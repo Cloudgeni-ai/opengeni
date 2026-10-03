@@ -64,6 +64,12 @@ Outside local development, `configured` mode refuses to start unless you set eit
 
 The optional deployment shared key (`OPENGENI_AUTH_REQUIRED=true` with `OPENGENI_ACCESS_KEY`) is a coarse perimeter for smoke tests and simple self-hosting, sent as the `x-opengeni-access-key` header. It is not a tenant model.
 
+## Customer credit coupons
+
+With Stripe billing enabled, customers can redeem a promotion code during signup onboarding, from **Add credits** on the main chat screen, or in Organization > Billing. Typing the code there applies it in Stripe Checkout up front, and a fixed-amount code sets the credits to its value: a $100 code gives $100 of credits for $0. Customers can also choose a package and enter a code in Stripe Checkout; they then receive the full selected package value, including when the coupon covers the full price. A $10 coupon applied to a $5 package gives $5 of credits; selecting a $15 package gives $15 of credits for $5 paid.
+
+OpenGeni provides coupon redemption and the credit ledger. Deployment operators manage campaigns, coupon creation, eligibility, expiry, and redemption limits in their own Stripe account and operations workflow. Configure `OPENGENI_WEB_BASE_URL` for the browser origin when it differs from the API origin.
+
 ## Before you expose it
 
 Put a long-lived deployment behind a gateway that provides:

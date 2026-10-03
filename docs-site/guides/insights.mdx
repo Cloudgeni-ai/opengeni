@@ -1,0 +1,53 @@
+---
+title: "Insights"
+description: "See what your agents cost and why: spend, model calls and tokens by type, for one workspace or the whole organization."
+---
+
+Insights shows where usage goes. Open it for one workspace from **Workspace
+settings → Insights**, or for every workspace at once from **Organization
+settings → Insights**. Both are the same dashboard; the organization one adds a
+workspace filter and a breakdown by workspace.
+
+Workspace Insights is for workspace admins. Organization Insights is for
+people who can read the organization's billing.
+
+## What you see
+
+- **Spend.** What Opengeni credits charged, plus a list-price estimate for
+  calls paid by a connected plan (ChatGPT, Claude, SuperGrok) or your own API
+  key. Those calls aren't charged by Opengeni, so their amount is marked with
+  `~` and labelled as an estimate.
+- **Model calls, tokens and cache hit rate.** The cache hit rate is the share
+  of input the provider read back from its prompt cache.
+- **Tokens and cost by type.** Input splits into new input, cache reads and
+  cache writes; output includes reasoning. Each type shows its token count and
+  its share of the list-price cost, so you can see, for example, that cache
+  writes are a small share of tokens but a large share of cost.
+- **Over time.** One chart per hour (today) or per day, as spend, tokens by
+  type or calls. **By model** (or by the current breakdown) stacks the bars by
+  group.
+- **Breakdown by.** One table you can group by model, provider, paid with,
+  workspace (organization only), project, session, person, schedule or source. Sort
+  any column. Select a row to filter the whole dashboard to it and look one
+  level down; remove the filter chip to go back. **Recent calls** lists the
+  latest individual calls.
+
+Pick the period (today, the last 7, 30 or 90 days, this month, the year to
+date or a custom range of days). **Filter** narrows everything by person,
+workspace (organization only), model, provider, paid with (credits, a plan or
+an API key), project, session, schedule and source (web app, API and SDK,
+Slack, schedules or agents); every filter takes several values, and filters
+combine. Active filters show as chips you can remove, and selecting any row in
+the breakdown filters to it. The whole selection is in the URL, so you can
+share a view.
+
+## Privacy
+
+Totals include everyone's usage, private chats included, as amounts only.
+Other people's private ("Only me") chats appear as one amount row per person,
+never with a title or a link. Usage from chats that were deleted shows as
+**Deleted chats**. In Organization Insights, other members' Personal
+workspaces appear as amounts only, under the member's name.
+
+An amount shows **—** when the model has no list price yet; hover it for why.
+A comparison with the previous period appears only when that period had usage.

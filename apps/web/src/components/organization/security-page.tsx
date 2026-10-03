@@ -166,7 +166,7 @@ function RowLoadFailure({
 
 /* ------------------------------------------------------------ Only me chats */
 
-function PrivateChatsRow({
+export function PrivateChatsRow({
   client,
   identity,
 }: {

@@ -2,7 +2,7 @@
 // view built on it. A leaf module: it depends on nothing beyond the Session
 // type so the always-loaded rail can import it without pulling more code into
 // the startup bundle.
-import type { Session } from "../types";
+import type { RailSession as Session } from "./session-list-entry";
 
 /**
  * True when the root itself is blocked on a human (approval/input requested,
@@ -25,7 +25,7 @@ export function countNeedsYou(sessions: readonly Session[]): number {
  * waiting. A flat projection (search) can hold a child without its root, so a
  * child that itself needs a human is kept on its own.
  */
-export function filterNeedsYou(sessions: readonly Session[]): Session[] {
+export function filterNeedsYou<T extends Session>(sessions: readonly T[]): T[] {
   const roots = new Set<string>();
   for (const session of sessions) {
     if (rootNeedsYou(session)) roots.add(session.id);

@@ -110,9 +110,18 @@ containment deadline, including normally completed turns. This is not a
 run-length limit. Heartbeats report `finalizing` and the current bounded
 `finalizationStage`; Grafana exposes stage occupancy and thirty-second slow-stage observations;
 the bounded containment log and worker restarts identify actual exits.
-A stuck writer drain is never detached to release a successor: the worker exits,
-and normal heartbeat recovery and durable retained-process proofs govern
-admission. The deadline resets only when cleanup advances to another stage and
+A stuck writer drain is never detached to release a successor. At the deadline,
+the host stops polling and requests the ordinary graceful worker shutdown. Other
+live turns checkpoint and resume the same logical turn on a healthy worker,
+without spending their unexpected-worker-death redispatch allowance. The
+standalone host arms a 100-second exit backstop alongside Temporal's existing
+shutdown ceiling for a writer that cannot quiesce; heartbeat recovery and durable
+retained-process proofs still govern its admission. Temporal force shutdown only
+rejects `Worker.run()` and cannot stop JavaScript activity promises. Embedded
+service hosts own their fatality policy through `terminateWorker` or an equivalent
+boundary; bare activity embedders must supply `requestWorkerDrain`. Activities
+never exit the shared process. The deadline resets only when cleanup advances
+to another stage and
 is disarmed when the finalizer exits, including exceptional exits. Publishing a
 quiescence receipt does not disable containment for later housekeeping.
 Closed attempts with unsettled workspace mutations or active, unadopted retained
@@ -120,6 +129,12 @@ processes also block admission, even when their logical outcome is `completed`.
 The work peeker exposes the existing previous-attempt wait, and the final writer's
 settlement re-arms the workflow wake. Independently adopted background commands
 retain their own lifetime and do not hold this turn-cleanup gate.
+Inference alone may resume on the same machine for a closed lease-lost attempt's
+legacy Modal home-route `execCommand` admission with unknown provider outcome
+and no retained locator. Exact actor, turn and execution generation must match.
+The admission, physical quiescence and capture/rotation fences remain unresolved;
+recovery tool results tell the model to inspect actual state before replay.
+Accepted Pause/Steer interruptions retain their independent receipt gate.
 
 A resumed attempt may attach another atomic internal-update batch to the same
 logical turn after its resolved open suffix. Each delivered update retains its
@@ -455,10 +470,15 @@ service initiator, latest connection, latest queue head, or an unrelated newer
 turn.
 
 That same exact calling-turn boundary supplies an agent-spawned child's omitted
-model, reasoning effort, and latency mode. Explicit child values may override
-them. A Codex-subscription manager therefore keeps its external billing path for
-workers by default instead of falling back to the deployment's OpenGeni-credit
-model.
+model and reasoning effort. Explicit child values may override them. A
+Codex-subscription manager therefore keeps its external billing path for workers
+by default instead of falling back to the deployment's OpenGeni-credit model.
+Omitted latency mode instead defaults to `standard` for every fresh session;
+`fast` and `priority` require an explicit, model-supported selection. The initial
+policy records this default as `deployment`, not `continuation`. Keyed replay
+preserves the originally accepted session and turn settings. Subsequent agent
+messages do not copy the sender's latency; follow-up admission retains the
+recipient's own defaults.
 
 Session detail reads expose `dispatchWait` for active-control queued sessions
 without an active turn. It projects the existing workflow-wake ledger's pending
@@ -566,6 +586,23 @@ claimed inference into a terminal failure or a new prompt.
 The same database-owned transition covers a lost claim commit response: if the
 activity reports retryable pre-claim failure but the control lane finds its
 exact active attempt, that durable attempt wins and is recovered.
+
+During an executing turn, own-client PostgreSQL connection outages use only
+`ECONNREFUSED`, `ECONNRESET`, `CONNECT_TIMEOUT`, or SQLSTATE `57P01`–`57P03`/`08xxx`
+through an actual ORM or typed persistence boundary, never a driver name alone.
+These closed outage classes use the same
+exact-attempt DB-only recovery lane, including SDK function-tool `.error` and
+mandatory-history wrappers. The activity exits without `turn.failed`, without
+retrying a possibly committed delta/tool-ledger write, and without manufacturing
+writer settlement. Cleanup and the durable physical/inference gates still hold
+successors; once connectivity returns, recovery preserves the accepted turn,
+trigger and frozen authority with bounded, signal-interruptible backoff. Query
+text, generic provider socket errors, permanent DB rejections and unknown tool
+outcomes do not grant this recovery authority.
+Transport evidence belongs to its trusted DB source subtree, never an unrelated
+aggregate sibling. All permanent/uncertain DB and no-replay evidence vetoes
+regardless of sibling order. Duplicate references/cycles consume no extra node
+budget; an incomplete or overflowed cause graph grants no recovery authority.
 
 Versioned control observers distinguish unavailable session reads from idle
 business state. Missing and RLS-hidden rows are indistinguishable; neither is
@@ -694,7 +731,15 @@ failure for no-port `task-*.w.modal.host` URLs without trusting DNS-shaped
 server replies. After exact never-started reservation settlement, OpenGeni
 resumes the same accepted turn through bounded connectivity backoff, including
 pre-model setup before `turn.started` eventing exists. The same durable five-replacement
-budget applies, with explicit typed exhaustion on the sixth failure. Retained
+budget applies. A sixth genuine pre-dispatch setup failure parks the same accepted
+turn as nonfailed **recovering** with `sandboxSetupRecoveryExhausted`, an explicit
+`not_started` outcome and unchanged count five. Existing `admission-blocked` work
+peek and direct claim both refuse automatic replay; wakes, time, provider recovery
+and lease changes never replenish the exhausted budget. This is separate from
+unknown-dispatch containment and does not fabricate a model tool, capacity waiter
+or human approval. An interrupted database checkpoint carries this exact fate
+through the DB-only control recovery lane. Configuration-definition mismatch and
+ordinary post-model provider exhaustion retain their existing failure behavior. Retained
 or outcome-unknown routing errors veto recovery even if their causes look safe.
 Generic `TaskExecStart` `UNAVAILABLE`, server-supplied DNS text, mixed failure
 batches, message-only lookalikes, HTTP status metadata, and the exact
@@ -719,11 +764,15 @@ capture/quiescence proofs keep their independent lifecycle.
 The existing blocked-admission wire kind also parks older workflow workers
 during a rolling deployment; no synthetic physical admission is created.
 
-An observation deadline, NOT_FOUND, provider/lease loss, or one original command
-exiting cannot prove that the rest of the unwound helper completed, so none
-clears the logical setup marker. Automatic continuation of incomplete setup
-requires a verified SDK continuation contract; the parked state is explicitly
-outcome-unknown, not a successful setup or a capacity/human-approval wait. Legacy
+An observation deadline, NOT_FOUND or provider/lease loss is not completion
+proof. Once the exact closed, quiesced attempt's home setup invocation has a
+real exit code, all its retained invocations have exited and every admitted
+operation is settled, control reconciliation removes only the uncertainty
+marker and durably wakes the original turn. Preparation reruns its idempotent
+setup rather than resuming an unwound SDK frame or replaying an unknown command.
+The accepted trigger, history, generation and recovery budget stay unchanged;
+effective Pause and exhausted-recovery markers still win. Pure DB peek remains
+read-only. Legacy
 `ContainerExec` still disables SDK retries and cannot recover an execution id
 lost with its response. Required first-party
 connect/tools-list also treats a rolling API
@@ -789,10 +838,23 @@ scripted Runner and native PostgreSQL worker tests cover continuation,
 exactly-once Start, failed promotion recovery, retained writer fencing and
 terminal-proof settlement. No new database outcome or migration is required.
 
+Post-ACK native observation failure uses that same internal writer-retention and
+no-replay parking boundary. Mixed or unreadable transport graphs produce typed
+uncertainty but grant no automatic read retry; pure missing-handle or persistence
+failures retain their existing behavior. Shared router lookup cancellation is
+waiter-local. Supervised cancellation preserves durable intent and its original
+writer; a bounded helper observation failure keeps the same helper UUID, cursor
+and partial response for a later drain. Rejection never proves quiescence or
+permits numeric-PID fallback or another possibly dispatched helper Start.
+
 Fresh progressive-disclosure attempts complete only session-marked eager MCP
 connection and schema admission before inference. All non-eager MCPs—strict or
 optional—connect/list concurrently with the first provider request. A plain
-terminal model response does not join that background work. Preparation-independent
+terminal model response does not join that background work. Configured agents
+decide router visibility from authorized pending server identities without
+joining preparation. Once exposed, that router stays in the request tool prefix
+even if background discovery returns no tools; an already-settled empty catalog
+does not introduce a router. Preparation-independent
 tools such as `skill_read` execute without joining it. Other local
 function calls join the one exact preparation promise before Runner can
 dispatch it, including always-visible base tools such as `exec_command` and
@@ -808,6 +870,23 @@ therefore observed at the first tool-call boundary and the tool body never runs.
 Approval/human-interaction resumes and editable-artifact turns retain the fully
 prepared catalog path because their continuation depends on exact prior tool or
 catalog identity.
+
+Startup metadata reads overlap only within independent pairs: video policy and
+Skill descriptors after native-link authorization, then per-attempt recovery
+instructions and a second live video-policy read before agent construction.
+Both pairs finish before downstream catalog writes; each reader retains its
+own RLS scope. Recovery reads remain unconditional, policy reads remain fresh,
+and failures prevent downstream preparation without bypassing execution fences.
+
+An explicitly empty effective first-party permission ceiling is zero delegated
+authority. Before eager/deferred preparation, runtime omits only remote
+OpenGeni-delegated MCP matches; it neither signs an empty token nor pads the
+grant. Empty broad tool selection is silent; requested first-party tools and
+dedicated `files`/`docs` stay unavailable with the existing `insufficient_scope`
+advisory. External-host, local-registration, connection-backed and
+already-authorized native paths retain their independent authorization.
+Automation template defaults and linked ceilings follow the same rule; see
+[automations](automations.md#empty-first-party-authority).
 
 Codemode submission compares the caller's catalog digest with the exact active
 catalog before creating its durable operation. A mismatch returns the stable
@@ -907,6 +986,13 @@ snapshot, so a concurrent revival cannot pair an old failed status with a cursor
 that skips the revival event. Diagnostic text is decoded through the lossless
 storage codec before its bounded logical prefix is returned; omitted suffixes
 are disclosed and exact event bytes remain in storage.
+
+Session SSE and finite browser replay use `listSessionEventPage` byte selection.
+Interactive pages select bounded candidates, then size only the payload prefix
+needed for the page. They retain the exact full event and durable cursor; one
+oversized event is delivered alone. Explicit continuation determines completion;
+a short page never substitutes for that durable read result.
+The downstream one-frame queue cannot substitute for this upstream read bound.
 
 Automatic same-turn provider/MCP recovery is finite: five
 consecutive replacement attempts may be scheduled, and a sixth retryable failure settles the
@@ -1058,10 +1144,12 @@ Resolved model context metadata is authoritative on every model-facing path.
 For the Codex subscription catalog this means a 272,000-token raw window, a
 258,400-token effective input ceiling (95%), and automatic compaction at
 244,800 tokens (90%, reached with `>=`). Local checkpoint replacement retains
-only the newest real user messages that fit one cumulative 20,000-token budget,
-then appends the summary; internal resume notices are never retained as user
-intent. Automatic compaction uses provider-reported usage only: the durable
-prior-call input count at a turn boundary, or the immediately preceding
+the newest user messages and system-role machine-input batches that fit one
+cumulative 20,000-token budget, then appends the summary. Retained machine inputs
+keep their original role and accepted goal snapshot, never become user intent,
+and are never requeued. Remote v2 also retains these system messages within its
+existing shared 64,000-token budget. Automatic compaction uses provider-reported
+usage only: the durable prior-call input count at a turn boundary, or the immediately preceding
 same-activity provider total plus bounded newly appended input. With no bound
 provider count, OpenGeni sends the request and recovers from a genuine provider
 context overflow instead of compacting from a whole-request approximation.
@@ -1094,8 +1182,20 @@ session lock and adopts the selected machine-input batch's exact personal-MCP
 delegation snapshot. A real Temporal activity retry retains the activity id; a
 re-dispatch creates a new attempt and captures the then-current policy. Every
 event, model-history write, run-state write, compaction transition, tool receipt,
-and terminal settlement must match that attempt. A typed schedule-to-start
-timeout is the only no-attempt recovery case because its activity never ran.
+and terminal settlement must match that attempt. A heartbeat timeout can occur
+before the activity commits its attempt, as can a schedule-to-start timeout.
+Recovery records a durable `turn.dispatch.expired` receipt for that exact
+attempt id under the same session lock used by claim. Its server-owned
+`producer_id = opengeni:dispatch-retired:<attemptId>`, `producer_seq = 1`, and
+null client-event id keep it separate from caller-controlled operation keys.
+Claim requires the exact scope, event type and strict attempt/timeout payload;
+duplicate recovery validates and reuses the same receipt without advancing the
+cursor twice. A conflicting server receipt fails rather than forging expiry.
+If timeout wins, a late activity cannot create an owner or consume pending
+input; a new dispatch may
+claim the preserved work. If claim wins, recovery closes that exact attempt
+through the existing generation and physical-writer fences. Repeated timeout
+recovery is idempotent, and Temporal settlement alone never revokes an owner.
 
 Raw SDK tool call, result, and approval items are normalized to protocol JSON
 before they enter the attempt-fenced `session_pending_tool_calls` receipt
@@ -1320,6 +1420,27 @@ workspace-control advisory lock plus `workspace_inference_controls FOR SHARE`
 when the write is control-aware, then the actual `workspaces` row
 `FOR KEY SHARE`, UUID-ordered sessions `FOR NO KEY UPDATE`, UUID-ordered exact
 turns `FOR UPDATE`, and UUID-ordered exact attempts `FOR UPDATE`.
+Child-answer read acknowledgments use the same session/cursor/turn/attempt
+prefix before updating turn metadata. The imported-archive write guard also
+locks the session on a turn update; a turn-only acknowledgment would therefore
+invert against claim, settlement, event append, or a parallel pending-result
+writer. Repeated reads remain lock-free no-ops, and a busy acknowledgment stays
+best effort without replaying the read tool or provider effects.
+Workflow-wake failure marking also owns the control/workspace/session/cursor
+prefix before its revision-conditional outbox update. The archive guard on the
+wake row locks the session; an outbox-first update would invert against a goal
+turn settlement that holds the session and enqueues its continuation wake.
+The global dispatcher uses the same tenancy/control/workspace/session prefix
+with nonblocking advisory acquisition and row `SKIP LOCKED`, then locks the
+current due outbox row. Its unlocked preview traverses workspace/session UUID
+order (not delivery priority) and does not pre-limit busy candidates; only
+actually lockable wakes count toward the bounded batch. It revalidates due
+time and undelivered revision under the locks, and retains the existing lease
+backoff and control/unquiesced-interruption projection. Migration 0587 replaces
+only the claim function, preserving its signature, owner, and app grant for old
+dispatchers during a rolling release; old failure-marker binaries remain
+outbox-first until the source rollout completes. Neither path retries delivery,
+tools, or provider effects, and the imported-archive guard remains unchanged.
 `lockWorkspaceInferenceControl` takes
 `pg_advisory_xact_lock[_shared](hashtextextended('workspace-control:<id>', 0))`
 in the same mode before the row lock. The row lock alone is unfair: PostgreSQL
@@ -1674,7 +1795,29 @@ PID/PGID command line contains the same token. The wrapper publishes its marker
 before checking the tombstone, so a late accepted start cannot execute user code;
 the fence still waits for both exact process-group absence and the original
 provider promise to settle. Timeout, missing marker, and transport failure remain
-non-proof. The queue/chrome projection renders this period as stopping previous
+non-proof. If that original start instead registers a process on its exact
+retained route, pending-start cleanup hands off to the retained process's
+physical cancellation and settlement fence. It must not retry a new ordinary
+mutation after that handoff, since Steer may already fence ordinary admission.
+A rejected or rendered transport error, or an unretained numeric session id,
+does not authorize this handoff. An already-issued proof helper has its own
+physical fence, independent of the original start's registration: a running
+receipt or typed retained-outcome-unknown fault is joined through empty control
+reads on that helper's exact retained route, or exact durable terminal proof.
+The helper is never relaunched or cancelled with the original command's marker.
+Generic rejection, rendered errors, and unretained helper locators remain
+outcome-unknown and keep quiescence closed; only typed non-dispatch/rejection
+or call-scoped proof from routing's pre-provider admission-refusal boundary
+permits retrying the tombstone helper. Routing preserves the original refusal
+error and reports proof separately for that invocation only; an error name,
+message, or the same error thrown after provider dispatch is never proof. A
+run-credential or Codemode-token command decorator preserves trailing invocation
+options unchanged, including that callback, through the production session chain.
+Routing consumes the callback at admission and never passes it to the provider. A
+refused helper releases only its own join, not the original retained process's
+physical/durable settlement fence, and later trusted registration stops its
+ordinary-helper retries. The queue/chrome projection renders this
+period as stopping previous
 work (or current work under Pause), never as a first-step wait or a completed
 direction change.
 
@@ -1750,8 +1893,7 @@ that case skips Temporal liveness inspection and idempotently parks only the
 session projection.
 
 Sandbox lease warming has two distinct bounded waits. A turn attached to a
-sibling creator waits at most `OPENGENI_SANDBOX_WARMING_TIMEOUT_MS` (default
-600000) for that durable warming lease to settle. The creator records the exact
+sibling creator waits at most `OPENGENI_SANDBOX_WARMING_TIMEOUT_MS` (default 600000) for that durable warming lease to settle. The creator records the exact
 provider instance as soon as create/restore returns, then gives Modal's command
 router a separate 60-second readiness budget before publishing the lease warm.
 The two failures retain different typed stages, group and instance identities,
@@ -2196,7 +2338,12 @@ recovery. Each ambiguous operation is invoked at most once and is never replayed
 on a replacement backend. In the winning loss transaction, every active
 retained process on that exact lease epoch/provider is marked lost, all matching
 open admissions are rejected, matching PTYs are closed, and only those process
-holders are removed before the epoch advances. Terminal processes and every
+holders are removed before the epoch advances. Each linked background command
+gets its `session.command.finished` event and typed result input in that same
+transaction; the transaction takes the session-event prefix (workspace control,
+workspace, session) before any blocker or lease row, and only when such a
+command exists; if a command was linked in the gap before the blockers were
+locked, it rolls back and retries (bounded) rather than lock a session late. Terminal processes and every
 other epoch/provider remain untouched. During idle drain, a resumable cloud box
 is deleted only after a verified workspace capture is durably folded onto the
 fenced lease. Definitive `NOT_FOUND` before capture preserves any existing
@@ -2211,7 +2358,7 @@ observation, and every process/admission/PTY/holder/interruption identity into a
 `clrp1:` receipt. Unknown, incomplete, possible-writer, or mismatched truth
 blocks. Apply accepts only that exact reviewed receipt, re-previews before and
 under row locks, and settles the same narrow rows as the automatic loss
-transaction. It never calls a provider, changes epoch/archive/recovery truth,
+transaction, including linked command events and inputs. It never calls a provider, changes epoch/archive/recovery truth,
 writes `/workspace`, or replays an ambiguous operation. The exact runbook is in
 [`deployment.md`](deployment.md#cold-lost-provider-blocker-reconciliation).
 
@@ -2254,6 +2401,19 @@ from their 512-character preview. Clipped previews end in an ellipsis; the UI
 uses the complete text for hover and expansion. Existing rows without full text
 fall back to their saved preview. Managed exec recovery preserves the original
 command before any later read adopts the retained process.
+
+If observation fails before a legacy Modal router command receives that row,
+`recoverManagedSessionBackgroundCommand` transfers its lifetime after the exact
+owning attempt closes. The reaper holds its current claim and copied physical
+identity, then takes the canonical session/control prefix and locks the process
+before adoption. Live attempts, supervised commands and Connected Machines do
+not use this compatibility lane. Recovery preserves provider state, output
+cursors, parent admission and process holder, with an explicit unknown-outcome
+preview and no replay or invented exit. The same transaction enqueues a workflow
+wake, so unrelated later turns can proceed. Paused/cancelled control or an existing
+process cancellation request creates a stopping command; recovery never resumes
+paused work or revives a cancelled command.
+
 Both provider paths serialize session adoption with Steer, Pause, terminal
 Cancel, and session-tree deletion through the canonical workspace-control,
 workspace, session, turn, and exact-attempt fence. Managed retention and session
@@ -2316,6 +2476,13 @@ read, and live output returned to the agent is not capped.
 The app exports bounded owner-state/backlog, reconciliation, and expired-drain
 metrics; dashboard/PromQL integration is coordinated separately.
 
+Turn cleanup also checks the exact durable process UUID and copied backend route.
+If reconciliation already committed physical terminal proof, cleanup forgets its
+stale local route even when a pending output capture or old provider transport
+cannot advance. Missing rows, active rows, mismatched routes and failed reads
+never prove quiescence. This check is cleanup-only and does not accept rejected
+output into model history or replay the original command.
+
 Command reads expose `observationStatus: unavailable` when the exact retained
 process cannot be observed; session aggregates expose `unavailableCount`.
 The panel and sidebar distinguish that uncertainty from running or a requested
@@ -2351,6 +2518,9 @@ may still arrive once; delivered history and earlier running tool receipts remai
 unchanged. Observation happens while serving the read, without a separate
 worker-history delivery handshake; a crash between observation and receipt
 preservation is an accepted tradeoff.
+Subsequent retained reads reuse the persisted completion-observation receipt
+without reacquiring session/event write locks. They still perform the same scoped
+command and output reads; the first observation retains settlement/claim locking.
 A failed or cancelled session remains terminal and
 keeps event-only command audit rather than reopening pending model input. A
 failed transaction leaves the command unsettled so the same already-checkpointed
@@ -2368,6 +2538,14 @@ Waits also recheck durable state once a second if a hint is missed. Sending
 stdin is a separate capability, explicitly unsupported when the provider has no
 interactive transport. A longer wait uses session-level `wait_for_input`,
 whose timeout never cancels the command.
+
+Session-authorized background-command GETs project stored Connected Machine
+`reconciliation` diagnostics: the last bounded outcome, attempt count, due/claim
+timestamps, and checkpointed terminal proof. Offline/error observations also
+project `observationStatus: unavailable`. These reads neither call the provider
+nor acknowledge output or model notifications. A proof can precede durable
+command settlement; `lost` may mean tracking ended, not physical process exit.
+The diagnostics expose no native final-ACK receipt or original routing locator.
 
 ### Modal retained-command observation
 
@@ -2395,6 +2573,26 @@ non-retrying middleware factory: Modal 0.9.0 otherwise drops abort signals for
 streaming and retry-disabled calls. Cancelling observation is not process-exit proof;
 the existing token/PGID cleanup fence still owns physical cancellation.
 
+After a successful Start, native output/poll transport failures retry only the
+same execution UUID and committed byte offsets. One read is bounded by its
+original requested wait and at most five read attempts; it never repeats Start
+or nonempty stdin. Foreground shell observation continues only within the
+original model-facing wait. Exhaustion returns explicit observation-unavailable
+uncertainty, with the exact retained locator and already captured output, rather
+than a fake exit, early background adoption, or a raw transport exception that
+fails the turn. Attempt cancellation aborts in-flight foreground reads while
+the independent physical settlement fence remains closed.
+Fixed supervision helpers use the same observation path within their existing
+five-second budgets. Materialization probes preserve their diagnostics and
+original locator. If an internal lifecycle observer unwinds with typed
+observation uncertainty, exact-attempt settlement parks setup with the existing
+durable no-replay marker, without replenishing the five-replacement recovery
+budget. Database capture, cursor/identity mismatch, missing handles and
+non-transport provider failures do not acquire read-retry or replay authority.
+Numeric and string gRPC transport codes and bounded AggregateError causes
+dominate terminal sandbox hints; transient observation can never retire a live
+lease or authorize command replay.
+
 `modal-control-v1` is an explicit legacy reader for already launched commands;
 new starts never select it. Its batch API does not guarantee full replay, so
 historical missing output cannot be reconstructed or called complete. Never
@@ -2412,6 +2610,24 @@ dispatch instead observes the same UUID, retrying transient reads without anothe
 Start. Budget expiry and attempt cancellation abort the native RPCs; success
 requires zero exit and EOF on both streams. Definitive rejection and nonzero
 exit remain failures. This applies to both new boxes and warm reattachment.
+
+Fixed supervision-capability and materialization-visibility probes likewise
+observe their original task/exec identity after a typed lost Start acknowledgement.
+They keep their existing five-second and thirty-second budgets. Visibility
+observation can continue across multiple unavailable read windows while preserving
+its private partial output and exact cursors; contradictory identities and mixed
+no-retry failures remain authoritative. Probe continuation never repeats Start
+or the surrounding workspace mutation.
+
+For native retained stdin, a transport acknowledgement failure after reserving
+the byte range carries typed input-outcome uncertainty. The reserved range remains
+consumed and the input is never resent. The worker's retained-process tool returns
+explicit no-resend guidance and permits empty-input observation of the original
+command. Settling the rejected child RPC promise is not proof that input bytes
+were rejected; the retained parent command and holder keep their existing lifetime
+and exact terminal-proof fence. See the
+[October 2 recovery audit](design/modal-recovery-assurance-2026-10-02.md) for
+the remaining durable automatic-continuity requirements.
 
 Other SDK-internal setup commands still use their original live SDK observer
 and may yield. Their adapter-local aliases are above the admitted command range
@@ -2431,44 +2647,113 @@ missing SDK map entry nor failure to recover terminal output proves command loss
 including when a completed entry aged out in its original adapter.
 
 Observation backoff does not suppress provider-lifecycle checks during rotation.
-An idle Modal lease held only by unobservable commands can enroll their exact
-identities into the existing drain. Enrollment requires every attempt in the
-sandbox group to be quiescent beyond idle grace, no other holders, and no child
-mutation admissions. It fences new admission while preserving command records
-and holders until provider termination. Capture excludes only enrolled parent
-admissions and holders; checkpoint publication, termination, cold commit, and
-durable wake remain owned by the existing lifecycle. Unknown commands settle
-lost, never successful; a real exit arriving during drain retains its exit code.
-Failed checkpoints retain the provider and command holders for retry. Filesystem
-snapshots preserve neither running processes nor application transaction state.
+
+**Idle command containment.** A legacy retained command keeps its Modal box
+warm through a non-expiring process holder, so the zero-holder idle drain never
+runs for it and the box would stay up until the provider deadline kills it
+uncaptured. One rule contains such commands, independent of command health:
+running, still draining output, stopping, unobservable, or repeatedly failing
+observation all qualify. The reaper reads a new inventory,
+`list_command_containment_candidates(limit, idle window)` from migrations 0547/0599,
+which lists enrolled drains, rotating leases, and warm or draining Modal leases
+whose only holders are process holders of active non-supervised processes, with
+no capture or reaper hold and no open turn, turn finish, attempt close,
+holder-set change or admission in the group within the window. Exact
+enrollment then re-checks, with an unlocked screen first and then under the
+workspace control fence and the process -> admission -> lease row locks:
+
+- every active process is on the lease's current epoch, provider and home route,
+  and none is supervised;
+- no holder other than those process holders, and no unsettled admission other
+  than their parent admissions;
+- in every session of the sandbox group and every session owning a process on
+  the lease: no open turn (`queued`, `running`, `requires_action`,
+  `waiting_capacity`, which includes a pending approval or human-input request),
+  no unpaused recovering turn, no non-closed attempt, no pending quiescence
+  (unsettled interruption or undrained attempt writer). A `wait_for_input` that has not been superseded,
+  and unclaimed machine input that will start a turn (pending immediate system
+  updates other than command results; child lifecycle notices only with an
+  active goal), are idle-clock facts: the window runs from the wait's deadline
+  and from the input's creation. A held wait therefore keeps the command
+  running, since the agent registered it for background work it is
+  deliberately waiting on, while input or a timeout settlement that a paused
+  session can never deliver cannot pin the box until the provider deadline;
+- a recovering turn under an effective session, ancestor or workspace pause
+  does not pin the box. The inventory admits it for inspection; exact enrollment
+  resolves current pause and resume overrides under the workspace control fence.
+  The existing drain saves the workspace before stopping commands. The paused
+  turn, history and control state survive for a later cold restore;
+- the group has been unused for `OPENGENI_SANDBOX_IDLE_COMMAND_CONTAINMENT_MS`
+  (default 30 minutes; it must exceed the idle grace and, when explicit, stay
+  below the rotation lead, and it must leave the reaper period plus the drain
+  capture budget before an explicit `OPENGENI_MODAL_IDLE_TIMEOUT_SECONDS`). The
+  newest attempt close, turn finish, lease holder-set change, and admission or
+  settlement on the lease epoch must all be older than the window. Migration
+  0547 stamps `sandbox_leases.holders_changed_at` in a trigger whenever any
+  writer changes the holder counters, and gives the SECURITY DEFINER inventory
+  inventory-only read policies on the turn, attempt, admission, system-update
+  and goal tables so its screen sees them as the FORCE-RLS owner. Process age is
+  never a fact. Set `OPENGENI_SANDBOX_IDLE_COMMAND_CONTAINMENT_MS=0` to explicitly
+  disable new idle-command enrollments. Configuration normalizes zero to the
+  existing absent window (deadline rule only), without deriving a replacement
+  window or passing zero to the database inventory. Unset or blank values still
+  derive the default; a derived window that cannot fit these bounds leaves idle
+  containment off rather than failing boot. Disabling this rule does not undo an
+  already enrolled drain, disable ordinary idle-lease reaping, or change provider
+  deadlines, stop grace, capture requirements, or turn/wait/holder fences.
+
+A holder or writer that committed first is seen and refuses enrollment; a later
+one observes the requested rotation and is fenced until the successor box.
+Enrollment preserves command records and holders until provider termination.
+Capture excludes only enrolled parent admissions and holders; checkpoint
+publication, termination, cold commit and durable wake remain owned by the
+existing drain, and the box is terminated immediately after capture, so the
+archive is the final state. The cold commit settles each still-active enrolled
+command `lost` with the reason recorded on the lease at enrollment
+(`idle_containment`, or `provider_deadline_containment` on a deadline rotation),
+never an exit code; a drain enrolled by a pre-0547 worker records none and
+settles as plain `provider_instance_lost`. In the same transaction it appends
+`session.command.finished`, the typed `background_command_result` input and
+`system.update.pending`, exactly as ordinary exit/loss proof does. The notice
+names the command, says nobody used the session for N minutes and nothing was
+waiting on it, says the workspace was saved, and asks the agent to restart it
+if still needed. A provider that disappeared before capture settles
+`provider_instance_lost` without a saved-workspace claim. A real exit arriving
+during the drain keeps its exit code. Failed checkpoints retain the provider and
+command holders for retry. Filesystem snapshots preserve neither running
+processes nor application transaction state.
+`opengeni_sandbox_command_containment_total{outcome}` counts inspections and
+enrolled cold commits. Pre-0547 workers keep calling the untouched legacy
+`list_unobservable_command_drain_candidates(integer)` with their narrower
+predicates during a rolling deploy; a later contract migration can drop it.
+
+Supervised commands stay excluded. Native supervision is default-off, its
+durable cancellation intent accepts only `provider_deadline` or `explicit_stop`,
+and migration 0496 forbids legacy containment from releasing a supervised
+process without its proof; an idle supervised command therefore waits for an
+explicit stop or the deadline rotation.
 
 For scheduled provider-deadline rotation, legacy commands have a separate
 two-minute cancellation grace. A PTY receives one Ctrl-C; non-PTY stdin is not
 a signal, so the worker records cancellation intent without writing Ctrl-C
 bytes. After that grace, exact process holders may be enrolled even without
-exit proof if the owner has a quiescence receipt or is normally completed and
-closed (or its direct request returned),
-and no unrelated holder or mutation admission remains. An outstanding
+exit proof when every owner attempt is closed with no pending quiescence,
+whatever its outcome (completed, cancelled, failed, superseded or awaiting
+action), or its direct request returned, and no unrelated holder or mutation
+admission remains. This backstop ignores the idle window, input waits and
+pending human requests: the box would die at the deadline anyway. An outstanding
 reconciliation claim does not grant writer authority or block this deadline
 capture. The provider is terminated only after the current workspace generation
-is captured; remaining commands settle lost. Supervised commands keep their
-separate proof gate. A prior explicit stop remains immutable; deadline intent
-starts its own grace. This path does not apply to idle or operator rotation.
-
-The same containment path covers an explicitly stopping managed command after
-at least five provider-error observations. Its cancellation request and owner
-quiescence (or normal completion and closed timestamp) must both predate idle
-grace. A failed/interrupted owner without a quiescence receipt remains blocked;
-provider errors alone never enroll a running command.
-All sandbox-group activity, other-holder and child-admission exclusions remain
-in force, and only verified provider termination settles an unknown result as
-lost. A failed checkpoint leaves the provider and holders intact for retry.
+is captured; remaining commands settle `provider_deadline_containment` with the
+same terminal event and notice. Supervised commands keep their separate proof
+gate. A prior explicit stop remains immutable; deadline intent starts its own
+grace. The two-minute grace applies only to provider-deadline rotation; any
+lease may still meet the idle rule above.
 
 Historical containment cannot reconstruct an execution ID the old adapter never
 retained. A command whose owner cannot recover its terminal receipt remains a visible capture blocker;
 operators must reconcile the exact command/provider identity rather than replay
 unknown side effects or clear holders by age. No new process is launched by probing.
-
 
 Migration 0419 records the exact launch turn, attempt, and execution generation
 when either provider adopts a background command under the existing attempt
@@ -2771,13 +3056,22 @@ rewrites. Uncoded provider failures and `provider_rate_limited` /
 `provider_unavailable` / `provider_quota_exhausted` get short plain-language copy
 (rejected credentials, provider billing or access, a used-up daily limit, quota,
 rate limiting) with the exact recorded text behind a Details toggle. A closed
+`provider_billing_error` instead uses neutral payment-detail copy: a general
+billing refusal is not proof that credits are exhausted. Native Claude's
+legacy authored credential rejection remains classified as rejected credentials.
+A closed
 `quotaScope` marker, on a quota turn failure or a quota-refused compaction, picks
 the daily, monthly, credits or quota copy directly; the `failureDiagnostics`
 projection carries it only as one of those four literals. Every
 billing, access, limit and quota class points at the model picker ("Choose
 another model below.") while the session still has the failed model selected. A bare leading HTTP status is
-classified only for 401, 402, 403 and 429; any other status keeps its recorded
-wording. Retry stays hidden only for rejected credentials, and only while the
+classified only for 401, 402, 403 and 429. Otherwise unknown uncoded or uncategorized preclaim failures
+show a generic unexpected-error headline with complete recorded Details;
+Modal task-router transport failures show an execution connection headline
+without claiming command failure, provider loss or safe replay. A typed Codex
+empty rejection gets a concise Codex headline; its account/plan diagnostic
+remains in Details. Structural sandbox failures retain their existing copy
+and recovery blockers. Retry stays hidden only for rejected credentials, and only while the
 same model is selected: it stays hidden for that failure on that model even
 after the key is fixed, when a new message re-runs the work. Billing, access,
 daily-limit and quota failures keep Retry, because each condition can clear.
@@ -2788,7 +3082,8 @@ model, or picking another model, with matching links. The connect remedy names
 ChatGPT or SuperGrok only when the deployment enables that subscription, and
 otherwise reads "connect a model provider". Every other model keeps the generic
 daily-limit wording.
-Failures with any other worker code keep their authored wording.
+Failures with any other worker code keep their authored wording. This banner
+projection does not change the shared React timeline's separate presentation.
 
 A genuinely new `user.message` can still transition failed → queued and start a
 new turn from stored history. This is a different intent from Try again, and
@@ -3256,7 +3551,68 @@ timestamp. Their labels are limited to the closed provider/backend/outcome and,
 where applicable, phase/count/cache vocabularies; session, turn, request,
 credential, and content values remain only in authenticated durable events.
 Operation durations can nest and overlap; summing them does not produce a
-critical path. A definite path miss answering a read-only first routed sandbox
+critical path. Initial session creation adds content-free
+`api.session_create.authorization|body_read|site_origin|core_create|response_projection`
+child spans within the existing HTTP span. Authorization still precedes body
+handling and creation; response policy projection remains outside the create
+rejection envelope, after committed creation. Core children
+`workspace_read|model_catalog_initial|default_model|model_catalog_effective|capability_settings|initiator_freeze|allowance|shell_insert`
+attribute existing pre-initialization reads and admission work, including both
+keyed and unkeyed shell insertion. Conditional work emits a child only when it
+runs: an explicit model omits default resolution, while Site origin without
+headers does no persistence work. These boundaries do not cover every internal
+selection check; gaps and parent/child spans must not be added as sequential costs.
+The existing
+`core.session_start.initialize|event_fanout|workflow_wake|session_reload`
+children still cover atomic initialization, post-commit fanout,
+immediate workflow signal plus wake-ledger acknowledgement, and response reload.
+The initial turn, authority, event log and wake outbox still commit atomically
+before either notification. Initial live fanout and the immediate durable-revision
+workflow wake then overlap; both settle before response reload or error propagation.
+Wake-ledger acknowledgement stays after signal acceptance, and ordinary fanout
+transport failures remain best-effort. Durable SSE replay handles later committed
+events arriving ahead of initial live fanout. Worker child phases
+`services_initialization`, `claim_catalog_read`, `claim_atomic`,
+`claim_session_read`, and `claim_capability_settings` separate startup work
+before durable `turn.started`; provider/backend labels remain `unresolved`
+until the existing reads establish them. `learning_policy_freeze` and
+`attachment_authority_projection` cover the existing work after that start but
+before the historical worker-preparation timer. Service initialization precedes
+the execution root and claim timer; its completed span is backdated beneath
+the root, not evidence that it ran after the claim. These observations add no
+database reads or event publications, do not join telemetry exports, and leave
+historical metric boundaries intact. Missing observations are not zero durations.
+After successful exact claim ownership, session reload and capability settings
+overlap as fresh reads in separate root-pool RLS transactions; neither uses the
+other's result. Both results still precede credential selection, accepted-policy
+installation, allowance checks and durable turn start. This read join is fail-fast:
+the first observed error can replace the prior serial diagnostic priority, and a
+read-only sibling may retain its pooled connection/shared tenancy lock until it
+finishes, but cannot start tools, publish events or continue downstream authority.
+Neither overlap establishes a measured latency saving without matched live spans.
+The historical `model_sdk_serialization` phase is Codex-only:
+it runs from the worker checkpoint immediately before `runtime.runStream` to
+the Codex `transport_entry` callback. It includes SDK runner/tool/input
+preparation, not just JSON serialization CPU time. When reported,
+`model_prepare_runner_before_mcp_tools` spans the runtime observer's start to
+the beginning of its first MCP tools snapshot; waiting for deferred catalog
+preparation inside tool resolution therefore appears in this runner gap.
+These spans overlap model-request preparation and must not be added to it.
+For generic fallback request events, including credits-billed Azure, the optional
+`initialWireDispatchedAt` field on the existing first-byte or terminal event is
+the first underlying fetch-entry clock of this worker attempt, after required
+admission/audit and request-capture setup. It is observed synchronously, immutable
+across retries and later tool/model requests, and matched to the event's provider,
+dispatch, attempt and execution identity. It is not the time bytes leave the
+kernel or reach the provider. The historical `provider_dispatch` milestone
+remains the durable started-audit checkpoint, not this post-audit fetch clock;
+no old phase or duration boundary changes. The field adds no awaited work or
+event publication. Native Codex/Xai request events and transports bypassing
+`instrumentedModelFetch` do not publish it: their separate physical request
+identities are not inferred from this generic observer. Absence is unsupported
+or unobserved, never evidence of a zero startup duration. Comparing its worker
+wall clock with database event times still requires accounting for clock skew.
+A definite path miss answering a read-only first routed sandbox
 operation (usually repository skill discovery listing an absent
 `.agents/skills`) records the `model_prepare_sandbox_first_routed_*` phases as
 completed; the per-operation sandbox metric keeps its separate `not_found`
@@ -3393,7 +3749,6 @@ Service turns without a human file subject read shared attachments under an expl
 null subject, clearing inherited private-file authority for that lookup. The reader
 restores the caller’s scope afterward; private and Drive-protected files still
 require their independent authority.
-
 
 Accepted private session uploads additionally use session-specific read grants,
 including for service continuations. Realtime and ordinary human admission share

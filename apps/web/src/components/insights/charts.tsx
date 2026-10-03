@@ -1,11 +1,12 @@
 import { AnimatePresence, motion, useReducedMotion } from "motion/react";
 import {
   useId,
+  useLayoutEffect,
   useMemo,
+  useRef,
   useState,
   type KeyboardEvent as ReactKeyboardEvent,
   type PointerEvent as ReactPointerEvent,
-  type ReactNode,
 } from "react";
 
 import { cn } from "@/lib/utils";
@@ -13,31 +14,10 @@ import { cn } from "@/lib/utils";
 type Series = {
   id: string;
   label: string;
-  values: number[];
+  /** `null` marks a bucket with no measurable value; it renders as a gap, not zero. */
+  values: Array<number | null>;
   className: string;
 };
-
-export type DonutSlice = {
-  id: string;
-  label: string;
-  value: number;
-  /** Tailwind text-* class used for fill-current */
-  toneClass: string;
-};
-
-const DONUT_TONES = [
-  "text-brand",
-  "text-status-running",
-  "text-status-waiting",
-  "text-fg-muted",
-  "text-status-failed",
-  "text-status-idle",
-  "text-fg",
-] as const;
-
-export function donutTone(index: number): string {
-  return DONUT_TONES[index % DONUT_TONES.length]!;
-}
 
 export function smoothLine(points: Array<{ x: number; y: number }>): string {
   if (points.length === 0) return "";
@@ -66,6 +46,32 @@ function formatChartNumber(value: number, digits?: number): string {
   return value.toFixed(1);
 }
 
+/** Drawing width before the first measurement (and in tests without layout). */
+const DEFAULT_CHART_WIDTH = 720;
+
+/**
+ * The element's content width in px, so the chart draws one unit per pixel:
+ * axis text keeps its size and the plot keeps its height at any width.
+ */
+function useChartWidth() {
+  const ref = useRef<HTMLDivElement>(null);
+  const [width, setWidth] = useState(DEFAULT_CHART_WIDTH);
+  useLayoutEffect(() => {
+    const element = ref.current;
+    if (!element) return;
+    const measure = () => {
+      const next = Math.round(element.clientWidth);
+      if (next > 0) setWidth(next);
+    };
+    measure();
+    if (typeof ResizeObserver === "undefined") return;
+    const observer = new ResizeObserver(measure);
+    observer.observe(element);
+    return () => observer.disconnect();
+  }, []);
+  return [ref, width] as const;
+}
+
 export function AreaChart(props: {
   labels: readonly string[];
   series: Series[];
@@ -78,20 +84,22 @@ export function AreaChart(props: {
   /** Soft y-axis floor for percentage charts */
   yMax?: number;
   formatValue?: (value: number) => string;
+  /** Y-axis tick labels; defaults to `formatValue`. */
+  formatAxisValue?: (value: number) => string;
 }) {
   const reduceMotion = useReducedMotion();
   const gradId = useId();
   const plotClipId = useId();
   const [pointerActive, setPointerActive] = useState<number | null>(null);
   const [keyboardActive, setKeyboardActive] = useState<number | null>(null);
+  const [frameRef, width] = useChartWidth();
   const active = pointerActive ?? keyboardActive;
   const height = props.height ?? 220;
-  const width = 720;
-  const padL = 36;
+  const padL = 52;
   const padR = 12;
   const padTop = 16;
   const padBottom = 6;
-  const all = props.series.flatMap((s) => s.values);
+  const all = props.series.flatMap((s) => s.values.filter((v): v is number => v !== null));
   const dataMax = Math.max(...all, 0);
   const max = props.yMax ?? Math.max(dataMax * 1.12, 1);
   const innerW = width - padL - padR;
@@ -99,20 +107,31 @@ export function AreaChart(props: {
 
   const geometry = useMemo(() => {
     return props.series.map((series) => {
-      const points = series.values.map((value, i) => {
+      const points: Array<{ x: number; y: number; value: number; index: number }> = [];
+      const runs: Array<Array<{ x: number; y: number }>> = [];
+      let run: Array<{ x: number; y: number }> = [];
+      series.values.forEach((value, i) => {
+        if (value === null) {
+          if (run.length > 0) runs.push(run);
+          run = [];
+          return;
+        }
         const x =
           padL +
           (series.values.length <= 1 ? innerW / 2 : (i / (series.values.length - 1)) * innerW);
         const y = padTop + innerH - (value / max) * innerH;
-        return { x, y, value };
+        points.push({ x, y, value, index: i });
+        run.push({ x, y });
       });
-      const line = smoothLine(points);
-      const first = points[0];
-      const last = points[points.length - 1];
-      const area =
-        first && last
-          ? `${line} L${last.x},${padTop + innerH} L${first.x},${padTop + innerH} Z`
-          : "";
+      if (run.length > 0) runs.push(run);
+      const line = runs.map((segment) => smoothLine(segment)).join(" ");
+      const area = runs
+        .map((segment) => {
+          const first = segment[0]!;
+          const last = segment[segment.length - 1]!;
+          return `${smoothLine(segment)} L${last.x},${padTop + innerH} L${first.x},${padTop + innerH} Z`;
+        })
+        .join(" ");
       return { series, points, line, area };
     });
   }, [props.series, innerH, innerW, max, padTop]);
@@ -143,9 +162,13 @@ export function AreaChart(props: {
     props.formatValue
       ? props.formatValue(value)
       : `${props.valuePrefix ?? ""}${formatChartNumber(value, props.valueDigits)}${props.valueSuffix ?? ""}`;
+  const formattedTick = (value: number) =>
+    props.formatAxisValue ? props.formatAxisValue(value) : formattedValue(value);
+  const formattedPoint = (value: number | null | undefined) =>
+    value === null || value === undefined ? "Unknown" : formattedValue(value);
   const pointDescription = (index: number) =>
     `${props.labels[index]}. ${props.series
-      .map((series) => `${series.label}: ${formattedValue(series.values[index] ?? 0)}`)
+      .map((series) => `${series.label}: ${formattedPoint(series.values[index])}`)
       .join(", ")}`;
   const onChartKeyDown = (event: ReactKeyboardEvent<SVGSVGElement>) => {
     const current = keyboardActive ?? pointerActive ?? 0;
@@ -166,7 +189,10 @@ export function AreaChart(props: {
       ({ index }) => index === 0 || index === props.labels.length - 1 || index % labelStride === 0,
     );
 
-  if (props.labels.length === 0 || props.series.every((series) => series.values.length === 0)) {
+  if (
+    props.labels.length === 0 ||
+    props.series.every((series) => series.values.every((value) => value === null))
+  ) {
     return (
       <div
         className={cn(
@@ -181,6 +207,7 @@ export function AreaChart(props: {
 
   return (
     <div
+      ref={frameRef}
       className={cn("relative w-full", props.className)}
       onPointerLeave={() => setPointerActive(null)}
     >
@@ -208,7 +235,7 @@ export function AreaChart(props: {
                     <span className="text-fg-muted">{series.label}</span>
                   </span>
                   <span className="font-mono tabular-nums text-fg">
-                    {formattedValue(series.values[active] ?? 0)}
+                    {formattedPoint(series.values[active])}
                   </span>
                 </div>
               ))}
@@ -282,7 +309,7 @@ export function AreaChart(props: {
                 className="fill-fg-subtle"
                 style={{ fontSize: 10, fontFamily: "ui-monospace, monospace" }}
               >
-                {formattedValue(label)}
+                {formattedTick(label)}
               </text>
             </g>
           );
@@ -333,18 +360,18 @@ export function AreaChart(props: {
                 />
               </>
             ) : null}
-            {points.map((point, i) => (
+            {points.map((point) => (
               <circle
                 key={`${series.id}-x${point.x}`}
                 cx={point.x}
                 cy={point.y}
-                r={active === i ? 4.5 : 2.25}
+                r={active === point.index ? 4.5 : 2.25}
                 className={cn(
                   "stroke-bg transition-[r]",
-                  active === i || active == null ? "opacity-100" : "opacity-40",
+                  active === point.index || active == null ? "opacity-100" : "opacity-40",
                 )}
                 fill="currentColor"
-                strokeWidth={active === i ? 2 : 1.5}
+                strokeWidth={active === point.index ? 2 : 1.5}
               />
             ))}
           </g>
@@ -362,7 +389,7 @@ export function AreaChart(props: {
         ) : null}
       </svg>
 
-      <div className="mt-1 flex justify-between pl-9 pr-1">
+      <div className="mt-1 flex justify-between pl-[7.2%] pr-1">
         {visibleLabels.map(({ label, index }) => (
           <button
             key={`${label}-${index}`}
@@ -386,216 +413,6 @@ export function AreaChart(props: {
         ))}
       </div>
     </div>
-  );
-}
-
-function polar(cx: number, cy: number, r: number, angle: number) {
-  const rad = ((angle - 90) * Math.PI) / 180;
-  return { x: cx + r * Math.cos(rad), y: cy + r * Math.sin(rad) };
-}
-
-function arcPath(
-  cx: number,
-  cy: number,
-  rOuter: number,
-  rInner: number,
-  startAngle: number,
-  endAngle: number,
-): string {
-  const large = endAngle - startAngle > 180 ? 1 : 0;
-  const o1 = polar(cx, cy, rOuter, startAngle);
-  const o2 = polar(cx, cy, rOuter, endAngle);
-  const i1 = polar(cx, cy, rInner, endAngle);
-  const i2 = polar(cx, cy, rInner, startAngle);
-  return [
-    `M ${o1.x} ${o1.y}`,
-    `A ${rOuter} ${rOuter} 0 ${large} 1 ${o2.x} ${o2.y}`,
-    `L ${i1.x} ${i1.y}`,
-    `A ${rInner} ${rInner} 0 ${large} 0 ${i2.x} ${i2.y}`,
-    "Z",
-  ].join(" ");
-}
-
-export function DonutChart(props: {
-  slices: DonutSlice[];
-  className?: string;
-  /** Center primary line */
-  centerValue?: ReactNode;
-  centerLabel?: string;
-  formatValue?: (value: number) => string;
-  onSelect?: (id: string) => void;
-  size?: number;
-}) {
-  const reduceMotion = useReducedMotion();
-  const [hover, setHover] = useState<string | null>(null);
-  const size = props.size ?? 176;
-  const cx = size / 2;
-  const cy = size / 2;
-  const rOuter = size * 0.42;
-  const rInner = size * 0.27;
-  const total = props.slices.reduce((n, s) => n + s.value, 0);
-  const format = props.formatValue ?? ((v: number) => formatChartNumber(v));
-
-  const arcs = useMemo(() => {
-    if (total <= 0) return [];
-    let angle = 0;
-    return props.slices
-      .filter((s) => s.value > 0)
-      .map((slice) => {
-        const sweep = (slice.value / total) * 360;
-        // Leave a tiny gap between slices for clarity
-        const gap = props.slices.length > 1 ? 1.2 : 0;
-        const start = angle + gap / 2;
-        const end = angle + sweep - gap / 2;
-        angle += sweep;
-        const mid = (start + end) / 2;
-        return {
-          slice,
-          path: arcPath(cx, cy, rOuter, rInner, start, Math.max(start + 0.01, end)),
-          mid,
-          pct: Math.round((slice.value / total) * 100),
-        };
-      });
-  }, [props.slices, total, cx, cy, rOuter, rInner]);
-
-  const active = arcs.find((a) => a.slice.id === hover) ?? null;
-
-  return (
-    <div
-      className={cn(
-        "flex flex-col items-stretch gap-4 sm:flex-row sm:items-center",
-        props.className,
-      )}
-    >
-      <div className="relative mx-auto shrink-0" style={{ width: size, height: size }}>
-        <svg viewBox={`0 0 ${size} ${size}`} className="h-full w-full overflow-visible" role="img">
-          {total <= 0 ? (
-            <circle
-              cx={cx}
-              cy={cy}
-              r={(rOuter + rInner) / 2}
-              fill="none"
-              className="stroke-border"
-              strokeWidth={rOuter - rInner}
-            />
-          ) : (
-            arcs.map((arc, index) => {
-              const isActive = hover == null || hover === arc.slice.id;
-              return (
-                <motion.path
-                  key={arc.slice.id}
-                  d={arc.path}
-                  className={cn(arc.slice.toneClass, "cursor-pointer fill-current")}
-                  initial={reduceMotion ? false : { opacity: 0, scale: 0.92 }}
-                  animate={{
-                    opacity: isActive ? 1 : 0.35,
-                    scale: hover === arc.slice.id ? 1.03 : 1,
-                  }}
-                  transition={{
-                    duration: 0.45,
-                    delay: index * 0.04,
-                    ease: [0.22, 1, 0.36, 1],
-                  }}
-                  style={{ transformOrigin: `${cx}px ${cy}px` }}
-                  onMouseEnter={() => setHover(arc.slice.id)}
-                  onMouseLeave={() => setHover(null)}
-                  onClick={() => props.onSelect?.(arc.slice.id)}
-                />
-              );
-            })
-          )}
-        </svg>
-        <div className="pointer-events-none absolute inset-0 flex flex-col items-center justify-center px-6 text-center">
-          <p className="text-lg font-semibold tracking-[-0.03em] tabular-nums text-fg">
-            {active ? format(active.slice.value) : (props.centerValue ?? format(total))}
-          </p>
-          <p className="mt-0.5 line-clamp-2 text-2xs text-fg-subtle">
-            {active ? `${active.pct}% · ${active.slice.label}` : (props.centerLabel ?? "Total")}
-          </p>
-        </div>
-      </div>
-
-      <ul className="min-w-0 flex-1 grid gap-1">
-        {arcs.map((arc) => (
-          <li key={arc.slice.id}>
-            <button
-              type="button"
-              onMouseEnter={() => setHover(arc.slice.id)}
-              onMouseLeave={() => setHover(null)}
-              onClick={() => props.onSelect?.(arc.slice.id)}
-              className={cn(
-                "flex w-full items-center gap-2 rounded-md px-2 py-1.5 text-left transition-colors",
-                hover === arc.slice.id ? "bg-surface-2/80" : "hover:bg-surface-2/50",
-              )}
-            >
-              <span
-                className={cn("size-2 shrink-0 rounded-full bg-current", arc.slice.toneClass)}
-              />
-              <span className="min-w-0 flex-1 truncate text-xs text-fg">{arc.slice.label}</span>
-              <span className="shrink-0 font-mono text-2xs tabular-nums text-fg-muted">
-                {format(arc.slice.value)}
-              </span>
-              <span className="w-8 shrink-0 text-right font-mono text-2xs tabular-nums text-fg-subtle">
-                {arc.pct}%
-              </span>
-            </button>
-          </li>
-        ))}
-      </ul>
-    </div>
-  );
-}
-
-export function HorizontalBars(props: {
-  rows: Array<{ id: string; label: string; value: number; hint?: string; toneClass?: string }>;
-  max?: number;
-  valuePrefix?: string;
-  className?: string;
-  onSelect?: (id: string) => void;
-}) {
-  const reduceMotion = useReducedMotion();
-  const max = props.max ?? Math.max(...props.rows.map((r) => r.value), 1);
-
-  return (
-    <ul className={cn("grid gap-1", props.className)}>
-      {props.rows.map((row, index) => {
-        const pct = Math.max(3, (row.value / max) * 100);
-        return (
-          <li key={row.id}>
-            <button
-              type="button"
-              onClick={() => props.onSelect?.(row.id)}
-              className={cn(
-                "group relative grid w-full gap-1.5 overflow-hidden rounded-lg px-2.5 py-2 text-left transition-colors",
-                "hover:bg-surface-2/70",
-                props.onSelect && "cursor-pointer",
-              )}
-            >
-              <div className="relative z-[1] flex items-baseline justify-between gap-3">
-                <span className="truncate text-xs font-medium text-fg">{row.label}</span>
-                <span className="shrink-0 font-mono text-2xs tabular-nums text-fg-muted">
-                  {props.valuePrefix}
-                  {row.value.toFixed(row.value >= 10 ? 1 : 2)}
-                  {row.hint ? <span className="ml-1.5 text-fg-subtle">{row.hint}</span> : null}
-                </span>
-              </div>
-              <div className="relative z-[1] h-1.5 overflow-hidden rounded-full bg-fg/[0.06]">
-                <motion.div
-                  className={cn("h-full rounded-full bg-brand", row.toneClass)}
-                  initial={reduceMotion ? false : { width: 0 }}
-                  animate={{ width: `${pct}%` }}
-                  transition={{
-                    duration: 0.75,
-                    delay: 0.04 + index * 0.04,
-                    ease: [0.22, 1, 0.36, 1],
-                  }}
-                />
-              </div>
-            </button>
-          </li>
-        );
-      })}
-    </ul>
   );
 }
 

@@ -34,6 +34,12 @@ type MobbinUiState = {
   oauthRequest: Record<string, unknown> | null;
 };
 
+type AtlassianUiState = {
+  nativeRetired: true;
+  nativeConnected: boolean;
+  nativeRequests: number;
+};
+
 type DriveUiState = {
   driveSaves: number;
   sourceRequest: Record<string, unknown> | null;
@@ -590,6 +596,81 @@ describe("capabilities browser e2e", () => {
     }
   }, 60_000);
 
+  test("native Atlassian retirement preserves hosted agent tools and historical cleanup", async () => {
+    const context = await browser.newContext({ viewport: { width: 1440, height: 900 } });
+    const page = await context.newPage();
+    try {
+      const state: AtlassianUiState = {
+        nativeRetired: true,
+        nativeConnected: true,
+        nativeRequests: 0,
+      };
+      await installCapabilityApi(page, state);
+      await page.goto(`${webBaseUrl}/workspaces/${workspaceId}/plugins`, {
+        waitUntil: "networkidle",
+      });
+      await expectVisible(page.getByRole("button", { name: /^Jira & Confluence(?:\s|$)/ }));
+      await page.screenshot({
+        path: `${evidenceDir}atlassian-catalog-desktop.png`,
+        fullPage: true,
+      });
+      await page.getByRole("button", { name: /^Jira & Confluence(?:\s|$)/ }).click();
+      await expectVisible(
+        page.getByRole("button", { name: /Let agents work in Jira and Confluence/ }),
+      );
+      await expectVisible(page.getByRole("button", { name: /Previous sync connections/ }));
+      expect(
+        await page.getByText("You can set up both. Each one is connected separately.").count(),
+      ).toBe(0);
+      await page.getByRole("button", { name: /Previous sync connections/ }).click();
+      await page
+        .getByRole("button", { name: "More actions for Jira & Confluence", exact: true })
+        .click();
+      await page.getByRole("menuitem", { name: "Disconnect previous sync", exact: true }).click();
+      const confirmation = page.getByRole("dialog");
+      await expectVisible(
+        confirmation.getByRole("button", { name: "Disconnect previous sync", exact: true }),
+      );
+      await expectText(confirmation, "Its imported documents and history remain.");
+      await confirmation.getByRole("button", { name: "Cancel", exact: true }).click();
+      await expectHidden(confirmation);
+      await expectText(page.locator("main"), "Knowledge sync retired");
+      await expectText(page.locator("main"), "Imported documents and history remain.");
+      expect(
+        await page
+          .getByRole("button", { name: /Reconnect|Choose sources|Resume/, exact: false })
+          .count(),
+      ).toBe(0);
+      await assertAccessibleAndBounded(page, "main");
+      await page.screenshot({
+        path: `${evidenceDir}atlassian-retired-desktop.png`,
+        fullPage: true,
+      });
+      expect(state.nativeRequests).toBe(0);
+
+      state.nativeConnected = false;
+      await page.goto(`${webBaseUrl}/workspaces/${workspaceId}/plugins`, {
+        waitUntil: "networkidle",
+      });
+      await page.getByRole("button", { name: /^Jira & Confluence(?:\s|$)/ }).click();
+      expect(await page.getByRole("button", { name: /Previous sync connections/ }).count()).toBe(0);
+      await expectVisible(page.getByRole("heading", { name: "Jira & Confluence", exact: true }));
+      expect(state.nativeRequests).toBe(0);
+    } catch (error) {
+      console.error(
+        "Jira failed browser body:",
+        (await page.locator("body").innerText()).slice(0, 4000),
+      );
+      await page.screenshot({
+        path: `${evidenceDir}atlassian-failure-desktop.png`,
+        fullPage: true,
+      });
+      throw error;
+    } finally {
+      await context.close();
+    }
+  }, 60_000);
+
   test("Google Drive folders configure only the exact named Integration instance", async () => {
     const state: DriveUiState = {
       driveSaves: 0,
@@ -921,7 +1002,7 @@ async function expectNoCapabilitiesChunkCycle(assetsDir: string): Promise<void> 
 
 async function installCapabilityApi(
   page: Page,
-  state: CapabilityState | MobbinUiState | DriveUiState,
+  state: CapabilityState | MobbinUiState | DriveUiState | AtlassianUiState,
 ): Promise<void> {
   await page.route("http://127.0.0.1:9/**", async (route) => {
     const request = route.request();
@@ -935,6 +1016,30 @@ async function installCapabilityApi(
         body: JSON.stringify(body),
       });
 
+    if ("nativeRetired" in state) {
+      if (url.pathname === `/v1/workspaces/${workspaceId}/connect/catalog`) return json([]);
+      if (url.pathname === `/v1/workspaces/${workspaceId}/capabilities/discovery/plugins`) {
+        return json({ items: [], total: 0, nextOffset: null });
+      }
+      if (url.pathname === `/v1/workspaces/${workspaceId}/skills/search`) {
+        return json({
+          provider: "skills_sh",
+          query: url.searchParams.get("q") ?? "",
+          items: [],
+          nextCursor: null,
+        });
+      }
+      if (url.pathname === `/v1/workspaces/${workspaceId}`) return json(workspace());
+      if (url.pathname === `/v1/workspaces/${workspaceId}/knowledge/entries/search`) {
+        return json({ entries: [], nextCursor: null, truncated: false });
+      }
+      if (url.pathname === `/v1/workspaces/${workspaceId}/scheduled-tasks/attention`)
+        return json([]);
+    }
+    if ("nativeRetired" in state && url.pathname.includes("/connections/atlassian")) {
+      state.nativeRequests++;
+      return json({ error: "Native provider is retired" }, 410);
+    }
     if (url.pathname === "/v1/config/client") {
       return json({
         deploymentRevision: "browser-focus-test",
@@ -979,6 +1084,7 @@ async function installCapabilityApi(
               "capabilities:read",
               "capabilities:write",
               "connections:read",
+              ...("nativeRetired" in state ? ["connections:write"] : []),
             ],
           },
         ],
@@ -993,9 +1099,22 @@ async function installCapabilityApi(
     if (url.pathname === `/v1/workspaces/${workspaceId}/capabilities`) {
       return json({
         items:
-          "driveSaves" in state
-            ? []
-            : ["mode" in state ? mobbinCapability(state.mode) : capability(state.enabled)],
+          "nativeRetired" in state
+            ? [
+                {
+                  ...mobbinCapability("disconnected"),
+                  id: "mcp:atlassian-browser",
+                  name: "Atlassian",
+                  providerDomain: "atlassian.com",
+                  mcpUrl: "https://mcp.atlassian.com/v1/mcp",
+                  endpointUrl: "https://mcp.atlassian.com/v1/mcp",
+                  description: "Hosted Jira and Confluence agent tools.",
+                  metadata: { curation: { featured: true, official: true } },
+                },
+              ]
+            : "driveSaves" in state
+              ? []
+              : ["mode" in state ? mobbinCapability(state.mode) : capability(state.enabled)],
         installations: [],
       });
     }
@@ -1005,11 +1124,15 @@ async function installCapabilityApi(
     if (url.pathname === `/v1/workspaces/${workspaceId}/connections`) {
       return json({
         connections:
-          "driveSaves" in state
-            ? [driveConnection()]
-            : "mode" in state
-              ? mobbinConnections(state.mode)
-              : [],
+          "nativeRetired" in state
+            ? state.nativeConnected
+              ? [historicalAtlassianConnection()]
+              : []
+            : "driveSaves" in state
+              ? [driveConnection()]
+              : "mode" in state
+                ? mobbinConnections(state.mode)
+                : [],
       });
     }
     if (url.pathname === `/v1/workspaces/${workspaceId}/integrations/definitions`) {
@@ -1071,7 +1194,19 @@ async function installCapabilityApi(
       return json({ configured: false, missing: [], installUrl: null });
     }
     if (url.pathname === `/v1/workspaces/${workspaceId}/sessions`) {
-      return json({ sessions: [], pinned: [], pinnedTruncated: false, nextCursor: null });
+      return json({
+        sessions: [],
+        pinned: [],
+        pinnedTruncated: false,
+        nextCursor: null,
+        filtersApplied: true,
+        sortBy: url.searchParams.get("sortBy") ?? "updatedAt",
+        archiveStatus: url.searchParams.get("archiveStatus") ?? "active",
+        ...(url.searchParams.get("needsYouOnly") === "true" ? { needsYouOnly: true } : {}),
+        ...(url.searchParams.get("includeTotals") === "true"
+          ? { totals: { needsYouCount: 0, groups: [] } }
+          : {}),
+      });
     }
     if (
       "mode" in state &&
@@ -1219,7 +1354,19 @@ async function installLargeCatalogApi(
       return json({ configured: false, missing: [], installUrl: null });
     }
     if (url.pathname === `/v1/workspaces/${workspaceId}/sessions`) {
-      return json({ sessions: [], pinned: [], pinnedTruncated: false, nextCursor: null });
+      return json({
+        sessions: [],
+        pinned: [],
+        pinnedTruncated: false,
+        nextCursor: null,
+        filtersApplied: true,
+        sortBy: url.searchParams.get("sortBy") ?? "updatedAt",
+        archiveStatus: url.searchParams.get("archiveStatus") ?? "active",
+        ...(url.searchParams.get("needsYouOnly") === "true" ? { needsYouOnly: true } : {}),
+        ...(url.searchParams.get("includeTotals") === "true"
+          ? { totals: { needsYouCount: 0, groups: [] } }
+          : {}),
+      });
     }
     return json({});
   });
@@ -1325,7 +1472,19 @@ async function installWorkspaceCatalogApi(
       return json({ configured: false, missing: [], installUrl: null });
     }
     if (resource === "sessions") {
-      return json({ sessions: [], pinned: [], pinnedTruncated: false, nextCursor: null });
+      return json({
+        sessions: [],
+        pinned: [],
+        pinnedTruncated: false,
+        nextCursor: null,
+        filtersApplied: true,
+        sortBy: url.searchParams.get("sortBy") ?? "updatedAt",
+        archiveStatus: url.searchParams.get("archiveStatus") ?? "active",
+        ...(url.searchParams.get("needsYouOnly") === "true" ? { needsYouOnly: true } : {}),
+        ...(url.searchParams.get("includeTotals") === "true"
+          ? { totals: { needsYouCount: 0, groups: [] } }
+          : {}),
+      });
     }
     return json({});
   });
@@ -1587,6 +1746,46 @@ function driveInstallation() {
     approvalRequiredToolCount: 0,
     revisionId: "openapi:444444444444444444444444",
     contentSha256: "4".repeat(64),
+  };
+}
+
+function historicalAtlassianConnection() {
+  const now = new Date(0).toISOString();
+  return {
+    id: "00000000-0000-4000-8000-000000000140",
+    accountId,
+    workspaceId,
+    subjectId: "browser-focus-subject",
+    providerDomain: "api.atlassian.com",
+    kind: "oauth2",
+    status: "active",
+    grantedScopes: [],
+    expiresAt: null,
+    lastRefreshAt: null,
+    lastUsedAt: null,
+    lastError: null,
+    version: 1,
+    metadata: {
+      credentialRole: "atlassian_knowledge",
+      credentialLabel: "Atlassian read-only knowledge sync",
+      atlassianAccountId: "historical-owner",
+      displayName: "Historical Owner",
+      email: "owner@example.test",
+      sites: [
+        {
+          cloudId: "cloud-1",
+          name: "Previous site",
+          url: "https://fixture.atlassian.net",
+          products: ["jira", "confluence"],
+        },
+      ],
+      verifiedAt: now,
+      accessMode: "readonly",
+      lifecycle: { state: "active", recoverable: true, observedAt: now },
+      selectedSources: [],
+    },
+    createdAt: now,
+    updatedAt: now,
   };
 }
 

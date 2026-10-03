@@ -27,6 +27,7 @@ import {
   listSessionEvents,
   nestedPostgresSqlState,
   revokeOrganizationApiKey,
+  updateOrganizationApiKey,
   readSessionFileAttachments,
   setSubjectRlsContext,
   submitHumanPromptInTransaction,
@@ -179,11 +180,13 @@ describe("archived import PostgreSQL persistence", () => {
     }
   }, 60_000);
 
-  test("the actual pre0555 evaluator and provisioner accept the complete post0555 database", async () => {
+  test("archive storage stays compatible with pre0555 while later maintenance cutovers require the current runtime", async () => {
     if (!client || !shared) return;
     const repoRoot = new URL("../../..", import.meta.url).pathname;
     // Exact immutable feature base before 0555; do not substitute new constants
     // or filter its catalog. Both binaries inspect the entire real database.
+    // 0560's private archive ledgers were rolling-compatible; 0587 deliberately
+    // adds a runtime FORCE-RLS contract that requires a drained fleet cutover.
     const oldRevision = "bb2f7ea7febacf6fde998625fb1303e35f148c79";
     const root = await mkdtemp(`${repoRoot}/.archived-import-old-runtime-`);
     try {
@@ -204,12 +207,26 @@ describe("archived import PostgreSQL persistence", () => {
         organizationTenancyCanonicalActivationEnabled: true,
       };
       expect(old.FORCE_RLS_TABLES).not.toContain("session_import_batches");
+      // Later maintenance cutovers (Slack quotas, Claude account pools and the
+      // organization key scope join) intentionally require a new binary. Keep the
+      // immutable evaluator and complete catalog and check two of those gaps.
+      const laterQuotaGap =
+        "table slack_api_rate_limits grants excess runtime privileges: SELECT, INSERT, UPDATE, DELETE";
+      const missingScopeTable = (violations: string[]) =>
+        violations.some(
+          (violation) =>
+            violation.startsWith("RLS tables are absent from the declared contract:") &&
+            violation.includes("organization_api_key_workspaces"),
+        );
       expect(
         old.evaluateRuntimeDatabasePosture(
           await old.inspectRuntimeDatabasePosture(client.db, options),
           options,
         ),
-      ).toEqual([]);
+      ).toSatisfy(
+        (violations: string[]) =>
+          violations.includes(laterQuotaGap) && missingScopeTable(violations),
+      );
       await oldProvision.provisionRoles(shared.adminUrl, {
         appRole: "opengeni_app",
         appPassword: new URL(shared.appUrl).password,
@@ -220,7 +237,7 @@ describe("archived import PostgreSQL persistence", () => {
           await old.inspectRuntimeDatabasePosture(client.db, options),
           options,
         ),
-      ).toEqual([]);
+      ).toSatisfy(missingScopeTable);
       await provisionRoles(shared.adminUrl, {
         appRole: "opengeni_app",
         appPassword: new URL(shared.appUrl).password,
@@ -254,7 +271,10 @@ describe("archived import PostgreSQL persistence", () => {
           await old.inspectRuntimeDatabasePosture(client.db, options),
           options,
         ),
-      ).toEqual([]);
+      ).toSatisfy(
+        (violations: string[]) =>
+          violations.includes(laterQuotaGap) && missingScopeTable(violations),
+      );
     } finally {
       await rm(root, { recursive: true, force: true });
     }
@@ -929,6 +949,69 @@ describe("archived import PostgreSQL persistence", () => {
     expect(appended.events[0]!.sequence).toBe(3);
     expect((await importArchivedSession(client.db, { ...scope, payload })).nextOffset).toBe(2);
   });
+
+  test("explicit organization import keys require literal permissions and live selected scope even on replay", async () => {
+    if (!client || !shared) return;
+    const workspace = await fixture();
+    const [other] = await shared.admin<{ id: string }[]>`insert into workspaces (account_id, name)
+      values (${workspace.accountId}, 'Not selected') returning id`;
+    const key = await createOrganizationApiKey(client.db, {
+      accountId: workspace.accountId,
+      name: "Explicit import",
+      prefix: "test",
+      keyHash: crypto.randomUUID(),
+      permissions: ["workspace:admin"],
+      policy: {
+        preset: "custom",
+        permissions: ["sessions:create"],
+        workspaceScope: { kind: "selected", workspaceIds: [other!.id] },
+      },
+    });
+    const subjectId = `api_key:${key.id}`;
+    const scope = {
+      ...workspace,
+      subjectId,
+      apiKeyId: key.id,
+      requiredPermission: "sessions:create" as const,
+      createdBy: { kind: "service" as const, subjectId },
+    };
+    const payload = {
+      importId: "explicit-policy",
+      title: "Explicit policy",
+      createdAt: "2019-01-01T00:00:00Z",
+    };
+    await expect(importArchivedSession(client.db, { ...scope, payload })).rejects.toMatchObject({
+      code: "SESSION_IMPORT_NOT_FOUND",
+    });
+    await updateOrganizationApiKey(client.db, workspace.accountId, key.id, {
+      policy: {
+        preset: "custom",
+        permissions: ["workspace:admin"],
+        workspaceScope: { kind: "selected", workspaceIds: [workspace.workspaceId] },
+      },
+    });
+    await expect(importArchivedSession(client.db, { ...scope, payload })).rejects.toMatchObject({
+      code: "SESSION_IMPORT_NOT_FOUND",
+    });
+    await updateOrganizationApiKey(client.db, workspace.accountId, key.id, {
+      policy: {
+        preset: "custom",
+        permissions: ["sessions:create"],
+        workspaceScope: { kind: "selected", workspaceIds: [workspace.workspaceId] },
+      },
+    });
+    expect((await importArchivedSession(client.db, { ...scope, payload })).created).toBe(true);
+    await updateOrganizationApiKey(client.db, workspace.accountId, key.id, {
+      policy: {
+        preset: "custom",
+        permissions: ["sessions:create"],
+        workspaceScope: { kind: "selected", workspaceIds: [other!.id] },
+      },
+    });
+    await expect(importArchivedSession(client.db, { ...scope, payload })).rejects.toMatchObject({
+      code: "SESSION_IMPORT_NOT_FOUND",
+    });
+  }, 180_000);
 
   test("revoked import credentials cannot replay a create or append a suffix", async () => {
     if (!client || !shared) return;

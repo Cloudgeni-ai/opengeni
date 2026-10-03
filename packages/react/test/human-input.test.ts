@@ -230,7 +230,7 @@ describe("HumanInputForm async host boundary", () => {
       await Promise.resolve();
     });
     expect(mounted.container.querySelector('[role="alert"]')?.textContent).toContain(
-      "Host submission failed",
+      "The request could not be completed.",
     );
   });
 
@@ -727,5 +727,82 @@ describe("HumanInputForm async host boundary", () => {
     await act(async () => {
       await pending;
     });
+  });
+});
+
+describe("HumanInputForm yes/no decisions", () => {
+  const decision = (labels: [string, string]) => ({
+    id: "request-decision",
+    questions: [
+      {
+        id: "decision",
+        kind: "single_select" as const,
+        label: "Approval",
+        prompt: "Change your display name to Sam Taylor QA?",
+        options: [
+          { id: "a", label: labels[0], description: "first" },
+          { id: "b", label: labels[1], description: "second" },
+        ],
+        required: true,
+        allowOther: false,
+      },
+    ],
+    allowSkip: false,
+    expiresAt: null,
+  });
+
+  test("an approval asked as a question answers with Approve/Cancel buttons and no Other", async () => {
+    const submissions: SubmitHumanInputResponseRequest[] = [];
+    mounted = await renderComponent(
+      createElement(HumanInputForm, {
+        request: decision(["Cancel", "Approve"]),
+        decisionButtons: true,
+        onSubmit: (response) => {
+          submissions.push(response);
+        },
+        autoFocus: false,
+      }),
+    );
+    const text = mounted.container.textContent ?? "";
+    expect(text).not.toContain("Other");
+    // Option descriptions stay visible, not hover-only.
+    expect(text).toContain("first");
+    expect(text).toContain("second");
+    expect(mounted.container.querySelector('input[type="radio"]')).toBeNull();
+    const buttons = [...mounted.container.querySelectorAll("[data-human-input-choice]")];
+    // Decline first, the primary accept last.
+    expect(buttons.map((button) => button.textContent)).toEqual(["Cancel", "Approve"]);
+    await act(async () => {
+      (buttons[1] as HTMLButtonElement).click();
+      await Promise.resolve();
+    });
+    expect(submissions).toEqual([
+      { outcome: "answered", answers: [{ questionId: "decision", values: ["b"] }] },
+    ]);
+  });
+
+  test("other two-option choices keep the full form with Other", async () => {
+    mounted = await renderComponent(
+      createElement(HumanInputForm, {
+        request: decision(["Blue", "Green"]),
+        decisionButtons: true,
+        onSubmit: () => undefined,
+        autoFocus: false,
+      }),
+    );
+    expect(mounted.container.querySelector("[data-human-input-choice]")).toBeNull();
+    expect(mounted.container.textContent).toContain("Other");
+  });
+
+  test("the console keeps the full form unless decision buttons are requested", async () => {
+    mounted = await renderComponent(
+      createElement(HumanInputForm, {
+        request: decision(["Cancel", "Approve"]),
+        onSubmit: () => undefined,
+        autoFocus: false,
+      }),
+    );
+    expect(mounted.container.querySelector("[data-human-input-choice]")).toBeNull();
+    expect(mounted.container.textContent).toContain("Other");
   });
 });

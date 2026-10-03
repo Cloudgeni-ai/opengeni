@@ -1,11 +1,12 @@
 import { getRetainedProviderCommand } from "@opengeni/db/retained-provider-commands";
+import { UnsupportedLatencyModeError } from "@opengeni/config";
 import { searchSessionMessagesForSubject, SessionMessageSearchCursorError } from "@opengeni/db";
 import { listSessionEventSlices } from "@opengeni/db/session-event-slices";
 import * as sessionPreviewSchema from "@opengeni/db/schema";
 import { and, eq, sql } from "drizzle-orm";
 import { SessionMessageSearchRequest } from "@opengeni/contracts";
 import { scheduledSessionIds } from "@opengeni/db";
-import { withSiteSessionOrigin } from "@opengeni/core";
+import { isVerifiedDelegatedHumanAuthorization, withSiteSessionOrigin } from "@opengeni/core";
 import { freezeSessionRealtimeConnectionAccounts } from "@opengeni/core";
 import { resolveSiteSessionOrigin, withOptionalSiteCommandOrigin } from "../site-session-origin";
 import { SandboxRecoveryRequest } from "@opengeni/contracts";
@@ -148,6 +149,7 @@ import {
   listSessionDiscoverySummaries,
   listSessionDiscoveryAncestorPaths,
   listSessionsForSubject,
+  listSessionEntriesForSubject,
   getLatestStartedSessionTurn,
   listSessionTurns,
   projectEffectiveControlForRelatedAccess,
@@ -289,6 +291,7 @@ import {
 import { buildSessionCodexRealtimeBroker, CodexRealtimeBrokerError } from "../codex-realtime";
 import {
   acceptSessionUserMessage,
+  validateSessionMcpCredentialUpdates,
   controlHumanSessionWorkstream,
   retryFailedSession,
   createSessionForRequest,
@@ -314,8 +317,7 @@ import {
   workflowIdForSession,
   sessionWithEffectiveToolPolicy,
   workspaceSessionEffectiveToolsContext,
-  workspaceSessionToolPolicyDefaultServerIds,
-  workspaceSessionToolPolicyServerIds,
+  workspaceSessionToolPolicyContext,
   relayConfigFromSettings,
   validateVariableSetAttachment,
 } from "@opengeni/core";
@@ -331,6 +333,7 @@ import { ApiHttpError } from "../http/api-error";
 import { observeWorkDiscovery, summarizeWorkDiscoveryRows } from "../work-discovery-observability";
 import { recordAcceptedApiAdmission } from "../admission-trace";
 import { parseRequestBody, parseRequestJson } from "../http/request-body";
+import { measureSessionCreatePhase } from "../session-create-observability";
 
 type SessionRouteDeps = ApiRouteDeps & Pick<ViewerServices, "establishSandboxSession">;
 
@@ -586,16 +589,15 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
 
   app.post("/v1/workspaces/:workspaceId/sessions", async (c) => {
     const workspaceId = c.req.param("workspaceId");
-    const authorization = await requireAccessGrantAuthorization(
-      c,
-      deps,
-      workspaceId,
-      "sessions:create",
+    const authorization = await measureSessionCreatePhase(deps.observability, "authorization", () =>
+      requireAccessGrantAuthorization(c, deps, workspaceId, "sessions:create"),
     );
     const grant = authorization.grant;
     let payload: unknown;
     try {
-      payload = await c.req.json();
+      payload = await measureSessionCreatePhase(deps.observability, "body_read", () =>
+        c.req.json(),
+      );
     } catch {
       return c.json(
         {
@@ -608,22 +610,31 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
     let session: Session;
     try {
       CreateSessionRequest.parse(payload);
-      const origin = await resolveSiteSessionOrigin(
-        db,
-        workspaceId,
-        c.req.header("x-opengeni-site-id"),
-        c.req.header("x-opengeni-site-version"),
+      const origin = await measureSessionCreatePhase(deps.observability, "site_origin", () =>
+        resolveSiteSessionOrigin(
+          db,
+          workspaceId,
+          c.req.header("x-opengeni-site-id"),
+          c.req.header("x-opengeni-site-version"),
+        ),
       );
       const create = () =>
         createSessionForRequest(deps, grant, workspaceId, payload, authorization);
-      session = await (origin ? withSiteSessionOrigin(origin, create) : create());
+      session = await measureSessionCreatePhase(deps.observability, "core_create", () =>
+        origin ? withSiteSessionOrigin(origin, create) : create(),
+      );
     } catch (error) {
       return sessionCreateErrorResponse(c, error);
     }
     // Creation has committed by this point. Keep response projection outside
     // the create-rejection boundary so a post-commit policy read cannot be
     // misreported as though the session itself was rejected.
-    return c.json(await withEffectivePolicy(deps, workspaceId, grant.subjectId, session), 202);
+    return c.json(
+      await measureSessionCreatePhase(deps.observability, "response_projection", () =>
+        withEffectivePolicy(deps, workspaceId, grant.subjectId, session),
+      ),
+      202,
+    );
   });
 
   app.get("/v1/workspaces/:workspaceId/new-session-draft", async (c) => {
@@ -780,33 +791,50 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
     }
     const pageView = c.req.query("view") === "page";
     const query = sessionListQuery(c.req.query(), pageView);
-    let page: Awaited<ReturnType<typeof listSessionsForSubject>>;
+    const projection = c.req.query("projection");
+    if (projection !== undefined && projection !== "summary")
+      throw new HTTPException(400, { message: 'projection must be "summary"' });
+    if (projection && !pageView)
+      throw new HTTPException(400, { message: 'summary projection requires view="page"' });
+    const summary = projection === "summary";
+    let page: Awaited<
+      ReturnType<typeof listSessionsForSubject | typeof listSessionEntriesForSubject>
+    >;
     try {
-      page = await listSessionsForSubject(db, workspaceId, {
-        subjectId: grant.subjectId,
-        limit: boundedLimit(query.limit),
-        materializeSnapshot: pageView,
-        ...(query.cursor ? { cursor: query.cursor } : {}),
-        ...(query.search ? { search: query.search } : {}),
-        ...(query.pinsOnly ? { pinsOnly: true } : {}),
-        ...(query.archivedOnly ? { archivedOnly: true } : {}),
-        ...(query.sortBy ? { sortBy: query.sortBy } : {}),
-        ...(query.archiveStatus ? { archiveStatus: query.archiveStatus } : {}),
-        ...(query.parentSessionId !== undefined ? { parentSessionId: query.parentSessionId } : {}),
-        ...(query.channelId !== undefined ? { channelId: query.channelId } : {}),
-        ...(query.originSiteId ? { originSiteId: query.originSiteId } : {}),
-        ...(query.createdBy ? { createdBy: query.createdBy } : {}),
-        ...(query.updatedFrom ? { updatedFrom: query.updatedFrom } : {}),
-        ...(query.updatedBefore ? { updatedBefore: query.updatedBefore } : {}),
-        ...(query.createdFrom ? { createdFrom: query.createdFrom } : {}),
-        ...(query.createdBefore ? { createdBefore: query.createdBefore } : {}),
-        ...(query.scopeSubjectId ? { scopeSubjectId: query.scopeSubjectId } : {}),
-        ...(authorizationScope ? { authorizationScope } : {}),
-        // A managed human's own personal workspace has no membership row, so
-        // the list's removal fence must fall back to the organization-membership
-        // pointer, only with verified native or external owning-user provenance.
-        personalWorkspaceOwnerException: hasVerifiedOwningUserAuthorization(authorization),
-      });
+      page = await (summary ? listSessionEntriesForSubject : listSessionsForSubject)(
+        db,
+        workspaceId,
+        {
+          subjectId: grant.subjectId,
+          limit: boundedLimit(query.limit),
+          materializeSnapshot: pageView,
+          ...(query.cursor ? { cursor: query.cursor } : {}),
+          ...(query.search ? { search: query.search } : {}),
+          ...(query.pinsOnly ? { pinsOnly: true } : {}),
+          ...(query.includeTotals ? { includeTotals: true } : {}),
+          ...(query.needsYouOnly ? { needsYouOnly: true } : {}),
+          ...(query.includePinned === false ? { includePinned: false } : {}),
+          ...(query.archivedOnly ? { archivedOnly: true } : {}),
+          ...(query.sortBy ? { sortBy: query.sortBy } : {}),
+          ...(query.archiveStatus ? { archiveStatus: query.archiveStatus } : {}),
+          ...(query.parentSessionId !== undefined
+            ? { parentSessionId: query.parentSessionId }
+            : {}),
+          ...(query.channelId !== undefined ? { channelId: query.channelId } : {}),
+          ...(query.originSiteId ? { originSiteId: query.originSiteId } : {}),
+          ...(query.createdBy ? { createdBy: query.createdBy } : {}),
+          ...(query.updatedFrom ? { updatedFrom: query.updatedFrom } : {}),
+          ...(query.updatedBefore ? { updatedBefore: query.updatedBefore } : {}),
+          ...(query.createdFrom ? { createdFrom: query.createdFrom } : {}),
+          ...(query.createdBefore ? { createdBefore: query.createdBefore } : {}),
+          ...(query.scopeSubjectId ? { scopeSubjectId: query.scopeSubjectId } : {}),
+          ...(authorizationScope ? { authorizationScope } : {}),
+          // A managed human's own personal workspace has no membership row, so
+          // the list's removal fence must fall back to the organization-membership
+          // pointer, only with verified native or external owning-user provenance.
+          personalWorkspaceOwnerException: hasVerifiedOwningUserAuthorization(authorization),
+        },
+      );
     } catch (error) {
       if (error instanceof SessionListAccessError) {
         throw new HTTPException(403, { message: error.message });
@@ -827,10 +855,6 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
     // body for older clients while still making its older-pin omission visible
     // to raw HTTP consumers without changing that response shape.
     c.header("x-opengeni-pinned-truncated", page.pinnedTruncated === true ? "true" : "false");
-    const policy = await loadEffectivePolicyContext(deps, workspaceId, grant.subjectId, [
-      ...page.pinned,
-      ...page.sessions,
-    ]);
     const commandActivity = await backgroundCommandActivityForSessions(db, {
       accountId: grant.accountId,
       workspaceId,
@@ -845,14 +869,35 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
             [...page.pinned, ...page.sessions].map((session) => session.id),
           )
         : new Set<string>();
+    if ("projection" in page) {
+      const decorateEntry = (session: (typeof page.sessions)[number]) => ({
+        ...session,
+        hasSchedules: scheduleTargets.has(session.id),
+        ...(commandActivity.has(session.id)
+          ? { backgroundCommandActivity: commandActivity.get(session.id)! }
+          : {}),
+      });
+      return c.json({
+        ...page,
+        ...(query.hasPageFilters ? { filtersApplied: true as const } : {}),
+        ...(query.originSiteId ? { originSiteId: query.originSiteId } : {}),
+        pinned: page.pinned.map(decorateEntry),
+        sessions: page.sessions.map(decorateEntry),
+      });
+    }
+    const policy = await loadEffectivePolicyContext(deps, workspaceId, grant.subjectId, [
+      ...page.pinned,
+      ...page.sessions,
+    ]);
     const decorate = (session: Session): Session => {
       const activity = commandActivity.get(session.id);
+      const decorated = {
+        ...session,
+        hasSchedules: scheduleTargets.has(session.id),
+        ...(activity ? { backgroundCommandActivity: activity } : {}),
+      };
       return sessionWithEffectiveToolPolicy(
-        {
-          ...session,
-          hasSchedules: scheduleTargets.has(session.id),
-          ...(activity ? { backgroundCommandActivity: activity } : {}),
-        },
+        decorated,
         policy.workspaceServerIds,
         policy.workspaceDefaultServerIds,
         policy.effectiveToolsContext,
@@ -3592,16 +3637,42 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
       return c.json(result.accepted, 202);
     }
 
-    if (event.type === "user.approvalDecision") {
-      const accepted = await acceptSessionApprovalDecision(db, {
-        accountId: grant.accountId,
-        workspaceId,
-        sessionId,
-        subjectId: grant.subjectId,
-        respondedByKind: childRequiresActionRespondedByKindForGrant(grant),
-        payload: event.payload,
-        clientEventId: event.clientEventId ?? null,
+    // Responses use the same header-only validation, permission and encryption
+    // boundary as Send/Steer. Persistence belongs to the response transaction,
+    // never a separate rotation that could commit without accepting the reply.
+    const updates = event.payload.mcpCredentialUpdates ?? [];
+    let mcpCredentialUpdates = [] as ReturnType<typeof validateSessionMcpCredentialUpdates>;
+    if (updates.length) {
+      const session = await getSession(db, workspaceId, sessionId);
+      if (!session) throw new HTTPException(404, { message: "session not found" });
+      mcpCredentialUpdates = validateSessionMcpCredentialUpdates({
+        settings,
+        grant,
+        session,
+        updates,
       });
+    }
+
+    if (event.type === "user.approvalDecision") {
+      const { mcpCredentialUpdates: _writeOnlyCredentials, ...payload } = event.payload;
+      let accepted;
+      try {
+        accepted = await acceptSessionApprovalDecision(db, {
+          accountId: grant.accountId,
+          workspaceId,
+          sessionId,
+          subjectId: grant.subjectId,
+          respondedByKind: childRequiresActionRespondedByKindForGrant(grant),
+          payload,
+          mcpCredentialUpdates,
+          clientEventId: event.clientEventId ?? null,
+        });
+      } catch (error) {
+        if (error instanceof Error && error.message.startsWith("Unknown session MCP server")) {
+          throw new HTTPException(422, { message: error.message });
+        }
+        throw error;
+      }
       if (accepted.action === "conflict") {
         throw new HTTPException(409, {
           message: `session is ${accepted.sessionStatus}; no unhandled approval is pending`,
@@ -3631,11 +3702,17 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
           response: event.payload.response,
           respondedBy: grant.subjectId,
           canonicalHumanSession:
-            authorization.canonicalManagedHumanSession || authorization.canonicalLocalHumanSession,
+            authorization.canonicalManagedHumanSession ||
+            authorization.canonicalLocalHumanSession ||
+            isVerifiedDelegatedHumanAuthorization(authorization),
           respondedByKind: childRequiresActionRespondedByKindForGrant(grant),
           clientEventId: event.clientEventId ?? null,
+          mcpCredentialUpdates,
         });
       } catch (error) {
+        if (error instanceof Error && error.message.startsWith("Unknown session MCP server")) {
+          throw new HTTPException(422, { message: error.message });
+        }
         if (error instanceof SkillHumanResponseError) {
           throw new HTTPException(
             error.code === "conflict" ? 409 : error.code === "forbidden" ? 403 : 422,
@@ -5190,6 +5267,9 @@ export function sessionListQuery(
   cursor: ReturnType<typeof decodeSessionListCursor> | undefined;
   search: string | undefined;
   pinsOnly: boolean;
+  includePinned: boolean;
+  includeTotals: boolean;
+  needsYouOnly: boolean;
   archivedOnly: boolean;
   sortBy: "updatedAt" | "createdAt" | "name" | undefined;
   archiveStatus: "active" | "archived" | "all" | undefined;
@@ -5235,6 +5315,23 @@ export function sessionListQuery(
     });
   }
   const pinsOnly = query.pinsOnly === "true";
+  if (query.includePinned !== undefined && !["true", "false"].includes(query.includePinned)) {
+    throw new HTTPException(400, { message: 'includePinned must be "true" or "false"' });
+  }
+  const includePinned = query.includePinned !== "false";
+  for (const key of ["includeTotals", "needsYouOnly"]) {
+    if (query[key] !== undefined && !["true", "false"].includes(query[key]!))
+      throw new HTTPException(400, { message: `${key} must be "true" or "false"` });
+  }
+  const includeTotals = query.includeTotals === "true";
+  const needsYouOnly = query.needsYouOnly === "true";
+  if (includeTotals && (!allowCursor || (parentSessionId !== "null" && !pinsOnly)))
+    throw new HTTPException(400, { message: "includeTotals requires a root page" });
+  if (needsYouOnly && !allowCursor)
+    throw new HTTPException(400, { message: 'needsYouOnly requires view="page"' });
+  if (pinsOnly && !includePinned) {
+    throw new HTTPException(400, { message: "pinsOnly requires includePinned" });
+  }
   if (query.archivedOnly !== undefined && query.archivedOnly !== "true") {
     throw new HTTPException(400, { message: 'archivedOnly must be the literal "true"' });
   }
@@ -5325,6 +5422,7 @@ export function sessionListQuery(
     scopeSubjectId = parsedEndUser.data;
   }
   const hasPageFilters =
+    needsYouOnly ||
     originSiteId !== undefined ||
     channelId !== undefined ||
     createdByKind !== undefined ||
@@ -5356,6 +5454,9 @@ export function sessionListQuery(
     cursor,
     search: search || undefined,
     pinsOnly,
+    includePinned,
+    includeTotals,
+    needsYouOnly,
     archivedOnly,
     sortBy: sortBy.data,
     archiveStatus: archiveStatus.data,
@@ -5715,6 +5816,21 @@ function optionalEventSequence(raw: string | undefined): number | undefined {
 
 /** Stable, value-free JSON errors for only the create-session boundary. */
 export function sessionCreateErrorResponse(c: Context, error: unknown): Response {
+  if (error instanceof UnsupportedLatencyModeError) {
+    return c.json(
+      {
+        code: "SESSION_CREATE_REJECTED",
+        message: error.message,
+        details: {
+          code: error.code,
+          modelId: error.modelId,
+          latencyMode: error.latencyMode,
+          allowedLatencyModes: [...error.allowedLatencyModes],
+        },
+      },
+      422,
+    );
+  }
   if (error instanceof SessionCreateConnectionSelectionUnavailableError) {
     return c.json({ code: error.code, message: error.message, retryable: false }, 409);
   }
@@ -5874,12 +5990,11 @@ async function loadEffectivePolicyContext(
   subjectId: string,
   sessions: readonly Session[],
 ): Promise<EffectivePolicyContext> {
-  const [workspaceServerIds, workspaceDefaultServerIds, effectiveToolsContext] = await Promise.all([
-    workspaceSessionToolPolicyServerIds(deps.db, workspaceId, deps.settings, subjectId),
-    workspaceSessionToolPolicyDefaultServerIds(deps.db, workspaceId, deps.settings, subjectId),
+  const [policy, effectiveToolsContext] = await Promise.all([
+    workspaceSessionToolPolicyContext(deps.db, workspaceId, deps.settings, subjectId),
     workspaceSessionEffectiveToolsContext(deps, workspaceId, subjectId, sessions),
   ]);
-  return { workspaceServerIds, workspaceDefaultServerIds, effectiveToolsContext };
+  return { ...policy, effectiveToolsContext };
 }
 
 async function withEffectivePolicy(

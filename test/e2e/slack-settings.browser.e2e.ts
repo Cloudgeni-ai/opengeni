@@ -230,6 +230,18 @@ async function installApi(
       });
     if (path === "/v1/workspaces")
       return json([workspace(workspaceId, "Cloudgeni"), workspace(siblingId, "Analytics")]);
+    // Keep provider readiness independent of the connection lookup held during reload.
+    if (path.endsWith("/connect/catalog"))
+      return json([
+        {
+          id: "slack-bot",
+          label: "Opengeni Slack bot",
+          family: "slack",
+          readiness: "available",
+          ownership: ["workspace"],
+          setup: ["oauth"],
+        },
+      ]);
     if (path.endsWith("/capabilities")) return json({ items: [], installations: [] });
     if (path.endsWith("/connections")) {
       await state.connectionsReady;
@@ -260,7 +272,19 @@ async function installApi(
     if (path.endsWith("/integrations/definitions")) return json({ definitions: [] });
     if (path.endsWith("/integrations")) return json({ integrations: [] });
     if (path.endsWith("/sessions"))
-      return json({ sessions: [], pinned: [], pinnedTruncated: false, nextCursor: null });
+      return json({
+        sessions: [],
+        pinned: [],
+        pinnedTruncated: false,
+        nextCursor: null,
+        filtersApplied: true,
+        sortBy: url.searchParams.get("sortBy") ?? "updatedAt",
+        archiveStatus: url.searchParams.get("archiveStatus") ?? "active",
+        ...(url.searchParams.get("needsYouOnly") === "true" ? { needsYouOnly: true } : {}),
+        ...(url.searchParams.get("includeTotals") === "true"
+          ? { totals: { needsYouCount: 0, groups: [] } }
+          : {}),
+      });
     if (path.endsWith("/channels") || path.endsWith("/rigs") || path.endsWith("/variable-sets"))
       return json([]);
     if (path.endsWith("/github/app"))

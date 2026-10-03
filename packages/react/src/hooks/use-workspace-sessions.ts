@@ -1,15 +1,21 @@
-import type { Session } from "@opengeni/sdk";
+import type { Session, SessionListEntry, SessionListTotals } from "@opengeni/sdk";
 import { useCallback, useEffect, useRef } from "react";
 import { useOpenGeni, type ClientOverride } from "../provider";
 import { usePolledValue } from "./internal";
 
 export type UseWorkspaceSessionsOptions = ClientOverride & {
+  includeTotals?: boolean | undefined;
+  needsYouOnly?: boolean | undefined;
+  /** Compact list records; detail reads remain full sessions. */
+  projection?: "summary" | undefined;
   limit?: number | undefined;
   parentSessionId?: string | null | undefined;
   cursor?: string | undefined;
   search?: string | undefined;
   /** Return only the complete personal pinned projection. */
   pinsOnly?: boolean | undefined;
+  /** Skip pinned details when the pinned section is loaded separately. */
+  includePinned?: boolean | undefined;
   archivedOnly?: boolean | undefined;
   sortBy?: "updatedAt" | "createdAt" | "name" | undefined;
   archiveStatus?: "active" | "archived" | "all" | undefined;
@@ -20,16 +26,17 @@ export type UseWorkspaceSessionsOptions = ClientOverride & {
   beginRead?: (() => number) | undefined;
 };
 
-export type UseWorkspaceSessionsResult = {
+export type UseWorkspaceSessionsResult<T extends Session | SessionListEntry = Session> = {
   /**
    * All visible rows, with pins first. This preserves the pre-pinning hook
    * contract for consumers that only read `sessions`.
    */
-  sessions: Session[];
+  sessions: T[];
   /** The complete personal pinned section, also present in `sessions`. */
-  pinned: Session[];
+  pinned: T[];
   /** True when the server omitted older pins from its bounded pinned section. */
   pinnedTruncated: boolean;
+  totals: SessionListTotals | null;
   nextCursor: string | null;
   loading: boolean;
   error: Error | null;
@@ -42,14 +49,27 @@ export type UseWorkspaceSessionsResult = {
 
 /** List the workspace's sessions — the data behind fleet and manager views. */
 export function useWorkspaceSessions(
+  options: UseWorkspaceSessionsOptions & { projection: "summary" },
+): UseWorkspaceSessionsResult<SessionListEntry>;
+export function useWorkspaceSessions(
+  options?: UseWorkspaceSessionsOptions & { projection?: undefined },
+): UseWorkspaceSessionsResult;
+export function useWorkspaceSessions(
+  options: UseWorkspaceSessionsOptions,
+): UseWorkspaceSessionsResult<Session | SessionListEntry>;
+export function useWorkspaceSessions(
   options: UseWorkspaceSessionsOptions = {},
-): UseWorkspaceSessionsResult {
+): UseWorkspaceSessionsResult<Session | SessionListEntry> {
   const { client, workspaceId } = useOpenGeni(options);
+  const projection = options.projection;
+  const includeTotals = options.includeTotals;
+  const needsYouOnly = options.needsYouOnly;
   const limit = options.limit;
   const parentSessionId = options.parentSessionId;
   const cursor = options.cursor;
   const search = options.search;
   const pinsOnly = options.pinsOnly;
+  const includePinned = options.includePinned;
   const archivedOnly = options.archivedOnly;
   const sortBy = options.sortBy;
   const archiveStatus = options.archiveStatus;
@@ -59,11 +79,15 @@ export function useWorkspaceSessions(
   const beginRead = options.beginRead;
   const queryKey = [
     workspaceId,
+    projection ?? "full",
+    includeTotals ? "totals" : "",
+    needsYouOnly ? "needs-you" : "",
     limit ?? "",
     parentSessionId === null ? "null" : (parentSessionId ?? ""),
     cursor ?? "",
     search ?? "",
     pinsOnly ? "1" : "",
+    includePinned === false ? "no-pins" : "",
     archivedOnly ? "archived" : "active",
     sortBy ?? "",
     archiveStatus ?? "",
@@ -76,17 +100,33 @@ export function useWorkspaceSessions(
   const load = useCallback(
     async (signal?: AbortSignal) => {
       const readGeneration = beginRead?.() ?? ++nextReadGeneration.current;
-      const page = await client.listSessionPage(workspaceId, {
+      const query = {
+        ...(includeTotals ? { includeTotals: true } : {}),
+        ...(needsYouOnly ? { needsYouOnly: true } : {}),
         ...(limit !== undefined ? { limit } : {}),
         ...(parentSessionId !== undefined ? { parentSessionId } : {}),
         ...(cursor !== undefined ? { cursor } : {}),
         ...(search !== undefined ? { search } : {}),
         ...(pinsOnly ? { pinsOnly: true } : {}),
+        ...(includePinned === false ? { includePinned: false } : {}),
         ...(archivedOnly ? { archivedOnly: true } : {}),
         ...(sortBy ? { sortBy } : {}),
         ...(archiveStatus ? { archiveStatus } : {}),
         signal,
-      });
+      };
+      const page =
+        projection === "summary"
+          ? client.listSessionSummaryPage
+            ? await client.listSessionSummaryPage(workspaceId, query)
+            : await client.listSessionPage(workspaceId, query).then(async (full) => {
+                const { sessionListEntry } = await import("@opengeni/sdk/session-list-entries");
+                return {
+                  ...full,
+                  pinned: full.pinned.map(sessionListEntry),
+                  sessions: full.sessions.map(sessionListEntry),
+                };
+              })
+          : await client.listSessionPage(workspaceId, query);
       return {
         queryKey,
         page,
@@ -98,11 +138,15 @@ export function useWorkspaceSessions(
       beginRead,
       client,
       workspaceId,
+      projection,
+      includeTotals,
+      needsYouOnly,
       limit,
       parentSessionId,
       cursor,
       search,
       pinsOnly,
+      includePinned,
       archivedOnly,
       sortBy,
       archiveStatus,
@@ -126,6 +170,7 @@ export function useWorkspaceSessions(
     sessions: [...pinned, ...ordinary],
     pinned,
     pinnedTruncated: page?.pinnedTruncated ?? false,
+    totals: page?.totals ?? null,
     nextCursor: page?.nextCursor ?? null,
     // `usePolledValue` clears the old data and starts the new request in an
     // effect. During that query-key transition render, its old loading flag

@@ -1821,3 +1821,114 @@ describe("canonical queue commands", () => {
     expect(draft).toMatchObject({ revision: 1, text: "preserve me" });
   });
 });
+
+test("Send freezes Claude's private pool and keyed replay preserves it across account rotation", async () => {
+  const {
+    createClaudeSubscriptionAccount,
+    setInitialActiveClaudeCredential,
+    disconnectClaudeSubscriptionAccountAndRepick,
+    materializeClaudeSubscriptionAccountForRun,
+  } = await import("../src/claude-subscription-accounts");
+  const { getSessionTurnClaudeProviderAccountAuthoritySnapshot } = await import("../src");
+  const value = await fixture(0),
+    workspaceId = value.grant.workspaceId!,
+    subjectId = value.grant.subjectId;
+  const [personal] = await shared.admin<
+    { id: string }[]
+  >`insert into workspaces (account_id,name) values (${value.grant.accountId},'Personal fixture') returning id`;
+  await shared.admin`insert into organization_memberships (account_id,subject_id,status,personal_workspace_id) values (${value.grant.accountId},${subjectId},'active',${personal!.id})`;
+  const encryptionKey = Buffer.alloc(32, 53);
+  const scope = {
+    accountId: value.grant.accountId,
+    workspaceId,
+    subjectId,
+    scope: "user" as const,
+    encryptionKey,
+  };
+  const connect = () => {
+    const providerAccountId = crypto.randomUUID();
+    return createClaudeSubscriptionAccount(client.db, {
+      ...scope,
+      providerAccountId,
+      label: null,
+      accountEmail: "owner@example.test",
+      planType: "claude_max",
+      expiresAt: null,
+      secret: {
+        version: 1,
+        token: "sk-ant-oat01-fixture-" + crypto.randomUUID(),
+        identity: { accountUuid: providerAccountId, deviceId: "b".repeat(64) },
+      },
+    });
+  };
+  const first = await connect();
+  await setInitialActiveClaudeCredential(client.db, {
+    ...scope,
+    credentialId: first.account.id,
+    authoritySnapshot: first.authoritySnapshot,
+  });
+  const command = {
+    accountId: value.grant.accountId,
+    workspaceId,
+    sessionId: value.session.id,
+    subjectId,
+    actor: value.actor,
+    operationKey: crypto.randomUUID(),
+    delivery: "send" as const,
+    text: "Synthetic private subscription work",
+    resources: [],
+    model: "scripted-model",
+    reasoningEffort: "low" as const,
+    reasoningEffortFallback: "medium" as const,
+    source: "user" as const,
+  };
+  const send = () =>
+    withWorkspaceSubjectRls(client.db, workspaceId, subjectId, (db) =>
+      db.transaction((tx) => submitHumanPromptInTransaction(tx as unknown as typeof db, command)),
+    );
+  const accepted = await send();
+  const snapshot = await getSessionTurnClaudeProviderAccountAuthoritySnapshot(
+    client.db,
+    workspaceId,
+    value.session.id,
+    accepted.turnId,
+  );
+  expect(snapshot).toEqual(first.authoritySnapshot);
+  await disconnectClaudeSubscriptionAccountAndRepick(client.db, {
+    ...scope,
+    credentialId: first.account.id,
+    authoritySnapshot: first.authoritySnapshot,
+  });
+  const second = await connect();
+  await setInitialActiveClaudeCredential(client.db, {
+    ...scope,
+    credentialId: second.account.id,
+    authoritySnapshot: second.authoritySnapshot,
+  });
+  // Account rotation stays within the accepted owner's pool; it does not
+  // replace that pool's authority with current caller selection.
+  expect(second.authoritySnapshot).toEqual(snapshot);
+  expect((await send()).turnId).toBe(accepted.turnId);
+  expect(
+    await getSessionTurnClaudeProviderAccountAuthoritySnapshot(
+      client.db,
+      workspaceId,
+      value.session.id,
+      accepted.turnId,
+    ),
+  ).toEqual(snapshot);
+  await expect(
+    materializeClaudeSubscriptionAccountForRun(client.db, {
+      ...scope,
+      credentialId: first.account.id,
+      authoritySnapshot: snapshot,
+    }),
+  ).rejects.toThrow();
+  expect(
+    await materializeClaudeSubscriptionAccountForRun(client.db, {
+      ...scope,
+      credentialId: second.account.id,
+      authoritySnapshot: snapshot,
+    }),
+  ).not.toBeNull();
+});

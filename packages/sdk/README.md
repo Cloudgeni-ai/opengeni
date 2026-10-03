@@ -127,12 +127,12 @@ still enforce current permissions. Existing isolated users need an explicit
 `updateExternalWorkspaceMember` to gain newly added permissions such as MCP attachment.
 
 The facade also accepts `agent` (identity, capabilities, instructions, renderer)
-and defaults its renderer to `"markdown"` when the server admits agent configuration.
-Only an implicit renderer retries once without `agent` on `422 agent_config_not_enabled`,
-and that refusal is cached per facade instance. This avoids a bootstrap request
-and supports older servers that cannot advertise admission. Explicit agent settings
-are never stripped: the 422 names `OPENGENI_AGENT_CONFIG_ADMISSION_ENABLED` for the
-deployment operator. The private default with a user now turns personal Knowledge
+and defaults its renderer to `"markdown"`. Current servers always admit agent
+configuration. For older servers that still gate it, only an implicit renderer
+retries once without `agent` on `422 agent_config_not_enabled`, and that refusal
+is cached per facade instance. Explicit agent settings are never stripped: the
+422 names `OPENGENI_AGENT_CONFIG_ADMISSION_ENABLED` for that older server's
+operator. The private default with a user now turns personal Knowledge
 on; pass `memory: false` to keep authoring off.
 Missing organization private-session enablement raises `OpenGeniSetupError`,
 with owner/admin API, SDK and web-app instructions; the proxy preserves that
@@ -169,6 +169,19 @@ workspace, and `false` disables listing. Archive and restore go through
 sends only `{ initialMessage, idempotencyKey }`, so it needs the
 `createSession` hook.
 
+`listSessionPage` includes personal pinned details by default. A caller with a
+separate `pinsOnly: true` read can pass `includePinned: false` on ordinary pages
+to avoid repeatedly loading those details. Ordinary pages still exclude pinned
+rows; `pinsOnly: true` and `includePinned: false` cannot be combined. Older API
+versions may ignore `includePinned` and return the default pin projection.
+
+For navigation lists, `listSessionSummaryPage` uses the same filters, ordering,
+pin rules and cursors, returning `SessionListEntry` records. Entries include
+display/rename titles, creator, lifecycle, personal state and hierarchy counts;
+prompts and execution configuration remain on `getSession`. Older APIs return
+full pages that the SDK projects locally. Unknown filters/cursors still fail
+explicitly rather than returning an unfiltered result.
+
 Every request calls `resolve`, then runs through `asUser(user, { source })`
 (there is no service-authority fallback) against exactly the resolved
 workspace. Only the native routes `OpenGeniProvider` and the conversation use
@@ -187,6 +200,38 @@ choices. `authorizeSession(sessionId, context)` adds a product-level session
 check on top of OpenGeni's own membership and visibility checks. Without
 `authorizeMutation`, only cross-site (`Sec-Fetch-Site`) mutations are refused,
 so cookie-authenticated hosts should pass their CSRF check.
+
+### Your own tools, as the signed-in user
+
+`toolServer` attaches your product's MCP endpoint to every session the
+`createSession` hook creates, with a short-lived token for the user `resolve`
+authenticated. The proxy refreshes it on every send, steer, submit, approval,
+and human-input answer. Your endpoint, built with any MCP library, verifies it:
+
+```ts
+createSessionProxyHandler(og, {
+  resolve,
+  createSession,
+  toolServer: {
+    url: "https://app.example.com/api/mcp", // public HTTPS (tunnel locally)
+    approvals: { ask: ["rename_post"] }, // the user approves each call first
+  },
+});
+
+// In the MCP route (Web Request, or an Express/Node request):
+import { ToolRequestError, verifyToolRequest } from "@opengeni/sdk/tool-auth";
+const { user, tenant, workspaceId } = await verifyToolRequest(request); // or ToolRequestError (401)
+```
+
+Scope every tool to the verified `user` and `tenant`; never trust ids the model
+sends; list write tools in `approvals.ask`. Tools act as the chat's creator, also
+in shared chats. Members need `mcp_servers:attach`. Tokens are HS256 JWTs signed
+with a key derived from `OPENGENI_API_KEY` (or the same `secret` on both sides),
+bound to the full tool URL by `aud` (set `OPENGENI_TOOL_SERVER_URL` to configure
+both sides at once), and valid for `ttlSeconds` (default 24 hours). Non-Node
+verifiers use the hex key from `deriveToolTokenKey()`, never the organization key;
+the format is documented in `src/tool-auth.ts`. See
+`examples/tool-server` for a runnable Express version.
 
 `beforeForwardMessage(message, context)` runs before every forwarded user
 message (send, steer, composer submit, and a browser-started create) and may
@@ -275,17 +320,40 @@ if (workspace.kind !== "shared") {
 The response is `{ workspace, created }`. Replays return the original nested
 workspace with `created: false`. For an organization key, `getAccessContext()`
 does not enumerate every workspace grant; call `listWorkspaces()` for the
-complete organization-workspace inventory.
+organization-workspace inventory allowed by the key's live scope.
 
 Organization key administration uses `listOrganizationApiKeys`,
-`createOrganizationApiKey`, and `deleteOrganizationApiKey`. The key token from a
+`getOrganizationApiKey`, `createOrganizationApiKey`, `updateOrganizationApiKey`,
+and `deleteOrganizationApiKey`. GET detail and PATCH return the raw `ApiKey`;
+creation returns `{ apiKey, token }`. The key token from a
 create response is shown once and must be stored in the backend's secret
 manager. `createOrganizationApiKey(organizationId, { name, access: "read" })`
 mints a read-only master key: it inventories shared workspaces and reads their
 sessions, events, and files, but cannot create sessions, send messages, or mint
-keys, and every key reports its tier as `apiKey.access`. Either tier can call
+keys. This legacy `access: "read"` tier is distinct from the broader explicit
+`read_only` preset, which includes every read/list/view/search permission
+except the secret-value reads `secrets:read` and `variable-sets:read`.
+
+Create or edit with `policy: { preset, permissions, workspaceScope }` for exact
+grants. `OrganizationAccessPreset` is `"read_only" | "full" | "custom"`;
+the label never adds permissions and the server recomputes it from the selected
+set. Explicit `full` selects every canonical non-deprecated permission; `custom`
+has no implicit grants or scope. Even `workspace:admin` grants no wildcard under
+an explicit policy. Scope is `{ kind: "all" }` (current and future shared
+workspaces) or `{ kind: "selected", workspaceIds }` (up to 500 unique same-org
+shared-workspace IDs; empty reaches none). Personal workspaces are always excluded.
+
+`updateOrganizationApiKey(organizationId, apiKeyId, { name?, description?, policy? })`
+requires at least one change; `description: null` clears it. Metadata-only edits
+preserve legacy stored permissions and wildcard semantics. A policy edit replaces
+the policy, transitions legacy keys to explicit semantics, and applies narrowing
+on the next request without rotating the token. Omitting policy at creation
+retains legacy `access`/`preset` inputs and the full legacy default.
+See [the canonical policy guide](../../docs/product-integration.md#explicit-organization-key-policies).
+
+Keys with session-read authority can call
 `listOrganizationSessions(organizationId, { limit, cursor, scopeSubjectId, status })`
-for one page of sessions across every shared workspace (each row carries its
+for one page of sessions across authorized shared workspaces (each row carries its
 `workspaceId`; private sessions and Personal workspaces never appear), or
 `iterateOrganizationSessions` to follow `nextCursor` to the end.
 

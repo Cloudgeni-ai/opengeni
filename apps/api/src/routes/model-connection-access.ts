@@ -17,6 +17,7 @@ import {
   updateModelConnectionAccess,
   getOrganizationAdministrationOverview,
   getXaiSubscriptionAccountAuthoritySnapshot,
+  getClaudeSubscriptionAccountAuthoritySnapshot,
   listOrganizationModelProviderCustomModels,
   getWorkspaceProviderApiKeyConnectionMetadata,
   type ModelConnectionTarget,
@@ -24,8 +25,16 @@ import {
 import type { Context, Hono } from "hono";
 import { HTTPException } from "hono/http-exception";
 import { z } from "zod";
-import { requireOrganizationCodexHuman, requireSameOriginBrowserMutation } from "./codex";
-import { managedCookieHuman, requireScopeMutation } from "./supergrok";
+import {
+  managedHumanOrAgent,
+  requireOrganizationCodexHuman,
+  requireSameOriginBrowserMutation,
+} from "./codex";
+import { requireScopeMutation } from "./supergrok";
+import {
+  requirePrivateSubscriptionHuman,
+  requireSubscriptionScopeMutation,
+} from "./subscription-pool-access";
 
 const Kind = z.enum([
   "codex",
@@ -54,7 +63,7 @@ export function registerModelConnectionAccessRoutes(app: Hono, deps: ApiRouteDep
         throw new HTTPException(404, { message: "Claude subscriptions are not enabled" });
       const scopeId = z.string().uuid().parse(c.req.param("scopeId"));
       let connectionId = c.req.param("connectionId")!;
-      if (kind === "codex" || kind === "supergrok")
+      if (kind === "codex" || kind === "supergrok" || kind === "claude_subscription")
         connectionId = z.string().uuid().parse(connectionId);
       if (scope === "organizations") {
         if (mutate) requireSameOriginBrowserMutation(c, deps);
@@ -76,20 +85,31 @@ export function registerModelConnectionAccessRoutes(app: Hono, deps: ApiRouteDep
         });
         if (!snapshot) throw new HTTPException(404, { message: "Subscription not found" });
         if (snapshot.scope === "user") {
-          const human = await managedCookieHuman(c, deps);
+          const human = await managedHumanOrAgent(c, deps);
           if (!human || human.subjectId !== grant.subjectId)
             throw new HTTPException(403, {
               message: "Subscription owner browser session required",
             });
         }
         if (mutate) await requireScopeMutation(c, deps, scopeId, snapshot.scope);
+      } else if (kind === "claude_subscription") {
+        const snapshot = await getClaudeSubscriptionAccountAuthoritySnapshot(deps.db, {
+          workspaceId: scopeId,
+          subjectId: grant.subjectId,
+          credentialId: connectionId,
+        });
+        if (!snapshot) throw new HTTPException(404, { message: "Subscription not found" });
+        if (snapshot.scope === "user") {
+          const human = await requirePrivateSubscriptionHuman(c, deps, scopeId, "Claude");
+          if (human.subjectId !== grant.subjectId)
+            throw new HTTPException(403, { message: "Subscription owner required" });
+        }
+        if (mutate) {
+          if (!c.req.header("authorization")) requireSameOriginBrowserMutation(c, deps);
+          await requireSubscriptionScopeMutation(c, deps, scopeId, snapshot.scope, "Claude");
+        }
       } else if (mutate) await requireAccessGrant(c, deps, scopeId, "workspace:admin");
-      if (
-        kind === "vercel_gateway" ||
-        kind === "openrouter" ||
-        kind === "anthropic" ||
-        kind === "claude_subscription"
-      ) {
+      if (kind === "vercel_gateway" || kind === "openrouter" || kind === "anthropic") {
         const metadata = await getWorkspaceProviderApiKeyConnectionMetadata(deps.db, scopeId, kind);
         if (!metadata || (connectionId !== "current" && metadata.connectionId !== connectionId))
           throw new HTTPException(404, { message: "Connection not found" });
@@ -157,7 +177,9 @@ export function registerModelConnectionAccessRoutes(app: Hono, deps: ApiRouteDep
             .map(({ id, label }) => ({ id, label })),
           personalWorkspacesSupported:
             connection.workspaceId === null &&
-            (connection.kind === "codex" || connection.kind === "supergrok"),
+            (connection.kind === "codex" ||
+              connection.kind === "supergrok" ||
+              connection.kind === "claude_subscription"),
         }),
       );
     });

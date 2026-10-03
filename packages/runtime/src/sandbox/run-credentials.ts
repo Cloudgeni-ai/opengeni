@@ -18,7 +18,10 @@ const MAX_CREDENTIAL_FILES = 64;
 const MAX_CREDENTIAL_FILE_BYTES = 1024 * 1024;
 const MAX_TOTAL_MATERIAL_BYTES = 4 * 1024 * 1024;
 const MAX_AUTH_NEEDED_NOTICES = 32;
-const WRITE_CHUNK_BYTES = 24 * 1024;
+// Encoded chunks must leave room for both the cancellation shell and the SDK
+// run-as wrapper, each of which repeats and quotes the command. Keep chunks
+// base64-aligned and bounded without dropping any credential bytes.
+const WRITE_CHUNK_BYTES = 1536;
 const COMMAND_OK_MARKER = "__OPENGENI_RUN_CREDENTIAL_COMMAND_OK__";
 const AUTH_NEEDED_REASONS = new Set([
   "missing_connection",
@@ -496,25 +499,52 @@ async function runCredentialCommand(
 
 async function writeCredentialFile(
   session: RunCredentialCommandSession,
-  path: string,
+  directory: string,
+  relativePath: string,
   content: string,
   commandRunner?: RunCredentialCommandRunner,
 ): Promise<void> {
-  await runCredentialCommand(session, `: > ${shellQuote(path)}`, commandRunner);
+  await runCredentialCommand(
+    session,
+    credentialFileCommand(directory, relativePath, ': > "$_opengeni_credential_path"'),
+    commandRunner,
+  );
   const encoded = base64(content);
   for (let offset = 0; offset < encoded.length; offset += WRITE_CHUNK_BYTES) {
     const chunk = encoded.slice(offset, offset + WRITE_CHUNK_BYTES);
     await runCredentialCommand(
       session,
-      `printf %s ${shellQuote(chunk)} | ${portableBase64DecodeCommand()} >> ${shellQuote(path)}`,
+      credentialFileCommand(
+        directory,
+        relativePath,
+        `printf %s ${shellQuote(chunk)} | ${portableBase64DecodeCommand()} >> "$_opengeni_credential_path"`,
+      ),
       commandRunner,
     );
   }
   await runCredentialCommand(
     session,
-    `[ "$(wc -c < ${shellQuote(path)} | tr -d '[:space:]')" = ${shellQuote(String(byteLength(content)))} ]`,
+    credentialFileCommand(
+      directory,
+      relativePath,
+      `[ "$(wc -c < "$_opengeni_credential_path" | tr -d '[:space:]')" = ${shellQuote(String(byteLength(content)))} ]`,
+    ),
     commandRunner,
   );
+}
+
+function credentialFileCommand(directory: string, relativePath: string, command: string): string {
+  // Avoid multiplying accepted path quotes through nested shell wrappers. The
+  // existing outer Bash decodes only literal UTF-8 bytes, including trailing
+  // newlines, without evaluating host-provided text or invoking a path decoder.
+  const escapedPath = [...Buffer.from(relativePath, "utf8")]
+    .map((byte) => `\\x${byte.toString(16).padStart(2, "0")}`)
+    .join("");
+  return [
+    `printf -v _opengeni_credential_path %b ${shellQuote(escapedPath)}`,
+    `_opengeni_credential_path=${shellQuote(directory)}/"$_opengeni_credential_path"`,
+    command,
+  ].join("\n");
 }
 
 export type MaterializeRunCredentialsOptions = {
@@ -574,7 +604,8 @@ export async function materializeRunCredentials(
   ];
   await writeCredentialFile(
     session,
-    `${stage}/env`,
+    stage,
+    "env",
     environmentLines.length > 0 ? `${environmentLines.join("\n")}\n` : "",
     options.commandRunner,
   );
@@ -585,13 +616,20 @@ export async function materializeRunCredentials(
   );
 
   for (const file of material.files) {
-    const target = `${stage}/files/${file.path}`;
-    const parent = target.slice(0, target.lastIndexOf("/"));
-    await runCredentialCommand(session, `mkdir -p -- ${shellQuote(parent)}`, options.commandRunner);
-    await writeCredentialFile(session, target, file.content, options.commandRunner);
+    const directory = `${stage}/files`;
     await runCredentialCommand(
       session,
-      `chmod -- ${shellQuote(file.mode ?? "0600")} ${shellQuote(target)}`,
+      credentialFileCommand(directory, file.path, 'mkdir -p -- "${_opengeni_credential_path%/*}"'),
+      options.commandRunner,
+    );
+    await writeCredentialFile(session, directory, file.path, file.content, options.commandRunner);
+    await runCredentialCommand(
+      session,
+      credentialFileCommand(
+        directory,
+        file.path,
+        `chmod -- ${shellQuote(file.mode ?? "0600")} "$_opengeni_credential_path"`,
+      ),
       options.commandRunner,
     );
   }
@@ -599,25 +637,30 @@ export async function materializeRunCredentials(
   await runCredentialCommand(
     session,
     [
+      // Bind validated identifiers once rather than repeatedly expanding long
+      // paths through cancellation and SDK run-as shell quoting.
+      `_opengeni_credential_root=${shellQuote(root)}`,
+      `_opengeni_credential_version_name=${shellQuote(versionName)}`,
+      `_opengeni_credential_prefix=${shellQuote(prefix)}`,
       ...pointerLockAcquireCommands(root),
-      `previous=$(cat -- ${shellQuote(`${root}/current`)} 2>/dev/null || :)`,
-      `mv -- ${shellQuote(stage)} ${shellQuote(version)}`,
-      `printf '%s\\n' ${shellQuote(versionName)} > ${shellQuote(`${root}/.next`)}`,
-      `mv -f -- ${shellQuote(`${root}/.next`)} ${shellQuote(`${root}/current`)}`,
+      'previous=$(cat -- "$_opengeni_credential_root/current" 2>/dev/null || :)',
+      'mv -- "$_opengeni_credential_root/versions/.stage-$_opengeni_credential_version_name" "$_opengeni_credential_root/versions/$_opengeni_credential_version_name"',
+      'printf \'%s\\n\' "$_opengeni_credential_version_name" > "$_opengeni_credential_root/.next"',
+      'mv -f -- "$_opengeni_credential_root/.next" "$_opengeni_credential_root/current"',
       ...(options.prunePreviousGenerations
         ? [
-            `find ${shellQuote(`${root}/versions`)} -mindepth 1 -maxdepth 1 ! -name ${shellQuote(versionName)} -exec rm -rf -- {} +`,
+            'find "$_opengeni_credential_root/versions" -mindepth 1 -maxdepth 1 ! -name "$_opengeni_credential_version_name" -exec rm -rf -- {} +',
           ]
         : options.pruneOtherAttempts
           ? [
-              `find ${shellQuote(`${root}/versions`)} -mindepth 1 -maxdepth 1 ! -name ${shellQuote(`${attemptId}-${options.executionGeneration}-*`)} -exec rm -rf -- {} +`,
+              'find "$_opengeni_credential_root/versions" -mindepth 1 -maxdepth 1 ! -name "${_opengeni_credential_prefix}*" -exec rm -rf -- {} +',
             ]
           : options.pruneSupersededGenerations
             ? [
-                `for candidate in ${shellQuote(`${root}/versions`)}/${prefix}*; do`,
+                'for candidate in "$_opengeni_credential_root/versions/$_opengeni_credential_prefix"*; do',
                 `  [ -e "$candidate" ] || continue`,
                 `  name=\${candidate##*/}`,
-                `  [ "$name" = ${shellQuote(versionName)} ] || [ "$name" = "$previous" ] || rm -rf -- "$candidate"`,
+                '  [ "$name" = "$_opengeni_credential_version_name" ] || [ "$name" = "$previous" ] || rm -rf -- "$candidate"',
                 "done",
               ]
             : []),
@@ -713,21 +756,23 @@ export function withRunCredentialEnvironment(cmd: string, sessionId: string): st
 
 /**
  * Preserve the provider session identity/capabilities while decorating only
- * command creation. Non-command methods stay bound to the original instance.
+ * command creation. Trailing invocation options stay unchanged; non-command
+ * methods stay bound to the original instance.
  */
 export function withRunCredentialsSession<T extends object>(session: T, sessionId: string): T {
   return new Proxy(session, {
     get(target, property, receiver) {
       if (property === "exec" || property === "execCommand") {
         const command = Reflect.get(target, property, target) as
-          | ((args: ExecCommandArgs) => Promise<unknown>)
+          | ((args: ExecCommandArgs, ...callArgs: unknown[]) => Promise<unknown>)
           | undefined;
         if (!command) return undefined;
-        return async (args: ExecCommandArgs) =>
-          await command.call(target, {
-            ...args,
-            cmd: withRunCredentialEnvironment(args.cmd, sessionId),
-          });
+        return async (args: ExecCommandArgs, ...callArgs: unknown[]) =>
+          await command.call(
+            target,
+            { ...args, cmd: withRunCredentialEnvironment(args.cmd, sessionId) },
+            ...callArgs,
+          );
       }
       const value = Reflect.get(target, property, receiver) as unknown;
       return typeof value === "function" ? value.bind(target) : value;

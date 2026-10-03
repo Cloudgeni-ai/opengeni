@@ -82,28 +82,16 @@ describe("shared skills-only OpenGeni package", () => {
     );
   });
 
-  test("Bendik userConfig required semantics and shared metadata are preserved", () => {
+  test("plugin metadata is shared and needs no install-time settings", () => {
     const manifest = json("plugins/opengeni/.claude-plugin/plugin.json");
     expect(manifest.displayName).toBe("OpenGeni");
-    expect(manifest.author).toEqual({ name: "OpenGeni", url: "https://opengeni.ai" });
-    expect(manifest.homepage).toBe("https://docs.opengeni.ai/guides/coding-agents");
-    expect(manifest.userConfig).toEqual({
-      base_url: {
-        type: "string",
-        title: "OpenGeni URL",
-        description:
-          "Origin of your OpenGeni deployment, without a trailing slash. Use https://app.opengeni.ai for OpenGeni Cloud.",
-        default: "https://app.opengeni.ai",
-        required: true,
-      },
-      workspace_id: {
-        type: "string",
-        title: "Workspace ID",
-        description:
-          "The UUID after /workspaces/ in the OpenGeni address bar when the workspace you want to use is open.",
-        required: true,
-      },
+    expect(manifest.author).toEqual({
+      name: "OpenGeni",
+      url: "https://opengeni.ai",
     });
+    expect(manifest.homepage).toBe("https://docs.opengeni.ai/guides/coding-agents");
+    // The skills read OPENGENI_* from the project's env; no plugin settings are required.
+    expect(manifest.userConfig).toBeUndefined();
   });
 
   test("all catalogs use the same identity and nested repository-relative source", () => {

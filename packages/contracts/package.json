@@ -1,6 +1,6 @@
 {
   "name": "@opengeni/contracts",
-  "version": "5.6.0",
+  "version": "5.7.0",
   "description": "Shared zod schemas and wire-contract types for the OpenGeni API.",
   "license": "Apache-2.0",
   "repository": {
@@ -58,6 +58,10 @@
       "types": "./src/external-identities.ts",
       "default": "./src/external-identities.ts"
     },
+    "./organization-access": {
+      "types": "./src/organization-access.ts",
+      "default": "./src/organization-access.ts"
+    },
     "./connect": {
       "types": "./src/connect.ts",
       "default": "./src/connect.ts"
@@ -66,6 +70,14 @@
       "types": "./src/site-session-http.ts",
       "default": "./src/site-session-http.ts"
     },
+    "./organization-model-usage": {
+      "types": "./src/organization-model-usage.ts",
+      "default": "./src/organization-model-usage.ts"
+    },
+    "./insights-usage": {
+      "types": "./src/insights-usage.ts",
+      "default": "./src/insights-usage.ts"
+    },
     ".": {
       "types": "./src/index.ts",
       "default": "./src/index.ts"
@@ -73,6 +85,10 @@
     "./slack-bot-scopes": {
       "types": "./src/slack-bot-scopes.ts",
       "default": "./src/slack-bot-scopes.ts"
+    },
+    "./slack-rest-mcp": {
+      "types": "./src/slack-rest-mcp.ts",
+      "default": "./src/slack-rest-mcp.ts"
     },
     "./google-drive": {
       "types": "./src/google-drive.ts",
@@ -93,6 +109,10 @@
     "./atlassian": {
       "types": "./src/atlassian.ts",
       "default": "./src/atlassian.ts"
+    },
+    "./atlassian-native-retirement": {
+      "types": "./src/atlassian-native-retirement.ts",
+      "default": "./src/atlassian-native-retirement.ts"
     },
     "./connector-destinations": {
       "types": "./src/connector-destinations.ts",
@@ -141,6 +161,10 @@
     "./model-picker-order": {
       "types": "./src/model-picker-order.ts",
       "default": "./src/model-picker-order.ts"
+    },
+    "./model-display": {
+      "types": "./src/model-display.ts",
+      "default": "./src/model-display.ts"
     },
     "./workspace-integration-wire": {
       "types": "./src/workspace-integration-wire.ts",
@@ -201,6 +225,10 @@
     "./presentation-artifact-query": {
       "types": "./src/presentation-artifact-query.ts",
       "default": "./src/presentation-artifact-query.ts"
+    },
+    "./session-list-entries": {
+      "types": "./src/session-list-entries.ts",
+      "default": "./src/session-list-entries.ts"
     }
   },
   "publishConfig": {

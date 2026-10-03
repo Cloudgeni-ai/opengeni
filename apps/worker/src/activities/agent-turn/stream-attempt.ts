@@ -108,6 +108,7 @@ import {
   safeErrorDiagnostic,
   compactionFailureReasonFromError,
   compactionFailureTurnEventPayload,
+  modelPreparationFailureEventPayload,
   isCompactionSummaryFailure,
   PostCompactionContinuationEmptyError,
   shouldRecoverCompactionProviderFailure,
@@ -947,6 +948,12 @@ export async function runTurnStreamAttempt(
           ...(!providerPublishesNativeRequestEvents
             ? {
                 onModelTransportStarted: recordFallbackProviderDispatchAtWire,
+                onModelTransportDispatched: (clock) => {
+                  eventing.initialModelWireDispatch.record(
+                    { provider: streamProvider, dispatchId },
+                    clock,
+                  );
+                },
               }
             : {}),
           ...(eventing.toolCancellationFenceRef.current
@@ -1028,6 +1035,7 @@ export async function runTurnStreamAttempt(
             attemptId: input.attemptId,
             dispatchId,
             executionGeneration: attempt.executionGeneration,
+            ...eventing.initialModelWireDispatch.payload({ provider: streamProvider, dispatchId }),
           },
         },
       ]);
@@ -1114,6 +1122,10 @@ export async function runTurnStreamAttempt(
                   attemptId: input.attemptId,
                   dispatchId,
                   executionGeneration: attempt.executionGeneration,
+                  ...eventing.initialModelWireDispatch.payload({
+                    provider: streamProvider,
+                    dispatchId,
+                  }),
                 },
               },
             ]);
@@ -1448,6 +1460,10 @@ export async function runTurnStreamAttempt(
               attemptId: input.attemptId,
               dispatchId,
               executionGeneration: attempt.executionGeneration,
+              ...eventing.initialModelWireDispatch.payload({
+                provider: streamProvider,
+                dispatchId,
+              }),
             },
           },
         ]);
@@ -1472,10 +1488,7 @@ export async function runTurnStreamAttempt(
         await eventing.publish!([
           {
             type: "turn.startup.phase.failed",
-            payload: {
-              phase: "model_preparation",
-              durationMs: Math.round(durationMs),
-            },
+            payload: modelPreparationFailureEventPayload(error, durationMs),
           },
         ]);
       }

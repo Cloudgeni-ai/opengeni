@@ -1,7 +1,13 @@
+import {
+  normalizeSlackScopes,
+  OPENGENI_SLACK_REST_USER_SCOPES,
+  slackRestMcpToolsForScopes,
+} from "@opengeni/contracts/slack-rest-mcp";
 import { OPENGENI_PERSONAL_SLACK_MCP_URL, type ConnectionOwnership } from "@opengeni/contracts";
 import type { Settings } from "@opengeni/config";
 import { HTTPException } from "hono/http-exception";
 import { z } from "zod";
+import { GMAIL_REST_MCP_TOOLS } from "@opengeni/runtime/gmail-rest-mcp";
 import { canonicalProviderDomain } from "./provider-domain";
 
 /**
@@ -80,8 +86,10 @@ export type OAuthProviderProfile = {
   requireExactMcpUrl?: { url: string; message: string };
   /** Deployment-managed client credentials must be configured (503 otherwise). */
   requireDeploymentClient?: { key: DeploymentManagedClientKey; message: string };
-  /** Suggested ownership; an explicit user choice always wins. */
+  /** Suggested ownership; explicit choices remain subject to requiredOwnership. */
   defaultOwnership?: ConnectionOwnership;
+  /** Built-in-only ownership restriction, including old reconnect/callback state. */
+  requiredOwnership?: { ownership: ConnectionOwnership; message: string };
   /** Bind reconnect/dedupe to the exact mcpUrl, not just the provider domain. */
   exactMcpBinding: boolean;
   /** How an existing connection is chosen for reconnect coalescing. */
@@ -105,6 +113,27 @@ export type OAuthProviderProfile = {
   extraAuthorizeParams?: Readonly<Record<string, string>>;
   /** Exact scope override; the caller can never widen past it. */
   requestedScopes?: readonly string[];
+  /** Reviewed local bridge grant normalization and token verification. Catalog profiles cannot supply code. */
+  normalizeGrantedScopes?: (scopes: readonly string[] | string) => string[];
+  reportedScopesRequired?: boolean;
+  /** Built-in durable API bridges may refuse a new grant without offline access. */
+  freshRefreshTokenRequired?: boolean;
+  /** The reviewed bridge exposes one tool contract, not a partial-scope variant. */
+  fullRequestedScopesRequired?: boolean;
+  /** Built-in web OAuth clients must use a configured secret and provider-supported authentication. */
+  confidentialClientRequired?: boolean;
+  /** Built-in API bridge discovery; catalog metadata cannot redirect this seam. */
+  providerOAuthDiscovery?: { issuer: string; metadataUrl: string };
+  localToolVerification?: {
+    url: string;
+    method?: "GET" | "POST";
+    /** An API bridge may require a verified account before accepting a grant. */
+    required?: boolean;
+    /** Distinguish a rejected OAuth grant from a temporary verification failure. */
+    isRejectedGrant?: (payload: Record<string, unknown>) => boolean;
+    validateIdentity: (payload: Record<string, unknown>) => Record<string, string>;
+    toolsForScopes: (scopes: readonly string[]) => Array<{ name: string; description?: string }>;
+  };
 };
 
 export const DEFAULT_OAUTH_PROFILE: OAuthProviderProfile = {
@@ -144,12 +173,42 @@ const HOSTED_SLACK_PROFILE: OAuthProviderProfile = {
     skipInLocalTest: true,
   },
   sendResourceParameter: true,
+  requestedScopes: OPENGENI_SLACK_REST_USER_SCOPES,
+  normalizeGrantedScopes: normalizeSlackScopes,
+  reportedScopesRequired: true,
+  localToolVerification: {
+    url: "https://slack.com/api/auth.test",
+    isRejectedGrant: (payload) =>
+      payload.ok === false &&
+      ["invalid_auth", "not_authed", "token_revoked", "account_inactive", "token_expired"].includes(
+        typeof payload.error === "string" ? payload.error : "",
+      ),
+    validateIdentity: (payload) => {
+      if (
+        payload.ok !== true ||
+        typeof payload.team_id !== "string" ||
+        !payload.team_id ||
+        typeof payload.user_id !== "string" ||
+        !payload.user_id ||
+        payload.bot_id
+      ) {
+        throw new Error("Slack account verification failed");
+      }
+      return { slackTeamId: payload.team_id, slackUserId: payload.user_id };
+    },
+    toolsForScopes: slackRestMcpToolsForScopes,
+  },
 };
 
 const OFFICIAL_GMAIL_PROFILE: OAuthProviderProfile = {
   key: "official-gmail",
   match: { mcpUrls: [OFFICIAL_GMAIL_MCP_URL] },
+  requireExactMcpUrl: {
+    url: OFFICIAL_GMAIL_MCP_URL,
+    message: `Gmail OAuth must use ${OFFICIAL_GMAIL_MCP_URL}`,
+  },
   defaultOwnership: "personal",
+  requiredOwnership: { ownership: "personal", message: "Gmail connections must be personal-owned" },
   exactMcpBinding: true,
   connectionSelection: "first_active",
   authorizationServer: {
@@ -176,6 +235,41 @@ const OFFICIAL_GMAIL_PROFILE: OAuthProviderProfile = {
   // The Gmail PRM advertises broader grants, including full-mail access. The
   // reviewed connector never lets a caller widen the capability contract.
   requestedScopes: OFFICIAL_GMAIL_MCP_SCOPES,
+  reportedScopesRequired: true,
+  freshRefreshTokenRequired: true,
+  fullRequestedScopesRequired: true,
+  confidentialClientRequired: true,
+  providerOAuthDiscovery: {
+    issuer: GOOGLE_OAUTH_ISSUER_ORIGIN,
+    metadataUrl: `${GOOGLE_OAUTH_ISSUER_ORIGIN}/.well-known/openid-configuration`,
+  },
+  localToolVerification: {
+    url: "https://gmail.googleapis.com/gmail/v1/users/me/profile",
+    method: "GET",
+    required: true,
+    validateIdentity: (payload) => {
+      if (
+        typeof payload.emailAddress !== "string" ||
+        !/^[^\s@]+@[^\s@]+$/u.test(payload.emailAddress)
+      ) {
+        throw new Error("Gmail account verification failed");
+      }
+      return { gmailEmail: payload.emailAddress };
+    },
+    toolsForScopes: (scopes) => {
+      const granted = new Set(scopes);
+      const read = granted.has(OFFICIAL_GMAIL_MCP_SCOPES[0]);
+      const compose = granted.has(OFFICIAL_GMAIL_MCP_SCOPES[1]);
+      const modify = granted.has(OFFICIAL_GMAIL_MCP_SCOPES[2]);
+      return GMAIL_REST_MCP_TOOLS.filter((tool) => {
+        if (["create_draft", "send_message", "send_draft"].includes(tool.name))
+          return compose || modify;
+        if (tool.name === "list_drafts") return read || compose || modify;
+        if (/^(?:label|unlabel)_/u.test(tool.name)) return modify;
+        return read || modify;
+      }).map(({ name, description }) => ({ name, ...(description ? { description } : {}) }));
+    },
+  },
 };
 
 const BUILT_IN_OAUTH_PROFILES: readonly OAuthProviderProfile[] = [

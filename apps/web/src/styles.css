@@ -75,6 +75,19 @@
   --color-status-cancelled: var(--og-color-status-cancelled);
   --color-danger: var(--og-color-danger);
 
+  /* Data visualization (Insights). Token classes, then series in fixed order.
+     Validated with the dataviz palette checks against both canvases. */
+  --color-chart-input: var(--og-chart-input);
+  --color-chart-cache-read: var(--og-chart-cache-read);
+  --color-chart-cache-write: var(--og-chart-cache-write);
+  --color-chart-output: var(--og-chart-output);
+  --color-chart-1: var(--og-chart-1);
+  --color-chart-2: var(--og-chart-2);
+  --color-chart-3: var(--og-chart-3);
+  --color-chart-4: var(--og-chart-4);
+  --color-chart-5: var(--og-chart-5);
+  --color-chart-6: var(--og-chart-6);
+
   /* shadcn compatibility — map canonical token names to ours */
   --color-background: var(--color-bg);
   --color-foreground: var(--color-fg);
@@ -137,6 +150,35 @@
 
 [data-og-theme="light"] {
   color-scheme: light;
+}
+
+/* Chart palette: dark is the default canvas; light re-steps the same hues. */
+:root,
+[data-og-theme="dark"] {
+  --og-chart-input: #3987e5;
+  --og-chart-cache-read: #199e70;
+  --og-chart-cache-write: #9085e9;
+  --og-chart-output: #d95926;
+  --og-chart-1: #3987e5;
+  --og-chart-2: #d95926;
+  --og-chart-3: #199e70;
+  --og-chart-4: #c98500;
+  --og-chart-5: #d55181;
+  --og-chart-6: #9085e9;
+}
+
+[data-og-theme="light"],
+.og-light {
+  --og-chart-input: #2a78d6;
+  --og-chart-cache-read: #1baf7a;
+  --og-chart-cache-write: #4a3aa7;
+  --og-chart-output: #eb6834;
+  --og-chart-1: #2a78d6;
+  --og-chart-2: #eb6834;
+  --og-chart-3: #1baf7a;
+  --og-chart-4: #eda100;
+  --og-chart-5: #e87ba4;
+  --og-chart-6: #4a3aa7;
 }
 
 html,

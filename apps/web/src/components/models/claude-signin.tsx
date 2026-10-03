@@ -1,4 +1,9 @@
 import { reserveBrowserConnectNavigation } from "@opengeni/connect";
+import {
+  beginIntegrationConnect,
+  integrationConnectErrorOutcome,
+  type IntegrationConnectTracker,
+} from "@/lib/integration-connect-analytics";
 import { OpenGeniApiError, type ClaudeSubscriptionOAuthStartResponse } from "@opengeni/sdk";
 import { useEffect, useRef, useState } from "react";
 import type { ProviderConnectionView } from "../ai-gateway-connection";
@@ -8,6 +13,7 @@ import { Field, FieldStack } from "../ui/field";
 import { SecretInput } from "../ui/secret-field";
 import { ModelsFormPage, ProviderTile } from "./models-ui";
 import { ClaudeTokenInstructions } from "./claude-setup";
+import { SubscriptionConnectScope } from "./subscription-connect-scope";
 
 function recovered(key: string): ClaudeSubscriptionOAuthStartResponse | null {
   try {
@@ -39,21 +45,39 @@ export function ClaudeSignInPage({
   fields,
   blockedReason,
   afterSave,
+  accountPool = false,
+  connectionScope = "workspace",
+  reconnectAccountId,
+  reconnectCredentialVersion,
+  scopeChoice,
 }: {
-  state: ProviderConnectionView;
+  state: Pick<
+    ProviderConnectionView,
+    | "accessTarget"
+    | "organization"
+    | "connected"
+    | "canManageConnection"
+    | "saveKey"
+    | "refreshConnection"
+  >;
   onClose(): void;
-  onConnected(): void;
+  onConnected(accountId?: string): void;
   footerStart?: React.ReactNode;
   /** Fields above the sign-in, such as which workspaces can use it. */
   fields?: React.ReactNode;
   /** Why it can't be connected yet (a choice above is incomplete). */
   blockedReason?: string | null | undefined;
   /** Runs once the subscription is saved, before its page opens (the form stays pending). */
-  afterSave?: (() => Promise<void>) | undefined;
+  afterSave?: ((accountId?: string) => Promise<void>) | undefined;
+  accountPool?: boolean;
+  connectionScope?: "workspace" | "user";
+  reconnectAccountId?: string | undefined;
+  reconnectCredentialVersion?: number | undefined;
+  scopeChoice?: { scopeName: string; onChange(value: "workspace" | "user"): void } | undefined;
 }) {
   const target = state.accessTarget;
   const scopeId = target.organizationId ?? target.workspaceId!;
-  const storageKey = `opengeni.claude-signin:${state.organization ? "organization" : "workspace"}:${scopeId}`;
+  const storageKey = `opengeni.claude-signin:${state.organization ? "organization" : "workspace"}:${scopeId}${accountPool ? ":" + connectionScope + ":" + (reconnectAccountId ?? "add") : ""}`;
   const [attempt, setAttempt] = useState(() => recovered(storageKey));
   const [code, setCode] = useState("");
   const [token, setToken] = useState("");
@@ -61,7 +85,10 @@ export function ClaudeSignInPage({
   const [pending, setPending] = useState(false);
   const active = useRef(true);
   const popup = useRef<{ close(): void } | null>(null);
+  // Consent-gated connect journey for the Claude subscription sign-in.
+  const journey = useRef<IntegrationConnectTracker | null>(null);
   const codeInput = useRef<HTMLInputElement>(null);
+  const savedAccountId = useRef<string | undefined>(undefined);
   useEffect(() => {
     active.current = true;
     return () => {
@@ -112,9 +139,10 @@ export function ClaudeSignInPage({
         (legacy ? !token.trim() : Boolean(attempt && !code.trim()))
       }
       disabledReason={
-        state.canManageConnection
-          ? (blockedReason ?? undefined)
-          : "Only people who can manage connections can connect Claude."
+        blockedReason ??
+        (state.canManageConnection
+          ? undefined
+          : "Only people who can manage connections can connect Claude.")
       }
       footerStart={
         footerStart ??
@@ -124,10 +152,35 @@ export function ClaudeSignInPage({
       }
       onSubmit={async () => {
         if (legacy) {
-          const saved = await state.saveKey(token);
+          const connected = accountPool
+            ? await (state.organization
+                ? target.client.connectOrganizationClaudeSubscriptionSetupToken(scopeId, {
+                    token,
+                    ...(reconnectAccountId
+                      ? {
+                          reconnectAccountId,
+                          expectedCredentialVersion: reconnectCredentialVersion,
+                        }
+                      : {}),
+                  })
+                : target.client.connectClaudeSubscriptionSetupToken(scopeId, {
+                    token,
+                    scope: connectionScope,
+                    ...(reconnectAccountId
+                      ? {
+                          reconnectAccountId,
+                          expectedCredentialVersion: reconnectCredentialVersion,
+                        }
+                      : {}),
+                  }))
+            : null;
+          if (connected) savedAccountId.current = connected.accountId;
+          const saved = connected ? true : await state.saveKey(token);
+          if (!active.current) return false;
           if (saved) {
             reset();
-            await afterSave?.();
+            if (accountPool) await state.refreshConnection();
+            await afterSave?.(savedAccountId.current);
           }
           return saved;
         }
@@ -135,13 +188,26 @@ export function ClaudeSignInPage({
           const navigation = reserveBrowserConnectNavigation(window);
           try {
             const started = state.organization
-              ? await target.client.startOrganizationClaudeSubscriptionOAuth(scopeId)
-              : await target.client.startWorkspaceClaudeSubscriptionOAuth(scopeId);
+              ? await target.client.startOrganizationClaudeSubscriptionOAuth(
+                  scopeId,
+                  reconnectAccountId ? { reconnectAccountId } : {},
+                )
+              : await target.client.startWorkspaceClaudeSubscriptionOAuth(
+                  scopeId,
+                  accountPool
+                    ? {
+                        scope: connectionScope,
+                        ...(reconnectAccountId ? { reconnectAccountId } : {}),
+                      }
+                    : {},
+                );
             if (!active.current) {
               navigation.close();
               return false;
             }
             remember(started);
+            journey.current?.finish("abandoned");
+            journey.current = beginIntegrationConnect("claude_subscription", "oauth");
             popup.current = navigation.navigation.openPopup(started.authorizationUrl);
             return false;
           } catch (error) {
@@ -155,26 +221,39 @@ export function ClaudeSignInPage({
         }
         const request = { attemptId: attempt.attemptId, code: code.trim() };
         try {
-          await (state.organization
+          const connected = await (state.organization
             ? target.client.completeOrganizationClaudeSubscriptionOAuth(scopeId, request)
             : target.client.completeWorkspaceClaudeSubscriptionOAuth(scopeId, request));
+          savedAccountId.current = connected.accountId;
         } catch (error) {
           if (error instanceof OpenGeniApiError && [403, 409, 410, 502].includes(error.status))
             reset();
+          journey.current?.finish(integrationConnectErrorOutcome(error));
+          journey.current = null;
           throw error;
         }
+        journey.current?.finish("connected");
+        journey.current = null;
         reset();
         if (!active.current) return false;
         await state.refreshConnection();
-        await afterSave?.();
+        await afterSave?.(savedAccountId.current);
         return true;
       }}
       onSubmitted={() => {
-        if (active.current) onConnected();
+        if (active.current) onConnected(savedAccountId.current);
       }}
     >
       <FieldStack>
         {fields}
+        {scopeChoice ? (
+          <SubscriptionConnectScope
+            value={connectionScope}
+            onChange={scopeChoice.onChange}
+            scopeName={scopeChoice.scopeName}
+            disabled={pending || Boolean(attempt)}
+          />
+        ) : null}
         {!legacy ? (
           <>
             <p className="text-sm text-fg-muted">

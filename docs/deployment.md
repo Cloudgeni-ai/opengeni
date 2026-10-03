@@ -116,7 +116,123 @@ default 30 seconds) publishes two 0/1 gauges:
 New grants happen only while both gauges are 1. The runtime gauge alone reads 1
 on every deployment that never opted in, so never read it as "the trial is live".
 
+## New account sign-up switch (0596)
+
+`0596_managed_auth_new_signups_switch.sql` is a rolling migration with the same
+shape as the 0521 trial switch above. It needs no drain and no
+`OPENGENI_MIGRATION_APPLICATION_DATABASE_ROLES`; migrate, then run the normal
+`db:provision-roles`. Its seed revision keeps sign-ups open, so this migration
+changes no behavior on its own.
+
+It is the launch-load safety switch for managed deployments: it stops new people
+from creating accounts without affecting anyone who already has one. A new
+managed account is created only when **both** switches allow it:
+
+- `OPENGENI_MANAGED_AUTH_NEW_SIGNUPS_ENABLED` (default `true`) is the
+  deployment ceiling. The API reads it at startup, so changing it needs a config
+  rollout and an API restart. Set it with the API's own `api.extraEnv` so only
+  the API Deployment rolls (changing the shared `config` map restarts every
+  component that mounts it). While it is `false`, Better Auth is also built with
+  `emailAndPassword.disableSignUp` and per-provider `disableSignUp`.
+- The runtime switch is the newest row of the append-only
+  `opengeni_private.managed_auth_new_signups_switch_revisions` table. Use it as
+  the fast path during a launch. The API reads it on every sign-up request and
+  every `GET /v1/config/client`, so a change applies to the next request on
+  every API replica, with no deploy or restart. Sessions are untouched, so
+  nobody is signed out.
+
+To pause or reopen sign-ups, connect as the migration owner (the role in
+`OPENGENI_MIGRATIONS_DATABASE_URL`) and call the audited setter:
+
+```sql
+select set_managed_auth_new_signups_enabled(
+  false,                                                        -- true reopens sign-ups
+  'github:<owner>/<repo>:actor:<actor>:run:<run id>:attempt:<n>', -- operator identity, 1-200 characters
+  'launch load: pause new sign-ups'                             -- reason, 6-1000 characters
+);
+```
+
+Use the same operator identity convention as the 0521 switch. The setter
+returns the new revision as JSON (`revision`, `signupsEnabled`,
+`previousSignupsEnabled`, `changed`, `operator`, `reason`, `databaseRole`,
+`changedAt`); every call appends one revision, even without a change, and
+records the calling database login. Revisions cannot be updated, deleted, or
+truncated. Run it from the same audited, access-controlled operator path as the
+0521 switch, never from an application pod. Read the current state with:
+
+```sql
+select revision, signups_enabled, previous_signups_enabled, operator, reason,
+       database_role, changed_at
+from opengeni_private.managed_auth_new_signups_switch_revisions
+order by revision desc
+limit 1;
+```
+
+Then confirm the combined decision the browser sees:
+
+```bash
+curl -s "$OPENGENI_PUBLIC_BASE_URL/v1/config/client" | jq '.auth.newSignupsEnabled'   # false
+```
+
+Do not probe by submitting a real sign-up: while sign-ups are open it creates
+an account and sends a verification email.
+
+While sign-ups are paused (by either switch):
+
+- `POST /v1/auth/sign-up/email` is refused with `403`
+  `{ "code": "NEW_SIGNUPS_PAUSED", "message": "..." }` before any password
+  hashing or email, for new and already-registered addresses alike (no account
+  enumeration). The Better Auth user-create hook refuses every other creation
+  path with the same code.
+- Google and GitHub refuse an unknown provider account, including one that
+  asks for `requestSignUp`; the browser returns with `error=signup_disabled`.
+- Existing humans are unaffected: email and social sign-in (including verified
+  linking of a new provider to an existing human), existing sessions, password
+  reset, email verification of accounts that already exist, post-sign-in
+  organization setup, and invitation acceptance by a signed-in human.
+- Invited people can still create their account from the invitation link
+  (`/setup-account`, `POST /v1/auth/organization-setup`): that path is bound to
+  the pending invitation and does not create users through Better Auth. See
+  [organization tenancy](organization-tenancy.md#post-sign-in-organization-setup-and-one-time-invited-user-setup-0348).
+- `GET /v1/config/client` reports `auth.newSignupsEnabled: false`, and the web
+  sign-up screen shows a capacity message with sign-in still available instead
+  of the form and social buttons. A tab opened before the pause switches to the
+  same message when its sign-up is refused. A tab opened while paused shows the
+  form again after a reload once sign-ups reopen.
+
+Nothing is queued while sign-ups are paused; people who were turned away try
+again later.
+
+What the switch guarantees:
+
+- A read failure never decides sign-ups on its own: the API keeps the last
+  value it observed, and before its first successful read it follows the
+  deployment ceiling. A missing revision (an API running before the migration)
+  also follows the ceiling.
+- A sign-up request that already passed the check when the setter commits may
+  still finish; every request that starts after the commit sees the new value.
+- The setter is `SECURITY DEFINER` and callable only by its owner. PUBLIC and
+  every runtime role lack `EXECUTE`. The migration strips every non-owner grant
+  on the table and the setter at creation, `db:provision-roles` revokes any
+  later stray grant, and runtime posture fails readiness if a runtime role can
+  call the setter or write the table. Runtime roles get `SELECT` only.
+
+The control worker's sandbox-lease reaper pass publishes
+`opengeni_managed_auth_new_signups_runtime_enabled` (1 open, 0 paused) for the
+runtime switch. It does not see the API-only ceiling; `/v1/config/client` is
+the combined answer.
+
 ## Meaningful child attention (0503)
+
+`0585_session_attention_cursor.sql` persists the newest meaningful attention
+sequence in the narrow event cursor. Stop the declared application login roles
+for this maintenance migration: it backfills one indexed history probe per
+existing cursor and restores FORCE RLS in the same transaction. Cursor-backed
+readers must start after the migration commits. Older writers remain compatible
+because the existing event-insert trigger advances the raw and meaningful
+frontiers together; the change does not alter personal acknowledgements or
+rewrite event history. The current partial attention index remains available
+for exact content and lifecycle evidence reads.
 
 `0503_session_meaningful_attention.sql` is a maintenance migration. Stop all old
 API/control/turn workers, provide the exact application login list through
@@ -1332,23 +1448,14 @@ remove, drain, or disable those durable refs. Upgraded readers, child
 inheritance, and workers consume them regardless of their local switch value;
 the switch gates only new external admission and static configuration.
 
-Agent configuration (`sessions.agent_config`, rolling migration
-`0559_session_agent_config.sql`) has two switches, both `false` in config and
-Helm. Deploy the 0559-aware API, control worker, and turn worker everywhere
-with both off: every session keeps a NULL configuration and byte-identical
-legacy behavior, and an old worker reading a new row ignores the column. Then
-set `OPENGENI_AGENT_CONFIG_ADMISSION_ENABLED=true` to admit `agent` on session
-create, `PUT .../sessions/:id/agent`, MCP `session_create`, scheduled-task
-`agentConfig.agent`, automation templates, and workspace
-`settings.sessionAgentDefaults`; with it off each of those is a 422 whose
-`details.code` is `agent_config_not_enabled`, and stored workspace defaults are
-ignored. `OPENGENI_AGENT_CONFIG_DEFAULT_FOR_NEW_SESSIONS=true` additionally
-resolves omitted-`agent` top-level sessions to `{ capabilities: "all" }`; an old
-worker ignoring an `"all"` configuration still runs today's full tool set.
-Turning either switch off later changes only new admissions: stored
-configurations stay authoritative for their sessions, and a scheduled task
-whose stored `agent` is no longer admissible is refused (skipped) rather than
-run without it. See `packages/contracts/src/agent-config.ts`.
+Agent configuration (`sessions.agent_config`, migration
+`0559_session_agent_config.sql`) is always on; it has no deployment switch.
+`agent` is admitted on session create, `PUT .../sessions/:id/agent`, MCP
+`session_create`, scheduled-task `agentConfig.agent`, automation templates, and
+workspace `settings.sessionAgentDefaults`, and a top-level session that omits
+`agent` resolves to the workspace default or `{ capabilities: "all" }`. Sessions
+created before 0559 keep their NULL configuration and legacy behavior. See
+`packages/contracts/src/agent-config.ts`.
 
 Migration 0303 is intentionally rolling and applies while the switch remains
 `false`; applying the ordinary migration chain does not activate an
@@ -1389,7 +1496,61 @@ and 0340 install their contracts as rolling migrations but the separate
 activation command is still a drained, forward-only cutover. Each activation
 rejects a live application with SQLSTATE `55000` before taking `ACCESS
 EXCLUSIVE` source-table locks, and no activated boundary has a down-migration.
-For each subsequent activation:
+For the **fleet activation** cutover, rolling migration
+`0583_session_tenancy_operator_permission.sql` is inert preparation only. It
+adds a migration-owner-only, PUBLIC-revoked audited preference-enable function;
+it neither activates organizations nor changes sessions. The CLI additionally
+requires the separately reviewed maintenance marker
+`0586_private_sessions_fleet_activation.sql` before accepting:
+
+```bash
+bun run db:activate-session-tenancy -- \
+  --all-organizations \
+  --activated-by '<bounded-operator-identity>'
+```
+
+Run this only inside the existing protected, drained maintenance release after
+fresh all-organization evidence and release admission clearance. Persist and
+prove canonical activation `true` in durable Helm values **while the runtime is
+parked and before the first committed witness**; a Job-only override is not
+sufficient. Recovery and every later release must retain that value after any
+activation witness. Before a witness, an unwind additionally requires verified
+zero activation receipts; after one, recovery is forward-only.
+
+The fleet command freezes `managed_accounts`, preflights pending activations,
+then writes receipts for pending accounts in one transaction. It checks final
+receipt coverage before committing. Both activation scopes preserve all
+existing organization preferences byte-identically, including missing settings
+and explicit OFF or ON choices. The fleet command rejects the retired
+`--enable-organization-private-sessions` override and never invokes the 0583
+preference-enable helper. After activation, an organization owner or admin opts
+in separately through organization settings; shared-workspace Only me remains
+unavailable while that setting is OFF. No existing session visibility, chat
+default, credential owner, or authority is changed. Marker ordinal references
+must follow the project renumber command
+if newer main migrations claim these ordinals.
+
+The CLI validates every supplied runtime identity as an existing restricted
+database login (no superuser or BYPASSRLS), clears PostgreSQL's transaction-cached
+activity snapshot before its initial drain check and each guarded activation,
+then clears and checks again after receipt coverage while source locks remain
+held, before commit. A late application reconnect rejects and rolls back the
+entire transaction. The already-activated replay-only fleet must pass the same
+fresh initial and final drain checks; it never uses preference enablement as a
+drain mechanism.
+
+The activation CLI's migration-owner connection carries the same canonical
+`application_name` protocol identity as `createDb`, including through a
+transaction pooler. Before connecting, it replaces only `application_name` in
+the migration URL's query parameters: a legacy operator Job tag must not
+override the current protocol identity. Credentials, multi-host authority,
+schema, TLS, timeout budgets, and all other URL options are preserved. This
+normalization applies only to activation, not ordinary migration steps.
+An unversioned raw connection is not a supported operator
+substitute: the current sessions policy rejects it even when the backfill
+receipts and parity evidence are ready.
+
+For each subsequent single-organization activation:
 
 1. bind and verify the exact production subscription, cluster context,
    namespace, release, database, and image digests;
@@ -1400,11 +1561,11 @@ For each subsequent activation:
    `bun run db:inventory-tenancy --organization-id <uuid>`, parity evidence,
    cross-organization/RLS evidence, and immediate-revocation evidence - and
    record that evidence in private operator storage before touching the cluster;
-3. set `OPENGENI_ORGANIZATION_TENANCY_CANONICAL_ACTIVATION_ENABLED=true` for the
-   new image generation only. Never flip it on a running pre-activation
-   generation as a way to "test" activation;
+3. prepare canonical activation `true` for the new image generation. Never
+   flip it on a running pre-activation generation as a way to "test" activation;
 4. stop the API plus every control and turn worker while preserving the
-   migration-only secret and Job identity;
+   migration-only secret and Job identity, then persist and verify canonical
+   activation `true` in durable Helm values while they remain parked;
 5. query `pg_stat_activity` through the migration connection and prove zero
    other sessions with `usename = 'opengeni_app'`;
 6. run the new digest's migration Job and require 0303, 0340, plus every prerequisite
@@ -1468,6 +1629,35 @@ For each subsequent activation:
 After the activation migration commits, rollback to an earlier application image
 is forbidden, and setting the switch back to `false` is not a rollback - it
 cannot restore the legacy authority. Remain in maintenance and fix forward.
+
+### Production all-organization Only me availability cutover
+
+Migration `0586_private_sessions_fleet_activation.sql` is a maintenance-classified
+release marker, not an activation shortcut. The protected production release
+parks application database clients, applies the candidate migrations, then runs
+`db:activate-session-tenancy -- --all-organizations --activated-by
+production-release:<source-sha>` in its migration Job. The command takes a
+fixed snapshot of `managed_accounts`, checks the required migration, inventory,
+parity and six backfill receipt families for every not-yet-activated account,
+and calls the existing guarded SQL activation for each. All receipts commit in
+**one transaction**, including final coverage verification. An unready
+organization fails the entire Job without activating any new organization; do
+not bypass this gate or insert activation rows by hand. The maintenance lease
+owns forward recovery once the migration Job is authorized.
+An empty fleet also fails: without an initial activation receipt, migration
+0349 has no witness to auto-activate the first future signup.
+
+Before admitting that release, prepare and retain per-organization evidence
+using the fresh-key membership, resource, connection and final session
+backfills and the parity/RLS/revocation checks in
+[`organization-tenancy.md`](organization-tenancy.md#preconditions-for-permitting-an-activation).
+Fix unresolved cases first. The migration Job's 40-minute deadline is not a
+substitute for this preflight; a large fleet may require a deliberately budgeted
+maintenance window. The protected Helm reconciliation enables
+`OPENGENI_ORGANIZATION_TENANCY_CANONICAL_ACTIVATION_ENABLED` on the new runtime
+and preserves it for later releases. Existing organizations' independent
+`organization_private_session_settings` remain disabled until their owner or
+admin opts in; this cutover makes that toggle available, not automatically on.
 
 For Azure managed Blob storage, the artifact generator can consume the
 sensitive Terraform output `object_storage_azure_connection_string` into the
@@ -2685,6 +2875,31 @@ The runtime secret must provide values such as:
   admins and encrypted under `OPENGENI_ENVIRONMENTS_ENCRYPTION_KEY`; do not put
   those keys in Helm values, catalog JSON, or the deployment runtime Secret.
 - `OPENGENI_STRIPE_SECRET_KEY`, publishable key, webhook secret, and model pricing JSON when `OPENGENI_BILLING_MODE=stripe`; model pricing is also required when `OPENGENI_USAGE_LIMITS_MODE=managed` and any credits model lacks a reviewed built-in price
+- Stripe Checkout accepts customer-entered promotion codes on credit packages.
+  Configure `OPENGENI_WEB_BASE_URL` when the browser and API use different
+  origins; Checkout and billing-portal return URLs may use that configured web
+  origin or `OPENGENI_PUBLIC_BASE_URL`, and the default return uses the web
+  origin. Unconfigured external origins remain rejected.
+  OpenGeni owns the generic redemption and credit-ledger contract. Operators
+  manage Stripe products, coupons, promotion codes, customer eligibility,
+  redemption limits, and expiry in their own operations workflow; campaign
+  creation and account-specific offers are not part of the source package.
+  A discount changes the checkout price while OpenGeni credits the selected
+  package's full face value after the signed completion webhook, including a
+  zero-dollar checkout. For coupons restricted to the credits product, configure
+  `OPENGENI_STRIPE_CREDITS_PRODUCT_ID` to that Stripe Product ID. Refunds and
+  dispute holds on new checkouts remove the corresponding fraction of package
+  credits. Existing customer balances are account-wide.
+  Customers can also type a code in Opengeni first (signup onboarding, **Add
+  credits**, Organization > Billing): `POST /v1/billing/checkout` with
+  `promotionCode` looks the code up in Stripe and applies it up front, and a
+  fixed USD amount-off code sets the package to that amount, so a $100 code
+  grants exactly $100. When the code covers the whole package the total is
+  $0, so that checkout skips automatic tax and the billing address and the
+  customer only confirms. Checkout opens in a new tab and the page waits on
+  `GET /v1/billing/checkout/:checkoutSessionId`, which reports the credits
+  once granted and settles a completed session whose webhook is late (same
+  ledger idempotency key, so it never grants twice).
 - sandbox backend credentials when required
 
 Do not commit real secret values.
@@ -3226,6 +3441,13 @@ or delete an agent release tag. A baked asset still takes precedence so a
 deployed control-plane image serves its release-coherent binary directly.
 Explicit `/agent/v<version>/<asset>` binary and signature requests always use
 that immutable archive release; a baked canary cannot override a version pin.
+Linux canary builds use `scripts/bake-agent.sh` with the exact source commit as
+`OPENGENI_RUNTIME_BUILD_ID`. The signed agent embeds matching browserd, the
+pinned browser driver, and the native computer helper; adjacent helpers from
+another download are not its default runtime. The image gate requires all four
+assets plus checksums and signatures for each architecture. The API serves a
+complete baked target or falls back when that whole target is absent; a partial
+baked target returns 503 rather than combining image and archive assets.
 The same deployment serves signed `/agent/stable/manifest.json` and
 `manifest.json.minisig` routes so an enrolled agent updates through a control
 plane it already trusts instead of depending on public DNS. Beta is independent
@@ -3913,3 +4135,34 @@ change organization API keys, external-user authentication, sandbox credentials,
 webhook signatures or signed storage URLs. Review existing issued credentials
 separately when restricting an already-running deployment: removing an email does
 not revoke its previously issued API keys or cancel already accepted work.
+
+### Individual Claude subscription account activation
+
+Migration 0598 is a maintenance cutover. Stop every old API, control worker and
+turn worker, including idle database connections. Supply the exact runtime login
+list through OPENGENI_MIGRATION_APPLICATION_DATABASE_ROLES and the existing
+OPENGENI_ENVIRONMENTS_ENCRYPTION_KEY to the normal TypeScript migrator. Plain
+SQL cannot perform the encrypted credential conversion. An installation with no
+legacy Claude credentials needs no encryption key for this migration.
+
+The non-superuser schema owner performs one atomic conversion. It preserves
+credential IDs, logical generations, tokens, model/workspace access and valid
+usage readings, imports the prior primary with rotation disabled, and retires
+native single-connection subscription writes. Accepted turns, child results and
+scheduled inputs retain their producer scope and exact history. The migration
+restores original FORCE-RLS and trigger modes on success; any failure rolls back
+DDL, converted credentials and the activation receipt together. Never restart
+a pre-cutover image after commit. Restart sign-in attempts that were pending
+during the cutover. Anthropic API-key connections are unchanged.
+
+### Slack API pilot activation (0597)
+
+Stop every old/new API, control worker, and turn worker before applying
+`0597_slack_api_rate_limits.sql`, supply the complete runtime login list via
+`OPENGENI_MIGRATION_APPLICATION_DATABASE_ROLES`, and provision the matching role
+afterward. The content-free deployment-global quota table changes the exact
+runtime-posture contract; a pre-0597 binary must not be restarted as rollback.
+The default `OPENGENI_SLACK_ACCESS_MODE=limited` uses the reviewed Web API MCP
+bridge with one shared history/replies slot per minute and no search. Apply the
+generated Slack app scopes before rollout. See [Slack](slack-bot.md#unlisted-pilot-and-rollout)
+for the feature limits and external-workspace release acceptance.

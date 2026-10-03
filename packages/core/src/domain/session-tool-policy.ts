@@ -227,6 +227,28 @@ export function resolveTurnToolPolicy(
   });
 }
 
+/** Resolve availability and defaults from the same subject-scoped registry read. */
+export async function workspaceSessionToolPolicyContext(
+  db: Database,
+  workspaceId: string,
+  settings: Settings,
+  subjectId?: string,
+): Promise<{ workspaceServerIds: string[]; workspaceDefaultServerIds: string[] }> {
+  const [runtimeSettings, workspace] = await Promise.all([
+    settingsWithEnabledCapabilityMcpServers(db, workspaceId, settings, {
+      ...(subjectId ? { subjectId } : {}),
+    }),
+    requireWorkspace(db, workspaceId),
+  ]);
+  return {
+    workspaceServerIds: sortedIds(runtimeSettings.mcpServers.map((server) => server.id)),
+    workspaceDefaultServerIds: workspaceSessionToolPolicyDefaultServerIdsFor(
+      runtimeSettings.mcpServers,
+      workspace.settings,
+    ),
+  };
+}
+
 /** Current full runtime registry IDs, including configured static servers. */
 export async function workspaceSessionToolPolicyServerIds(
   db: Database,
@@ -478,11 +500,15 @@ export function sessionEffectiveToolProjectionInput(
         "browser_screenshot",
         "browser_clipboard",
         "browser_debug",
+        "browser_downloads",
         "computer_targets",
         "computer_observe",
         "computer_clipboard",
       ].includes(name);
-      if (permissionAllowed(readOnly ? "sessions:read" : "sessions:control")) {
+      if (
+        permissionAllowed(readOnly ? "sessions:read" : "sessions:control") &&
+        (name !== "browser_download_save" || permissionAllowed("files:upload"))
+      ) {
         firstPartyModelNames.set(name, `interaction__${name}`);
         if (
           !firstPartyMcpTools.includes(name) &&

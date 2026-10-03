@@ -1,3 +1,7 @@
+import {
+  ATLASSIAN_NATIVE_RETIRED_REASON,
+  isRetiredNativeAtlassianSource,
+} from "@opengeni/contracts/atlassian-native-retirement";
 import { isDeepStrictEqual } from "node:util";
 import { AsyncLocalStorage } from "node:async_hooks";
 import { scheduledTaskKnowledgeSource } from "@opengeni/contracts";
@@ -243,6 +247,12 @@ export function createKnowledgeSourceSyncActivities(
       ) {
         return { action: "failed", bufferedWake: false };
       }
+      if (isRetiredNativeAtlassianSource(action))
+        return {
+          action: "failed",
+          bufferedWake: false,
+          errorCode: ATLASSIAN_NATIVE_RETIRED_REASON,
+        };
       boundSource = action;
       await authorize();
       await ensureKnowledgeSourceSyncState(db, task);

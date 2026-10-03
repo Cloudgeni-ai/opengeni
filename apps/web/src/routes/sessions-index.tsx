@@ -29,6 +29,8 @@ import {
 import {
   FILE_ONLY_MESSAGE_TEXT,
   LightboxProvider,
+  ModelMark,
+  modelDisplayName,
   useChannels,
   useVariableSets,
   useWorkspaceSessions,
@@ -46,7 +48,14 @@ import {
   type VariableSetAttachmentMetadata,
 } from "@opengeni/sdk";
 import { Link, useNavigate } from "@tanstack/react-router";
-import { ChevronDownIcon, FolderIcon, LockIcon, PlusIcon, ServerCogIcon } from "lucide-react";
+import {
+  ChevronDownIcon,
+  CreditCardIcon,
+  FolderIcon,
+  LockIcon,
+  PlusIcon,
+  ServerCogIcon,
+} from "lucide-react";
 import {
   createElement,
   lazy,
@@ -111,7 +120,6 @@ import {
   type CreateComposerFocusIntent,
 } from "@/lib/create-composer-focus";
 import type { RepoDraft } from "@/lib/session-tools";
-import { displayModel } from "@/lib/format";
 import { composerFallbackModel } from "@/lib/model-access-onboarding";
 import {
   isMachineComputeSelectable,
@@ -198,6 +206,11 @@ const useCommitSynchronousEffect = typeof window === "undefined" ? useEffect : u
 const EmptyCreditsNotice = lazy(() =>
   import("@/components/credit-required-prompt").then((module) => ({
     default: module.EmptyCreditsNotice,
+  })),
+);
+const CreditTopupPrompt = lazy(() =>
+  import("@/components/credit-required-prompt").then((module) => ({
+    default: module.CreditRequiredPrompt,
   })),
 );
 
@@ -289,6 +302,7 @@ function SessionsIndexRouteContent({
   const [projectNameDraft, setProjectNameDraft] = useState("");
   const { resetSessionView } = context;
   const [message, setMessage] = useState("");
+  const [creditTopupOpen, setCreditTopupOpen] = useState(false);
   const [draft, setDraft] = useState<SessionDraft>(() =>
     emptySessionDraft(defaultFirstPartyMcpTools, defaultSandboxBackend),
   );
@@ -1589,6 +1603,32 @@ function SessionsIndexRouteContent({
           <h1 className="text-balance text-2xl font-semibold tracking-tight sm:text-3xl">
             What should the agent do?
           </h1>
+          {context.clientConfig.billingMode === "stripe" &&
+          workspace?.accountId &&
+          hasAccountPermission(context.accessContext, workspace.accountId, "billing:manage") ? (
+            <>
+              <Button
+                type="button"
+                variant="outline"
+                size="sm"
+                className="mt-2"
+                onClick={() => setCreditTopupOpen(true)}
+              >
+                <CreditCardIcon className="size-4" />
+                Add credits
+              </Button>
+              <Suspense fallback={null}>
+                <CreditTopupPrompt
+                  purpose="topup"
+                  open={creditTopupOpen}
+                  workspaceId={workspaceId}
+                  accountId={workspace.accountId}
+                  canBuyCredits
+                  onOpenChange={setCreditTopupOpen}
+                />
+              </Suspense>
+            </>
+          ) : null}
         </section>
 
         {launchSkillCapabilityId ? (
@@ -2005,7 +2045,7 @@ function recentSessionModelPresentation(
 ): { label: string; billingClass: PickerModelRow["billingClass"] } {
   const row = findPickerRow([...catalogRows], modelId);
   return {
-    label: row?.label ?? displayModel(modelId),
+    label: row?.label ?? modelDisplayName(modelId),
     billingClass:
       row?.billingClass ??
       (isCodexProductModel(modelId) ? "codex_subscription" : "opengeni_credits"),
@@ -2041,10 +2081,16 @@ function RecentSessionRow({
           <span className="block truncate text-sm text-fg group-hover:text-fg">{title}</span>
           {metaBits.length > 0 ? (
             <span className="mt-0.5 flex min-w-0 items-center gap-1.5 text-2xs text-fg-subtle">
-              <BillingClassMark
-                billingClass={model.billingClass}
+              <ModelMark
+                model={session.model}
                 className="size-3 text-fg-muted"
-                aria-label=""
+                fallback={
+                  <BillingClassMark
+                    billingClass={model.billingClass}
+                    className="size-3"
+                    aria-label=""
+                  />
+                }
               />
               <span className="truncate">{metaBits.join(" · ")}</span>
             </span>
@@ -2153,7 +2199,7 @@ function SessionFolderPicker({
       <DropdownMenuTrigger asChild>
         <Button
           type="button"
-          variant="secondary"
+          variant="outline"
           size="sm"
           disabled={disabled}
           aria-label={`Project: ${label}`}

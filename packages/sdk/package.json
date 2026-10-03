@@ -1,6 +1,6 @@
 {
   "name": "@opengeni/sdk",
-  "version": "7.6.1",
+  "version": "7.7.0",
   "description": "Framework-agnostic TypeScript SDK for the OpenGeni API: typed client, session lifecycle, SSE event streaming with reconnect + replay-by-sequence, and proxy re-streaming helpers.",
   "license": "Apache-2.0",
   "repository": {
@@ -130,6 +130,10 @@
       "types": "./src/model-picker-order.ts",
       "default": "./src/model-picker-order.ts"
     },
+    "./model-display": {
+      "types": "./src/model-display.ts",
+      "default": "./src/model-display.ts"
+    },
     "./chat": {
       "types": "./src/chat/index.ts",
       "default": "./src/chat/index.ts"
@@ -142,6 +146,10 @@
       "types": "./src/session-proxy.ts",
       "default": "./src/session-proxy.ts"
     },
+    "./tool-auth": {
+      "types": "./src/tool-auth.ts",
+      "default": "./src/tool-auth.ts"
+    },
     "./next": {
       "types": "./src/adapters/next.ts",
       "default": "./src/adapters/next.ts"
@@ -153,6 +161,10 @@
     "./hono": {
       "types": "./src/adapters/hono.ts",
       "default": "./src/adapters/hono.ts"
+    },
+    "./session-list-entries": {
+      "types": "./src/session-list-entries.ts",
+      "default": "./src/session-list-entries.ts"
     }
   },
   "publishConfig": {
@@ -169,6 +181,7 @@
     "@opengeni/contracts": "workspace:*"
   },
   "devDependencies": {
+    "@modelcontextprotocol/sdk": "^1.29.0",
     "@opengeni/artifact-kernel-wasm-document": "workspace:*",
     "@opengeni/artifact-kernel-wasm-presentation": "workspace:*",
     "@opengeni/artifact-kernel-wasm-spreadsheet": "workspace:*",

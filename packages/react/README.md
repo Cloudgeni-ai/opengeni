@@ -19,8 +19,10 @@ island for back-compat, deprecated per #144.)
 
 Design-system-first: every visual decision routes through CSS-variable tokens
 (`styles/tokens.css`) — color, typography, radius, shadow, motion. Dark mode is
-the first-class default; light is an opt-in via `data-og-theme="light"` on any
-ancestor. Components are styled with Tailwind v4 utilities mapped onto the
+the first-class token default; light is an opt-in via `data-og-theme="light"` on
+any ancestor. The embedded chat roots (`OpenGeniChat`, `SessionConversation`)
+resolve light or dark from the host page instead; see
+[Conversation UI](#conversation-ui). Components are styled with Tailwind v4 utilities mapped onto the
 tokens, Radix primitives for behavior, and Motion for state-communicating
 animation. Override the tokens to rebrand everything.
 
@@ -109,11 +111,30 @@ separately. Pass `conversationProps` for message rendering and tool renderers,
 `createSession` to create chats through your own endpoint, or `sessionId` /
 `onSessionChange` to control the selection (for example from the URL).
 
-`SessionConversation` hides its model picker when the client config reports
-`modelSelection: false` (a proxy that fixes the model policy); pass
-`modelPicker={false}` or `modelPicker` to override. Attachments appear when the
-deployment enables uploads (`attachments={false}` opts out), pending tool
-approvals render Approve/Reject, and `toolRegistry` customizes tool rendering.
+`SessionConversation` and `OpenGeniChat` are built to look native inside
+someone else's product with zero styling:
+
+- **Theme follows the host**, not the OS: an enclosing `data-og-theme`, then
+  `class="dark"`/`data-theme` (and similar) on `<html>`/`<body>`, the host's
+  `color-scheme`, then the luminance of the background the chat sits on. Pass
+  `theme="light" | "dark"` to force one.
+- **Surfaces blend into the host** (`surface="host"`, default): backgrounds and
+  cards are opaque mixes of the host background, so a navy app gets navy cards.
+  Host-customized `--og-color-*` tokens are kept; `surface="theme"` uses the
+  token surfaces as they are.
+- **Run control is Stop, not Pause**: a Stop control appears only while a
+  response runs, and the next message continues a stopped conversation. Opt
+  into the console's workstream Pause with `composerProps={{ runControl: "pause" }}`
+  (`"none"` hides both).
+- **No model picker by default**: end users rarely choose models. Pass
+  `modelPicker`, or report `modelSelection: true` from the proxy
+  (`createSessionProxyHandler({ modelSelection: true })`); `modelSelection: false`
+  also fixes the policy server-side.
+
+Attachments appear when the deployment enables uploads (`attachments={false}`
+opts out), pending tool approvals render Approve/Reject, a yes/no question
+renders as two buttons, a failed load offers Try again, and `toolRegistry`
+customizes tool rendering.
 
 The root keeps all existing exports, including workbench components, but never
 imports their optional peers. Conversation-only Next.js/Vite hosts do not need
@@ -605,6 +626,14 @@ explicit activation brings a tab forward. The override ends when its controller
 detaches. Native **App controls** also work in the background where supported.
 Physical desktop mouse/keyboard input shares the foreground seat; **Bring to front**
 makes that change explicit.
+Computer frames fit the dock while preserving their proportions. Resizing or
+reopening the dock refits the visible image without changing capture resolution
+or the coordinates sent to the computer.
+Desktop opens a whole screen by default. Multiple screens use a compact screen
+selector; app controls and window views are available from **Advanced**. Explicit
+view choices survive refreshes while the target remains available.
+
+Desktop IME candidates and their selection keys stay local; only committed text is sent.
 
 A managed browser's attachment authority error keeps a same-browser **Reconnect**
 action available. It obtains a fresh server-authorized attachment without creating
@@ -650,6 +679,12 @@ browser. A headed managed browser can receive `createLinkedComputer`; the
 returned ComputerSession must be the exact placement/window the browser uses.
 `onOpenComputer` then changes the host layout to that resource—it must not open a
 lookalike desktop. Closing either viewer never ends its durable resource.
+
+`ComputerViewer` disables input when its control service is unavailable, even if
+frames keep arriving. Reconnect refreshes the selected desktop's controls and
+frames. App accessibility inspection failures leave independent live input
+available; `useComputerSession().controlError` reports service loss separately
+from the hook's general `error`.
 
 If the chat's latest browser was lost or failed, the viewer names it and explains
 why it is unavailable instead of showing the ordinary empty state. It offers the
@@ -774,7 +809,8 @@ state remains application-owned; durable draft and session state remain in
 
 - `useSessionEvents(sessionId)` — loads a compact, bounded tail window by
   default, then live-streams on the SDK's exactly-once/ordered event delivery.
-  Initial replay is capped at three 5000-row raw pages and `loadOlder` at two;
+  Initial replay reads one 1000-row raw page, with at most one extra page to
+  recover a dense turn's boundary; `loadOlder` is capped at two such pages;
   timeline group density is only an early stop. It returns the raw windowed
   `events`, projected `timeline`, latest `sessionStatus`, connection state, and
   older-history controls (`hasOlder`, `loadingOlder`, `loadOlder`). Pass
@@ -789,6 +825,8 @@ state remains application-owned; durable draft and session state remain in
   window.
 - Browser retention limits are exported as `SESSION_EVENT_BROWSER_MAX_BYTES`
   and `SESSION_EVENT_BROWSER_MAX_COUNT`; they do not change fetch page sizes.
+  The live working set is at most 16 MiB or 20,000 events. One event larger than
+  the byte target stays complete in a window of its own.
   Live appends reuse the retained window's byte total, measuring only incoming
   and evicted events. History still pages when either retention limit is reached.
 - Newer history uses `hasNewer`, `loadingNewer`, and `loadNewer`. A failed
@@ -845,7 +883,10 @@ state remains application-owned; durable draft and session state remain in
 - `useSlashCommands(...)` — the slash-command palette state (registry + parsing +
   handlers) behind `CommandPalette`.
 - `useWorkspaceSessions()` / `useScheduledTasks()` — workspace lists for
-  fleet/manager views (optional polling).
+  fleet/manager views (optional polling). `useWorkspaceSessions({ projection:
+  "summary" })` returns compact list entries; omit the option for full sessions.
+  Scripted clients can omit the summary method and the hook projects full pages
+  locally while retaining cancellation and causal read revisions.
 - `useVariableSets()` — workspace variable sets with metadata-only generic
   reads and create/update/remove/set/delete operations. Dedicated permissioned
   exact-value reveal is part of the held React/UI train rather than an
@@ -1256,6 +1297,11 @@ can translate its search, current-selection, empty-result, attachment-warning, a
 thinking labels through `messages`, and override payment descriptions through
 `messages.billingHints`.
 
+The stock deployment-provided group is labeled **Models**, with a generic model
+icon. It can contain both credit-backed and free models; the **Free** badge
+depends on the model's explicit cost, not its group. Genuine external-provider
+and subscription identities retain their own labels and marks.
+
 Hosts can rebrand the full picker without replacing its interaction logic:
 
 ```tsx
@@ -1284,7 +1330,40 @@ are unchanged. The type `ModelPolicyPickerGroupPresentation` is exported from
 both `@opengeni/react` and `@opengeni/react/composer`. The native `ModelPicker`
 is a separate control; this API targets the full `ModelPolicyPicker` shown above.
 
+The complete conversation uses this same neutral picker. Customize its appearance
+without replacing composer controls through `SessionConversation.modelPickerProps`,
+or through `OpenGeniChat.conversationProps`:
+
+```tsx
+<OpenGeniChat
+  client={client}
+  workspaceId={workspaceId}
+  conversationProps={{
+    modelPickerProps: {
+      groupPresentation: {
+        opengeni_credits: { label: "Acme Assist", icon: <AcmeMark aria-hidden="true" /> },
+      },
+      messages: { label: "Choose a model" },
+    },
+  }}
+/>
+```
+
+`modelPickerProps` accepts only `groupPresentation` and `messages`; it does not
+enable a hidden picker or change policy, model availability or callbacks. Keep
+model-picker visibility controlled by `modelPicker` and the client configuration.
+
 For a rendered example, open the composer-responsive demo with `?branding=host`.
+
+Models always show their clean name and maker logo: picker rows carry
+`modelDisplayName(model)` (`claude-opus-4-8` and
+`organization-claude-subscription/claude-opus-5-5` read `Claude Opus 4.8` and
+`Claude Opus 5.5`) and a `ModelMark`. Organization- and workspace-connected API
+keys share one "API keys" group, and identical copies of one model in a
+connection group show once. Render a model anywhere else with
+`<ModelName model={id} />`, or `modelDisplayName` / `modelVendor` from
+`@opengeni/react` or `@opengeni/sdk/model-display`. The trigger keeps a host's
+explicit group icon; otherwise API-key models show the maker's logo.
 
 Subscription descriptions appear once per provider group. Free models carry a
 Free badge. Pass `hasImageAttachments` for the current draft to show an image

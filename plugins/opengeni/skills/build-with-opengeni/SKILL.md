@@ -42,11 +42,12 @@ every chat becomes a session in the given workspace. It needs
 - Inspect the product first: framework, auth, tenancy model, data routes,
   package manager, tests, and deployment. Never ask what the repository
   answers.
-- Four choices belong to the user. If the request or repository does not
-  settle them, ask once, in one bundled question with a recommended answer for
-  each: who shares agents and chats (per user or shared per tenant), when work
-  runs (on demand, schedules, events), where outputs land, and whether the
-  agent may write or act.
+- Two choices belong to the user: who can see a chat (per user or shared per
+  tenant) and whether the agent may change data or act. Ask once, in one short
+  plain-language question with a recommended answer, only about what the
+  request or repository does not settle. Don't ask about background work,
+  schedules or session length up front; long sessions just work. Ask about
+  timing only when the requested feature itself is scheduled.
 - Trust the installed package types, `GET /v1/config/client`, and
   `GET /v1/access/me` over memory. Pin `@opengeni/sdk` and `@opengeni/react` to
   the same release.

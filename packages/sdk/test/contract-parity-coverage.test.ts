@@ -351,7 +351,9 @@ describe("SDK / contracts parity (full coverage)", () => {
       value: Omit<CreateApiKeyRequest, "permissions">,
     ): z.input<typeof ContractCreateApiKeyBody> => value;
     const acceptCreateOrganizationApiKey = (
-      value: CreateOrganizationApiKeyRequest,
+      // Explicit-policy permissions are also an open string union in the SDK.
+      // The organization-access parity suite checks that nested wire shape.
+      value: Omit<CreateOrganizationApiKeyRequest, "policy">,
     ): z.input<typeof ContractCreateOrganizationApiKeyRequest> => value;
     const acceptUpdateGoal = (
       value: UpdateSessionGoalRequest,

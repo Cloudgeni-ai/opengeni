@@ -200,6 +200,8 @@ async function addAcceptedScheduledOccurrence(input: {
         personalResourceAuthoritySubjectId ?? causalHumanAuthority?.subjectId ?? null,
       causalHumanAuthority,
       xaiProviderAccountAuthoritySnapshot: { version: 1, scope: "workspace" },
+      claudeProviderAccountAuthoritySnapshot: { version: 1 as const, scope: "workspace" as const },
+      claudeAuthoritySubjectId: null,
       xaiAuthoritySubjectId: null,
       connectionAuthoritySubjectId: null,
       triggerInitiator: { kind: "service", subjectId: "scheduler" },
@@ -979,6 +981,7 @@ describe("migrations 0353-0355 automatic session title policy fence", () => {
       "session_work_claim_revisions",
       "session_work_claim_write_capabilities",
       "session_work_claims",
+      "slack_api_rate_limits",
       "tool_gateway_approval_capabilities",
       "workspace_codex_subscription_preferences",
       "workspace_gateway_custom_models",
@@ -996,15 +999,19 @@ describe("migrations 0353-0355 automatic session title policy fence", () => {
     // It also predates the 0507 pending MCP OAuth state table.
     // It also retains the three Pack tables removed from the runtime contract
     // by 0482 and predates the 0492 accepted Codex source table/capture capability.
-    // The allowance helpers introduced by 0552-0554 are likewise absent;
+    // The allowance helpers introduced by 0552-0554 are likewise absent, as are
+    // the Claude subscription tables/capabilities, 0600 key workspace scopes and
+    // 0603 service accounts;
     // private storage preserves the old table inventory, not these new helpers.
     // Preserve those exact expected boundary gaps while continuing to
     // reject every other posture violation in this
     // rolling-compatibility test.
     const expectedPost0353EvaluatorGaps = [
-      "runtime privilege tables are missing: codex_turn_source_bindings, connect_attempts, external_identity_links, external_link_task_authorities, external_link_turn_authorities, feedback_submissions, host_mcp_bindings, host_mcp_delegations, host_mcp_resolver_operations, host_mcp_resolvers, host_mcp_task_authorities, host_mcp_turn_authorities, integration_oauth_pending_states, organization_credential_providers, organization_integration_policies, organization_integration_policy_operations, organization_webhook_deliveries, organization_webhooks, session_attempt_model_context_snapshots, skill_source_bindings, skill_write_receipts, workspace_artifact_uploads, workspace_credential_providers, workspace_webhook_deliveries, workspace_webhooks",
-      "protected tables are missing: agent_instruction_operations, agent_learning_revisions, agent_learning_snapshots, codex_turn_source_bindings, connect_attempts, external_identities, external_identity_links, external_link_task_authorities, external_link_turn_authorities, feedback_submissions, host_mcp_bindings, host_mcp_delegations, host_mcp_resolver_operations, host_mcp_resolvers, host_mcp_task_authorities, host_mcp_turn_authorities, integration_oauth_pending_states, knowledge_entries, knowledge_entry_decisions, knowledge_entry_links, knowledge_entry_operations, knowledge_entry_revisions, knowledge_entry_search, knowledge_entry_vectors, knowledge_index_jobs, knowledge_review_batches, managed_sign_in_method_operations, mcp_operations, organization_credential_providers, organization_integration_policies, organization_integration_policy_operations, organization_webhook_deliveries, organization_webhooks, session_attempt_model_context_snapshots, skill_config_conversion_receipts, skill_source_bindings, skill_write_receipts, workspace_artifact_uploads, workspace_credential_providers, workspace_webhook_deliveries, workspace_webhooks",
+      "database is missing the Claude subscription account activation receipt",
+      "runtime privilege tables are missing: claude_capacity_waiters, claude_credential_leases, claude_rotation_settings, claude_session_account_pins, claude_subscription_account_usage, claude_subscription_credentials, codex_turn_source_bindings, connect_attempts, external_identity_links, external_link_task_authorities, external_link_turn_authorities, feedback_submissions, host_mcp_bindings, host_mcp_delegations, host_mcp_resolver_operations, host_mcp_resolvers, host_mcp_task_authorities, host_mcp_turn_authorities, integration_oauth_pending_states, organization_api_key_workspaces, organization_credential_providers, organization_integration_policies, organization_integration_policy_operations, organization_service_accounts, organization_webhook_deliveries, organization_webhooks, session_attempt_model_context_snapshots, skill_source_bindings, skill_write_receipts, workspace_artifact_uploads, workspace_credential_providers, workspace_webhook_deliveries, workspace_webhooks",
+      "protected tables are missing: agent_instruction_operations, agent_learning_revisions, agent_learning_snapshots, claude_capacity_waiters, claude_credential_leases, claude_rotation_settings, claude_session_account_pins, claude_subscription_account_usage, claude_subscription_credentials, codex_turn_source_bindings, connect_attempts, external_identities, external_identity_links, external_link_task_authorities, external_link_turn_authorities, feedback_submissions, host_mcp_bindings, host_mcp_delegations, host_mcp_resolver_operations, host_mcp_resolvers, host_mcp_task_authorities, host_mcp_turn_authorities, integration_oauth_pending_states, knowledge_entries, knowledge_entry_decisions, knowledge_entry_links, knowledge_entry_operations, knowledge_entry_revisions, knowledge_entry_search, knowledge_entry_vectors, knowledge_index_jobs, knowledge_review_batches, managed_sign_in_method_operations, mcp_operations, organization_api_key_workspaces, organization_credential_providers, organization_integration_policies, organization_integration_policy_operations, organization_service_accounts, organization_webhook_deliveries, organization_webhooks, session_attempt_model_context_snapshots, skill_config_conversion_receipts, skill_source_bindings, skill_write_receipts, workspace_artifact_uploads, workspace_credential_providers, workspace_webhook_deliveries, workspace_webhooks",
       "RLS tables are absent from the declared contract: pack_installation_components, pack_installations, workspace_packs",
+      "owner-internal target-schema helper enable_organization_private_sessions_from_activation(uuid, text[]) is missing or ambiguous",
       "owner-internal target-schema helper usage_allowance_members(uuid, uuid) is missing or ambiguous",
       "owner-internal target-schema helper usage_allowance_effective_period(uuid, jsonb, timestamp with time zone) is missing or ambiguous",
       "owner-internal target-schema helper count_workspace_allowance_debit() is missing or ambiguous",
@@ -1016,6 +1023,13 @@ describe("migrations 0353-0355 automatic session title policy fence", () => {
       "owner-internal target-schema helper validate_usage_allowance_config(jsonb) is missing or ambiguous",
       "owner-internal target-schema helper validate_usage_allowance_rule(jsonb) is missing or ambiguous",
       "owner-internal target-schema helper guard_slack_file_upload_operation() is missing or ambiguous",
+      "target-schema runtime capability claude_provider_account_authority_snapshot_v1_valid(jsonb) is missing or ambiguous",
+      "target-schema runtime capability create_claude_subscription_credential(uuid, uuid, text, text, text, text, text, text, text, timestamp with time zone) is missing or ambiguous",
+      "target-schema runtime capability disconnect_claude_subscription_credential(uuid, uuid, text, uuid, jsonb) is missing or ambiguous",
+      "target-schema runtime capability claude_subscription_authority_live(uuid, uuid, text, uuid, text, uuid, uuid, bigint) is missing or ambiguous",
+      "target-schema runtime capability claude_subscription_pool_visible(uuid, uuid, text, text, uuid) is missing or ambiguous",
+      "target-schema runtime capability resolve_claude_authority_pool(uuid, uuid, text, jsonb) is missing or ambiguous",
+      "target-schema runtime capability revalidate_claude_subscription_authority(uuid, text, uuid, jsonb) is missing or ambiguous",
       "target-schema runtime capability maintain_usage_allowances(integer, integer) is missing or ambiguous",
       "target-schema runtime capability usage_allowance_command(jsonb) is missing or ambiguous",
       "target-schema runtime capability usage_allowance_capability_active(uuid, uuid) is missing or ambiguous",
@@ -1100,6 +1114,7 @@ describe("migrations 0353-0355 automatic session title policy fence", () => {
     const post0353ForbiddenRoutines = new Set([
       "activate_session_tenancy_from_additional_organization(uuid)",
       "set_verified_signup_trial_credits_enabled(boolean, text, text)",
+      "set_managed_auth_new_signups_enabled(boolean, text, text)",
     ]);
     const post0353ProtectedTables = new Set([...post0353RuntimeTables, ...sessionSetTables]);
     const preSessionSetProtectedTables = FORCE_RLS_TABLES.filter(
@@ -1124,6 +1139,9 @@ describe("migrations 0353-0355 automatic session title policy fence", () => {
       protectedNoDirectDmlTables: preSessionSetNoDirectDmlTables,
       tablePrivileges: preSessionSetTablePrivileges,
       targetSchemaCapabilityRoutines: preSessionSetCapabilityRoutines,
+      // This binary predates both additive Insights model-fact routines. Keep
+      // its required capabilities frozen just like its table/target-routine sets.
+      modelFactCapabilityRoutines: [],
       targetSchemaForbiddenRoutines: RUNTIME_TARGET_SCHEMA_FORBIDDEN_ROUTINES.filter(
         (routine) => !post0353ForbiddenRoutines.has(routine),
       ),
@@ -1203,6 +1221,17 @@ describe("migrations 0353-0355 automatic session title policy fence", () => {
       expect(evaluateRuntimeDatabasePosture(customPosture, postureOptions(customRole))).toEqual(
         expectedPost0353EvaluatorGaps,
       );
+      // The current binary must not become ready on this historical schema:
+      // only the explicitly frozen old binary omits these later requirements.
+      const { modelFactCapabilityRoutines, ...currentBinaryOptions } = postureOptions(customRole);
+      expect(modelFactCapabilityRoutines).toEqual([]);
+      expect(evaluateRuntimeDatabasePosture(customPosture, currentBinaryOptions)).toEqual([
+        ...expectedPost0353EvaluatorGaps,
+        "Insights complete usage amount projection is missing or unsafe",
+        "Insights amount fact projection is missing or unsafe",
+        "organization model usage aggregate is missing or unsafe",
+        "Insights scoped fact projection is missing or unsafe",
+      ]);
 
       // Model the complete pre-policy posture with its original target-table
       // contract and private-routine generic loop. The current evaluator covers

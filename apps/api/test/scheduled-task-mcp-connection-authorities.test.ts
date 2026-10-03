@@ -404,6 +404,37 @@ describe("lossless scheduled-task model updates", () => {
 });
 
 describe("first-party MCP scheduled task connectionAccounts", () => {
+  test("creates an interval task through MCP using the advertised minimal agent input", async () => {
+    if (!available) return;
+    const workspace = await workspaceFixture();
+    const dependencies = deps(client.db);
+    const connected = await connectedClient(
+      buildOpenGeniMcpServer(dependencies, grantFor(workspace)),
+    );
+    try {
+      const result = await connected.client.callTool({
+        name: "scheduled_tasks_create",
+        arguments: {
+          name: "Interval monitor",
+          schedule: { type: "interval", everySeconds: 7_200 },
+          agentConfig: { prompt: "Report activity" },
+        },
+      });
+      expect(result.isError).not.toBe(true);
+      const receipt = JSON.parse(resultText(result));
+      expect(receipt).toMatchObject({ operation: "scheduled_tasks_create", outcome: "created" });
+      const task = await getScheduledTask(client.db, workspace.workspaceId, receipt.resource.id);
+      expect(task).toMatchObject({
+        schedule: { type: "interval", everySeconds: 7_200 },
+        action: { kind: "agent_turn" },
+        agentConfig: { prompt: "Report activity" },
+      });
+      expect((dependencies.workflowClient as FakeWorkflowClient).synced).toHaveLength(1);
+    } finally {
+      await connected.close();
+    }
+  });
+
   test.each([false, true])(
     "removing an MCP tool preserves explicit-account validation (%s)",
     async (explicit) => {

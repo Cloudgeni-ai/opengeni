@@ -18,6 +18,8 @@ export function assertClaudeWorkspaceCredential(
   if (role !== "anthropic" && role !== "claude_subscription") return;
   if (role === "claude_subscription" && !settings.claudeSubscriptionEnabled)
     throw new HTTPException(404, { message: "Claude subscriptions are not enabled" });
+  if (role === "claude_subscription")
+    throw new HTTPException(410, { message: "Use individual Claude subscription accounts." });
   if (
     input.subjectId !== null ||
     input.providerDomain !== "api.anthropic.com" ||
@@ -40,16 +42,6 @@ export function assertClaudeWorkspaceCredential(
       });
     return;
   }
-  let bundle: unknown;
-  try {
-    bundle = JSON.parse(key);
-  } catch {
-    bundle = null;
-  }
-  if (!ClaudeSubscriptionCredential.safeParse(bundle).success)
-    throw new HTTPException(422, {
-      message: "Enter a valid Claude setup token.",
-    });
 }
 
 /** Stable installation identity; setup tokens do not grant profile access. */
@@ -83,15 +75,8 @@ export function prepareClaudeWorkspaceCredential(
   metadata: Record<string, unknown> | undefined,
   credential: Record<string, unknown>,
 ): Record<string, unknown> {
-  if (metadata?.credentialRole !== "claude_subscription" || typeof credential.apiKey !== "string")
-    return credential;
-  if (credential.apiKey.startsWith("{")) return credential;
-  return {
-    ...credential,
-    apiKey: prepareClaudeSubscriptionCredential(
-      settings,
-      "workspace:" + workspaceId,
-      credential.apiKey,
-    ),
-  };
+  if (metadata?.credentialRole !== "claude_subscription") return credential;
+  if (!settings.claudeSubscriptionEnabled)
+    throw new HTTPException(404, { message: "Claude subscriptions are not enabled" });
+  throw new HTTPException(410, { message: "Use individual Claude subscription accounts." });
 }

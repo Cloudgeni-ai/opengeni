@@ -8,6 +8,7 @@ import {
 
 export function testSettings(overrides: Partial<Settings> = {}): Settings {
   return {
+    slackAccessMode: "limited",
     serviceName: "opengeni",
     environment: "test",
     deploymentRevision: "dev",
@@ -47,6 +48,9 @@ export function testSettings(overrides: Partial<Settings> = {}): Settings {
     analyticsPosthogProjectKey: undefined,
     analyticsPosthogHost: undefined,
     analyticsGa4MeasurementId: undefined,
+    legalPrivacyPolicyUrl: undefined,
+    legalTermsOfServiceUrl: undefined,
+    supportEmail: undefined,
     authRequired: false,
     accessKey: undefined,
     authAllowHealth: true,
@@ -61,6 +65,7 @@ export function testSettings(overrides: Partial<Settings> = {}): Settings {
     agentBetaVersion: undefined,
     productAccessMode: "local",
     managedAuthSessionSetMode: "legacy",
+    managedAuthNewSignupsEnabled: true,
     organizationUserSetupEmailTokenTransport: "fragment",
     organizationUserSetupQueryEdgeSanitizationConfirmed: false,
     organizationTenancyCanonicalActivationEnabled: false,
@@ -215,8 +220,6 @@ export function testSettings(overrides: Partial<Settings> = {}): Settings {
     openaiReasoningEncryptedContent: true,
     openaiMaxRetries: 5,
     webSearchEnabled: true,
-    agentConfigAdmissionEnabled: false,
-    agentConfigDefaultForNewSessions: false,
     jevApiKey: undefined,
     jevBaseUrl: "https://api.typesafe.ai",
     jevModel: "jev-latest",
@@ -322,6 +325,7 @@ export function testSettings(overrides: Partial<Settings> = {}): Settings {
     sandboxViewerHolderTtlMs: 90_000,
     sandboxInteractionHolderTtlMs: 180_000,
     sandboxIdleGraceMs: 900_000,
+    sandboxIdleCommandContainmentMs: 1_800_000,
     sandboxSnapshotIntervalMs: 900_000,
     sandboxSnapshotTimeoutMs: 60_000,
     sandboxRotationLeadMs: 3_600_000,

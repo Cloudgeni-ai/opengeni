@@ -721,7 +721,7 @@ describe("actor-private new-session drafts (real PostgreSQL + FORCE RLS)", () =>
       resources: [
         {
           kind: "repository",
-          uri: "https://github.com/acme/private.git",
+          uri: "https://github.example.test/example/private.git",
           ref: "main",
           mountPath: "repos/private",
           provider: "github",
@@ -738,6 +738,7 @@ describe("actor-private new-session drafts (real PostgreSQL + FORCE RLS)", () =>
       tools: [{ kind: "mcp", id: "docs" }],
       toolsProvided: true,
       options: {
+        visibility: "private",
         sandboxBackend: "selfhosted",
         targetSandboxId,
         workingDir,
@@ -762,7 +763,7 @@ describe("actor-private new-session drafts (real PostgreSQL + FORCE RLS)", () =>
       resources: [
         {
           kind: "repository",
-          uri: "https://github.com/acme/private.git",
+          uri: "https://github.example.test/example/private.git",
           ref: "main",
           mountPath: "repos/private",
           githubRepositoryId: 789,
@@ -774,6 +775,7 @@ describe("actor-private new-session drafts (real PostgreSQL + FORCE RLS)", () =>
       reasoningEffort: "low",
     });
     expect(seeded?.sessionOptions).toEqual({
+      visibility: "private",
       sandboxBackend: "selfhosted",
       targetSandboxId,
       workingDir,
@@ -823,6 +825,21 @@ describe("actor-private new-session drafts (real PostgreSQL + FORCE RLS)", () =>
         }),
     );
     expect(revisionZero).toBe(false);
+  });
+
+  test("remembers visibility changes across successive session creations", async () => {
+    const context = await fixture();
+    let revision = 0;
+    for (const visibility of ["private", "workspace", "private"] as const) {
+      const saved = await saveDraft(context, revision, { options: { visibility } });
+      const session = await createUninitializedSession(context);
+      await initialize(context, session.id, saved.revision);
+      const seeded = await readDraft(context.grant.workspaceId!, context.subjectId);
+      expect(seeded?.revision).toBe(saved.revision + 1);
+      expect(seeded?.text).toBe("");
+      expect(publicNewSessionDraftOptions(seeded!)).toEqual({ visibility });
+      revision = seeded!.revision;
+    }
   });
 
   test("a Sandbox Environment choice covers only its session when the workspace has a default", async () => {

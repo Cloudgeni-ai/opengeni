@@ -10,6 +10,7 @@ const CODES = [
   "db_failure",
   "retained_process_fenced",
   "retained_process_proof_failed",
+  "mcp_orchestration_failed",
 ] as const;
 const STAGES = [
   "startup",
@@ -20,6 +21,9 @@ const STAGES = [
   "session_attempts.claim",
   "failure_settlement",
   "sandbox_retained_processes.proof",
+  "mcp.session_create",
+  "mcp.session_send_message",
+  "mcp.session_steer",
 ] as const;
 const RETRIES = ["not_retryable", "exhausted", "unknown"] as const;
 // Reviewed schema names, never a syntactic allowlist for arbitrary driver strings.
@@ -49,6 +53,8 @@ export const DIAGNOSTIC_SOURCE_FILES = [
   "apps/api/src/index.ts",
   "apps/api/src/app.ts",
   "apps/api/src/fatal-process-boundary.ts",
+  "apps/api/src/mcp/server.ts",
+  "apps/api/src/mcp/orchestration-failure-diagnostic.ts",
   "apps/api/dist/process/index.js",
   "apps/worker/src/activities/agent-turn/run.ts",
   "apps/worker/src/activities/agent-turn/claim.ts",
@@ -91,10 +97,12 @@ export type FailureDiagnosticInput = {
   stage: (typeof STAGES)[number];
   retryDecision?: (typeof RETRIES)[number];
   error: unknown;
+  diagnosticId?: string;
   attemptId?: string;
   sessionId?: string;
   processId?: string;
   turnId?: string;
+  executionGeneration?: number;
   attempts?: number;
   sqlState?: string | null;
   constraint?: string;
@@ -133,9 +141,15 @@ export function failureDiagnostic(input: FailureDiagnosticInput, revision?: stri
   }> = [];
   const pgContext: Array<{ functionName: string; line: number }> = [];
   const seen = new Set<unknown>();
+  let causeSqlState: string | undefined;
   let error = input.error;
   while (error && typeof error === "object" && !seen.has(error) && causes.length < 4) {
     seen.add(error);
+    const kind = errorKind(error);
+    const driverCode = kind === "PostgresError" ? own(error, "code") : undefined;
+    if (!causeSqlState && typeof driverCode === "string" && /^[0-9A-Z]{5}$/.test(driverCode)) {
+      causeSqlState = driverCode;
+    }
     pgContext.push(...postgresContext(error).slice(0, 8 - pgContext.length));
     const stack = own(error, "stack");
     const frames =
@@ -160,7 +174,7 @@ export function failureDiagnostic(input: FailureDiagnosticInput, revision?: stri
             })
         : [];
     causes.push({
-      kind: errorKind(error),
+      kind,
       frames,
     });
     error = own(error, "cause");
@@ -172,7 +186,7 @@ export function failureDiagnostic(input: FailureDiagnosticInput, revision?: stri
       : undefined;
   return {
     schema: "opengeni.failure-diagnostic.v1",
-    diagnosticId: randomUUID(),
+    diagnosticId: uuid(input.diagnosticId) ?? randomUUID(),
     code: CODES.includes(input.code) ? input.code : "db_failure",
     stage: STAGES.includes(input.stage) ? input.stage : "failure_settlement",
     retryDecision:
@@ -183,6 +197,12 @@ export function failureDiagnostic(input: FailureDiagnosticInput, revision?: stri
     sessionId: uuid(input.sessionId),
     processId: uuid(input.processId),
     turnId: uuid(input.turnId),
+    executionGeneration:
+      Number.isSafeInteger(input.executionGeneration) &&
+      input.executionGeneration! >= 1 &&
+      input.executionGeneration! <= 2_147_483_647
+        ? input.executionGeneration
+        : undefined,
     attempts:
       Number.isSafeInteger(input.attempts) && input.attempts! >= 0 && input.attempts! <= 1_000_000
         ? input.attempts
@@ -190,7 +210,7 @@ export function failureDiagnostic(input: FailureDiagnosticInput, revision?: stri
     sqlState:
       typeof input.sqlState === "string" && /^[0-9A-Z]{5}$/.test(input.sqlState)
         ? input.sqlState
-        : undefined,
+        : causeSqlState,
     constraint:
       input.constraint && CONSTRAINTS.has(input.constraint) ? input.constraint : undefined,
     deploymentRevision: revision && /^[0-9a-f]{40}$/.test(revision) ? revision : undefined,

@@ -188,6 +188,94 @@ test("stopping sign-in restores retry without waiting for an unresponsive backen
   }
 });
 
+test("custom MCP setup retains discovery failures and can retry into sign-in", async () => {
+  let inspections = 0;
+  const custom = { ...item, enabled: false, authKind: null, connectionRef: null };
+  const client = {
+    listCapabilities: async () => ({ items: [custom] }),
+    inspectMcpAuthentication: async () => {
+      inspections += 1;
+      return inspections === 1
+        ? {
+            kind: "unknown",
+            message: "The provider returned HTTP 403 while checking how to sign in.",
+          }
+        : { kind: "oauth2" };
+    },
+    connectTransport: () => ({}),
+  } as unknown as OpenGeniClient;
+  const view = await renderComponent(
+    <McpConnectionCard
+      client={client}
+      workspaceId="workspace"
+      capabilityId={item.id}
+      name="Example service"
+      returnUrl="https://host.example/"
+      dialogOnly
+    />,
+  );
+  try {
+    await flush();
+    expect(document.querySelector('[role="alert"]')?.textContent).toContain("HTTP 403");
+    const retry = [...document.querySelectorAll("button")].find(
+      (button) => button.textContent === "Retry",
+    );
+    expect(retry).toBeDefined();
+    await actRun(() => retry!.click());
+    await flush();
+    expect(inspections).toBe(2);
+    expect(document.querySelector('[role="alert"]')).toBeNull();
+    expect(
+      [...document.querySelectorAll("button")].some(
+        (button) => button.textContent === "Continue to Example service",
+      ),
+    ).toBe(true);
+  } finally {
+    await view.unmount();
+  }
+});
+
+test("custom MCP setup discovers missing auth from its live endpoint", async () => {
+  const inspected: string[] = [];
+  const custom = {
+    ...item,
+    id: "custom-oauth",
+    enabled: false,
+    authKind: null,
+    connectionRef: null,
+  };
+  const client = {
+    listCapabilities: async () => ({ items: [custom] }),
+    inspectMcpAuthentication: async (_workspace: string, endpoint: string) => {
+      inspected.push(endpoint);
+      return { kind: "oauth2" };
+    },
+    connectTransport: () => ({}),
+  } as unknown as OpenGeniClient;
+  const view = await renderComponent(
+    <McpConnectionCard
+      client={client}
+      workspaceId="workspace"
+      capabilityId="custom-oauth"
+      name="Example service"
+      returnUrl="https://host.example/"
+      dialogOnly
+    />,
+  );
+  try {
+    await flush();
+    expect(inspected).toEqual(["https://service.example/mcp"]);
+    expect(document.querySelector('[role="alert"]')).toBeNull();
+    expect(
+      [...document.querySelectorAll("button")].some(
+        (button) => button.textContent === "Continue to Example service",
+      ),
+    ).toBe(true);
+  } finally {
+    await view.unmount();
+  }
+});
+
 test("a stalled connection reconciliation can close and reopen the inline card", async () => {
   const disconnected = {
     ...item,

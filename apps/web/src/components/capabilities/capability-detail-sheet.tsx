@@ -19,8 +19,12 @@ import {
   type RefObject,
 } from "react";
 
-import { ConnectorToolPermissions } from "./connector-tool-permissions";
+import {
+  ConnectorToolPermissions,
+  hasConnectorToolPermissionTarget,
+} from "./connector-tool-permissions";
 import { CapabilityLogo } from "@/components/capabilities/capability-logo";
+import { McpAuthDiscoveryNotice } from "./mcp-auth-discovery-notice";
 import { CapabilityDialogContent } from "@/components/capabilities/detail-dialog";
 import {
   capabilityPresentation,
@@ -241,6 +245,7 @@ export function DetailBody({
   canManageSocial,
   canManageSkills = false,
   onAction,
+  onRetryAuthInspection,
 }: {
   workspaceId?: string;
   item: CapabilityCatalogItem;
@@ -258,6 +263,7 @@ export function DetailBody({
   canManageSocial: boolean;
   canManageSkills?: boolean;
   onAction: (action: ConnectAction) => void;
+  onRetryAuthInspection?: (() => void) | undefined;
 }) {
   const plan = useMemo(() => capabilityConnectPlan(item), [item]);
   const defaultOwnership = defaultCapabilityConnectionOwnership(item);
@@ -393,11 +399,7 @@ export function DetailBody({
         ) : (
           <CuratedSkillProvenanceSection item={item} />
         )}
-        {workspaceId &&
-        item.enabled &&
-        item.kind === "mcp" &&
-        item.source !== "built_in" &&
-        item.surfaceType !== "codex_apps" ? (
+        {workspaceId && hasConnectorToolPermissionTarget(item, health) ? (
           <ConnectorToolPermissions
             key={`${workspaceId}:${item.id}`}
             workspaceId={workspaceId}
@@ -612,11 +614,15 @@ export function DetailBody({
               </ConnectionActions>
             </div>
           ) : plan.mode === "setup_required" ? (
-            <p role="status" className="text-sm text-fg-muted">
-              {item.metadata.authDiscovery === "checking"
-                ? "Checking sign-in requirements…"
-                : "Setup required. Check the provider’s instructions, or reopen to retry."}
-            </p>
+            <McpAuthDiscoveryNotice
+              checking={item.metadata.authDiscovery === "checking"}
+              message={
+                typeof item.metadata.authDiscoveryMessage === "string"
+                  ? item.metadata.authDiscoveryMessage
+                  : undefined
+              }
+              onRetry={onRetryAuthInspection}
+            />
           ) : item.kind === "mcp" ? (
             <ConnectionActions onCancel={onCancel} busy={busy}>
               <Button
@@ -917,12 +923,16 @@ export function FikenConnectorControls({
   busy,
   onAction,
   setupOnly = false,
+  oauthAvailable = true,
+  tokenAvailable = true,
 }: {
   item: CapabilityCatalogItem;
   health: ConnectionHealth;
   keyPageUrl: string | null;
   busy: boolean;
   setupOnly?: boolean;
+  oauthAvailable?: boolean;
+  tokenAvailable?: boolean;
   onAction: (action: ConnectAction) => void;
 }) {
   const [replacing, setReplacing] = useState(false);
@@ -1042,11 +1052,11 @@ export function FikenConnectorControls({
 
   return (
     <div className="space-y-3">
-      {oauthButton("Connect Fiken", <PlugIcon />)}
+      {oauthAvailable ? oauthButton("Connect Fiken", <PlugIcon />) : null}
       <p className="text-center text-xs text-fg-subtle">
         Uses your Fiken account. Agents and automations in this workspace can use it.
       </p>
-      {usingToken ? (
+      {tokenAvailable && (usingToken || !oauthAvailable) ? (
         <div className="space-y-3">
           {tokenForm("Connect for workspace", <PlugIcon />)}
           <p className="text-center text-xs text-fg-subtle">
@@ -1054,9 +1064,9 @@ export function FikenConnectorControls({
             personal tokens only for integrating your own company.
           </p>
         </div>
-      ) : (
+      ) : tokenAvailable ? (
         tokenFallbackToggle
-      )}
+      ) : null}
     </div>
   );
 }

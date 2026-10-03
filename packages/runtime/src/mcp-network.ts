@@ -17,7 +17,9 @@ export const MCP_MAX_RESPONSE_BYTES = 8 * 1024 * 1024;
 // a lower HTTP limit rejects valid calls before the tool can execute and turns
 // a deterministic transport refusal into apparent outcome uncertainty.
 export const MCP_MAX_INBOUND_REQUEST_BYTES = CODEMODE_ARGUMENTS_MAX_BYTES + 64 * 1024;
-export const MCP_MAX_TOOL_DEFINITION_BYTES = 128 * 1024;
+// Rich nested schemas fit within one bounded discovery/disclosure envelope.
+// Whole-server and aggregate limits still bound the complete catalog.
+export const MCP_MAX_TOOL_DEFINITION_BYTES = 512 * 1024;
 export const MCP_MAX_TOOL_LIST_BYTES = 4 * 1024 * 1024;
 export const MCP_MAX_AGGREGATE_TOOL_LIST_ENTRIES = MCP_MAX_CATALOG_TOOL_ENTRIES;
 // One provider may use the available catalog allowance. The shared budget
@@ -25,7 +27,7 @@ export const MCP_MAX_AGGREGATE_TOOL_LIST_ENTRIES = MCP_MAX_CATALOG_TOOL_ENTRIES;
 // silently excluded otherwise bounded catalogs from best-effort discovery.
 export const MCP_MAX_TOOL_LIST_ENTRIES = MCP_MAX_AGGREGATE_TOOL_LIST_ENTRIES;
 export const MCP_MAX_TOOL_RESULT_BYTES = 1024 * 1024;
-export const MCP_MAX_TOOL_SEARCH_DISCLOSURE_BYTES = 256 * 1024;
+export const MCP_MAX_TOOL_SEARCH_DISCLOSURE_BYTES = MCP_MAX_TOOL_DEFINITION_BYTES + 16 * 1024;
 export const MCP_MAX_SELECTED_SERVERS = 64;
 export const MCP_MAX_CONCURRENT_SERVER_OPERATIONS = 8;
 // @openai/agents has a separate lifecycle fence around MCPServer.connect().

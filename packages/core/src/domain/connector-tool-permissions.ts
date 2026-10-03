@@ -1,3 +1,4 @@
+import { slackRestMcpToolsForScopes } from "@opengeni/contracts/slack-rest-mcp";
 import { createHash } from "node:crypto";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
@@ -15,6 +16,8 @@ import type {
   ConnectorToolPermissionEntry,
   ConnectorToolPermissionsResponse,
   UpdateConnectorToolPermissionsRequest,
+  ConnectionMetadata,
+  McpServerConnectionRef,
 } from "@opengeni/contracts";
 import {
   buildConnectionTokenResolver,
@@ -27,7 +30,11 @@ import {
   type Database,
 } from "@opengeni/db";
 import { HTTPException } from "hono/http-exception";
-import { GMAIL_REST_MCP_TOOLS, isOfficialGmailMcpConfig } from "@opengeni/runtime";
+import {
+  GMAIL_REST_MCP_TOOLS,
+  isOfficialGmailMcpConfig,
+  isOfficialSlackMcpConfig,
+} from "@opengeni/runtime";
 import { hasPermission } from "../access";
 import { buildCapabilityCatalog, settingsWithMcpCapabilityServers } from "./capabilities";
 
@@ -57,6 +64,34 @@ export function connectorToolGroup(tool: ListedTool): "read" | "write" | "other"
     return "write";
   if (tool.annotations?.readOnlyHint === true) return "read";
   return "other";
+}
+
+/** A selector can supply discovery credentials only when one visible account
+ * matches. Never apply one account's approval choices to an arbitrary sibling. */
+export function unpinnedConnectorToolPermissionAccount<T extends ConnectionMetadata>(
+  ref: McpServerConnectionRef,
+  visible: T[],
+  subjectId: string,
+): T | null {
+  const matches = visible.filter(
+    (candidate) =>
+      candidate.subjectId === (ref.subjectScope === "subject" ? subjectId : null) &&
+      candidate.providerDomain === ref.providerDomain &&
+      (!ref.kind || candidate.kind === ref.kind) &&
+      candidate.status === "active",
+  );
+  if (matches.length > 1)
+    throw new HTTPException(409, {
+      message: "Choose one account to manage its tool permissions",
+    });
+  return matches[0] ?? null;
+}
+
+export function connectorToolPermissionReference(
+  ref: McpServerConnectionRef,
+  connectionId: string,
+): McpServerConnectionRef {
+  return { ...ref, accountSelection: undefined, connectionId };
 }
 
 async function resolveTarget(input: Input) {
@@ -97,20 +132,17 @@ async function resolveTarget(input: Input) {
         input.grant.subjectId,
       )
     : null;
-  if (ref?.subjectScope === "subject" && !ref.connectionId) {
+  if (
+    ref &&
+    !ref.connectionId &&
+    (ref.subjectScope === "subject" || ref.accountSelection === "all_eligible")
+  ) {
     const visible = await listConnectionsMetadata(
       input.db,
       input.workspaceId,
       input.grant.subjectId,
     );
-    connection =
-      visible.find(
-        (candidate) =>
-          candidate.subjectId === input.grant.subjectId &&
-          candidate.providerDomain === ref.providerDomain &&
-          (!ref.kind || candidate.kind === ref.kind) &&
-          candidate.status === "active",
-      ) ?? null;
+    connection = unpinnedConnectorToolPermissionAccount(ref, visible, input.grant.subjectId);
   }
   if (
     ref &&
@@ -134,17 +166,30 @@ async function resolveTarget(input: Input) {
   return { server, connection, connectionId };
 }
 
+/** Use the same adapter-owned identities as execution for reviewed local catalogs. */
+export function reviewedConnectorToolCatalog(
+  server: Pick<Settings["mcpServers"][number], "url" | "connectionRef" | "allowedTools">,
+  grantedScopes: readonly string[],
+): ListedTool[] | null {
+  const tools = isOfficialGmailMcpConfig(server.url, server.connectionRef)
+    ? GMAIL_REST_MCP_TOOLS
+    : isOfficialSlackMcpConfig(server.url, server.connectionRef)
+      ? slackRestMcpToolsForScopes(grantedScopes)
+      : null;
+  return (
+    tools?.filter((tool) => !server.allowedTools || server.allowedTools.includes(tool.name)) ?? null
+  );
+}
+
 async function listTools(
   input: Input,
   target: Awaited<ReturnType<typeof resolveTarget>>,
 ): Promise<ListedTool[]> {
-  // Runtime substitutes the reviewed REST bridge for this exact MCP identity.
-  // Its static catalog must not depend on Google's hosted MCP preview.
-  if (isOfficialGmailMcpConfig(target.server.url, target.server.connectionRef)) {
-    return GMAIL_REST_MCP_TOOLS.filter(
-      (tool) => !target.server.allowedTools || target.server.allowedTools.includes(tool.name),
-    );
-  }
+  const reviewed = reviewedConnectorToolCatalog(
+    target.server,
+    target.connection?.grantedScopes ?? [],
+  );
+  if (reviewed !== null) return reviewed;
   let headers = { ...target.server.headers };
   if (target.server.connectionRef) {
     const result = await buildConnectionTokenResolver(
@@ -155,7 +200,10 @@ async function listTools(
       ...(target.connection?.subjectId ? { subjectId: input.grant.subjectId } : {}),
       serverId: target.server.id,
       toolName: "tools/list",
-      connectionRef: { ...target.server.connectionRef, connectionId: target.connectionId },
+      connectionRef: connectorToolPermissionReference(
+        target.server.connectionRef,
+        target.connectionId,
+      ),
       destinationUrl: target.server.url,
     });
     if (result.status !== "ok") throw new Error("Reconnect this connector to load its tools.");

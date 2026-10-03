@@ -57,7 +57,12 @@ export type UseComputerFrameStreamResult = {
   frame: ComputerFrame | null;
   attachment: Pick<
     ComputerSessionAttachment,
-    "computerSessionId" | "controllerGeneration" | "targetId" | "stream" | "expiresAt"
+    | "computerSessionId"
+    | "controllerGeneration"
+    | "targetId"
+    | "inputAllowed"
+    | "stream"
+    | "expiresAt"
   > | null;
   error: Error | null;
   reconnect: () => void;
@@ -366,7 +371,7 @@ export function useComputerFrameStream(
             expiresInSeconds: 120,
             ...(streamRef.current ? { stream: streamRef.current } : {}),
           },
-          { signal: attachmentAbort.signal },
+          { signal: attachmentAbort.signal, timeoutMs: 15_000 },
         );
         if (disposed) return;
         if (
@@ -391,6 +396,7 @@ export function useComputerFrameStream(
             computerSessionId: attachment.computerSessionId,
             controllerGeneration: attachment.controllerGeneration,
             targetId: attachment.targetId,
+            inputAllowed: attachment.inputAllowed,
             stream: attachment.stream,
             expiresAt: attachment.expiresAt,
           },

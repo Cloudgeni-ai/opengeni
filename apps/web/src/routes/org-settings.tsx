@@ -1,11 +1,11 @@
 // Organization settings: General, People, Workspaces, Organization identity,
-// Models, Integrations, Billing & usage, Developer and Security & data.
+// Models, Integrations, Insights, Billing, Developer and Security & data.
 // They render inside the settings shell's Organization section
 // (components/settings/workspace-settings-shell.tsx); pages this person can't
 // use are hidden from the rail (lib/organization-settings-access.ts).
 import { useNavigate } from "@tanstack/react-router";
 import { PlusIcon, UserPlusIcon } from "lucide-react";
-import { lazy, Suspense, useCallback, useEffect, useMemo, type ReactNode } from "react";
+import { lazy, Suspense, useCallback, useEffect, useMemo, useState, type ReactNode } from "react";
 import { toast } from "sonner";
 
 import type { ReturnTo } from "@/lib/return-to";
@@ -44,6 +44,7 @@ import {
   resolveOrganizationSettingsSection,
 } from "@/lib/organization-settings-access";
 import type { OrganizationView } from "@/lib/organization-route";
+import { useOrganizationWorkspaces } from "@/components/models/connect-audience";
 import type { DeveloperLocation } from "@/lib/developer-route";
 import { hasAccountPermission } from "@/lib/permissions";
 import {
@@ -52,11 +53,30 @@ import {
 } from "@/lib/workspace-deletion";
 import type { OrganizationMembershipRole } from "@/types";
 
+const CheckoutCreditsCelebration = lazy(async () => {
+  const module = await import("@/components/credits/checkout-credits-celebration");
+  return { default: module.CheckoutCreditsCelebration };
+});
+
 const OrganizationDeveloperIntegrations = lazy(async () => {
   const module = await import("@/components/workspace-developer-settings");
   return { default: module.OrganizationDeveloperIntegrations };
 });
 
+const LazyOrganizationConnectedAgents = lazy(async () => {
+  const module = await import("@/components/organization-access/organization-connected-agents");
+  return { default: module.OrganizationConnectedAgents };
+});
+
+const LazyOrganizationServiceAccounts = lazy(async () => {
+  const module = await import("@/components/organization-access/organization-service-accounts");
+  return { default: module.OrganizationServiceAccounts };
+});
+
+const LazyOrganizationInsightsPage = lazy(async () => {
+  const module = await import("@/components/organization/insights-page");
+  return { default: module.OrganizationInsightsPage };
+});
 const LazyOrganizationModelsSection = lazy(async () => {
   const module = await import("@/components/models/organization-models-section");
   return { default: module.OrganizationModelsSection };
@@ -66,9 +86,19 @@ const LazyOrganizationApiKeysSection = lazy(async () => {
   return { default: module.OrganizationApiKeysSection };
 });
 
+// A Stripe return is a full page load, so one report per outcome per document
+// is one report per return, even when an effect runs twice.
+const reportedCheckoutReturns = new Set<string>();
+function takeCheckoutReturn(outcome: string): boolean {
+  if (reportedCheckoutReturns.has(outcome)) return false;
+  reportedCheckoutReturns.add(outcome);
+  return true;
+}
+
 export function OrgSettingsRoute({
   workspaceId,
   checkout,
+  checkoutSession,
   section: requestedSection,
   modelsAccount,
   modelsView,
@@ -78,11 +108,21 @@ export function OrgSettingsRoute({
   invitation,
   workspace,
   developer,
+  insights,
 }: {
   workspaceId: string;
+  /** Insights: the dashboard selection from the URL and how to change it. */
+  insights?:
+    | {
+        search: Record<string, string>;
+        onSearchChange: (next: Record<string, string | undefined>) => void;
+      }
+    | undefined;
   /** Developer: the webhook or provider page, or form, that is open. */
   developer?: DeveloperLocation | undefined;
   checkout?: "success" | "cancelled";
+  /** Stripe's session id on a same-tab return; its credits are celebrated once they land. */
+  checkoutSession?: string | undefined;
   section?: OrganizationAdminSection;
   /** Models: the account page that is open. */
   modelsAccount?: string | undefined;
@@ -159,13 +199,22 @@ export function OrgSettingsRoute({
   // the analytics module instead of the not-yet-installed observer shim.
   useEffect(() => {
     if (!checkout) return;
-    if (checkout === "success") {
+    if (takeCheckoutReturn(checkout)) {
       void import("@/lib/analytics")
-        .then(({ captureAnalyticsEvent }) => captureAnalyticsEvent("checkout_completed"))
+        .then(({ captureAnalyticsEvent }) =>
+          captureAnalyticsEvent(
+            checkout === "success" ? "checkout_completed" : "checkout_cancelled",
+          ),
+        )
         .catch(() => undefined);
-      toast.success("Payment received", {
-        description: "Your credits will appear shortly.",
-      });
+    }
+    if (checkout === "success") {
+      // With the session id, the celebration below names the real amount.
+      if (!checkoutSession) {
+        toast.success("Payment received", {
+          description: "Your credits will appear shortly.",
+        });
+      }
     } else {
       toast("Checkout cancelled", { description: "No charge was made." });
     }
@@ -175,7 +224,9 @@ export function OrgSettingsRoute({
       search: requestedSection ? { section: requestedSection } : {},
       replace: true,
     });
-  }, [checkout, navigate, requestedSection, workspaceId]);
+  }, [checkout, checkoutSession, navigate, requestedSection, workspaceId]);
+  // Kept past the URL cleanup above, which drops the session id right away.
+  const [celebratedCheckout] = useState(() => checkoutSession ?? null);
 
   const createWorkspace = useCallback(
     async (name: string, operationId: string): Promise<string | null> => {
@@ -245,7 +296,40 @@ export function OrgSettingsRoute({
     Boolean(accountId) &&
     hasAccountPermission(context.accessContext, accountId, "account:admin");
   // A webhook or provider page, or a form, brings its own back link and title.
-  const developerSubPage = Boolean(developer?.view || developer?.webhook);
+  // Create API key may name a service account to hold the key; that is the key
+  // form, not the service account's page.
+  const keyServiceAccount = organizationView === "new-key" ? developer?.serviceAccount : undefined;
+  const serviceAccountsLocation =
+    developer?.view === "new-service-account"
+      ? { view: "new-service-account" as const }
+      : developer?.serviceAccount && !keyServiceAccount
+        ? { serviceAccount: developer.serviceAccount }
+        : null;
+  const developerSubPage = Boolean(
+    developer?.view || developer?.webhook || developer?.agent || serviceAccountsLocation,
+  );
+  // Connected agents belong to the people who connect them, so any signed-in
+  // member sees their own; keys and services have none.
+  const showConnectedAgents =
+    Boolean(accountId) &&
+    context.clientConfig.productAccessMode === "managed" &&
+    context.accessContext.subjectId.startsWith("user:");
+  // Shared workspaces for an API key's "Only selected workspaces".
+  const organizationWorkspaces = useOrganizationWorkspaces(
+    client,
+    accountId,
+    section === "developer" && canManageOrganizationApiKeys && Boolean(accountId),
+  );
+  const connectedAgentsLocation =
+    developer?.view === "connect-agent"
+      ? { view: "connect-agent" as const }
+      : developer?.agent
+        ? { agent: developer.agent }
+        : {};
+  const listServiceAccounts = useCallback(
+    async () => (await client.listOrganizationServiceAccounts(accountId)).serviceAccounts,
+    [accountId, client],
+  );
   const navigateDeveloper = (next: DeveloperLocation) =>
     void navigate({
       to: "/workspaces/$workspaceId/organization",
@@ -264,6 +348,17 @@ export function OrgSettingsRoute({
     // A workspace's budget page brings its own back link and title too.
     (section === "billing" && Boolean(returnTo || workspace));
 
+  const checkoutCelebration =
+    celebratedCheckout && accountId && canReadBilling ? (
+      <Suspense fallback={null}>
+        <CheckoutCreditsCelebration
+          client={client}
+          accountId={accountId}
+          checkoutSessionId={celebratedCheckout}
+        />
+      </Suspense>
+    ) : null;
+
   return (
     <OrganizationDirectoryProvider
       key={identityKey}
@@ -278,147 +373,241 @@ export function OrgSettingsRoute({
       onCreateWorkspace={createWorkspace}
       onDeleteWorkspace={deleteWorkspace}
     >
-      <OrganizationSettingsFrame
-        workspaceId={workspaceId}
-        fallbackLabel={fallbackLabel}
-        section={modelsRefused ? "models" : section}
-        hideDescription={modelsRefused}
-        hideHeader={subPage}
-        actorRole={actorRole}
-      >
-        {modelsRefused ? (
-          <p className="m-0 text-sm leading-5 text-fg-muted">
-            Only admins manage models. Ask an admin to add one.
-          </p>
-        ) : null}
-
-        {!modelsRefused && section === "general" ? <OrganizationGeneralPage /> : null}
-
-        {!modelsRefused && section === "people" ? (
-          <OrganizationPeoplePage
-            workspaceId={workspaceId}
-            person={person}
-            invitation={invitation}
-            view={organizationView === "invite" ? "invite" : undefined}
+      {checkoutCelebration}
+      {section === "insights" ? (
+        <Suspense fallback={null}>
+          <OrganizationInsightsWithName
+            organizationId={accountId}
+            fallbackLabel={fallbackLabel}
+            anchorWorkspaceId={workspaceId}
+            canRead={canReadBilling}
+            search={insights?.search ?? {}}
+            onSearchChange={(next) => insights?.onSearchChange(next)}
           />
-        ) : null}
+        </Suspense>
+      ) : null}
+      {section === "insights" ? null : (
+        <OrganizationSettingsFrame
+          workspaceId={workspaceId}
+          fallbackLabel={fallbackLabel}
+          section={modelsRefused ? "models" : section}
+          hideDescription={modelsRefused}
+          hideHeader={subPage}
+          actorRole={actorRole}
+        >
+          {modelsRefused ? (
+            <p className="m-0 text-sm leading-5 text-fg-muted">
+              Only admins manage models. Ask an admin to add one.
+            </p>
+          ) : null}
 
-        {!modelsRefused && section === "workspaces" ? (
-          <OrganizationWorkspacesPage
-            workspaceId={workspaceId}
-            workspace={workspace}
-            view={organizationView === "new-workspace" ? "new-workspace" : undefined}
-            returnTo={returnTo}
-            onEnterWorkspace={(createdId) => {
-              context.resetSessionView();
-              void navigate({
-                to: "/workspaces/$workspaceId/sessions",
-                params: { workspaceId: createdId },
-              });
-            }}
-          />
-        ) : null}
+          {!modelsRefused && section === "general" ? <OrganizationGeneralPage /> : null}
 
-        {!modelsRefused && section === "models" ? (
-          <Suspense fallback={<Skeleton className="h-48 w-full rounded-lg" />}>
-            <OrganizationModelsSectionWithName
-              key={`${identityKey}:models`}
-              anchorWorkspaceId={workspaceId}
-              organizationId={accountId}
-              fallbackLabel={fallbackLabel}
-              administrator={administrator}
-              administeredWorkspaceIds={administeredWorkspaceIds}
+          {!modelsRefused && section === "people" ? (
+            <OrganizationPeoplePage
+              workspaceId={workspaceId}
+              person={person}
+              invitation={invitation}
+              view={organizationView === "invite" ? "invite" : undefined}
+            />
+          ) : null}
+
+          {!modelsRefused && section === "workspaces" ? (
+            <OrganizationWorkspacesPage
+              workspaceId={workspaceId}
               workspace={workspace}
-              account={modelsAccount}
-              view={modelsView}
+              view={organizationView === "new-workspace" ? "new-workspace" : undefined}
+              returnTo={returnTo}
+              onEnterWorkspace={(createdId) => {
+                context.resetSessionView();
+                void navigate({
+                  to: "/workspaces/$workspaceId/sessions",
+                  params: { workspaceId: createdId },
+                });
+              }}
             />
-          </Suspense>
-        ) : null}
+          ) : null}
 
-        {!modelsRefused && section === "identity" ? (
-          <OrganizationIdentityPage
-            workspaceId={workspaceId}
-            identityKey={identityKey}
-            canManage={canManageOrganizationKnowledge}
-            canManageAgentPolicy={canManageCompanyProfileAgentPolicy}
-          />
-        ) : null}
-
-        {!modelsRefused && section === "integrations" ? (
-          <OrganizationIntegrationsSection
-            key={`${identityKey}:integrations`}
-            client={client}
-            identity={adminIdentity}
-            actorRole={actorRole}
-            managedSession={organizationAdministratorSession}
-          />
-        ) : null}
-
-        {!modelsRefused && section === "developer" && developerSubPage ? (
-          <Suspense fallback={<Skeleton className="h-48 w-full rounded-lg" />}>
-            <OrganizationDeveloperIntegrations
-              key={`${identityKey}:developer-integrations`}
-              client={client}
-              organizationId={accountId}
-              canManage={canManageOrganizationIntegrations}
-              location={developer}
-              onNavigate={navigateDeveloper}
-            />
-          </Suspense>
-        ) : !modelsRefused && section === "developer" ? (
-          <div className="flex min-w-0 flex-col gap-8">
+          {!modelsRefused && section === "models" ? (
             <Suspense fallback={<Skeleton className="h-48 w-full rounded-lg" />}>
-              <LazyOrganizationApiKeysSection
-                key={`${identityKey}:organization-api-keys`}
+              <OrganizationModelsSectionWithName
+                key={`${identityKey}:models`}
+                anchorWorkspaceId={workspaceId}
                 organizationId={accountId}
-                canManage={canManageOrganizationApiKeys && Boolean(accountId)}
-                agentSettings={context.clientConfig.agentConfig?.enabled === true}
-                view={organizationView === "new-key" ? "new-key" : undefined}
-                onViewChange={(view) =>
+                fallbackLabel={fallbackLabel}
+                administrator={administrator}
+                administeredWorkspaceIds={administeredWorkspaceIds}
+                workspace={workspace}
+                account={modelsAccount}
+                view={modelsView}
+              />
+            </Suspense>
+          ) : null}
+
+          {!modelsRefused && section === "identity" ? (
+            <OrganizationIdentityPage
+              workspaceId={workspaceId}
+              identityKey={identityKey}
+              canManage={canManageOrganizationKnowledge}
+              canManageAgentPolicy={canManageCompanyProfileAgentPolicy}
+            />
+          ) : null}
+
+          {!modelsRefused && section === "integrations" ? (
+            <OrganizationIntegrationsSection
+              key={`${identityKey}:integrations`}
+              client={client}
+              identity={adminIdentity}
+              actorRole={actorRole}
+              managedSession={organizationAdministratorSession}
+            />
+          ) : null}
+
+          {!modelsRefused &&
+          section === "developer" &&
+          showConnectedAgents &&
+          (developer?.view === "connect-agent" || developer?.agent) ? (
+            <Suspense fallback={<Skeleton className="h-48 w-full rounded-lg" />}>
+              <LazyOrganizationConnectedAgents
+                key={`${identityKey}:connected-agents`}
+                client={client}
+                organizationId={accountId}
+                organizationName={fallbackLabel}
+                location={connectedAgentsLocation}
+                onNavigate={navigateDeveloper}
+                {...(canManageOrganizationApiKeys
+                  ? {
+                      onCreateApiKey: () =>
+                        void navigate({
+                          to: "/workspaces/$workspaceId/organization",
+                          params: { workspaceId },
+                          search: { section: "developer", view: "new-key" },
+                        }),
+                    }
+                  : {})}
+              />
+            </Suspense>
+          ) : !modelsRefused &&
+            section === "developer" &&
+            canManageOrganizationApiKeys &&
+            serviceAccountsLocation ? (
+            <Suspense fallback={<Skeleton className="h-48 w-full rounded-lg" />}>
+              <LazyOrganizationServiceAccounts
+                key={`${identityKey}:service-accounts`}
+                client={client}
+                organizationId={accountId}
+                canMakeAdmin={canManageOrganizationIntegrations}
+                location={serviceAccountsLocation}
+                onNavigate={navigateDeveloper}
+                onCreateKey={(serviceAccount) =>
                   void navigate({
                     to: "/workspaces/$workspaceId/organization",
                     params: { workspaceId },
-                    search: view ? { section: "developer", view } : { section: "developer" },
+                    search: { section: "developer", view: "new-key", serviceAccount },
                   })
-                }
-                listApiKeys={async () => await client.listOrganizationApiKeys(accountId)}
-                createApiKey={async (request) =>
-                  await client.createOrganizationApiKey(accountId, request)
-                }
-                deleteApiKey={async (apiKeyId) =>
-                  await client.deleteOrganizationApiKey(accountId, apiKeyId)
                 }
               />
             </Suspense>
-            {organizationView !== "new-key" && canManageOrganizationIntegrations && accountId ? (
+          ) : !modelsRefused && section === "developer" && developerSubPage ? (
+            <Suspense fallback={<Skeleton className="h-48 w-full rounded-lg" />}>
+              <OrganizationDeveloperIntegrations
+                key={`${identityKey}:developer-integrations`}
+                client={client}
+                organizationId={accountId}
+                canManage={canManageOrganizationIntegrations}
+                location={developer}
+                onNavigate={navigateDeveloper}
+              />
+            </Suspense>
+          ) : !modelsRefused && section === "developer" ? (
+            <div className="flex min-w-0 flex-col gap-8">
+              {organizationView !== "new-key" && showConnectedAgents ? (
+                <Suspense fallback={<Skeleton className="h-48 w-full rounded-lg" />}>
+                  <LazyOrganizationConnectedAgents
+                    key={`${identityKey}:connected-agents`}
+                    client={client}
+                    organizationId={accountId}
+                    organizationName={fallbackLabel}
+                    location={{}}
+                    onNavigate={navigateDeveloper}
+                  />
+                </Suspense>
+              ) : null}
+              {organizationView !== "new-key" && canManageOrganizationApiKeys && accountId ? (
+                <Suspense fallback={<Skeleton className="h-48 w-full rounded-lg" />}>
+                  <LazyOrganizationServiceAccounts
+                    key={`${identityKey}:service-accounts`}
+                    client={client}
+                    organizationId={accountId}
+                    canMakeAdmin={canManageOrganizationIntegrations}
+                    location={{}}
+                    onNavigate={navigateDeveloper}
+                    onCreateKey={(serviceAccount) =>
+                      void navigate({
+                        to: "/workspaces/$workspaceId/organization",
+                        params: { workspaceId },
+                        search: { section: "developer", view: "new-key", serviceAccount },
+                      })
+                    }
+                  />
+                </Suspense>
+              ) : null}
               <Suspense fallback={<Skeleton className="h-48 w-full rounded-lg" />}>
-                <OrganizationDeveloperIntegrations
-                  key={`${identityKey}:developer-integrations`}
-                  client={client}
+                <LazyOrganizationApiKeysSection
+                  key={`${identityKey}:organization-api-keys`}
                   organizationId={accountId}
-                  canManage
-                  location={{}}
-                  onNavigate={navigateDeveloper}
+                  canManage={canManageOrganizationApiKeys && Boolean(accountId)}
+                  agentSettings={context.clientConfig.agentConfig?.enabled === true}
+                  view={organizationView === "new-key" ? "new-key" : undefined}
+                  onViewChange={(view) =>
+                    void navigate({
+                      to: "/workspaces/$workspaceId/organization",
+                      params: { workspaceId },
+                      search: view ? { section: "developer", view } : { section: "developer" },
+                    })
+                  }
+                  listApiKeys={async () => await client.listOrganizationApiKeys(accountId)}
+                  createApiKey={async (request) =>
+                    await client.createOrganizationApiKey(accountId, request)
+                  }
+                  deleteApiKey={async (apiKeyId) =>
+                    await client.deleteOrganizationApiKey(accountId, apiKeyId)
+                  }
+                  workspaces={organizationWorkspaces.workspaces}
+                  listServiceAccounts={listServiceAccounts}
+                  {...(keyServiceAccount ? { initialServiceAccountId: keyServiceAccount } : {})}
                 />
               </Suspense>
-            ) : null}
-          </div>
-        ) : null}
+              {organizationView !== "new-key" && canManageOrganizationIntegrations && accountId ? (
+                <Suspense fallback={<Skeleton className="h-48 w-full rounded-lg" />}>
+                  <OrganizationDeveloperIntegrations
+                    key={`${identityKey}:developer-integrations`}
+                    client={client}
+                    organizationId={accountId}
+                    canManage
+                    location={{}}
+                    onNavigate={navigateDeveloper}
+                  />
+                </Suspense>
+              ) : null}
+            </div>
+          ) : null}
 
-        {!modelsRefused && section === "billing" ? (
-          <BillingSection returnTo={workspace ? undefined : returnTo}>
-            <OrganizationBillingPage
-              key={`${identityKey}:billing`}
-              identity={adminIdentity}
-              canReadBilling={canReadBilling}
-              canManageBilling={canManageBilling}
-              budgetWorkspaceId={workspace}
-            />
-          </BillingSection>
-        ) : null}
+          {!modelsRefused && section === "billing" ? (
+            <BillingSection returnTo={workspace ? undefined : returnTo}>
+              <OrganizationBillingPage
+                key={`${identityKey}:billing`}
+                identity={adminIdentity}
+                canReadBilling={canReadBilling}
+                canManageBilling={canManageBilling}
+                budgetWorkspaceId={workspace}
+              />
+            </BillingSection>
+          ) : null}
 
-        {!modelsRefused && section === "security" ? <OrganizationSecurityPage /> : null}
-      </OrganizationSettingsFrame>
+          {!modelsRefused && section === "security" ? <OrganizationSecurityPage /> : null}
+        </OrganizationSettingsFrame>
+      )}
     </OrganizationDirectoryProvider>
   );
 }
@@ -496,9 +685,30 @@ function BillingSection({
       back={{ label: returnTo.label, onClick: () => void navigate({ href: returnTo.path }) }}
       className={FLUSH_DETAIL_PAGE_CLASS}
     >
-      <DetailPageHeader title="Billing & usage" />
+      <DetailPageHeader title="Billing" />
       <div className="mt-6 min-w-0">{children}</div>
     </DetailPage>
+  );
+}
+
+/** Insights, named with the organization's real name once it has loaded. */
+function OrganizationInsightsWithName({
+  fallbackLabel,
+  ...props
+}: {
+  organizationId: string;
+  fallbackLabel: string;
+  anchorWorkspaceId: string;
+  canRead: boolean;
+  search: Record<string, string>;
+  onSearchChange: (next: Record<string, string | undefined>) => void;
+}) {
+  const directory = useOptionalOrganizationDirectory();
+  return (
+    <LazyOrganizationInsightsPage
+      {...props}
+      organizationName={directory?.overview.value?.organization.name ?? fallbackLabel}
+    />
   );
 }
 

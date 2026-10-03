@@ -24,11 +24,15 @@ import {
   getSession,
   getSessionTurn,
   peekSessionWork,
+  reconcileCompletedSandboxSetup,
+  advanceWorkspaceGenerationForRetainedProcess,
+  verifyRetainedProcessMutationSettlement,
   type DbClient,
 } from "@opengeni/db";
 import {
   isModalCommandStartOutcomeUnknownError,
   ProviderCommandStartOutcomeUnknownError,
+  ProviderCommandObservationUnavailableError,
   RoutingMutationOutcomeUnknownError,
 } from "@opengeni/runtime";
 import type { ModalRouterProviderCommand } from "@opengeni/contracts";
@@ -219,11 +223,24 @@ function unknownCommand(instanceId: string) {
   };
 }
 
-test.each(["exited", "lost"] as const)(
-  "the real retained SDK writer parks its owning turn even after exact %s proof",
-  async (terminal) => {
+test.each([
+  ["start", "exited"],
+  ["start", "lost"],
+  ["observation", "exited"],
+  ["observation", "lost"],
+] as const)(
+  "the real retained %s writer parks its owning turn even after exact %s proof",
+  async (boundary, terminal) => {
     const fixture = await admittedInternalMutation();
-    const { error: original, command } = unknownCommand(fixture.instanceId);
+    const { error: startUnknown, command } = unknownCommand(fixture.instanceId);
+    if (boundary === "observation") command.streams.stdout.byteOffset = 17;
+    const original =
+      boundary === "start"
+        ? startUnknown
+        : new ProviderCommandObservationUnavailableError(
+            command,
+            Object.assign(new Error("Read unavailable after Start acknowledgement"), { code: 14 }),
+          );
     let starts = 0;
     const failure = await fixture.runtime
       .runWorkspaceMutationForSandbox(
@@ -235,6 +252,26 @@ test.each(["exited", "lost"] as const)(
         },
       )
       .catch((error) => error);
+    const firstProcessId = (failure as RoutingMutationOutcomeUnknownError).retainedProcess!.id;
+    const childAdmission = await advanceWorkspaceGenerationForRetainedProcess(client.db, {
+      accountId: fixture.accountId,
+      workspaceId: fixture.workspaceId,
+      sessionId: fixture.session.id,
+      processId: firstProcessId,
+      operation: "writeStdin",
+    });
+    const secondUnknown = unknownCommand(fixture.instanceId);
+    const secondFailure = await fixture.runtime
+      .runWorkspaceMutationForSandbox(fixture.sandbox as never, "execCommand", async () => {
+        throw secondUnknown.error;
+      })
+      .catch((error) => error);
+    const secondScope = {
+      accountId: fixture.accountId,
+      workspaceId: fixture.workspaceId,
+      sessionId: fixture.session.id,
+      processId: (secondFailure as RoutingMutationOutcomeUnknownError).retainedProcess!.id,
+    };
     const context = createTurnContext({ settings: testSettings(), cancellationRequestedAt: null });
     Object.assign(context.attempt, {
       turnId: fixture.claim.turn.id,
@@ -280,11 +317,12 @@ test.each(["exited", "lost"] as const)(
       },
     });
     const [retained] = await shared.admin`select provider_command from sandbox_retained_processes
-    where workspace_id = ${fixture.workspaceId} and session_id = ${fixture.session.id}`;
+    where id=${firstProcessId}`;
     expect(retained!.provider_command).toEqual(command);
     const [admission] =
       await shared.admin`select provider_outcome, settled_at from sandbox_workspace_mutation_admissions
-    where workspace_id = ${fixture.workspaceId} and session_id = ${fixture.session.id}`;
+    where actor_kind='turn' and operation='eagerOwnedSandboxSetup'
+      and workspace_id = ${fixture.workspaceId} and session_id = ${fixture.session.id}`;
     expect(admission).toMatchObject({ provider_outcome: "retained", settled_at: null });
     expect(
       await readWorkspaceArchiveCapturePreflight(client.db, {
@@ -305,6 +343,17 @@ test.each(["exited", "lost"] as const)(
     };
     const process = await getRetainedProcess(client.db, processScope);
     expect(process).not.toBeNull();
+    const setupScope = {
+      accountId: fixture.accountId,
+      workspaceId: fixture.workspaceId,
+      sessionId: fixture.session.id,
+      turnId: fixture.claim.turn.id,
+      attemptId: fixture.attemptId,
+    };
+    expect(await reconcileCompletedSandboxSetup(client.db, setupScope)).toEqual({
+      reconciled: false,
+      events: [],
+    });
     if (terminal === "exited") {
       await settleRetainedProcess(client.db, {
         ...processScope,
@@ -333,6 +382,38 @@ test.each(["exited", "lost"] as const)(
       temporalWorkflowRunId: fixture.workflowRunId,
       temporalActivityId: fixture.dispatchId,
     });
+    expect(await reconcileCompletedSandboxSetup(client.db, setupScope)).toEqual({
+      reconciled: false,
+      events: [],
+    });
+    const secondProcess = await getRetainedProcess(client.db, secondScope);
+    if (terminal === "exited") {
+      await settleRetainedProcess(client.db, {
+        ...secondScope,
+        expected: retainedProcessSettlementIdentity(secondProcess!),
+        outcome: "exited",
+        exitCode: 0,
+        reason: "provider_exit_banner",
+        idleGraceMs: 0,
+      });
+    }
+    // Even with every invocation exited, a child admission can be last to settle.
+    expect(await reconcileCompletedSandboxSetup(client.db, setupScope)).toEqual({
+      reconciled: false,
+      events: [],
+    });
+    const [wakeBefore] =
+      await shared.admin`select wake_revision from session_workflow_wake_outbox where session_id=${fixture.session.id}`;
+    await verifyRetainedProcessMutationSettlement(client.db, {
+      ...processScope,
+      admission: childAdmission,
+      operation: "writeStdin",
+      outcome: "rejected",
+    });
+    const [wakeAfter] =
+      await shared.admin`select wake_revision from session_workflow_wake_outbox where session_id=${fixture.session.id}`;
+    if (terminal === "exited")
+      expect(Number(wakeAfter!.wake_revision)).toBeGreaterThan(Number(wakeBefore!.wake_revision));
     expect(await peekSessionWork(client.db, fixture.workspaceId, fixture.session.id)).toMatchObject(
       {
         kind: "admission-blocked",
@@ -351,6 +432,64 @@ test.each(["exited", "lost"] as const)(
       }),
     ).toMatchObject({ action: "unclaimed", reason: "no-work" });
     expect(starts).toBe(1);
+    const before = await getSessionTurn(client.db, fixture.workspaceId, fixture.claim.turn.id);
+    expect(
+      await reconcileCompletedSandboxSetup(client.db, {
+        ...setupScope,
+        attemptId: crypto.randomUUID(),
+      }),
+    ).toEqual({ reconciled: false, events: [] });
+    if (terminal === "exited") {
+      await shared.admin`update sessions set direct_control_state='paused', direct_pause_revision=1, control_version=1 where id=${fixture.session.id}`;
+      expect(await reconcileCompletedSandboxSetup(client.db, setupScope)).toEqual({
+        reconciled: false,
+        events: [],
+      });
+      await shared.admin`update sessions set direct_control_state='active', direct_pause_revision=null where id=${fixture.session.id}`;
+      const exhausted = {
+        version: 1,
+        turnId: fixture.claim.turn.id,
+        attemptId: fixture.attemptId,
+        reason: "sandbox_command_start_recovery_exhausted",
+        setupOutcome: "not_started",
+        providerRecoveryCount: 5,
+      };
+      await shared.admin`update session_turns set metadata=metadata || ${shared.admin.json({ sandboxSetupRecoveryExhausted: exhausted })} where id=${fixture.claim.turn.id}`;
+      expect(await reconcileCompletedSandboxSetup(client.db, setupScope)).toEqual({
+        reconciled: false,
+        events: [],
+      });
+      await shared.admin`update session_turns set metadata=metadata - 'sandboxSetupRecoveryExhausted' where id=${fixture.claim.turn.id}`;
+    }
+    const reconciled = await reconcileCompletedSandboxSetup(client.db, setupScope);
+    expect(reconciled.reconciled).toBe(terminal === "exited");
+    expect(reconciled.events).toHaveLength(terminal === "exited" ? 1 : 0);
+    if (terminal === "exited") {
+      const after = await getSessionTurn(client.db, fixture.workspaceId, fixture.claim.turn.id);
+      expect(after).toMatchObject({
+        status: "recovering",
+        id: before!.id,
+        triggerEventId: before!.triggerEventId,
+        executionGeneration: before!.executionGeneration,
+      });
+      expect(after!.metadata).toEqual(
+        Object.fromEntries(
+          Object.entries(before!.metadata ?? {}).filter(
+            ([key]) => key !== "sandboxSetupOutcomeUnknown",
+          ),
+        ),
+      );
+      expect((await peekSessionWork(client.db, fixture.workspaceId, fixture.session.id)).kind).toBe(
+        "runnable",
+      );
+      expect(await reconcileCompletedSandboxSetup(client.db, setupScope)).toEqual({
+        reconciled: false,
+        events: [],
+      });
+      const [wake] =
+        await shared.admin`select reason from session_workflow_wake_outbox where session_id=${fixture.session.id}`;
+      expect(wake!.reason).toBe("sandbox_setup_physically_settled");
+    }
   },
 );
 

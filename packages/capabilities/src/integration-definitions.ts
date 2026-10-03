@@ -266,7 +266,6 @@ export const MICROSOFT_OUTLOOK_CALENDAR_INTEGRATION_DEFINITION: IntegrationDefin
       "/me/calendarGroups",
       "/me/calendarView",
       "/me/events",
-      "/me/findMeetingTimes",
       "/me/reminderView",
     ],
   },

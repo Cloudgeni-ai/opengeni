@@ -35,6 +35,7 @@ const TOP_LEVEL_PAGES: ReadonlyArray<readonly [RegExp, string]> = [
   [/^\/billing$/, "checkout-return"],
   [/^\/integrations$/, "integration-return"],
   [/^\/device$/, "device"],
+  [/^\/connect-agent$/, "connect-agent"],
   [/^\/reset-password$/, "reset-password"],
   [/^\/setup-account$/, "setup-account"],
   [/^\/account-auth$/, "account-auth"],
@@ -45,6 +46,7 @@ const SECTIONS = new Set([
   "models",
   "members",
   "billing",
+  "insights",
   "usage",
   "security",
   "integrations",
@@ -72,6 +74,11 @@ const SECTIONS = new Set([
   "identity",
   "capabilities",
 ]);
+
+/** Every `page` value `journeyPage` can report. */
+export function journeyPageLabels(): ReadonlySet<string> {
+  return new Set([...PAGES, ...TOP_LEVEL_PAGES.map(([, page]) => page), "other"]);
+}
 
 export function journeyPage(pathname: string, search = ""): JourneyProperties {
   const parts = pathname.split("/").filter(Boolean);

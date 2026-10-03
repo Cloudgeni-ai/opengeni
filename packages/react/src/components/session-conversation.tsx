@@ -12,7 +12,7 @@ import {
 import type { SiteSnapshotClient } from "./artifacts/chat-interactive-block";
 import { useOpenGeni, type ClientOverride } from "../session-context";
 import { useWorkspaceModelCatalog } from "../hooks/use-available-models";
-import { ModelPolicyPicker } from "./model-policy-picker";
+import { ModelPolicyPicker, type ModelPolicyPickerProps } from "./model-policy-picker";
 import { useSessionEvents } from "../hooks/use-session-events";
 import { useSession } from "../hooks/use-session";
 import { useTurnQueue } from "../hooks/use-turn-queue";
@@ -37,6 +37,24 @@ import {
 import type { UserMessageDisclosureLabels } from "./user-message-body";
 import { conversationTimeline } from "../conversation-timeline";
 import { cn } from "../lib/cn";
+import { useErrorMessage } from "../lib/error-message";
+import {
+  useHostTheme,
+  type HostSurfacePreference,
+  type HostThemePreference,
+} from "../lib/host-theme";
+
+export type SessionConversationLabels = {
+  /** Banner action after a refresh failure; the conversation stays mounted. */
+  retry: string;
+  /** Action when the conversation could not load at all. */
+  tryAgain: string;
+};
+
+const DEFAULT_CONVERSATION_LABELS: SessionConversationLabels = {
+  retry: "Retry",
+  tryAgain: "Try again",
+};
 
 export type SessionConversationProps = ClientOverride & {
   sessionId: string;
@@ -76,16 +94,33 @@ export type SessionConversationProps = ClientOverride & {
    */
   attachments?: boolean | undefined;
   /**
-   * Show the model/reasoning picker. Defaults to shown unless the client config
-   * reports `modelSelection: false` (a host proxy that fixes the model policy).
+   * Show the model/reasoning picker. End users of an embedded product rarely
+   * choose models, so it is hidden unless this is `true` or the client config
+   * reports `modelSelection: true` (`createSessionProxyHandler({ modelSelection: true })`).
    */
   modelPicker?: boolean | undefined;
+  /** Model-picker appearance only; visibility, policy and delivery remain owned here. */
+  modelPickerProps?: Pick<ModelPolicyPickerProps, "groupPresentation" | "messages"> | undefined;
   /** Localized actions for already-sent user-message disclosure. */
   userMessageDisclosureLabels?: UserMessageDisclosureLabels | undefined;
   loadSkillReview?: HumanInputSurfaceProps["loadSkillReview"];
   className?: string;
   /** Defaults to filling the host. The host owns available height. */
   height?: CSSProperties["height"];
+  /**
+   * Light or dark. Defaults to `auto`: follow the host page (an enclosing
+   * `data-og-theme`, `class="dark"`/`data-theme` on <html> or <body>, the
+   * host's `color-scheme`, then its background), not the OS setting alone.
+   */
+  theme?: HostThemePreference | undefined;
+  /**
+   * `host` (default) derives backgrounds and cards from the host background so
+   * the conversation blends in; `theme` uses the `--og-color-*` surface tokens
+   * as they are. Customized surface tokens are always kept.
+   */
+  surface?: HostSurfacePreference | undefined;
+  /** Conversation-owned copy (error actions). */
+  labels?: Partial<SessionConversationLabels> | undefined;
   /** Presentation/custom controls only; queue and delivery wiring stay owned here. */
   composerProps?: Omit<
     ChatComposerProps,
@@ -96,7 +131,15 @@ export type SessionConversationProps = ClientOverride & {
 /** Complete existing-session conversation. Uses the provider's normal SDK client
  * (including Site clients), one shared event feed, and authoritative queue state. */
 export function SessionConversation(props: SessionConversationProps) {
-  return <Conversation key={`${props.workspaceId ?? ""}:${props.sessionId}`} {...props} />;
+  // A failed initial load retries by remounting the whole conversation.
+  const [attempt, setAttempt] = useState(0);
+  return (
+    <Conversation
+      key={`${props.workspaceId ?? ""}:${props.sessionId}:${attempt}`}
+      {...props}
+      onRetry={() => setAttempt((value) => value + 1)}
+    />
+  );
 }
 
 function Conversation({
@@ -110,16 +153,22 @@ function Conversation({
   allowanceExhaustedLabels,
   attachments: attachmentsRequested = true,
   modelPicker,
+  modelPickerProps,
   userMessageDisclosureLabels,
   loadSkillReview,
   client,
   workspaceId,
   className,
   height = "100%",
+  theme,
+  surface,
+  labels: labelOverrides,
   composerProps,
-}: SessionConversationProps) {
+  onRetry,
+}: SessionConversationProps & { onRetry: () => void }) {
   const scope = { client, workspaceId };
   const context = useOpenGeni(scope);
+  const formatError = useErrorMessage();
   const config = useClientConfigFlags(context.client);
   const showModelPicker = modelPicker ?? config.modelSelection;
   const catalog = useWorkspaceModelCatalog({
@@ -159,6 +208,7 @@ function Conversation({
       : {}),
   });
   const region = useRef<HTMLDivElement>(null);
+  const hostTheme = useHostTheme(region, { theme, surface });
   const defaultInteractiveBlock = useDefaultInteractiveBlock(
     context.client,
     context.workspaceId,
@@ -192,48 +242,95 @@ function Conversation({
     () => chainLinkResolvers(resolveLink, viewerLinks, inheritedLinks, defaultLinks) ?? undefined,
     [resolveLink, viewerLinks, inheritedLinks, defaultLinks],
   );
+  const labels = { ...DEFAULT_CONVERSATION_LABELS, ...labelOverrides };
   const error = detail.error ?? feed.error ?? human.error;
+  // Only an event feed that never loaded replaces the timeline; anything else
+  // is a refresh failure shown above a conversation that stays usable.
+  const loadFailed = Boolean(feed.error) && feed.events.length === 0;
+  const retryInPlace = () => {
+    if (detail.error) void detail.refresh();
+    if (human.error) void human.refresh();
+    if (feed.error) void feed.jumpToLatest();
+  };
+  const running = status === "running" || status === "recovering" || status === "waiting_capacity";
   return (
     <div
       className={cn(
-        "og-root flex min-h-0 min-w-0 flex-col gap-2 overflow-hidden bg-og-bg text-og-fg",
+        "og-root flex min-h-0 min-w-0 flex-col gap-2 overflow-hidden bg-og-bg text-og-base text-og-fg",
         className,
       )}
       ref={region}
-      style={{ height }}
+      style={{ ...hostTheme.style, height }}
+      data-og-theme={hostTheme.attribute}
+      data-og-host-theme=""
       data-og-conversation=""
     >
-      {error && <p role="alert">{error.message}</p>}
-      <MessageTimeline
-        renderMessageText={renderMessageText}
-        resolveLink={links}
-        renderInteractiveBlock={
-          renderInteractiveBlock === false
-            ? undefined
-            : (renderInteractiveBlock ?? defaultInteractiveBlock)
-        }
-        userMessageDisclosureLabels={userMessageDisclosureLabels}
-        renderAllowanceExhausted={renderAllowanceExhausted}
-        allowanceExhaustedLabels={allowanceExhaustedLabels}
-        className="min-h-0 flex-1"
-        {...(toolRegistry ? { toolRegistry } : {})}
-        events={feed.events}
-        items={conversationTimeline(feed.timeline, queue, composer)}
-        turnSummary={{ rolling: true }}
-        status={status}
-        hasOlder={feed.hasOlder}
-        loadingOlder={feed.loadingOlder}
-        onLoadOlder={feed.loadOlder}
-        hasNewer={feed.hasNewer}
-        loadingNewer={feed.loadingNewer}
-        onLoadNewer={feed.loadNewer}
-        onJumpToStart={async () => {
-          await feed.loadOldest();
-        }}
-        loadingOldest={feed.loadingOldest}
-        onJumpToLatest={feed.jumpToLatest}
-        onAnnotate={importedArchive ? undefined : composer.addAnnotation}
-      />
+      {error && !loadFailed ? (
+        <div
+          role="alert"
+          className="mx-auto flex w-full max-w-3xl shrink-0 items-center gap-3 rounded-og-md border border-og-status-failed/30 bg-og-status-failed/10 px-3 py-2 text-og-sm text-og-fg"
+          data-og-conversation-error=""
+        >
+          <span className="min-w-0 flex-1">{formatError(error)}</span>
+          <button
+            type="button"
+            onClick={retryInPlace}
+            className="shrink-0 rounded-og-sm px-2 py-1 font-medium text-og-fg hover:bg-og-hover"
+          >
+            {labels.retry}
+          </button>
+        </div>
+      ) : null}
+      {loadFailed ? (
+        <div
+          role="alert"
+          className="flex min-h-0 flex-1 flex-col items-center justify-center gap-3 px-6 text-center"
+          data-og-conversation-error=""
+        >
+          <p className="max-w-sm text-og-base text-og-fg-muted">{formatError(feed.error)}</p>
+          <button
+            type="button"
+            onClick={onRetry}
+            className="inline-flex min-h-9 items-center rounded-og-md border border-og-border bg-og-surface-1 px-3 py-1.5 text-og-sm font-medium text-og-fg hover:bg-og-surface-2"
+          >
+            {labels.tryAgain}
+          </button>
+        </div>
+      ) : (
+        <MessageTimeline
+          renderMessageText={renderMessageText}
+          resolveLink={links}
+          renderInteractiveBlock={
+            renderInteractiveBlock === false
+              ? undefined
+              : (renderInteractiveBlock ?? defaultInteractiveBlock)
+          }
+          userMessageDisclosureLabels={userMessageDisclosureLabels}
+          renderAllowanceExhausted={renderAllowanceExhausted}
+          allowanceExhaustedLabels={allowanceExhaustedLabels}
+          // Isolated and clipped: floating navigation stays inside the timeline.
+          className="isolate min-h-0 flex-1 overflow-hidden"
+          {...(toolRegistry ? { toolRegistry } : {})}
+          events={feed.events}
+          items={conversationTimeline(feed.timeline, queue, composer)}
+          turnSummary={{ rolling: true }}
+          status={status}
+          hasOlder={feed.hasOlder}
+          loadingOlder={feed.loadingOlder}
+          onLoadOlder={feed.loadOlder}
+          hasNewer={feed.hasNewer}
+          loadingNewer={feed.loadingNewer}
+          onLoadNewer={feed.loadNewer}
+          onJumpToStart={async () => {
+            await feed.loadOldest();
+          }}
+          loadingOldest={feed.loadingOldest}
+          onJumpToLatest={feed.jumpToLatest}
+          onAnnotate={importedArchive ? undefined : composer.addAnnotation}
+          // A narrow embed above a decision card has no room for the pill.
+          questionNavMinViewportHeight={320}
+        />
+      )}
       {importedArchive ? (
         <p className="shrink-0 px-4 py-2 text-center text-sm text-og-muted" role="status">
           Archived conversation · Read only
@@ -241,7 +338,9 @@ function Conversation({
       ) : (
         <>
           <div
-            className="min-h-0 max-h-[40%] shrink-0 overflow-y-auto"
+            // Above the timeline's floating navigation, which may never paint
+            // over a decision card.
+            className="relative z-20 min-h-0 max-h-[40%] shrink-0 overflow-y-auto empty:hidden"
             data-og-conversation-inputs=""
           >
             {approvals.length > 0 && !terminal ? (
@@ -259,14 +358,16 @@ function Conversation({
               />
             ) : null}
             <HumanInputSurface
+              className="mx-auto max-w-3xl"
               loadSkillReview={loadSkillReview}
               requests={human.requests}
               onSubmit={async (id, response) => {
                 await human.respond(id, response);
               }}
               respondingRequestId={human.respondingRequestId}
-              error={human.mutationError?.message}
+              error={human.mutationError ? formatError(human.mutationError) : null}
               autoFocus={false}
+              decisionButtons
             />
             {terminal ? (
               <SessionChrome queue={queue} sessionStatus={status} readOnly />
@@ -281,8 +382,13 @@ function Conversation({
               />
             )}
           </div>
-          <div className="shrink-0" data-og-conversation-composer="">
+          <div
+            className="relative z-20 mx-auto w-full max-w-3xl shrink-0"
+            data-og-conversation-composer=""
+          >
             <ChatComposer
+              runControl="stop"
+              running={running}
               {...composerProps}
               composer={composer}
               attachments={uploadsEnabled ? files : undefined}
@@ -291,6 +397,8 @@ function Conversation({
                 composerProps?.controlsStart ??
                 (showModelPicker && composer.policy && (
                   <ModelPolicyPicker
+                    groupPresentation={modelPickerProps?.groupPresentation}
+                    messages={modelPickerProps?.messages}
                     rows={catalog.rows}
                     model={composer.policy.model}
                     effort={composer.policy.reasoningEffort}
@@ -376,7 +484,11 @@ function useClientConfigFlags(client: {
     sandboxFiles?: boolean | undefined;
   }>;
 }): { uploads: boolean; modelSelection: boolean; sandboxFiles: boolean } {
-  const [flags, setFlags] = useState({ uploads: false, modelSelection: true, sandboxFiles: false });
+  const [flags, setFlags] = useState({
+    uploads: false,
+    modelSelection: false,
+    sandboxFiles: false,
+  });
   useEffect(() => {
     let live = true;
     client.getClientConfig().then(
@@ -384,7 +496,8 @@ function useClientConfigFlags(client: {
         if (live) {
           setFlags({
             uploads: config.fileUploads?.enabled === true,
-            modelSelection: config.modelSelection !== false,
+            // Only an explicit offer shows end users the picker.
+            modelSelection: config.modelSelection === true,
             sandboxFiles: config.sandboxFiles !== false,
           });
         }

@@ -73,6 +73,7 @@ import type { ComposerOptimisticMessage, ComposerState } from "../hooks/use-comp
 import type { UseGoalResult } from "../hooks/use-goal";
 import type { UseTurnQueueResult } from "../hooks/use-turn-queue";
 import { cn } from "../lib/cn";
+import { useErrorMessage } from "../lib/error-message";
 import { formatClockTime } from "../lib/format";
 import { requestQueueDraftEdit } from "./queue-draft-policy";
 import { QUEUE_ITEM_CONTENT_UNAVAILABLE, queueItemContent } from "./queue-item-content";
@@ -220,6 +221,9 @@ export function sessionChromeGoalPillExplanation(
       ? `Continues at ${formatClockTime(continuation.nextAttemptAt)}.`
       : "Waiting to continue automatically.";
   }
+  if (state === "waiting" && continuation?.reason === "system_work_pending") {
+    return "Waiting for other session work to finish before the goal continues automatically.";
+  }
   if (state === "held" && continuation?.reason === "held_for_input") {
     const reason = continuation.holdReason?.trim();
     const until = continuation.nextAttemptAt
@@ -349,7 +353,12 @@ export function sessionChromeGoalPillState(
   // next evaluation at `nextAttemptAt`) is an ordinary scheduled state.
   if (continuation.state === "scheduled") return "scheduled";
   if (continuation.state === "blocked") {
-    if (continuation.reason === "human_turn_running") return "waiting";
+    if (
+      continuation.reason === "human_turn_running" ||
+      continuation.reason === "system_work_pending"
+    ) {
+      return "waiting";
+    }
     // `held_for_input` is the agent's own wait_for_input hold (waiting for child
     // results / external input until a deadline); it shares the Held pill.
     return continuation.reason === "workstream_paused" || continuation.reason === "held_for_input"
@@ -453,6 +462,7 @@ export function SessionChrome({
   defaultActive = null,
   onActiveChange,
 }: SessionChromeProps) {
+  const formatError = useErrorMessage();
   const [activityRequested, setActivityOpen] = useState(
     Boolean(defaultActive && ["incoming", "agents", "commands"].includes(defaultActive)),
   );
@@ -1192,7 +1202,7 @@ export function SessionChrome({
           </AnimatePresence>
           {goal?.mutationError ? (
             <p role="alert" className="px-3 pb-2 text-og-xs text-og-danger">
-              Goal action not confirmed. {goal.mutationError.message}
+              Goal action not confirmed. {formatError(goal.mutationError)}
             </p>
           ) : null}
           <div
@@ -1667,6 +1677,7 @@ function GoalPanel({
   elapsed: string | null;
   readOnly: boolean;
 }) {
+  const formatError = useErrorMessage();
   const record = goal.goal;
   if (!record) return null;
   const canToggle = !readOnly && (record.status === "active" || record.status === "paused");
@@ -1699,7 +1710,7 @@ function GoalPanel({
       ) : null}
       {record.continuation?.lastError ? (
         <p className="rounded-og-sm bg-og-status-waiting/10 px-1.5 py-1 text-og-xs leading-4 text-og-status-waiting">
-          {record.continuation.lastError}
+          {formatError(record.continuation.lastError)}
         </p>
       ) : null}
       <div className="flex flex-wrap items-center justify-between gap-1.5 pt-0.5">

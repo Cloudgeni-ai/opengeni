@@ -77,7 +77,12 @@ const context = {
         return createdCatalogItem;
       },
     ),
-    inspectMcpAuthentication: mock(async () => ({ kind: "none" as const })),
+    inspectMcpAuthentication: mock(
+      async (): Promise<{
+        kind: "oauth2" | "none" | "unknown";
+        message?: string;
+      }> => ({ kind: "none" }),
+    ),
     listConnections: async () => connections,
     listSocialConnections: async () => [],
     listSlackInstallationBindings: async () => [],
@@ -100,7 +105,15 @@ const context = {
   },
   workspaceCapabilityCatalog: [catalogItem],
   githubStatus: null as { status: string } | null,
+  githubRepos: [],
+  githubCatalogReady: true,
+  githubStatusFailed: false,
+  repoBusy: false,
+  personalGitHubBusy: false,
   refreshGitHub,
+  refreshPersonalGitHub: async () => {},
+  captureWorkspaceInvocation: () => ({ revision: 1 }),
+  workspaces: [],
   refreshWorkspaceMcpServers: async () => {},
   accessContext: {
     workspaceGrants: [{ workspaceId: "workspace", permissions: ["connections:read"] }],
@@ -243,6 +256,56 @@ function button(container: HTMLElement, label: string) {
 }
 
 describe("conversation connection card", () => {
+  test("URL-less setup keeps provider guidance without offering an ineffective retry", async () => {
+    context.client.inspectMcpAuthentication.mockClear();
+    const custom = CapabilityCatalogItem.parse({
+      ...catalogItem,
+      authKind: null,
+      mcpUrl: null,
+      endpointUrl: null,
+      metadata: {},
+    });
+    const h = await render(false, custom, custom);
+    try {
+      await act(async () => button(h.container, "Connect Example").click());
+      expect(h.container.textContent).toContain("Check the provider's instructions.");
+      expect(
+        [...h.container.querySelectorAll("button")].some((node) => node.textContent === "Retry"),
+      ).toBe(false);
+      expect(context.client.inspectMcpAuthentication).not.toHaveBeenCalled();
+    } finally {
+      await h.close();
+    }
+  });
+
+  test("shows discovery failures and retries into OAuth without writing a connection", async () => {
+    let inspections = 0;
+    context.client.inspectMcpAuthentication.mockImplementation(async () => {
+      inspections += 1;
+      return inspections === 1
+        ? {
+            kind: "unknown",
+            message: "The provider returned HTTP 403 while checking how to sign in.",
+          }
+        : { kind: "oauth2" };
+    });
+    const custom = { ...catalogItem, authKind: null, metadata: { authDiscovery: "unknown" } };
+    const h = await render(false, custom, custom);
+    try {
+      await act(async () => button(h.container, "Connect Example").click());
+      expect(h.container.textContent).toContain("HTTP 403");
+      await act(async () => button(h.container, "Retry").click());
+      expect(inspections).toBe(2);
+      expect(h.container.textContent).not.toContain("HTTP 403");
+      expect(button(h.container, "Connect for workspace").disabled).toBe(false);
+      expect(createConnection).not.toHaveBeenCalled();
+      expect(enableCapability).not.toHaveBeenCalled();
+    } finally {
+      context.client.inspectMcpAuthentication.mockImplementation(async () => ({ kind: "none" }));
+      await h.close();
+    }
+  });
+
   test("reviews an agent-suggested URL before a human adds the MCP catalog entry", async () => {
     createdCatalogItem = null;
     context.client.createCapability.mockClear();
@@ -340,6 +403,14 @@ describe("conversation connection card", () => {
     name: "GitHub App",
     providerDomain: "github.com",
   };
+  const allowGitHub = () => {
+    context.accessContext.workspaceGrants = [
+      {
+        workspaceId: "workspace",
+        permissions: ["connections:read", "github:use", "sessions:control"],
+      },
+    ];
+  };
   const githubNotice = {
     ...item,
     capability: {
@@ -351,6 +422,7 @@ describe("conversation connection card", () => {
   } as AuthNeededItem;
 
   test("GitHub's bundled logo and verified binding persist in the conversation card", async () => {
+    allowGitHub();
     context.githubStatus = { status: "bound" };
     const h = await render(false, githubItem, githubItem, false, "workspace", githubNotice);
     try {
@@ -367,6 +439,7 @@ describe("conversation connection card", () => {
   });
 
   test("a returning GitHub binding refreshes the existing card, including later disconnection", async () => {
+    allowGitHub();
     context.githubStatus = { status: "unbound" };
     const h = await render(false, githubItem, githubItem, false, "workspace", githubNotice);
     try {
@@ -384,6 +457,7 @@ describe("conversation connection card", () => {
   });
 
   test("GitHub starts on one click, visibly waits, ignores a second click, and confirms a binding", async () => {
+    allowGitHub();
     context.githubStatus = null;
     getGitHubApp.mockClear();
     refreshGitHub.mockClear();
@@ -417,6 +491,7 @@ describe("conversation connection card", () => {
   });
 
   test("a BFCache return unlocks GitHub and ignores an old pending status response", async () => {
+    allowGitHub();
     context.githubStatus = null;
     refreshGitHub.mockClear();
     let resolveOldStatus!: (value: Awaited<ReturnType<typeof getGitHubApp>>) => void;
@@ -452,6 +527,7 @@ describe("conversation connection card", () => {
   });
 
   test("GitHub's failed start offers a retry in the existing dialog", async () => {
+    allowGitHub();
     getGitHubApp.mockImplementationOnce(async () => {
       throw new Error("Temporary status failure");
     });

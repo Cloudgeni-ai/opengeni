@@ -115,6 +115,42 @@ describe("rail footer account menu", () => {
     }
   });
 
+  test("Help & feedback offers Contact support as an email link when configured", async () => {
+    const unmount = await renderOpenAccountMenu({
+      managed: true,
+      analytics: false,
+      documentationUrl: docs,
+      supportEmail: "support@example.test",
+      canSendFeedback: true,
+    });
+    try {
+      const rows = await openSubmenu("Help & feedback");
+      expect(rows).toHaveLength(3);
+      expect(rows[0]).toContain("Documentation");
+      expect(rows[1]).toBe("Contact support");
+      expect(rows[2]).toBe("Send feedback");
+      const link = document.body.querySelector<HTMLAnchorElement>(
+        'a[href="mailto:support@example.test"]',
+      );
+      expect(link?.textContent).toBe("Contact support");
+      expect(link?.target).toBe("");
+    } finally {
+      await unmount();
+    }
+    document.body.replaceChildren();
+    const supportOnly = await renderOpenAccountMenu({
+      managed: false,
+      analytics: false,
+      documentationUrl: null,
+      supportEmail: "support@example.test",
+    });
+    try {
+      expect(await openSubmenu("Help & feedback")).toEqual(["Contact support"]);
+    } finally {
+      await supportOnly();
+    }
+  });
+
   test("Help & feedback drops the rows that don't apply, and itself when none do", async () => {
     const docsOnly = await renderOpenAccountMenu({
       managed: false,

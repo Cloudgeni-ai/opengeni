@@ -10,6 +10,11 @@ const migrationPath = new URL(
   import.meta.url,
 );
 const source = await Bun.file(migrationPath).text();
+// The repository code under test also reads the organization access columns
+// added to the same tables by 0601.
+const organizationConnectionsSource = await Bun.file(
+  new URL("../drizzle/0601_organization_mcp_connections.sql", import.meta.url),
+).text();
 const repositorySource = await Bun.file(new URL("../src/mcp-oauth.ts", import.meta.url)).text();
 const requireRealDatabase = process.env.OPENGENI_REQUIRE_REAL_DB === "1";
 
@@ -45,6 +50,9 @@ beforeAll(async () => {
       true
     )`;
     await transaction.unsafe(source);
+  });
+  await admin.begin(async (transaction) => {
+    await transaction.unsafe(organizationConnectionsSource);
   });
   await provisionRoles(blank.databaseUrl, {
     appRole: "opengeni_app",

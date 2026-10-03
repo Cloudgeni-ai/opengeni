@@ -437,11 +437,39 @@ export function buildTimeline(
           : null;
     if (setupPhase && setupStatus) {
       closeStreamingTail();
+      let blockedReason: StartupPhaseItem["blockedReason"];
+      if (setupPhase === "model_preparation" && setupStatus === "failed") {
+        blockedReason = startupLifecycleWaitReason(payload);
+        // Older preparation events omit the typed lifecycle fields. The
+        // sandbox span can supply them only inside the same turn attempt.
+        const sandbox = startupPhases.get(`${startupTurnId}:sandbox`);
+        const sameAttempt =
+          sandbox?.[1] || startupAttemptId
+            ? Boolean(startupAttemptId && sandbox?.[1] === startupAttemptId)
+            : sandbox?.[2] === startupRecoveryRevision;
+        if (
+          !blockedReason &&
+          payload.expectedTransition === undefined &&
+          payload.failureCode === undefined &&
+          payload.failureStage === undefined &&
+          payload.failureCategory === undefined &&
+          payload.error === undefined &&
+          startupTurnId &&
+          sameAttempt &&
+          sandbox?.[0].status === "cancelled"
+        ) {
+          blockedReason = sandbox[0].blockedReason;
+        }
+      }
       settleStartupPhase(
         setupPhase,
-        setupStatus,
+        blockedReason ? "cancelled" : setupStatus,
         numberOrNull(payload.durationMs),
         event.type === "rig.setup.skipped" ? "skipped" : null,
+        0,
+        undefined,
+        undefined,
+        blockedReason,
       );
       continue;
     }
@@ -910,8 +938,11 @@ export function buildTimeline(
             0,
             undefined,
             undefined,
-            status === "cancelled" && payload.failureCode === "rotation_in_progress"
-              ? "rotation_in_progress"
+            status === "cancelled"
+              ? (startupLifecycleWaitReason(payload) ??
+                  (payload.failureCode === "rotation_in_progress"
+                    ? "rotation_in_progress"
+                    : undefined))
               : undefined,
           );
           break;
@@ -2017,8 +2048,28 @@ function groupReadableTurns(items: TimelineItem[]): TimelineGroup[] {
       if (group?.work) group.work.details.push({ kind: "item", item });
       else groups.push({ kind: "item", item });
     } else {
-      groups.push({ kind: "item", item });
       const current = turns.get(currentTurn)?.work;
+      // A live approval wait is carried by the turn header ("Waiting for you")
+      // and decided in the host's approval surface; a second in-timeline banner
+      // only repeats it. Once resolved it returns as the quiet recorded marker.
+      const liveApprovalWait =
+        item.kind === "notice" &&
+        item.tone === "waiting" &&
+        !item.recordedOutcome &&
+        !item.resolvedAt &&
+        item.text.startsWith("Approval needed") &&
+        current !== undefined &&
+        !current.endedAt;
+      // Likewise the live "waiting on you" divider: the open turn's header
+      // already reads "Waiting for you · <elapsed>". It returns, resolved, as
+      // the "work resumed" divider once the session runs again.
+      const liveStatusWait =
+        item.kind === "session-status" &&
+        item.status === "requires_action" &&
+        !item.resolvedAt &&
+        current !== undefined &&
+        !current.endedAt;
+      if (!liveApprovalWait && !liveStatusWait) groups.push({ kind: "item", item });
       if (current && !current.endedAt) {
         if (
           item.kind === "notice" &&
@@ -3023,6 +3074,24 @@ function startupPhaseFromPayload(value: unknown): StartupPhase | null {
   return typeof value === "string" && STARTUP_PHASES.has(value as StartupPhase)
     ? (value as StartupPhase)
     : null;
+}
+
+function startupLifecycleWaitReason(
+  payload: Record<string, unknown>,
+): StartupPhaseItem["blockedReason"] {
+  if (
+    payload.expectedTransition !== true ||
+    payload.failureStage !== "lifecycle_wait" ||
+    payload.failureCategory !== "drain_capture_wait"
+  ) {
+    return undefined;
+  }
+  const code = payload.failureCode;
+  return code === "capture_in_progress" ||
+    code === "rotation_in_progress" ||
+    code === "provider_recovery_in_progress"
+    ? code
+    : undefined;
 }
 
 const SANDBOX_STARTUP_PHASES: Record<string, StartupPhase> = {

@@ -1,6 +1,7 @@
 import { ContextTextReader } from "./context-text-reader";
 import { AGENT_PROMPT_MODULE_TITLES } from "@opengeni/contracts";
 import type { ModelContextInstructionLayer, SessionModelContextResponse } from "@opengeni/sdk";
+import { modelDisplayName } from "@opengeni/sdk/model-display";
 import { ArrowLeftIcon, ChevronRightIcon, RefreshCwIcon } from "lucide-react";
 import { useEffect, useMemo, useRef, useState } from "react";
 import { Button } from "@/components/ui/button";
@@ -248,8 +249,11 @@ export function ModelContextInspectorPane(props: {
         <div className="flex items-start justify-between gap-2">
           <div className="min-w-0">
             <h3 className="text-sm font-medium">Captured model request</h3>
-            <p className="mt-1 text-2xs text-fg-subtle break-words">
-              {typeof payload?.model === "string" ? payload.model + " · " : ""}
+            <p
+              className="mt-1 text-2xs text-fg-subtle break-words"
+              title={typeof payload?.model === "string" ? payload.model : undefined}
+            >
+              {typeof payload?.model === "string" ? modelDisplayName(payload.model) + " · " : ""}
               {snapshot ? new Date(snapshot.capturedAt).toLocaleTimeString() : "No capture yet"}
             </p>
           </div>

@@ -19,6 +19,7 @@ export type BundledSkillId =
   | "builtin:document-parsing"
   | "builtin:opengeni-skills"
   | "builtin:opengeni-projects"
+  | "builtin:opengeni-schedules"
   | "builtin:opengeni-documents"
   | "builtin:opengeni-spreadsheets"
   | "builtin:opengeni-presentations"
@@ -847,6 +848,8 @@ type CreateConnectionRequestBase = {
   grantedScopes?: string[] | undefined;
   expiresAt?: string | null | undefined;
   operationId?: string | undefined;
+  /** Direct OpenAI/Azure keys only: verify the provider/model before saving. */
+  verifyModelAccess?: boolean | undefined;
 };
 
 export type CreateConnectionRequest = CreateConnectionRequestBase &
@@ -1435,8 +1438,21 @@ export type SessionBackgroundCommandActivity = {
   count: number;
 };
 
+/** Stored reconciliation checkpoints, not a live provider probe or native ACK. */
+export type SessionBackgroundCommandReconciliation = {
+  lastOutcome: string | null;
+  attempts: number;
+  dueAt: string;
+  claimedAt: string | null;
+  terminalProof:
+    | { outcome: "exited"; exitCode: number; observedAt: string }
+    | { outcome: "lost"; exitCode: null; observedAt: string }
+    | null;
+};
+
 export type SessionBackgroundCommand = {
   observationStatus?: "unavailable" | undefined;
+  reconciliation?: SessionBackgroundCommandReconciliation | undefined;
   id: string;
   workspaceId: string;
   sessionId: string;
@@ -1644,8 +1660,69 @@ export type CreateSessionResponse = Session & {
 
 export type SessionSummary = Session;
 
-/** Canonical session-list page; pinned rows are excluded from ordinary pages. */
+/** Compact list-only record, excluding prompts and execution configuration. */
+export type SessionListEntry = Pick<
+  Session,
+  | "id"
+  | "workspaceId"
+  | "accountId"
+  | "status"
+  | "backgroundCommandActivity"
+  | "hasSchedules"
+  | "title"
+  | "titleSource"
+  | "createdBy"
+  | "channelId"
+  | "parentSessionId"
+  | "rootSessionId"
+  | "effectiveControl"
+  | "inputWait"
+  | "lastSequence"
+  | "pinned"
+  | "pinnedAt"
+  | "pinVersion"
+  | "unread"
+  | "activelyWorking"
+  | "attentionVersion"
+  | "archived"
+  | "archivedAt"
+  | "importedArchive"
+  | "archiveVersion"
+  | "treeStats"
+  | "requiresActionSince"
+  | "createdAt"
+  | "updatedAt"
+> & {
+  displayTitle: string;
+  renameSeed: string;
+  scheduledTaskId: string | null;
+  siteOrigin: { siteId: string; title: string } | null;
+};
+export type SessionListEntryResponse = Omit<SessionListResponse, "pinned" | "sessions"> & {
+  projection: "summary";
+  pinned: SessionListEntry[];
+  sessions: SessionListEntry[];
+};
+
+/** Complete metadata for authorized roots and ordinary project trees. */
+export type SessionListTotals = {
+  needsYouCount: number;
+  groups: Array<{
+    channelId: string | null;
+    total: number;
+    attention: number;
+    attentionSince: string | null;
+    failed: number;
+    active: number;
+    queued: number;
+    unread: number;
+    activeWork: number;
+  }>;
+};
+
 export type SessionListResponse = {
+  totals?: SessionListTotals;
+  needsYouOnly?: true;
   pinned: Session[];
   /** True when the server omitted older pins from its bounded pinned section. */
   pinnedTruncated?: boolean;
@@ -2008,6 +2085,7 @@ export const SESSION_EVENT_TYPES = [
   "turn.cancelled",
   "turn.superseded",
   "turn.recovery.requested",
+  "turn.dispatch.expired",
   "turn.capacity_waiting",
   "turn.startup.phase.started",
   "turn.startup.phase.completed",
@@ -3344,6 +3422,8 @@ export type FirstPartyMcpToolName =
   | "browser_screenshot"
   | "browser_clipboard"
   | "browser_debug"
+  | "browser_downloads"
+  | "browser_download_save"
   | "browser_auth"
   | "interaction_request_human"
   | "browser_identity"
@@ -3483,7 +3563,7 @@ export type ModelCapabilitiesV1 = {
 
 export type ModelCredentialSourceV1 =
   | { kind: "deployment"; mechanism: "api_key" | "azure_ad_bearer" }
-  | { kind: "connected_subscription"; provider: "codex" | "xai" }
+  | { kind: "connected_subscription"; provider: "codex" | "xai" | "claude" }
   | { kind: "workspace_connection"; mechanism: "api_key" }
   | { kind: "organization_connection"; mechanism: "api_key" };
 
@@ -3660,6 +3740,17 @@ export type ClaudeUsageWindow = {
   resetsAt: string | null;
   status: "allowed" | "allowed_warning" | "rejected" | null;
   observedAt: string;
+  source?: "response_headers" | "provider" | undefined;
+};
+export type ClaudeUsageRequestStatus = {
+  status: ClaudeUsageWindow["status"];
+  resetsAt: string | null;
+  representativeClaim: ClaudeUsageWindow["id"] | null;
+  overageStatus: ClaudeUsageWindow["status"];
+  overageResetsAt: string | null;
+  upstreamModelId: string | null;
+  observedAt: string;
+  source?: "response_headers" | "provider" | undefined;
 };
 export type ClaudeSubscriptionUsage = {
   connected: boolean;
@@ -3669,6 +3760,8 @@ export type ClaudeSubscriptionUsage = {
   source: "response_headers" | "provider" | null;
   refreshStatus: "not_checked" | "available" | "scope_required" | "unavailable" | "reconnect";
   refreshCheckedAt: string | null;
+  requestStatus?: ClaudeUsageRequestStatus | null | undefined;
+  requestRestrictions?: ClaudeUsageRequestStatus[] | undefined;
 };
 
 export type OrganizationModelProviderConnection = {
@@ -4108,6 +4201,11 @@ export type ClientAuthConfig =
       emailVerificationRequired?: boolean;
       /** Configured managed sign-in providers; omitted by older deployments. */
       socialProviders?: ("google" | "github")[];
+      /**
+       * False while the deployment has paused new account creation; existing
+       * accounts can still sign in. Omitted (treat as true) by older deployments.
+       */
+      newSignupsEnabled?: boolean;
     };
 
 // Kept value-identical to @opengeni/contracts and pinned by the SDK contract
@@ -4152,7 +4250,8 @@ export type ClientConfig = {
   /**
    * `false` when a host's session proxy fixes the model policy
    * (`createSessionProxyHandler({ modelSelection: false })`), so UIs hide the
-   * model picker. OpenGeni itself omits it.
+   * model picker; `true` when the host explicitly offers end users model
+   * choice (embedded stock UIs then show the picker). OpenGeni itself omits it.
    */
   modelSelection?: boolean | undefined;
   /** Session proxy sandbox-path download opt-in; absent on native deployments. */
@@ -4195,6 +4294,15 @@ export type ClientConfig = {
       ga4?: { measurementId: string } | undefined;
     };
   };
+  /** Operator-owned legal documents the signed-out console links to, when configured. */
+  legal?:
+    | {
+        privacyPolicyUrl?: string | undefined;
+        termsOfServiceUrl?: string | undefined;
+      }
+    | undefined;
+  /** Operator support address the console offers as a mailto link, when configured. */
+  supportEmail?: string | undefined;
   // Server-wide hint: does this deployment support Channel-A structured services
   // at all (P4.4). Per-session availability is negotiated on /stream-capabilities;
   // this is the coarse on/off the client uses to decide whether to even attempt
@@ -4337,6 +4445,8 @@ export type AccessGrant = {
   subjectId: string;
   subjectLabel?: string | undefined;
   permissions: Permission[];
+  /** Explicit policies never expand `workspace:admin` into unselected permissions. */
+  permissionMode?: "legacy" | "explicit" | undefined;
   principalKind?: AccessPrincipalKind | undefined;
   metadata?: Record<string, unknown> | undefined;
   serviceInitiator?: ServiceTurnInitiator | undefined;
@@ -4357,14 +4467,18 @@ export type AccessCredential = {
   access?: OrganizationApiKeyAccess | undefined;
   /** The key's organization id. */
   accountId: string;
-  /** Null for an organization key: all shared workspaces in that organization, never Personal. */
+  /** Null for an organization key; `workspaceScope` selects shared workspaces, never Personal. */
   workspaceId: string | null;
   /**
-   * Workspace permissions after `workspace:admin` expansion. Excludes
+   * Effective workspace permissions, with admin expansion only for legacy keys. Excludes
    * account-only permissions and includes `secrets:read` only when explicitly
-   * granted. Full organization keys include `sessions:create` and `members:manage`.
+   * granted. Explicit policies grant exactly their selected permissions.
    */
   effectiveWorkspacePermissions: Permission[];
+  /** Organization keys only; the preset label never adds permissions. */
+  policy?: OrganizationAccessPolicy | undefined;
+  /** Organization keys only; omitted on older servers. */
+  workspaceScope?: OrganizationWorkspaceScope | undefined;
   /** Plain-language explanation of the key's scope and limits. */
   note: string;
 };
@@ -4997,7 +5111,7 @@ export type UpdateWorkspaceRequest = {
 };
 
 /**
- * Organization API key access tier, derived by the server from the key's
+ * Legacy organization API key access tier, derived by the server from the key's
  * permissions: `full` can provision shared workspaces, external members, and
  * `asUser` sessions (user requests additionally need live membership);
  * `read` only inventories shared workspaces and reads their sessions, events,
@@ -5007,6 +5121,27 @@ export type UpdateWorkspaceRequest = {
  * session visibility nor the explicit `secrets:read` permission requirement.
  */
 export type OrganizationApiKeyAccess = "full" | "read" | "developer_setup";
+
+/** Informational preset label; the server recomputes it from explicit permissions. */
+export type OrganizationAccessPreset = "read_only" | "full" | "custom";
+
+/** Organization-key scope always excludes Personal workspaces. */
+export type OrganizationWorkspaceScope =
+  | { kind: "all" }
+  | {
+      kind: "selected";
+      /** Up to 500 unique shared-workspace IDs in the same organization. Empty reaches none. */
+      workspaceIds: string[];
+    };
+
+export type OrganizationAccessPolicy = {
+  preset: OrganizationAccessPreset;
+  /** Exact grants, including `workspace:admin` individually; no implicit wildcard. */
+  permissions: Permission[];
+  workspaceScope: OrganizationWorkspaceScope;
+};
+
+export type OrganizationActor = "user" | "organization";
 
 export type ApiKey = {
   id: string;
@@ -5018,6 +5153,15 @@ export type ApiKey = {
   permissions: Permission[];
   /** Organization keys only; omitted for workspace-scoped keys. */
   access?: OrganizationApiKeyAccess | undefined;
+  policy?: OrganizationAccessPolicy | undefined;
+  workspaceScope?: OrganizationWorkspaceScope | undefined;
+  /** Legacy keys retain their historical workspace-admin wildcard. */
+  permissionMode?: "legacy" | "explicit" | undefined;
+  /** Organization keys: the service account that holds the key. */
+  serviceAccount?:
+    | { id: string; name: string; role: OrganizationServiceAccountRole }
+    | null
+    | undefined;
   expiresAt: string | null;
   revokedAt: string | null;
   lastUsedAt: string | null;
@@ -5042,15 +5186,111 @@ export type CreateOrganizationApiKeyRequest = {
   name: string;
   description?: string | undefined;
   expiresAt?: string | undefined;
-  /** Omitted means `full`. */
+  /** With no policy, omitted means legacy `full`. */
   access?: OrganizationApiKeyAccess | undefined;
   /** Optional creation alias for the developer_setup access tier. */
   preset?: "developer_setup" | undefined;
+  /** Explicit grants and shared-workspace scope; do not combine with legacy access/preset. */
+  policy?: OrganizationAccessPolicy | undefined;
+  /** The service account that holds the key; omitted creates one named after the key. */
+  serviceAccountId?: string | undefined;
+};
+
+/** The server requires at least one change. Omitted fields stay unchanged. */
+export type UpdateOrganizationApiKeyRequest = {
+  name?: string | undefined;
+  description?: string | null | undefined;
+  /** Replaces the policy and transitions a legacy key to explicit permission semantics. */
+  policy?: OrganizationAccessPolicy | undefined;
 };
 
 export type ListApiKeysResponse = {
   apiKeys: ApiKey[];
 };
+
+// --- Service accounts ----------------------------------------------------------------------------
+
+/** Up to admin, never owner. A member's keys never hold administrator permissions. */
+export type OrganizationServiceAccountRole = "admin" | "member";
+
+/** An organization identity with no person behind it; it holds organization API keys. */
+export type OrganizationServiceAccount = {
+  id: string;
+  organizationId: string;
+  name: string;
+  description: string | null;
+  role: OrganizationServiceAccountRole;
+  /** Keys that are not revoked, including expired ones. */
+  activeKeyCount: number;
+  createdAt: string;
+  updatedAt: string;
+};
+
+export type ListOrganizationServiceAccountsResponse = {
+  serviceAccounts: OrganizationServiceAccount[];
+};
+
+export type CreateOrganizationServiceAccountRequest = {
+  name: string;
+  description?: string | undefined;
+  /** Defaults to member. Only an organization administrator can choose admin. */
+  role?: OrganizationServiceAccountRole | undefined;
+};
+
+/** The server requires at least one change. Making it a member narrows its keys. */
+export type UpdateOrganizationServiceAccountRequest = {
+  name?: string | undefined;
+  description?: string | null | undefined;
+  role?: OrganizationServiceAccountRole | undefined;
+};
+
+// --- Connected agents (organization MCP server) ------------------------------------------------
+
+/** An outside agent a person connected to the organization MCP server. */
+export type OrganizationMcpConnection = {
+  id: string;
+  /** The name the client registered with ("Claude Code"). */
+  clientName: string;
+  /** Where its sign-in returned to ("127.0.0.1:4567", "cursor.com"). */
+  clientHost: string | null;
+  /** Signed-in agents act as the person who connected them. */
+  actor: "user";
+  connectedBy: { subjectId: string; name: string };
+  /** What it can do and where. The person's own live access still caps it. */
+  policy: OrganizationAccessPolicy;
+  createdAt: string;
+  lastUsedAt: string | null;
+  expiresAt: string;
+  revokedAt: null;
+};
+
+export type OrganizationMcpConnectionList = {
+  connections: OrganizationMcpConnection[];
+  /** Owners and admins see and can disconnect everyone's agents. */
+  canManageAll: boolean;
+};
+
+export type UpdateOrganizationMcpConnectionRequest = {
+  access: OrganizationAccessPolicy;
+};
+
+/** A pending agent sign-in, as the web app's sign-in page shows it. */
+export type McpConnectionRequest = {
+  client: { name: string; host: string | null };
+  person: { name: string | null };
+  organizations: Array<{
+    id: string;
+    name: string;
+    workspaces: Array<{ id: string; name: string; personal: boolean }>;
+    /** Everything the person can do there; the most an agent can get. */
+    grantable: Permission[];
+  }>;
+  defaultOrganizationId: string | null;
+};
+
+export type McpConnectionDecision =
+  | { decision: "deny" }
+  | { decision: "approve"; organizationId: string; access: OrganizationAccessPolicy };
 
 // --- Organization-wide session list (org API key or organization owner) -----------------------
 
@@ -8009,6 +8249,11 @@ export type InsightsSeriesPoint = {
   calls: number;
 };
 
+export type InsightsScope = {
+  rootSessionId: string | null;
+  sessionId: string | null;
+};
+
 export type InsightsDepthBucket = {
   depth: number;
   sessions: number;
@@ -8033,6 +8278,20 @@ export type InsightsSpendDriver = {
   pctOfCreditUsd: number;
   pctOfTokens: number;
   deltaUsdVsPrior: number;
+};
+
+export type InsightsProjectRow = {
+  id: string;
+  kind: "project" | "other" | "unfiled" | "unavailable";
+  label: string;
+  projects: number;
+  rootSessions: number;
+  calls: number;
+  creditUsd: number;
+  estimatedProviderUsd: number;
+  estimatedProviderCostKnownCalls: number;
+  tokens: number;
+  cacheHitPct: number | null;
 };
 
 export type InsightsWarmGroupRow = {
@@ -8142,6 +8401,18 @@ export type WorkspaceInsightsSnapshot = {
   series: InsightsSeriesPoint[];
   depth: InsightsDepthBucket[];
   drivers: InsightsSpendDriver[];
+  projects: InsightsProjectRow[];
+  privateChats: {
+    ownerKey: string;
+    name: string | null;
+    you: boolean;
+    calls: number;
+    tokens: number;
+    creditUsd: number;
+    estimatedProviderUsd: number;
+    estimatedProviderCostKnownCalls: number;
+  }[];
+  privateChatsTruncated: boolean;
   schedules: InsightsScheduleRow[];
   recentCalls: InsightsModelCallRow[];
   promptContributions: InsightsPromptContributions;
@@ -8182,6 +8453,13 @@ export type WorkspaceInsightsSnapshot = {
   agentRunsUsed: number;
   agentRunCap: number | null;
   modelFilterActive: boolean;
+  dataThrough: string | null;
+  cacheHitPct: number;
+  scope: InsightsScope;
+  driverGroups: number;
+  driversTruncated: boolean;
+  facetsTruncated: boolean;
+  recentCallsTruncated: boolean;
 };
 
 export type WorkspaceInsightsResponse = {
@@ -8196,8 +8474,13 @@ export type BillingEntitlementsResponse = {
 
 export type CreateCheckoutRequest = {
   accountId?: string | undefined;
-  /** USD amount with cent precision (server enforces min/max). */
-  amountUsd: number;
+  /**
+   * USD amount with cent precision (server enforces min/max). Required unless
+   * `promotionCode` is given; a fixed-amount USD code then sets the amount.
+   */
+  amountUsd?: number | undefined;
+  /** A Stripe promotion code to apply up front, as the customer typed it. */
+  promotionCode?: string | undefined;
   successUrl?: string | undefined;
   cancelUrl?: string | undefined;
 };
@@ -8205,6 +8488,22 @@ export type CreateCheckoutRequest = {
 export type CreateCheckoutResponse = {
   checkoutSessionId: string;
   url: string;
+  /** The credits this checkout grants once it completes. */
+  amountUsd?: number | undefined;
+};
+
+/** Where one checkout stands, and whether its credits reached the balance. */
+export type BillingCheckoutStatus = {
+  checkoutSessionId: string;
+  status: "open" | "complete" | "expired";
+  credit: {
+    state: "pending" | "granted";
+    amountMicros: number;
+    currency: "usd";
+    /** True when a coupon covered the whole checkout, so nothing was charged. */
+    free: boolean;
+  };
+  balance: BillingBalance | null;
 };
 
 export type CreateBillingPortalRequest = {
@@ -8261,6 +8560,8 @@ export type UserApprovalDecisionEventInput = {
     approvalId: string;
     decision: "approve" | "reject";
     message?: string | undefined;
+    /** Server-owned header rotation applied atomically when the response is accepted. */
+    mcpCredentialUpdates?: SessionMcpCredentialUpdateInput[] | undefined;
   };
 };
 
@@ -8270,6 +8571,8 @@ export type UserHumanInputResponseEventInput = {
   payload: {
     requestId: string;
     response: SubmitHumanInputResponseRequest;
+    /** Server-owned header rotation applied atomically when the response is accepted. */
+    mcpCredentialUpdates?: SessionMcpCredentialUpdateInput[] | undefined;
   };
 };
 
@@ -8768,7 +9071,9 @@ export type UpdateSessionAgentRequest = {
 };
 
 export type ClientAgentConfig = {
+  /** @deprecated Agent configuration is always on; current servers always report `true`. */
   enabled: boolean;
+  /** @deprecated Omitted `agent` always resolves `{ capabilities: "all" }`; always `true`. */
   defaultForNewSessions: boolean;
   capabilities: Array<{ id: AgentCapabilityId; available: boolean; reason?: string | undefined }>;
 };
@@ -8778,4 +9083,5 @@ export type AgentConfigErrorCode =
   | "agent_capability_unavailable"
   | "agent_config_conflict"
   | "agent_config_widening"
+  /** Returned only by older servers that predate always-on agent configuration. */
   | "agent_config_not_enabled";

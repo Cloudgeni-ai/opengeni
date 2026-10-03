@@ -302,6 +302,7 @@ const ROOT_TEST_DEPENDENCIES: Record<string, string[]> = {
   ],
   "test/e2e/compact-session-view.browser.e2e.ts": ["opengeni-web", "@opengeni/testing"],
   "test/e2e/queue-surface.browser.e2e.ts": ["@opengeni/react", "@opengeni/testing"],
+  "test/e2e/annotation-scroll.browser.e2e.ts": ["@opengeni/react", "@opengeni/testing"],
   "test/e2e/user-message-disclosure.browser.e2e.ts": ["@opengeni/react", "@opengeni/testing"],
   "test/e2e/realtime-demo.browser.e2e.ts": [
     "@opengeni/react",
@@ -390,6 +391,11 @@ const ROOT_TEST_DEPENDENCIES: Record<string, string[]> = {
   "test/e2e/session-rail-row-metadata.browser.e2e.ts": ["opengeni-web", "@opengeni/testing"],
   "test/e2e/project-rename.browser.e2e.ts": ["opengeni-web", "@opengeni/testing"],
   "test/e2e/session-sidebar.browser.e2e.ts": ["opengeni-web", "@opengeni/testing"],
+  "test/e2e/error-branding.browser.e2e.ts": [
+    "@opengeni/react",
+    "@opengeni/sdk",
+    "@opengeni/testing",
+  ],
   "test/e2e/skill-review.browser.e2e.ts": ["@opengeni/react", "@opengeni/testing"],
   "test/e2e/session-skill-review.browser.e2e.ts": [
     "opengeni-web",

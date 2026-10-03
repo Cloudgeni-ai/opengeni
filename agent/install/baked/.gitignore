@@ -1,3 +1,6 @@
 # The baked binaries + sidecars are per-SHA build outputs written by the CI bake
 # step; never commit them. Keep only the placeholder + this ignore file.
 opengeni-agent-*
+opengeni-browserd-*
+opengeni-agent-browser-*
+opengeni-computer-native-*

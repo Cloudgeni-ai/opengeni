@@ -39,8 +39,14 @@ Agents have a built-in tool for questions that need an answer before the turn ca
 
 Custom React UIs can use `projectPendingApprovals` and `useHumanInputRequests` from `@opengeni/react/session`.
 
+For a non-React/static renderer, fold ordered, deduplicated events: `session.requiresAction` replaces the pending set, `user.approvalDecision` removes its `payload.approvalId`, and settlement clears the owning turn's pending requests. Preserve each original `payload.approvals[].id` and the decision event ID; reload/replay must not make decided cards actionable again. Send that approval ID to `sendApprovalDecision`, not the requires-action event ID or a generated UI ID. Current requests expose stable `id`, `name` and `arguments`; use the packaged normalizer for older compatibility fields.
+
+Show the exact operation, target and arguments before enabling Approve. In a title-only OpenAPI operation, the proposal may be JSON-string `arguments` containing `body.title`, not a top-level `title`. Parse against that operation's schema and render escaped text. Missing or malformed exact proposal means disabled Approve, not an enabled button beside “proposal unavailable”; Reject or refresh can remain available. Backend/provider ownership, field restrictions and expected-version checks still apply.
+
+Persist a stable `clientEventId` before sending a decision and retain its returned event. Acceptance is not proof that the tool write finished. If `outcomeUnknown` is true, or acceptance is followed by failed local persistence, reconcile durable events and the authorized provider record before any supported exact-request retry. Do not promise “unchanged” or recreate/replay an approval blindly. A stale/no-pending conflict calls for refreshing state. Return friendly host-branded errors; keep raw SDK/provider messages and redacted diagnostics server-only. The full [client Skill](/reference/opengeni-client-skill) includes tested projection, proposal and safe-notice examples.
+
 If a user sends an ordinary message while a session waits, the pending approval or question is cancelled and the message is delivered as a Steer. "Actually, do this instead" is one action.
 
-To notify people who are not watching, subscribe a [workspace webhook](/integrate/host-managed-integrations#webhooks) to `session.requiresAction` and `session.humanInput.requested`.
+To notify people who are not watching, subscribe a [webhook](/guides/webhooks-and-credentials#webhooks) to `session.requiresAction` and `session.humanInput.requested`.
 
 <Tip>Using a coding agent? The [opengeni-client skill](/reference/for-ai-agents) covers this.</Tip>

@@ -87,6 +87,7 @@ function fakeClient(definitions: Promise<{ definitions: IntegrationDefinitionSum
     listSlackInstallationBindings: async () => [],
     listIntegrationDefinitions: async () => await definitions,
     listApiIntegrations: async () => ({ integrations: [] }),
+    connectTransport: () => ({ catalog: async () => [] }),
   } as unknown as OpenGeniBrowserClient;
 }
 
@@ -976,4 +977,91 @@ describe("useCapabilitiesCatalog", () => {
     await act(async () => root.unmount());
     container.remove();
   });
+});
+
+test("native setup readiness fences same-client actor changes and late responses", async () => {
+  const first = deferred<import("@opengeni/connect").ConnectProvider[]>();
+  const second = deferred<import("@opengeni/connect").ConnectProvider[]>();
+  let reads = 0;
+  context.client = {
+    ...fakeClient(Promise.resolve({ definitions: [] })),
+    connectTransport: () => ({ catalog: () => (++reads === 1 ? first.promise : second.promise) }),
+  } as unknown as OpenGeniBrowserClient;
+  context.accessContext = readGrant;
+  let latest!: ReturnType<typeof useCapabilitiesCatalog>;
+  function Harness() {
+    latest = useCapabilitiesCatalog("workspace-a");
+    const authorityKey = latest.authorityKey;
+    useEffect(() => {
+      void latest.refresh();
+    }, [authorityKey]);
+    return null;
+  }
+  const container = document.createElement("div");
+  const root = createRoot(container);
+  await act(async () => root.render(<Harness />));
+  const oldActor = latest;
+  context.accessContext = {
+    ...readGrant,
+    subjectId: "another-member",
+    workspaceGrants: [{ ...readGrant.workspaceGrants[0]!, subjectId: "another-member" }],
+  };
+  await act(async () => root.render(<Harness />));
+  expect(reads).toBe(2);
+  expect(latest.nativeConnectCatalog.status).toBe("loading");
+  const provider = {
+    id: "gmail",
+    label: "Gmail",
+    family: "mcp",
+    readiness: "available",
+    ownership: ["personal"],
+    setup: ["oauth"],
+  } as const;
+  await act(async () => {
+    first.resolve([provider as unknown as import("@opengeni/connect").ConnectProvider]);
+    await Bun.sleep(0);
+  });
+  expect(latest.nativeConnectCatalog.status).toBe("loading");
+  await act(async () => {
+    oldActor.replaceConnection({ id: "old-actor" } as ConnectionMetadata);
+  });
+  expect(latest.connections).toEqual([]);
+  await act(async () => {
+    second.resolve([]);
+    await Bun.sleep(0);
+  });
+  expect(latest.nativeConnectCatalog).toEqual({ status: "ready", providers: [] });
+  await act(async () => root.unmount());
+  context.accessContext = readGrant;
+});
+
+test("setup readiness failure is distinct from an empty catalog and retries independently", async () => {
+  let reads = 0;
+  context.client = {
+    ...fakeClient(Promise.resolve({ definitions: [] })),
+    listCapabilities: async () => {
+      throw new Error("Capability list failed");
+    },
+    connectTransport: () => ({
+      catalog: async () => {
+        if (++reads === 1) throw new Error("Readiness failed");
+        return [];
+      },
+    }),
+  } as unknown as OpenGeniBrowserClient;
+  context.accessContext = readGrant;
+  let latest!: ReturnType<typeof useCapabilitiesCatalog>;
+  function Harness() {
+    latest = useCapabilitiesCatalog("workspace-a");
+    return null;
+  }
+  const root = createRoot(document.createElement("div"));
+  await act(async () => root.render(<Harness />));
+  await act(async () => latest.refresh());
+  expect(latest.nativeConnectCatalog.status).toBe("error");
+  expect(latest.connections).toEqual([]);
+  await act(async () => latest.refresh());
+  expect(latest.nativeConnectCatalog).toEqual({ status: "ready", providers: [] });
+  expect(latest.loadError?.message).toBe("Capability list failed");
+  await act(async () => root.unmount());
 });

@@ -1363,8 +1363,21 @@ describe("SDK / contracts parity", () => {
       source: null,
       refreshStatus: "scope_required",
       refreshCheckedAt: null,
+      requestStatus: {
+        status: "rejected",
+        resetsAt: "2030-01-01T01:00:00Z",
+        representativeClaim: "five_hour",
+        overageStatus: null,
+        overageResetsAt: null,
+        upstreamModelId: "claude-opus-5-5",
+        observedAt: "2030-01-01T00:00:00Z",
+        source: "response_headers",
+      },
+      requestRestrictions: [],
     };
-    expect(acceptClaudeUsage(acceptContractUsage(usage))).toEqual(usage);
+    expect(
+      acceptClaudeUsage(ContractClaudeSubscriptionUsage.parse(acceptContractUsage(usage))),
+    ).toEqual(usage);
     const acceptModel = (
       value: z.infer<typeof ContractWorkspaceGatewayCustomModel>,
     ): WorkspaceGatewayCustomModel => value;

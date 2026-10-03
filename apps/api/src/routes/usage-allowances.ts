@@ -64,6 +64,13 @@ export function requireAllowanceAuthority(
     authorization.accountGrant?.permissions.includes("account:admin") === true &&
     requireAccountAdminAuthorizationStamp(authorization).accountId === grant.accountId;
   const workspaceAdmin = grant.permissions.includes("workspace:admin");
+  if (
+    sameOrganizationKey?.permissionMode === "explicit" &&
+    (operation === "workspace-write" || operation === "member-write")
+  ) {
+    if (authorization.accountGrant?.permissions.includes("usage_allowances:manage")) return;
+    throw new HTTPException(403, { message: "missing permission: usage_allowances:manage" });
+  }
   if (operation === "own") {
     if (grant.principalKind !== "human_session" || grant.serviceInitiator) {
       throw new HTTPException(403, { message: "Own usage requires an authenticated member" });

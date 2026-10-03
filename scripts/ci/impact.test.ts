@@ -284,6 +284,7 @@ describe("fail-closed change impact", () => {
     expect(sdk.e2eTests).toEqual([
       "packages/react/test/timeline-search.browser.e2e.ts",
       AI_GATEWAY_CONNECTION_E2E,
+      "test/e2e/annotation-scroll.browser.e2e.ts",
       "test/e2e/appearance.browser.e2e.ts",
       ARTIFACT_LIBRARY_E2E,
       "test/e2e/capability-catalog.browser.e2e.ts",
@@ -302,6 +303,7 @@ describe("fail-closed change impact", () => {
       CRYPTO_RANDOM_UUID_E2E,
       "test/e2e/developer-settings.browser.e2e.ts",
       "test/e2e/embedded-artifact-viewer.browser.e2e.ts",
+      "test/e2e/error-branding.browser.e2e.ts",
       FAILED_SESSION_RECOVERY_E2E,
       "test/e2e/lossless-message.browser.e2e.ts",
       "test/e2e/managed-actor-response.browser.e2e.ts",
@@ -569,6 +571,19 @@ describe("fail-closed change impact", () => {
     expect(plan.artifactRuntimeRequired).toBe(false);
   });
 
+  test("error presentation coverage follows its fixture and shared client dependencies", () => {
+    const fixture = "test/e2e/error-branding.browser.e2e.ts";
+    for (const path of [
+      fixture,
+      "packages/react/demo/error-branding-test-harness.tsx",
+      "packages/react/src/lib/error-message.ts",
+      "packages/sdk/src/errors.ts",
+    ]) {
+      expect(createImpactPlan([path]).e2eTests, path).toContain(fixture);
+    }
+    expect(createImpactPlan(["packages/browserd/src/index.ts"]).e2eTests).not.toContain(fixture);
+  });
+
   test("compact session view follows its web fixture dependencies without widening leaf plans", () => {
     for (const path of [
       COMPACT_SESSION_VIEW_E2E,
@@ -828,6 +843,7 @@ describe("fail-closed change impact", () => {
     expect(tests.e2e).toEqual([
       "packages/react/test/timeline-search.browser.e2e.ts",
       AI_GATEWAY_CONNECTION_E2E,
+      "test/e2e/annotation-scroll.browser.e2e.ts",
       "test/e2e/appearance.browser.e2e.ts",
       ARTIFACT_LIBRARY_E2E,
       "test/e2e/capability-catalog.browser.e2e.ts",
@@ -846,6 +862,7 @@ describe("fail-closed change impact", () => {
       CRYPTO_RANDOM_UUID_E2E,
       "test/e2e/developer-settings.browser.e2e.ts",
       "test/e2e/embedded-artifact-viewer.browser.e2e.ts",
+      "test/e2e/error-branding.browser.e2e.ts",
       FAILED_SESSION_RECOVERY_E2E,
       "test/e2e/lossless-message.browser.e2e.ts",
       "test/e2e/managed-actor-response.browser.e2e.ts",

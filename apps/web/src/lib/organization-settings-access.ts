@@ -96,7 +96,10 @@ export function organizationSettingsAccess(input: {
     visible.add("models");
   }
   visible.add("identity");
-  if (canReadBilling) visible.add("billing");
+  if (canReadBilling) {
+    visible.add("insights");
+    visible.add("billing");
+  }
   if (canManageOrganizationApiKeys) visible.add("developer");
   // Recovery contacts are members, not only owners and admins: they accept
   // and approve recovery on this page, so every managed person can reach it.

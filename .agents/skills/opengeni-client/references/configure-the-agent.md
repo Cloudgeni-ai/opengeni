@@ -16,7 +16,6 @@ workspace and product already do:
 
 ```ts
 const config = await og.getClientConfig();
-const admitted = config.agentConfig?.enabled === true; // false: send no `agent` yet
 const offered = (config.agentConfig?.capabilities ?? [])
   .filter((capability) => capability.available)
   .map((capability) => capability.id);
@@ -33,11 +32,8 @@ Also search the product's code for the older fields it already sends
 `chats` deliberately, one surface at a time, and check the result on
 `session.agent` and `session.effectiveTools`.
 
-If `admitted` is false the deployment has not turned agent settings on
-(`OPENGENI_AGENT_CONFIG_ADMISSION_ENABLED`). Any request with `agent` then
-returns 422 `agent_config_not_enabled`. Do not work around it: use the older
-fields (see [Agent recipes](agent-recipes.md#minimal-agent)) and tell the
-deployment operator what the switch would give them.
+Agent settings are always on; there is no deployment switch.
+`agentConfig.enabled` is deprecated and always `true`.
 
 ## Capabilities
 
@@ -198,9 +194,7 @@ await og.updateSessionAgent(workspaceId, sessionId, {
 Rules the server enforces:
 
 - Omitted `agent` uses the workspace's `sessionAgentDefaults` when set, and
-  otherwise behaves like `"all"`. (Deployments with
-  `OPENGENI_AGENT_CONFIG_DEFAULT_FOR_NEW_SESSIONS` record that as `"all"`;
-  without it the session keeps the older, unrecorded behavior.)
+  otherwise records `"all"`.
 - Child sessions inherit their parent's configuration and may only narrow it
   (422 `agent_config_widening`).
 - A goal turns `goals` on; `goals: false` with a goal is 422
@@ -218,6 +212,25 @@ Read response visibility from `session.tenancy?.visibility`, not
 `session.visibility`. The top-level `visibility` field belongs to create
 requests; the response's tenancy projection may be absent when private-session
 support is unavailable. Absence means unknown, not `"workspace"`.
+
+Public `createSession` rejects `firstPartyMcpPermissions: []` with 422,
+including `asService` calls. `firstPartyMcpTools: []` narrows the broad
+model-visible selection, not permission authority. Omitting permissions is not
+zero authority: a top-level request retains the default worker permission set,
+and a child inherits its bounded policy. An intentional public permission
+override must be nonempty and within the creator's grant. See
+[Agent recipes](agent-recipes.md); never pad permissions merely to make startup
+succeed.
+
+Automation session templates instead default both first-party arrays to `[]`
+and support explicit empty arrays. That supported automation ceiling, or an
+already-effective internal or linked permission ceiling of `[]`, is zero
+delegated OpenGeni authority. Runtime skips remote first-party MCP preparation;
+requested first-party tools or dedicated `files`/`docs` remain absent with an
+`insufficient_scope` advisory. External-host MCP servers, host-owned local
+adapters, independent connections and already-authorized native runtime
+mechanics retain their own authority. This runtime behavior does not widen
+public `createSession` admission.
 
 `effectiveTools.tools` is a flat list, not a capability-keyed object. Group it
 locally if your UI needs capability sections:

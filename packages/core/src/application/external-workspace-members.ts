@@ -132,7 +132,12 @@ function rethrowExternalWorkspaceOperation(error: unknown): never {
   throw error;
 }
 
-async function externalService(c: Context, deps: AccessDeps, organizationId: string) {
+async function externalService(
+  c: Context,
+  deps: AccessDeps,
+  organizationId: string,
+  workspaceId?: string,
+) {
   const context = await requireAccessContext(c, deps);
   const authority = accountScopedApiKeyWorkspaceAuthority(context);
   if (
@@ -143,6 +148,11 @@ async function externalService(c: Context, deps: AccessDeps, organizationId: str
     throw new HTTPException(403, {
       message: "External membership operation requires an organization service key",
     });
+  }
+  if (workspaceId !== undefined) {
+    const grant = await requireFreshAccessGrant(c, deps, workspaceId, "members:manage");
+    if (grant.accountId !== organizationId)
+      throw new HTTPException(403, { message: "External membership workspace authority changed" });
   }
   return { organizationId, actorSubjectId: context.subjectId };
 }
@@ -172,7 +182,7 @@ export async function cancelExternalWorkspaceMemberGrantForRequest(
   membershipId: string,
   input: unknown,
 ) {
-  const service = await externalService(c, deps, organizationId);
+  const service = await externalService(c, deps, organizationId, workspaceId);
   const request = CancelExternalWorkspaceMemberGrantRequest.safeParse(input);
   if (!request.success)
     throw new HTTPException(422, { message: "Invalid external grant cancellation" });
@@ -198,7 +208,7 @@ export async function updateExternalWorkspaceMemberForRequest(
   membershipId: string,
   input: unknown,
 ) {
-  const service = await externalService(c, deps, organizationId);
+  const service = await externalService(c, deps, organizationId, workspaceId);
   const request = UpdateExternalWorkspaceMemberRequest.safeParse(input);
   if (!request.success)
     throw new HTTPException(422, {

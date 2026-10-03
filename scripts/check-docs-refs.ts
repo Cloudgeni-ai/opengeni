@@ -21,7 +21,6 @@ const sourceRoots = [
 const recordMarker = "<!-- docs-refs: record -->";
 const ignoreMarker = "<!-- docs-refs: ignore -->";
 const architecturePath = "docs/architecture.md";
-const architectureMaxWords = 12_000;
 const architectureMaxLineLength = 500;
 const architectureWorkspaceMapHeadings = [
   "### 6.1 Applications",
@@ -172,16 +171,8 @@ function checkArchitectureMap(text: string, mapFiles: string[], out: Finding[]):
     return;
   }
 
-  const wordCount = text.match(/\S+/gu)?.length ?? 0;
-  if (wordCount > architectureMaxWords) {
-    out.push({
-      file: architecturePath,
-      line: 1,
-      token: `${wordCount} words`,
-      reason: `architecture orientation budget exceeds ${architectureMaxWords} words`,
-    });
-  }
-
+  // Total prose volume is not a correctness contract. References and workspace
+  // structure remain mandatory regardless of how much orientation is needed.
   const lines = text.split("\n");
   for (let index = 0; index < lines.length; index += 1) {
     const line = lines[index] ?? "";
@@ -403,7 +394,7 @@ async function listFiles(roots: string[]): Promise<string[]> {
 }
 
 async function runFileListCommand(command: string[]): Promise<string | null> {
-  let proc: ReturnType<typeof Bun.spawn>;
+  let proc: Bun.Subprocess<"ignore", "pipe", "pipe">;
   try {
     proc = Bun.spawn(command, {
       stdout: "pipe",

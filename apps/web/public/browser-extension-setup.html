@@ -39,6 +39,13 @@
         background: #383838;
         font-size: 19px;
       }
+      .icon::before {
+        content: "";
+        width: 28px;
+        height: 28px;
+        background: currentColor;
+        mask: url("/favicon.svg") center / contain no-repeat;
+      }
       h1 {
         margin: 18px 0 8px;
         font-size: 22px;
@@ -83,32 +90,49 @@
         color: #a3a3a3;
         line-height: 1.45;
       }
+      details {
+        margin-top: 20px;
+        color: #b8b8b8;
+        font-size: 13px;
+      }
+      summary {
+        cursor: pointer;
+      }
     </style>
   </head>
   <body>
     <main>
-      <div class="icon" aria-hidden="true">◎</div>
+      <div class="icon" aria-hidden="true"></div>
       <h1>Connect this Chrome profile</h1>
       <p>
         The Opengeni machine agent is ready. Chrome requires you to approve an extension once for
         each profile you want agents to use.
       </p>
       <ol>
-        <li>Download and extract the extension.</li>
-        <li>
-          Open <code>chrome://extensions</code>, enable <strong>Developer mode</strong>, then choose
-          <strong>Load unpacked</strong>.
-        </li>
-        <li>
-          Select the extracted <code>opengeni-browser-extension</code> folder. The profile then
-          appears in Opengeni automatically.
-        </li>
+        <li>Open the Chrome Web Store listing in the profile you want to connect.</li>
+        <li>Choose <strong>Add to Chrome</strong> and confirm the extension permissions.</li>
+        <li>Open Opengeni Browser to check its connection and give this profile a label.</li>
       </ol>
-      <a href="/opengeni-browser-extension.tar" download>Download Opengeni Browser</a>
-      <small
-        >A future Chrome Web Store listing can replace this manual development install. Existing
-        tabs are never attached until an agent explicitly uses this profile.</small
+      <a
+        href="https://chromewebstore.google.com/detail/opengeni-browser/phpmmcbeelfkcinjfbbggegjdcdmnnch"
+        >Install from Chrome Web Store</a
       >
+      <small
+        >The profile appears in Opengeni automatically. Existing tabs attach only when an agent uses
+        them.</small
+      >
+      <details>
+        <summary>Install an unpacked development version</summary>
+        <ol>
+          <li>Download and extract the extension.</li>
+          <li>
+            Open <code>chrome://extensions</code>, enable <strong>Developer mode</strong>, then
+            choose <strong>Load unpacked</strong>.
+          </li>
+          <li>Select the extracted <code>opengeni-browser-extension</code> folder.</li>
+        </ol>
+        <a href="/opengeni-browser-extension.tar" download>Download unpacked extension</a>
+      </details>
     </main>
   </body>
 </html>

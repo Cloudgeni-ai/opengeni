@@ -1,5 +1,10 @@
 import { ORGANIZATION_PROVIDER_META } from "@/components/models/provider-metadata";
 export { ORGANIZATION_PROVIDER_META } from "@/components/models/provider-metadata";
+import {
+  beginIntegrationConnect,
+  integrationConnectErrorOutcome,
+  modelConnectionClass,
+} from "@/lib/integration-connect-analytics";
 import { claudeModelLabel } from "@/components/models/claude-setup";
 import type {
   OrganizationModelProviderConnection as Connection,
@@ -29,13 +34,16 @@ export function useOrganizationProviderConnection({
   providerKind,
   client,
   enabled = true,
+  catalogConnection,
 }: {
   organizationId: string;
   providerKind: ProviderKind;
   client: OpenGeniBrowserClient;
   enabled?: boolean;
+  catalogConnection?: { connected: boolean; loaded: boolean; error: Error | null };
 }): ProviderConnectionView {
   const meta = ORGANIZATION_PROVIDER_META[providerKind];
+  const hasCatalogConnection = Boolean(catalogConnection);
   const [connection, setConnection] = useState<Connection | null>(null);
   const [models, setModels] = useState<CustomModel[]>([]);
   const [slug, setSlug] = useState("");
@@ -70,7 +78,7 @@ export function useOrganizationProviderConnection({
     };
   }, []);
 
-  const connected = connection?.status === "active";
+  const connected = catalogConnection?.connected ?? connection?.status === "active";
 
   const slugValid =
     slug.length <= WORKSPACE_GATEWAY_CUSTOM_MODEL_UPSTREAM_ID_MAX_LENGTH &&
@@ -86,7 +94,7 @@ export function useOrganizationProviderConnection({
         : `Add models now; they become selectable after ${meta.shortName} is connected.`;
 
   const refreshConnection = useCallback(async (): Promise<Connection | null | undefined> => {
-    if (!enabled) return undefined;
+    if (!enabled || hasCatalogConnection) return undefined;
     const generation = ++connectionGenerationRef.current;
     try {
       const result = await client.getOrganizationModelProviderConnection(
@@ -104,13 +112,13 @@ export function useOrganizationProviderConnection({
       setLoaded(true);
       return undefined;
     }
-  }, [client, organizationId, providerKind, enabled]);
+  }, [client, organizationId, providerKind, enabled, hasCatalogConnection]);
 
   const claudeUsage = useClaudeUsage({
     client,
     scope: "organization",
     scopeId: organizationId,
-    enabled: enabled && providerKind === "claude_subscription",
+    enabled: enabled && !catalogConnection && providerKind === "claude_subscription",
     connected,
     credentialVersion: connection?.version,
     canManage: true,
@@ -146,7 +154,7 @@ export function useOrganizationProviderConnection({
 
   async function saveKey(apiKey: string): Promise<boolean> {
     const key = apiKey.trim();
-    if (!key || connectionBusy) return false;
+    if (!key || catalogConnection || connectionBusy) return false;
     const credentialIdentity = key;
     const version = connection?.version ?? 0;
     const pending = pendingSaveRef.current;
@@ -157,6 +165,10 @@ export function useOrganizationProviderConnection({
     pendingSaveRef.current = { key: credentialIdentity, version, operationId };
     connectionGenerationRef.current += 1;
     setConnectionBusy(true);
+    const journey = beginIntegrationConnect(
+      modelConnectionClass(providerKind) ?? "other",
+      "api_key",
+    );
     const mutate = () =>
       client.upsertOrganizationModelProviderConnection(organizationId, providerKind, {
         operationId,
@@ -164,6 +176,7 @@ export function useOrganizationProviderConnection({
         apiKey: key,
       });
     const commit = (saved: Connection) => {
+      journey.finish("connected");
       pendingSaveRef.current = null;
       setConnection(saved);
       setConnectionError(null);
@@ -187,6 +200,7 @@ export function useOrganizationProviderConnection({
       }
       // A newer version can belong to another administrator. Only the mutation's
       // idempotent receipt proves that this token and identity were committed.
+      journey.finish(integrationConnectErrorOutcome(finalError));
       await refreshConnection();
       toast.error(`Couldn't connect ${meta.title}`, {
         description: userErrorText(finalError),
@@ -198,6 +212,7 @@ export function useOrganizationProviderConnection({
   }
 
   async function disconnect(): Promise<boolean> {
+    if (catalogConnection) return false;
     if (!connection || connection.status !== "active") return true;
     connectionGenerationRef.current += 1;
     setConnectionBusy(true);
@@ -345,12 +360,12 @@ export function useOrganizationProviderConnection({
     scopeLabel: "Organization",
     organization: true,
     accessTarget: { client, organizationId, kind: providerKind, connectionId: "current" },
-    canManageConnection: enabled,
+    canManageConnection: enabled && !catalogConnection,
     canManageCustomModels: enabled,
     connected,
-    settled: !enabled || (loaded && modelsLoaded),
-    hidden: !enabled,
-    error: connectionError,
+    settled: !enabled || ((catalogConnection?.loaded ?? loaded) && modelsLoaded),
+    hidden: !enabled || Boolean(catalogConnection),
+    error: catalogConnection?.error ?? connectionError,
     customModelsError: modelsError,
     customModels: models,
     customModelsLoaded: modelsLoaded,

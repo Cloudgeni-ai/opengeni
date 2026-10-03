@@ -1,5 +1,7 @@
 export { managedUserEmailAllowed } from "./managed-user-admission";
+import { isRetiredNativeAtlassianTool } from "@opengeni/contracts/atlassian-native-retirement";
 import {
+  directModelConnectionSpec,
   BillingMode,
   CAPABILITY_DESCRIPTORS,
   agentConfigDeploymentLimitsFromAllowlist,
@@ -99,6 +101,13 @@ const EnvBoolean = z.preprocess((value) => {
   }
   return value;
 }, z.boolean());
+
+/** An absolute http(s) URL that is safe to render as a browser link. */
+const PublicHttpUrl = z
+  .string()
+  .url()
+  .max(2_048)
+  .refine((value) => /^https?:\/\//iu.test(value), "must be an http(s) URL");
 
 /** Default pacing between consecutive no-input goal continuations. */
 export const DEFAULT_GOAL_IDLE_BACKOFF_MS: readonly number[] = [3_000, 30_000, 120_000, 300_000];
@@ -311,6 +320,15 @@ const SettingsSchema = z.object({
     .max(32)
     .regex(/^G-[A-Z0-9]+$/u)
     .optional(),
+  // Optional operator-owned legal documents linked from the signed-out console.
+  // Unset by default, so a self-hosted deployment never shows another operator's
+  // policies; the managed service points these at its own published pages.
+  legalPrivacyPolicyUrl: PublicHttpUrl.optional(),
+  legalTermsOfServiceUrl: PublicHttpUrl.optional(),
+  // Optional operator support address, shown as a "Contact support" mailto link
+  // on the signed-out page and in the Help menu. Unset by default for the same
+  // reason as the legal links.
+  supportEmail: z.string().trim().email().max(254).optional(),
   publicBaseUrl: z.string().url().optional(),
   // Product documentation the web console links from its Help menu. Absent
   // means the public OpenGeni docs; `none` hides the link for deployments that
@@ -439,6 +457,8 @@ const SettingsSchema = z.object({
   slackClientId: z.string().optional(),
   slackClientSecret: z.string().optional(),
   slackSigningSecret: z.string().optional(),
+  // Unlisted apps share Slack’s restricted history/replies quota across all tokens.
+  slackAccessMode: z.enum(["limited", "full"]).default("limited"),
   slackBotDisplayName: OpenGeniSlackBotDisplayName.default("OpenGeni"),
   slackCommand: z
     .string()
@@ -831,17 +851,6 @@ const SettingsSchema = z.object({
   // merged with the MCP-server tools (getAllTools = [...mcpTools, ...tools])
   // and the sandbox capability tools, never replacing them.
   webSearchEnabled: EnvBoolean.default(true),
-  // Agent configuration rollout (packages/contracts/src/agent-config.ts).
-  // Admission: when false the API rejects every `agent` input (and the
-  // mid-session update) with 422 agent_config_not_enabled, and stored
-  // workspace agent defaults are ignored. Enable only after every worker
-  // understands sessions.agent_config (migration 0559). Workers always honor
-  // stored configurations regardless of this switch.
-  agentConfigAdmissionEnabled: EnvBoolean.default(false),
-  // When true, a new top-level session that omits `agent` (and has no
-  // legacy parent) resolves `{ capabilities: "all" }`. Old workers ignoring an
-  // "all" configuration still produce today's full tool set.
-  agentConfigDefaultForNewSessions: EnvBoolean.default(false),
   // Jev (TypeSafe's fast judge model) for worker-side agent tools. Without a
   // usable key every Jev-backed feature is off. The key stays on the server
   // (API and worker) and never reaches a sandbox or Connected Machine.
@@ -968,12 +977,10 @@ const SettingsSchema = z.object({
   // Shared desktop toggle: this module reads it for the 6080 port-merge; the
   // owner module (P4.x) acts on it to launch the display stack.
   sandboxDesktopEnabled: EnvBoolean.default(false),
-  // Human take-control toggle: when ON (default) the negotiated DesktopStream
-  // cell advertises mode "interactive" — the noVNC viewer can drive mouse+keyboard
-  // into :0 (x11vnc runs without -viewonly). Turn it OFF for a genuinely read-only
-  // deployment: the cell reports mode "read-only" and the client disables the
-  // "Take control" affordance. This gates the HUMAN viewer plane; agent
-  // interaction is authorized through managed ComputerSession tools.
+  // Human sandbox input policy. Canonical ComputerSession attachments reflect
+  // it and /actions enforces it independently of the client. The legacy
+  // DesktopStream adapter also reports read-only when disabled. Agent tools
+  // retain their separate session-control authority.
   sandboxDesktopInteractive: EnvBoolean.default(true),
   // REAL PTY terminal toggle (P5.t): gates the ttyd pty-ws plane (7681) the API
   // mints over the SAME tunnel as the desktop. Defaults ON — the interactive
@@ -1223,6 +1230,33 @@ const SettingsSchema = z.object({
   // getSettings caps the default at half a shorter configured Modal lifetime so
   // the entire reaper window always fits. Knob: OPENGENI_SANDBOX_IDLE_GRACE_MS.
   sandboxIdleGraceMs: z.coerce.number().int().positive().default(900_000),
+  // Idle command containment. A legacy retained background command (a dev
+  // server, a command whose output is still draining, a stopped command the
+  // provider no longer answers for) keeps its box warm through a non-expiring
+  // process holder, so the zero-holder drain never runs and the box would stay
+  // up until the provider deadline kills it uncaptured. Once every session of
+  // the sandbox group has been unused this long - no open turn or pending
+  // request, no held wait_for_input, no other holder or writer, measured from
+  // durable turn/holder/admission facts - the reaper checkpoints the workspace,
+  // stops the box and settles those commands `lost` with reason
+  // `idle_containment`. Default 30min: twice the default
+  // idle grace, so a lease that is only waiting for a "glanced away" user is
+  // never contained earlier than an idle lease would drain, and well inside
+  // the 1h provider-deadline rotation lead, so an idle box is saved long before
+  // the deadline path has to act. Set 0 to disable new idle enrollments without
+  // disabling provider-deadline containment or cancelling an enrolled drain.
+  // A positive window must exceed OPENGENI_SANDBOX_IDLE_GRACE_MS;
+  // an explicit positive value must also stay below OPENGENI_SANDBOX_ROTATION_LEAD_MS,
+  // and with an explicit OPENGENI_MODAL_IDLE_TIMEOUT_SECONDS the reaper period
+  // plus this window plus the drain capture budget must fit before it.
+  // getSettings derives the unset default between those two for short-lived
+  // provider lifetimes. Knob: OPENGENI_SANDBOX_IDLE_COMMAND_CONTAINMENT_MS.
+  sandboxIdleCommandContainmentMs: z.coerce
+    .number()
+    .int()
+    .nonnegative()
+    .optional()
+    .transform((value) => (value === 0 ? undefined : value)),
   // MID-SESSION /workspace snapshot cadence (sandbox-file-persistence). The
   // reaper's drain-persist only protects boxes the reaper itself kills; a box
   // that dies any other way (Modal's hard creation-time timeout on a session
@@ -1394,6 +1428,12 @@ const SettingsSchema = z.object({
     .min(1)
     .optional(),
   managedAuthSessionSetMode: z.enum(["legacy", "dual", "broker"]).default("legacy"),
+  // Deployment ceiling for new managed accounts. When false, managed auth
+  // refuses every new Better Auth account (email/password sign-up and implicit
+  // Google/GitHub sign-up) while existing sign-in, sessions, password reset,
+  // email verification, and invitation-bound account setup keep working. Read
+  // at startup; the 0585 runtime switch pauses sign-ups without a restart.
+  managedAuthNewSignupsEnabled: EnvBoolean.default(true),
   // Query transport is an explicit second-stage rollout. A pre-compatibility
   // web image understands only fragment bearers, so API replicas must keep
   // generating fragment links until the compatible web fleet has converged.
@@ -1669,26 +1709,17 @@ export function usableJevApiKey(settings: Pick<Settings, "jevApiKey">): string |
   return usableDeploymentSecret(settings.jevApiKey);
 }
 
-/** Deployment half of agent configuration: rollout switches plus hard capability limits. */
+/** Deployment half of agent configuration: hard capability limits. */
 export function agentConfigDeploymentPolicy(
   settings: Pick<
     Settings,
-    | "agentConfigAdmissionEnabled"
-    | "agentConfigDefaultForNewSessions"
-    | "webSearchEnabled"
-    | "defaultFirstPartyMcpTools"
-    | "allowedFirstPartyMcpTools"
+    "webSearchEnabled" | "defaultFirstPartyMcpTools" | "allowedFirstPartyMcpTools"
   >,
-): AgentConfigDeploymentLimits & { admissionEnabled: boolean; defaultForNewSessions: boolean } {
-  const limits = agentConfigDeploymentLimitsFromAllowlist(
+): AgentConfigDeploymentLimits {
+  return agentConfigDeploymentLimitsFromAllowlist(
     resolveFirstPartyMcpToolPolicy(settings).allowed,
     settings.webSearchEnabled ? {} : { webSearch: "web search is turned off on this server" },
   );
-  return {
-    ...limits,
-    admissionEnabled: settings.agentConfigAdmissionEnabled === true,
-    defaultForNewSessions: settings.agentConfigDefaultForNewSessions === true,
-  };
 }
 
 /**
@@ -1902,6 +1933,27 @@ export type ModelUsageCostBreakdown = {
   creditCostMicros: number;
 };
 
+export type ModelListCostClassesMicros = {
+  uncachedInput: number;
+  cacheRead: number;
+  cacheWrite: number;
+  output: number;
+};
+
+export type ModelListUsageCostSnapshot = ModelUsageCostBreakdown & {
+  /** Captured upstream list costs, summing to providerCostMicros, never debits. */
+  listByClassMicros: ModelListCostClassesMicros | null;
+  /** True only when a returned class split includes latency rounding allocation. */
+  listByClassApprox: boolean;
+};
+
+export type ModelRecordedListCostAllocation = {
+  /** Approximate attribution of a stored upstream total, never a new price. */
+  listByClassMicros: ModelListCostClassesMicros | null;
+  /** True for every eligible historical allocation, including known zero. */
+  listByClassApprox: boolean;
+};
+
 export type StaticUsageLimitsConfig = StaticUsageLimits;
 export type EntitlementsConfig = Entitlements;
 
@@ -2072,7 +2124,7 @@ export type ModelExecutionLimitsV1 = {
 
 export type CredentialSourceV1 =
   | { kind: "deployment"; mechanism: "api_key" | "azure_ad_bearer" | "none" }
-  | { kind: "connected_subscription"; provider: "codex" | "xai" }
+  | { kind: "connected_subscription"; provider: "codex" | "xai" | "claude" }
   | { kind: "workspace_connection"; mechanism: "api_key" }
   | { kind: "organization_connection"; mechanism: "api_key" };
 
@@ -2113,6 +2165,8 @@ export const RegistryProviderKind = z.enum([
   "vercel-gateway-managed",
   "vercel-gateway-workspace",
   "vercel-gateway-organization",
+  "direct-openai-workspace",
+  "direct-azure-workspace",
   "openrouter-workspace",
   "openrouter-organization",
   "anthropic-organization",
@@ -2465,7 +2519,11 @@ const CodexCatalogModelSchema = RegistryModelSchema.safeExtend({
         message: "Codex product id must match its upstream model slug",
       });
     }
-  });
+  })
+  .transform((model) => ({
+    ...model,
+    capabilities: reviewedCodexCatalogCapabilities(model.upstreamModelId, model.capabilities),
+  }));
 
 export const ModelCatalogDocument = z
   .object({
@@ -2526,7 +2584,11 @@ export const ModelCatalogDocument = z
       });
     }
     document.registryProviders.forEach((provider, providerIndex) => {
-      if (RESERVED_MODEL_PROVIDER_IDS.has(provider.id)) {
+      if (
+        RESERVED_MODEL_PROVIDER_IDS.has(provider.id) ||
+        provider.id.startsWith("workspace-openai-") ||
+        provider.id.startsWith("workspace-azure-openai-")
+      ) {
         context.addIssue({
           code: "custom",
           path: ["registryProviders", providerIndex, "id"],
@@ -3135,6 +3197,113 @@ export const defaultModelPricing: Record<string, ModelPricingScheduleV1> = {
   },
 };
 
+/** Reviewed comparison rates only; never debit or execution-definition defaults. */
+export const reviewedModelListPricing: Record<string, ModelPricingScheduleV1> = {
+  // Reviewed 2026-10-03 against https://developers.openai.com/api/docs/pricing
+  // and https://ai-gateway.vercel.sh/v1/models. GPT-6.1 Sol's cache-read rate
+  // is 5% of input, not GPT-6 Sol's 10%. The long-context boundary is >272K.
+  "gpt-6.1-sol": {
+    default: {
+      inputMicrosPerMillionTokens: 2_000_000,
+      cachedInputMicrosPerMillionTokens: 100_000,
+      cacheWriteMicrosPerMillionTokens: 2_500_000,
+      outputMicrosPerMillionTokens: 10_000_000,
+      marginBps: 500,
+    },
+    inputTokenTiers: [
+      {
+        minimumInputTokens: 272_001,
+        pricing: {
+          inputMicrosPerMillionTokens: 4_000_000,
+          cachedInputMicrosPerMillionTokens: 200_000,
+          cacheWriteMicrosPerMillionTokens: 5_000_000,
+          outputMicrosPerMillionTokens: 15_000_000,
+          marginBps: 500,
+        },
+      },
+    ],
+  },
+  // xAI Standard API list rates, reviewed 2026-10-03:
+  // https://docs.x.ai/developers/models/grok-4.5 (and grok-4.6 / grok-4.7).
+  // Preserve the native API's established >=200K boundary. Gateway's separately
+  // configured >200K schedule is not interchangeable with this native schedule.
+  // xAI's automatic caching has no separate cache-write surcharge.
+  ...Object.fromEntries(
+    (
+      [
+        ["grok-4.5", 300_000],
+        ["grok-4.6", 500_000],
+        ["grok-4.7", 500_000],
+      ] as const
+    ).map(([model, cachedInput]) => [
+      model,
+      {
+        default: {
+          inputMicrosPerMillionTokens: 2_000_000,
+          cachedInputMicrosPerMillionTokens: cachedInput,
+          outputMicrosPerMillionTokens: 6_000_000,
+          marginBps: 500,
+        },
+        inputTokenTiers: [
+          {
+            minimumInputTokens: 200_000,
+            pricing: {
+              inputMicrosPerMillionTokens: 4_000_000,
+              cachedInputMicrosPerMillionTokens: cachedInput * 2,
+              outputMicrosPerMillionTokens: 12_000_000,
+              marginBps: 500,
+            },
+          },
+        ],
+      },
+    ]),
+  ),
+  // Every reviewed native Claude profile. Standard/global prices include
+  // 5-minute cache writes; 1-hour native routes are projected separately.
+  // https://platform.claude.com/docs/en/about-claude/pricing (2026-10-03).
+  // Opus 5.5 cache reads are 5%, unlike the older models' 10%; none of these
+  // models has a long-context premium.
+  ...Object.fromEntries(
+    (
+      [
+        ["claude-opus-5-5", 4_000_000, 200_000, 5_000_000, 20_000_000],
+        ["claude-sonnet-5-5", 2_000_000, 200_000, 2_500_000, 10_000_000],
+        ["claude-opus-5", 5_000_000, 500_000, 6_250_000, 25_000_000],
+        ["claude-sonnet-5", 2_000_000, 200_000, 2_500_000, 10_000_000],
+        ["claude-opus-4-8", 5_000_000, 500_000, 6_250_000, 25_000_000],
+        ["claude-opus-4-7", 5_000_000, 500_000, 6_250_000, 25_000_000],
+        ["claude-opus-4-6", 5_000_000, 500_000, 6_250_000, 25_000_000],
+        ["claude-sonnet-4-6", 3_000_000, 300_000, 3_750_000, 15_000_000],
+        ["claude-haiku-4-5-20251001", 1_000_000, 100_000, 1_250_000, 5_000_000],
+      ] as const
+    ).map(([model, input, cachedInput, cacheWrite, output]) => [
+      model,
+      {
+        default: {
+          inputMicrosPerMillionTokens: input,
+          cachedInputMicrosPerMillionTokens: cachedInput,
+          cacheWriteMicrosPerMillionTokens: cacheWrite,
+          outputMicrosPerMillionTokens: output,
+          marginBps: 500,
+        },
+      },
+    ]),
+  ),
+};
+
+// Explicitly priced free variant, not an unknown rate. List-only metadata
+// preserves previously accepted free-route execution definitions.
+// https://openrouter.ai/api/v1/models, verified 2026-10-03.
+const reviewedFreeOpenRouterListPricing: ModelPricingScheduleV1 = {
+  default: {
+    inputMicrosPerMillionTokens: 0,
+    cachedInputMicrosPerMillionTokens: 0,
+    cacheWriteMicrosPerMillionTokens: 0,
+    outputMicrosPerMillionTokens: 0,
+    marginBps: 500,
+  },
+};
+
 // --- backend-gated required-credential table (the single source of truth) ---
 // Each sandbox backend declares ONLY its own required credentials: a deployment
 // configured for `sandboxBackend=modal` must carry the Modal token, but a
@@ -3226,6 +3395,9 @@ function optionalEnvironmentValue(name: string, source: NodeJS.ProcessEnv): stri
   return value && value.trim().length > 0 ? value : undefined;
 }
 
+// getSettings runs per request in some processes; say this once per process.
+let idleCommandContainmentDisabledWarned = false;
+
 export function getSettings(source: NodeJS.ProcessEnv = process.env): Settings {
   const optional = (name: string): string | undefined => optionalEnvironmentValue(name, source);
   const modelCatalogSource = optional("OPENGENI_MODEL_CATALOG_SOURCE");
@@ -3282,6 +3454,9 @@ export function getSettings(source: NodeJS.ProcessEnv = process.env): Settings {
     analyticsPosthogProjectKey: optional("OPENGENI_ANALYTICS_POSTHOG_PROJECT_KEY"),
     analyticsPosthogHost: optional("OPENGENI_ANALYTICS_POSTHOG_HOST"),
     analyticsGa4MeasurementId: optional("OPENGENI_ANALYTICS_GA4_MEASUREMENT_ID"),
+    legalPrivacyPolicyUrl: optional("OPENGENI_LEGAL_PRIVACY_POLICY_URL"),
+    legalTermsOfServiceUrl: optional("OPENGENI_LEGAL_TERMS_OF_SERVICE_URL"),
+    supportEmail: optional("OPENGENI_SUPPORT_EMAIL"),
     publicBaseUrl: optional("OPENGENI_PUBLIC_BASE_URL"),
     documentationUrl: optional("OPENGENI_DOCUMENTATION_URL"),
     mcpOauthEnabled: optional("OPENGENI_MCP_OAUTH_ENABLED"),
@@ -3327,6 +3502,7 @@ export function getSettings(source: NodeJS.ProcessEnv = process.env): Settings {
     slackClientId: optional("OPENGENI_SLACK_CLIENT_ID"),
     slackClientSecret: optional("OPENGENI_SLACK_CLIENT_SECRET"),
     slackSigningSecret: optional("OPENGENI_SLACK_SIGNING_SECRET"),
+    slackAccessMode: optional("OPENGENI_SLACK_ACCESS_MODE"),
     slackBotDisplayName: optional("OPENGENI_SLACK_BOT_DISPLAY_NAME"),
     slackCommand: optional("OPENGENI_SLACK_COMMAND"),
     googleDriveClientId: optional("OPENGENI_GOOGLE_DRIVE_CLIENT_ID"),
@@ -3460,8 +3636,6 @@ export function getSettings(source: NodeJS.ProcessEnv = process.env): Settings {
     openaiReasoningEncryptedContent: optional("OPENGENI_OPENAI_REASONING_ENCRYPTED_CONTENT"),
     openaiMaxRetries: optional("OPENGENI_OPENAI_MAX_RETRIES"),
     webSearchEnabled: optional("OPENGENI_WEB_SEARCH_ENABLED"),
-    agentConfigAdmissionEnabled: optional("OPENGENI_AGENT_CONFIG_ADMISSION_ENABLED"),
-    agentConfigDefaultForNewSessions: optional("OPENGENI_AGENT_CONFIG_DEFAULT_FOR_NEW_SESSIONS"),
     jevApiKey: optional("OPENGENI_JEV_API_KEY"),
     jevBaseUrl: optional("OPENGENI_JEV_BASE_URL"),
     jevModel: optional("OPENGENI_JEV_MODEL"),
@@ -3586,6 +3760,7 @@ export function getSettings(source: NodeJS.ProcessEnv = process.env): Settings {
     sandboxViewerHolderTtlMs: optional("OPENGENI_SANDBOX_VIEWER_HOLDER_TTL_MS"),
     sandboxInteractionHolderTtlMs: optional("OPENGENI_SANDBOX_INTERACTION_HOLDER_TTL_MS"),
     sandboxIdleGraceMs: optional("OPENGENI_SANDBOX_IDLE_GRACE_MS"),
+    sandboxIdleCommandContainmentMs: optional("OPENGENI_SANDBOX_IDLE_COMMAND_CONTAINMENT_MS"),
     sandboxSnapshotIntervalMs: optional("OPENGENI_SANDBOX_SNAPSHOT_INTERVAL_MS"),
     sandboxSnapshotTimeoutMs: optional("OPENGENI_SANDBOX_SNAPSHOT_TIMEOUT_MS"),
     sandboxDrainSnapshotTimeoutMs: optional("OPENGENI_SANDBOX_DRAIN_SNAPSHOT_TIMEOUT_MS"),
@@ -3676,6 +3851,7 @@ export function getSettings(source: NodeJS.ProcessEnv = process.env): Settings {
         ? undefined
         : source.OPENGENI_ALLOWED_USER_EMAILS.split(",").map((email) => email.trim()),
     managedAuthSessionSetMode: optional("OPENGENI_MANAGED_AUTH_SESSION_SET_MODE"),
+    managedAuthNewSignupsEnabled: optional("OPENGENI_MANAGED_AUTH_NEW_SIGNUPS_ENABLED"),
     organizationUserSetupEmailTokenTransport: optional(
       "OPENGENI_ORGANIZATION_USER_SETUP_EMAIL_TOKEN_TRANSPORT",
     ),
@@ -3717,6 +3893,40 @@ export function getSettings(source: NodeJS.ProcessEnv = process.env): Settings {
         : parsed.sandboxRotationLeadMs,
     mcpServers: ensureBuiltInMcpServers(parsed),
   };
+  if (raw.sandboxIdleCommandContainmentMs === undefined) {
+    // Strictly between the idle grace and the rotation lead whenever that
+    // interval exists (short test/canary lifetimes), never above 30 minutes,
+    // and early enough that an explicit Modal idle timeout cannot fire first.
+    const modalIdleCeilingMs =
+      settings.sandboxBackend === "modal" && settings.modalIdleTimeoutSeconds !== undefined
+        ? settings.modalIdleTimeoutSeconds * 1000 -
+          settings.sandboxLeaseReaperPeriodMs -
+          sandboxArchiveCaptureTimeoutMs({
+            sandboxSnapshotTimeoutMs: effectiveSandboxDrainSnapshotTimeoutMs(settings),
+          }) -
+          1
+        : Number.POSITIVE_INFINITY;
+    const derived = Math.min(
+      1_800_000,
+      Math.floor((settings.sandboxIdleGraceMs + settings.sandboxRotationLeadMs) / 2),
+      modalIdleCeilingMs,
+    );
+    // A derived value never fails validation: with no room above the idle
+    // grace, idle containment stays off and only the deadline rule applies.
+    if (derived > settings.sandboxIdleGraceMs) {
+      settings.sandboxIdleCommandContainmentMs = derived;
+    } else {
+      settings.sandboxIdleCommandContainmentMs = undefined;
+      if (!idleCommandContainmentDisabledWarned) {
+        idleCommandContainmentDisabledWarned = true;
+        console.warn(
+          "[config] idle command containment disabled: no window fits between " +
+            `OPENGENI_SANDBOX_IDLE_GRACE_MS (${settings.sandboxIdleGraceMs}) and the Modal idle ` +
+            "timeout / rotation lead ceiling; set OPENGENI_SANDBOX_IDLE_COMMAND_CONTAINMENT_MS to override.",
+        );
+      }
+    }
+  }
   validateSettings(settings, source);
   return settings;
 }
@@ -3753,7 +3963,7 @@ export function resolveFirstPartyMcpToolPolicy(
 ): FirstPartyMcpToolPolicy {
   const allowed = currentAgentLearningToolSelection(
     settings.allowedFirstPartyMcpTools ?? [...FIRST_PARTY_MCP_TOOL_NAMES],
-  );
+  ).filter((tool) => !isRetiredNativeAtlassianTool(tool));
   const allowedSet = new Set(allowed);
   const defaults = currentAgentLearningToolSelection(
     settings.defaultFirstPartyMcpTools ?? [...DEFAULT_FIRST_PARTY_MCP_TOOLS],
@@ -4469,6 +4679,53 @@ function configuredRegistryProviders(settings: Settings): InternalRegistryProvid
   return injected;
 }
 
+/** Customer-owned OpenAI/Azure routes, bound to immutable connection identity. */
+export function withDirectModelProviders(
+  settings: Settings,
+  connections: readonly {
+    id: string;
+    version: number;
+    subjectId: string | null;
+    kind: string;
+    status: string;
+    providerDomain: string;
+    metadata: Record<string, unknown>;
+    apiKey?: string;
+  }[],
+): Settings {
+  const providers = parseModelProvidersJson(settings.modelProvidersJson).filter(
+    (provider) =>
+      !provider.id.startsWith("workspace-openai-") &&
+      !provider.id.startsWith("workspace-azure-openai-"),
+  );
+  for (const connection of connections) {
+    const spec = directModelConnectionSpec(connection);
+    if (!spec) continue;
+    providers.push({
+      kind: spec.provider === "openai" ? "direct-openai-workspace" : "direct-azure-workspace",
+      id: spec.providerId,
+      label: spec.provider === "openai" ? "Your OpenAI" : "Your Azure OpenAI",
+      api: "responses",
+      wireProfile: spec.provider === "openai" ? "openai" : "azure-openai",
+      baseUrl: spec.baseUrl,
+      ...(connection.apiKey ? { apiKey: connection.apiKey } : {}),
+      models: [
+        {
+          id: spec.modelId,
+          upstreamModelId: spec.model,
+          label: spec.model,
+          capabilities: legacyModelCapabilities(settings, {
+            reasoningEffort: false,
+            hostedWebSearch: false,
+          }),
+          toolOutputTruncationTokens: settings.modelToolOutputTruncationTokens,
+        },
+      ],
+    });
+  }
+  return { ...settings, modelProvidersJson: JSON.stringify(providers) };
+}
+
 /** Static catalog overlay; it contains no concrete workspace credential. */
 export function withWorkspaceGatewayCatalogProvider(
   settings: Settings,
@@ -4721,9 +4978,9 @@ function builtinLatencyModesForModel(modelId: string): Array<{
 }> {
   if (
     isBuiltinGpt56ModelId(modelId) ||
-    modelId.startsWith("gpt-6-") ||
+    /^gpt-6(?:\.\d+)?-/u.test(modelId) ||
     modelId.startsWith("codex/gpt-5.6-") ||
-    modelId.startsWith("codex/gpt-6-")
+    /^codex\/gpt-6(?:\.\d+)?-/u.test(modelId)
   ) {
     return [
       { id: "standard", upstream: "supported", runnable: true },
@@ -4736,6 +4993,31 @@ function builtinLatencyModesForModel(modelId: string): Array<{
     ];
   }
   return [{ id: "standard", upstream: "unknown", runnable: true }];
+}
+
+function isReviewedGptVisionModel(slug: string): boolean {
+  return slug.startsWith("gpt-5.6-") || /^gpt-6(?:\.\d+)?-/u.test(slug);
+}
+
+/** Repair missing reviewed capabilities in live/stored Codex definitions.
+ * Explicit latency restrictions and every unrelated catalog field remain authoritative.
+ */
+function reviewedCodexCatalogCapabilities(
+  slug: string,
+  capabilities: ModelCapabilitiesV1,
+): ModelCapabilitiesV1 {
+  if (!/^gpt-6(?:\.\d+)?-/u.test(slug)) return capabilities;
+  const fast = builtinLatencyModesForModel(`${CODEX_MODEL_ID_PREFIX}${slug}`).find(
+    (mode) => mode.id === "fast",
+  );
+  return normalizeCapabilities({
+    ...capabilities,
+    inputModalities: [...new Set([...capabilities.inputModalities, "image" as const])],
+    latencyModes:
+      fast && !capabilities.latencyModes.some((mode) => mode.id === "fast")
+        ? [...capabilities.latencyModes, fast]
+        : capabilities.latencyModes,
+  });
 }
 
 function builtinPromptCachingForModel(
@@ -4831,9 +5113,22 @@ function assertLatencyModeRunnable(
 ): void {
   const runnable = runnableLatencyModesForModel(settings, modelId);
   if (!runnable.includes(latencyMode)) {
-    throw new Error(
-      `latency mode ${latencyMode} is not runnable for model ${modelId} (allowed: ${runnable.join(", ")})`,
+    throw new UnsupportedLatencyModeError(modelId, latencyMode, runnable);
+  }
+}
+
+export class UnsupportedLatencyModeError extends Error {
+  readonly code = "UNSUPPORTED_LATENCY_MODE";
+
+  constructor(
+    readonly modelId: string,
+    readonly latencyMode: LatencyMode,
+    readonly allowedLatencyModes: readonly LatencyMode[],
+  ) {
+    super(
+      `latency mode ${latencyMode} is not runnable for model ${modelId} (allowed: ${allowedLatencyModes.join(", ")})`,
     );
+    this.name = "UnsupportedLatencyModeError";
   }
 }
 
@@ -4845,14 +5140,17 @@ function registryCredentialSource(provider: InternalRegistryProvider): Credentia
       return { kind: "connected_subscription", provider: "codex" };
     case "xai-subscription":
       return { kind: "connected_subscription", provider: "xai" };
+    case "claude-subscription-workspace":
+    case "claude-subscription-organization":
+      return { kind: "connected_subscription", provider: "claude" };
     case "vercel-gateway-workspace":
+    case "direct-openai-workspace":
+    case "direct-azure-workspace":
     case "openrouter-workspace":
     case "anthropic-workspace":
-    case "claude-subscription-workspace":
       return { kind: "workspace_connection", mechanism: "api_key" };
     case "vercel-gateway-organization":
     case "anthropic-organization":
-    case "claude-subscription-organization":
     case "openrouter-organization":
       return { kind: "organization_connection", mechanism: "api_key" };
     case "api-key":
@@ -4873,15 +5171,17 @@ function registryBilling(provider: InternalRegistryProvider): BillingAttribution
       return { upstreamPayer: "deployment", metering: "external" };
     case "codex-subscription":
     case "xai-subscription":
+    case "claude-subscription-workspace":
+    case "claude-subscription-organization":
       return { upstreamPayer: "connected_subscription", metering: "external" };
     case "vercel-gateway-workspace":
+    case "direct-openai-workspace":
+    case "direct-azure-workspace":
     case "openrouter-workspace":
     case "anthropic-workspace":
-    case "claude-subscription-workspace":
       return { upstreamPayer: "workspace", metering: "external" };
     case "vercel-gateway-organization":
     case "anthropic-organization":
-    case "claude-subscription-organization":
     case "openrouter-organization":
       return { upstreamPayer: "organization", metering: "external" };
     case "api-key":
@@ -5054,6 +5354,48 @@ function legacyCodexAstraImplicitCachingDefinitionVersionFor(
   return definitionVersionFor({ ...modelWithoutVersion, capabilities }, provider);
 }
 
+function matchesAdditiveCapabilityDefinitionVersion(
+  model: ConfiguredModel,
+  provider: ResolvedModelProvider,
+  policy: TurnExecutionPolicyV1,
+): boolean {
+  const { definitionVersion: _definitionVersion, ...modelWithoutVersion } = model;
+  const { latencyModes, inputModalities } = model.capabilities;
+  // V1 has only three unique latency ids and three unique input modalities:
+  // at most 4 * 7 subset digests retaining the frozen mode. Reconstruct an
+  // exact historical declaration; never ignore the digest or alter existing
+  // mode support, runnable state, billing multiplier, or request-tier routing.
+  // Every other executable field remains in the digest. Do not compose this
+  // with the pre-wire-profile or implicit-caching migration exceptions.
+  for (let latencyMask = 1; latencyMask < 1 << latencyModes.length; latencyMask += 1) {
+    const retainedModes = latencyModes.filter((_mode, index) => latencyMask & (1 << index));
+    if (!retainedModes.some((mode) => mode.id === policy.latencyMode && mode.runnable)) {
+      continue;
+    }
+    for (let inputMask = 1; inputMask < 1 << inputModalities.length; inputMask += 1) {
+      const retainedInputs = inputModalities.filter((_modality, index) => inputMask & (1 << index));
+      if (
+        retainedModes.length === latencyModes.length &&
+        retainedInputs.length === inputModalities.length
+      ) {
+        continue;
+      }
+      const capabilities = {
+        ...model.capabilities,
+        latencyModes: retainedModes,
+        inputModalities: retainedInputs,
+      };
+      if (
+        policy.definitionVersion ===
+        definitionVersionFor({ ...modelWithoutVersion, capabilities }, provider)
+      ) {
+        return true;
+      }
+    }
+  }
+  return false;
+}
+
 /**
  * The built-in provider's stable id: "openai" on the OpenAI platform, "azure"
  * on Azure. Exported because the workspace model-policy gate must attribute
@@ -5169,7 +5511,7 @@ export function withCodexCatalogProvider(settings: Settings): Settings {
           ...legacyModelCapabilities(settings, {
             reasoningEffort: true,
             hostedWebSearch: true,
-            vision: slug.startsWith("gpt-5.6-") || slug.startsWith("gpt-6-"),
+            vision: isReviewedGptVisionModel(slug),
           }),
           ...(builtinPromptCachingForModel(`${CODEX_MODEL_ID_PREFIX}${slug}`)
             ? {
@@ -5436,7 +5778,7 @@ export function configuredModels(
           reasoningEffort: true,
           hostedWebSearch: settings.webSearchEnabled,
           hostedImageGeneration: builtinHostedImageGenerationForModel(settings, id),
-          vision: id.startsWith("gpt-5.6-") || id.startsWith("gpt-6-"),
+          vision: isReviewedGptVisionModel(id),
         }),
         ...(builtinPromptCachingForModel(id)
           ? { promptCaching: builtinPromptCachingForModel(id)! }
@@ -5770,7 +6112,7 @@ export class TurnExecutionPolicyDefinitionMismatchError extends Error {
 /**
  * Parse-time validation lives in @opengeni/contracts; this verifier binds a
  * present snapshot to the current executable definition and exact turn row.
- * Any deployment/provider drift fails before a provider or compaction call.
+ * Non-additive executable drift fails before a provider or compaction call.
  */
 export function assertTurnExecutionPolicyMatchesConfigV1(
   settings: Settings,
@@ -5810,6 +6152,39 @@ export function assertTurnExecutionPolicyMatchesConfigV1(
   if (!resolved) {
     throw new Error("Turn execution policy model is no longer configured");
   }
+  // The individual-account cutover corrects subscription accounting labels.
+  // Preserve an already accepted legacy policy only if its complete original
+  // executable digest matches; this exception cannot compose with other drift.
+  const legacyClaudeScope =
+    resolved.provider.kind === "claude-subscription-workspace"
+      ? "workspace"
+      : resolved.provider.kind === "claude-subscription-organization"
+        ? "organization"
+        : null;
+  const legacyClaudeAccountingMatches =
+    legacyClaudeScope !== null &&
+    parsed.providerId === resolved.provider.id &&
+    parsed.upstreamModelId === resolved.model.upstreamModelId &&
+    parsed.wireApi === resolved.model.api &&
+    canonicalJson(parsed.credentialSource) ===
+      canonicalJson({
+        kind: `${legacyClaudeScope}_connection`,
+        mechanism: "api_key",
+      }) &&
+    canonicalJson(parsed.billing) ===
+      canonicalJson({
+        upstreamPayer: legacyClaudeScope,
+        metering: "external",
+      }) &&
+    parsed.definitionVersion ===
+      definitionVersionFor(
+        {
+          ...resolved.model,
+          credentialSource: parsed.credentialSource,
+          billing: parsed.billing,
+        },
+        resolved.provider,
+      );
   // wireProfile was added to the definition digest after policies already
   // existed in durable in-flight turns. An omitted profile meant exactly
   // "openai", so accept that one legacy digest only; Azure and every other
@@ -5822,7 +6197,8 @@ export function assertTurnExecutionPolicyMatchesConfigV1(
     parsed.definitionVersion === resolved.model.definitionVersion ||
     parsed.definitionVersion === legacyImplicitOpenAiDefinitionVersion ||
     parsed.definitionVersion ===
-      legacyCodexAstraImplicitCachingDefinitionVersionFor(resolved.model, resolved.provider);
+      legacyCodexAstraImplicitCachingDefinitionVersionFor(resolved.model, resolved.provider) ||
+    matchesAdditiveCapabilityDefinitionVersion(resolved.model, resolved.provider, parsed);
   const identityMismatched =
     parsed.providerId !== resolved.provider.id ||
     parsed.upstreamModelId !== resolved.model.upstreamModelId ||
@@ -5831,10 +6207,10 @@ export function assertTurnExecutionPolicyMatchesConfigV1(
     canonicalJson(parsed.billing) !== canonicalJson(resolved.model.billing);
   // Identity/source changes must never enter a rollout-retry classification,
   // even when their definition digest also differs.
-  if (identityMismatched) {
+  if (identityMismatched && !legacyClaudeAccountingMatches) {
     throw new Error("Turn execution policy does not match the current provider definition");
   }
-  if (!definitionVersionMatches) {
+  if (!definitionVersionMatches && !legacyClaudeAccountingMatches) {
     throw new TurnExecutionPolicyDefinitionMismatchError();
   }
   return { policy: parsed, provider: resolved.provider, model: resolved.model };
@@ -5873,6 +6249,154 @@ export function configuredModelPricingSchedules(
     ...defaults,
     ...registry,
     ...configured,
+  };
+}
+
+/**
+ * Insights list-price metadata, including reviewed namespaced provider routes.
+ * Kept separate from debit/catalog pricing: adding a comparison must not change
+ * an accepted turn's frozen execution-definition hash or payer classification.
+ * Inline registry and explicit product-ID prices always win over projections.
+ */
+export function configuredModelListPricingSchedules(
+  settings: Settings,
+): Record<string, ModelPricingScheduleV1> {
+  const prices = configuredModelPricingSchedules(settings);
+  const configured = Object.fromEntries(
+    Object.entries(parseModelPricingJson(settings.modelPricingJson)).map(([model, pricing]) => [
+      model,
+      normalizeModelPricingSchedule(pricing),
+    ]),
+  );
+  // Bare new IDs need the actual configured public OpenAI route, not merely a
+  // familiar model name. Azure/custom endpoints do not inherit these API rates.
+  if (
+    settings.openaiProvider === "openai" &&
+    isDirectOpenAiApiBaseUrl(settings.openaiBaseUrl ?? "https://api.openai.com/v1")
+  ) {
+    for (const model of configuredModels(settings)) {
+      if (
+        model.providerId !== builtinProviderId(settings) ||
+        !model.upstreamModelId.startsWith("gpt-") ||
+        prices[model.id] !== undefined
+      )
+        continue;
+      const reviewed = reviewedModelListPricing[model.upstreamModelId];
+      if (reviewed) prices[model.id] = reviewed;
+    }
+  }
+  for (const provider of configuredRegistryProviders(settings)) {
+    for (const model of provider.models) {
+      if (prices[model.id] !== undefined) continue;
+      const reviewed = reviewedProviderModelPricing(settings, provider, model, configured);
+      if (reviewed) prices[model.id] = reviewed;
+    }
+  }
+  return prices;
+}
+
+/**
+ * A reviewed upstream list rate may also describe a namespaced product route.
+ * Never infer a rate by stripping arbitrary prefixes, matching labels, or
+ * treating every OpenAI-compatible endpoint as the original provider.
+ * This is pricing metadata only: credential selection and payer/metering are
+ * still derived exclusively from the accepted execution policy.
+ */
+function reviewedProviderModelPricing(
+  settings: Settings,
+  provider: InternalRegistryProvider,
+  model: RegistryProvider["models"][number],
+  configured: Record<string, ModelPricingScheduleV1>,
+): ModelPricingScheduleV1 | undefined {
+  const upstream = model.upstreamModelId ?? model.id;
+  let priceId: string | undefined;
+  let nativeClaude = false;
+  switch (provider.kind) {
+    case "anonymous":
+      if (
+        provider.baseUrl.replace(/\/$/u, "") === OPENROUTER_BASE_URL &&
+        upstream === DEFAULT_OPENROUTER_MODEL_ID.slice(OPENROUTER_MODEL_ID_PREFIX.length)
+      ) {
+        priceId = DEFAULT_OPENROUTER_MODEL_ID;
+      }
+      break;
+    case "codex-subscription":
+      if (upstream.startsWith("gpt-")) priceId = upstream;
+      break;
+    case "xai-subscription":
+      if (upstream.startsWith("grok-")) priceId = upstream;
+      break;
+    case "anthropic-workspace":
+    case "anthropic-organization":
+    case "claude-subscription-workspace":
+    case "claude-subscription-organization":
+      if (claudeNativeModelProfile(upstream)) {
+        priceId = upstream;
+        nativeClaude = true;
+      }
+      break;
+    case "direct-openai-workspace":
+      if (isDirectOpenAiApiBaseUrl(provider.baseUrl) && upstream.startsWith("gpt-")) {
+        priceId = upstream;
+      }
+      break;
+    case "vercel-gateway-managed":
+    case "vercel-gateway-workspace":
+    case "vercel-gateway-organization":
+      // Only curated, provider-pinned routes use the conservative fallback.
+      // Arbitrary Gateway custom models still require exact reported cost or
+      // an explicit operator rate, even if their slugs resemble a known model.
+      priceId = configuredGatewayCatalogModels(settings).find(
+        (candidate) =>
+          candidate.upstreamModelId === upstream &&
+          Object.values(OPENGENI_GATEWAY_MODELS).some(
+            (reviewed) => reviewed.upstreamModelId === candidate.upstreamModelId,
+          ),
+      )?.productId;
+      break;
+    case "openrouter-workspace":
+    case "openrouter-organization":
+    case "openrouter-managed":
+      if (upstream === DEFAULT_OPENROUTER_MODEL_ID.slice(OPENROUTER_MODEL_ID_PREFIX.length)) {
+        priceId = DEFAULT_OPENROUTER_MODEL_ID;
+      }
+      break;
+    case "api-key":
+      // Explicit deployments of the official APIs may use their own product
+      // IDs. Custom gateways/proxies and Azure SKUs do not inherit API rates.
+      if (isDirectOpenAiApiBaseUrl(provider.baseUrl) && upstream.startsWith("gpt-")) {
+        priceId = upstream;
+      } else if (provider.baseUrl.replace(/\/$/u, "") === "https://api.x.ai/v1") {
+        if (upstream.startsWith("grok-")) priceId = upstream;
+      } else if (
+        provider.api === "anthropic-messages" &&
+        provider.baseUrl.replace(/\/$/u, "") === "https://api.anthropic.com/v1" &&
+        claudeNativeModelProfile(upstream)
+      ) {
+        priceId = upstream;
+        nativeClaude = true;
+      }
+      break;
+    default:
+      return undefined;
+  }
+  if (!priceId) return undefined;
+  // Explicit upstream overrides retain the existing Codex comparison behavior;
+  // a product-ID override or inline registry rate still has higher precedence.
+  if (configured[priceId]) return configured[priceId];
+  const schedule =
+    reviewedModelListPricing[priceId] ??
+    defaultModelPricing[priceId] ??
+    (priceId === DEFAULT_OPENROUTER_MODEL_ID ? reviewedFreeOpenRouterListPricing : undefined);
+  if (!schedule) return undefined;
+  if (!nativeClaude || provider.anthropic?.cacheTtl !== "1h") return schedule;
+  // Anthropic's 1-hour cache writes are 2x base input, rather than 5m's 1.25x.
+  return {
+    ...schedule,
+    default: {
+      ...schedule.default,
+      cacheWriteMicrosPerMillionTokens: schedule.default.inputMicrosPerMillionTokens * 2,
+    },
   };
 }
 
@@ -5992,6 +6516,314 @@ export function calculateModelUsageCostBreakdown(
   options?: { latencyMode?: LatencyMode },
 ): ModelUsageCostBreakdown {
   const schedule = configuredModelPricingSchedules(settings)[model];
+  return calculateUsageCostBreakdown(settings, model, usage, schedule, options);
+}
+
+/** Provider-list/equivalent-credit comparison only; never debit authority. */
+export function calculateModelListUsageCostBreakdown(
+  settings: Settings,
+  model: string,
+  usage: ModelUsageInput,
+  options?: { latencyMode?: LatencyMode },
+): ModelUsageCostBreakdown {
+  const schedule = configuredModelListPricingSchedules(settings)[model];
+  return calculateUsageCostBreakdown(settings, model, usage, schedule, options);
+}
+
+/**
+ * Forward-only list comparison snapshot for the model-call fact writer.
+ * Callers must establish request price provenance (including geography/service
+ * tier) and retain per-request counters. Unknown counters/TTL/modifiers yield
+ * no class split, not invented zeros. Historical facts must not use this helper.
+ * Native Claude details preserve cache_write_tokens_5m and cache_write_tokens_1h.
+ */
+export function calculateModelListUsageCostSnapshot(
+  settings: Settings,
+  model: string,
+  usage: ModelUsageInput,
+  options?: { latencyMode?: LatencyMode; priceContextKnown?: boolean },
+): ModelListUsageCostSnapshot {
+  const schedule = configuredModelListPricingSchedules(settings)[model];
+  const fallback = calculateUsageCostBreakdown(settings, model, usage, schedule, options);
+  const unknown = { ...fallback, listByClassMicros: null, listByClassApprox: false };
+  if (!schedule || !options?.priceContextKnown) return unknown;
+  const entries = usage.requestUsageEntries?.length ? usage.requestUsageEntries : [usage];
+  const classes: ModelListCostClassesMicros = {
+    uncachedInput: 0,
+    cacheRead: 0,
+    cacheWrite: 0,
+    output: 0,
+  };
+  const rawCostByPricing = new Map<ModelPricing, number>();
+  const native = nativeClaudeListWriteContext(settings, model);
+  for (const entry of entries) {
+    if (!knownTokenCounter(entry.inputTokens) || !knownTokenCounter(entry.outputTokens))
+      return unknown;
+    const cached = knownDetailTokenCounter(entry, [
+      "cached_tokens",
+      "cachedInputTokens",
+      "cached_input_tokens",
+    ]);
+    const writes = knownDetailTokenCounter(entry, ["cache_write_tokens", "cacheWriteTokens"], true);
+    if (cached === undefined || writes === undefined || cached + writes > entry.inputTokens)
+      return unknown;
+    const pricing = selectModelPricing(schedule, entry.inputTokens);
+    if (cached > 0 && pricing.cachedInputMicrosPerMillionTokens === undefined) return unknown;
+    if (writes > 0 && pricing.cacheWriteMicrosPerMillionTokens === undefined) return unknown;
+    const costs: ModelListCostClassesMicros = {
+      uncachedInput: Math.ceil(
+        ((entry.inputTokens - cached - writes) * pricing.inputMicrosPerMillionTokens) / 1_000_000,
+      ),
+      cacheRead: Math.ceil((cached * (pricing.cachedInputMicrosPerMillionTokens ?? 0)) / 1_000_000),
+      cacheWrite: Math.ceil((writes * (pricing.cacheWriteMicrosPerMillionTokens ?? 0)) / 1_000_000),
+      output: Math.ceil((entry.outputTokens * pricing.outputMicrosPerMillionTokens) / 1_000_000),
+    };
+    if (native && writes > 0) {
+      const fiveMinute = knownDetailTokenCounter(entry, ["cache_write_tokens_5m"]);
+      const oneHour = knownDetailTokenCounter(entry, ["cache_write_tokens_1h"]);
+      if (fiveMinute === undefined || oneHour === undefined || fiveMinute + oneHour !== writes)
+        return unknown;
+      if (native.publishedRates) {
+        costs.cacheWrite =
+          Math.ceil((fiveMinute * native.publishedRates.fiveMinute) / 1_000_000) +
+          Math.ceil((oneHour * native.publishedRates.oneHour) / 1_000_000);
+      } else if (
+        !(
+          (native.declaredTtl === "5m" && oneHour === 0) ||
+          (native.declaredTtl === "1h" && fiveMinute === 0)
+        )
+      ) {
+        // A single explicit override cannot establish two different TTL prices.
+        return unknown;
+      }
+    }
+    const raw = sumListCostClasses(costs);
+    rawCostByPricing.set(pricing, (rawCostByPricing.get(pricing) ?? 0) + raw);
+    for (const key of MODEL_LIST_COST_CLASS_KEYS) classes[key] += costs[key];
+  }
+  let providerCostMicros = sumListCostClasses(classes);
+  let creditCostMicros = 0;
+  for (const [pricing, raw] of rawCostByPricing) {
+    creditCostMicros += Math.ceil((raw * (10_000 + (pricing.marginBps ?? 0))) / 10_000);
+  }
+  let listByClassApprox = false;
+  const latencyMode = options.latencyMode ?? "standard";
+  if (latencyMode !== "standard") {
+    const catalogSettings = settingsForTurnExecutionPolicy(settings, model);
+    const resolved = resolveModelProvider(
+      catalogSettings,
+      canonicalizeConfiguredModelId(catalogSettings, model),
+    );
+    const multiplier = resolved?.model.capabilities.latencyModes.find(
+      (mode) => mode.id === latencyMode && mode.runnable,
+    )?.billingMultiplierBps;
+    if (multiplier === undefined || multiplier <= 0) return unknown;
+    providerCostMicros = Math.ceil((providerCostMicros * multiplier) / 10_000);
+    creditCostMicros = Math.ceil((creditCostMicros * multiplier) / 10_000);
+    const scaled = allocateLatencyListCostClasses(classes, multiplier, providerCostMicros);
+    if (!scaled) return unknown;
+    Object.assign(classes, scaled.classes);
+    listByClassApprox = scaled.approximate;
+  }
+  if (![providerCostMicros, creditCostMicros, ...Object.values(classes)].every(knownTokenCounter))
+    return unknown;
+  return { providerCostMicros, creditCostMicros, listByClassMicros: classes, listByClassApprox };
+}
+
+/**
+ * Approximate class attribution of a previously recorded upstream list total.
+ * Current reviewed rates are weights only: this never recomputes that total,
+ * credits, or charges. Missing class counters/rates remain unknown. Historical
+ * cache writes use the schedule's single TTL rate, not an exact TTL assertion.
+ * Reasoning is already included in outputTokens and is never added again.
+ */
+export function allocateRecordedModelListCostByClass(
+  settings: Settings,
+  model: string,
+  usage: ModelUsageInput,
+  recordedProviderCostMicros: number | null | undefined,
+): ModelRecordedListCostAllocation {
+  const unknown: ModelRecordedListCostAllocation = {
+    listByClassMicros: null,
+    listByClassApprox: false,
+  };
+  if (!knownTokenCounter(recordedProviderCostMicros)) return unknown;
+  const schedule = configuredModelListPricingSchedules(settings)[model];
+  if (!schedule) return unknown;
+  const weights = { uncachedInput: 0n, cacheRead: 0n, cacheWrite: 0n, output: 0n };
+  const entries = usage.requestUsageEntries?.length ? usage.requestUsageEntries : [usage];
+  for (const entry of entries) {
+    if (!knownTokenCounter(entry.inputTokens) || !knownTokenCounter(entry.outputTokens))
+      return unknown;
+    const cached = knownDetailTokenCounter(entry, [
+      "cached_tokens",
+      "cachedInputTokens",
+      "cached_input_tokens",
+    ]);
+    const writes = knownDetailTokenCounter(entry, ["cache_write_tokens", "cacheWriteTokens"], true);
+    if (cached === undefined || writes === undefined || cached + writes > entry.inputTokens)
+      return unknown;
+    const pricing = selectModelPricing(schedule, entry.inputTokens);
+    const counters = {
+      uncachedInput: entry.inputTokens - cached - writes,
+      cacheRead: cached,
+      cacheWrite: writes,
+      output: entry.outputTokens,
+    };
+    const rates = {
+      uncachedInput: pricing.inputMicrosPerMillionTokens,
+      cacheRead: pricing.cachedInputMicrosPerMillionTokens,
+      cacheWrite: pricing.cacheWriteMicrosPerMillionTokens,
+      output: pricing.outputMicrosPerMillionTokens,
+    };
+    for (const key of MODEL_LIST_COST_CLASS_KEYS) {
+      if (counters[key] === 0) continue;
+      const rate = rates[key];
+      if (!knownTokenCounter(rate)) return unknown;
+      // Do not round or convert weights to Number: both can distort ratios.
+      weights[key] += BigInt(counters[key]) * BigInt(rate);
+    }
+  }
+  const classes = allocateRecordedListCostWeights(weights, recordedProviderCostMicros);
+  return classes ? { listByClassMicros: classes, listByClassApprox: true } : unknown;
+}
+
+const MODEL_LIST_COST_CLASS_KEYS = ["uncachedInput", "cacheRead", "cacheWrite", "output"] as const;
+
+function sumListCostClasses(costs: ModelListCostClassesMicros): number {
+  return MODEL_LIST_COST_CLASS_KEYS.reduce((total, key) => total + costs[key], 0);
+}
+
+/** Integer-only largest remainder, preserving the supplied historical total. */
+function allocateRecordedListCostWeights(
+  weights: Record<(typeof MODEL_LIST_COST_CLASS_KEYS)[number], bigint>,
+  target: number,
+): ModelListCostClassesMicros | undefined {
+  const denominator = MODEL_LIST_COST_CLASS_KEYS.reduce((total, key) => total + weights[key], 0n);
+  if (denominator === 0n) {
+    return target === 0 ? { uncachedInput: 0, cacheRead: 0, cacheWrite: 0, output: 0 } : undefined;
+  }
+  const rows = MODEL_LIST_COST_CLASS_KEYS.map((key, index) => {
+    const numerator = BigInt(target) * weights[key];
+    return { key, index, value: numerator / denominator, remainder: numerator % denominator };
+  });
+  const remaining = BigInt(target) - rows.reduce((total, row) => total + row.value, 0n);
+  const ranked = [...rows].sort((a, b) =>
+    a.remainder === b.remainder ? a.index - b.index : a.remainder > b.remainder ? -1 : 1,
+  );
+  for (let index = 0; index < Number(remaining); index++) ranked[index]!.value += 1n;
+  return Object.fromEntries(
+    rows.map((row) => [row.key, Number(row.value)]),
+  ) as ModelListCostClassesMicros;
+}
+
+function knownTokenCounter(value: unknown): value is number {
+  return typeof value === "number" && Number.isSafeInteger(value) && value >= 0;
+}
+
+function knownDetailTokenCounter(
+  entry: ModelUsageInput,
+  keys: readonly string[],
+  firstOnly = false,
+): number | undefined {
+  const details = Array.isArray(entry.inputTokensDetails)
+    ? entry.inputTokensDetails
+    : entry.inputTokensDetails
+      ? [entry.inputTokensDetails]
+      : [];
+  if (details.length === 0) return undefined;
+  let total = 0;
+  for (const detail of details) {
+    const present = keys.filter((key) => detail[key] !== undefined);
+    if (present.length === 0) return undefined;
+    for (const key of firstOnly ? present.slice(0, 1) : present) {
+      if (!knownTokenCounter(detail[key])) return undefined;
+      total += detail[key]!;
+    }
+  }
+  return knownTokenCounter(total) ? total : undefined;
+}
+
+function nativeClaudeListWriteContext(
+  settings: Settings,
+  modelId: string,
+):
+  | {
+      declaredTtl: "off" | "5m" | "1h" | undefined;
+      publishedRates?: { fiveMinute: number; oneHour: number };
+    }
+  | undefined {
+  for (const provider of configuredRegistryProviders(settings)) {
+    const model = provider.models.find((candidate) => candidate.id === modelId);
+    if (!model || provider.api !== "anthropic-messages") continue;
+    const result = { declaredTtl: provider.anthropic?.cacheTtl };
+    const upstream = model.upstreamModelId ?? model.id;
+    const overrides = parseModelPricingJson(settings.modelPricingJson);
+    const official =
+      provider.kind === "anthropic-workspace" ||
+      provider.kind === "anthropic-organization" ||
+      provider.kind === "claude-subscription-workspace" ||
+      provider.kind === "claude-subscription-organization" ||
+      (provider.kind === "api-key" &&
+        provider.baseUrl.replace(/\/$/u, "") === "https://api.anthropic.com/v1");
+    const published = reviewedModelListPricing[upstream]?.default;
+    if (
+      !official ||
+      !claudeNativeModelProfile(upstream) ||
+      !published?.cacheWriteMicrosPerMillionTokens ||
+      model.pricing ||
+      overrides[modelId] !== undefined ||
+      overrides[upstream] !== undefined
+    )
+      return result;
+    return {
+      ...result,
+      publishedRates: {
+        fiveMinute: published.cacheWriteMicrosPerMillionTokens,
+        oneHour: published.inputMicrosPerMillionTokens * 2,
+      },
+    };
+  }
+  return undefined;
+}
+
+/** Deterministic largest-remainder allocation; disclose any fractional scaling. */
+function allocateLatencyListCostClasses(
+  classes: ModelListCostClassesMicros,
+  multiplier: number,
+  target: number,
+): { classes: ModelListCostClassesMicros; approximate: boolean } | undefined {
+  if (
+    !knownTokenCounter(multiplier) ||
+    !knownTokenCounter(target) ||
+    !Object.values(classes).every(knownTokenCounter)
+  )
+    return undefined;
+  const rows = MODEL_LIST_COST_CLASS_KEYS.map((key, index) => {
+    const numerator = BigInt(classes[key]) * BigInt(multiplier);
+    return { key, index, value: Number(numerator / 10_000n), remainder: numerator % 10_000n };
+  });
+  const remaining = target - rows.reduce((total, row) => total + row.value, 0);
+  if (remaining < 0 || remaining > rows.length) return undefined;
+  const ranked = [...rows].sort((a, b) =>
+    a.remainder === b.remainder ? a.index - b.index : a.remainder > b.remainder ? -1 : 1,
+  );
+  for (let index = 0; index < remaining; index++) ranked[index]!.value += 1;
+  return {
+    classes: Object.fromEntries(
+      rows.map((row) => [row.key, row.value]),
+    ) as ModelListCostClassesMicros,
+    approximate: rows.some((row) => row.remainder !== 0n),
+  };
+}
+
+function calculateUsageCostBreakdown(
+  settings: Settings,
+  model: string,
+  usage: ModelUsageInput,
+  schedule: ModelPricingScheduleV1 | undefined,
+  options?: { latencyMode?: LatencyMode },
+): ModelUsageCostBreakdown {
   if (!schedule) {
     throw new Error(`Missing model pricing for ${model}`);
   }
@@ -7610,6 +8442,26 @@ function validateSettings(settings: Settings, source: NodeJS.ProcessEnv = proces
           `leases after a default-backend rollout.`,
       );
     }
+    const containmentMs = settings.sandboxIdleCommandContainmentMs;
+    if (containmentMs !== undefined && !(containmentMs > settings.sandboxIdleGraceMs)) {
+      throw new Error(
+        `OPENGENI_SANDBOX_IDLE_COMMAND_CONTAINMENT_MS (${containmentMs}) must exceed ` +
+          `OPENGENI_SANDBOX_IDLE_GRACE_MS (${settings.sandboxIdleGraceMs}): a box kept warm only by ` +
+          `retained commands must stay available at least as long as an idle box awaiting drain.`,
+      );
+    }
+    if (
+      containmentMs !== undefined &&
+      optionalEnvironmentValue("OPENGENI_SANDBOX_IDLE_COMMAND_CONTAINMENT_MS", source) !==
+        undefined &&
+      !(containmentMs < rotationLeadMs)
+    ) {
+      throw new Error(
+        `OPENGENI_SANDBOX_IDLE_COMMAND_CONTAINMENT_MS (${containmentMs}) must be strictly less than ` +
+          `OPENGENI_SANDBOX_ROTATION_LEAD_MS (${rotationLeadMs}): an idle box must be checkpointed ` +
+          `and stopped well before its provider deadline.`,
+      );
+    }
     if (settings.sandboxBackend === "modal") {
       const idleGraceMs = settings.sandboxIdleGraceMs;
       const lifecycle = effectiveSandboxLifecycle(settings, "modal");
@@ -7651,6 +8503,19 @@ function validateSettings(settings: Settings, source: NodeJS.ProcessEnv = proces
             `elapses — Modal's idle-reap must NOT fire first (or /workspace is lost). Raise ` +
             `OPENGENI_MODAL_IDLE_TIMEOUT_SECONDS (defaults to OPENGENI_MODAL_TIMEOUT_SECONDS) or lower ` +
             `OPENGENI_SANDBOX_IDLE_GRACE_MS.`,
+        );
+      }
+      if (
+        settings.modalIdleTimeoutSeconds !== undefined &&
+        containmentMs !== undefined &&
+        !(reaperPeriod + containmentMs + drainCaptureTimeoutMs < idleTimeoutMs)
+      ) {
+        throw new Error(
+          `OPENGENI_SANDBOX_LEASE_REAPER_PERIOD_MS + OPENGENI_SANDBOX_IDLE_COMMAND_CONTAINMENT_MS + ` +
+            `drain capture timeout (${reaperPeriod} + ${containmentMs} + ${drainCaptureTimeoutMs}) ` +
+            `must be strictly less than OPENGENI_MODAL_IDLE_TIMEOUT_SECONDS*1000 (${idleTimeoutMs}): ` +
+            `idle command containment must checkpoint a box before Modal's own idle reaper stops it. ` +
+            `Lower OPENGENI_SANDBOX_IDLE_COMMAND_CONTAINMENT_MS or raise the Modal idle timeout.`,
         );
       }
     }
@@ -7710,6 +8575,8 @@ export function validateModelCatalogSettings(
       provider.kind === "vercel-gateway-managed" ||
       provider.kind === "vercel-gateway-workspace" ||
       provider.kind === "vercel-gateway-organization" ||
+      provider.kind === "direct-openai-workspace" ||
+      provider.kind === "direct-azure-workspace" ||
       provider.kind === "openrouter-workspace" ||
       provider.kind === "openrouter-organization" ||
       provider.kind === "anthropic-organization" ||
@@ -8107,6 +8974,59 @@ function delay(ms: number): Promise<void> {
 /** Native Claude connections reuse the encrypted workspace and organization boundaries. */
 export const CLAUDE_CONNECTION_KINDS = ["anthropic", "claude_subscription"] as const;
 export type ClaudeConnectionKind = (typeof CLAUDE_CONNECTION_KINDS)[number];
+// Per-model native Messages controls. Unknown IDs never inherit adaptive
+// thinking merely because they share a provider with a supported model.
+const CLAUDE_NATIVE_MODEL_PROFILES: Readonly<
+  Record<
+    string,
+    Readonly<{
+      efforts: readonly ReasoningEffort[];
+      defaultEffort: ReasoningEffort | null;
+      contextWindowTokens: number;
+      maxOutputTokens: number;
+    }>
+  >
+> = Object.fromEntries([
+  ...[
+    ["claude-opus-5-5", "medium"],
+    ["claude-sonnet-5-5", "medium"],
+    ["claude-opus-5", "high"],
+    ["claude-sonnet-5", "high"],
+    ["claude-opus-4-8", "high"],
+    ["claude-opus-4-7", "xhigh"],
+  ].map(([id, defaultEffort]) => [
+    id,
+    {
+      efforts: ["low", "medium", "high", "xhigh", "max"],
+      defaultEffort,
+      contextWindowTokens: 1_000_000,
+      maxOutputTokens: 128_000,
+    },
+  ]),
+  ...["claude-opus-4-6", "claude-sonnet-4-6"].map((id) => [
+    id,
+    {
+      efforts: ["low", "medium", "high", "max"],
+      defaultEffort: "high",
+      contextWindowTokens: 1_000_000,
+      maxOutputTokens: 128_000,
+    },
+  ]),
+  [
+    "claude-haiku-4-5-20251001",
+    {
+      efforts: [],
+      defaultEffort: null,
+      contextWindowTokens: 200_000,
+      maxOutputTokens: 64_000,
+    },
+  ],
+]);
+export function claudeNativeModelProfile(upstreamModelId: string) {
+  return Object.hasOwn(CLAUDE_NATIVE_MODEL_PROFILES, upstreamModelId)
+    ? CLAUDE_NATIVE_MODEL_PROFILES[upstreamModelId]
+    : undefined;
+}
 export function claudeProviderId(
   kind: ClaudeConnectionKind,
   scope: "workspace" | "organization" = "organization",
@@ -8148,19 +9068,21 @@ export function withClaudeConnectionCatalog(
       anthropic: {
         auth: kind === "anthropic" ? "api-key" : "oauth",
         cacheTtl: "5m",
-        maxOutputTokens: 32000,
+        maxOutputTokens: 128000,
         streamIdleTimeoutMs: 600000,
       },
       models: connection.models.map((model) => {
-        // Only captured adaptive-thinking models are enabled by the managed catalog.
-        // Operators can explicitly declare other capabilities in a registry provider.
-        const adaptiveThinking = ["claude-opus-5-5", "claude-sonnet-5-5"].includes(
-          model.upstreamModelId,
-        );
+        const profile = claudeNativeModelProfile(model.upstreamModelId);
+        const adaptiveThinking = Boolean(profile?.efforts.length);
+        const contextWindowTokens = profile?.contextWindowTokens ?? 200_000;
+        const outputReserve = profile?.maxOutputTokens ?? 32_000;
         return {
-          contextWindowTokens: 200000,
-          effectiveContextWindowTokens: 168000,
-          autoCompactTokenLimit: 150000,
+          contextWindowTokens,
+          effectiveContextWindowTokens: contextWindowTokens - outputReserve,
+          autoCompactTokenLimit:
+            contextWindowTokens === 1_000_000
+              ? 800_000
+              : Math.min(150_000, contextWindowTokens - outputReserve - 18_000),
           id: id + "/" + model.upstreamModelId,
           upstreamModelId: model.upstreamModelId,
           label:
@@ -8182,8 +9104,8 @@ export function withClaudeConnectionCatalog(
             reasoning: {
               upstream: adaptiveThinking ? "supported" : "unknown",
               runnable: adaptiveThinking,
-              efforts: adaptiveThinking ? ["low", "medium", "high"] : [],
-              defaultEffort: adaptiveThinking ? "high" : null,
+              efforts: [...(profile?.efforts ?? [])],
+              defaultEffort: profile?.defaultEffort ?? null,
               required: false,
             },
             functionCalling: { upstream: "supported", runnable: true },
@@ -8239,3 +9161,5 @@ export function withClaudeConnectionCredential(
 }
 export * from "./claude-subscription-usage";
 export * from "./claude-subscription-oauth";
+export * from "./subscription-account-selection";
+export * from "./claude-subscription-capacity";

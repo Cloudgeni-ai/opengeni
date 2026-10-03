@@ -15,14 +15,7 @@ agent: {
 }
 ```
 
-The same object works when you create a session, in the proxy's `createSession` hook, in the chat facade, on schedules, as the workspace default, and for a running session. Every session reports what it resolved to.
-
-<Note>
-  Agent settings need the deployment switch `OPENGENI_AGENT_CONFIG_ADMISSION_ENABLED`. When it is
-  off, `getClientConfig()` reports `agentConfig.enabled: false` and a request with `agent` is
-  refused with `agent_config_not_enabled`. Use `firstPartyMcpTools: []` and `tools` to narrow an
-  agent until then.
-</Note>
+The same object works when you create a session, in the proxy's `createSession` hook, in the chat facade, on schedules, as the workspace default, and for a running session. A session with agent settings reports what they resolved to.
 
 ## Capabilities
 
@@ -123,7 +116,7 @@ A change to a running session applies from its next turn. Sessions created by an
 import type { AgentEffectiveTools } from "@opengeni/sdk";
 
 const session = await og.getSession(workspaceId, sessionId);
-session.agent; // the resolved settings, or null for sessions created before them
+session.agent; // the resolved settings, or null when the session has none stored
 const visibility = session.tenancy?.visibility; // "private" | "workspace" | undefined
 const byCapability = new Map<string, AgentEffectiveTools["tools"]>();
 for (const tool of session.effectiveTools?.tools ?? []) {
@@ -135,6 +128,8 @@ const knowledgeTools = byCapability.get("knowledge") ?? [];
 ```
 
 `effectiveTools.tools` is a flat list of known tools, not a capability-keyed object; group it locally as above. An absent projection on an older session means unknown, not that every capability is off. Tool `visibility` (`"upfront"` or `"search"`) describes model discovery, not human access. `mcpServers[].toolsKnown: false` means that server's schemas are not known in this projection; do not invent names or infer that it is disabled.
+
+Enabling `media` adds image and video discovery guidance. An attached adapter may still have a deferred schema: the agent discovers it with `tool_search`. An empty literal-prefix result from `tool_list` does not establish that a capability is unavailable; suggested names come only from the current authorized catalog.
 
 Human visibility is `session.tenancy?.visibility`, not top-level `session.visibility`. Top-level `visibility` is a create-request field. A missing tenancy projection means unknown, not `"workspace"`. The OpenGeni web app shows the agent's settings in the session's Agent panel, and the exact instructions sent in Debug > Context.
 

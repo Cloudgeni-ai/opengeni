@@ -8,11 +8,11 @@ A **session** is one durable conversation and workstream: its history, policy, v
 
 ## Three identities
 
-| Identity | Meaning                                                                                                                         | Lifetime                                             |
-| -------- | ------------------------------------------------------------------------------------------------------------------------------- | ---------------------------------------------------- |
-| Session  | Durable conversation, workstream, policy, visibility, and compute context                                                       | Until archived or deleted                            |
-| Turn     | One accepted unit of input: a human or API prompt, a machine input, a goal continuation, a schedule, an approval, or a recovery | Until logically settled                              |
-| Attempt  | One physical worker execution of a turn                                                                                         | Until completion, interruption, loss, or replacement |
+| Identity | Meaning                                                                                                | Lifetime                                             |
+| -------- | ------------------------------------------------------------------------------------------------------ | ---------------------------------------------------- |
+| Session  | Durable conversation, workstream, policy, visibility, and compute context                              | Until deleted                                        |
+| Turn     | One accepted unit of input: a human or API prompt, a machine input, a goal continuation, or a schedule | Until logically settled                              |
+| Attempt  | One physical worker execution of a turn                                                                | Until completion, interruption, loss, or replacement |
 
 A new attempt does not imply a new prompt. A new prompt does imply a new turn. This is what lets OpenGeni recover the same logical turn after a worker dies without duplicating external effects.
 
@@ -76,6 +76,8 @@ An agent can spawn child sessions for parallel or delegated work. Children run a
 
 Workspaces are shared by their members, and sessions in a shared workspace are visible to members by default. An organization owner can allow members to create "Only me" sessions that only their owner can see. Personal workspaces belong to one person.
 
+The new-session form remembers your visibility choice separately for each workspace, including when you switch browsers.
+
 ### Connected accounts
 
 Open **Connectors** in the composer to see the accounts attached to each enabled
@@ -111,7 +113,7 @@ is not clear from your request—especially for actions that send or change data
 
 The more restrictive side wins across trees. Children inherit the parent's scope and can only narrow it. These rules do not make product-created chats invisible to authorized human workspace members or organization API keys. The product backend must still authorize each user's requests.
 
-The chat API defaults to `agentAccess: "session"`, while raw session creation defaults to `"workspace"`. An integration can separately choose where the agent saves [Knowledge](/concepts/memory-and-knowledge). Access scope and memory are frozen when a conversation is created; reopening the same conversation does not reconfigure them. See [Users, tenants & privacy](/integrate/users-and-tenants#choose-what-each-conversation-shares).
+The session proxy and chat API default to private chats with `agentAccess: "session"` (`chats: "shared"` uses `"workspace"`), while raw session creation defaults to `"workspace"`. An integration can separately choose where the agent saves [Knowledge](/concepts/memory-and-knowledge). Access scope and memory are frozen when a conversation is created; reopening the same conversation does not reconfigure them. See [Users, tenants & privacy](/integrate/users-and-tenants#choose-who-shares-chats).
 
 ## Browsing and archiving
 
@@ -137,6 +139,12 @@ use the model, reasoning effort and speed from the latest turn that started.
 Session labels and fresh message drafts use those settings too. Before any turn
 starts, the initial session settings apply. Existing drafts, queued messages and
 historical turns retain their own settings.
+
+When an agent creates a new worker, omitted model and reasoning inherit the
+calling turn, but omitted speed starts at **Standard**. Fast or Priority must be
+selected explicitly and supported by the chosen model. Later messages from a
+faster agent do not change the worker's own speed, and repeating a keyed creation
+returns the original session settings.
 
 ## Codex subscription source
 

@@ -2,12 +2,21 @@ import { prepareComputerNativeExecutable } from "./computer-native-executable";
 import { createHash, randomUUID } from "node:crypto";
 import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
 import type {
-  ComputerAction,
-  ComputerClipboard,
   ComputerSessionCapabilities,
   InteractionRect,
   InteractionSemanticNodeValue,
 } from "@opengeni/contracts";
+import {
+  ComputerBackendError,
+  type ComputerBackend,
+  type ComputerBackendTarget,
+  type ComputerBackendObservation,
+  type ComputerBackendActionCommand,
+  type ComputerBackendFrame,
+  type ComputerBackendCaptureOptions,
+  type ComputerBackendClipboard,
+  type ComputerBackendErrorCode,
+} from "./computer-backend";
 
 export const COMPUTER_NATIVE_PROTOCOL_VERSION = 3 as const;
 const MAX_REQUEST_BYTES = 2 * 1024 * 1024;
@@ -19,89 +28,12 @@ const MAX_STDERR_BYTES = 16 * 1024;
 const DEFAULT_REQUEST_TIMEOUT_MS = 30_000;
 const DEFAULT_CAPTURE_TIMEOUT_MS = 60_000;
 
-export type NativeComputerTarget = {
-  id: string;
-  targetGeneration: string;
-  kind: "app" | "window" | "screen";
-  applicationId: string | null;
-  processId: number | null;
-  title: string;
-  bounds: InteractionRect | null;
-  focused: boolean;
-};
-
-export type NativeComputerObservation = {
-  observationId: string;
-  target: NativeComputerTarget;
-  frameId: string | null;
-  roots: InteractionSemanticNodeValue[];
-  nodeCount: number;
-  focusedRef: string | null;
-  changedRegions: InteractionRect[];
-};
-
-export type NativeComputerActionCommand = {
-  targetId: string;
-  expectedTargetGeneration: string;
-  expectedObservationId: string | null;
-  expectedFrameId: string | null;
-  action: ComputerAction;
-};
-
-export type NativeComputerFrame = {
-  frameId: string;
-  targetId: string;
-  targetGeneration: string;
-  width: number;
-  height: number;
-  mimeType: "image/png" | "image/jpeg";
-  sha256: string;
-  data: Uint8Array;
-};
-
-export type NativeComputerCaptureOptions = {
-  format: "png" | "jpeg";
-  quality: number;
-  maxWidth: number;
-  maxHeight: number;
-};
-
-export type NativeComputerClipboard = Pick<ComputerClipboard, "text" | "truncated">;
-
 export type NativeComputerHandshake = {
   protocolVersion: typeof COMPUTER_NATIVE_PROTOCOL_VERSION;
   helperVersion: string;
   platform: "linux" | "macos" | "windows";
   capabilities: ComputerSessionCapabilities;
 };
-
-export type NativeComputerErrorCode =
-  | "target_not_found"
-  | "target_stale"
-  | "observation_stale"
-  | "frame_stale"
-  | "locator_not_found"
-  | "locator_ambiguous"
-  | "unsupported"
-  | "permission_denied"
-  | "unavailable"
-  | "machine_locked"
-  | "invalid_action"
-  | "timeout"
-  | "driver_failed"
-  | "outcome_unknown";
-
-export class NativeComputerError extends Error {
-  constructor(
-    readonly code: NativeComputerErrorCode,
-    message: string,
-    readonly retryable: boolean,
-    readonly dispatched: boolean,
-  ) {
-    super(message);
-    this.name = "NativeComputerError";
-  }
-}
 
 export type ComputerNativeClientOptions = {
   binaryPath: string;
@@ -111,24 +43,6 @@ export type ComputerNativeClientOptions = {
   requestTimeoutMs?: number;
   captureTimeoutMs?: number;
 };
-
-export interface ComputerNativeTransport {
-  readonly handshake: NativeComputerHandshake;
-  capabilities(): Promise<ComputerSessionCapabilities>;
-  targets(): Promise<NativeComputerTarget[]>;
-  observe(targetId: string): Promise<NativeComputerObservation>;
-  capture(targetId: string, options?: NativeComputerCaptureOptions): Promise<NativeComputerFrame>;
-  captureStill(
-    targetId: string,
-    options: NativeComputerCaptureOptions,
-  ): Promise<NativeComputerFrame>;
-  startCapture(targetId: string, options: NativeComputerCaptureOptions): Promise<void>;
-  stopCapture(targetId: string): Promise<void>;
-  clipboard(): Promise<NativeComputerClipboard>;
-  validate(command: NativeComputerActionCommand): Promise<void>;
-  dispatch(command: NativeComputerActionCommand): Promise<NativeComputerObservation | null>;
-  close(): Promise<void>;
-}
 
 type PendingRequest<T = unknown> = {
   parse(value: unknown): T;
@@ -145,8 +59,17 @@ type AwaitingAttachment = {
 };
 
 /** Correlated, bounded client for the placement-local Rust native helper. */
-export class ComputerNativeClient implements ComputerNativeTransport {
+export class ComputerNativeClient implements ComputerBackend {
   readonly handshake: NativeComputerHandshake;
+  get identity() {
+    return {
+      platform: this.handshake.platform,
+      adapterId: `opengeni.native.${this.handshake.platform}.v1`,
+    };
+  }
+  get initialCapabilities() {
+    return this.handshake.capabilities;
+  }
   private readonly process: ChildProcessWithoutNullStreams;
   private readonly requestTimeoutMs: number;
   private readonly captureTimeoutMs: number;
@@ -211,11 +134,11 @@ export class ComputerNativeClient implements ComputerNativeTransport {
     return await this.request("capabilities", {}, parseCapabilities, this.requestTimeoutMs);
   }
 
-  async targets(): Promise<NativeComputerTarget[]> {
+  async targets(): Promise<ComputerBackendTarget[]> {
     return await this.request("targets", {}, parseTargets, this.requestTimeoutMs);
   }
 
-  async observe(targetId: string): Promise<NativeComputerObservation> {
+  async observe(targetId: string): Promise<ComputerBackendObservation> {
     return await this.request(
       "observe",
       { targetId: boundedString(targetId, "targetId", 512) },
@@ -226,8 +149,8 @@ export class ComputerNativeClient implements ComputerNativeTransport {
 
   async capture(
     targetId: string,
-    options?: NativeComputerCaptureOptions,
-  ): Promise<NativeComputerFrame> {
+    options?: ComputerBackendCaptureOptions,
+  ): Promise<ComputerBackendFrame> {
     return await this.request(
       "capture",
       {
@@ -241,8 +164,8 @@ export class ComputerNativeClient implements ComputerNativeTransport {
 
   async captureStill(
     targetId: string,
-    options: NativeComputerCaptureOptions,
-  ): Promise<NativeComputerFrame> {
+    options: ComputerBackendCaptureOptions,
+  ): Promise<ComputerBackendFrame> {
     return await this.request(
       "capture_still",
       { targetId: boundedString(targetId, "targetId", 512), options },
@@ -251,7 +174,7 @@ export class ComputerNativeClient implements ComputerNativeTransport {
     );
   }
 
-  async startCapture(targetId: string, options: NativeComputerCaptureOptions): Promise<void> {
+  async startCapture(targetId: string, options: ComputerBackendCaptureOptions): Promise<void> {
     await this.request(
       "start_capture",
       { targetId: boundedString(targetId, "targetId", 512), options },
@@ -269,11 +192,11 @@ export class ComputerNativeClient implements ComputerNativeTransport {
     );
   }
 
-  async clipboard(): Promise<NativeComputerClipboard> {
+  async clipboard(): Promise<ComputerBackendClipboard> {
     return await this.request("clipboard", {}, parseClipboard, this.requestTimeoutMs);
   }
 
-  async validate(command: NativeComputerActionCommand): Promise<void> {
+  async validate(command: ComputerBackendActionCommand): Promise<void> {
     await this.request(
       "validate",
       { command },
@@ -284,7 +207,9 @@ export class ComputerNativeClient implements ComputerNativeTransport {
     );
   }
 
-  async dispatch(command: NativeComputerActionCommand): Promise<NativeComputerObservation | null> {
+  async dispatch(
+    command: ComputerBackendActionCommand,
+  ): Promise<ComputerBackendObservation | null> {
     return await this.request(
       "dispatch",
       { command },
@@ -572,7 +497,7 @@ function emptyCapabilities(): ComputerSessionCapabilities {
   };
 }
 
-function parseClipboard(value: unknown): NativeComputerClipboard {
+function parseClipboard(value: unknown): ComputerBackendClipboard {
   const input = record(value, "native clipboard");
   if (input.text !== null && typeof input.text !== "string") {
     throw new Error("native clipboard text is invalid");
@@ -590,14 +515,14 @@ function parseNull(value: unknown): void {
   if (value !== null) throw new Error("native computer operation returned a non-null result");
 }
 
-function parseTargets(value: unknown): NativeComputerTarget[] {
+function parseTargets(value: unknown): ComputerBackendTarget[] {
   if (!Array.isArray(value) || value.length > 10_000) {
     throw new Error("native computer targets are invalid");
   }
   return value.map(parseTarget);
 }
 
-function parseTarget(value: unknown): NativeComputerTarget {
+function parseTarget(value: unknown): ComputerBackendTarget {
   const input = record(value, "native target");
   const kind = input.kind;
   if (kind !== "app" && kind !== "window" && kind !== "screen") {
@@ -622,7 +547,7 @@ function parseTarget(value: unknown): NativeComputerTarget {
   };
 }
 
-function parseObservation(value: unknown): NativeComputerObservation {
+function parseObservation(value: unknown): ComputerBackendObservation {
   const input = record(value, "native observation");
   if (!Array.isArray(input.roots) || input.roots.length > 10_000) {
     throw new Error("native observation roots are invalid");
@@ -646,7 +571,7 @@ function parseObservation(value: unknown): NativeComputerObservation {
   };
 }
 
-function parseFrame(value: unknown): NativeComputerFrame {
+function parseFrame(value: unknown): ComputerBackendFrame {
   const envelope = record(value, "native frame envelope");
   const metadata = record(envelope.result, "native frame metadata");
   const attachment = envelope.attachment;
@@ -685,9 +610,9 @@ function attachmentLength(value: unknown): number {
   return Number(length);
 }
 
-function parseNativeError(value: unknown): NativeComputerError {
+function parseNativeError(value: unknown): ComputerBackendError {
   const input = record(value, "native error");
-  const allowed = new Set<NativeComputerErrorCode>([
+  const allowed = new Set<ComputerBackendErrorCode>([
     "target_not_found",
     "target_stale",
     "observation_stale",
@@ -704,11 +629,11 @@ function parseNativeError(value: unknown): NativeComputerError {
     "outcome_unknown",
   ]);
   const code = input.code;
-  if (typeof code !== "string" || !allowed.has(code as NativeComputerErrorCode)) {
+  if (typeof code !== "string" || !allowed.has(code as ComputerBackendErrorCode)) {
     throw new Error("native computer error code is invalid");
   }
-  return new NativeComputerError(
-    code as NativeComputerErrorCode,
+  return new ComputerBackendError(
+    code as ComputerBackendErrorCode,
     boundedString(input.message, "native error message", 8_192),
     boolean(input.retryable, "native error retryable"),
     boolean(input.dispatched, "native error dispatched"),

@@ -1,4 +1,8 @@
-import { ClaudeSubscriptionOAuthCompleteRequest } from "@opengeni/contracts";
+import { requireSubscriptionScopeMutation } from "./subscription-pool-access";
+import {
+  ClaudeSubscriptionOAuthCompleteRequest,
+  ClaudeSubscriptionOAuthStartRequest,
+} from "@opengeni/contracts";
 import { requireAccessGrant, requireFreshAccessGrant, type ApiRouteDeps } from "@opengeni/core";
 import { type Context, type Hono } from "hono";
 import { HTTPException } from "hono/http-exception";
@@ -37,7 +41,9 @@ export function registerClaudeSubscriptionOAuthRoutes(
       .safeParse(c.req.param(organization ? "organizationId" : "workspaceId"));
     if (!id.success) throw new HTTPException(404, { message: "Scope not found" });
     if (organization) {
-      const human = await requireOrganizationCodexHuman(c, deps, id.data);
+      const human = await requireOrganizationCodexHuman(c, deps, id.data, {
+        providerConsent: true,
+      });
       return {
         accountId: id.data,
         workspaceId: null,
@@ -78,9 +84,23 @@ export function registerClaudeSubscriptionOAuthRoutes(
     const path = organization
       ? "/v1/organizations/:organizationId/model-providers/claude_subscription/oauth"
       : "/v1/workspaces/:workspaceId/model-providers/claude_subscription/oauth";
-    app.post(`${path}/start`, async (c) =>
-      c.json(await startClaudeSubscriptionOAuth(deps, await scope(c, organization))),
-    );
+    app.post(`${path}/start`, async (c) => {
+      const inputScope = await scope(c, organization);
+      const payload = ClaudeSubscriptionOAuthStartRequest.safeParse(
+        await c.req.json().catch(() => null),
+      );
+      if (!payload.success || (organization && payload.data.scope !== "workspace"))
+        throw new HTTPException(422, { message: "Choose where to connect this Claude account." });
+      if (!organization)
+        await requireSubscriptionScopeMutation(
+          c,
+          deps,
+          inputScope.workspaceId!,
+          payload.data.scope,
+          "Claude",
+        );
+      return c.json(await startClaudeSubscriptionOAuth(deps, inputScope, payload.data));
+    });
     app.post(`${path}/complete`, async (c) => {
       const inputScope = await scope(c, organization);
       const payload = ClaudeSubscriptionOAuthCompleteRequest.safeParse(
@@ -95,7 +115,15 @@ export function registerClaudeSubscriptionOAuthRoutes(
           deps,
           inputScope,
           payload.data,
-          async () => {
+          async (poolScope) => {
+            if (!organization)
+              await requireSubscriptionScopeMutation(
+                c,
+                deps,
+                inputScope.workspaceId!,
+                poolScope ?? "workspace",
+                "Claude",
+              );
             const fresh = await scope(c, organization, true);
             if (
               fresh.accountId !== inputScope.accountId ||

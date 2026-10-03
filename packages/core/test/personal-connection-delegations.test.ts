@@ -1103,7 +1103,7 @@ describe("personal MCP connection delegation", () => {
     ).toEqual([social]);
   });
 
-  test("captures canonical Atlassian accounts and excludes legacy account rows", () => {
+  test("retired native Atlassian accounts never become execution authority", () => {
     const authorityId = crypto.randomUUID();
     const atlassian = googleDriveConnection({
       id: crypto.randomUUID(),
@@ -1117,20 +1117,46 @@ describe("personal MCP connection delegation", () => {
         subjectId: "user:owner",
         connections: [atlassian],
       }),
-    ).toEqual([
-      expect.objectContaining({
-        connectionId: atlassian.id,
-        originWorkspaceId: atlassian.workspaceId,
-        ownerSubjectId: "user:owner",
-        connectionType: "atlassian",
-      }),
-    ]);
+    ).toEqual([]);
     expect(
       personalAtlassianDelegationsFromVisibleConnections({
         subjectId: "user:owner",
         connections: [{ ...atlassian, authorityId: null }],
       }),
     ).toEqual([]);
+  });
+
+  test("children drop native Atlassian authority while retaining the hosted MCP binding", () => {
+    const hosted = {
+      ...personalServer,
+      id: "atlassian",
+      url: "https://mcp.atlassian.com/v1/mcp",
+      connectionRef: { ...personalServer.connectionRef, providerDomain: "mcp.atlassian.com" },
+    };
+    const native = {
+      ...hosted,
+      id: "old-native",
+      connectionRef: { ...hosted.connectionRef, providerDomain: "api.atlassian.com" },
+    };
+    const hostedGrant: McpPersonalConnectionDelegation = {
+      serverId: hosted.id,
+      connectionId: crypto.randomUUID(),
+      ownerSubjectId: "user:owner",
+      providerDomain: "mcp.atlassian.com",
+      kind: "oauth2",
+    };
+    const nativeGrant: McpPersonalConnectionDelegation = {
+      ...hostedGrant,
+      serverId: native.id,
+      providerDomain: "api.atlassian.com",
+      connectionType: "atlassian",
+    };
+    expect(
+      personalConnectionDelegationsFromParent({
+        servers: [hosted, native],
+        parentDelegations: [hostedGrant, nativeGrant],
+      }),
+    ).toEqual([hostedGrant]);
   });
 
   test("freezes, inherits, and composes one exact Google Drive publication connection", async () => {

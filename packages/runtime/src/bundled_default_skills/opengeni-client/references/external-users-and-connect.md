@@ -82,6 +82,14 @@ invalid Unicode are rejected. A native-looking ID does not impersonate a native
 user. Workspace mapping identity passed to `ensureWorkspace` is a separate
 concept from this acting-user identity.
 
+Use an immutable database/auth subject ID, never an editable username, email or
+display name. Renaming must keep the same external ID and private history;
+reassigning a username must not reassign the previous actor's identity. History
+collision on username reuse is conditional on the host allowing reuse, not a
+guarantee about every host. Derive the ID anew from current authentication rather
+than a mounted component's old user object; apply the
+[identity/session epoch fence](product-shapes-and-ui.md#bind-asynchronous-ui-work-to-the-current-identity-and-session).
+
 User mode lazily establishes an external identity but does not grant access to a
 shared workspace. An explicitly authorized service onboarding operation may use:
 
@@ -101,6 +109,15 @@ permissions conflict instead of overwriting a subsequently reduced grant. Instal
 needs `capabilities:manage`; do not add it unless installation is a product
 feature the user may perform. User requests intersect actual membership with
 the initiating key's permissions. Service administration remains separate.
+
+Check the host user's current enabled state, tenant membership and role on every
+session read/control route and every provider call. A still-valid token or an
+old `sessions:control` onboarding grant is not proof of current host authority.
+Block newly disallowed requests immediately and reconcile OpenGeni grants using
+the authorized membership lifecycle below; do not silently re-onboard or widen
+them on a user request. Permission-changing revocation can cancel running work.
+Per-user workspaces and deliberate team/site sharing are valid product choices,
+but neither replaces these current host-policy checks.
 
 ### Read the member inventory: SDK versus REST
 
@@ -401,8 +418,11 @@ approval is incomplete setup, not a connected account. Discovery currently suppo
 at most 99 existing installations plus the new-install option; a larger result
 fails explicitly instead of silently selecting or dropping installations.
 
-`slack-bot` is a workspace bot installation, while `slack-personal` is the official
-personal Slack MCP authorization flow. Do not substitute one for the other.
+`slack-bot` is a workspace bot installation. `slack-personal` uses Slack user OAuth
+with OpenGeni's API-backed MCP tools for authorized conversations, recent messages
+and threads, users, and sending messages. It does not require installing the bot.
+General workspace-wide message search is unavailable. Do not substitute one flow
+for the other.
 `x` and `reddit` use the existing social-account domain and OAuth scopes. Workspace
 social setup requires workspace administration; personal setup requires a verified
 owning user. Native and host clients share callback receipts and exact returns.
@@ -441,16 +461,20 @@ the selected operations. Personal installations require a personal connection.
 The source is immutable once previewed. Each setup gets an independent named
 installation unless the host deliberately supplies an observed instance target.
 
-`atlassian`, `google-drive-knowledge` and `google-drive-publish` preserve the
-first-party connectors rather than substituting curated API definitions.
-They require personal ownership; completion means the credential was committed,
-not that all projects, spaces or folders were selected or synchronized.
-Atlassian source selection uses `browseAtlassianSources`, `saveAtlassianSources`
-and `setAtlassianLifecycle`, retaining explicit destination, cadence and read
-policy. Google Drive publishing requires an existing knowledge connection in
-`reconnectAccountId`, additional provider consent and an explicitly picked writable
-folder. Publication writes retain the existing default `ask` policy. Native
-Atlassian and Drive connect buttons consume the same durable setup surface.
+`google-drive-knowledge` and `google-drive-publish` preserve the first-party
+Drive connector rather than substituting curated API definitions. They require
+personal ownership; completion means the credential was committed, not that all
+folders were selected or synchronized. Publishing requires an existing knowledge
+connection in `reconnectAccountId`, additional provider consent and an explicitly
+picked writable folder. Publication writes retain the existing default `ask`
+policy. Native Drive connect buttons consume the same durable setup surface.
+
+Atlassian agent tools use the hosted MCP connector through `mcp-oauth`. The old
+native `atlassian` Connect provider, live API tools and Jira/Confluence Knowledge
+sync are retired. Existing SDK methods remain compatible for historical readers;
+new native setup, browse, source selection, resume and Run now return `410`.
+Previous connections can still be disconnected and schedules removed; imported
+Documents and history are retained.
 
 `examples/embedded-product` is a runnable loopback host reference with explicit
 authentication/CSRF seams, shared Connect/Site UI, and Edit-with-Geni into ordinary

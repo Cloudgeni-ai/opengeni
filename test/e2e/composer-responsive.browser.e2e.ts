@@ -50,7 +50,107 @@ describe("container-responsive public composer demo", () => {
     await Promise.allSettled([demo?.stop(), browser?.close()]);
   }, 30_000);
 
-  // Two cold demo navigations and real accessibility scans need the same
+  test.each([390, 1440])(
+    "stock and opted-in model branding preserve credit/free truth at %spx",
+    async (width) => {
+      const context = await browser.newContext({
+        viewport: { width, height: 1000 },
+        reducedMotion: "reduce",
+      });
+      const page = await context.newPage();
+      try {
+        for (const theme of ["light", "dark"]) {
+          for (const selected of ["credits", "free"]) {
+            for (const branding of ["stock", "opengeni"]) {
+              const query = new URLSearchParams({
+                models: "deployment",
+                selected,
+                theme,
+                width: String(width === 390 ? 390 : 768),
+              });
+              if (branding !== "stock") query.set("branding", branding);
+              await page.goto(`${baseUrl}/composer-responsive.html?${query}`, {
+                waitUntil: "networkidle",
+              });
+              const trigger = page.getByRole("button", { name: "Model and effort", exact: true });
+              await trigger.waitFor();
+              expect(
+                await trigger
+                  .getByRole("img", {
+                    name: branding === "stock" ? "Models" : "Opengeni",
+                    exact: true,
+                  })
+                  .count(),
+              ).toBe(1);
+              expect(
+                await trigger
+                  .locator(
+                    branding === "stock"
+                      ? ".lucide-sparkles"
+                      : '[data-testid="opted-in-opengeni-mark"]',
+                  )
+                  .count(),
+              ).toBe(1);
+              await trigger.click();
+              const menu = page.getByTestId("model-picker-menu");
+              await menu.waitFor();
+              expect(
+                await menu
+                  .locator(`section[aria-label="${branding === "stock" ? "Models" : "Opengeni"}"]`)
+                  .count(),
+              ).toBe(1);
+              expect(
+                await menu
+                  .getByTestId("billing-class-icon-codex_subscription")
+                  .locator('svg[viewBox="0 0 24 24"]')
+                  .count(),
+              ).toBe(1);
+              expect(await menu.getByText("ChatGPT / Codex plan", { exact: true }).count()).toBe(1);
+              expect(
+                await menu
+                  .getByTestId("model-picker-choice-deployment/free")
+                  .getByText("Free", { exact: true })
+                  .count(),
+              ).toBe(1);
+              expect(
+                await menu
+                  .getByTestId("model-picker-choice-deployment/credits")
+                  .getByText("Free", { exact: true })
+                  .count(),
+              ).toBe(0);
+              expect(
+                await menu
+                  .getByTestId(`model-picker-choice-deployment/${selected}`)
+                  .getByLabel("Selected", { exact: true })
+                  .count(),
+              ).toBe(1);
+              if (branding === "stock") expect(await menu.innerText()).not.toContain("Opengeni");
+              expect(await page.locator('svg[viewBox="0 0 140 133"]').count()).toBe(0);
+              expect(
+                await page.evaluate(() => document.documentElement.scrollWidth),
+              ).toBeLessThanOrEqual(width);
+              const bounds = await page.locator(".og-model-policy-menu").boundingBox();
+              expect(bounds!.x).toBeGreaterThanOrEqual(-1);
+              expect(bounds!.x + bounds!.width).toBeLessThanOrEqual(width + 1);
+              await page.keyboard.press("Escape");
+              await page.locator(".og-model-policy-menu").waitFor({ state: "detached" });
+              await page.waitForFunction(
+                () => document.activeElement?.getAttribute("aria-label") === "Model and effort",
+              );
+              expect(await trigger.evaluate((element) => element === document.activeElement)).toBe(
+                true,
+              );
+            }
+          }
+        }
+      } finally {
+        await context.close();
+      }
+    },
+    60_000,
+  );
+
+  // Cold demo navigations and real accessibility scans need the same
   // explicit browser-test budget as the adjacent resize journey, not Bun's
   // default five seconds (baseline CI already measures this case near four).
   test("conversation paints a matched surface on light hosts in both themes", async () => {
@@ -58,8 +158,9 @@ describe("container-responsive public composer demo", () => {
     const page = await context.newPage();
     try {
       const colors: string[] = [];
-      for (const theme of ["light", "dark"]) {
-        await page.goto(`${baseUrl}/conversation-layout.html?theme=${theme}`);
+      for (const theme of ["light", "dark", "auto"]) {
+        const query = theme === "auto" ? "" : `?theme=${theme}`;
+        await page.goto(`${baseUrl}/conversation-layout.html${query}`);
         const reply = page.getByText("Readable assistant reply in the selected theme.", {
           exact: true,
         });
@@ -67,10 +168,12 @@ describe("container-responsive public composer demo", () => {
         const styles = await reply.evaluate((element) => {
           const conversation = element.closest("[data-og-conversation]")!;
           return {
+            theme: conversation.closest("[data-og-theme]")?.getAttribute("data-og-theme"),
             foreground: getComputedStyle(element).color,
             background: getComputedStyle(conversation).backgroundColor,
           };
         });
+        expect(styles.theme).toBe(theme === "auto" ? "light" : theme);
         expect(styles.background).not.toBe("rgba(0, 0, 0, 0)");
         expect(styles.foreground).not.toBe(styles.background);
         colors.push(styles.foreground);
@@ -81,6 +184,7 @@ describe("container-responsive public composer demo", () => {
         expect(accessibility.violations).toEqual([]);
       }
       expect(colors[0]).not.toBe(colors[1]);
+      expect(colors[2]).toBe(colors[0]);
     } finally {
       await context.close();
     }

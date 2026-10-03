@@ -22,6 +22,15 @@ Every catalog item includes a typed `lifecycle` projection and a bounded list of
 
 ## Runtime Behavior
 
+Fresh native connection setup uses the current actor's Connect catalog readiness
+for the deployment and workspace. Pending or failed checks do not offer setup;
+existing account management remains available. The stock Figma remote connector
+is withheld until OpenGeni receives approved-client access: Figma permits only
+clients in its [MCP catalog](https://www.figma.com/mcp-catalog/), as described in
+its [access documentation](https://developers.figma.com/docs/figma-mcp-server/rate-limits-access/).
+Existing enabled connections and manually configured endpoints retain their
+ordinary management and authority boundaries.
+
 Remote MCP capabilities with a streamable HTTP endpoint are executable. Enabling a remote MCP first performs an MCP initialize/list-tools probe. If the probe succeeds, OpenGeni stores a `capability_installations` row and the API/worker merge that row into the runtime MCP server list for new sessions, follow-ups, and scheduled tasks. A workspace may store `sessionToolDefaults` for sessions and scheduled sessions created without an explicit `tools` key. Workspaces without that override include available configured and enabled capability MCP servers by default. An existing exact override remains exact; `inheritConnectedMcpServers: true` additionally includes current and future connected MCP servers while preserving the selected built-in `files`/`docs` defaults. The web editor preserves built-in overrides when changing connector defaults. An explicit tools list (even an empty one) is taken verbatim. If the probe fails, the API returns `422` and the capability stays disabled, so a stale, down, or auth-only endpoint never breaks agent turns at runtime.
 
 Tool selection is durable session state. The composer’s **+ → Connectors** menu
@@ -760,6 +769,11 @@ connection. API-key values go only to the protected connection API, never into
 the event or model-visible tool result. Provider-specific prerequisites retain
 their existing protected setup paths and permission checks.
 
+The GitHub App card is the one card that can also add something to the chat:
+after the workspace binding exists it lists the shared repositories, and **Use**
+sends an ordinary human message carrying the composer picker's repository
+resource through the same Send endpoint and validation. See [GitHub App workspace bindings](github-app.md#using-a-repository-from-the-conversation-card).
+
 Reviewed library Skills install for the workspace. Their source/version review
 is available in the setup dialog; personal and conversation-only library
 installation are not supported by this path. Completing setup makes the
@@ -778,12 +792,13 @@ or a repository outside the durable allowlist. On success the browser returns
 to the originating session and subsequent tool calls use the existing
 host-owned GitHub authority.
 
-## Official Gmail MCP
+## Gmail MCP bridge
 
-The reviewed catalog includes Google's official hosted Gmail MCP at
-`https://gmailmcp.googleapis.com/mcp/v1`. It is currently a Google Developer
-Preview. OpenGeni requests only the three scopes used by the reviewed tool
-surface:
+The reviewed Gmail connector uses OpenGeni's REST-backed MCP bridge. Its
+historical `https://gmailmcp.googleapis.com/mcp/v1` connection identity remains
+stable, but setup, tool discovery, and execution do not contact Google's
+Developer Preview MCP server. OpenGeni requests only the three scopes used by
+the reviewed tool surface:
 
 - `https://www.googleapis.com/auth/gmail.readonly`
 - `https://www.googleapis.com/auth/gmail.compose`
@@ -802,10 +817,11 @@ is omitted from Google's authorization, token, and refresh requests. The MCP
 resource remains stored in the encrypted bundle and bound to the runtime
 connection.
 
-Gmail defaults to personal ownership; users may instead connect it for the workspace.
+Gmail connections are personal-only; every member connects their own mailbox.
 Personal account selection is frozen for the initiating user's accepted work,
-and another participant cannot borrow that account. A workspace connection
-uses the explicitly shared mailbox. Gmail content added to a conversation
+and another participant cannot borrow that account. Historical workspace-owned
+Gmail grants remain available for cleanup but cannot be reconnected or enabled.
+Gmail content added to a conversation
 follows that conversation's visibility; account ownership does not change it.
 
 Gmail is the single connector path for the provider: the catalog row's
@@ -818,9 +834,8 @@ no separate OpenAPI API-integration definition and no REST-adapter fallback
 mode - both existed only while the bridge coexisted with a direct-passthrough
 option; consolidated onto one path, they were removed rather than deprecated.
 
-The catalog pins the exact twelve tools in the reviewed surface (the
-Developer Preview's ten plus `send_message`/`send_draft`, which the real
-Developer Preview server does not offer at all). A newly added tool is
+The catalog pins the exact twelve tools in the reviewed surface, including
+OpenGeni's `send_message` and `send_draft`. A newly added tool is
 unavailable until the catalog contract is reviewed and updated. Draft
 creation, both send tools, and label/unlabel tools require the ordinary
 durable human approval - mandatory, not a workspace setting; search,
@@ -832,37 +847,46 @@ Google API or address another mailbox. Read-only calls may refresh after one
 after an ambiguous provider response - it fails closed with an explicit
 "outcome is uncertain" error instead of risking a duplicate send.
 
+OAuth discovery reads Google's pinned OpenID metadata with PKCE S256 and uses
+the deployment's registered client. After exchanging the authorization code,
+setup requires a fresh refresh token, all three reported Gmail scopes, and a
+successful `GET https://gmail.googleapis.com/gmail/v1/users/me/profile`. Only
+the verified mailbox email label is stored; counts and history identifiers are
+discarded. The label does not replace the signed OpenGeni owner authority.
+Tool permissions use the bridge's static reviewed catalog. A failed grant or
+verification settles the Connect attempt as failed without changing any
+previous connection. Google does not guarantee a new refresh token on every
+consent prompt; a response without offline access must be retried rather than
+combined with a previous account's token.
+
 Before importing/enabling the capability in a deployment:
 
-1. Join the [Google Workspace Developer Preview
-   Program](https://developers.google.com/workspace/preview) with the Google
-   Workspace account that will authorize Gmail. Include the deployment's exact
-   Google Cloud project in the application and wait for Google to confirm that
-   both the account and project are registered. Enabling the APIs and granting
-   OAuth scopes alone is not sufficient for the hosted MCP preview.
-2. In that registered Google Cloud project, enable both the Gmail API and Gmail
-   MCP API, configure the OAuth consent screen, and create a **Web application**
-   OAuth client.
-3. Register
+1. Enable the Gmail API in the deployment's Google Cloud project, configure the
+   OAuth consent screen, and create a **Web application** OAuth client. The
+   hosted MCP preview and Gmail MCP API are not prerequisites for this bridge.
+2. Register
    `${OPENGENI_PUBLIC_BASE_URL}/v1/integrations/oauth/callback` as an authorized
    redirect URI.
-4. Set `OPENGENI_INTEGRATIONS_ENABLED=true`, configure the normal integration
+3. Set `OPENGENI_INTEGRATIONS_ENABLED=true`, configure the normal integration
    state/encryption secrets, and add the deployment-owned client:
 
    ```dotenv
    OPENGENI_INTEGRATIONS_OAUTH_CLIENTS_JSON='{"https://accounts.google.com":{"clientId":"...","clientSecret":"...","tokenEndpointAuthMethod":"client_secret_post"}}'
    ```
 
+4. Before public launch, complete Google's required restricted-scope OAuth
+   verification and any applicable security assessment. A Google project left
+   in Testing can expire refresh tokens after seven days; reauthorization is
+   then required even when the bridge is working correctly.
 5. Run the normal reviewed catalog import, open **Capabilities**, search for
    **Gmail**, and select **Connect only for me**. The ownership choice is fixed:
    every member connects their own mailbox, and other workspace members cannot
    see or use it.
 
-The fixed tool allowlist and approval defaults are defense in depth for the
-provider's Developer Preview behavior. See Google's [configuration
-guide](https://developers.google.com/workspace/gmail/api/guides/configure-mcp-server)
-and [MCP tool
-reference](https://developers.google.com/workspace/gmail/api/reference/mcp).
+The fixed tool allowlist and approval defaults limit the broader Google grant.
+See Google's [OAuth web-server guide](https://developers.google.com/identity/protocols/oauth2/web-server),
+[Gmail REST reference](https://developers.google.com/workspace/gmail/api/reference/rest),
+and [restricted-scope verification requirements](https://developers.google.com/identity/protocols/oauth2/production-readiness/restricted-scope-verification).
 
 ## integrations.sh Snapshot Imports
 

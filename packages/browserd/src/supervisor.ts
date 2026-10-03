@@ -3,7 +3,7 @@ import { restoredTabUrl } from "./restored-tab-url";
 import { selectManagedChromiumExecutable, type VerifiedHeadlessShell } from "./headless-shell";
 import type { HeadlessSessionCookies } from "./headless-session-cookies";
 import { createHash, randomUUID } from "node:crypto";
-import { chmod, mkdir, rename, rm, writeFile } from "node:fs/promises";
+import { chmod, lstat, mkdir, realpath, rename, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import type {
@@ -63,7 +63,17 @@ import {
   assertAgentBrowserSocketPath,
   browserProfileCryptoPolicy,
   reapManagedBrowserProcesses,
+  inspectOwnedManagedBrowserProcess,
+  type OwnedManagedBrowserProcess,
 } from "./runner";
+import {
+  SqliteBrowserWorkingRuntimeJournal,
+  assertDirectory,
+  assertWorkingRuntimeReceipt,
+  unavailable as workingRuntimeUnavailable,
+  type BrowserWorkingRuntimeAuthority,
+  type BrowserWorkingRuntimeReceipt,
+} from "./working-runtime-journal";
 import { SqliteBrowserOperationJournal } from "./journal";
 import { SqliteBrowserProtectedAuthJournal } from "./protected-auth-journal";
 import { BrowserWorkspaceFileStager } from "./workspace-files";
@@ -119,6 +129,8 @@ export type BrowserSupervisorSessionOptions = BrowserSessionReference & {
   linkedComputer?: { computerSessionId: string; controllerGeneration: string };
   launchEnvironment?: NodeJS.ProcessEnv;
   networkRoute?: BrowserSupervisorNetworkRoute;
+  recoverExistingWorkingDirectory?: true;
+  workingRuntimeAuthority?: BrowserWorkingRuntimeAuthority;
 };
 
 export type BrowserSupervisorNetworkRoute = {
@@ -222,6 +234,9 @@ export type BrowserSupervisorDriver = BrowserInteractionDriver & {
    * honestly without implicit recovery. */
   isAvailable?(): Promise<boolean>;
   isTerminal?(): boolean;
+  ownedProcessIdentity?(): Promise<OwnedManagedBrowserProcess | null>;
+  /** Release a failed reattach transport without closing its owned browser. */
+  detach?(): Promise<void>;
   close(): Promise<void>;
 };
 
@@ -230,6 +245,8 @@ export type BrowserSupervisorDriverContext = BrowserSessionReference & {
   socketDirectory: string;
   profileDirectory: string;
   restoredProfile: boolean;
+  recoverOwnedProcess?: OwnedManagedBrowserProcess;
+  allowOwnedProcessLaunch?: boolean;
   headlessSessionCookies?: HeadlessSessionCookies;
   downloadDirectory: string;
   screenshotDirectory: string;
@@ -261,6 +278,8 @@ export type BrowserSupervisorOptions = {
   createDriver?: (context: BrowserSupervisorDriverContext) => Promise<BrowserSupervisorDriver>;
   uploadArtifact?: (artifactPath: string, authority: BrowserStateUploadAuthority) => Promise<void>;
   uploadDownload?: typeof uploadBrowserDownload;
+  /** Read-only identity seam; tests supply generated process receipts only. */
+  inspectOwnedProcess?: typeof inspectOwnedManagedBrowserProcess;
 };
 
 type Runtime = {
@@ -270,6 +289,8 @@ type Runtime = {
   journal: SqliteBrowserOperationJournal;
   protectedAuthJournal: SqliteBrowserProtectedAuthJournal;
   stateJournal: SqliteBrowserStateTransferJournal;
+  workingJournal: SqliteBrowserWorkingRuntimeJournal | null;
+  workingReceipt: BrowserWorkingRuntimeReceipt | null;
   driver: BrowserSupervisorDriver;
   controller: BrowserInteractionController;
   protectedAuthController: BrowserProtectedAuthController;
@@ -324,6 +345,7 @@ export class BrowserSupervisor {
     authority: BrowserStateUploadAuthority,
   ) => Promise<void>;
   private readonly uploadDownload: typeof uploadBrowserDownload;
+  private readonly inspectOwnedProcess: typeof inspectOwnedManagedBrowserProcess;
   private readonly sessions = new Map<string, Runtime>();
   private readonly creating = new Map<string, Promise<Runtime>>();
   private readonly creationRequests = new Set<Promise<BrowserSupervisorSession>>();
@@ -361,6 +383,7 @@ export class BrowserSupervisor {
             )));
     this.uploadArtifact = options.uploadArtifact ?? uploadBrowserStateArtifact;
     this.uploadDownload = options.uploadDownload ?? uploadBrowserDownload;
+    this.inspectOwnedProcess = options.inspectOwnedProcess ?? inspectOwnedManagedBrowserProcess;
   }
 
   private async createEphemeralDriver(
@@ -448,7 +471,18 @@ export class BrowserSupervisor {
     await chmod(supervisor.rootDirectory, 0o700);
     await chmod(supervisor.socketRootDirectory, 0o700);
     if (!options.createDriver) {
-      await reapManagedBrowserProcesses(supervisor.rootDirectory);
+      await reapManagedBrowserProcesses(supervisor.rootDirectory, async (directory) => {
+        // A durable launch/retirement history can include an accepted unknown
+        // outcome. Startup has no current human admission to settle it. Keep
+        // that exact directory; explicit bound cleanup remains authoritative.
+        try {
+          await lstat(join(directory, "working-runtime.sqlite"));
+          return true;
+        } catch (error) {
+          if ((error as NodeJS.ErrnoException).code === "ENOENT") return false;
+          throw error;
+        }
+      });
     }
     return supervisor;
   }
@@ -486,6 +520,7 @@ export class BrowserSupervisor {
     const active = this.sessions.get(options.browserSessionId);
     if (active) {
       this.assertSameBinding(active, options);
+      await this.recordWorkingAuthority(active, options);
       return {
         ...binding(active),
         observation: await this.currentObservation(active),
@@ -495,6 +530,7 @@ export class BrowserSupervisor {
     if (pending) {
       const runtime = await pending;
       this.assertSameBinding(runtime, options);
+      await this.recordWorkingAuthority(runtime, options);
       return {
         ...binding(runtime),
         observation: await this.currentObservation(runtime),
@@ -816,10 +852,28 @@ export class BrowserSupervisor {
     reference: BrowserSessionReference,
     options: { removeState?: boolean } = {},
   ): Promise<void> {
+    if (!isUuid(reference.browserSessionId)) throw new Error("browserSessionId must be a UUID");
     const pending = this.creating.get(reference.browserSessionId);
     if (pending) await pending;
     const stateTransfer = this.stateTransferTails.get(reference.browserSessionId);
     if (stateTransfer) await stateTransfer.catch(() => undefined);
+    if (!this.sessions.has(reference.browserSessionId)) {
+      try {
+        await lstat(
+          join(
+            this.rootDirectory,
+            "sessions",
+            reference.browserSessionId,
+            "working-runtime.sqlite",
+          ),
+        );
+        // Missing memory cannot acknowledge cleanup of a possibly accepted
+        // launch. Its exact binding/holder must stay addressable for cleanup.
+        throw workingRuntimeUnavailable();
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+      }
+    }
     const runtime = this.requireBound(reference);
     if (runtime.externalAuthTail) await runtime.externalAuthTail;
     const existing = this.ending.get(reference.browserSessionId);
@@ -873,19 +927,89 @@ export class BrowserSupervisor {
   }
 
   private async buildRuntime(options: ValidatedBrowserSupervisorSessionOptions): Promise<Runtime> {
-    if (options.networkRoute?.kind === "proxy" && !options.networkRoute.proxyUrl) {
-      throw new InteractionControllerError(
-        "resource_unavailable",
-        "proxy authority is unavailable for a new browser launch",
-        true,
-      );
-    }
     const sessionDirectory = join(this.rootDirectory, "sessions", options.browserSessionId);
     const socketDirectory = join(this.socketRootDirectory, shortDigest(options.browserSessionId));
     const profileDirectory = join(sessionDirectory, "profile");
     const downloadDirectory = join(sessionDirectory, "downloads");
     const uploadDirectory = join(sessionDirectory, "uploads");
     const screenshotDirectory = join(sessionDirectory, "screenshots");
+    if (
+      !options.recoverExistingWorkingDirectory &&
+      !options.restore &&
+      eligibleWorkingRuntime(options) &&
+      options.workingRuntimeAuthority
+    ) {
+      try {
+        await lstat(join(sessionDirectory, "working-runtime.sqlite"));
+        // A retry with no private recovery intent cannot execute a durable
+        // completed or potentially accepted launch again after memory loss.
+        throw workingRuntimeUnavailable();
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+      }
+    }
+    let recoveredReceipt: BrowserWorkingRuntimeReceipt | null = null;
+    if (options.recoverExistingWorkingDirectory) {
+      try {
+        await assertDirectory(this.rootDirectory);
+        await assertDirectory(join(this.rootDirectory, "sessions"));
+        await assertDirectory(sessionDirectory);
+        const profile = await assertDirectory(profileDirectory);
+        const reader = await SqliteBrowserWorkingRuntimeJournal.open(
+          { ...options, sessionDirectory },
+          true,
+        );
+        try {
+          const receipt = reader.latest();
+          assertWorkingRuntimeReceipt(
+            receipt,
+            options.workingRuntimeAuthority!,
+            workingLaunchDigest(options),
+            profile,
+          );
+          if (receipt.process.profileDirectory !== resolve(profileDirectory))
+            throw workingRuntimeUnavailable();
+          const state = await this.inspectOwnedProcess(receipt.process);
+          if (state === "exited" && !receipt.directoryLaunchAllowed)
+            throw workingRuntimeUnavailable();
+          recoveredReceipt = receipt;
+        } finally {
+          reader.close();
+        }
+        // Validate every path consumed by the existing writers before opening
+        // any journal RW or creating a driver. Missing adjunct directories may
+        // be recreated only after the exact profile/receipt proof above.
+        for (const path of [
+          socketDirectory,
+          downloadDirectory,
+          uploadDirectory,
+          screenshotDirectory,
+          join(downloadDirectory, "files"),
+        ])
+          await assertOptionalDirectory(path);
+        for (const path of [
+          "operations.sqlite",
+          "protected-auth-operations.sqlite",
+          "state-transfers.sqlite",
+        ])
+          await assertOptionalRegularFile(join(sessionDirectory, path));
+        await assertOptionalRegularFile(join(downloadDirectory, "downloads.sqlite"));
+      } catch {
+        throw workingRuntimeUnavailable();
+      }
+    }
+    if (
+      options.networkRoute?.kind === "proxy" &&
+      !options.networkRoute.proxyUrl &&
+      (!recoveredReceipt ||
+        (await this.inspectOwnedProcess(recoveredReceipt.process!)) === "exited")
+    ) {
+      throw new InteractionControllerError(
+        "resource_unavailable",
+        "proxy authority is unavailable for a new browser launch",
+        true,
+      );
+    }
     for (const directory of [
       sessionDirectory,
       socketDirectory,
@@ -927,7 +1051,7 @@ export class BrowserSupervisor {
       restoredManifest = restored.manifest;
       restoredCookies = restored.headlessSessionCookies;
       restoredProfileMaterialized = true;
-    } else {
+    } else if (!recoveredReceipt) {
       await mkdir(profileDirectory, { recursive: true, mode: 0o700 });
       await chmod(profileDirectory, 0o700);
     }
@@ -984,6 +1108,12 @@ export class BrowserSupervisor {
       socketDirectory,
       profileDirectory,
       restoredProfile: restoredProfileMaterialized,
+      ...(recoveredReceipt
+        ? {
+            recoverOwnedProcess: recoveredReceipt.process!,
+            allowOwnedProcessLaunch: recoveredReceipt.directoryLaunchAllowed,
+          }
+        : {}),
       ...(restoredCookies ? { headlessSessionCookies: restoredCookies } : {}),
       downloadDirectory: downloadStore?.filesDirectory ?? downloadDirectory,
       screenshotDirectory,
@@ -1008,7 +1138,30 @@ export class BrowserSupervisor {
       ...(options.networkRoute ? { networkRoute: options.networkRoute } : {}),
     };
     let driver: BrowserSupervisorDriver | null = null;
+    let workingJournal: SqliteBrowserWorkingRuntimeJournal | null = null;
+    let workingReceipt: BrowserWorkingRuntimeReceipt | null = null;
     try {
+      if (eligibleWorkingRuntime(options) && options.workingRuntimeAuthority) {
+        workingJournal = await SqliteBrowserWorkingRuntimeJournal.open({
+          ...options,
+          sessionDirectory,
+        });
+        workingReceipt = workingJournal.begin(
+          {
+            browserSessionId: options.browserSessionId,
+            controllerGeneration: options.controllerGeneration,
+            intent: "launch",
+            authority: options.workingRuntimeAuthority,
+            launchDigest: workingLaunchDigest(options),
+            restoreAuthorityDigest:
+              recoveredReceipt?.restoreAuthorityDigest ?? restoreAuthorityDigest(options.restore),
+            profile: await assertDirectory(profileDirectory),
+            process: null,
+            directoryLaunchAllowed: recoveredReceipt?.directoryLaunchAllowed ?? false,
+          },
+          recoveredReceipt?.operationId,
+        );
+      }
       const initialProtectedAuthJournal = protectedAuthJournal.loadAndRecover();
       driver = await this.createDriver(driverContext);
       const runtime: Runtime = {
@@ -1018,6 +1171,8 @@ export class BrowserSupervisor {
         journal,
         protectedAuthJournal,
         stateJournal,
+        workingJournal,
+        workingReceipt,
         driver,
         lifecycle: "active" as const,
         externalAuthTail: null,
@@ -1063,12 +1218,29 @@ export class BrowserSupervisor {
         runtime.lastSnapshot = snapshotWithTargets(runtime.lastSnapshot, runtime.lastTargets);
       }
       delete driverContext.headlessSessionCookies;
+      if (workingJournal && workingReceipt) {
+        let ownedProcess: OwnedManagedBrowserProcess | null = null;
+        try {
+          ownedProcess = (await driver.ownedProcessIdentity?.()) ?? null;
+        } catch (error) {
+          if (recoveredReceipt) throw error;
+        }
+        if (recoveredReceipt && !ownedProcess) throw workingRuntimeUnavailable();
+        workingReceipt = {
+          ...workingReceipt,
+          directoryLaunchAllowed: driver.requiresExplicitProfileRestore !== true,
+        };
+        runtime.workingReceipt = workingJournal.complete(workingReceipt, ownedProcess);
+        if (recoveredReceipt)
+          runtime.options.restoreAuthorityDigest = recoveredReceipt.restoreAuthorityDigest;
+      }
       return runtime;
     } catch (error) {
       const failures: unknown[] = [error];
       let driverClosed = driver === null;
       try {
-        await driver?.close();
+        if (recoveredReceipt) await driver?.detach?.();
+        else await driver?.close();
         driverClosed = true;
       } catch (cleanupError) {
         failures.push(cleanupError);
@@ -1079,6 +1251,11 @@ export class BrowserSupervisor {
         } catch (cleanupError) {
           failures.push(cleanupError);
         }
+      }
+      try {
+        workingJournal?.close();
+      } catch (cleanupError) {
+        failures.push(cleanupError);
       }
       try {
         journal.close();
@@ -1175,8 +1352,12 @@ export class BrowserSupervisor {
       snapshot = await runtime.driver.runtimeSnapshot();
       const cookies = await runtime.driver.captureSessionCookies?.();
       if (cookies) runtime.driverContext.headlessSessionCookies = cookies;
+      this.retireWorkingRuntime(runtime);
       await runtime.driver.close();
       driverClosed = true;
+      if (runtime.workingJournal && runtime.workingReceipt?.intent === "retire") {
+        runtime.workingReceipt = runtime.workingJournal.complete(runtime.workingReceipt, null);
+      }
       const manifest = profileManifest(runtime, snapshot);
       const artifact = await captureEncryptedBrowserProfile({
         profileDirectory: runtime.driverContext.profileDirectory,
@@ -1239,6 +1420,16 @@ export class BrowserSupervisor {
   }
 
   private async restartRuntime(runtime: Runtime, snapshot: BrowserRuntimeSnapshot): Promise<void> {
+    delete runtime.driverContext.recoverOwnedProcess;
+    delete runtime.driverContext.allowOwnedProcessLaunch;
+    const launch =
+      runtime.workingJournal && runtime.workingReceipt
+        ? runtime.workingJournal.begin({
+            ...runtime.workingReceipt,
+            intent: "launch",
+            process: null,
+          })
+        : null;
     const driver = await this.createDriver(runtime.driverContext);
     try {
       await restoreTabs(driver, snapshot.tabs);
@@ -1254,6 +1445,18 @@ export class BrowserSupervisor {
       runtime.lastTargets = currentTargets;
       runtime.lastSnapshot = snapshotWithTargets(currentSnapshot, currentTargets);
       delete runtime.driverContext.headlessSessionCookies;
+      if (launch && runtime.workingJournal) {
+        let process: OwnedManagedBrowserProcess | null = null;
+        try {
+          process = (await driver.ownedProcessIdentity?.()) ?? null;
+        } catch {
+          /* No recovery proof. */
+        }
+        runtime.workingReceipt = runtime.workingJournal.complete(
+          { ...launch, directoryLaunchAllowed: driver.requiresExplicitProfileRestore !== true },
+          process,
+        );
+      }
     } catch (error) {
       await driver.close().catch(() => undefined);
       throw error;
@@ -1381,6 +1584,7 @@ export class BrowserSupervisor {
         runtime.protectedAuthController.waitForIdle(),
       ]);
       await runtime.downloadStore?.interruptInProgress("browser_restarted");
+      this.retireWorkingRuntime(runtime);
       await previousDriver.close();
       await this.restartRuntime(runtime, snapshot);
       runtime.lifecycle = "active";
@@ -1515,11 +1719,13 @@ export class BrowserSupervisor {
     if (
       runtime.options.headed !== requested.headed ||
       runtime.options.browserExecutablePath !== requested.browserExecutablePath ||
-      runtime.options.initialUrl !== requested.initialUrl ||
+      (!requested.recoverExistingWorkingDirectory &&
+        runtime.options.initialUrl !== requested.initialUrl) ||
       canonicalJson(runtime.options.transport) !== canonicalJson(requested.transport) ||
       canonicalJson(runtime.options.linkedComputer ?? null) !==
         canonicalJson(requested.linkedComputer ?? null) ||
-      runtime.options.restoreAuthorityDigest !== restoreAuthorityDigest(requested.restore) ||
+      (!requested.recoverExistingWorkingDirectory &&
+        runtime.options.restoreAuthorityDigest !== restoreAuthorityDigest(requested.restore)) ||
       runtime.options.networkRouteAuthorityDigest !==
         (requested.networkRoute?.authorityDigest ?? null) ||
       ((requested.networkRoute?.proxyUrl !== undefined ||
@@ -1531,6 +1737,49 @@ export class BrowserSupervisor {
         "operation_conflict",
         "browser session is already active with different launch options",
       );
+    }
+  }
+
+  private async recordWorkingAuthority(
+    runtime: Runtime,
+    options: ValidatedBrowserSupervisorSessionOptions,
+  ) {
+    if (!runtime.workingJournal || !runtime.workingReceipt || !options.workingRuntimeAuthority) {
+      if (options.recoverExistingWorkingDirectory) throw workingRuntimeUnavailable();
+      return;
+    }
+    const previous = runtime.workingReceipt.authority;
+    const current = options.workingRuntimeAuthority;
+    if (
+      current.placementDigest !== previous.placementDigest ||
+      current.tokenGeneration < previous.tokenGeneration ||
+      (current.tokenGeneration === previous.tokenGeneration &&
+        JSON.stringify(current) !== JSON.stringify(previous))
+    ) {
+      throw workingRuntimeUnavailable();
+    }
+    if (current.tokenGeneration === previous.tokenGeneration) return;
+    const receipt = runtime.workingJournal.begin({
+      ...runtime.workingReceipt,
+      authority: current,
+      process: null,
+    });
+    let ownedProcess: OwnedManagedBrowserProcess | null = null;
+    try {
+      ownedProcess = (await runtime.driver.ownedProcessIdentity?.()) ?? null;
+    } catch {
+      /* An unattested receipt cannot be used for directory recovery. */
+    }
+    runtime.workingReceipt = runtime.workingJournal.complete(receipt, ownedProcess);
+  }
+
+  private retireWorkingRuntime(runtime: Runtime) {
+    if (
+      runtime.workingJournal &&
+      runtime.workingReceipt?.intent !== "retire" &&
+      runtime.workingReceipt
+    ) {
+      runtime.workingReceipt = runtime.workingJournal.retire(runtime.workingReceipt);
     }
   }
 
@@ -1582,10 +1831,18 @@ export class BrowserSupervisor {
   ): Promise<void> {
     const failures: unknown[] = [];
     let driverClosed = driverAlreadyClosed;
+    let workingReceiptSettled =
+      runtime.workingJournal === null ||
+      (runtime.workingReceipt?.intent === "retire" && runtime.workingReceipt.state === "completed");
+    let workingJournalClosed = runtime.workingJournal === null;
     let actionJournalClosed = false;
     let protectedAuthJournalClosed = false;
     let stateJournalClosed = false;
     let downloadStoreClosed = runtime.downloadStore === null;
+    // Retirement becomes durable before controller/process cleanup. A crash
+    // cannot turn an explicitly closed or captured runtime into a launch.
+    // Failed retirement acceptance preserves the live driver and all journals.
+    this.retireWorkingRuntime(runtime);
     if (!driverAlreadyClosed) {
       try {
         await runtime.downloadStore?.interruptInProgress("browser_ended");
@@ -1595,6 +1852,28 @@ export class BrowserSupervisor {
       try {
         await runtime.driver.close();
         driverClosed = true;
+      } catch (error) {
+        failures.push(error);
+      }
+    }
+    if (
+      driverClosed &&
+      runtime.workingJournal &&
+      runtime.workingReceipt?.intent === "retire" &&
+      runtime.workingReceipt.state !== "completed"
+    ) {
+      try {
+        runtime.workingReceipt = runtime.workingJournal.complete(runtime.workingReceipt, null);
+        workingReceiptSettled = true;
+      } catch (error) {
+        failures.push(error);
+      }
+    }
+    // An unsettled retirement keeps this journal open for the exact cleanup retry.
+    if (driverClosed && workingReceiptSettled) {
+      try {
+        runtime.workingJournal?.close();
+        workingJournalClosed = true;
       } catch (error) {
         failures.push(error);
       }
@@ -1638,6 +1917,8 @@ export class BrowserSupervisor {
     if (
       removeState &&
       driverClosed &&
+      workingReceiptSettled &&
+      workingJournalClosed &&
       actionJournalClosed &&
       protectedAuthJournalClosed &&
       stateJournalClosed &&
@@ -1767,7 +2048,7 @@ async function createBrowserDriver(
   if (context.linkedComputer) {
     launchArguments.push("--force-renderer-accessibility=complete");
   }
-  const browserExecutablePath = await selectManagedChromiumExecutable({
+  const selectedExecutable = await selectManagedChromiumExecutable({
     headed: context.headed,
     profileDirectory: context.profileDirectory,
     restoredProfile: context.restoredProfile,
@@ -1776,6 +2057,21 @@ async function createBrowserDriver(
       : {}),
     ...(headlessShell ? { headlessShell } : {}),
   });
+  if (
+    context.recoverOwnedProcess &&
+    selectedExecutable &&
+    (await realpath(selectedExecutable)) !== context.recoverOwnedProcess.executablePath
+  ) {
+    throw workingRuntimeUnavailable();
+  }
+  const browserExecutablePath = context.recoverOwnedProcess?.executablePath ?? selectedExecutable;
+  if (
+    context.recoverOwnedProcess &&
+    context.allowOwnedProcessLaunch !== true &&
+    (!headlessShell || (await realpath(headlessShell.path)) !== browserExecutablePath)
+  ) {
+    throw workingRuntimeUnavailable();
+  }
   const useHeadlessShell = headlessShell && browserExecutablePath === headlessShell.path;
   if (context.headlessSessionCookies && !useHeadlessShell) {
     throw new Error("Headless cookie state requires its matching verified profile launcher");
@@ -1796,6 +2092,12 @@ async function createBrowserDriver(
     ...(launchArguments.length > 0 ? { launchArguments } : {}),
     ...(route?.consistency.timezone ? { timezone: route.consistency.timezone } : {}),
     ...(browserExecutablePath ? { browserExecutablePath } : {}),
+    ...(context.recoverOwnedProcess
+      ? {
+          recoverOwnedProcess: context.recoverOwnedProcess,
+          allowOwnedProcessLaunch: context.allowOwnedProcessLaunch,
+        }
+      : {}),
     ...(context.launchEnvironment ? { environment: context.launchEnvironment } : {}),
     ...(binary ? { binary } : {}),
   });
@@ -1848,6 +2150,28 @@ function validateSessionOptions(
     throw new Error("initialUrl exceeds its byte envelope");
   }
   const transport = validateBrowserTransport(options.transport ?? { kind: "managed" });
+  if (
+    options.recoverExistingWorkingDirectory !== undefined &&
+    (options.recoverExistingWorkingDirectory !== true ||
+      options.initialUrl !== undefined ||
+      options.restore ||
+      !eligibleWorkingRuntime({ transport }) ||
+      !options.workingRuntimeAuthority)
+  ) {
+    throw workingRuntimeUnavailable();
+  }
+  if (options.workingRuntimeAuthority) {
+    const authority = options.workingRuntimeAuthority;
+    if (
+      !Number.isSafeInteger(authority.tokenGeneration) ||
+      authority.tokenGeneration < 1 ||
+      ![authority.placementDigest, authority.controlDigest, authority.viewDigest].every((value) =>
+        SHA256_PATTERN.test(value),
+      )
+    ) {
+      throw workingRuntimeUnavailable();
+    }
+  }
   if (
     transport.kind === "managed" &&
     transport.ephemeralPartition &&
@@ -2265,6 +2589,48 @@ function runtimeOptions(options: ValidatedBrowserSupervisorSessionOptions): Brow
     networkRouteAuthorityDigest: networkRoute?.authorityDigest ?? null,
     networkRouteMaterialDigest: networkRoute ? networkRouteMaterialDigest(networkRoute) : null,
   };
+}
+
+function eligibleWorkingRuntime(options: { transport: BrowserSupervisorTransport }) {
+  return (
+    options.transport.kind === "managed" &&
+    options.transport.engine !== "lightpanda" &&
+    !options.transport.ephemeralPartition
+  );
+}
+
+function workingLaunchDigest(options: ValidatedBrowserSupervisorSessionOptions): string {
+  return createHash("sha256")
+    .update(
+      canonicalJson({
+        driverId: BROWSER_DRIVER_ID,
+        driverSchemaVersion: BROWSER_DRIVER_SCHEMA_VERSION,
+        headed: options.headed,
+        executable: options.browserExecutablePath ?? null,
+        transport: options.transport,
+        linkedComputer: options.linkedComputer ?? null,
+        networkRoute: options.networkRoute
+          ? networkRouteMaterialDigest(options.networkRoute)
+          : null,
+      }),
+    )
+    .digest("hex");
+}
+
+async function assertOptionalDirectory(path: string) {
+  try {
+    await assertDirectory(path);
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+  }
+}
+async function assertOptionalRegularFile(path: string) {
+  try {
+    const metadata = await lstat(path);
+    if (!metadata.isFile() || metadata.isSymbolicLink()) throw workingRuntimeUnavailable();
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+  }
 }
 
 function networkRouteMaterialDigest(route: BrowserSupervisorNetworkRoute): string {

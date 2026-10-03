@@ -1,4 +1,9 @@
 import {
+  getSessionTurnClaudeProviderAccountAuthoritySnapshot,
+  getScheduledTaskClaudeProviderAccountAuthoritySnapshot,
+  resolveClaudeProviderAccountAuthoritySnapshotForAcceptance,
+} from "@opengeni/db";
+import {
   SCHEDULED_SLACK_BOT_POSTING_TOOLS,
   scheduledTaskKnowledgeSource,
   requireScheduledTaskKnowledgeSource,
@@ -8,6 +13,11 @@ import {
   resolveFirstPartyMcpToolPolicy,
   type Settings,
 } from "@opengeni/config";
+import {
+  ATLASSIAN_NATIVE_RETIRED_MESSAGE,
+  isRetiredNativeAtlassianSource,
+  isRetiredNativeAtlassianTask,
+} from "@opengeni/contracts/atlassian-native-retirement";
 import type {
   AccessGrant,
   KnowledgeSourceSyncAction,
@@ -21,6 +31,7 @@ import type {
   CreateScheduledTaskRequest as CreateScheduledTaskPayload,
   UpdateScheduledTaskRequest as UpdateScheduledTaskPayload,
   XaiProviderAccountAuthoritySnapshotV1,
+  ClaudeProviderAccountAuthoritySnapshotV1,
 } from "@opengeni/contracts";
 import {
   DEFAULT_FIRST_PARTY_MCP_PERMISSIONS,
@@ -75,6 +86,7 @@ import { fileOwnerContextForAccess, fileOwnerContextForAgent } from "./file-owne
 import { isDeepStrictEqual } from "node:util";
 import {
   hasPermission,
+  requireExplicitPermissionDelegation,
   isDeveloperSetupAuthorization,
   isDeveloperSetupGrant,
   requirePermission,
@@ -103,6 +115,7 @@ import {
   assertWorkspaceModelPolicyAllows,
   canonicalConfiguredModel,
   creationInitiatorForGrant,
+  modelUnavailableHttpException,
   settingsWithSessionMcpServerMetadata,
 } from "./sessions";
 import {
@@ -145,6 +158,7 @@ function workspaceCustomModelCommitGuard(input: {
   accountId: string;
   workspaceId: string;
   modelId: string;
+  claudeAuthoritySnapshot?: ClaudeProviderAccountAuthoritySnapshotV1;
 }): ((tx: Database) => Promise<void>) | undefined {
   const reference = workspaceCustomModelReference(input.settings, input.modelId);
   if (!reference) return undefined;
@@ -153,11 +167,12 @@ function workspaceCustomModelCommitGuard(input: {
       accountId: input.accountId,
       workspaceId: input.workspaceId,
       reference,
+      ...(input.claudeAuthoritySnapshot
+        ? { claudeAuthority: { authoritySnapshot: input.claudeAuthoritySnapshot } }
+        : {}),
     });
     if (!active) {
-      throw new HTTPException(422, {
-        message: `model is not available: ${input.modelId}`,
-      });
+      throw modelUnavailableHttpException(input.modelId);
     }
   };
 }
@@ -203,9 +218,7 @@ export function scheduledConnectionSurfaceEligibility(
       tools.includes("editable_artifact_export_status") &&
       permissions.includes("artifacts:read") &&
       permissions.includes("artifacts:publish"),
-    atlassianEnabled:
-      tools.some((tool) => tool.startsWith("atlassian_")) &&
-      permissions.includes("connections:read"),
+    atlassianEnabled: false,
   };
 }
 
@@ -461,6 +474,18 @@ export async function createValidatedScheduledTask(input: {
           workspaceId: input.grant.workspaceId,
           subjectId: input.grant.subjectId,
         });
+  const claudeProviderAccountAuthoritySnapshot: ClaudeProviderAccountAuthoritySnapshotV1 =
+    creationInitiator.actor
+      ? await getSessionTurnClaudeProviderAccountAuthoritySnapshot(
+          input.db,
+          input.grant.workspaceId,
+          creationInitiator.actor.sessionId,
+          creationInitiator.actor.turnId,
+        )
+      : await resolveClaudeProviderAccountAuthoritySnapshotForAcceptance(input.db, {
+          workspaceId: input.grant.workspaceId,
+          subjectId: input.grant.subjectId,
+        });
   const beforeCreateCommit =
     input.payload.runMode !== "existing_session"
       ? workspaceCustomModelCommitGuard({
@@ -468,6 +493,7 @@ export async function createValidatedScheduledTask(input: {
           accountId: input.grant.accountId,
           workspaceId: input.grant.workspaceId,
           modelId: agentConfig.model ?? input.settings.openaiModel,
+          claudeAuthoritySnapshot: claudeProviderAccountAuthoritySnapshot,
         })
       : undefined;
   return await withScheduledTaskAuthorityWriteErrors(() =>
@@ -489,6 +515,7 @@ export async function createValidatedScheduledTask(input: {
         createdByActor: creationInitiator.actor ?? null,
         ...(captureLinkAuthority ? { captureLinkAuthority } : {}),
         xaiProviderAccountAuthoritySnapshot,
+        claudeProviderAccountAuthoritySnapshot,
         creatorPolicy,
         targetSessionId: target?.id ?? null,
         variableSetId: input.payload.variableSetId ?? null,
@@ -533,6 +560,23 @@ export async function frozenScheduledTaskCreatorPolicy(input: {
       isDeveloperSetupAuthorization(input.authorization)) ||
     isDeveloperSetupGrant(input.grant);
   if (!input.actor) {
+    if (input.grant.permissionMode === "explicit") {
+      const permissions = DEFAULT_FIRST_PARTY_MCP_PERMISSIONS.filter((permission) =>
+        hasPermission(input.grant.permissions, permission, "explicit"),
+      );
+      if (permissions.length === 0) {
+        throw new HTTPException(403, {
+          message:
+            "the organization key holds no first-party MCP permission it could delegate to scheduled runs",
+        });
+      }
+      return {
+        firstPartyMcpTools: null,
+        firstPartyMcpPermissions: permissions,
+        sessionPolicy: null,
+        ...(restricted ? { credentialRestriction: "developer_setup" as const } : {}),
+      };
+    }
     // A restriction is not an agent tool/permission selection. Keep the exact
     // first-party and session defaults of ordinary API/service/asUser tasks.
     return restricted
@@ -575,7 +619,10 @@ export async function frozenScheduledTaskCreatorPolicy(input: {
   );
   const firstPartyMcpPermissions = (
     session.firstPartyMcpPermissions ?? [...DEFAULT_FIRST_PARTY_MCP_PERMISSIONS]
-  ).filter((permission) => hasPermission(input.grant.permissions, permission));
+  ).filter((permission) =>
+    hasPermission(input.grant.permissions, permission, input.grant.permissionMode),
+  );
+  requireExplicitPermissionDelegation(input.grant, firstPartyMcpPermissions);
   if (firstPartyMcpPermissions.length === 0) {
     throw new HTTPException(403, {
       message:
@@ -764,6 +811,8 @@ export async function triggerScheduledTaskForGrant(
 ): Promise<void> {
   await db.transaction(async (tx) => {
     await assertScheduledTaskMutationOwner(tx, grant, input.task.id);
+    if (isRetiredNativeAtlassianTask(input.task))
+      throw new HTTPException(410, { message: ATLASSIAN_NATIVE_RETIRED_MESSAGE });
     const actor = creationInitiatorForGrant(grant).actor ?? null;
     const restriction = await scheduledTaskCredentialRestrictionForGrant(tx, grant, actor);
     // A caller cannot supply or clear the trusted ceiling. Ownerless and
@@ -1143,6 +1192,11 @@ export async function validatedScheduledTaskUpdate(input: {
   }
   const update: UpdateScheduledTaskInput = {};
   const requestedKnowledgeSource = input.payload.agentConfig?.knowledgeSource ?? null;
+  if (
+    isRetiredNativeAtlassianTask(input.existing) &&
+    (input.payload.status === "active" || requestedKnowledgeSource)
+  )
+    throw new HTTPException(410, { message: ATLASSIAN_NATIVE_RETIRED_MESSAGE });
   const existingKnowledgeSource = scheduledTaskKnowledgeSource(input.existing);
   // Editing an ordinary source task's prompt/settings must not orphan its
   // connector binding. Deleting the task is the explicit source-disable path.
@@ -1430,6 +1484,11 @@ export async function validatedScheduledTaskUpdate(input: {
       accountId: input.existing.accountId,
       workspaceId: input.existing.workspaceId,
       modelId: nextAgentConfig.model ?? input.settings.openaiModel,
+      claudeAuthoritySnapshot: await getScheduledTaskClaudeProviderAccountAuthoritySnapshot(
+        input.db,
+        input.existing.workspaceId,
+        input.existing.id,
+      ),
     });
     if (beforeUpdateCommit) update.beforeUpdateCommit = beforeUpdateCommit;
   }
@@ -1670,6 +1729,8 @@ async function validateKnowledgeSourceSyncAction(input: {
   grant: AccessGrant;
   action: KnowledgeSourceSyncAction;
 }): Promise<void> {
+  if (isRetiredNativeAtlassianSource(input.action))
+    throw new HTTPException(410, { message: ATLASSIAN_NATIVE_RETIRED_MESSAGE });
   if (input.action.initiatingSubjectId !== input.grant.subjectId) {
     throw new HTTPException(403, {
       message: "knowledge source sync must preserve the exact initiating subject",

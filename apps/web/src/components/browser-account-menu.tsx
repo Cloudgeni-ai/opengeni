@@ -284,6 +284,7 @@ export function BrowserAccountMenu({
           <AppearanceSubmenu />
           <HelpMenu
             documentationUrl={context.clientConfig.documentationUrl}
+            supportEmail={context.clientConfig.supportEmail}
             onSendFeedback={onSendFeedback}
           />
           <DropdownMenuSeparator />

@@ -78,7 +78,8 @@ export async function resolveAcceptedConnectionUse(
         linked &&
         (!linked.authorized ||
           (!linked.permissions.includes("connections:read") &&
-            !linked.permissions.includes("workspace:admin")))
+            (linked.permissionMode === "explicit" ||
+              !linked.permissions.includes("workspace:admin"))))
       )
         return { status: "denied", reason: "grant_status_inactive" };
       const [row] = await rawRows<{

@@ -2,7 +2,7 @@
 name: opengeni-setup
 description: >-
   Set up OpenGeni for a product before writing its embedding code. Use for
-  browser-assisted organization onboarding, a scoped Developer setup key,
+  browser-assisted organization onboarding, a full-access setup key,
   idempotent REST/SDK workspace provisioning, agent persona and capabilities,
   product tools, approvals, schedules, webhooks, credentials and usage budgets.
   Skills only: the coding agent uses its own browser, shell and HTTP tools;
@@ -46,15 +46,17 @@ browser; I’ll handle the organization and developer setup.”** Let the person
 complete sign-in/sign-up, email verification and MFA. Do not request their
 password in chat or automate a verification challenge.
 
-After authentication, complete the organization-name step using the product's
-name, or reuse the exact intended existing organization. A bound invitation
+After authentication, if onboarding first asks how to use Opengeni, choose
+**Run agents in the cloud**: the other path shows a key on screen, and this
+setup creates its key below instead. Complete the organization-name step using
+the product's name, or reuse the exact intended existing organization. A bound invitation
 takes precedence; do not create a second organization. Skip optional model or
 purchase onboarding when an authorized billing path already exists. A key does
 not buy credits or make an unavailable model usable.
 
 In **Organization settings → Developer → Create API key**, select
-**Developer setup**, not Full access/all permissions. Keep its short default
-expiry. Store the once-shown token directly in the product's server-only `.env`
+**Full access** with a 30-day expiry, so setup and testing (including test users
+and a production key) need no further UI. Store the once-shown token directly in the product's server-only `.env`
 (or its existing secret manager), never in chat, a screenshot, a committed
 file, a browser bundle, or a `NEXT_PUBLIC_`/`VITE_` variable. Disable shell
 tracing; ignore `.env` and the local setup ledger; use file mode `0600`.
@@ -65,11 +67,9 @@ request from the walkthrough and capture its response directly to a protected
 file. Never print the raw response. If that secure path is unavailable, stop
 at the credential-transfer blocker; do not ask for a key pasted into chat.
 
-Verify `/v1/access/me`: the credential must be an organization API key for the
-intended organization with the Developer setup permissions. An empty
-`workspaceGrants` is normal for an organization key. If this preset is missing
-on the target, report a deployment-version mismatch; do not substitute Full
-access or a workspace key.
+Verify `/v1/access/me`: the credential must be a full-access organization API
+key for the intended organization. An empty `workspaceGrants` is normal for an
+organization key.
 
 ## 3. Provision and verify the organization workspace
 
@@ -159,6 +159,15 @@ proxy/authentication boundary. A short-lived setup key expiring is intentional;
 before shipping a long-lived integration, provision a separately scoped runtime
 credential through the authenticated organization administrator, not by granting
 key-management permission to the setup key.
+
+Carry the appearance choice into that handoff: custom-branded embeds should
+match host fonts/colors/spacing/radius/theme with no UI-owned OpenGeni branding;
+stock shipped UI should need no cosmetic host CSS. Expect polished desktop
+around 1440px/mobile around 390px and supported light/dark. Stock defects belong
+to package React/CSS, not host workarounds. Preserve first-try evidence; in
+coordinated trials the coordinator captures the browser matrix. Do not require
+screenshot submission for the coding-agent handoff. These are expectations,
+not a passed UI qualification or a reason to broaden setup permissions.
 
 For staging verification, delete only resources recorded as created by this
 run, verify removal, and revoke its disposable key through the authenticated

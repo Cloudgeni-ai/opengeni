@@ -1,3 +1,5 @@
+import { isDirectModelId, ModelUnavailableError } from "@opengeni/contracts";
+import { requireExplicitPermissionDelegation } from "../access";
 import { acceptSessionFileAttachments } from "@opengeni/db";
 import { knowledgeContextForAccess } from "./knowledge";
 import {
@@ -25,6 +27,7 @@ import { fileOwnerContextForAccess, fileOwnerContextForAgent } from "./file-owne
 import { assertSessionIsNotImported } from "@opengeni/db";
 import { CODEX_MODEL_ID_PREFIX, isCodexBilledModel } from "@opengeni/codex";
 import { sessionCreationMetadata } from "../site-session-origin";
+import { measureSessionStartPhase, type SessionStartObservability } from "./session-start-timing";
 import {
   requireDeveloperSetupDelegatedPermissions,
   withDeveloperSetupCredentialRestriction,
@@ -119,6 +122,7 @@ import {
   type TurnExecutionPolicyV1,
   type VariableSet,
   type XaiProviderAccountAuthoritySnapshotV1,
+  type ClaudeProviderAccountAuthoritySnapshotV1,
 } from "@opengeni/contracts";
 import {
   assertExactNewSessionDraftInTransaction,
@@ -152,6 +156,7 @@ import {
   getSessionTurnForAttempt,
   getSessionTurnPersonalConnectionDelegations,
   getSessionTurnXaiProviderAccountAuthoritySnapshot,
+  getSessionTurnClaudeProviderAccountAuthoritySnapshot,
   getWorkspaceModelPolicy,
   requireWorkspace,
   initializeSessionStartAtomically,
@@ -286,6 +291,7 @@ function defaultPolicyExclusions(
 
 function isCatalogOverlayModel(modelId: string | null | undefined): boolean {
   return (
+    (modelId != null && isDirectModelId(modelId)) ||
     modelId?.startsWith(WORKSPACE_GATEWAY_MODEL_ID_PREFIX) === true ||
     modelId?.startsWith(WORKSPACE_OPENROUTER_MODEL_ID_PREFIX) === true ||
     modelId?.startsWith(ORGANIZATION_GATEWAY_MODEL_ID_PREFIX) === true ||
@@ -762,7 +768,7 @@ function validateInheritedSessionMcpServersForCreate(
   };
 }
 
-function validateSessionMcpCredentialUpdates(input: {
+export function validateSessionMcpCredentialUpdates(input: {
   settings: Settings;
   grant: AccessGrant;
   session: Session;
@@ -905,6 +911,8 @@ export async function createAndStartSessionWithOutcome(input: {
    * counts once, and its initial user message once unless deferred.
    */
   metrics?: ProductUsageMetricsSink | null;
+  /** Optional content-free child spans; never a lifecycle dependency. */
+  startupObservability?: SessionStartObservability | null;
   /** Create the session shell without an initial user event/agent turn. */
   deferInitialTurn?: boolean;
   modelContext?: string | null;
@@ -977,6 +985,7 @@ export async function createAndStartSessionWithOutcome(input: {
   mcpAccountBindings?: McpConnectionAccountBinding[] | null;
   initialPersonalResourceAttachmentIntent?: PersonalResourceAttachmentIntent | null;
   xaiProviderAccountAuthoritySnapshot?: XaiProviderAccountAuthoritySnapshotV1;
+  claudeProviderAccountAuthoritySnapshot?: ClaudeProviderAccountAuthoritySnapshotV1;
   // The manager session spawning this worker (a worker-signed sessionId claim
   // on the creating grant); null for direct API creates and scheduled runs.
   // When set, the worker's terminal-for-now transitions wake this parent.
@@ -1118,11 +1127,10 @@ export async function createAndStartSessionWithOutcome(input: {
               accountId: input.accountId,
               workspaceId: input.workspaceId,
               reference,
+              claudeAuthority: { sessionId },
             });
             if (!active) {
-              throw new HTTPException(422, {
-                message: `model is not available: ${input.model}`,
-              });
+              throw modelUnavailableHttpException(input.model);
             }
           }
           // Reject an already-stale browser draft before the newly inserted
@@ -1164,62 +1172,74 @@ export async function createAndStartSessionWithOutcome(input: {
   // session or the committed denial atomically; an application-side lookup
   // cannot serialize those two source tables against an older writer.
   if (input.createIdempotencyKey) {
-    const keyedResult = await createSessionWithIdempotencyKeyResult(input.db, {
-      ...(input.requestedSessionId ? { requestedSessionId: input.requestedSessionId } : {}),
-      accountId: input.accountId,
-      workspaceId: input.workspaceId,
-      visibility: input.visibility ?? "workspace_shared",
-      initialMessage: input.initialMessage,
-      initialModelContext: input.modelContext ?? null,
-      resources: input.resources,
-      skills: input.skills ?? [],
-      bundledSkillIds: input.bundledSkillIds,
-      tools: input.tools,
-      toolPolicy: input.toolPolicy,
-      metadata: sessionMetadata,
-      initialAgentLearning: input.initialAgentLearning,
+    const keyedResult = await measureSessionStartPhase(
+      input.startupObservability,
+      "shell_insert",
+      () =>
+        createSessionWithIdempotencyKeyResult(input.db, {
+          ...(input.requestedSessionId ? { requestedSessionId: input.requestedSessionId } : {}),
+          accountId: input.accountId,
+          workspaceId: input.workspaceId,
+          visibility: input.visibility ?? "workspace_shared",
+          initialMessage: input.initialMessage,
+          initialModelContext: input.modelContext ?? null,
+          resources: input.resources,
+          skills: input.skills ?? [],
+          bundledSkillIds: input.bundledSkillIds,
+          tools: input.tools,
+          toolPolicy: input.toolPolicy,
+          metadata: sessionMetadata,
+          initialAgentLearning: input.initialAgentLearning,
 
-      ...(input.createdBy ? { createdBy: input.createdBy } : {}),
-      ...(frozenCreatedByContext ? { createdByContext: frozenCreatedByContext } : {}),
-      createdByActor: input.createdByActor ?? null,
-      model: input.model,
-      reasoningEffort: input.reasoningEffort,
-      latencyMode: input.latencyMode ?? "standard",
-      sandboxBackend: input.sandboxBackend,
-      variableSetIds: input.variableSets?.map((variableSet) => variableSet.id) ?? [],
-      variableSetId: input.variableSets?.at(-1)?.id ?? null,
-      rigId: input.rigId ?? null,
-      rigVersionId: input.rigVersionId ?? null,
-      channelId: input.channelId ?? null,
-      firstPartyMcpPermissions: input.firstPartyMcpPermissions ?? null,
-      firstPartyMcpTools: input.firstPartyMcpTools,
-      ...(input.agentConfig !== undefined ? { agentConfig: input.agentConfig } : {}),
-      instructions: input.instructions ?? null,
-      policyRole: input.policyRole ?? null,
-      ...(input.agentAccess ? { agentAccess: input.agentAccess } : {}),
-      ...(input.scopeSubjectId !== undefined ? { scopeSubjectId: input.scopeSubjectId } : {}),
-      ...(input.memoryScope ? { memoryScope: input.memoryScope } : {}),
-      parentSessionId: input.parentSessionId ?? null,
-      createIdempotencyKey: input.createIdempotencyKey,
-      selectedInstalledSkillIds: input.selectedInstalledSkillIds ?? [],
-      sandboxGroupId: input.sandboxGroupId ?? null,
-      ...(input.sandboxOs ? { sandboxOs: input.sandboxOs } : {}),
-      mcpServers: input.mcpServers ?? [],
-      mcpApprovalPolicies: input.mcpApprovalPolicies ?? {},
-      personalConnectionDelegations: input.personalConnectionDelegations ?? [],
-      mcpAccountBindings: input.mcpAccountBindings ?? null,
-      initialPersonalResourceAttachmentIntent:
-        input.initialPersonalResourceAttachmentIntent ?? null,
-      ...(input.xaiProviderAccountAuthoritySnapshot
-        ? {
-            initialXaiProviderAccountAuthoritySnapshot: input.xaiProviderAccountAuthoritySnapshot,
-          }
-        : {}),
-      maxNestedAgentDepthOverride: input.maxNestedAgentDepthOverride ?? null,
-      allowNestedAgentDepthIncrease: input.allowNestedAgentDepthIncrease ?? false,
-      subjectId: input.subjectId ?? null,
-      ...(beforeCreateCommit ? { beforeCreateCommit } : {}),
-    });
+          ...(input.createdBy ? { createdBy: input.createdBy } : {}),
+          ...(frozenCreatedByContext ? { createdByContext: frozenCreatedByContext } : {}),
+          createdByActor: input.createdByActor ?? null,
+          model: input.model,
+          reasoningEffort: input.reasoningEffort,
+          latencyMode: input.latencyMode ?? "standard",
+          sandboxBackend: input.sandboxBackend,
+          variableSetIds: input.variableSets?.map((variableSet) => variableSet.id) ?? [],
+          variableSetId: input.variableSets?.at(-1)?.id ?? null,
+          rigId: input.rigId ?? null,
+          rigVersionId: input.rigVersionId ?? null,
+          channelId: input.channelId ?? null,
+          firstPartyMcpPermissions: input.firstPartyMcpPermissions ?? null,
+          firstPartyMcpTools: input.firstPartyMcpTools,
+          ...(input.agentConfig !== undefined ? { agentConfig: input.agentConfig } : {}),
+          instructions: input.instructions ?? null,
+          policyRole: input.policyRole ?? null,
+          ...(input.agentAccess ? { agentAccess: input.agentAccess } : {}),
+          ...(input.scopeSubjectId !== undefined ? { scopeSubjectId: input.scopeSubjectId } : {}),
+          ...(input.memoryScope ? { memoryScope: input.memoryScope } : {}),
+          parentSessionId: input.parentSessionId ?? null,
+          createIdempotencyKey: input.createIdempotencyKey!,
+          selectedInstalledSkillIds: input.selectedInstalledSkillIds ?? [],
+          sandboxGroupId: input.sandboxGroupId ?? null,
+          ...(input.sandboxOs ? { sandboxOs: input.sandboxOs } : {}),
+          mcpServers: input.mcpServers ?? [],
+          mcpApprovalPolicies: input.mcpApprovalPolicies ?? {},
+          personalConnectionDelegations: input.personalConnectionDelegations ?? [],
+          mcpAccountBindings: input.mcpAccountBindings ?? null,
+          initialPersonalResourceAttachmentIntent:
+            input.initialPersonalResourceAttachmentIntent ?? null,
+          ...(input.xaiProviderAccountAuthoritySnapshot
+            ? {
+                initialXaiProviderAccountAuthoritySnapshot:
+                  input.xaiProviderAccountAuthoritySnapshot,
+              }
+            : {}),
+          ...(input.claudeProviderAccountAuthoritySnapshot
+            ? {
+                initialClaudeProviderAccountAuthoritySnapshot:
+                  input.claudeProviderAccountAuthoritySnapshot,
+              }
+            : {}),
+          maxNestedAgentDepthOverride: input.maxNestedAgentDepthOverride ?? null,
+          allowNestedAgentDepthIncrease: input.allowNestedAgentDepthIncrease ?? false,
+          subjectId: input.subjectId ?? null,
+          ...(beforeCreateCommit ? { beforeCreateCommit } : {}),
+        }),
+    );
     if (keyedResult.denied) {
       throw new SessionSpawnDeniedError(SessionSpawnDenial.parse(keyedResult.denial));
     }
@@ -1264,63 +1284,71 @@ export async function createAndStartSessionWithOutcome(input: {
   }
   let session: Session;
   try {
-    session = await createSession(input.db, {
-      ...(input.requestedSessionId ? { requestedSessionId: input.requestedSessionId } : {}),
-      accountId: input.accountId,
-      workspaceId: input.workspaceId,
-      visibility: input.visibility ?? "workspace_shared",
-      initialMessage: input.initialMessage,
-      initialModelContext: input.modelContext ?? null,
-      resources: input.resources,
-      skills: input.skills ?? [],
-      bundledSkillIds: input.bundledSkillIds,
-      tools: input.tools,
-      toolPolicy: input.toolPolicy,
-      metadata: sessionMetadata,
-      initialAgentLearning: input.initialAgentLearning,
-      ...(input.createdBy ? { createdBy: input.createdBy } : {}),
+    session = await measureSessionStartPhase(input.startupObservability, "shell_insert", () =>
+      createSession(input.db, {
+        ...(input.requestedSessionId ? { requestedSessionId: input.requestedSessionId } : {}),
+        accountId: input.accountId,
+        workspaceId: input.workspaceId,
+        visibility: input.visibility ?? "workspace_shared",
+        initialMessage: input.initialMessage,
+        initialModelContext: input.modelContext ?? null,
+        resources: input.resources,
+        skills: input.skills ?? [],
+        bundledSkillIds: input.bundledSkillIds,
+        tools: input.tools,
+        toolPolicy: input.toolPolicy,
+        metadata: sessionMetadata,
+        initialAgentLearning: input.initialAgentLearning,
+        ...(input.createdBy ? { createdBy: input.createdBy } : {}),
 
-      ...(frozenCreatedByContext ? { createdByContext: frozenCreatedByContext } : {}),
-      createdByActor: input.createdByActor ?? null,
-      model: input.model,
-      reasoningEffort: input.reasoningEffort,
-      latencyMode: input.latencyMode ?? "standard",
-      sandboxBackend: input.sandboxBackend,
-      variableSetIds: input.variableSets?.map((variableSet) => variableSet.id) ?? [],
-      variableSetId: input.variableSets?.at(-1)?.id ?? null,
-      rigId: input.rigId ?? null,
-      rigVersionId: input.rigVersionId ?? null,
-      channelId: input.channelId ?? null,
-      firstPartyMcpPermissions: input.firstPartyMcpPermissions ?? null,
-      firstPartyMcpTools: input.firstPartyMcpTools,
-      ...(input.agentConfig !== undefined ? { agentConfig: input.agentConfig } : {}),
-      instructions: input.instructions ?? null,
-      policyRole: input.policyRole ?? null,
-      ...(input.agentAccess ? { agentAccess: input.agentAccess } : {}),
-      ...(input.scopeSubjectId !== undefined ? { scopeSubjectId: input.scopeSubjectId } : {}),
-      ...(input.memoryScope ? { memoryScope: input.memoryScope } : {}),
-      parentSessionId: input.parentSessionId ?? null,
-      ...(input.codeSearchDeploymentPolicy
-        ? { codeSearchDeploymentPolicy: input.codeSearchDeploymentPolicy }
-        : {}),
-      sandboxGroupId: input.sandboxGroupId ?? null,
-      ...(input.sandboxOs ? { sandboxOs: input.sandboxOs } : {}),
-      mcpServers: input.mcpServers ?? [],
-      mcpApprovalPolicies: input.mcpApprovalPolicies ?? {},
-      personalConnectionDelegations: input.personalConnectionDelegations ?? [],
-      mcpAccountBindings: input.mcpAccountBindings ?? null,
-      initialPersonalResourceAttachmentIntent:
-        input.initialPersonalResourceAttachmentIntent ?? null,
-      ...(input.xaiProviderAccountAuthoritySnapshot
-        ? {
-            initialXaiProviderAccountAuthoritySnapshot: input.xaiProviderAccountAuthoritySnapshot,
-          }
-        : {}),
-      maxNestedAgentDepthOverride: input.maxNestedAgentDepthOverride ?? null,
-      allowNestedAgentDepthIncrease: input.allowNestedAgentDepthIncrease ?? false,
-      subjectId: input.subjectId ?? null,
-      ...(beforeCreateCommit ? { beforeCreateCommit } : {}),
-    });
+        ...(frozenCreatedByContext ? { createdByContext: frozenCreatedByContext } : {}),
+        createdByActor: input.createdByActor ?? null,
+        model: input.model,
+        reasoningEffort: input.reasoningEffort,
+        latencyMode: input.latencyMode ?? "standard",
+        sandboxBackend: input.sandboxBackend,
+        variableSetIds: input.variableSets?.map((variableSet) => variableSet.id) ?? [],
+        variableSetId: input.variableSets?.at(-1)?.id ?? null,
+        rigId: input.rigId ?? null,
+        rigVersionId: input.rigVersionId ?? null,
+        channelId: input.channelId ?? null,
+        firstPartyMcpPermissions: input.firstPartyMcpPermissions ?? null,
+        firstPartyMcpTools: input.firstPartyMcpTools,
+        ...(input.agentConfig !== undefined ? { agentConfig: input.agentConfig } : {}),
+        instructions: input.instructions ?? null,
+        policyRole: input.policyRole ?? null,
+        ...(input.agentAccess ? { agentAccess: input.agentAccess } : {}),
+        ...(input.scopeSubjectId !== undefined ? { scopeSubjectId: input.scopeSubjectId } : {}),
+        ...(input.memoryScope ? { memoryScope: input.memoryScope } : {}),
+        parentSessionId: input.parentSessionId ?? null,
+        ...(input.codeSearchDeploymentPolicy
+          ? { codeSearchDeploymentPolicy: input.codeSearchDeploymentPolicy }
+          : {}),
+        sandboxGroupId: input.sandboxGroupId ?? null,
+        ...(input.sandboxOs ? { sandboxOs: input.sandboxOs } : {}),
+        mcpServers: input.mcpServers ?? [],
+        mcpApprovalPolicies: input.mcpApprovalPolicies ?? {},
+        personalConnectionDelegations: input.personalConnectionDelegations ?? [],
+        mcpAccountBindings: input.mcpAccountBindings ?? null,
+        initialPersonalResourceAttachmentIntent:
+          input.initialPersonalResourceAttachmentIntent ?? null,
+        ...(input.xaiProviderAccountAuthoritySnapshot
+          ? {
+              initialXaiProviderAccountAuthoritySnapshot: input.xaiProviderAccountAuthoritySnapshot,
+            }
+          : {}),
+        ...(input.claudeProviderAccountAuthoritySnapshot
+          ? {
+              initialClaudeProviderAccountAuthoritySnapshot:
+                input.claudeProviderAccountAuthoritySnapshot,
+            }
+          : {}),
+        maxNestedAgentDepthOverride: input.maxNestedAgentDepthOverride ?? null,
+        allowNestedAgentDepthIncrease: input.allowNestedAgentDepthIncrease ?? false,
+        subjectId: input.subjectId ?? null,
+        ...(beforeCreateCommit ? { beforeCreateCommit } : {}),
+      }),
+    );
   } catch (error) {
     if (error instanceof SessionSpawnDeniedDbError) {
       throw new SessionSpawnDeniedError(SessionSpawnDenial.parse(error.denial));
@@ -1375,6 +1403,7 @@ async function finishStartSession(
     db: Database;
     bus: EventBus;
     workflowClient: Pick<SessionWorkflowClient, "wakeSessionWorkflow">;
+    startupObservability?: SessionStartObservability | null;
     initialMessage: string;
     captureInitialTurnAuthority?: (
       tx: Database,
@@ -1463,72 +1492,92 @@ async function finishStartSession(
       });
     }
   }
-  const started = await initializeSessionStartAtomically(input.db, {
-    accountId: session.accountId,
-    workspaceId: session.workspaceId,
-    sessionId: session.id,
-    ...(input.captureInitialTurnAuthority
-      ? {
-          captureInitialTurnAuthority: (tx: Database, turnId: string) =>
-            input.captureInitialTurnAuthority!(tx, session.id, turnId),
-        }
-      : {}),
-    ...(input.clientEventId ? { clientEventId: input.clientEventId } : {}),
-    reasoningEffortFallback: input.reasoningEffort,
-    turnExecutionPolicy: input.turnExecutionPolicy,
-    surface: input.surface ?? null,
-    createdEventPayload: {
-      toolPolicy: input.toolPolicy,
-      ...(input.variableSets?.length
-        ? {
-            variableSetIds: input.variableSets.map((variableSet) => variableSet.id),
-            variableSets: input.variableSets,
-            // Legacy highest-precedence aliases.
-            variableSetId: input.variableSets.at(-1)!.id,
-            variableSetName: input.variableSets.at(-1)!.name,
-          }
-        : {}),
-      ...(input.sessionMcpServers?.length ? { mcpServers: input.sessionMcpServers } : {}),
-    },
-    goal: input.goal
-      ? {
-          text: input.goal.text,
-          ...(input.goal.successCriteria !== undefined
-            ? { successCriteria: input.goal.successCriteria }
-            : {}),
-          ...(input.goal.rootConstraints !== undefined
-            ? { rootConstraints: input.goal.rootConstraints }
-            : {}),
-          ...(input.goal.reportRequirements !== undefined
-            ? { reportRequirements: input.goal.reportRequirements }
-            : {}),
-          ...(input.goal.maxAutoContinuations !== undefined
-            ? { maxAutoContinuations: input.goal.maxAutoContinuations }
-            : {}),
-          ...(input.goal.mutationPolicy !== undefined
-            ? { mutationPolicy: input.goal.mutationPolicy }
-            : {}),
-        }
-      : null,
-    initialAutomaticTitle: initialAutomaticTitleForSessionStart(
-      session,
-      input.initialAutomaticTitle,
-    ),
-    consumeNewSessionDraft: input.consumeNewSessionDraft ?? null,
-    rememberNewSessionSelection: input.rememberNewSessionSelection ?? null,
-    deferInitialTurn: input.deferInitialTurn === true,
-  });
-  await publishDurableSessionEvents(input.bus, session.workspaceId, session.id, started.events);
-  if (started.workflowWakeRevision !== null) {
-    await input.workflowClient.wakeSessionWorkflow({
+  const started = await measureSessionStartPhase(input.startupObservability, "initialize", () =>
+    initializeSessionStartAtomically(input.db, {
       accountId: session.accountId,
       workspaceId: session.workspaceId,
       sessionId: session.id,
-      workflowId: started.temporalWorkflowId,
-      wakeRevision: started.workflowWakeRevision,
-    });
-  }
-  const persisted = await requireSession(input.db, session.workspaceId, session.id);
+      ...(input.captureInitialTurnAuthority
+        ? {
+            captureInitialTurnAuthority: (tx: Database, turnId: string) =>
+              input.captureInitialTurnAuthority!(tx, session.id, turnId),
+          }
+        : {}),
+      ...(input.clientEventId ? { clientEventId: input.clientEventId } : {}),
+      reasoningEffortFallback: input.reasoningEffort,
+      turnExecutionPolicy: input.turnExecutionPolicy,
+      surface: input.surface ?? null,
+      createdEventPayload: {
+        toolPolicy: input.toolPolicy,
+        ...(input.variableSets?.length
+          ? {
+              variableSetIds: input.variableSets.map((variableSet) => variableSet.id),
+              variableSets: input.variableSets,
+              // Legacy highest-precedence aliases.
+              variableSetId: input.variableSets.at(-1)!.id,
+              variableSetName: input.variableSets.at(-1)!.name,
+            }
+          : {}),
+        ...(input.sessionMcpServers?.length ? { mcpServers: input.sessionMcpServers } : {}),
+      },
+      goal: input.goal
+        ? {
+            text: input.goal.text,
+            ...(input.goal.successCriteria !== undefined
+              ? { successCriteria: input.goal.successCriteria }
+              : {}),
+            ...(input.goal.rootConstraints !== undefined
+              ? { rootConstraints: input.goal.rootConstraints }
+              : {}),
+            ...(input.goal.reportRequirements !== undefined
+              ? { reportRequirements: input.goal.reportRequirements }
+              : {}),
+            ...(input.goal.maxAutoContinuations !== undefined
+              ? { maxAutoContinuations: input.goal.maxAutoContinuations }
+              : {}),
+            ...(input.goal.mutationPolicy !== undefined
+              ? { mutationPolicy: input.goal.mutationPolicy }
+              : {}),
+          }
+        : null,
+      initialAutomaticTitle: initialAutomaticTitleForSessionStart(
+        session,
+        input.initialAutomaticTitle,
+      ),
+      consumeNewSessionDraft: input.consumeNewSessionDraft ?? null,
+      rememberNewSessionSelection: input.rememberNewSessionSelection ?? null,
+      deferInitialTurn: input.deferInitialTurn === true,
+    }),
+  );
+  // Initialization committed the initial turn, events and wake outbox together.
+  // Live fanout is not workflow authority: signal from the durable revision
+  // without waiting for NATS, but retain and fully join both notifications.
+  const wakeRevision = started.workflowWakeRevision;
+  const [fanout, wake] = await Promise.allSettled([
+    measureSessionStartPhase(input.startupObservability, "event_fanout", () =>
+      publishDurableSessionEvents(input.bus, session.workspaceId, session.id, started.events),
+    ),
+    wakeRevision === null
+      ? Promise.resolve()
+      : measureSessionStartPhase(input.startupObservability, "workflow_wake", () =>
+          input.workflowClient.wakeSessionWorkflow({
+            accountId: session.accountId,
+            workspaceId: session.workspaceId,
+            sessionId: session.id,
+            workflowId: started.temporalWorkflowId,
+            wakeRevision,
+          }),
+        ),
+  ]);
+  // Keep the prior serial error priority without detaching attempt work. Normal
+  // transport failure remains best-effort inside publishDurableSessionEvents.
+  if (fanout.status === "rejected") throw fanout.reason;
+  if (wake.status === "rejected") throw wake.reason;
+  const persisted = await measureSessionStartPhase(
+    input.startupObservability,
+    "session_reload",
+    () => requireSession(input.db, session.workspaceId, session.id),
+  );
   const initialTurnId =
     started.turn?.id ??
     (await listSessionTurns(input.db, session.workspaceId, session.id, 1))[0]?.id ??
@@ -1541,6 +1590,17 @@ async function finishStartSession(
 
 export function workflowIdForSession(sessionId: string): string {
   return `session-${sessionId}`;
+}
+
+/**
+ * The one 422 for a model that is not selectable in the live catalog (retired,
+ * removed, or never offered). The message keeps its historical text; the typed
+ * cause lets the API envelope add `details.code: "model_unavailable"` so
+ * clients can ask for another model instead of offering a futile retry.
+ */
+export function modelUnavailableHttpException(model: string): HTTPException {
+  const cause = new ModelUnavailableError(model);
+  return new HTTPException(422, { message: cause.message, cause });
 }
 
 /**
@@ -1578,7 +1638,7 @@ export function canonicalConfiguredModel(
     ) {
       return canonicalModel;
     }
-    throw new HTTPException(422, { message: `model is not available: ${model}` });
+    throw modelUnavailableHttpException(model);
   }
   if (configuredAllowedModels(settings).includes(canonicalModel)) {
     return canonicalModel;
@@ -1602,7 +1662,7 @@ export function canonicalConfiguredModel(
   ) {
     return canonicalModel;
   }
-  throw new HTTPException(422, { message: `model is not available: ${model}` });
+  throw modelUnavailableHttpException(model);
 }
 
 export function assertConfiguredModel(settings: Settings, model: string | null | undefined): void {
@@ -1962,7 +2022,10 @@ export async function postUserMessageTurn(
               mcpCredentialUpdates: input.mcpCredentialUpdates ?? [],
               ...(freshWorkspaceCustomModel
                 ? {
-                    beforeFreshPromptCommit: async (tx: Database): Promise<void> => {
+                    beforeFreshPromptCommit: async (
+                      tx: Database,
+                      { claudeProviderAccountAuthoritySnapshot },
+                    ): Promise<void> => {
                       const reference = workspaceCustomModelReference(
                         settings,
                         freshWorkspaceCustomModel,
@@ -1974,11 +2037,12 @@ export async function postUserMessageTurn(
                         accountId,
                         workspaceId,
                         reference,
+                        claudeAuthority: {
+                          authoritySnapshot: claudeProviderAccountAuthoritySnapshot,
+                        },
                       });
                       if (!active) {
-                        throw new HTTPException(422, {
-                          message: `model is not available: ${freshWorkspaceCustomModel}`,
-                        });
+                        throw modelUnavailableHttpException(freshWorkspaceCustomModel);
                       }
                     },
                   }
@@ -2402,7 +2466,11 @@ async function createSessionForRequestInFileScope(
       message: `parent session not found in workspace: ${parentSessionId}`,
     });
   }
-  const workspace = await requireWorkspace(db, workspaceId);
+  const workspace = await measureSessionStartPhase(
+    unresolvedDeps.observability,
+    "workspace_read",
+    () => requireWorkspace(db, workspaceId),
+  );
   const workspaceSessionToolDefaults = resolveWorkspaceSessionToolDefaults(workspace.settings);
   const parentAuthority = parentSession
     ? await getSessionAuthorityProjection(db, workspaceId, parentSession.id)
@@ -2573,12 +2641,17 @@ async function createSessionForRequestInFileScope(
       throw error;
     }
   }
-  let settings = await resolveWorkspaceModelBoundarySettings(
-    unresolvedDeps,
-    grant,
-    workspaceId,
-    [payload.model],
-    retainedKeyedShellModel,
+  let settings = await measureSessionStartPhase(
+    unresolvedDeps.observability,
+    "model_catalog_initial",
+    () =>
+      resolveWorkspaceModelBoundarySettings(
+        unresolvedDeps,
+        grant,
+        workspaceId,
+        [payload.model],
+        retainedKeyedShellModel,
+      ),
   );
   let deps =
     settings === unresolvedDeps.settings
@@ -2607,24 +2680,31 @@ async function createSessionForRequestInFileScope(
       ? null
       : retainedKeyedShellModel !== null && retainedKeyedShellReasoningEffort !== null
         ? { model: retainedKeyedShellModel, reasoningEffort: retainedKeyedShellReasoningEffort }
-        : await resolveDefaultSessionModel(db, settings, {
-            accountId: grant.accountId,
-            workspaceId,
-            subjectId: grant.subjectId,
-            workspaceSettings: workspace.settings,
-          });
+        : await measureSessionStartPhase(unresolvedDeps.observability, "default_model", () =>
+            resolveDefaultSessionModel(db, settings, {
+              accountId: grant.accountId,
+              workspaceId,
+              subjectId: grant.subjectId,
+              workspaceSettings: workspace.settings,
+            }),
+          );
   const inheritedModel =
     parentCallingTurn?.model ??
     parentSession?.model ??
     resolvedDefault?.model ??
     settings.openaiModel;
   const effectiveModelId = payload.model ?? inheritedModel;
-  const effectiveCatalogSettings = await resolveWorkspaceModelBoundarySettings(
-    deps,
-    grant,
-    workspaceId,
-    [effectiveModelId],
-    parentSession ? inheritedModel : null,
+  const effectiveCatalogSettings = await measureSessionStartPhase(
+    unresolvedDeps.observability,
+    "model_catalog_effective",
+    () =>
+      resolveWorkspaceModelBoundarySettings(
+        deps,
+        grant,
+        workspaceId,
+        [effectiveModelId],
+        parentSession ? inheritedModel : null,
+      ),
   );
   if (effectiveCatalogSettings !== settings) {
     deps = {
@@ -2671,6 +2751,15 @@ async function createSessionForRequestInFileScope(
           creationInitiator.actor.turnId,
         )
       : undefined;
+  const claudeProviderAccountAuthoritySnapshot =
+    parentSession && creationInitiator.actor
+      ? await getSessionTurnClaudeProviderAccountAuthoritySnapshot(
+          db,
+          workspaceId,
+          parentSession.id,
+          creationInitiator.actor.turnId,
+        )
+      : undefined;
   const connectionDelegationSource = personalConnectionDelegationSourceForGrant(grant);
   const inheritedPersonalConnectionDelegations =
     connectionDelegationSource.kind === "turn"
@@ -2681,15 +2770,20 @@ async function createSessionForRequestInFileScope(
           connectionDelegationSource.turnId,
         )
       : null;
-  const capabilityRuntimeSettings = await settingsWithEnabledCapabilityMcpServers(
-    db,
-    workspaceId,
-    settings,
-    inheritedPersonalConnectionDelegations
-      ? {
-          personalConnectionDelegations: inheritedPersonalConnectionDelegations,
-        }
-      : { subjectId: grant.subjectId },
+  const capabilityRuntimeSettings = await measureSessionStartPhase(
+    unresolvedDeps.observability,
+    "capability_settings",
+    () =>
+      settingsWithEnabledCapabilityMcpServers(
+        db,
+        workspaceId,
+        settings,
+        inheritedPersonalConnectionDelegations
+          ? {
+              personalConnectionDelegations: inheritedPersonalConnectionDelegations,
+            }
+          : { subjectId: grant.subjectId },
+      ),
   );
   const sessionMcpServers = hasOwnProperty(rawPayload, "mcpServers")
     ? validateSessionMcpServersForCreate(capabilityRuntimeSettings, grant, payload.mcpServers)
@@ -2964,7 +3058,7 @@ async function createSessionForRequestInFileScope(
     channelId = channel.id;
   }
   // A spawned worker is causally part of the exact turn that created it. Omitted
-  // execution policy fields therefore inherit that calling turn rather than the
+  // model and reasoning fields therefore inherit that calling turn rather than the
   // deployment defaults. This is especially important for Codex subscription
   // managers: falling back to the deployment model would silently move a child
   // onto the OpenGeni-credits billing path. Legacy session-bound grants without
@@ -2988,6 +3082,9 @@ async function createSessionForRequestInFileScope(
       ...(xaiProviderAccountAuthoritySnapshot
         ? { xaiAuthoritySnapshot: xaiProviderAccountAuthoritySnapshot }
         : {}),
+      ...(claudeProviderAccountAuthoritySnapshot
+        ? { claudeAuthoritySnapshot: claudeProviderAccountAuthoritySnapshot }
+        : {}),
     });
     if (!admissibleWorkspaceModel(selections, model)) {
       throw new HTTPException(422, { message: `model is not selectable: ${model}` });
@@ -2998,10 +3095,11 @@ async function createSessionForRequestInFileScope(
     parentSession?.reasoningEffort ??
     resolvedDefault?.reasoningEffort ??
     settings.openaiReasoningEffort;
-  const inheritedLatencyMode =
-    parentCallingTurn?.latencyMode ?? parentSession?.latencyMode ?? "standard";
   const reasoningEffort = payload.reasoningEffort ?? inheritedReasoningEffort;
-  const latencyMode = payload.latencyMode ?? inheritedLatencyMode;
+  // A fresh session never implicitly opts into a faster, higher-cost tier.
+  // This is a fresh-creation default only: replay/repair preserves persisted
+  // policy, and follow-ups use the recipient session's own frozen settings.
+  const latencyMode = payload.latencyMode ?? "standard";
   if (payload.expectedNewSessionDraftRevision !== undefined && payload.rigId === null) {
     throw new HTTPException(409, {
       message: "The submitted session options are not represented by the new-session draft",
@@ -3062,12 +3160,7 @@ async function createSessionForRequestInFileScope(
             : "deployment"
           : "explicit",
       latencyMode,
-      latencyModeSource:
-        payload.latencyMode === undefined
-          ? inheritedFromParent
-            ? "continuation"
-            : "deployment"
-          : "explicit",
+      latencyModeSource: payload.latencyMode === undefined ? "deployment" : "explicit",
     }),
     { grant, authorization, trustedMetadata: [parentSession?.metadata] },
   );
@@ -3105,7 +3198,11 @@ async function createSessionForRequestInFileScope(
       ? parentFirstPartyMcpPermissions.filter((permission) =>
           hasPermission(grant.permissions, permission),
         )
-      : null);
+      : grant.permissionMode === "explicit"
+        ? DEFAULT_FIRST_PARTY_MCP_PERMISSIONS.filter((permission) =>
+            hasPermission(grant.permissions, permission),
+          )
+        : null);
   if (firstPartyMcpPermissions && firstPartyMcpPermissions.length === 0) {
     // An empty set would sign an unusable zero-permission token; the default
     // worker set is expressed by omitting the field.
@@ -3114,6 +3211,7 @@ async function createSessionForRequestInFileScope(
         "firstPartyMcpPermissions must not be empty; omit it for the default worker permission set",
     });
   }
+  requireExplicitPermissionDelegation(grant, firstPartyMcpPermissions ?? []);
   for (const permission of firstPartyMcpPermissions ?? []) {
     if (!hasPermission(grant.permissions, permission)) {
       throw new HTTPException(403, {
@@ -3501,32 +3599,36 @@ async function createSessionForRequestInFileScope(
     });
   }
   if (payload.startMode !== "realtime") {
-    const frozenCreationInitiator = await withWorkspaceSessionActivityRls(
-      db,
-      workspaceId,
-      (scopedDb) =>
-        frozenInitiatorForCommandActor(
-          scopedDb,
-          workspaceId,
-          creationInitiator.actor ??
-            (creationInitiator.initiator?.kind === "service"
-              ? {
-                  type: "service",
-                  subjectId: creationInitiator.initiator.subjectId,
-                  ...(creationInitiator.context ? { context: creationInitiator.context } : {}),
-                }
-              : { type: "human", subjectId: creationInitiator.initiator!.subjectId }),
-          grant.subjectLabel,
+    const frozenCreationInitiator = await measureSessionStartPhase(
+      unresolvedDeps.observability,
+      "initiator_freeze",
+      () =>
+        withWorkspaceSessionActivityRls(db, workspaceId, (scopedDb) =>
+          frozenInitiatorForCommandActor(
+            scopedDb,
+            workspaceId,
+            creationInitiator.actor ??
+              (creationInitiator.initiator?.kind === "service"
+                ? {
+                    type: "service",
+                    subjectId: creationInitiator.initiator.subjectId,
+                    ...(creationInitiator.context ? { context: creationInitiator.context } : {}),
+                  }
+                : { type: "human", subjectId: creationInitiator.initiator!.subjectId }),
+            grant.subjectLabel,
+          ),
         ),
     );
-    await requireLimit(deps, {
-      accountId: grant.accountId,
-      workspaceId,
-      initiatingHumanSubjectId: initiatingHumanForAllowance(frozenCreationInitiator),
-      action: "agent_run:create",
-      quantity: 1,
-      model,
-    });
+    await measureSessionStartPhase(unresolvedDeps.observability, "allowance", () =>
+      requireLimit(deps, {
+        accountId: grant.accountId,
+        workspaceId,
+        initiatingHumanSubjectId: initiatingHumanForAllowance(frozenCreationInitiator),
+        action: "agent_run:create",
+        quantity: 1,
+        model,
+      }),
+    );
   }
   const initialLearning =
     payload.agentLearning && Object.keys(payload.agentLearning).length
@@ -3582,6 +3684,9 @@ async function createSessionForRequestInFileScope(
       initialMessage: payload.initialMessage ?? "",
       surface,
       metrics: unresolvedDeps.observability ?? null,
+      ...(unresolvedDeps.observability
+        ? { startupObservability: unresolvedDeps.observability }
+        : {}),
       deferInitialTurn: payload.startMode === "realtime",
       modelContext: payload.modelContext ?? null,
       resources,
@@ -3661,6 +3766,7 @@ async function createSessionForRequestInFileScope(
       workspaceCustomModel: isWorkspaceCustomModelId(settings, model),
       retainWorkspaceCustomModel: parentSession !== null && model === inheritedModel,
       ...(xaiProviderAccountAuthoritySnapshot ? { xaiProviderAccountAuthoritySnapshot } : {}),
+      ...(claudeProviderAccountAuthoritySnapshot ? { claudeProviderAccountAuthoritySnapshot } : {}),
       parentSessionId,
       createIdempotencyKey: payload.idempotencyKey ?? null,
       selectedInstalledSkillIds,

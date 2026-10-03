@@ -39,8 +39,21 @@ describe("developer setup skill", () => {
     expect(examples).toHaveLength(16);
     // Never permit arbitrary organization-key permissions. Tokens and remote
     // ids below are fake fixtures; the key request uses the actual public schema.
-    expect(examples[0]).toEqual({ name: "Product developer setup", access: "developer_setup" });
-    expectPreservedRequest(CreateOrganizationApiKeyRequest, examples[0]);
+    expect(examples[0]).toEqual({
+      name: "Product setup",
+      access: "full",
+      expiresAt: "<now + 30 days, ISO 8601>",
+    });
+    // The illustrative expiry is the only key-request placeholder. Substitute
+    // a deterministic 30-day expiry before checking the unchanged strict schema.
+    const keyRequest = {
+      ...examples[0],
+      expiresAt: new Date(Date.UTC(2026, 9, 3) + 30 * 24 * 60 * 60 * 1000).toISOString(),
+    };
+    expectPreservedRequest(CreateOrganizationApiKeyRequest, keyRequest);
+    expect(() =>
+      CreateOrganizationApiKeyRequest.parse({ ...keyRequest, permissions: ["workspace:admin"] }),
+    ).toThrow();
     expectPreservedRequest(EnsureWorkspaceRequest, examples[1]);
     expectPreservedRequest(UpdateWorkspaceSettingsRequest, examples[2]);
     expectPreservedRequest(AddExternalWorkspaceMemberRequest, examples[3]);
@@ -66,6 +79,14 @@ describe("developer setup skill", () => {
     expectPreservedRequest(PutWorkspaceCredentialProviderRequest, examples[13]);
     expectPreservedRequest(SetWorkspaceAllowanceRequest, examples[14]);
     expectPreservedRequest(CreateSessionRequest, examples[15]);
+  });
+
+  test("bootstrap distinguishes full access from the separate limited setup tier", async () => {
+    const markdown = await readFile(referencePath, "utf8");
+    expect(markdown).toContain("Select **Full access** with a 30-day expiry.");
+    expect(markdown).toContain("The full-access key uses the explicit 30-day expiry above.");
+    expect(markdown).toContain("the limited `developer_setup` tier stores exactly");
+    expect(markdown).toContain("with a 24-hour default expiry. The limited tier does");
   });
 
   test("cleanup distinguishes disabled automations from deleted resources", async () => {

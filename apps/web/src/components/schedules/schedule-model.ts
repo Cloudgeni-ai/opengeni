@@ -431,18 +431,15 @@ export function scheduleErrorReference(error: unknown): string | undefined {
 
 /**
  * The first message of a "Create with OpenGeni" chat. The person says what
- * should happen and how often; the agent researches the rest with its
- * first-party tools and creates the schedule with scheduled_tasks_create.
+ * should happen and how often. Setup guidance belongs in the bundled
+ * opengeni-schedules Skill, which the agent reads when this request is relevant.
  */
 export function scheduleAgentOpeningMessage(request: string, timeZone: string): string {
   return [
     "Help me create a schedule in this workspace.",
     "",
-    "What should happen, and how often:",
     request.trim(),
     "",
-    "Research what the schedule needs before asking me anything: check scheduled_tasks_list so you don't duplicate an existing schedule, find the repositories it needs with github_repositories_list, the variable set with variable_set_list, and the integrations it needs (like Slack or Sentry) with capability_catalog_search.",
-    `Then create it with scheduled_tasks_create: a short name, a self-contained prompt that every run starts from, the cadence in my time zone (${timeZone}), and the repositories, variable set and tools it needs.`,
-    "Ask me only for what you can't find or decide yourself. When it's created, tell me its name and when it first runs.",
+    `My time zone is ${timeZone}.`,
   ].join("\n");
 }

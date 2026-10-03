@@ -13,6 +13,7 @@ import {
   matchRoutes,
   moduleExports,
   normalizeSdkPath,
+  sdkClassSurface,
   validateAllowlist,
   type Snapshot,
 } from "./surface";
@@ -87,7 +88,20 @@ describe("SDK path extraction", () => {
     const file = join(dir, "client.ts");
     writeFileSync(
       file,
-      `export class Client {
+      `function sessionRoot(workspaceId: string, sessionId: string) {
+  return \`/v1/workspaces/\${workspaceId}/sessions/\${sessionId}\`;
+}
+export class Client {
+  async getSession(workspaceId: string, sessionId: string): Promise<Session> {
+    return this.requestJson<Session>("GET", sessionRoot(workspaceId, sessionId));
+  }
+  async getEvents(workspaceId: string, sessionId: string): Promise<SessionEvent[]> {
+    return this.requestJson("GET", \`\${sessionRoot(workspaceId, sessionId)}/events\`);
+  }
+  opaqueHelper() {
+    const sessionRoot = unknownHelper;
+    return this.requestJson("GET", sessionRoot("workspace", "session"));
+  }
   async createThing(workspaceId: string, request: CreateThingRequest): Promise<Thing> {
     return await this.requestJson<Thing>("POST", \`/v1/workspaces/\${workspaceId}/things\`, request);
   }
@@ -102,6 +116,13 @@ describe("SDK path extraction", () => {
 }`,
     );
     const methods = extractSdkMethods([file]);
+    expect([...methods.find((method) => method.name === "Client.getSession")!.paths]).toEqual([
+      "/v1/workspaces/:p/sessions/:p",
+    ]);
+    expect([...methods.find((method) => method.name === "Client.getEvents")!.paths]).toEqual([
+      "/v1/workspaces/:p/sessions/:p/events",
+    ]);
+    expect(methods.some((method) => method.name === "Client.opaqueHelper")).toBe(false);
     const create = methods.find((method) => method.name === "Client.createThing")!;
     expect([...create.verbs]).toEqual(["POST"]);
     expect([...create.paths]).toEqual(["/v1/workspaces/:p/things"]);
@@ -141,6 +162,146 @@ export * from "@external/pkg";
       LocalBox: "value",
       "* from @external/pkg": "value",
     });
+  });
+});
+
+describe("public SDK client inheritance", () => {
+  const method = `getOrganizationApiKey(organizationId: string, apiKeyId: string): Promise<ApiKey> { throw new Error(); }`;
+
+  function hierarchy() {
+    const dir = mkdtempSync(join(tmpdir(), "public-api-inheritance-"));
+    const files = [
+      "browser",
+      "operator",
+      "barrel",
+      "artifact",
+      "embedding",
+      "root",
+      "core",
+      "artifacts",
+      "authority",
+    ].map((name) => join(dir, `${name}.ts`));
+    const write = (name: string, source: string) => writeFileSync(join(dir, `${name}.ts`), source);
+    write("barrel", 'export * from "./operator";');
+    write(
+      "embedding",
+      'import { OpenGeniClient as Artifacts } from "./artifact"; export class OpenGeniEmbeddingClient extends Artifacts {}',
+    );
+    write(
+      "root",
+      'export { OpenGeniEmbeddingClient as OpenGeniClient } from "./embedding"; export type { OpenGeniEmbeddingClient as TypeOnlyClient } from "./embedding";',
+    );
+    write(
+      "core",
+      'import { OpenGeniDocumentAuthorityClient as Authority } from "./barrel"; export { Authority as OpenGeniCoreClient };',
+    );
+    write("artifacts", 'export { OpenGeniClient } from "./artifact";');
+    write("authority", 'export { OpenGeniDocumentAuthorityClient } from "./operator";');
+    const entries = {
+      "@opengeni/sdk": join(dir, "root.ts"),
+      "@opengeni/sdk/core": join(dir, "core.ts"),
+      "@opengeni/sdk/artifacts": join(dir, "artifacts.ts"),
+      "@opengeni/sdk/document-authority": join(dir, "authority.ts"),
+    };
+    const configure = (browser: string, operator: string, artifact = "") => {
+      write("browser", `export class OpenGeniClient { ${browser} }`);
+      write(
+        "operator",
+        `import { OpenGeniClient as Browser } from "./browser"; export class OpenGeniDocumentAuthorityClient extends Browser { ${operator} }`,
+      );
+      write(
+        "artifact",
+        `import { OpenGeniDocumentAuthorityClient as Authority } from "./barrel"; export class OpenGeniClient extends Authority { ${artifact} }`,
+      );
+    };
+    return {
+      files,
+      entries,
+      configure,
+      collect: () => sdkClassSurface(files, entries),
+      browser: join(dir, "browser.ts"),
+    };
+  }
+
+  test("moving a method to the shared non-browser base preserves every public alias", () => {
+    const fixture = hierarchy();
+    fixture.configure(method, "");
+    const before = snapshot(fixture.collect());
+    fixture.configure("", method);
+    const after = snapshot(fixture.collect());
+
+    expect(breakingIds(before, after)).toEqual([]);
+    for (const [entry, name] of [
+      ["@opengeni/sdk", "OpenGeniClient"],
+      ["@opengeni/sdk/core", "OpenGeniCoreClient"],
+      ["@opengeni/sdk/artifacts", "OpenGeniClient"],
+      ["@opengeni/sdk/document-authority", "OpenGeniDocumentAuthorityClient"],
+    ])
+      expect(after.sdkSignatures![`${entry}:${name}`]).toHaveProperty("getOrganizationApiKey");
+    expect(after.sdkSignatures).not.toHaveProperty("@opengeni/sdk:TypeOnlyClient");
+    const browser = sdkClassSurface(fixture.files, { browser: fixture.browser });
+    expect(browser.sdkSignatures!["browser:OpenGeniClient"]).not.toHaveProperty(
+      "getOrganizationApiKey",
+    );
+  });
+
+  test("removing an inherited core method fails even when root and artifact retain it", () => {
+    const fixture = hierarchy();
+    fixture.configure("", method);
+    const before = snapshot(fixture.collect());
+    fixture.configure("", "", method);
+    const after = snapshot(fixture.collect());
+
+    expect(after.sdkSignatures!["@opengeni/sdk:OpenGeniClient"]).toHaveProperty(
+      "getOrganizationApiKey",
+    );
+    expect(breakingIds(before, after)).toContain(
+      "signature:@opengeni/sdk/core:OpenGeniCoreClient.getOrganizationApiKey",
+    );
+    expect(breakingIds(before, after)).toContain(
+      "signature:@opengeni/sdk/document-authority:OpenGeniDocumentAuthorityClient.getOrganizationApiKey",
+    );
+  });
+
+  test.each([
+    method.replace("organizationId: string", "organizationId: number"),
+    method.replace("apiKeyId: string", "apiKeyId: string, required: boolean"),
+    method.replace("Promise<ApiKey>", "Promise<ApiKey | null>"),
+  ])("rejects incompatible inherited signatures: %s", (changed) => {
+    const fixture = hierarchy();
+    fixture.configure("", method);
+    const before = snapshot(fixture.collect());
+    fixture.configure("", changed);
+    expect(breakingIds(before, snapshot(fixture.collect()))).toContain(
+      "signature:@opengeni/sdk/core:OpenGeniCoreClient.getOrganizationApiKey",
+    );
+  });
+
+  test("parameter names, implementation bodies and optional additions are not breaks", () => {
+    const fixture = hierarchy();
+    fixture.configure("", method);
+    const before = snapshot(fixture.collect());
+    fixture.configure(
+      "",
+      "getOrganizationApiKey(org: string, key: string, signal?: AbortSignal): Promise<ApiKey> { return fetchOtherImplementation(); }",
+    );
+    expect(breakingIds(before, snapshot(fixture.collect()))).toEqual([]);
+  });
+
+  test("narrow overrides and lost overloads cannot hide behind inherited signatures", () => {
+    const fixture = hierarchy();
+    const overloads =
+      "read(id: string): string; read(id: number): number; read(id: string | number): string | number { throw new Error(); }";
+    fixture.configure("", overloads);
+    const before = snapshot(fixture.collect());
+    fixture.configure("", overloads, "read(id: number): number { throw new Error(); }");
+    expect(breakingIds(before, snapshot(fixture.collect()))).toContain(
+      "signature:@opengeni/sdk:OpenGeniClient.read",
+    );
+    fixture.configure("", "read(id: number): number { throw new Error(); }");
+    expect(breakingIds(before, snapshot(fixture.collect()))).toContain(
+      "signature:@opengeni/sdk/core:OpenGeniCoreClient.read",
+    );
   });
 });
 

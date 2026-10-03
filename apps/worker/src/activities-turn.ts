@@ -12,6 +12,9 @@ function createTurnActivityServices(
   let servicesPromise: Promise<TurnActivityServices> | null = null;
   return async () => {
     servicesPromise ??= (async () => {
+      if (!dependencies.requestWorkerDrain) {
+        throw new Error("Turn activities require a host requestWorkerDrain lifecycle edge");
+      }
       const services = await shared();
       return {
         ...services,
@@ -20,6 +23,8 @@ function createTurnActivityServices(
           createProductionAgentRuntime({
             metrics: runtimeMetricsHooksForObservability(services.observability),
           }),
+        requestWorkerDrain: dependencies.requestWorkerDrain,
+        turnFinalizationTimeoutMs: dependencies.turnFinalizationTimeoutMs,
         summarizeContextForCompaction:
           dependencies.summarizeContextForCompaction ?? summarizeForCompaction,
       };

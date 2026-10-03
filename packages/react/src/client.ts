@@ -5,7 +5,7 @@ import type { OpenGeniClient } from "@opengeni/sdk";
  * pass the real SDK client, a proxy-backed client that routes through their
  * own API, or a scripted client in tests/demos.
  */
-export type SessionClientLike = Pick<
+type SessionClientMethods = Pick<
   OpenGeniClient,
   // Deployment config (host-exposed models, auth, upload limits)
   | "getClientConfig"
@@ -187,8 +187,13 @@ export type SessionClientLike = Pick<
       | "streamWorkspaceLiveEvents"
       | "listSessionBackgroundCommands"
       | "cancelSessionBackgroundCommand"
+      | "getComputerInputPosture"
     >
   >;
+
+/** Compact list transport is optional for scripted and older clients. */
+export type SessionClientLike = SessionClientMethods &
+  Partial<Pick<OpenGeniClient, "listSessionSummaryPage">>;
 
 /**
  * Tenant-safe client surface required by the session-only React entry.
@@ -341,7 +346,8 @@ export type EmbeddedComputerInteractionClientLike = Pick<
   | "heartbeatComputerSession"
   | "endComputerSession"
 > &
-  EmbeddedInterventionClientLike;
+  EmbeddedInterventionClientLike &
+  Partial<Pick<OpenGeniClient, "getComputerInputPosture">>;
 
 /** Complete public Browser + Computer interaction surface. */
 export type EmbeddedInteractionClientLike = EmbeddedBrowserInteractionClientLike &

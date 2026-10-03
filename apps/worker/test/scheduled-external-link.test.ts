@@ -93,6 +93,7 @@ test("linked schedules and children retain exact revocable native authority in a
     });
     // Original key ID is deliberately audit-only: no such API key is inserted.
     const snapshot = ExternalLinkWorkSnapshot.parse({
+      permissionMode: "explicit",
       identity: { externalId: identity.externalId, source: identity.source },
       actor: {
         accountId: account!.id,
@@ -185,6 +186,7 @@ test("linked schedules and children retain exact revocable native authority in a
     if (claim.action !== "claimed") throw new Error(JSON.stringify(claim));
     expect(await getExternalLinkTurnSnapshot(client.db, scope, claim.turn.id)).toEqual(snapshot);
     expect(await getExternalLinkTurnAuthorization(client.db, scope, claim.turn.id)).toMatchObject({
+      permissionMode: "explicit",
       authorized: true,
     });
     const actor = {

@@ -5,6 +5,11 @@ serves it. This document is the canonical integration contract for model
 definitions, provider credentials, billing attribution, workspace availability,
 and per-turn execution identity.
 
+The [provider failure contract map](design/provider-failure-audit-2026-10-01.md)
+describes official error contracts, current classifiers, messages, synthetic
+fixtures and remaining model/sandbox coverage gaps. It does not certify every
+configured endpoint.
+
 The point-in-time decision record and evidence are in
 [`design/model-provider-architecture-2026-07-18.md`](design/model-provider-architecture-2026-07-18.md).
 
@@ -65,6 +70,49 @@ digests; credential-like names are refused. Model fields, billing derivation,
 and examples are in [Registry configuration](#registry-configuration). In
 database catalog mode the host JSON still owns transport and credentials; the
 singleton owns membership.
+
+### Customer OpenAI and Azure OpenAI keys
+
+The web console offers **OpenAI** and **Azure OpenAI** in the model step after
+organization setup and in **Workspace settings → Models → OpenAI and Azure OpenAI**. OpenAI
+asks for an API key, with the model preselected and an optional Change model
+control. Azure asks for an API key, resource endpoint
+(`https://RESOURCE.openai.azure.com` or its `/openai/v1` URL), and deployment
+name. Both use Responses and ordinary function tools; arbitrary proxy endpoints
+are refused. Azure endpoint/deployment/API-version configuration remains available
+separately for deployment operators.
+
+The web flow sends `verifyModelAccess: true` on connection creation. Before
+saving, the API checks the exact provider/model with a short Responses message
+(32 output tokens maximum, `store: false`, no tools). Provider usage applies;
+this uses no OpenGeni credits. Failed checks do not save a connection and show
+safe actionable errors without reflecting upstream response text. Other API
+callers can omit the check for offline provisioning. A successful setup check
+does not establish ongoing provider health. The connected model is selected in
+the current user’s next-chat draft from onboarding and Workspace settings.
+
+These connections are workspace-owned, including in the onboarding Personal
+workspace. The existing Connections API encrypts the key at rest and returns
+metadata only. Usage is externally billed to that provider account and consumes
+no OpenGeni credits. Organization provider inheritance does not apply to these
+workspace connections. Replace a key, endpoint, or model by disconnecting and
+reconnecting; the new connection has a distinct model ID.
+
+`directModelProvider` metadata declares the provider, model/deployment, and Azure
+endpoint. `credentialRole` is `direct_openai` or `direct_azure_openai`. Model IDs
+include the exact connection ID and version. The metadata-only workspace catalog
+adds a secret-free provider definition; the worker loads only the selected exact
+active connection, verifies its definition and access, and overlays its decrypted
+key for that turn. Revocation or an identity mismatch fails closed. Missing
+customer connections never fall back to deployment credentials. Customer routes
+use conservative text/function capabilities; hosted tools and reasoning controls
+are not enabled implicitly for an arbitrary Azure deployment name.
+
+Canonical: `packages/contracts/src/direct-model-provider.ts`,
+`packages/core/src/domain/direct-model-provider.ts` for the setup check,
+`withDirectModelProviders` in `packages/config/src/index.ts`,
+`loadDirectModelProviderConnection` in `packages/db/src/index.ts`, and the direct
+provider form in `apps/web/src/components/direct-model-provider-connection.tsx`.
 
 ### Reviewed overlays — not generic JSON
 
@@ -254,6 +302,18 @@ and active turns that still name the old definition; accepted turns fail closed
 on definition drift rather than silently switching providers. A maintenance
 window that stops all catalog consumers is the simpler alternative.
 
+Sessions whose stored deployment model leaves the catalog keep their history
+and frozen turns. A new message that would use the removed model is refused
+with 422
+`validation_failed` (`model is not available: <id>`) plus
+`details: { code: "model_unavailable", modelId }`; retrying the same request
+cannot succeed, so clients must choose another model. The web console detects
+a deployment model missing from the workspace catalog (connection-owned custom
+and subscription models are judged only by that refusal, because a session may
+keep a retained definition), says the chat's model is no longer available, and
+preselects the resolved default for the next message only. A refused send keeps
+the typed message behind Edit message instead of Retry.
+
 Workspace-admin removal of a custom Vercel AI Gateway or OpenRouter slug is a
 retirement, not a hard delete. The provider-qualified slug leaves new model
 selection immediately, while an already accepted turn or an existing-session
@@ -360,6 +420,7 @@ derives both from the provider kind:
 | Connected SuperGrok/xAI subscription | connected subscription        | connected subscription | external         |
 | Workspace Vercel AI Gateway          | workspace connection          | workspace              | external         |
 | Workspace OpenRouter                 | workspace connection          | workspace              | external         |
+| Workspace OpenAI / Azure OpenAI       | workspace connection          | workspace              | external         |
 | Organization Vercel AI Gateway      | organization connection       | organization           | external         |
 | Organization OpenRouter             | organization connection       | organization           | external         |
 
@@ -665,6 +726,13 @@ It does not include aliases, display labels, health, entitlement state, concrete
 credential IDs, keys, tokens, or secret header/query values. Rotating a secret
 within the same credential class therefore does not invalidate an accepted
 turn. Changing executable provider identity does.
+
+Accepted policies also tolerate strictly additive latency-mode and input-modality
+declarations. Verification reconstructs an exact historical subset digest, keeping
+the frozen runnable mode and every retained mode declaration unchanged. It never
+rewrites the accepted policy or request tier. Removed modes/modalities, changed
+mode support or billing multipliers, and all other executable-definition drift
+remain fail-closed; this path does not compose with historical digest migrations.
 
 Credential identity is also not a conversation-history compatibility boundary.
 Changing the selected Codex or SuperGrok subscription does not rewrite canonical history or
@@ -1021,9 +1089,12 @@ first match wins:
    against a database catalog (edited independently of this env value), fall
    back instead: when the configured model is not selectable, the first
    selectable credits-billed model in operator catalog order is used at its own
-   default reasoning. This step is skipped when the deployment default is
-   already a selectable credits-billed model, so an operator's paid default is
-   never replaced.
+   default reasoning. When the deployment default is already a selectable
+   credits-billed model, it is never replaced: it keeps the deployment effort,
+   except that it uses `OPENGENI_CREDITS_DEFAULT_REASONING_EFFORT` (source
+   `credits`) when it is the credits default model itself, so a deployment
+   whose default is `gpt-6-luna` still starts credit holders on extra high
+   reasoning.
 4. `deployment`: the deployment default with `OPENGENI_OPENAI_REASONING_EFFORT`.
 
 An explicit choice always wins and never passes through this resolver: a
@@ -1194,12 +1265,88 @@ deployment uses Data Zone or another SKU whose rates differ from the built-in
 Global Standard defaults. Historical facts retain the price known at call time;
 they are not recomputed after an operator changes the override.
 
+Insights comparisons use `configuredModelListPricingSchedules` and
+`calculateModelListUsageCostBreakdown`. Newly reviewed GPT-6.1 Sol, Grok, and
+Claude rates live only in `reviewedModelListPricing`, not debit defaults. These
+project reviewed upstream rates
+onto recognized Codex, SuperGrok, native Claude, and curated Gateway/OpenRouter
+product routes without adding comparison-only prices to debit authority or
+changing frozen execution-definition hashes, including bare built-in models.
+New bare rates require a configured model on the official OpenAI API route;
+custom proxies and Azure do not inherit them by matching a model name.
+Registry prices and explicit
+product-ID overrides still win. External metering never becomes a credit debit.
+
+Forward fact writers may use `calculateModelListUsageCostSnapshot` with
+`priceContextKnown: true` only after establishing the request's price provenance
+(including geography and service tier). Its nullable `listByClassMicros`
+contains integer `uncachedInput`, `cacheRead`, `cacheWrite`, and `output` costs
+summing to **upstream** `providerCostMicros`, before markup. The separate
+`creditCostMicros` remains an equivalent-credit comparison, not charged-class
+attribution. Existing debit/totals-only helpers keep their result shapes.
+
+Class snapshots require observed input/output/read/write counters on every
+provider request. Positive native Claude writes additionally require preserved
+`inputTokensDetails.cache_write_tokens_5m` and `cache_write_tokens_1h` counters
+whose sum equals `cache_write_tokens`. Reviewed native default rates support
+mixed TTLs; a single explicit override supports only its declared TTL, not an
+inferred second price. Unknown counters, TTL, dedicated positive-class prices,
+or latency modifiers produce a null split. Fractional latency scaling uses
+deterministic largest-remainder rounding to preserve the total and sets
+`listByClassApprox: true`. Gateway-reported scalar cost has no authoritative
+class attribution and must retain a null split in the writer. Never run this
+forward helper to reprice historical facts lacking captured class costs.
+
+For explicitly approximate historical attribution, use
+`allocateRecordedModelListCostByClass(settings, model, usage, recordedProviderCostMicros)`.
+It returns a nullable four-class split and `listByClassApprox: true` for every
+eligible allocation, including known zero. The caller supplies the stored
+`estimated_provider_cost_micros`; the helper never recalculates that total,
+`listMicros`, priced-call coverage, credits, or actual charges. Current reviewed
+class rates are **weights only**, multiplied by observed class tokens without
+per-class rounding. Integer-only BigInt largest-remainder allocation preserves
+the supplied total exactly; ties resolve in uncached-input/read/write/output order.
+
+Every input/output/read/write counter must be observed. Missing/invalid counters,
+unpriced models, or unavailable positive-class rates keep the split null, even
+when the recorded total is zero. Known zero/free costs can return zero classes;
+zero total weights cannot explain a positive stored cost. Per-request input tiers
+are used when retained; aggregate-only historical input tiers remain approximate.
+Historical cache-write weights use the selected schedule's single TTL rate, not
+an assertion about the original request's TTL. Reasoning remains inside observed
+output, never an extra cost class. Rollups must sum only eligible class coverage
+and must not present that covered portion as all priced usage. This allocation
+does not relax the forward snapshot's provenance or TTL-knownness requirements.
+
+The added Standard rates were reviewed on 2026-10-03 against
+[OpenAI pricing](https://developers.openai.com/api/docs/pricing),
+[xAI model pricing](https://docs.x.ai/developers/models/grok-4.7),
+[Claude pricing](https://platform.claude.com/docs/en/about-claude/pricing), and
+the public [Gateway](https://ai-gateway.vercel.sh/v1/models) /
+[OpenRouter](https://openrouter.ai/api/v1/models) catalogs. GPT-6.1 Sol uses a
+5% cache-read rate and the exclusive 272K long-context boundary; native Grok
+4.5–4.7 comparison schedules preserve the established inclusive 200K boundary.
+Gateway's separate greater-than-200K schedule must not replace the native one.
+The reviewed native Claude models have no
+long-context premium. Claude 1-hour native cache writes use 2x base input,
+rather than the normal 5-minute 1.25x rate. The curated OpenRouter free variant
+has an explicit zero list price, not an unknown price.
+
+Unknown future models, alternate/custom endpoints, unpinned Gateway custom
+routes, and Azure SKU-specific rates are not inferred from similar names. Use
+an exact provider-reported cost or an explicit reviewed operator price for
+these cases. This audit is bounded to the supported code catalog and reviewed
+native profiles; it does not read or mutate a deployed catalog or reprice old
+usage facts.
+
 ### Price audit (llm-prices canary)
 
-OpenGeni debit authority is the hand-maintained
-`defaultModelPricing` map in `packages/config/src/index.ts` (plus registry /
-`OPENGENI_MODEL_PRICING_JSON` overrides). Do not generate that map from an
-external feed.
+OpenGeni debit authority is the unchanged hand-maintained `defaultModelPricing`
+map in `packages/config/src/index.ts` (plus registry /
+`OPENGENI_MODEL_PRICING_JSON` overrides). New comparison-only rates live in
+`reviewedModelListPricing` and reach callers only through provider-gated list
+resolution. The canary inspects both tables without promoting comparison rates
+to debit authority. Do not generate either map from an external feed.
 
 When you add a billed model or want to verify list rates are still current:
 
@@ -1208,8 +1355,8 @@ bun run check:model-pricing
 ```
 
 That fetches [llm-prices.com](https://www.llm-prices.com/current-v1.json) and
-compares Standard short- and long-context rates for the allow-listed GPT-5.6
-product ids. Treat mismatches as a prompt to re-check OpenAI (or the provider)
+compares Standard short- and long-context rates for the allow-listed GPT-6.1,
+GPT-6, and GPT-5.6 product ids. Treat mismatches as a prompt to re-check OpenAI (or the provider)
 and update `defaultModelPricing` — not as automatic truth to import.
 
 Not covered by the llm-prices canary: cache-write rates, Azure SKU-specific
@@ -1317,6 +1464,16 @@ in order; later system items keep their conversation position. Tool names unsupp
 Native OpenAI hosted tools and opaque compaction tokens are not compatible;
 ordinary function tools and OpenGeni's text compaction remain available.
 
+Native Claude HTTP and SSE errors retain status and bounded retry/request
+metadata. Documented tier-spend proof and configured-spend HTTP 400 prefixes
+become terminal quota; ordinary throttling remains recoverable. General billing
+refusals remain terminal payment errors and do not imply exhausted credits. An unrecognized
+SSE error type has no synthetic HTTP status and grants no automatic recovery.
+Only the provider error envelope's type/message is retained as UTF-8-bounded
+4 KiB `turn.failed.detail`, with a bounded request ID. Outgoing requests, echoed
+request fields, arbitrary body fields and headers are excluded; generic exception
+text and serialization remain structural.
+
 Claude subscription connections require `OPENGENI_CLAUDE_SUBSCRIPTION_ENABLED=true`;
 the deployment default is off. Anthropic API-key connections are independent of
 this flag. When off, subscription setup endpoints and catalog/credential resolution
@@ -1324,7 +1481,7 @@ are disabled, and subscription setup is hidden from model settings. Stored crede
 are retained. Anthropic API keys, Codex, SuperGrok, OpenRouter and Vercel are unchanged.
 
 Workspace Claude custom models use `/v1/workspaces/:workspaceId/model-providers/
-:providerKind/custom-models` (`anthropic` or `claude_subscription`) and the existing
+:providerKind/custom-models` (`anthropic` or `claude_subscription`) and the shared subscription account APIs for Claude. Anthropic API keys keep the
 workspace connection create/rotate/revoke API. Model IDs are scoped under
 `workspace-anthropic/` and `workspace-claude-subscription/`; organization models use
 `organization-anthropic/` and `organization-claude-subscription/`. Custom models use
@@ -1344,25 +1501,50 @@ addressable when a large tool batch exceeds the server's 20-block lookback.
 Signed thinking is never marked; canonical history is unchanged. One TTL applies
 to every marker: mixed TTLs and `scope: global` are not implemented. This is not
 a guarantee of a hit: prefix changes, expiration and minimum cache sizes still apply.
+Inline Claude images use a request-only raster projection with both dimensions
+bounded to 2,000 pixels from their first use. The bound does not depend on image
+count, so crossing the many-image threshold never changes an older image's cached
+representation. Images within both dimension and encoded-byte limits remain
+byte-identical. Resized images preserve orientation and aspect ratio, use lossless
+PNG when it fits both the original byte size and the 10 MiB encoded limit, and
+otherwise use WebP with deterministic quality steps. Image payloads never grow.
+Dimension notes describe the transport image; coordinate tools must also account
+for any provider-side resizing. Original uploads, retained artifacts and canonical
+history stay unchanged. Replays produce
+the same projection; URL images keep their existing provider-managed behavior.
 Usage includes fresh input, cache reads, cache writes and output. Per-response SDK
 usage preserves reported 5-minute and 1-hour creation counts separately; downstream
 durable telemetry and UI currently show aggregate writes. Registry pricing has one
 cache-write rate, which must match its configured TTL (do not use a 5-minute write
 price with `cacheTtl: "1h"`). Managed connections use 5-minute caching and external
 billing; OpenGeni does not debit these tokens as credits.
-Organization connections use conservative 200k context / 168k
-input / 150k compaction limits and 32k maximum output; configurable registry
-providers can declare model-specific limits. The managed connection catalog enables
-reasoning only for the captured adaptive models `claude-opus-5-5` and
-`claude-sonnet-5-5`; other model IDs
-remain available without a reasoning option. Registry providers can explicitly
-declare additional verified model capabilities. Invalid streams fail closed, incomplete tools
+Managed Claude connections use per-model native profiles from
+`claudeNativeModelProfile` in `packages/config/src/index.ts`. Opus and Sonnet 5.5
+expose low, medium, high, xhigh and max, with medium as the new-selection default.
+Supported adaptive models use a 1M context window, 872k safe input, 800k compaction
+threshold and up to 128k output; the native request includes the 1M-context beta.
+Smaller models retain their own output ceiling. Unknown IDs keep conservative
+200k context / 168k input / 150k compaction / 32k output and no adaptive thinking.
+Registry providers can explicitly declare additional verified model capabilities
+and lower request defaults. Native xhigh is never silently downgraded to high;
+unsupported effort on a known adaptive model is rejected before network I/O.
+Historical models requiring fixed thinking budgets are not enabled through
+adaptive-thinking controls. Invalid streams fail closed, incomplete tools
 are never executed, and truncated compaction summaries are rejected. The adapter
 does not silently retry failed requests or rotate credentials.
 HTTP error details are read for at most 5 seconds (or the shorter configured
 stream idle timeout) and 64 KiB. A stalled or broken diagnostic body does not
 hide the HTTP status, request ID or Retry-After header; caller cancellation
 interrupts the read.
+
+HTTP and SSE permission failures remain access errors, separate from expired
+credentials. A provider `model_access_suspended` rejection reports the validated
+UTC suspension deadline when present and stops automatic retry; reconnecting
+does not lift a provider suspension. Native `stop_reason: "refusal"` is a terminal
+policy rejection even when HTTP is 200 and content is empty. It uses the existing
+policy-refusal presentation, never completes an empty successful response, and
+never executes tools from refused output. These failures retain the request ID
+without persisting arbitrary provider explanation text.
 
 
 ### Claude subscription request identity
@@ -1405,6 +1587,23 @@ compaction calls remain nonstreaming. The default output ceiling remains 32k,
 within the adapter's conservative context budget, rather than copying 128k from
 an unrelated request. No live subscription probe is part of these tests.
 
+Mid-conversation system blocks must follow a user and precede an assistant (or
+end the request). The adapter groups retained system inputs at that boundary
+within each assistant-delimited phase, including after portable compaction;
+canonical roles and exact content remain unchanged.
+
+Machine-only system phases after an assistant receive a request-local user-role
+transport anchor identifying machine origin and the absence of human input.
+It adds no durable history, human intent or authority; system content remains
+system-role and stays after the same assistant. Tool pairing still validates
+before projection.
+
+HTTP and SSE failures retain
+only the provider error envelope's type/message in a UTF-8-bounded 4 KiB
+`turn.failed.detail`, plus the bounded provider request ID. Malformed/non-JSON
+bodies expose status only. Outgoing requests, arbitrary body fields and headers
+are not diagnostics; generic exception text and serialization remain structural.
+
 ### Claude subscription usage
 
 Model responses, including quota errors, report observed 5-hour, weekly and optional
@@ -1426,16 +1625,35 @@ provider readings when available.
 Sign-in attempts reuse encrypted, expiring OAuth pending states. They bind the exact
 human, browser session, scope and current connection generation. The one-use code
 is spent once; a committed connection has a secret-free, generation-fenced replay
-receipt. Authority is freshly checked after exchange, before native connection writes.
+receipt. Authority is freshly checked after exchange, before individual account writes.
 Organization attempts require organization administration and are not readable from
 a shared workspace's runtime scope.
 
-`packages/db/src/claude-subscription-tokens.ts` serializes renewal across replicas,
+`packages/db/src/claude-subscription-account-tokens.ts` resolves the selected account;
+shared subscription repositories serialize renewal across replicas,
 re-reads the captured generation and writes only encrypted token material. Renewal
 keeps connection identity, admission/credential generations, access policy and usage
 cache. Each physical Claude model request resolves its original binding before
 dispatch, including title and compaction requests; replacement credentials are never
-lent to an older turn. Catalog loading is offline, so Claude renewal failures do not
+lent to an older turn. Missing, disconnected or replaced bindings stop dispatch;
+the previously captured token is never used as a fallback. Claude supports multiple independent accounts in workspace, organization and
+explicit private user pools. Account rows, naming, primary selection, rotation
+settings and access policy reuse the Codex/SuperGrok settings experience. Browser
+sign-in discovers the provider account UUID, email and plan; setup tokens remain
+inference-only and do not expose profile details. Replacing a token targets one
+exact account generation and preserves its access policy.
+
+The worker reuses SuperGrok's scoped account selection, credential leases and
+durable same-turn capacity wait/resume protocol. Quotas and cooldowns apply to
+the exact upstream model: an Opus restriction need not block Sonnet. A manual
+pin or primary-only pool never silently borrows another subscription. Typed
+401 authentication failures permit one serialized rejected-token renewal per
+account generation on the accepted turn; persistent authentication failures
+require reconnect. Typed 429 refusals record the exact response/token/model
+and wait or select another permitted account. Permission, suspension, safety,
+validation and ambiguous transport errors never rotate the pool. Tool results
+and conversation history remain on the same accepted logical turn.
+Catalog loading is offline, so Claude renewal failures do not
 block turns using another provider. Invalid refresh grants require sign-in again;
 transient failures retain credentials and existing usage readings.
 
