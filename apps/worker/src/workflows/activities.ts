@@ -22,6 +22,7 @@ type WorkflowControlActivities = Pick<
   | "peekSessionWork"
   | "persistSessionAttemptQuiescence"
   | "reconcileSessionAttemptQuiescence"
+  | "reconcileSettledSessionAttempt"
   | "reconcileCodexCapacityWait"
   | "recoverDispatch"
   | "recoverEscapedMcpTimeout"

@@ -100,13 +100,16 @@ quiescence or replay unknown commands.
 Unavailable control reads/owned attempts retain bounded, interruptible waits,
 not idle/settlement, writer revocation or successor dispatch. Temporal metadata
 never proves writer quiescence.
+Settled-owner recovery re-inspects original dispatch and atomically closes
+only the exact current owner under control and physical/inference writer fences,
+committing quiescence receipt, same-turn recovery and durable wake.
 
-Normal idle [omits grace](run-lifecycle.md), retaining durable fences.
+Idle [omits grace](run-lifecycle.md), retaining durable fences.
 
 ### 3.3 Logical turns and physical attempts are different
 
-A **turn** is accepted work; an **attempt**, replaceable execution. Resumed
-attempts append ordered, exactly-once atomic history batches.
+**Turns** are accepted work; replaceable **attempts** append ordered,
+exactly-once atomic history batches.
 
 `wait_for_input` settles tool-batch execution, preserving trusted authority and
 immutable same-turn deadlines. Command results wake only explicit waits; notices
@@ -128,10 +131,10 @@ shares prepared prefixes with both Responses compaction modes; Chat retains
 its transcript adapter. Both modes retain recent system-role input batches
 within existing budgets, preserving chronological accepted goal snapshots.
 
-Failed-session retry is not Pause/Resume or prompt admission:
-`packages/db/src/session-retry.ts` fences failure identity, reserves actor-scoped
-receipts, rejects unresolved execution/safety refusals, and re-enables the
-original turn, history, authority and selected model policy—never synthetic input.
+Failed-session retry (`packages/db/src/session-retry.ts`) fences failure identity,
+reserves actor-scoped receipts, rejects unresolved execution/safety refusals,
+and re-enables original turn/history/authority/selected model policy—not
+Pause/Resume, prompt admission or synthetic input.
 
 Active-run writes require exact attempt/generation; stale workers cannot write
 or settle replacements. Temporal cancellation is intent, not quiescence;
@@ -178,16 +181,14 @@ Canonical: `apps/worker/src/activities/agent-turn/`,
 `apps/worker/src/activities/session-state.ts`, and
 [`run-lifecycle.md`](run-lifecycle.md).
 
-External SDK history and append verification: [`run-lifecycle.md`](run-lifecycle.md).
-
 ### 3.4 Long runs are bounded by policy and intent, not arbitrary loop caps
 
-Run length does not prove stalled progress. Budget admission, provider capacity,
-Pause/Cancel, goal state and host policy govern. Recovery preserves logical work.
-Postgres owns continuation obligations, not Temporal. Goal edits apply directly
-unless review is configured; human-owned constraints remain. Goals never live
-in `Agent.instructions` or solely workflow memory.
-Generic caps cannot replace lifecycle fixes.
+Duration never proves stalled progress. Budget admission, provider capacity,
+Pause/Cancel, goals and host policy govern; recovery preserves logical work.
+Postgres owns continuations, not Temporal. Goal edits apply unless review
+applies; human-owned constraints remain. Goals never live in
+`Agent.instructions` or solely workflow memory. Generic caps cannot replace
+lifecycle fixes.
 
 Empty finals after goal completion get one handoff, then a typed notice.
 See [run lifecycle](run-lifecycle.md).

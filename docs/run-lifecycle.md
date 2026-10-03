@@ -622,6 +622,23 @@ normal history rollover preserves the observer. Recovery of an orphaned live
 owner remains a separate exact-proof lifecycle operation, not an age-based
 fallback or a reuse of the closed-attempt quiescence reconciler.
 
+The `session-settled-owner-recovery-v1` workflow patch schedules that separate
+`reconcileSettledSessionAttempt` control operation only on an explicitly settled
+owner observation. It re-inspects the **stored original** Temporal run/activity,
+including after continue-as-new. Missing, pending or unknown inspection holds;
+the generic observer still never mutates an owner. Under canonical control,
+workspace, ordered child/parent session, exact turn and attempt locks, recovery
+revalidates account/workspace/session/turn/attempt/generation and all Temporal
+identities, current-owner pointers, effective control/lifecycle/Pause, pending
+interruptions, and **both** physical and inference writer predicates. Only
+authenticated settlement plus zero writers can close this exact owner, record
+the ordinary attempt quiescence receipt, preserve the same turn/trigger/frozen
+authority, and consume the existing bounded worker-loss budget. It invents no
+provider exit or timeout and never replays an unknown operation. Recovery and
+the durable workflow wake commit atomically, including the legacy exact-timeout
+path; stale ACKs and successor claims cannot erase newer wake debt. Pre-patch
+histories retain their observer timer/command order for deterministic replay.
+
 A permanent admission failure with no claimed turn records the supplied failure
 message and, when available, its classified admission cause on the durable
 `session.status.changed` event. The absence of a `turn.failed` event must not
