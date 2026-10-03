@@ -3,12 +3,38 @@
   "compilerOptions": {
     "strict": true,
     "paths": {
-      "@/*": ["./src/*"],
-      "@opengeni/sdk": ["../../packages/sdk/src/index.ts"],
-      "@opengeni/react/session": ["../../packages/react/src/session.ts"],
-      "@opengeni/react-native": ["../../packages/react-native/src/index.ts"],
-      "@opengeni/react-native/*": ["../../packages/react-native/src/*"]
+      "@/*": [
+        "./src/*"
+      ],
+      "@opengeni/sdk": [
+        "../../packages/sdk/src/index.ts"
+      ],
+      "@opengeni/react/session": [
+        "../../packages/react/src/session.ts"
+      ],
+      "@opengeni/react-native": [
+        "../../packages/react-native/src/index.ts"
+      ],
+      "@opengeni/react-native/ui": [
+        "../../packages/react-native/src/ui/index.ts"
+      ],
+      "@opengeni/react-native/lab": [
+        "../../packages/react-native/src/lab/fixtures.ts"
+      ],
+      "@opengeni/react-native/expo": [
+        "../../packages/react-native/src/expo.ts"
+      ],
+      "@opengeni/react-native/adapters": [
+        "../../packages/react-native/src/adapters.ts"
+      ],
+      "*": [
+        "./node_modules/@types/*",
+        "./node_modules/*"
+      ]
     }
   },
-  "include": ["**/*.ts", "**/*.tsx"]
+  "include": [
+    "**/*.ts",
+    "**/*.tsx"
+  ]
 }

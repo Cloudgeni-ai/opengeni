@@ -18,6 +18,14 @@
     "./expo": {
       "types": "./src/expo.ts",
       "default": "./src/expo.ts"
+    },
+    "./ui": {
+      "types": "./src/ui/index.ts",
+      "default": "./src/ui/index.ts"
+    },
+    "./lab": {
+      "types": "./src/lab/fixtures.ts",
+      "default": "./src/lab/fixtures.ts"
     }
   },
   "scripts": {
@@ -33,8 +41,11 @@
     "expo-crypto": "*",
     "expo-document-picker": "*",
     "expo-file-system": "*",
+    "expo-glass-effect": "*",
     "expo-image-picker": "*",
     "react": ">=19",
-    "react-native": ">=0.80"
+    "react-native": ">=0.80",
+    "react-native-reanimated": ">=4",
+    "react-native-svg": ">=15"
   }
 }
