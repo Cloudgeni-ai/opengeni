@@ -298,3 +298,41 @@ export function formatDurationFacet(durationMs: number | undefined): string | nu
   const minutes = totalMinutes % 60;
   return `${hours}h ${String(minutes).padStart(2, "0")}m`;
 }
+
+function hasFacetContent(content: ReactNode): boolean {
+  return content !== null && content !== undefined && content !== false && content !== "";
+}
+
+/**
+ * The facets a turn header shows. With a readable status line, duration lives in
+ * the status, preparation-only turns drop the step count, and a live or waiting
+ * status keeps only the step count among the built-ins. A failing custom facet is
+ * skipped rather than breaking the header.
+ */
+export function selectTurnSummaryFacets(
+  definitions: readonly TurnSummaryFacet[],
+  context: TurnSummaryContext,
+  statusKind: TurnSummaryStatus["kind"] | undefined,
+): Array<{ facet: TurnSummaryFacet; result: TurnSummaryFacetResult }> {
+  return definitions.flatMap((facet) => {
+    if (
+      statusKind &&
+      (facet.id === "duration" ||
+        (facet === BUILT_IN_TURN_SUMMARY_FACETS[0] &&
+          context.items.every(
+            (item) => item.kind === "startup-phase" || item.kind === "agent-message",
+          )) ||
+        (statusKind !== "worked" &&
+          facet.id !== "steps" &&
+          BUILT_IN_TURN_SUMMARY_FACET_IDS.includes(facet.id as BuiltInTurnSummaryFacetId)))
+    ) {
+      return [];
+    }
+    try {
+      const result = facet.summarize(context);
+      return result && hasFacetContent(result.content) ? [{ facet, result }] : [];
+    } catch {
+      return [];
+    }
+  });
+}

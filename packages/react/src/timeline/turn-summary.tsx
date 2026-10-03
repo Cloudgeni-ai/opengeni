@@ -19,11 +19,10 @@ import { useEntranceAnimation } from "./entrance";
 import { useFoldMemory, type FoldRestingState } from "./fold-memory";
 import {
   BUILT_IN_TURN_SUMMARY_FACET_IDS,
-  BUILT_IN_TURN_SUMMARY_FACETS,
   createTurnSummaryContext,
   formatElapsed,
   resolveTurnSummaryFacets,
-  type BuiltInTurnSummaryFacetId,
+  selectTurnSummaryFacets,
   type TurnSummaryFacetConfiguration,
   type TurnSummaryStatus,
 } from "./turn-summary-model";
@@ -343,32 +342,7 @@ export function TurnSummary({
   );
   const statusKind = status?.kind;
   const facets = useMemo(
-    () =>
-      facetDefinitions.flatMap((facet) => {
-        // The status line owns elapsed time; a live line keeps only the step
-        // count (plus host facets) so it stays one short line.
-        if (
-          statusKind &&
-          (facet.id === "duration" ||
-            (facet === BUILT_IN_TURN_SUMMARY_FACETS[0] &&
-              context.items.every(
-                (item) => item.kind === "startup-phase" || item.kind === "agent-message",
-              )) ||
-            (statusKind !== "worked" &&
-              facet.id !== "steps" &&
-              BUILT_IN_TURN_SUMMARY_FACET_IDS.includes(facet.id as BuiltInTurnSummaryFacetId)))
-        ) {
-          return [];
-        }
-        try {
-          const result = facet.summarize(context);
-          return result && hasFacetContent(result.content) ? [{ facet, result }] : [];
-        } catch {
-          // A host extension is presentation-only. It must never take down the
-          // durable timeline or hide the remaining built-in evidence.
-          return [];
-        }
-      }),
+    () => selectTurnSummaryFacets(facetDefinitions, context, statusKind),
     [context, facetDefinitions, statusKind],
   );
 
@@ -585,10 +559,6 @@ function LiveElapsed({ since }: { since: string }) {
   );
 }
 
-function hasFacetContent(content: ReactNode): boolean {
-  return content !== null && content !== undefined && content !== false && content !== "";
-}
-
 class FacetRenderBoundary extends Component<{ children: ReactNode }, { failed: boolean }> {
   state = { failed: false };
 
@@ -600,4 +570,3 @@ class FacetRenderBoundary extends Component<{ children: ReactNode }, { failed: b
     return this.state.failed ? null : this.props.children;
   }
 }
-
