@@ -44,3 +44,4 @@ export { ApprovalStrip, HumanInputCard } from "./decisions";
 export type { ApprovalStripProps, HumanInputCardProps } from "./decisions";
 export { Button, IconButton } from "./controls";
 export type { ButtonVariant } from "./controls";
+export { QueueDock } from "./queue-dock";

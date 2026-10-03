@@ -1,9 +1,10 @@
 import { conversationTimeline } from "@opengeni/react/session";
 import { useMemo, type ReactNode } from "react";
-import { KeyboardAvoidingView, Platform, Text, View } from "react-native";
+import { Text, View } from "react-native";
 import type { OpenGeniNativeSessionController } from "../use-native-session";
 import { SessionComposer, type SessionComposerProps } from "./composer";
 import { ApprovalStrip, HumanInputCard } from "./decisions";
+import { QueueDock } from "./queue-dock";
 import { MessageTimeline, type NativeMessageTimelineProps } from "./message-timeline";
 import { fontStyle, useNativeTimelineTheme } from "./theme";
 
@@ -32,7 +33,8 @@ export interface NativeSessionScreenProps extends Omit<
   /** Fixed host chrome above the timeline, inside the keyboard-avoiding area. */
   topBar?: ReactNode;
   bottomInset?: number | undefined;
-  keyboardVerticalOffset?: number | undefined;
+  /** Distance from this screen's bottom edge to the window bottom (e.g. a tab bar). */
+  keyboardBottomOffset?: number | undefined;
 }
 
 export function NativeSessionScreen({
@@ -41,7 +43,7 @@ export function NativeSessionScreen({
   trailing,
   topBar,
   bottomInset,
-  keyboardVerticalOffset,
+  keyboardBottomOffset,
   ...timelineProps
 }: NativeSessionScreenProps) {
   const theme = useNativeTimelineTheme();
@@ -55,11 +57,7 @@ export function NativeSessionScreen({
   const waitingOnInput = humanInput.requests.length > 0 && status === "requires_action";
   const busy = composer.sending || composer.pausing || composer.resuming;
   return (
-    <KeyboardAvoidingView
-      style={{ flex: 1, backgroundColor: theme.colors.bg }}
-      behavior={Platform.OS === "ios" ? "padding" : "height"}
-      keyboardVerticalOffset={keyboardVerticalOffset ?? 0}
-    >
+    <View style={{ flex: 1, backgroundColor: theme.colors.bg }}>
       {topBar}
       <MessageTimeline
         {...timelineProps}
@@ -97,6 +95,7 @@ export function NativeSessionScreen({
         options={composerSlots?.options}
         placeholder={composerSlots?.placeholder}
         bottomInset={bottomInset}
+        keyboardBottomOffset={keyboardBottomOffset}
         header={
           <>
             {composerSlots?.header}
@@ -145,18 +144,21 @@ export function NativeSessionScreen({
           </>
         }
         above={
-          approvals.length > 0 && status === "requires_action" ? (
-            <ApprovalStrip
-              approvals={approvals}
-              onDecide={(id, decision) =>
-                (decision === "approve" ? control.approve(id) : control.reject(id)).then(
-                  () => undefined,
-                )
-              }
-            />
-          ) : null
+          <>
+            <QueueDock queue={queue} />
+            {approvals.length > 0 && status === "requires_action" ? (
+              <ApprovalStrip
+                approvals={approvals}
+                onDecide={(id, decision) =>
+                  (decision === "approve" ? control.approve(id) : control.reject(id)).then(
+                    () => undefined,
+                  )
+                }
+              />
+            ) : null}
+          </>
         }
       />
-    </KeyboardAvoidingView>
+    </View>
   );
 }

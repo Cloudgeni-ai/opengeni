@@ -1,5 +1,6 @@
-import { useEffect, useState, type ReactNode } from "react";
-import { Keyboard, Platform, Text, TextInput, View } from "react-native";
+import { useState, type ReactNode } from "react";
+import { Platform, Text, TextInput, View } from "react-native";
+import Animated, { useAnimatedKeyboard, useAnimatedStyle } from "react-native-reanimated";
 import { IconButton } from "./controls";
 import { fontStyle, useNativeTimelineTheme } from "./theme";
 
@@ -33,6 +34,8 @@ export interface SessionComposerProps {
   /** Rendered above the card (queue, approvals, status dock). */
   above?: ReactNode;
   bottomInset?: number | undefined;
+  /** Distance from the composer's container bottom to the window bottom (tab bars). */
+  keyboardBottomOffset?: number | undefined;
   autoFocus?: boolean | undefined;
 }
 
@@ -40,18 +43,19 @@ export function SessionComposer(props: SessionComposerProps) {
   const theme = useNativeTimelineTheme();
   const c = theme.colors;
   const [height, setHeight] = useState(24);
-  const keyboardOpen = useKeyboardOpen();
+  // Track the keyboard directly: React Native's KeyboardAvoidingView mis-measures
+  // inside modals and overlays; the animated keyboard height does not.
+  const keyboard = useAnimatedKeyboard();
+  const restingBottom = Math.max(16, (props.bottomInset ?? 0) + 4);
+  const offset = props.keyboardBottomOffset ?? 0;
+  const lift = useAnimatedStyle(() => {
+    const height = keyboard.height.value - offset;
+    return { paddingBottom: height > 0 ? height + 8 : restingBottom };
+  });
   // Web shows the workstream control whenever the host can pause or resume.
   const showPause = Boolean(props.paused ? props.onResume : props.onPause);
   return (
-    <View
-      style={{
-        paddingHorizontal: 16,
-        paddingTop: 4,
-        paddingBottom: keyboardOpen ? 8 : Math.max(16, (props.bottomInset ?? 0) + 4),
-        backgroundColor: c.bg,
-      }}
-    >
+    <Animated.View style={[{ paddingHorizontal: 16, paddingTop: 4, backgroundColor: c.bg }, lift]}>
       {props.above}
       <View
         style={{
@@ -128,28 +132,8 @@ export function SessionComposer(props: SessionComposerProps) {
           />
         </View>
       </View>
-    </View>
+    </Animated.View>
   );
-}
-
-/** The home-indicator inset only applies while the keyboard is closed. */
-function useKeyboardOpen(): boolean {
-  const [open, setOpen] = useState(false);
-  useEffect(() => {
-    const show = Keyboard.addListener(
-      Platform.OS === "ios" ? "keyboardWillShow" : "keyboardDidShow",
-      () => setOpen(true),
-    );
-    const hide = Keyboard.addListener(
-      Platform.OS === "ios" ? "keyboardWillHide" : "keyboardDidHide",
-      () => setOpen(false),
-    );
-    return () => {
-      show.remove();
-      hide.remove();
-    };
-  }, []);
-  return open;
 }
 
 /** The web model pill ("6 Luna ⌄"): a quiet toolbar chip that opens host options. */
