@@ -4,7 +4,7 @@ import {
   emptyClaudeUsage,
 } from "@opengeni/config";
 import { ClaudeSubscriptionUsage } from "@opengeni/contracts";
-import { inArray } from "drizzle-orm";
+import { and, eq, inArray } from "drizzle-orm";
 import type { z } from "zod";
 import type { Database } from "./database";
 import * as schema from "./schema";
@@ -107,6 +107,27 @@ export const claudeSubscriptionAccountRepository = createSubscriptionAccountRepo
   refreshToken: (secret) => secret.oauth?.refreshToken,
   refreshIncrementsVersion: false,
   metadataIncrementsVersion: false,
+  onAccessTokenRenewed: async (db, credential) => {
+    const table = schema.claudeSubscriptionAccountUsage;
+    const [row] = await db.select().from(table).where(eq(table.credentialId, credential.id));
+    const parsed = ClaudeSubscriptionUsage.safeParse(row?.snapshot);
+    if (
+      row?.credentialVersion !== credential.version ||
+      !parsed.success ||
+      parsed.data.credentialVersion !== credential.version ||
+      parsed.data.refreshStatus !== "reconnect"
+    )
+      return;
+    await db
+      .update(table)
+      .set({
+        snapshot: { ...parsed.data, refreshStatus: "not_checked", refreshCheckedAt: null },
+        updatedAt: new Date(),
+      })
+      .where(
+        and(eq(table.credentialId, credential.id), eq(table.credentialVersion, credential.version)),
+      );
+  },
   readCapacity: readAccountCapacity,
 });
 

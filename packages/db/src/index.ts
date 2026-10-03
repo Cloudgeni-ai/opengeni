@@ -203,7 +203,7 @@ import {
   getWorkspaceConnectionModelRestrictions as resolveWorkspaceConnectionModelRestrictions,
 } from "./workspace-model-connection-access";
 export * from "./model-connection-access";
-import { createHash, randomUUID } from "node:crypto";
+import { createHash, randomUUID, timingSafeEqual } from "node:crypto";
 import {
   SCHEDULED_HUMAN_WAIT_TIMEOUT_CLIENT_EVENT_PREFIX,
   scheduledRunHumanWaitsInRlsContext,
@@ -527,6 +527,7 @@ import {
   VERCEL_AI_GATEWAY_CREDENTIAL_OPERATION_ID_METADATA_KEY,
 } from "@opengeni/contracts";
 import {
+  ClaudeSubscriptionCredential,
   environmentsEncryptionKeyBytes,
   SANDBOX_LIFECYCLE_TRANSITION_MAX_WAIT_MS,
   SANDBOX_DEADLINE_COMMAND_STOP_GRACE_MS,
@@ -28192,6 +28193,7 @@ function createScopedSubscriptionCapacityWaiters(options: {
       leaseFence?: { holderId: string; generation: number };
       credentialQuarantine?: XaiCredentialLeaseQuarantine;
       expectedCredentialVersion?: number;
+      credentialTokenFence?: { encryptionKey: Uint8Array; observedAccessToken: string };
       now?: Date;
     },
   ): Promise<ArmXaiCapacityWaitResult> {
@@ -28210,6 +28212,8 @@ function createScopedSubscriptionCapacityWaiters(options: {
     if (input.credentialQuarantine && !input.leaseFence) {
       throw new Error(options.label + " credential quarantine requires an exact lease fence");
     }
+    if (options.provider === "claude" && input.credentialQuarantine && !input.credentialTokenFence)
+      throw new Error("Claude credential quarantine requires the exact dispatched token");
     if (
       input.credentialQuarantine?.kind === "cooldown" &&
       (!Number.isFinite(input.credentialQuarantine.until.getTime()) ||
@@ -28299,7 +28303,6 @@ function createScopedSubscriptionCapacityWaiters(options: {
                   and(
                     eq(tables.credentialLeases.workspaceId, input.workspaceId),
                     eq(tables.credentialLeases.turnId, input.turnId),
-                    gt(tables.credentialLeases.leasedUntil, now),
                   ),
                 )
                 .for("update")
@@ -28359,6 +28362,15 @@ function createScopedSubscriptionCapacityWaiters(options: {
               lease.ownerOrganizationMembershipId === ownerOrganizationMembershipId &&
               lease.holderId === input.leaseFence.holderId &&
               lease.generation === input.leaseFence.generation);
+          const leaseStillLive = async () => {
+            if (!input.leaseFence) return true;
+            if (!lease) return false;
+            const [clock] = await rawRows<{ live: boolean }>(
+              tx,
+              sql`select ${lease.leasedUntil.toISOString()}::timestamptz > clock_timestamp() as live`,
+            );
+            return clock?.live === true;
+          };
           if (
             !session ||
             !attempt ||
@@ -28371,6 +28383,7 @@ function createScopedSubscriptionCapacityWaiters(options: {
             (goalId !== null &&
               (!goal || goal.status !== "active" || goal.version !== goalVersion)) ||
             !leaseFenceValid ||
+            !(await leaseStillLive()) ||
             !xaiSnapshotMatchesTurn(turn, snapshot, input.subjectId)
           ) {
             return {
@@ -28383,6 +28396,43 @@ function createScopedSubscriptionCapacityWaiters(options: {
           if (input.credentialQuarantine) {
             if (!lease)
               throw new Error(options.label + " credential quarantine lost its lease fence");
+            const [credential] = await tx
+              .select({ encrypted: tables.credentials.credentialEncrypted })
+              .from(tables.credentials)
+              .where(
+                and(
+                  eq(tables.credentials.accountId, input.accountId),
+                  eq(tables.credentials.id, lease.credentialId),
+                ),
+              )
+              .for("update")
+              .limit(1);
+            if (!credential || !(await leaseStillLive()))
+              return {
+                action: "stale",
+                waiter: existing ? mapXaiCapacityWaiter(existing) : null,
+                events: [],
+              } as const;
+            if (options.provider === "claude" && input.credentialTokenFence) {
+              const fence = input.credentialTokenFence;
+              const token = credential
+                ? ClaudeSubscriptionCredential.parse(
+                    JSON.parse(decryptEnvironmentValue(fence.encryptionKey, credential.encrypted)),
+                  ).token
+                : null;
+              const current = Buffer.from(token ?? ""),
+                observed = Buffer.from(fence.observedAccessToken);
+              if (
+                !token ||
+                current.length !== observed.length ||
+                !timingSafeEqual(current, observed)
+              )
+                return {
+                  action: "stale",
+                  waiter: existing ? mapXaiCapacityWaiter(existing) : null,
+                  events: [],
+                } as const;
+            }
             const updated = await tx
               .update(tables.credentials)
               .set(
@@ -28403,6 +28453,7 @@ function createScopedSubscriptionCapacityWaiters(options: {
                   eq(tables.credentials.accountId, input.accountId),
                   options.credentialWorkspacePredicate(input.workspaceId),
                   eq(tables.credentials.id, lease.credentialId),
+                  sql`${lease.leasedUntil.toISOString()}::timestamptz > clock_timestamp()`,
                   ...(input.expectedCredentialVersion === undefined
                     ? []
                     : [eq(tables.credentials.version, input.expectedCredentialVersion)]),
@@ -28410,7 +28461,7 @@ function createScopedSubscriptionCapacityWaiters(options: {
               )
               .returning({ id: tables.credentials.id });
             if (updated.length !== 1) {
-              if (input.expectedCredentialVersion !== undefined)
+              if (input.leaseFence)
                 return {
                   action: "stale",
                   waiter: existing ? mapXaiCapacityWaiter(existing) : null,

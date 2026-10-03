@@ -1532,6 +1532,7 @@ async function settleTurnFailureInAttempt(deps: TurnFailureDeps): Promise<RunAge
     const goal = await getSessionGoal(db, input.workspaceId, input.sessionId).catch(() => null);
     const activeGoal = goal?.status === "active" ? goal : null;
     const now = new Date();
+    let claudeTokenFence: { encryptionKey: Uint8Array; observedAccessToken: string } | undefined;
     const cooldownUntil =
       scopedFailure.kind === "rate_limit"
         ? new Date(now.getTime() + Math.max(1, scopedFailure.cooldownMs ?? 60_000))
@@ -1574,7 +1575,9 @@ async function settleTurnFailureInAttempt(deps: TurnFailureDeps): Promise<RunAge
           return await recoverChangedAccount();
         if (scopedFailure.kind !== "auth" || current.usage.refreshStatus !== "reconnect")
           throw new Error("Claude refused request has no exact account receipt");
+        claudeTokenFence = { encryptionKey: key, observedAccessToken: current.secret.token };
       }
+      if (receipt) claudeTokenFence = { encryptionKey: key, observedAccessToken: receipt.token };
       if (
         receipt &&
         scopedFailure.kind === "auth" &&
@@ -1698,7 +1701,10 @@ async function settleTurnFailureInAttempt(deps: TurnFailureDeps): Promise<RunAge
         generation: scopedLease.generation,
       },
       ...(claudeFailure
-        ? { expectedCredentialVersion: providerTurn.effectiveClaudeCredentialVersion! }
+        ? {
+            expectedCredentialVersion: providerTurn.effectiveClaudeCredentialVersion!,
+            ...(claudeTokenFence ? { credentialTokenFence: claudeTokenFence } : {}),
+          }
         : {}),
       ...(!claudeFailure || scopedFailure.kind !== "rate_limit"
         ? {

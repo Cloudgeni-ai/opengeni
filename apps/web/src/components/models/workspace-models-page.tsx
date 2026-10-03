@@ -275,6 +275,7 @@ export function WorkspaceModelsPageBody({
   );
   const nav = useModelsNavigation(scope, { account, view });
   const [revision, setRevision] = useState(0);
+  const [claudeSigningIn, setClaudeSigningIn] = useState(false);
   const connectionChanged = () => {
     setRevision((value) => value + 1);
     onConnectionChange();
@@ -621,7 +622,9 @@ export function WorkspaceModelsPageBody({
         ? Boolean(orgCodex.pending || codex.pending)
         : provider === "supergrok"
           ? Boolean(orgGrok.pending || grok.pending)
-          : false;
+          : provider === "claude_subscription"
+            ? claudeSigningIn
+            : false;
     const fields = (
       <>
         <ConnectAudienceFields
@@ -709,6 +712,7 @@ export function WorkspaceModelsPageBody({
           claude={orgClaude}
           onClose={backToList}
           onConnected={(id) => (id ? orgClaudePlaces.openAccount(id) : backToList())}
+          onPendingChange={setClaudeSigningIn}
           fields={fields}
           blockedReason={blockedReason}
           afterSave={(id) => limitAfterConnect(id ?? null)}

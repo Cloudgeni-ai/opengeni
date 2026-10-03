@@ -4,7 +4,13 @@ import { bootstrapWorkspace, createDb, createSession, type DbClient } from "../s
 import {
   upsertOrganizationClaudeSubscription,
   updateOrganizationClaudeSubscription,
+  getClaudeRotationSettings,
+  selectClaudeCredentialForUse,
 } from "../src/claude-subscription-accounts";
+import {
+  getModelConnectionAccess,
+  updateModelConnectionAccess,
+} from "../src/model-connection-access";
 import {
   withRlsContext,
   withSessionRlsActorContext,
@@ -139,6 +145,57 @@ test("organization Claude admission requires canonical readiness, with no legacy
       }),
     ),
   ).toBeNull();
+});
+
+test("organization readiness matches the primary assigned to this workspace", async () => {
+  const input = await fixture();
+  const primary = await connect(input);
+  const assigned = await connect(input);
+  const target = {
+    accountId: input.grant.accountId,
+    workspaceId: null,
+    subjectId: input.grant.subjectId,
+    kind: "claude_subscription" as const,
+    connectionId: primary.account.id,
+  };
+  const original = (await getModelConnectionAccess(client.db, target))!;
+  const excluded = (await updateModelConnectionAccess(client.db, target, {
+    ...original,
+    allowedWorkspaces: [],
+  }))!;
+  const selection = {
+    accountId: input.grant.accountId,
+    workspaceId: input.grant.workspaceId,
+    subjectId: input.grant.subjectId,
+    authoritySnapshot: organizationAuthority,
+    shardKey: crypto.randomUUID(),
+    modelId: `organization-claude-subscription/${input.model.upstreamModelId}`,
+    upstreamModelId: input.model.upstreamModelId,
+  };
+  expect((await getClaudeRotationSettings(client.db, selection))?.activeCredentialId).toBe(
+    assigned.account.id,
+  );
+  expect((await selectClaudeCredentialForUse(client.db, selection)).credentialId).toBe(
+    assigned.account.id,
+  );
+  expect((await admit(input))?.id).toBe(input.model.id);
+
+  // A visible paused primary remains explicit intent, even with another healthy account.
+  await updateModelConnectionAccess(client.db, target, {
+    ...excluded,
+    allowedWorkspaces: null,
+  });
+  await updateOrganizationClaudeSubscription(client.db, {
+    ...input.actor,
+    credentialId: primary.account.id,
+    allocatorEnabled: false,
+    expectedAllocatorVersion: primary.account.allocatorVersion,
+  });
+  expect((await getClaudeRotationSettings(client.db, selection))?.activeCredentialId).toBe(
+    primary.account.id,
+  );
+  expect((await selectClaudeCredentialForUse(client.db, selection)).credentialId).toBeNull();
+  expect(await admit(input)).toBeNull();
 });
 
 test("session-source admission keeps the stored pool instead of selecting a live organization pool", async () => {
