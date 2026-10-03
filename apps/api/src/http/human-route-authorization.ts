@@ -149,6 +149,7 @@ export async function requireOrganizationRouteAdministrator(
   organizationId: string,
   permission: Permission,
 ): Promise<{ subjectId: string }> {
+  const delegated = verifiedDelegatedHumanAuthorizationForRequest(context.req.raw);
   const access = await requireAccessContext(context, deps);
   const service = accountScopedApiKeyWorkspaceAuthority(access);
   if (service) {
@@ -166,7 +167,23 @@ export async function requireOrganizationRouteAdministrator(
   if (deps.settings.productAccessMode === "local") {
     return requireCanonicalLocalAccountAdministrator(context, deps, organizationId);
   }
-  const delegated = verifiedDelegatedHumanAuthorizationForRequest(context.req.raw);
+  const nativeGrant = access.workspaceGrants.find(
+    (candidate) => candidate.subjectId === access.subjectId,
+  );
+  if (
+    !delegated &&
+    !context.req.header("authorization") &&
+    nativeGrant &&
+    accessGrantAuthorizationFromContext(access, nativeGrant).canonicalManagedHumanSession
+  ) {
+    // Native identity admission preserves the DB lifecycle's live role and
+    // existence checks (404), without borrowing a cookie for a cached service,
+    // out-of-scope delegation, or bearer-selected context.
+    const identity = await requireManagedHumanRouteIdentity(context, deps, permission);
+    if (identity.subjectId !== access.subjectId)
+      throw new HTTPException(403, { message: "Organization actor changed during authorization" });
+    return identity;
+  }
   if (delegated && permission.startsWith("account:")) {
     const verified = await requireVerifiedDelegatedHumanContext(context, deps);
     const account = verified.context.accountGrants.find(
@@ -185,7 +202,6 @@ export async function requireOrganizationRouteAdministrator(
   if (!grant)
     throw new HTTPException(403, { message: "Organization administration is not authorized" });
   const authorization = accessGrantAuthorizationFromContext(access, grant);
-  if (authorization.canonicalManagedHumanSession) return { subjectId: access.subjectId };
   if (isVerifiedDelegatedHumanAuthorization(authorization)) {
     const proof = verifiedDelegatedHumanAuthorizationForRequest(context.req.raw)!;
     // Account capabilities remain literal. Workspace admin never expands to
