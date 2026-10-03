@@ -173,9 +173,21 @@ test.skipIf(!native)(
         ...f.options,
         browserExecutablePath: "/bin/sh",
       });
-      await expect(
-        wrongExecutable.ownedProcessIdentity(f.endpoint, f.browserPid),
-      ).rejects.toThrow();
+      if (process.platform === "linux") {
+        // Discovery returns no candidate when the actual executable mismatches.
+        expect(await wrongExecutable.ownedProcessIdentity(f.endpoint, f.browserPid)).toBeNull();
+      }
+      // A recorded PID exercises explicit identity rejection, not discovery's
+      // no-match result. Retire this witness before the sidecar-free checks.
+      const browserPidFile = join(f.directory, "browser.pid");
+      await writeFile(browserPidFile, String(f.browserPid), { mode: 0o600 });
+      try {
+        await expect(
+          wrongExecutable.ownedProcessIdentity(f.endpoint, f.browserPid),
+        ).rejects.toThrow("executable");
+      } finally {
+        await rm(browserPidFile);
+      }
       const lock = join(f.profileDirectory, "SingletonLock");
       await rm(lock);
       await symlink(`synthetic-host-${f.daemon.pid}`, lock);
