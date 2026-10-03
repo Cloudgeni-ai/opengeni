@@ -16,6 +16,7 @@ import {
   SessionMemoryScope,
   normalizeAutomaticSessionTitle,
   metadataWithTurnExecutionPolicyV1,
+  mergeResourceRefs,
   scheduledOccurrencePayloadUtf8Bytes,
   stableJson,
   TurnExecutionPolicyV1,
@@ -648,7 +649,7 @@ export function createScheduledTaskActivities(services: () => Promise<ControlAct
           ? settingsWithSessionMcpServerMetadata(connectionSettings, connectionTarget.mcpServers)
           : connectionSettings,
         tools: connectionTools,
-        resources: connectionTarget?.resources ?? task.agentConfig.resources,
+        resources: mergeResourceRefs(connectionTarget?.resources ?? [], task.agentConfig.resources),
         source: taskAuthoritySubjectId
           ? { kind: "subject", subjectId: taskAuthoritySubjectId, accountId: task.accountId }
           : { kind: "none" },

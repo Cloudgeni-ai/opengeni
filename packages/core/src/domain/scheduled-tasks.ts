@@ -8,6 +8,7 @@ import {
   scheduledTaskKnowledgeSource,
   requireScheduledTaskKnowledgeSource,
   scheduledOccurrencePayloadUtf8Bytes,
+  mergeResourceRefs,
   SCHEDULED_TASK_OCCURRENCE_PAYLOAD_MAX_BYTES,
   SCHEDULED_TASK_OCCURRENCE_PAYLOAD_INGRESS_HEADROOM_BYTES,
 } from "@opengeni/contracts";
@@ -231,9 +232,7 @@ export function scheduledConnectionSurfaceEligibility(
   target: Pick<Session, "firstPartyMcpTools" | "firstPartyMcpPermissions"> | null,
 ): { googleDrivePublicationEnabled: boolean; atlassianEnabled: boolean } {
   const tools = target?.firstPartyMcpTools ?? resolveFirstPartyMcpToolPolicy(settings).default;
-  const permissions = target?.firstPartyMcpPermissions?.length
-    ? target.firstPartyMcpPermissions
-    : DEFAULT_FIRST_PARTY_MCP_PERMISSIONS;
+  const permissions = target?.firstPartyMcpPermissions ?? DEFAULT_FIRST_PARTY_MCP_PERMISSIONS;
   return {
     googleDrivePublicationEnabled:
       tools.includes("editable_artifact_export") &&
@@ -482,7 +481,7 @@ export async function createValidatedScheduledTask(input: {
             agentConfig.tools,
             input.grant.subjectId,
           ),
-          resources: target?.resources ?? agentConfig.resources,
+          resources: mergeResourceRefs(target?.resources ?? [], agentConfig.resources),
           source: personalConnectionDelegationSourceForGrant(input.grant),
           authoritySelections: input.payload.connectionAccounts,
           ...scheduledConnectionSurfaceEligibility(effectiveRuntimeSettings, target),
@@ -1198,11 +1197,15 @@ export async function validatedScheduledTaskUpdate(input: {
   /** Proves the bot may post in a newly chosen task Slack channel. */
   verifySlackChannel?: ScheduledTaskSlackChannelVerifier | undefined;
 }): Promise<UpdateScheduledTaskInput> {
+  const requestedPrompt =
+    input.payload.prompt ??
+    input.payload.agentConfigPatch?.prompt ??
+    input.payload.agentConfig?.prompt;
+  if (requestedPrompt !== undefined && !requestedPrompt.trim())
+    throw new HTTPException(422, { message: "scheduled task prompt is required" });
   const retainedPrompt =
-    input.payload.agentConfig === undefined &&
-    input.payload.prompt === undefined &&
-    input.payload.agentConfigPatch?.prompt === undefined
-      ? input.existing.agentConfig.prompt
+    input.payload.agentConfig === undefined
+      ? (requestedPrompt ?? input.existing.agentConfig.prompt)
       : undefined;
   if (
     input.payload.expectedExecutionDigest !== undefined &&
@@ -1260,12 +1263,18 @@ export async function validatedScheduledTaskUpdate(input: {
     const retargeting =
       input.existing.runMode !== "existing_session" ||
       target?.id !== input.existing.targetSessionId;
+    const previousTargetSessionId =
+      input.existing.runMode === "existing_session"
+        ? input.existing.targetSessionId
+        : input.existing.runMode === "reusable_session"
+          ? input.existing.reusableSessionId
+          : null;
     const previousTarget =
-      retargeting && input.existing.runMode === "existing_session" && input.existing.targetSessionId
+      retargeting && previousTargetSessionId
         ? await validateScheduledTaskTarget({
             ...input,
             runMode: "existing_session",
-            targetSessionId: input.existing.targetSessionId,
+            targetSessionId: previousTargetSessionId,
             departingTarget: true,
             variableSetId: null,
             rigId: null,
@@ -1402,6 +1411,10 @@ export async function validatedScheduledTaskUpdate(input: {
     });
   const existingTarget = input.existing.targetSessionId;
   const nextRunMode = input.payload.runMode ?? input.existing.runMode;
+  const materializedReusable =
+    input.existing.runMode === "reusable_session" &&
+    nextRunMode === "reusable_session" &&
+    input.existing.reusableSessionId !== null;
   const nextTargetSessionId =
     input.payload.targetSessionId !== undefined
       ? input.payload.targetSessionId
@@ -1536,7 +1549,7 @@ export async function validatedScheduledTaskUpdate(input: {
     // bounded input. Legacy stored text, resources and selections stay exact.
     update.agentConfig = {
       ...input.existing.agentConfig,
-      ...(patch.prompt !== undefined ? { prompt: patch.prompt.trim() } : {}),
+      ...(patch.prompt !== undefined ? { prompt: patch.prompt } : {}),
       ...(model !== undefined && model !== null ? { model } : {}),
       ...(patch.reasoningEffort !== undefined ? { reasoningEffort: patch.reasoningEffort } : {}),
     };
@@ -1544,17 +1557,6 @@ export async function validatedScheduledTaskUpdate(input: {
     // Reuse the locked-row CAS so that merging this snapshot cannot erase a
     // concurrent config edit. The caller receives 409, never an automatic retry.
     update.expectedExecutionDigest = input.existing.executionDigest;
-    if (patch.prompt !== undefined) {
-      if (
-        scheduledOccurrencePayloadUtf8Bytes(update.agentConfig) >
-        SCHEDULED_TASK_OCCURRENCE_PAYLOAD_MAX_BYTES -
-          SCHEDULED_TASK_OCCURRENCE_PAYLOAD_INGRESS_HEADROOM_BYTES
-      )
-        throw new HTTPException(422, {
-          message:
-            "Updated scheduled message and attachments exceed the supported occurrence payload",
-        });
-    }
   }
   if (input.payload.agentConfig !== undefined) {
     const nextAgentConfig = await validateScheduledTaskAgentConfig({
@@ -1573,6 +1575,7 @@ export async function validatedScheduledTaskUpdate(input: {
             : input.existing.reusableSessionId,
       },
       ...(input.toolsProvided !== undefined ? { toolsProvided: input.toolsProvided } : {}),
+      ...(materializedReusable ? { retainedCreationConfig: input.existing.agentConfig } : {}),
     });
     if (
       input.existing.reusableSessionId &&
@@ -1586,7 +1589,12 @@ export async function validatedScheduledTaskUpdate(input: {
           "cannot change the OpenGeni Slack bot connection of a task with a live reusable session; recreate the task",
       });
     }
-    if (retainedPrompt !== undefined) nextAgentConfig.prompt = retainedPrompt;
+    // Update text is exact, even when a full form submission reuses the saved
+    // prompt while changing another setting. Creation keeps its trim convention.
+    nextAgentConfig.prompt = retainedPrompt ?? input.payload.agentConfig.prompt;
+    if (retainedPrompt !== undefined) {
+      nextAgentConfig.resources = input.existing.agentConfig.resources;
+    }
     update.agentConfig = nextAgentConfig;
   }
   if (
@@ -1602,6 +1610,18 @@ export async function validatedScheduledTaskUpdate(input: {
   const nextAgentConfig = {
     ...(update.agentConfig ?? input.existing.agentConfig),
   };
+  // Retargeting rewrites a narrow patch into a full config above. Check the
+  // exact final message after restoring retained fields, regardless of path.
+  // An unedited legacy prompt remains movable even when above today's limit.
+  if (
+    requestedPrompt !== undefined &&
+    scheduledOccurrencePayloadUtf8Bytes(nextAgentConfig) >
+      SCHEDULED_TASK_OCCURRENCE_PAYLOAD_MAX_BYTES -
+        SCHEDULED_TASK_OCCURRENCE_PAYLOAD_INGRESS_HEADROOM_BYTES
+  )
+    throw new HTTPException(422, {
+      message: "Updated scheduled message and attachments exceed the supported occurrence payload",
+    });
   await validateScheduledTaskSlackChannel({
     grant: input.grant,
     authorization: input.authorization,
@@ -1642,7 +1662,11 @@ export async function validatedScheduledTaskUpdate(input: {
     (input.payload.metadata !== undefined &&
       !isDeepStrictEqual(input.payload.metadata, input.existing.metadata)) ||
     (input.existing.status === "paused" && input.payload.status === "active");
-  if (materialExecutionChange && nextRunMode !== "existing_session") {
+  if (
+    materialExecutionChange &&
+    nextRunMode !== "existing_session" &&
+    (!materializedReusable || nextAgentConfig.model !== input.existing.agentConfig.model)
+  ) {
     const beforeUpdateCommit = workspaceCustomModelCommitGuard({
       settings: input.settings,
       accountId: input.existing.accountId,
@@ -1680,7 +1704,7 @@ export async function validatedScheduledTaskUpdate(input: {
       input.settings,
       ownerSubjectId ? { subjectId: ownerSubjectId } : {},
     );
-    const nextTarget = await validateScheduledTaskTarget({
+    let nextTarget = await validateScheduledTaskTarget({
       db: input.db,
       sessionAuthorization: input.sessionAuthorization,
       authorizationSurface: input.authorizationSurface,
@@ -1694,6 +1718,15 @@ export async function validatedScheduledTaskUpdate(input: {
       rigId: input.payload.rigId !== undefined ? input.payload.rigId : input.existing.rigId,
       agentConfig: nextAgentConfig,
     });
+    if (materializedReusable) {
+      nextTarget = await getSession(
+        input.db,
+        input.existing.workspaceId,
+        input.existing.reusableSessionId!,
+      );
+      if (!nextTarget || nextTarget.accountId !== input.existing.accountId)
+        throw new HTTPException(409, { message: "Scheduled task chat is unavailable" });
+    }
     const nextConnectionTools = await scheduledConnectionTools(
       input.db,
       input.grant.workspaceId,
@@ -1702,10 +1735,25 @@ export async function validatedScheduledTaskUpdate(input: {
       nextAgentConfig.tools,
       ownerSubjectId ?? undefined,
     );
-    const priorTarget =
-      input.existing.runMode === "existing_session" && input.existing.targetSessionId
-        ? await getSession(input.db, input.existing.workspaceId, input.existing.targetSessionId)
-        : null;
+    const priorTargetSessionId =
+      input.existing.runMode === "existing_session"
+        ? input.existing.targetSessionId
+        : input.existing.runMode === "reusable_session"
+          ? input.existing.reusableSessionId
+          : null;
+    const priorTarget = priorTargetSessionId
+      ? priorTargetSessionId === nextTarget?.id
+        ? nextTarget
+        : await getSession(input.db, input.existing.workspaceId, priorTargetSessionId)
+      : null;
+    const priorConnectionResources = mergeResourceRefs(
+      priorTarget?.resources ?? [],
+      input.existing.agentConfig.resources,
+    );
+    const nextConnectionResources = mergeResourceRefs(
+      nextTarget?.resources ?? [],
+      nextAgentConfig.resources,
+    );
     const priorConnectionTools = await scheduledConnectionTools(
       input.db,
       input.grant.workspaceId,
@@ -1714,11 +1762,13 @@ export async function validatedScheduledTaskUpdate(input: {
       input.existing.agentConfig.tools,
       ownerSubjectId ?? undefined,
     );
-    const priorMcpIds = new Set(
-      [...(priorTarget?.tools ?? input.existing.agentConfig.tools), ...priorConnectionTools]
+    const priorAccountSurfaceIds = new Set(
+      [...input.existing.agentConfig.tools, ...(priorTarget?.tools ?? []), ...priorConnectionTools]
         .filter((tool) => tool.kind === "mcp")
         .map((tool) => tool.id),
     );
+    if (personalGitHubRepositoryResources(priorConnectionResources).length)
+      priorAccountSurfaceIds.add(PERSONAL_GITHUB_CONNECTION_SURFACE_ID);
     const nextMcpIds = new Set(
       nextConnectionTools.filter((tool) => tool.kind === "mcp").map((tool) => tool.id),
     );
@@ -1729,22 +1779,21 @@ export async function validatedScheduledTaskUpdate(input: {
     );
     if (nextSurfaceEligibility.googleDrivePublicationEnabled)
       nextAccountSurfaceIds.add(GOOGLE_DRIVE_PUBLICATION_SERVER_ID);
-    if (
-      personalGitHubRepositoryResources(nextTarget?.resources ?? nextAgentConfig.resources).length
-    )
+    if (personalGitHubRepositoryResources(nextConnectionResources).length)
       nextAccountSurfaceIds.add(PERSONAL_GITHUB_CONNECTION_SURFACE_ID);
     const movingChat =
       nextRunMode !== input.existing.runMode ||
       nextTargetSessionId !== input.existing.targetSessionId;
-    // Removing a selected tool also removes its inherited account choice.
-    // Keep explicit caller selections subject to normal validation, and never
-    // reset accounts for retained tools or dedicated first-party surfaces.
+    // Removing a selected tool or repository also removes its inherited account choice.
+    // Keep explicit caller selections subject to normal validation, and retain
+    // account choices for unchanged tools and repository selections.
     const authoritySelections = (nextAgentConfig.connectionAccounts ?? []).filter(
       (selection) =>
         input.payload.connectionAccounts !== undefined ||
         (movingChat
           ? nextAccountSurfaceIds.has(selection.serverId)
-          : !priorMcpIds.has(selection.serverId) || nextMcpIds.has(selection.serverId)),
+          : !priorAccountSurfaceIds.has(selection.serverId) ||
+            nextAccountSurfaceIds.has(selection.serverId)),
     );
     const acceptedConnections = await freezeConnectionAccounts({
       db: input.db,
@@ -1754,7 +1803,7 @@ export async function validatedScheduledTaskUpdate(input: {
         ? settingsWithSessionMcpServerMetadata(runtimeSettings, nextTarget.mcpServers)
         : runtimeSettings,
       tools: nextConnectionTools,
-      resources: nextTarget?.resources ?? nextAgentConfig.resources,
+      resources: nextConnectionResources,
       source: ownerSubjectId
         ? { kind: "subject", subjectId: ownerSubjectId, accountId: input.existing.accountId }
         : { kind: "none" },
@@ -1837,7 +1886,14 @@ export async function validatedScheduledTaskUpdate(input: {
     rigId: input.payload.rigId !== undefined ? input.payload.rigId : input.existing.rigId,
     agentConfig: update.agentConfig ?? input.existing.agentConfig,
   });
-  if (!knowledgeSource) {
+  if (
+    !knowledgeSource &&
+    !(
+      materializedReusable &&
+      isDeepStrictEqual(nextAgentConfig.machineTarget, input.existing.agentConfig.machineTarget) &&
+      nextAgentConfig.sandboxBackend === input.existing.agentConfig.sandboxBackend
+    )
+  ) {
     await validateScheduledTaskMachineTarget({
       settings: input.settings,
       db: input.db,
@@ -2175,6 +2231,8 @@ async function validateScheduledTaskAgentConfig(input: {
   };
   workspaceId: string;
   toolsProvided?: boolean;
+  /** Only an already materialized reusable chat may retain unused creation defaults. */
+  retainedCreationConfig?: ScheduledTaskAgentConfig;
 }): Promise<ScheduledTaskAgentConfig> {
   const existingChat = input.payload.runMode === "existing_session";
   if (existingChat)
@@ -2186,6 +2244,9 @@ async function validateScheduledTaskAgentConfig(input: {
       },
       toolsProvided: true,
     };
+  const unchangedCreationField = (key: keyof ScheduledTaskAgentConfig) =>
+    input.retainedCreationConfig !== undefined &&
+    isDeepStrictEqual(input.payload.agentConfig[key], input.retainedCreationConfig[key]);
   const actor = scheduledTaskInitiatorForGrant(input.grant).actor;
   const parent =
     actor && !existingChat ? await getSession(input.db, input.workspaceId, actor.sessionId) : null;
@@ -2198,10 +2259,12 @@ async function validateScheduledTaskAgentConfig(input: {
   try {
     bundledSkillIds = existingChat
       ? undefined
-      : resolveBundledSkillSelection(
-          input.payload.agentConfig.bundledSkillIds,
-          parent?.bundledSkillIds,
-        );
+      : unchangedCreationField("bundledSkillIds")
+        ? input.payload.agentConfig.bundledSkillIds
+        : resolveBundledSkillSelection(
+            input.payload.agentConfig.bundledSkillIds,
+            parent?.bundledSkillIds,
+          );
   } catch (error) {
     throw new HTTPException(422, {
       message: error instanceof Error ? error.message : "Invalid bundled Skill selection",
@@ -2212,10 +2275,13 @@ async function validateScheduledTaskAgentConfig(input: {
   // session choke points (a `scheduled_tasks:manage` holder could otherwise set
   // a model the host does not expose). An omitted model inherits the host
   // default downstream, which is always configured.
-  const model = canonicalConfiguredModel(input.settings, input.payload.agentConfig.model);
+  const model = unchangedCreationField("model")
+    ? input.payload.agentConfig.model
+    : canonicalConfiguredModel(input.settings, input.payload.agentConfig.model);
   // Same policy vetting as the session choke points; an omitted model flows
   // through session creation later, where the effective default is vetted.
-  await assertWorkspaceModelPolicyAllows(input.db, input.settings, input.workspaceId, model);
+  if (!unchangedCreationField("model"))
+    await assertWorkspaceModelPolicyAllows(input.db, input.settings, input.workspaceId, model);
   const resources = normalizeResources(input.payload.agentConfig.resources ?? []);
   const runtimeSettings = await settingsWithEnabledCapabilityMcpServers(
     input.db,
@@ -2223,7 +2289,10 @@ async function validateScheduledTaskAgentConfig(input: {
     input.settings,
     { subjectId: input.grant.subjectId },
   );
-  const requestedTools = validateToolRefs(input.payload.agentConfig.tools ?? [], runtimeSettings);
+  const retainTools = unchangedCreationField("tools");
+  const requestedTools = retainTools
+    ? input.payload.agentConfig.tools
+    : validateToolRefs(input.payload.agentConfig.tools ?? [], runtimeSettings);
   const workspace = await requireWorkspace(input.db, input.workspaceId);
   if (
     parent?.tenancy?.visibility === "private" &&
@@ -2244,7 +2313,7 @@ async function validateScheduledTaskAgentConfig(input: {
   // kept falling into (a maintenance task that cannot reach its workspace's
   // notebook MCP cannot do its job).
   const tools =
-    (input.toolsProvided ?? true)
+    retainTools || (input.toolsProvided ?? true)
       ? requestedTools
       : withWorkspaceDefaultMcpTools(
           requestedTools,
@@ -2312,7 +2381,7 @@ async function validateScheduledTaskAgentConfig(input: {
     );
   }
   const requestedMaxDepth = input.payload.agentConfig.maxNestedAgentDepth;
-  if (requestedMaxDepth !== undefined) {
+  if (requestedMaxDepth !== undefined && !unchangedCreationField("maxNestedAgentDepth")) {
     const workspaceMaxDepth = workspace.settings.maxNestedAgentDepth;
     const deploymentPolicy = await getNestedAgentDepthDeploymentPolicy(input.db);
     const inheritedMaxDepth =

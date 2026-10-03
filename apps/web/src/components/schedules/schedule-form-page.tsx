@@ -66,6 +66,7 @@ import {
   deriveScheduleName,
   draftFromTemplate,
   isKnowledgeSync,
+  mergeScheduleConnectionAccounts,
   nextRunOf,
   newScheduleDraft,
   ownsSchedule,
@@ -356,6 +357,12 @@ function AgentScheduleForm({
       initial.mcpServerIds ??
       [...context.selectedCapabilityToolIds].filter((id) => id !== "opengeni"),
   }));
+  const savedReusableSessionId =
+    editing && task?.runMode === "reusable_session" ? task.reusableSessionId : null;
+  const materializedSessionId =
+    draft.runMode === "reusable_session" ? savedReusableSessionId : null;
+  const inheritsChatSettings =
+    draft.runMode === "existing_session" || Boolean(materializedSessionId);
   const [errors, setErrors] = useState<FormErrors>({});
   const [advancedOpen, setAdvancedOpen] = useState(false);
   const [accessChange, setAccessChange] = useState<{
@@ -420,11 +427,7 @@ function AgentScheduleForm({
   // A machine target picks the first machine that can run as soon as the
   // fleet loads.
   useEffect(() => {
-    if (
-      draft.runMode === "existing_session" ||
-      draft.executionTarget !== "machine" ||
-      draft.machineSandboxId
-    ) {
+    if (inheritsChatSettings || draft.executionTarget !== "machine" || draft.machineSandboxId) {
       return;
     }
     const firstSelectable = scheduledMachines.find((machine) =>
@@ -433,23 +436,25 @@ function AgentScheduleForm({
     if (firstSelectable) {
       setDraft((current) => ({ ...current, machineSandboxId: firstSelectable.sandboxId }));
     }
-  }, [draft.executionTarget, draft.machineSandboxId, draft.runMode, scheduledMachines]);
+  }, [draft.executionTarget, draft.machineSandboxId, inheritsChatSettings, scheduledMachines]);
 
   /* ----- destination chats */
   const [sessions, setSessions] = useState<Session[]>([]);
   const [sessionsLoading, setSessionsLoading] = useState(false);
   const [sessionsError, setSessionsError] = useState<unknown>(null);
   const [sessionsRetry, setSessionsRetry] = useState(0);
-  const needsSessions = draft.runMode === "existing_session" && access.canTargetSessions;
+  const needsSessions = inheritsChatSettings && access.canTargetSessions;
   const sourceSessionId = mode.kind === "create" ? mode.sourceSessionId : undefined;
-  const targetSessionId = draft.targetSessionId;
+  const targetSessionId = materializedSessionId ?? draft.targetSessionId;
   useEffect(() => {
     if (!needsSessions) return;
     let live = true;
     setSessionsLoading(true);
     setSessionsError(null);
     void Promise.allSettled([
-      client.listSessions(workspaceId, { limit: 100 }),
+      materializedSessionId
+        ? Promise.resolve([] as Session[])
+        : client.listSessions(workspaceId, { limit: 100 }),
       targetSessionId
         ? client.getSession(workspaceId, targetSessionId, { fresh: true })
         : Promise.resolve(null),
@@ -480,18 +485,17 @@ function AgentScheduleForm({
     return () => {
       live = false;
     };
-  }, [client, needsSessions, targetSessionId, workspaceId, sessionsRetry]);
+  }, [client, materializedSessionId, needsSessions, targetSessionId, workspaceId, sessionsRetry]);
 
   /* ----- connected accounts for the chosen tools */
-  const selectedIds =
-    draft.runMode === "existing_session"
-      ? (sessions.find((session) => session.id === draft.targetSessionId)?.effectiveToolPolicy
-          ?.configuredIds ??
-        sessions
-          .find((session) => session.id === draft.targetSessionId)
-          ?.tools.map((tool) => tool.id) ??
-        [])
-      : (draft.mcpServerIds ?? []);
+  const accountTargetSession = inheritsChatSettings
+    ? sessions.find((session) => session.id === targetSessionId)
+    : undefined;
+  const selectedIds = inheritsChatSettings
+    ? (accountTargetSession?.effectiveToolPolicy?.configuredIds ??
+      accountTargetSession?.tools.map((tool) => tool.id) ??
+      [])
+    : (draft.mcpServerIds ?? []);
   const connectionAccounts = useConnectionAccounts(
     context.client,
     {
@@ -549,10 +553,7 @@ function AgentScheduleForm({
     isMachineComputeSelectable(machine.state),
   );
   const cantRunHere =
-    machineOnly &&
-    draft.runMode !== "existing_session" &&
-    !fleet.loading &&
-    selectableMachines.length === 0;
+    machineOnly && !inheritsChatSettings && !fleet.loading && selectableMachines.length === 0;
   // Editing a schedule whose compute is unchanged stays possible (a rename, a
   // new cadence); only a new or changed target has to be one that can run.
   const computeChanged =
@@ -606,7 +607,7 @@ function AgentScheduleForm({
     ...(eachRun === "new_session_per_run"
       ? []
       : [ifStillRunning === "skip" ? "Skip if still running" : "Queue if still running"]),
-    ...(eachRun === "existing_session" ? [] : [whereLabel]),
+    ...(inheritsChatSettings ? [] : [whereLabel]),
     // A task that continues an existing chat never posts on its own.
     ...(eachRun !== "existing_session" && draft.slackBotChannelId ? ["Posts to Slack"] : []),
     ...(eachRun === "existing_session"
@@ -626,15 +627,11 @@ function AgentScheduleForm({
     if (draft.runMode === "existing_session" && !draft.targetSessionId) {
       next.target = "Pick the chat each run posts into.";
     }
-    if (
-      draft.runMode !== "existing_session" &&
-      draft.executionTarget === "machine" &&
-      !draft.machineSandboxId
-    ) {
+    if (!inheritsChatSettings && draft.executionTarget === "machine" && !draft.machineSandboxId) {
       next.machine = "Pick a connected machine.";
     }
     if (
-      draft.runMode !== "existing_session" &&
+      !inheritsChatSettings &&
       draft.executionTarget === "managed" &&
       machineOnly &&
       computeChanged
@@ -652,8 +649,19 @@ function AgentScheduleForm({
     if (Object.values(next).some(Boolean) || cadenceProblem) return false;
     const submitted: ScheduleDraft = {
       ...draft,
-      connectionAccounts: preserveAccounts
-        ? initial.connectionAccounts
+      connectionAccounts: editing
+        ? accountsChanged
+          ? mergeScheduleConnectionAccounts(
+              initial.connectionAccounts ?? [],
+              connectionAccounts.selections,
+              connectionAccounts.accountGroups.map((group) => group.serverId),
+              {
+                selectedServerIds: selectedIds,
+                resources: draft.resources,
+                ...(accountTargetSession ? { chat: accountTargetSession } : {}),
+              },
+            )
+          : initial.connectionAccounts
         : connectionAccounts.selections,
     };
     const submitNow = new Date();
@@ -744,6 +752,7 @@ function AgentScheduleForm({
     (draft.runMode === "existing_session" &&
       (!sessions.some((session) => session.id === draft.targetSessionId) ||
         (accessChange && !adoptSessionSettings))) ||
+    (accountsChanged && inheritsChatSettings && !accountTargetSession) ||
     (!preserveAccounts &&
       (connectionAccounts.loading ||
         Boolean(connectionAccounts.error) ||
@@ -766,9 +775,11 @@ function AgentScheduleForm({
             : draft.runMode === "existing_session" &&
                 !sessions.some((session) => session.id === draft.targetSessionId)
               ? "Choose an available chat."
-              : accessChange && !adoptSessionSettings
-                ? "Review the destination chat’s attachments before saving."
-                : undefined;
+              : accountsChanged && inheritsChatSettings && !accountTargetSession
+                ? "Chat settings couldn't load. Reload before changing accounts."
+                : accessChange && !adoptSessionSettings
+                  ? "Review the destination chat’s attachments before saving."
+                  : undefined;
 
   const selectedSession = sessions.find((session) => session.id === draft.targetSessionId);
   const sessionOptions: SelectOption[] = [
@@ -851,7 +862,9 @@ function AgentScheduleForm({
                 },
                 {
                   value: "reusable_session",
-                  label: "Create a chat for this schedule",
+                  label: savedReusableSessionId
+                    ? "Use this schedule's chat"
+                    : "Create a chat for this schedule",
                   description: "Keep the results together in one conversation.",
                 },
                 {
@@ -862,6 +875,22 @@ function AgentScheduleForm({
               ]}
               className="max-w-full"
             />
+            {materializedSessionId ? (
+              <p className="m-0 text-xs leading-4.5 text-fg-muted">
+                {access.canTargetSessions ? (
+                  <Link
+                    className="underline underline-offset-2"
+                    to="/workspaces/$workspaceId/sessions/$sessionId"
+                    params={{ workspaceId, sessionId: materializedSessionId }}
+                  >
+                    Open this schedule's chat
+                  </Link>
+                ) : (
+                  "Open this schedule's chat"
+                )}{" "}
+                to change its model, tools or machine.
+              </p>
+            ) : null}
           </Field>
           {eachRun === "existing_session" ? (
             <Field label="Send to" error={errors.target}>
@@ -956,6 +985,7 @@ function AgentScheduleForm({
               modelsError={modelCatalog.error}
               canAttachOpenGeniTool={canAttachOpenGeniTool}
               existingChat={draft.runMode === "existing_session"}
+              inheritsChatSettings={inheritsChatSettings}
             />
           </Field>
           {connectionAccounts.accountGroups.length > 0 || connectionAccounts.error ? (
@@ -1027,7 +1057,7 @@ function AgentScheduleForm({
               suppressAutofill
             />
           </Field>
-          {context.clientConfig.agentConfig?.enabled && eachRun !== "existing_session" ? (
+          {context.clientConfig.agentConfig?.enabled && !inheritsChatSettings ? (
             <ScheduleAgentCapabilities
               workspaceId={workspaceId}
               value={draft.agentCapabilities}
@@ -1065,7 +1095,7 @@ function AgentScheduleForm({
                   />
                 </Field>
               ) : null}
-              {eachRun !== "existing_session" ? (
+              {!inheritsChatSettings ? (
                 <Field label="Where it runs" error={errors.machine}>
                   <SelectMenu
                     options={whereOptions}
@@ -1082,7 +1112,7 @@ function AgentScheduleForm({
                   />
                 </Field>
               ) : null}
-              {eachRun !== "existing_session" &&
+              {!inheritsChatSettings &&
               draft.executionTarget === "machine" &&
               draft.machineSandboxId ? (
                 <Field
@@ -1098,7 +1128,7 @@ function AgentScheduleForm({
                   />
                 </Field>
               ) : null}
-              {fleet.error && eachRun !== "existing_session" ? (
+              {fleet.error && !inheritsChatSettings ? (
                 <p className="-mt-3 text-xs leading-4.5 text-danger">
                   Connected machines couldn't load. Refresh the page and try again.
                 </p>

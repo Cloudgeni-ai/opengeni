@@ -13,6 +13,7 @@ export function testSettings(overrides: Partial<Settings> = {}): Settings {
     environment: "test",
     deploymentRevision: "dev",
     databaseUrl: "postgres://opengeni:opengeni@127.0.0.1:5432/opengeni",
+    apiDatabasePoolMax: 32,
     dbSchema: "",
     rlsStrategy: "force",
     runtimeDatabaseRole: "opengeni_app",
