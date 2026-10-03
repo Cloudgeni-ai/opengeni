@@ -265,7 +265,7 @@ const expectedWriters: Record<string, ExpectedWriter> = {
     inserts: 1,
     contract: "canonical",
   },
-  "packages/db/src/index.ts#recoverSessionDispatch": { inserts: 2, contract: "canonical" },
+  "packages/db/src/index.ts#recoverSessionDispatch": { inserts: 3, contract: "canonical" },
   "packages/db/src/index.ts#addSessionSystemUpdateWithSourceMutation": {
     // pending event, producer-side supersession event, consumed-on-arrival
     // cancellation, goal.resumed

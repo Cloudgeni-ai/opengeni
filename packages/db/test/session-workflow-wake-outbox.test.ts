@@ -29,6 +29,7 @@ import {
   mutateSessionControlInTransaction,
   mutateWorkspaceControlInTransaction,
   requestSessionTurnRecovery,
+  recoverSessionDispatch,
   settleSessionAttemptInterruptions,
   setSessionGoalStatus,
   submitHumanPromptInTransaction,
@@ -141,6 +142,144 @@ async function wakeRow(workspaceId: string, sessionId: string) {
 }
 
 describe("transactional session workflow wake outbox", () => {
+  test.each(["HEARTBEAT", "SCHEDULE_TO_START"] as const)(
+    "a %s timeout before durable claim fences the late dispatch without consuming input",
+    async (timeoutType) => {
+      const ctx = await fixture();
+      const workspaceId = ctx.grant.workspaceId!;
+      const sessionId = ctx.session.id;
+      const workflowId = `session-${sessionId}`;
+      const attemptId = crypto.randomUUID();
+      await addSessionSystemUpdate(client.db, {
+        accountId: ctx.grant.accountId,
+        workspaceId,
+        sessionId,
+        kind: "agent_message",
+        classification: "info",
+        sourceId: crypto.randomUUID(),
+        dedupeKey: crypto.randomUUID(),
+        summary: "pending before admission",
+        payload: {
+          type: "agent_message",
+          text: "pending before admission",
+          operationId: crypto.randomUUID(),
+        },
+      });
+      const pending = await listOutstandingSessionSystemUpdates(client.db, workspaceId, sessionId);
+      const recover = () =>
+        recoverSessionDispatch(client.db, workspaceId, {
+          sessionId,
+          attemptId,
+          timeoutType,
+          maxRedispatches: 3,
+        });
+      // Match the incidents: Temporal timeout/recovery completes before the
+      // worker's delayed transaction materializes its system turn and owner.
+      await recover();
+      const late = await claimSessionWorkForAttempt(client.db, workspaceId, {
+        sessionId,
+        workflowId,
+        workflowRunId: crypto.randomUUID(),
+        attemptId,
+        dispatchId: crypto.randomUUID(),
+        trigger: { kind: "next" },
+      });
+      expect(late).toEqual({ action: "unclaimed", reason: "dispatch-expired" });
+      expect(await listSessionTurns(client.db, workspaceId, sessionId)).toEqual([]);
+      expect(await listOutstandingSessionSystemUpdates(client.db, workspaceId, sessionId)).toEqual(
+        pending,
+      );
+      const expiredEvents = await listSessionEvents(client.db, workspaceId, sessionId);
+      await recover();
+      expect(await listSessionEvents(client.db, workspaceId, sessionId)).toEqual(expiredEvents);
+
+      const subjectId = `api_key:${crypto.randomUUID()}`;
+      const accepted = await withWorkspaceSubjectRls(client.db, workspaceId, subjectId, (db) =>
+        db.transaction((tx) =>
+          submitHumanPromptInTransaction(tx as unknown as typeof db, {
+            accountId: ctx.grant.accountId,
+            workspaceId,
+            sessionId,
+            subjectId,
+            actor: { type: "service", subjectId },
+            operationKey: crypto.randomUUID(),
+            delivery: "send",
+            text: "service prompt behind the delayed dispatch",
+            resources: [],
+            reasoningEffortFallback: "low",
+            source: "api",
+          }),
+        ),
+      );
+      expect(await peekSessionWork(client.db, workspaceId, sessionId)).toEqual({
+        kind: "runnable",
+      });
+      const next = await claimSessionWorkForAttempt(client.db, workspaceId, {
+        sessionId,
+        workflowId,
+        workflowRunId: crypto.randomUUID(),
+        attemptId: crypto.randomUUID(),
+        dispatchId: crypto.randomUUID(),
+        trigger: { kind: "next" },
+      });
+      if (next.action !== "claimed") throw new Error("service prompt was stranded");
+      expect(next.turn.id).toBe(accepted.turn.id);
+      expect(next.turn.source).toBe("api");
+    },
+  );
+
+  test("claim and timeout serialize: no running owner survives the recovery decision", async () => {
+    for (let iteration = 0; iteration < 8; iteration += 1) {
+      const ctx = await fixture();
+      await send(ctx, "preserve accepted work across the race");
+      const workspaceId = ctx.grant.workspaceId!;
+      const sessionId = ctx.session.id;
+      const attemptId = crypto.randomUUID();
+      const claim = () =>
+        claimSessionWorkForAttempt(client.db, workspaceId, {
+          sessionId,
+          workflowId: `session-${sessionId}`,
+          workflowRunId: crypto.randomUUID(),
+          attemptId,
+          dispatchId: crypto.randomUUID(),
+          trigger: { kind: "next" },
+        });
+      const recover = () =>
+        recoverSessionDispatch(client.db, workspaceId, {
+          sessionId,
+          attemptId,
+          timeoutType: "HEARTBEAT",
+          maxRedispatches: 3,
+        });
+      // Force both orders once, then race independent DB connections.
+      const [claimed, recovered] =
+        iteration === 0
+          ? [await claim(), await recover()]
+          : iteration === 1
+            ? await (async () => {
+                const recovery = await recover();
+                return [await claim(), recovery] as const;
+              })()
+            : await Promise.all([claim(), recover()]);
+      if (claimed.action === "claimed") {
+        expect(recovered.action).toBe("recovering");
+        expect(await getSessionTurn(client.db, workspaceId, claimed.turn.id)).toMatchObject({
+          status: "recovering",
+          activeAttemptId: null,
+        });
+      } else {
+        expect(claimed.reason).toBe("dispatch-expired");
+        expect((await listSessionTurns(client.db, workspaceId, sessionId))[0]).toMatchObject({
+          status: "queued",
+          activeAttemptId: null,
+        });
+      }
+      expect(await peekSessionWork(client.db, workspaceId, sessionId)).toEqual({
+        kind: "runnable",
+      });
+    }
+  });
+
   test("safe observer preserves unavailable work and reports an exact live owner without dispatch", async () => {
     const ctx = await fixture();
     await send(ctx, "preserve this accepted input");

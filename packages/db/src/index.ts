@@ -70235,7 +70235,7 @@ export type ClaimSessionWorkForAttemptResult =
   | { action: "claimed"; turn: SessionTurnForExecution }
   | {
       action: "unclaimed";
-      reason: "gate-closed" | "no-work" | "stale-approval" | "control-pending";
+      reason: "gate-closed" | "no-work" | "stale-approval" | "control-pending" | "dispatch-expired";
     };
 
 function assertSessionGoalFieldBytes(value: string, maxBytes: number, field: string): void {
@@ -72163,6 +72163,22 @@ export async function claimSessionWorkForAttempt(
         );
         let session = prefix.sessions[0];
         if (!session) return { action: "unclaimed", reason: "no-work" };
+        // Timeout recovery and claim own the same session fence. If recovery
+        // won before this attempt existed, a delayed activity may not create
+        // its owner (or consume machine input) after Temporal abandoned it.
+        const [expiredDispatch] = await tx
+          .select({ id: schema.sessionEvents.id })
+          .from(schema.sessionEvents)
+          .where(
+            and(
+              eq(schema.sessionEvents.workspaceId, workspaceId),
+              eq(schema.sessionEvents.sessionId, sessionId),
+              eq(schema.sessionEvents.type, "turn.dispatch.expired"),
+              eq(schema.sessionEvents.clientEventId, sessionDispatchExpiryKey(input.attemptId)),
+            ),
+          )
+          .limit(1);
+        if (expiredDispatch) return { action: "unclaimed", reason: "dispatch-expired" };
         // Work and realtime may coexist, but claim remains the lazy lifecycle
         // cleanup point for an expired voice lease.
         session = await settleExpiredSessionRealtimeInTransaction(tx, session);
@@ -80380,6 +80396,10 @@ export type RecoverSessionDispatchInput = {
   maxRedispatches: number;
 };
 
+function sessionDispatchExpiryKey(attemptId: string): string {
+  return `opengeni:dispatch-expired:${attemptId}`;
+}
+
 export type RecoverSessionDispatchResult =
   | { action: "unclaimed"; events: [] }
   | {
@@ -80402,9 +80422,9 @@ export type RecoverSessionDispatchResult =
     };
 
 /**
- * Atomically recover the exact attempt that owned a running turn. An activity
- * that never reached the turn worker has no active attempt and returns
- * `unclaimed` without consuming the crash-loop budget.
+ * Atomically recover the exact attempt that owned a running turn. If timeout
+ * wins before its claim, persist an expiry receipt so a delayed activity cannot
+ * create an owner afterward. This does not consume the crash-loop budget.
  */
 export async function recoverSessionDispatch(
   db: Database,
@@ -80418,6 +80438,7 @@ export async function recoverSessionDispatch(
       "session.status.changed",
       "turn.failed",
       "turn.recovery.requested",
+      "turn.dispatch.expired",
     ],
     maxAttempts: 3,
   };
@@ -80437,6 +80458,47 @@ export async function recoverSessionDispatch(
       );
       const attempt = locks.attempts.find((row) => row.id === input.attemptId);
       if (!attempt) {
+        const clientEventId = sessionDispatchExpiryKey(input.attemptId);
+        const [existing] = await tx
+          .select({ id: schema.sessionEvents.id })
+          .from(schema.sessionEvents)
+          .where(
+            and(
+              eq(schema.sessionEvents.workspaceId, workspaceId),
+              eq(schema.sessionEvents.sessionId, input.sessionId),
+              eq(schema.sessionEvents.type, "turn.dispatch.expired"),
+              eq(schema.sessionEvents.clientEventId, clientEventId),
+            ),
+          )
+          .limit(1);
+        if (!existing) {
+          const now = new Date();
+          await tx.insert(schema.sessionEvents).values(
+            withLosslessContentWriteVersion(
+              {
+                accountId: session.accountId,
+                workspaceId,
+                sessionId: input.sessionId,
+                sequence: session.lastSequence + 1,
+                type: "turn.dispatch.expired",
+                payload: { attemptId: input.attemptId, timeoutType: input.timeoutType },
+                clientEventId,
+                occurredAt: now,
+              },
+              "payload",
+              "payloadCodecVersion",
+            ),
+          );
+          await tx
+            .update(schema.sessions)
+            .set({ lastSequence: session.lastSequence + 1, updatedAt: now })
+            .where(
+              and(
+                eq(schema.sessions.workspaceId, workspaceId),
+                eq(schema.sessions.id, input.sessionId),
+              ),
+            );
+        }
         return input.timeoutType === "SCHEDULE_TO_START"
           ? { action: "unclaimed", events: [] }
           : {

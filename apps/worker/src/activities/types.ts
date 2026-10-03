@@ -602,5 +602,5 @@ export type RunAgentTurnResult =
   | ClaimedRunAgentTurnResult
   | {
       status: "unclaimed";
-      reason: "gate-closed" | "no-work" | "stale-approval" | "control-pending";
+      reason: "gate-closed" | "no-work" | "stale-approval" | "control-pending" | "dispatch-expired";
     };
