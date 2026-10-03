@@ -235,7 +235,7 @@ exports[`agent configuration reaches the production model request api creator re
     "skill_search",
     "web_search",
   ],
-  "requestSha256": "4e24bb7f7d6e8362889ecd57a6604db49fa74ac027e989eafcda709ef0184461",
+  "requestSha256": "1a8519a4b5150cf6d9c37282ccd5ce4dddf689428eed629bebc590b726b73494",
 }
 `;
 
@@ -474,7 +474,7 @@ exports[`agent configuration reaches the production model request slack creator 
     "skill_search",
     "web_search",
   ],
-  "requestSha256": "4e24bb7f7d6e8362889ecd57a6604db49fa74ac027e989eafcda709ef0184461",
+  "requestSha256": "1a8519a4b5150cf6d9c37282ccd5ce4dddf689428eed629bebc590b726b73494",
 }
 `;
 
@@ -713,7 +713,7 @@ exports[`agent configuration reaches the production model request scheduled crea
     "skill_search",
     "web_search",
   ],
-  "requestSha256": "4e24bb7f7d6e8362889ecd57a6604db49fa74ac027e989eafcda709ef0184461",
+  "requestSha256": "1a8519a4b5150cf6d9c37282ccd5ce4dddf689428eed629bebc590b726b73494",
 }
 `;
 
@@ -952,7 +952,7 @@ exports[`agent configuration reaches the production model request automation cre
     "skill_search",
     "web_search",
   ],
-  "requestSha256": "4e24bb7f7d6e8362889ecd57a6604db49fa74ac027e989eafcda709ef0184461",
+  "requestSha256": "1a8519a4b5150cf6d9c37282ccd5ce4dddf689428eed629bebc590b726b73494",
 }
 `;
 
@@ -1191,7 +1191,7 @@ exports[`agent configuration reaches the production model request site_auth_main
     "skill_search",
     "web_search",
   ],
-  "requestSha256": "4e24bb7f7d6e8362889ecd57a6604db49fa74ac027e989eafcda709ef0184461",
+  "requestSha256": "1a8519a4b5150cf6d9c37282ccd5ce4dddf689428eed629bebc590b726b73494",
 }
 `;
 
@@ -1430,6 +1430,6 @@ exports[`agent configuration reaches the production model request omitted and nu
     "skill_search",
     "web_search",
   ],
-  "requestSha256": "4e24bb7f7d6e8362889ecd57a6604db49fa74ac027e989eafcda709ef0184461",
+  "requestSha256": "1a8519a4b5150cf6d9c37282ccd5ce4dddf689428eed629bebc590b726b73494",
 }
 `;

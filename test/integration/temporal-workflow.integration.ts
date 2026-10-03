@@ -80,6 +80,12 @@ const legacySessionCapacityWaitHistoryPath = new URL(
   "../../apps/worker/test/fixtures/legacy-session-capacity-wait-history.json",
   import.meta.url,
 ).pathname;
+// Recorded from base6609fa6f: an authenticated settled owner still took the
+// unconditional 30-second observer timer before this command patch existed.
+const legacySettledOwnerHistoryPath = new URL(
+  "../../apps/worker/test/fixtures/legacy-settled-owner-observation-history.json",
+  import.meta.url,
+).pathname;
 
 // This case follows two real 125-second heartbeat-timeout proofs. Temporal can
 // take more than the general 30-second budget to poll and drain its next worker
@@ -484,6 +490,213 @@ describe("Temporal workflow integration", () => {
           worker.shutdown();
           await run;
         }
+      }
+    },
+    quiescenceReceiptTestTimeoutMs,
+  );
+
+  test(
+    "replays pre-recovery settled-owner observation without adding a close command",
+    async () => {
+      const history = await Bun.file(legacySettledOwnerHistoryPath).json();
+      expect(patchIds(history)).toContain("session-safe-control-observation-v1");
+      expect(patchIds(history)).not.toContain("session-settled-owner-recovery-v1");
+      expect(
+        history.events.some(
+          (event: any) => event.timerStartedEventAttributes?.startToFireTimeout === "30s",
+        ),
+      ).toBe(true);
+      const workflowId =
+        history.events[0]?.workflowExecutionStartedEventAttributes?.workflowId ?? "fake";
+      await Worker.runReplayHistory(
+        { workflowsPath: workflowDefinitionsPath },
+        history,
+        workflowId,
+      );
+    },
+    temporalWorkflowTestTimeoutMs,
+  );
+
+  test(
+    "settled-current-owner recovery survives continue-as-new with the original owner run and one same-turn successor",
+    async () => {
+      const taskQueue = `workflow-test-${crypto.randomUUID()}`;
+      const scope = workflowScope();
+      const sessionId = crypto.randomUUID(),
+        workflowId = `session-${sessionId}`,
+        turnId = crypto.randomUUID();
+      let phase: "initial" | "owned" | "recovering" | "done" = "initial";
+      let ownerRunId: string | undefined, ownerAttemptId: string | undefined;
+      const reconciliations: any[] = [],
+        attempts: any[] = [];
+      const worker = await testWorker(nativeConnection, taskQueue, {
+        peekSessionWork: async () =>
+          phase === "owned"
+            ? {
+                kind: "attempt-owned",
+                turnId,
+                attemptId: ownerAttemptId!,
+                executionGeneration: 4,
+                activityRef: {
+                  workflowId,
+                  workflowRunId: ownerRunId!,
+                  activityId: "original-activity",
+                  quiesced: false,
+                },
+                ownerActivityState: "settled",
+              }
+            : phase === "done"
+              ? { kind: "idle" }
+              : { kind: "runnable" },
+        runAgentTurn: async (input: any) => {
+          attempts.push(input);
+          if (phase === "initial") {
+            ownerRunId = currentActivityContext()?.info.workflowExecution.runId;
+            ownerAttemptId = input.attemptId;
+            phase = "owned";
+          } else {
+            expect(phase).toBe("recovering");
+            expect(input.attemptId).not.toBe(ownerAttemptId);
+            expect(input.trigger).toEqual({ kind: "next" });
+            phase = "done";
+          }
+          return { status: "idle", turnId, attemptId: input.attemptId };
+        },
+        reconcileSettledSessionAttempt: async (input: any) => {
+          reconciliations.push(input);
+          expect(input).toEqual({
+            ...scope,
+            sessionId,
+            turnId,
+            attemptId: ownerAttemptId,
+            executionGeneration: 4,
+            workflowId,
+            workflowRunId: ownerRunId,
+            activityId: "original-activity",
+          });
+          expect(currentActivityContext()?.info.workflowExecution.runId).not.toBe(ownerRunId);
+          phase = "recovering";
+          return { action: "recovering" };
+        },
+        markSessionIdle: async () => undefined,
+        failSessionAttempt: async () => {
+          throw new Error("Settled proof cannot fabricate a failure/heartbeat");
+        },
+        settleSessionInterruptions: async () => ({ action: "continue" }),
+      });
+      const run = worker.run();
+      try {
+        const client = new Client({ connection });
+        const handle = await client.workflow.start("sessionWorkflow", {
+          taskQueue,
+          workflowId,
+          args: [{ ...scope, sessionId, initialEventId: "original-trigger", maxTurnsPerRun: 1 }],
+        });
+        await handle.result();
+        expect(attempts).toHaveLength(2);
+        expect(reconciliations).toHaveLength(1);
+        const first = await client.workflow.getHandle(workflowId, ownerRunId!).fetchHistory();
+        const boundary = first.events?.find(
+          (event) => !!event.workflowExecutionContinuedAsNewEventAttributes,
+        );
+        expect(decodeContinuedInput(boundary)).toEqual({ ...scope, sessionId, maxTurnsPerRun: 1 });
+        expect(patchIds(first)).not.toContain("session-settled-owner-recovery-v1");
+        const secondRun =
+          boundary?.workflowExecutionContinuedAsNewEventAttributes?.newExecutionRunId;
+        if (!secondRun) throw new Error("Missing continue-as-new successor run");
+        const second = await client.workflow.getHandle(workflowId, secondRun).fetchHistory();
+        expect(patchIds(second)).toContain("session-settled-owner-recovery-v1");
+        const thirdRun = second.events?.find(
+          (event) => !!event.workflowExecutionContinuedAsNewEventAttributes,
+        )?.workflowExecutionContinuedAsNewEventAttributes?.newExecutionRunId;
+        if (!thirdRun) throw new Error("Missing ownerless final run");
+        const third = await client.workflow.getHandle(workflowId, thirdRun).fetchHistory();
+        for (const history of [first, second, third])
+          await Worker.runReplayHistory(
+            { workflowsPath: workflowDefinitionsPath },
+            history,
+            workflowId,
+          );
+      } finally {
+        worker.shutdown();
+        await run;
+      }
+    },
+    continueAsNewTestTimeoutMs,
+  );
+
+  test.each(["pending-inspection", "unknown-inspection", "pending-writers"] as const)(
+    "%s settled-owner observation holds with the bounded timer and no successor",
+    async (state) => {
+      const taskQueue = `workflow-test-${crypto.randomUUID()}`;
+      const scope = workflowScope(),
+        workflowId = `wf-${crypto.randomUUID()}`;
+      let restored = false,
+        closes = 0,
+        dispatches = 0;
+      const worker = await testWorker(nativeConnection, taskQueue, {
+        peekSessionWork: async () =>
+          restored
+            ? { kind: "admission-blocked" }
+            : {
+                kind: "attempt-owned",
+                turnId: "turn",
+                attemptId: "owner",
+                executionGeneration: 4,
+                activityRef: {
+                  workflowId,
+                  workflowRunId: "old-run",
+                  activityId: "old-activity",
+                  quiesced: false,
+                },
+                ownerActivityState:
+                  state === "pending-writers"
+                    ? "settled"
+                    : state === "pending-inspection"
+                      ? "pending"
+                      : "unknown",
+              },
+        reconcileSettledSessionAttempt: async () => {
+          closes += 1;
+          return { action: "pending" };
+        },
+        runAgentTurn: async () => {
+          dispatches += 1;
+          throw new Error("Writer/pending hold admitted successor");
+        },
+      });
+      const run = worker.run();
+      try {
+        const client = new Client({ connection });
+        const handle = await client.workflow.start("sessionWorkflow", {
+          taskQueue,
+          workflowId,
+          args: [{ ...scope, sessionId: crypto.randomUUID() }],
+        });
+        await waitFor(
+          async () =>
+            (await handle.fetchHistory()).events?.some(
+              (event) => !!event.timerStartedEventAttributes,
+            ) ?? false,
+        );
+        const history = await handle.fetchHistory();
+        const timer = history.events?.find(
+          (event) => event.timerStartedEventAttributes,
+        )?.timerStartedEventAttributes;
+        expect(Number(timer?.startToFireTimeout?.seconds)).toBe(30);
+        expect(dispatches).toBe(0);
+        expect(closes).toBe(state === "pending-writers" ? 1 : 0);
+        restored = true;
+        await handle.signal("queueChanged");
+        await handle.result();
+        await Worker.runReplayHistory(
+          { workflowsPath: workflowDefinitionsPath },
+          await handle.fetchHistory(),
+          workflowId,
+        );
+      } finally {
+        worker.shutdown();
+        await run;
       }
     },
     quiescenceReceiptTestTimeoutMs,

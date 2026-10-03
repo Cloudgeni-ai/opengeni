@@ -192,6 +192,7 @@ import {
   resolveWorkspaceCatalogSettings,
   SessionAuthorizationDeniedError,
   SessionAuthorizationUnavailableError,
+  dispatchWithSessionAuthorizationReadReuse,
   searchCapabilityCatalogItems,
   type ResolvedSessionAuthorization,
 } from "@opengeni/core";
@@ -561,6 +562,205 @@ function orchestrationFailureResult(
 }
 
 const FIRST_PARTY_MCP_TOOL_NAME_SET = new Set<string>(FIRST_PARTY_MCP_TOOL_NAMES);
+// Tool names whose input passed `assertDescribedToolInput` in this process.
+// The check is about code structure, which cannot change while the process
+// runs, so converting every input to JSON Schema per request only re-proves it.
+const DESCRIBED_TOOL_INPUTS = new Set<string>();
+
+/**
+ * Build a caller-independent tool input once per process. Zod construction and
+ * JSON Schema conversion are a large part of building the per-request server.
+ */
+function staticToolInput<T>(build: () => T): () => T {
+  let value: T | undefined;
+  return () => (value ??= build());
+}
+
+const scheduledTaskCreateToolInput = staticToolInput(() =>
+  contractToolInput(
+    z4
+      .object({
+        ...CreateScheduledTaskRequest.options[1].out.shape,
+        agentConfig: z4
+          .object(ScheduledTaskAgentConfigInput.shape)
+          .omit({ slackBotChannelId: true })
+          .strict(),
+      })
+      .omit({ agentLearning: true, connectionAuthorities: true })
+      .strict(),
+    CreateScheduledTaskRequest.options[1],
+  ),
+);
+const scheduledTaskUpdateToolInput = staticToolInput(() =>
+  contractToolInput(
+    z4
+      .object({
+        ...UpdateScheduledTaskRequest.out.shape,
+        id: z4.string().uuid(),
+        action: CreateScheduledTaskRequest.options[1].out.shape.action.optional(),
+        agentConfig: z4
+          .object(ScheduledTaskAgentConfigInput.shape)
+          .omit({ slackBotChannelId: true })
+          .strict()
+          .optional(),
+      })
+      .omit({ agentLearning: true, connectionAuthorities: true })
+      .strict(),
+    UpdateScheduledTaskRequest,
+  ),
+);
+
+const sessionCreateToolInput = staticToolInput(() => {
+  const capabilityToggle = z4.boolean().optional();
+  const sessionCreateAgentInput = z4
+    .object({
+      capabilities: z4
+        .union([
+          z4.enum(["all", "none"]),
+          z4
+            .object({
+              from: z4.enum(["all", "none"]),
+              webSearch: capabilityToggle,
+              humanInput: capabilityToggle,
+              skills: z4
+                .union([z4.literal("read"), z4.literal("manage"), z4.literal(false)])
+                .optional(),
+              goals: capabilityToggle,
+              subagents: capabilityToggle,
+              knowledge: capabilityToggle,
+              schedules: capabilityToggle,
+              artifacts: capabilityToggle,
+              browser: capabilityToggle,
+              media: capabilityToggle,
+              workspaceFiles: capabilityToggle,
+              workspaceConnectors: capabilityToggle,
+              workspaceAdmin: capabilityToggle,
+            })
+            .strict(),
+        ])
+        .optional(),
+      identity: z4.string().min(1).max(AGENT_IDENTITY_MAX_CHARACTERS).nullable().optional(),
+      instructions: z4.string().min(1).max(SESSION_INSTRUCTIONS_MAX_CHARACTERS).optional(),
+      renderer: z4.enum(["opengeni", "markdown"]).optional(),
+    })
+    .strict()
+    .optional()
+    .describe(
+      "Optional agent configuration for the child. Omit to inherit this session's. capabilities 'all' means everything this session has; 'none' keeps only essentials; an object starts from one and switches capabilities off (or back on within this session's own set). A child may only narrow: enabling a capability this session lacks is rejected.",
+    );
+  const sessionCreateInput = z4
+    .object({
+      initialMessage: z4.string().min(1),
+      projectId: z4
+        .string()
+        .uuid()
+        .nullable()
+        .optional()
+        .describe(
+          "Workspace project to file the new session into. Omit for existing default behavior; does not change runtime or visibility.",
+        ),
+      title: z4
+        .string()
+        .min(1)
+        .max(SESSION_TITLE_MAX_CHARACTERS)
+        .optional()
+        .describe(
+          "Concise semantic title for the child session. Omit only when the delegated goal or initial message already provides a suitable title; OpenGeni derives a sensitive-safe bounded fallback from that text.",
+        ),
+      instructions: z4.string().min(1).max(SESSION_INSTRUCTIONS_MAX_CHARACTERS).optional(),
+      goal: GoalSpec.optional(),
+      resources: z4
+        .array(ResourceRef)
+        .optional()
+        .describe(
+          "Omit to inherit parent repositories only. Files are never inherited automatically; explicitly include file resources to attach them. An empty array inherits no resources.",
+        ),
+      tools: z4.array(ToolRef).optional(),
+      mcpServers: z4.array(SessionMcpServerInput).optional(),
+      variableSetId: z4.string().uuid().optional(),
+      variableSetIds: z4.array(z4.string().uuid()).max(MAX_SELECTED_VARIABLE_SETS).optional(),
+      environmentId: z4.string().uuid().optional(),
+      rigId: z4.string().uuid().optional(),
+      model: z4
+        .string()
+        .min(1)
+        .optional()
+        .describe(
+          "Model for the worker. Omit to inherit the exact calling turn's model, including its Codex subscription billing path.",
+        ),
+      reasoningEffort: CreateSessionRequest.out.shape.reasoningEffort.describe(
+        "Omit to inherit the exact calling turn's reasoning effort.",
+      ),
+      latencyMode: z4
+        .enum(["standard", "priority", "fast"])
+        .optional()
+        .describe(
+          "Omit for standard latency, even when model and reasoning are inherited. Fast or priority must be selected explicitly and supported by the model.",
+        ),
+      sandboxBackend: CreateSessionRequest.out.shape.sandboxBackend,
+      // Model-only structural coupling: workingDir cannot exist without a
+      // targetSandboxId because both live inside one optional object. The
+      // handler maps this back to the stable public REST/SDK request fields.
+      machineTarget: z4
+        .object({
+          targetSandboxId: z4.string().uuid(),
+          workingDir: z4.string().optional(),
+        })
+        .strict()
+        .optional(),
+      metadata: z4.record(z4.string(), z4.unknown()).optional(),
+      idempotencyKey: z4.string().min(1).max(200).optional(),
+      firstPartyMcpPermissions: z4
+        .array(Permission)
+        .optional()
+        .describe(
+          "Optional first-party capability set for the child. Omit to inherit this session's effective permissions. An explicit set may only narrow capabilities held by this session. A goal-bearing child requires goals:manage in the resulting set; creation fails rather than adding it implicitly.",
+        ),
+      firstPartyMcpTools: z4
+        .array(z4.enum(FIRST_PARTY_MCP_TOOL_NAMES))
+        .optional()
+        .describe(
+          "Exact model-visible first-party tool selection for the child. Omit to inherit this session's effective selection. An explicit selection may only narrow that selection: every listed tool must already be available to this session, and a wider list is rejected. To create a non-delegating leaf, provide a selection that omits session_create. This does not grant permissions.",
+        ),
+      // The child's agent-access scope and end-user label are never model
+      // choices: it inherits this session's exactly. Only the Memory
+      // selector may be narrowed here (workspace > user > off).
+      memoryScope: z4
+        .enum(["workspace", "user", "off"])
+        .optional()
+        .describe(
+          "Optional Memory selector for the child. Omit to inherit this session's selector. An explicit value may only narrow it (workspace > user > off); off gives the child no Memory tools. Use task notes for task-local findings.",
+        ),
+      // Omission is the ordinary safe sharing path. Literal "shared" remains
+      // available to advanced REST/SDK callers but is intentionally absent
+      // from the model surface because it turns compatibility drift into a
+      // deterministic failure instead of the omission path's safe own-box fallback.
+      sandbox: z4.union([z4.literal("new"), z4.object({ groupId: z4.string().uuid() })]).optional(),
+      agent: sessionCreateAgentInput,
+    })
+    .superRefine((value, context) => {
+      if (!value.variableSetIds) return;
+      if (new Set(value.variableSetIds).size !== value.variableSetIds.length) {
+        context.addIssue({
+          code: z4.ZodIssueCode.custom,
+          path: ["variableSetIds"],
+          message: "variableSetIds must not contain duplicates",
+        });
+      }
+      const singular = value.variableSetId ?? value.environmentId;
+      if (singular === undefined) return;
+      const expected = value.variableSetIds[value.variableSetIds.length - 1];
+      if (singular !== expected) {
+        context.addIssue({
+          code: z4.ZodIssueCode.custom,
+          path: ["variableSetId"],
+          message: "variableSetId must match the last variableSetIds entry",
+        });
+      }
+    })
+    .strict();
+  return contractToolInput(sessionCreateInput);
+});
 
 class PolicyMcpServer extends McpServer {
   private registeredToolCount = 0;
@@ -616,7 +816,7 @@ class PolicyMcpServer extends McpServer {
         remove() {},
       };
     }
-    if (config.inputSchema) {
+    if (config.inputSchema && !DESCRIBED_TOOL_INPUTS.has(name)) {
       const schema =
         normalizeObjectSchema(config.inputSchema) ??
         (Object.keys(config.inputSchema).length === 0 ? z4.object({}) : undefined);
@@ -625,9 +825,14 @@ class PolicyMcpServer extends McpServer {
         z4.toJSONSchema(schema as z4.ZodType, { io: "input", target: "draft-7" }),
         name,
       );
+      DESCRIBED_TOOL_INPUTS.add(name);
     }
     this.registeredToolCount += 1;
-    return super.registerTool(name, config, cb);
+    const handler = cb as (...args: unknown[]) => unknown;
+    return super.registerTool(name, config, ((...args: unknown[]) =>
+      dispatchWithSessionAuthorizationReadReuse(() =>
+        handler(...args),
+      )) as ToolCallback<InputArgs>);
   }
 
   ensureToolsListHandler(): void {
@@ -1494,19 +1699,7 @@ export function buildOpenGeniMcpServer(
       {
         description:
           "Create a scheduled task. Sessions generated for a task created from this session inherit this session's effective first-party tool selection and permission set; they never receive the deployment default catalog. To have runs post to Slack as the OpenGeni bot, a person must choose the channel in the schedule editor; you cannot set agentConfig.slackBotChannelId.",
-        inputSchema: contractToolInput(
-          z4
-            .object({
-              ...CreateScheduledTaskRequest.options[1].out.shape,
-              agentConfig: z4
-                .object(ScheduledTaskAgentConfigInput.shape)
-                .omit({ slackBotChannelId: true })
-                .strict(),
-            })
-            .omit({ agentLearning: true, connectionAuthorities: true })
-            .strict(),
-          CreateScheduledTaskRequest.options[1],
-        ),
+        inputSchema: scheduledTaskCreateToolInput(),
       },
       async (args) => {
         const payload = CreateScheduledTaskRequest.parse(args);
@@ -1555,22 +1748,7 @@ export function buildOpenGeniMcpServer(
       {
         description:
           "Update a scheduled task. For model/reasoning-only edits use agentConfigPatch: { model?, reasoningEffort? }; all omitted configuration is preserved. agentConfig is a complete replacement, and scheduled_tasks_get is a bounded projection, not replacement input. Task model settings apply to newly created sessions; existing-session targets and already-created reusable sessions keep their own model/reasoning.",
-        inputSchema: contractToolInput(
-          z4
-            .object({
-              ...UpdateScheduledTaskRequest.out.shape,
-              id: z4.string().uuid(),
-              action: CreateScheduledTaskRequest.options[1].out.shape.action.optional(),
-              agentConfig: z4
-                .object(ScheduledTaskAgentConfigInput.shape)
-                .omit({ slackBotChannelId: true })
-                .strict()
-                .optional(),
-            })
-            .omit({ agentLearning: true, connectionAuthorities: true })
-            .strict(),
-          UpdateScheduledTaskRequest,
-        ),
+        inputSchema: scheduledTaskUpdateToolInput(),
       },
       async ({ id, ...raw }) => {
         const existing = await requireScheduledTask(deps.db, grant.workspaceId, id);
@@ -5042,162 +5220,12 @@ function registerWorkspaceOrchestrationTools(
   }
 
   if (can("sessions:create") && sessionCreateVisible) {
-    const capabilityToggle = z4.boolean().optional();
-    const sessionCreateAgentInput = z4
-      .object({
-        capabilities: z4
-          .union([
-            z4.enum(["all", "none"]),
-            z4
-              .object({
-                from: z4.enum(["all", "none"]),
-                webSearch: capabilityToggle,
-                humanInput: capabilityToggle,
-                skills: z4
-                  .union([z4.literal("read"), z4.literal("manage"), z4.literal(false)])
-                  .optional(),
-                goals: capabilityToggle,
-                subagents: capabilityToggle,
-                knowledge: capabilityToggle,
-                schedules: capabilityToggle,
-                artifacts: capabilityToggle,
-                browser: capabilityToggle,
-                media: capabilityToggle,
-                workspaceFiles: capabilityToggle,
-                workspaceConnectors: capabilityToggle,
-                workspaceAdmin: capabilityToggle,
-              })
-              .strict(),
-          ])
-          .optional(),
-        identity: z4.string().min(1).max(AGENT_IDENTITY_MAX_CHARACTERS).nullable().optional(),
-        instructions: z4.string().min(1).max(SESSION_INSTRUCTIONS_MAX_CHARACTERS).optional(),
-        renderer: z4.enum(["opengeni", "markdown"]).optional(),
-      })
-      .strict()
-      .optional()
-      .describe(
-        "Optional agent configuration for the child. Omit to inherit this session's. capabilities 'all' means everything this session has; 'none' keeps only essentials; an object starts from one and switches capabilities off (or back on within this session's own set). A child may only narrow: enabling a capability this session lacks is rejected.",
-      );
-    const sessionCreateInput = z4
-      .object({
-        initialMessage: z4.string().min(1),
-        projectId: z4
-          .string()
-          .uuid()
-          .nullable()
-          .optional()
-          .describe(
-            "Workspace project to file the new session into. Omit for existing default behavior; does not change runtime or visibility.",
-          ),
-        title: z4
-          .string()
-          .min(1)
-          .max(SESSION_TITLE_MAX_CHARACTERS)
-          .optional()
-          .describe(
-            "Concise semantic title for the child session. Omit only when the delegated goal or initial message already provides a suitable title; OpenGeni derives a sensitive-safe bounded fallback from that text.",
-          ),
-        instructions: z4.string().min(1).max(SESSION_INSTRUCTIONS_MAX_CHARACTERS).optional(),
-        goal: GoalSpec.optional(),
-        resources: z4
-          .array(ResourceRef)
-          .optional()
-          .describe(
-            "Omit to inherit parent repositories only. Files are never inherited automatically; explicitly include file resources to attach them. An empty array inherits no resources.",
-          ),
-        tools: z4.array(ToolRef).optional(),
-        mcpServers: z4.array(SessionMcpServerInput).optional(),
-        variableSetId: z4.string().uuid().optional(),
-        variableSetIds: z4.array(z4.string().uuid()).max(MAX_SELECTED_VARIABLE_SETS).optional(),
-        environmentId: z4.string().uuid().optional(),
-        rigId: z4.string().uuid().optional(),
-        model: z4
-          .string()
-          .min(1)
-          .optional()
-          .describe(
-            "Model for the worker. Omit to inherit the exact calling turn's model, including its Codex subscription billing path.",
-          ),
-        reasoningEffort: CreateSessionRequest.out.shape.reasoningEffort.describe(
-          "Omit to inherit the exact calling turn's reasoning effort.",
-        ),
-        latencyMode: z4
-          .enum(["standard", "priority", "fast"])
-          .optional()
-          .describe(
-            "Omit for standard latency, even when model and reasoning are inherited. Fast or priority must be selected explicitly and supported by the model.",
-          ),
-        sandboxBackend: CreateSessionRequest.out.shape.sandboxBackend,
-        // Model-only structural coupling: workingDir cannot exist without a
-        // targetSandboxId because both live inside one optional object. The
-        // handler maps this back to the stable public REST/SDK request fields.
-        machineTarget: z4
-          .object({
-            targetSandboxId: z4.string().uuid(),
-            workingDir: z4.string().optional(),
-          })
-          .strict()
-          .optional(),
-        metadata: z4.record(z4.string(), z4.unknown()).optional(),
-        idempotencyKey: z4.string().min(1).max(200).optional(),
-        firstPartyMcpPermissions: z4
-          .array(Permission)
-          .optional()
-          .describe(
-            "Optional first-party capability set for the child. Omit to inherit this session's effective permissions. An explicit set may only narrow capabilities held by this session. A goal-bearing child requires goals:manage in the resulting set; creation fails rather than adding it implicitly.",
-          ),
-        firstPartyMcpTools: z4
-          .array(z4.enum(FIRST_PARTY_MCP_TOOL_NAMES))
-          .optional()
-          .describe(
-            "Exact model-visible first-party tool selection for the child. Omit to inherit this session's effective selection. An explicit selection may only narrow that selection: every listed tool must already be available to this session, and a wider list is rejected. To create a non-delegating leaf, provide a selection that omits session_create. This does not grant permissions.",
-          ),
-        // The child's agent-access scope and end-user label are never model
-        // choices: it inherits this session's exactly. Only the Memory
-        // selector may be narrowed here (workspace > user > off).
-        memoryScope: z4
-          .enum(["workspace", "user", "off"])
-          .optional()
-          .describe(
-            "Optional Memory selector for the child. Omit to inherit this session's selector. An explicit value may only narrow it (workspace > user > off); off gives the child no Memory tools. Use task notes for task-local findings.",
-          ),
-        // Omission is the ordinary safe sharing path. Literal "shared" remains
-        // available to advanced REST/SDK callers but is intentionally absent
-        // from the model surface because it turns compatibility drift into a
-        // deterministic failure instead of the omission path's safe own-box fallback.
-        sandbox: z4
-          .union([z4.literal("new"), z4.object({ groupId: z4.string().uuid() })])
-          .optional(),
-        agent: sessionCreateAgentInput,
-      })
-      .superRefine((value, context) => {
-        if (!value.variableSetIds) return;
-        if (new Set(value.variableSetIds).size !== value.variableSetIds.length) {
-          context.addIssue({
-            code: z4.ZodIssueCode.custom,
-            path: ["variableSetIds"],
-            message: "variableSetIds must not contain duplicates",
-          });
-        }
-        const singular = value.variableSetId ?? value.environmentId;
-        if (singular === undefined) return;
-        const expected = value.variableSetIds[value.variableSetIds.length - 1];
-        if (singular !== expected) {
-          context.addIssue({
-            code: z4.ZodIssueCode.custom,
-            path: ["variableSetId"],
-            message: "variableSetId must match the last variableSetIds entry",
-          });
-        }
-      })
-      .strict();
     server.registerTool(
       "session_create",
       {
         description:
           "Spawn a new agent session (a worker) only for a concrete, bounded subtask that can run independently and has a defined integration point in your current work. Delegation has setup and coordination overhead: by default, answer directly when the work takes only a few steps, and send a related follow-up to a worker you already spawned with session_send_message instead of spawning another. Explicit user requests and applicable Skill guidance for delegation, independent review, or fresh workers override that default within existing authority. After spawning work that needs minutes, once nothing else can advance, call wait_for_input and end the turn instead of alternating session_wait and session_get; no preliminary short wait or status recheck is required. The worker's terminal result wakes you and carries its final answer (payload.finalAnswer). Do not duplicate a child's implementation; independent review or comparison may intentionally examine the same subject with a distinct deliverable. Track the child and join its actual result before completing dependent work. Give the child a concise semantic title; if omitted, OpenGeni derives one from its delegated goal or initial message. The child inherits this session's visibility, agent-access scope and end-user label; a private session can only create a same-owner private child, and memoryScope may only narrow this session's selector. Give a goal-bearing child its delegated objective. Its goal.rootConstraints may be an exact applicable subset of this accepted turn's frozen root constraints; omit that field to inherit all of them. Omit sandbox for the safe default: compatible children share the creator's box, while a different Variable Set, Sandbox Environment, or machineTarget gets its own box. Use 'new' for deliberate isolation or {groupId} for a strict compatible sibling join. Put targetSandboxId and its optional workingDir together inside machineTarget; a machineTarget is always an own-box create even when the parent is backend none. To create a non-delegating leaf, pass a narrowed firstPartyMcpTools list that omits session_create; do not use a child-local depth override. Public REST/SDK callers retain advanced absolute depth and explicit shared-placement controls.",
-        inputSchema: contractToolInput(sessionCreateInput),
+        inputSchema: sessionCreateToolInput(),
       },
       async (args) => {
         try {

@@ -27,6 +27,14 @@ hello world below. Without these files, fetch
 https://docs.opengeni.ai/llms.txt and the canonical guide at
 https://github.com/Cloudgeni-ai/opengeni/tree/main/.agents/skills/opengeni-client.
 
+When the `opengeni` MCP tools are available (this plugin connects them), use
+them to inspect and act on the user's OpenGeni organization while you build:
+find an action with `opengeni_actions_search`, read it with
+`opengeni_action_describe`, run it with `opengeni_action_call`, instead of
+hand-writing API calls. The first use opens a browser sign-in where the user
+chooses what the agent may access. The product's own code still uses its
+server-side API key.
+
 ## Quick local demo app
 
 If the user asks for a small, local, or demo web app with an OpenGeni agent

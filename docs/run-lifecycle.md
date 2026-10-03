@@ -622,6 +622,23 @@ normal history rollover preserves the observer. Recovery of an orphaned live
 owner remains a separate exact-proof lifecycle operation, not an age-based
 fallback or a reuse of the closed-attempt quiescence reconciler.
 
+The `session-settled-owner-recovery-v1` workflow patch schedules that separate
+`reconcileSettledSessionAttempt` control operation only on an explicitly settled
+owner observation. It re-inspects the **stored original** Temporal run/activity,
+including after continue-as-new. Missing, pending or unknown inspection holds;
+the generic observer still never mutates an owner. Under canonical control,
+workspace, ordered child/parent session, exact turn and attempt locks, recovery
+revalidates account/workspace/session/turn/attempt/generation and all Temporal
+identities, current-owner pointers, effective control/lifecycle/Pause, pending
+interruptions, and **both** physical and inference writer predicates. Only
+authenticated settlement plus zero writers can close this exact owner, record
+the ordinary attempt quiescence receipt, preserve the same turn/trigger/frozen
+authority, and consume the existing bounded worker-loss budget. It invents no
+provider exit or timeout and never replays an unknown operation. Recovery and
+the durable workflow wake commit atomically, including the legacy exact-timeout
+path; stale ACKs and successor claims cannot erase newer wake debt. Pre-patch
+histories retain their observer timer/command order for deterministic replay.
+
 A permanent admission failure with no claimed turn records the supplied failure
 message and, when available, its classified admission cause on the durable
 `session.status.changed` event. The absence of a `turn.failed` event must not
@@ -639,8 +656,10 @@ worker identity, or another member's account. See
 
 Ordinary agent messages, like Steer, inherit initiating-human identity from the
 exact admitted sender turn. Empty personal-connection selections or workspace
-provider scope do not erase that identity. Different sender attempts own separate
-causal batches; malformed historical message lineage cannot borrow another
+provider scope do not erase that identity. Ordinary messages from different sender
+attempts may share a batch with each other and lifecycle results when their exact
+originating turns resolve to the same human and frozen execution permissions.
+Steer retains exact-caller isolation; malformed historical message lineage cannot borrow another
 update's human. Genuine service-only source turns remain service-only. This
 preserves identity without expanding accepted connection selections or replacing
 the receiving session's tool configuration.
@@ -922,6 +941,17 @@ tool/subject. A client
 `AbortSignal` is observer-only: it stops HTTP/polling waits but creates no server
 cancellation authority. Attempt/turn interruption remains the sole cancellation
 boundary and still drains or closes journaled work under the existing lifecycle.
+
+Accepted reasoning-capable GPT-5-and-later models on direct OpenAI or Azure
+Responses request provider-generated summaries with `reasoning.summary: auto`.
+Their `response.reasoning_summary_text.delta` events use the existing fenced
+`agent.reasoning.delta`, SSE and visible reasoning-preview path before final
+message text when the provider emits them. Summary timing and presence are
+provider-dependent; this does not expose private or encrypted reasoning or
+promise a first-token deadline. Codex retains `detailed`; chat, unverified
+compatible/proxy routes, nonreasoning and other model families retain their
+existing settings. Effort, tools, instructions, history and admission do not
+change, and no extra startup publication or await is introduced.
 
 Retryable provider connectivity and 5xx failures recover the same accepted turn
 after a durable 2 s, 5 s, 15 s, 30 s, then 60 s capped delay, indexed by that
@@ -3562,6 +3592,12 @@ keyed and unkeyed shell insertion. Conditional work emits a child only when it
 runs: an explicit model omits default resolution, while Site origin without
 headers does no persistence work. These boundaries do not cover every internal
 selection check; gaps and parent/child spans must not be added as sequential costs.
+Fresh model selection overlaps the existing policy/readiness batch with independent
+Claude catalog metadata reads on pooled connections. Subscription activation still
+joins its exact subject's readiness read; both batches are observed before admission
+continues, with input-batch errors taking precedence. Transaction handles retain
+serial batch ordering. No mutable authority is cached or query omitted; removed
+serialization is structural evidence, not measured first-token savings.
 The existing
 `core.session_start.initialize|event_fanout|workflow_wake|session_reload`
 children still cover atomic initialization, post-commit fanout,
