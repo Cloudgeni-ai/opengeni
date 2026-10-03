@@ -1037,35 +1037,24 @@ credits-path price and is zero for externally billed calls.
 Insights counts every ledger row, including private/missing/deleted sessions;
 `privateChats` exposes person-only amounts. Details/samples remain actor-visible;
 debits remain unchanged.
-The unified query readers initially read recorded facts with exact UTC windows
-and resolve current session visibility and metadata at read time. Daily
-write-maintained rollups are a separate performance follow-up; raw YTD reads
-are not a latency guarantee. Deleted retained usage is separate from other
-people's Only-me amounts; no private session ID/title is a group or filter
-facet. Organization Personal amounts preserve existing membership-name
-granularity only where independently authorized, never another person's
-Personal workspace ID or name.
+Unified workspace/organization `insights/usage` and `insights/calls` GET routes
+use `@opengeni/contracts/insights-usage`: UTC windows, repeated filters, groups,
+payer totals, coverage and nullable prior measures. Readers initially use raw
+facts; daily rollups are a performance follow-up, not a YTD latency guarantee.
+Visibility and metadata remain live. Deleted usage is distinct from private
+amounts. No hidden session/title or other Personal workspace identity is a
+facet; membership names require independent authority.
 
-The additive workspace/organization `insights/usage` and `insights/calls` GET
-routes use the narrow `@opengeni/contracts/insights-usage` subpath. Workspace
-usage still requires `workspace:admin`; organization usage still requires
-`billing:read`. Organization amount authority never grants individual call or
-session access. Exact UTC ranges, repeated filters, groups, payer totals,
-token-knownness coverage and a nullable prior window share one query contract.
-Charged totals follow actual debit-ledger amounts, not nominal usage prices
-that can exceed a balance-clipped debit. List totals are recorded provider
-estimates across all payers. Durable usage events preserve supported list-class
-snapshots verbatim; missing snapshots remain null until source-backed capture
-or an explicitly approximate fixed-total historical allocation supplies them.
-Future list estimates use comparison-only schedules independently of debit
-pricing. Current usage frames do not establish geography/service-tier price
-provenance, so their forward class splits remain null; Gateway-reported totals
-remain authoritative. Neither comparison lookup changes the nominal credit
-price or authorizes a previously unpriced debit.
-Missing counters, totals or rates remain unknown, not invented zeroes. Reasoning
-is a subset of output, never an extra cost class.
-The prior cache denominator is exposed separately so an empty prior
-window cannot appear to have a cache-hit comparison.
+Workspace usage requires `workspace:admin`; organization usage requires
+`billing:read`. Calls/details additionally require existing workspace read
+grants and actor visibility. Privacy masking precedes identity filters.
+Charged totals follow actual debits, including unmatched residuals, not nominal
+prices. List estimates span all payers; comparison schedules never authorize
+debits. Gateway totals remain authoritative. Events preserve class snapshots
+verbatim; absent price provenance leaves forward classes null. Historical
+allocation must conserve captured totals and declare approximation. Unknown
+counters/costs are not zeroes; reasoning is part of output. The separate prior
+cache denominator prevents an empty prior cache comparison.
 Canonical: `packages/db/src/insights-usage-bundle.ts`,
 `packages/db/src/insights-model-bundle.ts`,
 `packages/core/src/domain/insights-usage.ts`, and
