@@ -1,6 +1,8 @@
 import { conversationTimeline } from "@opengeni/react/session";
 import { useMemo, type ReactNode } from "react";
-import { Text, View } from "react-native";
+import { ActivityIndicator, Pressable, Text, View } from "react-native";
+import { Icon } from "./icon";
+import { withAlpha } from "./primitives";
 import type { OpenGeniNativeSessionController } from "../use-native-session";
 import { SessionComposer, type SessionComposerProps } from "./composer";
 import { ApprovalStrip, HumanInputCard } from "./decisions";
@@ -99,48 +101,7 @@ export function NativeSessionScreen({
         header={
           <>
             {composerSlots?.header}
-            {attachments.attachments.length > 0 ? (
-              <View
-                style={{
-                  flexDirection: "row",
-                  flexWrap: "wrap",
-                  gap: 6,
-                  paddingHorizontal: 12,
-                  paddingTop: 10,
-                }}
-              >
-                {attachments.attachments.map((item) => (
-                  <View
-                    key={item.id}
-                    style={{
-                      borderRadius: theme.radius.sm,
-                      borderWidth: 1,
-                      borderColor: theme.colors.border,
-                      paddingHorizontal: 8,
-                      paddingVertical: 4,
-                      backgroundColor: theme.colors["surface-2"],
-                    }}
-                  >
-                    <Text
-                      numberOfLines={1}
-                      style={{
-                        ...fontStyle(theme),
-                        maxWidth: 160,
-                        fontSize: theme.size.xs,
-                        color: theme.colors["fg-muted"],
-                      }}
-                    >
-                      {item.name}
-                      {item.status === "uploading" || item.status === "preparing"
-                        ? " · uploading"
-                        : item.status === "failed"
-                          ? " · failed"
-                          : ""}
-                    </Text>
-                  </View>
-                ))}
-              </View>
-            ) : null}
+            <AttachmentChips attachments={attachments} />
           </>
         }
         above={
@@ -159,6 +120,78 @@ export function NativeSessionScreen({
           </>
         }
       />
+    </View>
+  );
+}
+
+/** Composer attachment chips: name, upload state, tap to retry a failure, remove. */
+function AttachmentChips({
+  attachments,
+}: {
+  attachments: OpenGeniNativeSessionController["attachments"];
+}) {
+  const theme = useNativeTimelineTheme();
+  const c = theme.colors;
+  if (attachments.attachments.length === 0) return null;
+  return (
+    <View
+      style={{
+        flexDirection: "row",
+        flexWrap: "wrap",
+        gap: 6,
+        paddingHorizontal: 12,
+        paddingTop: 10,
+      }}
+    >
+      {attachments.attachments.map((item) => {
+        const failed = item.status === "failed";
+        const busy = item.status === "uploading" || item.status === "preparing";
+        return (
+          <View
+            key={item.id}
+            style={{
+              flexDirection: "row",
+              alignItems: "center",
+              borderRadius: theme.radius.sm,
+              borderWidth: 1,
+              borderColor: failed ? withAlpha(c["status-failed"], 0.4) : c.border,
+              paddingLeft: 8,
+              backgroundColor: c["surface-2"],
+            }}
+          >
+            <Pressable
+              accessibilityRole="button"
+              accessibilityLabel={failed ? `Retry ${item.name}` : item.name}
+              disabled={!failed}
+              onPress={() => void attachments.retry(item.id)}
+              style={{ flexDirection: "row", alignItems: "center", gap: 6, paddingVertical: 4 }}
+            >
+              {busy ? <ActivityIndicator size="small" color={c["fg-subtle"]} /> : null}
+              <Text
+                numberOfLines={1}
+                style={{
+                  ...fontStyle(theme),
+                  maxWidth: 160,
+                  fontSize: theme.size.xs,
+                  color: failed ? c["status-failed"] : c["fg-muted"],
+                }}
+              >
+                {item.name}
+                {failed ? " · tap to retry" : ""}
+              </Text>
+            </Pressable>
+            <Pressable
+              accessibilityRole="button"
+              accessibilityLabel={`Remove ${item.name}`}
+              onPress={() => attachments.remove(item.id)}
+              hitSlop={6}
+              style={{ width: 28, height: 28, alignItems: "center", justifyContent: "center" }}
+            >
+              <Icon name="x" size={12} color={c["fg-subtle"]} />
+            </Pressable>
+          </View>
+        );
+      })}
     </View>
   );
 }
