@@ -234,6 +234,8 @@ export function useCapabilitiesCatalog(workspaceId: string): CapabilitiesCatalog
       if (context.accessContext === null) return;
       try {
         const providers = await client.connectTransport().catalog(workspaceId);
+        // A malformed response must not crash the whole Capabilities page.
+        if (!Array.isArray(providers)) throw new Error("Invalid connect catalog");
         if (live())
           update((current) => ({
             ...current,
