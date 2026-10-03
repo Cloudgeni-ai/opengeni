@@ -39,6 +39,27 @@ function measures(): InsightsUsageMeasures {
   };
 }
 
+function emptyMeasures(): InsightsUsageMeasures {
+  return {
+    calls: 0,
+    tokenKnownCalls: 0,
+    cacheKnownCalls: 0,
+    cacheWriteKnownCalls: 0,
+    listClassKnownCalls: 0,
+    tokens: { ...zeroTokens },
+    chargedMicros: 0,
+    listMicros: 0,
+    listByClassMicros: null,
+    listByClassApprox: false,
+    pricedCalls: 0,
+    byPayer: {
+      opengeni_credits: { ...zeroPayer },
+      subscription: { ...zeroPayer },
+      own_key: { ...zeroPayer },
+    },
+  };
+}
+
 function response(): InsightsUsageResponse {
   return {
     scope: { kind: "workspace", accountId: id, workspaceId: secondId },
@@ -406,6 +427,13 @@ describe("Insights response contracts", () => {
     expect(
       InsightsUsageResponse.safeParse({
         ...response(),
+        windowEnd: response().priorWindowStart,
+      }).success,
+    ).toBe(false);
+    expect(
+      InsightsUsageResponse.safeParse({
+        ...response(),
+        priorWindowStart: response().priorWindowEnd,
         priorWindowEnd: response().priorWindowStart,
       }).success,
     ).toBe(false);
@@ -429,6 +457,91 @@ describe("Insights response contracts", () => {
         groupBy: "workspace",
       }).success,
     ).toBe(true);
+  });
+
+  for (const [range, boundary, priorBoundary] of [
+    ["today", "2026-10-03T00:00:00Z", "2026-10-02T00:00:00Z"],
+    ["week", "2026-10-05T00:00:00Z", "2026-09-28T00:00:00Z"],
+    ["month", "2026-10-01T00:00:00Z", "2026-09-01T00:00:00Z"],
+    ["ytd", "2026-01-01T00:00:00Z", "2025-01-01T00:00:00Z"],
+  ] as const) {
+    test(`accepts canonical empty ${range} windows at their exact UTC boundary`, () => {
+      const empty: InsightsUsageResponse = {
+        ...response(),
+        range,
+        bucket: range === "today" ? "hour" : "day",
+        windowStart: boundary,
+        windowEnd: boundary,
+        priorWindowStart: priorBoundary,
+        priorWindowEnd: priorBoundary,
+        generatedAt: boundary,
+        totals: emptyMeasures(),
+        prior: null,
+        groups: [],
+        groupCount: 0,
+        groupsTruncated: false,
+        series: [],
+      };
+      expect(InsightsUsageResponse.parse(empty)).toEqual(empty);
+    });
+  }
+
+  test("zero-length current windows reject calls, costs, tokens, groups and series", () => {
+    const empty: InsightsUsageResponse = {
+      ...response(),
+      windowEnd: response().windowStart,
+      totals: emptyMeasures(),
+      groups: [],
+      groupCount: 0,
+      groupsTruncated: false,
+      series: [],
+    };
+    expect(InsightsUsageResponse.safeParse(empty).success).toBe(true);
+    for (const totals of [
+      measures(),
+      {
+        ...emptyMeasures(),
+        chargedMicros: 1,
+        byPayer: {
+          ...emptyMeasures().byPayer,
+          opengeni_credits: { ...zeroPayer, chargedMicros: 1 },
+        },
+      },
+      {
+        ...emptyMeasures(),
+        listMicros: 1,
+        byPayer: {
+          ...emptyMeasures().byPayer,
+          own_key: { ...zeroPayer, listMicros: 1 },
+        },
+      },
+      ...Object.keys(zeroTokens).map((field) => ({
+        ...emptyMeasures(),
+        tokens: { ...zeroTokens, [field]: 1 },
+      })),
+    ]) {
+      expect(InsightsUsageMeasures.safeParse(totals).success).toBe(true);
+      expect(InsightsUsageResponse.safeParse({ ...empty, totals }).success).toBe(false);
+    }
+    for (const fields of [
+      { groups: [{ ...response().groups[0]!, measures: emptyMeasures() }] },
+      { groupCount: 1 },
+      { groupsTruncated: true },
+      { series: [{ start: empty.windowStart, measures: emptyMeasures() }] },
+    ]) {
+      expect(InsightsUsageResponse.safeParse({ ...empty, ...fields }).success).toBe(false);
+    }
+  });
+
+  test("zero-length prior windows accept only null prior measures", () => {
+    const emptyPrior = { ...response(), priorWindowEnd: response().priorWindowStart };
+    expect(InsightsUsageResponse.safeParse(emptyPrior).success).toBe(true);
+    expect(InsightsUsageResponse.safeParse({ ...emptyPrior, prior: measures() }).success).toBe(
+      false,
+    );
+    expect(InsightsUsageResponse.safeParse({ ...emptyPrior, prior: emptyMeasures() }).success).toBe(
+      false,
+    );
   });
 
   test("limits per-bucket groups to top six plus other", () => {

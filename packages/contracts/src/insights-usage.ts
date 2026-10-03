@@ -362,18 +362,59 @@ export const InsightsUsageResponse = z
   })
   .strict()
   .superRefine((value, context) => {
-    if (Date.parse(value.windowStart) >= Date.parse(value.windowEnd)) {
+    const windowStart = Date.parse(value.windowStart);
+    const windowEnd = Date.parse(value.windowEnd);
+    const priorWindowStart = Date.parse(value.priorWindowStart);
+    const priorWindowEnd = Date.parse(value.priorWindowEnd);
+    if (windowStart > windowEnd) {
       context.addIssue({
         code: "custom",
         path: ["windowEnd"],
-        message: "Window end must follow start",
+        message: "Window end must not precede start",
       });
     }
-    if (Date.parse(value.priorWindowStart) >= Date.parse(value.priorWindowEnd)) {
+    if (priorWindowStart > priorWindowEnd) {
       context.addIssue({
         code: "custom",
         path: ["priorWindowEnd"],
-        message: "Prior window end must follow start",
+        message: "Prior window end must not precede start",
+      });
+    }
+    // At an exact UTC range boundary, elapsed current/prior windows can be
+    // zero-length. Preserve that canonical window instead of inventing a future end.
+    if (windowStart === windowEnd) {
+      if (
+        value.totals.calls !== 0 ||
+        value.totals.chargedMicros !== 0 ||
+        value.totals.listMicros !== 0 ||
+        Object.values(value.totals.tokens).some((tokens) => tokens !== 0)
+      ) {
+        context.addIssue({
+          code: "custom",
+          path: ["totals"],
+          message: "Zero-length windows must have empty measures",
+        });
+      }
+      if (value.groups.length !== 0 || value.groupCount !== 0 || value.groupsTruncated) {
+        context.addIssue({
+          code: "custom",
+          path: ["groups"],
+          message: "Zero-length windows must have no groups",
+        });
+      }
+      if (value.series.length !== 0) {
+        context.addIssue({
+          code: "custom",
+          path: ["series"],
+          message: "Zero-length windows must have no series points",
+        });
+      }
+    }
+    if (priorWindowStart === priorWindowEnd && value.prior !== null) {
+      context.addIssue({
+        code: "custom",
+        path: ["prior"],
+        message: "Zero-length prior windows must have null measures",
       });
     }
     if (value.bucket !== (value.range === "today" ? "hour" : "day")) {
