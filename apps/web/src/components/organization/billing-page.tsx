@@ -448,7 +448,10 @@ function BillingLoadFailure(props: {
 
 /** "max_concurrent_sessions" as "Max concurrent sessions". */
 function entitlementLabel(name: string): string {
-  const words = name.replace(/^limits?\./, "").replace(/[_.-]+/g, " ").trim();
+  const words = name
+    .replace(/^limits?\./, "")
+    .replace(/[_.-]+/g, " ")
+    .trim();
   return words.charAt(0).toUpperCase() + words.slice(1);
 }
 
