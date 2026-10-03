@@ -2605,7 +2605,7 @@ runs for it and the box would stay up until the provider deadline kills it
 uncaptured. One rule contains such commands, independent of command health:
 running, still draining output, stopping, unobservable, or repeatedly failing
 observation all qualify. The reaper reads a new inventory,
-`list_command_containment_candidates(limit, idle window)` from migration 0547,
+`list_command_containment_candidates(limit, idle window)` from migrations 0547/0599,
 which lists enrolled drains, rotating leases, and warm or draining Modal leases
 whose only holders are process holders of active non-supervised processes, with
 no capture or reaper hold and no open turn, turn finish, attempt close,
@@ -2618,10 +2618,10 @@ workspace control fence and the process -> admission -> lease row locks:
 - no holder other than those process holders, and no unsettled admission other
   than their parent admissions;
 - in every session of the sandbox group and every session owning a process on
-  the lease: no open turn (`queued`, `running`, `requires_action`, `recovering`,
+  the lease: no open turn (`queued`, `running`, `requires_action`,
   `waiting_capacity`, which includes a pending approval or human-input request),
-  no non-closed attempt, no pending quiescence (unsettled interruption or
-  undrained attempt writer). A `wait_for_input` that has not been superseded,
+  no unpaused recovering turn, no non-closed attempt, no pending quiescence
+  (unsettled interruption or undrained attempt writer). A `wait_for_input` that has not been superseded,
   and unclaimed machine input that will start a turn (pending immediate system
   updates other than command results; child lifecycle notices only with an
   active goal), are idle-clock facts: the window runs from the wait's deadline
@@ -2629,6 +2629,11 @@ workspace control fence and the process -> admission -> lease row locks:
   running, since the agent registered it for background work it is
   deliberately waiting on, while input or a timeout settlement that a paused
   session can never deliver cannot pin the box until the provider deadline;
+- a recovering turn under an effective session, ancestor or workspace pause
+  does not pin the box. The inventory admits it for inspection; exact enrollment
+  resolves current pause and resume overrides under the workspace control fence.
+  The existing drain saves the workspace before stopping commands. The paused
+  turn, history and control state survive for a later cold restore;
 - the group has been unused for `OPENGENI_SANDBOX_IDLE_COMMAND_CONTAINMENT_MS`
   (default 30 minutes; it must exceed the idle grace and, when explicit, stay
   below the rotation lead, and it must leave the reaper period plus the drain

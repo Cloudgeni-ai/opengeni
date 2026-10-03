@@ -12,6 +12,7 @@ import {
   claimSessionWorkForAttempt,
   createDb,
   createSession,
+  enrollRetainedCommandContainment,
   initializeSessionStartAtomically,
   retainWorkspaceMutationProcess,
   type DbClient,
@@ -350,6 +351,23 @@ describe("0547 idle command containment", () => {
         await clear();
         expect(await candidateGroups()).toContain(fixture.sandboxGroupId);
       }
+      // The replacement inventory and exact enrollment must also work when
+      // migrations ran under FORCE RLS as an ordinary schema owner.
+      await admin`update session_turns set status = 'recovering', finished_at = null
+        where session_id = ${fixture.sessionId}`;
+      await admin`update sessions set direct_control_state = 'paused',
+        direct_pause_revision = control_version where id = ${fixture.sessionId}`;
+      expect(await candidateGroups()).toContain(fixture.sandboxGroupId);
+      expect(
+        (
+          await enrollRetainedCommandContainment(app.db, {
+            accountId: fixture.accountId,
+            workspaceId: fixture.workspaceId,
+            sandboxGroupId: fixture.sandboxGroupId,
+            idleCommandContainmentMs: WINDOW_MS,
+          })
+        )?.mode,
+      ).toBe("idle");
     } finally {
       admin = sharedAdmin;
       app = sharedApp;
