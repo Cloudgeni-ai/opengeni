@@ -39,6 +39,19 @@ export * from "./claude-subscription-accounts";
 export * from "./claude-subscription-account-usage";
 import { heartbeatSubscriptionCredentialLeaseUntil } from "./subscription-credential-leases";
 import { directModelConnectionSpec, isDirectModelId } from "@opengeni/contracts";
+import {
+  normalizeOrganizationAccessPolicy,
+  type OrganizationAccessPolicy,
+  type UpdateOrganizationApiKeyRequest,
+} from "@opengeni/contracts";
+import {
+  organizationApiKeyAllowsWorkspace,
+  organizationApiKeyPolicyProjection,
+  readOrganizationApiKeyWorkspaceScopes,
+  replaceOrganizationApiKeyWorkspaceScope,
+  validateOrganizationApiKeyWorkspaceScope,
+} from "./organization-api-key-access";
+export { OrganizationApiKeyWorkspaceScopeError } from "./organization-api-key-access";
 import { PROMPT_PREVIEW_SCAN_MAX_CODE_UNITS } from "@opengeni/contracts/session-titles";
 import { sessionListEntry } from "@opengeni/contracts/session-list-entries";
 import { currentSessionAttachmentReadAccess } from "./database";
@@ -4252,12 +4265,20 @@ export async function createOrganizationApiKey(
     expiresAt?: Date | null;
     maxActiveKeys?: number | null;
     rotationSourceApiKeyId?: string | null;
+    policy?: OrganizationAccessPolicy;
   },
 ): Promise<ApiKey> {
   return await withRlsContext(
     db,
     { accountId: input.accountId, workspaceId: null },
     async (scopedDb) => {
+      const policy = input.policy ? normalizeOrganizationAccessPolicy(input.policy) : undefined;
+      if (policy)
+        await validateOrganizationApiKeyWorkspaceScope(
+          scopedDb,
+          input.accountId,
+          policy.workspaceScope,
+        );
       if (input.maxActiveKeys !== null && input.maxActiveKeys !== undefined) {
         await scopedDb.execute(
           sql`select pg_advisory_xact_lock(hashtextextended(${`organization-api-key:${input.accountId}`}, 0))`,
@@ -4298,12 +4319,24 @@ export async function createOrganizationApiKey(
           description: input.description ?? null,
           prefix: input.prefix,
           keyHash: input.keyHash,
-          permissions: input.permissions,
+          permissions: policy?.permissions ?? input.permissions,
+          permissionMode: policy ? "explicit" : "legacy",
+          workspaceScope: policy?.workspaceScope.kind ?? "all",
           expiresAt: input.expiresAt ?? null,
         })
         .returning();
       if (!row) throw new Error("Failed to create organization API key");
-      return mapApiKey(row);
+      if (policy)
+        await replaceOrganizationApiKeyWorkspaceScope(
+          scopedDb,
+          input.accountId,
+          row.id,
+          policy.workspaceScope,
+        );
+      return mapApiKey(
+        row,
+        policy?.workspaceScope.kind === "selected" ? policy.workspaceScope.workspaceIds : [],
+      );
     },
   );
 }
@@ -4315,7 +4348,7 @@ export async function listApiKeys(db: Database, workspaceId: string): Promise<Ap
       .from(schema.apiKeys)
       .where(eq(schema.apiKeys.workspaceId, workspaceId))
       .orderBy(desc(schema.apiKeys.createdAt));
-    return rows.map(mapApiKey);
+    return rows.map((row) => mapApiKey(row));
   });
 }
 
@@ -4331,8 +4364,81 @@ export async function listOrganizationApiKeys(db: Database, accountId: string): 
           eq(schema.apiKeys.credentialKind, "organization"),
         ),
       )
-      .orderBy(desc(schema.apiKeys.createdAt));
-    return rows.map(mapApiKey);
+      .orderBy(desc(schema.apiKeys.createdAt))
+      .for("share");
+    const scopes = await readOrganizationApiKeyWorkspaceScopes(scopedDb, rows);
+    return rows.map((row) => mapApiKey(row, scopes.get(row.id)));
+  });
+}
+
+export async function getOrganizationApiKey(
+  db: Database,
+  accountId: string,
+  keyId: string,
+): Promise<ApiKey | null> {
+  return withRlsContext(db, { accountId, workspaceId: null }, async (tx) => {
+    const [row] = await tx
+      .select()
+      .from(schema.apiKeys)
+      .where(
+        and(
+          eq(schema.apiKeys.accountId, accountId),
+          eq(schema.apiKeys.id, keyId),
+          isNull(schema.apiKeys.workspaceId),
+          eq(schema.apiKeys.credentialKind, "organization"),
+        ),
+      )
+      .for("share");
+    if (!row) return null;
+    const scopes = await readOrganizationApiKeyWorkspaceScopes(tx, [row]);
+    return mapApiKey(row, scopes.get(row.id));
+  });
+}
+
+export async function updateOrganizationApiKey(
+  db: Database,
+  accountId: string,
+  keyId: string,
+  input: UpdateOrganizationApiKeyRequest,
+): Promise<ApiKey | null> {
+  return withRlsContext(db, { accountId, workspaceId: null }, async (tx) => {
+    const [prior] = await tx
+      .select()
+      .from(schema.apiKeys)
+      .where(
+        and(
+          eq(schema.apiKeys.accountId, accountId),
+          eq(schema.apiKeys.id, keyId),
+          isNull(schema.apiKeys.workspaceId),
+          eq(schema.apiKeys.credentialKind, "organization"),
+        ),
+      )
+      .for("update");
+    if (!prior) return null;
+    const policy = input.policy ? normalizeOrganizationAccessPolicy(input.policy) : undefined;
+    if (policy)
+      await validateOrganizationApiKeyWorkspaceScope(tx, accountId, policy.workspaceScope);
+    const [row] = await tx
+      .update(schema.apiKeys)
+      .set({
+        ...(input.name !== undefined ? { name: input.name } : {}),
+        ...(input.description !== undefined ? { description: input.description } : {}),
+        ...(policy
+          ? {
+              permissions: policy.permissions,
+              permissionMode: "explicit" as const,
+              workspaceScope: policy.workspaceScope.kind,
+            }
+          : {}),
+        updatedAt: new Date(),
+      })
+      .where(and(eq(schema.apiKeys.accountId, accountId), eq(schema.apiKeys.id, keyId)))
+      .returning();
+    if (!row) return null;
+    if (policy)
+      await replaceOrganizationApiKeyWorkspaceScope(tx, accountId, keyId, policy.workspaceScope);
+    const scopes = await readOrganizationApiKeyWorkspaceScopes(tx, [row]);
+    return mapApiKey(row, scopes.get(row.id));
   });
 }
 
@@ -4422,7 +4528,9 @@ export async function revokeOrganizationApiKey(
         ),
       )
       .returning();
-    return row ? mapApiKey(row) : null;
+    if (!row) return null;
+    const scopes = await readOrganizationApiKeyWorkspaceScopes(scopedDb, [row]);
+    return mapApiKey(row, scopes.get(row.id));
   });
 }
 
@@ -4442,17 +4550,22 @@ export async function findActiveApiKeyByHash(
           sql`(${schema.apiKeys.expiresAt} is null or ${schema.apiKeys.expiresAt} > now())`,
         ),
       )
-      .limit(1);
+      .limit(1)
+      .for("update");
     if (!row) {
       return null;
     }
+    // Hash visibility proves this account. The join-table hash lane requires
+    // both settings and remains bounded to this key, not sibling key scopes.
+    await tx.execute(sql`select set_config('opengeni.account_id', ${row.accountId}, true)`);
+    const scopes = await readOrganizationApiKeyWorkspaceScopes(tx, [row]);
     const now = new Date();
     await tx
       .update(schema.apiKeys)
       .set({ lastUsedAt: now, updatedAt: now })
       .where(eq(schema.apiKeys.id, row.id));
     return {
-      ...mapApiKey({ ...row, lastUsedAt: now }),
+      ...mapApiKey({ ...row, lastUsedAt: now }, scopes.get(row.id)),
       credentialKind: row.credentialKind,
     };
   });
@@ -4481,15 +4594,23 @@ export async function findActiveWorkspaceApiKeyById(
             ),
           ),
         )
-        .limit(1);
+        .limit(1)
+        .for("share");
       if (!row) {
         return null;
       }
       if (row.workspaceId !== null && row.workspaceId !== input.workspaceId) {
         return null;
       }
+      if (
+        row.workspaceId === null &&
+        (row.credentialKind !== "organization" ||
+          !(await organizationApiKeyAllowsWorkspace(scopedDb, row, input.workspaceId)))
+      )
+        return null;
+      const scopes = await readOrganizationApiKeyWorkspaceScopes(scopedDb, [row]);
       return {
-        ...mapApiKey(row),
+        ...mapApiKey(row, scopes.get(row.id)),
         credentialKind: row.credentialKind,
       };
     },
@@ -87095,7 +87216,7 @@ async function withSocialConnectionSubjectRls<T>(
     : await withWorkspaceRls(db, workspaceId, fn);
 }
 
-function mapApiKey(row: typeof schema.apiKeys.$inferSelect): ApiKey {
+function mapApiKey(row: typeof schema.apiKeys.$inferSelect, workspaceIds?: string[]): ApiKey {
   return {
     id: row.id,
     accountId: row.accountId,
@@ -87104,6 +87225,7 @@ function mapApiKey(row: typeof schema.apiKeys.$inferSelect): ApiKey {
     description: row.description,
     prefix: row.prefix,
     permissions: row.permissions as Permission[],
+    ...organizationApiKeyPolicyProjection(row, workspaceIds),
     expiresAt: row.expiresAt ? row.expiresAt.toISOString() : null,
     revokedAt: row.revokedAt ? row.revokedAt.toISOString() : null,
     lastUsedAt: row.lastUsedAt ? row.lastUsedAt.toISOString() : null,

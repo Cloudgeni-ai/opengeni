@@ -7,6 +7,7 @@ import {
 import { rawRows, setSubjectRlsContext, withRlsContext, type Database } from "./database";
 import { lockSessionEventWriteRows } from "./session-control";
 import * as schema from "./schema";
+import { organizationApiKeyAllowsWorkspace } from "./organization-api-key-access";
 export { connectionMetadataMatchesBinding } from "./connection-token-resolver";
 
 const action = "session.mcp.credentials.rotate";
@@ -123,7 +124,7 @@ export async function rotateSessionMcpCredentialsAtomically(
       if (input.subjectId.startsWith("api_key:")) {
         const keyId = input.subjectId.slice("api_key:".length);
         const [key] = await tx
-          .select({ id: schema.apiKeys.id, permissions: schema.apiKeys.permissions })
+          .select()
           .from(schema.apiKeys)
           .where(
             and(
@@ -137,7 +138,10 @@ export async function rotateSessionMcpCredentialsAtomically(
           .for("update");
         if (
           !key ||
-          (!key.permissions.includes("workspace:admin") &&
+          (key.workspaceId === null &&
+            (key.credentialKind !== "organization" ||
+              !(await organizationApiKeyAllowsWorkspace(tx, key, input.workspaceId)))) ||
+          (!(key.permissionMode === "legacy" && key.permissions.includes("workspace:admin")) &&
             (!key.permissions.includes("sessions:control") ||
               !key.permissions.includes("mcp_servers:attach")))
         )

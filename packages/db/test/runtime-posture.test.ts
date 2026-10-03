@@ -273,6 +273,7 @@ function companyProfileAgentAdminAuthorityTables(): RuntimeTablePosture[] {
 function organizationMembershipLifecycleAuthorityTables(): RuntimeTablePosture[] {
   return [
     "api_keys",
+    "organization_api_key_workspaces",
     "additional_organization_creation_receipts",
     "organization_invitation_binding_events",
     "organization_membership_invitations",
@@ -786,6 +787,7 @@ describe("runtime database posture evaluator", () => {
       ]),
     );
   });
+
   test("usage allowance capability rejects direct runtime access and split lifecycle ownership", () => {
     const posture = safePosture();
     posture.privateTables.push({
@@ -1147,11 +1149,12 @@ describe("runtime database posture evaluator", () => {
                       ? 8
                       : 0;
         const expectedLength =
-          // Individual Claude accounts share the six subscription runtime tables.
+          // Individual Claude accounts share the six subscription runtime tables;
+          // the organization key scope join adds one more.
           (tables === FORCE_RLS_TABLES ||
           tables === RUNTIME_FULL_DML_TABLES ||
           tables === RUNTIME_DML_TABLES
-            ? 6
+            ? 7
             : 0) +
           (tables === FORCE_RLS_TABLES || tables === PROTECTED_NO_DIRECT_DML_TABLES ? 8 : 0) +
           // 0546 adds three organization integration tables.
@@ -1266,6 +1269,7 @@ describe("runtime database posture evaluator", () => {
       ]);
       expect(new Set([...RUNTIME_DML_TABLES, ...PROTECTED_NO_DIRECT_DML_TABLES]).size).toBe(
         tableCount +
+          1 + // 0600 organization key workspace scope join.
           3 +
           personalResourceProtectedTableCount +
           managedAuthSessionSetProtectedTableCount +
@@ -1274,6 +1278,7 @@ describe("runtime database posture evaluator", () => {
       );
       expect(new Set([...FORCE_RLS_TABLES, ...NON_RLS_RUNTIME_TABLES]).size).toBe(
         tableCount +
+          1 + // 0600 organization key workspace scope join.
           3 +
           personalResourceProtectedTableCount +
           managedAuthSessionSetProtectedTableCount +

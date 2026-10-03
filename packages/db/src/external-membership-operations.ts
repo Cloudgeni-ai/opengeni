@@ -1,5 +1,6 @@
 import { sql } from "drizzle-orm";
 import { z } from "zod";
+import { organizationAccessPresetPermissions, type Permission } from "@opengeni/contracts";
 import {
   ExternalIdentity,
   ExternalIdentityLookup,
@@ -19,8 +20,60 @@ import {
 } from "./database";
 import { grantWorkspaceAccess, listWorkspaceMembers } from "./workspace-membership-access";
 import { removeWorkspaceMember } from "./organization-membership-lifecycle";
+import {
+  lockActiveExternalOrganizationKeyAuthority,
+  lockExternalWorkspaceMembershipLifecycle,
+} from "./external-identities";
 
 type ServiceScope = { organizationId: string; actorSubjectId: string };
+
+// These organization-only grants cannot be delegated by workspace membership.
+const accountOnlyPermissions = new Set<Permission>([
+  "account:read",
+  "account:admin",
+  "workspace:create",
+  "billing:read",
+  "billing:manage",
+  "usage_allowances:manage",
+]);
+
+/** Retain the canonical organization/key lock order through receipt and effect.
+ * Scope is read after the key lock, including on exact operation replays. */
+async function requireLiveServiceKey(
+  tx: Database,
+  scope: ServiceScope & { workspaceId?: string },
+  requested: readonly Permission[] = [],
+) {
+  const keyId = /^api_key:([0-9a-f-]{36})$/i.exec(scope.actorSubjectId)?.[1];
+  await lockExternalWorkspaceMembershipLifecycle(tx, scope.organizationId);
+  const authority = keyId
+    ? await lockActiveExternalOrganizationKeyAuthority(
+        tx,
+        scope.organizationId,
+        keyId,
+        scope.workspaceId,
+      )
+    : null;
+  if (
+    !authority ||
+    !(
+      authority.permissions.includes("members:manage") ||
+      (authority.permissionMode === "legacy" && authority.permissions.includes("workspace:admin"))
+    ) ||
+    (authority.permissionMode === "explicit" &&
+      (requested.some((permission) => !authority.permissions.includes(permission)) ||
+        (requested.includes("workspace:admin") &&
+          organizationAccessPresetPermissions("full").some(
+            (permission) =>
+              !accountOnlyPermissions.has(permission) &&
+              !authority.permissions.includes(permission),
+          ))))
+  ) {
+    throw Object.assign(new Error("External membership organization key authority changed"), {
+      code: "42501",
+    });
+  }
+}
 
 export async function lookupExternalIdentity(
   db: Database,
@@ -29,6 +82,7 @@ export async function lookupExternalIdentity(
 ) {
   return withAccountRls(db, scope.organizationId, async (tx) => {
     await setSubjectRlsContext(tx, scope.actorSubjectId);
+    await requireLiveServiceKey(tx, scope);
     const [row] = await rawRows<{ result: unknown }>(
       tx,
       sql`select lookup_external_identity(
@@ -71,6 +125,7 @@ export async function addExternalWorkspaceMemberOperation(
     permissions: [...new Set(request.permissions)].sort(),
   };
   return withWorkspaceSubjectRls(db, scope.workspaceId, scope.actorSubjectId, async (tx) => {
+    await requireLiveServiceKey(tx, scope, command.permissions);
     const prepared = await prepare(tx, command);
     if (prepared.replay)
       return z.object({ identity: ExternalIdentity }).parse(prepared.result).identity;
@@ -110,6 +165,7 @@ export async function cancelExternalWorkspaceMemberGrant(
 ) {
   const command = { ...scope, action: "revoke", ...request };
   return withWorkspaceSubjectRls(db, scope.workspaceId, scope.actorSubjectId, async (tx) => {
+    await requireLiveServiceKey(tx, scope);
     const prepared = await prepare(tx, command);
     if (prepared.replay) {
       const stored = z
@@ -152,6 +208,7 @@ export async function updateExternalWorkspaceMemberOperation(
     permissions: [...new Set(request.permissions)].sort(),
   };
   return withWorkspaceSubjectRls(db, scope.workspaceId, scope.actorSubjectId, async (tx) => {
+    await requireLiveServiceKey(tx, scope, command.permissions);
     const prepared = await prepare(tx, command);
     if (prepared.replay) {
       const stored = z

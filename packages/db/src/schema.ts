@@ -1301,6 +1301,11 @@ export const apiKeys = pgTable(
     name: text("name").notNull(),
     description: text("description"),
     credentialKind: text("credential_kind").$type<ApiKeyCredentialKind>().notNull(),
+    workspaceScope: text("workspace_scope").$type<"all" | "selected">().notNull().default("all"),
+    permissionMode: text("permission_mode")
+      .$type<"legacy" | "explicit">()
+      .notNull()
+      .default("legacy"),
     prefix: text("prefix").notNull(),
     keyHash: text("key_hash").notNull(),
     permissions: jsonb("permissions").$type<string[]>().notNull().default([]),
@@ -1315,6 +1320,14 @@ export const apiKeys = pgTable(
     hash: uniqueIndex("api_keys_key_hash_idx").on(table.keyHash),
     account: index("api_keys_account_idx").on(table.accountId),
     workspace: index("api_keys_workspace_idx").on(table.workspaceId),
+    accountIdentity: uniqueIndex("api_keys_id_account_idx").on(table.id, table.accountId),
+    accessPolicyValid: check(
+      "api_keys_access_policy_check",
+      sql`${table.workspaceScope} in ('all', 'selected')
+        and ${table.permissionMode} in ('legacy', 'explicit')
+        and (${table.workspaceScope} = 'all' or (${table.credentialKind} = 'organization' and ${table.permissionMode} = 'explicit'))
+        and (${table.permissionMode} = 'legacy' or ${table.credentialKind} = 'organization')`,
+    ),
     descriptionValid: check(
       "api_keys_description_check",
       sql`${table.description} is null or length(${table.description}) between 1 and 500`,
@@ -1333,6 +1346,32 @@ export const apiKeys = pgTable(
         and ${table.revokedAt} is not null
       )`,
     ),
+  }),
+);
+
+export const organizationApiKeyWorkspaces = pgTable(
+  "organization_api_key_workspaces",
+  {
+    apiKeyId: uuid("api_key_id").notNull(),
+    workspaceId: uuid("workspace_id").notNull(),
+    accountId: uuid("account_id").notNull(),
+  },
+  (table) => ({
+    keyWorkspace: primaryKey({ columns: [table.apiKeyId, table.workspaceId] }),
+    workspace: index("organization_api_key_workspaces_workspace_idx").on(
+      table.workspaceId,
+      table.accountId,
+    ),
+    keyAccount: foreignKey({
+      name: "organization_api_key_workspaces_key_account_fk",
+      columns: [table.apiKeyId, table.accountId],
+      foreignColumns: [apiKeys.id, apiKeys.accountId],
+    }).onDelete("cascade"),
+    workspaceAccount: foreignKey({
+      name: "organization_api_key_workspaces_workspace_account_fk",
+      columns: [table.workspaceId, table.accountId],
+      foreignColumns: [workspaces.id, workspaces.accountId],
+    }).onDelete("cascade"),
   }),
 );
 

@@ -64,6 +64,7 @@ import {
   resolveTurnToolPolicy,
   scheduledTurnMcpServerIds,
   hasPermission,
+  requireExplicitPermissionDelegation,
 } from "@opengeni/core";
 import { loadWorkspaceEnvironmentForRunWithCredentials } from "../environment";
 import { withFirstPartyTools } from "../goals";
@@ -82,6 +83,7 @@ import {
   DEFAULT_FIRST_PARTY_MCP_PERMISSIONS,
   resolveAgentToolFamilies,
   type ResourceRef,
+  type Permission,
   type ToolAuthNeededPayload,
 } from "@opengeni/contracts";
 
@@ -115,6 +117,19 @@ import { createWorkspaceSkillTools } from "./skill-tools";
 import { loadConfiguredBundledSkills } from "./skill-selection";
 import { guardSkillFilesystem } from "./skill-transfer";
 import { turnCredentialRestriction } from "./credential-restriction";
+
+/** A linked turn's immutable policy must survive array and token boundaries. */
+export function linkedTurnFirstPartyPermissions(
+  selected: Permission[] | null,
+  linked: { permissions: Permission[]; permissionMode?: "legacy" | "explicit" } | null,
+): Permission[] | null {
+  if (!linked) return selected;
+  const permissions = (selected ?? DEFAULT_FIRST_PARTY_MCP_PERMISSIONS).filter((permission) =>
+    hasPermission(linked.permissions, permission, linked.permissionMode),
+  );
+  requireExplicitPermissionDelegation(linked, permissions);
+  return permissions;
+}
 
 export type PrepareTurnToolPolicyDeps = {
   input: RunAgentTurnInput;
@@ -575,11 +590,10 @@ export async function prepareTurnToolRuntime(deps: PrepareTurnToolRuntimeDeps) {
   );
   if (linkedAuthority && !linkedAuthority.authorized)
     throw new Error("Native identity link was revoked");
-  const effectiveFirstPartyPermissions = linkedAuthority
-    ? (session.firstPartyMcpPermissions ?? DEFAULT_FIRST_PARTY_MCP_PERMISSIONS).filter(
-        (permission) => hasPermission(linkedAuthority.permissions, permission),
-      )
-    : session.firstPartyMcpPermissions;
+  const effectiveFirstPartyPermissions = linkedTurnFirstPartyPermissions(
+    session.firstPartyMcpPermissions,
+    linkedAuthority,
+  );
   const toolFamilies = resolveAgentToolFamilies(session.agent);
   const selectedFirstPartyMcpTools = toolFamilies.firstPartyTools(
     allowedFirstPartyMcpToolsForSession(runSettings, session.firstPartyMcpTools),

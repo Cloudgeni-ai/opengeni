@@ -8,6 +8,8 @@ import {
   hasPermission,
   requireAccessContext,
   requireLiteralPermission,
+  requirePermission,
+  requireExplicitPermissionDelegation,
 } from "../src/access";
 
 const grant = (permissions: AccessGrant["permissions"]): AccessGrant => ({
@@ -75,11 +77,37 @@ describe("literal high-trust permissions", () => {
       "missing literal permission: secrets:read",
     );
   });
+  test("explicit policy admin remains literal across serialized grant boundaries", () => {
+    const admin: AccessGrant = JSON.parse(
+      JSON.stringify({ ...grant(["workspace:admin"]), permissionMode: "explicit" }),
+    );
+    expect(() => requirePermission(admin, "workspace:admin")).not.toThrow();
+    expect(hasPermission(admin.permissions, "sessions:control")).toBe(false);
+    expect(() => requirePermission(admin, "sessions:control")).toThrow(
+      "missing permission: sessions:control",
+    );
+    expect(() => requireExplicitPermissionDelegation(admin, ["workspace:admin"])).toThrow(
+      "cannot delegate a legacy workspace-admin wildcard",
+    );
+  });
 
   test("an explicit secrets:read grant passes the literal boundary", () => {
     const explicit = grant(["workspace:admin", "secrets:read"]);
     expect(hasLiteralPermission(explicit.permissions, "secrets:read")).toBe(true);
     expect(() => requireLiteralPermission(explicit, "secrets:read")).not.toThrow();
+  });
+  test("explicit permission delegation cannot exceed its effective grant", () => {
+    const limited: AccessGrant = {
+      ...grant(["workspace:read", "members:manage"]),
+      permissionMode: "explicit",
+    };
+    expect(() => requireExplicitPermissionDelegation(limited, ["workspace:read"])).not.toThrow();
+    expect(() => requireExplicitPermissionDelegation(limited, ["sessions:control"])).toThrow(
+      "outside the organization key policy",
+    );
+    expect(
+      hasPermission([...limited.permissions], "sessions:control", limited.permissionMode),
+    ).toBe(false);
   });
 
   test("variable-set capabilities do not imply one another", () => {
