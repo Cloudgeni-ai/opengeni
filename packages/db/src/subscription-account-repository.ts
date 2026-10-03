@@ -1364,7 +1364,6 @@ export function createSubscriptionAccountRepository<Secret, Settings>(options: {
     },
   ): Promise<SubscriptionCredentialLeaseResult> {
     const snapshot = SubscriptionAuthoritySnapshotV1.parse(input.authoritySnapshot);
-    const now = input.now ?? new Date();
     const leaseTtlMs = input.leaseTtlMs ?? CREDENTIAL_LEASE_TTL_MS;
     if (!Number.isFinite(leaseTtlMs) || leaseTtlMs <= 0) {
       throw new Error(label + " credential lease TTL must be positive");
@@ -1372,7 +1371,6 @@ export function createSubscriptionAccountRepository<Secret, Settings>(options: {
     if (!input.holderId.trim()) {
       throw new Error(label + " credential lease holder id is required");
     }
-    const leasedUntil = new Date(now.getTime() + leaseTtlMs);
     return await withWorkspaceSubjectRls(
       db,
       input.workspaceId,
@@ -1417,6 +1415,26 @@ export function createSubscriptionAccountRepository<Secret, Settings>(options: {
             .limit(1);
           if (!settings) throw new Error(label + " rotation settings are unavailable");
 
+          // Pool and retained-lease contention must not consume the new TTL or
+          // let an expired holder keep its generation. Sample the DB clock
+          // only after both locks; explicit clocks are deterministic test input.
+          const [retained] = await tx
+            .select()
+            .from(tables.credentialLeases)
+            .where(
+              and(
+                eq(tables.credentialLeases.workspaceId, input.workspaceId),
+                eq(tables.credentialLeases.turnId, input.turnId),
+              ),
+            )
+            .for("update")
+            .limit(1);
+          const clock = input.now
+            ? undefined
+            : await tx.execute(sql`select clock_timestamp() as observed_at`);
+          const now = input.now ?? new Date(clock![0]!.observed_at as string);
+          const leasedUntil = new Date(now.getTime() + leaseTtlMs);
+          const existing = retained && retained.leasedUntil > now ? retained : undefined;
           await tx
             .delete(tables.credentialLeases)
             .where(
@@ -1426,18 +1444,6 @@ export function createSubscriptionAccountRepository<Secret, Settings>(options: {
               ),
             );
 
-          const [existing] = await tx
-            .select()
-            .from(tables.credentialLeases)
-            .where(
-              and(
-                eq(tables.credentialLeases.workspaceId, input.workspaceId),
-                eq(tables.credentialLeases.turnId, input.turnId),
-                gt(tables.credentialLeases.leasedUntil, now),
-              ),
-            )
-            .for("update")
-            .limit(1);
           const candidates = await tx
             .select(credentialAllocationColumns)
             .from(tables.credentials)
@@ -1553,6 +1559,7 @@ export function createSubscriptionAccountRepository<Secret, Settings>(options: {
               credentialId: selected.id,
               turnId: input.turnId,
               holderId: input.holderId,
+              generation: retained ? retained.generation + 1 : 1,
               leasedUntil,
             })
             .returning();

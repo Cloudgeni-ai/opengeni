@@ -1132,3 +1132,48 @@ test("Claude waiter keeps a manual pin binding and resumes after the explicit pi
     action: "resumed",
   });
 });
+
+test("pool lock contention does not consume lease TTL and expired holders advance generation", async () => {
+  const input = await fixture(),
+    { a } = await pool(input),
+    accepted = await turn(input);
+  const request = {
+    ...input,
+    ...accepted,
+    holderId: "fixture-retained-holder",
+    upstreamModelId: "claude-opus-fixture",
+    pinnedCredentialId: a.account.id,
+    pinSource: "policy" as const,
+    leaseTtlMs: 5000,
+  };
+  const first = await acquireClaudeCredentialLease(client.db, request);
+  let unlock!: () => void;
+  let locked!: () => void;
+  const ready = new Promise<void>((resolve) => {
+    locked = resolve;
+  });
+  const release = new Promise<void>((resolve) => {
+    unlock = resolve;
+  });
+  const holding = shared.admin.begin(async (tx) => {
+    await tx`SELECT id FROM claude_rotation_settings WHERE workspace_id = ${input.workspaceId} FOR UPDATE`;
+    locked();
+    await release;
+    await tx`UPDATE claude_credential_leases SET leased_until = clock_timestamp() - interval '1 second' WHERE turn_id = ${accepted.turnId}`;
+  });
+  await ready;
+  const acquiring = acquireClaudeCredentialLease(client.db, request);
+  // Deliberately hold the pool while acquisition is queued; TTL starts at admission.
+  await Bun.sleep(150);
+  const releasedAt = Date.now();
+  unlock();
+  await holding;
+  const next = await acquiring;
+  expect(next.reused).toBe(false);
+  expect(next.generation).toBe(first.generation! + 1);
+  expect(next.leasedUntil!.getTime()).toBeGreaterThanOrEqual(releasedAt + request.leaseTtlMs - 30);
+  await releaseClaudeCredentialLease(client.db, { ...request, generation: first.generation! });
+  const stillHeld = await acquireClaudeCredentialLease(client.db, request);
+  expect(stillHeld.reused).toBe(true);
+  expect(stillHeld.generation).toBe(next.generation);
+});

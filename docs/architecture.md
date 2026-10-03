@@ -1063,20 +1063,15 @@ SuperGrok freezes scope on acceptance. Vercel AI Gateway/OpenRouter BYOK keys
 belong to workspaces or organizations; organization keys use encrypted FORCE-RLS,
 inherit into same-organization shared workspaces, retain payer identity, and
 never fall back across rails.
-Provider-refusal cooldowns keep provenance and revisions: fresh usage repairs old
-quota refusals, not backpressure or newer refusals. Capped admission and waits
-use bounded refreshes. Codex quota labels require explicit `/wham/usage` window
+Cooldowns retain provenance: fresh usage repairs old quota refusals, not newer refusals or backpressure. Admission refreshes are bounded. Codex quota labels require explicit `/wham/usage` window
 durations, never primary/secondary position. Headers lacking both durations cannot
 update labeled cache; absent reset timing does not clear an exhausted window.
-Opening the account picker refreshes usage.
 
-Claude setup and quota observations:
-[`model-providers.md`](model-providers.md#claude-subscription-usage).
+Claude account pools: [setup and quotas](model-providers.md#claude-subscription-usage).
 
 Codex requires exact live credential leases and frozen accepted source/rotation
 policy; recovery preserves that policy while current health governs capacity.
-Canonical allocator, expiry, source-change, and picker rules:
-[Codex rotation](codex-subscription-rotation.md).
+[Allocator and picker rules](codex-subscription-rotation.md).
 Migration 0492 requires drained API/control/turn processes, runtime-login
 inventory, migration, role provisioning, and matching binaries; never restart
 pre-0492 code. Accepted turns recover from checkpoints.
@@ -1748,7 +1743,7 @@ organization-workspace lifecycle authority; see [external membership operation r
 | Change area | Canonical source | Read first |
 | --- | --- | --- |
 | Model registry, routing, pricing, provider identity, OpenAI-compatible or Claude inference | `packages/config/src/index.ts`, `packages/runtime/src/model-provider*.ts`, `packages/runtime/src/anthropic-messages.ts` | [`model-providers.md`](model-providers.md) (start at Configuring inference) |
-| Claude sign-in, renewal or quota | apps/api/src/claude-subscription-oauth.ts, packages/db/src/claude-subscription-tokens.ts | [model-providers.md](model-providers.md#claude-subscription-usage) |
+| Claude sign-in, renewal or quota | apps/api/src/routes/claude-subscription-accounts.ts, packages/db/src/claude-subscription-account-tokens.ts | [model-providers.md](model-providers.md#claude-subscription-usage) |
 | Codex subscription authority or capacity | `packages/codex/`, `apps/worker/src/activities/codex-rotation.ts` | [`codex-subscription-rotation.md`](codex-subscription-rotation.md) |
 | SuperGrok/xAI subscription authority or capacity | `packages/xai-subscription/`, `packages/db/src/xai-subscription.ts`, `packages/db/src/subscription-account-repository.ts`, `packages/db/src/subscription-pool-schema.ts`, `packages/db/src/organization-xai-subscriptions.ts` | [`supergrok-subscription.md`](supergrok-subscription.md) |
 | First-party MCP, Codemode, or tool selection | `apps/api/src/mcp/`, `packages/codemode/`, `packages/runtime/src/` | [`mcp-surfaces.md`](mcp-surfaces.md) |
