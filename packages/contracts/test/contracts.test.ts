@@ -1889,6 +1889,8 @@ describe("contracts", () => {
       true,
     );
     expect(payload.auth.mode === "managedSession" && payload.auth.socialProviders).toEqual([]);
+    // An older deployment omits the sign-up switch; that means sign-ups are open.
+    expect(payload.auth.mode === "managedSession" && payload.auth.newSignupsEnabled).toBe(true);
     expect(payload.mcpServers[0]?.id).toBe("opengeni");
     expect(payload.analytics).toEqual({ consentRequired: true, providers: {} });
     expect(payload.managedAuthSessionSetMode).toBe("legacy");

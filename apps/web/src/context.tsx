@@ -742,6 +742,11 @@ export function RootRouteComponent() {
       : true;
   const managedSocialProviders =
     clientConfig?.auth.mode === "managedSession" ? (clientConfig.auth.socialProviders ?? []) : [];
+  // An older API omits the field; only an explicit false pauses account creation.
+  const managedNewSignupsEnabled =
+    clientConfig?.auth.mode === "managedSession"
+      ? clientConfig.auth.newSignupsEnabled !== false
+      : true;
   const keyAuthReady = !keyAuthRequired || hasAccessKey;
   const managedAuthReady = !managedAuthRequired || Boolean(authSession);
   const authReady = keyAuthReady && managedAuthReady;
@@ -2851,6 +2856,7 @@ export function RootRouteComponent() {
                   presentation="embedded"
                   onSubmit={async (_mode, input) => await handleManagedSessionSetSignup(input)}
                   emailVerificationRequired={managedEmailVerificationRequired}
+                  newSignupsEnabled={managedNewSignupsEnabled}
                 />
               ) : undefined
             }
@@ -2863,6 +2869,7 @@ export function RootRouteComponent() {
             onDismissInvitation={clearOrganizationInvitationContinuation}
             onSubmit={handleManagedAuth}
             emailVerificationRequired={managedEmailVerificationRequired}
+            newSignupsEnabled={managedNewSignupsEnabled}
             socialProviders={managedSocialProviders}
             onSocialSubmit={handleManagedSocialAuth}
           />

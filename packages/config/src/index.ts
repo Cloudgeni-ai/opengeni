@@ -1438,6 +1438,12 @@ const SettingsSchema = z.object({
     .min(1)
     .optional(),
   managedAuthSessionSetMode: z.enum(["legacy", "dual", "broker"]).default("legacy"),
+  // Deployment ceiling for new managed accounts. When false, managed auth
+  // refuses every new Better Auth account (email/password sign-up and implicit
+  // Google/GitHub sign-up) while existing sign-in, sessions, password reset,
+  // email verification, and invitation-bound account setup keep working. Read
+  // at startup; the 0585 runtime switch pauses sign-ups without a restart.
+  managedAuthNewSignupsEnabled: EnvBoolean.default(true),
   // Query transport is an explicit second-stage rollout. A pre-compatibility
   // web image understands only fragment bearers, so API replicas must keep
   // generating fragment links until the compatible web fleet has converged.
@@ -3737,6 +3743,7 @@ export function getSettings(source: NodeJS.ProcessEnv = process.env): Settings {
         ? undefined
         : source.OPENGENI_ALLOWED_USER_EMAILS.split(",").map((email) => email.trim()),
     managedAuthSessionSetMode: optional("OPENGENI_MANAGED_AUTH_SESSION_SET_MODE"),
+    managedAuthNewSignupsEnabled: optional("OPENGENI_MANAGED_AUTH_NEW_SIGNUPS_ENABLED"),
     organizationUserSetupEmailTokenTransport: optional(
       "OPENGENI_ORGANIZATION_USER_SETUP_EMAIL_TOKEN_TRANSPORT",
     ),
