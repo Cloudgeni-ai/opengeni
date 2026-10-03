@@ -28,6 +28,7 @@ export default function RootLayout() {
       <SafeAreaProvider>
         <AccountProvider>
           <NativeEnvironment>
+            {/* oxlint-disable-next-line react/style-prop-object -- expo-status-bar takes a string */}
             <StatusBar style="auto" />
             <Stack screenOptions={{ headerShown: true }}>
               <Stack.Screen name="index" options={{ title: "OpenGeni" }} />

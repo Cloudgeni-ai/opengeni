@@ -36,3 +36,11 @@ export type {
   NativeTimelineThemeOverrides,
   WebColorToken,
 } from "./theme";
+export { NativeSessionScreen } from "./session-screen";
+export type { NativeSessionScreenProps } from "./session-screen";
+export { ComposerPill, SessionComposer } from "./composer";
+export type { SessionComposerProps } from "./composer";
+export { ApprovalStrip, HumanInputCard } from "./decisions";
+export type { ApprovalStripProps, HumanInputCardProps } from "./decisions";
+export { Button, IconButton } from "./controls";
+export type { ButtonVariant } from "./controls";

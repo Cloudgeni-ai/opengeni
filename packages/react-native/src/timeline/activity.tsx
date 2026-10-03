@@ -20,6 +20,7 @@ import {
   type ToolIconKind,
   type ToolPreview,
   type ToolRowPresentation,
+  type WebSearchResult,
 } from "@opengeni/react/timeline-model";
 import { createContext, useContext, type ReactNode } from "react";
 import { Pressable, Text, View } from "react-native";
@@ -141,6 +142,16 @@ function previewContent(preview: ToolPreview, compact: boolean): ReactNode {
   return <PreviewNode preview={preview} compact={compact} />;
 }
 
+function keyedResults(results: readonly WebSearchResult[]) {
+  const seen = new Map<string, number>();
+  return results.map((result) => {
+    const content = `${result.domain}\u0000${result.title}\u0000${result.snippet}`;
+    const occurrence = (seen.get(content) ?? 0) + 1;
+    seen.set(content, occurrence);
+    return { key: `${content}\u0000${occurrence}`, result };
+  });
+}
+
 function ToolBodyView({ body }: { body: ToolBody }) {
   const theme = useNativeTimelineTheme();
   switch (body.kind) {
@@ -186,8 +197,8 @@ function ToolBodyView({ body }: { body: ToolBody }) {
       }
       return (
         <View style={{ gap: 8 }}>
-          {body.results.map((result, index) => (
-            <View key={`${result.domain}-${index}`} style={{ flexDirection: "row", gap: 10 }}>
+          {keyedResults(body.results).map(({ key, result }) => (
+            <View key={key} style={{ flexDirection: "row", gap: 10 }}>
               <View style={{ marginTop: 3 }}>
                 <Icon name="globe" size={14} color={theme.colors["fg-subtle"]} />
               </View>
@@ -229,7 +240,15 @@ function PatchView({
 }) {
   const theme = useNativeTimelineTheme();
   const mono = { ...fontStyle(theme, 400, "mono"), fontSize: theme.size.xs, lineHeight: 18 };
-  const lines = diff.split("\n").filter((line) => !line.startsWith("*** "));
+  let offset = 0;
+  const lines = diff
+    .split("\n")
+    .map((text) => {
+      const entry = { text, key: `l${offset}` };
+      offset += text.length + 1;
+      return entry;
+    })
+    .filter((entry) => !entry.text.startsWith("*** "));
   return (
     <View
       style={{
@@ -255,9 +274,9 @@ function PatchView({
           {path}
         </Text>
       )}
-      {lines.slice(0, 400).map((line, index) => (
+      {lines.slice(0, 400).map(({ text: line, key }) => (
         <Text
-          key={index}
+          key={key}
           style={[
             mono,
             {

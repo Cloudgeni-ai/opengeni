@@ -11,28 +11,31 @@ export function Icon({
   size = 14,
   color,
   strokeWidth = 2,
+  fill,
 }: {
   name: NativeIconName;
   size?: number;
   color: string;
   strokeWidth?: number;
+  /** Solid glyphs (the web fills pause/play). */
+  fill?: string | undefined;
 }) {
   const node = iconNodes[name] as ReadonlyArray<readonly [string, Record<string, string | number>]>;
   return (
     <Svg width={size} height={size} viewBox="0 0 24 24" fill="none">
-      {node.map(([tag, attrs], index) => {
+      {node.map(([tag, attrs]) => {
         const Element = ELEMENTS[tag as keyof typeof ELEMENTS];
         if (!Element) return null;
         const props = { ...attrs } as Record<string, unknown>;
         return (
           <Element
-            key={index}
+            key={`${tag}:${JSON.stringify(attrs)}`}
             {...props}
             stroke={color}
             strokeWidth={strokeWidth}
             strokeLinecap="round"
             strokeLinejoin="round"
-            fill="none"
+            fill={fill ?? "none"}
           />
         );
       })}

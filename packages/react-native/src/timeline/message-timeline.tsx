@@ -13,10 +13,12 @@ import {
   durationBetween,
   flattenActivityItems,
   formatClockTime,
+  formatRelativeTime,
   isPreparingWork,
   readableWorkDefaultOpen,
   readableWorkShowsPreview,
   readableWorkStatus,
+  SESSION_STATUS_PRESENTATION,
   timelineGroupContainsPresentedImage,
   type TurnSummaryFacetConfiguration,
 } from "@opengeni/react/timeline-model";
@@ -339,11 +341,16 @@ function TimelineRow({ item, context }: { item: TimelineItem; context: GroupCont
     case "agent-message":
       return <AgentMessageRow item={item} context={context} />;
     case "human-input":
-      return <HumanInputRow item={item} />;
-    case "session-status":
+      return <HumanInputRow item={item} onCopy={context.onCopy} />;
+    case "session-status": {
+      const meta = SESSION_STATUS_PRESENTATION[item.status];
       return (
-        <SeparatorRow text={item.resolvedAt ? "work resumed" : item.status.replace(/_/g, " ")} />
+        <SeparatorRow
+          dot={item.resolvedAt ? undefined : theme.colors[`status-${meta.tone}`]}
+          text={`${item.resolvedAt ? "work resumed" : meta.label.toLowerCase()} · ${formatRelativeTime(item.resolvedAt ?? item.occurredAt)}`}
+        />
       );
+    }
     case "context-compaction":
       return <SeparatorRow text="context compacted" />;
     case "notice":
@@ -455,11 +462,16 @@ function nativeClockTime(iso: string): string {
   return formatClockTime(iso).replace(" at ", ", ");
 }
 
-function SeparatorRow({ text }: { text: string }) {
+function SeparatorRow({ text, dot }: { text: string; dot?: string | undefined }) {
   const theme = useNativeTimelineTheme();
   return (
     <View style={{ flexDirection: "row", alignItems: "center", gap: 12 }}>
       <View style={{ height: 1, flex: 1, backgroundColor: theme.colors.border }} />
+      {dot ? (
+        <View
+          style={{ width: 4, height: 4, borderRadius: 2, marginRight: -6, backgroundColor: dot }}
+        />
+      ) : null}
       <Text
         numberOfLines={1}
         style={{
@@ -644,7 +656,13 @@ function AgentMessageRow({ item, context }: { item: AgentMessageItem; context: G
   );
 }
 
-function HumanInputRow({ item }: { item: HumanInputItem }) {
+function HumanInputRow({
+  item,
+  onCopy,
+}: {
+  item: HumanInputItem;
+  onCopy?: ((text: string) => void) | undefined;
+}) {
   const theme = useNativeTimelineTheme();
   const multiple = Math.max(item.questions.length, item.answers.length) > 1;
   const settled =
@@ -769,6 +787,12 @@ function HumanInputRow({ item }: { item: HumanInputItem }) {
             </Text>
           ) : null}
         </View>
+        <MessageFooter
+          text={answerText || settled}
+          occurredAt={item.occurredAt}
+          align="end"
+          onCopy={onCopy}
+        />
       </View>
     </View>
   );
