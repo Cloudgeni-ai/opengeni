@@ -371,7 +371,7 @@ describe("readable per-turn rows", () => {
       await flush();
       expect(statusTrigger(r.container)).toBe(trigger);
       expect(trigger.textContent).toMatch(/^Working/);
-      expect(r.container.textContent).toContain("Approval was needed.");
+      expect(r.container.textContent).toContain("You responded to this approval.");
       expect(r.container.textContent).not.toContain("waiting on you");
       expect(r.container.textContent).not.toContain("the turn is paused");
       expect(topLevelMessages(r.container)).toEqual(["Continuing the approved work."]);
