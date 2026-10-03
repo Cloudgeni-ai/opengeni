@@ -20,6 +20,8 @@ import {
   updateOrganizationApiKey,
   OrganizationApiKeyWorkspaceScopeError,
   OrganizationApiKeyLimitExceededError,
+  OrganizationServiceAccountNotFoundError,
+  OrganizationServiceAccountRoleError,
   revokeApiKey,
   revokeOrganizationApiKey,
 } from "@opengeni/db";
@@ -198,6 +200,8 @@ export function registerApiKeyRoutes(app: Hono, deps: ApiRouteDeps): void {
           expiresAt: organizationApiKeyExpiryDate(body),
           maxActiveKeys: organizationApiKeyLimit(deps),
           rotationSourceApiKeyId: authenticatedApiKeyId(context),
+          serviceAccountId: body.serviceAccountId ?? null,
+          createdBySubjectId: context.subjectId,
         });
         return c.json(
           CreateApiKeyResponse.parse({ apiKey: withOrganizationApiKeyAccess(apiKey), token }),
@@ -209,6 +213,7 @@ export function registerApiKeyRoutes(app: Hono, deps: ApiRouteDeps): void {
         }
         if (error instanceof OrganizationApiKeyWorkspaceScopeError)
           throw new HTTPException(400, { message: error.message });
+        throwServiceAccountError(error);
         throw error;
       }
     },
@@ -243,6 +248,7 @@ export function registerApiKeyRoutes(app: Hono, deps: ApiRouteDeps): void {
       } catch (error) {
         if (error instanceof OrganizationApiKeyWorkspaceScopeError)
           throw new HTTPException(400, { message: error.message });
+        throwServiceAccountError(error);
         throw error;
       }
     },
@@ -258,6 +264,14 @@ export function registerApiKeyRoutes(app: Hono, deps: ApiRouteDeps): void {
     }
     return c.json(withOrganizationApiKeyAccess(apiKey));
   });
+}
+
+/** Service account problems read as the person would expect. */
+export function throwServiceAccountError(error: unknown): void {
+  if (error instanceof OrganizationServiceAccountNotFoundError)
+    throw new HTTPException(404, { message: error.message });
+  if (error instanceof OrganizationServiceAccountRoleError)
+    throw new HTTPException(400, { message: error.message });
 }
 
 function requireAccountPermission(

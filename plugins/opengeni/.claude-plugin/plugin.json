@@ -10,12 +10,5 @@
   "homepage": "https://docs.opengeni.ai/guides/coding-agents",
   "repository": "https://github.com/Cloudgeni-ai/opengeni",
   "license": "Apache-2.0",
-  "keywords": [
-    "opengeni",
-    "mcp",
-    "agents",
-    "background-agents",
-    "cloud-agents",
-    "sdk"
-  ]
+  "keywords": ["opengeni", "mcp", "agents", "background-agents", "cloud-agents", "sdk"]
 }

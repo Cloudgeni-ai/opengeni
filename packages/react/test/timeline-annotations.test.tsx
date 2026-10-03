@@ -361,6 +361,47 @@ describe("timeline annotations", () => {
     await rendered.unmount();
   });
 
+  test("consumes each focus request once across parent renders and permits a new request", async () => {
+    await import("../src/components/timeline-annotations-dialog");
+    const first = annotation("");
+    const second = { ...annotation(""), id: "00000000-0000-4000-8000-000000000504" };
+    let consumed = 0;
+    const view = (target: string | null) => (
+      <TimelineAnnotationsChip
+        annotations={[first, second]}
+        editable
+        focusAnnotationId={target}
+        onFocusConsumed={() => {
+          consumed += 1;
+        }}
+        onUpdate={() => undefined}
+      />
+    );
+    const rendered = await renderComponent(view(first.id));
+    const notes = document.body.querySelectorAll("textarea");
+    expect(document.activeElement).toBe(notes.item(0));
+    expect(consumed).toBe(1);
+    await act(async () => notes[1]?.focus());
+    // Both the callback and annotation array have new identities on this render.
+    await rendered.rerender(view(first.id));
+    expect(document.activeElement).toBe(notes.item(1));
+    expect(consumed).toBe(1);
+    await rendered.rerender(view(second.id));
+    expect(document.activeElement).toBe(notes.item(1));
+    expect(consumed).toBe(2);
+    await act(async () => notes[0]?.focus());
+    await rendered.rerender(view(null));
+    await rendered.rerender(view(second.id));
+    expect(document.activeElement).toBe(notes.item(1));
+    expect(consumed).toBe(3);
+    await act(async () => notes[0]?.focus());
+    await rendered.rerender(view("00000000-0000-4000-8000-000000000599"));
+    await rendered.rerender(view(second.id));
+    expect(document.activeElement).toBe(notes.item(1));
+    expect(consumed).toBe(4);
+    await rendered.unmount();
+  });
+
   test("keeps composer annotations as one numbered count chip", async () => {
     await import("../src/components/timeline-annotations-dialog");
     let note = "";

@@ -274,6 +274,7 @@ function organizationMembershipLifecycleAuthorityTables(): RuntimeTablePosture[]
   return [
     "api_keys",
     "organization_api_key_workspaces",
+    "organization_service_accounts",
     "additional_organization_creation_receipts",
     "organization_invitation_binding_events",
     "organization_membership_invitations",
@@ -1150,11 +1151,11 @@ describe("runtime database posture evaluator", () => {
                       : 0;
         const expectedLength =
           // Individual Claude accounts share the six subscription runtime tables;
-          // the organization key scope join adds one more.
+          // the organization key scope join and service accounts add two more.
           (tables === FORCE_RLS_TABLES ||
           tables === RUNTIME_FULL_DML_TABLES ||
           tables === RUNTIME_DML_TABLES
-            ? 7
+            ? 8
             : 0) +
           (tables === FORCE_RLS_TABLES || tables === PROTECTED_NO_DIRECT_DML_TABLES ? 8 : 0) +
           // 0546 adds three organization integration tables.
@@ -1269,7 +1270,7 @@ describe("runtime database posture evaluator", () => {
       ]);
       expect(new Set([...RUNTIME_DML_TABLES, ...PROTECTED_NO_DIRECT_DML_TABLES]).size).toBe(
         tableCount +
-          1 + // 0600 organization key workspace scope join.
+          2 + // 0600 organization key workspace scope join and 0603 service accounts.
           3 +
           personalResourceProtectedTableCount +
           managedAuthSessionSetProtectedTableCount +
@@ -1278,7 +1279,7 @@ describe("runtime database posture evaluator", () => {
       );
       expect(new Set([...FORCE_RLS_TABLES, ...NON_RLS_RUNTIME_TABLES]).size).toBe(
         tableCount +
-          1 + // 0600 organization key workspace scope join.
+          2 + // 0600 organization key workspace scope join and 0603 service accounts.
           3 +
           personalResourceProtectedTableCount +
           managedAuthSessionSetProtectedTableCount +

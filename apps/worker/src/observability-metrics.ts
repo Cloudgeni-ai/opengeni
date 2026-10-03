@@ -1603,6 +1603,13 @@ export function recordModelRequestPhase(
 }
 
 export type TurnStartupPhase =
+  | "services_initialization"
+  | "claim_catalog_read"
+  | "claim_atomic"
+  | "claim_session_read"
+  | "claim_capability_settings"
+  | "learning_policy_freeze"
+  | "attachment_authority_projection"
   | "claim_and_policy"
   | "turn_start_settlement"
   | "credential_selection"
@@ -1784,6 +1791,32 @@ export function recordTurnStartupPhase(
     },
     value: Math.max(0, input.durationSeconds),
   });
+}
+
+/** Observe an existing dependency only. Child intervals can overlap and are
+ * not additive; observer failure must never change authority or error identity. */
+export async function measureTurnStartupPhase<T>(
+  observability: Observability,
+  input: Omit<Parameters<typeof recordTurnStartupPhase>[1], "durationSeconds" | "outcome">,
+  work: () => Promise<T>,
+): Promise<T> {
+  const started = performance.now();
+  let outcome: TurnStartupOutcome = "failed";
+  try {
+    const result = await work();
+    outcome = "completed";
+    return result;
+  } finally {
+    try {
+      recordTurnStartupPhase(observability, {
+        ...input,
+        outcome,
+        durationSeconds: (performance.now() - started) / 1_000,
+      });
+    } catch {
+      // Telemetry is not an execution gate.
+    }
+  }
 }
 
 /** Background MCP preparation must not inflate startup phase distributions. */

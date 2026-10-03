@@ -231,9 +231,8 @@ capabilities and attached resources) from it; `session.agent` and
 /v1/workspaces/:workspaceId/sessions/:sessionId/agent` changes it from the next
 turn under the tool-policy version. Sessions without a configuration
 (`agent: null`) keep the legacy instruction and tool composition below byte for
-byte. Admission is behind `OPENGENI_AGENT_CONFIG_ADMISSION_ENABLED`, and
-`OPENGENI_AGENT_CONFIG_DEFAULT_FOR_NEW_SESSIONS` makes omitted `agent` resolve
-to `"all"`. The product-facing model is in
+byte. Agent configuration is always on; a new top-level session that omits
+`agent` resolves to the workspace default or `"all"`. The product-facing model is in
 [Product integration](product-integration.md#configure-the-agent); the design
 and enforcement details are in [Agent configuration](design/agent-configuration.md).
 

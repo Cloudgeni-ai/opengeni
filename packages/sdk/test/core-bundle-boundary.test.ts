@@ -69,10 +69,14 @@ describe("SDK browser bundle boundary", () => {
     expect(core).not.toContain("authority-reclassifications");
     expect(core).not.toContain("document-default-collection-backfills");
     expect(core).not.toContain("document-authority-reclassifications");
+    expect(core).not.toContain("getOrganizationApiKey");
+    expect(core).not.toContain("updateOrganizationApiKey");
 
     expect(documentAuthority).toContain("authority-reclassifications");
     expect(documentAuthority).toContain("document-default-collection-backfills");
     expect(documentAuthority).toContain("document-authority-reclassifications");
+    expect(documentAuthority).toContain("getOrganizationApiKey");
+    expect(documentAuthority).toContain("updateOrganizationApiKey");
 
     expect(coreWithUnusedOperatorMethod).toBe(core);
     expect(coreWithUnusedOperatorMethod).not.toContain(unusedOperatorMethodMarker);

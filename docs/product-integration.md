@@ -196,12 +196,9 @@ for OpenGeni's React components (`sandbox:`/`artifact:` links and inline
 visuals) or `"markdown"` for any other UI; the chat facade defaults to
 `"markdown"`.
 
-`agent` is admitted when the deployment sets
-`OPENGENI_AGENT_CONFIG_ADMISSION_ENABLED` (the client config reports
-`agentConfig.enabled`); otherwise it is 422 `agent_config_not_enabled` and the
-older fields (`firstPartyMcpTools`, `tools`, `instructions`) remain the way to
-narrow an agent. Sessions created before agent settings keep `agent: null` and
-their exact tools and prompt. See [Agent configuration](design/agent-configuration.md)
+`agent` is always admitted; a new session that omits it resolves to the
+workspace default or `"all"`. Sessions created before agent settings keep
+`agent: null` and their exact tools and prompt. See [Agent configuration](design/agent-configuration.md)
 for the design and enforcement details.
 
 ### Choose who shares chats

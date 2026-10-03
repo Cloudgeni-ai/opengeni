@@ -1,5 +1,5 @@
 import { environmentsEncryptionKeyBytes } from "@opengeni/config";
-import { modelUnavailableHttpException, requireAgentConfigAdmission } from "@opengeni/core";
+import { modelUnavailableHttpException } from "@opengeni/core";
 import {
   AUTOMATION_WEBHOOK_MAX_BYTES,
   AUTOMATION_MAX_MATCHED_TRIGGERS,
@@ -200,7 +200,6 @@ export function registerAutomationRoutes(app: Hono, deps: ApiRouteDeps): void {
     for (const permission of request.sessionTemplate.firstPartyMcpPermissions) {
       requirePermission(grant, permission);
     }
-    requireAgentConfigAdmission(deps.settings, request.sessionTemplate.agent);
     const catalogSettings = (
       await resolveWorkspaceCatalogSettings(deps.db, deps.settings, {
         accountId: grant.accountId,
@@ -273,7 +272,6 @@ export function registerAutomationRoutes(app: Hono, deps: ApiRouteDeps): void {
       for (const permission of request.sessionTemplate.firstPartyMcpPermissions) {
         requirePermission(grant, permission);
       }
-      requireAgentConfigAdmission(deps.settings, request.sessionTemplate.agent);
     }
     const catalogSettings = (
       await resolveWorkspaceCatalogSettings(deps.db, deps.settings, {

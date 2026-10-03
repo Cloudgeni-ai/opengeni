@@ -294,6 +294,10 @@ only own usage. These are post-call ceilings, not prepaid reservations.
   acting user. MCP and OpenAPI spec URLs must be public HTTPS the deployment can
   reach; tunnel local servers (`cloudflared tunnel --url http://localhost:PORT`)
   and use the tunnel URL as `toolServer.url`.
+- The packaged proxy already rejects cross-site mutations and requires JSON.
+  Don't put your own Origin/CSRF check in front of it (browsers often omit
+  `Origin` on same-origin requests), and don't format-validate the product's
+  own IDs; authorize them with the product's normal lookup instead.
 - Install `@opengeni/sdk` and `@opengeni/react` from the same release. If the
   repository enforces a release-age policy (for example pnpm
   `minimumReleaseAge`), a just-published version may be refused: pin an older
@@ -1268,7 +1272,6 @@ workspace and product already do:
 
 ```ts
 const config = await og.getClientConfig();
-const admitted = config.agentConfig?.enabled === true; // false: send no `agent` yet
 const offered = (config.agentConfig?.capabilities ?? [])
   .filter((capability) => capability.available)
   .map((capability) => capability.id);
@@ -1285,11 +1288,8 @@ Also search the product's code for the older fields it already sends
 `chats` deliberately, one surface at a time, and check the result on
 `session.agent` and `session.effectiveTools`.
 
-If `admitted` is false the deployment has not turned agent settings on
-(`OPENGENI_AGENT_CONFIG_ADMISSION_ENABLED`). Any request with `agent` then
-returns 422 `agent_config_not_enabled`. Do not work around it: use the older
-fields (see [Agent recipes](agent-recipes.md#minimal-agent)) and tell the
-deployment operator what the switch would give them.
+Agent settings are always on; there is no deployment switch.
+`agentConfig.enabled` is deprecated and always `true`.
 
 ## Capabilities
 
@@ -1450,9 +1450,7 @@ await og.updateSessionAgent(workspaceId, sessionId, {
 Rules the server enforces:
 
 - Omitted `agent` uses the workspace's `sessionAgentDefaults` when set, and
-  otherwise behaves like `"all"`. (Deployments with
-  `OPENGENI_AGENT_CONFIG_DEFAULT_FOR_NEW_SESSIONS` record that as `"all"`;
-  without it the session keeps the older, unrecorded behavior.)
+  otherwise records `"all"`.
 - Child sessions inherit their parent's configuration and may only narrow it
   (422 `agent_config_widening`).
 - A goal turns `goals` on; `goals: false` with a goal is 422

@@ -7,21 +7,106 @@ const UtcDateTime = z.string().datetime();
 const Identifier = z.string().uuid();
 const OpaqueKey = z.string().min(1);
 
-export const InsightsUsageRange = z.enum(["today", "week", "month", "30d", "90d", "ytd"]);
+export const InsightsUsageRange = z.enum(["today", "week", "month", "30d", "90d", "ytd", "custom"]);
 export type InsightsUsageRange = z.infer<typeof InsightsUsageRange>;
 
 export const InsightsUsageGroupBy = z.enum([
   "model",
   "provider",
   "payer",
+  "plan",
   "workspace",
   "project",
+  "session",
   "rootSession",
   "person",
   "schedule",
+  "source",
 ]);
 export type InsightsUsageGroupBy = z.infer<typeof InsightsUsageGroupBy>;
-const WorkspaceGroupBy = InsightsUsageGroupBy.exclude(["workspace"]);
+
+/** Recorded entry surface only; API includes SDK/embed. Missing provenance is other. */
+export const InsightsUsageSource = z.enum(["web", "api", "slack", "schedule", "agent", "other"]);
+export type InsightsUsageSource = z.infer<typeof InsightsUsageSource>;
+
+const UtcDay = z
+  .string()
+  .regex(/^\d{4}-\d{2}-\d{2}$/)
+  .refine((value) => {
+    const instant = Date.parse(`${value}T00:00:00Z`);
+    return (
+      !value.startsWith("0000-") &&
+      Number.isFinite(instant) &&
+      new Date(instant).toISOString().slice(0, 10) === value
+    );
+  }, "Expected a real UTC calendar date in years 0001 through 9999 (YYYY-MM-DD)");
+const CustomUtcDateTime = UtcDateTime.refine(
+  (value) => !value.startsWith("0000-"),
+  "Custom UTC boundaries must use years 0001 through 9999",
+);
+const DAY_MS = 86_400_000;
+const CUSTOM_MAX_DAYS = 370;
+
+function customWindow(from: string, to: string) {
+  if (!UtcDay.safeParse(from).success || !UtcDay.safeParse(to).success) return undefined;
+  const start = Date.parse(`${from}T00:00:00Z`);
+  const end = Date.parse(`${to}T00:00:00Z`) + DAY_MS;
+  if (start >= end || end - start > CUSTOM_MAX_DAYS * DAY_MS) return undefined;
+  const priorStart = start - (end - start);
+  const windows = {
+    windowStart: new Date(start).toISOString(),
+    windowEnd: new Date(end).toISOString(),
+    priorWindowStart: new Date(priorStart).toISOString(),
+    priorWindowEnd: new Date(start).toISOString(),
+  };
+  // Four-digit AD years must also represent the prior and exclusive end.
+  // PostgreSQL has no year zero even though ISO/Zod datetime permits it.
+  if (!Object.values(windows).every((value) => CustomUtcDateTime.safeParse(value).success))
+    return undefined;
+  return { ...windows, bucket: end - start <= 2 * DAY_MS ? ("hour" as const) : ("day" as const) };
+}
+
+const CustomDates = z
+  .object({ from: UtcDay, to: UtcDay })
+  .strict()
+  .refine(
+    (value) => customWindow(value.from, value.to) !== undefined,
+    "Custom days must be ordered, span at most 370 days and have representable current/prior windows",
+  );
+
+/** At most 370 inclusive UTC days; exclusive end and equally long immediate prior. */
+export function resolveInsightsUsageCustomWindow(dates: { from: string; to: string }) {
+  const parsed = CustomDates.parse(dates);
+  return customWindow(parsed.from, parsed.to)!;
+}
+
+function validateWindowQuery(
+  value: { range: InsightsUsageRange; from?: string | undefined; to?: string | undefined },
+  context: z.RefinementCtx,
+) {
+  if (value.range === "custom") {
+    if (value.from === undefined || value.to === undefined) {
+      context.addIssue({
+        code: "custom",
+        path: [value.from === undefined ? "from" : "to"],
+        message: "Custom range requires both from and to",
+      });
+    } else if (customWindow(value.from, value.to) === undefined) {
+      context.addIssue({
+        code: "custom",
+        path: ["to"],
+        message:
+          "Custom days must be ordered, span at most 370 days and have representable current/prior windows",
+      });
+    }
+  } else if (value.from !== undefined || value.to !== undefined) {
+    context.addIssue({
+      code: "custom",
+      path: ["range"],
+      message: "from/to are only valid with range=custom",
+    });
+  }
+}
 
 // Literal union avoids replacing existing, structurally identical named enum
 // fingerprints in the additive public-API inventory.
@@ -70,11 +155,21 @@ const QueryBoolean = z
 // field. Empty segments are rejected, never silently widened to all records.
 const Filters = {
   range: InsightsUsageRange.default("week"),
+  from: UtcDay.optional(),
+  to: UtcDay.optional(),
+  /** At workspace scope this intersects the path workspace; it never expands scope. */
+  workspaceId: repeated(Identifier),
   provider: repeated(OpaqueKey),
   model: repeated(InsightsUsageModelKey),
   payer: repeated(InsightsUsagePayer),
+  /** Recorded opaque plan key; missing historical snapshots use unknown, not today's plan. */
+  plan: repeated(OpaqueKey),
+  source: repeated(InsightsUsageSource),
   projectId: repeated(z.union([Identifier, z.literal("unfiled")])),
+  /** Authorized owner/member facet key, not a hidden causal initiator. */
   person: repeated(OpaqueKey),
+  /** Leaf session and root chat selectors are deliberately separate. */
+  sessionId: repeated(Identifier),
   rootSessionId: repeated(Identifier),
   scheduleId: repeated(Identifier),
 };
@@ -82,23 +177,24 @@ const Filters = {
 export const WorkspaceInsightsUsageQuery = z
   .object({
     ...Filters,
-    groupBy: WorkspaceGroupBy.default("model"),
+    groupBy: InsightsUsageGroupBy.default("model"),
     seriesGroups: QueryBoolean.optional(),
     limit: queryLimit(200),
   })
-  .strict();
+  .strict()
+  .superRefine(validateWindowQuery);
 export type WorkspaceInsightsUsageQuery = z.infer<typeof WorkspaceInsightsUsageQuery>;
 export type WorkspaceInsightsUsageQueryInput = z.input<typeof WorkspaceInsightsUsageQuery>;
 
 export const OrganizationInsightsUsageQuery = z
   .object({
     ...Filters,
-    workspaceId: repeated(Identifier),
     groupBy: InsightsUsageGroupBy.default("model"),
     seriesGroups: QueryBoolean.optional(),
     limit: queryLimit(200),
   })
-  .strict();
+  .strict()
+  .superRefine(validateWindowQuery);
 export type OrganizationInsightsUsageQuery = z.infer<typeof OrganizationInsightsUsageQuery>;
 export type OrganizationInsightsUsageQueryInput = z.input<typeof OrganizationInsightsUsageQuery>;
 
@@ -113,13 +209,12 @@ export const WorkspaceInsightsCallsQuery = z
     cursor: OpaqueKey.optional(),
     limit: queryLimit(100),
   })
-  .strict();
+  .strict()
+  .superRefine(validateWindowQuery);
 export type WorkspaceInsightsCallsQuery = z.infer<typeof WorkspaceInsightsCallsQuery>;
 export type WorkspaceInsightsCallsQueryInput = z.input<typeof WorkspaceInsightsCallsQuery>;
 
-export const OrganizationInsightsCallsQuery = WorkspaceInsightsCallsQuery.extend({
-  workspaceId: repeated(Identifier),
-});
+export const OrganizationInsightsCallsQuery = WorkspaceInsightsCallsQuery;
 export type OrganizationInsightsCallsQuery = z.infer<typeof OrganizationInsightsCallsQuery>;
 export type OrganizationInsightsCallsQueryInput = z.input<typeof OrganizationInsightsCallsQuery>;
 export const InsightsCallsQuery = OrganizationInsightsCallsQuery;
@@ -260,7 +355,7 @@ export type InsightsUsageScope = z.infer<typeof InsightsUsageScope>;
 
 export const InsightsUsageGroup = z
   .object({
-    /** Non-item private/personal keys are kind-scoped opaque display keys, never filter/facet IDs. */
+    /** Private/personal keys remain kind-scoped; named source keys are the source value. */
     key: OpaqueKey,
     kind: z.enum([
       "item",
@@ -276,6 +371,8 @@ export const InsightsUsageGroup = z
     provider: OpaqueKey.optional(),
     model: OpaqueKey.optional(),
     workspaceId: Identifier.optional(),
+    /** Only an already-authorized people facet key; permits person-only amount selection. */
+    personKey: OpaqueKey.optional(),
     you: z.boolean().optional(),
     measures: InsightsUsageMeasures,
   })
@@ -311,18 +408,23 @@ export const InsightsUsageSeriesPoint = z
   .object({
     start: UtcDateTime,
     measures: InsightsUsageMeasures,
-    /** Top six active groups plus "other" when requested. */
+    /** Top six active groups plus remainder; source uses other:folded to avoid other collisions. */
     groups: z
       .record(z.string(), SeriesGroup)
-      .refine((value) => Object.keys(value).filter((key) => key !== "other").length <= 6, {
-        message: "Series may include at most six groups plus other",
-      })
+      .refine(
+        (value) =>
+          Object.keys(value).length <= 7 &&
+          Object.keys(value).filter((key) => key !== "other" && key !== "other:folded").length <= 6,
+        {
+          message: "Series may include at most six groups plus other",
+        },
+      )
       .optional(),
   })
   .strict();
 export type InsightsUsageSeriesPoint = z.infer<typeof InsightsUsageSeriesPoint>;
 
-/** Range/scope-only visible metadata; opaque private/personal row keys are NOT facets. */
+/** Range/scope-only authorized metadata, not hidden row IDs or unconditional profile hydration. */
 export const InsightsUsageFacets = z
   .object({
     workspaces: z.array(
@@ -331,6 +433,10 @@ export const InsightsUsageFacets = z
     providers: z.array(OpaqueKey),
     models: z.array(z.object({ provider: OpaqueKey, model: OpaqueKey }).strict()),
     payers: z.array(OpaqueKey),
+    /** Recorded opaque plan keys, with unknown for absent snapshots. */
+    plans: z.array(OpaqueKey).default([]),
+    /** Capability marker: omit until source/custom support is actually implemented. */
+    sources: z.array(InsightsUsageSource).optional(),
     projects: z.array(z.object({ id: Identifier, name: z.string() }).strict()),
     people: z.array(
       z.object({ key: OpaqueKey, name: z.string().nullable(), you: z.boolean() }).strict(),
@@ -418,7 +524,15 @@ export const InsightsUsageResponse = z
         message: "Zero-length prior windows must have null measures",
       });
     }
-    if (value.bucket !== (value.range === "today" ? "hour" : "day")) {
+    const expectedBucket =
+      value.range === "custom"
+        ? windowEnd - windowStart <= 2 * DAY_MS
+          ? "hour"
+          : "day"
+        : value.range === "today"
+          ? "hour"
+          : "day";
+    if (value.bucket !== expectedBucket) {
       context.addIssue({
         code: "custom",
         path: ["bucket"],
@@ -438,12 +552,76 @@ export const InsightsUsageResponse = z
         message: "Prior without recorded calls or money must be null",
       });
     }
-    if (value.scope.kind === "workspace" && value.groupBy === "workspace") {
-      context.addIssue({
-        code: "custom",
-        path: ["groupBy"],
-        message: "Workspace grouping is organization-only",
-      });
+    if (value.range === "custom") {
+      for (const field of [
+        "windowStart",
+        "windowEnd",
+        "priorWindowStart",
+        "priorWindowEnd",
+      ] as const) {
+        if (!CustomUtcDateTime.safeParse(value[field]).success) {
+          context.addIssue({
+            code: "custom",
+            path: [field],
+            message: "Custom UTC boundaries must use years 0001 through 9999",
+          });
+        }
+      }
+      if (
+        windowStart === windowEnd ||
+        windowEnd - windowStart > CUSTOM_MAX_DAYS * DAY_MS ||
+        windowStart % DAY_MS !== 0 ||
+        windowEnd % DAY_MS !== 0 ||
+        priorWindowStart !== windowStart - (windowEnd - windowStart) ||
+        priorWindowEnd !== windowStart
+      ) {
+        context.addIssue({
+          code: "custom",
+          path: ["windowEnd"],
+          message:
+            "Custom windows must span at most 370 complete UTC days with an immediate equal-duration prior",
+        });
+      }
+    }
+    if (value.groupBy === "source") {
+      for (const [index, group] of value.groups.entries()) {
+        if (group.kind === "item" && !InsightsUsageSource.safeParse(group.key).success) {
+          context.addIssue({
+            code: "custom",
+            path: ["groups", index, "key"],
+            message: "Named source keys must equal their source value",
+          });
+        }
+        if (group.kind === "other" && group.key !== "other:folded") {
+          context.addIssue({
+            code: "custom",
+            path: ["groups", index, "key"],
+            message: "Source remainder must use other:folded, distinct from the other source",
+          });
+        }
+      }
+      for (const [index, point] of value.series.entries()) {
+        if (
+          point.groups &&
+          Object.keys(point.groups).filter((key) => key !== "other:folded").length > 6
+        ) {
+          context.addIssue({
+            code: "custom",
+            path: ["series", index, "groups"],
+            message: "Source series permits six named groups plus other:folded",
+          });
+        }
+      }
+    }
+    const peopleKeys = new Set(value.facets.people.map((person) => person.key));
+    for (const [index, group] of value.groups.entries()) {
+      if (group.personKey !== undefined && !peopleKeys.has(group.personKey)) {
+        context.addIssue({
+          code: "custom",
+          path: ["groups", index, "personKey"],
+          message: "Person amount keys must come from the authorized people facets",
+        });
+      }
     }
   });
 export type InsightsUsageResponse = z.infer<typeof InsightsUsageResponse>;

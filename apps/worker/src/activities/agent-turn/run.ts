@@ -66,6 +66,7 @@ import {
   recordModelRequestPhase,
   recordCompanyBrainContributions,
   recordTurnStartupPhase,
+  measureTurnStartupPhase,
   runtimeMetricsHooksForObservability,
 } from "../../observability-metrics";
 import { summarizeCompanyBrainContributions } from "../../model-context-contributions";
@@ -451,21 +452,35 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
       if (!attempt.turnId) {
         throw new Error("Turn id was not initialized");
       }
-      const learning = await freezeAgentLearningPolicy(db, {
-        accountId: input.accountId,
-        workspaceId: input.workspaceId,
-        actor: {
-          kind: "agent",
-          sessionId: input.sessionId,
-          turnId: attempt.turnId,
-          attemptId: input.attemptId,
-          executionGeneration: attempt.executionGeneration,
+      const learningActor = {
+        kind: "agent" as const,
+        sessionId: input.sessionId,
+        turnId: attempt.turnId,
+        attemptId: input.attemptId,
+        executionGeneration: attempt.executionGeneration,
+      };
+      const learning = await measureTurnStartupPhase(
+        observability,
+        {
+          phase: "learning_policy_freeze",
+          provider: turnExecutionPolicy.providerId,
+          backend: turn.sandboxBackend,
         },
-      });
-      const attachmentAuthority = await getSessionAuthorityProjection(
-        db,
-        input.workspaceId,
-        input.sessionId,
+        () =>
+          freezeAgentLearningPolicy(db, {
+            accountId: input.accountId,
+            workspaceId: input.workspaceId,
+            actor: learningActor,
+          }),
+      );
+      const attachmentAuthority = await measureTurnStartupPhase(
+        observability,
+        {
+          phase: "attachment_authority_projection",
+          provider: turnExecutionPolicy.providerId,
+          backend: turn.sandboxBackend,
+        },
+        () => getSessionAuthorityProjection(db, input.workspaceId, input.sessionId),
       );
       if (!attachmentAuthority) throw new Error("Session attachment authority unavailable");
       return await withSessionRlsActorContext(
@@ -1937,7 +1952,9 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
     }
   };
   return async (input: RunAgentTurnInput): Promise<RunAgentTurnResult> => {
+    const servicesStartedAt = performance.now();
     const resolvedServices = await services();
+    const servicesDurationSeconds = (performance.now() - servicesStartedAt) / 1_000;
     const correlationId = turnExecutionTelemetryKey(
       input.workspaceId,
       input.sessionId,
@@ -1954,6 +1971,17 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
     try {
       return await withMcpTelemetry(resolvedServices.observability, correlationId, () =>
         withTraceContext(span, () => {
+          try {
+            recordTurnStartupPhase(resolvedServices.observability, {
+              phase: "services_initialization",
+              provider: "unresolved",
+              backend: "unresolved",
+              outcome: "completed",
+              durationSeconds: servicesDurationSeconds,
+            });
+          } catch {
+            // Service initialization telemetry never gates a claimed attempt.
+          }
           try {
             resolvedServices.observability.info("worker execution started", { correlationId });
           } catch {

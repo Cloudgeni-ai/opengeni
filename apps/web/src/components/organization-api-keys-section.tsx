@@ -1,5 +1,9 @@
 import type { OpenGeniBrowserClient } from "@opengeni/sdk/browser";
-import { DEVELOPER_SETUP_API_KEY_PRESET, type Permission } from "@opengeni/contracts";
+import {
+  DEVELOPER_SETUP_API_KEY_PRESET,
+  serviceAccountAllowsPermission,
+  type Permission,
+} from "@opengeni/contracts";
 import { CheckIcon, CopyIcon, KeyRoundIcon, PlusIcon } from "lucide-react";
 import { useCallback, useEffect, useRef, useState } from "react";
 import { toast } from "sonner";
@@ -61,9 +65,16 @@ export type OrganizationApiKeysSectionProps = {
   agentSettings?: boolean;
   /** Shared workspaces for "Only selected workspaces"; null while loading. */
   workspaces?: { id: string; name: string }[] | null;
+  /** The organization's service accounts, for "Service account" on Create API key. */
+  listServiceAccounts?: () => Promise<KeyHolder[]>;
+  /** Create API key opened from a service account's page. */
+  initialServiceAccountId?: string;
 };
 
+type KeyHolder = { id: string; name: string; role: "admin" | "member" };
+
 const defaultKeyName = "Organization automation";
+const NEW_HOLDER = "new";
 
 type KeyAccessChoice = "full" | "read" | "developer_setup" | "custom";
 const KEY_ACCESS_CHOICES: SelectOption<KeyAccessChoice>[] = [
@@ -198,6 +209,10 @@ export function OrganizationApiKeysSection(props: OrganizationApiKeysSectionProp
           onClose={() => setView(undefined)}
           onCreate={createKey}
           workspaces={props.workspaces ?? null}
+          {...(props.listServiceAccounts ? { listServiceAccounts: props.listServiceAccounts } : {})}
+          {...(props.initialServiceAccountId
+            ? { initialServiceAccountId: props.initialServiceAccountId }
+            : {})}
         />
       </>
     );
@@ -286,6 +301,7 @@ export function OrganizationApiKeysSection(props: OrganizationApiKeysSectionProp
                 }
                 description={
                   <>
+                    {apiKey.serviceAccount ? `${apiKey.serviceAccount.name} · ` : null}
                     <span translate="no" className="font-mono">
                       {apiKey.prefix}…
                     </span>
@@ -372,11 +388,37 @@ function CreateApiKeyPage({
   onClose,
   onCreate,
   workspaces,
+  listServiceAccounts,
+  initialServiceAccountId,
 }: {
   onClose: () => void;
   onCreate: (request: CreateOrganizationApiKeyRequest) => Promise<string | null>;
   workspaces: { id: string; name: string }[] | null;
+  listServiceAccounts?: () => Promise<KeyHolder[]>;
+  initialServiceAccountId?: string;
 }) {
+  // Who holds the key: a new service account named after it, or an existing one.
+  const [holders, setHolders] = useState<KeyHolder[] | null>(null);
+  const [holder, setHolder] = useState<string>(initialServiceAccountId ?? NEW_HOLDER);
+  const [holderError, setHolderError] = useState<string | null>(null);
+  useEffect(() => {
+    if (!listServiceAccounts) return;
+    let live = true;
+    listServiceAccounts()
+      .then((accounts) => {
+        if (!live) return;
+        setHolders(accounts);
+        // A member can't hold Full access; start it at Read only instead.
+        if (accounts.find((each) => each.id === initialServiceAccountId)?.role === "member")
+          setAccess((current) => (current === "full" ? "read" : current));
+      })
+      .catch(() => {
+        if (live) setHolders([]);
+      });
+    return () => {
+      live = false;
+    };
+  }, [initialServiceAccountId, listServiceAccounts]);
   const [name, setName] = useState(defaultKeyName);
   const [description, setDescription] = useState("");
   const [access, setAccess] = useState<KeyAccessChoice>("full");
@@ -451,9 +493,26 @@ function CreateApiKeyPage({
             setAccessError({ workspaces: "Choose at least one workspace." });
             return false;
           }
+          const chosen = holders?.find((each) => each.id === holder);
+          const keyPermissions =
+            access === "developer_setup"
+              ? [...DEVELOPER_SETUP_API_KEY_PRESET.permissions]
+              : (permissions as Permission[]);
+          if (
+            chosen?.role === "member" &&
+            keyPermissions.some(
+              (permission) => !serviceAccountAllowsPermission("member", permission),
+            )
+          ) {
+            setHolderError(
+              `${chosen.name} is a member, so its keys can't manage people, keys or billing. Choose less access or make it an admin.`,
+            );
+            return false;
+          }
           try {
             const created = await onCreate({
               name: trimmed,
+              ...(holder !== NEW_HOLDER ? { serviceAccountId: holder } : {}),
               ...(description.trim() ? { description: description.trim() } : {}),
               // Developer setup keeps its own server-defined tier.
               ...(access === "developer_setup"
@@ -500,6 +559,33 @@ function CreateApiKeyPage({
               onChange={(event) => setDescription(event.target.value)}
             />
           </Field>
+          {listServiceAccounts ? (
+            <Field label="Service account" error={holderError ?? undefined}>
+              <SelectMenu
+                options={[
+                  {
+                    value: NEW_HOLDER,
+                    label: "New service account",
+                    description: "Named after this key.",
+                  },
+                  ...(holders ?? []).map((each) => ({
+                    value: each.id,
+                    label: each.name,
+                    meta: each.role === "admin" ? "Admin" : "Member",
+                  })),
+                ]}
+                value={holder}
+                onValueChange={(next) => {
+                  setHolder(next);
+                  setHolderError(null);
+                  if (holders?.find((each) => each.id === next)?.role === "member")
+                    setAccess((current) => (current === "full" ? "read" : current));
+                }}
+                loading={holders === null}
+                className="w-full"
+              />
+            </Field>
+          ) : null}
           <Field
             label="Access"
             hint={KEY_ACCESS_CHOICES.find((choice) => choice.value === access)?.description}

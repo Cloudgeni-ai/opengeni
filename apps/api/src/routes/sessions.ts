@@ -333,6 +333,7 @@ import { ApiHttpError } from "../http/api-error";
 import { observeWorkDiscovery, summarizeWorkDiscoveryRows } from "../work-discovery-observability";
 import { recordAcceptedApiAdmission } from "../admission-trace";
 import { parseRequestBody, parseRequestJson } from "../http/request-body";
+import { measureSessionCreatePhase } from "../session-create-observability";
 
 type SessionRouteDeps = ApiRouteDeps & Pick<ViewerServices, "establishSandboxSession">;
 
@@ -588,16 +589,15 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
 
   app.post("/v1/workspaces/:workspaceId/sessions", async (c) => {
     const workspaceId = c.req.param("workspaceId");
-    const authorization = await requireAccessGrantAuthorization(
-      c,
-      deps,
-      workspaceId,
-      "sessions:create",
+    const authorization = await measureSessionCreatePhase(deps.observability, "authorization", () =>
+      requireAccessGrantAuthorization(c, deps, workspaceId, "sessions:create"),
     );
     const grant = authorization.grant;
     let payload: unknown;
     try {
-      payload = await c.req.json();
+      payload = await measureSessionCreatePhase(deps.observability, "body_read", () =>
+        c.req.json(),
+      );
     } catch {
       return c.json(
         {
@@ -610,22 +610,31 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
     let session: Session;
     try {
       CreateSessionRequest.parse(payload);
-      const origin = await resolveSiteSessionOrigin(
-        db,
-        workspaceId,
-        c.req.header("x-opengeni-site-id"),
-        c.req.header("x-opengeni-site-version"),
+      const origin = await measureSessionCreatePhase(deps.observability, "site_origin", () =>
+        resolveSiteSessionOrigin(
+          db,
+          workspaceId,
+          c.req.header("x-opengeni-site-id"),
+          c.req.header("x-opengeni-site-version"),
+        ),
       );
       const create = () =>
         createSessionForRequest(deps, grant, workspaceId, payload, authorization);
-      session = await (origin ? withSiteSessionOrigin(origin, create) : create());
+      session = await measureSessionCreatePhase(deps.observability, "core_create", () =>
+        origin ? withSiteSessionOrigin(origin, create) : create(),
+      );
     } catch (error) {
       return sessionCreateErrorResponse(c, error);
     }
     // Creation has committed by this point. Keep response projection outside
     // the create-rejection boundary so a post-commit policy read cannot be
     // misreported as though the session itself was rejected.
-    return c.json(await withEffectivePolicy(deps, workspaceId, grant.subjectId, session), 202);
+    return c.json(
+      await measureSessionCreatePhase(deps.observability, "response_projection", () =>
+        withEffectivePolicy(deps, workspaceId, grant.subjectId, session),
+      ),
+      202,
+    );
   });
 
   app.get("/v1/workspaces/:workspaceId/new-session-draft", async (c) => {

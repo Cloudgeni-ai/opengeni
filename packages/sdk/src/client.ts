@@ -291,9 +291,12 @@ import type {
   CreateApiKeyRequest,
   CreateApiKeyResponse,
   CreateOrganizationApiKeyRequest,
-  UpdateOrganizationApiKeyRequest,
   OrganizationMcpConnection,
   OrganizationMcpConnectionList,
+  OrganizationServiceAccount,
+  ListOrganizationServiceAccountsResponse,
+  CreateOrganizationServiceAccountRequest,
+  UpdateOrganizationServiceAccountRequest,
   UpdateOrganizationMcpConnectionRequest,
   McpConnectionRequest,
   McpConnectionDecision,
@@ -8566,14 +8569,6 @@ export class OpenGeniClient {
     return response.apiKeys;
   }
 
-  /** Read organization-key metadata and policy; never returns the secret token. */
-  async getOrganizationApiKey(organizationId: string, apiKeyId: string): Promise<ApiKey> {
-    return await this.requestJson<ApiKey>(
-      "GET",
-      `/v1/organizations/${organizationId}/api-keys/${apiKeyId}`,
-    );
-  }
-
   /** The returned `token` is shown once; only its prefix is stored. */
   async createOrganizationApiKey(
     organizationId: string,
@@ -8582,19 +8577,6 @@ export class OpenGeniClient {
     return await this.requestJson<CreateApiKeyResponse>(
       "POST",
       `/v1/organizations/${organizationId}/api-keys`,
-      request,
-    );
-  }
-
-  /** Update metadata or replace the policy. Policy narrowing applies on the next request. */
-  async updateOrganizationApiKey(
-    organizationId: string,
-    apiKeyId: string,
-    request: UpdateOrganizationApiKeyRequest,
-  ): Promise<ApiKey> {
-    return await this.requestJson<ApiKey>(
-      "PATCH",
-      `/v1/organizations/${organizationId}/api-keys/${apiKeyId}`,
       request,
     );
   }
@@ -8644,6 +8626,62 @@ export class OpenGeniClient {
     await this.requestVoid(
       "DELETE",
       `/v1/organizations/${organizationId}/mcp-connections/${connectionId}`,
+    );
+  }
+
+  /** Service accounts: organization identities with no person behind them. */
+  async listOrganizationServiceAccounts(
+    organizationId: string,
+  ): Promise<ListOrganizationServiceAccountsResponse> {
+    return await this.requestJson<ListOrganizationServiceAccountsResponse>(
+      "GET",
+      `/v1/organizations/${organizationId}/service-accounts`,
+    );
+  }
+
+  async getOrganizationServiceAccount(
+    organizationId: string,
+    serviceAccountId: string,
+  ): Promise<OrganizationServiceAccount> {
+    return await this.requestJson<OrganizationServiceAccount>(
+      "GET",
+      `/v1/organizations/${organizationId}/service-accounts/${serviceAccountId}`,
+    );
+  }
+
+  /** Create a service account; give it keys with `createOrganizationApiKey({ serviceAccountId })`. */
+  async createOrganizationServiceAccount(
+    organizationId: string,
+    request: CreateOrganizationServiceAccountRequest,
+  ): Promise<OrganizationServiceAccount> {
+    return await this.requestJson<OrganizationServiceAccount>(
+      "POST",
+      `/v1/organizations/${organizationId}/service-accounts`,
+      request,
+    );
+  }
+
+  /** Rename it or change its role; making it a member narrows its keys at once. */
+  async updateOrganizationServiceAccount(
+    organizationId: string,
+    serviceAccountId: string,
+    request: UpdateOrganizationServiceAccountRequest,
+  ): Promise<OrganizationServiceAccount> {
+    return await this.requestJson<OrganizationServiceAccount>(
+      "PATCH",
+      `/v1/organizations/${organizationId}/service-accounts/${serviceAccountId}`,
+      request,
+    );
+  }
+
+  /** Delete a service account; every key it holds is revoked at once. */
+  async deleteOrganizationServiceAccount(
+    organizationId: string,
+    serviceAccountId: string,
+  ): Promise<void> {
+    await this.requestVoid(
+      "DELETE",
+      `/v1/organizations/${organizationId}/service-accounts/${serviceAccountId}`,
     );
   }
 

@@ -4,7 +4,7 @@
 
 ## Navigation
 
-Read §2–4 and §6. Subsystems: §13; updates: §14.
+Overview: §2–4/§6; subsystems: §13; updates: §14.
 
 ---
 
@@ -18,11 +18,8 @@ Preflight: `scripts/run-development-stack.ts`; ownership: `scripts/dev-stack-loc
 
 ## 2. OpenGeni
 
-Postgres persists state, Temporal coordinates execution, NATS transports events.
-The API authorizes; workers execute.
-
-External users require live membership and `asUser()`. Visibility and `agentAccess`
-differ; Personal Knowledge follows the verified active-turn user. Links never merge users.
+External users require live membership/`asUser()`. Visibility differs from `agentAccess`;
+Personal Knowledge follows the verified active-turn user. Links never merge users.
 [Product integration](product-integration.md),
 [embedding authority](embedding-authority-internals.md),
 [Skills](skills-lifecycle.md), [run lifecycle](run-lifecycle.md).
@@ -55,32 +52,27 @@ Hosted tool-call `status` survives replay; other annotations are stripped
 Postgres commits precede notifications. NATS carries fanout, invalidations,
 request/reply and machine streams, never commit evidence.
 
-`session_event_cursors` verifies appends transactionally and owns monotonic
-per-session sequencing/public `lastSequence`. Semantic writers lock sessions
-for atomic state/event commits; `sessions.last_sequence` is compatibility-only.
-Raw exact-attempt batches retain turn/attempt fences, hold session `FOR KEY SHARE`,
-serialize on cursors, and never update sessions. Legacy SQL writers rebase at
-the database boundary; late raw events roll back and retry semantic admission
+`session_event_cursors` transactionally verifies appends/monotonic sequencing/public
+`lastSequence`; `sessions.last_sequence` is compatibility-only. Semantic writers
+lock sessions for atomic state/events. Exact-attempt raw batches fence attempts,
+hold session `FOR KEY SHARE`, serialize cursors, never update sessions. Legacy
+SQL rebases at the DB boundary; late raw events roll back/retry semantic admission
 before rejected audit persistence.
 
-Unread/tree attention share the indexed meaningful frontier in
-`packages/db/src/session-meaningful-events.ts`, excluding bookkeeping. Claimed
-lifecycle content and exact parent reads acknowledge only the frozen human's
-direct-child content. Complete finals cover earlier activity, never newer answers;
-filtered reads cannot skip unseen content. Manual unread survives old replay;
-newer consumed activity or explicit mark-read supersedes it.
+Unread/tree attention use `packages/db/src/session-meaningful-events.ts`'s indexed
+non-bookkeeping frontier. Claimed lifecycle/exact parent reads acknowledge only
+the frozen human's direct-child content. Finals cover earlier activity, not newer
+answers; filtered reads cannot skip unseen content. Manual unread survives replay
+until newer consumed activity or explicit mark-read.
 [Bounded reads/reconciliation](session-monitoring-mcp.md).
 
-SSE replays events, subscribes to fanout and backfills Postgres gaps. Reads select
-byte-bounded prefixes before payload transfer. Oversized events travel intact,
-alone; short pages never prove EOF. NATS restarts affect delivery/reachability,
-never history or queued obligations.
+SSE replays/backfills Postgres and subscribes to fanout. Reads byte-bound prefixes
+before transfer; oversized events travel intact/alone. Short pages never prove
+EOF. NATS restarts affect delivery/reachability, never history/queued obligations.
 
 Raw-isolation rollback:
 `OPENGENI_SESSION_EVENT_RAW_LANE_ENABLED=false` keeps cursor allocation and
 validation active while restoring wide-session locking and compatibility writes.
-
-Commands acknowledge durable commits, independent of replayable NATS/Temporal notifications.
 
 Task-tree [locking invariants](run-lifecycle.md).
 
@@ -100,24 +92,24 @@ Conversation/goals/queues/usage/provider/tool transcripts never enter workflow h
 Canonical: `apps/worker/src/workflows/session.ts`,
 [`run-lifecycle.md`](run-lifecycle.md).
 
-Stalled turn finalization requests host-owned graceful shutdown, so peer turns
-checkpoint and hand off before the existing shutdown ceiling contains a stuck
-writer. Cleanup may consume an independently committed exact retained-process
-terminal proof; it never manufactures quiescence or replays an unknown command.
+Stalled finalization requests host-owned graceful shutdown: peers checkpoint
+before the shutdown ceiling contains stuck writers. Cleanup can consume exact,
+independently committed retained-process terminal proof, never manufacture
+quiescence or replay unknown commands.
 
-Control observation is not settlement: unavailable reads/owned attempts keep
-bounded, interruptible waits without marking idle, revoking writers or dispatching
-successors; Temporal metadata never proves writer quiescence.
-Separate settled-owner recovery re-inspects the original dispatch and atomically
-closes only the exact current owner under control, physical/inference writer
-fences, committing its quiescence receipt, same-turn recovery and durable wake.
+Unavailable control reads/owned attempts retain bounded, interruptible waits,
+not idle/settlement, writer revocation or successor dispatch. Temporal metadata
+never proves writer quiescence.
+Settled-owner recovery re-inspects original dispatch and atomically closes
+only the exact current owner under control and physical/inference writer fences,
+committing quiescence receipt, same-turn recovery and durable wake.
 
-Normal idle [omits grace](run-lifecycle.md), retaining durable fences.
+Idle [omits grace](run-lifecycle.md), retaining durable fences.
 
 ### 3.3 Logical turns and physical attempts are different
 
-A **turn** is accepted work; an **attempt**, replaceable execution. Resumed
-attempts append ordered, exactly-once atomic history batches.
+**Turns** are accepted work; replaceable **attempts** append ordered,
+exactly-once atomic history batches.
 
 `wait_for_input` settles tool-batch execution, preserving trusted authority and
 immutable same-turn deadlines. Command results wake only explicit waits; notices
@@ -129,16 +121,19 @@ latency defaults to `standard`.
 
 `runAgentTurn` is non-retryable and attempt-fenced: retry settlement, never
 unknown effects ([fences and recovery](run-lifecycle.md)).
+Structured PostgreSQL outages escape executing activities into the existing
+exact-attempt DB-only recovery lane, not terminal turn failure or old-attempt
+tool replay; physical/inference settlement gates remain independent.
 Replay: [notices/catalogs](run-lifecycle.md),
 [compaction](context-compaction.md). `packages/runtime/src/prepared-compaction-request.ts`
 shares prepared prefixes with both Responses compaction modes; Chat retains
 its transcript adapter. Both modes retain recent system-role input batches
 within existing budgets, preserving chronological accepted goal snapshots.
 
-Failed-session retry is not Pause/Resume or prompt admission:
-`packages/db/src/session-retry.ts` fences failure identity, reserves actor-scoped
-receipts, rejects unresolved execution/safety refusals, and re-enables the
-original turn, history, authority and selected model policy—never synthetic input.
+Failed-session retry (`packages/db/src/session-retry.ts`) fences failure identity,
+reserves actor-scoped receipts, rejects unresolved execution/safety refusals,
+and re-enables original turn/history/authority/selected model policy—not
+Pause/Resume, prompt admission or synthetic input.
 
 Active-run writes require exact attempt/generation; stale workers cannot write
 or settle replacements. Temporal cancellation is intent, not quiescence;
@@ -185,16 +180,14 @@ Canonical: `apps/worker/src/activities/agent-turn/`,
 `apps/worker/src/activities/session-state.ts`, and
 [`run-lifecycle.md`](run-lifecycle.md).
 
-External SDK history and append verification: [`run-lifecycle.md`](run-lifecycle.md).
-
 ### 3.4 Long runs are bounded by policy and intent, not arbitrary loop caps
 
-Run length does not prove stalled progress. Budget admission, provider capacity,
-Pause/Cancel, goal state and host policy govern. Recovery preserves logical work.
-Postgres owns continuation obligations, not Temporal. Goal edits apply directly
-unless review is configured; human-owned constraints remain. Goals never live
-in `Agent.instructions` or solely workflow memory.
-Generic caps cannot replace lifecycle fixes.
+Duration never proves stalled progress. Budget admission, provider capacity,
+Pause/Cancel, goals and host policy govern; recovery preserves logical work.
+Postgres owns continuations, not Temporal. Goal edits apply unless review
+applies; human-owned constraints remain. Goals never live in
+`Agent.instructions` or solely workflow memory. Generic caps cannot replace
+lifecycle fixes.
 
 Empty finals after goal completion get one handoff, then a typed notice.
 See [run lifecycle](run-lifecycle.md).
@@ -486,6 +479,11 @@ Home-compute selection proves establishment authority; invalid pointers reconcil
 visibly. Leases/reapers—not viewers—own sandboxes. Identity precedes setup; capture
 fences writers. Exact-instance loss never authorizes ambiguous replay. Routing stays
 lazy; raw handles serve setup/capture (`turn-sandbox-access.ts`).
+Pending cancellation accepts non-dispatch only from call-scoped routing admission
+proof or typed provider rejection. Credential command decorators preserve these
+invocation options up to routing, which never forwards proof callbacks to the
+provider. Issued helpers retain independent physical joins after original retained
+registration. See [run lifecycle](run-lifecycle.md).
 Global Modal inventory uses an owner-only SELECT capability under FORCE RLS (0497).
 
 Stock Modal non-PTY/no-`runAs` commands support native subreaper supervision.
@@ -666,45 +664,38 @@ flowchart LR
   Relay <--> Machine
 ```
 
-Artifact materializer and outbox sidecars have role-specific configuration in
-`packages/config`: the materializer consumes storage configuration; the outbox
-consumes broker configuration. Both retain telemetry and dedicated database
-posture without inheriting API authentication or agent sandbox credentials.
-Their startup adapters are `apps/worker/src/editable-artifact-materializer-service.ts`
+Materializer/outbox sidecars use `packages/config` storage/broker settings,
+telemetry and dedicated DB posture, never API/sandbox credentials. Adapters:
+`apps/worker/src/editable-artifact-materializer-service.ts`
 and `apps/worker/src/editable-artifact-outbox-service.ts`.
 
 ### 4.1 Request and event path
 
-1. `apps/api` middleware establishes deployment perimeter, observability context,
-   authentication, workspace, and permissioned grant.
-2. HTTP routes adapt requests into `@opengeni/core` domain operations.
-3. Domain operations validate and commit authoritative rows, events, queue/control state,
-   audit facts, and workflow-wake intent in Postgres.
-4. The API returns committed projections; NATS fanout and immediate Temporal
-   wakes are replayable follow-ups. Temporal acceptance acknowledges no durable
-   wake while accepted human/API turns remain queued or Agent Steer remains
-   pending; only attempt-fenced Postgres claims prove admission.
-5. Session workflows observe durable obligations and dispatch turn activities.
-6. Workers claim logical turns, register exact attempts, freeze execution and authority
-   snapshots, then invoke `@opengeni/runtime`.
-7. Runtime builds model/tools and lazily establishes selected provisioned
-   sandboxes or Connected Machines when operations need compute.
-8. Worker events commit before best-effort live publication; API SSE replays
-   and gap-fills from Postgres.
+1. `apps/api` establishes perimeter, trace, authentication, workspace/grant.
+2. Routes call `@opengeni/core`; validated state/events/queue/control/audit/wake
+   intent commit in Postgres.
+3. Child spans time creation; fanout/wake overlap post-commit;
+   both settle before response reload. Notifications never prove admission:
+   queued turns/pending Agent Steer cannot acknowledge durable wakes without
+   attempt-fenced Postgres claims.
+4. Workflows dispatch durable obligations. Workers claim turns/register attempts
+   and freeze execution/authority before runtime.
+5. Post-claim session/capability reads overlap with unchanged scopes before
+   credential/policy gates. Runtime builds model/tools and lazily establishes
+   sandboxes or Connected Machines for compute.
+6. Events commit before best-effort fanout; SSE replays/backfills Postgres.
 
-Unexpected first-party orchestration failures retain bounded, content-free
-diagnostic facts in the failed-tool receipt, independent of the optional
-protected diagnostic export. The API binds correlation to the signed caller
-attempt, never a tool-supplied target. Source:
+Orchestration failure receipts retain bounded, content-free diagnostics regardless
+of protected export; correlation binds signed caller attempts, never tool targets.
+Source:
 `apps/api/src/mcp/orchestration-failure-diagnostic.ts`; contract:
 [`mcp-surfaces.md`](mcp-surfaces.md#tool-argument-errors).
 
 ### 4.2 Control path versus data path
 
-API, Postgres, Temporal, and workers own durable control; NATS session fanout projects it.
-Connected Machine commands cross NATS after authorization and durable ownership
-decisions. Direct browser data planes use only short-lived API-authorized grants;
-they never establish independent session, tenant, or provider authority.
+API/Postgres/Temporal/workers own control. NATS projects it/transports authorized,
+owned Connected Machine commands. Browser data uses short-lived API grants,
+never independent session/tenant/provider authority.
 
 Large or high-frequency bytes take separate paths:
 
@@ -759,15 +750,14 @@ destinations.
 | Turn | One accepted human, machine, goal, schedule, approval, or recovery unit | Until logically settled |
 | Attempt | One physical worker execution of a turn | Until completion, interruption, loss, or replacement |
 
-A new attempt does not imply a new prompt. A new prompt does imply a new turn.
-This distinction is the basis for safe worker-death recovery and protection
-against duplicate external effects.
+A new attempt need not mean a new prompt; a new prompt creates a new turn.
+This distinction enables worker-death recovery without duplicate external effects.
 
-Semantic naming is attempt-owned auxiliary work. Pending titles and exact-session
-policy authorize one bounded, tool-less request parallel to the main stream,
-metered separately. Normal completion joins it before atomic settlement;
+Semantic naming is attempt-owned auxiliary work: pending titles and exact-session
+policy authorize one bounded, tool-less request, parallel to the main stream and
+separately metered. Normal completion joins it before atomic settlement;
 exceptional/cancelled exits abort and join. Generic title writes lose to human
-renames. Runtimes without this seam retain serialized `set_session_title`.
+renames. Runtimes without this seam serialize `set_session_title`.
 
 `packages/db/src/session-execution-policy.ts` projects defaults;
 `packages/db/src/session-model-settings.ts` records boundaries, preserving accepted
@@ -839,26 +829,23 @@ surfacing a pre-reservation model, limit, resource, or attachment failure, the
 retry takes the actor/key prompt-operation fence and rechecks the completed
 receipt so an overlapping committed Send or Steer is replayed exactly once.
 
-Failed sessions can be revived by new accepted work. Cancellation remains the
-terminal boundary.
+New accepted work can revive failed sessions; cancellation remains terminal.
 
-An operational database failure after an exact claim but before turn-start
-completion revalidates that immutable attempt and uses the ordinary same-turn
-recovery and bounded redispatch path. A lost claim response that later reveals
-the exact active attempt follows the same transition. Permanent database or
-state failures remain terminal, and no model, tool, or provider work is replayed
-or converted into a new queue item.
+Operational database failure after claim, before turn-start completion,
+revalidates the immutable attempt through ordinary same-turn recovery and bounded
+redispatch. A lost claim response revealing the exact active attempt follows that
+path. Permanent database/state faults remain terminal; model, tool, or provider
+work is never replayed or requeued.
 
-Transient provider recovery is bounded by a durable consecutive-failure streak,
-not lifetime failures across a long turn. A completed model request
-from the exact current attempt clears the durable streak atomically with its
-timeline event, and the worker clears its in-memory copy only after that commit;
-late attempt evidence cannot replenish the retry budget. See
+Transient provider recovery uses a durable consecutive-failure streak, not lifetime
+failures. An exact-current-attempt model completion atomically clears that streak
+with its timeline event; only then does the worker clear its in-memory copy.
+Late attempt evidence cannot replenish the retry budget. See
 [`run-lifecycle.md`](run-lifecycle.md) for pacing and exhaustion semantics.
 
 ### 5.3 Goals, schedules, automations, and child work
 
-These producers all converge on the ordinary session/turn runtime:
+All producers use the ordinary session/turn runtime:
 
 - an active **goal** creates a durable continuation obligation;
 - a **scheduled task** freezes one accepted occurrence and its execution
@@ -894,9 +881,8 @@ claim and task lifecycle locks serialize this decision. Resume never revives
 pre-pause deposits, and a delivery fence rejects updates for terminal runs even
 from old workers during a rolling deployment.
 
-None of them creates a parallel agent engine. They differ in admission and
-provenance, then use the same logical turn, attempt, event, recovery, and usage
-boundaries.
+Admission and provenance differ; logical turn, attempt, event, recovery, and
+usage boundaries remain shared. No parallel agent engine is created.
 
 Canonical: [`goals.md`](goals.md), [`automations.md`](automations.md),
 [`nested-agent-depth.md`](nested-agent-depth.md), and
@@ -904,14 +890,13 @@ Canonical: [`goals.md`](goals.md), [`automations.md`](automations.md),
 
 ### 5.4 Approval and structured human input
 
-Tool approval and structured human input are durable interruptions. The worker
-stores enough exact protocol state to stop without pairing an unfinished call
-into model history. A response must bind to the pending request, target turn,
-execution generation, requester, and current authorization.
+Tool approval and structured human input durably interrupt execution. The worker
+retains exact protocol state without pairing unfinished calls into model history.
+Responses bind the pending request, target turn, execution generation, requester,
+and current authorization.
 
-Tool approvals are human-only. Agents may answer an authorized structured
-human-input request for another session where the agent-session authority model
-allows it, but they cannot grant themselves tool approval.
+Tool approvals are human-only. Agent-session authority may permit answering
+another session's structured human-input request, never self-approval of tools.
 
 Canonical: [`human-input.md`](human-input.md),
 [`agent-session-authority.md`](agent-session-authority.md), and
@@ -1082,8 +1067,7 @@ from source; Connected Machine agent/relay use Rust Cargo workspace
 `examples/vue-conversation/app` has its own npm lock and builds against the
 published SDK, not repository source.
 
-Package manifests and `.changeset/config.json` own publication; these lists
-describe responsibility.
+Manifests and `.changeset/config.json` own publication; this map describes responsibilities.
 
 ### 6.1 Applications
 
@@ -1155,10 +1139,10 @@ handlers because its host owns process lifecycle.
 edge. `agent/proto/opengeni_agent.proto` is the single wire source, generated to
 Rust and `@opengeni/agent-proto` TypeScript types.
 
-One agent connects independently to multiple deployments and workspaces within
-shared host containment. The relay carries terminal/desktop bytes, not durable
-session or lease state. Install `latest` may serve baked binaries; version pins
-resolve binaries/signatures from the immutable release archive.
+One agent independently connects multiple deployments/workspaces within shared
+host containment. The relay carries terminal/desktop bytes, never durable session
+or lease state. Install `latest` may serve baked binaries; pinned versions resolve
+binaries/signatures from the immutable release archive.
 
 Canonical: [`../agent/README.md`](../agent/README.md) and
 [`connected-machines.md`](connected-machines.md).
@@ -1746,7 +1730,7 @@ Host ports/in-process composition: [`embedding.md`](embedding.md).
 
 ## 13. If you are changing X, read Y first
 
-Subsystem routing; complete topic map: [`README.md`](README.md).
+Topics: [`README.md`](README.md).
 
 ### Runtime and orchestration
 
@@ -1841,7 +1825,7 @@ organization-workspace lifecycle authority; see [external membership operation r
 Update ownership, invariants, flows, lifecycles and sources.
 Keep mechanics and rollout in [`README.md`](README.md)'s focused docs.
 
-Goal resume/pause semantics: [goals](goals.md).
+Goals: [semantics](goals.md).
 
 Filtered session page ownership and its maintenance boundary: [session pagination](session-pagination.md).
 
