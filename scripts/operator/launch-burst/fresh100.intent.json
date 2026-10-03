@@ -1,0 +1,13 @@
+{
+  "schemaVersion": 1,
+  "runId": "launch-fresh-100",
+  "origin": "https://staging.app.opengeni.ai",
+  "mode": "fresh",
+  "count": 100,
+  "requestTimeoutMs": 30000,
+  "turnTimeoutMs": 180000,
+  "signupTimeoutMs": 300000,
+  "costCapUsd": 20,
+  "reservedUsdPerSession": 0.2,
+  "cleanup": "request-after-terminal"
+}

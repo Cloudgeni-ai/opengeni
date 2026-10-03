@@ -1,0 +1,13 @@
+{
+  "schemaVersion": 1,
+  "runId": "launch-sandbox-100",
+  "origin": "https://staging.app.opengeni.ai",
+  "mode": "sandbox",
+  "count": 100,
+  "requestTimeoutMs": 30000,
+  "turnTimeoutMs": 180000,
+  "signupTimeoutMs": 300000,
+  "costCapUsd": 10,
+  "reservedUsdPerSession": 0.1,
+  "cleanup": "request-after-terminal"
+}
