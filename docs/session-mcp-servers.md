@@ -141,8 +141,9 @@ OpenGeni connection row. Opaque host ids are accepted; standalone connection
 lookups still use their ordinary UUID ids. A session server may use static
 headers, a connection ref, or neither.
 
-Credentials can still rotate as part of an accepted `user.message` payload;
-that existing Send/Steer behavior is unchanged:
+Credentials can rotate as part of an accepted `user.message`,
+`user.approvalDecision`, or `user.humanInputResponse` payload; the existing
+Send/Steer behavior is unchanged:
 
 ```json
 {
@@ -160,6 +161,21 @@ Rotation can only update headers for servers already attached to that session.
 It cannot change URL, name, allowed tools, timeout, or cache behavior. Each
 successful rotation replaces the encrypted header map and increments
 `credentialVersion`.
+
+Approval and human-input responses accept the same optional
+`payload.mcpCredentialUpdates` array, including Reject and permitted Skip.
+Nonempty updates require `mcp_servers:attach` as well as normal response
+authority. Validation and encryption reuse the Send/Steer rules. The encrypted
+replacements commit with the response before the workflow is signaled; failed
+or stale response acceptance rolls everything back, and response replay does
+not rotate again. Values are write-only and omitted from all response events.
+
+For the packaged embedding proxy, return fresh credentials from
+`beforeForwardMessage`: it runs on these responses as well as Send, Steer, and
+composer submit, including through Next/Express/Hono. The proxy rejects
+browser-supplied credential updates. Message-only `modelContext` is not added
+to response payloads. This refreshes a token that expired while the agent was
+waiting for a person, without recreating the session.
 
 Message-bound header rotation cannot change a connection reference. Use the
 standalone native-account replacement below to repair an existing attachment;
@@ -367,11 +383,12 @@ version 1 on the child; future parent and child rotations are independent. A
 copied `connectionRef` continues to resolve fresh request-time credentials and
 is therefore the preferred embedding-host path for rotating provider access.
 
-Rotation is effective on the next turn: the API validates updates up front, then
-applies credential updates only after the session has accepted the `user.message`
-inside the locked append transaction, before the event is appended and the turn
-is queued. The worker loads the latest decrypted headers during turn preparation
-immediately before `runtime.prepareTools`.
+Rotation is effective on the next preparation, including the resumed attempt
+of a waiting turn: the API validates updates up front, then applies encrypted
+replacements inside the locked acceptance transaction before appending the
+message/response event and committing its queue or wake obligation. The worker
+loads the latest decrypted headers during turn preparation immediately before
+`runtime.prepareTools`; already-prepared clients are not changed in place.
 
 ## Runtime path
 
@@ -383,6 +400,12 @@ session, and records only metadata in `session.created` events.
 new turn. The encrypted row update runs after the cancelled-session guard in the
 same locked acceptance path, and only metadata is persisted in the `user.message`
 event.
+
+The same validator handles approval/human-input response updates.
+`acceptSessionApprovalDecision` and `acceptSessionHumanInputResponse` apply the
+encrypted maps inside the existing first-writer-wins response transaction,
+after validating the pending boundary and before appending the resume event.
+Replay/conflict paths leave credential versions unchanged.
 
 `apps/worker/src/activities/agent-turn/tool-environment.ts` overlays session MCP servers after
 capability and Codex overlays, and before `runtime.prepareTools`. The worker-only

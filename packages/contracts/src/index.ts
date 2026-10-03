@@ -16499,6 +16499,8 @@ export const ClientSessionEvent = z.discriminatedUnion("type", [
       approvalId: z.string().min(1).max(SESSION_OPERATION_KEY_MAX_CHARS),
       decision: z.enum(["approve", "reject"]),
       message: z.string().optional(),
+      // Write-only header rotation committed with the response before resume.
+      mcpCredentialUpdates: z.array(SessionMcpCredentialUpdateInput).optional(),
     }),
   }),
   z.object({
@@ -16507,6 +16509,8 @@ export const ClientSessionEvent = z.discriminatedUnion("type", [
     payload: z.object({
       requestId: z.string().uuid(),
       response: SubmitHumanInputResponseRequest,
+      // Write-only header rotation committed with the response before resume.
+      mcpCredentialUpdates: z.array(SessionMcpCredentialUpdateInput).optional(),
     }),
   }),
 ]);

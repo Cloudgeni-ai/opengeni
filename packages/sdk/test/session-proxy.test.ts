@@ -4,7 +4,9 @@ import {
   OpenGeniClient,
   artifactViewerCapability,
   createSessionProxyHandler,
+  type ClientSessionEventInput,
   type SessionProxyHandlerOptions,
+  type SessionProxyMessageInput,
 } from "../src/index";
 import { parseSseStream } from "../src/sse";
 import { OPENGENI_API_CONTRACT_REVISION } from "../src/types";
@@ -19,6 +21,33 @@ const EDITABLE_ID = "0123456789abcdef0123456789abcdef";
 const SITE_ID = "22222222-2222-4222-8222-222222222222";
 const PRODUCT = "https://product.example.test";
 const API = "https://api.example.test";
+const RESPONSE_EVENTS = [
+  {
+    delivery: "approval",
+    event: {
+      type: "user.approvalDecision",
+      clientEventId: "approval-retry",
+      payload: { approvalId: "tool-call-1", decision: "approve", message: "Proceed" },
+    },
+  },
+  {
+    delivery: "human-input",
+    event: {
+      type: "user.humanInputResponse",
+      clientEventId: "human-input-retry",
+      payload: {
+        requestId: "request-1",
+        response: {
+          outcome: "answered",
+          answers: [{ questionId: "question-1", values: ["yes"], other: "Keep this answer" }],
+        },
+      },
+    },
+  },
+] satisfies Array<{
+  delivery: SessionProxyMessageInput["delivery"];
+  event: ClientSessionEventInput;
+}>;
 
 type Recorded = { method: string; url: URL; headers: Headers; body: unknown };
 
@@ -685,6 +714,200 @@ describe("createSessionProxyHandler", () => {
     });
     expect((await rejection(browser.sendMessage(WORKSPACE_ID, SESSION_ID, "hi"))).status).toBe(401);
     expect(upstream.requests).toHaveLength(0);
+  });
+
+  for (const { delivery, event } of RESPONSE_EVENTS) {
+    test(`beforeForwardMessage refreshes ${delivery} credentials without changing the response`, async () => {
+      const inputs: SessionProxyMessageInput[] = [];
+      const updates = [{ id: "crm", headers: { Authorization: "test-rotation" } }];
+      const { upstream, browser } = setup({
+        modelSelection: false,
+        beforeForwardMessage: async (input, context) => {
+          inputs.push(input);
+          expect(context.workspaceId).toBe(WORKSPACE_ID);
+          expect(context.user).toBe("u_42");
+          expect(context.source).toBe("northwind");
+          expect(new URL(context.request.url).pathname).toBe(
+            `/api/opengeni/v1/workspaces/${WORKSPACE_ID}/sessions/${SESSION_ID}/events`,
+          );
+          return {
+            mcpCredentialUpdates: updates,
+            modelContext: "Messages only",
+            metadata: { privateHostState: "Not an event field" },
+          };
+        },
+      });
+      const response = await browser.sendEvent(WORKSPACE_ID, SESSION_ID, event);
+      expect(inputs).toEqual([{ sessionId: SESSION_ID, delivery }]);
+      expect(upstream.requests).toHaveLength(1);
+      expect(upstream.requests[0]!.method).toBe("POST");
+      expect(upstream.requests[0]!.url.pathname).toBe(
+        `/v1/workspaces/${WORKSPACE_ID}/sessions/${SESSION_ID}/events`,
+      );
+      expect(upstream.requests[0]!.headers.get("x-opengeni-external-actor")).not.toBeNull();
+      expect(upstream.requests[0]!.body).toEqual({
+        ...event,
+        payload: { ...event.payload, mcpCredentialUpdates: updates },
+      });
+      expect(response).not.toHaveProperty("mcpCredentialUpdates");
+      expect(response).not.toHaveProperty("metadata");
+    });
+
+    test(`${delivery} payloads stay unchanged without credential extras`, async () => {
+      for (const extras of [
+        undefined,
+        {},
+        { modelContext: "Messages only" },
+        { mcpCredentialUpdates: [] },
+      ]) {
+        const { upstream, browser } = setup({
+          ...(extras === undefined ? {} : { beforeForwardMessage: () => extras }),
+        });
+        await browser.sendEvent(WORKSPACE_ID, SESSION_ID, event);
+        expect(upstream.requests[0]!.body).toEqual(event);
+      }
+    });
+
+    test(`browser ${delivery} credential updates are rejected before the hook`, async () => {
+      let hookCalls = 0;
+      const { upstream, browser } = setup({
+        beforeForwardMessage: () => {
+          hookCalls++;
+          return {
+            mcpCredentialUpdates: [{ id: "crm", headers: { Authorization: "test-rotation" } }],
+          };
+        },
+      });
+      for (const updates of [
+        [],
+        null,
+        [{ id: "crm", headers: { Authorization: "browser-input" } }],
+      ]) {
+        const error = await rejection(
+          browser.sendEvent(WORKSPACE_ID, SESSION_ID, {
+            ...event,
+            payload: { ...event.payload, mcpCredentialUpdates: updates },
+          } as never),
+        );
+        expect(error.status).toBe(403);
+        expect(error.code).toBe("credential_update_not_allowed");
+      }
+      expect(hookCalls).toBe(0);
+      expect(upstream.requests).toHaveLength(0);
+    });
+
+    test(`beforeForwardMessage can refuse ${delivery} without forwarding`, async () => {
+      const { upstream, handler } = setup({
+        beforeForwardMessage: () =>
+          new Response("Reauthenticate", {
+            status: 401,
+            headers: { "x-host-auth": "required" },
+          }),
+      });
+      const response = await handler(
+        new Request(
+          `${PRODUCT}/api/opengeni/v1/workspaces/${WORKSPACE_ID}/sessions/${SESSION_ID}/events`,
+          {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify(event),
+          },
+        ),
+      );
+      expect(response.status).toBe(401);
+      expect(response.headers.get("x-host-auth")).toBe("required");
+      expect(await response.text()).toBe("Reauthenticate");
+      expect(upstream.requests).toHaveLength(0);
+    });
+
+    test(`malformed ${delivery} payloads do not invoke the hook or forward`, async () => {
+      let hookCalls = 0;
+      const { upstream, browser } = setup({
+        beforeForwardMessage: () => {
+          hookCalls++;
+        },
+      });
+      for (const payload of [undefined, null, [], "invalid"]) {
+        const error = await rejection(
+          browser.sendEvent(WORKSPACE_ID, SESSION_ID, { ...event, payload } as never),
+        );
+        expect(error.status).toBe(400);
+        expect(error.code).toBe("invalid_body");
+      }
+      expect(hookCalls).toBe(0);
+      expect(upstream.requests).toHaveLength(0);
+    });
+  }
+
+  test("SDK approval rejection and human-input skip use the same credential hook", async () => {
+    const inputs: SessionProxyMessageInput[] = [];
+    const updates = [{ id: "crm", headers: { Authorization: "test-rotation" } }];
+    const { upstream, browser } = setup({
+      beforeForwardMessage: (input) => {
+        inputs.push(input);
+        return { mcpCredentialUpdates: updates };
+      },
+    });
+    await browser.sendApprovalDecision(WORKSPACE_ID, SESSION_ID, {
+      approvalId: "tool-call-1",
+      decision: "reject",
+      clientEventId: "reject-retry",
+    });
+    await browser.submitHumanInputResponse(
+      WORKSPACE_ID,
+      SESSION_ID,
+      "request-1",
+      { outcome: "skipped" },
+      { clientEventId: "skip-retry" },
+    );
+    expect(inputs).toEqual([
+      { sessionId: SESSION_ID, delivery: "approval" },
+      { sessionId: SESSION_ID, delivery: "human-input" },
+    ]);
+    expect(upstream.requests.map((request) => request.body)).toEqual([
+      {
+        type: "user.approvalDecision",
+        clientEventId: "reject-retry",
+        payload: { approvalId: "tool-call-1", decision: "reject", mcpCredentialUpdates: updates },
+      },
+      {
+        type: "user.humanInputResponse",
+        clientEventId: "skip-retry",
+        payload: {
+          requestId: "request-1",
+          response: { outcome: "skipped" },
+          mcpCredentialUpdates: updates,
+        },
+      },
+    ]);
+  });
+
+  test("response hooks run only after host authorization and event allowlisting", async () => {
+    let hookCalls = 0;
+    const beforeForwardMessage = () => {
+      hookCalls++;
+      return undefined;
+    };
+    const denied = setup({ authorizeSession: () => false, beforeForwardMessage });
+    for (const { event } of RESPONSE_EVENTS) {
+      expect(
+        (await rejection(denied.browser.sendEvent(WORKSPACE_ID, SESSION_ID, event))).status,
+      ).toBe(404);
+    }
+    const allowed = setup({ beforeForwardMessage });
+    expect(
+      (
+        await rejection(
+          allowed.browser.sendEvent(WORKSPACE_ID, SESSION_ID, {
+            type: "tool.result",
+            payload: {},
+          } as never),
+        )
+      ).status,
+    ).toBe(403);
+    expect(hookCalls).toBe(0);
+    expect(denied.upstream.requests).toHaveLength(0);
+    expect(allowed.upstream.requests).toHaveLength(0);
   });
 
   test("modelSelection: false is reported in client config so UIs hide the picker", async () => {

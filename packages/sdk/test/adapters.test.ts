@@ -4,7 +4,12 @@ import type { AddressInfo } from "node:net";
 import { toNodeMiddleware, type NodeRequestLike } from "../src/adapters/express";
 import { toHonoHandler } from "../src/adapters/hono";
 import { createSessionProxyRoute, toNextRouteHandlers } from "../src/adapters/next";
-import { OpenGeniClient } from "../src/index";
+import {
+  OpenGeniClient,
+  createSessionProxyHandler,
+  type SessionProxyHandlerOptions,
+  type SessionProxyMessageInput,
+} from "../src/index";
 import { SESSION_ID, WORKSPACE_ID } from "./helpers";
 
 function echoHandler(seen: Request[]) {
@@ -162,4 +167,144 @@ describe("framework adapters", () => {
       await server.close();
     }
   });
+
+  for (const adapter of ["Next.js", "Express/Connect", "Hono"] as const) {
+    for (const action of [
+      {
+        delivery: "approval",
+        event: {
+          type: "user.approvalDecision",
+          clientEventId: "approval-retry",
+          payload: { approvalId: "tool-call-1", decision: "approve", message: "Proceed" },
+        },
+      },
+      {
+        delivery: "human-input",
+        event: {
+          type: "user.humanInputResponse",
+          clientEventId: "human-input-retry",
+          payload: { requestId: "request-1", response: { outcome: "skipped" } },
+        },
+      },
+    ] as const) {
+      test(`${adapter}: ${action.delivery} refresh, browser rejection, and hook refusal`, async () => {
+        const upstream: Array<{ path: string; body: unknown; headers: Headers }> = [];
+        const inputs: SessionProxyMessageInput[] = [];
+        const updates = [{ id: "crm", headers: { Authorization: "test-rotation" } }];
+        let refuse = false;
+        const og = new OpenGeniClient({
+          baseUrl: "https://api.example.test",
+          apiKey: "k",
+          fetch: async (input, init) => {
+            const request = new Request(input, init);
+            upstream.push({
+              path: new URL(request.url).pathname,
+              body: await request.json(),
+              headers: request.headers,
+            });
+            return Response.json({ id: SESSION_ID });
+          },
+        });
+        const options: SessionProxyHandlerOptions = {
+          resolve: () => ({ workspaceId: WORKSPACE_ID, user: "u_1", source: "product" }),
+          beforeForwardMessage: async (input, context) => {
+            inputs.push(input);
+            expect(context.user).toBe("u_1");
+            expect(context.workspaceId).toBe(WORKSPACE_ID);
+            expect(context.source).toBe("product");
+            return refuse
+              ? new Response("Reauthenticate", {
+                  status: 401,
+                  headers: { "x-host-auth": "required" },
+                })
+              : { mcpCredentialUpdates: updates, modelContext: "Messages only" };
+          },
+        };
+        let origin = "https://app.example";
+        let close: (() => Promise<void>) | undefined;
+        let dispatch: (request: Request) => Promise<Response>;
+        if (adapter === "Next.js") {
+          dispatch = createSessionProxyRoute(og, options).POST;
+        } else if (adapter === "Hono") {
+          const handler = toHonoHandler(createSessionProxyHandler(og, options));
+          dispatch = (raw) => handler({ req: { raw } });
+        } else {
+          const middleware = toNodeMiddleware(createSessionProxyHandler(og, options));
+          const server = await listen((request, response) => {
+            const req = request as NodeRequestLike;
+            req.originalUrl = req.url;
+            req.url = req.url!.replace(/^\/base\/api\/opengeni/, "");
+            if (req.headers["x-preparsed"]) {
+              let text = "";
+              req.on("data", (chunk) => (text += chunk));
+              req.on("end", () => {
+                req.body = JSON.parse(text);
+                middleware(req, response);
+              });
+            } else {
+              middleware(req, response);
+            }
+          });
+          origin = server.origin;
+          close = server.close;
+          dispatch = (request) => fetch(request);
+        }
+        const post = (body: unknown, preparsed = false) =>
+          dispatch(
+            new Request(
+              `${origin}/base/api/opengeni/v1/workspaces/${WORKSPACE_ID}/sessions/${SESSION_ID}/events`,
+              {
+                method: "POST",
+                headers: {
+                  "Content-Type": "application/json",
+                  ...(preparsed ? { "x-preparsed": "1" } : {}),
+                },
+                body: JSON.stringify(body),
+              },
+            ),
+          );
+        try {
+          for (const preparsed of adapter === "Express/Connect" ? [false, true] : [false]) {
+            const response = await post(action.event, preparsed);
+            expect(response.status).toBe(200);
+            expect(await response.json()).toEqual({ id: SESSION_ID });
+            expect(upstream.at(-1)!.path).toBe(
+              `/v1/workspaces/${WORKSPACE_ID}/sessions/${SESSION_ID}/events`,
+            );
+            expect(upstream.at(-1)!.headers.get("x-opengeni-external-actor")).not.toBeNull();
+            expect(upstream.at(-1)!.body).toEqual({
+              ...action.event,
+              payload: { ...action.event.payload, mcpCredentialUpdates: updates },
+            });
+          }
+          const forwarded = upstream.length;
+          expect(inputs).toEqual(
+            Array.from({ length: forwarded }, () => ({
+              sessionId: SESSION_ID,
+              delivery: action.delivery,
+            })),
+          );
+
+          const rejected = await post({
+            ...action.event,
+            payload: { ...action.event.payload, mcpCredentialUpdates: [] },
+          });
+          expect(rejected.status).toBe(403);
+          expect((await rejected.json()).error.code).toBe("credential_update_not_allowed");
+          expect(inputs).toHaveLength(forwarded);
+          expect(upstream).toHaveLength(forwarded);
+
+          refuse = true;
+          const refused = await post(action.event);
+          expect(refused.status).toBe(401);
+          expect(refused.headers.get("x-host-auth")).toBe("required");
+          expect(await refused.text()).toBe("Reauthenticate");
+          expect(inputs).toHaveLength(forwarded + 1);
+          expect(upstream).toHaveLength(forwarded);
+        } finally {
+          await close?.();
+        }
+      });
+    }
+  }
 });

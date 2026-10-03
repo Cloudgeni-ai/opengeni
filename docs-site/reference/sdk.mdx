@@ -110,7 +110,7 @@ console.log(members.length); // WorkspaceMember[]; iterate the array directly
 | `authorizeMutation`    | Your CSRF check for non-GET requests. Without it, only cross-site (`Sec-Fetch-Site`) mutations are refused                 |
 | `authorizeSession`     | Optional product check that this user may open this session                                                                |
 | `createSession`        | Allows browser-started sessions. The browser sends only `initialMessage` and `idempotencyKey`; you return the full request |
-| `beforeForwardMessage` | Runs before each forwarded message. Returns `modelContext` and `mcpCredentialUpdates`, or a `Response` to reject           |
+| `beforeForwardMessage` | Runs before messages and approval/human-input responses. Returns fresh `mcpCredentialUpdates` (and message-only `modelContext`), or a `Response` to reject |
 | `modelSelection`       | `false` removes per-message model choices and hides the model picker                                                       |
 | `files`                | `false` disables attachment routes                                                                                         |
 | `sandboxFiles`         | Explicit `true` enables bounded, no-symlink reads inside the session working directory. Off by default                     |

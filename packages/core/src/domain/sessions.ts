@@ -764,7 +764,7 @@ function validateInheritedSessionMcpServersForCreate(
   };
 }
 
-function validateSessionMcpCredentialUpdates(input: {
+export function validateSessionMcpCredentialUpdates(input: {
   settings: Settings;
   grant: AccessGrant;
   session: Session;

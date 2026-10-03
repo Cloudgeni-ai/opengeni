@@ -36,6 +36,11 @@ retain catalog floors, granting no capabilities/credentials.
 Account binding: [`mcp-account-bindings.ts`](../packages/core/src/domain/mcp-account-bindings.ts),
 [`remote-mcp-credentials.md`](remote-mcp-credentials.md).
 
+Session-local header rotations commit encrypted/versioned replacements with
+messages or approval/human-input responses before queue/wake. Response events
+omit credentials; the embedding proxy refreshes them server-side through
+`beforeForwardMessage`. See [`session-mcp-servers.md`](session-mcp-servers.md).
+
 [`resolveTurnToolPolicy`](../packages/core/src/domain/session-tool-policy.ts)
 owns turn refs: ordinary work uses session policy; scheduled work retains frozen
 selection. Credential-provider targeting/MCP preparation consume these refs,

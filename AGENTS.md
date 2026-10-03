@@ -96,6 +96,10 @@ Empty realtime session creation captures no authority; first text Send selects
 normally. Superseded host references are rejected, not converted to native IDs.
 See `docs/architecture.md` and `docs/remote-mcp-credentials.md`.
 
+Session-local MCP header updates share message or approval/human-input response
+acceptance transactions; never rotate separately before a reply is accepted or
+copy write-only values into its event. See `docs/session-mcp-servers.md`.
+
 Explicit effective first-party permissions `[]` remain zero authority: skip
 only remote OpenGeni-delegated MCP preparation, never pad the grant or sign an
 empty token. Preserve independent external-host/local/connection/native paths.

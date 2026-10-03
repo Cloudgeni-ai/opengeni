@@ -66,6 +66,24 @@ Selected MCP servers are prepared lazily by default: the model discovers their t
 
 For session-specific MCP credentials, createSession stores header values encrypted and returns only metadata such as header names and credential version. Later accepted message requests can rotate those values through the supported MCP credential-update field without recreating the session. For workspace Connections, rotate or reconnect the Connection with optimistic versioning; installed Integrations continue to reference its stable ID.
 
+In `createSessionProxyHandler`, return fresh headers from `beforeForwardMessage`
+as `{ mcpCredentialUpdates: [{ id, headers: { Authorization: "Bearer <fresh>" } }] }`.
+The hook runs for Send, Steer, composer submit, and approval/human-input responses
+(including Reject and Skip), through the Next, Express, and Hono adapters too.
+This matters when a human answers after the original token has expired: refresh
+on the response, not only on the next message. The browser cannot supply updates;
+the authenticated product backend owns minting and authorization. `modelContext`
+applies only to messages, not approval or human-input response payloads.
+
+Direct backend `user.approvalDecision` and `user.humanInputResponse` events may
+also include optional `payload.mcpCredentialUpdates`. Nonempty updates require
+`mcp_servers:attach` in addition to normal response authority. Updates replace
+the complete encrypted header map for an existing session server and increment
+its credential version in the response transaction before resume. They cannot
+change URLs, tools, approval policies, or connection references. Invalid or stale
+responses do not rotate; response replay does not rotate twice. Header values
+never enter response events, browser replies, or model history.
+
 Prefer short-lived, audience-bound tokens when the customer can issue them. Let the customer's authenticated backend mint or refresh a token for the exact product subject and data boundary. A workspace-wide credential is appropriate only when every session in that workspace may exercise the same provider authority.
 
 ## Product-owned repository credentials
