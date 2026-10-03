@@ -507,7 +507,11 @@ automatic replay. Server DNS text and post-dispatch errors
 never prove non-execution. Uncertain Starts return typed outcome-unknown
 results, never transport retries, and block replay. An unwound setup parks its
 turn as recovering with `sandboxSetupOutcomeUnknown`; peek and claim refuse
-redispatch, and exit/loss or deadlines never prove completion. Published
+redispatch until control reconciliation verifies every invocation of that exact
+closed attempt physically settled, including a positively exited home setup
+invocation. It then clears only uncertainty and wakes the original turn to
+rerun idempotent preparation. Pause, exhaustion and history are preserved;
+loss and deadlines remain insufficient proof. Published
 consumers use unpatched Modal: the runtime owns its error class and recognizes
 SDK boundaries by a local own-Symbol marker, never patch-only imports, names,
 codes or text.

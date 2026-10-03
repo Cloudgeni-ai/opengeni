@@ -747,11 +747,15 @@ capture/quiescence proofs keep their independent lifecycle.
 The existing blocked-admission wire kind also parks older workflow workers
 during a rolling deployment; no synthetic physical admission is created.
 
-An observation deadline, NOT_FOUND, provider/lease loss, or one original command
-exiting cannot prove that the rest of the unwound helper completed, so none
-clears the logical setup marker. Automatic continuation of incomplete setup
-requires a verified SDK continuation contract; the parked state is explicitly
-outcome-unknown, not a successful setup or a capacity/human-approval wait. Legacy
+An observation deadline, NOT_FOUND or provider/lease loss is not completion
+proof. Once the exact closed, quiesced attempt's home setup invocation has a
+real exit code, all its retained invocations have exited and every admitted
+operation is settled, control reconciliation removes only the uncertainty
+marker and durably wakes the original turn. Preparation reruns its idempotent
+setup rather than resuming an unwound SDK frame or replaying an unknown command.
+The accepted trigger, history, generation and recovery budget stay unchanged;
+effective Pause and exhausted-recovery markers still win. Pure DB peek remains
+read-only. Legacy
 `ContainerExec` still disables SDK retries and cannot recover an execution id
 lost with its response. Required first-party
 connect/tools-list also treats a rolling API
@@ -1850,8 +1854,7 @@ that case skips Temporal liveness inspection and idempotently parks only the
 session projection.
 
 Sandbox lease warming has two distinct bounded waits. A turn attached to a
-sibling creator waits at most `OPENGENI_SANDBOX_WARMING_TIMEOUT_MS` (default
-600000) for that durable warming lease to settle. The creator records the exact
+sibling creator waits at most `OPENGENI_SANDBOX_WARMING_TIMEOUT_MS` (default 600000) for that durable warming lease to settle. The creator records the exact
 provider instance as soon as create/restore returns, then gives Modal's command
 router a separate 60-second readiness budget before publishing the lease warm.
 The two failures retain different typed stages, group and instance identities,
@@ -2712,7 +2715,6 @@ Historical containment cannot reconstruct an execution ID the old adapter never
 retained. A command whose owner cannot recover its terminal receipt remains a visible capture blocker;
 operators must reconcile the exact command/provider identity rather than replay
 unknown side effects or clear holders by age. No new process is launched by probing.
-
 
 Migration 0419 records the exact launch turn, attempt, and execution generation
 when either provider adopts a background command under the existing attempt
@@ -3655,7 +3657,6 @@ Service turns without a human file subject read shared attachments under an expl
 null subject, clearing inherited private-file authority for that lookup. The reader
 restores the caller’s scope afterward; private and Drive-protected files still
 require their independent authority.
-
 
 Accepted private session uploads additionally use session-specific read grants,
 including for service continuations. Realtime and ordinary human admission share

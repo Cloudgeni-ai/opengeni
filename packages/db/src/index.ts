@@ -57246,7 +57246,18 @@ async function verifyWorkspaceMutationSettlementForAuthority(
                 provider_outcome = ${input.outcome}, settled_at = now()
               where id = ${input.admission.id} and settled_at is null
             `);
-            if (pendingAttempt) {
+            if (
+              pendingAttempt ||
+              (authorityInput.kind !== "direct" &&
+                (!authority || authority.session.status === "recovering") &&
+                (await hasWaitingSandboxSetupForWriterTx(
+                  tx,
+                  authorityInput.workspaceId,
+                  authorityInput.sessionId,
+                  actorKind,
+                  actorId,
+                )))
+            ) {
               const [wakeTarget] = await tx
                 .select({ workflowId: schema.sessions.temporalWorkflowId })
                 .from(schema.sessions)
@@ -58550,9 +58561,20 @@ async function settleRetainedProcessWithAuthority(
         },
         commandMutation,
       );
+      const setupAwaitingCompletion =
+        process.ownerAttemptId &&
+        session.status === "recovering" &&
+        (await hasWaitingSandboxSetupForWriterTx(
+          tx,
+          input.workspaceId,
+          input.sessionId,
+          "turn",
+          process.ownerAttemptId,
+        ));
       if (
         process.ownerAttemptId &&
-        (wasAwaitingQuiescence ||
+        (setupAwaitingCompletion ||
+          wasAwaitingQuiescence ||
           (await hasPendingSessionAttemptQuiescenceTx(tx, {
             workspaceId: input.workspaceId,
             sessionId: input.sessionId,
@@ -73154,7 +73176,8 @@ export async function claimSessionWorkForAttempt(
             if (activeTurn.status === "recovering") {
               // Unknown dispatch cannot replay an unwound helper. Positive
               // non-dispatch also cannot replenish its exhausted budget.
-              // Neither a wake nor lease/command loss clears either fence.
+              // Control reconciliation clears uncertainty only after exact
+              // physical completion. Wakes or loss cannot reset exhaustion.
               if (
                 sandboxSetupOutcomeUnknownFromTurnMetadata(activeTurn.metadata) ||
                 sandboxSetupRecoveryExhaustedFromTurnMetadata(activeTurn.metadata)
@@ -78345,8 +78368,8 @@ function sandboxSetupRecoveryExhaustedFromTurnMetadata(
   return marker as SandboxSetupRecoveryExhausted;
 }
 
-/** Logical setup is incomplete even if one retained physical command exits.
- * There is deliberately no deadline or lease-liveness clearing condition. */
+/** Setup may be retried after every invocation of its exact unwound attempt
+ * has positively settled. Time or missing provider state is never exit proof. */
 export type SandboxSetupOutcomeUnknown = {
   version: 1;
   turnId: string;
@@ -78371,6 +78394,167 @@ function sandboxSetupOutcomeUnknownFromTurnMetadata(
     return null;
   }
   return marker as SandboxSetupOutcomeUnknown;
+}
+
+/** Completion may arrive after the attempt quiesced. Both a process exit and
+ * its last child admission must wake the exact setup waiter. */
+async function hasWaitingSandboxSetupForWriterTx(
+  tx: Database,
+  workspaceId: string,
+  sessionId: string,
+  actorKind: string,
+  actorId: string,
+): Promise<boolean> {
+  const [row] = await tx.execute<{ waiting: boolean }>(sql`
+    select exists (
+      select 1 from sessions s join session_turns t
+        on t.workspace_id=s.workspace_id and t.session_id=s.id and t.id=s.active_turn_id
+      left join sandbox_retained_processes p on p.workspace_id=s.workspace_id
+        and p.session_id=s.id and p.id=${actorId}::uuid
+      where s.workspace_id=${workspaceId} and s.id=${sessionId}
+        and s.status='recovering' and t.status='recovering'
+        and t.metadata->'sandboxSetupOutcomeUnknown' @> jsonb_build_object(
+          'version',1,'turnId',t.id::text,'reason','sandbox_command_start_outcome_unknown',
+          'attemptId',${actorKind === "process" ? sql`p.owner_attempt_id::text` : sql`${actorId}::text`})
+    ) as waiting
+  `);
+  return row?.waiting === true;
+}
+
+/** Retire an uncertainty marker after physical completion, not after a timeout.
+ * Setup reruns its idempotent preparation; this does not declare setup successful
+ * or replay an uncertain provider command. Peek itself remains read-only. */
+export async function reconcileCompletedSandboxSetup(
+  db: Database,
+  input: {
+    accountId: string;
+    workspaceId: string;
+    sessionId: string;
+    turnId: string;
+    attemptId: string;
+  },
+): Promise<{ reconciled: boolean; events: SessionEvent[] }> {
+  return withWorkspaceSessionActivityRls(db, input.workspaceId, async (scopedDb) =>
+    scopedDb.transaction(async (tx) => {
+      const locks = await lockSessionEventWriteRows(tx as unknown as Database, {
+        workspaceId: input.workspaceId,
+        controlLock: "share",
+        sessionIds: [input.sessionId],
+        turnIds: [input.turnId],
+        attemptIds: [input.attemptId],
+      });
+      const session = locks.sessions[0],
+        turn = locks.turns[0],
+        attempt = locks.attempts[0];
+      const marker = sandboxSetupOutcomeUnknownFromTurnMetadata(turn?.metadata);
+      if (
+        !session ||
+        !turn ||
+        !attempt ||
+        session.accountId !== input.accountId ||
+        session.activeTurnId !== turn.id ||
+        turn.sessionId !== session.id ||
+        turn.status !== "recovering" ||
+        turn.activeAttemptId !== null ||
+        marker?.turnId !== turn.id ||
+        marker.attemptId !== attempt.id ||
+        attempt.sessionId !== session.id ||
+        attempt.turnId !== turn.id ||
+        attempt.executionGeneration !== turn.executionGeneration ||
+        attempt.state !== "closed" ||
+        !attempt.quiescedAt ||
+        sandboxSetupRecoveryExhaustedFromTurnMetadata(turn.metadata)
+      )
+        return { reconciled: false, events: [] };
+      const control = await evaluateSessionControl(
+        tx as unknown as Database,
+        input.workspaceId,
+        input.sessionId,
+        { workspaceControl: locks.control ?? undefined },
+      );
+      if (control.state !== "active") return { reconciled: false, events: [] };
+      // Closed attempt + canonical session/attempt locks prevent new admissions.
+      // Terminal rows cannot revert to active, so no provider or lease I/O is needed.
+      const [proof] = await tx.execute<{ completed: boolean }>(sql`
+        select exists (
+          select 1 from sandbox_workspace_mutation_admissions a
+          where a.account_id = ${input.accountId} and a.workspace_id = ${input.workspaceId}
+            and a.session_id = ${input.sessionId} and a.attempt_id = ${attempt.id}
+            and a.turn_id = ${turn.id} and a.execution_generation = ${turn.executionGeneration}
+            and a.actor_kind = 'turn' and a.actor_id = ${attempt.id}
+            and a.operation in ('lazyOwnedSandboxSetup', 'eagerOwnedSandboxSetup')
+            and a.route_kind = 'home' and a.route_target_id is null
+            and exists (
+              select 1 from sandbox_retained_processes p
+              where p.parent_admission_id = a.id and p.owner_attempt_id = ${attempt.id}
+                and p.session_id = a.session_id and p.lease_id = a.lease_id
+                and p.lease_epoch = a.lease_epoch and p.provider_instance_id = a.provider_instance_id
+                and p.state = 'exited' and p.exit_code is not null
+            )
+        ) and not exists (
+          select 1 from sandbox_workspace_mutation_admissions a
+          where a.workspace_id = ${input.workspaceId} and a.session_id = ${input.sessionId}
+            and (a.attempt_id = ${attempt.id} or (a.actor_kind = 'process' and exists (
+              select 1 from sandbox_retained_processes p where p.id = a.actor_id
+                and p.owner_attempt_id = ${attempt.id}
+            ))) and (a.settled_at is null or a.provider_outcome is null
+              or a.provider_outcome not in ('resolved', 'rejected'))
+        ) and not exists (
+          select 1 from sandbox_retained_processes p
+          where p.workspace_id = ${input.workspaceId} and p.session_id = ${input.sessionId}
+            and p.owner_attempt_id = ${attempt.id}
+            and (p.state <> 'exited' or p.exit_code is null)
+        ) as completed
+      `);
+      if (!proof?.completed) return { reconciled: false, events: [] };
+      const metadata = { ...(turn.metadata ?? {}) };
+      delete metadata[SANDBOX_SETUP_OUTCOME_UNKNOWN_METADATA_KEY];
+      const now = new Date();
+      await tx
+        .update(schema.sessionTurns)
+        .set({ metadata, version: turn.version + 1, updatedAt: now })
+        .where(eq(schema.sessionTurns.id, turn.id));
+      const inserted = await tx
+        .insert(schema.sessionEvents)
+        .values(
+          withLosslessContentWriteVersion(
+            [
+              {
+                accountId: input.accountId,
+                workspaceId: input.workspaceId,
+                sessionId: input.sessionId,
+                sequence: session.lastSequence + 1,
+                type: "turn.recovery.requested" as const,
+                payload: {
+                  reason: "sandbox_setup_physically_settled",
+                  retryable: true,
+                },
+                turnId: turn.id,
+                turnGeneration: turn.executionGeneration,
+                turnAttemptId: attempt.id,
+                turnAssociation: "current" as const,
+                occurredAt: now,
+              },
+            ],
+            "payload",
+            "payloadCodecVersion",
+          ),
+        )
+        .returning();
+      await tx
+        .update(schema.sessions)
+        .set({ lastSequence: session.lastSequence + 1, updatedAt: now })
+        .where(eq(schema.sessions.id, session.id));
+      await enqueueSessionWorkflowWakeInTransaction(tx as unknown as Database, {
+        accountId: input.accountId,
+        workspaceId: input.workspaceId,
+        sessionId: session.id,
+        temporalWorkflowId: session.temporalWorkflowId ?? `session-${session.id}`,
+        reason: "sandbox_setup_physically_settled",
+      });
+      return { reconciled: true, events: inserted.map(mapEvent) };
+    }),
+  );
 }
 
 export type SandboxLifecycleWait = {
