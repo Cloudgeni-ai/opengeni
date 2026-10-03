@@ -65,6 +65,89 @@ describe("editable annotation scroll ownership", () => {
     return page;
   }
 
+  async function afterPaint(page: Page) {
+    await page.evaluate(
+      () =>
+        new Promise<void>((resolve) =>
+          requestAnimationFrame(() => requestAnimationFrame(() => resolve())),
+        ),
+    );
+  }
+
+  async function listState(page: Page) {
+    return page.locator("[data-og-annotation-review-list]").evaluate((list) => {
+      const bounds = list.getBoundingClientRect();
+      const anchor = Array.from(list.querySelectorAll<HTMLElement>("[data-og-annotation-id]")).find(
+        (row) => row.getBoundingClientRect().bottom > bounds.top,
+      );
+      return {
+        top: list.scrollTop,
+        height: list.clientHeight,
+        contentHeight: list.scrollHeight,
+        anchorId: anchor?.dataset.ogAnnotationId,
+        anchorOffset: anchor ? anchor.getBoundingClientRect().top - bounds.top : null,
+        documentTop: document.scrollingElement?.scrollTop,
+        notes: Array.from(list.querySelectorAll("textarea")).map((note) => note.scrollTop),
+      };
+    });
+  }
+
+  async function wheelList(page: Page) {
+    const list = page.locator("[data-og-annotation-review-list]");
+    const box = (await list.boundingBox())!;
+    // Aim at list padding, outside nested textarea scrollers.
+    await page.mouse.move(box.x + 4, box.y + box.height / 2);
+    await Promise.all([
+      list.evaluate(
+        (node) =>
+          new Promise<void>((resolve) => {
+            let generation = 0;
+            const onScroll = (event: Event) => {
+              if (event.target === node) generation++;
+            };
+            const onEnd = (event: Event) => {
+              if (event.target !== node) return;
+              const endedGeneration = generation;
+              // A layout update may emit another scroll; consume only a painted, quiet end.
+              requestAnimationFrame(() =>
+                requestAnimationFrame(() => {
+                  if (generation !== endedGeneration) return;
+                  node.removeEventListener("scroll", onScroll);
+                  node.removeEventListener("scrollend", onEnd);
+                  resolve();
+                }),
+              );
+            };
+            node.addEventListener("scroll", onScroll);
+            node.addEventListener("scrollend", onEnd);
+          }),
+      ),
+      page.mouse.wheel(0, 650),
+    ]);
+    return listState(page);
+  }
+
+  function expectListMovement(
+    before: Awaited<ReturnType<typeof listState>>,
+    after: Awaited<ReturnType<typeof listState>>,
+  ) {
+    expect(after.top).toBeGreaterThan(before.top);
+    expect(after.anchorId).not.toBe(before.anchorId);
+    expect(after.documentTop).toBe(before.documentTop);
+    expect(after.notes).toEqual(before.notes);
+  }
+
+  function expectListPreserved(
+    before: Awaited<ReturnType<typeof listState>>,
+    after: Awaited<ReturnType<typeof listState>>,
+  ) {
+    expect(after.top).toBeCloseTo(before.top, 0);
+    expect(after.anchorId).toBe(before.anchorId);
+    expect(after.anchorOffset).toBeCloseTo(before.anchorOffset!, 0);
+    expect(after.documentTop).toBe(before.documentTop);
+    expect(after.notes).toEqual(before.notes);
+  }
+
   for (const viewport of [
     { width: 1280, height: 900 },
     { width: 390, height: 844 },
@@ -72,23 +155,85 @@ describe("editable annotation scroll ownership", () => {
     test(`wheel scrolling the annotation list survives layout and parent renders at ${viewport.width}px`, async () => {
       const page = await openHarness(viewport, 12, true);
       try {
-        const list = page.locator("[data-og-annotation-review-list]");
-        const box = (await list.boundingBox())!;
-        // Aim at the list padding, outside nested textarea scrollers.
-        await page.mouse.move(box.x + 4, box.y + box.height / 2);
-        await page.mouse.wheel(0, 650);
-        await page.waitForTimeout(350);
-        const scrolled = await list.evaluate((node) => node.scrollTop);
+        const initial = await listState(page);
+        expect(initial.contentHeight).toBeGreaterThan(initial.height);
+        // Native wheel distance varies by engine. Verify navigation instead of a pixel threshold,
+        // including a second gesture so repeated layout work cannot pin the list to the first note.
+        const scrolled = await wheelList(page);
+        expectListMovement(initial, scrolled);
+        const advanced = await wheelList(page);
+        expectListMovement(scrolled, advanced);
         if (evidenceDir)
           await page.screenshot({ path: `${evidenceDir}/list-scrolled-${viewport.width}.png` });
-        expect(scrolled).toBeGreaterThan(300);
+
+        await page.setViewportSize({ ...viewport, height: Math.round(viewport.height / 2) });
+        await page.waitForFunction(
+          (height) =>
+            document.querySelector<HTMLElement>("[data-og-annotation-review-list]")!
+              .clientHeight !== height,
+          advanced.height,
+        );
+        await afterPaint(page);
+        const resized = await listState(page);
+        expect(resized.height).toBeLessThan(advanced.height);
+        expectListPreserved(advanced, resized);
+
+        const revision = await page.locator("main").getAttribute("data-revision");
         await page.evaluate(() =>
           document.querySelector<HTMLButtonElement>("main > button")!.click(),
         );
-        await page.waitForTimeout(100);
+        await page.waitForFunction(
+          (previousRevision) =>
+            document.querySelector("main")!.getAttribute("data-revision") !== previousRevision,
+          revision,
+        );
+        await afterPaint(page);
         if (evidenceDir)
           await page.screenshot({ path: `${evidenceDir}/list-${viewport.width}.png` });
-        expect(await list.evaluate((node) => node.scrollTop)).toBeCloseTo(scrolled, 0);
+        expectListPreserved(resized, await listState(page));
+      } finally {
+        await page.close();
+      }
+    }, 30_000);
+
+    test(`note autosizing follows edits and available width at ${viewport.width}px`, async () => {
+      const page = await openHarness(viewport, 1);
+      try {
+        const note = page.getByRole("textbox", { name: "Note", exact: true });
+        const initialHeight = await note.evaluate((node) => node.clientHeight);
+        await note.fill("Short note.");
+        await page.waitForFunction(
+          (height) => document.querySelector("textarea")!.clientHeight < height,
+          initialHeight,
+        );
+        const shortHeight = await note.evaluate((node) => node.clientHeight);
+        const text =
+          "Editable notes should grow when words wrap, and shrink again when there is enough space to read them without wrapping.";
+        await note.fill(text);
+        await page.waitForFunction(
+          (height) => document.querySelector("textarea")!.clientHeight > height,
+          shortHeight,
+        );
+        const wide = await note.evaluate((node) => ({
+          width: node.clientWidth,
+          height: node.clientHeight,
+        }));
+        await page.setViewportSize({ ...viewport, width: 240 });
+        await page.waitForFunction((size) => {
+          const textarea = document.querySelector("textarea")!;
+          return textarea.clientWidth < size.width && textarea.clientHeight > size.height;
+        }, wide);
+        const narrowHeight = await note.evaluate((node) => node.clientHeight);
+        expect(await note.inputValue()).toBe(text);
+        await page.setViewportSize(viewport);
+        await page.waitForFunction(
+          (height) => document.querySelector("textarea")!.clientHeight < height,
+          narrowHeight,
+        );
+        expect(await note.evaluate((node) => node.clientHeight)).toBeCloseTo(wide.height, 0);
+        expect(await note.inputValue()).toBe(text);
+        if (evidenceDir)
+          await page.screenshot({ path: `${evidenceDir}/note-sizing-${viewport.width}.png` });
       } finally {
         await page.close();
       }
