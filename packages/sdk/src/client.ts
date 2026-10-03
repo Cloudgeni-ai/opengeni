@@ -7694,7 +7694,7 @@ export class OpenGeniClient {
   ): Promise<import("@opengeni/contracts").PluginDiscoveryPage> {
     return this.requestJson(
       "GET",
-      "/v1/workspaces/" + workspaceId + "/capabilities/discovery/plugins",
+      `/v1/workspaces/${workspaceId}/capabilities/discovery/plugins`,
       undefined,
       {
         ...(options.id ? { id: options.id } : {}),
