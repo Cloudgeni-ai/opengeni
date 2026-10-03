@@ -300,6 +300,10 @@ describe("worker scheduled occurrence credential restriction acceptance", () => 
   ] as const)("freezes $name at the actual run admission boundary", async (options) => {
     await acceptanceFixture(options, async ({ run, accepted, sessionMetadata }) => {
       await run();
+      expect(accepted().claudeProviderAccountAuthoritySnapshot).toEqual({
+        version: 1,
+        scope: "workspace",
+      });
       const frozen = TurnExecutionPolicyV1.parse(accepted().turnExecutionPolicy);
       expect(frozen.credentialRestriction).toBe(options.expected);
       expect(Object.hasOwn(frozen, "credentialRestriction")).toBe(!!options.expected);
