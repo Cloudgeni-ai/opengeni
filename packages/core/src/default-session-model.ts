@@ -372,12 +372,16 @@ async function connectionRestrictionsAndXaiReadiness(
   };
 }
 
-/** Readiness observes metadata only; quota is handled by the runtime allocator. */
-async function claudePoolReadiness(
+/**
+ * Readiness for the subject's current or already accepted Claude pool observes
+ * metadata only; quota is handled by the runtime allocator. This is not an
+ * authorization: callers must supply their authenticated or frozen subject.
+ */
+export async function loadWorkspaceClaudeSubscriptionReadiness(
   db: Database,
   settings: Settings,
   context: WorkspaceModelSelectionContext,
-) {
+): Promise<{ workspace: boolean; organization: boolean }> {
   if (!settings.claudeSubscriptionEnabled) return { workspace: false, organization: false };
   const authoritySnapshot =
     context.claudeAuthoritySnapshot ??
@@ -423,7 +427,7 @@ export async function loadWorkspaceModelSelectionInput(
     organizationOpenRouterCustomModels,
   ] = await Promise.all([
     connectionRestrictionsAndXaiReadiness(db, settings, context),
-    claudePoolReadiness(db, settings, context),
+    loadWorkspaceClaudeSubscriptionReadiness(db, settings, context),
     getWorkspaceModelPolicy(db, workspaceId),
     workspaceCodexSubscriptionActive(db, settings, workspaceId),
     options.observeAvailability === false
