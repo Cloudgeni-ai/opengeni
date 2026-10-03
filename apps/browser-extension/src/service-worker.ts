@@ -138,7 +138,7 @@ async function connect(): Promise<void> {
       if (nativePort === connectingPort) handleNativeMessage(message);
     });
     port.onDisconnect.addListener(() => {
-      const error = chrome.runtime.lastError?.message ?? "OpenGeni agent disconnected";
+      const error = chrome.runtime.lastError?.message ?? "Opengeni agent disconnected";
       disconnectPort(connectingPort, error);
     });
     await setBadge(false);
@@ -157,7 +157,7 @@ async function connect(): Promise<void> {
         connectionGeneration === generation &&
         readyGeneration !== generation
       ) {
-        disconnectPort(connectingPort, "OpenGeni agent did not accept this browser profile");
+        disconnectPort(connectingPort, "Opengeni agent did not accept this browser profile");
       }
     }, HANDSHAKE_TIMEOUT_MS);
   } catch (error) {
@@ -277,7 +277,7 @@ async function executeBridgeCommand(command: BridgeCommand): Promise<unknown> {
       return { tabs: await tabs() };
     case "tabs.create": {
       const created = await chrome.tabs.create({
-        // OpenGeni renders and controls attached tabs in its own Browser panel.
+        // Opengeni renders and controls attached tabs in its own Browser panel.
         // Creating a target must not steal focus or raise Chrome on the user's
         // desktop; an explicit user action can still activate a tab separately.
         active: false,
@@ -321,7 +321,7 @@ async function executeBridgeCommand(command: BridgeCommand): Promise<unknown> {
       if (!attachedDebuggerTabs.has(tabId)) {
         throw new BridgeCommandError(
           "debugger_unavailable",
-          "OpenGeni is not attached to this tab",
+          "Opengeni is not attached to this tab",
         );
       }
       assertAllowedDebuggerMethod(command.method);
@@ -441,7 +441,7 @@ async function setBadge(connected: boolean): Promise<void> {
   await chrome.action.setBadgeText({ text: connected ? "" : "!" });
   if (!connected) await chrome.action.setBadgeBackgroundColor({ color: "#ef4444" });
   await chrome.action.setTitle({
-    title: connected ? "OpenGeni Browser · Connected" : "OpenGeni Browser · Agent unavailable",
+    title: connected ? "Opengeni Browser · Connected" : "Opengeni Browser · Agent unavailable",
   });
 }
 

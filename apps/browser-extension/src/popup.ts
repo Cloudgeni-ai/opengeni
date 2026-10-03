@@ -16,8 +16,8 @@ async function refresh(): Promise<void> {
   document.body.dataset.connected = String(status.connected);
   state.textContent = status.connected ? "Connected" : "Agent unavailable";
   detail.textContent = status.connected
-    ? "This Chrome profile is ready in OpenGeni. Tabs attach only when an agent uses them."
-    : (status.error ?? "Start the OpenGeni machine agent to connect this profile.");
+    ? "This Chrome profile is ready in Opengeni. Tabs attach only when an agent uses them."
+    : (status.error ?? "Start the Opengeni machine agent to connect this profile.");
   label.value = status.profileLabel ?? "";
 }
 
