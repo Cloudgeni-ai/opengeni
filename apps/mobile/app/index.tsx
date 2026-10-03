@@ -4,6 +4,8 @@ import { useCallback, useState } from "react";
 import {
   ActivityIndicator,
   FlatList,
+  KeyboardAvoidingView,
+  Platform,
   Pressable,
   RefreshControl,
   StyleSheet,
@@ -17,6 +19,7 @@ import { useAccount } from "@/account";
 export default function SessionsScreen() {
   const { client, workspaceId, workspaces, error, reload } = useAccount();
   const insets = useSafeAreaInsets();
+  const headerHeight = insets.top + 44;
   const [sessions, setSessions] = useState<Session[]>([]);
   const [loading, setLoading] = useState(false);
   const [draft, setDraft] = useState("");
@@ -60,12 +63,18 @@ export default function SessionsScreen() {
   const workspaceName = workspaces.find((workspace) => workspace.id === workspaceId)?.name;
 
   return (
-    <View style={styles.root}>
+    <KeyboardAvoidingView
+      behavior={Platform.OS === "ios" ? "padding" : undefined}
+      keyboardVerticalOffset={headerHeight}
+      style={styles.root}
+    >
       {error || listError ? (
         <Text style={styles.error}>{error?.message ?? listError}</Text>
       ) : null}
       <FlatList
         data={sessions}
+        keyboardDismissMode="interactive"
+        keyboardShouldPersistTaps="handled"
         keyExtractor={(session) => session.id}
         refreshControl={<RefreshControl refreshing={loading} onRefresh={() => void reload().then(load)} />}
         ListHeaderComponent={
@@ -103,7 +112,7 @@ export default function SessionsScreen() {
           {creating ? <ActivityIndicator color="#fff" /> : <Text style={styles.sendText}>↑</Text>}
         </Pressable>
       </View>
-    </View>
+    </KeyboardAvoidingView>
   );
 }
 
