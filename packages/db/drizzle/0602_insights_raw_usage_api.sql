@@ -32,7 +32,7 @@ LANGUAGE sql IMMUTABLE SET search_path=pg_catalog AS $$
     ((p->>'kind' IN('private','personal')) OR NOT EXISTS(
       SELECT 1 FROM jsonb_array_elements_text(f.value) requested(value) WHERE value=CASE f.key
         WHEN 'model' THEN(p->>'provider')||'/'||(p->>'model')
-        WHEN 'projectId' THEN CASE WHEN p->>'kind'='item' THEN coalesce(p->>'projectId','unfiled') END
+        WHEN 'projectId' THEN CASE WHEN p->>'kind'='item' AND p->>'rootSessionId' IS NOT NULL THEN coalesce(p->>'projectId','unfiled') END
         ELSE p->>f.key END)))
 $$;
 
@@ -139,7 +139,7 @@ BEGIN
                 CASE WHEN p_workspace IS NULL AND owner_index IS NOT NULL AND NOT detail_allowed THEN 'personal'
                   WHEN s.id IS NOT NULL AND s.visibility='user_private' AND(NOT s.actor_visible OR NOT detail_allowed) THEN 'private'
                   WHEN s.id IS NOT NULL AND NOT detail_allowed THEN 'restricted'
-                  WHEN f.charge_row AND f.provider IS NULL THEN 'service'
+                  WHEN f.charge_row AND f.provider IS NULL THEN 'restricted'
                   WHEN s.id IS NULL OR r.id IS NULL THEN 'deleted'
                   WHEN NOT s.actor_visible OR NOT r.actor_visible THEN 'restricted' ELSE 'item' END AS kind
               FROM opengeni_private.insights_raw_amount_inputs(a,w.id,p_since,p_until) f
@@ -152,7 +152,7 @@ BEGIN
                 'model',CASE WHEN f.kind='item' THEN f.model END,'payer',f.payer,
                 'rootSessionId',CASE WHEN f.kind='item' THEN f.root_session_id END,'rootTitle',CASE WHEN f.kind='item' THEN root.title END,
                 'projectId',CASE WHEN f.kind='item' THEN project.id END,'projectName',CASE WHEN f.kind='item' THEN project.name END,
-                'scheduleId',CASE WHEN f.kind='item' THEN f.scheduled_task_id END,'scheduleName',CASE WHEN f.kind='item' THEN task.name END,
+                'scheduleId',CASE WHEN f.kind='item' THEN task.id END,'scheduleName',CASE WHEN f.kind='item' THEN task.name END,
                 'person',CASE WHEN f.kind='personal' THEN owner_key WHEN f.kind IN('item','private')
                   AND coalesce(f.owner_subject_id,f.owner_organization_membership_id::text) IS NOT NULL THEN
                     encode(sha256(convert_to(a::text||':'||coalesce(f.owner_subject_id,f.owner_organization_membership_id::text),'UTF8')),'hex') END,
@@ -235,7 +235,7 @@ BEGIN
           INSERT INTO opengeni_private.insights_fact_read_runtime_capabilities
             (backend_pid,transaction_id,capability_kind,account_id,workspace_id,subject_id,initiating_human_subject_id)
           VALUES(pg_backend_pid(),pg_current_xact_id(),'model_call_facts',a,w.id,subject_value,human_value);
-          RETURN QUERY SELECT jsonb_build_object('id',f.id,'occurredAt',f.occurred_at,'workspaceId',w.id,
+          RETURN QUERY SELECT jsonb_build_object('id',f.id,'occurredAt',to_char(f.occurred_at AT TIME ZONE 'UTC','YYYY-MM-DD"T"HH24:MI:SS.US"Z"'),'workspaceId',w.id,
             'sessionId',leaf.id,'sessionTitle',leaf.title,'sessionKind','visible','personKey',meta->>'person',
             'provider',f.provider,'model',f.model,'payer',meta->>'payer','tokens',CASE WHEN
               f.input_tokens IS NOT NULL AND f.cached_tokens IS NOT NULL AND f.cache_write_tokens IS NOT NULL
@@ -253,12 +253,14 @@ BEGIN
               'cacheWrite',f.list_cache_write_cost_micros,'output',f.list_output_cost_micros) END)
           FROM %1$I.model_call_facts f JOIN %1$I.sessions leaf ON leaf.id=f.session_id AND leaf.account_id=a AND leaf.workspace_id=w.id
           LEFT JOIN %1$I.sessions root ON root.id=leaf.root_session_id AND root.account_id=a AND root.workspace_id=w.id
+          LEFT JOIN %1$I.channels project ON project.id=root.channel_id AND project.account_id=a AND project.workspace_id=w.id
+          LEFT JOIN %1$I.scheduled_tasks task ON task.id=f.scheduled_task_id AND task.account_id=a AND task.workspace_id=w.id
           CROSS JOIN LATERAL(SELECT jsonb_build_object('kind','item','workspaceId',w.id,'provider',f.provider,'model',f.model,
             'payer',opengeni_private.insights_usage_payer(f.provider,f.billing_path),'rootSessionId',CASE WHEN root.visibility='workspace_shared'
               OR subject_value IS NULL OR %1$I.session_private_actor_visible(root.account_id,root.workspace_id,root.owner_organization_membership_id,root.owner_subject_id) THEN root.id END,
             'projectId',CASE WHEN root.visibility='workspace_shared' OR subject_value IS NULL OR %1$I.session_private_actor_visible(
-              root.account_id,root.workspace_id,root.owner_organization_membership_id,root.owner_subject_id) THEN root.channel_id END,
-            'scheduleId',f.scheduled_task_id,'person',CASE WHEN coalesce(leaf.owner_subject_id,leaf.owner_organization_membership_id::text) IS NOT NULL THEN
+              root.account_id,root.workspace_id,root.owner_organization_membership_id,root.owner_subject_id) THEN project.id END,
+            'scheduleId',task.id,'person',CASE WHEN coalesce(leaf.owner_subject_id,leaf.owner_organization_membership_id::text) IS NOT NULL THEN
               encode(sha256(convert_to(a::text||':'||coalesce(leaf.owner_subject_id,leaf.owner_organization_membership_id::text),'UTF8')),'hex') END) AS meta) metadata
           WHERE f.account_id=a AND f.workspace_id=w.id AND f.occurred_at>=p_since AND f.occurred_at<p_until
             AND(p_cursor_at IS NULL OR(f.occurred_at,f.id)<(p_cursor_at,p_cursor_id))

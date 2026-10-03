@@ -13,6 +13,7 @@ import {
   InsightsCallsResponse,
 } from "@opengeni/contracts/insights-usage";
 import postgres from "postgres";
+import { sql } from "drizzle-orm";
 import {
   createDb,
   createSession,
@@ -46,6 +47,45 @@ let accountId: string,
   deletedId: string,
   subjectId: string;
 const migrationName = "0602_insights_raw_usage_api.sql";
+const stagingRevision = "2a5ab6f512a05bf28afce38ac4259dea861d3669";
+const preMigrationRevision = "3cc26b5b3d316cde28ba51fd8b266395f6108f5e";
+const postureOptions = {
+  expectedRole: "opengeni_app",
+  rlsStrategy: "force" as const,
+  targetSchema: "public",
+  organizationTenancyCanonicalActivationEnabled: true,
+};
+let stagingBaselineViolations: Record<"current" | "old" | "restored", string[]>;
+let preMigrationBaselineViolations: Record<"current" | "old" | "restored", string[]>;
+async function frozenRuntime<T>(
+  revision: string,
+  run: (
+    runtime: typeof import("../src/runtime-posture"),
+    roles: typeof import("../src/provision-roles"),
+  ) => Promise<T>,
+): Promise<T> {
+  const repoRoot = new URL("../../..", import.meta.url).pathname;
+  const root = await mkdtemp(`${repoRoot}/.insights-frozen-runtime-`),
+    directory = `${root}/${revision}`;
+  try {
+    await mkdir(directory);
+    for (const name of ["runtime-posture.ts", "role-relationships.ts", "provision-roles.ts"])
+      await writeFile(
+        `${directory}/${name}`,
+        execFileSync("git", ["show", `${revision}:packages/db/src/${name}`], { cwd: repoRoot }),
+      );
+    return await run(
+      await import(pathToFileURL(`${directory}/runtime-posture.ts`).href),
+      await import(pathToFileURL(`${directory}/provision-roles.ts`).href),
+    );
+  } finally {
+    await provisionRoles(fixture.adminUrl, {
+      appPassword: fixture.appPassword,
+      rlsStrategy: "force",
+    });
+    await rm(root, { recursive: true, force: true });
+  }
+}
 const now = new Date("2026-09-14T12:00:00Z");
 const actor = <T>(fn: () => Promise<T>, id = subjectId) =>
   withSessionRlsActorContext({ subjectId: id }, fn);
@@ -136,6 +176,36 @@ beforeAll(async () => {
       (${accountId},null,'model_usage_debit',-7,'model_response',null,'account-orphan','2026-09-03T00:00:00Z'),
       (${accountId},${workspaceId},'model_usage_debit',-17,'model_response','prior-orphan','prior-orphan','2026-08-25T00:00:00Z')`;
   const before = await policies();
+  await frozenRuntime(preMigrationRevision, async (baselineRuntime) => {
+    stagingBaselineViolations = await frozenRuntime(
+      stagingRevision,
+      async (runtime, oldProvision) => {
+        const inspect = async (reader = runtime) =>
+          reader.evaluateRuntimeDatabasePosture(
+            await reader.inspectRuntimeDatabasePosture(client.db, postureOptions),
+            postureOptions,
+          );
+        const current = await inspect(),
+          baselineCurrent = await inspect(baselineRuntime);
+        await oldProvision.provisionRoles(fixture.adminUrl, {
+          appPassword: fixture.appPassword,
+          rlsStrategy: "force",
+        });
+        const old = await inspect(),
+          baselineOld = await inspect(baselineRuntime);
+        await provisionRoles(fixture.adminUrl, {
+          appPassword: fixture.appPassword,
+          rlsStrategy: "force",
+        });
+        preMigrationBaselineViolations = {
+          current: baselineCurrent,
+          old: baselineOld,
+          restored: await inspect(baselineRuntime),
+        };
+        return { current, old, restored: await inspect() };
+      },
+    );
+  });
   await fixture.admin`delete from schema_migrations where name=${migrationName}`;
   await migrate(fixture.ownerUrl, undefined, {
     applicationDatabaseRoles: ["opengeni_app"],
@@ -175,7 +245,7 @@ test("rolling owner migration leaves FORCE, policies, old facts, and billing amo
     listByClassMicros: null,
     tokens: { uncachedInput: 32, cacheRead: 10, cacheWrite: 0, output: 30, reasoning: 0 },
   });
-  expect(response.groups.find((g) => g.kind === "service")?.measures).toMatchObject({
+  expect(response.groups.find((g) => g.kind === "restricted")?.measures).toMatchObject({
     calls: 0,
     chargedMicros: 13,
   });
@@ -183,49 +253,39 @@ test("rolling owner migration leaves FORCE, policies, old facts, and billing amo
   expect(org.totals.chargedMicros).toBe(31);
 });
 
-test("frozen pre-0602 runtime and provisioner accept the complete migrated inventory", async () => {
-  const revision = "3cc26b5b3d316cde28ba51fd8b266395f6108f5e";
-  const repoRoot = new URL("../../..", import.meta.url).pathname;
-  const root = await mkdtemp(`${repoRoot}/.insights-0601-old-runtime-`);
-  const directory = `${root}/${revision}`;
-  const options = {
-    expectedRole: "opengeni_app",
-    rlsStrategy: "force" as const,
-    targetSchema: "public",
-    organizationTenancyCanonicalActivationEnabled: true,
-  };
-  const roles = { appPassword: fixture.appPassword, rlsStrategy: "force" as const };
-  try {
-    await mkdir(directory);
-    for (const name of ["runtime-posture.ts", "role-relationships.ts", "provision-roles.ts"])
-      await writeFile(
-        `${directory}/${name}`,
-        execFileSync("git", ["show", `${revision}:packages/db/src/${name}`], { cwd: repoRoot }),
-      );
-    const old = await import(pathToFileURL(`${directory}/runtime-posture.ts`).href);
-    const oldProvision = await import(pathToFileURL(`${directory}/provision-roles.ts`).href);
-    const verify = async () => {
-      expect(
-        old.evaluateRuntimeDatabasePosture(
-          await old.inspectRuntimeDatabasePosture(client.db, options),
-          options,
-        ),
-      ).toEqual([]);
-      expect(
-        evaluateRuntimeDatabasePosture(
-          await inspectRuntimeDatabasePosture(client.db, options),
-          options,
-        ),
-      ).toEqual([]);
-    };
-    await verify();
-    await oldProvision.provisionRoles(fixture.adminUrl, roles);
-    await verify();
-    await provisionRoles(fixture.adminUrl, roles);
-    await verify();
-  } finally {
-    await provisionRoles(fixture.adminUrl, roles);
-    await rm(root, { recursive: true, force: true });
+test("frozen pre-0602 passes; serving staging retains exact existing full-catalog readiness blockers", async () => {
+  for (const revision of [stagingRevision, preMigrationRevision]) {
+    const roles = { appPassword: fixture.appPassword, rlsStrategy: "force" as const };
+    await frozenRuntime(revision, async (old, oldProvision) => {
+      if (revision === stagingRevision) {
+        expect(stagingBaselineViolations.current.length).toBeGreaterThan(0);
+        for (const inherited of [
+          "claude_subscription_credentials",
+          "organization_api_key_workspaces",
+          "slack_api_rate_limits",
+        ])
+          expect(stagingBaselineViolations.current.join("\n")).toContain(inherited);
+      }
+      const verify = async (provisioner: "current" | "old" | "restored") => {
+        expect(
+          old.evaluateRuntimeDatabasePosture(
+            await old.inspectRuntimeDatabasePosture(client.db, postureOptions),
+            postureOptions,
+          ),
+        ).toEqual(revision === stagingRevision ? stagingBaselineViolations[provisioner] : []);
+        expect(
+          evaluateRuntimeDatabasePosture(
+            await inspectRuntimeDatabasePosture(client.db, postureOptions),
+            postureOptions,
+          ),
+        ).toEqual(revision === stagingRevision ? preMigrationBaselineViolations[provisioner] : []);
+      };
+      await verify("current");
+      await oldProvision.provisionRoles(fixture.adminUrl, roles);
+      await verify("old");
+      await provisionRoles(fixture.adminUrl, roles);
+      await verify("restored");
+    });
   }
 }, 180_000);
 
@@ -304,29 +364,79 @@ test("forward classes conserve frozen total and visible cursor pagination preser
     listByClassMicros: { uncachedInput: 10, cacheRead: 2, cacheWrite: 0, output: 8 },
     listByClassApprox: false,
   });
+  const url = new URL(fixture.ownerUrl);
+  url.username = "opengeni_app";
+  url.password = fixture.appPassword;
+  const localClient = createDb(url.toString(), { max: 1, rlsStrategy: "force" });
+  await localClient.db.execute(sql`set timezone='America/New_York'`);
   const ids: string[] = [];
   let cursor: string | undefined;
-  do {
-    const page = await actor(() =>
-      readInsightsCalls(client.db, {
-        accountId,
-        workspaceId,
-        now,
-        detailsWorkspaceIds: [workspaceId],
-        query: InsightsCallsQuery.parse({
-          range: "month",
-          model: "cursor-provider/model/with/slashes",
-          limit: 1,
-          ...(cursor ? { cursor } : {}),
+  try {
+    do {
+      const page = await actor(() =>
+        readInsightsCalls(localClient.db, {
+          accountId,
+          workspaceId,
+          now,
+          detailsWorkspaceIds: [workspaceId],
+          query: InsightsCallsQuery.parse({
+            range: "month",
+            model: "cursor-provider/model/with/slashes",
+            limit: 1,
+            ...(cursor ? { cursor } : {}),
+          }),
         }),
-      }),
-    );
-    expect(InsightsCallsResponse.safeParse(page).success).toBe(true);
-    ids.push(...page.calls.map((c) => c.id));
-    cursor = page.nextCursor ?? undefined;
-  } while (cursor);
+      );
+      expect(InsightsCallsResponse.safeParse(page).success).toBe(true);
+      ids.push(...page.calls.map((c) => c.id));
+      cursor = page.nextCursor ?? undefined;
+      if (cursor)
+        expect(JSON.parse(Buffer.from(cursor, "base64url").toString("utf8")).at).toMatch(
+          /\.\d{6}Z$/,
+        );
+    } while (cursor);
+  } finally {
+    await localClient.close();
+  }
   expect(ids.length).toBe(4);
   expect(new Set(ids).size).toBe(4);
+});
+
+test("call charges use lifetime linked debit, while usage uses the ledger period and retains late money", async () => {
+  const turn = crypto.randomUUID(),
+    source = "delayed-debit-clock";
+  await fixture.admin`insert into model_call_facts(account_id,workspace_id,session_id,turn_id,source_key,provider,provider_api,model,billing_path,priced_cost_micros,occurred_at)
+    values(${accountId},${workspaceId},${sessionId},${turn},${source},'debit-clock','responses','clock','opengeni_credits',999,'2026-09-08T00:00:00Z')`;
+  for (const [amount, at] of [
+    [11, "2026-09-08T00:00:01Z"],
+    [17, "2026-10-02T00:00:00Z"],
+  ] as const)
+    await fixture.admin`insert into credit_ledger_entries(account_id,workspace_id,type,amount_micros,source_type,source_id,idempotency_key,occurred_at)
+      values(${accountId},${workspaceId},'model_usage_debit',${-amount},'model_response',${`${turn}:${source}`},${`${source}-${amount}`},${at})`;
+  const page = await actor(() =>
+    readInsightsCalls(client.db, {
+      accountId,
+      workspaceId,
+      detailsWorkspaceIds: [workspaceId],
+      now,
+      query: InsightsCallsQuery.parse({ range: "month", provider: "debit-clock" }),
+    }),
+  );
+  expect(page.calls).toHaveLength(1);
+  expect(page.calls[0]!.chargedMicros).toBe(28);
+  expect((await usage({ range: "month", provider: "debit-clock" })).totals.chargedMicros).toBe(11);
+  const late = await actor(() =>
+    readInsightsUsage(client.db, {
+      accountId,
+      workspaceId,
+      detailsWorkspaceIds: [workspaceId],
+      now: new Date("2026-10-03T12:00:00Z"),
+      query: InsightsUsageQuery.parse({ range: "month", provider: "debit-clock" }),
+    }),
+  );
+  expect(late.totals).toMatchObject({ calls: 0, chargedMicros: 17 });
+  await fixture.admin`delete from credit_ledger_entries where account_id=${accountId} and source_id=${`${turn}:${source}`}`;
+  await fixture.admin`delete from model_call_facts where account_id=${accountId} and turn_id=${turn} and source_key=${source}`;
 });
 
 test("impossible calendar cursors are rejected before PostgreSQL without normalizing days", async () => {

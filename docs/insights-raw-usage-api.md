@@ -33,8 +33,15 @@ Call details are visible-only, with filtering before cursor and limit.
 Charged amounts come only from negative `model_usage_debit` / `model_response`
 credit-ledger entries, matched by `turnId:sourceKey`. Requested fact prices are
 not actual debits. Unmatched workspace/account charges retain their money in
-service buckets with zero calls/tokens and no fabricated model attribution.
+restricted buckets with zero calls/tokens and no fabricated model attribution.
 Late ledger/fact updates are read immediately in this raw checkpoint.
+Usage totals follow each debit's ledger `occurredAt` in the selected period;
+call details follow the fact's `occurredAt` and show lifetime debits linked to
+that call, including a later clipped debit. These are different clocks: summing
+call rows is not period-ledger reconciliation. No requested price is substituted
+and a delayed debit is retained in its actual period even without period facts.
+Cursor timestamps are always UTC with all six PostgreSQL fractional digits,
+independent of the database connection timezone.
 
 Captured class annotations must conserve the recorded provider estimate. NULL
 telemetry is not zero, including cache-write telemetry. This interim checkpoint
@@ -53,3 +60,13 @@ both scopes, all ranges/groupings, clipped/orphan debit conservation, strict
 privacy/authority ceilings, class snapshots, microsecond cursors, exact UTC
 midnight, grants, capability cleanup and runtime posture. Daily-rollup
 bootstrap/maintenance tests are retained in the separate rollup branch.
+
+Serving staging API `2a5ab6f512a05bf28afce38ac4259dea861d3669` is also
+tested before/after this migration against the **complete** current catalog,
+with both old and current provisioners. Its pre-existing readiness blockers
+from main's Claude pool tables (0598), selected-key table (0600) and Slack
+rate-limit DML (0597) remain identical; 0602 adds no violations. The old
+provisioner removes newer required grants, so current-role provisioning must
+be restored at cutover. This is not a claim that the serving old binary is
+ready on the combined main schema. Frozen pre-0602 (3cc26b5) and current
+runtime/provisioner readiness pass without exclusions or widened grants.
