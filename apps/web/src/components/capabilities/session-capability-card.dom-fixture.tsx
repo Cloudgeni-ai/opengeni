@@ -100,7 +100,15 @@ const context = {
   },
   workspaceCapabilityCatalog: [catalogItem],
   githubStatus: null as { status: string } | null,
+  githubRepos: [],
+  githubCatalogReady: true,
+  githubStatusFailed: false,
+  repoBusy: false,
+  personalGitHubBusy: false,
   refreshGitHub,
+  refreshPersonalGitHub: async () => {},
+  captureWorkspaceInvocation: () => ({ revision: 1 }),
+  workspaces: [],
   refreshWorkspaceMcpServers: async () => {},
   accessContext: {
     workspaceGrants: [{ workspaceId: "workspace", permissions: ["connections:read"] }],
@@ -340,6 +348,14 @@ describe("conversation connection card", () => {
     name: "GitHub App",
     providerDomain: "github.com",
   };
+  const allowGitHub = () => {
+    context.accessContext.workspaceGrants = [
+      {
+        workspaceId: "workspace",
+        permissions: ["connections:read", "github:use", "sessions:control"],
+      },
+    ];
+  };
   const githubNotice = {
     ...item,
     capability: {
@@ -351,6 +367,7 @@ describe("conversation connection card", () => {
   } as AuthNeededItem;
 
   test("GitHub's bundled logo and verified binding persist in the conversation card", async () => {
+    allowGitHub();
     context.githubStatus = { status: "bound" };
     const h = await render(false, githubItem, githubItem, false, "workspace", githubNotice);
     try {
@@ -367,6 +384,7 @@ describe("conversation connection card", () => {
   });
 
   test("a returning GitHub binding refreshes the existing card, including later disconnection", async () => {
+    allowGitHub();
     context.githubStatus = { status: "unbound" };
     const h = await render(false, githubItem, githubItem, false, "workspace", githubNotice);
     try {
@@ -384,6 +402,7 @@ describe("conversation connection card", () => {
   });
 
   test("GitHub starts on one click, visibly waits, ignores a second click, and confirms a binding", async () => {
+    allowGitHub();
     context.githubStatus = null;
     getGitHubApp.mockClear();
     refreshGitHub.mockClear();
@@ -417,6 +436,7 @@ describe("conversation connection card", () => {
   });
 
   test("a BFCache return unlocks GitHub and ignores an old pending status response", async () => {
+    allowGitHub();
     context.githubStatus = null;
     refreshGitHub.mockClear();
     let resolveOldStatus!: (value: Awaited<ReturnType<typeof getGitHubApp>>) => void;
@@ -452,6 +472,7 @@ describe("conversation connection card", () => {
   });
 
   test("GitHub's failed start offers a retry in the existing dialog", async () => {
+    allowGitHub();
     getGitHubApp.mockImplementationOnce(async () => {
       throw new Error("Temporary status failure");
     });

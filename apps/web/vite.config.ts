@@ -268,8 +268,11 @@ export default defineConfig({
               // helper with the lazy settings page; keep it here so the
               // settings merge cannot fold it in beside payment and identity
               // glyphs and make that chunk a direct-session dependency.
+              // List sort arrows are shared by the direct session graph and
+              // the lazy conversation cards' repository list; keep them here
+              // instead of in their own tiny direct-session chunk.
               name: "session-shared-primitives",
-              test: /(?:packages[\\/]contracts[\\/]src[\\/](?:session-titles|session-final-reply)\.ts|packages[\\/]sdk[\\/]src[\\/]transcription\.ts|apps[\\/]web[\\/]src[\\/]lib[\\/](?:format|machine-selectability)\.ts|apps[\\/]web[\\/]src[\\/]components[\\/]personal-workspace-badge\.tsx|packages[\\/]react[\\/]src[\\/](?:hooks[\\/]use-machines|workstream-control-event)\.ts|lucide-react[\\/]dist[\\/]esm[\\/]icons[\\/](?:calendar-clock|chevron-up|gauge|git-branch|menu|message-square-text|plus|rotate-ccw|rotate-cw|save|server)\.mjs)$/,
+              test: /(?:packages[\\/]contracts[\\/]src[\\/](?:session-titles|session-final-reply)\.ts|packages[\\/]sdk[\\/]src[\\/]transcription\.ts|apps[\\/]web[\\/]src[\\/]lib[\\/](?:format|machine-selectability)\.ts|apps[\\/]web[\\/]src[\\/]components[\\/]personal-workspace-badge\.tsx|packages[\\/]react[\\/]src[\\/](?:hooks[\\/]use-machines|workstream-control-event)\.ts|lucide-react[\\/]dist[\\/]esm[\\/]icons[\\/](?:arrow-down|arrow-up|calendar-clock|chevron-up|gauge|git-branch|menu|message-square-text|plus|rotate-ccw|rotate-cw|save|server)\.mjs)$/,
               includeDependenciesRecursively: false,
               priority: 16,
             },

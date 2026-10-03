@@ -760,6 +760,11 @@ connection. API-key values go only to the protected connection API, never into
 the event or model-visible tool result. Provider-specific prerequisites retain
 their existing protected setup paths and permission checks.
 
+The GitHub App card is the one card that can also add something to the chat:
+after the workspace binding exists it lists the shared repositories, and **Use**
+sends an ordinary human message carrying the composer picker's repository
+resource through the same Send endpoint and validation. See [GitHub App workspace bindings](github-app.md#using-a-repository-from-the-conversation-card).
+
 Reviewed library Skills install for the workspace. Their source/version review
 is available in the setup dialog; personal and conversation-only library
 installation are not supported by this path. Completing setup makes the
