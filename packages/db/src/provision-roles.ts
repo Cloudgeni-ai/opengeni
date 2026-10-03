@@ -2162,6 +2162,18 @@ BEGIN
       REVOKE ALL ON TABLE opengeni_private.organization_usage_read_capabilities FROM PUBLIC;
       REVOKE ALL ON FUNCTION opengeni_private.organization_usage_summary(uuid,timestamptz,timestamptz,text,uuid,boolean) FROM PUBLIC;
     END IF;
+    IF to_regprocedure('opengeni_private.organization_model_usage_summary(uuid,timestamptz,timestamptz,uuid)') IS NOT NULL THEN
+      REVOKE ALL ON FUNCTION opengeni_private.organization_model_usage_summary(uuid,timestamptz,timestamptz,uuid) FROM PUBLIC;
+    END IF;
+    IF to_regprocedure('opengeni_private.visible_workspace_insights_model_fact_rows(uuid,timestamptz,timestamptz,text,text,uuid,uuid)') IS NOT NULL THEN
+      REVOKE ALL ON FUNCTION opengeni_private.visible_workspace_insights_model_fact_rows(uuid,timestamptz,timestamptz,text,text,uuid,uuid) FROM PUBLIC;
+    END IF;
+    IF to_regprocedure('opengeni_private.complete_workspace_insights_usage_projection(uuid,timestamptz,timestamptz,text[])') IS NOT NULL THEN
+      REVOKE ALL ON FUNCTION opengeni_private.complete_workspace_insights_usage_projection(uuid,timestamptz,timestamptz,text[]) FROM PUBLIC;
+    END IF;
+    IF to_regprocedure('opengeni_private.workspace_insights_amount_fact_rows(uuid,timestamptz,timestamptz,text,text,uuid,uuid)') IS NOT NULL THEN
+      REVOKE ALL ON FUNCTION opengeni_private.workspace_insights_amount_fact_rows(uuid,timestamptz,timestamptz,text,text,uuid,uuid) FROM PUBLIC;
+    END IF;
     IF to_regclass('opengeni_private.usage_allowance_capabilities') IS NOT NULL THEN
       EXECUTE format('REVOKE ALL ON TABLE opengeni_private.usage_allowance_capabilities FROM %I', ${literal(role)});
       EXECUTE format('REVOKE ALL (backend_pid,transaction_id,data_schema,account_id,workspace_id) ON TABLE opengeni_private.usage_allowance_capabilities FROM %I', ${literal(role)});
@@ -2194,6 +2206,13 @@ BEGIN
       REVOKE ALL ON TABLE opengeni_private.scheduled_slack_bot_messages FROM PUBLIC;
       REVOKE ALL ON FUNCTION opengeni_private.prepare_scheduled_slack_bot_message(uuid,uuid,uuid,uuid,uuid,integer,text,text,text) FROM PUBLIC;
       REVOKE ALL ON FUNCTION opengeni_private.read_scheduled_slack_bot_message(uuid,uuid,uuid,uuid) FROM PUBLIC;
+    END IF;
+    IF to_regclass('opengeni_private.organization_signup_use_cases') IS NOT NULL THEN
+      -- A signup answer is reachable only through its record capability, so a
+      -- stored answer can be neither rewritten nor read for another tenant.
+      EXECUTE format('REVOKE ALL ON TABLE opengeni_private.organization_signup_use_cases FROM %I', ${literal(role)});
+      REVOKE ALL ON TABLE opengeni_private.organization_signup_use_cases FROM PUBLIC;
+      REVOKE ALL ON FUNCTION opengeni_private.record_organization_signup_use_case(uuid,text,text) FROM PUBLIC;
     END IF;
     FOREACH routine_signature IN ARRAY ARRAY[
       'read_sender_connection(uuid,uuid,uuid,text)',

@@ -36,6 +36,7 @@ import {
   type RefObject,
 } from "react";
 import { argHint, defaultCommands } from "../commands/registry";
+import { useErrorMessage } from "../lib/error-message";
 import type { Notice, SlashCommand } from "../commands/types";
 import type { ComposerState } from "../hooks/use-composer";
 import { shouldSteerOnKey, shouldSubmitOnKey } from "../hooks/use-composer";
@@ -376,6 +377,7 @@ export function useChatComposerController({
   onPaste,
   messages: messageOverrides,
 }: UseChatComposerControllerOptions) {
+  const formatError = useErrorMessage();
   const messages = useMemo(
     () => ({ ...defaultChatComposerMessages, ...messageOverrides }),
     [messageOverrides],
@@ -665,7 +667,10 @@ export function useChatComposerController({
           tone: "error" as const,
           message: /control changed|paused while/i.test(delivery.error.message)
             ? messages.controlChangedError
-            : composerSubmissionErrorMessage(delivery.error) || messages.sendFailedError,
+            : formatError(
+                delivery.error,
+                composerSubmissionErrorMessage(delivery.error) || messages.sendFailedError,
+              ),
         }
       : null);
   useEffect(() => {

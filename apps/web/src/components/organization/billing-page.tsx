@@ -10,7 +10,9 @@ import { ErrorMessage } from "@/components/ui/error-message";
 import { TextInput } from "@/components/ui/field";
 import { Section, SectionStack } from "@/components/ui/section";
 import { SettingRow, SettingRowGroup } from "@/components/ui/setting-row";
+import { CouponRedeem } from "@/components/credits/coupon-redeem";
 import { useAppContext } from "@/context";
+import { billingCheckoutReturnUrl } from "@/lib/credit-checkout";
 import { analyticsAction } from "@/lib/analytics-actions";
 import {
   apiErrorAdvice,
@@ -30,8 +32,14 @@ import {
   type OrganizationAdminOperationSlot,
 } from "@/lib/organization-admin";
 import type { BillingEntitlementsResponse, BillingSummary } from "@/types";
+import type { BillingCheckoutStatus } from "@opengeni/sdk";
 
 // Budgets load only on this page: they never join the session or rail graphs.
+const CreditsCelebrationDialog = lazy(() =>
+  import("@/components/credits/checkout-credits-celebration").then((module) => ({
+    default: module.CreditsCelebrationDialog,
+  })),
+);
 const WorkspaceBudgetsSection = lazy(() =>
   import("@/components/usage/workspace-budgets-section").then((module) => ({
     default: module.WorkspaceBudgetsSection,
@@ -108,6 +116,8 @@ function BillingOverview({
   const [entitlementsError, setEntitlementsError] = useState<Error | null>(null);
   const [topupAmount, setTopupAmount] = useState("25.00");
   const [busy, setBusy] = useState(false);
+  // A coupon just redeemed here, celebrated with its real amount.
+  const [redeemed, setRedeemed] = useState<BillingCheckoutStatus | null>(null);
   const [busyOwnerKey, setBusyOwnerKey] = useState("");
   const identityRef = useRef<OrganizationAdminIdentity | null>(identity);
   identityRef.current = identity;
@@ -216,8 +226,8 @@ function BillingOverview({
       const session = await client.createBillingCheckout({
         amountUsd,
         ...(accountId ? { accountId } : {}),
-        successUrl: `${window.location.origin}/workspaces/${workspaceId}/organization?section=billing&checkout=success`,
-        cancelUrl: `${window.location.origin}/workspaces/${workspaceId}/organization?section=billing&checkout=cancelled`,
+        successUrl: billingCheckoutReturnUrl(window.location.origin, workspaceId, "success"),
+        cancelUrl: billingCheckoutReturnUrl(window.location.origin, workspaceId, "cancelled"),
       });
       if (!ownsBillingOperation(operation)) return;
       window.location.assign(session.url);
@@ -258,6 +268,17 @@ function BillingOverview({
   const stripe = visibleBilling?.mode === "stripe";
   return (
     <SectionStack>
+      {redeemed ? (
+        <Suspense fallback={null}>
+          <CreditsCelebrationDialog
+            status={redeemed}
+            open
+            onOpenChange={(open) => {
+              if (!open) setRedeemed(null);
+            }}
+          />
+        </Suspense>
+      ) : null}
       <section aria-label="Credits and payments" className="min-w-0">
         <Section title="Credits">
           <div className="mt-1 flex min-w-0 flex-col gap-4">
@@ -280,7 +301,7 @@ function BillingOverview({
               <SettingRowGroup>
                 <SettingRow
                   label="Add credits"
-                  description="Minimum $5.00. Enter a gift code in Stripe Checkout. You receive the selected credit amount, including when the coupon covers the full price."
+                  description="Minimum $5.00. You can also enter a promotion code in Stripe Checkout."
                   controlWidth="auto"
                   control={
                     <div className="flex items-center gap-2">
@@ -316,6 +337,26 @@ function BillingOverview({
                     </div>
                   }
                 />
+                {accountId ? (
+                  <SettingRow
+                    label="Redeem a coupon"
+                    description="A fixed-amount code adds exactly its value. Stripe opens in a new tab with the code applied."
+                    controlWidth="auto"
+                    control={
+                      <CouponRedeem
+                        variant="inline"
+                        client={client}
+                        accountId={accountId}
+                        workspaceId={workspaceId}
+                        disabled={visibleBusy}
+                        onGranted={(status) => {
+                          setRedeemed(status);
+                          void refreshBilling();
+                        }}
+                      />
+                    }
+                  />
+                ) : null}
                 <SettingRow
                   label="Invoices and payment details"
                   controlWidth="auto"

@@ -608,6 +608,9 @@ makes that change explicit.
 Computer frames fit the dock while preserving their proportions. Resizing or
 reopening the dock refits the visible image without changing capture resolution
 or the coordinates sent to the computer.
+Desktop opens a whole screen by default. Multiple screens use a compact screen
+selector; app controls and window views are available from **Advanced**. Explicit
+view choices survive refreshes while the target remains available.
 
 Desktop IME candidates and their selection keys stay local; only committed text is sent.
 
@@ -1273,6 +1276,11 @@ can translate its search, current-selection, empty-result, attachment-warning, a
 thinking labels through `messages`, and override payment descriptions through
 `messages.billingHints`.
 
+The stock deployment-provided group is labeled **Models**, with a generic model
+icon. It can contain both credit-backed and free models; the **Free** badge
+depends on the model's explicit cost, not its group. Genuine external-provider
+and subscription identities retain their own labels and marks.
+
 Hosts can rebrand the full picker without replacing its interaction logic:
 
 ```tsx
@@ -1300,6 +1308,29 @@ This is presentation only: model IDs, billing, ordering, availability and callba
 are unchanged. The type `ModelPolicyPickerGroupPresentation` is exported from
 both `@opengeni/react` and `@opengeni/react/composer`. The native `ModelPicker`
 is a separate control; this API targets the full `ModelPolicyPicker` shown above.
+
+The complete conversation uses this same neutral picker. Customize its appearance
+without replacing composer controls through `SessionConversation.modelPickerProps`,
+or through `OpenGeniChat.conversationProps`:
+
+```tsx
+<OpenGeniChat
+  client={client}
+  workspaceId={workspaceId}
+  conversationProps={{
+    modelPickerProps: {
+      groupPresentation: {
+        opengeni_credits: { label: "Acme Assist", icon: <AcmeMark aria-hidden="true" /> },
+      },
+      messages: { label: "Choose a model" },
+    },
+  }}
+/>
+```
+
+`modelPickerProps` accepts only `groupPresentation` and `messages`; it does not
+enable a hidden picker or change policy, model availability or callbacks. Keep
+model-picker visibility controlled by `modelPicker` and the client configuration.
 
 For a rendered example, open the composer-responsive demo with `?branding=host`.
 

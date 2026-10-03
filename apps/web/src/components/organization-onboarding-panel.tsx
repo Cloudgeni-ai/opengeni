@@ -22,6 +22,11 @@ import {
   ModelAccessOnboardingPanel,
   type IncludedOnboardingModel,
 } from "@/components/model-access-onboarding";
+import {
+  DeveloperSetupStep,
+  type OnboardingDestination,
+} from "@/components/onboarding/developer-setup-step";
+import { OnboardingUseCaseStep } from "@/components/onboarding/use-case-step";
 import { Button } from "@/components/ui/button";
 import { TechnicalDetails } from "@/components/ui/error-message";
 import { Input } from "@/components/ui/input";
@@ -33,6 +38,7 @@ import {
 } from "@/lib/api-error";
 import { includedDefaultModel } from "@/lib/model-access-onboarding";
 import { onboardingJourney, useOnboardingStep } from "@/lib/onboarding-analytics";
+import type { OnboardingUseCase } from "@/lib/onboarding-use-case";
 import {
   loadModelAccessOnboarding,
   type StartingCreditsOnboarding,
@@ -59,8 +65,10 @@ export function OrganizationOnboardingPanel({
   onUseInvitedAccount,
   onSignOut,
   onUseAnotherAccount,
+  initialUseCase,
 }: {
-  onComplete: () => void;
+  /** Leaves onboarding; a destination opens that chat instead of the home page. */
+  onComplete: (destination?: OnboardingDestination) => void;
   client?: OpenGeniBrowserClient;
   billingMode?: "disabled" | "stripe";
   codexEnabled?: boolean;
@@ -81,6 +89,11 @@ export function OrganizationOnboardingPanel({
   onSignOut?: () => Promise<void> | void;
   /** Adds or selects a different browser account without signing this one out. */
   onUseAnotherAccount?: () => void;
+  /**
+   * Skip the "How do you want to use Opengeni?" question with this answer
+   * (previews and embedders). Omitted asks it before the organization name.
+   */
+  initialUseCase?: OnboardingUseCase;
 }) {
   const [state, setState] = useState<SelfServiceOrganizationOnboardingState | null>(
     previewState ?? null,
@@ -100,6 +113,9 @@ export function OrganizationOnboardingPanel({
     organizationId: string;
     personalWorkspaceId: string;
   } | null>(null);
+  const [useCase, setUseCase] = useState<OnboardingUseCase | null>(initialUseCase ?? null);
+  // "Add AI agents to my product" continues past the model step to developer setup.
+  const [modelStepDone, setModelStepDone] = useState(false);
   const operationId = useRef(crypto.randomUUID());
   const invitationOperationIds = useRef(new Map<string, string>());
   // An explicit `includedModel` or `startingCredits` (previews, embedders) is
@@ -130,7 +146,9 @@ export function OrganizationOnboardingPanel({
       ? null
       : state === "invitation_pending" || invitation
         ? "invitation"
-        : "organization_name",
+        : useCase === null
+          ? "use_case"
+          : "organization_name",
     undefined,
     !previewState,
   );
@@ -266,6 +284,7 @@ export function OrganizationOnboardingPanel({
         const created = await completeSelfServiceOrganizationSetup({
           organizationName: normalizedName,
           operationId: operationId.current,
+          ...(useCase ? { useCase } : {}),
         });
         onboardingJourney().completed("organization_name", "created");
         setCreatedSetup({
@@ -458,6 +477,16 @@ export function OrganizationOnboardingPanel({
       includedModel !== undefined ? includedModel : (live?.includedModel ?? null);
     const effectiveStartingCredits =
       startingCredits !== undefined ? startingCredits : (live?.startingCredits ?? null);
+    const developerSetup = useCase === "embed";
+    if (developerSetup && modelStepDone)
+      return frame(
+        <DeveloperSetupStep
+          client={client}
+          organizationId={createdSetup.organizationId}
+          organizationName={organizationName.trim() || undefined}
+          onComplete={onComplete}
+        />,
+      );
     return frame(
       <ModelAccessOnboardingPanel
         client={client}
@@ -469,7 +498,8 @@ export function OrganizationOnboardingPanel({
         supergrokEnabled={supergrokEnabled}
         includedModel={effectiveIncludedModel}
         startingCredits={effectiveStartingCredits}
-        onComplete={onComplete}
+        continueToNextStep={developerSetup}
+        onComplete={developerSetup ? () => setModelStepDone(true) : () => onComplete()}
       />,
     );
   }
@@ -488,6 +518,17 @@ export function OrganizationOnboardingPanel({
           </p>
         </div>
       </section>,
+    );
+  }
+
+  if (useCase === null) {
+    return frame(
+      <OnboardingUseCaseStep
+        onChoose={(choice) => {
+          if (!previewState) onboardingJourney().completed("use_case", choice);
+          setUseCase(choice);
+        }}
+      />,
     );
   }
 
@@ -529,6 +570,17 @@ export function OrganizationOnboardingPanel({
           )}
           Create organization
         </Button>
+        {initialUseCase === undefined ? (
+          <Button
+            type="button"
+            variant="ghost"
+            className="mt-2 w-full text-fg-muted"
+            disabled={busy}
+            onClick={() => setUseCase(null)}
+          >
+            Back
+          </Button>
+        ) : null}
       </form>
     </section>,
   );

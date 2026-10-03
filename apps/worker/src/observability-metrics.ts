@@ -1497,6 +1497,7 @@ export function recordExpiredDrainingSandboxLeaseGauges(
 
 export const RETAINED_PROCESS_RECONCILIATION_OUTCOMES = [
   "claim_failed",
+  "background_recovered",
   "proof_exited",
   "proof_lost",
   "proof_checkpoint_failed",

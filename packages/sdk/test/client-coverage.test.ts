@@ -2440,6 +2440,8 @@ describe("OpenGeniClient billing", () => {
       nextWorkspaceCursor: null,
       personalWorkspaces: [],
       personalWorkspaceCount: 0,
+      privateChats: [],
+      privateChatsTruncated: false,
     };
     const { client, requests } = makeClient(() => jsonResponse(response));
     expect(
@@ -2462,6 +2464,15 @@ describe("OpenGeniClient billing", () => {
     expect(new URL(requests[1]!.url).pathname).toBe("/v1/billing/usage-workspaces");
     expect(new URL(requests[1]!.url).searchParams.get("afterWorkspaceId")).toBe(WORKSPACE_ID);
     expect(new URL(requests[1]!.url).searchParams.get("until")).toBe(response.until);
+    await client.getOrganizationModelUsage({
+      accountId: "acc-1",
+      period: "week",
+      afterWorkspaceId: WORKSPACE_ID,
+    });
+    expect(requests).toHaveLength(3);
+    expect(new URL(requests[2]!.url).pathname).toBe("/v1/billing/usage-models");
+    expect(new URL(requests[2]!.url).searchParams.get("period")).toBe("week");
+    expect(new URL(requests[2]!.url).searchParams.get("afterWorkspaceId")).toBe(WORKSPACE_ID);
   });
 
   test("billing reads pass account/workspace selectors as query params", async () => {
@@ -2484,6 +2495,7 @@ describe("OpenGeniClient billing", () => {
       accountId: "acc-1",
       returnUrl: "https://app.opengeni.ai/billing",
     });
+    await client.getBillingCheckout("cs_test_1", { accountId: "acc-1" });
     expect(
       requests.map(
         (request) =>
@@ -2495,6 +2507,7 @@ describe("OpenGeniClient billing", () => {
       "GET /v1/billing/entitlements",
       "POST /v1/billing/checkout",
       "POST /v1/billing/portal",
+      "GET /v1/billing/checkout/cs_test_1?accountId=acc-1",
     ]);
     expect(JSON.parse(requests[3]!.body!)).toEqual({ amountUsd: 25 });
     expect(JSON.parse(requests[4]!.body!)).toEqual({

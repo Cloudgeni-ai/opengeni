@@ -2,6 +2,9 @@ import { describe, expect, test } from "bun:test";
 import {
   COMPOSER_MODEL_UNAVAILABLE_MESSAGE,
   COMPOSER_PAYMENT_REQUIRED_MESSAGE,
+  ComposerReconciliationRequiredError,
+  ComposerStateError,
+  ComposerWorkspaceControlUnavailableError,
   CREDIT_EXHAUSTION_MESSAGE,
   composerSubmissionErrorMessage,
   composerSubmissionCanRetry,
@@ -33,7 +36,7 @@ describe("failure presentation", () => {
       });
       const before = JSON.stringify(payload);
       expect(presentFailure(payload)).toEqual({
-        reason: "OpenGeni encountered a database error.",
+        reason: "The service encountered a database error.",
         safetyRefusal: false,
       });
       expect(JSON.stringify(payload)).toBe(before);
@@ -227,11 +230,50 @@ describe("composerSubmissionErrorMessage", () => {
     expect(composerSubmissionCanRetry(other)).toBe(true);
   });
 
-  test("passes unrelated submission errors through", () => {
+  test("keeps unrelated submission diagnostics out of default UI copy", () => {
     expect(composerSubmissionErrorMessage(new Error("network unavailable"))).toBe(
-      "network unavailable",
+      "The request could not be completed.",
     );
     expect(composerSubmissionCanRetry(new Error("network unavailable"))).toBe(true);
+  });
+
+  test("uncertain delivery takes precedence over model-unavailable details", () => {
+    const error = new OpenGeniApiError(
+      422,
+      JSON.stringify({
+        error: {
+          code: "validation_failed",
+          message: "model is not available: retired-model",
+          details: { code: "model_unavailable" },
+        },
+      }),
+      { outcomeUnknown: true, correlationId: "uncertain-model" },
+    );
+    expect(error.details).toEqual({ code: "model_unavailable" });
+    expect(composerSubmissionErrorMessage(error)).toContain("Check its status before retrying");
+    expect(composerSubmissionErrorMessage(error)).toContain("Reference: uncertain-model.");
+    expect(composerSubmissionErrorMessage(error)).not.toContain("Choose another model");
+  });
+
+  test("preserves composer-owned validation and safe reconciliation guidance", () => {
+    expect(
+      composerSubmissionErrorMessage(
+        new ComposerStateError("A message can include at most 12 timeline annotations."),
+      ),
+    ).toContain("at most 12");
+    expect(composerSubmissionErrorMessage(new ComposerReconciliationRequiredError())).toContain(
+      "cannot safely retry",
+    );
+    expect(composerSubmissionErrorMessage(new ComposerReconciliationRequiredError())).toContain(
+      "reconcile the session",
+    );
+    expect(new ComposerReconciliationRequiredError().message).toContain("Opengeni");
+    expect(
+      composerSubmissionErrorMessage(new ComposerWorkspaceControlUnavailableError()),
+    ).toContain("Ask your administrator");
+    expect(new ComposerWorkspaceControlUnavailableError().message).toContain(
+      "setWorkspaceInferenceState",
+    );
   });
 
   test("recognizes retained legacy credit errors without their API object", () => {

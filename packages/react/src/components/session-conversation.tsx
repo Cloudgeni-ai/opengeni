@@ -12,7 +12,7 @@ import {
 import type { SiteSnapshotClient } from "./artifacts/chat-interactive-block";
 import { useOpenGeni, type ClientOverride } from "../session-context";
 import { useWorkspaceModelCatalog } from "../hooks/use-available-models";
-import { ModelPolicyPicker } from "./model-policy-picker";
+import { ModelPolicyPicker, type ModelPolicyPickerProps } from "./model-policy-picker";
 import { useSessionEvents } from "../hooks/use-session-events";
 import { useSession } from "../hooks/use-session";
 import { useTurnQueue } from "../hooks/use-turn-queue";
@@ -37,6 +37,7 @@ import {
 import type { UserMessageDisclosureLabels } from "./user-message-body";
 import { conversationTimeline } from "../conversation-timeline";
 import { cn } from "../lib/cn";
+import { useErrorMessage } from "../lib/error-message";
 
 export type SessionConversationProps = ClientOverride & {
   sessionId: string;
@@ -80,6 +81,8 @@ export type SessionConversationProps = ClientOverride & {
    * reports `modelSelection: false` (a host proxy that fixes the model policy).
    */
   modelPicker?: boolean | undefined;
+  /** Model-picker appearance only; visibility, policy and delivery remain owned here. */
+  modelPickerProps?: Pick<ModelPolicyPickerProps, "groupPresentation" | "messages"> | undefined;
   /** Localized actions for already-sent user-message disclosure. */
   userMessageDisclosureLabels?: UserMessageDisclosureLabels | undefined;
   loadSkillReview?: HumanInputSurfaceProps["loadSkillReview"];
@@ -110,6 +113,7 @@ function Conversation({
   allowanceExhaustedLabels,
   attachments: attachmentsRequested = true,
   modelPicker,
+  modelPickerProps,
   userMessageDisclosureLabels,
   loadSkillReview,
   client,
@@ -120,6 +124,7 @@ function Conversation({
 }: SessionConversationProps) {
   const scope = { client, workspaceId };
   const context = useOpenGeni(scope);
+  const formatError = useErrorMessage();
   const config = useClientConfigFlags(context.client);
   const showModelPicker = modelPicker ?? config.modelSelection;
   const catalog = useWorkspaceModelCatalog({
@@ -203,7 +208,7 @@ function Conversation({
       style={{ height }}
       data-og-conversation=""
     >
-      {error && <p role="alert">{error.message}</p>}
+      {error && <p role="alert">{formatError(error)}</p>}
       <MessageTimeline
         renderMessageText={renderMessageText}
         resolveLink={links}
@@ -265,7 +270,7 @@ function Conversation({
                 await human.respond(id, response);
               }}
               respondingRequestId={human.respondingRequestId}
-              error={human.mutationError?.message}
+              error={human.mutationError ? formatError(human.mutationError) : null}
               autoFocus={false}
             />
             {terminal ? (
@@ -291,6 +296,8 @@ function Conversation({
                 composerProps?.controlsStart ??
                 (showModelPicker && composer.policy && (
                   <ModelPolicyPicker
+                    groupPresentation={modelPickerProps?.groupPresentation}
+                    messages={modelPickerProps?.messages}
                     rows={catalog.rows}
                     model={composer.policy.model}
                     effort={composer.policy.reasoningEffort}

@@ -19,6 +19,7 @@ export type BundledSkillId =
   | "builtin:document-parsing"
   | "builtin:opengeni-skills"
   | "builtin:opengeni-projects"
+  | "builtin:opengeni-schedules"
   | "builtin:opengeni-documents"
   | "builtin:opengeni-spreadsheets"
   | "builtin:opengeni-presentations"
@@ -3721,6 +3722,17 @@ export type ClaudeUsageWindow = {
   resetsAt: string | null;
   status: "allowed" | "allowed_warning" | "rejected" | null;
   observedAt: string;
+  source?: "response_headers" | "provider" | undefined;
+};
+export type ClaudeUsageRequestStatus = {
+  status: ClaudeUsageWindow["status"];
+  resetsAt: string | null;
+  representativeClaim: ClaudeUsageWindow["id"] | null;
+  overageStatus: ClaudeUsageWindow["status"];
+  overageResetsAt: string | null;
+  upstreamModelId: string | null;
+  observedAt: string;
+  source?: "response_headers" | "provider" | undefined;
 };
 export type ClaudeSubscriptionUsage = {
   connected: boolean;
@@ -3730,6 +3742,8 @@ export type ClaudeSubscriptionUsage = {
   source: "response_headers" | "provider" | null;
   refreshStatus: "not_checked" | "available" | "scope_required" | "unavailable" | "reconnect";
   refreshCheckedAt: string | null;
+  requestStatus?: ClaudeUsageRequestStatus | null | undefined;
+  requestRestrictions?: ClaudeUsageRequestStatus[] | undefined;
 };
 
 export type OrganizationModelProviderConnection = {
@@ -8079,6 +8093,11 @@ export type InsightsSeriesPoint = {
   calls: number;
 };
 
+export type InsightsScope = {
+  rootSessionId: string | null;
+  sessionId: string | null;
+};
+
 export type InsightsDepthBucket = {
   depth: number;
   sessions: number;
@@ -8103,6 +8122,20 @@ export type InsightsSpendDriver = {
   pctOfCreditUsd: number;
   pctOfTokens: number;
   deltaUsdVsPrior: number;
+};
+
+export type InsightsProjectRow = {
+  id: string;
+  kind: "project" | "other" | "unfiled" | "unavailable";
+  label: string;
+  projects: number;
+  rootSessions: number;
+  calls: number;
+  creditUsd: number;
+  estimatedProviderUsd: number;
+  estimatedProviderCostKnownCalls: number;
+  tokens: number;
+  cacheHitPct: number | null;
 };
 
 export type InsightsWarmGroupRow = {
@@ -8212,6 +8245,18 @@ export type WorkspaceInsightsSnapshot = {
   series: InsightsSeriesPoint[];
   depth: InsightsDepthBucket[];
   drivers: InsightsSpendDriver[];
+  projects: InsightsProjectRow[];
+  privateChats: {
+    ownerKey: string;
+    name: string | null;
+    you: boolean;
+    calls: number;
+    tokens: number;
+    creditUsd: number;
+    estimatedProviderUsd: number;
+    estimatedProviderCostKnownCalls: number;
+  }[];
+  privateChatsTruncated: boolean;
   schedules: InsightsScheduleRow[];
   recentCalls: InsightsModelCallRow[];
   promptContributions: InsightsPromptContributions;
@@ -8252,6 +8297,13 @@ export type WorkspaceInsightsSnapshot = {
   agentRunsUsed: number;
   agentRunCap: number | null;
   modelFilterActive: boolean;
+  dataThrough: string | null;
+  cacheHitPct: number;
+  scope: InsightsScope;
+  driverGroups: number;
+  driversTruncated: boolean;
+  facetsTruncated: boolean;
+  recentCallsTruncated: boolean;
 };
 
 export type WorkspaceInsightsResponse = {
@@ -8266,8 +8318,13 @@ export type BillingEntitlementsResponse = {
 
 export type CreateCheckoutRequest = {
   accountId?: string | undefined;
-  /** USD amount with cent precision (server enforces min/max). */
-  amountUsd: number;
+  /**
+   * USD amount with cent precision (server enforces min/max). Required unless
+   * `promotionCode` is given; a fixed-amount USD code then sets the amount.
+   */
+  amountUsd?: number | undefined;
+  /** A Stripe promotion code to apply up front, as the customer typed it. */
+  promotionCode?: string | undefined;
   successUrl?: string | undefined;
   cancelUrl?: string | undefined;
 };
@@ -8275,6 +8332,22 @@ export type CreateCheckoutRequest = {
 export type CreateCheckoutResponse = {
   checkoutSessionId: string;
   url: string;
+  /** The credits this checkout grants once it completes. */
+  amountUsd?: number | undefined;
+};
+
+/** Where one checkout stands, and whether its credits reached the balance. */
+export type BillingCheckoutStatus = {
+  checkoutSessionId: string;
+  status: "open" | "complete" | "expired";
+  credit: {
+    state: "pending" | "granted";
+    amountMicros: number;
+    currency: "usd";
+    /** True when a coupon covered the whole checkout, so nothing was charged. */
+    free: boolean;
+  };
+  balance: BillingBalance | null;
 };
 
 export type CreateBillingPortalRequest = {

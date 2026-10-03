@@ -69,6 +69,7 @@ import {
   workspaceArchiveCaptureDeadlineElapsed,
   retainedProcessReconciliationProof,
   retainedProcessSettlementIdentity,
+  recoverManagedSessionBackgroundCommand,
   settleClaimedConnectedMachineBackgroundCommand,
   settleSandboxCheckpointArtifactGc,
   rlsContextForWorkspace,
@@ -1485,6 +1486,32 @@ async function reconcileTerminalRetainedProcesses(
       sessionId: process.sessionId,
       processId: process.id,
     };
+    // Recover a yield whose observation failed before normal receipt adoption.
+    // Do this before provider I/O: an unavailable observer must not fence every
+    // subsequent turn. Physical retention and unknown outcome stay unchanged.
+    if (
+      process.ownerActorKind === "turn" &&
+      process.providerBackend === "modal" &&
+      !proof &&
+      !claim.ownerState.startsWith("background_")
+    ) {
+      try {
+        const command = await recoverManagedSessionBackgroundCommand(db, {
+          ...processScope,
+          expected,
+          reconciliationClaimId: claim.claimId,
+        });
+        if (command) {
+          claim.ownerState = `background_${command.state}`;
+          recordRetainedProcessReconciliation(observability, "background_recovered");
+        }
+      } catch (error) {
+        observability.warn("sandbox reaper: retained-command background recovery failed", {
+          processId: process.id,
+          error: error instanceof Error ? error.message : String(error),
+        });
+      }
+    }
     const storedCommandPersistence = retainedProviderCommandPersistence(
       db,
       processScope,

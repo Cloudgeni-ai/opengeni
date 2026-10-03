@@ -52,6 +52,12 @@ An agent retry remains bound to the same calling session and target across
 attempt replacement, while the current attempt must independently remain
 authorized. Replaying an old receipt does not overwrite a newer setting.
 
+`session_create` inherits omitted model and reasoning from the exact calling
+turn, but omitted `latencyMode` always starts a fresh session in `standard`.
+Explicit `fast` or `priority` is honored only when the selected model supports
+it. Sending another agent a message does not change that recipient's latency
+default; keyed creation replay returns the original accepted settings.
+
 This is a future-default change, not a prompt or a resume. Already accepted work
 keeps its frozen policy. Older queued turns cannot undo the choice when they
 start, and scheduled per-occurrence model overrides do not replace these explicit

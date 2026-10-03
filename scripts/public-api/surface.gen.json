@@ -132,6 +132,17 @@
     },
     {
       "method": "GET",
+      "path": "/v1/billing/checkout/:checkoutSessionId",
+      "sdk": [
+        "OpenGeniClient.getBillingCheckout"
+      ],
+      "request": [],
+      "response": [
+        "BillingCheckoutStatus"
+      ]
+    },
+    {
+      "method": "GET",
       "path": "/v1/billing/entitlements",
       "sdk": [
         "OpenGeniClient.getBillingEntitlements"
@@ -160,6 +171,19 @@
       ],
       "request": [],
       "response": []
+    },
+    {
+      "method": "GET",
+      "path": "/v1/billing/usage-models",
+      "sdk": [
+        "OpenGeniClient.getOrganizationModelUsage"
+      ],
+      "request": [
+        "OrganizationUsagePeriod"
+      ],
+      "response": [
+        "OrganizationModelUsage"
+      ]
     },
     {
       "method": "GET",
@@ -8176,7 +8200,7 @@
         "output"
       ],
       "shape": {
-        "$": "enum=[\"\\\"admin\\\"\",\"\\\"artifacts\\\"\",\"\\\"attachments\\\"\",\"\\\"base_behavior\\\"\",\"\\\"connected_machine\\\"\",\"\\\"goals\\\"\",\"\\\"knowledge\\\"\",\"\\\"renderer_markdown\\\"\",\"\\\"repositories\\\"\",\"\\\"rig\\\"\",\"\\\"runtime_mechanics\\\"\",\"\\\"sandbox\\\"\",\"\\\"skills\\\"\",\"\\\"subagents\\\"\",\"\\\"workspace_environment\\\"\"]"
+        "$": "enum=[\"\\\"admin\\\"\",\"\\\"artifacts\\\"\",\"\\\"attachments\\\"\",\"\\\"base_behavior\\\"\",\"\\\"connected_machine\\\"\",\"\\\"goals\\\"\",\"\\\"knowledge\\\"\",\"\\\"media\\\"\",\"\\\"renderer_markdown\\\"\",\"\\\"repositories\\\"\",\"\\\"rig\\\"\",\"\\\"runtime_mechanics\\\"\",\"\\\"sandbox\\\"\",\"\\\"skills\\\"\",\"\\\"subagents\\\"\",\"\\\"workspace_environment\\\"\"]"
       }
     },
     "AgentRenderer": {
@@ -9017,6 +9041,34 @@
         "$.ownerKey": "string!"
       }
     },
+    "BillingBalance": {
+      "io": [
+        "output"
+      ],
+      "shape": {
+        "$": "object",
+        "$.accountId": "string!",
+        "$.balanceMicros": "integer!",
+        "$.currency": "const!=[\"\\\"usd\\\"\"]",
+        "$.updatedAt": "string!"
+      }
+    },
+    "BillingCheckoutStatus": {
+      "io": [
+        "output"
+      ],
+      "shape": {
+        "$": "object",
+        "$.balance": "ref(BillingBalance)! null",
+        "$.checkoutSessionId": "string!",
+        "$.credit": "object!",
+        "$.credit.amountMicros": "integer!",
+        "$.credit.currency": "const!=[\"\\\"usd\\\"\"]",
+        "$.credit.free": "boolean!",
+        "$.credit.state": "enum!=[\"\\\"granted\\\"\",\"\\\"pending\\\"\"]",
+        "$.status": "enum!=[\"\\\"complete\\\"\",\"\\\"expired\\\"\",\"\\\"open\\\"\"]"
+      }
+    },
     "BrowserAction": {
       "io": [
         "input"
@@ -9835,7 +9887,7 @@
         "input"
       ],
       "shape": {
-        "$": "enum=[\"\\\"builtin:document-parsing\\\"\",\"\\\"builtin:opengeni-client\\\"\",\"\\\"builtin:opengeni-documents\\\"\",\"\\\"builtin:opengeni-help\\\"\",\"\\\"builtin:opengeni-presentations\\\"\",\"\\\"builtin:opengeni-projects\\\"\",\"\\\"builtin:opengeni-sites\\\"\",\"\\\"builtin:opengeni-skills\\\"\",\"\\\"builtin:opengeni-spreadsheets\\\"\",\"\\\"builtin:opengeni-video-generation\\\"\",\"\\\"builtin:opengeni-visualize\\\"\"]"
+        "$": "enum=[\"\\\"builtin:document-parsing\\\"\",\"\\\"builtin:opengeni-client\\\"\",\"\\\"builtin:opengeni-documents\\\"\",\"\\\"builtin:opengeni-help\\\"\",\"\\\"builtin:opengeni-presentations\\\"\",\"\\\"builtin:opengeni-projects\\\"\",\"\\\"builtin:opengeni-schedules\\\"\",\"\\\"builtin:opengeni-sites\\\"\",\"\\\"builtin:opengeni-skills\\\"\",\"\\\"builtin:opengeni-spreadsheets\\\"\",\"\\\"builtin:opengeni-video-generation\\\"\",\"\\\"builtin:opengeni-visualize\\\"\"]"
       }
     },
     "CancelExternalWorkspaceMemberGrantRequest": {
@@ -10113,9 +10165,28 @@
         "$.observedAt": "string! null",
         "$.refreshCheckedAt": "string! null",
         "$.refreshStatus": "enum!=[\"\\\"available\\\"\",\"\\\"not_checked\\\"\",\"\\\"reconnect\\\"\",\"\\\"scope_required\\\"\",\"\\\"unavailable\\\"\"]",
+        "$.requestRestrictions": "array?",
+        "$.requestRestrictions[]": "ref(ClaudeUsageRequestStatus)",
+        "$.requestStatus": "ref(ClaudeUsageRequestStatus)? null",
         "$.source": "enum! null=[\"\\\"provider\\\"\",\"\\\"response_headers\\\"\"]",
         "$.windows": "array!",
         "$.windows[]": "ref(ClaudeUsageWindow)"
+      }
+    },
+    "ClaudeUsageRequestStatus": {
+      "io": [
+        "output"
+      ],
+      "shape": {
+        "$": "object",
+        "$.observedAt": "string!",
+        "$.overageResetsAt": "string! null",
+        "$.overageStatus": "enum! null=[\"\\\"allowed\\\"\",\"\\\"allowed_warning\\\"\",\"\\\"rejected\\\"\"]",
+        "$.representativeClaim": "ref(ClaudeUsageWindowId)! null",
+        "$.resetsAt": "string! null",
+        "$.source": "enum?=[\"\\\"provider\\\"\",\"\\\"response_headers\\\"\"]",
+        "$.status": "enum! null=[\"\\\"allowed\\\"\",\"\\\"allowed_warning\\\"\",\"\\\"rejected\\\"\"]",
+        "$.upstreamModelId": "string! null"
       }
     },
     "ClaudeUsageWindow": {
@@ -10127,6 +10198,7 @@
         "$.id": "ref(ClaudeUsageWindowId)!",
         "$.observedAt": "string!",
         "$.resetsAt": "string! null",
+        "$.source": "enum?=[\"\\\"provider\\\"\",\"\\\"response_headers\\\"\"]",
         "$.status": "enum! null=[\"\\\"allowed\\\"\",\"\\\"allowed_warning\\\"\",\"\\\"rejected\\\"\"]",
         "$.usedPercent": "number! null"
       }
@@ -11585,8 +11657,9 @@
       "shape": {
         "$": "object",
         "$.accountId": "string?",
-        "$.amountUsd": "number!",
+        "$.amountUsd": "number?",
         "$.cancelUrl": "string?",
+        "$.promotionCode": "string?",
         "$.successUrl": "string?"
       }
     },
@@ -11596,6 +11669,7 @@
       ],
       "shape": {
         "$": "object",
+        "$.amountUsd": "number?",
         "$.checkoutSessionId": "string!",
         "$.url": "string!"
       }
@@ -14462,6 +14536,25 @@
         "$": "enum=[\"\\\"configured_list_price\\\"\",\"\\\"gateway_reported\\\"\"]"
       }
     },
+    "InsightsProjectRow": {
+      "io": [
+        "output"
+      ],
+      "shape": {
+        "$": "object",
+        "$.cacheHitPct": "integer! null",
+        "$.calls": "integer!",
+        "$.creditUsd": "number!",
+        "$.estimatedProviderCostKnownCalls": "integer!",
+        "$.estimatedProviderUsd": "number!",
+        "$.id": "string!",
+        "$.kind": "enum!=[\"\\\"other\\\"\",\"\\\"project\\\"\",\"\\\"unavailable\\\"\",\"\\\"unfiled\\\"\"]",
+        "$.label": "string!",
+        "$.projects": "integer!",
+        "$.rootSessions": "integer!",
+        "$.tokens": "number!"
+      }
+    },
     "InsightsPromptContributionRow": {
       "io": [
         "output"
@@ -17080,6 +17173,73 @@
         "$": "enum=[\"\\\"anthropic\\\"\",\"\\\"claude_subscription\\\"\",\"\\\"openrouter\\\"\",\"\\\"vercel_gateway\\\"\"]"
       }
     },
+    "OrganizationModelUsage": {
+      "io": [
+        "output"
+      ],
+      "shape": {
+        "$": "object",
+        "$.accountId": "string!",
+        "$.billing": "array!",
+        "$.billing[]": "ref(OrganizationModelUsageTotals)",
+        "$.models": "array!",
+        "$.models[]": "object",
+        "$.models[].model": "string!",
+        "$.models[].provider": "string!",
+        "$.models[].totals": "ref(OrganizationModelUsageTotals)!",
+        "$.modelsTruncated": "boolean!",
+        "$.nextWorkspaceCursor": "string! null",
+        "$.payers": "array!",
+        "$.payers[]": "object",
+        "$.payers[].cacheInputTokens": "string!",
+        "$.payers[].cacheKnownCalls": "string!",
+        "$.payers[].cacheWriteTokens": "string!",
+        "$.payers[].cachedTokens": "string!",
+        "$.payers[].calls": "string!",
+        "$.payers[].creditMicros": "string!",
+        "$.payers[].estimatedProviderKnownCalls": "string!",
+        "$.payers[].estimatedProviderMicros": "string!",
+        "$.payers[].inputTokens": "string!",
+        "$.payers[].outputTokens": "string!",
+        "$.payers[].payer": "enum!=[\"\\\"opengeni_credits\\\"\",\"\\\"own_key\\\"\",\"\\\"subscription\\\"\"]",
+        "$.payers[].tokenKnownCalls": "string!",
+        "$.payers[].totalTokens": "string!",
+        "$.period": "ref(InsightsRange)!",
+        "$.personal": "object!",
+        "$.personal.billing": "array!",
+        "$.personal.billing[]": "ref(OrganizationModelUsageTotals)",
+        "$.personal.workspacesWithUsage": "string!",
+        "$.since": "string!",
+        "$.until": "string!",
+        "$.workspaces": "array!",
+        "$.workspaces[]": "object",
+        "$.workspaces[].billing": "array!",
+        "$.workspaces[].billing[]": "ref(OrganizationModelUsageTotals)",
+        "$.workspaces[].name": "string! null",
+        "$.workspaces[].workspaceId": "string!"
+      }
+    },
+    "OrganizationModelUsageTotals": {
+      "io": [
+        "output"
+      ],
+      "shape": {
+        "$": "object",
+        "$.billingPath": "ref(InsightsBillingPath)!",
+        "$.cacheInputTokens": "string!",
+        "$.cacheKnownCalls": "string!",
+        "$.cacheWriteTokens": "string!",
+        "$.cachedTokens": "string!",
+        "$.calls": "string!",
+        "$.creditMicros": "string!",
+        "$.estimatedProviderKnownCalls": "string!",
+        "$.estimatedProviderMicros": "string!",
+        "$.inputTokens": "string!",
+        "$.outputTokens": "string!",
+        "$.tokenKnownCalls": "string!",
+        "$.totalTokens": "string!"
+      }
+    },
     "OrganizationPrivateSessionSettings": {
       "io": [
         "output"
@@ -17346,6 +17506,14 @@
         "$.personalWorkspaceCount": "integer!",
         "$.personalWorkspaces": "array!",
         "$.personalWorkspaces[]": "ref(OrganizationUsagePersonalWorkspace)",
+        "$.privateChats": "array!",
+        "$.privateChats[]": "object",
+        "$.privateChats[].membershipId": "string! null",
+        "$.privateChats[].name": "string! null",
+        "$.privateChats[].totals": "array!",
+        "$.privateChats[].totals[]": "ref(OrganizationUsageTotal)",
+        "$.privateChats[].workspaceId": "string!",
+        "$.privateChatsTruncated": "boolean!",
         "$.since": "string!",
         "$.totals": "array!",
         "$.totals[]": "ref(OrganizationUsageTotal)",
@@ -23743,20 +23911,25 @@
         "$.avgDepth": "number!",
         "$.billableTokenCap": "integer! null",
         "$.billableTokensUsed": "number!",
+        "$.cacheHitPct": "integer!",
         "$.cacheSeriesLabel": "string!",
         "$.creditUsd": "number!",
+        "$.dataThrough": "string! null",
         "$.deepestDepth": "integer!",
         "$.deepestSessionTitle": "string!",
         "$.depth": "array!",
         "$.depth[]": "ref(InsightsDepthBucket)",
+        "$.driverGroups": "integer!",
         "$.drivers": "array!",
         "$.drivers[]": "ref(InsightsSpendDriver)",
+        "$.driversTruncated": "boolean!",
         "$.equivalentCreditCostKnownCalls": "integer!",
         "$.equivalentCreditUsd": "number!",
         "$.estimatedProviderCostKnownCalls": "integer!",
         "$.estimatedProviderUsd": "number!",
         "$.facets": "array!",
         "$.facets[]": "ref(InsightsModelFacet)",
+        "$.facetsTruncated": "boolean!",
         "$.floor": "array!",
         "$.floor[]": "ref(InsightsFloorSession)",
         "$.generatedAt": "string!",
@@ -23781,6 +23954,19 @@
         "$.priorTotalTokens": "number!",
         "$.priorWarmSeconds": "number!",
         "$.priorWorkspaceCreditUsd": "number!",
+        "$.privateChats": "array!",
+        "$.privateChats[]": "object",
+        "$.privateChats[].calls": "integer!",
+        "$.privateChats[].creditUsd": "number!",
+        "$.privateChats[].estimatedProviderCostKnownCalls": "integer!",
+        "$.privateChats[].estimatedProviderUsd": "number!",
+        "$.privateChats[].name": "string! null",
+        "$.privateChats[].ownerKey": "string!",
+        "$.privateChats[].tokens": "number!",
+        "$.privateChats[].you": "boolean!",
+        "$.privateChatsTruncated": "boolean!",
+        "$.projects": "array!",
+        "$.projects[]": "ref(InsightsProjectRow)",
         "$.promptContributions": "object!",
         "$.promptContributions.coveredCalls": "integer!",
         "$.promptContributions.estimatedTokens": "integer!",
@@ -23792,9 +23978,13 @@
         "$.rangeLabel": "string!",
         "$.recentCalls": "array!",
         "$.recentCalls[]": "ref(InsightsModelCallRow)",
+        "$.recentCallsTruncated": "boolean!",
         "$.rootSessions": "integer!",
         "$.schedules": "array!",
         "$.schedules[]": "ref(InsightsScheduleRow)",
+        "$.scope": "object!",
+        "$.scope.rootSessionId": "string! null",
+        "$.scope.sessionId": "string! null",
         "$.selfhostedEnabled": "boolean!",
         "$.series": "array!",
         "$.series[]": "ref(InsightsSeriesPoint)",
@@ -24835,6 +25025,7 @@
       "BeginExternalIdentityLinkResponse": "type",
       "BeginSessionRealtimeRequest": "type",
       "BillingBalance": "type",
+      "BillingCheckoutStatus": "type",
       "BillingEntitlementsResponse": "type",
       "BillingMode": "type",
       "BillingSummary": "type",
@@ -24927,6 +25118,7 @@
       "ClaudeSubscriptionOAuthCompleteResponse": "type",
       "ClaudeSubscriptionOAuthStartResponse": "type",
       "ClaudeSubscriptionUsage": "type",
+      "ClaudeUsageRequestStatus": "type",
       "ClaudeUsageWindow": "type",
       "ClearWorkspaceAllowanceRequest": "type",
       "ClearWorkspaceAllowanceResponse": "type",
@@ -25210,6 +25402,7 @@
       "FirstPartyMcpToolName": "type",
       "ForkSessionRequest": "type",
       "ForkSessionResponse": "type",
+      "formatErrorMessage": "value",
       "formatSseEvent": "value",
       "FsChangedPayload": "type",
       "FsChangeKind": "type",
@@ -25322,10 +25515,12 @@
       "InsightsModelFacet": "type",
       "InsightsModelUsageRow": "type",
       "InsightsPricingSource": "type",
+      "InsightsProjectRow": "type",
       "InsightsPromptContributionRow": "type",
       "InsightsPromptContributions": "type",
       "InsightsRange": "type",
       "InsightsScheduleRow": "type",
+      "InsightsScope": "type",
       "InsightsSeriesPoint": "type",
       "InsightsSpendDriver": "type",
       "InsightsWarmGroupRow": "type",
@@ -26324,6 +26519,7 @@
       "ConnectorToolPermissionsResponse": "type",
       "FetchLike": "type",
       "FetchResponse": "type",
+      "formatErrorMessage": "value",
       "GetSessionOptions": "type",
       "isRetryableStreamError": "value",
       "OPENGENI_API_CONTRACT_HEADER": "value",
@@ -26452,6 +26648,7 @@
     "@opengeni/sdk/core": {
       "FetchLike": "type",
       "FetchResponse": "type",
+      "formatErrorMessage": "value",
       "GetSessionOptions": "type",
       "isRetryableStreamError": "value",
       "OPENGENI_API_CONTRACT_HEADER": "value",
@@ -27373,6 +27570,7 @@
       "EnrollmentConsentProps": "type",
       "EnrollmentDeviceFlow": "value",
       "EnrollmentDeviceFlowProps": "type",
+      "ErrorMessageFormatter": "type",
       "execTruncated": "value",
       "extractSessionRef": "value",
       "FILE_ONLY_MESSAGE_TEXT": "value",
@@ -28561,6 +28759,7 @@
       "CreateToolRegistryOptions": "type",
       "DEFAULT_ARTIFACT_LABELS": "value",
       "defaultToolRegistry": "value",
+      "ErrorMessageFormatter": "type",
       "GenieLoadingOptions": "type",
       "HumanInputAnswerDraft": "type",
       "HumanInputForm": "value",
@@ -29137,6 +29336,7 @@
       "getAttachedBrowser",
       "getAuthRun",
       "getBilling",
+      "getBillingCheckout",
       "getBillingEntitlements",
       "getBillingUsage",
       "getBrowserActionReceipt",
@@ -29172,6 +29372,7 @@
       "getOrganizationAdministrationOverview",
       "getOrganizationClaudeSubscriptionUsage",
       "getOrganizationModelProviderConnection",
+      "getOrganizationModelUsage",
       "getOrganizationRecovery",
       "getOrganizationRetentionPolicy",
       "getOrganizationUsageSummary",

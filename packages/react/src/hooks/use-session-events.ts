@@ -10,6 +10,7 @@ import { createOlderHistoryLoadReceipt, type OlderHistoryLoadReceipt } from "../
 import { buildTimeline, groupTimeline, sessionStatusFromEvents } from "../timeline/projection";
 import type { TimelineItem } from "../timeline/types";
 import type { EmbeddedSessionClientLike } from "../client";
+import { normalizeError } from "../lib/error-message";
 import { usePageLiveActivity } from "./internal";
 import type { LatestQuestionOptions } from "./latest-question";
 
@@ -498,7 +499,7 @@ export function useSessionEvents(
               .then(() => reconcileSession(sessionId))
               .catch((cause) => {
                 if (isCurrent()) {
-                  setError(cause instanceof Error ? cause : new Error(String(cause)));
+                  setError(normalizeError(cause));
                 }
               });
           },
@@ -539,7 +540,7 @@ export function useSessionEvents(
       } catch (cause) {
         if (isCurrent()) {
           flush();
-          setError(cause instanceof Error ? cause : new Error(String(cause)));
+          setError(normalizeError(cause));
           setConnectionState("error");
           // A failed first compact-tail request has no later success path in
           // this effect instance. End the loading gate so hosts can render the
@@ -881,7 +882,7 @@ export function useSessionEvents(
       if (!isCurrent()) {
         return false;
       }
-      setNewerError(reason instanceof Error ? reason : new Error(String(reason)));
+      setNewerError(normalizeError(reason));
       // Keep authorization and integrity failures actionable for callers;
       // timeline-owned invocations attach their own explicit recovery UI.
       throw reason;

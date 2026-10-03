@@ -1,4 +1,5 @@
 import { RollingActivity } from "../timeline/rolling-activity";
+import { useErrorMessage } from "../lib/error-message";
 import { formatElapsed } from "../timeline/turn-summary";
 import { ActivityNoteTextContext } from "../timeline/activity-rail";
 import { timelineGroupContainsPresentedImage } from "../timeline/presented-image";
@@ -73,7 +74,6 @@ import {
   type TimelineAnchor,
 } from "./timeline-anchor";
 import { useReadingProgress } from "./timeline-reading-progress";
-import { type TimelinePillPlacement, useTimelinePillPlacement } from "./timeline-pill-placement";
 import {
   animateTimelineSettlement,
   captureTimelineSettlement,
@@ -332,20 +332,20 @@ const PIN_THRESHOLD_PX = 48;
 const JUMP_TO_LATEST_CATCHUP_DEBT_PX = 240;
 /** Breathing room above the question when following stops at an answer. */
 const QUESTION_NAV_MARGIN_PX = 12;
-// Floating pills rest at these spots and slide sideways, in this order, when
-// their resting spot would cover a control (see useTimelinePillPlacement).
-const JUMP_PILL_PLACEMENTS: readonly TimelinePillPlacement[] = ["center", "end", "start"];
-const QUESTION_PILL_PLACEMENTS: readonly TimelinePillPlacement[] = ["end", "center", "start"];
-const JUMP_PILL_PLACEMENT_CLASS: Record<TimelinePillPlacement, string> = {
-  center: "inset-x-0 mx-auto",
-  end: "right-4 sm:right-6",
-  start: "left-4 sm:left-6",
-};
-const QUESTION_PILL_PLACEMENT_CLASS: Record<TimelinePillPlacement, string> = {
-  center: "justify-center",
-  end: "justify-end",
-  start: "justify-start",
-};
+/**
+ * Floating timeline navigation (Back to your message, Jump to latest) shares one
+ * fixed anchor: centered at the bottom of the conversation, above the composer.
+ * The pills never measure or dodge the content beneath them, so they cannot
+ * wander sideways or drift vertically as rows stream in or the host resizes.
+ */
+const NAV_PILL_CLASS =
+  "pointer-events-auto inline-flex max-w-full items-center gap-1.5 whitespace-nowrap rounded-full border border-og-border bg-og-surface-3/90 px-3 py-1.5 text-og-control font-medium text-og-fg shadow-og-md backdrop-blur hover:border-og-border-strong focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-og-accent pointer-coarse:min-h-11";
+const NAV_PILL_MOTION = {
+  initial: { opacity: 0, y: 8 },
+  animate: { opacity: 1, y: 0 },
+  exit: { opacity: 0, y: 8 },
+  transition: { duration: 0.15, ease: "easeOut" },
+} as const;
 /**
  * Prefetch older history when the top sentinel is this far from the viewport.
  * After a page loads we stay cool until the reader leaves this band (scrolls
@@ -562,6 +562,7 @@ export function MessageTimeline({
   emptyState,
   className,
 }: MessageTimelineProps) {
+  const formatError = useErrorMessage();
   const resolvedItems = useMemo(() => {
     const projectedItems = items ?? buildTimeline(events ?? []);
     if (!shouldRenderAuthNeeded) {
@@ -672,12 +673,12 @@ export function MessageTimeline({
             setNewerRetryPending(false);
             setNewerFailure({
               key: newerBoundaryKey,
-              message: reason instanceof Error ? reason.message : String(reason),
+              message: formatError(reason),
             });
           },
         );
     },
-    [onLoadNewer, loadingNewer, newerBoundaryKey],
+    [onLoadNewer, loadingNewer, newerBoundaryKey, formatError],
   );
   const previousSourceIdsRef = useRef(new Set<string>());
   const previousSourceBoundaryRef = useRef<string | undefined>(undefined);
@@ -745,22 +746,7 @@ export function MessageTimeline({
   const resizeFollowRafRef = useRef<number | null>(null);
   const questionNavFrameRef = useRef<number | null>(null);
   const [questionNav, setQuestionNav] = useState<QuestionNav | null>(null);
-  const jumpPillRef = useRef<HTMLButtonElement | null>(null);
-  const questionPillRef = useRef<HTMLDivElement | null>(null);
   const jumpPillShown = autoFollow && (!pinned || hasNewer || canSkipTipCatchup);
-  const jumpPillPlacement = useTimelinePillPlacement({
-    pillRef: jumpPillRef,
-    scrollerRef: scrollRef,
-    active: jumpPillShown,
-    preference: JUMP_PILL_PLACEMENTS,
-  });
-  const questionPillPlacement = useTimelinePillPlacement({
-    pillRef: questionPillRef,
-    scrollerRef: scrollRef,
-    active: questionNav !== null,
-    preference: QUESTION_PILL_PLACEMENTS,
-    allowDownwardFallback: true,
-  });
   const firstGroupKey = allGroups[0] ? timelineGroupKey(allGroups[0]) : null;
   // Content stays invisible until the tip is hard-parked across a short
   // post-commit settle (two rAFs). That absorbs sync late layout while hidden
@@ -2264,8 +2250,7 @@ export function MessageTimeline({
                       // (pt-16). Subtract exactly that padding so an expanded work
                       // header pins flush to the scrollport. Pinning it lower left a
                       // band of scrolling rows visible above the header, which then
-                      // looked like it floated over the middle of the timeline. The
-                      // floating question action sits below this strip instead.
+                      // looked like it floated over the middle of the timeline.
                       style={{ "--og-work-header-top": "-4rem" } as CSSProperties}
                     >
                       {onAnnotate ? (
@@ -2394,14 +2379,7 @@ export function MessageTimeline({
                                   transition={{ duration: 0.15, ease: "easeOut" }}
                                   data-og-loading-older=""
                                   aria-live="polite"
-                                  className={cn(
-                                    "pointer-events-none absolute inset-x-0 -top-11 z-10 flex",
-                                    // The scrolling history control and fixed question
-                                    // action must never share the same pointer region.
-                                    questionNav
-                                      ? "max-w-[calc(50%-0.5rem)] justify-start"
-                                      : "justify-center",
-                                  )}
+                                  className="pointer-events-none absolute inset-x-0 -top-11 z-10 flex justify-center"
                                 >
                                   {loadingOlder || loadingOldest ? (
                                     <span className={LOADING_CHIP_CLASS}>
@@ -2576,139 +2554,113 @@ export function MessageTimeline({
                         </Suspense>
                       ) : null}
 
-                      <AnimatePresence>
-                        {questionNav ? (
-                          <motion.div
-                            key="question-nav"
-                            initial={{ opacity: 0, y: -6 }}
-                            animate={{ opacity: 1, y: 0 }}
-                            exit={{ opacity: 0, y: -6 }}
-                            transition={{ duration: 0.15, ease: "easeOut" }}
-                            data-og-question-nav=""
-                            // Below the pinned work-header strip (py-1.5 row, 44px on coarse
-                            // pointers), never over it: the header stays a full-width target.
-                            data-og-pill-placement={questionPillPlacement.placement}
-                            style={{ marginTop: questionPillPlacement.offsetY }}
-                            className={cn(
-                              "pointer-events-none absolute inset-x-0 top-11 z-10 flex px-4 sm:px-6 pointer-coarse:top-14",
-                              QUESTION_PILL_PLACEMENT_CLASS[questionPillPlacement.placement],
-                            )}
-                          >
+                      <div
+                        data-og-timeline-nav=""
+                        // One fixed anchor for every floating navigation control: a
+                        // centered column at the bottom of the conversation. Newest
+                        // stays nearest the composer; the up-pointing action and the
+                        // later-activity status stack above it.
+                        className="pointer-events-none absolute inset-x-0 bottom-4 z-10 flex flex-col items-center gap-2 px-4 sm:px-6"
+                      >
+                        <AnimatePresence mode="popLayout">
+                          {loadingNewer ? (
                             <motion.div
-                              ref={questionPillRef}
+                              key="loading-newer"
                               layout="position"
-                              transition={{ duration: 0.18, ease: "easeOut" }}
-                              className="pointer-events-auto inline-flex max-w-full items-center rounded-full border border-og-border bg-og-surface-3/90 text-og-control font-medium text-og-fg shadow-og-md backdrop-blur"
+                              {...NAV_PILL_MOTION}
+                              data-og-loading-newer=""
+                              aria-live="polite"
+                              className="flex max-w-full justify-center"
                             >
-                              <button
-                                type="button"
-                                data-og-jump-to-question=""
-                                onClick={() => jumpToQuestion(questionNav.key)}
-                                className="inline-flex min-w-0 items-center gap-1.5 whitespace-nowrap px-3 py-1.5 hover:text-og-fg pointer-coarse:min-h-11"
-                              >
-                                <ArrowUpIcon aria-hidden className="size-3.5" />
-                                Back to your message
-                              </button>
+                              <span className={LOADING_CHIP_CLASS}>
+                                <span className="og-shimmer-text">Loading later activity…</span>
+                              </span>
                             </motion.div>
-                          </motion.div>
-                        ) : null}
-                      </AnimatePresence>
-                      <AnimatePresence>
-                        {loadingNewer ? (
-                          <motion.div
-                            initial={{ opacity: 0, y: 6 }}
-                            animate={{ opacity: 1, y: 0 }}
-                            exit={{ opacity: 0, y: 6 }}
-                            transition={{ duration: 0.15, ease: "easeOut" }}
-                            data-og-loading-newer=""
-                            aria-live="polite"
-                            className="pointer-events-none absolute inset-x-0 bottom-14 z-10 flex justify-center"
-                          >
-                            <span className={LOADING_CHIP_CLASS}>
-                              <span className="og-shimmer-text">Loading later activity…</span>
-                            </span>
-                          </motion.div>
-                        ) : null}
-                      </AnimatePresence>
-                      <AnimatePresence>
-                        {jumpPillShown ? (
-                          <motion.button
-                            ref={jumpPillRef}
-                            type="button"
-                            data-og-jump-to-latest=""
-                            data-og-pill-placement={jumpPillPlacement.placement}
-                            layout="position"
-                            initial={{ opacity: 0, y: 8 }}
-                            animate={{ opacity: 1, y: 0 }}
-                            exit={{ opacity: 0, y: 8 }}
-                            transition={{ duration: 0.15, ease: "easeOut" }}
-                            onClick={() => {
-                              // Returning to the tip explicitly releases reader-owned
-                              // prose. Clear only this timeline's selection before the
-                              // synchronous ownership check on the next commit.
-                              const viewport = scrollRef.current;
-                              const selection = viewport?.ownerDocument.getSelection();
-                              if (
-                                selection &&
-                                !selection.isCollapsed &&
-                                (viewport?.contains(selection.anchorNode) ||
-                                  viewport?.contains(selection.focusNode))
-                              )
-                                selection.removeAllRanges();
-                              disclosureKeepsUnpinnedRef.current = false;
-                              if (hasNewer) {
-                                // Do not pin against the current history page — its bottom
-                                // is not the tip. The pin + snap run when the tip window
-                                // actually lands (`hasNewer` flips false).
-                                wantPinRef.current = true;
-                                const node = scrollRef.current;
-                                if (onJumpToLatest) {
-                                  void Promise.resolve(onJumpToLatest()).then(
-                                    () => {
-                                      // Covers a host that flipped hasNewer before
-                                      // resolving; otherwise the tip-window commit
-                                      // consumes the flag.
-                                      const current = scrollRef.current;
-                                      if (current && wantPinRef.current && !hasNewerRef.current) {
+                          ) : null}
+                          {questionNav ? (
+                            <motion.button
+                              key="question-nav"
+                              layout="position"
+                              {...NAV_PILL_MOTION}
+                              type="button"
+                              data-og-question-nav=""
+                              data-og-jump-to-question=""
+                              onClick={() => jumpToQuestion(questionNav.key)}
+                              className={NAV_PILL_CLASS}
+                            >
+                              <ArrowUpIcon aria-hidden className="size-3.5 shrink-0" />
+                              Back to your message
+                            </motion.button>
+                          ) : null}
+                          {jumpPillShown ? (
+                            <motion.button
+                              key="jump-to-latest"
+                              layout="position"
+                              {...NAV_PILL_MOTION}
+                              type="button"
+                              data-og-jump-to-latest=""
+                              onClick={() => {
+                                // Returning to the tip explicitly releases reader-owned
+                                // prose. Clear only this timeline's selection before the
+                                // synchronous ownership check on the next commit.
+                                const viewport = scrollRef.current;
+                                const selection = viewport?.ownerDocument.getSelection();
+                                if (
+                                  selection &&
+                                  !selection.isCollapsed &&
+                                  (viewport?.contains(selection.anchorNode) ||
+                                    viewport?.contains(selection.focusNode))
+                                )
+                                  selection.removeAllRanges();
+                                disclosureKeepsUnpinnedRef.current = false;
+                                if (hasNewer) {
+                                  // Do not pin against the current history page — its bottom
+                                  // is not the tip. The pin + snap run when the tip window
+                                  // actually lands (`hasNewer` flips false).
+                                  wantPinRef.current = true;
+                                  const node = scrollRef.current;
+                                  if (onJumpToLatest) {
+                                    void Promise.resolve(onJumpToLatest()).then(
+                                      () => {
+                                        // Covers a host that flipped hasNewer before
+                                        // resolving; otherwise the tip-window commit
+                                        // consumes the flag.
+                                        const current = scrollRef.current;
+                                        if (current && wantPinRef.current && !hasNewerRef.current) {
+                                          wantPinRef.current = false;
+                                          applyPinned(true);
+                                          snapToBottom(current);
+                                        }
+                                      },
+                                      () => {
+                                        // The tip reload failed (ordinary network error):
+                                        // an armed latch would fire a surprise snap when
+                                        // the reader later pages to the tip themselves.
                                         wantPinRef.current = false;
-                                        applyPinned(true);
-                                        snapToBottom(current);
-                                      }
-                                    },
-                                    () => {
-                                      // The tip reload failed (ordinary network error):
-                                      // an armed latch would fire a surprise snap when
-                                      // the reader later pages to the tip themselves.
-                                      wantPinRef.current = false;
-                                    },
-                                  );
-                                } else if (node) {
-                                  // No tip reload available: jump within the in-memory
-                                  // window so the newer sentinel can page forward; the
-                                  // latch pins if the tip window eventually lands.
+                                      },
+                                    );
+                                  } else if (node) {
+                                    // No tip reload available: jump within the in-memory
+                                    // window so the newer sentinel can page forward; the
+                                    // latch pins if the tip window eventually lands.
+                                    snapToBottom(node);
+                                  }
+                                  return;
+                                }
+                                const node = scrollRef.current;
+                                if (node) {
+                                  applyPinned(true);
                                   snapToBottom(node);
                                 }
-                                return;
-                              }
-                              const node = scrollRef.current;
-                              if (node) {
-                                applyPinned(true);
-                                snapToBottom(node);
-                              }
-                            }}
-                            className={cn(
-                              "absolute bottom-4 w-fit",
-                              JUMP_PILL_PLACEMENT_CLASS[jumpPillPlacement.placement],
-                              "inline-flex items-center gap-1.5 rounded-full border border-og-border bg-og-surface-3/90 px-3 py-1.5",
-                              "text-og-control font-medium text-og-fg shadow-og-md backdrop-blur",
-                              "hover:border-og-border-strong",
-                            )}
-                          >
-                            <ArrowDownIcon className="size-3.5" />
-                            Jump to latest
-                          </motion.button>
-                        ) : null}
-                      </AnimatePresence>
+                              }}
+                              className={NAV_PILL_CLASS}
+                            >
+                              <ArrowDownIcon aria-hidden className="size-3.5 shrink-0" />
+                              Jump to latest
+                            </motion.button>
+                          ) : null}
+                        </AnimatePresence>
+                      </div>
                     </div>
                   </TimelineAnnotationSourceRootContext.Provider>
                 </TooltipProvider>

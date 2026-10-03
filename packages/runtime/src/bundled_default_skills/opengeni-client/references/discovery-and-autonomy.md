@@ -29,6 +29,18 @@ verify that the agent can actually inspect the target before claiming access.
 Use the returned setup action rather than guessing UI controls or requesting a
 personal token in chat. Access does not authorize deployment or broader data use.
 
+Inside an OpenGeni session, connecting the GitHub App gives the running session
+no clone, push or pull request access: Git credentials and the pull request
+tools come only with a `repository` resource attached to a session, and a
+session cannot attach one to itself. After GitHub is connected, call
+`github_repositories_list`, ask the user which repository with one single-select
+`request_human_input` question (skip it when only one is listed), then start a
+worker with `session_create` whose `resources` holds that repository's returned
+`resource` object, and do the implementation there. Give the worker the full
+task, then report its pull request link. If you cannot start a worker, ask the
+user to attach the repository with the composer's repository picker on their
+next message.
+
 Infer the OpenGeni origin and organization from authorized session/access metadata
 when possible. Verify the chosen target deployment, privacy capability, model and
 billing path before relying on them. Explain missing authority or configuration
@@ -70,10 +82,11 @@ Write every question the way the end user talks about their own product. Never
 use internal terms such as "on-demand", "learning across chats", "shape",
 "capabilities" or "visibility". Only ask about what applies:
 
-- **Who can see a chat:** only the person who started it (`chats: "private"`),
-  their whole team (`"shared"`), or each user gets a fully separate space
-  (`"isolated"`). Choose the workspace mapping from the actual sharing boundary;
-  private chats alone do not require a workspace per person.
+- **Who can see a chat:** only the person who started it (`chats: "private"`)
+  or their whole team (`"shared"`). Offer only these two. Choosing
+  `"isolated"` or any other workspace mapping is your decision from the actual
+  sharing boundary, never a question; private chats alone do not require a
+  workspace per person.
 - **What the agent may do:** only look things up (read-only), or also make
   changes. Name the actual things ("read your analytics", "can't change
   websites or users"). Confirm writes separately, only when they are part of
