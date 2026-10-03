@@ -400,7 +400,9 @@ export function SessionList() {
     // step instead of hydrating hidden workstreams a second time.
     limit:
       channelMode && hierarchyMode && browseStatus !== "archived" ? SESSION_GROUP_VISIBLE_STEP : 50,
-    includePinned: !hierarchyMode,
+    // Filtered root pins carry exact attention membership beyond treeStats' cap.
+    // The separate global pin read still owns the complete shortcut section.
+    includePinned: needsYouOnly || !hierarchyMode,
     includeTotals: hierarchyMode && browseStatus !== "archived",
     needsYouOnly,
     search,

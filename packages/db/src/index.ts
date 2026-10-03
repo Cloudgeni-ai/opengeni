@@ -36563,14 +36563,8 @@ function withRequiresActionSince<T extends Pick<Session, "id" | "status" | "requ
 
 function sessionRelatedListScope(scope: SessionAuthorizationListScope | undefined): SQL {
   if (!scope) return sql`true`;
-  return sessionAuthorizationScopeFilter(
-    scope.kind === "all"
-      ? scope
-      : {
-          ...scope,
-          sessionIds: [],
-        },
-  );
+  // Used only for parentless roots: target-only grants never admit relatives.
+  return sessionAuthorizationRootScopeFilter(scope, false);
 }
 
 /** Exact target grants never imply visibility of relatives. */
@@ -36777,7 +36771,11 @@ function sessionFilters(
     filters.push(archiveStatus === "archived" ? archivedRoot : sql`not (${archivedRoot})`);
   }
   if (options.authorizationScope) {
-    filters.push(sessionAuthorizationScopeFilter(options.authorizationScope));
+    filters.push(
+      options.parentSessionId === null
+        ? sessionAuthorizationRootScopeFilter(options.authorizationScope)
+        : sessionAuthorizationScopeFilter(options.authorizationScope),
+    );
   }
   if (Object.prototype.hasOwnProperty.call(options, "parentSessionId")) {
     const parentSessionId = options.parentSessionId;
@@ -36853,6 +36851,29 @@ export function sessionAgentAccessViewerFilter(viewer: SessionAgentAccessViewer)
  */
 export function sessionAuthorizationScopeFilter(scope: SessionAuthorizationListScope): SQL {
   const hostScope = sessionAuthorizationHostScopeFilter(scope);
+  return scope.agentAccessViewer
+    ? and(hostScope, sessionAgentAccessViewerFilter(scope.agentAccessViewer))!
+    : hostScope;
+}
+
+/** A parentless root cannot be another granted root's descendant. */
+function sessionAuthorizationRootScopeFilter(
+  scope: SessionAuthorizationListScope,
+  includeExact = true,
+): SQL {
+  let hostScope: SQL = sql`true`;
+  if (scope.kind === "scoped") {
+    if (
+      scope.rootSessionIds.length > SESSION_AUTHORIZATION_LIST_SCOPE_MAX_IDS ||
+      scope.sessionIds.length > SESSION_AUTHORIZATION_LIST_SCOPE_MAX_IDS
+    ) {
+      throw new RangeError(
+        `Session authorization scope exceeds ${SESSION_AUTHORIZATION_LIST_SCOPE_MAX_IDS} ids per field`,
+      );
+    }
+    const ids = [...new Set([...scope.rootSessionIds, ...(includeExact ? scope.sessionIds : [])])];
+    hostScope = ids.length > 0 ? inArray(schema.sessions.id, ids) : sql`false`;
+  }
   return scope.agentAccessViewer
     ? and(hostScope, sessionAgentAccessViewerFilter(scope.agentAccessViewer))!
     : hostScope;

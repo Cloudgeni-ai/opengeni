@@ -306,15 +306,19 @@ describe("session pins (real PostgreSQL + FORCE RLS)", () => {
     await executeSessionActivity(
       workspace.workspaceId,
       sql`
+      with generated as materialized (
+        select gen_random_uuid() as id, ordinal from generate_series(1, 1536) ordinal
+      )
       insert into sessions (id, account_id, workspace_id, initial_message, model, reasoning_effort,
         latency_mode, sandbox_backend, sandbox_group_id, tool_policy, parent_session_id, root_session_id, status)
       select generated.id, ${workspace.accountId}, ${workspace.workspaceId}, 'generated metadata fixture',
         'test-model', 'medium', 'standard', 'none', generated.id,
         jsonb_build_object('mode', 'explicit', 'inheritedFromSessionId', null),
-        case when generated.ordinal <= 1024 then ${root.id}::uuid else null end,
+        case when generated.ordinal = 1024 then (select id from generated where ordinal = 1)
+          when generated.ordinal <= 1024 then ${root.id}::uuid else null end,
         case when generated.ordinal <= 1024 then ${root.id}::uuid else generated.id end,
         case when generated.ordinal = 1024 then 'requires_action' else 'idle' end
-      from (select gen_random_uuid() as id, ordinal from generate_series(1, 1536) ordinal) generated
+      from generated
     `,
     );
     const page = await listSessionEntriesForSubject(db, workspace.workspaceId, {
@@ -328,6 +332,16 @@ describe("session pins (real PostgreSQL + FORCE RLS)", () => {
     expect(page.totals?.needsYouCount).toBe(1);
     expect(page.totals?.groups[0]).toMatchObject({ total: 1537, attention: 1 });
     expect(page.sessions[0]).not.toHaveProperty("initialMessage");
+    const grantedRoots = await listSessionEntriesForSubject(db, workspace.workspaceId, {
+      subjectId,
+      parentSessionId: null,
+      includeTotals: true,
+      authorizationScope: { kind: "scoped", rootSessionIds: [root.id], sessionIds: [] },
+      limit: 1,
+      includePinned: false,
+    });
+    expect(grantedRoots.totals?.groups[0]).toMatchObject({ total: 1025, attention: 1 });
+    expect(grantedRoots.totals?.needsYouCount).toBe(1);
     const attention = await listSessionEntriesForSubject(db, workspace.workspaceId, {
       subjectId,
       parentSessionId: null,
@@ -344,6 +358,25 @@ describe("session pins (real PostgreSQL + FORCE RLS)", () => {
       includeTotals: true,
     });
     expect(pins.totals).toEqual(page.totals);
+    await setSessionPin(db, {
+      workspaceId: workspace.workspaceId,
+      subjectId,
+      sessionId: root.id,
+      pinned: true,
+    });
+    const pinnedAttention = await listSessionEntriesForSubject(db, workspace.workspaceId, {
+      subjectId,
+      parentSessionId: null,
+      needsYouOnly: true,
+      includeTotals: true,
+      includePinned: true,
+    });
+    expect(pinnedAttention.sessions).toHaveLength(0);
+    expect(pinnedAttention.pinned.map((row) => row.id)).toEqual([root.id]);
+    expect(pinnedAttention.needsYouOnly).toBe(true);
+    expect(pinnedAttention.totals?.needsYouCount).toBe(1);
+    expect(pinnedAttention.pinned[0]?.treeStats?.totalDescendants).toBe(1000);
+    expect(pinnedAttention.pinned[0]?.treeStats?.attentionDescendants).toBe(0);
   });
 
   test("compact pages retain authority and display state while excluding large configuration", async () => {
