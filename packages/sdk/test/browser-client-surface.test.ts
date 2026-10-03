@@ -1,5 +1,9 @@
 import { describe, expect, test } from "bun:test";
 import path from "node:path";
+import { OpenGeniClient } from "../src/index";
+import { OpenGeniCoreClient } from "../src/core";
+import { OpenGeniBrowserClient } from "../src/browser";
+import { SITE_BROWSER_RUNTIME } from "../src/site-browser-runtime.gen";
 
 const repoRoot = path.resolve(import.meta.dir, "../../..");
 const clientPath = path.join(repoRoot, "packages/sdk/src/client.ts");
@@ -99,6 +103,59 @@ async function readBrowserProductionSources(): Promise<string> {
 }
 
 describe("browser client runtime surface", () => {
+  test("preserves retired organization usage reads on public compatibility clients only", async () => {
+    for (const Client of [OpenGeniClient, OpenGeniCoreClient]) {
+      const requests: URL[] = [];
+      const client = new Client({
+        baseUrl: "https://api.example.test",
+        fetch: async (input) => {
+          requests.push(new URL(String(input)));
+          return Response.json({ accountId: "account" });
+        },
+      });
+      expect(await client.getOrganizationUsageSummary({ accountId: "account" })).toMatchObject({
+        accountId: "account",
+      });
+      await client.getOrganizationUsageWorkspacePage({
+        accountId: "account",
+        period: "week",
+        until: "2026-10-03T00:00:00Z",
+        afterWorkspaceId: "workspace",
+      });
+      expect(requests.map((url) => url.pathname)).toEqual([
+        "/v1/billing/usage-summary",
+        "/v1/billing/usage-workspaces",
+      ]);
+      expect(requests[0]!.searchParams.get("period")).toBe("month");
+      expect(Object.fromEntries(requests[1]!.searchParams)).toEqual({
+        accountId: "account",
+        period: "week",
+        until: "2026-10-03T00:00:00Z",
+        afterWorkspaceId: "workspace",
+      });
+    }
+    const browser = new OpenGeniBrowserClient({ baseUrl: "https://api.example.test" });
+    expect("getOrganizationUsageSummary" in browser).toBe(false);
+    expect("getOrganizationUsageWorkspacePage" in browser).toBe(false);
+    expect(browser.getOrganizationModelUsage).toBeFunction();
+  });
+
+  test("excludes retired organization usage routes from browser and Site bundles", async () => {
+    const result = await Bun.build({
+      entrypoints: [path.join(import.meta.dir, "fixtures/core-bundle-entry.ts")],
+      target: "browser",
+      format: "esm",
+      minify: true,
+    });
+    if (!result.success) throw new AggregateError(result.logs, "Browser bundle failed");
+    const browserBundle = await result.outputs[0]!.text();
+    for (const route of ["/v1/billing/usage-summary", "/v1/billing/usage-workspaces"]) {
+      expect(browserBundle.includes(route)).toBe(false);
+      expect(SITE_BROWSER_RUNTIME.includes(route)).toBe(false);
+    }
+    expect(browserBundle).toContain("/v1/billing/usage-models");
+  });
+
   test("rejects new SDK methods that the browser does not use", async () => {
     const [clientSource, browserSource] = await Promise.all([
       Bun.file(clientPath).text(),
