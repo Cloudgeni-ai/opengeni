@@ -12,9 +12,11 @@ import {
   type ScheduledTask,
   type WorkspaceSessionDefaults,
   type XaiProviderAccountAuthoritySnapshotV1,
+  type ClaudeProviderAccountAuthoritySnapshotV1,
 } from "@opengeni/contracts";
 import {
   getScheduledTaskXaiProviderAccountAuthoritySnapshot,
+  getScheduledTaskClaudeProviderAccountAuthoritySnapshot,
   getSession,
   getWorkspace,
   getWorkspaceConnectionModelRestrictions,
@@ -32,6 +34,9 @@ import {
   workspaceXaiSubscriptionActive,
   workspaceXaiSubscriptionActiveForAuthority,
   XaiAuthorityPoolInactiveError,
+  ClaudeAuthorityPoolInactiveError,
+  resolveClaudeProviderAccountAuthoritySnapshotForAcceptance,
+  workspaceClaudeSubscriptionActiveForAuthority,
   type ConnectionModelRestrictions,
   type Database,
 } from "@opengeni/db";
@@ -298,6 +303,8 @@ export type WorkspaceModelSelectionContext = {
    * direct Send resolves it.
    */
   xaiAuthoritySnapshot?: XaiProviderAccountAuthoritySnapshotV1 | undefined;
+  /** Already accepted Claude pool; never replace it with current selection. */
+  claudeAuthoritySnapshot?: ClaudeProviderAccountAuthoritySnapshotV1 | undefined;
 };
 
 /**
@@ -318,13 +325,25 @@ async function connectionRestrictionsAndXaiReadiness(
   const { workspaceId, subjectId, xaiAuthoritySnapshot } = context;
   if (!xaiAuthoritySnapshot) {
     const [restrictions, xaiSubscriptionActive] = await Promise.all([
-      getWorkspaceConnectionModelRestrictions(db, workspaceId, subjectId),
+      getWorkspaceConnectionModelRestrictions(
+        db,
+        workspaceId,
+        subjectId,
+        undefined,
+        context.claudeAuthoritySnapshot,
+      ),
       workspaceXaiSubscriptionActive(db, settings, workspaceId, subjectId),
     ]);
     return { restrictions, xaiSubscriptionActive };
   }
   const frozen = await Promise.allSettled([
-    getWorkspaceConnectionModelRestrictions(db, workspaceId, subjectId, xaiAuthoritySnapshot),
+    getWorkspaceConnectionModelRestrictions(
+      db,
+      workspaceId,
+      subjectId,
+      xaiAuthoritySnapshot,
+      context.claudeAuthoritySnapshot,
+    ),
     workspaceXaiSubscriptionActiveForAuthority(db, settings, {
       workspaceId,
       subjectId,
@@ -340,10 +359,43 @@ async function connectionRestrictionsAndXaiReadiness(
       throw result.reason;
     }
   }
-  const current = await getWorkspaceConnectionModelRestrictions(db, workspaceId, subjectId);
+  const current = await getWorkspaceConnectionModelRestrictions(
+    db,
+    workspaceId,
+    subjectId,
+    undefined,
+    context.claudeAuthoritySnapshot,
+  );
   return {
     restrictions: { ...current, "supergrok/": [] },
     xaiSubscriptionActive: false,
+  };
+}
+
+/** Readiness observes metadata only; quota is handled by the runtime allocator. */
+async function claudePoolReadiness(
+  db: Database,
+  settings: Settings,
+  context: WorkspaceModelSelectionContext,
+) {
+  if (!settings.claudeSubscriptionEnabled) return { workspace: false, organization: false };
+  const authoritySnapshot =
+    context.claudeAuthoritySnapshot ??
+    (await resolveClaudeProviderAccountAuthoritySnapshotForAcceptance(db, context));
+  let active: boolean;
+  try {
+    active = await workspaceClaudeSubscriptionActiveForAuthority(db, settings, {
+      ...context,
+      authoritySnapshot,
+    });
+  } catch (error) {
+    if (!context.claudeAuthoritySnapshot || !(error instanceof ClaudeAuthorityPoolInactiveError))
+      throw error;
+    active = false;
+  }
+  return {
+    workspace: active && authoritySnapshot.scope !== "organization",
+    organization: active && authoritySnapshot.scope === "organization",
   };
 }
 
@@ -357,6 +409,7 @@ export async function loadWorkspaceModelSelectionInput(
   const { accountId, workspaceId } = context;
   const [
     { restrictions: connectionModelRestrictions, xaiSubscriptionActive },
+    claudePool,
     policy,
     codexSubscriptionActive,
     observations,
@@ -370,6 +423,7 @@ export async function loadWorkspaceModelSelectionInput(
     organizationOpenRouterCustomModels,
   ] = await Promise.all([
     connectionRestrictionsAndXaiReadiness(db, settings, context),
+    claudePoolReadiness(db, settings, context),
     getWorkspaceModelPolicy(db, workspaceId),
     workspaceCodexSubscriptionActive(db, settings, workspaceId),
     options.observeAvailability === false
@@ -406,21 +460,28 @@ export async function loadWorkspaceModelSelectionInput(
     CLAUDE_CONNECTION_KINDS.map(async (kind) => {
       if (kind === "claude_subscription" && !settings.claudeSubscriptionEnabled) return;
       const [active, models, metadata, workspaceModels] = await Promise.all([
-        organizationModelProviderConnectionActiveForWorkspace(db, {
-          accountId,
-          workspaceId,
-          providerKind: kind,
-        }),
+        kind === "claude_subscription"
+          ? Promise.resolve(claudePool.organization)
+          : organizationModelProviderConnectionActiveForWorkspace(db, {
+              accountId,
+              workspaceId,
+              providerKind: kind,
+            }),
         listOrganizationModelProviderCustomModelsForWorkspace(db, {
           accountId,
           workspaceId,
           providerKind: kind,
         }),
-        getWorkspaceProviderApiKeyConnectionMetadata(db, workspaceId, kind),
+        kind === "claude_subscription"
+          ? Promise.resolve(null)
+          : getWorkspaceProviderApiKeyConnectionMetadata(db, workspaceId, kind),
         listWorkspaceProviderCustomModels(db, { accountId, workspaceId, providerKind: kind }),
       ]);
       claudeConnections[kind] = { active, models };
-      workspaceClaudeConnections[kind] = { active: metadata !== null, models: workspaceModels };
+      workspaceClaudeConnections[kind] = {
+        active: kind === "claude_subscription" ? claudePool.workspace : metadata !== null,
+        models: workspaceModels,
+      };
     }),
   );
   return {
@@ -522,6 +583,11 @@ export async function resolveScheduledTaskDefaultModel(
     accountId: task.accountId,
     workspaceId: task.workspaceId,
     subjectId: task.ownerSubjectId ?? task.createdBy.subjectId,
+    claudeAuthoritySnapshot: await getScheduledTaskClaudeProviderAccountAuthoritySnapshot(
+      db,
+      task.workspaceId,
+      task.id,
+    ),
     xaiAuthoritySnapshot: await getScheduledTaskXaiProviderAccountAuthoritySnapshot(
       db,
       task.workspaceId,

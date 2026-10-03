@@ -30,7 +30,7 @@ function parseSecret(value: string): XaiCredentialSecretV1 {
   return secret;
 }
 
-const repository = createSubscriptionAccountRepository<
+export const xaiSubscriptionRepository = createSubscriptionAccountRepository<
   XaiCredentialSecretV1,
   { readonly supergrokSubscriptionEnabled: boolean }
 >({
@@ -92,7 +92,7 @@ export const {
   credentialShardIndex: xaiCredentialShardIndex,
   CREDENTIAL_LEASE_TTL_MS: XAI_CREDENTIAL_LEASE_TTL_MS,
   SubscriptionAuthorityPoolInactiveError: XaiAuthorityPoolInactiveError,
-} = repository;
+} = xaiSubscriptionRepository;
 
 export type XaiAccountAuthorityScope = "workspace" | "user" | "organization";
 export type XaiCredentialStatus = "active" | "needs_relogin" | "error" | "disabled";
@@ -106,5 +106,5 @@ export type XaiSerializedCredentialRefreshResult = Awaited<
 >;
 export type XaiAllocatorUpdateResult = Awaited<ReturnType<typeof updateXaiAllocatorEligibility>>;
 export type XaiAuthorityPoolInactiveError = InstanceType<
-  typeof repository.SubscriptionAuthorityPoolInactiveError
+  typeof xaiSubscriptionRepository.SubscriptionAuthorityPoolInactiveError
 >;

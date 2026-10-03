@@ -397,6 +397,7 @@ function safePosture(): RuntimeDatabasePosture {
     ownedRelations: [],
     sessionTenancyProductActivationPresent: false,
     sessionVariableSetAttachmentsCutoverPresent: true,
+    claudeSubscriptionPoolActivationPresent: true,
     tables: [
       {
         name: "tenant_rows",
@@ -581,6 +582,14 @@ function safePosture(): RuntimeDatabasePosture {
 }
 
 describe("runtime database posture evaluator", () => {
+  test("requires the individual Claude account activation before starting a runtime", () => {
+    const posture = safePosture();
+    posture.claudeSubscriptionPoolActivationPresent = false;
+    expect(evaluateRuntimeDatabasePosture(posture, options)).toContain(
+      "database is missing the Claude subscription account activation receipt",
+    );
+  });
+
   const modelFactCapabilities = [
     {
       name: "complete_workspace_insights_usage_projection(uuid, timestamp with time zone, timestamp with time zone, text[])",
@@ -1138,6 +1147,12 @@ describe("runtime database posture evaluator", () => {
                       ? 8
                       : 0;
         const expectedLength =
+          // Individual Claude accounts share the six subscription runtime tables.
+          (tables === FORCE_RLS_TABLES ||
+          tables === RUNTIME_FULL_DML_TABLES ||
+          tables === RUNTIME_DML_TABLES
+            ? 6
+            : 0) +
           (tables === FORCE_RLS_TABLES || tables === PROTECTED_NO_DIRECT_DML_TABLES ? 8 : 0) +
           // 0546 adds three organization integration tables.
           (tables === FORCE_RLS_TABLES ||
@@ -1201,7 +1216,7 @@ describe("runtime database posture evaluator", () => {
 
       expect(Object.keys(RUNTIME_TABLE_PRIVILEGES).sort()).toEqual([...RUNTIME_DML_TABLES]);
       const tableCount =
-        (hasCurrentMainActivityLedger ? 341 : 218) + 9 + 12 + 2 + 2 + 2 - 3 + 1 + 1 + 3 + 8 + 1;
+        (hasCurrentMainActivityLedger ? 341 : 218) + 9 + 12 + 2 + 2 + 2 - 3 + 1 + 1 + 3 + 8 + 1 + 6;
       for (const removed of [
         "workspace_packs",
         "pack_installations",

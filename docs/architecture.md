@@ -18,12 +18,11 @@ Preflight: `scripts/run-development-stack.ts`; ownership: `scripts/dev-stack-loc
 
 ## 2. OpenGeni
 
-Self-hostable OpenGeni: Postgres persists state; Temporal coordinates execution;
-NATS transports reconstructible events. The API authorizes; workers execute.
+Postgres persists state, Temporal coordinates execution, NATS transports events.
+The API authorizes; workers execute.
 
-External users require live membership and `asUser()` identity, never labels.
-Visibility differs from `agentAccess`; Personal Knowledge follows the verified
-active-turn user. Task notes coordinate; links never merge users.
+External users require live membership and `asUser()`. Visibility and `agentAccess`
+differ; Personal Knowledge follows the verified active-turn user. Links never merge users.
 [Product integration](product-integration.md),
 [embedding authority](embedding-authority-internals.md),
 [Skills](skills-lifecycle.md), [run lifecycle](run-lifecycle.md).
@@ -33,18 +32,15 @@ enforcement, preserving context.
 `mcpApprovalPolicies` requires session-control authority. Frozen policies
 retain catalog floors, granting no capabilities/credentials.
 
-Account binding: [`mcp-account-bindings.ts`](../packages/core/src/domain/mcp-account-bindings.ts),
-[`remote-mcp-credentials.md`](remote-mcp-credentials.md).
+[Account binding](remote-mcp-credentials.md).
 
 [`resolveTurnToolPolicy`](../packages/core/src/domain/session-tool-policy.ts)
 owns turn refs: ordinary work uses session policy; scheduled work retains frozen
 selection. Credential-provider targeting/MCP preparation consume these refs,
-never omitted-tools queue arrays. Connection-backed MCPs use native authentication,
-excluding provider targeting/headers, including historical work. Signed credential
-callbacks carry accepted-turn informational initiators. Children inherit bounded
-lineage; internal continuations freeze causal-turn provenance at claim without
-replacing service principals. Renewals retain turn snapshots, never mutable
-session state. See
+never omitted-tools queue arrays. Connection-backed MCPs use native authentication, including historical work.
+Signed callbacks retain accepted initiators; children inherit bounded lineage.
+Continuations freeze causal-turn provenance at claim; renewals preserve snapshots
+and service principals. See
 [`workspace-integrations.md`](workspace-integrations.md).
 
 ---
@@ -1070,23 +1066,16 @@ SuperGrok freezes scope on acceptance. Vercel AI Gateway/OpenRouter BYOK keys
 belong to workspaces or organizations; organization keys use encrypted FORCE-RLS,
 inherit into same-organization shared workspaces, retain payer identity, and
 never fall back across rails.
-Provider-refusal cooldowns keep provenance and revisions: fresh usage repairs old
-quota refusals, not backpressure or newer refusals. Capped admission and waits
-use bounded refreshes. Codex quota labels require explicit `/wham/usage` window
+Cooldowns retain provenance: fresh usage repairs old quota refusals, not newer refusals or backpressure. Admission refreshes are bounded. Codex quota labels require explicit `/wham/usage` window
 durations, never primary/secondary position. Headers lacking both durations cannot
 update labeled cache; absent reset timing does not clear an exhausted window.
-Opening the account picker refreshes usage.
 
-Claude setup and quota observations:
-[`model-providers.md`](model-providers.md#claude-subscription-usage).
+Claude account pools: [setup and quotas](model-providers.md#claude-subscription-usage).
 
 Codex requires exact live credential leases and frozen accepted source/rotation
 policy; recovery preserves that policy while current health governs capacity.
-Canonical allocator, expiry, source-change, and picker rules:
-[Codex rotation](codex-subscription-rotation.md).
-Migration 0492 requires drained API/control/turn processes, runtime-login
-inventory, migration, role provisioning, and matching binaries; never restart
-pre-0492 code. Accepted turns recover from checkpoints.
+[Allocator and picker rules](codex-subscription-rotation.md).
+[Migration 0492 rollout](codex-subscription-rotation.md) requires drained processes and matching binaries.
 
 Canonical: `packages/core/src/billing/`, `packages/runtime/src/usage-telemetry.ts`,
 [`credit-boundaries-rollout.md`](credit-boundaries-rollout.md),
@@ -1762,7 +1751,7 @@ organization-workspace lifecycle authority; see [external membership operation r
 | Change area | Canonical source | Read first |
 | --- | --- | --- |
 | Model registry, routing, pricing, provider identity, OpenAI-compatible or Claude inference | `packages/config/src/index.ts`, `packages/runtime/src/model-provider*.ts`, `packages/runtime/src/anthropic-messages.ts` | [`model-providers.md`](model-providers.md) (start at Configuring inference) |
-| Claude sign-in, renewal or quota | apps/api/src/claude-subscription-oauth.ts, packages/db/src/claude-subscription-tokens.ts | [model-providers.md](model-providers.md#claude-subscription-usage) |
+| Claude sign-in, renewal or quota | apps/api/src/routes/claude-subscription-accounts.ts, packages/db/src/claude-subscription-account-tokens.ts | [model-providers.md](model-providers.md#claude-subscription-usage) |
 | Codex subscription authority or capacity | `packages/codex/`, `apps/worker/src/activities/codex-rotation.ts` | [`codex-subscription-rotation.md`](codex-subscription-rotation.md) |
 | SuperGrok/xAI subscription authority or capacity | `packages/xai-subscription/`, `packages/db/src/xai-subscription.ts`, `packages/db/src/subscription-account-repository.ts`, `packages/db/src/subscription-pool-schema.ts`, `packages/db/src/organization-xai-subscriptions.ts` | [`supergrok-subscription.md`](supergrok-subscription.md) |
 | First-party MCP, Codemode, or tool selection | `apps/api/src/mcp/`, `packages/codemode/`, `packages/runtime/src/` | [`mcp-surfaces.md`](mcp-surfaces.md) |
@@ -1868,3 +1857,12 @@ API → SDK `discoverPlugins` → shared React `PluginDiscovery`. This metadata
 catalogue does not confer installation compatibility. See [plugin catalogue](plugin-catalog.md).
 
 [Headless-shell](headless-shell.md).
+
+Claude subscription accounts reuse the scoped SuperGrok repository, individual
+account UI, credential lease and durable provider-capacity wait/resume seams.
+The encrypted account bundle owns token/account/device identity; public account
+rows expose only permitted display metadata. Acceptance freezes workspace,
+organization or explicit user authority independently of the current browser
+user. Execution rechecks that frozen pool, live owner authority and the exact
+serving account generation before every physical request. See the native Claude
+section in model-providers.md and the maintenance activation in deployment.md.

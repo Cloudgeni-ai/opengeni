@@ -151,9 +151,12 @@ export function payerSummaryForModel(model: ClientModel): string {
     return "Opengeni credits";
   }
   if (model.cost === "subscription") {
-    return model.source === "supergrok"
-      ? "SuperGrok subscription · external billing"
-      : "Codex subscription · external billing";
+    return model.credentialSource?.kind === "connected_subscription" &&
+      model.credentialSource.provider === "claude"
+      ? "Claude subscription · external billing"
+      : model.source === "supergrok"
+        ? "SuperGrok subscription · external billing"
+        : "Codex subscription · external billing";
   }
   if (model.cost === "workspace") {
     return workspaceProviderPayerSummary(model);
@@ -172,9 +175,12 @@ export function payerSummaryForModel(model: ClientModel): string {
     return "Opengeni credits · automatic managed route";
   }
   if (billing.upstreamPayer === "connected_subscription") {
-    return model.source === "supergrok"
-      ? "SuperGrok subscription · external billing"
-      : "Codex subscription · external billing";
+    return model.credentialSource?.kind === "connected_subscription" &&
+      model.credentialSource.provider === "claude"
+      ? "Claude subscription · external billing"
+      : model.source === "supergrok"
+        ? "SuperGrok subscription · external billing"
+        : "Codex subscription · external billing";
   }
   if (billing.upstreamPayer === "workspace") {
     return workspaceProviderPayerSummary(model);
@@ -195,9 +201,11 @@ export function advancedSourceSummary(model: ClientModel): string | null {
       : null;
   }
   if (source.kind === "connected_subscription") {
-    return source.provider === "xai"
-      ? "Connected SuperGrok subscription"
-      : "Connected Codex subscription";
+    return source.provider === "claude"
+      ? "Connected Claude subscription"
+      : source.provider === "xai"
+        ? "Connected SuperGrok subscription"
+        : "Connected Codex subscription";
   }
   if (source.kind === "workspace_connection") {
     if (model.provider === "workspace-openrouter") {

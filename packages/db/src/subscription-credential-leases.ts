@@ -4,7 +4,7 @@ import { rawRows, type Database } from "./database";
 /** Called inside the provider's authorized RLS transaction, never grants scope. */
 export async function heartbeatSubscriptionCredentialLeaseUntil(
   db: Database,
-  tableName: "codex_credential_leases" | "xai_credential_leases",
+  tableName: "codex_credential_leases" | "xai_credential_leases" | "claude_credential_leases",
   input: {
     workspaceId: string;
     turnId: string;

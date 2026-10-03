@@ -4138,6 +4138,25 @@ webhook signatures or signed storage URLs. Review existing issued credentials
 separately when restricting an already-running deployment: removing an email does
 not revoke its previously issued API keys or cancel already accepted work.
 
+### Individual Claude subscription account activation
+
+Migration 0598 is a maintenance cutover. Stop every old API, control worker and
+turn worker, including idle database connections. Supply the exact runtime login
+list through OPENGENI_MIGRATION_APPLICATION_DATABASE_ROLES and the existing
+OPENGENI_ENVIRONMENTS_ENCRYPTION_KEY to the normal TypeScript migrator. Plain
+SQL cannot perform the encrypted credential conversion. An installation with no
+legacy Claude credentials needs no encryption key for this migration.
+
+The non-superuser schema owner performs one atomic conversion. It preserves
+credential IDs, logical generations, tokens, model/workspace access and valid
+usage readings, imports the prior primary with rotation disabled, and retires
+native single-connection subscription writes. Accepted turns, child results and
+scheduled inputs retain their producer scope and exact history. The migration
+restores original FORCE-RLS and trigger modes on success; any failure rolls back
+DDL, converted credentials and the activation receipt together. Never restart
+a pre-cutover image after commit. Restart sign-in attempts that were pending
+during the cutover. Anthropic API-key connections are unchanged.
+
 ### Slack API pilot activation (0597)
 
 Stop every old/new API, control worker, and turn worker before applying

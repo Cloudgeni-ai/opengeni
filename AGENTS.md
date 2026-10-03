@@ -645,3 +645,11 @@ Subscription wire identity is pinned in `packages/runtime/src/claude-code-identi
 Its tests use fake credentials and local transports; no live subscription probes
 without explicit user approval. Account/device identity belongs in the encrypted
 connection bundle, never in source or model-admission metadata.
+
+Individual Claude subscriptions activate at maintenance migration 0598. Use the
+codec-aware migrator with drained runtime roles and the existing environments
+encryption key; never restart pre-cutover binaries. Account scope and quota
+rotation reuse the shared SuperGrok repository and durable capacity protocol.
+Never infer private authority from a session creator or present browser user,
+and never rotate permission, suspension, safety or validation failures. See
+docs/model-providers.md and docs/deployment.md.

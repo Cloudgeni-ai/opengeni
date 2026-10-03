@@ -2,7 +2,7 @@ name: Local startup
 
 on:
   workflow_dispatch:
-  # Launch window (until 2026-10-04 22:00 Oslo): no pull-request runs; restore with OPE-652.
+  # Launch window (until 2026-10-04 22:00 Oslo): no pull-request runs; restore after the launch window.
   schedule:
     - cron: "0 5 * * 1"
 

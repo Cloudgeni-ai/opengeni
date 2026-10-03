@@ -55,7 +55,7 @@ export function parseModelsView(value: unknown): ModelsView | undefined {
 }
 
 const ACCOUNT_KEY =
-  /^(org:)?((codex|supergrok):[\w-]{1,128}|gateway:(vercel|openrouter|anthropic|claude_subscription))$/;
+  /^(org:)?((codex|supergrok|claude):[\w-]{1,128}|gateway:(vercel|openrouter|anthropic|claude_subscription))$/;
 
 export function parseModelsAccount(value: unknown): string | undefined {
   return typeof value === "string" && ACCOUNT_KEY.test(value) ? value : undefined;
@@ -64,7 +64,7 @@ export function parseModelsAccount(value: unknown): string | undefined {
 export type GatewayId = "vercel" | "openrouter" | "anthropic" | "claude_subscription";
 
 export type AccountKey = (
-  | { provider: "codex" | "supergrok"; id: string }
+  | { provider: "codex" | "supergrok" | "claude"; id: string }
   | { provider: "gateway"; id: GatewayId }
 ) & {
   /** An organization account ("Everyone in <organization>"), not this workspace's own. */
@@ -76,7 +76,7 @@ export function accountKeyOf(value: string | undefined): AccountKey | null {
   const organization = value.startsWith("org:");
   const rest = organization ? value.slice("org:".length) : value;
   const [provider, id] = rest.split(":", 2) as [string, string];
-  if ((provider === "codex" || provider === "supergrok") && id) {
+  if ((provider === "codex" || provider === "supergrok" || provider === "claude") && id) {
     return { provider, id, organization };
   }
   if (
@@ -90,7 +90,7 @@ export function accountKeyOf(value: string | undefined): AccountKey | null {
 
 /** The account key for a row: `codex:<id>`, or `org:codex:<id>` for an organization account. */
 export function accountKey(
-  provider: "codex" | "supergrok" | "gateway",
+  provider: "codex" | "supergrok" | "claude" | "gateway",
   id: string,
   organization = false,
 ): string {

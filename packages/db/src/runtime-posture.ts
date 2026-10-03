@@ -101,6 +101,7 @@ const MCP_OPERATION_AUTHORITY_TABLES = [
   "scheduled_task_runs",
 ] as const;
 const OWNER_INTERNAL_PRIVATE_ROUTINES = new Set<string>([
+  "claude_subscription_pool_protocol_v1_active()",
   "read_sender_connection(uuid, uuid, uuid, text)",
   // Lifecycle fact writers (migrations 0532 and 0565): owner-run trigger
   // functions and the migration-owner backfill. Runtime roles may still hold
@@ -626,6 +627,30 @@ const XAI_AUTHORITY_TABLES = [
   "workspace_memberships",
   "xai_subscription_credentials",
 ] as const;
+const CLAUDE_SNAPSHOT_VALIDATOR_ROUTINE = XAI_SNAPSHOT_VALIDATOR_ROUTINE.replace("xai_", "claude_");
+const CLAUDE_AUTHORITY_ROUTINES = [
+  XAI_CREATE_CREDENTIAL_ROUTINE,
+  XAI_DISCONNECT_CREDENTIAL_ROUTINE,
+  XAI_AUTHORITY_LIVE_ROUTINE,
+  XAI_POOL_VISIBLE_ROUTINE,
+  XAI_RESOLVE_POOL_ROUTINE,
+  XAI_REVALIDATE_CREDENTIAL_ROUTINE,
+].map((name) => name.replace("xai_", "claude_"));
+export const CLAUDE_SUBSCRIPTION_CAPABILITY_ROUTINES = [
+  CLAUDE_SNAPSHOT_VALIDATOR_ROUTINE,
+  ...CLAUDE_AUTHORITY_ROUTINES,
+];
+export const SUBSCRIPTION_ACCOUNT_CAPABILITY_ROUTINES = [
+  XAI_SNAPSHOT_VALIDATOR_ROUTINE,
+  XAI_CREATE_CREDENTIAL_ROUTINE,
+  XAI_DISCONNECT_CREDENTIAL_ROUTINE,
+  XAI_AUTHORITY_LIVE_ROUTINE,
+  XAI_POOL_VISIBLE_ROUTINE,
+  XAI_RESOLVE_POOL_ROUTINE,
+  XAI_REVALIDATE_CREDENTIAL_ROUTINE,
+  ...CLAUDE_SUBSCRIPTION_CAPABILITY_ROUTINES,
+];
+const CLAUDE_AUTHORITY_ROUTINE_SET = new Set(CLAUDE_AUTHORITY_ROUTINES);
 
 const UNIFIED_KNOWLEDGE_ROUTINES = [
   "knowledge_index_claim(text, integer, integer)",
@@ -667,6 +692,7 @@ const UNIFIED_KNOWLEDGE_AUTHORITY_TABLES = [
   "documents",
 ] as const;
 export const RUNTIME_TARGET_SCHEMA_CAPABILITY_ROUTINES = [
+  ...CLAUDE_SUBSCRIPTION_CAPABILITY_ROUTINES,
   "maintain_usage_allowances(integer, integer)",
   "usage_allowance_command(jsonb)",
   "usage_allowance_capability_active(uuid, uuid)",
@@ -759,6 +785,7 @@ export const RUNTIME_TARGET_SCHEMA_FORBIDDEN_ROUTINES = [
 ] as const;
 
 export const RUNTIME_TARGET_SCHEMA_INVOKER_ROUTINES = [
+  CLAUDE_SNAPSHOT_VALIDATOR_ROUTINE,
   "usage_allowance_period(jsonb, timestamp with time zone)",
   "validate_usage_allowance_config(jsonb)",
   "validate_usage_allowance_rule(jsonb)",
@@ -820,6 +847,12 @@ export const FORCE_RLS_TABLES = [
   "capability_skill_facets",
   "capability_skill_files",
   "channels",
+  "claude_capacity_waiters",
+  "claude_credential_leases",
+  "claude_rotation_settings",
+  "claude_session_account_pins",
+  "claude_subscription_account_usage",
+  "claude_subscription_credentials",
   "codex_apps_settings",
   "codex_capacity_waiters",
   "codex_credential_leases",
@@ -1229,6 +1262,12 @@ export const RUNTIME_FULL_DML_TABLES = [
   "capability_operations",
   "capability_plugin_installations",
   "channels",
+  "claude_capacity_waiters",
+  "claude_credential_leases",
+  "claude_rotation_settings",
+  "claude_session_account_pins",
+  "claude_subscription_account_usage",
+  "claude_subscription_credentials",
   "codex_apps_settings",
   "codex_capacity_waiters",
   "codex_credential_leases",
@@ -1767,6 +1806,7 @@ export type RuntimeDatabasePosture = {
   privateRoutines: RuntimeRoutinePosture[];
   sessionTenancyProductActivationPresent: boolean;
   sessionVariableSetAttachmentsCutoverPresent: boolean;
+  claudeSubscriptionPoolActivationPresent: boolean;
 };
 
 export class RuntimeDatabasePostureError extends Error {
@@ -1907,6 +1947,12 @@ export async function inspectRuntimeDatabasePosture(
       );
       const sessionVariableSetAttachmentsCutoverPresent =
         variableSetCutoverRows[0]?.present === true;
+      const claudePoolActivationRows = resultRows<{ present: boolean }>(
+        await tx.execute(sql`select to_regprocedure(
+          'opengeni_private.claude_subscription_pool_protocol_v1_active()'
+        ) is not null as present`),
+      );
+      const claudeSubscriptionPoolActivationPresent = claudePoolActivationRows[0]?.present === true;
 
       // Scoped/embedded topology deliberately leaves ownership and isolation to
       // the host. Prove the connection identity is coherent, but do not impose
@@ -1924,6 +1970,7 @@ export async function inspectRuntimeDatabasePosture(
           privateRoutines: [],
           sessionTenancyProductActivationPresent,
           sessionVariableSetAttachmentsCutoverPresent,
+          claudeSubscriptionPoolActivationPresent,
         };
       }
 
@@ -2227,6 +2274,7 @@ export async function inspectRuntimeDatabasePosture(
         privateRoutines,
         sessionTenancyProductActivationPresent,
         sessionVariableSetAttachmentsCutoverPresent,
+        claudeSubscriptionPoolActivationPresent,
       };
     },
     { isolationLevel: "repeatable read", accessMode: "read only" },
@@ -2253,6 +2301,9 @@ export function evaluateRuntimeDatabasePosture(
 ): string[] {
   const violations: string[] = [];
   const identity = posture.identity;
+
+  if (!posture.claudeSubscriptionPoolActivationPresent)
+    violations.push("database is missing the Claude subscription account activation receipt");
 
   if (!posture.sessionVariableSetAttachmentsCutoverPresent) {
     violations.push("database is missing the 0352 session Variable Set attachment runtime receipt");
@@ -3004,11 +3055,15 @@ export function evaluateRuntimeDatabasePosture(
           `target-schema runtime capability ${routine.name} owner ${routine.owner} does not match session authority owner ${authorityOwner}`,
         );
       }
-    } else if (routine.name === XAI_SNAPSHOT_VALIDATOR_ROUTINE) {
+    } else if (
+      routine.name === XAI_SNAPSHOT_VALIDATOR_ROUTINE ||
+      routine.name === CLAUDE_SNAPSHOT_VALIDATOR_ROUTINE
+    ) {
       // The immutable SQL validator is invoker-rights and reads no table. Its
       // exact ACL is posture-checked above; it does not participate in the
       // SECURITY DEFINER same-owner authority graph.
     } else if (
+      CLAUDE_AUTHORITY_ROUTINE_SET.has(routine.name) ||
       routine.name === XAI_CREATE_CREDENTIAL_ROUTINE ||
       routine.name === XAI_DISCONNECT_CREDENTIAL_ROUTINE ||
       routine.name === XAI_AUTHORITY_LIVE_ROUTINE ||
@@ -3016,10 +3071,13 @@ export function evaluateRuntimeDatabasePosture(
       routine.name === XAI_RESOLVE_POOL_ROUTINE ||
       routine.name === XAI_REVALIDATE_CREDENTIAL_ROUTINE
     ) {
-      if (!tableByName.has("xai_subscription_credentials")) {
+      const authorityTableNames = CLAUDE_AUTHORITY_ROUTINE_SET.has(routine.name)
+        ? XAI_AUTHORITY_TABLES.map((name) => name.replace("xai_", "claude_"))
+        : XAI_AUTHORITY_TABLES;
+      if (!tableByName.has(authorityTableNames[3]!)) {
         continue;
       }
-      const missingAuthorityTables = XAI_AUTHORITY_TABLES.filter(
+      const missingAuthorityTables = authorityTableNames.filter(
         (tableName) => !tableByName.has(tableName),
       );
       if (missingAuthorityTables.length > 0) {
@@ -3027,9 +3085,7 @@ export function evaluateRuntimeDatabasePosture(
           `target-schema runtime capability ${routine.name} authority tables are missing: ${missingAuthorityTables.join(", ")}`,
         );
       } else {
-        const authorityTables = XAI_AUTHORITY_TABLES.map(
-          (tableName) => tableByName.get(tableName)!,
-        );
+        const authorityTables = authorityTableNames.map((tableName) => tableByName.get(tableName)!);
         const authorityOwners = new Set(authorityTables.map((table) => table.owner));
         if (authorityOwners.size !== 1) {
           violations.push(

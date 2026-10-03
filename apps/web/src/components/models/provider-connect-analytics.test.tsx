@@ -50,6 +50,88 @@ const submitButton = () =>
 const clickedAction = (element: Element) =>
   analyticsClickEvent(element, window.location.origin)?.properties.action;
 
+test("subscription pools reuse workspace model controls without reading or mutating legacy credentials", async () => {
+  const { useProviderConnection, PROVIDER_CONNECTION_CONFIGS, ProviderCustomModels } =
+    await import("../ai-gateway-connection");
+  const secrets = mock(async () => {
+    throw new Error("Legacy credentials must not be consulted");
+  });
+  const create = mock(async (_workspace: string, _kind: string, input: any) => ({
+    id: "model-fixture",
+    version: 1,
+    ...input,
+  }));
+  const client = {
+    listConnections: secrets,
+    getWorkspaceModelCatalog: secrets,
+    createConnection: secrets,
+    listWorkspaceClaudeCustomModels: async () => ({ models: [] }),
+    createWorkspaceClaudeCustomModel: create,
+  };
+  let state!: ReturnType<typeof useProviderConnection>;
+  function Harness() {
+    state = useProviderConnection({
+      client: client as any,
+      config: PROVIDER_CONNECTION_CONFIGS.claude_subscription,
+      workspaceId: "workspace-fixture",
+      canManageConnection: true,
+      canManageCustomModels: true,
+      catalogConnection: { connected: true, loaded: true, error: null },
+    });
+    return <ProviderCustomModels state={state} />;
+  }
+  await act(async () => root.render(<Harness />));
+  expect(container.textContent).toContain("Claude models");
+  await act(async () => state.addCustomModel("claude-opus-5-5"));
+  expect(create.mock.calls[0]?.[2]).toMatchObject({
+    upstreamModelId: "claude-opus-5-5",
+    label: "Claude Opus 5.5",
+  });
+  expect(await state.saveKey("sk-ant-oat01-fixture")).toBe(false);
+  expect(await state.disconnect()).toBe(false);
+  expect(state.canManageConnection).toBe(false);
+  expect(state.hidden).toBe(true);
+  expect(secrets).toHaveBeenCalledTimes(0);
+});
+
+test("organization subscription model controls keep pool and legacy credentials separate", async () => {
+  const { useOrganizationProviderConnection } =
+    await import("../organization-model-provider-connection");
+  const secrets = mock(async () => {
+    throw new Error("Legacy credentials must not be consulted");
+  });
+  const create = mock(async (_org: string, _kind: string, input: any) => ({
+    id: "model-fixture",
+    version: 1,
+    ...input,
+  }));
+  const client = {
+    getOrganizationModelProviderConnection: secrets,
+    upsertOrganizationModelProviderConnection: secrets,
+    listOrganizationProviderCustomModels: async () => ({ models: [] }),
+    createOrganizationProviderCustomModel: create,
+  };
+  let state!: ReturnType<typeof useOrganizationProviderConnection>;
+  function Harness() {
+    state = useOrganizationProviderConnection({
+      client: client as any,
+      providerKind: "claude_subscription",
+      organizationId: "organization-fixture",
+      catalogConnection: { connected: true, loaded: true, error: null },
+    });
+    return null;
+  }
+  await act(async () => root.render(<Harness />));
+  await act(async () => state.addCustomModel("claude-opus-5-5"));
+  expect(create.mock.calls[0]?.[2]).toMatchObject({
+    upstreamModelId: "claude-opus-5-5",
+    label: "Claude Opus 5.5",
+  });
+  expect(await state.saveKey("sk-ant-oat01-fixture")).toBe(false);
+  expect(await state.disconnect()).toBe(false);
+  expect(secrets).toHaveBeenCalledTimes(0);
+});
+
 test("the API-key provider Connect button carries the provider's connect label", async () => {
   for (const action of ["connect_ai_gateway", "connect_openrouter"] as const) {
     const state = {
@@ -287,6 +369,7 @@ test("workspace connect offers workspace Claude setup only when permitted", asyn
       <ConnectPickerPage
         codexAvailable={false}
         grok="hidden"
+        claude="available"
         gateways={gateways}
         target="workspace"
         title="Connect account"
@@ -297,8 +380,8 @@ test("workspace connect offers workspace Claude setup only when permitted", asyn
     ),
   );
   expect(container.textContent).not.toContain("Shared through your organization");
-  const claude = [...container.querySelectorAll("button")].find(
-    (button) => button.textContent === "Claude subscription",
+  const claude = [...container.querySelectorAll("button")].find((button) =>
+    button.textContent?.startsWith("Claude subscription"),
   )!;
   await act(async () => claude.click());
   expect(pick).toHaveBeenCalledWith("claude_subscription");
