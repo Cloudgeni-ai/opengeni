@@ -86,6 +86,29 @@
   .og-root :where(button, input[type="button"], input[type="submit"], input[type="reset"]) {
     appearance: button;
   }
+  /* Host global element styles (`ul { list-style: disc; margin }`,
+     `p { line-height: 1.8 }`, `li { margin-top }`) must not reach SDK markup.
+     The root class gives one class of specificity: above host element
+     selectors, but tied with (and emitted before) component utilities, which
+     therefore still win. */
+  .og-root :where(ul, ol, menu) {
+    list-style: none;
+    margin: 0;
+    padding: 0;
+  }
+  .og-root :where(li, p, blockquote, figure, dl, dd, pre, h1, h2, h3, h4, h5, h6) {
+    margin: 0;
+    padding: 0;
+    font-size: inherit;
+    line-height: inherit;
+  }
+  .og-root :where(h1, h2, h3, h4, h5, h6) {
+    font-weight: inherit;
+  }
+  .og-root,
+  .og-root :where(*, ::before, ::after) {
+    box-sizing: border-box;
+  }
 }
 
 @theme inline {

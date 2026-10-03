@@ -4250,7 +4250,8 @@ export type ClientConfig = {
   /**
    * `false` when a host's session proxy fixes the model policy
    * (`createSessionProxyHandler({ modelSelection: false })`), so UIs hide the
-   * model picker. OpenGeni itself omits it.
+   * model picker; `true` when the host explicitly offers end users model
+   * choice (embedded stock UIs then show the picker). OpenGeni itself omits it.
    */
   modelSelection?: boolean | undefined;
   /** Session proxy sandbox-path download opt-in; absent on native deployments. */
