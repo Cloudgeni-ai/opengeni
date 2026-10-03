@@ -128,6 +128,11 @@ const expectedWriters: Record<string, ExpectedWriter> = {
     contract: "canonical",
     requiresControlRevalidation: true,
   },
+  "packages/db/src/index.ts#reconcileCompletedSandboxSetup": {
+    inserts: 1,
+    contract: "canonical",
+    requiresControlRevalidation: true,
+  },
   "packages/db/src/index.ts#armXaiCapacityWait": {
     inserts: 1,
     contract: "canonical",
