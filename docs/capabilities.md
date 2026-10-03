@@ -834,12 +834,11 @@ no separate OpenAPI API-integration definition and no REST-adapter fallback
 mode - both existed only while the bridge coexisted with a direct-passthrough
 option; consolidated onto one path, they were removed rather than deprecated.
 
-The catalog pins the exact twelve tools in the reviewed surface, including
-OpenGeni's `send_message` and `send_draft`. A newly added tool is
-unavailable until the catalog contract is reviewed and updated. Draft
-creation, both send tools, and label/unlabel tools require the ordinary
-durable human approval - mandatory, not a workspace setting; search,
-message/thread reads, draft lists, and label lists do not. The bridge's
+The catalog pins 37 tools in the reviewed surface, including original-message
+and attachment downloads, draft editing/deletion, label management, inbox
+organization, history, imports and settings reads. See [Gmail](gmail.md) for the
+complete tool list, file receipts and watch setup. Every mailbox mutation
+requires the ordinary durable human approval floor; reads do not. The bridge's
 credential broker binding permits only
 `https://gmail.googleapis.com/gmail/v1/users/me/...`: it cannot call another
 Google API or address another mailbox. Read-only calls may refresh after one

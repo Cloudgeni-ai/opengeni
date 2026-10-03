@@ -159,6 +159,8 @@ import {
 } from "./lazy-tool-transport";
 import {
   GMAIL_REST_MCP_BRIDGE_ADAPTER,
+  gmailRestResultOutcome,
+  isOfficialGmailMcpConfig,
   type GmailRestMcpBridgeConfig,
   type GmailRestMcpBridgeContext,
 } from "./gmail-rest-mcp";
@@ -204,6 +206,7 @@ export {
   GmailRestMcpServer,
   OFFICIAL_GMAIL_MCP_URL,
   gmailRestToolIsMutation,
+  gmailToolSupportsScopes,
   isOfficialGmailMcpConfig,
   type GmailRestMcpServerOptions,
 } from "./gmail-rest-mcp";
@@ -4234,6 +4237,8 @@ export type PrepareToolsOptions = {
    * through this host callback and never included in the returned MCP result.
    */
   materializeConnectorAttachments?: ConnectorAttachmentMaterializer;
+  materializeGmailFile?: GmailRestMcpBridgeContext["materializeGmailFile"];
+  readGmailFile?: GmailRestMcpBridgeContext["readGmailFile"];
   /** Overlap every non-eager MCP connection/catalog with the first model request. */
   deferNonEagerUntilToolDemand?: boolean;
   /** @internal Shared live cells used by deferred preparation handles. */
@@ -4737,6 +4742,13 @@ export async function prepareAgentTools(
               recordResolvedMcpConnectionId(resolvedMcpConnectionIds, config, connectionId),
             fetchImpl: mcpFetchImpl,
             ...(options.slackRateLimit ? { slackRateLimit: options.slackRateLimit } : {}),
+            ...(options.materializeGmailFile
+              ? { materializeGmailFile: options.materializeGmailFile }
+              : {}),
+            ...(options.readGmailFile ? { readGmailFile: options.readGmailFile } : {}),
+            ...(settings.gmailWatchTopicName
+              ? { watchTopicName: settings.gmailWatchTopicName }
+              : {}),
           },
         );
         const innerServer =
@@ -5346,7 +5358,11 @@ function installAttemptConnectorActionGatewayLifecycle(
       lifecycle: connectorActionGatewayLifecycle({
         modelName: definition.modelName,
         call,
-        ...(binding?.resultOutcome ? { resultOutcome: binding.resultOutcome } : {}),
+        ...(binding?.resultOutcome
+          ? { resultOutcome: binding.resultOutcome }
+          : config && isOfficialGmailMcpConfig(config.url ?? "", config.connectionRef)
+            ? { resultOutcome: gmailRestResultOutcome }
+            : {}),
         ...(connectorActionPolicy ? { connectorActionPolicy } : {}),
       }),
     };
@@ -6301,7 +6317,7 @@ const MCP_AUTH_NEEDED_ERROR = {
 const MCP_TOOL_OUTCOME_UNCERTAIN_ERROR = {
   code: 40_102,
   message:
-    "Tool outcome uncertain: the provider returned 401 after receiving the request. OpenGeni did not replay this call. Do not retry automatically; verify provider state before any new attempt.",
+    "Tool outcome uncertain after provider submission. OpenGeni did not replay this call. Do not retry automatically; verify provider state before any new attempt.",
 } as const;
 
 function mcpToolAuthNeededResponse(request: McpRequestReplayInfo): Response {
