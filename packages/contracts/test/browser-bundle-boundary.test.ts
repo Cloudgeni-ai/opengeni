@@ -7,6 +7,11 @@ import {
   SkillPublicationReceipt,
   SkillSourceReleaseReceipt,
 } from "../src/skills";
+import {
+  HumanInputQuestion,
+  RequestHumanInputToolInput,
+  SessionHumanInputRequest,
+} from "../src/index";
 
 const fixtureRoot = path.resolve(import.meta.dir, "fixtures");
 
@@ -24,6 +29,92 @@ async function bundle(entrypoint: string): Promise<string> {
 }
 
 describe("contracts browser bundle boundary", () => {
+  test("keeps unused human-input question compositions out of unrelated browser imports", async () => {
+    const [browserCore, humanInputValidation] = await Promise.all([
+      bundle("browser-core-bundle-entry.ts"),
+      bundle("human-input-validation-bundle-entry.ts"),
+    ]);
+    for (const marker of [
+      "text questions cannot have options",
+      "select questions require options",
+    ]) {
+      expect(browserCore.includes(marker)).toBe(false);
+      expect(humanInputValidation).toContain(marker);
+    }
+  });
+
+  test("retains explicit human-input validation and exact Skill review checks", async () => {
+    const directory = await mkdtemp(path.join(tmpdir(), "human-input-validator-bundle-"));
+    let validators;
+    try {
+      const filename = path.join(directory, "validators.mjs");
+      await writeFile(filename, await bundle("human-input-validation-bundle-entry.ts"));
+      validators = (await import(filename)).humanInputValidators;
+    } finally {
+      await rm(directory, { recursive: true, force: true });
+    }
+    const id = "11111111-1111-4111-8111-111111111111";
+    const review = {
+      removalOperationId: id,
+      sourceOperationId: id,
+      skillId: id,
+      revisionId: id,
+      expectedRevisionId: null,
+      expectedScopeVersion: 1,
+    };
+    const question = {
+      id: "choice",
+      kind: "single_select",
+      prompt: "Choose a format",
+      options: [{ id: "text", label: "Text" }],
+    };
+    const sessionRequest = {
+      id,
+      workspaceId: id,
+      sessionId: id,
+      turnId: id,
+      turnGeneration: 1,
+      creationAttemptId: id,
+      toolCallId: "call",
+      status: "pending",
+      allowSkip: false,
+      response: null,
+      respondedBy: null,
+      respondedAt: null,
+      expiresAt: null,
+      createdAt: "2026-10-03T00:00:00Z",
+      updatedAt: "2026-10-03T00:00:00Z",
+    };
+    for (const input of [
+      question,
+      { ...question, skillReview: null },
+      { ...question, skillReview: review, extra: true },
+      { ...question, skillReview: {} },
+      { ...question, skillReview: { ...review, expectedScopeVersion: 0 } },
+      { ...question, options: [] },
+      { ...question, options: [question.options[0], question.options[0]] },
+      { ...question, kind: "text" },
+      { ...question, kind: "text", options: [], allowOther: true },
+      { ...question, validation: { minSelections: 2, maxSelections: 1 } },
+    ]) {
+      for (const [bundled, canonical, value] of [
+        [validators.HumanInputQuestion, HumanInputQuestion, input],
+        [validators.RequestHumanInputToolInput, RequestHumanInputToolInput, { questions: [input] }],
+        [
+          validators.SessionHumanInputRequest,
+          SessionHumanInputRequest,
+          { ...sessionRequest, questions: [input] },
+        ],
+      ] as const) {
+        const expected = canonical.safeParse(value);
+        const actual = bundled.safeParse(value);
+        expect(actual.success).toBe(expected.success);
+        if (expected.success) expect(actual.data).toEqual(expected.data);
+        else expect(actual.error.issues).toEqual(expected.error.issues);
+      }
+    }
+  });
+
   test("keeps unused installation validators out of unrelated browser imports", async () => {
     const [browserCore, installationValidation] = await Promise.all([
       bundle("browser-core-bundle-entry.ts"),
