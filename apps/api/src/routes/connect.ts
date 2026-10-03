@@ -1537,6 +1537,7 @@ export function registerConnectRoutes(app: Hono, deps: ApiRouteDeps): void {
                 subjectId: scope.subjectId,
                 personalOwnershipAllowed: scope.personalOwnerVerified,
                 connectAttemptId: id,
+                ...(continuation ? { externalContinuation: continuation } : {}),
                 requestUrl: c.req.url,
                 payload: { provider: input.providerId, ownership: input.ownership },
               },

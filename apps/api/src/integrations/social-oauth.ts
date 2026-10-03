@@ -7,6 +7,7 @@ import {
   type SocialOAuthProviderId,
   type SocialOAuthStartRequest,
 } from "@opengeni/contracts";
+import { ExternalActorContinuation } from "@opengeni/contracts/external-identities";
 import { hasPermission, requireEnvironmentEncryption } from "@opengeni/core";
 import type { Observability } from "@opengeni/observability";
 import {
@@ -143,6 +144,9 @@ function socialProviderFetch(
 
 export type SocialOAuthStartContext = {
   connectAttemptId?: string;
+  /** Trusted route continuation, not a field of the HTTP start payload.
+   * The stored Connect origin remains authoritative at claim and commit. */
+  externalContinuation?: ExternalActorContinuation;
   accountId: string;
   workspaceId: string;
   subjectId: string;
@@ -198,6 +202,10 @@ export async function startSocialOAuth(
   context: SocialOAuthStartContext,
 ): Promise<OAuthStartResponse> {
   const { settings } = deps;
+  if (context.externalContinuation && !context.connectAttemptId)
+    throw new HTTPException(422, {
+      message: "External Social OAuth requires a Connect attempt",
+    });
   const provider = SOCIAL_OAUTH_PROVIDERS[context.payload.provider];
   await withOrganizationIntegrationAcquisition(deps.db, context, [provider.id], async () => {});
   const client = socialOAuthClientFor(settings, provider.id);
@@ -214,6 +222,14 @@ export async function startSocialOAuth(
   const state = createSignedState(requireIntegrationsStateSecret(settings), {
     kind: "social_oauth",
     ...(context.connectAttemptId ? { connectAttemptId: context.connectAttemptId } : {}),
+    ...(context.externalContinuation
+      ? {
+          encryptedExternalContinuation: encryptEnvironmentValue(
+            key,
+            JSON.stringify(ExternalActorContinuation.parse(context.externalContinuation)),
+          ),
+        }
+      : {}),
     accountId: context.accountId,
     workspaceId: context.workspaceId,
     subjectId: context.subjectId,

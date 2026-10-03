@@ -48,6 +48,11 @@ passwords, and never appear in clear handoff-query claims. Missing encryption
 configuration fails closed before a delegated handoff is issued.
 Genuine encrypted external continuations keep their distinct live origin and
 commit-time checks; they do not become native browser authority.
+Existing external Social states without the authenticated encrypted continuation
+must restart; new Connect starts include it while the durable original origin
+remains authoritative at claim and credential commit. Old native provider flows
+without the independent browser binding and plaintext handoff intents also
+fail closed and must restart.
 Provider code redemption, browser login/session changes, canonical
 identity recovery, reset-credit payment confirmation and new native identity
 binding consent remain independent browser ceremonies. Merely returning a

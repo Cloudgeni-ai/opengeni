@@ -3,12 +3,14 @@ import { createHash, randomBytes, randomUUID } from "node:crypto";
 import { GOOGLE_DRIVE_INTEGRATION_DEFINITION } from "@opengeni/capabilities";
 import { signDelegatedAccessToken, type AccessContext } from "@opengeni/contracts";
 import { ExternalActorContinuation } from "@opengeni/contracts/external-identities";
+import { ConnectAttempt } from "@opengeni/contracts/connect";
 import {
   ATLASSIAN_CREDENTIAL_LABEL,
   ATLASSIAN_CREDENTIAL_ROLE,
 } from "@opengeni/contracts/atlassian";
 import {
   requireAccessGrantAuthorization,
+  externalActorContinuationForAuthorization,
   stampDelegatedHumanAuthorization,
   type ApiRouteDeps,
   type DelegatedHumanAuthorization,
@@ -136,6 +138,8 @@ describe("independent native consent for delegated provider setup", () => {
   let extraStarts: ReturnType<typeof extraStartSpies>;
   let extraCallbacks: ReturnType<typeof extraCallbackSpies>;
   let pendingStates: Map<string, string>;
+  let apiKeys: ReturnType<typeof spyOn<typeof db, "findActiveApiKeyByHash">>;
+  let grants: ReturnType<typeof spyOn<typeof db, "getWorkspaceGrant">>;
   let metadata: ReturnType<typeof spyOn<typeof db, "getConnectionMetadata">>;
   let attempts: ReturnType<typeof spyOn<typeof db, "getConnectAttempt">>;
   let persist: ReturnType<typeof spyOn<typeof db, "persistProviderOAuthConnection">>;
@@ -286,7 +290,7 @@ describe("independent native consent for delegated provider setup", () => {
     const validation = spyOn(canonical, "validateCanonicalHumanSession").mockImplementation(
       async () => nativeSessionValid,
     );
-    const key = spyOn(db, "findActiveApiKeyByHash").mockResolvedValue(null);
+    apiKeys = spyOn(db, "findActiveApiKeyByHash").mockResolvedValue(null);
     const rls = spyOn(db, "withWorkspaceSubjectRls").mockImplementation(async (_, __, ___, use) =>
       use(deps.db),
     );
@@ -296,7 +300,7 @@ describe("independent native consent for delegated provider setup", () => {
     const lifecycle = spyOn(db, "lockExternalWorkspaceMembershipLifecycle").mockResolvedValue(
       undefined,
     );
-    const grant = spyOn(db, "getWorkspaceGrant").mockImplementation(async (_, person, ws) =>
+    grants = spyOn(db, "getWorkspaceGrant").mockImplementation(async (_, person, ws) =>
       authorityLive
         ? (live.workspaceGrants.find(
             (candidate) => candidate.subjectId === person && candidate.workspaceId === ws,
@@ -342,11 +346,11 @@ describe("independent native consent for delegated provider setup", () => {
       profile,
       access,
       validation,
-      key,
+      apiKeys,
       rls,
       statementTimeout,
       lifecycle,
-      grant,
+      grants,
       personal,
       nonce,
       acquisition,
@@ -518,6 +522,405 @@ describe("independent native consent for delegated provider setup", () => {
       resolvedHeaders.set("cookie", `${cookie}; ${callbackCookies.get(raw)}`);
     return new Request(url, { headers: resolvedHeaders });
   }
+
+  function externalSocialFixture() {
+    const token = "social-external-organization-test-key";
+    const externalSubject = `external_user:${identityId}`;
+    const reference = { externalId: "social-host-person", source: "fixture-host" };
+    const destination = "https://host.example.test/exact-social-return?opaque=kept";
+    let current = ConnectAttempt.parse({
+      id: attemptId,
+      workspaceId,
+      providerId: "x",
+      ownership: "workspace",
+      revision: 1,
+      state: "requires_user_action",
+      credentialsCommitted: false,
+      integrationInstalled: false,
+      completionRequirement: "connection",
+      nextAction: { type: "authorize", url: "https://x.com/i/oauth2/authorize" },
+      expiresAt: new Date(Date.now() + 600_000).toISOString(),
+    });
+    let origin: ExternalActorContinuation | null = null;
+    let context: social.SocialOAuthStartContext | null = null;
+    const controls = { revoked: false, revokeAtClaim: false, revokeAfterExchange: false };
+    apiKeys.mockImplementation(async (_, hash) =>
+      hash === createHash("sha256").update(token).digest("hex")
+        ? ({
+            id: connectionId,
+            accountId: organizationId,
+            workspaceId: null,
+            credentialKind: "organization",
+            name: "Social external test host",
+            permissions: ["workspace:admin"],
+          } as never)
+        : null,
+    );
+    const key = spyOn(db, "lockActiveExternalOrganizationKey").mockImplementation(
+      async (_, org, id) =>
+        !controls.revoked && org === organizationId && id === connectionId
+          ? ["workspace:admin"]
+          : null,
+    );
+    const identity = spyOn(db, "ensureExternalIdentity").mockImplementation(async (_, input) => {
+      if (
+        input.accountId !== organizationId ||
+        input.externalId !== reference.externalId ||
+        input.source !== reference.source
+      )
+        throw new Error("External continuation authority unavailable");
+      return {
+        id: identityId,
+        accountId: organizationId,
+        subjectId: externalSubject,
+        authorizationRevision: 1,
+        personalWorkspaceId: otherId,
+        ...reference,
+      } as never;
+    });
+    grants.mockImplementation(async (_, person, ws) =>
+      person === externalSubject && ws === workspaceId
+        ? {
+            accountId: organizationId,
+            workspaceId,
+            subjectId: externalSubject,
+            principalKind: "human_session",
+            permissions: ["workspace:admin"],
+          }
+        : null,
+    );
+    attempts.mockImplementation(async (_, scope, id) => {
+      if (
+        scope.accountId !== organizationId ||
+        scope.workspaceId !== workspaceId ||
+        scope.subjectId !== externalSubject ||
+        id !== attemptId
+      )
+        throw new HTTPException(404, { message: "Original Social attempt not found" });
+      return {
+        attempt: structuredClone(current),
+        returnUrl: destination,
+        operationInFlight: false,
+      };
+    });
+    const claim = spyOn(db, "claimConnectOperation").mockImplementation(async (_, scope, input) => {
+      expect(scope).toMatchObject({
+        accountId: organizationId,
+        workspaceId,
+        subjectId: externalSubject,
+      });
+      expect(input.expectedRevision).toBe(current.revision);
+      if (controls.revokeAtClaim) controls.revoked = true;
+      await input.authorize?.(deps.db, structuredClone(current), origin);
+      await input.authorizeAcquisition?.(deps.db, structuredClone(current));
+      return { status: "claimed", attempt: structuredClone(current) };
+    });
+    const finish = spyOn(db, "finishConnectOperation").mockImplementation(
+      async (_, scope, input) => {
+        expect(scope).toMatchObject({
+          accountId: organizationId,
+          workspaceId,
+          subjectId: externalSubject,
+        });
+        await input.authorize?.(deps.db, structuredClone(current), origin);
+        await input.authorizeAcquisition?.(deps.db, structuredClone(current));
+        current = ConnectAttempt.parse(await input.commit(deps.db, structuredClone(current)));
+        return structuredClone(current);
+      },
+    );
+    const write = spyOn(db, "upsertSocialOAuthConnection").mockResolvedValue({
+      id: connectionId,
+      version: 1,
+    } as never);
+    const provider = mock(async (url: string, _init: RequestInit, _label: string) => {
+      if (url === "https://api.x.com/2/oauth2/token")
+        return Response.json({
+          access_token: "social-fixture-access",
+          token_type: "bearer",
+          scope: "tweet.read users.read",
+        });
+      if (url === "https://api.x.com/2/users/me") {
+        if (controls.revokeAfterExchange) controls.revoked = true;
+        return Response.json({
+          data: { id: "social-fixture-person", username: "host_person", name: "Host person" },
+        });
+      }
+      throw new Error("Unexpected Social provider fixture request");
+    });
+    extraCallbacks.social.mockImplementation(async (d, input) =>
+      realSocialCallback({ ...d, providerFetch: provider }, input),
+    );
+    for (const spy of [key, identity, claim, finish, write]) restores.push(() => spy.mockRestore());
+    app.post("/fixture/social/external-start", async (c) => {
+      const authorization = await requireAccessGrantAuthorization(
+        c,
+        deps,
+        workspaceId,
+        "workspace:admin",
+      );
+      expect(authorization.canonicalManagedHumanSession).toBe(false);
+      expect(authorization.canonicalLocalHumanSession).toBe(false);
+      origin = externalActorContinuationForAuthorization(authorization);
+      expect(origin).not.toBeNull();
+      context = {
+        accountId: authorization.grant.accountId,
+        workspaceId: authorization.grant.workspaceId,
+        subjectId: authorization.grant.subjectId,
+        connectAttemptId: attemptId,
+        externalContinuation: origin!,
+        personalOwnershipAllowed: false,
+        requestUrl: c.req.url,
+        payload: { provider: "x", ownership: "workspace" },
+      };
+      return c.json(
+        await social.startSocialOAuth({ db: deps.db, settings: deps.settings }, context),
+      );
+    });
+    return {
+      controls,
+      key,
+      identity,
+      claim,
+      finish,
+      write,
+      provider,
+      destination,
+      get current() {
+        return current;
+      },
+      get context() {
+        return context!;
+      },
+      get origin() {
+        return origin!;
+      },
+      async start() {
+        const response = await app.fetch(
+          new Request(`${baseUrl}/fixture/social/external-start`, {
+            method: "POST",
+            headers: {
+              authorization: `Bearer ${token}`,
+              "x-opengeni-external-actor": encodeURIComponent(
+                JSON.stringify({ mode: "external", identity: reference }),
+              ),
+            },
+          }),
+        );
+        expect(response.status).toBe(200);
+        expect(response.headers.get("set-cookie")).toBeNull();
+        const result = await response.json();
+        return { result, state: readSignedState(result.state, stateSecret)! };
+      },
+    };
+  }
+
+  test("Social genuine external Connect START permits its anonymous callback and retains the stored-origin fence through credential commit", async () => {
+    const fixture = externalSocialFixture();
+    const start = await fixture.start();
+    expect(start.state).toMatchObject({
+      kind: "social_oauth",
+      connectAttemptId: attemptId,
+      accountId: organizationId,
+      workspaceId,
+      subjectId: fixture.origin.actor.effectiveSubjectId,
+      ownership: "workspace",
+      personalOwnerVerified: false,
+    });
+    expect(
+      JSON.parse(
+        db.decryptEnvironmentValue(
+          encryptionKey,
+          String(start.state.encryptedExternalContinuation),
+        ),
+      ),
+    ).toEqual(fixture.origin);
+    expect(start.state.canonicalManagedHumanSession).toBeUndefined();
+    expect(start.state.sessionId).toBeUndefined();
+    const request = callback("social", start.result.state);
+    expect(request.headers.get("cookie")).toBeNull();
+    expect(request.headers.get("authorization")).toBeNull();
+    const response = await app.fetch(request);
+    expect(response.status).toBe(302);
+    expect(response.headers.get("location")).toBe(fixture.destination);
+    expect(fixture.claim).toHaveBeenCalledTimes(1);
+    expect(fixture.finish).toHaveBeenCalledTimes(1);
+    expect(fixture.key.mock.calls.length).toBeGreaterThanOrEqual(3);
+    expect(fixture.provider).toHaveBeenCalledTimes(2);
+    const tokenRequest = new URLSearchParams(String(fixture.provider.mock.calls[0]![1].body));
+    expect(tokenRequest.get("code_verifier")).toBe(
+      db.decryptEnvironmentValue(encryptionKey, String(start.state.encryptedPkceVerifier)),
+    );
+    expect(tokenRequest.get("grant_type")).toBe("authorization_code");
+    expect(fixture.write).toHaveBeenCalledTimes(1);
+    expect(fixture.write.mock.calls[0]![1]).toMatchObject({
+      accountId: organizationId,
+      workspaceId,
+      subjectId: null,
+      provider: "x",
+      accountHandle: "host_person",
+    });
+    expect(
+      JSON.parse(
+        db.decryptEnvironmentValue(
+          encryptionKey,
+          fixture.write.mock.calls[0]![1].credentialEncrypted,
+        ),
+      ),
+    ).toMatchObject({ provider: "x", accessToken: "social-fixture-access" });
+    expect(fixture.current).toMatchObject({
+      state: "complete",
+      revision: 2,
+      credentialsCommitted: true,
+    });
+    expect(sessions).not.toHaveBeenCalled();
+    expect(execute).not.toHaveBeenCalled();
+  });
+  test("Social external provider denial reaches the durable original-origin operation without exchanging or storing credentials", async () => {
+    const fixture = externalSocialFixture();
+    const start = await fixture.start();
+    const response = await app.fetch(
+      callback("social", start.result.state, undefined, "access_denied"),
+    );
+    expect(response.status).toBe(302);
+    expect(response.headers.get("location")).toBe(fixture.destination);
+    expect(fixture.claim).toHaveBeenCalledTimes(1);
+    expect(fixture.finish).toHaveBeenCalledTimes(1);
+    expect(fixture.current).toMatchObject({
+      state: "cancelled",
+      revision: 2,
+      credentialsCommitted: false,
+    });
+    expect(fixture.provider).not.toHaveBeenCalled();
+    expect(fixture.write).not.toHaveBeenCalled();
+    expect(sessions).not.toHaveBeenCalled();
+  });
+  test("Social rejects trusted external continuation without a durable Connect attempt", async () => {
+    const fixture = externalSocialFixture();
+    await fixture.start();
+    const acquisitionCalls = acquisition.mock.calls.length;
+    const { connectAttemptId: _attempt, ...withoutAttempt } = fixture.context;
+    await expect(
+      social.startSocialOAuth({ db: deps.db, settings: deps.settings }, withoutAttempt),
+    ).rejects.toMatchObject({ status: 422 });
+    expect(acquisition).toHaveBeenCalledTimes(acquisitionCalls);
+    expect(fixture.claim).not.toHaveBeenCalled();
+    expect(fixture.provider).not.toHaveBeenCalled();
+    expect(fixture.write).not.toHaveBeenCalled();
+  });
+  test("Social revoked encrypted external origin denies anonymous callback before lower claim or provider work", async () => {
+    const fixture = externalSocialFixture();
+    const start = await fixture.start();
+    fixture.controls.revoked = true;
+    expect((await app.fetch(callback("social", start.result.state))).status).toBe(403);
+    expect(extraCallbacks.social).not.toHaveBeenCalled();
+    expect(fixture.claim).not.toHaveBeenCalled();
+    expect(fixture.provider).not.toHaveBeenCalled();
+    expect(fixture.write).not.toHaveBeenCalled();
+  });
+  test("Social lower claim rechecks the durable original origin after encrypted callback admission", async () => {
+    const fixture = externalSocialFixture();
+    const start = await fixture.start();
+    fixture.controls.revokeAtClaim = true;
+    const response = await app.fetch(callback("social", start.result.state));
+    expect(response.status).toBe(302);
+    expect(response.headers.get("location")).toBe(fixture.destination);
+    expect(fixture.claim).toHaveBeenCalledTimes(1);
+    expect(fixture.finish).not.toHaveBeenCalled();
+    expect(fixture.provider).not.toHaveBeenCalled();
+    expect(fixture.write).not.toHaveBeenCalled();
+    expect(fixture.current.credentialsCommitted).toBe(false);
+  });
+  test("Social original-origin revocation after provider exchange prevents credential commit", async () => {
+    const fixture = externalSocialFixture();
+    const start = await fixture.start();
+    fixture.controls.revokeAfterExchange = true;
+    const response = await app.fetch(callback("social", start.result.state));
+    expect(response.status).toBe(302);
+    expect(response.headers.get("location")).toBe(fixture.destination);
+    expect(fixture.provider).toHaveBeenCalledTimes(2);
+    expect(fixture.finish).toHaveBeenCalledTimes(1);
+    expect(fixture.write).not.toHaveBeenCalled();
+    expect(fixture.current).toMatchObject({
+      state: "requires_user_action",
+      revision: 1,
+      credentialsCommitted: false,
+    });
+  });
+  test("Social encrypted continuation rejects actor, organization, workspace, generation and ciphertext substitution", async () => {
+    const fixture = externalSocialFixture();
+    const start = await fixture.start();
+    for (const change of [
+      { accountId: otherId },
+      { workspaceId: connectionId },
+      { subjectId },
+      { encryptedExternalContinuation: "invalid-ciphertext" },
+      {
+        encryptedExternalContinuation: db.encryptEnvironmentValue(
+          encryptionKey,
+          JSON.stringify({
+            ...fixture.origin,
+            actor: { ...fixture.origin.actor, externalIdentityId: otherId },
+          }),
+        ),
+      },
+      {
+        encryptedExternalContinuation: db.encryptEnvironmentValue(
+          encryptionKey,
+          JSON.stringify({
+            ...fixture.origin,
+            actor: { ...fixture.origin.actor, externalAuthorizationRevision: 2 },
+          }),
+        ),
+      },
+      {
+        encryptedExternalContinuation: db.encryptEnvironmentValue(
+          encryptionKey,
+          JSON.stringify({
+            ...fixture.origin,
+            actor: { ...fixture.origin.actor, authenticatingApiKeyId: otherId },
+          }),
+        ),
+      },
+    ])
+      expect(
+        (await app.fetch(callback("social", signed({ ...start.state, ...change })))).status,
+      ).toBe(403);
+    const tampered = await app.fetch(callback("social", `${start.result.state}forged`));
+    expect(tampered.status).toBe(302);
+    expect(tampered.headers.get("location")).toContain("reason=state_invalid");
+    expect(extraCallbacks.social).not.toHaveBeenCalled();
+    expect(fixture.claim).not.toHaveBeenCalled();
+    expect(fixture.provider).not.toHaveBeenCalled();
+    expect(fixture.write).not.toHaveBeenCalled();
+  });
+  test("Social genuine external state cannot be redeemed through raw delegated proof, Authorization or fake native presence", async () => {
+    const fixture = externalSocialFixture();
+    const start = await fixture.start();
+    const typed = callback("social", start.result.state);
+    stampDelegatedHumanAuthorization(typed, {
+      organizationId,
+      subjectId,
+      permissions: ["workspace:admin"],
+      workspaceScope: { kind: "selected", workspaceIds: [workspaceId] },
+    });
+    for (const request of [
+      typed,
+      callback("social", start.result.state, {
+        authorization: "Bearer social-external-organization-test-key",
+        cookie,
+        "x-opengeni-canonical-human": "true",
+      }),
+    ])
+      expect((await app.fetch(request)).status).toBe(403);
+    const { encryptedExternalContinuation: _continuation, ...nativeShaped } = start.state;
+    for (const headers of [undefined, { cookie }])
+      expect((await app.fetch(callback("social", signed(nativeShaped), headers))).status).toBe(403);
+    expect(extraCallbacks.social).not.toHaveBeenCalled();
+    expect(fixture.claim).not.toHaveBeenCalled();
+    expect(fixture.provider).not.toHaveBeenCalled();
+    expect(fixture.write).not.toHaveBeenCalled();
+    expect(sessions).not.toHaveBeenCalled();
+  });
   async function legacyBearer(principalKind: "human_session" | "service") {
     return `Bearer ${await signDelegatedAccessToken(delegationSecret, { accountId: organizationId, workspaceId, subjectId, principalKind, permissions: ["connections:write"], exp: Math.floor(Date.now() / 1000) + 600 })}`;
   }
