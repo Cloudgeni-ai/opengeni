@@ -493,14 +493,15 @@ const MAX_TRACKED_RATE_LIMIT_BUCKETS = 10_000;
 
 // A minimal per-key token bucket. capacity = burst; refillPerSecond = sustained
 // rate. Source buckets are created lazily and refill on access without a timer.
-// Once the storage cap is reached, new sources share one overflow bucket; existing
-// buckets are never evicted, so source churn cannot reset a depleted bucket.
+// At the storage cap, reclaim only a source idle for a complete burst-refill
+// period. Its quota would already be full, so eviction cannot reset a depleted
+// bucket. Until a slot becomes idle, refuse new sources without sharing quota.
 export class TokenBucket {
   private readonly capacity: number;
   private readonly refillPerSecond: number;
   private readonly maxBuckets = MAX_TRACKED_RATE_LIMIT_BUCKETS;
   private readonly buckets = new Map<string, { tokens: number; updatedAt: number }>();
-  private overflowBucket: { tokens: number; updatedAt: number } | undefined;
+  private latestObservedTime = Number.NEGATIVE_INFINITY;
 
   constructor(options: { capacity: number; refillPerSecond: number }) {
     this.capacity = options.capacity;
@@ -508,24 +509,31 @@ export class TokenBucket {
   }
 
   get bucketCount(): number {
-    return this.buckets.size + (this.overflowBucket ? 1 : 0);
+    return this.buckets.size;
   }
 
   take(key: string, now = Date.now()): boolean {
+    now = Math.max(now, this.latestObservedTime);
+    this.latestObservedTime = now;
     const existingBucket = this.buckets.get(key);
     let bucket = existingBucket;
     if (!bucket) {
-      if (this.buckets.size < this.maxBuckets - 1) {
-        bucket = { tokens: this.capacity, updatedAt: now };
-        this.buckets.set(key, bucket);
-      } else {
-        bucket = this.overflowBucket ??= { tokens: this.capacity, updatedAt: now };
+      if (this.buckets.size >= this.maxBuckets) {
+        const oldest = this.buckets.entries().next().value;
+        const refillPeriodMs = (this.capacity / this.refillPerSecond) * 1000;
+        if (!oldest || now - oldest[1].updatedAt < refillPeriodMs) return false;
+        this.buckets.delete(oldest[0]);
       }
+      bucket = { tokens: this.capacity, updatedAt: now };
     }
 
     const elapsedSeconds = Math.max(0, (now - bucket.updatedAt) / 1000);
     bucket.tokens = Math.min(this.capacity, bucket.tokens + elapsedSeconds * this.refillPerSecond);
     bucket.updatedAt = Math.max(now, bucket.updatedAt);
+    // Keep the oldest idle source first, including denied attempts. With the
+    // monotonic observation clock this allows safe reclamation in constant time.
+    this.buckets.delete(key);
+    this.buckets.set(key, bucket);
     if (bucket.tokens < 1) {
       return false;
     }

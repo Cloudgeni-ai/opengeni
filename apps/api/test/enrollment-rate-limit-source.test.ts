@@ -73,4 +73,39 @@ describe("enrollment rate-limit source and bounded state", () => {
     expect(limiter.take("source-0", 0)).toBe(false);
     expect(limiter.bucketCount).toBe(10_000);
   });
+
+  test("reclaims idle sources after refill and grants independent bursts to new clients", () => {
+    const limiter = new TokenBucket({ capacity: 2, refillPerSecond: 1 });
+    for (let index = 0; index < 10_000; index += 1) {
+      expect(limiter.take(`source-${index}`, 0)).toBe(true);
+    }
+    expect(limiter.take("new-client-a", 1_999)).toBe(false);
+    expect(limiter.bucketCount).toBe(10_000);
+
+    expect(limiter.take("new-client-a", 2_000)).toBe(true);
+    expect(limiter.take("new-client-a", 2_000)).toBe(true);
+    expect(limiter.take("new-client-a", 2_000)).toBe(false);
+    expect(limiter.take("new-client-b", 2_000)).toBe(true);
+    expect(limiter.take("new-client-b", 2_000)).toBe(true);
+    expect(limiter.take("new-client-b", 2_000)).toBe(false);
+    expect(limiter.bucketCount).toBe(10_000);
+  });
+
+  test("source churn reclaims idle keys without resetting a recently depleted source", () => {
+    const limiter = new TokenBucket({ capacity: 2, refillPerSecond: 1 });
+    for (let index = 0; index < 10_000; index += 1) {
+      expect(limiter.take(`source-${index}`, 0)).toBe(true);
+    }
+    expect(limiter.take("source-0", 0)).toBe(true);
+    expect(limiter.take("source-0", 1_000)).toBe(true);
+    for (let index = 0; index < 9_999; index += 1) {
+      expect(limiter.take(`new-client-${index}`, 2_000)).toBe(true);
+    }
+    expect(limiter.take("source-0", 2_000)).toBe(true);
+    expect(limiter.take("source-0", 2_000)).toBe(false);
+    expect(limiter.take("source-0", 1_000)).toBe(false);
+    expect(limiter.take("one-more-source", 2_000)).toBe(false);
+    expect(limiter.bucketCount).toBe(10_000);
+    expect(limiter.take("one-more-source", 4_000)).toBe(true);
+  });
 });
