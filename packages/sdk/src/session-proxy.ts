@@ -80,7 +80,7 @@ export type SessionProxyCreateInput = {
 export type SessionProxyMessageInput = {
   /** Absent for `create`. */
   sessionId?: string | undefined;
-  delivery: "create" | "send" | "steer" | "submit" | "approval" | "human-input";
+  delivery: "create" | "send" | "steer" | "submit";
 };
 
 /** Server-side additions the host attaches to one forwarded user message or response. */
@@ -368,7 +368,7 @@ export function createSessionProxyHandler(
             : {}),
         };
       };
-      /** Responses keep their own payload shape; only credentials are added. */
+      /** Responses reuse send hooks unchanged; only credentials are added. */
       const forwardResponse = async (
         value: unknown,
         input: SessionProxyMessageInput,
@@ -666,7 +666,7 @@ export function createSessionProxyHandler(
               ? await forwardMessage(event.payload, { sessionId, delivery: "send" })
               : await forwardResponse(event.payload, {
                   sessionId,
-                  delivery: event.type === "user.approvalDecision" ? "approval" : "human-input",
+                  delivery: "send",
                 });
           return await forward(
             `${session}/events`,

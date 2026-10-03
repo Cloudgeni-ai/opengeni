@@ -171,7 +171,7 @@ describe("framework adapters", () => {
   for (const adapter of ["Next.js", "Express/Connect", "Hono"] as const) {
     for (const action of [
       {
-        delivery: "approval",
+        label: "approval",
         event: {
           type: "user.approvalDecision",
           clientEventId: "approval-retry",
@@ -179,7 +179,7 @@ describe("framework adapters", () => {
         },
       },
       {
-        delivery: "human-input",
+        label: "human-input",
         event: {
           type: "user.humanInputResponse",
           clientEventId: "human-input-retry",
@@ -187,7 +187,7 @@ describe("framework adapters", () => {
         },
       },
     ] as const) {
-      test(`${adapter}: ${action.delivery} refresh, browser rejection, and hook refusal`, async () => {
+      test(`${adapter}: ${action.label} refresh, browser rejection, and hook refusal`, async () => {
         const upstream: Array<{ path: string; body: unknown; headers: Headers }> = [];
         const inputs: SessionProxyMessageInput[] = [];
         const updates = [{ id: "crm", headers: { Authorization: "test-rotation" } }];
@@ -209,6 +209,7 @@ describe("framework adapters", () => {
           resolve: () => ({ workspaceId: WORKSPACE_ID, user: "u_1", source: "product" }),
           beforeForwardMessage: async (input, context) => {
             inputs.push(input);
+            if (input.delivery !== "send") return;
             expect(context.user).toBe("u_1");
             expect(context.workspaceId).toBe(WORKSPACE_ID);
             expect(context.source).toBe("product");
@@ -281,7 +282,7 @@ describe("framework adapters", () => {
           expect(inputs).toEqual(
             Array.from({ length: forwarded }, () => ({
               sessionId: SESSION_ID,
-              delivery: action.delivery,
+              delivery: "send",
             })),
           );
 

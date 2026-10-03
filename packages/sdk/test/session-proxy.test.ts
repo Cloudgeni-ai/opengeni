@@ -23,7 +23,7 @@ const PRODUCT = "https://product.example.test";
 const API = "https://api.example.test";
 const RESPONSE_EVENTS = [
   {
-    delivery: "approval",
+    label: "approval",
     event: {
       type: "user.approvalDecision",
       clientEventId: "approval-retry",
@@ -31,7 +31,7 @@ const RESPONSE_EVENTS = [
     },
   },
   {
-    delivery: "human-input",
+    label: "human-input",
     event: {
       type: "user.humanInputResponse",
       clientEventId: "human-input-retry",
@@ -45,7 +45,7 @@ const RESPONSE_EVENTS = [
     },
   },
 ] satisfies Array<{
-  delivery: SessionProxyMessageInput["delivery"];
+  label: string;
   event: ClientSessionEventInput;
 }>;
 
@@ -716,14 +716,15 @@ describe("createSessionProxyHandler", () => {
     expect(upstream.requests).toHaveLength(0);
   });
 
-  for (const { delivery, event } of RESPONSE_EVENTS) {
-    test(`beforeForwardMessage refreshes ${delivery} credentials without changing the response`, async () => {
+  for (const { label, event } of RESPONSE_EVENTS) {
+    test(`existing send-only hook refreshes ${label} credentials without changing the response`, async () => {
       const inputs: SessionProxyMessageInput[] = [];
       const updates = [{ id: "crm", headers: { Authorization: "test-rotation" } }];
       const { upstream, browser } = setup({
         modelSelection: false,
         beforeForwardMessage: async (input, context) => {
           inputs.push(input);
+          if (input.delivery !== "send") return;
           expect(context.workspaceId).toBe(WORKSPACE_ID);
           expect(context.user).toBe("u_42");
           expect(context.source).toBe("northwind");
@@ -738,7 +739,7 @@ describe("createSessionProxyHandler", () => {
         },
       });
       const response = await browser.sendEvent(WORKSPACE_ID, SESSION_ID, event);
-      expect(inputs).toEqual([{ sessionId: SESSION_ID, delivery }]);
+      expect(inputs).toEqual([{ sessionId: SESSION_ID, delivery: "send" }]);
       expect(upstream.requests).toHaveLength(1);
       expect(upstream.requests[0]!.method).toBe("POST");
       expect(upstream.requests[0]!.url.pathname).toBe(
@@ -753,7 +754,7 @@ describe("createSessionProxyHandler", () => {
       expect(response).not.toHaveProperty("metadata");
     });
 
-    test(`${delivery} payloads stay unchanged without credential extras`, async () => {
+    test(`${label} payloads stay unchanged without credential extras`, async () => {
       for (const extras of [
         undefined,
         {},
@@ -768,7 +769,7 @@ describe("createSessionProxyHandler", () => {
       }
     });
 
-    test(`browser ${delivery} credential updates are rejected before the hook`, async () => {
+    test(`browser ${label} credential updates are rejected before the hook`, async () => {
       let hookCalls = 0;
       const { upstream, browser } = setup({
         beforeForwardMessage: () => {
@@ -796,7 +797,7 @@ describe("createSessionProxyHandler", () => {
       expect(upstream.requests).toHaveLength(0);
     });
 
-    test(`beforeForwardMessage can refuse ${delivery} without forwarding`, async () => {
+    test(`beforeForwardMessage can refuse ${label} without forwarding`, async () => {
       const { upstream, handler } = setup({
         beforeForwardMessage: () =>
           new Response("Reauthenticate", {
@@ -820,7 +821,7 @@ describe("createSessionProxyHandler", () => {
       expect(upstream.requests).toHaveLength(0);
     });
 
-    test(`malformed ${delivery} payloads do not invoke the hook or forward`, async () => {
+    test(`malformed ${label} payloads do not invoke the hook or forward`, async () => {
       let hookCalls = 0;
       const { upstream, browser } = setup({
         beforeForwardMessage: () => {
@@ -845,6 +846,7 @@ describe("createSessionProxyHandler", () => {
     const { upstream, browser } = setup({
       beforeForwardMessage: (input) => {
         inputs.push(input);
+        if (input.delivery !== "send") return;
         return { mcpCredentialUpdates: updates };
       },
     });
@@ -861,8 +863,8 @@ describe("createSessionProxyHandler", () => {
       { clientEventId: "skip-retry" },
     );
     expect(inputs).toEqual([
-      { sessionId: SESSION_ID, delivery: "approval" },
-      { sessionId: SESSION_ID, delivery: "human-input" },
+      { sessionId: SESSION_ID, delivery: "send" },
+      { sessionId: SESSION_ID, delivery: "send" },
     ]);
     expect(upstream.requests.map((request) => request.body)).toEqual([
       {

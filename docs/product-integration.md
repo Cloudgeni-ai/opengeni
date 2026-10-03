@@ -886,10 +886,7 @@ A session-specific remote MCP server may instead be supplied in
 `createSession.mcpServers` with a URL, allowed tools, approval policy, and
 write-only credential headers or a non-secret `connectionRef`. Credential
 headers are encrypted at rest and omitted from session/event responses. A later
-accepted message or approval/human-input response can carry the supported MCP
-credential update for atomic rotation before resume. The packaged proxy's
-`beforeForwardMessage` hook refreshes credentials on both response kinds too;
-the browser cannot supply credential updates, and response events omit values.
+accepted message can carry the supported MCP credential update for rotation.
 
 OpenGeni credential brokerage is not zero knowledge: the trusted control plane
 can decrypt a stored credential to construct the authorized provider request.

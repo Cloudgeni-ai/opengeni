@@ -202,19 +202,17 @@ check on top of OpenGeni's own membership and visibility checks. Without
 so cookie-authenticated hosts should pass their CSRF check.
 
 `beforeForwardMessage(message, context)` runs before every forwarded user
-message (send, steer, composer submit, and a browser-started create), approval
-decision, and human-input response. `delivery` is `"create"`, `"send"`, `"steer"`,
-`"submit"`, `"approval"`, or `"human-input"`. The hook may return server-owned
-additions, or a `Response` to refuse the action:
+message (send, steer, composer submit, and a browser-started create) and may
+return server-owned additions, or a `Response` to refuse the message:
 
 ```ts
 createSessionProxyHandler(og, {
   resolve,
   beforeForwardMessage: async ({ sessionId, delivery }, { user }) => ({
-    // Model-visible, placed before browser context; ignored for approval/human-input.
+    // Model-visible, placed before any context the browser sent.
     modelContext: `Page ${currentPage(user)} · ${timeZone(user)} · ${today()}`,
     // Header-only rotation of MCP servers already attached to the session,
-    // applied atomically as the message or response is accepted (ignored on create).
+    // applied atomically as the message is accepted (ignored on create).
     mcpCredentialUpdates: [
       { id: "acme", headers: { Authorization: `Bearer ${await mintUserToken(user)}` } },
     ],
@@ -225,12 +223,8 @@ createSessionProxyHandler(og, {
 This is the per-user tool token pattern: create the session with
 `mcpServers: [{ id: "acme", url, headers }]` (and `tools: [{ kind: "mcp", id:
 "acme" }]`, which the acting user needs `mcp_servers:attach` to attach), then
-hand the MCP server a fresh short-lived bearer on every message, approval
-decision, or human-input response. Responses retain their original event and
-payload shape with only server-owned `mcpCredentialUpdates` added; the hook's
-`modelContext` is never added to a response. The browser still cannot send
-`mcpCredentialUpdates` itself, including on approval/human-input payloads.
-With `modelSelection: false`
+hand the MCP server a fresh short-lived bearer on every message. The browser
+still cannot send `mcpCredentialUpdates` itself. With `modelSelection: false`
 the proxy reports `modelSelection: false` in the client config, and
 `SessionConversation` hides its model picker.
 

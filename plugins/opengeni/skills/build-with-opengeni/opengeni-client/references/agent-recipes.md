@@ -80,8 +80,7 @@ runtime mechanics keep their own authorization paths.
 ## Per-user tool tokens
 
 When the product's MCP server should act as the signed-in user, give each
-session a short-lived per-user bearer and rotate it on every message and
-approval/human-input response:
+session a short-lived per-user bearer and rotate it on every message:
 
 1. Onboard the user with `mcp_servers:attach` among their permissions.
 2. Create the session as that user with
@@ -90,10 +89,8 @@ approval/human-input response:
 3. In `createSessionProxyHandler`, return a fresh token from
    `beforeForwardMessage`:
    `{ mcpCredentialUpdates: [{ id, headers: { Authorization: "Bearer <new>" } }] }`.
-   OpenGeni applies it atomically as the message or response is accepted, before
-   resuming a waiting tool call; the browser can never send credential updates
-   itself. The same hook covers Reject and Skip, including through the framework
-   adapters. Message context is not added to approval/human-input responses.
+   OpenGeni applies it atomically as the message is accepted; the browser can
+   never send credential updates itself.
 4. The MCP server validates the token and enforces the user's own permissions.
 
 Make the token outlive long agent work by default (hours, refreshed on every message); this is a default, never a question for the user. Header

@@ -569,8 +569,7 @@ runtime mechanics keep their own authorization paths.
 ## Per-user tool tokens
 
 When the product's MCP server should act as the signed-in user, give each
-session a short-lived per-user bearer and rotate it on every message and
-approval/human-input response:
+session a short-lived per-user bearer and rotate it on every message:
 
 1. Onboard the user with `mcp_servers:attach` among their permissions.
 2. Create the session as that user with
@@ -579,10 +578,8 @@ approval/human-input response:
 3. In `createSessionProxyHandler`, return a fresh token from
    `beforeForwardMessage`:
    `{ mcpCredentialUpdates: [{ id, headers: { Authorization: "Bearer <new>" } }] }`.
-   OpenGeni applies it atomically as the message or response is accepted, before
-   resuming a waiting tool call; the browser can never send credential updates
-   itself. The same hook covers Reject and Skip, including through the framework
-   adapters. Message context is not added to approval/human-input responses.
+   OpenGeni applies it atomically as the message is accepted; the browser can
+   never send credential updates itself.
 4. The MCP server validates the token and enforces the user's own permissions.
 
 Make the token outlive long agent work by default (hours, refreshed on every message); this is a default, never a question for the user. Header
@@ -1678,23 +1675,7 @@ Selected MCP servers are prepared lazily by default: the model discovers their t
 
 For session-specific MCP credentials, createSession stores header values encrypted and returns only metadata such as header names and credential version. Later accepted message requests can rotate those values through the supported MCP credential-update field without recreating the session. For workspace Connections, rotate or reconnect the Connection with optimistic versioning; installed Integrations continue to reference its stable ID.
 
-In `createSessionProxyHandler`, return fresh headers from `beforeForwardMessage`
-as `{ mcpCredentialUpdates: [{ id, headers: { Authorization: "Bearer <fresh>" } }] }`.
-The hook runs for Send, Steer, composer submit, and approval/human-input responses
-(including Reject and Skip), through the Next, Express, and Hono adapters too.
-This matters when a human answers after the original token has expired: refresh
-on the response, not only on the next message. The browser cannot supply updates;
-the authenticated product backend owns minting and authorization. `modelContext`
-applies only to messages, not approval or human-input response payloads.
-
-Direct backend `user.approvalDecision` and `user.humanInputResponse` events may
-also include optional `payload.mcpCredentialUpdates`. Nonempty updates require
-`mcp_servers:attach` in addition to normal response authority. Updates replace
-the complete encrypted header map for an existing session server and increment
-its credential version in the response transaction before resume. They cannot
-change URLs, tools, approval policies, or connection references. Invalid or stale
-responses do not rotate; response replay does not rotate twice. Header values
-never enter response events, browser replies, or model history.
+The existing `beforeForwardMessage` send hook also refreshes MCP credentials automatically on approval/human-input responses; no integration changes are needed.
 
 Prefer short-lived, audience-bound tokens when the customer can issue them. Let the customer's authenticated backend mint or refresh a token for the exact product subject and data boundary. A workspace-wide credential is appropriate only when every session in that workspace may exercise the same provider authority.
 
@@ -3236,12 +3217,6 @@ Message rules (send, steer, draft, submit): reject `mcpCredentialUpdates`;
 `reasoningEffort` and `latencyMode` if your product fixes the model. Your server
 may add `modelContext` (page state) and `mcpCredentialUpdates` (fresh tool
 tokens) before forwarding.
-
-Approval/human-input response rules: reject browser-supplied
-`payload.mcpCredentialUpdates` too. Your authenticated backend may add fresh
-`payload.mcpCredentialUpdates` before forwarding either response, including
-Reject/Skip, but must not add message-only `modelContext`. OpenGeni commits the
-encrypted replacements atomically with the accepted response before resume.
 
 Artifact and Site viewing (the JS handler's opt-in `artifacts: true`) is not in
 this list: it needs a per-user cache partition in `config/client`, live

@@ -48,12 +48,6 @@ Message rules (send, steer, draft, submit): reject `mcpCredentialUpdates`;
 may add `modelContext` (page state) and `mcpCredentialUpdates` (fresh tool
 tokens) before forwarding.
 
-Approval/human-input response rules: reject browser-supplied
-`payload.mcpCredentialUpdates` too. Your authenticated backend may add fresh
-`payload.mcpCredentialUpdates` before forwarding either response, including
-Reject/Skip, but must not add message-only `modelContext`. OpenGeni commits the
-encrypted replacements atomically with the accepted response before resume.
-
 Artifact and Site viewing (the JS handler's opt-in `artifacts: true`) is not in
 this list: it needs a per-user cache partition in `config/client`, live
 tickets, and a session-scope check on every read (`x-opengeni-session-id` plus

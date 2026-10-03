@@ -42,11 +42,8 @@ Either way, the tool must also be **selected** in the session's `tools`. Nothing
     Header values are encrypted at rest and never returned in responses or events.
 
   </Step>
-  <Step title="Refresh on messages and human responses">
-    `beforeForwardMessage` runs on your server before each forwarded message,
-    approval decision, or human-input response (including Reject and Skip).
-    The Next, Express, and Hono adapters use the same hook. Return a fresh token
-    so a long wait for a person cannot resume with an expired credential:
+  <Step title="Rotate the token on every message">
+    `beforeForwardMessage` runs on your server before each message the browser sends. Return a fresh token and any per-message context:
 
     ```ts
     createSessionProxyHandler(og, {
@@ -58,10 +55,7 @@ Either way, the tool must also be **selected** in the session's `tools`. Nothing
     });
     ```
 
-    OpenGeni applies the update atomically as the message or response is accepted,
-    before resume. Replays do not rotate twice. The browser can never send
-    credential updates itself, and response events never contain header values.
-    `modelContext` is used only for messages, not approval/human-input responses.
+    OpenGeni applies the update atomically as the message is accepted. The browser can never send credential updates itself.
 
   </Step>
   <Step title="Authorize every call in your MCP server">
