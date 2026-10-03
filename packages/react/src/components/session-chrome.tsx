@@ -221,6 +221,9 @@ export function sessionChromeGoalPillExplanation(
       ? `Continues at ${formatClockTime(continuation.nextAttemptAt)}.`
       : "Waiting to continue automatically.";
   }
+  if (state === "waiting" && continuation?.reason === "system_work_pending") {
+    return "Waiting for other session work to finish before the goal continues automatically.";
+  }
   if (state === "held" && continuation?.reason === "held_for_input") {
     const reason = continuation.holdReason?.trim();
     const until = continuation.nextAttemptAt
@@ -350,7 +353,12 @@ export function sessionChromeGoalPillState(
   // next evaluation at `nextAttemptAt`) is an ordinary scheduled state.
   if (continuation.state === "scheduled") return "scheduled";
   if (continuation.state === "blocked") {
-    if (continuation.reason === "human_turn_running") return "waiting";
+    if (
+      continuation.reason === "human_turn_running" ||
+      continuation.reason === "system_work_pending"
+    ) {
+      return "waiting";
+    }
     // `held_for_input` is the agent's own wait_for_input hold (waiting for child
     // results / external input until a deadline); it shares the Held pill.
     return continuation.reason === "workstream_paused" || continuation.reason === "held_for_input"
