@@ -323,8 +323,8 @@ async function main(): Promise<void> {
   clearInterval(sampler);
   clearTimeout(deadline);
   if (escalation) clearTimeout(escalation);
-  process.removeListener("SIGINT", onSigint);
-  process.removeListener("SIGTERM", onSigterm);
+  process.off("SIGINT", onSigint);
+  process.off("SIGTERM", onSigterm);
   const after = cgroupSnapshot();
   if (
     after.memoryBytes !== null &&
