@@ -27,6 +27,8 @@ icon: "palette"
 
 The new-chat composer is the same as the follow-up one: attachments, your `conversationProps.composerProps`, and the model picker when offered. Files attached to the first message are added to the new chat.
 
+Once a chat exists, its composer shows a live voice button when your workspace has a voice model available (for example hosted GPT Live, paid from your Opengeni credits per minute). The user talks, the voice model answers, hands work to the agent in the same chat, and the transcript appears in the timeline. The button is hidden when no voice model is available. To turn voice off, pass `realtimeVoice: false` to `createSessionProxyHandler`, or `conversationProps={{ realtimeVoice: false }}`.
+
 If your app authenticates with a bearer token instead of cookies, pass it on every request and read it in the proxy's `resolve`:
 
 ```tsx

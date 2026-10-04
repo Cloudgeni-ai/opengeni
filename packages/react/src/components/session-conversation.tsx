@@ -34,6 +34,7 @@ import {
   createWorkspaceRetainedArtifactLoader,
   createWorkspaceRetainedVideoLoader,
 } from "../timeline/retained-loaders";
+import { useRealtimeVoiceModels } from "../hooks/use-realtime-voice-models";
 import { projectPendingApprovals } from "../approvals";
 import { ApprovalSurface } from "./approval-surface";
 import { ChatComposer, type ChatComposerProps } from "./chat-composer";
@@ -127,6 +128,12 @@ export type SessionConversationProps = ClientOverride &
      */
     voiceInput?: boolean | undefined;
     /**
+     * Live speech-to-speech voice in the composer. Defaults to true; the voice
+     * button appears only when the workspace offers an available voice model
+     * and the proxy has not turned it off (`realtimeVoice: false`).
+     */
+    realtimeVoice?: boolean | undefined;
+    /**
      * Show the model/reasoning picker. End users of an embedded product rarely
      * choose models, so it is hidden unless this is `true` or the client config
      * reports `modelSelection: true` (`createSessionProxyHandler({ modelSelection: true })`).
@@ -210,6 +217,7 @@ function Conversation({
   allowanceExhaustedLabels,
   attachments: attachmentsRequested = true,
   voiceInput: voiceInputRequested = true,
+  realtimeVoice: realtimeVoiceRequested = true,
   modelPicker,
   modelPickerProps,
   userMessageDisclosureLabels,
@@ -319,6 +327,30 @@ function Conversation({
     if (feed.error) void feed.jumpToLatest();
   };
   const running = status === "running" || status === "recovering" || status === "waiting_capacity";
+  const voiceModels = useRealtimeVoiceModels(
+    context.client,
+    context.workspaceId,
+    realtimeVoiceRequested && config.realtimeVoice && !importedArchive,
+  );
+  const [voiceActive, setVoiceActive] = useState(false);
+  const voiceControl =
+    composer.effectiveControl ?? queue.effectiveControl ?? detail.session?.effectiveControl;
+  const voice =
+    voiceModels.length > 0 && status && !terminal && voiceControl ? (
+      <Suspense fallback={null}>
+        <LazyEmbeddedRealtimeVoice
+          client={context.client}
+          workspaceId={context.workspaceId}
+          models={voiceModels}
+          sessionId={sessionId}
+          sessionStatus={status}
+          effectiveControl={voiceControl}
+          events={feed.events}
+          eventsReady={!feed.initialLoading}
+          onVoiceActiveChange={setVoiceActive}
+        />
+      </Suspense>
+    ) : null;
   return (
     <div
       className={cn(
@@ -467,6 +499,17 @@ function Conversation({
               {...(transcription && composerProps?.transcription === undefined
                 ? { transcription }
                 : {})}
+              actionsStart={
+                voice ? (
+                  <>
+                    {composerProps?.actionsStart}
+                    {voice}
+                  </>
+                ) : (
+                  composerProps?.actionsStart
+                )
+              }
+              transcriptionSuppressed={composerProps?.transcriptionSuppressed ?? voiceActive}
               composer={composer}
               attachments={uploadsEnabled ? files : undefined}
               disabled={terminal || composerProps?.disabled}
@@ -534,6 +577,7 @@ function GoalChrome({ sessionId, client, workspaceId, events, chrome }: Conversa
   });
   return <SessionChrome {...chrome} goal={goal} />;
 }
+const LazyEmbeddedRealtimeVoice = lazy(() => import("../realtime/embedded-voice"));
 
 const LazyChatInteractiveBlock = lazy(() =>
   import("./artifacts/chat-interactive-block").then((module) => ({

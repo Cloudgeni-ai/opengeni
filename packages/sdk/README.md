@@ -194,6 +194,18 @@ files and applies those choices to the request the hook returns. Voice input
 "Archive" when they are off, shows Site previews as unavailable without a
 request, and shows the composer microphone only when `voiceInput.available`.
 
+Live voice (speech-to-speech) is forwarded the same way unless
+`realtimeVoice: false`: the workspace's voice model catalog and the call routes
+under `.../sessions/{id}/realtime` (start, provider connect, heartbeat,
+activate, transcript sync, end). Opengeni still checks the user's
+`sessions:control` permission, binds the call to that user and browser, runs
+spoken requests as steers of the same chat, and meters deployment-funded voice
+against your credits. `authorizeSession` runs on every call route, and
+`beforeForwardMessage` sees `delivery: "realtime"` when a call starts (refuse
+it, or return `mcpCredentialUpdates`; the proxy also refreshes the `toolServer`
+token) and before transcripts and spoken requests are saved (refuse them, or add
+`modelContext`, which must be the same when a request is retried).
+
 `listSessionPage` includes personal pinned details by default. A caller with a
 separate `pinsOnly: true` read can pass `includePinned: false` on ordinary pages
 to avoid repeatedly loading those details. Ordinary pages still exclude pinned
