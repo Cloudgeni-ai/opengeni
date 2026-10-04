@@ -87,4 +87,6 @@ export const embeddingMigrationTail = [
   // Locks connection tables from withheld 0264 and rewrites the exact receipt
   // gates in routines from withheld 0306/0345/0478; replay after them.
   "0611_universal_session_tenancy_activation.sql",
+  // Extends the containment reason installed by withheld 0547; replay after it.
+  "0614_quiescence_command_containment.sql",
 ];
