@@ -59,7 +59,8 @@ behavior. Enabling policy does not restrict previously unrestricted grants.
 ## Customer flow
 
 Signup and redemption show the credit amount without promising specific models.
-The model picker shows **Free credits**, **Uses credits**, or **Needs credits**, including after selection.
+The open model picker shows **Free credits**, **Uses credits**, or **Needs credits**.
+These labels stay inside the menu; the closed selector keeps its model and effort.
 **Free credits** appears only while a remaining promotional balance covers that
 model. With general credits only, credit-funded models show **Uses credits**.
 With no usable balance for a model, it shows **Needs credits**. Subscriptions,

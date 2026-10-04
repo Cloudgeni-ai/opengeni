@@ -200,7 +200,7 @@ export function DefaultSessionModelPreferenceRow(props: {
           // Models settings keeps its scope-aware presentation.
           collapseScopes={false}
           triggerStyle="field"
-          triggerMeta={selected ? (selected.fundingHint ?? payerShortLabel(selected)) : null}
+          triggerMeta={selected ? payerShortLabel(selected) : null}
           // The secondary button's exact look, so every control on the row matches.
           className={cn(
             buttonVariants({ variant: "outline", size: "sm" }),
