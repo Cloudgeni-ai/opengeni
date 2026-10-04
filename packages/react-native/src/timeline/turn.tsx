@@ -19,7 +19,7 @@ import {
   useState,
   type ReactNode,
 } from "react";
-import { Pressable, Text, View, type TextStyle } from "react-native";
+import { Platform, Pressable, Text, View, type TextStyle } from "react-native";
 import Animated, { FadeIn, FadeInDown, FadeOut, FadeOutUp } from "react-native-reanimated";
 import { ActivityRow } from "./activity";
 import { Icon } from "./icon";
@@ -44,6 +44,14 @@ export type NativeTurnStatus =
 
 type FoldMemory = Map<string, "open" | "closed">;
 const FoldMemoryContext = createContext<FoldMemory | null>(null);
+
+/**
+ * A shrink-wrapped single-line summary. Android sizes it to the ellipsized line without
+ * the "…" glyph's overhang, which then clips the last dot; a little trailing room keeps
+ * the ellipsis whole.
+ */
+const TRUNCATED_TAIL: TextStyle =
+  Platform.OS === "android" ? { flexShrink: 1, paddingRight: 2 } : { flexShrink: 1 };
 export const FoldMemoryProvider = FoldMemoryContext.Provider;
 
 /**
@@ -268,7 +276,7 @@ export function TurnSummary({
         {showLive ? (
           <View style={{ flex: 1, minWidth: 0 }}>{liveHeader}</View>
         ) : (
-          <Text style={[text, { flexShrink: 1 }]} numberOfLines={1}>
+          <Text style={[text, TRUNCATED_TAIL]} numberOfLines={1}>
             {tail}
             {outcome === "failed" && failureText ? (
               <Text style={{ color: theme.colors["status-failed"] }}>{` · ${failureText}`}</Text>
