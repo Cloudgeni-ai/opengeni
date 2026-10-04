@@ -1,6 +1,7 @@
 import { expect, test } from "bun:test";
 import type { Session, SessionEvent } from "@/types";
 import { currentModelRecovery } from "./model-recovery";
+import { admissionRecheckControl } from "@/components/session/session-admission-notice";
 
 const session = {
   id: "session",
@@ -94,4 +95,25 @@ test("provider delay and event timestamps never become an ETA or reset promise",
   expect(currentModelRecovery(session, [{ ...event(), occurredAt: "invalid" }])).toEqual({
     kind: "rate_limited",
   });
+});
+
+test("a confirmed Pause suppresses retry copy before detail and queue reads catch up", () => {
+  const active = { ...session.effectiveControl, state: "active" as const, controlVersion: 1 };
+  const paused = { ...active, state: "paused" as const, controlVersion: 2 };
+  const events = [event()];
+  expect(currentModelRecovery({ ...session, effectiveControl: active }, events)).not.toBeNull();
+  for (const staleQueue of [active, undefined, null]) {
+    const effectiveControl = admissionRecheckControl(active, staleQueue, paused);
+    expect(currentModelRecovery({ ...session, effectiveControl }, events)).toBeNull();
+  }
+  const resumed = { ...active, controlVersion: 3 };
+  expect(
+    currentModelRecovery(
+      {
+        ...session,
+        effectiveControl: admissionRecheckControl(active, paused, resumed),
+      },
+      events,
+    ),
+  ).not.toBeNull();
 });

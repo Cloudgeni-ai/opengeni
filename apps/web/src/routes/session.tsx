@@ -2884,7 +2884,9 @@ function SessionChatPane(props: {
       </FailureRecoveryBoundary>
     ) : null;
 
-  const modelRecovery = props.hasNewer ? null : currentModelRecovery(props.session, props.events);
+  const modelRecovery = props.hasNewer
+    ? null
+    : currentModelRecovery({ ...props.session, effectiveControl: admissionControl }, props.events);
 
   return createElement(
     LightboxProvider,

@@ -91,7 +91,9 @@ describe("session control surface architecture", () => {
   test("current model pacing is shown above the composer, never on an older history page", async () => {
     const route = await source("routes/session.tsx");
     expect(route).toContain("const modelRecovery = props.hasNewer");
-    expect(route).toContain("currentModelRecovery(props.session, props.events)");
+    expect(route).toContain(
+      "currentModelRecovery({ ...props.session, effectiveControl: admissionControl }, props.events)",
+    );
     expect(route.match(/<ModelRecoveryNotice\b/g)).toHaveLength(1);
     expect(route.indexOf("<ModelRecoveryNotice")).toBeLessThan(route.indexOf("<ConsoleComposer"));
   });
