@@ -359,7 +359,7 @@ export function createSessionProxyHandler(
       if (chats === "isolated") {
         if (!resolved.tenant || !isFacade(target) || !target.workspaceIdFor) {
           throw new TypeError(
-            'chats: "isolated" requires the OpenGeni facade and a tenant resolution.',
+            'chats: "isolated" requires the Opengeni facade and a tenant resolution.',
           );
         }
         workspaceId = await target.workspaceIdFor(
@@ -372,7 +372,7 @@ export function createSessionProxyHandler(
         workspaceId = await target.workspaceId({ tenant: resolved.tenant });
       } else {
         throw new TypeError(
-          "resolve must return a workspaceId (or a tenant when given the OpenGeni facade).",
+          "resolve must return a workspaceId (or a tenant when given the Opengeni facade).",
         );
       }
       const client = service.asUser(resolved.user, { source });

@@ -168,6 +168,10 @@ import type {
   UpdateWorkspaceSettingsRequest,
   Workspace,
 } from "@/types";
+import {
+  clearPendingDeveloperSetup,
+  pendingDeveloperSetupFor,
+} from "@/lib/pending-developer-setup";
 
 const AnalyticsManager = lazy(() =>
   import("@/components/analytics-consent").then((module) => ({
@@ -178,6 +182,11 @@ const AnalyticsManager = lazy(() =>
 const OrganizationOnboardingPanel = lazy(() =>
   import("@/components/organization-onboarding-panel").then((module) => ({
     default: module.OrganizationOnboardingPanel,
+  })),
+);
+const ResumedDeveloperSetup = lazy(() =>
+  import("@/components/organization-onboarding-panel").then((module) => ({
+    default: module.ResumedDeveloperSetup,
   })),
 );
 
@@ -588,7 +597,7 @@ export function useOptionalAppContext(): AppContextValue | null {
 export function useAppContext(): AppContextValue {
   const value = useContext(AppContext);
   if (!value) {
-    throw new Error("OpenGeni app context is not ready");
+    throw new Error("Opengeni app context is not ready");
   }
   return value;
 }
@@ -733,6 +742,14 @@ export function RootRouteComponent() {
   const keyAuthRequired =
     clientConfig?.auth.mode === "deploymentKey" || clientConfig?.auth.mode === "configuredToken";
   const managedAuthRequired = clientConfig?.auth.mode === "managedSession";
+  // "Add AI agents to my product" left its developer setup step unfinished
+  // (reload, closed tab, another device): show it again until it is done.
+  const [developerSetupRevision, setDeveloperSetupRevision] = useState(0);
+  const pendingDeveloperSetup = useMemo(
+    () => (managedAuthRequired ? pendingDeveloperSetupFor(authSession?.user.email ?? null) : null),
+    // oxlint-disable-next-line react-hooks/exhaustive-deps -- re-read after the step finishes
+    [managedAuthRequired, authSession?.user.email, developerSetupRevision],
+  );
   const browserAccountsConfigured =
     managedAuthRequired && clientConfig?.managedAuthSessionSetMode !== "legacy";
   const browserAccountsEnabled = browserAccountsConfigured && managedAuthBootstrapComplete;
@@ -2959,6 +2976,24 @@ export function RootRouteComponent() {
       title="No workspace access"
       description="You don't have access to any workspace yet."
     />
+  ) : pendingDeveloperSetup &&
+    accessContext?.accountGrants.some(
+      (grant) => grant.accountId === pendingDeveloperSetup.organizationId,
+    ) ? (
+    <Suspense fallback={<LoadingPanel />}>
+      <ResumedDeveloperSetup
+        client={client}
+        organizationId={pendingDeveloperSetup.organizationId}
+        organizationName={pendingDeveloperSetup.organizationName}
+        activeEmail={authSession?.user.email ?? null}
+        onSignOut={handleManagedSignOut}
+        onComplete={(destination) => {
+          clearPendingDeveloperSetup();
+          setDeveloperSetupRevision((revision) => revision + 1);
+          completeOrganizationOnboarding(destination);
+        }}
+      />
+    </Suspense>
   ) : (
     <AppContext.Provider value={appContext}>
       <Outlet />

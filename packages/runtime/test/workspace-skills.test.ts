@@ -609,7 +609,7 @@ description: Prepare a safe release.
         [{ path: ".agents/skills", source: ".agents/skills" }],
         new Set(["release"]),
       ),
-    ).rejects.toThrow('Workspace skill "release" conflicts with a configured OpenGeni skill');
+    ).rejects.toThrow('Workspace skill "release" conflicts with a configured Opengeni skill');
   });
 
   test("lets native tool-bound Skills deterministically shadow workspace copies", async () => {

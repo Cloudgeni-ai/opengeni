@@ -1043,7 +1043,7 @@ export function registerConnectionRoutes(app: Hono, deps: ApiRouteDeps): void {
             if (!destination.success || !destinationOnlyUpdate) {
               throw new HTTPException(422, {
                 message:
-                  "use the dedicated OpenGeni Slack bot reinstall flow to update this connection",
+                  "use the dedicated Opengeni Slack bot reinstall flow to update this connection",
               });
             }
             const destinationSelection = destination.data;
@@ -1600,7 +1600,7 @@ async function persistOpenGeniSlackBotConnection(input: {
     throw new SlackInstallCallbackError(
       422,
       "connection_conflict",
-      "connectionId is not an OpenGeni Slack bot connection",
+      "connectionId is not an Opengeni Slack bot connection",
       "principal_validation",
     );
   }
@@ -1925,7 +1925,7 @@ function assertBrokeredApiKeyCredential(
 function assertNotReservedSlackBotMetadata(metadata: Record<string, unknown> | undefined): void {
   if (hasReservedOpenGeniSlackBotMetadata(metadata)) {
     throw new HTTPException(422, {
-      message: "OpenGeni Slack bot metadata is reserved for the dedicated connection flow",
+      message: "Opengeni Slack bot metadata is reserved for the dedicated connection flow",
     });
   }
 }

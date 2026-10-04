@@ -181,7 +181,7 @@ describe("OpenGeni Lens GitHub installation routes", () => {
       headers: { cookie: authorizationCookie },
     });
     expect(authorized.status).toBe(200);
-    expect(await authorized.text()).toContain("OpenGeni Lens connected");
+    expect(await authorized.text()).toContain("Opengeni Lens connected");
 
     const registrations = await listPrReviewAppRegistrations(client.db, accountId, workspaceId);
     expect(registrations).toEqual([

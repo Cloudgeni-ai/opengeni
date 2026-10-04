@@ -346,7 +346,7 @@ export async function ensureRunAllowed(
       quantity: 1,
     });
     if (!decision.allowed) {
-      throw new Error(decision.reason || "insufficient OpenGeni credits");
+      throw new Error(decision.reason || "insufficient Opengeni credits");
     }
   } else if (
     chargesOpenGeniCredits &&
@@ -354,7 +354,7 @@ export async function ensureRunAllowed(
   ) {
     const balance = await getBillingBalance(db, accountId);
     if (balance.balanceMicros <= 0) {
-      throw new Error("insufficient OpenGeni credits");
+      throw new Error("insufficient Opengeni credits");
     }
   }
   if (chargesOpenGeniCredits) {

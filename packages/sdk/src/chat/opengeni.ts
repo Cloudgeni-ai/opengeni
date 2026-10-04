@@ -66,8 +66,8 @@ export class OpenGeni {
   private implicitAgentAdmission: boolean | undefined;
 
   constructor(options: OpenGeniOptions) {
-    if (!options.apiKey) throw new TypeError("OpenGeni requires an apiKey.");
-    if (!options.organizationId) throw new TypeError("OpenGeni requires an organizationId.");
+    if (!options.apiKey) throw new TypeError("Opengeni requires an apiKey.");
+    if (!options.organizationId) throw new TypeError("Opengeni requires an organizationId.");
     this.client = new OpenGeniClient({
       baseUrl: options.baseUrl ?? DEFAULT_OPENGENI_BASE_URL,
       apiKey: options.apiKey,

@@ -382,7 +382,7 @@ type OrchestrationToolName = "session_create" | "session_send_message" | "sessio
 
 function boundedOrchestrationFailureMessage(value: string): string {
   const normalized = value.replace(/[\u0000-\u001f\u007f]+/g, " ").trim();
-  if (!normalized) return "OpenGeni could not complete the request.";
+  if (!normalized) return "Opengeni could not complete the request.";
   const encoded = new TextEncoder().encode(normalized);
   if (encoded.byteLength <= ORCHESTRATION_FAILURE_MESSAGE_MAX_UTF8_BYTES) return normalized;
   let end = ORCHESTRATION_FAILURE_MESSAGE_MAX_UTF8_BYTES;
@@ -483,7 +483,7 @@ function orchestrationFailureEnvelope(tool: OrchestrationToolName, error: unknow
         code: orchestrationFailureCode(tool, error),
         message:
           error.status >= 500
-            ? "OpenGeni is temporarily unavailable — retry."
+            ? "Opengeni is temporarily unavailable — retry."
             : boundedOrchestrationFailureMessage(error.message),
       },
     };
@@ -536,7 +536,7 @@ function orchestrationFailureEnvelope(tool: OrchestrationToolName, error: unknow
   return {
     error: {
       code: `${tool}_failed`,
-      message: "OpenGeni could not complete the request.",
+      message: "Opengeni could not complete the request.",
     },
   };
 }
@@ -658,7 +658,7 @@ const sessionCreateToolInput = staticToolInput(() => {
         .max(SESSION_TITLE_MAX_CHARACTERS)
         .optional()
         .describe(
-          "Concise semantic title for the child session. Omit only when the delegated goal or initial message already provides a suitable title; OpenGeni derives a sensitive-safe bounded fallback from that text.",
+          "Concise semantic title for the child session. Omit only when the delegated goal or initial message already provides a suitable title; Opengeni derives a sensitive-safe bounded fallback from that text.",
         ),
       instructions: z4.string().min(1).max(SESSION_INSTRUCTIONS_MAX_CHARACTERS).optional(),
       goal: GoalSpec.optional(),
@@ -1135,7 +1135,7 @@ export function buildOpenGeniMcpServer(
     server.registerTool(
       "social_posts_recent",
       {
-        description: "List recent social media posts imported or synced into OpenGeni.",
+        description: "List recent social media posts imported or synced into Opengeni.",
         inputSchema: {
           connectionIds: z4.array(z4.string().uuid()).optional(),
           since: z4.string().optional(),
@@ -1450,7 +1450,7 @@ export function buildOpenGeniMcpServer(
       "social_posts_sync",
       {
         description:
-          "Sync the connected account's own recent posts from the provider into OpenGeni's social_posts store (idempotent), so social_posts_recent and daily analysis see fresh data.",
+          "Sync the connected account's own recent posts from the provider into Opengeni's social_posts store (idempotent), so social_posts_recent and daily analysis see fresh data.",
         inputSchema: {
           connectionId: z4.string().uuid(),
           limit: z4.number().int().positive().optional(),
@@ -1547,7 +1547,7 @@ export function buildOpenGeniMcpServer(
       server.registerTool(
         `${provider}_posts_sync`,
         {
-          description: `Sync one exact connected ${providerName} account's recent posts into OpenGeni (idempotent).`,
+          description: `Sync one exact connected ${providerName} account's recent posts into Opengeni (idempotent).`,
           inputSchema: {
             connectionId: z4.string().uuid(),
             limit: z4.number().int().positive().optional(),
@@ -2082,7 +2082,7 @@ function registerSlackBotTools(
     "slack_bot_list_channels",
     {
       description:
-        "List public and bot-visible private Slack channels through the workspace-shared OpenGeni bot. isMember identifies channels the bot may read/post in; the bot never joins channels automatically.",
+        "List public and bot-visible private Slack channels through the workspace-shared Opengeni bot. isMember identifies channels the bot may read/post in; the bot never joins channels automatically.",
       inputSchema: {
         connectionId: z4.string().uuid().optional(),
         cursor: z4.string().max(1024).optional(),
@@ -2107,7 +2107,7 @@ function registerSlackBotTools(
     "slack_bot_channel_history",
     {
       description:
-        "Read Slack channel history as the workspace-shared OpenGeni bot. Public and private channels both require bot membership; invite the bot to private channels first.",
+        "Read Slack channel history as the workspace-shared Opengeni bot. Public and private channels both require bot membership; invite the bot to private channels first.",
       inputSchema: {
         connectionId: z4.string().uuid().optional(),
         channelId: z4.string().min(1).max(64),
@@ -2131,7 +2131,7 @@ function registerSlackBotTools(
     "slack_bot_thread_replies",
     {
       description:
-        "Read a Slack thread as the workspace-shared OpenGeni bot. Pass the channel ID and the parent message timestamp returned by channel history. The result includes the parent followed by its replies.",
+        "Read a Slack thread as the workspace-shared Opengeni bot. Pass the channel ID and the parent message timestamp returned by channel history. The result includes the parent followed by its replies.",
       inputSchema: {
         connectionId: z4.string().uuid().optional(),
         channelId: z4.string().min(1).max(64),
@@ -2156,7 +2156,7 @@ function registerSlackBotTools(
   server.registerTool(
     "slack_bot_list_users",
     {
-      description: "List Slack workspace users through the workspace-shared OpenGeni bot.",
+      description: "List Slack workspace users through the workspace-shared Opengeni bot.",
       inputSchema: {
         connectionId: z4.string().uuid().optional(),
         cursor: z4.string().max(1024).optional(),
@@ -2178,7 +2178,7 @@ function registerSlackBotTools(
     "slack_bot_list_files",
     {
       description:
-        "List Slack files and canvases shared with a channel where the workspace-shared OpenGeni bot is already a member.",
+        "List Slack files and canvases shared with a channel where the workspace-shared Opengeni bot is already a member.",
       inputSchema: {
         connectionId: z4.string().uuid().optional(),
         channelId: z4.string().min(1).max(64),
@@ -2202,7 +2202,7 @@ function registerSlackBotTools(
     "slack_bot_file_info",
     {
       description:
-        "Read safe metadata for a Slack file or canvas shared with a channel where the workspace-shared OpenGeni bot is already a member. For an embedded huddle transcript, also pass the shared canvas file ID as parentFileId so OpenGeni can verify the indirect share.",
+        "Read safe metadata for a Slack file or canvas shared with a channel where the workspace-shared Opengeni bot is already a member. For an embedded huddle transcript, also pass the shared canvas file ID as parentFileId so Opengeni can verify the indirect share.",
       inputSchema: {
         connectionId: z4.string().uuid().optional(),
         channelId: z4.string().min(1).max(64),
@@ -2226,7 +2226,7 @@ function registerSlackBotTools(
     "slack_bot_file_content",
     {
       description:
-        "Read a bounded page of text or view a PNG, JPEG, or WebP image from a Slack file shared with a channel where the workspace-shared OpenGeni bot is already a member. Use the file ID from thread replies to view images in earlier thread messages. Images are returned as viewable content, only when directly shared to a non-shared channel, up to 640 KiB; offset must be 0. For an embedded huddle transcript, also pass the shared canvas file ID as parentFileId so OpenGeni can verify the channel-to-canvas-to-transcript chain. Slack may still restrict a huddle transcript body to participants; that returns huddle_transcript_requires_participant_access. Private Slack URLs and credentials are never returned. Continue with nextOffset for truncated text.",
+        "Read a bounded page of text or view a PNG, JPEG, or WebP image from a Slack file shared with a channel where the workspace-shared Opengeni bot is already a member. Use the file ID from thread replies to view images in earlier thread messages. Images are returned as viewable content, only when directly shared to a non-shared channel, up to 640 KiB; offset must be 0. For an embedded huddle transcript, also pass the shared canvas file ID as parentFileId so Opengeni can verify the channel-to-canvas-to-transcript chain. Slack may still restrict a huddle transcript body to participants; that returns huddle_transcript_requires_participant_access. Private Slack URLs and credentials are never returned. Continue with nextOffset for truncated text.",
       inputSchema: {
         connectionId: z4.string().uuid().optional(),
         channelId: z4.string().min(1).max(64),
@@ -2260,7 +2260,7 @@ function registerSlackBotTools(
     "slack_bot_upload_file",
     {
       description:
-        "Upload one explicitly selected retained workspace file (including generated images) into this session's existing Slack task thread as the OpenGeni bot. Use the file/artifact UUID returned by sandbox_file_publish or image generation. No channel or URL is accepted. Generate one operationId UUID per intended delivery and reuse the same operationId on every retry, including unknown outcomes; never start a replacement delivery to retry. Requires the bot's optional files:write scope: a Slack administrator must apply the bot manifest and reinstall an older bot, not connect a personal Slack account. Nonempty files up to 25 MiB; personal files stay in private task threads. Does not automatically upload files merely because they appear in a message.",
+        "Upload one explicitly selected retained workspace file (including generated images) into this session's existing Slack task thread as the Opengeni bot. Use the file/artifact UUID returned by sandbox_file_publish or image generation. No channel or URL is accepted. Generate one operationId UUID per intended delivery and reuse the same operationId on every retry, including unknown outcomes; never start a replacement delivery to retry. Requires the bot's optional files:write scope: a Slack administrator must apply the bot manifest and reinstall an older bot, not connect a personal Slack account. Nonempty files up to 25 MiB; personal files stay in private task threads. Does not automatically upload files merely because they appear in a message.",
       inputSchema: { fileId: z4.string().uuid(), operationId: z4.string().uuid() },
     },
     async ({ fileId, operationId }) => {
@@ -2297,7 +2297,7 @@ function registerSlackBotTools(
     "slack_bot_prepare_message",
     {
       description:
-        "Prepare a message for this scheduled task's Slack channel, posted as the OpenGeni workspace bot. The channel was chosen by a person on the task; you cannot pick another one. This saves the exact text without sending it. Then call slack_bot_send_prepared_message with the returned messageId. Pass threadTimestamp (a timestamp returned by an earlier send) to reply in that thread of the same channel.",
+        "Prepare a message for this scheduled task's Slack channel, posted as the Opengeni workspace bot. The channel was chosen by a person on the task; you cannot pick another one. This saves the exact text without sending it. Then call slack_bot_send_prepared_message with the returned messageId. Pass threadTimestamp (a timestamp returned by an earlier send) to reply in that thread of the same channel.",
       inputSchema: {
         text: z4.string().min(1).max(40_000),
         threadTimestamp: z4
@@ -2323,7 +2323,7 @@ function registerSlackBotTools(
     "slack_bot_send_prepared_message",
     {
       description:
-        "Send a message prepared by slack_bot_prepare_message in this chat, exactly as saved, to the task's Slack channel as the OpenGeni workspace bot. If a send is interrupted or its outcome is unclear, retry with the same messageId: OpenGeni checks Slack and never posts the same message twice. Do not prepare a new message just to retry.",
+        "Send a message prepared by slack_bot_prepare_message in this chat, exactly as saved, to the task's Slack channel as the Opengeni workspace bot. If a send is interrupted or its outcome is unclear, retry with the same messageId: Opengeni checks Slack and never posts the same message twice. Do not prepare a new message just to retry.",
       inputSchema: { messageId: z4.string().uuid() },
     },
     async ({ messageId }) => {
@@ -2346,7 +2346,7 @@ function registerSlackBotTools(
     "slack_bot_delete_message",
     {
       description:
-        "Delete a message authored by the workspace-shared OpenGeni bot. Pass the channel ID and exact message timestamp returned by a prior post or channel/thread read. Generate one operationId UUID per intended deletion and reuse it on every retry, including after an unknown outcome. Slack refuses deletion of messages not authored by this bot.",
+        "Delete a message authored by the workspace-shared Opengeni bot. Pass the channel ID and exact message timestamp returned by a prior post or channel/thread read. Generate one operationId UUID per intended deletion and reuse it on every retry, including after an unknown outcome. Slack refuses deletion of messages not authored by this bot.",
       inputSchema: {
         connectionId: z4.string().uuid().optional(),
         operationId: z4.string().uuid(),
@@ -2871,7 +2871,7 @@ function registerGoalTools(
     "wait_for_input",
     {
       description:
-        "End the current turn and wait out of turn for relevant session input. This is self-only and does not require a goal. After success, the production runtime ends the turn at the tool-batch boundary without another model step or final message. Use it for long or uncertain waits, including right after spawning a child that needs minutes, instead of sleeping or repeatedly calling session_wait, session_get, or command_wait. No preliminary short wait or status recheck is required. timeoutSeconds is a relative safety-wake duration, not a blocking execution wait; choose it for the dependency or a meaningful user/task/Skill monitoring cadence, potentially hours or days within the schema limits. Do not schedule wakeups merely for unchanged reassurance unless an explicit update cadence requires it. OpenGeni persists the first absolute deadline for the turn, and repeated calls do not extend it. After answering a question during a wait, preserve the existing deadline by passing the time remaining, not a fresh full timeout. If less than the schema minimum remains or the deadline has passed, a question-only human/API turn that consumed no immediate machine input may finish without replacing the retained wait; its deadline machinery remains authoritative. Do not send an invalid timeout or silently extend the deadline. Otherwise do not assume the old wait remains armed; register a valid wait if needed and make any unavoidable deadline adjustment explicit. Timeout never cancels a background command. A human/API prompt, agent message or Steer, child terminal result (it carries the child's final answer in payload.finalAnswer), scheduled input, terminal background-command result, or the deadline wakes the session. Use goal_pause instead when the active goal itself should stop pending a human decision. Pending Codemode calls require the same live attempt: observe them with command_wait/command_read rather than ending the turn.",
+        "End the current turn and wait out of turn for relevant session input. This is self-only and does not require a goal. After success, the production runtime ends the turn at the tool-batch boundary without another model step or final message. Use it for long or uncertain waits, including right after spawning a child that needs minutes, instead of sleeping or repeatedly calling session_wait, session_get, or command_wait. No preliminary short wait or status recheck is required. timeoutSeconds is a relative safety-wake duration, not a blocking execution wait; choose it for the dependency or a meaningful user/task/Skill monitoring cadence, potentially hours or days within the schema limits. Do not schedule wakeups merely for unchanged reassurance unless an explicit update cadence requires it. Opengeni persists the first absolute deadline for the turn, and repeated calls do not extend it. After answering a question during a wait, preserve the existing deadline by passing the time remaining, not a fresh full timeout. If less than the schema minimum remains or the deadline has passed, a question-only human/API turn that consumed no immediate machine input may finish without replacing the retained wait; its deadline machinery remains authoritative. Do not send an invalid timeout or silently extend the deadline. Otherwise do not assume the old wait remains armed; register a valid wait if needed and make any unavoidable deadline adjustment explicit. Timeout never cancels a background command. A human/API prompt, agent message or Steer, child terminal result (it carries the child's final answer in payload.finalAnswer), scheduled input, terminal background-command result, or the deadline wakes the session. Use goal_pause instead when the active goal itself should stop pending a human decision. Pending Codemode calls require the same live attempt: observe them with command_wait/command_read rather than ending the turn.",
       inputSchema: {
         reason: inputWaitReasonSchema.describe(
           "Shown directly to the user; at most 2048 UTF-8 bytes. Write one short, natural sentence explaining what you are waiting for, with normal spacing. Exclude internal IDs, cursors, commit hashes, paths, and continuation instructions. Example: Waiting for the build and database checks to finish.",
@@ -3994,7 +3994,7 @@ function registerFleetTools(
     "sandbox_attach",
     {
       description:
-        'Attach this session to a sandbox for subsequent sandbox operations. The target must be owned and verified ready. A managed-home session currently running on a Connected Machine crosses a safe attempt boundary when attached back to home: OpenGeni checkpoints completed work and continues the same logical turn on home without another user message. A same-target attach is a repair request: it revalidates readiness and advances the route epoch rather than returning unchanged success. Recovery-in-progress/degraded/unrecoverable outcomes are typed. Use a sandboxes_list `id`, or "session"/"default" for home.',
+        'Attach this session to a sandbox for subsequent sandbox operations. The target must be owned and verified ready. A managed-home session currently running on a Connected Machine crosses a safe attempt boundary when attached back to home: Opengeni checkpoints completed work and continues the same logical turn on home without another user message. A same-target attach is a repair request: it revalidates readiness and advances the route epoch rather than returning unchanged success. Recovery-in-progress/degraded/unrecoverable outcomes are typed. Use a sandboxes_list `id`, or "session"/"default" for home.',
       inputSchema: { target: z4.string().min(1) },
     },
     async ({ target }) => json(await swapActiveSandbox(services, await fleetContext(), target)),
@@ -4004,7 +4004,7 @@ function registerFleetTools(
     "sandbox_swap",
     {
       description:
-        'Swap the active sandbox for this session mid-conversation. Validates ownership and verified readiness, then advances the route epoch. A managed-home session currently running on a Connected Machine crosses a safe attempt boundary when swapped back to home: OpenGeni checkpoints completed work and continues the same logical turn on home without another user message. Same-target swaps also revalidate and fence stale route caches. An operation that encountered provider disappearance is not replayed; retry only after a typed recovery-ready result. Use a sandboxes_list `id`, or "session"/"default" for home.',
+        'Swap the active sandbox for this session mid-conversation. Validates ownership and verified readiness, then advances the route epoch. A managed-home session currently running on a Connected Machine crosses a safe attempt boundary when swapped back to home: Opengeni checkpoints completed work and continues the same logical turn on home without another user message. Same-target swaps also revalidate and fence stale route caches. An operation that encountered provider disappearance is not replayed; retry only after a typed recovery-ready result. Use a sandboxes_list `id`, or "session"/"default" for home.',
       inputSchema: { target: z4.string().min(1) },
     },
     async ({ target }) => json(await swapActiveSandbox(services, await fleetContext(), target)),
@@ -5263,7 +5263,7 @@ function registerWorkspaceOrchestrationTools(
       "session_create",
       {
         description:
-          "Spawn a new agent session (a worker) only for a concrete, bounded subtask that can run independently and has a defined integration point in your current work. Delegation has setup and coordination overhead: by default, answer directly when the work takes only a few steps, and send a related follow-up to a worker you already spawned with session_send_message instead of spawning another. Explicit user requests and applicable Skill guidance for delegation, independent review, or fresh workers override that default within existing authority. After spawning work that needs minutes, once nothing else can advance, call wait_for_input and end the turn instead of alternating session_wait and session_get; no preliminary short wait or status recheck is required. The worker's terminal result wakes you and carries its final answer (payload.finalAnswer). Do not duplicate a child's implementation; independent review or comparison may intentionally examine the same subject with a distinct deliverable. Track the child and join its actual result before completing dependent work. Give the child a concise semantic title; if omitted, OpenGeni derives one from its delegated goal or initial message. The child inherits this session's visibility, agent-access scope and end-user label; a private session can only create a same-owner private child, and memoryScope may only narrow this session's selector. Give a goal-bearing child its delegated objective. Its goal.rootConstraints may be an exact applicable subset of this accepted turn's frozen root constraints; omit that field to inherit all of them. Omit sandbox for the safe default: compatible children share the creator's box, while a different Variable Set, Sandbox Environment, or machineTarget gets its own box. Use 'new' for deliberate isolation or {groupId} for a strict compatible sibling join. Put targetSandboxId and its optional workingDir together inside machineTarget; a machineTarget is always an own-box create even when the parent is backend none. To create a non-delegating leaf, pass a narrowed firstPartyMcpTools list that omits session_create; do not use a child-local depth override. Public REST/SDK callers retain advanced absolute depth and explicit shared-placement controls.",
+          "Spawn a new agent session (a worker) only for a concrete, bounded subtask that can run independently and has a defined integration point in your current work. Delegation has setup and coordination overhead: by default, answer directly when the work takes only a few steps, and send a related follow-up to a worker you already spawned with session_send_message instead of spawning another. Explicit user requests and applicable Skill guidance for delegation, independent review, or fresh workers override that default within existing authority. After spawning work that needs minutes, once nothing else can advance, call wait_for_input and end the turn instead of alternating session_wait and session_get; no preliminary short wait or status recheck is required. The worker's terminal result wakes you and carries its final answer (payload.finalAnswer). Do not duplicate a child's implementation; independent review or comparison may intentionally examine the same subject with a distinct deliverable. Track the child and join its actual result before completing dependent work. Give the child a concise semantic title; if omitted, Opengeni derives one from its delegated goal or initial message. The child inherits this session's visibility, agent-access scope and end-user label; a private session can only create a same-owner private child, and memoryScope may only narrow this session's selector. Give a goal-bearing child its delegated objective. Its goal.rootConstraints may be an exact applicable subset of this accepted turn's frozen root constraints; omit that field to inherit all of them. Omit sandbox for the safe default: compatible children share the creator's box, while a different Variable Set, Sandbox Environment, or machineTarget gets its own box. Use 'new' for deliberate isolation or {groupId} for a strict compatible sibling join. Put targetSandboxId and its optional workingDir together inside machineTarget; a machineTarget is always an own-box create even when the parent is backend none. To create a non-delegating leaf, pass a narrowed firstPartyMcpTools list that omits session_create; do not use a child-local depth override. Public REST/SDK callers retain advanced absolute depth and explicit shared-placement controls.",
         inputSchema: sessionCreateToolInput(),
       },
       async (args) => {
@@ -6201,7 +6201,7 @@ function registerCapabilityDiscoveryTools(
     "capability_catalog_search",
     {
       description:
-        "Find integrations in OpenGeni's reviewed workspace catalog when the user asks to add one or needed access is missing. Search by integration name or task outcome. Results describe setup status and provide setup.nextAction when human setup can be requested. Use available tools directly for ready candidates. This reads metadata only and does not connect or authorize anything.",
+        "Find integrations in Opengeni's reviewed workspace catalog when the user asks to add one or needed access is missing. Search by integration name or task outcome. Results describe setup status and provide setup.nextAction when human setup can be requested. Use available tools directly for ready candidates. This reads metadata only and does not connect or authorize anything.",
       inputSchema: {
         query: z4.string().min(1).max(500),
         limit: z4.number().int().min(1).max(20).optional(),

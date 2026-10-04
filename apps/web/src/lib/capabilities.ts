@@ -176,7 +176,7 @@ export function capabilityErrorToast(
   }
   const serverMessage = cleanApiErrorMessage(apiErrorFacts(error).serverMessage ?? "");
   const probe =
-    /^MCP capability ".+" could not be enabled because OpenGeni could not initialize (\S+?)\.?(?:\s|$)/u.exec(
+    /^MCP capability ".+" could not be enabled because (?:OpenGeni|Opengeni) could not initialize (\S+?)\.?(?:\s|$)/u.exec(
       serverMessage,
     );
   if (probe) {

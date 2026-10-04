@@ -1,22 +1,22 @@
 ---
 name: opengeni-setup
 description: >-
-  Set up OpenGeni for a product before writing its embedding code. Use for
+  Set up Opengeni for a product before writing its embedding code. Use for
   browser-assisted organization onboarding, a full-access setup key,
   idempotent REST/SDK workspace provisioning, agent persona and capabilities,
   product tools, approvals, schedules, webhooks, credentials and usage budgets.
-  Uses the OpenGeni MCP tools when available, otherwise the coding agent's own
+  Uses the Opengeni MCP tools when available, otherwise the coding agent's own
   browser, shell and HTTP tools.
 ---
 
-# OpenGeni developer setup
+# Opengeni developer setup
 
-You are the product's coding agent. Configure OpenGeni through its public API,
+You are the product's coding agent. Configure Opengeni through its public API,
 then hand off to [the embedding skill](../build-with-opengeni/opengeni-client/SKILL.md). This skill
 is not a runtime Skill for the product's end-user agent.
 
-When the `opengeni` MCP tools are available (the OpenGeni plugin connects
-them), use them to inspect and act on the user's OpenGeni organization:
+When the `opengeni` MCP tools are available (the Opengeni plugin connects
+them), use them to inspect and act on the user's Opengeni organization:
 `opengeni_actions_search` finds an action, `opengeni_action_describe` shows its
 input, `opengeni_action_call` runs it. Prefer them over hand-written API calls.
 The first use opens a browser sign-in where the user chooses what the agent may
@@ -29,7 +29,7 @@ The [SDK example](references/setup-sdk.ts) is typechecked against this repo.
 
 ## 1. Inspect the product and target
 
-Inspect the product's auth, tenancy, existing OpenGeni config, runtime, tools,
+Inspect the product's auth, tenancy, existing Opengeni config, runtime, tools,
 environment-file conventions and deployment. Reuse its sharing boundaries and
 explicitly requested schedule/time zone, write policy and output destination.
 Derive the organization name and stable `externalSource` from the product.
@@ -123,7 +123,7 @@ not reachable from the hosted deployment without a public HTTPS tunnel.
 
 If the product already has MCP, attach its server to sessions with write-only
 headers or a Connection reference, `allowedTools` and `requireApproval`.
-Those are **the product's** remote tools, not an OpenGeni MCP plugin. Schedules
+Those are **the product's** remote tools, not an Opengeni MCP plugin. Schedules
 use an installed workspace server id, not an inline `mcpServers` entry.
 The walkthrough distinguishes MCP approval policy from API Integration
 `autoApprovedTools`; do not substitute one for the other.
@@ -167,7 +167,7 @@ credential through the authenticated organization administrator, not by granting
 key-management permission to the setup key.
 
 Carry the appearance choice into that handoff: custom-branded embeds should
-match host fonts/colors/spacing/radius/theme with no UI-owned OpenGeni branding;
+match host fonts/colors/spacing/radius/theme with no UI-owned Opengeni branding;
 stock shipped UI should need no cosmetic host CSS. Expect polished desktop
 around 1440px/mobile around 390px and supported light/dark. Stock defects belong
 to package React/CSS, not host workarounds. Preserve first-try evidence; in
