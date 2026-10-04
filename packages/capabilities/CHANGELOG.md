@@ -1,5 +1,19 @@
 # @opengeni/capabilities
 
+## 1.0.0
+
+### Major Changes
+
+- Reset package versioning: every published `@opengeni/*` package now releases together at one shared version, starting at 1.0.0. Install all `@opengeni` packages at the same version. Earlier versions are retired.
+
+## 0.3.7
+
+### Patch Changes
+
+- aa41b15: Omit Outlook meeting suggestions, which need shared-calendar permissions and do not support personal Microsoft accounts, from the default calendar operation set. Keep calendar, event, and availability operations under the existing OAuth permissions.
+- Updated dependencies [3cc26b5]
+  - @opengeni/network@0.3.2
+
 ## 0.3.6
 
 ### Patch Changes

@@ -1,5 +1,35 @@
 import { describe, expect, test } from "bun:test";
-import { nextCanaryVersion, planCanaryVersions, workflowCanarySequence } from "./publish-canary";
+import {
+  canaryBasePackages,
+  nextCanaryVersion,
+  planCanaryVersions,
+  workflowCanarySequence,
+} from "./publish-canary";
+
+describe("lockstep canary base", () => {
+  test("previews the next free patch so canaries sort after the committed release", () => {
+    const packages = ["@opengeni/sdk", "@opengeni/contracts", "@opengeni/jev"].map((name) => ({
+      name,
+      version: "1.0.0",
+    }));
+    // 1.0.1 is a retired pre-reset version of sdk/contracts, so the whole group skips it.
+    const bases = canaryBasePackages(packages);
+    expect(bases.map((pkg) => pkg.version)).toEqual(["1.0.2", "1.0.2", "1.0.2"]);
+    const versions = planCanaryVersions(
+      bases,
+      new Map([["@opengeni/sdk", "7.8.1-canary.37189128503001"]]),
+      [packages.map((pkg) => pkg.name)],
+      workflowCanarySequence("40000000000", "1"),
+    );
+    for (const version of versions.values()) {
+      expect(version).toBe("1.0.2-canary.40000000000001");
+      expect(Bun.semver.order(version, "1.0.0")).toBe(1);
+    }
+    expect(canaryBasePackages([{ name: "@opengeni/jev", version: "1.0.2" }])).toEqual([
+      { name: "@opengeni/jev", version: "1.0.3" },
+    ]);
+  });
+});
 
 describe("workflow canary sequence", () => {
   test("uses distinct safe sequences for runs and retries even with stale registry tags", () => {

@@ -83,6 +83,11 @@ choices retain the schedule's captured authority. Keep message edits narrow and
 retargeting server-owned, with execution-digest checks for concurrent edits.
 See `docs/scheduled-task-access.md`.
 
+Temporal schedule synchronization and deletion share a per-schedule lock across
+API replicas. Read current desired state inside it, keep failed-write
+compensation under the same lock, and restore only the unchanged saved task.
+Never interpret a transport timeout as a known remote outcome.
+
 Fresh local checkouts leave Connected Machines disabled. An explicit
 `OPENGENI_SANDBOX_SELFHOSTED_ENABLED=true` enables self-initializing enrollment,
 NATS auth-callout and the local relay. Its cold build completes before application
@@ -382,6 +387,13 @@ membership/grants or invent a principal to make admission succeed. See
 `docs/run-lifecycle.md` for snapshot fencing and mixed-worker rollout limits.
 
 ## Pull-request delivery across moving `main`
+
+The workflow-wake reaper repairs authentic pending child terminal results for
+idle goalless parents behind fully acknowledged wake debt. Its bounded global
+identity selector is only discovery: scoped repair revalidates effective Pause,
+child-parent producer linkage, ownership and both writer gates before atomic
+queue/wake registration. Completed/paused goals remain settled; no child work
+or provider operation is replayed. See `docs/durable-agent-inputs.md`.
 
 Accepted model policies may tolerate additive latency modes and input modalities
 only by reconstructing the exact historical subset digest. Preserve the frozen

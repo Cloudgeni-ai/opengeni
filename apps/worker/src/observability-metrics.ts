@@ -1614,6 +1614,7 @@ export type TurnStartupPhase =
   | "turn_start_settlement"
   | "credential_selection"
   | "runtime_preparation"
+  | "session_mcp_settings"
   | "sandbox_establish"
   | "file_resolution"
   | "tool_context_preparation"

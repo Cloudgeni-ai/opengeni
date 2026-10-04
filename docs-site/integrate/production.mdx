@@ -35,7 +35,7 @@ only the user's own usage. Allowances are post-call ceilings, not prepaid reserv
 
 ## Keep SDK and server compatible
 
-Published SDKs and servers are compatible within the same major version. Within a major, changes are additive: servers ignore unknown request fields, and clients ignore unknown response fields and event types. Install `@opengeni/sdk` and `@opengeni/react` from the same release, and read the server version from `/healthz` or `/v1/config/client`. See the [API compatibility policy](https://github.com/Cloudgeni-ai/opengeni/blob/main/docs/design/api-compatibility-policy.md).
+Published SDKs and servers are compatible within the same major version. Within a major, changes are additive: servers ignore unknown request fields, and clients ignore unknown response fields and event types. Use the same version for all `@opengeni` packages (they release together at one shared version), and read the server version from `/healthz` or `/v1/config/client`. See the [API compatibility policy](https://github.com/Cloudgeni-ai/opengeni/blob/main/docs/design/api-compatibility-policy.md).
 
 ## Keep the tool surface minimal
 

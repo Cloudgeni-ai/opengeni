@@ -18,7 +18,7 @@
     },
     {
       "path": ".github/workflows/ci.yml",
-      "sha256": "c33cd87ce403b6db63a2448e47df7c373bab6c4bf73e3fd38d7df7e1527accf1"
+      "sha256": "823169781ba22bebfb1eb033970fe82810327de6acfe406bd3d9d28bb3878684"
     },
     {
       "path": ".github/workflows/desktop-e2e.yml",
@@ -521,7 +521,7 @@
       "workflow": ".github/workflows/ci.yml",
       "job": "automation-admission",
       "step": "Reproduce deterministic Version PR tree",
-      "sha256": "ec8f3406f284587176adb5180b9c8f63e7747e6b57198adbb68fb2522eeef971"
+      "sha256": "53e99af56de3c76307da5da43b5d5a85fd47a56c785ecd5e28cff0d2928f8ce9"
     },
     {
       "workflow": ".github/workflows/ci.yml",
@@ -797,7 +797,7 @@
       "workflow": ".github/workflows/ci.yml",
       "job": "source-contracts",
       "step": "Validate changeset release plan",
-      "sha256": "e4f7ba2c4878e2b12091455a670eebd39d611ba882da6f7f3adf85b19a51d46f"
+      "sha256": "3cb07f9390ad4e5470d45081e87d3e0b5fe4a7197d3ddc9478b5cebedc62468c"
     },
     {
       "workflow": ".github/workflows/ci.yml",

@@ -216,6 +216,11 @@ See [`goals.md`](goals.md).
 | Sandbox leases/envelopes | Provider identity/routing/recovery/workspace-generation truth | Conversation state |
 | Knowledge/instructions/Skills/organization identity | Scoped retrieval/governance authorities and lifecycle | Conversation history/temporary task notes |
 
+The wake reaper repairs already-pending authentic terminal results for idle
+goalless parents through bounded identity-only discovery and scoped, fenced
+queue/wake registration. It never replays child work; see
+[durable inputs](durable-agent-inputs.md).
+
 [Archived imports](../packages/core/src/application/archived-session-imports.ts)
 use server-only `@opengeni/sdk/session-history-import` for idempotent
 `session_events`, never model history/turns/active goals/wakes. Lifecycle seams
@@ -913,6 +918,11 @@ choices retain the schedule's own captured authority. Separate-agent modes are
 explicit. Narrow message edits and server-owned retargeting preserve omitted data;
 execution-digest comparisons guard concurrent edits. See
 [scheduling messages and editing destinations](scheduled-task-access.md#scheduling-a-message-in-a-chat).
+
+`apps/api/src/temporal-schedule-sync.ts` serializes Temporal schedule writes and
+deletion cleanup across API replicas, reading the current task after acquiring
+the lock. Failed writes compensate only the exact saved task; concurrent edits
+remain intact. Transport failures can still have an unknown remote outcome.
 
 Pre-admission refusals are immutable [run receipts](scheduled-admission-diagnostics.md); key-created schedules are ownerless; see [runs waiting on a person](scheduled-task-access.md#runs-waiting-on-a-person).
 
@@ -1788,7 +1798,7 @@ Topics: [`README.md`](README.md).
 | Session Debug model-visible context | `packages/runtime/src/model-request-capture.ts`, `packages/runtime/src/model-provider-client.ts`, `packages/runtime/src/model-context-inspector.ts`, `apps/web/src/components/session/model-context-inspector.tsx`, `apps/web/src/components/session/context-text-reader.tsx` | [`run-lifecycle.md`](run-lifecycle.md#debug-context-capture) |
 | Goals and continuations | `apps/worker/src/activities/goals.ts`, `packages/db/src/` | [`goals.md`](goals.md) |
 | Approval or structured human input | `apps/worker/src/activities/agent-turn/stream-attempt.ts`, `apps/api/src/routes/sessions.ts` | [`human-input.md`](human-input.md) |
-| Schedules | `packages/core/src/domain/scheduled-tasks.ts`, `apps/worker/src/activities/scheduled-tasks.ts` | [`reliability-fixes.md`](reliability-fixes.md), [`scheduled-task-access.md`](scheduled-task-access.md), [`slack-bot.md`](slack-bot.md) |
+| Schedules | `packages/core/src/domain/scheduled-tasks.ts`, `apps/api/src/temporal-schedule-sync.ts`, `apps/worker/src/activities/scheduled-tasks.ts` | [`reliability-fixes.md`](reliability-fixes.md), [`scheduled-task-access.md`](scheduled-task-access.md), [`slack-bot.md`](slack-bot.md) |
 | Event-triggered automations | `packages/core/src/domain/automations.ts`, `apps/worker/src/activities/automations.ts` | [`automations.md`](automations.md) |
 | Child sessions or depth policy | `packages/core/src/domain/sessions.ts`, `packages/core/src/session-authorization.ts` | [`nested-agent-depth.md`](nested-agent-depth.md) |
 | Automatic or human session titles | `packages/contracts/src/session-titles.ts`, `apps/api/src/mcp/server.ts`, `packages/core/src/domain/sessions.ts`, `apps/worker/src/activities/agent-turn/session-title.ts`, `packages/db/src/` | [`run-lifecycle.md`](run-lifecycle.md) |

@@ -4311,6 +4311,21 @@ export function evaluateRuntimeDatabasePosture(
     if (routine.owner === expectedRole) {
       violations.push(`runtime role owns private routine ${routine.name}`);
     }
+    if (routine.name === "list_pending_child_terminal_wake_repairs_v1(integer, uuid, uuid)") {
+      const dispatcher = posture.privateRoutines.find(
+        (entry) => entry.name === "claim_session_workflow_wakes(integer)",
+      );
+      if (
+        !dispatcher ||
+        routine.owner !== dispatcher.owner ||
+        !routine.securityDefiner ||
+        routine.publicExecute ||
+        !routine.execute ||
+        !routine.configuration?.includes("search_path=pg_catalog")
+      ) {
+        violations.push("child terminal repair inventory has unsafe dispatcher capability posture");
+      }
+    }
     const integrationContract = integrationRoutine.find(([name]) => name === routine.name);
     if (integrationContract) {
       const [, tableName, definer] = integrationContract;
