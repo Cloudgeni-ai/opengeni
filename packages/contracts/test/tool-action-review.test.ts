@@ -177,6 +177,34 @@ test("nested, array, composition and local-reference write-only values cannot es
   expect(toolReviewDetails(args, context, "/config/label", 0).items[0]!.value).toBe("Visible");
 });
 
+test("encoded content schemas protect the entire saved string without decoding it", () => {
+  const context = toolReviewContextFromSchema(
+    {
+      properties: {
+        document: {
+          type: "string",
+          contentMediaType: "application/json",
+          contentSchema: { properties: { value: { writeOnly: true } } },
+        },
+        entries: {
+          items: { properties: { encoded: { type: "string", contentSchema: true } } },
+        },
+      },
+    },
+    { kind: "generic" },
+  );
+  const args = {
+    document: '{"value":"CONTENT_SCHEMA_CANARY"}',
+    entries: [{ encoded: "OPAQUE_CONTENT_CANARY" }],
+    description: "Visible",
+  };
+  expect(context.protectedFields).toEqual(["document", "encoded"]);
+  expect(JSON.stringify(toolReviewFields(args, context))).not.toContain("CANARY");
+  for (const path of ["", "/document", "/entries", "/entries/0", "/entries/0/encoded"])
+    expect(JSON.stringify(toolReviewDetails(args, context, path, 0))).not.toContain("CANARY");
+  expect(toolReviewDetails(args, context, "/description", 0).items[0]!.value).toBe("Visible");
+});
+
 test.each([
   { properties: { value: { $ref: "https://schema.example.test/private" } } },
   { properties: { value: { $dynamicRef: "#private" } } },

@@ -75,6 +75,12 @@ function schemaProtectedFields(root: Record<string, unknown>): string[] {
       if (owner === undefined) refuse();
       protectedFields.add(owner!);
     }
+    if (node.contentSchema !== undefined) {
+      // Encoded content is one opaque argument value. Nested privacy annotations
+      // cannot be applied to its string without decoding and changing the bytes.
+      if (owner === undefined) refuse();
+      protectedFields.add(owner!);
+    }
     if (typeof node.$ref === "string") {
       if (node.$ref !== "#" && !node.$ref.startsWith("#/")) refuse();
       let target: unknown = root;
