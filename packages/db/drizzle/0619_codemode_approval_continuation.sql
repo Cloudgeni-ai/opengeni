@@ -1,5 +1,31 @@
 -- deployment-mode: maintenance
 -- Drain API and workers before activation: older clients do not recognize waiting state.
+SET LOCAL lock_timeout = '5s';
+SET LOCAL statement_timeout = '5min';
+
+DO $drain$
+DECLARE
+  roles jsonb;
+BEGIN
+  BEGIN
+    roles := nullif(current_setting('opengeni.migration_application_roles', true), '')::jsonb;
+  EXCEPTION WHEN OTHERS THEN
+    RAISE EXCEPTION 'programmatic approval continuation requires a valid application role list' USING ERRCODE = '55000';
+  END;
+  IF roles IS NULL OR jsonb_typeof(roles) <> 'array' THEN
+    RAISE EXCEPTION 'programmatic approval continuation requires an application role list' USING ERRCODE = '55000';
+  END IF;
+  IF jsonb_array_length(roles) NOT BETWEEN 1 AND 16
+    OR EXISTS (SELECT 1 FROM jsonb_array_elements(roles) item WHERE jsonb_typeof(item) <> 'string'
+      OR btrim(item #>> '{}') = '' OR item #>> '{}' <> btrim(item #>> '{}') OR octet_length(item #>> '{}') > 63)
+    OR (SELECT count(*) FROM jsonb_array_elements_text(roles)) <>
+       (SELECT count(DISTINCT value) FROM jsonb_array_elements_text(roles))
+    OR EXISTS (SELECT 1 FROM pg_stat_activity a JOIN jsonb_array_elements_text(roles) r ON r = a.usename
+      WHERE a.datname = current_database() AND a.pid <> pg_backend_pid()) THEN
+    RAISE EXCEPTION 'programmatic approval continuation requires stopped application roles' USING ERRCODE = '55000';
+  END IF;
+END $drain$;
+
 ALTER TABLE session_attempt_codemode_calls
   ADD COLUMN durable_approval boolean NOT NULL DEFAULT false,
   ADD COLUMN approval_request_id uuid REFERENCES connector_action_requests(id),

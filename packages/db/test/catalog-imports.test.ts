@@ -372,22 +372,22 @@ describe("catalog import persistence", () => {
     expect(matching[0]?.requireApproval).toEqual(["create_draft"]);
   }, 180_000);
 
-  test("a workspace's requireApproval override can only ADD to a global row's mandated floor, never remove it", async () => {
+  test("workspace approval configuration replaces the catalog recommendation", async () => {
     if (!available) return;
     const ws = await freshWorkspace();
     const batch = await createImportBatch(db, {
       source: "integrations.sh",
       snapshotDate: new Date("2026-08-18T00:00:00.000Z"),
-      snapshotRef: "approval-floor",
+      snapshotRef: "approval-default",
       attributionNote: "MIT attribution",
     });
-    const capabilityId = "mcp:integrations-sh:approval-floor";
+    const capabilityId = "mcp:integrations-sh:approval-default";
     await upsertRegistryCapabilityCatalogItem(db, {
       id: capabilityId,
       importBatchId: batch.id,
-      providerDomain: "approval-floor.example",
-      mcpUrl: "https://global.approval-floor.example/mcp",
-      name: "Approval Floor Fixture",
+      providerDomain: "approval-default.example",
+      mcpUrl: "https://global.approval-default.example/mcp",
+      name: "Approval Default Fixture",
       transport: "streamable-http",
       authKind: "none",
       credentialFacts: [],
@@ -399,8 +399,7 @@ describe("catalog import persistence", () => {
       },
     });
 
-    // A caller attempts to strip the mandated tool from the approval policy
-    // with an explicit false - the classic "turn approval off" payload.
+    // Explicit workspace configuration replaces the provider recommendation.
     await enableCapabilityInstallation(db, {
       accountId: ws.accountId,
       workspaceId: ws.workspaceId,
@@ -412,10 +411,9 @@ describe("catalog import persistence", () => {
     const stripped = (await listEnabledMcpCapabilityServers(db, ws.workspaceId)).find(
       (server) => server.capabilityId === capabilityId,
     );
-    expect(stripped?.requireApproval).toEqual(["send_it"]);
+    expect(stripped?.requireApproval).toBe(false);
 
-    // A narrower array that omits the mandated tool is unioned back in, not
-    // silently accepted as a replacement.
+    // A replacement list does not retain an invisible catalog requirement.
     await enableCapabilityInstallation(db, {
       accountId: ws.accountId,
       workspaceId: ws.workspaceId,
@@ -427,9 +425,9 @@ describe("catalog import persistence", () => {
     const narrowed = (await listEnabledMcpCapabilityServers(db, ws.workspaceId)).find(
       (server) => server.capabilityId === capabilityId,
     );
-    expect(narrowed?.requireApproval).toEqual(["search", "send_it"]);
+    expect(narrowed?.requireApproval).toEqual(["search"]);
 
-    // A workspace can still ADD approval requirements beyond the floor.
+    // A workspace can choose additional review defaults explicitly.
     await enableCapabilityInstallation(db, {
       accountId: ws.accountId,
       workspaceId: ws.workspaceId,
@@ -443,9 +441,8 @@ describe("catalog import persistence", () => {
     );
     expect(widened?.requireApproval).toEqual(["extra_caution", "search", "send_it"]);
 
-    // A workspace's OWN custom row has no OpenGeni-mandated floor to protect:
-    // its config fully controls the policy, including turning it off.
-    const customCapabilityId = "mcp:custom:approval-floor-workspace-owned";
+    // Workspace-owned custom rows follow the same configuration semantics.
+    const customCapabilityId = "mcp:custom:approval-default-workspace-owned";
     await upsertCapabilityCatalogItem(db, {
       accountId: ws.accountId,
       workspaceId: ws.workspaceId,
@@ -453,7 +450,7 @@ describe("catalog import persistence", () => {
       kind: "mcp",
       source: "manual",
       name: "Workspace Owned Approval",
-      endpointUrl: "https://workspace.approval-floor.example/mcp",
+      endpointUrl: "https://workspace.approval-default.example/mcp",
       category: "custom",
       tags: ["mcp", "workspace"],
       metadata: { requireApproval: ["send_it"] },

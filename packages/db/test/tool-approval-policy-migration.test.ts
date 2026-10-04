@@ -183,6 +183,7 @@ test("owner backfill preserves only known legacy exemptions, existing choices an
   ).text();
   const owner = postgres(owned.ownerUrl, { max: 1, onnotice: () => undefined });
   try {
+    await owner`select set_config('opengeni.migration_application_roles', '["opengeni_app"]', false)`;
     const [hidden] = await owner`select count(*)::int as count from connector_action_policies`;
     expect(hidden!.count).toBe(0);
     await owner.begin(async (tx) => {
