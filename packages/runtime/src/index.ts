@@ -425,6 +425,7 @@ import {
   ModelRequestCaptureProvider,
   notifyModelRequestCapture,
   withModelCallOutputBound,
+  type ModelCallOutputBound,
   withModelRequestCapture,
   withModelCallLifecycle,
   type ModelCallLifecycle,
@@ -997,7 +998,11 @@ export type GenerateSessionTitleOptions = {
    */
   reasoningEffort?: ReasoningEffort;
   signal?: AbortSignal;
-  onModelCallAdmission?: () => Promise<{ maxOutputTokens: number; budgetReserved?: boolean }>;
+  onModelCallAdmission?: () => Promise<{
+    maxOutputTokens: number;
+    budgetReserved?: boolean;
+    onRequestNotDispatched?: () => Promise<void>;
+  }>;
   onUsage?: (usage: ModelResponseUsage) => void | Promise<void>;
 };
 
@@ -1109,7 +1114,10 @@ export async function generateSessionTitle(
     );
   }
   const response = await withModelCallOutputBound(
-    { maxTokens: grant?.budgetReserved === false ? undefined : grant?.maxOutputTokens },
+    {
+      maxTokens: grant?.budgetReserved === false ? undefined : grant?.maxOutputTokens,
+      onRequestNotDispatched: grant?.onRequestNotDispatched,
+    },
     () =>
       binding?.provider.api === "anthropic-messages"
         ? new AnthropicMessagesModel(
@@ -1149,24 +1157,31 @@ async function generateChatSessionTitle(
   options: GenerateSessionTitleOptions,
 ): Promise<GeneratedSessionTitle> {
   const grant = await options.onModelCallAdmission?.();
-  const completion = await client.chat.completions.create(
+  const completion = await withModelCallOutputBound(
     {
-      model: modelName,
-      max_tokens: Math.min(
-        SESSION_TITLE_GENERATION_MAX_OUTPUT_TOKENS,
-        grant?.maxOutputTokens ?? SESSION_TITLE_GENERATION_MAX_OUTPUT_TOKENS,
-      ),
-      messages: [
-        { role: "system", content: SESSION_TITLE_GENERATION_INSTRUCTIONS },
-        { role: "user", content: prompt },
-      ],
-      ...(options.reasoningEffort ? { reasoning_effort: options.reasoningEffort } : {}),
-      ...(options.serviceTier ? { service_tier: options.serviceTier } : {}),
-    } as any,
-    {
-      ...(options.signal ? { signal: options.signal } : {}),
-      ...(grant && grant.budgetReserved !== false ? { maxRetries: 0 } : {}),
+      maxTokens: grant?.budgetReserved === false ? undefined : grant?.maxOutputTokens,
+      onRequestNotDispatched: grant?.onRequestNotDispatched,
     },
+    () =>
+      client.chat.completions.create(
+        {
+          model: modelName,
+          max_tokens: Math.min(
+            SESSION_TITLE_GENERATION_MAX_OUTPUT_TOKENS,
+            grant?.maxOutputTokens ?? SESSION_TITLE_GENERATION_MAX_OUTPUT_TOKENS,
+          ),
+          messages: [
+            { role: "system", content: SESSION_TITLE_GENERATION_INSTRUCTIONS },
+            { role: "user", content: prompt },
+          ],
+          ...(options.reasoningEffort ? { reasoning_effort: options.reasoningEffort } : {}),
+          ...(options.serviceTier ? { service_tier: options.serviceTier } : {}),
+        } as any,
+        {
+          ...(options.signal ? { signal: options.signal } : {}),
+          ...(grant && grant.budgetReserved !== false ? { maxRetries: 0 } : {}),
+        },
+      ),
   );
   const usage = modelResponseUsageFromResponse(completion);
   if (usage) await options.onUsage?.(usage);
@@ -1260,7 +1275,11 @@ export async function summarizeForCompaction(
     systemInstructions?: string;
     preparedRequest?: Omit<ModelRequest, "input">;
     signal?: AbortSignal;
-    onModelCallAdmission?: () => Promise<{ maxOutputTokens: number; budgetReserved?: boolean }>;
+    onModelCallAdmission?: () => Promise<{
+      maxOutputTokens: number;
+      budgetReserved?: boolean;
+      onRequestNotDispatched?: () => Promise<void>;
+    }>;
     onUsage?: (usage: ModelResponseUsage) => void | Promise<void>;
   } = {},
 ): Promise<string> {
@@ -1277,22 +1296,29 @@ export async function summarizeForCompaction(
     const grant = await options.onModelCallAdmission?.();
     let completion: unknown;
     try {
-      completion = await client.chat.completions.create(
+      completion = await withModelCallOutputBound(
         {
-          model,
-          max_tokens: Math.min(maxTokens, grant?.maxOutputTokens ?? maxTokens),
-          messages: [
-            ...(options.systemInstructions
-              ? [{ role: "system" as const, content: options.systemInstructions }]
-              : []),
-            { role: "user", content: transcript },
-          ],
-          ...(options.promptCacheKey ? { prompt_cache_key: options.promptCacheKey } : {}),
-        } as any,
-        {
-          ...(options.signal ? { signal: options.signal } : {}),
-          ...(grant && grant.budgetReserved !== false ? { maxRetries: 0 } : {}),
+          maxTokens: grant?.budgetReserved === false ? undefined : grant?.maxOutputTokens,
+          onRequestNotDispatched: grant?.onRequestNotDispatched,
         },
+        () =>
+          client.chat.completions.create(
+            {
+              model,
+              max_tokens: Math.min(maxTokens, grant?.maxOutputTokens ?? maxTokens),
+              messages: [
+                ...(options.systemInstructions
+                  ? [{ role: "system" as const, content: options.systemInstructions }]
+                  : []),
+                { role: "user", content: transcript },
+              ],
+              ...(options.promptCacheKey ? { prompt_cache_key: options.promptCacheKey } : {}),
+            } as any,
+            {
+              ...(options.signal ? { signal: options.signal } : {}),
+              ...(grant && grant.budgetReserved !== false ? { maxRetries: 0 } : {}),
+            },
+          ),
       );
     } catch (error) {
       throw new CompactionProviderResponseError(compactionProviderFailureDiagnostics(error), error);
@@ -1382,7 +1408,10 @@ export async function summarizeForCompaction(
   let response: unknown;
   try {
     response = await withModelCallOutputBound(
-      { maxTokens: grant?.budgetReserved === false ? undefined : grant?.maxOutputTokens },
+      {
+        maxTokens: grant?.budgetReserved === false ? undefined : grant?.maxOutputTokens,
+        onRequestNotDispatched: grant?.onRequestNotDispatched,
+      },
       () =>
         provider.api === "anthropic-messages"
           ? new AnthropicMessagesModel(
@@ -1599,7 +1628,11 @@ export async function requestRemoteCompactionV2(
     preparedRequest: Omit<ModelRequest, "input">;
     captureAgent?: object;
     signal?: AbortSignal | undefined;
-    onModelCallAdmission?: () => Promise<{ maxOutputTokens: number; budgetReserved?: boolean }>;
+    onModelCallAdmission?: () => Promise<{
+      maxOutputTokens: number;
+      budgetReserved?: boolean;
+      onRequestNotDispatched?: () => Promise<void>;
+    }>;
     onUsage?: (usage: ModelResponseUsage) => void | Promise<void>;
   },
 ): Promise<Record<string, unknown>> {
@@ -1630,7 +1663,10 @@ export async function requestRemoteCompactionV2(
     const provider = options.provider ?? configuredProviders(settings)[0];
     if (!provider) throw new Error("Built-in model provider is unavailable");
     response = await withModelCallOutputBound(
-      { maxTokens: grant?.budgetReserved === false ? undefined : grant?.maxOutputTokens },
+      {
+        maxTokens: grant?.budgetReserved === false ? undefined : grant?.maxOutputTokens,
+        onRequestNotDispatched: grant?.onRequestNotDispatched,
+      },
       () =>
         withModelRequestCapture(
           options.captureAgent ? agentModelContextCaptures.get(options.captureAgent) : undefined,
@@ -8378,7 +8414,10 @@ export type RunAgentStreamOptions = {
   onModelCallAdmission?: (call: {
     modelData: ModelInputData;
     agent: Agent<any, any>;
-  }) => void | { maxOutputTokens?: number } | Promise<void | { maxOutputTokens?: number }>;
+  }) =>
+    | void
+    | { maxOutputTokens?: number; onRequestNotDispatched?: () => Promise<void> }
+    | Promise<void | { maxOutputTokens?: number; onRequestNotDispatched?: () => Promise<void> }>;
   /**
    * Observes the exact model-visible prefix after every input filter. Must not
    * throw; capture failures are swallowed so they cannot change inference.
@@ -8474,13 +8513,14 @@ function modelModalityProjectionFilterForAgent(
  */
 function modelCallAdmissionFilter(
   onAdmission: RunAgentStreamOptions["onModelCallAdmission"],
-  outputBoundCell?: { maxTokens: number | undefined },
+  outputBoundCell?: ModelCallOutputBound,
 ): CallModelInputFilter | undefined {
   if (!onAdmission) return undefined;
   return async ({ modelData, agent }) => {
     const grant = await onAdmission({ modelData, agent });
     if (outputBoundCell) {
       outputBoundCell.maxTokens = grant?.maxOutputTokens;
+      outputBoundCell.onRequestNotDispatched = grant?.onRequestNotDispatched;
     }
     return modelData;
   };
@@ -8631,7 +8671,7 @@ async function runAgentStreamInternal(
   // headroom it granted for each call; the model wrappers clamp the
   // dispatched request's maxTokens to it so a permitted call cannot emit
   // beyond its reservation.
-  const modelCallOutputBoundCell: { maxTokens: number | undefined } = {
+  const modelCallOutputBoundCell: ModelCallOutputBound = {
     maxTokens: undefined,
   };
   installNonLazyModelRequestCapture(agent);

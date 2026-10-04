@@ -1069,7 +1069,12 @@ Usage facts, credit debits, allowance counters, and the matching reservation
 release commit atomically. Unresolved calls remain reserved across cancellation,
 worker retries, logical attempt closure, and month changes: none proves the
 provider charged zero. Missing usage retains the conservative hold until
-reconciliation. Reserved rows stay internal and are excluded from user-facing
+reconciliation. An owned preparation failure proved before transport refunds only
+its exact grant, even if cancellation has already closed the attempt. A private
+transactional projection tracks per-source outstanding balances, so admission
+reads unresolved sources instead of regrouping settled history. Account reads
+include every workspace; workspace reads preserve session visibility before
+netting releases. The usage ledger remains authoritative. Reserved rows stay internal and are excluded from user-facing
 usage lists, exports, and Insights. These monthly deployment caps are separate
 from the administrator allowance counters described in section3.12.
 

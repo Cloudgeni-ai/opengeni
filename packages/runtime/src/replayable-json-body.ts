@@ -1,4 +1,8 @@
-import { hasModelCallOutputBound } from "./model-request-capture";
+import {
+  hasModelCallOutputBound,
+  markModelRequestPreparationFailure,
+  refundModelRequestPreparationFailure,
+} from "./model-request-capture";
 import OpenAI, { type APIError } from "openai";
 import type { APIPromise } from "openai/core/api-promise";
 import { types as utilTypes } from "node:util";
@@ -125,25 +129,33 @@ export class ReplayableJsonOpenAI extends OpenAI {
     if (!isModelRequestPath(path) || opts === undefined) {
       return super.post<Rsp>(path, opts);
     }
-    const wrapped = Promise.resolve(opts).then((resolved) => {
-      const body = resolved.body;
-      let prepared = resolved;
-      if (this.modelRequestPolicy && isJsonRecordBody(body)) {
-        const policy = this.modelRequestPolicy({ path, body });
-        if (policy?.body || policy?.headers) {
-          prepared = {
-            ...resolved,
-            ...(policy.body ? { body: policy.body } : {}),
-            ...(policy.headers
-              ? { headers: mergePolicyHeaders(resolved.headers, policy.headers) }
-              : {}),
-          };
+    const wrapped = Promise.resolve(opts).then(async (resolved) => {
+      try {
+        const body = resolved.body;
+        let prepared = resolved;
+        if (this.modelRequestPolicy && isJsonRecordBody(body)) {
+          const policy = this.modelRequestPolicy({ path, body });
+          if (policy?.body || policy?.headers) {
+            prepared = {
+              ...resolved,
+              ...(policy.body ? { body: policy.body } : {}),
+              ...(policy.headers
+                ? { headers: mergePolicyHeaders(resolved.headers, policy.headers) }
+                : {}),
+            };
+          }
         }
+        // A financial admission covers one request. SDK retries of network or
+        // server failures may replay paid work without a fresh durable grant.
+        if (hasModelCallOutputBound()) prepared = { ...prepared, maxRetries: 0 };
+        return wrapJsonRequestOptions(prepared);
+      } catch (error) {
+        // Policy and eager wrapping happen before the SDK can enter fetch.
+        // Lazy body iteration remains part of the ambiguous transport phase.
+        markModelRequestPreparationFailure(error);
+        await refundModelRequestPreparationFailure(error);
+        throw error;
       }
-      // A financial admission covers one request. SDK retries of network or
-      // server failures may replay paid work without a fresh durable grant.
-      if (hasModelCallOutputBound()) prepared = { ...prepared, maxRetries: 0 };
-      return wrapJsonRequestOptions(prepared);
     });
     return super.post<Rsp>(path, wrapped);
   }

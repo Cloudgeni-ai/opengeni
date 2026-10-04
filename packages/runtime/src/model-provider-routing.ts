@@ -1,3 +1,4 @@
+import { AsyncLocalStorage } from "node:async_hooks";
 import { randomUUID } from "node:crypto";
 import { isDirectModelId } from "@opengeni/contracts";
 import type { ConfiguredModel, ResolvedModelProvider, Settings } from "@opengeni/config";
@@ -11,6 +12,10 @@ import {
   type ResponseStreamEvent,
 } from "@openai/agents";
 import OpenAI, { APIError } from "openai";
+import {
+  markModelRequestPreparationFailure,
+  refundModelRequestPreparationFailure,
+} from "./model-request-capture";
 import { providerReportedTokenUsage } from "./usage-telemetry";
 import { AnthropicMessagesModel } from "./anthropic-messages";
 import { instrumentedModelFetch } from "./model-provider-client";
@@ -67,9 +72,79 @@ function chatCompletionFinishReason(value: unknown): unknown {
  * before that boundary so the worker's fenced same-turn recovery owns the
  * continuation and no OpenGeni tool call from the ambiguous response executes.
  */
+const chatTransportEntry = new AsyncLocalStorage<{ entered: boolean }>();
+
+// The SDK's Chat conversion is private. Track the earliest client create entry,
+// conservatively treating every failure after it as a possible dispatch.
+function chatEntryTrackedClient(
+  client: ConstructorParameters<typeof OpenAIChatCompletionsModel>[0],
+) {
+  const completions = new Proxy(client.chat.completions, {
+    get(target, property) {
+      if (property === "create")
+        return (...args: Parameters<typeof target.create>) => {
+          const entry = chatTransportEntry.getStore();
+          if (entry) entry.entered = true;
+          return Reflect.apply(target.create, target, args);
+        };
+      return Reflect.get(target, property, target);
+    },
+  });
+  const chat = new Proxy(client.chat, {
+    get(target, property) {
+      return property === "completions" ? completions : Reflect.get(target, property, target);
+    },
+  });
+  return new Proxy(client, {
+    get(target, property) {
+      return property === "chat" ? chat : Reflect.get(target, property, target);
+    },
+  });
+}
+
+async function refundUnenteredChatFailure(error: unknown, entered: boolean) {
+  if (entered) return;
+  markModelRequestPreparationFailure(error);
+  await refundModelRequestPreparationFailure(error);
+}
+
+async function* chatEntryTrackedStream(
+  stream: AsyncIterable<ResponseStreamEvent>,
+): AsyncIterable<ResponseStreamEvent> {
+  const entry = { entered: false };
+  const iterator = stream[Symbol.asyncIterator]();
+  try {
+    while (true) {
+      const next = await chatTransportEntry.run(entry, () => iterator.next());
+      if (next.done) return;
+      yield next.value;
+    }
+  } catch (error) {
+    await refundUnenteredChatFailure(error, entry.entered);
+    throw error;
+  } finally {
+    await chatTransportEntry.run(entry, () => iterator.return?.());
+  }
+}
+
 export class OpenGeniChatCompletionsModel extends OpenAIChatCompletionsModel {
+  constructor(
+    client: ConstructorParameters<typeof OpenAIChatCompletionsModel>[0],
+    model: string,
+    options?: ConstructorParameters<typeof OpenAIChatCompletionsModel>[2],
+  ) {
+    super(chatEntryTrackedClient(client), model, options);
+  }
+
   override async getResponse(request: ModelRequest): Promise<ModelResponse> {
-    const response = await super.getResponse(request);
+    const entry = { entered: false };
+    let response: ModelResponse;
+    try {
+      response = await chatTransportEntry.run(entry, () => super.getResponse(request));
+    } catch (error) {
+      await refundUnenteredChatFailure(error, entry.entered);
+      throw error;
+    }
     if (isUnknownFinishReason(chatCompletionFinishReason(response.providerData))) {
       throw new UnknownModelFinishReasonError();
     }
@@ -87,7 +162,7 @@ export class OpenGeniChatCompletionsModel extends OpenAIChatCompletionsModel {
     let usageReported = false;
     let providerResponseId: string | undefined;
     const fallbackId = `opengeni-response:${randomUUID()}`;
-    for await (const event of super.getStreamedResponse(request)) {
+    for await (const event of chatEntryTrackedStream(super.getStreamedResponse(request))) {
       if (event.type === "model") {
         const rawId = (event.event as { id?: unknown } | undefined)?.id;
         if (typeof rawId === "string" && rawId.trim()) providerResponseId = rawId;
@@ -138,44 +213,49 @@ export class OpenGeniResponsesModel extends AppendOnlyOpenAIResponsesModel {
     request: ModelRequest,
     stream: boolean,
   ): Promise<OpenAI.Responses.Response | AsyncIterable<OpenAI.Responses.ResponseStreamEvent>> {
-    // One transport call owns one fallback identity, shared by raw and SDK terminals.
-    const fallbackId = `opengeni-response:${randomUUID()}`;
-    if (!stream || !this.ownsResponsesTerminalClassification()) {
-      // Subscription transports retain the SDK's request-id and error handling.
-      const response = await super._fetchResponse(request, stream as false);
-      if (!stream) return responseWithUsageEvidence(response, fallbackId);
+    try {
+      // One transport call owns one fallback identity, shared by raw and SDK terminals.
+      const fallbackId = `opengeni-response:${randomUUID()}`;
+      if (!stream || !this.ownsResponsesTerminalClassification()) {
+        // Subscription transports retain the SDK's request-id and error handling.
+        const response = await super._fetchResponse(request, stream as false);
+        if (!stream) return responseWithUsageEvidence(response, fallbackId);
+        return this.responseUsageEvidenceStream(
+          response as unknown as AsyncIterable<OpenAI.Responses.ResponseStreamEvent>,
+          fallbackId,
+        );
+      }
+      // Reuse the SDK's full request conversion, but retain its HTTP receipt
+      // before the SDK's stream wrapper discards the response headers.
+      const built = this._buildResponsesCreateRequest(request, true);
+      const internal = (request as ModelRequest & { _internal?: { runnerManagedRetry?: boolean } })
+        ._internal;
+      const pending = this._client.responses.create(
+        built.requestData as OpenAI.Responses.ResponseCreateParamsStreaming,
+        {
+          headers: built.sdkRequestHeaders,
+          signal: built.signal,
+          ...(built.transportExtraQuery ? { query: built.transportExtraQuery } : {}),
+          ...(internal?.runnerManagedRetry === true ? { maxRetries: 0 } : {}),
+        },
+      );
+      if (typeof pending.withResponse !== "function") {
+        // The SDK also permits custom clients returning only the stream promise.
+        // Such clients cannot supply HTTP evidence, but must remain usable.
+        return this.responseUsageEvidenceStream(
+          this.classifiedResponseStream(await pending, new Headers(), null),
+          fallbackId,
+        );
+      }
+      const receipt = await pending.withResponse();
       return this.responseUsageEvidenceStream(
-        response as unknown as AsyncIterable<OpenAI.Responses.ResponseStreamEvent>,
+        this.classifiedResponseStream(receipt.data, receipt.response.headers, receipt.request_id),
         fallbackId,
       );
+    } catch (error) {
+      await refundModelRequestPreparationFailure(error);
+      throw error;
     }
-    // Reuse the SDK's full request conversion, but retain its HTTP receipt
-    // before the SDK's stream wrapper discards the response headers.
-    const built = this._buildResponsesCreateRequest(request, true);
-    const internal = (request as ModelRequest & { _internal?: { runnerManagedRetry?: boolean } })
-      ._internal;
-    const pending = this._client.responses.create(
-      built.requestData as OpenAI.Responses.ResponseCreateParamsStreaming,
-      {
-        headers: built.sdkRequestHeaders,
-        signal: built.signal,
-        ...(built.transportExtraQuery ? { query: built.transportExtraQuery } : {}),
-        ...(internal?.runnerManagedRetry === true ? { maxRetries: 0 } : {}),
-      },
-    );
-    if (typeof pending.withResponse !== "function") {
-      // The SDK also permits custom clients returning only the stream promise.
-      // Such clients cannot supply HTTP evidence, but must remain usable.
-      return this.responseUsageEvidenceStream(
-        this.classifiedResponseStream(await pending, new Headers(), null),
-        fallbackId,
-      );
-    }
-    const receipt = await pending.withResponse();
-    return this.responseUsageEvidenceStream(
-      this.classifiedResponseStream(receipt.data, receipt.response.headers, receipt.request_id),
-      fallbackId,
-    );
   }
 
   private async *responseUsageEvidenceStream(
@@ -245,6 +325,7 @@ export class OpenGeniResponsesModel extends AppendOnlyOpenAIResponsesModel {
       return super._buildResponsesCreateRequest(request, stream);
     } catch (error) {
       outcome = "failed";
+      markModelRequestPreparationFailure(error);
       throw error;
     } finally {
       recordModelPreparationMeasurement({

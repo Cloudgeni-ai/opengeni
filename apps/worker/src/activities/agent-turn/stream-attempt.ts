@@ -102,6 +102,7 @@ import {
   stableInteractionInterventionId,
   stableInteractionInterventionOperationId,
   reserveModelCallBudget,
+  undispatchedModelCallRefund,
   takeAdmittedModelCall,
   usageReservationReleaseEvents,
   ensureRunAllowedBetweenModelCalls,
@@ -902,7 +903,23 @@ export async function runTurnStreamAttempt(
             admittedCallOrdinals.push(grant.callId);
             streamCallIds.add(grant.callId);
             if (grant.held) billingState.pendingUsageReservations.set(grant.callId, grant.held);
-            return grant.held ? { maxOutputTokens: grant.maxOutputTokens } : undefined;
+            return grant.held
+              ? {
+                  maxOutputTokens: grant.maxOutputTokens,
+                  onRequestNotDispatched: undispatchedModelCallRefund({
+                    db,
+                    accountId: input.accountId,
+                    workspaceId: input.workspaceId,
+                    grant,
+                    pending: billingState.pendingUsageReservations,
+                    onRefunded: () => {
+                      const index = admittedCallOrdinals.indexOf(grant.callId);
+                      if (index !== -1) admittedCallOrdinals.splice(index, 1);
+                      streamCallIds.delete(grant.callId);
+                    },
+                  }),
+                }
+              : undefined;
           },
           onModelVisibleContext: async (snapshot) => {
             await persistModelContextSnapshot(db, {
@@ -2122,6 +2139,13 @@ export async function runTurnStreamAttempt(
               return {
                 maxOutputTokens: sessionTitleGrant.maxOutputTokens,
                 budgetReserved: Boolean(sessionTitleGrant.held),
+                onRequestNotDispatched: undispatchedModelCallRefund({
+                  db,
+                  accountId: input.accountId,
+                  workspaceId: input.workspaceId,
+                  grant: sessionTitleGrant,
+                  pending: billingState.pendingUsageReservations,
+                }),
               };
             },
             onUsage: settleSessionTitleUsage,

@@ -1,3 +1,4 @@
+import { withModelCallOutputBound } from "../src/model-request-capture";
 import { describe, expect, test } from "bun:test";
 import {
   ReplayableJsonBody,
@@ -311,3 +312,39 @@ describe("replayable JSON model requests", () => {
     }
   });
 });
+
+test.each(["/responses", "/chat/completions"])(
+  "owned %s policy rejection refunds before fetch",
+  async (path) => {
+    let fetches = 0;
+    let refunds = 0;
+    const failure = new Error("Catalogue refuses this model before transport");
+    const client = new ReplayableJsonOpenAI(
+      {
+        apiKey: "fixture",
+        fetch: async () => {
+          fetches++;
+          throw new Error("transport must remain untouched");
+        },
+      },
+      {
+        modelRequestPolicy: () => {
+          throw failure;
+        },
+      },
+    );
+    await expect(
+      withModelCallOutputBound(
+        {
+          maxTokens: 10,
+          onRequestNotDispatched: async () => {
+            refunds++;
+          },
+        },
+        async () => await client.post(path, { body: { model: "fixture", input: "test" } }),
+      ),
+    ).rejects.toBe(failure);
+    expect(fetches).toBe(0);
+    expect(refunds).toBe(1);
+  },
+);

@@ -2490,6 +2490,22 @@ describe("standalone context compaction execution", () => {
       kind: "idle",
     });
 
+    // Synthetic completed acceptance isolates wake/attachment from earlier
+    // execution. A child result needs the receiving human's accepted parent
+    // authority; a provenance-less notice must never enter their prompt.
+    const [parentTurn] = await shared.admin<Array<{ id: string }>>`
+      insert into session_turns
+        (account_id, workspace_id, session_id, trigger_event_id, temporal_workflow_id,
+         status, position, prompt, model, reasoning_effort, sandbox_backend,
+         initiator_kind, initiator_subject_id, initiating_human_subject_id)
+      select ${grant.accountId}, ${grant.workspaceId!}, ${session.id}, gen_random_uuid(),
+        ${`session-${session.id}`}, 'completed', coalesce(max(position), -1) + 1,
+        'Accepted parent work', 'scripted-model', 'medium', 'none', 'subject',
+        ${grant.subjectId}, ${grant.subjectId}
+      from session_turns where session_id = ${session.id}
+      returning id`;
+    if (!parentTurn) throw new Error("accepted parent turn was not inserted");
+    const childSessionId = crypto.randomUUID();
     const newUpdate = await addSessionSystemUpdate(client.db, {
       accountId: grant.accountId,
       workspaceId: grant.workspaceId!,
@@ -2499,9 +2515,15 @@ describe("standalone context compaction execution", () => {
       sourceId: crypto.randomUUID(),
       dedupeKey: `child-${crypto.randomUUID()}`,
       summary: "A genuinely new child completed",
+      lineage: {
+        parentTurnId: parentTurn.id,
+        parentSessionId: session.id,
+        childSessionId,
+        connectionAuthoritySubjectId: grant.subjectId,
+      },
       payload: {
         type: "child_terminal_result",
-        childSessionId: crypto.randomUUID(),
+        childSessionId,
         status: "idle",
       },
     });

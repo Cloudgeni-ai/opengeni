@@ -5754,17 +5754,9 @@ async function openUsageReservationNetInScope(
 ): Promise<number> {
   const [row] = await rawRows<{ total: string | number | bigint }>(
     scopedDb,
-    sql`select coalesce(sum(
-greatest(g.net, 0)), 0) as total
-        from (
-          select sum(usage_row.quantity) as net,
-            max(usage_row.occurred_at) filter (where usage_row.quantity > 0) as hold_at
-          from ${schema.usageEvents} usage_row
-          where usage_row.account_id = ${input.accountId}
-            and usage_row.workspace_id = ${input.workspaceId}
-            and usage_row.event_type = ${input.eventType}
-          group by usage_row.source_resource_id
-        ) g`,
+    sql`select opengeni_private.workspace_open_usage_reservations(
+      ${input.accountId}::uuid, ${input.workspaceId}::uuid, ${input.eventType}
+    ) as total`,
   );
   return Number(row?.total ?? 0);
 }

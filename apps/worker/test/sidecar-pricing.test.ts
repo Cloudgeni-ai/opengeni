@@ -234,3 +234,47 @@ test("Fast prepared Responses compaction preserves request pricing while releasi
     fact.mockRestore();
   }
 });
+
+test.each(["title", "compaction"])(
+  "direct Chat %s local client policy failure refunds its own grant",
+  async (kind) => {
+    const settings = testSettings();
+    const provider = { ...configuredProviders(settings)[0]!, api: "chat" as const };
+    let fetches = 0;
+    let refunds = 0;
+    const client = new ReplayableJsonOpenAI(
+      {
+        apiKey: "fixture",
+        fetch: async () => {
+          fetches++;
+          throw new Error("unexpected fetch");
+        },
+      },
+      {
+        modelRequestPolicy: () => {
+          throw new Error("owned local policy refusal");
+        },
+      },
+    );
+    const onModelCallAdmission = async () => ({
+      maxOutputTokens: 10,
+      onRequestNotDispatched: async () => {
+        refunds++;
+      },
+    });
+    await expect(
+      kind === "title"
+        ? generateSessionTitle(settings, "test opener", { client, provider, onModelCallAdmission })
+        : summarizeForCompaction(settings, [{ role: "user", content: "test history" }], {
+            client,
+            provider,
+            api: "chat",
+            onModelCallAdmission,
+          }),
+    ).rejects.toThrow(
+      kind === "title" ? "owned local policy refusal" : "Compaction provider request failed",
+    );
+    expect(fetches).toBe(0);
+    expect(refunds).toBe(1);
+  },
+);

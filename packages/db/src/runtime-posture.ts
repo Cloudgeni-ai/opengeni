@@ -115,6 +115,8 @@ const MCP_OPERATION_AUTHORITY_TABLES = [
   "scheduled_task_runs",
 ] as const;
 const OWNER_INTERNAL_PRIVATE_ROUTINES = new Set<string>([
+  "adjust_usage_reservation_balance(uuid, uuid, uuid, text, text, numeric)",
+  "project_usage_reservation_balance()",
   "claude_subscription_pool_protocol_v1_active()",
   "read_sender_connection(uuid, uuid, uuid, text)",
   // Lifecycle fact writers (migrations 0532 and 0565): owner-run trigger
@@ -2136,15 +2138,15 @@ export async function inspectRuntimeDatabasePosture(
             -- Column-only grants on capability tables are also unsafe; a pin
             -- table must remain EXECUTE-only even after column ACL drift.
             (has_table_privilege(current_user, c.oid, 'SELECT') or
-              ((c.relname in ('modal_inventory_read_capabilities','usage_allowance_capabilities','session_import_batches', ${ARTIFACT_PINS_TABLE}) or
+              ((c.relname in ('usage_reservation_balances','modal_inventory_read_capabilities','usage_allowance_capabilities','session_import_batches', ${ARTIFACT_PINS_TABLE}) or
                 c.relname in (select jsonb_array_elements_text(${JSON.stringify(RUNTIME_ALLOWANCE_PRIVATE_TABLES)}::jsonb))) and
                 has_any_column_privilege(current_user, c.oid, 'SELECT'))) as can_select,
             (has_table_privilege(current_user, c.oid, 'INSERT') or
-              ((c.relname in ('modal_inventory_read_capabilities','usage_allowance_capabilities','session_import_batches', ${ARTIFACT_PINS_TABLE}) or
+              ((c.relname in ('usage_reservation_balances','modal_inventory_read_capabilities','usage_allowance_capabilities','session_import_batches', ${ARTIFACT_PINS_TABLE}) or
                 c.relname in (select jsonb_array_elements_text(${JSON.stringify(RUNTIME_ALLOWANCE_PRIVATE_TABLES)}::jsonb))) and
                 has_any_column_privilege(current_user, c.oid, 'INSERT'))) as can_insert,
             (has_table_privilege(current_user, c.oid, 'UPDATE') or
-              ((c.relname in ('modal_inventory_read_capabilities','usage_allowance_capabilities','session_import_batches', ${ARTIFACT_PINS_TABLE}) or
+              ((c.relname in ('usage_reservation_balances','modal_inventory_read_capabilities','usage_allowance_capabilities','session_import_batches', ${ARTIFACT_PINS_TABLE}) or
                 c.relname in (select jsonb_array_elements_text(${JSON.stringify(RUNTIME_ALLOWANCE_PRIVATE_TABLES)}::jsonb))) and
                 has_any_column_privilege(current_user, c.oid, 'UPDATE'))) as can_update,
             has_table_privilege(current_user, c.oid, 'DELETE') as can_delete,
@@ -2175,6 +2177,7 @@ export async function inspectRuntimeDatabasePosture(
               ${SCHEDULED_SLACK_BOT_MESSAGES_TABLE},
               ${ORGANIZATION_SIGNUP_USE_CASES_TABLE},
               ${SLACK_FILE_UPLOAD_OPERATIONS_TABLE},
+              'usage_reservation_balances',
               'organization_usage_read_capabilities',
               'usage_allowance_capabilities',
               'workspace_usage_allowances',
@@ -4269,6 +4272,7 @@ export function evaluateRuntimeDatabasePosture(
     }
   }
   for (const name of [
+    "workspace_open_usage_reservations(uuid, uuid, text)",
     "account_usage_quantity(uuid, text, timestamp with time zone)",
     "account_open_usage_reservations(uuid, text, timestamp with time zone, timestamp with time zone)",
   ]) {
@@ -4289,6 +4293,44 @@ export function evaluateRuntimeDatabasePosture(
       )
     ) {
       violations.push(`account usage capability ${name} is missing or unsafe`);
+    }
+  }
+  const reservationBalances = posture.privateTables.find(
+    (table) => table.name === "usage_reservation_balances",
+  );
+  if (reservationBalances) {
+    if (
+      !reservationBalances.rlsEnabled ||
+      !reservationBalances.rlsForced ||
+      !reservationBalances.rlsActive ||
+      reservationBalances.owner !== tableByName.get("usage_events")?.owner ||
+      reservationBalances.select ||
+      reservationBalances.insert ||
+      reservationBalances.update ||
+      reservationBalances.delete ||
+      reservationBalances.truncate ||
+      reservationBalances.references ||
+      reservationBalances.trigger
+    ) {
+      violations.push("reservation balances have unsafe owner-only table posture");
+    }
+    for (const [name, definer] of [
+      ["adjust_usage_reservation_balance(uuid, uuid, uuid, text, text, numeric)", false],
+      ["project_usage_reservation_balance()", true],
+    ] as const) {
+      const matches = posture.privateRoutines.filter((routine) => routine.name === name);
+      const routine = matches[0];
+      if (
+        matches.length !== 1 ||
+        !routine ||
+        routine.execute ||
+        routine.publicExecute ||
+        routine.owner !== reservationBalances.owner ||
+        routine.securityDefiner !== definer ||
+        !routine.configuration?.includes("search_path=pg_catalog")
+      ) {
+        violations.push(`reservation projection internal routine ${name} has unsafe posture`);
+      }
     }
   }
   const modelCallFactsOwner = tableByName.get("model_call_facts")?.owner;

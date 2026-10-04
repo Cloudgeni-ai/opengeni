@@ -1,4 +1,5 @@
 import {
+  recordUsageEventsAndApplyCreditDebit,
   checkWorkspaceAllowance,
   getBillingBalance,
   openUsageReservationQuantity,
@@ -833,4 +834,27 @@ export async function reserveModelCallBudget(input: {
         })
       : [],
   };
+}
+
+/** Callback bound to exactly one grant; owned local preparation may refund it. */
+export function undispatchedModelCallRefund(input: {
+  db: ActivityServices["db"];
+  accountId: string;
+  workspaceId: string;
+  grant: Awaited<ReturnType<typeof reserveModelCallBudget>>;
+  pending: Map<string, { tokens?: number; costMicros?: number }>;
+  onRefunded?: () => void;
+}): () => Promise<void> {
+  let refund: Promise<void> | undefined;
+  return () =>
+    (refund ??= (async () => {
+      if (!input.grant.held) return;
+      await recordUsageEventsAndApplyCreditDebit(input.db, {
+        accountId: input.accountId,
+        workspaceId: input.workspaceId,
+        usageEvents: input.grant.reservationReleases,
+      });
+      input.pending.delete(input.grant.callId);
+      input.onRefunded?.();
+    })());
 }

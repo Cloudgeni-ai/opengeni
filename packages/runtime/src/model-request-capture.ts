@@ -22,14 +22,28 @@ const captureIndices = new WeakMap<object, number>();
  * left is the ModelRequest seen by the model wrappers below. The cell is
  * scoped to one run's async context so concurrent turns never share a bound.
  */
-const modelCallOutputBound = new AsyncLocalStorage<{
+export type ModelCallOutputBound = {
   maxTokens: number | undefined;
-}>();
+  onRequestNotDispatched?: (() => Promise<void>) | undefined;
+};
+const modelCallOutputBound = new AsyncLocalStorage<ModelCallOutputBound>();
+const localPreparationFailures = new WeakMap<object, () => Promise<void>>();
 
-export function withModelCallOutputBound<T>(
-  cell: { maxTokens: number | undefined },
-  fn: () => T,
-): T {
+/** Register only at an owned boundary strictly before transport entry. */
+export function markModelRequestPreparationFailure(error: unknown): void {
+  const refund = modelCallOutputBound.getStore()?.onRequestNotDispatched;
+  if (refund && error && typeof error === "object") localPreparationFailures.set(error, refund);
+}
+
+export async function refundModelRequestPreparationFailure(error: unknown): Promise<void> {
+  if (!error || typeof error !== "object") return;
+  const refund = localPreparationFailures.get(error);
+  if (!refund) return;
+  await refund();
+  localPreparationFailures.delete(error);
+}
+
+export function withModelCallOutputBound<T>(cell: ModelCallOutputBound, fn: () => T): T {
   return modelCallOutputBound.run(cell, fn);
 }
 

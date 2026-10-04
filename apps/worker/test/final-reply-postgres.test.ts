@@ -1,3 +1,8 @@
+import {
+  undispatchedModelCallRefund,
+  usageReservationReleaseEvents,
+} from "../src/activities/agent-turn/admission";
+import { AnthropicMessagesModel } from "../../../packages/runtime/src/anthropic-messages";
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import {
   bootstrapWorkspace,
@@ -71,7 +76,11 @@ describe("empty final reply production runtime with PostgreSQL", () => {
       | "responses-no-id"
       | "responses-empty-id"
       | "chat-no-id"
-      | "chat-empty-id",
+      | "chat-empty-id"
+      | "responses-preparation"
+      | "chat-preparation"
+      | "claude-preparation"
+      | "claude-after-dispatch",
   ) {
     const suffix = crypto.randomUUID();
     const access = await bootstrapWorkspace(client.db, {
@@ -225,6 +234,36 @@ describe("empty final reply production runtime with PostgreSQL", () => {
               builtin: true,
             })
           : new OpenGeniChatCompletionsModel(providerClient, "scripted-model");
+        yield* owned.getStreamedResponse(
+          providerUsageMode.endsWith("preparation")
+            ? {
+                ...request,
+                tools: [],
+                modelSettings: { ...request.modelSettings, toolChoice: "missing_tool" },
+              }
+            : request,
+        );
+      };
+    }
+    if (providerUsageMode?.startsWith("claude-")) {
+      model.getStreamedResponse = async function* (request) {
+        const owned = new AnthropicMessagesModel(
+          {
+            id: "claude",
+            label: "Claude",
+            kind: "api-key",
+            api: "anthropic-messages",
+            builtin: false,
+            ...(providerUsageMode === "claude-after-dispatch" ? { apiKey: "fixture" } : {}),
+          },
+          "claude",
+          (async () => {
+            model.calls++;
+            return new Response(`event: message_stop\ndata: {"type":"message_stop"}\n\n`, {
+              headers: { "content-type": "text/event-stream" },
+            });
+          }) as typeof fetch,
+        );
         yield* owned.getStreamedResponse(request);
       };
     }
@@ -352,7 +391,8 @@ describe("empty final reply production runtime with PostgreSQL", () => {
         const agent = production.buildAgent(...args);
         // Chat does not implement Responses-only hosted tools; retain the
         // ordinary default tool authority for our single synthetic function.
-        if (providerUsageMode?.startsWith("chat-")) agent.tools = [];
+        if (providerUsageMode?.startsWith("chat-") || providerUsageMode?.startsWith("claude-"))
+          agent.tools = [];
         agent.tools.push(
           tool({
             name: "verified_result",
@@ -560,6 +600,101 @@ describe("empty final reply production runtime with PostgreSQL", () => {
     },
     60_000,
   );
+
+  test.each([
+    "responses-preparation",
+    "chat-preparation",
+    "claude-preparation",
+    "claude-after-dispatch",
+  ] as const)(
+    "owned %s only refunds a proved local preparation failure",
+    async (mode) => {
+      const actual = await run("Completed result.", false, false, false, undefined, mode);
+      expect(actual.turn?.status).toBe("failed");
+      expect(actual.model.calls).toBe(mode === "claude-after-dispatch" ? 1 : 0);
+      const holds = await shared.admin<
+        Array<{ quantity: string }>
+      >`select quantity from usage_events where account_id=${actual.grant.accountId} and event_type='model.tokens.reserved' and quantity>0`;
+      expect(holds).toHaveLength(1);
+      const debits =
+        await shared.admin`select id from credit_ledger_entries where account_id=${actual.grant.accountId} and type='model_usage_debit'`;
+      expect(debits).toHaveLength(0);
+      for (const eventType of ["model.tokens.reserved", "model.cost.reserved"] as const) {
+        const open = await openUsageReservationQuantity(client.db, {
+          accountId: actual.grant.accountId,
+          eventType,
+          since: new Date(0),
+          holdSince: new Date(0),
+        });
+        if (mode === "claude-after-dispatch") expect(open).toBeGreaterThan(0);
+        else expect(open).toBe(0);
+      }
+    },
+    60_000,
+  );
+
+  test("late no-dispatch proof releases after attempt closure and pending-map clear exactly once", async () => {
+    const actual = await run(
+      "Completed result.",
+      false,
+      false,
+      false,
+      undefined,
+      "claude-after-dispatch",
+    );
+    // Reuse a closed attempt with one durable grant; emulate the owned producer's
+    // late proof without interpreting the transport error as that proof.
+    const rows = await shared.admin<
+      Array<{
+        event_type: string;
+        quantity: string;
+        source_resource_id: string;
+        turn_attempt_id: string;
+      }>
+    >`
+      select event_type,quantity,source_resource_id,turn_attempt_id from usage_events where account_id=${actual.grant.accountId}
+      and event_type in ('model.tokens.reserved','model.cost.reserved') and quantity>0`;
+    const callId = rows[0]!.source_resource_id.split(":").at(-1)!;
+    const held = {
+      tokens: Number(rows.find((row) => row.event_type === "model.tokens.reserved")!.quantity),
+      costMicros: Number(rows.find((row) => row.event_type === "model.cost.reserved")!.quantity),
+    };
+    const pending = new Map([[callId, held]]);
+    pending.clear();
+    const refund = undispatchedModelCallRefund({
+      db: client.db,
+      accountId: actual.grant.accountId,
+      workspaceId: actual.grant.workspaceId!,
+      pending,
+      grant: {
+        callId,
+        held,
+        maxOutputTokens: 1,
+        reservationReleases: usageReservationReleaseEvents({
+          reservations: [[callId, held]],
+          sessionId: actual.session.id,
+          turnId: actual.turn!.id,
+          turnAttemptId: rows[0]!.turn_attempt_id,
+        }),
+      },
+    });
+    await Promise.all([refund(), refund()]);
+    await refund();
+    for (const eventType of ["model.tokens.reserved", "model.cost.reserved"]) {
+      expect(
+        await openUsageReservationQuantity(client.db, {
+          accountId: actual.grant.accountId,
+          eventType,
+          since: new Date(0),
+          holdSince: new Date(0),
+        }),
+      ).toBe(0);
+    }
+    const releases =
+      await shared.admin`select id from usage_events where account_id=${actual.grant.accountId}
+      and event_type like '%.reserved' and quantity<0`;
+    expect(releases).toHaveLength(2);
+  }, 60_000);
 
   test("aggregate-only usage bills both streams of a same-turn final-reply handoff", async () => {
     const answer = "Completed result: verified.";

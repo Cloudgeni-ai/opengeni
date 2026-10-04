@@ -47,7 +47,7 @@ import {
   processCompactionModelUsageEvent,
 } from "./model-usage";
 import { waitForTurnOperation } from "./sandbox-provision";
-import { reserveModelCallBudget } from "./admission";
+import { reserveModelCallBudget, undispatchedModelCallRefund } from "./admission";
 
 import type { ClaimTurnOk } from "./claim";
 import type { GovernanceModelOk } from "./governance-model";
@@ -307,6 +307,13 @@ export async function prepareCompaction(deps: CompactionPrepDeps): Promise<Compa
         return {
           maxOutputTokens: reservation.maxOutputTokens,
           budgetReserved: Boolean(reservation.held),
+          onRequestNotDispatched: undispatchedModelCallRefund({
+            db,
+            accountId: input.accountId,
+            workspaceId: input.workspaceId,
+            grant: reservation,
+            pending: billingState.pendingUsageReservations,
+          }),
         };
       },
       onUsage: (usage: ModelResponseUsage) =>

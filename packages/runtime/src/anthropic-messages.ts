@@ -1,3 +1,7 @@
+import {
+  markModelRequestPreparationFailure,
+  refundModelRequestPreparationFailure,
+} from "./model-request-capture";
 import { providerReportedTokenUsage } from "./usage-telemetry";
 import { createHash, randomUUID } from "node:crypto";
 import { applyClaudeCodeIdentity } from "./claude-code-identity";
@@ -657,68 +661,79 @@ export class AnthropicMessagesModel implements Model {
   }
 
   private async send(request: ModelRequest, stream: boolean): Promise<Response> {
-    request.signal?.throwIfAborted();
-    const body = buildAnthropicRequest(request, this.model, this.provider, stream);
-    for (const message of body.messages) {
-      message.content = await this.sizeImageBlocks(message.content, request.signal);
-    }
-    request.signal?.throwIfAborted();
-    const base = this.provider.baseUrl ?? "https://api.anthropic.com/v1";
-    const url = new URL(`${base.replace(/\/$/, "")}/messages`);
-    for (const [key, value] of Object.entries(this.provider.defaultQuery ?? {}))
-      url.searchParams.set(key, value);
-    const headers = new Headers(this.provider.defaultHeaders);
-    headers.set("content-type", "application/json");
-    headers.set("accept", stream ? "text/event-stream" : "application/json");
-    headers.set("anthropic-version", "2023-06-01");
-    if ((claudeNativeModelProfile(this.model)?.contextWindowTokens ?? 0) > 200_000) {
-      const betas = new Set((headers.get("anthropic-beta") ?? "").split(",").filter(Boolean));
-      betas.add("context-1m-2025-08-07");
-      headers.set("anthropic-beta", [...betas].join(","));
-    }
-    if (body.messages.some((message: Message) => message.role === "system")) {
-      const betas = new Set((headers.get("anthropic-beta") ?? "").split(",").filter(Boolean));
-      betas.add("mid-conversation-system-2026-04-07");
-      headers.set("anthropic-beta", [...betas].join(","));
-    }
-    if (this.provider.kind !== "anonymous") {
-      if (!this.provider.apiKey)
-        throw new AnthropicProtocolError("Claude credentials are unavailable");
-      if (this.provider.anthropic?.auth === "oauth") {
-        headers.delete("x-api-key");
-        headers.set("authorization", `Bearer ${this.provider.apiKey}`);
-        const betas = new Set((headers.get("anthropic-beta") ?? "").split(",").filter(Boolean));
-        betas.add("oauth-2025-04-20");
-        headers.set("anthropic-beta", [...betas].join(","));
-      } else {
-        headers.delete("authorization");
-        headers.set("x-api-key", this.provider.apiKey);
+    let prepared: { url: URL; init: RequestInit };
+    try {
+      request.signal?.throwIfAborted();
+      const body = buildAnthropicRequest(request, this.model, this.provider, stream);
+      for (const message of body.messages) {
+        message.content = await this.sizeImageBlocks(message.content, request.signal);
       }
-    }
-    if (this.provider.anthropic?.auth === "oauth") {
-      const identity = this.provider.anthropic.identity;
-      if (!identity)
-        throw new AnthropicProtocolError(
-          "Claude subscription identity is missing. Replace the connection with its Claude account UUID and device ID in Models.",
-        );
-      const session = request.modelSettings.providerData?.prompt_cache_key;
-      const sessionId =
-        typeof session === "string" && /^[0-9a-f]{8}-[0-9a-f-]{27}$/i.test(session)
-          ? session
-          : this.fallbackSessionId;
-      applyClaudeCodeIdentity(body, headers, url, request, identity, {
-        sessionId,
-        promptId: this.promptId,
-        previousRequestId: this.previousRequestId,
-      });
+      request.signal?.throwIfAborted();
+      const base = this.provider.baseUrl ?? "https://api.anthropic.com/v1";
+      const url = new URL(`${base.replace(/\/$/, "")}/messages`);
+      for (const [key, value] of Object.entries(this.provider.defaultQuery ?? {}))
+        url.searchParams.set(key, value);
+      const headers = new Headers(this.provider.defaultHeaders);
+      headers.set("content-type", "application/json");
+      headers.set("accept", stream ? "text/event-stream" : "application/json");
+      headers.set("anthropic-version", "2023-06-01");
+      if ((claudeNativeModelProfile(this.model)?.contextWindowTokens ?? 0) > 200_000) {
+        const betas = new Set((headers.get("anthropic-beta") ?? "").split(",").filter(Boolean));
+        betas.add("context-1m-2025-08-07");
+        headers.set("anthropic-beta", [...betas].join(","));
+      }
+      if (body.messages.some((message: Message) => message.role === "system")) {
+        const betas = new Set((headers.get("anthropic-beta") ?? "").split(",").filter(Boolean));
+        betas.add("mid-conversation-system-2026-04-07");
+        headers.set("anthropic-beta", [...betas].join(","));
+      }
+      if (this.provider.kind !== "anonymous") {
+        if (!this.provider.apiKey)
+          throw new AnthropicProtocolError("Claude credentials are unavailable");
+        if (this.provider.anthropic?.auth === "oauth") {
+          headers.delete("x-api-key");
+          headers.set("authorization", `Bearer ${this.provider.apiKey}`);
+          const betas = new Set((headers.get("anthropic-beta") ?? "").split(",").filter(Boolean));
+          betas.add("oauth-2025-04-20");
+          headers.set("anthropic-beta", [...betas].join(","));
+        } else {
+          headers.delete("authorization");
+          headers.set("x-api-key", this.provider.apiKey);
+        }
+      }
+      if (this.provider.anthropic?.auth === "oauth") {
+        const identity = this.provider.anthropic.identity;
+        if (!identity)
+          throw new AnthropicProtocolError(
+            "Claude subscription identity is missing. Replace the connection with its Claude account UUID and device ID in Models.",
+          );
+        const session = request.modelSettings.providerData?.prompt_cache_key;
+        const sessionId =
+          typeof session === "string" && /^[0-9a-f]{8}-[0-9a-f-]{27}$/i.test(session)
+            ? session
+            : this.fallbackSessionId;
+        applyClaudeCodeIdentity(body, headers, url, request, identity, {
+          sessionId,
+          promptId: this.promptId,
+          previousRequestId: this.previousRequestId,
+        });
+      }
+      prepared = {
+        url,
+        init: {
+          method: "POST",
+          headers,
+          body: JSON.stringify(body),
+          ...(request.signal ? { signal: request.signal } : {}),
+        },
+      };
+    } catch (error) {
+      markModelRequestPreparationFailure(error);
+      await refundModelRequestPreparationFailure(error);
+      throw error;
     }
     const response = await withClaudeModelRequest(this.model, () =>
-      this.fetch(url, {
-        method: "POST",
-        headers,
-        body: JSON.stringify(body),
-        ...(request.signal ? { signal: request.signal } : {}),
-      }),
+      this.fetch(prepared.url, prepared.init),
     );
     if (request.signal?.aborted) {
       void response.body?.cancel().catch(() => undefined);
