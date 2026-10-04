@@ -187,6 +187,14 @@ async function resolveTarget(input: Input) {
   if (!server || server.url !== item.endpointUrl)
     throw new HTTPException(409, { message: "Connector configuration is unavailable" });
   const ref = server.connectionRef;
+  if (
+    ref?.subjectScope === "subject" &&
+    ref.accountSelection !== "all_eligible" &&
+    !input.personalOwnerVerified
+  )
+    throw new HTTPException(403, {
+      message: "Only the authenticated connection owner may manage personal tool permissions",
+    });
   const visible = ref
     ? await listConnectionsMetadata(
         input.db,
@@ -199,7 +207,16 @@ async function resolveTarget(input: Input) {
     workspaceId: input.workspaceId,
     subjectId: input.personalOwnerVerified ? input.grant.subjectId : null,
     servers: [server],
-    connections: visible,
+    // Runtime admission can enumerate every eligible account. A permission
+    // selector must also preserve the installation's explicit owner scope.
+    connections:
+      ref?.accountSelection === "all_eligible"
+        ? visible
+        : visible.filter((candidate) =>
+            ref?.subjectScope === "subject"
+              ? candidate.subjectId === input.grant.subjectId
+              : candidate.subjectId === null,
+          ),
   });
   const binding = bindings.find(
     (candidate) => !input.connectionId || candidate.connectionId === input.connectionId,

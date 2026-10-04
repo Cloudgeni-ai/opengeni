@@ -203,6 +203,7 @@ export async function checkForbiddenProviderImports(
         "apps/api/src/routes/billing.ts",
         "apps/api/test/scoped-credit-checkout.test.ts",
         "apps/api/test/scoped-credits-postgres.test.ts",
+        "apps/api/test/stripe-dispute-postgres.test.ts",
       ].includes(normalized)
     ) {
       out.push({ file, message: "imports Stripe outside billing route/provider code" });

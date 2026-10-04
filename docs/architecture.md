@@ -853,6 +853,12 @@ revalidates the immutable attempt through ordinary same-turn recovery and bounde
 redispatch. A lost claim response revealing the exact active attempt follows that
 path. Permanent database/state faults remain terminal; model, tool, or provider
 work is never replayed or requeued.
+Running-turn own-database connection loss, including postgres.js lifecycle
+closure codes and raw RLS transaction admission/settlement errors, enters that
+same exact-attempt recovery lane. Physical writer and unknown-tool-outcome
+fences remain authoritative; database transactions are never blindly replayed.
+See [`run-lifecycle.md`](run-lifecycle.md) for the closed outage classes and
+provenance boundaries.
 
 Transient provider recovery uses a durable consecutive-failure streak, not lifetime
 failures. An exact-current-attempt model completion atomically clears that streak
@@ -1114,7 +1120,7 @@ Workspaces: `apps/*`, `examples/*`, `packages/*`. Bun consumes internal packages
 from source; Connected Machine agent/relay use Rust Cargo workspace
 `agent/`.
 
-`examples/vue-conversation/app` has its own npm lock and builds against the
+`examples/vue-conversation/app` has its own `bun.lock` and builds against the
 published SDK, not repository source.
 
 Manifests and `.changeset/config.json` own publication; this map describes responsibilities.
@@ -1181,7 +1187,7 @@ handlers because its host owns process lifecycle.
 | `examples/northstar-support` | `@opengeni/example-northstar-support` | Standalone product reference (proxy, MCP, React, streams) |
 | `examples/tool-server` | `@opengeni/example-tool-server` | Proxy `toolServer` reference |
 | `examples/site-session-embed` | `@opengeni/example-site-session-embed` | Site SDK/React embed and sandbox preview reference |
-| `examples/vue-conversation` | Standalone npm consumer in `app` | Published-SDK Vue conversation behind the Bun session proxy; [recipe](../examples/vue-conversation/README.md) |
+| `examples/vue-conversation` | Standalone Bun consumer in `app` (own `bun.lock`) | Published-SDK Vue conversation behind the Bun session proxy; [recipe](../examples/vue-conversation/README.md) |
 
 ### 6.4 Rust agent and relay
 

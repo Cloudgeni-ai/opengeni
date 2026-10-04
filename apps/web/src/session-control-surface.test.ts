@@ -114,7 +114,9 @@ describe("session control surface architecture", () => {
       source("routes/sessions-index.tsx"),
       source("../../../packages/react/src/components/chat-composer.tsx"),
     ]);
-    const provider = sessionRoute.indexOf("createElement(\n    LightboxProvider,");
+    const providerPattern = /createElement\(\s+LightboxProvider,/g;
+    expect([...sessionRoute.matchAll(providerPattern)]).toHaveLength(1);
+    const provider = sessionRoute.search(providerPattern);
     const timeline = sessionRoute.indexOf("<MessageTimeline", provider);
     const composer = sessionRoute.indexOf("<ConsoleComposer", timeline);
     const providerEnd = sessionRoute.indexOf("</ChatViewportFileDropTarget>,", composer);
@@ -123,7 +125,7 @@ describe("session control surface architecture", () => {
     expect(timeline).toBeGreaterThan(provider);
     expect(composer).toBeGreaterThan(timeline);
     expect(providerEnd).toBeGreaterThan(composer);
-    expect(newSessionRoute).toContain("createElement(\n    LightboxProvider,");
+    expect([...newSessionRoute.matchAll(providerPattern)]).toHaveLength(1);
     expect(chatComposer).not.toContain("<LightboxProvider>");
   });
 

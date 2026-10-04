@@ -2398,29 +2398,30 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
         throw new HTTPException(404, { message: "session not found" });
       case "not_root":
         throw new HTTPException(409, {
-          message: "delete the root session to remove the complete workstream",
+          message: "Delete the chat this one belongs to; sub-chats are removed with it.",
         });
       case "active_sessions":
         throw new HTTPException(409, {
-          message: "cancel the workstream and wait for active turns to finish before deleting it",
+          message:
+            "This chat is still running. Stop it, then delete it once its current turn has finished.",
         });
       case "active_video_generations":
         throw new HTTPException(409, {
-          message: "wait for active video generations to finish before deleting this workstream",
+          message: "Wait for this chat's video generations to finish before deleting it.",
         });
       case "active_background_commands":
         throw new HTTPException(409, {
-          message: "pause or cancel this workstream's background commands before deleting it",
+          message: "Stop this chat's background commands before deleting it.",
         });
       case "live_sandboxes":
         throw new HTTPException(409, {
           message:
-            "wait for the workstream's sandbox activity to finish draining before deleting it",
+            "This chat's computer is still shutting down. Try deleting it again in a moment.",
         });
       case "externally_referenced":
         throw new HTTPException(409, {
           message:
-            "this workstream has durable workspace outputs or independent forks; archive it instead",
+            "This chat has saved workspace outputs or forks that depend on it. Archive it instead.",
         });
     }
   });
