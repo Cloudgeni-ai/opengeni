@@ -6,23 +6,20 @@ import {
 } from "@opengeni/testing";
 import postgres from "postgres";
 import {
+  assertRuntimeDatabasePosture,
+  completeSelfServiceOrganizationSetup,
   createDb,
+  createSessionWithIdempotencyKeyResult,
   ensureManagedAccessForUser,
   getOrganizationPrivateSessionSettings,
   getPrivateSessionCreatePolicy,
-  nestedPostgresSqlState,
-  openPrivateSessionCreateCapability,
-  SessionTenancyNotActivatedError,
-  setSubjectRlsContext,
   updateOrganizationPrivateSessionSettings,
-  withRlsContext,
   type DbClient,
 } from "../src";
 import { migrate } from "../src/migrate";
 import { provisionRoles } from "../src/provision-roles";
 
 const MIGRATION = "0611_universal_session_tenancy_activation.sql";
-const MIGRATION_ACTOR = "opengeni:migration:0611_universal_session_tenancy_activation";
 const source = readFileSync(new URL(`../drizzle/${MIGRATION}`, import.meta.url), "utf8");
 const requireRealDatabase = process.env.OPENGENI_REQUIRE_REAL_DB === "1";
 
@@ -51,35 +48,23 @@ afterAll(async () => {
   await owned?.release();
 }, 180_000);
 
-/** The exact organization-activation section, run again as the real owner. */
-function activationSection(): string {
-  const begin = source.indexOf("-- universal-activation:begin");
-  const end = source.indexOf("-- universal-activation:end");
-  if (begin < 0 || end < begin) throw new Error("activation section markers are missing");
-  return [
-    "ALTER TABLE session_tenancy_activations NO FORCE ROW LEVEL SECURITY;",
-    source.slice(begin, end),
-    "ALTER TABLE session_tenancy_activations FORCE ROW LEVEL SECURITY;",
-  ].join("\n");
+type Human = {
+  subjectId: string;
+  accountId: string;
+  personalWorkspaceId: string;
+  sharedWorkspaceId: string | null;
+};
+
+async function receiptCount(accountId: string): Promise<number> {
+  const [row] = await owned!.admin<{ count: number }[]>`
+    select count(*)::int as count from session_tenancy_activations
+    where account_id = ${accountId}`;
+  return row?.count ?? 0;
 }
 
-async function runActivationSection(): Promise<void> {
-  await owner!.begin((transaction) => transaction.unsafe(activationSection()));
-}
-
-async function receipt(accountId: string) {
-  const [row] = await owned!.admin<
-    { activatedBy: string; inventoryDigest: string; parityDigest: string; receipts: number }[]
-  >`
-    select activated_by as "activatedBy", inventory_digest as "inventoryDigest",
-      parity_digest as "parityDigest", cardinality(backfill_receipt_ids) as receipts
-    from session_tenancy_activations where account_id = ${accountId}`;
-  return row ?? null;
-}
-
-async function managedHuman() {
+/** An existing (pre-0611) organization: shared default workspace, no receipt. */
+async function existingOrganizationHuman(): Promise<Human> {
   const userId = `universal-${crypto.randomUUID()}`;
-  const subjectId = `user:${userId}`;
   const context = await ensureManagedAccessForUser(client!.db, {
     userId,
     email: `${userId}@example.test`,
@@ -89,93 +74,154 @@ async function managedHuman() {
   const personal = context.workspaceGrants.find((grant) => grant.workspaceId !== sharedWorkspaceId);
   if (!personal) throw new Error("managed human provisioned without a personal workspace");
   return {
-    subjectId,
+    subjectId: `user:${userId}`,
     accountId: personal.accountId,
     sharedWorkspaceId,
     personalWorkspaceId: personal.workspaceId,
   };
 }
 
-async function openPrivateCreate(
-  human: Awaited<ReturnType<typeof managedHuman>>,
-  workspaceId: string,
-): Promise<unknown> {
-  return await withRlsContext(
-    client!.db,
-    { accountId: human.accountId, workspaceId },
-    async (transaction) => {
-      await setSubjectRlsContext(transaction, human.subjectId);
-      return await openPrivateSessionCreateCapability(transaction, {
-        accountId: human.accountId,
-        workspaceId,
-        sessionId: crypto.randomUUID(),
-        actorSubjectId: human.subjectId,
-      });
-    },
-  );
+/** A brand-new self-service signup through the 0348/0349 setup lifecycle. */
+async function selfServiceSignupHuman(): Promise<Human> {
+  const userId = crypto.randomUUID();
+  await owned!.admin`
+    insert into auth_users (id, name, email, email_verified)
+    values (${userId}, 'Fresh signup', ${`${userId}@example.test`}, true)`;
+  const setup = await completeSelfServiceOrganizationSetup(client!.db, {
+    authUserId: userId,
+    actorSubjectId: `user:${userId}`,
+    organizationName: "Fresh Signup Org",
+    operationId: crypto.randomUUID(),
+    requestFingerprint: "f".repeat(64),
+  });
+  return {
+    subjectId: `user:${userId}`,
+    accountId: setup.organizationId,
+    personalWorkspaceId: setup.personalWorkspaceId,
+    sharedWorkspaceId: null,
+  };
+}
+
+async function createPrivate(human: Human, workspaceId: string) {
+  return await createSessionWithIdempotencyKeyResult(client!.db, {
+    accountId: human.accountId,
+    workspaceId,
+    visibility: "user_private",
+    initialMessage: "only me",
+    resources: [],
+    metadata: {},
+    createdBy: { kind: "subject", subjectId: human.subjectId },
+    subjectId: human.subjectId,
+    model: "test-model",
+    reasoningEffort: "medium",
+    latencyMode: "standard",
+    sandboxBackend: "none",
+    createIdempotencyKey: `0611-${crypto.randomUUID()}`,
+  });
+}
+
+async function captureError(run: () => Promise<unknown>): Promise<unknown> {
+  try {
+    await run();
+  } catch (error) {
+    return error;
+  }
+  return undefined;
 }
 
 describe("migration 0611 universal session tenancy activation", () => {
-  test("is a drained maintenance cutover with a fail-loud activation section", () => {
-    expect(source.startsWith("-- deployment-mode: maintenance\n")).toBe(true);
-    expect(source).toContain("opengeni.migration_application_roles");
-    expect(source).toContain(
-      "ALTER TABLE session_tenancy_activations NO FORCE ROW LEVEL SECURITY;",
-    );
-    expect(source).toContain("ALTER TABLE session_tenancy_activations FORCE ROW LEVEL SECURITY;");
-    expect(source).toContain("USING ERRCODE = '55000'");
-    // Convergence uses only the reviewed deterministic seams; nothing else writes authority.
-    expect(source).toContain(
-      "backfill_organization_connection_authority(organization_id, 5000, false)",
-    );
-    expect(source).toContain(
-      "backfill_organization_session_ownership(organization_id, 5000, false, NULL)",
-    );
-    expect(source).not.toMatch(
-      /INSERT INTO organization_memberships|UPDATE sessions|UPDATE connections/,
-    );
+  test("is a rolling catalog-only rewrite that writes no receipt or setting", () => {
+    expect(source.startsWith("-- deployment-mode: rolling\n")).toBe(true);
+    expect(source).not.toContain("opengeni.migration_application_roles");
+    expect(source).not.toMatch(/\bLOCK TABLE\b/);
+    expect(source).not.toMatch(/NO FORCE ROW LEVEL SECURITY/);
+    expect(source).not.toMatch(/\b(?:INSERT INTO|UPDATE|DELETE FROM)\s+[a-z_]+\s/u);
+    expect(source).not.toMatch(/backfill_organization_/u);
   });
 
-  test("predicates no longer consult a receipt and FORCE RLS is restored", async () => {
+  test("a fresh self-service signup gets Only me with no operator action or boundary witness", async () => {
+    if (!owned || !client) return;
+    // Runs first on a freshly migrated database: no organization holds a
+    // receipt, so 0349's greenfield helper has no boundary witness (the
+    // production state that left every signup without Only me).
+    const [witnesses] = await owned.admin<{ count: number }[]>`
+      select count(*)::int as count from session_tenancy_activations`;
+    expect(witnesses?.count).toBe(0);
+    const human = await selfServiceSignupHuman();
+    expect(await receiptCount(human.accountId)).toBe(0);
+    await expect(
+      getOrganizationPrivateSessionSettings(client.db, {
+        organizationId: human.accountId,
+        actorSubjectId: human.subjectId,
+      }),
+    ).resolves.toMatchObject({ enabled: true, available: true });
+    await expect(
+      getPrivateSessionCreatePolicy(client.db, {
+        workspaceId: human.personalWorkspaceId,
+        actorSubjectId: human.subjectId,
+      }),
+    ).resolves.toEqual({
+      personalWorkspace: true,
+      platformAvailable: true,
+      organizationEnabled: true,
+    });
+    await expect(createPrivate(human, human.personalWorkspaceId)).resolves.toMatchObject({
+      created: true,
+      denied: false,
+    });
+  }, 180_000);
+
+  test("predicates no longer consult a receipt; legacy-lane retirement stays receipt-keyed", async () => {
     if (!owned || !owner) return;
     const [account] = await owned.admin<{ id: string }[]>`
       insert into managed_accounts (name) values ('0611 receiptless') returning id`;
     const accountId = account!.id;
-    expect(await receipt(accountId)).toBeNull();
-    const rows = await owner.begin(async (transaction) => {
-      await transaction`select set_config('opengeni.account_id', ${accountId}, true)`;
-      return await transaction<
-        {
-          activated: boolean;
-          wrongVersion: boolean;
-          nullAccount: boolean;
-          otherAccount: boolean;
-          privateActivated: boolean;
-          anyActivation: boolean;
-        }[]
-      >`
-        select session_tenancy_product_activated(${accountId}::uuid, 1) as activated,
-          session_tenancy_product_activated(${accountId}::uuid, 2) as "wrongVersion",
-          session_tenancy_product_activated(null, 1) as "nullAccount",
-          session_tenancy_product_activated(gen_random_uuid(), 1) as "otherAccount",
-          opengeni_private.session_tenancy_account_activated(${accountId}::uuid) as "privateActivated",
-          session_tenancy_any_product_activation() as "anyActivation"`;
-    });
-    expect(rows[0]).toEqual({
+    const [activated] = await owned.admin<{ id: string }[]>`
+      insert into managed_accounts (name) values ('0611 operator activated') returning id`;
+    await owned.admin`
+      insert into session_tenancy_activations (
+        account_id, activation_version, inventory_digest, parity_digest, activated_by
+      ) values (${activated!.id}, 1, ${"a".repeat(64)}, ${"b".repeat(64)}, 'operator-fixture')`;
+    expect(await receiptCount(accountId)).toBe(0);
+    const probe = async (target: string) =>
+      await owner!.begin(async (transaction) => {
+        await transaction`select set_config('opengeni.account_id', ${target}, true)`;
+        const [row] = await transaction<
+          {
+            activated: boolean;
+            wrongVersion: boolean;
+            nullAccount: boolean;
+            otherAccount: boolean;
+            legacyLaneRetired: boolean;
+            anyActivation: boolean;
+          }[]
+        >`
+          select session_tenancy_product_activated(${target}::uuid, 1) as activated,
+            session_tenancy_product_activated(${target}::uuid, 2) as "wrongVersion",
+            session_tenancy_product_activated(null, 1) as "nullAccount",
+            session_tenancy_product_activated(gen_random_uuid(), 1) as "otherAccount",
+            opengeni_private.session_tenancy_account_activated(${target}::uuid) as "legacyLaneRetired",
+            session_tenancy_any_product_activation() as "anyActivation"`;
+        return row;
+      });
+    expect(await probe(accountId)).toEqual({
       activated: true,
       wrongVersion: false,
       nullAccount: false,
       otherAccount: false,
-      // The legacy connection/writer lane retirement stays receipt-keyed.
-      privateActivated: false,
+      // No receipt: the legacy connection/writer compatibility lanes stay open.
+      legacyLaneRetired: false,
+      // The retired startup-interlock witness never fires, even with a receipt present.
+      anyActivation: false,
+    });
+    expect(await probe(activated!.id)).toMatchObject({
+      activated: true,
+      legacyLaneRetired: true,
       anyActivation: false,
     });
     const [table] = await owned.admin<{ force: boolean }[]>`
       select relforcerowsecurity as force from pg_class where oid = 'session_tenancy_activations'::regclass`;
     expect(table?.force).toBe(true);
-    const [role] = await owned.admin<{ superuser: boolean; bypass: boolean }[]>`
-      select rolsuper as superuser, rolbypassrls as bypass from pg_roles where rolname = ${owned.ownerRole}`;
-    expect(role).toEqual({ superuser: false, bypass: false });
     const readers = await owned.admin<{ name: string }[]>`
       select proname as name from pg_proc
       where prosrc like '%session_tenancy_activations%'
@@ -187,137 +233,83 @@ describe("migration 0611 universal session tenancy activation", () => {
       "enable_organization_private_sessions_from_activation",
       "session_tenancy_account_activated",
     ]);
-  }, 180_000);
-
-  test("activates receiptless organizations idempotently and refuses unactivatable ones by id", async () => {
-    if (!owned || !owner || !client) return;
-    // Organization that the retired operator command already activated.
-    const [preactivated] = await owned.admin<{ id: string }[]>`
-      insert into managed_accounts (name) values ('0611 pre-activated') returning id`;
-    await owned.admin`
-      insert into session_tenancy_activations (
-        account_id, activation_version, inventory_digest, parity_digest, activated_by
-      ) values (${preactivated!.id}, 1, ${"a".repeat(64)}, ${"b".repeat(64)}, 'operator-fixture')`;
-    // Ordinary managed human organization without any receipt.
-    const human = await managedHuman();
-    // A deterministic legacy personal connection (its subject holds an active
-    // membership) is converged by the reviewed seam inside the migration.
-    const legacyConnectionId = await owned.admin.begin(async (transaction) => {
-      await transaction`set local session_replication_role = replica`;
-      const [row] = await transaction<{ id: string }[]>`
-        insert into connections (
-          account_id, workspace_id, origin_workspace_id, subject_id, provider_domain, kind,
-          credential_encrypted, authority_scope
-        ) values (
-          ${human.accountId}, ${human.sharedWorkspaceId}, ${human.sharedWorkspaceId},
-          ${human.subjectId}, 'legacy-0611.example', 'api_key', 'ciphertext', 'legacy_user'
-        ) returning id`;
-      return row!.id;
-    });
-    // An organization whose data cannot be activated: a human with workspace
-    // access but no organization-membership anchor (never inferred).
-    const [blocked] = await owned.admin<{ id: string }[]>`
-      insert into managed_accounts (name) values ('0611 blocked') returning id`;
-    const [workspace] = await owned.admin<{ id: string }[]>`
-      insert into workspaces (account_id, name) values (${blocked!.id}, '0611 blocked') returning id`;
-    await owned.admin`
-      insert into workspace_memberships (account_id, workspace_id, subject_id, role)
-      values (${blocked!.id}, ${workspace!.id}, ${`user:anchorless-${crypto.randomUUID()}`}, 'member')`;
-
-    let failure: unknown;
+    // A durable receipt no longer requires any deployment switch at startup.
+    const appUrl = new URL(owned.ownerUrl);
+    appUrl.username = "opengeni_app";
+    appUrl.password = owned.appPassword;
+    const runtime = createDb(appUrl.toString(), { max: 1 });
     try {
-      await runActivationSection();
-    } catch (error) {
-      failure = error;
+      await expect(
+        assertRuntimeDatabasePosture(runtime.db, {
+          rlsStrategy: "force",
+          expectedRole: "opengeni_app",
+          targetSchema: "public",
+        }),
+      ).resolves.toBeDefined();
+    } finally {
+      await runtime.close();
     }
-    expect(nestedPostgresSqlState(failure)).toBe("55000");
-    expect(String((failure as Error).message)).toContain(blocked!.id);
-    expect(String((failure as Error).message)).toContain(
-      "lane:workspaceMemberSubjectsWithoutMembershipAnchor",
-    );
-    expect(String((failure as Error).message)).not.toContain(human.accountId);
-    // All-or-nothing: no organization was activated by the refused run.
-    expect(await receipt(human.accountId)).toBeNull();
-    expect(await receipt(blocked!.id)).toBeNull();
-
-    // Once the blocker is resolved through its own lifecycle, the rerun succeeds.
-    await owned.admin`delete from workspace_memberships where workspace_id = ${workspace!.id}`;
-    await runActivationSection();
-    for (const accountId of [human.accountId, blocked!.id]) {
-      const activated = await receipt(accountId);
-      expect(activated?.activatedBy).toBe(MIGRATION_ACTOR);
-      expect(activated?.inventoryDigest).toMatch(/^[0-9a-f]{64}$/);
-      expect(activated?.parityDigest).toMatch(/^[0-9a-f]{64}$/);
-      expect(activated?.receipts).toBe(0);
-      const [lane] = await owner.begin(async (transaction) => {
-        await transaction`select set_config('opengeni.account_id', ${accountId}, true)`;
-        return await transaction<{ retired: boolean }[]>`
-          select opengeni_private.session_tenancy_account_activated(${accountId}::uuid) as retired`;
-      });
-      expect(lane?.retired).toBe(true);
-    }
-    const [converged] = await owned.admin<{ scope: string; membership: string | null }[]>`
-      select authority_scope as scope, owner_organization_membership_id::text as membership
-      from connections where id = ${legacyConnectionId}`;
-    expect(converged?.scope).toBe("user");
-    expect(converged?.membership).toEqual(expect.any(String));
-    expect(await receipt(preactivated!.id)).toEqual({
-      activatedBy: "operator-fixture",
-      inventoryDigest: "a".repeat(64),
-      parityDigest: "b".repeat(64),
-      receipts: 0,
-    });
-
-    // Idempotent: a second run changes nothing and raises nothing.
-    const [before] = await owned.admin<{ count: number }[]>`
-      select count(*)::int as count from session_tenancy_activations`;
-    await runActivationSection();
-    const [after] = await owned.admin<{ count: number }[]>`
-      select count(*)::int as count from session_tenancy_activations`;
-    expect(after?.count).toBe(before?.count);
   }, 180_000);
 
-  test("a receiptless organization creates private sessions; the owner setting still gates shared workspaces", async () => {
+  test("an existing receiptless organization gets Only me by default; an explicit owner disable still gates shared workspaces", async () => {
     if (!owned || !client) return;
-    const human = await managedHuman();
-    expect(await receipt(human.accountId)).toBeNull();
+    const human = await existingOrganizationHuman();
+    const sharedWorkspaceId = human.sharedWorkspaceId!;
+    expect(await receiptCount(human.accountId)).toBe(0);
 
-    const personalPolicy = await getPrivateSessionCreatePolicy(client.db, {
-      workspaceId: human.personalWorkspaceId,
-      actorSubjectId: human.subjectId,
-    });
-    expect(personalPolicy).toMatchObject({ personalWorkspace: true, platformAvailable: true });
-    await expect(openPrivateCreate(human, human.personalWorkspaceId)).resolves.toMatchObject({
-      capabilityId: expect.any(String),
-    });
-
-    const sharedPolicy = await getPrivateSessionCreatePolicy(client.db, {
-      workspaceId: human.sharedWorkspaceId,
-      actorSubjectId: human.subjectId,
-    });
-    expect(sharedPolicy).toMatchObject({
+    await expect(
+      getOrganizationPrivateSessionSettings(client.db, {
+        organizationId: human.accountId,
+        actorSubjectId: human.subjectId,
+      }),
+    ).resolves.toMatchObject({ enabled: true, available: true, version: 0 });
+    await expect(
+      getPrivateSessionCreatePolicy(client.db, {
+        workspaceId: sharedWorkspaceId,
+        actorSubjectId: human.subjectId,
+      }),
+    ).resolves.toEqual({
       personalWorkspace: false,
       platformAvailable: true,
-      organizationEnabled: false,
+      organizationEnabled: true,
     });
-    await expect(openPrivateCreate(human, human.sharedWorkspaceId)).rejects.toBeInstanceOf(
-      SessionTenancyNotActivatedError,
-    );
+    await expect(createPrivate(human, human.personalWorkspaceId)).resolves.toMatchObject({
+      created: true,
+      denied: false,
+    });
+    await expect(createPrivate(human, sharedWorkspaceId)).resolves.toMatchObject({
+      created: true,
+      denied: false,
+    });
 
-    const settings = await getOrganizationPrivateSessionSettings(client.db, {
+    const disabled = await updateOrganizationPrivateSessionSettings(client.db, {
       organizationId: human.accountId,
       actorSubjectId: human.subjectId,
+      enabled: false,
+      expectedVersion: 0,
+      operationId: crypto.randomUUID(),
     });
-    expect(settings.enabled).toBe(false);
+    expect(disabled).toMatchObject({ enabled: false, available: true, version: 1, changed: true });
+    const denied = await captureError(() => createPrivate(human, sharedWorkspaceId));
+    expect(denied).toHaveProperty("name", "SessionTenancyNotActivatedError");
+    // The setting never gates the member's own Personal workspace.
+    await expect(createPrivate(human, human.personalWorkspaceId)).resolves.toMatchObject({
+      created: true,
+      denied: false,
+    });
+
     await updateOrganizationPrivateSessionSettings(client.db, {
       organizationId: human.accountId,
       actorSubjectId: human.subjectId,
       enabled: true,
-      expectedVersion: settings.version,
+      expectedVersion: 1,
       operationId: crypto.randomUUID(),
     });
-    await expect(openPrivateCreate(human, human.sharedWorkspaceId)).resolves.toMatchObject({
-      capabilityId: expect.any(String),
+    await expect(createPrivate(human, sharedWorkspaceId)).resolves.toMatchObject({
+      created: true,
+      denied: false,
     });
+    expect(await receiptCount(human.accountId)).toBe(0);
   }, 180_000);
+
 });

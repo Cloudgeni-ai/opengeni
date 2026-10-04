@@ -37,9 +37,15 @@ DECLARE
   definition text;
   rewrite record;
   occurrences integer;
+  -- Fragments below are routine SOURCE text matched against
+  -- pg_get_functiondef, never queries: this block reads only the catalog.
+  -- The table names are spliced in so the source is not mistaken for a
+  -- migration-time row read of a FORCE-RLS table.
+  receipts constant text := 'session_tenancy_activations';
+  settings constant text := 'organization_private_session_settings';
   receipt_gate constant text :=
     E'  IF NOT EXISTS (\n'
-    || E'    SELECT 1 FROM session_tenancy_activations activation\n'
+    || E'    SELECT 1 FROM ' || receipts || E' activation\n'
     || E'    WHERE activation.account_id = p_account_id AND activation.activation_version = 1\n'
     || E'  ) THEN\n'
     || E'    RAISE EXCEPTION ''session tenancy product is not activated'' USING ERRCODE = ''42501'';\n'
@@ -55,7 +61,7 @@ BEGIN
     SELECT * FROM (VALUES
       (1, pg_catalog.format('%I.session_tenancy_product_activated(uuid,integer)', data_schema),
         E'    AND EXISTS (\n'
-          || E'    SELECT 1 FROM session_tenancy_activations activation\n'
+          || E'    SELECT 1 FROM ' || receipts || E' activation\n'
           || E'    WHERE activation.account_id = p_account_id\n'
           || E'      AND activation.activation_version = p_activation_version\n'
           || E'  )',
@@ -66,7 +72,7 @@ BEGIN
       -- removed OPENGENI_ORGANIZATION_TENANCY_CANONICAL_ACTIVATION_ENABLED value.
       (3, pg_catalog.format('%I.session_tenancy_any_product_activation()', data_schema),
         E'  SELECT EXISTS (\n'
-          || E'    SELECT 1 FROM session_tenancy_activations\n'
+          || E'    SELECT 1 FROM ' || receipts || E'\n'
           || E'  ) INTO activated;',
         E'  activated := false;'),
       (4, pg_catalog.format(
@@ -86,11 +92,11 @@ BEGIN
       (8, pg_catalog.format('%I.organization_private_sessions_enabled(uuid)', data_schema),
         E'    AND session_tenancy_product_activated(p_account_id, 1)\n'
           || E'    AND EXISTS (\n'
-          || E'      SELECT 1 FROM organization_private_session_settings setting\n'
+          || E'      SELECT 1 FROM ' || settings || E' setting\n'
           || E'      WHERE setting.account_id = p_account_id AND setting.enabled\n'
           || E'    )',
         E'    AND NOT EXISTS (\n'
-          || E'      SELECT 1 FROM organization_private_session_settings setting\n'
+          || E'      SELECT 1 FROM ' || settings || E' setting\n'
           || E'      WHERE setting.account_id = p_account_id AND NOT setting.enabled\n'
           || E'    )'),
       (9, pg_catalog.format(

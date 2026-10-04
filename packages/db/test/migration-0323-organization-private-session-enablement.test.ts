@@ -198,7 +198,16 @@ describe("migration 0323 organization private-session enablement", () => {
     const organization = await provisionOrganization("receipt-vs-setting");
 
     // No readiness receipt exists: every organization is activated since 0611,
-    // so the managed human's own Personal workspace keeps the 0311 rule.
+    // so the managed human's own Personal workspace keeps the 0311 rule. An
+    // owner/admin explicitly disables shared-workspace Only me (the default
+    // since 0611 is enabled) to prove the setting never gates Personal.
+    await updateOrganizationPrivateSessionSettings(client.db, {
+      organizationId: organization.accountId,
+      actorSubjectId: organization.subjectId,
+      enabled: false,
+      expectedVersion: 0,
+      operationId: crypto.randomUUID(),
+    });
     await expect(
       getPrivateSessionCreatePolicy(client.db, {
         workspaceId: organization.personalWorkspaceId,
@@ -233,8 +242,8 @@ describe("migration 0323 organization private-session enablement", () => {
     });
 
     // Activation alone is NOT enough in a shared workspace: the owner/admin
-    // setting is still disabled, so the create fails closed with the typed error and
-    // nothing is inserted.
+    // setting is explicitly disabled, so the create fails closed with the typed
+    // error and nothing is inserted.
     await expect(
       getPrivateSessionCreatePolicy(client.db, {
         workspaceId: organization.sharedWorkspaceId,
@@ -308,8 +317,9 @@ describe("migration 0323 organization private-session enablement", () => {
         organizationId: organization.accountId,
         actorSubjectId: organization.subjectId,
       }),
-    ).resolves.toMatchObject({ enabled: false, available: true, version: 0 });
-    // No readiness receipt is required to enable (universal activation, 0611).
+    ).resolves.toMatchObject({ enabled: true, available: true, version: 0 });
+    // Only me defaults to enabled without any row or readiness receipt (0611):
+    // an explicit enable records the decision without changing the outcome.
     const enableOperationId = crypto.randomUUID();
     const enabled = await updateOrganizationPrivateSessionSettings(client.db, {
       organizationId: organization.accountId,
@@ -318,7 +328,7 @@ describe("migration 0323 organization private-session enablement", () => {
       expectedVersion: 0,
       operationId: enableOperationId,
     });
-    expect(enabled).toMatchObject({ enabled: true, available: true, version: 1, changed: true });
+    expect(enabled).toMatchObject({ enabled: true, available: true, version: 1, changed: false });
 
     const privateCreate = privateCreateInput(
       organization,
