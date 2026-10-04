@@ -579,6 +579,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
           const governance = await prepareGovernanceAndModel({
             input,
             db,
+            observability,
             runtime,
             objectStorage,
             eventing,

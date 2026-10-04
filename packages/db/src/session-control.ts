@@ -1531,6 +1531,95 @@ async function settlementAttemptCounts(
   );
 }
 
+type SingleTargetControlRow = AncestryRow & {
+  hasChildren: boolean;
+  attemptCount: number | string;
+  interruptionPendingCount: number | string;
+  quiescencePendingCount: number | string;
+  commandCount: number | string;
+};
+
+/**
+ * A leaf's settlement summaries need no descendant walk. Detect children and
+ * read its direct summaries in ONE statement: a separate EXISTS followed by
+ * direct counts could miss a child committed between READ COMMITTED snapshots.
+ * This is only a projection, never a subtree writer/admission shortcut.
+ */
+async function loadSingleTargetControlRow(
+  db: Database,
+  workspaceId: string,
+  sessionId: string,
+): Promise<SingleTargetControlRow | undefined> {
+  const rows = await db.execute<SingleTargetControlRow>(sql`
+    with target as materialized (
+      select session.id, session.parent_session_id, session.title,
+        session.direct_control_state, session.direct_pause_revision,
+        session.subtree_run_override_revision, session.control_version,
+        session.direct_control_changed_by, session.direct_control_reason,
+        session.direct_control_changed_at, exists (
+        select 1 from ${schema.sessions} child
+        where child.workspace_id = ${workspaceId}
+          and child.parent_session_id = session.id
+      ) as has_children
+      from ${schema.sessions} session
+      where session.workspace_id = ${workspaceId} and session.id = ${sessionId}
+    )
+    select
+      target.id as "targetId",
+      target.id as "sessionId",
+      target.parent_session_id as "parentSessionId",
+      target.title,
+      target.direct_control_state as "directState",
+      target.direct_pause_revision as "directPauseRevision",
+      target.subtree_run_override_revision as "subtreeRunOverrideRevision",
+      target.control_version as "controlVersion",
+      target.direct_control_changed_by as "directControlChangedBy",
+      target.direct_control_reason as "directControlReason",
+      target.direct_control_changed_at as "directControlChangedAt",
+      0::integer as depth,
+      false as cycle,
+      target.has_children as "hasChildren",
+      stopping.attempt_count as "attemptCount",
+      stopping.interruption_pending_count as "interruptionPendingCount",
+      stopping.quiescence_pending_count as "quiescencePendingCount",
+      commands.command_count as "commandCount"
+    from target
+    cross join lateral (
+      select
+        count(*)::integer as attempt_count,
+        count(*) filter (where interruption_pending)::integer as interruption_pending_count,
+        count(*) filter (where quiescence_pending)::integer as quiescence_pending_count
+      from (
+        select interruption.attempt_id,
+          bool_or(interruption.state in ('pending', 'delivered', 'acknowledged'))
+            as interruption_pending,
+          bool_or(interruption.state in ('settled', 'rejected_stale')
+            and attempt.quiesced_at is null) as quiescence_pending
+        from ${schema.sessionAttemptInterruptions} interruption
+        join ${schema.sessionTurnAttempts} attempt
+          on attempt.workspace_id = interruption.workspace_id
+          and attempt.id = interruption.attempt_id
+        where not target.has_children
+          and interruption.workspace_id = ${workspaceId}
+          and interruption.session_id = target.id
+          and (interruption.state in ('pending', 'delivered', 'acknowledged')
+            or (interruption.state in ('settled', 'rejected_stale')
+              and attempt.quiesced_at is null))
+        group by interruption.attempt_id
+      ) interruptions
+    ) stopping
+    cross join lateral (
+      select count(distinct command.id)::integer as command_count
+      from ${schema.sessionBackgroundCommands} command
+      where not target.has_children
+        and command.workspace_id = ${workspaceId}
+        and command.session_id = target.id
+        and command.state = 'stopping'
+    ) commands
+  `);
+  return rows[0];
+}
+
 export async function evaluateSessionControls(
   db: Database,
   workspaceId: string,
@@ -1553,6 +1642,38 @@ export async function evaluateSessionControls(
   const workspace =
     options.workspaceControl ??
     (await lockWorkspaceInferenceControl(db, workspaceId, options.lock ?? "share"));
+  if (uniqueIds.length === 1) {
+    const sessionId = uniqueIds[0]!;
+    const target = await loadSingleTargetControlRow(db, workspaceId, sessionId);
+    if (!target) {
+      throw new SessionControlInvariantError(
+        `Session ${sessionId} does not exist in its workspace`,
+      );
+    }
+    const stopping = target.hasChildren
+      ? ((await settlementAttemptCounts(db, workspaceId, uniqueIds)).get(sessionId) ??
+        NO_SETTLEMENT_ATTEMPTS)
+      : {
+          attemptCount: Number(target.attemptCount),
+          interruptionPendingCount: Number(target.interruptionPendingCount),
+          quiescencePendingCount: Number(target.quiescencePendingCount),
+        };
+    const stoppingCommands = target.hasChildren
+      ? ((await stoppingBackgroundCommandCounts(db, workspaceId, uniqueIds)).get(sessionId) ?? 0)
+      : Number(target.commandCount);
+    // A root's control node is already complete; nonroots retain the bounded
+    // recursive ancestry validation (including missing ancestors and cycles).
+    const ancestry =
+      target.parentSessionId === null
+        ? [target]
+        : await loadTargetAncestryRows(db, workspaceId, uniqueIds);
+    return new Map([
+      [
+        sessionId,
+        projectEffectiveControl(workspace, sessionId, ancestry, stopping, stoppingCommands),
+      ],
+    ]);
+  }
   const stopping = await settlementAttemptCounts(db, workspaceId, uniqueIds);
   const stoppingCommands = await stoppingBackgroundCommandCounts(db, workspaceId, uniqueIds);
   const result = new Map<string, EffectiveSessionControl>();
