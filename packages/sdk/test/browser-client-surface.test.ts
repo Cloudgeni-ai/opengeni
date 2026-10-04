@@ -1,5 +1,10 @@
 import { describe, expect, test } from "bun:test";
 import path from "node:path";
+import { OpenGeniBrowserClient } from "../src/browser";
+import { OpenGeniClient } from "../src/index";
+import { OpenGeniCoreClient } from "../src/core";
+import { OpenGeniClient as OpenGeniArtifactClient } from "../src/artifacts";
+import { OpenGeniDocumentAuthorityClient } from "../src/document-authority";
 
 const repoRoot = path.resolve(import.meta.dir, "../../..");
 const clientPath = path.join(repoRoot, "packages/sdk/src/client.ts");
@@ -34,6 +39,13 @@ const legacyBrowserUnusedMethods = [
   "getEnvironment",
   "getLatestEventResult",
   "getLatestStartedTurn",
+  // Shared Insights methods are adopted by the separately owned Insights UI.
+  "getWorkspaceInsightsUsage",
+  "getOrganizationInsightsUsage",
+  // Keep the existing summary/workspace reads available to SDK callers after
+  // Insights moved to getOrganizationModelUsage.
+  "getOrganizationUsageSummary",
+  "getOrganizationUsageWorkspacePage",
   "getPreferenceRegistryFullContent",
   "getPreferenceRegistrySummary",
   "getRetainedArtifactContent",
@@ -78,9 +90,38 @@ const legacyBrowserUnusedMethods = [
 // available to runtime callers even though the web UI does not call it.
 const agentInteractionMethods = ["captureBrowserTarget", "getBrowserTargetState", "readBrowserDom"];
 
+// #3470 retired the preference editor and learning/onboarding hooks, not their
+// public SDK contracts. Preserve these existing browser methods for old bundles
+// and SDK consumers; their browser transport is exercised in the corresponding
+// preference-registry, workspace-learning and instruction-policy tests.
+const retiredSettingsMethods = [
+  "activatePreferenceRegistryRevision",
+  "correctPreferenceRegistry",
+  "createPreferenceRegistryProposal",
+  "deactivatePreferenceRegistry",
+  "getWorkspaceLearningHistory",
+  "listPreferenceRegistry",
+  "listWorkspaceInstructionPolicyOnboardingProposals",
+  "rejectPreferenceRegistryProposal",
+  "supersedePreferenceRegistry",
+];
+
 function countIdentifier(source: string, identifier: string): number {
   const escaped = identifier.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
   return source.match(new RegExp(`\\b${escaped}\\b`, "g"))?.length ?? 0;
+}
+
+function browserUnusedMethods(clientSource: string, browserSource: string): string[] {
+  const methodNames = [
+    ...clientSource.matchAll(/^  (?:async )?([A-Za-z_$][A-Za-z0-9_$]*)\(/gm),
+  ].map((match) => match[1]!);
+  return [...new Set(methodNames)]
+    .filter(
+      (methodName) =>
+        countIdentifier(browserSource, methodName) === 0 &&
+        countIdentifier(clientSource, methodName) === 1,
+    )
+    .sort();
 }
 
 async function readBrowserProductionSources(): Promise<string> {
@@ -99,26 +140,47 @@ async function readBrowserProductionSources(): Promise<string> {
 }
 
 describe("browser client runtime surface", () => {
+  test.each(["getOrganizationApiKey", "updateOrganizationApiKey"] as const)(
+    "keeps %s on all non-browser public clients but out of the browser client",
+    (methodName) => {
+      const options = { baseUrl: "https://api.example.test" };
+      const clients = [
+        new OpenGeniClient(options),
+        new OpenGeniCoreClient(options),
+        new OpenGeniArtifactClient(options),
+        new OpenGeniDocumentAuthorityClient(options),
+      ];
+      const browserClient = new OpenGeniBrowserClient(options);
+
+      for (const client of clients) expect(client[methodName]).toBeFunction();
+      expect(browserClient).not.toHaveProperty(methodName);
+    },
+  );
+
   test("rejects new SDK methods that the browser does not use", async () => {
     const [clientSource, browserSource] = await Promise.all([
       Bun.file(clientPath).text(),
       readBrowserProductionSources(),
     ]);
-    const methodNames = [
-      ...clientSource.matchAll(/^  (?:async )?([A-Za-z_$][A-Za-z0-9_$]*)\(/gm),
-    ].map((match) => match[1]!);
-    const browserUnusedMethods = [...new Set(methodNames)]
-      .filter(
-        (methodName) =>
-          countIdentifier(browserSource, methodName) === 0 &&
-          countIdentifier(clientSource, methodName) === 1,
-      )
-      .sort();
-
     expect(browserSource).toContain("@opengeni/sdk/browser");
     expect(browserSource).not.toContain("@opengeni/sdk/core");
-    expect(browserUnusedMethods).toEqual(
-      [...legacyBrowserUnusedMethods, ...agentInteractionMethods].sort(),
+    expect(browserUnusedMethods(clientSource, browserSource)).toEqual(
+      [...legacyBrowserUnusedMethods, ...agentInteractionMethods, ...retiredSettingsMethods].sort(),
     );
+  });
+
+  test("still detects an unclassified addition while allowing an actual browser consumer", async () => {
+    const [clientSource, browserSource] = await Promise.all([
+      Bun.file(clientPath).text(),
+      readBrowserProductionSources(),
+    ]);
+    const baseline = browserUnusedMethods(clientSource, browserSource);
+    const extendedClient = `${clientSource}\n  async unclassifiedSdkMethod() {}\n`;
+    expect(browserUnusedMethods(extendedClient, browserSource)).toEqual(
+      [...baseline, "unclassifiedSdkMethod"].sort(),
+    );
+    expect(
+      browserUnusedMethods(extendedClient, `${browserSource}\nclient.unclassifiedSdkMethod();`),
+    ).toEqual(baseline);
   });
 });

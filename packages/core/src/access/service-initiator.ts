@@ -39,7 +39,7 @@ export function serviceInitiatorFromHeaders(
     } catch {
       throw new HTTPException(422, {
         message:
-          "x-opengeni-service-context must be a JSON object of flat string/number/boolean values, at most 2048 UTF-8 bytes, without reserved OpenGeni provenance fields",
+          "x-opengeni-service-context must be a JSON object of flat string/number/boolean values, at most 2048 UTF-8 bytes, without reserved Opengeni provenance fields",
       });
     }
   }

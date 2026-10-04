@@ -601,7 +601,7 @@ describe("responsive knowledge surfaces (real API + PostgreSQL)", () => {
       await collectionPath.getByText("Acme tree", { exact: true }).waitFor();
       const members = page.getByRole("list", { name: "Entries", exact: true });
       await members.getByRole("button", { name: "Nested renewal", exact: true }).waitFor();
-      await page.getByRole("button", { name: "Knowledge", exact: true }).click();
+      await returnToLibraryFromEntry(page);
       await acmeSection.getByRole("button", { name: "Contracts tree", exact: true }).waitFor();
 
       // A completed page must reauthorize on reopen, even when the browser's
@@ -698,7 +698,7 @@ describe("responsive knowledge surfaces (real API + PostgreSQL)", () => {
       await expectNoAxeViolations(page, contentPageSelector, "nested-knowledge-collection-mobile");
 
       // Search reaches entries inside nested collections from the By collection view.
-      await page.getByRole("button", { name: "Knowledge", exact: true }).click();
+      await returnToLibraryFromEntry(page);
       await page.getByRole("heading", { level: 1, name: "Knowledge", exact: true }).waitFor();
       await page
         .getByRole("searchbox", { name: "Search knowledge", exact: true })
@@ -1203,7 +1203,7 @@ describe("responsive knowledge surfaces (real API + PostgreSQL)", () => {
     await page.getByRole("heading", { level: 1, name: "Retained entry 20", exact: true }).waitFor();
     await page.getByText(tailKnowledgeText, { exact: true }).waitFor();
     await expectNoPageOverflow(page);
-    await page.getByRole("button", { name: "Knowledge", exact: true }).click();
+    await returnToLibraryFromEntry(page);
     await page.getByRole("button", { name: "Add knowledge", exact: true }).click();
     await page.getByRole("heading", { level: 1, name: "Add knowledge", exact: true }).waitFor();
     await page
@@ -1217,7 +1217,7 @@ describe("responsive knowledge surfaces (real API + PostgreSQL)", () => {
       .getByRole("heading", { level: 1, name: "Browser-created knowledge", exact: true })
       .waitFor();
     await page.getByText("A useful finding entered by a person.", { exact: true }).waitFor();
-    await page.getByRole("button", { name: "Knowledge", exact: true }).click();
+    await returnToLibraryFromEntry(page);
     await page.getByRole("button", { name: "Browser-created knowledge", exact: true }).waitFor();
     await expectContentPageScrollAndFocus(page, lastLibraryRow(page));
     await expectNoPageOverflow(page);
@@ -1593,6 +1593,27 @@ async function openVariableSet(page: Page, fixtures: SeededFixtures): Promise<vo
       .count(),
   ).toBe(1);
   await expectSecretNeverRendered(page);
+}
+
+/** An entry or collection returns to its Library tab, not a page named Knowledge. */
+async function returnToLibraryFromEntry(page: Page): Promise<void> {
+  const detailUrl = new URL(page.url());
+  expect(detailUrl.searchParams.get("entry")).not.toBeNull();
+  const back = page
+    .locator(contentPageSelector)
+    .getByRole("button", { name: "Library", exact: true });
+  expect(await back.count()).toBe(1);
+  await back.click();
+  await page.getByRole("heading", { level: 1, name: "Knowledge", exact: true }).waitFor();
+  expect(
+    await page.getByRole("tab", { name: "Library", exact: true }).getAttribute("aria-selected"),
+  ).toBe("true");
+  const libraryUrl = new URL(page.url());
+  expect(libraryUrl.pathname).toBe(detailUrl.pathname);
+  expect(libraryUrl.searchParams.get("view") ?? "library").toBe("library");
+  for (const key of ["entry", "revision", "page", "proposal", "collection"]) {
+    expect(libraryUrl.searchParams.get(key)).toBeNull();
+  }
 }
 
 /** Opens the Library's Filter menu and checks one option. */

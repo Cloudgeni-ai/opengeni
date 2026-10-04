@@ -248,6 +248,13 @@ import {
 } from "@opengeni/core";
 import type { Context, Hono } from "hono";
 import { HTTPException } from "hono/http-exception";
+import {
+  agentActingAsPerson,
+  agentActingAsPersonBeforeGrantCheck,
+  isAgentActingAsPerson,
+  organizationSettingsPermission,
+  requireNotAgent,
+} from "../http/acting-person";
 import * as z from "zod/v4";
 import {
   hashCodexBrowserSession,
@@ -297,14 +304,50 @@ export async function managedCookieHuman(
   };
 }
 
+/**
+ * The person in this browser, or an agent acting as them. Only for routes that
+ * then require the same person's workspace grant; provider sign-in steps keep
+ * managedCookieHuman. An agent has no browser session, so its hash never
+ * matches a sign-in started in one.
+ */
+export async function managedHumanOrAgent(
+  c: Context,
+  deps: ApiRouteDeps,
+): Promise<ManagedCookieHuman | null> {
+  const human = await managedCookieHuman(c, deps);
+  if (human) return human;
+  const agent = agentActingAsPersonBeforeGrantCheck(c);
+  return agent
+    ? {
+        subjectId: agent.subjectId,
+        browserSessionHash: await hashCodexBrowserSession(`agent:${crypto.randomUUID()}`),
+      }
+    : null;
+}
+
 export async function requireOrganizationCodexHuman(
   c: Context,
   deps: ApiRouteDeps,
   organizationId: string,
+  options: {
+    /** A provider sign-in step: the person does it in the browser, never an agent. */
+    providerConsent?: boolean;
+  } = {},
 ): Promise<ManagedCookieHuman> {
+  if (options.providerConsent) requireNotAgent(c, "Signing in to a provider");
   const parsed = z.string().uuid().safeParse(organizationId);
   if (!parsed.success) throw new HTTPException(422, { message: "invalid organization id" });
   let human = await managedCookieHuman(c, deps);
+  if (!human) {
+    const agent = agentActingAsPerson(c, parsed.data, organizationSettingsPermission(c));
+    // An agent has no browser session, so it never matches a sign-in started in one.
+    if (agent) {
+      human = {
+        subjectId: agent.subjectId,
+        browserSessionHash: await hashCodexBrowserSession(`agent:${crypto.randomUUID()}`),
+      };
+    }
+  }
   if (!human && deps.settings.productAccessMode === "local") {
     const local = await requireCanonicalLocalAccountAdministrator(c, deps, organizationId);
     human = {
@@ -355,6 +398,9 @@ async function requireWorkspaceCodexManagementSource(
 }
 
 export function requireSameOriginBrowserMutation(c: Context, deps: ApiRouteDeps): void {
+  // Built in process for an agent acting as a person: no browser credentials
+  // ride along, so there is no cross-site request to guard against.
+  if (isAgentActingAsPerson(c)) return;
   const contentType = c.req.header("content-type")?.split(";", 1)[0]?.trim().toLowerCase();
   if (contentType !== "application/json") {
     throw new HTTPException(403, {
@@ -474,7 +520,7 @@ async function requireRedemptionHuman(
     });
   }
   requireSameOriginBrowserMutation(c, deps);
-  const human = await managedCookieHuman(c, deps);
+  const human = await managedHumanOrAgent(c, deps);
   if (!human) {
     throw new HTTPException(401, {
       message: "managed browser session required",
@@ -500,7 +546,7 @@ async function requireCodexAppsHuman(
     });
   }
   requireSameOriginBrowserMutation(c, deps);
-  const human = await managedCookieHuman(c, deps);
+  const human = await managedHumanOrAgent(c, deps);
   if (!human) {
     throw new HTTPException(401, {
       message: "managed browser session required",
@@ -892,7 +938,9 @@ export function registerCodexRoutes(app: Hono, deps: ApiRouteDeps): void {
   app.post("/v1/organizations/:organizationId/codex/connect/start", async (c) => {
     const organizationId = c.req.param("organizationId");
     requireSameOriginBrowserMutation(c, deps);
-    const human = await requireOrganizationCodexHuman(c, deps, organizationId);
+    const human = await requireOrganizationCodexHuman(c, deps, organizationId, {
+      providerConsent: true,
+    });
     let start: Awaited<ReturnType<typeof startDeviceCode>>;
     try {
       start = await startDeviceCode();
@@ -918,7 +966,9 @@ export function registerCodexRoutes(app: Hono, deps: ApiRouteDeps): void {
   app.post("/v1/organizations/:organizationId/codex/connect/poll", async (c) => {
     const organizationId = c.req.param("organizationId");
     requireSameOriginBrowserMutation(c, deps);
-    const human = await requireOrganizationCodexHuman(c, deps, organizationId);
+    const human = await requireOrganizationCodexHuman(c, deps, organizationId, {
+      providerConsent: true,
+    });
     const { state } = (await c.req.json().catch(() => null)) as {
       state?: string;
     };
@@ -1365,7 +1415,7 @@ export function registerCodexRoutes(app: Hono, deps: ApiRouteDeps): void {
       listCodexAccountStatuses(db, workspaceId),
       getCodexRotationSettings(db, workspaceId),
       getCodexAppsSettings(db, workspaceId),
-      managedCookieHuman(c, deps),
+      managedHumanOrAgent(c, deps),
       getWorkspaceCodexSubscriptionSource(db, workspaceId),
     ]);
     const activeAccountId = rotation?.activeCredentialId ?? null;
@@ -1757,7 +1807,7 @@ export function registerCodexRoutes(app: Hono, deps: ApiRouteDeps): void {
   app.get("/v1/workspaces/:workspaceId/codex/overview", async (c) => {
     const workspaceId = c.req.param("workspaceId");
     const grant = await requireAccessGrant(c, deps, workspaceId, "workspace:read");
-    const human = await managedCookieHuman(c, deps);
+    const human = await managedHumanOrAgent(c, deps);
     const accounts = await listCodexAccountStatuses(db, workspaceId);
     const ownerRecoveries =
       human &&

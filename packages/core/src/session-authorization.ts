@@ -10,7 +10,9 @@ import {
   type SessionAuthorizationTarget,
   type SessionScopeSubjectId,
 } from "@opengeni/contracts";
+import { AsyncLocalStorage } from "node:async_hooks";
 import {
+  currentSessionRlsActorIdentityKey,
   getSessionAuthorityProjection,
   getSession,
   getSessionTurnForAttempt,
@@ -22,6 +24,77 @@ import {
 import type { AppDependencies } from "./dependencies";
 
 export type SessionAuthorizationDependencies = Pick<AppDependencies, "db" | "sessionAuthorization">;
+
+/**
+ * Identical caller-session and attempt reads shared by the authorization
+ * checks of one first-party MCP request. Phases bound reuse to checks that run
+ * back to back: the route's own checks, then only checks a tool handler starts
+ * synchronously on entry. Anything later (a re-check after a wait or a write)
+ * reads fresh. Results are keyed by database handle and session RLS actor, so
+ * a read is only reused under the exact visibility it was made with.
+ */
+type SessionAuthorizationReads = {
+  phase: "route" | "handoff" | "dispatch" | "closed";
+  readonly results: WeakMap<Database, Map<string, unknown>>;
+};
+
+const sessionAuthorizationReads = new AsyncLocalStorage<SessionAuthorizationReads>();
+
+/** Scope read reuse to one request; it never outlives `fn`. */
+export async function withSessionAuthorizationReadReuse<T>(
+  fn: (reuse: { handOffToToolDispatch(): void }) => Promise<T>,
+): Promise<T> {
+  const reads: SessionAuthorizationReads = { phase: "route", results: new WeakMap() };
+  const handOffToToolDispatch = () => {
+    if (reads.phase === "route") reads.phase = "handoff";
+  };
+  try {
+    return await sessionAuthorizationReads.run(reads, () => fn({ handOffToToolDispatch }));
+  } finally {
+    reads.phase = "closed";
+  }
+}
+
+/**
+ * Invoke a tool handler so that authorization checks it starts before its
+ * first await reuse the route's reads. Later checks, and every other dispatch
+ * in the same request, read fresh.
+ */
+export function dispatchWithSessionAuthorizationReadReuse<T>(handler: () => T): T {
+  const reads = sessionAuthorizationReads.getStore();
+  if (reads?.phase !== "handoff") return handler();
+  reads.phase = "dispatch";
+  try {
+    return handler();
+  } finally {
+    reads.phase = "closed";
+  }
+}
+
+/** Call before the first await, so the phase is the one the check started in. */
+function claimSessionAuthorizationReads(): SessionAuthorizationReads | null {
+  const reads = sessionAuthorizationReads.getStore();
+  return reads?.phase === "route" || reads?.phase === "dispatch" ? reads : null;
+}
+
+async function reusableAuthorizationRead<T>(
+  reads: SessionAuthorizationReads | null,
+  db: Database,
+  key: readonly string[],
+  read: () => Promise<T>,
+): Promise<T> {
+  if (!reads) return await read();
+  const scopedKey = JSON.stringify([...key, currentSessionRlsActorIdentityKey()]);
+  let results = reads.results.get(db);
+  if (results?.has(scopedKey)) return results.get(scopedKey) as T;
+  const value = await read();
+  if (!results) {
+    results = new Map();
+    reads.results.set(db, results);
+  }
+  results.set(scopedKey, value);
+  return value;
+}
 
 /** Maximum time an omitted host hint leaves a live session stream unchecked. */
 export const SESSION_AUTHORIZATION_DEFAULT_REAUTHORIZE_MS = 15_000;
@@ -178,7 +251,8 @@ export async function requireLiveAgentAttemptAuthorization(
   grant: AccessGrant,
   callerSessionId: string,
 ): Promise<Extract<SessionAuthorizationActor, { kind: "agent_attempt" }>> {
-  const { actor } = await resolveSessionAuthorizationActor(db, grant);
+  const reads = claimSessionAuthorizationReads();
+  const { actor } = await resolveSessionAuthorizationActor(db, grant, reads);
   if (actor.kind !== "agent_attempt" || actor.callerSessionId !== callerSessionId) {
     throw new SessionAuthorizationDeniedError("caller_stale");
   }
@@ -205,6 +279,7 @@ export async function requireSessionAuthorization(
     surface: SessionAuthorizationSurface;
   },
 ): Promise<ResolvedSessionAuthorization | null> {
+  const reads = claimSessionAuthorizationReads();
   const port = deps.sessionAuthorization;
   const isAgentAttempt = grantHasAgentAttemptAuthority(grant);
   // Callers can supply a transaction handle. Both reads open nested RLS
@@ -242,8 +317,13 @@ export async function requireSessionAuthorization(
   }
   if (!authority) throw new SessionAuthorizationDeniedError("not_found");
 
-  const resolvedActor = await resolveSessionAuthorizationActor(deps.db, grant);
-  const resolvedTarget = await resolveSessionAuthorizationTarget(deps.db, grant, input.sessionId);
+  const resolvedActor = await resolveSessionAuthorizationActor(deps.db, grant, reads);
+  const resolvedTarget = await resolveSessionAuthorizationTarget(
+    deps.db,
+    grant,
+    input.sessionId,
+    reads,
+  );
   const actor = resolvedActor.actor;
   const target = resolvedTarget.target;
   const agentRelatedSessionAccess =
@@ -337,10 +417,11 @@ export async function requireSessionAuthorizationListScope(
   grant: AccessGrant,
   surface: SessionAuthorizationSurface,
 ): Promise<SessionAuthorizationListScope | null> {
+  const reads = claimSessionAuthorizationReads();
   const port = deps.sessionAuthorization;
   const isAgentAttempt = grantHasAgentAttemptAuthority(grant);
   if (!port && !isAgentAttempt) return null;
-  const { actor, callerAccess } = await resolveSessionAuthorizationActor(deps.db, grant);
+  const { actor, callerAccess } = await resolveSessionAuthorizationActor(deps.db, grant, reads);
   // Standalone agents retain compact workspace discovery only while the signed
   // caller attempt is still the exact live attempt, and only within their own
   // declared agent-access reach (migration 0427). The viewer is derived from
@@ -386,8 +467,14 @@ async function resolveSessionAuthorizationTarget(
   db: Database,
   grant: AccessGrant,
   sessionId: string,
+  reads: SessionAuthorizationReads | null,
 ): Promise<ResolvedSessionAuthorizationTarget> {
-  const session = await getSession(db, grant.workspaceId, sessionId);
+  const session = await reusableAuthorizationRead(
+    reads,
+    db,
+    ["session", grant.workspaceId, sessionId],
+    () => getSession(db, grant.workspaceId, sessionId),
+  );
   if (!session || session.accountId !== grant.accountId) {
     throw new SessionAuthorizationDeniedError("not_found");
   }
@@ -399,6 +486,7 @@ async function resolveSessionAuthorizationTarget(
 async function resolveSessionAuthorizationActor(
   db: Database,
   grant: AccessGrant,
+  reads: SessionAuthorizationReads | null,
 ): Promise<ResolvedSessionAuthorizationActor> {
   const callerSessionId = grant.metadata?.["sessionId"];
   const turnId = grant.metadata?.["turnId"];
@@ -427,8 +515,18 @@ async function resolveSessionAuthorizationActor(
     throw new SessionAuthorizationDeniedError("caller_stale");
   }
   // These scoped reads can also open nested savepoints on a transaction handle.
-  const callerSession = await getSession(db, grant.workspaceId, callerSessionId);
-  const turn = await getSessionTurnForAttempt(db, grant.workspaceId, callerSessionId, attemptId);
+  const callerSession = await reusableAuthorizationRead(
+    reads,
+    db,
+    ["session", grant.workspaceId, callerSessionId],
+    () => getSession(db, grant.workspaceId, callerSessionId),
+  );
+  const turn = await reusableAuthorizationRead(
+    reads,
+    db,
+    ["turn", grant.workspaceId, callerSessionId, attemptId],
+    () => getSessionTurnForAttempt(db, grant.workspaceId, callerSessionId, attemptId),
+  );
   if (
     !callerSession ||
     callerSession.accountId !== grant.accountId ||

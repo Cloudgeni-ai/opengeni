@@ -65,12 +65,19 @@ organization-scoped policy, editable only by an active organization owner,
 controls the result:
 
 - `off` rejects the operation before a proposal revision is created;
-- `suggest` (shown as **Require approval**, and the default for existing and new organizations) creates an
+- `suggest` (shown as **Review first**, and the default for existing and new organizations) creates an
   inactive immutable proposal and requires the bound
   `company_profile_confirm` human-confirmation path;
 - `automatic` creates the same immutable proposal and immediately activates it
   through the existing company-profile compare-and-swap lifecycle, without a
   second human prompt.
+
+In the web app the owner changes this policy on Knowledge > Agent learning, as
+an owner-only **Organization identity** row beside the workspace modes and in
+the same Off / Review first / Automatic words. Organization settings >
+Organization identity shows the current mode as one row that links there. The
+stored values and the `PATCH /company-profile/agent-policy` contract are
+unchanged.
 
 The policy mode and version are frozen on the proposal receipt. Changing the
 policy afterward does not reinterpret an existing proposal, and every mode

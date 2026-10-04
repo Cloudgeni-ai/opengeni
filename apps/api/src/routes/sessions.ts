@@ -1,4 +1,5 @@
 import { getRetainedProviderCommand } from "@opengeni/db/retained-provider-commands";
+import { assertGoalResumeAllowed, GoalResumeBlockedError } from "@opengeni/core";
 import { UnsupportedLatencyModeError } from "@opengeni/config";
 import { searchSessionMessagesForSubject, SessionMessageSearchCursorError } from "@opengeni/db";
 import { listSessionEventSlices } from "@opengeni/db/session-event-slices";
@@ -6,7 +7,7 @@ import * as sessionPreviewSchema from "@opengeni/db/schema";
 import { and, eq, sql } from "drizzle-orm";
 import { SessionMessageSearchRequest } from "@opengeni/contracts";
 import { scheduledSessionIds } from "@opengeni/db";
-import { withSiteSessionOrigin } from "@opengeni/core";
+import { isVerifiedDelegatedHumanAuthorization, withSiteSessionOrigin } from "@opengeni/core";
 import { freezeSessionRealtimeConnectionAccounts } from "@opengeni/core";
 import { resolveSiteSessionOrigin, withOptionalSiteCommandOrigin } from "../site-session-origin";
 import { SandboxRecoveryRequest } from "@opengeni/contracts";
@@ -291,6 +292,7 @@ import {
 import { buildSessionCodexRealtimeBroker, CodexRealtimeBrokerError } from "../codex-realtime";
 import {
   acceptSessionUserMessage,
+  validateSessionMcpCredentialUpdates,
   controlHumanSessionWorkstream,
   retryFailedSession,
   createSessionForRequest,
@@ -332,6 +334,7 @@ import { ApiHttpError } from "../http/api-error";
 import { observeWorkDiscovery, summarizeWorkDiscoveryRows } from "../work-discovery-observability";
 import { recordAcceptedApiAdmission } from "../admission-trace";
 import { parseRequestBody, parseRequestJson } from "../http/request-body";
+import { measureSessionCreatePhase } from "../session-create-observability";
 
 type SessionRouteDeps = ApiRouteDeps & Pick<ViewerServices, "establishSandboxSession">;
 
@@ -587,16 +590,15 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
 
   app.post("/v1/workspaces/:workspaceId/sessions", async (c) => {
     const workspaceId = c.req.param("workspaceId");
-    const authorization = await requireAccessGrantAuthorization(
-      c,
-      deps,
-      workspaceId,
-      "sessions:create",
+    const authorization = await measureSessionCreatePhase(deps.observability, "authorization", () =>
+      requireAccessGrantAuthorization(c, deps, workspaceId, "sessions:create"),
     );
     const grant = authorization.grant;
     let payload: unknown;
     try {
-      payload = await c.req.json();
+      payload = await measureSessionCreatePhase(deps.observability, "body_read", () =>
+        c.req.json(),
+      );
     } catch {
       return c.json(
         {
@@ -609,22 +611,31 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
     let session: Session;
     try {
       CreateSessionRequest.parse(payload);
-      const origin = await resolveSiteSessionOrigin(
-        db,
-        workspaceId,
-        c.req.header("x-opengeni-site-id"),
-        c.req.header("x-opengeni-site-version"),
+      const origin = await measureSessionCreatePhase(deps.observability, "site_origin", () =>
+        resolveSiteSessionOrigin(
+          db,
+          workspaceId,
+          c.req.header("x-opengeni-site-id"),
+          c.req.header("x-opengeni-site-version"),
+        ),
       );
       const create = () =>
         createSessionForRequest(deps, grant, workspaceId, payload, authorization);
-      session = await (origin ? withSiteSessionOrigin(origin, create) : create());
+      session = await measureSessionCreatePhase(deps.observability, "core_create", () =>
+        origin ? withSiteSessionOrigin(origin, create) : create(),
+      );
     } catch (error) {
       return sessionCreateErrorResponse(c, error);
     }
     // Creation has committed by this point. Keep response projection outside
     // the create-rejection boundary so a post-commit policy read cannot be
     // misreported as though the session itself was rejected.
-    return c.json(await withEffectivePolicy(deps, workspaceId, grant.subjectId, session), 202);
+    return c.json(
+      await measureSessionCreatePhase(deps.observability, "response_projection", () =>
+        withEffectivePolicy(deps, workspaceId, grant.subjectId, session),
+      ),
+      202,
+    );
   });
 
   app.get("/v1/workspaces/:workspaceId/new-session-draft", async (c) => {
@@ -801,6 +812,8 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
           ...(query.cursor ? { cursor: query.cursor } : {}),
           ...(query.search ? { search: query.search } : {}),
           ...(query.pinsOnly ? { pinsOnly: true } : {}),
+          ...(query.includeTotals ? { includeTotals: true } : {}),
+          ...(query.needsYouOnly ? { needsYouOnly: true } : {}),
           ...(query.includePinned === false ? { includePinned: false } : {}),
           ...(query.archivedOnly ? { archivedOnly: true } : {}),
           ...(query.sortBy ? { sortBy: query.sortBy } : {}),
@@ -2736,6 +2749,15 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
       sessionId,
       {
         status: "active",
+        beforeResume: (tx, session, causalTurn) =>
+          assertGoalResumeAllowed({ ...deps, db: tx }, session, causalTurn).catch(
+            (error: unknown) => {
+              if (error instanceof GoalResumeBlockedError) {
+                throw new HTTPException(422, { message: error.message, cause: error });
+              }
+              throw error;
+            },
+          ),
         event: { type: "goal.resumed", actor: "api" },
       },
     );
@@ -3625,16 +3647,42 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
       return c.json(result.accepted, 202);
     }
 
-    if (event.type === "user.approvalDecision") {
-      const accepted = await acceptSessionApprovalDecision(db, {
-        accountId: grant.accountId,
-        workspaceId,
-        sessionId,
-        subjectId: grant.subjectId,
-        respondedByKind: childRequiresActionRespondedByKindForGrant(grant),
-        payload: event.payload,
-        clientEventId: event.clientEventId ?? null,
+    // Responses use the same header-only validation, permission and encryption
+    // boundary as Send/Steer. Persistence belongs to the response transaction,
+    // never a separate rotation that could commit without accepting the reply.
+    const updates = event.payload.mcpCredentialUpdates ?? [];
+    let mcpCredentialUpdates = [] as ReturnType<typeof validateSessionMcpCredentialUpdates>;
+    if (updates.length) {
+      const session = await getSession(db, workspaceId, sessionId);
+      if (!session) throw new HTTPException(404, { message: "session not found" });
+      mcpCredentialUpdates = validateSessionMcpCredentialUpdates({
+        settings,
+        grant,
+        session,
+        updates,
       });
+    }
+
+    if (event.type === "user.approvalDecision") {
+      const { mcpCredentialUpdates: _writeOnlyCredentials, ...payload } = event.payload;
+      let accepted;
+      try {
+        accepted = await acceptSessionApprovalDecision(db, {
+          accountId: grant.accountId,
+          workspaceId,
+          sessionId,
+          subjectId: grant.subjectId,
+          respondedByKind: childRequiresActionRespondedByKindForGrant(grant),
+          payload,
+          mcpCredentialUpdates,
+          clientEventId: event.clientEventId ?? null,
+        });
+      } catch (error) {
+        if (error instanceof Error && error.message.startsWith("Unknown session MCP server")) {
+          throw new HTTPException(422, { message: error.message });
+        }
+        throw error;
+      }
       if (accepted.action === "conflict") {
         throw new HTTPException(409, {
           message: `session is ${accepted.sessionStatus}; no unhandled approval is pending`,
@@ -3664,11 +3712,17 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
           response: event.payload.response,
           respondedBy: grant.subjectId,
           canonicalHumanSession:
-            authorization.canonicalManagedHumanSession || authorization.canonicalLocalHumanSession,
+            authorization.canonicalManagedHumanSession ||
+            authorization.canonicalLocalHumanSession ||
+            isVerifiedDelegatedHumanAuthorization(authorization),
           respondedByKind: childRequiresActionRespondedByKindForGrant(grant),
           clientEventId: event.clientEventId ?? null,
+          mcpCredentialUpdates,
         });
       } catch (error) {
+        if (error instanceof Error && error.message.startsWith("Unknown session MCP server")) {
+          throw new HTTPException(422, { message: error.message });
+        }
         if (error instanceof SkillHumanResponseError) {
           throw new HTTPException(
             error.code === "conflict" ? 409 : error.code === "forbidden" ? 403 : 422,
@@ -5108,7 +5162,7 @@ export function sessionTenancyHttpError(error: unknown): Error {
   if (error instanceof SessionTenancyNotActivatedError) {
     return new ApiHttpError(409, {
       code: "conflict",
-      message: "Session tenancy is not activated for this organization.",
+      message: "Only-me chats are not enabled for this organization.",
       retryable: false,
       details: { reason: "not_activated" },
     });
@@ -5224,6 +5278,8 @@ export function sessionListQuery(
   search: string | undefined;
   pinsOnly: boolean;
   includePinned: boolean;
+  includeTotals: boolean;
+  needsYouOnly: boolean;
   archivedOnly: boolean;
   sortBy: "updatedAt" | "createdAt" | "name" | undefined;
   archiveStatus: "active" | "archived" | "all" | undefined;
@@ -5273,6 +5329,16 @@ export function sessionListQuery(
     throw new HTTPException(400, { message: 'includePinned must be "true" or "false"' });
   }
   const includePinned = query.includePinned !== "false";
+  for (const key of ["includeTotals", "needsYouOnly"]) {
+    if (query[key] !== undefined && !["true", "false"].includes(query[key]!))
+      throw new HTTPException(400, { message: `${key} must be "true" or "false"` });
+  }
+  const includeTotals = query.includeTotals === "true";
+  const needsYouOnly = query.needsYouOnly === "true";
+  if (includeTotals && (!allowCursor || (parentSessionId !== "null" && !pinsOnly)))
+    throw new HTTPException(400, { message: "includeTotals requires a root page" });
+  if (needsYouOnly && !allowCursor)
+    throw new HTTPException(400, { message: 'needsYouOnly requires view="page"' });
   if (pinsOnly && !includePinned) {
     throw new HTTPException(400, { message: "pinsOnly requires includePinned" });
   }
@@ -5360,12 +5426,13 @@ export function sessionListQuery(
     const parsedEndUser = SessionScopeSubjectId.safeParse(query.scopeSubjectId);
     if (!parsedEndUser.success) {
       throw new HTTPException(400, {
-        message: "scopeSubjectId must be a canonical OpenGeni user subject",
+        message: "scopeSubjectId must be a canonical Opengeni user subject",
       });
     }
     scopeSubjectId = parsedEndUser.data;
   }
   const hasPageFilters =
+    needsYouOnly ||
     originSiteId !== undefined ||
     channelId !== undefined ||
     createdByKind !== undefined ||
@@ -5398,6 +5465,8 @@ export function sessionListQuery(
     search: search || undefined,
     pinsOnly,
     includePinned,
+    includeTotals,
+    needsYouOnly,
     archivedOnly,
     sortBy: sortBy.data,
     archiveStatus: archiveStatus.data,

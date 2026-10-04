@@ -806,6 +806,66 @@ describe("observability", () => {
     expect(JSON.parse(observed[0]!)).not.toHaveProperty("arbitraryDiagnostic");
   });
 
+  test("reviewed operational codes retain fixed descriptions, never raw exception messages", () => {
+    const sentinel = "PRIVATE_OPERATIONAL_MESSAGE_SENTINEL_98cabc";
+    const observed: string[] = [];
+    const originalWarn = console.warn;
+    console.warn = (message?: unknown) => observed.push(String(message));
+    try {
+      const obs = createObservability(settings, { component: "worker", now: () => 1 });
+      for (const [errorClass, errorCode] of [
+        ["ParallelSessionTitleGenerationError", "parallel_session_title_generation_failed"],
+        ["ParallelSessionTitlePersistenceError", "parallel_session_title_persistence_failed"],
+        ["KnowledgeIndexOperationError", "knowledge_index_embedding_failed"],
+        ["WorkerOperationError", "worker_operation_failed"],
+      ]) {
+        obs.warn("fixed operational failure", {
+          errorClass,
+          errorCode,
+          origin: "worker",
+          errorMessage: sentinel,
+          error: sentinel,
+          cause: sentinel,
+          status: 503,
+        });
+      }
+      obs.warn("unknown operational failure", {
+        errorClass: "UnreviewedFailure",
+        errorCode: "unreviewed_failure",
+        errorMessage: sentinel,
+        error: sentinel,
+      });
+    } finally {
+      console.warn = originalWarn;
+    }
+
+    expect(observed).toHaveLength(5);
+    expect(observed.join("\n")).not.toContain(sentinel);
+    const records = observed.map((record) => JSON.parse(record));
+    expect(records[0]).toMatchObject({
+      errorClass: "ParallelSessionTitleGenerationError",
+      errorCode: "parallel_session_title_generation_failed",
+      errorMessage: "parallel session title generation failed",
+      origin: "worker",
+      status: 503,
+    });
+    expect(records[1]).toMatchObject({
+      errorClass: "ParallelSessionTitlePersistenceError",
+      errorMessage: "parallel session title persistence failed",
+    });
+    expect(records[2]).toMatchObject({
+      errorCode: "knowledge_index_embedding_failed",
+      errorMessage: "knowledge index embedding failed",
+    });
+    expect(records[3]).toMatchObject({
+      errorCode: "worker_operation_failed",
+      errorMessage: "worker operation failed",
+    });
+    expect(records[4]).toMatchObject({ errorClass: "OperationError" });
+    expect(records[4]).not.toHaveProperty("errorCode");
+    expect(records[4]).not.toHaveProperty("errorMessage");
+  });
+
   test("public structured logs admit only validated opaque sandbox correlation keys", () => {
     const observed: string[] = [];
     const originalLog = console.log;
@@ -897,6 +957,54 @@ describe("observability", () => {
     });
     expect(JSON.parse(observed[0]!)).not.toHaveProperty("workspaceId");
     expect(JSON.parse(observed[1]!)).not.toHaveProperty("correlationId");
+  });
+
+  test("HTTP failure logs keep bounded request and cause context without error text or credentials", () => {
+    const sentinel = "HTTP_DIAGNOSTIC_SECRET_CANARY";
+    const observed: string[] = [];
+    const originalError = console.error;
+    console.error = (message?: unknown) => observed.push(String(message));
+    try {
+      const obs = createObservability(settings, { component: "api", now: () => 1 });
+      obs.error("HTTP request failed", {
+        errorClass: "HttpOperationError",
+        errorCode: "internal_error",
+        status: 500,
+        method: "GET",
+        route: "/v1/workspaces/:workspaceId/mcp",
+        reasonKind: "TypeError",
+        diagnosticId: "00000000-0000-4000-8000-000000000001",
+        correlationId: "request-1",
+        error: new Error(sentinel),
+        errorMessage: sentinel,
+        authorization: sentinel,
+        cookie: sentinel,
+        body: sentinel,
+        sessionId: sentinel,
+      });
+      obs.error("HTTP request failed", {
+        errorClass: "HttpOperationError",
+        errorCode: "internal_error",
+        status: 500,
+        method: sentinel,
+        route: `/v1/workspaces/workspace/mcp?token=${sentinel}`,
+        reasonKind: sentinel,
+        diagnosticId: sentinel,
+      });
+    } finally {
+      console.error = originalError;
+    }
+    expect(JSON.parse(observed[0]!)).toMatchObject({
+      method: "GET",
+      route: "/v1/workspaces/:workspaceId/mcp",
+      reasonKind: "TypeError",
+      diagnosticId: "00000000-0000-4000-8000-000000000001",
+      correlationId: "request-1",
+    });
+    for (const field of ["method", "route", "reasonKind", "diagnosticId"]) {
+      expect(JSON.parse(observed[1]!)).not.toHaveProperty(field);
+    }
+    expect(observed.join("\n")).not.toContain(sentinel);
   });
 
   test("public fatal diagnostics retain only closed structural fields", () => {

@@ -3,7 +3,11 @@ import { mkdtempSync, writeFileSync, mkdirSync, symlinkSync, rmSync } from "node
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { spawnSync } from "node:child_process";
-import { confinedFileReadScript, parseConfinedFileRead } from "../src/sandbox/confined-file-read";
+import {
+  confinedFileReadCommand,
+  confinedFileReadScript,
+  parseConfinedFileRead,
+} from "../src/sandbox/confined-file-read";
 import { SandboxChannelAService } from "../src/sandbox/channel-a";
 import { OpenSandboxSession } from "../src/sandbox/providers/opensandbox-adapter";
 
@@ -20,6 +24,11 @@ function run(script: string) {
 }
 
 describe("race-safe confined file reads", () => {
+  test("uses only trusted interpreter paths including the system profile on immutable hosts", () => {
+    const command = confinedFileReadCommand(root, "fixture.bin", 4);
+    expect(command).toContain("PATH=/usr/bin:/bin:/usr/local/bin:/run/current-system/sw/bin");
+    expect(command).toContain("python3 -I -S");
+  });
   test("caps a giant single line in bytes and preserves arbitrary binary bytes", () => {
     const bytes = Buffer.from([0, 1, 255, 254, ...Array(1024).fill(65)]);
     writeFileSync(join(root, "large.bin"), bytes);

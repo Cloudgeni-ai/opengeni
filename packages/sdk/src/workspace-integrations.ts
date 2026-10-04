@@ -87,7 +87,7 @@ export type WorkspaceSandboxImages = { images: string[]; selected: string | null
 
 export class OpenGeniSignatureError extends Error {
   constructor() {
-    super("OpenGeni signature verification failed");
+    super("Opengeni signature verification failed");
     this.name = "OpenGeniSignatureError";
   }
 }

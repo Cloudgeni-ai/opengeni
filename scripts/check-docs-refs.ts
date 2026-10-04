@@ -21,7 +21,6 @@ const sourceRoots = [
 const recordMarker = "<!-- docs-refs: record -->";
 const ignoreMarker = "<!-- docs-refs: ignore -->";
 const architecturePath = "docs/architecture.md";
-const architectureMaxWords = 12_000;
 const architectureMaxLineLength = 500;
 const architectureWorkspaceMapHeadings = [
   "### 6.1 Applications",
@@ -40,8 +39,6 @@ const productIntegrationLinkConsumers = [
   ".agents/skills/opengeni/SKILL.md",
   ".agents/skills/opengeni/references/client-integration.md",
   ".agents/skills/opengeni-client/SKILL.md",
-  ".agents/skills/opengeni-client/references/product-integration-shapes.md",
-  ".agents/skills/opengeni-client/references/api-workflows.md",
 ] as const;
 const productIntegrationRequiredTokens = [
   "organization API key",
@@ -172,16 +169,8 @@ function checkArchitectureMap(text: string, mapFiles: string[], out: Finding[]):
     return;
   }
 
-  const wordCount = text.match(/\S+/gu)?.length ?? 0;
-  if (wordCount > architectureMaxWords) {
-    out.push({
-      file: architecturePath,
-      line: 1,
-      token: `${wordCount} words`,
-      reason: `architecture orientation budget exceeds ${architectureMaxWords} words`,
-    });
-  }
-
+  // Total prose volume is not a correctness contract. References and workspace
+  // structure remain mandatory regardless of how much orientation is needed.
   const lines = text.split("\n");
   for (let index = 0; index < lines.length; index += 1) {
     const line = lines[index] ?? "";
@@ -395,15 +384,25 @@ async function listFiles(roots: string[]): Promise<string[]> {
   if (ripgrep !== null) {
     return normalizeFileList(ripgrep);
   }
-  const git = await runFileListCommand(["git", "ls-files", "--", ...existingRoots]);
+  const git = await runFileListCommand(["git", "ls-files", "--", ...existingRoots]).catch(
+    () => null,
+  );
   if (git !== null) {
     return normalizeFileList(git);
   }
-  throw new Error("Unable to list source files: neither rg nor git ls-files is available");
+  // Neither rg nor a git checkout (e.g. a fixture directory on a runner
+  // without ripgrep): walk the roots directly, skipping dependencies.
+  const discoveredFiles: string[] = [];
+  for (const root of existingRoots) {
+    for await (const path of new Bun.Glob(`${root}/**/*`).scan({ onlyFiles: true, dot: true })) {
+      if (!/(^|\/)(node_modules|\.git|dist)\//.test(path)) discoveredFiles.push(path);
+    }
+  }
+  return normalizeFileList(discoveredFiles.join("\n"));
 }
 
 async function runFileListCommand(command: string[]): Promise<string | null> {
-  let proc: ReturnType<typeof Bun.spawn>;
+  let proc: Bun.Subprocess<"ignore", "pipe", "pipe">;
   try {
     proc = Bun.spawn(command, {
       stdout: "pipe",

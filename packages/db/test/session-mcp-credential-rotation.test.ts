@@ -142,6 +142,45 @@ async function waitForBlockedBackend(pid: number) {
 }
 
 describe("atomic standalone credential rotation (real PostgreSQL)", () => {
+  test("organization key rotation rechecks selected scope and never treats explicit workspace-admin as a wildcard", async () => {
+    if (!available) return;
+    const input = await fixture();
+    const [other] = await admin<{ id: string }[]>`insert into workspaces (account_id, name)
+      values (${input.accountId}, 'Not selected') returning id`;
+    const key = await database.createOrganizationApiKey(first.db, {
+      accountId: input.accountId,
+      name: "Explicit rotation",
+      prefix: "fixture",
+      keyHash: crypto.randomUUID(),
+      permissions: ["workspace:admin"],
+      policy: {
+        preset: "custom",
+        permissions: ["sessions:control", "mcp_servers:attach"],
+        workspaceScope: { kind: "selected", workspaceIds: [other!.id] },
+      },
+    });
+    const request = { ...input, subjectId: `api_key:${key.id}`, actorType: "service" as const };
+    await expect(rotate(first.db, request)).rejects.toMatchObject({ code: "authority_revoked" });
+    await database.updateOrganizationApiKey(first.db, input.accountId, key.id, {
+      policy: {
+        preset: "custom",
+        permissions: ["workspace:admin"],
+        workspaceScope: { kind: "selected", workspaceIds: [input.workspaceId] },
+      },
+    });
+    await expect(rotate(first.db, request)).rejects.toMatchObject({ code: "authority_revoked" });
+    expect((await state(input)).credential_version).toBe(1);
+    await database.updateOrganizationApiKey(first.db, input.accountId, key.id, {
+      policy: {
+        preset: "custom",
+        permissions: ["sessions:control", "mcp_servers:attach"],
+        workspaceScope: { kind: "selected", workspaceIds: [input.workspaceId] },
+      },
+    });
+    await rotate(first.db, request);
+    expect((await state(input)).credential_version).toBe(2);
+  }, 180_000);
+
   test("native replacement cannot skip CAS, destination or resolver authorization", async () => {
     if (!available) return;
     for (const variant of ["version", "destination", "resolver"] as const) {

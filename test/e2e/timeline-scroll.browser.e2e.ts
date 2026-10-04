@@ -864,7 +864,10 @@ describe("timeline scroll ownership browser regression", () => {
     expect(after.gap).toBeCloseTo(atTop.gap, 0);
     expect(after.pin).toBe("false");
     expect(afterAnchorTop).toBeCloseTo(beforeAnchorTop, 0);
-    expect(await page.locator("[data-og-jump-to-latest]").count()).toBe(1);
+    // The retained gap is now inside the normal near-tip band. The reader
+    // stays unpinned, but the jump is quiet until they move farther away.
+    await page.locator("[data-og-jump-to-latest]").waitFor({ state: "detached", timeout: 5_000 });
+    expect(await page.locator("[data-og-jump-to-latest]").count()).toBe(0);
   }, 30_000);
 
   test("keeps a nested row anchored when prepend merges into its activity group", async () => {

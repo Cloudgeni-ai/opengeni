@@ -256,6 +256,7 @@ function rfbAttachment(targetId: string): ComputerSessionAttachment {
     targetId,
     stream: {
       kind: "direct_rfb",
+      inputAllowed: true,
       url: "wss://computer.example.test/v1/rfb",
       protocols: ["binary", "opengeni.computer.rfb.v1", "opengeni.auth.super-secret"],
     },
@@ -852,6 +853,126 @@ describe("ComputerSession frame stream", () => {
 });
 
 describe("ComputerViewer", () => {
+  test("dismisses both desktop menus after target discovery before dock shortcuts", async () => {
+    const screenTarget = target("screen-1", "screen");
+    const windowTarget = target();
+    let discover!: () => void;
+    const discovered = new Promise<void>((resolve) => {
+      discover = resolve;
+    });
+    const requests: ComputerActionRequest[] = [];
+    const client = fakeClient({
+      listComputerSessions: async () => ({ revision: 1, sessions: [computerSession()] }),
+      getComputerSession: async () => computerSession(),
+      listComputerTargets: async () => {
+        await discovered;
+        return {
+          computerSessionId: COMPUTER_SESSION_ID,
+          controllerGeneration: "controller-1",
+          targets: [screenTarget, windowTarget],
+        };
+      },
+      observeComputerTarget: async (_workspaceId, _computerSessionId, targetId) =>
+        observation(targetId === screenTarget.id ? screenTarget : windowTarget),
+      attachComputerSession: async (_workspaceId, _computerSessionId, request) =>
+        attachment(request.targetId),
+      actInComputer: async (_workspaceId, _computerSessionId, request) => {
+        requests.push(request);
+        return receipt(observation(screenTarget), request.operationId);
+      },
+    });
+    const rendered = await renderComponent(
+      <ComputerViewer
+        client={client}
+        workspaceId={WORKSPACE_ID}
+        sessionId={SESSION_ID}
+        webSocketFactory={(url, protocols) =>
+          new FakeComputerSocket(url, protocols) as unknown as ComputerFrameWebSocket
+        }
+      />,
+    );
+    let dockEscapes = 0;
+    const dock = (event: Event) => {
+      if ((event as KeyboardEvent).key === "Escape") dockEscapes += 1;
+    };
+    document.addEventListener("keydown", dock);
+    try {
+      await flush(40);
+      expect(
+        rendered.container.querySelector("summary[aria-label='Advanced desktop views']"),
+      ).toBeNull();
+      await actRun(discover);
+      await flush(20);
+      const menus = [...rendered.container.querySelectorAll<HTMLDetailsElement>("details")];
+      expect(menus).toHaveLength(2);
+      for (const menu of menus) {
+        const trigger = menu.querySelector("summary")!;
+        const inside = menu.querySelector("button")!;
+        menu.open = true;
+        inside.focus();
+        inside.dispatchEvent(new Event("pointerdown", { bubbles: true, composed: true }));
+        expect(menu.open).toBe(true);
+        const escape = new KeyboardEvent("keydown", {
+          key: "Escape",
+          bubbles: true,
+          cancelable: true,
+        });
+        inside.dispatchEvent(escape);
+        expect(menu.open).toBe(false);
+        expect(document.activeElement === trigger).toBe(true);
+        expect(escape.defaultPrevented).toBe(true);
+        expect(dockEscapes).toBe(0);
+        menu.open = true;
+        const outside = new Event("pointerdown", {
+          bubbles: true,
+          cancelable: true,
+          composed: true,
+        });
+        document.body.dispatchEvent(outside);
+        expect(menu.open).toBe(false);
+        expect(outside.defaultPrevented).toBe(false);
+      }
+      menus[0]!
+        .querySelector("summary")!
+        .dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true }));
+      expect(dockEscapes).toBe(1);
+      expect(requests).toEqual([]);
+    } finally {
+      discover();
+      document.removeEventListener("keydown", dock);
+      await rendered.unmount();
+    }
+  });
+
+  test("returns desktop menu focus after keyboard actions without stealing pointer focus", async () => {
+    const fixture = await renderComputerInputFixture();
+    try {
+      const menu = fixture.rendered.container.querySelector<HTMLDetailsElement>("details")!;
+      const trigger = menu.querySelector("summary")!;
+      for (const label of ["Agent computer", "Follow agent"]) {
+        menu.open = true;
+        const action = [...menu.querySelectorAll("button")].find((button) =>
+          button.textContent?.startsWith(label),
+        )!;
+        action.focus();
+        await actRun(() => action.click());
+        expect(menu.open).toBe(false);
+        expect(document.activeElement === trigger).toBe(true);
+      }
+      menu.open = true;
+      const choice = menu.querySelector("button")!;
+      choice.focus();
+      await actRun(() =>
+        choice.dispatchEvent(new MouseEvent("click", { bubbles: true, detail: 1 })),
+      );
+      expect(menu.open).toBe(false);
+      expect(document.activeElement === trigger).toBe(false);
+      expect(fixture.actions).toEqual([]);
+    } finally {
+      await fixture.rendered.unmount();
+    }
+  });
+
   test("keeps a single desktop uncluttered and puts app/window views under Advanced", async () => {
     const screenTarget = target("screen-1", "screen");
     const windowTarget = target();
@@ -861,6 +982,11 @@ describe("ComputerViewer", () => {
     const attachments: string[] = [];
     const requests: ComputerActionRequest[] = [];
     const client = fakeClient({
+      getComputerInputPosture: async () => ({
+        computerSessionId: COMPUTER_SESSION_ID,
+        controllerGeneration: "controller-1",
+        inputAllowed: true,
+      }),
       listComputerSessions: async () => ({ revision: 1, sessions: [computerSession()] }),
       getComputerSession: async () => ({ ...computerSession(), platform: "macos" }),
       listComputerTargets: async () => ({
@@ -962,6 +1088,11 @@ describe("ComputerViewer", () => {
     const requests: ComputerActionRequest[] = [];
     const attachments: string[] = [];
     const client = fakeClient({
+      getComputerInputPosture: async () => ({
+        computerSessionId: COMPUTER_SESSION_ID,
+        controllerGeneration: "controller-1",
+        inputAllowed: true,
+      }),
       listComputerSessions: async () => ({ revision: 1, sessions: [computerSession()] }),
       getComputerSession: async () => computerSession(),
       listComputerTargets: async () => ({
@@ -1981,6 +2112,56 @@ describe("ComputerViewer", () => {
 });
 
 describe("ComputerViewer input reliability", () => {
+  test.each([undefined, false, true])(
+    "requires explicit attachment input scope for RFB (%p)",
+    async (inputAllowed) => {
+      const priorWebSocket = globalThis.WebSocket;
+      globalThis.WebSocket = class extends EventTarget {
+        static CONNECTING = 0;
+        static CLOSED = 3;
+        readyState = 0;
+        binaryType = "arraybuffer";
+        close() {
+          this.readyState = 3;
+        }
+      } as unknown as typeof WebSocket;
+      const currentSession = computerSession();
+      const currentTarget = target();
+      const client = fakeClient({
+        listComputerSessions: async () => ({ revision: 1, sessions: [currentSession] }),
+        getComputerSession: async () => currentSession,
+        listComputerTargets: async () => ({
+          computerSessionId: COMPUTER_SESSION_ID,
+          controllerGeneration: "controller-1",
+          targets: [currentTarget],
+        }),
+        observeComputerTarget: async () => observation(currentTarget),
+        attachComputerSession: async (_workspaceId, _computerSessionId, request) => {
+          const rfbGrantAttachment = rfbAttachment(request.targetId);
+          if (rfbGrantAttachment.stream.kind === "direct_rfb") {
+            if (inputAllowed === undefined)
+              delete (rfbGrantAttachment.stream as Partial<typeof rfbGrantAttachment.stream>)
+                .inputAllowed;
+            else rfbGrantAttachment.stream.inputAllowed = inputAllowed;
+          }
+          return rfbGrantAttachment;
+        },
+      });
+      const rendered = await renderComponent(
+        <ComputerViewer client={client} workspaceId={WORKSPACE_ID} sessionId={SESSION_ID} />,
+      );
+      try {
+        await flush(40);
+        const desktop = rendered.container.querySelector("[data-opengeni-desktop]");
+        expect(desktop).not.toBeNull();
+        expect(desktop!.hasAttribute("data-in-control")).toBe(inputAllowed === true);
+      } finally {
+        await rendered.unmount();
+        globalThis.WebSocket = priorWebSocket;
+      }
+    },
+  );
+
   test("keeps an RFB desktop view-only when native input is unavailable", async () => {
     const priorWebSocket = globalThis.WebSocket;
     // noVNC owns its socket; keep this component check on a disconnected fixture.
@@ -2254,12 +2435,15 @@ describe("ComputerViewer input reliability", () => {
     }
   });
 
-  test("retains keyboard focus after a canvas click and types after that click", async () => {
+  test("dismisses the desktop menu without swallowing a canvas click or subsequent typing", async () => {
     const canvasMock = mockComputerCanvas();
     const fixture = await renderComputerInputFixture();
     try {
       await fixture.frame(1);
       await canvasMock.finishDecode(0);
+      const menu = fixture.rendered.container.querySelector<HTMLDetailsElement>("details")!;
+      menu.open = true;
+      menu.querySelector("summary")!.focus();
       const pointer = new MouseEvent("pointerdown", {
         bubbles: true,
         cancelable: true,
@@ -2279,6 +2463,7 @@ describe("ComputerViewer input reliability", () => {
         );
       });
       expect(pointer.defaultPrevented).toBe(true);
+      expect(menu.open).toBe(false);
       expect(document.activeElement).toBe(fixture.keyboard);
       await actRun(() => {
         fixture.keyboard.value = "immediate text";

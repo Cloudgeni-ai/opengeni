@@ -15,6 +15,7 @@ import {
   CAPABILITY_DESCRIPTORS,
   DEFAULT_FIRST_PARTY_MCP_TOOLS,
   FIRST_PARTY_MCP_TOOL_CAPABILITIES,
+  isDerivedAgentToolOwner,
   mergeResourceRefs,
   Permission,
   stableJson,
@@ -186,7 +187,7 @@ function explicitFirstPartyTools(
   return {
     firstPartyMcpTools: selected.filter((tool) => {
       const owner = FIRST_PARTY_MCP_TOOL_CAPABILITIES[tool];
-      return owner === "runtime" || capabilityOn(values, owner);
+      return isDerivedAgentToolOwner(owner) || capabilityOn(values, owner);
     }),
   };
 }

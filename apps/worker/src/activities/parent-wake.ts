@@ -1,3 +1,4 @@
+import { getSessionParentClaudeProviderAccountAuthority } from "@opengeni/db";
 import type { Settings } from "@opengeni/config";
 import type { Session, SessionGoal, SessionSystemUpdatePayload } from "@opengeni/contracts";
 import {
@@ -9,6 +10,8 @@ import {
   addSessionSystemUpdateWithSourceMutation,
   claimPendingSessionSystemUpdateOutbox,
   claimPendingSessionWorkflowWakes,
+  repairPendingChildTerminalResultWakes,
+  type ChildTerminalWakeRepairCursor,
   childRequiresActionDedupeKey,
   getSessionSystemUpdateOutboxByDedupeKey,
   getOrCreateSessionSystemUpdateOutbox,
@@ -39,7 +42,10 @@ export type ReconcileParentSystemUpdateOverrides = Partial<{
 
 export type ReconcileSessionWorkflowWakeOverrides = Partial<{
   claimPendingSessionWorkflowWakes: typeof claimPendingSessionWorkflowWakes;
+  repairPendingChildTerminalResultWakes: typeof repairPendingChildTerminalResultWakes;
 }>;
+
+const childTerminalRepairCursors = new WeakMap<Database, ChildTerminalWakeRepairCursor>();
 
 export type ReconcileAutomaticSessionTitleFanoutOverrides = Partial<{
   claimAutomaticSessionTitleFanout: typeof claimAutomaticSessionTitleFanout;
@@ -83,6 +89,11 @@ export async function notifyParentOfChildIdle(
       workspaceId,
       childSessionId,
     );
+    const claudeAuthority = await getSessionParentClaudeProviderAccountAuthority(
+      svc.db,
+      workspaceId,
+      childSessionId,
+    );
     const outbox = await getOrCreateSessionSystemUpdateOutbox(svc.db, {
       accountId: child.accountId,
       workspaceId,
@@ -95,6 +106,9 @@ export async function notifyParentOfChildIdle(
       summary: childCompletionSummary(child, goal, "idle"),
       payload,
       lineage: {
+        ...(claudeAuthority.subjectId
+          ? { claudeAuthoritySubjectId: claudeAuthority.subjectId }
+          : {}),
         childSessionId: child.id,
         parentSessionId: child.parentSessionId,
         ...(xaiAuthority.subjectId ? { xaiAuthoritySubjectId: xaiAuthority.subjectId } : {}),
@@ -102,6 +116,7 @@ export async function notifyParentOfChildIdle(
       personalConnectionDelegations,
       mcpAccountBindings,
       xaiProviderAccountAuthoritySnapshot: xaiAuthority.snapshot,
+      claudeProviderAccountAuthoritySnapshot: claudeAuthority.snapshot,
     });
     if (outbox.status === "delivered") {
       return;
@@ -220,6 +235,7 @@ async function deliverParentSystemUpdateOutbox(
         personalConnectionDelegations: outbox.personalConnectionDelegations,
         mcpAccountBindings: outbox.mcpAccountBindings,
         xaiProviderAccountAuthoritySnapshot: outbox.xaiProviderAccountAuthoritySnapshot,
+        claudeProviderAccountAuthoritySnapshot: outbox.claudeProviderAccountAuthoritySnapshot,
       },
       async (tx) => {
         await markSessionSystemUpdateOutboxDeliveredInTransaction(tx, outbox);
@@ -374,6 +390,22 @@ export async function reconcilePendingSessionWorkflowWakes(
       failed: 0,
       pendingAdmissionBlockers: {},
     };
+  }
+  const repairChildren =
+    overrides.repairPendingChildTerminalResultWakes ?? repairPendingChildTerminalResultWakes;
+  const inventory = await repairChildren(
+    svc.db,
+    Math.min(100, limit),
+    childTerminalRepairCursors.get(svc.db) ?? null,
+  );
+  if (inventory.cursor) childTerminalRepairCursors.set(svc.db, inventory.cursor);
+  else childTerminalRepairCursors.delete(svc.db);
+  if (inventory.failed > 0) {
+    svc.observability.error("Pending child-result wake repair failed", {
+      examined: inventory.examined,
+      registered: inventory.registered,
+      failed: inventory.failed,
+    });
   }
   const repairs = await claimPendingSessionWorkflowWakesFn(svc.db, limit);
   let signaled = 0;

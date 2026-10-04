@@ -5,6 +5,7 @@
 import { formatWaitingSince } from "@/lib/format";
 import { sessionInputWait } from "./session-rail";
 import { sessionSiteOrigin, type SessionSiteOrigin } from "./session-site-origin";
+import type { SessionListTotals } from "@opengeni/sdk";
 import type { SessionStatus } from "@/types";
 import type { RailSession as Session } from "./session-list-entry";
 
@@ -205,7 +206,7 @@ export type RailAggregateStatus = {
   attentionSince?: string;
 };
 
-type RailStatusCounts = {
+export type RailStatusCounts = {
   total: number;
   sendFailed: number;
   attention: number;
@@ -217,6 +218,34 @@ type RailStatusCounts = {
   unread: number;
   activeWork: number;
 };
+
+/** Complete ordinary project counters; absent groups are authoritative zeroes. */
+export function sessionProjectTotals(
+  totals: SessionListTotals,
+  channelIds: readonly string[],
+): Map<string | null, RailStatusCounts> {
+  const known = new Set(channelIds);
+  const zero = (): RailStatusCounts => ({
+    total: 0,
+    sendFailed: 0,
+    attention: 0,
+    attentionSince: null,
+    failed: 0,
+    active: 0,
+    queued: 0,
+    unread: 0,
+    activeWork: 0,
+  });
+  const result = new Map<string | null, RailStatusCounts>([
+    ...channelIds.map((id) => [id, zero()] as const),
+    [null, zero()],
+  ]);
+  for (const group of totals.groups) {
+    const id = group.channelId && known.has(group.channelId) ? group.channelId : null;
+    addRailStatusCounts(result.get(id)!, { ...group, sendFailed: 0 });
+  }
+  return result;
+}
 
 function earliestIso(a: string | null | undefined, b: string | null | undefined): string | null {
   if (!a) return b ?? null;
@@ -358,6 +387,14 @@ export function summarizeRailNodes(
     addRailStatusCounts(counts, railStatusCounts(node, localDeliveryAttention));
   }
 
+  return summarizeRailStatusCounts(counts, now);
+}
+
+/** Shared presentation for complete server metadata and loaded node summaries. */
+export function summarizeRailStatusCounts(
+  counts: RailStatusCounts,
+  now: Date = new Date(),
+): RailAggregateStatus {
   if (counts.sendFailed > 0) {
     return {
       kind: "send_failed",

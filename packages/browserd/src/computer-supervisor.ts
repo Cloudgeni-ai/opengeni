@@ -276,7 +276,11 @@ export class ComputerSupervisor {
   /** Resolve the private loopback RFB endpoint for one exact isolated screen.
    * The endpoint is consumed only by BrowserControlServer's authenticated
    * WebSocket proxy and is never returned across the placement boundary. */
-  async rfbPort(reference: ComputerSessionReference, targetId: string): Promise<number> {
+  async rfbPort(
+    reference: ComputerSessionReference,
+    targetId: string,
+    scope?: { targetGeneration: string; inputAllowed: boolean },
+  ): Promise<number> {
     const runtime = this.requireActive(reference);
     if (runtime.environmentLease.rfbPort === null) {
       throw new InteractionControllerError(
@@ -290,6 +294,15 @@ export class ComputerSupervisor {
         "invalid_action",
         "RFB is available only for a complete screen target",
       );
+    }
+    if (scope && target.targetGeneration !== scope.targetGeneration) {
+      throw new InteractionControllerError("target_stale", "RFB screen generation is stale");
+    }
+    if (
+      scope?.inputAllowed &&
+      (!runtime.driver.capabilities.pointerInput || !runtime.driver.capabilities.keyboardInput)
+    ) {
+      throw new InteractionControllerError("permission_denied", "RFB native input is unavailable");
     }
     return runtime.environmentLease.rfbPort;
   }

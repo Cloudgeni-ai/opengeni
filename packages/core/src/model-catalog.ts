@@ -49,6 +49,7 @@ import {
   listWorkspaceOpenRouterCustomModels,
   listOrganizationModelProviderCustomModelsForWorkspace,
   lockActiveOrganizationModelProviderCustomModelForAdmission,
+  type OrganizationClaudeModelAdmissionAuthority,
   type Database,
 } from "@opengeni/db";
 
@@ -145,6 +146,7 @@ export async function lockActiveCustomModelForAdmission(
     accountId: string;
     workspaceId: string;
     reference: WorkspaceCustomModelReference;
+    claudeAuthority?: OrganizationClaudeModelAdmissionAuthority;
   },
 ): Promise<boolean> {
   if (input.reference.scope === "organization") {
@@ -154,6 +156,7 @@ export async function lockActiveCustomModelForAdmission(
         workspaceId: input.workspaceId,
         providerKind: input.reference.providerKind,
         upstreamModelId: input.reference.upstreamModelId,
+        ...(input.claudeAuthority ? { claudeAuthority: input.claudeAuthority } : {}),
       }),
     );
   }
@@ -587,7 +590,14 @@ function credentialReadinessFor(input: {
   const source = input.model.credentialSource;
   if (source.kind === "connected_subscription") {
     const active =
-      source.provider === "xai" ? input.xaiSubscriptionActive : input.codexSubscriptionActive;
+      source.provider === "xai"
+        ? input.xaiSubscriptionActive
+        : source.provider === "claude"
+          ? (input.model.providerId === claudeProviderId("claude_subscription", "workspace")
+              ? input.workspaceClaudeConnections
+              : input.claudeConnections
+            )?.claude_subscription?.active === true
+          : input.codexSubscriptionActive;
     return active
       ? { status: "ready", reason: null, basis: "connection", checkedAt: null }
       : {

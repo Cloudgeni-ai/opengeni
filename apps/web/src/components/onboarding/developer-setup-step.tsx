@@ -23,6 +23,7 @@ import {
   developerSetupKeyRequest,
   developerSetupModelContext,
 } from "@/lib/onboarding-use-case";
+import { clearPendingDeveloperSetup } from "@/lib/pending-developer-setup";
 
 /** Where onboarding sends the person when it finishes somewhere other than home. */
 export type OnboardingDestination = { workspaceId: string; sessionId: string };
@@ -40,7 +41,7 @@ type KeyState =
 /**
  * "Add AI agents to my product", after the organization and model steps. The
  * signed-in owner's click on that path is what creates the organization's
- * scoped Developer setup key, once, and shows it only here. From there the
+ * full-access setup key, once, and shows it only here. From there the
  * person either lets Opengeni implement the integration in a new "Opengeni
  * setup" workspace, or uses their own coding agent: copy the key into the
  * product's server-only env, then copy a prompt that names that variable.
@@ -113,6 +114,7 @@ export function DeveloperSetupStep({
     (via: "copied_prompt" | "skipped") => {
       if (opening) return;
       onboardingJourney().completed("developer_setup", via);
+      clearPendingDeveloperSetup();
       onComplete();
     },
     [onComplete, opening],
@@ -137,7 +139,7 @@ export function DeveloperSetupStep({
           .createVariableSet(workspaceId, {
             scope: "workspace",
             name: DEVELOPER_SETUP_VARIABLE_SET_NAME,
-            description: "The Developer setup API key from signup, for the setup chat's sandbox.",
+            description: "The full-access setup API key from signup, for the setup chat's sandbox.",
             variables: [{ name: DEVELOPER_SETUP_KEY_VARIABLE, value: token }],
           })
           .then(
@@ -156,6 +158,7 @@ export function DeveloperSetupStep({
         idempotencyKey: sessionRequestKey.current,
       });
       onboardingJourney().completed("developer_setup", "implement_with_opengeni");
+      clearPendingDeveloperSetup();
       onComplete({ workspaceId, sessionId: session.id });
     } catch (error) {
       toast.error("Couldn't open your setup chat", { description: userErrorText(error) });
@@ -177,7 +180,7 @@ export function DeveloperSetupStep({
       setPromptCopied(true);
     } else {
       toast.error("Couldn't copy the prompt", {
-        description: "Open Preview the prompt and copy it by hand.",
+        description: "Expand “Preview the prompt” below and copy it from there.",
       });
     }
   }
@@ -284,7 +287,7 @@ export function DeveloperSetupStep({
                   <code translate="no" className="font-mono text-fg">
                     {CODING_AGENT_KEY_VARIABLE}
                   </code>
-                  . Shown only here. It expires in 30 days and can't create other keys.
+                  . Shown only here. It has full access and expires in 30 days.
                 </p>
               </li>
               <li className="grid gap-2">

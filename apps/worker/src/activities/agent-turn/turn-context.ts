@@ -26,6 +26,7 @@ import type { TurnOutcome } from "../../observability-metrics";
 import type { ResumedTurnSandbox, TurnSandboxLeaseHolderId } from "../../sandbox-resume";
 import type { TurnEventPublisher } from "./model-usage";
 import type { TurnSandboxProvisioner } from "./sandbox-provision";
+import { InitialModelWireDispatchClock } from "./model-wire-dispatch";
 
 /** Stamps the claimed turn/attempt ids onto a phase's own outcome. */
 export type ClaimedResult = (
@@ -67,6 +68,11 @@ export type AttemptIdentityState = {
   triggerEventId: string | undefined;
   executionGeneration: number;
   providerRecoveryCount: number;
+  providerRecoveryObservation?:
+    | import("./provider-recovery-metrics").ProviderRecoveryObservation
+    | undefined;
+  modelMetricRoute?: { provider: string; model: string };
+  claudeAuthRecovery?: { credentialId: string; credentialVersion: number } | undefined;
   modelRequestStarted: boolean;
   redispatchesAtDispatch: number;
   // Held for same-turn recovery: an approval-decision rerun must re-enter
@@ -77,6 +83,7 @@ export type AttemptIdentityState = {
 export type BillingState = {
   isCodexTurn: boolean;
   isXaiTurn: boolean;
+  isClaudeTurn: boolean;
   isExternallyBilledTurn: boolean;
   chargesOpenGeniCredits: boolean;
   countsTowardTokenCap: boolean;
@@ -145,6 +152,7 @@ export type EventingState = {
   firstModelRequestPreparationStartedAt: number | null;
   firstModelRequestPreparationRecorded: boolean;
   firstModelRequestCheckpointAt: number | null;
+  initialModelWireDispatch: InitialModelWireDispatchClock;
   companyBrainContextContributions: readonly ModelContextContributionSummary[] | null;
   /** Skill ids in this turn's frozen, model-visible Skill index; telemetry only. */
   modelVisibleSkillIds: ReadonlySet<string> | null;
@@ -173,6 +181,11 @@ export type ProviderTurnState = {
   codexProductModelId?: string | null;
   /** Accepted Codex allocator policy captured with the first durable lease. */
   codexPolicySnapshot: CodexCredentialPolicySnapshotV1 | null;
+  effectiveClaudeCredentialId: string | null;
+  effectiveClaudeCredentialVersion: number | null;
+  claudeUpstreamModelId: string | null;
+  claudeRotationEnabled: boolean;
+  claudeAuthoritySnapshot: XaiProviderAccountAuthoritySnapshotV1 | null;
   effectiveXaiCredentialId: string | null;
   xaiRotationEnabled: boolean;
   xaiAuthoritySnapshot: XaiProviderAccountAuthoritySnapshotV1 | null;
@@ -231,6 +244,7 @@ export function createTurnContext(input: {
     billingState: {
       isCodexTurn: false,
       isXaiTurn: false,
+      isClaudeTurn: false,
       isExternallyBilledTurn: false,
       chargesOpenGeniCredits: true,
       countsTowardTokenCap: true,
@@ -286,6 +300,7 @@ export function createTurnContext(input: {
       firstModelRequestPreparationStartedAt: null,
       firstModelRequestPreparationRecorded: false,
       firstModelRequestCheckpointAt: null,
+      initialModelWireDispatch: new InitialModelWireDispatchClock(),
       companyBrainContextContributions: null,
       modelVisibleSkillIds: null,
     },
@@ -299,6 +314,11 @@ export function createTurnContext(input: {
       effectiveCodexCredentialVersion: null,
       codexCredentialFailoverLimit: 1,
       codexPolicySnapshot: null,
+      effectiveClaudeCredentialId: null,
+      effectiveClaudeCredentialVersion: null,
+      claudeUpstreamModelId: null,
+      claudeRotationEnabled: false,
+      claudeAuthoritySnapshot: null,
       effectiveXaiCredentialId: null,
       xaiRotationEnabled: false,
       xaiAuthoritySnapshot: null,

@@ -56,10 +56,13 @@ to the saved host return URL but cannot recover credential-exchange authority.
 Core `application/connect-authority.ts` shares
 native, service-key and external callback checks; `prepareFikenTokenInstall`
 shares verified Fiken token persistence between native routes and Connect.
-First-party Atlassian and Google Drive knowledge/publication callbacks retain
+First-party Google Drive knowledge/publication callbacks retain
 their account/resource proofs while committing credentials and completion in
 one transaction. The native entry points use `NativeConnectSetup`; source-sync
-destination controls remain explicit. Public OpenAPI/GraphQL source setup stores
+destination controls remain explicit. Native Atlassian setup and sync are retired;
+in-flight callbacks preserve their authority checks and exact navigation but
+settle failed without exchanging a grant. Hosted Atlassian MCP is unchanged.
+Public OpenAPI/GraphQL source setup stores
 an immutable source after preview, then re-resolves revision/hash and explicit
 selected operations through the existing installation validator. No-auth API
 sources do not invent credentials. Custom-header MCP setup uses the runtime's
@@ -79,11 +82,21 @@ membership/Personal-workspace anchors, but no native login or shared-workspace
 grant. Reuse cannot reactivate suspended or revoked membership.
 External-mode admission is resolved separately in `packages/core/src/access/`:
 only organization-key authentication can assert an external actor, and its
-workspace permissions intersect the live key ceiling with explicit membership.
+workspace permissions intersect the live key ceiling with membership.
 `OpenGeniClient.asUser` returns an isolated server-side client; it never changes
-a shared client's actor or grants membership. Explicit host onboarding lives in
+a shared client's actor. Explicit host onboarding lives in
 `packages/core/src/application/external-workspace-members.ts` and reauthorizes
-under the organization membership fence. External lifecycle administration
+under the organization membership fence. First-use membership
+(`provisionExternalMemberOnFirstUse`, request entry only, never a fresh
+re-check) creates a missing shared-workspace row with the conversation defaults
+through `ensureExternalWorkspaceMemberOnFirstUse` in
+`packages/db/src/external-membership-operations.ts`: same fence and live key
+authority (`members:manage` or legacy `workspace:admin`, every default
+permission, workspace in scope), the keyed-grant prepare/record functions
+(identity re-validated active under the fence, Personal workspaces refused,
+receipt plus key-attributed lifecycle event), insert-on-conflict-do-nothing,
+plain external mode only, never for `opengeni-sdk:user-isolation:*`
+workspaces or a requested permission outside the defaults. External lifecycle administration
 reuses native settlement commands; core private/Personal admission uses a
 dedicated verified-owning-user proof. Explicit linked-native admission uses the
 separate link proof; no external request is stamped as a managed-cookie login.

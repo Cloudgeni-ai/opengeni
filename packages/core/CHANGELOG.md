@@ -1,5 +1,184 @@
 # @opengeni/core
 
+## 1.1.0
+
+### Patch Changes
+
+- 5fd6c55: A session whose agent starts from `capabilities: "none"` no longer receives the
+  bundled Opengeni guides (`opengeni-help`, `opengeni-client`, ...) when
+  `bundledSkillIds` is omitted; an explicit list still opts in exactly, and
+  `"all"` or legacy configurations keep the bundled defaults. Session create
+  freezes the empty selection so the record, replay, and children agree.
+
+  `command_read` and `command_wait` are now owned by attached compute
+  (`FIRST_PARTY_MCP_TOOL_CAPABILITIES` reports `"sandbox"`) and are attached, and
+  listed in `effectiveTools`, only when a managed sandbox or Connected Machine is
+  attached to the turn. `wait_for_input` and `set_session_title` are unchanged.
+  New exports: `AgentFirstPartyToolOwner`, `isDerivedAgentToolOwner`,
+  `AGENT_SANDBOX_MECHANIC_TOOL_NAMES`, `bundledSkillSelectionForAgentConfig`, and
+  the `sandboxAttached` tool-environment flag.
+
+- c600e3a: Use the full scoped model catalog for goal continuation and validate goal Resume before changing state. Preserve specific admission pause reasons and show the actionable rationale in the existing goal controls.
+- 4cd01cd: Every organization is now session-tenancy activated (rolling migration 0611): private ("Only me") sessions, visibility changes, forks, and personal-resource grants no longer require a per-organization activation receipt, and the owner/admin Only-me setting defaults to enabled when an organization has never changed it (owners and admins can still turn it off). `OPENGENI_ORGANIZATION_TENANCY_CANONICAL_ACTIVATION_ENABLED` and `Settings.organizationTenancyCanonicalActivationEnabled` are retired (the variable is accepted and ignored with a warning), the runtime posture no longer has an activation startup interlock, and the `db:activate-session-tenancy` operator command is removed.
+- Updated dependencies [5fd6c55]
+- Updated dependencies [c600e3a]
+- Updated dependencies [f895d19]
+- Updated dependencies [411b3b5]
+- Updated dependencies [208dec1]
+- Updated dependencies [4cd01cd]
+  - @opengeni/contracts@1.1.0
+  - @opengeni/runtime@1.1.0
+  - @opengeni/db@1.1.0
+  - @opengeni/config@1.1.0
+  - @opengeni/codex@1.1.0
+  - @opengeni/documents@1.1.0
+  - @opengeni/events@1.1.0
+  - @opengeni/observability@1.1.0
+  - @opengeni/storage@1.1.0
+  - @opengeni/capabilities@1.1.0
+  - @opengeni/network@1.1.0
+
+## 1.0.2
+
+### Patch Changes
+
+- 4476ca7: Share connected-account identity labels across the web UI and agent MCP bindings. Save Slack username and workspace name from the existing verified authentication response without requesting additional scopes.
+
+  Allow settings to include inactive accounts in the owning user's organization-wide account inventory, while keeping execution account lists active-only by default.
+
+- cbe4357: Simple embedding path. An organization API key acting as a user (`asUser`) on a
+  shared workspace of its own organization now adds that user's missing membership
+  once, with conversation permissions, when the key holds `members:manage` plus
+  those permissions; existing memberships are never changed. The `@opengeni/sdk/chat`
+  `OpenGeni` facade derives `organizationId` from the key, maps `{ user, tenant }`,
+  `{ user }` (one workspace per user), or `{ user, workspaceId }` to a workspace
+  created on first use, and `og.workspaceId({ tenant } | { user } | { workspaceId })`
+  translates your ids. The session proxy reports its resolved workspace in client
+  config, so `<OpenGeniChat baseUrl="/api/opengeni" />` and
+  `<SessionConversation baseUrl="/api/opengeni" sessionId={id} />` need no provider
+  or workspace id. Explicit membership APIs and provider-based usage are unchanged.
+- Updated dependencies [ee6b145]
+- Updated dependencies [6fccfa0]
+- Updated dependencies [4476ca7]
+- Updated dependencies [f9e33b5]
+- Updated dependencies [e16aa17]
+- Updated dependencies [cbe4357]
+- Updated dependencies [9925fe2]
+  - @opengeni/db@1.0.1
+  - @opengeni/runtime@1.0.1
+  - @opengeni/contracts@1.0.1
+  - @opengeni/observability@1.0.1
+  - @opengeni/documents@1.0.1
+  - @opengeni/events@1.0.1
+  - @opengeni/codex@1.0.1
+  - @opengeni/config@1.0.1
+  - @opengeni/storage@1.0.1
+  - @opengeni/capabilities@1.0.1
+  - @opengeni/network@1.0.1
+
+## 1.0.0
+
+### Major Changes
+
+- Reset package versioning: every published `@opengeni/*` package now releases together at one shared version, starting at 1.0.0. Install all `@opengeni` packages at the same version. Earlier versions are retired.
+
+## 5.3.2
+
+### Patch Changes
+
+- Updated dependencies [6fee02a]
+  - @opengeni/db@6.7.2
+  - @opengeni/documents@0.8.44
+  - @opengeni/events@0.4.42
+
+## 5.3.1
+
+### Patch Changes
+
+- 627ff68: Preserve exact account choices and newer edits when updating schedules. Reusable schedules inherit their chat's current Variable Sets, and changing to fresh chats permits new creation settings. Keep scheduler synchronization ordered against edits and deletion, and expose frozen account state in the SDK.
+  - @opengeni/runtime@4.8.1
+  - @opengeni/db@6.7.1
+  - @opengeni/documents@0.8.43
+  - @opengeni/events@0.4.41
+
+## 5.3.0
+
+### Minor Changes
+
+- 2f09c54: Add unified workspace/organization usage and visible-call readers over recorded
+  facts without changing debit or access semantics.
+  Distinguish deleted retained usage from private amounts and expose the prior
+  cache denominator and historical telemetry coverage.
+  Bound successful responses to a 60-second, authorization/visibility-fenced server
+  cache and return an actionable friendly error for statement timeouts.
+
+### Patch Changes
+
+- aa41b15: Use hosted Atlassian MCP for Jira and Confluence agent access. Retire native API tools and Knowledge sync admission while preserving historical wire types, encrypted grants, imported Documents and cleanup paths. Existing native schedules no longer fetch provider content; pending authorization attempts settle without exchanging a native grant. Google Drive integration is unchanged.
+- 8ce490f: Support multiple Claude subscription accounts with shared workspace, organization and owning-user account controls, verified browser sign-in profiles, usage windows, exact credential leases and quota-aware rotation. Preserve accepted work during capacity waits and recovery. Upgrade existing encrypted subscription credentials through the documented maintenance migration before starting matching runtime binaries.
+- 1b482bf: Cut per-request CPU of the first-party MCP route. Within one request, the agent-attempt context, the route's session check, and a tool's entry check share identical caller-session and attempt reads (keyed by database handle and session RLS actor; re-checks after a handler's first await read fresh). Static tool inputs are built once per process, and each tool's described-input check runs once per process instead of converting every schema to JSON Schema on every request.
+- a651f55: Complete the reviewed Gmail tool surface under the existing OAuth scopes: exact attachment and original message downloads, individual message search, draft updates/deletion, label lifecycle, atomic and batch organization, trash/restore, imports, history, optional operator-configured watches and settings reads. Bind draft sends and workspace-file attachment inputs to reviewed hashes, preserve MIME metadata and report bounded body projections explicitly.
+- aa41b15: Connect personal Gmail accounts through Google's regular OAuth and Gmail API without depending on the hosted MCP preview. Require the configured Google Web client, the reviewed Gmail scopes, a fresh offline grant and successful mailbox verification before saving a connection. Failed reconnects preserve the previous account, and historical workspace-owned Gmail grants remain available for cleanup.
+- 3395acc: Automatically reuse the existing send credential hook for approval/human-input responses, with atomic write-only MCP header updates and no integration changes.
+- 18216d2: Add an unused private worker-host Modal proof transport with explicit deployment-root selection, separate HMAC domains, strict exact-body and acquisition correlation, and short transport expiry. It does not widen ordinary delegated access, issue custody grants, call providers or activate recovery.
+- 2a47520: Reject blank or oversized scheduled-message edits and preserve exact text when moving a schedule. Resolve reusable schedules against their current chat settings and combined message attachments. Show inherited settings accurately and preserve unrelated model, tool, and eligible account choices in the schedule editor.
+- 6cdc0aa: Agent configuration is always on. The `OPENGENI_AGENT_CONFIG_ADMISSION_ENABLED` and `OPENGENI_AGENT_CONFIG_DEFAULT_FOR_NEW_SESSIONS` settings are removed: `agent` is admitted on every surface, and a top-level session that omits it resolves to the workspace default or `{ capabilities: "all" }`. The client config still reports `agentConfig.enabled` and `defaultForNewSessions` (deprecated, always `true`).
+- 0fba21e: Schedule messages in existing chats without duplicating execution settings. Default conversational scheduling to the calling chat, add lossless message edits and guarded retargeting, and preserve captured account authority. Improve destination controls, exact prompt retrieval and filtered history paging; remove obsolete deployment guidance.
+- 8323e90: Run Slack account MCP tools through a reviewed Web API bridge while preserving OAuth, exact account authority, and tool approvals. Add scope-aware discovery and shared app/workspace request quotas for unlisted pilots. Preserve bot reaction and message tasks under throttled optional context, and remove unavailable generic Real-time Search.
+
+  Migration 0597 requires stopped application processes and matching role provisioning before starting this release.
+
+- Updated dependencies [a0f5728]
+- Updated dependencies [aa41b15]
+- Updated dependencies [981ba72]
+- Updated dependencies [3be5798]
+- Updated dependencies [af57cf9]
+- Updated dependencies [6ca71f6]
+- Updated dependencies [8ce490f]
+- Updated dependencies [692a1f5]
+- Updated dependencies [fe2aa8c]
+- Updated dependencies [b710f5e]
+- Updated dependencies [a651f55]
+- Updated dependencies [e103581]
+- Updated dependencies [e0d4bd4]
+- Updated dependencies [c7c09fd]
+- Updated dependencies [2f09c54]
+- Updated dependencies [303ed6c]
+- Updated dependencies [9ca494c]
+- Updated dependencies [3cc26b5]
+- Updated dependencies [3395acc]
+- Updated dependencies [f38dac6]
+- Updated dependencies [18216d2]
+- Updated dependencies [5b809eb]
+- Updated dependencies [81a5d9d]
+- Updated dependencies [aa41b15]
+- Updated dependencies [7705d65]
+- Updated dependencies [746464c]
+- Updated dependencies [ac20181]
+- Updated dependencies [fa0a9ef]
+- Updated dependencies [53b2c83]
+- Updated dependencies [6fc73e3]
+- Updated dependencies [6cdc0aa]
+- Updated dependencies [b32b5f6]
+- Updated dependencies [0fba21e]
+- Updated dependencies [97d4f07]
+- Updated dependencies [14e95e9]
+- Updated dependencies [8323e90]
+- Updated dependencies [8f8629d]
+- Updated dependencies [f23caa9]
+- Updated dependencies [44d5ee5]
+  - @opengeni/db@6.7.0
+  - @opengeni/contracts@5.8.0
+  - @opengeni/config@3.4.0
+  - @opengeni/runtime@4.8.0
+  - @opengeni/network@0.3.2
+  - @opengeni/observability@0.8.39
+  - @opengeni/capabilities@0.3.7
+  - @opengeni/documents@0.8.42
+  - @opengeni/events@0.4.40
+  - @opengeni/codex@0.2.33
+  - @opengeni/storage@0.2.140
+
 ## 5.2.0
 
 ### Minor Changes

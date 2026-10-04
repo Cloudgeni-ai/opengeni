@@ -9,12 +9,35 @@ import { useAppContext } from "@/context";
 import { isPermissionDenied, userErrorText } from "@/lib/api-error";
 import { Button } from "@/components/ui/button";
 import { Notice } from "@/components/ui/notice";
+import type { ConnectionHealth } from "@/lib/capabilities";
+import type { CapabilityCatalogItem } from "@/types";
 
 const groups = [
   ["read", "Read-only tools"],
   ["write", "Tools that make changes"],
   ["other", "Other tools"],
 ] as const;
+
+/** A workspace-enabled connector need not have an account for this viewer. */
+export function hasConnectorToolPermissionTarget(
+  item: CapabilityCatalogItem,
+  health: ConnectionHealth,
+): boolean {
+  if (
+    !item.enabled ||
+    item.kind !== "mcp" ||
+    item.source === "built_in" ||
+    item.surfaceType === "codex_apps" ||
+    item.connectionRef?.authoritySource === "host"
+  )
+    return false;
+  if (item.connectionRef || item.authKind === "oauth2" || item.authKind === "api_key") {
+    return (
+      (health.state === "connected" || health.state === "attention") && health.connection !== null
+    );
+  }
+  return true;
+}
 
 export function PermissionSelect({
   label,

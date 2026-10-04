@@ -11,6 +11,7 @@ import {
 } from "@openai/agents";
 import { claudeNativeModelProfile, type ResolvedModelProvider } from "@opengeni/config";
 import { withClaudeModelRequest } from "./claude-subscription-usage";
+import { createModelImageSizer } from "./model-image-sizing";
 
 type Json = Record<string, any>;
 type Message = { role: "user" | "assistant" | "system"; content: Json[] };
@@ -612,15 +613,52 @@ export class AnthropicMessagesModel implements Model {
   private readonly fallbackSessionId = randomUUID();
   private readonly promptId = randomUUID();
   private previousRequestId: string | undefined;
+  // The same bound applies from the first image onward. A growing conversation
+  // must not resize its old prefix when it crosses the many-image threshold.
+  private readonly sizeImage = createModelImageSizer(2000);
   constructor(
     readonly provider: ResolvedModelProvider,
     readonly model: string,
     private readonly fetch: typeof globalThis.fetch = globalThis.fetch,
   ) {}
 
+  /** Project inline images only; never fetch arbitrary URLs or edit stored history. */
+  private async sizeImageBlocks(blocks: Json[], signal?: AbortSignal): Promise<Json[]> {
+    const result: Json[] = [];
+    for (const block of blocks) {
+      signal?.throwIfAborted();
+      if (block.type === "tool_result" && Array.isArray(block.content)) {
+        result.push({ ...block, content: await this.sizeImageBlocks(block.content, signal) });
+      } else if (block.type === "image" && block.source?.type === "base64") {
+        const image = await this.sizeImage(block.source.data, block.source.media_type);
+        if (image.data === block.source.data && image.mediaType === block.source.media_type) {
+          result.push(block);
+          continue;
+        }
+        const { cache_control: cache, ...unmarked } = block;
+        result.push({
+          ...unmarked,
+          source: { type: "base64", media_type: image.mediaType, data: image.data },
+        });
+        // Preserve the mapping for tools whose coordinates refer to the original
+        // frame. This note is deterministic and belongs inside the same cache prefix.
+        result.push({
+          type: "text",
+          text: `Image resized for transport: oriented original ${image.originalWidth}x${image.originalHeight}; encoded image ${image.width}x${image.height}. For pixel coordinates, account for any further provider resizing and use the coordinate system required by the tool.`,
+          ...(cache ? { cache_control: cache } : {}),
+        });
+      } else result.push(block);
+    }
+    return result;
+  }
+
   private async send(request: ModelRequest, stream: boolean): Promise<Response> {
     request.signal?.throwIfAborted();
     const body = buildAnthropicRequest(request, this.model, this.provider, stream);
+    for (const message of body.messages) {
+      message.content = await this.sizeImageBlocks(message.content, request.signal);
+    }
+    request.signal?.throwIfAborted();
     const base = this.provider.baseUrl ?? "https://api.anthropic.com/v1";
     const url = new URL(`${base.replace(/\/$/, "")}/messages`);
     for (const [key, value] of Object.entries(this.provider.defaultQuery ?? {}))

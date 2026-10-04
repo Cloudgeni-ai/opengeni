@@ -1,4 +1,5 @@
 import { expect, test } from "bun:test";
+import type { TurnCredentialLeaseDeps } from "../src/activities/agent-turn/credential-leases";
 import {
   SubscriptionTurnLease,
   type SubscriptionLeaseDeps,
@@ -154,3 +155,56 @@ test.each(["released", "lost", "different_turn"] as const)(
     expect(f.renewed).toEqual([]);
   },
 );
+
+test("Claude participates in the shared serving lease with its exact scoped holder fence", async () => {
+  const { spyOn } = await import("bun:test");
+  const db = await import("@opengeni/db");
+  const { createTurnCredentialLeases } =
+    await import("../src/activities/agent-turn/credential-leases");
+  const heartbeat = spyOn(db, "heartbeatClaudeCredentialLeaseUntil").mockResolvedValue(
+    new Date(Date.now() + 300_000),
+  );
+  const xai = spyOn(db, "heartbeatXaiCredentialLeaseUntil");
+  try {
+    const dependencies = {
+      db: {} as TurnCredentialLeaseDeps["db"],
+      observability: {
+        incrementCounter() {},
+        warn() {},
+      } as unknown as TurnCredentialLeaseDeps["observability"],
+      accountId: crypto.randomUUID(),
+      workspaceId: crypto.randomUUID(),
+      codexWorkspaceKey: "fixture",
+      getTurnId: () => "fixture-turn",
+    };
+    const leases = createTurnCredentialLeases(dependencies);
+    Object.assign(leases.claude, {
+      held: true,
+      subjectId: "user:fixture",
+      holderId: "fixture-holder",
+      generation: 3,
+      confirmedUntilMs: performance.now() + 10_000,
+    });
+    await leases.renewServing("model_usage");
+    expect(heartbeat).toHaveBeenCalledTimes(1);
+    expect(heartbeat.mock.calls[0]?.[1]).toEqual({
+      workspaceId: dependencies.workspaceId,
+      subjectId: "user:fixture",
+      turnId: "fixture-turn",
+      holderId: "fixture-holder",
+      generation: 3,
+      leaseTtlMs: db.CLAUDE_CREDENTIAL_LEASE_TTL_MS,
+    });
+    expect(xai).not.toHaveBeenCalled();
+    expect(leases.servingLost()).toBe(false);
+    heartbeat.mockResolvedValue(null);
+    await leases.renewServing("runtime_event");
+    expect(leases.servingLost()).toBe(true);
+    expect(() => leases.claude.assertUsable()).toThrow(
+      "Claude credential lease is not usable for provider dispatch",
+    );
+  } finally {
+    heartbeat.mockRestore();
+    xai.mockRestore();
+  }
+});

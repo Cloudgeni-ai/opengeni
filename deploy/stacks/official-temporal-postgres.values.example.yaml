@@ -83,15 +83,41 @@ server:
     history.eventsCacheTTL:
       - value: 10m
         constraints: {}
+  frontend:
+    resources:
+      requests:
+        cpu: 200m
+        memory: 256Mi
+      limits:
+        cpu: "1"
+        memory: 512Mi
   history:
     resources:
       requests:
+        cpu: 250m
         memory: 768Mi
       limits:
+        cpu: "1"
         memory: 1280Mi
     additionalEnv:
       - name: GOMEMLIMIT
         value: 768MiB
+  matching:
+    resources:
+      requests:
+        cpu: 100m
+        memory: 256Mi
+      limits:
+        cpu: 500m
+        memory: 512Mi
+  worker:
+    resources:
+      requests:
+        cpu: 100m
+        memory: 128Mi
+      limits:
+        cpu: 500m
+        memory: 512Mi
   metrics:
     annotations:
       enabled: true

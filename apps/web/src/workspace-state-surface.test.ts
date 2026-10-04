@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test";
 
-import { parseKnowledgeSearch } from "@/lib/knowledge-route";
+import { documentsRedirectSearch, parseKnowledgeSearch } from "@/lib/knowledge-route";
 
 async function source(path: string): Promise<string> {
   return Bun.file(`${import.meta.dir}/${path}`).text();
@@ -36,6 +36,29 @@ describe("Knowledge surface", () => {
     expect(parseKnowledgeSearch({ revision: "r1" })).toEqual({});
     expect(parseKnowledgeSearch({ entry: "../../etc" })).toEqual({});
     expect(parseKnowledgeSearch({ review: true })).toEqual({ review: true });
+    expect(parseKnowledgeSearch({ scope: "organization" })).toEqual({ scope: "organization" });
+    expect(parseKnowledgeSearch({ scope: "everyone" })).toEqual({});
+  });
+
+  test("an old Documents link keeps its authority filter", async () => {
+    // Organization identity > Organization documents and old bookmarks.
+    expect(documentsRedirectSearch({ authority: "organization" })).toEqual({
+      scope: "organization",
+    });
+    expect(documentsRedirectSearch({ authority: "personal" })).toEqual({ scope: "personal" });
+    expect(documentsRedirectSearch({})).toEqual({ view: "files" });
+    expect(documentsRedirectSearch({ authority: "elsewhere" })).toEqual({ view: "files" });
+    expect(
+      documentsRedirectSearch({
+        memory: "8f2c1b9e-0d4a-4c1e-9b7a-1f2e3d4c5b6a",
+        authority: "organization",
+      }),
+    ).toEqual({ entry: "8f2c1b9e-0d4a-4c1e-9b7a-1f2e3d4c5b6a" });
+    const app = await source("App.tsx");
+    expect(app).toContain("search={documentsRedirectSearch({ memory, authority })}");
+    // The Knowledge page applies the scope to the Library filter.
+    const page = await source("components/knowledge/knowledge-page.tsx");
+    expect(page).toContain("setLibrary((current) => ({ ...current, scope: scopeLink }))");
   });
 
   test("the page never shows the retired words", async () => {

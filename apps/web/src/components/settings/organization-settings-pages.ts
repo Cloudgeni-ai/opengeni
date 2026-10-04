@@ -1,5 +1,6 @@
 import {
   BlocksIcon,
+  ChartColumnIcon,
   CodeIcon,
   CreditCardIcon,
   FingerprintIcon,
@@ -32,7 +33,8 @@ export const ORGANIZATION_SETTINGS_ITEMS: readonly OrganizationSettingsItem[] = 
   { id: "identity", label: "Organization identity", icon: FingerprintIcon },
   { id: "models", label: "Models", icon: SparklesIcon },
   { id: "integrations", label: "Integrations", icon: BlocksIcon },
-  { id: "billing", label: "Billing & usage", icon: CreditCardIcon },
+  { id: "insights", label: "Insights", icon: ChartColumnIcon },
+  { id: "billing", label: "Billing", icon: CreditCardIcon },
   { id: "developer", label: "Developer", icon: CodeIcon },
   { id: "security", label: "Security & data", icon: ShieldCheckIcon },
 ];
@@ -43,7 +45,7 @@ export const ORGANIZATION_SETTINGS_ITEMS: readonly OrganizationSettingsItem[] = 
  */
 export const ORGANIZATION_SETTINGS_GROUPS: readonly (readonly OrganizationAdminSection[])[] = [
   ["general", "people", "workspaces", "identity"],
-  ["models", "integrations", "billing", "developer", "security"],
+  ["models", "integrations", "insights", "billing", "developer", "security"],
 ];
 
 export function organizationSettingsLabel(section: OrganizationAdminSection): string {
@@ -70,8 +72,10 @@ export function organizationSettingsDescription(
       return undefined;
     case "identity":
       return "Who the organization is and what it does, for every agent.";
+    case "insights":
+      return `Spend, tokens and model calls across ${organizationName}.`;
     case "billing":
-      return "Credits, plan and usage by workspace.";
+      return "Credits, payments and workspace budgets.";
     case "developer":
       return "API keys, webhooks and a credential provider for products built on Opengeni.";
     case "security":

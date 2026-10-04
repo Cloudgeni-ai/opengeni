@@ -274,6 +274,9 @@ const pinnedRequestFetch: FetchLike = async (input, init) => {
   if (init?.headers) {
     new Headers(init.headers).forEach((value, name) => headers.set(name, value));
   }
+  // The low-level request adapter supplies no Fetch default user agent. Some
+  // providers reject otherwise valid requests without a client identity.
+  if (!headers.has("user-agent")) headers.set("user-agent", "OpenGeni");
   // Undici request() deliberately does not auto-decompress. Asking providers
   // for identity encoding keeps the returned web Response body truthful.
   if (!headers.has("accept-encoding")) headers.set("accept-encoding", "identity");

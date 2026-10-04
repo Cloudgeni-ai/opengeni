@@ -1,7 +1,4 @@
-import {
-  OpenGeniSlackBotInstallStart,
-  OPENGENI_SLACK_BOT_REQUESTED_SCOPES,
-} from "@opengeni/contracts";
+import { OpenGeniSlackBotInstallStart, openGeniSlackBotRequestedScopes } from "@opengeni/contracts";
 import { ExternalActorContinuation } from "@opengeni/contracts/external-identities";
 import {
   isOpenGeniSlackBotConnection,
@@ -23,7 +20,7 @@ export function requireOpenGeniSlackOAuthSettings(settings: ApiRouteDeps["settin
   if (!clientId || !clientSecret || !settings.slackSigningSecret?.trim())
     throw new HTTPException(503, {
       message:
-        "OpenGeni Slack bot installation requires OPENGENI_SLACK_CLIENT_ID, OPENGENI_SLACK_CLIENT_SECRET, and OPENGENI_SLACK_SIGNING_SECRET",
+        "Opengeni Slack bot installation requires OPENGENI_SLACK_CLIENT_ID, OPENGENI_SLACK_CLIENT_SECRET, and OPENGENI_SLACK_SIGNING_SECRET",
     });
   return { clientId, clientSecret };
 }
@@ -51,7 +48,7 @@ export async function startSlackBotInstall(
     throw new HTTPException(404, { message: "connection not found" });
   if (existing && !isOpenGeniSlackBotConnection(existing))
     throw new HTTPException(422, {
-      message: "connectionId is not an OpenGeni Slack bot connection",
+      message: "connectionId is not an Opengeni Slack bot connection",
     });
   const redirectUri = `${integrationBaseUrl(deps.settings.publicBaseUrl, input.requestUrl)}/v1/integrations/slack/callback`;
   const state = createSignedState(requireIntegrationsStateSecret(deps.settings), {
@@ -73,7 +70,10 @@ export async function startSlackBotInstall(
   });
   const url = new URL("https://slack.com/oauth/v2/authorize");
   url.searchParams.set("client_id", slack.clientId);
-  url.searchParams.set("scope", OPENGENI_SLACK_BOT_REQUESTED_SCOPES.join(","));
+  url.searchParams.set(
+    "scope",
+    openGeniSlackBotRequestedScopes(deps.settings.slackAccessMode).join(","),
+  );
   url.searchParams.set("redirect_uri", redirectUri);
   url.searchParams.set("state", state);
   return OpenGeniSlackBotInstallStart.parse({

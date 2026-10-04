@@ -13,6 +13,8 @@ import {
   OPENGENI_API_CONTRACT_REVISION,
   OPENROUTER_CREDENTIAL_OPERATION_DIGEST_METADATA_KEY,
   OPENROUTER_CREDENTIAL_OPERATION_ID_METADATA_KEY,
+  OPENGENI_SLACK_REST_USER_SCOPES,
+  ToolGatewayCatalog,
   VERCEL_AI_GATEWAY_CREDENTIAL_OPERATION_DIGEST_METADATA_KEY,
   VERCEL_AI_GATEWAY_CREDENTIAL_OPERATION_ID_METADATA_KEY,
   signDelegatedAccessToken,
@@ -550,6 +552,39 @@ describe("connections routes", () => {
         ).toBe(404);
       }
     }
+  });
+
+  test("account settings inventory includes inactive shared accounts only when explicitly requested", async () => {
+    if (!available) throw new Error("Account inventory proof requires the PostgreSQL test fixture");
+    const workspace = await freshWorkspace();
+    const connection = await createConnection(client.db, {
+      ...workspace,
+      subjectId: null,
+      providerDomain: "mcp.example.test",
+      kind: "api_key",
+      status: "needs_reauth",
+      credentialEncrypted: "encrypted-fixture",
+    });
+    const headers = { authorization: await bearer(workspace, "subject-a", ["connections:read"]) };
+    const api = app();
+    const path = `/v1/workspaces/${workspace.workspaceId}/connections/accounts`;
+    const active = await api.request(path, { headers });
+    expect(active.status).toBe(200);
+    expect((await active.json()).connections).toEqual([]);
+    const all = await api.request(`${path}?includeInactive=true`, { headers });
+    expect(all.status).toBe(200);
+    const body = await all.json();
+    expect(body.connections.map((row: { id: string }) => row.id)).toEqual([connection.id]);
+    expect(body.connections[0].status).toBe("needs_reauth");
+    expect(body.connections[0].credentialEncrypted).toBeUndefined();
+    expect((await api.request(`${path}?includeInactive=invalid`, { headers })).status).toBe(400);
+    expect(
+      (
+        await api.request(`${path}?includeInactive=true`, {
+          headers: { authorization: await bearer(workspace, "subject-a", ["sessions:read"]) },
+        })
+      ).status,
+    ).toBe(403);
   });
 
   test("manual connection ownership defaults to workspace and personal binds only the caller", async () => {
@@ -1912,13 +1947,23 @@ describe("connections routes", () => {
       try {
         const response = await api.request(path, { headers });
         expect(response.status).toBe(200);
-        const catalog = await response.json();
-        expect(JSON.stringify(catalog)).toContain("native-fixture");
+        const catalog = ToolGatewayCatalog.parse(await response.json());
+        expect(catalog).toMatchObject(workspace);
+        const searchEntries = catalog.entries.filter(
+          (entry) => entry.source === "mcp" && entry.identity.toolName === "search_documents",
+        );
+        expect(searchEntries).toHaveLength(1);
+        const searchEntry = searchEntries[0];
+        if (!searchEntry) throw new Error("Native connection search tool was not advertised");
+        expect(searchEntry.identity).toEqual({
+          serverId: mcpAccountRouteId("native-fixture", connection.id),
+          toolName: "search_documents",
+        });
         expect(mcp.requests.some((request) => request.jsonRpcMethod === "tools/list")).toBe(true);
         const call = {
           operationId: randomUUID(),
           catalogDigest: catalog.digest,
-          identity: { serverId: "native-fixture", toolName: "search_documents" },
+          identity: searchEntry.identity,
           arguments: { query: "embedding fixture" },
         };
         const post = (route: string, body: unknown) =>
@@ -3880,7 +3925,8 @@ describe("connections routes", () => {
         const body = (await response.json()) as { state: string; authorizationUrl: string };
         const authUrl = new URL(body.authorizationUrl);
         expect(authUrl.searchParams.get("client_id")).toBe("slack-client-id");
-        expect(authUrl.searchParams.get("scope")).toBe("search:read.public chat:write");
+        expect(authUrl.searchParams.get("scope")).toBe(OPENGENI_SLACK_REST_USER_SCOPES.join(" "));
+        expect(authUrl.searchParams.get("scope")).not.toContain("search:");
         const state = await readMcpOAuthState(body.state);
         expect(state?.providerDomain).toBe("slack.com");
         expect(state?.ownership).toBe(ownership);

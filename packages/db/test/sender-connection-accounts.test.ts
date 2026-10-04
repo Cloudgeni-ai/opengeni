@@ -562,6 +562,8 @@ test("owner inventory works without private conversation activation and isolates
       causalHumanSubjectId: alice,
       causalHumanAuthority: revisionAuthority,
       xaiProviderAccountAuthoritySnapshot: { version: 1, scope: "workspace" },
+      claudeProviderAccountAuthoritySnapshot: { version: 1 as const, scope: "workspace" as const },
+      claudeAuthoritySubjectId: null,
       xaiAuthoritySubjectId: null,
       connectionAuthoritySubjectId: alice,
       triggerInitiator: { kind: "service", subjectId: "scheduler" },
@@ -647,6 +649,10 @@ test("owner inventory works without private conversation activation and isolates
         },
         personalConnectionDelegations: [selection],
         xaiProviderAccountAuthoritySnapshot: { version: 1, scope: "workspace" },
+        claudeProviderAccountAuthoritySnapshot: {
+          version: 1 as const,
+          scope: "workspace" as const,
+        },
         scheduledTaskRunId: run.id,
       },
       async (tx, eventId) => {

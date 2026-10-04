@@ -670,9 +670,28 @@ const effectiveBudgets = {
     // 2,604,402 raw / 735,237 gzip (merged main 8f191fed7 measures 2,602,600
     // raw on the same machine). Keep the established 1.5 KiB allowance.
     wholeKibEnvelope(2_604_402, 1.5 * kib),
+    // The Insights redesign (#3264) no longer imports the old chart, count-up
+    // and select primitives; entry-aware chunk merging regroups the modules
+    // Insights shared with the session route, and none of its code joins this
+    // graph. Linux/x64 CI on main 3194ab836 measures 2,611,406 raw / 737,356
+    // gzip (macOS/arm64: 2,611,364 / 737,320; parent 692a1f554: 2,604,460).
+    // Keep the established 1.5 KiB allowance; every other cap stays fixed.
+    wholeKibEnvelope(2_611_406, 1.5 * kib),
+    // Embedded-chat defaults: the shared composer's Stop control and the
+    // human-input yes/no decision buttons join this graph (theme resolution
+    // stays in the embed roots, outside it). macOS/arm64 Bun 1.4 measures
+    // 2,614,314 raw / 737,561 gzip on main c7c717790 (+2,150 raw / +466 gzip).
+    // Keep the established 1.5 KiB allowance; every other cap stays fixed.
+    wholeKibEnvelope(2_614_314, 1.5 * kib),
+    // Launch-window merges (history controls, model names, approval copy) add
+    // ~3 KiB to this graph; Linux/x64 CI on main 69b99b61e measures 2,617,458
+    // raw. Keep the established 1.5 KiB allowance; every other cap stays fixed.
+    wholeKibEnvelope(2_617_458, 1.5 * kib),
   ),
   directSessionGzip: Math.max(
     budgets.directSessionGzip,
+    // The same Insights chunk regrouping measures 737,356 gzip bytes.
+    wholeKibEnvelope(737_356, 1.5 * kib),
     // The same onboarding provider-list graph measures 735,237 gzip bytes.
     wholeKibEnvelope(735_237, 1.5 * kib),
     // The same merged graph measures 733,267 gzip bytes. Preserve the

@@ -158,12 +158,22 @@ async function resolveFromRegistry(minors: number): Promise<string[]> {
   if (!response.ok) fail(`npm registry returned ${response.status} for ${PACKAGE}`);
   const body = (await response.json()) as {
     "dist-tags"?: Record<string, string>;
-    versions?: Record<string, unknown>;
+    versions?: Record<string, { deprecated?: unknown } | undefined>;
   };
   const latest = body["dist-tags"]?.latest;
   const latestMatch = latest ? SEMVER.exec(latest) : null;
   if (!latestMatch) fail(`npm dist-tag latest is not a stable version: ${String(latest)}`);
-  const stable = Object.keys(body.versions ?? {}).filter((version) => SEMVER.test(version));
+  // Retired (deprecated) versions and anything newer than latest are not the
+  // supported line: after the 1.0.0 lockstep reset, the old per-package 1.0.1
+  // would otherwise be picked as "the latest 1.0.x".
+  const stable = Object.entries(body.versions ?? {})
+    .filter(
+      ([version, manifest]) =>
+        SEMVER.test(version) &&
+        !manifest?.deprecated &&
+        compareSemver(version, latest as string) <= 0,
+    )
+    .map(([version]) => version);
   return selectPolicyVersions(stable, Number(latestMatch[1]), minors);
 }
 

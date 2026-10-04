@@ -1082,15 +1082,13 @@ describe("organization onboarding UI", () => {
         ),
       );
       expect(container.querySelector("h1")!.textContent).toBe("You got $7.25 in free credits");
-      expect(container.textContent).toContain("You can start right now.");
-      expect(container.textContent).toContain(
-        "New chats use Credits Model with extra high reasoning.",
-      );
-      expect(container.textContent).toContain(
-        "When your credits run out, new chats use Free Model, which is free.",
-      );
+      expect(container.textContent).toContain("Start chatting. No card or API key needed.");
+      expect(container.textContent).not.toContain("Credits Model");
       expect(container.textContent).not.toContain("Start chatting for free");
       expect(container.textContent).not.toContain("free to use. No card");
+      await act(async () =>
+        container.querySelector<HTMLButtonElement>('button[aria-expanded="false"]')!.click(),
+      );
       expect(providerRow(container, "Codex")).not.toBeNull();
       expect(providerRow(container, "OpenRouter")).not.toBeNull();
       expect(container.textContent).toContain("Buy more Opengeni credits");
@@ -1109,7 +1107,7 @@ describe("organization onboarding UI", () => {
     }
   });
 
-  test("an unreadable balance still names the credits default without an amount", async () => {
+  test("an unreadable balance confirms credits without promising a model or amount", async () => {
     const container = document.createElement("div");
     document.body.appendChild(container);
     const root = createRoot(container);
@@ -1130,7 +1128,8 @@ describe("organization onboarding UI", () => {
         ),
       );
       expect(container.querySelector("h1")!.textContent).toBe("You got free Opengeni credits");
-      expect(container.textContent).toContain("New chats use Credits Model.");
+      expect(container.textContent).toContain("Start chatting. No card or API key needed.");
+      expect(container.textContent).not.toContain("Credits Model");
       // Without a free default there is nothing to name for after the credits.
       expect(container.textContent).not.toContain("When your credits run out");
     } finally {
@@ -1267,13 +1266,8 @@ describe("organization onboarding UI", () => {
           expect(getBilling).not.toHaveBeenCalled();
         }
         if (scenario.heading === "You got $10 in free credits") {
-          expect(container.textContent).toContain("You can start right now.");
-          expect(container.textContent).toContain(
-            "New chats use Credits Model with extra high reasoning.",
-          );
-          expect(container.textContent).toContain(
-            "When your credits run out, new chats use Free Model, which is free.",
-          );
+          expect(container.textContent).toContain("Start chatting. No card or API key needed.");
+          expect(container.textContent).not.toContain("Credits Model");
         } else if (scenario.heading === "Start chatting for free") {
           expect(container.textContent).toContain("Free Model is set up and free to use");
           expect(container.textContent).not.toContain("in free credits");
@@ -1497,9 +1491,10 @@ describe("organization onboarding UI", () => {
       expect(createOrganizationApiKey.mock.calls[0]).toEqual([
         "preview-organization",
         {
-          name: "Developer setup",
-          description: "Created at signup to add Opengeni agents to your product.",
-          access: "developer_setup",
+          name: "Setup (full access)",
+          description:
+            "Created at signup so an agent can set up Opengeni in your product end to end.",
+          access: "full",
           expiresAt: expect.any(String),
         },
       ]);
@@ -1510,7 +1505,7 @@ describe("organization onboarding UI", () => {
         ) - Date.now();
       expect(keyLifetimeMs).toBeGreaterThan(29 * 24 * 60 * 60 * 1000);
       expect(keyLifetimeMs).toBeLessThanOrEqual(30 * 24 * 60 * 60 * 1000);
-      expect(container.textContent).toContain("It expires in 30 days");
+      expect(container.textContent).toContain("expires in 30 days");
       // Shown once, in its own copy step; the prompt never carries it.
       expect(container.querySelector("[data-slot=developer-setup-key]")!.textContent).toBe(token);
       expect(container.textContent).toContain("1. Copy your key");
@@ -1581,6 +1576,37 @@ describe("organization onboarding UI", () => {
   });
 
   test("a coupon code redeems its full amount in a new tab and celebrates it in place", async () => {
+    const onComplete = mock(() => undefined);
+    let rejectSave!: (reason: Error) => void;
+    const saveNewSessionDraft = mock(
+      () =>
+        new Promise<void>((_resolve, reject) => {
+          rejectSave = reject;
+        }),
+    );
+    const creditSelectionClient = {
+      getWorkspaceModelCatalog: mock(async () => ({
+        models: [
+          {
+            ...baseModel,
+            id: "covered-model",
+            label: "Covered model",
+            cost: "credits",
+            creditFunding: "promotional",
+          },
+        ],
+        defaultSelection: { model: "covered-model", reasoningEffort: "low", source: "credits" },
+      })),
+      getNewSessionDraft: mock(async () => ({
+        revision: 1,
+        text: "",
+        resources: [],
+        tools: [],
+        toolsProvided: false,
+        options: {},
+      })),
+      saveNewSessionDraft,
+    };
     const createBillingCheckout = mock(async (_request: Record<string, unknown>) => ({
       checkoutSessionId: "cs_test_coupon",
       url: "https://checkout.stripe.test/c/pay/cs_test_coupon",
@@ -1613,7 +1639,14 @@ describe("organization onboarding UI", () => {
       await act(async () =>
         root.render(
           <OrganizationOnboardingPanel
-            client={{ ...setupClient, createBillingCheckout, getBillingCheckout } as never}
+            client={
+              {
+                ...setupClient,
+                ...creditSelectionClient,
+                createBillingCheckout,
+                getBillingCheckout,
+              } as never
+            }
             previewState="required"
             billingMode="stripe"
             initialUseCase="cloud"
@@ -1621,7 +1654,7 @@ describe("organization onboarding UI", () => {
               balance: { balanceMicros: 10_000_000, currency: "usd" },
               model: { id: "credits-model", label: "Credits Model", reasoningEffort: "none" },
             }}
-            onComplete={() => undefined}
+            onComplete={onComplete}
           />,
         ),
       );
@@ -1632,7 +1665,7 @@ describe("organization onboarding UI", () => {
       expect(container.querySelector("[data-slot=credits-prize]")).not.toBeNull();
       await act(async () =>
         Array.from(container.querySelectorAll("button"))
-          .find((button) => button.textContent?.includes("Have a coupon code?"))!
+          .find((button) => button.textContent?.includes("Have a code?"))!
           .click(),
       );
       await enter(
@@ -1640,8 +1673,9 @@ describe("organization onboarding UI", () => {
         "launch100",
       );
       await act(async () =>
-        Array.from(container.querySelectorAll("form"))
-          .find((form) => form.textContent?.includes("Coupon code"))!
+        container
+          .querySelector<HTMLInputElement>("input[placeholder='Enter your code']")!
+          .closest("form")!
           .requestSubmit(),
       );
       await flush();
@@ -1660,6 +1694,20 @@ describe("organization onboarding UI", () => {
       expect(container.querySelector("h1")!.textContent).toBe("You got $100 in free credits");
       expect(container.textContent).toContain("Your balance is now $110");
       expect(container.textContent).toContain("Coupon redeemed");
+      expect(saveNewSessionDraft).toHaveBeenCalledTimes(1);
+      const start = Array.from(container.querySelectorAll("button")).find(
+        (button) => button.textContent?.trim() === "Start chatting",
+      )!;
+      expect(start.disabled).toBe(true);
+      await act(async () => start.click());
+      expect(onComplete).not.toHaveBeenCalled();
+      await act(async () => rejectSave(new Error("Temporary save failure")));
+      expect(start.disabled).toBe(true);
+      expect(container.textContent).toContain("Your credits are ready");
+      saveNewSessionDraft.mockImplementation(async () => undefined);
+      await clickButton(container, "Try again");
+      expect(saveNewSessionDraft).toHaveBeenCalledTimes(2);
+      expect(onComplete).toHaveBeenCalledTimes(1);
     } finally {
       window.open = originalOpen;
       await act(async () => root.unmount());

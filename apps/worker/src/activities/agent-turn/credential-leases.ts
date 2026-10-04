@@ -1,6 +1,8 @@
 import {
   CODEX_CREDENTIAL_LEASE_TTL_MS,
   XAI_CREDENTIAL_LEASE_TTL_MS,
+  CLAUDE_CREDENTIAL_LEASE_TTL_MS,
+  heartbeatClaudeCredentialLeaseUntil,
   heartbeatCodexCredentialLeaseUntil,
   heartbeatXaiCredentialLeaseUntil,
 } from "@opengeni/db";
@@ -87,37 +89,44 @@ export class CodexTurnLease extends SubscriptionTurnLease {
   }
 }
 
-/** SuperGrok uses the same deadline and holder fences as Codex. */
-export class XaiTurnLease extends SubscriptionTurnLease {
+/** Scoped subscriptions share the existing holder and monotonic deadline implementation. */
+class ScopedSubscriptionTurnLease extends SubscriptionTurnLease {
   subjectId: string | null = null;
-  constructor(deps: TurnCredentialLeaseDeps) {
+  constructor(
+    deps: TurnCredentialLeaseDeps,
+    provider: {
+      name: string;
+      code: string;
+      ttlMs: number;
+      heartbeat: typeof heartbeatXaiCredentialLeaseUntil;
+    },
+  ) {
     super({
-      ttlMs: XAI_CREDENTIAL_LEASE_TTL_MS,
+      ttlMs: provider.ttlMs,
       getTurnId: deps.getTurnId,
       heartbeat: ({ turnId, holderId, generation }) =>
         this.subjectId
-          ? heartbeatXaiCredentialLeaseUntil(deps.db, {
+          ? provider.heartbeat(deps.db, {
               workspaceId: deps.workspaceId,
               subjectId: this.subjectId,
               turnId,
               holderId,
               generation,
-              leaseTtlMs: XAI_CREDENTIAL_LEASE_TTL_MS,
+              leaseTtlMs: provider.ttlMs,
             })
           : Promise.resolve(null),
       lostError: (reason) =>
-        Object.assign(new Error("SuperGrok credential lease is not usable for provider dispatch"), {
-          code: "xai_credential_lease_lost",
-          reason,
-        }),
+        Object.assign(
+          new Error(provider.name + " credential lease is not usable for provider dispatch"),
+          { code: provider.code, reason },
+        ),
       onLost: (reason) =>
-        deps.observability.warn("xAI credential lease was lost during an active turn", {
-          workspaceId: deps.workspaceId,
-          turnId: deps.getTurnId(),
-          reason,
-        }),
+        deps.observability.warn(
+          provider.name + " credential lease was lost during an active turn",
+          { workspaceId: deps.workspaceId, turnId: deps.getTurnId(), reason },
+        ),
       onError: (error) =>
-        deps.observability.warn("xAI credential lease heartbeat failed", {
+        deps.observability.warn(provider.name + " credential lease heartbeat failed", {
           workspaceId: deps.workspaceId,
           turnId: deps.getTurnId(),
           ...safeErrorDiagnostic(error),
@@ -125,11 +134,32 @@ export class XaiTurnLease extends SubscriptionTurnLease {
     });
   }
 }
+export class XaiTurnLease extends ScopedSubscriptionTurnLease {
+  constructor(deps: TurnCredentialLeaseDeps) {
+    super(deps, {
+      name: "SuperGrok",
+      code: "xai_credential_lease_lost",
+      ttlMs: XAI_CREDENTIAL_LEASE_TTL_MS,
+      heartbeat: heartbeatXaiCredentialLeaseUntil,
+    });
+  }
+}
+export class ClaudeTurnLease extends ScopedSubscriptionTurnLease {
+  constructor(deps: TurnCredentialLeaseDeps) {
+    super(deps, {
+      name: "Claude",
+      code: "claude_credential_lease_lost",
+      ttlMs: CLAUDE_CREDENTIAL_LEASE_TTL_MS,
+      heartbeat: heartbeatClaudeCredentialLeaseUntil,
+    });
+  }
+}
 
-/** Both serving-credential leases for one turn attempt plus their composite views. */
+/** Serving-credential leases for one turn attempt plus their composite views. */
 export type TurnCredentialLeases = {
   codex: CodexTurnLease;
   xai: XaiTurnLease;
+  claude: ClaudeTurnLease;
   renewServing: (reason: LeaseRenewReason) => Promise<void>;
   servingLost: () => boolean;
 };
@@ -137,13 +167,16 @@ export type TurnCredentialLeases = {
 export function createTurnCredentialLeases(deps: TurnCredentialLeaseDeps): TurnCredentialLeases {
   const codex = new CodexTurnLease(deps);
   const xai = new XaiTurnLease(deps);
+  const claude = new ClaudeTurnLease(deps);
   return {
     codex,
     xai,
+    claude,
     renewServing: async (reason) => {
       await codex.renew(reason);
-      await xai.renew();
+      await xai.renew(reason);
+      await claude.renew(reason);
     },
-    servingLost: () => codex.lost || xai.lost,
+    servingLost: () => codex.lost || xai.lost || claude.lost,
   };
 }

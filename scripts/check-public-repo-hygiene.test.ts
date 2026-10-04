@@ -1,4 +1,5 @@
 import { describe, expect, test } from "bun:test";
+import { readFileSync } from "node:fs";
 import {
   auditCatalogSnapshot,
   auditPublicText,
@@ -6,6 +7,28 @@ import {
 } from "./check-public-repo-hygiene";
 
 describe("public repository hygiene", () => {
+  test("the committed catalog quarantines restricted clients and keeps counts consistent", () => {
+    const snapshot = JSON.parse(
+      readFileSync(new URL("../data/catalog/integrations-snapshot.json", import.meta.url), "utf8"),
+    ) as {
+      importRows: { domain: string }[];
+      quarantined: { row: { domain: string }; reason: string }[];
+      cleaning: { outputRows: number; quarantinedRows: number };
+      probe: { kept: number };
+      retention: { retainedRows: { domain: string }[] };
+    };
+    expect(auditCatalogSnapshot(snapshot)).toEqual([]);
+    expect(snapshot.importRows.some((row) => row.domain === "figma.com")).toBe(false);
+    expect(snapshot.retention.retainedRows.some((row) => row.domain === "figma.com")).toBe(false);
+    expect(snapshot.quarantined).toContainEqual({
+      row: expect.objectContaining({ domain: "figma.com" }),
+      reason: expect.stringContaining("approved MCP client"),
+    });
+    expect(snapshot.cleaning.outputRows).toBe(snapshot.importRows.length);
+    expect(snapshot.cleaning.quarantinedRows).toBe(snapshot.quarantined.length);
+    expect(snapshot.probe.kept).toBe(snapshot.importRows.length);
+  });
+
   test("distinguishes nested public URL paths from private filesystem roots", () => {
     const publicUrl = "https://example.com/repository/skills/home/SKILL.md";
     expect(auditPublicText("catalog.json", JSON.stringify({ sourceUrl: publicUrl }))).toEqual([]);

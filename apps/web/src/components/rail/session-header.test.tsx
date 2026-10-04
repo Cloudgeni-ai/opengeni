@@ -153,7 +153,7 @@ test("reuses the compact Schedule button without requiring creation metadata", a
   }
 });
 
-test("phones keep a compact lifecycle indicator instead of hiding status", async () => {
+test("narrow headers keep a compact lifecycle dot instead of hiding status", async () => {
   const container = document.createElement("div");
   document.body.append(container);
   const root = createRoot(container);
@@ -182,7 +182,7 @@ test("phones keep a compact lifecycle indicator instead of hiding status", async
       await act(async () => root.render(render(session, status)));
       expect(compact()?.dataset.compactSessionStatus).toBe(status);
       expect(compact()?.textContent).toBe(label);
-      expect(compact()?.className).toContain("md:hidden");
+      expect(compact()?.className).toContain("lg:hidden");
     }
     await act(async () =>
       root.render(
@@ -214,7 +214,46 @@ test("phones keep a compact lifecycle indicator instead of hiding status", async
       ),
     );
     expect(compact()?.textContent).toBe("Paused");
-    expect(container.querySelector(".sr-only.md\\:hidden")?.textContent).toBe("Connection live.");
+    expect(container.querySelector(".sr-only.lg\\:hidden")?.textContent).toBe("Connection live.");
+  } finally {
+    await act(async () => root.unmount());
+    container.remove();
+  }
+});
+
+test("names the model cleanly for org- and workspace-connected copies alike", async () => {
+  const container = document.createElement("div");
+  document.body.append(container);
+  const root = createRoot(container);
+  const render = (model: string) => (
+    <SessionHeader
+      session={{ ...session, model }}
+      ancestors={[]}
+      connectionState="live"
+      status="idle"
+      keyAuthRequired={false}
+      onForgetAccessKey={() => undefined}
+      inspectorOpen={false}
+      onToggleInspector={() => undefined}
+      onRename={async () => null}
+      onPin={async () => null}
+      billingClass="claude_subscription"
+    />
+  );
+  try {
+    const seen: string[] = [];
+    for (const model of [
+      "organization-claude-subscription/claude-opus-5-5",
+      "workspace-claude-subscription/claude-opus-5-5",
+    ]) {
+      await act(async () => root.render(render(model)));
+      const text = container.querySelector("header")?.textContent ?? "";
+      expect(text).toContain("Claude Opus 5.5");
+      expect(text).not.toContain("claude-subscription");
+      expect(container.querySelector('[data-model-vendor="anthropic"]')).not.toBeNull();
+      seen.push(container.querySelector("[data-model-vendor]")?.parentElement?.textContent ?? "");
+    }
+    expect(seen[0]).toBe(seen[1]);
   } finally {
     await act(async () => root.unmount());
     container.remove();

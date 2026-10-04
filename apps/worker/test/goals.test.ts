@@ -214,7 +214,7 @@ describe("goalContinuationModelDecision", () => {
       }),
     ).toMatchObject({
       model: "removed/provider-model",
-      blocked: expect.stringContaining("no longer in the deployment or workspace catalog"),
+      blocked: expect.stringContaining("selected model is unavailable"),
     });
   });
 
@@ -227,7 +227,7 @@ describe("goalContinuationModelDecision", () => {
       }),
     ).toMatchObject({
       model: "removed/provider-model",
-      blocked: expect.stringContaining("no longer in the deployment or workspace catalog"),
+      blocked: expect.stringContaining("selected model is unavailable"),
     });
   });
 

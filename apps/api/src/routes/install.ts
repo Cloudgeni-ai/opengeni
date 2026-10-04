@@ -158,18 +158,53 @@ function bakedContentType(asset: string): string {
 // BAKED_DIR is a fixed sibling, so the resolved path cannot escape the dir.
 async function readBaked(asset: string): Promise<ArrayBuffer | null> {
   const url = new URL(asset, BAKED_DIR);
-  try {
-    const info = await stat(url);
-    if (!info.isFile()) {
+  const runtime =
+    /^(?:opengeni-agent-browser|opengeni-computer-native|opengeni-browserd|opengeni-agent)-(.+?)(?:\.(?:sha256|minisig))?$/.exec(
+      asset,
+    );
+  if (runtime) {
+    const target = runtime[1]!;
+    const cohort = [
+      "opengeni-agent",
+      "opengeni-browserd",
+      "opengeni-agent-browser",
+      "opengeni-computer-native",
+    ].flatMap((component) =>
+      ["", ".sha256", ".minisig"].map((suffix) => `${component}-${target}${suffix}`),
+    );
+    const members = await Promise.all(
+      cohort.map(async (name) => {
+        try {
+          const info = await stat(new URL(name, BAKED_DIR));
+          return info.isFile() && info.size > 0 ? "complete" : "invalid";
+        } catch (error) {
+          if ((error as NodeJS.ErrnoException).code === "ENOENT") return "absent";
+          throw new HTTPException(503, { message: "baked interaction runtime is unavailable" });
+        }
+      }),
+    );
+    // A target is either wholly absent or wholly baked. A partial image cannot
+    // combine its agent with helpers or verification sidecars from an archive.
+    if (members.every((member) => member === "absent")) return null;
+    if (members.some((member) => member !== "complete")) {
+      throw new HTTPException(503, { message: "baked interaction runtime is incomplete" });
+    }
+  } else {
+    try {
+      const info = await stat(url);
+      if (!info.isFile()) return null;
+    } catch {
       return null;
     }
-  } catch {
-    return null;
   }
   // Return a standalone ArrayBuffer (a valid Response BodyInit). `readFile`'s
   // Buffer may be a view into a larger pooled allocation, so copy out the exact
   // byte range with `.slice` rather than handing over the backing store.
-  const buf = await readFile(url);
+  const buf = await readFile(url).catch(() => {
+    // Never redirect after selecting a baked cohort, even if a file becomes
+    // unreadable between the completeness check and the byte read.
+    throw new HTTPException(503, { message: "baked interaction runtime is unavailable" });
+  });
   return buf.buffer.slice(buf.byteOffset, buf.byteOffset + buf.byteLength);
 }
 

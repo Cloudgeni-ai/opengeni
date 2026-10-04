@@ -1,4 +1,4 @@
-import { knowledgeContextForGateway } from "@opengeni/core";
+import { isVerifiedDelegatedHumanAuthorization, knowledgeContextForGateway } from "@opengeni/core";
 import { createHash, randomBytes } from "node:crypto";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
@@ -27,7 +27,10 @@ import {
   type ToolRef,
 } from "@opengeni/contracts";
 import {
+  availableMcpAccountBindings,
   buildApiIntegrationMcpServers,
+  expandApiIntegrationAccountRoutes,
+  expandMcpAccountRoutes,
   hasPermission,
   externalActorContinuationForAuthorization,
   isVerifiedOrganizationServiceAuthorization,
@@ -42,7 +45,8 @@ import {
 import {
   buildCodexTokenResolver,
   buildConnectionTokenResolver,
-  lockActiveExternalOrganizationKey,
+  buildSlackApiRateLimiter,
+  lockActiveExternalOrganizationKeyAuthority,
   withAccountRls,
   requireWorkspace,
   withCodexAppsRequestAuthorization,
@@ -136,6 +140,7 @@ export function requireWorkspaceToolGatewayAuthorization(
   if (
     !authorization.canonicalManagedHumanSession &&
     !authorization.canonicalLocalHumanSession &&
+    !isVerifiedDelegatedHumanAuthorization(authorization) &&
     !externalActorContinuationForAuthorization(authorization)
   ) {
     throw new HTTPException(403, { message: "current-human tool access required" });
@@ -163,15 +168,18 @@ export async function prepareWorkspaceToolGateway(
           await withAccountRls(routeDeps.db, scope.accountId, async (tx) => {
             if (reauthorizeExternal) await reauthorizeExternal(tx);
             else {
-              const live = await lockActiveExternalOrganizationKey(
+              const live = await lockActiveExternalOrganizationKeyAuthority(
                 tx,
                 scope.accountId,
                 scope.subjectId.slice("api_key:".length),
+                scope.workspaceId,
               );
               const workspace = await requireWorkspace(tx, scope.workspaceId);
               if (
                 !live ||
-                permissions.some((permission) => !hasPermission(live, permission)) ||
+                permissions.some(
+                  (permission) => !hasPermission(live.permissions, permission, live.permissionMode),
+                ) ||
                 workspace.accountId !== scope.accountId ||
                 workspace.kind !== "shared"
               )
@@ -267,7 +275,31 @@ async function prepareWorkspaceToolGatewayForGrantInternal(
       },
     },
   );
-  const gatewaySettings = workspaceToolGatewaySettingsForGrant(settings, grant, allowedIdentities);
+  // Transport admission has already verified the current caller. A service
+  // receives workspace accounts only; human transports use their exact subject.
+  const accountBindings = await availableMcpAccountBindings({
+    db: routeDeps.db,
+    accountId: grant.accountId,
+    workspaceId: grant.workspaceId,
+    settings,
+    tools: allGatewayToolRefs(settings),
+    source:
+      grant.principalKind === "service" || grant.principalKind === "api_key"
+        ? { kind: "none" }
+        : { kind: "subject", accountId: grant.accountId, subjectId: grant.subjectId },
+  });
+  const accountRoutes = expandMcpAccountRoutes({
+    settings,
+    tools: allGatewayToolRefs(settings),
+    bindings: accountBindings,
+  });
+  // OAuth/Site identities are account-qualified. Intersect only after expansion;
+  // canonical connector IDs are never aliases for an account's execution route.
+  const gatewaySettings = workspaceToolGatewaySettingsForGrant(
+    accountRoutes.settings,
+    grant,
+    allowedIdentities,
+  );
   const gatewayServerIds = new Set(gatewaySettings.mcpServers.map((server) => server.id));
   const deps = { ...routeDeps, catalogSourceSettings, settings: gatewaySettings };
   const resolveConnection = withWorkspaceConnectionAuthorization(
@@ -308,7 +340,11 @@ async function prepareWorkspaceToolGatewayForGrantInternal(
   ]);
   const apiIntegrationServers = buildApiIntegrationMcpServers({
     settings: gatewaySettings,
-    integrations: integrations.filter((integration) => gatewayServerIds.has(integration.serverId)),
+    integrations: expandApiIntegrationAccountRoutes({
+      integrations,
+      bindings: accountBindings,
+      tools: allGatewayToolRefs(gatewaySettings),
+    }),
     authority: {
       accountId: grant.accountId,
       workspaceId: grant.workspaceId,
@@ -359,7 +395,9 @@ async function prepareWorkspaceToolGatewayForGrantInternal(
       workspaceId: grant.workspaceId,
       subjectId: grant.subjectId,
       credentialSubjectId: grant.subjectId,
+      mcpAccountLabels: accountRoutes.accountLabels,
       resolveCredential,
+      slackRateLimit: buildSlackApiRateLimiter(routeDeps.db, gatewaySettings),
       localMcpServers,
       ...(codexAppsAuth ? { codexAppsAuth } : {}),
       workspaceToolGateway: {

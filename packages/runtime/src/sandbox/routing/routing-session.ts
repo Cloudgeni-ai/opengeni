@@ -126,9 +126,10 @@ export interface RoutableBackendSession extends ProviderCommandSession {
   resolveExposedPort?(port: number): Promise<ExposedPortEndpoint>;
   serializeSessionState?(): Promise<unknown>;
   /** Release op-stream replay retention only after the caller has durably
-   * accepted every settled result. Routing proxies aggregate this hook across
+   * accepted the supplied tool results (or all settled results when omitted).
+   * Routing proxies aggregate this hook across
    * every Connected Machine backend reached during their lifetime. */
-  finalizeOpStreamOps?(): Promise<void>;
+  finalizeOpStreamOps?(toolCallIds?: readonly string[]): Promise<void>;
 }
 
 /** The resolved active backend for an epoch: the live session + the sandbox id it
@@ -186,6 +187,13 @@ export type RoutingRetainedProcessAdoption = {
 export type RoutingRetainedProcessTerminalProof =
   | { outcome: "exited"; exitCode: number; reason: "provider_exit_banner" }
   | { outcome: "lost"; exitCode: null; reason: "provider_session_lost_banner" };
+
+export type RoutingCommandDispatchOptions = {
+  /** Call-scoped proof that THIS command's ordinary admission rejected before
+   * its provider invocation. Receives the unchanged rejection, never a rendered
+   * error or post-dispatch fault. Does not release any durable writer. */
+  onMutationAdmissionRefused?: (error: unknown) => void;
+};
 
 export interface RoutingSandboxSessionDeps {
   providerCommandHandle?: (admission: unknown) => number | undefined;
@@ -819,14 +827,15 @@ export class RoutingSandboxSession implements RoutableBackendSession {
    * Callers own the durability point: worker turns invoke this after history is
    * persisted; one-off API calls invoke it after their result has been accepted
    * in memory. A failed backend stays registered so a later durability hook can
-   * retry it, while successful backends are forgotten immediately.
+   * retry it. Scoped hooks retain backends for other results; the complete
+   * boundary forgets successful backends.
    */
-  async finalizeOpStreamOps(): Promise<void> {
+  async finalizeOpStreamOps(toolCallIds?: readonly string[]): Promise<void> {
     const failures: unknown[] = [];
     for (const backend of [...this.opStreamBackends]) {
       try {
-        await backend.finalizeOpStreamOps?.();
-        this.opStreamBackends.delete(backend);
+        await backend.finalizeOpStreamOps?.(toolCallIds);
+        if (toolCallIds === undefined) this.opStreamBackends.delete(backend);
       } catch (error) {
         failures.push(error);
       }
@@ -1522,6 +1531,7 @@ export class RoutingSandboxSession implements RoutableBackendSession {
     mutatesWorkspace: boolean,
     fn: (session: RoutableBackendSession, backend: ResolvedActiveBackend) => Promise<T>,
     supervisionEligible = false,
+    onMutationAdmissionRefused?: (error: unknown) => void,
   ): Promise<T> {
     const firstOperationObserver = this.deps.onFirstOperation;
     if (this.firstOperationClaimed || !firstOperationObserver) {
@@ -1531,6 +1541,7 @@ export class RoutingSandboxSession implements RoutableBackendSession {
         fn,
         undefined,
         supervisionEligible,
+        onMutationAdmissionRefused,
       );
     }
     this.firstOperationClaimed = true;
@@ -1544,6 +1555,7 @@ export class RoutingSandboxSession implements RoutableBackendSession {
         fn,
         timing,
         supervisionEligible,
+        onMutationAdmissionRefused,
       );
       outcome = "completed";
       return result;
@@ -1592,6 +1604,7 @@ export class RoutingSandboxSession implements RoutableBackendSession {
     fn: (session: RoutableBackendSession, backend: ResolvedActiveBackend) => Promise<T>,
     firstOperationTiming?: RoutingSandboxFirstOperationTiming,
     supervisionEligible = false,
+    onMutationAdmissionRefused?: (error: unknown) => void,
   ): Promise<T> {
     let attempt = 0;
     let lastError: unknown;
@@ -1662,6 +1675,16 @@ export class RoutingSandboxSession implements RoutableBackendSession {
             },
           });
           admissionOutcome = "completed";
+        } catch (error) {
+          // Only this boundary knows that the command never reached provider
+          // dispatch. Keep proof local to this call and preserve the original
+          // error's identity/type for every existing admission-fence consumer.
+          try {
+            onMutationAdmissionRefused?.(error);
+          } catch {
+            // A caller's proof observer cannot change admission or its error.
+          }
+          throw error;
         } finally {
           recordFirstOperationPhase(
             firstOperationTiming,
@@ -2120,7 +2143,7 @@ export class RoutingSandboxSession implements RoutableBackendSession {
     );
   }
 
-  async execCommand(args: unknown): Promise<string> {
+  async execCommand(args: unknown, options?: RoutingCommandDispatchOptions): Promise<string> {
     try {
       return await this.dispatch(
         "execCommand",
@@ -2136,6 +2159,7 @@ export class RoutingSandboxSession implements RoutableBackendSession {
           throw new RoutingUnsupportedError("execCommand", this.cached?.kind ?? "unknown");
         },
         eligibleForSupervision(args),
+        options?.onMutationAdmissionRefused,
       );
     } catch (error) {
       // Render a terminal selfhosted fault as the tool's result (four fields, correct

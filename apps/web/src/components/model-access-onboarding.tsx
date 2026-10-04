@@ -1,6 +1,6 @@
+import { modelDisplayName } from "@opengeni/sdk/model-display";
 import { DirectModelProviderForm } from "@/components/direct-model-provider-connection";
 import { pollDeviceAuthorization } from "@opengeni/connect";
-import { labelReasoningEffort } from "@opengeni/react";
 import type { BillingCheckoutStatus, CodexConnectPoll, CodexConnectStart } from "@opengeni/sdk";
 import type { OpenGeniBrowserClient } from "@opengeni/sdk/browser";
 import { ArrowUpRightIcon, Loader2Icon } from "lucide-react";
@@ -106,19 +106,12 @@ export type IncludedOnboardingModel = {
   free: boolean;
 };
 
-/** "GPT-6 Luna with extra high reasoning", or just the label when there is no effort to name. */
-function describeCreditsModel(model: StartingCreditsOnboarding["model"]): string {
-  if (model.reasoningEffort === "none") return model.label;
-  return `${model.label} with ${labelReasoningEffort(model.reasoningEffort).toLowerCase()} reasoning`;
-}
-
 /**
  * First-sign-in product step after the durable organization-name lifecycle.
  * When the organization already holds Opengeni credits (for example the
  * verified-signup trial grant) and new chats default to a credits model,
  * starting to chat on those credits is the primary path: the step shows the
- * balance and the resolved default, and names the free model as what applies
- * once the credits run out. Otherwise, when the deployment includes a default
+ * balance without promising a particular model. Otherwise, when the deployment includes a default
  * model, starting to chat with it is the primary path. Every connection or
  * purchase is an optional upgrade. Connecting a model updates the
  * actor-private new-chat draft so the next chat preselects that model. Leaving
@@ -217,7 +210,7 @@ export function ModelAccessOnboardingPanel({
 
   function leaveOnboarding(): void {
     // Leaving mid-save would complete twice or drop the connected selection.
-    if (finishing.current) return;
+    if (finishing.current || selectionRetry === "credits") return;
     stopDeviceLogin();
     onboardingJourney().completed(
       "model_access",
@@ -229,6 +222,7 @@ export function ModelAccessOnboardingPanel({
   async function finishWithConnectedModel(
     family: ConnectedModelFamily,
     preferredModelId?: string,
+    complete = true,
   ): Promise<boolean> {
     connectedModelId.current = preferredModelId;
     if (client) {
@@ -240,24 +234,39 @@ export function ModelAccessOnboardingPanel({
           family,
           preferredModelId,
         );
+        if (cancelled.current) return false;
         if (model) {
           setSelectionRetry(null);
-          toast.success(`${model.label} (${FAMILY_LABELS[family]}) is selected for your next chat`);
+          if (complete)
+            toast.success(
+              `${modelDisplayName(model)} (${FAMILY_LABELS[family]}) is selected for your next chat`,
+            );
         } else {
           setSelectionRetry(family);
-          toast.error("The connection is ready, but its model is not selectable yet");
+          toast.error(
+            family === "credits"
+              ? "Credits added. A covered model isn't available yet."
+              : "The connection is ready, but its model is not selectable yet",
+          );
           return false;
         }
       } catch (error) {
+        if (cancelled.current) return false;
         setSelectionRetry(family);
-        toast.error("Model connected, but your new-chat selection could not be saved", {
-          description: userErrorText(error),
-        });
+        toast.error(
+          family === "credits"
+            ? "Credits added. Couldn't prepare your next chat."
+            : "Model connected, but your new-chat selection could not be saved",
+          {
+            description: userErrorText(error),
+          },
+        );
         return false;
       } finally {
         finishing.current = false;
       }
     }
+    if (!complete) return true;
     onboardingJourney().completed("model_access", "connected_model");
     onComplete();
     return true;
@@ -449,18 +458,18 @@ export function ModelAccessOnboardingPanel({
     setOpen((current) => (current === row ? null : row));
   }
 
-  function celebrateCheckout(status: BillingCheckoutStatus): void {
+  async function celebrateCheckout(status: BillingCheckoutStatus): Promise<void> {
+    setBusy(true);
     setWon((previous) => ({
       amountMicros: status.credit.amountMicros,
       balanceMicros: status.balance?.balanceMicros ?? null,
       free: status.credit.free,
       celebration: (previous?.celebration ?? 0) + 1,
     }));
-    // Without a credits default yet, make the next chat use the credits just added.
-    if (!startingCredits && client) {
-      void applyConnectedModelToNewSessionDraft(client, workspaceId, "credits").catch(
-        () => undefined,
-      );
+    try {
+      await finishWithConnectedModel("credits", undefined, false);
+    } finally {
+      if (!cancelled.current) setBusy(false);
     }
   }
 
@@ -679,9 +688,13 @@ export function ModelAccessOnboardingPanel({
   const selectionRetryNotice = selectionRetry ? (
     <div className="mt-6 grid gap-3 rounded-lg border border-border bg-bg p-4" role="alert">
       <div>
-        <p className="text-sm font-medium">Your service is connected</p>
+        <p className="text-sm font-medium">
+          {selectionRetry === "credits" ? "Your credits are ready" : "Your service is connected"}
+        </p>
         <p className="mt-1 text-xs leading-relaxed text-fg-muted">
-          Its model is not selectable yet. Try again to use it for your next chat.
+          {selectionRetry === "credits"
+            ? "Try again to select a covered model for your next chat."
+            : "Its model is not selectable yet. Try again to use it for your next chat."}
         </p>
       </div>
       <Button
@@ -697,7 +710,6 @@ export function ModelAccessOnboardingPanel({
   ) : null;
 
   if (startingCredits || won) {
-    const freeAfterCredits = includedModel?.free ? includedModel : null;
     const currency = startingCredits?.balance?.currency ?? "usd";
     const trialAmount = startingCredits?.balance
       ? formatCreditAmount(startingCredits.balance.balanceMicros, currency)
@@ -734,33 +746,27 @@ export function ModelAccessOnboardingPanel({
             {heading}
           </h1>
           <p className="mt-2 text-sm leading-relaxed text-fg-muted">
-            {startingCredits
-              ? `You can start right now. New chats use ${describeCreditsModel(startingCredits.model)}. No card or API key needed.`
-              : "You can start right now. New chats use your Opengeni credits."}
+            Start chatting. No card or API key needed.
           </p>
-          {freeAfterCredits ? (
-            <p className="mt-2 text-xs leading-relaxed text-fg-muted">
-              When your credits run out, new chats use {freeAfterCredits.label}, which is free.
-            </p>
-          ) : null}
           <Button
             type="button"
             size="lg"
             className="mt-6 w-full"
-            disabled={busy}
+            disabled={busy || selectionRetry === "credits"}
             onClick={leaveOnboarding}
           >
             {continueToNextStep ? "Continue" : "Start chatting"}
           </Button>
           {coupon ? <div className="mt-3 text-center">{coupon}</div> : null}
+          {selectionRetry === "credits" ? selectionRetryNotice : null}
 
           <Disclosure
             className="mt-6 border-t border-border pt-3"
             title="Other ways to pay"
-            summary={`Optional. Connect a subscription or API key${billingMode === "stripe" ? ", or buy more credits" : ""}. You can also do this later.`}
+            summary="Connect a subscription or API key."
           >
             <div className="pt-2">{connectOptions}</div>
-            {selectionRetryNotice}
+            {selectionRetry !== "credits" ? selectionRetryNotice : null}
           </Disclosure>
         </div>
       </section>
@@ -776,8 +782,8 @@ export function ModelAccessOnboardingPanel({
           </h1>
           <p className="mt-2 text-sm leading-relaxed text-fg-muted">
             {includedModel.free
-              ? `${includedModel.label} is set up and free to use. No card or API key needed.`
-              : `${includedModel.label} is set up and included with this deployment.`}
+              ? `${modelDisplayName(includedModel)} is set up and free to use. No card or API key needed.`
+              : `${modelDisplayName(includedModel)} is set up and included with this deployment.`}
           </p>
           <Button
             type="button"

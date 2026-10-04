@@ -1,4 +1,5 @@
 import type { FirstPartyMcpToolName } from "@opengeni/contracts";
+import { isRetiredNativeAtlassianTool } from "@opengeni/contracts/atlassian-native-retirement";
 
 export type SessionCapabilityGroup = {
   id: string;
@@ -156,7 +157,9 @@ const OPENGENI_GROUPS: CapabilityGroupDefinition[] = [
 export function sessionCapabilityGroupsFor(
   tools: ReadonlyArray<{ id: FirstPartyMcpToolName }>,
 ): SessionCapabilityGroup[] {
-  const unmatched = new Set(tools.map((tool) => tool.id));
+  const unmatched = new Set(
+    tools.filter((tool) => !isRetiredNativeAtlassianTool(tool.id)).map((tool) => tool.id),
+  );
   const groups = [...OPENGENI_GROUPS, ...CONNECTED_APP_GROUPS].flatMap((definition) => {
     const toolIds = [...unmatched].filter(definition.matches);
     for (const tool of toolIds) unmatched.delete(tool);

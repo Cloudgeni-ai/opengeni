@@ -10,6 +10,8 @@ import {
   McpOAuthClientRegistrationResponse,
   McpOAuthProtectedResourceMetadata,
   McpOAuthTokenResponse,
+  OrganizationAccessPolicy,
+  organizationAccessPresetPermissions,
   type AccessContext,
   type AccessGrant,
   type ToolGatewayCatalog,
@@ -32,6 +34,8 @@ import {
   resolveLiveMcpOAuthGrant,
   resolveMcpOAuthAccessToken,
   rotateMcpOAuthRefreshToken,
+  setMcpOAuthRequestOrganizationAccess,
+  type McpOAuthAccess,
 } from "@opengeni/db";
 import {
   hasPermission,
@@ -41,7 +45,10 @@ import {
 } from "@opengeni/core";
 import { Hono, type Context } from "hono";
 import { HTTPException } from "hono/http-exception";
+import { z } from "zod";
 import { trustedRequestSourceRateLimitKey, type RequestSourceTrust } from "./http/request-source";
+import { requireNotAgent } from "./http/acting-person";
+import { requireSameOriginBrowserMutation } from "./routes/codex";
 import {
   prepareWorkspaceToolGateway,
   requireWorkspaceToolGatewayAuthorization,
@@ -56,10 +63,14 @@ const PKCE_VERIFIER = /^[A-Za-z0-9._~-]{43,128}$/u;
 const PKCE_CHALLENGE = /^[A-Za-z0-9_-]{43}$/u;
 const WORKSPACE_MCP_PATH = /^\/v1\/workspaces\/([0-9a-f-]{36})\/mcp(?:\/(docs|files))?$/u;
 
+/** One organization MCP server for everyone; the sign-in chooses the organization. */
+export const ORGANIZATION_MCP_PATH = "/v1/mcp";
+
 export type McpOAuthResource = {
   resource: string;
-  workspaceId: string;
-  kind: "all" | "docs" | "files";
+  /** Null for the organization server. */
+  workspaceId: string | null;
+  kind: "all" | "docs" | "files" | "organization";
 };
 
 export type McpOAuthRouteAccess = {
@@ -68,7 +79,10 @@ export type McpOAuthRouteAccess = {
 };
 
 export function registerMcpOAuthRoutes(app: Hono, deps: ApiRouteDeps): void {
-  app.get("/.well-known/oauth-authorization-server", (c) => {
+  // RFC 8414 path-aware discovery: MCP clients (Claude among them) ask for the
+  // metadata at /.well-known/oauth-authorization-server/<resource path> first
+  // and give up on anything but JSON. Serve the same document at both.
+  const authorizationServerMetadata = (c: Context) => {
     requireMcpOAuthEnabled(deps);
     const issuer = mcpOAuthIssuer(deps);
     c.header("cache-control", "public, max-age=300");
@@ -86,7 +100,9 @@ export function registerMcpOAuthRoutes(app: Hono, deps: ApiRouteDeps): void {
         authorization_response_iss_parameter_supported: true,
       }),
     );
-  });
+  };
+  app.get("/.well-known/oauth-authorization-server", authorizationServerMetadata);
+  app.get("/.well-known/oauth-authorization-server/*", authorizationServerMetadata);
 
   app.get("/.well-known/oauth-protected-resource/*", (c) => {
     requireMcpOAuthEnabled(deps);
@@ -157,6 +173,51 @@ export function registerMcpOAuthRoutes(app: Hono, deps: ApiRouteDeps): void {
     const query = new URL(c.req.url).searchParams;
     const client = await requireAuthorizationClient(deps, query);
     const resource = requireAuthorizationResource(deps, query);
+    if (resource.kind === "organization") {
+      // The person picks the organization, what the agent can do and where on
+      // the web app's sign-in page, which reads and answers this request.
+      const web = new URL(deps.settings.webBaseUrl ?? mcpOAuthIssuer(deps));
+      let person: { context: AccessContext };
+      try {
+        person = await requireBrowserPerson(c, deps);
+      } catch (error) {
+        if (!(error instanceof HTTPException) || error.status !== 401) throw error;
+        // Not signed in here yet: sign in on the web app, which returns to
+        // this exact authorization request (a same-origin path only).
+        const url = new URL(c.req.url);
+        c.header("cache-control", "no-store");
+        return c.redirect(
+          `${web.origin}/connect-agent?authorize=${encodeURIComponent(`${url.pathname}${url.search}`)}`,
+          302,
+        );
+      }
+      const accountId =
+        person.context.defaultAccountId ?? person.context.accountGrants[0]?.accountId;
+      if (!accountId) {
+        throw new HTTPException(403, { message: "no organization is available for MCP OAuth" });
+      }
+      const requestToken = opaque(REQUEST_PREFIX);
+      await createMcpOAuthAuthorizationRequest(deps.db, {
+        requestHash: tokenHash(requestToken),
+        clientId: client.clientId,
+        accountId,
+        workspaceId: null,
+        subjectId: person.context.subjectId,
+        resource: resource.resource,
+        redirectUri: requireRedirectUri(client.redirectUris, query.get("redirect_uri")),
+        codeChallenge: requireCodeChallenge(query),
+        state: boundedState(query.get("state")),
+        permissions: [],
+        toolIdentities: [],
+        organizationAccess: DEFAULT_ORGANIZATION_ACCESS(),
+        expiresAt: expiresIn(MCP_OAUTH_CONSENT_TTL_SECONDS),
+      });
+      c.header("cache-control", "no-store");
+      return c.redirect(
+        `${web.origin}/connect-agent?request=${encodeURIComponent(requestToken)}`,
+        302,
+      );
+    }
     const context = await requireAccessContext(c, deps);
     const workspaces = await listConsentWorkspaces(deps, context);
     if (workspaces.length === 0) {
@@ -186,6 +247,7 @@ export function registerMcpOAuthRoutes(app: Hono, deps: ApiRouteDeps): void {
         state: boundedState(query.get("state")),
         permissions: grant.permissions,
         toolIdentities: mcpOAuthConsentToolIdentities(prepared.toolGatewayCatalog),
+        organizationAccess: null,
         expiresAt: expiresIn(MCP_OAUTH_CONSENT_TTL_SECONDS),
       });
     } finally {
@@ -230,11 +292,16 @@ export function registerMcpOAuthRoutes(app: Hono, deps: ApiRouteDeps): void {
         "This authorization request expired or was already approved.",
       );
     }
+    // Organization sign-ins are answered on the Opengeni page they opened.
+    if (request.workspaceId === null) {
+      return oauthAuthorizeBrowserError(c, "Answer this sign-in on the Opengeni page it opened.");
+    }
+    const requestWorkspaceId = request.workspaceId;
     if (form.get("decision") !== "approve") {
       const authorization = await requireAccessGrantAuthorization(
         c,
         deps,
-        request.workspaceId,
+        requestWorkspaceId,
         "workspace:read",
       );
       if (requireWorkspaceToolGatewayAuthorization(authorization).subjectId !== request.subjectId) {
@@ -250,7 +317,7 @@ export function registerMcpOAuthRoutes(app: Hono, deps: ApiRouteDeps): void {
         }),
       );
     }
-    const selectedWorkspaceId = form.get("workspace_id") || request.workspaceId;
+    const selectedWorkspaceId = form.get("workspace_id") || requestWorkspaceId;
     if (!isWorkspaceId(selectedWorkspaceId)) {
       return oauthAuthorizeBrowserError(c, "Choose a workspace before authorizing this client.");
     }
@@ -308,6 +375,83 @@ export function registerMcpOAuthRoutes(app: Hono, deps: ApiRouteDeps): void {
         ...(consumed.state ? { state: consumed.state } : {}),
       }),
     );
+  });
+
+  // The web sign-in page for the organization server reads the pending request…
+  app.get("/v1/mcp-connections/requests/:request", async (c) => {
+    requireMcpOAuthEnabled(deps);
+    const person = await requireBrowserPerson(c, deps);
+    const request = await requirePendingOrganizationRequest(deps, c.req.param("request"), person);
+    const client = await getMcpOAuthClient(deps.db, request.clientId);
+    const organizations = await consentOrganizations(deps, person.context);
+    c.header("cache-control", "no-store");
+    return c.json({
+      client: {
+        name: client?.clientName ?? "MCP client",
+        host: redirectHost(request.redirectUri),
+      },
+      person: { name: person.context.subjectLabel ?? null },
+      organizations,
+      defaultOrganizationId: organizations.some((each) => each.id === request.accountId)
+        ? request.accountId
+        : (organizations[0]?.id ?? null),
+    });
+  });
+
+  // …and answers it. Approving returns the agent's redirect with a code.
+  app.post("/v1/mcp-connections/requests/:request", async (c) => {
+    requireMcpOAuthEnabled(deps);
+    requireSameOriginBrowserMutation(c, deps);
+    const person = await requireBrowserPerson(c, deps);
+    const request = await requirePendingOrganizationRequest(deps, c.req.param("request"), person);
+    const parsed = OrganizationConsentDecision.safeParse(await c.req.json().catch(() => null));
+    if (!parsed.success) throw new HTTPException(400, { message: "invalid sign-in decision" });
+    const decision = parsed.data;
+    if (decision.decision === "deny") {
+      await deleteMcpOAuthAuthorizationRequest(deps.db, request.requestHash);
+      return c.json({
+        redirectTo: authorizationRedirect(request.redirectUri, {
+          error: "access_denied",
+          iss: mcpOAuthIssuer(deps),
+          ...(request.state ? { state: request.state } : {}),
+        }),
+      });
+    }
+    const organizations = await consentOrganizations(deps, person.context);
+    const organization = organizations.find((each) => each.id === decision.organizationId);
+    if (!organization) throw new HTTPException(403, { message: "organization is not available" });
+    const access = decision.access;
+    if (access.workspaceScope.kind === "selected") {
+      const reachable = new Set(organization.workspaces.map((workspace) => workspace.id));
+      if (access.workspaceScope.workspaceIds.some((id) => !reachable.has(id))) {
+        throw new HTTPException(403, { message: "a selected workspace is not available" });
+      }
+    }
+    const bound = await setMcpOAuthRequestOrganizationAccess(deps.db, {
+      requestHash: request.requestHash,
+      subjectId: person.context.subjectId,
+      accountId: organization.id,
+      organizationAccess: access,
+    });
+    const code = opaque(CODE_PREFIX);
+    const consumed = bound
+      ? await consumeMcpOAuthAuthorizationRequest(deps.db, {
+          requestHash: request.requestHash,
+          subjectId: person.context.subjectId,
+          codeHash: tokenHash(code),
+          codeExpiresAt: expiresIn(MCP_OAUTH_AUTHORIZATION_CODE_TTL_SECONDS),
+        })
+      : null;
+    if (!consumed) {
+      throw new HTTPException(410, { message: "This sign-in expired or was already answered." });
+    }
+    return c.json({
+      redirectTo: authorizationRedirect(consumed.redirectUri, {
+        code,
+        iss: mcpOAuthIssuer(deps),
+        ...(consumed.state ? { state: consumed.state } : {}),
+      }),
+    });
   });
 
   app.post("/oauth/token", async (c) => {
@@ -414,7 +558,7 @@ export function mcpOAuthBearerToken(request: Request): string | null {
 }
 
 export function isMcpOAuthResourcePath(pathname: string): boolean {
-  return WORKSPACE_MCP_PATH.test(pathname);
+  return WORKSPACE_MCP_PATH.test(pathname) || pathname === ORGANIZATION_MCP_PATH;
 }
 
 export function mcpOAuthConsentToolIdentities(catalog: ToolGatewayCatalog): ToolGatewayIdentity[] {
@@ -424,6 +568,7 @@ export function mcpOAuthConsentToolIdentities(catalog: ToolGatewayCatalog): Tool
 export function isMcpOAuthPublicProtocolPath(pathname: string): boolean {
   return (
     pathname === "/.well-known/oauth-authorization-server" ||
+    pathname.startsWith("/.well-known/oauth-authorization-server/") ||
     pathname.startsWith("/.well-known/oauth-protected-resource/") ||
     pathname === "/oauth/register" ||
     pathname === "/oauth/authorize" ||
@@ -452,6 +597,20 @@ function parseMcpOAuthResource(deps: ApiRouteDeps, value: string): McpOAuthResou
     throw new HTTPException(400, { message: "invalid OAuth resource" });
   }
   const issuer = mcpOAuthIssuer(deps);
+  if (
+    url.pathname === ORGANIZATION_MCP_PATH &&
+    url.origin === issuer &&
+    !url.username &&
+    !url.password &&
+    !url.search &&
+    !url.hash
+  ) {
+    return {
+      resource: `${issuer}${ORGANIZATION_MCP_PATH}`,
+      workspaceId: null,
+      kind: "organization",
+    };
+  }
   const match = url.pathname.match(WORKSPACE_MCP_PATH);
   if (url.origin !== issuer || url.username || url.password || url.search || url.hash || !match) {
     throw new HTTPException(400, { message: "invalid OAuth resource" });
@@ -711,7 +870,7 @@ export function renderMcpOAuthConsentPage(input: {
 <input type="hidden" name="request" value="${escapeHtml(input.requestToken)}">
 <label class="field"><span>Organization</span><select id="organization" name="organization" autocomplete="off">${accountOptions}</select></label>
 <label class="field"><span>Workspace</span><select id="workspace_id" name="workspace_id" autocomplete="off">${workspaceOptions}</select></label>
-<p class="note">The grant is limited to tools available in the workspace you authorize. OpenGeni rechecks live authority on every request.</p>
+<p class="note">The grant is limited to tools available in the workspace you authorize. Opengeni rechecks live authority on every request.</p>
 <div class="actions"><button class="approve" name="decision" value="approve">Authorize</button><button class="deny" name="decision" value="deny">Deny</button></div>
 </form>
 <script type="application/json" id="mcp-oauth-workspaces">${jsonForScript(workspacePayload)}</script>
@@ -814,7 +973,7 @@ function oauthDocument(input: {
   body: string;
   head?: string;
 }): string {
-  return `<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>${escapeHtml(input.title)}</title>${input.head ?? ""}<style>${OAUTH_PAGE_CSS}</style></head><body><main><p class="mark">OpenGeni</p><h1>${escapeHtml(input.heading)}</h1>${input.body}</main></body></html>`;
+  return `<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>${escapeHtml(input.title)}</title>${input.head ?? ""}<style>${OAUTH_PAGE_CSS}</style></head><body><main><p class="mark">Opengeni</p><h1>${escapeHtml(input.heading)}</h1>${input.body}</main></body></html>`;
 }
 
 const OAUTH_PAGE_CSS =
@@ -836,4 +995,135 @@ function oauthError(c: Context, error: string, status: 400 | 401 | 429) {
   c.header("cache-control", "no-store");
   c.header("pragma", "no-cache");
   return c.json({ error }, status);
+}
+
+/* ----------------------------------------------------------------------------
+   Organization server sign-in: a person picks the organization, what the agent
+   can do and where. The agent then acts as that person, never beyond their
+   live access, on every request.
+   -------------------------------------------------------------------------- */
+
+/** Read only, every workspace: the least surprising default until the person chooses. */
+function DEFAULT_ORGANIZATION_ACCESS(): OrganizationAccessPolicy {
+  return {
+    preset: "read_only",
+    permissions: organizationAccessPresetPermissions("read_only"),
+    workspaceScope: { kind: "all" },
+  };
+}
+
+const OrganizationConsentDecision = z.discriminatedUnion("decision", [
+  z.object({ decision: z.literal("deny") }).strict(),
+  z
+    .object({
+      decision: z.literal("approve"),
+      organizationId: z.string().uuid(),
+      access: OrganizationAccessPolicy,
+    })
+    .strict(),
+]);
+
+/** A person signed in to Opengeni in this browser: never a key, bearer or service. */
+async function requireBrowserPerson(
+  c: Context,
+  deps: ApiRouteDeps,
+): Promise<{ context: AccessContext }> {
+  requireNotAgent(c, "Approving a connection");
+  if (
+    deps.settings.productAccessMode !== "managed" ||
+    !c.req.header("cookie") ||
+    c.req.header("authorization")
+  ) {
+    throw new HTTPException(401, { message: "sign in to Opengeni in this browser first" });
+  }
+  const context = await requireAccessContext(c, deps);
+  if (context.mode !== "managed" || !context.subjectId.startsWith("user:")) {
+    throw new HTTPException(401, { message: "sign in to Opengeni in this browser first" });
+  }
+  return { context };
+}
+
+async function requirePendingOrganizationRequest(
+  deps: ApiRouteDeps,
+  requestToken: string,
+  person: { context: AccessContext },
+) {
+  const request = requestToken.startsWith(REQUEST_PREFIX)
+    ? await getMcpOAuthAuthorizationRequest(deps.db, tokenHash(requestToken))
+    : null;
+  if (!request || request.workspaceId !== null) {
+    throw new HTTPException(410, { message: "This sign-in expired or was already answered." });
+  }
+  if (request.subjectId !== person.context.subjectId) {
+    throw new HTTPException(403, { message: "This sign-in belongs to someone else." });
+  }
+  return request;
+}
+
+/** Organizations the person belongs to, with what they could hand an agent there. */
+async function consentOrganizations(deps: ApiRouteDeps, context: AccessContext) {
+  const memberOf = new Set(context.accountGrants.map((grant) => grant.accountId));
+  const workspaces = (await listConsentWorkspaces(deps, context)).filter((workspace) =>
+    memberOf.has(workspace.accountId),
+  );
+  const accounts = await consentAccountsForWorkspaces(
+    deps,
+    [...memberOf].map((accountId) => ({ accountId })),
+  );
+  const canonical = organizationAccessPresetPermissions("full");
+  return accounts.map((account) => {
+    const accountGrant = context.accountGrants.find((grant) => grant.accountId === account.id);
+    const workspaceGrants = context.workspaceGrants.filter(
+      (grant) => grant.accountId === account.id,
+    );
+    return {
+      id: account.id,
+      name: account.name,
+      workspaces: workspaces
+        .filter((workspace) => workspace.accountId === account.id)
+        .map((workspace) => ({
+          id: workspace.id,
+          name: workspace.name,
+          personal: workspace.kind === "personal",
+        })),
+      grantable: canonical.filter(
+        (permission) =>
+          (accountGrant !== undefined && hasPermission(accountGrant.permissions, permission)) ||
+          workspaceGrants.some((grant) => hasPermission(grant.permissions, permission)),
+      ),
+    };
+  });
+}
+
+function redirectHost(redirectUri: string): string | null {
+  try {
+    const url = new URL(redirectUri);
+    return url.host || url.protocol.replace(/:$/u, "");
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * The organization connection behind an organization-server bearer, or null
+ * when the request carries no MCP OAuth token. Invalid, revoked, expired or
+ * workspace-bound tokens are refused.
+ */
+export async function resolveOrganizationMcpOAuthAccess(
+  deps: ApiRouteDeps,
+  request: Request,
+): Promise<(McpOAuthAccess & { organizationAccess: OrganizationAccessPolicy }) | null> {
+  const token = mcpOAuthBearerToken(request);
+  if (!token) return null;
+  requireMcpOAuthEnabled(deps);
+  const access = await resolveMcpOAuthAccessToken(deps.db, tokenHash(token));
+  if (
+    !access ||
+    access.workspaceId !== null ||
+    access.organizationAccess === null ||
+    access.resource !== `${mcpOAuthIssuer(deps)}${ORGANIZATION_MCP_PATH}`
+  ) {
+    throw new HTTPException(401, { message: "invalid MCP OAuth access token" });
+  }
+  return { ...access, organizationAccess: access.organizationAccess };
 }

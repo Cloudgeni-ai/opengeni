@@ -1,8 +1,5 @@
 import { afterAll, beforeAll, expect, setDefaultTimeout, test } from "bun:test";
 import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/testing";
-import { execFileSync } from "node:child_process";
-import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
-import { pathToFileURL } from "node:url";
 import {
   createDb,
   evaluateRuntimeDatabasePosture,
@@ -19,7 +16,7 @@ afterAll(async () => {
   await shared?.release();
 }, 180_000);
 
-test("0590 inline private amounts add no owner-only helper to the frozen old EXECUTE inventory", async () => {
+test("0590 inline private amounts expose only the restricted runtime reader boundary", async () => {
   if (!shared) throw new Error("PostgreSQL test database unavailable");
   const [installed] = await shared.admin<Array<{ helper: string | null; summary: string }>>`
     select to_regprocedure('opengeni_private.organization_private_chat_usage(uuid,timestamptz,timestamptz)')::text as helper,
@@ -39,8 +36,8 @@ test("0590 inline private amounts add no owner-only helper to the frozen old EXE
       ('complete_workspace_insights_usage_projection', 'workspace_insights_amount_fact_rows',
        'organization_model_usage_summary', 'visible_workspace_insights_model_fact_rows')`;
   expect(routines).toHaveLength(4);
-  // The frozen old generic check requires every unknown installed routine to
-  // stay executable. No current-only owner-internal exemption participates.
+  // Released readers remain callable by the restricted runtime, never PUBLIC.
+  // The obsolete owner-only private-chat helper must not reappear.
   expect(routines.filter((routine) => !routine.execute)).toEqual([]);
   expect(routines.every((routine) => !routine.publicExecute)).toBe(true);
 });
@@ -190,19 +187,58 @@ test("0592 repairs the applied draft payer expression idempotently without chang
   }
 });
 
-test("frozen pre-feature and current binaries accept the complete real PostgreSQL routine inventory", async () => {
+test("current post-cutover runtime accepts the complete real PostgreSQL routine inventory", async () => {
   if (!shared) throw new Error("PostgreSQL test database unavailable");
-  const repoRoot = new URL("../../..", import.meta.url).pathname;
-  // Both the immutable original feature merge-base and origin/main fetched
-  // October 2, 2026, before #2768's new readers. Never filter either inventory.
-  const oldRevisions = ["76ff363228fcc5d26e24018b3335729f1e94237b", "131eda293"];
-  const root = await mkdtemp(`${repoRoot}/.insights-old-runtime-`);
+  // 0598 is a maintenance cutover: pre-cutover binaries must never run against
+  // this schema. Validate the matching current binary over the entire real
+  // inventory instead of filtering old violations or padding old allowlists.
   const runtime = createDb(shared.appUrl, { max: 2 });
   const options = {
     expectedRole: new URL(shared.appUrl).username,
     rlsStrategy: "force" as const,
     targetSchema: "public",
-    organizationTenancyCanonicalActivationEnabled: true,
+  };
+  const roles = {
+    appRole: options.expectedRole,
+    appPassword: new URL(shared.appUrl).password,
+    rlsStrategy: "force" as const,
+  };
+  const verify = async () => {
+    const posture = await inspectRuntimeDatabasePosture(runtime.db, options);
+    expect(evaluateRuntimeDatabasePosture(posture, options)).toEqual([]);
+    expect(posture.identity).toMatchObject({
+      currentUser: options.expectedRole,
+      sessionUser: options.expectedRole,
+      superuser: false,
+      bypassRls: false,
+    });
+    const routines = await shared!.admin<Array<{ name: string }>>`
+      select (procedure.proname || '(' || pg_catalog.oidvectortypes(procedure.proargtypes) || ')')::text as name
+      from pg_proc procedure join pg_namespace namespace on namespace.oid = procedure.pronamespace
+      where namespace.nspname = 'opengeni_private' and procedure.prokind in ('f', 'p')`;
+    expect(posture.privateRoutines.map((routine) => routine.name).sort()).toEqual(
+      routines.map((routine) => routine.name).sort(),
+    );
+  };
+  try {
+    await verify();
+    for (let pass = 0; pass < 2; pass += 1) {
+      await provisionRoles(shared.adminUrl, roles);
+      await verify();
+    }
+  } finally {
+    await provisionRoles(shared.adminUrl, roles);
+    await runtime.close();
+  }
+}, 180_000);
+
+test("current readiness rejects a revoked amount reader until canonical provisioning repairs it", async () => {
+  if (!shared) throw new Error("PostgreSQL test database unavailable");
+  const runtime = createDb(shared.appUrl, { max: 2 });
+  const options = {
+    expectedRole: new URL(shared.appUrl).username,
+    rlsStrategy: "force" as const,
+    targetSchema: "public",
   };
   const roles = {
     appRole: options.expectedRole,
@@ -210,46 +246,31 @@ test("frozen pre-feature and current binaries accept the complete real PostgreSQ
     rlsStrategy: "force" as const,
   };
   try {
-    for (const oldRevision of oldRevisions) {
-      // Distinct module URLs prevent Bun's import cache from reusing the first
-      // binary after the second frozen source has been extracted.
-      const directory = `${root}/${oldRevision}`;
-      await mkdir(directory);
-      for (const name of ["runtime-posture.ts", "role-relationships.ts", "provision-roles.ts"]) {
-        await writeFile(
-          `${directory}/${name}`,
-          execFileSync("git", ["show", `${oldRevision}:packages/db/src/${name}`], {
-            cwd: repoRoot,
-          }),
-        );
-      }
-      const old = await import(pathToFileURL(`${directory}/runtime-posture.ts`).href);
-      const oldProvision = await import(pathToFileURL(`${directory}/provision-roles.ts`).href);
-      const verify = async () => {
-        expect(
-          old.evaluateRuntimeDatabasePosture(
-            await old.inspectRuntimeDatabasePosture(runtime.db, options),
-            options,
-          ),
-          oldRevision,
-        ).toEqual([]);
-        expect(
-          evaluateRuntimeDatabasePosture(
-            await inspectRuntimeDatabasePosture(runtime.db, options),
-            options,
-          ),
-          oldRevision,
-        ).toEqual([]);
-      };
-      await verify();
-      await oldProvision.provisionRoles(shared.adminUrl, roles);
-      await verify();
-      await provisionRoles(shared.adminUrl, roles);
-      await verify();
-    }
+    const baseline = await inspectRuntimeDatabasePosture(runtime.db, options);
+    expect(evaluateRuntimeDatabasePosture(baseline, options)).toEqual([]);
+    const reader = baseline.privateRoutines.find((routine) =>
+      routine.name.startsWith("workspace_insights_amount_fact_rows("),
+    );
+    expect(reader?.execute).toBe(true);
+    await shared.admin`revoke execute on function
+      opengeni_private.workspace_insights_amount_fact_rows(uuid,timestamptz,timestamptz,text,text,uuid,uuid)
+      from ${shared.admin(options.expectedRole)}`;
+    const revoked = await inspectRuntimeDatabasePosture(runtime.db, options);
+    expect(revoked.privateRoutines.find((routine) => routine.name === reader!.name)?.execute).toBe(
+      false,
+    );
+    expect(evaluateRuntimeDatabasePosture(revoked, options)).toContain(
+      `runtime role lacks EXECUTE on private routine ${reader!.name}`,
+    );
+    await provisionRoles(shared.adminUrl, roles);
+    expect(
+      evaluateRuntimeDatabasePosture(
+        await inspectRuntimeDatabasePosture(runtime.db, options),
+        options,
+      ),
+    ).toEqual([]);
   } finally {
     await provisionRoles(shared.adminUrl, roles);
     await runtime.close();
-    await rm(root, { recursive: true, force: true });
   }
 }, 180_000);

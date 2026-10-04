@@ -29,6 +29,8 @@ import {
 import {
   FILE_ONLY_MESSAGE_TEXT,
   LightboxProvider,
+  ModelMark,
+  modelDisplayName,
   useChannels,
   useVariableSets,
   useWorkspaceSessions,
@@ -118,7 +120,6 @@ import {
   type CreateComposerFocusIntent,
 } from "@/lib/create-composer-focus";
 import type { RepoDraft } from "@/lib/session-tools";
-import { displayModel } from "@/lib/format";
 import { composerFallbackModel } from "@/lib/model-access-onboarding";
 import {
   isMachineComputeSelectable,
@@ -310,7 +311,6 @@ function SessionsIndexRouteContent({
     { panel: "capabilities"; nonce: number } | undefined
   >(undefined);
   // "+" > Capabilities: the workspace's defaults, or this chat's own choice.
-  const agentConfigEnabled = context.clientConfig.agentConfig?.enabled === true;
   const agentAvailability = useMemo(
     () => capabilityAvailability(context.clientConfig.agentConfig),
     [context.clientConfig.agentConfig],
@@ -323,32 +323,30 @@ function SessionsIndexRouteContent({
       }),
     [workspace?.settings],
   );
-  const composerAgentCapabilities = agentConfigEnabled
-    ? {
-        customized: draft.agentCapabilities !== undefined,
-        draft:
-          draft.agentCapabilities !== undefined
-            ? draftFromRequest(draft.agentCapabilities)
-            : workspaceAgentDraft,
-        availability: agentAvailability,
-        onCustomizedChange: (customized: boolean) =>
-          setDraft((current) => {
-            if (!customized) {
-              const { agentCapabilities: _dropped, ...rest } = current;
-              return rest;
-            }
-            return {
-              ...current,
-              agentCapabilities: requestFromDraft(workspaceAgentDraft, agentAvailability),
-            };
-          }),
-        onChange: (next: AgentCapabilityDraft) =>
-          setDraft((current) => ({
-            ...current,
-            agentCapabilities: requestFromDraft(next, agentAvailability),
-          })),
-      }
-    : undefined;
+  const composerAgentCapabilities = {
+    customized: draft.agentCapabilities !== undefined,
+    draft:
+      draft.agentCapabilities !== undefined
+        ? draftFromRequest(draft.agentCapabilities)
+        : workspaceAgentDraft,
+    availability: agentAvailability,
+    onCustomizedChange: (customized: boolean) =>
+      setDraft((current) => {
+        if (!customized) {
+          const { agentCapabilities: _dropped, ...rest } = current;
+          return rest;
+        }
+        return {
+          ...current,
+          agentCapabilities: requestFromDraft(workspaceAgentDraft, agentAvailability),
+        };
+      }),
+    onChange: (next: AgentCapabilityDraft) =>
+      setDraft((current) => ({
+        ...current,
+        agentCapabilities: requestFromDraft(next, agentAvailability),
+      })),
+  };
   const attachments = useDraftAttachments(
     workspaceId,
     personalWorkspace || draft.visibility === "private" ? "personal" : "workspace",
@@ -1644,6 +1642,7 @@ function SessionsIndexRouteContent({
           <div className="mt-6">
             <Suspense fallback={null}>
               <EmptyCreditsNotice
+                creditFunding={selectedPolicyRow?.catalog.creditFunding}
                 workspaceId={workspaceId}
                 accountId={workspace?.accountId ?? null}
                 canBuyCredits={hasAccountPermission(
@@ -1683,14 +1682,10 @@ function SessionsIndexRouteContent({
                     },
                   }}
                   menuSide="bottom"
-                  {...(composerAgentCapabilities
-                    ? {
-                        agentCapabilities: {
-                          ...composerAgentCapabilities,
-                          disabled: busy || newSessionDraft.loading,
-                        },
-                      }
-                    : {})}
+                  agentCapabilities={{
+                    ...composerAgentCapabilities,
+                    disabled: busy || newSessionDraft.loading,
+                  }}
                   draftChatSettings={{
                     workspaceId,
                     scope:
@@ -1805,7 +1800,7 @@ function SessionsIndexRouteContent({
                       }
                     : {})}
                 />
-                {composerAgentCapabilities?.customized ? (
+                {composerAgentCapabilities.customized ? (
                   <ComposerCapabilitiesChip
                     summary={capabilitySummary(
                       composerAgentCapabilities.draft.values,
@@ -2041,10 +2036,11 @@ function sessionRepoLabel(session: Session): string | null {
 function recentSessionModelPresentation(
   modelId: string,
   catalogRows: readonly PickerModelRow[],
-): { label: string; billingClass: PickerModelRow["billingClass"] } {
+): { label: string; billingClass: PickerModelRow["billingClass"]; logoUrl?: string | undefined } {
   const row = findPickerRow([...catalogRows], modelId);
   return {
-    label: row?.label ?? displayModel(modelId),
+    label: row?.label ?? modelDisplayName(modelId),
+    logoUrl: row?.catalog.logoUrl,
     billingClass:
       row?.billingClass ??
       (isCodexProductModel(modelId) ? "codex_subscription" : "opengeni_credits"),
@@ -2080,10 +2076,16 @@ function RecentSessionRow({
           <span className="block truncate text-sm text-fg group-hover:text-fg">{title}</span>
           {metaBits.length > 0 ? (
             <span className="mt-0.5 flex min-w-0 items-center gap-1.5 text-2xs text-fg-subtle">
-              <BillingClassMark
-                billingClass={model.billingClass}
+              <ModelMark
+                model={{ id: session.model, logoUrl: model.logoUrl }}
                 className="size-3 text-fg-muted"
-                aria-label=""
+                fallback={
+                  <BillingClassMark
+                    billingClass={model.billingClass}
+                    className="size-3"
+                    aria-label=""
+                  />
+                }
               />
               <span className="truncate">{metaBits.join(" · ")}</span>
             </span>
@@ -2147,6 +2149,9 @@ function SessionModelControl({
   return (
     <ModelPicker
       hasImageAttachments={hasImageAttachments}
+      onOpenChange={(open) => {
+        if (open) void modelCatalog.refresh();
+      }}
       rows={modelCatalog.rows}
       model={context.model}
       effort={context.reasoningEffort}

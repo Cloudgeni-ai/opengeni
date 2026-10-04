@@ -2060,7 +2060,16 @@ function groupReadableTurns(items: TimelineItem[]): TimelineGroup[] {
         item.text.startsWith("Approval needed") &&
         current !== undefined &&
         !current.endedAt;
-      if (!liveApprovalWait) groups.push({ kind: "item", item });
+      // Likewise the live "waiting on you" divider: the open turn's header
+      // already reads "Waiting for you · <elapsed>". It returns, resolved, as
+      // the "work resumed" divider once the session runs again.
+      const liveStatusWait =
+        item.kind === "session-status" &&
+        item.status === "requires_action" &&
+        !item.resolvedAt &&
+        current !== undefined &&
+        !current.endedAt;
+      if (!liveApprovalWait && !liveStatusWait) groups.push({ kind: "item", item });
       if (current && !current.endedAt) {
         if (
           item.kind === "notice" &&
@@ -2153,6 +2162,15 @@ function groupReadableTurns(items: TimelineItem[]): TimelineGroup[] {
         if (message === response || message.text.includes("![")) continue;
         foldedProse.add(message);
         group.work!.details.push({ kind: "item", item: message });
+      }
+    } else {
+      // Live progress stays primary above the work row, and is also listed in
+      // the work history so an expanded disclosure reads like the settled one.
+      // The timeline folds the outside copies only while that disclosure is open.
+      for (const message of prose) {
+        if (message.phase === "final_answer" || message.text.includes("![")) continue;
+        group.work!.details.push({ kind: "item", item: message });
+        (group.work!.liveNoteIds ??= []).push(message.id);
       }
     }
     // Preserve event chronology, not completion timestamps or activity kinds.

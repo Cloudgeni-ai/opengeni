@@ -11,6 +11,7 @@ COPY examples/chat-quickstart/package.json examples/chat-quickstart/package.json
 COPY examples/northstar-support/package.json examples/northstar-support/package.json
 COPY examples/embedded-product/package.json examples/embedded-product/package.json
 COPY examples/site-session-embed/package.json examples/site-session-embed/package.json
+COPY examples/tool-server/package.json examples/tool-server/package.json
 COPY packages/agent-proto/package.json packages/agent-proto/package.json
 COPY packages/artifact-kernel-wasm-document/package.json packages/artifact-kernel-wasm-document/package.json
 COPY packages/artifact-kernel-wasm-presentation/package.json packages/artifact-kernel-wasm-presentation/package.json
@@ -48,7 +49,22 @@ WORKDIR /app
 ARG OPENGENI_SERVER_VERSION
 ENV OPENGENI_SERVER_VERSION=$OPENGENI_SERVER_VERSION
 COPY --from=workspace-manifests / /app/
-RUN bun install --frozen-lockfile
+# Retry only this dependency-install boundary, never later builds or doctors.
+# A private retry cache avoids reusing a failed download/extraction without
+# deleting the original cache or changing the frozen dependency selection.
+RUN bun install --frozen-lockfile || { \
+      status=$?; \
+      for attempt in 1 2; do \
+        sleep "$((attempt * 5))" || exit "$?"; \
+        retry_cache="$(mktemp -d)" || exit "$?"; \
+        if BUN_INSTALL_CACHE_DIR="$retry_cache" bun install --frozen-lockfile; then \
+          exit 0; \
+        else \
+          status=$?; \
+        fi; \
+      done; \
+      exit "$status"; \
+    }
 
 COPY --chown=bun:bun . .
 

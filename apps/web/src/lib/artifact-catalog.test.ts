@@ -66,6 +66,38 @@ describe("artifact catalog", () => {
       filterArtifactCatalog([older, items[1]!], { ...defaultArtifactFilters, sort: "newest" })[0],
     ).toBe(items[1]!);
   });
+  test("pins come first in every sort without bypassing search, type or archive filters", () => {
+    const pinned = {
+      ...item("old", "site", "Zebra dashboard"),
+      pinned: true,
+      createdAt: "2026-08-01T00:00:00Z",
+      updatedAt: "2026-08-01T00:00:00Z",
+    };
+    const otherPin = { ...item("other", "document", "Alpha brief"), pinned: true };
+    const ordinary = item("new", "site", "A new dashboard");
+    const source = [ordinary, pinned, otherPin];
+    for (const sort of ["updated", "newest", "title"] as const) {
+      expect(filterArtifactCatalog(source, { ...defaultArtifactFilters, sort })).toEqual([
+        otherPin,
+        pinned,
+        ordinary,
+      ]);
+    }
+    expect(filterArtifactCatalog(source, { ...defaultArtifactFilters, kind: "site" })).toEqual([
+      pinned,
+      ordinary,
+    ]);
+    expect(filterArtifactCatalog(source, { ...defaultArtifactFilters, q: "new" })).toEqual([
+      ordinary,
+    ]);
+    expect(
+      filterArtifactCatalog(source, { ...defaultArtifactFilters, status: "archived" }),
+    ).toEqual([]);
+    expect(source).toEqual([ordinary, pinned, otherPin]);
+    expect(
+      filterArtifactCatalog([{ ...pinned, pinned: false }, ordinary], defaultArtifactFilters),
+    ).toEqual([ordinary, { ...pinned, pinned: false }]);
+  });
   test("builds plain artifact URLs with the return-to-session search", () => {
     expect(artifactPath("ws 1", { kind: "site", id: "a/b" })).toBe(
       "/workspaces/ws%201/artifacts/a%2Fb",

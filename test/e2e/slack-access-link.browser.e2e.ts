@@ -620,7 +620,19 @@ async function installAccessApi(page: Page, state: AccessUiState): Promise<void>
       return json({ invitations: [], nextCursor: null });
     }
     if (url.pathname.endsWith("/sessions")) {
-      return json({ sessions: [], pinned: [], pinnedTruncated: false, nextCursor: null });
+      return json({
+        sessions: [],
+        pinned: [],
+        pinnedTruncated: false,
+        nextCursor: null,
+        filtersApplied: true,
+        sortBy: url.searchParams.get("sortBy") ?? "updatedAt",
+        archiveStatus: url.searchParams.get("archiveStatus") ?? "active",
+        ...(url.searchParams.get("needsYouOnly") === "true" ? { needsYouOnly: true } : {}),
+        ...(url.searchParams.get("includeTotals") === "true"
+          ? { totals: { needsYouCount: 0, groups: [] } }
+          : {}),
+      });
     }
     return json({});
   });

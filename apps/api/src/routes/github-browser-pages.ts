@@ -40,7 +40,7 @@ const pageStyle = `
 `;
 
 function page(title: string, content: string): string {
-  return `<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>${escapeHtml(title)} · OpenGeni</title><style>${pageStyle}</style></head><body><div class="shell"><header><span class="brand">OpenGeni</span><span class="context">GitHub connection</span></header><main>${content}</main></div></body></html>`;
+  return `<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>${escapeHtml(title)} · Opengeni</title><style>${pageStyle}</style></head><body><div class="shell"><header><span class="brand">Opengeni</span><span class="context">GitHub connection</span></header><main>${content}</main></div></body></html>`;
 }
 
 export function githubInstallationChooserHtml(
@@ -61,21 +61,21 @@ export function githubInstallationChooserHtml(
     .join("");
   return page(
     "Choose a GitHub account",
-    `<h1>Choose a GitHub account</h1><p class="intro">Connect an account where the OpenGeni GitHub App is already installed, or install it on another account.</p><form id="existing-account" method="get" action="${escapeHtml(action)}"><input type="hidden" name="state" value="${escapeHtml(state)}"><fieldset class="options" aria-label="Available GitHub accounts">${options}</fieldset></form><div class="actions"><button class="button" type="submit" form="existing-account">Connect selected account</button><form method="get" action="${escapeHtml(action)}"><input type="hidden" name="state" value="${escapeHtml(state)}"><input type="hidden" name="installation_id" value="new"><button class="button secondary" type="submit">Install on another account</button></form></div><p class="note">Only accounts GitHub has confirmed you own or manage appear here.</p>`,
+    `<h1>Choose a GitHub account</h1><p class="intro">Connect an account where the Opengeni GitHub App is already installed, or install it on another account.</p><form id="existing-account" method="get" action="${escapeHtml(action)}"><input type="hidden" name="state" value="${escapeHtml(state)}"><fieldset class="options" aria-label="Available GitHub accounts">${options}</fieldset></form><div class="actions"><button class="button" type="submit" form="existing-account">Connect selected account</button><form method="get" action="${escapeHtml(action)}"><input type="hidden" name="state" value="${escapeHtml(state)}"><input type="hidden" name="installation_id" value="new"><button class="button secondary" type="submit">Install on another account</button></form></div><p class="note">Only accounts GitHub has confirmed you own or manage appear here.</p>`,
   );
 }
 
 export function githubSetupSuccessHtml(account: string, returnUrl: string): string {
   return page(
     "GitHub connected",
-    `<h1>GitHub connected</h1><p class="intro"><strong>${escapeHtml(account)}</strong> is now available in this OpenGeni workspace. OpenGeni can access only the repositories allowed for this installation.</p><a class="button" href="${escapeHtml(returnUrl)}">Back to OpenGeni</a>`,
+    `<h1>GitHub connected</h1><p class="intro"><strong>${escapeHtml(account)}</strong> is now available in this Opengeni workspace. Opengeni can access only the repositories allowed for this installation.</p><a class="button" href="${escapeHtml(returnUrl)}">Back to Opengeni</a>`,
   );
 }
 
 export function githubSetupPendingHtml(): string {
   return page(
     "GitHub approval pending",
-    `<h1>Waiting for an organization owner</h1><p>An owner needs to approve your GitHub App request before you can connect. OpenGeni has not created a workspace binding.</p>`,
+    `<h1>Waiting for an organization owner</h1><p>An owner needs to approve your GitHub App request before you can connect. Opengeni has not created a workspace binding.</p>`,
   );
 }
 
@@ -96,19 +96,19 @@ export type GitHubConnectFailure =
 const GITHUB_CONNECT_FAILURE_COPY: Record<GitHubConnectFailure, { title: string; body: string }> = {
   expired: {
     title: "This GitHub link expired",
-    body: "GitHub connection links stay valid for 10 minutes, and each one works once. Go back to OpenGeni and select Connect again to get a fresh link.",
+    body: "GitHub connection links stay valid for 10 minutes, and each one works once. Go back to Opengeni and select Connect again to get a fresh link.",
   },
   cancelled: {
     title: "GitHub connection cancelled",
-    body: "You cancelled on GitHub, so nothing was connected. Go back to OpenGeni and select Connect when you are ready.",
+    body: "You cancelled on GitHub, so nothing was connected. Go back to Opengeni and select Connect when you are ready.",
   },
   not_owner: {
     title: "An owner needs to connect this account",
-    body: "Only the owner of the GitHub account, or an owner of the GitHub organization, can connect it to OpenGeni. Ask an owner to connect it, or install the app on an account you own.",
+    body: "Only the owner of the GitHub account, or an owner of the GitHub organization, can connect it to Opengeni. Ask an owner to connect it, or install the app on an account you own.",
   },
   forbidden: {
     title: "You can't manage GitHub here",
-    body: "Your OpenGeni access doesn't allow connecting GitHub for this workspace. Ask a workspace admin to connect it.",
+    body: "Your Opengeni access doesn't allow connecting GitHub for this workspace. Ask a workspace admin to connect it.",
   },
   policy_denied: {
     title: "GitHub is turned off for your organization",
@@ -116,11 +116,11 @@ const GITHUB_CONNECT_FAILURE_COPY: Record<GitHubConnectFailure, { title: string;
   },
   signed_out: {
     title: "Sign in to continue",
-    body: "Your OpenGeni sign-in wasn't available when GitHub sent you back. Sign in to OpenGeni and select Connect again.",
+    body: "Your Opengeni sign-in wasn't available when GitHub sent you back. Sign in to Opengeni and select Connect again.",
   },
   failed: {
     title: "GitHub couldn't finish connecting",
-    body: "Nothing was connected. Go back to OpenGeni and select Connect to try again.",
+    body: "Nothing was connected. Go back to Opengeni and select Connect to try again.",
   },
 };
 
@@ -135,7 +135,7 @@ export function githubConnectFailureHtml(
     : "";
   return page(
     copy.title,
-    `<h1>${escapeHtml(copy.title)}</h1><p class="intro">${escapeHtml(copy.body)}</p><a class="button" href="${escapeHtml(returnUrl)}">Back to OpenGeni</a>${note}`,
+    `<h1>${escapeHtml(copy.title)}</h1><p class="intro">${escapeHtml(copy.body)}</p><a class="button" href="${escapeHtml(returnUrl)}">Back to Opengeni</a>${note}`,
   );
 }
 

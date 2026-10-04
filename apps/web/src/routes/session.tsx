@@ -40,13 +40,16 @@ import {
 import { LightboxProvider, type WorkspaceTab } from "@opengeni/react";
 import { MACHINES_SESSION_POLL_MS } from "@opengeni/react/machines";
 import {
+  ApprovalSurface,
   MessageTimeline,
   SessionChrome,
   KnowledgeActivityProvider,
   type TimelineSearchTarget,
 } from "@opengeni/react/session-ui";
 import type { SessionSearchRoute } from "@/lib/session-search-route";
+import { OPEN_CONVERSATION_FIND_EVENT } from "@/lib/conversation-find-event";
 import { expireArtifactCatalog } from "@/lib/artifact-catalog-cache";
+import { useArtifactCatalogMutationInvalidation } from "@/lib/use-artifact-catalog-mutation-invalidation";
 import {
   creditExhaustedFromEvents,
   conversationTimeline,
@@ -70,13 +73,10 @@ import { useNavigate } from "@tanstack/react-router";
 import {
   BotIcon,
   BugIcon,
-  CheckIcon,
   Loader2Icon,
   MenuIcon,
   MessagesSquareIcon,
   PanelsTopLeftIcon,
-  SearchIcon,
-  XIcon,
 } from "lucide-react";
 import {
   createElement,
@@ -118,7 +118,6 @@ import { SessionVariableSetPicker } from "@/components/session/session-variable-
 import { useSessionVariableSetPickerState } from "@/lib/use-session-variable-set-picker-state";
 import { Button } from "@/components/ui/button";
 import { EmptyState } from "@/components/ui/empty-state";
-import { Notice } from "@/components/ui/notice";
 import { useAppContext } from "@/context";
 import { useBrowserAccountBridgeBlocker } from "@/lib/browser-account-bridge";
 import type {
@@ -133,6 +132,9 @@ import {
 } from "@/lib/capabilities";
 import { startMcpOAuthWithTimeout } from "@/lib/mcp-oauth";
 import { hasAccountPermission, hasWorkspacePermission } from "@/lib/permissions";
+import { chatLearningScope } from "@/lib/chat-learning-scope";
+import { currentModelRecovery } from "@/lib/model-recovery";
+import { ModelRecoveryNotice } from "@/components/session/model-recovery-notice";
 import { isPersonalWorkspace } from "@/lib/managed-self-context";
 import {
   isTerminalSessionStatus,
@@ -1097,6 +1099,16 @@ export function SessionRoute({
     setSandboxFileRequest(null);
   }, [sessionId]);
   const setInspectorOpen = context.setInspectorOpen;
+  // Composer + > Chat settings opens the dock's Agent tab at its Agent learning.
+  const agentSettingsRequestSeq = useRef(0);
+  const [agentSettingsRequest, setAgentSettingsRequest] = useState<{
+    sessionId: string;
+    requestId: number;
+  } | null>(null);
+  const openAgentSettings = useCallback(() => {
+    setAgentSettingsRequest({ sessionId, requestId: ++agentSettingsRequestSeq.current });
+    setInspectorOpen(true);
+  }, [sessionId, setInspectorOpen]);
   const openSandboxFile = useCallback(
     (path: string, line?: number) => {
       setSandboxFileRequest({
@@ -1218,6 +1230,7 @@ export function SessionRoute({
       resolveProviderLogo={resolveProviderLogo}
       onReloadSession={refreshSession}
       onOpenSandboxFile={openSandboxFile}
+      onOpenAgentSettings={openAgentSettings}
     />
   );
 
@@ -1255,6 +1268,9 @@ export function SessionRoute({
         dockCollapsed={!context.inspectorOpen}
         onDockCollapsedChange={(collapsed) => context.setInspectorOpen(!collapsed)}
         openFileRequest={sandboxFileRequest}
+        openAgentSettingsRequest={
+          agentSettingsRequest?.sessionId === sessionId ? agentSettingsRequest : null
+        }
         onOpenNavigation={() => {
           context.setInspectorOpen(false);
           rail.setDrawerOpen(true);
@@ -1310,8 +1326,30 @@ function SessionDock(props: {
     line?: number | null;
     requestId: number;
   } | null;
+  /** Open the Agent tab at its Agent learning section. A new requestId reopens it. */
+  openAgentSettingsRequest?: { requestId: number } | null;
 }) {
   const context = useAppContext();
+  // One request sequence for every tab the host opens (an artifact, the Agent
+  // tab): the dock ignores a requestId it has already handled.
+  const tabRequestSeq = useRef(0);
+  const [tabRequest, setTabRequest] = useState<{
+    sessionId: string;
+    tab: string;
+    requestId: number;
+  } | null>(null);
+  const agentSettingsRequestId = props.openAgentSettingsRequest?.requestId ?? null;
+  const [agentLearningFocus, setAgentLearningFocus] = useState(0);
+  useEffect(() => {
+    if (agentSettingsRequestId === null) return;
+    setTabRequest({
+      sessionId: props.sessionId,
+      tab: "agent",
+      requestId: ++tabRequestSeq.current,
+    });
+    setAgentLearningFocus((value) => value + 1);
+  }, [agentSettingsRequestId, props.sessionId]);
+  const currentTabRequest = tabRequest?.sessionId === props.sessionId ? tabRequest : null;
   const dockLayoutStorageId = sessionDockLayoutStorageId(
     context.accessContext.subjectId,
     props.sessionId,
@@ -1352,6 +1390,11 @@ function SessionDock(props: {
     sessionId: props.sessionId,
     refreshSequence: artifactRefreshSequence,
   });
+  const expireAfterArtifactMutation = useArtifactCatalogMutationInvalidation(
+    context.client,
+    props.workspaceId,
+    expireArtifactCatalog,
+  );
   const [artifactRequest, setArtifactRequest] = useState<{
     sessionId: string;
     artifactId: string;
@@ -1361,6 +1404,15 @@ function SessionDock(props: {
   } | null>(null);
   const currentArtifactRequest =
     artifactRequest?.sessionId === props.sessionId ? artifactRequest : null;
+  const artifactTabRequestId = currentArtifactRequest?.requestId ?? null;
+  useEffect(() => {
+    if (artifactTabRequestId === null) return;
+    setTabRequest({
+      sessionId: props.sessionId,
+      tab: "artifacts",
+      requestId: ++tabRequestSeq.current,
+    });
+  }, [artifactTabRequestId, props.sessionId]);
   const artifactSummaries = [...artifactState.artifacts];
   // A just-published artifact may be linked before discovery refresh completes, or
   // belong to another session in this workspace. The viewer still authorizes its read.
@@ -1411,12 +1463,27 @@ function SessionDock(props: {
             initialSelectedArtifactId={dockNavigation.artifactId}
             openArtifactRequest={currentArtifactRequest}
             onSelectedArtifactIdChange={rememberArtifact}
+            onPin={
+              hasWorkspacePermission(context.accessContext, props.workspaceId, "artifacts:publish")
+                ? async (item, pinned) => {
+                    await context.client.updateArtifactPin(
+                      props.workspaceId,
+                      item.kind,
+                      item.id,
+                      pinned,
+                    );
+                    artifactState.applyPin(item.kind, item.id, pinned);
+                    expireAfterArtifactMutation();
+                    artifactState.retry();
+                  }
+                : undefined
+            }
           />
         </Suspense>
       ),
     },
   ];
-  if (props.session && context.clientConfig.agentConfig?.enabled) {
+  if (props.session) {
     trailingTabs.push({
       id: "agent",
       label: "Agent",
@@ -1428,6 +1495,7 @@ function SessionDock(props: {
             session={props.session}
             lastChange={lastAgentChange(props.events)}
             onReloadSession={props.onReloadSession}
+            learningFocusRequest={agentLearningFocus}
           />
         </Suspense>
       ),
@@ -1494,7 +1562,7 @@ function SessionDock(props: {
           {props.primary}
         </ArtifactLinkBoundary>
       }
-      openTabRequest={currentArtifactRequest}
+      openTabRequest={currentTabRequest}
       trailingTabs={trailingTabs}
       collapsed={props.dockCollapsed}
       onCollapsedChange={props.onDockCollapsedChange}
@@ -1523,6 +1591,7 @@ function useSessionEditableArtifactSummaries(input: {
   artifacts: readonly SessionEditableArtifactSummary[];
   status: SessionEditableArtifactsStatus;
   retry: () => void;
+  applyPin: (kind: SessionEditableArtifactSummary["modality"], id: string, pinned: boolean) => void;
 }> {
   const context = useAppContext();
   const authorityKey = `${input.workspaceId}:${input.sessionId}:${context.accessKeyVersion}`;
@@ -1599,9 +1668,25 @@ function useSessionEditableArtifactSummaries(input: {
   ]);
 
   const retry = useCallback(() => setRetrySequence((value) => value + 1), []);
+  const applyPin = useCallback(
+    (kind: SessionEditableArtifactSummary["modality"], id: string, pinned: boolean) => {
+      setLoaded((previous) => {
+        if (previous?.key !== authorityKey || previous.client !== context.client) return previous;
+        return {
+          ...previous,
+          artifacts: previous.artifacts.map((artifact) =>
+            artifact.modality === kind && artifact.id === id && artifact.catalogItem
+              ? { ...artifact, catalogItem: { ...artifact.catalogItem, pinned } }
+              : artifact,
+          ),
+        };
+      });
+    },
+    [authorityKey, context.client],
+  );
   return loaded?.key === authorityKey && loaded.client === context.client
-    ? { artifacts: loaded.artifacts, status: loaded.status, retry }
-    : { artifacts: [], status: "loading", retry };
+    ? { artifacts: loaded.artifacts, status: loaded.status, retry, applyPin }
+    : { artifacts: [], status: "loading", retry, applyPin };
 }
 
 function SessionChatPane(props: {
@@ -1650,14 +1735,20 @@ function SessionChatPane(props: {
   resolveProviderLogo: (providerDomain: string) => string | null;
   onReloadSession: () => Promise<void>;
   onOpenSandboxFile: (path: string, line?: number) => void;
+  /** Composer + > Chat settings: open this chat's Agent tab. */
+  onOpenAgentSettings: () => void;
 }) {
   const context = useAppContext();
   const [findOpen, setFindOpen] = useState(!!props.searchTarget.find);
   const [findMounted, setFindMounted] = useState(!!props.searchTarget.find);
   const [findFocusRevision, setFindFocusRevision] = useState(0);
   const [activeSearchTarget, setActiveSearchTarget] = useState<TimelineSearchTarget | null>(null);
-  const findButton = useRef<HTMLButtonElement>(null);
+  // Find opens from the session header (or Ctrl/Cmd+F); closing returns focus
+  // to whatever opened it.
+  const findReturnFocus = useRef<HTMLElement | null>(null);
   const openFind = useCallback(() => {
+    const active = document.activeElement;
+    if (active instanceof HTMLElement && active !== document.body) findReturnFocus.current = active;
     setFindMounted(true);
     setFindOpen(true);
     setFindFocusRevision((value) => value + 1);
@@ -1669,8 +1760,23 @@ function SessionChatPane(props: {
     setFindOpen(false);
     setActiveSearchTarget(null);
     onSearchOriginConsumed();
-    requestAnimationFrame(() => findButton.current?.focus({ preventScroll: true }));
+    requestAnimationFrame(() => {
+      // Back to whatever opened Find, else the header's Find button when shown.
+      const opener = findReturnFocus.current;
+      findReturnFocus.current = null;
+      const trigger = document.querySelector<HTMLElement>("[data-conversation-find-trigger]");
+      const target = opener?.isConnected
+        ? opener
+        : trigger && trigger.getClientRects().length > 0
+          ? trigger
+          : null;
+      target?.focus({ preventScroll: true });
+    });
   }, [onSearchOriginConsumed]);
+  useEffect(() => {
+    document.addEventListener(OPEN_CONVERSATION_FIND_EVENT, openFind);
+    return () => document.removeEventListener(OPEN_CONVERSATION_FIND_EVENT, openFind);
+  }, [openFind]);
   useEffect(() => {
     if (props.searchTarget.find) openFind();
   }, [
@@ -1701,7 +1807,17 @@ function SessionChatPane(props: {
     window.addEventListener("keydown", onKeyDown);
     return () => window.removeEventListener("keydown", onKeyDown);
   }, [openFind]);
-  const modelCatalog = useWorkspaceModelCatalog(props.session.workspaceId);
+  const fundingRevision = useMemo(() => {
+    for (let index = props.events.length - 1; index >= 0; index -= 1) {
+      const event = props.events[index]!;
+      if (event.type === "agent.model.usage") return event.sequence;
+    }
+    return 0;
+  }, [props.events]);
+  const modelCatalog = useWorkspaceModelCatalog(
+    props.session.workspaceId,
+    `${props.session.id}:${props.session.status}:${fundingRevision}`,
+  );
   const fleet = useWorkspaceMachines({
     sessionId: props.session.id,
     pollIntervalMs: MACHINES_SESSION_POLL_MS,
@@ -1851,14 +1967,14 @@ function SessionChatPane(props: {
         return;
       }
       setApprovalPending((current) => ({ ...current, [approvalId]: decision }));
+      // A failure propagates so the approval surface releases its fence and
+      // the buttons stay live for a retry.
       try {
         await (decision === "approve" ? props.onApprove(approvalId) : props.onReject(approvalId));
         setApprovalSettled((current) => ({
           ...current,
           [approvalId]: decision,
         }));
-      } catch {
-        // The route already surfaced a toast; leave the buttons live to retry.
       } finally {
         setApprovalPending((current) => {
           const next = { ...current };
@@ -2738,6 +2854,7 @@ function SessionChatPane(props: {
             }
             canChooseModel={canChooseRecoveryModel}
             hasModelPicker={hasComposerPolicy}
+            onChooseModel={() => setModelPickerSession(props.session.id)}
             freeModel={isDeploymentFreeModel(modelCatalog.rows, props.session.model)}
             subscriptions={connectableSubscriptions(context.clientConfig.models)}
             modelChanged={Boolean(composerPolicy && composerPolicy.model !== props.session.model)}
@@ -2815,6 +2932,10 @@ function SessionChatPane(props: {
       </FailureRecoveryBoundary>
     ) : null;
 
+  const modelRecovery = props.hasNewer
+    ? null
+    : currentModelRecovery({ ...props.session, effectiveControl: admissionControl }, props.events);
+
   return createElement(
     LightboxProvider,
     null,
@@ -2823,21 +2944,6 @@ function SessionChatPane(props: {
       enabled={!terminal && context.clientConfig.fileUploads.enabled === true}
       onFiles={attachments.addFiles}
     >
-      <div className="flex shrink-0 justify-end px-3 py-1">
-        <Button
-          ref={findButton}
-          type="button"
-          variant="ghost"
-          size="sm"
-          onClick={openFind}
-          aria-label="Find in conversation"
-          title="Find in conversation (Ctrl/Cmd+F)"
-          className="text-xs text-fg-muted"
-        >
-          <SearchIcon className="size-3.5" />
-          Find
-        </Button>
-      </div>
       {findMounted ? (
         <Suspense fallback={null}>
           <ConversationFind
@@ -3016,50 +3122,17 @@ function SessionChatPane(props: {
           actionable Approve/Reject buttons for an already-resumed turn. */}
       {props.approvals.length > 0 && props.session.status === "requires_action" ? (
         <div className="mx-auto w-full max-w-3xl shrink-0 px-4 sm:px-6">
-          <div className="grid max-h-64 gap-3 overflow-y-auto pb-2">
-            {props.approvals.map((approval) => {
-              const pending = approvalPending[approval.id];
-              const settled = approvalSettled[approval.id];
-              const busy = Boolean(pending) || Boolean(settled);
-              const payload = JSON.stringify(approval.arguments ?? approval.raw ?? {}, null, 2);
-              return (
-                <Notice key={approval.id} tone="waiting" title={approval.name}>
-                  <pre className="mt-2 max-h-40 overflow-auto whitespace-pre-wrap rounded-md border border-border bg-surface-2/60 p-2.5 font-mono text-xs leading-5 text-fg-muted">
-                    {payload}
-                  </pre>
-                  <div className="mt-3 flex justify-end gap-2">
-                    <Button
-                      size="sm"
-                      disabled={busy}
-                      onClick={() => void decideApproval(approval.id, "approve")}
-                    >
-                      {pending === "approve" ? (
-                        <Loader2Icon className="size-3.5 animate-spin" />
-                      ) : (
-                        <CheckIcon className="size-3.5" />
-                      )}
-                      {settled === "approve" ? "Approved" : "Approve"}
-                    </Button>
-                    <Button
-                      size="sm"
-                      variant="destructive"
-                      disabled={busy}
-                      onClick={() => void decideApproval(approval.id, "reject")}
-                    >
-                      {pending === "reject" ? (
-                        <Loader2Icon className="size-3.5 animate-spin" />
-                      ) : (
-                        <XIcon className="size-3.5" />
-                      )}
-                      {settled === "reject" ? "Rejected" : "Reject"}
-                    </Button>
-                  </div>
-                </Notice>
-              );
-            })}
+          <div className="max-h-80 overflow-y-auto pb-2">
+            <ApprovalSurface
+              approvals={props.approvals}
+              onApprove={(approval) => decideApproval(approval.id, "approve")}
+              onReject={(approval) => decideApproval(approval.id, "reject")}
+            />
           </div>
         </div>
       ) : null}
+
+      {modelRecovery ? <ModelRecoveryNotice recovery={modelRecovery} /> : null}
 
       {((props.session.inputWait && props.session.status === "idle") ||
         (props.session.status === "queued" && !props.session.activeTurnId)) &&
@@ -3167,13 +3240,12 @@ function SessionChatPane(props: {
                   chatSettings={{
                     workspaceId: props.session.workspaceId,
                     sessionId: props.session.id,
-                    scope:
-                      props.session.tenancy?.visibility === "private" ||
-                      props.session.memoryScope === "user" ||
-                      isPersonalWorkspace(workspace, context.managedSelfContext)
-                        ? "personal"
-                        : "workspace",
+                    scope: chatLearningScope(
+                      props.session,
+                      isPersonalWorkspace(workspace, context.managedSelfContext),
+                    ),
                     canEdit: workspacePermissions.includes("sessions:control"),
+                    onOpen: props.onOpenAgentSettings,
                   }}
                   workspaceId={props.session.workspaceId}
                   disabled={terminal || composer.sending}
@@ -3286,7 +3358,10 @@ function SessionChatPane(props: {
                     (file) => file.status !== "failed" && file.contentType.startsWith("image/"),
                   )}
                   open={modelPickerSession === props.session.id && !pendingRetryInput}
-                  onOpenChange={(open) => setModelPickerSession(open ? props.session.id : null)}
+                  onOpenChange={(open) => {
+                    setModelPickerSession(open ? props.session.id : null);
+                    if (open) void modelCatalog.refresh();
+                  }}
                   rows={modelCatalog.rows}
                   model={model}
                   effort={reasoningEffort}

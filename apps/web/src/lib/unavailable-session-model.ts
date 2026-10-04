@@ -5,7 +5,7 @@ import type {
   WorkspaceModelCatalogModel,
 } from "@opengeni/sdk";
 
-import { displayModel } from "@/lib/format";
+import { modelDisplayName } from "@opengeni/sdk/model-display";
 import {
   defaultEffortForModel,
   findPickerRow,
@@ -42,15 +42,12 @@ export function sessionModelMissingFromCatalog(input: {
 }
 
 /**
- * A readable name for a model the catalog no longer describes. Known product
- * ids get their display label; otherwise the last id segment without a
- * routing variant (`openrouter/vendor/name:free` becomes `name`).
+ * A readable name for a model the catalog no longer describes: the shared
+ * display name, never the routing id (`openrouter/vendor/name:free` becomes
+ * `Name`, `codex/gpt-6.1-sol` becomes `GPT-6.1 Sol`).
  */
 export function unavailableModelName(modelId: string): string {
-  const display = displayModel(modelId);
-  if (display !== modelId) return display;
-  const lastSegment = modelId.split("/").filter(Boolean).at(-1) ?? modelId;
-  return lastSegment.replace(/:[^:]+$/, "") || modelId;
+  return modelDisplayName(modelId);
 }
 
 export type UnavailableModelReplacement = {

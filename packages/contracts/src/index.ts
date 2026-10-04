@@ -1,3 +1,14 @@
+import { modelLogoUrl } from "./model-display";
+import {
+  ClaudeProviderAccountAuthoritySnapshotV1,
+  WORKSPACE_CLAUDE_PROVIDER_ACCOUNT_AUTHORITY_SNAPSHOT_V1,
+} from "./claude-provider-account-authority";
+export {
+  SubscriptionAccountSummary,
+  SubscriptionPoolSettings,
+  ClaudeSubscriptionAccount,
+  ClaudeSubscriptionAccountsResponse,
+} from "./subscription-account-pools";
 export * from "./direct-model-provider";
 export * from "./artifact-catalog";
 export * from "./claude-subscription-usage";
@@ -66,6 +77,8 @@ export const HostMcpCreateSelections = z
 export type HostMcpCreateSelection = z.input<typeof HostMcpCreateSelections>[number];
 import { Permission } from "./permissions";
 import { OrganizationApiKeyPreset } from "./api-key-presets";
+import { OrganizationAccessPolicy, OrganizationWorkspaceScope } from "./organization-access";
+export * from "./organization-access";
 import { ScopedKnowledgeScope } from "./scoped-knowledge";
 export { siteSessionPath, SiteSessionPathError } from "./site-session-http";
 import {
@@ -1113,6 +1126,10 @@ export function currentAgentLearningToolSelection(
 
 const FIRST_PARTY_COMPATIBILITY_ONLY_TOOL_NAMES = [
   "slack_bot_post_message",
+  // Keep historical policies parseable without advertising native API execution.
+  "atlassian_sources_list",
+  "atlassian_search",
+  "atlassian_get",
   ...RETIRED_AGENT_LEARNING_TOOL_NAMES,
 ] as const satisfies readonly FirstPartyMcpToolName[];
 
@@ -2586,8 +2603,7 @@ export const UpdateWorkspaceSettingsRequest = z
     slackReactionSummon: WorkspaceSlackReactionSummonSettings.optional(),
     slackOrchestrationNotices: WorkspaceSlackOrchestrationNoticeSettings.optional(),
     defaultSandboxImage: WorkspaceDefaultSandboxImage.nullable().optional(),
-    // Agent defaults for new sessions; null clears them. Requires the agent
-    // configuration admission switch.
+    // Agent defaults for new sessions; null clears them.
     sessionAgentDefaults: WorkspaceAgentDefaults.nullable().optional(),
   })
   .passthrough();
@@ -2796,7 +2812,7 @@ export const ServiceTurnInitiatorContext = TurnInitiatorContext.superRefine((val
       ctx.addIssue({
         code: z.ZodIssueCode.custom,
         path: [key],
-        message: `${key} is reserved OpenGeni initiator context`,
+        message: `${key} is reserved Opengeni initiator context`,
       });
     }
   }
@@ -2842,6 +2858,8 @@ export const AccessGrant = z.object({
   subjectId: z.string().min(1),
   subjectLabel: z.string().optional(),
   permissions: z.array(Permission),
+  /** Explicit policies do not expand workspace:admin into unselected permissions. */
+  permissionMode: z.enum(["legacy", "explicit"]).optional(),
   // Trusted principal provenance. Delegated grants copy this from the signed
   // token claim; managed/local grants derive it from their authenticated path.
   principalKind: AccessPrincipalKind.optional(),
@@ -2879,6 +2897,8 @@ export const AccessCredential = z.object({
    * from organization-key authority. Account permissions remain in accountGrants.
    */
   effectiveWorkspacePermissions: z.array(Permission),
+  policy: OrganizationAccessPolicy.optional(),
+  workspaceScope: OrganizationWorkspaceScope.optional(),
   note: z.string(),
 });
 export type AccessCredential = z.infer<typeof AccessCredential>;
@@ -3485,6 +3505,15 @@ export const ApiKey = z.object({
    * Omitted for workspace-scoped keys, whose permissions are explicit.
    */
   access: OrganizationApiKeyAccess.optional(),
+  policy: OrganizationAccessPolicy.optional(),
+  workspaceScope: OrganizationWorkspaceScope.optional(),
+  /** Legacy keys retain their historical workspace-admin wildcard. */
+  permissionMode: z.enum(["legacy", "explicit"]).optional(),
+  /** Organization keys: the service account that holds the key. */
+  serviceAccount: z
+    .object({ id: z.string().uuid(), name: z.string(), role: z.enum(["admin", "member"]) })
+    .nullable()
+    .optional(),
   expiresAt: z.string().nullable(),
   revokedAt: z.string().nullable(),
   lastUsedAt: z.string().nullable(),
@@ -3517,13 +3546,30 @@ export const CreateOrganizationApiKeyRequest = z
     access: OrganizationApiKeyAccess.default("full"),
     /** Optional creation alias for the developer_setup access tier. */
     preset: OrganizationApiKeyPreset.optional(),
+    policy: OrganizationAccessPolicy.optional(),
+    /** The service account that holds the key; omitted creates one named after the key. */
+    serviceAccountId: z.string().uuid().optional(),
   })
   .strict()
   .refine((request) => request.preset !== "developer_setup" || request.access !== "read", {
     path: ["access"],
     message: "Developer setup is not read-only organization API key access",
+  })
+  .refine((request) => !request.policy || (!request.preset && request.access === "full"), {
+    path: ["policy"],
+    message: "Choose either a policy or a legacy access tier/preset",
   });
 export type CreateOrganizationApiKeyRequest = z.infer<typeof CreateOrganizationApiKeyRequest>;
+
+export const UpdateOrganizationApiKeyRequest = z
+  .object({
+    name: z.string().trim().min(1).max(200).optional(),
+    description: z.string().trim().min(1).max(500).nullable().optional(),
+    policy: OrganizationAccessPolicy.optional(),
+  })
+  .strict()
+  .refine((request) => Object.keys(request).length > 0, "At least one change is required");
+export type UpdateOrganizationApiKeyRequest = z.infer<typeof UpdateOrganizationApiKeyRequest>;
 
 // A person (or API key) with access to a workspace: one workspace_memberships
 // row. `subjectId` is `user:<betterAuthUserId>` or `api_key:<id>`; the People
@@ -3820,12 +3866,13 @@ export type InsightsSpendDriver = z.infer<typeof InsightsSpendDriver>;
 
 /**
  * Usage grouped by each root session's current project. `other` folds the
- * projects past the listed limit; `unavailable` holds trees whose root the
- * viewer cannot read. Rows sum to the window totals.
+ * projects past the listed limit; `unavailable` holds private trees whose root
+ * the viewer cannot read; `deleted` holds retained usage without a session.
+ * Rows sum to the window totals. Neither amounts-only bucket identifies chats.
  */
 export const InsightsProjectRow = z.object({
   id: z.string().min(1),
-  kind: z.enum(["project", "other", "unfiled", "unavailable"]),
+  kind: z.enum(["project", "other", "unfiled", "unavailable", "deleted"]),
   label: z.string().min(1),
   projects: z.number().int().nonnegative(),
   rootSessions: z.number().int().nonnegative(),
@@ -3994,6 +4041,8 @@ export const WorkspaceInsightsSnapshot = z.object({
   priorInputTokens: z.number().nonnegative(),
   priorTotalTokens: z.number().nonnegative(),
   priorCacheHitPct: z.number().int().min(0).max(100),
+  /** Prior input whose cache details are known. Omitted by older API replicas. */
+  priorCacheInputTokens: z.number().nonnegative().optional(),
   priorCalls: z.number().int().nonnegative(),
   /** Lifetime workspace topology (not scoped to the selected Insights range). */
   goalsActive: z.number().int().nonnegative(),
@@ -4955,11 +5004,26 @@ export type GitHubAppApiPort = {
   }) => Promise<GitHubAppRepositoryBranchPage>;
 };
 
+export const PromotionalCreditScope = z.object({
+  label: z.string().trim().min(1).max(120),
+  eligibleModelIds: z.array(z.string().trim().min(1).max(200)).min(1).max(40),
+});
+export type PromotionalCreditScope = z.infer<typeof PromotionalCreditScope>;
+
+export const PromotionalCreditBalance = PromotionalCreditScope.extend({
+  grantId: z.string().uuid(),
+  remainingMicros: z.number().int().nonnegative(),
+});
+export type PromotionalCreditBalance = z.infer<typeof PromotionalCreditBalance>;
+
 export const BillingBalance = z.object({
   accountId: z.string().uuid(),
   balanceMicros: z.number().int(),
   currency: z.literal("usd"),
   updatedAt: z.string(),
+  /** General credits, including unrestricted legacy grants. May be negative after use. */
+  generalBalanceMicros: z.number().int().optional(),
+  promotionalCredits: z.array(PromotionalCreditBalance).optional(),
 });
 export type BillingBalance = z.infer<typeof BillingBalance>;
 
@@ -4990,6 +5054,7 @@ export const CreateCheckoutResponse = z.object({
   url: z.string().url(),
   /** The credits this checkout grants once it completes. */
   amountUsd: z.number().optional(),
+  promotionalScope: PromotionalCreditScope.optional(),
 });
 export type CreateCheckoutResponse = z.infer<typeof CreateCheckoutResponse>;
 
@@ -5007,6 +5072,7 @@ export const BillingCheckoutStatus = z.object({
     currency: z.literal("usd"),
     /** True when a coupon covered the whole checkout, so nothing was charged. */
     free: z.boolean(),
+    promotionalScope: PromotionalCreditScope.optional(),
   }),
   balance: BillingBalance.nullable(),
 });
@@ -6660,6 +6726,16 @@ export const SessionGoalContinuation = z.object({
   holdReason: z.string().nullable().optional(),
 });
 export type SessionGoalContinuation = z.infer<typeof SessionGoalContinuation>;
+
+/** New admission pauses are specific; the wire field remains open for older peers. */
+export type GoalAdmissionPausedReason =
+  | "model_unavailable"
+  | "model_policy"
+  | "credits"
+  | "budget"
+  | "usage_limit"
+  | "usage_policy"
+  | "allowance";
 
 export const SessionGoal = z.object({
   id: z.string().uuid(),
@@ -8473,7 +8549,7 @@ export const ChildWaitingCapacityPayload = z
     type: z.literal("child_waiting_capacity"),
     childSessionId: z.string().uuid(),
     childTurnId: z.string().uuid(),
-    provider: z.enum(["codex", "xai"]),
+    provider: z.enum(["codex", "xai", "claude"]),
     nextCheckAt: z.string().nullable(),
   })
   .passthrough();
@@ -8844,6 +8920,8 @@ type RenderableSessionSystemUpdate = Pick<
  */
 export type SessionSystemUpdateBatchRenderOptions = {
   deliveredAt?: Date | string | null;
+  /** Server-derived configuration facts, model memory only. */
+  selectionNotes?: Readonly<Record<string, string>>;
 };
 
 function renderSessionSystemUpdateDeliveredAt(
@@ -8881,6 +8959,9 @@ export function renderSessionSystemUpdateBatch(
         summary: update.summary,
         payload: update.payload,
         lineage: update.lineage,
+        ...(options.selectionNotes?.[update.id]
+          ? { selectionNote: options.selectionNotes[update.id] }
+          : {}),
       })),
     }),
   ].join("\n");
@@ -10039,7 +10120,8 @@ export const ScheduledTaskAgentConfigInput = /* @__PURE__ */ z
       context.addIssue({
         code: "custom",
         path: ["sandboxBackend"],
-        message: "selfhosted scheduled tasks require machineTarget",
+        message:
+          "Omit sandboxBackend and select machineTarget for a separate agent; existing-chat schedules inherit the chat's machine",
       });
     }
     if (scheduledTaskJsonUtf8Bytes(value) > SCHEDULED_TASK_AGENT_CONFIG_MAX_BYTES) {
@@ -10301,7 +10383,11 @@ export const ScheduledTaskRunAcceptedExecution = /* @__PURE__ */ z
       .nullable()
       .default(null),
     xaiProviderAccountAuthoritySnapshot: XaiProviderAccountAuthoritySnapshotV1,
+    claudeProviderAccountAuthoritySnapshot: ClaudeProviderAccountAuthoritySnapshotV1.default(
+      WORKSPACE_CLAUDE_PROVIDER_ACCOUNT_AUTHORITY_SNAPSHOT_V1,
+    ),
     xaiAuthoritySubjectId: z.string().min(1).nullable(),
+    claudeAuthoritySubjectId: z.string().min(1).nullable().default(null),
     connectionAuthoritySubjectId: z.string().min(1).nullable(),
     triggerInitiator: TurnInitiator,
     agentRunUsageIdempotencyKey: z.string().min(1).max(512).nullable(),
@@ -10372,7 +10458,8 @@ export type KnowledgeSourceSyncRunSummary = z.infer<typeof KnowledgeSourceSyncRu
  * means every occurrence is refused until the task or a resource it names
  * changes. Known reasons: `scheduled_authority_unavailable`,
  * `machine_target_unavailable`, `machine_enrollment_inactive`,
- * `variable_set_unavailable`, `rig_version_unavailable` (terminal) and
+ * `variable_set_unavailable`, `rig_version_unavailable`, `scheduled_model_unavailable`
+ * (terminal) and
  * `insufficient_credits`, `allowance_exhausted`, `monthly_model_cost_limit`, `monthly_agent_run_limit`
  * (transient). Readers must tolerate new reasons.
  */
@@ -10663,11 +10750,56 @@ const CreateKnowledgeSourceSyncScheduledTaskRequest = /* @__PURE__ */ z
     connectionAccounts: [],
   }));
 
+/** Schedule a message in an existing chat, whose execution settings are inherited. */
+export const CreateSessionScheduledTaskRequest = /* @__PURE__ */ z
+  .object({
+    name: ScheduledTaskNameInput,
+    schedule: ScheduledTaskScheduleSpec,
+    prompt: ScheduledTaskAgentConfigInput.shape.prompt,
+    targetSessionId: z.string().uuid(),
+    connectionAccounts: McpConnectionAccountSelections.default([]),
+    runMode: z.literal("existing_session").default("existing_session"),
+    overlapPolicy: ScheduledTaskOverlapPolicy.default("buffer_one"),
+    status: ScheduledTaskStatus.default("active"),
+    metadata: ScheduledTaskMetadataInput.default({}),
+  })
+  .strict()
+  .superRefine((value, context) => {
+    const result = ScheduledTaskAgentConfigInput.safeParse({ prompt: value.prompt });
+    if (!result.success) for (const issue of result.error.issues) context.addIssue({ ...issue });
+  })
+  .transform(({ prompt, ...value }) => ({
+    ...value,
+    action: { kind: "agent_turn" as const },
+    agentConfig: {
+      prompt,
+      resources: [],
+      tools: [],
+      metadata: {},
+    } as ScheduledTaskAgentConfigInput,
+    variableSetId: undefined,
+    environmentId: undefined,
+    rigId: undefined,
+  }));
+
 export const CreateScheduledTaskRequest = /* @__PURE__ */ z.union([
   CreateKnowledgeSourceSyncScheduledTaskRequest,
   CreateAgentScheduledTaskRequest,
+  CreateSessionScheduledTaskRequest,
 ]);
 export type CreateScheduledTaskRequest = z.infer<typeof CreateScheduledTaskRequest>;
+
+/** Reviewable access consequences of moving a schedule to another chat. */
+export const ScheduledTaskTargetAccessChange = z
+  .object({
+    code: z.literal("scheduled_target_access_change"),
+    targetSessionId: z.uuid(),
+    removedVariableSetIds: z.array(z.uuid()).max(100),
+    removedVariableSetCount: z.number().int().min(0).max(100),
+    removedRigId: z.uuid().nullable(),
+    resolution: z.string().max(512),
+  })
+  .strict();
 
 export const UpdateScheduledTaskRequest =
   /* @__PURE__ */ withVariableSetIdAlias(
@@ -10691,17 +10823,25 @@ export const UpdateScheduledTaskRequest =
       connectionAuthorities: z.never().optional(),
       connectionAccounts: McpConnectionAccountSelections.optional(),
 
+      /** Compare against the reviewed execution digest; rejects concurrent edits. */
+      expectedExecutionDigest: z.string().min(1).max(128).optional(),
+      /** Accept a retarget's explicitly reported changes to attached access. */
+      adoptSessionSettings: z.literal(true).optional(),
+      /** Lossless instruction edit; all other saved fields are preserved. */
+      prompt: ScheduledTaskAgentConfigInput.shape.prompt.optional(),
+
       agentConfig: ScheduledTaskAgentConfigInput.optional(),
       // Narrow, lossless update: never reconstruct agentConfig from its
       // bounded MCP projection. Full agentConfig retains replacement semantics.
       agentConfigPatch: z
         .object({
+          prompt: ScheduledTaskAgentConfigInput.shape.prompt.optional(),
           model: scheduledTaskBoundedString(512, "scheduled task model").optional(),
           reasoningEffort: ReasoningEffort.optional(),
         })
         .strict()
-        .refine((patch) => patch.model !== undefined || patch.reasoningEffort !== undefined, {
-          message: "agentConfigPatch requires model or reasoningEffort",
+        .refine((patch) => Object.keys(patch).length > 0, {
+          message: "agentConfigPatch requires prompt, model or reasoningEffort",
         })
         .optional(),
       status: ScheduledTaskStatus.optional(),
@@ -10714,6 +10854,24 @@ export const UpdateScheduledTaskRequest =
     },
     { rejectKeys: ["selectedHostMcpDelegations"] },
   ).superRefine((value, context) => {
+    if (value.adoptSessionSettings && !value.expectedExecutionDigest) {
+      context.addIssue({
+        code: "custom",
+        path: ["expectedExecutionDigest"],
+        message:
+          "Review the current schedule and supply expectedExecutionDigest when accepting destination access changes",
+      });
+    }
+    if (
+      value.prompt !== undefined &&
+      (value.agentConfig || value.agentConfigPatch?.prompt !== undefined)
+    ) {
+      context.addIssue({
+        code: "custom",
+        path: ["prompt"],
+        message: "Supply prompt once, without agentConfig replacement or agentConfigPatch.prompt",
+      });
+    }
     if (value.agentConfig && value.agentConfigPatch) {
       context.addIssue({
         code: "custom",
@@ -12114,23 +12272,25 @@ export const InstallLibrarySkillRequest = z
   .strict();
 export type InstallLibrarySkillRequest = z.infer<typeof InstallLibrarySkillRequest>;
 
-export const InstalledSkill = z.object({
-  skillReceipt: SkillWriteReceipt.optional(),
-  capabilityId: z.string().min(1),
-  pluginId: z.string().uuid(),
-  pluginVersionId: z.string().uuid(),
-  facetId: z.string().uuid(),
-  pluginInstallationId: z.string().uuid(),
-  facetInstallationId: z.string().uuid(),
-  installationVersion: z.number().int().positive(),
-  source: SkillInstallationSource,
-  version: z.string().min(1).max(96),
-  sourceUrl: z.string().url(),
-  sourceCommit: z.string().regex(/^[0-9a-f]{40,64}$/),
-  contentSha256: z.string().regex(/^[0-9a-f]{64}$/),
-  name: z.string(),
-  status: z.literal("installed"),
-});
+export const InstalledSkill = /* @__PURE__ */ defineSkillContractSchema(() =>
+  z.object({
+    skillReceipt: SkillWriteReceipt.optional(),
+    capabilityId: z.string().min(1),
+    pluginId: z.string().uuid(),
+    pluginVersionId: z.string().uuid(),
+    facetId: z.string().uuid(),
+    pluginInstallationId: z.string().uuid(),
+    facetInstallationId: z.string().uuid(),
+    installationVersion: z.number().int().positive(),
+    source: SkillInstallationSource,
+    version: z.string().min(1).max(96),
+    sourceUrl: z.string().url(),
+    sourceCommit: z.string().regex(/^[0-9a-f]{40,64}$/),
+    contentSha256: z.string().regex(/^[0-9a-f]{64}$/),
+    name: z.string(),
+    status: z.literal("installed"),
+  }),
+);
 export type InstalledSkill = z.infer<typeof InstalledSkill>;
 
 export const CapabilityComponentOwner = z.object({
@@ -12849,21 +13009,23 @@ export const InstallPluginRequest = z
   .strict();
 export type InstallPluginRequest = z.infer<typeof InstallPluginRequest>;
 
-export const InstalledPlugin = z
-  .object({
-    skillWrites: z.array(SkillWriteReceipt).optional(),
-    skillPublications: z.array(SkillPublicationReceipt).optional(),
-    skillReleases: z.array(SkillSourceReleaseReceipt).optional(),
-    pluginKey: z.string().min(1),
-    version: z.string().min(1),
-    pluginId: z.string().uuid(),
-    pluginVersionId: z.string().uuid(),
-    pluginInstallationId: z.string().uuid(),
-    installationVersion: z.number().int().positive(),
-    componentCount: z.number().int().positive(),
-    status: z.literal("installed"),
-  })
-  .strict();
+export const InstalledPlugin = /* @__PURE__ */ defineSkillContractSchema(() =>
+  z
+    .object({
+      skillWrites: z.array(SkillWriteReceipt).optional(),
+      skillPublications: z.array(SkillPublicationReceipt).optional(),
+      skillReleases: z.array(SkillSourceReleaseReceipt).optional(),
+      pluginKey: z.string().min(1),
+      version: z.string().min(1),
+      pluginId: z.string().uuid(),
+      pluginVersionId: z.string().uuid(),
+      pluginInstallationId: z.string().uuid(),
+      installationVersion: z.number().int().positive(),
+      componentCount: z.number().int().positive(),
+      status: z.literal("installed"),
+    })
+    .strict(),
+);
 export type InstalledPlugin = z.infer<typeof InstalledPlugin>;
 
 export const PluginInstallationSummary = z
@@ -13383,6 +13545,27 @@ export type CreateSessionResponse = z.infer<typeof CreateSessionResponse>;
 
 export type SessionSummary = Session;
 
+/** Content-free complete root discovery metadata, independent of page size. */
+export const SessionListTotals = /* @__PURE__ */ defineSkillContractSchema(() =>
+  z.object({
+    needsYouCount: z.number().int().nonnegative(),
+    groups: z.array(
+      z.object({
+        channelId: z.string().uuid().nullable(),
+        total: z.number().int().nonnegative(),
+        attention: z.number().int().nonnegative(),
+        attentionSince: z.string().datetime().nullable(),
+        failed: z.number().int().nonnegative(),
+        active: z.number().int().nonnegative(),
+        queued: z.number().int().nonnegative(),
+        unread: z.number().int().nonnegative(),
+        activeWork: z.number().int().nonnegative(),
+      }),
+    ),
+  }),
+);
+export type SessionListTotals = z.infer<typeof SessionListTotals>;
+
 /**
  * The canonical session-list page. Pinned rows are returned separately and are
  * excluded from `sessions`, so a cursor can page ordinary recency rows without
@@ -13395,6 +13578,9 @@ export const SessionListResponse = /* @__PURE__ */ defineSkillContractSchema(() 
   z.object({
     pinned: z.array(Session),
     filtersApplied: z.literal(true).optional(),
+    /** Explicit receipt: older servers may acknowledge other filters only. */
+    needsYouOnly: z.literal(true).optional(),
+    totals: SessionListTotals.optional(),
     /** Effective server ordering; name uses ASCII-space trim, ASCII case fold,
      * UTF-8 byte order, then id ASC. Date keys and their id ties use DESC. */
     sortBy: z.enum(["updatedAt", "createdAt", "name", "archivedAt"]).optional(),
@@ -13551,6 +13737,7 @@ export const SessionEventType = z.enum([
   "turn.cancelled",
   "turn.superseded",
   "turn.recovery.requested",
+  "turn.dispatch.expired",
   "turn.capacity_waiting",
   // Compact, attempt-fenced user-visible worker preparation checkpoints. The
   // payload phase is a closed enum and terminal events carry durationMs; no
@@ -13928,6 +14115,7 @@ export const SESSION_EVENT_SEMANTIC_CLASS_TYPES = {
     "session.context.compaction.skipped",
     "session.context.cleared",
     "turn.recovery.requested",
+    "turn.dispatch.expired",
     "session.queue.history",
     "sandbox.box.snapshot",
     "workspace.revision.captured",
@@ -16098,7 +16286,7 @@ export const CreateSessionRequest = /* @__PURE__ */ defineSkillContractSchema(()
       firstPartyMcpTools: z.array(FirstPartyMcpToolName).optional(),
       // One agent configuration: capabilities, identity, instructions alias and
       // renderer. Omission keeps today's behavior (or inherits a configured
-      // parent). Children may only narrow. Behind the admission switch.
+      // parent). Children may only narrow.
       agent: AgentConfigRequest.optional(),
       // Third-party MCP servers attached only to this session. For an agent-created
       // child, omission snapshots its trusted immediate parent's server definitions,
@@ -16221,76 +16409,78 @@ export const HumanInputOption = z.object({
 });
 export type HumanInputOption = z.infer<typeof HumanInputOption>;
 
-export const HumanInputQuestion = z
-  .object({
-    id: z.string().min(1).max(64),
-    kind: HumanInputQuestionKind,
-    prompt: z.string().min(1).max(4096),
-    label: z.string().min(1).max(128).nullable().optional(),
-    helpText: z.string().max(2048).nullable().optional(),
-    // Strict model tool schemas encode an absent optional object as null.
-    // A real review reference still requires every authority-bearing field.
-    skillReview: SkillReviewReference.nullable().optional(),
-    options: z.array(HumanInputOption).max(20).default([]),
-    required: z.boolean().default(true),
-    // Retained on the wire for older hosts. OpenGeni's stock runtime and
-    // surfaces always expose Other for choice questions, including requests
-    // that were persisted before that became the default behavior.
-    allowOther: z.boolean().default(false),
-    // Selection bounds only — agents invent useless text char mins/maxes.
-    // Answer strings stay platform-capped on HumanInputAnswer (~8192).
-    validation: z
-      .object({
-        minSelections: z.number().int().nonnegative().max(20).nullable().optional(),
-        maxSelections: z.number().int().positive().max(20).nullable().optional(),
-      })
-      .nullable()
-      .optional(),
-  })
-  .superRefine((question, ctx) => {
-    const optionIds = new Set(question.options.map((option) => option.id));
-    if (optionIds.size !== question.options.length) {
-      ctx.addIssue({
-        code: "custom",
-        path: ["options"],
-        message: "option ids must be unique",
-      });
-    }
-    if (question.kind === "text") {
-      if (question.options.length > 0) {
+export const HumanInputQuestion = /* @__PURE__ */ defineSkillContractSchema(() =>
+  z
+    .object({
+      id: z.string().min(1).max(64),
+      kind: HumanInputQuestionKind,
+      prompt: z.string().min(1).max(4096),
+      label: z.string().min(1).max(128).nullable().optional(),
+      helpText: z.string().max(2048).nullable().optional(),
+      // Strict model tool schemas encode an absent optional object as null.
+      // A real review reference still requires every authority-bearing field.
+      skillReview: SkillReviewReference.nullable().optional(),
+      options: z.array(HumanInputOption).max(20).default([]),
+      required: z.boolean().default(true),
+      // Retained on the wire for older hosts. OpenGeni's stock runtime and
+      // surfaces always expose Other for choice questions, including requests
+      // that were persisted before that became the default behavior.
+      allowOther: z.boolean().default(false),
+      // Selection bounds only — agents invent useless text char mins/maxes.
+      // Answer strings stay platform-capped on HumanInputAnswer (~8192).
+      validation: z
+        .object({
+          minSelections: z.number().int().nonnegative().max(20).nullable().optional(),
+          maxSelections: z.number().int().positive().max(20).nullable().optional(),
+        })
+        .nullable()
+        .optional(),
+    })
+    .superRefine((question, ctx) => {
+      const optionIds = new Set(question.options.map((option) => option.id));
+      if (optionIds.size !== question.options.length) {
         ctx.addIssue({
           code: "custom",
           path: ["options"],
-          message: "text questions cannot have options",
+          message: "option ids must be unique",
         });
       }
-      if (question.allowOther) {
+      if (question.kind === "text") {
+        if (question.options.length > 0) {
+          ctx.addIssue({
+            code: "custom",
+            path: ["options"],
+            message: "text questions cannot have options",
+          });
+        }
+        if (question.allowOther) {
+          ctx.addIssue({
+            code: "custom",
+            path: ["allowOther"],
+            message: "text questions do not use Other",
+          });
+        }
+      } else if (question.options.length === 0) {
         ctx.addIssue({
           code: "custom",
-          path: ["allowOther"],
-          message: "text questions do not use Other",
+          path: ["options"],
+          message: "select questions require options",
         });
       }
-    } else if (question.options.length === 0) {
-      ctx.addIssue({
-        code: "custom",
-        path: ["options"],
-        message: "select questions require options",
-      });
-    }
-    const validation = question.validation;
-    if (
-      validation?.minSelections != null &&
-      validation?.maxSelections != null &&
-      validation.minSelections > validation.maxSelections
-    ) {
-      ctx.addIssue({
-        code: "custom",
-        path: ["validation"],
-        message: "minSelections exceeds maxSelections",
-      });
-    }
-  });
+      const validation = question.validation;
+      if (
+        validation?.minSelections != null &&
+        validation?.maxSelections != null &&
+        validation.minSelections > validation.maxSelections
+      ) {
+        ctx.addIssue({
+          code: "custom",
+          path: ["validation"],
+          message: "minSelections exceeds maxSelections",
+        });
+      }
+    }),
+);
 export type HumanInputQuestion = z.infer<typeof HumanInputQuestion>;
 
 /** Only known presentation wire differences are equivalent. This is not
@@ -16337,17 +16527,19 @@ export const HumanInputRequestStatus = z.enum([
 ]);
 export type HumanInputRequestStatus = z.infer<typeof HumanInputRequestStatus>;
 
-export const RequestHumanInputToolInput = z.object({
-  questions: z.array(HumanInputQuestion).min(1).max(20),
-  allowSkip: z.boolean().default(false),
-  expiresInSeconds: z
-    .number()
-    .int()
-    .positive()
-    .max(30 * 24 * 60 * 60)
-    .nullable()
-    .optional(),
-});
+export const RequestHumanInputToolInput = /* @__PURE__ */ defineSkillContractSchema(() =>
+  z.object({
+    questions: z.array(HumanInputQuestion).min(1).max(20),
+    allowSkip: z.boolean().default(false),
+    expiresInSeconds: z
+      .number()
+      .int()
+      .positive()
+      .max(30 * 24 * 60 * 60)
+      .nullable()
+      .optional(),
+  }),
+);
 export type RequestHumanInputToolInput = z.infer<typeof RequestHumanInputToolInput>;
 
 export const HumanInputAnswer = z.object({
@@ -16377,24 +16569,26 @@ export const SubmitHumanInputResponseRequest = z.discriminatedUnion("outcome", [
 ]);
 export type SubmitHumanInputResponseRequest = z.infer<typeof SubmitHumanInputResponseRequest>;
 
-export const SessionHumanInputRequest = z.object({
-  id: z.string().uuid(),
-  workspaceId: z.string().uuid(),
-  sessionId: z.string().uuid(),
-  turnId: z.string().uuid(),
-  turnGeneration: z.number().int().positive(),
-  creationAttemptId: z.string().uuid(),
-  toolCallId: z.string().min(1).max(1024),
-  status: HumanInputRequestStatus,
-  questions: z.array(HumanInputQuestion).min(1).max(20),
-  allowSkip: z.boolean(),
-  response: HumanInputResponse.nullable(),
-  respondedBy: z.string().max(1024).nullable(),
-  respondedAt: z.string().nullable(),
-  expiresAt: z.string().nullable(),
-  createdAt: z.string(),
-  updatedAt: z.string(),
-});
+export const SessionHumanInputRequest = /* @__PURE__ */ defineSkillContractSchema(() =>
+  z.object({
+    id: z.string().uuid(),
+    workspaceId: z.string().uuid(),
+    sessionId: z.string().uuid(),
+    turnId: z.string().uuid(),
+    turnGeneration: z.number().int().positive(),
+    creationAttemptId: z.string().uuid(),
+    toolCallId: z.string().min(1).max(1024),
+    status: HumanInputRequestStatus,
+    questions: z.array(HumanInputQuestion).min(1).max(20),
+    allowSkip: z.boolean(),
+    response: HumanInputResponse.nullable(),
+    respondedBy: z.string().max(1024).nullable(),
+    respondedAt: z.string().nullable(),
+    expiresAt: z.string().nullable(),
+    createdAt: z.string(),
+    updatedAt: z.string(),
+  }),
+);
 export type SessionHumanInputRequest = z.infer<typeof SessionHumanInputRequest>;
 
 /**
@@ -16499,6 +16693,8 @@ export const ClientSessionEvent = z.discriminatedUnion("type", [
       approvalId: z.string().min(1).max(SESSION_OPERATION_KEY_MAX_CHARS),
       decision: z.enum(["approve", "reject"]),
       message: z.string().optional(),
+      // Write-only header rotation committed with the response before resume.
+      mcpCredentialUpdates: z.array(SessionMcpCredentialUpdateInput).optional(),
     }),
   }),
   z.object({
@@ -16507,6 +16703,8 @@ export const ClientSessionEvent = z.discriminatedUnion("type", [
     payload: z.object({
       requestId: z.string().uuid(),
       response: SubmitHumanInputResponseRequest,
+      // Write-only header rotation committed with the response before resume.
+      mcpCredentialUpdates: z.array(SessionMcpCredentialUpdateInput).optional(),
     }),
   }),
 ]);
@@ -17606,7 +17804,7 @@ export const ModelCredentialSourceV1 =
       z
         .object({
           kind: z.literal("connected_subscription"),
-          provider: z.enum(["codex", "xai"]),
+          provider: z.enum(["codex", "xai", "claude"]),
         })
         .strict(),
       z
@@ -17929,6 +18127,10 @@ export const ClientModel = /* @__PURE__ */ defineModelContractSchema(() =>
     label: z.string(),
     /** Optional curated compact label for dense UI (e.g. mobile composer). */
     shortLabel: z.string().min(1).max(64).optional(),
+    logoUrl: z
+      .string()
+      .refine((value) => modelLogoUrl({ id: "", logoUrl: value }) !== null)
+      .optional(),
     provider: z.string(), // provider id
     providerLabel: z.string(),
     api: z.enum(["responses", "chat", "anthropic-messages"]),
@@ -18049,6 +18251,8 @@ export const WorkspaceModelCatalogModel =
   /* @__PURE__ */ defineModelContractSchema(() =>
     ClientModel.extend({
       credentialReadiness: ModelCredentialReadinessV1,
+      /** Current funding status, without exposing the organization's balance. */
+      creditFunding: z.enum(["promotional", "general", "unavailable"]).optional(),
       /** Exact workspace-policy verdict without exposing provider identity. */
       policyAllowed: z.boolean().optional(),
       availability: ModelAvailabilityV1,
@@ -18197,8 +18401,8 @@ export const ClientConfig = /* @__PURE__ */ defineModelContractSchema(() =>
       maxSizeBytes: VOICE_INPUT_MAX_SIZE_BYTES,
       acceptedMimeTypes: [...VOICE_INPUT_ACCEPTED_MIME_TYPES],
     }),
-    // Agent configuration rollout: whether `agent` is admitted, whether new
-    // sessions default to a configuration, and per-capability availability.
+    // Agent configuration: per-capability availability. `enabled` and
+    // `defaultForNewSessions` are deprecated; current servers report `true`.
     agentConfig: ClientAgentConfig.default({
       enabled: false,
       defaultForNewSessions: false,
@@ -18356,6 +18560,7 @@ export function evaluateWorkspaceModelPolicy(
 
 export * from "./codex-fleet-policy";
 export * from "./xai-provider-account-authority";
+export * from "./claude-provider-account-authority";
 export * from "./workspace-instruction-policies";
 export * from "./company-profile";
 export * from "./company-brain";
@@ -18386,5 +18591,7 @@ export { mcpEndpointIdentity } from "./mcp-endpoint";
 export { pluginMcpUnavailableReason } from "./mcp-endpoint";
 export * from "./connector-tool-permissions";
 export * from "./mcp-catalog-limits";
+export * from "./slack-rest-mcp";
 export * from "./skill-catalog-context";
 export * from "./sandbox-recovery";
+export * from "./modal-native-proof-v2";

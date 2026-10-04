@@ -56,9 +56,19 @@ import {
   workspaceModelsRedirect,
   type ModelsView,
 } from "@/lib/models-route";
-import { parseKnowledgeSearch, type KnowledgeSearch } from "@/lib/knowledge-route";
+import {
+  documentsRedirectSearch,
+  parseKnowledgeSearch,
+  type KnowledgeSearch,
+} from "@/lib/knowledge-route";
 import { parseApiKeyParam } from "@/lib/api-keys-route";
-import { parseDeveloperView, parseWebhookParam, type DeveloperView } from "@/lib/developer-route";
+import {
+  parseAgentParam,
+  parseServiceAccountParam,
+  parseDeveloperView,
+  parseWebhookParam,
+  type DeveloperView,
+} from "@/lib/developer-route";
 import { parseAccessSearch, type AccessUrlView } from "@/lib/access-route";
 import {
   workspaceSettingsSectionFromSearch,
@@ -98,6 +108,10 @@ const LazyIntegrationsReturnRoute = lazyRouteComponent(
   "IntegrationsReturnRoute",
 );
 const LazyDeviceRoute = lazyRouteComponent(() => import("@/routes/device"), "DeviceRoute");
+const LazyConnectAgentRoute = lazyRouteComponent(
+  () => import("@/routes/connect-agent"),
+  "ConnectAgentRoute",
+);
 const LazyVariableSetsRoute = lazyRouteComponent(
   () => import("@/routes/variable-sets"),
   "VariableSetsRoute",
@@ -231,6 +245,19 @@ const integrationsReturnRoute = createRoute({
 // /billing, NOT workspace-scoped): the agent prints `${origin}/device?user_code=…`
 // when it starts an enrollment; the page resolves the owning workspace from the
 // code via `lookupDeviceEnrollment`, so no workspace lives in the URL.
+// Where an agent's sign-in to the organization MCP server lands: the person
+// picks the organization, what the agent can do and where (/v1/mcp OAuth).
+const connectAgentRoute = createRoute({
+  getParentRoute: () => rootRoute,
+  path: "connect-agent",
+  validateSearch: (search: Record<string, unknown>): { request?: string; authorize?: string } => ({
+    ...(typeof search.request === "string" && search.request ? { request: search.request } : {}),
+    ...(typeof search.authorize === "string" && search.authorize
+      ? { authorize: search.authorize }
+      : {}),
+  }),
+  component: ConnectAgent,
+});
 const deviceRoute = createRoute({
   getParentRoute: () => rootRoute,
   path: "device",
@@ -381,21 +408,33 @@ const workspaceMachinesRoute = createRoute({
   path: "machines",
   component: Machines,
 });
+// Mirrors the UsageSearch keys in components/insights/usage-search.ts (kept here
+// so the route table doesn't import the lazy Insights chunk).
 const INSIGHTS_SEARCH_KEYS = [
   "view",
   "range",
-  "chart",
-  "provider",
+  "group",
+  "metric",
+  "split",
+  "tab",
+  "ws",
+  "prov",
   "model",
+  "payer",
+  "proj",
+  "who",
   "root",
-  "session",
+  "sched",
+  "src",
+  "start",
+  "end",
 ] as const;
 type InsightsRawSearch = Partial<Record<(typeof INSIGHTS_SEARCH_KEYS)[number], string>>;
 const workspaceInsightsRoute = createRoute({
   getParentRoute: () => workspaceRoute,
   path: "insights",
   // Insights filters pass as strings (the lazy chunk validates their values);
-  // `from` is set when opened from Organization settings > Billing & usage.
+  // `from` is set when opened from Organization settings > Billing.
   validateSearch: (search: Record<string, unknown>): InsightsRawSearch & ReturnToSearch => ({
     ...Object.fromEntries(
       INSIGHTS_SEARCH_KEYS.flatMap((key) =>
@@ -595,7 +634,10 @@ const workspaceOrganizationRoute = createRoute({
     invitation?: string;
     workspace?: string;
     webhook?: string;
-  } & ReturnToSearch => {
+    agent?: string;
+    serviceAccount?: string;
+  } & InsightsRawSearch &
+    ReturnToSearch => {
     const checkout = parseCheckoutOutcome(search);
     const checkoutSession =
       checkout === "success" ? parseCheckoutSessionId(search.checkoutSession) : null;
@@ -610,6 +652,9 @@ const workspaceOrganizationRoute = createRoute({
             ? (parseOrganizationView(search.view) ?? parseDeveloperView(search.view))
             : undefined;
     const webhook = section === "developer" ? parseWebhookParam(search.webhook) : undefined;
+    const agent = section === "developer" ? parseAgentParam(search.agent) : undefined;
+    const serviceAccount =
+      section === "developer" ? parseServiceAccountParam(search.serviceAccount) : undefined;
     const person = section === "people" ? parseOrganizationRecordId(search.person) : undefined;
     const invitation =
       section === "people" ? parseOrganizationRecordId(search.invitation) : undefined;
@@ -630,6 +675,15 @@ const workspaceOrganizationRoute = createRoute({
       ...(invitation ? { invitation } : {}),
       ...(workspace ? { workspace } : {}),
       ...(webhook ? { webhook } : {}),
+      ...(agent ? { agent } : {}),
+      ...(serviceAccount ? { serviceAccount } : {}),
+      ...(section === "insights"
+        ? Object.fromEntries(
+            INSIGHTS_SEARCH_KEYS.flatMap((key) =>
+              key !== "view" && typeof search[key] === "string" ? [[key, search[key]]] : [],
+            ),
+          )
+        : {}),
       ...parseReturnTo(search),
     };
   },
@@ -652,6 +706,7 @@ const routeTree = rootRoute.addChildren([
   billingReturnRoute,
   integrationsReturnRoute,
   deviceRoute,
+  connectAgentRoute,
   resetPasswordRoute,
   identityLinkRoute,
   setupAccountRoute,
@@ -892,12 +947,12 @@ function ScheduleEdit() {
 
 function Documents() {
   const { workspaceId } = workspaceDocumentsRoute.useParams();
-  const { memory } = workspaceDocumentsRoute.useSearch();
+  const { memory, authority } = workspaceDocumentsRoute.useSearch();
   return (
     <Navigate
       to="/workspaces/$workspaceId/state"
       params={{ workspaceId }}
-      search={memory ? parseKnowledgeSearch({ entry: memory }) : { view: "files" }}
+      search={documentsRedirectSearch({ memory, authority })}
       replace
     />
   );
@@ -1011,6 +1066,8 @@ function RetainedArtifact() {
 
 function Organization() {
   const { workspaceId } = workspaceOrganizationRoute.useParams();
+  const search = workspaceOrganizationRoute.useSearch();
+  const navigate = workspaceOrganizationRoute.useNavigate();
   const {
     checkout,
     checkoutSession,
@@ -1021,6 +1078,8 @@ function Organization() {
     invitation,
     workspace,
     webhook,
+    agent,
+    serviceAccount,
     from,
     fromLabel,
   } = workspaceOrganizationRoute.useSearch();
@@ -1040,12 +1099,27 @@ function Organization() {
           ? {
               ...(parseDeveloperView(view) ? { view: parseDeveloperView(view)! } : {}),
               ...(webhook ? { webhook } : {}),
+              ...(agent ? { agent } : {}),
+              ...(serviceAccount ? { serviceAccount } : {}),
             }
           : undefined
       }
       person={person}
       invitation={invitation}
       workspace={workspace}
+      insights={
+        page === "insights"
+          ? {
+              search: Object.fromEntries(
+                INSIGHTS_SEARCH_KEYS.flatMap((key) =>
+                  typeof search[key] === "string" ? [[key, search[key]]] : [],
+                ),
+              ),
+              onSearchChange: (next: Record<string, string | undefined>) =>
+                void navigate({ search: { section: "insights", ...next } }),
+            }
+          : undefined
+      }
     />
   );
 }
@@ -1061,6 +1135,11 @@ function AccountRedirect() {
       replace
     />
   );
+}
+
+function ConnectAgent() {
+  const { request, authorize } = connectAgentRoute.useSearch();
+  return <LazyConnectAgentRoute request={request} authorize={authorize} />;
 }
 
 function Device() {

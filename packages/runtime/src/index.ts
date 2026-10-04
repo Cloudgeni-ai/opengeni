@@ -159,9 +159,16 @@ import {
 } from "./lazy-tool-transport";
 import {
   GMAIL_REST_MCP_BRIDGE_ADAPTER,
+  gmailRestResultOutcome,
+  isOfficialGmailMcpConfig,
   type GmailRestMcpBridgeConfig,
   type GmailRestMcpBridgeContext,
 } from "./gmail-rest-mcp";
+import {
+  SLACK_REST_MCP_BRIDGE_ADAPTER,
+  type SlackApiRateLimiter,
+  type SlackRestMcpBridgeContext,
+} from "./slack-rest-mcp";
 
 import { McpResultCustomDataBridge, unwrapSdkMcpResultProjection } from "./mcp-result-custom-data";
 import {
@@ -199,9 +206,20 @@ export {
   GmailRestMcpServer,
   OFFICIAL_GMAIL_MCP_URL,
   gmailRestToolIsMutation,
+  gmailToolSupportsScopes,
   isOfficialGmailMcpConfig,
   type GmailRestMcpServerOptions,
 } from "./gmail-rest-mcp";
+export {
+  SLACK_REST_API_BASE,
+  SLACK_REST_MCP_TOOLS,
+  SlackRestMcpServer,
+  OFFICIAL_SLACK_MCP_URL,
+  slackRestToolIsMutation,
+  isOfficialSlackMcpConfig,
+  type SlackRestMcpServerOptions,
+  type SlackApiRateLimiter,
+} from "./slack-rest-mcp";
 import {
   Agent,
   AgentsError,
@@ -430,6 +448,7 @@ import {
   withModelTransportStartedObserver,
   type ModelPreparationMeasurement,
   type ModelPreparationPhase,
+  type ModelTransportDispatchClock,
 } from "./model-preparation-diagnostics";
 import {
   HUMAN_INPUT_TOOL_NAME,
@@ -486,6 +505,7 @@ export {
 export type {
   ModelPreparationMeasurement,
   ModelPreparationPhase,
+  ModelTransportDispatchClock,
 } from "./model-preparation-diagnostics";
 export {
   markModelPreparationFirstSandboxOperation,
@@ -754,10 +774,11 @@ export type {
 
 ensureReadableStreamFrom();
 
+type BuiltInMcpBridgeContext = GmailRestMcpBridgeContext & SlackRestMcpBridgeContext;
 const BUILT_IN_MCP_BRIDGE_ADAPTERS: readonly LocalMcpBridgeAdapter<
   GmailRestMcpBridgeConfig,
-  GmailRestMcpBridgeContext
->[] = Object.freeze([GMAIL_REST_MCP_BRIDGE_ADAPTER]);
+  BuiltInMcpBridgeContext
+>[] = Object.freeze([GMAIL_REST_MCP_BRIDGE_ADAPTER, SLACK_REST_MCP_BRIDGE_ADAPTER]);
 const SANDBOX_LIFECYCLE_COMMAND_TIMEOUT_MS = 120_000;
 
 /**
@@ -2052,6 +2073,8 @@ export type BuildAgentOptions = {
     response: HumanInputResponse;
   };
   reasoningEffort?: ReasoningEffort;
+  /** Provider-generated Responses summaries. Omitted preserves the existing wire. */
+  reasoningSummary?: "auto" | "detailed";
   /** Product latency selection frozen onto this turn. */
   latencyMode?: LatencyMode;
   /** Provider-specific wire value resolved by the worker (`fast` or `priority`). */
@@ -2681,6 +2704,9 @@ export function mcpToolErrorOutput(error: unknown): {
 } {
   const text =
     invalidToolArgumentsText(error) ??
+    (isIntegrationInvocationOutcomeUnknownError(error)
+      ? `The tool outcome is uncertain. Do not retry automatically; check the provider before a new attempt. Error: ${exactErrorMessage(error)}`
+      : null) ??
     `An error occurred while running the tool. Please try again. Error: ${exactErrorMessage(error)}`;
   return { isError: true, content: [{ type: "text", text }] };
 }
@@ -2997,7 +3023,7 @@ export function buildOpenGeniAgent(
     modelSettings: {
       reasoning: {
         effort: options.reasoningEffort ?? settings.openaiReasoningEffort,
-        summary: "detailed",
+        summary: options.reasoningSummary ?? "detailed",
       },
       ...(options.textVerbosity ? { text: { verbosity: options.textVerbosity } } : {}),
       // Round-trip the encrypted reasoning payload with every call so chains
@@ -3888,6 +3914,35 @@ function withoutImageInputTools(tools: Tool<unknown>[]): Tool<unknown>[] {
   );
 }
 
+/** The SDK's function fallback accepts a string tuple but omits its item schema. */
+function withTypedApplyPatchCommand(tools: Tool<unknown>[]): Tool<unknown>[] {
+  return tools.map((capabilityTool) => {
+    if (capabilityTool.type !== "function" || capabilityTool.name !== "apply_patch") {
+      return capabilityTool;
+    }
+    const parameters = capabilityTool.parameters;
+    const command = parameters.properties?.command;
+    if (
+      !command ||
+      typeof command !== "object" ||
+      command.type !== "array" ||
+      command.items !== undefined
+    ) {
+      return capabilityTool;
+    }
+    return {
+      ...capabilityTool,
+      parameters: {
+        ...parameters,
+        properties: {
+          ...parameters.properties,
+          command: { ...command, items: { type: "string" } },
+        },
+      },
+    };
+  });
+}
+
 export function buildAgentCapabilities(
   settings: Settings,
   skillActivations: readonly RuntimeSkillActivation[] = [],
@@ -3948,10 +4003,11 @@ function buildAgentCapabilitiesFromComposition(
   // results below; text-only/unproven wires remove the image tool entirely.
   // Scoped to filesystem: shell() is always a function-tool transport.
   const configureFilesystemTools = (tools: Tool<unknown>[]): Tool<unknown>[] => {
+    const typedTools = withTypedApplyPatchCommand(tools);
     const transportTools =
       options.structuredToolTransport === false
-        ? withStructuredViewImageFunctionResults(tools)
-        : tools;
+        ? withStructuredViewImageFunctionResults(typedTools)
+        : typedTools;
     const imageCapableTools =
       options.supportsImageInput === false
         ? withoutImageInputTools(transportTools)
@@ -3962,11 +4018,7 @@ function buildAgentCapabilitiesFromComposition(
     );
   };
   const filesystemCapability = filesystem({
-    ...(options.structuredToolTransport === false ||
-    options.supportsImageInput === false ||
-    options.onRetainableSessionImageOutput
-      ? { configureTools: configureFilesystemTools }
-      : {}),
+    configureTools: configureFilesystemTools,
   });
   if (options.structuredToolTransport === false || options.authorizeAttemptExecution) {
     neutralizeStructuredToolTransport(filesystemCapability);
@@ -4153,6 +4205,8 @@ export type PrepareToolsOptions = {
   resolveCredential?: (
     input: ResolveConnectionCredentialInput,
   ) => Promise<ResolveConnectionCredentialResult>;
+  /** Shared Slack workspace/app method quota and provider Retry-After coordination. */
+  slackRateLimit?: SlackApiRateLimiter;
   onAuthNeeded?: (payload: ToolAuthNeededPayload) => Promise<void> | void;
   /** Exact workspace-designated ChatGPT credential; unrelated to inference. */
   codexAppsAuth?: {
@@ -4209,6 +4263,8 @@ export type PrepareToolsOptions = {
    * through this host callback and never included in the returned MCP result.
    */
   materializeConnectorAttachments?: ConnectorAttachmentMaterializer;
+  materializeGmailFile?: GmailRestMcpBridgeContext["materializeGmailFile"];
+  readGmailFile?: GmailRestMcpBridgeContext["readGmailFile"];
   /** Overlap every non-eager MCP connection/catalog with the first model request. */
   deferNonEagerUntilToolDemand?: boolean;
   /** @internal Shared live cells used by deferred preparation handles. */
@@ -4687,7 +4743,7 @@ export async function prepareAgentTools(
         // generic transport/catalog code never branches on provider identity.
         const bridge = createLocalMcpBridgeFromAdapters<
           GmailRestMcpBridgeConfig,
-          GmailRestMcpBridgeContext
+          BuiltInMcpBridgeContext
         >(
           BUILT_IN_MCP_BRIDGE_ADAPTERS,
           {
@@ -4711,6 +4767,14 @@ export async function prepareAgentTools(
             onResolvedConnectionId: (connectionId) =>
               recordResolvedMcpConnectionId(resolvedMcpConnectionIds, config, connectionId),
             fetchImpl: mcpFetchImpl,
+            ...(options.slackRateLimit ? { slackRateLimit: options.slackRateLimit } : {}),
+            ...(options.materializeGmailFile
+              ? { materializeGmailFile: options.materializeGmailFile }
+              : {}),
+            ...(options.readGmailFile ? { readGmailFile: options.readGmailFile } : {}),
+            ...(settings.gmailWatchTopicName
+              ? { watchTopicName: settings.gmailWatchTopicName }
+              : {}),
           },
         );
         const innerServer =
@@ -5320,7 +5384,11 @@ function installAttemptConnectorActionGatewayLifecycle(
       lifecycle: connectorActionGatewayLifecycle({
         modelName: definition.modelName,
         call,
-        ...(binding?.resultOutcome ? { resultOutcome: binding.resultOutcome } : {}),
+        ...(binding?.resultOutcome
+          ? { resultOutcome: binding.resultOutcome }
+          : config && isOfficialGmailMcpConfig(config.url ?? "", config.connectionRef)
+            ? { resultOutcome: gmailRestResultOutcome }
+            : {}),
         ...(connectorActionPolicy ? { connectorActionPolicy } : {}),
       }),
     };
@@ -6275,7 +6343,7 @@ const MCP_AUTH_NEEDED_ERROR = {
 const MCP_TOOL_OUTCOME_UNCERTAIN_ERROR = {
   code: 40_102,
   message:
-    "Tool outcome uncertain: the provider returned 401 after receiving the request. OpenGeni did not replay this call. Do not retry automatically; verify provider state before any new attempt.",
+    "Tool outcome uncertain after provider submission. OpenGeni did not replay this call. Do not retry automatically; verify provider state before any new attempt.",
 } as const;
 
 function mcpToolAuthNeededResponse(request: McpRequestReplayInfo): Response {
@@ -8198,6 +8266,8 @@ export type RunAgentStreamOptions = {
   onModelPreparationPhase?: (measurement: ModelPreparationMeasurement) => void;
   /** Awaited at the generic provider's literal pre-fetch boundary. */
   onModelTransportStarted?: () => Promise<void> | void;
+  /** Synchronous diagnostic after admission/audit, immediately before fetch. */
+  onModelTransportDispatched?: (clock: ModelTransportDispatchClock) => void;
   sandboxClient?: unknown;
   sandboxEnvironment?: Record<string, string>;
   onRuntimeEvent?: (event: NormalizedRuntimeEvent) => Promise<void> | void;
@@ -8691,21 +8761,25 @@ async function runAgentStreamInternal(
     } as SandboxRunConfig;
     return await withModelRequestCapture(modelRequestCapture, () =>
       withModelPreparationObserver(overrides.onModelPreparationPhase, () =>
-        withModelTransportStartedObserver(overrides.onModelTransportStarted, () => {
-          recordModelPreparationManifestInventory(
-            "sandbox_agent_manifest_inventory",
-            (agent as { defaultManifest?: Manifest }).defaultManifest,
-          );
-          recordModelPreparationManifestInventory(
-            "sandbox_session_manifest_inventory",
-            (agentSession as { state?: { manifest?: Manifest } }).state?.manifest,
-          );
-          return runScopedRunner(settings, agent, inputWaitYield).run(
-            agent,
-            prepared.input,
-            ownedRunOptions,
-          );
-        }),
+        withModelTransportStartedObserver(
+          overrides.onModelTransportStarted,
+          () => {
+            recordModelPreparationManifestInventory(
+              "sandbox_agent_manifest_inventory",
+              (agent as { defaultManifest?: Manifest }).defaultManifest,
+            );
+            recordModelPreparationManifestInventory(
+              "sandbox_session_manifest_inventory",
+              (agentSession as { state?: { manifest?: Manifest } }).state?.manifest,
+            );
+            return runScopedRunner(settings, agent, inputWaitYield).run(
+              agent,
+              prepared.input,
+              ownedRunOptions,
+            );
+          },
+          overrides.onModelTransportDispatched,
+        ),
       ),
     );
   }
@@ -8853,17 +8927,21 @@ async function runAgentStreamInternal(
   }
   return await withModelRequestCapture(modelRequestCapture, () =>
     withModelPreparationObserver(overrides.onModelPreparationPhase, () =>
-      withModelTransportStartedObserver(overrides.onModelTransportStarted, () => {
-        recordModelPreparationManifestInventory(
-          "sandbox_agent_manifest_inventory",
-          (agent as { defaultManifest?: Manifest }).defaultManifest,
-        );
-        return runScopedRunner(settings, agent, inputWaitYield).run(
-          agent,
-          prepared.input,
-          runOptions,
-        );
-      }),
+      withModelTransportStartedObserver(
+        overrides.onModelTransportStarted,
+        () => {
+          recordModelPreparationManifestInventory(
+            "sandbox_agent_manifest_inventory",
+            (agent as { defaultManifest?: Manifest }).defaultManifest,
+          );
+          return runScopedRunner(settings, agent, inputWaitYield).run(
+            agent,
+            prepared.input,
+            runOptions,
+          );
+        },
+        overrides.onModelTransportDispatched,
+      ),
     ),
   );
 }

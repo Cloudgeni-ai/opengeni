@@ -1,9 +1,10 @@
 /**
  * Shared helpers for the release-schema contract registration guard.
  *
- * `scripts/release-schema-contract.test.ts` pins the migration ledger in three
- * places that a new migration moves, and all three must be updated in the same
- * change:
+ * Forward registration excludes additions from the immutable governed
+ * checkpoint. Complete-ledger metadata is checked independently against actual
+ * SQL files, so new migrations need no count indicators or latest-name pins.
+ * The legacy three-site mode remains supported for historical contracts:
  *
  * 1. `appendedMigrationPaths` - the forward-migration list. Migrations named
  *    here are excluded from the governed host-export checkpoint input, so the
@@ -34,6 +35,7 @@
  */
 import { readFileSync, readdirSync } from "node:fs";
 import { join } from "node:path";
+import { parseSync } from "oxc-parser";
 
 import { MIGRATIONS_DIR, RELEASE_CONTRACT_TEST } from "./migration-ordinals";
 
@@ -55,7 +57,6 @@ const COMPLETE_ASSERTION = `expect(${COMPLETE_CONTRACT}).toMatchObject({`;
 
 const MIGRATION_FILE = /^\d{4}_[A-Za-z0-9_]+\.sql$/;
 const MIGRATION_LITERAL = /"(\d{4}_[A-Za-z0-9_]+\.sql)"/g;
-const LINE_COMMENT = /^[^\S\n]*\/\/.*$/gm;
 /**
  * A `fileCount` presence probe. The callback parameter is captured and then
  * backreferenced rather than hard-coded, so renaming it (or annotating its
@@ -87,6 +88,8 @@ export type ContractRegistration = {
   fileCountProbes: string[];
   /** Migrations named inside the complete-contract assertion, i.e. the `latestMigration` chain. */
   latestMigrationPins: string[];
+  /** True only after executable, source-derived metadata assertions are verified. */
+  semanticLedger?: true;
 };
 
 export type RegistrationViolation = {
@@ -98,9 +101,219 @@ export type RegistrationViolation = {
   absentFrom: string;
 };
 
-/** Strips `//` line comments so a commented-out entry never counts as registered. */
+/** Parse comments, rather than treating quoted text or commented code as executable. */
 function withoutLineComments(source: string): string {
-  return source.replace(LINE_COMMENT, "");
+  const parsed = parseContract(source);
+  let clean = source;
+  for (const comment of [...parsed.comments].reverse()) {
+    clean =
+      clean.slice(0, comment.start) +
+      " ".repeat(comment.end - comment.start) +
+      clean.slice(comment.end);
+  }
+  return clean;
+}
+
+function parseContract(source: string) {
+  const parsed = parseSync(RELEASE_CONTRACT_TEST, source);
+  if (parsed.errors.length > 0) {
+    throw new ContractParseError(
+      `cannot parse ${RELEASE_CONTRACT_TEST}: ${parsed.errors[0]!.message}`,
+    );
+  }
+  return parsed;
+}
+
+const SEMANTIC_LEDGER_TEST = "checks complete ledger metadata against migration files";
+
+// An executable semantic contract, not a source-text/count/hash pin. Comparing
+// parsed structure verifies independent directory provenance, SQL selection,
+// ordering, exact path equality, uniqueness, and both metadata fields. Local
+// bindings and import aliases are alpha-renamed; formatting, quotes, comments,
+// callback names, and TypeScript annotations do not define the invariant.
+const SEMANTIC_LEDGER_CALLBACK = `const check = async () => {
+  const completeSourceContract = await buildCompleteSchemaContract();
+  const sourceMigrationPaths = (
+    await readdir(join(import.meta.dir, "../packages/db/drizzle"), { withFileTypes: true })
+  )
+    .filter((entry) => entry.isFile() && entry.name.endsWith(".sql"))
+    .map((entry) => entry.name)
+    .sort();
+  const contractMigrationPaths = completeSourceContract.migrations.map((migration) => migration.path);
+  expect(completeSourceContract).toMatchObject({
+    fileCount: sourceMigrationPaths.length,
+    latestMigration: sourceMigrationPaths.at(-1) ?? null,
+  });
+  expect(contractMigrationPaths).toEqual(sourceMigrationPaths);
+  expect(new Set(contractMigrationPaths).size).toBe(contractMigrationPaths.length);
+};`;
+
+type AstNode = { type: string; [key: string]: unknown };
+
+function astNode(value: unknown): AstNode | undefined {
+  return value !== null && typeof value === "object" && "type" in value
+    ? (value as AstNode)
+    : undefined;
+}
+
+/** Structural normalization with lexical binding scopes, never source replacement. */
+function canonicalAst(
+  value: unknown,
+  bindings = new Map<string, string>(),
+  counter = { next: 0 },
+  propertyName = false,
+): unknown {
+  if (Array.isArray(value)) return value.map((entry) => canonicalAst(entry, bindings, counter));
+  const node = astNode(value);
+  if (!node) return value;
+  let scope = bindings;
+  if (node.type === "BlockStatement" || node.type === "ArrowFunctionExpression") {
+    scope = new Map(bindings);
+  }
+  const bind = (binding: unknown) => {
+    const identifier = astNode(binding);
+    if (identifier?.type === "Identifier") scope.set(String(identifier.name), `$${counter.next++}`);
+  };
+  if (node.type === "VariableDeclarator") bind(node.id);
+  if (node.type === "ArrowFunctionExpression") {
+    for (const parameter of node.params as unknown[]) bind(parameter);
+  }
+  const result: Record<string, unknown> = {};
+  for (const [key, entry] of Object.entries(node)) {
+    if (["start", "end", "raw", "typeAnnotation", "typeArguments", "decorators"].includes(key))
+      continue;
+    if (node.type === "Identifier" && key === "name") {
+      result[key] = propertyName ? entry : (scope.get(String(entry)) ?? entry);
+    } else {
+      const isProperty =
+        !node.computed &&
+        ((node.type === "MemberExpression" && key === "property") ||
+          (node.type === "Property" && key === "key"));
+      result[key] = canonicalAst(entry, scope, counter, isProperty);
+    }
+  }
+  return result;
+}
+
+function verifySemanticLedger(source: string): boolean {
+  // A commented or string-embedded claim must fail closed, not select legacy
+  // mode and accidentally use unrelated historical probes as its evidence.
+  if (!source.includes(SEMANTIC_LEDGER_TEST)) return false;
+  const program = parseContract(source).program;
+  const bindings = new Map<string, string>();
+  const imports: Record<string, readonly string[]> = {
+    "bun:test": ["test", "describe", "expect"],
+    "node:fs/promises": ["readdir"],
+    "node:path": ["join"],
+    "./release-schema-contract": ["buildSchemaContract"],
+  };
+  for (const statement of program.body) {
+    if (statement.type !== "ImportDeclaration") continue;
+    if (statement.importKind === "type") continue;
+    for (const specifier of statement.specifiers) {
+      if (specifier.type !== "ImportSpecifier") continue;
+      if (specifier.importKind === "type") continue;
+      const imported =
+        specifier.imported.type === "Identifier"
+          ? specifier.imported.name
+          : String(specifier.imported.value);
+      if (imports[statement.source.value]?.includes(imported)) {
+        bindings.set(
+          specifier.local.name,
+          imported === "buildSchemaContract" ? "buildCompleteSchemaContract" : imported,
+        );
+      }
+    }
+  }
+  if (
+    ["test", "describe", "expect", "readdir", "join", "buildCompleteSchemaContract"].some(
+      (name) => ![...bindings.values()].includes(name),
+    )
+  ) {
+    throw new ContractParseError(
+      "semantic ledger assertions must use the real test, filesystem, path, and complete-contract imports",
+    );
+  }
+  const expected = parseContract(SEMANTIC_LEDGER_CALLBACK).program.body[0];
+  if (expected?.type !== "VariableDeclaration")
+    throw new ContractParseError("invalid semantic ledger guard template");
+  const expectedCallback = expected.declarations[0]!.init;
+  const candidates: { callback: unknown; bindings: Map<string, string> }[] = [];
+  const visit = (statements: unknown[], parentBindings: Map<string, string>) => {
+    const scope = new Map(parentBindings);
+    for (const value of statements) {
+      const statement = astNode(value);
+      const shadow = (binding: unknown) => {
+        visitAst(binding, (identifier) => {
+          if (
+            identifier.type === "Identifier" &&
+            (scope.has(String(identifier.name)) || identifier.name === "Set")
+          ) {
+            scope.set(String(identifier.name), `shadowed:${identifier.name}`);
+          }
+        });
+      };
+      if (statement?.type === "VariableDeclaration") {
+        for (const declaration of statement.declarations as unknown[])
+          shadow(astNode(declaration)?.id);
+      } else if (
+        statement?.type === "FunctionDeclaration" ||
+        statement?.type === "ClassDeclaration"
+      )
+        shadow(statement.id);
+      // Ancestor control flow can prevent registration even when the callback
+      // itself is correct. This mode recognizes unconditional test registration.
+      if (
+        statement &&
+        [
+          "ReturnStatement",
+          "ThrowStatement",
+          "IfStatement",
+          "ForStatement",
+          "ForOfStatement",
+          "ForInStatement",
+          "WhileStatement",
+          "DoWhileStatement",
+          "TryStatement",
+          "SwitchStatement",
+        ].includes(statement.type)
+      )
+        return;
+    }
+    for (const value of statements) {
+      const statement = astNode(value);
+      if (statement?.type !== "ExpressionStatement") continue;
+      const call = astNode(statement.expression);
+      const callee = astNode(call?.callee);
+      if (call?.type !== "CallExpression" || callee?.type !== "Identifier") continue;
+      const args = call.arguments as unknown[];
+      const callback = astNode(args[1]);
+      if (
+        scope.get(String(callee.name)) === "test" &&
+        astNode(args[0])?.value === SEMANTIC_LEDGER_TEST
+      )
+        candidates.push({ callback, bindings: scope });
+      if (
+        scope.get(String(callee.name)) === "describe" &&
+        callback?.type === "ArrowFunctionExpression" &&
+        (callback.params as unknown[]).length === 0
+      ) {
+        const body = astNode(callback.body);
+        if (body?.type === "BlockStatement") visit(body.body as unknown[], scope);
+      }
+    }
+  };
+  visit(program.body, bindings);
+  if (
+    candidates.length !== 1 ||
+    JSON.stringify(canonicalAst(candidates[0]?.callback, candidates[0]?.bindings)) !==
+      JSON.stringify(canonicalAst(expectedCallback))
+  ) {
+    throw new ContractParseError(
+      `${RELEASE_CONTRACT_TEST} must execute \`${SEMANTIC_LEDGER_TEST}\` with independent, ordered SQL-file paths, exact unique contract paths, and source-derived fileCount/latestMigration assertions; update the semantic guard for an intentional equivalent refactor.`,
+    );
+  }
+  return true;
 }
 
 /**
@@ -138,32 +351,53 @@ function balanced(source: string, open: number, opener: "[" | "{", closer: "]" |
   throw new ContractParseError(`unterminated region in ${RELEASE_CONTRACT_TEST}`);
 }
 
-/**
- * Reads the body of a `const <name> = [ ... ]` array literal.
- *
- * Deliberately strict: a rename or refactor of the contract must fail this
- * guard loudly rather than silently reduce it to a no-op, which is the one
- * failure mode that would put main back where it started.
- */
-function arrayLiteralBody(source: string, name: string): string {
-  const start = source.indexOf(`const ${name} = [`);
-  if (start < 0) {
-    throw new ContractParseError(
-      `${RELEASE_CONTRACT_TEST} no longer declares \`const ${name} = [\`. ` +
-        "The registration guard cannot locate the forward-migration list; update " +
-        "scripts/migration-schema-contract.ts to match the contract.",
-    );
+function visitAst(value: unknown, visitor: (node: AstNode) => void): void {
+  const node = astNode(value);
+  if (!node) return;
+  visitor(node);
+  for (const entry of Object.values(node)) {
+    if (Array.isArray(entry)) {
+      for (const child of entry) visitAst(child, visitor);
+    } else visitAst(entry, visitor);
   }
-  return balanced(source, source.indexOf("[", start), "[", "]");
 }
 
 /** Every migration the contract excludes from the governed checkpoint input. */
 export function parseForwardMigrations(source: string): string[] {
-  const clean = withoutLineComments(source);
+  const program = parseContract(source).program;
   const forward: string[] = [];
   for (const name of FORWARD_LIST_NAMES) {
-    for (const match of arrayLiteralBody(clean, name).matchAll(MIGRATION_LITERAL)) {
-      if (!forward.includes(match[1]!)) forward.push(match[1]!);
+    const declarations: AstNode[] = [];
+    visitAst(program, (node) => {
+      if (node.type !== "VariableDeclaration" || node.kind !== "const") return;
+      for (const declaration of node.declarations as unknown[]) {
+        const declarator = astNode(declaration);
+        if (astNode(declarator?.id)?.name === name && declarator) declarations.push(declarator);
+      }
+    });
+    let array = astNode(declarations[0]?.init);
+    if (array?.type === "CallExpression") {
+      const callee = astNode(array.callee);
+      array =
+        callee?.type === "MemberExpression" && astNode(callee.property)?.name === "filter"
+          ? astNode(callee.object)
+          : undefined;
+    }
+    if (declarations.length !== 1 || array?.type !== "ArrayExpression") {
+      throw new ContractParseError(
+        `${RELEASE_CONTRACT_TEST} must declare one executable \`const ${name} = [\` forward list; update scripts/migration-schema-contract.ts for an intentional equivalent refactor.`,
+      );
+    }
+    for (const value of array.elements as unknown[]) {
+      const entry = astNode(value);
+      if (
+        entry?.type !== "Literal" ||
+        typeof entry.value !== "string" ||
+        !MIGRATION_FILE.test(entry.value)
+      ) {
+        throw new ContractParseError(`nonliteral migration in ${name} in ${RELEASE_CONTRACT_TEST}`);
+      }
+      if (!forward.includes(entry.value)) forward.push(entry.value);
     }
   }
   if (forward.length === 0) {
@@ -213,6 +447,14 @@ export function parseFilteredMembershipTests(source: string): string[] {
 
 /** Every registration site the contract declares, parsed from its source. */
 export function parseContractRegistration(source: string): ContractRegistration {
+  if (verifySemanticLedger(source)) {
+    return {
+      forward: parseForwardMigrations(source),
+      fileCountProbes: [],
+      latestMigrationPins: [],
+      semanticLedger: true,
+    };
+  }
   const clean = withoutLineComments(source);
   const fileCountProbes: string[] = [];
   for (const match of clean.matchAll(PRESENCE_PROBE)) {
@@ -308,7 +550,9 @@ export function unregisteredMigrations(
   const violations: RegistrationViolation[] = [];
   for (const file of [...head].sort()) {
     if (carried.has(file)) continue;
-    const missing = REGISTRATION_SITES.filter((site) => !sites[site].has(file));
+    const missing = REGISTRATION_SITES.filter(
+      (site) => (site === "forward-list" || !registration.semanticLedger) && !sites[site].has(file),
+    );
     if (missing.length > 0) violations.push({ file, missing, absentFrom: base.ref });
   }
   return violations;
@@ -445,6 +689,7 @@ export function availableProbeName(file: string, taken: ReadonlySet<string> = ne
 export function registrationFixLines(
   violations: readonly RegistrationViolation[],
   taken: ReadonlySet<string> = new Set(),
+  semanticLedger = false,
 ): string[] {
   const lines: string[] = [];
   const names = new Map(
@@ -506,10 +751,20 @@ export function registrationFixLines(
   }
 
   lines.push(
-    `Sites 2 and 3 live in \`${COMPLETE_ASSERTION}\` in ${RELEASE_CONTRACT_TEST},`,
-    "which pins the UNFILTERED ledger, so the forward-list entry alone does not",
-    "satisfy them.",
-    "",
+    ...(semanticLedger
+      ? [
+          "Complete-ledger metadata is already checked against ordered SQL files;",
+          "do not add file-count indicators or latest-migration name pins.",
+          "",
+        ]
+      : [
+          `Sites 2 and 3 live in \`${COMPLETE_ASSERTION}\` in ${RELEASE_CONTRACT_TEST},`,
+          "which pins the UNFILTERED ledger, so the forward-list entry alone does not",
+          "satisfy them.",
+          "",
+        ]),
+  );
+  lines.push(
     `Do NOT instead pin a fresh hash in the \`${LADDER_NAME}\` ladder. That aggregate`,
     "covers the whole filtered ledger, so a hash computed on your branch is stale the",
     "moment another migration merges first: your pull request stays green and",

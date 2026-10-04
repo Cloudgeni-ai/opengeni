@@ -1,3 +1,4 @@
+import { signupCreditModelIds } from "@opengeni/config";
 import {
   CompleteSelfServiceOrganizationSetupRequest,
   CompleteSelfServiceOrganizationSetupResponse,
@@ -80,6 +81,7 @@ export function registerManagedOnboardingRoutes(
           organizationName,
           operationId: parsed.data.operationId,
           requestFingerprint,
+          trialCreditModelIds: signupCreditModelIds(deps.settings),
           trialCreditsEnabled:
             deps.settings.productAccessMode === "managed" &&
             deps.settings.verifiedSignupTrialCreditsEnabled,

@@ -20,7 +20,14 @@ import {
 } from "../src";
 
 const repair = "0552_usage_allowances.sql";
-const currentSessionWriterMigration = "0559_session_agent_config.sql";
+// Current adapters require the actual nullable agent config and canonical
+// subscription pool schema, even when seeding non-Claude historical work.
+// Neither changes the attribution/visibility policies under test. Install the
+// real migrations rather than inventing a permissive reader-only pool table.
+const currentWriterMigrations = [
+  "0559_session_agent_config.sql",
+  "0598_claude_subscription_account_pools.sql",
+];
 const visibilityPlanningMigration = "0591_insights_aggregate_query_plans.sql";
 const directory = fileURLToPath(new URL("../drizzle/", import.meta.url));
 
@@ -76,7 +83,7 @@ test("real non-bypass owner preserves source policy bytes through receipt repair
     await owner.unsafe(`CREATE TABLE IF NOT EXISTS schema_migrations (
       name text PRIMARY KEY, applied_at timestamptz NOT NULL DEFAULT now())`);
     const deferred = (await readdir(directory)).filter(
-      (file) => file.endsWith(".sql") && file >= repair && file !== currentSessionWriterMigration,
+      (file) => file.endsWith(".sql") && file >= repair && !currentWriterMigrations.includes(file),
     );
     for (const name of deferred) await owner`insert into schema_migrations(name) values(${name})`;
     await migrate(owned.ownerUrl);
@@ -92,12 +99,17 @@ test("real non-bypass owner preserves source policy bytes through receipt repair
     // Remove it before replay so the actual attention backfill still runs.
     await owner`ALTER TABLE session_event_cursors
       ADD COLUMN last_meaningful_sequence integer NOT NULL DEFAULT 0`;
+    // Current session/turn adapters project 0608's nullable context fields.
+    // Stage only empty reader columns for historical seeds, not its authority
+    // triggers or backfill; remove them before the real ordered 0608 replay.
+    await owner`ALTER TABLE sessions ADD COLUMN execution_context_turn_id uuid`;
+    await owner`ALTER TABLE session_turns ADD COLUMN execution_context_turn_id uuid`;
     // Renumbering the independent nullable agent-config column after this
     // repair must not break current session writers used to seed legacy rows.
-    // Apply only that additive migration early; allowance/collaborator repairs
+    // Apply those adapter prerequisites early; allowance/collaborator repairs
     // stay deferred until historical rows and the original policy snapshot exist.
     await owner`delete from schema_migrations
-      where name >= ${repair} and name <> ${currentSessionWriterMigration}`;
+      where name >= ${repair} and not (name = any(${currentWriterMigrations}::text[]))`;
     const [staged] = await owner`select
       to_regclass('opengeni_private.usage_allowance_attribution_receipts') as receipts`;
     expect(staged!.receipts).toBeNull();
@@ -145,6 +157,14 @@ test("real non-bypass owner preserves source policy bytes through receipt repair
     const historical = await createSession(adminDb.db, sessionInput);
     const turn = (await initialize(historical.id)).turn;
     expect(turn).not.toBeNull();
+    const historicalContext = () => owned.admin`select
+      s.execution_context_turn_id as session_context,
+      t.execution_context_turn_id as turn_context
+      from sessions s join session_turns t on t.session_id=s.id
+      where s.id=${historical.id} and t.id=${turn!.id}`;
+    expect([...(await historicalContext())]).toEqual([
+      { session_context: null, turn_context: null },
+    ]);
     const task = await createScheduledTask(adminDb.db, {
       accountId,
       workspaceId,
@@ -206,6 +226,11 @@ test("real non-bypass owner preserves source policy bytes through receipt repair
         causalHumanSubjectId: subjectId,
         causalHumanAuthority,
         xaiProviderAccountAuthoritySnapshot: { version: 1, scope: "workspace" },
+        claudeProviderAccountAuthoritySnapshot: {
+          version: 1 as const,
+          scope: "workspace" as const,
+        },
+        claudeAuthoritySubjectId: null,
         xaiAuthoritySubjectId: null,
         connectionAuthoritySubjectId: null,
         triggerInitiator: { kind: "service", subjectId: "scheduler" },
@@ -269,9 +294,16 @@ test("real non-bypass owner preserves source policy bytes through receipt repair
         and polname = 'attribution_expected_planned_visibility'`;
     expect(planned?.qual).toBeDefined();
     await owner.unsafe("DROP POLICY attribution_expected_planned_visibility ON usage_events");
+    await owner`ALTER TABLE sessions DROP COLUMN execution_context_turn_id`;
+    await owner`ALTER TABLE session_turns DROP COLUMN execution_context_turn_id`;
     for (const name of planningSuffix)
       await owner`delete from schema_migrations where name=${name}`;
     await migrate(owned.ownerUrl);
+    // A historical accepted turn without turn.started proof gains no context
+    // from the actual migration's backfill, either on its session or turn.
+    expect([...(await historicalContext())]).toEqual([
+      { session_context: null, turn_context: null },
+    ]);
     const plannedPolicies = before.map((row) =>
       row.relname === "usage_events" && row.polname === "session_visibility_isolation"
         ? { ...row, qual: planned!.qual }

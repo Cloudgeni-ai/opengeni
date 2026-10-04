@@ -1,5 +1,6 @@
 import { sql } from "drizzle-orm";
 import { z } from "zod";
+import { organizationAccessPresetPermissions, type Permission } from "@opengeni/contracts";
 import {
   ExternalIdentity,
   ExternalIdentityLookup,
@@ -17,10 +18,67 @@ import {
   setSubjectRlsContext,
   type Database,
 } from "./database";
-import { grantWorkspaceAccess, listWorkspaceMembers } from "./workspace-membership-access";
+import {
+  grantWorkspaceAccess,
+  insertWorkspaceMembershipIfAbsent,
+  listWorkspaceMembers,
+} from "./workspace-membership-access";
 import { removeWorkspaceMember } from "./organization-membership-lifecycle";
+import {
+  lockActiveExternalOrganizationKeyAuthority,
+  lockExternalWorkspaceMembershipLifecycle,
+} from "./external-identities";
 
 type ServiceScope = { organizationId: string; actorSubjectId: string };
+
+// These organization-only grants cannot be delegated by workspace membership.
+const accountOnlyPermissions = new Set<Permission>([
+  "account:read",
+  "account:admin",
+  "workspace:create",
+  "billing:read",
+  "billing:manage",
+  "usage_allowances:manage",
+]);
+
+/** Retain the canonical organization/key lock order through receipt and effect.
+ * Scope is read after the key lock, including on exact operation replays. */
+async function requireLiveServiceKey(
+  tx: Database,
+  scope: ServiceScope & { workspaceId?: string },
+  requested: readonly Permission[] = [],
+): Promise<{ permissions: Permission[]; permissionMode: "legacy" | "explicit" }> {
+  const keyId = /^api_key:([0-9a-f-]{36})$/i.exec(scope.actorSubjectId)?.[1];
+  await lockExternalWorkspaceMembershipLifecycle(tx, scope.organizationId);
+  const authority = keyId
+    ? await lockActiveExternalOrganizationKeyAuthority(
+        tx,
+        scope.organizationId,
+        keyId,
+        scope.workspaceId,
+      )
+    : null;
+  if (
+    !authority ||
+    !(
+      authority.permissions.includes("members:manage") ||
+      (authority.permissionMode === "legacy" && authority.permissions.includes("workspace:admin"))
+    ) ||
+    (authority.permissionMode === "explicit" &&
+      (requested.some((permission) => !authority.permissions.includes(permission)) ||
+        (requested.includes("workspace:admin") &&
+          organizationAccessPresetPermissions("full").some(
+            (permission) =>
+              !accountOnlyPermissions.has(permission) &&
+              !authority.permissions.includes(permission),
+          ))))
+  ) {
+    throw Object.assign(new Error("External membership organization key authority changed"), {
+      code: "42501",
+    });
+  }
+  return authority;
+}
 
 export async function lookupExternalIdentity(
   db: Database,
@@ -29,6 +87,7 @@ export async function lookupExternalIdentity(
 ) {
   return withAccountRls(db, scope.organizationId, async (tx) => {
     await setSubjectRlsContext(tx, scope.actorSubjectId);
+    await requireLiveServiceKey(tx, scope);
     const [row] = await rawRows<{ result: unknown }>(
       tx,
       sql`select lookup_external_identity(
@@ -71,6 +130,7 @@ export async function addExternalWorkspaceMemberOperation(
     permissions: [...new Set(request.permissions)].sort(),
   };
   return withWorkspaceSubjectRls(db, scope.workspaceId, scope.actorSubjectId, async (tx) => {
+    await requireLiveServiceKey(tx, scope, command.permissions);
     const prepared = await prepare(tx, command);
     if (prepared.replay)
       return z.object({ identity: ExternalIdentity }).parse(prepared.result).identity;
@@ -101,6 +161,85 @@ export async function addExternalWorkspaceMemberOperation(
   });
 }
 
+/** SDK-provisioned per-user workspaces stay single-user: never auto-admitted. */
+export const USER_ISOLATION_WORKSPACE_SOURCE_PREFIX = "opengeni-sdk:user-isolation:";
+
+/**
+ * First-use membership for an organization key acting as an external user
+ * (`asUser`). This is the explicit keyed onboarding effect, not new authority:
+ * the same organization lifecycle fence, the same live key check
+ * (`members:manage`, or a legacy `workspace:admin` key, holding every requested
+ * permission, with the workspace in the key's scope), the same in-database
+ * identity re-check (`ensure_external_identity` locks the identity and its
+ * organization membership and requires both active), and the same receipt and
+ * lifecycle event attributed to the key. It only inserts a missing row (insert
+ * ... on conflict do nothing): an existing membership is returned unchanged.
+ * There is no tombstone: a member removed from a shared workspace is created
+ * again on their next request, because the host owns its users. Personal and
+ * SDK per-user (`opengeni-sdk:user-isolation:*`) workspaces are refused.
+ * Concurrent first requests serialize on the organization fence.
+ */
+export async function ensureExternalWorkspaceMemberOnFirstUse(
+  db: Database,
+  scope: ServiceScope & { workspaceId: string },
+  input: {
+    subjectId: string;
+    identity: { source: string; externalId: string };
+    permissions: readonly Permission[];
+  },
+): Promise<"created" | "existing"> {
+  const permissions = [...new Set(input.permissions)].sort();
+  const refuse = (message: string): never => {
+    throw Object.assign(new Error(message), { code: "42501" });
+  };
+  return withWorkspaceSubjectRls(db, scope.workspaceId, scope.actorSubjectId, async (tx) => {
+    const authority = await requireLiveServiceKey(tx, scope, permissions);
+    if (
+      authority.permissionMode === "legacy" &&
+      !authority.permissions.includes("workspace:admin") &&
+      permissions.some((permission) => !authority.permissions.includes(permission))
+    )
+      refuse("External membership exceeds organization key authority");
+    const [workspace] = await rawRows<{ account_id: string; external_source: string | null }>(
+      tx,
+      sql`select account_id, external_source from workspaces where id = ${scope.workspaceId}::uuid`,
+    );
+    if (
+      !workspace ||
+      workspace.account_id !== scope.organizationId ||
+      workspace.external_source?.startsWith(USER_ISOLATION_WORKSPACE_SOURCE_PREFIX)
+    )
+      refuse("Workspace does not admit members on first use");
+    const existing = (await listWorkspaceMembers(tx, scope.workspaceId)).some(
+      (member) => member.subjectId === input.subjectId,
+    );
+    if (existing) return "existing";
+    const command = {
+      ...scope,
+      action: "grant",
+      identity: input.identity,
+      permissions,
+      operationId: crypto.randomUUID(),
+    };
+    // Re-validates the identity and its organization membership under the
+    // fence (suspended/offboarded -> 42501) and refuses Personal workspaces.
+    const prepared = await prepare(tx, command);
+    const identity = ExternalIdentity.parse(prepared.identity);
+    if (identity.subjectId !== input.subjectId || identity.status !== "active")
+      refuse("External identity changed");
+    const inserted = await insertWorkspaceMembershipIfAbsent(tx, {
+      accountId: scope.organizationId,
+      workspaceId: scope.workspaceId,
+      subjectId: input.subjectId,
+      role: "member",
+      permissions,
+    });
+    if (!inserted) return "existing";
+    await record(tx, command, { workspaceId: scope.workspaceId, identity });
+    return "created";
+  });
+}
+
 /** The native removal owns all teardown; this wrapper adds an immutable causal
  * fence even when an earlier grant has not reached the database yet. */
 export async function cancelExternalWorkspaceMemberGrant(
@@ -110,6 +249,7 @@ export async function cancelExternalWorkspaceMemberGrant(
 ) {
   const command = { ...scope, action: "revoke", ...request };
   return withWorkspaceSubjectRls(db, scope.workspaceId, scope.actorSubjectId, async (tx) => {
+    await requireLiveServiceKey(tx, scope);
     const prepared = await prepare(tx, command);
     if (prepared.replay) {
       const stored = z
@@ -152,6 +292,7 @@ export async function updateExternalWorkspaceMemberOperation(
     permissions: [...new Set(request.permissions)].sort(),
   };
   return withWorkspaceSubjectRls(db, scope.workspaceId, scope.actorSubjectId, async (tx) => {
+    await requireLiveServiceKey(tx, scope, command.permissions);
     const prepared = await prepare(tx, command);
     if (prepared.replay) {
       const stored = z

@@ -6,11 +6,11 @@ import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "@/comp
  * Chats in a Personal workspace are private to its owner (docs/organization-
  * tenancy.md): organization owners and admins get no access to another
  * member's Personal workspace, and billing readers see only its usage amounts
- * on Billing & usage, never the chats. These say that, calmly and read-only.
+ * in Insights, never the chats. These say that, calmly and read-only.
  */
 
 export const PRIVATE_SESSION_EXPLANATION =
-  "Only you can see this chat. Organization admins can't open it; billing shows only usage amounts.";
+  "Only you can see this chat. Organization admins can't open it; Insights shows only usage amounts.";
 
 /** The session header's read-only mark for a chat in a Personal workspace. */
 export function PrivateSessionIndicator() {

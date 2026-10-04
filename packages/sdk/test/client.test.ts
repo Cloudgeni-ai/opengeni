@@ -70,9 +70,43 @@ function makeClient(
   return { client, requests };
 }
 
+test("account settings opt into inactive inventory without changing the execution picker default", async () => {
+  const { client, requests } = makeClient(() => jsonResponse({ connections: [] }));
+  await client.listOwnConnectionAccounts(WORKSPACE_ID);
+  await client.listOwnConnectionAccounts(WORKSPACE_ID, { includeInactive: true });
+  expect(new URL(requests[0]!.url).search).toBe("");
+  expect(new URL(requests[1]!.url).searchParams.get("includeInactive")).toBe("true");
+});
+
 const STRICT = { apiContract: "strict" } as const;
 
 describe("OpenGeniClient", () => {
+  test.each([undefined, false, true])(
+    "defaults legacy Computer RFB grants to view only (%p)",
+    async (inputAllowed) => {
+      const { client } = makeClient(() =>
+        jsonResponse({
+          computerSessionId: SESSION_ID,
+          controllerGeneration: "controller-1",
+          targetId: "screen-1",
+          expiresAt: "2026-08-10T12:00:00.000Z",
+          stream: {
+            kind: "direct_rfb",
+            url: "wss://computer.example.test/rfb",
+            protocols: ["binary", "opengeni.computer.rfb.v1", "opengeni.auth.fixture"],
+            ...(inputAllowed === undefined ? {} : { inputAllowed }),
+          },
+        }),
+      );
+      const attachment = await client.attachComputerSession(WORKSPACE_ID, SESSION_ID, {
+        targetId: "screen-1",
+      });
+      expect(attachment.stream.kind).toBe("direct_rfb");
+      if (attachment.stream.kind === "direct_rfb")
+        expect(attachment.stream.inputAllowed).toBe(inputAllowed === true);
+    },
+  );
+
   test("Claude sign-in uses scoped JSON browser mutations without passing tokens or requesting inference", async () => {
     const { client, requests } = makeClient(() =>
       jsonResponse({ connected: true, credentialVersion: 1 }),
@@ -1811,7 +1845,7 @@ describe("OpenGeniClient", () => {
       body: "",
     });
     expect((error as Error).message).toMatch(
-      /^OpenGeni could not confirm the request — reconcile before retrying\. Reference: [0-9a-f-]{36}\.$/,
+      /^Opengeni could not confirm the request — reconcile before retrying\. Reference: [0-9a-f-]{36}\.$/,
     );
     expect((error as Error).message).not.toContain("PRIVATE");
     expect((error as Error).message).not.toContain("bearer");
@@ -1914,7 +1948,7 @@ describe("OpenGeniClient", () => {
       error: {
         status: 503,
         code: "upstream_unavailable",
-        message: "OpenGeni is temporarily unavailable — retry.",
+        message: "Opengeni is temporarily unavailable — retry.",
         retryable: true,
         requestId: "api-safe-503",
       },
@@ -1931,7 +1965,7 @@ describe("OpenGeniClient", () => {
       correlationId: "api-safe-503",
       outcomeUnknown: false,
       body,
-      message: "OpenGeni is temporarily unavailable — retry. Reference: api-safe-503.",
+      message: "Opengeni is temporarily unavailable — retry. Reference: api-safe-503.",
     });
   });
 
@@ -2072,7 +2106,7 @@ describe("OpenGeniClient", () => {
           body: "",
         });
         expect((error as Error).message).toBe(
-          `OpenGeni is temporarily unavailable — retry. Reference: ${correlationId}.`,
+          `Opengeni is temporarily unavailable — retry. Reference: ${correlationId}.`,
         );
         expect((error as Error).message).not.toContain("PRIVATE-UPSTREAM-BODY");
         expect(requests[0]!.headers[OPENGENI_CORRELATION_HEADER]).toMatch(/^[0-9a-f-]{36}$/);
@@ -2217,6 +2251,43 @@ describe("OpenGeniClient", () => {
     );
     expect(requests[0]!.headers["x-request-id"]).toBe("rid-1");
     expect(requests[0]!.headers.authorization).toBe("Bearer og_test_key");
+  });
+
+  test("requires a dedicated attention-filter receipt and forwards complete totals", async () => {
+    const old = makeClient(() =>
+      jsonResponse({ pinned: [], sessions: [], nextCursor: null, filtersApplied: true }),
+    );
+    await expect(
+      old.client.listSessionSummaryPage(WORKSPACE_ID, { needsYouOnly: true }),
+    ).rejects.toThrow("attention session filtering");
+    await expect(
+      old.client.listSessionSummaryPage(WORKSPACE_ID, {
+        parentSessionId: null,
+        includeTotals: true,
+      }),
+    ).rejects.toThrow("complete session totals");
+    const totals = { needsYouCount: 12, groups: [] };
+    const { client, requests } = makeClient(() =>
+      jsonResponse({
+        pinned: [],
+        sessions: [],
+        nextCursor: null,
+        filtersApplied: true,
+        needsYouOnly: true,
+        totals,
+      }),
+    );
+    expect(
+      (
+        await client.listSessionSummaryPage(WORKSPACE_ID, {
+          parentSessionId: null,
+          includeTotals: true,
+          needsYouOnly: true,
+        })
+      ).totals,
+    ).toEqual(totals);
+    expect(requests[0]!.url).toContain("includeTotals=true");
+    expect(requests[0]!.url).toContain("needsYouOnly=true");
   });
 
   test("compact session pages retain cursors and filters across a rolling API upgrade", async () => {
@@ -2687,4 +2758,22 @@ test("sets a workspace duration timer through the public endpoint", async () => 
   expect(requests[0]!.url).toEndWith(`/v1/workspaces/${WORKSPACE_ID}/pause-timer`);
   expect(requests[0]!.method).toBe("POST");
   expect(JSON.parse(requests[0]!.body!)).toEqual(request);
+});
+
+test("Claude account disconnects send JSON for scoped browser mutation guards", async () => {
+  const { client, requests } = makeClient(() => jsonResponse({ disconnected: true }));
+  await client.disconnectClaudeSubscriptionAccount(
+    WORKSPACE_ID,
+    "11111111-1111-4111-8111-111111111111",
+  );
+  await client.disconnectOrganizationClaudeSubscriptionAccount(
+    "22222222-2222-4222-8222-222222222222",
+    "11111111-1111-4111-8111-111111111111",
+  );
+  expect(requests).toHaveLength(2);
+  for (const request of requests) {
+    expect(request.method).toBe("DELETE");
+    expect(request.headers["content-type"]).toBe("application/json");
+    expect(request.body).toBe("{}");
+  }
 });

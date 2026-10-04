@@ -1,9 +1,11 @@
-import type { Session, SessionListEntry } from "@opengeni/sdk";
+import type { Session, SessionListEntry, SessionListTotals } from "@opengeni/sdk";
 import { useCallback, useEffect, useRef } from "react";
 import { useOpenGeni, type ClientOverride } from "../provider";
 import { usePolledValue } from "./internal";
 
 export type UseWorkspaceSessionsOptions = ClientOverride & {
+  includeTotals?: boolean | undefined;
+  needsYouOnly?: boolean | undefined;
   /** Compact list records; detail reads remain full sessions. */
   projection?: "summary" | undefined;
   limit?: number | undefined;
@@ -34,6 +36,7 @@ export type UseWorkspaceSessionsResult<T extends Session | SessionListEntry = Se
   pinned: T[];
   /** True when the server omitted older pins from its bounded pinned section. */
   pinnedTruncated: boolean;
+  totals: SessionListTotals | null;
   nextCursor: string | null;
   loading: boolean;
   error: Error | null;
@@ -59,6 +62,8 @@ export function useWorkspaceSessions(
 ): UseWorkspaceSessionsResult<Session | SessionListEntry> {
   const { client, workspaceId } = useOpenGeni(options);
   const projection = options.projection;
+  const includeTotals = options.includeTotals;
+  const needsYouOnly = options.needsYouOnly;
   const limit = options.limit;
   const parentSessionId = options.parentSessionId;
   const cursor = options.cursor;
@@ -75,6 +80,8 @@ export function useWorkspaceSessions(
   const queryKey = [
     workspaceId,
     projection ?? "full",
+    includeTotals ? "totals" : "",
+    needsYouOnly ? "needs-you" : "",
     limit ?? "",
     parentSessionId === null ? "null" : (parentSessionId ?? ""),
     cursor ?? "",
@@ -94,6 +101,8 @@ export function useWorkspaceSessions(
     async (signal?: AbortSignal) => {
       const readGeneration = beginRead?.() ?? ++nextReadGeneration.current;
       const query = {
+        ...(includeTotals ? { includeTotals: true } : {}),
+        ...(needsYouOnly ? { needsYouOnly: true } : {}),
         ...(limit !== undefined ? { limit } : {}),
         ...(parentSessionId !== undefined ? { parentSessionId } : {}),
         ...(cursor !== undefined ? { cursor } : {}),
@@ -130,6 +139,8 @@ export function useWorkspaceSessions(
       client,
       workspaceId,
       projection,
+      includeTotals,
+      needsYouOnly,
       limit,
       parentSessionId,
       cursor,
@@ -159,6 +170,7 @@ export function useWorkspaceSessions(
     sessions: [...pinned, ...ordinary],
     pinned,
     pinnedTruncated: page?.pinnedTruncated ?? false,
+    totals: page?.totals ?? null,
     nextCursor: page?.nextCursor ?? null,
     // `usePolledValue` clears the old data and starts the new request in an
     // effect. During that query-key transition render, its old loading flag

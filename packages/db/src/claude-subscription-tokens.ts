@@ -37,6 +37,50 @@ export class ClaudeSubscriptionConnectionChanged extends Error {
   }
 }
 
+export async function requestClaudeTokenRefresh(
+  bundle: import("zod").z.infer<typeof ClaudeSubscriptionCredential>,
+  fetchImpl: typeof fetch = globalThis.fetch,
+) {
+  if (!bundle.oauth) throw new ClaudeSubscriptionReconnectRequired();
+  try {
+    const signal = AbortSignal.timeout(10_000);
+    const response = await fetchImpl(CLAUDE_OAUTH_TOKEN_URL, {
+      method: "POST",
+      redirect: "error",
+      signal,
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        grant_type: "refresh_token",
+        client_id: CLAUDE_OAUTH_CLIENT_ID,
+        refresh_token: bundle.oauth!.refreshToken,
+        scope: bundle.oauth!.scopes.join(" "),
+      }),
+    });
+    if (!response.ok) {
+      if (response.status === 401 || response.status === 400) {
+        const body = await readResponseJsonBounded<unknown>(response, 16 * 1024, "Claude refresh", {
+          signal,
+        }).catch(() => null);
+        const error = body && typeof body === "object" && "error" in body ? body.error : null;
+        if (response.status === 401 || error === "invalid_grant")
+          throw new ClaudeSubscriptionReconnectRequired();
+      } else await response.body?.cancel().catch(() => undefined);
+      throw new ClaudeSubscriptionRefreshUnavailable();
+    }
+    const tokens = ClaudeOAuthTokenResponse.parse(
+      await readResponseJsonBounded(response, 64 * 1024, "Claude refresh", {
+        signal,
+      }),
+    );
+    if (!CLAUDE_OAUTH_SCOPES.every((required) => tokens.scope.split(/\s+/).includes(required)))
+      throw new ClaudeSubscriptionReconnectRequired();
+    return tokens;
+  } catch (error) {
+    if (error instanceof ClaudeSubscriptionReconnectRequired) throw error;
+    throw new ClaudeSubscriptionRefreshUnavailable();
+  }
+}
+
 /** The existing connection generation remains authority; token renewal is not replacement. */
 export async function resolveClaudeSubscriptionCredential(
   db: Database,
@@ -87,40 +131,7 @@ export async function resolveClaudeSubscriptionCredential(
     if (!latest?.oauth || Date.parse(latest.oauth.expiresAt) - now() > 60_000) return current;
     let tokens: ReturnType<typeof ClaudeOAuthTokenResponse.parse>;
     try {
-      const signal = AbortSignal.timeout(10_000);
-      const response = await (options.fetchImpl ?? globalThis.fetch)(CLAUDE_OAUTH_TOKEN_URL, {
-        method: "POST",
-        redirect: "error",
-        signal,
-        headers: { "content-type": "application/json" },
-        body: JSON.stringify({
-          grant_type: "refresh_token",
-          client_id: CLAUDE_OAUTH_CLIENT_ID,
-          refresh_token: latest.oauth.refreshToken,
-          scope: latest.oauth.scopes.join(" "),
-        }),
-      });
-      if (!response.ok) {
-        if (response.status === 401 || response.status === 400) {
-          const body = await readResponseJsonBounded<unknown>(
-            response,
-            16 * 1024,
-            "Claude refresh",
-            { signal },
-          ).catch(() => null);
-          const error = body && typeof body === "object" && "error" in body ? body.error : null;
-          if (response.status === 401 || error === "invalid_grant")
-            throw new ClaudeSubscriptionReconnectRequired();
-        } else await response.body?.cancel().catch(() => undefined);
-        throw new ClaudeSubscriptionRefreshUnavailable();
-      }
-      tokens = ClaudeOAuthTokenResponse.parse(
-        await readResponseJsonBounded(response, 64 * 1024, "Claude refresh", {
-          signal,
-        }),
-      );
-      if (!CLAUDE_OAUTH_SCOPES.every((required) => tokens.scope.split(/\s+/).includes(required)))
-        throw new ClaudeSubscriptionReconnectRequired();
+      tokens = await requestClaudeTokenRefresh(latest, options.fetchImpl ?? globalThis.fetch);
     } catch (error) {
       if (error instanceof ClaudeSubscriptionReconnectRequired) {
         const usage = await recordClaudeSubscriptionUsage(tx, settings, scope, {

@@ -78,11 +78,10 @@ function append() {
 }
 function App() {
   const [height, setHeight] = useState(500);
+  const theme = new URLSearchParams(location.search).get("theme");
   return (
     <main
-      data-og-theme={
-        new URLSearchParams(location.search).get("theme") === "light" ? "light" : undefined
-      }
+      data-og-theme={theme === "light" || theme === "dark" ? theme : undefined}
       style={{ width: "min(760px,100%)", background: "#fffdf9", padding: 16 }}
     >
       <button onClick={append}>Append live message</button>

@@ -464,7 +464,7 @@ describe("scheduled task form projection", () => {
     const form = recurringSessionTaskFormState(targetSessionId, true);
 
     expect(form).toMatchObject({
-      name: "Recurring Slack task",
+      name: "",
       scheduleType: "interval",
       intervalMinutes: 60,
       runMode: "existing_session",
@@ -978,4 +978,30 @@ describe("scheduledTaskAwaitingHumanText", () => {
       }),
     ).toContain("the scheduler rejects it automatically");
   });
+});
+
+test("historical Atlassian schedules are retired while hosted MCP tasks remain active", () => {
+  const task = scheduledTask();
+  const source = { connection: { providerDomain: "api.atlassian.com" } };
+  const retired = {
+    ...task,
+    agentConfig: { ...task.agentConfig, knowledgeSource: source },
+  } as ScheduledTask;
+  for (const status of ["active", "paused"] as const) {
+    expect(scheduledTaskStateLabel({ ...retired, status })).toEqual({
+      label: "Sync retired",
+      active: false,
+      reason: "provider_retired",
+    });
+  }
+  expect(groupScheduledTasksForList([retired], {})).toMatchObject({
+    active: [],
+    paused: [retired],
+  });
+  expect(
+    scheduledTaskStateLabel({
+      ...task,
+      agentConfig: { ...task.agentConfig, tools: [{ kind: "mcp", id: "atlassian-mcp" }] },
+    }),
+  ).toMatchObject({ active: true });
 });

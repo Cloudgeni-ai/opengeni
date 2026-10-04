@@ -36,7 +36,7 @@ function config(capabilities: "all" | "none", identity: string | null = null): R
     creator: "api",
     request: { capabilities, ...(identity ? { identity } : {}) },
     workspace: { defaults: null, humanInputEnabled: true },
-    deployment: { unavailable: {}, admissionEnabled: true, defaultForNewSessions: false },
+    deployment: { unavailable: {} },
     goal: false,
   }).config!;
 }

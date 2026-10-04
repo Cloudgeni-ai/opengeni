@@ -5,7 +5,6 @@ import { toast } from "sonner";
 
 import { RowButton } from "@/components/ui/page-actions";
 import { OrganizationCreditBalance } from "@/components/organization-credit-balance";
-import { OrganizationUsageDashboard } from "@/components/organization-usage-dashboard";
 import { ErrorMessage } from "@/components/ui/error-message";
 import { TextInput } from "@/components/ui/field";
 import { Section, SectionStack } from "@/components/ui/section";
@@ -13,6 +12,7 @@ import { SettingRow, SettingRowGroup } from "@/components/ui/setting-row";
 import { CouponRedeem } from "@/components/credits/coupon-redeem";
 import { useAppContext } from "@/context";
 import { billingCheckoutReturnUrl } from "@/lib/credit-checkout";
+import { CREDIT_BALANCE_CHANGED } from "@/lib/credit-balance-events";
 import { analyticsAction } from "@/lib/analytics-actions";
 import {
   apiErrorAdvice,
@@ -52,7 +52,7 @@ const WorkspaceBudgetPage = lazy(() =>
 );
 
 /* ----------------------------------------------------------------------------
-   Organization settings > Billing & usage: the credit balance and top-ups,
+   Organization settings > Billing: the credit balance and top-ups,
    plan limits, workspace budgets, and usage by workspace. A workspace's budget
    page (`?section=billing&workspace=<id>`) opens from the budgets list.
    -------------------------------------------------------------------------- */
@@ -104,6 +104,7 @@ function BillingOverview({
   onOpenBudget: (workspaceId: string) => void;
 }) {
   const client = useAppContext().client;
+  const navigate = useNavigate();
   const accountId = identity.organizationId;
   const workspaceId = identity.workspaceId;
   const identityKey = organizationAdminIdentityKey(identity);
@@ -218,6 +219,15 @@ function BillingOverview({
     void refresh();
   }, [workspaceId, refresh]);
 
+  useEffect(() => {
+    const changed = (event: Event) => {
+      if ((event as CustomEvent<{ accountId: string }>).detail.accountId === accountId)
+        void refreshBilling();
+    };
+    window.addEventListener(CREDIT_BALANCE_CHANGED, changed);
+    return () => window.removeEventListener(CREDIT_BALANCE_CHANGED, changed);
+  }, [accountId, refreshBilling]);
+
   async function startCheckout(amountUsd: number) {
     const operation = claimBillingOperation("billing", "mutation");
     setBusyOwnerKey(identityKey);
@@ -301,7 +311,7 @@ function BillingOverview({
               <SettingRowGroup>
                 <SettingRow
                   label="Add credits"
-                  description="Minimum $5.00. You can also enter a promotion code in Stripe Checkout."
+                  description="For models and platform usage. Minimum $5."
                   controlWidth="auto"
                   control={
                     <div className="flex items-center gap-2">
@@ -339,8 +349,8 @@ function BillingOverview({
                 />
                 {accountId ? (
                   <SettingRow
-                    label="Redeem a coupon"
-                    description="A fixed-amount code adds exactly its value. Stripe opens in a new tab with the code applied."
+                    label="Promo code"
+                    description="Opens Stripe to confirm your code."
                     controlWidth="auto"
                     control={
                       <CouponRedeem
@@ -351,7 +361,6 @@ function BillingOverview({
                         disabled={visibleBusy}
                         onGranted={(status) => {
                           setRedeemed(status);
-                          void refreshBilling();
                         }}
                       />
                     }
@@ -392,11 +401,30 @@ function BillingOverview({
         <WorkspaceBudgetsSection onOpenWorkspace={onOpenBudget} />
       </Suspense>
 
-      <OrganizationUsageDashboard
-        key={identityKey}
-        accountId={accountId}
-        enabled={canReadBilling && Boolean(accountId)}
-      />
+      {canReadBilling && accountId ? (
+        <Section title="Usage">
+          <SettingRowGroup>
+            <SettingRow
+              label="Insights"
+              description="Spend, tokens and model calls across every workspace, by model, workspace, person and more."
+              controlWidth="auto"
+              control={
+                <RowButton
+                  onClick={() =>
+                    void navigate({
+                      to: "/workspaces/$workspaceId/organization",
+                      params: { workspaceId },
+                      search: { section: "insights" },
+                    })
+                  }
+                >
+                  Open Insights
+                </RowButton>
+              }
+            />
+          </SettingRowGroup>
+        </Section>
+      ) : null}
     </SectionStack>
   );
 }
@@ -429,8 +457,21 @@ function BillingLoadFailure(props: {
 
 /** "max_concurrent_sessions" as "Max concurrent sessions". */
 function entitlementLabel(name: string): string {
-  const words = name.replace(/[_.-]+/g, " ").trim();
+  const words = name
+    .replace(/^limits?\./, "")
+    .replace(/[_.-]+/g, " ")
+    .trim();
   return words.charAt(0).toUpperCase() + words.slice(1);
+}
+
+/**
+ * Only limits a customer can run into: numbers. Feature switches
+ * ("managed.api_keys": true) are how the deployment is built, not a limit.
+ */
+function customerLimits(entitlements: BillingEntitlementsResponse["entitlements"]) {
+  return entitlementEntries(entitlements).filter(
+    (row) => !row.name.startsWith("managed.") && /^[\d,.]+$/.test(row.value),
+  );
 }
 
 /**
@@ -443,19 +484,11 @@ function EntitlementsSection(props: {
   error: Error | null;
   onRetry: () => void;
 }) {
-  const rows = props.entitlements ? entitlementEntries(props.entitlements.entitlements) : [];
+  const rows = props.entitlements ? customerLimits(props.entitlements.entitlements) : [];
   if (!props.enabled) return null;
   if (props.error) {
-    return (
-      <Section title="Plan limits">
-        <BillingLoadFailure
-          title="Couldn't load the plan's limits"
-          denied="You can't see the plan's limits. Ask an organization owner for access."
-          error={props.error}
-          onRetry={props.onRetry}
-        />
-      </Section>
-    );
+    // Limits are rare; a failed read of them is not worth a red box on Billing.
+    return null;
   }
   if (rows.length === 0) return null;
   return (

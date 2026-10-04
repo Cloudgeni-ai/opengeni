@@ -132,6 +132,31 @@ const client = {
     }),
   ),
   listConnections: mock(async (): Promise<ConnectionMetadata[]> => []),
+  listClaudeSubscriptionAccounts: mock(
+    async (): Promise<unknown> => ({
+      accounts: [],
+      activeAccountId: null,
+      source: "workspace",
+      settings: { rotationEnabled: true, rotationStrategy: "sharded", activeCredentialId: null },
+    }),
+  ),
+  listOrganizationClaudeSubscriptionAccounts: mock(
+    async (): Promise<unknown> => ({
+      accounts: [],
+      activeAccountId: null,
+      source: "organization",
+      settings: { rotationEnabled: true, rotationStrategy: "sharded", activeCredentialId: null },
+    }),
+  ),
+  getClaudeSubscriptionAccountUsage: mock(async () => ({
+    connected: true,
+    credentialVersion: 1,
+    windows: [],
+    observedAt: null,
+    source: null,
+    refreshStatus: "not_checked",
+    refreshCheckedAt: null,
+  })),
   getWorkspaceClaudeSubscriptionUsage: mock(async () => ({
     connected: true,
     credentialVersion: 1,
@@ -300,6 +325,94 @@ afterAll(() => {
   GlobalRegistrator.unregister();
 });
 
+test.each([false, true])(
+  "Claude freezes its audience during setup completion (selected=%s)",
+  async (selectedBefore) => {
+    asOrganizationAdmin();
+    context.clientConfig.claudeSubscriptionEnabled = true;
+    let finish!: (value: {
+      accountId: string;
+      connected: boolean;
+      credentialVersion: number;
+    }) => void;
+    const deferred = new Promise<{
+      accountId: string;
+      connected: boolean;
+      credentialVersion: number;
+    }>((resolve) => {
+      finish = resolve;
+    });
+    const save = mock(async () => deferred);
+    Object.assign(client, { connectOrganizationClaudeSubscriptionSetupToken: save });
+    client.getModelConnectionAccess.mockImplementation(async () => ({ policy: openPolicy }));
+    const view = await render();
+    try {
+      await act(async () => navigateTo({ view: "connect-org:claude_subscription" }));
+      await flush();
+      expect(view.container.querySelector("h1")?.textContent).toBe("Connect Claude subscription");
+      await act(async () => button(view.container, /Use a setup token/)!.click());
+      await flush();
+      const input = view.container.querySelector<HTMLInputElement>(
+        'input[aria-label="Claude subscription setup token"]',
+      )!;
+      expect(input).not.toBeNull();
+      await act(async () => {
+        Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, "value")!.set!.call(
+          input,
+          "sk-ant-oat01-synthetic-fixture",
+        );
+        const propKey = Object.keys(input).find((key) => key.startsWith("__reactProps$"))!;
+        (input as any)[propKey].onChange({ target: input });
+      });
+      if (selectedBefore) {
+        const selected = [
+          ...view.container.querySelectorAll<HTMLElement>('[data-slot="choice-card"]'),
+        ].find((card) => card.textContent?.includes("Only selected workspaces"))!;
+        await act(async () => selected.click());
+        await flush();
+      }
+      const form = input.closest("form")!;
+      await act(async () =>
+        form.dispatchEvent(new Event("submit", { bubbles: true, cancelable: true })),
+      );
+      expect(save).toHaveBeenCalledTimes(1);
+      const selected = [
+        ...view.container.querySelectorAll<HTMLElement>('[data-slot="choice-card"]'),
+      ].find((card) => card.textContent?.includes("Only selected workspaces"))!;
+      expect(selected).not.toBeNull();
+      await act(async () => selected.click());
+      await flush();
+      expect(selected.getAttribute("data-state")).toBe(selectedBefore ? "checked" : "unchecked");
+      expect(selected.getAttribute("disabled")).not.toBeNull();
+      await act(async () => {
+        finish({
+          accountId: "10000000-0000-4000-8000-000000000003",
+          connected: true,
+          credentialVersion: 1,
+        });
+        await Promise.resolve();
+      });
+      await flush();
+      expect(client.updateModelConnectionAccess).toHaveBeenCalledTimes(selectedBefore ? 1 : 0);
+      if (selectedBefore)
+        expect(client.updateModelConnectionAccess).toHaveBeenCalledWith(
+          {
+            scope: "organizations",
+            scopeId: "organization-a",
+            kind: "claude_subscription",
+            connectionId: "10000000-0000-4000-8000-000000000003",
+          },
+          { ...openPolicy, allowedWorkspaces: ["workspace-a"], allowPersonalWorkspaces: false },
+        );
+      expect(lastNavigation?.search.account).toBe(
+        "org:claude:10000000-0000-4000-8000-000000000003",
+      );
+    } finally {
+      await cleanup(view);
+    }
+  },
+);
+
 beforeAll(() => undefined);
 
 beforeEach(() => {
@@ -328,6 +441,12 @@ beforeEach(() => {
   }));
   client.requestJson.mockImplementation(async () => ({}));
   client.listConnections.mockImplementation(async () => []);
+  client.listClaudeSubscriptionAccounts.mockImplementation(async () => ({
+    accounts: [],
+    activeAccountId: null,
+    source: "workspace",
+    settings: { rotationEnabled: true, rotationStrategy: "sharded", activeCredentialId: null },
+  }));
   context.clientConfig.claudeSubscriptionEnabled = false;
 });
 
@@ -645,29 +764,33 @@ describe("Models list", () => {
 
 test("Claude workspace reauthentication returns Back and Cancel to its account", async () => {
   context.clientConfig.claudeSubscriptionEnabled = true;
-  const now = new Date().toISOString();
-  client.listConnections.mockImplementation(async () => [
-    {
-      id: "11111111-1111-4111-8111-111111111111",
-      accountId: "organization-a",
-      workspaceId: "workspace-a",
-      subjectId: null,
-      providerDomain: "api.anthropic.com",
-      kind: "api_key",
-      status: "active",
-      version: 1,
-      metadata: { credentialRole: "claude_subscription" },
-      grantedScopes: [],
-      expiresAt: null,
-      lastRefreshAt: null,
-      lastUsedAt: null,
-      lastError: null,
-      createdBySubjectId: "user:owner",
-      updatedBySubjectId: "user:owner",
-      createdAt: now,
-      updatedAt: now,
+  client.listClaudeSubscriptionAccounts.mockImplementation(async () => ({
+    accounts: [
+      {
+        id: "11111111-1111-4111-8111-111111111111",
+        scope: "workspace",
+        subject: "fixture-account",
+        email: "claude@example.test",
+        label: "Claude subscription",
+        plan: "claude_max",
+        status: "needs_relogin",
+        active: true,
+        allocatorEnabled: true,
+        allocatorVersion: 1,
+        version: 1,
+        expiresAt: null,
+        lastRefreshAt: null,
+        lastError: "Sign in to Claude again.",
+      },
+    ],
+    activeAccountId: "11111111-1111-4111-8111-111111111111",
+    source: "workspace",
+    settings: {
+      rotationEnabled: true,
+      rotationStrategy: "sharded",
+      activeCredentialId: "11111111-1111-4111-8111-111111111111",
     },
-  ]);
+  }));
   const view = await render();
   try {
     await act(async () => navigateTo({ account: "gateway:claude_subscription" }));
@@ -678,7 +801,7 @@ test("Claude workspace reauthentication returns Back and Cancel to its account",
       expect(view.container.querySelector("h1")?.textContent).toBe("Reconnect Claude subscription");
       await act(async () => button(view.container, label)!.click());
       await flush();
-      expect(lastNavigation?.search.account).toBe("gateway:claude_subscription");
+      expect(lastNavigation?.search.account).toBe("claude:11111111-1111-4111-8111-111111111111");
       expect(view.container.querySelector("h1")?.textContent).toBe("Claude subscription");
     }
   } finally {

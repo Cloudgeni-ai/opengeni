@@ -56,6 +56,7 @@ export function TimelineAnnotationsDialog({
   const headerRef = useRef<HTMLDivElement | null>(null);
   const listRef = useRef<HTMLDivElement | null>(null);
   const noteRefs = useRef(new Map<string, HTMLTextAreaElement>());
+  const focusedAnnotationIdRef = useRef<string | null>(null);
   const portalStyle = usePortalTokenStyle(triggerRef.current);
   const revealNote = (id: string) => {
     const row = listRef.current?.querySelector<HTMLElement>(
@@ -110,10 +111,20 @@ export function TimelineAnnotationsDialog({
   }, [annotations, triggerRef]);
 
   useLayoutEffect(() => {
-    if (!focusAnnotationId || position.maxHeight <= 0) return;
+    if (!focusAnnotationId) {
+      focusedAnnotationIdRef.current = null;
+      return;
+    }
+    // A consumed request must not reclaim focus or scroll on layout/callback updates.
+    if (focusedAnnotationIdRef.current === focusAnnotationId) return;
+    focusedAnnotationIdRef.current = null;
+    if (position.maxHeight <= 0) return;
     revealNote(focusAnnotationId);
     const note = noteRefs.current.get(focusAnnotationId);
-    if (note && document.activeElement === note) onFocusConsumed?.();
+    if (note && document.activeElement === note) {
+      focusedAnnotationIdRef.current = focusAnnotationId;
+      onFocusConsumed?.();
+    }
   }, [focusAnnotationId, onFocusConsumed, annotations.length, position.maxHeight]);
 
   useEffect(() => {

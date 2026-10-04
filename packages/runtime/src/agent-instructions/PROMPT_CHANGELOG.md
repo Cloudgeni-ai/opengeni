@@ -6,12 +6,13 @@ composition (`operational-instructions.ts` + the persona template + CORE in
 `../index.ts`) byte for byte; `test/agent-instructions/legacy-prompt-lock.test.ts`
 pins those bytes.
 
-The legacy locks track the reviewed upstream CORE. After main's #3053 added
-the four goal-completion handoff sentences, the locks and worker request hashes
-were refreshed against main `709eef238d523a892b54e43304d4e1fdaa393eba`.
-All fourteen omitted/null legacy cases retain that main composition and layer
-order exactly. The modular goals module retains those sentences verbatim too;
-they are not intentional removals or modular-only additions.
+Both compositions now tell child sessions that final answers reach their parent
+automatically, while retaining messages for early updates and other sessions.
+The legacy byte locks and worker request hashes include this shared guidance.
+
+The legacy locks also include the shared goal-completion handoff guidance.
+All fourteen omitted/null legacy cases retain the same composition and layer
+order. Shared guidance is not an intentional removal or modular-only addition.
 
 ## Authoring rule
 
@@ -40,7 +41,11 @@ Composition order (each part separated by a blank line):
      Formatting rules, Rules for getting work done, Autonomy and persistence,
      Destructive Actions.
    - `runtime_mechanics` (always): new messages while working (steer/queue),
-     waiting and `wait_for_input`, compaction, background commands.
+     waiting and `wait_for_input`, compaction, and background commands. The
+     background-command paragraphs (and the `command_wait` mentions in the
+     in-flight examples and `subagents`) appear only when a managed sandbox or
+     Connected Machine is attached, because `command_read`/`command_wait` are
+     withheld from a turn without compute.
    - Conditional modules, in this order: `renderer_markdown`, `sandbox`,
      `connected_machine`, `repositories`, `workspace_environment`, `rig`,
      `artifacts`, `media`, `goals`, `subagents`, `knowledge`, `skills`, `admin`,

@@ -608,7 +608,9 @@ describe("session search browser e2e (real API + non-superuser PostgreSQL)", () 
       await find.waitFor();
       const findInput = find.getByRole("searchbox", { name: "Find in conversation" });
       await expectFocused(findInput);
-      await expectContainsText(find, "All saved user and completed assistant messages");
+      expect(await find.getByText("All saved user and completed assistant messages").count()).toBe(
+        0,
+      );
 
       await findInput.fill("lumen");
       const counter = find.locator('span[role="status"]');
@@ -890,7 +892,9 @@ describe("session search browser e2e (real API + non-superuser PostgreSQL)", () 
       expect(
         Math.abs((await scroller.evaluate((node) => node.scrollTop)) - beforeClose),
       ).toBeLessThanOrEqual(2);
-      await page.getByRole("button", { name: "Find in conversation", exact: true }).click();
+      // Phones open Find from the header's "…" menu.
+      await page.getByRole("button", { name: "More session actions", exact: true }).click();
+      await page.getByRole("menuitem", { name: "Find", exact: true }).click();
       await find.waitFor();
       expect(await find.getByRole("button", { name: "Back to session search" }).count()).toBe(0);
       await page.getByRole("button", { name: "Open navigation", exact: true }).click();
