@@ -1,6 +1,5 @@
 // Server-only examples. Import these functions into the product's provisioning
-// script after its normal .env loader. Never log a client, request credentials,
-// key-creation response, webhook response or provider response.
+// script after its normal .env loader.
 import type {
   AgentConfigRequest,
   CreateConnectionRequest,
@@ -124,7 +123,7 @@ export async function admitProductUser(
 export async function createProductConnection(
   og: OpenGeniClient,
   workspaceId: string,
-  request: CreateConnectionRequest, // Write-only credentials; never log.
+  request: CreateConnectionRequest,
 ) {
   const connection = await og.createConnection(workspaceId, request);
   const verified = (await og.listConnections(workspaceId)).find(
