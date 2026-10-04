@@ -17,7 +17,10 @@ try {
   for (const [state, headline] of [
     ["recovering", "High demand right now"],
     ["unavailable", "This model is temporarily unavailable"],
-    ["rate-limit", "This model is throttled due to high demand. Choose another model"],
+    [
+      "rate-limit",
+      "This model is throttled due to high demand. Select another model in the chat bar",
+    ],
     ["quota", "The model provider's usage quota for this model is used up"],
     ["daily", "This model's daily limit has been reached"],
     ["credits", "This workspace is out of Opengeni credits"],
@@ -33,7 +36,7 @@ try {
     console.log(`PASS ${state}: desktop and phone`);
   }
   await page.goto(`${base}?state=recovering`);
-  await page.getByText("Your work is saved", { exact: false }).waitFor();
+  await page.getByText("Your message is saved and we’ll keep retrying", { exact: false }).waitFor();
   assert.equal(await page.getByRole("button", { name: "Retry", exact: true }).count(), 0);
   assert.equal(await page.getByRole("button", { name: "Choose model", exact: true }).count(), 0);
   await page.getByRole("button", { name: "Pause preview", exact: true }).click();

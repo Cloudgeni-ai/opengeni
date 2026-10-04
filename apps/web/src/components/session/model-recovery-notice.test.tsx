@@ -27,15 +27,19 @@ test("live status explains saved work without promising timing or creating anoth
     "High demand right now",
   );
   expect(container.textContent).toContain(
-    "This model is being throttled. Your work is saved. We’ll retry automatically.",
+    "Some models are being throttled. Your message is saved and we’ll keep retrying for a few minutes.",
   );
   expect(container.textContent).not.toMatch(/next retry at|reset|\b\d{1,2}:\d{2}\b/i);
   expect(container.querySelector("button")).toBeNull();
   expect(container.querySelector("details")).toBeNull();
   await act(async () => root!.render(<ModelRecoveryNotice recovery={{ kind: "unavailable" }} />));
   expect(container.textContent).toContain("This model is temporarily unavailable");
-  expect(container.textContent).toContain("Your work is saved. We’ll retry automatically.");
+  expect(container.textContent).toContain(
+    "Your message is saved and we’ll keep retrying for a few minutes.",
+  );
   expect(container.textContent).not.toContain("throttled");
+  expect(container.textContent).not.toMatch(/choose another model/i);
+  expect(container.querySelector("button")).toBeNull();
   expect(container.textContent).not.toMatch(/next retry at|reset|\b\d{1,2}:\d{2}\b/i);
   expect(container.textContent).not.toContain("Waiting for the next retry.");
 });

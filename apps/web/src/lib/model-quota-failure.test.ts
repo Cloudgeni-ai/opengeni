@@ -44,7 +44,7 @@ test("an exhausted worker rate-limit payload preserves every distinct diagnostic
   expect(summary.recordedDetail).toBe(recorded);
   expect(failedSessionCopy(summary, false, false, true)).toMatchObject({
     reason:
-      "This model is throttled due to high demand. Choose another model to continue, or try again in a few minutes.",
+      "This model is throttled due to high demand. Select another model in the chat bar, or try again in a few minutes.",
     detail: recorded,
   });
 });
@@ -89,7 +89,7 @@ test("a retained short Gemini quota diagnostic does not override the worker rate
   expect(summary.recordedDetail).toContain(detail);
   expect(failedSessionCopy(summary, false, false, true)).toMatchObject({
     reason:
-      "This model is throttled due to high demand. Choose another model to continue, or try again in a few minutes.",
+      "This model is throttled due to high demand. Select another model in the chat bar, or try again in a few minutes.",
     detail: summary.recordedDetail,
   });
 });

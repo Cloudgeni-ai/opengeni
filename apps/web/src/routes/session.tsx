@@ -2854,7 +2854,6 @@ function SessionChatPane(props: {
             }
             canChooseModel={canChooseRecoveryModel}
             hasModelPicker={hasComposerPolicy}
-            onChooseModel={() => setModelPickerSession(props.session.id)}
             freeModel={isDeploymentFreeModel(modelCatalog.rows, props.session.model)}
             subscriptions={connectableSubscriptions(context.clientConfig.models)}
             modelChanged={Boolean(composerPolicy && composerPolicy.model !== props.session.model)}
