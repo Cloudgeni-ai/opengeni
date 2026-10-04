@@ -34,7 +34,6 @@ import {
   getScheduledTask,
   getSession,
   getSlackBotPostOperation,
-  listConnectionsMetadata,
   availableSlackBotConnectionMetadata,
   sharedOrganizationSlackBots,
   prepareBotMessage,

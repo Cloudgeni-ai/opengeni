@@ -40,7 +40,6 @@ import {
   updateConnection,
   updateSlackBotDocumentDestination,
   availableSlackBotConnectionMetadata,
-  setOrganizationSlackBotAccess,
   type DbClient,
 } from "@opengeni/db";
 import {
