@@ -106,9 +106,7 @@ describe("developer setup skill", () => {
       /\s+/g,
       " ",
     );
-    expect(cleanup).toContain(
-      "Clean up **only disposable staging resources this run created**.",
-    );
+    expect(cleanup).toContain("Clean up **only disposable staging resources this run created**.");
     expect(cleanup).toContain("Never delete reused resources.");
     expect(cleanup).toContain('status === "disabled"');
     expect(cleanup).toContain("`GET .../automations/triggers` / `listTriggers`");
