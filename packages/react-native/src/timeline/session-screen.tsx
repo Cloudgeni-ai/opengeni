@@ -3,7 +3,7 @@ import {
   type AgentMessageItem,
   type UserMessageItem,
 } from "@opengeni/react/session";
-import { useCallback, useEffect, useMemo, useRef, type ReactNode } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { ActivityIndicator, Pressable, Text, View, type TextInput } from "react-native";
 import {
   defaultChatComposerMessages,
@@ -41,7 +41,13 @@ export interface NativeSessionScreenProps extends Omit<
     | Partial<
         Pick<
           SessionComposerProps,
-          "renderLeading" | "options" | "header" | "placeholder" | "onAttach" | "messages"
+          | "renderLeading"
+          | "options"
+          | "header"
+          | "placeholder"
+          | "onAttach"
+          | "messages"
+          | "onActionFeedback"
         >
       >
     | undefined;
@@ -76,6 +82,8 @@ export function NativeSessionScreen({
   const theme = useNativeTimelineTheme();
   const { composer, queue, humanInput, approvals, control, attachments } = controller;
   const composerInput = useRef<TextInput>(null);
+  // The composer floats over the conversation; its occupied height insets the timeline.
+  const [composerHeight, setComposerHeight] = useState(120);
   const items = useMemo(
     () => conversationTimeline(controller.timeline, queue, composer),
     [controller.timeline, queue, composer],
@@ -117,6 +125,8 @@ export function NativeSessionScreen({
       {topBar}
       <MessageTimeline
         {...timelineProps}
+        contentInsetBottom={composerHeight + 20}
+        overlayInsetBottom={composerHeight}
         renderMessageActions={feedback || hostMessageActions ? renderMessageActions : undefined}
         items={items}
         status={status}
@@ -152,6 +162,9 @@ export function NativeSessionScreen({
         }
       />
       <SessionComposer
+        floating
+        onHeightChange={(height) => setComposerHeight(Math.round(height))}
+        onActionFeedback={composerSlots?.onActionFeedback}
         value={composer.value}
         onChangeText={composer.setValue}
         onSend={() => void composer.send()}
@@ -356,8 +369,8 @@ function DraftConflictStrip(props: {
         flexWrap: "wrap",
         alignItems: "center",
         gap: 8,
-        paddingHorizontal: 4,
-        paddingTop: 6,
+        paddingHorizontal: 16,
+        paddingTop: 12,
       }}
     >
       <Text style={{ ...text, flexGrow: 1, flexShrink: 1, flexBasis: 180 }}>

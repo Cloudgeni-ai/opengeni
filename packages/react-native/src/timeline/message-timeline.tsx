@@ -83,6 +83,8 @@ export interface NativeMessageTimelineProps extends NativeActivityOptions {
   header?: ReactNode;
   contentInsetTop?: number | undefined;
   contentInsetBottom?: number | undefined;
+  /** Height of host chrome floating over the timeline's bottom edge (a floating composer). */
+  overlayInsetBottom?: number | undefined;
   style?: StyleProp<ViewStyle>;
 }
 
@@ -299,7 +301,7 @@ export function MessageTimeline(props: NativeMessageTimelineProps) {
                   pointerEvents="box-none"
                   style={{
                     position: "absolute",
-                    bottom: 12,
+                    bottom: (props.overlayInsetBottom ?? 0) + 12,
                     left: 0,
                     right: 0,
                     alignItems: "center",

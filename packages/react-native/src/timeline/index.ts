@@ -57,6 +57,7 @@ export {
   SectionLabel,
   SessionRow,
   SessionRowList,
+  SessionHeaderTitle,
   SessionStatusBadge,
   StatusDot,
 } from "./session-list";

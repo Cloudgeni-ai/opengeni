@@ -521,6 +521,26 @@ export function BodyNote({ children, tone }: { children: ReactNode; tone?: "erro
 }
 
 /** `rgb(r, g, b)` / `#rrggbb` → rgba with the given alpha (Tailwind `/50`). */
+function rgbOf(color: string): [number, number, number] | null {
+  const rgb = color.match(/rgba?\(\s*(\d+)[,\s]+(\d+)[,\s]+(\d+)/);
+  if (rgb) return [Number(rgb[1]), Number(rgb[2]), Number(rgb[3])];
+  const hex = color.match(/^#([0-9a-f]{2})([0-9a-f]{2})([0-9a-f]{2})/i);
+  if (hex) return [parseInt(hex[1]!, 16), parseInt(hex[2]!, 16), parseInt(hex[3]!, 16)];
+  return null;
+}
+
+/**
+ * `color` at `alpha` composited over `base`, as an opaque color: a tinted
+ * surface that stays solid when it floats over scrolling content.
+ */
+export function blendOver(base: string, color: string, alpha: number): string {
+  const under = rgbOf(base);
+  const over = rgbOf(color);
+  if (!under || !over) return withAlpha(color, alpha);
+  const mix = (index: number) => Math.round(under[index]! * (1 - alpha) + over[index]! * alpha);
+  return `rgb(${mix(0)}, ${mix(1)}, ${mix(2)})`;
+}
+
 export function withAlpha(color: string, alpha: number): string {
   const rgb = color.match(/rgba?\(\s*(\d+)[,\s]+(\d+)[,\s]+(\d+)/);
   if (rgb) return `rgba(${rgb[1]}, ${rgb[2]}, ${rgb[3]}, ${alpha})`;

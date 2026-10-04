@@ -12,7 +12,7 @@ import { useMemo, useState } from "react";
 import { ActivityIndicator, Pressable, Text, View } from "react-native";
 import { Button } from "./controls";
 import { Icon, type NativeIconName } from "./icon";
-import { withAlpha } from "./primitives";
+import { blendOver, withAlpha } from "./primitives";
 import { fontStyle, useNativeTimelineTheme } from "./theme";
 
 /* ----------------------------------------------------------------------------
@@ -72,7 +72,7 @@ export function QueueDock({
     else void checkout(turn.id, false);
   };
   return (
-    <View style={{ gap: 6, paddingBottom: 8 }}>
+    <View style={{ gap: 6 }}>
       <View
         style={{
           alignSelf: "flex-start",
@@ -120,7 +120,8 @@ export function QueueDock({
           accessibilityLabel="Queued prompts"
           style={{
             borderRadius: theme.radius.lg,
-            backgroundColor: withAlpha(c["surface-2"], 0.6),
+            // Opaque: the dock floats over scrolling conversation.
+            backgroundColor: blendOver(c.bg, c["surface-2"], 0.6),
             paddingHorizontal: 8,
             paddingVertical: 2,
           }}

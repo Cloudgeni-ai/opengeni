@@ -18,7 +18,7 @@ import { createContext, useContext, useMemo, useRef, useState } from "react";
 import { Pressable, ScrollView, Text, TextInput, View } from "react-native";
 import { Button } from "./controls";
 import { Icon } from "./icon";
-import { withAlpha } from "./primitives";
+import { blendOver, withAlpha } from "./primitives";
 import { fontStyle, useNativeTimelineTheme } from "./theme";
 
 /* ----------------------------------------------------------------------------
@@ -562,11 +562,7 @@ export function ApprovalStrip({ approvals, onDecide, messages: overrides }: Appr
     }
   };
   return (
-    <ScrollView
-      style={{ maxHeight: 256 }}
-      contentContainerStyle={{ gap: 12, paddingBottom: 8 }}
-      nestedScrollEnabled
-    >
+    <ScrollView style={{ maxHeight: 256 }} contentContainerStyle={{ gap: 12 }} nestedScrollEnabled>
       {approvals.map((approval) => {
         const busy = Boolean(pending[approval.id]) || Boolean(settled[approval.id]);
         const payload = JSON.stringify(approval.arguments ?? approval.raw ?? {}, null, 2);
@@ -577,7 +573,8 @@ export function ApprovalStrip({ approvals, onDecide, messages: overrides }: Appr
               borderRadius: theme.radius.lg,
               borderWidth: 1,
               borderColor: withAlpha(tone.waiting, 0.3),
-              backgroundColor: withAlpha(tone.waiting, 0.06),
+              // Opaque: the strip floats over scrolling conversation.
+              backgroundColor: blendOver(c.bg, tone.waiting, 0.06),
               padding: 12,
               flexDirection: "row",
               gap: 10,

@@ -11,7 +11,7 @@ import {
   type SessionStatusTone,
 } from "@opengeni/react/session-list-model";
 import { useEffect, useMemo } from "react";
-import { Pressable, Text, View } from "react-native";
+import { Platform, Pressable, Text, View } from "react-native";
 import Animated, {
   cancelAnimation,
   Easing,
@@ -264,6 +264,65 @@ export function SessionStatusBadge({ status, label }: { status: SessionStatus; l
       >
         {label ?? presentation.label}
       </Text>
+    </View>
+  );
+}
+
+/**
+ * A native navigation-bar title for a session: the title on one line and, under
+ * it, the run state as a status dot and quiet label (the web header badge's
+ * information without boxing a pill inside the bar's glass).
+ */
+export function SessionHeaderTitle({
+  title,
+  status,
+  statusLabel,
+  align = Platform.OS === "ios" ? "center" : "left",
+}: {
+  title: string;
+  status: SessionStatus | null;
+  /** Override the label ("Paused" for a paused workstream). */
+  statusLabel?: string | undefined;
+  align?: "center" | "left";
+}) {
+  const theme = useNativeTimelineTheme();
+  const c = theme.colors;
+  const presentation = status ? SESSION_STATUS_PRESENTATION[status] : null;
+  const label = statusLabel ?? presentation?.label;
+  // Live and attention states take their status colour; settled ones stay quiet.
+  const emphasized =
+    presentation?.tone === "running" ||
+    presentation?.tone === "waiting" ||
+    presentation?.tone === "failed";
+  return (
+    <View
+      accessible
+      accessibilityRole="header"
+      accessibilityLabel={label ? `${title}, ${label}` : title}
+      style={{ alignItems: align === "center" ? "center" : "flex-start", maxWidth: 240 }}
+    >
+      <Text
+        numberOfLines={1}
+        style={{ ...fontStyle(theme, 600), fontSize: 16, lineHeight: 20, color: c.fg }}
+      >
+        {title}
+      </Text>
+      {presentation && label ? (
+        <View style={{ flexDirection: "row", alignItems: "center", gap: 5, marginTop: 1 }}>
+          <StatusDot tone={presentation.tone} pulse={presentation.pulse} size={6} />
+          <Text
+            numberOfLines={1}
+            style={{
+              ...fontStyle(theme, 500),
+              fontSize: 12,
+              lineHeight: 15,
+              color: emphasized ? c[TONE_COLOR[presentation.tone]] : c["fg-muted"],
+            }}
+          >
+            {label}
+          </Text>
+        </View>
+      ) : null}
     </View>
   );
 }

@@ -7,7 +7,7 @@ import {
   ModelPickerSheet,
   NativeSessionScreen,
   SessionActionsButton,
-  SessionStatusBadge,
+  SessionHeaderTitle,
   useNativeTimelineTheme,
 } from "@opengeni/react-native/timeline";
 import { createWebMarkdownRenderer } from "@opengeni/react-native/timeline/markdown";
@@ -74,34 +74,39 @@ function LiveSession(props: {
   const paused = controller.queue.effectiveControl?.state === "paused";
   // Web header: the status badge beside the title (a paused workstream says so).
   const refreshSession = controller.session.refresh;
-  const headerRight = useCallback(
+  const title = session ? sessionDisplayTitle(session) : "";
+  const headerTitle = useCallback(
     () => (
       <AppThemeProvider>
-        <View style={{ flexDirection: "row", alignItems: "center", gap: 4 }}>
-          {status ? (
-            <SessionStatusBadge
-              status={paused ? "queued" : status}
-              label={paused ? "Paused" : undefined}
-            />
-          ) : null}
-          {session ? (
-            <SessionActionsButton
-              session={session}
-              client={props.client}
-              onChanged={() => void refreshSession()}
-              onActionFeedback={() => void Haptics.selectionAsync()}
-            />
-          ) : null}
-        </View>
+        <SessionHeaderTitle
+          title={title}
+          status={paused ? "queued" : status}
+          statusLabel={paused ? "Paused" : undefined}
+        />
       </AppThemeProvider>
     ),
-    [paused, props.client, refreshSession, session, status],
+    [paused, status, title],
+  );
+  const headerRight = useCallback(
+    () =>
+      session ? (
+        <AppThemeProvider>
+          <SessionActionsButton
+            session={session}
+            client={props.client}
+            onChanged={() => void refreshSession()}
+            onActionFeedback={() => void Haptics.selectionAsync()}
+          />
+        </AppThemeProvider>
+      ) : null,
+    [props.client, refreshSession, session],
   );
   return (
     <>
       <Stack.Screen
         options={{
-          title: session ? sessionDisplayTitle(session) : "",
+          title,
+          headerTitle,
           headerRight,
           headerStyle: { backgroundColor: theme.colors.bg },
           headerTintColor: theme.colors.fg,
@@ -117,6 +122,7 @@ function LiveSession(props: {
         computeLabel={computeLabel}
         feedback={feedback}
         composer={{
+          onActionFeedback: () => void Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light),
           options: pill ? (
             <ComposerPill
               label={pill.effort ? `${pill.name} · ${pill.effort}` : pill.name}

@@ -2,18 +2,32 @@ import {
   defaultChatComposerMessages,
   type ChatComposerMessages,
 } from "@opengeni/react/composer-messages";
-import { useState, type ReactNode, type Ref } from "react";
-import { Platform, Pressable, Text, TextInput, View } from "react-native";
+import { GlassView, isLiquidGlassAvailable } from "expo-glass-effect";
+import { useEffect, useState, type ReactNode, type Ref } from "react";
+import {
+  AccessibilityInfo,
+  ActivityIndicator,
+  Platform,
+  Pressable,
+  Text,
+  TextInput,
+  View,
+  type ViewStyle,
+} from "react-native";
 import Animated, { useAnimatedKeyboard, useAnimatedStyle } from "react-native-reanimated";
-import { IconButton } from "./controls";
-import { Icon } from "./icon";
+import { Icon, type NativeIconName } from "./icon";
+import { withAlpha } from "./primitives";
 import { fontStyle, useNativeTimelineTheme } from "./theme";
 
 /* ----------------------------------------------------------------------------
-   The web session composer at phone width: a bordered surface card with the
-   message field on top and a 44pt toolbar below — leading actions (attach,
-   dictate, model) on the left, pause and send on the right. Hosts fill the
-   toolbar slots (a product adds its own actions/options) without forking.
+   The session composer, designed for each platform rather than copied from
+   the web card. It keeps the web composer's behaviour and copy (the shared
+   message catalog): one field, leading actions, the model pill, and a single
+   trailing action that sends, pauses a running workstream, or resumes it.
+
+   iOS 26+: a floating Liquid Glass surface the conversation scrolls under.
+   Older iOS or Reduce Transparency: the same shape on a solid raised surface.
+   Android: a Material 3 filled container (no glass, no border).
    -------------------------------------------------------------------------- */
 
 export interface SessionComposerProps {
@@ -23,7 +37,7 @@ export interface SessionComposerProps {
   canSend: boolean;
   sending?: boolean | undefined;
   placeholder?: string | undefined;
-  /** Run state drives the pause control (web: "Pause this workstream"). */
+  /** Run state drives the trailing action: pause while running, resume when paused. */
   running?: boolean | undefined;
   paused?: boolean | undefined;
   onPause?: (() => void) | undefined;
@@ -32,36 +46,119 @@ export interface SessionComposerProps {
   /** Leading toolbar content; defaults to an attach button when `onAttach` is set. */
   renderLeading?: (() => ReactNode) | undefined;
   onAttach?: (() => void) | undefined;
-  /** Content between leading actions and the right-hand controls (model/options pill). */
+  /** Content between leading actions and the trailing action (model/options pill). */
   options?: ReactNode;
-  /** Rendered above the field inside the card (attachment chips, annotations). */
+  /** Rendered inside the surface above the field (attachment chips, annotations). */
   header?: ReactNode;
-  /** Rendered above the card (queue, approvals, status dock). */
+  /** Rendered above the surface (queue, approvals, status dock). */
   above?: ReactNode;
   bottomInset?: number | undefined;
   /** Distance from the composer's container bottom to the window bottom (tab bars). */
   keyboardBottomOffset?: number | undefined;
   autoFocus?: boolean | undefined;
-  /** Horizontal page inset around the card (default 16). */
+  /** Horizontal page inset around the surface (default 12). */
   inset?: number | undefined;
   /** Lift above the keyboard (bottom-docked composer). Off for an inline card. */
   liftWithKeyboard?: boolean | undefined;
-  /** Rendered under the card (draft conflict, composer notices). */
+  /**
+   * Float over the conversation (absolute, transparent around the surface) so
+   * content scrolls beneath it. The host reads the occupied height from
+   * `onHeightChange` to inset its scroll content.
+   */
+  floating?: boolean | undefined;
+  onHeightChange?: ((height: number) => void) | undefined;
+  /** Rendered inside the surface under the header (draft conflict, notices). */
   below?: ReactNode;
   /** The message field, for hosts that focus it (queue Edit, replies). */
   inputRef?: Ref<TextInput> | undefined;
   /** The shared composer catalog; hosts translate by overriding entries. */
   messages?: Partial<ChatComposerMessages> | undefined;
+  /** Called when the trailing action fires (host haptics). */
+  onActionFeedback?: (() => void) | undefined;
+}
+
+/** Whether to draw Liquid Glass: iOS 26+, the native module present, transparency allowed. */
+export function useLiquidGlass(): boolean {
+  const [reduceTransparency, setReduceTransparency] = useState(false);
+  useEffect(() => {
+    if (Platform.OS !== "ios") return;
+    void AccessibilityInfo.isReduceTransparencyEnabled().then(setReduceTransparency);
+    const subscription = AccessibilityInfo.addEventListener(
+      "reduceTransparencyChanged",
+      setReduceTransparency,
+    );
+    return () => subscription.remove();
+  }, []);
+  if (Platform.OS !== "ios" || reduceTransparency) return false;
+  try {
+    return isLiquidGlassAvailable();
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * A floating surface for composer-adjacent chrome: glass on iOS 26, a solid
+ * raised surface elsewhere.
+ */
+export function ComposerSurface({
+  children,
+  radius,
+  style,
+}: {
+  children: ReactNode;
+  radius: number;
+  style?: ViewStyle | undefined;
+}) {
+  const theme = useNativeTimelineTheme();
+  const c = theme.colors;
+  const glass = useLiquidGlass();
+  if (glass) {
+    return (
+      <GlassView glassEffectStyle="regular" style={[{ borderRadius: radius }, style]}>
+        {children}
+      </GlassView>
+    );
+  }
+  const android = Platform.OS === "android";
+  return (
+    <View
+      style={[
+        {
+          borderRadius: radius,
+          // Material 3 surfaceContainerHigh: a filled tonal surface, no outline.
+          backgroundColor: android ? c["surface-2"] : c["surface-1"],
+          ...(android
+            ? null
+            : {
+                borderWidth: 0.5,
+                borderColor: c.border,
+                shadowColor: "#000",
+                shadowOpacity: theme.scheme === "dark" ? 0 : 0.08,
+                shadowRadius: 12,
+                shadowOffset: { width: 0, height: 4 },
+              }),
+        },
+        style,
+      ]}
+    >
+      {children}
+    </View>
+  );
 }
 
 export function SessionComposer(props: SessionComposerProps) {
   const theme = useNativeTimelineTheme();
   const c = theme.colors;
-  const [height, setHeight] = useState(24);
+  const ios = Platform.OS === "ios";
+  const [height, setHeight] = useState(22);
   // Track the keyboard directly: React Native's KeyboardAvoidingView mis-measures
   // inside modals and overlays; the animated keyboard height does not.
   const keyboard = useAnimatedKeyboard();
-  const restingBottom = Math.max(16, (props.bottomInset ?? 0) + 4);
+  const floating = props.floating ?? false;
+  const restingBottom = floating
+    ? Math.max(10, (props.bottomInset ?? 0) - 4)
+    : Math.max(16, (props.bottomInset ?? 0) + 4);
   const offset = props.keyboardBottomOffset ?? 0;
   const liftWithKeyboard = props.liftWithKeyboard ?? true;
   const lift = useAnimatedStyle(() => {
@@ -69,29 +166,27 @@ export function SessionComposer(props: SessionComposerProps) {
     const lifted = keyboard.height.value - offset;
     return { paddingBottom: lifted > 0 ? lifted + 8 : restingBottom };
   });
-  // Web shows the workstream control whenever the host can pause or resume.
-  const showPause = Boolean(props.paused ? props.onResume : props.onPause);
   const messages = { ...defaultChatComposerMessages, ...props.messages };
+  const fieldSize = ios ? 17 : 16;
   return (
     <Animated.View
-      style={[{ paddingHorizontal: props.inset ?? 16, paddingTop: 4, backgroundColor: c.bg }, lift]}
+      pointerEvents={floating ? "box-none" : "auto"}
+      onLayout={(event) => props.onHeightChange?.(event.nativeEvent.layout.height)}
+      style={[
+        {
+          paddingHorizontal: props.inset ?? 12,
+          paddingTop: 6,
+          gap: 8,
+          backgroundColor: floating ? "transparent" : c.bg,
+        },
+        floating ? { position: "absolute", left: 0, right: 0, bottom: 0 } : null,
+        lift,
+      ]}
     >
-      {props.above}
-      <View
-        style={{
-          borderRadius: theme.radius.lg,
-          borderWidth: 1,
-          borderColor: c.border,
-          backgroundColor: c["surface-1"],
-          // Web shadow-og-sm: 0 1px 2px rgb(0 0 0 / 0.07).
-          shadowColor: "#000",
-          shadowOpacity: 0.07,
-          shadowRadius: 2,
-          shadowOffset: { width: 0, height: 1 },
-          elevation: 1,
-        }}
-      >
+      {props.above ? <View pointerEvents="box-none">{props.above}</View> : null}
+      <ComposerSurface radius={24}>
         {props.header}
+        {props.below}
         <TextInput
           ref={props.inputRef}
           accessibilityLabel={messages.inputLabel}
@@ -103,20 +198,21 @@ export function SessionComposer(props: SessionComposerProps) {
           placeholderTextColor={c["fg-subtle"]}
           multiline
           autoFocus={props.autoFocus}
+          selectionColor={c.accent}
           onContentSizeChange={(event) =>
-            setHeight(Math.min(160, Math.max(24, event.nativeEvent.contentSize.height)))
+            setHeight(Math.min(150, Math.max(22, event.nativeEvent.contentSize.height)))
           }
           style={{
             ...fontStyle(theme),
-            fontSize: theme.size.composer,
-            lineHeight: 24,
+            fontSize: fieldSize,
+            lineHeight: 22,
             color: c.fg,
-            paddingTop: 12,
-            paddingHorizontal: 14,
-            paddingBottom: 4,
-            minHeight: 44,
-            height: Platform.OS === "android" ? undefined : height + 16,
-            maxHeight: 176,
+            paddingTop: 14,
+            paddingHorizontal: 16,
+            paddingBottom: 2,
+            minHeight: 40,
+            height: ios ? height + 16 : undefined,
+            maxHeight: 166,
             textAlignVertical: "top",
           }}
         />
@@ -124,46 +220,128 @@ export function SessionComposer(props: SessionComposerProps) {
           style={{
             flexDirection: "row",
             alignItems: "center",
-            paddingHorizontal: 8,
+            paddingLeft: 6,
+            paddingRight: 8,
             paddingBottom: 8,
-            gap: 4,
+            minHeight: 44,
+            gap: 2,
           }}
         >
           {props.renderLeading ? (
             props.renderLeading()
           ) : props.onAttach ? (
-            <IconButton
+            <ToolbarButton
               icon="plus"
-              accessibilityLabel="More composer actions"
+              accessibilityLabel={messages.attachFiles}
               onPress={props.onAttach}
             />
           ) : null}
           <View style={{ flex: 1, flexDirection: "row", alignItems: "center", minWidth: 0 }}>
             {props.options}
           </View>
-          {showPause ? (
-            <IconButton
-              icon={props.paused ? "play" : "pause"}
-              tone="secondary"
-              accessibilityLabel={
-                props.paused ? messages.resumeThisWorkstream : messages.pauseAriaLabel
-              }
-              onPress={props.paused ? props.onResume : props.onPause}
-              busy={props.pauseBusy}
-            />
-          ) : null}
-          <IconButton
-            icon="arrow-up"
-            tone="primary"
-            accessibilityLabel={messages.sendMessageAriaLabel}
-            onPress={props.onSend}
-            disabled={!props.canSend}
-            busy={props.sending}
-          />
+          <TrailingAction {...props} messages={messages} />
         </View>
-      </View>
-      {props.below}
+      </ComposerSurface>
     </Animated.View>
+  );
+}
+
+/** A quiet round toolbar button (the web composer's leading actions). */
+export function ToolbarButton({
+  icon,
+  accessibilityLabel,
+  onPress,
+}: {
+  icon: NativeIconName;
+  accessibilityLabel: string;
+  onPress: () => void;
+}) {
+  const theme = useNativeTimelineTheme();
+  return (
+    <Pressable
+      accessibilityRole="button"
+      accessibilityLabel={accessibilityLabel}
+      onPress={onPress}
+      hitSlop={4}
+      style={({ pressed }) => ({
+        width: 36,
+        height: 36,
+        borderRadius: 18,
+        alignItems: "center",
+        justifyContent: "center",
+        backgroundColor: pressed ? theme.colors.hover : "transparent",
+      })}
+    >
+      <Icon name={icon} size={20} color={theme.colors["fg-muted"]} />
+    </Pressable>
+  );
+}
+
+/**
+ * One trailing control, as native chat apps do: send when there is something
+ * to send (a message to a running agent joins the queue), otherwise pause a
+ * running workstream or resume a paused one; an idle empty composer shows a
+ * quiet, disabled send.
+ */
+function TrailingAction(props: SessionComposerProps & { messages: ChatComposerMessages }) {
+  const theme = useNativeTimelineTheme();
+  const c = theme.colors;
+  const hasText = props.value.trim().length > 0;
+  const mode: "send" | "pause" | "resume" | "idle" =
+    hasText || props.canSend
+      ? "send"
+      : props.paused && props.onResume
+        ? "resume"
+        : props.running && props.onPause
+          ? "pause"
+          : "idle";
+  const active = mode !== "idle";
+  const busy = mode === "send" ? props.sending : mode === "idle" ? false : props.pauseBusy;
+  const disabled = mode === "send" ? !props.canSend : !active;
+  const icon: NativeIconName = mode === "pause" ? "pause" : mode === "resume" ? "play" : "arrow-up";
+  const label =
+    mode === "pause"
+      ? props.messages.pauseAriaLabel
+      : mode === "resume"
+        ? props.messages.resumeThisWorkstream
+        : props.messages.sendMessageAriaLabel;
+  const fg = active ? c["accent-fg"] : c["fg-subtle"];
+  return (
+    <Pressable
+      accessibilityRole="button"
+      accessibilityLabel={label}
+      accessibilityState={{ disabled, busy: Boolean(busy) }}
+      disabled={disabled || busy}
+      hitSlop={6}
+      onPress={() => {
+        props.onActionFeedback?.();
+        if (mode === "send") props.onSend();
+        else if (mode === "pause") props.onPause?.();
+        else if (mode === "resume") props.onResume?.();
+      }}
+      style={({ pressed }) => ({
+        width: 34,
+        height: 34,
+        borderRadius: 17,
+        alignItems: "center",
+        justifyContent: "center",
+        backgroundColor: active ? c.accent : withAlpha(c.fg, 0.08),
+        opacity: pressed ? 0.8 : 1,
+        transform: [{ scale: pressed ? 0.94 : 1 }],
+      })}
+    >
+      {busy ? (
+        <ActivityIndicator size="small" color={fg} />
+      ) : (
+        <Icon
+          name={icon}
+          size={icon === "arrow-up" ? 18 : 14}
+          strokeWidth={icon === "arrow-up" ? 2.5 : 2}
+          color={fg}
+          fill={icon === "arrow-up" ? undefined : fg}
+        />
+      )}
+    </Pressable>
   );
 }
 
