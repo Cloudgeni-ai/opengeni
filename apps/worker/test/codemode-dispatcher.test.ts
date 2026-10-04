@@ -1,4 +1,6 @@
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
+import { Agent, RunContext, RunState } from "@openai/agents";
+import { OPEN_SUFFIX_RUN_STATE_BLOB } from "@opengeni/contracts";
 import { environmentsEncryptionKeyBytes } from "@opengeni/config";
 import {
   AttemptToolApprovalRequiredError,
@@ -39,7 +41,11 @@ import {
   type SharedTestDatabase,
   testSettings,
 } from "@opengeni/testing";
-import { InputWaitYield } from "@opengeni/runtime";
+import {
+  InputWaitYield,
+  extractOpenSuffixFromRunState,
+  assertOpenSuffixResumable,
+} from "@opengeni/runtime";
 import { connectionTokenResolverForTurn } from "../src/activities/mcp-credentials";
 import {
   CodemodeAttemptDispatcher,
@@ -1161,11 +1167,34 @@ test("waiting releases the claim and approved continuation executes stored argum
   expect(effects).toBe(0);
   expect(gate.requested).toBe(true);
   await dispatcher.close();
+  // The SDK exec call has returned the durable waiting handle. There is no
+  // interrupted SDK call, and canonical history omits output-only statuses.
+  const pausedState = new RunState(
+    new RunContext(),
+    [
+      { type: "message", role: "assistant", content: [{ type: "output_text", text: "Ready" }] },
+      { type: "function_call", callId: "call_exec", name: "exec_command", arguments: "{}" },
+      {
+        type: "function_call_result",
+        callId: "call_exec",
+        name: "exec_command",
+        output: {
+          type: "text",
+          text: JSON.stringify({ operationId, state: "waiting_for_approval" }),
+        },
+      },
+    ] as never,
+    new Agent({ name: "Test agent" }),
+    null,
+  );
+  const suffix = extractOpenSuffixFromRunState(pausedState);
+  expect(suffix).toEqual([]);
+  assertOpenSuffixResumable(suffix, []);
   await saveRunState(client.db, {
     ...scope,
     expectedExecutionGeneration: scope.executionGeneration,
     expectedAttemptId: scope.attemptId,
-    serializedRunState: "{}",
+    serializedRunState: OPEN_SUFFIX_RUN_STATE_BLOB,
     pendingApprovals: [{ id: operationId, source: "codemode" }],
   });
   await applySessionTurnSettlement(client.db, scope.workspaceId, {

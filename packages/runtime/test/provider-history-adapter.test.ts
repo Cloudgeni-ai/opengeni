@@ -28,7 +28,7 @@ describe("projectHistoryForProvider", () => {
     }
   });
 
-  test("native encrypted/signed reasoning and Responses annotations retain their original references", () => {
+  test("native encrypted/signed reasoning keeps references only on its own API", () => {
     const rawContent = [{ type: "reasoning_text", text: "Native raw text" }];
     const items = [
       { type: "reasoning", content: [], rawContent, providerData: { encrypted_content: "opaque" } },
@@ -70,8 +70,10 @@ describe("projectHistoryForProvider", () => {
         ],
       },
     ];
-    for (const api of ["responses", "anthropic-messages"] as const)
-      expect(projectHistoryForProvider(items, api)).toBe(items);
+    const responses = [items[0]!, items[1]!, items[3]!, items[4]!];
+    expect(projectHistoryForProvider(responses, "responses")).toBe(responses);
+    const claude = [items[2]!, items[4]!];
+    expect(projectHistoryForProvider(claude, "anthropic-messages")).toBe(claude);
   });
 
   test("Responses removes only Chat reply metadata from assistant text/refusal parts", () => {

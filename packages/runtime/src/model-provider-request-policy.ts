@@ -27,7 +27,7 @@ import {
   XaiSubscriptionUnavailableError,
 } from "./model-provider-errors";
 import type { ModelJsonRequestPolicy } from "./replayable-json-body";
-import { chatReasoning, joinChatReasoningMessages } from "./chat-reasoning";
+import { chatReasoning, chatReasoningDetails, joinChatReasoningMessages } from "./chat-reasoning";
 
 /**
  * Gateway's Kimi Responses adapter rejects the standard grouped parallel-tool
@@ -291,11 +291,13 @@ export const chatModelRequestPolicy: ModelJsonRequestPolicy = ({ path, body }) =
     // Older non-streamed SDK replies retained message fields inside text parts.
     // Recover their reasoning at message scope before removing invalid nesting.
     let retainedReasoning = chatReasoning(message);
+    let retainedDetails = chatReasoningDetails(message);
     const content = message.content.map((part: unknown) => {
       if (!part || typeof part !== "object" || Array.isArray(part)) return part;
       const record = part as Record<string, unknown>;
       if (record.type !== "text" && record.type !== "refusal") return part;
       retainedReasoning ??= chatReasoning(record);
+      retainedDetails ??= chatReasoningDetails(record);
       const outputOnlyKeys = [
         "annotations",
         "logprobs",
@@ -305,6 +307,7 @@ export const chatModelRequestPolicy: ModelJsonRequestPolicy = ({ path, body }) =
         "audio",
         "reasoning",
         "reasoning_content",
+        "reasoning_details",
         "tools",
         ...(record.type === "text" ? ["refusal"] : ["content"]),
       ];
@@ -320,6 +323,7 @@ export const chatModelRequestPolicy: ModelJsonRequestPolicy = ({ path, body }) =
       ...message,
       content,
       ...(retainedReasoning ? { [retainedReasoning.field]: retainedReasoning.text } : {}),
+      ...(retainedDetails ? { reasoning_details: retainedDetails } : {}),
     };
   });
   const joined = joinChatReasoningMessages(messages);

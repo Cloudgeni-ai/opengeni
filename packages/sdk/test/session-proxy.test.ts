@@ -56,14 +56,18 @@ function upstreamServer() {
   const fetch = async (input: string | URL | Request, init?: RequestInit): Promise<Response> => {
     const request = new Request(input, init);
     const url = new URL(request.url);
-    const text = request.method === "GET" ? "" : await request.text();
+    const multipart = /^multipart\/form-data/i.test(request.headers.get("content-type") ?? "");
+    const text = request.method === "GET" || multipart ? "" : await request.text();
     requests.push({
       method: request.method,
       url,
       headers: request.headers,
-      body: text ? JSON.parse(text) : undefined,
+      body: multipart ? await request.formData() : text ? JSON.parse(text) : undefined,
     });
     const path = url.pathname;
+    if (path === `/v1/workspaces/${WORKSPACE_ID}/transcriptions`) {
+      return Response.json({ text: "transcribed words", languages: ["en"] });
+    }
     if (path.endsWith("/live-events/stream")) {
       const control = {
         id: "33333333-3333-4333-8333-333333333333",
@@ -147,7 +151,17 @@ function upstreamServer() {
       });
     }
     if (path === "/v1/config/client") {
-      return Response.json({ apiContractRevision: "upstream-deployed-later", defaultModel: "m" });
+      return Response.json({
+        apiContractRevision: "upstream-deployed-later",
+        defaultModel: "m",
+        voiceInput: {
+          available: true,
+          maxDurationSeconds: 60,
+          maxSizeBytes: 1024,
+          acceptedMimeTypes: ["audio/webm"],
+          resumable: { maxDurationSeconds: 600, maxSizeBytes: 4096, maxChunkSizeBytes: 512 },
+        },
+      });
     }
     if (path === `/v1/workspaces/${WORKSPACE_ID}/sessions` && request.method === "POST") {
       return Response.json({ session: { id: SESSION_ID } });
@@ -398,6 +412,112 @@ describe("createSessionProxyHandler", () => {
       tools: [],
       firstPartyMcpTools: [],
     });
+  });
+
+  test("first-message files and model choices reach the hook and the created session", async () => {
+    const inputs: unknown[] = [];
+    const { upstream, browser } = setup({
+      createSession: (input) => {
+        inputs.push(input);
+        return {
+          initialMessage: input.initialMessage,
+          reasoningEffort: "medium",
+          resources: [{ kind: "file", fileId: "host-file" }],
+        };
+      },
+    });
+    const repository = await rejection(
+      browser.createSession(WORKSPACE_ID, {
+        initialMessage: "hi",
+        resources: [{ kind: "repository", url: "https://github.com/acme/secret" }],
+      } as never),
+    );
+    expect(repository.status).toBe(403);
+    expect(upstream.requests).toHaveLength(0);
+
+    await browser.createSession(WORKSPACE_ID, {
+      initialMessage: "Summarize this",
+      idempotencyKey: "k2",
+      resources: [
+        { kind: "file", fileId: "file-1" },
+        { kind: "file", fileId: "host-file" },
+      ],
+      model: "picked-model",
+      reasoningEffort: "low",
+    });
+    expect(inputs).toEqual([
+      {
+        initialMessage: "Summarize this",
+        idempotencyKey: "k2",
+        resources: [
+          { kind: "file", fileId: "file-1" },
+          { kind: "file", fileId: "host-file" },
+        ],
+        model: "picked-model",
+        reasoningEffort: "low",
+      },
+    ]);
+    expect(upstream.requests[0]!.body).toMatchObject({
+      initialMessage: "Summarize this",
+      model: "picked-model",
+      reasoningEffort: "low",
+      resources: [
+        { kind: "file", fileId: "host-file" },
+        { kind: "file", fileId: "file-1" },
+      ],
+    });
+  });
+
+  test("voice input is forwarded as the resolved user, one recording at a time", async () => {
+    const { upstream, browser } = setup();
+    const config = await browser.getClientConfig();
+    // Resumable chunk uploads are not proxied, so the browser uses one-shot recordings.
+    expect(config.voiceInput).toEqual({
+      available: true,
+      maxDurationSeconds: 60,
+      maxSizeBytes: 1024,
+      acceptedMimeTypes: ["audio/webm"],
+    });
+    const result = await browser.transcribeAudio(WORKSPACE_ID, {
+      audio: new Uint8Array([1, 2, 3]),
+      mimeType: "audio/webm",
+      durationSeconds: 2,
+    });
+    expect(result.text).toBe("transcribed words");
+    const forwarded = upstream.requests.find((request) =>
+      request.url.pathname.endsWith("/transcriptions"),
+    )!;
+    expect(forwarded.url.pathname).toBe(`/v1/workspaces/${WORKSPACE_ID}/transcriptions`);
+    expect(
+      JSON.parse(decodeURIComponent(forwarded.headers.get("x-opengeni-external-actor")!)),
+    ).toEqual({ mode: "external", identity: { externalId: "u_42", source: "northwind" } });
+    const form = forwarded.body as FormData;
+    expect((form.get("audio") as File).size).toBe(3);
+    expect(form.get("mimeType")).toBe("audio/webm");
+    expect(form.get("durationSeconds")).toBe("2");
+
+    const other = await rejection(
+      browser.transcribeAudio(OTHER_WORKSPACE_ID, {
+        audio: new Uint8Array([1]),
+        mimeType: "audio/webm",
+      }),
+    );
+    expect(other.status).toBe(403);
+  });
+
+  test("voiceInput: false reports voice unavailable and refuses recordings", async () => {
+    const { upstream, browser } = setup({ voiceInput: false });
+    expect((await browser.getClientConfig()).voiceInput?.available).toBe(false);
+    const refused = await rejection(
+      browser.transcribeAudio(WORKSPACE_ID, {
+        audio: new Uint8Array([1]),
+        mimeType: "audio/webm",
+      }),
+    );
+    expect(refused.status).toBe(404);
+    expect(
+      upstream.requests.some((request) => request.url.pathname.endsWith("/transcriptions")),
+    ).toBe(false);
   });
 
   test("creation is unavailable unless the server supplies a createSession hook", async () => {

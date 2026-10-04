@@ -1,4 +1,4 @@
-import { chatReasoning } from "./chat-reasoning";
+import { chatReasoning, chatReasoningDetails, chatReasoningDetailsText } from "./chat-reasoning";
 
 export type HistoryProviderApi = "responses" | "chat" | "anthropic-messages";
 
@@ -86,12 +86,43 @@ function historicalReasoningContent(text: string) {
   return { type: "output_text", text: `[Historical reasoning from another model]\n${text}` };
 }
 
-function chatReasoningFact(item: Record<string, unknown>): Record<string, unknown> {
+/** Opaque reasoning belongs to its native API. Foreign APIs receive only its
+ * readable text (or an explicit unavailable marker), never signatures/ciphertext.
+ * The canonical artifact stays intact for a later switch back to its native API.
+ */
+function foreignReasoningFact(
+  item: Record<string, unknown>,
+  providerApi: HistoryProviderApi,
+): Record<string, unknown> | undefined {
+  if (item.type !== "reasoning") return undefined;
+  const metadata = item.providerData as Record<string, any> | undefined;
+  const nativeApi: HistoryProviderApi = metadata?.anthropic?.block
+    ? "anthropic-messages"
+    : isChatReasoning(item)
+      ? "chat"
+      : "responses";
+  if (nativeApi === providerApi) return undefined;
+  const content =
+    nativeApi === "chat"
+      ? chatReasoningText(item)
+      : Array.isArray(item.content)
+        ? item.content
+            .filter((part) => typeof part?.text === "string")
+            .map((part) => part.text)
+            .join("")
+        : "";
   return {
     type: "message",
     role: "assistant",
     status: "completed",
-    content: [historicalReasoningContent(chatReasoningText(item))],
+    content: [
+      content
+        ? historicalReasoningContent(content)
+        : {
+            type: "output_text",
+            text: "[Historical reasoning from another model is unavailable.]",
+          },
+    ],
   };
 }
 
@@ -128,7 +159,9 @@ function portableChatMetadata(
     // Before the shared Chat adapter, reasoning_content survived only inside
     // reply metadata. Retain it before removing that foreign envelope. Newer
     // histories already have the same text in their preceding reasoning item.
-    const reason = chatReasoning(part.providerData)?.text;
+    const reason =
+      chatReasoning(part.providerData)?.text ??
+      chatReasoningDetailsText(chatReasoningDetails(part.providerData));
     if (reason && reason !== precedingReason) legacyReasons.add(reason);
     const { providerData: _replyMetadata, ...projected } = part;
     changed = true;
@@ -201,9 +234,8 @@ export function projectHistoryForProvider(
       const next =
         item.type === "message" && item.role === "developer"
           ? { type: "unknown", providerData: item }
-          : isChatReasoning(item)
-            ? chatReasoningFact(item)
-            : portableChatMetadata(item, items[index - 1]);
+          : (foreignReasoningFact(item, providerApi) ??
+            portableChatMetadata(item, items[index - 1]));
       changed ||= next !== item;
       return next;
     });
@@ -218,9 +250,8 @@ export function projectHistoryForProvider(
       const next =
         item.type === "message" && item.role === "developer"
           ? { ...item, role: "system" }
-          : isChatReasoning(item)
-            ? chatReasoningFact(item)
-            : portableChatMetadata(item, items[index - 1]);
+          : (foreignReasoningFact(item, providerApi) ??
+            portableChatMetadata(item, items[index - 1]));
       changed ||= next !== item;
       return next;
     });
@@ -239,6 +270,11 @@ export function projectHistoryForProvider(
 
   let changed = false;
   const projected = items.map((item) => {
+    const reasoning = foreignReasoningFact(item, providerApi);
+    if (reasoning) {
+      changed = true;
+      return reasoning;
+    }
     if (item.type === "message" && (item.role === "developer" || item.role === "system")) {
       const content = chatSystemContent(item.content);
       if (item.role === "developer" || content !== item.content) {

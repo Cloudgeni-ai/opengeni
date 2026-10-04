@@ -2,6 +2,7 @@
 // no provider, client or workspace id in the browser. The component reads the
 // workspace the session proxy resolved from its client config.
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
+import { OpenGeniBrowserClient } from "@opengeni/sdk/browser";
 import { OpenGeniChat } from "../src/components/open-geni-chat";
 import { SessionConversation } from "../src/components/session-conversation";
 import { flush, registerDom, renderComponent } from "./render-hook";
@@ -121,6 +122,72 @@ describe("session proxy baseUrl", () => {
     try {
       await flush(150);
       expect(requests).toContain(`GET /api/opengeni/v1/workspaces/${RESOLVED}/sessions`);
+      expect(view.container.textContent).toContain("Quarterly report");
+    } finally {
+      await view.unmount();
+    }
+  });
+
+  test("bearer-token hosts add headers per request", async () => {
+    const seen: Array<string | null> = [];
+    globalThis.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
+      seen.push(new Headers(init?.headers).get("authorization"));
+      return await fakeProxy(input, init);
+    }) as typeof globalThis.fetch;
+    const token = "t1";
+    const view = await renderComponent(
+      <OpenGeniChat
+        baseUrl="/api/opengeni"
+        headers={() => ({ Authorization: `Bearer ${token}` })}
+      />,
+    );
+    try {
+      await flush(150);
+      expect(seen.length).toBeGreaterThan(1);
+      expect(seen.every((value) => value === "Bearer t1")).toBe(true);
+      expect(view.container.textContent).toContain("Quarterly report");
+    } finally {
+      await view.unmount();
+    }
+  });
+
+  test("a custom fetch carries every proxy request", async () => {
+    const custom: string[] = [];
+    const view = await renderComponent(
+      <SessionConversation
+        baseUrl="/api/opengeni"
+        sessionId={SESSION}
+        fetch={async (input, init) => {
+          custom.push(String(input));
+          return await fakeProxy(input as RequestInfo, init);
+        }}
+      />,
+    );
+    try {
+      await flush(150);
+      expect(custom.length).toBeGreaterThan(0);
+      expect(custom.length).toBe(requests.length);
+      expect(view.container.querySelector("[data-og-conversation]")).not.toBeNull();
+    } finally {
+      await view.unmount();
+    }
+  });
+
+  test("a client passed with baseUrl is used, not dropped", async () => {
+    const used: string[] = [];
+    const client = new OpenGeniBrowserClient({
+      baseUrl: "/api/opengeni",
+      apiContract: "compatible",
+      fetch: async (input, init) => {
+        used.push(String(input));
+        return await fakeProxy(input as RequestInfo, init);
+      },
+    });
+    const view = await renderComponent(<OpenGeniChat baseUrl="/api/opengeni" client={client} />);
+    try {
+      await flush(150);
+      expect(used.some((url) => url.endsWith("/v1/config/client"))).toBe(true);
+      expect(used.length).toBe(requests.length);
       expect(view.container.textContent).toContain("Quarterly report");
     } finally {
       await view.unmount();

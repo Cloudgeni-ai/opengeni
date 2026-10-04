@@ -15,6 +15,7 @@ import {
   type OpenGeniSlackBotConnectionMetadata,
 } from "@opengeni/contracts";
 import {
+  grantHasAgentAttemptAuthority,
   isOpenGeniSlackBotConnection,
   isTrustedScheduledSlackBotSession,
   openGeniSlackBotMetadata,
@@ -33,10 +34,11 @@ import {
   getScheduledTask,
   getSession,
   getSlackBotPostOperation,
-  listConnectionsMetadata,
-  prepareScheduledSlackBotMessage,
-  readScheduledSlackBotMessage,
-  ScheduledSlackBotMessageRefusedError,
+  availableSlackBotConnectionMetadata,
+  sharedOrganizationSlackBots,
+  prepareBotMessage,
+  readPreparedBotMessage,
+  freezeAgentLearningPolicy,
   markSlackBotDeleteOperationProviderStarted,
   markSlackBotPostOperationProviderStarted,
   recordAuditEvent,
@@ -516,6 +518,8 @@ export async function resolveSlackBotConnectionForTool(input: {
   connection: ConnectionMetadata;
   metadata: OpenGeniSlackBotConnectionMetadata;
   context: SlackBotContext;
+  sharingGeneration?: number;
+  authorizeOrganizationAccess?: SlackProviderAuthorization;
 }> {
   const session = input.sessionId
     ? await getSession(input.db, input.grant.workspaceId, input.sessionId)
@@ -540,12 +544,14 @@ export async function resolveSlackBotConnectionForTool(input: {
   let connectionId = boundConnectionId ?? input.requestedConnectionId;
   if (!connectionId) {
     const activeConnections = (
-      await listConnectionsMetadata(input.db, input.grant.workspaceId, null)
+      await availableSlackBotConnectionMetadata(input.db, input.grant)
     ).filter(
       (connection) => connection.status === "active" && isOpenGeniSlackBotConnection(connection),
     );
     if (activeConnections.length === 0) {
-      throw new Error("no active Opengeni Slack bot connection is installed in this workspace");
+      throw new Error(
+        "No active Opengeni bot is available. Connect it in Capabilities or ask an organization administrator to share the installed bot.",
+      );
     }
     if (activeConnections.length > 1) {
       const principals = new Set(
@@ -556,7 +562,10 @@ export async function resolveSlackBotConnectionForTool(input: {
       );
       if (principals.size > 1) {
         throw new Error(
-          "connectionId is required because this workspace has multiple active Opengeni Slack bot connections",
+          `Choose connectionId because multiple Opengeni bots are available: ${activeConnections
+            .slice(0, 20)
+            .map((bot) => `${openGeniSlackBotMetadataLabel(bot)} (${bot.id})`)
+            .join(", ")}`,
         );
       }
     }
@@ -571,12 +580,29 @@ export async function resolveSlackBotConnectionForTool(input: {
   if (!metadata) {
     throw new Error("Opengeni Slack bot connection metadata is invalid");
   }
+  const sharingGeneration =
+    connection.workspaceId === input.grant.workspaceId
+      ? 0
+      : Number(connection.metadata.organizationSharingGeneration);
   return {
     connection,
     metadata,
+    sharingGeneration,
+    ...(connection.workspaceId !== input.grant.workspaceId
+      ? {
+          authorizeOrganizationAccess: async () =>
+            (await sharedOrganizationSlackBots(input.db, input.grant)).some(
+              (share) =>
+                share.connectionId === connection.id &&
+                share.homeWorkspaceId === connection.workspaceId &&
+                share.generation === sharingGeneration &&
+                share.connectionVersion === connection.version,
+            ),
+        }
+      : {}),
     context: {
       accountId: input.grant.accountId,
-      workspaceId: input.grant.workspaceId,
+      workspaceId: connection.workspaceId,
       subjectId: input.grant.subjectId,
       sessionId: input.sessionId,
       scheduledTaskId:
@@ -585,6 +611,11 @@ export async function resolveSlackBotConnectionForTool(input: {
           : null,
     },
   };
+}
+
+function openGeniSlackBotMetadataLabel(connection: ConnectionMetadata): string {
+  const metadata = openGeniSlackBotMetadata(connection.metadata);
+  return metadata?.slackTeamName ?? "Slack workspace";
 }
 
 /**
@@ -643,21 +674,18 @@ export async function prepareScheduledSlackBotPost(input: {
   threadTimestamp?: string | undefined;
 }) {
   const target = await resolveScheduledSlackBotPostTarget(input);
-  const message = await prepareScheduledSlackBotMessage(input.db, {
+  const message = await prepareBotMessage(input.db, {
     accountId: input.grant.accountId,
     workspaceId: input.grant.workspaceId,
     sessionId: input.sessionId!,
     scheduledTaskId: target.scheduledTaskId,
     connectionId: target.connection.id,
     connectionVersion: target.connection.version,
+    homeWorkspaceId: target.connection.workspaceId,
+    sharingGeneration: target.sharingGeneration ?? 0,
     channelId: target.channelId,
     threadTimestamp: input.threadTimestamp ?? null,
     text: input.text,
-  }).catch((error: unknown) => {
-    if (error instanceof ScheduledSlackBotMessageRefusedError) {
-      throw new Error(`Posting to the task's Slack channel is unavailable: ${error.message}`);
-    }
-    throw error;
   });
   return {
     messageId: message.id,
@@ -666,6 +694,167 @@ export async function prepareScheduledSlackBotPost(input: {
     threadTimestamp: message.threadTimestamp,
     text: message.text,
     sent: false,
+  };
+}
+
+/** Ordinary chats choose an explicit channel; scheduled roots retain their
+ * person-chosen destination and cannot enter this path through a child. */
+export async function prepareSlackBotPost(input: {
+  db: Database;
+  grant: AccessGrant;
+  sessionId: string | null;
+  text: string;
+  channelId?: string;
+  connectionId?: string;
+  threadTimestamp?: string;
+}) {
+  if (!input.sessionId) throw new Error("Bot posting requires a chat");
+  const session = await getSession(input.db, input.grant.workspaceId, input.sessionId);
+  if (!session) throw new Error("Bot posting chat is unavailable");
+  if (isTrustedScheduledSlackBotSession(session)) {
+    if (input.channelId || input.connectionId)
+      throw new Error(
+        "A scheduled task uses only the bot and channel chosen by a person on the task",
+      );
+    return prepareScheduledSlackBotPost(input);
+  }
+  await authorizeOrdinaryBotPosting(input);
+  if (!input.grant.permissions.includes("connections:read"))
+    throw new Error("connections:read is required to post as the bot");
+  if (!input.channelId)
+    throw new Error(
+      "Choose the Slack channel for this bot message. For a schedule, choose Post to Slack in the schedule editor.",
+    );
+  const target = await resolveSlackBotConnectionForTool({
+    db: input.db,
+    grant: input.grant,
+    sessionId: input.sessionId,
+    ...(input.connectionId ? { requestedConnectionId: input.connectionId } : {}),
+  });
+  const message = await prepareBotMessage(input.db, {
+    accountId: input.grant.accountId,
+    workspaceId: input.grant.workspaceId,
+    sessionId: input.sessionId,
+    scheduledTaskId: null,
+    connectionId: target.connection.id,
+    connectionVersion: target.connection.version,
+    homeWorkspaceId: target.connection.workspaceId,
+    sharingGeneration: target.sharingGeneration ?? 0,
+    channelId: input.channelId,
+    threadTimestamp: input.threadTimestamp ?? null,
+    text: input.text,
+  });
+  return {
+    messageId: message.id,
+    identity: "organization_bot" as const,
+    channelId: message.channelId,
+    threadTimestamp: message.threadTimestamp,
+    text: message.text,
+    sent: false,
+  };
+}
+
+/** The saved server-owned identity, destination, text and sharing generation
+ * are immutable. Neither a reconnect nor a revoked/re-enabled share redirects it. */
+export async function sendSlackBotPost(input: {
+  db: Database;
+  settings: Settings;
+  grant: AccessGrant;
+  sessionId: string | null;
+  messageId: string;
+  slackFetch?: typeof fetch;
+  authorizeProviderRequest?: SlackProviderAuthorization;
+}) {
+  if (!input.sessionId) throw new Error("Bot posting requires a chat");
+  const message = await readPreparedBotMessage(input.db, {
+    accountId: input.grant.accountId,
+    workspaceId: input.grant.workspaceId,
+    sessionId: input.sessionId,
+    id: input.messageId,
+  });
+  if (!message) throw new Error("This prepared bot message does not exist in this chat");
+  if (message.scheduledTaskId) return sendScheduledSlackBotPost(input);
+  await authorizeOrdinaryBotPosting(input);
+  const earlier = await getSlackBotPostOperation(
+    input.db,
+    message.homeWorkspaceId,
+    message.connectionId,
+    message.id,
+  );
+  if (earlier?.status === "completed") return completedPreparedBotPost(message, earlier);
+  if (!input.grant.permissions.includes("connections:read"))
+    throw new Error("connections:read is required to post as the bot");
+  const target = await resolveSlackBotConnectionForTool({
+    db: input.db,
+    grant: input.grant,
+    sessionId: input.sessionId,
+    requestedConnectionId: message.connectionId,
+  });
+  if (
+    message.connectionVersion !== target.connection.version ||
+    message.homeWorkspaceId !== target.connection.workspaceId ||
+    message.sharingGeneration !== (target.sharingGeneration ?? 0)
+  ) {
+    throw new Error(
+      "Bot access changed after this message was prepared. It was not sent again; an earlier interrupted send may already have posted it.",
+    );
+  }
+  const client = createOpenGeniSlackBotClient(input, target);
+  return client.postMessage({
+    operationId: message.id,
+    channelId: message.channelId,
+    ...(message.threadTimestamp ? { threadTimestamp: message.threadTimestamp } : {}),
+    text: message.text,
+    requireActiveNonSharedChannel: true,
+  });
+}
+
+async function authorizeOrdinaryBotPosting(input: {
+  db: Database;
+  grant: AccessGrant;
+  sessionId: string | null;
+}) {
+  if (!grantHasAgentAttemptAuthority(input.grant)) return;
+  const { sessionId, turnId, attemptId, executionGeneration } = input.grant.metadata ?? {};
+  if (
+    typeof sessionId !== "string" ||
+    sessionId !== input.sessionId ||
+    typeof turnId !== "string" ||
+    typeof attemptId !== "string" ||
+    typeof executionGeneration !== "number" ||
+    !Number.isSafeInteger(executionGeneration) ||
+    executionGeneration < 1
+  )
+    throw new Error("Exact live agent attempt required for bot posting");
+  const policy = await freezeAgentLearningPolicy(input.db, {
+    accountId: input.grant.accountId,
+    workspaceId: input.grant.workspaceId,
+    actor: { kind: "agent", sessionId, turnId, attemptId, executionGeneration },
+  });
+  if (typeof policy.scheduledTaskRunId === "string") {
+    throw new Error(
+      "A scheduled occurrence can post as the bot only to its person-chosen Post to Slack destination. Tasks that continue an existing chat cannot post as the bot.",
+    );
+  }
+}
+
+function completedPreparedBotPost(
+  message: Awaited<ReturnType<typeof readPreparedBotMessage>> & {},
+  operation: { slackChannelId: string | null; slackMessageTimestamp: string | null },
+) {
+  return {
+    channelId: operation.slackChannelId,
+    timestamp: operation.slackMessageTimestamp,
+    threadTimestamp: message.threadTimestamp,
+    alreadySent: true,
+    receipt: {
+      credentialRole: OPENGENI_SLACK_BOT_CREDENTIAL_ROLE,
+      credentialLabel: OPENGENI_SLACK_BOT_CREDENTIAL_LABEL,
+      connectionId: message.connectionId,
+      operation: "message.post",
+      operationId: message.id,
+      clientMessageId: message.id,
+    },
   };
 }
 
@@ -683,8 +872,24 @@ export async function sendScheduledSlackBotPost(input: {
   slackFetch?: typeof fetch;
   authorizeProviderRequest?: SlackProviderAuthorization;
 }) {
+  if (!input.sessionId) throw new Error("Bot posting requires a chat");
+  const saved = await readPreparedBotMessage(input.db, {
+    accountId: input.grant.accountId,
+    workspaceId: input.grant.workspaceId,
+    sessionId: input.sessionId,
+    id: input.messageId,
+  });
+  if (saved) {
+    const earlier = await getSlackBotPostOperation(
+      input.db,
+      saved.homeWorkspaceId,
+      saved.connectionId,
+      saved.id,
+    );
+    if (earlier?.status === "completed") return completedPreparedBotPost(saved, earlier);
+  }
   const target = await resolveScheduledSlackBotPostTarget(input);
-  const message = await readScheduledSlackBotMessage(input.db, {
+  const message = await readPreparedBotMessage(input.db, {
     accountId: input.grant.accountId,
     workspaceId: input.grant.workspaceId,
     sessionId: input.sessionId!,
@@ -697,7 +902,9 @@ export async function sendScheduledSlackBotPost(input: {
     message.channelId !== target.channelId || message.scheduledTaskId !== target.scheduledTaskId;
   const botChanged =
     message.connectionId !== target.connection.id ||
-    message.connectionVersion !== target.connection.version;
+    message.connectionVersion !== target.connection.version ||
+    message.homeWorkspaceId !== target.connection.workspaceId ||
+    message.sharingGeneration !== (target.sharingGeneration ?? 0);
   const client = createOpenGeniSlackBotClient(
     {
       db: input.db,
@@ -706,6 +913,18 @@ export async function sendScheduledSlackBotPost(input: {
       ...(input.authorizeProviderRequest
         ? { authorizeProviderRequest: input.authorizeProviderRequest }
         : {}),
+      authorizeBotMutation: async () => {
+        const current = await resolveScheduledSlackBotPostTarget(input);
+        if (
+          current.channelId !== message.channelId ||
+          current.connection.id !== message.connectionId ||
+          current.connection.version !== message.connectionVersion ||
+          (current.sharingGeneration ?? 0) !== message.sharingGeneration
+        )
+          throw new Error(
+            "The task's bot destination changed before sending; the message was not sent again",
+          );
+      },
     },
     target,
   );
@@ -723,7 +942,7 @@ export async function sendScheduledSlackBotPost(input: {
   // agent does not post the same content again believing nothing was sent.
   const earlier = await getSlackBotPostOperation(
     input.db,
-    input.grant.workspaceId,
+    message.homeWorkspaceId,
     message.connectionId,
     message.id,
   );
@@ -799,6 +1018,7 @@ export class OpenGeniSlackBotClient {
     private readonly context: SlackBotContext,
     private readonly fetchImpl: FetchLike = fetch,
     private readonly authorizeProviderRequest?: SlackProviderAuthorization,
+    private readonly authorizeBotAccess?: (method: string) => Promise<boolean | void>,
   ) {
     this.resolveCredential = buildConnectionTokenResolver(db, settings);
     this.rateLimit = buildSlackApiRateLimiter(db, settings);
@@ -2115,6 +2335,11 @@ export class OpenGeniSlackBotClient {
     if (result.status !== "ok" || result.connectionId !== this.connection.id) {
       throw new Error("Opengeni Slack bot connection needs to be reinstalled");
     }
+    // Caller revalidation may await arbitrary adapter work. Verify bot authority
+    // only after it, immediately before the final provider access fence.
+    if (this.authorizeProviderRequest && (await this.authorizeProviderRequest()) === false) {
+      throw new Error("Opengeni Slack bot provider request is no longer authorized");
+    }
     const current = await requireOpenGeniSlackBotConnection(
       this.db,
       this.context.workspaceId,
@@ -2135,17 +2360,21 @@ export class OpenGeniSlackBotClient {
     ) {
       throw new Error("Opengeni Slack bot connection authority changed");
     }
-    // The adapter callback is a fallible preflight. The canonical credential
-    // callback must remain the final await before the physical fetch.
-    if (this.authorizeProviderRequest && (await this.authorizeProviderRequest()) === false) {
-      throw new Error("Opengeni Slack bot provider request is no longer authorized");
-    }
+    // Recheck the canonical credential after adapter work, then the exact bot
+    // sharing/destination fence immediately before the physical fetch.
     if (
       credentialResolutionMode === "execution" &&
       result.authorizeProviderRequest &&
       !(await result.authorizeProviderRequest())
     ) {
       throw new Error("Opengeni Slack bot provider request is no longer authorized");
+    }
+    if (
+      this.authorizeBotAccess &&
+      (await this.authorizeBotAccess(new URL(destinationUrl).pathname.split("/").at(-1) ?? "")) ===
+        false
+    ) {
+      throw new Error("Opengeni Slack bot organization access is no longer authorized");
     }
     return result.headers;
   }
@@ -2416,6 +2645,7 @@ export function createOpenGeniSlackBotClient(
     settings: Settings;
     slackFetch?: typeof fetch;
     authorizeProviderRequest?: SlackProviderAuthorization;
+    authorizeBotMutation?: () => Promise<void>;
   },
   resolved: Awaited<ReturnType<typeof resolveSlackBotConnectionForTool>>,
 ): OpenGeniSlackBotClient {
@@ -2427,6 +2657,15 @@ export function createOpenGeniSlackBotClient(
     resolved.context,
     deps.slackFetch,
     deps.authorizeProviderRequest,
+    async (method) => {
+      if (method === "chat.postMessage") await deps.authorizeBotMutation?.();
+      if (
+        resolved.authorizeOrganizationAccess &&
+        (await resolved.authorizeOrganizationAccess()) === false
+      )
+        return false;
+      return true;
+    },
   );
 }
 
@@ -2462,13 +2701,27 @@ export async function createOpenGeniSlackBotInteractionClient(
     metadata,
     {
       accountId: input.accountId,
-      workspaceId: input.workspaceId,
+      workspaceId: connection.workspaceId,
       subjectId: input.subjectId,
       sessionId: input.sessionId ?? null,
       scheduledTaskId: null,
     },
     deps.slackFetch,
     deps.authorizeProviderRequest,
+    async () => {
+      if (
+        connection.workspaceId !== input.workspaceId &&
+        !(await sharedOrganizationSlackBots(deps.db, input)).some(
+          (share) =>
+            share.connectionId === connection.id &&
+            share.homeWorkspaceId === connection.workspaceId &&
+            share.generation === Number(connection.metadata.organizationSharingGeneration) &&
+            share.connectionVersion === connection.version,
+        )
+      )
+        return false;
+      return true;
+    },
   );
 }
 

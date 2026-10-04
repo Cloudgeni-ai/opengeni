@@ -1,4 +1,4 @@
-import { SESSION_SCOPE_HEADER, type SendMessageInput } from "@opengeni/sdk";
+import { SESSION_SCOPE_HEADER, type ReasoningEffort, type SendMessageInput } from "@opengeni/sdk";
 import {
   lazy,
   Suspense,
@@ -134,11 +134,22 @@ export type SessionConversationProps = ClientOverride &
  * (including Site clients), one shared event feed, and authoritative queue state.
  * `<SessionConversation baseUrl="/api/opengeni" sessionId={id} />` needs no
  * provider: it talks to your session proxy and its resolved workspace. */
-export function SessionConversation({ baseUrl, ...props }: SessionConversationProps) {
+export function SessionConversation({
+  baseUrl,
+  headers,
+  fetch,
+  ...props
+}: SessionConversationProps) {
   if (baseUrl === undefined) return <RetryingConversation {...props} />;
-  const { client: _client, workspaceId, ...rest } = props;
+  const { client, workspaceId, ...rest } = props;
   return (
-    <SessionProxyScope baseUrl={baseUrl} workspaceId={workspaceId}>
+    <SessionProxyScope
+      baseUrl={baseUrl}
+      workspaceId={workspaceId}
+      client={client}
+      headers={headers}
+      fetch={fetch}
+    >
       <RetryingConversation {...rest} />
     </SessionProxyScope>
   );
@@ -494,17 +505,24 @@ function useDefaultInteractiveBlock(
 }
 
 /** Deployment/proxy flags from the client config: uploads, and whether model choice is open. */
-function useClientConfigFlags(client: {
+export function useClientConfigFlags(client: {
   getClientConfig: () => Promise<{
     fileUploads?: { enabled?: boolean };
     modelSelection?: boolean | undefined;
     sandboxFiles?: boolean | undefined;
+    defaultReasoningEffort?: ReasoningEffort | undefined;
   }>;
-}): { uploads: boolean; modelSelection: boolean; sandboxFiles: boolean } {
-  const [flags, setFlags] = useState({
+}): {
+  uploads: boolean;
+  modelSelection: boolean;
+  sandboxFiles: boolean;
+  defaultReasoningEffort: ReasoningEffort | null;
+} {
+  const [flags, setFlags] = useState<ReturnType<typeof useClientConfigFlags>>({
     uploads: false,
     modelSelection: false,
     sandboxFiles: false,
+    defaultReasoningEffort: null,
   });
   useEffect(() => {
     let live = true;
@@ -516,6 +534,7 @@ function useClientConfigFlags(client: {
             // Only an explicit offer shows end users the picker.
             modelSelection: config.modelSelection === true,
             sandboxFiles: config.sandboxFiles !== false,
+            defaultReasoningEffort: config.defaultReasoningEffort ?? null,
           });
         }
       },

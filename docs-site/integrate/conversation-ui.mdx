@@ -25,6 +25,19 @@ icon: "palette"
 
 `baseUrl` is your proxy's mount. The component creates the browser client and uses the workspace your proxy resolved for the signed-in user.
 
+The new-chat composer is the same as the follow-up one: attachments, your `conversationProps.composerProps`, and the model picker when offered. Files attached to the first message are added to the new chat.
+
+If your app authenticates with a bearer token instead of cookies, pass it on every request and read it in the proxy's `resolve`:
+
+```tsx
+<OpenGeniChat
+  baseUrl="/api/opengeni"
+  headers={() => ({ Authorization: `Bearer ${getAccessToken()}` })}
+/>
+```
+
+The function runs per request, so it can return a refreshed token. Pass `fetch` instead when the token must be awaited. A `client` you pass with `baseUrl` is used instead of the one the component would create.
+
 The list shows the chats the user created. Set `sessionList: "visible"` on the proxy to list every chat they can read. Control the selection with `sessionId` and `onSessionChange` (for example from the URL).
 
 For a single conversation, use `SessionConversation`. It includes streaming replies, tool activity, approvals, questions, attachments, the message queue, Steer, and Pause/Resume.
@@ -44,8 +57,9 @@ Import from `@opengeni/react/session-ui` for the smallest bundle; it has no opti
 | ------------------------------------------------------ | ---------------------------------------------------------------------------------------- |
 | `sessionId`                                            | Required. The session to show                                                            |
 | `baseUrl`                                              | Your proxy's mount, such as `/api/opengeni`. Not needed inside an `OpenGeniProvider`     |
+| `headers`, `fetch`                                     | With `baseUrl`: headers for every request (static or a function), or a custom fetch      |
 | `attachments`                                          | File attachments in the composer. Defaults to `true`                                     |
-| `modelPicker`                                          | Show the model picker. Hidden when the proxy fixes the model                             |
+| `modelPicker`                                          | Show the model picker. Hidden unless the proxy sets `modelSelection: true`               |
 | `toolRegistry`                                         | Your own renderers for your tools                                                        |
 | `renderMessageText`                                    | Custom rendering for message text, such as links into your product                       |
 | `renderAllowanceExhausted`, `allowanceExhaustedLabels` | Replace the row or its words when a [usage allowance](/guides/usage-allowances) runs out |

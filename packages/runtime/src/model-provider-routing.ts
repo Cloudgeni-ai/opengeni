@@ -21,7 +21,9 @@ import { AnthropicMessagesModel } from "./anthropic-messages";
 import { projectChatToolImages } from "./chat-tool-images";
 import { projectHistoryForProvider } from "./provider-history-adapter";
 import {
+  appendChatReasoningDetails,
   chatReasoning,
+  chatReasoningDetails,
   primaryChatChoice,
   projectChatReasoning,
   withChatReasoning,
@@ -72,6 +74,16 @@ function chatCompletionFinishReason(value: unknown): unknown {
   return primary && typeof primary === "object"
     ? (primary as { finish_reason?: unknown }).finish_reason
     : undefined;
+}
+
+function chatRequest(request: ModelRequest): ModelRequest {
+  const input =
+    typeof request.input === "string"
+      ? request.input
+      : (projectHistoryForProvider(request.input, "chat") as ModelRequest["input"]);
+  return projectChatReasoning(
+    projectChatToolImages(input === request.input ? request : { ...request, input }),
+  );
 }
 
 /**
@@ -151,9 +163,7 @@ export class OpenGeniChatCompletionsModel extends OpenAIChatCompletionsModel {
     const entry = { entered: false };
     let response: ModelResponse;
     try {
-      response = await chatTransportEntry.run(entry, () =>
-        super.getResponse(projectChatReasoning(projectChatToolImages(request))),
-      );
+      response = await chatTransportEntry.run(entry, () => super.getResponse(chatRequest(request)));
     } catch (error) {
       await refundUnenteredChatFailure(error, entry.entered);
       throw error;
@@ -172,6 +182,7 @@ export class OpenGeniChatCompletionsModel extends OpenAIChatCompletionsModel {
       output: withChatReasoning(
         response.output,
         chatReasoning(primaryChatChoice(response.providerData)?.message),
+        chatReasoningDetails(primaryChatChoice(response.providerData)?.message),
       ),
     };
   }
@@ -179,11 +190,12 @@ export class OpenGeniChatCompletionsModel extends OpenAIChatCompletionsModel {
   override async *getStreamedResponse(request: ModelRequest): AsyncIterable<ResponseStreamEvent> {
     let finishReason: unknown;
     let reasoning: ChatReasoning | undefined;
+    let reasoningDetails: Record<string, unknown>[] | undefined;
     let usageReported = false;
     let providerResponseId: string | undefined;
     const fallbackId = `opengeni-response:${randomUUID()}`;
     for await (const event of chatEntryTrackedStream(() =>
-      super.getStreamedResponse(projectChatReasoning(projectChatToolImages(request))),
+      super.getStreamedResponse(chatRequest(request)),
     )) {
       if (event.type === "model") {
         const rawId = (event.event as { id?: unknown } | undefined)?.id;
@@ -196,6 +208,8 @@ export class OpenGeniChatCompletionsModel extends OpenAIChatCompletionsModel {
           finishReason = observed;
         }
         const delta = chatReasoning(primaryChatChoice(event.event)?.delta);
+        const details = chatReasoningDetails(primaryChatChoice(event.event)?.delta);
+        if (details) appendChatReasoningDetails((reasoningDetails ??= []), details);
         if (delta)
           reasoning = {
             field: delta.field,
@@ -220,7 +234,7 @@ export class OpenGeniChatCompletionsModel extends OpenAIChatCompletionsModel {
             ...event,
             response: {
               ...event.response,
-              output: withChatReasoning(event.response.output, reasoning),
+              output: withChatReasoning(event.response.output, reasoning, reasoningDetails),
             },
           }
         : event;

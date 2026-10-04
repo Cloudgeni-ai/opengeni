@@ -1,5 +1,15 @@
 # @opengeni/contracts
 
+## 1.3.0
+
+### Minor Changes
+
+- 178b5ae: Unify connector Allow, Ask first and Block decisions across tool transports and settings. Add durable programmatic approval handles, exact stored-operation continuation, and shared review facts with portable React presentation and paginated protected details.
+
+  Add lightweight Gmail message selection and bounded pagination/chunk helpers. Preserve exact access checks, uncertain outcomes and existing client compatibility. Deploy matching API, worker and native runtime artifacts through the documented maintenance migration.
+
+- 414d416: Support explicit organization sharing of installed Slack bots and durable bot posting from ordinary chats. Add bot inventory and organization-access SDK methods, preserve person-chosen scheduled destinations, and keep personal Slack identities separate.
+
 ## 1.2.0
 
 ### Minor Changes

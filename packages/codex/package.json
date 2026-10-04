@@ -1,6 +1,6 @@
 {
   "name": "@opengeni/codex",
-  "version": "1.2.0",
+  "version": "1.3.0",
   "description": "ChatGPT/Codex subscription auth + transport: device-code login, token refresh, and the Responses-backend fetch. Pure HTTP + transforms; no database dependency.",
   "license": "Apache-2.0",
   "repository": {

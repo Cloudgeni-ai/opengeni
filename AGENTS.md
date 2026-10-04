@@ -288,10 +288,11 @@ disabled tools or grant execution outside the current catalog.
   human, not the session creator. Admission reads counters; post-call stopping
   permits overshoot without reservations. Enable new writes only after the
   complete fleet supports enforcement. See `docs/usage-allowances.md`.
-- Codex rate-limit reset credits are never automatic agent capacity. Their
-  irreversible consume path is managed-cookie owning-human web-only with durable
-  provider idempotency; do not add an SDK, MCP, Codemode, worker, scheduled, or
-  allocator/rotation consume hook. See `docs/codex-subscription-rotation.md`.
+- Codex rate-limit reset credits are never automatic agent capacity. Only the
+  owning person redeems them (in the web app, or through an agent they signed
+  in to the organization MCP acting as them), with durable provider
+  idempotency; do not add a worker, scheduled, or allocator/rotation consume
+  hook. See `docs/codex-subscription-rotation.md`.
 
 ## Run Lifecycle (read `docs/run-lifecycle.md` before changing the session workflow, the agent turn activity, or memory)
 
@@ -393,6 +394,15 @@ durable `turn.started`, never queue/claim or recovery. Preserve exact receipt
 generations and live revocation; restricted/foreign inputs, schedules and Steer
 retain explicit authority. Migration 0608 requires drained writers and only
 context-aware images afterward. See `docs/durable-agent-inputs.md`.
+
+Organization Slack bot sharing is an explicit organization-admin setting. Bot
+credentials and provider delivery receipts stay in their installation workspace;
+authorized target workspaces use the current sharing generation. Ordinary chats
+prepare an explicit channel message before sending its server-owned message ID.
+Scheduled occurrences, including child work and tasks that continue an existing
+chat, never gain arbitrary-channel posting from the ordinary tools. Recheck bot,
+sharing and the schedule's person-chosen destination before physical writes;
+never fall back to a personal Slack account. See `docs/slack-bot.md`.
 
 ## Pull-request delivery across moving `main`
 

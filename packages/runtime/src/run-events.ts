@@ -3,7 +3,12 @@ import {
   isOpenAIResponsesRawModelStreamEvent,
   type RunStreamEvent,
 } from "@openai/agents";
-import { chatReasoning, primaryChatChoice } from "./chat-reasoning";
+import {
+  chatReasoning,
+  chatReasoningDetails,
+  chatReasoningDetailsText,
+  primaryChatChoice,
+} from "./chat-reasoning";
 import {
   INTERACTION_REQUEST_HUMAN_MODEL_TOOL_NAME,
   approvalIdentifier,
@@ -548,11 +553,13 @@ export function normalizeSdkEvent(
     return out;
   }
   if (isOpenAIChatCompletionsRawModelStreamEvent(event)) {
-    const reasoning = chatReasoning(primaryChatChoice(event.data.event)?.delta);
-    if (reasoning)
+    const delta = primaryChatChoice(event.data.event)?.delta;
+    const text =
+      chatReasoning(delta)?.text ?? chatReasoningDetailsText(chatReasoningDetails(delta));
+    if (text)
       out.push({
         type: "agent.reasoning.delta",
-        payload: { text: reasoning.text },
+        payload: { text },
       });
     return out;
   }

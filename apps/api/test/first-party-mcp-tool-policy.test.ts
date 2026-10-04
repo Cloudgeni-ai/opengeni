@@ -696,7 +696,7 @@ describe("first-party MCP tool visibility policy", () => {
     ).rejects.toThrow("sessions_list query must be at most 200 characters");
   });
 
-  test("ordinary omission excludes connector tools while explicit authorized selection stays exact", () => {
+  test("an attempt without an accepted tool selection never receives connector tools", () => {
     const ordinary = buildOpenGeniMcpServer(
       deps(),
       grant([...DEFAULT_FIRST_PARTY_MCP_PERMISSIONS]),
@@ -1308,9 +1308,9 @@ describe("first-party MCP tool visibility policy", () => {
     }
   });
 
-  test("scheduled Slack posting tools take no destination and stay explicit-only", async () => {
-    expect(DEFAULT_FIRST_PARTY_MCP_TOOLS).not.toContain("slack_bot_prepare_message");
-    expect(DEFAULT_FIRST_PARTY_MCP_TOOLS).not.toContain("slack_bot_send_prepared_message");
+  test("bot posting is default-discoverable and accepts an ordinary chat destination", async () => {
+    expect(DEFAULT_FIRST_PARTY_MCP_TOOLS).toContain("slack_bot_prepare_message");
+    expect(DEFAULT_FIRST_PARTY_MCP_TOOLS).toContain("slack_bot_send_prepared_message");
     const server = buildOpenGeniMcpServer(
       deps(),
       grant(["connections:read"], ["slack_bot_prepare_message", "slack_bot_send_prepared_message"]),
@@ -1323,8 +1323,10 @@ describe("first-party MCP tool visibility policy", () => {
       const tools = (await client.listTools()).tools;
       const prepare = tools.find((tool) => tool.name === "slack_bot_prepare_message");
       const send = tools.find((tool) => tool.name === "slack_bot_send_prepared_message");
-      // The agent cannot name a channel, user, or bot connection.
+      // Ordinary chats choose a channel; scheduled execution enforces its fixed destination.
       expect(Object.keys(prepare?.inputSchema.properties ?? {}).sort()).toEqual([
+        "channelId",
+        "connectionId",
         "text",
         "threadTimestamp",
       ]);

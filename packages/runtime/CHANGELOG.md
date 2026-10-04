@@ -1,5 +1,31 @@
 # @opengeni/runtime
 
+## 1.3.0
+
+### Patch Changes
+
+- 62006f1: Preserve image attachments and tool image results on image-capable Chat Completions models, omit response-only metadata from replayed assistant content, and explicitly request Claude thinking summaries.
+- fd4346c: Preserve Chat Completions reasoning across streamed and non-streamed replies, tool continuations, and saved history. Surface streamed reasoning in the thinking timeline and keep response-only metadata out of follow-up text blocks.
+- 178b5ae: Unify connector Allow, Ask first and Block decisions across tool transports and settings. Add durable programmatic approval handles, exact stored-operation continuation, and shared review facts with portable React presentation and paginated protected details.
+
+  Add lightweight Gmail message selection and bounded pagination/chunk helpers. Preserve exact access checks, uncertain outcomes and existing client compatibility. Deploy matching API, worker and native runtime artifacts through the documented maintenance migration.
+
+- 757a7e4: Preserve Chat reasoning as historical assistant context when switching to Responses or native Claude, and prevent Chat reply metadata from leaking into Responses text blocks and tool calls.
+- Updated dependencies [178b5ae]
+- Updated dependencies [2aed1a1]
+- Updated dependencies [414d416]
+  - @opengeni/contracts@1.3.0
+  - @opengeni/capabilities@1.3.0
+  - @opengeni/codemode@1.3.0
+  - @opengeni/observability@1.3.0
+  - @opengeni/sdk@1.3.0
+  - @opengeni/tool-gateway@1.3.0
+  - @opengeni/codex@1.3.0
+  - @opengeni/config@1.3.0
+  - @opengeni/agent-proto@1.3.0
+  - @opengeni/network@1.3.0
+  - @opengeni/xai-subscription@1.3.0
+
 ## 1.2.0
 
 ### Patch Changes

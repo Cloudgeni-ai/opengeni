@@ -35,6 +35,14 @@ processes ignore the new `slackBotChannelId` task field, so a task keeps
 running without the posting tools until the matching worker creates its next
 run. See [`slack-bot.md`](slack-bot.md#scheduled-tasks).
 
+## Organization Slack bot posting (0622)
+
+`0622_organization_slack_bot_delivery.sql` is rolling. It adds private, explicit
+organization-admin bot sharing and extends immutable prepared messages to ordinary
+chats. Existing installations are not automatically shared. Deploy the matching
+API and workers, then enable **Use the bot across the organization** in the
+installation workspace's Slack settings. Personal accounts are unchanged.
+
 ## Assistant message phases (0527)
 
 `0527_session_attention_excludes_commentary.sql` is rolling: it builds the
@@ -3978,7 +3986,7 @@ for the feature limits and external-workspace release acceptance.
 
 ### Reservation balance projection cutover
 
-Migration `0625_usage_reservation_balance_projection.sql` requires maintenance.
+Migration `0629_usage_reservation_balance_projection.sql` requires maintenance.
 Drain API, control-worker, and turn-worker writers before applying it, and run
 role provisioning with the projection-aware release before resuming that release.
 Older binaries reject its owner-only internal routines during database posture

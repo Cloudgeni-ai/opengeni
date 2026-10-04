@@ -1174,9 +1174,9 @@ export const EDITABLE_ARTIFACT_MCP_CODEMODE_PATHS = {
 } as const satisfies Partial<Record<FirstPartyMcpToolName, readonly [string, string]>>;
 
 /**
- * Connector-wide tools are explicit-only. Ordinary session omission selects
- * the non-connector catalog, while an explicit session policy may still select
- * any catalogued connector tool and remains independently permission-gated.
+ * Connector-wide tools are explicit-only except prepared bot sending. Ordinary
+ * chats may select the bot's explicit channel without borrowing a personal
+ * account; accepted turn/task policies and permission ceilings remain fixed.
  */
 export const DEFAULT_FIRST_PARTY_MCP_TOOLS = FIRST_PARTY_MCP_TOOL_NAMES.filter(
   (name) =>
@@ -1184,7 +1184,10 @@ export const DEFAULT_FIRST_PARTY_MCP_TOOLS = FIRST_PARTY_MCP_TOOL_NAMES.filter(
     !name.startsWith("social_") &&
     !name.startsWith("x_") &&
     !name.startsWith("reddit_") &&
-    !name.startsWith("slack_bot_") &&
+    (!name.startsWith("slack_bot_") ||
+      name === "slack_bot_list_channels" ||
+      name === "slack_bot_prepare_message" ||
+      name === "slack_bot_send_prepared_message") &&
     !name.startsWith("fiken_") &&
     !name.startsWith("atlassian_"),
 ) satisfies readonly FirstPartyMcpToolName[];
@@ -11789,6 +11792,23 @@ export const ConnectionMetadata = z.object({
   updatedAt: z.string(),
 });
 export type ConnectionMetadata = z.infer<typeof ConnectionMetadata>;
+
+/** Verified bot metadata available in the requested workspace. Credentials
+ * remain in the installation workspace; personal accounts are excluded. */
+export const AvailableOpenGeniSlackBots = z.object({
+  connections: z.array(ConnectionMetadata),
+  organizationSharedConnectionIds: z.array(z.string().uuid()),
+});
+export type AvailableOpenGeniSlackBots = z.infer<typeof AvailableOpenGeniSlackBots>;
+export const UpdateOpenGeniSlackBotOrganizationAccess = z.object({ enabled: z.boolean() }).strict();
+export type UpdateOpenGeniSlackBotOrganizationAccess = z.infer<
+  typeof UpdateOpenGeniSlackBotOrganizationAccess
+>;
+export const OpenGeniSlackBotOrganizationAccess = z.object({
+  enabled: z.boolean(),
+  generation: z.number().int().nonnegative().max(Number.MAX_SAFE_INTEGER),
+});
+export type OpenGeniSlackBotOrganizationAccess = z.infer<typeof OpenGeniSlackBotOrganizationAccess>;
 
 type PersonalSlackCanonicalConnection = Pick<
   ConnectionMetadata,
