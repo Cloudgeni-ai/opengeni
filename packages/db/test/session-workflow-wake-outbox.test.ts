@@ -1162,19 +1162,49 @@ describe("transactional session workflow wake outbox", () => {
     const queued = await send(ctx, "preserve this exact accepted input");
     const workspaceId = ctx.grant.workspaceId!;
     const sessionId = ctx.session.id;
+    // A real Agent message carries its exact sender attempt. The same human's
+    // informational message joins the receiving human turn's request context.
+    const senderSession = await createSession(client.db, {
+      accountId: ctx.grant.accountId,
+      workspaceId,
+      initialMessage: "sender",
+      resources: [],
+      metadata: {},
+      model: "scripted-model",
+      reasoningEffort: "medium" as const,
+      latencyMode: "standard" as const,
+      sandboxBackend: "none",
+    });
+    await send({ grant: ctx.grant, session: senderSession }, "send a result");
+    const senderAttemptId = crypto.randomUUID();
+    const senderClaim = await claimSessionWorkForAttempt(client.db, workspaceId, {
+      sessionId: senderSession.id,
+      workflowId: `session-${senderSession.id}`,
+      workflowRunId: crypto.randomUUID(),
+      attemptId: senderAttemptId,
+      dispatchId: crypto.randomUUID(),
+      trigger: { kind: "next" },
+    });
+    if (senderClaim.action !== "claimed") throw new Error("Expected sender claim");
     const update = await addSessionSystemUpdate(client.db, {
       accountId: ctx.grant.accountId,
       workspaceId,
       sessionId,
       kind: "agent_message",
       classification: "info",
-      sourceId: crypto.randomUUID(),
+      sourceId: senderSession.id,
       dedupeKey: crypto.randomUUID(),
       summary: "preserved machine input",
       payload: {
         type: "agent_message",
         text: "preserved machine input",
         operationId: crypto.randomUUID(),
+      },
+      lineage: {
+        callerSessionId: senderSession.id,
+        callerTurnId: senderClaim.turn.id,
+        callerAttemptId: senderAttemptId,
+        callerExecutionGeneration: senderClaim.turn.executionGeneration,
       },
     });
     if (!update.added) throw new Error("Machine input not accepted");
@@ -1281,6 +1311,8 @@ describe("transactional session workflow wake outbox", () => {
         ),
       ).toContain(update.update.id);
       const parkedWake = await wakeRow(workspaceId, sessionId);
+      // No caller lineage: an unresolved origin keeps exact-turn isolation, so
+      // it stays pending for its own claim instead of joining the human turn.
       const laterUpdate = await addSessionSystemUpdate(client.db, {
         accountId: ctx.grant.accountId,
         workspaceId,

@@ -918,10 +918,7 @@ for (const width of [1280, 390]) {
       await transcript.getByText("Start this next step.", { exact: true }).waitFor();
       await capture("optimistic");
       state.gates.send.release();
-      await page
-        .locator('[data-session-dispatch-wait] [role="status"]')
-        .getByText("Starting", { exact: true })
-        .waitFor();
+      await page.getByRole("status").getByText("Preparing your task.", { exact: true }).waitFor();
       assert.equal(await transcript.getByText("Start this next step.", { exact: true }).count(), 1);
       assert.equal(await page.getByRole("button", { name: /queued prompt/i }).count(), 0);
       assert.equal(await page.locator('[data-og-session-chrome-panel="queue"]').count(), 0);
@@ -930,7 +927,12 @@ for (const width of [1280, 390]) {
         "Starting",
       );
       await state.gates.dispatchDetail.entered;
-      assert.equal(await page.getByText("Still waiting to start", { exact: true }).count(), 0);
+      assert.equal(
+        await page
+          .getByText("Preparing your task. Taking longer than usual.", { exact: true })
+          .count(),
+        0,
+      );
       await capture("delayed-detail");
       state.deferDetail = false;
       state.gates.dispatchDetail.release();
@@ -939,9 +941,13 @@ for (const width of [1280, 390]) {
       await page.reload();
       await transcript.getByText("Start this next step.", { exact: true }).waitFor();
       await capture("reconnected");
-      state.session.updatedAt = new Date(Date.now() - 60_000).toISOString();
+      const acceptedAt = new Date(Date.now() - 70_000).toISOString();
+      state.session.updatedAt = acceptedAt;
+      for (const event of state.events) if (event.turnId === turnId) event.occurredAt = acceptedAt;
       await page.reload();
-      await page.getByText("Still waiting to start", { exact: true }).waitFor();
+      await page
+        .getByText("Preparing your task. Taking longer than usual.", { exact: true })
+        .waitFor();
       assert.equal(await transcript.getByText("Start this next step.", { exact: true }).count(), 1);
       await capture("stalled");
       state.session.dispatchWait = {
@@ -951,15 +957,31 @@ for (const width of [1280, 390]) {
         lastError: "Worker dispatch unavailable",
       };
       await page.reload();
-      await page.getByText("Unable to start yet", { exact: true }).waitFor();
-      await page.getByText("Start details", { exact: true }).click();
       await page
+        .getByRole("status")
+        .filter({ hasText: "Unable to start yet. Your messages are saved." })
+        .waitFor();
+      await page.getByRole("button", { name: "Behind the magic" }).click();
+      const dispatchDetails = page.locator("[data-og-startup-dispatch-details]");
+      await dispatchDetails
         .getByText("Last recorded dispatch error: Worker dispatch unavailable", { exact: true })
         .waitFor();
+      assert.equal(
+        await dispatchDetails.getByText("3 dispatch attempts.", { exact: true }).count(),
+        1,
+      );
+      assert.equal(
+        await dispatchDetails
+          .getByText("Your messages are saved. No agent turn is running yet.", { exact: true })
+          .count(),
+        1,
+      );
       await capture("retry");
       Object.assign(state.session, { status: "waiting_capacity" });
       await page.reload();
       await page.locator("header [data-status=waiting_capacity]:visible").waitFor();
+      assert.equal(await page.locator(".og-genie-loading").count(), 0);
+      assert.equal(await page.locator("[data-og-startup-dispatch-details]").count(), 0);
       await capture("capacity");
       Object.assign(state.session, { status: "running", activeTurnId: turnId });
       state.turns = [];
@@ -967,6 +989,13 @@ for (const width of [1280, 390]) {
       await page.locator("header [data-status=running]:visible").waitFor();
       await transcript.getByText("Start this next step.", { exact: true }).waitFor();
       assert.equal(await page.locator("[data-session-dispatch-wait]").count(), 0);
+      assert.equal(await page.locator("[data-og-startup-dispatch-details]").count(), 0);
+      assert.equal(
+        await page
+          .getByText("Unable to start yet. Your messages are saved.", { exact: true })
+          .count(),
+        0,
+      );
       await capture("running");
       state.turns = [
         {
@@ -993,7 +1022,8 @@ for (const width of [1280, 390]) {
       state.session.effectiveControl = { ...control, state: "paused", directState: "paused" };
       await page.reload();
       await page.getByRole("list", { name: "Queued prompts" }).waitFor();
-      assert.equal(await page.locator("[data-session-dispatch-wait]").count(), 0);
+      assert.equal(await page.locator(".og-genie-loading").count(), 0);
+      assert.equal(await page.locator("[data-og-startup-dispatch-details]").count(), 0);
       await capture("paused-queue");
       state.denyAccess = true;
       await page.reload();
@@ -2272,6 +2302,20 @@ for (const theme of ["light", "dark"] as const) {
         );
         const surface = page.locator("[data-og-approval-surface]");
         await surface.getByRole("heading", { name: "Move 600 messages to Trash" }).waitFor();
+        const verifyForcedColorsFocus = async (selector: string) => {
+          await page.emulateMedia({ forcedColors: "active" });
+          const heading = page.locator(selector).getByRole("heading");
+          await heading.focus();
+          assert.deepEqual(
+            await heading.evaluate((element) => {
+              const style = getComputedStyle(element);
+              return { style: style.outlineStyle, width: style.outlineWidth };
+            }),
+            { style: "solid", width: "2px" },
+          );
+          await page.emulateMedia({ forcedColors: "none" });
+        };
+        await verifyForcedColorsFocus("[data-og-approval-surface]");
         assert.ok((await surface.innerText()).includes("ExampleLabel"));
         assert.ok((await surface.innerText()).includes(hints.accountLabel));
         assert.equal(await surface.locator("pre").count(), 0);
@@ -2301,6 +2345,7 @@ for (const theme of ["light", "dark"] as const) {
         await page.keyboard.press("Enter");
         const details = page.locator("[data-og-review-details]");
         await details.getByText("synthetic-25", { exact: true }).waitFor();
+        await verifyForcedColorsFocus("[data-og-review-details]");
         assert.equal(await details.getByText("synthetic-26", { exact: true }).count(), 0);
         await details.getByRole("button", { name: "Next", exact: true }).click();
         await details.getByText("synthetic-50", { exact: true }).waitFor();

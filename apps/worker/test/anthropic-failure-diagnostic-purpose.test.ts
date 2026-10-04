@@ -338,6 +338,7 @@ describe("Anthropic failure diagnostic purpose", () => {
         undefined,
       );
       const { deps, settle } = failureDeps(error);
+      const random = spyOn(Math, "random").mockReturnValue(0);
       try {
         expect(await settleTurnFailure(deps)).toMatchObject({
           status: "recovering",
@@ -388,6 +389,7 @@ describe("Anthropic failure diagnostic purpose", () => {
         expect(JSON.stringify(settle.mock.calls)).not.toContain("private echoed request");
         expect(parentDelivery).toHaveBeenCalledTimes(1);
       } finally {
+        random.mockRestore();
         recovery.mockRestore();
         parentDelivery.mockRestore();
       }

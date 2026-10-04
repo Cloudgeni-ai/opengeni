@@ -100,7 +100,7 @@ export function ToolActionReviewCard({
       <h3
         tabIndex={-1}
         id={titleId}
-        className="m-0 mt-1.5 outline-none break-words text-og-md font-semibold leading-snug text-og-fg"
+        className="m-0 mt-1.5 outline-hidden break-words text-og-md font-semibold leading-snug text-og-fg"
       >
         {review.title}
       </h3>
@@ -293,7 +293,7 @@ export function ToolActionReviewDetails({
       <h2
         ref={heading}
         tabIndex={-1}
-        className="m-0 break-words text-og-lg font-semibold outline-none"
+        className="m-0 break-words text-og-lg font-semibold outline-hidden"
       >
         {review.title}
       </h2>

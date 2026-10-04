@@ -2395,6 +2395,8 @@ describe("release schema contract", () => {
       "0620_tool_action_review_details.sql",
       "0621_legacy_api_tool_preferences.sql",
       "0613_model_scoped_promotional_credits.sql",
+      "0614_quiescence_command_containment.sql",
+      "0615_credit_promotion_policy_validation.sql",
     ].filter((path) =>
       unfilteredSourceContract.migrations.some((migration) => migration.path === path),
     );

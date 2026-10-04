@@ -905,7 +905,7 @@ export function buildTimeline(
           null,
           0,
           queuedAt,
-          `${event.id}-queue`,
+          `${turnId}-queue`,
         );
         break;
       }
@@ -1946,10 +1946,14 @@ function groupReadableTurns(items: TimelineItem[]): TimelineGroup[] {
       let group = turns.get(key);
       const firstMessage = messages.get(key)?.[0];
       const messageStart = firstMessage?.startedAt ?? firstMessage?.occurredAt;
-      const startedAt =
-        messageStart && Date.parse(messageStart) < Date.parse(item.occurredAt)
-          ? messageStart
+      const activityStart =
+        item.kind === "startup-phase"
+          ? (item.loadingStartedAt ?? item.occurredAt)
           : item.occurredAt;
+      const startedAt =
+        messageStart && Date.parse(messageStart) < Date.parse(activityStart)
+          ? messageStart
+          : activityStart;
       if (!group) {
         const settlement = settlements.get(key);
         group = {
