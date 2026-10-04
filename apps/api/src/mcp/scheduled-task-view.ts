@@ -474,6 +474,16 @@ function buildScheduledTaskDetailMcp(
           : null,
       },
       taskMetadataKeys,
+      slackPosting: {
+        identity: task.agentConfig.slackBotConnectionId ? "opengeni_bot" : null,
+        connectionId: task.agentConfig.slackBotConnectionId ?? null,
+        channelId: task.agentConfig.slackBotChannelId ?? null,
+        configured: Boolean(
+          task.agentConfig.slackBotConnectionId && task.agentConfig.slackBotChannelId,
+        ),
+        setup:
+          "A person can choose Post to Slack in the schedule editor. Personal Slack tools send as their connected account; they do not select the Opengeni bot.",
+      },
     },
     detailProjection: {
       bounded: true,

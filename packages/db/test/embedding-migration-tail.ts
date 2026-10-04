@@ -95,4 +95,5 @@ export const embeddingMigrationTail = [
   "0614_quiescence_command_containment.sql",
   // Replaces the policy setter created by withheld 0613; replay after it.
   "0615_credit_promotion_policy_validation.sql",
+  "0622_organization_slack_bot_delivery.sql",
 ];

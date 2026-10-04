@@ -251,7 +251,7 @@ describe("scheduled OpenGeni Slack bot routing", () => {
       expect.arrayContaining(["slack_bot_prepare_message", "slack_bot_send_prepared_message"]),
     );
     expect(posting.firstPartyMcpTools).not.toContain("slack_bot_post_message");
-    expect(posting.firstPartyMcpTools).not.toContain("slack_bot_list_channels");
+    expect(posting.firstPartyMcpTools).toContain("slack_bot_list_channels");
 
     const readOnly = await dispatch(
       (await taskFixture(workspace, connection.id, "new_session_per_run")).id,
