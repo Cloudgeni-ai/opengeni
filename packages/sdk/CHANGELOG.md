@@ -1,5 +1,28 @@
 # @opengeni/sdk
 
+## 1.1.0
+
+### Minor Changes
+
+- 208dec1: Add `updateArtifactPin(workspaceId, kind, artifactId, pinned)` and optional catalog
+  `pinned` metadata for workspace-shared artifact pins. Catalog pages order matching
+  pins globally before the selected sort without changing content-access authority.
+
+### Patch Changes
+
+- 411b3b5: A scheduled task whose model was retired or removed from the catalog now records each
+  occurrence as a visible failed run with reason `scheduled_model_unavailable` instead of
+  failing the scheduler activity and leaving no run.
+- 4d5053f: `new OpenGeni({ baseUrl })` treats a blank value (a copied `.env.example` line like
+  `OPENGENI_API_BASE_URL=`) as unset and uses the hosted API, and a blank
+  `organizationId` as unset. `@opengeni/sdk/package.json` is now an exported subpath.
+- Updated dependencies [5fd6c55]
+- Updated dependencies [c600e3a]
+- Updated dependencies [411b3b5]
+- Updated dependencies [208dec1]
+  - @opengeni/contracts@1.1.0
+  - @opengeni/connect@1.1.0
+
 ## 1.0.2
 
 ### Patch Changes
