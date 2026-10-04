@@ -165,14 +165,35 @@ const accounts = [
   { id: "workspace-id", subjectId: null, metadata: { team: { name: "Support team" } } },
 ] as unknown as ConnectionMetadata[];
 
+// Identity and ownership identify an account; formatter punctuation and fallback prefixes do not.
+function accountSwitch(identity: string, ownership: "Only me" | "This workspace") {
+  const matches = [...container.querySelectorAll<HTMLButtonElement>('[role="switch"]')].filter(
+    (button) => {
+      const label = button.getAttribute("aria-label") ?? "";
+      return label.includes(identity) && label.endsWith(`, ${ownership}`);
+    },
+  );
+  expect(matches).toHaveLength(1);
+  const button = matches[0]!;
+  expect(button.textContent).toContain(identity);
+  expect(button.textContent).toContain(ownership);
+  for (const account of accounts) {
+    expect(button.getAttribute("aria-label")).not.toContain(account.id);
+    expect(button.textContent).not.toContain(account.id);
+  }
+  return button;
+}
+
 test("connector settings attach multiple readable personal/workspace accounts without closing", async () => {
   const reconnect = mock();
+  let chosen!: ConnectionAccountChoices;
   function Preview() {
     const [choices, setChoices] = useState<ConnectionAccountChoices>({});
     const [selection, setSelection] = useState<SessionToolSelection>({
       mcpServerIds: new Set(["mail"]),
       firstPartyToolIds: new Set(),
     });
+    chosen = choices;
     return (
       <SessionConnectorsMenuBody
         presentation="dialog"
@@ -194,20 +215,19 @@ test("connector settings attach multiple readable personal/workspace accounts wi
   await act(async () =>
     container.querySelector<HTMLButtonElement>('[aria-label="Mail account settings"]')!.click(),
   );
-  const personal = container.querySelector<HTMLButtonElement>(
-    '[aria-label="alex@example.com, Only me"]',
-  )!;
-  const workspace = container.querySelector<HTMLButtonElement>(
-    '[aria-label="Support team, This workspace"]',
-  )!;
+  const personal = accountSwitch("alex@example.com", "Only me");
+  const workspace = accountSwitch("Support team", "This workspace");
   expect(personal.getAttribute("aria-checked")).toBe("true");
   expect(workspace.getAttribute("aria-checked")).toBe("true");
   await act(async () => personal.click());
+  expect(chosen.mail).toEqual(["workspace-id"]);
   expect(personal.getAttribute("aria-checked")).toBe("false");
   expect(workspace.getAttribute("aria-checked")).toBe("true");
   await act(async () => workspace.click());
+  expect(chosen.mail).toEqual([]);
   expect(container.textContent).toContain("No accounts selected.");
   await act(async () => personal.click());
+  expect(chosen.mail).toEqual(["personal-id"]);
   expect(personal.getAttribute("aria-checked")).toBe("true");
   expect(workspace.getAttribute("aria-checked")).toBe("false");
   await act(async () =>
@@ -218,6 +238,10 @@ test("connector settings attach multiple readable personal/workspace accounts wi
     container.querySelector<HTMLButtonElement>('[aria-label="Mail account settings"]')!.click(),
   );
   expect(container.textContent).toContain("Connected accounts");
+  expect(accountSwitch("alex@example.com", "Only me").getAttribute("aria-checked")).toBe("true");
+  expect(accountSwitch("Support team", "This workspace").getAttribute("aria-checked")).toBe(
+    "false",
+  );
   expect(container.textContent).not.toContain("Connect another account");
   // Healthy chat settings contain only navigation and account attachment controls.
   expect(container.querySelectorAll("button")).toHaveLength(3);
@@ -422,20 +446,35 @@ test("transient account failure still offers Retry in the composer menu", async 
 });
 
 test("account labels use readable metadata and never fall back to a raw connection ID", () => {
+  for (const metadata of [{ email: "Label" }, { displayName: "Label" }, { accountName: "Label" }]) {
+    const label = connectionAccountLabel({ ...accounts[0]!, metadata }, "Mail account 1");
+    expect(label).toBe("Label");
+    expect(label).not.toContain(accounts[0]!.id);
+  }
+  // Workspace metadata supplements identity; it must not replace the account fallback.
   for (const metadata of [
-    { email: "Label" },
-    { displayName: "Label" },
-    { accountName: "Label" },
     { teamName: "Label" },
     { workspaceName: "Label" },
     { team: { name: "Label" } },
     { workspace: { name: "Label" } },
   ]) {
-    expect(connectionAccountLabel({ ...accounts[0]!, metadata }, "Mail account 1")).toBe("Label");
+    const label = connectionAccountLabel({ ...accounts[1]!, metadata }, "Mail account 2");
+    expect(label).toContain("Mail account 2");
+    expect(label).toContain("Label");
+    expect(label).not.toContain(accounts[1]!.id);
   }
-  expect(connectionAccountLabel({ ...accounts[0]!, metadata: {} }, "Mail account 1")).toBe(
+  const combined = connectionAccountLabel(
+    { ...accounts[0]!, metadata: { email: "alex@example.com", teamName: "Support team" } },
     "Mail account 1",
   );
+  expect(combined).toContain("alex@example.com");
+  expect(combined).toContain("Support team");
+  expect(combined).not.toContain(accounts[0]!.id);
+  for (const account of accounts) {
+    const label = connectionAccountLabel({ ...account, metadata: {} }, "Mail account 1");
+    expect(label).toBe("Mail account 1");
+    expect(label).not.toContain(account.id);
+  }
 });
 
 test("last account off disables only its connector; reenable restores accounts and ordinary off/on preserves narrowing", async () => {
@@ -471,8 +510,8 @@ test("last account off disables only its connector; reenable restores accounts a
     act(async () => container.querySelector<HTMLButtonElement>(`[aria-label="${label}"]`)!.click());
   await act(async () => root.render(<Preview />));
   await click("Mail account settings");
-  await click("alex@example.com, Only me");
-  await click("Support team, This workspace");
+  await act(async () => accountSwitch("alex@example.com", "Only me").click());
+  await act(async () => accountSwitch("Support team", "This workspace").click());
   expect(current.mcpServerIds).toEqual(new Set(["files", "hidden"]));
   expect(current.firstPartyToolIds).toEqual(new Set(["session_get"]));
   expect(chosen.mail).toEqual([]);
@@ -484,12 +523,16 @@ test("last account off disables only its connector; reenable restores accounts a
   expect(current.mcpServerIds.has("mail")).toBe(true);
   expect(chosen.mail).toEqual(accounts.map((account) => account.id));
   await click("Mail account settings");
-  await click("alex@example.com, Only me");
+  expect(accountSwitch("alex@example.com", "Only me").getAttribute("aria-checked")).toBe("true");
+  expect(accountSwitch("Support team", "This workspace").getAttribute("aria-checked")).toBe("true");
+  await act(async () => accountSwitch("alex@example.com", "Only me").click());
   await click("Back to connectors");
   await click("Mail");
   expect(container.querySelector('[aria-label="Mail account settings"]')).not.toBeNull();
   await click("Mail");
   expect(chosen.mail).toEqual(["workspace-id"]);
+  expect(current.mcpServerIds).toEqual(new Set(["mail", "files", "hidden"]));
+  expect(current.firstPartyToolIds).toEqual(new Set(["session_get"]));
 });
 
 test("settings remains reachable to remove the last disconnected account", async () => {
