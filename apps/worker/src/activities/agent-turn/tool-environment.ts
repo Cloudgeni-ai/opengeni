@@ -82,6 +82,7 @@ import { createTurnMediaArtifacts } from "./media-artifacts";
 import { SandboxChannelAService } from "@opengeni/runtime/sandbox";
 import { sandboxRunAs } from "@opengeni/runtime";
 import {
+  bundledSkillSelectionForAgentConfig,
   DEFAULT_FIRST_PARTY_MCP_PERMISSIONS,
   resolveAgentToolFamilies,
   type ResourceRef,
@@ -596,7 +597,11 @@ export async function prepareTurnToolRuntime(deps: PrepareTurnToolRuntimeDeps) {
     session.firstPartyMcpPermissions,
     linkedAuthority,
   );
-  const toolFamilies = resolveAgentToolFamilies(session.agent);
+  // Background-command tools need compute: the effective route of this turn,
+  // a managed sandbox or an attached Connected Machine, not the durable home.
+  const toolFamilies = resolveAgentToolFamilies(session.agent, {
+    sandboxAttached: (activeSandboxBackend ?? groupBoxBackend) !== "none",
+  });
   const selectedFirstPartyMcpTools = toolFamilies.firstPartyTools(
     allowedFirstPartyMcpToolsForSession(runSettings, session.firstPartyMcpTools),
   );
@@ -669,7 +674,9 @@ export async function prepareTurnToolRuntime(deps: PrepareTurnToolRuntimeDeps) {
     }),
   ]);
   const bundledSkills = loadConfiguredBundledSkills({
-    bundledSkillIds: session.bundledSkillIds,
+    // Rows that could not freeze the "none" default at create (scheduled
+    // generated sessions, pre-existing rows) get the same rule here.
+    bundledSkillIds: bundledSkillSelectionForAgentConfig(session.bundledSkillIds, session.agent),
     firstPartyTools: selectedFirstPartyMcpTools,
     videoGenerationEnabled:
       skillConfiguration.defaultModelId !== null && skillConfiguration.enabledModelIds.length > 0,
