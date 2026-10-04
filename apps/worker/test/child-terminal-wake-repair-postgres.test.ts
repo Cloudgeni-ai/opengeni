@@ -261,6 +261,8 @@ for (const scenario of [
   "cancelled",
   "superseded",
   "forged_link",
+  "forged_lineage",
+  "changed_authority",
   "cross_tenant",
   "nonterminal",
   "unquiesced",
@@ -297,6 +299,13 @@ for (const scenario of [
       await shared.admin`update session_system_updates set state = 'superseded' where id = ${updateId}`;
     } else if (scenario === "forged_link") {
       await shared.admin`update sessions set parent_session_id = null where id = ${ctx.child.id}`;
+    } else if (scenario === "forged_lineage") {
+      await shared.admin`update session_system_updates
+        set lineage = jsonb_set(lineage, '{parentSessionId}', to_jsonb(${ctx.child.id}::text))
+        where id = ${updateId}`;
+    } else if (scenario === "changed_authority") {
+      await shared.admin`update session_system_updates set mcp_account_bindings = '[]'::jsonb
+        where id = ${updateId}`;
     } else if (scenario === "cross_tenant") {
       const other = await fixture();
       await shared.admin`update session_system_updates set source_id = ${other.child.id},

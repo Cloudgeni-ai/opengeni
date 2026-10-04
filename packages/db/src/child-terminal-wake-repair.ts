@@ -102,6 +102,11 @@ async function repairCandidate(db: Database, candidate: Candidate): Promise<bool
           and producer.target_session_id = input.session_id and producer.dedupe_key = input.dedupe_key
           and producer.source_id = input.source_id and producer.kind = 'child_terminal_result'
           and producer.status = 'delivered'
+          and (producer.update_id is null or producer.update_id = input.id)
+          and producer.personal_connection_delegations = input.personal_connection_delegations
+          and producer.mcp_account_bindings is not distinct from input.mcp_account_bindings
+          and producer.xai_provider_account_authority_snapshot = input.xai_provider_account_authority_snapshot
+          and producer.claude_provider_account_authority_snapshot = input.claude_provider_account_authority_snapshot
         join sessions child on child.id = producer.source_session_id
           and child.account_id = input.account_id and child.workspace_id = input.workspace_id
           and child.parent_session_id = input.session_id and child.id::text = input.source_id
@@ -109,6 +114,7 @@ async function repairCandidate(db: Database, candidate: Candidate): Promise<bool
           and input.session_id = ${candidate.sessionId} and input.state = 'pending'
           and input.kind = 'child_terminal_result'
           and input.payload ->> 'childSessionId' = input.source_id
+          and input.lineage ->> 'parentSessionId' = input.session_id::text
         limit 100`,
       );
       if (
