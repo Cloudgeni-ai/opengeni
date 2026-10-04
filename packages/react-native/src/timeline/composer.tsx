@@ -172,6 +172,44 @@ export function SessionComposer(props: SessionComposerProps) {
   });
   const messages = { ...defaultChatComposerMessages, ...props.messages };
   const fieldSize = ios ? 17 : 16;
+  const compact = !props.options;
+  const leading = props.renderLeading ? (
+    props.renderLeading()
+  ) : props.onAttach ? (
+    <ToolbarButton icon="plus" accessibilityLabel={messages.attachFiles} onPress={props.onAttach} />
+  ) : null;
+  const field = (inline: boolean) => (
+    <TextInput
+      ref={props.inputRef}
+      accessibilityLabel={messages.inputLabel}
+      value={props.value}
+      onChangeText={props.onChangeText}
+      placeholder={
+        props.placeholder ?? (props.paused ? messages.pausedPlaceholder : "Send a follow-up...")
+      }
+      placeholderTextColor={c["fg-subtle"]}
+      multiline
+      autoFocus={props.autoFocus}
+      selectionColor={c.accent}
+      onContentSizeChange={(event) =>
+        setHeight(Math.min(150, Math.max(22, event.nativeEvent.contentSize.height)))
+      }
+      style={{
+        ...fontStyle(theme),
+        fontSize: fieldSize,
+        lineHeight: 22,
+        color: c.fg,
+        ...(inline
+          ? { paddingTop: 7, paddingBottom: 7, paddingHorizontal: 6, minHeight: 36 }
+          : { paddingTop: 14, paddingBottom: 2, paddingHorizontal: 16, minHeight: 40 }),
+        // The inline field sizes itself; the stacked one tracks its content.
+        // (iOS never shrinks a self-sized multiline field, so an empty one is pinned.)
+        height: ios ? (inline ? (props.value ? undefined : 36) : height + 16) : undefined,
+        maxHeight: 166,
+        textAlignVertical: inline ? "center" : "top",
+      }}
+    />
+  );
   return (
     <Animated.View
       pointerEvents={floating ? "box-none" : "auto"}
@@ -188,63 +226,48 @@ export function SessionComposer(props: SessionComposerProps) {
       ]}
     >
       {props.above ? <View pointerEvents="box-none">{props.above}</View> : null}
-      <ComposerSurface radius={24}>
+      <ComposerSurface radius={compact ? 22 : 24}>
         {props.header}
         {props.below}
-        <TextInput
-          ref={props.inputRef}
-          accessibilityLabel={messages.inputLabel}
-          value={props.value}
-          onChangeText={props.onChangeText}
-          placeholder={
-            props.placeholder ?? (props.paused ? messages.pausedPlaceholder : "Send a follow-up...")
-          }
-          placeholderTextColor={c["fg-subtle"]}
-          multiline
-          autoFocus={props.autoFocus}
-          selectionColor={c.accent}
-          onContentSizeChange={(event) =>
-            setHeight(Math.min(150, Math.max(22, event.nativeEvent.contentSize.height)))
-          }
-          style={{
-            ...fontStyle(theme),
-            fontSize: fieldSize,
-            lineHeight: 22,
-            color: c.fg,
-            paddingTop: 14,
-            paddingHorizontal: 16,
-            paddingBottom: 2,
-            minHeight: 40,
-            height: ios ? height + 16 : undefined,
-            maxHeight: 166,
-            textAlignVertical: "top",
-          }}
-        />
-        <View
-          style={{
-            flexDirection: "row",
-            alignItems: "center",
-            paddingLeft: 6,
-            paddingRight: 8,
-            paddingBottom: 8,
-            minHeight: 44,
-            gap: 2,
-          }}
-        >
-          {props.renderLeading ? (
-            props.renderLeading()
-          ) : props.onAttach ? (
-            <ToolbarButton
-              icon="plus"
-              accessibilityLabel={messages.attachFiles}
-              onPress={props.onAttach}
-            />
-          ) : null}
-          <View style={{ flex: 1, flexDirection: "row", alignItems: "center", minWidth: 0 }}>
-            {props.options}
+        {compact ? (
+          // No options to show: one row, as native messaging apps lay it out.
+          <View
+            style={{
+              flexDirection: "row",
+              alignItems: "flex-end",
+              paddingHorizontal: 5,
+              paddingVertical: 5,
+              gap: 2,
+            }}
+          >
+            {leading}
+            <View style={{ flex: 1, minWidth: 0 }}>{field(true)}</View>
+            <View style={{ paddingBottom: 0 }}>
+              <TrailingAction {...props} messages={messages} />
+            </View>
           </View>
-          <TrailingAction {...props} messages={messages} />
-        </View>
+        ) : (
+          <>
+            {field(false)}
+            <View
+              style={{
+                flexDirection: "row",
+                alignItems: "center",
+                paddingLeft: 6,
+                paddingRight: 8,
+                paddingBottom: 8,
+                minHeight: 44,
+                gap: 2,
+              }}
+            >
+              {leading}
+              <View style={{ flex: 1, flexDirection: "row", alignItems: "center", minWidth: 0 }}>
+                {props.options}
+              </View>
+              <TrailingAction {...props} messages={messages} />
+            </View>
+          </>
+        )}
       </ComposerSurface>
     </Animated.View>
   );
