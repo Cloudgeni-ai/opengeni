@@ -1,4 +1,4 @@
-import { checkWorkspaceAllowance, getBillingBalance, sumUsageQuantity } from "@opengeni/db";
+import { checkWorkspaceAllowance, getSpendableCreditBalance, sumUsageQuantity } from "@opengeni/db";
 import {
   configuredStaticUsageLimits,
   resolveTurnExecutionPolicyV1,
@@ -274,10 +274,11 @@ export async function ensureRunAllowedBetweenModelCalls(input: {
   chargesOpenGeniCredits: boolean;
   countsTowardTokenCap: boolean;
   initiatingHumanSubjectId: string | null;
+  modelId?: string;
   serializedRunState?: () => string | null;
-}): Promise<void> {
+}): Promise<number | undefined> {
   try {
-    await ensureRunAllowed(
+    return await ensureRunAllowed(
       input.settings,
       input.db,
       input.accountId,
@@ -287,6 +288,7 @@ export async function ensureRunAllowedBetweenModelCalls(input: {
       input.chargesOpenGeniCredits,
       input.countsTowardTokenCap,
       input.initiatingHumanSubjectId,
+      input.modelId,
     );
   } catch (limitError) {
     let serializedRunState: string | null = null;
@@ -317,7 +319,9 @@ export async function ensureRunAllowed(
   chargesOpenGeniCredits = !isExternallyBilledTurn,
   countsTowardTokenCap = !isExternallyBilledTurn,
   initiatingHumanSubjectId: string | null = null,
-): Promise<void> {
+  modelId?: string,
+): Promise<number | undefined> {
+  let creditPolicyRevision: number | undefined;
   // Upstream settlement and workspace-facing cost are independent. External
   // metering skips the token cap; free/subscription/workspace cost skips the
   // OpenGeni credit gate. The agent-run COUNT cap below is a volume/fairness
@@ -352,7 +356,8 @@ export async function ensureRunAllowed(
     chargesOpenGeniCredits &&
     (settings.billingMode === "stripe" || settings.usageLimitsMode === "managed")
   ) {
-    const balance = await getBillingBalance(db, accountId);
+    const balance = await getSpendableCreditBalance(db, accountId, modelId);
+    creditPolicyRevision = balance.creditPolicyRevision;
     if (balance.balanceMicros <= 0) {
       throw new Error("insufficient Opengeni credits");
     }
@@ -393,4 +398,5 @@ export async function ensureRunAllowed(
       }
     }
   }
+  return creditPolicyRevision;
 }

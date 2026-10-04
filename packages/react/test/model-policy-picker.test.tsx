@@ -9,6 +9,7 @@ import {
   BillingClassMark,
   defaultModelPolicyPickerMessages,
   ModelPolicyPicker,
+  type ModelPolicyPickerProps,
   useModelPolicyPickerState,
 } from "../src/components/model-policy-picker";
 import { actRun, registerDom, renderHook } from "./render-hook";
@@ -764,6 +765,63 @@ describe("ModelPolicyPicker", () => {
     expect(trigger?.textContent).not.toContain("Medium");
     expect(trigger?.className).not.toContain("rounded-full");
   });
+
+  test.each(["field", "pill"] as const)(
+    "keeps funding inside the menu and off the %s trigger when coverage changes",
+    async (triggerStyle) => {
+      const render = (fundingHint: string) => {
+        const props: ModelPolicyPickerProps = {
+          rows: projectClientModelRows(MODELS).map((row) => ({
+            ...row,
+            fundingHint,
+            catalog: {
+              ...row.catalog,
+              credentialReadiness: {
+                status: "ready",
+                reason: null,
+                basis: "configuration",
+                checkedAt: null,
+              },
+              availability: {
+                status: "available",
+                selectable: true,
+                reason: null,
+                checkedAt: null,
+              },
+            },
+          })),
+          model: MODELS[0]!.id,
+          effort: "medium" as const,
+          latencyMode: "standard" as const,
+          onModelChange: () => {},
+          onEffortChange: () => {},
+          onLatencyModeChange: () => {},
+        };
+        return (
+          <>
+            <ModelPolicyPicker {...props} triggerStyle={triggerStyle} />
+            <ModelPolicyPickerMenu {...props} />
+          </>
+        );
+      };
+      const container = await mount(render("Free credits"));
+      const trigger = container.querySelector<HTMLButtonElement>(
+        'button[aria-label="Model and effort"]',
+      )!;
+      for (const hint of ["Free credits", "Uses credits", "Needs credits"]) {
+        await act(async () => mounted!.root.render(render(hint)));
+        expect(trigger.textContent).not.toContain("credits");
+        expect(trigger.title).not.toContain("credits");
+        expect(trigger.getAttribute("aria-description") ?? "").not.toContain("credits");
+        expect(trigger.getAttribute("aria-description")).toContain("GPT-5.6 Sol");
+        expect(trigger.getAttribute("aria-description")).toContain("Medium");
+        expect(
+          document.querySelector(`[data-testid="model-picker-choice-${MODELS[0]!.id}"]`)
+            ?.textContent,
+        ).toContain(hint);
+      }
+    },
+  );
 
   test("selects immediately and coerces unsupported effort and speed without closing", async () => {
     const calls: unknown[] = [];

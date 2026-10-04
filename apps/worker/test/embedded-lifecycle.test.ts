@@ -616,6 +616,14 @@ describe("embedded worker lifecycle contract", () => {
       ],
       [
         {
+          name: "credit_promotion_policy_revisions",
+          owner: "opengeni_migrator",
+          can_select: true,
+          can_insert: false,
+          can_update: false,
+          can_delete: false,
+        },
+        {
           name: "personal_resource_delegation_capabilities",
           owner: "opengeni_migrator",
           can_select: false,

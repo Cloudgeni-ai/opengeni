@@ -1,4 +1,10 @@
 export { managedUserEmailAllowed } from "./managed-user-admission";
+import { EnvCreditPromotionPolicy } from "./credit-promotions";
+export {
+  CreditPromotionPolicy,
+  signupCreditModelIds,
+  promotionalCreditScope,
+} from "./credit-promotions";
 import { isRetiredNativeAtlassianTool } from "@opengeni/contracts/atlassian-native-retirement";
 import { modelLogoUrl } from "@opengeni/contracts/model-display";
 import {
@@ -391,6 +397,7 @@ const SettingsSchema = z.object({
   // Explicit launch gate for the one-time $10 verified self-service signup grant.
   // A migration or deployment alone must not start issuing live credits.
   verifiedSignupTrialCreditsEnabled: EnvBoolean.default(false),
+  creditPromotionPolicy: EnvCreditPromotionPolicy,
   entitlementsMode: EntitlementsMode.default("none"),
   usageLimitsMode: UsageLimitsMode.default("none"),
   // Gate new allowance policies until every API/worker in the fleet enforces
@@ -3471,6 +3478,7 @@ export function getSettings(source: NodeJS.ProcessEnv = process.env): Settings {
     productAccessMode: optional("OPENGENI_PRODUCT_ACCESS_MODE"),
     billingMode: optional("OPENGENI_BILLING_MODE"),
     verifiedSignupTrialCreditsEnabled: optional("OPENGENI_VERIFIED_SIGNUP_TRIAL_CREDITS_ENABLED"),
+    creditPromotionPolicy: optional("OPENGENI_CREDIT_PROMOTION_POLICY_JSON"),
     entitlementsMode: optional("OPENGENI_ENTITLEMENTS_MODE"),
     usageLimitsMode: optional("OPENGENI_USAGE_LIMITS_MODE"),
     usageAllowancesEnabled: optional("OPENGENI_USAGE_ALLOWANCES_ENABLED"),
@@ -8657,6 +8665,19 @@ export function validateModelCatalogSettings(
   // validated even when managed billing is disabled.
   const models = configuredModels(settings, source);
   const defaultCatalogSettings = settingsForTurnExecutionPolicy(settings, settings.openaiModel);
+  const policy = settings.creditPromotionPolicy;
+  const promotionalModelIds = new Set([
+    ...(policy.defaultModelIds ?? []),
+    ...(policy.signupModelIds ?? []),
+    ...Object.values(policy.offers).flatMap((offer) => offer.eligibleModelIds ?? []),
+  ]);
+  for (const modelId of promotionalModelIds) {
+    if (!models.some((model) => model.id === modelId && model.cost === "credits")) {
+      throw new Error(
+        `Promotional credit model ${modelId} must be a canonical credits-billed model in the catalog`,
+      );
+    }
+  }
   const defaultCatalogModels =
     defaultCatalogSettings === settings ? models : configuredModels(defaultCatalogSettings, source);
   if (models.length === 0 && defaultCatalogModels.length === 0) {

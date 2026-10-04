@@ -63,7 +63,7 @@ function rowMatchesFamily(row: PickerModelRow, family: ConnectedModelFamily): bo
         (row.provider === "workspace-openrouter" || row.provider === "organization-openrouter")
       );
     case "credits":
-      return row.catalog.cost === "credits";
+      return row.catalog.cost === "credits" && row.catalog.creditFunding !== "unavailable";
   }
 }
 
@@ -126,11 +126,28 @@ export async function applyConnectedModelToNewSessionDraft(
   preferredModelId?: string,
 ): Promise<{ id: string; label: string } | null> {
   const catalog = await client.getWorkspaceModelCatalog(workspaceId);
+  const creditDefault =
+    family === "credits"
+      ? [catalog.defaultSelection, catalog.creditsSelection].find(
+          (selection) =>
+            selection &&
+            projectPickerRows(catalog.models).some(
+              (row) =>
+                row.id === selection.model && row.selectable && rowMatchesFamily(row, "credits"),
+            ),
+        )
+      : undefined;
   const modelId = preferredModelId
     ? (projectPickerRows(catalog.models).find(
-        (row) => row.id === preferredModelId && row.selectable,
-      )?.id ?? null)
-    : preferredConnectedModelId(catalog.models, family);
+        (row) =>
+          row.id === preferredModelId &&
+          row.selectable &&
+          (family !== "credits" || rowMatchesFamily(row, "credits")),
+      )?.id ??
+      (family === "credits"
+        ? (creditDefault?.model ?? preferredConnectedModelId(catalog.models, family))
+        : null))
+    : (creditDefault?.model ?? preferredConnectedModelId(catalog.models, family));
   if (!modelId) return null;
   const model = catalog.models.find((candidate) => candidate.id === modelId);
   const draft = await client.getNewSessionDraft(workspaceId);
@@ -140,7 +157,12 @@ export async function applyConnectedModelToNewSessionDraft(
     tools: draft.tools,
     toolsProvided: draft.toolsProvided,
     model: modelId,
-    reasoningEffort: model ? defaultEffortForModel(model) : "low",
+    reasoningEffort:
+      creditDefault?.model === modelId
+        ? creditDefault.reasoningEffort
+        : model
+          ? defaultEffortForModel(model)
+          : "low",
     latencyMode: draft.latencyMode,
     // Connecting a service is a deliberate choice of that service's model.
     modelProvided: true,

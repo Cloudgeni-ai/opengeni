@@ -23,6 +23,21 @@ function withEnv<T>(env: NodeJS.ProcessEnv, fn: () => T): T {
 }
 
 describe("deployment model catalog source", () => {
+  test("validates promotional coverage after resolving a database catalog", () => {
+    for (const modelId of ["missing-model", "gpt-5.6-luna"]) {
+      const settings = applyModelCatalogDocument(
+        withEnv({ OPENGENI_MODEL_CATALOG_SOURCE: "database" }, () => getSettings()),
+        { schemaVersion: 1, builtInModels: ["gpt-5.6-luna"] },
+      );
+      settings.creditPromotionPolicy = { defaultModelIds: [modelId], offers: {} };
+      if (modelId === "gpt-5.6-luna")
+        settings.modelCostPolicyJson = JSON.stringify({ [modelId]: "free" });
+      expect(() => validateModelCatalogSettings(settings)).toThrow(
+        "must be a canonical credits-billed model",
+      );
+    }
+  });
+
   test("database logo updates preserve execution identity and reject unsafe URLs", () => {
     const provider = {
       id: "example-provider",

@@ -4,7 +4,7 @@ import {
   applyCreditDebitAfterUse,
   checkWorkspaceAllowance,
   creditDebitAttributionForTurn,
-  getBillingBalance,
+  getSpendableCreditBalance,
   listKnowledgeEntries,
   recordUsageEvent,
   sumUsageQuantity,
@@ -190,7 +190,7 @@ export async function searchKnowledgeEntries(
     context.accountId,
     context.workspaceId,
     async (lockedDb) => {
-      const balance = await getBillingBalance(lockedDb, context.accountId);
+      const balance = await getSpendableCreditBalance(lockedDb, context.accountId);
       if (balance.balanceMicros <= 0)
         return keywordFallback(lockedDb, new KnowledgeVectorFundingError(), "awaiting_funding");
       const attribution =

@@ -1,3 +1,4 @@
+import { canonicalizeConfiguredModelId } from "@opengeni/config";
 import {
   applyCreditDebitUpToBalance,
   recordUsageEvent,
@@ -53,6 +54,27 @@ export function modelUsageSourceKey(input: {
     return input.responseId;
   }
   return input.dispatchId ? `${input.dispatchId}:${input.positionalKey}` : input.positionalKey;
+}
+
+/** Legacy aggregate usage may only debit a policy shared by its completed calls. */
+export function aggregateCreditPolicyRevision(input: {
+  responseRevisions: ReadonlySet<number | undefined>;
+  lastAdmittedRevision: number | undefined;
+  chargesOpenGeniCredits: boolean;
+  totalTokens: number | null;
+}): number | undefined {
+  if (
+    input.chargesOpenGeniCredits &&
+    input.responseRevisions.size > 1 &&
+    (input.totalTokens ?? 0) > 0
+  ) {
+    throw new Error("Aggregate model usage spans different credit policy revisions");
+  }
+  // Bind the completed response, even if later preparation changed admission.
+  // Older runtimes without response callbacks retain their admitted snapshot.
+  return input.responseRevisions.size === 1
+    ? input.responseRevisions.values().next().value
+    : input.lastAdmittedRevision;
 }
 
 export function providerContextTokens(
@@ -209,6 +231,7 @@ export async function processModelResponseTerminalEvent(input: {
   externallyBilled: boolean;
   chargesOpenGeniCredits?: boolean;
   countsTowardTokenCap?: boolean;
+  creditPolicyRevision?: number | undefined;
   servingCredentialId: string | null;
   priorSessionCredentialId: string | null;
   emittedSourceKeys: Set<string>;
@@ -229,6 +252,15 @@ export async function processModelResponseTerminalEvent(input: {
 > {
   const terminal = modelTerminalResponseFromSdkEvent(input.event);
   if (!terminal) {
+    return { status: "not_response" };
+  }
+  // Some providers mirror a terminal response before normalized usage arrives.
+  // Claiming that empty raw mirror would discard the SDK's billable response.
+  if (
+    !terminal.usage &&
+    input.event.type === "raw_model_stream_event" &&
+    input.event.data.type !== "response_done"
+  ) {
     return { status: "not_response" };
   }
 
@@ -268,6 +300,7 @@ export async function processModelResponseTerminalEvent(input: {
         turnId: input.turnId,
         turnAttemptId: input.turnAttemptId,
         model: input.model,
+        creditPolicyRevision: input.creditPolicyRevision,
         externallyBilled: input.externallyBilled,
         ...(input.chargesOpenGeniCredits !== undefined
           ? { chargesOpenGeniCredits: input.chargesOpenGeniCredits }
@@ -374,6 +407,7 @@ export async function processCompactionModelUsageEvent(input: {
   externallyBilled: boolean;
   chargesOpenGeniCredits?: boolean;
   countsTowardTokenCap?: boolean;
+  creditPolicyRevision?: number | undefined;
   servingCredentialId: string | null;
   priorSessionCredentialId: string | null;
   emittedSourceKeys: Set<string>;
@@ -416,6 +450,7 @@ export async function processCompactionModelUsageEvent(input: {
         turnId: input.turnId,
         turnAttemptId: input.turnAttemptId,
         model: input.model,
+        creditPolicyRevision: input.creditPolicyRevision,
         externallyBilled: input.externallyBilled,
         ...(input.chargesOpenGeniCredits !== undefined
           ? { chargesOpenGeniCredits: input.chargesOpenGeniCredits }
@@ -651,6 +686,7 @@ export async function recordModelUsageAndDebitCredits(
     externallyBilled: boolean;
     chargesOpenGeniCredits?: boolean;
     countsTowardTokenCap?: boolean;
+    creditPolicyRevision?: number | undefined;
     gatewayBilling?: ModelResponseUsage["gatewayBilling"];
     usage?: ModelUsageInput | ModelCallUsageInput | null;
     normalizedUsage?: ModelCallUsageNormalization;
@@ -842,6 +878,8 @@ export async function recordModelUsageAndDebitCredits(
       workspaceId: input.workspaceId,
       type: "model_usage_debit",
       requestedAmountMicros: costMicros,
+      modelId: canonicalizeConfiguredModelId(settings, input.model),
+      creditPolicyRevision: input.creditPolicyRevision,
       sourceType: "model_response",
       sourceId: `${input.turnId}:${input.sourceKey}`,
       idempotencyKey: `credit:model_usage_debit:${input.turnId}:${input.sourceKey}`,
