@@ -46,6 +46,26 @@ type FoldMemory = Map<string, "open" | "closed">;
 const FoldMemoryContext = createContext<FoldMemory | null>(null);
 export const FoldMemoryProvider = FoldMemoryContext.Provider;
 
+/**
+ * An expanded outer turn header stays pinned to the top of the timeline while
+ * its section scrolls (web: sticky inside the section). Each open section
+ * reports its content-space frame and a renderer for the header row; the
+ * timeline draws the pinned copy over the scroll view.
+ */
+export type StickyWorkHeader = {
+  top: number;
+  height: number;
+  headerHeight: number;
+  render: () => ReactNode;
+};
+export type StickyWorkHeaderRegistry = {
+  register: (key: string, entry: StickyWorkHeader | null) => void;
+  /** Bring a section's top back into view (after collapsing from the pinned copy). */
+  reveal: (top: number) => void;
+};
+const StickyWorkHeaderContext = createContext<StickyWorkHeaderRegistry | null>(null);
+export const StickyWorkHeaderProvider = StickyWorkHeaderContext.Provider;
+
 export function useLiveNow(active: boolean): number {
   const [now, setNow] = useState(() => Date.now());
   useEffect(() => {
@@ -98,6 +118,12 @@ export function TurnSummary({
 }: TurnSummaryProps) {
   const theme = useNativeTimelineTheme();
   const foldMemory = useContext(FoldMemoryContext);
+  const registerSticky = useContext(StickyWorkHeaderContext);
+  const frame = useRef<{ top: number; height: number; headerHeight: number }>({
+    top: 0,
+    height: 0,
+    headerHeight: 0,
+  });
   const remembered = foldKey !== undefined ? foldMemory?.get(foldKey) : undefined;
   const [open, setOpen] = useState(
     remembered === "closed" ? false : remembered === "open" ? true : (defaultOpen ?? false),
@@ -185,88 +211,123 @@ export function TurnSummary({
           .map((value, index) => (index > 0 || hasStatusText ? ` · ${value}` : value))
           .join("")) + "";
 
-  return (
-    <View>
-      <Pressable
-        accessibilityRole="button"
-        accessibilityState={{ expanded: open }}
-        onPress={() => toggle(!open)}
-        style={({ pressed }) => ({
-          flexDirection: "row",
-          alignItems: "center",
-          minHeight: ROW_MIN_HEIGHT,
-          paddingVertical: 10,
-          borderRadius: theme.radius.sm,
-          // Web `-mx-2 px-2 w-full`: shifted left 8 with the same width.
-          ...(bare
-            ? { gap: 8, paddingHorizontal: 6 }
-            : { gap: 10, paddingHorizontal: 8, marginLeft: -8, marginRight: 8 }),
-          backgroundColor: pressed
-            ? theme.colors["surface-1"]
-            : !bare && open
-              ? theme.colors.bg
-              : "transparent",
-        })}
-      >
-        <View style={{ transform: [{ rotate: open ? "90deg" : "0deg" }] }}>
-          <Icon name="chevron-right" size={14} color={theme.colors["fg-subtle"]} />
-        </View>
-        {showMarker ? (
-          <View
-            style={{
-              width: bare ? 14 : 20,
-              height: bare ? 14 : 20,
-              alignItems: "center",
-              justifyContent: "center",
-            }}
-          >
-            {outcome === "failed" ? (
-              <Icon name="triangle-alert" size={12} color={theme.colors["status-failed"]} />
-            ) : outcome === "cancelled" ? (
-              <Icon name="circle-slash" size={12} color={theme.colors["fg-subtle"]} />
-            ) : (
-              <PulseDot color={theme.colors["fg-subtle"]} />
-            )}
-          </View>
-        ) : null}
+  const renderHeader = (pinned: boolean) => (
+    <Pressable
+      accessibilityRole="button"
+      accessibilityState={{ expanded: open }}
+      onPress={() => (pinned ? collapseFromPin() : toggle(!open))}
+      style={({ pressed }) => ({
+        flexDirection: "row",
+        alignItems: "center",
+        minHeight: ROW_MIN_HEIGHT,
+        paddingVertical: 10,
+        borderRadius: theme.radius.sm,
+        // Web `-mx-2 px-2 w-full`: shifted left 8 with the same width.
+        ...(bare
+          ? { gap: 8, paddingHorizontal: 6 }
+          : { gap: 10, paddingHorizontal: 8, marginLeft: -8, marginRight: 8 }),
+        backgroundColor: pressed
+          ? theme.colors["surface-1"]
+          : !bare && open
+            ? theme.colors.bg
+            : "transparent",
+      })}
+    >
+      <View style={{ transform: [{ rotate: open ? "90deg" : "0deg" }] }}>
+        <Icon name="chevron-right" size={14} color={theme.colors["fg-subtle"]} />
+      </View>
+      {showMarker ? (
         <View
           style={{
-            flexDirection: "row",
+            width: bare ? 14 : 20,
+            height: bare ? 14 : 20,
             alignItems: "center",
-            minWidth: 0,
-            ...(status?.kind === "worked" ? { flexShrink: 1 } : { flex: 1 }),
+            justifyContent: "center",
           }}
         >
-          {statusNode}
-          {showLive ? (
-            <View style={{ flex: 1, minWidth: 0 }}>{liveHeader}</View>
+          {outcome === "failed" ? (
+            <Icon name="triangle-alert" size={12} color={theme.colors["status-failed"]} />
+          ) : outcome === "cancelled" ? (
+            <Icon name="circle-slash" size={12} color={theme.colors["fg-subtle"]} />
           ) : (
-            <Text style={[text, { flexShrink: 1 }]} numberOfLines={1}>
-              {tail}
-              {outcome === "failed" && failureText ? (
-                <Text style={{ color: theme.colors["status-failed"] }}>{` · ${failureText}`}</Text>
-              ) : null}
-              {outcome === "cancelled" ? (
-                <Text style={{ color: theme.colors["fg-subtle"] }}>{" · interrupted"}</Text>
-              ) : null}
-            </Text>
+            <PulseDot color={theme.colors["fg-subtle"]} />
           )}
         </View>
-        {status?.kind === "worked" ? (
-          <View
-            style={{
-              marginLeft: 4,
-              height: 1,
-              flex: 1,
-              minWidth: 0,
-              backgroundColor: theme.colors.border,
-            }}
-          />
-        ) : null}
-        {status && status.kind !== "worked" && (contextCompactionCount ?? 0) > 0 ? (
-          <Icon name="shrink" size={14} color={theme.colors["fg-muted"]} />
-        ) : null}
-      </Pressable>
+      ) : null}
+      <View
+        style={{
+          flexDirection: "row",
+          alignItems: "center",
+          minWidth: 0,
+          ...(status?.kind === "worked" ? { flexShrink: 1 } : { flex: 1 }),
+        }}
+      >
+        {statusNode}
+        {showLive ? (
+          <View style={{ flex: 1, minWidth: 0 }}>{liveHeader}</View>
+        ) : (
+          <Text style={[text, { flexShrink: 1 }]} numberOfLines={1}>
+            {tail}
+            {outcome === "failed" && failureText ? (
+              <Text style={{ color: theme.colors["status-failed"] }}>{` · ${failureText}`}</Text>
+            ) : null}
+            {outcome === "cancelled" ? (
+              <Text style={{ color: theme.colors["fg-subtle"] }}>{" · interrupted"}</Text>
+            ) : null}
+          </Text>
+        )}
+      </View>
+      {status?.kind === "worked" ? (
+        <View
+          style={{
+            marginLeft: 4,
+            height: 1,
+            flex: 1,
+            minWidth: 0,
+            backgroundColor: theme.colors.border,
+          }}
+        />
+      ) : null}
+      {status && status.kind !== "worked" && (contextCompactionCount ?? 0) > 0 ? (
+        <Icon name="shrink" size={14} color={theme.colors["fg-muted"]} />
+      ) : null}
+    </Pressable>
+  );
+  const sticky = !bare && open && foldKey !== undefined && registerSticky !== null;
+  const collapseFromPin = () => {
+    toggle(false);
+    registerSticky?.reveal(frame.current.top);
+  };
+  const report = () => {
+    if (!sticky || !registerSticky || foldKey === undefined) return;
+    registerSticky.register(foldKey, { ...frame.current, render: () => renderHeader(true) });
+  };
+  // oxlint-disable-next-line react-hooks/exhaustive-deps -- re-report when the row content changes
+  useEffect(() => {
+    if (!sticky) {
+      if (registerSticky && foldKey !== undefined) registerSticky.register(foldKey, null);
+      return;
+    }
+    report();
+    return () => registerSticky?.register(foldKey!, null);
+  });
+
+  return (
+    <View
+      onLayout={(event) => {
+        const { y, height } = event.nativeEvent.layout;
+        frame.current = { ...frame.current, top: y, height };
+        report();
+      }}
+    >
+      <View
+        onLayout={(event) => {
+          frame.current = { ...frame.current, headerHeight: event.nativeEvent.layout.height };
+          report();
+        }}
+      >
+        {renderHeader(false)}
+      </View>
       {status && status.kind !== "worked" && !open && status.preview ? (
         <Pressable
           onPress={() => toggle(true)}
