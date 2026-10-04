@@ -159,6 +159,9 @@ function CodeFence({
   const theme = useNativeTimelineTheme();
   const styles = webMarkdownStyles(theme, "body");
   const [copied, setCopied] = useState(false);
+  // The code scrolls in the space left of the language label and copy button, which
+  // vary in width ("SH" vs "TYPESCRIPT"); reserve their measured width plus a gap.
+  const [chromeWidth, setChromeWidth] = useState(64);
   return (
     <View style={{ marginTop: 2, marginBottom: 10 }}>
       <View
@@ -166,7 +169,7 @@ function CodeFence({
           borderRadius: theme.radius.md,
           backgroundColor: insetSurface(theme),
           paddingLeft: 12,
-          paddingRight: 64,
+          paddingRight: chromeWidth,
           paddingVertical: 10,
         }}
       >
@@ -185,6 +188,10 @@ function CodeFence({
         </ScrollView>
       </View>
       <View
+        onLayout={(event) => {
+          const next = Math.ceil(event.nativeEvent.layout.width) + 6 + 10;
+          if (next !== chromeWidth) setChromeWidth(next);
+        }}
         style={{
           position: "absolute",
           top: 6,
