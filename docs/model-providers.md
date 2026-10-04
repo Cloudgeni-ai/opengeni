@@ -768,6 +768,8 @@ this projection at their request boundary, including SDK-driven continuations.
 Canonical history stays unchanged, so switching back
 to Chat restores its original reasoning field. Native encrypted Responses and
 signed Claude reasoning retain their existing paths.
+Older replies with reasoning only in nested Chat metadata retain that text too;
+newer replies with a separate reasoning item do not duplicate it.
 
 Chat Completions receives one request-local transcript view for
 canonical record types that its SDK converter cannot represent; that view is

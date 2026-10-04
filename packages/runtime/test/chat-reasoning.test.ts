@@ -426,8 +426,12 @@ test("legacy nonstreamed answer metadata stays with its following tool calls", a
 });
 
 for (const field of ["reasoning", "reasoning_content"] as const) {
-  for (const stream of [false, true]) {
-    test(`persisted Chat ${field}, stream=${stream}: Responses/Claude switch and return`, async () => {
+  for (const { stream, legacy } of [
+    { stream: false, legacy: false },
+    { stream: true, legacy: false },
+    { stream: false, legacy: true },
+  ]) {
+    test(`persisted Chat ${field}, stream=${stream}, legacy=${legacy}: Responses/Claude switch and return`, async () => {
       const chatRequests: Record<string, any>[] = [];
       const chat = new OpenGeniChatCompletionsModel(
         new ReplayableJsonOpenAI(
@@ -450,7 +454,9 @@ for (const field of ["reasoning", "reasoning_content"] as const) {
         JSON.parse(
           JSON.stringify([
             { type: "message", role: "user", content: "Start" },
-            ...first.output,
+            // Older nonstream reasoning_content replies retained reasoning only
+            // in output_text metadata, without a separate reasoning record.
+            ...first.output.filter((item) => !legacy || item.type !== "reasoning"),
             {
               type: "function_call_result",
               callId: "call-fixture",

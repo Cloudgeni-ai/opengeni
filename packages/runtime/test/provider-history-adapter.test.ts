@@ -97,13 +97,17 @@ describe("projectHistoryForProvider", () => {
     const before = JSON.stringify(items);
     const projected = projectHistoryForProvider(items, "responses");
     expect(projected[0]!.content).toEqual([
+      { type: "output_text", text: "[Historical reasoning from another model]\nSummary" },
       { type: "output_text", text: "Answer" },
       { type: "refusal", refusal: "Cannot help" },
       items[0]!.content[2],
     ]);
-    expect((projected[0]!.content as unknown[])[2]).toBe(items[0]!.content[2]);
+    expect((projected[0]!.content as unknown[])[3]).toBe(items[0]!.content[2]);
     expect(JSON.stringify(items)).toBe(before);
     expect(projectHistoryForProvider(projected, "responses")).toBe(projected);
+    const claude = projectHistoryForProvider(items, "anthropic-messages");
+    expect(claude).toEqual(projected);
+    expect(projectHistoryForProvider(claude, "anthropic-messages")).toBe(claude);
   });
 
   test("Responses uses canonical history by reference", () => {

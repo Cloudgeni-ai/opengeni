@@ -1,3 +1,5 @@
+import { chatReasoning } from "./chat-reasoning";
+
 export type HistoryProviderApi = "responses" | "chat" | "anthropic-messages";
 
 const CHAT_FUNCTION_NAME = /^[a-zA-Z0-9_-]+$/;
@@ -72,21 +74,24 @@ function isChatReasoning(item: Record<string, unknown>): boolean {
   );
 }
 
-function chatReasoningFact(item: Record<string, unknown>): Record<string, unknown> {
+function chatReasoningText(item: Record<string, unknown>): string {
   const parts = item.rawContent as Array<{ type?: string; text?: string }>;
+  return parts
+    .filter((part) => part?.type === "reasoning_text" && typeof part.text === "string")
+    .map((part) => part.text)
+    .join("");
+}
+
+function historicalReasoningContent(text: string) {
+  return { type: "output_text", text: `[Historical reasoning from another model]\n${text}` };
+}
+
+function chatReasoningFact(item: Record<string, unknown>): Record<string, unknown> {
   return {
     type: "message",
     role: "assistant",
     status: "completed",
-    content: [
-      {
-        type: "output_text",
-        text: `[Historical reasoning from another model]\n${parts
-          .filter((part) => part?.type === "reasoning_text" && typeof part.text === "string")
-          .map((part) => part.text)
-          .join("")}`,
-      },
-    ],
+    content: [historicalReasoningContent(chatReasoningText(item))],
   };
 }
 
@@ -96,7 +101,10 @@ function chatReasoningFact(item: Record<string, unknown>): Record<string, unknow
  * output_text block. Only this identifiable Chat shape is removed; canonical
  * history and native Responses annotations/provider extensions remain intact.
  */
-function responsesChatMetadata(item: Record<string, unknown>): Record<string, unknown> {
+function portableChatMetadata(
+  item: Record<string, unknown>,
+  previous: Record<string, unknown> | undefined,
+): Record<string, unknown> {
   const metadata = item.providerData as Record<string, unknown> | undefined;
   if (item.type === "function_call" && metadata?.type === "function" && metadata.function) {
     // Non-streamed Chat calls also retain their nested wire function envelope.
@@ -108,17 +116,30 @@ function responsesChatMetadata(item: Record<string, unknown>): Record<string, un
   }
   if (item.role !== "assistant" || !Array.isArray(item.content)) return item;
   let changed = false;
+  const precedingReason =
+    previous && isChatReasoning(previous) ? chatReasoningText(previous) : undefined;
+  const legacyReasons = new Set<string>();
   const content = item.content.map((part) => {
     if (
       (part?.type !== "output_text" && part?.type !== "refusal") ||
       part.providerData?.role !== "assistant"
     )
       return part;
+    // Before the shared Chat adapter, reasoning_content survived only inside
+    // reply metadata. Retain it before removing that foreign envelope. Newer
+    // histories already have the same text in their preceding reasoning item.
+    const reason = chatReasoning(part.providerData)?.text;
+    if (reason && reason !== precedingReason) legacyReasons.add(reason);
     const { providerData: _replyMetadata, ...projected } = part;
     changed = true;
     return projected;
   });
-  return changed ? { ...item, content } : item;
+  return changed
+    ? {
+        ...item,
+        content: [...Array.from(legacyReasons, historicalReasoningContent), ...content],
+      }
+    : item;
 }
 
 function isChatIncompatibleCall(item: Record<string, unknown>): boolean {
@@ -176,13 +197,13 @@ export function projectHistoryForProvider(
     // agents-js 0.14's message converter supports system/user/assistant only.
     // The Responses API itself supports developer; use the SDK's raw-item adapter.
     let changed = false;
-    const projected = items.map((item) => {
+    const projected = items.map((item, index) => {
       const next =
         item.type === "message" && item.role === "developer"
           ? { type: "unknown", providerData: item }
           : isChatReasoning(item)
             ? chatReasoningFact(item)
-            : responsesChatMetadata(item);
+            : portableChatMetadata(item, items[index - 1]);
       changed ||= next !== item;
       return next;
     });
@@ -193,13 +214,13 @@ export function projectHistoryForProvider(
     if (items.some((item) => item.type === "compaction"))
       throw new ProviderHistoryIncompatibleError(providerApi, "compaction");
     let changed = false;
-    const projected = items.map((item) => {
+    const projected = items.map((item, index) => {
       const next =
         item.type === "message" && item.role === "developer"
           ? { ...item, role: "system" }
           : isChatReasoning(item)
             ? chatReasoningFact(item)
-            : item;
+            : portableChatMetadata(item, items[index - 1]);
       changed ||= next !== item;
       return next;
     });
