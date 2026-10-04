@@ -967,6 +967,7 @@ export const Surface = forwardRef<HTMLDivElement, ComposerSurfaceProps>(function
   const controller = useComposerController();
   return (
     <div
+      data-og-composer-surface=""
       {...props}
       ref={ref}
       onDragOver={controller.attachments ? controller.handleDragOver : undefined}
