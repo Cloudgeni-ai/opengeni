@@ -166,6 +166,10 @@
     "./session-feedback-model": {
       "types": "./src/session-feedback-model.ts",
       "default": "./src/session-feedback-model.ts"
+    },
+    "./session-attention-model": {
+      "types": "./src/session-attention-model.ts",
+      "default": "./src/session-attention-model.ts"
     }
   },
   "publishConfig": {
