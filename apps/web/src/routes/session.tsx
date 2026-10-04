@@ -132,6 +132,8 @@ import {
 import { startMcpOAuthWithTimeout } from "@/lib/mcp-oauth";
 import { hasAccountPermission, hasWorkspacePermission } from "@/lib/permissions";
 import { chatLearningScope } from "@/lib/chat-learning-scope";
+import { currentModelRecovery } from "@/lib/model-recovery";
+import { ModelRecoveryNotice } from "@/components/session/model-recovery-notice";
 import { isPersonalWorkspace } from "@/lib/managed-self-context";
 import {
   isTerminalSessionStatus,
@@ -2881,6 +2883,8 @@ function SessionChatPane(props: {
       </FailureRecoveryBoundary>
     ) : null;
 
+  const modelRecovery = props.hasNewer ? null : currentModelRecovery(props.session, props.events);
+
   return createElement(
     LightboxProvider,
     null,
@@ -3076,6 +3080,8 @@ function SessionChatPane(props: {
           </div>
         </div>
       ) : null}
+
+      {modelRecovery ? <ModelRecoveryNotice recovery={modelRecovery} /> : null}
 
       {((props.session.inputWait && props.session.status === "idle") ||
         (props.session.status === "queued" && !props.session.activeTurnId)) &&

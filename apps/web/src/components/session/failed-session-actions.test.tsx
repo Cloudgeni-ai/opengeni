@@ -232,7 +232,7 @@ test("the free model keeps ordinary wording for failures other than its daily li
   );
   const row = container.querySelector<HTMLElement>('[data-testid="failed-session-banner"]')!;
   expect(row.querySelector("span")!.textContent).toBe(
-    "The model provider is rate limiting requests. Try again in a minute.",
+    "This model is busy. Automatic retries stopped; try again shortly. Choose another model below.",
   );
   expect([...row.querySelectorAll("a, button")].map((node) => node.textContent)).toEqual(["Retry"]);
 });

@@ -71,15 +71,15 @@ const QUOTA: KnownFailure = {
 };
 const RATE_LIMITED: KnownFailure = {
   kind: "rate_limited",
-  message: "The model provider is rate limiting requests. Try again in a minute.",
+  message: "This model is busy. Automatic retries stopped; try again shortly.",
   retryUnhelpful: false,
-  suggestModel: false,
+  suggestModel: true,
 };
 const PROVIDER_ERROR: KnownFailure = {
   kind: "provider_error",
-  message: "The model provider had a temporary error.",
+  message: "The model is temporarily unavailable. Try again shortly.",
   retryUnhelpful: false,
-  suggestModel: false,
+  suggestModel: true,
 };
 
 const UNKNOWN_FAILURE = "The session stopped unexpectedly.";
@@ -226,11 +226,19 @@ export function failedSessionCopy(
   const known =
     creditExhausted || failure.safetyRefusal || unavailableModel
       ? null
-      : classifyProviderFailure(
-          failure.recordedDetail ?? recorded ?? "",
-          failure.failureCode,
-          failure.quotaScope,
-        );
+      : (quotaScopeFailure(failure.quotaScope) ??
+        // A recorded recovery streak proves the worker paced this transient
+        // refusal. Provider quota wording alone must not override that typed
+        // decision (e.g. Gemini's per-minute quota); legacy failures with an
+        // unknown streak retain their existing text fallback.
+        (failure.failureCode === "provider_rate_limited" &&
+        failure.consecutiveRecoveryCount !== null
+          ? RATE_LIMITED
+          : classifyProviderFailure(
+              failure.recordedDetail ?? recorded ?? "",
+              failure.failureCode,
+              failure.quotaScope,
+            )));
   if (known) {
     const detail = diagnostic;
     return {
