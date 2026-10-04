@@ -627,6 +627,8 @@ export type {
   AgentToolCallOutputPayload,
   ApiKey,
   BillingBalance,
+  PromotionalCreditScope,
+  PromotionalCreditBalance,
   BillingEntitlementsResponse,
   BillingMode,
   BillingSummary,

@@ -28,9 +28,22 @@ export type ModelDisplayInput =
   | {
       id: string;
       label?: string | null | undefined;
+      logoUrl?: string | null | undefined;
       upstreamModelId?: string | null | undefined;
       deployment?: { upstreamModelId?: string | null | undefined } | null | undefined;
     };
+
+/** Catalog maker logo; remote images must use HTTPS without embedded credentials. */
+export function modelLogoUrl(input: ModelDisplayInput): string | null {
+  const value = typeof input === "string" ? undefined : input.logoUrl;
+  if (!value || value.length > 2048 || value !== value.trim()) return null;
+  try {
+    const url = new URL(value);
+    return url.protocol === "https:" && !url.username && !url.password ? value : null;
+  } catch {
+    return null;
+  }
+}
 
 const WORDS: Readonly<Record<string, string>> = {
   gpt: "GPT",

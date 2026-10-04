@@ -3,10 +3,26 @@ import {
   humanizeModelSlug,
   isRawModelLabel,
   modelDisplayName,
+  modelLogoUrl,
   modelVendor,
 } from "../src/model-display";
 
 describe("modelDisplayName", () => {
+  test("only accepts credential-free HTTPS catalog logos", () => {
+    expect(modelLogoUrl("example/model")).toBeNull();
+    expect(
+      modelLogoUrl({ id: "example/model", logoUrl: "https://cdn.example.test/logo.svg" }),
+    ).toBe("https://cdn.example.test/logo.svg");
+    for (const logoUrl of [
+      "http://cdn.example.test/logo.svg",
+      "https://user:secret@cdn.example.test/logo.svg",
+      "data:image/svg+xml,<svg/>",
+      "https://",
+      " https://cdn.example.test/logo.svg",
+    ]) {
+      expect(modelLogoUrl({ id: "example/model", logoUrl })).toBeNull();
+    }
+  });
   test("strips routing prefixes from raw ids", () => {
     expect(modelDisplayName("codex/gpt-6.1-sol")).toBe("GPT-6.1 Sol");
     expect(modelDisplayName("organization-claude-subscription/claude-opus-5-5")).toBe(

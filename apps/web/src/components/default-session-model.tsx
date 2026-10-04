@@ -186,6 +186,9 @@ export function DefaultSessionModelPreferenceRow(props: {
       control={
         <ModelPicker
           rows={pickerRows}
+          onOpenChange={(open) => {
+            if (open) void catalog.refresh();
+          }}
           model={draft.model}
           effort={draft.reasoningEffort}
           latencyMode="standard"

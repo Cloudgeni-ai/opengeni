@@ -2339,6 +2339,9 @@ describe("standalone context compaction execution", () => {
       turn: { source: "user" },
     });
     if (retryClaim.action !== "claimed") throw new Error("human input did not wake the session");
+    // This synthetic child notice has no accepted parent-turn lineage. New
+    // human input can wake the chat, but must not borrow unproven producer
+    // authority. Keep the notice pending instead of attaching or losing it.
     expect(
       (
         await listSessionSystemUpdatesForTurn(
@@ -2348,6 +2351,11 @@ describe("standalone context compaction execution", () => {
           retryClaim.turn.id,
         )
       ).map((update) => update.id),
+    ).toEqual([]);
+    expect(
+      (await listOutstandingSessionSystemUpdates(client.db, grant.workspaceId!, session.id)).map(
+        (update) => update.id,
+      ),
     ).toEqual([newUpdate.update.id]);
   });
 

@@ -1,6 +1,7 @@
 import type { OpenGeniBrowserClient } from "@opengeni/sdk/browser";
 import type {
   BillingSummary,
+  BillingBalance,
   DefaultModelSelectionSource,
   ReasoningEffort,
   WorkspaceModelCatalogResponse,
@@ -17,7 +18,12 @@ import { confirmIncludedModel } from "./model-access-onboarding";
  */
 export type StartingCreditsOnboarding = {
   /** The positive balance, or null when it could not be read. */
-  balance: { balanceMicros: number; currency: string } | null;
+  balance:
+    | ({ balanceMicros: number; currency: string } & Pick<
+        BillingBalance,
+        "promotionalCredits" | "generalBalanceMicros"
+      >)
+    | null;
   /** The server-resolved default new chats use, billed in OpenGeni credits. */
   model: { id: string; label: string; reasoningEffort: ReasoningEffort };
 };
@@ -35,6 +41,7 @@ export function creditsBilledDefaultModel(
   if (!selection) return null;
   const model = catalog.models.find((candidate) => candidate.id === selection.model);
   if (!model?.availability.selectable || model.cost !== "credits") return null;
+  if (model.creditFunding === "unavailable") return null;
   return {
     id: model.id,
     label: model.label,
@@ -66,7 +73,14 @@ export function startingCreditsForOnboarding(input: {
   const { mode, balance } = input.billing;
   if (mode !== "stripe" || balance.balanceMicros <= 0) return null;
   return {
-    balance: { balanceMicros: balance.balanceMicros, currency: balance.currency },
+    balance: {
+      balanceMicros: balance.balanceMicros,
+      currency: balance.currency,
+      ...(balance.promotionalCredits ? { promotionalCredits: balance.promotionalCredits } : {}),
+      ...(balance.generalBalanceMicros !== undefined
+        ? { generalBalanceMicros: balance.generalBalanceMicros }
+        : {}),
+    },
     model,
   };
 }

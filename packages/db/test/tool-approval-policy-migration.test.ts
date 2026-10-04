@@ -179,7 +179,7 @@ test("owner backfill preserves only known legacy exemptions, existing choices an
   expect(before).toHaveLength(1);
   expect(before[0]!.status).toBe("pending");
   const source = await Bun.file(
-    new URL("../drizzle/0616_legacy_api_tool_preferences.sql", import.meta.url),
+    new URL("../drizzle/0621_legacy_api_tool_preferences.sql", import.meta.url),
   ).text();
   const owner = postgres(owned.ownerUrl, { max: 1, onnotice: () => undefined });
   try {

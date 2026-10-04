@@ -3019,17 +3019,14 @@ describe("worker activities integration", () => {
       workflowRunId: crypto.randomUUID(),
     });
 
-    // Budget exhaustion is account state, not an agent failure: the segment
-    // ends gracefully so the session accepts new messages after a top-up.
+    // An admitted final answer stays complete even when it spends the last
+    // credit. A later request must pass a fresh credit check.
     expect(result.status).toBe("idle");
     const events = await listSessionEvents(dbClient.db, grant.workspaceId, session.id, 0, 50);
     expect(events.some((event) => event.type === "turn.failed")).toBe(false);
     const completed = events.find((event) => event.type === "turn.completed");
-    expect(completed?.payload).toMatchObject({
-      segmentLimit: "budget_exhausted",
-      // Budget semantics are contractual; product-name capitalization is not.
-      detail: expect.stringMatching(/^insufficient \S+ credits$/),
-    });
+    expect(completed?.payload).toMatchObject({ output: "expensive response" });
+    expect(completed?.payload).not.toHaveProperty("segmentLimit");
     expect((await getSession(dbClient.db, grant.workspaceId, session.id))?.status).toBe("idle");
     const balance = await getBillingBalance(dbClient.db, grant.accountId);
     expect(balance.balanceMicros).toBe(0);
@@ -3043,6 +3040,99 @@ describe("worker activities integration", () => {
         event.eventType === "model.cost" && event.sourceResourceId?.endsWith("expensive-response"),
     );
     expect(cost?.quantity).toBeGreaterThan(1);
+  });
+
+  test("exhausted promotional credits stop before a second model request", async () => {
+    const mcp = startTestMcpServer();
+    try {
+      const grant = await testGrant(dbClient.db);
+      await applyCreditLedgerEntry(dbClient.db, {
+        accountId: grant.accountId,
+        workspaceId: grant.workspaceId,
+        type: "grant",
+        amountMicros: 1,
+        eligibleModelIds: ["scripted-model"],
+        sourceType: "test",
+        sourceId: "promotional-exhaustion",
+        idempotencyKey: `test-credit:${grant.workspaceId}:promotional-exhaustion`,
+      });
+      const model = new ScriptedModel([
+        {
+          id: "promotional-tool-response",
+          output: [functionCall("docs__search_documents", { query: "test" }, "promotional-search")],
+        },
+        { id: "unfunded-response", outputText: "must not run" },
+      ]);
+      const session = await createOwnedSession(dbClient.db, grant, {
+        initialMessage: "search docs",
+        resources: [],
+        tools: [{ kind: "mcp", id: "docs" }],
+        metadata: {},
+        model: "scripted-model",
+        sandboxBackend: "none",
+      });
+      await appendOwnedEvents(dbClient.db, grant, session.id, [
+        { type: "user.message", payload: { text: "search docs" } },
+      ]);
+      const activities = createWorkerActivities({
+        settings: testSettings({
+          databaseUrl: services.databaseUrl,
+          natsUrl: services.natsUrl,
+          billingMode: "stripe",
+          modelPricingJson: JSON.stringify({
+            "scripted-model": {
+              inputMicrosPerMillionTokens: 1_000_000_000,
+              outputMicrosPerMillionTokens: 1_000_000_000,
+            },
+          }),
+          mcpServers: [
+            {
+              id: "docs",
+              name: "Document Search",
+              url: mcp.url,
+              allowedTools: ["search_documents"],
+              cacheToolsList: false,
+            },
+          ],
+        }),
+        db: dbClient.db,
+        bus,
+        runtime: createProductionAgentRuntime({ model }),
+      });
+      const result = await activities.runAgentTurn({
+        attemptId: crypto.randomUUID(),
+        accountId: grant.accountId,
+        workspaceId: grant.workspaceId,
+        sessionId: session.id,
+        trigger: { kind: "next" },
+        workflowId: "workflow-promotional-exhaustion",
+        workflowRunId: crypto.randomUUID(),
+      });
+
+      expect(result.status).toBe("idle");
+      expect(model.calls).toBe(1);
+      const events = await listSessionEvents(dbClient.db, grant.workspaceId, session.id, 0, 100);
+      expect(events.some((event) => event.type === "turn.failed")).toBe(false);
+      expect(events.find((event) => event.type === "turn.completed")?.payload).toMatchObject({
+        segmentLimit: "budget_exhausted",
+      });
+      expect(await getBillingBalance(dbClient.db, grant.accountId)).toMatchObject({
+        balanceMicros: 0,
+        generalBalanceMicros: 0,
+        promotionalCredits: [],
+      });
+      const usage = await listUsageEvents(dbClient.db, {
+        accountId: grant.accountId,
+        workspaceId: grant.workspaceId,
+        limit: 20,
+      });
+      const costs = usage.filter((event) => event.eventType === "model.cost");
+      expect(costs).toHaveLength(1);
+      expect(costs[0]?.quantity).toBeGreaterThan(1);
+      expect(costs[0]?.sourceResourceId).toEndWith(":promotional-tool-response");
+    } finally {
+      mcp.close();
+    }
   });
 
   test("persists conversation items and resumes follow-up turns from them", async () => {

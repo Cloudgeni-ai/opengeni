@@ -2390,10 +2390,11 @@ describe("release schema contract", () => {
       "0611_universal_session_tenancy_activation.sql",
       "0612_scheduled_model_unavailable_refusal.sql",
 
-      "0613_tool_approval_defaults.sql",
-      "0614_codemode_approval_continuation.sql",
-      "0615_tool_action_review_details.sql",
-      "0616_legacy_api_tool_preferences.sql",
+      "0618_tool_approval_defaults.sql",
+      "0619_codemode_approval_continuation.sql",
+      "0620_tool_action_review_details.sql",
+      "0621_legacy_api_tool_preferences.sql",
+      "0613_model_scoped_promotional_credits.sql",
     ].filter((path) =>
       unfilteredSourceContract.migrations.some((migration) => migration.path === path),
     );
