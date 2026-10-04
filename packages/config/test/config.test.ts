@@ -65,6 +65,32 @@ describe(".env.example", () => {
   });
 });
 
+describe("managed turn-worker planning and queue activation", () => {
+  test("keeps the queue cutover opt-in and parses deployment strings", () => {
+    expect(withEnv({}, () => getSettings()).videoReconciliationControlQueueEnabled).toBe(false);
+    const settings = withEnv(
+      {
+        OPENGENI_VIDEO_RECONCILIATION_CONTROL_QUEUE_ENABLED: "true",
+        OPENGENI_TURN_WORKER_MIN_MEMORY_SAFE_TURNS: "20",
+        OPENGENI_TURN_WORKER_BASELINE_MEMORY_BUDGET_MIB: "1536",
+      },
+      () => getSettings(),
+    );
+    expect(settings.videoReconciliationControlQueueEnabled).toBe(true);
+    expect(settings.turnWorkerMinMemorySafeTurns).toBe(20);
+    expect(settings.turnWorkerBaselineMemoryBudgetMiB).toBe(1536);
+    expect(
+      withEnv({ OPENGENI_VIDEO_RECONCILIATION_CONTROL_QUEUE_ENABLED: "false" }, () => getSettings())
+        .videoReconciliationControlQueueEnabled,
+    ).toBe(false);
+    expect(() =>
+      withEnv({ OPENGENI_VIDEO_RECONCILIATION_CONTROL_QUEUE_ENABLED: "unknown" }, () =>
+        getSettings(),
+      ),
+    ).toThrow();
+  });
+});
+
 describe("optional resource credits and verified signup trial", () => {
   test("keeps every new charge and grant off by default", () => {
     const settings = withEnv({}, () => getSettings());

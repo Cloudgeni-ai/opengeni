@@ -1,0 +1,86 @@
+{{- $autoscaling := .Values.worker.turns.autoscaling }}
+{{- $keda := $autoscaling.keda }}
+{{- if and .Values.worker.enabled $keda.enabled $keda.demandEnabled (.Capabilities.APIVersions.Has "monitoring.coreos.com/v1") }}
+{{- $fullName := include "opengeni.fullname" . }}
+{{- $environment := default "production" (index .Values.config "OPENGENI_ENVIRONMENT") }}
+{{- $scope := printf "namespace=%q,release=%q,environment=%q,component=\"worker-turn\",job=%q" .Release.Namespace .Release.Name $environment (printf "%s-worker-turns" $fullName) }}
+{{- $recordScope := printf "namespace=%q,release=%q,environment=%q" .Release.Namespace .Release.Name $environment }}
+apiVersion: monitoring.coreos.com/v1
+kind: PrometheusRule
+metadata:
+  name: {{ $fullName }}-worker-autoscaling
+  labels:
+    {{- include "opengeni.labels" . | nindent 4 }}
+    {{- with .Values.observability.prometheusRule.labels }}
+    {{- toYaml . | nindent 4 }}
+    {{- end }}
+spec:
+  groups:
+    - name: opengeni.worker-autoscaling
+      interval: 15s
+      labels:
+        namespace: {{ .Release.Namespace | quote }}
+        release: {{ .Release.Name | quote }}
+        environment: {{ $environment | quote }}
+      rules:
+        - record: opengeni:turn_autoscaling_replicas:desired
+          expr: max(kube_deployment_spec_replicas{namespace={{ .Release.Namespace | quote }},deployment={{ printf "%s-worker-turns" $fullName | quote }}})
+        - record: opengeni:turn_autoscaling_replicas:observed
+          expr: max(kube_deployment_status_replicas{namespace={{ .Release.Namespace | quote }},deployment={{ printf "%s-worker-turns" $fullName | quote }}})
+        # A successful target count alone does not establish completeness. Each
+        # physical pod must have occupancy, queue and same-instance freshness,
+        # and the deduplicated count must cover Kubernetes' observed/desired pods.
+        - record: opengeni:turn_autoscaling_pod_occupancy:fresh
+          expr: |
+            max by (pod) (
+              opengeni_turns_inflight{ {{ $scope }} }
+              and on(namespace, release, environment, component, instance)
+              opengeni_turn_eligible_backlog{ {{ $scope }} }
+              and on(namespace, release, environment, component, instance)
+              (opengeni_turn_capacity_monitor_fresh{ {{ $scope }} } == 1)
+              and on(namespace, release, environment, component, instance)
+              (time() - opengeni_turn_capacity_monitor_last_success_timestamp_seconds{ {{ $scope }} } < 45)
+              and on(namespace, pod)
+              (max by (namespace, pod) (up{namespace={{ .Release.Namespace | quote }},release={{ .Release.Name | quote }},job={{ printf "%s-worker-turns" $fullName | quote }}}) == 1)
+            )
+        # DescribeTaskQueue is a replicated global projection, not pod-local
+        # work: MAX is intentional. This becomes activity pressure only after
+        # the protected legacy-video drain/cutover preflight passes.
+        - record: opengeni:turn_autoscaling_queue:fresh_max
+          expr: |
+            max(
+              opengeni_turn_eligible_backlog{ {{ $scope }} }
+              and on(namespace, release, environment, component, instance)
+              (opengeni_turn_capacity_monitor_fresh{ {{ $scope }} } == 1)
+              and on(namespace, release, environment, component, instance)
+              (time() - opengeni_turn_capacity_monitor_last_success_timestamp_seconds{ {{ $scope }} } < 45)
+              and on(namespace, pod)
+              opengeni:turn_autoscaling_pod_occupancy:fresh{ {{ $recordScope }} }
+            )
+        - record: opengeni:turn_autoscaling_occupancy:fresh_sum
+          expr: sum(opengeni:turn_autoscaling_pod_occupancy:fresh{ {{ $recordScope }} })
+        - record: opengeni:turn_autoscaling_pressure:fresh_total
+          expr: |
+            (
+              opengeni:turn_autoscaling_occupancy:fresh_sum{ {{ $recordScope }} }
+              + opengeni:turn_autoscaling_queue:fresh_max{ {{ $recordScope }} }
+            )
+            and on(namespace, release, environment)
+            (count by (namespace, release, environment) (opengeni:turn_autoscaling_pod_occupancy:fresh{ {{ $recordScope }} }) == opengeni:turn_autoscaling_replicas:observed{ {{ $recordScope }} })
+            and on(namespace, release, environment)
+            (count by (namespace, release, environment) (opengeni:turn_autoscaling_pod_occupancy:fresh{ {{ $recordScope }} }) >= opengeni:turn_autoscaling_replicas:desired{ {{ $recordScope }} })
+            and on(namespace, release, environment)
+            (opengeni:turn_autoscaling_replicas:desired{ {{ $recordScope }} } > 0)
+        # Occupancy is physical agent-turn attempts plus dispatchable activities,
+        # NOT a unique logical-turn count. While any queue remains, never let
+        # low occupancy recommend a downscale. Missing evidence stays absent;
+        # there is deliberately no zero-valued fallback expression.
+        - record: opengeni:turn_autoscaling_demand:fresh_total
+          expr: |
+            opengeni:turn_autoscaling_pressure:fresh_total{ {{ $recordScope }} }
+            + clamp_min(
+                opengeni:turn_autoscaling_replicas:desired{ {{ $recordScope }} } * {{ $keda.targetTurnsPerPod }}
+                - opengeni:turn_autoscaling_pressure:fresh_total{ {{ $recordScope }} },
+                0
+              ) * (opengeni:turn_autoscaling_queue:fresh_max{ {{ $recordScope }} } > bool 0)
+{{- end }}

@@ -107,6 +107,74 @@ describe("worker concurrency contract", () => {
     });
   });
 
+  test("does not advertise a fixed memory guarantee from the native resource tuner", () => {
+    expect(() =>
+      createTurnWorkerConcurrencyPlan({
+        ...fixed,
+        turnWorkerConcurrencyMode: "resource-based",
+        turnWorkerMinMemorySafeTurns: 20,
+      }),
+    ).toThrow("memory-safe planning guarantees require fixed admission");
+  });
+
+  test("checks the planning density after native initialization with full resident and permit budgets", () => {
+    const memory = mutableMemory(300 * MIB, 4_096 * MIB);
+    const supplier = new MemoryAwareTurnSlotSupplier({
+      maximumTurns: 32,
+      minimumMemorySafeTurns: 20,
+      memorySnapshot: memory.read,
+    });
+    memory.currentBytes = 512 * MIB;
+    // Startup has 30 empty slots, but only 15 worst-case fully resident turns
+    // can retain their complete permit charge and native headroom at 4 GiB.
+    expect(supplier.snapshot().memoryBoundCapacity).toBe(30);
+    expect(() => supplier.finalizeStartupBaseline()).toThrow("minimum=20 safe=15");
+  });
+
+  test("validates a reviewed 6 GiB planning density without claiming all 32 hard slots", () => {
+    const memory = mutableMemory(300 * MIB, 6_144 * MIB);
+    const supplier = new MemoryAwareTurnSlotSupplier({
+      maximumTurns: 32,
+      minimumMemorySafeTurns: 20,
+      baselineMemoryBudgetBytes: 1_536 * MIB,
+      memorySnapshot: memory.read,
+    });
+    memory.currentBytes = 1_536 * MIB;
+    supplier.finalizeStartupBaseline();
+    expect(supplier.snapshot()).toMatchObject({
+      baselineBytes: 1_536 * MIB,
+      maximumTurns: 32,
+      hardBytesPerTurn: 100 * MIB,
+      nativeHeadroomBytes: 512 * MIB,
+    });
+    // Exercise the worst-case admission projection, not a provider/load test.
+    for (let index = 0; index < 20; index += 1) {
+      const permit = supplier.tryReserveSlot({} as never);
+      expect(permit).not.toBeNull();
+      supplier.markSlotUsed(used(permit!));
+      memory.currentBytes += 100 * MIB;
+    }
+    expect(supplier.snapshot().usedSlots).toBe(20);
+  });
+
+  test("refuses an unknown cgroup or a post-create baseline above the placement contract", () => {
+    const memory = mutableMemory(300 * MIB, 6_144 * MIB);
+    const supplier = new MemoryAwareTurnSlotSupplier({
+      maximumTurns: 32,
+      minimumMemorySafeTurns: 20,
+      baselineMemoryBudgetBytes: 1_536 * MIB,
+      memorySnapshot: memory.read,
+    });
+    memory.currentBytes = 1_537 * MIB;
+    expect(() => supplier.finalizeStartupBaseline()).toThrow("placement baseline budget");
+    const unbounded = new MemoryAwareTurnSlotSupplier({
+      maximumTurns: 32,
+      minimumMemorySafeTurns: 20,
+      memorySnapshot: () => ({ currentBytes: 300 * MIB, limitBytes: null, source: "process" }),
+    });
+    expect(() => unbounded.finalizeStartupBaseline()).toThrow("minimum=20 safe=0");
+  });
+
   test("caps permits at the lower of density and baseline memory capacity", () => {
     const memory = mutableMemory(300 * MIB, 2_050 * MIB);
     const supplier = new MemoryAwareTurnSlotSupplier({

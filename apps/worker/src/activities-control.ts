@@ -17,6 +17,7 @@ import { createSiteAuthMaintenanceActivities } from "./activities/site-auth-main
 import { createSessionStateActivities } from "./activities/session-state";
 import type { ActivityDependencies, ControlActivityServices } from "./activities/types";
 import { createWorkflowWakeActivities } from "./activities/workflow-wake";
+import { createVideoGenerationActivities } from "./activities/video-generation-reconciliation";
 
 function createControlActivityServices(
   dependencies: ActivityDependencies,
@@ -47,6 +48,7 @@ export function createControlActivitiesFromServices(
     ...createRetainedScreenshotMaintenanceActivities(services),
     ...createWorkflowWakeActivities(services),
     ...createSandboxLeaseActivities(services),
+    ...createVideoGenerationActivities(services),
   };
 }
 

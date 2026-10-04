@@ -40,6 +40,9 @@ export function createTurnActivities(dependencies: ActivityDependencies = {}) {
 export function createTurnActivitiesFromServices(services: () => Promise<TurnActivityServices>) {
   return {
     runAgentTurn: createRunAgentTurnActivity(services),
+    // Compatibility drain only: old scheduled/retrying video activities keep
+    // their original queue. Remove this registration only after protected
+    // rollout evidence proves no legacy turn-queue video can execute/replay.
     ...createVideoGenerationActivities(services),
   };
 }

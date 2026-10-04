@@ -54,14 +54,14 @@ import {
   startXaiVideoGeneration,
 } from "./xai-video-generation";
 import type {
-  TurnActivityServices,
+  SharedActivityServices,
   VideoGenerationReconcileResult,
   VideoGenerationTerminalStatus,
 } from "./types";
 
 const RECONCILE_ERROR_MAX = 1_000;
 
-export function createVideoGenerationActivities(services: () => Promise<TurnActivityServices>) {
+export function createVideoGenerationActivities(services: () => Promise<SharedActivityServices>) {
   return {
     reconcileVideoGenerationOperation: async (input: {
       accountId: string;
@@ -78,7 +78,7 @@ export function createVideoGenerationActivities(services: () => Promise<TurnActi
 }
 
 export async function reconcileVideoGenerationOperation(
-  service: TurnActivityServices,
+  service: SharedActivityServices,
   input: { accountId: string; workspaceId: string; operationId: string },
 ): Promise<VideoGenerationReconcileResult> {
   const storage = requireStorage(service.objectStorage);
@@ -382,7 +382,7 @@ export async function reconcileVideoGenerationOperation(
 }
 
 async function deliverTerminalResult(
-  service: TurnActivityServices,
+  service: SharedActivityServices,
   operation: VideoGenerationOperationWithReferences,
 ): Promise<void> {
   if (
@@ -460,7 +460,7 @@ async function deliverTerminalResult(
 }
 
 async function cleanupTerminalReferences(
-  service: TurnActivityServices,
+  service: SharedActivityServices,
   operation: VideoGenerationOperationWithReferences,
 ): Promise<void> {
   const storage = requireStorage(service.objectStorage);
@@ -495,7 +495,7 @@ async function cleanupTerminalReferences(
 }
 
 async function terminalPayload(
-  service: TurnActivityServices,
+  service: SharedActivityServices,
   operation: VideoGenerationOperationWithReferences,
 ): Promise<MediaGenerationResult> {
   return withSessionRlsActorContext(
@@ -508,7 +508,7 @@ async function terminalPayload(
 }
 
 async function requireOperation(
-  service: TurnActivityServices,
+  service: SharedActivityServices,
   input: { workspaceId: string; operationId: string },
 ): Promise<VideoGenerationOperationWithReferences> {
   const operation = await getVideoGenerationOperation(
@@ -598,11 +598,11 @@ function requireStorage(storage: ObjectStorage | null): ObjectStorage {
   return storage;
 }
 
-function nextPoll(service: TurnActivityServices): Date {
+function nextPoll(service: SharedActivityServices): Date {
   return new Date(Date.now() + service.settings.videoGenerationPollIntervalMs);
 }
 
-function waitResult(service: TurnActivityServices): VideoGenerationReconcileResult {
+function waitResult(service: SharedActivityServices): VideoGenerationReconcileResult {
   return {
     action: "waiting",
     delayMs: service.settings.videoGenerationPollIntervalMs,
@@ -628,7 +628,7 @@ function requireXaiAuth(
  * best-effort mirror only; it is never the operation's recovery authority.
  */
 async function durableXaiVideoAuth(
-  service: TurnActivityServices,
+  service: SharedActivityServices,
   operation: VideoGenerationOperationWithReferences,
   key: Uint8Array,
   credential: Extract<VideoGenerationProviderCredential, { kind: "xai-subscription" }>,
