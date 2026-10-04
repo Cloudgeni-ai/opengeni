@@ -14,6 +14,7 @@ import {
   OPENROUTER_CREDENTIAL_OPERATION_DIGEST_METADATA_KEY,
   OPENROUTER_CREDENTIAL_OPERATION_ID_METADATA_KEY,
   OPENGENI_SLACK_REST_USER_SCOPES,
+  ToolGatewayCatalog,
   VERCEL_AI_GATEWAY_CREDENTIAL_OPERATION_DIGEST_METADATA_KEY,
   VERCEL_AI_GATEWAY_CREDENTIAL_OPERATION_ID_METADATA_KEY,
   signDelegatedAccessToken,
@@ -1946,13 +1947,23 @@ describe("connections routes", () => {
       try {
         const response = await api.request(path, { headers });
         expect(response.status).toBe(200);
-        const catalog = await response.json();
-        expect(JSON.stringify(catalog)).toContain("native-fixture");
+        const catalog = ToolGatewayCatalog.parse(await response.json());
+        expect(catalog).toMatchObject(workspace);
+        const searchEntries = catalog.entries.filter(
+          (entry) => entry.source === "mcp" && entry.identity.toolName === "search_documents",
+        );
+        expect(searchEntries).toHaveLength(1);
+        const searchEntry = searchEntries[0];
+        if (!searchEntry) throw new Error("Native connection search tool was not advertised");
+        expect(searchEntry.identity).toEqual({
+          serverId: mcpAccountRouteId("native-fixture", connection.id),
+          toolName: "search_documents",
+        });
         expect(mcp.requests.some((request) => request.jsonRpcMethod === "tools/list")).toBe(true);
         const call = {
           operationId: randomUUID(),
           catalogDigest: catalog.digest,
-          identity: { serverId: "native-fixture", toolName: "search_documents" },
+          identity: searchEntry.identity,
           arguments: { query: "embedding fixture" },
         };
         const post = (route: string, body: unknown) =>
