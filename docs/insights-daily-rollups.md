@@ -83,6 +83,51 @@ The additive source/custom grain is preserved on the source-extension branch,
 not installed here and not a blocker for basic daily reads. No historical list
 total is repriced by these migrations.
 
+### Retained-volume full-App uncached diagnostic
+
+On October 4, 2026, the timing-only harness
+`apps/api/scripts/bench-insights-daily-http.ts` ran at unchanged start/end head
+`dd82c46c26cbd9bc6b03d3b8cbe6a94256dd8932` on a new physical copy of the
+838,000-fact/4,170,000-event fixture. Its database was copied from the historical
+`78c96261` bootstrap result: this is not a measurement of the UUID correction or
+the subsequent concurrency repair. The original datasets were unchanged, and no
+migration or seed was replayed.
+
+Each request used the full `createApp`, actual loopback HTTP, a normal canonical
+selected organization key, a restricted `opengeni_app` connection with FORCE RLS,
+and a fresh App instance with an empty response cache. Both scopes queried
+`range=week&groupBy=model`, resolving from `2026-09-27T00:00:00.000Z` through
+`2026-10-03T23:59:59.999Z`; the prior window began at
+`2026-09-20T00:00:00.001Z` and ended at `2026-09-27T00:00:00.000Z`. These are
+seven UTC calendar dates with equal-duration prior, not an exact 168-hour window.
+
+| Scope | First request | Subsequent samples | Empirical p50 / p95 |
+| --- | ---: | --- | --- |
+| Workspace | 1.661 s | 1.570 s, 1.586 s | 1.570 s / 1.586 s |
+| Organization | 4.487 s | 3.985 s, 4.037 s | 3.985 s / 4.037 s |
+
+All six responses were HTTP 200; the sub-one-second target was unmet in both
+scopes. Two subsequent samples are only a bounded diagnostic, not final p95
+clearance. The dominant database scoped callback took about 1.50–1.52 s for
+workspace requests and 3.90–4.40 s for organization requests; other observed
+authentication/metadata callbacks were at most about 5 ms each. Nested timing
+observations overlap and must not be added together.
+
+The first requests are not true-cold samples: shared PostgreSQL, connection-pool
+and OS caches were not flushed. The local PostgreSQL 17.11 instance had a
+16.125-CPU quota, 128 MiB shared buffers and 4 MiB work memory. Postmeasurement
+`taskset` inspection confirmed postmaster and shell affinity 0–16; the terminated
+benchmark process's affinity was not captured by this diagnostic. This is not a
+dedicated four-vCPU or real-staging result.
+
+Primary evidence is retained as artifact
+`35d7a831-de14-48bc-9432-f0e18146fefc` (310,511 bytes,
+SHA-256 `8468d0a1287a93bd370f23561e4137c09273708fb4883ee981fc8e4e7482c031`).
+The physical-copy attestation is artifact
+`7efa32ca-4f5b-4fcb-b61e-da76544a12d2`. Final repaired-head clean and dirty-write
+measurements remain separate work; cached responses and the small DB builder
+fixture do not satisfy the uncached target.
+
 ### Frozen-head full-volume bootstrap measurement
 
 On October 4, 2026, a new isolated physical copy of the retained synthetic data
