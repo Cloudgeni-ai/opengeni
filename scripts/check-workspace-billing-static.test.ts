@@ -199,6 +199,18 @@ describe("workspace and organization MCP route guard", () => {
     ).toEqual([]);
   });
 
+  test("does not mistake authorization discovery for an MCP gateway default", () => {
+    const file = "apps/web/src/server.test.ts";
+    const discoveryPath = ["/.well-known/oauth-authorization-server", "v1", "mcp"].join("/");
+    expect(routeFindings(file, `const discovery = "${discoveryPath}";`)).toEqual([]);
+    expect(
+      routeFindings(
+        file,
+        `const discovery = "${discoveryPath}"; const gateway = "${organizationMcpPath}";`,
+      ),
+    ).toHaveLength(2);
+  });
+
   test("preserves scoped workspace MCP and third-party absolute URL handling", () => {
     const file = "apps/api/src/routes/example.ts";
     expect(routeFindings(file, 'const resource = "/v1/workspaces/{workspaceId}/mcp";')).toEqual([]);
