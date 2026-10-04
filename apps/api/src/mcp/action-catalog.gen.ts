@@ -1763,14 +1763,9 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     "method": "GET",
     "path": "/v1/organizations/:accountId/insights/calls",
     "request": [],
-    "response": []
-  },
-  {
-    "id": "GET /v1/organizations/:accountId/insights/usage",
-    "method": "GET",
-    "path": "/v1/organizations/:accountId/insights/usage",
-    "request": [],
-    "response": []
+    "response": [
+      "InsightsCallsResponse"
+    ]
   },
   {
     "id": "GET /v1/organizations/:organizationId/codex/accounts",
@@ -1923,14 +1918,9 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     "method": "GET",
     "path": "/v1/workspaces/:workspaceId/insights/calls",
     "request": [],
-    "response": []
-  },
-  {
-    "id": "GET /v1/workspaces/:workspaceId/insights/usage",
-    "method": "GET",
-    "path": "/v1/workspaces/:workspaceId/insights/usage",
-    "request": [],
-    "response": []
+    "response": [
+      "InsightsCallsResponse"
+    ]
   },
   {
     "id": "GET /v1/workspaces/:workspaceId/instruction-policies/:revisionId",
@@ -2492,6 +2482,15 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     ]
   },
   {
+    "id": "getOrganizationInsightsUsage",
+    "method": "GET",
+    "path": "/v1/organizations/:accountId/insights/usage",
+    "request": [],
+    "response": [
+      "InsightsUsageResponse"
+    ]
+  },
+  {
     "id": "getOrganizationIntegrationCatalog",
     "method": "GET",
     "path": "/v1/organizations/:organizationId/integration-policy/catalog",
@@ -2944,6 +2943,15 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     ],
     "response": [
       "WorkspaceInsightsResponse"
+    ]
+  },
+  {
+    "id": "getWorkspaceInsightsUsage",
+    "method": "GET",
+    "path": "/v1/workspaces/:workspaceId/insights/usage",
+    "request": [],
+    "response": [
+      "InsightsUsageResponse"
     ]
   },
   {
@@ -6104,6 +6112,17 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     ],
     "response": [
       "PrReviewAppRegistration"
+    ]
+  },
+  {
+    "id": "updateArtifactPin",
+    "method": "PUT",
+    "path": "/v1/workspaces/:workspaceId/artifact-catalog/:kind/:artifactId/pin",
+    "request": [
+      "ArtifactCatalogKind"
+    ],
+    "response": [
+      "ArtifactPinResponse"
     ]
   },
   {

@@ -399,7 +399,6 @@ function safePosture(): RuntimeDatabasePosture {
     ],
     ownedSchemas: [],
     ownedRelations: [],
-    sessionTenancyProductActivationPresent: false,
     sessionVariableSetAttachmentsCutoverPresent: true,
     claudeSubscriptionPoolActivationPresent: true,
     tables: [
@@ -472,6 +471,14 @@ function safePosture(): RuntimeDatabasePosture {
         truncate: false,
         references: false,
         trigger: false,
+      },
+      {
+        name: "credit_promotion_policy_revisions",
+        owner: "opengeni_migrator",
+        select: true,
+        insert: false,
+        update: false,
+        delete: false,
       },
       {
         name: "personal_resource_delegation_capabilities",
@@ -1318,6 +1325,12 @@ describe("runtime database posture evaluator", () => {
           tables === RUNTIME_DML_TABLES
             ? 1
             : 0) +
+          // 0611 adds account-isolated, append-only promotional debit allocations.
+          (tables === FORCE_RLS_TABLES ||
+          tables === RUNTIME_READ_INSERT_TABLES ||
+          tables === RUNTIME_DML_TABLES
+            ? 1
+            : 0) +
           embeddingTableCount +
           (tables === FORCE_RLS_TABLES || tables === PROTECTED_NO_DIRECT_DML_TABLES
             ? length +
@@ -1333,7 +1346,21 @@ describe("runtime database posture evaluator", () => {
 
       expect(Object.keys(RUNTIME_TABLE_PRIVILEGES).sort()).toEqual([...RUNTIME_DML_TABLES]);
       const tableCount =
-        (hasCurrentMainActivityLedger ? 341 : 218) + 9 + 12 + 2 + 2 + 2 - 3 + 1 + 1 + 3 + 8 + 1 + 6;
+        (hasCurrentMainActivityLedger ? 341 : 218) +
+        9 +
+        12 +
+        2 +
+        2 +
+        2 -
+        3 +
+        1 +
+        1 +
+        3 +
+        8 +
+        1 +
+        6 +
+        1;
+      expect(RUNTIME_TABLE_PRIVILEGES.credit_debit_allocations).toEqual(["SELECT", "INSERT"]);
       for (const removed of [
         "workspace_packs",
         "pack_installations",
@@ -2740,18 +2767,17 @@ describe("runtime database posture evaluator", () => {
     ).toEqual([]);
   });
 
-  test("fails closed when durable session-tenancy activation outlives the deployment switch", () => {
+  test("session-tenancy activation is universal and no longer has a startup interlock", () => {
+    // Migration 0611 retired OPENGENI_ORGANIZATION_TENANCY_CANONICAL_ACTIVATION_ENABLED:
+    // neither the posture shape nor its options carry an activation switch.
     const posture = safePosture();
-    posture.sessionTenancyProductActivationPresent = true;
-    expect(evaluateRuntimeDatabasePosture(posture, options)).toContain(
-      "session-tenancy product activation is durable but OPENGENI_ORGANIZATION_TENANCY_CANONICAL_ACTIVATION_ENABLED is not true",
-    );
+    expect(posture).not.toHaveProperty("sessionTenancyProductActivationPresent");
+    expect(evaluateRuntimeDatabasePosture(posture, options)).toEqual([]);
     expect(
-      evaluateRuntimeDatabasePosture(posture, {
-        ...options,
-        organizationTenancyCanonicalActivationEnabled: true,
-      }),
-    ).toEqual([]);
+      evaluateRuntimeDatabasePosture(posture, options).some((violation) =>
+        violation.includes("ORGANIZATION_TENANCY_CANONICAL_ACTIVATION_ENABLED"),
+      ),
+    ).toBe(false);
   });
 
   test("rejects runtime or PUBLIC execution of the owner-internal quiescence helper", () => {

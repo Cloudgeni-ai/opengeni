@@ -1,3 +1,10 @@
+export { readCreditPromotionPolicy } from "./credit-promotion-policy";
+import { getBillingBalance, getSpendableCreditBalance, planCreditDebit } from "./credit-balances";
+export {
+  getBillingBalance,
+  getSpendableCreditBalance,
+  spendableCreditMicros,
+} from "./credit-balances";
 import {
   agentSelectionNotes,
   loadInboxExecutionContext,
@@ -12,6 +19,7 @@ export {
   type ModalNativeLiveOriginResult,
 } from "./modal-native-live-origin";
 export { SubscriptionAccountChangedError } from "./subscription-account-conflict";
+import type { GoalAdmissionPausedReason } from "@opengeni/contracts";
 import {
   claudeSubscriptionAccountRepository,
   claudeSubscriptionTables,
@@ -445,7 +453,6 @@ import {
   closePrivateSessionCreateCapability,
   openPrivateChildSessionCreateCapability,
   openPrivateSessionCreateCapability,
-  sessionTenancyProductActivated,
 } from "./session-tenancy";
 import {
   completeCodemodeOperationInTransaction,
@@ -5707,6 +5714,7 @@ export async function applyCreditLedgerEntry(
     workspaceId?: string | null;
     type: string;
     amountMicros: number;
+    eligibleModelIds?: string[] | undefined;
     sourceType?: string | null;
     sourceId?: string | null;
     idempotencyKey: string;
@@ -5725,6 +5733,7 @@ export async function applyCreditLedgerEntry(
           workspaceId: input.workspaceId ?? null,
           type: input.type,
           amountMicros: input.amountMicros,
+          eligibleModelIds: input.eligibleModelIds ?? null,
           sourceType: input.sourceType ?? null,
           sourceId: input.sourceId ?? null,
           idempotencyKey: input.idempotencyKey,
@@ -5746,6 +5755,9 @@ export async function applyCreditDebitUpToBalance(
     workspaceId?: string | null;
     type: string;
     requestedAmountMicros: number;
+    /** Canonical, accepted model ID. Omitted for non-model usage. */
+    modelId?: string;
+    creditPolicyRevision?: number | undefined;
     sourceType?: string | null;
     sourceId?: string | null;
     idempotencyKey: string;
@@ -5764,35 +5776,42 @@ export async function applyCreditDebitUpToBalance(
     { accountId: input.accountId, workspaceId: input.workspaceId ?? null },
     async (scopedDb) => {
       await scopedDb.execute(sql`select pg_advisory_xact_lock(hashtext(${input.accountId}))`);
-      const before = await getBillingBalance(scopedDb, input.accountId);
-      const candidateDebitMicros = Math.min(
-        input.requestedAmountMicros,
-        Math.max(0, before.balanceMicros),
-      );
-      let debitedMicros = 0;
-      if (candidateDebitMicros > 0) {
-        const inserted = await scopedDb
-          .insert(schema.creditLedgerEntries)
-          .values({
+      const before = await getBillingBalance(scopedDb, input.accountId, input.creditPolicyRevision);
+      const plan = planCreditDebit(before, input.requestedAmountMicros, input.modelId);
+      const candidateDebitMicros = plan.debitedMicros;
+      // Keep a zero-cost receipt too: retrying after a top-up must not charge
+      // a response that was already settled while the eligible balance was empty.
+      const [inserted] = await scopedDb
+        .insert(schema.creditLedgerEntries)
+        .values({
+          accountId: input.accountId,
+          workspaceId: input.workspaceId ?? null,
+          type: input.type,
+          amountMicros: -candidateDebitMicros,
+          sourceType: input.sourceType ?? null,
+          sourceId: input.sourceId ?? null,
+          idempotencyKey: input.idempotencyKey,
+          metadata: {
+            ...input.metadata,
+            requestedAmountMicros: input.requestedAmountMicros,
+            debitedMicros: candidateDebitMicros,
+            creditPolicyRevision: before.creditPolicyRevision,
+          },
+          occurredAt: input.occurredAt ?? new Date(),
+        })
+        .onConflictDoNothing({
+          target: schema.creditLedgerEntries.idempotencyKey,
+        })
+        .returning({ id: schema.creditLedgerEntries.id });
+      const debitedMicros = inserted ? candidateDebitMicros : 0;
+      if (inserted && plan.allocations.length) {
+        await scopedDb.insert(schema.creditDebitAllocations).values(
+          plan.allocations.map((allocation) => ({
+            ...allocation,
             accountId: input.accountId,
-            workspaceId: input.workspaceId ?? null,
-            type: input.type,
-            amountMicros: -candidateDebitMicros,
-            sourceType: input.sourceType ?? null,
-            sourceId: input.sourceId ?? null,
-            idempotencyKey: input.idempotencyKey,
-            metadata: {
-              ...input.metadata,
-              requestedAmountMicros: input.requestedAmountMicros,
-              debitedMicros: candidateDebitMicros,
-            },
-            occurredAt: input.occurredAt ?? new Date(),
-          })
-          .onConflictDoNothing({
-            target: schema.creditLedgerEntries.idempotencyKey,
-          })
-          .returning({ id: schema.creditLedgerEntries.id });
-        debitedMicros = inserted.length === 1 ? candidateDebitMicros : 0;
+            debitEntryId: inserted.id,
+          })),
+        );
       }
       return {
         balance: await getBillingBalance(scopedDb, input.accountId),
@@ -6023,23 +6042,6 @@ export async function markStripeWebhookProcessed(db: Database, id: string): Prom
     .update(schema.stripeWebhookEvents)
     .set({ processedAt: new Date() })
     .where(eq(schema.stripeWebhookEvents.id, id));
-}
-
-export async function getBillingBalance(db: Database, accountId: string): Promise<BillingBalance> {
-  return await withAccountRls(db, accountId, async (scopedDb) => {
-    const [{ balance } = { balance: 0 }] = await scopedDb
-      .select({
-        balance: sql<number>`coalesce(sum(${schema.creditLedgerEntries.amountMicros}), 0)`,
-      })
-      .from(schema.creditLedgerEntries)
-      .where(eq(schema.creditLedgerEntries.accountId, accountId));
-    return {
-      accountId,
-      balanceMicros: Number(balance),
-      currency: "usd",
-      updatedAt: new Date().toISOString(),
-    };
-  });
 }
 
 /**
@@ -18581,6 +18583,7 @@ export type ScheduledTaskAdmissionRefusalReason =
   | "machine_enrollment_inactive"
   | "variable_set_unavailable"
   | "rig_version_unavailable"
+  | "scheduled_model_unavailable"
   | "insufficient_credits"
   | "allowance_exhausted"
   | "monthly_model_cost_limit"
@@ -37691,11 +37694,6 @@ async function readSessionListForSubject(
           throw new SessionListAccessError();
         }
 
-        const tenancyActivated = await sessionTenancyProductActivated(
-          tx as unknown as Database,
-          workspaceId,
-        );
-
         const archiveMode = options.archiveStatus ?? (options.archivedOnly ? "archived" : "active");
         const sortBy = options.sortBy ?? (archiveMode === "archived" ? "archivedAt" : "updatedAt");
         if (options.archivedOnly && archiveMode !== "archived") {
@@ -38145,7 +38143,7 @@ async function readSessionListForSubject(
                       ? { archivedAt: exactArchiveTimestamps.get(session.id)! }
                       : {}),
                   },
-                  { subjectId: options.subjectId, activated: tenancyActivated },
+                  { subjectId: options.subjectId },
                 ),
                 ...(sortBy === "updatedAt" && exactOrdinaryTimestamps.has(session.id)
                   ? { updatedAt: exactOrdinaryTimestamps.get(session.id)! }
@@ -38401,7 +38399,6 @@ export async function getSessionForSubject(
     const mcpServers = await sessionMcpServerMetadataForSessions(scopedDb, workspaceId, [
       sessionId,
     ]);
-    const tenancyActivated = await sessionTenancyProductActivated(scopedDb, workspaceId);
     const failureDiagnostics = await sessionFailureDiagnostics(scopedDb, workspaceId, session);
     return projectSessionForRelatedAccess(
       {
@@ -38413,7 +38410,7 @@ export async function getSessionForSubject(
           mapSessionAttention(session, row.pin),
           mapSessionArchive(row.pin),
           undefined,
-          { subjectId, activated: tenancyActivated },
+          { subjectId },
         )),
         failureDiagnostics,
       },
@@ -44568,6 +44565,19 @@ export async function applyContextCompaction(
             ),
           );
         const supersededFrom = Math.floor(Number(maxPosition)) + 1;
+        // Installing a successful summary is model progress, including a
+        // maintenance turn that never enters the ordinary response stream.
+        // Clear only provider recovery under the same locked attempt fence.
+        if (providerRecoveryCountFromTurnMetadata(fence.turn!.metadata) > 0) {
+          await tx
+            .update(schema.sessionTurns)
+            .set({
+              metadata: metadataWithoutProviderRecoveryCount(fence.turn!.metadata),
+              version: fence.turn!.version + 1,
+              updatedAt: new Date(),
+            })
+            .where(eq(schema.sessionTurns.id, input.turnId));
+        }
         await tx
           .update(schema.sessionHistoryItems)
           .set({ active: false })
@@ -47851,7 +47861,7 @@ async function acquireLeaseOnce(
                 refusal,
               );
             }
-            const balance = await getBillingBalance(tx, accountId);
+            const balance = await getSpendableCreditBalance(tx, accountId);
             if (balance.balanceMicros <= 0) {
               throw new SandboxPaidComputeAdmissionError(workspaceId, sandboxGroupId);
             }
@@ -52812,8 +52822,8 @@ type LostProviderBlockerScope = {
 };
 
 /** Take the session-event write prefix (workspace control share, workspace,
- * sessions, cursors) for every session whose background command is linked to
- * an active process in the exact lost-provider scope. Call it before the
+ * sessions, cursors) for linked background commands and attempt owners in the
+ * exact lost-provider scope. Call it before the
  * process/admission/PTY/lease locks so terminal command delivery keeps the
  * canonical control -> session -> process -> admission -> lease order. */
 async function linkedLostProviderCommandSessionIdsTx(
@@ -52823,7 +52833,8 @@ async function linkedLostProviderCommandSessionIdsTx(
   const sessions = await rawRows<{ session_id: string }>(
     tx,
     sql`
-      select distinct command.session_id
+      select distinct session_id from (
+      select command.session_id
       from session_background_commands command
       join sandbox_retained_processes process on process.id = command.retained_process_id
         and process.workspace_id = command.workspace_id
@@ -52837,7 +52848,21 @@ async function linkedLostProviderCommandSessionIdsTx(
         and process.provider_instance_id = ${input.lostInstanceId}
         and process.state = 'active'
         and command.state in ('running', 'stopping')
-      order by command.session_id
+      union
+      select process.session_id
+      from sandbox_retained_processes process
+      join session_turn_attempts attempt on attempt.id = process.owner_attempt_id
+        and attempt.workspace_id = process.workspace_id
+        and attempt.session_id = process.session_id
+      where process.account_id = ${input.accountId}
+        and process.workspace_id = ${input.workspaceId}
+        and process.lease_id = ${input.leaseId}
+        and process.sandbox_group_id = ${input.sandboxGroupId}
+        and process.lease_epoch = ${input.lostEpoch}
+        and process.provider_backend = ${input.lostBackend}
+        and process.provider_instance_id = ${input.lostInstanceId}
+        and process.state = 'active'
+      ) owners order by session_id
     `,
   );
   return sessions.map((row) => row.session_id);
@@ -53056,6 +53081,37 @@ async function settleExactLostProviderWorkspaceBlockersTx(
         mutation,
       );
       delivery.events.push(...mutation.events);
+    }
+  }
+
+  if (lostProcesses.length) {
+    // The session prefix was locked before blockers and revalidated afterward.
+    // Unadopted writers have no background-command delivery to wake their owner;
+    // persist that obligation atomically with physical provider settlement.
+    const owners = await rawRows<{ session_id: string; temporal_workflow_id: string }>(
+      tx,
+      sql`
+        select distinct attempt.session_id, attempt.temporal_workflow_id
+        from session_turn_attempts attempt
+        join sandbox_retained_processes process on process.owner_attempt_id = attempt.id
+          and process.workspace_id = attempt.workspace_id
+          and process.session_id = attempt.session_id
+        where attempt.workspace_id = ${input.workspaceId}
+          and attempt.account_id = ${input.accountId}
+          and attempt.state = 'closed' and attempt.quiesced_at is null
+          and attempt.temporal_workflow_id is not null
+          and process.id = any(${`{${lostProcesses.map((p) => p.id).join(",")}}`}::uuid[])
+        order by attempt.session_id, attempt.temporal_workflow_id
+      `,
+    );
+    for (const owner of owners) {
+      await enqueueSessionWorkflowWakeInTransaction(tx, {
+        accountId: input.accountId,
+        workspaceId: input.workspaceId,
+        sessionId: owner.session_id,
+        temporalWorkflowId: owner.temporal_workflow_id,
+        reason: "attempt_writer_provider_settled",
+      });
     }
   }
 
@@ -53945,7 +54001,7 @@ export async function heartbeatLeaseHolderStatus(
           (input.billingMode ?? snapshot?.mode) === "credits" &&
           snapshot?.mode === "credits" &&
           snapshot.rateMicrosPerSecond > 0 &&
-          (await getBillingBalance(tx, input.accountId)).balanceMicros <= 0
+          (await getSpendableCreditBalance(tx, input.accountId)).balanceMicros <= 0
         ) {
           // Touching the holder above is essential: the running writer remains
           // protected while it winds down. The provider/lease TTL is not renewed.
@@ -54601,23 +54657,69 @@ export async function reapStaleLeaseHolders(
 }
 
 /** Settlement reasons for legacy retained commands that containment stopped
- * after a verified checkpoint. Neither is exit proof: the command settles
+ * after a verified checkpoint. None is exit proof: the command settles
  * `lost` with no exit code. */
 export const IDLE_COMMAND_CONTAINMENT_REASON = "idle_containment";
 export const DEADLINE_COMMAND_CONTAINMENT_REASON = "provider_deadline_containment";
+export const QUIESCENCE_COMMAND_CONTAINMENT_REASON = "quiescence_containment";
+
+type SettledCommandOwner = {
+  sessionId: string;
+  attemptId: string;
+  temporalWorkflowId: string;
+  temporalWorkflowRunId: string;
+  temporalActivityId: string;
+};
+
+/** Exact dispatch settlement is enrollment authority, never physical proof. */
+async function settledCommandOwnerMatchesTx(
+  tx: Database,
+  input: { accountId: string; workspaceId: string; sandboxGroupId: string },
+  owner: SettledCommandOwner,
+): Promise<boolean> {
+  const [row] = await rawRows<{ eligible: boolean }>(
+    tx,
+    sql`
+    select exists (
+      select 1 from session_turn_attempts attempt
+      join sessions session on session.id = attempt.session_id
+        and session.workspace_id = attempt.workspace_id
+      where attempt.account_id = ${input.accountId}
+        and attempt.workspace_id = ${input.workspaceId}
+        and attempt.session_id = ${owner.sessionId} and attempt.id = ${owner.attemptId}
+        and attempt.temporal_workflow_id = ${owner.temporalWorkflowId}
+        and attempt.temporal_workflow_run_id = ${owner.temporalWorkflowRunId}
+        and attempt.temporal_activity_id = ${owner.temporalActivityId}
+        and attempt.state = 'closed' and attempt.quiesced_at is null
+        and session.sandbox_group_id = ${input.sandboxGroupId}
+        and not exists (select 1 from session_attempt_interruptions interruption
+          where interruption.workspace_id = attempt.workspace_id
+            and interruption.session_id = attempt.session_id and interruption.attempt_id = attempt.id
+            and interruption.state in ('pending', 'delivered', 'acknowledged'))
+    ) and not exists (
+      select 1 from session_turn_attempts live
+      join sessions member on member.id = live.session_id and member.workspace_id = live.workspace_id
+      where live.workspace_id = ${input.workspaceId}
+        and member.sandbox_group_id = ${input.sandboxGroupId} and live.state <> 'closed'
+    ) as eligible
+  `,
+  );
+  return row?.eligible === true;
+}
 
 /** Bounded per-candidate containment inspection outcomes (metric labels). */
 export type CommandContainmentInspection =
   | "idle_enrolled"
   | "deadline_enrolled"
+  | "quiescence_enrolled"
   | "resumed_enrolled"
   | "not_eligible"
   | "inspection_failed";
 
 export type CommandContainmentEnrollment = ReapDrainable & {
-  /** `idle`/`deadline` newly enrolled this call; `resumed` continues an
+  /** `idle`/`deadline`/`quiescence` newly enrolled this call; `resumed` continues an
    * existing enrollment whose drain has not committed yet. */
-  mode: "idle" | "deadline" | "resumed";
+  mode: "idle" | "deadline" | "quiescence" | "resumed";
 };
 
 /** Whole-group "unused" from durable facts only. Every session of the group,
@@ -54820,6 +54922,8 @@ export async function enrollRetainedCommandContainment(
     sandboxGroupId: string;
     /** Omit to evaluate only the provider-deadline rule. */
     idleCommandContainmentMs?: number | undefined;
+    /** Internal recovery authority: caller verified exact Temporal settlement. */
+    settledOwner?: SettledCommandOwner;
   },
 ): Promise<CommandContainmentEnrollment | null> {
   const screened = await withRlsContext(db, input, async (tx) => {
@@ -54832,6 +54936,8 @@ export async function enrollRetainedCommandContainment(
       // Enrolled drains resume; any requested rotation also refreshes command
       // observation backoff below and may meet the deadline rule.
       (Boolean(lease.unobservableCommandDrainIds?.length) ||
+        (input.settledOwner !== undefined &&
+          (await settledCommandOwnerMatchesTx(tx, input, input.settledOwner))) ||
         lease.rotationRequestedAt !== null ||
         (input.idleCommandContainmentMs !== undefined &&
           (await sandboxGroupIdleForCommandContainmentTx(tx, {
@@ -54881,11 +54987,17 @@ export async function enrollRetainedCommandContainment(
       supervised: boolean;
       owned: boolean;
       deadline_ready: boolean;
+      adopted: boolean;
     }>(
       tx,
       sql`
       select process.id, process.session_id, process.owner_attempt_id,
         process.parent_admission_id, process.holder_id,
+        exists (select 1 from session_background_commands background
+          where background.retained_process_id = process.id
+            and background.workspace_id = process.workspace_id
+            and background.session_id = process.session_id
+            and background.state in ('running', 'stopping')) as adopted,
         (coalesce(process.provider_command, '{}'::jsonb) ? 'supervision') as supervised,
         (process.lease_epoch = ${initial.leaseEpoch}
           and process.provider_instance_id = ${initial.instanceId}
@@ -54959,8 +55071,19 @@ export async function enrollRetainedCommandContainment(
     };
     if (enrolled) return { ...target, mode: "resumed" };
     if (lease.archive_capture_id !== null) return null;
-    let mode: "idle" | "deadline" | null = null;
+    let mode: "idle" | "deadline" | "quiescence" | null = null;
     if (
+      input.settledOwner !== undefined &&
+      processes.every(
+        (p) =>
+          p.owner_attempt_id === input.settledOwner!.attemptId &&
+          p.session_id === input.settledOwner!.sessionId &&
+          !p.adopted,
+      ) &&
+      (await settledCommandOwnerMatchesTx(tx, input, input.settledOwner))
+    ) {
+      mode = "quiescence";
+    } else if (
       deadlineRotation &&
       processes.every((p) => p.deadline_ready) &&
       !(await deadlineOwnerQuiescencePending(tx, input.workspaceId, processes)) &&
@@ -54984,9 +55107,11 @@ export async function enrollRetainedCommandContainment(
     await tx.execute(sql`
       update sandbox_leases set unobservable_command_drain_ids = ${`{${ids.join(",")}}`}::uuid[],
         command_containment_reason = ${
-          mode === "deadline"
-            ? DEADLINE_COMMAND_CONTAINMENT_REASON
-            : IDLE_COMMAND_CONTAINMENT_REASON
+          mode === "quiescence"
+            ? QUIESCENCE_COMMAND_CONTAINMENT_REASON
+            : mode === "deadline"
+              ? DEADLINE_COMMAND_CONTAINMENT_REASON
+              : IDLE_COMMAND_CONTAINMENT_REASON
         },
         liveness = 'draining', rotation_requested_at = coalesce(rotation_requested_at, now()),
         rotation_reason = coalesce(rotation_reason, 'operator'), expires_at = now(), updated_at = now()
@@ -55342,7 +55467,7 @@ export async function reArmDrainingLease(
             ? snapshot.mode === "credits" && snapshot.rateMicrosPerSecond > 0
             : input.warmBilling?.rateMicrosPerSecond !== undefined &&
               input.warmBilling.rateMicrosPerSecond > 0) &&
-          (await getBillingBalance(tx, input.accountId)).balanceMicros <= 0
+          (await getSpendableCreditBalance(tx, input.accountId)).balanceMicros <= 0
         ) {
           throw new SandboxPaidComputeAdmissionError(input.workspaceId, input.sandboxGroupId);
         }
@@ -55526,7 +55651,8 @@ export async function confirmDrainCold(
             !input.providerMissingBeforeCapture &&
             row.archive_capture_published_at !== null &&
             (reason === IDLE_COMMAND_CONTAINMENT_REASON ||
-              reason === DEADLINE_COMMAND_CONTAINMENT_REASON) &&
+              reason === DEADLINE_COMMAND_CONTAINMENT_REASON ||
+              reason === QUIESCENCE_COMMAND_CONTAINMENT_REASON) &&
             row.unobservable_command_drain_ids?.length
               ? row.unobservable_command_drain_ids
               : [];
@@ -68347,6 +68473,16 @@ export async function updateSessionTitleWithEvent(
   );
 }
 
+/** Read-only admission at a locked paused-to-active transition. */
+export type SessionGoalResumeValidation = (
+  tx: Database,
+  session: Pick<
+    Session,
+    "accountId" | "workspaceId" | "model" | "codexCompactionMode" | "latencyMode"
+  >,
+  causalTurn: { id: string; initiatingHumanSubjectId: string | null } | null,
+) => Promise<void>;
+
 /**
  * Status transition helper. Idempotent: requesting the current status returns
  * `changed: false` so callers can skip emitting a duplicate event. `completed`
@@ -68366,6 +68502,8 @@ export async function setSessionGoalStatus(
     reportDeliveries?: SessionGoalReportDelivery[];
     reportArtifactActor?: ReportArtifactActor;
     commandActor?: Extract<SessionCommandActor, { type: "agent_attempt" }>;
+    /** Runs under the canonical control/session/goal locks, before a paused goal changes. */
+    beforeResume?: SessionGoalResumeValidation;
   },
 ): Promise<{
   goal: SessionGoal;
@@ -68414,6 +68552,51 @@ export async function setSessionGoalStatus(
     }
     if (existing.status === "completed") {
       throw new Error("session goal is completed; set a new goal to continue");
+    }
+    if (input.status === "active" && input.beforeResume) {
+      const [effectiveSession] = await withEffectiveSessionPolicy(scopedDb, workspaceId, [session]);
+      // An accepted running turn owns the work the goal will continue after it
+      // settles. An idle Resume uses the exact latest-finished causal row.
+      const causalTurnFilter = session.activeTurnId
+        ? or(
+            eq(schema.sessionTurns.id, session.activeTurnId),
+            sql`${schema.sessionTurns.finishedAt} is not null`,
+          )
+        : sql`${schema.sessionTurns.finishedAt} is not null`;
+      const [causalTurn] = await scopedDb
+        .select({
+          id: schema.sessionTurns.id,
+          initiatingHumanSubjectId: schema.sessionTurns.initiatingHumanSubjectId,
+        })
+        .from(schema.sessionTurns)
+        .where(
+          and(
+            eq(schema.sessionTurns.workspaceId, workspaceId),
+            eq(schema.sessionTurns.sessionId, sessionId),
+            causalTurnFilter,
+          ),
+        )
+        .orderBy(
+          ...(session.activeTurnId
+            ? [desc(sql`${schema.sessionTurns.id} = ${session.activeTurnId}`)]
+            : []),
+          desc(schema.sessionTurns.finishedAt),
+          desc(schema.sessionTurns.position),
+          desc(schema.sessionTurns.createdAt),
+          desc(schema.sessionTurns.id),
+        )
+        .limit(1);
+      await input.beforeResume(
+        scopedDb,
+        {
+          accountId: session.accountId,
+          workspaceId,
+          model: effectiveSession!.model,
+          latencyMode: effectiveSession!.latencyMode as Session["latencyMode"],
+          codexCompactionMode: session.codexCompactionMode as Session["codexCompactionMode"],
+        },
+        causalTurn ?? null,
+      );
     }
     if (input.status === "completed") {
       await verifyGoalReportDeliveries(scopedDb, {
@@ -68508,6 +68691,7 @@ export async function setSessionGoalStatusWithEvent(
     reportDeliveries?: SessionGoalReportDelivery[];
     reportArtifactActor?: ReportArtifactActor;
     commandActor?: Extract<SessionCommandActor, { type: "agent_attempt" }>;
+    beforeResume?: SessionGoalResumeValidation;
     event: SetSessionGoalStatusEvent;
   },
 ): Promise<{
@@ -68541,6 +68725,7 @@ export async function setSessionGoalStatusWithEvent(
           : {}),
         ...(input.reportArtifactActor ? { reportArtifactActor: input.reportArtifactActor } : {}),
         ...(input.commandActor ? { commandActor: input.commandActor } : {}),
+        ...(input.beforeResume ? { beforeResume: input.beforeResume } : {}),
         ...(input.evidence !== undefined ? { evidence: input.evidence } : {}),
         ...(input.rationale !== undefined ? { rationale: input.rationale } : {}),
         ...(input.pausedReason !== undefined ? { pausedReason: input.pausedReason } : {}),
@@ -68639,7 +68824,7 @@ export type GoalContinuationDecision =
   | { decision: "queue" }
   | {
       decision: "paused";
-      reason: "max_auto_continuations" | "limits" | "allowance";
+      reason: "max_auto_continuations" | "limits" | GoalAdmissionPausedReason;
       goal: SessionGoal;
     }
   | {
@@ -68718,7 +68903,7 @@ export async function evaluateGoalContinuation(
     // decision (before the counter bump) so a budget pause never consumes
     // continuation budget.
     budgetBlocked?: string | null;
-    budgetPausedReason?: "limits" | "allowance" | undefined;
+    budgetPausedReason?: "limits" | GoalAdmissionPausedReason | undefined;
   },
 ): Promise<GoalContinuationDecision> {
   return await withWorkspaceRls(
@@ -68980,7 +69165,7 @@ export async function materializeGoalContinuation(
     workflowId: string;
     defaultMaxAutoContinuations?: number | null;
     budgetBlocked?: string | null;
-    budgetPausedReason?: "limits" | "allowance" | undefined;
+    budgetPausedReason?: "limits" | GoalAdmissionPausedReason | undefined;
     /** Trusted worker admission, evaluated under the same session/goal locks
      * as lineage materialization. Never substitutes a mutable latest human. */
     admission?: (
@@ -68988,7 +69173,7 @@ export async function materializeGoalContinuation(
       causalTurn: { id: string; initiatingHumanSubjectId: string | null } | null,
     ) => Promise<{
       budgetBlocked: string | null;
-      budgetPausedReason?: "limits" | "allowance";
+      budgetPausedReason?: "limits" | GoalAdmissionPausedReason;
     }>;
     idleBackoff?: GoalIdleBackoffPolicy | null;
     policy: {
@@ -75305,6 +75490,28 @@ export async function reconcileSessionAttemptQuiescence(
     };
   }
   if (!input.activitySettled || eligibility.writer_pending) {
+    if (input.activitySettled && eligibility.writer_pending) {
+      const group = await withRlsContext(db, input, async (tx) => {
+        const [row] = await tx
+          .select({ id: schema.sessions.sandboxGroupId })
+          .from(schema.sessions)
+          .where(
+            and(
+              eq(schema.sessions.workspaceId, input.workspaceId),
+              eq(schema.sessions.id, input.sessionId),
+            ),
+          )
+          .limit(1);
+        return row?.id;
+      });
+      if (group)
+        await enrollRetainedCommandContainment(db, {
+          accountId: input.accountId,
+          workspaceId: input.workspaceId,
+          sandboxGroupId: group,
+          settledOwner: input,
+        });
+    }
     return { action: "pending", events: [] };
   }
   const events = await markSessionAttemptQuiesced(db, {
@@ -78879,6 +79086,8 @@ function metadataWithoutProviderRecoveryCount(
 ): Record<string, unknown> {
   const next = { ...(metadata ?? {}) };
   delete next.providerRecoveryCount;
+  delete next.providerRecoveryStartedAt;
+  delete next.providerRecoveryReason;
   return next;
 }
 
@@ -81321,7 +81530,15 @@ export async function requestSessionTurnRecovery(
                 }
               : {}),
             ...(input.providerRecoveryCount !== undefined
-              ? { providerRecoveryCount: input.providerRecoveryCount }
+              ? {
+                  providerRecoveryCount: input.providerRecoveryCount,
+                  providerRecoveryStartedAt:
+                    providerRecoveryCountFromTurnMetadata(turn.metadata) > 0 &&
+                    typeof turn.metadata?.providerRecoveryStartedAt === "string"
+                      ? turn.metadata.providerRecoveryStartedAt
+                      : now.toISOString(),
+                  providerRecoveryReason: input.reason,
+                }
               : {}),
           },
           updatedAt: now,
@@ -86765,7 +86982,7 @@ async function mapSessionWithControl(
   },
   archive: Pick<Session, "archived" | "archivedAt" | "archiveVersion"> = mapSessionArchive(null),
   workspaceControl?: WorkspaceControlRow,
-  tenancyViewer?: { subjectId: string; activated: boolean },
+  tenancyViewer?: { subjectId: string },
 ): Promise<Session> {
   const controls = await sessionControlProjections(db, row.workspaceId, [row.id], workspaceControl);
   const control = controls.get(row.id);
@@ -86902,7 +87119,7 @@ function mapSession(
     attentionVersion: 0,
   },
   archive: Pick<Session, "archived" | "archivedAt" | "archiveVersion"> = mapSessionArchive(null),
-  tenancyViewer?: { subjectId: string; activated: boolean },
+  tenancyViewer?: { subjectId: string },
 ): Session {
   const bundledSkillIds = bundledSkillSelectionFromMetadata(row.metadata);
   return {
@@ -86936,9 +87153,7 @@ function mapSession(
     toolPolicyVersion: Number(row.toolPolicyVersion),
     mcpApprovalPolicies: row.mcpApprovalPolicies,
     metadata: row.metadata,
-    ...(tenancyViewer?.activated
-      ? { tenancy: mapSessionTenancy(row, tenancyViewer.subjectId) }
-      : {}),
+    ...(tenancyViewer ? { tenancy: mapSessionTenancy(row, tenancyViewer.subjectId) } : {}),
     createdBy: initiatorFromStorage(
       row.createdByKind,
       row.createdBySubjectId,

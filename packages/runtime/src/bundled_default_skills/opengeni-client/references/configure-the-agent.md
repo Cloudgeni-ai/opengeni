@@ -9,15 +9,16 @@ agent: {
   identity: "You are Acme Analytics' assistant. You help customers read their dashboards.",
   instructions: "Lead with the number, then one sentence of context.",
   capabilities: { from: "none", webSearch: true, knowledge: true },
-  renderer: "opengeni", // "markdown" when your own UI renders plain Markdown
 }
 ```
 
 ## Capabilities
 
-Start from `"none"` (the session's own tools, asking the user, reading Skills)
-or `"all"` (everything the workspace offers; also what an omitted `agent`
-gets), then switch single capabilities on or off.
+Start from `"none"` (the session's own tools, asking the user, reading the
+session's Skills) or `"all"` (everything the workspace offers; also what an
+omitted `agent` gets), then switch single capabilities on or off. `"none"` adds
+no Opengeni workspace tools, connectors, or bundled Opengeni guides, so it
+needs no empty `tools`, `firstPartyMcpTools`, or `bundledSkillIds` lists.
 
 | Capability            | Lets the agent                                          |
 | --------------------- | ------------------------------------------------------- |
@@ -47,8 +48,8 @@ internal operator agent usually starts from `"all"` minus what it must not do.
 - `identity` replaces only Opengeni's introduction: name, product, voice.
 - `instructions` add rules. They outrank Opengeni's default style, never its
   safety rules.
-- `renderer: "opengeni"` suits `OpenGeniChat` and `SessionConversation`;
-  `"markdown"` suits your own UI, Slack, or email.
+- `renderer` defaults to `"opengeni"`, which suits `OpenGeniChat` and
+  `SessionConversation`; set `"markdown"` for your own UI, Slack, or email.
 - Per-message facts go in `modelContext`, not in instructions.
 
 ## Other places to set it

@@ -798,11 +798,13 @@ export const RUNTIME_TARGET_SCHEMA_FORBIDDEN_ROUTINES = [
   SESSION_TENANCY_QUIESCENCE_ROUTINE,
   TENANCY_BACKFILL_ACTIVATION_EVIDENCE_ROUTINE,
   VERIFIED_SIGNUP_TRIAL_SWITCH_SETTER_ROUTINE,
+  "set_credit_promotion_policy(jsonb, text, text)",
   MANAGED_AUTH_NEW_SIGNUPS_SWITCH_SETTER_ROUTINE,
   ...DOCUMENT_MIGRATION_AUDIT_INTERNAL_ROUTINES,
 ] as const;
 
 export const RUNTIME_TARGET_SCHEMA_INVOKER_ROUTINES = [
+  "set_credit_promotion_policy(jsonb, text, text)",
   CLAUDE_SNAPSHOT_VALIDATOR_ROUTINE,
   "usage_allowance_period(jsonb, timestamp with time zone)",
   "validate_usage_allowance_config(jsonb)",
@@ -898,6 +900,7 @@ export const FORCE_RLS_TABLES = [
   "connections",
   "connector_action_policies",
   "connector_action_requests",
+  "credit_debit_allocations",
   "credit_ledger_entries",
   "device_enrollment_requests",
   "document_authority_reclassifications",
@@ -1480,6 +1483,7 @@ export const RUNTIME_READ_INSERT_TABLES = [
   "browser_revision_components",
   "browser_revisions",
   "company_profile_revisions",
+  "credit_debit_allocations",
   "editable_artifact_blob_refs",
   "editable_artifact_idempotency_receipts",
   "editable_artifact_live_outbox",
@@ -1742,7 +1746,6 @@ export type RuntimeDatabasePostureOptions = {
   targetSchemaForbiddenRoutines?: readonly string[];
   /** Frozen binary contract; current callers require both additive Insights capabilities. */
   modelFactCapabilityRoutines?: readonly string[];
-  organizationTenancyCanonicalActivationEnabled?: boolean;
 };
 
 export type RuntimeDatabaseIdentity = {
@@ -1828,7 +1831,6 @@ export type RuntimeDatabasePosture = {
   privateTables: RuntimePrivateTablePosture[];
   targetRoutines: RuntimeTargetRoutinePosture[];
   privateRoutines: RuntimeRoutinePosture[];
-  sessionTenancyProductActivationPresent: boolean;
   sessionVariableSetAttachmentsCutoverPresent: boolean;
   claudeSubscriptionPoolActivationPresent: boolean;
 };
@@ -1954,14 +1956,6 @@ export async function inspectRuntimeDatabasePosture(
         bypassRls: identity.rolbypassrls,
       };
 
-      // The forward-only activation receipt outlives topology. Embedded/scoped
-      // deployments must enforce the same environment interlock as standalone
-      // FORCE-RLS deployments, so inspect the value-free predicate before the
-      // scoped catalog fast-path.
-      const activationRows = resultRows<{ activated: boolean }>(
-        await tx.execute(sql`select session_tenancy_any_product_activation() as activated`),
-      );
-      const sessionTenancyProductActivationPresent = activationRows[0]?.activated === true;
       const variableSetCutoverRows = resultRows<{ present: boolean }>(
         await tx.execute(sql`
           select to_regprocedure(
@@ -1992,7 +1986,6 @@ export async function inspectRuntimeDatabasePosture(
           privateTables: [],
           targetRoutines: [],
           privateRoutines: [],
-          sessionTenancyProductActivationPresent,
           sessionVariableSetAttachmentsCutoverPresent,
           claudeSubscriptionPoolActivationPresent,
         };
@@ -2197,6 +2190,7 @@ export async function inspectRuntimeDatabasePosture(
               'modal_native_origin_read_capabilities',
               ${AUTOMATIC_SESSION_TITLE_FANOUT_OUTBOX_TABLE},
               ${VERIFIED_SIGNUP_TRIAL_SWITCH_TABLE},
+              'credit_promotion_policy_revisions',
               ${MANAGED_AUTH_NEW_SIGNUPS_SWITCH_TABLE}
             )
         `),
@@ -2306,7 +2300,6 @@ export async function inspectRuntimeDatabasePosture(
         privateTables,
         targetRoutines,
         privateRoutines,
-        sessionTenancyProductActivationPresent,
         sessionVariableSetAttachmentsCutoverPresent,
         claudeSubscriptionPoolActivationPresent,
       };
@@ -2341,15 +2334,6 @@ export function evaluateRuntimeDatabasePosture(
 
   if (!posture.sessionVariableSetAttachmentsCutoverPresent) {
     violations.push("database is missing the 0352 session Variable Set attachment runtime receipt");
-  }
-
-  if (
-    posture.sessionTenancyProductActivationPresent &&
-    options.organizationTenancyCanonicalActivationEnabled !== true
-  ) {
-    violations.push(
-      "session-tenancy product activation is durable but OPENGENI_ORGANIZATION_TENANCY_CANONICAL_ACTIVATION_ENABLED is not true",
-    );
   }
 
   if (!identity.currentUser || !identity.sessionUser) {
@@ -3778,6 +3762,23 @@ export function evaluateRuntimeDatabasePosture(
 
   // The trial-credit kill switch is operator state. Runtime roles may read it
   // for the gauge (SELECT is optional) but must never append or rewrite it.
+  const creditPolicyTable = posture.privateTables.find(
+    (table) => table.name === "credit_promotion_policy_revisions",
+  );
+  if (!creditPolicyTable) {
+    violations.push("credit promotion policy table is missing");
+  } else if (!creditPolicyTable.select) {
+    violations.push("runtime role cannot read the credit promotion policy");
+  }
+  if (
+    creditPolicyTable &&
+    (creditPolicyTable.owner === expectedRole ||
+      creditPolicyTable.insert ||
+      creditPolicyTable.update ||
+      creditPolicyTable.delete)
+  ) {
+    violations.push("runtime role has forbidden write authority on the credit promotion policy");
+  }
   const trialSwitchTable = posture.privateTables.find(
     (table) => table.name === VERIFIED_SIGNUP_TRIAL_SWITCH_TABLE,
   );

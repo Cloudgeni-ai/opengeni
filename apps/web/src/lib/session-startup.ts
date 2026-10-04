@@ -8,7 +8,7 @@ import {
 } from "react";
 import type { Session } from "@opengeni/sdk";
 
-export const SESSION_STARTUP_GRACE_MS = 30_000;
+export const SESSION_STARTUP_GRACE_MS = 60_000;
 
 export type SessionStartupSource = Pick<
   Session,
@@ -43,7 +43,9 @@ export function sessionStartupPhase(
  * Polling updatedAt must not continually restart the clock. On a fresh mount,
  * the durable timestamp can shorten (never lengthen) the local grace period.
  */
-function useStartupClock(session: SessionStartupSource | null): SessionStartup {
+type StartupState = { phase: SessionStartup; startedAt: string };
+
+function useStartupClock(session: SessionStartupSource | null): StartupState {
   // The provider remains mounted while the route/detail read is unresolved.
   const eligible = session !== null && sessionStartupPhase(session, 0) !== null;
   const key = `${session?.workspaceId}:${session?.id}:${eligible}`;
@@ -65,10 +67,13 @@ function useStartupClock(session: SessionStartupSource | null): SessionStartup {
     const timer = setTimeout(() => setClock((value) => ({ ...value, now: Date.now() })), remaining);
     return () => clearTimeout(timer);
   }, [eligible, key, current.since, current.now]);
-  return session ? sessionStartupPhase(session, current.now - current.since) : null;
+  return {
+    phase: session ? sessionStartupPhase(session, current.now - current.since) : null,
+    startedAt: new Date(current.since).toISOString(),
+  };
 }
 
-const StartupContext = createContext<{ key: string; phase: SessionStartup } | null>(null);
+const StartupContext = createContext<{ key: string; startup: StartupState } | null>(null);
 
 /** One clock inside the authorized shell; actor/workspace unmount clears it. */
 export function SessionStartupProvider({
@@ -78,22 +83,27 @@ export function SessionStartupProvider({
   session: SessionStartupSource | null;
   children: ReactNode;
 }) {
-  const phase = useStartupClock(session);
+  const startup = useStartupClock(session);
   return createElement(
     StartupContext.Provider,
-    { value: { key: `${session?.workspaceId}:${session?.id}`, phase } },
+    { value: { key: `${session?.workspaceId}:${session?.id}`, startup } },
     children,
   );
 }
 
 export function useSessionStartup(session: SessionStartupSource): SessionStartup {
+  return useSessionStartupState(session)?.phase ?? null;
+}
+
+export function useSessionStartupState(session: SessionStartupSource): StartupState | null {
   const shared = useContext(StartupContext);
   // Standalone components/previews may have no shell. Never run a second clock
   // for real header/wait consumers, including their conditional first mount.
   const local = useStartupClock(shared ? null : session);
+  if (sessionStartupPhase(session, 0) === null) return null;
   return shared
-    ? shared.key === `${session.workspaceId}:${session.id}`
-      ? shared.phase
+    ? shared.key === `${session.workspaceId}:${session.id}` && shared.startup.phase !== null
+      ? shared.startup
       : null
     : local;
 }

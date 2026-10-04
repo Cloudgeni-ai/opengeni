@@ -5,6 +5,7 @@ import type {
   MediaGenerationResult,
   ResourceRef,
   SessionStatus,
+  Session,
   TimelineAnnotation,
   TimelineAnnotationSource,
   ToolAuthNeededPayload,
@@ -223,6 +224,10 @@ export type StartupPhaseItem = {
   id: string;
   turnId: string | null;
   phase: StartupPhase;
+  /** Live presentation only: accepted work waiting for its first worker claim. */
+  dispatchWait?: Session["dispatchWait"];
+  /** Renderer-only elapsed anchor when acceptance preceded recorded startup spans. */
+  loadingStartedAt?: string | undefined;
   status: "running" | "complete" | "failed" | "cancelled";
   startedAt: string;
   completedAt: string | null;

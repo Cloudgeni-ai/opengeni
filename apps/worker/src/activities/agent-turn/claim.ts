@@ -60,6 +60,7 @@ import { createTurnCredentialLeases } from "./credential-leases";
 import { createTurnMediaArtifacts } from "./media-artifacts";
 import { readTurnExecutionPolicyV1 } from "@opengeni/contracts";
 import { turnCredentialRestriction } from "./credential-restriction";
+import { readProviderRecoveryObservation } from "./provider-recovery-metrics";
 
 import {
   credentialSubjectIdForTurnInitiator,
@@ -237,6 +238,7 @@ export async function claimTurnAttempt(deps: ClaimTurnDeps): Promise<ClaimTurnOu
   attempt.dispatchId = dispatchId;
   attempt.executionGeneration = turn.executionGeneration;
   attempt.providerRecoveryCount = providerRecoveryCountFromMetadata(turn.metadata);
+  attempt.providerRecoveryObservation = readProviderRecoveryObservation(turn.metadata ?? {});
   const authRecovery = turn.metadata?.claudeAuthRecovery;
   attempt.claudeAuthRecovery =
     authRecovery &&
@@ -391,6 +393,11 @@ export async function claimTurnAttempt(deps: ClaimTurnDeps): Promise<ClaimTurnOu
       latencyMode: turn.latencyMode,
     },
   );
+  // The durable same-turn recovery lane owns provider retries. Hidden SDK
+  // retries multiply that budget and keep the UI looking active during backoff.
+  // Apply before configuring/resolving clients so main, compaction and title
+  // requests all share this policy; standalone runtime consumers keep theirs.
+  capabilitySettings = { ...capabilitySettings, openaiMaxRetries: 0 };
   runtime.configure(capabilitySettings);
   const verifiedExecutionPolicy = assertTurnExecutionPolicyMatchesConfigV1(
     capabilitySettings,
@@ -402,6 +409,10 @@ export async function claimTurnAttempt(deps: ClaimTurnDeps): Promise<ClaimTurnOu
     },
   );
   const turnExecutionPolicy = verifiedExecutionPolicy.policy;
+  attempt.modelMetricRoute = {
+    provider: turnExecutionPolicy.providerId,
+    model: turnExecutionPolicy.productModelId,
+  };
   assertSessionAllowsProductModel(session, turnExecutionPolicy.productModelId);
   const billingIdentity = turnExecutionPolicyBillingIdentity(turnExecutionPolicy);
   billingState.isExternallyBilledTurn = billingIdentity.externallyBilled;
@@ -462,6 +473,7 @@ export async function claimTurnAttempt(deps: ClaimTurnDeps): Promise<ClaimTurnOu
         billingState.chargesOpenGeniCredits,
         billingState.countsTowardTokenCap,
         turn.initiatingHumanSubjectId,
+        turnExecutionPolicy.productModelId,
       ),
       cancellationSignal,
       undefined,

@@ -1090,6 +1090,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
               ),
             );
           const compactionPrep = await prepareCompaction({
+            entitlements,
             input,
             settings: capabilitySettings,
             db,

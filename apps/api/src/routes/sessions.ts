@@ -1,4 +1,5 @@
 import { getRetainedProviderCommand } from "@opengeni/db/retained-provider-commands";
+import { assertGoalResumeAllowed, GoalResumeBlockedError } from "@opengeni/core";
 import { UnsupportedLatencyModeError } from "@opengeni/config";
 import { searchSessionMessagesForSubject, SessionMessageSearchCursorError } from "@opengeni/db";
 import { listSessionEventSlices } from "@opengeni/db/session-event-slices";
@@ -2748,6 +2749,15 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
       sessionId,
       {
         status: "active",
+        beforeResume: (tx, session, causalTurn) =>
+          assertGoalResumeAllowed({ ...deps, db: tx }, session, causalTurn).catch(
+            (error: unknown) => {
+              if (error instanceof GoalResumeBlockedError) {
+                throw new HTTPException(422, { message: error.message, cause: error });
+              }
+              throw error;
+            },
+          ),
         event: { type: "goal.resumed", actor: "api" },
       },
     );
@@ -5152,7 +5162,7 @@ export function sessionTenancyHttpError(error: unknown): Error {
   if (error instanceof SessionTenancyNotActivatedError) {
     return new ApiHttpError(409, {
       code: "conflict",
-      message: "Session tenancy is not activated for this organization.",
+      message: "Only-me chats are not enabled for this organization.",
       retryable: false,
       details: { reason: "not_activated" },
     });

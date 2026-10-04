@@ -563,6 +563,7 @@ function SessionRouteHeader({
       lastStartedLatencyMode={lastStartedLatencyMode}
       billingClass={selectedRow?.billingClass}
       modelLabel={selectedRow?.label}
+      modelLogoUrl={selectedRow?.catalog.logoUrl}
       policyLoading={policyLoading}
       accessSlot={
         session.tenancy ? (

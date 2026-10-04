@@ -41,7 +41,11 @@ Composition order (each part separated by a blank line):
      Formatting rules, Rules for getting work done, Autonomy and persistence,
      Destructive Actions.
    - `runtime_mechanics` (always): new messages while working (steer/queue),
-     waiting and `wait_for_input`, compaction, background commands.
+     waiting and `wait_for_input`, compaction, and background commands. The
+     background-command paragraphs (and the `command_wait` mentions in the
+     in-flight examples and `subagents`) appear only when a managed sandbox or
+     Connected Machine is attached, because `command_read`/`command_wait` are
+     withheld from a turn without compute.
    - Conditional modules, in this order: `renderer_markdown`, `sandbox`,
      `connected_machine`, `repositories`, `workspace_environment`, `rig`,
      `artifacts`, `media`, `goals`, `subagents`, `knowledge`, `skills`, `admin`,

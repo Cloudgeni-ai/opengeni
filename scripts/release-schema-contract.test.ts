@@ -2387,7 +2387,12 @@ describe("release schema contract", () => {
       "0608_receiver_execution_context.sql",
       "0609_captured_command_output_priority.sql",
       "0610_artifact_catalog_pins.sql",
-      "0614_modal_native_live_origin.sql",
+      "0611_universal_session_tenancy_activation.sql",
+      "0612_scheduled_model_unavailable_refusal.sql",
+      "0613_model_scoped_promotional_credits.sql",
+      "0614_quiescence_command_containment.sql",
+      "0615_credit_promotion_policy_validation.sql",
+      "0626_modal_native_live_origin.sql",
     ].filter((path) =>
       unfilteredSourceContract.migrations.some((migration) => migration.path === path),
     );

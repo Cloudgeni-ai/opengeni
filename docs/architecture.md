@@ -311,6 +311,8 @@ Organization/workspace membership, API keys, delegated grants, private-session
 ownership and personal-resource grants remain distinct. Organization keys with
 `workspace:admin` may change private-session product settings; DB fences recheck
 live keys, including replay. This grants no private-content access.
+Only-me chats are on by default for every organization (migration 0611); no
+per-organization activation receipt or deployment switch gates them.
 Sharing advances viewer-access epoch while preserving accepted execution and
 connection selections. Privatization/revocation advance the execution-epoch floor;
 privatization requires quiescence and clears staged personal selections.
@@ -508,7 +510,7 @@ registration. See [run lifecycle](run-lifecycle.md).
 Global Modal inventory uses an owner-only SELECT capability under FORCE RLS (0497).
 
 `packages/db/src/modal-native-live-origin.ts` is an inert, trusted-server-only
-LIVE-origin projection (0614), not a host authenticator or custody grant. Its
+LIVE-origin projection (0626), not a host authenticator or custody grant. Its
 transaction joins the exact accepted attempt, immutable initiating human,
 current membership/Personal pointer, control, route and execution-authority
 floor before any lease acquisition. Function-lifetime owner-only read
@@ -1065,6 +1067,19 @@ Canonical: [`knowledge.md`](knowledge.md),
 [`artifact-collaboration.md`](artifact-collaboration.md).
 
 ### 5.7 Usage, limits, and billing
+
+Model-scoped promotions retain offer identity and initial eligibility on each grant.
+Audited `credit_promotion_policy_revisions` can update coverage for existing and
+new scoped grants without a restart. Each paid call retains its admitted revision
+for settlement; the next call reads current policy. `packages/db/src/credit-balances.ts` owns the general/promotional split and
+eligible balance calculation. Model settlement serializes by account, consumes
+eligible grants before general credits, and inserts `credit_debit_allocations`
+with the idempotent debit in one transaction. A settled zero-cost receipt cannot
+be charged later on retry. Non-model resources spend general credits only.
+Legacy grants remain unrestricted. Stripe checkout metadata records scoped status and initial eligibility
+before the customer confirms; webhook and status recovery share fulfillment.
+Deployment policy, activation order and customer flow: [scoped promotional
+credits](scoped-promotional-credits.md).
 
 Blocked account switches: [Codex rotation](codex-subscription-rotation.md).
 

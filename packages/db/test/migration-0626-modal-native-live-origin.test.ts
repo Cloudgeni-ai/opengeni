@@ -2,7 +2,7 @@ import { describe, expect, test } from "bun:test";
 import { readFileSync } from "node:fs";
 
 const migration = readFileSync(
-  new URL("../drizzle/0614_modal_native_live_origin.sql", import.meta.url),
+  new URL("../drizzle/0626_modal_native_live_origin.sql", import.meta.url),
   "utf8",
 );
 const moduleSource = readFileSync(
@@ -10,7 +10,7 @@ const moduleSource = readFileSync(
   "utf8",
 );
 
-describe("0614 inert original-origin capability contract", () => {
+describe("0626 inert original-origin capability contract", () => {
   test("rolling exact SELECT capability, not a lifecycle/subject GUC or blanket owner window", () => {
     expect(migration.startsWith("-- deployment-mode: rolling\n")).toBe(true);
     expect(migration).toContain("FORCE ROW LEVEL SECURITY");
