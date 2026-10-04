@@ -26,6 +26,7 @@ import {
   getOrganizationUsageSummary,
   getOrganizationUsageWorkspacePage,
   withSessionRlsActorContext,
+  withRlsContext,
   getManagedAccount,
   markStripeWebhookProcessed,
   recordStripeWebhookEvent,
@@ -838,18 +839,28 @@ async function releaseDisputedCredits(
     return;
   }
   const holdIdempotencyKey = `stripe:dispute_hold:${dispute.id}`;
-  if (!(await hasCreditLedgerEntry(deps.db, accountId, holdIdempotencyKey))) {
-    return;
-  }
   const debitMicros = await creditAdjustmentMicros(deps, metadata, dispute.amount);
-  await applyCreditLedgerEntry(deps.db, {
-    accountId,
-    type: "credit_dispute_release",
-    amountMicros: debitMicros,
-    sourceType: "stripe_dispute",
-    sourceId: dispute.id,
-    idempotencyKey: `stripe:dispute_release:${dispute.id}`,
-    metadata: { stripeDisputeId: dispute.id, stripeEventType: event.type },
+  await withRlsContext(deps.db, { accountId }, async (tx) => {
+    // Stripe can deliver the resolution before the hold. Materialize both
+    // receipts atomically so a late hold cannot withhold restored credits.
+    await applyCreditLedgerEntry(tx, {
+      accountId,
+      type: "credit_dispute_hold",
+      amountMicros: -debitMicros,
+      sourceType: "stripe_dispute",
+      sourceId: dispute.id,
+      idempotencyKey: holdIdempotencyKey,
+      metadata: { stripeDisputeId: dispute.id, stripeEventType: event.type },
+    });
+    await applyCreditLedgerEntry(tx, {
+      accountId,
+      type: "credit_dispute_release",
+      amountMicros: debitMicros,
+      sourceType: "stripe_dispute",
+      sourceId: dispute.id,
+      idempotencyKey: `stripe:dispute_release:${dispute.id}`,
+      metadata: { stripeDisputeId: dispute.id, stripeEventType: event.type },
+    });
   });
 }
 
