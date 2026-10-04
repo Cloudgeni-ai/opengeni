@@ -34,6 +34,7 @@ import {
 } from "@/components/artifacts/artifact-page-chrome";
 import { artifactKinds, defaultArtifactFilters, type ArtifactKind } from "@/lib/artifact-catalog";
 import { invalidateArtifactCatalog, useArtifactCatalog } from "@/lib/use-artifact-catalog";
+import { useArtifactCatalogMutationInvalidation } from "@/lib/use-artifact-catalog-mutation-invalidation";
 import { Button } from "@/components/ui/button";
 import { ConfirmDialog } from "@/components/ui/confirm-dialog";
 import { ContentPage } from "@/components/ui/content-layout";
@@ -135,6 +136,11 @@ function ArtifactListRoute({ workspaceId }: { workspaceId: string }) {
     filters,
     context.accessKeyVersion,
   );
+  const invalidateAfterMutation = useArtifactCatalogMutationInvalidation(
+    context.client,
+    workspaceId,
+    invalidateArtifactCatalog,
+  );
   const canCreate = hasWorkspacePermission(context.accessContext, workspaceId, "sessions:create");
   const canPin = hasWorkspacePermission(context.accessContext, workspaceId, "artifacts:publish");
   // The catalog quietly omits Sites and editable artifacts without `artifacts:read`.
@@ -207,7 +213,7 @@ function ArtifactListRoute({ workspaceId }: { workspaceId: string }) {
               canPin
                 ? async (item, pinned) => {
                     await context.client.updateArtifactPin(workspaceId, item.kind, item.id, pinned);
-                    invalidateArtifactCatalog(context.client, workspaceId);
+                    invalidateAfterMutation();
                     await catalog.refresh();
                   }
                 : undefined

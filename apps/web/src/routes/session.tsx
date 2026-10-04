@@ -48,6 +48,7 @@ import {
 import type { SessionSearchRoute } from "@/lib/session-search-route";
 import { OPEN_CONVERSATION_FIND_EVENT } from "@/lib/conversation-find-event";
 import { expireArtifactCatalog } from "@/lib/artifact-catalog-cache";
+import { useArtifactCatalogMutationInvalidation } from "@/lib/use-artifact-catalog-mutation-invalidation";
 import {
   creditExhaustedFromEvents,
   conversationTimeline,
@@ -1389,6 +1390,11 @@ function SessionDock(props: {
     sessionId: props.sessionId,
     refreshSequence: artifactRefreshSequence,
   });
+  const expireAfterArtifactMutation = useArtifactCatalogMutationInvalidation(
+    context.client,
+    props.workspaceId,
+    expireArtifactCatalog,
+  );
   const [artifactRequest, setArtifactRequest] = useState<{
     sessionId: string;
     artifactId: string;
@@ -1467,7 +1473,7 @@ function SessionDock(props: {
                       pinned,
                     );
                     artifactState.applyPin(item.kind, item.id, pinned);
-                    expireArtifactCatalog(context.client, props.workspaceId);
+                    expireAfterArtifactMutation();
                     artifactState.retry();
                   }
                 : undefined

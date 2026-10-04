@@ -6,6 +6,7 @@ import type { ArtifactCatalogItem, ArtifactCatalogListResponse } from "@opengeni
 import { defaultArtifactFilters } from "./artifact-catalog";
 import { expireArtifactCatalog } from "./artifact-catalog-cache";
 import { invalidateArtifactCatalog, useArtifactCatalog } from "./use-artifact-catalog";
+import { useArtifactCatalogMutationInvalidation } from "./use-artifact-catalog-mutation-invalidation";
 
 type Request = {
   workspaceId: string;
@@ -47,22 +48,30 @@ const item = (title: string): ArtifactCatalogItem => ({
   updatedAt: "2026-09-01T00:00:00Z",
 });
 let catalog: ReturnType<typeof useArtifactCatalog>;
+let invalidateAfterMutation: () => void;
 function Probe({
   workspaceId,
   q = "",
   kind = "all",
   catalogClient = client,
+  invalidate = invalidateArtifactCatalog,
 }: {
   workspaceId: string;
   q?: string;
   kind?: "all" | "site";
   catalogClient?: typeof client;
+  invalidate?: typeof invalidateArtifactCatalog;
 }) {
   catalog = useArtifactCatalog(
     catalogClient,
     workspaceId,
     { ...defaultArtifactFilters, q, kind },
     accessKeyVersion,
+  );
+  invalidateAfterMutation = useArtifactCatalogMutationInvalidation(
+    catalogClient,
+    workspaceId,
+    invalidate,
   );
   return <div>{catalog.items.map((entry) => entry.title).join(",")}</div>;
 }
@@ -113,12 +122,13 @@ for (const change of ["filters", "authority", "client"] as const) {
       await act(async () => root.render(<Probe workspaceId={workspaceId} />));
       await act(async () => requests[0]!.resolve({ items: [item("Before")], nextCursor: null }));
       const beforeSave = catalog;
+      const invalidateSavedMutation = invalidateAfterMutation;
       let resolveSave!: () => void;
       const saved = new Promise<void>((resolve) => {
         resolveSave = resolve;
       });
       const finished = saved.then(async () => {
-        invalidateArtifactCatalog(client, workspaceId);
+        invalidateSavedMutation();
         await beforeSave.refresh();
       });
       const nextClient = change === "client" ? { ...client } : client;
@@ -183,6 +193,232 @@ test("obsolete retry and pagination callbacks cannot invalidate the current view
     container.remove();
   }
 });
+
+for (const [mode, invalidate] of [
+  ["workspace invalidation", invalidateArtifactCatalog],
+  ["session expiration", expireArtifactCatalog],
+] as const) {
+  test(`a delayed pin save updates every latest-client filtered cache via ${mode}`, async () => {
+    requests = [];
+    accessKeyVersion = 0;
+    const workspaceId = `delayed-pin-client-filters-${mode}`;
+    const nextClient = { ...client };
+    const container = document.createElement("div");
+    document.body.append(container);
+    const root = createRoot(container);
+    try {
+      await act(async () =>
+        root.render(<Probe workspaceId={workspaceId} invalidate={invalidate} />),
+      );
+      await act(async () => requests[0]!.resolve({ items: [item("Before")], nextCursor: null }));
+      const beforeSave = catalog;
+      const invalidateSavedMutation = invalidateAfterMutation;
+      let resolveSave!: () => void;
+      const saved = new Promise<void>((resolve) => {
+        resolveSave = resolve;
+      });
+      const finished = saved.then(async () => {
+        invalidateSavedMutation();
+        await beforeSave.refresh();
+      });
+      await act(async () =>
+        root.render(
+          <Probe
+            workspaceId={workspaceId}
+            kind="site"
+            catalogClient={nextClient}
+            invalidate={invalidate}
+          />,
+        ),
+      );
+      await act(async () =>
+        requests[1]!.resolve({ items: [{ ...item("Sites"), pinned: false }], nextCursor: null }),
+      );
+      await act(async () =>
+        root.render(
+          <Probe workspaceId={workspaceId} catalogClient={nextClient} invalidate={invalidate} />,
+        ),
+      );
+      await act(async () =>
+        requests[2]!.resolve({ items: [{ ...item("All"), pinned: false }], nextCursor: null }),
+      );
+      await act(async () => resolveSave());
+      expect(requests).toHaveLength(4);
+      await act(async () => {
+        requests[3]!.resolve({ items: [{ ...item("All"), pinned: true }], nextCursor: null });
+        await finished;
+      });
+      expect(catalog.items[0]?.pinned).toBe(true);
+      await act(async () =>
+        root.render(
+          <Probe
+            workspaceId={workspaceId}
+            kind="site"
+            catalogClient={nextClient}
+            invalidate={invalidate}
+          />,
+        ),
+      );
+      expect(catalog.loading).toBe(true);
+      expect(requests).toHaveLength(5);
+      await act(async () =>
+        requests[4]!.resolve({ items: [{ ...item("Sites"), pinned: true }], nextCursor: null }),
+      );
+      expect(catalog.items[0]?.pinned).toBe(true);
+      expect(catalog.loading).toBe(false);
+    } finally {
+      await act(async () => root.unmount());
+      container.remove();
+    }
+  });
+
+  test(`a delayed save preserves unrelated workspace caches via ${mode}`, async () => {
+    requests = [];
+    accessKeyVersion = 0;
+    const workspaceId = `mutation-scope-${mode}`;
+    const otherWorkspaceId = `${workspaceId}-other`;
+    const nextClient = { ...client };
+    const container = document.createElement("div");
+    document.body.append(container);
+    const root = createRoot(container);
+    try {
+      await act(async () =>
+        root.render(<Probe workspaceId={workspaceId} invalidate={invalidate} />),
+      );
+      await act(async () =>
+        requests[0]!.resolve({ items: [item("Saved workspace")], nextCursor: null }),
+      );
+      const invalidateSavedMutation = invalidateAfterMutation;
+      await act(async () =>
+        root.render(<Probe workspaceId={otherWorkspaceId} invalidate={invalidate} />),
+      );
+      await act(async () =>
+        requests[1]!.resolve({ items: [item("Other original client")], nextCursor: null }),
+      );
+      await act(async () =>
+        root.render(
+          <Probe
+            workspaceId={otherWorkspaceId}
+            catalogClient={nextClient}
+            invalidate={invalidate}
+          />,
+        ),
+      );
+      await act(async () =>
+        requests[2]!.resolve({ items: [item("Other latest client")], nextCursor: null }),
+      );
+      await act(async () =>
+        root.render(
+          <Probe
+            workspaceId={otherWorkspaceId}
+            kind="site"
+            catalogClient={nextClient}
+            invalidate={invalidate}
+          />,
+        ),
+      );
+      await act(async () =>
+        requests[3]!.resolve({ items: [item("Other latest Sites")], nextCursor: null }),
+      );
+
+      invalidateSavedMutation();
+      await act(async () =>
+        root.render(
+          <Probe
+            workspaceId={otherWorkspaceId}
+            catalogClient={nextClient}
+            invalidate={invalidate}
+          />,
+        ),
+      );
+      expect(requests).toHaveLength(4);
+      expect(catalog.loading).toBe(false);
+      expect(container.textContent).toBe("Other latest client");
+      await act(async () =>
+        root.render(<Probe workspaceId={otherWorkspaceId} invalidate={invalidate} />),
+      );
+      expect(requests).toHaveLength(4);
+      expect(catalog.loading).toBe(false);
+      expect(container.textContent).toBe("Other original client");
+      await act(async () =>
+        root.render(<Probe workspaceId={workspaceId} invalidate={invalidate} />),
+      );
+      expect(requests).toHaveLength(5);
+      expect(catalog.loading).toBe(true);
+      await act(async () =>
+        requests[4]!.resolve({
+          items: [{ ...item("Saved workspace"), pinned: true }],
+          nextCursor: null,
+        }),
+      );
+      expect(catalog.items[0]?.pinned).toBe(true);
+    } finally {
+      await act(async () => root.unmount());
+      container.remove();
+    }
+  });
+
+  test(`an unmounted mutation callback ${mode} does not refresh or invalidate another view`, async () => {
+    requests = [];
+    accessKeyVersion = 0;
+    const workspaceId = `mutation-unmounted-${mode}`;
+    const nextClient = { ...client };
+    const container = document.createElement("div");
+    document.body.append(container);
+    let root = createRoot(container);
+    try {
+      await act(async () =>
+        root.render(<Probe workspaceId={workspaceId} invalidate={invalidate} />),
+      );
+      await act(async () => requests[0]!.resolve({ items: [item("Original")], nextCursor: null }));
+      const invalidateSavedMutation = invalidateAfterMutation;
+      const beforeSave = catalog;
+      await act(async () =>
+        root.render(
+          <Probe workspaceId={workspaceId} catalogClient={nextClient} invalidate={invalidate} />,
+        ),
+      );
+      await act(async () => requests[1]!.resolve({ items: [item("Latest")], nextCursor: null }));
+      await act(async () => root.unmount());
+      root = createRoot(container);
+      await act(async () =>
+        root.render(
+          <Probe workspaceId={workspaceId} catalogClient={nextClient} invalidate={invalidate} />,
+        ),
+      );
+
+      await act(async () => {
+        invalidateSavedMutation();
+        await beforeSave.refresh();
+      });
+      expect(requests).toHaveLength(2);
+      expect(container.textContent).toBe("Latest");
+      expect(catalog.loading).toBe(false);
+      await act(async () =>
+        root.render(
+          <Probe
+            workspaceId={workspaceId}
+            kind="site"
+            catalogClient={nextClient}
+            invalidate={invalidate}
+          />,
+        ),
+      );
+      await act(async () => requests[2]!.resolve({ items: [item("Sites")], nextCursor: null }));
+      await act(async () =>
+        root.render(
+          <Probe workspaceId={workspaceId} catalogClient={nextClient} invalidate={invalidate} />,
+        ),
+      );
+      expect(requests).toHaveLength(3);
+      expect(catalog.loading).toBe(false);
+      expect(container.textContent).toBe("Latest");
+    } finally {
+      await act(async () => root.unmount());
+      container.remove();
+    }
+  });
+}
 
 test("old workspace, query, and authority responses never replace the current catalog", async () => {
   requests = [];
