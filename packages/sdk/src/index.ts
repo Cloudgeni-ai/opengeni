@@ -7,6 +7,7 @@ export type {
   ClaudeSubscriptionAccountsResponse,
 } from "@opengeni/contracts";
 export type {
+  ArtifactPinResponse,
   ArtifactCatalogKind,
   ArtifactCatalogItem,
   ArtifactCatalogListOptions,

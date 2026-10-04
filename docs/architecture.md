@@ -1494,6 +1494,9 @@ Workspace/session discovery shares `/artifact-catalog` across Sites, editable
 artifacts, generated images, and published files, preserving existing content
 authority. File provenance stays separate from bytes; `kind:id` identifies list
 entries. Browsing never executes Sites or wakes compute.
+Shared pins live in private discovery metadata, not content domains. The catalog
+and its bounded publication branch apply pin-first keysets globally; pin writes
+require publishing and target-domain read authority ([library](artifact-library.md)).
 
 Published-file links use `Markdown.artifactHref`; `retained-file-preview.tsx`
 previews media/PDF via authorized APIs; `sandbox:` opens the inspector.

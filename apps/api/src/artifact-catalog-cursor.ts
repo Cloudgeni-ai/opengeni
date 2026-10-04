@@ -13,6 +13,7 @@ const Cursor = z
         key: z.string().max(4096),
         kind: ArtifactCatalogKind,
         id: z.string().min(1).max(128),
+        pinned: z.boolean().optional(),
       })
       .strict(),
   })

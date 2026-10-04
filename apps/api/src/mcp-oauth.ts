@@ -79,7 +79,10 @@ export type McpOAuthRouteAccess = {
 };
 
 export function registerMcpOAuthRoutes(app: Hono, deps: ApiRouteDeps): void {
-  app.get("/.well-known/oauth-authorization-server", (c) => {
+  // RFC 8414 path-aware discovery: MCP clients (Claude among them) ask for the
+  // metadata at /.well-known/oauth-authorization-server/<resource path> first
+  // and give up on anything but JSON. Serve the same document at both.
+  const authorizationServerMetadata = (c: Context) => {
     requireMcpOAuthEnabled(deps);
     const issuer = mcpOAuthIssuer(deps);
     c.header("cache-control", "public, max-age=300");
@@ -97,7 +100,9 @@ export function registerMcpOAuthRoutes(app: Hono, deps: ApiRouteDeps): void {
         authorization_response_iss_parameter_supported: true,
       }),
     );
-  });
+  };
+  app.get("/.well-known/oauth-authorization-server", authorizationServerMetadata);
+  app.get("/.well-known/oauth-authorization-server/*", authorizationServerMetadata);
 
   app.get("/.well-known/oauth-protected-resource/*", (c) => {
     requireMcpOAuthEnabled(deps);
@@ -563,6 +568,7 @@ export function mcpOAuthConsentToolIdentities(catalog: ToolGatewayCatalog): Tool
 export function isMcpOAuthPublicProtocolPath(pathname: string): boolean {
   return (
     pathname === "/.well-known/oauth-authorization-server" ||
+    pathname.startsWith("/.well-known/oauth-authorization-server/") ||
     pathname.startsWith("/.well-known/oauth-protected-resource/") ||
     pathname === "/oauth/register" ||
     pathname === "/oauth/authorize" ||

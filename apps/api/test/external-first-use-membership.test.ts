@@ -31,6 +31,8 @@ import {
 } from "@opengeni/contracts";
 import { registerWorkspaceRoutes } from "../src/routes/workspaces";
 import { registerOrganizationMembershipRoutes } from "../src/routes/organization-memberships";
+import { registerArtifactCatalogRoutes } from "../src/routes/artifact-catalog";
+import { createApp } from "../src/app";
 
 // Keep equal to CONVERSATION_PERMISSIONS in packages/sdk/src/tenant-workspaces.ts.
 const CONVERSATION_PERMISSIONS = [
@@ -91,11 +93,12 @@ app.onError((error, c) => {
   throw error;
 });
 let routesRegistered = false;
+let productionApp: ReturnType<typeof createApp>;
 const delegationSecret = "first-use-membership-test-secret-at-least-32-bytes";
 
 async function organization(
   permissions: Permission[] = CAPABLE,
-  options: { scopeTo?: "self" | "other" } = {},
+  options: { scopeTo?: "self" | "other"; composition?: "routes" | "production" } = {},
 ) {
   if (!routesRegistered) {
     const deps = {
@@ -109,6 +112,8 @@ async function organization(
     } as unknown as ApiRouteDeps;
     registerWorkspaceRoutes(app, deps);
     registerOrganizationMembershipRoutes(app, deps);
+    registerArtifactCatalogRoutes(app, deps);
+    productionApp = createApp({ ...deps, workflowClient: {} as never, managedAuth: null });
     // A long-lived connection's re-check (e.g. an open SSE stream).
     app.get("/test/fresh/:workspaceId", async (c) =>
       c.json(await requireFreshAccessGrant(c, deps, c.req.param("workspaceId"), "workspace:read")),
@@ -140,10 +145,11 @@ async function organization(
         }
       : {}),
   });
+  const requestApp = options.composition === "production" ? productionApp : app;
   const service = new OpenGeniClient({
     baseUrl: "http://fixture",
     apiKey: token,
-    fetch: async (input, init) => await app.request(input, init),
+    fetch: async (input, init) => await requestApp.request(input, init),
   });
   const user = (externalId = crypto.randomUUID()) => ({
     externalId,
@@ -183,7 +189,7 @@ async function status(promise: Promise<unknown>): Promise<number> {
 }
 
 test("a capable key creates the missing membership once and the request succeeds", async () => {
-  const org = await organization();
+  const org = await organization(CAPABLE, { composition: "production" });
   const { externalId, client } = org.user();
   expect((await client.getWorkspace(org.workspace.id)).id).toBe(org.workspace.id);
   const subjectId = await subjectOf(org.accountId, externalId);
@@ -341,6 +347,52 @@ test("a request needing a permission outside the defaults creates nothing", asyn
     await memberships(org.workspace.id, await subjectOf(org.accountId, externalId)),
   ).toHaveLength(0);
 }, 60_000);
+
+test("denied first-use artifact pins never provision workspace membership", async () => {
+  const org = await organization([...CAPABLE, "artifacts:read", "artifacts:publish"]);
+  const { externalId, client } = org.user();
+  expect(
+    await status(client.updateArtifactPin(org.workspace.id, "site", crypto.randomUUID(), true)),
+  ).toBe(403);
+  expect(
+    await memberships(org.workspace.id, await subjectOf(org.accountId, externalId)),
+  ).toHaveLength(0);
+  expect(await lifecycleEvents(org.workspace.id)).toHaveLength(0);
+}, 60_000);
+
+for (const encoded of [false, true]) {
+  for (const pinned of [true, false]) {
+    test(`production denies first-use artifact ${pinned ? "pin" : "unpin"} without provisioning${encoded ? " (encoded route)" : ""}`, async () => {
+      const org = await organization([...CAPABLE, "artifacts:read", "artifacts:publish"], {
+        composition: "production",
+      });
+      const { externalId, client } = org.user();
+      const result = encoded
+        ? (
+            await client.fetchApi(
+              `/v1/workspaces/${org.workspace.id}/artif%61ct-catalog/site/${crypto.randomUUID()}/%70in`,
+              {
+                method: "PUT",
+                headers: { "content-type": "application/json" },
+                body: JSON.stringify({ pinned }),
+              },
+            )
+          ).status
+        : await status(
+            client.updateArtifactPin(org.workspace.id, "site", crypto.randomUUID(), pinned),
+          );
+      expect(result).toBe(403);
+      expect(
+        await memberships(org.workspace.id, await subjectOf(org.accountId, externalId)),
+      ).toHaveLength(0);
+      expect(await lifecycleEvents(org.workspace.id)).toHaveLength(0);
+      const [{ n }] = await shared.admin<{ n: number }[]>`
+      select count(*)::int as n from opengeni_private.artifact_catalog_pins
+      where workspace_id = ${org.workspace.id}::uuid`;
+      expect(n).toBe(0);
+    }, 60_000);
+  }
+}
 
 test("a selected-scope key admits only inside its scope", async () => {
   const outside = await organization(CAPABLE, { scopeTo: "other" });

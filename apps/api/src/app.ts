@@ -1418,7 +1418,13 @@ export function createAppComposition(deps: AppDependencies): {
       await next();
       return;
     }
-    const grant = await requireAccessGrant(c, routeDeps, workspaceId);
+    // Match Hono's decoded routing path before first-use membership and RLS.
+    const permission =
+      c.req.method === "PUT" &&
+      /^\/v1\/workspaces\/[^/]+\/artifact-catalog\/[^/]+\/[^/]+\/pin$/.test(c.req.path)
+        ? "artifacts:publish"
+        : undefined;
+    const grant = await requireAccessGrant(c, routeDeps, workspaceId, permission);
     await withAccessGrantSessionRlsContext(routeDeps, grant, next);
   });
 
@@ -2480,7 +2486,7 @@ const routeLabelPatterns: Array<{
   label: string | ((match: RegExpMatchArray) => string);
 }> = [
   {
-    pattern: /^\/\.well-known\/oauth-authorization-server$/,
+    pattern: /^\/\.well-known\/oauth-authorization-server(?:\/.*)?$/,
     label: "/.well-known/oauth-authorization-server",
   },
   {

@@ -5870,6 +5870,23 @@ export const sandboxFilePublications = opengeniPrivateSchema.table(
   }),
 );
 
+/** Shared discovery pins; no content or access authority. SQL owns target validation. */
+export const artifactCatalogPins = opengeniPrivateSchema.table(
+  "artifact_catalog_pins",
+  {
+    accountId: uuid("account_id").notNull(),
+    workspaceId: uuid("workspace_id")
+      .notNull()
+      .references(() => workspaces.id, { onDelete: "cascade" }),
+    kind: text("kind").notNull(),
+    artifactId: text("artifact_id").notNull(),
+    pinnedAt: timestamp("pinned_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (table) => ({
+    pk: primaryKey({ columns: [table.accountId, table.workspaceId, table.kind, table.artifactId] }),
+  }),
+);
+
 /** Source-session upload fence; never stores file bytes or expiring upload URLs. */
 export const slackFileUploadOperations = opengeniPrivateSchema.table(
   "slack_file_upload_operations",

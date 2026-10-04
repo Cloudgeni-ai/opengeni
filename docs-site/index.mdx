@@ -37,7 +37,14 @@ Opengeni gives your product an agent that does real work: it calls your APIs, as
 
 ## The fastest way to embed
 
-Most teams integrate Opengeni with a coding agent such as Claude Code, Codex, or Cursor. Give it the `opengeni-client` skill and one prompt, and it wires up your backend, your users, and the UI. See [Embed with your coding agent](/embed-with-a-coding-agent).
+Most teams integrate Opengeni with a coding agent such as Claude Code, Codex, or Cursor. Install the Opengeni plugin, give your agent one prompt, and it wires up your backend, your users, and the UI.
+
+```bash
+claude plugin marketplace add Cloudgeni-ai/opengeni && claude plugin install opengeni@opengeni --scope user
+# or: codex plugin marketplace add Cloudgeni-ai/opengeni && codex plugin add opengeni@opengeni
+```
+
+See [Embed with your coding agent](/embed-with-a-coding-agent) and the [plugin guide](/guides/developer-plugin).
 
 ## What you get
 
