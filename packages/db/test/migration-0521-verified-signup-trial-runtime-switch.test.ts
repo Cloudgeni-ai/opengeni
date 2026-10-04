@@ -330,7 +330,7 @@ describe("migration 0521 verified signup trial runtime switch", () => {
         )
         and tgfoid = 'public.reject_verified_signup_trial_switch_revision_mutation()'::regprocedure
       order by tgname`;
-    expect(restoredPolicyGuards).toEqual([
+    expect([...restoredPolicyGuards]).toEqual([
       { name: "credit_promotion_policy_revisions_immutable", enabled: "O" },
       { name: "credit_promotion_policy_revisions_no_truncate", enabled: "O" },
     ]);
