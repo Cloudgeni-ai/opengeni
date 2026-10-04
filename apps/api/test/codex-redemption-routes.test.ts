@@ -1,6 +1,9 @@
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import { signDelegatedAccessToken, type AccessContext } from "@opengeni/contracts";
-import { resolveCodexAppsCredentialIdForRun } from "@opengeni/core";
+import {
+  resolveCodexAppsCredentialIdForRun,
+  stampDelegatedHumanAuthorization,
+} from "@opengeni/core";
 import {
   createDb,
   encryptEnvironmentValue,
@@ -1412,5 +1415,93 @@ describe("Codex quota managed-cookie-only reset redemption API", () => {
     const bodies = provider.consumeBodies.filter((body) => body.credit_id === "credit-ambiguous");
     expect(bodies).toHaveLength(2);
     expect(new Set(bodies.map((body) => body.redeem_request_id)).size).toBe(1);
+  }, 60_000);
+
+  test("an agent the owner signed in (organization MCP) can prepare and redeem as them", async () => {
+    if (!available) return;
+    const api = app();
+    const access = await api.request("/v1/access/me", { headers: { cookie: OWNER_COOKIE } });
+    const context = (await access.json()) as AccessContext;
+    const workspaceId = context.defaultWorkspaceId!;
+    const accountId = context.defaultAccountId!;
+    const key = Buffer.from(settings.environmentsEncryptionKey!, "base64");
+    const connected = await upsertCodexSubscriptionCredential(client.db, {
+      accountId,
+      workspaceId,
+      credentialEncrypted: encryptEnvironmentValue(
+        key,
+        JSON.stringify({ access_token: "token", refresh_token: "refresh", id_token: "id" }),
+      ),
+      chatgptAccountId: `agent-${crypto.randomUUID()}`,
+      scopes: null,
+      planType: "pro",
+      isFedramp: false,
+      expiresAt: new Date(Date.now() + 60 * 60_000),
+      lastRefreshAt: new Date(),
+      connectedBySubjectId: `user:${OWNER_USER_ID}`,
+    });
+    // Exactly what organization-mcp dispatches for a signed-in person: no
+    // cookie, no bearer, no browser headers, and a stamped person proof.
+    const agentRequest = (
+      action: "prepare" | "redeem",
+      body: unknown,
+      permissions: string[] = ["connections:write", "workspace:read"],
+    ) => {
+      const payload = JSON.stringify(body);
+      const request = new Request(
+        `${PUBLIC_ORIGIN}/v1/workspaces/${workspaceId}/codex/accounts/${connected.id}/reset-credits/${action}`,
+        {
+          method: "POST",
+          headers: {
+            accept: "application/json",
+            "content-type": "application/json",
+            "content-length": String(Buffer.byteLength(payload)),
+          },
+          body: payload,
+        },
+      );
+      stampDelegatedHumanAuthorization(request, {
+        organizationId: accountId,
+        subjectId: `user:${OWNER_USER_ID}`,
+        permissions: permissions as never,
+        workspaceScope: { kind: "all" },
+      });
+      return api.fetch(request);
+    };
+
+    const consumedBefore = provider.consumeBodies.length;
+    const attemptId = crypto.randomUUID();
+    const prepared = await agentRequest("prepare", { attemptId, creditId: "credit-reset" });
+    expect(prepared.status).toBe(200);
+    const { confirmationToken } = (await prepared.json()) as { confirmationToken: string };
+    expect(provider.consumeBodies.length).toBe(consumedBefore);
+    const redeemed = await agentRequest("redeem", {
+      attemptId,
+      creditId: "credit-reset",
+      confirmationToken,
+      confirmation: "REDEEM_USAGE_LIMIT_RESET",
+    });
+    expect(redeemed.status).toBe(200);
+    expect((await redeemed.json()) as any).toMatchObject({ status: "completed", outcome: "reset" });
+    expect(provider.consumeBodies.length).toBe(consumedBefore + 1);
+
+    // The connection's access still bounds it: no connections:write, no redemption.
+    const refused = await agentRequest(
+      "prepare",
+      { attemptId: crypto.randomUUID(), creditId: "credit-reset" },
+      ["workspace:read"],
+    );
+    expect(refused.status).toBe(403);
+    // A plain bearer token (not an agent acting as a person) is still refused.
+    const bearer = await api.request(
+      `/v1/workspaces/${workspaceId}/codex/accounts/${connected.id}/reset-credits/prepare`,
+      {
+        method: "POST",
+        headers: { ...browserHeaders(), authorization: "Bearer not-a-person" },
+        body: JSON.stringify({ attemptId: crypto.randomUUID(), creditId: "credit-reset" }),
+      },
+    );
+    expect(bearer.status).toBe(403);
+    expect(provider.consumeBodies.length).toBe(consumedBefore + 1);
   }, 60_000);
 });
