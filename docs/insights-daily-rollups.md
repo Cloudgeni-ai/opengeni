@@ -244,6 +244,100 @@ Retained primary evidence:
 - Native plans: `15a47f77-3d11-4b09-9ce4-c333d000e016`, 3,987,720 bytes,
   SHA-256 `10d5c830c3638e9cc06a02e089abb2a6e891a5c686c00b38b01fce73279ecb1e`.
 
+### Read-input optimization retained-volume checkpoint
+
+On October 4, 2026, composed head
+`0c7caf63ae100623736de031a9a51f5d3bed3208` incorporated the independently
+source-approved DB input delta `ed04a773b8a36d406d5f79f37c71c9c1edc129e1`
+and the actual `33d2a7cccb435251a1538676c537107f7e650636` main composition.
+The latter already included the coordinator's raw-adapter optimization; these
+results must not be attributed to the DB delta alone. The two imported DB file
+bodies matched the immutable bundle. SQL outside `insights_charge_window` and
+`insights_rollup_amount_inputs` remained byte-identical, including bootstrap,
+source hooks, reconciliation and grants.
+
+The read delta reuses a clean edge day's cache only after an authoritative
+excluded-record absence proof in the same STABLE snapshot. It does not round the
+caller window or reuse a pending day. Dirty negative debits use typed UUID-prefix
+and exact source-key lookups through the existing full source index. The nested
+loop setting is local to the charge helper and restored for its caller. Its
+required owner/app PostgreSQL suite passed 129 tests and 2,226 assertions, with
+one heavy historical fixture filtered. Independent source review found no new
+correctness, privacy or ACL defect; it did not rerun PostgreSQL tests.
+
+The composed head passed 14 full-App/release tests with 536 assertions, including
+fresh actual-auth daily-versus-raw full-response parity; 93 runtime/API/Core units
+with 635 assertions; touched type checks; migration, FORCE-RLS, test-budget and
+documentation guards; and lint. These are correctness checks, not latency
+acceptance.
+
+A new attested physical copy of the unchanged 838,000-fact/4,170,000-event fixture
+received 0610–0613 once. No prior migration was replayed, no source history was
+reseeded, and no comparison catalog or allocation was invoked. Bootstrap phases
+committed in 526.511 s, 26.375 s, 0.233 s and 0.005 s respectively. Source
+AccessExclusiveLock sampled hold bounds were 526.083–526.511 s for 0610 and
+25.998–26.375 s for 0611, retaining the material maintenance-window disruption.
+No source lock was observed during the latter two phases at 250 ms resolution;
+this is not a no-lock claim. Four normal-app probes were cancelled under LOCAL
+10-second diagnostic budgets; native statement/lock timeouts remained zero.
+Three baseline and fourteen post-phase writes completed and deliberately rolled
+back. Counts, amounts, checked knownness, policies, FORCE posture and original
+history matched, with zero current runtime-posture violations before and after.
+
+Each following HTTP case used actual full `createApp`, canonical selected-key
+authorization, the normal non-superuser/NOBYPASSRLS role and a fresh response
+cache for every request. Both clean and immediately-after-write dirty states had
+one first request and twenty subsequent MISS samples per scope: 84 HTTP 200s in
+total, no errors. Current/prior windows matched the earlier exact frozen calendar
+windows; no range was shortened to meet the target.
+
+| State | Scope | First | Subsequent p50 | Subsequent p95 |
+| --- | --- | ---: | ---: | ---: |
+| Clean | Workspace | 1,896.2 ms | 1,613.6 ms | 1,643.3 ms |
+| Clean | Organization | 4,961.1 ms | 4,564.8 ms | 4,804.2 ms |
+| Dirty | Workspace | 2,656.9 ms | 1,820.2 ms | 1,873.1 ms |
+| Dirty | Organization | 5,313.6 ms | 5,368.9 ms | 5,699.6 ms |
+
+The uncached sub-one-second target remains **unmet in both scopes and states**.
+Before every dirty request, an ordinary fact, warm event and matching negative
+debit committed atomically without intervening reconciliation. All complete
+current/prior totals and unknown coverage matched expected wire deltas. Only the
+isolated copy gained 42 facts/events/debits and 4,242/3,066/-42 requested/list/actual
+micros. Original data and source/head hashes remained unchanged. Shared PG/OS
+caches were not flushed: there were zero true-cold samples. The environment was
+still PostgreSQL 17.11, affinity 0–16, a 16.125-CPU quota, 128 MiB shared buffers
+and 4 MiB work memory, not a dedicated four-vCPU or staging run.
+
+Two subsequent full-App nested-plan diagnostics returned 200 with 11 workspace
+and 55 organization parsed plans, preserving normal authority and the read
+budget. Their elapsed times are not benchmark samples. They confirm dirty fact
+attribution now uses the full workspace/turn/source index, one row per lookup
+over 3,608 prior and 5,450 current debits rather than scanning 502,514 facts.
+However, clean organization charge-edge branches still scan the 276,568-link
+history twice per workspace/window; one zero-output scope discards all 276,568
+rows twice. Other clean scoped projectors consume roughly 0.36–0.43 s and
+54–55 thousand shared-read blocks for three or four output rows. Scalar edge
+gating and nullable-workspace index predicates remain concrete input-helper
+optimization candidates, not a proven repair or authority to change the privacy
+projector. This checkpoint is not merge, staging p95 or rollout clearance.
+
+Retained primary evidence:
+
+- Targeted combined-head checks: `41967f59-a1bf-40e8-98b6-89b380993003`,
+  SHA-256 `25915522ded120983516efc4b927ab0a0544d752dac9ce955c4b210e597f9abc`.
+- Bootstrap: `3465575a-179c-4427-a00d-5ec2bc2658c7`, 6,725,145 bytes,
+  SHA-256 `7d861e90ed8da69f9f807e97b899a5b3a8594f016f3bb09771f97d66b0539a36`.
+- Physical-copy attestation: `98665213-27ca-4ace-9b9e-5e1aae988bf9`, 94,505 bytes,
+  SHA-256 `8f9235b3d64d8c7be935e0d836cd7703a85489111d178d0dff08689975afdfaa`.
+- Clean HTTP: `dc4f38e2-4221-4b21-9036-20448126bce2`, 537,559 bytes,
+  SHA-256 `6e754f94839d70ec641d12661eacec65e551f28446ba4466a8ea8a6e3b91105d`.
+- Dirty HTTP: `74fbfed5-2ba8-4a45-a7bd-af38845aa475`, 635,127 bytes,
+  SHA-256 `aad2b212b45fecf94f33d3983ed5bb5fe3983cdd4bba6a9608c8c0b7a26c7b71`.
+- Native plans: `2e20777b-6c90-4bff-a2b5-681fe155b705`, 4,056,419 bytes,
+  SHA-256 `21c5d1a112a12fd576935d29a3ec985b8e44d3b8e64585ab078b59d319a80dc2`.
+- Executed native-plan runner: `050bb366-de33-49a4-9719-0b9c192766ce`, 9,615 bytes,
+  SHA-256 `de96bfe0c320f6258acd0e5aad4689341c61692ce11bc9685d981011c90c5021`.
+
 ### Frozen-head full-volume bootstrap measurement
 
 On October 4, 2026, a new isolated physical copy of the retained synthetic data
