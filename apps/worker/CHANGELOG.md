@@ -1,5 +1,11 @@
 # @opengeni/worker-bundle
 
+## 1.0.0
+
+### Major Changes
+
+- Reset package versioning: every published `@opengeni/*` package now releases together at one shared version, starting at 1.0.0. Install all `@opengeni` packages at the same version. Earlier versions are retired.
+
 ## 2.3.5
 
 ### Patch Changes

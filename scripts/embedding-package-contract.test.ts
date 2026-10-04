@@ -35,7 +35,7 @@ test("Connect is published before its SDK and React consumers without a React/se
     expect(names.indexOf(name)).toBeGreaterThan(names.indexOf("@opengeni/connect"));
     const manifest = structuredClone(packages.find((pkg) => pkg.name === name)!.packageJson);
     rewriteWorkspaceDependenciesToConcrete(manifest, workspaceVersionMap());
-    expect(manifest.dependencies?.["@opengeni/connect"]).toBe(`^${connect!.version}`);
+    expect(manifest.dependencies?.["@opengeni/connect"]).toBe(connect!.version);
   }
 });
 

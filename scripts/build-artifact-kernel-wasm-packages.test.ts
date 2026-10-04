@@ -147,16 +147,16 @@ test("version automation regenerates WASM identity without forcing peer dependen
   };
 
   expect(rootPackage.scripts?.["changeset:version"]).toBe(
-    "changeset version && bun scripts/build-artifact-kernel-wasm-packages.ts --refresh-package-identities",
+    "changeset version && bun scripts/release/lockstep-version.ts && bun scripts/build-artifact-kernel-wasm-packages.ts --refresh-package-identities",
   );
   expect(
     changesetConfig.___experimentalUnsafeOptions_WILL_CHANGE_IN_PATCH
       ?.onlyUpdatePeerDependentsWhenOutOfRange,
   ).toBe(true);
-  expect(reactPackage.peerDependencies?.["@opengeni/artifact-tool"]).toBe(">=0.1.0 <0.4.0");
+  expect(reactPackage.peerDependencies?.["@opengeni/artifact-tool"]).toBe("^1.0.0");
   expect(
     ciWorkflow.match(
-      /@changesets\/cli\/bin\.js" version\n\s+bun scripts\/build-artifact-kernel-wasm-packages\.ts --refresh-package-identities/gu,
+      /@changesets\/cli\/bin\.js" version\n\s+bun scripts\/release\/lockstep-version\.ts\n\s+bun scripts\/build-artifact-kernel-wasm-packages\.ts --refresh-package-identities/gu,
     ),
   ).toHaveLength(2);
 });

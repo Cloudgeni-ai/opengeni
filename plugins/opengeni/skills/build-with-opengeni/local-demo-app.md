@@ -39,7 +39,7 @@ npm install -D vite @vitejs/plugin-react tsx typescript @types/node @types/react
 npm ls @opengeni/sdk @opengeni/react
 ```
 
-`npm ls` must show one `@opengeni/sdk` version, equal to `@opengeni/react`'s.
+`npm ls` must show one version for every `@opengeni` package; they release together at one shared version.
 
 ## 2. Add the files
 
@@ -230,7 +230,7 @@ link. Startup already proved the key, URL, and IDs. Then:
 | `... is not a shared workspace of organization ...` | A Personal workspace or a mismatched organization ID. Use a shared workspace of that organization. |
 | `403 external onboarding requires an organization service key` or `membership exceeds key authority` | A workspace key or a read-only organization key. Create a full-access organization key. |
 | `409 existing membership differs` | The demo user was onboarded before with other permissions. Change `user` to a new ID. |
-| Startup crashes with `"ConnectPopupClosedError" is not exported by "@opengeni/connect"` | The published `@opengeni/connect` is older than `@opengeni/react` needs (seen with 7.4.0 and connect 0.3.0). Run `npm pkg set overrides.@opengeni/connect=canary`, then `rm -rf node_modules package-lock.json && npm install` (a plain `npm install` keeps the locked version). Remove the override once a newer `@opengeni/connect` is on `latest`. |
+| Startup crashes with `"<name>" is not exported by "@opengeni/connect"` (or another `@opengeni` package) | The installed `@opengeni` packages are at different versions. Use the same version for all of them: `npm install @opengeni/sdk@latest @opengeni/react@latest`, then `npm ls @opengeni/sdk @opengeni/react @opengeni/connect` must show one version. If a lockfile keeps an old copy, `rm -rf node_modules package-lock.json && npm install`. |
 | `EADDRINUSE` | Port taken: `PORT=5174 npm run dev`, and use that port in the URLs. |
 | The message is sent but no reply, or a model error | The workspace has no usable model for this user. Connect one in OpenGeni (Organization settings, Models), or set `OPENGENI_MODEL` to an available model ID. |
 | `403` from `/api/opengeni` | The page was opened through another host name than `127.0.0.1` or `localhost`. By design. |
