@@ -11,6 +11,7 @@ import {
   safeDatabaseErrorFacts,
   isRetryableDatabaseTransportFailure,
   isSessionEventPersistenceError,
+  DatabaseTransactionError,
   SandboxLeaseTransitionError,
 } from "@opengeni/db";
 import {
@@ -100,6 +101,11 @@ export const MAX_AUTOMATIC_PROVIDER_RECOVERIES = PROVIDER_CONNECTIVITY_BACKOFF_M
  * alone would spend every automatic recovery before the window resets.
  */
 export const PROVIDER_RATE_LIMIT_BACKOFF_MS = [10_000, 20_000, 40_000, 60_000, 120_000] as const;
+/** Positive-only spread: never shorten the provider's minimum delay. */
+export function providerRecoveryJitterMs(delayMs: number, sample: number): number {
+  const bounded = Number.isFinite(sample) ? Math.max(0, Math.min(sample, 1)) : 0;
+  return Math.floor(Math.min(5_000, delayMs * 0.2) * bounded);
+}
 export const POST_COMPACTION_CONTINUATION_EMPTY_CODE = "post_compaction_continuation_empty";
 
 export class PostCompactionContinuationEmptyError extends Error {
@@ -126,6 +132,7 @@ export function providerRecoveryResult(input: {
   failureCode: string | undefined;
   attemptNumber: number;
   retryAfterMs?: number | null;
+  jitterSample?: number;
 }): ProviderRecoveryResult {
   if (input.attemptNumber > MAX_AUTOMATIC_PROVIDER_RECOVERIES) {
     return {
@@ -171,7 +178,13 @@ export function providerRecoveryResult(input: {
         : PROVIDER_BACKPRESSURE_DELAY_MS;
   return {
     status: "recovering",
-    continueDelayMs,
+    continueDelayMs:
+      continueDelayMs +
+      (input.failureCode === "provider_rate_limited" ||
+      input.failureCode === "provider_unavailable" ||
+      input.failureCode === "upstream_connectivity_unavailable"
+        ? providerRecoveryJitterMs(continueDelayMs, input.jitterSample ?? 0)
+        : 0),
   };
 }
 
@@ -407,6 +420,12 @@ function retryableDatabaseFailureCode(
     const boundaries = new Set<object>();
     const ownDatabaseNodes = new Set<object>();
     const codes = new Set<PostClaimDatabaseRecoveryDetail["code"]>();
+    const ownChildren = (node: object): object[] =>
+      node instanceof DatabaseTransactionError
+        ? // Callback failures retained beside a failed rollback supply vetoes,
+          // never driver provenance for a provider's connection-looking error.
+          [...graph.get(node)!].filter((child) => child === node.cause)
+        : [...graph.get(node)!];
     // Ask the canonical transport predicate about ONLY this node's facts. Its
     // recursive search must not pair a DB sibling with an unrelated provider.
     for (const node of graph.keys()) {
@@ -429,7 +448,11 @@ function retryableDatabaseFailureCode(
           : isDatabaseConnectionSqlState(sqlState)
       )
         transports.add(node);
-      if (node instanceof DrizzleQueryError || isSessionEventPersistenceError(node)) {
+      if (
+        node instanceof DrizzleQueryError ||
+        node instanceof DatabaseTransactionError ||
+        isSessionEventPersistenceError(node)
+      ) {
         // Only actual errors raised at our ORM/typed persistence boundary own
         // their driver subtree. A PostgresError name, SDK wrapper or provider
         // socket by itself is never own-client provenance for a running turn.
@@ -437,7 +460,7 @@ function retryableDatabaseFailureCode(
         for (const source of queue) {
           if (ownDatabaseNodes.has(source)) continue;
           ownDatabaseNodes.add(source);
-          queue.push(...graph.get(source)!);
+          queue.push(...ownChildren(source));
         }
       }
     }
@@ -448,7 +471,7 @@ function retryableDatabaseFailureCode(
         if (seen.has(node)) continue;
         seen.add(node);
         if (transports.has(node)) return true;
-        queue.push(...graph.get(node)!);
+        queue.push(...ownChildren(node));
       }
       return false;
     };
@@ -457,7 +480,7 @@ function retryableDatabaseFailureCode(
     // order; a deeper transport/reset cannot override it either.
     for (const node of graph.keys()) {
       const record = node as Record<string, unknown>;
-      if (node instanceof DrizzleQueryError) {
+      if (node instanceof DrizzleQueryError || node instanceof DatabaseTransactionError) {
         boundaries.add(node);
         if (hasOwnTransport(node)) codes.add("db_failure");
       }
@@ -501,6 +524,12 @@ function retryableDatabaseFailureCode(
 }
 
 const RUNNING_TURN_DATABASE_TRANSPORT_CODES = new Set([
+  // postgres.js reports these for a physically lost connection, including
+  // transaction cleanup after its socket has already closed. Own-client
+  // provenance and the unknown-outcome veto remain mandatory above.
+  "CONNECTION_CLOSED",
+  "CONNECTION_DESTROYED",
+  "CONNECTION_ENDED",
   "ECONNREFUSED",
   "ECONNRESET",
   "CONNECT_TIMEOUT",
@@ -1086,19 +1115,28 @@ function isProviderSafetyRefusal(error: unknown): boolean {
   return providerSafetyRefusalDiagnostic(error) !== undefined;
 }
 
+/** Preserve the closest real HTTP status through SDK Error.cause wrappers. */
+function providerHttpStatus(error: unknown): number | undefined {
+  let current = error;
+  const seen = new Set<unknown>();
+  for (let depth = 0; depth < 6 && current && typeof current === "object"; depth += 1) {
+    if (seen.has(current)) break;
+    seen.add(current);
+    const value = current as { status?: unknown; statusCode?: unknown; cause?: unknown };
+    const status = Number(value.status ?? value.statusCode);
+    if (Number.isInteger(status) && status >= 100 && status < 600) return status;
+    current = value.cause;
+  }
+  return undefined;
+}
+
 export function isTransientProviderError(error: unknown): boolean {
   if (error instanceof ResponsesStreamingTerminalError) {
     return error.category === "unavailable";
   }
   // A semantic refusal can arrive inside a 5xx transport envelope.
   if (isProviderSafetyRefusal(error)) return false;
-  const status =
-    typeof error === "object" && error !== null
-      ? Number(
-          (error as { status?: unknown; statusCode?: unknown }).status ??
-            (error as { statusCode?: unknown }).statusCode,
-        )
-      : undefined;
+  const status = providerHttpStatus(error);
   // A real HTTP status is AUTHORITATIVE: a 5xx is transient, and ANY other status
   // (4xx validation/auth/404, plus the 429 the earlier branches already handled) is
   // a request fault that must NOT auto-retry — even if its body happens to read like
@@ -1399,13 +1437,7 @@ function baseAgentRunFailurePayload(
     };
   }
   const message = error instanceof Error ? error.message : String(error);
-  const status =
-    typeof error === "object" && error !== null
-      ? Number(
-          (error as { status?: unknown; statusCode?: unknown }).status ??
-            (error as { statusCode?: unknown }).statusCode,
-        )
-      : undefined;
+  const status = providerHttpStatus(error);
   const code =
     typeof error === "object" && error !== null && "code" in error
       ? String((error as { code?: unknown }).code)

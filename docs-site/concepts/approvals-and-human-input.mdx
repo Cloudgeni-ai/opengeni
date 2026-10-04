@@ -8,7 +8,11 @@ A session can pause mid-turn and wait for a person in two ways. The wait survive
 
 ## Tool approvals
 
-A tool can require approval before it runs. When the agent proposes such a call, the session enters `requires_action` and the timeline shows the pending call. A person approves or rejects it; a rejection goes back to the agent so it can adapt. Only humans can approve tool calls.
+Each connected account has **Allow**, **Ask first**, and **Block** choices. Allow runs without asking, Ask first waits for review, and Block prevents execution. Tool recommendations apply until you choose otherwise. These choices do not grant account access or additional provider permissions.
+
+For Ask first, the session enters `requires_action`. The review shows the account, action, consequences and selection count, with full saved details available separately. Approving resumes that exact action; declining lets the agent adapt. A waiting review retains its original choice. Changed settings apply when work next starts or resumes. Only humans can approve tool calls.
+
+Programmatic calls also retain their exact arguments through the wait. Approval resumes the stored operation; it does not restart the earlier program. An unknown outcome means execution may have started and needs reconciliation before retrying.
 
 ## Structured human input
 

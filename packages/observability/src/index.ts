@@ -22,6 +22,7 @@ export {
   bindMcpTelemetry,
   beginMcpPhase,
   measureMcpPhase,
+  recordToolApproval,
   MCP_EXECUTION_PHASES,
 } from "./mcp-timing";
 export {

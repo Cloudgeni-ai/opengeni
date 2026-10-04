@@ -4,6 +4,7 @@ import {
   TOOL_GATEWAY_INPUT_DIAGNOSTIC_MAX_CHARS,
   TOOL_GATEWAY_INPUT_ISSUES_MAX,
   ToolGatewayApprovalRequiredError,
+  ToolGatewayBlockedError,
   ToolGatewayCatalogIntegrityError,
   ToolGatewayInputValidationError,
   ToolGatewayPathCollisionError,
@@ -31,6 +32,83 @@ const definition: ToolGatewayDefinition = {
 };
 
 describe("ToolGateway", () => {
+  test("continuation semantics ignore prose, but bind account and schema changes", () => {
+    const digest = (changes: Partial<ToolGatewayDefinition>) =>
+      createWorkspaceToolGateway({
+        accountId: "11111111-1111-4111-8111-111111111111",
+        workspaceId: "22222222-2222-4222-8222-222222222222",
+        generation: 1,
+        definitions: [{ ...definition, effectAuthorityDigest: "a".repeat(64), ...changes }],
+        authorize: () => {},
+      }).gateway.effectDigest(definition.identity);
+    expect(
+      digest({
+        description: "Improved documentation",
+        inputSchema: {
+          ...definition.inputSchema,
+          description: "More documentation",
+          properties: { query: { type: "string", description: "Useful help" } },
+        },
+      }),
+    ).toBe(digest({}));
+    expect(digest({ effectAuthorityDigest: "b".repeat(64) })).not.toBe(digest({}));
+    expect(
+      digest({ inputSchema: { type: "object", properties: { query: { type: "number" } } } }),
+    ).not.toBe(digest({}));
+  });
+  test("effective preference overrides catalog recommendations after validated access", async () => {
+    for (const choice of ["allow", "ask", "block"] as const) {
+      let effects = 0;
+      const phases: string[] = [];
+      const { catalog, gateway } = createWorkspaceToolGateway({
+        accountId: "11111111-1111-4111-8111-111111111111",
+        workspaceId: "22222222-2222-4222-8222-222222222222",
+        generation: 1,
+        definitions: [
+          {
+            ...definition,
+            approval: "human",
+            execute: () => {
+              effects++;
+              return { content: [] };
+            },
+          },
+        ],
+        authorize: () => {
+          phases.push("access");
+        },
+        requireApproval: () => true,
+        resolveApproval: () => {
+          phases.push("preference");
+          return choice;
+        },
+      });
+      const call = {
+        operationId: crypto.randomUUID(),
+        catalogDigest: catalog.digest,
+        identity: definition.identity,
+        arguments: { query: "test" },
+        caller: { kind: "http" as const, subjectId: "human:test" },
+      };
+      if (choice === "allow") {
+        const prepared = await gateway.prepareCall(call);
+        expect(prepared.approvalDecision).toBe("allow");
+        await prepared.execute();
+        expect(effects).toBe(1);
+      } else {
+        await expect(gateway.call(call)).rejects.toBeInstanceOf(
+          choice === "ask" ? ToolGatewayApprovalRequiredError : ToolGatewayBlockedError,
+        );
+        expect(effects).toBe(0);
+      }
+      expect(phases).toEqual(["access", "preference"]);
+      phases.length = 0;
+      await expect(
+        gateway.call({ ...call, arguments: { action: "allow" } }),
+      ).rejects.toBeInstanceOf(ToolGatewayInputValidationError);
+      expect(phases).toEqual([]);
+    }
+  });
   test("prepared gateway timing retains call context after preparation and never replays a rejection", async () => {
     const bodies: any[] = [];
     const observer = createObservability(

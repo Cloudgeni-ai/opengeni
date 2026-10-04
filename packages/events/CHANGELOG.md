@@ -1,5 +1,29 @@
 # @opengeni/events
 
+## 1.2.0
+
+### Patch Changes
+
+- Updated dependencies [7424e7c]
+- Updated dependencies [1033595]
+- Updated dependencies [21c8904]
+- Updated dependencies [d870f32]
+  - @opengeni/db@1.2.0
+  - @opengeni/contracts@1.2.0
+
+## 1.1.0
+
+### Patch Changes
+
+- Updated dependencies [5fd6c55]
+- Updated dependencies [c600e3a]
+- Updated dependencies [f895d19]
+- Updated dependencies [411b3b5]
+- Updated dependencies [208dec1]
+- Updated dependencies [4cd01cd]
+  - @opengeni/contracts@1.1.0
+  - @opengeni/db@1.1.0
+
 ## 1.0.2
 
 ### Patch Changes

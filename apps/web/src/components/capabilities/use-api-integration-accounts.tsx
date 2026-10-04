@@ -594,6 +594,9 @@ export function useIntegrationDefinitionRow({
         }
       : {}),
     options: [],
+    ...(controller.accounts[0]
+      ? { toolPermissions: { workspaceId, capabilityId: controller.accounts[0].capabilityId } }
+      : {}),
     footer,
     ...(controller.tools.length > 0 ? { tools: { tools: controller.tools } } : {}),
     outcomes: (

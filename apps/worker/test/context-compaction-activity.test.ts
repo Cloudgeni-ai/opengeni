@@ -1,4 +1,5 @@
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
+import { createObservability } from "@opengeni/observability";
 import { MODEL_ATTACHMENT_REFS_FIELD } from "@opengeni/contracts";
 import {
   ACTIVE_SESSION_HISTORY_MAX_JSON_BYTES,
@@ -8,6 +9,7 @@ import {
   ActiveSessionHistoryLimitExceededError,
   ApprovalRunStateLimitExceededError,
   addSessionSystemUpdate,
+  applySessionTurnSettlement,
   bootstrapWorkspace,
   claimSessionWorkForAttempt,
   createDb,
@@ -1301,7 +1303,7 @@ describe("standalone context compaction execution", () => {
     expect(JSON.stringify(events)).not.toContain("private conversation text");
   });
 
-  test("a transient standalone summary failure keeps the request on the same recovering turn", async () => {
+  test("standalone compaction recovers after throttling on a fresh worker and clears recovery tracking", async () => {
     const suffix = crypto.randomUUID();
     const access = await bootstrapWorkspace(client.db, {
       accountExternalSource: "test",
@@ -1349,61 +1351,72 @@ describe("standalone context compaction execution", () => {
       );
     });
     await requestSessionCompaction(client.db, grant.workspaceId!, session.id);
-    const runtime = {
-      configure: () => undefined,
-      resolveTurnModel: () => ({
-        client: {
-          chat: {
-            completions: {
-              create: async () => {
-                throw Object.assign(new Error("temporary provider outage"), {
-                  status: 503,
-                  code: "server_error",
-                });
+    const makeRuntime = (fail: boolean) =>
+      ({
+        configure: () => undefined,
+        resolveTurnModel: () => ({
+          client: {
+            chat: {
+              completions: {
+                create: async () => {
+                  if (fail) throw Object.assign(new Error("Too Many Requests"), { status: 429 });
+                  return {
+                    id: "chatcmpl-compaction-recovered",
+                    usage: { prompt_tokens: 1234, completion_tokens: 20, total_tokens: 1254 },
+                    choices: [
+                      {
+                        message: { content: "Preserve the request and continue the work." },
+                        finish_reason: "stop",
+                      },
+                    ],
+                  };
+                },
               },
             },
           },
+          provider: {
+            id: "test-chat",
+            kind: "api-key",
+            api: "chat",
+            builtin: false,
+          },
+          configured: {
+            id: "scripted-compactor",
+            contextWindowTokens: 250_000,
+            effectiveContextWindowTokens: 250_000,
+            autoCompactLimitTokens: 225_000,
+            hostedWebSearch: false,
+          },
+        }),
+        buildAgent: () => {
+          throw new Error("transient standalone compaction entered the agent runtime");
         },
-        provider: {
-          id: "test-chat",
-          kind: "api-key",
-          api: "chat",
-          builtin: false,
+        prepareTools: () => {
+          throw new Error("transient standalone compaction prepared tools");
         },
-        configured: {
-          id: "scripted-compactor",
-          contextWindowTokens: 250_000,
-          effectiveContextWindowTokens: 250_000,
-          autoCompactLimitTokens: 225_000,
-          hostedWebSearch: false,
+        prepareInput: () => {
+          throw new Error("transient standalone compaction prepared input");
         },
-      }),
-      buildAgent: () => {
-        throw new Error("transient standalone compaction entered the agent runtime");
-      },
-      prepareTools: () => {
-        throw new Error("transient standalone compaction prepared tools");
-      },
-      prepareInput: () => {
-        throw new Error("transient standalone compaction prepared input");
-      },
-      runStream: () => {
-        throw new Error("transient standalone compaction started inference");
-      },
-      serializeApprovals: () => {
-        throw new Error("transient standalone compaction serialized approvals");
-      },
-    } as unknown as OpenGeniRuntime;
+        runStream: () => {
+          throw new Error("transient standalone compaction started inference");
+        },
+        serializeApprovals: () => {
+          throw new Error("transient standalone compaction serialized approvals");
+        },
+      }) as unknown as OpenGeniRuntime;
     const bus = new MemoryEventBus();
+    const settings = testSettings({
+      databaseUrl: shared.appUrl,
+      openaiModel: "scripted-compactor",
+      sandboxBackend: "none",
+    });
+    const observability = createObservability(settings, { component: "worker-turn" });
     const activities = createActivityTestHarness({
-      settings: testSettings({
-        databaseUrl: shared.appUrl,
-        openaiModel: "scripted-compactor",
-        sandboxBackend: "none",
-      }),
+      settings,
       db: client.db,
       bus,
-      runtime,
+      runtime: makeRuntime(true),
+      observability,
     });
 
     const attemptId = crypto.randomUUID();
@@ -1441,7 +1454,38 @@ describe("standalone context compaction execution", () => {
     });
     expect(events.map((event) => event.type)).not.toContain("session.context.compaction.skipped");
     expect(events).toContainEqual(expect.objectContaining({ type: "turn.recovery.requested" }));
-  });
+    const held = await getSessionTurn(client.db, grant.workspaceId!, result.turnId);
+    expect(held?.metadata).toMatchObject({
+      providerRecoveryCount: 1,
+      providerRecoveryReason: "provider_rate_limited",
+    });
+    const resumed = await createActivityTestHarness({
+      settings,
+      db: client.db,
+      bus,
+      runtime: makeRuntime(false),
+      observability,
+    }).runAgentTurn({
+      accountId: grant.accountId,
+      workspaceId: grant.workspaceId!,
+      sessionId: session.id,
+      workflowId: `session-${session.id}`,
+      workflowRunId: crypto.randomUUID(),
+      attemptId: crypto.randomUUID(),
+      trigger: { kind: "next" },
+    });
+    expect(resumed).toMatchObject({ status: "idle", turnId: result.turnId });
+    const completed = await getSessionTurn(client.db, grant.workspaceId!, result.turnId);
+    expect(completed?.metadata.providerRecoveryCount).toBeUndefined();
+    expect(completed?.metadata.providerRecoveryStartedAt).toBeUndefined();
+    expect(completed?.metadata.providerRecoveryReason).toBeUndefined();
+    expect(await isSessionCompactionRequested(client.db, grant.workspaceId!, session.id)).toBe(
+      false,
+    );
+    const metrics = await observability.prometheusMetrics();
+    expect(metrics).toMatch(/opengeni_model_recovery_total\{[^}]*outcome="scheduled"[^}]*\} 1/);
+    expect(metrics).toMatch(/opengeni_model_recovery_total\{[^}]*outcome="recovered"[^}]*\} 1/);
+  }, 60_000);
 
   test("a transient /compact inside a queued user turn preserves the request for same-turn recovery", async () => {
     const suffix = crypto.randomUUID();
@@ -2065,11 +2109,54 @@ describe("standalone context compaction execution", () => {
         })),
       );
     });
-    const historyBefore = JSON.stringify(
-      (await getActiveSessionHistoryItems(client.db, grant.workspaceId!, session.id)).map(
-        (row) => row.item,
-      ),
+    // An earlier human request spawned the child whose result arrives after
+    // the failed compaction; the result carries that exact parent turn.
+    await withWorkspaceSubjectSessionActivityRls(
+      client.db,
+      grant.workspaceId!,
+      grant.subjectId,
+      async (db) =>
+        await submitHumanPromptInTransaction(db, {
+          accountId: grant.accountId,
+          workspaceId: grant.workspaceId!,
+          sessionId: session.id,
+          subjectId: grant.subjectId,
+          actor: { type: "human", subjectId: grant.subjectId },
+          operationKey: crypto.randomUUID(),
+          delivery: "send",
+          text: "Delegate the remaining work to a child session",
+          resources: [],
+          tools: [],
+          reasoningEffortFallback: "low",
+          source: "user",
+        }),
     );
+    const spawningAttemptId = crypto.randomUUID();
+    const spawningClaim = await claimSessionWorkForAttempt(client.db, grant.workspaceId!, {
+      sessionId: session.id,
+      workflowId: `session-${session.id}`,
+      workflowRunId: crypto.randomUUID(),
+      attemptId: spawningAttemptId,
+      dispatchId: `dispatch-${crypto.randomUUID()}`,
+      trigger: { kind: "next" },
+    });
+    if (spawningClaim.action !== "claimed") throw new Error("spawning turn was not claimed");
+    expect(
+      await applySessionTurnSettlement(client.db, grant.workspaceId!, {
+        sessionId: session.id,
+        turnId: spawningClaim.turn.id,
+        triggerEventId: spawningClaim.turn.triggerEventId,
+        attemptId: spawningAttemptId,
+        turnStatus: "completed",
+        sessionStatus: "idle",
+        activeTurnId: null,
+        events: [],
+      }),
+    ).toMatchObject({ action: "settled" });
+    const itemsBefore = (
+      await getActiveSessionHistoryItems(client.db, grant.workspaceId!, session.id)
+    ).map((row) => row.item);
+    const historyBefore = JSON.stringify(itemsBefore);
 
     const goal = await createSessionGoal(client.db, {
       accountId: grant.accountId,
@@ -2197,7 +2284,7 @@ describe("standalone context compaction execution", () => {
       grant.workspaceId!,
       session.id,
     );
-    expect(JSON.stringify(historyAfter.slice(0, originalItems.length).map((row) => row.item))).toBe(
+    expect(JSON.stringify(historyAfter.slice(0, itemsBefore.length).map((row) => row.item))).toBe(
       historyBefore,
     );
     expect(historyAfter.at(-1)?.item).toMatchObject({
@@ -2246,6 +2333,7 @@ describe("standalone context compaction execution", () => {
         childSessionId: crypto.randomUUID(),
         status: "idle",
       },
+      lineage: { parentTurnId: spawningClaim.turn.id },
     });
     if (!newUpdate.added) throw new Error("new update was not inserted");
     const heldClaim = await claimSessionWorkForAttempt(client.db, grant.workspaceId!, {
@@ -2296,6 +2384,8 @@ describe("standalone context compaction execution", () => {
       turn: { source: "user" },
     });
     if (retryClaim.action !== "claimed") throw new Error("human input did not wake the session");
+    // The notice carries this human's accepted spawning turn. The failed
+    // compaction cannot consume it; a new human Send can deliver it once.
     expect(
       (
         await listSessionSystemUpdatesForTurn(
@@ -2306,6 +2396,11 @@ describe("standalone context compaction execution", () => {
         )
       ).map((update) => update.id),
     ).toEqual([newUpdate.update.id]);
+    expect(
+      (await listOutstandingSessionSystemUpdates(client.db, grant.workspaceId!, session.id)).map(
+        (update) => update.id,
+      ),
+    ).toEqual([]);
   });
 
   test("consumes an operator request without replacing history when its summary is not smaller", async () => {

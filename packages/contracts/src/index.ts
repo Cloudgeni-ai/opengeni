@@ -1,3 +1,4 @@
+import { modelLogoUrl } from "./model-display";
 import {
   ClaudeProviderAccountAuthoritySnapshotV1,
   WORKSPACE_CLAUDE_PROVIDER_ACCOUNT_AUTHORITY_SNAPSHOT_V1,
@@ -5017,11 +5018,26 @@ export type GitHubAppApiPort = {
   }) => Promise<GitHubAppRepositoryBranchPage>;
 };
 
+export const PromotionalCreditScope = z.object({
+  label: z.string().trim().min(1).max(120),
+  eligibleModelIds: z.array(z.string().trim().min(1).max(200)).min(1).max(40),
+});
+export type PromotionalCreditScope = z.infer<typeof PromotionalCreditScope>;
+
+export const PromotionalCreditBalance = PromotionalCreditScope.extend({
+  grantId: z.string().uuid(),
+  remainingMicros: z.number().int().nonnegative(),
+});
+export type PromotionalCreditBalance = z.infer<typeof PromotionalCreditBalance>;
+
 export const BillingBalance = z.object({
   accountId: z.string().uuid(),
   balanceMicros: z.number().int(),
   currency: z.literal("usd"),
   updatedAt: z.string(),
+  /** General credits, including unrestricted legacy grants. May be negative after use. */
+  generalBalanceMicros: z.number().int().optional(),
+  promotionalCredits: z.array(PromotionalCreditBalance).optional(),
 });
 export type BillingBalance = z.infer<typeof BillingBalance>;
 
@@ -5052,6 +5068,7 @@ export const CreateCheckoutResponse = z.object({
   url: z.string().url(),
   /** The credits this checkout grants once it completes. */
   amountUsd: z.number().optional(),
+  promotionalScope: PromotionalCreditScope.optional(),
 });
 export type CreateCheckoutResponse = z.infer<typeof CreateCheckoutResponse>;
 
@@ -5069,6 +5086,7 @@ export const BillingCheckoutStatus = z.object({
     currency: z.literal("usd"),
     /** True when a coupon covered the whole checkout, so nothing was charged. */
     free: z.boolean(),
+    promotionalScope: PromotionalCreditScope.optional(),
   }),
   balance: BillingBalance.nullable(),
 });
@@ -6722,6 +6740,16 @@ export const SessionGoalContinuation = z.object({
   holdReason: z.string().nullable().optional(),
 });
 export type SessionGoalContinuation = z.infer<typeof SessionGoalContinuation>;
+
+/** New admission pauses are specific; the wire field remains open for older peers. */
+export type GoalAdmissionPausedReason =
+  | "model_unavailable"
+  | "model_policy"
+  | "credits"
+  | "budget"
+  | "usage_limit"
+  | "usage_policy"
+  | "allowance";
 
 export const SessionGoal = z.object({
   id: z.string().uuid(),
@@ -10444,7 +10472,8 @@ export type KnowledgeSourceSyncRunSummary = z.infer<typeof KnowledgeSourceSyncRu
  * means every occurrence is refused until the task or a resource it names
  * changes. Known reasons: `scheduled_authority_unavailable`,
  * `machine_target_unavailable`, `machine_enrollment_inactive`,
- * `variable_set_unavailable`, `rig_version_unavailable` (terminal) and
+ * `variable_set_unavailable`, `rig_version_unavailable`, `scheduled_model_unavailable`
+ * (terminal) and
  * `insufficient_credits`, `allowance_exhausted`, `monthly_model_cost_limit`, `monthly_agent_run_limit`
  * (transient). Readers must tolerate new reasons.
  */
@@ -18112,6 +18141,10 @@ export const ClientModel = /* @__PURE__ */ defineModelContractSchema(() =>
     label: z.string(),
     /** Optional curated compact label for dense UI (e.g. mobile composer). */
     shortLabel: z.string().min(1).max(64).optional(),
+    logoUrl: z
+      .string()
+      .refine((value) => modelLogoUrl({ id: "", logoUrl: value }) !== null)
+      .optional(),
     provider: z.string(), // provider id
     providerLabel: z.string(),
     api: z.enum(["responses", "chat", "anthropic-messages"]),
@@ -18232,6 +18265,8 @@ export const WorkspaceModelCatalogModel =
   /* @__PURE__ */ defineModelContractSchema(() =>
     ClientModel.extend({
       credentialReadiness: ModelCredentialReadinessV1,
+      /** Current funding status, without exposing the organization's balance. */
+      creditFunding: z.enum(["promotional", "general", "unavailable"]).optional(),
       /** Exact workspace-policy verdict without exposing provider identity. */
       policyAllowed: z.boolean().optional(),
       availability: ModelAvailabilityV1,
@@ -18574,3 +18609,5 @@ export * from "./slack-rest-mcp";
 export * from "./skill-catalog-context";
 export * from "./sandbox-recovery";
 export * from "./modal-native-proof-v2";
+export { toolPolicyActionName, executableToolSchema } from "./tool-policy";
+export * from "./tool-action-review";

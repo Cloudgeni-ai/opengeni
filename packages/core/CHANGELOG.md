@@ -1,5 +1,71 @@
 # @opengeni/core
 
+## 1.2.0
+
+### Minor Changes
+
+- d870f32: Support model-scoped signup and coupon credits with a shared operator default and
+  per-offer overrides. Update coverage at runtime, spend eligible promotions before
+  general credits, and preserve allocation and retry accounting. Keep scoped coupon
+  redemption separate from paid top-ups. Show credit funding in model selection and
+  current coverage on demand in billing. Legacy unrestricted grants stay unrestricted.
+
+### Patch Changes
+
+- Updated dependencies [7424e7c]
+- Updated dependencies [1033595]
+- Updated dependencies [21c8904]
+- Updated dependencies [d870f32]
+  - @opengeni/db@1.2.0
+  - @opengeni/config@1.2.0
+  - @opengeni/contracts@1.2.0
+  - @opengeni/runtime@1.2.0
+  - @opengeni/documents@1.2.0
+  - @opengeni/events@1.2.0
+  - @opengeni/storage@1.2.0
+  - @opengeni/codex@1.2.0
+  - @opengeni/observability@1.2.0
+  - @opengeni/capabilities@1.2.0
+  - @opengeni/network@1.2.0
+
+## 1.1.0
+
+### Patch Changes
+
+- 5fd6c55: A session whose agent starts from `capabilities: "none"` no longer receives the
+  bundled Opengeni guides (`opengeni-help`, `opengeni-client`, ...) when
+  `bundledSkillIds` is omitted; an explicit list still opts in exactly, and
+  `"all"` or legacy configurations keep the bundled defaults. Session create
+  freezes the empty selection so the record, replay, and children agree.
+
+  `command_read` and `command_wait` are now owned by attached compute
+  (`FIRST_PARTY_MCP_TOOL_CAPABILITIES` reports `"sandbox"`) and are attached, and
+  listed in `effectiveTools`, only when a managed sandbox or Connected Machine is
+  attached to the turn. `wait_for_input` and `set_session_title` are unchanged.
+  New exports: `AgentFirstPartyToolOwner`, `isDerivedAgentToolOwner`,
+  `AGENT_SANDBOX_MECHANIC_TOOL_NAMES`, `bundledSkillSelectionForAgentConfig`, and
+  the `sandboxAttached` tool-environment flag.
+
+- c600e3a: Use the full scoped model catalog for goal continuation and validate goal Resume before changing state. Preserve specific admission pause reasons and show the actionable rationale in the existing goal controls.
+- 4cd01cd: Every organization is now session-tenancy activated (rolling migration 0611): private ("Only me") sessions, visibility changes, forks, and personal-resource grants no longer require a per-organization activation receipt, and the owner/admin Only-me setting defaults to enabled when an organization has never changed it (owners and admins can still turn it off). `OPENGENI_ORGANIZATION_TENANCY_CANONICAL_ACTIVATION_ENABLED` and `Settings.organizationTenancyCanonicalActivationEnabled` are retired (the variable is accepted and ignored with a warning), the runtime posture no longer has an activation startup interlock, and the `db:activate-session-tenancy` operator command is removed.
+- Updated dependencies [5fd6c55]
+- Updated dependencies [c600e3a]
+- Updated dependencies [f895d19]
+- Updated dependencies [411b3b5]
+- Updated dependencies [208dec1]
+- Updated dependencies [4cd01cd]
+  - @opengeni/contracts@1.1.0
+  - @opengeni/runtime@1.1.0
+  - @opengeni/db@1.1.0
+  - @opengeni/config@1.1.0
+  - @opengeni/codex@1.1.0
+  - @opengeni/documents@1.1.0
+  - @opengeni/events@1.1.0
+  - @opengeni/observability@1.1.0
+  - @opengeni/storage@1.1.0
+  - @opengeni/capabilities@1.1.0
+  - @opengeni/network@1.1.0
+
 ## 1.0.2
 
 ### Patch Changes

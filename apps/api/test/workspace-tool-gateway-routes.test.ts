@@ -107,7 +107,7 @@ beforeAll(async () => {
       }),
       expect.objectContaining({
         identity: { serverId: "ordinary-fixture", toolName: "search_documents" },
-        approval: "none",
+        approval: "policy",
       }),
     ]),
   );

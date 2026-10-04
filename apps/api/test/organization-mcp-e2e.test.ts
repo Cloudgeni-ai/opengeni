@@ -215,6 +215,15 @@ describe("organization MCP server end to end", () => {
       return { isError: body.result.isError === true, text, value: safeJson(text) };
     };
 
+    // No server-to-client stream: an authorized GET is refused (405), never an
+    // empty 200 that makes clients reconnect in a loop.
+    const streamGet = await app.request("/v1/mcp", {
+      method: "GET",
+      headers: { authorization: `Bearer ${token}`, accept: "text/event-stream" },
+    });
+    expect(streamGet.status).toBe(405);
+    expect(streamGet.headers.get("allow")).toBe("POST");
+
     // The agent acts as the person: same subject, same Personal workspace.
     const whoami = await mcp("opengeni_action_call", { id: "getAccessContext" });
     expect(whoami.isError).toBe(false);

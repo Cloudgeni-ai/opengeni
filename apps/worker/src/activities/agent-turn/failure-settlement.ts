@@ -100,6 +100,7 @@ import type {
 } from "./turn-context";
 import type { CodexCredentialPolicySnapshotV1 } from "@opengeni/contracts";
 import { armAndReconcileCodexCapacityWait } from "../codex-capacity";
+import { providerRecoveryCause, recordProviderRecoveryOutcome } from "./provider-recovery-metrics";
 
 export type TurnFailureDeps = {
   error: unknown;
@@ -276,12 +277,20 @@ export async function settleTurnFailure(deps: TurnFailureDeps): Promise<RunAgent
   try {
     return await settleTurnFailureInAttempt(deps);
   } catch (error) {
+    if (
+      deps.control.activityStatus === "recovering" &&
+      error instanceof ApplicationFailure &&
+      error.type === "OpenGeniPostClaimDatabaseRecovery"
+    )
+      throw error;
     // Connectivity can disappear while settling an unrelated run error too.
     // Do not overwrite a possibly committed settlement; the control lane
     // re-reads exact ownership and becomes a stale no-op if it already closed.
     if (deps.attempt.turnId && deps.attempt.triggerEventId) {
       const recovery = postClaimDatabaseRecoveryFailure({
-        error,
+        // A failed rollback/terminal write must not erase no-replay evidence
+        // from the failure we were settling (notably unknown tool effects).
+        error: new AggregateError([error, deps.error], "Turn failure settlement failed"),
         turnId: deps.attempt.turnId,
         triggerEventId: deps.attempt.triggerEventId,
         executionGeneration: deps.attempt.executionGeneration,
@@ -1995,6 +2004,7 @@ async function settleTurnFailureInAttempt(deps: TurnFailureDeps): Promise<RunAge
       failureCode: failure.code,
       attemptNumber: nextProviderRecoveryCount,
       retryAfterMs: providerRetryAfterMs(error),
+      jitterSample: Math.random(),
     });
     const setupRecoveryExhausted =
       earlyCommandStartUnavailable &&
@@ -2064,9 +2074,29 @@ async function settleTurnFailureInAttempt(deps: TurnFailureDeps): Promise<RunAge
         control.turnMetricOutcome = "recovering";
         control.activityStatus = "recovering";
         control.activityError = error;
+        const recoveryCause = providerRecoveryCause(failure.code);
+        if (recoveryCause) {
+          recordProviderRecoveryOutcome(observability, {
+            route: attempt.modelMetricRoute,
+            cause: recoveryCause,
+            outcome: "scheduled",
+            delayMs: recoveryResult.continueDelayMs,
+          });
+        }
         return claimedResult(recoveryResult);
       }
       failure = providerRecoveryExhaustedFailure(failure, recoveryResult);
+      const recoveryCause = providerRecoveryCause(failure.code);
+      if (recoveryCause) {
+        recordProviderRecoveryOutcome(observability, {
+          route: attempt.modelMetricRoute,
+          cause: recoveryCause,
+          outcome: "exhausted",
+          ...(attempt.providerRecoveryObservation
+            ? { elapsedMs: Date.now() - attempt.providerRecoveryObservation.startedAt }
+            : {}),
+        });
+      }
       if (earlyRecoverableSetup) {
         // Setup has no eventing sink yet. Carry only the fixed, safe diagnostic
         // through Temporal into exact-attempt workflow failure settlement.

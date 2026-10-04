@@ -15,6 +15,8 @@ import {
 } from "@opengeni/contracts";
 import {
   addSessionSystemUpdate,
+  prepareConnectorActionApproval,
+  acceptSessionApprovalDecision,
   applyCreditDebitAfterUse,
   applyCreditLedgerEntry,
   checkWorkspaceAllowance,
@@ -10261,3 +10263,167 @@ describe("Slack-to-OpenGeni real PostgreSQL acceptance", () => {
     ]);
   }, 60_000);
 });
+
+for (const audience of ["private", "shared"] as const) {
+  test(`portable tool review uses saved facts and signed decisions in ${audience} Slack`, async () => {
+    if (!available) throw new Error("Real database is required");
+    const value = await fixture({ linkOther: true });
+    const channel = audience === "private" ? "D_TOOL_REVIEW" : "C_TOOL_REVIEW";
+    const rootTimestamp = "1770000000.000001";
+    await postEvent(value.app, {
+      teamId: value.teamId,
+      eventId: `E_REVIEW_${crypto.randomUUID()}`,
+      event: {
+        type: audience === "private" ? "message" : "app_mention",
+        channel_type: audience === "private" ? "im" : "channel",
+        user: value.ownerSlackUserId,
+        channel,
+        ts: rootTimestamp,
+        text: `<@${value.botUserId}> Review the synthetic messages`,
+      },
+    });
+    await drainAll(value.deps);
+    const [route] = await interactions(value.owner.workspaceId);
+    if (!route) throw new Error("Fixture interaction missing");
+    const attemptId = crypto.randomUUID();
+    const claimed = await claimSessionWorkForAttempt(client.db, value.owner.workspaceId, {
+      sessionId: route.session_id,
+      workflowId: `session-${route.session_id}`,
+      workflowRunId: crypto.randomUUID(),
+      dispatchId: crypto.randomUUID(),
+      attemptId,
+      trigger: { kind: "next" },
+    });
+    if (claimed.action !== "claimed") throw new Error("Fixture claim unavailable");
+    const approvalId = crypto.randomUUID();
+    const args = {
+      messageIds: ["synthetic-a", "synthetic-b"],
+      addLabelIds: ["TRASH"],
+      removeLabelIds: ["INBOX"],
+    };
+    await prepareConnectorActionApproval(
+      client.db,
+      {
+        accountId: value.owner.accountId,
+        workspaceId: value.owner.workspaceId,
+        sessionId: route.session_id,
+        turnId: claimed.turn.id,
+        attemptId,
+        executionGeneration: claimed.turn.executionGeneration,
+        initiator: claimed.turn.initiator,
+      },
+      {
+        approvalId,
+        connectionId: "session-mcp:mail:fixture",
+        serverId: "mail",
+        toolName: "batch_modify_messages",
+        arguments: args,
+        approvalMode: "session_mcp",
+        reviewContext: { kind: "gmail", accountLabel: "fixture-mail@example.test" },
+      },
+    );
+    await applySessionTurnSettlement(client.db, value.owner.workspaceId, {
+      sessionId: route.session_id,
+      turnId: claimed.turn.id,
+      triggerEventId: claimed.turn.triggerEventId,
+      attemptId,
+      turnStatus: "requires_action",
+      sessionStatus: "requires_action",
+      activeTurnId: claimed.turn.id,
+      runState: {
+        serializedRunState: "{}",
+        pendingApprovals: [{ id: approvalId, source: "codemode" }],
+        humanInputRequests: [],
+      },
+      events: [
+        {
+          type: "session.requiresAction",
+          payload: {
+            approvals: [{ id: approvalId, name: "mail__batch_modify_messages", arguments: args }],
+          },
+        },
+        { type: "session.status.changed", payload: { status: "requires_action" } },
+      ],
+    });
+    await drainAll(value.deps);
+    const post = value.slack.posts.at(-1)!;
+    const rendered = JSON.stringify(post);
+    if (audience === "shared") {
+      expect(rendered).not.toContain("fixture-mail@example.test");
+      expect(rendered).not.toContain("synthetic-a");
+      expect(rendered).not.toContain("opengeni.approval.approve");
+      expect(rendered).toContain("Open the task to review");
+      return;
+    }
+    expect(rendered).toContain("Move 2 messages to Trash");
+    expect(rendered).toContain("fixture-mail@example.test");
+    expect(rendered).toContain("Move to Trash");
+    expect(rendered).not.toContain("mcp_");
+    const approve = await pendingHandle(post, "approval_approve");
+    const press = (userId = value.ownerSlackUserId, posted = post) =>
+      pressSlackButton(value, {
+        post: posted,
+        rootTimestamp,
+        actionId: "opengeni.approval.approve",
+        handleId: approve,
+        actionTs: `1770000000.${Math.floor(Math.random() * 1000000)}`,
+        userId,
+      });
+    await press(value.otherSlackUserId);
+    await press(value.ownerSlackUserId, { ...post, channel: "D_WRONG_CHANNEL" });
+    const status = async () =>
+      (
+        await shared!
+          .admin`select status from connector_action_requests where approval_id = ${approvalId}`
+      )[0]!.status;
+    expect(await status()).toBe("pending");
+    await Promise.all([
+      press(),
+      acceptSessionApprovalDecision(client.db, {
+        accountId: value.owner.accountId,
+        workspaceId: value.owner.workspaceId,
+        sessionId: route.session_id,
+        subjectId: value.owner.subjectId,
+        payload: { approvalId, decision: "reject" },
+        clientEventId: crypto.randomUUID(),
+      }),
+    ]);
+    expect(["approved", "rejected"]).toContain(await status());
+    const [count] = await shared!
+      .admin`select count(*)::int as count from session_events where session_id = ${route.session_id} and type = 'user.approvalDecision' and payload->>'approvalId' = ${approvalId}`;
+    expect(count!.count).toBe(1);
+    await press();
+    expect(await status()).not.toBe("pending");
+    // A lost delivery cursor after either surface decided must replay the same
+    // post intent, without a digest conflict or another provider message.
+    const countBeforeReplay = value.slack.posts.length;
+    await shared!.admin`update slack_interactions
+      set last_delivered_session_event_sequence = 0,
+          delivery_claim_holder_id = null, delivery_claim_expires_at = null,
+          delivery_retry_at = null, updated_at = now()
+      where id = ${route.id}`;
+    await drainAll(value.deps);
+    expect(value.slack.posts.length).toBe(countBeforeReplay);
+    const [replayed] = await shared!
+      .admin`select last_delivered_session_event_sequence, delivery_retry_at from slack_interactions where id = ${route.id}`;
+    expect(replayed!.last_delivered_session_event_sequence).toBeGreaterThan(0);
+    expect(replayed!.delivery_retry_at).toBeNull();
+    // A completed delivery from an older renderer has different immutable
+    // bytes. Its recorded provider result still settles this exact event;
+    // upgrading must never post a replacement or wedge the delivery cursor.
+    await shared!.admin`update slack_bot_post_operations set request_digest = repeat('f', 64)
+      where status = 'completed' and operation_id = (
+        select message_operation_id from slack_interaction_action_handles where id = ${approve}
+      )`;
+    await shared!.admin`update slack_interactions
+      set last_delivered_session_event_sequence = 0, delivery_retry_at = null
+      where id = ${route.id}`;
+    await drainAll(value.deps);
+    expect(value.slack.posts.length).toBe(countBeforeReplay);
+    const [upgraded] = await shared!
+      .admin`select last_delivered_session_event_sequence, delivery_retry_at
+      from slack_interactions where id = ${route.id}`;
+    expect(upgraded!.last_delivered_session_event_sequence).toBeGreaterThan(0);
+    expect(upgraded!.delivery_retry_at).toBeNull();
+  }, 90_000);
+}

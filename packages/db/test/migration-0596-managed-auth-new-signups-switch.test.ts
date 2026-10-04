@@ -261,7 +261,6 @@ describe("migration 0596 managed auth new signups switch", () => {
       expectedRole: "opengeni_app",
       targetSchema: "public",
       rlsStrategy: "force" as const,
-      organizationTenancyCanonicalActivationEnabled: true,
     };
     const switchViolations = async () =>
       evaluateRuntimeDatabasePosture(

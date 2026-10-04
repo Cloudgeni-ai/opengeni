@@ -1,5 +1,47 @@
 # @opengeni/sdk
 
+## 1.2.0
+
+### Minor Changes
+
+- 11c4d3c: Add typed workspace/organization Insights usage and calls client methods plus the small insights-usage subpath. Support repeated filters across the expanded dimensions, custom UTC day selections, strict false serialization, opaque cursors and cancellation without loading contract validation at runtime.
+- d870f32: Support model-scoped signup and coupon credits with a shared operator default and
+  per-offer overrides. Update coverage at runtime, spend eligible promotions before
+  general credits, and preserve allocation and retry accounting. Keep scoped coupon
+  redemption separate from paid top-ups. Show credit funding in model selection and
+  current coverage on demand in billing. Legacy unrestricted grants stay unrestricted.
+
+### Patch Changes
+
+- 21c8904: Support optional HTTPS model catalog logos with safe image fallbacks, and declare the item type of the SDK filesystem function tool's command tuple.
+- Updated dependencies [21c8904]
+- Updated dependencies [d870f32]
+  - @opengeni/contracts@1.2.0
+  - @opengeni/connect@1.2.0
+
+## 1.1.0
+
+### Minor Changes
+
+- 208dec1: Add `updateArtifactPin(workspaceId, kind, artifactId, pinned)` and optional catalog
+  `pinned` metadata for workspace-shared artifact pins. Catalog pages order matching
+  pins globally before the selected sort without changing content-access authority.
+
+### Patch Changes
+
+- 411b3b5: A scheduled task whose model was retired or removed from the catalog now records each
+  occurrence as a visible failed run with reason `scheduled_model_unavailable` instead of
+  failing the scheduler activity and leaving no run.
+- 4d5053f: `new OpenGeni({ baseUrl })` treats a blank value (a copied `.env.example` line like
+  `OPENGENI_API_BASE_URL=`) as unset and uses the hosted API, and a blank
+  `organizationId` as unset. `@opengeni/sdk/package.json` is now an exported subpath.
+- Updated dependencies [5fd6c55]
+- Updated dependencies [c600e3a]
+- Updated dependencies [411b3b5]
+- Updated dependencies [208dec1]
+  - @opengeni/contracts@1.1.0
+  - @opengeni/connect@1.1.0
+
 ## 1.0.2
 
 ### Patch Changes

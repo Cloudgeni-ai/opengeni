@@ -540,8 +540,8 @@ separate service subject when projecting lifecycle audit records.
 
 Migration `0442_external_owning_user_authority.sql` adds persisted external-owner
 consistency checks to the existing self-membership and private-create routines.
-It does not activate private sessions: platform readiness and shared-workspace
-organization settings still apply. Pair it with the API's dedicated external
+It does not enable private sessions by itself: shared-workspace organization
+settings still apply. Pair it with the API's dedicated external
 owning-user proof; do not synthesize native-cookie flags or grant Personal
 workspace membership to service keys. The matching runtime adds live external
 authority checks before session-create, visibility-change, and fork commits.
@@ -1434,17 +1434,24 @@ must never be interpreted as authorization to mutate staging or production.
 ### Canonical organization-tenancy authority activation
 
 Organization-tenancy activation follows the same maintenance shape, one
-subsystem at a time. `docs/organization-tenancy.md` owns the boundary itself -
-what is reversible before activation, what becomes forward-recovery-only after,
-and the exact preconditions - and this section owns the operator procedure.
+subsystem at a time. `docs/organization-tenancy.md` owns the boundary itself;
+this section owns the operator procedure. A pre-0264, pre-0275, or pre-0303
+image must never be started again.
 
-The named switch for declining or deferring the boundary is
-`OPENGENI_ORGANIZATION_TENANCY_CANONICAL_ACTIVATION_ENABLED`. It defaults to
-`false` in both `.env.example` and the chart's `config` map, and leaving it at
-`false` is the supported way to decline or defer activation indefinitely: the
-deployment keeps the legacy workspace-owned lane and an image rollback stays an
-ordinary deployment decision. Every rolling tenancy migration still applies
-normally with the switch off.
+`0611_universal_session_tenancy_activation.sql` makes session tenancy
+product-active for every organization and is `-- deployment-mode: rolling`: it
+only rewrites routine predicates (no table lock, backfill, or receipt write), so
+old and new images run side by side and an image rollback stays an ordinary
+deployment decision. Only-me chats default to enabled for every organization
+with no `organization_private_session_settings` row; owners and admins can
+still turn them off. Activation receipts keep only their legacy-lane meaning
+(see [`organization-tenancy.md`](organization-tenancy.md)).
+
+History: the `db:activate-session-tenancy` command (single and
+`--all-organizations`), the 0586 fleet marker procedure, and
+`OPENGENI_ORGANIZATION_TENANCY_CANONICAL_ACTIVATION_ENABLED` with its startup
+interlock are retired; the variable is accepted and ignored with a warning, so
+remove it from Helm values and environments at your convenience.
 
 Connection-backed MCP servers use ordinary native connections. Host-provenance
 connection refs and the former host credential callback are retired. Integrating
@@ -1459,208 +1466,6 @@ workspace `settings.sessionAgentDefaults`, and a top-level session that omits
 `agent` resolves to the workspace default or `{ capabilities: "all" }`. Sessions
 created before 0559 keep their NULL configuration and legacy behavior. See
 `packages/contracts/src/agent-config.ts`.
-
-Migration 0303 is intentionally rolling and applies while the switch remains
-`false`; applying the ordinary migration chain does not activate an
-organization. The switch is enforced by the separately invoked session-tenancy
-activation command and by API/worker startup posture after the first durable
-activation receipt exists. It is not a reversible feature flag: once any
-organization is activated, every subsequently started API and worker must keep
-the switch `true`, and a pre-0303 image or a new image with the switch disabled
-fails closed.
-
-Consequently, a normal local stack creates workspace-visible sessions and omits
-the visibility chooser while Only me is unavailable. That is the expected
-pre-activation posture, not a missing browser feature. Testing Only me requires
-the same explicit version-1 activation receipt and enabled deployment switch
-described below; do not seed the receipt through direct table DML.
-
-The migration deliberately drops the legacy eight-argument visibility/fork
-routines and exposes only nine-argument, activation-versioned routines with no
-defaults. This is a drained protocol cutover, not an overload-compatible API:
-an old caller fails with undefined-function, and operators must not add a
-wrapper that supplies an activation version on its behalf.
-
-Three tenancy cutovers have now used this maintenance shape, and a pre-0264,
-pre-0275, or pre-0303 image must never be started again after its corresponding
-activation:
-
-- `0264_connection_authority_runtime_activation.sql` activated canonical
-  Connection authority; and
-- `0275_scheduled_connection_authority.sql` froze common-user Connection
-  authority on scheduled-task revisions; and
-- `0303_session_tenancy_product_activation.sql` installed the per-organization
-  session-tenancy receipt plus hardened visibility/fork contract. Unlike the
-  first two, applying 0303 is inert; the drained operator command performs the
-  forward-only per-organization activation.
-
-The first two migration files declare `-- deployment-mode: maintenance`; 0303
-and 0340 install their contracts as rolling migrations but the separate
-activation command is still a drained, forward-only cutover. Each activation
-rejects a live application with SQLSTATE `55000` before taking `ACCESS
-EXCLUSIVE` source-table locks, and no activated boundary has a down-migration.
-For the **fleet activation** cutover, rolling migration
-`0583_session_tenancy_operator_permission.sql` is inert preparation only. It
-adds a migration-owner-only, PUBLIC-revoked audited preference-enable function;
-it neither activates organizations nor changes sessions. The CLI additionally
-requires the separately reviewed maintenance marker
-`0586_private_sessions_fleet_activation.sql` before accepting:
-
-```bash
-bun run db:activate-session-tenancy -- \
-  --all-organizations \
-  --activated-by '<bounded-operator-identity>'
-```
-
-Run this only inside the existing protected, drained maintenance release after
-fresh all-organization evidence and release admission clearance. Persist and
-prove canonical activation `true` in durable Helm values **while the runtime is
-parked and before the first committed witness**; a Job-only override is not
-sufficient. Recovery and every later release must retain that value after any
-activation witness. Before a witness, an unwind additionally requires verified
-zero activation receipts; after one, recovery is forward-only.
-
-The fleet command freezes `managed_accounts`, preflights pending activations,
-then writes receipts for pending accounts in one transaction. It checks final
-receipt coverage before committing. Both activation scopes preserve all
-existing organization preferences byte-identically, including missing settings
-and explicit OFF or ON choices. The fleet command rejects the retired
-`--enable-organization-private-sessions` override and never invokes the 0583
-preference-enable helper. After activation, an organization owner or admin opts
-in separately through organization settings; shared-workspace Only me remains
-unavailable while that setting is OFF. No existing session visibility, chat
-default, credential owner, or authority is changed. Marker ordinal references
-must follow the project renumber command
-if newer main migrations claim these ordinals.
-
-The CLI validates every supplied runtime identity as an existing restricted
-database login (no superuser or BYPASSRLS), clears PostgreSQL's transaction-cached
-activity snapshot before its initial drain check and each guarded activation,
-then clears and checks again after receipt coverage while source locks remain
-held, before commit. A late application reconnect rejects and rolls back the
-entire transaction. The already-activated replay-only fleet must pass the same
-fresh initial and final drain checks; it never uses preference enablement as a
-drain mechanism.
-
-The activation CLI's migration-owner connection carries the same canonical
-`application_name` protocol identity as `createDb`, including through a
-transaction pooler. Before connecting, it replaces only `application_name` in
-the migration URL's query parameters: a legacy operator Job tag must not
-override the current protocol identity. Credentials, multi-host authority,
-schema, TLS, timeout budgets, and all other URL options are preserved. This
-normalization applies only to activation, not ordinary migration steps.
-An unversioned raw connection is not a supported operator
-substitute: the current sessions policy rejects it even when the backfill
-receipts and parity evidence are ready.
-
-For each subsequent single-organization activation:
-
-1. bind and verify the exact production subscription, cluster context,
-   namespace, release, database, and image digests;
-2. prove the activation preconditions in
-   [`organization-tenancy.md`](organization-tenancy.md#preconditions-for-permitting-an-activation)
-   - completed membership, resource-classification, and final session-classifier
-   receipts under fresh run keys, current counters from
-   `bun run db:inventory-tenancy --organization-id <uuid>`, parity evidence,
-   cross-organization/RLS evidence, and immediate-revocation evidence - and
-   record that evidence in private operator storage before touching the cluster;
-3. prepare canonical activation `true` for the new image generation. Never
-   flip it on a running pre-activation generation as a way to "test" activation;
-4. stop the API plus every control and turn worker while preserving the
-   migration-only secret and Job identity, then persist and verify canonical
-   activation `true` in durable Helm values while they remain parked;
-5. query `pg_stat_activity` through the migration connection and prove zero
-   other sessions with `usename = 'opengeni_app'`;
-6. run the new digest's migration Job and require 0303, 0340, plus every prerequisite
-   migration to appear in `schema_migrations`;
-7. with the application still drained, run:
-
-   ```bash
-   OPENGENI_ORGANIZATION_TENANCY_CANONICAL_ACTIVATION_ENABLED=true \
-   OPENGENI_MIGRATIONS_DATABASE_URL='<migration-owner-url>' \
-   OPENGENI_MIGRATION_APPLICATION_DATABASE_ROLES='opengeni_app' \
-   bun run db:activate-session-tenancy -- \
-     --organization-id <organization-uuid> \
-     --activated-by '<bounded-operator-identity>'
-   ```
-
-   The command reruns the canonical inventory, parity, and backfill-evidence
-   reports, retains and hashes the inventory snapshot, and requires every parity invariant plus each
-   exact drainable/bounded activation lane to be zero. It deliberately does not
-   gate on total ownerless sessions or all-time immutable legacy writer rows;
-   migration 0298 supplies their truthful attributable and observation-window
-   refinements. Migration 0340 also requires the newest
-   `organization_memberships`, `sessions`, `variable_sets`, `rigs`, `machines`,
-   and `connections` receipts to be completed, verifies full-population counts
-   for the resource/session/connection classifiers, requires zero unresolved
-   resource or connection rows, and binds those six exact receipt ids into every
-   new activation row. It then recomputes inventory, parity, and receipt evidence
-   under the complete source-table lock, checks the supplied exact application-
-   role inventory twice around that fence, and is idempotent only for the same
-   evidence digests. A stale or fabricated digest rejects with SQLSTATE `40001`.
-   A live application session rejects activation with SQLSTATE `55000`; changed
-   evidence against an existing receipt is a conflict. Immediately before the
-   final recompute and receipt write, the database also takes the owner-only
-   `session-tenancy-canonical-boundary:v1` transaction fence. This happens only
-   after all source-table locks; do not move the boundary earlier, because future
-   greenfield provisioning writes its complete graph before taking the same
-   fence and the reversed order would deadlock.
-
-   Migration 0349 implements that greenfield side. After at least one operator
-   activation is committed, an ordinary eligible self-service signup
-   automatically appends its version-1 activation receipt, deterministic
-   greenfield evidence, and enabled private-session setting/event in the same
-   transaction as its owner + Personal-workspace graph and setup receipt. There
-   is no second operator command for that newly inserted organization. A signup
-   that wins the boundary before the first committed witness stays unactivated,
-   as do every 0348 adopted legacy account and all existing organizations; run
-   this drained operator procedure for those organizations. Never hand-insert a
-   greenfield evidence or activation row to bypass that distinction.
-
-   Migration 0303 created `session_tenancy_activations` with `FORCE ROW LEVEL
-   SECURITY` and a `FOR SELECT`-only policy, so under this exact
-   non-superuser-owner posture the activation's own receipt `INSERT` was denied
-   with SQLSTATE `42501` after every gate had already passed. Migration 0340
-   re-opens that single command behind an owner-only marker policy; the runtime
-   role keeps `SELECT` and nothing else, and the table has no `UPDATE` or
-   `DELETE` writer at all. `packages/db/test/migration-0340-owner-migrated-tenancy-cutover.test.ts`
-   commits a real receipt through this posture, so the cutover is executable end
-   to end ([`force-rls-migration-backfills.md`](force-rls-migration-backfills.md)).
-8. start only that same digest's API and workers, and require the startup and
-   readiness posture checks to pass before reopening admission.
-
-After the activation migration commits, rollback to an earlier application image
-is forbidden, and setting the switch back to `false` is not a rollback - it
-cannot restore the legacy authority. Remain in maintenance and fix forward.
-
-### Production all-organization Only me availability cutover
-
-Migration `0586_private_sessions_fleet_activation.sql` is a maintenance-classified
-release marker, not an activation shortcut. The protected production release
-parks application database clients, applies the candidate migrations, then runs
-`db:activate-session-tenancy -- --all-organizations --activated-by
-production-release:<source-sha>` in its migration Job. The command takes a
-fixed snapshot of `managed_accounts`, checks the required migration, inventory,
-parity and six backfill receipt families for every not-yet-activated account,
-and calls the existing guarded SQL activation for each. All receipts commit in
-**one transaction**, including final coverage verification. An unready
-organization fails the entire Job without activating any new organization; do
-not bypass this gate or insert activation rows by hand. The maintenance lease
-owns forward recovery once the migration Job is authorized.
-An empty fleet also fails: without an initial activation receipt, migration
-0349 has no witness to auto-activate the first future signup.
-
-Before admitting that release, prepare and retain per-organization evidence
-using the fresh-key membership, resource, connection and final session
-backfills and the parity/RLS/revocation checks in
-[`organization-tenancy.md`](organization-tenancy.md#preconditions-for-permitting-an-activation).
-Fix unresolved cases first. The migration Job's 40-minute deadline is not a
-substitute for this preflight; a large fleet may require a deliberately budgeted
-maintenance window. The protected Helm reconciliation enables
-`OPENGENI_ORGANIZATION_TENANCY_CANONICAL_ACTIVATION_ENABLED` on the new runtime
-and preserves it for later releases. Existing organizations' independent
-`organization_private_session_settings` remain disabled until their owner or
-admin opts in; this cutover makes that toggle available, not automatically on.
 
 For Azure managed Blob storage, the artifact generator can consume the
 sensitive Terraform output `object_storage_azure_connection_string` into the
@@ -2868,7 +2673,7 @@ The runtime secret must provide values such as:
 - `OPENGENI_OBJECT_STORAGE_BACKEND=gcs` plus `OPENGENI_OBJECT_STORAGE_GCS_PROJECT_ID`; prefer GKE Workload Identity over service-account JSON
 - `OPENGENI_PRODUCT_ACCESS_MODE=local|configured|managed`, independent of cloud/infrastructure profile
 - `OPENGENI_BILLING_MODE=disabled|stripe`, `OPENGENI_ENTITLEMENTS_MODE=none|static|managed`, and `OPENGENI_USAGE_LIMITS_MODE=none|static|managed`
-- `OPENGENI_VERIFIED_SIGNUP_TRIAL_CREDITS_ENABLED=false` keeps the one-time $10 verified first self-service signup grant off. Activating it affects only new setup receipts, never existing users, invitations, or a later organization. It is the master opt-in; the database runtime switch from migration 0521 can pause and resume grants without a deploy or restart (see "Verified signup trial runtime switch (0521)" above). The grant is account-wide and may pay any OpenGeni-credit resource; no payment card is required. A completed in-flight resource can leave a negative balance, and future top-ups clear that balance first; no card is automatically charged. While the grant leaves a positive balance, new work that names no model defaults to `OPENGENI_CREDITS_DEFAULT_MODEL` (unless a saved workspace default or connected subscription wins), and the post-signup model step shows the balance; at zero or below it falls back to the deployment default. See "Default model for new work" in [`model-providers.md`](model-providers.md).
+- `OPENGENI_VERIFIED_SIGNUP_TRIAL_CREDITS_ENABLED=false` keeps the one-time $10 verified first self-service signup grant off. Activating it affects only new setup receipts, never existing users, invitations, or a later organization. It is the master opt-in; the database runtime switch from migration 0521 can pause and resume grants without a deploy or restart (see "Verified signup trial runtime switch (0521)" above). The grant is account-wide. Operators can restrict and update eligible models with `bun run credits:policy`; `OPENGENI_CREDIT_PROMOTION_POLICY_JSON` is a bootstrap fallback until the first runtime policy revision. With neither configured, new grants remain unrestricted. See [scoped promotional credits](scoped-promotional-credits.md) for activation and existing-balance behavior. No payment card is required. A completed in-flight resource can leave a negative general balance, and future top-ups clear that balance first; no card is automatically charged. New work that names no model chooses a funded credits-billed model unless a saved workspace default or connected subscription wins; with no funded candidate it falls back to the deployment default. The signup welcome shows the amount, and the picker shows each model's current payment source. See "Default model for new work" in [`model-providers.md`](model-providers.md).
 - `OPENGENI_SANDBOX_WARM_BILLING_MODE=usage_only|shadow|credits` and `OPENGENI_DOCUMENT_EMBEDDING_BILLING_MODE=usage_only|shadow|credits` are independent of Stripe and default to `usage_only`. `shadow` is operator-only comparison, never a customer debit. Paid sandbox mode additionally needs a reviewed backend warm rate in `OPENGENI_SANDBOX_WARM_RATE_MICROS_PER_SECOND_JSON`; paid deployment-funded embeddings need `OPENGENI_DOCUMENT_EMBEDDING_RATE_MICROS_PER_MILLION_BYTES` (integer USD micros per million input UTF-8 bytes) and `OPENGENI_DOCUMENT_EMBEDDING_CREDITS_ACTIVATED_AT` (ISO UTC timestamp; earlier queued jobs stay unpriced). This PR leaves commercial rates and production activation unset.
 - `OPENGENI_AUTH_REQUIRED=true` and `OPENGENI_ACCESS_KEY` only when using the optional deployment shared-key boundary
 - `OPENGENI_BETTER_AUTH_SECRET`, trusted origins, public base URL, Resend key, and delegation secret when `OPENGENI_PRODUCT_ACCESS_MODE=managed`
@@ -2878,7 +2683,7 @@ The runtime secret must provide values such as:
   admins and encrypted under `OPENGENI_ENVIRONMENTS_ENCRYPTION_KEY`; do not put
   those keys in Helm values, catalog JSON, or the deployment runtime Secret.
 - `OPENGENI_STRIPE_SECRET_KEY`, publishable key, webhook secret, and model pricing JSON when `OPENGENI_BILLING_MODE=stripe`; model pricing is also required when `OPENGENI_USAGE_LIMITS_MODE=managed` and any credits model lacks a reviewed built-in price
-- Stripe Checkout accepts customer-entered promotion codes on credit packages.
+- Promotional codes are entered and reviewed in the app; paid Stripe top-ups have no promotion-code field.
   Configure `OPENGENI_WEB_BASE_URL` when the browser and API use different
   origins; Checkout and billing-portal return URLs may use that configured web
   origin or `OPENGENI_PUBLIC_BASE_URL`, and the default return uses the web

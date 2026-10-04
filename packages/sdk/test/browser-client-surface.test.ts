@@ -19,8 +19,6 @@ const legacyBrowserUnusedMethods = [
   "advanceExternalBrowserAuthRun",
   "applyGoalRevision",
   "browseAtlassianSources",
-  // Only the removed Agents page cancelled sessions from the web client.
-  "cancelSession",
   "captureComputerTarget",
   "codexAccountUsage",
   "codexDisconnect",
@@ -39,6 +37,9 @@ const legacyBrowserUnusedMethods = [
   "getEnvironment",
   "getLatestEventResult",
   "getLatestStartedTurn",
+  // Shared Insights methods are adopted by the separately owned Insights UI.
+  "getWorkspaceInsightsUsage",
+  "getOrganizationInsightsUsage",
   // Keep the existing summary/workspace reads available to SDK callers after
   // Insights moved to getOrganizationModelUsage.
   "getOrganizationUsageSummary",

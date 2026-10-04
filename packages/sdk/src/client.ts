@@ -5,12 +5,23 @@ import type {
   ClaudeSubscriptionSetupTokenRequest,
   SubscriptionPoolSettings,
 } from "@opengeni/contracts";
+import {
+  insightsUsageQueryString,
+  type WorkspaceInsightsUsageOptions,
+  type OrganizationInsightsUsageOptions,
+  type WorkspaceInsightsCallsOptions,
+  type OrganizationInsightsCallsOptions,
+  type InsightsCallsScope,
+  type InsightsUsageResponse,
+  type InsightsCallsResponse,
+} from "./insights-usage";
 import type {
   ArtifactCatalogKind,
   ArtifactCatalogListOptions,
   ArtifactCatalogListResponse,
   ArtifactPinResponse,
 } from "./artifact-catalog";
+import type { ToolActionReview, ToolReviewDetailsPage } from "@opengeni/contracts";
 import type {
   SessionMessageSearchRequest,
   SessionMessageSearchResponse,
@@ -1404,6 +1415,34 @@ export class OpenGeniClient {
       path,
       (signal) => this.requestJson<Session>("GET", path, undefined, {}, { signal }),
       options,
+    );
+  }
+
+  async getToolActionReview(
+    workspaceId: string,
+    sessionId: string,
+    approvalId: string,
+  ): Promise<ToolActionReview> {
+    return await this.requestJson(
+      "GET",
+      `${sessionPath(workspaceId, sessionId)}/tool-reviews/${encodeURIComponent(approvalId)}`,
+    );
+  }
+
+  async getToolReviewDetails(
+    workspaceId: string,
+    sessionId: string,
+    approvalId: string,
+    options: { actionDigest: string; path?: string; offset?: number },
+  ): Promise<ToolReviewDetailsPage> {
+    const query = new URLSearchParams({
+      actionDigest: options.actionDigest,
+      path: options.path ?? "",
+      offset: String(options.offset ?? 0),
+    });
+    return await this.requestJson(
+      "GET",
+      `${sessionPath(workspaceId, sessionId)}/tool-reviews/${encodeURIComponent(approvalId)}/details?${query}`,
     );
   }
 
@@ -7516,14 +7555,27 @@ export class OpenGeniClient {
     );
   }
 
+  getConnectorToolPermissions(
+    workspaceId: string,
+    capabilityId: string,
+    options?: { signal?: AbortSignal },
+  ): Promise<ConnectorToolPermissionsResponse>;
+  getConnectorToolPermissions(
+    workspaceId: string,
+    capabilityId: string,
+    options?: { signal?: AbortSignal; connectionId?: string; instanceKey?: string },
+  ): Promise<ConnectorToolPermissionsResponse>;
   async getConnectorToolPermissions(
     workspaceId: string,
     capabilityId: string,
-    options: { signal?: AbortSignal } = {},
+    options: { signal?: AbortSignal; connectionId?: string; instanceKey?: string } = {},
   ): Promise<ConnectorToolPermissionsResponse> {
+    const query = new URLSearchParams();
+    if (options.connectionId) query.set("connectionId", options.connectionId);
+    if (options.instanceKey) query.set("instanceKey", options.instanceKey);
     return await this.requestJson(
       "GET",
-      `/v1/workspaces/${workspaceId}/capabilities/${encodeURIComponent(capabilityId)}/tool-permissions`,
+      `/v1/workspaces/${workspaceId}/capabilities/${encodeURIComponent(capabilityId)}/tool-permissions${query.size ? `?${query}` : ""}`,
       undefined,
       {},
       options,
@@ -8886,6 +8938,65 @@ export class OpenGeniClient {
         ...(options.sessionId !== undefined ? { sessionId: options.sessionId } : {}),
       },
       { signal: options.signal },
+    );
+  }
+
+  /** Shared usage under the existing workspace access gate. */
+  async getWorkspaceInsightsUsage(
+    workspaceId: string,
+    options: WorkspaceInsightsUsageOptions = {},
+    requestOptions: OpenGeniRequestOptions = {},
+  ): Promise<InsightsUsageResponse> {
+    return await this.requestJson(
+      "GET",
+      `/v1/workspaces/${encodeURIComponent(workspaceId)}/insights/usage${insightsUsageQueryString(options)}`,
+      undefined,
+      {},
+      requestOptions,
+    );
+  }
+
+  /** Shared usage under the existing organization access gate. */
+  async getOrganizationInsightsUsage(
+    accountId: string,
+    options: OrganizationInsightsUsageOptions = {},
+    requestOptions: OpenGeniRequestOptions = {},
+  ): Promise<InsightsUsageResponse> {
+    return await this.requestJson(
+      "GET",
+      `/v1/organizations/${encodeURIComponent(accountId)}/insights/usage${insightsUsageQueryString(options)}`,
+      undefined,
+      {},
+      requestOptions,
+    );
+  }
+
+  /** Visible calls only; a filter never grants access to hidden call facts. */
+  async listInsightsCalls(
+    scope: Extract<InsightsCallsScope, { kind: "workspace" }>,
+    options?: WorkspaceInsightsCallsOptions,
+    requestOptions?: OpenGeniRequestOptions,
+  ): Promise<InsightsCallsResponse>;
+  async listInsightsCalls(
+    scope: Extract<InsightsCallsScope, { kind: "organization" }>,
+    options?: OrganizationInsightsCallsOptions,
+    requestOptions?: OpenGeniRequestOptions,
+  ): Promise<InsightsCallsResponse>;
+  async listInsightsCalls(
+    scope: InsightsCallsScope,
+    options: OrganizationInsightsCallsOptions = {},
+    requestOptions: OpenGeniRequestOptions = {},
+  ): Promise<InsightsCallsResponse> {
+    const path =
+      scope.kind === "workspace"
+        ? `/v1/workspaces/${encodeURIComponent(scope.workspaceId)}/insights/calls`
+        : `/v1/organizations/${encodeURIComponent(scope.accountId)}/insights/calls`;
+    return await this.requestJson(
+      "GET",
+      `${path}${insightsUsageQueryString(options)}`,
+      undefined,
+      {},
+      requestOptions,
     );
   }
 

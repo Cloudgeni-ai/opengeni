@@ -13,10 +13,12 @@ import {
   buildActionCatalog,
   isActionCatalogExempt,
   registeredApiRoutes,
+  type ActionCatalogEntry,
 } from "../../../scripts/public-api/action-catalog";
 import { ACTION_CATALOG } from "../src/mcp/action-catalog.gen";
 import {
   buildOrganizationMcpServer,
+  organizationMcpIcons,
   READ_ONLY_POST_ACTIONS,
   type OrganizationMcpCaller,
   searchActions,
@@ -31,6 +33,38 @@ const insightsRoutes = [
   "/v1/workspaces/:workspaceId/insights/calls",
   "/v1/workspaces/:workspaceId/insights/usage",
 ] as const;
+
+function routeKey(route: { method: string; path: string }): string {
+  return `${route.method} ${route.path}`;
+}
+
+function catalogByRoute(entries: readonly ActionCatalogEntry[]) {
+  const routes = new Map<string, ActionCatalogEntry>();
+  const ids = new Set<string>();
+  const duplicateRoutes = new Set<string>();
+  const duplicateIds = new Set<string>();
+  for (const entry of entries) {
+    const key = routeKey(entry);
+    if (routes.has(key)) duplicateRoutes.add(key);
+    if (ids.has(entry.id)) duplicateIds.add(entry.id);
+    ids.add(entry.id);
+    routes.set(key, {
+      ...entry,
+      request: [...entry.request].sort(),
+      response: [...entry.response].sort(),
+    });
+  }
+  expect(duplicateRoutes).toEqual(new Set());
+  expect(duplicateIds).toEqual(new Set());
+  return routes;
+}
+
+function assertCatalogMatches(
+  actual: readonly ActionCatalogEntry[],
+  expected: readonly ActionCatalogEntry[],
+): void {
+  expect(catalogByRoute(actual)).toEqual(catalogByRoute(expected));
+}
 
 const full: OrganizationAccessPolicy = {
   preset: "full",
@@ -82,15 +116,15 @@ describe("organization MCP action catalog", () => {
   test("covers every registered route except the listed exemptions, and is current", () => {
     const registered = registeredApiRoutes();
     // Regenerate with `bun scripts/public-api/action-catalog.ts --write`.
-    expect(ACTION_CATALOG).toEqual(buildActionCatalog(registered));
-    const listed = new Set(ACTION_CATALOG.map((entry) => `${entry.method} ${entry.path}`));
-    const missing = [...registered, ...surface.routes]
-      .filter((route) => !isActionCatalogExempt(route.path))
-      .map((route) => `${route.method} ${route.path}`)
-      .filter((key) => !listed.has(key));
-    expect(missing).toEqual([]);
-    expect(new Set(ACTION_CATALOG.map((entry) => entry.id)).size).toBe(ACTION_CATALOG.length);
-    for (const entry of ACTION_CATALOG) expect(isActionCatalogExempt(entry.path)).toBe(false);
+    assertCatalogMatches(ACTION_CATALOG, buildActionCatalog(registered));
+    const listed = new Set(ACTION_CATALOG.map(routeKey));
+    // Independently require the complete route union, not only generator parity.
+    const callable = new Set(
+      [...registered, ...surface.routes]
+        .filter((route) => !isActionCatalogExempt(route.path))
+        .map(routeKey),
+    );
+    expect(listed).toEqual(callable);
     // Every read-only POST exception names a real POST action.
     for (const path of READ_ONLY_POST_ACTIONS) expect(listed.has(`POST ${path}`)).toBe(true);
     // UI actions that live outside the SDK are included too.
@@ -108,15 +142,85 @@ describe("organization MCP action catalog", () => {
     ])
       expect(listed.has(key)).toBe(false);
   });
+
+  test("catalog parity is order-independent but rejects missing, extra and ambiguous actions", () => {
+    const expected: ActionCatalogEntry[] = [
+      {
+        id: "readFixture",
+        method: "GET",
+        path: "/v1/fixture",
+        request: [],
+        response: ["Fixture", "FixtureError"],
+      },
+      {
+        id: "createFixture",
+        method: "POST",
+        path: "/v1/fixture",
+        request: ["CreateFixture", "FixtureOptions"],
+        response: ["Fixture"],
+      },
+    ];
+    const reordered = [...expected].reverse().map((entry) => ({
+      ...entry,
+      request: [...entry.request].reverse(),
+      response: [...entry.response].reverse(),
+    }));
+    assertCatalogMatches(reordered, expected);
+    const [read, create] = expected as [ActionCatalogEntry, ActionCatalogEntry];
+    for (const invalid of [
+      [read],
+      [...expected, { ...read, id: "extraFixture", path: "/v1/fixture/extra" }],
+      [read, { ...create, method: "DELETE" }],
+      [read, { ...create, request: [] }],
+      [read, { ...create, response: [] }],
+      [read, { ...create, id: "wrongAction" }],
+      [read, { ...create, id: read.id }],
+      [...expected, { ...read, id: "shadowFixture" }],
+    ]) {
+      expect(() => assertCatalogMatches(invalid, expected)).toThrow();
+    }
+  });
 });
 
 describe("organization MCP server", () => {
+  test("advertises the brand icons in serverInfo", async () => {
+    const { client } = await connect(person(readOnly));
+    try {
+      const info = client.getServerVersion()!;
+      expect(info.name).toBe("opengeni");
+      expect(info.title).toBe("Opengeni");
+      expect(info.icons?.map(({ mimeType, sizes, theme }) => ({ mimeType, sizes, theme }))).toEqual(
+        [
+          { mimeType: "image/svg+xml", sizes: ["any"], theme: "light" },
+          { mimeType: "image/svg+xml", sizes: ["any"], theme: "dark" },
+        ],
+      );
+      const marks = info.icons!.map(({ src }) => {
+        expect(src.startsWith("data:image/svg+xml;base64,")).toBe(true);
+        return Buffer.from(src.slice(src.indexOf(",") + 1), "base64").toString("utf8");
+      });
+      expect(marks[0]).toContain('fill="#111111"');
+      expect(marks[1]).toContain('fill="#FFFFFF"');
+    } finally {
+      await client.close();
+    }
+    expect(organizationMcpIcons("https://app.example.test").at(-1)).toEqual({
+      src: "https://app.example.test/icon-512.png",
+      mimeType: "image/png",
+      sizes: ["512x512"],
+      theme: "light",
+    });
+  });
+
   test.each(insightsRoutes)(
     "discovers, describes and dispatches %s with the original read-only person proof",
     async (path) => {
       const { client, call, seen } = await connect(person(readOnly));
       try {
-        const id = `GET ${path}`;
+        // Generated ids follow the SDK method name when one maps the route.
+        const id = ACTION_CATALOG.find(
+          (entry) => entry.method === "GET" && entry.path === path,
+        )!.id;
         const found = (await call("opengeni_actions_search", { query: "insights", limit: 50 }))
           .value as { actions: Array<{ id: string; method: string; path: string }> };
         expect(found.actions).toContainEqual({ id, method: "GET", path });

@@ -1,5 +1,37 @@
 # @opengeni/config
 
+## 1.2.0
+
+### Minor Changes
+
+- d870f32: Support model-scoped signup and coupon credits with a shared operator default and
+  per-offer overrides. Update coverage at runtime, spend eligible promotions before
+  general credits, and preserve allocation and retry accounting. Keep scoped coupon
+  redemption separate from paid top-ups. Show credit funding in model selection and
+  current coverage on demand in billing. Legacy unrestricted grants stay unrestricted.
+
+### Patch Changes
+
+- 21c8904: Support optional HTTPS model catalog logos with safe image fallbacks, and declare the item type of the SDK filesystem function tool's command tuple.
+- Updated dependencies [21c8904]
+- Updated dependencies [d870f32]
+  - @opengeni/contracts@1.2.0
+  - @opengeni/codex@1.2.0
+  - @opengeni/xai-subscription@1.2.0
+
+## 1.1.0
+
+### Patch Changes
+
+- 4cd01cd: Every organization is now session-tenancy activated (rolling migration 0611): private ("Only me") sessions, visibility changes, forks, and personal-resource grants no longer require a per-organization activation receipt, and the owner/admin Only-me setting defaults to enabled when an organization has never changed it (owners and admins can still turn it off). `OPENGENI_ORGANIZATION_TENANCY_CANONICAL_ACTIVATION_ENABLED` and `Settings.organizationTenancyCanonicalActivationEnabled` are retired (the variable is accepted and ignored with a warning), the runtime posture no longer has an activation startup interlock, and the `db:activate-session-tenancy` operator command is removed.
+- Updated dependencies [5fd6c55]
+- Updated dependencies [c600e3a]
+- Updated dependencies [411b3b5]
+- Updated dependencies [208dec1]
+  - @opengeni/contracts@1.1.0
+  - @opengeni/codex@1.1.0
+  - @opengeni/xai-subscription@1.1.0
+
 ## 1.0.2
 
 ### Patch Changes

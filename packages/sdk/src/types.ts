@@ -1,5 +1,27 @@
 import type { WorkspaceTranscriptionPolicy } from "./transcription";
 export type {
+  InsightsUsageRange,
+  InsightsUsageGroupBy,
+  InsightsUsagePayer,
+  InsightsUsageSource,
+  InsightsUsageTokens,
+  InsightsUsageClassMicros,
+  InsightsUsageMeasures,
+  InsightsUsageScope,
+  InsightsUsageGroup,
+  InsightsUsageSeriesPoint,
+  InsightsUsageFacets,
+  InsightsUsageResponse,
+  InsightsCall,
+  InsightsCallsResponse,
+  InsightsUsageWindowOptions,
+  WorkspaceInsightsUsageOptions,
+  OrganizationInsightsUsageOptions,
+  WorkspaceInsightsCallsOptions,
+  OrganizationInsightsCallsOptions,
+  InsightsCallsScope,
+} from "./insights-usage";
+export type {
   ClaudeSubscriptionOAuthStartResponse,
   ClaudeSubscriptionOAuthCompleteRequest,
   ClaudeSubscriptionOAuthCompleteResponse,
@@ -3605,6 +3627,8 @@ export type ClientModel = {
   label: string;
   /** Optional curated compact label for dense UI (e.g. mobile composer). */
   shortLabel?: string | undefined;
+  /** Optional HTTPS maker logo supplied by the model catalog. */
+  logoUrl?: string | undefined;
   /** Provider id (e.g. `openai`, `azure`, or a registry provider id). */
   provider: string;
   providerLabel: string;
@@ -3665,6 +3689,7 @@ export type ModelCredentialReadinessV1 = {
 
 export type WorkspaceModelCatalogModel = ClientModel & {
   credentialReadiness: ModelCredentialReadinessV1;
+  creditFunding?: "promotional" | "general" | "unavailable" | undefined;
   /** Exact workspace-policy verdict without exposing provider identity. */
   policyAllowed?: boolean | undefined;
   availability: ModelAvailabilityV1;
@@ -6192,6 +6217,7 @@ export type ScheduledTaskAdmissionRefusal = {
     | "machine_enrollment_inactive"
     | "variable_set_unavailable"
     | "rig_version_unavailable"
+    | "scheduled_model_unavailable"
     | "insufficient_credits"
     | "monthly_model_cost_limit"
     | "monthly_agent_run_limit"
@@ -8169,11 +8195,23 @@ export type BillingMode = "disabled" | "stripe";
 
 export type EntitlementsMode = "none" | "static" | "managed";
 
+export type PromotionalCreditScope = {
+  label: string;
+  eligibleModelIds: string[];
+};
+
+export type PromotionalCreditBalance = PromotionalCreditScope & {
+  grantId: string;
+  remainingMicros: number;
+};
+
 export type BillingBalance = {
   accountId: string;
   balanceMicros: number;
   currency: "usd";
   updatedAt: string;
+  generalBalanceMicros?: number | undefined;
+  promotionalCredits?: PromotionalCreditBalance[] | undefined;
 };
 
 export const KNOWN_USAGE_EVENT_TYPES = [
@@ -8520,6 +8558,7 @@ export type CreateCheckoutResponse = {
   url: string;
   /** The credits this checkout grants once it completes. */
   amountUsd?: number | undefined;
+  promotionalScope?: PromotionalCreditScope | undefined;
 };
 
 /** Where one checkout stands, and whether its credits reached the balance. */
@@ -8532,6 +8571,7 @@ export type BillingCheckoutStatus = {
     currency: "usd";
     /** True when a coupon covered the whole checkout, so nothing was charged. */
     free: boolean;
+    promotionalScope?: PromotionalCreditScope | undefined;
   };
   balance: BillingBalance | null;
 };
@@ -8968,6 +9008,9 @@ export type ConnectorToolPermissionEntry = {
   permission: ConnectorToolPermission;
   inherited: boolean;
   approvalRequired: boolean;
+  source?: "recommended" | "connector_default" | "tool" | "action" | "conflict";
+  conditional?: boolean;
+  actionPermissions?: Array<{ actionName: string; permission: ConnectorToolPermission }>;
 };
 export type ConnectorToolPermissionsResponse = {
   connectionId: string;
@@ -8976,11 +9019,27 @@ export type ConnectorToolPermissionsResponse = {
   tools: ConnectorToolPermissionEntry[];
   discoveryError: string | null;
   canManage: boolean;
+  appliesTo?: "next_attempt";
+  revision?: string;
+  accountLabel?: string;
+  instanceKey?: string;
+  accounts?: Array<{
+    connectionId: string;
+    label: string;
+    scope: "personal" | "workspace" | "none";
+    instanceKey?: string;
+  }>;
 };
 export type UpdateConnectorToolPermissionsRequest = {
   connectionId: string;
-  permission: ConnectorToolPermission;
-} & ({ target: "default" } | { target: "tools"; toolNames: string[] });
+  permission: ConnectorToolPermission | null;
+  expectedRevision?: string;
+  instanceKey?: string;
+} & (
+  | { target: "default" }
+  | { target: "tools"; toolNames: string[] }
+  | { target: "action"; toolName: string; actionName: string }
+);
 
 /** Agent capability ids (see `@opengeni/contracts` agent-config). */
 export type AgentCapabilityId =
@@ -9115,3 +9174,8 @@ export type AgentConfigErrorCode =
   | "agent_config_widening"
   /** Returned only by older servers that predate always-on agent configuration. */
   | "agent_config_not_enabled";
+export type {
+  ToolActionReview,
+  ToolReviewDetailsPage,
+  ToolReviewStatus,
+} from "@opengeni/contracts";

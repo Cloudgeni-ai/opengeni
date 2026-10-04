@@ -1,3 +1,34 @@
+export { readCreditPromotionPolicy } from "./credit-promotion-policy";
+import { getBillingBalance, getSpendableCreditBalance, planCreditDebit } from "./credit-balances";
+export {
+  getBillingBalance,
+  getSpendableCreditBalance,
+  spendableCreditMicros,
+} from "./credit-balances";
+import {
+  lockTurnAttemptWriteFenceTx,
+  type TurnAttemptFenceRejectReason,
+} from "./session-attempt-fence";
+export type { TurnAttemptFenceRejectReason } from "./session-attempt-fence";
+import { ToolReviewContext } from "@opengeni/contracts";
+import { recordToolApproval } from "@opengeni/observability";
+import { connectorActionFingerprint } from "./connector-action-fingerprint";
+import {
+  resolveConnectorActionPolicy,
+  connectorActionPolicyDecision,
+  connectorActionPoliciesForAccountRoutes,
+  connectorToolPolicyRevision,
+  ConnectorToolPermissionConflictError,
+  type ResolvedConnectorActionPolicy,
+} from "./connector-action-policy";
+export {
+  resolveConnectorActionPolicy,
+  connectorActionPolicyDecision,
+  projectConnectorToolPermission,
+  connectorActionPoliciesForAccountRoutes,
+  connectorToolPolicyRevision,
+  ConnectorToolPermissionConflictError,
+} from "./connector-action-policy";
 import {
   agentSelectionNotes,
   loadInboxExecutionContext,
@@ -6,6 +37,7 @@ import {
 } from "./inbox-execution-context";
 import { parentOutboxAuthorityTx } from "./child-outbox-authority";
 export { SubscriptionAccountChangedError } from "./subscription-account-conflict";
+import type { GoalAdmissionPausedReason } from "@opengeni/contracts";
 import {
   claudeSubscriptionAccountRepository,
   claudeSubscriptionTables,
@@ -439,12 +471,12 @@ import {
   closePrivateSessionCreateCapability,
   openPrivateChildSessionCreateCapability,
   openPrivateSessionCreateCapability,
-  sessionTenancyProductActivated,
 } from "./session-tenancy";
 import {
   completeCodemodeOperationInTransaction,
   failCodemodeOperationInTransaction,
 } from "./codemode-operations";
+import { adoptCodemodeApproval } from "./codemode-approvals";
 import {
   cancelTurnInteractionInterventionsInTransaction,
   InteractionResourceStateError,
@@ -616,6 +648,7 @@ import {
   SessionEventPersistenceError,
   type IdempotentPersistenceTransactionOptions,
 } from "./persistence-errors";
+export { DatabaseTransactionError } from "./persistence-errors";
 import {
   assertCapabilityComponentVersionCanChange,
   effectiveCapabilityOwnerSql,
@@ -623,6 +656,7 @@ import {
 } from "./capability-components";
 import {
   closePendingSessionToolCallsInTransaction,
+  settleInterruptedCodemodeCallsInTransaction,
   historyCallId,
   historyItemType,
   TOOL_RESULT_TYPE_BY_CALL_TYPE,
@@ -5701,6 +5735,7 @@ export async function applyCreditLedgerEntry(
     workspaceId?: string | null;
     type: string;
     amountMicros: number;
+    eligibleModelIds?: string[] | undefined;
     sourceType?: string | null;
     sourceId?: string | null;
     idempotencyKey: string;
@@ -5719,6 +5754,7 @@ export async function applyCreditLedgerEntry(
           workspaceId: input.workspaceId ?? null,
           type: input.type,
           amountMicros: input.amountMicros,
+          eligibleModelIds: input.eligibleModelIds ?? null,
           sourceType: input.sourceType ?? null,
           sourceId: input.sourceId ?? null,
           idempotencyKey: input.idempotencyKey,
@@ -5740,6 +5776,9 @@ export async function applyCreditDebitUpToBalance(
     workspaceId?: string | null;
     type: string;
     requestedAmountMicros: number;
+    /** Canonical, accepted model ID. Omitted for non-model usage. */
+    modelId?: string;
+    creditPolicyRevision?: number | undefined;
     sourceType?: string | null;
     sourceId?: string | null;
     idempotencyKey: string;
@@ -5758,35 +5797,42 @@ export async function applyCreditDebitUpToBalance(
     { accountId: input.accountId, workspaceId: input.workspaceId ?? null },
     async (scopedDb) => {
       await scopedDb.execute(sql`select pg_advisory_xact_lock(hashtext(${input.accountId}))`);
-      const before = await getBillingBalance(scopedDb, input.accountId);
-      const candidateDebitMicros = Math.min(
-        input.requestedAmountMicros,
-        Math.max(0, before.balanceMicros),
-      );
-      let debitedMicros = 0;
-      if (candidateDebitMicros > 0) {
-        const inserted = await scopedDb
-          .insert(schema.creditLedgerEntries)
-          .values({
+      const before = await getBillingBalance(scopedDb, input.accountId, input.creditPolicyRevision);
+      const plan = planCreditDebit(before, input.requestedAmountMicros, input.modelId);
+      const candidateDebitMicros = plan.debitedMicros;
+      // Keep a zero-cost receipt too: retrying after a top-up must not charge
+      // a response that was already settled while the eligible balance was empty.
+      const [inserted] = await scopedDb
+        .insert(schema.creditLedgerEntries)
+        .values({
+          accountId: input.accountId,
+          workspaceId: input.workspaceId ?? null,
+          type: input.type,
+          amountMicros: -candidateDebitMicros,
+          sourceType: input.sourceType ?? null,
+          sourceId: input.sourceId ?? null,
+          idempotencyKey: input.idempotencyKey,
+          metadata: {
+            ...input.metadata,
+            requestedAmountMicros: input.requestedAmountMicros,
+            debitedMicros: candidateDebitMicros,
+            creditPolicyRevision: before.creditPolicyRevision,
+          },
+          occurredAt: input.occurredAt ?? new Date(),
+        })
+        .onConflictDoNothing({
+          target: schema.creditLedgerEntries.idempotencyKey,
+        })
+        .returning({ id: schema.creditLedgerEntries.id });
+      const debitedMicros = inserted ? candidateDebitMicros : 0;
+      if (inserted && plan.allocations.length) {
+        await scopedDb.insert(schema.creditDebitAllocations).values(
+          plan.allocations.map((allocation) => ({
+            ...allocation,
             accountId: input.accountId,
-            workspaceId: input.workspaceId ?? null,
-            type: input.type,
-            amountMicros: -candidateDebitMicros,
-            sourceType: input.sourceType ?? null,
-            sourceId: input.sourceId ?? null,
-            idempotencyKey: input.idempotencyKey,
-            metadata: {
-              ...input.metadata,
-              requestedAmountMicros: input.requestedAmountMicros,
-              debitedMicros: candidateDebitMicros,
-            },
-            occurredAt: input.occurredAt ?? new Date(),
-          })
-          .onConflictDoNothing({
-            target: schema.creditLedgerEntries.idempotencyKey,
-          })
-          .returning({ id: schema.creditLedgerEntries.id });
-        debitedMicros = inserted.length === 1 ? candidateDebitMicros : 0;
+            debitEntryId: inserted.id,
+          })),
+        );
       }
       return {
         balance: await getBillingBalance(scopedDb, input.accountId),
@@ -6017,23 +6063,6 @@ export async function markStripeWebhookProcessed(db: Database, id: string): Prom
     .update(schema.stripeWebhookEvents)
     .set({ processedAt: new Date() })
     .where(eq(schema.stripeWebhookEvents.id, id));
-}
-
-export async function getBillingBalance(db: Database, accountId: string): Promise<BillingBalance> {
-  return await withAccountRls(db, accountId, async (scopedDb) => {
-    const [{ balance } = { balance: 0 }] = await scopedDb
-      .select({
-        balance: sql<number>`coalesce(sum(${schema.creditLedgerEntries.amountMicros}), 0)`,
-      })
-      .from(schema.creditLedgerEntries)
-      .where(eq(schema.creditLedgerEntries.accountId, accountId));
-    return {
-      accountId,
-      balanceMicros: Number(balance),
-      currency: "usd",
-      updatedAt: new Date().toISOString(),
-    };
-  });
 }
 
 /**
@@ -10366,10 +10395,9 @@ export async function listEnabledMcpCapabilityServers(
     const allowedTools = stringArrayConfig(config.allowedTools ?? metadata.allowedTools);
     const timeoutMs = positiveIntegerConfig(config.timeoutMs ?? metadata.timeoutMs);
     const cacheToolsList = booleanConfig(config.cacheToolsList ?? metadata.cacheToolsList);
-    const requireApproval = requireApprovalWithFloor(
+    const requireApproval = resolveMcpApprovalRecommendation(
       config.requireApproval,
       metadata.requireApproval,
-      item.workspaceId === null,
     );
     return [
       {
@@ -18575,6 +18603,7 @@ export type ScheduledTaskAdmissionRefusalReason =
   | "machine_enrollment_inactive"
   | "variable_set_unavailable"
   | "rig_version_unavailable"
+  | "scheduled_model_unavailable"
   | "insufficient_credits"
   | "allowance_exhausted"
   | "monthly_model_cost_limit"
@@ -32402,7 +32431,7 @@ async function updateSessionMcpApprovalPolicyInTransaction(
       .limit(1);
     if (!session) return { server: null, changed: false };
     const policy =
-      requireApprovalWithFloor(input.requireApproval, inherited.approvalFloor, true) ?? false;
+      resolveMcpApprovalRecommendation(input.requireApproval, inherited.approvalFloor) ?? false;
     const server = { id: input.serverId, source: "workspace" as const, requireApproval: policy };
     if (
       Object.hasOwn(session.policies, input.serverId) &&
@@ -32533,7 +32562,12 @@ export type ConnectorActionInvocation = {
   serverId: string;
   toolName: string;
   arguments: unknown;
-  /** Explicit per-session approval or capability-authorized mutation ledger mode. */
+  reviewContext?: import("@opengeni/contracts").ToolReviewContext;
+  /** Recommended decision when no explicit user choice matches. */
+  defaultDecision?: "allow" | "ask";
+  /** Schema-validated discriminator supplied by the trusted tool adapter. */
+  actionName?: string;
+  /** Legacy recommendation or capability-authorized mutation ledger mode. */
   approvalMode?: "session_mcp" | "connector_write";
 };
 
@@ -32543,6 +32577,7 @@ export type PrepareConnectorActionApprovalResult =
       managed: true;
       decision: ConnectorActionPolicyDecision;
       requestId?: string;
+      approvalStatus?: string;
       actionFingerprint: string;
     };
 
@@ -32582,118 +32617,10 @@ function boundedConnectorActionText(value: string, label: string, max: number): 
   return trimmed;
 }
 
-/**
- * Resolve the request's policy selector. This caller-controlled value is used
- * only transiently to match the attempt-frozen policy snapshot; it must never
- * be copied into a request row or audit event.
- */
-function connectorActionPolicySelector(toolName: string, args: unknown): string {
-  if (args && typeof args === "object" && !Array.isArray(args)) {
-    const action = (args as Record<string, unknown>).action;
-    if (typeof action === "string" && action.trim().length > 0) {
-      return boundedConnectorActionText(action, "connector action name", CONNECTOR_ACTION_NAME_MAX);
-    }
-  }
-  return toolName;
-}
-
 function connectorActionEvidenceName(
   resolved: Exclude<ResolvedConnectorActionPolicy, { managed: false }>,
 ): string {
   return resolved.entry?.actionName ?? ("actionName" in resolved ? resolved.actionName : "*");
-}
-
-function connectorActionPolicyDecision(
-  resolved: Exclude<ResolvedConnectorActionPolicy, { managed: false }>,
-): ConnectorActionPolicyDecision {
-  if (resolved.entry) return resolved.entry.policy;
-  return resolved.decision;
-}
-
-function connectorActionFingerprint(input: {
-  workspaceId: string;
-  connectionId: string;
-  serverId: string;
-  toolName: string;
-  actionName: string;
-  arguments: unknown;
-}): string {
-  return createHash("sha256")
-    .update(
-      stableJson({
-        workspaceId: input.workspaceId,
-        connectionId: input.connectionId,
-        serverId: input.serverId,
-        toolName: input.toolName,
-        actionName: input.actionName,
-        arguments: input.arguments ?? null,
-      }),
-      "utf8",
-    )
-    .digest("hex");
-}
-
-type ResolvedConnectorActionPolicy =
-  | { managed: false }
-  | {
-      managed: true;
-      source: "explicit";
-      entry: ConnectorActionPolicySnapshotEntry;
-    }
-  | {
-      managed: true;
-      source: "explicit";
-      entry: null;
-      decision: "allow" | "ask";
-      actionName: string;
-    }
-  | {
-      managed: true;
-      source: "ambiguous";
-      entry: null;
-      decision: "block";
-    };
-
-/** Resolve one immutable attempt snapshot with exact-over-wildcard precedence. */
-export function resolveConnectorActionPolicy(
-  snapshot: readonly ConnectorActionPolicySnapshotEntry[],
-  input: {
-    connectionId: string;
-    serverId: string;
-    toolName: string;
-    actionName: string;
-  },
-): ResolvedConnectorActionPolicy {
-  const candidates = snapshot
-    .filter(
-      (entry) =>
-        entry.connectionId === input.connectionId &&
-        (entry.serverId === input.serverId || entry.serverId === "*") &&
-        (entry.toolName === input.toolName || entry.toolName === "*") &&
-        (entry.actionName === input.actionName || entry.actionName === "*"),
-    )
-    .map((entry) => ({
-      entry,
-      specificity:
-        Number(entry.serverId !== "*") +
-        Number(entry.toolName !== "*") +
-        Number(entry.actionName !== "*"),
-    }))
-    .sort(
-      (left, right) =>
-        right.specificity - left.specificity || left.entry.id.localeCompare(right.entry.id),
-    );
-  const selected = candidates[0];
-  if (!selected) return { managed: false };
-  if (candidates[1]?.specificity === selected.specificity) {
-    return {
-      managed: true,
-      source: "ambiguous",
-      entry: null,
-      decision: "block",
-    };
-  }
-  return { managed: true, source: "explicit", entry: selected.entry };
 }
 
 function connectorActionAuditMetadata(
@@ -32761,7 +32688,9 @@ function normalizedConnectorActionInvocation(
   toolName: string;
   policyActionSelector: string;
   arguments: unknown;
+  reviewContext?: import("@opengeni/contracts").ToolReviewContext;
   approvalMode: "connector" | "session_mcp" | "connector_write";
+  defaultDecision?: "allow" | "ask";
 } {
   const approvalId = boundedConnectorActionText(
     invocation.approvalId,
@@ -32778,7 +32707,14 @@ function normalizedConnectorActionInvocation(
     "connector tool name",
     CONNECTOR_ACTION_NAME_MAX,
   );
-  const policyActionSelector = connectorActionPolicySelector(toolName, invocation.arguments);
+  const policyActionSelector =
+    invocation.actionName === undefined
+      ? toolName
+      : boundedConnectorActionText(
+          invocation.actionName,
+          "connector action name",
+          CONNECTOR_ACTION_NAME_MAX,
+        );
   const connectionId = invocation.connectionId?.trim()
     ? boundedConnectorActionText(
         invocation.connectionId,
@@ -32804,43 +32740,18 @@ function normalizedConnectorActionInvocation(
     toolName,
     policyActionSelector,
     arguments: invocation.arguments,
+    ...(invocation.reviewContext
+      ? { reviewContext: ToolReviewContext.parse(invocation.reviewContext) }
+      : {}),
     approvalMode,
+    ...(invocation.defaultDecision !== undefined
+      ? { defaultDecision: invocation.defaultDecision }
+      : approvalMode === "session_mcp"
+        ? { defaultDecision: "ask" as const }
+        : approvalMode === "connector_write"
+          ? { defaultDecision: "allow" as const }
+          : {}),
   };
-}
-
-function resolvedSessionMcpApproval(
-  actionName: string,
-): Exclude<ResolvedConnectorActionPolicy, { managed: false }> {
-  return {
-    managed: true,
-    source: "explicit",
-    entry: null,
-    decision: "ask",
-    actionName,
-  };
-}
-
-function resolvedConnectorWritePolicy(
-  resolved: ResolvedConnectorActionPolicy,
-  approvalMode: "connector" | "connector_write" | "session_mcp",
-  actionName: string,
-): ResolvedConnectorActionPolicy {
-  if (approvalMode === "session_mcp") {
-    // Explicit Block still wins for header-backed / credential-free servers.
-    // Allow cannot lower the separately frozen session approval floor.
-    return resolved.managed && connectorActionPolicyDecision(resolved) !== "allow"
-      ? resolved
-      : resolvedSessionMcpApproval(actionName);
-  }
-  return approvalMode === "connector_write" && !resolved.managed
-    ? {
-        managed: true,
-        source: "explicit",
-        entry: null,
-        decision: "allow",
-        actionName,
-      }
-    : resolved;
 }
 
 function durableConnectorActionInvocation(
@@ -32856,14 +32767,29 @@ function durableConnectorActionInvocation(
   toolName: string;
   actionName: string;
   actionFingerprint: string;
+  reviewArguments: string;
+  reviewContext?: import("@opengeni/contracts").ToolReviewContext;
 } {
   const actionName = connectorActionEvidenceName(resolved);
+  const reviewArguments = JSON.stringify(invocation.arguments) ?? "null";
+  const reviewContext = invocation.reviewContext
+    ? ToolReviewContext.parse(invocation.reviewContext)
+    : undefined;
+  if (
+    Buffer.byteLength(reviewArguments, "utf8") > 4 * 1024 * 1024 ||
+    (reviewContext && Buffer.byteLength(JSON.stringify(reviewContext), "utf8") > 4 * 1024 * 1024)
+  ) {
+    recordToolApproval("size_rejected");
+    throw new Error("Tool review exceeds the supported size. Prepare smaller independent actions.");
+  }
   return {
     approvalId: invocation.approvalId,
     connectionId: invocation.connectionId,
     serverId: invocation.serverId,
     toolName: invocation.toolName,
     actionName,
+    reviewArguments,
+    ...(reviewContext ? { reviewContext } : {}),
     actionFingerprint: connectorActionFingerprint({
       workspaceId: identity.workspaceId,
       connectionId: invocation.connectionId,
@@ -32887,8 +32813,16 @@ async function connectorActionAttemptSnapshot(
       executionGeneration: schema.sessionTurnAttempts.executionGeneration,
       state: schema.sessionTurnAttempts.state,
       connectorActionPolicies: schema.sessionTurnAttempts.connectorActionPolicies,
+      mcpAccountBindings: schema.sessionTurns.mcpAccountBindings,
     })
     .from(schema.sessionTurnAttempts)
+    .innerJoin(
+      schema.sessionTurns,
+      and(
+        eq(schema.sessionTurns.id, schema.sessionTurnAttempts.turnId),
+        eq(schema.sessionTurns.workspaceId, schema.sessionTurnAttempts.workspaceId),
+      ),
+    )
     .where(
       and(
         eq(schema.sessionTurnAttempts.workspaceId, identity.workspaceId),
@@ -32909,7 +32843,10 @@ async function connectorActionAttemptSnapshot(
   if (attempt.connectorActionPolicies.length > CONNECTOR_ACTION_POLICY_SNAPSHOT_MAX) {
     throw new Error("connector action policy snapshot exceeds the runtime bound");
   }
-  return attempt.connectorActionPolicies;
+  return connectorActionPoliciesForAccountRoutes(
+    attempt.connectorActionPolicies,
+    attempt.mcpAccountBindings,
+  );
 }
 
 function connectorActionRequestMatches(
@@ -33006,6 +32943,12 @@ async function insertConnectorActionRequest(
       policySource: input.resolved.source,
       policyDecision: connectorActionPolicyDecision(input.resolved),
       actionFingerprint: input.invocation.actionFingerprint!,
+      ...(input.status === "pending"
+        ? {
+            reviewArguments: input.invocation.reviewArguments,
+            reviewContext: input.invocation.reviewContext ?? null,
+          }
+        : {}),
       status: input.status,
       ...(input.status === "executing"
         ? {
@@ -33404,6 +33347,37 @@ export async function ensureConnectorActionPolicyDefault(
   );
 }
 
+/** An already prepared action keeps its original choice across resumed attempts. */
+async function priorConnectorActionPreparation(
+  db: Database,
+  identity: ConnectorActionAttemptIdentity,
+  invocation: ReturnType<typeof normalizedConnectorActionInvocation>,
+): Promise<PrepareConnectorActionApprovalResult | null> {
+  const [row] = await db
+    .select()
+    .from(schema.connectorActionRequests)
+    .where(
+      and(
+        eq(schema.connectorActionRequests.workspaceId, identity.workspaceId),
+        eq(schema.connectorActionRequests.sessionId, identity.sessionId),
+        eq(schema.connectorActionRequests.turnId, identity.turnId),
+        eq(schema.connectorActionRequests.approvalId, invocation.approvalId),
+      ),
+    )
+    .limit(1);
+  if (!row) return null;
+  if (!connectorActionRequestMatchesLogicalCall(row, identity, invocation)) {
+    throw new Error("connector action approval id conflicts with different immutable inputs");
+  }
+  return {
+    managed: true,
+    decision: row.policyDecision,
+    approvalStatus: row.status,
+    requestId: row.id,
+    actionFingerprint: row.actionFingerprint,
+  };
+}
+
 export async function prepareConnectorActionApproval(
   db: Database,
   identity: ConnectorActionAttemptIdentity,
@@ -33419,16 +33393,21 @@ export async function prepareConnectorActionApproval(
     async (scopedDb) =>
       await scopedDb.transaction(async (tx) => {
         const snapshot = await connectorActionAttemptSnapshot(tx as unknown as Database, identity);
-        const resolved = resolvedConnectorWritePolicy(
-          resolveConnectorActionPolicy(snapshot, {
-            connectionId: normalized.connectionId!,
-            serverId: normalized.serverId,
-            toolName: normalized.toolName,
-            actionName: normalized.policyActionSelector,
-          }),
-          normalized.approvalMode,
-          normalized.policyActionSelector,
+        const prior = await priorConnectorActionPreparation(
+          tx as unknown as Database,
+          identity,
+          normalized,
         );
+        if (prior) return prior;
+        const resolved = resolveConnectorActionPolicy(snapshot, {
+          connectionId: normalized.connectionId!,
+          serverId: normalized.serverId,
+          toolName: normalized.toolName,
+          actionName: normalized.policyActionSelector,
+          ...(normalized.defaultDecision !== undefined
+            ? { defaultDecision: normalized.defaultDecision }
+            : {}),
+        });
         if (!resolved.managed) return { managed: false, decision: "unmanaged" } as const;
         const durable = durableConnectorActionInvocation(
           identity,
@@ -33436,6 +33415,7 @@ export async function prepareConnectorActionApproval(
           resolved,
         );
         const decision = connectorActionPolicyDecision(resolved);
+        recordToolApproval(decision, resolved.source);
         if (decision === "allow") {
           return {
             managed: true,
@@ -33463,6 +33443,7 @@ export async function prepareConnectorActionApproval(
         return {
           managed: true,
           decision,
+          approvalStatus: row.status,
           requestId: row.id,
           actionFingerprint: row.actionFingerprint,
         } as const;
@@ -33485,16 +33466,17 @@ export async function previewConnectorActionApproval(
     { accountId: identity.accountId, workspaceId: identity.workspaceId },
     async (scopedDb) => {
       const snapshot = await connectorActionAttemptSnapshot(scopedDb, identity);
-      const resolved = resolvedConnectorWritePolicy(
-        resolveConnectorActionPolicy(snapshot, {
-          connectionId: normalized.connectionId!,
-          serverId: normalized.serverId,
-          toolName: normalized.toolName,
-          actionName: normalized.policyActionSelector,
-        }),
-        normalized.approvalMode,
-        normalized.policyActionSelector,
-      );
+      const prior = await priorConnectorActionPreparation(scopedDb, identity, normalized);
+      if (prior) return prior;
+      const resolved = resolveConnectorActionPolicy(snapshot, {
+        connectionId: normalized.connectionId!,
+        serverId: normalized.serverId,
+        toolName: normalized.toolName,
+        actionName: normalized.policyActionSelector,
+        ...(normalized.defaultDecision !== undefined
+          ? { defaultDecision: normalized.defaultDecision }
+          : {}),
+      });
       if (!resolved.managed) return { managed: false, decision: "unmanaged" } as const;
       const durable = durableConnectorActionInvocation(
         identity,
@@ -33544,16 +33526,15 @@ export async function beginConnectorActionExecution(
         let row = existing;
         let inserted = false;
         if (!row) {
-          const resolved = resolvedConnectorWritePolicy(
-            resolveConnectorActionPolicy(snapshot, {
-              connectionId: normalized.connectionId!,
-              serverId: normalized.serverId,
-              toolName: normalized.toolName,
-              actionName: normalized.policyActionSelector,
-            }),
-            normalized.approvalMode,
-            normalized.policyActionSelector,
-          );
+          const resolved = resolveConnectorActionPolicy(snapshot, {
+            connectionId: normalized.connectionId!,
+            serverId: normalized.serverId,
+            toolName: normalized.toolName,
+            actionName: normalized.policyActionSelector,
+            ...(normalized.defaultDecision !== undefined
+              ? { defaultDecision: normalized.defaultDecision }
+              : {}),
+          });
           if (!resolved.managed) return { allowed: true, managed: false } as const;
           const durable = durableConnectorActionInvocation(
             identity,
@@ -37685,11 +37666,6 @@ async function readSessionListForSubject(
           throw new SessionListAccessError();
         }
 
-        const tenancyActivated = await sessionTenancyProductActivated(
-          tx as unknown as Database,
-          workspaceId,
-        );
-
         const archiveMode = options.archiveStatus ?? (options.archivedOnly ? "archived" : "active");
         const sortBy = options.sortBy ?? (archiveMode === "archived" ? "archivedAt" : "updatedAt");
         if (options.archivedOnly && archiveMode !== "archived") {
@@ -38139,7 +38115,7 @@ async function readSessionListForSubject(
                       ? { archivedAt: exactArchiveTimestamps.get(session.id)! }
                       : {}),
                   },
-                  { subjectId: options.subjectId, activated: tenancyActivated },
+                  { subjectId: options.subjectId },
                 ),
                 ...(sortBy === "updatedAt" && exactOrdinaryTimestamps.has(session.id)
                   ? { updatedAt: exactOrdinaryTimestamps.get(session.id)! }
@@ -38395,7 +38371,6 @@ export async function getSessionForSubject(
     const mcpServers = await sessionMcpServerMetadataForSessions(scopedDb, workspaceId, [
       sessionId,
     ]);
-    const tenancyActivated = await sessionTenancyProductActivated(scopedDb, workspaceId);
     const failureDiagnostics = await sessionFailureDiagnostics(scopedDb, workspaceId, session);
     return projectSessionForRelatedAccess(
       {
@@ -38407,7 +38382,7 @@ export async function getSessionForSubject(
           mapSessionAttention(session, row.pin),
           mapSessionArchive(row.pin),
           undefined,
-          { subjectId, activated: tenancyActivated },
+          { subjectId },
         )),
         failureDiagnostics,
       },
@@ -42564,144 +42539,6 @@ export async function getHumanInputResumeForEvent(
     : null;
 }
 
-export type TurnAttemptFenceRejectReason =
-  | "workspace_paused"
-  | "session_paused"
-  | "pending_control"
-  | "active_turn_changed"
-  | "generation_changed"
-  | "attempt_changed"
-  | "turn_terminal"
-  | "not_found";
-
-type TurnAttemptFenceResult =
-  | {
-      allowed: true;
-      workspace: typeof schema.workspaces.$inferSelect;
-      session: typeof schema.sessions.$inferSelect;
-      turn: typeof schema.sessionTurns.$inferSelect;
-      attempt: typeof schema.sessionTurnAttempts.$inferSelect;
-    }
-  | {
-      allowed: false;
-      reason: TurnAttemptFenceRejectReason;
-      workspace: typeof schema.workspaces.$inferSelect | null;
-      session: typeof schema.sessions.$inferSelect | null;
-      turn: typeof schema.sessionTurns.$inferSelect | null;
-      attempt: typeof schema.sessionTurnAttempts.$inferSelect | null;
-    };
-
-/**
- * Lock order for every activity write fence: workspace control -> actual
- * workspace -> session -> exact turn -> exact attempt.
- *
- * Activity writes only need a shared workspace admission lock: concurrent
- * sessions may write independently, while an exclusive workspace Pause/Resume
- * still waits for every admitted write and prevents later writes from crossing
- * the control boundary. Using FOR UPDATE here serialized every active session in
- * one workspace behind a single row and turned streaming into a workspace-wide
- * lock queue.
- */
-async function lockTurnAttemptWriteFenceTx(
-  tx: Database,
-  input: {
-    workspaceId: string;
-    sessionId: string;
-    turnId: string;
-    executionGeneration: number;
-    attemptId: string;
-    sessionLock?: "no_key_update" | "key_share";
-  },
-): Promise<TurnAttemptFenceResult> {
-  const locks = await lockSessionEventWriteRows(tx, {
-    workspaceId: input.workspaceId,
-    controlLock: "share",
-    sessionLock: input.sessionLock ?? "no_key_update",
-    sessionIds: [input.sessionId],
-    turnIds: [input.turnId],
-    attemptIds: [input.attemptId],
-  });
-  const workspace = locks.workspace;
-  const session = locks.sessions.find((row) => row.id === input.sessionId) ?? null;
-  const turn = locks.turns.find((row) => row.id === input.turnId) ?? null;
-  const attempt = locks.attempts.find((row) => row.id === input.attemptId) ?? null;
-  const base = { workspace, session, turn, attempt };
-  if (!workspace || !session || !turn || !attempt) {
-    return { allowed: false, reason: "not_found", ...base };
-  }
-  const effectiveControl = await evaluateSessionWriteAdmissionControl(
-    tx,
-    input.workspaceId,
-    input.sessionId,
-    {
-      workspaceControl: locks.control ?? undefined,
-    },
-  );
-  if (effectiveControl.state === "paused") {
-    return {
-      allowed: false,
-      reason:
-        effectiveControl.primaryBlockerKind === "workspace" ? "workspace_paused" : "session_paused",
-      ...base,
-    };
-  }
-  if (session.activeTurnId !== input.turnId) {
-    return { allowed: false, reason: "active_turn_changed", ...base };
-  }
-  if (turn.executionGeneration !== input.executionGeneration) {
-    return { allowed: false, reason: "generation_changed", ...base };
-  }
-  if (turn.activeAttemptId !== input.attemptId) {
-    return { allowed: false, reason: "attempt_changed", ...base };
-  }
-  if (
-    turn.accountId !== session.accountId ||
-    turn.sessionId !== input.sessionId ||
-    attempt.accountId !== session.accountId ||
-    attempt.sessionId !== input.sessionId ||
-    attempt.turnId !== input.turnId ||
-    attempt.executionGeneration !== input.executionGeneration ||
-    !["claimed", "running"].includes(attempt.state)
-  ) {
-    return { allowed: false, reason: "attempt_changed", ...base };
-  }
-  let authoritySnapshot;
-  try {
-    authoritySnapshot = assertSessionAuthoritySnapshot({
-      attemptId: input.attemptId,
-      authorityEpoch: attempt.authorityEpoch,
-      authorityVisibility: attempt.authorityVisibility,
-      authorityOwnerOrganizationMembershipId: attempt.authorityOwnerOrganizationMembershipId,
-    });
-  } catch {
-    // The 0222 insert trigger keeps old writers rolling-safe, but no missing
-    // or partial tuple may cross an accepted-attempt write fence.
-    return { allowed: false, reason: "attempt_changed", ...base };
-  }
-  if (!sessionAuthoritySnapshotMatchesSession(authoritySnapshot, session)) {
-    return { allowed: false, reason: "attempt_changed", ...base };
-  }
-  const [interruption] = await tx
-    .select({ id: schema.sessionAttemptInterruptions.id })
-    .from(schema.sessionAttemptInterruptions)
-    .where(
-      and(
-        eq(schema.sessionAttemptInterruptions.workspaceId, input.workspaceId),
-        eq(schema.sessionAttemptInterruptions.sessionId, input.sessionId),
-        eq(schema.sessionAttemptInterruptions.attemptId, input.attemptId),
-        inArray(schema.sessionAttemptInterruptions.state, ["pending", "delivered", "acknowledged"]),
-      ),
-    )
-    .limit(1);
-  if (interruption) {
-    return { allowed: false, reason: "pending_control", ...base };
-  }
-  if (!["running", "requires_action"].includes(turn.status)) {
-    return { allowed: false, reason: "turn_terminal", ...base };
-  }
-  return { allowed: true, workspace, session, turn, attempt };
-}
-
 export class SessionBackgroundCommandAdoptionFencedError extends Error {
   readonly name = "SessionBackgroundCommandAdoptionFencedError";
 
@@ -44562,6 +44399,19 @@ export async function applyContextCompaction(
             ),
           );
         const supersededFrom = Math.floor(Number(maxPosition)) + 1;
+        // Installing a successful summary is model progress, including a
+        // maintenance turn that never enters the ordinary response stream.
+        // Clear only provider recovery under the same locked attempt fence.
+        if (providerRecoveryCountFromTurnMetadata(fence.turn!.metadata) > 0) {
+          await tx
+            .update(schema.sessionTurns)
+            .set({
+              metadata: metadataWithoutProviderRecoveryCount(fence.turn!.metadata),
+              version: fence.turn!.version + 1,
+              updatedAt: new Date(),
+            })
+            .where(eq(schema.sessionTurns.id, input.turnId));
+        }
         await tx
           .update(schema.sessionHistoryItems)
           .set({ active: false })
@@ -47845,7 +47695,7 @@ async function acquireLeaseOnce(
                 refusal,
               );
             }
-            const balance = await getBillingBalance(tx, accountId);
+            const balance = await getSpendableCreditBalance(tx, accountId);
             if (balance.balanceMicros <= 0) {
               throw new SandboxPaidComputeAdmissionError(workspaceId, sandboxGroupId);
             }
@@ -52806,8 +52656,8 @@ type LostProviderBlockerScope = {
 };
 
 /** Take the session-event write prefix (workspace control share, workspace,
- * sessions, cursors) for every session whose background command is linked to
- * an active process in the exact lost-provider scope. Call it before the
+ * sessions, cursors) for linked background commands and attempt owners in the
+ * exact lost-provider scope. Call it before the
  * process/admission/PTY/lease locks so terminal command delivery keeps the
  * canonical control -> session -> process -> admission -> lease order. */
 async function linkedLostProviderCommandSessionIdsTx(
@@ -52817,7 +52667,8 @@ async function linkedLostProviderCommandSessionIdsTx(
   const sessions = await rawRows<{ session_id: string }>(
     tx,
     sql`
-      select distinct command.session_id
+      select distinct session_id from (
+      select command.session_id
       from session_background_commands command
       join sandbox_retained_processes process on process.id = command.retained_process_id
         and process.workspace_id = command.workspace_id
@@ -52831,7 +52682,21 @@ async function linkedLostProviderCommandSessionIdsTx(
         and process.provider_instance_id = ${input.lostInstanceId}
         and process.state = 'active'
         and command.state in ('running', 'stopping')
-      order by command.session_id
+      union
+      select process.session_id
+      from sandbox_retained_processes process
+      join session_turn_attempts attempt on attempt.id = process.owner_attempt_id
+        and attempt.workspace_id = process.workspace_id
+        and attempt.session_id = process.session_id
+      where process.account_id = ${input.accountId}
+        and process.workspace_id = ${input.workspaceId}
+        and process.lease_id = ${input.leaseId}
+        and process.sandbox_group_id = ${input.sandboxGroupId}
+        and process.lease_epoch = ${input.lostEpoch}
+        and process.provider_backend = ${input.lostBackend}
+        and process.provider_instance_id = ${input.lostInstanceId}
+        and process.state = 'active'
+      ) owners order by session_id
     `,
   );
   return sessions.map((row) => row.session_id);
@@ -53050,6 +52915,37 @@ async function settleExactLostProviderWorkspaceBlockersTx(
         mutation,
       );
       delivery.events.push(...mutation.events);
+    }
+  }
+
+  if (lostProcesses.length) {
+    // The session prefix was locked before blockers and revalidated afterward.
+    // Unadopted writers have no background-command delivery to wake their owner;
+    // persist that obligation atomically with physical provider settlement.
+    const owners = await rawRows<{ session_id: string; temporal_workflow_id: string }>(
+      tx,
+      sql`
+        select distinct attempt.session_id, attempt.temporal_workflow_id
+        from session_turn_attempts attempt
+        join sandbox_retained_processes process on process.owner_attempt_id = attempt.id
+          and process.workspace_id = attempt.workspace_id
+          and process.session_id = attempt.session_id
+        where attempt.workspace_id = ${input.workspaceId}
+          and attempt.account_id = ${input.accountId}
+          and attempt.state = 'closed' and attempt.quiesced_at is null
+          and attempt.temporal_workflow_id is not null
+          and process.id = any(${`{${lostProcesses.map((p) => p.id).join(",")}}`}::uuid[])
+        order by attempt.session_id, attempt.temporal_workflow_id
+      `,
+    );
+    for (const owner of owners) {
+      await enqueueSessionWorkflowWakeInTransaction(tx, {
+        accountId: input.accountId,
+        workspaceId: input.workspaceId,
+        sessionId: owner.session_id,
+        temporalWorkflowId: owner.temporal_workflow_id,
+        reason: "attempt_writer_provider_settled",
+      });
     }
   }
 
@@ -53939,7 +53835,7 @@ export async function heartbeatLeaseHolderStatus(
           (input.billingMode ?? snapshot?.mode) === "credits" &&
           snapshot?.mode === "credits" &&
           snapshot.rateMicrosPerSecond > 0 &&
-          (await getBillingBalance(tx, input.accountId)).balanceMicros <= 0
+          (await getSpendableCreditBalance(tx, input.accountId)).balanceMicros <= 0
         ) {
           // Touching the holder above is essential: the running writer remains
           // protected while it winds down. The provider/lease TTL is not renewed.
@@ -54595,23 +54491,69 @@ export async function reapStaleLeaseHolders(
 }
 
 /** Settlement reasons for legacy retained commands that containment stopped
- * after a verified checkpoint. Neither is exit proof: the command settles
+ * after a verified checkpoint. None is exit proof: the command settles
  * `lost` with no exit code. */
 export const IDLE_COMMAND_CONTAINMENT_REASON = "idle_containment";
 export const DEADLINE_COMMAND_CONTAINMENT_REASON = "provider_deadline_containment";
+export const QUIESCENCE_COMMAND_CONTAINMENT_REASON = "quiescence_containment";
+
+type SettledCommandOwner = {
+  sessionId: string;
+  attemptId: string;
+  temporalWorkflowId: string;
+  temporalWorkflowRunId: string;
+  temporalActivityId: string;
+};
+
+/** Exact dispatch settlement is enrollment authority, never physical proof. */
+async function settledCommandOwnerMatchesTx(
+  tx: Database,
+  input: { accountId: string; workspaceId: string; sandboxGroupId: string },
+  owner: SettledCommandOwner,
+): Promise<boolean> {
+  const [row] = await rawRows<{ eligible: boolean }>(
+    tx,
+    sql`
+    select exists (
+      select 1 from session_turn_attempts attempt
+      join sessions session on session.id = attempt.session_id
+        and session.workspace_id = attempt.workspace_id
+      where attempt.account_id = ${input.accountId}
+        and attempt.workspace_id = ${input.workspaceId}
+        and attempt.session_id = ${owner.sessionId} and attempt.id = ${owner.attemptId}
+        and attempt.temporal_workflow_id = ${owner.temporalWorkflowId}
+        and attempt.temporal_workflow_run_id = ${owner.temporalWorkflowRunId}
+        and attempt.temporal_activity_id = ${owner.temporalActivityId}
+        and attempt.state = 'closed' and attempt.quiesced_at is null
+        and session.sandbox_group_id = ${input.sandboxGroupId}
+        and not exists (select 1 from session_attempt_interruptions interruption
+          where interruption.workspace_id = attempt.workspace_id
+            and interruption.session_id = attempt.session_id and interruption.attempt_id = attempt.id
+            and interruption.state in ('pending', 'delivered', 'acknowledged'))
+    ) and not exists (
+      select 1 from session_turn_attempts live
+      join sessions member on member.id = live.session_id and member.workspace_id = live.workspace_id
+      where live.workspace_id = ${input.workspaceId}
+        and member.sandbox_group_id = ${input.sandboxGroupId} and live.state <> 'closed'
+    ) as eligible
+  `,
+  );
+  return row?.eligible === true;
+}
 
 /** Bounded per-candidate containment inspection outcomes (metric labels). */
 export type CommandContainmentInspection =
   | "idle_enrolled"
   | "deadline_enrolled"
+  | "quiescence_enrolled"
   | "resumed_enrolled"
   | "not_eligible"
   | "inspection_failed";
 
 export type CommandContainmentEnrollment = ReapDrainable & {
-  /** `idle`/`deadline` newly enrolled this call; `resumed` continues an
+  /** `idle`/`deadline`/`quiescence` newly enrolled this call; `resumed` continues an
    * existing enrollment whose drain has not committed yet. */
-  mode: "idle" | "deadline" | "resumed";
+  mode: "idle" | "deadline" | "quiescence" | "resumed";
 };
 
 /** Whole-group "unused" from durable facts only. Every session of the group,
@@ -54814,6 +54756,8 @@ export async function enrollRetainedCommandContainment(
     sandboxGroupId: string;
     /** Omit to evaluate only the provider-deadline rule. */
     idleCommandContainmentMs?: number | undefined;
+    /** Internal recovery authority: caller verified exact Temporal settlement. */
+    settledOwner?: SettledCommandOwner;
   },
 ): Promise<CommandContainmentEnrollment | null> {
   const screened = await withRlsContext(db, input, async (tx) => {
@@ -54826,6 +54770,8 @@ export async function enrollRetainedCommandContainment(
       // Enrolled drains resume; any requested rotation also refreshes command
       // observation backoff below and may meet the deadline rule.
       (Boolean(lease.unobservableCommandDrainIds?.length) ||
+        (input.settledOwner !== undefined &&
+          (await settledCommandOwnerMatchesTx(tx, input, input.settledOwner))) ||
         lease.rotationRequestedAt !== null ||
         (input.idleCommandContainmentMs !== undefined &&
           (await sandboxGroupIdleForCommandContainmentTx(tx, {
@@ -54875,11 +54821,17 @@ export async function enrollRetainedCommandContainment(
       supervised: boolean;
       owned: boolean;
       deadline_ready: boolean;
+      adopted: boolean;
     }>(
       tx,
       sql`
       select process.id, process.session_id, process.owner_attempt_id,
         process.parent_admission_id, process.holder_id,
+        exists (select 1 from session_background_commands background
+          where background.retained_process_id = process.id
+            and background.workspace_id = process.workspace_id
+            and background.session_id = process.session_id
+            and background.state in ('running', 'stopping')) as adopted,
         (coalesce(process.provider_command, '{}'::jsonb) ? 'supervision') as supervised,
         (process.lease_epoch = ${initial.leaseEpoch}
           and process.provider_instance_id = ${initial.instanceId}
@@ -54953,8 +54905,19 @@ export async function enrollRetainedCommandContainment(
     };
     if (enrolled) return { ...target, mode: "resumed" };
     if (lease.archive_capture_id !== null) return null;
-    let mode: "idle" | "deadline" | null = null;
+    let mode: "idle" | "deadline" | "quiescence" | null = null;
     if (
+      input.settledOwner !== undefined &&
+      processes.every(
+        (p) =>
+          p.owner_attempt_id === input.settledOwner!.attemptId &&
+          p.session_id === input.settledOwner!.sessionId &&
+          !p.adopted,
+      ) &&
+      (await settledCommandOwnerMatchesTx(tx, input, input.settledOwner))
+    ) {
+      mode = "quiescence";
+    } else if (
       deadlineRotation &&
       processes.every((p) => p.deadline_ready) &&
       !(await deadlineOwnerQuiescencePending(tx, input.workspaceId, processes)) &&
@@ -54978,9 +54941,11 @@ export async function enrollRetainedCommandContainment(
     await tx.execute(sql`
       update sandbox_leases set unobservable_command_drain_ids = ${`{${ids.join(",")}}`}::uuid[],
         command_containment_reason = ${
-          mode === "deadline"
-            ? DEADLINE_COMMAND_CONTAINMENT_REASON
-            : IDLE_COMMAND_CONTAINMENT_REASON
+          mode === "quiescence"
+            ? QUIESCENCE_COMMAND_CONTAINMENT_REASON
+            : mode === "deadline"
+              ? DEADLINE_COMMAND_CONTAINMENT_REASON
+              : IDLE_COMMAND_CONTAINMENT_REASON
         },
         liveness = 'draining', rotation_requested_at = coalesce(rotation_requested_at, now()),
         rotation_reason = coalesce(rotation_reason, 'operator'), expires_at = now(), updated_at = now()
@@ -55336,7 +55301,7 @@ export async function reArmDrainingLease(
             ? snapshot.mode === "credits" && snapshot.rateMicrosPerSecond > 0
             : input.warmBilling?.rateMicrosPerSecond !== undefined &&
               input.warmBilling.rateMicrosPerSecond > 0) &&
-          (await getBillingBalance(tx, input.accountId)).balanceMicros <= 0
+          (await getSpendableCreditBalance(tx, input.accountId)).balanceMicros <= 0
         ) {
           throw new SandboxPaidComputeAdmissionError(input.workspaceId, input.sandboxGroupId);
         }
@@ -55520,7 +55485,8 @@ export async function confirmDrainCold(
             !input.providerMissingBeforeCapture &&
             row.archive_capture_published_at !== null &&
             (reason === IDLE_COMMAND_CONTAINMENT_REASON ||
-              reason === DEADLINE_COMMAND_CONTAINMENT_REASON) &&
+              reason === DEADLINE_COMMAND_CONTAINMENT_REASON ||
+              reason === QUIESCENCE_COMMAND_CONTAINMENT_REASON) &&
             row.unobservable_command_drain_ids?.length
               ? row.unobservable_command_drain_ids
               : [];
@@ -68341,6 +68307,16 @@ export async function updateSessionTitleWithEvent(
   );
 }
 
+/** Read-only admission at a locked paused-to-active transition. */
+export type SessionGoalResumeValidation = (
+  tx: Database,
+  session: Pick<
+    Session,
+    "accountId" | "workspaceId" | "model" | "codexCompactionMode" | "latencyMode"
+  >,
+  causalTurn: { id: string; initiatingHumanSubjectId: string | null } | null,
+) => Promise<void>;
+
 /**
  * Status transition helper. Idempotent: requesting the current status returns
  * `changed: false` so callers can skip emitting a duplicate event. `completed`
@@ -68360,6 +68336,8 @@ export async function setSessionGoalStatus(
     reportDeliveries?: SessionGoalReportDelivery[];
     reportArtifactActor?: ReportArtifactActor;
     commandActor?: Extract<SessionCommandActor, { type: "agent_attempt" }>;
+    /** Runs under the canonical control/session/goal locks, before a paused goal changes. */
+    beforeResume?: SessionGoalResumeValidation;
   },
 ): Promise<{
   goal: SessionGoal;
@@ -68408,6 +68386,51 @@ export async function setSessionGoalStatus(
     }
     if (existing.status === "completed") {
       throw new Error("session goal is completed; set a new goal to continue");
+    }
+    if (input.status === "active" && input.beforeResume) {
+      const [effectiveSession] = await withEffectiveSessionPolicy(scopedDb, workspaceId, [session]);
+      // An accepted running turn owns the work the goal will continue after it
+      // settles. An idle Resume uses the exact latest-finished causal row.
+      const causalTurnFilter = session.activeTurnId
+        ? or(
+            eq(schema.sessionTurns.id, session.activeTurnId),
+            sql`${schema.sessionTurns.finishedAt} is not null`,
+          )
+        : sql`${schema.sessionTurns.finishedAt} is not null`;
+      const [causalTurn] = await scopedDb
+        .select({
+          id: schema.sessionTurns.id,
+          initiatingHumanSubjectId: schema.sessionTurns.initiatingHumanSubjectId,
+        })
+        .from(schema.sessionTurns)
+        .where(
+          and(
+            eq(schema.sessionTurns.workspaceId, workspaceId),
+            eq(schema.sessionTurns.sessionId, sessionId),
+            causalTurnFilter,
+          ),
+        )
+        .orderBy(
+          ...(session.activeTurnId
+            ? [desc(sql`${schema.sessionTurns.id} = ${session.activeTurnId}`)]
+            : []),
+          desc(schema.sessionTurns.finishedAt),
+          desc(schema.sessionTurns.position),
+          desc(schema.sessionTurns.createdAt),
+          desc(schema.sessionTurns.id),
+        )
+        .limit(1);
+      await input.beforeResume(
+        scopedDb,
+        {
+          accountId: session.accountId,
+          workspaceId,
+          model: effectiveSession!.model,
+          latencyMode: effectiveSession!.latencyMode as Session["latencyMode"],
+          codexCompactionMode: session.codexCompactionMode as Session["codexCompactionMode"],
+        },
+        causalTurn ?? null,
+      );
     }
     if (input.status === "completed") {
       await verifyGoalReportDeliveries(scopedDb, {
@@ -68502,6 +68525,7 @@ export async function setSessionGoalStatusWithEvent(
     reportDeliveries?: SessionGoalReportDelivery[];
     reportArtifactActor?: ReportArtifactActor;
     commandActor?: Extract<SessionCommandActor, { type: "agent_attempt" }>;
+    beforeResume?: SessionGoalResumeValidation;
     event: SetSessionGoalStatusEvent;
   },
 ): Promise<{
@@ -68535,6 +68559,7 @@ export async function setSessionGoalStatusWithEvent(
           : {}),
         ...(input.reportArtifactActor ? { reportArtifactActor: input.reportArtifactActor } : {}),
         ...(input.commandActor ? { commandActor: input.commandActor } : {}),
+        ...(input.beforeResume ? { beforeResume: input.beforeResume } : {}),
         ...(input.evidence !== undefined ? { evidence: input.evidence } : {}),
         ...(input.rationale !== undefined ? { rationale: input.rationale } : {}),
         ...(input.pausedReason !== undefined ? { pausedReason: input.pausedReason } : {}),
@@ -68633,7 +68658,7 @@ export type GoalContinuationDecision =
   | { decision: "queue" }
   | {
       decision: "paused";
-      reason: "max_auto_continuations" | "limits" | "allowance";
+      reason: "max_auto_continuations" | "limits" | GoalAdmissionPausedReason;
       goal: SessionGoal;
     }
   | {
@@ -68712,7 +68737,7 @@ export async function evaluateGoalContinuation(
     // decision (before the counter bump) so a budget pause never consumes
     // continuation budget.
     budgetBlocked?: string | null;
-    budgetPausedReason?: "limits" | "allowance" | undefined;
+    budgetPausedReason?: "limits" | GoalAdmissionPausedReason | undefined;
   },
 ): Promise<GoalContinuationDecision> {
   return await withWorkspaceRls(
@@ -68974,7 +68999,7 @@ export async function materializeGoalContinuation(
     workflowId: string;
     defaultMaxAutoContinuations?: number | null;
     budgetBlocked?: string | null;
-    budgetPausedReason?: "limits" | "allowance" | undefined;
+    budgetPausedReason?: "limits" | GoalAdmissionPausedReason | undefined;
     /** Trusted worker admission, evaluated under the same session/goal locks
      * as lineage materialization. Never substitutes a mutable latest human. */
     admission?: (
@@ -68982,7 +69007,7 @@ export async function materializeGoalContinuation(
       causalTurn: { id: string; initiatingHumanSubjectId: string | null } | null,
     ) => Promise<{
       budgetBlocked: string | null;
-      budgetPausedReason?: "limits" | "allowance";
+      budgetPausedReason?: "limits" | GoalAdmissionPausedReason;
     }>;
     idleBackoff?: GoalIdleBackoffPolicy | null;
     policy: {
@@ -72974,10 +72999,9 @@ export async function claimSessionWorkForAttempt(
                 !Object.hasOwn(mcpApprovalPolicies, server.id)
               ) {
                 mcpApprovalPolicies[server.id] =
-                  requireApprovalWithFloor(
+                  resolveMcpApprovalRecommendation(
                     inheritedPolicies[server.id],
                     server.approvalFloor,
-                    true,
                   ) ?? false;
               }
             }
@@ -75299,6 +75323,28 @@ export async function reconcileSessionAttemptQuiescence(
     };
   }
   if (!input.activitySettled || eligibility.writer_pending) {
+    if (input.activitySettled && eligibility.writer_pending) {
+      const group = await withRlsContext(db, input, async (tx) => {
+        const [row] = await tx
+          .select({ id: schema.sessions.sandboxGroupId })
+          .from(schema.sessions)
+          .where(
+            and(
+              eq(schema.sessions.workspaceId, input.workspaceId),
+              eq(schema.sessions.id, input.sessionId),
+            ),
+          )
+          .limit(1);
+        return row?.id;
+      });
+      if (group)
+        await enrollRetainedCommandContainment(db, {
+          accountId: input.accountId,
+          workspaceId: input.workspaceId,
+          sandboxGroupId: group,
+          settledOwner: input,
+        });
+    }
     return { action: "pending", events: [] };
   }
   const events = await markSessionAttemptQuiesced(db, {
@@ -78873,6 +78919,8 @@ function metadataWithoutProviderRecoveryCount(
 ): Record<string, unknown> {
   const next = { ...(metadata ?? {}) };
   delete next.providerRecoveryCount;
+  delete next.providerRecoveryStartedAt;
+  delete next.providerRecoveryReason;
   return next;
 }
 
@@ -79836,6 +79884,15 @@ export async function applySessionTurnSettlement(
               : {}),
           }
         : null;
+      if (input.turnStatus === "completed") {
+        await settleInterruptedCodemodeCallsInTransaction(tx as unknown as Database, {
+          workspaceId,
+          sessionId: input.sessionId,
+          turnId: input.turnId,
+          reason: "turn_completed",
+          now,
+        });
+      }
       const terminalHumanInputRows = ["completed", "failed", "cancelled", "superseded"].includes(
         input.turnStatus,
       )
@@ -81315,7 +81372,15 @@ export async function requestSessionTurnRecovery(
                 }
               : {}),
             ...(input.providerRecoveryCount !== undefined
-              ? { providerRecoveryCount: input.providerRecoveryCount }
+              ? {
+                  providerRecoveryCount: input.providerRecoveryCount,
+                  providerRecoveryStartedAt:
+                    providerRecoveryCountFromTurnMetadata(turn.metadata) > 0 &&
+                    typeof turn.metadata?.providerRecoveryStartedAt === "string"
+                      ? turn.metadata.providerRecoveryStartedAt
+                      : now.toISOString(),
+                  providerRecoveryReason: input.reason,
+                }
               : {}),
           },
           updatedAt: now,
@@ -86256,6 +86321,51 @@ export type SettleCodemodeOperationWithOutputInput = {
  * ordinary durable event replay repairs; it cannot leave a completed call
  * permanently spinning in the timeline.
  */
+export async function adoptCodemodeApprovalWithOutput(
+  db: Database,
+  input: Parameters<typeof adoptCodemodeApproval>[1],
+) {
+  const events: SessionEvent[] = [];
+  const operation = await withSessionActivityRlsContext(db, input, (scoped) =>
+    adoptCodemodeApproval(scoped, input, async (tx, terminal) => {
+      const appended = await appendSessionEventsForTurnAttempt(
+        tx,
+        input.workspaceId,
+        input.sessionId,
+        input.turnId,
+        input.executionGeneration,
+        input.attemptId,
+        [
+          {
+            type: "agent.toolCall.output",
+            clientEventId: `opengeni:codemode-terminal:${terminal.operationId}`,
+            turnId: input.turnId,
+            turnGeneration: input.executionGeneration,
+            turnAttemptId: input.attemptId,
+            producerId: terminal.caller.subjectId,
+            payload: {
+              id: terminal.operationId,
+              origin: "codemode",
+              subjectId: terminal.caller.subjectId,
+              error: true,
+              output: {
+                isError: true,
+                content: [
+                  { type: "text", text: terminal.errorMessage ?? "Action ended before execution." },
+                ],
+                _meta: { codemodeState: terminal.state, errorCode: terminal.errorCode },
+              },
+            },
+          },
+        ],
+      );
+      if (!appended.accepted) throw new Error("Continuation lost its execution fence");
+      events.push(...appended.events);
+    }),
+  );
+  return { operation, events };
+}
+
 export async function settleCodemodeOperationWithOutput(
   db: Database,
   input: SettleCodemodeOperationWithOutputInput,
@@ -86759,7 +86869,7 @@ async function mapSessionWithControl(
   },
   archive: Pick<Session, "archived" | "archivedAt" | "archiveVersion"> = mapSessionArchive(null),
   workspaceControl?: WorkspaceControlRow,
-  tenancyViewer?: { subjectId: string; activated: boolean },
+  tenancyViewer?: { subjectId: string },
 ): Promise<Session> {
   const controls = await sessionControlProjections(db, row.workspaceId, [row.id], workspaceControl);
   const control = controls.get(row.id);
@@ -86896,7 +87006,7 @@ function mapSession(
     attentionVersion: 0,
   },
   archive: Pick<Session, "archived" | "archivedAt" | "archiveVersion"> = mapSessionArchive(null),
-  tenancyViewer?: { subjectId: string; activated: boolean },
+  tenancyViewer?: { subjectId: string },
 ): Session {
   const bundledSkillIds = bundledSkillSelectionFromMetadata(row.metadata);
   return {
@@ -86930,9 +87040,7 @@ function mapSession(
     toolPolicyVersion: Number(row.toolPolicyVersion),
     mcpApprovalPolicies: row.mcpApprovalPolicies,
     metadata: row.metadata,
-    ...(tenancyViewer?.activated
-      ? { tenancy: mapSessionTenancy(row, tenancyViewer.subjectId) }
-      : {}),
+    ...(tenancyViewer ? { tenancy: mapSessionTenancy(row, tenancyViewer.subjectId) } : {}),
     createdBy: initiatorFromStorage(
       row.createdByKind,
       row.createdBySubjectId,
@@ -87826,29 +87934,21 @@ function sessionMcpApprovalPolicyConfig(value: unknown): SessionMcpApprovalPolic
   return parsed.success ? parsed.data : undefined;
 }
 
-/**
- * Unions a workspace's configured approval policy with a global catalog row's
- * mandated floor, so `enableCapability`'s ordinary config override can only
- * ADD approval requirements beyond a curated minimum, never remove one -
- * closing the gap where a bare `??` let a workspace-supplied `false` or a
- * narrower array silently erase a reviewed row's mandate (e.g. Gmail's
- * approval-gated send tools). `true` on either side is maximal. Applies only
- * to global rows (`workspaceId === null`): a workspace's own custom MCP
- * registration owns its policy outright, with no OpenGeni-reviewed floor to
- * protect.
- */
+/** Resolve explicit configuration before the provider recommendation. */
+export function resolveMcpApprovalRecommendation(
+  rawConfigValue: unknown,
+  rawMetadataValue: unknown,
+): SessionMcpApprovalPolicy | undefined {
+  return sessionMcpApprovalPolicyConfig(rawConfigValue ?? rawMetadataValue);
+}
+
+/** @deprecated Compatibility alias. Recommendations never impose an approval floor. */
 export function requireApprovalWithFloor(
   rawConfigValue: unknown,
   rawMetadataValue: unknown,
-  isGlobalRow: boolean,
+  _isGlobalRow: boolean,
 ): SessionMcpApprovalPolicy | undefined {
-  const resolved = sessionMcpApprovalPolicyConfig(rawConfigValue ?? rawMetadataValue);
-  if (!isGlobalRow) return resolved;
-  const floor = sessionMcpApprovalPolicyConfig(rawMetadataValue);
-  if (floor === undefined || floor === false) return resolved;
-  if (floor === true || resolved === true) return true;
-  const resolvedNames = resolved === undefined || resolved === false ? [] : resolved;
-  return [...new Set([...resolvedNames, ...floor])].sort();
+  return resolveMcpApprovalRecommendation(rawConfigValue, rawMetadataValue);
 }
 
 function cleanDbString(value: string | undefined | null): string | undefined {
@@ -88215,6 +88315,8 @@ export * from "./editable-artifact-materialization";
 export * from "./attempt-tool-catalogs";
 export * from "./model-context-snapshots";
 export * from "./codemode-operations";
+export * from "./codemode-approvals";
+export * from "./tool-action-reviews";
 export * from "./browser-sessions";
 export * from "./browser-deadline-checkpoints";
 export * from "./computer-sessions";
@@ -88274,6 +88376,37 @@ export async function listConnectorToolPermissionPolicies(
   );
 }
 
+/** A reset notice lasts until that exact policy version is changed by the user. */
+export async function listChangedConnectorToolPermissions(
+  db: Database,
+  input: { accountId: string; workspaceId: string; connectionId: string; serverId: string },
+): Promise<string[]> {
+  return withRlsContext(db, input, async (tx) => {
+    const rows = await tx
+      .selectDistinct({ toolName: schema.connectorActionPolicies.toolName })
+      .from(schema.connectorActionPolicies)
+      .innerJoin(
+        schema.auditEvents,
+        and(
+          eq(schema.auditEvents.workspaceId, input.workspaceId),
+          eq(schema.auditEvents.action, "connector.action.policy_reset"),
+          sql`${schema.auditEvents.targetId} = ${schema.connectorActionPolicies.id}::text`,
+          sql`${schema.auditEvents.metadata}->>'version' = ${schema.connectorActionPolicies.version}::text`,
+        ),
+      )
+      .where(
+        and(
+          eq(schema.connectorActionPolicies.workspaceId, input.workspaceId),
+          eq(schema.connectorActionPolicies.connectionId, input.connectionId),
+          eq(schema.connectorActionPolicies.serverId, input.serverId),
+          eq(schema.connectorActionPolicies.policy, "ask"),
+        ),
+      )
+      .limit(2048);
+    return rows.map((row) => row.toolName);
+  });
+}
+
 /** All tools in a group change together, and never exceed the attempt snapshot bound. */
 export async function updateConnectorToolPermissionPolicies(
   db: Database,
@@ -88284,7 +88417,9 @@ export async function updateConnectorToolPermissionPolicies(
     connectionId: string;
     serverId: string;
     toolNames: string[];
-    policy: ConnectorToolPermission;
+    policy: ConnectorToolPermission | null;
+    actionName?: string;
+    expectedRevision?: string;
   },
 ): Promise<void> {
   await withRlsContext(db, input, async (scoped) =>
@@ -88296,7 +88431,57 @@ export async function updateConnectorToolPermissionPolicies(
         .select()
         .from(schema.connectorActionPolicies)
         .where(eq(schema.connectorActionPolicies.workspaceId, input.workspaceId));
+      if (
+        input.expectedRevision !== undefined &&
+        input.expectedRevision !==
+          connectorToolPolicyRevision(existing, input.connectionId, input.serverId)
+      ) {
+        throw new ConnectorToolPermissionConflictError();
+      }
       const names = [...new Set(input.toolNames)].sort((left, right) => left.localeCompare(right));
+      // A whole-tool choice replaces its action exceptions. Reset removes only
+      // the selected overrides and reveals the inherited recommendation again.
+      const removed =
+        input.policy !== null && input.actionName !== undefined
+          ? []
+          : await tx
+              .delete(schema.connectorActionPolicies)
+              .where(
+                and(
+                  eq(schema.connectorActionPolicies.workspaceId, input.workspaceId),
+                  eq(schema.connectorActionPolicies.connectionId, input.connectionId),
+                  eq(schema.connectorActionPolicies.serverId, input.serverId),
+                  inArray(schema.connectorActionPolicies.toolName, names),
+                  ...(input.actionName !== undefined
+                    ? [eq(schema.connectorActionPolicies.actionName, input.actionName)]
+                    : []),
+                  ...(input.policy !== null
+                    ? [ne(schema.connectorActionPolicies.actionName, "*")]
+                    : []),
+                ),
+              )
+              .returning();
+      if (removed.length)
+        await tx.insert(schema.auditEvents).values(
+          withLosslessContentWriteVersion(
+            {
+              accountId: input.accountId,
+              workspaceId: input.workspaceId,
+              subjectId: input.subjectId,
+              action: "connector.action.preferences_replaced",
+              targetType: "connector_action_policy",
+              targetId: input.connectionId,
+              metadata: {
+                serverId: input.serverId,
+                policyIds: removed.map((row) => row.id),
+                reset: input.policy === null,
+              },
+            },
+            "metadata",
+            "metadataCodecVersion",
+          ),
+        );
+      if (input.policy === null) return;
       const added = names.filter(
         (name) =>
           !existing.some(
@@ -88304,13 +88489,18 @@ export async function updateConnectorToolPermissionPolicies(
               row.connectionId === input.connectionId &&
               row.serverId === input.serverId &&
               row.toolName === name &&
-              row.actionName === "*",
+              row.actionName === (input.actionName ?? "*"),
           ),
       );
-      if (existing.length + added.length > 2048)
+      if (existing.length - removed.length + added.length > 2048)
         throw new Error("The workspace tool permission limit has been reached");
       for (const toolName of names) {
-        await upsertConnectorActionPolicy(tx, { ...input, toolName, actionName: "*" });
+        await upsertConnectorActionPolicy(tx, {
+          ...input,
+          policy: input.policy,
+          toolName,
+          actionName: input.actionName ?? "*",
+        });
       }
     }),
   );
@@ -88351,3 +88541,4 @@ export async function loadDirectModelProviderConnection(
   });
   return { ...metadata, apiKey: connection.credential.apiKey };
 }
+export { apiIntegrationToolEffect } from "./api-integration-approvals";

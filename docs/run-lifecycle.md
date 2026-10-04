@@ -108,7 +108,9 @@ has origin `system`.
 After execution ends, every physical finalization stage has a five-minute
 containment deadline, including normally completed turns. This is not a
 run-length limit. Heartbeats report `finalizing` and the current bounded
-`finalizationStage`; Grafana exposes stage occupancy and thirty-second slow-stage observations;
+`finalizationStage`; slow and containment logs carry the same hashed attempt
+`correlationId` as worker execution, never raw session or attempt IDs or metric labels.
+Grafana exposes stage occupancy and thirty-second slow-stage observations;
 the bounded containment log and worker restarts identify actual exits.
 A stuck writer drain is never detached to release a successor. At the deadline,
 the host stops polling and requests the ordinary graceful worker shutdown. Other
@@ -588,8 +590,17 @@ activity reports retryable pre-claim failure but the control lane finds its
 exact active attempt, that durable attempt wins and is recovered.
 
 During an executing turn, own-client PostgreSQL connection outages use only
-`ECONNREFUSED`, `ECONNRESET`, `CONNECT_TIMEOUT`, or SQLSTATE `57P01`–`57P03`/`08xxx`
-through an actual ORM or typed persistence boundary, never a driver name alone.
+`CONNECTION_CLOSED`, `CONNECTION_DESTROYED`, `CONNECTION_ENDED`, `ECONNREFUSED`,
+`ECONNRESET`, `CONNECT_TIMEOUT`, or SQLSTATE `57P01`–`57P03`/`08xxx` through an
+actual ORM, typed persistence or own transaction boundary, never a driver name
+alone. RLS transaction admission/settlement preserves raw driver provenance;
+application callback errors remain unbranded, and rollback failures retain the
+callback's no-replay evidence. The postgres.js patch rejects late writes from
+a physically closed reserved connection as `CONNECTION_CLOSED`, fences stale
+transaction/reservation callbacks after pool reuse, clears unsent bytes and the
+rejected active query on close, releases closed-connection drain obligations,
+and preserves the existing Bun TLS drainage. It never replays a
+transaction whose commit acknowledgement was lost.
 These closed outage classes use the same
 exact-attempt DB-only recovery lane, including SDK function-tool `.error` and
 mandatory-history wrappers. The activity exits without `turn.failed`, without
@@ -940,8 +951,19 @@ converge to one creation plus one replay. Client abort is observer-only; server
 cancellation remains owned by the attempt/turn lifecycle.
 Worker dispatch performs catalog, identity, approval, input-schema,
 authorization, and argument-sensitive connector-policy prepare before writing
-the execution-start marker. Ask, Block, unavailable policy, and rejected frozen
-connector authority therefore settle before the provider executor can run.
+the execution-start marker. Block, unavailable policy, and rejected frozen
+connector authority settle before the provider executor can run. Ask creates a
+linked `waiting_for_approval` operation when the client acknowledges durable
+approval support. Its compact handle exits client polling; the InputWaitYield
+receipt fences the next model dispatch until the waiting row is durable. The
+worker stores programmatic reviews separately from open SDK call identities,
+then settles requires_action. Human decisions use the existing transactional
+approval event and workflow wake. A resumed attempt checks the exact logical
+turn, caller, tool schema/effect and account, and claims the stored arguments
+without changing the original attempt/catalog provenance. Old attempt tokens
+stay invalid. The current attempt can read the same-turn handle. Rejection or
+stale semantics produce a terminal nonexecution receipt; a crossed execution
+marker is never automatically replayed.
 After the marker, the prepared gateway call performs durable connector begin at
 the executor boundary and completes the same request as `completed`,
 `not_executed`, or `uncertain`. Model MCP and Codemode use this same canonical
@@ -992,6 +1014,14 @@ of 10 s / 20 s / 40 s / 60 s / 120 s (`PROVIDER_RATE_LIMIT_BACKOFF_MS`). Without
 the floor, a one-second hint on a per-minute token limit spends every automatic
 recovery before the window resets. Other retryable classes keep their existing
 pacing.
+Ordinary model rate-limit, provider-unavailable and upstream-connectivity
+recoveries add positive-only random spread (up to 20% of the selected delay,
+capped at 5 s). The worker samples this once when settling the attempt; the
+returned delay and durable recovery event use the same value. Provider retry
+hints remain a lower bound. Subscription capacity waits retain their separate
+workflow jitter. Worker-owned main, compaction and title clients disable hidden
+OpenAI SDK retries before client resolution; the durable worker recovery budget
+owns retries. Standalone runtime clients retain `openaiMaxRetries`.
 An exhausted API-key provider quota is not a rate limit and is never retried:
 a daily or monthly allowance (OpenRouter `free-models-per-day`, requests or
 tokens per day), a used-up quota (`insufficient_quota`, "exceeded your current
@@ -1061,6 +1091,18 @@ Every Steer commits a control wake revision, including when
 the recovering turn has no live attempt. A later coalesced Send cannot downgrade
 it to an ordinary queue signal, so the workflow interrupts the hold and processes
 the new direction immediately.
+
+Provider recovery telemetry records structural provider/model/cause labels:
+`opengeni_model_recovery_total` distinguishes scheduled, recovered and exhausted
+observations; `opengeni_model_recovery_delay_seconds` records scheduled waits;
+`opengeni_model_recovery_duration_seconds` records elapsed episodes through the
+first successful response, committed context compaction, or exhaustion,
+including preparation and request time. The start timestamp survives worker
+replacement in turn metadata and is cleared with the successful response or
+compaction checkpoint. Skipped compaction does not close recovery. These are
+operational observations, not billing or exactly-once audit counters. They include classified
+HTTP-200 stream failures rather than treating HTTP acceptance as model success.
+No request text, provider error detail, credential or session identity is a label.
 
 Codex-subscription turns add one explicit recovery boundary before the model
 run. The worker always selects and leases a credential atomically under the
@@ -2703,6 +2745,19 @@ missing SDK map entry nor failure to recover terminal output proves command loss
 including when a completed entry aged out in its original adapter.
 
 Observation backoff does not suppress provider-lifecycle checks during rotation.
+
+**Closed-attempt command recovery.** A missing quiescence receipt can leave
+queued successor work behind legacy retained commands whose provider output is
+unobservable. Once the control activity verifies settlement of the exact
+Temporal dispatch, reconciliation may enroll a `quiescence_containment` drain.
+Enrollment requires no nonclosed attempt in the group, only unsupervised
+processes of that exact attempt, no independently adopted background command,
+and no other holder or open admission. It bypasses neither a live owner nor an
+unresolved interruption. The existing drain saves the workspace and terminates
+the exact provider before settling those commands lost and atomically queuing
+an owner workflow wake. Admission and the quiescence receipt stay fenced until
+physical settlement and exact reconciliation; missing output or an elapsed
+observation window is never substituted for termination proof.
 
 **Idle command containment.** A legacy retained command keeps its Modal box
 warm through a non-expiring process holder, so the zero-holder idle drain never

@@ -9,6 +9,8 @@ export type {
 } from "./components/human-input-form";
 export { HumanInputSurface } from "./components/human-input-surface";
 export { ApprovalSurface } from "./components/approval-surface";
+export { ToolActionReviewCard, ToolActionReviewDetails } from "./components/tool-action-review";
+export type { ToolReviewDetailsLoader } from "./components/tool-action-review";
 export type { ApprovalSurfaceProps, ApprovalSurfaceMessages } from "./components/approval-surface";
 export type { HumanInputSurfaceProps } from "./components/human-input-surface";
 export { MessageTimeline, TimelineRow } from "./components/message-timeline";
@@ -95,3 +97,5 @@ export type { KnowledgeActivityActions } from "./timeline/knowledge-receipt";
 export { StartupTimings } from "./timeline/startup-timings";
 export { useStartupDetails, setStartupDetails } from "./timeline/startup-preference";
 export type { GenieLoadingOptions } from "./timeline/genie-loading";
+
+export { ToolReviewHistoryProvider } from "./components/tool-review-history";

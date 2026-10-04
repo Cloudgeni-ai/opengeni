@@ -72,6 +72,7 @@ import {
   OPENGENI_SLACK_BOT_SESSION_METADATA_KEY,
   SessionSkills,
   resolveBundledSkillSelection,
+  bundledSkillSelectionForAgentConfig,
   SessionSpawnDenial,
   ServiceTurnInitiator,
   ServiceTurnInitiatorContext,
@@ -141,7 +142,7 @@ import {
   listDistinctRigVersionIdsInGroup,
   listInstalledPortableSkills,
   listEnabledMcpCapabilityServers,
-  requireApprovalWithFloor,
+  resolveMcpApprovalRecommendation,
   getSandbox,
   getSession,
   getInitializedSessionCreateReplay,
@@ -182,7 +183,6 @@ import {
   SessionToolPolicyVersionConflictError,
   SessionCreateIdempotencyConflictError,
   PersonalResourceAttachmentAcceptanceError,
-  sessionTenancyProductActivated,
   workspaceControlRequestLockTimeoutMs,
   WorkspaceControlBusyError,
   type SessionCommandActor,
@@ -325,11 +325,6 @@ async function requireAtomicPersonalResourceAttachment(
     throw new HTTPException(403, {
       message: "Personal resources require the owning managed-human session.",
       cause: error,
-    });
-  }
-  if (!(await sessionTenancyProductActivated(deps.db, workspaceId))) {
-    throw new HTTPException(409, {
-      message: "Session tenancy is not activated for this organization.",
     });
   }
   if (existingSession && intent.expectedAuthorityEpoch === undefined) {
@@ -1051,6 +1046,13 @@ export async function createAndStartSessionWithOutcome(input: {
   allowNestedAgentDepthIncrease?: boolean;
   subjectId?: string | null;
 }): Promise<CreateSessionOutcome> {
+  const frozenBundledSkillIds = bundledSkillSelectionForAgentConfig(
+    input.bundledSkillIds,
+    input.agentConfig,
+  );
+  if (frozenBundledSkillIds !== input.bundledSkillIds) {
+    input = { ...input, bundledSkillIds: frozenBundledSkillIds };
+  }
   const sessionMetadata = metadataWithTurnExecutionPolicyV1(
     {
       ...input.metadata,
@@ -2545,6 +2547,9 @@ async function createSessionForRequestInFileScope(
   if (agentResolution.instructions !== undefined) {
     payload.instructions = agentResolution.instructions;
   }
+  // Freeze what the agent configuration implies before keyed replay compares
+  // it: a `"none"` agent omits the bundled guides unless the request lists them.
+  bundledSkillIds = bundledSkillSelectionForAgentConfig(bundledSkillIds, agentConfig);
   const parentCallingTurn =
     parentSession && creationInitiator.actor
       ? await getSessionTurnForAttempt(
@@ -2814,7 +2819,7 @@ async function createSessionForRequestInFileScope(
         });
       }
       mcpApprovalPolicies[id] =
-        requireApprovalWithFloor(policy, inherited.approvalFloor, true) ?? false;
+        resolveMcpApprovalRecommendation(policy, inherited.approvalFloor) ?? false;
     }
   }
   const resources = normalizeResources(

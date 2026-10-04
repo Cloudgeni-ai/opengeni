@@ -9,6 +9,7 @@ import {
   setSessionChannel,
 } from "@opengeni/db";
 import { createHash, randomUUID } from "node:crypto";
+import { assertGoalResumeAllowed } from "@opengeni/core";
 import { mintEnrollToken } from "../sandbox/enrollment";
 import { capabilityAccountReadiness } from "./capability-account-readiness";
 import {
@@ -3076,6 +3077,8 @@ function registerGoalTools(
         sessionId,
         {
           status: "active",
+          beforeResume: (tx, session, causalTurn) =>
+            assertGoalResumeAllowed({ ...deps, db: tx }, session, causalTurn),
           event: { type: "goal.resumed", actor: "agent" },
         },
       );

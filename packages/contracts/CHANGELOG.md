@@ -1,5 +1,48 @@
 # @opengeni/contracts
 
+## 1.2.0
+
+### Minor Changes
+
+- d870f32: Support model-scoped signup and coupon credits with a shared operator default and
+  per-offer overrides. Update coverage at runtime, spend eligible promotions before
+  general credits, and preserve allocation and retry accounting. Keep scoped coupon
+  redemption separate from paid top-ups. Show credit funding in model selection and
+  current coverage on demand in billing. Legacy unrestricted grants stay unrestricted.
+
+### Patch Changes
+
+- 21c8904: Support optional HTTPS model catalog logos with safe image fallbacks, and declare the item type of the SDK filesystem function tool's command tuple.
+
+## 1.1.0
+
+### Minor Changes
+
+- 208dec1: Add `updateArtifactPin(workspaceId, kind, artifactId, pinned)` and optional catalog
+  `pinned` metadata for workspace-shared artifact pins. Catalog pages order matching
+  pins globally before the selected sort without changing content-access authority.
+
+### Patch Changes
+
+- 5fd6c55: A session whose agent starts from `capabilities: "none"` no longer receives the
+  bundled Opengeni guides (`opengeni-help`, `opengeni-client`, ...) when
+  `bundledSkillIds` is omitted; an explicit list still opts in exactly, and
+  `"all"` or legacy configurations keep the bundled defaults. Session create
+  freezes the empty selection so the record, replay, and children agree.
+
+  `command_read` and `command_wait` are now owned by attached compute
+  (`FIRST_PARTY_MCP_TOOL_CAPABILITIES` reports `"sandbox"`) and are attached, and
+  listed in `effectiveTools`, only when a managed sandbox or Connected Machine is
+  attached to the turn. `wait_for_input` and `set_session_title` are unchanged.
+  New exports: `AgentFirstPartyToolOwner`, `isDerivedAgentToolOwner`,
+  `AGENT_SANDBOX_MECHANIC_TOOL_NAMES`, `bundledSkillSelectionForAgentConfig`, and
+  the `sandboxAttached` tool-environment flag.
+
+- c600e3a: Use the full scoped model catalog for goal continuation and validate goal Resume before changing state. Preserve specific admission pause reasons and show the actionable rationale in the existing goal controls.
+- 411b3b5: A scheduled task whose model was retired or removed from the catalog now records each
+  occurrence as a visible failed run with reason `scheduled_model_unavailable` instead of
+  failing the scheduler activity and leaving no run.
+
 ## 1.0.2
 
 ### Patch Changes

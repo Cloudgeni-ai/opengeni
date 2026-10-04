@@ -13,6 +13,7 @@ import {
   type WorkspaceSessionDefaults,
   type XaiProviderAccountAuthoritySnapshotV1,
   type ClaudeProviderAccountAuthoritySnapshotV1,
+  type BillingBalance,
 } from "@opengeni/contracts";
 import {
   getScheduledTaskXaiProviderAccountAuthoritySnapshot,
@@ -30,7 +31,8 @@ import {
   workspaceCodexSubscriptionActive,
   workspaceOpenRouterConnectionActive,
   workspaceVercelAiGatewayConnectionActive,
-  organizationHoldsCredits,
+  getBillingBalance,
+  spendableCreditMicros,
   workspaceXaiSubscriptionActive,
   workspaceXaiSubscriptionActiveForAuthority,
   XaiAuthorityPoolInactiveError,
@@ -112,16 +114,22 @@ export type DefaultSessionModelInput = {
    * `organizationHoldsCredits`).
    */
   creditsAvailable: boolean;
+  creditBalance?: BillingBalance;
 };
 
 function creditsCandidate(
-  input: Pick<DefaultSessionModelInput, "settings" | "selections">,
+  input: Pick<DefaultSessionModelInput, "settings" | "selections" | "creditBalance">,
 ): DefaultModelSelection | null {
+  const selections = input.creditBalance
+    ? input.selections.filter(
+        (selection) => spendableCreditMicros(input.creditBalance!, selection.model.id) > 0,
+      )
+    : input.selections;
   const fallbackEffort = input.settings.openaiReasoningEffort;
-  const deployment = findSelection(input.selections, input.settings.openaiModel);
-  const configured = findSelection(input.selections, input.settings.creditsDefaultModel);
+  const deployment = findSelection(selections, input.settings.openaiModel);
+  const configured = findSelection(selections, input.settings.creditsDefaultModel);
   if (deployment?.availability.selectable && deployment.model.cost === "credits") {
-    // An operator's paid deployment default is never replaced. When it is the
+    // A funded paid deployment default is preserved. When it is the
     // credits default model itself, credit holders get the credits default
     // effort rather than the deployment-wide fallback effort.
     if (configured?.model.id !== deployment.model.id) return null;
@@ -146,7 +154,7 @@ function creditsCandidate(
       source: "credits",
     };
   }
-  const first = input.selections.find(
+  const first = selections.find(
     (selection) => selection.availability.selectable && selection.model.cost === "credits",
   );
   return first
@@ -175,8 +183,8 @@ function creditsCandidate(
  *    configured credits default (`OPENGENI_CREDITS_DEFAULT_MODEL`, effort
  *    clamped to what the model supports), or the first selectable
  *    credits-billed model when that one is not selectable. When the
- *    deployment default is already a selectable credits-billed model it is
- *    never replaced: it keeps the deployment effort, except that it takes the
+ *    deployment default is already a funded, selectable credits-billed model it
+ *    keeps the deployment effort, except that it takes the
  *    credits default effort when it is the credits default model itself.
  * 4. `deployment`: the deployment default with the deployment reasoning effort
  *    when stably admissible; otherwise the first stably admissible catalog
@@ -247,6 +255,7 @@ export function creditsDefaultSessionModel(input: {
   settings: Settings;
   selections: readonly WorkspaceModelSelection[];
   workspaceSettings: unknown;
+  creditBalance?: BillingBalance;
 }): DefaultModelSelection | null {
   if (input.settings.billingMode !== "stripe") return null;
   return selectDefaultSessionModel({
@@ -254,6 +263,7 @@ export function creditsDefaultSessionModel(input: {
     selections: input.selections,
     workspaceDefaults: resolveWorkspaceSessionDefaults(input.workspaceSettings),
     creditsAvailable: true,
+    ...(input.creditBalance ? { creditBalance: input.creditBalance } : {}),
   });
 }
 
@@ -279,13 +289,14 @@ export async function resolveDefaultSessionModelForSelections(
   if (
     withoutCredits.source !== "deployment" ||
     input.settings.billingMode !== "stripe" ||
-    creditsCandidate(decision) === null
+    !input.selections.some(
+      (selection) => selection.availability.selectable && selection.model.cost === "credits",
+    )
   ) {
     return withoutCredits;
   }
-  return (await organizationHoldsCredits(db, input.accountId))
-    ? selectDefaultSessionModel({ ...decision, creditsAvailable: true })
-    : withoutCredits;
+  const creditBalance = await getBillingBalance(db, input.accountId);
+  return selectDefaultSessionModel({ ...decision, creditsAvailable: true, creditBalance });
 }
 
 export type WorkspaceModelSelectionContext = {

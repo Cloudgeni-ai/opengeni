@@ -232,9 +232,39 @@ test("the free model keeps ordinary wording for failures other than its daily li
   );
   const row = container.querySelector<HTMLElement>('[data-testid="failed-session-banner"]')!;
   expect(row.querySelector("span")!.textContent).toBe(
-    "The model provider is rate limiting requests. Try again in a minute.",
+    "This model is throttled due to high demand. Select a different model, or try again in a few minutes.",
   );
   expect([...row.querySelectorAll("a, button")].map((node) => node.textContent)).toEqual(["Retry"]);
+});
+
+test("throttling points at the chat bar's model picker and keeps only Retry", async () => {
+  const banner = (modelChanged: boolean) => (
+    <FailedSessionBanner
+      failure={{
+        ...failure,
+        reason: "429 Too Many Requests",
+        failureCode: "provider_rate_limited",
+      }}
+      actions={actions}
+      canChooseModel
+      modelChanged={modelChanged}
+    />
+  );
+  const container = await render(banner(false));
+  const row = container.querySelector<HTMLElement>('[data-testid="failed-session-banner"]')!;
+  expect(row.querySelector("span")!.textContent).toBe(
+    "This model is throttled due to high demand. Select a different model, or try again in a few minutes.",
+  );
+  expect([...row.querySelectorAll("button")].map((node) => node.textContent)).toEqual(["Retry"]);
+
+  await act(async () => root!.render(banner(true)));
+  const changedRow = container.querySelector<HTMLElement>('[data-testid="failed-session-banner"]')!;
+  expect(changedRow.querySelector("span")!.textContent).toBe(
+    "This model is throttled due to high demand. Try again in a few minutes.",
+  );
+  expect([...changedRow.querySelectorAll("button")].map((node) => node.textContent)).toEqual([
+    "Retry",
+  ]);
 });
 
 test("double clicks and accepted submissions never duplicate recovery", async () => {

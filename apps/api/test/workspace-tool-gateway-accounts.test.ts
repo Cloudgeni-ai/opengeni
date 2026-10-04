@@ -19,6 +19,7 @@ const real = {
   settingsWithEnabledCapabilityMcpServers: core.settingsWithEnabledCapabilityMcpServers,
   availableMcpAccountBindings: core.availableMcpAccountBindings,
   buildConnectionTokenResolver: dbModule.buildConnectionTokenResolver,
+  listConnectorToolPermissionPolicies: dbModule.listConnectorToolPermissionPolicies,
 };
 const fixtures = new Map<
   Database,
@@ -57,6 +58,10 @@ mock.module("@opengeni/core", () => ({
 }));
 mock.module("@opengeni/db", () => ({
   ...dbModule,
+  listConnectorToolPermissionPolicies: (
+    ...args: Parameters<typeof real.listConnectorToolPermissionPolicies>
+  ) =>
+    fixtures.has(args[0]) ? Promise.resolve([]) : real.listConnectorToolPermissionPolicies(...args),
   buildConnectionTokenResolver: (...args: Parameters<typeof real.buildConnectionTokenResolver>) => {
     const fixture = fixtures.get(args[0]);
     if (!fixture) return real.buildConnectionTokenResolver(...args);
@@ -106,6 +111,24 @@ const access: AccessGrant = {
   principalKind: "human_session",
   permissions: ["workspace:read"],
 };
+
+function resolvedAccountAuthorization() {
+  const authorization = core.accessGrantAuthorizationFromContext(
+    {
+      mode: "managed",
+      subjectId,
+      accountGrants: [{ accountId, subjectId, permissions: [] }],
+      workspaceGrants: [access],
+      defaultAccountId: accountId,
+      defaultWorkspaceId: workspaceId,
+    },
+    access,
+  );
+  // These account-binding fixtures start after trusted cookie resolution.
+  // Authentication provenance itself is covered by the gateway authority tests.
+  authorization.canonicalManagedHumanSession = true;
+  return authorization;
+}
 
 function createConnection(id: string, subject: string | null): ConnectionMetadata {
   return {
@@ -208,7 +231,7 @@ test("agent-authored Grafana account identities survive the live Site catalog an
       callTool: async ({ request }) =>
         callWorkspaceToolGateway(
           prepared,
-          access,
+          resolvedAccountAuthorization(),
           request,
           f.deps.db,
           undefined,
@@ -309,7 +332,7 @@ test("service projections omit personal accounts; revocation never substitutes a
       await refreshed.close();
     }
     const before = f.provider.calls.length;
-    const result = await callWorkspaceToolGateway(old, access, {
+    const result = await callWorkspaceToolGateway(old, resolvedAccountAuthorization(), {
       catalogDigest: digest,
       identity: f.identity(f.personal),
       arguments: {},
@@ -391,7 +414,7 @@ test("generated API accounts retain distinct connections and current approval ge
       const identity = { ...f.identity(connection), toolName: "list_items" };
       await approveWorkspaceToolGatewayCall(
         prepared,
-        access,
+        resolvedAccountAuthorization(),
         f.deps.db,
         {
           operationId: crypto.randomUUID(),

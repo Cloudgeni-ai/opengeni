@@ -1214,8 +1214,6 @@ export async function startWorker() {
     rlsStrategy: settings.rlsStrategy,
     expectedRole: settings.runtimeDatabaseRole,
     targetSchema: settings.dbSchema.trim() || "public",
-    organizationTenancyCanonicalActivationEnabled:
-      settings.organizationTenancyCanonicalActivationEnabled,
   } as const;
   const controlPlaneAuth = resolveNatsControlPlaneAuth(settings);
   let bus: Awaited<ReturnType<typeof createNatsEventBus>> | undefined;

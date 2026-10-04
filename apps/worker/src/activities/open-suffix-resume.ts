@@ -248,6 +248,8 @@ export async function resultItemForOpenSuffixMember(input: {
 }
 
 export async function settleOpenSuffixResumeIfNeeded(input: {
+  additionalApprovals?: unknown[];
+  programmaticApprovalAcknowledged?: boolean;
   db: Database;
   agent: Agent<any, any>;
   accountId: string;
@@ -270,7 +272,8 @@ export async function settleOpenSuffixResumeIfNeeded(input: {
 }): Promise<OpenSuffixResumeOutcome> {
   if (
     input.trigger.type !== "user.approvalDecision" &&
-    input.trigger.type !== "user.humanInputResponse"
+    input.trigger.type !== "user.humanInputResponse" &&
+    !input.additionalApprovals?.length
   ) {
     return { action: "continue" };
   }
@@ -280,7 +283,7 @@ export async function settleOpenSuffixResumeIfNeeded(input: {
     input.sessionId,
     input.turnId,
   );
-  if (rows.length === 0) {
+  if (rows.length === 0 && !input.additionalApprovals?.length) {
     return { action: "continue" };
   }
   const callId = matchingOpenSuffixCallId({
@@ -288,105 +291,123 @@ export async function settleOpenSuffixResumeIfNeeded(input: {
     humanInputToolCallId: input.humanInputResume?.toolCallId,
   });
   const target = resolveOpenSuffixResumeTarget(rows, callId);
-  if (!target || !callId) {
+  if (
+    (!target || !callId) &&
+    !input.programmaticApprovalAcknowledged &&
+    (input.trigger.type === "user.approvalDecision" ||
+      input.trigger.type === "user.humanInputResponse" ||
+      !input.additionalApprovals?.length)
+  ) {
     throw new Error("Open suffix resume event does not match an interruption");
   }
-  const truncationTokens =
-    input.modelToolOutputTruncationTokens ?? target.modelToolOutputTruncationTokens ?? undefined;
-  let resultItem = target.resultItem;
-  let eventOutput: unknown = resultItem?.output;
-  if (!resultItem) {
-    const member = await resultItemForOpenSuffixMember({
-      agent: input.agent,
-      row: target,
-      trigger: input.trigger,
-      humanInputResume: input.humanInputResume,
-    });
-    resultItem = member.resultItem;
-    eventOutput = member.eventOutput;
-    const recorded = await recordPendingSessionToolCallResult(input.db, {
-      accountId: input.accountId,
-      workspaceId: input.workspaceId,
-      sessionId: input.sessionId,
-      turnId: input.turnId,
-      executionGeneration: input.executionGeneration,
-      attemptId: input.attemptId,
-      callId: target.callId,
-      ...(truncationTokens !== undefined
-        ? { modelToolOutputTruncationTokens: truncationTokens }
-        : {}),
-      resultItem,
-      eventOutput,
-    });
-    if (!recorded.accepted) {
-      return { action: "cancelled" };
+  if (target && callId) {
+    const truncationTokens =
+      input.modelToolOutputTruncationTokens ?? target.modelToolOutputTruncationTokens ?? undefined;
+    let resultItem = target.resultItem;
+    let eventOutput: unknown = resultItem?.output;
+    if (!resultItem) {
+      const member = await resultItemForOpenSuffixMember({
+        agent: input.agent,
+        row: target,
+        trigger: input.trigger,
+        humanInputResume: input.humanInputResume,
+      });
+      resultItem = member.resultItem;
+      eventOutput = member.eventOutput;
+      const recorded = await recordPendingSessionToolCallResult(input.db, {
+        accountId: input.accountId,
+        workspaceId: input.workspaceId,
+        sessionId: input.sessionId,
+        turnId: input.turnId,
+        executionGeneration: input.executionGeneration,
+        attemptId: input.attemptId,
+        callId: target.callId,
+        ...(truncationTokens !== undefined
+          ? { modelToolOutputTruncationTokens: truncationTokens }
+          : {}),
+        resultItem,
+        eventOutput,
+      });
+      if (!recorded.accepted) {
+        return { action: "cancelled" };
+      }
+      if (!recorded.recorded) {
+        const latest = resolveOpenSuffixResumeTarget(
+          await listTurnOpenSuffixToolCalls(
+            input.db,
+            input.workspaceId,
+            input.sessionId,
+            input.turnId,
+          ),
+          callId,
+        );
+        resultItem = latest?.resultItem ?? resultItem;
+      } else if (input.publish) {
+        await input.publish([
+          {
+            type: "agent.toolCall.output",
+            payload: { id: target.callId, output: eventOutput },
+          },
+        ]);
+      }
     }
-    if (!recorded.recorded) {
-      const latest = resolveOpenSuffixResumeTarget(
-        await listTurnOpenSuffixToolCalls(
-          input.db,
-          input.workspaceId,
-          input.sessionId,
-          input.turnId,
-        ),
-        callId,
-      );
-      resultItem = latest?.resultItem ?? resultItem;
-    } else if (input.publish) {
-      await input.publish([
-        {
-          type: "agent.toolCall.output",
-          payload: { id: target.callId, output: eventOutput },
-        },
-      ]);
+    if (!resultItem) {
+      throw new Error(`Open suffix resume for ${target.callId} has no result item`);
     }
-  }
-  if (!resultItem) {
-    throw new Error(`Open suffix resume for ${target.callId} has no result item`);
-  }
-  const history = await getActiveSessionHistoryItems(input.db, input.workspaceId, input.sessionId);
-  if (
-    !openSuffixPairPresentInHistory(
-      history.map((row) => row.item),
-      callId,
-    )
-  ) {
-    const historyItems = openSuffixHistoryItems(target, resultItem);
-    if (historyItems.length === 0) {
-      throw new Error(`Open suffix resume for ${target.callId} produced no paired history`);
-    }
-    const nextPosition = await nextSessionHistoryPosition(
+    const history = await getActiveSessionHistoryItems(
       input.db,
       input.workspaceId,
       input.sessionId,
     );
-    const appended = await appendSessionHistoryItems(input.db, {
-      accountId: input.accountId,
-      workspaceId: input.workspaceId,
-      sessionId: input.sessionId,
-      turnId: input.turnId,
-      expectedExecutionGeneration: input.executionGeneration,
-      expectedAttemptId: input.attemptId,
-      ...(truncationTokens !== undefined
-        ? { modelToolOutputTruncationTokens: truncationTokens }
-        : {}),
-      items: historyItems.map((item, offset) => ({
-        position: nextPosition + offset,
-        item,
-      })),
-    });
-    if (!appended) {
-      return { action: "cancelled" };
+    if (
+      !openSuffixPairPresentInHistory(
+        history.map((row) => row.item),
+        callId,
+      )
+    ) {
+      const historyItems = openSuffixHistoryItems(target, resultItem);
+      if (historyItems.length === 0) {
+        throw new Error(`Open suffix resume for ${target.callId} produced no paired history`);
+      }
+      const nextPosition = await nextSessionHistoryPosition(
+        input.db,
+        input.workspaceId,
+        input.sessionId,
+      );
+      const appended = await appendSessionHistoryItems(input.db, {
+        accountId: input.accountId,
+        workspaceId: input.workspaceId,
+        sessionId: input.sessionId,
+        turnId: input.turnId,
+        expectedExecutionGeneration: input.executionGeneration,
+        expectedAttemptId: input.attemptId,
+        ...(truncationTokens !== undefined
+          ? { modelToolOutputTruncationTokens: truncationTokens }
+          : {}),
+        items: historyItems.map((item, offset) => ({
+          position: nextPosition + offset,
+          item,
+        })),
+      });
+      if (!appended) {
+        return { action: "cancelled" };
+      }
     }
   }
   const remaining = (
     await listTurnOpenSuffixToolCalls(input.db, input.workspaceId, input.sessionId, input.turnId)
   ).filter((row) => row.resultItem == null);
-  if (remaining.length === 0) {
+  if (remaining.length === 0 && !input.additionalApprovals?.length) {
     return { action: "continue" };
   }
-  const requiresActionApprovals = remainingPendingApprovalsFromSuffix(remaining);
-  const pendingApprovals = remainingRunStatePendingApprovalsFromSuffix(remaining);
+  const requiresActionApprovals = [
+    ...remainingPendingApprovalsFromSuffix(remaining),
+    ...(input.additionalApprovals ?? []),
+  ];
+  const pendingApprovals = [
+    ...remainingRunStatePendingApprovalsFromSuffix(remaining),
+    ...(input.additionalApprovals ?? []),
+  ];
   const settled = await input.settle({
     events: [
       ...(requiresActionApprovals.length > 0

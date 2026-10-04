@@ -874,7 +874,7 @@ describe("turn exact-content boundaries", () => {
       postCompactionRecovery,
     );
     const interruptionPath = source.indexOf(
-      "if (eventing.stream.interruptions.length > 0)",
+      "if (eventing.stream.interruptions.length > 0 || programmaticPending.length > 0)",
       cancelledStreamGuard,
     );
     const completionPath = source.indexOf(
@@ -2065,6 +2065,13 @@ describe("production model-response usage callback authority", () => {
         type: "response_done",
         response: { id: "resp-1", output: [] },
       } as any);
+      const emptyRawMirror = new RunRawModelStreamEvent({
+        type: "model",
+        providerData: { rawModelEventSource: OPENAI_RESPONSES_RAW_MODEL_EVENT_SOURCE },
+        event: { type: "response.completed", response: { id: "resp-2" } },
+      } as any);
+      expect(await process(emptyRawMirror)).toEqual({ status: "not_response" });
+      expect(state.responseCount).toBe(0);
       expect(await process(missingUsage)).toMatchObject({
         status: "processed",
         authoritative: true,

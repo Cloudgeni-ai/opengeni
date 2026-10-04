@@ -7,6 +7,7 @@ import {
   getHumanInputResumeForEvent,
   getSessionHumanInputRequest,
   getWorkspace,
+  listTurnCodemodeApprovals,
   recordUsageEvent,
   registerPendingSessionToolCall,
   recordPendingSessionToolCallResult,
@@ -18,6 +19,7 @@ import {
   updateSessionTitleWithEvent,
 } from "@opengeni/db";
 import { publishDurableSessionEvents } from "@opengeni/events";
+import { recordProviderRecoveryOutcome } from "./provider-recovery-metrics";
 import {
   AssistantMessagePhaseTracker,
   normalizeModelCallUsage,
@@ -76,6 +78,7 @@ import {
   generatedImageFromSdkEvent,
   isCompletedGeneratedImageSdkEvent,
 } from "../generated-images";
+import { programmaticApproval, programmaticContinuationNote } from "../programmatic-approvals";
 import { ToolResultSpill } from "./tool-result-spill";
 import { ownedTurnSandboxForAgent } from "./turn-sandbox-access";
 import { createTurnCredentialLeases } from "./credential-leases";
@@ -121,6 +124,7 @@ import {
   completedToolCallFromSdkEvent,
 } from "./history";
 import {
+  aggregateCreditPolicyRevision,
   modelUsageSourceKey,
   recordCompletedModelCallBeforeOwnershipFences,
   TurnEventPublisher,
@@ -383,6 +387,8 @@ export async function runTurnStreamAttempt(
   );
   let parallelSessionTitle: ReturnType<typeof startParallelSessionTitleGeneration> | null = null;
   let parallelSessionTitleFinished = false;
+  let creditPolicyRevision: number | undefined;
+  let titleCreditPolicyRevision: number | undefined;
   const finishParallelSessionTitle = async (): Promise<void> => {
     if (parallelSessionTitleFinished) return;
     parallelSessionTitleFinished = true;
@@ -392,6 +398,7 @@ export async function runTurnStreamAttempt(
     if (generated.usage) {
       await processSessionTitleModelUsageEvent({
         usage: generated.usage,
+        creditPolicyRevision: titleCreditPolicyRevision,
         state: sessionTitleUsageState,
         dispatchId: modelUsageDispatchId,
         settings,
@@ -444,6 +451,8 @@ export async function runTurnStreamAttempt(
     await parallelSessionTitle?.cancel();
   };
   let runInput: Awaited<ReturnType<typeof turnInput>>["input"] | null = null;
+  let codemodeContinuationNote: string | undefined;
+  let programmaticApprovalAcknowledged = false;
   const prepareRunAttemptInput = async () => {
     const historyPreparationStartedAt = performance.now();
     let historyPreparationOutcome: "completed" | "failed" = "completed";
@@ -456,6 +465,8 @@ export async function runTurnStreamAttempt(
           subjectId: fileAuthoritySubjectId,
         },
         recovering: turn.executionGeneration > 1,
+        programmaticApprovalAcknowledged,
+        ...(codemodeContinuationNote ? { codemodeContinuationNote } : {}),
         ...(unavailableSandboxFilesNote ? { unavailableSandboxFilesNote } : {}),
         ...(runCredentialsNote ? { runCredentialsNote } : {}),
         ...(mcpAvailabilityNote ? { mcpAvailabilityNote } : {}),
@@ -594,7 +605,8 @@ export async function runTurnStreamAttempt(
   let finalReplyNudged = false;
   const revalidateModelCallAdmission = async () => {
     await historySink.reconcileConversationTruth({ requireDurable: true });
-    await ensureRunAllowedBetweenModelCalls({
+    creditPolicyRevision = await ensureRunAllowedBetweenModelCalls({
+      modelId: resolvedModel?.configured.id ?? turn.model,
       settings,
       db,
       accountId: input.accountId,
@@ -624,6 +636,7 @@ export async function runTurnStreamAttempt(
       signal: runtimeCancellationSignal,
       admit: revalidateModelCallAdmission,
     });
+    const responseCreditPolicyRevisions = new Set<number | undefined>();
     const responseCountBeforeStream = modelResponseState.responseCount;
     eventing.batcher = null;
     // The SDK emits every processed call item for one model response before
@@ -841,7 +854,10 @@ export async function runTurnStreamAttempt(
         attempt.modelRequestStarted = true;
         return await runtime.runStream(agent, runInput!, eventing.modelRunSettings, {
           beforeModelRequest: modelCallAdmission.beforeModelRequest,
-          onModelResponse: modelCallAdmission.onModelResponse,
+          onModelResponse: (event) => {
+            responseCreditPolicyRevisions.add(creditPolicyRevision);
+            return modelCallAdmission.onModelResponse(event);
+          },
           signal: runtimeCancellationSignal,
           sandboxEnvironment,
           onModelVisibleContext: async (snapshot) => {
@@ -1067,6 +1083,7 @@ export async function runTurnStreamAttempt(
           ? await media.retainNativeGeneratedImage(generatedImage)
           : null;
         const responseResult = await processModelResponseTerminalEvent({
+          creditPolicyRevision,
           event: next.value,
           state: modelResponseState,
           dispatchId: modelUsageDispatchId,
@@ -1132,6 +1149,15 @@ export async function runTurnStreamAttempt(
             ]);
             attempt.providerRecoveryCount = 0;
           }
+          if (attempt.providerRecoveryObservation) {
+            recordProviderRecoveryOutcome(observability, {
+              route: attempt.modelMetricRoute,
+              cause: attempt.providerRecoveryObservation.cause,
+              outcome: "recovered",
+              elapsedMs: Date.now() - attempt.providerRecoveryObservation.startedAt,
+            });
+            attempt.providerRecoveryObservation = undefined;
+          }
           const rawStreamHistory = (eventing.stream.state as { history?: unknown[] }).history;
           if (Array.isArray(rawStreamHistory)) {
             // The completed image item is normally retained from its own
@@ -1148,21 +1174,9 @@ export async function runTurnStreamAttempt(
           await historySink.reconcileConversationTruth();
           turnLifecycleMetricsFor(observability).progress({ attemptId: input.attemptId });
           modelCheckpointMemoryCollector.schedule(observability);
-          await ensureRunAllowedBetweenModelCalls({
-            settings,
-            db,
-            accountId: input.accountId,
-            workspaceId: input.workspaceId,
-            isExternallyBilledTurn: billingState.isExternallyBilledTurn,
-            entitlements,
-            chargesOpenGeniCredits: billingState.chargesOpenGeniCredits,
-            countsTowardTokenCap: billingState.countsTowardTokenCap,
-            initiatingHumanSubjectId: turn.initiatingHumanSubjectId,
-            serializedRunState: () =>
-              media.compactMediaRunState(String(eventing.stream!.state.toString())),
-          });
         }
-        // Release only after both the debit and frozen-human admission finish.
+        // Release after settlement. The producer checks fresh admission before
+        // its next request; a final response keeps the revision it ran under.
         modelCallAdmission.settle(next.value);
         const durableSdkEvent = generatedImageReceipt
           ? compactGeneratedImageSdkEvent(next.value, generatedImageReceipt)
@@ -1551,6 +1565,12 @@ export async function runTurnStreamAttempt(
     if (!streamSawPerResponseUsage) {
       const aggregateUsage = eventing.stream.state.usage;
       const normalizedAggregateUsage = normalizeModelCallUsage(aggregateUsage);
+      const aggregatePolicyRevision = aggregateCreditPolicyRevision({
+        responseRevisions: responseCreditPolicyRevisions,
+        lastAdmittedRevision: creditPolicyRevision,
+        chargesOpenGeniCredits: billingState.chargesOpenGeniCredits,
+        totalTokens: normalizedAggregateUsage.totalTokens,
+      });
       const aggregateInput = normalizedAggregateUsage.telemetry.inputTokens;
       const aggregateSourceKey = modelUsageSourceKey({
         responseId: null,
@@ -1573,6 +1593,7 @@ export async function runTurnStreamAttempt(
           leaseLostMessage: "Provider credential lease expired during the active turn",
           recordUsage: async () => {
             const billing = await recordModelUsageAndDebitCredits(settings, db, {
+              creditPolicyRevision: aggregatePolicyRevision,
               accountId: input.accountId,
               workspaceId: input.workspaceId,
               sessionId: input.sessionId,
@@ -1641,10 +1662,21 @@ export async function runTurnStreamAttempt(
         });
       }
     }
-    if (eventing.stream.interruptions.length > 0) {
+    const programmaticPending = (
+      await listTurnCodemodeApprovals(db, {
+        accountId: input.accountId,
+        workspaceId: input.workspaceId,
+        sessionId: input.sessionId,
+        turnId: activeTurnId,
+      })
+    )
+      .filter((operation) => operation.state === "waiting_for_approval")
+      .map(programmaticApproval);
+    if (eventing.stream.interruptions.length > 0 || programmaticPending.length > 0) {
       await eventing.preparedTools?.inputWaitYield?.sealForSettlement(runtimeCancellationSignal);
       await historySink.reconcileConversationTruth({ requireDurable: true });
-      const approvals = runtime.serializeApprovals(eventing.stream.interruptions);
+      const sdkApprovals = runtime.serializeApprovals(eventing.stream.interruptions);
+      const approvals = [...sdkApprovals, ...programmaticPending];
       const humanInputInterruptions =
         runtime.serializeHumanInputRequests?.(eventing.stream.interruptions) ?? [];
       const interactionInterventionInterruptions =
@@ -1724,28 +1756,34 @@ export async function runTurnStreamAttempt(
       const interruptionCallIds = interruptionCallIdsFromPause({
         humanInputRequests,
         interactionInterventionRequests,
-        pendingApprovals,
+        pendingApprovals: [
+          ...sdkApprovals,
+          ...interactionInterventionInterruptions.map((interruption) => interruption.approval),
+        ],
       });
       assertOpenSuffixResumable(suffixMembers, interruptionCallIds);
       const suffixByCallId = new Map(suffixMembers.map((member) => [member.callId, member]));
-      const attached = await attachOpenSuffixToPendingToolCalls(db, {
-        accountId: input.accountId,
-        workspaceId: input.workspaceId,
-        sessionId: input.sessionId,
-        turnId: activeTurnId,
-        executionGeneration: attempt.executionGeneration,
-        attemptId: input.attemptId,
-        members: interruptionCallIds.map((callId) => {
-          const member = suffixByCallId.get(callId)!;
-          return {
-            callId,
-            interruptionKind: interruptionKindForCallItem(
-              member.callItem as Record<string, unknown>,
-            ),
-            reasoningItems: member.reasoningItems as Array<Record<string, unknown>>,
-          };
-        }),
-      });
+      const attached =
+        interruptionCallIds.length === 0
+          ? { accepted: true }
+          : await attachOpenSuffixToPendingToolCalls(db, {
+              accountId: input.accountId,
+              workspaceId: input.workspaceId,
+              sessionId: input.sessionId,
+              turnId: activeTurnId,
+              executionGeneration: attempt.executionGeneration,
+              attemptId: input.attemptId,
+              members: interruptionCallIds.map((callId) => {
+                const member = suffixByCallId.get(callId)!;
+                return {
+                  callId,
+                  interruptionKind: interruptionKindForCallItem(
+                    member.callItem as Record<string, unknown>,
+                  ),
+                  reasoningItems: member.reasoningItems as Array<Record<string, unknown>>,
+                };
+              }),
+            });
       if (!attached.accepted) {
         return claimedResult({ status: "cancelled" });
       }
@@ -1920,7 +1958,29 @@ export async function runTurnStreamAttempt(
     return claimedResult({ status: "idle" });
   };
 
+  // Recover committed waits/results before any model dispatch, including crash replacement.
+  // A new attempt uses its own signed caller; origin provenance never changes.
+  await eventing.toolPreparationReady;
+  const codemodeOperations =
+    (await eventing.codemodeDispatcher?.resumeApproved(
+      `sandbox:${input.attemptId}`,
+      trigger.type === "user.approvalDecision"
+        ? (trigger.payload as { approvalId: string }).approvalId
+        : undefined,
+    )) ?? [];
+  codemodeContinuationNote = programmaticContinuationNote(codemodeOperations);
+  programmaticApprovalAcknowledged =
+    trigger.type === "user.approvalDecision" &&
+    codemodeOperations.some(
+      (operation) =>
+        operation.operationId === (trigger.payload as { approvalId?: unknown }).approvalId,
+    );
+  const pendingProgrammaticApprovals = codemodeOperations
+    .filter((operation) => operation.state === "waiting_for_approval")
+    .map(programmaticApproval);
   const openSuffixResume = await settleOpenSuffixResumeIfNeeded({
+    additionalApprovals: pendingProgrammaticApprovals,
+    programmaticApprovalAcknowledged,
     db,
     agent,
     accountId: input.accountId,
@@ -1965,6 +2025,7 @@ export async function runTurnStreamAttempt(
       turnExecutionPolicy.providerId,
       turnExecutionPolicy.latencyMode,
     );
+    titleCreditPolicyRevision = creditPolicyRevision;
     parallelSessionTitle = startParallelSessionTitleGeneration({
       signal: runtimeCancellationSignal,
       generate: async (signal) =>

@@ -1,3 +1,4 @@
+import { useHasToolReview, ToolReviewHistoryReceipt } from "../components/tool-review-history";
 import { KnowledgeReceiptRow } from "./knowledge-receipt";
 import { defaultUrlTransform } from "react-markdown";
 import { isRetainedImageContentType, useRetainedImageObjectUrl } from "./retained-image";
@@ -2333,6 +2334,12 @@ function RunOnRenderer({ item }: ToolRendererProps) {
  * JSON stays in the expandable body only.
  */
 function GenericRenderer({ item }: ToolRendererProps) {
+  const reviewed = useHasToolReview(item.callId);
+  if (reviewed && item.callId) return <ToolReviewHistoryReceipt approvalId={item.callId} />;
+  return <UnreviewedGenericRenderer item={item} />;
+}
+
+function UnreviewedGenericRenderer({ item }: ToolRendererProps) {
   const running = item.status === "running";
   const args = parseToolArgs(item.arguments);
   const display = toolDisplayName(item.name, item.display);

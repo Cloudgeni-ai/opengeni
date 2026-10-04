@@ -99,6 +99,11 @@ test("real non-bypass owner preserves source policy bytes through receipt repair
     // Remove it before replay so the actual attention backfill still runs.
     await owner`ALTER TABLE session_event_cursors
       ADD COLUMN last_meaningful_sequence integer NOT NULL DEFAULT 0`;
+    // Current session/turn adapters project 0608's nullable context fields.
+    // Stage only empty reader columns for historical seeds, not its authority
+    // triggers or backfill; remove them before the real ordered 0608 replay.
+    await owner`ALTER TABLE sessions ADD COLUMN execution_context_turn_id uuid`;
+    await owner`ALTER TABLE session_turns ADD COLUMN execution_context_turn_id uuid`;
     // Renumbering the independent nullable agent-config column after this
     // repair must not break current session writers used to seed legacy rows.
     // Apply those adapter prerequisites early; allowance/collaborator repairs
@@ -152,6 +157,14 @@ test("real non-bypass owner preserves source policy bytes through receipt repair
     const historical = await createSession(adminDb.db, sessionInput);
     const turn = (await initialize(historical.id)).turn;
     expect(turn).not.toBeNull();
+    const historicalContext = () => owned.admin`select
+      s.execution_context_turn_id as session_context,
+      t.execution_context_turn_id as turn_context
+      from sessions s join session_turns t on t.session_id=s.id
+      where s.id=${historical.id} and t.id=${turn!.id}`;
+    expect([...(await historicalContext())]).toEqual([
+      { session_context: null, turn_context: null },
+    ]);
     const task = await createScheduledTask(adminDb.db, {
       accountId,
       workspaceId,
@@ -281,9 +294,16 @@ test("real non-bypass owner preserves source policy bytes through receipt repair
         and polname = 'attribution_expected_planned_visibility'`;
     expect(planned?.qual).toBeDefined();
     await owner.unsafe("DROP POLICY attribution_expected_planned_visibility ON usage_events");
+    await owner`ALTER TABLE sessions DROP COLUMN execution_context_turn_id`;
+    await owner`ALTER TABLE session_turns DROP COLUMN execution_context_turn_id`;
     for (const name of planningSuffix)
       await owner`delete from schema_migrations where name=${name}`;
     await migrate(owned.ownerUrl);
+    // A historical accepted turn without turn.started proof gains no context
+    // from the actual migration's backfill, either on its session or turn.
+    expect([...(await historicalContext())]).toEqual([
+      { session_context: null, turn_context: null },
+    ]);
     const plannedPolicies = before.map((row) =>
       row.relname === "usage_events" && row.polname === "session_visibility_isolation"
         ? { ...row, qual: planned!.qual }

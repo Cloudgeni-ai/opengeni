@@ -421,6 +421,9 @@ function Conversation({
                     error={catalog.error?.message}
                     disabled={terminal}
                     sessionKey={sessionId}
+                    onOpenChange={(open) => {
+                      if (open) void catalog.refresh();
+                    }}
                     onModelChange={(model) => composer.setModel?.(model)}
                     onEffortChange={(effort) => composer.setReasoningEffort?.(effort)}
                     onLatencyModeChange={(mode) => composer.setLatencyMode?.(mode)}

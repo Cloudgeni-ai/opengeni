@@ -296,6 +296,8 @@ Organization/workspace membership, API keys, delegated grants, private-session
 ownership and personal-resource grants remain distinct. Organization keys with
 `workspace:admin` may change private-session product settings; DB fences recheck
 live keys, including replay. This grants no private-content access.
+Only-me chats are on by default for every organization (migration 0611); no
+per-organization activation receipt or deployment switch gates them.
 Sharing advances viewer-access epoch while preserving accepted execution and
 connection selections. Privatization/revocation advance the execution-epoch floor;
 privatization requires quiescence and clears staged personal selections.
@@ -851,6 +853,12 @@ revalidates the immutable attempt through ordinary same-turn recovery and bounde
 redispatch. A lost claim response revealing the exact active attempt follows that
 path. Permanent database/state faults remain terminal; model, tool, or provider
 work is never replayed or requeued.
+Running-turn own-database connection loss, including postgres.js lifecycle
+closure codes and raw RLS transaction admission/settlement errors, enters that
+same exact-attempt recovery lane. Physical writer and unknown-tool-outcome
+fences remain authoritative; database transactions are never blindly replayed.
+See [`run-lifecycle.md`](run-lifecycle.md) for the closed outage classes and
+provenance boundaries.
 
 Transient provider recovery uses a durable consecutive-failure streak, not lifetime
 failures. An exact-current-attempt model completion atomically clears that streak
@@ -921,6 +929,8 @@ Tool approval and structured human input durably interrupt execution. The worker
 retains exact protocol state without pairing unfinished calls into model history.
 Responses bind the pending request, target turn, execution generation, requester,
 and current authorization.
+
+See [Tool approvals](tool-approvals.md) for canonical policy, portable review and durable programmatic continuation.
 
 Tool approvals are human-only. Agent-session authority may permit answering
 another session's structured human-input request, never self-approval of tools.
@@ -1041,6 +1051,19 @@ Canonical: [`knowledge.md`](knowledge.md),
 
 ### 5.7 Usage, limits, and billing
 
+Model-scoped promotions retain offer identity and initial eligibility on each grant.
+Audited `credit_promotion_policy_revisions` can update coverage for existing and
+new scoped grants without a restart. Each paid call retains its admitted revision
+for settlement; the next call reads current policy. `packages/db/src/credit-balances.ts` owns the general/promotional split and
+eligible balance calculation. Model settlement serializes by account, consumes
+eligible grants before general credits, and inserts `credit_debit_allocations`
+with the idempotent debit in one transaction. A settled zero-cost receipt cannot
+be charged later on retry. Non-model resources spend general credits only.
+Legacy grants remain unrestricted. Stripe checkout metadata records scoped status and initial eligibility
+before the customer confirms; webhook and status recovery share fulfillment.
+Deployment policy, activation order and customer flow: [scoped promotional
+credits](scoped-promotional-credits.md).
+
 Blocked account switches: [Codex rotation](codex-subscription-rotation.md).
 
 Provider-normalized calls freeze nullable provider/equivalent-credit comparisons.
@@ -1097,7 +1120,7 @@ Workspaces: `apps/*`, `examples/*`, `packages/*`. Bun consumes internal packages
 from source; Connected Machine agent/relay use Rust Cargo workspace
 `agent/`.
 
-`examples/vue-conversation/app` has its own npm lock and builds against the
+`examples/vue-conversation/app` has its own `bun.lock` and builds against the
 published SDK, not repository source.
 
 Manifests and `.changeset/config.json` own publication; this map describes responsibilities.
@@ -1164,7 +1187,7 @@ handlers because its host owns process lifecycle.
 | `examples/northstar-support` | `@opengeni/example-northstar-support` | Standalone product reference (proxy, MCP, React, streams) |
 | `examples/tool-server` | `@opengeni/example-tool-server` | Proxy `toolServer` reference |
 | `examples/site-session-embed` | `@opengeni/example-site-session-embed` | Site SDK/React embed and sandbox preview reference |
-| `examples/vue-conversation` | Standalone npm consumer in `app` | Published-SDK Vue conversation behind the Bun session proxy; [recipe](../examples/vue-conversation/README.md) |
+| `examples/vue-conversation` | Standalone Bun consumer in `app` (own `bun.lock`) | Published-SDK Vue conversation behind the Bun session proxy; [recipe](../examples/vue-conversation/README.md) |
 
 ### 6.4 Rust agent and relay
 
@@ -1303,7 +1326,14 @@ Wiring: `apps/worker/src/sandbox-routing.ts` and
 `apps/worker/src/activities/agent-turn/sandbox-runtime.ts`.
 
 Codemode adds attempt scope, active-attempt fencing, a durable operation journal,
-sandbox delivery and recovery. Preflight finishes before the execution-start
+sandbox delivery and recovery. Programmatic review uses a linked durable action
+request and `waiting_for_approval`; the original attempt/catalog foreign key
+never changes. A separate execution claim binds an approved continuation to the
+current attempt of the same turn and compatible tool/account semantics.
+`packages/db/src/codemode-approvals.ts` owns that transition, and the existing
+human-decision transaction supplies the durable workflow wake. Waiting releases
+capacity and yields at the SDK tool boundary; it is not an open SDK call or a
+JavaScript stack checkpoint. Preflight finishes before the execution-start
 marker; a pre-creation `codemode_catalog_stale` allows one safe client refresh,
 never a retry of an existing or ambiguous operation. Submission conflicts never
 reconcile to an existing row; ambiguous failures adopt one only after exact

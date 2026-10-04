@@ -2,6 +2,8 @@ import { randomUUID } from "node:crypto";
 import { readFileSync, statSync, writeFileSync } from "node:fs";
 import {
   CodemodeClient,
+  CodemodeApprovalPendingError,
+  CodemodeOperationError,
   generateCodemodeDeclarations,
   type AttemptToolCatalog,
   type AttemptToolCatalogEntry,
@@ -19,6 +21,8 @@ function usage(exitCode = 1): void {
     "              [--query <substring>] [--limit <1..100>] [--offset <nonnegative integer>]",
     "  ogtool show <tool-path-or-model-name>",
     "  ogtool call <tool-path-or-model-name> [json-object]",
+    "  ogtool read <operation-id>",
+    "  ogtool resume <operation-id>",
     "  ogtool declarations [output-file]",
     "  ogtool doctor",
     "  ogtool --version",
@@ -197,6 +201,14 @@ async function main(): Promise<void> {
   }
 
   const client = configuredClient();
+  if (command === "read" || command === "resume") {
+    if (args.length !== 1 || !/^[0-9a-f-]{36}$/iu.test(args[0]!))
+      throw new Error("A valid operation ID is required");
+    const result =
+      command === "read" ? await client.status(args[0]!) : await client.resume(args[0]!);
+    process.stdout.write(`${JSON.stringify(result, null, 2)}\n`);
+    return;
+  }
   if (command === "list") {
     const catalog = await client.catalog();
     if (listOptions!.full) {
@@ -240,6 +252,20 @@ async function main(): Promise<void> {
 }
 
 void main().catch((error: unknown) => {
+  if (error instanceof CodemodeApprovalPendingError) {
+    process.stdout.write(
+      `${JSON.stringify({ operationId: error.operationId, state: error.state, code: error.code, approvalRequestId: error.approvalRequestId, message: error.message })}\n`,
+    );
+    process.exitCode = 2;
+    return;
+  }
+  if (error instanceof CodemodeOperationError) {
+    process.stdout.write(
+      `${JSON.stringify({ operationId: error.operation.operationId, state: error.operation.state, code: error.code, message: error.message })}\n`,
+    );
+    process.exitCode = error.operation.state === "outcome_unknown" ? 3 : 1;
+    return;
+  }
   const code =
     error && typeof error === "object" && "code" in error
       ? String((error as { code: unknown }).code)

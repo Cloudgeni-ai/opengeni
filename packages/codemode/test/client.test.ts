@@ -3,6 +3,7 @@ import { readFile, rm } from "node:fs/promises";
 import { dirname } from "node:path";
 import {
   CodemodeClient,
+  CodemodeApprovalPendingError,
   CodemodeOperationError,
   CodemodeTransportError,
   CodemodeToolCallError,
@@ -812,4 +813,65 @@ describe("CodemodeClient", () => {
       await rm(dirname(typed.images[0]!.path), { recursive: true, force: true });
     }
   });
+});
+
+test("waiting returns a compact handle; continuation observes without resubmission", async () => {
+  const catalog = createAttemptToolEnvironment({
+    scope,
+    generation: 1,
+    definitions: [definition],
+  }).catalog;
+  const operationId = crypto.randomUUID(),
+    requestId = crypto.randomUUID();
+  let posts = 0,
+    reads = 0,
+    approved = false;
+  const client = new CodemodeClient({
+    baseUrl: "https://tools.example.test/codemode",
+    token: "fixture-token",
+    fetch: (async (url, init) => {
+      if (String(url).endsWith("/catalog")) return Response.json(catalog);
+      if (init?.method === "POST") {
+        posts++;
+        const payload = JSON.parse(String(init.body));
+        expect(payload.durableApproval).toBe(true);
+        return Response.json({
+          dispatch: "accepted",
+          operation: {
+            ...operation(operationId, catalog.digest, "queued"),
+            state: "waiting_for_approval",
+            durableApproval: true,
+            approvalRequestId: requestId,
+          },
+        });
+      }
+      reads++;
+      return Response.json({
+        ...operation(operationId, catalog.digest, approved ? "completed" : "queued"),
+        state: approved ? "completed" : "waiting_for_approval",
+        durableApproval: true,
+        approvalRequestId: requestId,
+      });
+    }) as typeof fetch,
+  });
+  let receipt: unknown;
+  try {
+    await client.call(definition.identity, { query: "hello" }, { operationId });
+  } catch (error) {
+    receipt = error;
+  }
+  expect(receipt).toBeInstanceOf(CodemodeApprovalPendingError);
+  expect(receipt).toMatchObject({
+    operationId,
+    approvalRequestId: requestId,
+    code: "codemode_approval_pending",
+  });
+  expect(JSON.stringify(receipt)).not.toContain("arguments");
+  expect(posts).toBe(1);
+  expect(reads).toBe(0);
+  expect(await client.status(operationId)).toMatchObject({ state: "waiting_for_approval" });
+  await expect(client.resume(operationId)).rejects.toBeInstanceOf(CodemodeApprovalPendingError);
+  approved = true;
+  expect(await client.resume(operationId)).toMatchObject({ content: [{ text: "found" }] });
+  expect(posts).toBe(1);
 });

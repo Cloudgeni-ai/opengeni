@@ -117,6 +117,8 @@ function preparedGateway(
   approval: "human" | "none" = "none",
   options: {
     authorize?: ToolGatewayAuthorization;
+    resolveApproval?: () => "allow" | "ask" | "block";
+    onLifecycle?: () => void;
     onPreflight?: () => void;
     onExecute?: (context: { transportMeta?: Record<string, unknown> | null }) => void;
     executeError?: unknown;
@@ -154,6 +156,15 @@ function preparedGateway(
               },
             }
           : {}),
+        ...(options.onLifecycle
+          ? {
+              lifecycle: {
+                prepare: () => {
+                  options.onLifecycle?.();
+                },
+              },
+            }
+          : {}),
         execute: async (argumentsValue, context) => {
           options.onExecute?.(context);
           calls.push({ kind: context.caller.kind, argumentsValue });
@@ -168,6 +179,7 @@ function preparedGateway(
     requireApproval: (entry, _caller, context) =>
       entry.approval === "human" && context.transportMeta?.approvalConfirmed !== true,
     ...(options.authorize ? { authorize: options.authorize } : {}),
+    ...(options.resolveApproval ? { resolveApproval: options.resolveApproval } : {}),
   });
   return {
     toolGateway: gateway,
@@ -952,6 +964,75 @@ describe("workspace tool gateway adapters", () => {
     expect(calls).toEqual([]);
     expect(preflightCalls).toBe(0);
   });
+
+  test("allows explicit policy Allow for a service caller despite a human recommendation", async () => {
+    const calls: Array<{ kind: string; argumentsValue: Record<string, unknown> }> = [];
+    const prepared = preparedGateway(calls, "human", { resolveApproval: () => "allow" });
+    const authorization = resolvedAuthorization(
+      grant({ subjectId: "api_key:org-service", principalKind: "api_key" }),
+    );
+    const result = await callWorkspaceToolGateway(prepared, authorization, {
+      operationId: "33333333-3333-4333-8333-333333333333",
+      catalogDigest: prepared.toolGatewayCatalog.digest,
+      identity: { serverId: "inventory", toolName: "lookup" },
+      arguments: { sku: "EXPLICIT-ALLOW" },
+    });
+    expect(result.result).toMatchObject({ structuredContent: { count: 7 } });
+    expect(calls).toHaveLength(1);
+  });
+
+  for (const operation of ["call", "approve"] as const) {
+    test(`denies resolved Ask before preflight and lifecycle for service ${operation}`, async () => {
+      const calls: Array<{ kind: string; argumentsValue: Record<string, unknown> }> = [];
+      let preflightCalls = 0;
+      let lifecycleCalls = 0;
+      let capabilityCalls = 0;
+      const prepared = preparedGateway(calls, "none", {
+        resolveApproval: () => "ask",
+        onPreflight: () => {
+          preflightCalls += 1;
+        },
+        onLifecycle: () => {
+          lifecycleCalls += 1;
+        },
+      });
+      const authorization = resolvedAuthorization(
+        grant({ subjectId: "api_key:org-service", principalKind: "api_key" }),
+      );
+      const request = {
+        operationId: "33333333-3333-4333-8333-333333333333",
+        catalogDigest: prepared.toolGatewayCatalog.digest,
+        identity: { serverId: "inventory", toolName: "lookup" },
+        arguments: { sku: "RESOLVED-ASK" },
+      };
+      const pending =
+        operation === "call"
+          ? callWorkspaceToolGateway(
+              prepared,
+              authorization,
+              { ...request, approvalToken: `ogta_${"a".repeat(43)}` },
+              {} as never,
+              async () => {
+                capabilityCalls += 1;
+                return true;
+              },
+            )
+          : approveWorkspaceToolGatewayCall(
+              prepared,
+              authorization,
+              {} as never,
+              request,
+              async () => {
+                capabilityCalls += 1;
+              },
+            );
+      await expect(pending).rejects.toMatchObject({ status: 403 });
+      expect(preflightCalls).toBe(0);
+      expect(lifecycleCalls).toBe(0);
+      expect(capabilityCalls).toBe(0);
+      expect(calls).toHaveLength(0);
+    });
+  }
 
   test("allows an authorized organization service API key to call a non-approval tool", async () => {
     const calls: Array<{ kind: string; argumentsValue: Record<string, unknown> }> = [];
