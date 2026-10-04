@@ -112,12 +112,6 @@ config:
   # dedicated setupAccountIngress to remain enabled so the request cannot fall
   # through the ordinarily logged/traced primary Ingress.
   OPENGENI_ORGANIZATION_USER_SETUP_QUERY_EDGE_SANITIZATION_CONFIRMED: "false"
-  # Canonical organization-tenancy authority activation. Pinned to the
-  # reversible pre-activation posture so an upgrade can never cross the one-way
-  # boundary implicitly. Flip to "true" only after proving the preconditions in
-  # docs/organization-tenancy.md; setting it back to "false" afterwards is not a
-  # rollback.
-  OPENGENI_ORGANIZATION_TENANCY_CANONICAL_ACTIVATION_ENABLED: "false"
   # See docs/deployment.md.
   OPENGENI_BILLING_MODE: disabled
   # The offer and both new resource charges require separate operator activation.

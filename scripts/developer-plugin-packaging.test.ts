@@ -80,7 +80,7 @@ describe("shared OpenGeni package", () => {
     const portable = json("plugins/opengeni/plugin.json");
     for (const manifest of [claude, portable]) {
       expect(manifest.name).toBe("opengeni");
-      expect(manifest.version).toBe("0.2.0");
+      expect(manifest.version).toBe("0.3.0");
       expect(manifest).not.toHaveProperty("skills");
       const { mcpServers: _claudeMcp, ...rest } = manifest;
       noTransport(rest);

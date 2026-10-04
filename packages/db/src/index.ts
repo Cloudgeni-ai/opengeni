@@ -6,6 +6,7 @@ import {
 } from "./inbox-execution-context";
 import { parentOutboxAuthorityTx } from "./child-outbox-authority";
 export { SubscriptionAccountChangedError } from "./subscription-account-conflict";
+import type { GoalAdmissionPausedReason } from "@opengeni/contracts";
 import {
   claudeSubscriptionAccountRepository,
   claudeSubscriptionTables,
@@ -439,7 +440,6 @@ import {
   closePrivateSessionCreateCapability,
   openPrivateChildSessionCreateCapability,
   openPrivateSessionCreateCapability,
-  sessionTenancyProductActivated,
 } from "./session-tenancy";
 import {
   completeCodemodeOperationInTransaction,
@@ -38146,11 +38146,6 @@ async function readSessionListForSubject(
           throw new SessionListAccessError();
         }
 
-        const tenancyActivated = await sessionTenancyProductActivated(
-          tx as unknown as Database,
-          workspaceId,
-        );
-
         const archiveMode = options.archiveStatus ?? (options.archivedOnly ? "archived" : "active");
         const sortBy = options.sortBy ?? (archiveMode === "archived" ? "archivedAt" : "updatedAt");
         if (options.archivedOnly && archiveMode !== "archived") {
@@ -38600,7 +38595,7 @@ async function readSessionListForSubject(
                       ? { archivedAt: exactArchiveTimestamps.get(session.id)! }
                       : {}),
                   },
-                  { subjectId: options.subjectId, activated: tenancyActivated },
+                  { subjectId: options.subjectId },
                 ),
                 ...(sortBy === "updatedAt" && exactOrdinaryTimestamps.has(session.id)
                   ? { updatedAt: exactOrdinaryTimestamps.get(session.id)! }
@@ -38856,7 +38851,6 @@ export async function getSessionForSubject(
     const mcpServers = await sessionMcpServerMetadataForSessions(scopedDb, workspaceId, [
       sessionId,
     ]);
-    const tenancyActivated = await sessionTenancyProductActivated(scopedDb, workspaceId);
     const failureDiagnostics = await sessionFailureDiagnostics(scopedDb, workspaceId, session);
     return projectSessionForRelatedAccess(
       {
@@ -38868,7 +38862,7 @@ export async function getSessionForSubject(
           mapSessionAttention(session, row.pin),
           mapSessionArchive(row.pin),
           undefined,
-          { subjectId, activated: tenancyActivated },
+          { subjectId },
         )),
         failureDiagnostics,
       },
@@ -68815,6 +68809,16 @@ export async function updateSessionTitleWithEvent(
   );
 }
 
+/** Read-only admission at a locked paused-to-active transition. */
+export type SessionGoalResumeValidation = (
+  tx: Database,
+  session: Pick<
+    Session,
+    "accountId" | "workspaceId" | "model" | "codexCompactionMode" | "latencyMode"
+  >,
+  causalTurn: { id: string; initiatingHumanSubjectId: string | null } | null,
+) => Promise<void>;
+
 /**
  * Status transition helper. Idempotent: requesting the current status returns
  * `changed: false` so callers can skip emitting a duplicate event. `completed`
@@ -68834,6 +68838,8 @@ export async function setSessionGoalStatus(
     reportDeliveries?: SessionGoalReportDelivery[];
     reportArtifactActor?: ReportArtifactActor;
     commandActor?: Extract<SessionCommandActor, { type: "agent_attempt" }>;
+    /** Runs under the canonical control/session/goal locks, before a paused goal changes. */
+    beforeResume?: SessionGoalResumeValidation;
   },
 ): Promise<{
   goal: SessionGoal;
@@ -68882,6 +68888,51 @@ export async function setSessionGoalStatus(
     }
     if (existing.status === "completed") {
       throw new Error("session goal is completed; set a new goal to continue");
+    }
+    if (input.status === "active" && input.beforeResume) {
+      const [effectiveSession] = await withEffectiveSessionPolicy(scopedDb, workspaceId, [session]);
+      // An accepted running turn owns the work the goal will continue after it
+      // settles. An idle Resume uses the exact latest-finished causal row.
+      const causalTurnFilter = session.activeTurnId
+        ? or(
+            eq(schema.sessionTurns.id, session.activeTurnId),
+            sql`${schema.sessionTurns.finishedAt} is not null`,
+          )
+        : sql`${schema.sessionTurns.finishedAt} is not null`;
+      const [causalTurn] = await scopedDb
+        .select({
+          id: schema.sessionTurns.id,
+          initiatingHumanSubjectId: schema.sessionTurns.initiatingHumanSubjectId,
+        })
+        .from(schema.sessionTurns)
+        .where(
+          and(
+            eq(schema.sessionTurns.workspaceId, workspaceId),
+            eq(schema.sessionTurns.sessionId, sessionId),
+            causalTurnFilter,
+          ),
+        )
+        .orderBy(
+          ...(session.activeTurnId
+            ? [desc(sql`${schema.sessionTurns.id} = ${session.activeTurnId}`)]
+            : []),
+          desc(schema.sessionTurns.finishedAt),
+          desc(schema.sessionTurns.position),
+          desc(schema.sessionTurns.createdAt),
+          desc(schema.sessionTurns.id),
+        )
+        .limit(1);
+      await input.beforeResume(
+        scopedDb,
+        {
+          accountId: session.accountId,
+          workspaceId,
+          model: effectiveSession!.model,
+          latencyMode: effectiveSession!.latencyMode as Session["latencyMode"],
+          codexCompactionMode: session.codexCompactionMode as Session["codexCompactionMode"],
+        },
+        causalTurn ?? null,
+      );
     }
     if (input.status === "completed") {
       await verifyGoalReportDeliveries(scopedDb, {
@@ -68976,6 +69027,7 @@ export async function setSessionGoalStatusWithEvent(
     reportDeliveries?: SessionGoalReportDelivery[];
     reportArtifactActor?: ReportArtifactActor;
     commandActor?: Extract<SessionCommandActor, { type: "agent_attempt" }>;
+    beforeResume?: SessionGoalResumeValidation;
     event: SetSessionGoalStatusEvent;
   },
 ): Promise<{
@@ -69009,6 +69061,7 @@ export async function setSessionGoalStatusWithEvent(
           : {}),
         ...(input.reportArtifactActor ? { reportArtifactActor: input.reportArtifactActor } : {}),
         ...(input.commandActor ? { commandActor: input.commandActor } : {}),
+        ...(input.beforeResume ? { beforeResume: input.beforeResume } : {}),
         ...(input.evidence !== undefined ? { evidence: input.evidence } : {}),
         ...(input.rationale !== undefined ? { rationale: input.rationale } : {}),
         ...(input.pausedReason !== undefined ? { pausedReason: input.pausedReason } : {}),
@@ -69107,7 +69160,7 @@ export type GoalContinuationDecision =
   | { decision: "queue" }
   | {
       decision: "paused";
-      reason: "max_auto_continuations" | "limits" | "allowance";
+      reason: "max_auto_continuations" | "limits" | GoalAdmissionPausedReason;
       goal: SessionGoal;
     }
   | {
@@ -69186,7 +69239,7 @@ export async function evaluateGoalContinuation(
     // decision (before the counter bump) so a budget pause never consumes
     // continuation budget.
     budgetBlocked?: string | null;
-    budgetPausedReason?: "limits" | "allowance" | undefined;
+    budgetPausedReason?: "limits" | GoalAdmissionPausedReason | undefined;
   },
 ): Promise<GoalContinuationDecision> {
   return await withWorkspaceRls(
@@ -69448,7 +69501,7 @@ export async function materializeGoalContinuation(
     workflowId: string;
     defaultMaxAutoContinuations?: number | null;
     budgetBlocked?: string | null;
-    budgetPausedReason?: "limits" | "allowance" | undefined;
+    budgetPausedReason?: "limits" | GoalAdmissionPausedReason | undefined;
     /** Trusted worker admission, evaluated under the same session/goal locks
      * as lineage materialization. Never substitutes a mutable latest human. */
     admission?: (
@@ -69456,7 +69509,7 @@ export async function materializeGoalContinuation(
       causalTurn: { id: string; initiatingHumanSubjectId: string | null } | null,
     ) => Promise<{
       budgetBlocked: string | null;
-      budgetPausedReason?: "limits" | "allowance";
+      budgetPausedReason?: "limits" | GoalAdmissionPausedReason;
     }>;
     idleBackoff?: GoalIdleBackoffPolicy | null;
     policy: {
@@ -87345,7 +87398,7 @@ async function mapSessionWithControl(
   },
   archive: Pick<Session, "archived" | "archivedAt" | "archiveVersion"> = mapSessionArchive(null),
   workspaceControl?: WorkspaceControlRow,
-  tenancyViewer?: { subjectId: string; activated: boolean },
+  tenancyViewer?: { subjectId: string },
 ): Promise<Session> {
   const controls = await sessionControlProjections(db, row.workspaceId, [row.id], workspaceControl);
   const control = controls.get(row.id);
@@ -87482,7 +87535,7 @@ function mapSession(
     attentionVersion: 0,
   },
   archive: Pick<Session, "archived" | "archivedAt" | "archiveVersion"> = mapSessionArchive(null),
-  tenancyViewer?: { subjectId: string; activated: boolean },
+  tenancyViewer?: { subjectId: string },
 ): Session {
   const bundledSkillIds = bundledSkillSelectionFromMetadata(row.metadata);
   return {
@@ -87516,9 +87569,7 @@ function mapSession(
     toolPolicyVersion: Number(row.toolPolicyVersion),
     mcpApprovalPolicies: row.mcpApprovalPolicies,
     metadata: row.metadata,
-    ...(tenancyViewer?.activated
-      ? { tenancy: mapSessionTenancy(row, tenancyViewer.subjectId) }
-      : {}),
+    ...(tenancyViewer ? { tenancy: mapSessionTenancy(row, tenancyViewer.subjectId) } : {}),
     createdBy: initiatorFromStorage(
       row.createdByKind,
       row.createdBySubjectId,

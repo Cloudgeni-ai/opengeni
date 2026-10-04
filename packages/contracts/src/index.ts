@@ -6715,6 +6715,16 @@ export const SessionGoalContinuation = z.object({
 });
 export type SessionGoalContinuation = z.infer<typeof SessionGoalContinuation>;
 
+/** New admission pauses are specific; the wire field remains open for older peers. */
+export type GoalAdmissionPausedReason =
+  | "model_unavailable"
+  | "model_policy"
+  | "credits"
+  | "budget"
+  | "usage_limit"
+  | "usage_policy"
+  | "allowance";
+
 export const SessionGoal = z.object({
   id: z.string().uuid(),
   accountId: z.string().uuid(),

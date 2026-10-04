@@ -395,7 +395,7 @@ export function RunsOnMenuBody(
   );
 }
 
-/** Whether "Visibility" is a real choice here (an activated organization). */
+/** Whether "Visibility" is a real choice here (Only me is allowed). */
 export function hasVisibilityChoice(props: {
   personalWorkspace: boolean;
   canCreatePrivate: boolean;
