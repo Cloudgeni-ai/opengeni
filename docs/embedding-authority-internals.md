@@ -82,11 +82,17 @@ membership/Personal-workspace anchors, but no native login or shared-workspace
 grant. Reuse cannot reactivate suspended or revoked membership.
 External-mode admission is resolved separately in `packages/core/src/access/`:
 only organization-key authentication can assert an external actor, and its
-workspace permissions intersect the live key ceiling with explicit membership.
+workspace permissions intersect the live key ceiling with membership.
 `OpenGeniClient.asUser` returns an isolated server-side client; it never changes
-a shared client's actor or grants membership. Explicit host onboarding lives in
+a shared client's actor. Explicit host onboarding lives in
 `packages/core/src/application/external-workspace-members.ts` and reauthorizes
-under the organization membership fence. External lifecycle administration
+under the organization membership fence. First-use membership
+(`provisionExternalMemberOnFirstUse`, request entry only, never a fresh
+re-check) creates a missing shared-workspace row with the conversation defaults
+through `ensureExternalWorkspaceMemberOnFirstUse` in
+`packages/db/src/external-membership-operations.ts`: same fence and live key
+authority (`members:manage` or legacy `workspace:admin`, every default
+permission, workspace in scope), plain external mode only, existing rows untouched. External lifecycle administration
 reuses native settlement commands; core private/Personal admission uses a
 dedicated verified-owning-user proof. Explicit linked-native admission uses the
 separate link proof; no external request is stamped as a managed-cookie login.

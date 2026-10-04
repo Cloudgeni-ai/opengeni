@@ -43,7 +43,7 @@ async function requireLiveServiceKey(
   tx: Database,
   scope: ServiceScope & { workspaceId?: string },
   requested: readonly Permission[] = [],
-) {
+): Promise<{ permissions: Permission[]; permissionMode: "legacy" | "explicit" }> {
   const keyId = /^api_key:([0-9a-f-]{36})$/i.exec(scope.actorSubjectId)?.[1];
   await lockExternalWorkspaceMembershipLifecycle(tx, scope.organizationId);
   const authority = keyId
@@ -73,6 +73,7 @@ async function requireLiveServiceKey(
       code: "42501",
     });
   }
+  return authority;
 }
 
 export async function lookupExternalIdentity(
@@ -153,6 +154,51 @@ export async function addExternalWorkspaceMemberOperation(
       });
     await record(tx, command, { workspaceId: scope.workspaceId, identity });
     return identity;
+  });
+}
+
+/**
+ * First-use membership for an organization key acting as an external user
+ * (`asUser`). This is the explicit onboarding effect, not new authority: the
+ * same organization lifecycle fence, the same live key check (`members:manage`,
+ * or a legacy `workspace:admin` key, holding every requested permission, with
+ * the workspace in the key's scope), and the same membership write. It only
+ * creates a missing row: an existing membership is returned unchanged, even
+ * with reduced permissions. There is no tombstone: a member removed from the
+ * workspace is created again on their next authenticated request, because the
+ * host owns its users. A suspended or removed organization identity never
+ * reaches this function. Concurrent first requests serialize on the
+ * organization fence, so exactly one row is written.
+ */
+export async function ensureExternalWorkspaceMemberOnFirstUse(
+  db: Database,
+  scope: ServiceScope & { workspaceId: string },
+  input: { subjectId: string; permissions: readonly Permission[] },
+): Promise<"created" | "existing"> {
+  const permissions = [...new Set(input.permissions)].sort();
+  return withWorkspaceSubjectRls(db, scope.workspaceId, scope.actorSubjectId, async (tx) => {
+    const authority = await requireLiveServiceKey(tx, scope, permissions);
+    if (
+      authority.permissionMode === "legacy" &&
+      !authority.permissions.includes("workspace:admin") &&
+      permissions.some((permission) => !authority.permissions.includes(permission))
+    ) {
+      throw Object.assign(new Error("External membership exceeds organization key authority"), {
+        code: "42501",
+      });
+    }
+    const existing = (await listWorkspaceMembers(tx, scope.workspaceId)).some(
+      (member) => member.subjectId === input.subjectId,
+    );
+    if (existing) return "existing";
+    await grantWorkspaceAccess(tx, {
+      accountId: scope.organizationId,
+      workspaceId: scope.workspaceId,
+      subjectId: input.subjectId,
+      role: "member",
+      permissions,
+    });
+    return "created";
   });
 }
 

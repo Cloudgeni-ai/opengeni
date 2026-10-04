@@ -27,8 +27,11 @@ export type ChatMemory = "user" | "workspace" | false;
 export type OpenGeniOptions = {
   /** Organization API key. Keep it on the server. */
   apiKey: string;
-  /** The organization (account) id that owns every tenant workspace. */
-  organizationId: string;
+  /**
+   * The organization (account) id that owns every workspace. Optional: when
+   * omitted it is read once from the API key.
+   */
+  organizationId?: string | undefined;
   /** Defaults to `https://app.opengeni.ai`. */
   baseUrl?: string | undefined;
   /**
@@ -40,21 +43,41 @@ export type OpenGeniOptions = {
   /** Display name for a tenant workspace created on first use. Defaults to the tenant id. */
   workspaceName?: ((tenant: string) => string) | undefined;
   /**
-   * Permissions for newly provisioned isolated users. Replaces the default
-   * workspace read, session create/read/control (including sending messages),
-   * file upload/read, and per-session MCP attachment permissions; no admin
-   * permissions by default. Does not update existing or revoked memberships.
-   * The organization API key must also allow these permissions.
+   * Legacy `chats: "isolated"` with a tenant only: permissions for the member
+   * the SDK adds explicitly. Every other path relies on Opengeni, which adds a
+   * user on their first request with workspace read, session
+   * create/read/control (including sending messages), file upload/read, and
+   * per-session MCP attachment; no admin permissions. Never updates an
+   * existing membership: use `client.updateExternalWorkspaceMember` for that.
    */
   memberPermissions?: WorkspaceIdResolverOptions["memberPermissions"];
 };
 
+/**
+ * Which workspace, in your own ids: `tenant` (one workspace per tenant),
+ * neither (the `user`'s own workspace), or an explicit `workspaceId`.
+ */
 export type ChatTarget =
   | { tenant: string; workspaceId?: undefined }
-  | { workspaceId: string; tenant?: undefined };
+  | { workspaceId: string; tenant?: undefined }
+  | { tenant?: undefined; workspaceId?: undefined };
+
+/**
+ * A workspace in your own ids, for `og.workspaceId(...)`: `{ tenant }` (one
+ * workspace per tenant), `{ user }` (one workspace per user), or
+ * `{ workspaceId }`. Precedence: workspaceId, then tenant, then user.
+ */
+export type WorkspaceTarget = {
+  tenant?: string | undefined;
+  user?: string | undefined;
+  workspaceId?: string | undefined;
+};
 
 export type ChatOptions = ChatTarget & {
-  /** Host-authenticated external user; resolved through server-side asUser(). */
+  /**
+   * Host-authenticated external user; resolved through server-side asUser().
+   * Without a tenant or workspaceId, the user gets one workspace of their own.
+   */
   user?: string | undefined;
   /** Stable conversation id; the session id is derived from it deterministically. */
   conversation: string;

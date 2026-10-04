@@ -4,6 +4,11 @@ import { OpenGeniApiError } from "./errors";
 import { uuidV5 } from "./chat/ids";
 
 const ISOLATION_NAMESPACE = "fc398712-b4db-5b0b-8842-57cb4f2a65f9";
+/**
+ * Conversation-only member permissions. The API grants exactly this set when
+ * an organization key first acts as a user on a workspace (keep equal to
+ * `EXTERNAL_FIRST_USE_MEMBER_PERMISSIONS` in `packages/core/src/access`).
+ */
 const CONVERSATION_PERMISSIONS = [
   "workspace:read",
   "sessions:create",
@@ -15,37 +20,50 @@ const CONVERSATION_PERMISSIONS = [
 ] as const;
 
 export type WorkspaceIdTarget = {
-  tenant: string;
+  /**
+   * Your tenant id. With user isolation and no tenant, the user gets one
+   * workspace of their own, independent of any tenant.
+   */
+  tenant?: string | undefined;
   user?: string | undefined;
   /** External user identity source; defaults to the resolver's source. */
   source?: string | undefined;
 };
 
 export type WorkspaceIdOptions = {
-  /** User isolation provisions a separate workspace and its one external member. */
+  /**
+   * `tenant`: one workspace per tenant. `user`: a separate workspace for the
+   * user (per tenant when a tenant is given, otherwise one per user).
+   */
   isolation: "tenant" | "user";
 };
 
 export type WorkspaceIdResolverOptions = {
-  organizationId: string;
+  /** The organization id, or a lazy lookup (for example derived from the API key). */
+  organizationId: string | (() => Promise<string>);
   source: string;
+  /** Workspace display name; receives the tenant id, or the user id for a per-user workspace. */
   workspaceName?: ((tenant: string) => string) | undefined;
   /**
-   * Permissions for a newly provisioned isolated user. Replaces the defaults:
-   * workspace read, session create/read/control (including sending messages),
-   * file upload/read, and attaching the host's per-session MCP servers. No admin
-   * permissions are granted by default. Tenant isolation does not add members.
-   * Existing or revoked grants are not changed; use explicit membership updates.
-   * The organization API key must also allow the selected permissions.
+   * Legacy `chats: "isolated"` with a tenant only: permissions for the member
+   * this resolver adds explicitly. Replaces the defaults: workspace read,
+   * session create/read/control (including sending messages), file
+   * upload/read, and attaching the host's per-session MCP servers. No admin
+   * permissions are granted by default. Every other path relies on the API,
+   * which creates a missing membership with those defaults on the user's first
+   * request. Existing grants are never changed here; change them with
+   * `updateExternalWorkspaceMember`. The organization API key must also allow
+   * the selected permissions.
    */
   memberPermissions?: readonly Permission[] | undefined;
 };
 
 /**
- * Server-only tenant resolution using external workspace/member provisioning.
- * User isolation admits only the authenticated user; keyed retries never restore a revoked grant.
- * Changed or cancelled onboarding returns only the workspace address, without
- * changing membership. Every later asUser request still checks live access.
+ * Server-only workspace resolution using external workspace provisioning.
+ * Workspaces are created on first use and cached. The API creates a missing
+ * membership on the user's first `asUser` request (the organization key needs
+ * `members:manage`). Only legacy tenant-plus-user isolation still adds the
+ * member explicitly; keyed retries never restore a revoked grant there.
  */
 export function createWorkspaceIdResolver(
   client: Pick<OpenGeniEmbeddingClient, "ensureWorkspace" | "addExternalWorkspaceMember">,
@@ -53,36 +71,45 @@ export function createWorkspaceIdResolver(
 ): (target: WorkspaceIdTarget, resolution: WorkspaceIdOptions) => Promise<string> {
   const memberPermissions = [...(options.memberPermissions ?? CONVERSATION_PERMISSIONS)];
   const cache = new Map<string, Promise<string>>();
+  const organizationId = async () =>
+    typeof options.organizationId === "function"
+      ? await options.organizationId()
+      : options.organizationId;
   return async (target, resolution) => {
-    if (!target.tenant) throw new TypeError("workspaceIdFor requires a tenant.");
-    if (resolution.isolation === "user" && !target.user) {
+    const isolated = resolution.isolation === "user";
+    if (!isolated && !target.tenant) throw new TypeError("workspaceIdFor requires a tenant.");
+    if (isolated && !target.user) {
       throw new TypeError("User isolation requires an authenticated product user.");
     }
     const source = target.source ?? options.source;
-    const isolated = resolution.isolation === "user";
-    const key = JSON.stringify([
-      resolution.isolation,
-      options.source,
-      source,
-      target.tenant,
-      isolated ? target.user : null,
-    ]);
+    // A per-user workspace without a tenant has its own key shape, so it can
+    // never alias a tenant-scoped isolated workspace.
+    const key = target.tenant
+      ? JSON.stringify([
+          resolution.isolation,
+          options.source,
+          source,
+          target.tenant,
+          isolated ? target.user : null,
+        ])
+      : JSON.stringify(["user", options.source, source, target.user]);
     let pending = cache.get(key);
     if (!pending) {
       pending = (async () => {
         const productSource = options.source.trim();
         const isolatedSource = `opengeni-sdk:user-isolation:${await uuidV5(productSource, ISOLATION_NAMESPACE)}`;
+        const label = target.tenant ?? target.user!;
         const { workspace } = await client.ensureWorkspace({
-          accountId: options.organizationId,
+          accountId: await organizationId(),
           externalSource: isolated
             ? isolatedSource === productSource
               ? `${isolatedSource}:user`
               : isolatedSource
             : options.source,
-          externalId: isolated ? await uuidV5(key, ISOLATION_NAMESPACE) : target.tenant,
-          name: options.workspaceName?.(target.tenant) ?? target.tenant,
+          externalId: isolated ? await uuidV5(key, ISOLATION_NAMESPACE) : target.tenant!,
+          name: options.workspaceName?.(label) ?? label,
         });
-        if (isolated) {
+        if (isolated && target.tenant) {
           try {
             await client.addExternalWorkspaceMember(workspace.id, {
               identity: { source, externalId: target.user! },

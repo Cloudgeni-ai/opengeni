@@ -22,6 +22,7 @@ import {
   type ChatSessionListOptions,
   type ChatSnapshot,
   type ChatTarget,
+  type WorkspaceTarget,
   type OpenGeniOptions,
 } from "./types";
 
@@ -56,6 +57,12 @@ const IMPORTED_HISTORY_ROLES: ReadonlySet<string> = new Set(["user", "assistant"
  */
 export class OpenGeni {
   readonly client: OpenGeniClient;
+  /**
+   * The organization id: the one passed to the constructor, else the one
+   * derived from the API key once {@link resolveOrganizationId} (or any
+   * workspace lookup) has run. An empty string before that; prefer
+   * `await og.resolveOrganizationId()`.
+   */
   readonly organizationId: string;
   readonly source: string;
   readonly sessions: {
@@ -64,19 +71,19 @@ export class OpenGeni {
   };
   private readonly resolveWorkspaceId: ReturnType<typeof createWorkspaceIdResolver>;
   private implicitAgentAdmission: boolean | undefined;
+  private pendingOrganizationId: Promise<string> | undefined;
 
   constructor(options: OpenGeniOptions) {
     if (!options.apiKey) throw new TypeError("OpenGeni requires an apiKey.");
-    if (!options.organizationId) throw new TypeError("OpenGeni requires an organizationId.");
     this.client = new OpenGeniClient({
       baseUrl: options.baseUrl ?? DEFAULT_OPENGENI_BASE_URL,
       apiKey: options.apiKey,
       ...(options.fetch ? { fetch: options.fetch } : {}),
     });
-    this.organizationId = options.organizationId;
+    this.organizationId = options.organizationId ?? "";
     this.source = options.source ?? DEFAULT_CHAT_SOURCE;
     this.resolveWorkspaceId = createWorkspaceIdResolver(this.client, {
-      organizationId: this.organizationId,
+      organizationId: () => this.resolveOrganizationId(),
       source: this.source,
       workspaceName: options.workspaceName,
       memberPermissions: options.memberPermissions,
@@ -84,25 +91,88 @@ export class OpenGeni {
     this.sessions = { list: (listOptions) => this.listSessions(listOptions) };
   }
 
-  /** The workspace id for a tenant (created on first use, cached per instance) or an explicit id. */
-  async workspaceId(
-    target: ChatTarget | { tenant?: string | undefined; workspaceId?: string | undefined },
-  ): Promise<string> {
-    if (target.workspaceId) return target.workspaceId;
-    const tenant = target.tenant;
-    if (!tenant) throw new TypeError("Pass either tenant or workspaceId.");
-    return await this.workspaceIdFor({ tenant }, { isolation: "tenant" });
+  /**
+   * The organization that owns every workspace this facade creates. Uses the
+   * constructor's `organizationId`, else reads it once from the API key
+   * (`GET /v1/access/me`) and caches it.
+   */
+  async resolveOrganizationId(): Promise<string> {
+    if (this.organizationId) return this.organizationId;
+    if (!this.pendingOrganizationId) {
+      const pending = this.client.getAccessContext().then((access) => {
+        const credential = access.credential;
+        if (credential && credential.kind !== "organization_api_key") {
+          throw new TypeError(
+            "OpenGeni needs an organization API key to create workspaces; this is a workspace key.",
+          );
+        }
+        const organizationId = credential?.accountId ?? access.defaultAccountId;
+        if (!organizationId) {
+          throw new TypeError(
+            "Could not derive the organization from this API key. Pass organizationId.",
+          );
+        }
+        // Readonly to callers; set once here, from the key's own organization.
+        (this as { organizationId: string }).organizationId = organizationId;
+        return organizationId;
+      });
+      pending.catch(() => {
+        if (this.pendingOrganizationId === pending) this.pendingOrganizationId = undefined;
+      });
+      this.pendingOrganizationId = pending;
+    }
+    return await this.pendingOrganizationId;
   }
 
-  /** Resolve a tenant workspace, or provision its separate user workspace and external member. */
+  /**
+   * Translate your own ids to the Opengeni workspace id, creating the
+   * workspace on first use (cached per instance):
+   * `{ tenant }` is one workspace per tenant, `{ user }` (no tenant) is one
+   * workspace per user, and `{ workspaceId }` is returned as is. Membership
+   * is created by Opengeni on the user's first request.
+   */
+  async workspaceId(
+    target:
+      | ChatTarget
+      | { tenant?: string | undefined; workspaceId?: string | undefined }
+      | WorkspaceTarget,
+  ): Promise<string> {
+    if (target.workspaceId) return target.workspaceId;
+    if (target.tenant) {
+      return await this.workspaceIdFor({ tenant: target.tenant }, { isolation: "tenant" });
+    }
+    const user = "user" in target ? target.user : undefined;
+    if (user) {
+      return await this.workspaceIdFor({ user }, { isolation: "user" });
+    }
+    throw new TypeError("Pass tenant, user, or workspaceId.");
+  }
+
+  /**
+   * Resolve a tenant workspace or a user's own workspace. With a tenant and a
+   * user (`chats: "isolated"`), the user's separate tenant workspace and its
+   * explicit external member are provisioned (legacy).
+   */
   async workspaceIdFor(target: WorkspaceIdTarget, options: WorkspaceIdOptions): Promise<string> {
     return await this.resolveWorkspaceId(target, options);
   }
 
+  /** `chats: "isolated"` keeps its tenant-plus-user workspace; a user alone gets their own. */
+  private async isolatedWorkspaceId(target: WorkspaceTarget): Promise<string> {
+    if (target.workspaceId) {
+      throw new TypeError('chats: "isolated" requires a tenant or user, not a workspaceId.');
+    }
+    return await this.workspaceIdFor(
+      { tenant: target.tenant, user: target.user },
+      { isolation: "user" },
+    );
+  }
+
   /**
    * Address one conversation; the session is created lazily on the first send.
-   * Identity selects authority, not the conversation address. Workspace
-   * membership must be provisioned by the host's explicit onboarding flow.
+   * Identity selects authority, not the conversation address. The workspace
+   * is the tenant's, the user's own (user only), or the explicit id; Opengeni
+   * adds the user to it on their first request.
    * Legacy user-namespaced conversations remain accessible by their session ID.
    */
   async chat(options: ChatOptions): Promise<Chat> {
@@ -139,10 +209,7 @@ export class OpenGeni {
       : this.client;
     const workspaceId =
       options.chats === "isolated"
-        ? await this.workspaceIdFor(
-            { tenant: options.tenant ?? "", user: options.user },
-            { isolation: "user" },
-          )
+        ? await this.isolatedWorkspaceId(options)
         : await this.workspaceId(options);
     const sessionId = options.sessionId ?? (await chatSessionId(workspaceId, options.conversation));
     const session = await this.findSession(client, workspaceId, sessionId);
@@ -276,10 +343,7 @@ export class OpenGeni {
   private async listSessions(options: ChatSessionListOptions): Promise<Session[]> {
     const workspaceId =
       options.chats === "isolated"
-        ? await this.workspaceIdFor(
-            { tenant: options.tenant ?? "", user: options.user },
-            { isolation: "user" },
-          )
+        ? await this.isolatedWorkspaceId(options)
         : await this.workspaceId(options);
     const client = options.user
       ? this.client.asUser(options.user, { source: this.source })
