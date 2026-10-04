@@ -58,10 +58,10 @@ afterEach(() => {
 });
 
 describe("transcription routes", () => {
-  test("projects capability availability", async () => {
+  test("does not advertise unscoped subscription capability", async () => {
     expect((await app(service(true)).request("/v1/config/client")).status).toBe(200);
     expect(await (await app(service(true)).request("/v1/config/client")).json()).toMatchObject({
-      voiceInput: { available: true },
+      voiceInput: { available: false },
     });
     expect(await (await app(service(false)).request("/v1/config/client")).json()).toMatchObject({
       voiceInput: { available: false },

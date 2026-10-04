@@ -1,3 +1,4 @@
+import { startWorkspaceVoiceCapabilityRefresh } from "./lib/workspace-voice-capability";
 import {
   beginSocialLoginAnalytics,
   noteSuccessfulLogin,
@@ -618,6 +619,8 @@ export function RootRouteComponent() {
   const [sessionCreationHandoff, setSessionCreationHandoff] =
     useState<SessionCreationHandoff | null>(null);
   const [clientConfig, setClientConfig] = useState<ClientConfig | null>(null);
+  const [workspaceVoiceInput, setWorkspaceVoiceInput] =
+    useState<ClientConfig["voiceInput"]>(undefined);
   const [configError, setConfigError] = useState<BootstrapErrorPresentation | null>(null);
   const [configRequestVersion, setConfigRequestVersion] = useState(0);
   const [authSession, setAuthSession] = useState<AuthSession | null | undefined>(undefined);
@@ -896,6 +899,7 @@ export function RootRouteComponent() {
       setGithubAppBusy(false);
       setPersonalGitHubBusy(false);
       resetWorkspaceIntegrations();
+      setWorkspaceVoiceInput(undefined);
       setWorkspaceStateOwnerId(workspaceId);
     },
     [resetSessionView, resetWorkspaceIntegrations, sessionChannelProjectionAuthority],
@@ -919,6 +923,31 @@ export function RootRouteComponent() {
       ownsWorkspaceTransition(workspaceTransitionIdentity.current, accepted, workspaceId),
     [],
   );
+
+  const clientConfigurationReady = clientConfig !== null;
+  useEffect(() => {
+    if (!clientConfigurationReady || !authReady || !workspaceStateOwnerId) return;
+    const workspaceId = workspaceStateOwnerId;
+    const accepted = captureWorkspaceInvocation(workspaceId);
+    if (!accepted) return;
+    return startWorkspaceVoiceCapabilityRefresh({
+      read: (signal) => fetchClientConfig(signal, workspaceId),
+      ownsWorkspace: () => ownsWorkspaceInvocation(workspaceId, accepted),
+      apply: (voiceInput) => setWorkspaceVoiceInput(voiceInput),
+      subscribeFocus: (refresh) => {
+        window.addEventListener("focus", refresh);
+        return () => window.removeEventListener("focus", refresh);
+      },
+    });
+  }, [
+    clientConfigurationReady,
+    authReady,
+    workspaceStateOwnerId,
+    accessContext?.subjectId,
+    accessKeyVersion,
+    captureWorkspaceInvocation,
+    ownsWorkspaceInvocation,
+  ]);
 
   const invalidatePrincipalWorkspaceState = useCallback(
     (options?: { preservePendingSlackLink?: boolean }) => {
@@ -2640,7 +2669,14 @@ export function RootRouteComponent() {
     return clientConfig && accessContext
       ? ({
           client,
-          clientConfig,
+          clientConfig: {
+            ...clientConfig,
+            voiceInput:
+              workspaceVoiceInput ??
+              (clientConfig.voiceInput
+                ? { ...clientConfig.voiceInput, available: false, providers: [] }
+                : undefined),
+          },
           authSession: authSession ?? null,
           accessContext,
           workspaces,
@@ -2750,6 +2786,7 @@ export function RootRouteComponent() {
     clearSlackLinkContinuation,
     client,
     clientConfig,
+    workspaceVoiceInput,
     connectionState,
     contextAddManualRepository,
     contextCreateWorkspace,

@@ -2398,6 +2398,7 @@ describe("release schema contract", () => {
       "0614_quiescence_command_containment.sql",
       "0615_credit_promotion_policy_validation.sql",
       "0622_organization_slack_bot_delivery.sql",
+      "0623_voice_transcription_attribution.sql",
     ].filter((path) =>
       unfilteredSourceContract.migrations.some((migration) => migration.path === path),
     );

@@ -254,3 +254,43 @@ available independently when a provider is ready.
 
 Deprecated host-adapter types remain exported from
 `packages/sdk/src/transcription.ts` for one compatibility release.
+
+## Deployment transcription and credit billing
+
+`OPENGENI_VOICE_INPUT_PROVIDER_ORDER` selects the default before audio is sent.
+For example, `codex-subscription,supergrok-subscription,azure-mai,azure-openai`
+uses a workspace subscription when available, otherwise MAI. Swap the last two
+entries to make GPT Transcribe the deployment default. A recording already
+pinned to a provider keeps that provider. Workspace preferences still apply.
+
+- `azure-openai` uses the versioned Azure OpenAI audio transcription API.
+  Configure `OPENGENI_VOICE_INPUT_AZURE_ENDPOINT`, `DEPLOYMENT`, `API_VERSION`,
+  and `API_KEY` (or `AD_TOKEN`), all with the same prefix. `MODEL` identifies
+  the underlying model for pricing when the deployment has a custom name.
+- `azure-mai` uses Azure Speech's file transcription API. Configure
+  `OPENGENI_VOICE_INPUT_MAI_ENDPOINT` and `API_KEY`; `MODEL` defaults to
+  `MAI-Transcribe-2`, and `API_VERSION` to `2025-10-15`. Browser recordings
+  are decoded with the existing ffmpeg segmenter when needed. This is file
+  dictation, separate from realtime voice.
+- `OPENGENI_VOICE_INPUT_{OPENAI,AZURE,MAI}_PRICING_JSON` accepts
+  `microsPerMinute`, optional paired `inputMicrosPerMillionTokens` /
+  `outputMicrosPerMillionTokens`, optional `audioInputMicrosPerMillionTokens`,
+  and `marginBps`. Rates are integer USD micros; 500 basis points means 5%.
+  MAI requires an explicit price because offers vary. OpenAI/Azure have
+  built-in prices for recognized transcription models; override contracted rates.
+
+When Stripe billing or managed usage limits are enabled, deployment-funded
+providers require general credits. Connected subscriptions are never debited.
+Malformed pricing fails boot; a provider with no known price is unavailable,
+allowing other configured providers to serve safely. Admission checks credits,
+workspace/member allowances and the monthly cost cap before sending audio.
+Billing records a usage receipt and debit atomically, once per recording segment
+(or per one-shot request). Provider usage wins; a server-produced WAV duration
+can fill a missing duration. Client timing and maximum recording limits are
+never billing quantities. Concurrent admitted calls may finish after a balance
+is exhausted; settlement charges their actual usage.
+
+Credit/allowance refusals preserve the recording for manual retry and show a
+specific message. They do not trigger automatic retries. Client availability
+and provider choices are scoped to the authorized workspace; unscoped bootstrap
+cannot advertise a connected subscription belonging to another workspace.

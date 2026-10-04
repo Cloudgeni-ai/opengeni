@@ -1864,6 +1864,9 @@ export const TranscriptionErrorCode = z.enum([
   "too_large",
   "invalid_audio",
   "unknown",
+  "insufficient_credits",
+  "allowance_exhausted",
+  "monthly_model_cost_limit",
 ]);
 export type TranscriptionErrorCode = z.infer<typeof TranscriptionErrorCode>;
 
@@ -2120,6 +2123,7 @@ export const VoiceInputProviderId = z.enum([
   "codex-subscription",
   "openai",
   "azure-openai",
+  "azure-mai",
 ]);
 export type VoiceInputProviderId = z.infer<typeof VoiceInputProviderId>;
 

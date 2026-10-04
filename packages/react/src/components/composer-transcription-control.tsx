@@ -50,6 +50,8 @@ export type ComposerTranscriptionMessages = {
   errorPermissionDenied: string;
   errorNotSupported: string;
   errorUnavailable: string;
+  errorInsufficientCredits: string;
+  errorAllowanceExhausted: string;
   errorTooLarge: string;
   errorInvalidAudio: string;
   errorStorageUnavailable: string;
@@ -78,6 +80,9 @@ const defaultMessages: ComposerTranscriptionMessages = {
   errorPermissionDenied: "Microphone permission was denied. Your draft was not changed.",
   errorNotSupported: "Voice input is not supported on this device.",
   errorUnavailable: "Voice input is not configured.",
+  errorInsufficientCredits:
+    "Voice input needs Opengeni credits. Add credits, then retry your saved recording.",
+  errorAllowanceExhausted: "Your usage limit was reached. Your recording is saved for later.",
   errorTooLarge: "Recording is too large. Try a shorter message.",
   errorInvalidAudio: "The recording could not be read. Try again.",
   errorStorageUnavailable: "Voice input stopped because audio could not be saved safely.",
@@ -518,6 +523,11 @@ function restingLevels(count: number): number[] {
 
 function transcriptionErrorMessage(code: string, messages: ComposerTranscriptionMessages): string {
   switch (code) {
+    case "insufficient_credits":
+      return messages.errorInsufficientCredits;
+    case "allowance_exhausted":
+    case "monthly_model_cost_limit":
+      return messages.errorAllowanceExhausted;
     case "permission_denied":
       return messages.errorPermissionDenied;
     case "not_supported":

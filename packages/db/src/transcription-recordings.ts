@@ -1113,6 +1113,8 @@ export async function completeTranscriptionRecordingSegment(
     languages: string[];
     providerId: string;
   },
+  /** Exact-attempt completion and its credit debit commit or roll back together. */
+  settleBilling?: (transaction: Database) => Promise<void>,
 ): Promise<TranscriptionRecordingResponse> {
   return await withWorkspaceSubjectRls(db, input.workspaceId, input.subjectId, async (scopedDb) => {
     const recording = await requiredRecordingRow(
@@ -1196,6 +1198,7 @@ export async function completeTranscriptionRecordingSegment(
         .set({ cleanupAfter: now })
         .where(eq(schema.transcriptionRecordingObjects.recordingId, input.recordingId));
     }
+    await settleBilling?.(scopedDb);
     return await detailForRow(scopedDb, updated);
   });
 }
