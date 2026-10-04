@@ -2,6 +2,7 @@ import { canonicalPublicOrigin, managedUserEmailAllowed, type Settings } from "@
 import { MANAGED_AUTH_NEW_SIGNUPS_PAUSED_CODE } from "@opengeni/contracts";
 import {
   configureManagedUserAdmission,
+  recordManagedAuthLoggedFailure,
   type ManagedAuth,
   type ManagedEmailMessage,
   type ManagedEmailTransport,
@@ -142,6 +143,23 @@ export async function verifyManagedAuthPassword(password: string, hash: string):
 type ManagedAuthPoolObservability = Pick<Observability, "warn" | "incrementCounter">;
 
 /**
+ * Better Auth's default console output, plus handing logged failures to the
+ * session-lookup boundary so a lost database connection behind its generic
+ * INTERNAL_SERVER_ERROR stays recognizable (see `withManagedAuthSessionLookup`).
+ */
+function logBetterAuthMessage(
+  level: "debug" | "info" | "warn" | "error",
+  message: string,
+  ...args: unknown[]
+): void {
+  if (level === "error") recordManagedAuthLoggedFailure(args);
+  const line = `${new Date().toISOString()} ${level.toUpperCase()} [Better Auth]: ${message}`;
+  if (level === "error") console.error(line, ...args);
+  else if (level === "warn") console.warn(line, ...args);
+  else console.log(line, ...args);
+}
+
+/**
  * Bounded pool settings for Better Auth's dedicated `pg` pool. A connection
  * attempt fails after 10 s instead of queueing requests indefinitely while the
  * database is unreachable, and connections recycle like the main postgres-js
@@ -243,6 +261,7 @@ export function createManagedAuth(
     secret: settings.betterAuthSecret,
     database: pool,
     trustedOrigins: betterAuthTrustedOrigins(settings),
+    logger: { log: logBetterAuthMessage },
     hooks: {
       before: createManagedAuthEmailThrottleHook(
         db,

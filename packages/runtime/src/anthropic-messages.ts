@@ -494,7 +494,7 @@ export function buildAnthropicRequest(
       throw new AnthropicProtocolError(
         "The selected Claude model does not support this reasoning effort",
       );
-    body.thinking = { type: "adaptive" };
+    body.thinking = { type: "adaptive", display: "summarized" };
     body.output_config = {
       effort,
     };

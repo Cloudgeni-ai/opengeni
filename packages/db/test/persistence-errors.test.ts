@@ -1,5 +1,8 @@
 import { describe, expect, test } from "bun:test";
 import {
+  databaseReconnectBackoffSeconds,
+  DatabaseUnavailableError,
+  isDatabaseConnectionLoss,
   isDatabasePersistenceFailure,
   isRetryableDatabaseTransportFailure,
   nestedPostgresSqlState,
@@ -295,5 +298,87 @@ describe("session event persistence failure truth", () => {
     expect((caught as Error).message).not.toContain(source.message);
     expect((caught as Error).message).not.toContain(syntheticValue);
     expect(nestedPostgresSqlState(caught)).toBe("23505");
+  });
+});
+
+describe("database connection loss", () => {
+  test("recognizes server-ended sessions, transport codes, and node-postgres socket loss", () => {
+    const adminShutdown = Object.assign(
+      new Error("terminating connection due to administrator command"),
+      {
+        name: "PostgresError",
+        code: "57P01",
+        severity: "FATAL",
+      },
+    );
+    const wrapped = Object.assign(new Error("Failed query: select 1"), {
+      name: "DrizzleQueryError",
+      query: "select 1",
+      params: [],
+      cause: adminShutdown,
+    });
+    for (const failure of [
+      adminShutdown,
+      wrapped,
+      // postgres.js connection error shape.
+      Object.assign(new Error("write CONNECTION_CLOSED 10.0.0.4:5432"), {
+        code: "CONNECTION_CLOSED",
+        errno: "CONNECTION_CLOSED",
+        address: ["10.0.0.4"],
+        port: [5432],
+      }),
+      // A socket failure postgres.js stamped with the failed query.
+      Object.assign(new Error("read ECONNRESET"), { code: "ECONNRESET", query: "select 1" }),
+      Object.assign(new Error("Failed query: select 1"), {
+        query: "select 1",
+        params: [],
+        cause: Object.assign(new Error("read ECONNRESET"), { code: "ECONNRESET" }),
+      }),
+      Object.assign(new Error("the database system is starting up"), { code: "57P03" }),
+      Object.assign(new Error("server closed the connection"), { code: "08006" }),
+      new Error("Connection terminated unexpectedly"),
+      new DatabaseUnavailableError("managed auth session store unavailable", {
+        cause: new Error("Failed to get session"),
+      }),
+      new Error("outer", { cause: new Error("Connection terminated unexpectedly") }),
+    ]) {
+      expect(isDatabaseConnectionLoss(failure)).toBe(true);
+    }
+  });
+
+  test("does not treat a rejected statement or an ordinary failure as connection loss", () => {
+    for (const failure of [
+      Object.assign(new Error("duplicate key"), { name: "PostgresError", code: "23505" }),
+      Object.assign(new Error("syntax error"), { name: "PostgresError", code: "42601" }),
+      Object.assign(new Error("canceling statement due to statement timeout"), { code: "57014" }),
+      Object.assign(new Error("deadlock detected"), { code: "40P01" }),
+      new Error("Connection terminated unexpectedly while parsing"),
+      // The same transport codes from another service are not database loss.
+      Object.assign(new Error("read ECONNRESET"), { code: "ECONNRESET" }),
+      Object.assign(new Error("getaddrinfo ENOTFOUND api.example.com"), { code: "ENOTFOUND" }),
+      Object.assign(new Error("closed"), { name: "NatsError", code: "CONNECTION_CLOSED" }),
+      Object.assign(new Error("browser control failed"), {
+        cause: Object.assign(new TypeError("fetch failed"), {
+          cause: Object.assign(new Error("connect ECONNREFUSED"), { code: "ECONNREFUSED" }),
+        }),
+      }),
+      new Error("Failed to get session"),
+      null,
+      "Connection terminated unexpectedly",
+    ]) {
+      expect(isDatabaseConnectionLoss(failure)).toBe(false);
+    }
+  });
+});
+
+describe("database reconnect backoff", () => {
+  test("keeps the driver's jittered growth but never waits more than 2 s", () => {
+    expect(databaseReconnectBackoffSeconds(0)).toBeLessThanOrEqual(0.01);
+    for (let retries = 0; retries < 40; retries += 1) {
+      const delay = databaseReconnectBackoffSeconds(retries);
+      expect(delay).toBeGreaterThanOrEqual(0);
+      expect(delay).toBeLessThanOrEqual(2);
+    }
+    expect(databaseReconnectBackoffSeconds(30)).toBeGreaterThanOrEqual(1);
   });
 });

@@ -6690,8 +6690,12 @@ describe("modelAttachmentInputPolicyForTurn", () => {
     ).toEqual({ supportsImageInput: false, inputFileMediaTypes: [] });
   });
 
-  test("keeps chat-completions typed attachments on the sandbox-path fallback", () => {
+  test("delivers images to image-capable chat models while documents use file paths", () => {
     expect(modelAttachmentInputPolicyForTurn(resolved("chat", true, ["application/pdf"]))).toEqual({
+      supportsImageInput: true,
+      inputFileMediaTypes: [],
+    });
+    expect(modelAttachmentInputPolicyForTurn(resolved("chat", false))).toEqual({
       supportsImageInput: false,
       inputFileMediaTypes: [],
     });

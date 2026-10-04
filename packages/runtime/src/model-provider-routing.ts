@@ -18,6 +18,7 @@ import {
 } from "./model-request-capture";
 import { providerReportedTokenUsage } from "./usage-telemetry";
 import { AnthropicMessagesModel } from "./anthropic-messages";
+import { projectChatToolImages } from "./chat-tool-images";
 import { instrumentedModelFetch } from "./model-provider-client";
 import { CODEX_MODEL_ID_PREFIX } from "@opengeni/codex";
 import { XAI_SUBSCRIPTION_MODEL_ID_PREFIX } from "@opengeni/xai-subscription";
@@ -109,13 +110,15 @@ async function refundUnenteredChatFailure(error: unknown, entered: boolean) {
 }
 
 async function* chatEntryTrackedStream(
-  stream: AsyncIterable<ResponseStreamEvent>,
+  stream: () => AsyncIterable<ResponseStreamEvent>,
 ): AsyncIterable<ResponseStreamEvent> {
   const entry = { entered: false };
-  const iterator = stream[Symbol.asyncIterator]();
+  let iterator: AsyncIterator<ResponseStreamEvent> | undefined;
   try {
+    const activeIterator = chatTransportEntry.run(entry, () => stream()[Symbol.asyncIterator]());
+    iterator = activeIterator;
     while (true) {
-      const next = await chatTransportEntry.run(entry, () => iterator.next());
+      const next = await chatTransportEntry.run(entry, () => activeIterator.next());
       if (next.done) return;
       yield next.value;
     }
@@ -123,7 +126,7 @@ async function* chatEntryTrackedStream(
     await refundUnenteredChatFailure(error, entry.entered);
     throw error;
   } finally {
-    await chatTransportEntry.run(entry, () => iterator.return?.());
+    await chatTransportEntry.run(entry, () => iterator?.return?.());
   }
 }
 
@@ -140,7 +143,9 @@ export class OpenGeniChatCompletionsModel extends OpenAIChatCompletionsModel {
     const entry = { entered: false };
     let response: ModelResponse;
     try {
-      response = await chatTransportEntry.run(entry, () => super.getResponse(request));
+      response = await chatTransportEntry.run(entry, () =>
+        super.getResponse(projectChatToolImages(request)),
+      );
     } catch (error) {
       await refundUnenteredChatFailure(error, entry.entered);
       throw error;
@@ -162,7 +167,9 @@ export class OpenGeniChatCompletionsModel extends OpenAIChatCompletionsModel {
     let usageReported = false;
     let providerResponseId: string | undefined;
     const fallbackId = `opengeni-response:${randomUUID()}`;
-    for await (const event of chatEntryTrackedStream(super.getStreamedResponse(request))) {
+    for await (const event of chatEntryTrackedStream(() =>
+      super.getStreamedResponse(projectChatToolImages(request)),
+    )) {
       if (event.type === "model") {
         const rawId = (event.event as { id?: unknown } | undefined)?.id;
         if (typeof rawId === "string" && rawId.trim()) providerResponseId = rawId;

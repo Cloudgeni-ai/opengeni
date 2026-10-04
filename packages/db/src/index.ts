@@ -924,6 +924,7 @@ import {
 } from "./database";
 export {
   createDb,
+  databaseReconnectBackoffSeconds,
   registerDbBinding,
   retrySessionActivityRls,
   rlsContextForWorkspace,

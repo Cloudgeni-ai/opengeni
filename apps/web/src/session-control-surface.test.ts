@@ -37,6 +37,18 @@ describe("session control surface architecture", () => {
     expect(route).not.toContain("newSessionDraft.conflict !== null ||");
   });
 
+  test("new-chat outage shows one calm notice instead of raw errors", async () => {
+    const route = await source("routes/sessions-index.tsx");
+    expect(route).toContain("{OPENGENI_UPDATING_NOTICE}");
+    expect(route).toContain("newSessionDraft.unavailable || connectionAccounts.unavailable");
+    expect(route).toContain(
+      "error: newSessionDraft.unavailable || newSessionDraft.conflict ? null : newSessionDraft.error",
+    );
+    expect(route).toContain("newSessionDraft.reportUnavailable(error)");
+    expect(route).toContain('"Couldn\'t send your message. Try again."');
+    expect(route).not.toContain("Couldn't check connected accounts. Retry to send your message.");
+  });
+
   test("new and existing composers use the same popover pattern", async () => {
     const newSession = await source("routes/sessions-index.tsx");
     const existingSession = await source("routes/session.tsx");
