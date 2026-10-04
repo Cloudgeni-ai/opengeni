@@ -24,7 +24,13 @@ import { resolveAgentConfig } from "@opengeni/contracts";
 import * as schema from "@opengeni/db/schema";
 import { tool } from "@openai/agents";
 import { z } from "zod";
-import { createProductionAgentRuntime, generateSessionTitle } from "@opengeni/runtime";
+import {
+  createProductionAgentRuntime,
+  generateSessionTitle,
+  OpenGeniResponsesModel,
+  OpenGeniChatCompletionsModel,
+} from "@opengeni/runtime";
+import OpenAI from "openai";
 import {
   acquireSharedTestDatabase,
   assistantMessage,
@@ -57,7 +63,15 @@ describe("empty final reply production runtime with PostgreSQL", () => {
     unrelatedGoal = false,
     aggregateOnlyBilling = false,
     titleUsageMode?: "callback-no-id" | "fallback-no-id" | "callback-with-id",
-    providerUsageMode?: "missing" | "partial" | "zero" | "mirrored",
+    providerUsageMode?:
+      | "missing"
+      | "partial"
+      | "zero"
+      | "mirrored"
+      | "responses-no-id"
+      | "responses-empty-id"
+      | "chat-no-id"
+      | "chat-empty-id",
   ) {
     const suffix = crypto.randomUUID();
     const access = await bootstrapWorkspace(client.db, {
@@ -105,7 +119,11 @@ describe("empty final reply production runtime with PostgreSQL", () => {
     });
     const boundedBilling = aggregateOnlyBilling || providerUsageMode !== undefined;
     const model = new ScriptedModel(steps);
-    if (providerUsageMode && providerUsageMode !== "mirrored") {
+    if (
+      providerUsageMode === "missing" ||
+      providerUsageMode === "partial" ||
+      providerUsageMode === "zero"
+    ) {
       const getStreamedResponse = model.getStreamedResponse.bind(model);
       model.getStreamedResponse = async function* (request) {
         for await (const event of getStreamedResponse(request)) {
@@ -118,6 +136,96 @@ describe("empty final reply production runtime with PostgreSQL", () => {
             });
           yield event;
         }
+      };
+    }
+    if (providerUsageMode?.startsWith("responses-") || providerUsageMode?.startsWith("chat-")) {
+      const scriptedResponse = model.getResponse.bind(model);
+      const responses = providerUsageMode.startsWith("responses-");
+      const emptyId = providerUsageMode.endsWith("empty-id");
+      // Drive the actual owned HTTP adapter, SDK tool loop and worker ledger.
+      model.getStreamedResponse = async function* (request) {
+        const providerClient = new OpenAI({
+          apiKey: "fixture",
+          fetch: async () => {
+            const result = await scriptedResponse(request);
+            const idFields = emptyId ? { id: "" } : {};
+            const rawUsage = {
+              input_tokens: result.usage.inputTokens,
+              output_tokens: result.usage.outputTokens,
+              total_tokens: result.usage.totalTokens,
+            };
+            const output = result.output.map((item) =>
+              item.type === "function_call" ? { ...item, call_id: item.callId } : item,
+            );
+            const calls = result.output.filter((item) => item.type === "function_call");
+            const content = result.output
+              .flatMap((item) =>
+                item.type === "message"
+                  ? item.content.flatMap((part) => (part.type === "output_text" ? [part.text] : []))
+                  : [],
+              )
+              .join("");
+            const events = responses
+              ? [
+                  {
+                    type: "response.completed",
+                    response: {
+                      ...idFields,
+                      object: "response",
+                      status: "completed",
+                      output,
+                      usage: rawUsage,
+                    },
+                  },
+                ]
+              : [
+                  {
+                    ...idFields,
+                    object: "chat.completion.chunk",
+                    choices: [
+                      {
+                        index: 0,
+                        delta: {
+                          role: "assistant",
+                          content,
+                          ...(calls.length
+                            ? {
+                                tool_calls: calls.map((call, index) => ({
+                                  index,
+                                  id: call.callId,
+                                  type: "function",
+                                  function: { name: call.name, arguments: call.arguments },
+                                })),
+                              }
+                            : {}),
+                        },
+                        finish_reason: calls.length ? "tool_calls" : "stop",
+                      },
+                    ],
+                    usage: {
+                      prompt_tokens: rawUsage.input_tokens,
+                      completion_tokens: rawUsage.output_tokens,
+                      total_tokens: rawUsage.total_tokens,
+                    },
+                  },
+                ];
+            return new Response(
+              events.map((event) => `data: ${JSON.stringify(event)}\n\n`).join("") +
+                "data: [DONE]\n\n",
+              { headers: { "content-type": "text/event-stream" } },
+            );
+          },
+        });
+        const owned = responses
+          ? new OpenGeniResponsesModel(providerClient, "scripted-model", {
+              id: "openai",
+              label: "OpenAI",
+              kind: "api-key",
+              api: "responses",
+              builtin: true,
+            })
+          : new OpenGeniChatCompletionsModel(providerClient, "scripted-model");
+        yield* owned.getStreamedResponse(request);
       };
     }
     const production = createProductionAgentRuntime({ model });
@@ -242,6 +350,9 @@ describe("empty final reply production runtime with PostgreSQL", () => {
       },
       buildAgent: (...args: Parameters<typeof production.buildAgent>) => {
         const agent = production.buildAgent(...args);
+        // Chat does not implement Responses-only hosted tools; retain the
+        // ordinary default tool authority for our single synthetic function.
+        if (providerUsageMode?.startsWith("chat-")) agent.tools = [];
         agent.tools.push(
           tool({
             name: "verified_result",
@@ -409,6 +520,46 @@ describe("empty final reply production runtime with PostgreSQL", () => {
       }),
     ).toBe(0);
   }, 60_000);
+
+  test.each(["responses-no-id", "responses-empty-id", "chat-no-id", "chat-empty-id"] as const)(
+    "owned %s transport settles two SDK calls and each reservation exactly once",
+    async (mode) => {
+      const actual = await run(
+        [
+          {
+            inputTokens: 100,
+            outputText: "Checking",
+            output: [functionCall("verified_result", {})],
+          },
+          { inputTokens: 200, outputText: "Completed result." },
+        ],
+        false,
+        false,
+        false,
+        undefined,
+        mode,
+      );
+      expect(actual.model.calls).toBe(2);
+      expect(actual.toolCalls).toBe(1);
+      expect(actual.turn?.status).toBe("completed");
+      const debits = await shared.admin<
+        Array<{ idempotency_key: string }>
+      >`select idempotency_key from credit_ledger_entries where account_id=${actual.grant.accountId} and type='model_usage_debit'`;
+      expect(debits).toHaveLength(2);
+      expect(new Set(debits.map((row) => row.idempotency_key)).size).toBe(2);
+      for (const eventType of ["model.tokens.reserved", "model.cost.reserved"] as const) {
+        expect(
+          await openUsageReservationQuantity(client.db, {
+            accountId: actual.grant.accountId,
+            eventType,
+            since: new Date(0),
+            holdSince: new Date(0),
+          }),
+        ).toBe(0);
+      }
+    },
+    60_000,
+  );
 
   test("aggregate-only usage bills both streams of a same-turn final-reply handoff", async () => {
     const answer = "Completed result: verified.";

@@ -1,3 +1,4 @@
+import { randomUUID } from "node:crypto";
 import { isDirectModelId } from "@opengeni/contracts";
 import type { ConfiguredModel, ResolvedModelProvider, Settings } from "@opengeni/config";
 import { configuredProviders, resolveModelProvider } from "@opengeni/config";
@@ -29,9 +30,13 @@ import {
   XaiSubscriptionUnavailableError,
 } from "./model-provider-errors";
 
-function responseWithUsageEvidence(response: OpenAI.Responses.Response): OpenAI.Responses.Response {
+function responseWithUsageEvidence(
+  response: OpenAI.Responses.Response,
+  fallbackId: string,
+): OpenAI.Responses.Response {
   const annotated = {
     ...response,
+    id: typeof response.id === "string" && response.id.trim() ? response.id : fallbackId,
     providerUsageReported: providerReportedTokenUsage(response.usage),
   };
   const requestId = Object.getOwnPropertyDescriptor(response, "_request_id");
@@ -68,19 +73,24 @@ export class OpenGeniChatCompletionsModel extends OpenAIChatCompletionsModel {
     if (isUnknownFinishReason(chatCompletionFinishReason(response.providerData))) {
       throw new UnknownModelFinishReasonError();
     }
-    Object.assign(response.usage, {
-      providerUsageReported: providerReportedTokenUsage(
-        (response.providerData as { usage?: unknown } | undefined)?.usage,
-      ),
-    });
+    const providerUsageReported = providerReportedTokenUsage(
+      (response.providerData as { usage?: unknown } | undefined)?.usage,
+    );
+    if (!response.responseId?.trim()) response.responseId = `opengeni-response:${randomUUID()}`;
+    Object.assign(response.usage, { providerUsageReported });
+    response.providerData = { ...response.providerData, providerUsageReported };
     return response;
   }
 
   override async *getStreamedResponse(request: ModelRequest): AsyncIterable<ResponseStreamEvent> {
     let finishReason: unknown;
     let usageReported = false;
+    let providerResponseId: string | undefined;
+    const fallbackId = `opengeni-response:${randomUUID()}`;
     for await (const event of super.getStreamedResponse(request)) {
       if (event.type === "model") {
+        const rawId = (event.event as { id?: unknown } | undefined)?.id;
+        if (typeof rawId === "string" && rawId.trim()) providerResponseId = rawId;
         const rawUsage = (event.event as { usage?: unknown } | undefined)?.usage;
         if (rawUsage !== undefined && rawUsage !== null)
           usageReported = providerReportedTokenUsage(rawUsage);
@@ -92,8 +102,16 @@ export class OpenGeniChatCompletionsModel extends OpenAIChatCompletionsModel {
       if (event.type === "response_done" && isUnknownFinishReason(finishReason)) {
         throw new UnknownModelFinishReasonError();
       }
-      if (event.type === "response_done")
+      if (event.type === "response_done") {
+        // The SDK uses the same FAKE_ID for every ID-less Chat dispatch.
+        if (!providerResponseId && (!event.response.id?.trim() || event.response.id === "FAKE_ID"))
+          event.response.id = fallbackId;
         Object.assign(event.response.usage, { providerUsageReported: usageReported });
+        event.response.providerData = {
+          ...event.response.providerData,
+          providerUsageReported: usageReported,
+        };
+      }
       yield event;
     }
   }
@@ -120,12 +138,15 @@ export class OpenGeniResponsesModel extends AppendOnlyOpenAIResponsesModel {
     request: ModelRequest,
     stream: boolean,
   ): Promise<OpenAI.Responses.Response | AsyncIterable<OpenAI.Responses.ResponseStreamEvent>> {
+    // One transport call owns one fallback identity, shared by raw and SDK terminals.
+    const fallbackId = `opengeni-response:${randomUUID()}`;
     if (!stream || !this.ownsResponsesTerminalClassification()) {
       // Subscription transports retain the SDK's request-id and error handling.
       const response = await super._fetchResponse(request, stream as false);
-      if (!stream) return responseWithUsageEvidence(response);
+      if (!stream) return responseWithUsageEvidence(response, fallbackId);
       return this.responseUsageEvidenceStream(
         response as unknown as AsyncIterable<OpenAI.Responses.ResponseStreamEvent>,
+        fallbackId,
       );
     }
     // Reuse the SDK's full request conversion, but retain its HTTP receipt
@@ -147,22 +168,25 @@ export class OpenGeniResponsesModel extends AppendOnlyOpenAIResponsesModel {
       // Such clients cannot supply HTTP evidence, but must remain usable.
       return this.responseUsageEvidenceStream(
         this.classifiedResponseStream(await pending, new Headers(), null),
+        fallbackId,
       );
     }
     const receipt = await pending.withResponse();
     return this.responseUsageEvidenceStream(
       this.classifiedResponseStream(receipt.data, receipt.response.headers, receipt.request_id),
+      fallbackId,
     );
   }
 
   private async *responseUsageEvidenceStream(
     stream: AsyncIterable<OpenAI.Responses.ResponseStreamEvent>,
+    fallbackId: string,
   ): AsyncIterable<OpenAI.Responses.ResponseStreamEvent> {
     for await (const event of stream) {
       if ("response" in event && event.response) {
         // The SDK copies extra response fields into providerData before it
         // fills absent usage with zeros. Preserve the provider's presence proof.
-        yield { ...event, response: responseWithUsageEvidence(event.response) };
+        yield { ...event, response: responseWithUsageEvidence(event.response, fallbackId) };
       } else yield event;
     }
   }

@@ -1052,10 +1052,14 @@ Missing cost pricing refuses cost-capped dispatch. Reservation-backed requests
 cannot use hidden SDK retries.
 
 SDK-normalized zeros do not prove that a provider reported usage. Preserve raw
-counter-presence evidence before SDK defaults; missing or partial usage keeps
+counter-presence evidence before SDK defaults and retain it through SDK schema
+parsing; missing or partial usage keeps
 its hold, while explicitly reported zero usage can settle. A terminal response's
 SDK aggregate cannot replace missing telemetry. Normalized terminals and raw
 mirrors retain one response-to-call binding and cannot consume the next hold.
+Owned transports assign a unique local identity per dispatch when the provider
+omits an ID, including Chat SDK placeholder IDs. Overflow recovery retires
+the failed call from response ordering while preserving its unresolved hold.
 Gateway-reported monetary charges have no token-price bound, so credit-funded
 Gateway calls under a monthly cost cap fail admission until an enforceable
 provider charge bound is available. Token-only, external, and uncapped calls

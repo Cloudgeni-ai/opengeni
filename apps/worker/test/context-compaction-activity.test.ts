@@ -2053,7 +2053,7 @@ describe("standalone context compaction execution", () => {
     ).toBe(false);
   });
 
-  test("a rejected call's hold is retired before the compaction retry is admitted", async () => {
+  test("an overflow call without usage stays reserved while compaction and retry settle", async () => {
     const suffix = crypto.randomUUID();
     const access = await bootstrapWorkspace(client.db, {
       accountExternalSource: "test",
@@ -2104,10 +2104,8 @@ describe("standalone context compaction execution", () => {
     // must release its own hold, not the dead call's.
     const scriptedModel = new ScriptedModel([
       {
-        error: new CompactionNeededError({
-          signalTokens: 250_000,
-          thresholdTokens: 249_000,
-          signalSource: "provider",
+        error: Object.assign(new Error("Provider context window exceeded after dispatch"), {
+          code: "context_length_exceeded",
         }),
       },
       { outputText: "post-compaction answer" },
@@ -2131,6 +2129,7 @@ describe("standalone context compaction execution", () => {
     const productionRuntime = createProductionAgentRuntime({ model: scriptedModel });
     const openReservedAtRetryAdmission: number[] = [];
     const reservedOutputBound = 1_000;
+    let rejectedHoldKey: string | undefined;
     const runtime: OpenGeniRuntime = {
       ...productionRuntime,
       configure: () => undefined,
@@ -2163,8 +2162,7 @@ describe("standalone context compaction execution", () => {
           ...options,
           onModelCallAdmission: async (admission) => {
             if (openReservedAtRetryAdmission.length === 1) {
-              // The retry's admission: the rejected call's hold must already be
-              // released — under response-count matching it would still be open.
+              // The retry sees ambiguous prior spend still consuming the cap.
               openReservedAtRetryAdmission.push(
                 await openUsageReservationQuantity(client.db, {
                   accountId: grant.accountId,
@@ -2177,7 +2175,15 @@ describe("standalone context compaction execution", () => {
             } else if (openReservedAtRetryAdmission.length === 0) {
               openReservedAtRetryAdmission.push(-1);
             }
-            return await workerAdmission?.(admission);
+            const workerGrant = await workerAdmission?.(admission);
+            if (openReservedAtRetryAdmission.length === 1) {
+              const holds = await shared.admin<
+                Array<{ idempotency_key: string }>
+              >`select idempotency_key from usage_events where workspace_id = ${session.workspaceId} and event_type = 'model.tokens.reserved' and quantity > 0`;
+              expect(holds).toHaveLength(1);
+              rejectedHoldKey = holds[0]!.idempotency_key;
+            }
+            return workerGrant;
           },
         });
       },
@@ -2220,8 +2226,8 @@ describe("standalone context compaction execution", () => {
     expect(scriptedModel.requests[0]?.modelSettings.maxTokens).toBe(reservedOutputBound);
     expect(scriptedModel.requests[1]?.modelSettings.maxTokens).toBe(reservedOutputBound);
 
-    // At the retry's admission, the rejected call's hold was already retired.
-    expect(openReservedAtRetryAdmission).toEqual([-1, 0]);
+    // FIFO retirement allows a fresh call; it does not prove the old one was free.
+    expect(openReservedAtRetryAdmission).toEqual([-1, 251_000]);
 
     // Rejection, standalone compaction, and retry each own a distinct hold.
     // Every release uses its hold's exact key and quantity.
@@ -2240,13 +2246,18 @@ describe("standalone context compaction execution", () => {
     expect(holds).toHaveLength(3);
     expect(new Set(holds.map((row) => row.idempotency_key)).size).toBe(3);
     expect(releases.map((row) => row.idempotency_key)).toEqual(
-      holds.map((row) => `${row.idempotency_key}:release`),
+      holds
+        .filter((row) => row.idempotency_key !== rejectedHoldKey)
+        .map((row) => `${row.idempotency_key}:release`),
     );
     expect(releases.map((row) => Number(row.quantity))).toEqual(
-      holds.map((row) => -Number(row.quantity)),
+      holds
+        .filter((row) => row.idempotency_key !== rejectedHoldKey)
+        .map((row) => -Number(row.quantity)),
     );
-    // Net open reservations are zero and the retry's response recorded its
-    // own usage fact.
+    expect(rejectedHoldKey).toBeDefined();
+    expect(releases).toHaveLength(2);
+    // Closure preserves unknown spend. Only summary and retry have actual usage.
     expect(
       await sumUsageQuantity(client.db, {
         accountId: grant.accountId,
@@ -2254,7 +2265,7 @@ describe("standalone context compaction execution", () => {
         eventType: "model.tokens.reserved",
         since: new Date(0),
       }),
-    ).toBe(0);
+    ).toBe(251_000);
     expect(
       await sumUsageQuantity(client.db, {
         accountId: grant.accountId,

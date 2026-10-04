@@ -14,7 +14,6 @@ import {
   isSessionCompactionRequested,
   nextSessionHistoryPosition,
   persistModelContextSnapshot,
-  recordUsageEventsAndApplyCreditDebit,
   updateSessionTitleWithEvent,
 } from "@opengeni/db";
 import { publishDurableSessionEvents } from "@opengeni/events";
@@ -2173,32 +2172,10 @@ export async function runTurnStreamAttempt(
         if (!recoveryKind || !eventing.publish || !eventing.turnStartedPublished) {
           throw attemptError;
         }
-        // The call that just died is the admission FIFO's tail — the model
-        // loop is sequential, so everything ahead of it already emitted its
-        // response and was consumed before this error surfaced. Retire its
-        // admission ordinal and release its hold NOW, before the re-admitted
-        // retry call queues behind it: otherwise the retry's response would
-        // release the dead call's hold and leave the live one pinned.
-        const rejectedCallOrdinal = admittedCallOrdinals.pop();
-        const rejectedCallHold =
-          rejectedCallOrdinal !== undefined
-            ? billingState.pendingUsageReservations.get(rejectedCallOrdinal)
-            : undefined;
-        if (rejectedCallOrdinal !== undefined) {
-          billingState.pendingUsageReservations.delete(rejectedCallOrdinal);
-        }
-        if (rejectedCallOrdinal !== undefined && rejectedCallHold) {
-          await recordUsageEventsAndApplyCreditDebit(db, {
-            accountId: input.accountId,
-            workspaceId: input.workspaceId,
-            usageEvents: usageReservationReleaseEvents({
-              reservations: [[rejectedCallOrdinal, rejectedCallHold]],
-              sessionId: input.sessionId,
-              turnId: activeTurnId,
-              turnAttemptId: input.attemptId,
-            }),
-          });
-        }
+        // Retire the failed call's FIFO entry so the retry settles its own
+        // identity. Dispatch followed by overflow does not prove zero spend:
+        // preserve the pending and durable hold until authoritative usage.
+        admittedCallOrdinals.pop();
         await flushRuntimeBatcher();
         await historySink.reconcileConversationTruth({ skipInputOnlyRows: true });
         observability.warn("context compaction recovery attempted", {

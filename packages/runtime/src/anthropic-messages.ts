@@ -603,6 +603,7 @@ export function anthropicResponse(
     responseId: message.id,
     ...(requestId ? { requestId } : {}),
     providerData: {
+      providerUsageReported: providerReportedTokenUsage(message.usage),
       anthropic: { stopReason: message.stop_reason, usage: message.usage },
       ...(message.stop_reason === "max_tokens"
         ? { status: "incomplete", incomplete_details: { reason: "max_output_tokens" } }
