@@ -1,19 +1,67 @@
 /** One-shot isolated physical copy, or explicitly requested read-only reattestation. */
 import postgres from "postgres";
+import { createHash } from "node:crypto";
 
 const fixture = await Bun.file("/workspace/insights-raw-http-fixture.json").json();
 const out = process.env.INSIGHTS_DAILY_COPY_RECEIPT;
 const template =
   process.env.INSIGHTS_DAILY_COPY_TEMPLATE ?? "og_insights_daily_bootstrap_1a6870920e21";
+const parentPath = process.env.INSIGHTS_DAILY_COPY_COMPLETED_DIRTY_RECEIPT;
+const parentSha256 = process.env.INSIGHTS_DAILY_COPY_COMPLETED_DIRTY_SHA256;
+const parentText = parentPath ? await Bun.file(parentPath).text() : null;
+const parent = parentText ? JSON.parse(parentText) : null;
+const retainedTemplates = [
+  "og_insights_daily_bootstrap_1a6870920e21",
+  "og_insights_http_cache_1a6870920e21",
+];
 const attest = process.argv.includes("--attest-after-migrations");
+if (
+  parent &&
+  (!parentPath?.startsWith("/workspace/") ||
+    !/^[a-f0-9]{64}$/.test(parentSha256 ?? "") ||
+    createHash("sha256").update(parentText!).digest("hex") !== parentSha256 ||
+    !parent.completed ||
+    parent.mode !== "dirty" ||
+    !parent.originalUnchanged ||
+    !parent.copyExactDeliberateDirtyDelta ||
+    !/^[a-f0-9]{40}$/.test(parent.measuredEndHead ?? "") ||
+    parent.measuredStartHead !== parent.measuredEndHead ||
+    JSON.stringify(parent.sourceStart) !== JSON.stringify(parent.sourceEnd) ||
+    parent.physicalCopy?.database !== template ||
+    parent.physicalCopy.originalDatabase !== fixture.database ||
+    !retainedTemplates.includes(parent.physicalCopy.template) ||
+    !parent.physicalCopy.countsAndForceEqual ||
+    !/^og_insights_daily_http_[a-f0-9]{12}$/.test(template) ||
+    parent.before?.counts?.facts !== "838000" ||
+    parent.before?.counts?.usage !== "4170000" ||
+    parent.dirtyWrites?.length !== 42 ||
+    parent.dirtyWrites.some(
+      (write: {
+        committed?: boolean;
+        requestedMicros?: number;
+        recordedListMicros?: number;
+        actualDebitMicros?: number;
+        warmUsageQuantity?: number;
+      }) =>
+        write.committed !== true ||
+        write.requestedMicros !== 101 ||
+        write.recordedListMicros !== 73 ||
+        write.actualDebitMicros !== 1 ||
+        write.warmUsageQuantity !== 1,
+    ) ||
+    parent.cases?.length !== 2 ||
+    parent.cases.some(
+      (entry: { successfulRequests?: number; errors?: number; subsequentSamples?: number }) =>
+        entry.successfulRequests !== 21 || entry.errors !== 0 || entry.subsequentSamples !== 20,
+    ))
+)
+  throw new Error("A hash-verified completed 42-write retained-volume benchmark is required");
 if (
   !out?.startsWith("/workspace/") ||
   fixture.database !== "og_insights_http_scale_1a6870920e21" ||
   !fixture.seeded ||
   fixture.ownerRole !== `${fixture.database}_owner` ||
-  !["og_insights_daily_bootstrap_1a6870920e21", "og_insights_http_cache_1a6870920e21"].includes(
-    template,
-  )
+  (!retainedTemplates.includes(template) && !parent)
 )
   throw new Error("Exact retained fixture, allowed template and workspace receipt required");
 if ((await Bun.file(out).exists()) !== attest)
@@ -51,6 +99,19 @@ const saved = attest
       createdAt: new Date().toISOString(),
       copyCreated: false,
       countsAndForceEqual: false,
+      ...(parent
+        ? {
+            lineage: {
+              kind: "completed-dirty-benchmark-physical-copy",
+              parentReceiptSha256: parentSha256,
+              parentMeasuredHead: parent.measuredEndHead,
+              rootTemplate: parent.physicalCopy.template,
+              inheritedLabWrites: 42,
+              originalBaseCounts: parent.before.counts,
+              expectedCounts: parent.after.counts,
+            },
+          }
+        : {}),
     };
 if (
   saved.template !== template ||
@@ -61,10 +122,26 @@ if (
 try {
   if (!attest) {
     const before = await snapshot(source);
+    const expectedCounts = parent ? { ...parent.before.counts } : null;
+    if (expectedCounts) {
+      for (const [field, delta] of Object.entries({
+        facts: 42,
+        usage: 42,
+        warm: 42,
+        ledger: 42,
+        requested: 4242,
+        list: 3066,
+        actual: -42,
+      }))
+        expectedCounts[field] = String(BigInt(expectedCounts[field]) + BigInt(delta));
+    }
     if (
-      before.counts?.facts !== "838000" ||
-      before.counts?.usage !== "4170000" ||
-      before.counts?.warm !== "2870000" ||
+      (parent
+        ? JSON.stringify(expectedCounts) !== JSON.stringify(parent.after.counts) ||
+          JSON.stringify(before) !== JSON.stringify(parent.after)
+        : before.counts?.facts !== "838000" ||
+          before.counts?.usage !== "4170000" ||
+          before.counts?.warm !== "2870000") ||
       before.force.some((row) => !row.relrowsecurity || !row.relforcerowsecurity)
     )
       throw new Error("Expected retained staging-sized counts and FORCE posture required");

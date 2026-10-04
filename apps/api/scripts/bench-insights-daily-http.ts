@@ -32,20 +32,53 @@ if (!Number.isSafeInteger(samples) || samples < 2 || samples > 50)
   throw new Error("Samples must be 2..50, excluding the separately reported first request");
 if (mode !== "clean" && mode !== "dirty") throw new Error("Benchmark mode must be clean or dirty");
 const copy = await Bun.file(receiptPath).json();
+const retainedTemplates = [
+  "og_insights_daily_bootstrap_1a6870920e21",
+  "og_insights_http_cache_1a6870920e21",
+];
+const inheritedLabCopy =
+  copy.lineage?.kind === "completed-dirty-benchmark-physical-copy" &&
+  /^[a-f0-9]{64}$/.test(copy.lineage.parentReceiptSha256 ?? "") &&
+  /^[a-f0-9]{40}$/.test(copy.lineage.parentMeasuredHead ?? "") &&
+  retainedTemplates.includes(copy.lineage.rootTemplate) &&
+  copy.lineage.inheritedLabWrites === 42 &&
+  copy.lineage.originalBaseCounts?.facts === "838000" &&
+  copy.lineage.originalBaseCounts?.usage === "4170000" &&
+  copy.after?.counts?.facts === "838042" &&
+  copy.after?.counts?.usage === "4170042" &&
+  JSON.stringify(copy.after.counts) === JSON.stringify(copy.lineage.expectedCounts) &&
+  /^og_insights_daily_http_[a-f0-9]{12}$/.test(copy.template) &&
+  copy.template !== copy.database;
 if (
   fixture.database !== "og_insights_http_scale_1a6870920e21" ||
   !fixture.seeded ||
   copy.originalDatabase !== fixture.database ||
   !copy.countsAndForceEqual ||
   !/^og_insights_daily_http_[a-f0-9]{12}$/.test(copy.database) ||
-  !["og_insights_daily_bootstrap_1a6870920e21", "og_insights_http_cache_1a6870920e21"].includes(
-    copy.template,
-  )
+  (!retainedTemplates.includes(copy.template) && !inheritedLabCopy)
 )
   throw new Error("Verified new isolated retained-volume copy required");
 const hash = (value: string) => createHash("sha256").update(value).digest("hex");
 const head = () =>
   Bun.spawnSync(["git", "rev-parse", "HEAD"], { stdout: "pipe" }).stdout.toString().trim();
+const preparePath = process.env.INSIGHTS_DAILY_PREPARE_RECEIPT;
+const preparation = preparePath ? await Bun.file(preparePath).json() : null;
+if (
+  inheritedLabCopy &&
+  (!preparePath?.startsWith("/workspace/") ||
+    !preparation?.completed ||
+    preparation.database !== copy.database ||
+    preparation.sourceHead !== head() ||
+    preparation.sourceHead !== preparation.sourceEndHead ||
+    !preparation.securityPreserved ||
+    !preparation.otherRoutinesUnchanged ||
+    !preparation.allDefinitionsMatchSource ||
+    !preparation.sourceDataUnchanged ||
+    !preparation.originalUnchanged ||
+    JSON.stringify(preparation.pendingAfter) !== "[]" ||
+    JSON.stringify(preparation.after) !== JSON.stringify(copy.after))
+)
+  throw new Error("Inherited lab copies require completed exact-head copy-only preparation");
 const ledger = await readdir(`${repo}/packages/db/drizzle`);
 const migrationFiles = [
   "insights_daily_rollups.sql",
@@ -61,6 +94,8 @@ if (migrationFiles.some((name, index) => index > 0 && name <= migrationFiles[ind
   throw new Error("Daily migrations must retain their dependency order");
 const paths = [
   "apps/api/scripts/bench-insights-daily-http.ts",
+  "apps/api/scripts/copy-insights-retained-fixture.ts",
+  "apps/api/scripts/prepare-insights-retained-readers.ts",
   "apps/api/src/app.ts",
   "apps/api/src/routes/insights-usage.ts",
   "apps/api/src/routes/insights-response-cache.ts",
@@ -116,6 +151,8 @@ const evidence: Record<string, unknown> = {
   synthetic: true,
   localOnly: true,
   physicalCopy: copy,
+  inheritedLabWrites: inheritedLabCopy ? copy.lineage.inheritedLabWrites : 0,
+  preparationReceiptSha256: preparePath ? hash(await Bun.file(preparePath).text()) : null,
   seedOrMigrationReplay: false,
   cachePolicy:
     "Every timed request uses a fresh complete createApp instance and its newly created empty response-cache map; no public bypass or authentication changes",
@@ -225,8 +262,8 @@ try {
     originalBefore = await snapshot(original);
   if (
     JSON.stringify(before) !== JSON.stringify(copy.after) ||
-    before.counts?.facts !== "838000" ||
-    before.counts?.usage !== "4170000" ||
+    before.counts?.facts !== (inheritedLabCopy ? "838042" : "838000") ||
+    before.counts?.usage !== (inheritedLabCopy ? "4170042" : "4170000") ||
     before.force.some((row) => !row.relrowsecurity || !row.relforcerowsecurity)
   )
     throw new Error("Attested copy data/FORCE/catalog changed before timing");

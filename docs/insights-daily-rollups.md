@@ -338,6 +338,25 @@ Retained primary evidence:
 - Executed native-plan runner: `050bb366-de33-49a4-9719-0b9c192766ce`, 9,615 bytes,
   SHA-256 `de96bfe0c320f6258acd0e5aad4689341c61692ce11bc9685d981011c90c5021`.
 
+For a later read-helper-only revision, the local copy harness can bind the
+completed dirty receipt by SHA-256 and physically clone that measured database.
+It preserves, rather than deletes, the 42 deliberate test records: the next
+baseline is explicitly 838,042 facts and 4,170,042 events. Counts, amounts, FORCE
+posture and migration history must match the completed parent receipt exactly.
+This is not a new pristine 838,000-fact seed or permission to replay migrations.
+
+`apps/api/scripts/prepare-insights-retained-readers.ts` is a copy-only laboratory
+step. It obtains the two approved reader definitions from the source-built native
+test schema, verifies all other Insights definitions are unchanged, replaces
+only those readers under the preserved owner, and checks identities, ownership,
+ACLs and configuration. One bounded owner repeatable-read reconciliation makes
+the copy clean before measurements; it records its duration and explicit
+10-million-source-row budget. No refresh is allowed between the subsequent dirty
+samples. The HTTP harness requires completed exact-head preparation evidence for
+this descendant-copy lane. This procedure changes neither the original fixture
+nor deployment history, and establishes no automatic production maintenance
+cadence or performance acceptance.
+
 ### Frozen-head full-volume bootstrap measurement
 
 On October 4, 2026, a new isolated physical copy of the retained synthetic data
