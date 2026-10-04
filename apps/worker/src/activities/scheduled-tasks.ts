@@ -16,6 +16,7 @@ import {
   SessionMemoryScope,
   normalizeAutomaticSessionTitle,
   metadataWithTurnExecutionPolicyV1,
+  mergeResourceRefs,
   scheduledOccurrencePayloadUtf8Bytes,
   stableJson,
   TurnExecutionPolicyV1,
@@ -648,7 +649,7 @@ export function createScheduledTaskActivities(services: () => Promise<ControlAct
           ? settingsWithSessionMcpServerMetadata(connectionSettings, connectionTarget.mcpServers)
           : connectionSettings,
         tools: connectionTools,
-        resources: connectionTarget?.resources ?? task.agentConfig.resources,
+        resources: mergeResourceRefs(connectionTarget?.resources ?? [], task.agentConfig.resources),
         source: taskAuthoritySubjectId
           ? { kind: "subject", subjectId: taskAuthoritySubjectId, accountId: task.accountId }
           : { kind: "none" },
@@ -1793,9 +1794,8 @@ export function createScheduledTaskActivities(services: () => Promise<ControlAct
             // the locked admission check below remains authoritative. Mirrors
             // apps/api/src/domain/sessions.ts.
             assertReusableSessionRevivable(session.status);
-            // Defensive backstop for the API-level 409: a reusable session keeps
-            // its creation-time attachment, so a diverged task attachment must
-            // fail the run instead of silently running with the wrong secrets.
+            // Slack routing remains bound to the reusable chat; execution
+            // attachments come from its accepted target snapshot.
             assertReusableSessionBindingMatches(session, task);
             const bundled = await addSessionSystemUpdateWithSourceMutation(
               dispatchDb,
@@ -2026,24 +2026,17 @@ class IncidentTelemetryPreflightBlockedError extends Error {
 }
 
 /**
- * Defensive backstop for the API-level 409: a generated reusable session
- * keeps its creation-time attachment, so a diverged task attachment or Slack
- * bot binding must settle the run terminally instead of silently running with
- * the wrong secrets - on the first attempt and on every recovery attempt.
+ * Defensive backstop for the API-level Slack binding guard. Variable Sets
+ * belong to the live target and are fenced by its accepted execution snapshot,
+ * not by the task's retained creation defaults.
  */
 function assertReusableSessionBindingMatches(
-  session: { variableSetId: string | null; metadata: Record<string, unknown> },
-  task: Pick<ScheduledTask, "runMode" | "variableSetId" | "agentConfig">,
+  session: { metadata: Record<string, unknown> },
+  task: Pick<ScheduledTask, "runMode" | "agentConfig">,
 ): void {
   // Existing-chat messages use the target policy frozen at admission. Task
   // creation defaults are not an additional authority or binding constraint.
   if (task.runMode === "existing_session") return;
-  if ((session.variableSetId ?? null) !== (task.variableSetId ?? null)) {
-    throw new ScheduledRunTerminalAuthorityError(
-      "scheduled_reusable_binding_changed",
-      "scheduled task variableSet attachment does not match its reusable session",
-    );
-  }
   if (
     scheduledSlackBotConnectionId(session.metadata) !==
     (task.agentConfig.slackBotConnectionId ?? null)
@@ -2360,9 +2353,8 @@ async function recoverBoundScheduledTaskDispatch(input: {
   let session: Awaited<ReturnType<typeof createSession>>;
   if (input.run.sessionId) {
     session = await requireSession(input.db, task.workspaceId, input.run.sessionId);
-    // A bound existing/reusable target must still carry the exact Variable Set
-    // and Slack bot binding frozen with this occurrence; recovery must fail the
-    // run terminally rather than deliver into a diverged session.
+    // Preserve the reusable chat's Slack routing; the accepted target snapshot
+    // independently fences its current Variable Set attachments during recovery.
     if (!generatedSession) assertReusableSessionBindingMatches(session, task);
   } else if (generatedSession) {
     const variableSet = input.acceptedExecution.resolvedVariableSet;

@@ -234,27 +234,32 @@ describe("Gmail complete mailbox operations", () => {
   for (const inline of [false, true])
     test(`exact binary download ${inline ? "inline" : "external"} keeps bytes private and checks authority`, async () => {
       const bytes = Buffer.from([0, 255, 128, 10]);
+      const attachmentId = `synthetic-opaque-${"a_".repeat(200)}`;
       let captured: Uint8Array | undefined;
       const server = make(
-        async (input) =>
-          new URL(input.toString()).pathname.includes("/attachments/")
-            ? Response.json({ data: b64(bytes), size: bytes.length })
-            : Response.json({
-                id: "message-test",
-                payload: {
-                  parts: [
-                    {
-                      partId: "1",
-                      filename: "../../unsafe.bin",
-                      mimeType: "application/octet-stream",
-                      body: {
-                        size: bytes.length,
-                        ...(inline ? { data: b64(bytes) } : { attachmentId: "attachment-test" }),
-                      },
-                    },
-                  ],
+        async (input) => {
+          const url = new URL(input.toString());
+          if (url.pathname.includes("/attachments/")) {
+            expect(decodeURIComponent(url.pathname.split("/attachments/")[1]!)).toBe(attachmentId);
+            return Response.json({ data: b64(bytes), size: bytes.length });
+          }
+          return Response.json({
+            id: "message-test",
+            payload: {
+              parts: [
+                {
+                  partId: "1",
+                  filename: "../../unsafe.bin",
+                  mimeType: "application/octet-stream",
+                  body: {
+                    size: bytes.length,
+                    ...(inline ? { data: b64(bytes) } : { attachmentId }),
+                  },
                 },
-              }),
+              ],
+            },
+          });
+        },
         {
           materializeGmailFile: async (request) => {
             expect(await request.authorizeProviderRequest()).toBe(true);
@@ -266,13 +271,83 @@ describe("Gmail complete mailbox operations", () => {
       );
       const receipt = await value(server, "download_attachment", {
         messageId: "message-test",
-        partId: "1",
+        ...(inline ? { partId: "1" } : { attachmentId }),
+        ...(!inline ? { fileName: "../../unsafe.bin" } : {}),
       });
       expect(Buffer.from(captured!)).toEqual(bytes);
       expect(receipt.contentSha256).toBe(digest(bytes));
       expect(JSON.stringify(receipt)).not.toContain(b64(bytes));
       expect(JSON.stringify(receipt)).not.toContain("synthetic-token");
     });
+
+  test("opaque attachment tokens are fetched directly while stable part IDs use current MIME metadata", async () => {
+    const bytes = Buffer.from([0, 255, 128]);
+    const oldId = `original-token-${"a_".repeat(200)}`;
+    const paths: string[] = [];
+    const names: string[] = [];
+    const server = make(
+      async (input) => {
+        const path = new URL(input.toString()).pathname;
+        paths.push(path);
+        if (path.endsWith("/messages/message-test"))
+          return Response.json({
+            payload: {
+              parts: [
+                {
+                  partId: "1",
+                  filename: "original.bin",
+                  body: { attachmentId: "new-token", size: 3 },
+                },
+              ],
+            },
+          });
+        expect(path).toBe(
+          `/gmail/v1/users/me/messages/message-test/attachments/${path.endsWith("new-token") ? "new-token" : encodeURIComponent(oldId)}`,
+        );
+        return Response.json({ size: 3, data: b64(bytes) });
+      },
+      {
+        materializeGmailFile: async (request) => {
+          expect(Buffer.from(request.bytes)).toEqual(bytes);
+          names.push(request.fileName);
+          return { contentSha256: digest(request.bytes) };
+        },
+      },
+    );
+    await value(server, "download_attachment", {
+      messageId: "message-test",
+      attachmentId: oldId,
+      fileName: "original.bin",
+    });
+    expect(paths).toEqual([
+      `/gmail/v1/users/me/messages/message-test/attachments/${encodeURIComponent(oldId)}`,
+    ]);
+    await value(server, "download_attachment", {
+      messageId: "message-test",
+      attachmentId: oldId,
+      partId: "1",
+    });
+    expect(paths.slice(1)).toEqual([
+      "/gmail/v1/users/me/messages/message-test",
+      "/gmail/v1/users/me/messages/message-test/attachments/new-token",
+    ]);
+    expect(names).toEqual(["original.bin", "original.bin"]);
+
+    let delivered = false;
+    const malformed = make(async () => Response.json({ size: 9, data: b64(bytes) }), {
+      materializeGmailFile: async () => {
+        delivered = true;
+        return {};
+      },
+    });
+    const refused = await malformed.callToolResult(
+      "download_attachment",
+      { messageId: "message-test", attachmentId: oldId },
+      { opengeniOperationId: operationId },
+    );
+    expect(refused.isError).toBe(true);
+    expect(delivered).toBe(false);
+  });
 
   test("original message downloads preserve all raw bytes, and missing filesystem fails explicitly", async () => {
     let captured: Uint8Array | undefined;
@@ -337,9 +412,13 @@ describe("Gmail complete mailbox operations", () => {
   });
 
   test("imports never send and Calendar processing defaults off", async () => {
-    const calls: Array<{ url: URL; body: any }> = [];
+    const calls: Array<{ url: URL; body: any; method: string }> = [];
     const server = make(async (input, init) => {
-      calls.push({ url: new URL(input.toString()), body: JSON.parse(String(init?.body)) });
+      calls.push({
+        url: new URL(input.toString()),
+        body: JSON.parse(String(init?.body)),
+        method: init?.method ?? "GET",
+      });
       return Response.json({ id: "imported" });
     });
     await value(server, "import_message", {
@@ -348,10 +427,14 @@ describe("Gmail complete mailbox operations", () => {
       labelIds: ["INBOX"],
     });
     await value(server, "insert_message", { raw: b64(raw) });
-    expect(calls[0]!.url.pathname).toEndWith("/messages/import");
+    expect(calls[0]!.url.pathname).toBe("/gmail/v1/users/me/messages/import");
+    expect(calls[0]!.method).toBe("POST");
     expect(calls[0]!.url.searchParams.get("processForCalendar")).toBe("false");
-    expect(calls[1]!.url.pathname).toEndWith("/messages/insert");
+    expect(calls[1]!.url.pathname).toBe("/gmail/v1/users/me/messages");
+    expect(calls[1]!.method).toBe("POST");
+    expect(calls[1]!.url.searchParams.has("processForCalendar")).toBe(false);
     expect(Buffer.from(calls[0]!.body.raw, "base64url")).toEqual(raw);
+    expect(Buffer.from(calls[1]!.body.raw, "base64url")).toEqual(raw);
   });
 
   test("history preserves continuation and expired cursors require resync", async () => {

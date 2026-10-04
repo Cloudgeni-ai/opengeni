@@ -6259,11 +6259,9 @@ describe("clean session control plane", () => {
       }
     }
 
-    for (const kind of [
-      "child_progress",
-      "background_command_result",
-      "child_terminal_result",
-    ] as const) {
+    // A child_terminal_result now wakes a goalless idle parent (#3439), so it
+    // carries a wake obligation and is not in this list.
+    for (const kind of ["child_progress", "background_command_result"] as const) {
       test(`${kind} without a wake obligation does not block completed idle`, async () => {
         const { grant, child, idleNotices } = await idleChild();
         const operationId = crypto.randomUUID();
@@ -6287,29 +6285,20 @@ describe("clean session control plane", () => {
                   progressNote: "still working",
                 },
               }
-            : kind === "child_terminal_result"
-              ? {
-                  kind,
-                  payload: {
-                    type: kind,
-                    childSessionId: crypto.randomUUID(),
-                    status: "idle" as const,
-                  },
-                }
-              : {
-                  kind,
-                  payload: {
-                    type: kind,
+            : {
+                kind,
+                payload: {
+                  type: kind,
+                  commandId: operationId,
+                  state: "exited" as const,
+                  exitCode: 0,
+                  reason: "completed",
+                  outputLocator: {
+                    eventType: "sandbox.command.output.delta" as const,
                     commandId: operationId,
-                    state: "exited" as const,
-                    exitCode: 0,
-                    reason: "completed",
-                    outputLocator: {
-                      eventType: "sandbox.command.output.delta" as const,
-                      commandId: operationId,
-                    },
                   },
-                }),
+                },
+              }),
         });
         if (!added.added) throw new Error("retained notice was not inserted");
         expect(added.shouldWake).toBe(false);

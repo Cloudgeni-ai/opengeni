@@ -659,7 +659,9 @@ exact admitted sender turn. Empty personal-connection selections or workspace
 provider scope do not erase that identity. Ordinary messages from different sender
 attempts may share a batch with each other and lifecycle results when their exact
 originating turns resolve to the same human and frozen execution permissions.
-Steer retains exact-caller isolation; malformed historical message lineage cannot borrow another
+Steer retains exact-caller isolation: messages from that same attempt can join its
+batch, with the replacement instruction last in both the timeline and persisted
+model context, including turns with a goal snapshot. Malformed historical message lineage cannot borrow another
 update's human. Genuine service-only source turns remain service-only. This
 preserves identity without expanding accepted connection selections or replacing
 the receiving session's tool configuration.
@@ -1235,6 +1237,20 @@ properties with JavaScript `undefined` values are omitted as wire-absent
 without mutating the SDK object, while undefined array entries and every other
 non-JSON graph fail with the exact offending path. The lossless database codec
 stays strict rather than silently changing arbitrary input.
+
+A newly committed completed-tool receipt, followed by its durable structural
+output event, permits final acknowledgement of that exact tool's completed
+Connected Machine foreground operations. It does not wait for parallel SDK
+history to stabilize: attempt-ending recovery preserves the recorded result.
+Missing or duplicate receipts do not permit this incremental release. The
+complete-turn durability hook remains the boundary for other accepted output;
+session-owned background output uses its separate lifecycle. A complete verified
+replay and awaited PostgreSQL output capture create an exact terminal custody
+receipt. Its independent reconciliation claim retries final acknowledgement on
+the immutable launch connection after worker loss, without executing again or
+observing model completion. Publish success is a retry milestone; only an exact
+native absence observation settles release. Missing retained output before
+capture is recorded as unavailable, never inferred consumed.
 
 Pending-call registration retries only PostgreSQL-confirmed deadlock (`40P01`)
 or serialization (`40001`) rollback, with three total attempts and 25/50 ms
@@ -3618,6 +3634,12 @@ the execution root and claim timer; its completed span is backdated beneath
 the root, not evidence that it ran after the claim. These observations add no
 database reads or event publications, do not join telemetry exports, and leave
 historical metric boundaries intact. Missing observations are not zero durations.
+`session_mcp_settings` is a bounded child within runtime preparation. With a
+configured credential key, its independent exact-attempt policy and fresh
+server-credential reads overlap on root-pool connections; both settle before
+settings or credential provenance are exposed, retaining policy-error priority.
+Transaction handles and the missing-key metadata path retain serial ordering.
+No read, approval fence, credential refresh or model/tool authority is omitted.
 After successful exact claim ownership, session reload and capability settings
 overlap as fresh reads in separate root-pool RLS transactions; neither uses the
 other's result. Both results still precede credential selection, accepted-policy

@@ -8130,11 +8130,17 @@ export class OpenGeniClient {
 
   // --- Connections -------------------------------------------------------------------------------
 
-  /** The authenticated user's active accounts across this organization. */
-  async listOwnConnectionAccounts(workspaceId: string): Promise<ConnectionMetadata[]> {
+  /** This authenticated user's accounts across the organization, plus current-workspace shared accounts.
+   * Inactive accounts are opt-in for settings display; execution pickers keep the active default. */
+  async listOwnConnectionAccounts(
+    workspaceId: string,
+    options: { includeInactive?: boolean } = {},
+  ): Promise<ConnectionMetadata[]> {
     const response = await this.requestJson<ListConnectionsResponse>(
       "GET",
       `/v1/workspaces/${workspaceId}/connections/accounts`,
+      undefined,
+      options.includeInactive === true ? { includeInactive: "true" } : {},
     );
     return response.connections;
   }

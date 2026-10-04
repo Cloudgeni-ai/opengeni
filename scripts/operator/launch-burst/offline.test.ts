@@ -1,11 +1,23 @@
 import { describe, expect, test } from "bun:test";
 import { readFile } from "node:fs/promises";
+import { createRequire } from "node:module";
+import { pathToFileURL } from "node:url";
 import type { SessionEvent } from "../../../packages/contracts/src/index";
 import {
   coalesceSessionEventDeltasWithCoverage,
   formatSessionEventSse,
 } from "../../../packages/events/src/index";
-import { Authorization, Cohort, digest, Intent, intentDigest, STAGING_ORIGIN } from "./config";
+import {
+  Authorization,
+  Cohort,
+  digest,
+  FRESH_ENROLLMENT_MAX_BATCH_SIZE,
+  FRESH_ENROLLMENT_MIN_GAP_MS,
+  FRESH_ENROLLMENT_MIN_RESET_COOLDOWN_MS,
+  Intent,
+  intentDigest,
+  STAGING_ORIGIN,
+} from "./config";
 import { verificationPath } from "./auth";
 import { HumanHttp, type FetchLike } from "./http";
 import {
@@ -27,11 +39,14 @@ const env = {
   BURST_COOKIE: "better-auth.session_token=offline-fixture",
   BURST_PASSWORD: "offline-password-not-a-real-credential",
 };
-async function setup(mode: "plain" | "sandbox" | "fresh" = "plain") {
+async function setup(mode: "plain" | "sandbox" | "fresh" = "plain", freshCount: 50 | 100 = 50) {
   const intent = Intent.parse(
     JSON.parse(
       await readFile(
-        new URL(mode === "fresh" ? "fresh50.intent.json" : `${mode}.intent.json`, import.meta.url),
+        new URL(
+          mode === "fresh" ? `fresh${freshCount}.intent.json` : `${mode}.intent.json`,
+          import.meta.url,
+        ),
         "utf8",
       ),
     ),
@@ -86,7 +101,17 @@ async function setup(mode: "plain" | "sandbox" | "fresh" = "plain") {
     sourceSha: sha,
     execute: true,
     confirm: true,
-    clock: { now: () => now, wall: () => new Date(now).toISOString(), mono: () => ++mono },
+    clock: {
+      now: () => now + mono,
+      wall: () => new Date(now + mono).toISOString(),
+      mono: () => ++mono,
+    },
+    wait: async (milliseconds: number) => {
+      mono += milliseconds;
+    },
+    advance: (milliseconds: number) => {
+      mono += milliseconds;
+    },
     verificationReader: async (identity: { label: string }) =>
       `${STAGING_ORIGIN}/v1/auth/verify-email?token=${identity.label}`,
   };
@@ -106,6 +131,10 @@ function sample(): Sample {
     httpStatus: null,
     errorCode: null,
     signupMs: null,
+    enrollmentStartedAt: null,
+    enrollmentSettledAt: null,
+    enrollmentPacingWaitMs: null,
+    enrollmentResetWaitMs: null,
     promptSentAt: null,
     sentMonoMs: 0,
     acceptedMs: null,
@@ -168,16 +197,20 @@ function fixtureFetch(
   outcome = "success",
   authMode = "legacy",
   streamResponse: (events: ReturnType<typeof event>[]) => Response = sse,
+  nowMs: () => number = () => now,
 ) {
   const calls: Array<{
     path: string;
     method: string;
     body: Record<string, unknown> | null;
     headers: Headers;
+    atMs: number;
+    signal: AbortSignal | null;
   }> = [];
   const onboarded = new Set<string>();
   const emails = new Map<string, string>();
   const users = new Map<string, string>();
+  const createdAt = new Map<string, string>();
   const sessions = new Map<string, string>();
   const slots = new Map<string, string>();
   const projection = (correlation: string, selected = false) => ({
@@ -203,7 +236,7 @@ function fixtureFetch(
     const method = init?.method ?? "GET";
     const headers = new Headers(init?.headers);
     const body = init?.body ? JSON.parse(String(init.body)) : null;
-    calls.push({ path, method, body, headers });
+    calls.push({ path, method, body, headers, atMs: nowMs(), signal: init?.signal ?? null });
     const correlation = headers.get("x-opengeni-correlation-id")!;
     const json = (value: unknown, extra: Record<string, string> = {}) =>
       Response.json(value, { headers: extra });
@@ -223,7 +256,7 @@ function fixtureFetch(
           id: crypto.randomUUID(),
           kind: "add",
           returnIntentId: null,
-          expiresAt: "2026-10-03T13:10:00.000Z",
+          expiresAt: new Date(nowMs() + 10 * 60_000).toISOString(),
         },
         { "set-cookie": "opengeni.login_transaction=fixture" },
       );
@@ -235,13 +268,16 @@ function fixtureFetch(
     if (path === "/v1/auth/sign-up/email") {
       emails.set(correlation, body.email);
       users.set(correlation, crypto.randomUUID());
+      createdAt.set(
+        correlation,
+        outcome === "old_identity" ? "2000-01-01T00:00:00.000Z" : new Date(nowMs()).toISOString(),
+      );
       return json({
         user: {
           id: users.get(correlation),
           email: body.email,
           emailVerified: false,
-          createdAt:
-            outcome === "old_identity" ? "2000-01-01T00:00:00.000Z" : new Date(now).toISOString(),
+          createdAt: createdAt.get(correlation),
         },
       });
     }
@@ -255,7 +291,7 @@ function fixtureFetch(
           id: users.get(correlation),
           email: emails.get(correlation),
           emailVerified: true,
-          createdAt: new Date(now).toISOString(),
+          createdAt: createdAt.get(correlation),
         },
       });
     if (path === "/v1/auth/organization-onboarding") {
@@ -352,6 +388,834 @@ function fixtureFetch(
   }) as FetchLike;
   return { calls, fetchImpl };
 }
+type BurstResult = {
+  phase: string;
+  samples: Sample[];
+  summary: ReturnType<typeof summarize>;
+  enrollment: {
+    concurrency: number;
+    gapAfterSettlementMs: number | null;
+    batchSize: number | null;
+    resetCooldownMs: number | null;
+    startedAt: string | null;
+    settledAt: string | null;
+    durationMs: number | null;
+    pacingWaitMs: number;
+    ordinaryWaitMs: number;
+    resetWaitMs: number;
+    dispatchReleasedAt: string | null;
+  };
+};
+type RateRow = { key: string; count: number; lastRequest: number };
+type RateWhere = {
+  field: keyof RateRow;
+  operator?: "lt" | "gt" | "lte";
+  value: string | number;
+};
+type DatabaseLimiter = {
+  requests: Array<{ path: string; atMs: number; status: number }>;
+  check: (url: URL | Request | string, init?: RequestInit) => Promise<Response | undefined>;
+};
+// Reuse the independent reviewer's real database-consumer seam, not a model of
+// its rate rules. Resolve the API's LOCKED package, and read the source rules.
+// Only its adapter is fake: all predicates/increments/pruning act on memory rows.
+async function withProductionDatabaseLimiter<T>(
+  nowMs: () => number,
+  exercise: (limiter: DatabaseLimiter) => Promise<T>,
+): Promise<T> {
+  const apiRequire = createRequire(new URL("../../../apps/api/package.json", import.meta.url));
+  const limiterUrl = new URL(
+    "./api/rate-limiter/index.mjs",
+    pathToFileURL(apiRequire.resolve("better-auth")),
+  );
+  const { onRequestRateLimit } = (await import(limiterUrl.href)) as {
+    onRequestRateLimit: (request: Request, context: unknown) => Promise<Response | undefined>;
+  };
+  const rulesUrl = new URL(
+    "../../../apps/api/src/auth/managed-auth-rate-limits.ts",
+    import.meta.url,
+  );
+  const { MANAGED_AUTH_CLIENT_RATE_LIMIT_RULES: customRules } = (await import(rulesUrl.href)) as {
+    MANAGED_AUTH_CLIENT_RATE_LIMIT_RULES: Record<string, { window: number; max: number }>;
+  };
+  const matches = (row: RateRow, where: RateWhere[]) =>
+    where.every(({ field, operator, value }) => {
+      const actual = row[field];
+      if (!operator) return actual === value;
+      if (typeof actual !== "number" || typeof value !== "number")
+        throw new Error("unexpected database limiter predicate");
+      if (operator === "lt") return actual < value;
+      if (operator === "gt") return actual > value;
+      return actual <= value;
+    });
+  const rows = new Map<string, RateRow>();
+  let databaseReads = 0;
+  const adapter = {
+    async findMany({ where }: { where: RateWhere[] }) {
+      databaseReads++;
+      return [...rows.values()].filter((row) => matches(row, where)).map((row) => ({ ...row }));
+    },
+    async create({ data }: { data: RateRow }) {
+      if (rows.has(data.key)) throw new Error("duplicate memory database key");
+      rows.set(data.key, { ...data });
+      return { ...data };
+    },
+    async incrementOne({
+      where,
+      increment,
+      set,
+    }: {
+      where: RateWhere[];
+      increment: Partial<Record<"count" | "lastRequest", number>>;
+      set: Partial<RateRow>;
+    }) {
+      const row = [...rows.values()].find((candidate) => matches(candidate, where));
+      if (!row) return null;
+      for (const field of ["count", "lastRequest"] as const) row[field] += increment[field] ?? 0;
+      Object.assign(row, set);
+      return { ...row };
+    },
+    async deleteMany({ where }: { where: RateWhere[] }) {
+      let deleted = 0;
+      for (const [key, row] of rows) {
+        if (!matches(row, where)) continue;
+        rows.delete(key);
+        deleted++;
+      }
+      return deleted;
+    },
+  };
+  const context = {
+    baseURL: `${STAGING_ORIGIN}/v1/auth`,
+    rateLimit: { enabled: true, storage: "database", window: 10, max: 100, customRules },
+    // No spoofed source header: all Requests share Better Auth's unknown-IP bucket.
+    options: {},
+    adapter,
+    runInBackgroundOrAwait: async (task: Promise<unknown>) => await task,
+    logger: { warn() {}, error() {} },
+  };
+  const requests: DatabaseLimiter["requests"] = [];
+  const originalNow = Date.now;
+  const originalFetch = globalThis.fetch;
+  Date.now = nowMs;
+  const forbidNetwork = () => {
+    throw new Error("global network fetch forbidden in production limiter fixture");
+  };
+  globalThis.fetch = Object.assign(forbidNetwork, { preconnect: forbidNetwork });
+  try {
+    return await exercise({
+      requests,
+      check: async (url, init) => {
+        const request = new Request(url, init);
+        const path = new URL(request.url).pathname;
+        // Session-set transactions are product-owned, not Better Auth HTTP paths.
+        // Their existing fixtures remain intact; signup/verification still use
+        // the actual consumer in every mode, plus legacy email signin.
+        if (
+          !["/sign-up/email", "/verify-email", "/sign-in/email"].some(
+            (route) => path === `/v1/auth${route}`,
+          )
+        )
+          return;
+        const atMs = nowMs();
+        const response = await onRequestRateLimit(request, context);
+        requests.push({ path, atMs, status: response?.status ?? 200 });
+        expect(databaseReads).toBeGreaterThan(0);
+        return response;
+      },
+    });
+  } finally {
+    Date.now = originalNow;
+    globalThis.fetch = originalFetch;
+  }
+}
+describe("offline serial fresh enrollment and first-turn barrier", () => {
+  test.each([50, 100] as const)(
+    "actual database limiter rejects old 3100 ms-only enrollment 21 in a %s-user wave",
+    async (count) => {
+      let virtualNow = now;
+      await withProductionDatabaseLimiter(
+        () => virtualNow,
+        async (limiter) => {
+          expect(() => globalThis.fetch("https://example.invalid")).toThrow(
+            "global network fetch forbidden",
+          );
+          expect(() => globalThis.fetch.preconnect("https://example.invalid")).toThrow(
+            "global network fetch forbidden",
+          );
+          const paths = ["/sign-up/email", "/verify-email", "/sign-in/email"];
+          for (let index = 0; index < count; index++) {
+            for (const path of paths) {
+              await limiter.check(`${STAGING_ORIGIN}/v1/auth${path}`);
+              virtualNow += 100;
+            }
+            virtualNow += 3_100;
+          }
+          for (const path of paths) {
+            const requests = limiter.requests.filter((request) => request.path.endsWith(path));
+            expect(requests).toHaveLength(count);
+            expect(requests.findIndex((request) => request.status === 429)).toBe(20);
+            expect(requests.filter((request) => request.status === 200)).toHaveLength(
+              count === 50 ? 33 : 60,
+            );
+            expect(requests.filter((request) => request.status === 429)).toHaveLength(
+              count === 50 ? 17 : 40,
+            );
+            expect(requests[20]!.atMs - requests[19]!.atMs).toBe(3_400);
+          }
+        },
+      );
+    },
+  );
+  test("actual database limiter refuses exactly 60000 ms idle but admits 61000 ms", async () => {
+    let virtualNow = now;
+    await withProductionDatabaseLimiter(
+      () => virtualNow,
+      async (limiter) => {
+        const url = `${STAGING_ORIGIN}/v1/auth/sign-up/email`;
+        for (let index = 0; index < 20; index++) {
+          if (index > 0) virtualNow += 3_100;
+          expect(await limiter.check(url)).toBeUndefined();
+        }
+        const lastAdmission = virtualNow;
+        virtualNow = lastAdmission + 60_000;
+        expect((await limiter.check(url))?.status).toBe(429);
+        virtualNow = lastAdmission + 61_000;
+        expect(await limiter.check(url)).toBeUndefined();
+        expect(limiter.requests.map((request) => request.status)).toEqual([
+          ...Array.from({ length: 20 }, () => 200),
+          429,
+          200,
+        ]);
+      },
+    );
+  });
+  test("fresh pacing defaults to 3100 ms and never permits a shorter live gap", async () => {
+    const input = await setup("fresh");
+    const { freshEnrollmentGapMs: _gap, ...withoutGap } = input.intent;
+    expect(Intent.parse(withoutGap).freshEnrollmentGapMs).toBe(FRESH_ENROLLMENT_MIN_GAP_MS);
+    for (const gap of [0, 3_000, 3_099]) {
+      expect(Intent.safeParse({ ...input.intent, freshEnrollmentGapMs: gap }).success).toBe(false);
+    }
+  });
+  test("fresh batches and idle-reset cooldowns are mandatory and intent-bound", async () => {
+    const input = await setup("fresh");
+    const {
+      freshEnrollmentBatchSize: _batch,
+      freshEnrollmentResetCooldownMs: _cooldown,
+      ...withoutReset
+    } = input.intent;
+    expect(Intent.parse(withoutReset)).toMatchObject({
+      freshEnrollmentBatchSize: FRESH_ENROLLMENT_MAX_BATCH_SIZE,
+      freshEnrollmentResetCooldownMs: FRESH_ENROLLMENT_MIN_RESET_COOLDOWN_MS,
+    });
+    for (const batch of [0, 21, 100])
+      expect(Intent.safeParse({ ...input.intent, freshEnrollmentBatchSize: batch }).success).toBe(
+        false,
+      );
+    for (const cooldown of [0, 3_100, 60_000, 60_999])
+      expect(
+        Intent.safeParse({ ...input.intent, freshEnrollmentResetCooldownMs: cooldown }).success,
+      ).toBe(false);
+    for (const change of [
+      { freshEnrollmentBatchSize: 10 },
+      { freshEnrollmentResetCooldownMs: 62_000 },
+    ])
+      expect(intentDigest(Intent.parse({ ...input.intent, ...change }))).not.toBe(
+        input.authorization.intentDigest,
+      );
+  });
+  test.each([50, 100] as const)(
+    "fresh %s dry plan invokes no wait/STOP/mailbox/checkpoint/fetch",
+    async (count) => {
+      const input = await setup("fresh", count);
+      let calls = 0;
+      const result = await runBurst({
+        ...input,
+        execute: false,
+        cohortText: "not json",
+        authorization: {},
+        env: {},
+        wait: async () => {
+          calls++;
+        },
+        stopRequested: async () => {
+          calls++;
+          return true;
+        },
+        verificationReader: async () => {
+          calls++;
+          return "";
+        },
+        checkpoint: async () => {
+          calls++;
+        },
+        fetchImpl: async () => {
+          calls++;
+          throw new Error("network forbidden");
+        },
+      });
+      expect(calls).toBe(0);
+      expect(result).toMatchObject({
+        dryRun: true,
+        remoteRequests: 0,
+        enrollment: {
+          concurrency: 1,
+          gapAfterSettlementMs: 3_100,
+          batchSize: 20,
+          resetCooldownMs: 61_000,
+          minimumPacingSpanMs: count === 50 ? 267_700 : 538_500,
+          sessionsCreated: 0,
+        },
+      });
+    },
+  );
+  test.each([
+    { count: 50, authMode: "legacy" },
+    { count: 100, authMode: "legacy" },
+    { count: 50, authMode: "dual" },
+    { count: 100, authMode: "dual" },
+    { count: 50, authMode: "broker" },
+    { count: 100, authMode: "broker" },
+  ] as const)(
+    "$count $authMode fresh pipelines settle before spaced next enrollment and concurrent first turns",
+    async ({ count, authMode }) => {
+      const input = await setup("fresh", count);
+      input.intent.signupTimeoutMs = 10_000;
+      input.authorization.intentDigest = intentDigest(input.intent);
+      const fixture = fixtureFetch("fresh", "success", authMode, sse, input.clock.now);
+      let barrierSettled = false;
+      let activeCreates = 0;
+      let maxActiveCreates = 0;
+      const result = await withProductionDatabaseLimiter(input.clock.now, async (limiter) => {
+        const burstResult = (await runBurst({
+          ...input,
+          verificationReader: async (identity, signal) => {
+            expect(signal.aborted).toBe(false);
+            // Variable mailbox latency is inside the COMPLETE pipeline, not a signup-only gap.
+            input.advance((Number(identity.label.split("-")[1]) % 3) * 4_000);
+            return input.verificationReader(identity);
+          },
+          checkpoint: async (snapshot) => {
+            const state = snapshot as BurstResult;
+            if (state.phase !== "auth_and_defaults_prepared") return;
+            expect(state.samples.every((value) => value.enrollmentSettledAt !== null)).toBe(true);
+            expect(
+              fixture.calls.some(
+                (call) => call.method === "POST" && call.path.endsWith("/sessions"),
+              ),
+            ).toBe(false);
+            barrierSettled = true;
+          },
+          fetchImpl: async (url, init) => {
+            const rejection = await limiter.check(url, init);
+            if (rejection) return rejection;
+            const create =
+              init?.method === "POST" && new URL(String(url)).pathname.endsWith("/sessions");
+            if (create) {
+              expect(barrierSettled).toBe(true);
+              activeCreates++;
+              maxActiveCreates = Math.max(maxActiveCreates, activeCreates);
+              // Hold each injected request for one microtask to observe real concurrent release.
+              await Promise.resolve();
+            }
+            try {
+              return await fixture.fetchImpl(url, init);
+            } finally {
+              if (create) activeCreates--;
+            }
+          },
+        })) as BurstResult;
+        expect(limiter.requests).toHaveLength(count * (authMode === "legacy" ? 3 : 2));
+        expect(limiter.requests.every((request) => request.status === 200)).toBe(true);
+        return burstResult;
+      });
+      expect(result.phase).toBe("complete");
+      expect(result.summary).toMatchObject({
+        denominator: count,
+        successes: count,
+        failures: 0,
+        promptSentCount: count,
+      });
+      expect(maxActiveCreates).toBe(count);
+      expect(result.summary.promptLaunchSpreadMs).not.toBeNull();
+      expect(result.summary.promptLaunchSpreadMs!).toBeLessThan(1_000);
+      expect(result.enrollment).toMatchObject({
+        concurrency: 1,
+        gapAfterSettlementMs: 3_100,
+        batchSize: 20,
+        resetCooldownMs: 61_000,
+      });
+      expect(result.enrollment.durationMs!).toBeGreaterThanOrEqual(
+        count === 50 ? 267_700 : 538_500,
+      );
+      expect(result.enrollment.pacingWaitMs).toBe(
+        result.enrollment.ordinaryWaitMs + result.enrollment.resetWaitMs,
+      );
+      expect(result.samples.filter((value) => value.enrollmentResetWaitMs! > 0)).toHaveLength(
+        count === 50 ? 2 : 4,
+      );
+      expect(Date.parse(result.enrollment.dispatchReleasedAt!)).toBeGreaterThanOrEqual(
+        Date.parse(result.enrollment.settledAt!),
+      );
+      for (let index = 0; index < count; index++) {
+        const value = result.samples[index]!;
+        expect(value.signupMs!).toBeLessThan(input.intent.signupTimeoutMs);
+        expect(value.enrollmentPacingWaitMs).not.toBeNull();
+        expect(value.commandCount).toBe(1);
+        if (index === 0) continue;
+        expect(
+          Date.parse(value.enrollmentStartedAt!) -
+            Date.parse(result.samples[index - 1]!.enrollmentSettledAt!),
+        ).toBeGreaterThanOrEqual(index % 20 === 0 ? 61_000 : 3_100);
+        expect(value.enrollmentResetWaitMs).toBe(
+          index % 20 === 0 ? value.enrollmentPacingWaitMs : 0,
+        );
+      }
+      for (const path of [
+        "/v1/auth/sign-up/email",
+        "/v1/auth/verify-email",
+        authMode === "legacy"
+          ? "/v1/auth/sign-in/email"
+          : "/v1/auth/session-set/transactions/email-password",
+      ]) {
+        const calls = fixture.calls.filter((call) => call.path === path);
+        expect(calls).toHaveLength(count);
+        for (let index = 1; index < calls.length; index++)
+          expect(calls[index]!.atMs - calls[index - 1]!.atMs).toBeGreaterThanOrEqual(3_100);
+      }
+      const creates = fixture.calls.filter(
+        (call) => call.method === "POST" && call.path.endsWith("/sessions"),
+      );
+      expect(creates).toHaveLength(count);
+      for (const call of creates) {
+        expect(call.body).not.toHaveProperty("model");
+        expect(call.body).not.toHaveProperty("reasoningEffort");
+        expect(call.body).toMatchObject({ sandbox: "new", firstPartyMcpTools: ["exec_command"] });
+      }
+      expect(fixture.calls.some((call) => /\/messages|\/turns|\/commands/.test(call.path))).toBe(
+        false,
+      );
+      expect(
+        fixture.calls.every(
+          (call) =>
+            !["authorization", "x-forwarded-for", "x-real-ip", "forwarded"].some((name) =>
+              call.headers.has(name),
+            ),
+        ),
+      ).toBe(true);
+      expect(JSON.stringify(result)).not.toContain(env.BURST_PASSWORD);
+      expect(JSON.stringify(result)).not.toContain("better-auth.session_token");
+    },
+  );
+  test.each([50, 100] as const)(
+    "fresh %s retains failed enrollment and dispatches only ready first turns",
+    async (count) => {
+      const input = await setup("fresh", count);
+      const fixture = fixtureFetch("fresh", "success", "legacy", sse, input.clock.now);
+      let rejected = false;
+      let settled = false;
+      const result = await withProductionDatabaseLimiter(input.clock.now, async (limiter) => {
+        const burstResult = (await runBurst({
+          ...input,
+          checkpoint: async (snapshot) => {
+            if ((snapshot as BurstResult).phase === "auth_and_defaults_prepared") settled = true;
+          },
+          fetchImpl: async (url, init) => {
+            const rejection = await limiter.check(url, init);
+            if (rejection) return rejection;
+            const path = new URL(String(url)).pathname;
+            if (init?.method === "POST" && path.endsWith("/sessions")) expect(settled).toBe(true);
+            const response = await fixture.fetchImpl(url, init);
+            if (path === "/v1/auth/sign-up/email" && !rejected) {
+              rejected = true;
+              return Response.json({}, { status: 409 });
+            }
+            return response;
+          },
+        })) as BurstResult;
+        expect(limiter.requests.every((request) => request.status === 200)).toBe(true);
+        return burstResult;
+      });
+      expect(result.summary).toMatchObject({
+        denominator: count,
+        failures: 1,
+        successes: count - 1,
+        promptSentCount: count - 1,
+      });
+      expect(result.samples[0]).toMatchObject({
+        status: "failed",
+        errorCode: "http_409",
+        signupMs: null,
+        promptSentAt: null,
+        sessionId: null,
+      });
+      expect(fixture.calls.filter((call) => call.path === "/v1/auth/sign-up/email")).toHaveLength(
+        count,
+      );
+      expect(
+        Date.parse(result.samples[1]!.enrollmentStartedAt!) -
+          Date.parse(result.samples[0]!.enrollmentSettledAt!),
+      ).toBeGreaterThanOrEqual(3_100);
+      // The first failed signup still consumed a limiter admission and batch slot.
+      expect(
+        Date.parse(result.samples[20]!.enrollmentStartedAt!) -
+          Date.parse(result.samples[19]!.enrollmentSettledAt!),
+      ).toBeGreaterThanOrEqual(61_000);
+    },
+  );
+  test.each([50, 100] as const)(
+    "fresh %s partial mailbox failure at slot 20 consumes the slot before real limiter reset",
+    async (count) => {
+      const input = await setup("fresh", count);
+      const fixture = fixtureFetch("fresh", "success", "legacy", sse, input.clock.now);
+      const result = await withProductionDatabaseLimiter(input.clock.now, async (limiter) => {
+        const burstResult = (await runBurst({
+          ...input,
+          verificationReader: async (identity) => {
+            if (identity.label === "fresh-19") throw new Error("offline mailbox collection failed");
+            return input.verificationReader(identity);
+          },
+          fetchImpl: async (url, init) =>
+            (await limiter.check(url, init)) ?? fixture.fetchImpl(url, init),
+        })) as BurstResult;
+        expect(
+          limiter.requests.filter((request) => request.path.endsWith("/sign-up/email")),
+        ).toHaveLength(count);
+        expect(limiter.requests.every((request) => request.status === 200)).toBe(true);
+        return burstResult;
+      });
+      expect(result.summary).toMatchObject({
+        denominator: count,
+        failures: 1,
+        successes: count - 1,
+        promptSentCount: count - 1,
+      });
+      expect(result.samples[19]).toMatchObject({
+        status: "failed",
+        errorCode: "transport_or_local_failure",
+        signupMs: null,
+        sessionId: null,
+      });
+      expect(
+        Date.parse(result.samples[20]!.enrollmentStartedAt!) -
+          Date.parse(result.samples[19]!.enrollmentSettledAt!),
+      ).toBeGreaterThanOrEqual(61_000);
+      expect(result.samples[20]!.enrollmentResetWaitMs).toBeGreaterThan(60_000);
+    },
+  );
+  test("a smaller batch and longer cooldown remain conservative and intent-bound", async () => {
+    const input = await setup("fresh");
+    input.intent.freshEnrollmentBatchSize = 10;
+    input.intent.freshEnrollmentResetCooldownMs = 62_000;
+    input.authorization.intentDigest = intentDigest(input.intent);
+    const fixture = fixtureFetch("fresh", "success", "legacy", sse, input.clock.now);
+    const result = await withProductionDatabaseLimiter(input.clock.now, async (limiter) => {
+      const burstResult = (await runBurst({
+        ...input,
+        fetchImpl: async (url, init) =>
+          (await limiter.check(url, init)) ?? fixture.fetchImpl(url, init),
+      })) as BurstResult;
+      expect(limiter.requests.every((request) => request.status === 200)).toBe(true);
+      return burstResult;
+    });
+    expect(result.summary.successes).toBe(50);
+    expect(result.samples.filter((value) => value.enrollmentResetWaitMs! > 0)).toHaveLength(4);
+    for (const index of [10, 20, 30, 40])
+      expect(
+        Date.parse(result.samples[index]!.enrollmentStartedAt!) -
+          Date.parse(result.samples[index - 1]!.enrollmentSettledAt!),
+      ).toBeGreaterThanOrEqual(62_000);
+    const plan = await runBurst({ ...input, execute: false });
+    expect(plan).toMatchObject({
+      enrollment: { batchSize: 10, resetCooldownMs: 62_000, minimumPacingSpanMs: 387_500 },
+    });
+  });
+  test.each(
+    ([50, 100] as const).flatMap((count) =>
+      ["operator_cutoff", "operator_cutoff_read_failed", "authorization_expired"].map((reason) => ({
+        count,
+        reason,
+      })),
+    ),
+  )(
+    "$count fresh $reason during 61-second cooldown blocks ALL first turns including 20 ready users",
+    async ({ count, reason }) => {
+      const input = await setup("fresh", count);
+      if (reason === "authorization_expired")
+        input.authorization.expiresAt = new Date(now + 90_000).toISOString();
+      const fixture = fixtureFetch("fresh", "success", "legacy", sse, input.clock.now);
+      let cooldownWaitMs = 0;
+      let stopped = false;
+      const result = await withProductionDatabaseLimiter(input.clock.now, async (limiter) => {
+        const burstResult = (await runBurst({
+          ...input,
+          wait: async (milliseconds) => {
+            await input.wait(milliseconds);
+            if (
+              fixture.calls.filter((call) => call.path === "/v1/auth/sign-up/email").length !== 20
+            )
+              return;
+            cooldownWaitMs += milliseconds;
+            if (cooldownWaitMs >= 30_000 && reason !== "authorization_expired") stopped = true;
+          },
+          stopRequested: async () => {
+            if (stopped && reason === "operator_cutoff_read_failed")
+              throw new Error("offline STOP read failed");
+            return stopped;
+          },
+          fetchImpl: async (url, init) =>
+            (await limiter.check(url, init)) ?? fixture.fetchImpl(url, init),
+        })) as BurstResult;
+        expect(limiter.requests).toHaveLength(60);
+        expect(limiter.requests.every((request) => request.status === 200)).toBe(true);
+        return burstResult;
+      });
+      expect(result.phase).toBe("dispatch_blocked");
+      expect(result.summary).toMatchObject({
+        denominator: count,
+        failures: count,
+        successes: 0,
+        promptSentCount: 0,
+      });
+      expect(
+        result.samples.every((value) => value.status === "failed" && value.errorCode === reason),
+      ).toBe(true);
+      expect(
+        result.samples
+          .slice(0, 20)
+          .every((value) => value.enrollmentSettledAt !== null && value.signupMs !== null),
+      ).toBe(true);
+      expect(result.samples.slice(20).every((value) => value.enrollmentStartedAt === null)).toBe(
+        true,
+      );
+      expect(cooldownWaitMs).toBeGreaterThanOrEqual(29_000);
+      expect(cooldownWaitMs).toBeLessThan(61_000);
+      expect(result.enrollment.resetWaitMs).toBeGreaterThan(29_000);
+      expect(result.enrollment.dispatchReleasedAt).toBeNull();
+      expect(
+        fixture.calls.some((call) => /\/sessions|\/messages|\/turns|\/commands/.test(call.path)),
+      ).toBe(false);
+    },
+  );
+  test.each([50, 100] as const)(
+    "fresh %s signup timeout begins after pacing and an individual timeout stays in denominator",
+    async (count) => {
+      const input = await setup("fresh", count);
+      input.intent.signupTimeoutMs = 10_000;
+      input.authorization.intentDigest = intentDigest(input.intent);
+      const fixture = fixtureFetch("fresh", "success", "legacy", sse, input.clock.now);
+      const result = (await runBurst({
+        ...input,
+        verificationReader: async (identity) => {
+          if (identity.label === "fresh-0") input.advance(10_001);
+          return input.verificationReader(identity);
+        },
+        fetchImpl: fixture.fetchImpl,
+      })) as BurstResult;
+      expect(result.samples[0]).toMatchObject({
+        status: "timeout",
+        errorCode: "signup_timeout",
+        signupMs: null,
+        sessionId: null,
+      });
+      expect(result.summary).toMatchObject({
+        denominator: count,
+        failures: 1,
+        successes: count - 1,
+        promptSentCount: count - 1,
+      });
+      expect(
+        result.samples
+          .slice(1)
+          .every((value) => value.signupMs !== null && value.signupMs < 10_000),
+      ).toBe(true);
+      expect(result.enrollment.durationMs!).toBeGreaterThan(10_000 + (count - 1) * 3_100);
+    },
+  );
+  test.each(
+    ([50, 100] as const).flatMap((count) =>
+      ["pacing", "mailbox", "barrier", "stop_read_failed"].map((where) => ({ count, where })),
+    ),
+  )(
+    "STOP during $count fresh $where blocks all session/model dispatch",
+    async ({ count, where }) => {
+      const input = await setup("fresh", count);
+      const fixture = fixtureFetch("fresh", "success", "legacy", sse, input.clock.now);
+      let stop = false;
+      const result = (await runBurst({
+        ...input,
+        wait: async (milliseconds) => {
+          await input.wait(milliseconds);
+          if (where === "pacing" || where === "stop_read_failed") stop = true;
+        },
+        stopRequested: async () => {
+          if (stop && where === "stop_read_failed") throw new Error("offline STOP read failure");
+          return stop;
+        },
+        verificationReader: async (identity) => {
+          if (where === "mailbox") stop = true;
+          return input.verificationReader(identity);
+        },
+        checkpoint: async (snapshot) => {
+          if (
+            where === "barrier" &&
+            (snapshot as BurstResult).phase === "auth_and_defaults_prepared"
+          )
+            stop = true;
+        },
+        fetchImpl: fixture.fetchImpl,
+      })) as BurstResult;
+      expect(result.phase).toBe("dispatch_blocked");
+      expect(result.summary).toMatchObject({
+        denominator: count,
+        successes: 0,
+        failures: count,
+        promptSentCount: 0,
+      });
+      expect(
+        result.samples.every(
+          (value) =>
+            value.errorCode ===
+            (where === "stop_read_failed" ? "operator_cutoff_read_failed" : "operator_cutoff"),
+        ),
+      ).toBe(true);
+      expect(result.enrollment.dispatchReleasedAt).toBeNull();
+      expect(
+        fixture.calls.some((call) => call.method === "POST" && call.path.endsWith("/sessions")),
+      ).toBe(false);
+      if (where === "mailbox")
+        expect(
+          fixture.calls.some(
+            (call) => call.path === "/v1/auth/verify-email" || call.path.endsWith("/model-catalog"),
+          ),
+        ).toBe(false);
+    },
+  );
+  test.each([50, 100] as const)(
+    "fresh %s expiry during pacing blocks every first turn",
+    async (count) => {
+      const input = await setup("fresh", count);
+      input.authorization.expiresAt = new Date(now + 3_100).toISOString();
+      const fixture = fixtureFetch("fresh", "success", "legacy", sse, input.clock.now);
+      const result = (await runBurst({ ...input, fetchImpl: fixture.fetchImpl })) as BurstResult;
+      expect(result.phase).toBe("dispatch_blocked");
+      expect(result.summary).toMatchObject({
+        denominator: count,
+        failures: count,
+        successes: 0,
+        promptSentCount: 0,
+      });
+      expect(
+        result.samples.every(
+          (value) => value.status === "failed" && value.errorCode === "authorization_expired",
+        ),
+      ).toBe(true);
+      expect(fixture.calls.filter((call) => call.path === "/v1/auth/sign-up/email")).toHaveLength(
+        1,
+      );
+      expect(
+        fixture.calls.some((call) => call.method === "POST" && call.path.endsWith("/sessions")),
+      ).toBe(false);
+    },
+  );
+  test.each(
+    ([50, 100] as const).flatMap((count) =>
+      ["expiry_at_barrier", "token_drift", "slow_cohort_exceeds_30_minutes"].map((failure) => ({
+        count,
+        failure,
+      })),
+    ),
+  )(
+    "fresh $count $failure revalidates exact gate before releasing any prompt",
+    async ({ count, failure }) => {
+      const input = await setup("fresh", count);
+      input.authorization.expiresAt = new Date(now + 30 * 60_000).toISOString();
+      const fixture = fixtureFetch("fresh", "success", "legacy", sse, input.clock.now);
+      const result = (await runBurst({
+        ...input,
+        verificationReader: async (identity) => {
+          if (failure === "slow_cohort_exceeds_30_minutes") input.advance(40_000);
+          return input.verificationReader(identity);
+        },
+        checkpoint: async (snapshot) => {
+          if ((snapshot as BurstResult).phase !== "auth_and_defaults_prepared") return;
+          if (failure === "expiry_at_barrier")
+            input.advance(Date.parse(input.authorization.expiresAt) - input.clock.now());
+          if (failure === "token_drift")
+            input.env.OPENGENI_BURST_GATE_TOKEN =
+              "changed-offline-token-with-at-least-32-characters";
+        },
+        fetchImpl: fixture.fetchImpl,
+      })) as BurstResult;
+      expect(result.phase).toBe("dispatch_blocked");
+      expect(result.summary).toMatchObject({
+        denominator: count,
+        failures: count,
+        successes: 0,
+        promptSentCount: 0,
+      });
+      expect(
+        result.samples.every(
+          (value) =>
+            value.errorCode ===
+            (failure === "token_drift"
+              ? "authorization_revalidation_failed"
+              : "authorization_expired"),
+        ),
+      ).toBe(true);
+      expect(result.enrollment.dispatchReleasedAt).toBeNull();
+      expect(
+        fixture.calls.some((call) => call.method === "POST" && call.path.endsWith("/sessions")),
+      ).toBe(false);
+      if (failure === "slow_cohort_exceeds_30_minutes")
+        expect(result.enrollment.durationMs!).toBeGreaterThanOrEqual(30 * 60_000);
+    },
+  );
+  test.each([
+    { count: 50, reason: "operator_cutoff" },
+    { count: 100, reason: "authorization_expired" },
+  ] as const)(
+    "$count unresolved offline mailbox wait is interrupted by $reason without dispatch",
+    async ({ count, reason }) => {
+      const input = await setup("fresh", count);
+      const fixture = fixtureFetch("fresh", "success", "legacy", sse, input.clock.now);
+      let stop = false;
+      const result = (await runBurst({
+        ...input,
+        stopRequested: async () => stop,
+        verificationReader: async (_identity, signal) => {
+          if (reason === "operator_cutoff") stop = true;
+          else input.advance(Date.parse(input.authorization.expiresAt) - input.clock.now());
+          return new Promise<string>((_resolve, reject) => {
+            signal.throwIfAborted();
+            signal.addEventListener("abort", () => reject(signal.reason), { once: true });
+          });
+        },
+        fetchImpl: fixture.fetchImpl,
+      })) as BurstResult;
+      expect(result.phase).toBe("dispatch_blocked");
+      expect(result.summary).toMatchObject({
+        denominator: count,
+        failures: count,
+        successes: 0,
+        promptSentCount: 0,
+      });
+      expect(
+        result.samples.every((value) => value.status === "failed" && value.errorCode === reason),
+      ).toBe(true);
+      expect(fixture.calls.filter((call) => call.path === "/v1/auth/sign-up/email")).toHaveLength(
+        1,
+      );
+      expect(
+        fixture.calls.some(
+          (call) => call.path.endsWith("/sessions") || call.path.endsWith("/model-catalog"),
+        ),
+      ).toBe(false);
+    },
+    5_000,
+  );
+});
 describe("offline launch burst safety", () => {
   test("default dry-run invokes no network, credentials, mailbox or checkpoint", async () => {
     const input = await setup();
@@ -372,6 +1236,13 @@ describe("offline launch burst safety", () => {
       verificationReader: async () => {
         calls++;
         return "";
+      },
+      wait: async () => {
+        calls++;
+      },
+      stopRequested: async () => {
+        calls++;
+        return true;
       },
     });
     expect(calls).toBe(0);
@@ -432,8 +1303,9 @@ describe("offline launch burst safety", () => {
   test.each(["plain", "sandbox", "fresh"] as const)(
     "%s uses exact separate source policy",
     async (mode) => {
-      const fixture = fixtureFetch(mode);
-      const result = (await runBurst({ ...(await setup(mode)), fetchImpl: fixture.fetchImpl })) as {
+      const input = await setup(mode);
+      const fixture = fixtureFetch(mode, "success", "legacy", sse, input.clock.now);
+      const result = (await runBurst({ ...input, fetchImpl: fixture.fetchImpl })) as {
         samples: Sample[];
         summary: { successes: number };
       };
@@ -614,9 +1486,10 @@ describe("offline launch burst safety", () => {
   test.each(["dual", "broker"])(
     "%s fresh auth uses isolated public transaction and selected actor",
     async (authMode) => {
-      const fixture = fixtureFetch("fresh", "success", authMode);
+      const input = await setup("fresh");
+      const fixture = fixtureFetch("fresh", "success", authMode, sse, input.clock.now);
       const result = (await runBurst({
-        ...(await setup("fresh")),
+        ...input,
         fetchImpl: fixture.fetchImpl,
       })) as { summary: { successes: number } };
       expect(result.summary.successes).toBe(50);
@@ -637,9 +1510,10 @@ describe("offline launch burst safety", () => {
     },
   );
   test("fresh default mismatch cannot be replaced by an explicit low-effort model", async () => {
-    const fixture = fixtureFetch("fresh", "wrong_default");
+    const input = await setup("fresh");
+    const fixture = fixtureFetch("fresh", "wrong_default", "legacy", sse, input.clock.now);
     const result = (await runBurst({
-      ...(await setup("fresh")),
+      ...input,
       fetchImpl: fixture.fetchImpl,
     })) as { summary: { denominator: number; failures: number } };
     expect(result.summary).toMatchObject({ denominator: 50, failures: 50 });
@@ -648,9 +1522,10 @@ describe("offline launch burst safety", () => {
     ).toBe(false);
   });
   test("previously registered identities are not a fresh signup wave", async () => {
-    const fixture = fixtureFetch("fresh", "old_identity");
+    const input = await setup("fresh");
+    const fixture = fixtureFetch("fresh", "old_identity", "legacy", sse, input.clock.now);
     const result = (await runBurst({
-      ...(await setup("fresh")),
+      ...input,
       fetchImpl: fixture.fetchImpl,
     })) as { summary: { denominator: number; failures: number } };
     expect(result.summary).toMatchObject({ denominator: 50, failures: 50 });

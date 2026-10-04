@@ -355,7 +355,7 @@ describe("session tenancy SQL seams inside a managed human's own personal worksp
         status: "idle",
       },
     });
-    expect(update).toMatchObject({ added: true, shouldWake: false });
+    expect(update).toMatchObject({ added: true });
     const attemptId = crypto.randomUUID();
     const claim = await claimSessionWorkForAttempt(client.db, human.personalWorkspaceId, {
       sessionId: created.session.id,

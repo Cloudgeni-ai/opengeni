@@ -46,7 +46,9 @@ concurrency:
   # merged. Main pushes share one queue without cancelling: the running build
   # finishes (its images stay usable), and only the newest waiting push runs
   # next, so rapid merges cannot pile up dozens of queued runs.
-  group: ${{ github.event_name == 'workflow_dispatch' && format('ci-automation-{0}', inputs.automation_pr_number) || github.event_name == 'pull_request' && format('ci-pr-{0}', github.event.pull_request.number) || github.ref == 'refs/heads/main' && 'ci-main-push' || format('ci-{0}', github.run_id) }}
+  # Version-PR merge commits keep their own run: stable releases require a
+  # successful CI run for that exact SHA.
+  group: ${{ github.event_name == 'workflow_dispatch' && format('ci-automation-{0}', inputs.automation_pr_number) || github.event_name == 'pull_request' && format('ci-pr-{0}', github.event.pull_request.number) || github.ref == 'refs/heads/main' && contains(github.event.head_commit.message, 'version packages') == false && 'ci-main-push' || format('ci-{0}', github.run_id) }}
   cancel-in-progress: ${{ github.event_name == 'workflow_dispatch' || github.event_name == 'pull_request' }}
 
 permissions:
@@ -122,6 +124,7 @@ jobs:
           (
             cd "$expected"
             bun "$GITHUB_WORKSPACE/node_modules/@changesets/cli/bin.js" version
+            bun scripts/release/lockstep-version.ts
             bun scripts/build-artifact-kernel-wasm-packages.ts --refresh-package-identities
             git add -A
             git diff --cached --check
@@ -351,6 +354,7 @@ jobs:
             (
               cd "$expected"
               bun "$GITHUB_WORKSPACE/node_modules/@changesets/cli/bin.js" version
+              bun scripts/release/lockstep-version.ts
               bun scripts/build-artifact-kernel-wasm-packages.ts --refresh-package-identities
               git add -A
               git diff --cached --check

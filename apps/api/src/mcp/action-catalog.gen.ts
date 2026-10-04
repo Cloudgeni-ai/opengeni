@@ -1759,6 +1759,20 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     ]
   },
   {
+    "id": "GET /v1/organizations/:accountId/insights/calls",
+    "method": "GET",
+    "path": "/v1/organizations/:accountId/insights/calls",
+    "request": [],
+    "response": []
+  },
+  {
+    "id": "GET /v1/organizations/:accountId/insights/usage",
+    "method": "GET",
+    "path": "/v1/organizations/:accountId/insights/usage",
+    "request": [],
+    "response": []
+  },
+  {
     "id": "GET /v1/organizations/:organizationId/codex/accounts",
     "method": "GET",
     "path": "/v1/organizations/:organizationId/codex/accounts",
@@ -1901,6 +1915,20 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     "id": "GET /v1/workspaces/:workspaceId/identity-links/:linkId/:operation",
     "method": "GET",
     "path": "/v1/workspaces/:workspaceId/identity-links/:linkId/:operation",
+    "request": [],
+    "response": []
+  },
+  {
+    "id": "GET /v1/workspaces/:workspaceId/insights/calls",
+    "method": "GET",
+    "path": "/v1/workspaces/:workspaceId/insights/calls",
+    "request": [],
+    "response": []
+  },
+  {
+    "id": "GET /v1/workspaces/:workspaceId/insights/usage",
+    "method": "GET",
+    "path": "/v1/workspaces/:workspaceId/insights/usage",
     "request": [],
     "response": []
   },

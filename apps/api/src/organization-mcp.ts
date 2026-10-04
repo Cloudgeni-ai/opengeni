@@ -173,25 +173,43 @@ function words(value: string): string[] {
 }
 
 export function searchActions(input: { query: string; limit: number; offset: number }) {
-  const wanted = words(input.query);
+  // Singular and plural match ("workspace" finds listWorkspaces).
+  const stem = (word: string) =>
+    word.endsWith("ies") ? `${word.slice(0, -3)}y` : word.replace(/(?<!s)s$/u, "");
+  const wanted = words(input.query).map(stem);
+  // "workspaces" asks for a list; prefer list actions on a plural query.
+  const plural = words(input.query).some((word) => /[^s]s$/u.test(word));
   const scored = ACTION_CATALOG.map((entry) => {
-    const haystack = [
-      ...words(entry.id),
-      ...words(entry.path.replace(/:\w+/g, "")),
-      entry.method.toLowerCase(),
-    ];
+    // A word in the action's name matters far more than one in its path:
+    // nearly every path contains "workspaces".
+    const name = words(entry.id).map(stem);
+    const path = [...words(entry.path.replace(/:\w+/g, "")), entry.method.toLowerCase()].map(stem);
     const score = wanted.reduce(
       (total, word) =>
         total +
-        (haystack.includes(word) ? 2 : haystack.some((token) => token.startsWith(word)) ? 1 : 0),
+        (name.includes(word)
+          ? 4
+          : name.some((token) => token.startsWith(word))
+            ? 3
+            : path.includes(word)
+              ? 1
+              : path.some((token) => token.startsWith(word))
+                ? 0.5
+                : 0),
       0,
     );
-    return { entry, score, size: words(entry.id).length };
+    return {
+      entry,
+      score: score + (plural && score > 0 && name[0] === "list" ? 0.5 : 0),
+      size: name.length,
+    };
   }).filter((candidate) => wanted.length === 0 || candidate.score > 0);
   scored.sort(
     (left, right) =>
       right.score - left.score ||
       left.size - right.size ||
+      // On a tie, reads come before writes.
+      Number(left.entry.method !== "GET") - Number(right.entry.method !== "GET") ||
       left.entry.id.localeCompare(right.entry.id),
   );
   return {

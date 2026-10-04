@@ -582,6 +582,27 @@ oversized-reply wall does not apply on this path; output is instead bounded by
 the runner's retention quotas, and exceeding them fails typed with exact
 counters, never silently truncated.
 
+Foreground output can be released within a long turn once the exact tool's
+call/result receipt and structural output event are durable. The receipt preserves
+recovery while a parallel SDK call batch is still incomplete. Only completed
+operations owned by that tool are eligible: parallel results and unscoped setup
+work remain retained until their own durability boundary. Each final
+acknowledgement still follows journal persistence; failed persistence or publish
+keeps the frontier available for retry. Turn completion finalizes remaining
+accepted output. Durably adopted background commands keep their separate output
+capture and terminal-settlement lifecycle.
+
+Background output has an independent durable custody receipt containing its
+verified exit sequence and attach generation. It is recorded only after all
+retained bytes have been captured in PostgreSQL. A terminal-only reconciliation
+queue retries the final acknowledgement against the original operation and
+connection, including after worker loss; a newer enrollment route is never
+substituted. Publish success leaves the obligation pending until an exact runner
+observation establishes that output is no longer retained. Completion input to
+the model remains independent. Legacy rows require full replay before a receipt
+can be recorded; output lost before capture is explicitly marked unavailable
+without manufacturing consumption or an acknowledgement.
+
 After process exit and pipe drain, the native runner releases both transport-sized
 read buffers before waiting for result collection. Retained output and the terminal
 record remain replayable until their normal acknowledgement/retention boundary;
@@ -705,6 +726,9 @@ generation. A machine returning after a longer offline period uses the same
 renewal path. Revocation, removal and a superseding re-enrollment deny renewal;
 renewal cannot change ownership, scope or screen-control consent. Updated
 credentials load into the existing process, preserving host operations.
+The signed `/v1/enrollments/renew` machine protocol is outside the browser API
+contract-revision fence, like device polling and token exchange. Its install-key,
+enrollment-generation and revocation checks still apply in production.
 
 Deploy the API renewal endpoint before upgrading agents. An older API returns
 404 and the agent retries with jitter while retaining its existing credentials.

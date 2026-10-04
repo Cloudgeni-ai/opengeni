@@ -383,15 +383,23 @@ export function scheduleFromFormState(form: ScheduledTaskFormState): ScheduledTa
 export function agentConfigFromFormState(
   form: ScheduledTaskFormState,
   existingTask?: ScheduledTask,
+  initial?: ScheduledTaskFormState,
 ): ScheduledTaskAgentConfig {
+  const savedTools = new Map(existingTask?.agentConfig.tools.map((tool) => [tool.id, tool]));
   const tools = (
-    form.mcpServerIds?.map((id) => ({ kind: "mcp" as const, id })) ??
+    form.mcpServerIds?.map((id) => savedTools.get(id) ?? { kind: "mcp" as const, id }) ??
     existingTask?.agentConfig.tools ??
     []
   ).filter((tool) => !(tool.kind === "mcp" && tool.id === "opengeni"));
   if (form.includeOpenGeniTool) {
-    tools.push({ kind: "mcp", id: "opengeni" });
+    tools.push(savedTools.get("opengeni") ?? { kind: "mcp", id: "opengeni" });
   }
+  const unchangedModel =
+    existingTask &&
+    initial &&
+    form.modelFollowsDefault === initial.modelFollowsDefault &&
+    (form.modelFollowsDefault ||
+      (form.model === initial.model && form.reasoningEffort === initial.reasoningEffort));
   // Keep what the form doesn't edit (identity, renderer, instructions) as saved.
   const { capabilities: _savedCapabilities, ...savedAgent } = existingTask?.agentConfig.agent ?? {};
   // Preserve fields this editor does not expose. Editable optional fields are
@@ -417,7 +425,7 @@ export function agentConfigFromFormState(
         };
   return {
     ...retainedConfig,
-    prompt: form.prompt.trim(),
+    prompt: existingTask ? form.prompt : form.prompt.trim(),
     ...(agent && Object.keys(agent).length > 0 ? { agent } : {}),
     ...(existingTask?.agentConfig.knowledgeSource
       ? { knowledgeSource: existingTask.agentConfig.knowledgeSource }
@@ -430,12 +438,21 @@ export function agentConfigFromFormState(
     ...(form.slackBotConnectionId && form.slackBotChannelId && form.runMode !== "existing_session"
       ? { slackBotChannelId: form.slackBotChannelId }
       : {}),
-    ...(form.modelFollowsDefault
-      ? {}
-      : {
-          ...(form.model ? { model: form.model } : {}),
-          reasoningEffort: form.reasoningEffort,
-        }),
+    ...(unchangedModel
+      ? {
+          ...(existingTask.agentConfig.model !== undefined
+            ? { model: existingTask.agentConfig.model }
+            : {}),
+          ...(existingTask.agentConfig.reasoningEffort !== undefined
+            ? { reasoningEffort: existingTask.agentConfig.reasoningEffort }
+            : {}),
+        }
+      : form.modelFollowsDefault
+        ? {}
+        : {
+            ...(form.model ? { model: form.model } : {}),
+            reasoningEffort: form.reasoningEffort,
+          }),
     ...(form.runMode !== "existing_session" &&
     form.executionTarget === "machine" &&
     form.machineSandboxId

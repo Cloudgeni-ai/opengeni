@@ -16,10 +16,73 @@ import {
   boundedRun,
   OWNER_PAGE_SIZE,
   LATENCY_TAIL_LIMIT,
+  DIAGNOSTIC_LIMIT,
+  validDiagnostics,
   validLatencyTail,
   type OwnerObservation,
   type Run,
 } from "./staging-health-sweep";
+
+function quietDiagnostics() {
+  return {
+    diagnosticTotal: 0,
+    diagnosticLimit: DIAGNOSTIC_LIMIT,
+    diagnosticReturned: 0,
+    diagnosticOverflow: 0,
+    missingDiagnosticTriggerEvidence: 0,
+    diagnostics: [],
+  };
+}
+
+function anomaly(kind: "empty" | "latency", index = 0) {
+  const common = {
+    turn_id: `flag${index}`,
+    session_id: "session",
+    workspace_id: "w",
+    trigger_event_id: `trigger${index}`,
+    source: "api",
+    trigger_kind: "user.message",
+    accepted_at: "2026-10-03T10:59:50Z",
+  };
+  return kind === "empty"
+    ? {
+        ...common,
+        finished_at: "2026-10-03T10:59:59Z",
+        completed_at: "2026-10-03T10:59:59Z",
+        completion_event_id: `completed${index}`,
+        completion_attempt_id: null,
+        classification: "suspect",
+        explicit_empty: true,
+        control_valid: true,
+        control_paused: false,
+        session_status: "idle",
+        input_wait_until: null,
+        has_tool_events: true,
+      }
+    : {
+        ...common,
+        active_attempt_id: null,
+        first_started_at: null,
+        latest_started_at: "2026-10-03T10:59:59Z",
+        observed_at: "2026-10-03T11:00:00Z",
+        missing_first_start: true,
+        future_first_start: false,
+        invalid_negative_sample: false,
+      };
+}
+
+function flaggedDiagnostics(kind: "empty" | "latency", count: number) {
+  const diagnostics = Array.from({ length: Math.min(count, DIAGNOSTIC_LIMIT) }, (_, index) =>
+    anomaly(kind, index),
+  );
+  return {
+    ...quietDiagnostics(),
+    diagnosticTotal: count,
+    diagnosticReturned: diagnostics.length,
+    diagnosticOverflow: Math.max(0, count - DIAGNOSTIC_LIMIT),
+    diagnostics,
+  };
+}
 
 function latencyFixture() {
   const tail = [2, 1, 1].map((latency_seconds, index) => ({
@@ -35,6 +98,7 @@ function latencyFixture() {
     latency_seconds,
   }));
   return {
+    ...quietDiagnostics(),
     sample: 3,
     p50Seconds: 1,
     p95Seconds: 2,
@@ -74,6 +138,7 @@ function healthyRun(
         queuedInventory: { total: 0, sessions: [] },
         recovering: { total: 0, controlUnknown: 0, missingStatusTimestamp: 0 },
         empty: {
+          ...quietDiagnostics(),
           sample: 3,
           suspectTurns: 0,
           repeatedSessions: 0,
@@ -246,6 +311,7 @@ describe("staging health sweep", () => {
           queuedInventory: { total: 0, sessions: [] },
           recovering: { total: 0, controlUnknown: 0, missingStatusTimestamp: 0 },
           empty: {
+            ...quietDiagnostics(),
             sample: 3,
             suspectTurns: 0,
             repeatedSessions: 0,
@@ -442,6 +508,7 @@ describe("staging health sweep", () => {
         return JSON.stringify({
           latency: {
             ...latencyFixture(),
+            ...flaggedDiagnostics("latency", 1),
             missingFirstStartEvents: 1,
           },
         });
@@ -451,6 +518,126 @@ describe("staging health sweep", () => {
     expect(latency.status).toBe("gap");
     expect(latency.facts?.missingFirstStartEvents).toBe(1);
     expect(latency.definition).toContain("FIRST");
+  });
+  test("diagnostics retain exact IDs and overlapping cross-check flags without summing unique turns", async () => {
+    const empty = {
+      ...quietDiagnostics(),
+      ...flaggedDiagnostics("empty", 1),
+      sample: 3,
+      suspectTurns: 1,
+      repeatedSessions: 0,
+      controlUnknown: 0,
+      missingCompletionEvidence: 0,
+    };
+    const latency = {
+      ...latencyFixture(),
+      ...flaggedDiagnostics("latency", 1),
+      missingFirstStartEvents: 1,
+    };
+    expect(validDiagnostics(empty, "empty")).toBe(true);
+    expect(validDiagnostics(latency, "latency")).toBe(true);
+    const result = await sweep(
+      parseArgs(["--database-secret", "reader"]),
+      healthyRun({ database: { empty, latency } }),
+      new Date("2026-10-03T11:00:00Z"),
+    );
+    const emptyCheck = result.checks.find((check) => check.id === "empty")!;
+    const latencyCheck = result.checks.find((check) => check.id === "latency")!;
+    expect(emptyCheck.status).toBe("ok"); // Existing repeated-turn threshold is unchanged.
+    expect(latencyCheck.status).toBe("gap");
+    expect(emptyCheck.facts?.diagnostics).toEqual(empty.diagnostics);
+    expect(latencyCheck.facts?.diagnostics).toEqual(latency.diagnostics);
+    expect(empty.diagnostics[0]!.turn_id).toBe(latency.diagnostics[0]!.turn_id);
+    expect(textResult(result)).not.toContain("trigger0");
+    expect(latencyCheck.facts?.missingFirstStartEvents).toBe(1);
+  });
+  test("diagnostic output caps and overflow remain truthful without capping aggregate flags", async () => {
+    const empty = {
+      ...flaggedDiagnostics("empty", 13),
+      sample: 20,
+      suspectTurns: 13,
+      repeatedSessions: 1,
+      controlUnknown: 0,
+      missingCompletionEvidence: 0,
+    };
+    expect(validDiagnostics(empty, "empty")).toBe(true);
+    const result = await sweep(
+      parseArgs(["--database-secret", "reader"]),
+      healthyRun({ database: { empty } }),
+      new Date("2026-10-03T11:00:00Z"),
+    );
+    const check = result.checks.find((value) => value.id === "empty")!;
+    expect(check.status).toBe("gap");
+    expect(check.facts?.suspectTurns).toBe(13);
+    expect(check.facts?.diagnosticOverflow).toBe(3);
+    expect(check.facts?.diagnosticReturned).toBe(DIAGNOSTIC_LIMIT);
+    expect(result.exitCode).toBe(2);
+  });
+  test("future FIRST diagnostics retain exact boundaries and do not assert clock skew", async () => {
+    const diagnostic = {
+      ...anomaly("latency"),
+      first_started_at: "2026-10-03T11:01:00Z",
+      missing_first_start: false,
+      future_first_start: true,
+    };
+    const latency = {
+      ...latencyFixture(),
+      ...flaggedDiagnostics("latency", 1),
+      futureFirstStartEvents: 1,
+      diagnostics: [diagnostic],
+    };
+    expect(validDiagnostics(latency, "latency")).toBe(true);
+    const result = await sweep(
+      parseArgs(["--database-secret", "reader"]),
+      healthyRun({ database: { latency } }),
+      new Date("2026-10-03T11:00:00Z"),
+    );
+    const check = result.checks.find((value) => value.id === "latency")!;
+    expect(check.status).toBe("gap");
+    expect(check.facts?.diagnostics).toEqual([diagnostic]);
+    expect(check.facts?.futureFirstStartEvents).toBe(1);
+    expect(JSON.stringify(check)).not.toContain("clock skew");
+    expect(
+      validDiagnostics(
+        { ...latency, diagnostics: [{ ...diagnostic, missing_first_start: true }] },
+        "latency",
+      ),
+    ).toBe(false);
+  });
+  test("missing diagnostic trigger evidence retains flags and IDs as an explicit gap", async () => {
+    const empty = {
+      ...flaggedDiagnostics("empty", 1),
+      sample: 3,
+      suspectTurns: 1,
+      repeatedSessions: 0,
+      controlUnknown: 0,
+      missingCompletionEvidence: 0,
+      missingDiagnosticTriggerEvidence: 1,
+      diagnostics: [{ ...anomaly("empty"), trigger_kind: null }],
+    };
+    expect(validDiagnostics(empty, "empty")).toBe(true);
+    const result = await sweep(
+      parseArgs(["--database-secret", "reader"]),
+      healthyRun({ database: { empty } }),
+      new Date("2026-10-03T11:00:00Z"),
+    );
+    expect(result.checks.find((check) => check.id === "empty")?.status).toBe("gap");
+    expect(result.checks.find((check) => check.id === "empty")?.facts?.diagnostics).toEqual(
+      empty.diagnostics,
+    );
+  });
+  test("invalid or incomplete diagnostic projections fail closed", () => {
+    const empty = { ...flaggedDiagnostics("empty", 2), suspectTurns: 2 };
+    for (const patch of [
+      { diagnosticReturned: 0 },
+      { diagnosticLimit: 100 },
+      { diagnosticOverflow: 1 },
+      { diagnostics: [] },
+      { diagnostics: [empty.diagnostics[0], empty.diagnostics[0]] },
+      { diagnostics: [{ ...empty.diagnostics[0], control_paused: true }, empty.diagnostics[1]] },
+    ]) {
+      expect(validDiagnostics({ ...empty, ...patch }, "empty")).toBe(false);
+    }
   });
   test("malformed API usage or limits fail closed rather than emitting OK/null bytes", async () => {
     for (const overrides of [
@@ -537,6 +724,7 @@ describe("staging health sweep", () => {
   });
   test("missing usable completion evidence preserves denominator and is a gap", async () => {
     const empty = {
+      ...quietDiagnostics(),
       sample: 3,
       suspectTurns: 0,
       repeatedSessions: 0,
@@ -812,10 +1000,26 @@ describe("staging health sweep", () => {
     expect(missing.incompleteOwnerPage).toBe(1);
     expect(missing.canonicalPage.nextOffset).toBeNull();
   });
-  test.skipIf(process.env.OPENGENI_HEALTH_SWEEP_LIVE_TESTS !== "1")(
+  test.skipIf(
+    process.env.OPENGENI_HEALTH_SWEEP_LIVE_TESTS !== "1" &&
+      !process.env.OPENGENI_HEALTH_SWEEP_FIXTURE_RUNNER,
+  )(
     "read-only SQL fixtures retain missing completions and pending work across session projections",
     async () => {
-      const run = boundedRun(20);
+      const fixtureRunner = process.env.OPENGENI_HEALTH_SWEEP_FIXTURE_RUNNER;
+      const bounded = boundedRun(20);
+      const run: Run = fixtureRunner
+        ? async (_args, stdin) =>
+            stdin
+              ? bounded(["bun", fixtureRunner], stdin)
+              : JSON.stringify({
+                  data: {
+                    OPENGENI_MIGRATIONS_DATABASE_URL: Buffer.from(
+                      "postgres://local-synthetic-fixture",
+                    ).toString("base64"),
+                  },
+                })
+        : bounded;
       const kube = ["kubectl", "--context", "opengeni-stg-neu-aks", "-n", "opengeni"];
       const secret = JSON.parse(
         await run([...kube, "get", "secret", "opengeni-migrations", "-o", "json"]),
@@ -823,14 +1027,14 @@ describe("staging health sweep", () => {
       const url = Buffer.from(secret.data.OPENGENI_MIGRATIONS_DATABASE_URL, "base64").toString();
       const table = (name: string, columns: string, rows: object[]) =>
         `${name} AS (SELECT * FROM jsonb_to_recordset('${JSON.stringify(rows).replaceAll("'", "''")}'::jsonb) AS fixture(${columns}))`;
-      const sessions = (rows: { id: string; status: string }[]) =>
+      const sessions = (rows: { id: string; status: string; direct_control_state?: string }[]) =>
         table(
           "sessions",
           "id text,workspace_id text,parent_session_id text,direct_control_state text,direct_pause_revision bigint,subtree_run_override_revision bigint,status text,input_wait_until timestamptz,created_at timestamptz",
           rows.map((row) => ({
             ...row,
             workspace_id: "w",
-            direct_control_state: "active",
+            direct_control_state: row.direct_control_state ?? "active",
             created_at: "2020-01-01T00:00:00Z",
           })),
         );
@@ -972,6 +1176,15 @@ describe("staging health sweep", () => {
       }));
       const latencyTurns = [
         ...normalTurns,
+        ...Array.from({ length: 12 }, (_, index) => ({
+          id: `zz-missing${String(index).padStart(2, "0")}`,
+          workspace_id: "w",
+          session_id: "latency-session",
+          source: "api",
+          trigger_event_id: `trigger-zz-missing${String(index).padStart(2, "0")}`,
+          created_at: "2026-10-03T12:50:00Z",
+          started_at: "2026-10-03T12:59:00Z",
+        })),
         ...["old-resume", "missing-start", "duplicate-only", "negative", "future"].map((id) => ({
           id,
           workspace_id: "w",
@@ -1025,7 +1238,7 @@ describe("staging health sweep", () => {
       const latency = query("latency", [
         table(
           "session_turns",
-          "id text,workspace_id text,session_id text,source text,trigger_event_id text,created_at timestamptz,started_at timestamptz",
+          "id text,workspace_id text,session_id text,source text,trigger_event_id text,active_attempt_id text,created_at timestamptz,started_at timestamptz",
           latencyTurns,
         ),
         table(
@@ -1034,25 +1247,92 @@ describe("staging health sweep", () => {
           latencyEvents,
         ),
       ]);
+      const suspectIds = [
+        "duplicate-only",
+        ...Array.from({ length: 12 }, (_, index) => `suspect${String(index).padStart(2, "0")}`),
+      ];
+      const normalIds = ["normal-tool", "normal-wait", "normal-quiet", "paused"];
+      const completionEvent = (id: string, payload: object, sequence: number) => ({
+        id: `completion-${id}`,
+        workspace_id: "w",
+        session_id:
+          id === "duplicate-only" ? "latency-session" : id === "paused" ? "paused" : "completed",
+        turn_id: id,
+        turn_attempt_id: `attempt-${id}`,
+        type: "turn.completed",
+        created_at: id === "duplicate-only" ? "2026-10-03T12:56:00Z" : "2026-10-03T12:55:00Z",
+        payload,
+        sequence,
+      });
       const empty = query("empty", [
-        sessions([{ id: "completed", status: "idle" }]),
+        sessions([
+          { id: "completed", status: "idle" },
+          { id: "latency-session", status: "idle" },
+          { id: "paused", status: "idle", direct_control_state: "paused" },
+        ]),
         control,
         table(
           "session_turns",
-          "id text,workspace_id text,session_id text,status text,source text,finished_at timestamptz",
-          ["valid", "missing", "malformed"].map((id) => ({
+          "id text,workspace_id text,session_id text,status text,source text,trigger_event_id text,created_at timestamptz,finished_at timestamptz",
+          ["valid", "missing", "malformed", ...normalIds, ...suspectIds].map((id) => ({
             id,
             workspace_id: "w",
-            session_id: "completed",
+            session_id:
+              id === "duplicate-only"
+                ? "latency-session"
+                : id === "paused"
+                  ? "paused"
+                  : "completed",
             status: "completed",
-            source: "user",
+            source: id === "normal-quiet" ? "compaction" : "user",
+            trigger_event_id: `trigger-${id}`,
+            created_at: "2026-10-03T12:50:00Z",
             finished_at: "2026-10-03T12:55:00Z",
           })),
         ),
         table(
           "session_events",
-          "id text,workspace_id text,session_id text,turn_id text,type text,created_at timestamptz,payload jsonb,sequence int,duplicate_of_event_id text",
+          "id text,workspace_id text,session_id text,turn_id text,turn_attempt_id text,type text,created_at timestamptz,payload jsonb,sequence int,duplicate_of_event_id text",
           [
+            ...suspectIds.map((id, index) =>
+              completionEvent(
+                id,
+                { emptyFinalReply: true, token: "never emit fixture token" },
+                index + 10,
+              ),
+            ),
+            ...normalIds.map((id, index) =>
+              completionEvent(id, id === "paused" ? { emptyFinalReply: true } : {}, index + 40),
+            ),
+            {
+              ...completionEvent(
+                "duplicate-only",
+                { output: "duplicate reply must not change suspect classification" },
+                999,
+              ),
+              id: "ignored-completion-duplicate",
+              duplicate_of_event_id: "completion-duplicate-only",
+            },
+            ...["normal-tool", "normal-wait", "suspect00"].map((id, index) => ({
+              id: `tool-${id}`,
+              workspace_id: "w",
+              session_id: "completed",
+              turn_id: id,
+              type: "agent.toolCall.created",
+              created_at: "2026-10-03T12:54:00Z",
+              sequence: index + 50,
+              payload: { name: id === "normal-wait" ? "wait_for_input" : "fixture_tool" },
+            })),
+            ...suspectIds.map((id, index) => ({
+              id: `trigger-${id}`,
+              workspace_id: "w",
+              session_id: id === "duplicate-only" ? "latency-session" : "completed",
+              turn_id: id,
+              type: "user.message",
+              created_at: "2026-10-03T12:50:00Z",
+              sequence: index + 70,
+              payload: { prompt: "never emit fixture prompt" },
+            })),
             {
               id: "v",
               workspace_id: "w",
@@ -1156,9 +1436,36 @@ describe("staging health sweep", () => {
         applyOwnership(result.queuedInventory, unknownObservation, false, true).unknownQueueAge,
       ).toBe(1);
       expect(result.empty).not.toHaveProperty("gap");
-      expect(result.empty.sample).toBe(3);
+      expect(result.empty.sample).toBe(20);
       expect(result.empty.missingCompletionEvidence).toBe(2);
-      expect(result.empty.repeatedSessions).toBe(0);
+      expect(result.empty.suspectTurns).toBe(13);
+      expect(result.empty.repeatedSessions).toBe(1);
+      expect(result.empty.classifications).toEqual({
+        reply: 1,
+        missing_evidence: 2,
+        suspect: 13,
+        tool_only: 1,
+        awaiting_input: 1,
+        maintenance: 1,
+        paused: 1,
+      });
+      expect(result.empty.diagnosticTotal).toBe(13);
+      expect(result.empty.diagnosticReturned).toBe(DIAGNOSTIC_LIMIT);
+      expect(result.empty.diagnosticOverflow).toBe(3);
+      expect(validDiagnostics(result.empty, "empty")).toBe(true);
+      const overlapping = result.empty.diagnostics.find(
+        (row: any) => row.turn_id === "duplicate-only",
+      );
+      expect(overlapping.session_id).toBe("latency-session");
+      expect(overlapping.trigger_event_id).toBe("trigger-duplicate-only");
+      expect(overlapping.completion_event_id).toBe("completion-duplicate-only");
+      expect(overlapping.completion_attempt_id).toBe("attempt-duplicate-only");
+      expect(overlapping.control_valid).toBe(true);
+      expect(overlapping.control_paused).toBe(false);
+      expect(
+        result.empty.diagnostics.find((row: any) => row.turn_id === "suspect00").has_tool_events,
+      ).toBe(true);
+      expect(JSON.stringify(result.empty)).not.toContain("never emit");
       expect(result.latency.code).toBeUndefined();
       expect(result.latency).not.toHaveProperty("gap");
       expect(result.latency.sample).toBe(16);
@@ -1176,10 +1483,25 @@ describe("staging health sweep", () => {
       expect(result.latency.tail[0].trigger_kind).toBeNull();
       expect(result.latency.missingTailTriggerEvidence).toBe(1);
       expect(result.latency.resumedFromBeforeWindow).toBe(1);
-      expect(result.latency.missingFirstStartEvents).toBe(2);
+      expect(result.latency.missingFirstStartEvents).toBe(14);
       expect(result.latency.futureFirstStartEvents).toBe(1);
       expect(result.latency.invalidNegativeSamples).toBe(1);
       expect(validLatencyTail(result.latency)).toBe(true);
+      expect(validDiagnostics(result.latency, "latency")).toBe(true);
+      expect(result.latency.diagnosticTotal).toBe(15);
+      expect(result.latency.diagnosticReturned).toBe(DIAGNOSTIC_LIMIT);
+      expect(result.latency.diagnosticOverflow).toBe(5);
+      expect(result.latency.diagnostics.map((row: any) => row.turn_id)).toEqual([
+        "duplicate-only",
+        "future",
+        "missing-start",
+        ...Array.from({ length: 7 }, (_, index) => `zz-missing${String(index).padStart(2, "0")}`),
+      ]);
+      expect(result.latency.diagnostics[0].session_id).toBe(overlapping.session_id);
+      expect(result.latency.diagnostics[0].missing_first_start).toBe(true);
+      expect(result.latency.diagnostics[0].first_started_at).toBeNull();
+      expect(result.latency.diagnostics[1].future_first_start).toBe(true);
+      expect(result.latency.diagnostics[1].first_started_at).toStartWith("2026-10-03T13:01:00");
       expect(JSON.stringify(result.latency)).not.toContain("never emit");
     },
     30000,

@@ -32,6 +32,8 @@ export function ScheduleSlackPosting(props: {
   disabled: boolean;
   /** The surrounding section is open, so the channel list is worth loading. */
   active: boolean;
+  /** A materialized schedule keeps its chat's bot binding, but may change channels. */
+  connectionLocked?: boolean;
   onChange: (next: { connectionId: string; channelId: string }) => void;
 }) {
   const context = useAppContext();
@@ -66,7 +68,8 @@ export function ScheduleSlackPosting(props: {
 
   const botOptions = useMemo(() => openGeniSlackBotConnectionOptions(bots ?? []), [bots]);
   const effectiveConnectionId =
-    props.connectionId || (botOptions.length === 1 ? botOptions[0]!.connection.id : "");
+    props.connectionId ||
+    (!props.connectionLocked && botOptions.length === 1 ? botOptions[0]!.connection.id : "");
 
   useEffect(() => {
     if (!canChoose || (!props.active && !props.channelId) || !effectiveConnectionId) {
@@ -123,25 +126,47 @@ export function ScheduleSlackPosting(props: {
     Boolean(props.connectionId) &&
     bots !== null &&
     !botOptions.some((option) => option.connection.id === props.connectionId);
+  const lockedWorkspace =
+    props.connectionLocked && props.connectionId ? (
+      <Field label="Slack workspace">
+        <p className="m-0 text-sm text-fg">
+          {!canRead
+            ? "You can't view this Slack workspace"
+            : botsError
+              ? "Slack workspace couldn't load"
+              : bots === null
+                ? "Loading Slack workspace…"
+                : storedBotMissing
+                  ? "The selected bot is unavailable"
+                  : botOptions.find((option) => option.connection.id === props.connectionId)?.label}
+        </p>
+      </Field>
+    ) : null;
 
   const hint =
     "Each run can post to one Slack channel as the Opengeni bot. The agent cannot post to any " +
     "other channel. Invite the bot to a channel in Slack to see it here.";
-  const blocked = !canChoose
-    ? "Only people who can manage connections can choose this channel."
-    : botsError
-      ? `Couldn't load Slack connections. ${botsError}`
-      : bots !== null && botOptions.length === 0 && !props.connectionId
-        ? "No Opengeni Slack bot is installed in this workspace. A task can post only through a " +
-          "bot installed in its own workspace, from Capabilities."
-        : null;
+  const blocked =
+    props.connectionLocked && !props.connectionId
+      ? "This schedule's chat has no Slack bot. Choose a new chat for each run to set up posting."
+      : !canChoose
+        ? "Only people who can manage connections can choose this channel."
+        : botsError
+          ? `Couldn't load Slack connections. ${botsError}`
+          : bots !== null && botOptions.length === 0 && !props.connectionId
+            ? "No Opengeni Slack bot is installed in this workspace. A task can post only through a " +
+              "bot installed in its own workspace, from Capabilities."
+            : null;
   if (blocked) {
     return (
-      <Field label="Post to Slack" optional group>
-        <p role={botsError ? "alert" : undefined} className="m-0 text-sm text-fg-muted">
-          {blocked}
-        </p>
-      </Field>
+      <>
+        {lockedWorkspace}
+        <Field label="Post to Slack" optional group>
+          <p role={botsError ? "alert" : undefined} className="m-0 text-sm text-fg-muted">
+            {blocked}
+          </p>
+        </Field>
+      </>
     );
   }
 
@@ -171,7 +196,8 @@ export function ScheduleSlackPosting(props: {
 
   return (
     <>
-      {botOptions.length > 1 || storedBotMissing ? (
+      {lockedWorkspace}
+      {!props.connectionLocked && (botOptions.length > 1 || storedBotMissing) ? (
         <Field label="Slack workspace">
           <SelectMenu
             options={botMenu}
@@ -186,7 +212,9 @@ export function ScheduleSlackPosting(props: {
       <Field
         label="Post to Slack"
         optional
-        hint={hint}
+        hint={
+          props.connectionLocked ? `${hint} This chat keeps its current Slack workspace.` : hint
+        }
         error={channelsError ? `Couldn't load Slack channels. ${channelsError}` : undefined}
       >
         <SelectMenu

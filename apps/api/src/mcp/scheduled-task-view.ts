@@ -309,6 +309,9 @@ function toolIdentity(
 
 export function scheduledTaskMcpSummary(task: ScheduledTask) {
   const action = task.action ?? ({ kind: "agent_turn" } as const);
+  const inheritsSessionSettings =
+    task.runMode === "existing_session" ||
+    (task.runMode === "reusable_session" && Boolean(task.reusableSessionId));
   const name = projectScheduledTaskUtf8(task.name, SCHEDULED_TASK_NAME_MAX_BYTES);
   const schedule = projectScheduledTaskSchedule(task.schedule);
   const model = task.agentConfig.model
@@ -351,12 +354,10 @@ export function scheduledTaskMcpSummary(task: ScheduledTask) {
     createdAt: createdAt.value,
     updatedAt: updatedAt.value,
     configuration: {
-      source: task.runMode === "existing_session" ? "target_session" : "task_defaults",
-      model: task.runMode === "existing_session" ? null : (model?.value ?? null),
-      reasoningEffort:
-        task.runMode === "existing_session" ? null : (task.agentConfig.reasoningEffort ?? null),
-      sandboxBackend:
-        task.runMode === "existing_session" ? null : (task.agentConfig.sandboxBackend ?? null),
+      source: inheritsSessionSettings ? "target_session" : "task_defaults",
+      model: inheritsSessionSettings ? null : (model?.value ?? null),
+      reasoningEffort: inheritsSessionSettings ? null : (task.agentConfig.reasoningEffort ?? null),
+      sandboxBackend: inheritsSessionSettings ? null : (task.agentConfig.sandboxBackend ?? null),
       hasGoal: task.agentConfig.goal !== undefined,
       promptBytes: Buffer.byteLength(task.agentConfig.prompt, "utf8"),
       resourceCount: task.agentConfig.resources.length,

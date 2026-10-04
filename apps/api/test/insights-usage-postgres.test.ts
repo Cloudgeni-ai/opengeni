@@ -393,11 +393,11 @@ test("actual-auth response cache hits, isolates keys/scopes/queries, expires, re
       );
       expect(timeout.status).toBe(408);
       const text = await timeout.text();
-      expect(text).toContain("Range too large, try 7 days.");
+      expect(text).toContain("This range has too much data right now. Try a shorter range.");
       expect(text).not.toContain("private SQL");
       expect(JSON.parse(text).error).toMatchObject({
         status: 408,
-        message: "Range too large, try 7 days.",
+        message: "This range has too much data right now. Try a shorter range.",
       });
     }
     expect(usageRead.mock.calls.length - before).toBe(2);

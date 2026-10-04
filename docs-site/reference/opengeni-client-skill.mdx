@@ -298,10 +298,11 @@ only own usage. These are post-call ceilings, not prepaid reservations.
   Don't put your own Origin/CSRF check in front of it (browsers often omit
   `Origin` on same-origin requests), and don't format-validate the product's
   own IDs; authorize them with the product's normal lookup instead.
-- Install `@opengeni/sdk` and `@opengeni/react` from the same release. If the
-  repository enforces a release-age policy (for example pnpm
-  `minimumReleaseAge`), a just-published version may be refused: pin an older
-  matching pair or ask before adding an exclusion; never bypass it silently.
+- Use the same version for all `@opengeni` packages: they release together at
+  one shared version. If the repository enforces a release-age policy (for
+  example pnpm `minimumReleaseAge`), a just-published version may be refused:
+  pin all of them to an older shared version or ask before adding an
+  exclusion; never bypass it silently.
 - External member permissions cannot yet be edited in place (a re-grant with a
   new `operationId` conflicts, and the organization key cannot update the
   member). Grant the final set at onboarding; to change it, revoke

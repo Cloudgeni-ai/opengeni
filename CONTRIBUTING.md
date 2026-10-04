@@ -91,7 +91,7 @@ Release and publishing guidance starts here; executable truth lives in [`package
 
 **Staging:** dispatch `staging-canary-dispatch.yml` with any `main` SHA whose `canary-sha-*` tags already exist. Pending changesets are allowed. Missing tags fail closed; do not rebuild unsigned `:ci` images.
 
-**Canary npm:** dispatch `publish-canary.yml` to publish `{version}-canary.N` with dist-tag `canary`. This does not consume changeset files or move `latest`.
+**Canary npm:** dispatch `publish-canary.yml` to publish `{next-patch}-canary.N` with dist-tag `canary` (committed `1.0.0` publishes `1.0.2-canary.N`, skipping a retired patch), so canaries sort after the committed release. This does not consume changeset files or move `latest`.
 
 In GitHub Actions, `N` has a floor derived from the workflow run ID and attempt
 (`run ID * 1000 + attempt`), so retries do not reuse versions hidden by stale
@@ -100,9 +100,10 @@ rejects a superseded attempt: dispatch a new workflow instead of retrying the
 older one. Fixed package groups remain aligned. An admitted retry publishes a fresh set rather than
 overwriting or removing any partially published versions.
 
-Two publish-coherence rules learned the hard way (all versions are 0.x):
+**Lockstep versions.** Every published `@opengeni/*` package is in one Changesets `fixed` group and always releases at one shared version (the line restarted at `1.0.0`); a new published package must join that group (`scripts/release/lockstep-version.test.ts` enforces it). Published manifests pin sibling packages exactly (`workspace:*` becomes the exact version), so consumers install every `@opengeni` package at the same version. The retired pre-reset line already burned some 1.x versions (for example `@opengeni/contracts@1.0.1`, `@opengeni/runtime@1.4.2`); `bun run changeset:version` runs `scripts/release/lockstep-version.ts`, which moves the whole group to the next free patch when the computed version is one of them (`1.0.1` → `1.0.2`), and rewrites the new CHANGELOG heading. The retired list in that script is closed history; never publish an `@opengeni` version by hand. After the 1.0.0 publication, an operator runs `bun scripts/release/deprecate-pre-1.0.ts` (dry run) and then `--execute` once to check `latest` and deprecate every pre-reset version.
 
-- **A minor bump of a package must cascade to its dependents.** Published manifests carry caret ranges (`^0.3.0`), and under 0.x caret semantics a minor bump (0.3.0 → 0.4.0) leaves every dependent's range. Add a patch changeset covering the dependent closure in the same release, or external consumers nest a stale copy of the bumped package.
+A publish-coherence rule learned the hard way:
+
 - **Merging a Version PR only creates versioned source; it does not publish.** GitHub branch protection may still require a review to merge into `main`. Ordinary candidate and operator admission bind the merged associated PR, not a later GitHub `APPROVE` or structured PASS body. Merge deliberately, then run the evidence-bound candidate, acceptance, and release workflows for that exact retained source.
 
 ### Registry dependency export smoke
@@ -147,7 +148,7 @@ remain bound to the selected candidate, with its Bun pin restored afterward.
 separately and installs only its declared registry dependency closure, without
 sibling candidates, links, or overrides. Build packages first. `--published-source`
 instead installs exact workspace versions from npm; `--published` checks current
-`latest`, or use `--package @opengeni/react@7.4.0` to reproduce a historical failure.
+`latest`, or use `--package @opengeni/react@<version>` to reproduce a historical failure.
 
 Every stable publication route uses the shared `release:publish` prepublication
 guard with its admitted publication set. The stable workflows additionally run

@@ -48,6 +48,37 @@ function expectNoInvalidUtf8(value: unknown): void {
 }
 
 describe("scheduled-task MCP views", () => {
+  test("materialized reusable chats report inherited settings instead of stale creation defaults", () => {
+    const source = task({
+      runMode: "reusable_session",
+      agentConfig: {
+        prompt: "Review activity",
+        resources: [],
+        tools: [],
+        metadata: {},
+        model: "test-model",
+        reasoningEffort: "high",
+        sandboxBackend: "none",
+      },
+    });
+    expect(scheduledTaskMcpSummary(source).configuration).toMatchObject({
+      source: "task_defaults",
+      model: "test-model",
+      reasoningEffort: "high",
+      sandboxBackend: "none",
+    });
+    const configuration = scheduledTaskMcpSummary({
+      ...source,
+      reusableSessionId: crypto.randomUUID(),
+    }).configuration;
+    expect(configuration).toMatchObject({
+      source: "target_session",
+      model: null,
+      reasoningEffort: null,
+      sandboxBackend: null,
+    });
+  });
+
   test("complete prompt paging preserves whitespace, escapes and UTF-16 without oversized responses", () => {
     const source = task({
       executionDigest: "a".repeat(64),

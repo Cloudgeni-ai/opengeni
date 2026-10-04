@@ -216,6 +216,11 @@ See [`goals.md`](goals.md).
 | Sandbox leases/envelopes | Provider identity/routing/recovery/workspace-generation truth | Conversation state |
 | Knowledge/instructions/Skills/organization identity | Scoped retrieval/governance authorities and lifecycle | Conversation history/temporary task notes |
 
+The wake reaper repairs already-pending authentic terminal results for idle
+goalless parents through bounded identity-only discovery and scoped, fenced
+queue/wake registration. It never replays child work; see
+[durable inputs](durable-agent-inputs.md).
+
 [Archived imports](../packages/core/src/application/archived-session-imports.ts)
 use server-only `@opengeni/sdk/session-history-import` for idempotent
 `session_events`, never model history/turns/active goals/wakes. Lifecycle seams
@@ -270,6 +275,16 @@ Canonical: [`run-lifecycle.md`](run-lifecycle.md),
 Workspace operations require API-resolved authenticated access contexts and grants
 before data access. Transaction-local Postgres FORCE RLS adds defense-in-depth;
 resource UUIDs grant nothing.
+
+The unused private Modal worker-host proof transport
+(`packages/core/src/application/modal-native-worker-host-transport.ts`) has a
+separate prefix, version, purpose and HMAC subkey/message domain. It accepts only
+the explicitly configured deployment delegation root, never ordinary delegated
+tokens or the access-key/local fallback. A verified request MAC is transport
+correlation, not a resolved workspace grant, initiating-human authorization,
+native response, current custody claim, physical settlement or effect permit.
+No host entry, provider caller or durable recovery is activated by this helper.
+See [Modal recovery assurance](design/modal-recovery-assurance-2026-10-02.md).
 
 Organization/workspace membership, API keys, delegated grants, private-session
 ownership and personal-resource grants remain distinct. Organization keys with
@@ -404,53 +419,36 @@ Agent configuration: `packages/contracts/src/agent-config.ts`; null configs stay
 
 ### 3.8 A Connected Machine is first-class primary compute
 
-Connected Machines (`selfhosted`) run agents without sandboxes. [Native updates](../agent/README.md#distribution)
-fence admission and require idle commands, uploads and owned browser/computer controllers;
-unavailable proof defers updates. Mac updates preserve signed bundles and
-[write ACLs](../agent/TRANSACTIONAL-WRITES.md).
+Connected Machines (`selfhosted`) run agents without sandboxes. [Updates](../agent/README.md#distribution)
+fence admission, require idle commands/uploads and owned browser/computer controllers,
+and defer without proof. Mac updates preserve signed bundles and
+[ACLs](../agent/TRANSACTIONAL-WRITES.md).
 
-Machines own files, Git authentication, environment and [credential renewal](connected-machines.md).
-OpenGeni neither clones repositories nor installs durable control-plane credentials;
-children receive transient, exact-attempt Codemode authority.
-[Same-turn recovery](run-lifecycle.md) restores native capabilities without tool replay.
+Machines own files, Git auth, environment and [credential renewal](connected-machines.md).
+OpenGeni neither clones repos nor installs durable credentials;
+child Codemode authority is transient/attempt-bound.
+[Recovery](run-lifecycle.md) restores capabilities without tool replay.
 
-Machine paths are host-native and session-specific, not universal `/workspace`
-aliases. Unavailability produces a typed operation outcome; text-only reasoning
-can begin without contact. An offline machine never authorizes cold-creating a
-rival box, snapshotting it, or provider-terminating the user's computer.
+Foreground output releases once its exact tool-result receipt, output event and
+journal are durable, independently of turn completion. Other owners retain output.
+[Streaming exec](connected-machines.md#streaming-exec-op-stream).
 
-Structured Files exposes the selected machine's effective host-native working
-directory as `FileSystem.root`; links and tree nodes share this namespace.
-Connected Machine reads accept external absolute paths under the machine account's
-OS permissions; working directories remain browsing defaults.
-Managed reads and structured mutations stay workspace-confined, including `/`.
-Requests carry capability epoch and root. The API binds one route per request;
-target/root changes return retryable conflicts instead of reinterpreting paths
-on another filesystem.
+Machine paths are session-specific. Offline operations fail typed; reasoning continues.
+Availability never authorizes provisioning, snapshotting or terminating a user's computer.
 
-Generated-session schedules persist an exact workspace- or organization-scoped
-machine target and seed its active pointer before the first turn. Ingress
-rejects targetless `selfhosted` schedules; dispatch revalidates the frozen target
-without managed-compute fallback. Manual and generated creates preflight target
-liveness and workspace root, then recheck durable authority and atomically
-commit the active pointer with the session row. Rejection leaves no queued
-session shell in discovery or parent-tree projections.
+Structured Files binds paths, route, capability epoch and root per request; changes
+conflict. OS permissions govern machine reads; managed access remains workspace-confined.
 
-Child workers keep the ordinary low-friction rule: omitting placement shares
-the creator's box. Because a Connected Machine pointer is session-local, that
-default copies the trusted parent's exact active machine and working directory
-before the child's first turn. This includes a `backend:none` parent that has
-attached a Connected Machine: the child keeps the shared backend-none home and
-group while inheriting the exact active route. A selfhosted-only child with no
-inherited or explicit machine fails at create rather than reaching an unbound
-runtime.
+Creates preflight liveness/root then atomically bind verified machine authority.
+Generated schedules freeze/revalidate scoped targets without managed fallback.
+Unbound `selfhosted` creates leave no queued shell.
 
-Machine-home sessions never pre-provision hidden managed boxes. With a managed
-deployment backend, the fleet exposes the synthetic managed group explicitly.
-Selecting `session`/`default` clears the active machine pointer and verifies that
-group through the ordinary viewer/lease lifecycle before the next operation/turn
-uses it. This intentional user route change is not offline-machine fallback;
-`none`/`selfhosted`-only deployments expose no managed group.
+Omitted child placement inherits parent machine/root and shared home/group,
+including attached `backend:none`; selfhosted-only children require a machine.
+
+Machine homes never pre-provision boxes. Explicit `session`/`default` clears the
+machine pointer and verifies managed compute via viewer/lease authority;
+`none`/`selfhosted` offers none.
 
 Connected Machine event ingestion drains NATS immediately into exact-process
 queues, not one global database queue. Connection subjects progress concurrently
@@ -518,6 +516,15 @@ loss and deadlines remain insufficient proof. Published
 consumers use unpatched Modal: the runtime owns its error class and recognizes
 SDK boundaries by a local own-Symbol marker, never patch-only imports, names,
 codes or text.
+
+`modal-original-read-wire.ts` is a dormant private read-only transport, with no
+production caller or public sandbox export. Its pinned Modal 0.9.0 projection
+owns an explicit pair, TLS endpoint/channel and bundled Node trust roots;
+namespace and exact-task router-access reads have no ambient SDK profile or
+transport retry. Local observation slots and joined close wait for actual RPC
+callbacks, not waiter abort. It issues no host grant, authenticated original
+context, capture receipt or effect permit. See
+[the recovery design](design/modal-recovery-assurance-2026-10-02.md).
 
 Snapshots use `OPENGENI_SANDBOX_SNAPSHOT_TIMEOUT_MS`; zero-holder drains/rotations
 may override with `OPENGENI_SANDBOX_DRAIN_SNAPSHOT_TIMEOUT_MS`. Boot reserves the
@@ -869,6 +876,11 @@ choices retain the schedule's own captured authority. Separate-agent modes are
 explicit. Narrow message edits and server-owned retargeting preserve omitted data;
 execution-digest comparisons guard concurrent edits. See
 [scheduling messages and editing destinations](scheduled-task-access.md#scheduling-a-message-in-a-chat).
+
+`apps/api/src/temporal-schedule-sync.ts` serializes Temporal schedule writes and
+deletion cleanup across API replicas, reading the current task after acquiring
+the lock. Failed writes compensate only the exact saved task; concurrent edits
+remain intact. Transport failures can still have an unknown remote outcome.
 
 Pre-admission refusals are immutable [run receipts](scheduled-admission-diagnostics.md); key-created schedules are ownerless; see [runs waiting on a person](scheduled-task-access.md#runs-waiting-on-a-person).
 
@@ -1244,6 +1256,16 @@ selections suppress restoration. Children inherit captured authority. Canonical:
 `packages/core/src/domain/personal-connection-delegations.ts` and
 [shared connection presentation](connection-presentation.md).
 
+Capabilities detail pages list backend-authorized native accounts through
+`apps/web/src/components/capabilities/catalog-connected-accounts.tsx`.
+`packages/contracts/src/connection-account-label.ts` owns their shared identity
+labels for the web picker and core MCP account bindings. Labels are presentation
+only; exact connection references and accepted selections remain authority.
+Settings opt into inactive rows through the owning-human `/connections/accounts`
+inventory; execution pickers retain its active-only default. Shared accounts are
+current-workspace scoped, while personal accounts use their existing same-owner,
+same-organization authority across origin workspaces.
+
 Connector permission management: `packages/core/src/domain/connector-tool-permissions.ts`.
 See [`session-mcp-servers.md`](session-mcp-servers.md).
 
@@ -1275,7 +1297,11 @@ never a retry of an existing or ambiguous operation. Submission conflicts never
 reconcile to an existing row; ambiguous failures adopt one only after exact
 scope, catalog, identity and argument comparison. Recovery never replays the
 tool ([run lifecycle](run-lifecycle.md#codemode-recovery)). The current-human
-gateway rebuilds live authority per request. Browsers use
+gateway rebuilds live authority per request. Native connection-backed providers
+use the same account-qualified identities as agent catalogs. Shared projection
+lives in `packages/core/src/domain/mcp-account-routes.ts`; services see workspace
+accounts only, and human transports may see their own eligible accounts.
+Browsers use
 `client.tools.forWorkspace(...)`; opaque-origin Sites use the parent-held
 `@opengeni/sdk/site` MessagePort adapter with no bearer or workspace context.
 A Site version's retained tool identities are only a maximum allowlist: the
@@ -1751,7 +1777,7 @@ Topics: [`README.md`](README.md).
 | Session Debug model-visible context | `packages/runtime/src/model-request-capture.ts`, `packages/runtime/src/model-provider-client.ts`, `packages/runtime/src/model-context-inspector.ts`, `apps/web/src/components/session/model-context-inspector.tsx`, `apps/web/src/components/session/context-text-reader.tsx` | [`run-lifecycle.md`](run-lifecycle.md#debug-context-capture) |
 | Goals and continuations | `apps/worker/src/activities/goals.ts`, `packages/db/src/` | [`goals.md`](goals.md) |
 | Approval or structured human input | `apps/worker/src/activities/agent-turn/stream-attempt.ts`, `apps/api/src/routes/sessions.ts` | [`human-input.md`](human-input.md) |
-| Schedules | `packages/core/src/domain/scheduled-tasks.ts`, `apps/worker/src/activities/scheduled-tasks.ts` | [`reliability-fixes.md`](reliability-fixes.md), [`scheduled-task-access.md`](scheduled-task-access.md), [`slack-bot.md`](slack-bot.md) |
+| Schedules | `packages/core/src/domain/scheduled-tasks.ts`, `apps/api/src/temporal-schedule-sync.ts`, `apps/worker/src/activities/scheduled-tasks.ts` | [`reliability-fixes.md`](reliability-fixes.md), [`scheduled-task-access.md`](scheduled-task-access.md), [`slack-bot.md`](slack-bot.md) |
 | Event-triggered automations | `packages/core/src/domain/automations.ts`, `apps/worker/src/activities/automations.ts` | [`automations.md`](automations.md) |
 | Child sessions or depth policy | `packages/core/src/domain/sessions.ts`, `packages/core/src/session-authorization.ts` | [`nested-agent-depth.md`](nested-agent-depth.md) |
 | Automatic or human session titles | `packages/contracts/src/session-titles.ts`, `apps/api/src/mcp/server.ts`, `packages/core/src/domain/sessions.ts`, `apps/worker/src/activities/agent-turn/session-title.ts`, `packages/db/src/` | [`run-lifecycle.md`](run-lifecycle.md) |

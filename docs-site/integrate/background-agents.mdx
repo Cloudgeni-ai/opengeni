@@ -24,7 +24,9 @@ await og.createScheduledTask(workspaceId, {
 
 `agent` is optional: without it each run uses the workspace's agent defaults. See [Configure the agent](/integrate/configure-the-agent).
 
-Always set an explicit schedule and time zone. `runMode` chooses a new session per run, one reusable session, or an existing session. Scheduled tasks cannot carry a per-session MCP server, so their tools come from a workspace [OpenAPI Integration or MCP connection](/integrate/your-data#openapi-integration), selected by id.
+Always set an explicit schedule and time zone. `runMode` chooses a new session per run, one reusable session, or an existing session. For tasks that create chats, select tools from a workspace [OpenAPI Integration or MCP connection](/integrate/your-data#openapi-integration) by id. Existing chats supply their own tools.
+
+A reusable schedule's creation settings apply to its first chat. Once that chat exists, change its model, tools, or machine in the chat itself; the schedule editor links to it. You can still edit the schedule's timing and message.
 
 Manage tasks with `listScheduledTasks`, `updateScheduledTask`, `pauseScheduledTask`, `resumeScheduledTask`, `triggerScheduledTask`, and `deleteScheduledTask`.
 
