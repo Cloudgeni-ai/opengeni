@@ -173,14 +173,14 @@ describe("native composer voice-input browser acceptance", () => {
 
     await page.getByRole("button", { name: "Start voice input" }).click();
     const stop = page.getByRole("button", { name: "Stop and transcribe" });
-    const cancel = page.getByRole("button", { name: "Cancel recording" });
+    const cancel = page.getByRole("button", { name: "Stop without transcribing" });
     await stop.waitFor();
 
     const audit = await page.locator(".og-composer-footer").evaluate((footer) => {
       const button = (label: string) =>
         footer.querySelector<HTMLButtonElement>(`button[aria-label="${label}"]`);
       const stopButton = button("Stop and transcribe");
-      const cancelButton = button("Cancel recording");
+      const cancelButton = button("Stop without transcribing");
       const stopRect = stopButton?.getBoundingClientRect();
       const cancelRect = cancelButton?.getBoundingClientRect();
       const footerRect = footer.getBoundingClientRect();
@@ -266,14 +266,17 @@ describe("native composer voice-input browser acceptance", () => {
     ).toBe("1");
 
     await page.reload({ waitUntil: "networkidle" });
-    await page.getByRole("button", { name: "Retry voice input" }).waitFor();
+    // The interrupted capture transcribes automatically but is never appended
+    // behind the user's back: it waits for an explicit insert.
+    const insert = page.getByRole("button", { name: "Insert saved transcript" });
+    await insert.waitFor();
     expect(
       await page.evaluate(() => document.documentElement.dataset.transcriptionMicRequests),
     ).toBeUndefined();
-    await page.getByRole("button", { name: "Retry voice input" }).click();
-    await page.waitForFunction(
-      () => document.documentElement.dataset.transcriptionUpload === "completed",
-    );
+    expect(
+      await page.getByText("Transcript saved. Insert it into your draft?").count(),
+    ).toBeGreaterThan(0);
+    await insert.click();
     expect(await page.getByRole("textbox", { name: "Message the agent" }).inputValue()).toBe(
       "Existing editable draft fixture transcript",
     );
@@ -312,7 +315,7 @@ describe("native composer voice-input browser acceptance", () => {
       () => document.documentElement.dataset.transcriptionUpload === "started",
     );
     await hanging.keyboard.press("Escape");
-    await hanging.getByRole("button", { name: "Retry voice input" }).waitFor();
+    await hanging.getByRole("button", { name: "Transcribe saved recording" }).waitFor();
     expect(await hanging.getByRole("button", { name: "Discard saved recording" }).count()).toBe(1);
     expect(await hanging.getByRole("textbox", { name: "Message the agent" }).inputValue()).toBe(
       "Existing editable draft",

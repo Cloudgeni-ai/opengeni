@@ -1918,7 +1918,7 @@ describe("useVoiceInput", () => {
     });
 
     expect(hook.result.current.status).toBe("transcript-ready");
-    expect(hook.result.current.error).toBe("handoff_uncertain");
+    expect(hook.result.current.error).toBeNull();
     expect(hook.result.current.recordingId).toBe("recording-retry");
     expect((await store.listChunks("recording-retry")).map((chunk) => chunk.chunkNumber)).toEqual([
       0, 1, 2,

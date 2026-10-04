@@ -365,14 +365,20 @@ export function useVoiceInput({
           }
           rememberManifest(claimed);
           beginOwnerHeartbeat(claimed);
+          const transcriptReady =
+            claimed.finalizationState === "transcript-ready" && claimed.transcriptText !== null;
           setStatus(
-            claimed.finalizationState === "transcript-ready" && claimed.transcriptText !== null
+            transcriptReady
               ? "transcript-ready"
               : claimed.recoveryMode === "automatic"
                 ? "retrying"
                 : "recovered",
           );
-          setError(null);
+          // An append-mode transcript may already be in the draft (the page
+          // closed between appending and recording the handoff).
+          setError(
+            transcriptReady && claimed.handoffMode === "append" ? "handoff_uncertain" : null,
+          );
           return;
         } catch (reason) {
           if (reason instanceof VoiceRecordingOwnedError) continue;
@@ -476,8 +482,9 @@ export function useVoiceInput({
 
         automaticRetryAttemptRef.current = 0;
         if (ready.handoffMode === "explicit") {
+          // Never appended: offer an explicit insert, not an "already inserted?" warning.
           setStatus("transcript-ready");
-          setError("handoff_uncertain");
+          setError(null);
           focusInput();
           return;
         }
