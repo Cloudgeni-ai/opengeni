@@ -914,12 +914,15 @@ for (const width of [1280, 390]) {
       await input.press("Enter");
       await state.gates.send.entered;
       await transcript.getByText("Start this next step.", { exact: true }).waitFor();
+      const startup = page.locator(".og-genie-loading");
+      assert.equal(await startup.count(), 0, "pending Send has not been accepted yet");
       await capture("optimistic");
       state.gates.send.release();
       await page
-        .locator('[data-session-dispatch-wait] [role="status"]')
-        .getByText("Starting", { exact: true })
+        .locator('.og-genie-loading [role="status"]')
+        .getByText("Preparing your task.", { exact: true })
         .waitFor();
+      assert.equal(await startup.count(), 1, "accepted work has one startup indicator");
       assert.equal(await transcript.getByText("Start this next step.", { exact: true }).count(), 1);
       assert.equal(await page.getByRole("button", { name: /queued prompt/i }).count(), 0);
       assert.equal(await page.locator('[data-og-session-chrome-panel="queue"]').count(), 0);
@@ -928,7 +931,10 @@ for (const width of [1280, 390]) {
         "Starting",
       );
       await state.gates.dispatchDetail.entered;
-      assert.equal(await page.getByText("Still waiting to start", { exact: true }).count(), 0);
+      assert.equal(
+        await startup.getByText("A little longer than usual…", { exact: true }).count(),
+        0,
+      );
       await capture("delayed-detail");
       state.deferDetail = false;
       state.gates.dispatchDetail.release();
@@ -936,21 +942,48 @@ for (const width of [1280, 390]) {
       // A hard reconnect must recover durable admission without moving the bubble.
       await page.reload();
       await transcript.getByText("Start this next step.", { exact: true }).waitFor();
+      await startup
+        .getByRole("status")
+        .getByText("Preparing your task.", { exact: true })
+        .waitFor();
+      assert.equal(await startup.count(), 1);
       await capture("reconnected");
-      state.session.updatedAt = new Date(Date.now() - 60_000).toISOString();
+      const acceptedAt = new Date(Date.now() - 65_000).toISOString();
+      for (const event of state.events) {
+        if (event.turnId === turnId) event.occurredAt = acceptedAt;
+      }
+      state.session.updatedAt = acceptedAt;
       await page.reload();
-      await page.getByText("Still waiting to start", { exact: true }).waitFor();
+      await startup
+        .getByRole("status")
+        .getByText("Preparing your task. Taking longer than usual.", { exact: true })
+        .waitFor();
+      await startup.getByText("A little longer than usual…", { exact: true }).waitFor();
+      await startup.getByRole("button", { name: "Behind the magic" }).click();
+      await page
+        .getByText("Your messages are saved. No agent turn is running yet.", { exact: true })
+        .waitFor();
+      await page
+        .getByText("The start request was accepted; a worker has not started the turn yet.", {
+          exact: true,
+        })
+        .waitFor();
       assert.equal(await transcript.getByText("Start this next step.", { exact: true }).count(), 1);
       await capture("stalled");
       state.session.dispatchWait = {
         state: "pending",
         attempts: 3,
-        nextAttemptAt: null,
+        nextAttemptAt: new Date(Date.now() + 60_000).toISOString(),
         lastError: "Worker dispatch unavailable",
       };
       await page.reload();
-      await page.getByText("Unable to start yet", { exact: true }).waitFor();
-      await page.getByText("Start details", { exact: true }).click();
+      await startup
+        .getByRole("status")
+        .getByText("Unable to start yet. Your messages are saved.", { exact: true })
+        .waitFor();
+      await startup.getByRole("button", { name: "Behind the magic" }).click();
+      await page.getByText("3 dispatch attempts.", { exact: true }).waitFor();
+      await page.getByText(/Automatic start retry at/).waitFor();
       await page
         .getByText("Last recorded dispatch error: Worker dispatch unavailable", { exact: true })
         .waitFor();
@@ -958,13 +991,21 @@ for (const width of [1280, 390]) {
       Object.assign(state.session, { status: "waiting_capacity" });
       await page.reload();
       await page.locator("header [data-status=waiting_capacity]:visible").waitFor();
+      assert.equal(await startup.count(), 0);
+      assert.equal(await page.locator("[data-og-startup-dispatch-details]").count(), 0);
       await capture("capacity");
       Object.assign(state.session, { status: "running", activeTurnId: turnId });
       state.turns = [];
       await page.reload();
       await page.locator("header [data-status=running]:visible").waitFor();
       await transcript.getByText("Start this next step.", { exact: true }).waitFor();
-      assert.equal(await page.locator("[data-session-dispatch-wait]").count(), 0);
+      assert.equal(await page.locator("[data-og-startup-dispatch-details]").count(), 0);
+      assert.equal(
+        await page
+          .getByText("Unable to start yet. Your messages are saved.", { exact: true })
+          .count(),
+        0,
+      );
       await capture("running");
       state.turns = [
         {
@@ -987,11 +1028,13 @@ for (const width of [1280, 390]) {
       await page.reload();
       await page.getByRole("button", { name: /1 queued prompt/ }).waitFor();
       await page.getByRole("list", { name: "Queued prompts" }).waitFor();
+      assert.equal(await startup.count(), 1, "a queued follow-up must not add another startup");
       await capture("genuine-queue");
       state.session.effectiveControl = { ...control, state: "paused", directState: "paused" };
       await page.reload();
       await page.getByRole("list", { name: "Queued prompts" }).waitFor();
-      assert.equal(await page.locator("[data-session-dispatch-wait]").count(), 0);
+      assert.equal(await startup.count(), 0);
+      assert.equal(await page.locator("[data-og-startup-dispatch-details]").count(), 0);
       await capture("paused-queue");
       state.denyAccess = true;
       await page.reload();

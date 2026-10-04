@@ -275,6 +275,12 @@ describe("migration 0521 verified signup trial runtime switch", () => {
         await tx.unsafe(`
           DROP TABLE opengeni_private.verified_signup_trial_switch_revisions;
           DROP FUNCTION public.${SETTER};
+          -- Later policy revisions reuse the guard created by 0521. Remove only
+          -- those dependencies while reconstructing its creation in this rollback.
+          DROP TRIGGER credit_promotion_policy_revisions_immutable
+            ON opengeni_private.credit_promotion_policy_revisions;
+          DROP TRIGGER credit_promotion_policy_revisions_no_truncate
+            ON opengeni_private.credit_promotion_policy_revisions;
           DROP FUNCTION public.reject_verified_signup_trial_switch_revision_mutation();
           ALTER DEFAULT PRIVILEGES IN SCHEMA opengeni_private
             GRANT SELECT, INSERT, UPDATE, DELETE ON TABLES TO opengeni_app;
@@ -314,6 +320,20 @@ describe("migration 0521 verified signup trial runtime switch", () => {
     // The default privileges really would have leaked to the runtime role.
     expect(probe).toEqual({ probe_insert: true, probe_execute: true });
     expect(grantees).toEqual({ table_grantees: [], setter_grantees: [] });
+    const restoredPolicyGuards = await owner<Array<{ name: string; enabled: string }>>`
+      select tgname as name, tgenabled as enabled
+      from pg_trigger
+      where tgrelid = 'opengeni_private.credit_promotion_policy_revisions'::regclass
+        and tgname in (
+          'credit_promotion_policy_revisions_immutable',
+          'credit_promotion_policy_revisions_no_truncate'
+        )
+        and tgfoid = 'public.reject_verified_signup_trial_switch_revision_mutation()'::regprocedure
+      order by tgname`;
+    expect(restoredPolicyGuards).toEqual([
+      { name: "credit_promotion_policy_revisions_immutable", enabled: "O" },
+      { name: "credit_promotion_policy_revisions_no_truncate", enabled: "O" },
+    ]);
   }, 60_000);
 
   test("the runtime role can read the switch but never flip or rewrite it", async () => {
