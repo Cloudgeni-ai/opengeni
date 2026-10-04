@@ -249,7 +249,9 @@ describe("native branded-host error paths", () => {
       );
       expect(view.container.querySelector("textarea")!.value).toBe("A private ACME question");
       expect(
-        view.container.querySelector<HTMLButtonElement>("button[type='submit']")!.disabled,
+        view.container.querySelector<HTMLButtonElement>(
+          "[data-og-new-chat-composer] button[aria-label='Send']",
+        )!.disabled,
       ).toBe(false);
     } finally {
       await view.unmount();
