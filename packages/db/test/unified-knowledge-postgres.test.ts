@@ -252,8 +252,11 @@ describe("unified Knowledge storage", () => {
         previous: restoreState,
         task: changed,
         workflowClient: {
-          syncScheduledTask: async () => {
-            throw new Error("Temporal unavailable");
+          syncScheduledTask: async ({
+            onFailure,
+          }: Parameters<SessionWorkflowClient["syncScheduledTask"]>[0]) => {
+            const error = new Error("Temporal unavailable");
+            throw await client.db.transaction((tx) => onFailure!(tx, error));
           },
         } as unknown as SessionWorkflowClient,
       }),

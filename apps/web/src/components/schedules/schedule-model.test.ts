@@ -2,6 +2,10 @@ import { describe, expect, test } from "bun:test";
 
 import type { ScheduledTask } from "@/types";
 import { formStateFromScheduledTask } from "@/lib/scheduled-tasks";
+import {
+  selectedConnectionAccounts,
+  type ConnectedAccountGroup,
+} from "@/components/capabilities/session-connection-accounts";
 
 import {
   SCHEDULE_FREQUENCIES,
@@ -14,6 +18,7 @@ import {
   scheduleAgentOpeningMessage,
   scheduleErrorText,
   scheduleInheritsChatSettings,
+  scheduleConnectionAccountIntent,
   scheduleWords,
   sortSchedulesForList,
   specFromCadence,
@@ -595,6 +600,103 @@ describe("schedule requests", () => {
         expect(patch.agentConfig).toBeUndefined();
       }
     }
+  });
+});
+
+describe("schedule account edit intent", () => {
+  const saved = [{ serverId: "retained", connectionId: "chosen-account" }];
+  const groups = [
+    {
+      serverId: "retained",
+      name: "Retained",
+      accounts: [{ id: "chosen-account" }, { id: "later-account" }],
+    },
+    { serverId: "empty", name: "Empty", accounts: [{ id: "not-authorized" }] },
+    { serverId: "added", name: "Added", accounts: [{ id: "new-account" }] },
+  ] as ConnectedAccountGroup[];
+  const input = {
+    saved,
+    frozen: true,
+    initialServerIds: ["retained", "empty"],
+    selectedServerIds: ["retained", "empty", "added"],
+    editedServerIds: [] as string[],
+    destinationChanged: false,
+    toolsChanged: false,
+  };
+
+  function submission(intent: ReturnType<typeof scheduleConnectionAccountIntent>) {
+    const selection = selectedConnectionAccounts(
+      groups.filter((group) => intent.changedServerIds.includes(group.serverId)),
+      intent.choices,
+    );
+    expect(selection.unresolved).toEqual([]);
+    return mergeScheduleConnectionAccounts(saved, selection.selections, intent.changedServerIds, {
+      selectedServerIds: input.selectedServerIds,
+      resources: [],
+    });
+  }
+
+  test("enabling a connector saves its displayed accounts and preserves unrelated saved choices", () => {
+    const intent = scheduleConnectionAccountIntent({ ...input, toolsChanged: true });
+    expect(intent.choices).toEqual({ retained: ["chosen-account"], empty: [] });
+    expect(intent.changedServerIds).toEqual(["added"]);
+    const accounts = submission(intent);
+    expect(accounts).toEqual([...saved, { serverId: "added", connectionId: "new-account" }]);
+    const stored = task();
+    stored.agentConfig.tools = [
+      { kind: "mcp", id: "retained" },
+      { kind: "mcp", id: "empty" },
+    ];
+    stored.agentConfig.connectionAccounts = saved;
+    stored.agentConfig.connectionAccountsFrozen = true;
+    const initial = {
+      ...newScheduleDraft({ includeOpenGeniTool: false }),
+      ...formStateFromScheduledTask(stored),
+    };
+    const patch = updateRequestFromDraft(
+      stored,
+      initial,
+      {
+        ...initial,
+        mcpServerIds: input.selectedServerIds,
+        connectionAccounts: accounts,
+      },
+      { now: NOW },
+    );
+    expect(patch.connectionAccounts).toEqual(accounts);
+  });
+
+  test("a destination change captures only newly applicable connector defaults", () => {
+    const intent = scheduleConnectionAccountIntent({ ...input, destinationChanged: true });
+    expect(intent.changed).toBe(true);
+    expect(intent.changedServerIds).toEqual(["added"]);
+    expect(submission(intent)).toEqual([
+      ...saved,
+      { serverId: "added", connectionId: "new-account" },
+    ]);
+  });
+
+  test("loading a chat with new tools never authorizes its accounts during a message edit", () => {
+    const intent = scheduleConnectionAccountIntent(input);
+    expect(intent.changed).toBe(false);
+    expect(intent.changedServerIds).toEqual([]);
+    expect(intent.choices).toEqual({ retained: ["chosen-account"], empty: [], added: [] });
+    expect(submission(intent)).toEqual(saved);
+  });
+
+  test("an account-only edit cannot default other frozen-empty groups", () => {
+    const intent = scheduleConnectionAccountIntent({ ...input, editedServerIds: ["retained"] });
+    const selection = selectedConnectionAccounts(
+      groups.filter((group) => intent.changedServerIds.includes(group.serverId)),
+      { ...intent.choices, retained: ["later-account"] },
+    );
+    expect(selection.unresolved).toEqual([]);
+    expect(
+      mergeScheduleConnectionAccounts(saved, selection.selections, intent.changedServerIds, {
+        selectedServerIds: input.selectedServerIds,
+        resources: [],
+      }),
+    ).toEqual([{ serverId: "retained", connectionId: "later-account" }]);
   });
 });
 
