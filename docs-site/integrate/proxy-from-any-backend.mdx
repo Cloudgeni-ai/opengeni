@@ -4,7 +4,7 @@ description: "Serve the Opengeni conversation from Django, Rails, Go, PHP, or Ja
 icon: "server"
 ---
 
-[`createSessionProxyHandler`](/embed-manually) is JavaScript. On any other backend, write the same proxy in your own framework and point the browser SDK (`OpenGeniClient` with `baseUrl: "/api/opengeni"`) and `@opengeni/react` at it.
+[`createSessionProxyHandler`](/embed-manually) is JavaScript. On any other backend, write the same proxy in your own framework and render `<OpenGeniChat baseUrl="/api/opengeni" />` against it.
 
 The proxy forwards a fixed list of routes to the Opengeni API, adds the organization key and the signed-in user's identity, and returns 404 for everything else.
 
@@ -68,7 +68,7 @@ Return upstream status codes and error bodies unchanged; the SDK reads them.
 - Apply your CSRF protection to POST, PUT, and PATCH.
 - Cap request bodies (1 MiB is plenty) and don't log bodies or keys.
 - Stream SSE unbuffered and close the upstream request when the browser disconnects.
-- [Onboard each user](/integrate/users-and-tenants#onboard-users) as a workspace member first.
+- Store each tenant's workspace id. Create it once with `POST /v1/workspaces/external` (the SDK's `ensureWorkspace`). Users are added to it on their first request.
 
 ## Django example
 

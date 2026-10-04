@@ -66,7 +66,7 @@ for await (const event of og.streamEvents(workspaceId, session.id)) {
 }
 ```
 
-`og.asUser(externalUserId, { source })` returns a client that acts as one of your onboarded users.
+`og.asUser(externalUserId, { source })` returns a client that acts as one of your users. A user with no membership in the workspace is added on their first request with conversation permissions (the key needs `members:manage`).
 
 | Area                         | Highlights                                                                                                                                                             |
 | ---------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
@@ -98,12 +98,12 @@ console.log(members.length); // WorkspaceMember[]
 
 ## createSessionProxyHandler
 
-`createSessionProxyHandler(client, options)` returns a web-standard `(request: Request) => Promise<Response>`. Mount it at a catch-all route such as `/api/opengeni/*` and point a browser `new OpenGeniClient({ baseUrl: "/api/opengeni" })` at it. Each request calls `resolve`, runs as the resolved user, and stays in the resolved workspace. Only the routes a conversation needs are exposed; Cancel and workspace Pause are refused.
+`createSessionProxyHandler(client, options)` returns a web-standard `(request: Request) => Promise<Response>`. Mount it at a catch-all route such as `/api/opengeni/*` and render `<OpenGeniChat baseUrl="/api/opengeni" />`. Each request calls `resolve`, runs as the resolved user, and stays in the resolved workspace. Only the routes a conversation needs are exposed; Cancel and workspace Pause are refused.
 
 | Option                 | Purpose                                                                                                                    |
 | ---------------------- | -------------------------------------------------------------------------------------------------------------------------- |
-| `resolve`              | Required. Returns `{ workspaceId, user, source? }` (or `{ tenant, user }` with the facade), or a `Response` to reject      |
-| `chats`                | `"private"` (default), `"shared"`, or `"isolated"` (needs the `OpenGeni` facade): who sees and shares chats                |
+| `resolve`              | Required. Returns `{ user, tenant }`, `{ user }`, or `{ user, workspaceId }`, or a `Response` to reject                    |
+| `chats`                | `"private"` (default) or `"shared"`: who sees and shares chats                                                             |
 | `authorizeMutation`    | Your CSRF check for non-GET requests. Without it, only cross-site (`Sec-Fetch-Site`) mutations are refused                 |
 | `authorizeSession`     | Optional product check that this user may open this session                                                                |
 | `createSession`        | Allows browser-started sessions. The browser sends only `initialMessage` and `idempotencyKey`; you return the full request |
@@ -138,19 +138,14 @@ app.all("/api/opengeni/*", toHonoHandler(createSessionProxyHandler(og, options))
 
 The Node middleware streams bodies and SSE, works after a body parser, and aborts when the client disconnects.
 
-Pass the chat facade's `OpenGeni` instead of a client to resolve `{ tenant, user }` instead of a workspace id. Don't replace the proxy with a passthrough that forwards any path under the organization key.
+Pass the `OpenGeni` facade from `@opengeni/sdk/chat` so `resolve` can return your own ids; with a plain `OpenGeniClient`, `resolve` must return `{ user, workspaceId }`. Don't replace the proxy with a passthrough that forwards any path under the organization key.
 
 ## Chat facade
 
 ```ts
 import { OpenGeni } from "@opengeni/sdk/chat";
 
-const og = new OpenGeni({
-  baseUrl: process.env.OPENGENI_API_BASE_URL!,
-  apiKey: process.env.OPENGENI_API_KEY!,
-  organizationId: process.env.OPENGENI_ORGANIZATION_ID!,
-  source: "acme-product",
-});
+const og = new OpenGeni({ apiKey: process.env.OPENGENI_API_KEY! }); // add baseUrl when self-hosting
 
 const chat = await og.chat({ tenant: "acme", user: "u_42", conversation: "c_9" });
 const reply = await chat.send("What did we decide last time?");
