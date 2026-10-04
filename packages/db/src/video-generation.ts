@@ -50,7 +50,7 @@ export class VideoGenerationCapacityError extends Error {
 }
 
 export class VideoGenerationCreditError extends Error {
-  constructor(message = "insufficient OpenGeni credits") {
+  constructor(message = "insufficient Opengeni credits") {
     super(message);
     this.name = "VideoGenerationCreditError";
   }
@@ -292,7 +292,7 @@ export async function admitVideoGenerationOperation(
         if (!operation) throw new Error("Video generation operation was not admitted");
         if (input.pricedCostMicros > 0) {
           if (input.fundingSource !== "opengeni_credits" || input.connectionId !== null) {
-            throw new Error("Only OpenGeni-funded video operations may debit credits");
+            throw new Error("Only Opengeni-funded video operations may debit credits");
           }
           await debitVideoGenerationCredits(tx, operation);
         }

@@ -302,8 +302,8 @@ the saved source id/name; creation has no idempotency key. Save the returned
 
 Keep `firstPartyMcpTools: []` and `firstPartyMcpPermissions: []` for this
 product-only automation. Automation templates also default omitted arrays to
-`[]`; neither form inherits OpenGeni permissions. Startup skips remote
-OpenGeni-delegated MCP preparation without minting a token or calling its
+`[]`; neither form inherits Opengeni permissions. Startup skips remote
+Opengeni-delegated MCP preparation without minting a token or calling its
 endpoint. Requested first-party tools or dedicated `files`/`docs` remain
 unavailable with an `insufficient_scope` advisory. Do not pad the grant with
 `sessions:read`. The installed product server keeps its separately authorized

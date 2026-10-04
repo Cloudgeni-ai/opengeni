@@ -693,7 +693,7 @@ export async function recordModelUsageAndDebitCredits(
     }
     if (unpinnedWorkspaceGatewayModel && chargesOpenGeniCredits) {
       throw new Error(
-        `Workspace Gateway custom model ${input.model} cannot charge OpenGeni credits without pinned pricing`,
+        `Workspace Gateway custom model ${input.model} cannot charge Opengeni credits without pinned pricing`,
       );
     }
   }

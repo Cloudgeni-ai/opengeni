@@ -825,7 +825,7 @@ describe("native branded-host error paths", () => {
       });
       expect(uploads.hasUnresolved).toBe(true);
       expect(uploads.readyResources).toEqual([]);
-      expect(failure.message).toContain("OpenGeni");
+      expect(failure.message).toContain("Opengeni");
     } finally {
       await view.unmount();
     }

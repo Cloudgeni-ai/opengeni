@@ -588,7 +588,7 @@ export function useOptionalAppContext(): AppContextValue | null {
 export function useAppContext(): AppContextValue {
   const value = useContext(AppContext);
   if (!value) {
-    throw new Error("OpenGeni app context is not ready");
+    throw new Error("Opengeni app context is not ready");
   }
   return value;
 }

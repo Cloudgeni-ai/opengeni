@@ -282,7 +282,7 @@ test("paid indexing waits for funding, settles accepted batches and finishes a f
       () => embedder,
       settings,
     ),
-  ).rejects.toThrow("Knowledge vector search needs OpenGeni credits");
+  ).rejects.toThrow("Knowledge vector search needs Opengeni credits");
   expect(calls).toBe(0);
   await shared.admin`INSERT INTO credit_ledger_entries(account_id,workspace_id,type,amount_micros,source_type,source_id,idempotency_key) VALUES (${accountId},NULL,'grant',1,'test',${saved.revisionId},${`funded-index:${saved.revisionId}`})`;
   await shared.admin`UPDATE knowledge_index_jobs SET next_attempt_at=now()-interval '1 second' WHERE revision_id=${saved.revisionId}`;

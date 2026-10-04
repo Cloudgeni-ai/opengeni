@@ -2811,7 +2811,7 @@ export const ServiceTurnInitiatorContext = TurnInitiatorContext.superRefine((val
       ctx.addIssue({
         code: z.ZodIssueCode.custom,
         path: [key],
-        message: `${key} is reserved OpenGeni initiator context`,
+        message: `${key} is reserved Opengeni initiator context`,
       });
     }
   }
