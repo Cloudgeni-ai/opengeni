@@ -70,6 +70,14 @@ function makeClient(
   return { client, requests };
 }
 
+test("account settings opt into inactive inventory without changing the execution picker default", async () => {
+  const { client, requests } = makeClient(() => jsonResponse({ connections: [] }));
+  await client.listOwnConnectionAccounts(WORKSPACE_ID);
+  await client.listOwnConnectionAccounts(WORKSPACE_ID, { includeInactive: true });
+  expect(new URL(requests[0]!.url).search).toBe("");
+  expect(new URL(requests[1]!.url).searchParams.get("includeInactive")).toBe("true");
+});
+
 const STRICT = { apiContract: "strict" } as const;
 
 describe("OpenGeniClient", () => {

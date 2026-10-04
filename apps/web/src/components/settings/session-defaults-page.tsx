@@ -18,6 +18,7 @@ import { useEffect, useMemo, useState } from "react";
 import { toast } from "sonner";
 
 import { AgentCapabilityPicker } from "@/components/agent/agent-capability-picker";
+import { InAppHelpLink } from "@/components/in-app-help-link";
 import { Button } from "@/components/ui/button";
 import { Field, FieldStack, TextArea } from "@/components/ui/field";
 import { FlushFormPage } from "@/components/ui/flush-form-page";
@@ -31,6 +32,7 @@ import {
   requestFromDraft,
   workspaceAgentDefaultsDraft,
   type AgentCapabilityDraft,
+  type AgentCapabilityId,
 } from "@/lib/agent-capabilities";
 
 export const IDENTITY_PLACEHOLDER =
@@ -98,6 +100,16 @@ export function SessionDefaultsPage({
     !identity.trim() &&
     saved?.identitySource !== "legacy_agent_instructions";
   const readOnlyReason = canManage ? undefined : "Only workspace admins can change these.";
+  // Knowledge and Skills: whether their saves need an OK is Agent learning.
+  const learningAside = (id: AgentCapabilityId) =>
+    id === "knowledge" || id === "skills" ? (
+      <>
+        Whether its saves need your OK:{" "}
+        <InAppHelpLink href={`/workspaces/${workspaceId}/state?page=learning`}>
+          Agent learning
+        </InAppHelpLink>
+      </>
+    ) : null;
 
   async function save(): Promise<boolean> {
     if (!workspace || !draft || !saved || !canManage) return false;
@@ -159,7 +171,8 @@ export function SessionDefaultsPage({
             availability={availability}
             disabled={!canManage}
             startingPointLabel="What agents can do"
-            startingPointDescription="People can still change this for one chat from the composer."
+            startingPointDescription="People can change this for one chat in the composer or in the chat's Agent tab."
+            rowAside={learningAside}
           />
           <Field
             label="Who the agent is"

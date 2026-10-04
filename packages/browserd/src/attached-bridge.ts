@@ -50,6 +50,7 @@ export class AttachedBrowserBridgeError extends Error {
       | "fenced"
       | "timeout"
       | "bridge_failed"
+      | "debugger_unavailable"
       | "driver_rejected",
     message: string,
     readonly retryable: boolean,
@@ -397,8 +398,19 @@ async function connectLoopback(port: number, timeoutMs: number): Promise<Socket>
 }
 
 function errorFromWire(error: BridgeWireError): AttachedBrowserBridgeError {
-  const code = ["resource_unavailable", "fenced", "timeout", "bridge_failed"].includes(error.code)
-    ? (error.code as "resource_unavailable" | "fenced" | "timeout" | "bridge_failed")
+  const code = [
+    "resource_unavailable",
+    "fenced",
+    "timeout",
+    "bridge_failed",
+    "debugger_unavailable",
+  ].includes(error.code)
+    ? (error.code as
+        | "resource_unavailable"
+        | "fenced"
+        | "timeout"
+        | "bridge_failed"
+        | "debugger_unavailable")
     : "driver_rejected";
   return new AttachedBrowserBridgeError(code, error.message, error.retryable);
 }

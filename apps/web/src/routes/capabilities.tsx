@@ -99,6 +99,7 @@ import {
   nativeProviderAvailable,
 } from "@/components/capabilities/native-connect-readiness";
 import { useCapabilitiesCatalog } from "@/components/capabilities/use-capabilities-catalog";
+import { useCatalogConnectionAccounts } from "@/components/capabilities/use-catalog-connection-accounts";
 import { useAtlassianIntegration } from "@/components/capabilities/use-atlassian-integration";
 import { useGitHubIntegration } from "@/components/capabilities/use-github-integration";
 import { useGoogleDriveIntegration } from "@/components/capabilities/use-google-drive-integration";
@@ -809,6 +810,18 @@ function CapabilitiesBody({ workspaceId, initialSection, slackLinkToken }: Capab
     context.accessContext === null
       ? null
       : hasWorkspacePermission(context.accessContext, workspaceId, "connections:read");
+  const catalogConnectionAccounts = useCatalogConnectionAccounts(
+    client,
+    workspaceId,
+    authorityKey,
+    canReadConnections,
+    Boolean(
+      selectedItem?.kind === "mcp" &&
+      selectedItem.surfaceType !== "codex_apps" &&
+      selectedItem.connectionRef?.authoritySource !== "host",
+    ),
+    catalogData.revision,
+  );
 
   useEffect(() => {
     void refresh();
@@ -1593,6 +1606,7 @@ function CapabilitiesBody({ workspaceId, initialSection, slackLinkToken }: Capab
           tokenAvailable: nativeProviderAvailable(nativeConnectCatalog, "fiken-token"),
         }}
         socialConnections={selectedSocialConnections}
+        connectionAccounts={catalogConnectionAccounts}
         canManageSocial={canManageSocial}
         socialSetupAvailable={selectedSocialSetupAvailable}
         canManageSkills={canManageSkills}

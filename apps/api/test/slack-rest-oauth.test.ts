@@ -216,7 +216,15 @@ describe("Slack API-backed personal OAuth", () => {
   test.each(["personal", "workspace"] as const)(
     "%s account callback verifies the Web API and saves the reviewed tools without an installed bot",
     async (ownership) => {
-      const provider = await fixture();
+      const provider = await fixture({
+        identity: {
+          ok: true,
+          team_id: "T_EXTERNAL",
+          user_id: "U_EXTERNAL",
+          team: "Example Community",
+          user: "member",
+        },
+      });
       try {
         const begun = await provider.begin(ownership);
         expect(begun.authorizationUrl.searchParams.get("scope")?.split(" ")).toEqual([
@@ -248,6 +256,8 @@ describe("Slack API-backed personal OAuth", () => {
           mcpUrl: OFFICIAL_SLACK_MCP_URL,
           slackTeamId: "T_EXTERNAL",
           slackUserId: "U_EXTERNAL",
+          slackTeamName: "Example Community",
+          slackUserName: "member",
           mcpToolsVerification: { status: "ok", toolCount: 9 },
         });
         expect(

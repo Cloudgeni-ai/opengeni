@@ -553,6 +553,39 @@ describe("connections routes", () => {
     }
   });
 
+  test("account settings inventory includes inactive shared accounts only when explicitly requested", async () => {
+    if (!available) throw new Error("Account inventory proof requires the PostgreSQL test fixture");
+    const workspace = await freshWorkspace();
+    const connection = await createConnection(client.db, {
+      ...workspace,
+      subjectId: null,
+      providerDomain: "mcp.example.test",
+      kind: "api_key",
+      status: "needs_reauth",
+      credentialEncrypted: "encrypted-fixture",
+    });
+    const headers = { authorization: await bearer(workspace, "subject-a", ["connections:read"]) };
+    const api = app();
+    const path = `/v1/workspaces/${workspace.workspaceId}/connections/accounts`;
+    const active = await api.request(path, { headers });
+    expect(active.status).toBe(200);
+    expect((await active.json()).connections).toEqual([]);
+    const all = await api.request(`${path}?includeInactive=true`, { headers });
+    expect(all.status).toBe(200);
+    const body = await all.json();
+    expect(body.connections.map((row: { id: string }) => row.id)).toEqual([connection.id]);
+    expect(body.connections[0].status).toBe("needs_reauth");
+    expect(body.connections[0].credentialEncrypted).toBeUndefined();
+    expect((await api.request(`${path}?includeInactive=invalid`, { headers })).status).toBe(400);
+    expect(
+      (
+        await api.request(`${path}?includeInactive=true`, {
+          headers: { authorization: await bearer(workspace, "subject-a", ["sessions:read"]) },
+        })
+      ).status,
+    ).toBe(403);
+  });
+
   test("manual connection ownership defaults to workspace and personal binds only the caller", async () => {
     if (!available) return;
     const workspace = await freshWorkspace();

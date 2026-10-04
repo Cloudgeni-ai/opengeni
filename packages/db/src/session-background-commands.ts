@@ -75,6 +75,197 @@ type ConnectedMachineBackgroundCommandClaimRow = {
   reconcileProofObservedAt: Date | string | null;
 };
 
+export type ConnectedCommandOutputReceipt = { exitSeq: string; attachGeneration: string };
+type ConnectedCommandOutputIdentity = SessionCommandIdentity & {
+  controlWorkspaceId: string;
+  enrollmentId: string;
+  connectionInstanceId: string;
+  opId: string;
+};
+export type ConnectedCommandOutputClaim = ConnectedCommandOutputIdentity & {
+  claimId: string;
+  reconcileAttempts: number;
+  receipt: ConnectedCommandOutputReceipt | null;
+};
+
+function connectedOutputIdentityWhere(input: ConnectedCommandOutputIdentity) {
+  const command = schema.sessionBackgroundCommands;
+  return and(
+    eq(command.id, input.commandId),
+    eq(command.accountId, input.accountId),
+    eq(command.workspaceId, input.workspaceId),
+    eq(command.sessionId, input.sessionId),
+    eq(command.provider, "connected_machine"),
+    eq(command.state, "exited"),
+    eq(command.controlWorkspaceId, input.controlWorkspaceId),
+    eq(command.enrollmentId, input.enrollmentId),
+    eq(command.connectionInstanceId, input.connectionInstanceId),
+    eq(command.opId, input.opId),
+  );
+}
+
+/** Record full output custody only after the caller's verified, awaited capture.
+ * Terminal observation is insufficient. The persisted receipt is the retry
+ * obligation even when the capturing worker disappears before publishing ACK. */
+export async function recordConnectedCommandOutputConsumption(
+  db: Database,
+  input: ConnectedCommandOutputIdentity & {
+    receipt: ConnectedCommandOutputReceipt;
+    exitCode: number;
+  },
+): Promise<void> {
+  for (const value of [input.receipt.exitSeq, input.receipt.attachGeneration]) {
+    if (!/^[1-9][0-9]{0,19}$/.test(value) || BigInt(value) > 18446744073709551615n)
+      throw new Error("Connected command output receipt has an invalid frontier");
+  }
+  await withSessionActivityRlsContext(db, input, async (tx) => {
+    await lockSessionEventWriteRows(tx, {
+      workspaceId: input.workspaceId,
+      controlLock: "share",
+      sessionIds: [input.sessionId],
+    });
+    const command = schema.sessionBackgroundCommands;
+    const [current] = await tx
+      .select()
+      .from(command)
+      .where(connectedOutputIdentityWhere(input))
+      .for("update")
+      .limit(1);
+    if (!current || current.exitCode !== input.exitCode || current.outputUnavailableAt !== null)
+      throw new Error("Connected command output receipt disagrees with its exact terminal owner");
+    if (current.outputExitSeq !== null) {
+      if (current.outputExitSeq !== input.receipt.exitSeq)
+        throw new Error("Connected command output retry changed its durable exit frontier");
+      return;
+    }
+    await tx
+      .update(command)
+      .set({
+        outputExitSeq: input.receipt.exitSeq,
+        outputAttachGeneration: input.receipt.attachGeneration,
+        outputConsumedAt: new Date(),
+        reconcileAfter: new Date(),
+        updatedAt: new Date(),
+      })
+      .where(connectedOutputIdentityWhere(input));
+  });
+}
+
+/** A separate terminal-only inventory keeps rolling old workers from receiving
+ * unfamiliar states and never borrows the mutable enrollment's current route. */
+export async function claimConnectedCommandOutputReleases(
+  db: Database,
+  input: { claimId: string; limit: number; claimTtlMs: number; dueBefore?: Date },
+): Promise<ConnectedCommandOutputClaim[]> {
+  if (
+    !Number.isSafeInteger(input.limit) ||
+    input.limit < 1 ||
+    input.limit > 100 ||
+    !Number.isSafeInteger(input.claimTtlMs) ||
+    input.claimTtlMs < 0 ||
+    input.claimTtlMs > 3_600_000
+  )
+    throw new Error("Connected command output claim bounds are invalid");
+  const rows = await db.execute<
+    ConnectedMachineBackgroundCommandClaimRow & {
+      outputExitSeq: string | null;
+      outputAttachGeneration: string | null;
+    }
+  >(sql`
+    select account_id as "accountId", workspace_id as "workspaceId", session_id as "sessionId",
+      command_id as "commandId", claim_id as "claimId", command_state as "commandState",
+      control_workspace_id as "controlWorkspaceId", enrollment_id as "enrollmentId",
+      connection_instance_id as "connectionInstanceId", op_id as "opId",
+      reconcile_attempts as "reconcileAttempts", output_exit_seq as "outputExitSeq",
+      output_attach_generation as "outputAttachGeneration"
+    from opengeni_private.claim_connected_command_output_releases(
+      ${input.claimId}::uuid, ${input.limit}::integer, ${input.claimTtlMs}::bigint,
+      ${(input.dueBefore ?? new Date()).toISOString()}::timestamptz
+    )
+  `);
+  return rows.map(
+    (
+      row: ConnectedMachineBackgroundCommandClaimRow & {
+        outputExitSeq: string | null;
+        outputAttachGeneration: string | null;
+      },
+    ) => {
+      if (row.commandState !== "exited") throw new Error("Output release claim is not terminal");
+      return {
+        commandId: row.commandId,
+        accountId: row.accountId,
+        workspaceId: row.workspaceId,
+        sessionId: row.sessionId,
+        claimId: row.claimId,
+        controlWorkspaceId: row.controlWorkspaceId,
+        enrollmentId: row.enrollmentId,
+        connectionInstanceId: row.connectionInstanceId,
+        opId: row.opId,
+        reconcileAttempts: Number(row.reconcileAttempts),
+        receipt:
+          row.outputExitSeq !== null && row.outputAttachGeneration !== null
+            ? { exitSeq: row.outputExitSeq, attachGeneration: row.outputAttachGeneration }
+            : null,
+      };
+    },
+  );
+}
+
+/** Publish success is only a retry milestone. Stop retrying only after an exact
+ * native absence observation, or record pre-capture loss explicitly as missing
+ * output. Neither outcome is a model-completion acknowledgement. */
+export async function settleConnectedCommandOutputReleaseClaim(
+  db: Database,
+  input: {
+    claim: ConnectedCommandOutputClaim;
+    outcome: "published" | "not_retained" | "unavailable" | "retry";
+    retryAfterMs: number;
+  },
+): Promise<boolean> {
+  if (!Number.isSafeInteger(input.retryAfterMs) || input.retryAfterMs < 0)
+    throw new Error("Connected command output retry delay is invalid");
+  return await withSessionActivityRlsContext(db, input.claim, async (tx) => {
+    await lockSessionEventWriteRows(tx, {
+      workspaceId: input.claim.workspaceId,
+      controlLock: "share",
+      sessionIds: [input.claim.sessionId],
+    });
+    const command = schema.sessionBackgroundCommands;
+    const rows = await tx
+      .update(command)
+      .set({
+        ...(input.outcome === "not_retained" ? { outputReleaseObservedAt: new Date() } : {}),
+        ...(input.outcome === "unavailable" ? { outputUnavailableAt: new Date() } : {}),
+        reconcileAfter: new Date(Date.now() + input.retryAfterMs),
+        reconcileClaimId: null,
+        reconcileClaimedAt: null,
+        lastReconcileOutcome:
+          input.outcome === "not_retained"
+            ? "output_released"
+            : input.outcome === "published"
+              ? "output_ack_published"
+              : input.outcome === "unavailable"
+                ? "output_unavailable"
+                : "output_retry",
+        updatedAt: new Date(),
+      })
+      .where(
+        and(
+          connectedOutputIdentityWhere(input.claim),
+          eq(command.reconcileClaimId, input.claim.claimId),
+          sql`${command.outputReleaseObservedAt} is null and ${command.outputUnavailableAt} is null`,
+          ...(input.outcome === "unavailable"
+            ? [sql`${command.outputConsumedAt} is null`]
+            : input.outcome !== "retry"
+              ? [sql`${command.outputConsumedAt} is not null`]
+              : []),
+        ),
+      )
+      .returning({ id: command.id });
+    return rows.length === 1;
+  });
+}
+
 function commandPreview(value: string): string {
   if (value.length <= 512) return value;
   let preview = value.slice(0, 511);

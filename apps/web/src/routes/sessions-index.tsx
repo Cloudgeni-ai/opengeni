@@ -311,7 +311,6 @@ function SessionsIndexRouteContent({
     { panel: "capabilities"; nonce: number } | undefined
   >(undefined);
   // "+" > Capabilities: the workspace's defaults, or this chat's own choice.
-  const agentConfigEnabled = context.clientConfig.agentConfig?.enabled === true;
   const agentAvailability = useMemo(
     () => capabilityAvailability(context.clientConfig.agentConfig),
     [context.clientConfig.agentConfig],
@@ -324,32 +323,30 @@ function SessionsIndexRouteContent({
       }),
     [workspace?.settings],
   );
-  const composerAgentCapabilities = agentConfigEnabled
-    ? {
-        customized: draft.agentCapabilities !== undefined,
-        draft:
-          draft.agentCapabilities !== undefined
-            ? draftFromRequest(draft.agentCapabilities)
-            : workspaceAgentDraft,
-        availability: agentAvailability,
-        onCustomizedChange: (customized: boolean) =>
-          setDraft((current) => {
-            if (!customized) {
-              const { agentCapabilities: _dropped, ...rest } = current;
-              return rest;
-            }
-            return {
-              ...current,
-              agentCapabilities: requestFromDraft(workspaceAgentDraft, agentAvailability),
-            };
-          }),
-        onChange: (next: AgentCapabilityDraft) =>
-          setDraft((current) => ({
-            ...current,
-            agentCapabilities: requestFromDraft(next, agentAvailability),
-          })),
-      }
-    : undefined;
+  const composerAgentCapabilities = {
+    customized: draft.agentCapabilities !== undefined,
+    draft:
+      draft.agentCapabilities !== undefined
+        ? draftFromRequest(draft.agentCapabilities)
+        : workspaceAgentDraft,
+    availability: agentAvailability,
+    onCustomizedChange: (customized: boolean) =>
+      setDraft((current) => {
+        if (!customized) {
+          const { agentCapabilities: _dropped, ...rest } = current;
+          return rest;
+        }
+        return {
+          ...current,
+          agentCapabilities: requestFromDraft(workspaceAgentDraft, agentAvailability),
+        };
+      }),
+    onChange: (next: AgentCapabilityDraft) =>
+      setDraft((current) => ({
+        ...current,
+        agentCapabilities: requestFromDraft(next, agentAvailability),
+      })),
+  };
   const attachments = useDraftAttachments(
     workspaceId,
     personalWorkspace || draft.visibility === "private" ? "personal" : "workspace",
@@ -1684,14 +1681,10 @@ function SessionsIndexRouteContent({
                     },
                   }}
                   menuSide="bottom"
-                  {...(composerAgentCapabilities
-                    ? {
-                        agentCapabilities: {
-                          ...composerAgentCapabilities,
-                          disabled: busy || newSessionDraft.loading,
-                        },
-                      }
-                    : {})}
+                  agentCapabilities={{
+                    ...composerAgentCapabilities,
+                    disabled: busy || newSessionDraft.loading,
+                  }}
                   draftChatSettings={{
                     workspaceId,
                     scope:
@@ -1806,7 +1799,7 @@ function SessionsIndexRouteContent({
                       }
                     : {})}
                 />
-                {composerAgentCapabilities?.customized ? (
+                {composerAgentCapabilities.customized ? (
                   <ComposerCapabilitiesChip
                     summary={capabilitySummary(
                       composerAgentCapabilities.draft.values,

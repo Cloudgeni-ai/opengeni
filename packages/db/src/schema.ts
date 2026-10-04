@@ -10595,6 +10595,13 @@ export const sessionBackgroundCommands = pgTable(
     reconcileProofObservedAt: timestamp("reconcile_proof_observed_at", {
       withTimezone: true,
     }),
+    // Independent output custody. Neither terminal state nor model observation
+    // licenses native output collection. Pending releases survive worker loss.
+    outputExitSeq: text("output_exit_seq"),
+    outputAttachGeneration: text("output_attach_generation"),
+    outputConsumedAt: timestamp("output_consumed_at", { withTimezone: true }),
+    outputReleaseObservedAt: timestamp("output_release_observed_at", { withTimezone: true }),
+    outputUnavailableAt: timestamp("output_unavailable_at", { withTimezone: true }),
     updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
   },
   (table) => ({
@@ -10638,6 +10645,29 @@ export const sessionBackgroundCommands = pgTable(
     connectedOp: uniqueIndex("session_background_commands_connected_op_uq")
       .on(table.controlWorkspaceId, table.enrollmentId, table.connectionInstanceId, table.opId)
       .where(sql`${table.provider} = 'connected_machine'`),
+    outputReleasePending: index("session_background_commands_output_release_idx").on(
+      table.reconcileAfter,
+      table.startedAt,
+      table.id,
+    ).where(sql`${table.provider} = 'connected_machine' and ${table.state} = 'exited'
+        and ${table.outputReleaseObservedAt} is null and ${table.outputUnavailableAt} is null`),
+    outputCustodyValid: check(
+      "session_background_commands_output_custody_check",
+      sql`(
+        ${table.outputExitSeq} is null and ${table.outputAttachGeneration} is null
+        and ${table.outputConsumedAt} is null and ${table.outputReleaseObservedAt} is null
+        and (${table.outputUnavailableAt} is null or
+          (${table.provider} = 'connected_machine' and ${table.state} = 'exited'))
+      ) or (
+        ${table.provider} = 'connected_machine' and ${table.state} = 'exited'
+        and ${table.outputExitSeq} is not null and ${table.outputAttachGeneration} is not null
+        and ${table.outputConsumedAt} is not null and ${table.outputUnavailableAt} is null
+        and ${table.outputExitSeq} ~ '^[1-9][0-9]{0,19}$'
+        and ${table.outputAttachGeneration} ~ '^[1-9][0-9]{0,19}$'
+        and ${table.outputExitSeq}::numeric <= 18446744073709551615
+        and ${table.outputAttachGeneration}::numeric <= 18446744073709551615
+      )`,
+    ),
     activeSession: index("session_background_commands_active_session_idx")
       .on(table.workspaceId, table.sessionId, table.state, table.startedAt, table.id)
       .where(sql`${table.state} in ('running', 'stopping')`),
