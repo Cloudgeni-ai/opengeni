@@ -165,7 +165,8 @@
     "./session-list-entries": {
       "types": "./src/session-list-entries.ts",
       "default": "./src/session-list-entries.ts"
-    }
+    },
+    "./package.json": "./package.json"
   },
   "publishConfig": {
     "access": "public",

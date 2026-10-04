@@ -69,7 +69,6 @@ export function testSettings(overrides: Partial<Settings> = {}): Settings {
     managedAuthNewSignupsEnabled: true,
     organizationUserSetupEmailTokenTransport: "fragment",
     organizationUserSetupQueryEdgeSanitizationConfirmed: false,
-    organizationTenancyCanonicalActivationEnabled: false,
     billingMode: "disabled",
     verifiedSignupTrialCreditsEnabled: false,
     sandboxWarmBillingMode: "usage_only",

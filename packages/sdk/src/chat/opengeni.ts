@@ -76,11 +76,12 @@ export class OpenGeni {
   constructor(options: OpenGeniOptions) {
     if (!options.apiKey) throw new TypeError("Opengeni requires an apiKey.");
     this.client = new OpenGeniClient({
-      baseUrl: options.baseUrl ?? DEFAULT_OPENGENI_BASE_URL,
+      // An empty value (a blank `OPENGENI_API_BASE_URL=` in .env) means the default.
+      baseUrl: options.baseUrl?.trim() || DEFAULT_OPENGENI_BASE_URL,
       apiKey: options.apiKey,
       ...(options.fetch ? { fetch: options.fetch } : {}),
     });
-    this.organizationId = options.organizationId ?? "";
+    this.organizationId = options.organizationId?.trim() ?? "";
     this.source = options.source ?? DEFAULT_CHAT_SOURCE;
     this.resolveWorkspaceId = createWorkspaceIdResolver(this.client, {
       organizationId: () => this.resolveOrganizationId(),

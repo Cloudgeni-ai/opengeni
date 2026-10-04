@@ -18,6 +18,7 @@ import {
   updateSessionTitleWithEvent,
 } from "@opengeni/db";
 import { publishDurableSessionEvents } from "@opengeni/events";
+import { recordProviderRecoveryOutcome } from "./provider-recovery-metrics";
 import {
   AssistantMessagePhaseTracker,
   normalizeModelCallUsage,
@@ -1131,6 +1132,15 @@ export async function runTurnStreamAttempt(
               },
             ]);
             attempt.providerRecoveryCount = 0;
+          }
+          if (attempt.providerRecoveryObservation) {
+            recordProviderRecoveryOutcome(observability, {
+              route: attempt.modelMetricRoute,
+              cause: attempt.providerRecoveryObservation.cause,
+              outcome: "recovered",
+              elapsedMs: Date.now() - attempt.providerRecoveryObservation.startedAt,
+            });
+            attempt.providerRecoveryObservation = undefined;
           }
           const rawStreamHistory = (eventing.stream.state as { history?: unknown[] }).history;
           if (Array.isArray(rawStreamHistory)) {
