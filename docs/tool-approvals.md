@@ -31,7 +31,11 @@ and receives a compact waiting handle. Arguments remain in protected storage.
 Waiting releases the execution claim and dispatcher capacity. The ordinary human
 decision transaction and wake outbox resume the same turn; a current authorized
 attempt adopts the exact operation after checking its executable identity.
-Original attempt and catalog references never change.
+Original attempt and catalog references never change. Only an approval-decision
+turn, or a turn whose cheap journal read finds unfinished durable operations,
+waits for full tool preparation before its first model request; every other turn
+keeps the eager-only first-request barrier (`programmatic_operation_recovery`
+startup phase).
 
 Approval resumes a stored operation, not a JavaScript stack. Persist a complete
 selection and chunk plan before submitting changes. Each chunk has its own
