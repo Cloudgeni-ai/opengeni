@@ -18,6 +18,7 @@ import {
 import { ACTION_CATALOG } from "../src/mcp/action-catalog.gen";
 import {
   buildOrganizationMcpServer,
+  organizationMcpIcons,
   READ_ONLY_POST_ACTIONS,
   type OrganizationMcpCaller,
   searchActions,
@@ -182,6 +183,35 @@ describe("organization MCP action catalog", () => {
 });
 
 describe("organization MCP server", () => {
+  test("advertises the brand icons in serverInfo", async () => {
+    const { client } = await connect(person(readOnly));
+    try {
+      const info = client.getServerVersion()!;
+      expect(info.name).toBe("opengeni");
+      expect(info.title).toBe("Opengeni");
+      expect(info.icons?.map(({ mimeType, sizes, theme }) => ({ mimeType, sizes, theme }))).toEqual(
+        [
+          { mimeType: "image/svg+xml", sizes: ["any"], theme: "light" },
+          { mimeType: "image/svg+xml", sizes: ["any"], theme: "dark" },
+        ],
+      );
+      const marks = info.icons!.map(({ src }) => {
+        expect(src.startsWith("data:image/svg+xml;base64,")).toBe(true);
+        return Buffer.from(src.slice(src.indexOf(",") + 1), "base64").toString("utf8");
+      });
+      expect(marks[0]).toContain('fill="#111111"');
+      expect(marks[1]).toContain('fill="#FFFFFF"');
+    } finally {
+      await client.close();
+    }
+    expect(organizationMcpIcons("https://app.example.test").at(-1)).toEqual({
+      src: "https://app.example.test/icon-512.png",
+      mimeType: "image/png",
+      sizes: ["512x512"],
+      theme: "light",
+    });
+  });
+
   test.each(insightsRoutes)(
     "discovers, describes and dispatches %s with the original read-only person proof",
     async (path) => {

@@ -78,6 +78,9 @@ workspace, or selected ones). The connection then acts as that person:
   organization (creating another organization, accepting an invitation) stay
   with the person in the browser; calls return a hint to finish there.
   Organization API keys may call the same server and act as the organization.
+- `initialize` advertises `serverInfo` title `Opengeni` and the brand mark as
+  MCP `icons` (light and dark SVG data URIs, plus `/icon-512.png` on the public
+  origin when `OPENGENI_PUBLIC_BASE_URL` is set) for clients that render them.
 
 Connected agents are listed, changed and disconnected at
 `/v1/organizations/:id/mcp-connections` (browser only; SDK
