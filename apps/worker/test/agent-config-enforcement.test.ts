@@ -622,19 +622,19 @@ function assertLegacyRequestContract(request: ModelRequest) {
   expect(install).toMatchObject({
     type: "function",
     strict: false,
-    parameters: {
-      type: "object",
-      properties: {
-        operationId: { type: "string", format: "uuid" },
-        source: { type: "string", minLength: 1, maxLength: 2048 },
-        expectedInstallationVersion: { type: "integer", minimum: 0 },
-        reason: { type: "string", minLength: 1, maxLength: 2000 },
-      },
-      required: ["operationId", "source", "reason"],
-      additionalProperties: true,
-    },
   });
   if (install?.type !== "function") throw new Error("Skill installation function missing");
+  expect(install.parameters).toEqual({
+    type: "object",
+    properties: {
+      operationId: { type: "string", format: "uuid" },
+      source: { type: "string", minLength: 1, maxLength: 2048 },
+      expectedInstallationVersion: { type: "integer", minimum: 0 },
+      reason: { type: "string", minLength: 1, maxLength: 2000 },
+    },
+    required: ["operationId", "source", "reason"],
+    additionalProperties: true,
+  });
   expect(install.description).toContain("Off prevents agent installation");
   expect(install.description).toContain("requires its current installation version");
 }
@@ -701,6 +701,7 @@ describe("agent configuration reaches the production model request", () => {
     "leaked credential",
     "missing install authority",
     "unversioned install",
+    "widened install schema",
   ] as const)("legacy request contract rejects %s", async (mutation) => {
     const captured = await captureWorkerRequest({ agent: null });
     assertLegacyRequestContract(captured.request);
@@ -721,8 +722,9 @@ describe("agent configuration reaches the production model request", () => {
     } else {
       const install = changed.tools.find((tool) => tool.name === "skill_install");
       if (install?.type !== "function") throw new Error("Skill installation function missing");
-      delete (install.parameters as { properties: Record<string, unknown> }).properties
-        .expectedInstallationVersion;
+      const properties = (install.parameters as { properties: Record<string, unknown> }).properties;
+      if (mutation === "unversioned install") delete properties.expectedInstallationVersion;
+      else properties.unacceptedAuthority = { type: "string" };
     }
     expect(() => assertLegacyRequestContract(changed)).toThrow();
   });
