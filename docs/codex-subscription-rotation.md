@@ -302,13 +302,18 @@ Codex quota adds three deliberately separate product seams:
   token `version`, health, connection, cooldown, quota history, active leases,
   and accepted turns remain independent; reconnect, refresh and redemption never
   auto-enable the row.
-- **Reset redemption** has no SDK method, MCP/Codemode tool, worker activity,
-  scheduled/background hook, or allocator/rotation call. Its REST mutation
-  requires managed product mode, an actual Better Auth cookie with no
-  `Authorization` header, workspace admin, the exact `user:<id>` who most
-  recently connected the credential through a direct cookie session, exact
-  same-origin `Origin`, `Sec-Fetch-Site: same-origin`, and a five-minute
-  session-bound HMAC confirmation. The deployment must configure
+- **Reset redemption** is something a person does: in the web app, or through
+  an agent they signed in to the organization MCP, which acts as them. Nothing
+  redeems automatically: there is no worker activity, scheduled/background
+  hook, or allocator/rotation call. The REST mutation requires managed product
+  mode, `connections:write` for the exact `user:<id>` who most recently
+  connected the credential, and a five-minute HMAC confirmation from
+  `prepare`. A browser caller additionally needs an actual Better Auth cookie
+  with no `Authorization` header, exact same-origin `Origin` and
+  `Sec-Fetch-Site: same-origin`, and its confirmation is bound to that browser
+  session; an agent acting as the person skips those browser-only checks and
+  its confirmation is bound to a stable per-person agent hash. API keys and
+  other bearer tokens are refused. The deployment must configure
   `publicBaseUrl`; the route never derives a trusted origin from request
   `Host`/URL headers. Legacy/nonhuman-connected rows are view-only.
   The overview returns only a closed, secret-free ownership reason. A legacy

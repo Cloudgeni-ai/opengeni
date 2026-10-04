@@ -288,10 +288,11 @@ disabled tools or grant execution outside the current catalog.
   human, not the session creator. Admission reads counters; post-call stopping
   permits overshoot without reservations. Enable new writes only after the
   complete fleet supports enforcement. See `docs/usage-allowances.md`.
-- Codex rate-limit reset credits are never automatic agent capacity. Their
-  irreversible consume path is managed-cookie owning-human web-only with durable
-  provider idempotency; do not add an SDK, MCP, Codemode, worker, scheduled, or
-  allocator/rotation consume hook. See `docs/codex-subscription-rotation.md`.
+- Codex rate-limit reset credits are never automatic agent capacity. Only the
+  owning person redeems them (in the web app, or through an agent they signed
+  in to the organization MCP acting as them), with durable provider
+  idempotency; do not add a worker, scheduled, or allocator/rotation consume
+  hook. See `docs/codex-subscription-rotation.md`.
 
 ## Run Lifecycle (read `docs/run-lifecycle.md` before changing the session workflow, the agent turn activity, or memory)
 
