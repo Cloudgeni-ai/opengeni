@@ -2,6 +2,7 @@ import { afterAll, beforeAll, expect, test } from "bun:test";
 import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/testing";
 import { SessionBackgroundCommand } from "@opengeni/contracts";
 import {
+  applySessionTurnSettlement,
   submitHumanPromptInTransaction,
   bootstrapWorkspace,
   claimSessionWorkForAttempt,
@@ -35,7 +36,49 @@ afterAll(async () => {
   await shared?.release();
 }, 60_000);
 
-async function fixture(command = "printf output", terminal = true) {
+async function submitHumanSend(
+  grant: { accountId: string; workspaceId: string | null; subjectId: string },
+  sessionId: string,
+  text: string,
+) {
+  const workspaceId = grant.workspaceId!;
+  await withWorkspaceSessionActivityRls(client.db, workspaceId, (db) =>
+    db.transaction((tx) =>
+      submitHumanPromptInTransaction(tx as unknown as typeof db, {
+        accountId: grant.accountId,
+        workspaceId,
+        sessionId,
+        subjectId: grant.subjectId,
+        actor: { type: "human", subjectId: grant.subjectId },
+        operationKey: crypto.randomUUID(),
+        delivery: "send",
+        text,
+        resources: [],
+        source: "user",
+        reasoningEffortFallback: "medium",
+      }),
+    ),
+  );
+}
+
+async function claimNext(workspaceId: string, sessionId: string) {
+  const attemptId = crypto.randomUUID();
+  const claim = await claimSessionWorkForAttempt(client.db, workspaceId, {
+    sessionId,
+    workflowId: `session-${sessionId}`,
+    workflowRunId: crypto.randomUUID(),
+    attemptId,
+    dispatchId: crypto.randomUUID(),
+    trigger: { kind: "next" },
+  });
+  if (claim.action !== "claimed") throw new Error(`Expected claim: ${claim.reason}`);
+  return { turn: claim.turn, attemptId };
+}
+
+/** `launchedByHuman` adopts the command from an exact claimed human turn
+ * attempt, as production adoption always does, and settles that turn before
+ * the command exits. */
+async function fixture(command = "printf output", terminal = true, launchedByHuman = false) {
   const suffix = crypto.randomUUID();
   const access = await bootstrapWorkspace(client.db, {
     accountExternalSource: "test",
@@ -66,13 +109,46 @@ async function fixture(command = "printf output", terminal = true) {
     connectionInstanceId: crypto.randomUUID(),
     opId: crypto.randomUUID(),
   };
+  let launch:
+    | { turnId: string; triggerEventId: string; attemptId: string; executionGeneration: number }
+    | undefined;
+  if (launchedByHuman) {
+    await submitHumanSend(grant, session.id, "Start the command");
+    const launched = await claimNext(scope.workspaceId, session.id);
+    launch = {
+      turnId: launched.turn.id,
+      triggerEventId: launched.turn.triggerEventId,
+      attemptId: launched.attemptId,
+      executionGeneration: launched.turn.executionGeneration,
+    };
+  }
   await withWorkspaceSessionActivityRls(client.db, scope.workspaceId, (db) =>
     insertConnectedMachineSessionBackgroundCommandInTransaction(db, {
       ...identity,
       ...provider,
+      ...(launch
+        ? {
+            turnId: launch.turnId,
+            attemptId: launch.attemptId,
+            executionGeneration: launch.executionGeneration,
+          }
+        : {}),
       command,
     }),
   );
+  if (launch) {
+    const settled = await applySessionTurnSettlement(client.db, scope.workspaceId, {
+      sessionId: session.id,
+      turnId: launch.turnId,
+      triggerEventId: launch.triggerEventId,
+      attemptId: launch.attemptId,
+      turnStatus: "completed",
+      sessionStatus: "idle",
+      activeTurnId: null,
+      events: [],
+    });
+    if (settled.action !== "settled") throw new Error("Launching turn did not settle");
+  }
   if (terminal) {
     await settleConnectedMachineSessionBackgroundCommand(client.db, {
       ...identity,
@@ -201,34 +277,11 @@ test("command reads preserve exact text and safely bound unicode previews", asyn
 });
 
 test("terminal reads preserve notification and history delivered by the ordinary claim API", async () => {
-  const { identity, grant } = await fixture();
-  // The terminal notice rides eligible new input; it does not itself wake idle.
-  await withWorkspaceSessionActivityRls(client.db, identity.workspaceId, (db) =>
-    db.transaction((tx) =>
-      submitHumanPromptInTransaction(tx as unknown as typeof db, {
-        accountId: identity.accountId,
-        workspaceId: identity.workspaceId,
-        sessionId: identity.sessionId,
-        subjectId: grant.subjectId,
-        actor: { type: "human", subjectId: grant.subjectId },
-        operationKey: crypto.randomUUID(),
-        delivery: "send",
-        text: "Inspect the command result",
-        resources: [],
-        source: "user",
-        reasoningEffortFallback: "medium",
-      }),
-    ),
-  );
-  const claim = await claimSessionWorkForAttempt(client.db, identity.workspaceId, {
-    sessionId: identity.sessionId,
-    workflowId: `session-${identity.sessionId}`,
-    workflowRunId: crypto.randomUUID(),
-    attemptId: crypto.randomUUID(),
-    dispatchId: crypto.randomUUID(),
-    trigger: { kind: "next" },
-  });
-  expect(claim.action).toBe("claimed");
+  const { identity, grant } = await fixture("printf output", true, true);
+  // The terminal notice rides the same human's eligible new input; it does
+  // not itself wake idle.
+  await submitHumanSend(grant, identity.sessionId, "Inspect the command result");
+  await claimNext(identity.workspaceId, identity.sessionId);
   const updates = () => shared.admin`
     select * from session_system_updates where workspace_id = ${identity.workspaceId}
       and session_id = ${identity.sessionId} and source_id = ${identity.commandId}`;
