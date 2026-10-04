@@ -80,6 +80,12 @@ export const SANDBOX_FILE_PUBLICATION_RUNTIME_ROUTINES = [
   "list_sandbox_file_publications(uuid, uuid, jsonb)",
 ] as const;
 const SANDBOX_FILE_PUBLICATIONS_TABLE = "sandbox_file_publications";
+export const ARTIFACT_PIN_RUNTIME_ROUTINES = [
+  "update_artifact_pin(uuid, uuid, text, text, boolean)",
+  "list_artifact_pins(uuid, uuid)",
+  "list_sandbox_file_publications_pinned(uuid, uuid, jsonb)",
+] as const;
+const ARTIFACT_PINS_TABLE = "artifact_catalog_pins";
 export const SCHEDULED_SLACK_BOT_MESSAGE_RUNTIME_ROUTINES = [
   "prepare_scheduled_slack_bot_message(uuid, uuid, uuid, uuid, uuid, integer, text, text, text)",
   "read_scheduled_slack_bot_message(uuid, uuid, uuid, uuid)",
@@ -1807,6 +1813,8 @@ export type RuntimePrivateTablePosture = {
   truncate?: boolean;
   references?: boolean;
   trigger?: boolean;
+  /** Effective relation ACL privileges not represented by the named flags. */
+  extraPrivileges?: string[];
 };
 
 export type RuntimeDatabasePosture = {
@@ -2119,6 +2127,7 @@ export async function inspectRuntimeDatabasePosture(
         can_truncate: boolean;
         can_references: boolean;
         can_trigger: boolean;
+        extra_privileges: string[];
       }>(
         await tx.execute(sql`
           select
@@ -2128,25 +2137,31 @@ export async function inspectRuntimeDatabasePosture(
             c.relforcerowsecurity as rls_forced,
             row_security_active(c.oid) as rls_active,
             (select count(*)::int from pg_policy policy where policy.polrelid = c.oid) as policy_count,
-            -- Column-only grants on the inventory stamp are also unsafe; in
-            -- particular INSERT can mint authority without a table grant.
+            -- Column-only grants on capability tables are also unsafe; a pin
+            -- table must remain EXECUTE-only even after column ACL drift.
             (has_table_privilege(current_user, c.oid, 'SELECT') or
-              ((c.relname in ('modal_native_origin_read_capabilities','modal_inventory_read_capabilities','usage_allowance_capabilities','session_import_batches') or
+              ((c.relname in ('modal_native_origin_read_capabilities','modal_inventory_read_capabilities','usage_allowance_capabilities','session_import_batches', ${ARTIFACT_PINS_TABLE}) or
                 c.relname in (select jsonb_array_elements_text(${JSON.stringify(RUNTIME_ALLOWANCE_PRIVATE_TABLES)}::jsonb))) and
                 has_any_column_privilege(current_user, c.oid, 'SELECT'))) as can_select,
             (has_table_privilege(current_user, c.oid, 'INSERT') or
-              ((c.relname in ('modal_native_origin_read_capabilities','modal_inventory_read_capabilities','usage_allowance_capabilities','session_import_batches') or
+              ((c.relname in ('modal_native_origin_read_capabilities','modal_inventory_read_capabilities','usage_allowance_capabilities','session_import_batches', ${ARTIFACT_PINS_TABLE}) or
                 c.relname in (select jsonb_array_elements_text(${JSON.stringify(RUNTIME_ALLOWANCE_PRIVATE_TABLES)}::jsonb))) and
                 has_any_column_privilege(current_user, c.oid, 'INSERT'))) as can_insert,
             (has_table_privilege(current_user, c.oid, 'UPDATE') or
-              ((c.relname in ('modal_native_origin_read_capabilities','modal_inventory_read_capabilities','usage_allowance_capabilities','session_import_batches') or
+              ((c.relname in ('modal_native_origin_read_capabilities','modal_inventory_read_capabilities','usage_allowance_capabilities','session_import_batches', ${ARTIFACT_PINS_TABLE}) or
                 c.relname in (select jsonb_array_elements_text(${JSON.stringify(RUNTIME_ALLOWANCE_PRIVATE_TABLES)}::jsonb))) and
                 has_any_column_privilege(current_user, c.oid, 'UPDATE'))) as can_update,
             has_table_privilege(current_user, c.oid, 'DELETE') as can_delete,
             has_table_privilege(current_user, c.oid, 'TRUNCATE') as can_truncate,
             (has_table_privilege(current_user, c.oid, 'REFERENCES') or
               has_any_column_privilege(current_user, c.oid, 'REFERENCES')) as can_references,
-            has_table_privilege(current_user, c.oid, 'TRIGGER') as can_trigger
+            has_table_privilege(current_user, c.oid, 'TRIGGER') as can_trigger,
+            CASE WHEN c.relname = ${ARTIFACT_PINS_TABLE} THEN ARRAY(
+              SELECT DISTINCT acl.privilege_type FROM aclexplode(coalesce(c.relacl, acldefault('r', c.relowner))) acl
+              WHERE acl.privilege_type NOT IN ('SELECT','INSERT','UPDATE','DELETE','TRUNCATE','REFERENCES','TRIGGER')
+                AND CASE WHEN acl.grantee = 0 THEN true ELSE pg_has_role(current_user, acl.grantee, 'USAGE') END
+              ORDER BY acl.privilege_type
+            ) ELSE ARRAY[]::text[] END AS extra_privileges
           from pg_class c
           join pg_namespace n on n.oid = c.relnamespace
           where n.nspname = 'opengeni_private'
@@ -2160,6 +2175,7 @@ export async function inspectRuntimeDatabasePosture(
               ${SCOPED_COMPUTE_CAPABILITY_TABLE},
               ${CONNECTION_TENANCY_BACKFILL_CAPABILITY_TABLE},
               ${SANDBOX_FILE_PUBLICATIONS_TABLE},
+              ${ARTIFACT_PINS_TABLE},
               ${SCHEDULED_SLACK_BOT_MESSAGES_TABLE},
               ${ORGANIZATION_SIGNUP_USE_CASES_TABLE},
               ${SLACK_FILE_UPLOAD_OPERATIONS_TABLE},
@@ -2198,6 +2214,7 @@ export async function inspectRuntimeDatabasePosture(
         truncate: row.can_truncate,
         references: row.can_references,
         trigger: row.can_trigger,
+        ...(row.extra_privileges?.length ? { extraPrivileges: row.extra_privileges } : {}),
       }));
 
       const targetRoutines = resultRows<{
@@ -3888,6 +3905,47 @@ export function evaluateRuntimeDatabasePosture(
       ) {
         violations.push(`sandbox file publication capability ${name} is missing or unsafe`);
       }
+    }
+  }
+
+  const pinTables = posture.privateTables.filter((table) => table.name === ARTIFACT_PINS_TABLE);
+  if (pinTables.length !== 1) {
+    if (!options.protectedTables)
+      violations.push("artifact pin private relation is missing or ambiguous");
+  } else {
+    const table = pinTables[0]!;
+    if (!table.rlsEnabled || !table.rlsForced || !table.rlsActive || (table.policyCount ?? 0) < 1)
+      violations.push("artifact pin relation lacks active FORCE-RLS workspace isolation");
+    if (
+      table.select ||
+      table.insert ||
+      table.update ||
+      table.delete ||
+      table.truncate ||
+      table.references ||
+      table.trigger ||
+      table.extraPrivileges?.length ||
+      table.owner === expectedRole
+    )
+      violations.push("runtime role has forbidden direct artifact pin authority");
+    if (tableByName.get("files")?.owner && table.owner !== tableByName.get("files")!.owner)
+      violations.push("artifact pin owner does not match workspace authority");
+    const quotedSchema = `"${targetSchema.replaceAll('"', '""')}"`;
+    const searchPaths = new Set([
+      `search_path=pg_catalog, ${quotedSchema}, pg_temp`,
+      `search_path=pg_catalog, ${/^[a-z_][a-z0-9_]*$/.test(targetSchema) ? targetSchema : quotedSchema}, pg_temp`,
+    ]);
+    for (const name of ARTIFACT_PIN_RUNTIME_ROUTINES) {
+      const routines = posture.privateRoutines.filter((routine) => routine.name === name);
+      if (
+        routines.length !== 1 ||
+        !routines[0]!.execute ||
+        routines[0]!.publicExecute ||
+        !routines[0]!.securityDefiner ||
+        routines[0]!.owner !== table.owner ||
+        !routines[0]!.configuration?.some((configuration) => searchPaths.has(configuration))
+      )
+        violations.push(`artifact pin capability ${name} is missing or unsafe`);
     }
   }
 

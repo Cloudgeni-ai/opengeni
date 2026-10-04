@@ -508,7 +508,7 @@ registration. See [run lifecycle](run-lifecycle.md).
 Global Modal inventory uses an owner-only SELECT capability under FORCE RLS (0497).
 
 `packages/db/src/modal-native-live-origin.ts` is an inert, trusted-server-only
-LIVE-origin projection (0611), not a host authenticator or custody grant. Its
+LIVE-origin projection (0614), not a host authenticator or custody grant. Its
 transaction joins the exact accepted attempt, immutable initiating human,
 current membership/Personal pointer, control, route and execution-authority
 floor before any lease acquisition. Function-lifetime owner-only read
@@ -1506,6 +1506,9 @@ Workspace/session discovery shares `/artifact-catalog` across Sites, editable
 artifacts, generated images, and published files, preserving existing content
 authority. File provenance stays separate from bytes; `kind:id` identifies list
 entries. Browsing never executes Sites or wakes compute.
+Shared pins live in private discovery metadata, not content domains. The catalog
+and its bounded publication branch apply pin-first keysets globally; pin writes
+require publishing and target-domain read authority ([library](artifact-library.md)).
 
 Published-file links use `Markdown.artifactHref`; `retained-file-preview.tsx`
 previews media/PDF via authorized APIs; `sandbox:` opens the inspector.

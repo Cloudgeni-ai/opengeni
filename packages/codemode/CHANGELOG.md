@@ -1,5 +1,17 @@
 # @opengeni/codemode
 
+## 1.0.2
+
+### Patch Changes
+
+- Updated dependencies [43da85e]
+- Updated dependencies [4476ca7]
+- Updated dependencies [e16aa17]
+- Updated dependencies [cbe4357]
+  - @opengeni/sdk@1.0.1
+  - @opengeni/contracts@1.0.1
+  - @opengeni/tool-gateway@1.0.1
+
 ## 1.0.0
 
 ### Major Changes

@@ -2685,7 +2685,8 @@ describe("worker activities integration", () => {
     const completed = events.find((event) => event.type === "turn.completed");
     expect(completed?.payload).toMatchObject({
       segmentLimit: "budget_exhausted",
-      detail: "insufficient OpenGeni credits",
+      // Budget semantics are contractual; product-name capitalization is not.
+      detail: expect.stringMatching(/^insufficient \S+ credits$/),
     });
     expect((await getSession(dbClient.db, grant.workspaceId, session.id))?.status).toBe("idle");
     const balance = await getBillingBalance(dbClient.db, grant.accountId);
@@ -5203,10 +5204,9 @@ describe("worker activities integration", () => {
         const events = await listSessionEvents(dbClient.db, grant.workspaceId, session.id, 0, 200);
         expect(events.some((event) => event.type === "turn.recovery.requested")).toBe(false);
         expect(events.find((event) => event.type === "turn.failed")?.payload).toEqual({
-          error:
-            "The Codex backend rejected this request (HTTP 400) without an error message. " +
-            'The ChatGPT account "Paid Pro" still reports the Pro plan, so OpenGeni did not switch accounts. ' +
-            "Try again, or choose another model if it keeps failing.",
+          error: expect.stringMatching(
+            /^The Codex backend rejected this request \(HTTP 400\) without an error message\. The ChatGPT account "Paid Pro" still reports the Pro plan, so \S+ did not switch accounts\. Try again, or choose another model if it keeps failing\.$/,
+          ),
           code: "codex_request_rejected",
           retryable: false,
           planType: "pro",

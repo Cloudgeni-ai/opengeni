@@ -1,5 +1,7 @@
 # @opengeni/artifact-kernel-wasm-spreadsheet
 
+## 1.0.2
+
 ## 1.0.0
 
 ### Major Changes

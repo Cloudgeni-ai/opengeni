@@ -14,9 +14,28 @@ It also connects your coding agent to your organization through the Opengeni MCP
 
 ## Install
 
-For Claude Code or Codex, add the `Cloudgeni-ai/opengeni` marketplace and install **`opengeni@opengeni`**. For Cursor, import that repository through **Customize → From GitHub Repository**, then install **OpenGeni**.
+The plugin installs from the Opengeni GitHub marketplace, `Cloudgeni-ai/opengeni`.
 
-See the [install commands](https://github.com/Cloudgeni-ai/opengeni/blob/main/docs/developer-plugin.md) for each tool. The plugin has not been published to the universal public directory.
+<Tabs>
+  <Tab title="Claude Code">
+    ```bash
+    claude plugin marketplace add Cloudgeni-ai/opengeni
+    claude plugin install opengeni@opengeni --scope user
+    ```
+  </Tab>
+  <Tab title="Codex">
+    Works in the Codex CLI, IDE extension, and the Codex app.
+
+    ```bash
+    codex plugin marketplace add Cloudgeni-ai/opengeni
+    codex plugin add opengeni@opengeni
+    ```
+
+  </Tab>
+  <Tab title="Cursor">
+    **Customize → From GitHub Repository**, enter `https://github.com/Cloudgeni-ai/opengeni`, then install **Opengeni**.
+  </Tab>
+</Tabs>
 
 To sign in ahead of time, run `/mcp` in Claude Code and select `opengeni`, or run `codex mcp login opengeni`.
 
