@@ -42,7 +42,7 @@ Pinning and unpinning require `artifacts:publish` plus the target's existing
 application seam, and private files remain owner-filtered. Missing, hidden,
 foreign-workspace and kind-mismatched targets are not pin-mutable. A pin never
 grants content access or exposes otherwise unreadable items or provenance.
-Migration `0609_artifact_catalog_pins.sql` adds only private FORCE-RLS metadata
+Migration `0610_artifact_catalog_pins.sql` adds only private FORCE-RLS metadata
 and fixed-search-path, tenant-scoped EXECUTE capabilities; runtime roles get no
 direct pin-table privileges. The original publication capability is unchanged
 so pre-pin binaries retain their schema/runtime-posture contract during rollout.

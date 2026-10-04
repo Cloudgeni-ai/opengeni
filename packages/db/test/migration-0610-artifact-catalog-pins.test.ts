@@ -2,7 +2,7 @@ import { expect, test } from "bun:test";
 
 test("pins expand private metadata through fixed-path scoped capabilities without altering old publication APIs", async () => {
   const source = await Bun.file(
-    new URL("../drizzle/0609_artifact_catalog_pins.sql", import.meta.url),
+    new URL("../drizzle/0610_artifact_catalog_pins.sql", import.meta.url),
   ).text();
   expect(source.startsWith("-- deployment-mode: rolling\n")).toBe(true);
   expect(source).toContain("PRIMARY KEY (account_id, workspace_id, kind, artifact_id)");
