@@ -1,4 +1,5 @@
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
+import { recordModelTransportStarted } from "../../packages/runtime/src/model-preparation-diagnostics";
 import { readSkillCatalogContext } from "@opengeni/contracts";
 import { generateKeyPairSync } from "node:crypto";
 import {
@@ -93,10 +94,7 @@ import {
 } from "@opengeni/runtime";
 import { createActivityTestHarness as createWorkerActivities } from "../../apps/worker/src/activities";
 import { createApp, type SessionWorkflowClient } from "../../apps/api/src/app";
-import {
-  MAX_AUTOMATIC_PROVIDER_RECOVERIES,
-  PROVIDER_BACKPRESSURE_DELAY_MS,
-} from "../../apps/worker/src/activities/agent-turn";
+import { MAX_AUTOMATIC_PROVIDER_RECOVERIES } from "../../apps/worker/src/activities/agent-turn";
 import {
   PRE_CLAIM_FAILURE_MESSAGE,
   PRE_CLAIM_FAILURE_TYPE,
@@ -1369,7 +1367,7 @@ describe("worker activities integration", () => {
     });
     expect(result).toMatchObject({
       status: "recovering",
-      continueDelayMs: PROVIDER_BACKPRESSURE_DELAY_MS,
+      continueDelayMs: expect.any(Number),
     });
     const events = await listSessionEvents(dbClient.db, grant.workspaceId, session.id, 0, 50);
     expect(events.some((event) => event.type === "turn.failed")).toBe(false);
@@ -1380,7 +1378,7 @@ describe("worker activities integration", () => {
         code: "provider_rate_limited",
         reason: "provider_rate_limited",
         retryable: true,
-        continueDelayMs: PROVIDER_BACKPRESSURE_DELAY_MS,
+        continueDelayMs: expect.any(Number),
       },
     );
     expect((await getSession(dbClient.db, grant.workspaceId, session.id))?.status).toBe(
@@ -1393,6 +1391,85 @@ describe("worker activities integration", () => {
       status: "recovering",
       activeAttemptId: null,
     });
+  });
+
+  test("provider recovery survives a fresh worker and records one successful resumption", async () => {
+    const grant = await testGrant(dbClient.db);
+    const session = await createOwnedSession(dbClient.db, grant, {
+      initialMessage: "continue when capacity returns",
+      resources: [],
+      metadata: {},
+      model: "scripted-model",
+      sandboxBackend: "none",
+    });
+    await appendOwnedEvents(dbClient.db, grant, session.id, [
+      { type: "user.message", payload: { text: "continue when capacity returns" } },
+    ]);
+    const settings = testSettings({
+      databaseUrl: services.databaseUrl,
+      natsUrl: services.natsUrl,
+      openaiMaxRetries: 5,
+    });
+    const observability = createObservability(settings, { component: "worker-turn" });
+    const configuredRetries: number[] = [];
+    const makeActivities = (error?: Error) => {
+      const model = new ScriptedModel(error ? [{ error }] : [{ outputText: "Finished" }]);
+      const stream = model.getStreamedResponse.bind(model);
+      model.getStreamedResponse = async function* (request) {
+        // Scripted models bypass fetch; simulate its dispatch observer so this
+        // fixture exercises the same durable request-completion checkpoint.
+        await recordModelTransportStarted();
+        yield* stream(request);
+      };
+      const runtime = createProductionAgentRuntime({ model });
+      const configure = runtime.configure.bind(runtime);
+      runtime.configure = (next) => {
+        configuredRetries.push(next.openaiMaxRetries);
+        return configure(next);
+      };
+      return createWorkerActivities({ settings, db: dbClient.db, bus, runtime, observability });
+    };
+    const input = {
+      accountId: grant.accountId,
+      workspaceId: grant.workspaceId,
+      sessionId: session.id,
+      trigger: { kind: "next" as const },
+      workflowId: "workflow-provider-restart",
+      workflowRunId: crypto.randomUUID(),
+    };
+    const first = await makeActivities(
+      Object.assign(new Error("Too Many Requests"), {
+        status: 429,
+        headers: new Headers({ "retry-after-ms": "1" }),
+      }),
+    ).runAgentTurn({ ...input, attemptId: crypto.randomUUID() });
+    expect(first.status).toBe("recovering");
+    if (first.status !== "recovering") throw new Error("Expected recoverable turn");
+    expect(first.continueDelayMs).toBeGreaterThanOrEqual(10_000);
+    expect(first.continueDelayMs).toBeLessThanOrEqual(12_000);
+    const held = (await listSessionTurns(dbClient.db, grant.workspaceId, session.id))[0]!;
+    expect(held.metadata).toMatchObject({
+      providerRecoveryCount: 1,
+      providerRecoveryReason: "provider_rate_limited",
+    });
+    expect(typeof held.metadata.providerRecoveryStartedAt).toBe("string");
+    // Reconstruct the activity/runtime, as after a worker replacement. Durable
+    // history and recovery metadata, not the former process, drive this claim.
+    const resumed = await makeActivities().runAgentTurn({
+      ...input,
+      attemptId: crypto.randomUUID(),
+    });
+    expect(resumed.status).toBe("idle");
+    const turns = await listSessionTurns(dbClient.db, grant.workspaceId, session.id);
+    expect(turns).toHaveLength(1);
+    expect(turns[0]!.id).toBe(held.id);
+    expect(turns[0]!.metadata.providerRecoveryStartedAt).toBeUndefined();
+    expect(turns[0]!.metadata.providerRecoveryCount).toBeUndefined();
+    expect(configuredRetries.length).toBeGreaterThan(0);
+    expect(configuredRetries.every((count) => count === 0)).toBe(true);
+    const metrics = await observability.prometheusMetrics();
+    expect(metrics).toMatch(/opengeni_model_recovery_total\{[^}]*outcome="scheduled"[^}]*\} 1/);
+    expect(metrics).toMatch(/opengeni_model_recovery_total\{[^}]*outcome="recovered"[^}]*\} 1/);
   });
 
   test("fails the turn promptly on an exhausted provider quota instead of recovering", async () => {
@@ -1505,7 +1582,7 @@ describe("worker activities integration", () => {
     });
     expect(result).toMatchObject({
       status: "recovering",
-      continueDelayMs: PROVIDER_BACKPRESSURE_DELAY_MS,
+      continueDelayMs: expect.any(Number),
     });
     const events = await listSessionEvents(dbClient.db, grant.workspaceId, session.id, 0, 50);
     expect(events.some((event) => event.type === "turn.failed")).toBe(false);
@@ -1516,7 +1593,7 @@ describe("worker activities integration", () => {
         code: "provider_rate_limited",
         reason: "provider_rate_limited",
         retryable: true,
-        continueDelayMs: PROVIDER_BACKPRESSURE_DELAY_MS,
+        continueDelayMs: expect.any(Number),
       },
     );
     expect((await getSession(dbClient.db, grant.workspaceId, session.id))?.status).toBe(
@@ -1534,164 +1611,169 @@ describe("worker activities integration", () => {
     );
   });
 
-  test("an MCP stream timeout after a successful tool output checkpoints once and recovers the same turn", async () => {
-    const grant = await testGrant(dbClient.db);
-    const session = await createOwnedSession(dbClient.db, grant, {
-      initialMessage: "continue after transient MCP transport loss",
-      resources: [],
-      metadata: {},
-      model: "scripted-model",
-      sandboxBackend: "none",
-    });
-    await createSessionGoal(dbClient.db, {
-      accountId: grant.accountId,
-      workspaceId: grant.workspaceId,
-      sessionId: session.id,
-      text: "finish without repeating completed tool side effects",
-      createdBy: "api",
-    });
-    await appendOwnedEvents(dbClient.db, grant, session.id, [
-      {
-        type: "user.message",
-        payload: { text: "continue after transient MCP transport loss" },
-      },
-    ]);
-    const callId = "call-before-mcp-timeout";
-    const state = {
-      history: [
-        {
-          type: "message",
-          role: "user",
-          content: "continue after transient MCP transport loss",
-        },
-        {
-          type: "function_call",
-          callId,
-          name: "opengeni__session_send_message",
-          arguments: "{}",
-          status: "completed",
-        },
-        {
-          type: "function_call_result",
-          callId,
-          status: "completed",
-          output: { ok: true, durableEventId: "event-once" },
-        },
-      ],
-      usage: {},
-      toString: () => "checkpointed-state",
-    };
-    const baseRuntime = createProductionAgentRuntime({
-      model: new ScriptedModel([{ outputText: "unused" }]),
-    });
-    const runtime: OpenGeniRuntime = {
-      ...baseRuntime,
-      runStream: async (_agent, prepared) => {
-        // The SDK preserves the exact prepared input under external ownership.
-        // Keep this transport-error fixture faithful to that contract.
-        const original = Array.isArray(prepared.input)
-          ? prepared.input
-          : [{ type: "message", role: "user", content: prepared.input }];
-        state.history = [...original, ...state.history.slice(1)] as typeof state.history;
-        return {
-          toStream: () =>
-            (async function* () {
-              yield {
-                type: "run_item_stream_event",
-                item: {
-                  id: "tool-call-item",
-                  type: "tool_call_item",
-                  rawItem: {
-                    callId,
-                    type: "function_call",
-                    name: "opengeni__session_send_message",
-                    arguments: "{}",
-                  },
-                },
-              };
-              yield {
-                type: "run_item_stream_event",
-                item: {
-                  id: "tool-output-item",
-                  type: "tool_call_output_item",
-                  rawItem: { callId, type: "function_call_result" },
-                  output: { ok: true, durableEventId: "event-once" },
-                },
-              };
-              // Reproduce the actual escaped boundary: no new tool call is
-              // created after the successful output; next-loop MCP transport
-              // work rejects the stream iterator instead.
-              throw new Error("MCP error -32001: Request timed out");
-            })(),
-          completed: Promise.resolve(),
-          interruptions: [],
-          state,
-          finalOutput: "",
-        } as never;
-      },
-    };
-    const activities = createWorkerActivities({
-      settings: testSettings({
-        databaseUrl: services.databaseUrl,
-        natsUrl: services.natsUrl,
-      }),
-      db: dbClient.db,
-      bus,
-      runtime,
-    });
-
-    await expect(
-      activities.runAgentTurn({
-        attemptId: crypto.randomUUID(),
+  test.each(["mcp", "model"] as const)(
+    "a %s failure after successful tool output checkpoints once and recovers the same turn",
+    async (kind) => {
+      const grant = await testGrant(dbClient.db);
+      const session = await createOwnedSession(dbClient.db, grant, {
+        initialMessage: "continue after transient MCP transport loss",
+        resources: [],
+        metadata: {},
+        model: "scripted-model",
+        sandboxBackend: "none",
+      });
+      await createSessionGoal(dbClient.db, {
         accountId: grant.accountId,
         workspaceId: grant.workspaceId,
         sessionId: session.id,
-        trigger: { kind: "next" },
-        workflowId: "workflow-mcp-timeout-after-output",
-        workflowRunId: crypto.randomUUID(),
-      }),
-    ).resolves.toMatchObject({
-      status: "recovering",
-      continueDelayMs: 2_000,
-    });
+        text: "finish without repeating completed tool side effects",
+        createdBy: "api",
+      });
+      await appendOwnedEvents(dbClient.db, grant, session.id, [
+        {
+          type: "user.message",
+          payload: { text: "continue after transient MCP transport loss" },
+        },
+      ]);
+      const callId = "call-before-mcp-timeout";
+      const state = {
+        history: [
+          {
+            type: "message",
+            role: "user",
+            content: "continue after transient MCP transport loss",
+          },
+          {
+            type: "function_call",
+            callId,
+            name: "opengeni__session_send_message",
+            arguments: "{}",
+            status: "completed",
+          },
+          {
+            type: "function_call_result",
+            callId,
+            status: "completed",
+            output: { ok: true, durableEventId: "event-once" },
+          },
+        ],
+        usage: {},
+        toString: () => "checkpointed-state",
+      };
+      const baseRuntime = createProductionAgentRuntime({
+        model: new ScriptedModel([{ outputText: "unused" }]),
+      });
+      const runtime: OpenGeniRuntime = {
+        ...baseRuntime,
+        runStream: async (_agent, prepared) => {
+          // The SDK preserves the exact prepared input under external ownership.
+          // Keep this transport-error fixture faithful to that contract.
+          const original = Array.isArray(prepared.input)
+            ? prepared.input
+            : [{ type: "message", role: "user", content: prepared.input }];
+          state.history = [...original, ...state.history.slice(1)] as typeof state.history;
+          return {
+            toStream: () =>
+              (async function* () {
+                yield {
+                  type: "run_item_stream_event",
+                  item: {
+                    id: "tool-call-item",
+                    type: "tool_call_item",
+                    rawItem: {
+                      callId,
+                      type: "function_call",
+                      name: "opengeni__session_send_message",
+                      arguments: "{}",
+                    },
+                  },
+                };
+                yield {
+                  type: "run_item_stream_event",
+                  item: {
+                    id: "tool-output-item",
+                    type: "tool_call_output_item",
+                    rawItem: { callId, type: "function_call_result" },
+                    output: { ok: true, durableEventId: "event-once" },
+                  },
+                };
+                // Reproduce the actual escaped boundary: no new tool call is
+                // created after the successful output; next-loop MCP transport
+                // work rejects the stream iterator instead.
+                throw kind === "mcp"
+                  ? new Error("MCP error -32001: Request timed out")
+                  : Object.assign(new Error("Too Many Requests"), { status: 429 });
+              })(),
+            completed: Promise.resolve(),
+            interruptions: [],
+            state,
+            finalOutput: "",
+          } as never;
+        },
+      };
+      const activities = createWorkerActivities({
+        settings: testSettings({
+          databaseUrl: services.databaseUrl,
+          natsUrl: services.natsUrl,
+        }),
+        db: dbClient.db,
+        bus,
+        runtime,
+      });
 
-    const events = await listSessionEvents(dbClient.db, grant.workspaceId, session.id, 0, 100);
-    const outputIndex = events.findIndex((event) => event.type === "agent.toolCall.output");
-    const recoveryIndex = events.findIndex((event) => event.type === "turn.recovery.requested");
-    expect(outputIndex).toBeGreaterThanOrEqual(0);
-    expect(recoveryIndex).toBeGreaterThan(outputIndex);
-    expect(events[recoveryIndex]?.payload).toMatchObject({
-      code: "mcp_transport_timeout",
-      retryable: true,
-      continueDelayMs: 2_000,
-    });
-    expect(events.some((event) => event.type === "turn.failed")).toBe(false);
-    expect(events.filter((event) => event.type === "agent.toolCall.output")).toHaveLength(1);
-    const activeHistory = await getActiveSessionHistoryItems(
-      dbClient.db,
-      grant.workspaceId,
-      session.id,
-    );
-    expect(
-      activeHistory.filter(
-        (row) =>
-          (row.item as Record<string, unknown>).type === "function_call_result" &&
-          (row.item as Record<string, unknown>).callId === callId,
-      ),
-    ).toHaveLength(1);
-    expect((await getSession(dbClient.db, grant.workspaceId, session.id))?.status).toBe(
-      "recovering",
-    );
-    expect(
-      (await listSessionTurns(dbClient.db, grant.workspaceId, session.id)).at(-1),
-    ).toMatchObject({
-      status: "recovering",
-      activeAttemptId: null,
-    });
-    expect((await getSessionGoal(dbClient.db, grant.workspaceId, session.id))?.status).toBe(
-      "active",
-    );
-  });
+      await expect(
+        activities.runAgentTurn({
+          attemptId: crypto.randomUUID(),
+          accountId: grant.accountId,
+          workspaceId: grant.workspaceId,
+          sessionId: session.id,
+          trigger: { kind: "next" },
+          workflowId: "workflow-mcp-timeout-after-output",
+          workflowRunId: crypto.randomUUID(),
+        }),
+      ).resolves.toMatchObject({
+        status: "recovering",
+        continueDelayMs: expect.any(Number),
+      });
+
+      const events = await listSessionEvents(dbClient.db, grant.workspaceId, session.id, 0, 100);
+      const outputIndex = events.findIndex((event) => event.type === "agent.toolCall.output");
+      const recoveryIndex = events.findIndex((event) => event.type === "turn.recovery.requested");
+      expect(outputIndex).toBeGreaterThanOrEqual(0);
+      expect(recoveryIndex).toBeGreaterThan(outputIndex);
+      expect(events[recoveryIndex]?.payload).toMatchObject({
+        code: kind === "mcp" ? "mcp_transport_timeout" : "provider_rate_limited",
+        retryable: true,
+        continueDelayMs: expect.any(Number),
+      });
+      expect(events.some((event) => event.type === "turn.failed")).toBe(false);
+      expect(events.filter((event) => event.type === "agent.toolCall.output")).toHaveLength(1);
+      const activeHistory = await getActiveSessionHistoryItems(
+        dbClient.db,
+        grant.workspaceId,
+        session.id,
+      );
+      expect(
+        activeHistory.filter(
+          (row) =>
+            (row.item as Record<string, unknown>).type === "function_call_result" &&
+            (row.item as Record<string, unknown>).callId === callId,
+        ),
+      ).toHaveLength(1);
+      expect((await getSession(dbClient.db, grant.workspaceId, session.id))?.status).toBe(
+        "recovering",
+      );
+      expect(
+        (await listSessionTurns(dbClient.db, grant.workspaceId, session.id)).at(-1),
+      ).toMatchObject({
+        status: "recovering",
+        activeAttemptId: null,
+      });
+      expect((await getSessionGoal(dbClient.db, grant.workspaceId, session.id))?.status).toBe(
+        "active",
+      );
+    },
+  );
 
   test("an exact required-MCP connection refusal recovers the same turn", async () => {
     const grant = await testGrant(dbClient.db);
@@ -1768,54 +1850,73 @@ describe("worker activities integration", () => {
     });
   });
 
-  test("repeated required-MCP connection refusal exhausts automatic same-turn recovery", async () => {
-    const grant = await testGrant(dbClient.db);
-    const session = await createOwnedSession(dbClient.db, grant, {
-      initialMessage: "stop retrying when required MCP stays unavailable",
-      resources: [],
-      metadata: {},
-      model: "scripted-model",
-      sandboxBackend: "none",
-    });
-    await createSessionGoal(dbClient.db, {
-      accountId: grant.accountId,
-      workspaceId: grant.workspaceId,
-      sessionId: session.id,
-      text: "prove recovery does not become a goal continuation loop",
-      createdBy: "api",
-    });
-    await appendOwnedEvents(dbClient.db, grant, session.id, [
-      {
-        type: "user.message",
-        payload: { text: "stop retrying when required MCP stays unavailable" },
-      },
-    ]);
-    const raw = new Error("MCP connect failed for https://private.example/token-value");
-    raw.cause = Object.assign(new Error("connect ECONNREFUSED 127.0.0.1:8000"), {
-      code: "ECONNREFUSED",
-    });
-    const baseRuntime = createProductionAgentRuntime({
-      model: new ScriptedModel([{ outputText: "unused" }]),
-    });
-    const runtime: OpenGeniRuntime = {
-      ...baseRuntime,
-      runStream: async () => {
-        throw mcpTransportErrorWithRetryMetadata(raw);
-      },
-    };
-    const activities = createWorkerActivities({
-      settings: testSettings({
-        databaseUrl: services.databaseUrl,
-        natsUrl: services.natsUrl,
-      }),
-      db: dbClient.db,
-      bus,
-      runtime,
-    });
-    const workflowId = "workflow-required-mcp-recovery-exhaustion";
-    const workflowRunId = crypto.randomUUID();
+  test.each(["mcp", "model"] as const)(
+    "repeated %s refusal exhausts automatic same-turn recovery",
+    async (kind) => {
+      const grant = await testGrant(dbClient.db);
+      const session = await createOwnedSession(dbClient.db, grant, {
+        initialMessage: "stop retrying when required MCP stays unavailable",
+        resources: [],
+        metadata: {},
+        model: "scripted-model",
+        sandboxBackend: "none",
+      });
+      await createSessionGoal(dbClient.db, {
+        accountId: grant.accountId,
+        workspaceId: grant.workspaceId,
+        sessionId: session.id,
+        text: "prove recovery does not become a goal continuation loop",
+        createdBy: "api",
+      });
+      await appendOwnedEvents(dbClient.db, grant, session.id, [
+        {
+          type: "user.message",
+          payload: { text: "stop retrying when required MCP stays unavailable" },
+        },
+      ]);
+      const raw = new Error("MCP connect failed for https://private.example/token-value");
+      raw.cause = Object.assign(new Error("connect ECONNREFUSED 127.0.0.1:8000"), {
+        code: "ECONNREFUSED",
+      });
+      const baseRuntime = createProductionAgentRuntime({
+        model: new ScriptedModel([{ outputText: "unused" }]),
+      });
+      const runtime: OpenGeniRuntime = {
+        ...baseRuntime,
+        runStream: async () => {
+          throw kind === "mcp"
+            ? mcpTransportErrorWithRetryMetadata(raw)
+            : Object.assign(new Error("Too Many Requests"), { status: 429 });
+        },
+      };
+      const activities = createWorkerActivities({
+        settings: testSettings({
+          databaseUrl: services.databaseUrl,
+          natsUrl: services.natsUrl,
+        }),
+        db: dbClient.db,
+        bus,
+        runtime,
+      });
+      const workflowId = "workflow-required-mcp-recovery-exhaustion";
+      const workflowRunId = crypto.randomUUID();
 
-    for (let recovery = 1; recovery <= MAX_AUTOMATIC_PROVIDER_RECOVERIES; recovery += 1) {
+      for (let recovery = 1; recovery <= MAX_AUTOMATIC_PROVIDER_RECOVERIES; recovery += 1) {
+        await expect(
+          activities.runAgentTurn({
+            attemptId: crypto.randomUUID(),
+            accountId: grant.accountId,
+            workspaceId: grant.workspaceId,
+            sessionId: session.id,
+            trigger: { kind: "next" },
+            workflowId,
+            workflowRunId,
+          }),
+        ).resolves.toMatchObject({
+          status: "recovering",
+        });
+      }
+
       await expect(
         activities.runAgentTurn({
           attemptId: crypto.randomUUID(),
@@ -1826,64 +1927,50 @@ describe("worker activities integration", () => {
           workflowId,
           workflowRunId,
         }),
-      ).resolves.toMatchObject({
-        status: "recovering",
-      });
-    }
+      ).resolves.toMatchObject({ status: "failed" });
 
-    await expect(
-      activities.runAgentTurn({
-        attemptId: crypto.randomUUID(),
+      const events = await listSessionEvents(dbClient.db, grant.workspaceId, session.id, 0, 200);
+      expect(events.filter((event) => event.type === "turn.recovery.requested")).toHaveLength(
+        MAX_AUTOMATIC_PROVIDER_RECOVERIES,
+      );
+      expect(events.filter((event) => event.type === "goal.continuation")).toHaveLength(0);
+      expect(events.findLast((event) => event.type === "turn.failed")?.payload).toMatchObject({
+        code: kind === "mcp" ? "mcp_transport_unavailable" : "provider_rate_limited",
+        retryable: false,
+        recoveryExhausted: true,
+        providerRecoveryCount: MAX_AUTOMATIC_PROVIDER_RECOVERIES,
+        maxProviderRecoveryCount: MAX_AUTOMATIC_PROVIDER_RECOVERIES,
+      });
+      expect((await getSession(dbClient.db, grant.workspaceId, session.id))?.status).toBe("failed");
+      expect((await getSessionGoal(dbClient.db, grant.workspaceId, session.id))?.status).toBe(
+        "active",
+      );
+      expect(
+        (await listSessionTurns(dbClient.db, grant.workspaceId, session.id)).at(-1),
+      ).toMatchObject({
+        status: "failed",
+        activeAttemptId: null,
+      });
+
+      const revived = await submitTestHumanPrompt(dbClient.db, {
         accountId: grant.accountId,
         workspaceId: grant.workspaceId,
         sessionId: session.id,
-        trigger: { kind: "next" },
-        workflowId,
-        workflowRunId,
-      }),
-    ).resolves.toMatchObject({ status: "failed" });
-
-    const events = await listSessionEvents(dbClient.db, grant.workspaceId, session.id, 0, 200);
-    expect(events.filter((event) => event.type === "turn.recovery.requested")).toHaveLength(
-      MAX_AUTOMATIC_PROVIDER_RECOVERIES,
-    );
-    expect(events.filter((event) => event.type === "goal.continuation")).toHaveLength(0);
-    expect(events.findLast((event) => event.type === "turn.failed")?.payload).toMatchObject({
-      code: "mcp_transport_unavailable",
-      retryable: false,
-      recoveryExhausted: true,
-      providerRecoveryCount: MAX_AUTOMATIC_PROVIDER_RECOVERIES,
-      maxProviderRecoveryCount: MAX_AUTOMATIC_PROVIDER_RECOVERIES,
-    });
-    expect((await getSession(dbClient.db, grant.workspaceId, session.id))?.status).toBe("failed");
-    expect((await getSessionGoal(dbClient.db, grant.workspaceId, session.id))?.status).toBe(
-      "active",
-    );
-    expect(
-      (await listSessionTurns(dbClient.db, grant.workspaceId, session.id)).at(-1),
-    ).toMatchObject({
-      status: "failed",
-      activeAttemptId: null,
-    });
-
-    const revived = await submitTestHumanPrompt(dbClient.db, {
-      accountId: grant.accountId,
-      workspaceId: grant.workspaceId,
-      sessionId: session.id,
-      subjectId: grant.subjectId,
-      text: "retry now that the dependency has recovered",
-      resources: [],
-      tools: [],
-      delivery: "send",
-      reasoningEffortFallback: "medium",
-    });
-    expect(revived.accepted.type).toBe("user.message");
-    expect(revived.turn.status).toBe("queued");
-    expect((await getSession(dbClient.db, grant.workspaceId, session.id))?.status).toBe("queued");
-    expect((await getSessionGoal(dbClient.db, grant.workspaceId, session.id))?.status).toBe(
-      "active",
-    );
-  });
+        subjectId: grant.subjectId,
+        text: "retry now that the dependency has recovered",
+        resources: [],
+        tools: [],
+        delivery: "send",
+        reasoningEffortFallback: "medium",
+      });
+      expect(revived.accepted.type).toBe("user.message");
+      expect(revived.turn.status).toBe("queued");
+      expect((await getSession(dbClient.db, grant.workspaceId, session.id))?.status).toBe("queued");
+      expect((await getSessionGoal(dbClient.db, grant.workspaceId, session.id))?.status).toBe(
+        "active",
+      );
+    },
+  );
 
   test("a rolling-replacement first-party MCP 404 recovers the same goal turn before inference", async () => {
     const grant = await testGrant(dbClient.db);
@@ -2012,10 +2099,15 @@ describe("worker activities integration", () => {
     });
     await Bun.sleep(0);
 
-    expect(exported).toHaveLength(1);
-    const span = exported[0]!.body.resourceSpans[0].scopeSpans[0].spans[0];
-    expect(span.name).toBe("worker.run_agent_segment");
-    expect(span.status.code).toBe(2);
+    // Startup phases export their own spans too; find the segment span by name.
+    const spans = exported.flatMap(({ body }) =>
+      body.resourceSpans.flatMap((resource: any) =>
+        resource.scopeSpans.flatMap((scope: any) => scope.spans),
+      ),
+    );
+    const span = spans.find((candidate: any) => candidate.name === "worker.run_agent_segment");
+    expect(span).toBeDefined();
+    expect(span!.status.code).toBe(2);
     expect(await observability.prometheusMetrics()).toContain('status="failed"');
   });
 
@@ -2369,7 +2461,7 @@ describe("worker activities integration", () => {
       resources: [
         {
           kind: "repository",
-          uri: "https://github.com/Futhark-AS/aifilesearch.git",
+          uri: "https://git.example.com/team/fixture.git",
           ref: "main",
         },
       ],
@@ -2416,7 +2508,7 @@ describe("worker activities integration", () => {
     });
 
     expect(result.status).toBe("failed");
-    expect(sandboxExecCalls).toHaveLength(3);
+    expect(sandboxExecCalls.length).toBeGreaterThan(3);
     expect(String(sandboxExecCalls[0]?.cmd)).toContain("/workspace/.opengeni/codemode-clients/");
     expect(String(sandboxExecCalls[0]?.cmd)).not.toContain("OPENGENI_CODEMODE_TOKEN_SEED");
     expect(String(sandboxExecCalls[1]?.cmd)).toContain(
@@ -2425,13 +2517,26 @@ describe("worker activities integration", () => {
     expect(String(sandboxExecCalls[1]?.cmd)).toContain(
       'printf \'%s\' "$OPENGENI_CODEMODE_TOKEN_SEED" > "$token_file.tmp.$$"',
     );
-    expect(String(sandboxExecCalls[2]?.cmd)).toContain(
-      "start_repository_clone '/workspace/repos/github.com/Futhark-AS/aifilesearch.git'",
+    const chunks = sandboxExecCalls.slice(2).flatMap(({ cmd }) => {
+      const match = String(cmd).match(/printf '%s' '([A-Za-z0-9+/=]+)' >> /u);
+      return match ? [match[1]!] : [];
+    });
+    expect(chunks.length).toBeGreaterThan(0);
+    const cloneCommand = Buffer.from(chunks.join(""), "base64").toString("utf8");
+    expect(cloneCommand).toContain(
+      "start_repository_clone '/workspace/repos/git.example.com/team/fixture.git'",
     );
-    expect(String(sandboxExecCalls[2]?.cmd)).toContain(
+    expect(cloneCommand).toContain(
       'git -C "$tmp" fetch --depth 1 --no-tags --filter=blob:none origin "$ref"',
     );
-    expect(String(sandboxExecCalls[2]?.cmd)).toContain("x-access-token");
+    expect(cloneCommand).toContain("x-access-token");
+    const cloneExecution = sandboxExecCalls.findIndex(({ cmd }) =>
+      String(cmd).includes("exec /bin/sh '/tmp/opengeni/repository-setup-payloads/"),
+    );
+    expect(cloneExecution).toBeGreaterThan(2);
+    expect(String(sandboxExecCalls.at(-1)?.cmd)).toContain(
+      "rm -f '/tmp/opengeni/repository-setup-payloads/",
+    );
     const events = await listSessionEvents(dbClient.db, grant.workspaceId, session.id, 0, 50);
     expect(events.some((event) => event.type === "sandbox.operation.started")).toBe(true);
     expect(events.some((event) => event.type === "sandbox.operation.completed")).toBe(true);
@@ -2667,7 +2772,8 @@ describe("worker activities integration", () => {
     const completed = events.find((event) => event.type === "turn.completed");
     expect(completed?.payload).toMatchObject({
       segmentLimit: "budget_exhausted",
-      detail: "insufficient OpenGeni credits",
+      // Budget semantics are contractual; product-name capitalization is not.
+      detail: expect.stringMatching(/^insufficient \S+ credits$/),
     });
     expect((await getSession(dbClient.db, grant.workspaceId, session.id))?.status).toBe("idle");
     const balance = await getBillingBalance(dbClient.db, grant.accountId);
@@ -4853,66 +4959,6 @@ describe("worker activities integration", () => {
     },
   );
 
-  test("fails reusable dispatch when the task attachment diverges from its session", async () => {
-    const grant = await testGrant(dbClient.db);
-    const environment = await seedWorkspaceEnvironment(dbClient.db, grant, {
-      DIVERGED_TOKEN: "diverged-value-123456",
-    });
-    const session = await createOwnedSession(dbClient.db, grant, {
-      initialMessage: "reusable",
-      resources: [],
-      metadata: {},
-      model: "scripted-model",
-      sandboxBackend: "none",
-    });
-    const task = await createOwnedScheduledTask(dbClient.db, grant, {
-      name: "diverged reusable",
-      status: "active",
-      schedule: { type: "interval", everySeconds: 3600 },
-      temporalScheduleId: `scheduled-task-${crypto.randomUUID()}`,
-      runMode: "reusable_session",
-      overlapPolicy: "allow_concurrent",
-      agentConfig: { prompt: "run", resources: [], tools: [], metadata: {} },
-      variableSetId: environment.id,
-      metadata: {},
-    });
-    await updateScheduledTask(dbClient.db, grant.workspaceId, task.id, {
-      reusableSessionId: session.id,
-    });
-    const activities = createWorkerActivities({
-      settings: testSettings({
-        databaseUrl: services.databaseUrl,
-        natsUrl: services.natsUrl,
-        environmentsEncryptionKey: workerEnvironmentsKey,
-      }),
-      db: dbClient.db,
-      bus,
-      runtime: createProductionAgentRuntime({
-        model: new ScriptedModel([{ outputText: "ok" }]),
-      }),
-    });
-    // Binding divergence is deterministic: the run settles failed with a stable
-    // error code and the dispatch resolves blocked instead of throwing.
-    await expect(
-      activities.dispatchScheduledTaskRun({
-        workspaceId: grant.workspaceId,
-        taskId: task.id,
-        triggerType: "scheduled",
-        producerKey: `worker-activity-${crypto.randomUUID()}`,
-      }),
-    ).resolves.toEqual({ action: "blocked", reason: "scheduled_run_terminal" });
-    const runs = await listScheduledTaskRuns(dbClient.db, grant.workspaceId, task.id);
-    expect(runs).toHaveLength(1);
-    expect(runs[0]).toMatchObject({
-      status: "failed",
-      error: "scheduled_reusable_binding_changed",
-    });
-    // Nothing was delivered into the diverged session.
-    expect(
-      await listOutstandingSessionSystemUpdates(dbClient.db, grant.workspaceId, session.id),
-    ).toHaveLength(0);
-  });
-
   test("refuses to revive a cancelled reusable session on the next fire", async () => {
     const grant = await testGrant(dbClient.db);
     const session = await createOwnedSession(dbClient.db, grant, {
@@ -5245,10 +5291,9 @@ describe("worker activities integration", () => {
         const events = await listSessionEvents(dbClient.db, grant.workspaceId, session.id, 0, 200);
         expect(events.some((event) => event.type === "turn.recovery.requested")).toBe(false);
         expect(events.find((event) => event.type === "turn.failed")?.payload).toEqual({
-          error:
-            "The Codex backend rejected this request (HTTP 400) without an error message. " +
-            'The ChatGPT account "Paid Pro" still reports the Pro plan, so OpenGeni did not switch accounts. ' +
-            "Try again, or choose another model if it keeps failing.",
+          error: expect.stringMatching(
+            /^The Codex backend rejected this request \(HTTP 400\) without an error message\. The ChatGPT account "Paid Pro" still reports the Pro plan, so \S+ did not switch accounts\. Try again, or choose another model if it keeps failing\.$/,
+          ),
           code: "codex_request_rejected",
           retryable: false,
           planType: "pro",

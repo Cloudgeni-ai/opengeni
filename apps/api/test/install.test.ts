@@ -28,7 +28,17 @@ function appFor(settings: Settings) {
 // (mac/windows/un-built arches) so they are deterministic regardless of any local
 // build artifacts; the baked-path tests stage a throwaway file and clean it up.
 const BAKED_DIR = fileURLToPath(new URL("../../../agent/install/baked/", import.meta.url));
-const BAKED_FIXTURE = "opengeni-agent-x86_64-unknown-linux-musl-test-fixture";
+const BAKED_TARGET = "x86_64-unknown-linux-musl-test-fixture";
+const BAKED_ASSETS = [
+  "opengeni-agent",
+  "opengeni-browserd",
+  "opengeni-agent-browser",
+  "opengeni-computer-native",
+].map((name) => `${name}-${BAKED_TARGET}`);
+const BAKED_FIXTURE = BAKED_ASSETS[0]!;
+const BAKED_FILES = BAKED_ASSETS.flatMap((asset) =>
+  ["", ".sha256", ".minisig"].map((suffix) => `${asset}${suffix}`),
+);
 
 describe("get.<domain> install routes", () => {
   test("GET /install.sh serves the committed POSIX script as a shell content type", async () => {
@@ -219,15 +229,78 @@ describe("get.<domain> install routes", () => {
 describe("get.<domain> install routes — baked binary serving", () => {
   beforeEach(async () => {
     await mkdir(BAKED_DIR, { recursive: true });
-    await writeFile(`${BAKED_DIR}${BAKED_FIXTURE}`, "BAKED-BINARY-BYTES");
-    await writeFile(`${BAKED_DIR}${BAKED_FIXTURE}.sha256`, "deadbeef  baked\n");
-    await writeFile(`${BAKED_DIR}${BAKED_FIXTURE}.minisig`, "untrusted comment: x\nSIG\n");
+    for (const asset of BAKED_ASSETS) {
+      await writeFile(`${BAKED_DIR}${asset}`, "BAKED-BINARY-BYTES");
+      await writeFile(`${BAKED_DIR}${asset}.sha256`, "deadbeef  baked\n");
+      await writeFile(`${BAKED_DIR}${asset}.minisig`, "untrusted comment: fixture\nSIG\n");
+    }
   });
 
   afterEach(async () => {
-    await rm(`${BAKED_DIR}${BAKED_FIXTURE}`, { force: true });
-    await rm(`${BAKED_DIR}${BAKED_FIXTURE}.sha256`, { force: true });
-    await rm(`${BAKED_DIR}${BAKED_FIXTURE}.minisig`, { force: true });
+    for (const file of BAKED_FILES)
+      await rm(`${BAKED_DIR}${file}`, { recursive: true, force: true });
+  });
+
+  test("serves every member of one complete baked runtime cohort", async () => {
+    const app = appFor(testSettings());
+    for (const file of BAKED_FILES) {
+      const res = await app.request(`/agent/latest/${file}`);
+      expect(res.status).toBe(200);
+      expect(res.headers.get("x-opengeni-agent-source")).toBe("baked");
+      expect(res.headers.get("location")).toBeNull();
+    }
+  });
+
+  test.each([BAKED_ASSETS[1]!, `${BAKED_FIXTURE}.sha256`, `${BAKED_ASSETS[2]}.minisig`])(
+    "refuses the whole cohort when %s is missing instead of mixing baked and archive assets",
+    async (missing) => {
+      await rm(`${BAKED_DIR}${missing}`);
+      const app = appFor(testSettings());
+      for (const file of BAKED_FILES) {
+        const res = await app.request(`/agent/latest/${file}`);
+        expect(res.status).toBe(503);
+        expect(res.headers.get("location")).toBeNull();
+        expect(res.headers.get("x-opengeni-agent-source")).toBeNull();
+      }
+    },
+  );
+
+  test("an orphan helper also prevents the absent agent from falling back", async () => {
+    for (const file of BAKED_FILES.filter(
+      (name) => name.startsWith(`${BAKED_FIXTURE}.`) || name === BAKED_FIXTURE,
+    )) {
+      await rm(`${BAKED_DIR}${file}`);
+    }
+    const app = appFor(testSettings());
+    for (const asset of [BAKED_FIXTURE, BAKED_ASSETS[1]!]) {
+      const res = await app.request(`/agent/latest/${asset}`);
+      expect(res.status).toBe(503);
+      expect(res.headers.get("location")).toBeNull();
+    }
+  });
+
+  test.each(["empty", "directory"] as const)(
+    "refuses a cohort with an %s signature",
+    async (kind) => {
+      const path = `${BAKED_DIR}${BAKED_FIXTURE}.minisig`;
+      await rm(path);
+      if (kind === "empty") await writeFile(path, "");
+      else await mkdir(path);
+      const res = await appFor(testSettings()).request(`/agent/latest/${BAKED_FIXTURE}`);
+      expect(res.status).toBe(503);
+      expect(res.headers.get("location")).toBeNull();
+    },
+  );
+
+  test("an entirely absent target redirects the whole runtime to one immutable release", async () => {
+    for (const file of BAKED_FILES) await rm(`${BAKED_DIR}${file}`);
+    const app = appFor(testSettings({ agentStableVersion: "9.9.9" }));
+    for (const file of BAKED_FILES) {
+      const res = await app.request(`/agent/latest/${file}`);
+      expect(res.status).toBe(302);
+      expect(res.headers.get("location")).toEndWith(`/download/agent-v9.9.9/${file}`);
+      expect(res.headers.get("x-opengeni-agent-source")).toBeNull();
+    }
   });
 
   test("GET /agent/latest/<baked-asset> serves the baked binary as octet-stream (no redirect)", async () => {

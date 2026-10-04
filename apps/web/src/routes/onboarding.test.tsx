@@ -149,6 +149,23 @@ async function enter(input: HTMLInputElement, value: string): Promise<void> {
   });
 }
 
+/** A provider row in the shared connect list, by its visible name. */
+function providerRow(container: HTMLElement, title: string): HTMLButtonElement | null {
+  return (
+    Array.from(container.querySelectorAll<HTMLButtonElement>("button[data-row-action]")).find(
+      (button) => button.textContent?.trim() === title,
+    ) ?? null
+  );
+}
+
+async function clickButton(container: HTMLElement, text: string): Promise<void> {
+  await act(async () =>
+    Array.from(container.querySelectorAll("button"))
+      .find((button) => button.textContent?.trim() === text)!
+      .click(),
+  );
+}
+
 async function flush(): Promise<void> {
   await act(async () => await new Promise((resolve) => setTimeout(resolve, 0)));
 }
@@ -405,7 +422,11 @@ describe("organization onboarding UI", () => {
     try {
       await act(async () =>
         root.render(
-          <OrganizationOnboardingPanel previewState="required" onComplete={onComplete} />,
+          <OrganizationOnboardingPanel
+            initialUseCase="cloud"
+            previewState="required"
+            onComplete={onComplete}
+          />,
         ),
       );
       expect(container.textContent).toContain("Create your organization");
@@ -429,6 +450,7 @@ describe("organization onboarding UI", () => {
       await act(async () =>
         root.render(
           <OrganizationOnboardingPanel
+            initialUseCase="cloud"
             client={setupClient as never}
             billingMode="stripe"
             codexEnabled
@@ -443,22 +465,14 @@ describe("organization onboarding UI", () => {
       await flush();
       expect(completeSelfServiceSetup).not.toHaveBeenCalled();
       expect(container.textContent).toContain("Choose how to power your chats");
-      expect(container.querySelector('button[aria-label="Connect Codex"]')).not.toBeNull();
-      expect(container.querySelector('button[aria-label="Connect SuperGrok"]')).not.toBeNull();
-      expect(container.textContent).toContain("Use Opengeni credits");
+      expect(providerRow(container, "Codex")).not.toBeNull();
+      expect(providerRow(container, "SuperGrok")).not.toBeNull();
+      expect(providerRow(container, "Opengeni credits")).not.toBeNull();
       expect(setupClient.getBilling).not.toHaveBeenCalled();
       expect(onComplete).not.toHaveBeenCalled();
-      await act(async () =>
-        container
-          .querySelector<HTMLButtonElement>('button[aria-label="Connect Vercel AI Gateway"]')!
-          .click(),
-      );
+      await act(async () => providerRow(container, "Vercel AI Gateway")!.click());
       await enter(container.querySelector("#onboarding-provider-key")!, "vercel-secret");
-      await act(async () =>
-        container
-          .querySelector<HTMLButtonElement>('button[aria-label="Connect OpenRouter"]')!
-          .click(),
-      );
+      await act(async () => providerRow(container, "OpenRouter")!.click());
       expect(container.querySelector<HTMLInputElement>("#onboarding-provider-key")!.value).toBe("");
       await act(async () =>
         Array.from(container.querySelectorAll("button"))
@@ -480,6 +494,7 @@ describe("organization onboarding UI", () => {
       await act(async () =>
         root.render(
           <OrganizationOnboardingPanel
+            initialUseCase="cloud"
             client={setupClient as never}
             previewState="required"
             onComplete={() => undefined}
@@ -490,8 +505,8 @@ describe("organization onboarding UI", () => {
       await act(async () => container.querySelector<HTMLFormElement>("form")!.requestSubmit());
       await flush();
       expect(container.textContent).toContain("Choose how to power your chats");
-      expect(container.querySelector('button[aria-label="Connect Codex"]')).toBeNull();
-      expect(container.querySelector('button[aria-label="Connect SuperGrok"]')).toBeNull();
+      expect(providerRow(container, "Codex")).toBeNull();
+      expect(providerRow(container, "SuperGrok")).toBeNull();
     } finally {
       await act(async () => root.unmount());
       container.remove();
@@ -519,11 +534,7 @@ describe("organization onboarding UI", () => {
           />,
         ),
       );
-      await act(async () =>
-        container
-          .querySelector<HTMLButtonElement>('button[aria-label="Connect Vercel AI Gateway"]')!
-          .click(),
-      );
+      await act(async () => providerRow(container, "Vercel AI Gateway")!.click());
       await enter(container.querySelector("#onboarding-provider-key")!, "vercel-secret");
       await act(async () =>
         Array.from(container.querySelectorAll("button"))
@@ -567,12 +578,8 @@ describe("organization onboarding UI", () => {
           />,
         ),
       );
-      expect(container.querySelector('button[aria-label="Connect OpenAI"]')).not.toBeNull();
-      await act(async () =>
-        container
-          .querySelector<HTMLButtonElement>('button[aria-label="Connect Azure OpenAI"]')!
-          .click(),
-      );
+      expect(providerRow(container, "OpenAI")).not.toBeNull();
+      await act(async () => providerRow(container, "Azure OpenAI")!.click());
       await enter(
         container.querySelector('input[placeholder="https://your-resource.openai.azure.com"]')!,
         "https://customer.openai.azure.com",
@@ -710,11 +717,8 @@ describe("organization onboarding UI", () => {
           />,
         ),
       );
-      await act(async () =>
-        container
-          .querySelector<HTMLButtonElement>('button[aria-label="Connect SuperGrok"]')!
-          .click(),
-      );
+      await act(async () => providerRow(container, "SuperGrok")!.click());
+      await clickButton(container, "Sign in with xAI");
       await flush();
       // Not the Personal workspace's "Only me" scope, which the API refuses there.
       expect(organizationSupergrokConnectStart).toHaveBeenCalledWith("organization-a");
@@ -752,9 +756,8 @@ describe("organization onboarding UI", () => {
           />,
         ),
       );
-      await act(async () =>
-        container.querySelector<HTMLButtonElement>('button[aria-label="Connect Codex"]')!.click(),
-      );
+      await act(async () => providerRow(container, "Codex")!.click());
+      await clickButton(container, "Sign in with ChatGPT");
       await flush();
       expect(codexConnectStart).toHaveBeenCalledTimes(1);
       // For the organization its creator owns, not the Personal workspace.
@@ -786,7 +789,7 @@ describe("organization onboarding UI", () => {
           .click(),
       );
       expect(container.textContent).not.toContain("Waiting for you to sign in");
-      expect(container.querySelector('button[aria-label="Connect Codex"]')).not.toBeNull();
+      expect(providerRow(container, "Codex")).not.toBeNull();
       expect(onComplete).not.toHaveBeenCalled();
       expect(codexConnectPoll).not.toHaveBeenCalled();
     } finally {
@@ -831,11 +834,8 @@ describe("organization onboarding UI", () => {
           />,
         ),
       );
-      await act(async () =>
-        container
-          .querySelector<HTMLButtonElement>('button[aria-label="Connect SuperGrok"]')!
-          .click(),
-      );
+      await act(async () => providerRow(container, "SuperGrok")!.click());
+      await clickButton(container, "Sign in with xAI");
       await flush();
       await flush();
       expect(container.textContent).toContain("Still waiting?");
@@ -877,16 +877,20 @@ describe("organization onboarding UI", () => {
       expect(container.textContent).toContain("Free Model is set up and free to use");
       expect(container.textContent).not.toContain("Choose how to power your chats");
       expect(container.textContent).toContain("Want a more capable model? (optional)");
-      expect(container.querySelector('button[aria-label="Connect Codex"]')).not.toBeNull();
-      expect(container.textContent).toContain("Use Opengeni credits");
+      expect(providerRow(container, "Codex")).not.toBeNull();
+      expect(providerRow(container, "Opengeni credits")).not.toBeNull();
       const buttons = Array.from(container.querySelectorAll("button"));
       const start = buttons.find(
         (button) => button.textContent?.trim() === "Start chatting for free",
       )!;
-      const buy = buttons.find((button) => button.textContent?.includes("in credits"))!;
+      const buy = providerRow(container, "Opengeni credits")!;
       // The free path precedes every paid option in reading order.
       expect(start.compareDocumentPosition(buy) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
-      expect(buy.getAttribute("data-variant") ?? buy.className).not.toContain("bg-primary ");
+      await act(async () => buy.click());
+      const buyButton = Array.from(container.querySelectorAll("button")).find((button) =>
+        button.textContent?.includes("in credits"),
+      )!;
+      expect(buyButton.getAttribute("data-analytics-action")).toBe("buy_credits");
       await act(async () => start.click());
       expect(onComplete).toHaveBeenCalledTimes(1);
     } finally {
@@ -964,9 +968,8 @@ describe("organization onboarding UI", () => {
           />,
         ),
       );
-      await act(async () =>
-        container.querySelector<HTMLButtonElement>('button[aria-label="Connect Codex"]')!.click(),
-      );
+      await act(async () => providerRow(container, "Codex")!.click());
+      await clickButton(container, "Sign in with ChatGPT");
       await flush();
       await flush();
       await flush();
@@ -1016,6 +1019,7 @@ describe("organization onboarding UI", () => {
         await act(async () =>
           root.render(
             <OrganizationOnboardingPanel
+              initialUseCase="cloud"
               client={{ ...setupClient, getWorkspaceModelCatalog } as never}
               billingMode="stripe"
               modelDefaults={modelDefaults}
@@ -1034,6 +1038,10 @@ describe("organization onboarding UI", () => {
         const created = (await completeSelfServiceSetup.mock.results.at(-1)!.value) as {
           personalWorkspaceId: string;
         };
+        // The signup answer is stored with the organization.
+        expect(
+          (completeSelfServiceSetup.mock.calls.at(-1) as unknown as [Record<string, unknown>])[0],
+        ).toMatchObject({ organizationName: "Northwind Research", useCase: "cloud" });
         expect(getWorkspaceModelCatalog).toHaveBeenCalledWith(created.personalWorkspaceId);
         if (selectable) {
           expect(container.querySelector("h1")!.textContent).toBe("Start chatting for free");
@@ -1073,10 +1081,8 @@ describe("organization onboarding UI", () => {
           />,
         ),
       );
-      expect(container.querySelector("h1")!.textContent).toBe(
-        "Start chatting with Opengeni credits",
-      );
-      expect(container.textContent).toContain("$7.25 of Opengeni credits included.");
+      expect(container.querySelector("h1")!.textContent).toBe("You got $7.25 in free credits");
+      expect(container.textContent).toContain("You can start right now.");
       expect(container.textContent).toContain(
         "New chats use Credits Model with extra high reasoning.",
       );
@@ -1085,15 +1091,16 @@ describe("organization onboarding UI", () => {
       );
       expect(container.textContent).not.toContain("Start chatting for free");
       expect(container.textContent).not.toContain("free to use. No card");
-      expect(container.querySelector('button[aria-label="Connect Codex"]')).not.toBeNull();
-      expect(container.querySelector('button[aria-label="Connect OpenRouter"]')).not.toBeNull();
+      expect(providerRow(container, "Codex")).not.toBeNull();
+      expect(providerRow(container, "OpenRouter")).not.toBeNull();
       expect(container.textContent).toContain("Buy more Opengeni credits");
       const buttons = Array.from(container.querySelectorAll("button"));
       const start = buttons.find((button) => button.textContent?.trim() === "Start chatting")!;
-      const buy = buttons.find((button) => button.textContent?.includes("in credits"))!;
+      // Buying more is a collapsed row in the shared list, not a second primary action.
+      const buy = providerRow(container, "Buy more Opengeni credits")!;
+      expect(buttons.find((button) => button.textContent?.includes("in credits"))).toBeUndefined();
       // Chatting on the included credits precedes every other option.
       expect(start.compareDocumentPosition(buy) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
-      expect(buy.getAttribute("data-variant") ?? buy.className).not.toContain("bg-primary ");
       await act(async () => start.click());
       expect(onComplete).toHaveBeenCalledTimes(1);
     } finally {
@@ -1122,7 +1129,7 @@ describe("organization onboarding UI", () => {
           />,
         ),
       );
-      expect(container.textContent).toContain("Opengeni credits are included with your account.");
+      expect(container.querySelector("h1")!.textContent).toBe("You got free Opengeni credits");
       expect(container.textContent).toContain("New chats use Credits Model.");
       // Without a free default there is nothing to name for after the credits.
       expect(container.textContent).not.toContain("When your credits run out");
@@ -1165,9 +1172,9 @@ describe("organization onboarding UI", () => {
         name: "trial credits",
         billingMode: "stripe" as const,
         modelDefaults: freeModelDefaults,
-        defaultSelection: { model: "credits-model", reasoningEffort: "low", source: "credits" },
+        defaultSelection: { model: "credits-model", reasoningEffort: "xhigh", source: "credits" },
         balanceMicros: 10_000_000,
-        heading: "Start chatting with Opengeni credits",
+        heading: "You got $10 in free credits",
         billingRead: true,
       },
       {
@@ -1185,7 +1192,11 @@ describe("organization onboarding UI", () => {
         name: "credits-billed deployment default with zero balance",
         billingMode: "stripe" as const,
         modelDefaults: creditsModelDefaults,
-        defaultSelection: { model: "credits-model", reasoningEffort: "low", source: "deployment" },
+        defaultSelection: {
+          model: "credits-model",
+          reasoningEffort: "xhigh",
+          source: "deployment",
+        },
         balanceMicros: 0,
         heading: "Choose how to power your chats",
         billingRead: true,
@@ -1203,7 +1214,7 @@ describe("organization onboarding UI", () => {
         name: "self-hosted",
         billingMode: "disabled" as const,
         modelDefaults: freeModelDefaults,
-        defaultSelection: { model: "credits-model", reasoningEffort: "low", source: "credits" },
+        defaultSelection: { model: "credits-model", reasoningEffort: "xhigh", source: "credits" },
         balanceMicros: 10_000_000,
         heading: "Start chatting for free",
         billingRead: false,
@@ -1225,6 +1236,7 @@ describe("organization onboarding UI", () => {
         await act(async () =>
           root.render(
             <OrganizationOnboardingPanel
+              initialUseCase="cloud"
               client={{ ...setupClient, getWorkspaceModelCatalog, getBilling } as never}
               billingMode={scenario.billingMode}
               modelDefaults={scenario.modelDefaults}
@@ -1254,19 +1266,19 @@ describe("organization onboarding UI", () => {
         } else {
           expect(getBilling).not.toHaveBeenCalled();
         }
-        if (scenario.heading === "Start chatting with Opengeni credits") {
-          expect(container.textContent).toContain("$10.00 of Opengeni credits included.");
+        if (scenario.heading === "You got $10 in free credits") {
+          expect(container.textContent).toContain("You can start right now.");
           expect(container.textContent).toContain(
-            "New chats use Credits Model with low reasoning.",
+            "New chats use Credits Model with extra high reasoning.",
           );
           expect(container.textContent).toContain(
             "When your credits run out, new chats use Free Model, which is free.",
           );
         } else if (scenario.heading === "Start chatting for free") {
           expect(container.textContent).toContain("Free Model is set up and free to use");
-          expect(container.textContent).not.toContain("of Opengeni credits included");
+          expect(container.textContent).not.toContain("in free credits");
         } else {
-          expect(container.textContent).not.toContain("of Opengeni credits included");
+          expect(container.textContent).not.toContain("in free credits");
           expect(container.textContent).not.toContain("free to use");
         }
       } finally {
@@ -1338,9 +1350,8 @@ describe("organization onboarding UI", () => {
           />,
         ),
       );
-      await act(async () =>
-        container.querySelector<HTMLButtonElement>('button[aria-label="Connect Codex"]')!.click(),
-      );
+      await act(async () => providerRow(container, "Codex")!.click());
+      await clickButton(container, "Sign in with ChatGPT");
       await flush();
       await flush();
       await flush();
@@ -1359,6 +1370,376 @@ describe("organization onboarding UI", () => {
       await act(async () => root.unmount());
       container.remove();
       window.open = priorOpen;
+    }
+  });
+
+  test("signup asks how to use Opengeni first, and the cloud path ends at home", async () => {
+    const onComplete = mock((_destination?: unknown) => undefined);
+    const createOrganizationApiKey = mock(async () => {
+      throw new Error("the cloud path creates no key");
+    });
+    const container = document.createElement("div");
+    document.body.appendChild(container);
+    const root = createRoot(container);
+    try {
+      await act(async () =>
+        root.render(
+          <OrganizationOnboardingPanel
+            client={{ ...setupClient, createOrganizationApiKey } as never}
+            previewState="required"
+            includedModel={{ id: "free-model", label: "Free Model", free: true }}
+            onComplete={onComplete}
+          />,
+        ),
+      );
+      expect(container.querySelector("h1")!.textContent).toBe("How do you want to use Opengeni?");
+      expect(container.querySelector("#organization-onboarding-name")).toBeNull();
+      const choices = Array.from(container.querySelectorAll("li button")).map(
+        (button) => button.querySelector("span.font-medium")?.textContent,
+      );
+      expect(choices).toEqual(["Add AI agents to my product", "Run agents in the cloud"]);
+      await act(async () =>
+        Array.from(container.querySelectorAll<HTMLButtonElement>("li button"))
+          .find((button) => button.textContent?.includes("Run agents in the cloud"))!
+          .click(),
+      );
+      // Back returns to the question without creating anything.
+      await act(async () =>
+        Array.from(container.querySelectorAll("button"))
+          .find((button) => button.textContent?.trim() === "Back")!
+          .click(),
+      );
+      expect(container.querySelector("h1")!.textContent).toBe("How do you want to use Opengeni?");
+      await act(async () =>
+        Array.from(container.querySelectorAll<HTMLButtonElement>("li button"))
+          .find((button) => button.textContent?.includes("Run agents in the cloud"))!
+          .click(),
+      );
+      await enter(container.querySelector("#organization-onboarding-name")!, "Northwind Research");
+      await act(async () => container.querySelector<HTMLFormElement>("form")!.requestSubmit());
+      await flush();
+      await act(async () =>
+        Array.from(container.querySelectorAll("button"))
+          .find((button) => button.textContent?.trim() === "Start chatting for free")!
+          .click(),
+      );
+      expect(onComplete).toHaveBeenCalledTimes(1);
+      expect(onComplete.mock.calls[0]).toEqual([]);
+      expect(createOrganizationApiKey).not.toHaveBeenCalled();
+    } finally {
+      await act(async () => root.unmount());
+      container.remove();
+    }
+  });
+
+  test("adding agents to a product creates one setup key and opens a setup chat without it in history", async () => {
+    const token = "ogk_setup12_secret-token-value";
+    const onComplete = mock((_destination?: unknown) => undefined);
+    const createOrganizationApiKey = mock(async (_organizationId: string, _request: unknown) => ({
+      apiKey: { id: "key-1", prefix: "ogk_setup12" },
+      token,
+    }));
+    const createWorkspace = mock(async (_request: unknown) => ({ id: "setup-workspace" }));
+    const createVariableSet = mock(async (_workspaceId: string, _request: unknown) => ({
+      id: "variable-set-1",
+    }));
+    const createSession = mock(async (_workspaceId: string, _request: Record<string, unknown>) => ({
+      id: "setup-session",
+    }));
+    const writeText = mock(async (_text: string) => undefined);
+    Object.defineProperty(navigator, "clipboard", { value: { writeText }, configurable: true });
+    const container = document.createElement("div");
+    document.body.appendChild(container);
+    const root = createRoot(container);
+    try {
+      await act(async () =>
+        root.render(
+          <OrganizationOnboardingPanel
+            client={
+              {
+                ...setupClient,
+                createOrganizationApiKey,
+                createWorkspace,
+                createVariableSet,
+                createSession,
+              } as never
+            }
+            previewState="required"
+            billingMode="stripe"
+            startingCredits={{
+              balance: { balanceMicros: 10_000_000, currency: "usd" },
+              model: { id: "credits-model", label: "Credits Model", reasoningEffort: "none" },
+            }}
+            onComplete={onComplete}
+          />,
+        ),
+      );
+      await act(async () =>
+        Array.from(container.querySelectorAll<HTMLButtonElement>("li button"))
+          .find((button) => button.textContent?.includes("Add AI agents to my product"))!
+          .click(),
+      );
+      expect(createOrganizationApiKey).not.toHaveBeenCalled();
+      await enter(container.querySelector("#organization-onboarding-name")!, "Northwind");
+      await act(async () => container.querySelector<HTMLFormElement>("form")!.requestSubmit());
+      await flush();
+      expect(container.querySelector("h1")!.textContent).toBe("You got $10 in free credits");
+      expect(createOrganizationApiKey).not.toHaveBeenCalled();
+      await act(async () =>
+        Array.from(container.querySelectorAll("button"))
+          .find((button) => button.textContent?.trim() === "Continue")!
+          .click(),
+      );
+      await flush();
+      expect(onComplete).not.toHaveBeenCalled();
+      expect(container.querySelector("h1")!.textContent).toBe("Add AI agents to your product");
+      expect(createOrganizationApiKey).toHaveBeenCalledTimes(1);
+      expect(createOrganizationApiKey.mock.calls[0]).toEqual([
+        "preview-organization",
+        {
+          name: "Setup (full access)",
+          description:
+            "Created at signup so an agent can set up Opengeni in your product end to end.",
+          access: "full",
+          expiresAt: expect.any(String),
+        },
+      ]);
+      // The signup key lasts 30 days, not the preset's 24-hour default.
+      const keyLifetimeMs =
+        Date.parse(
+          (createOrganizationApiKey.mock.calls[0]![1] as { expiresAt: string }).expiresAt,
+        ) - Date.now();
+      expect(keyLifetimeMs).toBeGreaterThan(29 * 24 * 60 * 60 * 1000);
+      expect(keyLifetimeMs).toBeLessThanOrEqual(30 * 24 * 60 * 60 * 1000);
+      expect(container.textContent).toContain("expires in 30 days");
+      // Shown once, in its own copy step; the prompt never carries it.
+      expect(container.querySelector("[data-slot=developer-setup-key]")!.textContent).toBe(token);
+      expect(container.textContent).toContain("1. Copy your key");
+      expect(container.querySelector("pre")!.textContent).not.toContain(token);
+      expect(container.querySelector("pre")!.textContent).toContain(
+        "server-only .env as OPENGENI_API_KEY",
+      );
+
+      await act(async () =>
+        Array.from(container.querySelectorAll("button"))
+          .find((button) => button.textContent?.trim() === "Copy key")!
+          .click(),
+      );
+      await flush();
+      expect(writeText.mock.calls).toEqual([[token]]);
+      expect(container.textContent).toContain("Key copied");
+
+      await act(async () =>
+        Array.from(container.querySelectorAll("button"))
+          .find((button) => button.textContent?.trim() === "Copy prompt")!
+          .click(),
+      );
+      await flush();
+      expect(writeText).toHaveBeenCalledTimes(2);
+      const prompt = writeText.mock.calls[1]![0];
+      expect(prompt).not.toContain(token);
+      expect(prompt).toContain("server-only .env as OPENGENI_API_KEY");
+      expect(prompt).toContain("claude plugin install opengeni@opengeni");
+
+      await act(async () =>
+        Array.from(container.querySelectorAll("button"))
+          .find((button) => button.textContent?.includes("Let Opengeni implement it"))!
+          .click(),
+      );
+      await flush();
+      expect(createWorkspace.mock.calls).toEqual([
+        [{ accountId: "preview-organization", name: "Opengeni setup" }],
+      ]);
+      expect(createVariableSet.mock.calls[0]![0]).toBe("setup-workspace");
+      expect(createVariableSet.mock.calls[0]![1]).toMatchObject({
+        name: "Opengeni developer setup",
+        variables: [{ name: "DEVELOPER_SETUP_API_KEY", value: token }],
+      });
+      expect(createSession).toHaveBeenCalledTimes(1);
+      const [sessionWorkspaceId, sessionRequest] = createSession.mock.calls[0]!;
+      expect(sessionWorkspaceId).toBe("setup-workspace");
+      expect(sessionRequest.initialMessage).toBe(
+        "I want to add AI agents to my product. Help me set it up.",
+      );
+      expect(sessionRequest.variableSetIds).toEqual(["variable-set-1"]);
+      expect(String(sessionRequest.idempotencyKey)).toStartWith("onboarding-developer-setup:");
+      const context = String(sessionRequest.modelContext);
+      expect(context).toContain("I chose to let Opengeni implement it.");
+      expect(context).toContain("Organization: Northwind (ID preview-organization)");
+      expect(context).toContain("builtin:opengeni-client");
+      expect(context).toContain("DEVELOPER_SETUP_API_KEY");
+      expect(context).toContain("GitHub");
+      // The key is in the sandbox variable set, never in model-visible history.
+      expect(JSON.stringify(sessionRequest)).not.toContain(token);
+      expect(onComplete.mock.calls).toEqual([
+        [{ workspaceId: "setup-workspace", sessionId: "setup-session" }],
+      ]);
+    } finally {
+      await act(async () => root.unmount());
+      container.remove();
+      Reflect.deleteProperty(navigator, "clipboard");
+    }
+  });
+
+  test("a coupon code redeems its full amount in a new tab and celebrates it in place", async () => {
+    const createBillingCheckout = mock(async (_request: Record<string, unknown>) => ({
+      checkoutSessionId: "cs_test_coupon",
+      url: "https://checkout.stripe.test/c/pay/cs_test_coupon",
+      amountUsd: 100,
+    }));
+    const getBillingCheckout = mock(async () => ({
+      checkoutSessionId: "cs_test_coupon",
+      status: "complete" as const,
+      credit: { state: "granted" as const, amountMicros: 100_000_000, currency: "usd", free: true },
+      balance: {
+        accountId: "preview-organization",
+        balanceMicros: 110_000_000,
+        currency: "usd",
+        updatedAt: "2026-10-02T00:00:00.000Z",
+      },
+    }));
+    const tab = {
+      opener: {},
+      location: { href: "" },
+      close: mock(() => undefined),
+      document: { title: "", body: { style: { cssText: "" }, textContent: "" } },
+    };
+    const open = mock(() => tab);
+    const originalOpen = window.open;
+    window.open = open as unknown as typeof window.open;
+    const container = document.createElement("div");
+    document.body.appendChild(container);
+    const root = createRoot(container);
+    try {
+      await act(async () =>
+        root.render(
+          <OrganizationOnboardingPanel
+            client={{ ...setupClient, createBillingCheckout, getBillingCheckout } as never}
+            previewState="required"
+            billingMode="stripe"
+            initialUseCase="cloud"
+            startingCredits={{
+              balance: { balanceMicros: 10_000_000, currency: "usd" },
+              model: { id: "credits-model", label: "Credits Model", reasoningEffort: "none" },
+            }}
+            onComplete={() => undefined}
+          />,
+        ),
+      );
+      await enter(container.querySelector("#organization-onboarding-name")!, "Northwind");
+      await act(async () => container.querySelector<HTMLFormElement>("form")!.requestSubmit());
+      await flush();
+      expect(container.querySelector("h1")!.textContent).toBe("You got $10 in free credits");
+      expect(container.querySelector("[data-slot=credits-prize]")).not.toBeNull();
+      await act(async () =>
+        Array.from(container.querySelectorAll("button"))
+          .find((button) => button.textContent?.includes("Have a coupon code?"))!
+          .click(),
+      );
+      await enter(
+        container.querySelector<HTMLInputElement>("input[placeholder='Enter your code']")!,
+        "launch100",
+      );
+      await act(async () =>
+        Array.from(container.querySelectorAll("form"))
+          .find((form) => form.textContent?.includes("Coupon code"))!
+          .requestSubmit(),
+      );
+      await flush();
+      await flush();
+      // The tab opened inside the click; checkout carries the code, not an amount.
+      expect(open).toHaveBeenCalledTimes(1);
+      expect(createBillingCheckout.mock.calls[0]![0]).toMatchObject({
+        accountId: "preview-organization",
+        promotionCode: "launch100",
+      });
+      expect(createBillingCheckout.mock.calls[0]![0]).not.toHaveProperty("amountUsd");
+      expect(tab.location.href).toBe("https://checkout.stripe.test/c/pay/cs_test_coupon");
+      expect(getBillingCheckout).toHaveBeenCalledWith("cs_test_coupon", {
+        accountId: "preview-organization",
+      });
+      expect(container.querySelector("h1")!.textContent).toBe("You got $100 in free credits");
+      expect(container.textContent).toContain("Your balance is now $110");
+      expect(container.textContent).toContain("Coupon redeemed");
+    } finally {
+      window.open = originalOpen;
+      await act(async () => root.unmount());
+      container.remove();
+    }
+  });
+
+  test("a failed setup chat retries without a second workspace or key", async () => {
+    const onComplete = mock((_destination?: unknown) => undefined);
+    const createOrganizationApiKey = mock(async () => ({
+      apiKey: { id: "key-1", prefix: "ogk_retry123" },
+      token: "ogk_retry123_secret",
+    }));
+    const createWorkspace = mock(async () => ({ id: "setup-workspace" }));
+    const createVariableSet = mock(async () => {
+      throw new Error("variable sets unavailable");
+    });
+    let sessionAttempts = 0;
+    const createSession = mock(async (_workspaceId: string, _request: Record<string, unknown>) => {
+      sessionAttempts += 1;
+      if (sessionAttempts === 1) throw new Error("temporarily unavailable");
+      return { id: "setup-session" };
+    });
+    const container = document.createElement("div");
+    document.body.appendChild(container);
+    const root = createRoot(container);
+    try {
+      await act(async () =>
+        root.render(
+          <OrganizationOnboardingPanel
+            client={
+              {
+                ...setupClient,
+                createOrganizationApiKey,
+                createWorkspace,
+                createVariableSet,
+                createSession,
+              } as never
+            }
+            previewState="required"
+            includedModel={{ id: "free-model", label: "Free Model", free: true }}
+            initialUseCase="embed"
+            onComplete={onComplete}
+          />,
+        ),
+      );
+      await enter(container.querySelector("#organization-onboarding-name")!, "Northwind");
+      await act(async () => container.querySelector<HTMLFormElement>("form")!.requestSubmit());
+      await flush();
+      await act(async () =>
+        Array.from(container.querySelectorAll("button"))
+          .find((button) => button.textContent?.trim() === "Continue")!
+          .click(),
+      );
+      await flush();
+      const implement = () =>
+        Array.from(container.querySelectorAll<HTMLButtonElement>("button")).find((button) =>
+          button.textContent?.includes("Let Opengeni implement it"),
+        )!;
+      await act(async () => implement().click());
+      await flush();
+      expect(onComplete).not.toHaveBeenCalled();
+      await act(async () => implement().click());
+      await flush();
+      expect(createOrganizationApiKey).toHaveBeenCalledTimes(1);
+      expect(createWorkspace).toHaveBeenCalledTimes(1);
+      expect(createVariableSet).toHaveBeenCalledTimes(1);
+      expect(createSession).toHaveBeenCalledTimes(2);
+      const [first, second] = createSession.mock.calls.map(([, request]) => request);
+      expect(second!.idempotencyKey).toBe(first!.idempotencyKey);
+      // Without the variable set the chat says so instead of claiming a key.
+      expect(second!.variableSetIds).toBeUndefined();
+      expect(String(second!.modelContext)).toContain("No API key is attached to this chat.");
+      expect(onComplete.mock.calls).toEqual([
+        [{ workspaceId: "setup-workspace", sessionId: "setup-session" }],
+      ]);
+    } finally {
+      await act(async () => root.unmount());
+      container.remove();
     }
   });
 
@@ -1391,7 +1772,7 @@ describe("organization onboarding UI", () => {
           .click(),
       );
       await flush();
-      expect(container.textContent).toContain("Create your organization");
+      expect(container.textContent).toContain("How do you want to use Opengeni?");
       expect(container.textContent).toContain("Signed in as ada@example.test");
       await act(async () =>
         Array.from(container.querySelectorAll("button"))

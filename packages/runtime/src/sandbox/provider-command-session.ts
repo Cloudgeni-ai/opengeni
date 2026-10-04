@@ -54,6 +54,23 @@ export class ProviderCommandStartOutcomeUnknownError extends Error {
   }
 }
 
+/** A reserved stdin byte range was sent once but its acknowledgement was lost.
+ * The original process remains observation authority, never input replay authority. */
+export class ProviderCommandInputOutcomeUnknownError extends Error {
+  constructor(
+    readonly command: SandboxProviderCommand,
+    readonly byteOffset: number,
+    readonly byteLength: number,
+    cause: unknown,
+  ) {
+    super(
+      "Provider command stdin outcome is unknown; the input was not resent. Do not resend stdin; inspect the original command with empty input.",
+      { cause },
+    );
+    this.name = "ProviderCommandInputOutcomeUnknownError";
+  }
+}
+
 /** An already-dispatched invocation could not be observed within this read's
  * budget. The exact locator is read authority, never Start/input replay authority. */
 export class ProviderCommandObservationUnavailableError extends Error {

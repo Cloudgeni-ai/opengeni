@@ -31,8 +31,26 @@ setDefaultTimeout(120_000);
 let shared: SharedTestDatabase | null = null;
 let client: DbClient | null = null;
 
+async function acquireDatabase(): Promise<SharedTestDatabase | null> {
+  const adminUrl = process.env.OPENGENI_TEST_POSTGRES_ADMIN_URL;
+  const appUrl = process.env.OPENGENI_TEST_POSTGRES_APP_URL;
+  if (!adminUrl && !appUrl) return await acquireSharedTestDatabase("insights-usage-bundle");
+  if (!adminUrl || !appUrl) {
+    throw new Error(
+      "OPENGENI_TEST_POSTGRES_ADMIN_URL and OPENGENI_TEST_POSTGRES_APP_URL must be set together",
+    );
+  }
+  const admin = postgres(adminUrl, { max: 4 });
+  return {
+    admin,
+    adminUrl,
+    appUrl,
+    release: async () => await admin.end().catch(() => undefined),
+  };
+}
+
 beforeAll(async () => {
-  shared = await acquireSharedTestDatabase("insights-usage-bundle");
+  shared = await acquireDatabase();
   if (!shared) return;
   client = createDb(shared.appUrl, { max: 8 });
 }, 180_000);
@@ -125,9 +143,9 @@ async function fixture(): Promise<Fixture> {
   const currentAt = new Date(now.getTime() + 1_000);
   const priorAt = new Date(now.getTime() - 90 * 60_000);
   const monthSince = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), 1));
-  const privateGroup = crypto.randomUUID();
-  const sharedGroup = crypto.randomUUID();
-  const workspaceGroup = crypto.randomUUID();
+  const privateGroup = privateSession.sandboxGroupId ?? privateSession.id;
+  const sharedGroup = sharedSession.sandboxGroupId ?? sharedSession.id;
+  const workspaceGroup = sharedGroup;
   const values: Array<[string, number, string, string | null, string | null, Date]> = [];
   const add = (
     eventType: string,
@@ -160,6 +178,7 @@ async function fixture(): Promise<Fixture> {
     currentAt,
   );
   add("model.tokens", 999, "tokens", null, null, monthSince);
+  add("agent_run.created", 13, "runs", null, null, monthSince);
   add("irrelevant.event", 999_999, "units", null, null, currentAt);
 
   for (const [index, value] of values.entries()) {
@@ -274,11 +293,12 @@ function instrumentedDb(statements: string[]): { db: Database; close: () => Prom
 }
 
 describe("Workspace Insights usage bundle", () => {
-  test("materializes only the reused current window", async () => {
+  test("aggregates the current window in one grouping-sets pass without materializing it", async () => {
     const source = await Bun.file(
       new URL("../src/insights-usage-bundle.ts", import.meta.url),
     ).text();
-    expect(source).toContain("current_visible as materialized");
+    expect(source).not.toContain("as materialized");
+    expect(source.match(/group by grouping sets/g)).toHaveLength(1);
     expect(source).not.toContain("prior_visible");
     expect(source).not.toContain("month_visible");
   });
@@ -286,6 +306,13 @@ describe("Workspace Insights usage bundle", () => {
   test("matches the nine legacy reads for shared/private and workspace-level usage", async () => {
     if (!shared || !client) return;
     const seeded = await fixture();
+    // Independent raw ledger oracle, not the released strict-`>` helper.
+    const [month] = await shared.admin<Array<{ tokens: string; runs: string }>>`
+      select coalesce(sum(quantity) filter (where event_type = 'model.tokens'), 0)::text as tokens,
+        coalesce(sum(quantity) filter (where event_type = 'agent_run.created'), 0)::text as runs
+      from usage_events where workspace_id = ${seeded.workspaceId}
+        and occurred_at >= ${seeded.input.monthSince}`;
+    expect(month).toEqual({ tokens: "1699", runs: "20" });
     const cases = [
       { subjectId: seeded.ownerSubjectId, input: seeded.input },
       {
@@ -302,12 +329,24 @@ describe("Workspace Insights usage bundle", () => {
           readWorkspaceInsightsUsageBundle(client!.db, input),
         ]),
       );
-      expect(comparable(bundled)).toEqual(comparable(legacy));
-      const owner = subjectId === seeded.ownerSubjectId;
-      expect(bundled.billableTokensUsed).toBe(owner ? 700 : 600);
-      expect(bundled.agentRunsUsed).toBe(owner ? 7 : 6);
+      const complete = await withSessionRlsActorContext({ subjectId: seeded.ownerSubjectId }, () =>
+        legacyUsageBundle(client!.db, input),
+      );
+      expect(
+        comparable({ ...bundled, warmGroups: [], billableTokensUsed: 0, agentRunsUsed: 0 }),
+      ).toEqual(
+        comparable({ ...complete, warmGroups: [], billableTokensUsed: 0, agentRunsUsed: 0 }),
+      );
+      expect(bundled.warmGroups).toEqual(
+        legacy.warmGroups.filter((group) => !group.groupId.startsWith("77777777-")),
+      );
+      expect(bundled.warmSeconds).toBe(151);
+      expect(bundled.billableTokensUsed).toBe(1699);
+      expect(bundled.agentRunsUsed).toBe(20);
+      expect(bundled.billableTokensUsed).toBe(Number(month!.tokens));
+      expect(bundled.agentRunsUsed).toBe(Number(month!.runs));
       expect(bundled.warmGroups.every((group) => group.groupId !== "not-a-uuid")).toBe(true);
-      expect(bundled.warmGroups.some((group) => group.groupId.startsWith("77777777-"))).toBe(true);
+      expect(bundled.warmGroups.some((group) => group.groupId.startsWith("77777777-"))).toBe(false);
     }
 
     const emptyInput = {
@@ -323,7 +362,11 @@ describe("Workspace Insights usage bundle", () => {
           readWorkspaceInsightsUsageBundle(client!.db, emptyInput),
         ]),
     );
-    expect(comparable(bundledEmpty)).toEqual(comparable(legacyEmpty));
+    expect(comparable({ ...bundledEmpty, billableTokensUsed: 0, agentRunsUsed: 0 })).toEqual(
+      comparable({ ...legacyEmpty, billableTokensUsed: 0, agentRunsUsed: 0 }),
+    );
+    expect(bundledEmpty.billableTokensUsed).toBe(1699);
+    expect(bundledEmpty.agentRunsUsed).toBe(20);
     expect(bundledEmpty.workspaceCreditMicros).toBe(0);
     expect(bundledEmpty.warmSeconds).toBe(0);
     expect(bundledEmpty.buckets).toEqual(new Map());
@@ -357,7 +400,7 @@ describe("Workspace Insights usage bundle", () => {
       (total, statement) => total + (statement.match(new RegExp(source, "g"))?.length ?? 0),
       0,
     );
-    const projection = "visible_workspace_insights_usage_projection";
+    const projection = "complete_workspace_insights_usage_projection";
     const bundleQueries = bundledStatements.filter((statement) => statement.includes(projection));
     const bundledInvocations = bundleQueries.reduce(
       (total, statement) => total + (statement.match(new RegExp(projection, "g"))?.length ?? 0),

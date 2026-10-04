@@ -64,6 +64,10 @@ class FakePresentationSession {
     this.listeners.add(listener);
     return () => this.listeners.delete(listener);
   }
+  blockAuthoring(reason: "pending_conflict" | "prior_writer"): void {
+    this.view = { ...this.view, authoringBlockedReason: reason };
+    for (const listener of this.listeners) listener(this.view);
+  }
   revokeReadAccess(): void {
     this.view = {
       ...this.view,
@@ -185,6 +189,30 @@ class FakePresentationSession {
 }
 
 describe("SDK-backed editable presentation", () => {
+  test("forwards an authoring conflict without revoking edit permission or browsing", async () => {
+    const fake = new FakePresentationSession();
+    const rendered = await renderComponent(
+      <EditablePresentationArtifactSurface session={fake as unknown as EditableArtifactSession} />,
+    );
+    try {
+      await flush(30);
+      await actRun(() => fake.blockAuthoring("pending_conflict"));
+      expect(fake.getView().writable).toBe(true);
+      expect(rendered.container.querySelector('[role="application"]')).not.toBeNull();
+      expect(
+        rendered.container.querySelector<HTMLButtonElement>('button[aria-label="Add slide"]')
+          ?.disabled,
+      ).toBe(true);
+      expect(rendered.container.textContent).toContain("An earlier change needs attention");
+      expect(
+        rendered.container
+          .querySelector("[data-og-presentation-editor]")
+          ?.getAttribute("data-og-command-state"),
+      ).toBe("error");
+    } finally {
+      await rendered.unmount();
+    }
+  });
   test("removes retained slide content immediately after read access is revoked", async () => {
     const fake = new FakePresentationSession();
     const rendered = await renderComponent(

@@ -1,4 +1,5 @@
 import { canonicalPublicOrigin, managedUserEmailAllowed, type Settings } from "@opengeni/config";
+import { MANAGED_AUTH_NEW_SIGNUPS_PAUSED_CODE } from "@opengeni/contracts";
 import {
   configureManagedUserAdmission,
   type ManagedAuth,
@@ -15,7 +16,7 @@ import {
 } from "@opengeni/db/canonical-human-identities";
 import type { Observability } from "@opengeni/observability";
 import { betterAuth } from "better-auth";
-import { createEmailVerificationToken } from "better-auth/api";
+import { APIError, createEmailVerificationToken } from "better-auth/api";
 import { hashPassword, verifyPassword } from "better-auth/crypto";
 import { sql } from "drizzle-orm";
 import { Pool, type PoolConfig } from "pg";
@@ -27,6 +28,10 @@ import {
   MANAGED_AUTH_CLIENT_RATE_LIMIT_RULES,
 } from "./managed-auth-rate-limits";
 import { deliverManagedSignInNotification } from "./managed-sign-in-notifications";
+import {
+  createManagedAuthNewSignupsGate,
+  type ManagedAuthNewSignupsGate,
+} from "./new-signups-gate";
 import { createSignupFunnelMetrics } from "./signup-funnel-metrics";
 import {
   currentManagedAuthProviderId,
@@ -60,11 +65,45 @@ export function managedAuthUserCreateOverride(
   return { data: { ...user, emailVerified: true } };
 }
 
+export const MANAGED_AUTH_NEW_SIGNUPS_PAUSED_MESSAGE =
+  "We're at capacity for new accounts right now. Please try again later.";
+
+/**
+ * Typed refusal for a new account while the deployment has paused sign-ups.
+ * Existing accounts are unaffected; the body mirrors Better Auth's
+ * `{ code, message }` error shape so browser and SDK callers parse it alike.
+ */
+export function managedAuthNewSignupsPausedResponse(): Response {
+  return Response.json(
+    {
+      code: MANAGED_AUTH_NEW_SIGNUPS_PAUSED_CODE,
+      message: MANAGED_AUTH_NEW_SIGNUPS_PAUSED_MESSAGE,
+    },
+    { status: 403, headers: { "cache-control": "no-store" } },
+  );
+}
+
+/**
+ * Thrown from the user-create hook while the runtime switch has paused new
+ * sign-ups. Better Auth returns it as `403 { code: "NEW_SIGNUPS_PAUSED" }` on
+ * email sign-up, and its OAuth callback turns the message into the
+ * `error=signup_disabled` redirect it also uses for a static provider refusal.
+ */
+export class ManagedAuthNewSignupsPausedError extends APIError {
+  constructor() {
+    super("FORBIDDEN", { code: MANAGED_AUTH_NEW_SIGNUPS_PAUSED_CODE, message: "signup disabled" });
+  }
+}
+
 export function managedAuthUserCreateAdmission(
-  settings: Pick<Settings, "environment" | "allowedUserEmails">,
+  settings: Pick<Settings, "environment" | "allowedUserEmails"> &
+    Partial<Pick<Settings, "managedAuthNewSignupsEnabled">>,
   user: { emailVerified: boolean } & Record<string, unknown>,
   providerId: string,
 ): { data: typeof user } | false | undefined {
+  // Backstop for every Better Auth user-create path. Invited-user account
+  // setup does not create users through Better Auth, so it is unaffected.
+  if (settings.managedAuthNewSignupsEnabled === false) return false;
   if (!managedUserEmailAllowed(settings.allowedUserEmails, user.email)) return false;
   if (
     managedAuthRequiresEmailVerification(settings) &&
@@ -74,6 +113,21 @@ export function managedAuthUserCreateAdmission(
     return false;
   }
   return managedAuthUserCreateOverride(settings, user);
+}
+
+/**
+ * Per-provider Better Auth options while sign-ups are paused. A social sign-in
+ * for an existing human still signs in (and may link a verified provider);
+ * an unknown human is redirected back with `error=signup_disabled`.
+ * `disableSignUp` is the hard switch: `disableImplicitSignUp` alone can be
+ * overridden by a client-supplied `requestSignUp`.
+ */
+export function managedAuthSocialSignupOptions(
+  settings: Pick<Settings, "managedAuthNewSignupsEnabled">,
+): { disableImplicitSignUp?: true; disableSignUp?: true } {
+  return settings.managedAuthNewSignupsEnabled
+    ? {}
+    : { disableImplicitSignUp: true, disableSignUp: true };
 }
 
 /** Keep Better Auth password policy and storage format behind this boundary. */
@@ -162,7 +216,10 @@ export function createManagedAuth(
   settings: Settings,
   db: Database,
   managedEmailTransport: ManagedEmailTransport,
-  options: { observability?: ManagedAuthPoolObservability } = {},
+  options: {
+    observability?: ManagedAuthPoolObservability;
+    newSignupsGate?: ManagedAuthNewSignupsGate;
+  } = {},
 ): ManagedAuth | null {
   if (settings.productAccessMode !== "managed") {
     return null;
@@ -173,8 +230,14 @@ export function createManagedAuth(
     : undefined;
   const requireEmailVerification = managedAuthRequiresEmailVerification(settings);
   const pool = createManagedAuthDatabasePool(settings.databaseUrl, options.observability);
+  // The deployment ceiling is static Better Auth configuration; the runtime
+  // switch is checked per user create in the hook below.
+  const newSignupsSocialProviderOptions = managedAuthSocialSignupOptions(settings);
+  const newSignupsGate =
+    options.newSignupsGate ??
+    createManagedAuthNewSignupsGate({ db, settings, observability: options.observability });
   const auth = betterAuth({
-    appName: "OpenGeni",
+    appName: "Opengeni",
     baseURL: betterAuthBaseUrl(settings),
     basePath: "/v1/auth",
     secret: settings.betterAuthSecret,
@@ -316,6 +379,7 @@ export function createManagedAuth(
               clientId: settings.managedAuthGoogleClientId,
               clientSecret: settings.managedAuthGoogleClientSecret,
               prompt: "select_account" as const,
+              ...newSignupsSocialProviderOptions,
             },
           }
         : {}),
@@ -324,6 +388,7 @@ export function createManagedAuth(
             github: {
               clientId: settings.managedAuthGithubClientId,
               clientSecret: settings.managedAuthGithubClientSecret,
+              ...newSignupsSocialProviderOptions,
             },
           }
         : {}),
@@ -339,6 +404,9 @@ export function createManagedAuth(
     },
     emailAndPassword: {
       enabled: true,
+      // Sign-in, password reset, and verification stay enabled; only new
+      // account creation is refused while sign-ups are paused.
+      disableSignUp: !settings.managedAuthNewSignupsEnabled,
       // Local managed mode exists so the complete human/org tenancy flow can
       // be exercised without first configuring a transactional-email vendor.
       // Every non-local deployment retains the verified-email boundary.
@@ -357,9 +425,9 @@ export function createManagedAuth(
         await sendManagedAuthEmail(managedEmailTransport, {
           kind: "password_reset",
           to: user.email,
-          subject: "Reset your OpenGeni password",
-          text: `Reset your OpenGeni password: ${url}`,
-          html: `<p>Reset your OpenGeni password:</p><p><a href="${escapeHtml(url)}">Reset password</a></p>`,
+          subject: "Reset your Opengeni password",
+          text: `Reset your Opengeni password: ${url}`,
+          html: `<p>Reset your Opengeni password:</p><p><a href="${escapeHtml(url)}">Reset password</a></p>`,
         });
       },
     },
@@ -522,8 +590,16 @@ export function createManagedAuth(
       },
       user: {
         create: {
-          before: async (user) =>
-            managedAuthUserCreateAdmission(settings, user, currentManagedAuthProviderId()),
+          before: async (user) => {
+            const admission = managedAuthUserCreateAdmission(
+              settings,
+              user,
+              currentManagedAuthProviderId(),
+            );
+            if (admission === false) return false;
+            if (!(await newSignupsGate.signupsOpen())) throw new ManagedAuthNewSignupsPausedError();
+            return admission;
+          },
           after: async (user, context) => {
             await funnel?.recordSignUp(context);
             if (!user.emailVerified) return;
@@ -696,13 +772,13 @@ export async function sendManagedAuthEmail(
 // Verification can sign the clicker in (autoSignInAfterVerification), so an
 // unsolicited verification email must say plainly that it can be ignored.
 function emailVerificationMessage(to: string, url: string): Omit<ManagedEmailMessage, "from"> {
-  const ignore = "If you did not create an OpenGeni account, ignore this email.";
+  const ignore = "If you did not create an Opengeni account, ignore this email.";
   return {
     kind: "email_verification",
     to,
-    subject: "Verify your OpenGeni email",
-    text: `Verify your OpenGeni email: ${url}\n\n${ignore}`,
-    html: `<p>Verify your OpenGeni email:</p><p><a href="${escapeHtml(url)}">Verify email</a></p><p>${ignore}</p>`,
+    subject: "Verify your Opengeni email",
+    text: `Verify your Opengeni email: ${url}\n\n${ignore}`,
+    html: `<p>Verify your Opengeni email:</p><p><a href="${escapeHtml(url)}">Verify email</a></p><p>${ignore}</p>`,
   };
 }
 

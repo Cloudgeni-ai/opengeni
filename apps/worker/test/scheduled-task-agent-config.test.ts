@@ -172,13 +172,13 @@ async function queuedAgentRun(
 // it through to the generated session and freezes it in the accepted execution.
 
 describe("scheduled-task agent configuration (real PostgreSQL)", () => {
-  test("a task without agent keeps the exact legacy generated session", async () => {
+  test("a task without agent resolves all with the default generated tools", async () => {
     if (!available) return;
     const grant = await workspaceGrant();
     const task = await generatedTask(grant, null);
     const { settings, session, accepted } = await dispatchGeneratedSession(grant, task.id);
-    expect(session.agent).toBeNull();
-    expect(accepted?.resolvedAgentConfig).toBeUndefined();
+    expect(session.agent).toMatchObject({ from: "all", source: "deployment_default" });
+    expect(accepted?.resolvedAgentConfig).toEqual(session.agent!);
     expect(session.firstPartyMcpTools).toEqual(resolveFirstPartyMcpToolPolicy(settings).default);
   }, 60_000);
 
@@ -189,9 +189,7 @@ describe("scheduled-task agent configuration (real PostgreSQL)", () => {
       capabilities: { from: "none", goals: true },
       identity: "Nightly reporter",
     });
-    const { session, accepted } = await dispatchGeneratedSession(grant, task.id, {
-      agentConfigAdmissionEnabled: true,
-    });
+    const { session, accepted } = await dispatchGeneratedSession(grant, task.id);
     expect(session.agent).toMatchObject({
       from: "none",
       identity: "Nightly reporter",
@@ -230,8 +228,7 @@ describe("scheduled-task agent configuration (real PostgreSQL)", () => {
       { purpose: "nightly", [identityKey]: { spoof: true } },
     );
     const producerKey = `scheduled-agent-${crypto.randomUUID()}`;
-    const overrides = { agentConfigAdmissionEnabled: true };
-    const first = await dispatchGeneratedSession(grant, task.id, overrides, producerKey);
+    const first = await dispatchGeneratedSession(grant, task.id, {}, producerKey);
     const { source: _source, ...identity } = first.session.agent!;
     expect(first.session.metadata[identityKey]).toEqual(identity);
     expect(first.session.metadata.purpose).toBe("nightly");
@@ -242,31 +239,14 @@ describe("scheduled-task agent configuration (real PostgreSQL)", () => {
     await shared!.admin`update scheduled_tasks
       set agent_config = jsonb_set(agent_config, '{agent,identity}', '"Updated reporter"'::jsonb)
       where id = ${task.id}`;
-    const replay = await dispatchGeneratedSession(grant, task.id, overrides, producerKey);
+    const replay = await dispatchGeneratedSession(grant, task.id, {}, producerKey);
     expect(replay.session.id).toBe(first.session.id);
     expect(replay.session.agent).toEqual(first.session.agent);
     expect(replay.session.instructions).toBe(first.session.instructions);
     expect(replay.accepted).toEqual(first.accepted);
   }, 60_000);
 
-  test("a stored task agent with admission off is refused, never silently dropped", async () => {
-    if (!available) return;
-    const grant = await workspaceGrant();
-    const task = await generatedTask(grant, null, { capabilities: "none" });
-    const { activities: scheduled } = activities();
-    const result = await scheduled.dispatchScheduledTaskRun({
-      workspaceId: grant.workspaceId,
-      taskId: task.id,
-      triggerType: "scheduled",
-      producerKey: `scheduled-agent-${crypto.randomUUID()}`,
-    });
-    expect(result.action).not.toBe("start");
-    const [run] = await listScheduledTaskRuns(client.db, grant.workspaceId, task.id, 10);
-    expect(run?.status).toBe("skipped");
-    expect(run?.sessionId ?? null).toBeNull();
-  }, 60_000);
-
-  test("queued recovery preserves the complete agent and instructions without re-admission", async () => {
+  test("queued recovery preserves the complete agent and instructions", async () => {
     if (!available) return;
     const grant = await workspaceGrant();
     const task = await generatedTask(grant, null, {
@@ -274,9 +254,7 @@ describe("scheduled-task agent configuration (real PostgreSQL)", () => {
       identity: "Scheduled report writer",
       instructions: "Return the synthetic fixture report.",
     });
-    const { session, accepted } = await dispatchGeneratedSession(grant, task.id, {
-      agentConfigAdmissionEnabled: true,
-    });
+    const { session, accepted } = await dispatchGeneratedSession(grant, task.id);
     expect(session.instructions).toBe("Return the synthetic fixture report.");
     expect(accepted?.resolvedAgentInstructions).toBe(session.instructions);
     const { producerKey } = await queuedAgentRun(grant, accepted!);
@@ -311,9 +289,7 @@ describe("scheduled-task agent configuration (real PostgreSQL)", () => {
       capabilities: "none",
       identity: "Accepted report writer",
     });
-    const { accepted } = await dispatchGeneratedSession(grant, task.id, {
-      agentConfigAdmissionEnabled: true,
-    });
+    const { accepted } = await dispatchGeneratedSession(grant, task.id);
     const { run, producerKey, snapshot } = await queuedAgentRun(grant, accepted!);
     const binding = snapshot.generatedSessionBinding;
     const session = await createSession(client.db, {

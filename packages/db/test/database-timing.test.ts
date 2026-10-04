@@ -16,7 +16,17 @@ function fixture(
     execute: async () => {
       calls.push("execute");
       if (options.setupError) throw options.setupError;
-      return [{ account_id: context.accountId, workspace_id: context.workspaceId }];
+      return [
+        {
+          account_id: context.accountId,
+          workspace_id: context.workspaceId,
+          subject_id: "",
+          private_file_owner: "",
+          initiating_human_subject_id: "",
+          personal_resource_human_subject_id: "",
+          personal_resource_actor_subject_id: "",
+        },
+      ];
     },
   } as unknown as Database;
   const db = {

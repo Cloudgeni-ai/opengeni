@@ -887,7 +887,7 @@ describe("API helpers", () => {
       error: {
         status: 503,
         code: "upstream_unavailable",
-        message: "OpenGeni is temporarily unavailable — retry.",
+        message: "Opengeni is temporarily unavailable — retry.",
         retryable: true,
         requestId: "browser-safe-503",
       },
@@ -912,7 +912,7 @@ describe("API helpers", () => {
     });
     const body = (await response.json()) as { error: { requestId: string; message: string } };
     expect(response.status).toBe(500);
-    expect(body.error.message).toBe("OpenGeni could not complete the request.");
+    expect(body.error.message).toBe("Opengeni could not complete the request.");
     expect(body.error.requestId).toMatch(/^[0-9a-f-]{36}$/);
     expect(JSON.stringify(body)).not.toContain("PRIVATE-DATABASE-CREDENTIAL");
   });
@@ -1144,6 +1144,42 @@ describe("API helpers", () => {
     expect(params.payment_intent_data?.metadata?.opengeni_credit_coupon_v1).toBe("1");
   });
 
+  test("applies a typed promotion code up front instead of Stripe's code field", () => {
+    const params = stripeCheckoutSessionCreateParams({
+      accountId: "00000000-0000-4000-8000-000000000001",
+      customerId: "cus_test",
+      amountCents: 10_000,
+      amountMicros: 100_000_000,
+      publicBaseUrl: "https://app.opengeni.ai",
+      successUrl:
+        "https://app.opengeni.ai/workspaces/w/organization?section=billing&checkout=success&checkoutSession={CHECKOUT_SESSION_ID}",
+      idempotencyKey: "checkout:test",
+      promotionCodeId: "promo_test",
+      fullyDiscounted: true,
+    });
+
+    expect(params.discounts).toEqual([{ promotion_code: "promo_test" }]);
+    expect(params.allow_promotion_codes).toBeUndefined();
+    // A $0 checkout has nothing to tax, so Checkout asks for no billing address.
+    expect(params.automatic_tax).toEqual({ enabled: false });
+    expect(
+      stripeCheckoutSessionCreateParams({
+        accountId: "00000000-0000-4000-8000-000000000001",
+        customerId: "cus_test",
+        amountCents: 10_000,
+        amountMicros: 100_000_000,
+        publicBaseUrl: "https://app.opengeni.ai",
+        idempotencyKey: "checkout:test",
+        promotionCodeId: "promo_half",
+        fullyDiscounted: false,
+      }).automatic_tax,
+    ).toEqual({ enabled: true });
+    expect(params.line_items?.[0]?.price_data?.unit_amount).toBe(10_000);
+    expect(params.metadata?.opengeni_credit_micros).toBe("100000000");
+    // Stripe fills in the session id; the placeholder must survive validation.
+    expect(params.success_url).toContain("checkoutSession={CHECKOUT_SESSION_ID}");
+  });
+
   test("restricts Stripe Checkout return URLs to the public OpenGeni origin", () => {
     const params = stripeCheckoutSessionCreateParams({
       accountId: "00000000-0000-4000-8000-000000000001",
@@ -1170,7 +1206,7 @@ describe("API helpers", () => {
         successUrl: "https://evil.example/checkout",
         idempotencyKey: "checkout:test-open-redirect",
       }),
-    ).toThrow("successUrl must use the OpenGeni public origin");
+    ).toThrow("successUrl must use the Opengeni public origin");
   });
 
   test("returns local Stripe Checkout to the configured web origin", () => {
@@ -1200,7 +1236,7 @@ describe("API helpers", () => {
         ...base,
         successUrl: "https://evil.example/checkout",
       }),
-    ).toThrow("successUrl must use the OpenGeni public or web origin");
+    ).toThrow("successUrl must use the Opengeni public or web origin");
   });
 
   test("namespaces Stripe customer mirrors by live and test mode", () => {
@@ -1231,7 +1267,7 @@ describe("API helpers", () => {
         publicBaseUrl: "https://app.opengeni.ai",
         returnUrl: "https://evil.example/billing",
       }),
-    ).toThrow("returnUrl must use the OpenGeni public origin");
+    ).toThrow("returnUrl must use the Opengeni public origin");
     expect(
       stripeBillingPortalSessionCreateParams({
         customerId: "cus_test",
@@ -1608,7 +1644,7 @@ describe("API helpers", () => {
       message = error instanceof Error ? error.message : String(error);
     }
 
-    expect(message).toContain("OpenGeni could not initialize configured.example");
+    expect(message).toContain("Opengeni could not initialize configured.example");
     expect(message).not.toContain(fixturePassword);
     expect(message).not.toContain(fixtureSecret);
     expect(message).not.toContain("fixture-user");
@@ -1634,7 +1670,7 @@ describe("API helpers", () => {
         throw new Error("Streamable HTTP error: POSTing to endpoint: HTTP 404 Not Found");
       }),
     ).rejects.toThrow(
-      'MCP capability "Gmail" could not be enabled because OpenGeni could not reach a valid Streamable HTTP MCP server at gmail.googleapis.com. Check the endpoint URL or choose a different catalog entry.',
+      'MCP capability "Gmail" could not be enabled because Opengeni could not reach a valid Streamable HTTP MCP server at gmail.googleapis.com. Check the endpoint URL or choose a different catalog entry.',
     );
   });
 
@@ -1954,7 +1990,7 @@ describe("GET /v1/config/client", () => {
     const defaultModel = config.models.find((model) => model.id === settings.openaiModel);
     expect(defaultModel).toMatchObject({
       provider: "opengeni",
-      providerLabel: "OpenGeni",
+      providerLabel: "Opengeni",
       source: "opengeni",
       api: "responses",
     });
@@ -2028,6 +2064,15 @@ describe("GET /v1/config/client", () => {
       socialProviders: ["google", "github"],
     });
     expect(JSON.stringify(config.auth)).not.toContain("secret");
+  });
+
+  test("projects whether new managed accounts may be created", async () => {
+    const open = await fetchClientConfig(testSettings({ productAccessMode: "managed" }));
+    expect(open.auth).toMatchObject({ mode: "managedSession", newSignupsEnabled: true });
+    const paused = await fetchClientConfig(
+      testSettings({ productAccessMode: "managed", managedAuthNewSignupsEnabled: false }),
+    );
+    expect(paused.auth).toMatchObject({ mode: "managedSession", newSignupsEnabled: false });
   });
 
   test("keeps analytics off by default and exposes only configured public identifiers", async () => {
@@ -2185,7 +2230,7 @@ describe("GET /v1/config/client", () => {
       id: "accounts/fireworks/models/glm-5p2",
       label: "GLM 5.2",
       provider: "opengeni",
-      providerLabel: "OpenGeni",
+      providerLabel: "Opengeni",
       source: "opengeni",
       api: "chat",
       contextWindowTokens: 1_048_576,

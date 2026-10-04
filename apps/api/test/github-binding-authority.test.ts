@@ -659,7 +659,7 @@ describe("GitHub owner-authority binding routes", () => {
       expect(response.headers.get("content-type")).toContain("text/html");
       const html = await response.text();
       expect(html).toContain(title);
-      expect(html).toContain("Back to OpenGeni");
+      expect(html).toContain("Back to Opengeni");
       expect(html).not.toContain('{"error"');
       return html;
     };

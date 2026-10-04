@@ -2,6 +2,7 @@ import { CheckIcon, ShieldCheckIcon, XIcon } from "lucide-react";
 import { Fragment, useEffect, useId, useRef, useState, type ReactNode } from "react";
 import type { PendingApproval } from "../approvals";
 import { cn } from "../lib/cn";
+import { useErrorMessage } from "../lib/error-message";
 import { toolDisplayName } from "../timeline/tool-display-name";
 
 export type ApprovalSurfaceMessages = {
@@ -144,6 +145,7 @@ export function ApprovalSurface({
   className,
 }: ApprovalSurfaceProps) {
   const titleId = useId();
+  const formatError = useErrorMessage();
   const descriptionId = useId();
   const messages = { ...defaultApprovalSurfaceMessages, ...overrides };
   const [pending, setPending] = useState<{
@@ -152,7 +154,7 @@ export function ApprovalSurface({
     token: symbol;
   } | null>(null);
   const pendingRef = useRef<{ approvalKey: string; token: symbol } | null>(null);
-  const [decisionError, setDecisionError] = useState<Error | null>(null);
+  const [decisionError, setDecisionError] = useState<{ cause: unknown } | null>(null);
 
   useEffect(() => {
     if (
@@ -187,11 +189,15 @@ export function ApprovalSurface({
       if (pendingRef.current?.token === token) {
         pendingRef.current = null;
         setPending((current) => (current?.token === token ? null : current));
-        setDecisionError(cause instanceof Error ? cause : new Error(String(cause)));
+        setDecisionError({ cause });
       }
     }
   };
-  const errorMessage = decisionError?.message ?? (error instanceof Error ? error.message : error);
+  const errorMessage = decisionError
+    ? formatError(decisionError.cause)
+    : error instanceof Error
+      ? formatError(error)
+      : error;
 
   return (
     <section

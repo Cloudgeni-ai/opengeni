@@ -261,12 +261,54 @@ describe("Computer routes on the placement interaction server", () => {
     }
   });
 
+  test("keeps RFB pixel requests available but rejects input from session view tokens", async () => {
+    const received: number[] = [];
+    const upstream = createServer((socket) =>
+      socket.on("data", (chunk) =>
+        received.push(...(typeof chunk === "string" ? Buffer.from(chunk) : chunk)),
+      ),
+    );
+    await new Promise<void>((resolve) => upstream.listen(0, "127.0.0.1", resolve));
+    const address = upstream.address();
+    if (!address || typeof address === "string") throw new Error("RFB fixture did not bind TCP");
+    try {
+      await withServer(
+        async ({ server, reference }) => {
+          await request(server, "/v1/computer-sessions", {
+            method: "POST",
+            token: adminToken,
+            body: createBody(reference),
+          });
+          const socket = await openRfb(server, reference.computerSessionId, viewToken);
+          const handshake = new Uint8Array([...new TextEncoder().encode("RFB 003.008\n"), 1, 1]);
+          const frameRequest = Uint8Array.of(3, 1, 0, 0, 0, 0, 0, 20, 0, 10);
+          socket.send(handshake);
+          socket.send(frameRequest);
+          await waitUntil(() => received.length === handshake.length + frameRequest.length);
+          const closed = new Promise<number>((resolve) =>
+            socket.addEventListener("close", (event) => resolve(event.code), { once: true }),
+          );
+          socket.send(Uint8Array.of(4, 1, 0, 0, 0, 0, 0, 65));
+          expect(await Promise.race([closed, Bun.sleep(500).then(() => null)])).toBe(1008);
+          expect(received).toEqual([...handshake, ...frameRequest]);
+        },
+        { rfbPort: address.port },
+      );
+    } finally {
+      await new Promise<void>((resolve) => upstream.close(() => resolve()));
+    }
+  });
+
   test("owns rapid browser RFB input packets until TCP consumes them", async () => {
+    const handshake = new TextEncoder().encode("RFB 003.008\n\u0001\u0001");
     const packets = Array.from({ length: 512 }, (_, index) =>
       Uint8Array.of(4, index & 1, 0, 0, 0, 0, 0, index & 0xff),
     );
-    const expected = new Uint8Array(packets.reduce((length, packet) => length + packet.length, 0));
-    let offset = 0;
+    const expected = new Uint8Array(
+      handshake.length + packets.reduce((length, packet) => length + packet.length, 0),
+    );
+    expected.set(handshake);
+    let offset = handshake.length;
     for (const packet of packets) {
       expected.set(packet, offset);
       offset += packet.length;
@@ -307,20 +349,27 @@ describe("Computer routes on the placement interaction server", () => {
             body: createBody(reference),
           });
           expect(created.status).toBe(201);
-          const websocket = new WebSocket(
-            `${server.url.replace("http:", "ws:")}/v1/computer-sessions/${reference.computerSessionId}/targets/screen-1/rfb`,
-            [
-              "binary",
-              COMPUTER_RFB_WEBSOCKET_PROTOCOL,
-              `${BROWSER_CONTROL_WEBSOCKET_BEARER_PREFIX}${viewToken}`,
-            ],
+          const inputToken = `rfb.${"i".repeat(48)}`;
+          const grant = await request(
+            server,
+            `/v1/computer-sessions/${reference.computerSessionId}/view-grants`,
+            {
+              method: "POST",
+              token: adminToken,
+              body: {
+                grantId: randomUUID(),
+                controllerGeneration: reference.controllerGeneration,
+                token: inputToken,
+                expiresAt: new Date(Date.now() + 60_000).toISOString(),
+                targetId: "screen-1",
+                targetGeneration: "target-generation-1",
+                inputAllowed: true,
+              },
+            },
           );
-          await new Promise<void>((resolve, reject) => {
-            websocket.addEventListener("open", () => resolve(), { once: true });
-            websocket.addEventListener("error", () => reject(new Error("websocket failed")), {
-              once: true,
-            });
-          });
+          expect(grant.status).toBe(201);
+          const websocket = await openRfb(server, reference.computerSessionId, inputToken);
+          websocket.send(handshake);
           for (const packet of packets) websocket.send(packet);
           expect(await Promise.race([received, Bun.sleep(5_000).then(() => null)])).toEqual(
             expected,
@@ -335,12 +384,246 @@ describe("Computer routes on the placement interaction server", () => {
       );
     }
   });
+
+  test("binds a prepared RFB grant once to an exact screen generation and input posture", async () => {
+    await withRfbServer(async ({ server, reference, driver, received }) => {
+      const prepared = rfbGrantBody(reference, false);
+      const path = `/v1/computer-sessions/${reference.computerSessionId}/view-grants`;
+      const { targetId, targetGeneration, inputAllowed: _inputAllowed, ...oldBody } = prepared;
+      expect(
+        (
+          await json(
+            await request(server, path, { method: "POST", token: adminToken, body: oldBody }),
+          )
+        ).data,
+      ).toMatchObject({ scopedRfbInput: true });
+      for (const body of [prepared, prepared, oldBody]) {
+        const response = await request(server, path, { method: "POST", token: adminToken, body });
+        expect(response.status).toBe(200);
+        expect((await json(response)).data).toMatchObject({
+          targetId,
+          targetGeneration,
+          inputAllowed: false,
+        });
+      }
+      expect(
+        (
+          await request(server, path, {
+            method: "POST",
+            token: adminToken,
+            body: { ...prepared, inputAllowed: true },
+          })
+        ).status,
+      ).toBe(409);
+      const wrongTarget = await rfbUpgradeResponse(
+        server,
+        reference.computerSessionId,
+        prepared.token,
+        "screen-2",
+      );
+      expect(wrongTarget.status).toBe(401);
+      const socket = await openRfb(server, reference.computerSessionId, prepared.token);
+      socket.send(rfbHandshake());
+      await waitUntil(() => received.length === rfbHandshake().length);
+      const closed = websocketClosed(socket);
+      socket.send(Uint8Array.of(5, 1, 0, 1, 0, 1));
+      expect((await closed).code).toBe(1008);
+      expect(received).toEqual([...rfbHandshake()]);
+      driver.capabilities.keyboardInput = false;
+      const nativeDenied = await request(server, path, {
+        method: "POST",
+        token: adminToken,
+        body: rfbGrantBody(reference, true),
+      });
+      expect(nativeDenied.status).toBe(403);
+    });
+  });
+
+  test.each(["target", "native", "rotation", "end"] as const)(
+    "rejects buffered RFB input after %s revocation",
+    async (revocation) => {
+      await withRfbServer(async ({ server, reference, driver, received }) => {
+        const grant = rfbGrantBody(reference, true);
+        expect(
+          (
+            await request(
+              server,
+              `/v1/computer-sessions/${reference.computerSessionId}/view-grants`,
+              { method: "POST", token: adminToken, body: grant },
+            )
+          ).status,
+        ).toBe(201);
+        const socket = await openRfb(server, reference.computerSessionId, grant.token);
+        socket.send(rfbHandshake());
+        await waitUntil(() => received.length === rfbHandshake().length);
+        let release!: () => void;
+        let reached!: () => void;
+        const entered = new Promise<void>((resolve) => {
+          reached = resolve;
+        });
+        const blocked = new Promise<void>((resolve) => {
+          release = resolve;
+        });
+        driver.beforeTarget = async () => {
+          reached();
+          await blocked;
+        };
+        const closed = websocketClosed(socket);
+        // A partial input message is still fenced before entering the parser.
+        socket.send(Uint8Array.of(4, 1, 0, 0));
+        await entered;
+        if (revocation === "target") driver.screenGeneration = "target-generation-2";
+        else if (revocation === "native") driver.capabilities.pointerInput = false;
+        else if (revocation === "rotation") {
+          expect(
+            (
+              await request(server, "/v1/computer-sessions", {
+                method: "POST",
+                token: adminToken,
+                body: createBody(reference, {
+                  tokenGeneration: 2,
+                  controlToken: rotatedControlToken,
+                  viewToken: rotatedViewToken,
+                }),
+              })
+            ).status,
+          ).toBe(200);
+        } else {
+          expect(
+            (
+              await request(server, `/v1/computer-sessions/${reference.computerSessionId}/end`, {
+                method: "POST",
+                token: adminToken,
+                body: { controllerGeneration: reference.controllerGeneration, removeState: false },
+              })
+            ).status,
+          ).toBe(200);
+        }
+        release();
+        expect((await closed).code).toBe(revocation === "end" ? 1001 : 1008);
+        expect(received).toEqual([...rfbHandshake()]);
+      });
+    },
+  );
+
+  test("expires an RFB grant while a handshake packet awaits native validation", async () => {
+    await withRfbServer(async ({ server, reference, driver, received }) => {
+      const grant = {
+        ...rfbGrantBody(reference, true),
+        expiresAt: new Date(Date.now() + 250).toISOString(),
+      };
+      expect(
+        (
+          await request(
+            server,
+            `/v1/computer-sessions/${reference.computerSessionId}/view-grants`,
+            { method: "POST", token: adminToken, body: grant },
+          )
+        ).status,
+      ).toBe(201);
+      const socket = await openRfb(server, reference.computerSessionId, grant.token);
+      let release!: () => void;
+      let reached!: () => void;
+      const entered = new Promise<void>((resolve) => {
+        reached = resolve;
+      });
+      const blocked = new Promise<void>((resolve) => {
+        release = resolve;
+      });
+      driver.beforeTarget = async () => {
+        reached();
+        await blocked;
+      };
+      const closed = websocketClosed(socket);
+      socket.send(rfbHandshake());
+      await entered;
+      expect((await closed).code).toBe(1008);
+      release();
+      await Bun.sleep(10);
+      expect(received).toEqual([]);
+    });
+  });
 });
+
+function rfbHandshake(): Uint8Array<ArrayBuffer> {
+  return new TextEncoder().encode("RFB 003.008\n\u0001\u0001");
+}
+
+function rfbGrantBody(reference: { controllerGeneration: string }, inputAllowed: boolean) {
+  return {
+    grantId: randomUUID(),
+    controllerGeneration: reference.controllerGeneration,
+    token: `rfb.${randomUUID()}.${"r".repeat(32)}`,
+    expiresAt: new Date(Date.now() + 60_000).toISOString(),
+    targetId: "screen-1",
+    targetGeneration: "target-generation-1",
+    inputAllowed,
+  };
+}
+
+async function rfbUpgradeResponse(
+  server: BrowserControlServer,
+  computerSessionId: string,
+  token: string,
+  targetId: string,
+): Promise<Response> {
+  return await fetch(
+    `${server.url}/v1/computer-sessions/${computerSessionId}/targets/${targetId}/rfb`,
+    {
+      headers: {
+        "sec-websocket-protocol": [
+          "binary",
+          COMPUTER_RFB_WEBSOCKET_PROTOCOL,
+          `${BROWSER_CONTROL_WEBSOCKET_BEARER_PREFIX}${token}`,
+        ].join(", "),
+      },
+    },
+  );
+}
+
+async function withRfbServer(
+  callback: (fixture: {
+    server: BrowserControlServer;
+    reference: { computerSessionId: string; controllerGeneration: string };
+    driver: FixtureComputerDriver;
+    received: number[];
+  }) => Promise<void>,
+): Promise<void> {
+  const received: number[] = [];
+  const upstream = createServer((socket) =>
+    socket.on("data", (chunk) =>
+      received.push(...(typeof chunk === "string" ? Buffer.from(chunk) : chunk)),
+    ),
+  );
+  await new Promise<void>((resolve) => upstream.listen(0, "127.0.0.1", resolve));
+  const address = upstream.address();
+  if (!address || typeof address === "string") throw new Error("RFB fixture did not bind TCP");
+  try {
+    await withServer(
+      async ({ server, reference, getDriver }) => {
+        expect(
+          (
+            await request(server, "/v1/computer-sessions", {
+              method: "POST",
+              token: adminToken,
+              body: createBody(reference),
+            })
+          ).status,
+        ).toBe(201);
+        await callback({ server, reference, driver: getDriver(), received });
+      },
+      { rfbPort: address.port },
+    );
+  } finally {
+    await new Promise<void>((resolve) => upstream.close(() => resolve()));
+  }
+}
 
 async function withServer(
   callback: (fixture: {
     server: BrowserControlServer;
     reference: { computerSessionId: string; controllerGeneration: string };
+    getDriver: () => FixtureComputerDriver;
   }) => Promise<void>,
   options: { rfbPort?: number } = {},
 ): Promise<void> {
@@ -352,11 +635,14 @@ async function withServer(
       throw new Error("browser driver must not be used by computer routes");
     },
   });
+  let driver: FixtureComputerDriver | null = null;
   const computerSupervisor = await ComputerSupervisor.open({
     rootDirectory: join(directory, "computer-state"),
     environmentAllocator: fixtureEnvironmentAllocator(options.rfbPort ?? null),
-    createDriver: async (context) =>
-      new FixtureComputerDriver(context, options.rfbPort !== undefined),
+    createDriver: async (context) => {
+      driver = new FixtureComputerDriver(context, options.rfbPort !== undefined);
+      return driver;
+    },
   });
   const server = BrowserControlServer.start({
     supervisor: browserSupervisor,
@@ -368,6 +654,10 @@ async function withServer(
     await callback({
       server,
       reference: { computerSessionId: randomUUID(), controllerGeneration: "controller-1" },
+      getDriver: () => {
+        if (!driver) throw new Error("fixture driver has not opened");
+        return driver;
+      },
     });
   } finally {
     await server.stop();
@@ -376,6 +666,8 @@ async function withServer(
 }
 
 class FixtureComputerDriver implements ComputerSupervisorDriver {
+  screenGeneration = "target-generation-1";
+  beforeTarget: (() => Promise<void>) | null = null;
   readonly platform = "linux" as const;
   readonly adapterId = "fixture.atspi.v1";
   readonly capabilities: ComputerSessionCapabilities = {
@@ -404,6 +696,7 @@ class FixtureComputerDriver implements ComputerSupervisorDriver {
   }
 
   async target(targetId: string): Promise<ComputerTarget | null> {
+    await this.beforeTarget?.();
     if (targetId === "window-1") return this.buildTarget();
     if (targetId === "screen-1" && this.includeScreen) return this.buildScreenTarget();
     return null;
@@ -458,6 +751,7 @@ class FixtureComputerDriver implements ComputerSupervisorDriver {
     return {
       ...this.buildTarget(),
       id: "screen-1",
+      targetGeneration: this.screenGeneration,
       kind: "screen",
       applicationId: null,
       processId: null,
@@ -526,6 +820,36 @@ function fixtureEnvironmentAllocator(rfbPort: number | null = null): ComputerEnv
       };
     },
   };
+}
+
+async function openRfb(
+  server: BrowserControlServer,
+  computerSessionId: string,
+  token: string,
+): Promise<WebSocket> {
+  const socket = new WebSocket(
+    `${server.url.replace("http:", "ws:")}/v1/computer-sessions/${computerSessionId}/targets/screen-1/rfb`,
+    [
+      "binary",
+      COMPUTER_RFB_WEBSOCKET_PROTOCOL,
+      `${BROWSER_CONTROL_WEBSOCKET_BEARER_PREFIX}${token}`,
+    ],
+  );
+  await new Promise<void>((resolve, reject) => {
+    socket.addEventListener("open", () => resolve(), { once: true });
+    socket.addEventListener("error", () => reject(new Error("RFB fixture socket failed")), {
+      once: true,
+    });
+  });
+  return socket;
+}
+
+async function waitUntil(predicate: () => boolean): Promise<void> {
+  const deadline = performance.now() + 2_000;
+  while (!predicate()) {
+    if (performance.now() > deadline) throw new Error("RFB fixture did not reach expected state");
+    await Bun.sleep(2);
+  }
 }
 
 function command(reference: {

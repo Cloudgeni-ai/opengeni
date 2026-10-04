@@ -152,7 +152,7 @@ async function checkCreditBalance(
   if (balance.balanceMicros > 0) {
     return { allowed: true };
   }
-  return { allowed: false, code: "insufficient_credits", message: "insufficient OpenGeni credits" };
+  return { allowed: false, code: "insufficient_credits", message: "insufficient Opengeni credits" };
 }
 
 async function checkStaticCaps(

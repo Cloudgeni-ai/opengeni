@@ -301,6 +301,135 @@ async function counts(ctx: GoalFixture) {
 }
 
 describe("durable active-goal wake", () => {
+  test("Resume during accepted work validates its frozen causal human", async () => {
+    const ctx = await runningGoalFixture();
+    await setSessionGoalStatusWithEvent(client.db, ctx.grant.workspaceId!, ctx.session.id, {
+      status: "paused",
+      pausedReason: "api",
+      event: { type: "goal.paused", actor: "api", reason: "api" },
+    });
+    const resumed = await setSessionGoalStatusWithEvent(
+      client.db,
+      ctx.grant.workspaceId!,
+      ctx.session.id,
+      {
+        status: "active",
+        beforeResume: async (_tx, _session, causalTurn) => {
+          expect(causalTurn).toEqual({
+            id: ctx.turn.id,
+            initiatingHumanSubjectId: ctx.grant.subjectId,
+          });
+        },
+        event: { type: "goal.resumed", actor: "api" },
+      },
+    );
+    expect(resumed.goal.status).toBe("active");
+    expect(resumed.workflowWakeRevision).toBeNull();
+  });
+
+  test("Resume validates locked causal work before changing counters, events or wakes", async () => {
+    const ctx = await runningGoalFixture();
+    await settleIdle(ctx);
+    await materialize(ctx);
+    await setSessionGoalStatusWithEvent(client.db, ctx.grant.workspaceId!, ctx.session.id, {
+      status: "paused",
+      rationale: "Selected model unavailable",
+      pausedReason: "model_unavailable",
+      event: { type: "goal.paused", actor: "api", reason: "model_unavailable" },
+    });
+    const before = await getSessionGoalWithContinuation(
+      client.db,
+      ctx.grant.workspaceId!,
+      ctx.session.id,
+    );
+    const readWake = () =>
+      shared.admin`select * from session_workflow_wake_outbox where session_id = ${ctx.session.id}`;
+    const wakeBefore = await readWake();
+    const [sessionBefore] =
+      await shared.admin`select last_sequence from sessions where id = ${ctx.session.id}`;
+    expect(before?.autoContinuations).toBe(1);
+    let validations = 0;
+    const validate = async (
+      _tx: unknown,
+      session: { model: string; latencyMode: string },
+      causalTurn: { id: string; initiatingHumanSubjectId: string | null } | null,
+    ) => {
+      validations += 1;
+      expect(session.model).toBe("scripted-model");
+      expect(session.latencyMode).toBe("standard");
+      expect(causalTurn).toEqual({
+        id: ctx.turn.id,
+        initiatingHumanSubjectId: ctx.grant.subjectId,
+      });
+    };
+    await expectRejectionContaining(
+      setSessionGoalStatusWithEvent(client.db, ctx.grant.workspaceId!, ctx.session.id, {
+        status: "active",
+        beforeResume: async (...args) => {
+          await validate(...args);
+          throw new Error("Choose an available model before resuming.");
+        },
+        event: { type: "goal.resumed", actor: "api" },
+      }),
+      "Choose an available model",
+    );
+    expect(
+      await getSessionGoalWithContinuation(client.db, ctx.grant.workspaceId!, ctx.session.id),
+    ).toEqual(before);
+    expect(await readWake()).toEqual(wakeBefore);
+    const [sessionAfter] =
+      await shared.admin`select last_sequence from sessions where id = ${ctx.session.id}`;
+    expect(sessionAfter).toEqual(sessionBefore);
+    const resumed = await setSessionGoalStatusWithEvent(
+      client.db,
+      ctx.grant.workspaceId!,
+      ctx.session.id,
+      {
+        status: "active",
+        beforeResume: validate,
+        event: { type: "goal.resumed", actor: "api" },
+      },
+    );
+    expect(resumed.goal.status).toBe("active");
+    expect(resumed.goal.autoContinuations).toBe(0);
+    expect(resumed.goal.rationale).toBeNull();
+    expect(resumed.events.map((event) => event.type)).toEqual(["goal.resumed"]);
+    expect(resumed.workflowWakeRevision).not.toBeNull();
+    const replay = await setSessionGoalStatusWithEvent(
+      client.db,
+      ctx.grant.workspaceId!,
+      ctx.session.id,
+      {
+        status: "active",
+        beforeResume: validate,
+        event: { type: "goal.resumed", actor: "api" },
+      },
+    );
+    expect(replay.changed).toBe(false);
+    expect(replay.events).toEqual([]);
+    expect(validations).toBe(2);
+  });
+
+  test("model admission pauses keep their specific cause without spending continuation budget", async () => {
+    const ctx = await runningGoalFixture();
+    await settleIdle(ctx);
+    const result = await evaluateGoalContinuation(client.db, {
+      workspaceId: ctx.grant.workspaceId!,
+      sessionId: ctx.session.id,
+      budgetBlocked: "The selected model is unavailable. Choose another model.",
+      budgetPausedReason: "model_unavailable",
+    });
+    expect(result.decision).toBe("paused");
+    const goal = await getSessionGoalWithContinuation(
+      client.db,
+      ctx.grant.workspaceId!,
+      ctx.session.id,
+    );
+    expect(goal?.pausedReason).toBe("model_unavailable");
+    expect(goal?.rationale).toContain("Choose another model");
+    expect(goal?.autoContinuations).toBe(0);
+  });
+
   test("agent goal_set rejects live goals and replaces completed goals", async () => {
     const ctx = await runningGoalFixture();
     await expect(
@@ -2445,6 +2574,11 @@ describe("session-level wait_for_input", () => {
           personalResourceAuthoritySubjectId ?? causalHumanAuthority?.subjectId ?? null,
         causalHumanAuthority,
         xaiProviderAccountAuthoritySnapshot: { version: 1, scope: "workspace" },
+        claudeProviderAccountAuthoritySnapshot: {
+          version: 1 as const,
+          scope: "workspace" as const,
+        },
+        claudeAuthoritySubjectId: null,
         xaiAuthoritySubjectId: null,
         connectionAuthoritySubjectId: null,
         triggerInitiator: { kind: "service", subjectId: "scheduler" },
@@ -2704,6 +2838,41 @@ describe("session-level wait_for_input", () => {
     expect(superseded.events[0]!.payload).toMatchObject({ outcome: "input" });
     expect((await waitColumns(ctx)).input_wait_turn_id).toBeNull();
   });
+
+  test("a child result wakes an idle goalless parent that is not waiting", async () => {
+    // An ordinary chat (no goal) that started a worker and promised its result:
+    // its turn ended without a held wait, so only the result can wake it.
+    const ctx = await runningGoalFixture();
+    await clearSessionGoal(client.db, ctx.grant.workspaceId!, ctx.session.id);
+    await settleClaimedIdle(ctx, ctx, ctx.attemptId);
+    const childSessionId = crypto.randomUUID();
+    const childResult = await addSessionSystemUpdate(client.db, {
+      accountId: ctx.grant.accountId,
+      workspaceId: ctx.grant.workspaceId!,
+      sessionId: ctx.session.id,
+      kind: "child_terminal_result",
+      classification: "success",
+      sourceId: childSessionId,
+      dedupeKey: `child-completion:${childSessionId}:1`,
+      summary: "A worker session you spawned has finished its work and gone idle.",
+      payload: { type: "child_terminal_result", childSessionId, status: "idle" },
+      lineage: { parentSessionId: ctx.session.id, parentTurnId: ctx.turn.id, childSessionId },
+    });
+    if (!childResult.added) throw new Error("child result was not inserted");
+    const wake = (await outboxRow(ctx))!;
+    expect(Number(wake.wake_revision)).toBeGreaterThan(Number(wake.delivered_revision));
+    const resumed = await claimNext(ctx);
+    expect(
+      (
+        await listSessionSystemUpdatesForTurn(
+          client.db,
+          ctx.grant.workspaceId!,
+          ctx.session.id,
+          resumed.claimed.turn.id,
+        )
+      ).map((update) => update.kind),
+    ).toEqual(["child_terminal_result"]);
+  }, 180_000);
 
   async function addPendingChildUpdate(
     ctx: GoalFixture,
@@ -3696,7 +3865,7 @@ describe("session-level wait_for_input", () => {
   });
 
   test.each([true, false])(
-    "child results retain delivery until claimed only with ongoing intent: %s",
+    "a goalless parent is woken by a child result and claims it (waiting: %s)",
     async (holding) => {
       const ctx = await runningGoalFixture();
       await clearSessionGoal(client.db, ctx.grant.workspaceId!, ctx.session.id);
@@ -3723,12 +3892,11 @@ describe("session-level wait_for_input", () => {
         temporalWorkflowId: `session-${ctx.session.id}`,
         wakeRevision: Number(wake.wake_revision),
       };
-      expect(await markSessionWorkflowWakeDelivered(client.db, receipt)).toEqual(
-        holding
-          ? { action: "pending_admission", blocker: "pending_machine_input" }
-          : { action: "acknowledged" },
-      );
-      if (holding) {
+      expect(await markSessionWorkflowWakeDelivered(client.db, receipt)).toEqual({
+        action: "pending_admission",
+        blocker: "pending_machine_input",
+      });
+      {
         const attemptId = crypto.randomUUID();
         const claimed = await claimSessionWorkForAttempt(client.db, ctx.grant.workspaceId!, {
           sessionId: ctx.session.id,

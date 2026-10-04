@@ -258,6 +258,7 @@ export function planScheduledTaskOpenGeniTools(input: {
   > | null;
   settings: Pick<Settings, "defaultFirstPartyMcpTools" | "allowedFirstPartyMcpTools">;
   grantPermissions: readonly Permission[];
+  grantPermissionMode?: AccessGrant["permissionMode"];
   permissionsRequiredByTools: FirstPartyToolPermissionRequirements;
   leaveOut?: ReadonlySet<FirstPartyMcpToolName>;
 }): ScheduledTaskOpenGeniToolPlan {
@@ -273,7 +274,8 @@ export function planScheduledTaskOpenGeniTools(input: {
   const priorPermissions: readonly Permission[] = input.creatorPolicy?.firstPartyMcpPermissions ?? [
     ...DEFAULT_FIRST_PARTY_MCP_PERMISSIONS,
   ];
-  const holds = (permission: Permission) => hasPermission([...input.grantPermissions], permission);
+  const holds = (permission: Permission) =>
+    hasPermission(input.grantPermissions, permission, input.grantPermissionMode);
   const defaults: ReadonlySet<Permission> = new Set(DEFAULT_FIRST_PARTY_MCP_PERMISSIONS);
   const added = input
     .permissionsRequiredByTools(missing)
@@ -550,6 +552,7 @@ export async function computeScheduledTaskAccessPlan(input: {
         creatorPolicy: input.creatorPolicy,
         settings,
         grantPermissions: input.grant.permissions,
+        grantPermissionMode: input.grant.permissionMode,
         permissionsRequiredByTools: input.permissionsRequiredByTools,
         leaveOut: new Set(input.leaveOut?.openGeniTools ?? []),
       })
@@ -742,7 +745,7 @@ export async function refreshScheduledTaskAccess(input: {
     if (plan.creatorFirstPartyPolicy.firstPartyMcpPermissions.length === 0) {
       throw new HTTPException(403, {
         message:
-          "You hold none of the permissions this schedule's OpenGeni tools need, so it cannot be refreshed with your access.",
+          "You hold none of the permissions this schedule's Opengeni tools need, so it cannot be refreshed with your access.",
       });
     }
     update.creatorFirstPartyPolicy = plan.creatorFirstPartyPolicy;

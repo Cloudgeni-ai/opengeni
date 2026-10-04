@@ -1195,6 +1195,24 @@ export function recordVerifiedSignupTrialSwitchGauge(
 }
 
 /**
+ * The deployment-level runtime switch for new managed account sign-ups
+ * (migration 0585): 1 while it allows new accounts (also when no revision
+ * exists), 0 when an operator has paused them. The API additionally honours
+ * its OPENGENI_MANAGED_AUTH_NEW_SIGNUPS_ENABLED ceiling, which this gauge does
+ * not see; `GET /v1/config/client` reports the combined decision.
+ */
+export function recordManagedAuthNewSignupsSwitchGauge(
+  observability: Observability,
+  signupsEnabled: boolean,
+): void {
+  observability.setGauge({
+    name: "opengeni_managed_auth_new_signups_runtime_enabled",
+    help: "Whether the runtime switch allows new managed account sign-ups (1) or has paused them (0).",
+    value: signupsEnabled ? 1 : 0,
+  });
+}
+
+/**
  * The OPENGENI_VERIFIED_SIGNUP_TRIAL_CREDITS_ENABLED master opt-in as this
  * worker's configuration sees it. The API reads the same shared setting; new
  * grants happen only while this gauge and the runtime switch gauge are both 1.
@@ -1498,6 +1516,7 @@ export function recordExpiredDrainingSandboxLeaseGauges(
 
 export const RETAINED_PROCESS_RECONCILIATION_OUTCOMES = [
   "claim_failed",
+  "background_recovered",
   "proof_exited",
   "proof_lost",
   "proof_checkpoint_failed",
@@ -1585,10 +1604,18 @@ export function recordModelRequestPhase(
 }
 
 export type TurnStartupPhase =
+  | "services_initialization"
+  | "claim_catalog_read"
+  | "claim_atomic"
+  | "claim_session_read"
+  | "claim_capability_settings"
+  | "learning_policy_freeze"
+  | "attachment_authority_projection"
   | "claim_and_policy"
   | "turn_start_settlement"
   | "credential_selection"
   | "runtime_preparation"
+  | "session_mcp_settings"
   | "sandbox_establish"
   | "file_resolution"
   | "tool_context_preparation"
@@ -1766,6 +1793,32 @@ export function recordTurnStartupPhase(
     },
     value: Math.max(0, input.durationSeconds),
   });
+}
+
+/** Observe an existing dependency only. Child intervals can overlap and are
+ * not additive; observer failure must never change authority or error identity. */
+export async function measureTurnStartupPhase<T>(
+  observability: Observability,
+  input: Omit<Parameters<typeof recordTurnStartupPhase>[1], "durationSeconds" | "outcome">,
+  work: () => Promise<T>,
+): Promise<T> {
+  const started = performance.now();
+  let outcome: TurnStartupOutcome = "failed";
+  try {
+    const result = await work();
+    outcome = "completed";
+    return result;
+  } finally {
+    try {
+      recordTurnStartupPhase(observability, {
+        ...input,
+        outcome,
+        durationSeconds: (performance.now() - started) / 1_000,
+      });
+    } catch {
+      // Telemetry is not an execution gate.
+    }
+  }
 }
 
 /** Background MCP preparation must not inflate startup phase distributions. */

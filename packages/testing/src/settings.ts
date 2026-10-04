@@ -8,10 +8,12 @@ import {
 
 export function testSettings(overrides: Partial<Settings> = {}): Settings {
   return {
+    slackAccessMode: "limited",
     serviceName: "opengeni",
     environment: "test",
     deploymentRevision: "dev",
     databaseUrl: "postgres://opengeni:opengeni@127.0.0.1:5432/opengeni",
+    apiDatabasePoolMax: 32,
     dbSchema: "",
     rlsStrategy: "force",
     runtimeDatabaseRole: "opengeni_app",
@@ -64,9 +66,9 @@ export function testSettings(overrides: Partial<Settings> = {}): Settings {
     agentBetaVersion: undefined,
     productAccessMode: "local",
     managedAuthSessionSetMode: "legacy",
+    managedAuthNewSignupsEnabled: true,
     organizationUserSetupEmailTokenTransport: "fragment",
     organizationUserSetupQueryEdgeSanitizationConfirmed: false,
-    organizationTenancyCanonicalActivationEnabled: false,
     billingMode: "disabled",
     verifiedSignupTrialCreditsEnabled: false,
     sandboxWarmBillingMode: "usage_only",
@@ -218,8 +220,6 @@ export function testSettings(overrides: Partial<Settings> = {}): Settings {
     openaiReasoningEncryptedContent: true,
     openaiMaxRetries: 5,
     webSearchEnabled: true,
-    agentConfigAdmissionEnabled: false,
-    agentConfigDefaultForNewSessions: false,
     jevApiKey: undefined,
     jevBaseUrl: "https://api.typesafe.ai",
     jevModel: "jev-latest",

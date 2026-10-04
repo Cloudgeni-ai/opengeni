@@ -61,6 +61,7 @@ import {
   createMockSelfhostedOpStream,
   MockAgentResponder,
   RoutingBackendRecoveryRequiredError,
+  RoutingMutationOutcomeUnknownError,
   RoutingSandboxSession,
   subjectFor,
   type EstablishedSandboxSession,
@@ -85,6 +86,7 @@ import {
   type ModalRouterStart,
 } from "../../../packages/runtime/src/sandbox/providers/modal-command-router-wire";
 import type { ChannelASession } from "../../../packages/runtime/src/sandbox/channel-a";
+import { ProviderCommandInputOutcomeUnknownError } from "../../../packages/runtime/src/sandbox/provider-command-session";
 
 let available = true;
 let shared: SharedTestDatabase | null = null;
@@ -299,6 +301,7 @@ async function ambiguousModalGroupBox() {
   const server = new Server();
   const starts: ModalRouterStart[] = [];
   const observations: ModalRouterIdentity[] = [];
+  const inputs: Array<ModalRouterIdentity & { offset: number; data: Buffer }> = [];
   let exitCode: number | null = null;
   const method = (name: string, input: string, output: string, streaming = false) => ({
     path: `/modal.task_command_router.TaskCommandRouter/${name}`,
@@ -316,6 +319,7 @@ async function ambiguousModalGroupBox() {
       start: method("TaskExecStart", "Start", "Empty"),
       read: method("TaskExecStdioRead", "Read", "Data", true),
       poll: method("TaskExecPoll", "Identity", "Poll"),
+      write: method("TaskExecStdinWrite", "Write", "Empty"),
     },
     {
       start(call: Call<ModalRouterStart>, callback: Reply) {
@@ -326,13 +330,35 @@ async function ambiguousModalGroupBox() {
           details: "Name resolution failed for target dns:task-worker.w.modal.host:443",
         });
       },
-      read(call: Call<ModalRouterIdentity> & { end(): void }) {
+      read(
+        call: Call<ModalRouterIdentity & { offset: number; fileDescriptor: number }> & {
+          write(value: { data: Uint8Array }): void;
+          end(): void;
+        },
+      ) {
         observations.push(call.request);
+        const bytes = Buffer.concat(inputs.map(({ data }) => data));
+        if (call.request.fileDescriptor === 0 && Number(call.request.offset) < bytes.length)
+          call.write({ data: bytes.subarray(Number(call.request.offset)) });
         call.end();
       },
       poll(call: Call<ModalRouterIdentity>, callback: Reply) {
         observations.push(call.request);
         callback(null, exitCode === null ? {} : { code: exitCode });
+      },
+      write(
+        call: Call<ModalRouterIdentity & { offset: number; data: Uint8Array }>,
+        callback: Reply,
+      ) {
+        expect(call.metadata.get("authorization")).toEqual(["Bearer test-token"]);
+        // The provider accepts these bytes before losing the acknowledgement.
+        // Another dispatch of this range would duplicate real input effects.
+        inputs.push({
+          ...call.request,
+          offset: Number(call.request.offset),
+          data: Buffer.from(call.request.data),
+        });
+        callback({ code: status.UNAVAILABLE, details: "stdin acknowledgement unavailable" });
       },
     },
   );
@@ -382,6 +408,7 @@ async function ambiguousModalGroupBox() {
   return {
     starts,
     observations,
+    inputs,
     complete: () => {
       exitCode = 7;
     },
@@ -458,7 +485,7 @@ afterAll(async () => {
 
 describe("M7 worker routing — wrapTurnBoxWithRouting + a real DB pointer + setActiveSandbox", () => {
   test.each(["exited", "lost"] as const)(
-    "ambiguous native Modal Start is retained and fenced until exact %s proof",
+    "ambiguous native Modal Start and input remain retained until exact %s proof",
     async (terminal) => {
       if (!available) throw new Error("PostgreSQL required for unknown-Start regression");
       const fixture = await ambiguousModalGroupBox();
@@ -586,6 +613,62 @@ describe("M7 worker routing — wrapTurnBoxWithRouting + a real DB pointer + set
           stdout: { byteOffset: 0, utf8Remainder: "", eof: false, exitCode: null },
           stderr: { byteOffset: 0, utf8Remainder: "", eof: false, exitCode: null },
         });
+        const input = "héllø 🧪\n";
+        await admin`update session_turns
+          set metadata = metadata || jsonb_build_object('providerRecoveryCount', 3)
+          where id = ${workspaceMutationFence.turnId}`;
+        const inputFailure = await proxy
+          .writeStdinForProcessMutation({
+            sessionId: retained!.providerSessionId,
+            chars: input,
+            yieldTimeMs: 0,
+          })
+          .catch((error) => error);
+        expect(inputFailure).toBeInstanceOf(RoutingMutationOutcomeUnknownError);
+        expect(inputFailure).toMatchObject({
+          op: "writeStdin",
+          retryable: false,
+          retainedProcess: { providerSessionId: retained!.providerSessionId },
+        });
+        expect(inputFailure.cause).toBeInstanceOf(ProviderCommandInputOutcomeUnknownError);
+        expect(inputFailure.cause).toMatchObject({
+          byteOffset: 0,
+          byteLength: Buffer.byteLength(input),
+          command: {
+            kind: "modal-router-v1",
+            sandboxId: instanceId,
+            taskId: fixture.starts[0]!.taskId,
+            execId: fixture.starts[0]!.execId,
+          },
+        });
+        expect(fixture.inputs).toHaveLength(1);
+        expect(fixture.inputs[0]).toMatchObject({
+          taskId: fixture.starts[0]!.taskId,
+          execId: fixture.starts[0]!.execId,
+          offset: 0,
+        });
+        expect(fixture.inputs[0]!.data.toString()).toBe(input);
+        const [inputIndex] = await admin`select provider_command_input_index
+          from sandbox_retained_processes where id = ${scope.processId}`;
+        expect(Number(inputIndex!.provider_command_input_index)).toBe(Buffer.byteLength(input));
+        const [inputAdmission] = await admin`select provider_outcome, settled_at
+          from sandbox_workspace_mutation_admissions
+          where actor_kind = 'process' and actor_id = ${scope.processId}`;
+        expect(inputAdmission!.provider_outcome).toBe("rejected");
+        expect(inputAdmission!.settled_at).not.toBeNull();
+        const [retainedParent] = await admin`select provider_outcome, settled_at
+          from sandbox_workspace_mutation_admissions where id = ${admission!.id}`;
+        expect(retainedParent).toMatchObject({ provider_outcome: "retained", settled_at: null });
+        expect(await getRetainedProcess(db, scope)).toMatchObject({
+          state: "active",
+          settledAt: null,
+        });
+        expect(proxy.hasRetainedProcess(retained!.providerSessionId)).toBe(true);
+        const [inputHolder] = await admin`select count(*)::integer as count
+          from sandbox_lease_holders
+          where lease_id = ${retained!.leaseId} and holder_id = ${retained!.holderId}`;
+        expect(inputHolder!.count).toBe(1);
+
         const captureScope = {
           accountId,
           workspaceId,
@@ -645,7 +728,7 @@ describe("M7 worker routing — wrapTurnBoxWithRouting + a real DB pointer + set
         expect(await readLease(db, workspaceId, session.sandboxGroupId)).toMatchObject({
           liveness: "warm",
           refcount: 1,
-          workspaceGeneration: 1,
+          workspaceGeneration: 2,
           archiveCapture: null,
           rotationReason: "provider_deadline",
         });
@@ -666,6 +749,7 @@ describe("M7 worker routing — wrapTurnBoxWithRouting + a real DB pointer + set
             idleGraceMs: 0,
           }),
         ).rejects.toThrow("copied durable identity");
+        expect(await proxy.reconcileRetainedProcess(retained!.providerSessionId)).toBe(false);
         const observed = await proxy.writeStdinForProcessRead({
           sessionId: retained!.providerSessionId,
           chars: "",
@@ -674,7 +758,17 @@ describe("M7 worker routing — wrapTurnBoxWithRouting + a real DB pointer + set
         expect(observed).toContain(
           `Process running with session ID ${retained!.providerSessionId}`,
         );
+        expect(observed).toContain(input);
+        expect(fixture.inputs).toHaveLength(1);
         expect((await getRetainedProcess(db, scope))!.state).toBe("active");
+        const [unchangedInputIndex] = await admin`select provider_command_input_index
+          from sandbox_retained_processes where id = ${scope.processId}`;
+        expect(Number(unchangedInputIndex!.provider_command_input_index)).toBe(
+          Buffer.byteLength(input),
+        );
+        const [unchangedRecovery] = await admin`select metadata from session_turns
+          where id = ${workspaceMutationFence.turnId}`;
+        expect(unchangedRecovery!.metadata.providerRecoveryCount).toBe(3);
         expect(
           await readWorkspaceArchiveCapturePreflight(db, {
             ...captureScope,
@@ -740,12 +834,35 @@ describe("M7 worker routing — wrapTurnBoxWithRouting + a real DB pointer + set
           expect(observation.execId).toBe(fixture.starts[0]!.execId);
         }
         expect(fixture.starts).toHaveLength(1);
+        expect(fixture.inputs).toHaveLength(1);
         expect(output).toContain("outcome unknown");
         expect(output).toContain("not replayed");
         expect(output).toContain(String(retained!.providerSessionId));
         expect(output).not.toContain("Please try again");
         expect(output).not.toContain("Process running");
         expect(output).not.toContain("Process exited");
+        // Reconstruct a stale cleanup route after another authority committed
+        // settlement. Modal locator identity comes from protected persistence,
+        // not the public/general retained-process projection.
+        if (!proxy.hasRetainedProcess(retained!.providerSessionId)) {
+          proxy.adoptRetainedProcess({
+            process: {
+              id: retained!.id,
+              providerSessionId: retained!.providerSessionId,
+              providerCommand: row!.provider_command,
+            },
+            backend: {
+              sandboxId: null,
+              leaseEpoch,
+              providerInstanceId: instanceId,
+              activeEpoch: 0,
+            },
+          });
+        }
+        const observationsBefore = fixture.observations.length;
+        expect(await proxy.reconcileRetainedProcess(retained!.providerSessionId)).toBe(true);
+        expect(proxy.hasRetainedProcess(retained!.providerSessionId)).toBe(false);
+        expect(fixture.observations.length).toBe(observationsBefore);
       } finally {
         await fixture.close();
       }
@@ -753,98 +870,118 @@ describe("M7 worker routing — wrapTurnBoxWithRouting + a real DB pointer + set
     60_000,
   );
 
-  test("a local SDK process settles against its canonical durable backend", async () => {
-    if (!available) throw new Error("PostgreSQL required for retained-process regression");
-    const [account] = await admin<{ id: string }[]>`
+  test.each(["provider_poll", "reaper"] as const)(
+    "a local SDK process consumes exact %s settlement",
+    async (settler) => {
+      if (!available) throw new Error("PostgreSQL required for retained-process regression");
+      const [account] = await admin<{ id: string }[]>`
       insert into managed_accounts (name) values ('local-process-test') returning id`;
-    const [workspace] = await admin<{ id: string }[]>`
+      const [workspace] = await admin<{ id: string }[]>`
       insert into workspaces (account_id, name) values (${account!.id}, 'local-process-test') returning id`;
-    const accountId = account!.id;
-    const workspaceId = workspace!.id;
-    await admin`insert into workspace_inference_controls (workspace_id, account_id)
+      const accountId = account!.id;
+      const workspaceId = workspace!.id;
+      await admin`insert into workspace_inference_controls (workspace_id, account_id)
       values (${workspaceId}, ${accountId})`;
-    const session = await createSession(db, {
-      accountId,
-      workspaceId,
-      initialMessage: "scripted process",
-      resources: [],
-      metadata: {},
-      model: "scripted-model",
-      reasoningEffort: "medium",
-      latencyMode: "standard",
-      sandboxBackend: "local",
-    });
-    const workspaceMutationFence = await claimRoutingAttempt({
-      accountId,
-      workspaceId,
-      sessionId: session.id,
-    });
-    const acquired = await acquireLease(db, {
-      accountId,
-      workspaceId,
-      sandboxGroupId: session.sandboxGroupId,
-      kind: "turn",
-      holderId: sandboxLeaseHolderIdForAttempt(workspaceMutationFence.attemptId),
-      subjectId: session.id,
-      backend: "local",
-      leaseTtlMs: 45_000,
-    });
-    const committed = await commitWarmingToWarm(db, {
-      accountId,
-      workspaceId,
-      sandboxGroupId: session.sandboxGroupId,
-      expectedEpoch: acquired.lease.leaseEpoch,
-      instanceId: "local-process-box",
-      resumeBackendId: "unix_local",
-      resumeState: { backendId: "unix_local", sessionState: { instanceId: "local-process-box" } },
-      leaseTtlMs: 45_000,
-    });
-    expect(committed.committed).toBe(true);
-    let executions = 0;
-    const established = wrapTurnBoxWithRouting(
-      { db, settings, bus: new MemoryEventBus() as never, opJournal: testOpJournal },
-      {
+      const session = await createSession(db, {
+        accountId,
+        workspaceId,
+        initialMessage: "scripted process",
+        resources: [],
+        metadata: {},
+        model: "scripted-model",
+        reasoningEffort: "medium",
+        latencyMode: "standard",
+        sandboxBackend: "local",
+      });
+      const workspaceMutationFence = await claimRoutingAttempt({
+        accountId,
         workspaceId,
         sessionId: session.id,
-        workspaceMutationFence,
-        homeLease: {
-          accountId,
-          sandboxGroupId: session.sandboxGroupId,
-          leaseEpoch: committed.lease!.leaseEpoch,
-          instanceId: "local-process-box",
-          backend: "local",
-        },
-      },
-      {
-        client: {},
-        backendId: "unix_local",
+      });
+      const acquired = await acquireLease(db, {
+        accountId,
+        workspaceId,
+        sandboxGroupId: session.sandboxGroupId,
+        kind: "turn",
+        holderId: sandboxLeaseHolderIdForAttempt(workspaceMutationFence.attemptId),
+        subjectId: session.id,
+        backend: "local",
+        leaseTtlMs: 45_000,
+      });
+      const committed = await commitWarmingToWarm(db, {
+        accountId,
+        workspaceId,
+        sandboxGroupId: session.sandboxGroupId,
+        expectedEpoch: acquired.lease.leaseEpoch,
         instanceId: "local-process-box",
-        sessionState: {},
-        session: {
-          state: { instanceId: "local-process-box" },
-          async exec() {
-            executions += 1;
-            return { sessionId: 17, stdout: "working" };
-          },
-          async writeStdin() {
-            return "Process exited with code 0\nOutput:\ndone";
+        resumeBackendId: "unix_local",
+        resumeState: { backendId: "unix_local", sessionState: { instanceId: "local-process-box" } },
+        leaseTtlMs: 45_000,
+      });
+      expect(committed.committed).toBe(true);
+      let executions = 0;
+      const established = wrapTurnBoxWithRouting(
+        { db, settings, bus: new MemoryEventBus() as never, opJournal: testOpJournal },
+        {
+          workspaceId,
+          sessionId: session.id,
+          workspaceMutationFence,
+          homeLease: {
+            accountId,
+            sandboxGroupId: session.sandboxGroupId,
+            leaseEpoch: committed.lease!.leaseEpoch,
+            instanceId: "local-process-box",
+            backend: "local",
           },
         },
-      },
-    );
-    const proxy = established.session as {
-      exec: (args: unknown) => Promise<unknown>;
-      writeStdin: (args: unknown) => Promise<string>;
-    };
-    await proxy.exec({ cmd: "scripted" });
-    expect(await proxy.writeStdin({ session_id: 17, chars: "" })).toContain(
-      "Process exited with code 0",
-    );
-    const [process] = await admin`select state, exit_code from sandbox_retained_processes
+        {
+          client: {},
+          backendId: "unix_local",
+          instanceId: "local-process-box",
+          sessionState: {},
+          session: {
+            state: { instanceId: "local-process-box" },
+            async exec() {
+              executions += 1;
+              return { sessionId: 17, stdout: "working" };
+            },
+            async writeStdin() {
+              return "Process exited with code 0\nOutput:\ndone";
+            },
+          },
+        },
+      );
+      const proxy = established.session as RoutingSandboxSession;
+      await proxy.exec({ cmd: "scripted" });
+      expect(await proxy.reconcileRetainedProcess(17)).toBe(false);
+      expect(await proxy.reconcileRetainedProcess(999)).toBe(false);
+      if (settler === "reaper") {
+        const identity = proxy.retainedProcessIdentity(17)!;
+        const scope = { accountId, workspaceId, sessionId: session.id, processId: identity.id };
+        const retained = (await getRetainedProcess(db, scope))!;
+        await settleRetainedProcess(db, {
+          ...scope,
+          expected: retainedProcessSettlementIdentity(retained),
+          outcome: "exited",
+          exitCode: 0,
+          reason: "provider_exit_banner",
+          idleGraceMs: 0,
+        });
+        expect(proxy.hasRetainedProcess(17)).toBe(true);
+        expect(await proxy.reconcileRetainedProcess(17)).toBe(true);
+        expect(proxy.hasRetainedProcess(17)).toBe(false);
+      } else {
+        expect(await proxy.writeStdin({ session_id: 17, chars: "" })).toContain(
+          "Process exited with code 0",
+        );
+      }
+      const [process] = await admin`select state, exit_code from sandbox_retained_processes
       where workspace_id = ${workspaceId} and session_id = ${session.id}`;
-    expect(process).toMatchObject({ state: "exited", exit_code: 0 });
-    expect(executions).toBe(1);
-  }, 60_000);
+      expect(process).toMatchObject({ state: "exited", exit_code: 0 });
+      expect(executions).toBe(1);
+    },
+    60_000,
+  );
 
   test("the proxy routes to the GROUP box by default, then to the MACHINE after a swap, then back", async () => {
     if (!available) return;

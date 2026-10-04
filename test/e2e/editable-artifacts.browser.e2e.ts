@@ -226,6 +226,9 @@ describe("public editable-artifact browser composition", () => {
       await waitForEditorIdle(page, "presentation");
       await page.reload();
       await page.getByRole("option", { name: /^Slide 1/u }).waitFor({ timeout: 30_000 });
+      // Restored text is visible before a prior writer's WAL settles; Enter is
+      // intentionally ignored while that authoring barrier remains active.
+      await waitForEditorIdle(page, "presentation");
       const reloadedSlideEditor = page.getByRole("application", { name: "Slide 1 editor" });
       await reloadedSlideEditor.focus();
       expect(
@@ -244,12 +247,16 @@ describe("public editable-artifact browser composition", () => {
       for (let index = 0; index < 2; index += 1) {
         await page.getByRole("button", { name: "Add slide" }).click();
         await waitForEditorIdle(page, "presentation");
+        // Command settlement precedes projection refresh and insertion selection.
+        await page.locator(`[data-og-slide-index="${index + 1}"][aria-selected="true"]`).waitFor();
       }
       const desktopViewport = page.viewportSize()!;
       const rail = page.locator("[data-og-slide-rail]");
       await rail.focus();
+      expect(await rail.evaluate((element) => document.activeElement === element)).toBe(true);
       await page.keyboard.press("Home");
       await page.locator('[data-og-slide-index="0"][aria-selected="true"]').waitFor();
+      expect(await rail.evaluate((element) => document.activeElement === element)).toBe(true);
       await page.keyboard.press("End");
       await page.locator('[data-og-slide-index="2"][aria-selected="true"]').waitFor();
 

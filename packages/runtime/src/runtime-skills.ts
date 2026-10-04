@@ -50,6 +50,7 @@ export type NativeToolSkillSet = Readonly<{
   defaults?: boolean;
   editableArtifacts: boolean;
   sites?: boolean;
+  schedules?: boolean;
   videoGeneration: boolean;
 }>;
 
@@ -121,6 +122,7 @@ export function loadNativeToolSkillArtifacts(
 ): readonly RuntimeSkillArtifact[] {
   const directories: string[] = nativeTools.defaults === false ? [] : ["bundled_default_skills"];
   if (nativeTools.projects) directories.push("bundled_project_skills");
+  if (nativeTools.schedules) directories.push("bundled_schedule_skills");
   if (nativeTools.editableArtifacts) directories.push("bundled_artifact_skills");
   if (nativeTools.sites) directories.push("bundled_site_skills");
   if (nativeTools.videoGeneration) directories.push("bundled_video_skills");
@@ -389,6 +391,12 @@ function nativeToolSkillSources(nativeTools: NativeToolSkillSet): Array<{
     sources.push({
       names: skillDirNames(packagedSkillDirectory("bundled_site_skills")),
       reason: "bundled Site authoring skill",
+    });
+  }
+  if (nativeTools.schedules) {
+    sources.push({
+      names: skillDirNames(packagedSkillDirectory("bundled_schedule_skills")),
+      reason: "native scheduled-task tool surface",
     });
   }
   if (nativeTools.videoGeneration) {

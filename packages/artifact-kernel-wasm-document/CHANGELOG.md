@@ -1,5 +1,17 @@
 # @opengeni/artifact-kernel-wasm-document
 
+## 1.0.2
+
+## 1.0.0
+
+### Major Changes
+
+- Reset package versioning: every published `@opengeni/*` package now releases together at one shared version, starting at 1.0.0. Install all `@opengeni` packages at the same version. Earlier versions are retired.
+
+## 0.3.39
+
+## 0.3.38
+
 ## 0.3.37
 
 ## 0.3.36

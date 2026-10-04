@@ -77,13 +77,14 @@ describe("managed email transport", () => {
       ],
       setupUrl: "https://opengeni.test/setup-account?token=secret-bearer",
     });
-    expect(rendered.subject).toBe("You're invited to join R&D <Labs> on OpenGeni");
+    // Keep invitation semantics stable without freezing product-name capitalization.
+    expect(rendered.subject).toMatch(/^You're invited to join R&D <Labs> on \S+$/);
     expect(rendered.text).toContain("Ada <Admin>");
     expect(rendered.text).toContain("Launch <Ops>: Viewer");
     expect(rendered.text).toContain("never shares anyone's Personal workspace");
     expect(rendered.text).toContain("Accept invitation to R&D <Labs>:");
     expect(rendered.text).toContain("You'll sign in or create an account before joining.");
-    expect(rendered.text).toContain("OpenGeni will show the invitation immediately");
+    expect(rendered.text).toContain("will show the invitation immediately");
     expect(rendered.html).toContain("Ada &lt;Admin&gt;");
     expect(rendered.html).toContain("R&amp;D &lt;Labs&gt;");
     expect(rendered.html).toContain("Launch &lt;Ops&gt;");

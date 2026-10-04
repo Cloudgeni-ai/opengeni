@@ -108,7 +108,6 @@ import {
   requestSlackUserLinkWorkspaceAccess,
   resolveSlackInstallationRoute,
   resolveSlackInteractionFirstTaskHint,
-  saveSlackInteractionInboxReactionCheckpoint,
   saveSlackSharedTaskOrigin,
   settleSlackInteractionInbox,
   settleSlackAppHomeRefresh,
@@ -152,6 +151,7 @@ import {
   type SlackMessageBlock,
   SlackBotOperationConflictError,
   SlackBotProviderError,
+  slackHistoryRateLimited,
 } from "./slack-bot";
 import { slackMrkdwnFromMarkdown } from "./slack-mrkdwn";
 import {
@@ -567,7 +567,7 @@ export function registerSlackInteractionRoutes(app: Hono, deps: ApiRouteDeps): v
     } catch (error) {
       if (error instanceof SlackBotProviderError && error.code === "not_in_channel") {
         return c.text(
-          "OpenGeni is not a member of this channel. Add @OpenGeni, then run /opengeni again.",
+          "Opengeni is not a member of this channel. Add @OpenGeni, then run /opengeni again.",
           200,
         );
       }
@@ -580,7 +580,7 @@ export function registerSlackInteractionRoutes(app: Hono, deps: ApiRouteDeps): v
       }
     }
     await enqueueNormalizedSlackInteraction(deps, installation, entry);
-    return c.text("OpenGeni accepted this task and will reply in a thread.", 200);
+    return c.text("Opengeni accepted this task and will reply in a thread.", 200);
   });
 
   app.post("/v1/integrations/slack/interactions", async (c) => {
@@ -1139,11 +1139,11 @@ async function publishSlackAppHome(
       refresh,
       renewLease,
       buildSlackAppHomeAccessBlocks({
-        title: link ? "OpenGeni access needed" : "Connect your OpenGeni account",
+        title: link ? "Opengeni access needed" : "Connect your Opengeni account",
         message: link
-          ? "Your Slack identity is linked, but it does not currently have access to this OpenGeni workspace."
+          ? "Your Slack identity is linked, but it does not currently have access to this Opengeni workspace."
           : "Link this Slack identity to see your active tasks, requests, and recent results here.",
-        actionLabel: link ? "Request access" : "Connect OpenGeni",
+        actionLabel: link ? "Request access" : "Connect Opengeni",
         actionUrl: slackAppHomeLinkUrl(
           deps,
           installation,
@@ -1188,10 +1188,10 @@ async function publishSlackAppHome(
       refresh,
       renewLease,
       buildSlackAppHomeAccessBlocks({
-        title: "OpenGeni access changed",
+        title: "Opengeni access changed",
         message:
-          "Your current OpenGeni access could not be verified. Reconnect before tasks are shown here.",
-        actionLabel: "Reconnect OpenGeni",
+          "Your current Opengeni access could not be verified. Reconnect before tasks are shown here.",
+        actionLabel: "Reconnect Opengeni",
         actionUrl: slackAppHomeLinkUrl(
           deps,
           installation,
@@ -1225,10 +1225,10 @@ async function publishSlackAppHome(
       refresh,
       renewLease,
       buildSlackAppHomeAccessBlocks({
-        title: "OpenGeni access changed",
+        title: "Opengeni access changed",
         message:
-          "Your current OpenGeni access could not be verified. Reconnect before tasks are shown here.",
-        actionLabel: "Reconnect OpenGeni",
+          "Your current Opengeni access could not be verified. Reconnect before tasks are shown here.",
+        actionLabel: "Reconnect Opengeni",
         actionUrl: slackAppHomeLinkUrl(
           deps,
           installation,
@@ -1253,10 +1253,10 @@ async function publishSlackAppHome(
       refresh,
       renewLease,
       buildSlackAppHomeAccessBlocks({
-        title: "OpenGeni access changed",
+        title: "Opengeni access changed",
         message:
           "Your current task access changed while this view was loading. Reopen Home to refresh it safely.",
-        actionLabel: "Open OpenGeni",
+        actionLabel: "Open Opengeni",
         actionUrl: slackWorkspaceUrl(deps, installation.workspaceId),
       }),
     );
@@ -1268,10 +1268,10 @@ async function publishSlackAppHome(
       refresh,
       renewLease,
       buildSlackAppHomeAccessBlocks({
-        title: "Refresh OpenGeni Home",
+        title: "Refresh Opengeni Home",
         message:
-          "Reopen Home to refresh your tasks safely. OpenGeni does not publish task data without Slack's current view version.",
-        actionLabel: "Open OpenGeni",
+          "Reopen Home to refresh your tasks safely. Opengeni does not publish task data without Slack's current view version.",
+        actionLabel: "Open Opengeni",
         actionUrl: slackWorkspaceUrl(deps, installation.workspaceId),
       }),
     );
@@ -1790,13 +1790,13 @@ export function renderSlackStartMessageLine(input: {
     : "";
   switch (input.origin.kind) {
     case "private_dm_message":
-      return `<${input.sessionUrl}|OpenGeni started a private task>${where} from the selected DM message. The source DM was not opened to the bot or made workspace-visible.`;
+      return `<${input.sessionUrl}|Opengeni started a private task>${where} from the selected DM message. The source DM was not opened to the bot or made workspace-visible.`;
     case "private_conversation":
-      return `<${input.sessionUrl}|OpenGeni started a private task>${where} from the selected Slack conversation. Results stay private unless a separate authorized publication is approved.`;
+      return `<${input.sessionUrl}|Opengeni started a private task>${where} from the selected Slack conversation. Results stay private unless a separate authorized publication is approved.`;
     case "reaction":
-      return `<${input.sessionUrl}|OpenGeni started this task>${where} from the :${input.origin.emoji}: reaction. If the request is unclear, OpenGeni will ask in this thread. Reply here to continue, or reply \`stop\` to stop.`;
+      return `<${input.sessionUrl}|Opengeni started this task>${where} from the :${input.origin.emoji}: reaction. If the request is unclear, Opengeni will ask in this thread. Reply here to continue, or reply \`stop\` to stop.`;
     case "task":
-      return `<${input.sessionUrl}|OpenGeni started this task>${where}.`;
+      return `<${input.sessionUrl}|Opengeni started this task>${where}.`;
   }
 }
 
@@ -2571,7 +2571,52 @@ export type SlackInvocationMessageContext = {
   messages: Awaited<ReturnType<OpenGeniSlackBotClient["threadReplies"]>>["messages"];
   nextCursor: string | null;
   kind: "thread" | "channel";
+  unavailable?: "rate_limited" | "attachments_only";
 };
+
+/** Context is optional; only Slack's explicit history throttling may be omitted. */
+export async function loadSlackInvocationMessageContext(
+  client: Pick<OpenGeniSlackBotClient, "threadReplies" | "channelHistory">,
+  entry: Pick<SlackInteractionInboxEntry, "slackChannelId" | "slackThreadTs" | "slackMessageTs">,
+  authorizeRead?: () => Promise<void>,
+  exactMessageOnly = false,
+): Promise<SlackInvocationMessageContext> {
+  const kind = entry.slackThreadTs ? "thread" : "channel";
+  try {
+    const context = entry.slackThreadTs
+      ? await client.threadReplies({
+          channelId: entry.slackChannelId,
+          threadTimestamp: entry.slackThreadTs,
+          limit: exactMessageOnly ? 1 : MAX_SLACK_INVOCATION_CONTEXT_MESSAGES,
+          ...(exactMessageOnly
+            ? {
+                oldest: entry.slackMessageTs,
+                latest: entry.slackMessageTs,
+                inclusive: true,
+              }
+            : {}),
+          ...(authorizeRead ? { authorizeRead } : {}),
+        })
+      : await client.channelHistory({
+          channelId: entry.slackChannelId,
+          latest: entry.slackMessageTs,
+          inclusive: true,
+          limit: MAX_SLACK_CHANNEL_CONTEXT_MESSAGES,
+          ...(authorizeRead ? { authorizeRead } : {}),
+        });
+    return {
+      messages: context.messages,
+      nextCursor: context.nextCursor,
+      kind,
+      ...(exactMessageOnly && kind === "thread"
+        ? { unavailable: "attachments_only" as const }
+        : {}),
+    };
+  } catch (error) {
+    if (!slackHistoryRateLimited(error)) throw error;
+    return { messages: [], nextCursor: null, kind, unavailable: "rate_limited" };
+  }
+}
 
 async function prepareSlackInvocationEntry(
   deps: ApiRouteDeps,
@@ -2586,32 +2631,30 @@ async function prepareSlackInvocationEntry(
   attachments: PreparedSlackReactionTask;
   modelContext: string | null;
 }> {
-  const context = entry.slackThreadTs
-    ? await client.threadReplies({
+  // In an unlisted app, the exact attachment message gets the one available
+  // thread-read slot before optional surrounding history does.
+  const context = await loadSlackInvocationMessageContext(
+    client,
+    entry,
+    authorizeRead,
+    entry.hasFiles && deps.settings.slackAccessMode === "limited",
+  );
+  let exactMessage = context.messages.find((message) => message.timestamp === entry.slackMessageTs);
+  if (!exactMessage && entry.hasFiles && entry.slackThreadTs && !context.unavailable) {
+    try {
+      const exact = await client.threadReplies({
         channelId: entry.slackChannelId,
         threadTimestamp: entry.slackThreadTs,
-        limit: MAX_SLACK_INVOCATION_CONTEXT_MESSAGES,
-        ...(authorizeRead ? { authorizeRead } : {}),
-      })
-    : await client.channelHistory({
-        channelId: entry.slackChannelId,
+        oldest: entry.slackMessageTs,
         latest: entry.slackMessageTs,
         inclusive: true,
-        limit: MAX_SLACK_CHANNEL_CONTEXT_MESSAGES,
+        limit: 1,
         ...(authorizeRead ? { authorizeRead } : {}),
       });
-  let exactMessage = context.messages.find((message) => message.timestamp === entry.slackMessageTs);
-  if (!exactMessage && entry.hasFiles && entry.slackThreadTs) {
-    const exact = await client.threadReplies({
-      channelId: entry.slackChannelId,
-      threadTimestamp: entry.slackThreadTs,
-      oldest: entry.slackMessageTs,
-      latest: entry.slackMessageTs,
-      inclusive: true,
-      limit: 1,
-      ...(authorizeRead ? { authorizeRead } : {}),
-    });
-    exactMessage = exact.messages.find((message) => message.timestamp === entry.slackMessageTs);
+      exactMessage = exact.messages.find((message) => message.timestamp === entry.slackMessageTs);
+    } catch (error) {
+      if (!slackHistoryRateLimited(error)) throw error;
+    }
   }
   const attachments = exactMessage
     ? await prepareSlackMessageAttachments(
@@ -2633,7 +2676,8 @@ async function prepareSlackInvocationEntry(
       ? slackInvocationModelContext(entry.slackMessageTs, {
           messages: context.messages,
           nextCursor: context.nextCursor,
-          kind: entry.slackThreadTs ? "thread" : "channel",
+          kind: context.kind,
+          ...(context.unavailable ? { unavailable: context.unavailable } : {}),
         })
       : null;
   return {
@@ -2683,6 +2727,15 @@ export function slackInvocationModelContext(
   invocationTimestamp: string,
   context: SlackInvocationMessageContext,
 ) {
+  if (context.unavailable) {
+    return [
+      "A linked, authorized Slack user explicitly mentioned OpenGeni.",
+      "The visible user message on this turn is the exact accepted Slack invocation.",
+      context.unavailable === "rate_limited"
+        ? "Slack's rate limit prevented loading surrounding conversation history. Work from the invocation text; ask the user for any missing context instead of assuming it."
+        : "Only the exact invocation message was fetched to authorize its attachments within Slack's history limit. Surrounding thread history was omitted. Work from the invocation text and imported attachments; ask for any missing context instead of assuming it.",
+    ].join("\n");
+  }
   const surroundingLines = context.messages
     .filter((message) => message.timestamp !== invocationTimestamp)
     .slice(0, MAX_SLACK_INVOCATION_CONTEXT_MESSAGES)
@@ -3046,17 +3099,6 @@ async function processSlackReactionInboxEntry(
       slackChannelId: entry.slackChannelId,
       slackMessageTs: entry.slackMessageTs,
     },
-    saveCheckpoint: async (checkpoint) => {
-      if (!entry.claimHolderId) {
-        throw new Error("Slack reaction inbox checkpoint requires an active claim");
-      }
-      const saved = await saveSlackInteractionInboxReactionCheckpoint(deps.db, {
-        entry,
-        claimHolderId: entry.claimHolderId,
-        checkpoint,
-      });
-      if (!saved) throw new Error("Slack reaction inbox checkpoint claim was lost");
-    },
   });
   const routeKey = slackRouteKey(entry.slackChannelId, context.threadTimestamp);
   const existing = await getSlackInteractionByConnectionRoute(deps.db, {
@@ -3396,8 +3438,9 @@ export function slackReactionTaskText(
     .slice(0, MAX_SLACK_REACTION_CONTEXT_MESSAGES)
     .filter((message) => message.timestamp !== context.reactedMessage.timestamp)
     .map((message) => slackReactionMessageLine(message, false));
-  const truncationNotice =
-    "The containing thread was truncated at the bounded Slack context limit.";
+  const truncationNotice = context.contextUnavailable
+    ? "Slack's rate limit prevented loading surrounding thread history. Work from the exact reacted message and ask for any missing context."
+    : "The containing thread was truncated at the bounded Slack context limit.";
   let prompt = [
     "A linked, authorized Slack user explicitly summoned OpenGeni by reacting to one message.",
     "Use only the exact reacted message and bounded containing-thread context below.",
@@ -5806,8 +5849,8 @@ async function slackInfoCommandResponse(
   ) {
     return ephemeralSlackResponse(
       link
-        ? `Your Slack identity is linked, but it does not currently have access to this OpenGeni workspace. Request access: ${linkUrl(deps, identity)}. No session was created.`
-        : `Link your Slack identity to OpenGeni before starting work: ${linkUrl(deps, identity)}. No session was created.`,
+        ? `Your Slack identity is linked, but it does not currently have access to this Opengeni workspace. Request access: ${linkUrl(deps, identity)}. No session was created.`
+        : `Link your Slack identity to Opengeni before starting work: ${linkUrl(deps, identity)}. No session was created.`,
     );
   }
   const workspace = await getWorkspace(deps.db, installation.workspaceId);
@@ -5832,9 +5875,9 @@ async function slackInfoCommandResponse(
   const workspaceName = (workspace?.name ?? "").trim().slice(0, 120);
   const destination = workspaceName
     ? `the *${escapeSlackMrkdwn(workspaceName)}* workspace`
-    : "your OpenGeni workspace";
+    : "your Opengeni workspace";
   const lines = [
-    "*Working with OpenGeni in Slack*",
+    "*Working with Opengeni in Slack*",
     "",
     ...(canControl
       ? [
@@ -5850,12 +5893,12 @@ async function slackInfoCommandResponse(
     ...(agentSchedules || schedules
       ? [
           `• *Repeat a task on a schedule:* ${[
-            ...(agentSchedules ? ["ask OpenGeni in its thread"] : []),
+            ...(agentSchedules ? ["ask Opengeni in its thread"] : []),
             ...(schedules ? [`open <${schedules}|Schedules>`] : []),
           ].join(", or ")}.`,
         ]
       : []),
-    `• *Where work lands:* ${destination}${workspaceUrl ? ` (<${workspaceUrl}|open OpenGeni>)` : ""}.`,
+    `• *Where work lands:* ${destination}${workspaceUrl ? ` (<${workspaceUrl}|open Opengeni>)` : ""}.`,
   ];
   const text = lines.join("\n");
   return ephemeralSlackResponse(text, [

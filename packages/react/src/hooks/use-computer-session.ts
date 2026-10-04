@@ -123,7 +123,7 @@ export function useComputerSession(options: UseComputerSessionOptions): UseCompu
       discoveryCompleted = true;
       if (!mountedRef.current || requestRef.current.id !== id) return;
       const targets = sortComputerTargets(targetResponse.targets);
-      const selected = chooseTarget(targets, selectedTargetIdRef.current, session.platform);
+      const selected = chooseTarget(targets, selectedTargetIdRef.current);
       // Discovery is useful independently of semantic observation. Publish it
       // now so a slow/unresponsive application cannot block the frame stream
       // or prevent the person from choosing a different window or screen.
@@ -503,24 +503,14 @@ function emptyState(computerSessionId: string | null, loading: boolean): Compute
 function chooseTarget(
   targets: readonly ComputerTarget[],
   preferredId: string | null,
-  platform: ComputerSession["platform"],
 ): ComputerTarget | null {
   const preferred = targets.find((target) => target.id === preferredId);
   if (preferred) return preferred;
-  if (platform === "linux") {
-    return (
-      targets.find((target) => target.focused && target.kind === "screen") ??
-      targets.find((target) => target.kind === "screen") ??
-      targets.find((target) => target.focused && target.kind === "window") ??
-      targets.find((target) => target.kind === "window") ??
-      targets[0] ??
-      null
-    );
-  }
   return (
+    targets.find((target) => target.focused && target.kind === "screen") ??
+    targets.find((target) => target.kind === "screen") ??
     targets.find((target) => target.focused && target.kind === "window") ??
     targets.find((target) => target.kind === "window") ??
-    targets.find((target) => target.kind === "screen") ??
     targets.find((target) => target.focused && target.kind === "app") ??
     targets.find((target) => target.kind === "app") ??
     targets[0] ??

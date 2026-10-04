@@ -1,4 +1,6 @@
 import type { LatencyMode, ReasoningEffort, WorkspaceModelCatalogModel } from "@opengeni/sdk";
+import { modelDisplayName } from "@opengeni/sdk/model-display";
+import { paymentSourceFor } from "@/lib/agent-brain-prompt-model";
 import { useNavigate } from "@tanstack/react-router";
 import { SparklesIcon } from "lucide-react";
 import { type FormEvent, useCallback, useEffect, useMemo, useState } from "react";
@@ -15,29 +17,6 @@ type OrganizationKnowledgeModelSelection = {
   reasoningEffort: ReasoningEffort;
   latencyMode: LatencyMode;
 };
-
-function paymentSourceFor(model: WorkspaceModelCatalogModel): string {
-  if (model.cost === "free") return "Free in this deployment";
-  if (model.cost === "credits") return "Opengeni credits";
-  if (model.cost === "workspace") return "Workspace AI Gateway";
-  if (model.cost === "subscription") {
-    return model.source === "supergrok" ? "SuperGrok subscription" : "Codex subscription";
-  }
-  if (model.source === "codex") return "Codex subscription";
-  if (model.source === "supergrok") return "SuperGrok subscription";
-  if (model.source === "workspace_gateway") return "Workspace AI Gateway";
-  if (model.source === "opengeni" || model.billing?.metering === "opengeni_credits") {
-    return "Opengeni credits";
-  }
-  if (model.billing?.upstreamPayer === "connected_subscription") {
-    return model.credentialSource?.kind === "connected_subscription" &&
-      model.credentialSource.provider === "xai"
-      ? "SuperGrok subscription"
-      : "Codex subscription";
-  }
-  if (model.billing?.upstreamPayer === "workspace") return "Workspace AI Gateway";
-  return "External provider";
-}
 
 /** Kept route-local so organization settings cannot re-bucket the session chunk graph. */
 function resolveOrganizationKnowledgeModel(
@@ -73,7 +52,7 @@ function resolveOrganizationKnowledgeModel(
 
   return {
     model: model.id,
-    label: model.label,
+    label: modelDisplayName(model),
     paymentSource: paymentSourceFor(model),
     reasoningEffort,
     latencyMode,

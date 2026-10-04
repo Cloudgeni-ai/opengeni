@@ -157,10 +157,6 @@ export function compileOpenApiRevision(
   options: CompileOpenApiOptions,
 ): OpenApiRevision {
   const document = isRecord(source) ? source : parseOpenApiDocument(source);
-  const contentSha256 = sha256Hex(
-    canonicalJson(options.schemaMode ? { document, schemaMode: options.schemaMode } : document),
-  );
-  const revisionId = immutableRevisionId("openapi", contentSha256);
   const info = isRecord(document.info) ? document.info : {};
   const documentServers = readServers(document.servers, options.baseUrl, options.sourceUrl);
   const documentSecurity = readSecurity(document.security);
@@ -228,8 +224,25 @@ export function compileOpenApiRevision(
   if (tools.length === 0) {
     throw new IntegrationProtocolError("openapi_empty", "OpenAPI document exposes no operations");
   }
+  // A document alone does not identify its executable revision: an explicit
+  // base URL or relative-server resolution can change destinations without
+  // changing any document bytes. Hash the normalized, effective operation
+  // URLs and the primary URL used by the installation manifest, not raw
+  // options (which may be equivalent or overridden).
+  // Match the manifest's binding enumeration: integer-like tool IDs enumerate
+  // numerically, independently of the tools' path traversal order.
+  const contentSha256 = sha256Hex(
+    canonicalJson({
+      document,
+      ...(options.schemaMode ? { schemaMode: options.schemaMode } : {}),
+      baseUrl: Object.values(bindings)[0]!.serverUrl,
+      serverUrls: Object.fromEntries(
+        Object.entries(bindings).map(([id, binding]) => [id, binding.serverUrl]),
+      ),
+    }),
+  );
   return {
-    id: revisionId,
+    id: immutableRevisionId("openapi", contentSha256),
     protocol: "openapi",
     definitionId: options.definitionId,
     contentSha256,

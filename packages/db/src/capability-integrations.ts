@@ -236,6 +236,23 @@ export class ApiIntegrationInstallationVersionConflictError extends Error {
   }
 }
 
+/** A known rejection of the selected credential, not an internal install failure. */
+export class ApiIntegrationConnectionReferenceError extends Error {
+  readonly name = "ApiIntegrationConnectionReferenceError";
+
+  constructor(
+    readonly reason:
+      | "not_found"
+      | "inactive"
+      | "provider_mismatch"
+      | "kind_mismatch"
+      | "scope_mismatch",
+    message: string,
+  ) {
+    super(message);
+  }
+}
+
 export async function installApiIntegration(
   db: Database,
   input: InstallApiIntegrationInput,
@@ -1618,16 +1635,29 @@ async function loadInstallConnection(
     )
     .limit(1);
   if (!connection || connection.accountId !== input.accountId) {
-    throw new Error("API Integration connection was not found in this workspace");
+    throw new ApiIntegrationConnectionReferenceError(
+      "not_found",
+      "API Integration connection was not found in this workspace",
+    );
   }
   if (connection.subjectId && connection.subjectId !== input.subjectId) {
-    throw new Error("API Integration personal connection belongs to another subject");
+    // Do not reveal the existence or owner of a Connection the caller cannot use.
+    throw new ApiIntegrationConnectionReferenceError(
+      "not_found",
+      "API Integration connection was not found in this workspace",
+    );
   }
   if (connection.status !== "active") {
-    throw new Error("API Integration connection is not active");
+    throw new ApiIntegrationConnectionReferenceError(
+      "inactive",
+      "API Integration connection is not active",
+    );
   }
   if (connection.providerDomain.toLowerCase() !== input.providerDomain.toLowerCase()) {
-    throw new Error("API Integration connection provider does not match the destination");
+    throw new ApiIntegrationConnectionReferenceError(
+      "provider_mismatch",
+      "API Integration connection provider does not match the destination",
+    );
   }
   assertConnectionKindMatchesAuth(input.authScheme, connection.kind);
   const grantedScopes = new Set(
@@ -1637,7 +1667,10 @@ async function loadInstallConnection(
     (scope) => !grantedScopes.has(connectionScopeKey(connection.providerDomain, scope)),
   );
   if (missing.length > 0) {
-    throw new Error("API Integration connection is missing required scopes");
+    throw new ApiIntegrationConnectionReferenceError(
+      "scope_mismatch",
+      "API Integration connection is missing required scopes",
+    );
   }
   return connection;
 }
@@ -1651,13 +1684,19 @@ function assertConnectionKindMatchesAuth(
   if (authKind === undefined || authKind === "none") return;
   if (authKind === "oauth2") {
     if (connectionKind !== "oauth2") {
-      throw new Error("API Integration requires an OAuth Connection");
+      throw new ApiIntegrationConnectionReferenceError(
+        "kind_mismatch",
+        "API Integration requires an OAuth Connection",
+      );
     }
     return;
   }
   if (authKind === "api_key" || authKind === "http") {
     if (connectionKind !== "api_key") {
-      throw new Error("API Integration requires a credential Connection, not OAuth");
+      throw new ApiIntegrationConnectionReferenceError(
+        "kind_mismatch",
+        "API Integration requires a credential Connection, not OAuth",
+      );
     }
     return;
   }

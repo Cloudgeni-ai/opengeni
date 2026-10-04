@@ -28,6 +28,7 @@ import {
   settleRetainedScreenshotArtifactReady,
   settleVideoGenerationReady,
   updateWorkspaceVideoGenerationPolicy,
+  withSessionRlsActorContext,
   type DbClient,
 } from "@opengeni/db";
 import { OBJECT_VISIBILITY_RETRY_DELAYS_MS, type ObjectStorage } from "@opengeni/storage";
@@ -202,7 +203,13 @@ function sessionArtifactUrl(
 
 async function createScreenshotArtifact(
   workspace: Awaited<ReturnType<typeof workspaceFixture>>,
-  input: { bytes: Uint8Array; expiresAt?: Date; ready?: boolean; kind?: "browser_screenshot" },
+  input: {
+    bytes: Uint8Array;
+    expiresAt?: Date;
+    ready?: boolean;
+    kind?: "browser_screenshot";
+    privateOwnerSubjectId?: string;
+  },
 ) {
   const session = await createSession(client.db, {
     accountId: workspace.accountId,
@@ -240,35 +247,43 @@ async function createScreenshotArtifact(
   const objectName =
     input.kind === "browser_screenshot" ? "browser-screenshot" : "computer-screenshot";
   const objectKey = `workspaces/${workspace.workspaceId}/files/${artifactId}/retained/${objectName}.png`;
-  await prepareRetainedScreenshotArtifact(client.db, {
-    artifactId,
-    accountId: workspace.accountId,
-    workspaceId: workspace.workspaceId,
-    sessionId: session.id,
-    turnId: claim.turn.id,
-    attemptId,
-    settlementKey,
-    toolCallId: `call-${artifactId}`,
-    toolOutputId: `output-${artifactId}`,
-    mediaType: "image/png",
-    sizeBytes: input.bytes.byteLength,
-    sha256: "b".repeat(64),
-    width: 1,
-    height: 1,
-    retentionExpiresAt: input.expiresAt ?? new Date(Date.now() + 60_000),
-    bucket: "retained-test-bucket",
-    objectKey,
-    workspaceQuotaBytes: 100 * 1024 * 1024,
-  });
-  if (input.ready !== false) {
-    await settleRetainedScreenshotArtifactReady(client.db, {
-      accountId: workspace.accountId,
-      workspaceId: workspace.workspaceId,
-      artifactId,
-      settlementKey,
-    });
-  }
-  return { sessionId: session.id, artifactId, objectKey };
+  return await withSessionRlsActorContext(
+    {
+      subjectId: workspace.subjectId,
+      privateFileOwnerSubjectId: input.privateOwnerSubjectId ?? null,
+    },
+    async () => {
+      await prepareRetainedScreenshotArtifact(client.db, {
+        artifactId,
+        accountId: workspace.accountId,
+        workspaceId: workspace.workspaceId,
+        sessionId: session.id,
+        turnId: claim.turn.id,
+        attemptId,
+        settlementKey,
+        toolCallId: `call-${artifactId}`,
+        toolOutputId: `output-${artifactId}`,
+        mediaType: "image/png",
+        sizeBytes: input.bytes.byteLength,
+        sha256: "b".repeat(64),
+        width: 1,
+        height: 1,
+        retentionExpiresAt: input.expiresAt ?? new Date(Date.now() + 60_000),
+        bucket: "retained-test-bucket",
+        objectKey,
+        workspaceQuotaBytes: 100 * 1024 * 1024,
+      });
+      if (input.ready !== false) {
+        await settleRetainedScreenshotArtifactReady(client.db, {
+          accountId: workspace.accountId,
+          workspaceId: workspace.workspaceId,
+          artifactId,
+          settlementKey,
+        });
+      }
+      return { sessionId: session.id, artifactId, objectKey };
+    },
+  );
 }
 
 async function createGeneratedImageArtifact(
@@ -1029,6 +1044,65 @@ describe("retained artifact metadata and bounded content", () => {
     expect(fixture.calls).toEqual([
       { fileId: artifact.artifactId, start: 1_048_576, end: 1_572_863 },
     ]);
+  });
+
+  test("session image metadata and ranges retain private-file owner authority", async () => {
+    if (!available) return;
+    const workspace = await workspaceFixture();
+    const fixture = storageFixture();
+    const bytes = Uint8Array.of(1, 2, 3, 4);
+    const artifact = await createScreenshotArtifact(workspace, {
+      bytes,
+      privateOwnerSubjectId: workspace.subjectId,
+    });
+    fixture.objects.set(artifact.objectKey, bytes);
+    const app = routeApp(fixture.storage);
+    const url = sessionArtifactUrl(workspace.workspaceId, artifact.sessionId, artifact.artifactId);
+
+    const metadata = await app.request(url, {
+      headers: { authorization: workspace.authorization },
+    });
+    expect(metadata.status).toBe(200);
+    expect(await metadata.json()).toMatchObject({
+      available: true,
+      artifactId: artifact.artifactId,
+    });
+    expect(fixture.existenceCalls).toHaveLength(0);
+
+    const content = await app.request(`${url}/content`, {
+      headers: { authorization: workspace.authorization, range: "bytes=1-2" },
+    });
+    expect(content.status).toBe(206);
+    expect(new Uint8Array(await content.arrayBuffer())).toEqual(bytes.slice(1, 3));
+    expect(fixture.calls).toEqual([{ fileId: artifact.artifactId, start: 1, end: 2 }]);
+
+    const otherAuthorization = `Bearer ${await signDelegatedAccessToken(SECRET, {
+      accountId: workspace.accountId,
+      workspaceId: workspace.workspaceId,
+      subjectId: `other-subject-${crypto.randomUUID()}`,
+      permissions: ["files:read"],
+      principalKind: "human_session",
+      exp: Math.floor(Date.now() / 1000) + 3_600,
+    })}`;
+    const serviceAuthorization = `Bearer ${await signDelegatedAccessToken(SECRET, {
+      accountId: workspace.accountId,
+      workspaceId: workspace.workspaceId,
+      subjectId: workspace.subjectId,
+      permissions: ["files:read"],
+      principalKind: "service",
+      exp: Math.floor(Date.now() / 1000) + 3_600,
+    })}`;
+    for (const authorization of [otherAuthorization, serviceAuthorization]) {
+      for (const deniedUrl of [url, `${url}/content`]) {
+        const denied = await app.request(deniedUrl, {
+          headers: { authorization },
+        });
+        expect(denied.status).toBe(404);
+        expect(await denied.json()).toMatchObject({ available: false });
+      }
+    }
+    expect(fixture.calls).toHaveLength(1);
+    expect(fixture.existenceCalls).toHaveLength(0);
   });
 
   test("serves browser screenshots with their own kind through the same session authorization", async () => {

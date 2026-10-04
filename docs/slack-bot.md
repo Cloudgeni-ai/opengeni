@@ -1,26 +1,32 @@
 # Slack identities and connections
 
-One configured Slack app can serve Slack's hosted MCP and OpenGeni's separate bot integration within one deployment. Every staging, production, preview, or self-hosted deployment must use its own Slack app, client ID, client secret, and signing secret. Hosted MCP uses a Slack **user token** and is always personal: each member connects only their own Slack account. The bot uses its own bot token, routing, and authority.
+One configured Slack app serves user-account OAuth and OpenGeni's separate bot integration within one deployment. Each deployed environment uses its own app and credential triplet. User-account MCP tools run through OpenGeni's reviewed **Slack Web API bridge**, not Slack's Marketplace-restricted hosted MCP transport. A user token reads permitted conversations and sends as the authenticating human. The bot uses its separate bot token, routing, and authority.
 
 | Connection | Slack author | OpenGeni ownership | Intended use |
 | --- | --- | --- | --- |
-| Hosted Slack MCP | The Slack human who authenticated, with Slack's configured app attribution | Personal only, owned by the member who connected it | That member's own work, and schedules that froze that member's personal authority |
-| OpenGeni workspace bot | The deployment's configured bot user (`OpenGeni` in production, `OpenGeni Staging` in managed staging) | The one OpenGeni workspace that installed it | Shared agents, first-party bot tools, bot-token public search, and scheduled tasks that post to a channel a person chose |
+| Slack account API MCP bridge | The human who authenticated | Stock UI: personal; Connect API also permits an explicitly shared workspace grant | Exact accepted user account for channels, users, recent messages, threads, DMs, and sends |
+| OpenGeni workspace bot | The configured deployment bot user | Workspace installation | Bot-member conversations, DM/mention/command/shortcut tasks, replies, Geni reactions, and explicit task-file delivery |
 
-The two authorities are never substituted for one another. Nothing reads or posts until the capability is enabled or the bot is installed and an agent invokes a tool.
+Personal rows are visible only to their owner. Shared account rows are workspace-visible, and using one acts as the human who deliberately shared it. Accepted work freezes the exact selected Connection; the bot, personal, and shared authorities never substitute for each other. The stock Slack account page manages one canonical account per ownership in each OpenGeni workspace: reconnecting another Slack account replaces that row. It does not offer an add-another-account flow.
 
-Hosted Slack MCP accepts only personal ownership: OAuth start, callback, reconnect, and capability enablement refuse a workspace-owned binding. A personal connection is available only to its owner's accepted work.
+### Unlisted pilot and rollout
 
-The first-party `slack_bot_search` tool remains bound to the bot and calls `assistant.search.context` with `channel_types` pinned to `public_channel`. An installation missing the required bot search scopes asks for reinstallation; it never borrows a hosted-MCP user token.
+`OPENGENI_SLACK_ACCESS_MODE=limited` is the default. Personal tools omit search, file access, canvases, channel administration, and bulk backfill. History and replies return at most 15 messages per requested page. A deployment-global, content-free Postgres quota admits at most one request per minute per app/Slack workspace/method across both bot and personal tokens; it also shares provider `Retry-After` cooldowns. Throttled calls report the delay without prompting a reconnect. Messages arriving in authenticated events remain usable when optional surrounding history is throttled. Geni reactions resolve their exact message using `reactions.get` and add at most one optional thread page, preserving channel and attachment checks.
+
+`full` removes the proactive one-minute history ceiling and requests the safe optional bot search grants on future installs. Use it only after Slack confirms the app's eligibility. It does **not** add search tools: Real-time Search also requires a trusted Slack interaction action token, so generic agent `slack_bot_search` is no longer registered. Marketplace approval alone does not add scopes to existing grants; new scopes require Slack reauthorization/reinstallation and may require workspace-admin approval. Existing broader grants remain valid for the reviewed API tools, including older comma-delimited stored scopes.
+
+Before activating migration `0597_slack_api_rate_limits.sql`, stop all old/new API and worker processes, supply the complete runtime login list with `OPENGENI_MIGRATION_APPLICATION_DATABASE_ROLES`, migrate, provision roles, and start the matching binary. Its new global table changes the exact runtime-posture contract; do not restart a pre-0597 binary afterward. This implementation is covered by mocked provider and isolated database regressions. A fresh external-workspace install and personal connect/send acceptance remain a release check; do not claim production delivery from those tests.
+
+Slack permits unlisted apps for early customer pilots; commercial scale and hosted MCP/Real-time Search remain subject to [Slack distribution](https://docs.slack.dev/app-management/distribution/) and [MCP app identity requirements](https://docs.slack.dev/ai/slack-mcp-server/#app-identity). [Web API limits](https://docs.slack.dev/apis/web-api/rate-limits/) apply independently of authentication.
 
 ## Provider identity and deployment prerequisites
 
-Slack renders the message author from the OAuth principal and renders `Sent using @…` from Slack app/provider metadata. An existing internal app may be reused for hosted MCP and may retain its current name. The first-party workspace-bot flow is stricter: if that surface is used, an authorized Slack app administrator must configure the same app as follows rather than adding generated text or changing message payloads:
+Slack renders the message author from the OAuth principal and renders `Sent using @…` from Slack app/provider metadata. An existing Slack app may serve the account API MCP bridge and may retain its current name. The first-party workspace-bot flow is stricter: if that surface is used, an authorized Slack app administrator must configure the same app as follows rather than adding generated text or changing message payloads:
 
 1. Set the production Slack app name to `OpenGeni`. Use an environment-qualified app name such as `OpenGeni Staging` for a non-production deployment so administrators can distinguish simultaneous installations.
 2. Set the bot user display name to the deployment's exact configured identity: `OpenGeni` in production or `OpenGeni Staging` in managed staging.
 3. Configure both exact redirect URLs:
-   - `${OPENGENI_PUBLIC_BASE_URL}/v1/integrations/oauth/callback` for hosted MCP OAuth.
+   - `${OPENGENI_PUBLIC_BASE_URL}/v1/integrations/oauth/callback` for user-account OAuth.
    - `${OPENGENI_PUBLIC_BASE_URL}/v1/integrations/slack/callback` for workspace-bot installation.
 4. Enable direct/public OAuth distribution. A Slack Marketplace listing is not required.
 5. Keep the client credential server-side and configure the deployment with:
@@ -33,17 +39,17 @@ Slack renders the message author from the OAuth principal and renders `Sent usin
    - `OPENGENI_ENVIRONMENTS_ENCRYPTION_KEY`
    - `OPENGENI_PUBLIC_BASE_URL`
 
-Enable Slack MCP on the app and configure the full hosted-MCP user-scope set emitted by `bun run slack:manifest`. **Apply the manifest's bot scopes to the Slack app before deploying a version that requests them.** The install URL requests every scope in `OPENGENI_SLACK_BOT_REQUESTED_SCOPES`, so a bot scope the app is not configured for fails the whole install with `invalid_scope`, including a repair reinstall; the manifest and the request set are deliberately the same list so they cannot drift. Bot search scopes follow the same rule as `reactions:read`: requested and accepted, not required, so an existing installation stays eligible and gains them on the next reinstall. The same configured Slack app client is used for personal hosted MCP and the bot flow inside one deployment. It must never be shared between staging and production: Slack owns redirect, command, event, and interaction URLs at the app level, so sharing the client causes both OpenGeni environments to install the same provider app and makes one environment's provider settings overwrite the other's. Users never paste a client ID, client secret, bot token, or user token into OpenGeni. Do not log, expose, rotate, or copy production credentials while applying metadata or deployment configuration.
+Keep Slack MCP enabled on the app for the existing OAuth discovery identity and configure the reviewed user grants emitted by `bun run slack:manifest`. **Apply the manifest's bot scopes to the Slack app before deploying a version that requests them.** Manifest and install URL use `openGeniSlackBotRequestedScopes` with the same access mode. Limited mode does not request search. Reaction read and file write stay optional for older installed grants, with their existing per-feature checks. Client credentials remain server-side; users never paste tokens into OpenGeni.
 
-Changing Slack app metadata is provider administration outside this repository. Reconnect affected hosted-MCP OAuth grants and reinstall an affected bot through OpenGeni only when the provider requires a fresh grant; do not replace one authority with another.
+Changing Slack app metadata is provider administration outside this repository. Reconnect affected user-account OAuth grants and reinstall an affected bot through OpenGeni only when the provider requires a fresh grant; do not replace one authority with another.
 
-## Personal hosted Slack MCP
+## Slack account MCP bridge
 
-Slack uses the provider's official hosted MCP resource, exactly `https://mcp.slack.com/mcp`. The normal authenticated MCP OAuth start endpoint performs discovery, uses the deployment-managed Slack client, creates signed single-use state bound to the exact OpenGeni account, workspace, and authenticating subject with `ownership = "personal"`, and uses authorization-code OAuth with PKCE S256. A start, reconnect, or callback whose ownership is not `personal` fails with 422 before Slack is contacted or any row is written; the generic ownership selector never offers **Connect for workspace** for this resource. The callback rechecks the subject's live workspace grant before consuming the nonce, exchanging the code, verifying MCP tool discovery, or writing the connection.
+The catalog and discovery identity remain exactly `https://mcp.slack.com/mcp`. The existing OAuth starter uses the deployment-managed Slack client, PKCE S256, and signed single-use state bound to the exact organization, workspace, human, and chosen ownership. The stock UI starts a personal grant; explicit Connect API workspace ownership remains supported. The callback rechecks live owner authority before exchanging or persisting, verifies the user token with `auth.test`, and stores a scope-filtered reviewed catalog. It never authenticates to hosted MCP for tool discovery. A permanently rejected returned grant is preserved as `needs_reauth`; transient verification failures preserve the grant for a later retry.
 
 The signed-in user's account-linking surface is **Capabilities → Slack connections → Your Slack account**, separate from the adjacent **OpenGeni workspace bot** installation card:
 
-1. **Connect my Slack account** starts the existing hosted-MCP OAuth flow. The browser sends only the official resource/provider target and the return path; Slack client credentials remain deployment-managed.
+1. **Connect my Slack account** starts the existing user-account OAuth flow. The browser sends only the official resource/provider target and the return path; Slack client credentials remain deployment-managed.
 2. The card shows only non-secret subject-owned metadata: connection health, granted personal scopes, last use, and access-token expiry. It never shows the private connection UUID, token, client credential, or workspace-bot installation details.
 3. **Reconnect my Slack account** reuses the current subject's row when it still exists. The callback preserves the generic subject-scoped capability reference and never publishes that row's UUID into workspace capability configuration.
 4. **Disconnect** requires an explicit confirmation and revokes local OpenGeni use of that subject-owned row. It does not disconnect the workspace bot or revoke provider-side access in Slack.
@@ -62,13 +68,13 @@ Enforcement is fail-closed across the full lifecycle:
 - A service or scheduled-task initiator can use a personal connection only through its immutable frozen personal-delegation snapshot; it never infers one from the creator or current user.
 - Two different OpenGeni users in the same workspace resolve different Slack rows even when both use `slack.com` and `oauth2`.
 
-Slack writes hosted-MCP messages as the authenticating Slack human and supplies the configured app attribution. OpenGeni must pass the user's requested message content to the existing Slack MCP tool unchanged: it does not prepend or append author, requester, requested-by, or proxy text.
+Slack writes API-bridge messages as the authenticating Slack human and supplies the configured app attribution. OpenGeni must pass the user's requested message content to the reviewed Slack API tool unchanged: it does not prepend or append author, requester, requested-by, or proxy text.
 
 Deleting the OpenGeni personal connection removes local use of that grant; it does not uninstall the Slack app or revoke the grant at Slack. Revoking the grant at Slack causes later verification or refresh to fail and the local connection to require reconnect. Use Slack administration when provider-side revocation is required.
 
 ## Workspace bot manifest
 
-The separate workspace-shared principal uses this deliberately narrow bot manifest:
+The default `limited` manifest requests 17 bot scopes and 11 separate user scopes for the account API MCP bridge:
 
 ```yaml
 display_information:
@@ -104,7 +110,6 @@ oauth_config:
       - chat:write
       - commands
       - files:read
-      - files:write
       - groups:history
       - groups:read
       - im:history
@@ -112,37 +117,21 @@ oauth_config:
       - im:write
       - mpim:history
       - mpim:read
+      - users:read
       - reactions:read
-      - users:read
-      - search:read.public
-      - search:read.files
-      - search:read.users
+      - files:write
     user:
-      - search:read.public
-      - search:read.private
-      - search:read.mpim
-      - search:read.im
-      - search:read.files
-      - files:read
-      - emoji:read
-      - search:read.users
-      - chat:write
-      - channels:history
-      - groups:history
-      - mpim:history
-      - im:history
-      - channels:write
-      - groups:write
-      - im:write
-      - mpim:write
-      - reactions:write
-      - canvases:read
-      - canvases:write
-      - users:read
-      - users:read.email
       - channels:read
       - groups:read
+      - im:read
       - mpim:read
+      - channels:history
+      - groups:history
+      - im:history
+      - mpim:history
+      - users:read
+      - im:write
+      - chat:write
 settings:
   event_subscriptions:
     bot_events:
@@ -176,7 +165,7 @@ bun run slack:manifest
 
 This changes the provider app name, bot display name, slash command, shortcut label, and every provider callback URL. Keep `OPENGENI_SLACK_BOT_DISPLAY_NAME` and `OPENGENI_SLACK_COMMAND` set to the same exact values in the API runtime so installation verification, signed command delivery, and the generated provider manifest cannot drift. For managed Kubernetes, `bun run deployment:runtime-artifacts` carries `OPENGENI_SLACK_CLIENT_ID`, `OPENGENI_SLACK_CLIENT_SECRET`, `OPENGENI_SLACK_SIGNING_SECRET`, `OPENGENI_SLACK_BOT_DISPLAY_NAME`, and `OPENGENI_SLACK_COMMAND` into the generated runtime environment. Populate the three credential values from the matching environment's Slack app before publishing the runtime Secret; a staging release must never reuse the production triplet. `OPENGENI_SLACK_WORKSPACE_ROUTING_ENABLED` rides the same generated runtime environment and is emitted only when it is set, so leaving it unset keeps the code default, which is now routing **on**. Set it explicitly to `false` in that environment to opt a deployment out. See [Which workspace Slack work lands in](#which-workspace-slack-work-lands-in).
 
-Generate the canonical JSON manifest with `bun run slack:manifest`. It defaults to the managed `https://app.opengeni.ai` base URL. Self-hosted deployments set their stable HTTPS `OPENGENI_PUBLIC_BASE_URL` before running the same command; every redirect, command, event, and interaction URL is derived from that value. The bot scopes remain the narrow first-party bot allowlist; the separate user scopes cover the full current Slack-hosted MCP tool catalog and `settings.is_mcp_enabled` enables that provider surface. Bot verification evaluates only the granted bot-token scopes, so hosted-MCP user scopes do not widen the bot principal. `reactions:read` is read-only and exists only for optional reaction summon; `reactions:write` belongs only to the hosted-MCP user principal. `search:read.public`, `search:read.files`, and `search:read.users` are the bot-token scopes Slack's Real-time Search API accepts (`OPENGENI_SLACK_BOT_SEARCH_SCOPES`); `search:read.private`, `search:read.im`, and `search:read.mpim` are user-token only and stay on the personal principal. Do not enable Socket Mode or token rotation, or add bot-side `channels:join`, `chat:write.public`, `chat:write.customize`, administrative, or enterprise-search scopes; Slack's native "Invite Them" prompt handles channels the bot has not joined. The canonical bot allowlist accepts the required manifest scopes plus the explicitly safe extras `team:read`, `reactions:read`, `files:write`, and the three bot search scopes; every other bot extra or unknown future scope fails closed across installation verification, core routing, and browser Installed-state projection. The reaction, search, and file-upload scopes are requested but not required for eligibility: older installations keep working for mentions, commands, DMs, shortcuts, and existing tools, and gain these optional capabilities after a reinstall with the canonical manifest (`hasOpenGeniSlackReactionScope`, `hasOpenGeniSlackBotSearchScopes`, `hasOpenGeniSlackFileUploadScope`).
+Generate the canonical JSON manifest with `bun run slack:manifest`. Its URL/name overrides remain unchanged; set `OPENGENI_SLACK_ACCESS_MODE=full` only when eligible to request the optional bot search scopes. The separate user grants cover the nine reviewed API tools. `settings.is_mcp_enabled` retains the existing OAuth discovery surface. Bot verification evaluates only granted bot scopes; user grants never widen the bot principal. Reactions and file delivery retain their optional grants and workspace settings. Do not add `channels:join`, `chat:write.public`, `chat:write.customize`, administration, or enterprise-search grants. Slack's native invite prompt handles missing bot membership. The bot allowlist still accepts previously granted safe search scopes without enabling an unusable generic search tool.
 
 ## Install and connect the workspace bot
 
@@ -436,7 +425,7 @@ App Home stays home, so it lists the installation workspace's tasks rather than 
 - File and canvas reads are limited to channels where the bot is already a member. Results expose bounded file metadata and text content, never Slack private-file URLs or credentials.
 - For a PNG, JPEG, or WebP file ID in thread context, `slack_bot_file_content` returns fully decoded, validated image content on explicit request (up to 640 KiB, directly shared to a non-shared channel). Larger files return `image_result_too_large` rather than failing at the model's 1 MiB result limit. This does not import surrounding attachments into the session or make them available to other sessions. Text files still use bounded pages. Unsupported image formats and Slack Connect channels remain unavailable through this path.
 
-The generic first-party MCP exposes `slack_bot_list_channels`, `slack_bot_search` (workspace-wide public search over `assistant.search.context`: messages by default, files and channels via `contentTypes`; `channel_types` is pinned to `public_channel` server-side and never caller-controlled, and an install without the search scopes fails closed with a reinstall hint), `slack_bot_channel_history`, `slack_bot_thread_replies`, `slack_bot_list_users`, `slack_bot_list_files`, `slack_bot_file_info`, `slack_bot_file_content`, and `slack_bot_delete_message`. Scheduled runs whose task has a person-chosen channel also get `slack_bot_prepare_message` and `slack_bot_send_prepared_message` (see [Scheduled tasks](#scheduled-tasks)). Connector-wide tools are explicit-only for ordinary sessions. `slack_bot_post_message` remains an accepted stored tool-name value for backward-compatible session and delegated-token parsing, but it is deliberately not registered on the generic model-facing MCP: a caller UUID, tool-call ID, turn ID, attempt ID, generation, request content, or JSON-RPC ID does not prove one durable logical delivery across model operations. A session started from a Slack mention, command, DM, or shortcut always freezes the seven read-only list/history/thread/user/file tools on top of its base selection so it can retrieve bounded context on demand; it does not expose deletion, because the durable interaction pump owns replies to the originating thread. Internal interaction delivery and governed Memory publication call the server-owned Slack client directly with operation IDs reserved in their durable ledgers. Threaded internal posts bind the parent message timestamp and return it in the result so placement can be verified. Message deletion accepts an operation UUID, the exact channel ID, and the exact message timestamp; Slack permits the bot token to delete only messages authored by that bot. Outside a scheduled session, calls require `connections:read`; the connection ID is optional when exactly one eligible active bot is installed. That selection reads workspace connection metadata and collapses exact-principal duplicates, it does NOT consult the installation binding ledger: the ledger is the team-to-installation authority used by the inbound event edge, not the outbound tool selector. Legacy exact-principal duplicate connection rows are non-authoritative. A scheduled session can use only its immutable selected bot connection ID.
+The generic first-party MCP exposes `slack_bot_list_channels`, `slack_bot_channel_history`, `slack_bot_thread_replies`, `slack_bot_list_users`, `slack_bot_list_files`, `slack_bot_file_info`, `slack_bot_file_content`, and `slack_bot_delete_message`. `slack_bot_search` remains a reserved contract name but is not registered: Real-time Search needs a trusted server-owned interaction token in addition to eligible scopes. Scheduled runs whose task has a person-chosen channel also get `slack_bot_prepare_message` and `slack_bot_send_prepared_message` (see [Scheduled tasks](#scheduled-tasks)). Connector-wide tools are explicit-only for ordinary sessions. `slack_bot_post_message` remains an accepted stored tool-name value for backward-compatible session and delegated-token parsing, but it is deliberately not registered on the generic model-facing MCP: a caller UUID, tool-call ID, turn ID, attempt ID, generation, request content, or JSON-RPC ID does not prove one durable logical delivery across model operations. A session started from a Slack mention, command, DM, or shortcut always freezes the seven read-only list/history/thread/user/file tools on top of its base selection so it can retrieve bounded context on demand; it does not expose deletion, because the durable interaction pump owns replies to the originating thread. Internal interaction delivery and governed Memory publication call the server-owned Slack client directly with operation IDs reserved in their durable ledgers. Threaded internal posts bind the parent message timestamp and return it in the result so placement can be verified. Message deletion accepts an operation UUID, the exact channel ID, and the exact message timestamp; Slack permits the bot token to delete only messages authored by that bot. Outside a scheduled session, calls require `connections:read`; the connection ID is optional when exactly one eligible active bot is installed. That selection reads workspace connection metadata and collapses exact-principal duplicates, it does NOT consult the installation binding ledger: the ledger is the team-to-installation authority used by the inbound event edge, not the outbound tool selector. Legacy exact-principal duplicate connection rows are non-authoritative. A scheduled session can use only its immutable selected bot connection ID.
 
 Slack AI huddle notes are canvases. Sharing that canvas into a channel where the bot is a member lets OpenGeni read the notes and exposes the associated `huddleTranscriptFileId`. For transcript content, OpenGeni requests the expanded `files.info` projection with `include_transcription=true` and reads the returned `huddle_transcription` object from the transcript or parent canvas. If Slack omits that projection and redirects the private download to an interactive user page, OpenGeni reports `huddle_transcript_requires_participant_access` and never treats Slack web-client HTML as transcript content.
 
@@ -452,7 +441,7 @@ Each deletion also requires an `operationId` UUID. OpenGeni durably binds it to 
 
 ## Scheduled tasks
 
-A scheduled task can post to **one** Slack channel as the OpenGeni workspace bot. A person chooses that channel when setting up the task; the agent can never choose or change it. Without a chosen channel, scheduled Slack posts go through a personal hosted-MCP grant, which reaches a scheduled occurrence only through the task's immutable frozen personal delegation snapshot; it is never inherited as a workspace capability and never inferred from the task's service initiator.
+A scheduled task can post to **one** Slack channel as the OpenGeni workspace bot. A person chooses that channel when setting up the task; the agent can never choose or change it. Without a chosen channel, scheduled Slack posts use the personal Slack Web API bridge and user grant, which reaches a scheduled occurrence only through the task's immutable frozen personal delegation snapshot; it is never inherited as a workspace capability and never inferred from the task's service initiator.
 
 ### Choosing the channel
 
@@ -493,7 +482,7 @@ When the current workspace has no bot connection or installation binding, the we
 
 Slack OAuth outcomes open the Slack panel automatically. A failed callback remains visible across reloads through its bounded URL outcome until dismissed or replaced by a successful callback. Dismissal removes only Slack outcome parameters. These parameters are display hints, never repair authority. Conflicts and lost permissions explain the next owner/admin action instead of inviting repeated installation attempts. Cross-organization moves and quarantined installation recovery still require an administrator-led forward fix; this panel does not advertise an unsupported self-service transfer.
 
-Disconnecting a personal hosted-MCP connection in OpenGeni disables that exact subject-owned row and does not revoke the grant at Slack. Disconnecting the bot likewise disables only the bot row; it does not uninstall the Slack app or affect hosted-MCP OAuth. To remove provider access, an authorized Slack administrator must revoke or uninstall the app in Slack as a separate action.
+Disconnecting a personal account API MCP bridge connection in OpenGeni disables that exact subject-owned row and does not revoke the grant at Slack. Disconnecting the bot likewise disables only the bot row; it does not uninstall the Slack app or affect user-account OAuth. To remove provider access, an authorized Slack administrator must revoke or uninstall the app in Slack as a separate action.
 
 Slack authentication errors that prove invalid, inactive, expired, or revoked credentials mark the connection for reinstall. Provider transport failures, HTTP 5xx responses, missing channel membership, missing scope, or a missing channel do not falsely poison the credential. Reinstall preserves an existing row only after exact principal validation; otherwise use **Install another Slack workspace/bot** and explicitly review scheduled tasks.
 

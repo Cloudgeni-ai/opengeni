@@ -56,6 +56,10 @@ test("public Claude catalog preserves provider and payment identity without leak
     const client = projectClientModel(model);
     expect(client.provider).toBe(providerId);
     expect(client.providerLabel).toBe(label);
+    expect(client.capabilities?.reasoning).toMatchObject({
+      efforts: ["low", "medium", "high", "xhigh", "max"],
+      defaultEffort: "medium",
+    });
     expect(client.source).toBeUndefined();
     expect(modelPickerBillingClassFor(client)).toBe(billingClass);
     expect(JSON.stringify(client)).not.toContain("secret");
@@ -221,7 +225,7 @@ describe("workspace model catalog availability", () => {
     const managed = disconnected.models.find((model) => model.id === "deepseek-v4-flash-0731")!;
     expect(managed).toMatchObject({
       provider: "opengeni",
-      providerLabel: "OpenGeni",
+      providerLabel: "Opengeni",
       source: "opengeni",
       billing: { upstreamPayer: "deployment", metering: "opengeni_credits" },
     });
@@ -607,7 +611,7 @@ describe("workspace model catalog availability", () => {
     }).models.find((candidate) => candidate.id === settings.openaiModel)!;
     expect(unresolved).toMatchObject({
       provider: "opengeni",
-      providerLabel: "OpenGeni",
+      providerLabel: "Opengeni",
       source: "opengeni",
       credentialReadiness: {
         status: "not_ready",

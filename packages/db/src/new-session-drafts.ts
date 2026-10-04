@@ -600,6 +600,7 @@ export async function seedNewSessionDraftInTransaction(
     options.rigId.length > 0 &&
     !(await workspaceHasDefaultRig(db, input.workspaceId));
   const safeOptions: NewSessionDraftOptionsValue = {
+    ...(options.visibility ? { visibility: options.visibility } : {}),
     ...(options.sandboxBackend ? { sandboxBackend: options.sandboxBackend } : {}),
     ...(targetSandboxId ? { targetSandboxId } : {}),
     ...(targetSandboxId && typeof options.workingDir === "string"

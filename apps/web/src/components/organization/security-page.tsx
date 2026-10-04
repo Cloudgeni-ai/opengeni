@@ -166,7 +166,7 @@ function RowLoadFailure({
 
 /* ------------------------------------------------------------ Only me chats */
 
-function PrivateChatsRow({
+export function PrivateChatsRow({
   client,
   identity,
 }: {
@@ -205,7 +205,6 @@ function PrivateChatsRow({
   }
   if (!settings) return <SettingRowSkeleton />;
 
-  const unavailable = !settings.available && !settings.enabled;
   return (
     <SettingRowGroup>
       <SettingRow
@@ -216,12 +215,6 @@ function PrivateChatsRow({
             aria-label="Only me chats"
             checked={pending ?? settings.enabled}
             pending={pending !== null}
-            disabled={unavailable}
-            disabledReason={
-              unavailable
-                ? "Private chats aren't turned on for this installation. Ask whoever runs your Opengeni to enable them."
-                : undefined
-            }
             onCheckedChange={async (enabled) => {
               const operation = claim("mutation");
               setPending(enabled);

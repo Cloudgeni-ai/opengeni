@@ -31,7 +31,6 @@ declare const mintUserToken: (user: string) => Promise<string>;
 // 1. Inspect before changing anything.
 async function inspect(og: OpenGeniClient, workspaceId: string, sessionId: string) {
   const config = await og.getClientConfig();
-  const admitted = config.agentConfig?.enabled === true; // false: send no `agent` yet
   const offered = (config.agentConfig?.capabilities ?? [])
     .filter((capability) => capability.available)
     .map((capability) => capability.id);
@@ -42,7 +41,7 @@ async function inspect(og: OpenGeniClient, workspaceId: string, sessionId: strin
   // session.effectiveTools: the tools it can use, with upfront or on-demand visibility.
   const visibility = session.tenancy?.visibility;
   const byCapability = groupByCapability(session.effectiveTools?.tools ?? []);
-  return { admitted, offered, defaults, agent: session.agent, visibility, byCapability };
+  return { offered, defaults, agent: session.agent, visibility, byCapability };
 }
 
 // Read shapes: tenancy visibility is nested; effectiveTools.tools is flat.

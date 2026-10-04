@@ -3,16 +3,19 @@
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
-    <title>OpenGeni Browser</title>
+    <title>Opengeni Browser</title>
     <link rel="stylesheet" href="popup.css" />
   </head>
   <body>
     <main>
       <header>
-        <span class="signal" aria-hidden="true"></span>
+        <img class="brand-mark" src="icons/brand-mark.svg" alt="" width="28" height="22" />
         <div>
-          <h1>OpenGeni Browser</h1>
-          <p data-state>Connecting…</p>
+          <h1><span class="wordmark">Opengeni</span><span class="product">Browser</span></h1>
+          <p class="status">
+            <span class="signal" aria-hidden="true"></span
+            ><span data-state role="status">Connecting…</span>
+          </p>
         </div>
       </header>
       <p class="detail" data-detail>Connecting this Chrome profile to your machine agent.</p>
@@ -28,7 +31,7 @@
           />
           <button type="submit">Save</button>
         </div>
-        <small>Used only to recognize this profile in OpenGeni.</small>
+        <small>Used only to recognize this profile in Opengeni.</small>
       </form>
     </main>
     <script type="module" src="popup.js"></script>

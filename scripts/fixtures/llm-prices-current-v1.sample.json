@@ -1,6 +1,22 @@
 {
-  "updated_at": "2026-09-22",
+  "updated_at": "2026-09-29",
   "prices": [
+    {
+      "id": "gpt-6.1-sol",
+      "vendor": "openai",
+      "name": "GPT-6.1 Sol ≤272k",
+      "input": 2,
+      "output": 10,
+      "input_cached": 0.1
+    },
+    {
+      "id": "gpt-6.1-sol-272k",
+      "vendor": "openai",
+      "name": "GPT-6.1 Sol >272k",
+      "input": 4,
+      "output": 15,
+      "input_cached": 0.2
+    },
     {
       "id": "gpt-6-luna",
       "vendor": "openai",

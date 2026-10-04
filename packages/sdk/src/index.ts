@@ -1,4 +1,13 @@
+// Types only: a value re-export would pull the contracts runtime into the root entry.
 export type {
+  SubscriptionAccountSummary,
+  SubscriptionPoolSettings,
+  ClaudeSubscriptionSetupTokenRequest,
+  ClaudeSubscriptionAccount,
+  ClaudeSubscriptionAccountsResponse,
+} from "@opengeni/contracts";
+export type {
+  ArtifactPinResponse,
   ArtifactCatalogKind,
   ArtifactCatalogItem,
   ArtifactCatalogListOptions,
@@ -207,6 +216,7 @@ export {
   OpenGeniSecureContextRequiredError,
   OpenGeniSessionListCursorError,
   OpenGeniStreamError,
+  formatErrorMessage,
   isRetryableStreamError,
 } from "./errors";
 export type { OpenGeniSecureContextRequiredReason } from "./errors";
@@ -219,6 +229,16 @@ export {
   sessionTitleIsPending,
 } from "./session-titles";
 export type { SessionDisplayTitleInput, SessionDisplayTitleOptions } from "./session-titles";
+// Preserve the published root aliases through the dependency-free leaf, never
+// the contracts root (which would load its schema runtime in native bundles).
+export {
+  humanizeModelSlug,
+  isRawModelLabel,
+  modelDisplayName,
+  modelSlug,
+  modelVendor,
+} from "./model-display";
+export type { ModelDisplayInput, ModelVendor } from "./model-display";
 export type {
   AgentPromptModuleId,
   ModelContextInstructionLayer,
@@ -249,7 +269,10 @@ export type {
   SessionProxyMessageInput,
   SessionProxyResolution,
   SessionProxyResolve,
+  SessionProxyToolServer,
 } from "./session-proxy";
+export { ToolRequestError, verifyToolRequest } from "./tool-auth";
+export type { ToolRequestIdentity, ToolRequestLike, VerifyToolRequestOptions } from "./tool-auth";
 export {
   openGeniConsolePath,
   parseOpenGeniLink,
@@ -602,12 +625,17 @@ export type {
   BillingEntitlementsResponse,
   BillingMode,
   BillingSummary,
+  BillingCheckoutStatus,
   ListManagedOrganizationMembershipsResponse,
   ManagedOrganizationMembership,
   OrganizationAdministrationMember,
   OrganizationAdministrationMemberWorkspaceAccess,
   OrganizationAdministrationOverview,
   OrganizationApiKeyAccess,
+  OrganizationAccessPreset,
+  OrganizationWorkspaceScope,
+  OrganizationAccessPolicy,
+  OrganizationActor,
   OrganizationInvitation,
   OrganizationMember,
   OrganizationMembershipRole,
@@ -655,10 +683,12 @@ export type {
   InsightsDepthBucket,
   InsightsModelFacet,
   InsightsSpendDriver,
+  InsightsProjectRow,
   InsightsWarmGroupRow,
   InsightsLiveWarmLease,
   InsightsFloorSession,
   InsightsScheduleRow,
+  InsightsScope,
   WorkspaceInsightsSnapshot,
   WorkspaceInsightsResponse,
   CapabilityCatalogItem,
@@ -721,6 +751,7 @@ export type {
   ClaudeSubscriptionOAuthCompleteRequest,
   ClaudeSubscriptionOAuthCompleteResponse,
   ClaudeUsageWindow,
+  ClaudeUsageRequestStatus,
   OrganizationModelProviderConnection,
   UpsertOrganizationModelProviderConnectionRequest,
   RevokeOrganizationModelProviderConnectionRequest,
@@ -801,6 +832,17 @@ export type {
   CreateApiKeyRequest,
   CreateApiKeyResponse,
   CreateOrganizationApiKeyRequest,
+  UpdateOrganizationApiKeyRequest,
+  OrganizationMcpConnection,
+  OrganizationMcpConnectionList,
+  UpdateOrganizationMcpConnectionRequest,
+  OrganizationServiceAccount,
+  OrganizationServiceAccountRole,
+  ListOrganizationServiceAccountsResponse,
+  CreateOrganizationServiceAccountRequest,
+  UpdateOrganizationServiceAccountRequest,
+  McpConnectionRequest,
+  McpConnectionDecision,
   CreateCapabilityCatalogItemRequest,
   OpenGeniSlackBotInstallRequest,
   OpenGeniSlackBotInstallStart,
@@ -832,6 +874,7 @@ export type {
   CreateKnowledgeDropRequest,
   CreateKnowledgeMemoryRequest,
   CreateScheduledTaskRequest,
+  CreateSessionScheduledTaskRequest,
   CreateSessionRequest,
   CreateVariableSetRequest,
   CreateWorkspaceEnvironmentRequest,
@@ -1041,6 +1084,7 @@ export type {
   AgentTopologyPageResponse,
   AgentTopologySession,
   SessionListResponse,
+  SessionListTotals,
   SessionListEntry,
   SessionListEntryResponse,
   SessionLineageResponse,

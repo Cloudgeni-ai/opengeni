@@ -265,6 +265,64 @@ test("tolerates an excluded directory removed between readdir and lstat", async 
   expect(readFileSync(outputPath(root), "utf8")).toBe("BASE|A|644\n");
 });
 
+test("tolerates an excluded tsup config file removed between readdir and lstat", async () => {
+  const root = createFixture();
+  const generated = join(root, "packages", "demo", "tsup.config.bundled_fixture.mjs");
+  const pausePath = join(root, "excluded-file-stat-pause");
+  writeFileSync(generated, "export default {};\n");
+
+  const builder = startBuilder(root, {
+    OPENGENI_BUILD_VARIANT: "BASE",
+    OPENGENI_BUILD_CACHE_PAUSE_BEFORE_EXCLUDED_ENTRY_STAT: pausePath,
+  });
+  expect(await waitForPath(`${pausePath}.ready`, 5_000)).toBe(true);
+  rmSync(generated);
+  writeFileSync(`${pausePath}.release`, "release\n");
+
+  const result = await builder.result;
+  expect(result.code).toBe(0);
+  expect(result.stdout).not.toContain("source changed during @opengeni/demo");
+  expect(readFileSync(outputPath(root), "utf8")).toBe("BASE|A|644\n");
+});
+
+test("tolerates excluded tsup config removal during input monitoring", async () => {
+  const root = createFixture();
+  const generated = join(root, "packages", "demo", "tsup.config.bundled_fixture.mjs");
+  const monitorPause = join(root, "input-monitor-pause");
+  const statPause = join(root, "excluded-file-stat-pause");
+  const builder = startBuilder(root, {
+    OPENGENI_BUILD_VARIANT: "BASE",
+    OPENGENI_BUILD_CACHE_PAUSE_AFTER_INPUT_MONITOR_START: monitorPause,
+    OPENGENI_BUILD_CACHE_PAUSE_BEFORE_EXCLUDED_ENTRY_STAT: statPause,
+  });
+  expect(await waitForPath(`${monitorPause}.ready`, 5_000)).toBe(true);
+  writeFileSync(generated, "export default {};\n");
+  writeFileSync(`${monitorPause}.release`, "release\n");
+  expect(await waitForPath(`${statPause}.ready`, 5_000)).toBe(true);
+  rmSync(generated);
+  writeFileSync(`${statPause}.release`, "release\n");
+
+  const result = await builder.result;
+  expect(result.code).toBe(0);
+  expect(result.stdout).not.toContain("source changed during @opengeni/demo");
+  expect(readFileSync(outputPath(root), "utf8")).toBe("BASE|A|644\n");
+});
+
+test("keeps directories matching excluded tsup config names in package input hashes", async () => {
+  const root = createFixture();
+  const directory = join(root, "packages", "demo", "tsup.config.bundled_fixture.mjs");
+  mkdirSync(directory);
+  const source = join(directory, "source.ts");
+  writeFileSync(source, 'export const value = "one";\n');
+
+  const cold = await runBuilder(root, { OPENGENI_BUILD_VARIANT: "BASE" });
+  expect(cold.code).toBe(0);
+  writeFileSync(source, 'export const value = "two";\n');
+  const changed = await runBuilder(root, { OPENGENI_BUILD_VARIANT: "BASE" });
+  expect(changed.code).toBe(0);
+  expect(changed.stdout).not.toContain("cached");
+});
+
 test("ignores Cargo target output in package input hashes", async () => {
   const root = createFixture();
   const kernel = join(root, "packages", "demo", "kernel");

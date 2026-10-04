@@ -28,6 +28,9 @@
 #                              which resolves the immutable per-version path the
 #                              edge advertises. The direct GitHub-Releases asset
 #                              URL is the documented fallback (see below).
+#   OPENGENI_MINISIGN_BOOTSTRAP_BASE_URL  Optional mirror of the pinned minisign
+#                              0.11 archives, for hosts without a capable verifier.
+#                              Archive SHA-256 pins cannot be overridden.
 #   OPENGENI_ALLOW_DOWNGRADE=1 Explicitly allow an older verified agent to replace
 #                              a newer installed one. By default, installers from
 #                              lagging deployments cannot downgrade a shared agent.
@@ -80,7 +83,7 @@
 # Exit codes (so a CI harness can assert on the failure mode):
 #   0  success           3  download failed
 #   2  usage/bad env     4  checksum mismatch
-#   5  signature verify failed   6  no verify tool (openssl/minisign) available
+#   5  signature verify failed   6  no usable verify tool/bootstrap available
 #   7  unsupported OS/arch
 # =============================================================================
 
@@ -134,6 +137,10 @@ OPENGENI_APP_ICON_ASSET="OpenGeni-Agent.icns"
 # service must restart. Adding another workspace with identical bytes remains
 # live and does not interrupt in-flight commands.
 OPENGENI_AGENT_WAS_UPGRADED=0
+# Invocation-local verifier state. Never accept an executable path or capability
+# result from the environment. Bootstrapped tools live only in TMPDIR_OG.
+OPENGENI_INSTALL_MINISIGN=""
+OPENGENI_INSTALL_OPENSSL_READY=unknown
 
 log()  { printf '%s\n' "opengeni-install: $*" >&2; }
 err()  { printf '%s\n' "opengeni-install: ERROR: $*" >&2; }
@@ -268,18 +275,15 @@ sha256_of() {
 }
 
 # --- minisign signature verify ----------------------------------------------
-# Two paths, both verifying the SAME ed25519 signature against the pinned key:
-#   1. the `minisign`/`rsign2` binary if present (simplest, exact upstream impl);
-#   2. otherwise a self-contained `openssl` ed25519 verify, reconstructing the
-#      raw public key from the pinned base64 — so verification works on a stock
-#      box with only openssl, never silently skipped.
+# Prefer an installed minisign/rsign2, then a capability-tested OpenSSL. Stock
+# macOS LibreSSL and older OpenSSL cannot verify Ed25519. In that case download
+# a pinned upstream minisign archive, authenticate its checksum BEFORE extracting
+# or executing its verifier, and still verify the agent with the pinned key.
 # A minisign pubkey base64 decodes to: 2-byte algo ("Ed") + 8-byte key id +
 # 32-byte ed25519 public key. A .minisig's first base64 (the "untrusted comment"
 # signature line) decodes to: 2-byte algo + 8-byte key id + 64-byte signature.
-# minisign signs the raw FILE bytes (legacy "E" mode is over the file; "ED"
-# prehashes with BLAKE2b — our release signer uses the prehashed form, so the
-# openssl path verifies the BLAKE2b-512 hash). We therefore prefer the minisign
-# binary and only use openssl for the legacy/un-prehashed signature.
+# Minisign "Ed" signs the raw file; "ED" signs its BLAKE2b-512 prehash. Both also
+# authenticate the trusted comment. No backend skips either signature check.
 verify_signature() {
   _file="$1"; _sig="$2"
 
@@ -298,11 +302,100 @@ verify_signature() {
     log "minisign signature verified (rsign2)"
     return 0
   fi
-  if command -v openssl >/dev/null 2>&1; then
+  if openssl_minisign_available; then
     verify_signature_openssl "$_file" "$_sig"
     return 0
   fi
-  die 6 "no signature-verify tool (minisign, rsign2, or openssl) available"
+  bootstrap_minisign
+  "$OPENGENI_INSTALL_MINISIGN" -Vm "$_file" -x "$_sig" -P "$OPENGENI_MINISIGN_PUBKEY" >/dev/null 2>&1 \
+    || die 5 "minisign signature verification FAILED for $(basename "$_file")"
+  log "minisign signature verified (pinned temporary verifier)"
+}
+
+# Test a known-valid signature independently of release/key data. RFC 8032 §7.1,
+# TEST 2: message 0x72, its public key in SPKI DER, and its detached signature.
+# A bad release signature must remain an authentication failure, never trigger a
+# verifier download. Requiring BLAKE2b also covers the release signer's ED mode.
+openssl_minisign_available() {
+  case "$OPENGENI_INSTALL_OPENSSL_READY" in
+    1) return 0 ;;
+    0) return 1 ;;
+  esac
+  OPENGENI_INSTALL_OPENSSL_READY=0
+  command -v openssl >/dev/null 2>&1 || return 1
+  _probe="$TMPDIR_OG/openssl-probe"
+  mkdir -p "$_probe" || return 1
+  printf '%s' 'MCowBQYDK2VwAyEAPUAXw+hDiVqStwqnTRt+vJyYLM8uxJaMwM1V8Sr0Zgw=' \
+    | b64decode > "$_probe/key.der" || return 1
+  printf '%s' 'kqAJqfDUyrhyDoILX2QlQKKye1QWUD+Ps3YiI+vbadoIWsHkPhWZbkWPNhPQ8R2MOHsurrQwKu6wDSkWErsMAA==' \
+    | b64decode > "$_probe/signature" || return 1
+  printf 'r' > "$_probe/message"
+  openssl pkey -pubin -inform DER -in "$_probe/key.der" -out "$_probe/key.pem" >/dev/null 2>&1 || return 1
+  openssl pkeyutl -verify -pubin -inkey "$_probe/key.pem" -rawin \
+    -in "$_probe/message" -sigfile "$_probe/signature" >/dev/null 2>&1 || return 1
+  openssl dgst -blake2b512 -binary "$_probe/message" > "$_probe/prehash" 2>/dev/null || return 1
+  [ "$(wc -c < "$_probe/prehash")" -eq 64 ] || return 1
+  OPENGENI_INSTALL_OPENSSL_READY=1
+}
+
+# Official 0.11 is retained because its macOS binary is Intel + Apple Silicon
+# universal; its Linux archive includes static binaries for both supported arches.
+# These archive pins were authenticated against the upstream minisign release key:
+# https://github.com/jedisct1/minisign/releases/tag/0.11
+bootstrap_minisign() {
+  [ -z "$OPENGENI_INSTALL_MINISIGN" ] || return 0
+  _bootstrap_root="$TMPDIR_OG/minisign-bootstrap"
+  _bootstrap_os="$(uname -s)"
+  _bootstrap_arch="$(uname -m)"
+  case "$_bootstrap_os/$_bootstrap_arch" in
+    Darwin/x86_64|Darwin/arm64|Darwin/aarch64)
+      _bootstrap_archive=minisign-0.11-macos.zip
+      _bootstrap_sha=e7c410ae8b8960d7087392472b040bda9b2f307c76df0384ac37f9ad103fc893
+      _bootstrap_member=minisign
+      ;;
+    Linux/x86_64|Linux/amd64|Linux/aarch64|Linux/arm64)
+      _bootstrap_archive=minisign-0.11-linux.tar.gz
+      _bootstrap_sha=f0a0954413df8531befed169e447a66da6868d79052ed7e892e50a4291af7ae0
+      case "$_bootstrap_arch" in
+        x86_64|amd64) _bootstrap_member=minisign-linux/x86_64/minisign ;;
+        aarch64|arm64) _bootstrap_member=minisign-linux/aarch64/minisign ;;
+      esac
+      ;;
+    *) die 7 "unsupported verifier bootstrap platform: $_bootstrap_os/$_bootstrap_arch" ;;
+  esac
+  mkdir -p "$_bootstrap_root" || die 6 "cannot stage the pinned signature verifier"
+  _bootstrap_download="$_bootstrap_root/$_bootstrap_archive"
+  _bootstrap_base="${OPENGENI_MINISIGN_BOOTSTRAP_BASE_URL:-https://github.com/jedisct1/minisign/releases/download/0.11}"
+  _bootstrap_url="${_bootstrap_base%/}/$_bootstrap_archive"
+  log "downloading pinned minisign verifier (temporary; no host installation)"
+  # Bound the bootstrap download. curl is present on stock macOS; timeout + wget
+  # covers Linux hosts using GNU coreutils or BusyBox instead.
+  if command -v curl >/dev/null 2>&1; then
+    curl -fsSL --connect-timeout 15 --max-time 60 --max-filesize 1048576 \
+      "$_bootstrap_url" -o "$_bootstrap_download" || die 3 "failed to download the pinned signature verifier"
+  elif command -v wget >/dev/null 2>&1 && command -v timeout >/dev/null 2>&1; then
+    (ulimit -f 2048; timeout 60 wget -q "$_bootstrap_url" -O "$_bootstrap_download") \
+      || die 3 "failed to download the pinned signature verifier"
+  else
+    die 6 "signature verifier bootstrap needs curl or wget with timeout; install minisign and re-run"
+  fi
+  [ "$(sha256_of "$_bootstrap_download")" = "$_bootstrap_sha" ] \
+    || die 4 "pinned signature verifier archive checksum mismatch"
+  _bootstrap_bin="$_bootstrap_root/minisign"
+  case "$_bootstrap_os" in
+    Darwin)
+      command -v unzip >/dev/null 2>&1 || die 6 "unzip is required to extract the pinned signature verifier"
+      unzip -p "$_bootstrap_download" "$_bootstrap_member" > "$_bootstrap_bin" \
+        || die 6 "could not extract the authenticated signature verifier"
+      ;;
+    Linux)
+      tar -xOf "$_bootstrap_download" "$_bootstrap_member" > "$_bootstrap_bin" \
+        || die 6 "could not extract the authenticated signature verifier"
+      ;;
+  esac
+  chmod 0755 "$_bootstrap_bin" || die 6 "could not prepare the authenticated signature verifier"
+  "$_bootstrap_bin" -v >/dev/null 2>&1 || die 6 "authenticated signature verifier cannot run on this host"
+  OPENGENI_INSTALL_MINISIGN="$_bootstrap_bin"
 }
 
 # Pure-openssl ed25519 verify of a minisign detached signature. Reconstructs a
@@ -316,6 +409,9 @@ verify_signature_openssl() {
   pk_raw="$TMPDIR_OG/pk.raw"
   printf '%s' "$OPENGENI_MINISIGN_PUBKEY" | b64decode > "$TMPDIR_OG/pk.bin" \
     || die 5 "could not decode the pinned public key"
+  [ "$(wc -c < "$TMPDIR_OG/pk.bin")" -eq 42 ] || die 5 "pinned public key has an unexpected length"
+  [ "$(dd if="$TMPDIR_OG/pk.bin" bs=1 count=2 2>/dev/null)" = Ed ] \
+    || die 5 "unrecognized minisign public key algorithm"
   dd if="$TMPDIR_OG/pk.bin" of="$pk_raw" bs=1 skip=10 count=32 2>/dev/null
   [ "$(wc -c < "$pk_raw")" -eq 32 ] || die 5 "pinned public key has an unexpected length"
 
@@ -325,7 +421,11 @@ verify_signature_openssl() {
   sig_b64="$(sed -n '2p' "$_sig")"
   printf '%s' "$sig_b64" | b64decode > "$TMPDIR_OG/sig.bin" \
     || die 5 "could not decode the signature"
+  [ "$(wc -c < "$TMPDIR_OG/sig.bin")" -eq 74 ] || die 5 "signature has an unexpected length"
   algo="$(dd if="$TMPDIR_OG/sig.bin" bs=1 count=2 2>/dev/null)"
+  dd if="$TMPDIR_OG/pk.bin" of="$TMPDIR_OG/pk.id" bs=1 skip=2 count=8 2>/dev/null
+  dd if="$TMPDIR_OG/sig.bin" of="$TMPDIR_OG/sig.id" bs=1 skip=2 count=8 2>/dev/null
+  cmp -s "$TMPDIR_OG/pk.id" "$TMPDIR_OG/sig.id" || die 5 "signature key id does not match the pinned key"
   dd if="$TMPDIR_OG/sig.bin" of="$TMPDIR_OG/sig.raw" bs=1 skip=10 count=64 2>/dev/null
   [ "$(wc -c < "$TMPDIR_OG/sig.raw")" -eq 64 ] || die 5 "signature has an unexpected length"
 
@@ -358,6 +458,22 @@ verify_signature_openssl() {
   openssl pkeyutl -verify -pubin -inkey "$TMPDIR_OG/pk.pem" -rawin \
     -in "$_signed" -sigfile "$TMPDIR_OG/sig.raw" >/dev/null 2>&1 \
     || die 5 "ed25519 signature verification FAILED for $(basename "$_file")"
+
+  # Minisign's second signature authenticates the raw file signature followed by
+  # the trusted comment, without its prefix or newline (also for prehashed ED).
+  _trusted_line="$(sed -n '3p' "$_sig")"
+  case "$_trusted_line" in
+    'trusted comment: '*) _trusted_comment="${_trusted_line#trusted comment: }" ;;
+    *) die 5 "missing minisign trusted comment" ;;
+  esac
+  printf '%s' "$(sed -n '4p' "$_sig")" | b64decode > "$TMPDIR_OG/sig.global" \
+    || die 5 "could not decode the trusted comment signature"
+  [ "$(wc -c < "$TMPDIR_OG/sig.global")" -eq 64 ] || die 5 "trusted comment signature has an unexpected length"
+  cat "$TMPDIR_OG/sig.raw" > "$TMPDIR_OG/comment.message"
+  printf '%s' "$_trusted_comment" >> "$TMPDIR_OG/comment.message"
+  openssl pkeyutl -verify -pubin -inkey "$TMPDIR_OG/pk.pem" -rawin \
+    -in "$TMPDIR_OG/comment.message" -sigfile "$TMPDIR_OG/sig.global" >/dev/null 2>&1 \
+    || die 5 "minisign trusted comment signature verification FAILED"
   log "minisign signature verified (openssl ed25519)"
 }
 
@@ -365,7 +481,7 @@ verify_signature_openssl() {
 b64decode() {
   if base64 --help 2>&1 | grep -q -- '-d'; then base64 -d
   elif base64 --help 2>&1 | grep -q -- '-D'; then base64 -D
-  else openssl base64 -d; fi
+  else openssl base64 -d -A; fi
 }
 
 # --- The asset URL for a name. Immutable per version; "latest" goes to the

@@ -49,6 +49,7 @@ import { startHelloIngestion, startMetricsIngestion } from "./sandbox/metrics-in
 import { startSlackInteractionPump } from "./integrations/slack-interactions";
 import { startMemorySlackPublicationPump } from "./memory-slack-delivery";
 import { startTemporalScheduleCleanupPump } from "./temporal-schedule-cleanup";
+import { createTemporalScheduleSynchronizer } from "./temporal-schedule-sync";
 import { startWorkspaceWebhookDispatchPump } from "./workspace-webhook-dispatch";
 import { cleanupScheduledTaskConnectorAuthorization } from "./scheduled-task-deletion";
 import {
@@ -105,6 +106,28 @@ export async function createTemporalWorkflowClient(
   const temporal = new TemporalClient({
     connection,
     namespace: settings.temporalNamespace,
+  });
+  const scheduledTasks = createTemporalScheduleSynchronizer({
+    db,
+    withDeadline: (deadline, work) => temporal.withDeadline(deadline, work),
+    upsert: async (task) => {
+      const options = temporalScheduleOptions(task, settings.temporalTaskQueue);
+      try {
+        await temporal.schedule
+          .getHandle(task.temporalScheduleId)
+          .update(() => temporalScheduleUpdateOptions(options));
+      } catch (error) {
+        if (!shouldCreateScheduleAfterUpdateError(error)) throw error;
+        await temporal.schedule.create(options);
+      }
+    },
+    remove: async (temporalScheduleId) => {
+      try {
+        await temporal.schedule.getHandle(temporalScheduleId).delete();
+      } catch (error) {
+        if (!(error instanceof ScheduleNotFoundError)) throw error;
+      }
+    },
   });
   const client: SessionWorkflowClient = {
     triggerAutomationRun: async ({ accountId, workspaceId, runId }) => {
@@ -201,36 +224,9 @@ export async function createTemporalWorkflowClient(
         wakeRevision: workflowWakeRevision,
       });
     },
-    syncScheduledTask: async ({ task }) => {
-      const schedule = temporal.schedule.getHandle(task.temporalScheduleId);
-      if (task.schedule.type === "manual") {
-        try {
-          await schedule.delete();
-        } catch (error) {
-          if (!(error instanceof ScheduleNotFoundError)) throw error;
-        }
-        return;
-      }
-      const options = temporalScheduleOptions(task, settings.temporalTaskQueue);
-      try {
-        await schedule.update(() => temporalScheduleUpdateOptions(options));
-      } catch (error) {
-        if (!shouldCreateScheduleAfterUpdateError(error)) {
-          throw error;
-        }
-        await temporal.schedule.create(options);
-      }
-    },
-    deleteScheduledTaskSchedule: async ({ temporalScheduleId }) => {
-      try {
-        await temporal.withDeadline(Date.now() + 5_000, async () => {
-          await temporal.schedule.getHandle(temporalScheduleId).delete();
-        });
-      } catch (error) {
-        if (error instanceof ScheduleNotFoundError) return;
-        throw error;
-      }
-    },
+    syncScheduledTask: async ({ task, onFailure }) => scheduledTasks.sync(task, onFailure),
+    deleteScheduledTaskSchedule: async ({ temporalScheduleId }) =>
+      scheduledTasks.remove(temporalScheduleId),
     triggerScheduledTask: async ({
       task,
       agentRunUsageIdempotencyKey,
@@ -333,7 +329,7 @@ export async function startApi(
   // strategy.
   const searchPath = dbSearchPath(settings);
   const dbClient = createDb(settings.databaseUrl, {
-    max: 32,
+    max: settings.apiDatabasePoolMax,
     ...(searchPath ? { searchPath } : {}),
     rlsStrategy: settings.rlsStrategy,
   });
@@ -346,8 +342,6 @@ export async function startApi(
     rlsStrategy: settings.rlsStrategy,
     expectedRole: settings.runtimeDatabaseRole,
     targetSchema: settings.dbSchema.trim() || "public",
-    organizationTenancyCanonicalActivationEnabled:
-      settings.organizationTenancyCanonicalActivationEnabled,
   } as const;
   // The PRIVILEGED control-plane NATS login (M-AUTH): when the server runs with
   // auth_callout, api/worker authenticate as a static account user permitted to

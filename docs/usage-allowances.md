@@ -272,7 +272,8 @@ const allowance = await og.setWorkspaceAllowance(workspaceId, {
 Five eligible members initially get equal ceilings against the $100 pool.
 If paid seats and the OpenGeni roster differ, the split follows the roster,
 not the paid-seat count. Decide which users are admitted before applying the
-recipe; `asUser` and the proxy never create membership.
+recipe; an `asUser` request through a key with `members:manage` adds a missing
+member on first use (see [product integration](product-integration.md)).
 On a seat-plan change, update the included amount with the saved version.
 Do not treat a mid-period config update as a fresh usage period.
 
@@ -513,7 +514,7 @@ the same reads and administration as free functions over `requestJson`
 
 The OpenGeni console shows budgets in dollars, the unit of the credit balance
 they draw on: owners set a shared workspace's monthly budget under
-Organization settings → Billing & usage (a budgets list and one page per
+Organization settings → Billing (a budgets list and one page per
 workspace), workspace admins set member limits under Workspace settings →
 Usage, everyone sees their own limit there and in the account menu, and the
 composer shows the near/at-limit notice. Personal workspaces have no budget.

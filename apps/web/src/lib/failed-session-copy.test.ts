@@ -20,7 +20,11 @@ test("only explicit model availability evidence suggests another model", () => {
     "Connection failed.",
     "An unknown response was received.",
   ]) {
-    expect(failedSessionCopy({ ...summary, reason })).toEqual({ reason, unavailableModel: false });
+    expect(failedSessionCopy({ ...summary, reason })).toEqual({
+      reason: "The session stopped unexpectedly.",
+      unavailableModel: false,
+      detail: reason,
+    });
   }
 });
 test("unusable picker does not receive unavailable-model guidance", () => {
@@ -28,11 +32,14 @@ test("unusable picker does not receive unavailable-model guidance", () => {
     "This model isn’t available.",
   );
 });
-test("long recorded errors are bounded without inventing a recovery diagnosis", () => {
-  const result = failedSessionCopy({ ...summary, reason: "Connection interrupted. ".repeat(100) });
+test("unknown errors have a plain headline and complete recorded details", () => {
+  const recorded = "Connection interrupted. ".repeat(100);
+  const result = failedSessionCopy({ ...summary, reason: recorded });
   expect(result.reason.length).toBeLessThanOrEqual(160);
-  expect(result.reason.endsWith("…")).toBe(true);
-  expect(failedSessionCopy({ ...summary, reason: null }).reason).toBe("This session failed.");
+  expect(result.detail).toBe(recorded);
+  expect(failedSessionCopy({ ...summary, reason: null }).reason).toBe(
+    "The session stopped unexpectedly.",
+  );
 });
 
 const openAiKey =
@@ -102,9 +109,9 @@ test("a bare HTTP status classifies only 401, 402, 403 and 429", () => {
     retryUnhelpful: false,
   });
   expect(failedSessionCopy({ ...summary, reason: "429 Too Many Requests" }).reason).toBe(
-    "The model provider is rate limiting requests. Try again in a minute.",
+    "This model is throttled due to high demand. Try again in a few minutes.",
   );
-  // Other statuses say nothing about the cause, so the recorded text stays.
+  // Other statuses say nothing about the cause: keep the evidence in Details.
   for (const reason of [
     "400 Invalid 'input[12].name': string too long. See https://platform.openai.com/docs",
     "404 Not Found",
@@ -112,8 +119,9 @@ test("a bare HTTP status classifies only 401, 402, 403 and 429", () => {
     "413 Payload Too Large",
   ]) {
     expect(failedSessionCopy({ ...summary, reason, recordedDetail: reason })).toEqual({
-      reason,
+      reason: "The session stopped unexpectedly.",
       unavailableModel: false,
+      detail: reason,
     });
   }
 });
@@ -138,9 +146,54 @@ test("provider rate limits separate daily limits and quota from transient thrott
     retryUnhelpful: false,
   });
   expect(failedSessionCopy(coded("429 Too Many Requests"))).toMatchObject({
-    reason: "The model provider is rate limiting requests. Try again in a minute.",
+    reason: "This model is throttled due to high demand. Try again in a few minutes.",
     retryUnhelpful: false,
   });
+});
+
+test("temporary model capacity failures offer the existing model picker, without promising a reset", () => {
+  for (const [failureCode, message, chooseMessage] of [
+    [
+      "provider_rate_limited",
+      "This model is throttled due to high demand. Try again in a few minutes.",
+      "This model is throttled due to high demand. Choose another model to continue, or try again in a few minutes.",
+    ],
+    [
+      "provider_unavailable",
+      "This model is temporarily unavailable. Try again in a few minutes.",
+      "This model is temporarily unavailable. Choose another model to continue, or try again in a few minutes.",
+    ],
+  ] as const) {
+    const failure = { ...summary, reason: "Temporary provider failure", failureCode };
+    expect(failedSessionCopy(failure, false, false, true)).toMatchObject({
+      reason: chooseMessage,
+      chooseModel: true,
+    });
+    expect(failedSessionCopy(failure, false, true, true).reason).toBe(message);
+    expect(failedSessionCopy(failure, false, true, true).chooseModel).toBeUndefined();
+    expect(failedSessionCopy(failure, false, false, false).reason).toBe(message);
+    expect(failedSessionCopy(failure, false, false, false).chooseModel).toBeUndefined();
+    expect(failedSessionCopy(failure, true, false, true).reason).toBe(
+      "This workspace is out of Opengeni credits.",
+    );
+  }
+});
+
+test("typed quota scope stays authoritative over a recorded rate-limit recovery streak", () => {
+  const failure = {
+    ...summary,
+    reason: "Automatic recovery stopped",
+    failureCode: "provider_rate_limited",
+    consecutiveRecoveryCount: 5,
+    quotaScope: "daily",
+    recordedDetail: "429 temporary rate limit",
+  };
+  expect(failedSessionCopy(failure, false, false, true).reason).toBe(
+    "This model's daily limit has been reached. Choose another model below.",
+  );
+  expect(failedSessionCopy({ ...failure, quotaScope: "credits" }).reason).toBe(
+    "The model provider account for this model is out of credits.",
+  );
 });
 
 test("an exhausted provider quota is terminal copy that points at the model picker", () => {
@@ -253,7 +306,11 @@ test("authored worker copy and OpenGeni credit failures keep their own wording",
       reason: "Connection interrupted.",
       recordedDetail: "Connection interrupted.",
     }),
-  ).toEqual({ reason: "Connection interrupted.", unavailableModel: false });
+  ).toEqual({
+    reason: "The session stopped unexpectedly.",
+    unavailableModel: false,
+    detail: "Connection interrupted.",
+  });
 });
 
 test("Codex plan copy stays whole, keeps Retry, and keeps the recorded detail", () => {
@@ -284,5 +341,81 @@ test("Codex plan copy stays whole, keeps Retry, and keeps the recorded detail", 
   expect(rejected.length).toBeGreaterThan(160);
   expect(
     failedSessionCopy({ ...summary, reason: rejected, failureCode: "codex_request_rejected" }),
-  ).toEqual({ reason: rejected, unavailableModel: false });
+  ).toEqual({
+    reason: "Codex rejected this request. Try again when you're ready.",
+    unavailableModel: false,
+    detail: rejected,
+  });
+});
+
+test("Modal transport headline makes no command-outcome or retry claim", () => {
+  const detail =
+    "Failed to run function tools: ClientError: /modal.task_command_router.TaskCommandRouter/TaskExecStart UNAVAILABLE: Name resolution failed for target dns:execution.example.test:443";
+  const failure = { ...summary, reason: detail, recordedDetail: detail };
+  const before = JSON.stringify(failure);
+  expect(failedSessionCopy(failure)).toEqual({
+    reason: "Opengeni lost contact with the execution environment.",
+    unavailableModel: false,
+    detail,
+  });
+  expect(JSON.stringify(failure)).toBe(before);
+});
+
+test("unknown failure headline preserves diagnostic whitespace behind Details", () => {
+  const detail = "Upstream failure\n  exact diagnostic\n";
+  expect(failedSessionCopy({ ...summary, reason: detail })).toEqual({
+    reason: "The session stopped unexpectedly.",
+    unavailableModel: false,
+    detail,
+  });
+});
+
+test("uncategorized preclaim diagnostics stay behind Details without changing failure truth", () => {
+  for (const detail of [
+    "Failed query: INSERT INTO fixture_records VALUES ($1)\nparams: synthetic-marker",
+    "getaddrinfo ENOTFOUND database.example.test",
+  ]) {
+    const failure = {
+      ...summary,
+      reason: detail,
+      recordedDetail: detail,
+      failureCode: "pre_claim_failure",
+    };
+    const before = JSON.stringify(failure);
+    expect(failedSessionCopy(failure)).toEqual({
+      reason: "The session stopped unexpectedly.",
+      unavailableModel: false,
+      detail,
+    });
+    expect(JSON.stringify(failure)).toBe(before);
+  }
+});
+
+test("preclaim presentation preserves existing authored database and structural remedies", () => {
+  const authored = "Earlier execution is still settling.";
+  expect(
+    failedSessionCopy({
+      ...summary,
+      reason: authored,
+      failureCode: "pre_claim_failure",
+      structuralSandboxFailure: true,
+    }),
+  ).toEqual({ reason: authored, unavailableModel: false });
+  const database = "Opengeni encountered a database error.";
+  expect(
+    failedSessionCopy({
+      ...summary,
+      reason: database,
+      failureCode: "db_failure",
+      recordedDetail: "synthetic diagnostic",
+    }),
+  ).toEqual({ reason: database, unavailableModel: false });
+  expect(
+    failedSessionCopy({
+      ...summary,
+      reason: "synthetic refusal",
+      failureCode: "pre_claim_failure",
+      safetyRefusal: true,
+    }).reason,
+  ).toBe("The model provider declined this request.");
 });

@@ -76,6 +76,12 @@ export interface RowListColumn {
    * explain themselves ("4 variables"). The table header still shows it.
    */
   hideLabel?: boolean;
+  /**
+   * On narrow lists this fact folds in ahead of the meta items instead of
+   * after them and stays on a phone-width line, for a value the row exists to
+   * show (an amount). Keep it to one or two short facts per list.
+   */
+  leadsWhenFolded?: boolean;
 }
 
 export interface RowListSort {
@@ -549,35 +555,52 @@ export function ListRow({
   const expandable = !table && expanded !== undefined;
 
   /* The meta line: quiet facts, then the fact columns folded in on narrow lists. */
-  const facts = columns.filter((column) => cells[column.id] != null);
+  const presentFacts = columns.filter((column) => cells[column.id] != null);
+  const facts = [
+    ...presentFacts.filter((column) => column.leadsWhenFolded),
+    ...presentFacts.filter((column) => !column.leadsWhenFolded),
+  ];
+  const leadingFacts = facts.filter((column) => column.leadsWhenFolded).length;
   const metaItems = meta.filter((item) => item != null && item !== false && item !== "");
   // On one line the facts give way from the end: a later part truncates (and
   // then disappears) before an earlier one, so a narrow row reads "Fact ·
   // Staging runs on walrus-2…" instead of every part cut to a few letters.
   // Only the last meta item and the folded facts after it shrink at all: any
   // shrink, however small, would put an ellipsis into a short fact ("Fa…").
+  const foldedFact = (column: RowListColumn, index: number, order: number, leads: boolean) => (
+    <MetaPart
+      key={column.id}
+      order={order}
+      keep={leads}
+      className={cn(
+        hasColumns && "@[640px]/list:hidden",
+        // A phone-width line has room for one folded fact (none next to a
+        // status) beyond the leading ones; more would only be cut to a dot
+        // and a few letters.
+        !leads && (index > 0 || status) && "@max-[479px]/list:hidden",
+      )}
+    >
+      {column.hideLabel ? null : <span className="text-fg-subtle">{column.label} </span>}
+      <span className="text-fg-muted">{cells[column.id]}</span>
+    </MetaPart>
+  );
   const metaParts: ReactNode[] = [
-    ...metaItems.map((item, index) => (
-      // oxlint-disable-next-line react/no-array-index-key -- meta items are positional
-      <MetaPart key={`meta-${index}`} order={index} keep={index < metaItems.length - 1}>
-        {item}
-      </MetaPart>
-    )),
-    ...facts.map((column, index) => (
-      <MetaPart
-        key={column.id}
-        order={metaItems.length + index}
-        className={cn(
-          hasColumns && "@[640px]/list:hidden",
-          // A phone-width line has room for one folded fact (none next to a
-          // status); more would only be cut to a dot and a few letters.
-          (index > 0 || status) && "@max-[479px]/list:hidden",
-        )}
-      >
-        {column.hideLabel ? null : <span className="text-fg-subtle">{column.label} </span>}
-        <span className="text-fg-muted">{cells[column.id]}</span>
-      </MetaPart>
-    )),
+    // A leading fact never shrinks: the meta after it gives way instead.
+    ...facts.slice(0, leadingFacts).map((column, index) => foldedFact(column, index, index, true)),
+    ...metaItems.map((item, index) => {
+      const last = index === metaItems.length - 1;
+      return (
+        // oxlint-disable-next-line react/no-array-index-key -- meta items are positional
+        <MetaPart key={`meta-${index}`} order={leadingFacts + index} keep={!last}>
+          {item}
+        </MetaPart>
+      );
+    }),
+    ...facts
+      .slice(leadingFacts)
+      .map((column, index) =>
+        foldedFact(column, leadingFacts + index, leadingFacts + metaItems.length + index, false),
+      ),
   ];
   // Resource and table rows keep one fixed height: the description, the meta
   // facts and (on narrow lists) the status and indicator words share ONE

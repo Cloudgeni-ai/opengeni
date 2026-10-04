@@ -150,12 +150,12 @@ export function createByteBoundedSseStream(
   return {
     stream,
     write: async (frame) => {
-      const chunk = encoder.encode(frame);
       for (;;) {
         if (stopped) return false;
         const desired = controller.desiredSize;
         if (desired === null) return false;
         if (desired >= 1 && queuedFrames === 0) {
+          const chunk = encoder.encode(frame);
           controller.enqueue(chunk);
           queuedFrames = 1;
           queuedBytes = chunk.byteLength;

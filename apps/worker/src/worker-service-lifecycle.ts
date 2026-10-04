@@ -172,3 +172,56 @@ function safeLifecycleLog(log: () => void): void {
     // Telemetry cannot change worker lifecycle state or shutdown delivery.
   }
 }
+
+/** A cleanup stall first drains peers through WORKER_SHUTDOWN. The standalone
+ * process owns the final exit, because Temporal cannot kill JavaScript writers.
+ * Embedded hosts may supply their own termination policy at this same edge. */
+export function createWorkerCleanupContainment(input: {
+  drain: () => boolean;
+  terminate?: () => void;
+  observability: Observability;
+  timeoutMs?: number;
+}) {
+  let requested = false;
+  let finished = false;
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  return {
+    request() {
+      if (requested || finished) return;
+      requested = true;
+      if (input.terminate) {
+        timer = setTimeout(() => {
+          safeLifecycleLog(() =>
+            input.observability.error("worker cleanup drain exhausted; terminating host", {
+              errorClass: "WorkerLifecycleOperationError",
+              errorCode: "worker_cleanup_drain_exhausted",
+              origin: "worker-lifecycle",
+            }),
+          );
+          input.terminate?.();
+        }, input.timeoutMs ?? 100_000);
+        timer.unref?.();
+      }
+      let accepted = false;
+      try {
+        accepted = input.drain();
+      } catch {
+        /* The host backstop remains armed. */
+      }
+      if (!accepted)
+        safeLifecycleLog(() =>
+          input.observability.error("worker cleanup drain request failed", {
+            errorClass: "WorkerLifecycleOperationError",
+            errorCode: "worker_shutdown_request_failed",
+            origin: "worker-lifecycle",
+          }),
+        );
+    },
+    finished() {
+      // Call only after Worker.run resolves. ForceShutdownError does not prove
+      // its activity promises stopped, so rejection must retain the backstop.
+      finished = true;
+      clearTimeout(timer);
+    },
+  };
+}

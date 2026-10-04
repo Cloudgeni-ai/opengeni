@@ -20,6 +20,7 @@ export function configuredBundledSkillNames(context: BundledSkillConfiguration):
     { name: "document-parsing", include: () => true },
     { name: "opengeni-skills", include: () => true },
     { name: "opengeni-projects", include: () => true },
+    { name: "opengeni-schedules", include: () => tools.has("scheduled_tasks_create") },
     { name: "opengeni-documents", include: artifacts },
     { name: "opengeni-spreadsheets", include: artifacts },
     { name: "opengeni-presentations", include: artifacts },
@@ -43,6 +44,7 @@ export function loadConfiguredBundledSkills(context: BundledSkillConfiguration) 
   const names = new Set(configuredBundledSkillNames(context));
   const artifacts = loadNativeToolSkillArtifacts({
     projects: names.has("opengeni-projects"),
+    schedules: names.has("opengeni-schedules"),
     editableArtifacts: [
       "opengeni-documents",
       "opengeni-spreadsheets",

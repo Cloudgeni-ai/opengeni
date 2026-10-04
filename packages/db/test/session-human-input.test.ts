@@ -710,6 +710,69 @@ describe("durable structured human input", () => {
     expect(repeated.event.id).toBe(expired.event.id);
   });
 
+  test("expiry leaves an eventless historical cancellation unchanged", async () => {
+    const frozen = await freezeRequest({ expiresAt: new Date(Date.now() - 1_000) });
+    await shared.admin`
+      update session_human_input_requests
+      set status = 'cancelled', response = null, responded_by = null, responded_at = null
+      where workspace_id = ${frozen.grant.workspaceId!}
+        and session_id = ${frozen.session.id}
+        and id = ${frozen.requestId}`;
+    const input = {
+      accountId: frozen.grant.accountId,
+      workspaceId: frozen.grant.workspaceId!,
+      sessionId: frozen.session.id,
+      requestId: frozen.requestId,
+    };
+    for (let retry = 0; retry < 2; retry += 1) {
+      expect(await expireSessionHumanInputRequest(client.db, input)).toMatchObject({
+        action: "conflict",
+        request: { status: "cancelled", response: null, respondedAt: null },
+        events: [],
+        workflowWakeRevision: null,
+      });
+    }
+    await expect(
+      acceptSessionHumanInputResponse(client.db, {
+        ...input,
+        response: { outcome: "skipped" },
+        respondedBy: frozen.grant.subjectId,
+      }),
+    ).rejects.toThrow("Terminal human-input request has no response event");
+    const [evidence] = await shared.admin<{ count: number }[]>`
+      select count(*)::int as count from session_events
+      where workspace_id = ${input.workspaceId} and session_id = ${input.sessionId}
+        and type = 'user.humanInputResponse'
+        and payload ->> 'requestId' = ${input.requestId}`;
+    expect(evidence?.count).toBe(0);
+  });
+
+  test("expiry never repairs or changes an already answered request", async () => {
+    const frozen = await freezeRequest({ expiresAt: new Date(Date.now() + 60_000) });
+    const input = {
+      accountId: frozen.grant.accountId,
+      workspaceId: frozen.grant.workspaceId!,
+      sessionId: frozen.session.id,
+      requestId: frozen.requestId,
+    };
+    const answer = await acceptSessionHumanInputResponse(client.db, {
+      ...input,
+      response: {
+        outcome: "answered",
+        answers: [{ questionId: "environment", values: ["production"] }],
+      },
+      respondedBy: frozen.grant.subjectId,
+    });
+    expect(answer.action).toBe("accepted");
+    if (answer.action !== "accepted") throw new Error("answer was not accepted");
+    expect(await expireSessionHumanInputRequest(client.db, input)).toEqual({
+      action: "conflict",
+      request: answer.request,
+      events: [],
+      workflowWakeRevision: null,
+    });
+  });
+
   test("repairs an eventless cancelled terminal row once without waking terminal work", async () => {
     const frozen = await freezeRequest();
     const cancelledAt = new Date();

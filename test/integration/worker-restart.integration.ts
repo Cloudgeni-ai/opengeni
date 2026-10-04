@@ -15,7 +15,10 @@ import {
   withWorkspaceSessionActivityRls,
 } from "@opengeni/db";
 import { createNatsEventBus, type EventBus } from "@opengeni/events";
+import { createObservability } from "@opengeni/observability";
+import { createWorkerServiceLifecycle } from "../../apps/worker/src/worker-service-lifecycle";
 import { createProductionAgentRuntime } from "@opengeni/runtime";
+import { createTurnToolCancellationController } from "../../packages/runtime/src/sandbox/turn-tool-cancellation";
 import {
   functionCall,
   latestStatus,
@@ -68,7 +71,7 @@ describe("worker restart resilience", () => {
     await services?.down();
   }, 60_000);
 
-  test("graceful worker shutdown mid-turn recovers the same turn on a healthy worker", async () => {
+  test("stalled cleanup hands a concurrent checkpointed turn to a healthy worker", async () => {
     const grant = await testGrant();
     const mcp = startTestMcpServer();
     const taskQueue = `worker-restart-${crypto.randomUUID()}`;
@@ -142,7 +145,47 @@ describe("worker restart resilience", () => {
       reasoningEffortFallback: settings.openaiReasoningEffort,
     });
 
-    const firstWorker = await restartTestWorker(nativeConnection, taskQueue, activities);
+    const cleanupModel = new ScriptedModel([
+      { id: "cleanup-completed", outputText: "done", chunks: ["done"] },
+    ]);
+    let releaseCleanup!: () => void;
+    const blockedCleanup = new Promise<void>((resolve) => {
+      releaseCleanup = resolve;
+    });
+    let cleanupEntered = false;
+    let lifecycle!: ReturnType<typeof createWorkerServiceLifecycle>;
+    const cleanupRuntime = createProductionAgentRuntime({ model: cleanupModel });
+    const cleanupFence = createTurnToolCancellationController();
+    cleanupFence.waitForQuiescence = async () => {
+      cleanupEntered = true;
+      await blockedCleanup;
+    };
+    const cleanupActivities = createActivityTestHarness({
+      settings,
+      db: dbClient.db,
+      bus,
+      turnFinalizationTimeoutMs: 25,
+      requestWorkerDrain: () => {
+        expect(cleanupEntered).toBe(true);
+        expect(lifecycle.drain("stalled turn finalization")).toBe(true);
+      },
+      runtime: {
+        ...cleanupRuntime,
+        buildAgent: (...args) => {
+          const agent = cleanupRuntime.buildAgent(...args);
+          args[2]?.onToolCancellationFence?.(cleanupFence);
+          return agent;
+        },
+      },
+    });
+    const selectedActivities = {
+      ...activities,
+      runAgentTurn: (input: Parameters<typeof activities.runAgentTurn>[0]) =>
+        input.sessionId === session.id
+          ? activities.runAgentTurn(input)
+          : cleanupActivities.runAgentTurn(input),
+    };
+    const firstWorker = await restartTestWorker(nativeConnection, taskQueue, selectedActivities);
     const firstRun = firstWorker.run();
     const client = new Client({ connection });
     const handle = await client.workflow.start("sessionWorkflow", {
@@ -165,8 +208,62 @@ describe("worker restart resilience", () => {
         (await getSessionHistoryItems(dbClient.db, grant.workspaceId, session.id)).length > 0,
     );
     await waitFor(() => model.calls === 2);
-    firstWorker.shutdown();
+    const observability = createObservability(settings, { component: "worker-turn" });
+    lifecycle = createWorkerServiceLifecycle({
+      role: "turn",
+      worker: firstWorker,
+      observability,
+      closeOwnedResources: async () => {},
+    });
+    // A second session finishes its work and then holds its cleanup open. Use
+    // the production stage monitor and host lifecycle with a shorter test clock.
+    const cleanupSession = await createSession(dbClient.db, {
+      accountId: grant.accountId,
+      workspaceId: grant.workspaceId,
+      initialMessage: "cleanup peer",
+      resources: [],
+      tools: [],
+      metadata: {},
+      model: "scripted-model",
+      reasoningEffort: "medium",
+      latencyMode: "standard",
+      sandboxBackend: "none",
+    });
+    await submitTestHumanPrompt(dbClient.db, {
+      accountId: grant.accountId,
+      workspaceId: grant.workspaceId,
+      sessionId: cleanupSession.id,
+      subjectId: grant.subjectId,
+      text: "cleanup peer",
+      resources: [],
+      tools: [],
+      delivery: "send",
+      reasoningEffortFallback: settings.openaiReasoningEffort,
+    });
+    const cleanupHandle = await client.workflow.start("sessionWorkflow", {
+      taskQueue,
+      workflowId: `session-${cleanupSession.id}`,
+      args: [
+        {
+          accountId: grant.accountId,
+          workspaceId: grant.workspaceId,
+          sessionId: cleanupSession.id,
+        },
+      ],
+    });
+    await waitFor(() => cleanupEntered);
+    await waitFor(() => lifecycle.state() === "draining");
+    // The ordinary peer must checkpoint before the stalled writer is released.
+    await waitFor(
+      async () =>
+        (await getSession(dbClient.db, grant.workspaceId, session.id))?.status === "recovering",
+    );
+    expect(cleanupModel.calls).toBe(1);
+    releaseCleanup();
     await firstRun;
+    expect((await getSession(dbClient.db, grant.workspaceId, cleanupSession.id))?.status).toBe(
+      "idle",
+    );
 
     // Between workers the same logical turn is recoverable, not converted into
     // queue work and not failed.
@@ -190,7 +287,7 @@ describe("worker restart resilience", () => {
     const secondWorker = await restartTestWorker(nativeConnection, taskQueue, activities);
     const secondRun = secondWorker.run();
     try {
-      await handle.result();
+      await Promise.all([handle.result(), cleanupHandle.result()]);
     } finally {
       secondWorker.shutdown();
       await secondRun;
@@ -201,6 +298,7 @@ describe("worker restart resilience", () => {
     expect(resumed?.status).toBe("idle");
     const turns = await listSessionTurns(dbClient.db, grant.workspaceId, session.id);
     expect(turns.map((turn) => turn.status)).toEqual(["completed"]);
+    expect(turns[0]?.metadata?.workerDeathRedispatches ?? 0).toBe(0);
     const events = await listSessionEvents(dbClient.db, grant.workspaceId, session.id, 0, 500);
     expect(events.some((event) => event.type === "turn.failed")).toBe(false);
     expect(events.filter((event) => event.type === "turn.recovery.requested")).toHaveLength(1);
@@ -746,6 +844,8 @@ async function restartTestWorker(
       namespace: "default",
       taskQueue: turnTaskQueue(taskQueue),
       activities: { runAgentTurn },
+      shutdownGraceTime: "5s",
+      shutdownForceTime: "100s",
       tuner: integrationTurnTuner(),
     }),
   ]);

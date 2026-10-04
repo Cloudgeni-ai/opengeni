@@ -1,4 +1,3 @@
-import { ClaudeMark, AnthropicMark, OpenRouterMark, GrokMark } from "@opengeni/react";
 import type { ModelConnectionAccessResponse } from "@opengeni/sdk";
 import { useNavigate } from "@tanstack/react-router";
 import {
@@ -8,14 +7,11 @@ import {
   useEffect,
   useState,
   type ComponentProps,
-  type SVGProps,
 } from "react";
 
-import { ChatGptMark } from "@/components/chatgpt-mark";
 import { Field, TextInput } from "@/components/ui/field";
 import { FormDialog } from "@/components/ui/form-dialog";
 import { FlushFormPage } from "@/components/ui/flush-form-page";
-import { LogoTile, type LogoTileSize } from "@/components/ui/logo-tile";
 import { userErrorText } from "@/lib/api-error";
 import type { ModelsView } from "@/lib/models-route";
 import { returnToSearch, type ReturnTo } from "@/lib/return-to";
@@ -25,7 +21,10 @@ import { returnToSearch, type ReturnTo } from "@/lib/return-to";
  * `anchorWorkspaceId` (the settings URL's workspace), and the workspace whose
  * model page it is or was opened from, if any (`?workspace=`).
  */
-export type ModelsScope = { anchorWorkspaceId: string; workspaceId?: string | undefined };
+export type ModelsScope = {
+  anchorWorkspaceId: string;
+  workspaceId?: string | undefined;
+};
 
 /* ----------------------------------------------------------------------------
    Shared pieces of Organization settings > Models: provider marks, small
@@ -43,47 +42,9 @@ export function useModelsListLabel(): string {
   return useContext(ModelsListLabelContext);
 }
 
-export type ModelProviderId =
-  | "codex"
-  | "supergrok"
-  | "vercel"
-  | "openrouter"
-  | "anthropic"
-  | "claude_subscription";
-
-function VercelMark(props: SVGProps<SVGSVGElement>) {
-  return (
-    <svg viewBox="0 0 24 24" fill="currentColor" aria-hidden="true" {...props}>
-      <path d="M 12 3.5 22.5 20.5h-21z" />
-    </svg>
-  );
-}
-
-export function ProviderMark({
-  provider,
-  className,
-}: {
-  provider: ModelProviderId;
-  className?: string;
-}) {
-  if (provider === "codex") return <ChatGptMark className={className} />;
-  if (provider === "vercel") return <VercelMark className={className} />;
-  if (provider === "claude_subscription") return <ClaudeMark className={className} />;
-  if (provider === "anthropic") return <AnthropicMark className={className} />;
-  if (provider === "supergrok") return <GrokMark className={className} />;
-  return <OpenRouterMark className={className} />;
-}
-
-/** The provider's logo on the shared tile. Size follows the list or page it sits in. */
-export function ProviderTile({
-  provider,
-  size,
-}: {
-  provider: ModelProviderId;
-  size?: LogoTileSize;
-}) {
-  return <LogoTile size={size} icon={<ProviderMark provider={provider} className="text-fg" />} />;
-}
+// The provider logos live in their own light module so the onboarding model
+// step can show them without the Models page graph.
+export { ProviderMark, ProviderTile, type ModelProviderId } from "./provider-mark";
 
 /**
  * Who an account is for, as the one tag on its row and page: the
@@ -145,7 +106,9 @@ export const NOT_IN_USE = <span className="text-xs font-medium text-fg-subtle">N
 export function ModelsFormPage({
   backLabel,
   ...props
-}: Omit<ComponentProps<typeof FlushFormPage>, "backLabel"> & { backLabel?: string }) {
+}: Omit<ComponentProps<typeof FlushFormPage>, "backLabel"> & {
+  backLabel?: string;
+}) {
   const listLabel = useModelsListLabel();
   return <FlushFormPage backLabel={backLabel ?? listLabel} {...props} />;
 }

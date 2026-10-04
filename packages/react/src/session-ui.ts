@@ -55,7 +55,7 @@ export { QueueSurface } from "./components/queue-surface";
 // The provider too, so a host needs only this entry (the root also exports the
 // workbench, whose editors, terminal and desktop are optional peers).
 export { OpenGeniProvider } from "./provider";
-export type { OpenGeniProviderProps } from "./provider";
+export type { OpenGeniProviderProps, ErrorMessageFormatter } from "./provider";
 // The tool-renderer registry, so custom tool renderers need no root import.
 export { createDefaultToolRegistry, createToolRegistry, defaultToolRegistry } from "./timeline";
 export type {
@@ -70,7 +70,10 @@ export { SessionList } from "./components/session-list";
 export type { SessionListLabels, SessionListProps } from "./components/session-list";
 export { OpenGeniChat } from "./components/open-geni-chat";
 export type { OpenGeniChatLabels, OpenGeniChatProps } from "./components/open-geni-chat";
-export type { SessionConversationProps } from "./components/session-conversation";
+export type {
+  SessionConversationLabels,
+  SessionConversationProps,
+} from "./components/session-conversation";
 export type { QueueSurfaceProps } from "./components/queue-surface";
 export {
   SessionChrome,

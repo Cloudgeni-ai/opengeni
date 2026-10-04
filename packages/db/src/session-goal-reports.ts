@@ -210,18 +210,20 @@ export async function verifyGoalReportDeliveries(
   const recipient =
     turn?.initiatingHumanSubjectId ??
     (turn?.initiatorKind === "subject" ? turn.initiatorSubjectId : null);
-  if (!recipient)
-    throw new Error("Report completion requires a verified initiating human recipient");
   for (const delivery of [...deliveries].sort((a, b) => a.artifactId.localeCompare(b.artifactId))) {
     const artifact = await lockReadableDocument(tx, input, input.actor, delivery.artifactId);
-    const recipientAccess = await transactionallyAuthorizeEditableArtifactActor(tx, {
-      scope: input,
-      artifactId: delivery.artifactId,
-      actor: { kind: "human", subjectId: recipient, replicaId: input.actor.replicaId },
-      permission: "read",
-    });
-    if (!recipientAccess.allowed)
-      throw new Error("Report recipient cannot access the native document");
+    // API-key and service-started turns have no human recipient; the document
+    // stays readable in the workspace, so only check access when one exists.
+    if (recipient) {
+      const recipientAccess = await transactionallyAuthorizeEditableArtifactActor(tx, {
+        scope: input,
+        artifactId: delivery.artifactId,
+        actor: { kind: "human", subjectId: recipient, replicaId: input.actor.replicaId },
+        permission: "read",
+      });
+      if (!recipientAccess.allowed)
+        throw new Error("Report recipient cannot access the native document");
+    }
     const [receipt] = await tx
       .select()
       .from(schema.sessionCommandReceipts)

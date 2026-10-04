@@ -150,6 +150,7 @@ import {
   assertPersonalConnectionOwnerPrincipal,
   isPersonalConnectionOwnerPrincipal,
   requireLegacyOAuthActor,
+  requireProviderConsentInBrowser,
 } from "../connection-ownership";
 import { canonicalProviderDomain } from "../integrations/provider-domain";
 import { externalActorContinuationForAuthorization } from "@opengeni/core";
@@ -207,9 +208,19 @@ export function registerConnectionRoutes(app: Hono, deps: ApiRouteDeps): void {
   app.get("/v1/workspaces/:workspaceId/connections/accounts", async (c) => {
     const workspaceId = c.req.param("workspaceId");
     const grant = await requireAccessGrant(c, deps, workspaceId, "connections:read");
+    const includeInactive = c.req.query("includeInactive");
+    if (
+      includeInactive !== undefined &&
+      includeInactive !== "true" &&
+      includeInactive !== "false"
+    ) {
+      throw new HTTPException(400, { message: "includeInactive must be true or false" });
+    }
     return c.json(
       ListConnectionsResponse.parse({
-        connections: await listOwnConnectionAccountsForGrant(db, grant),
+        connections: await listOwnConnectionAccountsForGrant(db, grant, {
+          includeInactive: includeInactive === "true",
+        }),
       }),
     );
   });
@@ -1032,7 +1043,7 @@ export function registerConnectionRoutes(app: Hono, deps: ApiRouteDeps): void {
             if (!destination.success || !destinationOnlyUpdate) {
               throw new HTTPException(422, {
                 message:
-                  "use the dedicated OpenGeni Slack bot reinstall flow to update this connection",
+                  "use the dedicated Opengeni Slack bot reinstall flow to update this connection",
               });
             }
             const destinationSelection = destination.data;
@@ -1454,6 +1465,7 @@ export function registerConnectionRoutes(app: Hono, deps: ApiRouteDeps): void {
     assertIntegrationsEnabled();
     const workspaceId = c.req.param("workspaceId");
     const access = await requireAccessGrantAuthorization(c, deps, workspaceId, "connections:write");
+    requireProviderConsentInBrowser(access);
     const grant = access.grant;
     const parsed = OAuthStartRequest.safeParse(await c.req.json());
     if (!parsed.success) {
@@ -1483,6 +1495,7 @@ export function registerConnectionRoutes(app: Hono, deps: ApiRouteDeps): void {
     assertIntegrationsEnabled();
     const workspaceId = c.req.param("workspaceId");
     const access = await requireAccessGrantAuthorization(c, deps, workspaceId, "connections:write");
+    requireProviderConsentInBrowser(access);
     const grant = access.grant;
     const parsed = ApiIntegrationOAuthStartRequest.safeParse(await c.req.json());
     if (!parsed.success) {
@@ -1587,7 +1600,7 @@ async function persistOpenGeniSlackBotConnection(input: {
     throw new SlackInstallCallbackError(
       422,
       "connection_conflict",
-      "connectionId is not an OpenGeni Slack bot connection",
+      "connectionId is not an Opengeni Slack bot connection",
       "principal_validation",
     );
   }
@@ -1912,7 +1925,7 @@ function assertBrokeredApiKeyCredential(
 function assertNotReservedSlackBotMetadata(metadata: Record<string, unknown> | undefined): void {
   if (hasReservedOpenGeniSlackBotMetadata(metadata)) {
     throw new HTTPException(422, {
-      message: "OpenGeni Slack bot metadata is reserved for the dedicated connection flow",
+      message: "Opengeni Slack bot metadata is reserved for the dedicated connection flow",
     });
   }
 }

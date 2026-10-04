@@ -4,6 +4,7 @@ import {
   measureInsightsPhase,
   workspaceInsightsPhaseMetricObserver,
   normalizeWorkspaceInsightsFilter,
+  normalizeWorkspaceInsightsSessionScope,
   requireAccessGrant,
   WorkspaceInsightsFilterValidationError,
   type ApiRouteDeps,
@@ -19,7 +20,9 @@ export function normalizeWorkspaceInsightsQueryFilter(
   field: WorkspaceInsightsFilterField,
 ): string | null {
   try {
-    return normalizeWorkspaceInsightsFilter(value, field);
+    return field === "rootSessionId" || field === "sessionId"
+      ? normalizeWorkspaceInsightsSessionScope(value, field)
+      : normalizeWorkspaceInsightsFilter(value, field);
   } catch (error) {
     if (error instanceof WorkspaceInsightsFilterValidationError) {
       throw new HTTPException(400, { message: error.message });
@@ -69,6 +72,8 @@ export function workspaceInsightsCoalesceKey(input: {
   range: string;
   provider: string | null;
   model: string | null;
+  rootSessionId?: string | null;
+  sessionId?: string | null;
   rlsActor: string | null;
 }): string {
   return JSON.stringify([
@@ -76,6 +81,8 @@ export function workspaceInsightsCoalesceKey(input: {
     input.range,
     input.provider,
     input.model,
+    input.rootSessionId ?? null,
+    input.sessionId ?? null,
     input.rlsActor,
   ]);
 }
@@ -89,6 +96,8 @@ export function registerInsightsRoutes(app: Hono, deps: ApiRouteDeps): void {
     const rangeRaw = c.req.query("range") ?? "week";
     const providerRaw = c.req.query("provider");
     const modelRaw = c.req.query("model");
+    const rootSessionIdRaw = c.req.query("rootSessionId");
+    const sessionIdRaw = c.req.query("sessionId");
     let provider: string | null = null;
     let model: string | null = null;
     let outcome = "failed";
@@ -107,6 +116,11 @@ export function registerInsightsRoutes(app: Hono, deps: ApiRouteDeps): void {
       }
       provider = normalizeWorkspaceInsightsQueryFilter(providerRaw, "provider");
       model = normalizeWorkspaceInsightsQueryFilter(modelRaw, "model");
+      const rootSessionId = normalizeWorkspaceInsightsQueryFilter(
+        rootSessionIdRaw,
+        "rootSessionId",
+      );
+      const sessionId = normalizeWorkspaceInsightsQueryFilter(sessionIdRaw, "sessionId");
 
       const response = await coalesce.run(
         workspaceInsightsCoalesceKey({
@@ -114,6 +128,8 @@ export function registerInsightsRoutes(app: Hono, deps: ApiRouteDeps): void {
           range: rangeParsed.data,
           provider,
           model,
+          rootSessionId,
+          sessionId,
           rlsActor: currentSessionRlsActorIdentityKey(),
         }),
         () =>
@@ -125,6 +141,8 @@ export function registerInsightsRoutes(app: Hono, deps: ApiRouteDeps): void {
               range: rangeParsed.data,
               provider,
               model,
+              rootSessionId,
+              sessionId,
             },
             observePhase,
           ),

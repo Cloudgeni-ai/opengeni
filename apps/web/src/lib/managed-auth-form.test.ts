@@ -71,6 +71,26 @@ describe("managed auth form", () => {
     });
   });
 
+  test("explains paused sign-ups and offers sign-in instead", () => {
+    expect(
+      managedAuthFailure(
+        "signup",
+        new AuthApiError(
+          403,
+          "NEW_SIGNUPS_PAUSED",
+          null,
+          "We're at capacity for new accounts right now. Please try again later.",
+        ),
+      ),
+    ).toEqual({
+      fields: {},
+      message:
+        "We're at capacity for new accounts right now. Please try again later. If you already have an account, sign in instead.",
+      switchTo: "signin",
+      canResendVerification: false,
+    });
+  });
+
   test("explains a signup that created an account without a browser session", () => {
     expect(
       managedAuthFailure("signup", new ManagedAuthSessionUnavailableError("signup")),
@@ -88,6 +108,14 @@ describe("managed auth form", () => {
     expect(managedAuthModeFromSearch("?mode=signin")).toBeUndefined();
     expect(managedAuthModeFromSearch("?mode=admin")).toBeUndefined();
     expect(managedAuthModeFromSearch("?mode=signup&mode=signin")).toBeUndefined();
+  });
+
+  test("the /sign-up and /signup paths open Sign up", () => {
+    expect(managedAuthModeFromSearch("", "/sign-up")).toBe("signup");
+    expect(managedAuthModeFromSearch("", "/signup/")).toBe("signup");
+    expect(managedAuthModeFromSearch("?utm_source=producthunt", "/Sign-Up")).toBe("signup");
+    expect(managedAuthModeFromSearch("", "/sign-in")).toBeUndefined();
+    expect(managedAuthModeFromSearch("", "/")).toBeUndefined();
   });
 
   test("recognizes only Better Auth's verification-link failure codes", () => {

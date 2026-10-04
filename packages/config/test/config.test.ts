@@ -326,7 +326,7 @@ describe("browser analytics configuration", () => {
     ).toBe(false);
   });
 
-  test("configured host MCP refs are rejected even with the retired rollout flag", () => {
+  test("configured host MCP refs are rejected", () => {
     const mcpServers = JSON.stringify([
       {
         id: "host-tools",
@@ -341,15 +341,6 @@ describe("browser analytics configuration", () => {
     expect(() => withEnv({ OPENGENI_MCP_SERVERS: mcpServers }, () => getSettings())).toThrow(
       /host-owned connection refs are no longer supported/,
     );
-    expect(() =>
-      withEnv(
-        {
-          OPENGENI_MCP_SERVERS: mcpServers,
-          OPENGENI_HOST_MCP_AUTHORITY_SOURCE_ADMISSION_ENABLED: "true",
-        },
-        () => getSettings(),
-      ),
-    ).toThrow(/host-owned connection refs are no longer supported/);
   });
 
   test("Slack workspace routing defaults on and parses the rollout flag", () => {
@@ -731,6 +722,23 @@ describe("Google Drive integration settings", () => {
   });
 });
 
+describe("managed auth new account sign-up switch", () => {
+  test("defaults open and accepts an explicit pause", () => {
+    expect(withEnv({}, () => getSettings()).managedAuthNewSignupsEnabled).toBe(true);
+    expect(
+      withEnv({ OPENGENI_MANAGED_AUTH_NEW_SIGNUPS_ENABLED: "false" }, () => getSettings())
+        .managedAuthNewSignupsEnabled,
+    ).toBe(false);
+    expect(
+      withEnv({ OPENGENI_MANAGED_AUTH_NEW_SIGNUPS_ENABLED: "true" }, () => getSettings())
+        .managedAuthNewSignupsEnabled,
+    ).toBe(true);
+    expect(() =>
+      withEnv({ OPENGENI_MANAGED_AUTH_NEW_SIGNUPS_ENABLED: "paused" }, () => getSettings()),
+    ).toThrow();
+  });
+});
+
 describe("managed auth browser session-set rollout", () => {
   test("remains default-off and accepts only the rolling compatibility modes", () => {
     expect(withEnv({}, () => getSettings()).managedAuthSessionSetMode).toBe("legacy");
@@ -1029,48 +1037,17 @@ describe("rig verification lease ownership rollout", () => {
   });
 });
 
-describe("canonical organization-tenancy activation opt-out", () => {
-  test("defaults to the reversible pre-activation posture", () => {
-    expect(withEnv({}, () => getSettings()).organizationTenancyCanonicalActivationEnabled).toBe(
-      false,
-    );
-  });
-
-  test("parses an explicit decline and an explicit acceptance without truthy-string coercion", () => {
-    // The whole point of the switch is that an operator can write it out to say
-    // "no". A z.coerce.boolean() field would read "false" as TRUE and activate
-    // the one-way boundary for exactly the operator who tried to decline it.
-    for (const declined of ["false", "0", "no", "off", "FALSE"]) {
-      expect(
-        withEnv({ OPENGENI_ORGANIZATION_TENANCY_CANONICAL_ACTIVATION_ENABLED: declined }, () =>
-          getSettings(),
-        ).organizationTenancyCanonicalActivationEnabled,
-      ).toBe(false);
+describe("retired organization-tenancy activation switch", () => {
+  test("is accepted and ignored for any value so existing deployments keep booting", () => {
+    for (const value of [undefined, "false", "true", "0", "1", "not-a-boolean"]) {
+      const settings = withEnv(
+        value === undefined
+          ? {}
+          : { OPENGENI_ORGANIZATION_TENANCY_CANONICAL_ACTIVATION_ENABLED: value },
+        () => getSettings(),
+      );
+      expect(settings).not.toHaveProperty("organizationTenancyCanonicalActivationEnabled");
     }
-    for (const accepted of ["true", "1", "yes", "on", "TRUE"]) {
-      expect(
-        withEnv({ OPENGENI_ORGANIZATION_TENANCY_CANONICAL_ACTIVATION_ENABLED: accepted }, () =>
-          getSettings(),
-        ).organizationTenancyCanonicalActivationEnabled,
-      ).toBe(true);
-    }
-  });
-
-  test("is independent of every other tenancy-adjacent posture", () => {
-    // Activation must never be inferred from managed product access or the
-    // delegation posture: it is one explicit operator statement.
-    const settings = withEnv(
-      {
-        OPENGENI_ENVIRONMENT: "test",
-        OPENGENI_PRODUCT_ACCESS_MODE: "managed",
-        OPENGENI_PUBLIC_BASE_URL: "https://opengeni.example.com",
-        OPENGENI_BETTER_AUTH_SECRET: "better-auth-secret-value",
-        OPENGENI_DELEGATION_SECRET: "delegation-secret-value",
-      },
-      () => getSettings(),
-    );
-    expect(settings.productAccessMode).toBe("managed");
-    expect(settings.organizationTenancyCanonicalActivationEnabled).toBe(false);
   });
 });
 
@@ -2673,6 +2650,60 @@ describe("sandbox lease cadence vs box idle timeout (sandbox-file-persistence)",
     );
     // Derived strictly between the 150s idle grace and the 250.001s lead.
     expect(shortLived.sandboxIdleCommandContainmentMs).toBe(200_000);
+  });
+
+  test("explicit zero disables idle command containment without changing other lifecycle settings", () => {
+    for (const environment of [
+      {},
+      {
+        OPENGENI_SANDBOX_BACKEND: "modal",
+        OPENGENI_MODAL_TOKEN_ID: "ak",
+        OPENGENI_MODAL_TOKEN_SECRET: "as",
+        OPENGENI_MODAL_TIMEOUT_SECONDS: "300",
+      },
+      {
+        OPENGENI_SANDBOX_BACKEND: "modal",
+        OPENGENI_MODAL_TOKEN_ID: "ak",
+        OPENGENI_MODAL_TOKEN_SECRET: "as",
+        OPENGENI_MODAL_IDLE_TIMEOUT_SECONDS: "1500",
+      },
+    ]) {
+      const baseline = withEnv(environment, () => getSettings());
+      expect(baseline.sandboxIdleCommandContainmentMs).toBeGreaterThan(0);
+      const disabled = withEnv(
+        { ...environment, OPENGENI_SANDBOX_IDLE_COMMAND_CONTAINMENT_MS: "0" },
+        () => getSettings(),
+      );
+      expect(disabled.sandboxIdleCommandContainmentMs).toBeUndefined();
+      expect(disabled).toEqual({ ...baseline, sandboxIdleCommandContainmentMs: undefined });
+    }
+  });
+
+  test("idle command containment treats blank as unset and still rejects invalid windows", () => {
+    expect(
+      withEnv({ OPENGENI_SANDBOX_IDLE_COMMAND_CONTAINMENT_MS: " " }, () => getSettings())
+        .sandboxIdleCommandContainmentMs,
+    ).toBe(1_800_000);
+    for (const value of ["-1", "0.5", "not-a-number", "Infinity"]) {
+      expect(() =>
+        withEnv({ OPENGENI_SANDBOX_IDLE_COMMAND_CONTAINMENT_MS: value }, () => getSettings()),
+      ).toThrow();
+    }
+  });
+
+  test("disabled idle command containment does not bypass provider capture or lifetime validation", () => {
+    const base = {
+      OPENGENI_SANDBOX_BACKEND: "modal",
+      OPENGENI_MODAL_TOKEN_ID: "ak",
+      OPENGENI_MODAL_TOKEN_SECRET: "as",
+      OPENGENI_SANDBOX_IDLE_COMMAND_CONTAINMENT_MS: "0",
+    };
+    expect(() =>
+      withEnv({ ...base, OPENGENI_SANDBOX_ROTATION_LEAD_MS: "250000" }, () => getSettings()),
+    ).toThrow(/must exceed the legacy command stop grace/i);
+    expect(() =>
+      withEnv({ ...base, OPENGENI_MODAL_TIMEOUT_SECONDS: "86401" }, () => getSettings()),
+    ).toThrow(/<=86400/i);
   });
 
   test("an explicit idle command containment window must exceed idle grace and precede the deadline", () => {

@@ -27,6 +27,7 @@ export type AgentPromptModuleId =
   | "workspace_environment"
   | "rig"
   | "artifacts"
+  | "media"
   | "goals"
   | "subagents"
   | "knowledge"

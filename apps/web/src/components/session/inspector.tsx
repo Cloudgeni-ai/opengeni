@@ -1,7 +1,7 @@
 import { useWorkspaceRigs } from "@/lib/use-workspace-rigs";
 import { useWorkspaceMachines } from "@/lib/use-workspace-machines";
 import { StartupTimings, useStartupDetails, setStartupDetails } from "@opengeni/react/session-ui";
-import { buildTimeline } from "@opengeni/react";
+import { buildTimeline, labelReasoningEffort, ModelName } from "@opengeni/react";
 import { PreferenceToggleRow } from "@/components/transcription-settings";
 import {
   SessionStatus as SessionStatusBadge,
@@ -283,8 +283,14 @@ export function SessionInspector(props: {
               </InspectorSection>
 
               <InspectorSection title="Runtime">
-                <InfoRow label="Model" value={props.session.model} />
-                <InfoRow label="Effort" value={props.session.reasoningEffort} />
+                <InfoRow
+                  label="Model"
+                  value={<ModelName model={props.session.model} markClassName="text-fg-muted" />}
+                />
+                <InfoRow
+                  label="Effort"
+                  value={labelReasoningEffort(props.session.reasoningEffort)}
+                />
                 <InfoRow label={computeLabel} value={computeValue} />
                 <InfoRow label="Sandbox Environment" value={props.session.rigId ?? "none"} />
                 <div className="space-y-2 rounded-md border border-border bg-bg/35 p-2">

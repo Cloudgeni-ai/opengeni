@@ -1482,6 +1482,67 @@ describe("buildConnectionTokenResolver", () => {
     }
   });
 
+  test("Slack API bridge keeps exact owner/resource binding and normalizes legacy comma grants", async () => {
+    const credential = brokerCredential({
+      id: "slack-personal",
+      subjectId: "subject-a",
+      providerDomain: "slack.com",
+      kind: "oauth2",
+      credential: {
+        access_token: "slack-user-token",
+        mcp_url: "https://mcp.slack.com/mcp",
+        resource: "https://mcp.slack.com/mcp",
+      },
+      grantedScopes: ["channels:read,channels:history,chat:write"],
+    });
+    const { deps, counts } = resolverDeps({ loadCredential: async () => credential });
+    const resolver = buildConnectionTokenResolver({} as Database, settings, deps);
+    const connectionRef = {
+      connectionId: credential.id,
+      providerDomain: "slack.com",
+      kind: "oauth2" as const,
+      subjectScope: "subject" as const,
+      resource: "https://mcp.slack.com/mcp",
+      scopes: ["channels:history"],
+    };
+    const request = {
+      workspaceId: "ws_1",
+      subjectId: "subject-a",
+      serverId: "slack",
+      destinationUrl: "https://slack.com/api/conversations.history",
+      connectionRef,
+    };
+    await expect(resolver(request)).resolves.toMatchObject({
+      status: "ok",
+      connectionId: "slack-personal",
+      grantedScopes: ["channels:history", "channels:read", "chat:write"],
+    });
+    const used = counts.recordUsed;
+    for (const destinationUrl of [
+      "https://slack.com/api/admin.users.remove",
+      "https://slack.com/api/search.all",
+      "https://slack.com/other",
+      "https://evil.slack.com/api/chat.postMessage",
+      "http://slack.com/api/chat.postMessage",
+      "https://slack.com:444/api/chat.postMessage",
+      "https://attacker@slack.com/api/chat.postMessage",
+    ]) {
+      await expect(resolver({ ...request, destinationUrl })).resolves.toMatchObject({
+        status: "auth_needed",
+      });
+    }
+    await expect(resolver({ ...request, subjectId: "subject-b" })).resolves.toMatchObject({
+      status: "auth_needed",
+    });
+    await expect(
+      resolver({
+        ...request,
+        connectionRef: { ...connectionRef, resource: "https://another.example/mcp" },
+      }),
+    ).resolves.toMatchObject({ status: "auth_needed" });
+    expect(counts.recordUsed).toBe(used);
+  });
+
   test("binds an official Gmail MCP OAuth row to only Gmail REST users/me", async () => {
     const gmailCredential = brokerCredential({
       id: "gmail-connection",

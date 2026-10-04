@@ -239,6 +239,9 @@ jobs:
         with:
           bun-version-file: .bun-version
 
+      - name: Install source interaction dependencies
+        run: bun install --frozen-lockfile
+
       - name: Install the Rust toolchain
         run: |
           rustup toolchain install 1.97.1 --profile minimal --no-self-update
@@ -247,6 +250,7 @@ jobs:
       - name: Bake and sign per-SHA agent binaries
         env:
           OPENGENI_AGENT_MINISIGN_KEY: ${{ secrets.OPENGENI_AGENT_MINISIGN_KEY }}
+          OPENGENI_RUNTIME_BUILD_ID: ${{ inputs.source_sha }}
         run: scripts/bake-agent.sh
 
       - name: Build and push API candidate

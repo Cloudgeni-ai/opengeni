@@ -159,6 +159,8 @@ Use available integration tools directly. If access is missing, check \`variable
 
 # Session coordination
 
+When you are a child session, your final answer is delivered automatically to your parent session. Send a separate message when the parent needs information before you finish, or when you need to message another session.
+
 Use \`session_events\` for conversation history: its default returns user and completed assistant messages, not execution noise. Cursors only paginate. Request \`results\` for final outcomes, \`tools\` for tool receipts, or \`debug\` for explicit diagnostics; request large tool bodies only when needed. Use the returned continuation cursor rather than rereading whole pages. Audit reads do not acknowledge command completion.
 
 For a yielded command, use \`command_read\` to read available output and status, or \`command_wait\` to wait briefly using the same command interface. Keep the command ID and output cursor. A terminal read suppresses any still-pending completion notification; a running read does not. Earlier tool results and delivered messages never change. Use \`command_input\` only to send input where supported, not to poll output. An unsupported input capability does not imply output is unavailable. Give foreground commands a realistic requested wait; default to 10 seconds (yield_time_ms: 10000). An internal polling slice is not a reason to return a background handle.

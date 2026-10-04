@@ -21,7 +21,10 @@ import {
   installModalCommandStartRetention,
   withModalCommandStartSignal,
 } from "../src/sandbox/providers/modal-command-start-errors";
-import { ProviderCommandStartOutcomeUnknownError } from "../src/sandbox/provider-command-session";
+import {
+  ProviderCommandStartOutcomeUnknownError,
+  ProviderCommandObservationUnavailableError,
+} from "../src/sandbox/provider-command-session";
 import { releaseModalCreateFailure } from "../src/sandbox/providers/modal-create-session";
 import {
   ModalCommandRouterWire,
@@ -899,7 +902,7 @@ test("dual manifest and close failure preserves genuine Start uncertainty in bot
   }
 }, 20_000);
 
-test("native capability/control/materialization Starts also contain ambiguous gRPC outcomes", async () => {
+test("native helper lost ACKs stay contained when original invocation cannot be observed", async () => {
   const f = await routerFixture();
   const wire = new ModalCommandRouterWire({ url: f.url, jwt: "test-token" });
   // Use an actual local gRPC transport without TLS; the production wire's
@@ -941,30 +944,55 @@ test("native capability/control/materialization Starts also contain ambiguous gR
   } as const;
   try {
     const capability = await control.verifySupervisionCapability().catch((error) => error);
-    expect(capability).toBeInstanceOf(ModalCommandStartOutcomeUnknownError);
+    expect(capability).toBeInstanceOf(ProviderCommandObservationUnavailableError);
+    expect(capability.command.execId).toBe(f.starts[0]!.execId);
     const controlFailure = await control
       .supervisionControl(command as never, "status")
       .catch((error) => error);
     expect(controlFailure).toBeInstanceOf(ModalCommandStartOutcomeUnknownError);
     const pending = new Set<AbortController>();
-    const probe = await verifyModalMaterializedPath(control, "dir", "/workspace", pending).catch(
-      (error) => error,
-    );
-    expect(isModalCommandStartOutcomeUnknownError(probe)).toBe(true);
-    expect(materializationVerificationDiagnostic(probe)).toMatchObject({ reason: "command_error" });
+    const probe = await verifyModalMaterializedPath(
+      control,
+      "dir",
+      "/workspace",
+      pending,
+      100,
+    ).catch((error) => error);
+    expect(probe.cause).toBeInstanceOf(ProviderCommandObservationUnavailableError);
+    expect(probe.cause.command.execId).toBe(f.starts[2]!.execId);
+    expect(materializationVerificationDiagnostic(probe)).toMatchObject({
+      reason: "command_pending",
+      providerExecution: {
+        sandboxId: "sb-resumed",
+        taskId: "task-setup",
+        execId: f.starts[2]!.execId,
+      },
+    });
     expect(pending.size).toBe(0);
     expect(f.starts).toHaveLength(3);
-    for (const failure of [capability, controlFailure, probe])
-      expect(agentRunFailurePayload(failure)).toMatchObject({
-        code: "sandbox_command_start_outcome_unknown",
-        retryable: false,
-      });
+    expect(controlFailure.execId).toBe(f.starts[1]!.execId);
+    const observedIds = new Set([f.starts[0]!.execId, f.starts[2]!.execId]);
+    expect(f.reads.every((read) => observedIds.has(read.execId))).toBe(true);
+    expect(f.polls.every((poll) => observedIds.has(poll.execId))).toBe(true);
+    expect(agentRunFailurePayload(capability)).toMatchObject({
+      code: "sandbox_command_observation_unavailable",
+      retryable: false,
+    });
+    expect(agentRunFailurePayload(probe)).toMatchObject({
+      code: "sandbox_materialization_verification_failed",
+      retryable: false,
+      materializationDiagnostic: { reason: "command_pending" },
+    });
+    expect(agentRunFailurePayload(controlFailure)).toMatchObject({
+      code: "sandbox_command_start_outcome_unknown",
+      retryable: false,
+    });
   } finally {
     wire.close();
     await control.close();
     f.server.forceShutdown();
   }
-});
+}, 8_000);
 
 test("reconstructed setup succeeds after a proven non-dispatched lookup failure", async () => {
   const f = await routerFixture(false);

@@ -1,180 +1,91 @@
 ---
 title: "Sessions and turns"
-description: "The durable unit of agent work, and how input, streaming, and control fit around it."
+description: "The unit of agent work, and how input, streaming, and control fit around it."
 icon: "comments"
 ---
 
-A **session** is one durable conversation and workstream: its history, policy, visibility, and compute context. Sessions belong to a workspace. Operational session routes use that workspace; an organization-wide inventory can list readable sessions across shared workspaces.
+A **session** is one conversation and workstream: its history, settings, visibility, and compute. Sessions belong to a workspace.
 
-## Three identities
+## Sessions, turns, and attempts
 
-| Identity | Meaning                                                                                                | Lifetime                                             |
-| -------- | ------------------------------------------------------------------------------------------------------ | ---------------------------------------------------- |
-| Session  | Durable conversation, workstream, policy, visibility, and compute context                              | Until deleted                                        |
-| Turn     | One accepted unit of input: a human or API prompt, a machine input, a goal continuation, or a schedule | Until logically settled                              |
-| Attempt  | One physical worker execution of a turn                                                                | Until completion, interruption, loss, or replacement |
+| Identity | Meaning                                                                        |
+| -------- | ------------------------------------------------------------------------------ |
+| Session  | The conversation and its context. Lives until deleted.                         |
+| Turn     | One unit of input: a prompt, a machine input, a goal continuation, a schedule. |
+| Attempt  | One worker execution of a turn. A crashed worker is replaced by a new attempt. |
 
-A new attempt does not imply a new prompt. A new prompt does imply a new turn. This is what lets OpenGeni recover the same logical turn after a worker dies without duplicating external effects.
+A new attempt never means a new prompt, so Opengeni can recover a turn after a worker dies without repeating it.
 
 ## The event log
 
-Every session event is appended to a Postgres event log with a contiguous sequence number. Clients read it two ways:
+Every session event is stored in Postgres with a sequence number. Clients read it two ways:
 
 - **Replay**: fetch events after a sequence.
-- **Stream**: subscribe over Server-Sent Events. The SDK resumes by sequence after a drop, backfills gaps from the replay endpoint, and suppresses duplicates, so a browser reload, a new client, or an audit sees the same history.
+- **Stream**: subscribe over Server-Sent Events. The SDK resumes by sequence after a drop and fills gaps from replay.
 
-Postgres is the source of truth. The realtime bus only fans out what was already durably written.
+A reload, a second client, or an audit all see the same history.
 
 ## Sending input
 
-**Queued** means the next agent turn has not started. The sidebar uses a clock
-for work waiting to run. Inside the session, the start status shows automatic
-retry timing and recorded errors when available. A start request being accepted
-does not mean a worker is executing it. Deliberate agent waits separately show
-their reason and next recheck; running turns and background commands retain
-their own activity indicators.
+- **Send** appends a prompt. If a turn is running, the message queues behind it. Queued messages stay editable and reorderable until they start.
+- **Steer** moves your message to the front and interrupts the running turn.
+- **Pause** and **Resume** hold and release the session.
+- **Cancel** stops the session and its children for good.
 
-- **Send** appends a prompt. If a turn is running, the message queues behind it. Queued messages stay visible, editable, and reorderable until the worker claims them.
-- **Steer** delivers now: it moves your message to the front and interrupts the running turn.
-- **Pause** and **Resume** hold and release the workstream without creating queue items.
-- **Cancel** is terminal. It drains queued work for the session and its children and fences the subtree.
-
-When a session is waiting on you (a tool approval or a structured question), a normal Send replaces that wait with your new prompt.
-
-## Recovering unavailable workspace files
-
-If a managed sandbox's files are unavailable but an earlier checkpoint exists, a signed-in member can review and restore that checkpoint in the same chat. The conversation stays intact; changes made after the checkpoint are lost, and external effects are not undone. The chat explains when recovery is not possible.
+If the session is waiting on you for an approval or a question, Send replaces that wait with your new prompt.
 
 ## Attached context
 
-A session can carry repositories, uploaded files, workspace documents, selected tools, and Skills. Tool selection is durable session state: an explicit tool list is taken verbatim, and omitting it selects the workspace default.
+A session can carry repositories, uploaded files, workspace documents, selected tools, and Skills. If you omit the tool list, the session uses the workspace default.
 
 ## Artifacts
 
-The workspace **Artifacts** page brings together Sites, documents, spreadsheets,
-presentations, images, and published files. Use its type filters, title search,
-sorting, and grid or list view to find an output without reopening its conversation.
-The session's Artifacts panel shows outputs associated with that conversation.
+The workspace **Artifacts** page collects Sites, documents, spreadsheets, presentations, images, and published files, with filters and search. A session's Artifacts panel shows the outputs of that conversation.
 
-Published files are retained in workspace storage. Images, video, audio and PDFs
-can display directly in chat and in the artifact panel. Other file formats offer
-a download. Opening them does not require starting the compute sandbox. A file merely
-created in the filesystem is not published automatically: the agent must publish
-the output it intends to deliver. Input attachments and temporary files do not
-automatically become library entries.
-
-Images have image previews; types without an available static preview show a
-type/title fallback. Opening a Site uses its existing interactive viewer. Small
-inline HTML visualizations can remain in chat; save one as a Site when it should
-also be discoverable in the workspace library.
+The agent publishes the files it means to deliver; files it only writes to disk stay in the sandbox. Images, video, audio, and PDFs preview in chat. Other formats download.
 
 ## Child sessions
 
-An agent can spawn child sessions for parallel or delegated work. Children run as ordinary sessions, and their terminal results are delivered back to the parent as durable input the parent's next turn sees. A finished child's result carries its final answer (up to 8 KiB, with a pointer to the full text when longer), so the parent can use it without reading the child's history. A child costs minutes and its own model context, so agents answer directly when the work is small and reuse an existing child for related follow-ups.
+An agent can spawn child sessions for parallel or delegated work. Children are ordinary sessions. When one finishes, its final answer is delivered to the parent's next turn.
 
 ## Visibility
 
-Workspaces are shared by their members, and sessions in a shared workspace are visible to members by default. An organization owner can allow members to create "Only me" sessions that only their owner can see. Personal workspaces belong to one person.
+Sessions in a shared workspace are visible to its members. An organization owner can let members create **Only me** sessions. Personal workspaces belong to one person.
 
-### Connected accounts
+## Connected accounts
 
-Open **Connectors** in the composer to see the accounts attached to each enabled
-connector. Personal and workspace accounts can be attached together. Account rows
-show a readable identity and whether the connection is **Only me** or **This
-workspace**; use their toggles to narrow which accounts the agent may use.
-Add or connect accounts from the connector's **Capabilities** page, not from the
-chat's account list.
+Open **Connectors** in the composer to choose which connected accounts the agent may use. Each account is marked **Only me** or **This workspace**. Add accounts from the connector's **Capabilities** page.
 
-Connectors configured for one exact account keep that restriction. Account
-selection does not broaden an existing pinned custom integration.
-
-Personal credentials belong to the person sending the message, even in a shared
-session. Another participant cannot inherit those credentials by replying. The
-results of an action in a shared session are still visible to its participants.
-Scheduled tasks use their execution owner's authorized account selections and
-revalidate access for each occurrence.
-
-Each attached account has its own tool route. A missing or revoked account is an
-access failure, not permission to silently switch to another identity. If you
-attach several accounts, name the account or workspace when the intended identity
-is not clear from your request—especially for actions that send or change data.
+Personal accounts belong to whoever sends the message, even in a shared session; other participants can't use them by replying. Scheduled tasks use their owner's accounts. If you attach several accounts, say which one to use for actions that send or change data.
 
 ## Agent access in product integrations
 
-`agentAccess` controls how an agent reaches other session trees within its workspace:
+`agentAccess` controls which other sessions an agent can reach in its workspace:
 
-| Scope       | Agent reach                                                                                    |
-| ----------- | ---------------------------------------------------------------------------------------------- |
-| `session`   | Its own conversation tree, including children                                                  |
-| `user`      | Other trees with the same non-null product/user label, when the target also permits access     |
-| `workspace` | Other trees in the workspace, subject to the target's scope and existing private-session rules |
+| Scope       | Agent reach                                                    |
+| ----------- | -------------------------------------------------------------- |
+| `session`   | Its own session tree, including children                       |
+| `user`      | Other trees with the same product user label, if they allow it |
+| `workspace` | Other trees in the workspace, if they allow it                 |
 
-The more restrictive side wins across trees. Children inherit the parent's scope and can only narrow it. These rules do not make product-created chats invisible to authorized human workspace members or organization API keys. The product backend must still authorize each user's requests.
+The stricter side wins, and children can only narrow their parent's scope. This does not hide sessions from workspace members; your backend still authorizes each user's requests.
 
-The session proxy and chat API default to private chats with `agentAccess: "session"` (`chats: "shared"` uses `"workspace"`), while raw session creation defaults to `"workspace"`. An integration can separately choose where the agent saves [Knowledge](/concepts/memory-and-knowledge). Access scope and memory are frozen when a conversation is created; reopening the same conversation does not reconfigure them. See [Users, tenants & privacy](/integrate/users-and-tenants#choose-who-shares-chats).
+The chat API defaults to private chats with `agentAccess: "session"` (`chats: "shared"` uses `"workspace"`). Raw session creation defaults to `"workspace"`. Access and [Knowledge](/concepts/memory-and-knowledge) scope are set when a conversation is created. See [Users, tenants & privacy](/integrate/users-and-tenants#choose-who-shares-chats).
 
 ## Browsing and archiving
 
-The session sidebar initially shows four workstreams in each project or creator
-group. **Show 4 more** reveals the next small batch in that group without expanding
-other groups. The last batch shows only the remaining sessions; the open chat
-stays visible even when it is outside the initial four. Scrolling does not reveal
-more rows or load older pages.
+The sidebar groups sessions by project or creator. **Active** hides archived sessions; **All** shows them in a collapsed **Archived** folder. Archiving offers **Undo** for a few seconds, and you can restore later from **Archived**.
 
-**Active** hides archived sessions. **All** puts them in a separate, collapsed
-**Archived** folder at the bottom, never mixed into their original project or
-creator groups. Choosing **Archived** opens that folder on its own. Restoring a
-session returns it to its original project.
+## Model settings
 
-After you archive a chat, the bottom-right notification offers **Undo** for eight
-seconds. You can also restore it later from **Archived**, which lists the most
-recently archived sessions first, regardless of when they last had activity.
+Follow-ups without an explicit choice reuse the model, reasoning effort, and speed of the latest turn. Child sessions inherit the parent's model and reasoning effort but start at **Standard** speed.
 
-## Model inheritance
-
-Follow-ups without an explicit selection, voice requests and voice-end handoffs
-use the model, reasoning effort and speed from the latest turn that started.
-Session labels and fresh message drafts use those settings too. Before any turn
-starts, the initial session settings apply. Existing drafts, queued messages and
-historical turns retain their own settings.
-
-## Codex subscription source
-
-Workspace model settings let you connect Codex subscriptions even when the
-workspace inherits organization subscriptions. **Automatic** uses workspace
-subscriptions when connected, otherwise the organization's subscriptions.
-**This workspace only** and **Organization only** select one source explicitly;
-they do not combine the two pools.
-
-You can change this setting while work is in progress. New work uses the selected
-source; already-accepted turns keep their original source, including while
-recovering, awaiting an action, or waiting for capacity. Connecting an account
-does not change your selected mode: **Organization only** stays selected, and
-**Turn off Codex** stays off for new work.
+**Codex subscription source** in workspace model settings picks between workspace and organization subscriptions. **Automatic** prefers the workspace's own. A change applies to new work only.
 
 ## Voice input
 
-In workspace settings, **Voice input** lets you select the default transcription
-provider alongside its payment source. **Automatic** follows the deployment
-priority. This choice is separate from the chat model.
-
-**Automatic transcription fallback** tries another configured provider when the
-preferred one is unavailable or rejects access; that provider’s billing applies.
-Timeouts and recordings already partly transcribed stay with their original
-provider. Turn fallback off to use only your selected provider.
-
-Your recording remains saved while transcription retries. A recovered transcript
-appears as **Insert saved transcript**, so you can review it before sending.
+**Voice input** in workspace settings sets the default transcription provider. **Automatic transcription fallback** tries another configured provider when the preferred one fails; that provider's billing applies. Your recording is kept while transcription retries.
 
 ## Fast code search
 
-When your deployment offers it, **Fast code search** in workspace settings gives
-agents a `code_search` tool. The agent asks one question with a few likely
-names and gets back the most relevant source passages with file paths and line
-numbers, instead of running many separate searches and file reads. It is
-fastest and cheapest for questions about a codebase, such as where a setting is
-stored or how a feature works. Choose **On**, **Off**, or **Default** to follow
-your deployment. A new choice applies to sessions created after it, so a
-running session keeps a stable prompt. **Off** also pauses the tool in running
-sessions from their next turn; switching back restores it in sessions that had
-it.
+When your deployment offers it, **Fast code search** in workspace settings gives agents a `code_search` tool that returns the most relevant source passages for a question about a codebase, in one call. It applies to sessions created after you turn it on.

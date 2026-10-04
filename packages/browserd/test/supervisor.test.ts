@@ -1,6 +1,6 @@
-import { describe, expect, test } from "bun:test";
+import { describe, expect, spyOn, test } from "bun:test";
 import { createHash, randomUUID } from "node:crypto";
-import { mkdtemp, readFile, rm, stat, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, rename, rm, stat, symlink, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import type {
   BrowserActionCommand,
@@ -16,7 +16,15 @@ import {
   type BrowserStateUploadAuthority,
   type BrowserSupervisorDriver,
   type BrowserSupervisorDriverContext,
+  type BrowserDownloadStore,
+  type SqliteBrowserProtectedAuthJournal,
+  type SqliteBrowserStateTransferJournal,
 } from "../src";
+import {
+  SqliteBrowserWorkingRuntimeJournal,
+  type BrowserWorkingRuntimeReceipt,
+} from "../src/working-runtime-journal";
+import type { SqliteInteractionOperationJournal } from "../src/operation-journal";
 
 describe("BrowserSupervisor", () => {
   test("protects creation and pending shutdown even when active inventory is empty", async () => {
@@ -1465,4 +1473,576 @@ function canonicalValue(value: unknown): unknown {
       .sort()
       .map((key) => [key, canonicalValue(input[key])]),
   );
+}
+
+const workingAuthority = {
+  tokenGeneration: 1,
+  placementDigest: "a".repeat(64),
+  controlDigest: "b".repeat(64),
+  viewDigest: "c".repeat(64),
+};
+
+describe("same-working-directory controller restart", () => {
+  test.each(["live", "exited"] as const)(
+    "completed %s receipt preserves exact directory and never replays an accepted action",
+    async (processState) => {
+      await withWorkingCrashFixture(
+        async ({ options, action, rootDirectory, socketRootDirectory }) => {
+          let drivers = 0,
+            dispatches = 0;
+          const contexts: BrowserSupervisorDriverContext[] = [];
+          const supervisor = await BrowserSupervisor.open({
+            rootDirectory,
+            socketRootDirectory,
+            inspectOwnedProcess: async () => processState,
+            createDriver: async (context) => {
+              drivers++;
+              contexts.push(context);
+              const driver = fakeDriver(context, {
+                dispatch: () => {
+                  dispatches++;
+                },
+              });
+              return {
+                ...driver,
+                ownedProcessIdentity: async () => syntheticOwnedProcess(context),
+              };
+            },
+          });
+          try {
+            const result = await supervisor.createSession({
+              ...options,
+              recoverExistingWorkingDirectory: true,
+            });
+            expect(result.browserSessionId === options.browserSessionId).toBe(true);
+            expect(result.controllerGeneration === options.controllerGeneration).toBe(true);
+            expect(drivers).toBe(1);
+            expect(
+              contexts[0]?.recoverOwnedProcess?.profileDirectory === contexts[0]?.profileDirectory,
+            ).toBe(true);
+            expect(contexts[0]?.restoredProfile).toBe(false);
+            expect(result.observation.target.url).toBe("about:blank");
+            const receipt = await supervisor.action(action);
+            expect(receipt.state).toBe("outcome_unknown");
+            expect(dispatches).toBe(0);
+            expect((await supervisor.action(action)).state).toBe("outcome_unknown");
+            expect(dispatches).toBe(0);
+          } finally {
+            await supervisor.close();
+          }
+        },
+      );
+    },
+  );
+
+  test.each([
+    "missing",
+    "symlink",
+    "replaced",
+    "generation",
+    "token",
+    "placement",
+    "headed",
+    "unknown",
+    "no-proof",
+  ] as const)(
+    "%s recovery evidence denies before driver creation and preserves the directory",
+    async (kind) => {
+      await withWorkingCrashFixture(async ({ options, rootDirectory, socketRootDirectory }) => {
+        const sessionDirectory = join(rootDirectory, "sessions", options.browserSessionId);
+        const profile = join(sessionDirectory, "profile");
+        if (kind === "missing") await rm(profile, { recursive: true });
+        if (kind === "symlink") {
+          const target = join(rootDirectory, "synthetic-profile");
+          await mkdir(target);
+          await rm(profile, { recursive: true });
+          await symlink(target, profile);
+        }
+        if (kind === "replaced") {
+          await rename(profile, `${profile}.original`);
+          await mkdir(profile);
+        }
+        if (kind === "unknown" || kind === "no-proof") {
+          const journal = await SqliteBrowserWorkingRuntimeJournal.open({
+            ...options,
+            sessionDirectory,
+          });
+          const previous = journal.latest()!;
+          const claim = journal.begin({ ...previous, process: null });
+          if (kind === "no-proof") journal.complete(claim, null);
+          journal.close();
+        }
+        let drivers = 0;
+        const supervisor = await BrowserSupervisor.open({
+          rootDirectory,
+          socketRootDirectory,
+          inspectOwnedProcess: async () => "live",
+          createDriver: async (context) => {
+            drivers++;
+            return fakeDriver(context);
+          },
+        });
+        const requested = {
+          ...options,
+          recoverExistingWorkingDirectory: true as const,
+          ...(kind === "generation" ? { controllerGeneration: "different-generation" } : {}),
+          ...(kind === "headed" ? { headed: true } : {}),
+          workingRuntimeAuthority: {
+            ...workingAuthority,
+            ...(kind === "token" ? { tokenGeneration: 2 } : {}),
+            ...(kind === "placement" ? { placementDigest: "d".repeat(64) } : {}),
+          },
+        };
+        try {
+          const before = await readFile(join(sessionDirectory, "working-runtime.sqlite"));
+          await expect(supervisor.createSession(requested)).rejects.toThrow("preserved");
+          expect(drivers).toBe(0);
+          expect(
+            (await readFile(join(sessionDirectory, "working-runtime.sqlite"))).equals(before),
+          ).toBe(true);
+          expect(supervisor.listSessions()).toEqual([]);
+          if (kind === "missing") expect(await exists(profile)).toBe(false);
+        } finally {
+          await supervisor.close();
+        }
+      });
+    },
+  );
+
+  test.each(["unknown-process", "headless-exit", "unadmitted-create"] as const)(
+    "%s cannot turn a completed receipt into a new launch",
+    async (kind) => {
+      await withWorkingCrashFixture(async ({ options, rootDirectory, socketRootDirectory }) => {
+        let drivers = 0;
+        const supervisor = await BrowserSupervisor.open({
+          rootDirectory,
+          socketRootDirectory,
+          inspectOwnedProcess: async () => {
+            if (kind === "unknown-process") throw new Error("synthetic unproven identity");
+            return "exited";
+          },
+          createDriver: async (context) => {
+            drivers++;
+            return fakeDriver(context);
+          },
+        });
+        try {
+          await expect(
+            supervisor.createSession({
+              ...options,
+              ...(kind === "unadmitted-create" ? {} : { recoverExistingWorkingDirectory: true }),
+            }),
+          ).rejects.toThrow("preserved");
+          expect(drivers).toBe(0);
+        } finally {
+          await supervisor.close();
+        }
+      }, kind === "headless-exit");
+    },
+  );
+
+  test("failed accepted reattach detaches transport, preserves owned Chrome, and leaves dispatch unknown", async () => {
+    await withWorkingCrashFixture(async ({ options, rootDirectory, socketRootDirectory }) => {
+      let closes = 0,
+        detaches = 0,
+        drivers = 0;
+      const supervisor = await BrowserSupervisor.open({
+        rootDirectory,
+        socketRootDirectory,
+        inspectOwnedProcess: async () => "live",
+        createDriver: async (context) => {
+          drivers++;
+          return {
+            ...fakeDriver(context),
+            async start() {
+              throw new Error("synthetic accepted transport disappeared");
+            },
+            async close() {
+              closes++;
+            },
+            async detach() {
+              detaches++;
+            },
+          };
+        },
+      });
+      try {
+        await expect(
+          supervisor.createSession({ ...options, recoverExistingWorkingDirectory: true }),
+        ).rejects.toThrow();
+        const journal = await SqliteBrowserWorkingRuntimeJournal.open(
+          {
+            ...options,
+            sessionDirectory: join(rootDirectory, "sessions", options.browserSessionId),
+          },
+          true,
+        );
+        try {
+          expect(journal.latest()?.state).toBe("dispatched");
+        } finally {
+          journal.close();
+        }
+        await expect(
+          supervisor.createSession({ ...options, recoverExistingWorkingDirectory: true }),
+        ).rejects.toThrow("preserved");
+        await expect(supervisor.endSession(options)).rejects.toThrow("preserved");
+        expect({ closes, detaches, drivers }).toEqual({ closes: 0, detaches: 1, drivers: 1 });
+      } finally {
+        await supervisor.close();
+      }
+    });
+  });
+
+  test("startup preserves durable owned/unknown histories; explicit close retires exactly that directory", async () => {
+    await withWorkingCrashFixture(async ({ options, rootDirectory, socketRootDirectory }) => {
+      const sessionDirectory = join(rootDirectory, "sessions", options.browserSessionId);
+      // Invalid PID sidecar proves startup never enters the destructive reaper
+      // for this durable history. No real process/browser is probed or killed.
+      await writeFile(join(sessionDirectory, "browser.pid"), "invalid");
+      const startup = await BrowserSupervisor.open({ rootDirectory, socketRootDirectory });
+      await startup.close();
+      expect(await readFile(join(sessionDirectory, "browser.pid"), "utf8")).toBe("invalid");
+      let closed = 0;
+      const supervisor = await BrowserSupervisor.open({
+        rootDirectory,
+        socketRootDirectory,
+        inspectOwnedProcess: async () => "live",
+        createDriver: async (context) => ({
+          ...fakeDriver(context),
+          ownedProcessIdentity: async () => syntheticOwnedProcess(context),
+          async close() {
+            closed++;
+          },
+        }),
+      });
+      await supervisor.createSession({ ...options, recoverExistingWorkingDirectory: true });
+      await supervisor.endSession(options);
+      expect(closed).toBe(1);
+      const journal = await SqliteBrowserWorkingRuntimeJournal.open(
+        { ...options, sessionDirectory },
+        true,
+      );
+      try {
+        expect(journal.latest()?.intent).toBe("retire");
+        expect(journal.latest()?.state).toBe("completed");
+      } finally {
+        journal.close();
+      }
+      await expect(
+        supervisor.createSession({ ...options, recoverExistingWorkingDirectory: true }),
+      ).rejects.toThrow("preserved");
+      expect(closed).toBe(1);
+      await supervisor.close();
+      // Unrelated old directories still pass through existing bounded cleanup.
+      await rm(join(sessionDirectory, "working-runtime.sqlite"));
+      await expect(BrowserSupervisor.open({ rootDirectory, socketRootDirectory })).rejects.toThrow(
+        "PID is invalid",
+      );
+    });
+  });
+
+  test("failed retirement start preserves the live process and exact cleanup holder before any close", async () => {
+    await withWorkingCrashFixture(
+      async ({ options, action, rootDirectory, socketRootDirectory }) => {
+        let closes = 0;
+        const supervisor = await BrowserSupervisor.open({
+          rootDirectory,
+          socketRootDirectory,
+          inspectOwnedProcess: async () => "live",
+          createDriver: async (context) => ({
+            ...fakeDriver(context),
+            ownedProcessIdentity: async () => syntheticOwnedProcess(context),
+            async close() {
+              closes++;
+            },
+          }),
+        });
+        await supervisor.createSession({ ...options, recoverExistingWorkingDirectory: true });
+        const sessions = (
+          supervisor as unknown as {
+            sessions: Map<
+              string,
+              {
+                lifecycle: string;
+                sessionDirectory: string;
+                driver: BrowserSupervisorDriver;
+                workingJournal: SqliteBrowserWorkingRuntimeJournal;
+                workingReceipt: BrowserWorkingRuntimeReceipt;
+                journal: SqliteBrowserOperationJournal;
+                protectedAuthJournal: SqliteBrowserProtectedAuthJournal;
+                stateJournal: SqliteBrowserStateTransferJournal;
+                downloadStore: BrowserDownloadStore;
+              }
+            >;
+          }
+        ).sessions;
+        const runtime = sessions.get(options.browserSessionId)!;
+        const directory = await stat(runtime.sessionDirectory);
+        const originalReceipt = runtime.workingReceipt;
+        const journal = (
+          runtime.workingJournal as unknown as {
+            journal: SqliteInteractionOperationJournal<BrowserWorkingRuntimeReceipt>;
+          }
+        ).journal;
+        const originalWrite = journal.write.bind(journal);
+        const failure = new Error("synthetic retirement dispatch persistence failure");
+        const write = spyOn(journal, "write").mockImplementationOnce((record) => {
+          expect(record.receipt.intent).toBe("retire");
+          expect(record.receipt.state).toBe("prepared");
+          originalWrite(record);
+          throw failure;
+        });
+        const workingClose = spyOn(runtime.workingJournal, "close");
+        const actionClose = spyOn(runtime.journal, "close");
+        const authClose = spyOn(runtime.protectedAuthJournal, "close");
+        const stateClose = spyOn(runtime.stateJournal, "close");
+        const downloadClose = spyOn(runtime.downloadStore, "close");
+        const interrupt = spyOn(runtime.downloadStore, "interruptInProgress");
+        const dispatch = spyOn(runtime.driver, "dispatch");
+        try {
+          const rejected = await supervisor
+            .endSession(options, { removeState: true })
+            .catch((error) => error);
+          expect(rejected).toBe(failure);
+          expect(closes).toBe(0);
+          expect(
+            [workingClose, actionClose, authClose, stateClose, downloadClose, interrupt].map(
+              (spy) => spy.mock.calls.length,
+            ),
+          ).toEqual([0, 0, 0, 0, 0, 0]);
+          expect(sessions.get(options.browserSessionId)).toBe(runtime);
+          expect(runtime.lifecycle).toBe("ending");
+          expect(runtime.workingReceipt).toBe(originalReceipt);
+          expect(supervisor.isIdle()).toBe(false);
+          const retained = await stat(runtime.sessionDirectory);
+          expect([retained.dev, retained.ino]).toEqual([directory.dev, directory.ino]);
+          const partial = runtime.workingJournal.latest()!;
+          expect(partial.intent).toBe("retire");
+          expect(partial.state).toBe("prepared");
+          await expect(
+            supervisor.action({ ...action, operationId: randomUUID() }),
+          ).rejects.toThrow();
+          expect(dispatch).not.toHaveBeenCalled();
+          expect(runtime.workingJournal.latest()).toEqual(partial);
+          await supervisor.endSession(options, { removeState: true });
+          expect(closes).toBe(1);
+          expect(runtime.workingReceipt.intent).toBe("retire");
+          expect(runtime.workingReceipt.state).toBe("completed");
+          expect(sessions.has(options.browserSessionId)).toBe(false);
+          expect(await exists(runtime.sessionDirectory)).toBe(false);
+        } finally {
+          for (const spy of [
+            write,
+            workingClose,
+            actionClose,
+            authClose,
+            stateClose,
+            downloadClose,
+            interrupt,
+            dispatch,
+          ])
+            spy.mockRestore();
+          await supervisor.close();
+        }
+      },
+    );
+  });
+
+  test("retirement persistence failure settles other stores and preserves exact cleanup retry", async () => {
+    await withWorkingCrashFixture(async ({ options, rootDirectory, socketRootDirectory }) => {
+      let closes = 0;
+      const supervisor = await BrowserSupervisor.open({
+        rootDirectory,
+        socketRootDirectory,
+        inspectOwnedProcess: async () => "live",
+        createDriver: async (context) => ({
+          ...fakeDriver(context),
+          ownedProcessIdentity: async () => syntheticOwnedProcess(context),
+          async close() {
+            closes++;
+          },
+        }),
+      });
+      await supervisor.createSession({ ...options, recoverExistingWorkingDirectory: true });
+      const sessions = (
+        supervisor as unknown as {
+          sessions: Map<
+            string,
+            {
+              sessionDirectory: string;
+              workingJournal: SqliteBrowserWorkingRuntimeJournal;
+              workingReceipt: BrowserWorkingRuntimeReceipt | null;
+              journal: SqliteBrowserOperationJournal;
+              protectedAuthJournal: SqliteBrowserProtectedAuthJournal;
+              stateJournal: SqliteBrowserStateTransferJournal;
+              downloadStore: BrowserDownloadStore | null;
+            }
+          >;
+        }
+      ).sessions;
+      const runtime = sessions.get(options.browserSessionId)!;
+      const directoryIdentity = await stat(runtime.sessionDirectory);
+      const failure = new Error("synthetic retirement persistence failure");
+      const complete = spyOn(runtime.workingJournal, "complete").mockImplementationOnce(() => {
+        expect(closes).toBe(1);
+        throw failure;
+      });
+      const workingClose = spyOn(runtime.workingJournal, "close");
+      const actionClose = spyOn(runtime.journal, "close");
+      const authClose = spyOn(runtime.protectedAuthJournal, "close");
+      const stateClose = spyOn(runtime.stateJournal, "close");
+      const downloadClose = spyOn(runtime.downloadStore!, "close");
+      try {
+        const rejected = await supervisor
+          .endSession(options, { removeState: true })
+          .catch((error) => error);
+        expect({
+          action: actionClose.mock.calls.length,
+          auth: authClose.mock.calls.length,
+          state: stateClose.mock.calls.length,
+          download: downloadClose.mock.calls.length,
+        }).toEqual({ action: 1, auth: 1, state: 1, download: 1 });
+        expect(rejected).toBeInstanceOf(AggregateError);
+        expect((rejected as AggregateError).errors).toEqual([failure]);
+        expect(workingClose).not.toHaveBeenCalled();
+        expect(runtime.downloadStore).toBeNull();
+        expect(sessions.get(options.browserSessionId)).toBe(runtime);
+        expect(supervisor.isIdle()).toBe(false);
+        const retainedDirectory = await stat(runtime.sessionDirectory);
+        expect([retainedDirectory.dev, retainedDirectory.ino]).toEqual([
+          directoryIdentity.dev,
+          directoryIdentity.ino,
+        ]);
+        const retirement = runtime.workingJournal.latest()!;
+        expect(retirement.intent).toBe("retire");
+        expect(retirement.state).toBe("dispatched");
+        expect(runtime.workingReceipt?.operationId).toBe(retirement.operationId);
+
+        await supervisor.endSession(options, { removeState: true });
+        expect(closes).toBe(2);
+        expect(complete).toHaveBeenCalledTimes(2);
+        expect(runtime.workingReceipt?.operationId).toBe(retirement.operationId);
+        expect(runtime.workingReceipt?.state).toBe("completed");
+        expect(workingClose).toHaveBeenCalledTimes(1);
+        expect(sessions.has(options.browserSessionId)).toBe(false);
+        expect(supervisor.isIdle()).toBe(true);
+        expect(await exists(runtime.sessionDirectory)).toBe(false);
+      } finally {
+        for (const spy of [
+          complete,
+          workingClose,
+          actionClose,
+          authClose,
+          stateClose,
+          downloadClose,
+        ])
+          spy.mockRestore();
+        await supervisor.close();
+      }
+    });
+  });
+
+  test("an unconfirmed explicit close keeps retirement dispatched; exact retry alone may complete it", async () => {
+    await withWorkingCrashFixture(async ({ options, rootDirectory, socketRootDirectory }) => {
+      let closes = 0;
+      const supervisor = await BrowserSupervisor.open({
+        rootDirectory,
+        socketRootDirectory,
+        inspectOwnedProcess: async () => "live",
+        createDriver: async (context) => ({
+          ...fakeDriver(context),
+          ownedProcessIdentity: async () => syntheticOwnedProcess(context),
+          async close() {
+            closes++;
+            if (closes === 1) throw new Error("synthetic unconfirmed close");
+          },
+        }),
+      });
+      const latest = async () => {
+        const reader = await SqliteBrowserWorkingRuntimeJournal.open(
+          {
+            ...options,
+            sessionDirectory: join(rootDirectory, "sessions", options.browserSessionId),
+          },
+          true,
+        );
+        try {
+          const receipt = reader.latest()!;
+          return { operationId: receipt.operationId, intent: receipt.intent, state: receipt.state };
+        } finally {
+          reader.close();
+        }
+      };
+      try {
+        await supervisor.createSession({ ...options, recoverExistingWorkingDirectory: true });
+        await expect(supervisor.endSession(options)).rejects.toThrow("cleanup");
+        const before = await latest();
+        expect(before.intent).toBe("retire");
+        expect(before.state).toBe("dispatched");
+        expect(closes).toBe(1);
+        await supervisor.endSession(options);
+        const after = await latest();
+        expect(after.operationId === before.operationId).toBe(true);
+        expect(after.intent).toBe("retire");
+        expect(after.state).toBe("completed");
+        expect(closes).toBe(2);
+        await expect(supervisor.endSession(options)).rejects.toThrow("preserved");
+        expect(closes).toBe(2);
+      } finally {
+        await supervisor.close();
+      }
+    });
+  });
+});
+
+function syntheticOwnedProcess(context: BrowserSupervisorDriverContext) {
+  return {
+    pid: 2001,
+    birth: "synthetic-process-birth",
+    executablePath: "/synthetic/chrome",
+    profileDirectory: context.profileDirectory,
+    cdpEndpoint: "ws://127.0.0.1:12345/devtools/browser/11111111-1111-4111-8111-111111111111",
+  };
+}
+
+async function withWorkingCrashFixture(
+  fn: (fixture: {
+    options: Parameters<BrowserSupervisor["createSession"]>[0];
+    action: BrowserActionCommand;
+    rootDirectory: string;
+    socketRootDirectory: string;
+  }) => Promise<void>,
+  headlessCookieAdjunct = false,
+) {
+  const directory = await mkdtemp("/tmp/ogw-");
+  const rootDirectory = join(directory, "state"),
+    socketRootDirectory = join(directory, "sockets");
+  const options = { ...reference(95), headed: false, workingRuntimeAuthority: workingAuthority };
+  const childPath = join(directory, "synthetic-controller.ts");
+  const script = `import {randomUUID} from "node:crypto";
+    import {BrowserSupervisor} from ${JSON.stringify(new URL("../src/supervisor.ts", import.meta.url).href)};
+    const fakeDriver=${fakeDriver.toString()}; const command=${command.toString()};
+    const syntheticOwnedProcess=${syntheticOwnedProcess.toString()};
+    let dispatched; const ready=new Promise(resolve=>{dispatched=resolve});
+    const supervisor=await BrowserSupervisor.open({rootDirectory:${JSON.stringify(rootDirectory)},socketRootDirectory:${JSON.stringify(socketRootDirectory)},
+      createDriver:async context=>({...fakeDriver(context,{requiresExplicitProfileRestore:${headlessCookieAdjunct},dispatch:async()=>{dispatched();await new Promise(()=>{})}}),ownedProcessIdentity:async()=>syntheticOwnedProcess(context)})});
+    const result=await supervisor.createSession(${JSON.stringify(options)});
+    const action=command(result.observation); void supervisor.action(action); await ready;
+    console.log(JSON.stringify({created:true,action})); process.exit(0);`;
+  await writeFile(childPath, script, { mode: 0o600 });
+  try {
+    const child = Bun.spawn([process.execPath, childPath], { stdout: "pipe", stderr: "pipe" });
+    const [stdout, stderr, exitCode] = await Promise.all([
+      new Response(child.stdout).text(),
+      new Response(child.stderr).text(),
+      child.exited,
+    ]);
+    expect(exitCode).toBe(0);
+    expect(stderr).toBe("");
+    const result = JSON.parse(stdout) as { created: boolean; action: BrowserActionCommand };
+    expect(result.created).toBe(true);
+    await fn({ options, action: result.action, rootDirectory, socketRootDirectory });
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
 }

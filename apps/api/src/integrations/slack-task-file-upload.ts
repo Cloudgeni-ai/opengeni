@@ -123,7 +123,7 @@ export async function uploadSlackTaskFile(
     if (!hasOpenGeniSlackFileUploadScope(connection.grantedScopes)) {
       throw new HTTPException(422, {
         message:
-          "A Slack administrator must apply the OpenGeni bot manifest and reinstall the bot to grant files:write. A personal Slack connection is not needed.",
+          "A Slack administrator must apply the Opengeni bot manifest and reinstall the bot to grant files:write. A personal Slack connection is not needed.",
       });
     }
     if (!deps.objectStorage)

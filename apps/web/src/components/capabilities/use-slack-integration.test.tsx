@@ -288,6 +288,69 @@ test("a sibling installation cannot hide the local bot's reconnect action", asyn
 });
 
 describe("useSlackIntegration model selection and gating", () => {
+  test("personal Slack access describes supported reads without promising workspace search", async () => {
+    const rendered = await renderAdapter({
+      permissions: ["sessions:create"],
+      connections: [personalConnection()],
+      bindings: [],
+    });
+    try {
+      expect(rendered.model.access?.items.map((item) => item.name)).toEqual([
+        "Channels and DMs your Slack account can access",
+        "Send messages as you",
+      ]);
+      expect(rendered.model.access?.items[1]?.meta).toBe(
+        "workspace-wide message search is unavailable",
+      );
+      expect(JSON.stringify(rendered.model.access)).not.toContain("Everything");
+    } finally {
+      await rendered.unmount();
+    }
+  });
+
+  test("a newer shared Slack row does not hide the viewer's own account", async () => {
+    const own = personalConnection();
+    const shared = {
+      ...personalConnection(),
+      id: "66666666-6666-4666-8666-666666666666",
+      subjectId: null,
+      updatedAt: "2099-10-02T00:00:00.000Z",
+      createdAt: "2099-10-02T00:00:00.000Z",
+    };
+    const rendered = await renderAdapter({
+      permissions: ["sessions:create"],
+      connections: [shared, own],
+      bindings: [],
+    });
+    try {
+      expect(rendered.model.connection.find((fact) => fact.label === "Available to")?.value).toBe(
+        "Only me",
+      );
+      expect(rendered.model.connection.some((fact) => fact.label === "Your account")).toBe(true);
+      expect(rendered.model.connection.some((fact) => fact.label === "Shared account")).toBe(false);
+    } finally {
+      await rendered.unmount();
+    }
+  });
+
+  test("the personal Slack page never uses a stale coworker or another workspace account", async () => {
+    const rendered = await renderAdapter({
+      permissions: ["sessions:create"],
+      connections: [
+        { ...personalConnection(), subjectId: "subject-b" },
+        { ...personalConnection(), workspaceId: "99999999-9999-4999-8999-999999999999" },
+      ],
+      bindings: [],
+    });
+    try {
+      expect(rendered.model.chip.label).toBe("Not connected");
+      expect(rendered.model.connection.some((fact) => fact.label === "Your account")).toBe(false);
+      expect(rendered.model.access).toBeUndefined();
+    } finally {
+      await rendered.unmount();
+    }
+  });
+
   test("admin with an installed bot manages every option", async () => {
     const { bot, binding } = installedBot();
     const rendered = await renderAdapter({
@@ -299,6 +362,10 @@ describe("useSlackIntegration model selection and gating", () => {
       const { model } = rendered;
       expect(model.chip.label).toBe("Connected");
       expect(model.footer.kind).toBe("connected");
+      expect(model.access?.items.some((item) => item.name === "All public channels")).toBe(false);
+      expect(
+        model.access?.items.some((item) => item.name === "Conversations Opengeni has joined"),
+      ).toBe(true);
       const reaction = optionById(model, "slack-reaction") as IntegrationToggleOption;
       expect(reaction.disabled).toBeFalsy();
       expect(reaction.action?.label).toBe("Choose where it works");

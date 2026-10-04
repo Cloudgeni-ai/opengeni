@@ -56,6 +56,7 @@ describe("organization settings access", () => {
         "developer",
         "general",
         "identity",
+        "insights",
         "integrations",
         "models",
         "people",

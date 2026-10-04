@@ -1,0 +1,83 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta name="robots" content="noindex" />
+    <title>Checkout complete · Opengeni</title>
+    <link rel="icon" href="/favicon.svg" type="image/svg+xml" />
+    <style>
+      :root {
+        color-scheme: light dark;
+        font-family: Inter, ui-sans-serif, system-ui, sans-serif;
+        --bg: #ffffff;
+        --surface: #ffffff;
+        --border: #dedede;
+        --fg: #242424;
+        --muted: #5f5f5f;
+        --teal: #9fe3d359;
+        --peach: #ffb78752;
+      }
+      @media (prefers-color-scheme: dark) {
+        :root {
+          --bg: #202020;
+          --surface: #333333;
+          --border: #454545;
+          --fg: #e6e6e6;
+          --muted: #b8b8b8;
+          --teal: #79d9c125;
+          --peach: #ffb78724;
+        }
+      }
+      body {
+        margin: 0;
+        min-height: 100vh;
+        display: grid;
+        place-items: center;
+        padding: 24px;
+        box-sizing: border-box;
+        color: var(--fg);
+        background:
+          radial-gradient(ellipse 42% 70% at 0 20%, var(--teal), transparent 95%),
+          radial-gradient(ellipse 42% 65% at 0 100%, var(--peach), transparent 95%), var(--bg);
+      }
+      main {
+        box-sizing: border-box;
+        width: min(420px, 100%);
+        border: 1px solid var(--border);
+        border-radius: 12px;
+        background: var(--surface);
+        padding: 28px;
+      }
+      h1 {
+        margin: 0;
+        font-size: 18px;
+        font-weight: 600;
+      }
+      p {
+        margin: 8px 0 0;
+        font-size: 14px;
+        line-height: 1.5;
+        color: var(--muted);
+      }
+    </style>
+  </head>
+  <body>
+    <main>
+      <h1 id="title">You're all set</h1>
+      <p id="body">
+        Go back to your Opengeni tab. Your credits show up there in a few seconds. You can close
+        this tab.
+      </p>
+    </main>
+    <script>
+      if (new URLSearchParams(location.search).get("checkout") === "cancelled") {
+        document.getElementById("title").textContent = "Checkout cancelled";
+        document.getElementById("body").textContent =
+          "Nothing was charged. Go back to your Opengeni tab to continue. You can close this tab.";
+      }
+      // Opengeni opened this tab for checkout, so the browser lets it close itself.
+      setTimeout(() => window.close(), 1500);
+    </script>
+  </body>
+</html>

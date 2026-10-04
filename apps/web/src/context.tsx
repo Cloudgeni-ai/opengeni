@@ -51,6 +51,7 @@ import {
   fetchAuthSession,
   fetchClientConfig,
   checkDeploymentRevision,
+  mountApiUpdateNotice,
   getStoredAccessKey,
   setStoredAccessKey,
   signInEmail,
@@ -167,6 +168,10 @@ import type {
   UpdateWorkspaceSettingsRequest,
   Workspace,
 } from "@/types";
+import {
+  clearPendingDeveloperSetup,
+  pendingDeveloperSetupFor,
+} from "@/lib/pending-developer-setup";
 
 const AnalyticsManager = lazy(() =>
   import("@/components/analytics-consent").then((module) => ({
@@ -177,6 +182,11 @@ const AnalyticsManager = lazy(() =>
 const OrganizationOnboardingPanel = lazy(() =>
   import("@/components/organization-onboarding-panel").then((module) => ({
     default: module.OrganizationOnboardingPanel,
+  })),
+);
+const ResumedDeveloperSetup = lazy(() =>
+  import("@/components/organization-onboarding-panel").then((module) => ({
+    default: module.ResumedDeveloperSetup,
   })),
 );
 
@@ -587,7 +597,7 @@ export function useOptionalAppContext(): AppContextValue | null {
 export function useAppContext(): AppContextValue {
   const value = useContext(AppContext);
   if (!value) {
-    throw new Error("OpenGeni app context is not ready");
+    throw new Error("Opengeni app context is not ready");
   }
   return value;
 }
@@ -732,6 +742,14 @@ export function RootRouteComponent() {
   const keyAuthRequired =
     clientConfig?.auth.mode === "deploymentKey" || clientConfig?.auth.mode === "configuredToken";
   const managedAuthRequired = clientConfig?.auth.mode === "managedSession";
+  // "Add AI agents to my product" left its developer setup step unfinished
+  // (reload, closed tab, another device): show it again until it is done.
+  const [developerSetupRevision, setDeveloperSetupRevision] = useState(0);
+  const pendingDeveloperSetup = useMemo(
+    () => (managedAuthRequired ? pendingDeveloperSetupFor(authSession?.user.email ?? null) : null),
+    // oxlint-disable-next-line react-hooks/exhaustive-deps -- re-read after the step finishes
+    [managedAuthRequired, authSession?.user.email, developerSetupRevision],
+  );
   const browserAccountsConfigured =
     managedAuthRequired && clientConfig?.managedAuthSessionSetMode !== "legacy";
   const browserAccountsEnabled = browserAccountsConfigured && managedAuthBootstrapComplete;
@@ -741,6 +759,11 @@ export function RootRouteComponent() {
       : true;
   const managedSocialProviders =
     clientConfig?.auth.mode === "managedSession" ? (clientConfig.auth.socialProviders ?? []) : [];
+  // An older API omits the field; only an explicit false pauses account creation.
+  const managedNewSignupsEnabled =
+    clientConfig?.auth.mode === "managedSession"
+      ? clientConfig.auth.newSignupsEnabled !== false
+      : true;
   const keyAuthReady = !keyAuthRequired || hasAccessKey;
   const managedAuthReady = !managedAuthRequired || Boolean(authSession);
   const authReady = keyAuthReady && managedAuthReady;
@@ -2503,6 +2526,17 @@ export function RootRouteComponent() {
     () => setAccessKeyVersion((version) => version + 1),
     [],
   );
+  // Onboarding may finish in a chat it opened (developer setup); go there
+  // while access revalidates, so the app opens on that chat.
+  const completeOrganizationOnboarding = useCallback(
+    (destination?: { workspaceId: string; sessionId: string }) => {
+      if (destination) {
+        void navigate({ to: "/workspaces/$workspaceId/sessions/$sessionId", params: destination });
+      }
+      revalidatePrincipalAccess();
+    },
+    [navigate, revalidatePrincipalAccess],
+  );
   async function refreshPrincipalAccess(): Promise<boolean> {
     if (!clientConfig || !authReady) return false;
     let acceptedPrincipal = principalTransitionIdentity.current;
@@ -2839,6 +2873,7 @@ export function RootRouteComponent() {
                   presentation="embedded"
                   onSubmit={async (_mode, input) => await handleManagedSessionSetSignup(input)}
                   emailVerificationRequired={managedEmailVerificationRequired}
+                  newSignupsEnabled={managedNewSignupsEnabled}
                 />
               ) : undefined
             }
@@ -2851,6 +2886,7 @@ export function RootRouteComponent() {
             onDismissInvitation={clearOrganizationInvitationContinuation}
             onSubmit={handleManagedAuth}
             emailVerificationRequired={managedEmailVerificationRequired}
+            newSignupsEnabled={managedNewSignupsEnabled}
             socialProviders={managedSocialProviders}
             onSocialSubmit={handleManagedSocialAuth}
           />
@@ -2909,7 +2945,7 @@ export function RootRouteComponent() {
         modelDefaults={clientConfig}
         activeEmail={authSession?.user.email ?? null}
         invitation={organizationInvitationContinuation}
-        onComplete={revalidatePrincipalAccess}
+        onComplete={completeOrganizationOnboarding}
       />
     ) : (
       <Suspense fallback={<LoadingPanel />}>
@@ -2929,7 +2965,7 @@ export function RootRouteComponent() {
             );
           }}
           onSignOut={handleManagedSignOut}
-          onComplete={revalidatePrincipalAccess}
+          onComplete={completeOrganizationOnboarding}
         />
       </Suspense>
     )
@@ -2940,6 +2976,24 @@ export function RootRouteComponent() {
       title="No workspace access"
       description="You don't have access to any workspace yet."
     />
+  ) : pendingDeveloperSetup &&
+    accessContext?.accountGrants.some(
+      (grant) => grant.accountId === pendingDeveloperSetup.organizationId,
+    ) ? (
+    <Suspense fallback={<LoadingPanel />}>
+      <ResumedDeveloperSetup
+        client={client}
+        organizationId={pendingDeveloperSetup.organizationId}
+        organizationName={pendingDeveloperSetup.organizationName}
+        activeEmail={authSession?.user.email ?? null}
+        onSignOut={handleManagedSignOut}
+        onComplete={(destination) => {
+          clearPendingDeveloperSetup();
+          setDeveloperSetupRevision((revision) => revision + 1);
+          completeOrganizationOnboarding(destination);
+        }}
+      />
+    </Suspense>
   ) : (
     <AppContext.Provider value={appContext}>
       <Outlet />
@@ -2988,6 +3042,7 @@ export function RootRouteComponent() {
     // main grow past the viewport when a child mis-owned scroll.
     <main className="flex h-dvh max-h-dvh flex-col overflow-hidden bg-bg text-fg">
       <Toaster />
+      <div ref={mountApiUpdateNotice} className="shrink-0" />
       <SignInCallbackNotice
         userId={authSession?.user.id ?? null}
         verificationLinkError={

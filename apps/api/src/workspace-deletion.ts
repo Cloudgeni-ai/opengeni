@@ -28,6 +28,15 @@ export async function deleteWorkspaceForRequest(
     if (state === "P0002") {
       throw new HTTPException(404, { message: "workspace not found" });
     }
+    if (state === "23503") {
+      // Retention and linked-record FKs are intentional deletion boundaries.
+      // The failed transaction has rolled back: do not erase history, retry
+      // the cascade, or dispatch any external schedule cleanup.
+      throw new HTTPException(409, {
+        message:
+          "workspace deletion is blocked by retained or linked records; keep the workspace, revoke access, and disable scheduled work instead",
+      });
+    }
     throw error;
   }
 

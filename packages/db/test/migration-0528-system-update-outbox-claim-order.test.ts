@@ -77,6 +77,7 @@ async function childResult(parent: Parent, childId: string) {
     personalConnectionDelegations: [],
     mcpAccountBindings: [],
     xaiProviderAccountAuthoritySnapshot: { version: 1, scope: "workspace" },
+    claudeProviderAccountAuthoritySnapshot: { version: 1, scope: "workspace" },
   });
 }
 

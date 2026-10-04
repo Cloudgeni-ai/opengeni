@@ -85,6 +85,7 @@ const MARKERS: Record<string, RegExp> = {
   admin:
     /variable_set_list|capability_catalog_search|custom_mcp_setup_request|rig_propose_change|rig_get|Variable Set/u,
   skills: /# Using skills|Skill index/u,
+  media: /# Images and video|generate_image|generate_video|image_generation/u,
   sandbox: /apply_patch|exec_command|rg --files|mktemp|sandbox:\/workspace/u,
 };
 
@@ -131,6 +132,7 @@ describe("modular composer: module selection (AC12)", () => {
     ["knowledge", "knowledge"],
     ["subagents", "subagents"],
     ["artifacts", "artifacts"],
+    ["media", "media"],
     ["workspaceAdmin", "admin"],
   ];
   for (const [capability, marker] of capabilityCases) {
@@ -180,6 +182,26 @@ describe("modular composer: module selection (AC12)", () => {
       ).toMatch(MARKERS[marker]!);
     });
   }
+
+  test("background-command guidance needs a sandbox or Connected Machine", () => {
+    for (const capabilities of [allAgentCapabilities(), noneAgentCapabilities()]) {
+      const detached = compose(capabilities, NO_RESOURCES).composed;
+      expect(detached).not.toContain("## Background commands");
+      expect(detached).not.toContain("command_wait");
+      expect(detached).not.toContain("command_read");
+      expect(detached).not.toContain("a command");
+      expect(detached).toContain("`wait_for_input`");
+      for (const resources of [
+        { ...NO_RESOURCES, managedSandbox: true },
+        { ...NO_RESOURCES, connectedMachine: true },
+      ]) {
+        const attached = compose(capabilities, resources).composed;
+        expect(attached).toContain("## Background commands");
+        expect(attached).toContain("`command_read`");
+        expect(attached).toContain("`command_wait`");
+      }
+    }
+  });
 
   test("sandbox guidance appears for a Connected Machine alone", () => {
     const result = compose(allAgentCapabilities(), { ...NO_RESOURCES, connectedMachine: true });

@@ -419,22 +419,76 @@ async function installApi(page: Page, state: ReturnType<typeof fixtures>) {
       };
       return json(state.session);
     }
-    if (path === `/v1/workspaces/${workspaceId}/sessions`)
+    if (path === `/v1/workspaces/${workspaceId}/sessions`) {
+      const params = new URL(request.url()).searchParams;
+      const rows =
+        state.enableCreate && !state.created
+          ? []
+          : [
+              state.session,
+              {
+                ...state.session,
+                id: otherSessionId,
+                rootSessionId: otherSessionId,
+                title: "Unloaded other session",
+              },
+            ];
+      const needsYou = (row: (typeof rows)[number]) =>
+        row.status === "requires_action" || row.status === "failed";
+      const needsYouOnly = params.get("needsYouOnly") === "true";
+      const pinsOnly = params.get("pinsOnly") === "true";
+      const archiveStatus = params.get("archiveStatus") ?? "active";
+      const filtered = needsYouOnly ? rows.filter(needsYou) : rows;
+      // All fixture roots are unarchived and unpinned. Global pin metadata
+      // remains complete when ordinary browse rows are filtered or absent.
+      const measured = pinsOnly ? rows : archiveStatus === "archived" ? [] : filtered;
       return json({
         sessions:
-          state.enableCreate && !state.created
+          pinsOnly ||
+          archiveStatus === "archived" ||
+          (params.has("parentSessionId") && params.get("parentSessionId") !== "null")
             ? []
-            : [
-                state.session,
-                { ...state.session, id: otherSessionId, title: "Unloaded other session" },
-              ],
+            : filtered,
         pinned: [],
         pinnedTruncated: false,
         nextCursor: null,
         filtersApplied: true,
-        sortBy: new URL(request.url()).searchParams.get("sortBy") ?? "updated",
-        archiveStatus: new URL(request.url()).searchParams.get("archiveStatus") ?? "active",
+        sortBy: params.get("sortBy") ?? "updatedAt",
+        archiveStatus,
+        ...(needsYouOnly ? { needsYouOnly: true } : {}),
+        ...(params.get("includeTotals") === "true"
+          ? {
+              totals: {
+                needsYouCount: rows.filter(needsYou).length,
+                groups: measured.length
+                  ? [
+                      {
+                        channelId: null,
+                        total: measured.length,
+                        attention: measured.filter((row) => row.status === "requires_action")
+                          .length,
+                        attentionSince: null,
+                        failed: 0,
+                        active: measured.filter(
+                          (row) =>
+                            row.effectiveControl.state !== "paused" &&
+                            (row.status === "running" || row.status === "recovering"),
+                        ).length,
+                        queued: measured.filter(
+                          (row) =>
+                            row.effectiveControl.state !== "paused" &&
+                            (row.status === "queued" || row.status === "waiting_capacity"),
+                        ).length,
+                        unread: 0,
+                        activeWork: 0,
+                      },
+                    ]
+                  : [],
+              },
+            }
+          : {}),
       });
+    }
     if (
       path === `/v1/workspaces/${workspaceId}/sessions/${otherSessionId}` ||
       path === `/v1/workspaces/${workspaceId}/sessions/${otherSessionId}/events`
@@ -1027,7 +1081,8 @@ for (const width of [1280, 390]) {
         } else await page.goto(`${base}/workspaces/${workspaceId}/sessions/${sessionId}`);
         await transcript.getByText("History question 5000", { exact: true }).waitFor();
         if (origin === "created") {
-          await page.getByRole("button", { name: "Find in conversation", exact: true }).click();
+          // Ctrl/Cmd+F opens Find at every width (phones keep the button in "…").
+          await page.keyboard.press("Control+f");
           await page
             .getByRole("searchbox", { name: "Find in conversation", exact: true })
             .fill("History question 4000");
@@ -1658,10 +1713,14 @@ test("a mounted tab refreshes a changed deployment while retaining its URL, draf
   }
 }, 45_000);
 
-for (const mismatch of ["header", "config"] as const) {
-  test(`contract ${mismatch} reload preserves a draft started during the update notice`, async () => {
+for (const [mismatch, width] of [
+  ["header", 1280],
+  ["config", 1280],
+  ["header", 390],
+] as const) {
+  test(`contract ${mismatch} notice preserves controls and drafts at ${width}px`, async () => {
     const context = await browser.newContext({
-      viewport: { width: 1280, height: 900 },
+      viewport: { width, height: 900 },
       reducedMotion: "reduce",
     });
     const page = await context.newPage();
@@ -1678,14 +1737,22 @@ for (const mismatch of ["header", "config"] as const) {
     });
     await installApi(page, state);
     const pin = gate();
+    const pinWrites: boolean[] = [];
     await page.route(
       `${base}/v1/workspaces/${workspaceId}/sessions/${sessionId}/pin`,
       async (route) => {
+        const request = route.request().postDataJSON() as { pinned: boolean };
+        pinWrites.push(request.pinned);
         await pin.wait();
+        Object.assign(state.session, {
+          pinned: request.pinned,
+          pinVersion: pinWrites.length,
+          pinnedAt: request.pinned ? state.session.updatedAt : null,
+        });
         return route.fulfill({
           contentType: "application/json",
           headers: { "x-opengeni-api-contract": OPENGENI_API_CONTRACT_REVISION },
-          body: JSON.stringify({ ...state.session, pinned: true, pinVersion: 1 }),
+          body: JSON.stringify(state.session),
         });
       },
     );
@@ -1746,12 +1813,45 @@ for (const mismatch of ["header", "config"] as const) {
       assert.equal(documents, 1, "A contract update must preserve an existing draft");
       assert.equal(await input.count(), 1, "The stock provider must keep the draft mounted");
       assert.equal(await input.inputValue(), "Preserve the existing draft.");
-      const pinButton = page
+      const notice = page.locator("#opengeni-api-update-notice");
+      await notice.waitFor();
+      const noticeBounds = await notice.boundingBox();
+      const headerBounds = await page.locator("header").boundingBox();
+      const inputBounds = await input.boundingBox();
+      assert(noticeBounds && headerBounds && inputBounds);
+      assert(
+        noticeBounds.y + noticeBounds.height <= headerBounds.y,
+        "The update notice must reserve space above the header controls",
+      );
+      assert(
+        inputBounds.y >= headerBounds.y + headerBounds.height &&
+          inputBounds.y + inputBounds.height <= 900,
+        "The notice must leave the composer within the viewport",
+      );
+      assert.equal(
+        await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth),
+        true,
+        "The notice must not introduce horizontal overflow",
+      );
+      await page.screenshot({
+        path: `${output}/contract-${mismatch}-${width}-notice-controls.png`,
+      });
+      // Phones pin from the header's "…" menu; wider headers keep the button.
+      const phone = width < 640;
+      const moreButton = page
         .locator("header")
-        .getByRole("button", { name: "Pin session", exact: true });
-      await pinButton.focus();
-      await pinButton.press("Enter");
+        .getByRole("button", { name: "More session actions", exact: true });
+      if (phone) {
+        await moreButton.click();
+        await page.getByRole("menuitem", { name: "Pin", exact: true }).click();
+      } else {
+        await page
+          .locator("header")
+          .getByRole("button", { name: "Pin session", exact: true })
+          .click();
+      }
       await pin.entered;
+      assert.deepEqual(pinWrites, [true], "A real pointer click must reach the save exactly once");
       await input.fill("");
       await page.clock.runFor(1_000);
       await check();
@@ -1768,6 +1868,23 @@ for (const mismatch of ["header", "config"] as const) {
       pin.release();
       await pinned;
       await page.clock.runFor(1_000);
+      const unpinButton = phone
+        ? page.getByRole("menuitem", { name: "Unpin", exact: true })
+        : page.locator("header").getByRole("button", { name: "Unpin session", exact: true });
+      if (phone) {
+        await moreButton.focus();
+        await moreButton.press("Enter");
+        await unpinButton.waitFor();
+      }
+      await unpinButton.focus();
+      const unpinned = page.waitForResponse((response) =>
+        response.url().endsWith(`/${sessionId}/pin`),
+      );
+      await unpinButton.press("Enter");
+      await unpinned;
+      assert.deepEqual(pinWrites, [true, false], "Keyboard activation must reach the second save");
+      assert.equal(await input.inputValue(), "Preserve while the save settles.");
+      assert.equal(documents, 1, "The notice and both saves must leave the draft mounted");
       setContract(OPENGENI_API_CONTRACT_REVISION);
       await page.clock.runFor(1_000);
       await input.fill("");
@@ -1784,7 +1901,9 @@ for (const mismatch of ["header", "config"] as const) {
         await page.evaluate((storageKey) => sessionStorage.getItem(storageKey), key),
         null,
       );
-      await page.screenshot({ path: `${output}/contract-${mismatch}-draft-protected.png` });
+      await page.screenshot({
+        path: `${output}/contract-${mismatch}-${width}-draft-protected.png`,
+      });
       setContract(OPENGENI_API_CONTRACT_REVISION);
       await page.clock.runFor(1_000);
       await input.fill("");

@@ -1,4 +1,5 @@
 import type { CodexAccount } from "@opengeni/sdk";
+import { SubscriptionAccountRow } from "./subscription-account-ui";
 import { BuildingIcon, CheckIcon, CopyIcon, PencilIcon, UnplugIcon } from "lucide-react";
 import { useEffect, useRef, useState, type ReactNode } from "react";
 import { toast } from "sonner";
@@ -45,7 +46,6 @@ import { EmptyState } from "@/components/ui/empty-state";
 import { ErrorMessage } from "@/components/ui/error-message";
 import { FieldStack } from "@/components/ui/field";
 import { ListRow, ListRowSkeleton, RowList, type RowListColumn } from "@/components/ui/list-row";
-import { MetaChip } from "@/components/ui/meta-chip";
 import { Notice } from "@/components/ui/notice";
 import { formatAbsoluteTime, RelativeTime } from "@/components/ui/relative-time";
 import { SegmentedControl } from "@/components/ui/segmented-control";
@@ -716,10 +716,11 @@ function CodexRow({
   const loadingUsage = codex.refreshingUsage && !live;
   const organizationAccount = account.source === "organization";
   return (
-    <ListRow
-      leading={<ProviderTile provider="codex" size="lg" />}
+    <SubscriptionAccountRow
+      provider="codex"
       title={codexAccountName(account)}
-      titleAddon={primary ? <MetaChip variant="outline">Primary</MetaChip> : null}
+      email={account.email}
+      primary={primary}
       meta={[
         scopeLabel ?? (organizationAccount ? places.scope.organization : places.scope.workspace),
         planLabel(account.plan, "ChatGPT"),

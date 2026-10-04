@@ -1,4 +1,5 @@
 import { deriveSessionDisplayTitle, type Session } from "@opengeni/sdk";
+import { modelDisplayName } from "@opengeni/sdk/model-display";
 import { cn } from "../lib/cn";
 import { formatRelativeTime } from "../lib/format";
 import { SessionStatus } from "./session-status";
@@ -67,7 +68,7 @@ export function FleetTile({ session, title, subtitle, onOpen, className }: Fleet
       <span className="mt-auto flex w-full items-center gap-2 text-og-xs text-og-fg-subtle">
         <span className="font-og-mono">{session.id.slice(0, 8)}</span>
         <span aria-hidden>·</span>
-        <span className="truncate">{session.model}</span>
+        <span className="truncate">{modelDisplayName(session.model)}</span>
         <span className="ml-auto shrink-0" title={session.updatedAt}>
           {formatRelativeTime(session.updatedAt)}
         </span>

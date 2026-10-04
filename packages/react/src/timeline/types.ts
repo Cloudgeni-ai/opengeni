@@ -229,7 +229,11 @@ export type StartupPhaseItem = {
   durationMs: number | null;
   /** Sandbox origin and rig marker outcomes refine the settled label only. */
   outcome: "created" | "restored" | "resumed" | "skipped" | null;
-  blockedReason?: "rotation_in_progress" | undefined;
+  blockedReason?:
+    | "capture_in_progress"
+    | "rotation_in_progress"
+    | "provider_recovery_in_progress"
+    | undefined;
   occurredAt: string;
 };
 
@@ -582,6 +586,12 @@ export type TimelineGroup =
         responseStartedAt?: string;
         waiting?: { label: string; since: string };
         details: TimelineGroup[];
+        /**
+         * While the turn is live, its progress notes stay readable above the
+         * work row and are also listed in `details`. These are their item ids,
+         * so an expanded work disclosure can fold the outside copies away.
+         */
+        liveNoteIds?: string[];
       };
     }
   | {

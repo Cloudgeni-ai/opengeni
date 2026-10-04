@@ -62,7 +62,7 @@ export async function createGatewayRealtimeConnectionSecret(input: {
     throw new GatewayRealtimeBrokerError(
       "credential_unavailable",
       resolved.source === "managed"
-        ? "OpenGeni Gateway voice is not configured"
+        ? "Opengeni Gateway voice is not configured"
         : "The workspace AI Gateway connection is unavailable",
     );
   }

@@ -20,6 +20,7 @@ function emptyModelBundle(): WorkspaceInsightsModelBundle {
     factBuckets: new Map(),
     rootDrivers: [],
     priorRootDrivers: [],
+    projects: [],
     scheduleFacts: [],
     facets: [],
     recentCalls: [],
@@ -30,6 +31,11 @@ function emptyModelBundle(): WorkspaceInsightsModelBundle {
       totalCalls: 0,
       sources: [],
     },
+    dataThrough: null,
+    driverGroups: 0,
+    driversTruncated: false,
+    facetsTruncated: false,
+    recentCallsTruncated: false,
   };
 }
 
@@ -59,6 +65,10 @@ describe("getWorkspaceInsights", () => {
       name: "Acme",
     } as never);
     restores.push(() => requireWorkspace.mockRestore());
+    const scopeAccess = spyOn(opengeniDb, "getSessionAccessProjection").mockImplementation(
+      async (_db, _workspaceId, sessionId) => ({ sessionId }) as never,
+    );
+    restores.push(() => scopeAccess.mockRestore());
 
     const modelBundle = spyOn(opengeniDb, "readWorkspaceInsightsModelBundle").mockResolvedValue(
       emptyModelBundle(),
@@ -212,6 +222,45 @@ describe("getWorkspaceInsights", () => {
     expect(requireWorkspace).not.toHaveBeenCalled();
   });
 
+  test("passes session scope to the model bundle and marks the snapshot filtered", async () => {
+    const { modelBundle, usageBundle } = stubEmptyWorkspace();
+    const root = "44444444-4444-4444-8444-444444444444";
+    const { snapshot } = await getWorkspaceInsights(
+      db,
+      testSettings({ sandboxSelfhostedEnabled: false }),
+      {
+        workspaceId: WORKSPACE,
+        range: "week",
+        rootSessionId: ` ${root.toUpperCase()} `,
+        sessionId: "all",
+        now: new Date("2026-07-15T12:00:00.000Z"),
+      },
+    );
+    expect(modelBundle.mock.calls[0]?.[1]).toMatchObject({
+      rootSessionId: root,
+      sessionId: null,
+    });
+    expect(usageBundle.mock.calls[0]?.[1]).not.toHaveProperty("rootSessionId", root);
+    expect(snapshot.scope).toEqual({ rootSessionId: root, sessionId: null });
+    expect(snapshot.modelFilterActive).toBe(true);
+    expect(snapshot.cacheHitPct).toBe(0);
+    expect(snapshot.dataThrough).toBeNull();
+  });
+
+  test("rejects malformed session scope before storage", async () => {
+    const { requireWorkspace } = stubEmptyWorkspace();
+    for (const field of ["rootSessionId", "sessionId"] as const) {
+      await expect(
+        getWorkspaceInsights(db, testSettings({ sandboxSelfhostedEnabled: false }), {
+          workspaceId: WORKSPACE,
+          range: "week",
+          [field]: "not-a-uuid",
+        }),
+      ).rejects.toMatchObject({ field });
+    }
+    expect(requireWorkspace).not.toHaveBeenCalled();
+  });
+
   test("uses UTC-month model.tokens and agent_run.created for caps", async () => {
     const { usageBundle } = stubEmptyWorkspace();
     usageBundle.mockResolvedValue({
@@ -324,6 +373,7 @@ describe("getWorkspaceInsights", () => {
       expect(snapshot.recentCalls).toEqual([]);
       expect(snapshot.workspaceCreditUsd).toBe(0);
       expect(snapshot.creditUsd).toBe(0);
+      expect(snapshot.priorCacheInputTokens).toBe(0);
 
       const bundleInput = modelBundle.mock.calls.at(-1)?.[1];
       expect(bundleInput?.since.toISOString()).toBe(now.toISOString());
@@ -524,6 +574,94 @@ describe("getWorkspaceInsights", () => {
     expect(snapshot.floor[0]?.title).toBe("Agent 22222222");
     expect(snapshot.recentCalls[0]?.sessionTitle).toBe("Agent 22222222");
     expect(snapshot.deepestSessionTitle).toBe("Agent 22222222");
+  });
+
+  test("labels project rows and keeps their credit and cache figures exact", async () => {
+    const { modelBundle } = stubEmptyWorkspace();
+    const row = {
+      rootSessions: 1,
+      calls: 2,
+      totalTokens: 100,
+      cachedTokens: 30,
+      cacheInputTokens: 60,
+      pricedCostMicros: 1_250_000,
+      estimatedProviderCostMicros: 0,
+      estimatedProviderCostKnownCalls: 0,
+    };
+    modelBundle.mockResolvedValue({
+      ...emptyModelBundle(),
+      projects: [
+        {
+          ...row,
+          kind: "project",
+          channelId: "44444444-4444-4444-8444-444444444444",
+          name: "Billing",
+          projects: 1,
+        },
+        {
+          ...row,
+          kind: "project",
+          channelId: "55555555-5555-4555-8555-555555555555",
+          name: "  ",
+          projects: 1,
+        },
+        { ...row, kind: "other", channelId: null, name: null, projects: 3 },
+        { ...row, kind: "unfiled", channelId: null, name: null, projects: 1, cacheInputTokens: 0 },
+        { ...row, kind: "unavailable", channelId: null, name: null, projects: 1 },
+      ],
+    });
+    const { snapshot } = await getWorkspaceInsights(
+      db,
+      testSettings({ sandboxSelfhostedEnabled: false }),
+      { workspaceId: WORKSPACE, range: "today", now: new Date("2026-08-26T08:00:00.000Z") },
+    );
+
+    expect(snapshot.projects.map((project) => [project.id, project.label])).toEqual([
+      ["project:44444444-4444-4444-8444-444444444444", "Billing"],
+      ["project:55555555-5555-4555-8555-555555555555", "Untitled project"],
+      ["other", "3 other projects"],
+      ["unfiled", "No project"],
+      ["unavailable", "Root session not visible"],
+    ]);
+    expect(snapshot.projects[0]).toMatchObject({ creditUsd: 1.25, cacheHitPct: 50, calls: 2 });
+    expect(snapshot.projects[3]?.cacheHitPct).toBe(0);
+  });
+
+  test("exposes the prior cache denominator separately from total input", async () => {
+    const { modelBundle } = stubEmptyWorkspace();
+    modelBundle.mockResolvedValue({
+      ...emptyModelBundle(),
+      priorModelRows: [
+        {
+          provider: "openai",
+          model: "model",
+          billingPath: "external",
+          calls: 2,
+          inputTokens: 1000,
+          outputTokens: 0,
+          cachedTokens: 100,
+          cacheInputTokens: 200,
+          cacheWriteTokens: 0,
+          reasoningTokens: 0,
+          totalTokens: 1000,
+          tokenKnownCalls: 2,
+          cacheKnownCalls: 1,
+          pricedCostMicros: 0,
+          estimatedProviderCostMicros: 0,
+          estimatedProviderCostKnownCalls: 0,
+          equivalentCreditCostMicros: 0,
+          equivalentCreditCostKnownCalls: 0,
+        },
+      ],
+    });
+    const { snapshot } = await getWorkspaceInsights(
+      db,
+      testSettings({ sandboxSelfhostedEnabled: false }),
+      { workspaceId: WORKSPACE, range: "week", now: new Date("2026-10-03T10:00:00.000Z") },
+    );
+    expect(snapshot.priorInputTokens).toBe(1000);
+    expect(snapshot.priorCacheInputTokens).toBe(200);
+    expect(snapshot.priorCacheHitPct).toBe(50);
   });
 });
 

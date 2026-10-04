@@ -7,6 +7,7 @@ export const BundledSkillId = z.enum([
   "builtin:document-parsing",
   "builtin:opengeni-skills",
   "builtin:opengeni-projects",
+  "builtin:opengeni-schedules",
   "builtin:opengeni-documents",
   "builtin:opengeni-spreadsheets",
   "builtin:opengeni-presentations",
@@ -29,6 +30,19 @@ export function resolveBundledSkillSelection(
   if (parent !== undefined && selected?.some((id) => !parent.includes(id)))
     throw new Error("A child cannot widen its parent's bundled Skill selection");
   return selected === undefined ? undefined : BundledSkillSelection.parse(selected);
+}
+
+/**
+ * Freeze the defaults a session's agent configuration implies. An agent that
+ * starts from `capabilities: "none"` carries no bundled Opengeni guides unless
+ * the request lists them; an explicit list (including `[]`) is kept exactly,
+ * and `"all"` or legacy (null) configurations keep the bundled defaults.
+ */
+export function bundledSkillSelectionForAgentConfig(
+  selection: BundledSkillId[] | undefined,
+  agentConfig: { from: "all" | "none" } | null | undefined,
+): BundledSkillId[] | undefined {
+  return selection === undefined && agentConfig?.from === "none" ? [] : selection;
 }
 
 // Immutable session configuration, following the existing create-identity

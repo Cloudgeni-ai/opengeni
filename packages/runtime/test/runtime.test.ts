@@ -1,4 +1,5 @@
 import { describe, expect, test } from "bun:test";
+
 import {
   chmodSync,
   mkdtempSync,
@@ -14,6 +15,7 @@ import { createHash } from "node:crypto";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { pathToFileURL } from "node:url";
+import { createRequire } from "node:module";
 import {
   ToolGatewayInputValidationError,
   createWorkspaceToolGateway,
@@ -152,7 +154,10 @@ import { McpResultCustomDataBridge } from "../src/mcp-result-custom-data";
 
 import { Manifest } from "@openai/agents/sandbox";
 import { createAttemptToolEnvironment } from "@opengeni/codemode";
-import { TurnSandboxCommandCancelledError } from "../src/sandbox/turn-tool-cancellation";
+import {
+  cancellableShellCommand,
+  TurnSandboxCommandCancelledError,
+} from "../src/sandbox/turn-tool-cancellation";
 import { CompactionNeededError } from "../src/context-compaction";
 import {
   buildPortableSkillArtifact,
@@ -178,6 +183,16 @@ import {
   type CodexTokenSnapshot,
 } from "@opengeni/codex";
 import { hostShellSession } from "./isolated-git-home-fixture";
+
+function capturedRepositorySetupCommand(calls: Array<Record<string, unknown>>): string {
+  const chunks = calls.flatMap(({ cmd }) => {
+    const match = String(cmd).match(/^printf '%s' '([A-Za-z0-9+/=]+)' >> /u);
+    return match ? [match[1]!] : [];
+  });
+  return chunks.length
+    ? Buffer.from(chunks.join(""), "base64").toString("utf8")
+    : String(calls[0]?.cmd);
+}
 
 function makeCodexAppsAuth(overrides: { token?: CodexTokenSnapshot; tokenError?: Error } = {}): {
   clientVersion: string;
@@ -5856,11 +5871,28 @@ describe("runtime event normalization", () => {
       },
     );
 
-    expect(calls).toHaveLength(1);
+    expect(calls.length).toBeGreaterThan(1);
     expect(calls[0]?.runAs).toBe("sandbox");
     expect(calls[0]?.workdir).toBe("/workspace");
-    expect(String(calls[0]?.cmd)).toContain("git init");
-    expect(String(calls[0]?.cmd)).not.toContain("secret-token");
+    expect(capturedRepositorySetupCommand(calls)).toContain("git init");
+    expect(capturedRepositorySetupCommand(calls)).not.toContain("secret-token");
+    // Exercise the installed SDK path as well as the runtime provider path:
+    // both wrappers expand their input before Modal applies its argv limit.
+    const { sandboxUserShellCommand } = createRequire(
+      import.meta.resolve("@openai/agents-extensions/sandbox/modal"),
+    )("../shared/runAs.js") as {
+      sandboxUserShellCommand: (command: string, user: string) => string;
+    };
+    for (const { cmd } of calls) {
+      const wrapped = sandboxUserShellCommand(
+        cancellableShellCommand(
+          String(cmd),
+          "/tmp/opengeni/cancellations/00000000-0000-0000-0000-000000000000",
+        ),
+        "sandbox",
+      );
+      expect(Buffer.byteLength(wrapped, "utf8") + 10).toBeLessThan(65_536);
+    }
     expect(events).toEqual(["sandbox.operation.started", "sandbox.operation.completed"]);
   });
 
@@ -5895,23 +5927,27 @@ describe("runtime event normalization", () => {
       },
     );
 
-    expect(calls).toHaveLength(1);
+    expect(calls.length).toBeGreaterThan(1);
     // The seed is inlined as an ephemeral export PREFIX on the command text — it is
     // NOT passed as an exec `environment` option (ExecCommandArgs has no such field)
     // and NEVER lands on the box/agent manifest.
     expect(calls[0]?.environment).toBeUndefined();
-    expect(String(calls[0]?.cmd)).toContain(
+    expect(capturedRepositorySetupCommand(calls)).toContain(
       "export OPENGENI_GIT_GITHUB_TOKEN_SEED='ghs_liveToken123'",
     );
-    expect(String(calls[0]?.cmd)).toContain("export OPENGENI_GIT_TOKEN_SEED='ghs_liveToken123'");
+    expect(capturedRepositorySetupCommand(calls)).toContain(
+      "export OPENGENI_GIT_TOKEN_SEED='ghs_liveToken123'",
+    );
     // The prefix precedes the seed writer that writes the file.
-    expect(String(calls[0]?.cmd).indexOf("export OPENGENI_GIT_TOKEN_SEED=")).toBeLessThan(
-      String(calls[0]?.cmd).indexOf("write_git_provider_token github"),
+    expect(
+      capturedRepositorySetupCommand(calls).indexOf("export OPENGENI_GIT_TOKEN_SEED="),
+    ).toBeLessThan(
+      capturedRepositorySetupCommand(calls).indexOf("write_git_provider_token github"),
     );
     // TOKEN-BROKER (B2): the SAME per-exec command also provisions an EXECUTABLE git
     // askpass into $GIT_ASKPASS whose Password branch reads the token file — so a warm
     // box on ANY image gets a correct askpass at setup, no baked script required.
-    const cmd = String(calls[0]?.cmd);
+    const cmd = capturedRepositorySetupCommand(calls);
     expect(cmd.startsWith("set +x\n")).toBe(true);
     expect(cmd.indexOf("set +x")).toBeLessThan(
       cmd.indexOf("export OPENGENI_GIT_GITHUB_TOKEN_SEED="),
@@ -5957,7 +5993,7 @@ describe("runtime event normalization", () => {
       },
     );
 
-    const cmd = String(calls[0]?.cmd);
+    const cmd = capturedRepositorySetupCommand(calls);
     expect(calls[0]?.environment).toBeUndefined();
     expect(cmd.startsWith("set +x\n")).toBe(true);
     expect(cmd).toContain("export OPENGENI_GIT_GITLAB_TOKEN_SEED='glpat_liveToken123'");
@@ -6022,9 +6058,10 @@ describe("runtime event normalization", () => {
     expect(created).toHaveLength(1);
     expect(created[0]!.path).toStartWith("/workspace/.opengeni/git-broker-seeds/");
     expect(created[0]!.diff).toBe("+oggh1.secret-broker-bearer");
-    expect(commands).toHaveLength(1);
-    expect(commands[0]).not.toContain("oggh1.secret-broker-bearer");
-    expect(commands[0]).toContain(created[0]!.path);
+    expect(commands.every((command) => !command.includes("oggh1.secret-broker-bearer"))).toBe(true);
+    expect(capturedRepositorySetupCommand(commands.map((cmd) => ({ cmd })))).toContain(
+      created[0]!.path,
+    );
     expect(deleted).toEqual([created[0]!.path]);
   });
 
@@ -6161,11 +6198,10 @@ describe("runtime event normalization", () => {
       },
     );
 
-    expect(calls).toHaveLength(1);
-    expect(String(calls[0]?.cmd)).not.toContain("export OPENGENI_GIT_TOKEN_SEED=");
+    expect(capturedRepositorySetupCommand(calls)).not.toContain("export OPENGENI_GIT_TOKEN_SEED=");
     // The only prefix is the sandbox target that admits the provisioning guard;
     // the exported builder alone refuses to run on a host.
-    expect(String(calls[0]?.cmd)).toBe(
+    expect(capturedRepositorySetupCommand(calls)).toBe(
       `set +x\nOPENGENI_GIT_PROVISIONING_TARGET=sandbox\n${repositoryCloneCommand(resources)}`,
     );
     expect(repositoryCloneCommand(resources)).not.toContain(
@@ -8961,7 +8997,7 @@ describe("runtime event normalization", () => {
     const mcp = startTestMcpServer({
       requiredHeaders: { authorization: "Bearer fresh-token" },
     });
-    const resolved: ResolveConnectionCredentialInput[] = [];
+    const resolved: Array<ResolveConnectionCredentialInput & { submittedToolCalls: number }> = [];
     let providerAuthorizations = 0;
     const prepared = await prepareAgentTools(
       testSettings({
@@ -8984,7 +9020,12 @@ describe("runtime event normalization", () => {
       {
         workspaceId: "45454545-4545-4545-8545-454545454545",
         resolveCredential: async (input): Promise<ResolveConnectionCredentialResult> => {
-          resolved.push(input);
+          resolved.push({
+            ...input,
+            submittedToolCalls: mcp.requests.filter(
+              (request) => request.jsonRpcMethod === "tools/call",
+            ).length,
+          });
           return {
             status: "ok",
             connectionId,
@@ -9014,26 +9055,38 @@ describe("runtime event normalization", () => {
       expect(result.structuredContent).toEqual({
         error: {
           code: "tool_outcome_unknown",
-          message:
-            "Tool outcome uncertain: the provider returned 401 after receiving the request. OpenGeni did not replay this call. Do not retry automatically; verify provider state before any new attempt.",
+          message: expect.stringMatching(/outcome uncertain/i),
           retryable: false,
           outcomeUnknown: true,
         },
       });
-      const text = JSON.stringify(result);
-      expect(text).toMatch(/outcome uncertain/i);
-      expect(text).toMatch(/did not replay/i);
-      expect(text).toMatch(/do not retry automatically/i);
-      expect(text).toMatch(/verify provider state/i);
-      expect(text).toContain("unauthorized");
-      expect(mcp.requests.filter((request) => request.jsonRpcMethod === "tools/call")).toHaveLength(
-        1,
-      );
+      // Check actionable guidance on the structured error itself, not unrelated
+      // provider text or a particular prose description of the transport failure.
+      const outcome = result.structuredContent?.error;
+      const warning =
+        outcome && typeof outcome === "object" && "message" in outcome
+          ? outcome.message
+          : undefined;
+      expect(warning).toMatch(/did not replay this call/i);
+      expect(warning).toMatch(/do not retry automatically/i);
+      expect(warning).toMatch(/verify provider state before any new attempt/i);
+      expect(result.content).toContainEqual({ type: "text", text: warning });
+      expect(JSON.stringify(result)).toContain("unauthorized");
+      expect(mcp.requests.filter((request) => request.jsonRpcMethod === "tools/call")).toEqual([
+        { httpMethod: "POST", jsonRpcMethod: "tools/call" },
+      ]);
       expect(mcp.calls).toHaveLength(0);
       expect(providerAuthorizations - setupAuthorizations).toBe(1);
+      // A post-401 refresh prepares future requests; it must not authorize or
+      // submit this ambiguous invocation again, even with valid fresh credentials.
       expect(
-        resolved.some((input) => input.toolName === "search_documents" && input.forceRefresh),
-      ).toBe(true);
+        resolved
+          .filter((input) => input.toolName === "search_documents")
+          .map(({ forceRefresh, submittedToolCalls }) => ({ forceRefresh, submittedToolCalls })),
+      ).toEqual([
+        { forceRefresh: false, submittedToolCalls: 0 },
+        { forceRefresh: true, submittedToolCalls: 1 },
+      ]);
     } finally {
       await prepared.close();
       mcp.close();

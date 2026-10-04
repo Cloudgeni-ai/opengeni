@@ -44,11 +44,55 @@ test("compact row offers one ghost Retry without duplicate controls or guidance"
   expect(container.querySelector("button")!.textContent).toBe("Retry");
   expect(container.querySelector("button")!.dataset.variant).toBe("ghost");
   expect(container.querySelector("svg")).not.toBeNull();
-  expect(container.querySelector("details")).toBeNull();
+  const details = container.querySelector("details")!;
+  expect(details.open).toBe(false);
+  expect(details.querySelector("p")!.textContent).toBe("Connection interrupted.");
+  expect(container.querySelector('[data-testid="failed-session-banner"] span')!.textContent).toBe(
+    "The session stopped unexpectedly.",
+  );
   expect(container.textContent).not.toMatch(/Choose another model|composer|preserved|Try again/);
   expect(container.querySelector('[data-testid="failed-session-banner"]')!.className).not.toMatch(
     /bg-|border|rounded/,
   );
+});
+
+test("uncategorized preclaim details never grant Retry or bypass its blocker", async () => {
+  const detail = "getaddrinfo ENOTFOUND database.example.test\nsynthetic diagnostic";
+  const preclaim = {
+    ...failure,
+    reason: detail,
+    recordedDetail: detail,
+    failureCode: "pre_claim_failure",
+  };
+  let retries = 0;
+  const container = await render(<FailedSessionBanner failure={preclaim} />);
+  expect(container.querySelector("button")).toBeNull();
+  const details = container.querySelector("details")!;
+  expect(details.open).toBe(false);
+  expect(details.querySelector("p")!.textContent).toBe(detail);
+  expect(container.querySelector('[data-testid="failed-session-banner"] span')!.textContent).toBe(
+    "The session stopped unexpectedly.",
+  );
+  await act(async () =>
+    root!.render(
+      <FailedSessionBanner
+        failure={preclaim}
+        actions={{
+          onRetry: async () => {
+            retries += 1;
+            return true;
+          },
+          retryBlocker: "permission",
+        }}
+      />,
+    ),
+  );
+  expect(container.querySelector("button")).toBeNull();
+  await act(async () => {
+    details.open = true;
+    details.dispatchEvent(new Event("toggle"));
+  });
+  expect(retries).toBe(0);
 });
 
 test("credential failures hide Retry until another model is chosen and keep raw detail folded", async () => {
@@ -188,9 +232,44 @@ test("the free model keeps ordinary wording for failures other than its daily li
   );
   const row = container.querySelector<HTMLElement>('[data-testid="failed-session-banner"]')!;
   expect(row.querySelector("span")!.textContent).toBe(
-    "The model provider is rate limiting requests. Try again in a minute.",
+    "This model is throttled due to high demand. Choose another model to continue, or try again in a few minutes.",
   );
   expect([...row.querySelectorAll("a, button")].map((node) => node.textContent)).toEqual(["Retry"]);
+});
+
+test("throttling offers the existing model picker next to Retry until another model is chosen", async () => {
+  let opened = 0;
+  const banner = (modelChanged: boolean) => (
+    <FailedSessionBanner
+      failure={{
+        ...failure,
+        reason: "429 Too Many Requests",
+        failureCode: "provider_rate_limited",
+      }}
+      actions={actions}
+      canChooseModel
+      modelChanged={modelChanged}
+      onChooseModel={() => opened++}
+    />
+  );
+  const container = await render(banner(false));
+  const row = container.querySelector<HTMLElement>('[data-testid="failed-session-banner"]')!;
+  expect(row.querySelector("span")!.textContent).toBe(
+    "This model is throttled due to high demand. Choose another model to continue, or try again in a few minutes.",
+  );
+  const buttons = [...row.querySelectorAll("button")];
+  expect(buttons.map((node) => node.textContent)).toEqual(["Choose model", "Retry"]);
+  await act(async () => buttons[0]!.click());
+  expect(opened).toBe(1);
+
+  await act(async () => root!.render(banner(true)));
+  const changedRow = container.querySelector<HTMLElement>('[data-testid="failed-session-banner"]')!;
+  expect(changedRow.querySelector("span")!.textContent).toBe(
+    "This model is throttled due to high demand. Try again in a few minutes.",
+  );
+  expect([...changedRow.querySelectorAll("button")].map((node) => node.textContent)).toEqual([
+    "Retry",
+  ]);
 });
 
 test("double clicks and accepted submissions never duplicate recovery", async () => {
@@ -442,7 +521,7 @@ test.each(["restored", "connected_machine", "automatic", "fresh_workspace"] as c
     }
     if (route === "fresh_workspace")
       expect(container.textContent).toContain(
-        "Retry will continue with an empty workspace. OpenGeni cannot restore the previous sandbox files automatically.",
+        "Retry will continue with an empty workspace. Opengeni cannot restore the previous sandbox files automatically.",
       );
     expect(container.querySelector("button")!.dataset.variant).toBe("ghost");
     expect(container.textContent).not.toContain("Choose another model");
@@ -675,7 +754,11 @@ test("unknown provider evidence never invents expiry, reset or connection classi
       actions={actions}
     />,
   );
-  expect(container.textContent).toBe("Connection failed.Retry");
+  const row = container.querySelector('[data-testid="failed-session-banner"]')!;
+  expect(row.querySelector("span")!.textContent).toBe("The session stopped unexpectedly.");
+  expect(row.querySelector("details p")!.textContent).toBe("Connection failed.");
+  expect(row.querySelector("details")!.open).toBe(false);
+  expect(row.querySelector("button")!.textContent).toBe("Retry");
   expect(container.textContent).not.toMatch(/Codex|expired|reset|reconnect/i);
 });
 

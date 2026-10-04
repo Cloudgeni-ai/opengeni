@@ -254,7 +254,8 @@ describe("file upload crash, concurrency, RLS, and object cleanup", () => {
       error: {
         status: 402,
         code: "payment_required",
-        message: "insufficient OpenGeni credits",
+        // Admission semantics are contractual; product-name capitalization is not.
+        message: expect.stringMatching(/^insufficient \S+ credits$/),
         retryable: false,
       },
     });

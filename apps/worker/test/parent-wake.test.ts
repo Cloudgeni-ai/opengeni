@@ -90,7 +90,15 @@ for (const scenario of [
         wakeSessionWorkflow,
       },
       17,
-      { claimPendingSessionWorkflowWakes },
+      {
+        claimPendingSessionWorkflowWakes,
+        repairPendingChildTerminalResultWakes: async () => ({
+          examined: 0,
+          registered: 0,
+          failed: 0,
+          cursor: null,
+        }),
+      },
     );
 
     expect(result).toEqual({

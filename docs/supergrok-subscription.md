@@ -8,7 +8,9 @@ Canonical implementation sources:
 
 - protocol/OAuth/transport: `packages/xai-subscription`;
 - public management API: `apps/api/src/routes/supergrok.ts`;
-- persistence and RLS: `packages/db/src/xai-subscription.ts`,
+- persistence and RLS: `packages/db/src/xai-subscription.ts` adapts the shared
+  `packages/db/src/subscription-account-repository.ts` lifecycle and
+  `packages/db/src/subscription-pool-schema.ts` table definitions;
   `packages/db/src/index.ts`, `packages/db/src/schema.ts`, and migration
   `0234_xai_subscription_authority.sql`;
 - runtime: `apps/worker/src/activities/xai-auth.ts` and

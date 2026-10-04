@@ -151,11 +151,24 @@ export function AnnotationNoteField({
   const setRef = (node: HTMLTextAreaElement | null) => {
     localRef.current = node;
     inputRef?.(node);
-    autosizeNote(node);
   };
 
   useLayoutEffect(() => {
-    autosizeNote(localRef.current);
+    const textarea = localRef.current;
+    if (!textarea) return;
+    // Ref callbacks can reattach on every scroll-driven parent render. Reflowing
+    // unchanged notes there interrupts native scrolling, particularly in WebKit.
+    autosizeNote(textarea);
+    if (typeof ResizeObserver === "undefined") return;
+    let width = textarea.getBoundingClientRect().width;
+    const observer = new ResizeObserver(() => {
+      const nextWidth = textarea.getBoundingClientRect().width;
+      if (nextWidth === width) return;
+      width = nextWidth;
+      autosizeNote(textarea);
+    });
+    observer.observe(textarea);
+    return () => observer.disconnect();
   }, [annotation.note]);
 
   return (

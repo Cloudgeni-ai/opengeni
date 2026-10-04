@@ -3,6 +3,7 @@ import type {
   ConnectionCredentialsPort,
   Document,
   DocumentAuthorityKind,
+  EntitlementsPort,
   GitHubAppApiPort,
   ScheduledTask,
   ScheduledTaskTriggerType,
@@ -69,7 +70,15 @@ export type SessionWorkflowClient = {
     workflowId: string;
     workflowWakeRevision: number;
   }) => Promise<void>;
-  syncScheduledTask: (input: { task: ScheduledTask }) => Promise<void>;
+  syncScheduledTask: (input: {
+    task: ScheduledTask;
+    /**
+     * Compensate under the same per-schedule writer lock. Return the error to
+     * throw only after this transaction commits; lock/commit failures bypass
+     * that receipt. A failing compensation must roll back its own savepoint.
+     */
+    onFailure?: (tx: Database, error: unknown) => Promise<Error>;
+  }) => Promise<void>;
   deleteScheduledTaskSchedule: (input: { temporalScheduleId: string }) => Promise<void>;
   triggerScheduledTask: (input: {
     task: ScheduledTask;
@@ -147,6 +156,8 @@ export type AppDependencies = {
    */
   catalogSourceSettings?: Settings;
   db: Database;
+  /** Read-only host funding admission; unset uses the standalone billing ledger. */
+  entitlements?: EntitlementsPort | null;
   /**
    * Host-composed editable artifact engine. Standalone startup binds the same
    * native kernel/DB/object-store implementation; embedded hosts may inject an

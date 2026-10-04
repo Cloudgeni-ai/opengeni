@@ -7,6 +7,7 @@ import {
   RUNTIME_READ_ONLY_TABLES,
   RUNTIME_READ_UPDATE_TABLES,
   WORK_CLAIM_CAPABILITY_ROUTINES,
+  SUBSCRIPTION_ACCOUNT_CAPABILITY_ROUTINES,
 } from "./runtime-posture";
 import {
   classifyRoleRelationships,
@@ -1640,6 +1641,19 @@ BEGIN
         ${literal(schema)}, ${literal(role)}
       );
     END IF;
+    -- The new-account sign-up switch setter is operator-only (migration owner).
+    IF to_regprocedure(
+      format('%I.set_managed_auth_new_signups_enabled(boolean,text,text)', ${literal(schema)})
+    ) IS NOT NULL THEN
+      EXECUTE format(
+        'REVOKE ALL ON FUNCTION %I.set_managed_auth_new_signups_enabled(boolean, text, text) FROM PUBLIC',
+        ${literal(schema)}
+      );
+      EXECUTE format(
+        'REVOKE ALL ON FUNCTION %I.set_managed_auth_new_signups_enabled(boolean, text, text) FROM %I',
+        ${literal(schema)}, ${literal(role)}
+      );
+    END IF;
     IF to_regprocedure(
       format('%I.open_private_session_create_capability(uuid,uuid,uuid,text)', ${literal(schema)})
     ) IS NOT NULL THEN
@@ -1675,76 +1689,12 @@ BEGIN
         ${literal(schema)}, ${literal(role)}
       );
     END IF;
-    IF to_regprocedure(
-      format(
-        '%I.create_xai_subscription_credential(uuid,uuid,text,text,text,text,text,text,text,timestamptz)',
-        ${literal(schema)}
-      )
-    ) IS NOT NULL THEN
-      EXECUTE format(
-        'REVOKE ALL ON FUNCTION %I.create_xai_subscription_credential(uuid, uuid, text, text, text, text, text, text, text, timestamptz) FROM PUBLIC',
-        ${literal(schema)}
-      );
-      EXECUTE format(
-        'GRANT EXECUTE ON FUNCTION %I.create_xai_subscription_credential(uuid, uuid, text, text, text, text, text, text, text, timestamptz) TO %I',
-        ${literal(schema)},
-        ${literal(role)}
-      );
-      EXECUTE format(
-        'REVOKE ALL ON FUNCTION %I.disconnect_xai_subscription_credential(uuid, uuid, text, uuid, jsonb) FROM PUBLIC',
-        ${literal(schema)}
-      );
-      EXECUTE format(
-        'GRANT EXECUTE ON FUNCTION %I.disconnect_xai_subscription_credential(uuid, uuid, text, uuid, jsonb) TO %I',
-        ${literal(schema)},
-        ${literal(role)}
-      );
-      EXECUTE format(
-        'REVOKE ALL ON FUNCTION %I.resolve_xai_authority_pool(uuid, uuid, text, jsonb) FROM PUBLIC',
-        ${literal(schema)}
-      );
-      EXECUTE format(
-        'GRANT EXECUTE ON FUNCTION %I.resolve_xai_authority_pool(uuid, uuid, text, jsonb) TO %I',
-        ${literal(schema)},
-        ${literal(role)}
-      );
-      EXECUTE format(
-        'REVOKE ALL ON FUNCTION %I.revalidate_xai_subscription_authority(uuid, text, uuid, jsonb) FROM PUBLIC',
-        ${literal(schema)}
-      );
-      EXECUTE format(
-        'GRANT EXECUTE ON FUNCTION %I.revalidate_xai_subscription_authority(uuid, text, uuid, jsonb) TO %I',
-        ${literal(schema)},
-        ${literal(role)}
-      );
-      EXECUTE format(
-        'REVOKE ALL ON FUNCTION %I.xai_provider_account_authority_snapshot_v1_valid(jsonb) FROM PUBLIC',
-        ${literal(schema)}
-      );
-      EXECUTE format(
-        'GRANT EXECUTE ON FUNCTION %I.xai_provider_account_authority_snapshot_v1_valid(jsonb) TO %I',
-        ${literal(schema)},
-        ${literal(role)}
-      );
-      EXECUTE format(
-        'REVOKE ALL ON FUNCTION %I.xai_subscription_authority_live(uuid, uuid, text, uuid, text, uuid, uuid, bigint) FROM PUBLIC',
-        ${literal(schema)}
-      );
-      EXECUTE format(
-        'GRANT EXECUTE ON FUNCTION %I.xai_subscription_authority_live(uuid, uuid, text, uuid, text, uuid, uuid, bigint) TO %I',
-        ${literal(schema)},
-        ${literal(role)}
-      );
-      EXECUTE format(
-        'REVOKE ALL ON FUNCTION %I.xai_subscription_pool_visible(uuid, uuid, text, text, uuid) FROM PUBLIC',
-        ${literal(schema)}
-      );
-      EXECUTE format(
-        'GRANT EXECUTE ON FUNCTION %I.xai_subscription_pool_visible(uuid, uuid, text, text, uuid) TO %I',
-        ${literal(schema)},
-        ${literal(role)}
-      );
-    END IF;
+    FOREACH routine_signature IN ARRAY ARRAY[${SUBSCRIPTION_ACCOUNT_CAPABILITY_ROUTINES.map(literal).join(", ")}] LOOP
+      IF to_regprocedure(format('%I.%s', ${literal(schema)}, routine_signature)) IS NOT NULL THEN
+        EXECUTE format('REVOKE ALL ON FUNCTION %I.%s FROM PUBLIC', ${literal(schema)}, routine_signature);
+        EXECUTE format('GRANT EXECUTE ON FUNCTION %I.%s TO %I', ${literal(schema)}, routine_signature, ${literal(role)});
+      END IF;
+    END LOOP;
     IF to_regprocedure(
       format(
         '%I.resolve_session_attempt_personal_resources(uuid,uuid,uuid)',
@@ -2121,6 +2071,16 @@ BEGIN
     EXECUTE format('GRANT USAGE ON SCHEMA opengeni_private TO %I', ${literal(role)});
     EXECUTE format('REVOKE CREATE ON SCHEMA opengeni_private FROM %I', ${literal(role)});
     EXECUTE format('GRANT EXECUTE ON ALL FUNCTIONS IN SCHEMA opengeni_private TO %I', ${literal(role)});
+    -- This exact content-free repair inventory shares the existing global
+    -- wake dispatcher's authority. Converge custom-role and migrate-then-
+    -- provision installs without opening a generic owner/posture exception.
+    IF to_regprocedure('opengeni_private.list_pending_child_terminal_wake_repairs_v1(integer,uuid,uuid)') IS NOT NULL THEN
+      EXECUTE format('ALTER FUNCTION opengeni_private.list_pending_child_terminal_wake_repairs_v1(integer,uuid,uuid) OWNER TO %I',
+        (SELECT pg_get_userbyid(proowner) FROM pg_proc
+          WHERE oid = 'opengeni_private.claim_session_workflow_wakes(integer)'::regprocedure));
+      REVOKE ALL ON FUNCTION opengeni_private.list_pending_child_terminal_wake_repairs_v1(integer,uuid,uuid) FROM PUBLIC;
+      EXECUTE format('GRANT EXECUTE ON FUNCTION opengeni_private.list_pending_child_terminal_wake_repairs_v1(integer,uuid,uuid) TO %I', ${literal(role)});
+    END IF;
     IF to_regclass('opengeni_private.session_import_batches') IS NOT NULL THEN
       EXECUTE format('REVOKE ALL ON TABLE opengeni_private.session_import_batches FROM %I', ${literal(role)});
       EXECUTE format('REVOKE ALL (%s) ON TABLE opengeni_private.session_import_batches FROM %I',
@@ -2157,10 +2117,35 @@ BEGIN
       REVOKE ALL ON TABLE opengeni_private.verified_signup_trial_switch_revisions FROM PUBLIC;
       EXECUTE format('GRANT SELECT ON TABLE opengeni_private.verified_signup_trial_switch_revisions TO %I', ${literal(role)});
     END IF;
+    IF to_regclass('opengeni_private.managed_auth_new_signups_switch_revisions') IS NOT NULL THEN
+      -- Read-only so the API can decide each sign-up. Only the owner-only
+      -- audited setter appends revisions; runtime identities and PUBLIC never write them.
+      EXECUTE format('REVOKE ALL ON TABLE opengeni_private.managed_auth_new_signups_switch_revisions FROM %I', ${literal(role)});
+      REVOKE ALL ON TABLE opengeni_private.managed_auth_new_signups_switch_revisions FROM PUBLIC;
+      EXECUTE format('GRANT SELECT ON TABLE opengeni_private.managed_auth_new_signups_switch_revisions TO %I', ${literal(role)});
+    END IF;
     IF to_regclass('opengeni_private.organization_usage_read_capabilities') IS NOT NULL THEN
       EXECUTE format('REVOKE ALL ON TABLE opengeni_private.organization_usage_read_capabilities FROM %I', ${literal(role)});
       REVOKE ALL ON TABLE opengeni_private.organization_usage_read_capabilities FROM PUBLIC;
       REVOKE ALL ON FUNCTION opengeni_private.organization_usage_summary(uuid,timestamptz,timestamptz,text,uuid,boolean) FROM PUBLIC;
+    END IF;
+    IF to_regprocedure('opengeni_private.organization_model_usage_summary(uuid,timestamptz,timestamptz,uuid)') IS NOT NULL THEN
+      REVOKE ALL ON FUNCTION opengeni_private.organization_model_usage_summary(uuid,timestamptz,timestamptz,uuid) FROM PUBLIC;
+    END IF;
+    IF to_regprocedure('opengeni_private.visible_workspace_insights_model_fact_rows(uuid,timestamptz,timestamptz,text,text,uuid,uuid)') IS NOT NULL THEN
+      REVOKE ALL ON FUNCTION opengeni_private.visible_workspace_insights_model_fact_rows(uuid,timestamptz,timestamptz,text,text,uuid,uuid) FROM PUBLIC;
+    END IF;
+    IF to_regprocedure('opengeni_private.complete_workspace_insights_usage_projection(uuid,timestamptz,timestamptz,text[])') IS NOT NULL THEN
+      REVOKE ALL ON FUNCTION opengeni_private.complete_workspace_insights_usage_projection(uuid,timestamptz,timestamptz,text[]) FROM PUBLIC;
+    END IF;
+    IF to_regprocedure('opengeni_private.workspace_insights_amount_fact_rows(uuid,timestamptz,timestamptz,text,text,uuid,uuid)') IS NOT NULL THEN
+      REVOKE ALL ON FUNCTION opengeni_private.workspace_insights_amount_fact_rows(uuid,timestamptz,timestamptz,text,text,uuid,uuid) FROM PUBLIC;
+    END IF;
+    IF to_regprocedure('opengeni_private.insights_scoped_usage_rows(uuid,uuid,timestamptz,timestamptz,text,uuid[],boolean)') IS NOT NULL THEN
+      REVOKE ALL ON FUNCTION opengeni_private.insights_scoped_usage_rows(uuid,uuid,timestamptz,timestamptz,text,uuid[],boolean) FROM PUBLIC;
+      REVOKE ALL ON FUNCTION opengeni_private.insights_scoped_calls_rows(uuid,uuid,timestamptz,timestamptz,jsonb,timestamptz,uuid,integer,uuid[],boolean) FROM PUBLIC;
+      REVOKE ALL ON FUNCTION opengeni_private.insights_raw_amount_inputs(uuid,uuid,timestamptz,timestamptz) FROM PUBLIC;
+      REVOKE ALL ON FUNCTION opengeni_private.insights_usage_payer(text,text), opengeni_private.insights_usage_filter(jsonb,jsonb) FROM PUBLIC;
     END IF;
     IF to_regclass('opengeni_private.usage_allowance_capabilities') IS NOT NULL THEN
       EXECUTE format('REVOKE ALL ON TABLE opengeni_private.usage_allowance_capabilities FROM %I', ${literal(role)});
@@ -2178,6 +2163,22 @@ BEGIN
       REVOKE ALL ON FUNCTION opengeni_private.record_sandbox_file_publication(uuid,uuid,uuid,uuid) FROM PUBLIC;
       REVOKE ALL ON FUNCTION opengeni_private.list_sandbox_file_publications(uuid,uuid,jsonb) FROM PUBLIC;
     END IF;
+    IF to_regclass('opengeni_private.artifact_catalog_pins') IS NOT NULL THEN
+      EXECUTE format('REVOKE ALL ON TABLE opengeni_private.artifact_catalog_pins FROM %I', ${literal(role)});
+      -- Table revocation does not remove column ACLs. Reconcile every current
+      -- column for both the runtime and PUBLIC, including future additions.
+      EXECUTE format('REVOKE ALL (%s) ON TABLE opengeni_private.artifact_catalog_pins FROM %I',
+        (SELECT string_agg(quote_ident(attname),',' ORDER BY attnum) FROM pg_attribute
+          WHERE attrelid='opengeni_private.artifact_catalog_pins'::regclass AND attnum>0 AND NOT attisdropped),
+        ${literal(role)});
+      REVOKE ALL ON TABLE opengeni_private.artifact_catalog_pins FROM PUBLIC;
+      EXECUTE format('REVOKE ALL (%s) ON TABLE opengeni_private.artifact_catalog_pins FROM PUBLIC',
+        (SELECT string_agg(quote_ident(attname),',' ORDER BY attnum) FROM pg_attribute
+          WHERE attrelid='opengeni_private.artifact_catalog_pins'::regclass AND attnum>0 AND NOT attisdropped));
+      REVOKE ALL ON FUNCTION opengeni_private.update_artifact_pin(uuid,uuid,text,text,boolean),
+        opengeni_private.list_artifact_pins(uuid,uuid),
+        opengeni_private.list_sandbox_file_publications_pinned(uuid,uuid,jsonb) FROM PUBLIC;
+    END IF;
     IF to_regclass('opengeni_private.slack_file_upload_operations') IS NOT NULL THEN
       -- Ordinary RLS repositories own the upload CAS, not owner capabilities.
       -- Never allow deletion/truncation to erase its durable completion fence.
@@ -2194,6 +2195,13 @@ BEGIN
       REVOKE ALL ON TABLE opengeni_private.scheduled_slack_bot_messages FROM PUBLIC;
       REVOKE ALL ON FUNCTION opengeni_private.prepare_scheduled_slack_bot_message(uuid,uuid,uuid,uuid,uuid,integer,text,text,text) FROM PUBLIC;
       REVOKE ALL ON FUNCTION opengeni_private.read_scheduled_slack_bot_message(uuid,uuid,uuid,uuid) FROM PUBLIC;
+    END IF;
+    IF to_regclass('opengeni_private.organization_signup_use_cases') IS NOT NULL THEN
+      -- A signup answer is reachable only through its record capability, so a
+      -- stored answer can be neither rewritten nor read for another tenant.
+      EXECUTE format('REVOKE ALL ON TABLE opengeni_private.organization_signup_use_cases FROM %I', ${literal(role)});
+      REVOKE ALL ON TABLE opengeni_private.organization_signup_use_cases FROM PUBLIC;
+      REVOKE ALL ON FUNCTION opengeni_private.record_organization_signup_use_case(uuid,text,text) FROM PUBLIC;
     END IF;
     FOREACH routine_signature IN ARRAY ARRAY[
       'read_sender_connection(uuid,uuid,uuid,text)',

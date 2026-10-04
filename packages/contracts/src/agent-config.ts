@@ -176,10 +176,12 @@ export const UpdateSessionAgentRequest = z
   .strict();
 export type UpdateSessionAgentRequest = z.infer<typeof UpdateSessionAgentRequest>;
 
-/** Client-safe rollout projection. */
+/** Client-safe agent-configuration projection. */
 export const ClientAgentConfig = z
   .object({
+    /** @deprecated Agent configuration is always on; servers always report `true`. */
     enabled: z.boolean(),
+    /** @deprecated Omitted `agent` always resolves `{ capabilities: "all" }`; always `true`. */
     defaultForNewSessions: z.boolean(),
     capabilities: z.array(
       z
@@ -198,8 +200,21 @@ export type ClientAgentConfig = z.infer<typeof ClientAgentConfig>;
 // Capability registry
 // ---------------------------------------------------------------------------
 
-/** A first-party tool's owner: a capability, or pure runtime mechanics. */
+/** A built-in MCP server's owner: a capability, or pure runtime mechanics. */
 export type AgentToolCapability = AgentCapabilityId | "runtime";
+
+/**
+ * A first-party tool's owner: a capability, pure runtime mechanics, or the
+ * attached compute (a managed sandbox or Connected Machine).
+ */
+export type AgentFirstPartyToolOwner = AgentToolCapability | "sandbox";
+
+/** Owners no capability toggles: the runtime or the attached compute derives them. */
+export function isDerivedAgentToolOwner(
+  owner: AgentFirstPartyToolOwner,
+): owner is "runtime" | "sandbox" {
+  return owner === "runtime" || owner === "sandbox";
+}
 
 /**
  * Exhaustive map from every `FIRST_PARTY_MCP_TOOL_NAMES` entry to exactly one
@@ -208,15 +223,18 @@ export type AgentToolCapability = AgentCapabilityId | "runtime";
  *
  * `runtime` tools are mechanics every agent needs regardless of what it may do:
  * - `wait_for_input`: ends the turn and waits for the next input.
- * - `command_read` / `command_wait`: read/await the session's own background
- *   sandbox commands (the shell already exists whenever a sandbox is attached).
  * - `set_session_title`: session titling.
+ *
+ * `sandbox` tools are derived from attached compute and never toggled:
+ * - `command_read` / `command_wait`: read/await the session's own background
+ *   commands. A command can only exist on a managed sandbox or Connected
+ *   Machine, so a turn with neither attached never receives them.
  */
 export const FIRST_PARTY_MCP_TOOL_CAPABILITIES = {
   set_session_title: "runtime",
   wait_for_input: "runtime",
-  command_wait: "runtime",
-  command_read: "runtime",
+  command_wait: "sandbox",
+  command_read: "sandbox",
 
   goal_set: "goals",
   goal_update: "goals",
@@ -398,7 +416,7 @@ export const FIRST_PARTY_MCP_TOOL_CAPABILITIES = {
   editable_artifact_apply: "artifacts",
   editable_artifact_export: "artifacts",
   editable_artifact_export_status: "artifacts",
-} as const satisfies Record<FirstPartyMcpToolName, AgentToolCapability>;
+} as const satisfies Record<FirstPartyMcpToolName, AgentFirstPartyToolOwner>;
 
 /** Owner of a non-MCP tool: a capability, runtime mechanics, or the sandbox. */
 export type AgentFunctionToolClass = AgentCapabilityId | "runtime" | "sandbox";
@@ -491,7 +509,7 @@ export const AGENT_BUILTIN_MCP_SERVER_CAPABILITIES = {
   "google-drive-publishing": "workspaceConnectors",
 } as const satisfies Record<string, AgentToolCapability>;
 
-export function firstPartyMcpToolCapability(tool: FirstPartyMcpToolName): AgentToolCapability {
+export function firstPartyMcpToolCapability(tool: FirstPartyMcpToolName): AgentFirstPartyToolOwner {
   return FIRST_PARTY_MCP_TOOL_CAPABILITIES[tool];
 }
 
@@ -506,10 +524,21 @@ export type AgentToolEnvironment = {
   media?: boolean | undefined;
   hasDeferredTools?: boolean;
   routerInHistory?: boolean;
+  /**
+   * Whether the turn has a managed sandbox or Connected Machine attached.
+   * `false` withholds the `sandbox`-owned first-party tools, which could never
+   * find a command; undefined means not yet known and keeps them.
+   */
+  sandboxAttached?: boolean;
 };
 
+/** Runtime mechanics every configured agent receives. */
 export const AGENT_RUNTIME_MECHANIC_TOOL_NAMES = [
   "wait_for_input",
+] as const satisfies readonly FirstPartyMcpToolName[];
+
+/** First-party tools a configured agent receives whenever compute is attached. */
+export const AGENT_SANDBOX_MECHANIC_TOOL_NAMES = [
   "command_read",
   "command_wait",
 ] as const satisfies readonly FirstPartyMcpToolName[];
@@ -517,7 +546,9 @@ export const AGENT_RUNTIME_MECHANIC_TOOL_NAMES = [
 /**
  * The one turn-time capability gate. Null means the historical attachment
  * rules, including unconditional Skill tools and router. Resource-derived
- * sandbox tools, product MCPs and runtime mechanics are never toggled.
+ * sandbox tools, product MCPs and runtime mechanics are never toggled; the
+ * `sandbox`-owned first-party tools follow `environment.sandboxAttached` for
+ * every session, configured or not.
  */
 export function resolveAgentToolFamilies(
   config: ResolvedAgentConfig | null | undefined,
@@ -532,8 +563,10 @@ export function resolveAgentToolFamilies(
   const humanInput = enabled("humanInput") && environment.humanInput !== false;
   const media = enabled("media") && environment.media !== false;
   const skills = !config ? "manage" : enabled("skills") ? config.capabilities.skills : false;
+  const sandboxTools = environment.sandboxAttached !== false;
   const allowsFirstPartyTool = (name: FirstPartyMcpToolName): boolean => {
-    const owner = FIRST_PARTY_MCP_TOOL_CAPABILITIES[name];
+    const owner: AgentFirstPartyToolOwner = FIRST_PARTY_MCP_TOOL_CAPABILITIES[name];
+    if (owner === "sandbox") return sandboxTools;
     return owner === "runtime" || enabled(owner);
   };
   return {
@@ -547,11 +580,14 @@ export function resolveAgentToolFamilies(
     allowsFirstPartyTool,
     firstPartyTools(names: readonly FirstPartyMcpToolName[]): FirstPartyMcpToolName[] {
       return !config
-        ? [...names]
+        ? names.filter(
+            (name) => sandboxTools || FIRST_PARTY_MCP_TOOL_CAPABILITIES[name] !== "sandbox",
+          )
         : [
             ...new Set([
               ...names.filter(allowsFirstPartyTool),
               ...AGENT_RUNTIME_MECHANIC_TOOL_NAMES,
+              ...(sandboxTools ? AGENT_SANDBOX_MECHANIC_TOOL_NAMES : []),
             ]),
           ];
     },
@@ -656,6 +692,7 @@ export const AGENT_PROMPT_MODULE_IDS = [
   "workspace_environment",
   "rig",
   "artifacts",
+  "media",
   "goals",
   "subagents",
   "knowledge",
@@ -676,6 +713,7 @@ export const AGENT_PROMPT_MODULE_TITLES: Readonly<Record<AgentPromptModuleId, st
   workspace_environment: "Workspace environment",
   rig: "Sandbox environment",
   artifacts: "Documents, files, and visuals",
+  media: "Images and video",
   goals: "Goals",
   subagents: "Session coordination",
   knowledge: "Knowledge",
@@ -689,6 +727,7 @@ export const AGENT_CAPABILITY_PROMPT_MODULES: Readonly<
   Partial<Record<AgentCapabilityId, readonly AgentPromptModuleId[]>>
 > = {
   artifacts: ["artifacts"],
+  media: ["media"],
   goals: ["goals"],
   subagents: ["subagents"],
   knowledge: ["knowledge"],
@@ -704,7 +743,6 @@ export const AgentConfigErrorCode = z.enum([
   "agent_capability_unavailable",
   "agent_config_conflict",
   "agent_config_widening",
-  "agent_config_not_enabled",
 ]);
 export type AgentConfigErrorCode = z.infer<typeof AgentConfigErrorCode>;
 
@@ -858,10 +896,7 @@ export type ResolveAgentConfigInput = {
   /** The legacy session `instructions` field (alias target). */
   instructions?: string | undefined;
   workspace: AgentConfigWorkspaceContext;
-  deployment: AgentConfigDeploymentLimits & {
-    admissionEnabled: boolean;
-    defaultForNewSessions: boolean;
-  };
+  deployment: AgentConfigDeploymentLimits;
   /** Undefined for a top-level session. */
   parent?: AgentConfigParent | undefined;
   /** Whether the new session carries a goal. */
@@ -950,19 +985,13 @@ function resolveInstructionsAlias(
  * Resolve the frozen agent configuration for a new session.
  *
  * Order: deployment limits, then the workspace default, then the request, then
- * the parent (children only narrow). Returns `config: null` (exact legacy)
- * when nothing asks for a configuration: no request `agent`, no configured
- * parent, no honored workspace default, and the default-for-new-sessions
- * switch off (or a legacy parent, which keeps its tree legacy).
+ * the parent (children only narrow). An omitted `agent` on a top-level
+ * session resolves the workspace default, else `{ capabilities: "all" }`.
+ * Returns `config: null` (exact legacy) only under a legacy parent, which
+ * keeps its tree legacy, and for site-auth maintenance sessions.
  */
 export function resolveAgentConfig(input: ResolveAgentConfigInput): ResolveAgentConfigResult {
   const { request } = input;
-  if (request !== undefined && !input.deployment.admissionEnabled) {
-    throw new AgentConfigError(
-      "agent_config_not_enabled",
-      "agent configuration is not enabled on this deployment",
-    );
-  }
   const instructions = resolveInstructionsAlias(request, input.instructions);
   const requestConfigFields =
     request !== undefined &&
@@ -972,7 +1001,7 @@ export function resolveAgentConfig(input: ResolveAgentConfigInput): ResolveAgent
       request.instructions !== undefined);
 
   const parent = input.parent;
-  const workspaceDefaults = input.deployment.admissionEnabled ? input.workspace.defaults : null;
+  const workspaceDefaults = input.workspace.defaults;
 
   // --- Omitted agent ---------------------------------------------------------
   if (!requestConfigFields) {
@@ -993,11 +1022,8 @@ export function resolveAgentConfig(input: ResolveAgentConfigInput): ResolveAgent
       const config = resolveTopLevel(input, workspaceDefaults, "workspace_default");
       return { config, instructions };
     }
-    if (input.deployment.defaultForNewSessions) {
-      const config = resolveTopLevel(input, { capabilities: "all" }, "deployment_default");
-      return { config, instructions };
-    }
-    return { config: null, instructions };
+    const config = resolveTopLevel(input, { capabilities: "all" }, "deployment_default");
+    return { config, instructions };
   }
 
   // --- Explicit agent ---------------------------------------------------------
@@ -1120,18 +1146,12 @@ export function resolveAgentConfigUpdate(input: {
   current: ResolvedAgentConfig | null;
   legacyCeiling: ResolvedAgentCapabilities;
   request: AgentConfigRequest;
-  deployment: AgentConfigDeploymentLimits & { admissionEnabled: boolean };
+  deployment: AgentConfigDeploymentLimits;
   onlyNarrow: boolean;
   /** A parent's configuration or legacy ceiling; children never widen past it. */
   parentCeiling?: ResolvedAgentCapabilities | undefined;
   goal: boolean;
 }): ResolvedAgentConfig {
-  if (!input.deployment.admissionEnabled) {
-    throw new AgentConfigError(
-      "agent_config_not_enabled",
-      "agent configuration is not enabled on this deployment",
-    );
-  }
   const current: ResolvedAgentConfig = input.current ?? {
     version: 1,
     from: "all",
@@ -1217,8 +1237,8 @@ export function agentConfigFirstPartyMcpTools(
   explicit?: readonly FirstPartyMcpToolName[],
 ): FirstPartyMcpToolName[] {
   for (const tool of explicit ?? []) {
-    const owner = FIRST_PARTY_MCP_TOOL_CAPABILITIES[tool];
-    if (owner !== "runtime" && capabilityFilteredOut(config, owner)) {
+    const owner: AgentFirstPartyToolOwner = FIRST_PARTY_MCP_TOOL_CAPABILITIES[tool];
+    if (!isDerivedAgentToolOwner(owner) && capabilityFilteredOut(config, owner)) {
       throw new AgentConfigError(
         "agent_config_conflict",
         `firstPartyMcpTools lists ${tool}, but agent capability ${owner} is off`,
@@ -1227,8 +1247,8 @@ export function agentConfigFirstPartyMcpTools(
     }
   }
   return baseline.filter((tool) => {
-    const owner = FIRST_PARTY_MCP_TOOL_CAPABILITIES[tool];
-    return owner === "runtime" || !capabilityFilteredOut(config, owner);
+    const owner: AgentFirstPartyToolOwner = FIRST_PARTY_MCP_TOOL_CAPABILITIES[tool];
+    return isDerivedAgentToolOwner(owner) || !capabilityFilteredOut(config, owner);
   });
 }
 
@@ -1243,9 +1263,9 @@ export function agentConfigAddedFirstPartyMcpTools(
   defaults: readonly FirstPartyMcpToolName[],
 ): FirstPartyMcpToolName[] {
   return defaults.filter((tool) => {
-    const owner = FIRST_PARTY_MCP_TOOL_CAPABILITIES[tool];
+    const owner: AgentFirstPartyToolOwner = FIRST_PARTY_MCP_TOOL_CAPABILITIES[tool];
     return (
-      owner !== "runtime" &&
+      !isDerivedAgentToolOwner(owner) &&
       !agentCapabilityEnabled(previous, owner) &&
       agentCapabilityEnabled(next.capabilities, owner)
     );
@@ -1339,7 +1359,7 @@ export function legacyEffectiveAgentCapabilities(input: {
    */
   defaultServerIds?: Iterable<string> | undefined;
 }): ResolvedAgentCapabilities {
-  const selected = new Set<AgentToolCapability>(
+  const selected = new Set<AgentFirstPartyToolOwner>(
     input.firstPartyMcpTools.map((tool) => FIRST_PARTY_MCP_TOOL_CAPABILITIES[tool]),
   );
   const ids = new Set(input.tools.map((tool) => tool.id));

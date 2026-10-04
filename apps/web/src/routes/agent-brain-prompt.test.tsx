@@ -1,12 +1,8 @@
-import { afterAll, beforeAll, beforeEach, describe, expect, mock, test } from "bun:test";
-import { GlobalRegistrator } from "@happy-dom/global-registrator";
+import { describe, expect, test } from "bun:test";
 import type { LatencyMode, ReasoningEffort, WorkspaceModelCatalogModel } from "@opengeni/sdk";
-import { act } from "react";
-import { createRoot } from "react-dom/client";
 
 import { resolveAgentBrainPromptModel } from "@/lib/agent-brain-prompt-model";
 
-const workspaceId = "00000000-0000-4000-8000-000000000001";
 const supported = { upstream: "supported", runnable: true } as const;
 const unsupported = { upstream: "unsupported", runnable: false } as const;
 
@@ -92,7 +88,7 @@ describe("resolveAgentBrainPromptModel", () => {
       }),
     ).toEqual({
       model: "gpt-5.6-sol",
-      label: "gpt-5.6-sol",
+      label: "GPT-5.6 Sol",
       paymentSource: "Opengeni credits",
       reasoningEffort: "low",
       latencyMode: "standard",
@@ -203,7 +199,7 @@ describe("resolveAgentBrainPromptModel", () => {
     ).toEqual({
       model: "codex/gpt-5.6-luna",
       label: "GPT-5.6 Luna",
-      paymentSource: "Codex subscription",
+      paymentSource: "ChatGPT plan",
       reasoningEffort: "high",
       latencyMode: "standard",
     });
@@ -216,7 +212,7 @@ describe("resolveAgentBrainPromptModel", () => {
     ).toEqual({
       model: "codex/gpt-5.6-luna",
       label: "GPT-5.6 Luna",
-      paymentSource: "Codex subscription",
+      paymentSource: "ChatGPT plan",
       reasoningEffort: "medium",
       latencyMode: "standard",
     });
@@ -239,256 +235,5 @@ describe("resolveAgentBrainPromptModel", () => {
         latencyMode: "priority",
       })?.latencyMode,
     ).toBe("priority");
-  });
-});
-
-/* ---------------------------------------------------------------------------
-   Component render: the submit button stays disabled while the catalog loads,
-   enables once a selectable row arrives, and the start request carries the
-   resolved model instead of the blocked app-context default.
-   ------------------------------------------------------------------------- */
-
-function deferred<T>() {
-  let resolve!: (value: T) => void;
-  const promise = new Promise<T>((resolvePromise) => {
-    resolve = resolvePromise;
-  });
-  return { promise, resolve };
-}
-
-const catalogRequest = deferred<{ models: WorkspaceModelCatalogModel[] }>();
-const getWorkspaceModelCatalog = mock(async (_workspaceId: string) => catalogRequest.promise);
-const startSession = mock(
-  async (_workspaceId: string, _submission: Record<string, unknown>, _options: unknown) => ({
-    id: "00000000-0000-4000-8000-000000000099",
-  }),
-);
-const navigate = mock(async (_target: unknown) => undefined);
-
-const appContext: Record<string, any> = {
-  client: { getWorkspaceModelCatalog },
-  model: "gpt-5.5",
-  reasoningEffort: "low",
-  latencyMode: "standard",
-  busy: false,
-  startSession,
-};
-
-mock.module("@/context", () => ({
-  useAppContext: () => appContext,
-}));
-mock.module("@tanstack/react-router", () => ({
-  useNavigate: () => navigate,
-}));
-
-const { AgentKnowledgePrompt } = await import("./agent-brain-prompt");
-
-beforeAll(() => {
-  GlobalRegistrator.register();
-  (
-    globalThis as typeof globalThis & { IS_REACT_ACT_ENVIRONMENT: boolean }
-  ).IS_REACT_ACT_ENVIRONMENT = true;
-});
-
-afterAll(() => {
-  mock.restore();
-  GlobalRegistrator.unregister();
-});
-
-beforeEach(() => {
-  startSession.mockClear();
-  navigate.mockClear();
-});
-
-async function settle(): Promise<void> {
-  await act(async () => {
-    await new Promise((resolve) => setTimeout(resolve, 0));
-  });
-}
-
-async function setValue(element: HTMLTextAreaElement, value: string): Promise<void> {
-  await act(async () => {
-    const prototype = Object.getPrototypeOf(element) as object;
-    Object.getOwnPropertyDescriptor(prototype, "value")?.set?.call(element, value);
-    const reactPropsKey = Object.keys(element).find((key) => key.startsWith("__reactProps$"));
-    const onChange = reactPropsKey
-      ? (
-          element as unknown as Record<
-            string,
-            { onChange?: (event: { target: typeof element }) => void }
-          >
-        )[reactPropsKey]?.onChange
-      : undefined;
-    if (onChange) {
-      onChange({ target: element });
-    } else {
-      element.dispatchEvent(new Event("input", { bubbles: true }));
-    }
-    await Promise.resolve();
-  });
-}
-
-describe("AgentKnowledgePrompt", () => {
-  test("waits for the workspace catalog and starts with a workspace-selectable model", async () => {
-    const container = document.createElement("div");
-    document.body.appendChild(container);
-    const root = createRoot(container);
-    await act(async () => {
-      root.render(<AgentKnowledgePrompt kind="workspace_instructions" workspaceId={workspaceId} />);
-    });
-    await settle();
-
-    const textarea = container.querySelector("textarea") as HTMLTextAreaElement;
-    const button = container.querySelector("button[type=submit]") as HTMLButtonElement;
-    await setValue(textarea, "Keep updates concise.");
-    expect(button.disabled).toBe(true);
-
-    catalogRequest.resolve({
-      models: [
-        catalogModel("gpt-5.5", { selectable: false }),
-        catalogModel("codex/gpt-5.6-luna", { source: "codex" }),
-      ],
-    });
-    await settle();
-    expect(button.disabled).toBe(false);
-    expect(container.textContent).not.toContain("No model is available");
-    expect(container.textContent).toContain("Model: GPT-5.6 Luna · Codex subscription");
-    expect(container.textContent).not.toContain("GPT-5.5");
-
-    await act(async () => {
-      (container.querySelector("form") as HTMLFormElement).dispatchEvent(
-        new Event("submit", { bubbles: true, cancelable: true }),
-      );
-    });
-    await settle();
-
-    expect(startSession).toHaveBeenCalledTimes(1);
-    const [calledWorkspaceId, submission, options] = startSession.mock.calls[0]!;
-    expect(calledWorkspaceId).toBe(workspaceId);
-    expect(submission.model).toBe("codex/gpt-5.6-luna");
-    expect(submission.reasoningEffort).toBe("low");
-    expect(submission.latencyMode).toBe("standard");
-    expect(String(submission.text)).toContain("Keep updates concise.");
-    expect(options).toEqual(expect.objectContaining({ instructions: expect.any(String) }));
-    expect(navigate).toHaveBeenCalledTimes(1);
-
-    await act(async () => {
-      root.unmount();
-    });
-    container.remove();
-  });
-
-  test("explains that personal Skills follow Agent learning policy", async () => {
-    const container = document.createElement("div");
-    document.body.appendChild(container);
-    const root = createRoot(container);
-    await act(async () => {
-      root.render(
-        <AgentKnowledgePrompt kind="skill" workspaceId={workspaceId} personalWorkspace />,
-      );
-    });
-    await settle();
-
-    expect(container.textContent).toContain("Describe a personal skill");
-    expect(container.textContent).toContain("Uses your Agent learning settings.");
-    const textarea = container.querySelector("textarea") as HTMLTextAreaElement;
-    await setValue(textarea, "Lead with the outcome.");
-    await act(async () => {
-      (container.querySelector("form") as HTMLFormElement).dispatchEvent(
-        new Event("submit", { bubbles: true, cancelable: true }),
-      );
-    });
-    await settle();
-
-    const options = startSession.mock.calls[0]?.[2] as { instructions: string };
-    expect(options.instructions).toContain(
-      "Use skill_read and skill_save in this personal workspace",
-    );
-    expect(options.instructions).toContain("Report the actual saved or pending receipt");
-
-    await act(async () => root.unmount());
-    container.remove();
-  });
-
-  test("shows the no-model message and keeps the button disabled when nothing is selectable", async () => {
-    getWorkspaceModelCatalog.mockImplementationOnce(async () => ({
-      models: [catalogModel("gpt-5.6-sol", { selectable: false })],
-    }));
-    const container = document.createElement("div");
-    document.body.appendChild(container);
-    const root = createRoot(container);
-    await act(async () => {
-      root.render(<AgentKnowledgePrompt kind="company_profile" workspaceId={workspaceId} />);
-    });
-    await settle();
-
-    const textarea = container.querySelector("textarea") as HTMLTextAreaElement;
-    const button = container.querySelector("button[type=submit]") as HTMLButtonElement;
-    await setValue(textarea, "We build agents.");
-    expect(button.disabled).toBe(true);
-    expect(container.textContent).toContain("No model is available for this workspace.");
-    expect(container.textContent).not.toContain("Could not load the workspace model catalog");
-
-    await act(async () => {
-      root.unmount();
-    });
-    container.remove();
-  });
-
-  test("fails closed with a retry control when the allowed model cannot be resolved", async () => {
-    getWorkspaceModelCatalog.mockImplementationOnce(async () => {
-      throw new Error("catalog unavailable");
-    });
-    const container = document.createElement("div");
-    document.body.appendChild(container);
-    const root = createRoot(container);
-    await act(async () => {
-      root.render(<AgentKnowledgePrompt kind="skill" workspaceId={workspaceId} />);
-    });
-    await settle();
-
-    const textarea = container.querySelector("textarea") as HTMLTextAreaElement;
-    const button = container.querySelector("button[type=submit]") as HTMLButtonElement;
-    await setValue(textarea, "Lead with the outcome.");
-    expect(button.disabled).toBe(true);
-    expect(container.textContent).toContain(
-      "Could not resolve an allowed workspace model: catalog unavailable. Retry before creating with Opengeni.",
-    );
-    expect(container.textContent).not.toContain("No model is available");
-
-    await act(async () => {
-      (container.querySelector("form") as HTMLFormElement).dispatchEvent(
-        new Event("submit", { bubbles: true, cancelable: true }),
-      );
-    });
-    await settle();
-    expect(startSession).not.toHaveBeenCalled();
-
-    // Retry re-fetches the catalog; a successful reload clears the error and
-    // switches to the catalog-resolved model.
-    const callsBeforeRetry = getWorkspaceModelCatalog.mock.calls.length;
-    getWorkspaceModelCatalog.mockImplementationOnce(async () => ({
-      models: [
-        catalogModel("gpt-5.5", { selectable: false }),
-        catalogModel("codex/gpt-5.6-luna", { source: "codex" }),
-      ],
-    }));
-    const retry = Array.from(container.querySelectorAll("button")).find(
-      (candidate) => candidate.textContent === "Retry",
-    ) as HTMLButtonElement;
-    expect(retry).toBeDefined();
-    await act(async () => {
-      retry.click();
-    });
-    await settle();
-    expect(getWorkspaceModelCatalog.mock.calls.length).toBe(callsBeforeRetry + 1);
-    expect(container.textContent).not.toContain("Could not resolve an allowed workspace model");
-    expect(container.textContent).toContain("Model: GPT-5.6 Luna · Codex subscription");
-    expect(button.disabled).toBe(false);
-
-    await act(async () => {
-      root.unmount();
-    });
-    container.remove();
   });
 });

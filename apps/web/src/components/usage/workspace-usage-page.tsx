@@ -19,7 +19,7 @@ import { isForbidden, useWorkspaceBudget } from "./use-workspace-budget";
 /**
  * Workspace settings > Usage. Everyone sees their own limit and the workspace
  * budget; workspace admins also see every member and can change their limits.
- * The budget itself belongs to organization owners (Billing & usage).
+ * The budget itself belongs to organization owners (Billing).
  */
 export function WorkspaceUsagePage({
   workspaceId,

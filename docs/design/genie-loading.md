@@ -12,7 +12,10 @@ preserves the existing elapsed time and orb, and does not claim model progress.
 The waiting-state disclosure reads “Show details”. Explicit host phrase/message
 overrides still apply in both states.
 
-Startup phase events and their projection remain unchanged. The Debug inspector's
+Startup diagnostics retain technical failure receipts. Expected sandbox lifecycle
+transitions present as neutral waits, including interrupted model preparation;
+actual preparation and model provider failures remain failures. A successful
+recovery attempt replaces its interrupted startup spans. The Debug inspector's
 Startup tab displays recorded durations, including overlapping phases. Its
 “Show startup details in chat” switch is off by default and stored only in the
 current browser under `opengeni:startup-details:v1`. “Behind the magic” appears after 15 seconds and reveals

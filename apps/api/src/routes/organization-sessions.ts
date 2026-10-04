@@ -7,6 +7,7 @@ import {
 } from "@opengeni/contracts";
 import {
   accountScopedApiKeyWorkspaceAuthority,
+  organizationWorkspaceInScope,
   hasPermission,
   requireAccessContext,
   requireAccessGrantAuthorization,
@@ -14,6 +15,7 @@ import {
   SessionAuthorizationDeniedError,
   SessionAuthorizationUnavailableError,
   type ApiRouteDeps,
+  isVerifiedDelegatedHumanAuthorization,
 } from "@opengeni/core";
 import {
   decodeSessionListCursor,
@@ -161,9 +163,13 @@ export function registerOrganizationSessionRoutes(app: Hono, deps: ApiRouteDeps)
     // Personal workspaces are excluded by the inventory itself; the stable id
     // order is what makes the `{ workspaceId, cursor }` continuation resumable
     // even when a workspace is created or deleted between pages.
-    const workspaces = (await listSharedWorkspacesForAccount(deps.db, organizationId)).sort(
-      compareWorkspaceIds,
-    );
+    const authority = accountScopedApiKeyWorkspaceAuthority(context);
+    const workspaces = (await listSharedWorkspacesForAccount(deps.db, organizationId))
+      .filter(
+        (workspace) =>
+          !authority || organizationWorkspaceInScope(authority.workspaceScope, workspace.id),
+      )
+      .sort(compareWorkspaceIds);
     let index = 0;
     let innerCursor: string | null = null;
     let pinnedOffset = 0;
@@ -298,7 +304,9 @@ async function listWorkspaceSessionPage(
           ? { scopeSubjectId: input.query.scopeSubjectId }
           : {}),
         ...(authorizationScope ? { authorizationScope } : {}),
-        personalWorkspaceOwnerException: authorization.canonicalManagedHumanSession,
+        personalWorkspaceOwnerException:
+          authorization.canonicalManagedHumanSession ||
+          isVerifiedDelegatedHumanAuthorization(authorization),
       });
     const withStatus = (rows: Session[]) =>
       input.query.status ? rows.filter((session) => session.status === input.query.status) : rows;

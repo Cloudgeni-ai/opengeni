@@ -52,6 +52,12 @@ Legacy unpinned selectors retain their existing eligible-account behavior.
 New catalog OAuth/API-key enables explicitly select this mode. Reconnects retain
 an existing selector or exact pin; adding an account never silently converts an
 existing exact installation into a selector.
+Slack's reviewed Web API bridge retains the official MCP catalog/OAuth identity
+and native accepted-account authority. It requires actual reported user scopes,
+normalizes legacy comma-packed grants, and uses scope-filtered discovery rather
+than authenticating to Slack's hosted MCP endpoint. The shared database quota and
+bot context limits are described in [Slack](slack-bot.md#unlisted-pilot-and-rollout).
+
 The dedicated Slack account setup enables a previously disabled stock Slack
 capability with this selector after successful account connection. Bot setup and
 reconnects of already-enabled capabilities do not rewrite their bindings.
@@ -106,6 +112,14 @@ Dedicated first-party surfaces, such as personal GitHub repository access and
 Google Drive publication, retain their existing specialized selection contracts;
 they accept at most one account per specialized surface. Generic MCP account
 attachment does not broaden those permissions.
+
+The current-human HTTP/SDK and public MCP gateways project these same stable
+account-qualified routes from the viewer's live eligible connections. A Site's
+retained identities intersect this projection exactly; canonical connector IDs
+never substitute for a requested account. Service gateways expose workspace
+accounts only. Generated API adapters retain each route's exact connection and
+live authority generation. Gateway requests rebuild the projection, and provider
+requests still revalidate the bound connection.
 
 The former host-specific credential callback is removed from API and worker
 startup and from the core package. The direct workspace tool gateway also uses

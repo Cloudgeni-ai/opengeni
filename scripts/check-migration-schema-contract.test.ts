@@ -109,6 +109,32 @@ function fullyRegistered(files: readonly string[]) {
   return { forward: files, probes: files, pins: files };
 }
 
+/** Independent fixture for the executable semantic metadata contract. */
+function semanticContract(forward: readonly string[] = []): string {
+  return `
+import { readdir } from "node:fs/promises";
+import { join } from "node:path";
+import { buildSchemaContract as buildCompleteSchemaContract } from "./release-schema-contract";
+${miniContract({ forward })}
+test("checks complete ledger metadata against migration files", async () => {
+  const completeSourceContract = await buildCompleteSchemaContract();
+  const sourceMigrationPaths = (
+    await readdir(join(import.meta.dir, "../packages/db/drizzle"), { withFileTypes: true })
+  )
+    .filter((entry) => entry.isFile() && entry.name.endsWith(".sql"))
+    .map((entry) => entry.name)
+    .sort();
+  const contractMigrationPaths = completeSourceContract.migrations.map((migration) => migration.path);
+  expect(completeSourceContract).toMatchObject({
+    fileCount: sourceMigrationPaths.length,
+    latestMigration: sourceMigrationPaths.at(-1) ?? null,
+  });
+  expect(contractMigrationPaths).toEqual(sourceMigrationPaths);
+  expect(new Set(contractMigrationPaths).size).toBe(contractMigrationPaths.length);
+});
+`;
+}
+
 function registration(sites: Parameters<typeof miniContract>[0]): ContractRegistration {
   return parseContractRegistration(miniContract(sites));
 }
@@ -121,6 +147,7 @@ function registration(sites: Parameters<typeof miniContract>[0]): ContractRegist
 async function fixtureRepo(options: {
   added: readonly string[];
   sites: Parameters<typeof miniContract>[0];
+  source?: string;
 }): Promise<string> {
   const dir = await mkdtemp(join(tmpdir(), "migration-schema-contract-"));
   scratch.push(dir);
@@ -146,7 +173,7 @@ async function fixtureRepo(options: {
   }
   await writeFile(
     join(root, "scripts/release-schema-contract.test.ts"),
-    miniContract(options.sites),
+    options.source ?? miniContract(options.sites),
   );
   await git(root, "add", "-A");
   // `--allow-empty`: the no-migration-added case leaves the tree identical to the
@@ -473,6 +500,157 @@ describe("release-schema contract parsing", () => {
   });
 });
 
+describe("semantic complete-ledger registration", () => {
+  test("uses source semantics instead of adding per-file count/latest pins", () => {
+    const parsed = parseContractRegistration(semanticContract(["0003_new.sql"]));
+    expect(parsed.semanticLedger).toBe(true);
+    expect(parsed.fileCountProbes).toEqual([]);
+    expect(parsed.latestMigrationPins).toEqual([]);
+    expect(
+      unregisteredMigrations(
+        ["0001_first.sql", "0002_second.sql", "0003_new.sql"],
+        { ref: "origin/main", files: ["0001_first.sql", "0002_second.sql"] },
+        parsed,
+      ),
+    ).toEqual([]);
+  });
+
+  test("still requires every new forward registration, including cross-branch additions", () => {
+    const parsed = parseContractRegistration(semanticContract(["0003_new.sql"]));
+    const missing = unregisteredMigrations(
+      ["0001_first.sql", "0003_new.sql", "0004_next.sql", "custom_probe.sql"],
+      { ref: "origin/main", files: ["0001_first.sql"] },
+      parsed,
+    );
+    expect(missing).toEqual([
+      { file: "0004_next.sql", missing: ["forward-list"], absentFrom: "origin/main" },
+      { file: "custom_probe.sql", missing: ["forward-list"], absentFrom: "origin/main" },
+    ]);
+    const guidance = registrationFixLines(missing, new Set(), true).join("\n");
+    expect(guidance).toContain("do not add file-count indicators or latest-migration name pins");
+    expect(guidance).toContain("Do NOT instead pin a fresh hash");
+    expect(guidance).not.toContain("Add a presence probe");
+    expect(guidance).not.toContain("Prepend a `latestMigration` branch");
+  });
+
+  test("accepts local/import renaming, quote style, annotations, and harmless comments", () => {
+    const renamed = semanticContract(["0003_new.sql"])
+      .replaceAll("completeSourceContract", "completeLedger")
+      .replaceAll("sourceMigrationPaths", "filesFromDisk")
+      .replaceAll("contractMigrationPaths", "contractPaths")
+      .replaceAll("(entry)", "(file: Entry)")
+      .replaceAll("entry.", "file.")
+      .replace("import { readdir }", "import { readdir as readMigrationFiles }")
+      .replace("await readdir(", "await readMigrationFiles(")
+      .replace('"../packages/db/drizzle"', "'../packages/db/drizzle'")
+      .replace(".sort();", ".sort(/* lexical SQL-file order */);");
+    expect(parseContractRegistration(renamed).semanticLedger).toBe(true);
+  });
+
+  test.each([
+    [
+      "count from the contract, not disk",
+      "fileCount: sourceMigrationPaths.length",
+      "fileCount: contractMigrationPaths.length",
+    ],
+    ["a fixed count", "fileCount: sourceMigrationPaths.length", "fileCount: 999"],
+    [
+      "latest from the contract, not disk",
+      "latestMigration: sourceMigrationPaths.at(-1)",
+      "latestMigration: contractMigrationPaths.at(-1)",
+    ],
+    [
+      "a fixed latest name",
+      "latestMigration: sourceMigrationPaths.at(-1) ?? null",
+      'latestMigration: "0003_new.sql"',
+    ],
+    ["wrong source directory", '"../packages/db/drizzle"', '"../fixtures"'],
+    [
+      "filtered rather than complete builder",
+      "await buildCompleteSchemaContract()",
+      "await buildSchemaContract()",
+    ],
+    ["wrong builder module", 'from "./release-schema-contract"', 'from "./filtered-contract"'],
+    [
+      "type-only builder import",
+      "import { buildSchemaContract as",
+      "import type { buildSchemaContract as",
+    ],
+    ["missing file-only selection", "entry.isFile() && ", ""],
+    ["missing SQL selection", ' && entry.name.endsWith(".sql")', ""],
+    ["missing ordering", ".sort();", ";"],
+    ["incorrect ordering", ".sort();", ".sort(() => -1);"],
+    [
+      "only partial path comparison",
+      "expect(contractMigrationPaths).toEqual(sourceMigrationPaths)",
+      "expect(contractMigrationPaths).toContain(sourceMigrationPaths[0])",
+    ],
+    [
+      "commented-out path assertion",
+      "expect(contractMigrationPaths).toEqual(sourceMigrationPaths);",
+      "/* expect(contractMigrationPaths).toEqual(sourceMigrationPaths); */",
+    ],
+    [
+      "commented-out uniqueness",
+      "expect(new Set(contractMigrationPaths).size).toBe(contractMigrationPaths.length);",
+      "// expect(new Set(contractMigrationPaths).size).toBe(contractMigrationPaths.length);",
+    ],
+    [
+      "tautological uniqueness",
+      "new Set(contractMigrationPaths).size",
+      "contractMigrationPaths.length",
+    ],
+    ["skipped test", 'test("checks complete ledger', 'test.skip("checks complete ledger'],
+    [
+      "unconditional early return",
+      "const completeSourceContract = await",
+      "return; const completeSourceContract = await",
+    ],
+    ["mutable directory paths", "const sourceMigrationPaths =", "let sourceMigrationPaths ="],
+  ])("rejects %s even though unrelated legacy probes remain", (_label, before, after) => {
+    const source = semanticContract(["0003_new.sql"]);
+    expect(source).toContain(before);
+    expect(() => parseContractRegistration(source.replace(before, after))).toThrow(
+      ContractParseError,
+    );
+  });
+
+  test("a commented complete test cannot opt in to semantic registration", () => {
+    const source = semanticContract(["0003_new.sql"]);
+    const start = source.indexOf('test("checks complete ledger');
+    expect(() =>
+      parseContractRegistration(source.slice(0, start) + "/*" + source.slice(start) + "*/"),
+    ).toThrow(ContractParseError);
+  });
+
+  test.each([
+    ["shadowed matcher", "const expect = () => ({ toMatchObject() {}, toEqual() {}, toBe() {} });"],
+    ["shadowed directory reader", "const readdir = async () => [];"],
+    ["shadowed uniqueness constructor", "const Set = class { size = 0; };"],
+    ["unreachable registration", "return;"],
+    ["conditionally unreachable registration", "if (true) return;"],
+  ])("rejects %s in the enclosing registration scope", (_label, prefix) => {
+    const source = semanticContract(["0003_new.sql"]);
+    const start = source.indexOf('test("checks complete ledger');
+    const wrapped =
+      source.slice(0, start) +
+      `describe("wrapped", () => { ${prefix}\n` +
+      source.slice(start) +
+      "\n});";
+    expect(() => parseContractRegistration(wrapped)).toThrow(ContractParseError);
+  });
+
+  test("commented and string-embedded forward lists do not register additions", () => {
+    const source = semanticContract(["0003_new.sql"]);
+    const commented = source.replace('      "0003_new.sql",', '      /* "0003_new.sql", */');
+    expect(parseContractRegistration(commented).forward).not.toContain("0003_new.sql");
+    const fake =
+      source.replace("const appendedMigrationPaths = [", "const unrelated = [") +
+      "\nconst fake = 'const appendedMigrationPaths = [\"0003_new.sql\"]';\n";
+    expect(() => parseContractRegistration(fake)).toThrow(ContractParseError);
+  });
+});
+
 describe("check-migration-schema-contract CLI", () => {
   const guard = [
     "bun",
@@ -480,6 +658,51 @@ describe("check-migration-schema-contract CLI", () => {
     "--base",
     "origin/main",
   ];
+
+  test("passes source-semantic metadata only when all additions are forward-listed", async () => {
+    const root = await fixtureRepo({
+      added: ["0003_new.sql", "0004_next.sql"],
+      sites: {},
+      source: semanticContract(["0003_new.sql"]),
+    });
+    const missing = await run(root, guard);
+    expect(missing.code).toBe(1);
+    expect(missing.stderr).toContain("- 0004_next.sql  (missing: forward-list)");
+    expect(missing.stderr).not.toContain("Add a presence probe");
+    await writeFile(
+      join(root, "scripts/release-schema-contract.test.ts"),
+      semanticContract(["0003_new.sql", "0004_next.sql"]),
+    );
+    const registered = await run(root, guard);
+    expect(registered.code).toBe(0);
+    expect(registered.stderr).toBe("");
+  });
+
+  test("fails closed on altered semantic assertions even when no migration was added", async () => {
+    const root = await fixtureRepo({
+      added: [],
+      sites: {},
+      source: semanticContract().replace(
+        "fileCount: sourceMigrationPaths.length",
+        "fileCount: contractMigrationPaths.length",
+      ),
+    });
+    const result = await run(root, guard);
+    expect(result.code).toBe(1);
+    expect(result.stderr).toContain("independent, ordered SQL-file paths");
+  });
+
+  test("semantic mode retains the unreachable governed-checkpoint reference audit", async () => {
+    const root = await fixtureRepo({
+      added: [],
+      sites: {},
+      source: semanticContract(["0001_first.sql"]),
+    });
+    const result = await run(root, guard);
+    expect(result.code).toBe(1);
+    expect(result.stderr).toContain("where the check can never match");
+    expect(result.stderr).toContain("- 0001_first.sql");
+  });
 
   test("fails on an unregistered migration and passes once every site names it", async () => {
     const unregistered = await fixtureRepo({ added: ["0003_new.sql"], sites: {} });

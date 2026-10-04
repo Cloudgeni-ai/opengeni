@@ -8,6 +8,7 @@ import {
 import {
   AGENT_SKILL_MANAGE_TOOL_NAMES,
   AUTOMATIC_SESSION_TITLE_FALLBACK,
+  bundledSkillSelectionForAgentConfig,
   DEFAULT_FIRST_PARTY_MCP_PERMISSIONS,
   FIRST_PARTY_IN_PROCESS_TOOL_NAMES,
   type FirstPartyMcpToolName,
@@ -395,14 +396,19 @@ export async function workspaceSessionEffectiveToolsContext(
 
 function sessionHasSkills(session: Session, context: SessionEffectiveToolsContext): boolean {
   if (context.hasWorkspaceSkills || session.skills.length > 0) return true;
-  // Undefined is the worker's bundled default. Explicit [] means no bundles.
-  if (session.bundledSkillIds === undefined) return true;
+  // Undefined is the worker's bundled default. Explicit [] means no bundles,
+  // and a "none" agent without an explicit list has none (as in the worker).
+  const bundledSkillIds = bundledSkillSelectionForAgentConfig(
+    session.bundledSkillIds,
+    session.agent,
+  );
+  if (bundledSkillIds === undefined) return true;
   const tools = new Set(
     resolveAgentToolFamilies(session.agent).firstPartyTools(
       allowedFirstPartyMcpToolsForSession(context.settings, session.firstPartyMcpTools),
     ),
   );
-  return session.bundledSkillIds.some((id) => {
+  return bundledSkillIds.some((id) => {
     if (
       [
         "builtin:opengeni-documents",
@@ -479,7 +485,7 @@ export function sessionEffectiveToolProjectionInput(
     (!session.title?.trim() || session.title.trim() === AUTOMATIC_SESSION_TITLE_FALLBACK);
   const firstPartyMcpTools =
     context && toolRefs.some((ref) => ref.id === "opengeni")
-      ? resolveAgentToolFamilies(session.agent)
+      ? resolveAgentToolFamilies(session.agent, { sandboxAttached: sandboxAvailable })
           .firstPartyTools(
             allowedFirstPartyMcpToolsForSession(context.settings, session.firstPartyMcpTools),
           )
@@ -512,7 +518,9 @@ export function sessionEffectiveToolProjectionInput(
         firstPartyModelNames.set(name, `interaction__${name}`);
         if (
           !firstPartyMcpTools.includes(name) &&
-          resolveAgentToolFamilies(session.agent).allowsFirstPartyTool(name) &&
+          resolveAgentToolFamilies(session.agent, {
+            sandboxAttached: sandboxAvailable,
+          }).allowsFirstPartyTool(name) &&
           session.firstPartyMcpTools.includes(name)
         )
           firstPartyMcpTools.push(name);
@@ -561,6 +569,7 @@ export function sessionEffectiveToolProjectionInput(
     routerInHistory:
       context?.routerInHistory === true ||
       context?.routerHistorySessionIds?.has(session.id) === true,
+    ...(context ? { sandboxAttached: sandboxAvailable } : {}),
   };
   const families = resolveAgentToolFamilies(session.agent, environment);
   environment.hasDeferredTools =

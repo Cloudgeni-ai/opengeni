@@ -177,10 +177,13 @@ hidden for five minutes).
 
 The post-sign-in setup reports `onboarding_step_viewed{step, variant?}`,
 `onboarding_step_completed{step, via}` and `onboarding_abandoned{last_step}`.
-Steps: `organization_name` (via `created`), `invitation` (via `joined`), and
-`model_access` (via `start_chatting`, `skipped`, `connected_model`, or
-`checkout`; `variant` is `credits`, `included`, or `choose`). `invitation` and
-`model_access` are final. `onboarding_abandoned` is best effort: the onboarding
+Steps: `use_case` (via `embed` or `cloud`), `organization_name` (via
+`created`), `invitation` (via `joined`), `model_access` (via `start_chatting`,
+`skipped`, `connected_model`, or `checkout`; `variant` is `credits`,
+`included`, or `choose`), and `developer_setup` (via
+`implement_with_opengeni`, `copied_prompt`, or `skipped`). `invitation`,
+`developer_setup`, and `model_access` are final, except that `model_access` is
+not final after `use_case` `embed`, whose `developer_setup` step follows. `onboarding_abandoned` is best effort: the onboarding
 view unmounted (sign out, another account) or the page was closed before a
 final step completed. Each step is reported once per document.
 

@@ -126,7 +126,7 @@ describe("credit required prompt", () => {
       ),
     );
     expect(container.textContent).toContain("Add Opengeni credits");
-    expect(container.textContent).toContain("gift code");
+    expect(container.textContent).toContain("Have a coupon code?");
     expect(container.textContent).not.toContain("Connect a model");
     const preset = container.querySelector<HTMLSelectElement>("#credit-preset")!;
     await act(async () => {
@@ -140,7 +140,7 @@ describe("credit required prompt", () => {
     expect(createBillingCheckout).toHaveBeenCalledWith({
       amountUsd: 10,
       accountId: "account-a",
-      successUrl: `${window.location.origin}/workspaces/workspace-a/organization?section=billing&checkout=success`,
+      successUrl: `${window.location.origin}/workspaces/workspace-a/organization?section=billing&checkout=success&checkoutSession={CHECKOUT_SESSION_ID}`,
       cancelUrl: `${window.location.origin}/workspaces/workspace-a/organization?section=billing&checkout=cancelled`,
     });
   });

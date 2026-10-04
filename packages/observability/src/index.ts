@@ -14,6 +14,7 @@ import {
 import { ExportQueue } from "./export-queue";
 import { failureDiagnostic, type FailureDiagnosticInput } from "./failure-diagnostic";
 export type { FailureDiagnosticInput } from "./failure-diagnostic";
+export { failureDiagnostic } from "./failure-diagnostic";
 export { createLogThrottle, type LogThrottle } from "./log-throttle";
 export {
   withMcpTelemetry,
@@ -425,6 +426,8 @@ const PUBLIC_TELEMETRY_ERROR_CLASSES = new Set([
   "MemorySearchOperationError",
   "NatsAuthCalloutOperationError",
   "OAuthOperationError",
+  "ParallelSessionTitleGenerationError",
+  "ParallelSessionTitlePersistenceError",
   "RunCredentialRenewalOperationError",
   "RunStateCompatibilityError",
   "SandboxChannelAOperationError",
@@ -488,6 +491,8 @@ const PUBLIC_TELEMETRY_ERROR_CODES = new Set([
   "not_found",
   "oauth_operation_failed",
   "otlp_export_failed",
+  "parallel_session_title_generation_failed",
+  "parallel_session_title_persistence_failed",
   "payment_required",
   "provider_verification_failed",
   "sandbox_channel_a_cancelled",
@@ -511,6 +516,12 @@ const PUBLIC_TELEMETRY_ERROR_CODES = new Set([
   "worker_shutdown_request_failed",
   "workspace_control_live_publish_failed",
 ]);
+
+// Human-readable descriptions come only from the reviewed protocol vocabulary,
+// never an exception message or a caller-supplied errorMessage attribute.
+const PUBLIC_TELEMETRY_ERROR_MESSAGES = new Map(
+  [...PUBLIC_TELEMETRY_ERROR_CODES].map((code) => [code, code.replaceAll("_", " ")]),
+);
 
 const PUBLIC_TELEMETRY_ERROR_ORIGINS = new Set([
   "api",
@@ -1540,6 +1551,7 @@ function projectPublicTelemetryAttributes(attributes: Attributes): Attributes {
       ...projectStartupDependencyAttributes(attributes),
       ...projectPublicChannelADiagnosticAttributes(attributes),
       ...projectApiFatalDiagnosticAttributes(attributes),
+      ...projectHttpDiagnosticAttributes(attributes),
       ...projectSnapshotDiagnosticAttributes(attributes),
       ...projectKnowledgeIndexDiagnosticAttributes(attributes),
       ...projectPublicDiagnosticAttributes(attributes),
@@ -1563,6 +1575,46 @@ function projectApiFatalDiagnosticAttributes(attributes: Attributes): Attributes
     ...(typeof phase === "string" && PUBLIC_API_FATAL_PHASES.has(phase) ? { phase } : {}),
     ...(typeof reasonKind === "string" && PUBLIC_API_FATAL_REASON_KINDS.has(reasonKind)
       ? { reasonKind }
+      : {}),
+  };
+}
+
+function projectHttpDiagnosticAttributes(attributes: Attributes): Attributes {
+  if (attributes.errorClass !== "HttpOperationError") return {};
+  const method = attributes.method;
+  const route = attributes.route;
+  const reasonKind = attributes.reasonKind;
+  const diagnosticId = attributes.diagnosticId;
+  return {
+    ...(typeof method === "string" &&
+    ["GET", "HEAD", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"].includes(method)
+      ? { method }
+      : {}),
+    // Callers supply routeLabel(), not a URL, query, or concrete tenant path.
+    ...(typeof route === "string" &&
+    route.length <= 256 &&
+    /^\/(?:[A-Za-z0-9_-]+|:[A-Za-z][A-Za-z0-9_]*)(?:\/(?:[A-Za-z0-9_-]+|:[A-Za-z][A-Za-z0-9_]*))*$/.test(
+      route,
+    )
+      ? { route }
+      : {}),
+    ...(typeof reasonKind === "string" &&
+    [
+      "Error",
+      "TypeError",
+      "RangeError",
+      "AggregateError",
+      "PostgresError",
+      "DrizzleQueryError",
+      "SessionEventPersistenceError",
+      "SandboxWorkspaceMutationFencedError",
+      "Response",
+    ].includes(reasonKind)
+      ? { reasonKind }
+      : {}),
+    ...(typeof diagnosticId === "string" &&
+    /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(diagnosticId)
+      ? { diagnosticId }
       : {}),
   };
 }
@@ -1683,7 +1735,7 @@ function projectPublicDiagnosticAttributes(attributes: Attributes): Attributes {
         ? errorClass
         : "OperationError",
     ...(typeof errorCode === "string" && PUBLIC_TELEMETRY_ERROR_CODES.has(errorCode)
-      ? { errorCode }
+      ? { errorCode, errorMessage: PUBLIC_TELEMETRY_ERROR_MESSAGES.get(errorCode)! }
       : {}),
     ...(typeof status === "number" && Number.isInteger(status) && status >= 100 && status <= 599
       ? { status }
@@ -1809,6 +1861,8 @@ async function defaultExporter(
     body: JSON.stringify(body),
     signal: AbortSignal.timeout(1_000),
   });
+  // Export decisions use only the status; release the ignored response body.
+  await response.body?.cancel().catch(() => {});
   if (!response.ok) {
     throw new Error(`OTLP endpoint returned HTTP ${response.status}`);
   }

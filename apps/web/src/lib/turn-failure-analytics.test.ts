@@ -27,6 +27,20 @@ describe("turn failure class", () => {
       "context_limit",
     );
     expect(turnFailureClass({ ...base, reason: "something odd" })).toBe("other");
+    expect(
+      turnFailureClass({
+        ...base,
+        failureCode: "provider_billing_error",
+        reason: "synthetic billing refusal",
+      }),
+    ).toBe("provider_billing");
+    expect(
+      turnFailureClass({
+        ...base,
+        failureCode: "pre_claim_failure",
+        reason: "getaddrinfo ENOTFOUND database.example.test",
+      }),
+    ).toBe("pre_start");
   });
 });
 
