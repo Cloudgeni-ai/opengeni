@@ -99,10 +99,14 @@ describe("native embedded error presentation", () => {
               .evaluate((node) => getComputedStyle(node).backgroundColor),
           );
           expect(await input.evaluate((node) => getComputedStyle(node).fontFamily)).not.toBe("");
+          // The compound composer root owns layout; its bordered surface owns the input styling.
           const field = page
-            .locator("[data-og-new-chat-composer] > div")
+            .locator("[data-og-new-chat-composer] [data-og-composer-id] .border")
             .filter({ has: page.locator("textarea") });
           expect(await field.count()).toBe(1);
+          expect(await field.evaluate((node) => getComputedStyle(node).borderTopWidth)).not.toBe(
+            "0px",
+          );
           expect(await field.evaluate((node) => getComputedStyle(node).borderRadius)).not.toBe(
             "0px",
           );
