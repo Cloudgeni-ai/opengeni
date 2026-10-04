@@ -216,6 +216,11 @@ See [`goals.md`](goals.md).
 | Sandbox leases/envelopes | Provider identity/routing/recovery/workspace-generation truth | Conversation state |
 | Knowledge/instructions/Skills/organization identity | Scoped retrieval/governance authorities and lifecycle | Conversation history/temporary task notes |
 
+The wake reaper repairs already-pending authentic terminal results for idle
+goalless parents through bounded identity-only discovery and scoped, fenced
+queue/wake registration. It never replays child work; see
+[durable inputs](durable-agent-inputs.md).
+
 [Archived imports](../packages/core/src/application/archived-session-imports.ts)
 use server-only `@opengeni/sdk/session-history-import` for idempotent
 `session_events`, never model history/turns/active goals/wakes. Lifecycle seams
