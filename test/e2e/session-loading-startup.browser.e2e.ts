@@ -1081,7 +1081,8 @@ for (const width of [1280, 390]) {
         } else await page.goto(`${base}/workspaces/${workspaceId}/sessions/${sessionId}`);
         await transcript.getByText("History question 5000", { exact: true }).waitFor();
         if (origin === "created") {
-          await page.getByRole("button", { name: "Find in conversation", exact: true }).click();
+          // Ctrl/Cmd+F opens Find at every width (phones keep the button in "…").
+          await page.keyboard.press("Control+f");
           await page
             .getByRole("searchbox", { name: "Find in conversation", exact: true })
             .fill("History question 4000");
@@ -1835,10 +1836,20 @@ for (const [mismatch, width] of [
       await page.screenshot({
         path: `${output}/contract-${mismatch}-${width}-notice-controls.png`,
       });
-      const pinButton = page
+      // Phones pin from the header's "…" menu; wider headers keep the button.
+      const phone = width < 640;
+      const moreButton = page
         .locator("header")
-        .getByRole("button", { name: "Pin session", exact: true });
-      await pinButton.click();
+        .getByRole("button", { name: "More session actions", exact: true });
+      if (phone) {
+        await moreButton.click();
+        await page.getByRole("menuitem", { name: "Pin", exact: true }).click();
+      } else {
+        await page
+          .locator("header")
+          .getByRole("button", { name: "Pin session", exact: true })
+          .click();
+      }
       await pin.entered;
       assert.deepEqual(pinWrites, [true], "A real pointer click must reach the save exactly once");
       await input.fill("");
@@ -1857,9 +1868,14 @@ for (const [mismatch, width] of [
       pin.release();
       await pinned;
       await page.clock.runFor(1_000);
-      const unpinButton = page
-        .locator("header")
-        .getByRole("button", { name: "Unpin session", exact: true });
+      const unpinButton = phone
+        ? page.getByRole("menuitem", { name: "Unpin", exact: true })
+        : page.locator("header").getByRole("button", { name: "Unpin session", exact: true });
+      if (phone) {
+        await moreButton.focus();
+        await moreButton.press("Enter");
+        await unpinButton.waitFor();
+      }
       await unpinButton.focus();
       const unpinned = page.waitForResponse((response) =>
         response.url().endsWith(`/${sessionId}/pin`),

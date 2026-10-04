@@ -181,6 +181,15 @@ describe("embedded artifact viewer", () => {
       };
       return {
         coarse: window.matchMedia("(pointer: coarse)").matches,
+        headerPinned: [
+          ...scroller.querySelectorAll<HTMLElement>(
+            '[data-og-work-header="outer"][data-state="open"]',
+          ),
+        ].some((header) => {
+          const box = header.getBoundingClientRect();
+          const top = scroller.getBoundingClientRect().top;
+          return Math.abs(box.top - top) <= 1 && box.bottom > top;
+        }),
         latest: read("[data-og-jump-to-latest]"),
         question: read("[data-og-jump-to-question]"),
       };
@@ -222,7 +231,8 @@ describe("embedded artifact viewer", () => {
         }
         // Back to your message floats just below the pinned work-header strip
         // (taller on coarse pointers), Jump to latest just above the bottom edge.
-        expect(question.topGap).toBe(rest.coarse ? 52 : 40);
+        // 12px from the top, or just below a pinned work-header strip.
+        expect(question.topGap).toBe(rest.headerPinned ? (rest.coarse ? 52 : 40) : 12);
         expect(latest.bottomGap).toBe(12);
 
         // Reading on (different rows under the buttons, time passing) never moves them.
