@@ -1,6 +1,8 @@
 import type { CompanyBrainOkfDownload, CompanyBrainOkfPackage } from "./company-brain";
 import { OpenGeniClient as OpenGeniCoreClient } from "./client";
 import type {
+  ApiKey,
+  UpdateOrganizationApiKeyRequest,
   Document,
   IssueUserResourceGrantRequest,
   UserResourceGrantMutationResponse,
@@ -19,13 +21,34 @@ import type {
 } from "./types";
 
 /**
- * Operator-only Document authority and tenancy-backfill surface.
+ * Operator-only authority administration and Document tenancy-backfill surface.
  *
  * The public root and legacy `core` clients extend this class for compatibility.
  * Browser consoles that import `@opengeni/sdk/browser` do not retain these
  * methods or their routes.
  */
 export class OpenGeniDocumentAuthorityClient extends OpenGeniCoreClient {
+  /** Read organization-key metadata and policy; never returns the secret token. */
+  async getOrganizationApiKey(organizationId: string, apiKeyId: string): Promise<ApiKey> {
+    return await this.requestJson<ApiKey>(
+      "GET",
+      `/v1/organizations/${organizationId}/api-keys/${apiKeyId}`,
+    );
+  }
+
+  /** Update metadata or replace the policy. Policy narrowing applies on the next request. */
+  async updateOrganizationApiKey(
+    organizationId: string,
+    apiKeyId: string,
+    request: UpdateOrganizationApiKeyRequest,
+  ): Promise<ApiKey> {
+    return await this.requestJson<ApiKey>(
+      "PATCH",
+      `/v1/organizations/${organizationId}/api-keys/${apiKeyId}`,
+      request,
+    );
+  }
+
   /** Issue an exact-session or standing personal-resource grant. */
   async issueUserResourceGrant(
     workspaceId: string,

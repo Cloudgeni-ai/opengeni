@@ -1,9 +1,25 @@
 import { describe, expect, test } from "bun:test";
-import type * as Contracts from "@opengeni/contracts";
+import * as Contracts from "@opengeni/contracts";
 import { OpenGeniClient } from "../src/client";
 import type * as Sdk from "../src/types";
 
 type MutuallyAssignable<A, B> = [A] extends [B] ? ([B] extends [A] ? true : false) : false;
+
+function retainedProjectUsage(): Sdk.InsightsProjectRow {
+  return {
+    id: "deleted",
+    kind: "deleted",
+    label: "Retained usage",
+    projects: 0,
+    rootSessions: 0,
+    calls: 1,
+    creditUsd: 0,
+    estimatedProviderUsd: 0,
+    estimatedProviderCostKnownCalls: 0,
+    tokens: 1,
+    cacheHitPct: null,
+  };
+}
 
 test("SDK Insights mirrors match contract output types in both directions", () => {
   // These assignments are checked by SDK typecheck, not merely Bun's runtime
@@ -25,6 +41,36 @@ test("SDK Insights mirrors match contract output types in both directions", () =
     true,
     true,
   ]);
+});
+
+test("SDK project buckets accept canonical retained usage without inventing identities", () => {
+  const row = retainedProjectUsage();
+  for (const kind of Contracts.InsightsProjectRow.shape.kind.options) {
+    const canonical = Contracts.InsightsProjectRow.parse({ ...row, kind });
+    const sdk: Sdk.InsightsProjectRow = canonical;
+    expect(sdk).toEqual({ ...row, kind });
+  }
+  const amountsOnly: Extract<
+    keyof Sdk.InsightsProjectRow,
+    "sessionId" | "rootSessionId" | "ownerKey" | "title"
+  > extends never
+    ? true
+    : false = true;
+  expect(amountsOnly).toBe(true);
+});
+
+test("canonical project output rejects foreign bucket kinds and strips private session fields", () => {
+  const row = retainedProjectUsage();
+  expect(Contracts.InsightsProjectRow.safeParse({ ...row, kind: "session" }).success).toBe(false);
+  expect(
+    Contracts.InsightsProjectRow.parse({
+      ...row,
+      sessionId: "11111111-1111-4111-8111-111111111111",
+      rootSessionId: "22222222-2222-4222-8222-222222222222",
+      ownerKey: "private-owner",
+      title: "Private session title",
+    }),
+  ).toEqual(row);
 });
 
 describe("workspace Insights requests", () => {

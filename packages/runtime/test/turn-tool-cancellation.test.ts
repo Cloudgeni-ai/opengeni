@@ -18,6 +18,7 @@ import {
 import { createSandboxClientForBackend } from "../src/index";
 import { testSettings } from "@opengeni/testing";
 import { markPendingCommandSupervised } from "../src/sandbox/provider-command-session";
+import { ModalCommandStartNotDispatchedError } from "../src/sandbox/providers/modal-command-router-wire";
 
 const runContext = {} as never;
 
@@ -1300,7 +1301,7 @@ describe("turn sandbox-tool physical cancellation fence", () => {
     expect(retained).toBe(false);
   });
 
-  test("abort also cancels a cleanup exec that stalls before provider yield", async () => {
+  test("abort joins cleanup start cancellation before retrying a proven non-dispatch", async () => {
     const abort = new AbortController();
     const controller = createTurnToolCancellationController(abort.signal);
     let rejectOriginal!: (error: Error) => void;
@@ -1345,7 +1346,9 @@ describe("turn sandbox-tool physical cancellation fence", () => {
         if (providerCancellations === 1) {
           rejectOriginal(new Error("original Modal command-router transport closed"));
         } else if (providerCancellations === 2) {
-          rejectCleanup(new Error("cleanup Modal command-router transport closed"));
+          rejectCleanup(
+            new ModalCommandStartNotDispatchedError(new Error("cleanup Start was never sent")),
+          );
           markCleanupCancellationStarted();
           await cleanupCancellation;
         }

@@ -28,7 +28,7 @@ import {
 const minimalAgentConfig = resolveAgentConfig({
   creator: "api",
   request: { capabilities: { from: "none" } },
-  deployment: { unavailable: {}, admissionEnabled: true, defaultForNewSessions: false },
+  deployment: { unavailable: {} },
   workspace: { defaults: null, humanInputEnabled: true },
   goal: false,
 }).config!;

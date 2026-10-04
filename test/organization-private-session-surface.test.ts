@@ -27,10 +27,16 @@ describe("organization private-session product surface", () => {
     expect(surface).not.toContain("/members");
   });
 
-  test("gates shared-workspace creates on receipt plus setting and leaves ordinary creates alone", async () => {
+  test("gates shared-workspace creates on the setting and leaves ordinary creates alone", async () => {
     const migration = await readFile(join(repo, ENABLEMENT_MIGRATION), "utf8");
-    // The 0303 readiness receipt stays in the entry guard for every caller.
+    // The entry guard still calls the activation predicate; 0611 made that
+    // predicate universal, so only the owner/admin setting gates shared creates.
     expect(migration).toContain("OR NOT session_tenancy_product_activated(p_account_id, 1)");
+    const universal = await readFile(
+      join(repo, "packages/db/drizzle/0611_universal_session_tenancy_activation.sql"),
+      "utf8",
+    );
+    expect(universal).toContain("AND p_activation_version IS NOT DISTINCT FROM 1");
     // The owner/admin setting is consulted only outside the actor's Personal workspace.
     expect(migration).toContain("IF NOT actor_personal_workspace THEN");
     expect(migration).toContain("organization_private_sessions_enabled(p_account_id)");

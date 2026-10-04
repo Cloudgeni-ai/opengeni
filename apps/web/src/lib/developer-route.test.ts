@@ -6,8 +6,10 @@ import {
   developerSearch,
   isConnectedAgentsLocation,
   isDeveloperSubPage,
+  isServiceAccountsLocation,
   parseAgentParam,
   parseDeveloperView,
+  parseServiceAccountParam,
 } from "./developer-route";
 
 const agent = "3F0C8A52-1B4E-4C6D-9E2F-7A8B9C0D1E2F";
@@ -25,6 +27,19 @@ describe("Developer sub-pages for connected agents", () => {
     expect(isConnectedAgentsLocation({ view: "connect-agent" })).toBe(true);
     expect(isConnectedAgentsLocation({ agent })).toBe(true);
     expect(isConnectedAgentsLocation({ view: "new-webhook" })).toBe(false);
+  });
+});
+
+describe("Developer sub-pages for service accounts", () => {
+  test("a service account's page and New service account are their own sub-pages", () => {
+    expect(parseDeveloperView("new-service-account")).toBe("new-service-account");
+    expect(parseServiceAccountParam(agent)).toBe(agent.toLowerCase());
+    expect(parseServiceAccountParam("../x")).toBeUndefined();
+    expect(developerSearch({ serviceAccount: agent })).toEqual({ serviceAccount: agent });
+    expect(isDeveloperSubPage({ serviceAccount: agent })).toBe(true);
+    expect(isServiceAccountsLocation({ view: "new-service-account" })).toBe(true);
+    expect(isServiceAccountsLocation({ serviceAccount: agent })).toBe(true);
+    expect(isServiceAccountsLocation({ agent })).toBe(false);
   });
 });
 

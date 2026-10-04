@@ -535,7 +535,7 @@ describe("ChatComposer attachments", () => {
     );
 
     expect(container.textContent ?? "").toContain(
-      "Couldn’t attach this file because OpenGeni is open over HTTP.",
+      "Couldn’t attach this file because Opengeni is open over HTTP.",
     );
     expect(container.textContent ?? "").toContain(
       "Open the secure site or configure HTTPS for this deployment.",

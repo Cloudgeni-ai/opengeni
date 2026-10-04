@@ -716,6 +716,7 @@
         "debug": "4.4.3",
         "modal": "0.9.0",
         "openai": "6.47.0",
+        "postal-mime": "2.7.5",
         "protobufjs": "7.6.5",
         "sharp": "0.34.5",
         "ws": "8.21.1",
@@ -813,11 +814,11 @@
     },
   },
   "patchedDependencies": {
+    "@openai/agents-core@0.14.3": "patches/@openai%2Fagents-core@0.14.3.patch",
     "modal@0.9.0": "patches/modal@0.9.0.patch",
-    "@openai/agents-openai@0.14.3": "patches/@openai%2Fagents-openai@0.14.3.patch",
     "@temporalio/worker@1.22.0": "patches/@temporalio%2Fworker@1.22.0.patch",
     "@openai/agents-extensions@0.14.3": "patches/@openai%2Fagents-extensions@0.14.3.patch",
-    "@openai/agents-core@0.14.3": "patches/@openai%2Fagents-core@0.14.3.patch",
+    "@openai/agents-openai@0.14.3": "patches/@openai%2Fagents-openai@0.14.3.patch",
     "postgres@3.4.9": "patches/postgres@3.4.9.patch",
   },
   "overrides": {

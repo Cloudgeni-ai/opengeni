@@ -26,6 +26,13 @@ describe("onboarding use case text", () => {
     for (const host of ["Claude Code:", "Codex:", "Cursor:", "Anything else:"]) {
       expect(prompt).toContain(host);
     }
+    expect(prompt).toContain("one server route plus the OpenGeniChat component");
+    expect(prompt).not.toContain("OPENGENI_ORGANIZATION_ID");
+    // The SDK defaults to Opengeni Cloud; only other deployments name their origin.
+    expect(prompt).not.toContain("OPENGENI_API_BASE_URL");
+    expect(
+      codingAgentSetupPrompt({ ...facts, apiBaseUrl: "https://opengeni.example.com" }),
+    ).toContain("OPENGENI_API_BASE_URL=https://opengeni.example.com");
   });
 
   test("the setup chat context names where the key is, never a key", () => {
@@ -33,6 +40,7 @@ describe("onboarding use case text", () => {
     expect(withKey).toContain("DEVELOPER_SETUP_API_KEY environment variable");
     expect(withKey).toContain("never write it into this chat");
     expect(withKey).toContain("builtin:opengeni-client");
+    expect(withKey).toContain("one /api/opengeni server route plus the OpenGeniChat component");
     // Connecting GitHub gives the setup chat no Git credentials: the person
     // attaches a repository with the card's Use button and the chat implements
     // there; a repository-attached worker is only the fallback.

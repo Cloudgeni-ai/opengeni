@@ -105,7 +105,7 @@ function gatewayError(status = 502): OpenGeniApiError {
     retryable: true,
     correlationId: `edge-${status}-safe`,
     outcomeUnknown: true,
-    displayMessage: "OpenGeni is temporarily unavailable — retry.",
+    displayMessage: "Opengeni is temporarily unavailable — retry.",
   });
 }
 
@@ -4393,7 +4393,7 @@ describe("useComposer durable draft and control binding", () => {
       outcomeUnknown: true,
     });
     expect(hook.result.current.error?.message).toBe(
-      "OpenGeni is temporarily unavailable — retry. Reference: edge-503-safe.",
+      "Opengeni is temporarily unavailable — retry. Reference: edge-503-safe.",
     );
     await hook.unmount();
   });

@@ -269,6 +269,9 @@ describe("Anthropic failure diagnostic purpose", () => {
           expect(arm.mock.calls[0]![1]).toMatchObject({
             turnId: "turn-1",
             expectedCredentialVersion: 3,
+            credentialTokenFence: expect.objectContaining({
+              observedAccessToken: "sk-ant-oat01-fixture",
+            }),
             leaseFence: { holderId: "holder-fixture", generation: 7 },
           });
           expect(arm.mock.calls[0]![1]).not.toHaveProperty("credentialQuarantine");
@@ -335,6 +338,7 @@ describe("Anthropic failure diagnostic purpose", () => {
         undefined,
       );
       const { deps, settle } = failureDeps(error);
+      const random = spyOn(Math, "random").mockReturnValue(0);
       try {
         expect(await settleTurnFailure(deps)).toMatchObject({
           status: "recovering",
@@ -385,6 +389,7 @@ describe("Anthropic failure diagnostic purpose", () => {
         expect(JSON.stringify(settle.mock.calls)).not.toContain("private echoed request");
         expect(parentDelivery).toHaveBeenCalledTimes(1);
       } finally {
+        random.mockRestore();
         recovery.mockRestore();
         parentDelivery.mockRestore();
       }

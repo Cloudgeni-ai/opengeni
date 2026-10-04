@@ -159,6 +159,8 @@ import {
 } from "./lazy-tool-transport";
 import {
   GMAIL_REST_MCP_BRIDGE_ADAPTER,
+  gmailRestResultOutcome,
+  isOfficialGmailMcpConfig,
   type GmailRestMcpBridgeConfig,
   type GmailRestMcpBridgeContext,
 } from "./gmail-rest-mcp";
@@ -204,6 +206,7 @@ export {
   GmailRestMcpServer,
   OFFICIAL_GMAIL_MCP_URL,
   gmailRestToolIsMutation,
+  gmailToolSupportsScopes,
   isOfficialGmailMcpConfig,
   type GmailRestMcpServerOptions,
 } from "./gmail-rest-mcp";
@@ -2070,6 +2073,8 @@ export type BuildAgentOptions = {
     response: HumanInputResponse;
   };
   reasoningEffort?: ReasoningEffort;
+  /** Provider-generated Responses summaries. Omitted preserves the existing wire. */
+  reasoningSummary?: "auto" | "detailed";
   /** Product latency selection frozen onto this turn. */
   latencyMode?: LatencyMode;
   /** Provider-specific wire value resolved by the worker (`fast` or `priority`). */
@@ -3018,7 +3023,7 @@ export function buildOpenGeniAgent(
     modelSettings: {
       reasoning: {
         effort: options.reasoningEffort ?? settings.openaiReasoningEffort,
-        summary: "detailed",
+        summary: options.reasoningSummary ?? "detailed",
       },
       ...(options.textVerbosity ? { text: { verbosity: options.textVerbosity } } : {}),
       // Round-trip the encrypted reasoning payload with every call so chains
@@ -3909,6 +3914,35 @@ function withoutImageInputTools(tools: Tool<unknown>[]): Tool<unknown>[] {
   );
 }
 
+/** The SDK's function fallback accepts a string tuple but omits its item schema. */
+function withTypedApplyPatchCommand(tools: Tool<unknown>[]): Tool<unknown>[] {
+  return tools.map((capabilityTool) => {
+    if (capabilityTool.type !== "function" || capabilityTool.name !== "apply_patch") {
+      return capabilityTool;
+    }
+    const parameters = capabilityTool.parameters;
+    const command = parameters.properties?.command;
+    if (
+      !command ||
+      typeof command !== "object" ||
+      command.type !== "array" ||
+      command.items !== undefined
+    ) {
+      return capabilityTool;
+    }
+    return {
+      ...capabilityTool,
+      parameters: {
+        ...parameters,
+        properties: {
+          ...parameters.properties,
+          command: { ...command, items: { type: "string" } },
+        },
+      },
+    };
+  });
+}
+
 export function buildAgentCapabilities(
   settings: Settings,
   skillActivations: readonly RuntimeSkillActivation[] = [],
@@ -3969,10 +4003,11 @@ function buildAgentCapabilitiesFromComposition(
   // results below; text-only/unproven wires remove the image tool entirely.
   // Scoped to filesystem: shell() is always a function-tool transport.
   const configureFilesystemTools = (tools: Tool<unknown>[]): Tool<unknown>[] => {
+    const typedTools = withTypedApplyPatchCommand(tools);
     const transportTools =
       options.structuredToolTransport === false
-        ? withStructuredViewImageFunctionResults(tools)
-        : tools;
+        ? withStructuredViewImageFunctionResults(typedTools)
+        : typedTools;
     const imageCapableTools =
       options.supportsImageInput === false
         ? withoutImageInputTools(transportTools)
@@ -3983,11 +4018,7 @@ function buildAgentCapabilitiesFromComposition(
     );
   };
   const filesystemCapability = filesystem({
-    ...(options.structuredToolTransport === false ||
-    options.supportsImageInput === false ||
-    options.onRetainableSessionImageOutput
-      ? { configureTools: configureFilesystemTools }
-      : {}),
+    configureTools: configureFilesystemTools,
   });
   if (options.structuredToolTransport === false || options.authorizeAttemptExecution) {
     neutralizeStructuredToolTransport(filesystemCapability);
@@ -4232,6 +4263,8 @@ export type PrepareToolsOptions = {
    * through this host callback and never included in the returned MCP result.
    */
   materializeConnectorAttachments?: ConnectorAttachmentMaterializer;
+  materializeGmailFile?: GmailRestMcpBridgeContext["materializeGmailFile"];
+  readGmailFile?: GmailRestMcpBridgeContext["readGmailFile"];
   /** Overlap every non-eager MCP connection/catalog with the first model request. */
   deferNonEagerUntilToolDemand?: boolean;
   /** @internal Shared live cells used by deferred preparation handles. */
@@ -4735,6 +4768,13 @@ export async function prepareAgentTools(
               recordResolvedMcpConnectionId(resolvedMcpConnectionIds, config, connectionId),
             fetchImpl: mcpFetchImpl,
             ...(options.slackRateLimit ? { slackRateLimit: options.slackRateLimit } : {}),
+            ...(options.materializeGmailFile
+              ? { materializeGmailFile: options.materializeGmailFile }
+              : {}),
+            ...(options.readGmailFile ? { readGmailFile: options.readGmailFile } : {}),
+            ...(settings.gmailWatchTopicName
+              ? { watchTopicName: settings.gmailWatchTopicName }
+              : {}),
           },
         );
         const innerServer =
@@ -5344,7 +5384,11 @@ function installAttemptConnectorActionGatewayLifecycle(
       lifecycle: connectorActionGatewayLifecycle({
         modelName: definition.modelName,
         call,
-        ...(binding?.resultOutcome ? { resultOutcome: binding.resultOutcome } : {}),
+        ...(binding?.resultOutcome
+          ? { resultOutcome: binding.resultOutcome }
+          : config && isOfficialGmailMcpConfig(config.url ?? "", config.connectionRef)
+            ? { resultOutcome: gmailRestResultOutcome }
+            : {}),
         ...(connectorActionPolicy ? { connectorActionPolicy } : {}),
       }),
     };
@@ -6299,7 +6343,7 @@ const MCP_AUTH_NEEDED_ERROR = {
 const MCP_TOOL_OUTCOME_UNCERTAIN_ERROR = {
   code: 40_102,
   message:
-    "Tool outcome uncertain: the provider returned 401 after receiving the request. OpenGeni did not replay this call. Do not retry automatically; verify provider state before any new attempt.",
+    "Tool outcome uncertain after provider submission. OpenGeni did not replay this call. Do not retry automatically; verify provider state before any new attempt.",
 } as const;
 
 function mcpToolAuthNeededResponse(request: McpRequestReplayInfo): Response {

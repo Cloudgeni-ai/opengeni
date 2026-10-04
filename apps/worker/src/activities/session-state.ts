@@ -6,6 +6,7 @@ import {
   blockSessionWorkBeforeAttemptClaim,
   requestSessionTurnRecovery,
   recoverSessionDispatch,
+  reconcileSettledSessionAttempt,
   reconcileSessionAttemptQuiescence,
   reconcileCompletedSandboxSetup,
   peekSessionWork as peekSessionWorkDb,
@@ -48,6 +49,8 @@ import type {
   PersistSessionAttemptQuiescenceInput,
   ReconcileSessionAttemptQuiescenceInput,
   ReconcileSessionAttemptQuiescenceResult,
+  ReconcileSettledSessionAttemptInput,
+  ReconcileSettledSessionAttemptResult,
   RecoverDispatchInput,
   RecoverDispatchResult,
   RecoverEscapedMcpTimeoutInput,
@@ -64,6 +67,7 @@ export type SessionStateActivityOverrides = Partial<{
   blockSessionWorkBeforeAttemptClaim: typeof blockSessionWorkBeforeAttemptClaim;
   requestSessionTurnRecovery: typeof requestSessionTurnRecovery;
   recoverSessionDispatch: typeof recoverSessionDispatch;
+  reconcileSettledSessionAttempt: typeof reconcileSettledSessionAttempt;
   reconcileSessionAttemptQuiescence: typeof reconcileSessionAttemptQuiescence;
   reconcileCompletedSandboxSetup: typeof reconcileCompletedSandboxSetup;
   peekSessionWork: typeof peekSessionWorkDb;
@@ -109,6 +113,8 @@ export function createSessionStateActivities(
   const requestSessionTurnRecoveryFn =
     overrides.requestSessionTurnRecovery ?? requestSessionTurnRecovery;
   const recoverSessionDispatchFn = overrides.recoverSessionDispatch ?? recoverSessionDispatch;
+  const reconcileSettledSessionAttemptFn =
+    overrides.reconcileSettledSessionAttempt ?? reconcileSettledSessionAttempt;
   const reconcileSessionAttemptQuiescenceFn =
     overrides.reconcileSessionAttemptQuiescence ?? reconcileSessionAttemptQuiescence;
   const peekSessionWorkFn = overrides.peekSessionWork ?? peekSessionWorkDb;
@@ -474,6 +480,63 @@ export function createSessionStateActivities(
     return { action: result.action };
   }
 
+  /** A new authenticated inspection, never trust the earlier observer hint.
+   * The DB seam independently revalidates the entire stored/current identity,
+   * control and both writer predicates under canonical locks before closing. */
+  async function reconcileSettledSessionAttemptActivity(
+    input: ReconcileSettledSessionAttemptInput,
+  ): Promise<ReconcileSettledSessionAttemptResult> {
+    const { db, bus, inspectSessionAttemptActivity, settings, observability, wakeSessionWorkflow } =
+      await services();
+    const ref = await getSessionAttemptActivityRefFn(db, {
+      ...input,
+      temporalWorkflowId: input.workflowId,
+    });
+    if (!ref || ref.workflowRunId !== input.workflowRunId || ref.activityId !== input.activityId)
+      return { action: "stale" };
+    if (!inspectSessionAttemptActivity) return { action: "pending" };
+    try {
+      if ((await inspectSessionAttemptActivity(ref)) !== "settled") return { action: "pending" };
+    } catch (error) {
+      if (error instanceof CancelledFailure) throw error;
+      if (currentActivityContext()?.cancellationSignal.aborted)
+        throw new CancelledFailure("Settled-owner reconciliation cancelled");
+      return { action: "pending" };
+    }
+    if (currentActivityContext()?.cancellationSignal.aborted)
+      throw new CancelledFailure("Settled-owner reconciliation cancelled");
+    const result = await reconcileSettledSessionAttemptFn(db, {
+      accountId: input.accountId,
+      workspaceId: input.workspaceId,
+      sessionId: input.sessionId,
+      turnId: input.turnId,
+      attemptId: input.attemptId,
+      executionGeneration: input.executionGeneration,
+      temporalWorkflowId: ref.workflowId,
+      temporalWorkflowRunId: ref.workflowRunId,
+      temporalActivityId: ref.activityId,
+      activitySettled: true,
+      maxRedispatches: WORKER_DEATH_MAX_REDISPATCHES,
+    });
+    // Atomic Postgres recovery/quiescence/wake truth is already sufficient if
+    // live fanout fails. It must not be replaced by an observer-only wake.
+    if (result.events.length > 0)
+      await publishDurableSessionEventsFn(
+        bus,
+        input.workspaceId,
+        input.sessionId,
+        result.events,
+      ).catch(() => undefined);
+    if (result.action === "exceeded")
+      await deliverFailedChildTurnToParentFn(
+        { db, bus, settings, observability, wakeSessionWorkflow },
+        input.workspaceId,
+        input.sessionId,
+        result.turnId,
+      );
+    return { action: result.action };
+  }
+
   /**
    * Recover the same current inference when its worker dies without completing
    * a graceful checkpoint (heartbeat timeout, SIGKILL, OOM, or node loss).
@@ -734,6 +797,7 @@ export function createSessionStateActivities(
     settleSessionInterruptions,
     persistSessionAttemptQuiescence,
     reconcileSessionAttemptQuiescence: reconcileSessionAttemptQuiescenceActivity,
+    reconcileSettledSessionAttempt: reconcileSettledSessionAttemptActivity,
     recoverDispatch,
     recoverEscapedMcpTimeout,
     peekSessionWork,

@@ -28,8 +28,6 @@ import {
 
 const deployment = {
   unavailable: {},
-  admissionEnabled: true,
-  defaultForNewSessions: false,
 } satisfies ResolveAgentConfigInput["deployment"];
 const workspace = { defaults: null, humanInputEnabled: true };
 
@@ -70,22 +68,9 @@ describe("agent config schemas", () => {
 });
 
 describe("resolveAgentConfig", () => {
-  test("omitted agent with switches off stays legacy (null)", () => {
-    expect(resolve()).toEqual({ config: null, instructions: undefined });
-    expect(resolve({ instructions: "be brief" })).toEqual({
-      config: null,
-      instructions: "be brief",
-    });
-    expect(resolve({ creator: "scheduled" }).config).toBeNull();
-    expect(resolve({ creator: "slack" }).config).toBeNull();
-  });
-
-  test("admission switch off rejects any agent input", () => {
-    expect(
-      errorCode(() =>
-        resolve({ request: {}, deployment: { ...deployment, admissionEnabled: false } }),
-      ),
-    ).toBe("agent_config_not_enabled");
+  test("omitted agent on a top-level session resolves all", () => {
+    expect(resolve().config).toMatchObject({ source: "deployment_default", from: "all" });
+    expect(resolve({ instructions: "be brief" }).instructions).toBe("be brief");
   });
 
   test("all and none starting points", () => {
@@ -154,7 +139,7 @@ describe("resolveAgentConfig", () => {
   });
 
   test("renderer defaults per creator", () => {
-    expect(resolve({ request: {}, creator: "api" }).config).toBeNull();
+    expect(resolve({ request: {}, creator: "api" }).config!.source).toBe("deployment_default");
     expect(resolve({ request: { capabilities: "all" }, creator: "slack" }).config!.renderer).toBe(
       "markdown",
     );
@@ -166,30 +151,16 @@ describe("resolveAgentConfig", () => {
     );
   });
 
-  test("workspace defaults and the default-for-new-sessions switch", () => {
+  test("workspace defaults and the deployment default", () => {
     const defaults = { capabilities: { from: "none" as const, goals: true }, identity: "Acme bot" };
     const fromWorkspace = resolve({ workspace: { defaults, humanInputEnabled: true } }).config!;
     expect(fromWorkspace).toMatchObject({ source: "workspace_default", identity: "Acme bot" });
     expect(fromWorkspace.capabilities.goals).toBe(true);
     expect(fromWorkspace.capabilities.knowledge).toBe(false);
-    // Admission off: an old stored default is ignored and the session stays legacy.
-    expect(
-      resolve({
-        workspace: { defaults, humanInputEnabled: true },
-        deployment: { ...deployment, admissionEnabled: false },
-      }).config,
-    ).toBeNull();
-    const deploymentDefault = resolve({
-      deployment: { ...deployment, defaultForNewSessions: true },
-    }).config!;
+    const deploymentDefault = resolve().config!;
     expect(deploymentDefault).toMatchObject({ source: "deployment_default", from: "all" });
     // Site-auth maintenance always stays legacy.
-    expect(
-      resolve({
-        creator: "site_auth_maintenance",
-        deployment: { ...deployment, defaultForNewSessions: true },
-      }).config,
-    ).toBeNull();
+    expect(resolve({ creator: "site_auth_maintenance" }).config).toBeNull();
     // Request capabilities override the workspace default entirely; identity falls back.
     const request = resolve({
       workspace: { defaults, humanInputEnabled: true },
@@ -253,10 +224,7 @@ describe("resolveAgentConfig", () => {
       kind: "legacy" as const,
       ceiling: { ...allAgentCapabilities(), schedules: false },
     };
-    expect(
-      resolve({ parent: legacy, deployment: { ...deployment, defaultForNewSessions: true } })
-        .config,
-    ).toBeNull();
+    expect(resolve({ parent: legacy }).config).toBeNull();
     const child = resolve({
       parent: legacy,
       request: { capabilities: { from: "all", media: false } },
@@ -316,7 +284,7 @@ describe("write-through", () => {
       const kept = agentConfigFirstPartyMcpTools(config, FIRST_PARTY_MCP_TOOL_NAMES);
       for (const tool of FIRST_PARTY_MCP_TOOL_NAMES) {
         const owner = FIRST_PARTY_MCP_TOOL_CAPABILITIES[tool];
-        const expected = owner === "runtime" || owner === id;
+        const expected = owner === "runtime" || owner === "sandbox" || owner === id;
         expect({ tool, kept: kept.includes(tool) }).toEqual({ tool, kept: expected });
       }
     }
@@ -503,18 +471,6 @@ describe("mid-session update", () => {
       renderer: "markdown",
       capabilities: current.capabilities,
     });
-    expect(
-      errorCode(() =>
-        resolveAgentConfigUpdate({
-          current,
-          legacyCeiling,
-          request: {},
-          deployment: { ...deployment, admissionEnabled: false },
-          onlyNarrow: false,
-          goal: false,
-        }),
-      ),
-    ).toBe("agent_config_not_enabled");
   });
 });
 
@@ -603,6 +559,51 @@ describe("effective tools projection", () => {
       "command_read",
       "command_wait",
     ]);
+  });
+  test("background-command tools follow attached compute for every session", () => {
+    const none = resolve({ request: { capabilities: "none" } }).config!;
+    const all = resolve({ request: { capabilities: "all" } }).config!;
+    const selection = ["wait_for_input", "command_read", "command_wait", "goal_set"] as const;
+    for (const config of [none, all, null]) {
+      const detached = resolveAgentToolFamilies(config, { sandboxAttached: false });
+      const attached = resolveAgentToolFamilies(config, { sandboxAttached: true });
+      expect(detached.firstPartyTools(selection)).not.toContain("command_read");
+      expect(detached.firstPartyTools(selection)).not.toContain("command_wait");
+      expect(detached.firstPartyTools(selection)).toContain("wait_for_input");
+      expect(detached.allowsFirstPartyTool("command_wait")).toBe(false);
+      expect(detached.allowsFirstPartyTool("wait_for_input")).toBe(true);
+      expect(attached.firstPartyTools(selection)).toContain("command_read");
+      expect(attached.firstPartyTools(selection)).toContain("command_wait");
+      expect(attached.allowsFirstPartyTool("command_read")).toBe(true);
+    }
+    // A "none" agent still gets them as mechanics once compute is attached.
+    expect(resolveAgentToolFamilies(none, { sandboxAttached: true }).firstPartyTools([])).toEqual([
+      "wait_for_input",
+      "command_read",
+      "command_wait",
+    ]);
+    expect(resolveAgentToolFamilies(none, { sandboxAttached: false }).firstPartyTools([])).toEqual([
+      "wait_for_input",
+    ]);
+    const projection = projectAgentEffectiveTools({
+      config: none,
+      firstPartyMcpTools: ["wait_for_input", "command_read", "command_wait"],
+      mcpServerIds: ["opengeni"],
+      productServerIds: new Set(),
+      environment: { sandboxAttached: false },
+    });
+    expect(projection.tools.map((tool) => tool.name)).toEqual(["opengeni__wait_for_input"]);
+    const withSandbox = projectAgentEffectiveTools({
+      config: none,
+      firstPartyMcpTools: ["wait_for_input", "command_read"],
+      mcpServerIds: ["opengeni"],
+      productServerIds: new Set(),
+      environment: { sandboxAttached: true },
+    });
+    expect(withSandbox.tools.find((tool) => tool.name === "opengeni__command_read")).toMatchObject({
+      capability: "sandbox",
+      source: "first_party",
+    });
   });
   test("lists capability tools and classifies servers", () => {
     const config = resolve({ request: { capabilities: { from: "none", media: true } } }).config!;

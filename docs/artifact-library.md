@@ -24,6 +24,31 @@ the viewer and query and expires after one hour. A bounded scan through denied
 candidates can return an empty page with `nextCursor`; that is not the end of the
 listing.
 
+Pins are persisted, workspace-shared discovery metadata for every catalog kind.
+`client.updateArtifactPin(workspaceId, kind, artifactId, pinned)` idempotently sets
+the pin through `PUT /v1/workspaces/:workspaceId/artifact-catalog/:kind/:artifactId/pin`
+with `{ pinned: boolean }`, returning only `{ kind, artifactId, pinned }`. Await
+that response, then refresh the catalog from its first page. `ArtifactCatalogItem.pinned`
+is optional for compatibility with older servers; absence means unpinned.
+
+Normal kind, status, title and source-session filters still apply. Pins sort
+**globally first**, before the selected sort and `kind:id` tie-breaker, including
+subsequent pages and the bounded published-file branch. Pin changes, like title
+changes, can move items across a live cursor; refresh to restart traversal.
+Legacy unpinned cursor frontiers remain accepted by the new API.
+
+Pinning and unpinning require `artifacts:publish` plus the target's existing
+`artifacts:read` or `files:read` authority. Editable targets pass the read-only
+application seam, and private files remain owner-filtered. Missing, hidden,
+foreign-workspace and kind-mismatched targets are not pin-mutable. A pin never
+grants content access or exposes otherwise unreadable items or provenance.
+Migration `0610_artifact_catalog_pins.sql` adds only private FORCE-RLS metadata
+and fixed-search-path, tenant-scoped EXECUTE capabilities; runtime roles get no
+direct pin-table privileges. The original publication capability is unchanged
+so pre-pin binaries retain their schema/runtime-posture contract during rollout.
+Pin endpoints and pin-aware continuation requests must reach upgraded API
+instances; older instances remain safe but cannot serve this additive feature.
+
 The web console keeps loaded catalog views in memory per client, credential
 generation, workspace, and filters, so switching tabs or returning to the page
 renders at once. A view older than 30 seconds, or one a session's tool output has

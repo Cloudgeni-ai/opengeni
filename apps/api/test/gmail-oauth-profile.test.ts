@@ -62,12 +62,37 @@ describe("Gmail REST OAuth profile", () => {
       tools([OFFICIAL_GMAIL_MCP_SCOPES[0]])
         .map(({ name }) => name)
         .sort(),
-    ).toEqual(["get_message", "get_thread", "list_drafts", "list_labels", "search_threads"]);
+    ).toEqual([
+      "download_attachment",
+      "download_message",
+      "get_draft",
+      "get_history",
+      "get_label",
+      "get_message",
+      "get_profile",
+      "get_settings",
+      "get_thread",
+      "list_drafts",
+      "list_labels",
+      "list_settings",
+      "search_messages",
+      "search_threads",
+      "stop_watch",
+      "watch_mailbox",
+    ]);
     expect(
       tools([OFFICIAL_GMAIL_MCP_SCOPES[1]])
         .map(({ name }) => name)
         .sort(),
-    ).toEqual(["create_draft", "list_drafts", "send_draft", "send_message"]);
+    ).toEqual([
+      "create_draft",
+      "delete_draft",
+      "get_draft",
+      "list_drafts",
+      "send_draft",
+      "send_message",
+      "update_draft",
+    ]);
     expect(tools([OFFICIAL_GMAIL_MCP_SCOPES[2]]).map(({ name }) => name)).toEqual(
       GMAIL_REST_MCP_TOOLS.map(({ name }) => name),
     );

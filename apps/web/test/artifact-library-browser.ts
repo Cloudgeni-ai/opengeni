@@ -127,6 +127,45 @@ try {
     assert.equal(await page.locator("iframe").count(), 0, "the list shows no Site stills");
     assert.equal(await page.locator("[data-slot=list-row]").count(), 7);
     await page.screenshot({ path: `${output}/list-${suffix}.png`, fullPage: true });
+    // Pin the oldest Site, not a conveniently already-first item. Its server
+    // mutation is simulated only by the fixture; these are the production UI.
+    await page
+      .getByRole("button", { name: "More actions for Product analytics", exact: true })
+      .click();
+    await page.getByRole("menuitem", { name: "Pin", exact: true }).click();
+    await page
+      .locator('ul[aria-label="Artifacts"] > li')
+      .first()
+      .getByRole("link", { name: "Product analytics", exact: true })
+      .waitFor();
+    await page.screenshot({ path: `${output}/pinned-list-${suffix}.png`, fullPage: true });
+    await page.getByRole("radio", { name: "Gallery", exact: true }).click();
+    assert.equal(
+      await page
+        .locator('ul[aria-label="Artifacts"] > li')
+        .first()
+        .locator('[title="Pinned"]')
+        .count(),
+      1,
+    );
+    await page.screenshot({ path: `${output}/pinned-gallery-${suffix}.png`, fullPage: true });
+    await page.reload({ waitUntil: "networkidle" });
+    await page
+      .locator('ul[aria-label="Artifacts"] > li')
+      .first()
+      .getByRole("link", { name: "Product analytics", exact: true })
+      .waitFor();
+    await page
+      .getByRole("button", { name: "More actions for Product analytics", exact: true })
+      .click();
+    await page.getByRole("menuitem", { name: "Unpin", exact: true }).waitFor();
+    await page.screenshot({ path: `${output}/unpin-menu-${suffix}.png`, fullPage: true });
+    await page.getByRole("menuitem", { name: "Unpin", exact: true }).click();
+    await page
+      .locator('ul[aria-label="Artifacts"] > li')
+      .first()
+      .getByRole("link", { name: "Research export.csv", exact: true })
+      .waitFor();
     await page.getByRole("radio", { name: "Gallery", exact: true }).click();
     await page.getByRole("tab", { name: "Images", exact: true }).click();
     assert.equal(await page.locator("ul[aria-label=Artifacts] > li").count(), 2);
@@ -214,7 +253,61 @@ try {
     await page.screenshot({ path: `${output}/embedded-${suffix}.png`, fullPage: true });
     await page.getByRole("button", { name: "Browse session artifacts" }).click();
     await page.getByRole("heading", { name: "Session artifacts" }).waitFor();
+    await page
+      .getByRole("button", { name: "More actions for Product analytics", exact: true })
+      .click();
+    await page.getByRole("menuitem", { name: "Pin", exact: true }).click();
+    await page
+      .locator('ul[aria-label="Artifacts"] > li')
+      .first()
+      .getByRole("button", { name: "Product analytics", exact: true })
+      .waitFor();
+    assert.equal(await page.locator('[title="Pinned"]').count(), 1);
     await page.screenshot({ path: `${output}/session-${suffix}.png`, fullPage: true });
+    await page
+      .getByRole("button", { name: "More actions for Product analytics", exact: true })
+      .click();
+    await page.getByRole("menuitem", { name: "Unpin", exact: true }).click();
+    for (const mode of ["readonly", "pin-error", "pin-pending"]) {
+      await page.goto(`${baseUrl}/test/artifact-library.html?${mode}=1`, {
+        waitUntil: "networkidle",
+      });
+      await page
+        .getByRole("button", { name: "More actions for Product analytics", exact: true })
+        .click();
+      if (mode === "readonly") {
+        assert.equal(await page.getByRole("menuitem", { name: "Pin", exact: true }).count(), 0);
+        await page.keyboard.press("Escape");
+        continue;
+      }
+      await page.getByRole("menuitem", { name: "Pin", exact: true }).click();
+      if (mode === "pin-error") {
+        await page
+          .getByRole("button", { name: "More actions for Product analytics", exact: true })
+          .click();
+        await page.getByRole("menuitem", { name: "Pin", exact: true }).waitFor();
+        assert.equal(
+          await page.locator('[title="Pinned"]').count(),
+          0,
+          "failed saves do not mark an artifact pinned",
+        );
+      } else {
+        await page
+          .getByRole("button", { name: "More actions for Product analytics", exact: true })
+          .click();
+        assert.equal(
+          await page
+            .getByRole("menuitem", { name: "Saving…", exact: true })
+            .getAttribute("aria-disabled"),
+          "true",
+        );
+        assert.equal(
+          (await page.evaluate(() => Reflect.get(window, "artifactLibraryFixture").pins)).length,
+          1,
+        );
+      }
+      await page.keyboard.press("Escape");
+    }
     for (const state of ["loading", "empty", "error"]) {
       await page.goto(`${baseUrl}/test/artifact-library.html?state=${state}`, {
         waitUntil: "networkidle",

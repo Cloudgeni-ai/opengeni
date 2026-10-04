@@ -1,5 +1,5 @@
 import type { ReactNode } from "react";
-import { useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { CheckIcon, PencilIcon, UnplugIcon } from "lucide-react";
 import type { OpenGeniBrowserClient } from "@opengeni/sdk/browser";
 import { ConnectionAccessRows, useConnectionAccess } from "@/components/connection-access-settings";
@@ -88,6 +88,14 @@ export function SubscriptionAccountPage<Account extends AccountSummary>({
   client: OpenGeniBrowserClient;
 }) {
   const listLabel = useModelsListLabel();
+  const pageKey = `${provider}:${pool.organizationId ?? pool.workspaceId}:${accountId}`;
+  const pageLifetime = useMemo(() => ({ key: pageKey, active: true }), [pageKey]);
+  useEffect(() => {
+    pageLifetime.active = true;
+    return () => {
+      pageLifetime.active = false;
+    };
+  }, [pageLifetime]);
   const account = pool.accounts.find((candidate) => candidate.id === accountId) ?? null;
   const back = { label: listLabel, onClick: places.backToList };
   if (pool.loading) {
@@ -131,7 +139,12 @@ export function SubscriptionAccountPage<Account extends AccountSummary>({
       renderUsage={renderUsage}
       renderModels={renderModels}
       account={account}
-      places={places}
+      places={{
+        ...places,
+        backToList: () => {
+          if (pageLifetime.active) places.backToList();
+        },
+      }}
       client={client}
     />
   );

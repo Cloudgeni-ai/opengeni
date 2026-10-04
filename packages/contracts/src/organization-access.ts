@@ -105,3 +105,72 @@ export function normalizeOrganizationAccessPolicy(
 export const OrganizationAccessPolicy = OrganizationAccessPolicyInput.transform(
   normalizeOrganizationAccessPolicy,
 );
+
+/* ----------------------------------------------------------------------------
+   Service accounts: an organization identity with no person behind it. It
+   holds organization API keys; its role caps what those keys can be given.
+   Up to admin, never owner.
+   -------------------------------------------------------------------------- */
+
+export const OrganizationServiceAccountRole = z.enum(["admin", "member"]);
+export type OrganizationServiceAccountRole = z.infer<typeof OrganizationServiceAccountRole>;
+
+/** What only an organization administrator can do; a member service account's keys never hold it. */
+export const ORGANIZATION_ADMIN_ONLY_PERMISSIONS: readonly Permission[] = [
+  "account:admin",
+  "members:manage",
+  "billing:manage",
+  "api_keys:manage",
+  "usage_allowances:manage",
+];
+
+/** The permissions a service account's keys may hold, given its role. */
+export function serviceAccountAllowsPermission(
+  role: OrganizationServiceAccountRole,
+  permission: Permission,
+): boolean {
+  return role === "admin" || !ORGANIZATION_ADMIN_ONLY_PERMISSIONS.includes(permission);
+}
+
+export const OrganizationServiceAccount = z.object({
+  id: z.string().uuid(),
+  organizationId: z.string().uuid(),
+  name: z.string().min(1).max(200),
+  description: z.string().nullable(),
+  role: OrganizationServiceAccountRole,
+  /** Keys that are not revoked, including expired ones. */
+  activeKeyCount: z.number().int().nonnegative(),
+  createdAt: z.string(),
+  updatedAt: z.string(),
+});
+export type OrganizationServiceAccount = z.infer<typeof OrganizationServiceAccount>;
+
+export const ListOrganizationServiceAccountsResponse = z.object({
+  serviceAccounts: z.array(OrganizationServiceAccount),
+});
+export type ListOrganizationServiceAccountsResponse = z.infer<
+  typeof ListOrganizationServiceAccountsResponse
+>;
+
+export const CreateOrganizationServiceAccountRequest = z
+  .object({
+    name: z.string().trim().min(1).max(200),
+    description: z.string().trim().min(1).max(500).optional(),
+    role: OrganizationServiceAccountRole.default("member"),
+  })
+  .strict();
+export type CreateOrganizationServiceAccountRequest = z.infer<
+  typeof CreateOrganizationServiceAccountRequest
+>;
+
+export const UpdateOrganizationServiceAccountRequest = z
+  .object({
+    name: z.string().trim().min(1).max(200).optional(),
+    description: z.string().trim().min(1).max(500).nullable().optional(),
+    role: OrganizationServiceAccountRole.optional(),
+  })
+  .strict()
+  .refine((request) => Object.keys(request).length > 0, "At least one change is required");
+export type UpdateOrganizationServiceAccountRequest = z.infer<
+  typeof UpdateOrganizationServiceAccountRequest
+>;

@@ -567,7 +567,7 @@ export function registerSlackInteractionRoutes(app: Hono, deps: ApiRouteDeps): v
     } catch (error) {
       if (error instanceof SlackBotProviderError && error.code === "not_in_channel") {
         return c.text(
-          "OpenGeni is not a member of this channel. Add @OpenGeni, then run /opengeni again.",
+          "Opengeni is not a member of this channel. Add @OpenGeni, then run /opengeni again.",
           200,
         );
       }
@@ -580,7 +580,7 @@ export function registerSlackInteractionRoutes(app: Hono, deps: ApiRouteDeps): v
       }
     }
     await enqueueNormalizedSlackInteraction(deps, installation, entry);
-    return c.text("OpenGeni accepted this task and will reply in a thread.", 200);
+    return c.text("Opengeni accepted this task and will reply in a thread.", 200);
   });
 
   app.post("/v1/integrations/slack/interactions", async (c) => {
@@ -1139,11 +1139,11 @@ async function publishSlackAppHome(
       refresh,
       renewLease,
       buildSlackAppHomeAccessBlocks({
-        title: link ? "OpenGeni access needed" : "Connect your OpenGeni account",
+        title: link ? "Opengeni access needed" : "Connect your Opengeni account",
         message: link
-          ? "Your Slack identity is linked, but it does not currently have access to this OpenGeni workspace."
+          ? "Your Slack identity is linked, but it does not currently have access to this Opengeni workspace."
           : "Link this Slack identity to see your active tasks, requests, and recent results here.",
-        actionLabel: link ? "Request access" : "Connect OpenGeni",
+        actionLabel: link ? "Request access" : "Connect Opengeni",
         actionUrl: slackAppHomeLinkUrl(
           deps,
           installation,
@@ -1188,10 +1188,10 @@ async function publishSlackAppHome(
       refresh,
       renewLease,
       buildSlackAppHomeAccessBlocks({
-        title: "OpenGeni access changed",
+        title: "Opengeni access changed",
         message:
-          "Your current OpenGeni access could not be verified. Reconnect before tasks are shown here.",
-        actionLabel: "Reconnect OpenGeni",
+          "Your current Opengeni access could not be verified. Reconnect before tasks are shown here.",
+        actionLabel: "Reconnect Opengeni",
         actionUrl: slackAppHomeLinkUrl(
           deps,
           installation,
@@ -1225,10 +1225,10 @@ async function publishSlackAppHome(
       refresh,
       renewLease,
       buildSlackAppHomeAccessBlocks({
-        title: "OpenGeni access changed",
+        title: "Opengeni access changed",
         message:
-          "Your current OpenGeni access could not be verified. Reconnect before tasks are shown here.",
-        actionLabel: "Reconnect OpenGeni",
+          "Your current Opengeni access could not be verified. Reconnect before tasks are shown here.",
+        actionLabel: "Reconnect Opengeni",
         actionUrl: slackAppHomeLinkUrl(
           deps,
           installation,
@@ -1253,10 +1253,10 @@ async function publishSlackAppHome(
       refresh,
       renewLease,
       buildSlackAppHomeAccessBlocks({
-        title: "OpenGeni access changed",
+        title: "Opengeni access changed",
         message:
           "Your current task access changed while this view was loading. Reopen Home to refresh it safely.",
-        actionLabel: "Open OpenGeni",
+        actionLabel: "Open Opengeni",
         actionUrl: slackWorkspaceUrl(deps, installation.workspaceId),
       }),
     );
@@ -1268,10 +1268,10 @@ async function publishSlackAppHome(
       refresh,
       renewLease,
       buildSlackAppHomeAccessBlocks({
-        title: "Refresh OpenGeni Home",
+        title: "Refresh Opengeni Home",
         message:
-          "Reopen Home to refresh your tasks safely. OpenGeni does not publish task data without Slack's current view version.",
-        actionLabel: "Open OpenGeni",
+          "Reopen Home to refresh your tasks safely. Opengeni does not publish task data without Slack's current view version.",
+        actionLabel: "Open Opengeni",
         actionUrl: slackWorkspaceUrl(deps, installation.workspaceId),
       }),
     );
@@ -1790,13 +1790,13 @@ export function renderSlackStartMessageLine(input: {
     : "";
   switch (input.origin.kind) {
     case "private_dm_message":
-      return `<${input.sessionUrl}|OpenGeni started a private task>${where} from the selected DM message. The source DM was not opened to the bot or made workspace-visible.`;
+      return `<${input.sessionUrl}|Opengeni started a private task>${where} from the selected DM message. The source DM was not opened to the bot or made workspace-visible.`;
     case "private_conversation":
-      return `<${input.sessionUrl}|OpenGeni started a private task>${where} from the selected Slack conversation. Results stay private unless a separate authorized publication is approved.`;
+      return `<${input.sessionUrl}|Opengeni started a private task>${where} from the selected Slack conversation. Results stay private unless a separate authorized publication is approved.`;
     case "reaction":
-      return `<${input.sessionUrl}|OpenGeni started this task>${where} from the :${input.origin.emoji}: reaction. If the request is unclear, OpenGeni will ask in this thread. Reply here to continue, or reply \`stop\` to stop.`;
+      return `<${input.sessionUrl}|Opengeni started this task>${where} from the :${input.origin.emoji}: reaction. If the request is unclear, Opengeni will ask in this thread. Reply here to continue, or reply \`stop\` to stop.`;
     case "task":
-      return `<${input.sessionUrl}|OpenGeni started this task>${where}.`;
+      return `<${input.sessionUrl}|Opengeni started this task>${where}.`;
   }
 }
 
@@ -5849,8 +5849,8 @@ async function slackInfoCommandResponse(
   ) {
     return ephemeralSlackResponse(
       link
-        ? `Your Slack identity is linked, but it does not currently have access to this OpenGeni workspace. Request access: ${linkUrl(deps, identity)}. No session was created.`
-        : `Link your Slack identity to OpenGeni before starting work: ${linkUrl(deps, identity)}. No session was created.`,
+        ? `Your Slack identity is linked, but it does not currently have access to this Opengeni workspace. Request access: ${linkUrl(deps, identity)}. No session was created.`
+        : `Link your Slack identity to Opengeni before starting work: ${linkUrl(deps, identity)}. No session was created.`,
     );
   }
   const workspace = await getWorkspace(deps.db, installation.workspaceId);
@@ -5875,9 +5875,9 @@ async function slackInfoCommandResponse(
   const workspaceName = (workspace?.name ?? "").trim().slice(0, 120);
   const destination = workspaceName
     ? `the *${escapeSlackMrkdwn(workspaceName)}* workspace`
-    : "your OpenGeni workspace";
+    : "your Opengeni workspace";
   const lines = [
-    "*Working with OpenGeni in Slack*",
+    "*Working with Opengeni in Slack*",
     "",
     ...(canControl
       ? [
@@ -5893,12 +5893,12 @@ async function slackInfoCommandResponse(
     ...(agentSchedules || schedules
       ? [
           `• *Repeat a task on a schedule:* ${[
-            ...(agentSchedules ? ["ask OpenGeni in its thread"] : []),
+            ...(agentSchedules ? ["ask Opengeni in its thread"] : []),
             ...(schedules ? [`open <${schedules}|Schedules>`] : []),
           ].join(", or ")}.`,
         ]
       : []),
-    `• *Where work lands:* ${destination}${workspaceUrl ? ` (<${workspaceUrl}|open OpenGeni>)` : ""}.`,
+    `• *Where work lands:* ${destination}${workspaceUrl ? ` (<${workspaceUrl}|open Opengeni>)` : ""}.`,
   ];
   const text = lines.join("\n");
   return ephemeralSlackResponse(text, [

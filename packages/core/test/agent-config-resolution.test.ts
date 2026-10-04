@@ -10,13 +10,10 @@ import { HTTPException } from "hono/http-exception";
 import {
   applySessionAgentConfigWriteThrough,
   legacySessionAgentCapabilities,
-  requireAgentConfigAdmission,
   resolveSessionAgentConfigForCreate,
-  scheduledTaskAgentInput,
 } from "../src/domain/agent-config-resolution";
 
-const on = testSettings({ agentConfigAdmissionEnabled: true });
-const off = testSettings();
+const settings = testSettings();
 
 function failure(fn: () => unknown): { status: number; code: string } | null {
   try {
@@ -49,52 +46,24 @@ describe("resolveSessionAgentConfigForCreate", () => {
     goal: false,
   };
 
-  test("switches off and no agent: legacy for every creator", () => {
-    for (const creator of [
-      "api",
-      "slack",
-      "scheduled",
-      "automation",
-      "site_auth_maintenance",
-    ] as const) {
-      expect(
-        resolveSessionAgentConfigForCreate({ ...base, settings: off, creator }).config,
-      ).toBeNull();
-    }
-  });
-
-  test("admission off turns an agent input into a typed 422", () => {
-    expect(
-      failure(() =>
-        resolveSessionAgentConfigForCreate({
-          ...base,
-          settings: off,
-          creator: "api",
-          request: { capabilities: "none" },
-        }),
-      ),
-    ).toEqual({ status: 422, code: "agent_config_not_enabled" });
-  });
-
   test("Slack defaults to the markdown renderer, other creators to opengeni", () => {
     const slack = resolveSessionAgentConfigForCreate({
       ...base,
-      settings: on,
+      settings,
       creator: "slack",
       request: { capabilities: "all" },
     }).config!;
     expect(slack.renderer).toBe("markdown");
     const api = resolveSessionAgentConfigForCreate({
       ...base,
-      settings: on,
+      settings,
       creator: "api",
       request: { capabilities: "all" },
     }).config!;
     expect(api.renderer).toBe("opengeni");
   });
 
-  test("default-for-new-sessions applies to every creator except site-auth maintenance", () => {
-    const settings = testSettings({ agentConfigDefaultForNewSessions: true });
+  test("the deployment default applies to every creator except site-auth maintenance", () => {
     for (const creator of ["api", "slack", "scheduled", "automation"] as const) {
       expect(
         resolveSessionAgentConfigForCreate({ ...base, settings, creator }).config?.source,
@@ -109,7 +78,7 @@ describe("resolveSessionAgentConfigForCreate", () => {
   test("hosted web search off on the deployment reports webSearch unavailable", () => {
     const config = resolveSessionAgentConfigForCreate({
       ...base,
-      settings: testSettings({ agentConfigAdmissionEnabled: true, webSearchEnabled: false }),
+      settings: testSettings({ webSearchEnabled: false }),
       creator: "api",
       request: { capabilities: "all" },
     }).config!;
@@ -120,7 +89,7 @@ describe("resolveSessionAgentConfigForCreate", () => {
   test("workspace legacy human-input switch and stored defaults", () => {
     const config = resolveSessionAgentConfigForCreate({
       ...base,
-      settings: on,
+      settings,
       creator: "api",
       workspaceSettings: {
         agentHumanInputEnabled: false,
@@ -135,7 +104,7 @@ describe("resolveSessionAgentConfigForCreate", () => {
     const configuredParent = parentSession({
       agent: resolveSessionAgentConfigForCreate({
         ...base,
-        settings: on,
+        settings,
         creator: "api",
         request: { capabilities: "none" },
       }).config!,
@@ -143,7 +112,7 @@ describe("resolveSessionAgentConfigForCreate", () => {
     expect(
       resolveSessionAgentConfigForCreate({
         ...base,
-        settings: off,
+        settings,
         creator: "api",
         parent: configuredParent,
       }).config?.source,
@@ -151,7 +120,7 @@ describe("resolveSessionAgentConfigForCreate", () => {
     expect(
       resolveSessionAgentConfigForCreate({
         ...base,
-        settings: testSettings({ agentConfigDefaultForNewSessions: true }),
+        settings,
         creator: "api",
         parent: parentSession({}),
       }).config,
@@ -164,7 +133,7 @@ describe("resolveSessionAgentConfigForCreate", () => {
       failure(() =>
         resolveSessionAgentConfigForCreate({
           ...base,
-          settings: on,
+          settings,
           creator: "api",
           parent: legacyNarrowParent,
           request: { capabilities: { from: "none", schedules: true } },
@@ -197,7 +166,7 @@ describe("applySessionAgentConfigWriteThrough", () => {
       workspaceSettings: {},
       parent: null,
       goal: false,
-      settings: on,
+      settings,
       creator: "api",
     }).config;
     expect(
@@ -218,12 +187,12 @@ describe("applySessionAgentConfigWriteThrough", () => {
 describe("legacy ceilings and stored-input admission", () => {
   test("workspace-default legacy sessions only count servers that are defaults", () => {
     const session = parentSession({});
-    const withoutDocs = legacySessionAgentCapabilities(off, session, {}, ["github"]);
+    const withoutDocs = legacySessionAgentCapabilities(settings, session, {}, ["github"]);
     expect(withoutDocs.knowledge).toBe(true); // default selection includes knowledge tools
     expect(withoutDocs.workspaceFiles).toBe(false);
     expect(withoutDocs.workspaceConnectors).toBe(true);
     const onlyBuiltins = legacySessionAgentCapabilities(
-      off,
+      settings,
       parentSession({ firstPartyMcpTools: ["wait_for_input"] }),
       {},
       ["files"],
@@ -234,18 +203,5 @@ describe("legacy ceilings and stored-input admission", () => {
       knowledge: false,
       goals: false,
     });
-  });
-
-  test("stored agent inputs require admission", () => {
-    expect(failure(() => requireAgentConfigAdmission(off, { capabilities: "all" }))).toEqual({
-      status: 422,
-      code: "agent_config_not_enabled",
-    });
-    expect(failure(() => requireAgentConfigAdmission(off, undefined))).toBeNull();
-    expect(failure(() => requireAgentConfigAdmission(on, { capabilities: "all" }))).toBeNull();
-    expect(scheduledTaskAgentInput({ agentConfig: { agent: { capabilities: "none" } } })).toEqual({
-      capabilities: "none",
-    });
-    expect(scheduledTaskAgentInput({ name: "x" })).toBeUndefined();
   });
 });

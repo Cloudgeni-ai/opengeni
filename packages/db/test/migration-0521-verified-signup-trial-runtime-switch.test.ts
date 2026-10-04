@@ -414,7 +414,6 @@ describe("migration 0521 verified signup trial runtime switch", () => {
       expectedRole: "opengeni_app",
       targetSchema: "public",
       rlsStrategy: "force" as const,
-      organizationTenancyCanonicalActivationEnabled: true,
     };
     const trialViolations = async () =>
       evaluateRuntimeDatabasePosture(

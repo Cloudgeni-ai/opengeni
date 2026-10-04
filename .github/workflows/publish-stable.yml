@@ -1,0 +1,78 @@
+name: Publish stable packages
+
+# Publish the committed lockstep version to dist-tag latest from an exact
+# protected-main SHA. Already-published versions are only re-tagged latest.
+on:
+  workflow_dispatch:
+    inputs:
+      source_sha:
+        description: "Exact lowercase 40-character protected-main SHA to publish as latest."
+        required: true
+        type: string
+
+concurrency:
+  group: publish-stable
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+  id-token: write
+
+jobs:
+  publish:
+    name: Publish latest
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - name: Admit protected main source
+        env:
+          SOURCE_SHA: ${{ inputs.source_sha }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          [[ "$GITHUB_EVENT_NAME" == "workflow_dispatch" ]]
+          [[ "$GITHUB_REPOSITORY" == "Cloudgeni-ai/opengeni" ]]
+          [[ "$GITHUB_REF" == "refs/heads/main" ]]
+          [[ "$GITHUB_SHA" =~ ^[0-9a-f]{40}$ ]]
+          [[ "$SOURCE_SHA" =~ ^[0-9a-f]{40}$ ]]
+          [[ "$GITHUB_WORKFLOW_SHA" == "$GITHUB_SHA" ]]
+          [[ "$GITHUB_WORKFLOW_REF" == "$GITHUB_REPOSITORY/.github/workflows/publish-stable.yml@refs/heads/main" ]]
+
+      - name: Check out source
+        uses: actions/checkout@v6
+        with:
+          ref: "${{ github.sha }}"
+          persist-credentials: false
+          fetch-depth: 0
+
+      - name: Verify exact source
+        env:
+          SOURCE_SHA: ${{ inputs.source_sha }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          git merge-base --is-ancestor "$SOURCE_SHA" HEAD
+          git checkout --quiet --detach "$SOURCE_SHA"
+          [[ "$(git rev-parse HEAD)" == "$SOURCE_SHA" ]]
+
+      - name: Set up Bun
+        uses: oven-sh/setup-bun@v2
+        with:
+          bun-version-file: .bun-version
+
+      - name: Install dependencies
+        run: bun install --frozen-lockfile
+
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: 24
+          registry-url: https://registry.npmjs.org
+
+      - name: Publish stable versions
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+          NPM_CONFIG_PROVENANCE: "true"
+          OPENGENI_RELEASE: "1"
+        # npm verifies GITHUB_SHA against the signed workflow identity.
+        # Verify exact source above and the source-named receipt bind the checkout.
+        run: bun scripts/publish-stable.ts

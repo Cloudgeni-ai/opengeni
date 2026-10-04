@@ -2,6 +2,7 @@ export { readSessionAttachmentFiles } from "./domain/session-file-access";
 export { verifyDirectModelAccess } from "./domain/direct-model-provider";
 export * from "./domain/skills";
 export * from "./domain/mcp-account-bindings";
+export * from "./domain/mcp-account-routes";
 export * from "./domain/session-connection-accounts";
 export * from "./domain/organization-integration-catalog";
 export * from "./domain/knowledge";
@@ -62,6 +63,7 @@ export {
 } from "./managed-session";
 export * from "./transcription";
 export * from "./model-catalog";
+export * from "./goal-admission";
 export * from "./codex-model-availability";
 export * from "./default-session-model";
 
@@ -85,6 +87,7 @@ export * from "./session-authorization";
 
 // Billing / usage-limit admission (checkLimit / requireLimit / recordWorkspaceUsage).
 export * from "./billing/limits";
+export * from "./billing/agent-run-admission";
 
 // Domain layer — the off-HTTP V2 surface (createSessionForRequest,
 
@@ -109,6 +112,7 @@ export * from "./domain/scheduled-tasks";
 export * from "./domain/scheduled-task-access";
 export * from "./domain/sessions";
 export * from "./domain/insights";
+export * from "./domain/insights-usage";
 export * from "./domain/memory-slack-publication";
 export * from "./domain/memory-slack-delivery";
 export * from "./domain/governed-learning-slack-publication";

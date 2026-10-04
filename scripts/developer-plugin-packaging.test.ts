@@ -1,17 +1,8 @@
 import { describe, expect, test } from "bun:test";
-import {
-  existsSync,
-  lstatSync,
-  readFileSync,
-  readdirSync,
-  realpathSync,
-} from "node:fs";
+import { existsSync, lstatSync, readFileSync, readdirSync, realpathSync } from "node:fs";
 import { dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
-import {
-  checkClientSkill,
-  renderPluginSetupSkillFile,
-} from "./sync-client-skill";
+import { checkClientSkill, renderPluginSetupSkillFile } from "./sync-client-skill";
 
 const root = fileURLToPath(new URL("..", import.meta.url));
 const pluginRoot = join(root, "plugins/opengeni");
@@ -22,11 +13,7 @@ function json(path: string): Record<string, any> {
 function contained(path: string): string {
   const target = realpathSync(path);
   const fromRoot = relative(realpathSync(pluginRoot), target);
-  expect(
-    fromRoot === ".." ||
-      fromRoot.startsWith(`..${sep}`) ||
-      isAbsolute(fromRoot),
-  ).toBe(false);
+  expect(fromRoot === ".." || fromRoot.startsWith(`..${sep}`) || isAbsolute(fromRoot)).toBe(false);
   expect(lstatSync(path).isSymbolicLink()).toBe(false);
   return target;
 }
@@ -60,16 +47,45 @@ function noTransport(value: unknown): void {
   }
 }
 
-describe("shared skills-only OpenGeni package", () => {
+// Read the actual native producer instead of duplicating its raw URL. Both
+// hosts must agree, while the URL contract below independently fences authority.
+const ORGANIZATION_MCP_URL: string = json("plugins/opengeni/mcp.json").mcpServers.opengeni.url;
+
+function isOrganizationMcpUrl(value: unknown): value is string {
+  if (typeof value !== "string") return false;
+  try {
+    const url = new URL(value);
+    const [leadingSlash, version, resource, ...children] = url.pathname.split("/");
+    return (
+      url.protocol === "https:" &&
+      url.hostname === "app.opengeni.ai" &&
+      url.port === "" &&
+      leadingSlash === "" &&
+      version === "v1" &&
+      resource === "mcp" &&
+      children.length === 0 &&
+      url.username === "" &&
+      url.password === "" &&
+      url.search === "" &&
+      url.hash === ""
+    );
+  } catch {
+    return false;
+  }
+}
+
+describe("shared OpenGeni package", () => {
   test("one identity uses default contained skills and compatible manifests", () => {
     const claude = json("plugins/opengeni/.claude-plugin/plugin.json");
     const portable = json("plugins/opengeni/plugin.json");
     for (const manifest of [claude, portable]) {
       expect(manifest.name).toBe("opengeni");
-      expect(manifest.version).toBe("0.1.0");
+      expect(manifest.version).toBe("0.3.0");
       expect(manifest).not.toHaveProperty("skills");
-      noTransport(manifest);
+      const { mcpServers: _claudeMcp, ...rest } = manifest;
+      noTransport(rest);
     }
+    expect(portable).not.toHaveProperty("mcpServers");
     for (const field of [
       "name",
       "version",
@@ -81,52 +97,93 @@ describe("shared skills-only OpenGeni package", () => {
       "keywords",
     ])
       expect(portable[field]).toEqual(claude[field]);
-    expect(portable.$schema).toBe(
-      "https://agent-plugins.org/schemas/1.0.0/plugin.schema.json",
-    );
+    expect(portable.$schema).toBe("https://agent-plugins.org/schemas/1.0.0/plugin.schema.json");
     const schema = json("scripts/fixtures/agent-plugin-1.0.0.schema.json");
     expect(schema.$id).toBe(portable.$schema);
     expect(schema.additionalProperties).toBe(false);
     expect(schema.required).toEqual(["$schema", "name"]);
-    for (const key of Object.keys(portable))
-      expect(Object.keys(schema.properties)).toContain(key);
+    for (const key of Object.keys(portable)) expect(Object.keys(schema.properties)).toContain(key);
     expect(portable.extensions["com.openai"].onboardingSkill).toBe(
       "./skills/opengeni-setup/SKILL.md",
     );
-    expect(
-      contained(
-        join(pluginRoot, portable.extensions["com.openai"].onboardingSkill),
-      ),
-    ).toBe(realpathSync(join(pluginRoot, "skills/opengeni-setup/SKILL.md")));
+    expect(contained(join(pluginRoot, portable.extensions["com.openai"].onboardingSkill))).toBe(
+      realpathSync(join(pluginRoot, "skills/opengeni-setup/SKILL.md")),
+    );
+  });
+
+  test("each host gets exactly one credential-free organization MCP server through its native file", () => {
+    // Claude Code: inline in its manifest, HTTP transport, OAuth discovered from the server.
+    const claude = json("plugins/opengeni/.claude-plugin/plugin.json").mcpServers;
+    expect(claude).toEqual({
+      opengeni: { type: "http", url: ORGANIZATION_MCP_URL },
+    });
+    expect(isOrganizationMcpUrl(claude.opengeni.url)).toBe(true);
+    // Codex, Cursor and other Agent Plugins hosts: the portable root mcp.json.
+    const portable = json("plugins/opengeni/mcp.json");
+    expect(portable).toEqual({
+      $schema: "https://agent-plugins.org/schemas/1.0.0/mcp.schema.json",
+      mcpServers: { opengeni: { type: "streamable-http", url: ORGANIZATION_MCP_URL } },
+    });
+    expect(isOrganizationMcpUrl(portable.mcpServers.opengeni.url)).toBe(true);
+    const schema = json("scripts/fixtures/agent-plugin-mcp-1.0.0.schema.json");
+    expect(schema.$id).toBe(portable.$schema);
+    expect(schema.required).toEqual(["$schema", "mcpServers"]);
+    const http = schema.$defs.streamableHttpServer;
+    expect(http.properties.type.const).toBe("streamable-http");
+    expect(http.additionalProperties).toBe(false);
+    for (const key of Object.keys(portable.mcpServers.opengeni))
+      expect(Object.keys(http.properties)).toContain(key);
+    // No second copy a host could also load.
+    expect(existsSync(join(pluginRoot, ".mcp.json"))).toBe(false);
+  });
+
+  test("organization MCP defaults reject other authorities, workspace resources and embedded credentials", () => {
+    const canonical = new URL(ORGANIZATION_MCP_URL);
+    const mutations = [
+      { protocol: "http:" },
+      { hostname: "untrusted.example" },
+      { port: "8443" },
+      { pathname: "/v1/workspaces/example/mcp" },
+      ...["docs", "files", "tools"].map((child) => ({
+        pathname: `${canonical.pathname}/${child}`,
+      })),
+      { pathname: `${canonical.pathname}%2Fdocs` },
+      { pathname: `${canonical.pathname}-connections` },
+      { search: "?workspaceId=example" },
+      { hash: "#workspace" },
+      { username: "embedded-user" },
+      { password: "embedded-password" },
+    ];
+    for (const mutation of mutations) {
+      const url = new URL(canonical);
+      Object.assign(url, mutation);
+      expect(isOrganizationMcpUrl(url.href), JSON.stringify(mutation)).toBe(false);
+    }
+    for (const value of [undefined, null, "", {}, { url: ORGANIZATION_MCP_URL }, "not-a-url"]) {
+      expect(isOrganizationMcpUrl(value)).toBe(false);
+    }
   });
 
   test("plugin metadata is shared and needs no install-time settings", () => {
     const manifest = json("plugins/opengeni/.claude-plugin/plugin.json");
-    expect(manifest.displayName).toBe("OpenGeni");
+    expect(manifest.displayName).toBe("Opengeni");
     expect(manifest.author).toEqual({
-      name: "OpenGeni",
+      name: "Opengeni",
       url: "https://opengeni.ai",
     });
-    expect(manifest.homepage).toBe(
-      "https://docs.opengeni.ai/guides/coding-agents",
-    );
+    expect(manifest.homepage).toBe("https://docs.opengeni.ai/guides/coding-agents");
     // The skills read OPENGENI_* from the project's env; no plugin settings are required.
     expect(manifest.userConfig).toBeUndefined();
   });
 
   test("all catalogs use the same identity and nested repository-relative source", () => {
-    for (const directory of [
-      ".agents/plugins",
-      ".claude-plugin",
-      ".cursor-plugin",
-    ]) {
+    for (const directory of [".agents/plugins", ".claude-plugin", ".cursor-plugin"]) {
       const catalog = json(`${directory}/marketplace.json`);
       expect(catalog.name).toBe("opengeni");
       expect(catalog.plugins).toHaveLength(1);
       const entry = catalog.plugins[0];
       expect(entry.name).toBe("opengeni");
-      const source =
-        directory === ".agents/plugins" ? entry.source.path : entry.source;
+      const source = directory === ".agents/plugins" ? entry.source.path : entry.source;
       expect(source).toBe("./plugins/opengeni");
       expect(source.split("/")).not.toContain("..");
       expect(resolve(root, source)).toBe(pluginRoot);
@@ -137,21 +194,16 @@ describe("shared skills-only OpenGeni package", () => {
   });
 
   test("only three immediate skill folders are public and every local entrypoint link stays inside the package", () => {
-    expect(readdirSync(join(pluginRoot, "skills")).sort()).toEqual(
-      [...names].sort(),
-    );
+    expect(readdirSync(join(pluginRoot, "skills")).sort()).toEqual([...names].sort());
     for (const name of names) {
       const path = join(pluginRoot, "skills", name, "SKILL.md");
       contained(path);
       const text = readFileSync(path, "utf8");
       const frontmatter = /^---\r?\n([\s\S]*?)\r?\n---(?:\r?\n|$)/.exec(text);
       expect(frontmatter).not.toBeNull();
-      const metadata = Bun.YAML.parse(frontmatter![1]!) as Record<
-        string,
-        string
-      >;
+      const metadata = Bun.YAML.parse(frontmatter![1]!) as Record<string, string>;
       expect(metadata.name).toBe(name);
-      expect(metadata.description.trim().length).toBeGreaterThan(0);
+      expect(metadata.description?.trim().length ?? 0).toBeGreaterThan(0);
       for (const match of text.matchAll(/\]\(([^)\s]+)\)/g)) {
         if (/^(?:https?:|#)/.test(match[1]!)) continue;
         contained(resolve(dirname(path), match[1]!.split("#")[0]!));
@@ -159,25 +211,16 @@ describe("shared skills-only OpenGeni package", () => {
     }
     expect(existsSync(join(pluginRoot, "skills/opengeni-client"))).toBe(false);
     expect(
-      existsSync(
-        join(pluginRoot, "skills/build-with-opengeni/opengeni-client/SKILL.md"),
-      ),
+      existsSync(join(pluginRoot, "skills/build-with-opengeni/opengeni-client/SKILL.md")),
     ).toBe(true);
   });
 
   test("canonical client/setup mirrors have complete deterministic parity without weakening setup semantics", async () => {
     await checkClientSkill();
     const client = files(join(root, ".agents/skills/opengeni-client"));
+    expect(files(join(pluginRoot, "skills/build-with-opengeni/opengeni-client"))).toEqual(client);
     expect(
-      files(join(pluginRoot, "skills/build-with-opengeni/opengeni-client")),
-    ).toEqual(client);
-    expect(
-      files(
-        join(
-          root,
-          "packages/runtime/src/bundled_default_skills/opengeni-client",
-        ),
-      ),
+      files(join(root, "packages/runtime/src/bundled_default_skills/opengeni-client")),
     ).toEqual(client);
     const setup = files(join(root, ".agents/skills/opengeni-setup"));
     const packaged = files(join(pluginRoot, "skills/opengeni-setup"));
@@ -185,21 +228,11 @@ describe("shared skills-only OpenGeni package", () => {
     for (const [path, text] of setup) {
       expect(packaged.get(path)).toBe(renderPluginSetupSkillFile(path, text));
       expect(
-        packaged
-          .get(path)!
-          .replaceAll("build-with-opengeni/opengeni-client", "opengeni-client"),
+        packaged.get(path)!.replaceAll("build-with-opengeni/opengeni-client", "opengeni-client"),
       ).toBe(text);
     }
-    const handoff = join(
-      pluginRoot,
-      "skills/opengeni-setup/references/setup-api.md",
-    );
-    contained(
-      resolve(
-        dirname(handoff),
-        "../../build-with-opengeni/opengeni-client/SKILL.md",
-      ),
-    );
+    const handoff = join(pluginRoot, "skills/opengeni-setup/references/setup-api.md");
+    contained(resolve(dirname(handoff), "../../build-with-opengeni/opengeni-client/SKILL.md"));
   });
 
   test.each([
@@ -209,16 +242,12 @@ describe("shared skills-only OpenGeni package", () => {
     "plugins/opengeni/skills/build-with-opengeni/opengeni-client/SKILL.md",
   ])("client setup handoff stays portable in %s", (path) => {
     const text = readFileSync(join(root, path), "utf8");
-    const handoffs = [
-      ...text.matchAll(/\[OpenGeni developer setup\]\(([^)\s]+)\)/g),
-    ];
+    const handoffs = [...text.matchAll(/\[(?:OpenGeni|Opengeni) developer setup\]\(([^)\s]+)\)/g)];
     expect(handoffs).toHaveLength(1);
-    expect(new URL(handoffs[0]![1]!).href).toBe(
-      "https://docs.opengeni.ai/guides/developer-plugin",
-    );
+    expect(new URL(handoffs[0]![1]!).href).toBe("https://docs.opengeni.ai/guides/developer-plugin");
   });
 
-  test("the package contains no transport, executable components, symlinks or competing root plugins", () => {
+  test("the package contains only the declared MCP entry, no executable components, symlinks or competing root plugins", () => {
     for (const path of [
       ".claude-plugin/plugin.json",
       ".codex-plugin/plugin.json",
@@ -228,7 +257,6 @@ describe("shared skills-only OpenGeni package", () => {
       expect(existsSync(join(root, path))).toBe(false);
     for (const path of [
       ".mcp.json",
-      "mcp.json",
       ".app.json",
       ".lsp.json",
       "hooks",
@@ -240,13 +268,13 @@ describe("shared skills-only OpenGeni package", () => {
       ".cursor-plugin",
     ])
       expect(existsSync(join(pluginRoot, path))).toBe(false);
-    for (const path of files(pluginRoot).keys())
-      expect(path).not.toMatch(
-        /(?:^|[\\/])(?:\.mcp\.json|mcp\.json|hooks\.json)$/,
-      );
+    for (const path of files(pluginRoot).keys()) {
+      if (path === "mcp.json") continue;
+      expect(path).not.toMatch(/(?:^|[\\/])(?:\.mcp\.json|mcp\.json|hooks\.json)$/);
+    }
   });
 
-  test("docs describe the current selector, three skills, optional transport and native verification", () => {
+  test("docs describe the current selector, three skills, MCP server and native verification", () => {
     const guide = readFileSync(join(root, "docs/developer-plugin.md"), "utf8");
     for (const token of [
       "opengeni@opengeni",
@@ -256,18 +284,19 @@ describe("shared skills-only OpenGeni package", () => {
       "opengeni-setup",
       "October 1, 2026",
       "required",
-      "skills-only",
+      "mcp.json",
+      ORGANIZATION_MCP_URL,
+      "codex mcp login opengeni",
       "check-developer-plugin-hosts.ts",
       "https://agent-plugins.org/schemas/1.0.0/plugin.schema.json",
+      "https://agent-plugins.org/schemas/1.0.0/mcp.schema.json",
     ])
       expect(guide).toContain(token);
     expect(guide).not.toContain("opengeni-developer@");
-    const page = readFileSync(
-      join(root, "docs-site/guides/developer-plugin.mdx"),
-      "utf8",
-    );
+    const page = readFileSync(join(root, "docs-site/guides/developer-plugin.mdx"), "utf8");
     expect(page).toContain("opengeni@opengeni");
-    expect(page).toContain("has not been published");
+    expect(page).toContain("plugin marketplace add Cloudgeni-ai/opengeni");
+    expect(page).toContain(ORGANIZATION_MCP_URL);
     expect(
       json("docs-site/docs.json").navigation.groups.flatMap(
         (group: { pages: string[] }) => group.pages,

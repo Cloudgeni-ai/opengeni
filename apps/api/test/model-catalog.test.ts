@@ -21,6 +21,12 @@ import {
 import { modelPickerBillingClassFor } from "@opengeni/contracts/model-picker-order";
 import { resolveWorkspaceModelSelection } from "@opengeni/core";
 
+test("client catalog retains configured model logos", () => {
+  const model = configuredModels(testSettings())[0]!;
+  const logoUrl = "https://cdn.example.test/model.svg";
+  expect(projectClientModel({ ...model, logoUrl }).logoUrl).toBe(logoUrl);
+});
+
 test("public Claude catalog preserves provider and payment identity without leaking credentials", () => {
   let settings = withClaudeConnectionCatalog(testSettings({ claudeSubscriptionEnabled: true }), {
     anthropic: { models: [{ upstreamModelId: "claude-opus-5-5" }] },
@@ -225,7 +231,7 @@ describe("workspace model catalog availability", () => {
     const managed = disconnected.models.find((model) => model.id === "deepseek-v4-flash-0731")!;
     expect(managed).toMatchObject({
       provider: "opengeni",
-      providerLabel: "OpenGeni",
+      providerLabel: "Opengeni",
       source: "opengeni",
       billing: { upstreamPayer: "deployment", metering: "opengeni_credits" },
     });
@@ -611,7 +617,7 @@ describe("workspace model catalog availability", () => {
     }).models.find((candidate) => candidate.id === settings.openaiModel)!;
     expect(unresolved).toMatchObject({
       provider: "opengeni",
-      providerLabel: "OpenGeni",
+      providerLabel: "Opengeni",
       source: "opengeni",
       credentialReadiness: {
         status: "not_ready",

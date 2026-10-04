@@ -10,7 +10,7 @@ import {
   creditDebitAttributionMetadata,
   deferKnowledgeIndexJob,
   freezeKnowledgeIndexBillingMode,
-  getBillingBalance,
+  getSpendableCreditBalance,
   guardPaidKnowledgeIndexPublication,
   knowledgeIndexBillingActivationTime,
   readKnowledgeIndexSource,
@@ -211,7 +211,7 @@ export function createKnowledgeIndexingActivities(
                 return;
               }
               if (paid && current.nextIndex === 0) {
-                const balance = await getBillingBalance(lockedDb, claim.accountId);
+                const balance = await getSpendableCreditBalance(lockedDb, claim.accountId);
                 if (balance.balanceMicros <= 0) {
                   await waitKnowledgeIndexForFunding(lockedDb, claim);
                   result.deferred++;

@@ -23,13 +23,16 @@ import {
   taskMetadataFromFormState,
   type ScheduledTaskFormState,
 } from "@/lib/scheduled-tasks";
-import type { CreateScheduledTaskRequest, UpdateScheduledTaskRequest } from "@opengeni/sdk";
-import type { ScheduledTask, ScheduledTaskRun, ScheduledTaskScheduleSpec } from "@/types";
-
-type CreateAgentScheduledTaskRequest = Extract<
+import type {
   CreateScheduledTaskRequest,
-  { agentConfig: unknown }
->;
+  McpConnectionAccountSelection,
+  UpdateScheduledTaskRequest,
+} from "@opengeni/sdk";
+import { GOOGLE_DRIVE_PUBLICATION_SERVER_ID } from "@opengeni/contracts/google-drive";
+import { PERSONAL_GITHUB_CONNECTION_SURFACE_ID } from "@opengeni/contracts/personal-github";
+import { mergeResourceRefs } from "@opengeni/contracts";
+import { connectionAccountChoices } from "@/components/capabilities/session-connection-accounts";
+import type { ScheduledTask, ScheduledTaskRun, ScheduledTaskScheduleSpec, Session } from "@/types";
 
 /** Agent learning overrides sent with an edit (not in the SDK's update type yet). */
 export interface ScheduleLearningUpdate {
@@ -330,16 +333,109 @@ export function overlapPolicyForCreate(
   return draft.runMode === "new_session_per_run" ? "allow_concurrent" : draft.overlapPolicy;
 }
 
+/** Existing chats, including one already created for a schedule, own their settings. */
+export function scheduleInheritsChatSettings(
+  task: Pick<ScheduledTask, "runMode" | "reusableSessionId">,
+): boolean {
+  return (
+    task.runMode === "existing_session" ||
+    (task.runMode === "reusable_session" && Boolean(task.reusableSessionId))
+  );
+}
+
+/** Newly enabled connectors can use their displayed defaults; other groups keep their saved set. */
+export function scheduleConnectionAccountIntent(input: {
+  saved: McpConnectionAccountSelection[];
+  frozen: boolean;
+  initialServerIds: string[];
+  selectedServerIds: string[];
+  editedServerIds: string[];
+  destinationChanged: boolean;
+  toolsChanged: boolean;
+}) {
+  const prior = new Set(input.initialServerIds);
+  const newlySelected = new Set(
+    input.destinationChanged || input.toolsChanged
+      ? input.selectedServerIds.filter((id) => !prior.has(id))
+      : [],
+  );
+  const changedServerIds = [...new Set([...input.editedServerIds, ...newlySelected])];
+  const choices = connectionAccountChoices(input.saved);
+  if (input.frozen) {
+    for (const id of input.selectedServerIds) {
+      if (!newlySelected.has(id) && choices[id] === undefined) choices[id] = [];
+    }
+  }
+  return {
+    choices,
+    changedServerIds,
+    // A move must also discard selections the destination cannot use.
+    changed: input.destinationChanged || changedServerIds.length > 0,
+  };
+}
+
+/** Retain unshown choices only where the destination can still use them. */
+export function mergeScheduleConnectionAccounts(
+  saved: McpConnectionAccountSelection[],
+  selections: McpConnectionAccountSelection[],
+  editableServerIds: string[],
+  destination: {
+    selectedServerIds: string[];
+    resources: ScheduleDraft["resources"];
+    chat?: Pick<Session, "resources" | "firstPartyMcpTools" | "firstPartyMcpPermissions">;
+  },
+): McpConnectionAccountSelection[] {
+  const eligible = new Set(destination.selectedServerIds);
+  eligible.delete(PERSONAL_GITHUB_CONNECTION_SURFACE_ID);
+  eligible.delete(GOOGLE_DRIVE_PUBLICATION_SERVER_ID);
+  if (
+    mergeResourceRefs(destination.chat?.resources ?? [], destination.resources).some(
+      (resource) => resource.kind === "repository" && resource.connectionType === "github_personal",
+    )
+  )
+    eligible.add(PERSONAL_GITHUB_CONNECTION_SURFACE_ID);
+  const chat = destination.chat;
+  const permissions = chat?.firstPartyMcpPermissions;
+  // New chats retain the stored publication choice under the server's defaults.
+  // A bound chat instead supplies the exact first-party tool/permission policy.
+  if (
+    !chat ||
+    (chat.firstPartyMcpTools.includes("editable_artifact_export") &&
+      chat.firstPartyMcpTools.includes("editable_artifact_export_status") &&
+      (permissions === null ||
+        permissions === undefined ||
+        (permissions.includes("artifacts:read") && permissions.includes("artifacts:publish"))))
+  )
+    eligible.add(GOOGLE_DRIVE_PUBLICATION_SERVER_ID);
+  const replaced = new Set(editableServerIds);
+  return [
+    ...saved.filter(
+      (selection) => eligible.has(selection.serverId) && !replaced.has(selection.serverId),
+    ),
+    ...selections,
+  ];
+}
+
 export function createRequestFromDraft(
   draft: ScheduleDraft,
   options: {
     now: Date;
     learningScope: "personal" | "workspace";
   },
-): CreateAgentScheduledTaskRequest {
+): CreateScheduledTaskRequest {
   const schedule: ScheduledTaskScheduleSpec = draft.cadence
     ? specFromCadence(draft.cadence, options.now)
     : { type: "manual" };
+  if (draft.runMode === "existing_session")
+    return {
+      name: scheduleName(draft),
+      schedule,
+      prompt: draft.prompt.trim(),
+      targetSessionId: draft.targetSessionId,
+      overlapPolicy: overlapPolicyForCreate(draft),
+      metadata: taskMetadataFromFormState(draft),
+      connectionAccounts: draft.connectionAccounts ?? [],
+    };
   return {
     ...(draft.agentLearning && Object.keys(draft.agentLearning).length
       ? { agentLearning: { scope: options.learningScope, settings: draft.agentLearning } }
@@ -347,7 +443,6 @@ export function createRequestFromDraft(
     name: scheduleName(draft),
     schedule,
     runMode: draft.runMode,
-    ...(draft.runMode === "existing_session" ? { targetSessionId: draft.targetSessionId } : {}),
     overlapPolicy: overlapPolicyForCreate(draft),
     metadata: taskMetadataFromFormState(draft),
     connectionAccounts: draft.connectionAccounts ?? [],
@@ -376,9 +471,43 @@ export function updateRequestFromDraft(
     agentLearning?: ScheduleLearningUpdate;
   },
 ): UpdateScheduledTaskRequest & { agentLearning?: ScheduleLearningUpdate } {
+  const same = (a: unknown, b: unknown) => JSON.stringify(a) === JSON.stringify(b);
+  const targetChanged =
+    initial.runMode !== draft.runMode || initial.targetSessionId !== draft.targetSessionId;
+  const inheritsChatSettings =
+    draft.runMode === "existing_session" ||
+    (draft.runMode === task.runMode && scheduleInheritsChatSettings(task));
+  const materializedReusable = inheritsChatSettings && draft.runMode === "reusable_session";
+  const editableConfig = (form: ScheduleDraft) => {
+    if (!materializedReusable) return agentConfigFromFormState(form, task, initial);
+    const {
+      connectionAccounts: _accounts,
+      connectionAccountsFrozen: _frozen,
+      slackBotConnectionId: _bot,
+      slackBotChannelId: _channel,
+      ...retained
+    } = { connectionAccountsFrozen: undefined, ...task.agentConfig };
+    return {
+      ...retained,
+      prompt: form.prompt,
+      resources: form.resources,
+      ...(form.slackBotConnectionId ? { slackBotConnectionId: form.slackBotConnectionId } : {}),
+      ...(form.slackBotConnectionId && form.slackBotChannelId
+        ? { slackBotChannelId: form.slackBotChannelId }
+        : {}),
+    };
+  };
+  const oldConfig = editableConfig(initial);
+  const nextConfig = editableConfig(draft);
+  const onlyPromptChanged = same({ ...oldConfig, prompt: nextConfig.prompt }, nextConfig);
+  const oldMetadata = taskMetadataFromFormState(initial, task);
+  const nextMetadata = taskMetadataFromFormState(draft, task);
   return {
-    ...(options.agentLearning ? { agentLearning: options.agentLearning } : {}),
-    name: scheduleName(draft),
+    expectedExecutionDigest: task.executionDigest,
+    ...(options.agentLearning && draft.runMode !== "existing_session"
+      ? { agentLearning: options.agentLearning }
+      : {}),
+    ...(scheduleName(initial) === scheduleName(draft) ? {} : { name: scheduleName(draft) }),
     ...(sameCadence(initial.cadence, draft.cadence)
       ? {}
       : {
@@ -386,16 +515,30 @@ export function updateRequestFromDraft(
             ? specFromCadence(draft.cadence, options.now)
             : ({ type: "manual" } as const),
         }),
-    runMode: draft.runMode,
-    targetSessionId: draft.runMode === "existing_session" ? draft.targetSessionId : null,
-    overlapPolicy: draft.overlapPolicy,
-    metadata: taskMetadataFromFormState(draft, task),
-    connectionAccounts: draft.connectionAccounts ?? [],
-    agentConfig: agentConfigFromFormState(draft, task),
-    ...(initial.variableSetId === draft.variableSetId
+    ...(targetChanged
+      ? {
+          runMode: draft.runMode,
+          targetSessionId: draft.runMode === "existing_session" ? draft.targetSessionId : null,
+        }
+      : {}),
+    ...(initial.overlapPolicy === draft.overlapPolicy
+      ? {}
+      : { overlapPolicy: draft.overlapPolicy }),
+    ...(same(oldMetadata, nextMetadata) ? {} : { metadata: nextMetadata }),
+    ...(same(initial.connectionAccounts ?? [], draft.connectionAccounts ?? [])
+      ? {}
+      : { connectionAccounts: draft.connectionAccounts ?? [] }),
+    ...(draft.runMode === "existing_session" || onlyPromptChanged
+      ? initial.prompt === draft.prompt
+        ? {}
+        : { prompt: draft.prompt }
+      : same(oldConfig, nextConfig)
+        ? {}
+        : { agentConfig: nextConfig }),
+    ...(inheritsChatSettings || initial.variableSetId === draft.variableSetId
       ? {}
       : { variableSetId: draft.variableSetId }),
-    ...(initial.rigId === draft.rigId ? {} : { rigId: draft.rigId }),
+    ...(inheritsChatSettings || initial.rigId === draft.rigId ? {} : { rigId: draft.rigId }),
   };
 }
 

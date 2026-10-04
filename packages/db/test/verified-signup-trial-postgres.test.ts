@@ -21,7 +21,7 @@ let owned: OwnerMigratedTestDatabase | null = null;
 let client: DbClient | null = null;
 const requireRealDatabase = process.env.OPENGENI_REQUIRE_REAL_DB === "1";
 
-async function setup(enabled: boolean) {
+async function setup(enabled: boolean, trialCreditModelIds?: string[]) {
   if (!owned || !client) throw new Error("test database unavailable");
   const authUserId = crypto.randomUUID();
   await owned.admin`
@@ -37,6 +37,7 @@ async function setup(enabled: boolean) {
   const result = await completeSelfServiceOrganizationSetup(client.db, {
     ...command,
     trialCreditsEnabled: enabled,
+    trialCreditModelIds,
   });
   return { authUserId, command, result };
 }
@@ -64,6 +65,21 @@ afterAll(async () => {
 }, 180_000);
 
 describe("verified signup trial and post-use credit settlement", () => {
+  test("new signup records initial eligibility; replay cannot rewrite the grant", async () => {
+    if (!owned || !client) return;
+    const { command, result } = await setup(true, ["model-a"]);
+    const before = await getBillingBalance(client.db, result.organizationId);
+    expect(before.generalBalanceMicros).toBe(0);
+    expect(before.promotionalCredits?.[0]?.eligibleModelIds).toEqual(["model-a"]);
+    await completeSelfServiceOrganizationSetup(client.db, {
+      ...command,
+      trialCreditsEnabled: true,
+      trialCreditModelIds: ["model-b"],
+    });
+    const after = await getBillingBalance(client.db, result.organizationId);
+    expect(after.promotionalCredits).toEqual(before.promotionalCredits);
+    expect(after.balanceMicros).toBe(10_000_000);
+  }, 180_000);
   test("launch flag and one-shot receipt trigger are the only grant authority", () => {
     const migration = readFileSync(
       new URL("../drizzle/0509_verified_signup_trial_credits.sql", import.meta.url),
@@ -208,3 +224,23 @@ describe("verified signup trial and post-use credit settlement", () => {
     expect(grants?.count).toBe(1);
   });
 });
+
+test("runtime policy scopes new signups and updates their current coverage", async () => {
+  if (!owned || !client) return;
+  await owned.admin`select set_credit_promotion_policy(${owned.admin.json({ defaultModelIds: ["model-a"] })}::jsonb, 'test operator', 'Enable shared model list')`;
+  const { result } = await setup(true);
+  expect(
+    (await getBillingBalance(client.db, result.organizationId)).promotionalCredits?.[0]
+      ?.eligibleModelIds,
+  ).toEqual(["model-a"]);
+  await owned.admin`select set_credit_promotion_policy(${owned.admin.json({ defaultModelIds: ["model-b"], signupModelIds: ["model-c"] })}::jsonb, 'test operator', 'Change signup model list')`;
+  expect(
+    (await getBillingBalance(client.db, result.organizationId)).promotionalCredits?.[0]
+      ?.eligibleModelIds,
+  ).toEqual(["model-c"]);
+  const next = await setup(true, ["old-deployment-default"]);
+  expect(
+    (await getBillingBalance(client.db, next.result.organizationId)).promotionalCredits?.[0]
+      ?.eligibleModelIds,
+  ).toEqual(["model-c"]);
+}, 180_000);

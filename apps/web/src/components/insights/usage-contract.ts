@@ -6,6 +6,7 @@
  * older Insights and billing endpoints, so the dashboard never branches on the
  * source.
  */
+import type { InsightsUsageResponse } from "@opengeni/contracts/insights-usage";
 
 /** "custom" pairs with `from`/`to` (UTC days, `to` inclusive). */
 export type UsageRange = "today" | "week" | "month" | "30d" | "90d" | "ytd" | "custom";
@@ -174,6 +175,18 @@ export type UsageResponse = {
   };
 };
 
+/** The API supports more groupings than this dashboard requests. Never relabel a different one. */
+export function usageResponseForGrouping(
+  response: InsightsUsageResponse,
+  groupBy: UsageGroupBy,
+  capabilities: UsageResponse["capabilities"],
+): UsageResponse {
+  if (response.groupBy !== groupBy) {
+    throw new Error("Usage response grouping does not match the request");
+  }
+  return { ...response, groupBy, capabilities };
+}
+
 export type UsageCallKind = "visible" | "private" | "deleted";
 
 export type UsageCall = {
@@ -275,18 +288,19 @@ export function sumMeasures(rows: readonly UsageMeasures[]): UsageMeasures {
 /*
  * Drift guard (types only, nothing ships): the shared contract
  * (`@opengeni/contracts/insights-usage`) must stay assignable to the shapes
- * this dashboard reads.
+ * this dashboard reads after its requested grouping is verified above.
+ * Every dashboard grouping must remain supported by the shared query contract;
+ * additive API-only groupings do not automatically become dashboard controls.
  */
 type AssertAssignable<_T extends true> = true;
+type DashboardUsageResponse = Omit<InsightsUsageResponse, "groupBy"> & {
+  groupBy: Extract<InsightsUsageResponse["groupBy"], UsageGroupBy>;
+};
 export type UsageContractGuard = [
   AssertAssignable<
-    import("@opengeni/contracts/insights-usage").InsightsUsageResponse extends Omit<
-      UsageResponse,
-      "capabilities"
-    >
-      ? true
-      : false
+    DashboardUsageResponse extends Omit<UsageResponse, "capabilities"> ? true : false
   >,
+  AssertAssignable<UsageGroupBy extends InsightsUsageResponse["groupBy"] ? true : false>,
   AssertAssignable<
     import("@opengeni/contracts/insights-usage").InsightsCall extends UsageCall ? true : false
   >,

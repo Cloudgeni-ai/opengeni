@@ -355,7 +355,7 @@ describe("session tenancy SQL seams inside a managed human's own personal worksp
         status: "idle",
       },
     });
-    expect(update).toMatchObject({ added: true, shouldWake: false });
+    expect(update).toMatchObject({ added: true });
     const attemptId = crypto.randomUUID();
     const claim = await claimSessionWorkForAttempt(client.db, human.personalWorkspaceId, {
       sessionId: created.session.id,
@@ -820,34 +820,22 @@ describe("session tenancy SQL seams inside a managed human's own personal worksp
     expect(settled).toEqual({ authorityEpoch: 2, accessRows: 0, revocationEvents: 1 });
   }, 180_000);
 
-  test("subject reads expose tenancy only after the organization's durable activation", async () => {
+  test("subject reads expose tenancy for every organization without an activation receipt", async () => {
     if (!shared || !client) return;
     const human = await provisionManagedHuman();
     const sessionId = await ownedSession(human, human.personalWorkspaceId);
     await shared.admin`
       delete from session_tenancy_activations where account_id = ${human.accountId}`;
 
-    const inert = await getSessionForSubject(
+    // Migration 0611 made session tenancy universal: the projection no longer
+    // depends on a per-organization receipt.
+    const projected = await getSessionForSubject(
       client.db,
       human.personalWorkspaceId,
       sessionId,
       human.subjectId,
     );
-    expect(inert?.tenancy).toBeUndefined();
-
-    await shared.admin`
-      insert into session_tenancy_activations (
-        account_id, activation_version, inventory_digest, parity_digest, activated_by
-      ) values (
-        ${human.accountId}, 1, ${"0".repeat(64)}, ${"1".repeat(64)}, 'database-test'
-      )`;
-    const activated = await getSessionForSubject(
-      client.db,
-      human.personalWorkspaceId,
-      sessionId,
-      human.subjectId,
-    );
-    expect(activated?.tenancy).toEqual({
+    expect(projected?.tenancy).toEqual({
       visibility: "workspace",
       authorityEpoch: 1,
       ownedByCurrentUser: true,

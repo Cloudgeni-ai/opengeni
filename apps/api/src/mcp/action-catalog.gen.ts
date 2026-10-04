@@ -938,6 +938,17 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     ]
   },
   {
+    "id": "createOrganizationServiceAccount",
+    "method": "POST",
+    "path": "/v1/organizations/:organizationId/service-accounts",
+    "request": [
+      "CreateOrganizationServiceAccountRequest"
+    ],
+    "response": [
+      "OrganizationServiceAccount"
+    ]
+  },
+  {
     "id": "createOrganizationWebhook",
     "method": "POST",
     "path": "/v1/organizations/:organizationId/webhooks",
@@ -1289,6 +1300,13 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     ]
   },
   {
+    "id": "deleteOrganizationServiceAccount",
+    "method": "DELETE",
+    "path": "/v1/organizations/:organizationId/service-accounts/:serviceAccountId",
+    "request": [],
+    "response": []
+  },
+  {
     "id": "deleteOrganizationWebhook",
     "method": "DELETE",
     "path": "/v1/organizations/:organizationId/webhooks/:webhookId",
@@ -1547,11 +1565,9 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
   {
     "id": "discoverPlugins",
     "method": "GET",
-    "path": "/v1/workspaces",
+    "path": "/v1/workspaces/:workspaceId/capabilities/discovery/plugins",
     "request": [],
-    "response": [
-      "Workspace"
-    ]
+    "response": []
   },
   {
     "id": "downloadEditableArtifactMaterialization",
@@ -1743,6 +1759,20 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     ]
   },
   {
+    "id": "GET /v1/organizations/:accountId/insights/calls",
+    "method": "GET",
+    "path": "/v1/organizations/:accountId/insights/calls",
+    "request": [],
+    "response": []
+  },
+  {
+    "id": "GET /v1/organizations/:accountId/insights/usage",
+    "method": "GET",
+    "path": "/v1/organizations/:accountId/insights/usage",
+    "request": [],
+    "response": []
+  },
+  {
     "id": "GET /v1/organizations/:organizationId/codex/accounts",
     "method": "GET",
     "path": "/v1/organizations/:organizationId/codex/accounts",
@@ -1774,13 +1804,6 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     "id": "GET /v1/workspaces/:workspaceId/browser-sessions/:browserSessionId/auth-runs/:authRunId",
     "method": "GET",
     "path": "/v1/workspaces/:workspaceId/browser-sessions/:browserSessionId/auth-runs/:authRunId",
-    "request": [],
-    "response": []
-  },
-  {
-    "id": "GET /v1/workspaces/:workspaceId/capabilities/discovery/plugins",
-    "method": "GET",
-    "path": "/v1/workspaces/:workspaceId/capabilities/discovery/plugins",
     "request": [],
     "response": []
   },
@@ -1892,6 +1915,20 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     "id": "GET /v1/workspaces/:workspaceId/identity-links/:linkId/:operation",
     "method": "GET",
     "path": "/v1/workspaces/:workspaceId/identity-links/:linkId/:operation",
+    "request": [],
+    "response": []
+  },
+  {
+    "id": "GET /v1/workspaces/:workspaceId/insights/calls",
+    "method": "GET",
+    "path": "/v1/workspaces/:workspaceId/insights/calls",
+    "request": [],
+    "response": []
+  },
+  {
+    "id": "GET /v1/workspaces/:workspaceId/insights/usage",
+    "method": "GET",
+    "path": "/v1/workspaces/:workspaceId/insights/usage",
     "request": [],
     "response": []
   },
@@ -2515,6 +2552,15 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     "request": [],
     "response": [
       "OrganizationRetentionPolicy"
+    ]
+  },
+  {
+    "id": "getOrganizationServiceAccount",
+    "method": "GET",
+    "path": "/v1/organizations/:organizationId/service-accounts/:serviceAccountId",
+    "request": [],
+    "response": [
+      "OrganizationServiceAccount"
     ]
   },
   {
@@ -3728,6 +3774,15 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     ]
   },
   {
+    "id": "listOrganizationServiceAccounts",
+    "method": "GET",
+    "path": "/v1/organizations/:organizationId/service-accounts",
+    "request": [],
+    "response": [
+      "ListOrganizationServiceAccountsResponse"
+    ]
+  },
+  {
     "id": "listOrganizationSessions",
     "method": "GET",
     "path": "/v1/organizations/:organizationId/sessions",
@@ -4092,6 +4147,15 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     "request": [],
     "response": [
       "WorkspaceOpenRouterCustomModelsResponse"
+    ]
+  },
+  {
+    "id": "listWorkspaces",
+    "method": "GET",
+    "path": "/v1/workspaces",
+    "request": [],
+    "response": [
+      "Workspace"
     ]
   },
   {
@@ -6043,6 +6107,17 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     ]
   },
   {
+    "id": "updateArtifactPin",
+    "method": "PUT",
+    "path": "/v1/workspaces/:workspaceId/artifact-catalog/:kind/:artifactId/pin",
+    "request": [
+      "ArtifactCatalogKind"
+    ],
+    "response": [
+      "ArtifactPinResponse"
+    ]
+  },
+  {
     "id": "updateBrowserIdentity",
     "method": "PATCH",
     "path": "/v1/workspaces/:workspaceId/browser-identities/:identityId",
@@ -6266,6 +6341,17 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     ],
     "response": [
       "OrganizationRetentionPolicy"
+    ]
+  },
+  {
+    "id": "updateOrganizationServiceAccount",
+    "method": "PATCH",
+    "path": "/v1/organizations/:organizationId/service-accounts/:serviceAccountId",
+    "request": [
+      "UpdateOrganizationServiceAccountRequest"
+    ],
+    "response": [
+      "OrganizationServiceAccount"
     ]
   },
   {

@@ -24,6 +24,7 @@ import { PageHeader } from "@/components/ui/page-header";
 import { useAppContext } from "@/context";
 import { isPersonalWorkspace } from "@/lib/managed-self-context";
 import { orgLabel } from "@/lib/org";
+import { organizationSettingsAccess } from "@/lib/organization-settings-access";
 import {
   canManageWorkspaceSettings,
   hasAccountPermission,
@@ -41,9 +42,11 @@ import {
   useWorkspaceInstructions,
 } from "./knowledge-instructions";
 import {
+  AGENT_LEARNING_TITLE,
   LearningPage,
   learningSummary,
   reviewEmptyLine,
+  useIdentityLearningPolicy,
   useLearningDefaults,
 } from "./knowledge-learning";
 import {
@@ -64,14 +67,14 @@ import { UploadFilesDialog } from "./knowledge-upload";
    Knowledge: one rail page with tabs Library, Instructions and Review (n),
    built like every resource page: a header with one primary action (Add
    knowledge) and a ⋯ menu, a toolbar, and flat lists of rows. Every entry,
-   each change waiting for review, the instructions, Learning, Add knowledge,
+   each change waiting for review, the instructions, Agent learning, Add knowledge,
    Edit and History open as their own pages in the content area with a back
    link. The URL says which one, so each page can be linked and the browser's
    back button works.
    -------------------------------------------------------------------------- */
 
 const TAB_LABEL: Record<KnowledgeTab, string> = {
-  library: "Knowledge",
+  library: "Library",
   instructions: "Instructions",
   review: "Review",
 };
@@ -120,17 +123,22 @@ export function KnowledgePage({
   const [collectionOpen, setCollectionOpen] = useState(false);
   const [libraryEmpty, setLibraryEmpty] = useState(false);
 
-  // Old links: Files is a Library filter now, the Review flag is a tab.
+  // Old links: Files is a Library filter now, the Review flag is a tab. A
+  // scope link (Organization documents) opens the Library filtered to it.
   const legacyFiles = search.view === "files";
   const legacyReview = search.review === true && search.view !== "review";
+  const scopeLink = search.scope;
   useEffect(() => {
     if (legacyFiles) {
       setLibrary((current) => ({ ...current, filters: { type: ["source"] } }));
       nav.replace(search.file ? { file: search.file } : {});
     } else if (legacyReview) {
       nav.replace({ view: "review" });
+    } else if (scopeLink) {
+      setLibrary((current) => ({ ...current, scope: scopeLink }));
+      nav.replace({});
     }
-  }, [legacyFiles, legacyReview, nav, search.file]);
+  }, [legacyFiles, legacyReview, scopeLink, nav, search.file]);
 
   const tab: KnowledgeTab =
     search.view === "instructions" || search.view === "review" || legacyReview
@@ -151,6 +159,19 @@ export function KnowledgePage({
   });
   const shared = useLearningDefaults(workspaceId, personal ? "personal" : "workspace");
   const mine = useLearningDefaults(workspaceId, "personal");
+  // Owner-only, the same rule as Organization settings > Organization identity.
+  const ownsOrganization = Boolean(
+    workspace?.accountId &&
+    organizationSettingsAccess({
+      accessContext: context.accessContext,
+      clientConfig: context.clientConfig,
+      accountId: workspace.accountId,
+    }).canManageCompanyProfileAgentPolicy,
+  );
+  const identityPolicy = useIdentityLearningPolicy(
+    workspaceId,
+    ownsOrganization && search.page === "learning",
+  );
   const instructions = useWorkspaceInstructions(workspaceId);
   const archive = useArchiveKnowledge(workspaceId, changed);
 
@@ -271,6 +292,7 @@ export function KnowledgePage({
           canManageWorkspace={canManageWorkspace}
           shared={shared}
           mine={mine}
+          identity={identityPolicy}
           onClose={backToTab}
         />
       );
@@ -374,7 +396,7 @@ export function KnowledgePage({
           canEdit={canEdit}
           canWriteOrganization={canWriteOrganization}
           refresh={refresh}
-          backLabel={tab === "library" ? "Knowledge" : TAB_LABEL[tab]}
+          backLabel={TAB_LABEL[tab]}
           onBack={backToTab}
           onOpenEntry={openEntry}
           onEdit={(id) => nav.openPage("edit", { entry: id })}
@@ -453,7 +475,7 @@ export function KnowledgePage({
                 {canEdit ? <DropdownMenuSeparator /> : null}
                 <DropdownMenuItem onSelect={openLearning}>
                   <GraduationCapIcon />
-                  Learning
+                  {AGENT_LEARNING_TITLE}
                   {shared.loading ? null : (
                     <span className="ml-auto pl-6 text-xs text-fg-subtle">
                       {learningSummary(shared.modes)}
@@ -465,8 +487,8 @@ export function KnowledgePage({
           }
           tabs={
             <LineTabsList aria-label="Knowledge">
-              <LineTabsTrigger value="library">Library</LineTabsTrigger>
-              <LineTabsTrigger value="instructions">Instructions</LineTabsTrigger>
+              <LineTabsTrigger value="library">{TAB_LABEL.library}</LineTabsTrigger>
+              <LineTabsTrigger value="instructions">{TAB_LABEL.instructions}</LineTabsTrigger>
               {showReview ? (
                 <LineTabsTrigger
                   value="review"
@@ -474,7 +496,7 @@ export function KnowledgePage({
                   countTone="attention"
                   countLabel={waiting ? `${waiting} waiting for review` : undefined}
                 >
-                  Review
+                  {TAB_LABEL.review}
                 </LineTabsTrigger>
               ) : null}
             </LineTabsList>

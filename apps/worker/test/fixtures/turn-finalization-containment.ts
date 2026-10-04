@@ -53,7 +53,7 @@ const containment = createWorkerCleanupContainment({
 });
 const deps = {
   ...context,
-  input: { sessionId: "session-1", attemptId: "attempt-1" },
+  input: { workspaceId: "workspace-1", sessionId: "session-1", attemptId: "attempt-1" },
   settings,
   activityStarted: performance.now(),
   activitySpan: { end() {} },

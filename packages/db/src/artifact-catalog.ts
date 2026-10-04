@@ -2,7 +2,13 @@ import type { ArtifactCatalogKind, ArtifactCatalogListQuery } from "@opengeni/co
 import { sql, type SQL } from "drizzle-orm";
 import { withRlsContext, type Database } from "./database";
 
-export type ArtifactCatalogPosition = { key: string; kind: ArtifactCatalogKind; id: string };
+export type ArtifactCatalogPosition = {
+  key: string;
+  kind: ArtifactCatalogKind;
+  id: string;
+  /** Legacy cursor frontiers did not carry this bit. */
+  pinned?: boolean | undefined;
+};
 /** Internal candidates are NOT an authorized public projection. */
 export type ArtifactCatalogCandidate = {
   id: string;
@@ -16,7 +22,21 @@ export type ArtifactCatalogCandidate = {
   source_session_id: string | null;
   version_id: string | null;
   sort_key: string;
+  pinned?: boolean;
 };
+
+/** API callers must first verify publish permission and domain-specific read authority. */
+export async function updateArtifactPin(
+  db: Database,
+  scope: { accountId: string; workspaceId: string },
+  input: { kind: ArtifactCatalogKind; artifactId: string; pinned: boolean },
+): Promise<void> {
+  await withRlsContext(db, scope, async (tx) => {
+    await tx.execute(sql`select opengeni_private.update_artifact_pin(
+      ${scope.accountId}::uuid, ${scope.workspaceId}::uuid,
+      ${input.kind}::text, ${input.artifactId}::text, ${input.pinned}::boolean)`);
+  });
+}
 
 /** Called only after immutable bytes have been retained by explicit publication. */
 export async function recordSandboxFilePublication(
@@ -84,7 +104,7 @@ export async function listArtifactCatalogCandidates(
     branches.push(sql`
     SELECT p.file_id::text AS id, p.kind, p.title, 'active'::text AS status,
       p.published_at AS created_at, p.published_at AS updated_at, p.source_session_id, NULL::text AS version_id, 'sandbox_file'::text AS origin
-    FROM opengeni_private.list_sandbox_file_publications(${scope.accountId}::uuid, ${scope.workspaceId}::uuid,
+    FROM opengeni_private.list_sandbox_file_publications_pinned(${scope.accountId}::uuid, ${scope.workspaceId}::uuid,
       ${JSON.stringify({ sourceSessionId: source, q: query.q, kinds: publishedKinds, sort: query.sort, snapshotAt: input.snapshotAt, after: input.after, limit: input.limit })}::jsonb) p`);
   if (!branches.length) return [];
   const sort =
@@ -95,22 +115,28 @@ export async function listArtifactCatalogCandidates(
         : sql`to_char(updated_at AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.US')`;
   const descending = query.sort !== "title";
   const position = input.after;
-  const keyset = !position
+  const secondaryKeyset = !position
     ? sql`true`
     : sql`(
     sort_key COLLATE "C" ${descending ? sql`<` : sql`>`} ${position.key} COLLATE "C"
     OR (sort_key = ${position.key} AND (kind COLLATE "C", id COLLATE "C") > (${position.kind}, ${position.id})))`;
+  const keyset = !position
+    ? sql`true`
+    : sql`(pinned < ${position.pinned ?? false}::boolean OR
+        (pinned = ${position.pinned ?? false}::boolean AND ${secondaryKeyset}))`;
   return withRlsContext(
     db,
     scope,
     async (tx) => {
       const result = await tx.execute(sql`
       WITH candidates AS (${sql.join(branches, sql` UNION ALL `)}),
-      ordered AS (SELECT *, ${sort} AS sort_key FROM candidates
+      ordered AS (SELECT candidates.*, ${sort} AS sort_key, (pins.artifact_id IS NOT NULL) AS pinned
+        FROM candidates LEFT JOIN opengeni_private.list_artifact_pins(${scope.accountId}::uuid, ${scope.workspaceId}::uuid) pins
+          ON pins.kind = candidates.kind AND pins.artifact_id = candidates.id
         WHERE status = ${query.status} AND created_at <= ${input.snapshotAt}::timestamptz
           ${query.q ? sql`AND strpos(lower(title), lower(${query.q})) > 0` : sql``})
       SELECT * FROM ordered WHERE ${keyset}
-      ORDER BY sort_key COLLATE "C" ${descending ? sql`DESC` : sql`ASC`}, kind COLLATE "C", id COLLATE "C"
+      ORDER BY pinned DESC, sort_key COLLATE "C" ${descending ? sql`DESC` : sql`ASC`}, kind COLLATE "C", id COLLATE "C"
       LIMIT ${input.limit}`);
       return (
         Array.isArray(result) ? result : (result as { rows: ArtifactCatalogCandidate[] }).rows

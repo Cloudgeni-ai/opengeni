@@ -1,5 +1,35 @@
 # @opengeni/ogtool
 
+## 1.1.0
+
+### Patch Changes
+
+- @opengeni/codemode@1.1.0
+
+## 1.0.2
+
+### Patch Changes
+
+- @opengeni/codemode@1.0.1
+
+## 1.0.0
+
+### Major Changes
+
+- Reset package versioning: every published `@opengeni/*` package now releases together at one shared version, starting at 1.0.0. Install all `@opengeni` packages at the same version. Earlier versions are retired.
+
+## 0.3.53
+
+### Patch Changes
+
+- @opengeni/codemode@0.7.2
+
+## 0.3.52
+
+### Patch Changes
+
+- @opengeni/codemode@0.7.1
+
 ## 0.3.51
 
 ### Patch Changes

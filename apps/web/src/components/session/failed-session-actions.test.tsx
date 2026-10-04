@@ -232,9 +232,44 @@ test("the free model keeps ordinary wording for failures other than its daily li
   );
   const row = container.querySelector<HTMLElement>('[data-testid="failed-session-banner"]')!;
   expect(row.querySelector("span")!.textContent).toBe(
-    "The model provider is rate limiting requests. Try again in a minute.",
+    "This model is throttled due to high demand. Choose another model to continue, or try again in a few minutes.",
   );
   expect([...row.querySelectorAll("a, button")].map((node) => node.textContent)).toEqual(["Retry"]);
+});
+
+test("throttling offers the existing model picker next to Retry until another model is chosen", async () => {
+  let opened = 0;
+  const banner = (modelChanged: boolean) => (
+    <FailedSessionBanner
+      failure={{
+        ...failure,
+        reason: "429 Too Many Requests",
+        failureCode: "provider_rate_limited",
+      }}
+      actions={actions}
+      canChooseModel
+      modelChanged={modelChanged}
+      onChooseModel={() => opened++}
+    />
+  );
+  const container = await render(banner(false));
+  const row = container.querySelector<HTMLElement>('[data-testid="failed-session-banner"]')!;
+  expect(row.querySelector("span")!.textContent).toBe(
+    "This model is throttled due to high demand. Choose another model to continue, or try again in a few minutes.",
+  );
+  const buttons = [...row.querySelectorAll("button")];
+  expect(buttons.map((node) => node.textContent)).toEqual(["Choose model", "Retry"]);
+  await act(async () => buttons[0]!.click());
+  expect(opened).toBe(1);
+
+  await act(async () => root!.render(banner(true)));
+  const changedRow = container.querySelector<HTMLElement>('[data-testid="failed-session-banner"]')!;
+  expect(changedRow.querySelector("span")!.textContent).toBe(
+    "This model is throttled due to high demand. Try again in a few minutes.",
+  );
+  expect([...changedRow.querySelectorAll("button")].map((node) => node.textContent)).toEqual([
+    "Retry",
+  ]);
 });
 
 test("double clicks and accepted submissions never duplicate recovery", async () => {
@@ -486,7 +521,7 @@ test.each(["restored", "connected_machine", "automatic", "fresh_workspace"] as c
     }
     if (route === "fresh_workspace")
       expect(container.textContent).toContain(
-        "Retry will continue with an empty workspace. OpenGeni cannot restore the previous sandbox files automatically.",
+        "Retry will continue with an empty workspace. Opengeni cannot restore the previous sandbox files automatically.",
       );
     expect(container.querySelector("button")!.dataset.variant).toBe("ghost");
     expect(container.textContent).not.toContain("Choose another model");

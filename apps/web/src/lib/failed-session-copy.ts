@@ -16,6 +16,13 @@ type KnownFailure = {
   message: string;
   retryUnhelpful: boolean;
   suggestModel: boolean;
+  /**
+   * Whole headline when another model can be chosen, for transient refusals
+   * whose remedy reads as a choice; the banner then offers a model button
+   * instead of pointing below. Otherwise " Choose another model below." is
+   * appended to `message`.
+   */
+  chooseModelMessage?: string;
 };
 export type KnownFailureKind =
   | "provider_credentials"
@@ -71,15 +78,19 @@ const QUOTA: KnownFailure = {
 };
 const RATE_LIMITED: KnownFailure = {
   kind: "rate_limited",
-  message: "The model provider is rate limiting requests. Try again in a minute.",
+  message: "This model is throttled due to high demand. Try again in a few minutes.",
+  chooseModelMessage:
+    "This model is throttled due to high demand. Choose another model to continue, or try again in a few minutes.",
   retryUnhelpful: false,
-  suggestModel: false,
+  suggestModel: true,
 };
 const PROVIDER_ERROR: KnownFailure = {
   kind: "provider_error",
-  message: "The model provider had a temporary error.",
+  message: "This model is temporarily unavailable. Try again in a few minutes.",
+  chooseModelMessage:
+    "This model is temporarily unavailable. Choose another model to continue, or try again in a few minutes.",
   retryUnhelpful: false,
-  suggestModel: false,
+  suggestModel: true,
 };
 
 const UNKNOWN_FAILURE = "The session stopped unexpectedly.";
@@ -191,6 +202,8 @@ export function failedSessionCopy(
   detail?: string;
   /** A daily allowance is spent; the banner may name the deployment's free model. */
   dailyLimit?: true;
+  /** The headline invites a model choice without pointing below; offer the picker. */
+  chooseModel?: true;
 } {
   const recorded = failure.reason?.replace(/\s+/g, " ").trim();
   const diagnostic = failure.recordedDetail || failure.reason;
@@ -226,22 +239,31 @@ export function failedSessionCopy(
   const known =
     creditExhausted || failure.safetyRefusal || unavailableModel
       ? null
-      : classifyProviderFailure(
-          failure.recordedDetail ?? recorded ?? "",
-          failure.failureCode,
-          failure.quotaScope,
-        );
+      : (quotaScopeFailure(failure.quotaScope) ??
+        // A recorded recovery streak proves the worker paced this transient
+        // refusal. Provider quota wording alone must not override that typed
+        // decision (e.g. Gemini's per-minute quota); legacy failures with an
+        // unknown streak retain their existing text fallback.
+        (failure.failureCode === "provider_rate_limited" &&
+        failure.consecutiveRecoveryCount !== null
+          ? RATE_LIMITED
+          : classifyProviderFailure(
+              failure.recordedDetail ?? recorded ?? "",
+              failure.failureCode,
+              failure.quotaScope,
+            )));
   if (known) {
     const detail = diagnostic;
+    const suggest = known.suggestModel && canChooseModel && !modelChanged;
     return {
-      reason:
-        known.suggestModel && canChooseModel && !modelChanged
-          ? `${known.message} Choose another model below.`
-          : known.message,
+      reason: suggest
+        ? (known.chooseModelMessage ?? `${known.message} Choose another model below.`)
+        : known.message,
       unavailableModel: false,
       retryUnhelpful: known.retryUnhelpful,
       ...(detail && detail !== known.message ? { detail } : {}),
       ...(known === DAILY_LIMIT ? { dailyLimit: true as const } : {}),
+      ...(suggest && known.chooseModelMessage ? { chooseModel: true as const } : {}),
     };
   }
   // Unclassified preclaim text can also contain raw infrastructure diagnostics.

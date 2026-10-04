@@ -360,7 +360,7 @@ test.each(["personal"] as const)(
       expect(saved?.subjectId).toBe(ownership === "personal" ? identity.subjectId : null);
       expect(saved?.metadata).toMatchObject({
         gmailEmail: "mailbox@example.test",
-        mcpToolsVerification: { status: "ok", toolCount: 12 },
+        mcpToolsVerification: { status: "ok", toolCount: 37 },
       });
       expect(JSON.stringify(saved?.metadata)).not.toContain("private-history");
       expect(saved?.grantedScopes).toEqual([...OFFICIAL_GMAIL_MCP_SCOPES]);

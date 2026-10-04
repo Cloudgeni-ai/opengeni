@@ -8,18 +8,24 @@ import {
 import * as z from "zod/v4";
 import { assertDescribedToolInput, contractToolInput } from "../src/mcp/contract-input";
 import {
+  resolveScheduledTaskCreateInput,
+  scheduledTaskCreateToolInput,
+  scheduledTaskCreateToolValidation,
+} from "../src/mcp/scheduled-task-input";
+import {
   firstPartyToolGrant as grant,
   withFirstPartyToolClient as withClient,
   withMcpClient as withServer,
 } from "./helpers/first-party-tool-client";
 
 describe("first-party tool input discovery and validation", () => {
-  test("publishes the interval cadence through real MCP discovery", async () => {
+  test("publishes message destinations and separate-agent settings through real MCP discovery", async () => {
     await withClient(async (client) => {
       const { tools } = await client.listTools();
       const schema = tools.find((tool) => tool.name === "scheduled_tasks_create")!.inputSchema;
       expect(JSON.stringify(schema)).toContain("everySeconds");
-      expect(schema.required).toEqual(["name", "schedule", "agentConfig"]);
+      for (const field of ["prompt", "targetSessionId", "runMode", "agentConfig"])
+        expect(schema.properties).toHaveProperty(field);
       expect(JSON.stringify(schema)).not.toContain("slackBotChannelId");
       expect(schema.properties).not.toHaveProperty("agentLearning");
       expect(schema.properties).not.toHaveProperty("connectionAuthorities");
@@ -40,12 +46,13 @@ describe("first-party tool input discovery and validation", () => {
     });
   });
 
-  test("the advertised schedule is accepted and rejected by the shared gateway before execution", async () => {
+  test("the advertised schedule preserves exact chat and separate-agent intent through the gateway", async () => {
     await withClient(async (client) => {
       const tool = (await client.listTools()).tools.find(
         (item) => item.name === "scheduled_tasks_create",
       )!;
       let executions = 0;
+      const accepted: ReturnType<typeof resolveScheduledTaskCreateInput>[] = [];
       const { gateway } = createWorkspaceToolGateway({
         accountId: grant.accountId!,
         workspaceId: grant.workspaceId!,
@@ -56,8 +63,11 @@ describe("first-party tool input discovery and validation", () => {
             modelName: tool.name,
             source: "mcp",
             approval: "none",
-            inputSchema: tool.inputSchema,
+            inputSchema: z.record(z.string(), z.json()).parse(tool.inputSchema),
             execute: async (args) => {
+              accepted.push(
+                resolveScheduledTaskCreateInput(args, String(grant.metadata!.sessionId)),
+              );
               executions++;
               return { content: [{ type: "text", text: JSON.stringify(args) }] };
             },
@@ -67,11 +77,37 @@ describe("first-party tool input discovery and validation", () => {
       const args = {
         name: "Activity monitor",
         schedule: { type: "interval", everySeconds: 7200 },
-        agentConfig: { prompt: "Report activity" },
+        prompt: "Report activity",
       };
       const request = { modelName: tool.name, arguments: args, subjectId: grant.subjectId };
       await gateway.callModel(request);
       expect(executions).toBe(1);
+      expect(accepted[0]).toMatchObject({
+        runMode: "existing_session",
+        targetSessionId: grant.metadata!.sessionId,
+        agentConfig: { prompt: args.prompt },
+      });
+
+      const targetSessionId = "44444444-4444-4444-8444-444444444444";
+      await gateway.callModel({
+        ...request,
+        arguments: { ...args, targetSessionId },
+      });
+      expect(accepted.at(-1)).toMatchObject({ runMode: "existing_session", targetSessionId });
+      for (const runMode of ["reusable_session", "new_session_per_run"] as const) {
+        await gateway.callModel({
+          ...request,
+          arguments: {
+            name: args.name,
+            schedule: args.schedule,
+            runMode,
+            agentConfig: { prompt: args.prompt },
+          },
+        });
+        expect(accepted.at(-1)?.runMode).toBe(runMode);
+        expect(accepted.at(-1)?.targetSessionId).toBeUndefined();
+      }
+      const beforeInvalid = executions;
       try {
         await gateway.callModel({
           ...request,
@@ -83,7 +119,80 @@ describe("first-party tool input discovery and validation", () => {
         expect((error as Error).message).toContain("everySeconds");
         expect((error as Error).message).not.toContain("knowledge_source_sync");
       }
-      expect(executions).toBe(1);
+      for (const field of ["name", "schedule"] as const) {
+        const { [field]: omitted, ...missingRequired } = args;
+        expect(omitted).toBeDefined();
+        await expect(
+          gateway.callModel({ ...request, arguments: missingRequired }),
+        ).rejects.toBeInstanceOf(ToolGatewayInputValidationError);
+      }
+      await expect(
+        gateway.callModel({
+          ...request,
+          arguments: { ...args, runMode: "reusable_session" },
+        }),
+      ).rejects.toThrow();
+      expect(executions).toBe(beforeInvalid);
+    });
+  });
+
+  test("sessionless MCP requires a destination or explicit separate-agent intent before execution", async () => {
+    const server = new McpServer({ name: "sessionless-schedules", version: "1" });
+    const accepted: ReturnType<typeof resolveScheduledTaskCreateInput>[] = [];
+    server.registerTool(
+      "scheduled_tasks_create",
+      {
+        inputSchema: contractToolInput(
+          scheduledTaskCreateToolInput(),
+          scheduledTaskCreateToolValidation(null),
+        ),
+      },
+      async (args) => {
+        accepted.push(resolveScheduledTaskCreateInput(args, null));
+        return { content: [{ type: "text", text: "accepted" }] };
+      },
+    );
+    const base = { name: "Activity monitor", schedule: { type: "interval", everySeconds: 7200 } };
+    const targetSessionId = "44444444-4444-4444-8444-444444444444";
+    await withServer(server, async (client) => {
+      for (const args of [
+        { ...base, agentConfig: { prompt: "Report activity" } },
+        { ...base, prompt: "Report activity" },
+      ]) {
+        const result = await client.callTool({ name: "scheduled_tasks_create", arguments: args });
+        expect(result.isError).toBe(true);
+        expect(JSON.stringify(result.content)).toContain("Choose an existing chat");
+      }
+      for (const args of [
+        { ...base, runMode: "existing_session", prompt: "Report activity" },
+        { ...base, runMode: "reusable_session", prompt: "Report activity" },
+        {
+          ...base,
+          runMode: "new_session_per_run",
+          targetSessionId,
+          agentConfig: { prompt: "Report activity" },
+        },
+      ]) {
+        const result = await client.callTool({ name: "scheduled_tasks_create", arguments: args });
+        expect(result.isError).toBe(true);
+      }
+      expect(accepted).toHaveLength(0);
+
+      const message = await client.callTool({
+        name: "scheduled_tasks_create",
+        arguments: { ...base, targetSessionId, prompt: "Report activity" },
+      });
+      expect(message.isError).not.toBe(true);
+      expect(accepted.at(-1)).toMatchObject({ runMode: "existing_session", targetSessionId });
+      for (const runMode of ["reusable_session", "new_session_per_run"] as const) {
+        const result = await client.callTool({
+          name: "scheduled_tasks_create",
+          arguments: { ...base, runMode, agentConfig: { prompt: "Report activity" } },
+        });
+        expect(result.isError).not.toBe(true);
+        expect(accepted.at(-1)?.runMode).toBe(runMode);
+        expect(accepted.at(-1)?.targetSessionId).toBeUndefined();
+      }
     });
   });
 

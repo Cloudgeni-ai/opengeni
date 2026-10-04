@@ -244,6 +244,22 @@ export type ReconcileSessionAttemptQuiescenceResult = {
   action: "quiesced" | "pending" | "stale";
 };
 
+export type ReconcileSettledSessionAttemptInput = {
+  accountId: string;
+  workspaceId: string;
+  sessionId: string;
+  turnId: string;
+  attemptId: string;
+  executionGeneration: number;
+  workflowId: string;
+  workflowRunId: string;
+  activityId: string;
+};
+
+export type ReconcileSettledSessionAttemptResult = {
+  action: "recovering" | "exceeded" | "pending" | "stale";
+};
+
 export type FailSessionAttemptInput = {
   accountId: string;
   workspaceId: string;
@@ -484,6 +500,7 @@ export type DispatchScheduledTaskRunResult =
         | "machine_enrollment_inactive"
         | "variable_set_unavailable"
         | "rig_version_unavailable"
+        | "scheduled_model_unavailable"
         | "knowledge_source_paused"
         | "legacy_source_schedule_requires_migration"
         | "atlassian_native_retired"

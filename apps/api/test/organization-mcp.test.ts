@@ -16,11 +16,22 @@ import {
   type ActionCatalogEntry,
 } from "../../../scripts/public-api/action-catalog";
 import { ACTION_CATALOG } from "../src/mcp/action-catalog.gen";
-import { buildOrganizationMcpServer, type OrganizationMcpCaller } from "../src/organization-mcp";
+import {
+  buildOrganizationMcpServer,
+  READ_ONLY_POST_ACTIONS,
+  type OrganizationMcpCaller,
+  searchActions,
+} from "../src/organization-mcp";
 
 const organizationId = "11111111-1111-4111-8111-111111111111";
 const workspaceId = "22222222-2222-4222-8222-222222222222";
 const subjectId = "user:33333333-3333-4333-8333-333333333333";
+const insightsRoutes = [
+  "/v1/organizations/:accountId/insights/calls",
+  "/v1/organizations/:accountId/insights/usage",
+  "/v1/workspaces/:workspaceId/insights/calls",
+  "/v1/workspaces/:workspaceId/insights/usage",
+] as const;
 
 function routeKey(route: { method: string; path: string }): string {
   return `${route.method} ${route.path}`;
@@ -113,6 +124,8 @@ describe("organization MCP action catalog", () => {
         .map(routeKey),
     );
     expect(listed).toEqual(callable);
+    // Every read-only POST exception names a real POST action.
+    for (const path of READ_ONLY_POST_ACTIONS) expect(listed.has(`POST ${path}`)).toBe(true);
     // UI actions that live outside the SDK are included too.
     for (const key of [
       "PATCH /v1/organizations/:organizationId/codex/settings",
@@ -169,6 +182,89 @@ describe("organization MCP action catalog", () => {
 });
 
 describe("organization MCP server", () => {
+  test.each(insightsRoutes)(
+    "discovers, describes and dispatches %s with the original read-only person proof",
+    async (path) => {
+      const { client, call, seen } = await connect(person(readOnly));
+      try {
+        const id = `GET ${path}`;
+        const found = (await call("opengeni_actions_search", { query: "insights", limit: 50 }))
+          .value as { actions: Array<{ id: string; method: string; path: string }> };
+        expect(found.actions).toContainEqual({ id, method: "GET", path });
+        const parameter = path.includes(":accountId") ? "accountId" : "workspaceId";
+        const value = parameter === "accountId" ? organizationId : workspaceId;
+        const described = (await call("opengeni_action_describe", { id })).value as {
+          method: string;
+          path: string;
+          pathParameters: string[];
+        };
+        expect(described).toMatchObject({ method: "GET", path, pathParameters: [parameter] });
+        const result = await call("opengeni_action_call", {
+          id,
+          pathParameters: { [parameter]: value },
+          query: { range: "week", provider: ["anthropic", "openai"] },
+          // GET action input cannot manufacture another actor or a write body.
+          body: { subjectId: "user:spoofed", permissions: ["workspace:admin"] },
+        });
+        expect(result).toEqual({ isError: false, value: { status: 200, body: { ok: true } } });
+        expect(seen).toHaveLength(1);
+        const request = seen[0]!;
+        const url = new URL(request.url);
+        expect(request.method).toBe("GET");
+        expect(url.pathname).toBe(path.replace(`:${parameter}`, value));
+        expect(url.origin).toBe("https://app.example.test");
+        expect([...url.searchParams.entries()]).toEqual([
+          ["range", "week"],
+          ["provider", "anthropic"],
+          ["provider", "openai"],
+        ]);
+        expect(request.body).toBeNull();
+        expect(request.headers.get("authorization")).toBeNull();
+        expect(request.headers.get("cookie")).toBeNull();
+        expect(verifiedDelegatedHumanAuthorizationForRequest(request)).toEqual({
+          organizationId,
+          subjectId,
+          permissions: readOnly.permissions,
+          workspaceScope: readOnly.workspaceScope,
+        });
+      } finally {
+        await client.close();
+      }
+    },
+  );
+
+  test.each(insightsRoutes)(
+    "%s forwards route denial without substituting the requested scope for caller authority",
+    async (path) => {
+      const { client, call, seen } = await connect(person(readOnly), () =>
+        Response.json({ message: "scope permission denied" }, { status: 403 }),
+      );
+      try {
+        const parameter = path.includes(":accountId") ? "accountId" : "workspaceId";
+        const otherScope = "44444444-4444-4444-8444-444444444444";
+        const result = await call("opengeni_action_call", {
+          id: `GET ${path}`,
+          pathParameters: { [parameter]: otherScope },
+          query: { range: "week" },
+        });
+        expect(result).toEqual({
+          isError: true,
+          value: { status: 403, body: { message: "scope permission denied" } },
+        });
+        expect(seen).toHaveLength(1);
+        expect(new URL(seen[0]!.url).pathname).toBe(path.replace(`:${parameter}`, otherScope));
+        expect(verifiedDelegatedHumanAuthorizationForRequest(seen[0]!)).toEqual({
+          organizationId,
+          subjectId,
+          permissions: readOnly.permissions,
+          workspaceScope: { kind: "selected", workspaceIds: [workspaceId] },
+        });
+      } finally {
+        await client.close();
+      }
+    },
+  );
+
   test("lists find, describe and run, and finds actions by words", async () => {
     const { client, call } = await connect(person(full));
     const tools = await client.listTools();
@@ -244,6 +340,15 @@ describe("organization MCP server", () => {
       kind: "selected",
       workspaceIds: [workspaceId],
     });
+    // Searching sends the query as a POST body, but only reads: it runs.
+    const search = await call("opengeni_action_call", {
+      id: "POST /v1/workspaces/:workspaceId/knowledge/search",
+      pathParameters: { workspaceId },
+      body: { query: "release notes" },
+    });
+    expect(search.isError).toBe(false);
+    expect(seen).toHaveLength(2);
+    expect(seen[1]!.method).toBe("POST");
   });
 
   test("an organization API key forwards its own credential and carries no person proof", async () => {
@@ -287,5 +392,15 @@ describe("organization MCP server", () => {
     });
     expect(refused.isError).toBe(true);
     expect(refused.value).toMatchObject({ status: 403, hint: expect.stringContaining("browser") });
+  });
+});
+
+describe("organization MCP action search", () => {
+  test("ranks name matches above path matches", () => {
+    const first = (query: string) => searchActions({ query, limit: 1, offset: 0 }).actions[0]?.id;
+    expect(first("list workspaces")).toBe("listWorkspaces");
+    expect(first("workspaces")).toBe("listWorkspaces");
+    expect(first("create session")).toBe("createSession");
+    expect(first("github repositories")).toBe("listGitHubRepositories");
   });
 });
