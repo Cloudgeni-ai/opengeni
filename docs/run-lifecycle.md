@@ -1369,7 +1369,14 @@ For MCP, the runtime reads the complete provider `CallToolResult` through the
 SDK's `callToolResult` seam and carries a private duplicate only until the exact
 audit projection is durable. An HTTP-successful result with `isError: true`
 therefore remains a failed tool outcome in live SDK state, model-facing history,
-the pending receipt, the durable event, recovery, and the timeline. The physical
+the pending receipt, the durable event, recovery, and the timeline. The
+model-facing projection of a prefixed MCP result
+(`packages/runtime/src/mcp-model-output.ts`) keeps the result envelope but drops
+a plain text block whose text is exactly a JSON serialization of
+`structuredContent` (the MCP backwards-compatibility copy), so the payload is
+not paid for twice. Prose, differing JSON, annotated text, non-text blocks, and
+text carrying integers beyond the safe range stay; the durable event keeps the
+exact result, and stored history rows are never rewritten. The physical
 invocation boundary also records
 `opengeni_mcp_tool_calls_total{outcome}` and
 `opengeni_mcp_tool_call_duration_seconds{outcome}` with one closed structural
