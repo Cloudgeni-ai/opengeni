@@ -4,6 +4,15 @@ import type { RealtimeControllerTransportStarter } from "./codex-realtime-contro
 type Envelope = Record<string, unknown>;
 const MAX_FRAGMENT_BYTES = 64_000;
 
+/** The most recent speech wins when the user talks for a long time between delegations. */
+function takeUtf8Tail(text: string, maxBytes = MAX_FRAGMENT_BYTES): string {
+  const encoder = new TextEncoder();
+  if (encoder.encode(text).byteLength <= maxBytes) return text;
+  let tail = text.slice(-maxBytes);
+  while (encoder.encode(tail).byteLength > maxBytes) tail = tail.slice(1);
+  return tail;
+}
+
 /** Azure Live has timed transcript fragments, not provider-finalized turns. */
 export class AzureLiveDataChannel extends EventTarget {
   private pending: {
@@ -19,6 +28,9 @@ export class AzureLiveDataChannel extends EventTarget {
   private closeSent = false;
   private providerClosed = false;
   private readonly delegations = new Set<string>();
+  // Azure delegations carry no content, so the user's words since the previous
+  // delegation become the delegation input.
+  private userSinceDelegation = "";
   private draining: Promise<void> | null = null;
   private finishDrain: ((error?: Error) => void) | null = null;
   private readonly onOpen = () => this.dispatchEvent(new Event("open"));
@@ -94,6 +106,8 @@ export class AzureLiveDataChannel extends EventTarget {
       )
         return;
       const role = value.type === "session.input_transcript.delta" ? "user" : "assistant";
+      if (role === "user")
+        this.userSinceDelegation = takeUtf8Tail(this.userSinceDelegation + value.delta);
       if (
         this.pending &&
         (this.pending.role !== role ||
@@ -122,9 +136,16 @@ export class AzureLiveDataChannel extends EventTarget {
       if (delegation?.target !== "client" || typeof delegation.id !== "string") return;
       this.delegations.add(delegation.id);
       this.flush();
+      const spoken = this.userSinceDelegation.trim();
+      this.userSinceDelegation = "";
       this.emit({
         type: "delegation.created",
-        item: { id: delegation.id, type: "delegation", target: "client", content: [] },
+        item: {
+          id: delegation.id,
+          type: "delegation",
+          target: "client",
+          content: spoken ? [{ type: "input_text", text: spoken }] : [],
+        },
         offset_ms: value.offset_ms,
       });
       return;

@@ -37,8 +37,20 @@ test("interleaved fragments retain order and delegation flushes its input", () =
   ]);
   expect(received[0].turn.transcript).toBe("Build the page");
   expect(received[1].turn.transcript).toBe("On it");
+  // Azure delegations carry no content; the user's words since the last
+  // delegation become the delegation input, so the server can name the request.
+  expect(received[2].item.content).toEqual([{ type: "input_text", text: "Build the page" }]);
   for (const event of received)
     expect(parseCodexRealtimeV3Event(JSON.stringify(event)).ok).toBe(true);
+  const parsed = parseCodexRealtimeV3Event(JSON.stringify(received[2]));
+  expect(
+    parsed.ok && parsed.event.type === "delegation.created" && parsed.event.inputTranscript,
+  ).toBe("Build the page");
+  raw.emit({
+    type: "session.delegation.created",
+    delegation: { id: "delegation-2", target: "client" },
+  });
+  expect(received.at(-1).item.content).toEqual([]);
   channel.close();
 });
 test("quiet and speakable context preserve the exact delegation identity", () => {
