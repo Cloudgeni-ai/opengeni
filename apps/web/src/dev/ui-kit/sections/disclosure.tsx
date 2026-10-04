@@ -30,7 +30,7 @@ const whereOptions: SelectOption[] = [
   {
     value: "managed",
     label: "Managed sandbox",
-    description: "A fresh OpenGeni sandbox for each run.",
+    description: "A fresh Opengeni sandbox for each run.",
   },
   ...sandboxEnvironments.map((environment) => ({
     value: environment.id,

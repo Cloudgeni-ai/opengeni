@@ -1304,8 +1304,8 @@ export function ProviderDisconnectDialog({
           : `Models billed to ${config.title} stop working for new work.`,
         "Work already running finishes first.",
         config.provider === "claude_subscription"
-          ? "The saved token is removed from OpenGeni. Your Claude subscription stays active."
-          : "The saved API key is removed from OpenGeni. You can reconnect with a valid key.",
+          ? "The saved token is removed from Opengeni. Your Claude subscription stays active."
+          : "The saved API key is removed from Opengeni. You can reconnect with a valid key.",
       ]}
       confirmLabel="Disconnect"
       pendingLabel="Disconnecting…"

@@ -1,25 +1,25 @@
 # Quick local demo app
 
-The smallest correct app with an OpenGeni agent chat: a Vite + React page that
+The smallest correct app with an Opengeni agent chat: a Vite + React page that
 renders `@opengeni/react`'s `OpenGeniChat`, and one Node server that holds the
 API key, serves the page, and runs the packaged session proxy from
 `@opengeni/sdk`. Every chat the user starts in the page is a session in their
-OpenGeni workspace, visible in the OpenGeni app with the same messages.
+Opengeni workspace, visible in the Opengeni app with the same messages.
 
 Use this recipe when the user asks for a small, local, or demo app with an
-OpenGeni agent chat, for example "create a small local web app with an Opengeni
+Opengeni agent chat, for example "create a small local web app with an Opengeni
 agent chat". Follow it as written: do not ask the four product questions from
 `SKILL.md`, and do not add a framework, database, login, or extra features. To
-add OpenGeni to an existing product, use `SKILL.md` instead.
+add Opengeni to an existing product, use `SKILL.md` instead.
 
 ## What you need
 
 - Node.js 20.19+ or 22.12+ with npm.
 - An **organization API key** (`ogk_...`, full access), the **organization ID**,
   and the ID of a **shared workspace** in that organization (not a Personal
-  workspace). OpenGeni's Get started page shows all three; the key is also
+  workspace). Opengeni's Get started page shows all three; the key is also
   created under Organization settings, Developer.
-- The OpenGeni URL when it is not OpenGeni Cloud (`https://app.opengeni.ai`).
+- The Opengeni URL when it is not Opengeni Cloud (`https://app.opengeni.ai`).
 
 Put the IDs from the user's request into `.env` yourself. If the request
 already contains the key, write it into `.env` without repeating it. Otherwise
@@ -192,7 +192,7 @@ What the server does, so you can explain it:
 - **Acts as a user, not as the key.** The proxy runs every call through
   `asUser("local-demo-user", { source: "local-demo" })`. That external user
   must be a workspace member, so the server onboards it at startup with the
-  smallest chat permissions. OpenGeni shows these sessions as created by an
+  smallest chat permissions. Opengeni shows these sessions as created by an
   external user; there is no display-name field for external users.
 - **Chat only.** `sandboxBackend: "none"`, no tools, and no bundled guidance,
   so replies start in seconds and the agent can only talk.
@@ -208,7 +208,7 @@ npx tsc        # optional type check; prints nothing when clean
 npm run dev
 ```
 
-The server prints `Chat app: http://127.0.0.1:5173` and the OpenGeni workspace
+The server prints `Chat app: http://127.0.0.1:5173` and the Opengeni workspace
 link. Startup already proved the key, URL, and IDs. Then:
 
 1. Check the proxy without running the agent; this prints `200`:
@@ -217,7 +217,7 @@ link. Startup already proved the key, URL, and IDs. Then:
    agent on the workspace's model and uses its credits or connected
    subscription, so do not send one yourself unless the user asked you to. The
    reply streams into the page, and the chat appears in the list on the left.
-3. In OpenGeni, open the workspace (`<OpenGeni URL>/workspaces/<workspace ID>`):
+3. In Opengeni, open the workspace (`<OpenGeni URL>/workspaces/<workspace ID>`):
    the chat is listed under Sessions, titled after its first message, with the
    same conversation. You can reply there too.
 
@@ -232,7 +232,7 @@ link. Startup already proved the key, URL, and IDs. Then:
 | `409 existing membership differs` | The demo user was onboarded before with other permissions. Change `user` to a new ID. |
 | Startup crashes with `"<name>" is not exported by "@opengeni/connect"` (or another `@opengeni` package) | The installed `@opengeni` packages are at different versions. Use the same version for all of them: `npm install @opengeni/sdk@latest @opengeni/react@latest`, then `npm ls @opengeni/sdk @opengeni/react @opengeni/connect` must show one version. If a lockfile keeps an old copy, `rm -rf node_modules package-lock.json && npm install`. |
 | `EADDRINUSE` | Port taken: `PORT=5174 npm run dev`, and use that port in the URLs. |
-| The message is sent but no reply, or a model error | The workspace has no usable model for this user. Connect one in OpenGeni (Organization settings, Models), or set `OPENGENI_MODEL` to an available model ID. |
+| The message is sent but no reply, or a model error | The workspace has no usable model for this user. Connect one in Opengeni (Organization settings, Models), or set `OPENGENI_MODEL` to an available model ID. |
 | `403` from `/api/opengeni` | The page was opened through another host name than `127.0.0.1` or `localhost`. By design. |
 
 ## Next steps

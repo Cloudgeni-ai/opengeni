@@ -197,7 +197,7 @@ export async function mintToolToken(input: {
   const token = `${header}.${payload}.${base64UrlEncode(new Uint8Array(signature))}`;
   if (`Bearer ${token}`.length > MAX_HEADER_VALUE_LENGTH) {
     throw new TypeError(
-      `Tool token exceeds OpenGeni's ${MAX_HEADER_VALUE_LENGTH}-character header limit; shorten the user, tenant, or URL.`,
+      `Tool token exceeds Opengeni's ${MAX_HEADER_VALUE_LENGTH}-character header limit; shorten the user, tenant, or URL.`,
     );
   }
   return token;

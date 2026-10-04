@@ -1,10 +1,10 @@
 {
   "name": "opengeni",
-  "displayName": "OpenGeni",
+  "displayName": "Opengeni",
   "version": "0.2.0",
-  "description": "Offload long-running or parallel work from your coding agent to an OpenGeni workspace, and build products on OpenGeni agents.",
+  "description": "Offload long-running or parallel work from your coding agent to an Opengeni workspace, and build products on Opengeni agents.",
   "author": {
-    "name": "OpenGeni",
+    "name": "Opengeni",
     "url": "https://opengeni.ai"
   },
   "homepage": "https://docs.opengeni.ai/guides/coding-agents",

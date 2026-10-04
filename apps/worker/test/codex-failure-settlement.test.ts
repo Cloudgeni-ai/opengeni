@@ -401,7 +401,7 @@ describe("raw database rollback settlement", () => {
           {
             type: "turn.failed",
             payload: expect.objectContaining({
-              error: "OpenGeni encountered a database error.",
+              error: "Opengeni encountered a database error.",
               code: "db_deadlock",
               sqlState: "40P01",
             }),

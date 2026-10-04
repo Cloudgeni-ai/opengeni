@@ -1,6 +1,6 @@
 {
   "name": "opengeni",
-  "interface": { "displayName": "OpenGeni" },
+  "interface": { "displayName": "Opengeni" },
   "plugins": [
     {
       "name": "opengeni",

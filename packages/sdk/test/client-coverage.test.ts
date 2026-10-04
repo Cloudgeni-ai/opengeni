@@ -1182,7 +1182,7 @@ describe("OpenGeniClient files", () => {
         reason: "insecure_context",
         retryable: false,
       });
-      expect((error as Error).message).toContain("OpenGeni is open over HTTP");
+      expect((error as Error).message).toContain("Opengeni is open over HTTP");
       expect(requests).toHaveLength(0);
     } finally {
       if (windowDescriptor) {
@@ -1561,7 +1561,7 @@ describe("OpenGeniClient files", () => {
       correlationId,
       outcomeUnknown: true,
       body: "",
-      message: `OpenGeni is temporarily unavailable — retry. Reference: ${correlationId}.`,
+      message: `Opengeni is temporarily unavailable — retry. Reference: ${correlationId}.`,
     });
     expect(requests).toHaveLength(2);
     expect(requests.some((request) => request.url.includes("/complete"))).toBe(false);
