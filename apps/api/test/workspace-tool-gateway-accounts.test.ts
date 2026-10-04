@@ -281,17 +281,19 @@ test("OAuth intersects account routes after expansion and rejects canonical alia
 
 test("service projections omit personal accounts; revocation never substitutes a sibling account", async () => {
   const f = createFixture();
-  const service = await prepareWorkspaceToolGatewayForGrant(f.deps, {
-    ...access,
-    subjectId: "api_key:service",
-    principalKind: "service",
-  });
-  try {
-    expect(service.toolGatewayCatalog.entries.map((entry) => entry.identity)).toEqual([
-      f.identity(f.shared),
-    ]);
-  } finally {
-    await service.close();
+  for (const principalKind of ["api_key", "service"] as const) {
+    const service = await prepareWorkspaceToolGatewayForGrant(f.deps, {
+      ...access,
+      subjectId: "api_key:service",
+      principalKind,
+    });
+    try {
+      expect(service.toolGatewayCatalog.entries.map((entry) => entry.identity)).toEqual([
+        f.identity(f.shared),
+      ]);
+    } finally {
+      await service.close();
+    }
   }
   const old = await prepareWorkspaceToolGatewayForGrant(f.deps, access);
   try {
