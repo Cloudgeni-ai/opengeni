@@ -1209,13 +1209,16 @@ describe("immutable session turn initiators", () => {
         .where(eq(schema.sessionHistoryItems.turnId, attachedClaim.turn.id))
         .orderBy(schema.sessionHistoryItems.position),
     );
-    expect(attachedHistory.map(({ item }) => item.role)).toEqual(["user", "system"]);
+    // A captured schedule keeps its explicit service lane (0608): it never
+    // joins the human request and stays pending for its own scheduled turn.
+    expect(attachedHistory.map(({ item }) => item.role)).toEqual(["user"]);
     expect(attachedHistory[0]?.item.content).toEqual([
       { type: "input_text", text: renderMessageSentAtForModel(attachedClaim.turn.createdAt) },
       { type: "input_text", text: "Keep this human task authoritative." },
     ]);
-    expect(attachedHistory[1]?.item.content).toContain("[OpenGeni internal updates]");
-    expect(attachedHistory[1]?.item.content).not.toContain("[OpenGeni scheduled task occurrence]");
+    expect(
+      await listOutstandingSessionSystemUpdates(client.db, grant.workspaceId!, attachedTarget.id),
+    ).toMatchObject([{ state: "pending" }]);
 
     const mixedTarget = await createSession(client.db, sessionInput(grant));
     const goal = await createSessionGoal(client.db, {
