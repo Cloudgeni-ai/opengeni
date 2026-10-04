@@ -28,3 +28,21 @@ test("catalog cursors are opaque, authenticated and scoped to the complete reque
     "Invalid or expired",
   );
 });
+
+test("pin-aware cursors preserve the leading key and still accept legacy unpinned frontiers", () => {
+  const codec = artifactCatalogCursorCodec("secret", "principal:workspace:filters");
+  const value = {
+    version: 1 as const,
+    snapshotAt: new Date().toISOString(),
+    expiresAt: Date.now() + 60_000,
+    after: { kind: "file" as const, id: "native", key: "title" },
+  };
+  expect(codec.decode(codec.encode(value)).after.pinned).toBeUndefined();
+  for (const pinned of [true, false])
+    expect(
+      codec.decode(codec.encode({ ...value, after: { ...value.after, pinned } })).after,
+    ).toEqual({
+      ...value.after,
+      pinned,
+    });
+});
