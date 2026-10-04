@@ -1,10 +1,12 @@
+import { randomUUID } from "node:crypto";
+import { InteractionControllerError } from "@opengeni/interaction";
 import {
   AttachedBrowserBridgeClient,
   AttachedBrowserBridgeError,
   type AttachedBrowserBridgeOptions,
 } from "./attached-bridge";
 import { type BrowserCdpConnection, type BrowserCommandRunner } from "./cdp-driver";
-import { CdpProtocolError, CdpTransportError, type CdpEvent } from "./cdp";
+import { CdpProtocolError, CdpSessionDetachedError, CdpTransportError, type CdpEvent } from "./cdp";
 
 const POLL_INTERVAL_MS = 50;
 const POLL_LIMIT = 1_000;
@@ -99,12 +101,18 @@ export class AttachedChromeRunner implements BrowserCommandRunner {
 export class AttachedChromeCdpConnection implements BrowserCdpConnection {
   private readonly listeners = new Map<string, Set<EventListener>>();
   private readonly sessionTabs = new Map<string, string>();
+  private readonly tabSessions = new Map<string, string>();
   private readonly attachedTabs = new Set<string>();
+  private readonly canceledTabs = new Set<string>();
+  private readonly tabDetachEpochs = new Map<string, number>();
+  private readonly pendingInput = new Map<string, number>();
+  private readonly uncertainTabs = new Set<string>();
   private readonly browserName: string;
   private readonly browserVersion: string;
   private readonly browserPlatform: NodeJS.Platform;
   private cursor = 0;
   private pollTask: Promise<void> | null = null;
+  private pollReady: Promise<void> | null = null;
   private stopped = false;
   private failure: CdpTransportError | null = null;
 
@@ -131,14 +139,41 @@ export class AttachedChromeCdpConnection implements BrowserCdpConnection {
     try {
       if (options.sessionId) {
         const tabId = this.sessionTabs.get(options.sessionId);
-        if (!tabId) throw new CdpProtocolError(method, -32_601, "CDP session is unavailable");
-        const response = await this.bridge.request<{ result: unknown }>({
-          type: "debugger.command",
-          tabId,
-          sessionId: nestedSessionId(options.sessionId),
-          method,
-          params,
-        });
+        if (!tabId)
+          throw new InteractionControllerError(
+            "resource_unavailable",
+            "Browser tab debugging disconnected; observe the tab again",
+            true,
+          );
+        const mayChangePage = mayChangePageContent(method);
+        if (mayChangePage) this.pendingInput.set(tabId, (this.pendingInput.get(tabId) ?? 0) + 1);
+        let response: { result: unknown };
+        try {
+          response = await this.bridge.request<{ result: unknown }>({
+            type: "debugger.command",
+            tabId,
+            sessionId: nestedSessionId(options.sessionId),
+            method,
+            params,
+          });
+        } catch (error) {
+          // A failed bridge reply does not prove that a queued command cannot
+          // arrive later. Do not attach a replacement debugger underneath it.
+          if (mayChangePage) this.uncertainTabs.add(tabId);
+          if (this.sessionTabs.get(options.sessionId) !== tabId)
+            throw new CdpSessionDetachedError(method);
+          throw error;
+        } finally {
+          if (mayChangePage) {
+            const remaining = (this.pendingInput.get(tabId) ?? 1) - 1;
+            if (remaining > 0) this.pendingInput.set(tabId, remaining);
+            else this.pendingInput.delete(tabId);
+          }
+        }
+        // A command may already have been sent when Chrome disconnects. Do
+        // not turn a late response into proof that the current tab was used.
+        if (this.sessionTabs.get(options.sessionId) !== tabId)
+          throw new CdpSessionDetachedError(method);
         return requireRecord(response.result, "debugger command result") as T;
       }
       return (await this.browserCommand(method, params)) as T;
@@ -205,6 +240,12 @@ export class AttachedChromeCdpConnection implements BrowserCdpConnection {
   close(): void {
     if (this.stopped) return;
     this.stopped = true;
+    this.sessionTabs.clear();
+    this.tabSessions.clear();
+    this.canceledTabs.clear();
+    this.tabDetachEpochs.clear();
+    this.pendingInput.clear();
+    this.uncertainTabs.clear();
     this.listeners.clear();
     this.bridge.close();
   }
@@ -219,6 +260,11 @@ export class AttachedChromeCdpConnection implements BrowserCdpConnection {
     );
     this.attachedTabs.clear();
     this.sessionTabs.clear();
+    this.tabSessions.clear();
+    this.canceledTabs.clear();
+    this.tabDetachEpochs.clear();
+    this.pendingInput.clear();
+    this.uncertainTabs.clear();
     this.listeners.clear();
     this.bridge.close();
     await this.pollTask?.catch(() => undefined);
@@ -275,11 +321,24 @@ export class AttachedChromeCdpConnection implements BrowserCdpConnection {
       }
       case "Target.attachToTarget": {
         const targetId = requireTargetId(params.targetId);
-        await this.bridge.request({ type: "debugger.attach", tabId: targetId });
-        this.attachedTabs.add(targetId);
-        const sessionId = attachedSessionId(targetId);
-        this.sessionTabs.set(sessionId, targetId);
+        this.assertAttachAllowed(targetId);
+        // Establish the event cursor before attaching, so a disconnect during
+        // initialization cannot be discarded as pre-existing history.
         this.ensurePolling();
+        await this.pollReady;
+        this.assertAttachAllowed(targetId);
+        const detachEpoch = this.tabDetachEpochs.get(targetId) ?? 0;
+        await this.bridge.request({ type: "debugger.attach", tabId: targetId });
+        if ((this.tabDetachEpochs.get(targetId) ?? 0) !== detachEpoch)
+          throw new InteractionControllerError(
+            "resource_unavailable",
+            "Browser tab disconnected while attaching",
+            !this.canceledTabs.has(targetId),
+          );
+        this.attachedTabs.add(targetId);
+        const sessionId = this.tabSessions.get(targetId) ?? `attached:${targetId}:${randomUUID()}`;
+        this.sessionTabs.set(sessionId, targetId);
+        this.tabSessions.set(targetId, sessionId);
         return { sessionId };
       }
       default:
@@ -289,14 +348,32 @@ export class AttachedChromeCdpConnection implements BrowserCdpConnection {
 
   private ensurePolling(): void {
     if (this.pollTask || this.stopped || this.failure) return;
-    this.pollTask = this.poll().catch((error) => {
-      if (!this.stopped) this.fail(mapBridgeError("debugger.poll", error));
+    this.pollReady = this.pollEvents(Number.MAX_SAFE_INTEGER).then((initial) => {
+      this.cursor = initial.cursor;
     });
+    this.pollTask = this.pollReady
+      .then(() => this.poll())
+      .catch((error) => {
+        if (!this.stopped) this.fail(mapBridgeError("debugger.poll", error));
+      });
+  }
+
+  private assertAttachAllowed(targetId: string): void {
+    if (this.canceledTabs.has(targetId))
+      throw new InteractionControllerError(
+        "resource_unavailable",
+        "Browser tab debugging was canceled; reconnect the browser profile to restore control",
+        false,
+      );
+    if (this.uncertainTabs.has(targetId))
+      throw new InteractionControllerError(
+        "resource_unavailable",
+        "Browser tab disconnected during input; check the tab and reconnect the browser profile before continuing",
+        false,
+      );
   }
 
   private async poll(): Promise<void> {
-    const initial = await this.pollEvents(Number.MAX_SAFE_INTEGER);
-    this.cursor = initial.cursor;
     while (!this.stopped) {
       const batch = await this.pollEvents(this.cursor);
       // Older extensions also mark a full continuation page as truncated.
@@ -342,15 +419,29 @@ export class AttachedChromeCdpConnection implements BrowserCdpConnection {
 
   private emit(input: BridgeDebuggerEvent): void {
     if (input.method === "OpenGeni.debuggerDetached") {
+      if ((this.pendingInput.get(input.tabId) ?? 0) > 0) this.uncertainTabs.add(input.tabId);
+      this.tabDetachEpochs.set(input.tabId, (this.tabDetachEpochs.get(input.tabId) ?? 0) + 1);
+      const sessionId = this.tabSessions.get(input.tabId);
+      if (input.params.reason === "canceled_by_user") this.canceledTabs.add(input.tabId);
       this.removeTab(input.tabId);
+      if (sessionId)
+        this.emitEvent({
+          method: "Target.detachedFromTarget",
+          sessionId: null,
+          params: { sessionId, targetId: input.tabId, reason: input.params.reason },
+        });
       return;
     }
-    const sessionId = input.sessionId ?? attachedSessionId(input.tabId);
+    const sessionId = input.sessionId ?? this.tabSessions.get(input.tabId) ?? null;
     const event: CdpEvent = { method: input.method, params: input.params, sessionId };
+    this.emitEvent(event);
+  }
+
+  private emitEvent(event: CdpEvent): void {
     const keys = new Set([
-      eventKey(event.method, sessionId),
+      eventKey(event.method, event.sessionId),
       eventKey(event.method, null),
-      eventKey("*", sessionId),
+      eventKey("*", event.sessionId),
       eventKey("*", null),
     ]);
     for (const key of keys) {
@@ -366,6 +457,7 @@ export class AttachedChromeCdpConnection implements BrowserCdpConnection {
 
   private removeTab(tabId: string): void {
     this.attachedTabs.delete(tabId);
+    this.tabSessions.delete(tabId);
     for (const [sessionId, mappedTabId] of this.sessionTabs) {
       if (mappedTabId === tabId) this.sessionTabs.delete(sessionId);
     }
@@ -412,8 +504,20 @@ function requireTab(value: unknown): AttachedTab {
 }
 
 function mapBridgeError(method: string, error: unknown): Error {
-  if (error instanceof CdpProtocolError || error instanceof CdpTransportError) return error;
+  if (error instanceof InteractionControllerError) return error;
+  if (
+    error instanceof CdpProtocolError ||
+    error instanceof CdpTransportError ||
+    error instanceof CdpSessionDetachedError
+  )
+    return error;
   if (error instanceof AttachedBrowserBridgeError) {
+    if (error.code === "debugger_unavailable")
+      return new InteractionControllerError(
+        "resource_unavailable",
+        "Browser tab debugging unavailable; observe the tab again",
+        true,
+      );
     return error.code === "driver_rejected"
       ? new CdpProtocolError(method, -32_000, error.message)
       : new CdpTransportError(error.message);
@@ -421,12 +525,37 @@ function mapBridgeError(method: string, error: unknown): Error {
   return new CdpTransportError(error instanceof Error ? error.message : "attached Chrome failed");
 }
 
-function attachedSessionId(tabId: string): string {
-  return `attached:${tabId}`;
-}
-
 function nestedSessionId(sessionId: string): string | undefined {
   return sessionId.startsWith("attached:") ? undefined : sessionId;
+}
+
+// Only audited read/setup commands may survive without an uncertain-effect
+// fence. Unknown methods are conservative: a late queued command must never
+// run underneath a replacement attachment to the same tab.
+const READ_ONLY_TAB_METHODS = new Set([
+  "Accessibility.enable",
+  "Accessibility.getFullAXTree",
+  "Accessibility.getPartialAXTree",
+  "DOM.enable",
+  "DOM.describeNode",
+  "DOM.getBoxModel",
+  "DOM.getDocument",
+  "DOM.querySelectorAll",
+  "DOM.resolveNode",
+  "Log.enable",
+  "Network.enable",
+  "Page.captureScreenshot",
+  "Page.createIsolatedWorld",
+  "Page.enable",
+  "Page.getFrameTree",
+  "Page.getLayoutMetrics",
+  "Page.getNavigationHistory",
+  "Runtime.enable",
+  "Runtime.releaseObject",
+]);
+
+function mayChangePageContent(method: string): boolean {
+  return !READ_ONLY_TAB_METHODS.has(method);
 }
 
 function eventKey(method: string, sessionId: string | null): string {

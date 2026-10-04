@@ -982,6 +982,19 @@ explicit placement, identity, revision, network route and linked desktop choices
 Debugger continuation pages are drained without treating a full page as lost
 history; actual sequence gaps still terminate the connection.
 
+An attached tab's debugger disconnect invalidates its cached target, document,
+frame and element authority without restarting Chrome or changing other tabs.
+A later read can reattach the same surviving tab with fresh fences. Chrome's
+`canceled_by_user` disconnect requires reconnecting the profile; it is never
+silently overridden. Detachment during pending input or other possible effects preserves an unknown
+outcome and blocks automatic reattachment until the profile reconnects. A late
+reply cannot revive the old attachment, and no input or navigation is replayed.
+Acknowledged partial input followed by a disconnect also remains outcome unknown.
+Queued navigation, DOM changes, emulation and unclassified commands cannot run
+under a replacement debugger attachment.
+Read-only disconnect failures use typed unavailable responses instead of a
+generic internal error.
+
 Native computer protocol version 3 separates `capture_still` (including JPEG and
 size options) from reading an explicitly started live stream. macOS helpers use
 private, byte-identical executable copies for each process: concurrent

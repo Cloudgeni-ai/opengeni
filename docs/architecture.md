@@ -1380,6 +1380,14 @@ requires consent. Computer frames bind screenshot digest to controller/session/t
 runtime, API and SDK independently verify. The browser extension only attaches;
 Lightpanda is semantic-only.
 
+An attached tab's debugger disconnect invalidates only its cached target,
+document, frame and element authority. Read-only recovery can attach the same
+surviving tab with fresh fences; explicit cancellation and uncertain effects
+require profile reconnection. Chrome and unrelated tabs remain intact, and
+mutations are never replayed. Partially dispatched input remains outcome unknown;
+queued input, DOM changes, navigation and emulation cannot cross into a replacement
+attachment. See [Connected Machines](connected-machines.md).
+
 ComputerSession attachments use canonical frame streams, including relay kind 4,
 for screens and windows. The viewer paints those exact authenticated pixels and
 uses the painted frame ID, target generation and geometry for human `/actions`;
