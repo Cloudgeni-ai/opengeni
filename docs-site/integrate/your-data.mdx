@@ -19,9 +19,6 @@ A session only sees tools it selects. The proxy's `toolServer` and a per-session
 The session proxy attaches your MCP endpoint to every chat, mints a short-lived token for the signed-in user, and refreshes it on every message, approval, and answer.
 
 <Steps>
-  <Step title="Let users attach the tool server">
-    Add `mcp_servers:attach` to the permissions you grant during [onboarding](/embed-manually).
-  </Step>
   <Step title="Add toolServer to the proxy">
     ```ts
     createSessionProxyHandler(og, {
@@ -91,14 +88,11 @@ user, tenant = claims["sub"], claims.get("tenant")
 With a [Django or Rails proxy](/integrate/proxy-from-any-backend), attach the server and rotate its token yourself.
 
 <Steps>
-  <Step title="Allow users to attach an MCP server">
-    Add `mcp_servers:attach` to the permissions you grant during [onboarding](/embed-manually).
-  </Step>
   <Step title="Attach and select the server when creating the session">
     ```ts
     const acme = (token: string) => ({ id: "acme", headers: { Authorization: `Bearer ${token}` } });
 
-    await og.asUser(user.id, { source }).createSession(workspaceId, {
+    await og.client.asUser(user.id, { source: og.source }).createSession(workspaceId, {
       initialMessage,
       idempotencyKey,
       mcpServers: [

@@ -8,18 +8,17 @@ A small server that serves an Opengeni agent through `createChatHandler` from `@
 
 ## Run it
 
-You need Bun, a repository checkout, a full-access organization API key, and your organization id. An organization owner must also turn on **Only me chats** in **Organization settings > Security & data**.
+You need Bun, a repository checkout, and a full-access organization API key. The demo uses private chats, so **Only me chats** must be on in **Organization settings > Security & data**.
 
 ```bash
 git clone https://github.com/Cloudgeni-ai/opengeni.git
 cd opengeni && bun install
 cd examples/chat-quickstart
-cp .env.example .env.local   # set OPENGENI_API_KEY and OPENGENI_ORGANIZATION_ID
-bun run onboard u_42
+cp .env.example .env.local   # set OPENGENI_API_KEY
 bun run server
 ```
 
-`bun run onboard u_42` creates the demo workspace and adds user `u_42` as a member. A real product does this once per user.
+The demo workspace is created on first use, and user `u_42` is added to it on their first request.
 
 Send a message:
 

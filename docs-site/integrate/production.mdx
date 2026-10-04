@@ -31,20 +31,20 @@ SDKs and servers are compatible within a major version; changes within a major a
 
 ## Keep the tool surface minimal
 
-Every visible tool costs prompt tokens and widens what the agent can do. For an agent that should use only your tools:
+Every visible tool costs prompt tokens and widens what the agent can do. For an agent that should use only your tools, return this from the proxy's `createSession` hook:
 
 ```ts
-await og.asUser(user.id, { source }).createSession(workspaceId, {
+createSession: ({ initialMessage, idempotencyKey }) => ({
   initialMessage,
   idempotencyKey,
   mcpServers: [{ id: "acme", url: ACME_MCP_URL, allowedTools: ["get_ticket", "update_ticket"] }],
   tools: [{ kind: "mcp", id: "acme" }], // exactly your server
-  firstPartyMcpTools: [], // no OpenGeni workspace or session tools
-  bundledSkillIds: [], // no bundled OpenGeni guidance
+  firstPartyMcpTools: [], // no Opengeni workspace or session tools
+  bundledSkillIds: [], // no bundled Opengeni guidance
   sandboxBackend: "none", // no sandbox, shell, or file tools
   agentLearning: { knowledge: "off", instructions: "off", skills: "off" },
   skills: productSkills, // your own versioned Skills, if any
-});
+}),
 ```
 
 Omitting `tools` or `firstPartyMcpTools` inherits workspace defaults, so pass explicit lists. `agent: { capabilities: "none" }` also limits the agent to the session's own tools plus the essentials; see [Configure the agent](/integrate/configure-the-agent).

@@ -128,27 +128,11 @@ A conversation ID is not scoped to a user. Your backend decides which conversati
 
 On sign-out or a user or tenant change, abort pending requests, clear transcripts in your frontend, and remount session components. See [Users, tenants & privacy](/integrate/users-and-tenants).
 
-## External-user onboarding
+## External users
 
-Passing `user` to the chat facade, or calling `asUser` on the SDK, identifies an
-external user but does not grant workspace access. Once your backend approves a
-user's tenant membership, add the matching workspace member:
+When the organization key acts as one of your users (through the session proxy, the chat facade, or `asUser`), Opengeni adds that user to the workspace on their first request. They get conversation permissions: workspace read, session create/read/control, file upload/read, and `mcp_servers:attach`. The key must hold `members:manage` and those permissions; a full-access key does. Existing memberships are never changed.
 
-```ts
-await serviceClient.addExternalWorkspaceMember(authorizedWorkspaceId, {
-  identity: { externalId: authenticatedUser.id, source: "my-product" },
-  permissions: approvedProductPermissions,
-  operationId: persistedOnboardingOperationId,
-});
-```
-
-Use the same `source` as the chat facade. `approvedProductPermissions` lists the
-permissions your product's features need, including the session operations. The
-calling key needs `members:manage` and cannot grant more than it holds. User
-requests get the intersection of the membership and the key's permissions.
-
-Run this once during onboarding, not on every request. Save the `operationId`
-before calling and retry with the same request if the result is uncertain.
+To choose permissions yourself, call `addExternalWorkspaceMember` before the user's first request, and `updateExternalWorkspaceMember` to change them later.
 
 ## Rules that hold everywhere
 
