@@ -57,6 +57,10 @@ export const embeddingMigrationTail = [
   "0515_autonomous_learning_defaults.sql",
   // Patches the 0509 trial grant trigger; replay after it.
   "0521_verified_signup_trial_runtime_switch.sql",
+  // Reuses the revision guard installed by withheld 0521; its validation
+  // follow-up must run after the original promotional-credit routines.
+  "0613_model_scoped_promotional_credits.sql",
+  "0615_credit_promotion_policy_validation.sql",
   // Replaces scheduled-run triggers installed by withheld 0275 and 0478.
   "0534_scheduled_admission_diagnostics.sql",
   // References the files scope identity introduced by withheld 0461.
@@ -82,18 +86,17 @@ export const embeddingMigrationTail = [
   "0584_agent_instruction_size_parity.sql",
   // Extends the cursor table and meaningful index withheld by these fixtures.
   "0585_session_attention_cursor.sql",
+  // Clones the 0345 waiter fence and extends the accepted authority ledgers.
+  "0598_claude_subscription_account_pools.sql",
   // Uses the existing session inventory/capability routines withheld by these fixtures.
   "0604_insights_raw_usage_api.sql",
-  // Rewrites the accepted-authority capture installed by withheld 0478.
+  // Patches the sender-owned capture from withheld 0478 and reads the frozen
+  // subscription authority installed by withheld 0598; replay after both.
   "0608_receiver_execution_context.sql",
   // Locks connection tables from withheld 0264 and rewrites the exact receipt
   // gates in routines from withheld 0306/0345/0478; replay after them.
   "0611_universal_session_tenancy_activation.sql",
-  // Policy immutability uses the trigger function from withheld 0521.
-  "0613_model_scoped_promotional_credits.sql",
   // Extends the containment reason installed by withheld 0547; replay after it.
   "0614_quiescence_command_containment.sql",
-  // Replaces the policy setter created by withheld 0613; replay after it.
-  "0615_credit_promotion_policy_validation.sql",
   "0622_organization_slack_bot_delivery.sql",
 ];

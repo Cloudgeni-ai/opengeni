@@ -30,6 +30,7 @@ export default defineConfig({
     "src/managed-sign-in-methods.ts",
     "src/model-picker-order.ts",
     "src/model-display.ts",
+    "src/tool-review-presentation.ts",
     "src/code-search.ts",
     "src/workspace-integration-wire.ts",
     "src/organization-access.ts",

@@ -5,6 +5,16 @@ export type {
   UpdateOpenGeniSlackBotOrganizationAccess,
 } from "./types";
 export type {
+  ToolActionReview,
+  ToolReviewDetailsPage,
+  ToolReviewStatus,
+} from "@opengeni/contracts";
+export {
+  toolReviewAction,
+  toolReviewFields,
+  toolReviewDetails,
+} from "@opengeni/contracts/tool-review-presentation";
+export type {
   SubscriptionAccountSummary,
   SubscriptionPoolSettings,
   ClaudeSubscriptionSetupTokenRequest,

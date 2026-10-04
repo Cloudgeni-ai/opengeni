@@ -36,6 +36,7 @@
   },
   "dependencies": {
     "@openai/agents": "0.14.3",
+    "@opengeni/contracts": "workspace:*",
     "@opengeni/network": "workspace:*",
     "graphql": "^16.12.0",
     "js-yaml": "4.1.1"

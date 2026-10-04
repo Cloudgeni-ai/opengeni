@@ -21,6 +21,7 @@ import { registerModelConnectionAccessRoutes } from "./routes/model-connection-a
 import {
   codeSearchDeploymentPolicy,
   agentConfigDeploymentPolicy,
+  canonicalPublicOrigin,
   configuredAllowedReasoningEfforts,
   resolveFirstPartyMcpToolPolicy,
   resolveVoiceInputProviderRegistry,
@@ -58,6 +59,7 @@ import {
   CodemodeOperationConflictError,
   CodemodeOperationNotExecutableError,
   CodemodePayloadTooLargeError,
+  CodemodeOperationLimitError,
   CodemodeToolApprovalRequiredError,
   CodemodeToolNotInCatalogError,
   ConnectAttemptConflictError,
@@ -95,6 +97,8 @@ import {
   ApiHttpError,
   agentConfigHttpError,
   allowanceExhaustedHttpError,
+  DATABASE_UNAVAILABLE_ERROR_DETAIL_CODE,
+  databaseUnavailableHttpError,
   modelUnavailableHttpError,
   scheduledTaskTargetAccessHttpError,
   workspaceControlBusyHttpError,
@@ -1392,10 +1396,32 @@ export function createAppComposition(deps: AppDependencies): {
       if (error instanceof HTTPException && error.status === 401) challenge();
       throw error;
     }
+    // Stateless JSON-response transport: there is no server-to-client stream.
+    // Answering GET with an empty 200 made clients (Claude) reconnect every
+    // second; refuse it after authorization, as the workspace endpoint does.
+    if (c.req.method === "GET") {
+      const version = c.req.header("mcp-protocol-version");
+      if (version && !SUPPORTED_PROTOCOL_VERSIONS.includes(version)) {
+        return c.json(
+          {
+            jsonrpc: "2.0",
+            id: null,
+            error: { code: -32000, message: "Unsupported protocol version." },
+          },
+          400,
+        );
+      }
+      return c.json(
+        { jsonrpc: "2.0", id: null, error: { code: -32000, message: "Method not allowed." } },
+        405,
+        { allow: "POST" },
+      );
+    }
     const transport = new WebStandardStreamableHTTPServerTransport({ enableJsonResponse: true });
     const mcp = buildOrganizationMcpServer({
       caller,
       origin: new URL(c.req.url).origin,
+      publicOrigin: canonicalPublicOrigin(deps.settings.publicBaseUrl),
       dispatch: async (request) => await app.fetch(request, c.env),
       signal: c.req.raw.signal,
     });
@@ -1753,7 +1779,9 @@ export function createAppComposition(deps: AppDependencies): {
       throw new HTTPException(403, { message: "Codemode access denied" });
     }
     try {
-      const operation = await readCodemodeOperation(routeDeps, grant, c.req.param("operationId"));
+      const operation = await readCodemodeOperation(routeDeps, grant, c.req.param("operationId"), {
+        durableApproval: c.req.header("x-opengeni-codemode-capabilities") === "durable-approval-v1",
+      });
       if (!operation)
         throw new HTTPException(404, {
           message: "Codemode operation not found",
@@ -1891,6 +1919,7 @@ export function createAppComposition(deps: AppDependencies): {
             : null) ??
           requestBodyValidationHttpError(rawError) ??
           invalidPathIdentifierHttpError(rawError, new URL(c.req.url).pathname) ??
+          databaseUnavailableHttpError(rawError, c.req.method) ??
           rawError);
     const compactionLock = codexCompactionV2ProviderLockedError(error);
     const apiError = error instanceof ApiHttpError ? error : null;
@@ -1899,6 +1928,9 @@ export function createAppComposition(deps: AppDependencies): {
       ? compactionLock.code
       : (apiError?.code ?? errorCodeForStatus(status));
     if (status >= 500) logHttpFailure(c, status, code, rawError);
+    if (apiError?.details?.code === DATABASE_UNAVAILABLE_ERROR_DETAIL_CODE) {
+      c.header("retry-after", "1");
+    }
     const envelope = ErrorEnvelope.parse({
       error: {
         status,
@@ -2263,6 +2295,9 @@ function codemodeHttpError(error: unknown): HTTPException {
   }
   if (error instanceof CodemodePayloadTooLargeError) {
     return new HTTPException(413, { message: error.message, cause: error });
+  }
+  if (error instanceof CodemodeOperationLimitError) {
+    return new HTTPException(429, { message: error.message, cause: error });
   }
   return error instanceof HTTPException
     ? error

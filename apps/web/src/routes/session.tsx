@@ -1,3 +1,4 @@
+import { Fragment } from "react";
 import { enablePierreDiffs } from "@opengeni/react/diffs";
 import { enableSandboxTerminal } from "@opengeni/react/terminal";
 import { enableCodeEditor } from "@opengeni/react/editor";
@@ -42,7 +43,9 @@ import { LightboxProvider, type WorkspaceTab } from "@opengeni/react";
 import { MACHINES_SESSION_POLL_MS } from "@opengeni/react/machines";
 import {
   ApprovalSurface,
+  ToolActionReviewDetails,
   MessageTimeline,
+  ToolReviewHistoryProvider,
   SessionChrome,
   KnowledgeActivityProvider,
   type TimelineSearchTarget,
@@ -1950,6 +1953,43 @@ function SessionChatPane(props: {
   // Per-approval decision state: an in-flight decision disables both buttons for
   // that approval and shows progress; a settled one can never double-submit even
   // if the strip lingers for a beat before the status flips.
+  const [selectedApprovalId, setSelectedApprovalId] = useState<string | null>(null);
+  const [reviewDetails, setReviewDetails] = useState<{
+    review: import("@opengeni/sdk").ToolActionReview;
+    path: string;
+    origin?: string;
+  } | null>(null);
+  const loadToolReview = useCallback(
+    (approval: PendingApproval) =>
+      context.client.getToolActionReview(props.session.workspaceId, props.session.id, approval.id),
+    [context.client, props.session.workspaceId, props.session.id],
+  );
+  const loadRecordedToolReview = useCallback(
+    (id: string) =>
+      context.client.getToolActionReview(props.session.workspaceId, props.session.id, id),
+    [context.client, props.session.workspaceId, props.session.id],
+  );
+  const viewToolReviewDetails = useCallback(
+    (review: import("@opengeni/sdk").ToolActionReview, path: string) =>
+      setReviewDetails({
+        review,
+        path,
+        origin:
+          document.activeElement
+            ?.closest("[data-review-origin]")
+            ?.getAttribute("data-review-origin") ?? undefined,
+      }),
+    [],
+  );
+  const loadToolReviewDetails = useCallback(
+    (review: import("@opengeni/sdk").ToolActionReview, path: string, offset: number) =>
+      context.client.getToolReviewDetails(props.session.workspaceId, props.session.id, review.id, {
+        actionDigest: review.actionDigest,
+        path,
+        offset,
+      }),
+    [context.client, props.session.workspaceId, props.session.id],
+  );
   const [approvalPending, setApprovalPending] = useState<Record<string, "approve" | "reject">>({});
   const [approvalSettled, setApprovalSettled] = useState<Record<string, "approve" | "reject">>({});
   // Decision state is scoped to ONE requires_action pause. Once the session
@@ -2941,458 +2981,500 @@ function SessionChatPane(props: {
     ? null
     : currentModelRecovery({ ...props.session, effectiveControl: admissionControl }, props.events);
 
+  const reviewDetailPane = reviewDetails ? (
+    <div className="min-h-0 flex-1 overflow-y-auto" data-workspace-scroll-owner="self-managed">
+      <ToolActionReviewDetails
+        key={reviewDetails.review.id + reviewDetails.path}
+        review={reviewDetails.review}
+        path={reviewDetails.path}
+        load={loadToolReviewDetails}
+        onBack={() => {
+          const { review, path, origin } = reviewDetails;
+          setReviewDetails(null);
+          requestAnimationFrame(() => {
+            const selector = `[data-approval-id="${CSS.escape(review.id)}"]${origin ? `[data-review-origin="${CSS.escape(origin)}"]` : ""} button[data-review-path="${CSS.escape(path)}"]`;
+            document.querySelector<HTMLElement>(selector)?.focus();
+          });
+        }}
+      />
+    </div>
+  ) : null;
+
   return createElement(
-    LightboxProvider,
+    Fragment,
     null,
-    <ChatViewportFileDropTarget
-      data-workspace-scroll-owner="self-managed"
-      enabled={!terminal && context.clientConfig.fileUploads.enabled === true}
-      onFiles={attachments.addFiles}
-    >
-      {findMounted ? (
-        <Suspense fallback={null}>
-          <ConversationFind
-            workspaceId={props.session.workspaceId}
-            sessionId={props.session.id}
-            open={findOpen}
-            focusRevision={findFocusRevision}
-            initial={props.searchTarget}
-            showBackToSessionSearch={props.searchTarget.searchOrigin === "session-search"}
-            onClose={closeFind}
-            onTarget={setActiveSearchTarget}
-            onJump={props.onJumpToSequence}
-          />
-        </Suspense>
-      ) : null}
-      {terminal ? (
-        <div className="mx-auto w-full max-w-3xl px-4 pt-6 sm:px-6">
-          <TerminalSessionBanner session={props.session} onNewSession={props.onNewSession} />
-          <TerminalSessionArchive session={props.session} eventCount={props.timeline.length} />
-        </div>
-      ) : null}
-      {
-        <>
-          <div data-testid="session-timeline" className="min-h-0 min-w-0 flex-1">
-            <KnowledgeActivityProvider
-              onInspect={props.onMemoryClick}
-              onRetryFile={(fileId) =>
-                composer.send(
-                  `Retry searchable source preparation for attached file ${fileId}. Use knowledge_retain_file and report its result.`,
-                )
-              }
-              retryDisabled={
-                composer.hasDraftContent() ||
-                composer.sending ||
-                composer.draftLoading ||
-                !hasComposerPolicy
-              }
-            >
-              <MessageTimeline
-                resolveLink={consoleLinkResolver}
-                allowanceExhaustedLabels={CONSOLE_TIMELINE_ALLOWANCE_LABELS}
-                trailingState={
-                  <>
-                    {/* Recovery follows the failed request, only in the latest history window.
+    reviewDetailPane,
+    createElement(
+      "div",
+      { className: reviewDetails ? "hidden" : "contents", inert: reviewDetails ? true : undefined },
+      createElement(
+        LightboxProvider,
+        null,
+        <ChatViewportFileDropTarget
+          data-workspace-scroll-owner="self-managed"
+          enabled={!terminal && context.clientConfig.fileUploads.enabled === true}
+          onFiles={attachments.addFiles}
+        >
+          {findMounted ? (
+            <Suspense fallback={null}>
+              <ConversationFind
+                workspaceId={props.session.workspaceId}
+                sessionId={props.session.id}
+                open={findOpen}
+                focusRevision={findFocusRevision}
+                initial={props.searchTarget}
+                showBackToSessionSearch={props.searchTarget.searchOrigin === "session-search"}
+                onClose={closeFind}
+                onTarget={setActiveSearchTarget}
+                onJump={props.onJumpToSequence}
+              />
+            </Suspense>
+          ) : null}
+          {terminal ? (
+            <div className="mx-auto w-full max-w-3xl px-4 pt-6 sm:px-6">
+              <TerminalSessionBanner session={props.session} onNewSession={props.onNewSession} />
+              <TerminalSessionArchive session={props.session} eventCount={props.timeline.length} />
+            </div>
+          ) : null}
+          {
+            <>
+              <div data-testid="session-timeline" className="min-h-0 min-w-0 flex-1">
+                <KnowledgeActivityProvider
+                  onInspect={props.onMemoryClick}
+                  onRetryFile={(fileId) =>
+                    composer.send(
+                      `Retry searchable source preparation for attached file ${fileId}. Use knowledge_retain_file and report its result.`,
+                    )
+                  }
+                  retryDisabled={
+                    composer.hasDraftContent() ||
+                    composer.sending ||
+                    composer.draftLoading ||
+                    !hasComposerPolicy
+                  }
+                >
+                  <ToolReviewHistoryProvider
+                    events={props.events}
+                    load={loadRecordedToolReview}
+                    onViewDetails={viewToolReviewDetails}
+                  >
+                    <MessageTimeline
+                      resolveLink={consoleLinkResolver}
+                      allowanceExhaustedLabels={CONSOLE_TIMELINE_ALLOWANCE_LABELS}
+                      trailingState={
+                        <>
+                          {/* Recovery follows the failed request, only in the latest history window.
                         Credit exhaustion also surfaces on idle sessions. */}
-                    {failureRecovery}
-                    <Suspense fallback={null}>
-                      <SessionSkillReviews
-                        key={`${context.accessContext.subjectId}:${props.session.workspaceId}:${props.session.id}`}
-                        context={context}
-                        workspaceId={props.session.workspaceId}
-                        sessionId={props.session.id}
-                        events={props.events}
-                      />
-                    </Suspense>
-                    {props.humanInput.requests.length > 0 &&
-                    props.session.status === "requires_action" ? (
-                      <div className="pb-1" data-human-input-timeline-surface="">
-                        <Suspense fallback={<LoadingPanel label="Loading questions…" />}>
-                          <HumanInputSurface
-                            loadSkillReview={loadSkillReview}
-                            requests={props.humanInput.requests}
-                            respondingRequestId={props.humanInput.respondingRequestId}
-                            error={props.humanInput.mutationError?.message}
-                            onSubmit={(requestId, response) =>
-                              props.humanInput.respond(requestId, response).then(() => undefined)
+                          {failureRecovery}
+                          {props.approvals.length > 0 &&
+                            props.session.status === "requires_action" && (
+                              <ApprovalSurface
+                                approvals={props.approvals}
+                                selectedApprovalId={selectedApprovalId}
+                                onSelectedApprovalChange={setSelectedApprovalId}
+                                loadReview={loadToolReview}
+                                onViewDetails={viewToolReviewDetails}
+                                onApprove={(approval) => decideApproval(approval.id, "approve")}
+                                onReject={(approval) => decideApproval(approval.id, "reject")}
+                              />
+                            )}
+                          <Suspense fallback={null}>
+                            <SessionSkillReviews
+                              key={`${context.accessContext.subjectId}:${props.session.workspaceId}:${props.session.id}`}
+                              context={context}
+                              workspaceId={props.session.workspaceId}
+                              sessionId={props.session.id}
+                              events={props.events}
+                            />
+                          </Suspense>
+                          {props.humanInput.requests.length > 0 &&
+                          props.session.status === "requires_action" ? (
+                            <div className="pb-1" data-human-input-timeline-surface="">
+                              <Suspense fallback={<LoadingPanel label="Loading questions…" />}>
+                                <HumanInputSurface
+                                  loadSkillReview={loadSkillReview}
+                                  requests={props.humanInput.requests}
+                                  respondingRequestId={props.humanInput.respondingRequestId}
+                                  error={props.humanInput.mutationError?.message}
+                                  onSubmit={(requestId, response) =>
+                                    props.humanInput
+                                      .respond(requestId, response)
+                                      .then(() => undefined)
+                                  }
+                                />
+                              </Suspense>
+                            </div>
+                          ) : null}
+                        </>
+                      }
+                      turnSummary={{ rolling: true }}
+                      key={props.session.id}
+                      className="h-full"
+                      items={timelineWithStartup}
+                      searchTarget={activeSearchTarget}
+                      events={props.events}
+                      status={props.session.status}
+                      computeLabel={computeLabel}
+                      renderMessageText={renderMessageText}
+                      renderMessageActions={renderMessageActions}
+                      onAnnotate={composer.addAnnotation}
+                      draftAnnotations={composer.annotations}
+                      onDraftAnnotationSelect={composer.requestAnnotationReview}
+                      onOpenSession={props.onOpenSession}
+                      onMemoryClick={props.onMemoryClick}
+                      onReconnect={props.onReconnect}
+                      renderAuthNeeded={renderAuthNeeded}
+                      resolveProviderLogo={props.resolveProviderLogo}
+                      loadRetainedScreenshot={loadRetainedScreenshot}
+                      loadRetainedArtifact={loadRetainedArtifact}
+                      loadVideoArtifactPlayback={loadVideoArtifactPlayback}
+                      hasOlder={props.hasOlder}
+                      loadingOlder={props.loadingOlder}
+                      onLoadOlder={props.onLoadOlder}
+                      hasNewer={props.hasNewer}
+                      loadingNewer={props.loadingNewer}
+                      onLoadNewer={props.onLoadNewer}
+                      loadingOldest={props.loadingOldest}
+                      onJumpToStart={async () => {
+                        await props.onJumpToStart();
+                      }}
+                      onJumpToLatest={props.onJumpToLatest}
+                      emptyState={
+                        // Clear view hides history, not the retained failure or retry operation.
+                        failureRecovery ??
+                        (props.queue.stoppingPreviousAttempt ? (
+                          <EmptyState
+                            className="min-h-[24rem]"
+                            icon={
+                              <Loader2Icon className="size-4 animate-spin motion-reduce:animate-none" />
+                            }
+                            title={
+                              props.queue.effectiveControl?.state === "paused"
+                                ? "Stopping current work"
+                                : "Stopping previous work"
+                            }
+                            description={
+                              props.queue.effectiveControl?.state === "paused"
+                                ? "Waiting for the current command to stop safely. Queued work stays saved."
+                                : "Your direction is saved. It starts after the previous command stops safely."
                             }
                           />
-                        </Suspense>
-                      </div>
-                    ) : null}
-                  </>
-                }
-                turnSummary={{ rolling: true }}
-                key={props.session.id}
-                className="h-full"
-                items={timelineWithStartup}
-                searchTarget={activeSearchTarget}
-                events={props.events}
-                status={props.session.status}
-                computeLabel={computeLabel}
-                renderMessageText={renderMessageText}
-                renderMessageActions={renderMessageActions}
-                onAnnotate={composer.addAnnotation}
-                draftAnnotations={composer.annotations}
-                onDraftAnnotationSelect={composer.requestAnnotationReview}
-                onOpenSession={props.onOpenSession}
-                onMemoryClick={props.onMemoryClick}
-                onReconnect={props.onReconnect}
-                renderAuthNeeded={renderAuthNeeded}
-                resolveProviderLogo={props.resolveProviderLogo}
-                loadRetainedScreenshot={loadRetainedScreenshot}
-                loadRetainedArtifact={loadRetainedArtifact}
-                loadVideoArtifactPlayback={loadVideoArtifactPlayback}
-                hasOlder={props.hasOlder}
-                loadingOlder={props.loadingOlder}
-                onLoadOlder={props.onLoadOlder}
-                hasNewer={props.hasNewer}
-                loadingNewer={props.loadingNewer}
-                onLoadNewer={props.onLoadNewer}
-                loadingOldest={props.loadingOldest}
-                onJumpToStart={async () => {
-                  await props.onJumpToStart();
-                }}
-                onJumpToLatest={props.onJumpToLatest}
-                emptyState={
-                  // Clear view hides history, not the retained failure or retry operation.
-                  failureRecovery ??
-                  (props.queue.stoppingPreviousAttempt ? (
-                    <EmptyState
-                      className="min-h-[24rem]"
-                      icon={
-                        <Loader2Icon className="size-4 animate-spin motion-reduce:animate-none" />
-                      }
-                      title={
-                        props.queue.effectiveControl?.state === "paused"
-                          ? "Stopping current work"
-                          : "Stopping previous work"
-                      }
-                      description={
-                        props.queue.effectiveControl?.state === "paused"
-                          ? "Waiting for the current command to stop safely. Queued work stays saved."
-                          : "Your direction is saved. It starts after the previous command stops safely."
-                      }
-                    />
-                  ) : props.initialLoading ? (
-                    <div className="flex min-h-[24rem]">
-                      <LoadingPanel />
-                    </div>
-                  ) : props.historyReloadFailed ? (
-                    <ProblemPanel
-                      title="Conversation couldn't be loaded"
-                      description="Your saved messages are unchanged. Try loading them again."
-                      action={
-                        <Button variant="outline" onClick={() => void props.onJumpToLatest()}>
-                          Retry conversation
-                        </Button>
-                      }
-                    />
-                  ) : (
-                    <EmptyState
-                      className="min-h-[24rem]"
-                      icon={
-                        props.session.status === "running" ||
-                        props.session.status === "recovering" ? (
-                          <Loader2Icon className="size-4 animate-spin motion-reduce:animate-none" />
+                        ) : props.initialLoading ? (
+                          <div className="flex min-h-[24rem]">
+                            <LoadingPanel />
+                          </div>
+                        ) : props.historyReloadFailed ? (
+                          <ProblemPanel
+                            title="Conversation couldn't be loaded"
+                            description="Your saved messages are unchanged. Try loading them again."
+                            action={
+                              <Button variant="outline" onClick={() => void props.onJumpToLatest()}>
+                                Retry conversation
+                              </Button>
+                            }
+                          />
                         ) : (
-                          <MessagesSquareIcon className="size-4" />
-                        )
+                          <EmptyState
+                            className="min-h-[24rem]"
+                            icon={
+                              props.session.status === "running" ||
+                              props.session.status === "recovering" ? (
+                                <Loader2Icon className="size-4 animate-spin motion-reduce:animate-none" />
+                              ) : (
+                                <MessagesSquareIcon className="size-4" />
+                              )
+                            }
+                            title={timelineEmptyStateCopy.title}
+                            description={timelineEmptyStateCopy.description}
+                          />
+                        ))
                       }
-                      title={timelineEmptyStateCopy.title}
-                      description={timelineEmptyStateCopy.description}
                     />
-                  ))
+                  </ToolReviewHistoryProvider>
+                </KnowledgeActivityProvider>
+              </div>
+            </>
+          }
+
+          {forkEventId ? (
+            <Suspense fallback={null}>
+              <MessageForkDialog
+                key={forkEventId}
+                session={props.session}
+                events={props.events}
+                sourceEventId={forkEventId}
+                onForkClose={() => setForkEventId(null)}
+              />
+            </Suspense>
+          ) : null}
+
+          {modelRecovery ? <ModelRecoveryNotice recovery={modelRecovery} /> : null}
+
+          {props.session.inputWait &&
+          props.session.status === "idle" &&
+          admissionControl.state === "active" ? (
+            <Suspense fallback={null}>
+              <LazySessionWaitStatus session={props.session} />
+            </Suspense>
+          ) : null}
+
+          {/* Compact session chrome above the composer — incoming, queue, goal,
+          and agents as one dock. Hides entirely when there are no signals. */}
+          <div className="mb-2 w-full shrink-0 px-4 sm:px-6">
+            <div className="mx-auto w-full max-w-3xl">
+              <SessionAdmissionNotice
+                key={`${props.session.workspaceId}:${props.session.id}`}
+                session={props.session}
+                canControl={workspacePermissions.includes("sessions:control")}
+                paused={admissionControl.state === "paused"}
+                refreshRequired={admissionRefreshRequired}
+                busy={
+                  composer.resuming || composer.pausing || composer.sending || props.queue.mutating
+                }
+                onRecheck={() =>
+                  recheckSessionAdmission({
+                    control: admissionControl,
+                    refreshOnly: admissionRefreshRequired,
+                    resume: (control) =>
+                      context.client.resumeSession(props.session.workspaceId, props.session.id, {
+                        clientEventId: crypto.randomUUID(),
+                        expectedControlEtag: control.controlEtag,
+                      }),
+                    refresh: [props.onReloadSession, props.queue.refresh],
+                  })
                 }
               />
-            </KnowledgeActivityProvider>
-          </div>
-        </>
-      }
-
-      {forkEventId ? (
-        <Suspense fallback={null}>
-          <MessageForkDialog
-            key={forkEventId}
-            session={props.session}
-            events={props.events}
-            sourceEventId={forkEventId}
-            onForkClose={() => setForkEventId(null)}
-          />
-        </Suspense>
-      ) : null}
-
-      {/* Live decision strip: only while the session is actually paused on
-          an approval — a replayed log or a stale stream must never render
-          actionable Approve/Reject buttons for an already-resumed turn. */}
-      {props.approvals.length > 0 && props.session.status === "requires_action" ? (
-        <div className="mx-auto w-full max-w-3xl shrink-0 px-4 sm:px-6">
-          <div className="max-h-80 overflow-y-auto pb-2">
-            <ApprovalSurface
-              approvals={props.approvals}
-              onApprove={(approval) => decideApproval(approval.id, "approve")}
-              onReject={(approval) => decideApproval(approval.id, "reject")}
-            />
-          </div>
-        </div>
-      ) : null}
-
-      {modelRecovery ? <ModelRecoveryNotice recovery={modelRecovery} /> : null}
-
-      {props.session.inputWait &&
-      props.session.status === "idle" &&
-      admissionControl.state === "active" ? (
-        <Suspense fallback={null}>
-          <LazySessionWaitStatus session={props.session} />
-        </Suspense>
-      ) : null}
-
-      {/* Compact session chrome above the composer — incoming, queue, goal,
-          and agents as one dock. Hides entirely when there are no signals. */}
-      <div className="mb-2 w-full shrink-0 px-4 sm:px-6">
-        <div className="mx-auto w-full max-w-3xl">
-          <SessionAdmissionNotice
-            key={`${props.session.workspaceId}:${props.session.id}`}
-            session={props.session}
-            canControl={workspacePermissions.includes("sessions:control")}
-            paused={admissionControl.state === "paused"}
-            refreshRequired={admissionRefreshRequired}
-            busy={composer.resuming || composer.pausing || composer.sending || props.queue.mutating}
-            onRecheck={() =>
-              recheckSessionAdmission({
-                control: admissionControl,
-                refreshOnly: admissionRefreshRequired,
-                resume: (control) =>
-                  context.client.resumeSession(props.session.workspaceId, props.session.id, {
-                    clientEventId: crypto.randomUUID(),
-                    expectedControlEtag: control.controlEtag,
-                  }),
-                refresh: [props.onReloadSession, props.queue.refresh],
-              })
-            }
-          />
-          <SessionChrome
-            sessionStatus={props.session.status}
-            onOpenSession={props.onOpenSession}
-            queue={props.queue}
-            composer={terminal ? undefined : composer}
-            goal={props.goal}
-            readOnly={terminal}
-            commandsCount={props.session.backgroundCommandActivity?.count ?? 0}
-            commandsPanel={
-              <Suspense fallback={<LoadingPanel label="Loading commands…" />}>
-                <SessionCommands
-                  key={props.session.id}
-                  sessionId={props.session.id}
-                  readOnly={terminal}
-                />
-              </Suspense>
-            }
-            agentsSignal={agentsSignal}
-            agentsPanel={
-              props.agentNodes.length > 0 ? (
-                <Suspense fallback={<LoadingPanel label="Loading agents…" />}>
-                  <SubagentTree workspaceId={props.session.workspaceId} nodes={props.agentNodes} />
-                </Suspense>
-              ) : null
-            }
-          />
-        </div>
-      </div>
-
-      <div ref={composerRegionRef} className="shrink-0 px-4 pb-4 pt-1 sm:px-6">
-        <div className="mx-auto w-full max-w-3xl">
-          <PersonalResourceAttachmentSurface
-            controller={personalAttachment}
-            disabled={terminal || composer.sending}
-            compact
-          />
-          <ConsoleComposer
-            workspaceId={props.session.workspaceId}
-            usageRefreshKey={props.session.status}
-            composer={composer}
-            attachments={attachments}
-            effectiveControl={composer.effectiveControl}
-            queuedAheadCount={props.queue.queue.length}
-            canControlWorkspace={workspacePermissions.includes("workspace:admin")}
-            controlLinks={{
-              workspaceHref: `/workspaces/${props.session.workspaceId}`,
-              sessionHref: (sessionId) =>
-                `/workspaces/${props.session.workspaceId}/sessions/${sessionId}`,
-            }}
-            disabled={terminal}
-            header={unavailableModelNotice}
-            commandContext={commandContext}
-            onClearView={props.onClearView}
-            fileUploadsEnabled={context.clientConfig.fileUploads.enabled === true}
-            transcriptionSuppressed={voiceActive}
-            controlsLeading={
-              <>
-                <ComposerMobilePlus
-                  connectorActions={{
-                    accountControls: {
-                      groups: connectionAccounts.availableAccountGroups,
-                      choices: connectionAccounts.accountChoices,
-                      onChoose: connectionAccounts.selectAccount,
-                      loading: connectionAccounts.loading,
-                      error: connectionAccounts.error,
-                      accessDenied: connectionAccounts.accessDenied,
-                      onRefresh: () => void connectionAccounts.refresh(),
-                      disabled:
-                        terminal || composer.sending || durableToolsSaving || !durableToolsHydrated,
-                    },
-                  }}
-                  chatSettings={{
-                    workspaceId: props.session.workspaceId,
-                    sessionId: props.session.id,
-                    scope: chatLearningScope(
-                      props.session,
-                      isPersonalWorkspace(workspace, context.managedSelfContext),
-                    ),
-                    canEdit: workspacePermissions.includes("sessions:control"),
-                    onOpen: props.onOpenAgentSettings,
-                  }}
-                  workspaceId={props.session.workspaceId}
-                  disabled={terminal || composer.sending}
-                  fileUploadsEnabled={context.clientConfig.fileUploads.enabled === true}
-                  servers={selectableSessionMcpServers}
-                  firstPartyTools={firstPartyToolOptions}
-                  selection={durableToolSelection}
-                  toolsSaving={durableToolsSaving}
-                  toolsDisabled={
-                    composer.sending || terminal || durableToolsSaving || !durableToolsHydrated
-                  }
-                  connectorCustomizing={connectorCustomizing}
-                  onConnectorCustomizingChange={(next) => {
-                    setConnectorCustomizingOverride(next);
-                    if (next) return;
-                    connectionAccounts.resetEmptyChoices();
-                    void applyDurableToolPolicy(
-                      followWorkspaceConnectorPolicy(durableToolsSnapshot),
-                    );
-                  }}
-                  onToolSelectionChange={(next) => void saveDurableToolPolicy(next)}
-                  variableSets={{
-                    selectedCount:
-                      props.session.variableSetIds?.length ?? (props.session.variableSetId ? 1 : 0),
-                    panel: (
-                      <SessionVariableSetPicker
-                        session={props.session}
-                        canControl={workspacePermissions.includes("sessions:control")}
-                        canAttach={workspacePermissions.includes("variable-sets:attach")}
-                        canUse={workspacePermissions.includes("variable-sets:use")}
-                        canList={
-                          workspacePermissions.includes("variable-sets:list") &&
-                          workspacePermissions.includes("secrets:list")
-                        }
-                        disabled={terminal}
-                        busy={
-                          voiceActive ||
-                          composer.sending ||
-                          props.session.activeTurnId !== null ||
-                          props.queue.queue.length > 0
-                        }
-                        goalActive={props.goal.isActive}
-                        voiceActive={voiceActive}
-                        sharedState={variableSetPickerState}
-                        setSharedState={setVariableSetPickerState}
-                        embedded
-                        onReloadSession={props.onReloadSession}
+              <SessionChrome
+                sessionStatus={props.session.status}
+                onOpenSession={props.onOpenSession}
+                queue={props.queue}
+                composer={terminal ? undefined : composer}
+                goal={props.goal}
+                readOnly={terminal}
+                commandsCount={props.session.backgroundCommandActivity?.count ?? 0}
+                commandsPanel={
+                  <Suspense fallback={<LoadingPanel label="Loading commands…" />}>
+                    <SessionCommands
+                      key={props.session.id}
+                      sessionId={props.session.id}
+                      readOnly={terminal}
+                    />
+                  </Suspense>
+                }
+                agentsSignal={agentsSignal}
+                agentsPanel={
+                  props.agentNodes.length > 0 ? (
+                    <Suspense fallback={<LoadingPanel label="Loading agents…" />}>
+                      <SubagentTree
+                        workspaceId={props.session.workspaceId}
+                        nodes={props.agentNodes}
                       />
-                    ),
-                  }}
-                  repositories={{
-                    selectedCount: repositories.selectionCount,
-                    disabled: terminal || composer.sending,
-                    panel: <FollowUpRepositoryMenuBody {...repositoryPickerProps} />,
-                  }}
-                  {...(runsOn.hasChoices ||
-                  props.session.rigId ||
-                  (runsOn.activeMachine && !runsOn.activeMachine.isSessionGroup)
-                    ? {
-                        runsOn: {
-                          summary: runsOn.activeName,
-                          panel: (
-                            <SessionRunsOnMenuBody
-                              runsOn={runsOn}
-                              workspaceId={props.session.workspaceId}
-                              rigId={props.session.rigId ?? null}
-                            />
-                          ),
+                    </Suspense>
+                  ) : null
+                }
+              />
+            </div>
+          </div>
+
+          <div ref={composerRegionRef} className="shrink-0 px-4 pb-4 pt-1 sm:px-6">
+            <div className="mx-auto w-full max-w-3xl">
+              <PersonalResourceAttachmentSurface
+                controller={personalAttachment}
+                disabled={terminal || composer.sending}
+                compact
+              />
+              <ConsoleComposer
+                workspaceId={props.session.workspaceId}
+                usageRefreshKey={props.session.status}
+                composer={composer}
+                attachments={attachments}
+                effectiveControl={composer.effectiveControl}
+                queuedAheadCount={props.queue.queue.length}
+                canControlWorkspace={workspacePermissions.includes("workspace:admin")}
+                controlLinks={{
+                  workspaceHref: `/workspaces/${props.session.workspaceId}`,
+                  sessionHref: (sessionId) =>
+                    `/workspaces/${props.session.workspaceId}/sessions/${sessionId}`,
+                }}
+                disabled={terminal}
+                header={unavailableModelNotice}
+                commandContext={commandContext}
+                onClearView={props.onClearView}
+                fileUploadsEnabled={context.clientConfig.fileUploads.enabled === true}
+                transcriptionSuppressed={voiceActive}
+                controlsLeading={
+                  <>
+                    <ComposerMobilePlus
+                      connectorActions={{
+                        accountControls: {
+                          groups: connectionAccounts.availableAccountGroups,
+                          choices: connectionAccounts.accountChoices,
+                          onChoose: connectionAccounts.selectAccount,
+                          loading: connectionAccounts.loading,
+                          error: connectionAccounts.error,
+                          accessDenied: connectionAccounts.accessDenied,
+                          onRefresh: () => void connectionAccounts.refresh(),
+                          disabled:
+                            terminal ||
+                            composer.sending ||
+                            durableToolsSaving ||
+                            !durableToolsHydrated,
                         },
+                      }}
+                      chatSettings={{
+                        workspaceId: props.session.workspaceId,
+                        sessionId: props.session.id,
+                        scope: chatLearningScope(
+                          props.session,
+                          isPersonalWorkspace(workspace, context.managedSelfContext),
+                        ),
+                        canEdit: workspacePermissions.includes("sessions:control"),
+                        onOpen: props.onOpenAgentSettings,
+                      }}
+                      workspaceId={props.session.workspaceId}
+                      disabled={terminal || composer.sending}
+                      fileUploadsEnabled={context.clientConfig.fileUploads.enabled === true}
+                      servers={selectableSessionMcpServers}
+                      firstPartyTools={firstPartyToolOptions}
+                      selection={durableToolSelection}
+                      toolsSaving={durableToolsSaving}
+                      toolsDisabled={
+                        composer.sending || terminal || durableToolsSaving || !durableToolsHydrated
                       }
-                    : {})}
-                />
-              </>
-            }
-            actions={
-              !terminal ? (
-                <Suspense fallback={null}>
-                  <LazyCodexRealtimeControl
-                    client={context.client}
-                    workspaceId={props.session.workspaceId}
-                    sessionId={props.session.id}
-                    sessionStatus={props.session.status}
-                    effectiveControl={
-                      props.queue.effectiveControl ?? props.session.effectiveControl
-                    }
-                    events={props.events}
-                    eventsReady={!props.initialLoading}
-                    codexConnected={codexConnected}
-                    realtimeAutostartModel={props.realtimeAutostartModel}
-                    onRealtimeAutostartConsumed={props.onRealtimeAutostartConsumed}
-                    onVoiceActiveChange={onVoiceActiveChange}
-                  />
-                </Suspense>
-              ) : null
-            }
-            placeholder={
-              props.session.status === "cancelled"
-                ? "This session was cancelled."
-                : props.creditExhausted &&
-                    (props.session.status === "failed" || props.session.status === "idle")
-                  ? // "Send a message to revive" is a dead end without credits —
-                    // the reply turn dies the same budget death.
-                    "Out of Opengeni credits — add credits to continue."
-                  : "Send a follow-up…"
-            }
-            controls={
-              <div className="@container/model-controls flex min-w-0 flex-1 items-center gap-1.5">
-                <ModelPicker
-                  hasImageAttachments={attachments.attachments.some(
-                    (file) => file.status !== "failed" && file.contentType.startsWith("image/"),
-                  )}
-                  open={modelPickerSession === props.session.id && !pendingRetryInput}
-                  onOpenChange={(open) => {
-                    setModelPickerSession(open ? props.session.id : null);
-                    if (open) void modelCatalog.refresh();
-                  }}
-                  rows={modelCatalog.rows}
-                  model={model}
-                  effort={reasoningEffort}
-                  latencyMode={latencyMode}
-                  disabled={modelPickerDisabled}
-                  loading={modelCatalog.loading || composer.draftLoading}
-                  error={modelCatalog.error ?? composerPolicyError}
-                  sessionKey={props.session.id}
-                  menuSide="top"
-                  connectModelsHref={`/workspaces/${encodeURIComponent(props.session.workspaceId)}/settings?section=models`}
-                  codexOnly={props.session.codexCompactionMode === "remote_v2"}
-                  onModelChange={composer.setModel}
-                  onEffortChange={composer.setReasoningEffort}
-                  onLatencyModeChange={composer.setLatencyMode}
-                />
-                {durableToolsError ? (
-                  <span className="sr-only" role="alert">
-                    {durableToolsError}
-                  </span>
-                ) : null}
-              </div>
-            }
-          />
-        </div>
-      </div>
-    </ChatViewportFileDropTarget>,
+                      connectorCustomizing={connectorCustomizing}
+                      onConnectorCustomizingChange={(next) => {
+                        setConnectorCustomizingOverride(next);
+                        if (next) return;
+                        connectionAccounts.resetEmptyChoices();
+                        void applyDurableToolPolicy(
+                          followWorkspaceConnectorPolicy(durableToolsSnapshot),
+                        );
+                      }}
+                      onToolSelectionChange={(next) => void saveDurableToolPolicy(next)}
+                      variableSets={{
+                        selectedCount:
+                          props.session.variableSetIds?.length ??
+                          (props.session.variableSetId ? 1 : 0),
+                        panel: (
+                          <SessionVariableSetPicker
+                            session={props.session}
+                            canControl={workspacePermissions.includes("sessions:control")}
+                            canAttach={workspacePermissions.includes("variable-sets:attach")}
+                            canUse={workspacePermissions.includes("variable-sets:use")}
+                            canList={
+                              workspacePermissions.includes("variable-sets:list") &&
+                              workspacePermissions.includes("secrets:list")
+                            }
+                            disabled={terminal}
+                            busy={
+                              voiceActive ||
+                              composer.sending ||
+                              props.session.activeTurnId !== null ||
+                              props.queue.queue.length > 0
+                            }
+                            goalActive={props.goal.isActive}
+                            voiceActive={voiceActive}
+                            sharedState={variableSetPickerState}
+                            setSharedState={setVariableSetPickerState}
+                            embedded
+                            onReloadSession={props.onReloadSession}
+                          />
+                        ),
+                      }}
+                      repositories={{
+                        selectedCount: repositories.selectionCount,
+                        disabled: terminal || composer.sending,
+                        panel: <FollowUpRepositoryMenuBody {...repositoryPickerProps} />,
+                      }}
+                      {...(runsOn.hasChoices ||
+                      props.session.rigId ||
+                      (runsOn.activeMachine && !runsOn.activeMachine.isSessionGroup)
+                        ? {
+                            runsOn: {
+                              summary: runsOn.activeName,
+                              panel: (
+                                <SessionRunsOnMenuBody
+                                  runsOn={runsOn}
+                                  workspaceId={props.session.workspaceId}
+                                  rigId={props.session.rigId ?? null}
+                                />
+                              ),
+                            },
+                          }
+                        : {})}
+                    />
+                  </>
+                }
+                actions={
+                  !terminal ? (
+                    <Suspense fallback={null}>
+                      <LazyCodexRealtimeControl
+                        client={context.client}
+                        workspaceId={props.session.workspaceId}
+                        sessionId={props.session.id}
+                        sessionStatus={props.session.status}
+                        effectiveControl={
+                          props.queue.effectiveControl ?? props.session.effectiveControl
+                        }
+                        events={props.events}
+                        eventsReady={!props.initialLoading}
+                        codexConnected={codexConnected}
+                        realtimeAutostartModel={props.realtimeAutostartModel}
+                        onRealtimeAutostartConsumed={props.onRealtimeAutostartConsumed}
+                        onVoiceActiveChange={onVoiceActiveChange}
+                      />
+                    </Suspense>
+                  ) : null
+                }
+                placeholder={
+                  props.session.status === "cancelled"
+                    ? "This session was cancelled."
+                    : props.creditExhausted &&
+                        (props.session.status === "failed" || props.session.status === "idle")
+                      ? // "Send a message to revive" is a dead end without credits —
+                        // the reply turn dies the same budget death.
+                        "Out of Opengeni credits — add credits to continue."
+                      : "Send a follow-up…"
+                }
+                controls={
+                  <div className="@container/model-controls flex min-w-0 flex-1 items-center gap-1.5">
+                    <ModelPicker
+                      hasImageAttachments={attachments.attachments.some(
+                        (file) => file.status !== "failed" && file.contentType.startsWith("image/"),
+                      )}
+                      open={modelPickerSession === props.session.id && !pendingRetryInput}
+                      onOpenChange={(open) => {
+                        setModelPickerSession(open ? props.session.id : null);
+                        if (open) void modelCatalog.refresh();
+                      }}
+                      rows={modelCatalog.rows}
+                      model={model}
+                      effort={reasoningEffort}
+                      latencyMode={latencyMode}
+                      disabled={modelPickerDisabled}
+                      loading={modelCatalog.loading || composer.draftLoading}
+                      error={modelCatalog.error ?? composerPolicyError}
+                      sessionKey={props.session.id}
+                      menuSide="top"
+                      connectModelsHref={`/workspaces/${encodeURIComponent(props.session.workspaceId)}/settings?section=models`}
+                      codexOnly={props.session.codexCompactionMode === "remote_v2"}
+                      onModelChange={composer.setModel}
+                      onEffortChange={composer.setReasoningEffort}
+                      onLatencyModeChange={composer.setLatencyMode}
+                    />
+                    {durableToolsError ? (
+                      <span className="sr-only" role="alert">
+                        {durableToolsError}
+                      </span>
+                    ) : null}
+                  </div>
+                }
+              />
+            </div>
+          </div>
+        </ChatViewportFileDropTarget>,
+      ),
+    ),
   );
 }
 

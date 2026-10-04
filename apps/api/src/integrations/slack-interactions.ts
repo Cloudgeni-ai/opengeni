@@ -1,3 +1,4 @@
+import { slackToolReviewBlocks, slackToolReviewCanDecide } from "./slack-tool-review";
 import { createHash, createHmac, timingSafeEqual } from "node:crypto";
 import {
   approvalIdentifier,
@@ -58,6 +59,7 @@ import {
   enqueueSlackAppHomeRefresh,
   enqueueSlackInteractionInbox,
   getConnectionMetadata,
+  getToolActionReview,
   getOrCreateSlackInteraction,
   getLatestSessionModelForSubject,
   getSession,
@@ -1478,6 +1480,20 @@ export function startSlackInteractionPump(
     try {
       for (let index = 0; index < maxPerTick; index += 1) {
         if (!(await drainSlackInteractionsOnce(deps))) break;
+      }
+    } catch (error) {
+      // A failed claim (for example a database connection terminated during a
+      // deploy drain) leaves every durable interaction pending; the next tick
+      // retries it. It must never escape as an unhandled rejection, which the
+      // API fatal boundary turns into a process exit.
+      try {
+        deps.observability?.error("Slack interaction delivery claim failed", {
+          errorClass: error instanceof Error ? error.name : "SlackInteractionPumpError",
+          errorCode: safeErrorCode(error),
+          origin: "api",
+        });
+      } catch {
+        // An observer failure must not turn a recovered tick into a crash.
       }
     } finally {
       running = false;
@@ -4345,7 +4361,7 @@ async function executeSlackAction(
     });
     return {
       result: decision === "approve" ? "approved" : "rejected",
-      text: `${mention}${decision === "approve" ? "Approved once" : "Rejected"}. OpenGeni will continue from the durable task state.`,
+      text: `${mention}${decision === "approve" ? "Approved. Waiting to run." : "Declined. This action will not run."} ${openSessionText(deps, interaction.workspaceId, handle.sessionId)}`,
     };
   }
   if (handle.actionKind === "human_input_select" || handle.actionKind === "human_input_skip") {
@@ -4736,7 +4752,8 @@ function slackApprovalSummaries(payload: unknown): SlackApprovalSummary[] {
     .slice(0, MAX_SLACK_APPROVALS_PER_CARD);
 }
 
-async function slackApprovalCard(
+/** Byte-compatible repair only for an existing pre-review post ledger entry. */
+async function legacySlackApprovalCard(
   deps: ApiRouteDeps,
   interaction: SlackInteraction,
   event: SessionEvent,
@@ -4817,6 +4834,121 @@ async function slackApprovalCard(
       {
         type: "section",
         text: { type: "mrkdwn", text: `${mention}OpenGeni needs your approval.` },
+      },
+      ...blocks,
+    ],
+    operationId,
+  };
+}
+
+async function slackApprovalCard(
+  deps: ApiRouteDeps,
+  interaction: SlackInteraction,
+  event: SessionEvent,
+  mention: string,
+  requesterAuthorized: boolean,
+): Promise<{ text: string; blocks?: SlackMessageBlock[]; operationId: string }> {
+  const operationId = deterministicUuid(
+    slackPostSeed(interaction, `slack-delivery:${interaction.id}:${event.sequence}:approval`),
+  );
+  const approvals = slackApprovalSummaries(event.payload);
+  const link = interaction.sessionId
+    ? slackSessionUrl(deps, interaction.workspaceId, interaction.sessionId)
+    : null;
+  const fallback = `${mention}An action needs review.${link ? ` <${link}|Open the task to review>` : " Open the task to review it."}`;
+  // A linked requester does not prove that everyone in a channel may see mail.
+  // The provider-verified interaction route identifies a private bot DM.
+  const privateAudience =
+    requesterAuthorized &&
+    interaction.visibility === "private" &&
+    interaction.slackChannelId.startsWith("D");
+  if (
+    !privateAudience ||
+    !interaction.sessionId ||
+    !interaction.initiatingSlackUserId ||
+    approvals.length === 0
+  )
+    return { text: fallback, operationId };
+  const reviews = await Promise.all(
+    approvals.map((approval) =>
+      getToolActionReview(deps.db, {
+        accountId: interaction.accountId,
+        workspaceId: interaction.workspaceId,
+        sessionId: interaction.sessionId!,
+        approvalId: approval.id,
+      }),
+    ),
+  );
+  const reviewById = new Map(
+    reviews.flatMap((review) => (review ? [[review.id, review] as const] : [])),
+  );
+  const actionable = approvals.filter((approval) => {
+    const review = reviewById.get(approval.id);
+    return review && slackToolReviewCanDecide(review);
+  });
+  const specs = actionable
+    .flatMap((approval) => [
+      {
+        actionKind: "approval_approve" as const,
+        actionKey: `approval:${approval.id}:approve`,
+        targetId: approval.id,
+      },
+      {
+        actionKind: "approval_reject" as const,
+        actionKey: `approval:${approval.id}:reject`,
+        targetId: approval.id,
+      },
+    ])
+    .slice(0, MAX_SLACK_ACTIONS_PER_CARD);
+  const handles = specs.length
+    ? await reserveSlackInteractionActionHandles(deps.db, {
+        interaction,
+        sessionEventSequence: event.sequence,
+        messageOperationId: operationId,
+        expiresAt: new Date(Date.now() + SLACK_ACTION_TTL_MS),
+        actions: specs,
+      })
+    : [];
+  const byKey = new Map(handles.map((handle) => [handle.actionKey, handle]));
+  const blocks: SlackMessageBlock[] = [];
+  for (const approval of approvals) {
+    const approve = byKey.get(`approval:${approval.id}:approve`);
+    const reject = byKey.get(`approval:${approval.id}:reject`);
+    const review = reviewById.get(approval.id);
+    if (!review) continue;
+    blocks.push(...slackToolReviewBlocks(review, privateAudience));
+    // Render the original event deterministically, even after a decision. The
+    // signed handler checks live access and the canonical pending request; a
+    // stale button cannot approve again. Changing these bytes breaks replay of
+    // an uncertain Slack post under its durable operation id.
+    if (approve && reject) {
+      blocks.push({
+        type: "actions",
+        block_id: `opengeni_approval_${event.sequence}_${blocks.length}`,
+        elements: [
+          {
+            type: "button",
+            action_id: SLACK_ACTION_ID_BY_KIND.approval_approve,
+            value: approve.id,
+            text: { type: "plain_text", text: review.approveLabel.slice(0, 75), emoji: true },
+            style: "primary",
+          },
+          {
+            type: "button",
+            action_id: SLACK_ACTION_ID_BY_KIND.approval_reject,
+            value: reject.id,
+            text: { type: "plain_text", text: "Decline", emoji: true },
+          },
+        ],
+      });
+    }
+  }
+  return {
+    text: fallback,
+    blocks: [
+      {
+        type: "section",
+        text: { type: "mrkdwn", text: fallback },
       },
       ...blocks,
     ],
@@ -5297,15 +5429,49 @@ async function deliverSlackSessionEvents(
         requester.mention,
         requester.authorized,
       );
-      await postDelivery(
-        client,
-        interaction,
-        event,
-        card.text,
-        "approval",
-        card.operationId,
-        card.blocks,
-      );
+      try {
+        await postDelivery(
+          client,
+          interaction,
+          event,
+          card.text,
+          "approval",
+          card.operationId,
+          card.blocks,
+        );
+      } catch (error) {
+        // The ledger refused changed bytes before any provider write. Preserve
+        // an existing old post identity across upgrade; never mint a new id
+        // and accidentally send a second approval card. Fresh posts always use
+        // the shared facts above. The legacy renderer is repair-only.
+        if (!(error instanceof SlackBotOperationConflictError)) throw error;
+        const prior = await getSlackBotPostOperation(
+          deps.db,
+          interaction.workspaceId,
+          interaction.connectionId,
+          card.operationId,
+        );
+        // A completed server-owned event delivery needs no new provider write,
+        // even when an older renderer used different bytes. The provider client
+        // above already rechecked current connection/channel authority.
+        if (prior?.status === "completed") continue;
+        const legacy = await legacySlackApprovalCard(
+          deps,
+          interaction,
+          event,
+          requester.mention,
+          requester.authorized,
+        );
+        await postDelivery(
+          client,
+          interaction,
+          event,
+          legacy.text,
+          "approval",
+          legacy.operationId,
+          legacy.blocks,
+        );
+      }
     } else if (event.type === "session.humanInput.requested") {
       const card = await slackHumanInputCard(
         deps,

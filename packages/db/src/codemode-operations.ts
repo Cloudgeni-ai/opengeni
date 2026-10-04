@@ -1,3 +1,4 @@
+import { lockTurnAttemptWriteFenceTx } from "./session-attempt-fence";
 import {
   AttemptToolCall,
   AttemptToolResult,
@@ -47,10 +48,12 @@ export class CodemodeToolNotInCatalogError extends Error {
 }
 
 export class CodemodeToolApprovalRequiredError extends Error {
-  readonly code = "codemode_tool_approval_required";
+  readonly code = "codemode_client_upgrade_required";
 
   constructor() {
-    super("Tool requires human approval and must be invoked through the agent");
+    super(
+      "This tool needs review. Upgrade the Codemode client to support durable approval handles.",
+    );
     this.name = "CodemodeToolApprovalRequiredError";
   }
 }
@@ -64,6 +67,16 @@ export class CodemodePayloadTooLargeError extends Error {
   }
 }
 
+export class CodemodeOperationLimitError extends Error {
+  readonly code = "codemode_operation_limit";
+  constructor() {
+    super(
+      "This turn already has 128 unfinished programmatic operations. Finish or decline existing work before submitting more.",
+    );
+    this.name = "CodemodeOperationLimitError";
+  }
+}
+
 export type SubmitCodemodeOperationInput = {
   accountId: string;
   workspaceId: string;
@@ -72,6 +85,7 @@ export type SubmitCodemodeOperationInput = {
   attemptId: string;
   executionGeneration: number;
   call: AttemptToolCallValue;
+  durableApproval?: boolean;
 };
 
 /**
@@ -100,6 +114,13 @@ export async function submitCodemodeOperation(
             hashtextextended(${`codemode-operation:${input.workspaceId}:${call.operationId}`}, 0)
           )
         `);
+        const fence = await lockTurnAttemptWriteFenceTx(tx as unknown as Database, input);
+        if (
+          !fence.allowed ||
+          fence.turn.accountId !== input.accountId ||
+          fence.turn.status !== "running"
+        )
+          throw new CodemodeOperationNotExecutableError();
         const [existing] = await tx
           .select()
           .from(schema.sessionAttemptCodemodeCalls)
@@ -108,35 +129,7 @@ export async function submitCodemodeOperation(
           .limit(1);
         if (existing) {
           assertExistingRequest(existing, input, requestDigest);
-          return { operation: mapOperation(existing), created: false };
-        }
-
-        const [turn] = await tx
-          .select({
-            accountId: schema.sessionTurns.accountId,
-            sessionId: schema.sessionTurns.sessionId,
-            status: schema.sessionTurns.status,
-            activeAttemptId: schema.sessionTurns.activeAttemptId,
-            executionGeneration: schema.sessionTurns.executionGeneration,
-          })
-          .from(schema.sessionTurns)
-          .where(
-            and(
-              eq(schema.sessionTurns.workspaceId, input.workspaceId),
-              eq(schema.sessionTurns.id, input.turnId),
-            ),
-          )
-          .for("update")
-          .limit(1);
-        if (
-          !turn ||
-          turn.accountId !== input.accountId ||
-          turn.sessionId !== input.sessionId ||
-          turn.status !== "running" ||
-          turn.activeAttemptId !== input.attemptId ||
-          turn.executionGeneration !== input.executionGeneration
-        ) {
-          throw new CodemodeOperationNotExecutableError();
+          return { operation: mapCodemodeOperation(existing), created: false };
         }
 
         const [catalogRow] = await tx
@@ -169,9 +162,22 @@ export async function submitCodemodeOperation(
         if (!catalogEntry) {
           throw new CodemodeToolNotInCatalogError();
         }
-        if (catalogEntry.approval === "human") {
+        if (catalogEntry.approval === "human" && input.durableApproval !== true) {
           throw new CodemodeToolApprovalRequiredError();
         }
+
+        // The turn lock also serializes admission; completed receipts never consume this budget.
+        const active = await tx
+          .select({ operationId: schema.sessionAttemptCodemodeCalls.operationId })
+          .from(schema.sessionAttemptCodemodeCalls)
+          .where(
+            and(
+              eq(schema.sessionAttemptCodemodeCalls.turnId, input.turnId),
+              sql`${schema.sessionAttemptCodemodeCalls.state} in ('queued', 'running', 'waiting_for_approval')`,
+            ),
+          )
+          .limit(128);
+        if (active.length >= 128) throw new CodemodeOperationLimitError();
 
         const [created] = await tx
           .insert(schema.sessionAttemptCodemodeCalls)
@@ -185,6 +191,7 @@ export async function submitCodemodeOperation(
             executionGeneration: input.executionGeneration,
             catalogDigest: call.catalogDigest,
             requestDigest,
+            durableApproval: input.durableApproval === true,
             serverId: call.identity.serverId,
             toolName: call.identity.toolName,
             arguments: call.arguments,
@@ -192,7 +199,7 @@ export async function submitCodemodeOperation(
           })
           .returning();
         if (!created) throw new Error("Failed to create Codemode operation");
-        return { operation: mapOperation(created), created: true };
+        return { operation: mapCodemodeOperation(created), created: true };
       }),
   );
 }
@@ -211,11 +218,11 @@ export async function getCodemodeOperation(
         .where(
           and(
             eq(schema.sessionAttemptCodemodeCalls.operationId, input.operationId),
-            eq(schema.sessionAttemptCodemodeCalls.attemptId, input.attemptId),
+            sql`coalesce(${schema.sessionAttemptCodemodeCalls.executionAttemptId}, ${schema.sessionAttemptCodemodeCalls.attemptId}) = ${input.attemptId}`,
           ),
         )
         .limit(1);
-      return row ? mapOperation(row) : null;
+      return row ? mapCodemodeOperation(row) : null;
     },
   );
 }
@@ -253,6 +260,13 @@ export async function claimCodemodeOperation(
     { accountId: input.accountId, workspaceId: input.workspaceId },
     async (scopedDb) =>
       await scopedDb.transaction(async (tx) => {
+        const fence = await lockTurnAttemptWriteFenceTx(tx as unknown as Database, input);
+        if (
+          !fence.allowed ||
+          fence.turn.accountId !== input.accountId ||
+          fence.turn.status !== "running"
+        )
+          return { status: "rejected", operation: null };
         let [row] = await tx
           .select()
           .from(schema.sessionAttemptCodemodeCalls)
@@ -260,14 +274,14 @@ export async function claimCodemodeOperation(
           .for("update")
           .limit(1);
         if (!row || !operationMatchesAuthority(row, input)) {
-          return { status: "rejected", operation: row ? mapOperation(row) : null };
+          return { status: "rejected", operation: row ? mapCodemodeOperation(row) : null };
         }
         const now = input.now ?? new Date();
         const claimExpiresAt = new Date(now.getTime() + boundedClaimLeaseMs(input.claimLeaseMs));
         let reclaimed = false;
         if (row.state === "running") {
           if (!row.claimExpiresAt || row.claimExpiresAt.getTime() > now.getTime()) {
-            return { status: "already_running", operation: mapOperation(row) };
+            return { status: "already_running", operation: mapCodemodeOperation(row) };
           }
           if (row.executionStartedAt) {
             if (!row.claimId) {
@@ -275,7 +289,7 @@ export async function claimCodemodeOperation(
             }
             return {
               status: "execution_owner_lost",
-              operation: mapOperation(row),
+              operation: mapCodemodeOperation(row),
               claimId: row.claimId,
             };
           }
@@ -300,47 +314,11 @@ export async function claimCodemodeOperation(
           row = requeued;
           reclaimed = true;
         }
-        if (isTerminalState(row.state)) return { status: "terminal", operation: mapOperation(row) };
+        if (row.state === "waiting_for_approval")
+          return { status: "terminal", operation: mapCodemodeOperation(row) };
+        if (isTerminalState(row.state))
+          return { status: "terminal", operation: mapCodemodeOperation(row) };
 
-        const [turn] = await tx
-          .select({
-            status: schema.sessionTurns.status,
-            activeAttemptId: schema.sessionTurns.activeAttemptId,
-            executionGeneration: schema.sessionTurns.executionGeneration,
-          })
-          .from(schema.sessionTurns)
-          .where(
-            and(
-              eq(schema.sessionTurns.workspaceId, input.workspaceId),
-              eq(schema.sessionTurns.id, input.turnId),
-            ),
-          )
-          .for("update")
-          .limit(1);
-        if (
-          !turn ||
-          turn.status !== "running" ||
-          turn.activeAttemptId !== input.attemptId ||
-          turn.executionGeneration !== input.executionGeneration
-        ) {
-          const [cancelled] = await tx
-            .update(schema.sessionAttemptCodemodeCalls)
-            .set({
-              state: "cancelled",
-              errorCode: "attempt_not_executable",
-              errorMessage: "Execution attempt ended before the Codemode call started",
-              completedAt: now,
-              updatedAt: now,
-            })
-            .where(
-              and(
-                eq(schema.sessionAttemptCodemodeCalls.operationId, input.operationId),
-                eq(schema.sessionAttemptCodemodeCalls.state, "queued"),
-              ),
-            )
-            .returning();
-          return { status: "terminal", operation: mapOperation(cancelled ?? row) };
-        }
         const [claimed] = await tx
           .update(schema.sessionAttemptCodemodeCalls)
           .set({
@@ -360,7 +338,7 @@ export async function claimCodemodeOperation(
         if (!claimed) throw new Error("Codemode operation claim lost its row lock");
         return {
           status: "claimed",
-          operation: mapOperation(claimed),
+          operation: mapCodemodeOperation(claimed),
           claimId: input.claimId,
           reclaimed,
         };
@@ -376,26 +354,47 @@ export async function markCodemodeOperationExecutionStarted(
   return await withRlsContext(
     db,
     { accountId: input.accountId, workspaceId: input.workspaceId },
-    async (scopedDb) => {
-      const now = input.now ?? new Date();
-      const rows = await scopedDb
-        .update(schema.sessionAttemptCodemodeCalls)
-        .set({
-          executionStartedAt: sql`coalesce(${schema.sessionAttemptCodemodeCalls.executionStartedAt}, now())`,
-          claimExpiresAt: new Date(now.getTime() + boundedClaimLeaseMs(input.claimLeaseMs)),
-          updatedAt: now,
-        })
-        .where(
-          and(
-            eq(schema.sessionAttemptCodemodeCalls.operationId, input.operationId),
-            eq(schema.sessionAttemptCodemodeCalls.attemptId, input.attemptId),
-            eq(schema.sessionAttemptCodemodeCalls.state, "running"),
-            eq(schema.sessionAttemptCodemodeCalls.claimId, input.claimId),
-          ),
+    async (scopedDb) =>
+      scopedDb.transaction(async (tx) => {
+        const [operation] = await tx
+          .select()
+          .from(schema.sessionAttemptCodemodeCalls)
+          .where(eq(schema.sessionAttemptCodemodeCalls.operationId, input.operationId))
+          .limit(1);
+        if (
+          !operation ||
+          operation.accountId !== input.accountId ||
+          (operation.executionAttemptId ?? operation.attemptId) !== input.attemptId
         )
-        .returning({ id: schema.sessionAttemptCodemodeCalls.operationId });
-      return rows.length === 1;
-    },
+          return false;
+        const fence = await lockTurnAttemptWriteFenceTx(tx as unknown as Database, {
+          workspaceId: input.workspaceId,
+          sessionId: operation.sessionId,
+          turnId: operation.turnId,
+          attemptId: input.attemptId,
+          executionGeneration:
+            operation.executionAttemptGeneration ?? operation.executionGeneration,
+        });
+        if (!fence.allowed || fence.turn.status !== "running") return false;
+        const now = input.now ?? new Date();
+        const rows = await tx
+          .update(schema.sessionAttemptCodemodeCalls)
+          .set({
+            executionStartedAt: sql`coalesce(${schema.sessionAttemptCodemodeCalls.executionStartedAt}, now())`,
+            claimExpiresAt: new Date(now.getTime() + boundedClaimLeaseMs(input.claimLeaseMs)),
+            updatedAt: now,
+          })
+          .where(
+            and(
+              eq(schema.sessionAttemptCodemodeCalls.operationId, input.operationId),
+              sql`coalesce(${schema.sessionAttemptCodemodeCalls.executionAttemptId}, ${schema.sessionAttemptCodemodeCalls.attemptId}) = ${input.attemptId}`,
+              eq(schema.sessionAttemptCodemodeCalls.state, "running"),
+              eq(schema.sessionAttemptCodemodeCalls.claimId, input.claimId),
+            ),
+          )
+          .returning({ id: schema.sessionAttemptCodemodeCalls.operationId });
+        return rows.length === 1;
+      }),
   );
 }
 
@@ -417,7 +416,7 @@ export async function renewCodemodeOperationClaim(
         .where(
           and(
             eq(schema.sessionAttemptCodemodeCalls.operationId, input.operationId),
-            eq(schema.sessionAttemptCodemodeCalls.attemptId, input.attemptId),
+            sql`coalesce(${schema.sessionAttemptCodemodeCalls.executionAttemptId}, ${schema.sessionAttemptCodemodeCalls.attemptId}) = ${input.attemptId}`,
             eq(schema.sessionAttemptCodemodeCalls.state, "running"),
             eq(schema.sessionAttemptCodemodeCalls.claimId, input.claimId),
           ),
@@ -511,7 +510,7 @@ export async function cancelQueuedCodemodeOperationsForAttempt(
         })
         .where(
           and(
-            eq(schema.sessionAttemptCodemodeCalls.attemptId, input.attemptId),
+            sql`coalesce(${schema.sessionAttemptCodemodeCalls.executionAttemptId}, ${schema.sessionAttemptCodemodeCalls.attemptId}) = ${input.attemptId}`,
             eq(schema.sessionAttemptCodemodeCalls.state, "queued"),
           ),
         )
@@ -546,7 +545,7 @@ async function settleClaimedCodemodeOperationInTransaction(
     .where(
       and(
         eq(schema.sessionAttemptCodemodeCalls.operationId, input.operationId),
-        eq(schema.sessionAttemptCodemodeCalls.attemptId, input.attemptId),
+        sql`coalesce(${schema.sessionAttemptCodemodeCalls.executionAttemptId}, ${schema.sessionAttemptCodemodeCalls.attemptId}) = ${input.attemptId}`,
         eq(schema.sessionAttemptCodemodeCalls.state, "running"),
         eq(schema.sessionAttemptCodemodeCalls.claimId, input.claimId),
       ),
@@ -568,7 +567,8 @@ function assertExistingRequest(
     row.attemptId !== input.attemptId ||
     row.executionGeneration !== input.executionGeneration ||
     row.catalogDigest !== input.call.catalogDigest ||
-    row.requestDigest !== requestDigest
+    row.requestDigest !== requestDigest ||
+    row.durableApproval !== (input.durableApproval === true)
   ) {
     throw new CodemodeOperationConflictError();
   }
@@ -591,13 +591,13 @@ function operationMatchesAuthority(
     row.workspaceId === input.workspaceId &&
     row.sessionId === input.sessionId &&
     row.turnId === input.turnId &&
-    row.attemptId === input.attemptId &&
-    row.executionGeneration === input.executionGeneration &&
-    row.catalogDigest === input.catalogDigest
+    (row.executionAttemptId ?? row.attemptId) === input.attemptId &&
+    (row.executionAttemptGeneration ?? row.executionGeneration) === input.executionGeneration &&
+    (row.executionCatalogDigest ?? row.catalogDigest) === input.catalogDigest
   );
 }
 
-function mapOperation(
+export function mapCodemodeOperation(
   row: typeof schema.sessionAttemptCodemodeCalls.$inferSelect,
 ): CodemodeOperationValue {
   return CodemodeOperation.parse({
@@ -615,6 +615,8 @@ function mapOperation(
     arguments: row.arguments,
     caller: { kind: "codemode", subjectId: row.callerSubjectId },
     state: row.state,
+    ...(row.durableApproval ? { durableApproval: true } : {}),
+    ...(row.approvalRequestId ? { approvalRequestId: row.approvalRequestId } : {}),
     result: row.result,
     errorCode: row.errorCode,
     errorMessage: row.errorMessage,

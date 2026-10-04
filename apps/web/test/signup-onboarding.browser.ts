@@ -163,8 +163,8 @@ try {
         await page.getByTestId("landed").waitFor();
         await pace(page);
         const landed = await page.getByTestId("landed").innerText();
-        if (!landed.includes("55555555-5555-4555-8555-555555555555")) {
-          throw new Error(`Did not open the setup chat: ${landed}`);
+        if (landed !== "Opened a new chat in workspace 33333333-3333-4333-8333-333333333333") {
+          throw new Error(`Did not open the setup workspace's new chat: ${landed}`);
         }
         const sent = await requests(page);
         const methods = sent.map(({ method }) => method);
@@ -174,13 +174,14 @@ try {
             "createOrganizationApiKey",
             "createWorkspace",
             "createVariableSet",
-            "createSession",
+            "getNewSessionDraft",
+            "saveNewSessionDraft",
           ])
         ) {
           throw new Error(`Unexpected requests: ${JSON.stringify(methods)}`);
         }
-        const session = JSON.stringify(sent.at(-1));
-        if (session.includes(KEY)) throw new Error("The setup chat request carries the key");
+        const draft = JSON.stringify(sent.at(-1));
+        if (draft.includes(KEY)) throw new Error("The setup chat draft carries the key");
         if (errors.length) throw new Error(errors.join("; "));
         await context.close();
       }
@@ -189,9 +190,11 @@ try {
         const { context, page, errors } = await open(theme, width);
         await page.getByRole("button", { name: /^Run agents in the cloud/ }).click();
         await createOrganization(page, theme, width);
-        await page.getByRole("button", { name: /^Other ways to pay/ }).click();
-        await page.getByRole("button", { name: "Codex", exact: true }).waitFor();
-        await check(page, "6-cloud-credits-options", theme, width);
+        // Credits need nothing connected, so the step offers none.
+        if (await page.getByRole("button", { name: "Codex", exact: true }).count()) {
+          throw new Error("The credits step offers connecting a model");
+        }
+        await check(page, "6-cloud-credits", theme, width);
         await page.getByRole("button", { name: "Start chatting", exact: true }).click();
         await page.getByText("Opened home").waitFor();
         if ((await requests(page)).length) throw new Error("The cloud path created something");

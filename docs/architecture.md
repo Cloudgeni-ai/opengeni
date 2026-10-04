@@ -930,6 +930,8 @@ retains exact protocol state without pairing unfinished calls into model history
 Responses bind the pending request, target turn, execution generation, requester,
 and current authorization.
 
+See [Tool approvals](tool-approvals.md) for canonical policy, portable review and durable programmatic continuation.
+
 Tool approvals are human-only. Agent-session authority may permit answering
 another session's structured human-input request, never self-approval of tools.
 
@@ -1139,7 +1141,21 @@ structural diagnostics plus an opaque correlation id, drain accepted OTLP
 exports for a bounded interval, and then exit nonzero. Exception messages,
 stacks, enumerable fields, and arbitrary rejection values never cross the
 public telemetry boundary. Embedded API composition does not install process
-handlers because its host owns process lifecycle.
+handlers because its host owns process lifecycle. One class is survivable once
+the API is serving: an unhandled rejection that only reports a lost database
+connection (`isDatabaseConnectionLoss` in `packages/db/src/persistence-errors.ts`:
+SQLSTATE 57P01-57P03/08xxx, exact node-postgres socket-loss sentences, and
+socket or postgres.js transport codes only when the failure carries database
+origin, so the same codes from NATS or a provider fetch never qualify) is logged as
+`api_unhandled_database_connection_loss` and the process keeps running, because
+the driver has already discarded that connection. Background claim loops still
+catch and log their own failures and retry on the next tick. On request paths
+`app.onError` renders the same class as a retryable HTTP 503
+`upstream_unavailable` with `details.code: DATABASE_UNAVAILABLE` and
+`Retry-After: 1`; mutations also carry `outcomeUnknown: true` because the
+connection may have dropped after a commit. Better Auth hides driver errors
+behind a generic 500, so its session lookups run through
+`withManagedAuthSessionLookup`, which recovers the logged cause.
 
 ### 6.2 Packages
 
@@ -1317,7 +1333,14 @@ Wiring: `apps/worker/src/sandbox-routing.ts` and
 `apps/worker/src/activities/agent-turn/sandbox-runtime.ts`.
 
 Codemode adds attempt scope, active-attempt fencing, a durable operation journal,
-sandbox delivery and recovery. Preflight finishes before the execution-start
+sandbox delivery and recovery. Programmatic review uses a linked durable action
+request and `waiting_for_approval`; the original attempt/catalog foreign key
+never changes. A separate execution claim binds an approved continuation to the
+current attempt of the same turn and compatible tool/account semantics.
+`packages/db/src/codemode-approvals.ts` owns that transition, and the existing
+human-decision transaction supplies the durable workflow wake. Waiting releases
+capacity and yields at the SDK tool boundary; it is not an open SDK call or a
+JavaScript stack checkpoint. Preflight finishes before the execution-start
 marker; a pre-creation `codemode_catalog_stale` allows one safe client refresh,
 never a retry of an existing or ambiguous operation. Submission conflicts never
 reconcile to an existing row; ambiguous failures adopt one only after exact
@@ -1846,7 +1869,7 @@ organization-workspace lifecycle authority; see [external membership operation r
 
 | Change area | Canonical source | Read first |
 | --- | --- | --- |
-| Model registry, routing, pricing, provider identity, OpenAI-compatible or Claude inference | `packages/config/src/index.ts`, `packages/runtime/src/model-provider*.ts`, `packages/runtime/src/anthropic-messages.ts` | [`model-providers.md`](model-providers.md) (start at Configuring inference) |
+| Model registry, routing, pricing, provider identity, OpenAI-compatible or Claude inference | `packages/config/src/index.ts`, `packages/runtime/src/model-provider*.ts`, `packages/runtime/src/chat-reasoning.ts`, `packages/runtime/src/anthropic-messages.ts` | [`model-providers.md`](model-providers.md) (start at Configuring inference) |
 | Claude sign-in, renewal or quota | apps/api/src/routes/claude-subscription-accounts.ts, packages/db/src/claude-subscription-account-tokens.ts | [model-providers.md](model-providers.md#claude-subscription-usage) |
 | Codex subscription authority or capacity | `packages/codex/`, `apps/worker/src/activities/codex-rotation.ts` | [`codex-subscription-rotation.md`](codex-subscription-rotation.md) |
 | SuperGrok/xAI subscription authority or capacity | `packages/xai-subscription/`, `packages/db/src/xai-subscription.ts`, `packages/db/src/subscription-account-repository.ts`, `packages/db/src/subscription-pool-schema.ts`, `packages/db/src/organization-xai-subscriptions.ts` | [`supergrok-subscription.md`](supergrok-subscription.md) |

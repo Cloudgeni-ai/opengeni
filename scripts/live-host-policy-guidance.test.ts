@@ -2,7 +2,7 @@ import { expect, test } from "bun:test";
 
 const root = new URL("../", import.meta.url);
 
-test("setup guide preserves stock ownership and qualification boundaries", async () => {
+test("setup guide preserves stock ownership and real-use verification", async () => {
   const setup = await Bun.file(new URL(".agents/skills/opengeni-setup/SKILL.md", root)).text();
   const prose = setup.replaceAll(/\s+/g, " ");
   for (const phrase of [
@@ -13,8 +13,13 @@ test("setup guide preserves stock ownership and qualification boundaries", async
     "These are expectations",
     "not a passed UI qualification",
     "a reason to broaden setup permissions",
+    "Stock defects belong to package React/CSS, not host workarounds",
+    "read the streamed answer",
+    "the chat survives a reload",
+    "a write that asks for approval first",
   ])
     expect(prose).toContain(phrase);
+  expect(prose).toContain("not a passed UI");
   // The public page keeps only the developer-facing stock-styling promise.
   const primary = await Bun.file(new URL("docs-site/integrate/conversation-ui.mdx", root)).text();
   expect(primary).toContain("no extra cosmetic host CSS");

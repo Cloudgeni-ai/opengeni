@@ -206,6 +206,20 @@ const baseModel = {
   },
 };
 
+const emptyNewSessionDraft = {
+  revision: 4,
+  text: "",
+  resources: [],
+  tools: [],
+  toolsProvided: false,
+  model: "credits-model",
+  reasoningEffort: "low",
+  latencyMode: "standard",
+  options: {},
+  selectionHistory: { projects: [] },
+  updatedAt: null,
+};
+
 describe("organization onboarding UI", () => {
   test("self-service signup submits only ordinary account fields", async () => {
     const submitted = mock(async () => undefined);
@@ -1086,19 +1100,15 @@ describe("organization onboarding UI", () => {
       expect(container.textContent).not.toContain("Credits Model");
       expect(container.textContent).not.toContain("Start chatting for free");
       expect(container.textContent).not.toContain("free to use. No card");
-      await act(async () =>
-        container.querySelector<HTMLButtonElement>('button[aria-expanded="false"]')!.click(),
-      );
-      expect(providerRow(container, "Codex")).not.toBeNull();
-      expect(providerRow(container, "OpenRouter")).not.toBeNull();
-      expect(container.textContent).toContain("Buy more Opengeni credits");
+      // With credits there is nothing to connect here: no subscriptions, keys
+      // or buying more, just the way on.
+      expect(container.textContent).not.toContain("Other ways to pay");
+      expect(providerRow(container, "Codex")).toBeNull();
+      expect(providerRow(container, "OpenRouter")).toBeNull();
+      expect(providerRow(container, "Buy more Opengeni credits")).toBeNull();
       const buttons = Array.from(container.querySelectorAll("button"));
-      const start = buttons.find((button) => button.textContent?.trim() === "Start chatting")!;
-      // Buying more is a collapsed row in the shared list, not a second primary action.
-      const buy = providerRow(container, "Buy more Opengeni credits")!;
       expect(buttons.find((button) => button.textContent?.includes("in credits"))).toBeUndefined();
-      // Chatting on the included credits precedes every other option.
-      expect(start.compareDocumentPosition(buy) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+      const start = buttons.find((button) => button.textContent?.trim() === "Start chatting")!;
       await act(async () => start.click());
       expect(onComplete).toHaveBeenCalledTimes(1);
     } finally {
@@ -1426,7 +1436,7 @@ describe("organization onboarding UI", () => {
     }
   });
 
-  test("adding agents to a product creates one setup key and opens a setup chat without it in history", async () => {
+  test("adding agents to a product creates one setup key and readies a setup chat without it in history", async () => {
     const token = "ogk_setup12_secret-token-value";
     const onComplete = mock((_destination?: unknown) => undefined);
     const createOrganizationApiKey = mock(async (_organizationId: string, _request: unknown) => ({
@@ -1437,9 +1447,9 @@ describe("organization onboarding UI", () => {
     const createVariableSet = mock(async (_workspaceId: string, _request: unknown) => ({
       id: "variable-set-1",
     }));
-    const createSession = mock(async (_workspaceId: string, _request: Record<string, unknown>) => ({
-      id: "setup-session",
-    }));
+    const saveNewSessionDraft = mock(
+      async (_workspaceId: string, _request: Record<string, unknown>) => undefined,
+    );
     const writeText = mock(async (_text: string) => undefined);
     Object.defineProperty(navigator, "clipboard", { value: { writeText }, configurable: true });
     const container = document.createElement("div");
@@ -1455,7 +1465,8 @@ describe("organization onboarding UI", () => {
                 createOrganizationApiKey,
                 createWorkspace,
                 createVariableSet,
-                createSession,
+                getNewSessionDraft: async () => emptyNewSessionDraft,
+                saveNewSessionDraft,
               } as never
             }
             previewState="required"
@@ -1549,25 +1560,30 @@ describe("organization onboarding UI", () => {
         name: "Opengeni developer setup",
         variables: [{ name: "DEVELOPER_SETUP_API_KEY", value: token }],
       });
-      expect(createSession).toHaveBeenCalledTimes(1);
-      const [sessionWorkspaceId, sessionRequest] = createSession.mock.calls[0]!;
-      expect(sessionWorkspaceId).toBe("setup-workspace");
-      expect(sessionRequest.initialMessage).toBe(
-        "I want to add AI agents to my product. Help me set it up.",
-      );
-      expect(sessionRequest.variableSetIds).toEqual(["variable-set-1"]);
-      expect(String(sessionRequest.idempotencyKey)).toStartWith("onboarding-developer-setup:");
-      const context = String(sessionRequest.modelContext);
+      // No chat starts yet: its new-chat page opens with the message ready to
+      // send, so this works before any model or credits exist.
+      expect(saveNewSessionDraft).toHaveBeenCalledTimes(1);
+      const [draftWorkspaceId, draft] = saveNewSessionDraft.mock.calls[0]! as [
+        string,
+        {
+          text: string;
+          expectedRevision: number;
+          options: { variableSetIds?: string[]; agent?: { instructions?: string } };
+        },
+      ];
+      expect(draftWorkspaceId).toBe("setup-workspace");
+      expect(draft.text).toBe("I want to add AI agents to my product. Help me set it up.");
+      expect(draft.expectedRevision).toBe(emptyNewSessionDraft.revision);
+      expect(draft.options.variableSetIds).toEqual(["variable-set-1"]);
+      const context = String(draft.options.agent?.instructions);
       expect(context).toContain("I chose to let Opengeni implement it.");
       expect(context).toContain("Organization: Northwind (ID preview-organization)");
       expect(context).toContain("builtin:opengeni-client");
       expect(context).toContain("DEVELOPER_SETUP_API_KEY");
       expect(context).toContain("GitHub");
       // The key is in the sandbox variable set, never in model-visible history.
-      expect(JSON.stringify(sessionRequest)).not.toContain(token);
-      expect(onComplete.mock.calls).toEqual([
-        [{ workspaceId: "setup-workspace", sessionId: "setup-session" }],
-      ]);
+      expect(JSON.stringify(draft)).not.toContain(token);
+      expect(onComplete.mock.calls).toEqual([[{ workspaceId: "setup-workspace" }]]);
     } finally {
       await act(async () => root.unmount());
       container.remove();
@@ -1715,7 +1731,7 @@ describe("organization onboarding UI", () => {
     }
   });
 
-  test("a failed setup chat retries without a second workspace or key", async () => {
+  test("a setup chat that couldn't be readied retries without a second workspace or key", async () => {
     const onComplete = mock((_destination?: unknown) => undefined);
     const createOrganizationApiKey = mock(async () => ({
       apiKey: { id: "key-1", prefix: "ogk_retry123" },
@@ -1725,12 +1741,13 @@ describe("organization onboarding UI", () => {
     const createVariableSet = mock(async () => {
       throw new Error("variable sets unavailable");
     });
-    let sessionAttempts = 0;
-    const createSession = mock(async (_workspaceId: string, _request: Record<string, unknown>) => {
-      sessionAttempts += 1;
-      if (sessionAttempts === 1) throw new Error("temporarily unavailable");
-      return { id: "setup-session" };
-    });
+    let draftAttempts = 0;
+    const saveNewSessionDraft = mock(
+      async (_workspaceId: string, _request: Record<string, unknown>) => {
+        draftAttempts += 1;
+        if (draftAttempts === 1) throw new Error("temporarily unavailable");
+      },
+    );
     const container = document.createElement("div");
     document.body.appendChild(container);
     const root = createRoot(container);
@@ -1744,7 +1761,8 @@ describe("organization onboarding UI", () => {
                 createOrganizationApiKey,
                 createWorkspace,
                 createVariableSet,
-                createSession,
+                getNewSessionDraft: async () => emptyNewSessionDraft,
+                saveNewSessionDraft,
               } as never
             }
             previewState="required"
@@ -1775,15 +1793,16 @@ describe("organization onboarding UI", () => {
       expect(createOrganizationApiKey).toHaveBeenCalledTimes(1);
       expect(createWorkspace).toHaveBeenCalledTimes(1);
       expect(createVariableSet).toHaveBeenCalledTimes(1);
-      expect(createSession).toHaveBeenCalledTimes(2);
-      const [first, second] = createSession.mock.calls.map(([, request]) => request);
-      expect(second!.idempotencyKey).toBe(first!.idempotencyKey);
+      expect(saveNewSessionDraft).toHaveBeenCalledTimes(2);
+      const second = saveNewSessionDraft.mock.calls[1]![1] as {
+        options: { variableSetIds?: string[]; agent?: { instructions?: string } };
+      };
       // Without the variable set the chat says so instead of claiming a key.
-      expect(second!.variableSetIds).toBeUndefined();
-      expect(String(second!.modelContext)).toContain("No API key is attached to this chat.");
-      expect(onComplete.mock.calls).toEqual([
-        [{ workspaceId: "setup-workspace", sessionId: "setup-session" }],
-      ]);
+      expect(second.options.variableSetIds).toBeUndefined();
+      expect(String(second.options.agent?.instructions)).toContain(
+        "No API key is attached to this chat.",
+      );
+      expect(onComplete.mock.calls).toEqual([[{ workspaceId: "setup-workspace" }]]);
     } finally {
       await act(async () => root.unmount());
       container.remove();

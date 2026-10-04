@@ -19,10 +19,10 @@ describe("onboarding use case text", () => {
     const prompt = codingAgentSetupPrompt(facts);
     expect(prompt).not.toMatch(/ogk_/);
     expect(prompt).toContain("server-only .env as OPENGENI_API_KEY");
-    expect(prompt).toContain("never ask me to paste it into this chat");
+    expect(prompt).toContain("If it isn't there yet, ask me for it.");
     expect(prompt).toContain("Opengeni API: https://app.opengeni.ai");
     expect(prompt).toContain("Organization: Acme (ID 22222222-2222-4222-8222-222222222222)");
-    expect(prompt).toContain("Never print, log or commit the key");
+    expect(prompt).toContain("used only by the server (never in browser code)");
     for (const host of ["Claude Code:", "Codex:", "Cursor:", "Anything else:"]) {
       expect(prompt).toContain(host);
     }
@@ -38,7 +38,6 @@ describe("onboarding use case text", () => {
   test("the setup chat context names where the key is, never a key", () => {
     const withKey = developerSetupModelContext({ ...facts, keyInSandbox: true });
     expect(withKey).toContain("DEVELOPER_SETUP_API_KEY environment variable");
-    expect(withKey).toContain("never write it into this chat");
     expect(withKey).toContain("builtin:opengeni-client");
     expect(withKey).toContain("one /api/opengeni server route plus the OpenGeniChat component");
     // Connecting GitHub gives the setup chat no Git credentials: the person

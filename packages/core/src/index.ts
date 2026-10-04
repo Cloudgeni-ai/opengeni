@@ -52,6 +52,8 @@ export {
   getManagedAuthRequestActorEpoch,
   getManagedAuthRequestActorLeaseStamp,
   getManagedSession,
+  recordManagedAuthLoggedFailure,
+  withManagedAuthSessionLookup,
   configureManagedUserAdmission,
   assertManagedUserAdmission,
   ManagedAuthActorLeaseOutcomeUnknownError,

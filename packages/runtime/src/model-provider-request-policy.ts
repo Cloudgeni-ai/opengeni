@@ -27,6 +27,7 @@ import {
   XaiSubscriptionUnavailableError,
 } from "./model-provider-errors";
 import type { ModelJsonRequestPolicy } from "./replayable-json-body";
+import { chatReasoning, joinChatReasoningMessages } from "./chat-reasoning";
 
 /**
  * Gateway's Kimi Responses adapter rejects the standard grouped parallel-tool
@@ -196,7 +197,7 @@ export function modelRequestPolicyForProvider(
   provider: ResolvedModelProvider,
   gatewayPolicies?: GatewayRequestPolicyLookup,
 ): ModelJsonRequestPolicy {
-  return ({ path, body }) => {
+  const providerPolicy: ModelJsonRequestPolicy = ({ path, body }) => {
     if (provider.wireProfile === "azure-openai") {
       return azureModelRequestPolicy({ body });
     }
@@ -268,4 +269,59 @@ export function modelRequestPolicyForProvider(
     }
     return undefined;
   };
+  return (request) => {
+    const projected = chatModelRequestPolicy(request);
+    const result = providerPolicy({ ...request, body: projected?.body ?? request.body });
+    return result ?? projected;
+  };
 }
+
+/** Output-only metadata can survive the SDK's conversion of retained replies.
+ * Project it off the Chat request without changing the retained history or
+ * provider extensions such as cache_control. Responses keeps its own schema.
+ */
+export const chatModelRequestPolicy: ModelJsonRequestPolicy = ({ path, body }) => {
+  if (!(path.split("?", 1)[0] ?? path).endsWith("/chat/completions")) return undefined;
+  if (!Array.isArray(body.messages)) return undefined;
+  let changed = false;
+  const messages = body.messages.map((message) => {
+    if (!message || typeof message !== "object" || message.role !== "assistant") return message;
+    if (!Array.isArray(message.content)) return message;
+    let contentChanged = false;
+    // Older non-streamed SDK replies retained message fields inside text parts.
+    // Recover their reasoning at message scope before removing invalid nesting.
+    let retainedReasoning = chatReasoning(message);
+    const content = message.content.map((part: unknown) => {
+      if (!part || typeof part !== "object" || Array.isArray(part)) return part;
+      const record = part as Record<string, unknown>;
+      if (record.type !== "text" && record.type !== "refusal") return part;
+      retainedReasoning ??= chatReasoning(record);
+      const outputOnlyKeys = [
+        "annotations",
+        "logprobs",
+        "role",
+        "tool_calls",
+        "function_call",
+        "audio",
+        "reasoning",
+        "reasoning_content",
+        "tools",
+        ...(record.type === "text" ? ["refusal"] : ["content"]),
+      ];
+      if (!outputOnlyKeys.some((key) => Object.hasOwn(record, key))) return part;
+      const projected = { ...record };
+      for (const key of outputOnlyKeys) delete projected[key];
+      contentChanged = true;
+      return projected;
+    });
+    if (!contentChanged) return message;
+    changed = true;
+    return {
+      ...message,
+      content,
+      ...(retainedReasoning ? { [retainedReasoning.field]: retainedReasoning.text } : {}),
+    };
+  });
+  const joined = joinChatReasoningMessages(messages);
+  return changed || joined !== messages ? { body: { ...body, messages: joined } } : undefined;
+};

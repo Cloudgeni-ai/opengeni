@@ -951,8 +951,19 @@ converge to one creation plus one replay. Client abort is observer-only; server
 cancellation remains owned by the attempt/turn lifecycle.
 Worker dispatch performs catalog, identity, approval, input-schema,
 authorization, and argument-sensitive connector-policy prepare before writing
-the execution-start marker. Ask, Block, unavailable policy, and rejected frozen
-connector authority therefore settle before the provider executor can run.
+the execution-start marker. Block, unavailable policy, and rejected frozen
+connector authority settle before the provider executor can run. Ask creates a
+linked `waiting_for_approval` operation when the client acknowledges durable
+approval support. Its compact handle exits client polling; the InputWaitYield
+receipt fences the next model dispatch until the waiting row is durable. The
+worker stores programmatic reviews separately from open SDK call identities,
+then settles requires_action. Human decisions use the existing transactional
+approval event and workflow wake. A resumed attempt checks the exact logical
+turn, caller, tool schema/effect and account, and claims the stored arguments
+without changing the original attempt/catalog provenance. Old attempt tokens
+stay invalid. The current attempt can read the same-turn handle. Rejection or
+stale semantics produce a terminal nonexecution receipt; a crossed execution
+marker is never automatically replayed.
 After the marker, the prepared gateway call performs durable connector begin at
 the executor boundary and completes the same request as `completed`,
 `not_executed`, or `uncertain`. Model MCP and Codemode use this same canonical

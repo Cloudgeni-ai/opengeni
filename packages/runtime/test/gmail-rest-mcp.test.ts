@@ -351,7 +351,7 @@ describe("Gmail REST MCP adapter", () => {
     expect(providerAuthorizations).toBe(1);
   });
 
-  test("rejects sensitive label additions before any provider request", async () => {
+  test("recoverable Trash uses the ordinary governed label operation", async () => {
     let requests = 0;
     const gmail = server({
       fetchImpl: async () => {
@@ -363,9 +363,8 @@ describe("Gmail REST MCP adapter", () => {
       threadId: "t1",
       labelIds: ["TRASH"],
     })) as { isError?: boolean; content: Array<{ text: string }> };
-    expect(result.isError).toBe(true);
-    expect(result.content[0]!.text).toContain("TRASH and SPAM");
-    expect(requests).toBe(0);
+    expect(result.isError).not.toBe(true);
+    expect(requests).toBe(1);
   });
 
   test("creates a draft as base64url MIME but never sends it", async () => {

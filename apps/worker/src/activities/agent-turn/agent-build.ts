@@ -757,8 +757,8 @@ export async function buildTurnAgent(deps: BuildTurnAgentDeps) {
               // tool. Gateway Responses routes likewise expose ordinary function
               // tools, not OpenAI-hosted sandbox tools. Tell buildAgent to use
               // function apply_patch and wrap successful view_image results as
-              // typed input_image content. Chat wires have no proven typed image
-              // result transport and therefore receive no view_image tool.
+              // typed input_image content. The Chat adapter projects tool images
+              // into a labelled image envelope after the paired tool results.
               structuredToolTransport: structuredToolTransportForTurn(resolvedModel),
               ...(promptCacheKey ? { promptCacheKey } : {}),
             }

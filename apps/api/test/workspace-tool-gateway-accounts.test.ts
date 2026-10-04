@@ -19,6 +19,7 @@ const real = {
   settingsWithEnabledCapabilityMcpServers: core.settingsWithEnabledCapabilityMcpServers,
   availableMcpAccountBindings: core.availableMcpAccountBindings,
   buildConnectionTokenResolver: dbModule.buildConnectionTokenResolver,
+  listConnectorToolPermissionPolicies: dbModule.listConnectorToolPermissionPolicies,
 };
 const fixtures = new Map<
   Database,
@@ -57,6 +58,10 @@ mock.module("@opengeni/core", () => ({
 }));
 mock.module("@opengeni/db", () => ({
   ...dbModule,
+  listConnectorToolPermissionPolicies: (
+    ...args: Parameters<typeof real.listConnectorToolPermissionPolicies>
+  ) =>
+    fixtures.has(args[0]) ? Promise.resolve([]) : real.listConnectorToolPermissionPolicies(...args),
   buildConnectionTokenResolver: (...args: Parameters<typeof real.buildConnectionTokenResolver>) => {
     const fixture = fixtures.get(args[0]);
     if (!fixture) return real.buildConnectionTokenResolver(...args);

@@ -9,6 +9,12 @@ import type {
 } from "@opengeni/sdk";
 import { OpenGeniApiError } from "@opengeni/sdk";
 import { useCallback, useEffect, useRef, useState } from "react";
+import {
+  isTransientServiceFailure,
+  retryTransient,
+  TRANSIENT_RECONNECT_INTERVAL_MS,
+  TRANSIENT_RETRY_DELAYS_MS,
+} from "./transient-retry";
 
 export type NewSessionDraftEditable = Omit<SaveNewSessionDraftRequest, "expectedRevision">;
 
@@ -30,6 +36,8 @@ export type UseNewSessionDraftOptions = {
   resourceHydrationReady?: boolean;
   /** A create in flight owns the exact clicked snapshot; resume autosave on settlement. */
   suspendAutosave?: boolean;
+  /** Test seam for the quiet retry backoff and the background reconnect pace. */
+  transientRetry?: { delaysMs?: readonly number[]; reconnectIntervalMs?: number };
 };
 
 export type FlushedNewSessionDraft = {
@@ -49,6 +57,16 @@ export type UseNewSessionDraftResult = {
   saving: boolean;
   conflict: Error | null;
   error: Error | null;
+  /**
+   * `error` only says Opengeni was briefly unreachable (a deploy or database
+   * restart). Show the calm updating notice instead of the error; the hook
+   * keeps reconnecting in the background and clears this on success.
+   */
+  unavailable: boolean;
+  /** The latest failure, readable right after an awaited call (state lags a render). */
+  currentError: () => Error | null;
+  /** Mark Opengeni unreachable after a transient failure elsewhere in the send path. */
+  reportUnavailable: (cause: unknown) => boolean;
   flush: () => Promise<FlushedNewSessionDraft | null>;
   /** Send the visible snapshot, rebasing a stale draft revision without replacing the composer. */
   flushForSend: (snapshot?: NewSessionDraftEditable) => Promise<FlushedNewSessionDraft | null>;
@@ -85,11 +103,24 @@ export function useNewSessionDraft(options: UseNewSessionDraftOptions): UseNewSe
   const resourceHydrationReady = options.resourceHydrationReady ?? true;
   const suspendAutosave = options.suspendAutosave ?? false;
   const hydrateResources = options.hydrateResources;
+  const retryDelaysMs = options.transientRetry?.delaysMs ?? TRANSIENT_RETRY_DELAYS_MS;
+  const reconnectIntervalMs =
+    options.transientRetry?.reconnectIntervalMs ?? TRANSIENT_RECONNECT_INTERVAL_MS;
   const [draft, setDraft] = useState<NewSessionDraft | null>(null);
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
   const [conflict, setConflict] = useState<Error | null>(null);
-  const [error, setError] = useState<Error | null>(null);
+  const [error, setErrorState] = useState<Error | null>(null);
+  const errorRef = useRef<Error | null>(null);
+  const setError = useCallback((next: Error | null) => {
+    errorRef.current = next;
+    setErrorState(next);
+  }, []);
+  /**
+   * Composer value when a first load failed. A background reconnect may apply
+   * the remote draft only while the person has not edited since then.
+   */
+  const unloadedValueSignature = useRef<string | null>(null);
   const valueRef = useRef(options.value);
   valueRef.current = options.value;
   const onApplyRemoteRef = useRef(options.onApplyRemote);
@@ -123,7 +154,7 @@ export function useNewSessionDraft(options: UseNewSessionDraftOptions): UseNewSe
       setError(problem);
       return true;
     },
-    [setCurrentConflict],
+    [setCurrentConflict, setError],
   );
 
   const abortActiveRemoteReads = useCallback(() => {
@@ -149,7 +180,12 @@ export function useNewSessionDraft(options: UseNewSessionDraftOptions): UseNewSe
         return [resource];
       });
       const settled = await Promise.allSettled(
-        fileRefs.map((resource) => client.getFile(workspaceId, resource.fileId, { signal })),
+        fileRefs.map((resource) =>
+          retryTransient(() => client.getFile(workspaceId, resource.fileId, { signal }), {
+            signal,
+            delaysMs: retryDelaysMs,
+          }),
+        ),
       );
       if (generation !== targetGeneration.current || signal.aborted) return null;
       const files = settled.flatMap((result, index) => {
@@ -187,23 +223,35 @@ export function useNewSessionDraft(options: UseNewSessionDraftOptions): UseNewSe
         files,
       };
     },
-    [client, hydrateResources, resourceHydrationReady, workspaceId],
+    [client, hydrateResources, resourceHydrationReady, retryDelaysMs, workspaceId],
   );
 
-  const readRemote = useCallback(async (): Promise<ValidatedRemoteDraft | null> => {
-    const controller = new AbortController();
-    activeRemoteReads.current.add(controller);
-    const generation = targetGeneration.current;
-    try {
-      const remote = normalizeLegacyNewSessionDraft(
-        await client.getNewSessionDraft(workspaceId, { signal: controller.signal }),
-      );
-      if (generation !== targetGeneration.current || controller.signal.aborted) return null;
-      return await validateRemoteDraft(remote, generation, controller.signal);
-    } finally {
-      activeRemoteReads.current.delete(controller);
-    }
-  }, [client, validateRemoteDraft, workspaceId]);
+  const readRemote = useCallback(
+    async (quietRetries = true): Promise<ValidatedRemoteDraft | null> => {
+      const controller = new AbortController();
+      activeRemoteReads.current.add(controller);
+      const generation = targetGeneration.current;
+      try {
+        // A deploy or database restart answers 502/503 for a few seconds; the
+        // read is safe to repeat, so retry it quietly before reporting anything.
+        const remote = normalizeLegacyNewSessionDraft(
+          await retryTransient(
+            () => client.getNewSessionDraft(workspaceId, { signal: controller.signal }),
+            {
+              signal: controller.signal,
+              shouldContinue: () => generation === targetGeneration.current,
+              delaysMs: quietRetries ? retryDelaysMs : [],
+            },
+          ),
+        );
+        if (generation !== targetGeneration.current || controller.signal.aborted) return null;
+        return await validateRemoteDraft(remote, generation, controller.signal);
+      } finally {
+        activeRemoteReads.current.delete(controller);
+      }
+    },
+    [client, retryDelaysMs, validateRemoteDraft, workspaceId],
+  );
 
   const applyRemote = useCallback(
     (remote: ValidatedRemoteDraft): void => {
@@ -214,32 +262,37 @@ export function useNewSessionDraft(options: UseNewSessionDraftOptions): UseNewSe
       lastSavedSignature.current = draftSignature(remote.editable);
       passiveProjectionSignature.current = null;
       pendingHydratedBaselineGeneration.current = targetGeneration.current;
+      unloadedValueSignature.current = null;
       setDraft(remote.draft);
       setCurrentConflict(null);
       setError(null);
       restoreReadyFilesRef.current(remote.files);
       onApplyRemoteRef.current(remote.editable, remote.draft.selectionHistory);
     },
-    [setCurrentConflict],
+    [setCurrentConflict, setError],
   );
 
   const reload = useCallback(async (): Promise<void> => {
     if (!resourceHydrationReady) return;
     const generation = targetGeneration.current;
+    const valueAtStart = draftSignature(valueRef.current);
     loadingRef.current = true;
     setLoading(true);
     try {
       const remote = await readRemote();
       if (remote && generation === targetGeneration.current) applyRemote(remote);
     } catch (cause) {
-      if (generation === targetGeneration.current) setError(asError(cause));
+      if (generation === targetGeneration.current) {
+        if (!draftRef.current) unloadedValueSignature.current = valueAtStart;
+        setError(asError(cause));
+      }
     } finally {
       if (generation === targetGeneration.current) {
         loadingRef.current = false;
         setLoading(false);
       }
     }
-  }, [applyRemote, readRemote, resourceHydrationReady]);
+  }, [applyRemote, readRemote, resourceHydrationReady, setError]);
 
   // `reload` intentionally follows resource hydration callbacks, but those
   // callbacks can change identity when a catalog refresh publishes a new
@@ -262,6 +315,7 @@ export function useNewSessionDraft(options: UseNewSessionDraftOptions): UseNewSe
     lastSavedSignature.current = null;
     passiveProjectionSignature.current = null;
     pendingHydratedBaselineGeneration.current = null;
+    unloadedValueSignature.current = null;
     saveChain.current = Promise.resolve();
     if (autosaveTimer.current) clearTimeout(autosaveTimer.current);
     autosaveTimer.current = null;
@@ -277,7 +331,7 @@ export function useNewSessionDraft(options: UseNewSessionDraftOptions): UseNewSe
       if (autosaveTimer.current) clearTimeout(autosaveTimer.current);
       autosaveTimer.current = null;
     };
-  }, [abortActiveRemoteReads, setCurrentConflict, targetKey]);
+  }, [abortActiveRemoteReads, setCurrentConflict, setError, targetKey]);
 
   // Initial/target reads wait for the catalogs required to validate resources.
   // A later catalog refresh keeps this boolean true and therefore does not
@@ -302,10 +356,22 @@ export function useNewSessionDraft(options: UseNewSessionDraftOptions): UseNewSe
         }
         setSaving(true);
         try {
-          const saved = await client.saveNewSessionDraft(workspaceId, {
-            ...snapshot,
-            expectedRevision: current.revision,
-          });
+          const save = () =>
+            client.saveNewSessionDraft(workspaceId, {
+              ...snapshot,
+              expectedRevision: current.revision,
+            });
+          // Send's save is idempotent by construction: it writes one exact
+          // snapshot against one expected revision. If an unconfirmed attempt
+          // did commit, the repeat is a revision conflict that flushForSend
+          // already reconciles by rereading, so it can never apply twice.
+          const saved = force
+            ? await retryTransient(save, {
+                shouldContinue: () =>
+                  generation === targetGeneration.current && epoch === persistenceEpoch.current,
+                delaysMs: retryDelaysMs,
+              })
+            : await save();
           if (generation !== targetGeneration.current || epoch !== persistenceEpoch.current) {
             return null;
           }
@@ -337,7 +403,7 @@ export function useNewSessionDraft(options: UseNewSessionDraftOptions): UseNewSe
       );
       return operation;
     },
-    [client, setCurrentConflict, workspaceId],
+    [client, retryDelaysMs, setCurrentConflict, setError, workspaceId],
   );
 
   const valueSignature = draftSignature(options.value);
@@ -436,7 +502,7 @@ export function useNewSessionDraft(options: UseNewSessionDraftOptions): UseNewSe
       }
       return null;
     },
-    [persistSnapshot, readRemote, setCurrentConflict],
+    [persistSnapshot, readRemote, setCurrentConflict, setError],
   );
 
   const isCurrentSignature = useCallback(
@@ -568,7 +634,7 @@ export function useNewSessionDraft(options: UseNewSessionDraftOptions): UseNewSe
       );
       return await operation;
     },
-    [client, readRemote, setCurrentConflict, workspaceId],
+    [client, readRemote, setCurrentConflict, setError, workspaceId],
   );
 
   const resolveConflict = useCallback(
@@ -599,8 +665,63 @@ export function useNewSessionDraft(options: UseNewSessionDraftOptions): UseNewSe
         }
       }
     },
-    [persistSnapshot, readRemote, reload, setCurrentConflict],
+    [persistSnapshot, readRemote, reload, setCurrentConflict, setError],
   );
+
+  const unavailable = error !== null && conflict === null && isTransientServiceFailure(error);
+
+  /**
+   * Re-read after Opengeni was unreachable. The remote draft replaces the
+   * composer only when the first load never succeeded and nothing was typed
+   * since; otherwise it only becomes the save base, so local text survives and
+   * an unconfirmed save is reconciled by what the server actually holds.
+   */
+  const reconnect = useCallback(async (): Promise<void> => {
+    if (!resourceHydrationReady) return;
+    const generation = targetGeneration.current;
+    try {
+      // One attempt per tick: the loop itself is the retry.
+      const remote = await readRemote(false);
+      if (!remote || generation !== targetGeneration.current) return;
+      if (
+        !draftRef.current &&
+        unloadedValueSignature.current !== null &&
+        unloadedValueSignature.current === draftSignature(valueRef.current)
+      ) {
+        applyRemote(remote);
+        return;
+      }
+      unloadedValueSignature.current = null;
+      draftRef.current = remote.draft;
+      lastSavedSignature.current = draftSignature(remote.editable);
+      passiveProjectionSignature.current = null;
+      setDraft(remote.draft);
+      setError(null);
+    } catch (cause) {
+      if (generation === targetGeneration.current) setError(asError(cause));
+    }
+  }, [applyRemote, readRemote, resourceHydrationReady, setError]);
+  const reconnectRef = useRef(reconnect);
+  reconnectRef.current = reconnect;
+
+  useEffect(() => {
+    if (!unavailable) return;
+    let stopped = false;
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const tick = () => {
+      timer = setTimeout(() => {
+        if (stopped) return;
+        void reconnectRef.current().finally(() => {
+          if (!stopped) tick();
+        });
+      }, reconnectIntervalMs);
+    };
+    tick();
+    return () => {
+      stopped = true;
+      if (timer !== undefined) clearTimeout(timer);
+    };
+  }, [unavailable, reconnectIntervalMs, targetKey]);
 
   return {
     draft,
@@ -609,6 +730,16 @@ export function useNewSessionDraft(options: UseNewSessionDraftOptions): UseNewSe
     saving,
     conflict,
     error,
+    unavailable,
+    currentError: useCallback(() => errorRef.current, []),
+    reportUnavailable: useCallback(
+      (cause: unknown): boolean => {
+        if (!isTransientServiceFailure(cause)) return false;
+        setError(asError(cause));
+        return true;
+      },
+      [setError],
+    ),
     flush,
     flushForSend,
     isCurrentSignature,
@@ -619,7 +750,7 @@ export function useNewSessionDraft(options: UseNewSessionDraftOptions): UseNewSe
     clearError: useCallback(() => {
       setError(null);
       setCurrentConflict(null);
-    }, [setCurrentConflict]),
+    }, [setCurrentConflict, setError]),
   };
 }
 

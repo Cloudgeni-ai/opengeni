@@ -523,6 +523,9 @@ export function useGoogleDriveIntegration({
     footer,
     ...(stateNotice ? { notice: stateNotice } : {}),
     ...(extraAccounts.tools.length > 0 ? { tools: { tools: extraAccounts.tools } } : {}),
+    ...(extraAccounts.accounts[0]
+      ? { toolPermissions: { workspaceId, capabilityId: extraAccounts.accounts[0].capabilityId } }
+      : {}),
     // Google OAuth limited-use disclosures: rendered with every state so the
     // connect and publish affordances can point at them via aria-describedby.
     disclosures: [

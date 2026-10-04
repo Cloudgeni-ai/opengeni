@@ -1605,3 +1605,20 @@ Hosts, test doubles, and same-origin proxies must import
 configuration or contract header. Do not copy its string value: the revision is
 an executable compatibility boundary, and `getClientConfig()` intentionally
 fails closed when server and SDK revisions differ.
+
+### Action review facts
+
+`getToolActionReview(workspaceId, sessionId, approvalId)` returns version 1 facts
+for an exact prepared connector action: title, selected account/count, material
+effects, optional provider-sourced examples, bounded fields, reason, status and
+available actions. Use `sendApprovalDecision` for the existing authenticated
+human decision. Facts never grant execution authority.
+
+`getToolReviewDetails(workspaceId, sessionId, approvalId, { actionDigest, path,
+offset })` pages through the saved selection/values (25 rows per page). The
+reference is tied to the original action digest and requires the same session
+visibility permission; it never re-runs a search. Secret/write-only fields stay
+hidden. A missing legacy snapshot may return 404; other authorization or transport
+failures must not be interpreted as permission to execute. Responses are private
+and non-cacheable. Review states distinguish waiting, execution, cancellation,
+failure and uncertain outcome. Exact stored arguments are never client-editable.

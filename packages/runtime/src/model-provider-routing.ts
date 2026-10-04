@@ -11,6 +11,14 @@ import {
 } from "@openai/agents";
 import OpenAI, { APIError } from "openai";
 import { AnthropicMessagesModel } from "./anthropic-messages";
+import { projectChatToolImages } from "./chat-tool-images";
+import {
+  chatReasoning,
+  primaryChatChoice,
+  projectChatReasoning,
+  withChatReasoning,
+  type ChatReasoning,
+} from "./chat-reasoning";
 import { instrumentedModelFetch } from "./model-provider-client";
 import { CODEX_MODEL_ID_PREFIX } from "@opengeni/codex";
 import { XAI_SUBSCRIPTION_MODEL_ID_PREFIX } from "@opengeni/xai-subscription";
@@ -53,26 +61,49 @@ function chatCompletionFinishReason(value: unknown): unknown {
  */
 export class OpenGeniChatCompletionsModel extends OpenAIChatCompletionsModel {
   override async getResponse(request: ModelRequest): Promise<ModelResponse> {
-    const response = await super.getResponse(request);
+    const response = await super.getResponse(projectChatReasoning(projectChatToolImages(request)));
     if (isUnknownFinishReason(chatCompletionFinishReason(response.providerData))) {
       throw new UnknownModelFinishReasonError();
     }
-    return response;
+    return {
+      ...response,
+      output: withChatReasoning(
+        response.output,
+        chatReasoning(primaryChatChoice(response.providerData)?.message),
+      ),
+    };
   }
 
   override async *getStreamedResponse(request: ModelRequest): AsyncIterable<ResponseStreamEvent> {
     let finishReason: unknown;
-    for await (const event of super.getStreamedResponse(request)) {
+    let reasoning: ChatReasoning | undefined;
+    for await (const event of super.getStreamedResponse(
+      projectChatReasoning(projectChatToolImages(request)),
+    )) {
       if (event.type === "model") {
         const observed = chatCompletionFinishReason(event.event);
         if (observed !== undefined && observed !== null) {
           finishReason = observed;
         }
+        const delta = chatReasoning(primaryChatChoice(event.event)?.delta);
+        if (delta)
+          reasoning = {
+            field: delta.field,
+            text: (reasoning?.text ?? "") + delta.text,
+          };
       }
       if (event.type === "response_done" && isUnknownFinishReason(finishReason)) {
         throw new UnknownModelFinishReasonError();
       }
-      yield event;
+      yield event.type === "response_done"
+        ? {
+            ...event,
+            response: {
+              ...event.response,
+              output: withChatReasoning(event.response.output, reasoning),
+            },
+          }
+        : event;
     }
   }
 }

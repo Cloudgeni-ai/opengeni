@@ -1472,7 +1472,19 @@ describe("organization onboarding with real Better Auth / Hono / SDK / PostgreSQ
     expect(prompt).toContain(`Opengeni API: ${publicOrigin}`);
     await expectNoAxeViolations(page, "body");
 
+    // The setup chat opens ready in its workspace's composer, and starts on Send.
     await page.getByRole("button", { name: "Let Opengeni implement it" }).click();
+    await page.waitForURL(/\/workspaces\/[0-9a-f-]{36}\/sessions$/u, { timeout: 30_000 });
+    const composer = page.getByRole("textbox", { name: "Message the agent" });
+    await composer.waitFor({ timeout: 30_000 });
+    const composerDeadline = Date.now() + 30_000;
+    while (
+      (await composer.inputValue()) !== "I want to add AI agents to my product. Help me set it up."
+    ) {
+      if (Date.now() > composerDeadline) throw new Error("The setup chat was not ready to send");
+      await page.waitForTimeout(200);
+    }
+    await page.getByRole("button", { name: "Send message", exact: true }).click();
     await page.waitForURL(/\/workspaces\/[0-9a-f-]{36}\/sessions\/[0-9a-f-]{36}$/u, {
       timeout: 30_000,
     });

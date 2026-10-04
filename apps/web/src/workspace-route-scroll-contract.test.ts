@@ -15,6 +15,7 @@ const workspaceRouteContracts = {
     source: "routes/sessions-index.tsx",
   },
   workspaceSessionRoute: { kind: "self-managed", source: "routes/session.tsx" },
+  workspacePlaygroundRoute: { kind: "self-managed", source: "routes/playground.tsx" },
   workspaceVariableSetsRoute: {
     kind: "page",
     source: "routes/variable-sets.tsx",

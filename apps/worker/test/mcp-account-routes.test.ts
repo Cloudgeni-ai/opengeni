@@ -3,6 +3,10 @@ import { testSettings } from "@opengeni/testing";
 import type { McpConnectionAccountBinding } from "@opengeni/contracts";
 import { selectedSessionRemoteMcpTargets } from "@opengeni/runtime";
 import {
+  connectorActionPoliciesForAccountRoutes,
+  resolveConnectorActionPolicy,
+} from "@opengeni/db";
+import {
   accountRouteAuthNeededPayload,
   expandMcpAccountRoutes,
 } from "../src/activities/mcp-account-routes";
@@ -55,6 +59,43 @@ const settings = () =>
       },
     ],
   });
+
+test("account routes resolve canonical preferences only for the exact frozen connection", () => {
+  const preference = {
+    id: crypto.randomUUID(),
+    connectionId: personal.connectionId,
+    serverId: "mail",
+    toolName: "send",
+    actionName: "*",
+    policy: "allow" as const,
+    version: 1,
+  };
+  const snapshot = connectorActionPoliciesForAccountRoutes([preference], [personal, workspace]);
+  for (const binding of [personal, workspace]) {
+    const resolved = resolveConnectorActionPolicy(snapshot, {
+      connectionId: binding.connectionId,
+      serverId: binding.serverId,
+      toolName: "send",
+      actionName: "send",
+      defaultDecision: "ask",
+    });
+    expect(resolved).toMatchObject(
+      binding === personal
+        ? { managed: true, source: "explicit", entry: { policy: "allow", id: preference.id } }
+        : { managed: true, source: "default", decision: "ask" },
+    );
+  }
+  expect(
+    resolveConnectorActionPolicy(snapshot, {
+      connectionId: personal.connectionId,
+      serverId: workspace.serverId,
+      toolName: "send",
+      actionName: "send",
+      defaultDecision: "ask",
+    }),
+  ).toMatchObject({ source: "default", decision: "ask" });
+  expect(connectorActionPoliciesForAccountRoutes([preference], null)).toEqual([preference]);
+});
 
 test("auth recovery keeps exact execution alias and adds only frozen canonical identity", () => {
   const payload = {

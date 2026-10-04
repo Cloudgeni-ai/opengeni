@@ -2782,6 +2782,24 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     ]
   },
   {
+    "id": "getToolActionReview",
+    "method": "GET",
+    "path": "/v1/workspaces/:workspaceId/sessions/:sessionId/tool-reviews/:approvalId",
+    "request": [],
+    "response": [
+      "ToolActionReview"
+    ]
+  },
+  {
+    "id": "getToolReviewDetails",
+    "method": "GET",
+    "path": "/v1/workspaces/:workspaceId/sessions/:sessionId/tool-reviews/:approvalId/details",
+    "request": [],
+    "response": [
+      "ToolReviewDetailsPage"
+    ]
+  },
+  {
     "id": "getTranscriptionRecording",
     "method": "GET",
     "path": "/v1/workspaces/:workspaceId/transcription-recordings/:recordingId",

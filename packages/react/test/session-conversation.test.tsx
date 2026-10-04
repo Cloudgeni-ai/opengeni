@@ -483,7 +483,16 @@ test("complete conversation surfaces tool approvals and wires attachments when u
           turnId: "44444444-4444-4444-8444-444444444444",
           occurredAt: "2026-09-07T00:00:00Z",
           payload: {
-            approvals: [{ rawItem: { callId: "call-1", name: "deploy" }, name: "deploy" }],
+            approvals: [
+              {
+                rawItem: {
+                  callId: "call-1",
+                  name: "deploy",
+                  arguments: { environment: "test" },
+                },
+                name: "deploy",
+              },
+            ],
           },
         },
       ] as never,
@@ -510,7 +519,7 @@ test("complete conversation surfaces tool approvals and wires attachments when u
     await flush(200);
     expect(view.container.querySelector("[aria-label='Attach files']")).not.toBeNull();
     const approve = [...view.container.querySelectorAll("button")].find(
-      (node) => node.textContent === "Approve",
+      (node) => node.textContent === "Approve action",
     );
     expect(approve).toBeDefined();
     await actRun(() => approve!.click());

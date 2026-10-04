@@ -50,6 +50,7 @@ import {
 } from "@/lib/organization-invitation-continuation";
 import type { OrganizationInvitation } from "@/types";
 import { rememberPendingDeveloperSetup } from "@/lib/pending-developer-setup";
+import { rememberSignupUseCase } from "@/lib/signup-starter-set";
 
 export function OrganizationOnboardingPanel({
   onComplete,
@@ -288,6 +289,14 @@ export function OrganizationOnboardingPanel({
           ...(useCase ? { useCase } : {}),
         });
         onboardingJourney().completed("organization_name", "created");
+        // The new-chat page leads with suggestions for the answer.
+        if (useCase && activeEmail) {
+          rememberSignupUseCase({
+            account: activeEmail,
+            organizationId: created.organizationId,
+            useCase,
+          });
+        }
         if (useCase === "embed" && activeEmail) {
           rememberPendingDeveloperSetup({
             account: activeEmail,
