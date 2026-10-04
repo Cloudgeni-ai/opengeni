@@ -156,8 +156,12 @@ export function SessionComposer(props: SessionComposerProps) {
   // inside modals and overlays; the animated keyboard height does not.
   const keyboard = useAnimatedKeyboard();
   const floating = props.floating ?? false;
+  // Floating: iOS tucks the glass toward the home indicator like system bars;
+  // Android keeps clear of the gesture handle.
   const restingBottom = floating
-    ? Math.max(10, (props.bottomInset ?? 0) - 4)
+    ? ios
+      ? Math.max(10, (props.bottomInset ?? 0) - 4)
+      : (props.bottomInset ?? 0) + 8
     : Math.max(16, (props.bottomInset ?? 0) + 4);
   const offset = props.keyboardBottomOffset ?? 0;
   const liftWithKeyboard = props.liftWithKeyboard ?? true;
