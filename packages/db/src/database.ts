@@ -345,6 +345,11 @@ export async function withSandboxProviderReadLock<T>(
   });
 }
 
+/** Jittered reconnect delay in seconds after `retries` consecutive connection failures. */
+export function databaseReconnectBackoffSeconds(retries: number): number {
+  return (0.5 + Math.random() / 2) * Math.min(3 ** retries / 100, 2);
+}
+
 export function createDb(databaseUrl: string, options: CreateDbOptions = {}): DbClient {
   // `prepare: false` is REQUIRED for Azure Database for PostgreSQL Flexible
   // Server's transaction-pooling PgBouncer: postgres-js's default named prepared
@@ -360,6 +365,12 @@ export function createDb(databaseUrl: string, options: CreateDbOptions = {}): Db
     prepare: false,
     idle_timeout: 30,
     max_lifetime: 1800,
+    // postgres.js grows one pool-wide reconnect delay after every refused or
+    // reset connection (3^n / 100 s, up to 20 s) and queues queries behind it.
+    // After a restart or failover that left the server refusing connections
+    // for a while, requests then hung for up to 20 s after it was back. Keep
+    // the same jittered growth but cap it at 2 s.
+    backoff: databaseReconnectBackoffSeconds,
     // `connection` carries per-session Postgres STARTUP parameters. The exact
     // `application_name` is also the PgBouncer-compatible current-image receipt
     // for migration 0352's restrictive sessions policy; arbitrary custom startup

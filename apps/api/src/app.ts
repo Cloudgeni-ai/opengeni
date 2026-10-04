@@ -97,6 +97,8 @@ import {
   ApiHttpError,
   agentConfigHttpError,
   allowanceExhaustedHttpError,
+  DATABASE_UNAVAILABLE_ERROR_DETAIL_CODE,
+  databaseUnavailableHttpError,
   modelUnavailableHttpError,
   scheduledTaskTargetAccessHttpError,
   workspaceControlBusyHttpError,
@@ -1915,6 +1917,7 @@ export function createAppComposition(deps: AppDependencies): {
             : null) ??
           requestBodyValidationHttpError(rawError) ??
           invalidPathIdentifierHttpError(rawError, new URL(c.req.url).pathname) ??
+          databaseUnavailableHttpError(rawError, c.req.method) ??
           rawError);
     const compactionLock = codexCompactionV2ProviderLockedError(error);
     const apiError = error instanceof ApiHttpError ? error : null;
@@ -1923,6 +1926,9 @@ export function createAppComposition(deps: AppDependencies): {
       ? compactionLock.code
       : (apiError?.code ?? errorCodeForStatus(status));
     if (status >= 500) logHttpFailure(c, status, code, rawError);
+    if (apiError?.details?.code === DATABASE_UNAVAILABLE_ERROR_DETAIL_CODE) {
+      c.header("retry-after", "1");
+    }
     const envelope = ErrorEnvelope.parse({
       error: {
         status,

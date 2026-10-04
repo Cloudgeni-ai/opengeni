@@ -1481,6 +1481,20 @@ export function startSlackInteractionPump(
       for (let index = 0; index < maxPerTick; index += 1) {
         if (!(await drainSlackInteractionsOnce(deps))) break;
       }
+    } catch (error) {
+      // A failed claim (for example a database connection terminated during a
+      // deploy drain) leaves every durable interaction pending; the next tick
+      // retries it. It must never escape as an unhandled rejection, which the
+      // API fatal boundary turns into a process exit.
+      try {
+        deps.observability?.error("Slack interaction delivery claim failed", {
+          errorClass: error instanceof Error ? error.name : "SlackInteractionPumpError",
+          errorCode: safeErrorCode(error),
+          origin: "api",
+        });
+      } catch {
+        // An observer failure must not turn a recovered tick into a crash.
+      }
     } finally {
       running = false;
     }
