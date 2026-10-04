@@ -3,6 +3,8 @@ import {
   AGENT_CAPABILITY_IDS,
   AGENT_FUNCTION_TOOL_CAPABILITIES,
   AGENT_INSTRUCTIONS_MAX_CHARACTERS,
+  AGENT_RUNTIME_MECHANIC_TOOL_NAMES,
+  AGENT_SANDBOX_MECHANIC_TOOL_NAMES,
   AGENT_SKILL_MANAGE_TOOL_NAMES,
   AGENT_SKILL_READ_TOOL_NAMES,
   DEFAULT_FIRST_PARTY_MCP_TOOLS,
@@ -14,7 +16,8 @@ import {
   firstPartyMcpToolsForCapability,
 } from "../src/index";
 
-const RUNTIME_TOOLS = ["set_session_title", "wait_for_input", "command_wait", "command_read"];
+const RUNTIME_TOOLS = ["set_session_title", "wait_for_input"];
+const SANDBOX_TOOLS = ["command_wait", "command_read"];
 
 describe("agent capability registry", () => {
   test("every first-party MCP tool maps to exactly one known owner", () => {
@@ -22,7 +25,7 @@ describe("agent capability registry", () => {
     // Fails on any new unmapped catalog name and on any stale mapped name.
     expect(mapped).toEqual([...FIRST_PARTY_MCP_TOOL_NAMES].sort());
     expect(new Set(FIRST_PARTY_MCP_TOOL_NAMES).size).toBe(FIRST_PARTY_MCP_TOOL_NAMES.length);
-    const owners = new Set<string>([...AGENT_CAPABILITY_IDS, "runtime"]);
+    const owners = new Set<string>([...AGENT_CAPABILITY_IDS, "runtime", "sandbox"]);
     for (const [tool, owner] of Object.entries(FIRST_PARTY_MCP_TOOL_CAPABILITIES)) {
       expect({ tool, known: owners.has(owner) }).toEqual({ tool, known: true });
     }
@@ -34,6 +37,18 @@ describe("agent capability registry", () => {
       .map(([tool]) => tool)
       .sort();
     expect(runtime).toEqual([...RUNTIME_TOOLS].sort());
+  });
+
+  test("sandbox-derived tools are exactly the background-command readers", () => {
+    const sandbox = Object.entries(FIRST_PARTY_MCP_TOOL_CAPABILITIES)
+      .filter(([, owner]) => owner === "sandbox")
+      .map(([tool]) => tool)
+      .sort();
+    expect(sandbox).toEqual([...SANDBOX_TOOLS].sort());
+    expect([...AGENT_SANDBOX_MECHANIC_TOOL_NAMES].sort() as string[]).toEqual(
+      [...SANDBOX_TOOLS].sort(),
+    );
+    expect([...AGENT_RUNTIME_MECHANIC_TOOL_NAMES]).toEqual(["wait_for_input"]);
   });
 
   test("families land on their capability", () => {

@@ -1,8 +1,8 @@
 {
   "$schema": "https://mintlify.com/docs.json",
   "theme": "mint",
-  "name": "OpenGeni",
-  "description": "Add agents that finish real work to your product. OpenGeni is the open, self-hostable runtime for long-running AI agents.",
+  "name": "Opengeni",
+  "description": "Add agents that finish real work to your product. Opengeni is the open, self-hostable runtime for long-running AI agents.",
   "colors": {
     "primary": "#1f8a74",
     "light": "#9fe3d3",
@@ -48,7 +48,6 @@
           "integrate/existing-chat-ui",
           "integrate/proxy-from-any-backend",
           "integrate/production",
-          "integrate/session-history-import",
           "integrate/host-managed-integrations"
         ]
       },

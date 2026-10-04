@@ -10,18 +10,24 @@
 import {
   OPEN_WORKSTREAM_CONTROL_EVENT,
   SessionStatus as SessionStatusBadge,
+  SESSION_STATUS_META,
+  StatusDot,
 } from "@opengeni/react";
 import { ModelMark, modelDisplayName, type SessionEventsConnectionState } from "@opengeni/react";
 import type { SessionSummary } from "@opengeni/sdk";
 import { SiteOriginLink } from "@/components/session/site-origin-link";
 import {
+  ArchiveIcon,
+  ArchiveRestoreIcon,
   CalendarClockIcon,
   LockIcon,
+  MoreHorizontalIcon,
   PanelRightCloseIcon,
   PanelRightOpenIcon,
   PauseIcon,
   PencilIcon,
   PinIcon,
+  SearchIcon,
 } from "lucide-react";
 import { useCallback, useRef, useState, type ReactNode } from "react";
 
@@ -29,7 +35,16 @@ import { BillingClassMark, type BillingClass } from "@/components/billing-class-
 import { ConnectionPill } from "@/components/common";
 import { SessionAncestryBreadcrumb } from "@/components/session/subagents";
 import { Button } from "@/components/ui/button";
+import {
+  DropdownMenu,
+  DropdownMenuContent,
+  DropdownMenuItem,
+  DropdownMenuMeta,
+  DropdownMenuSeparator,
+  DropdownMenuTrigger,
+} from "@/components/ui/dropdown-menu";
 import { Skeleton } from "@/components/ui/skeleton";
+import { requestConversationFind } from "@/lib/conversation-find-event";
 import { sessionInputWait } from "@/lib/session-rail";
 import { useSessionStartup } from "@/lib/session-startup";
 import { isCodexProductModel } from "@/lib/session-model";
@@ -37,6 +52,7 @@ import {
   SESSION_TITLE_MAX_LENGTH,
   sessionDisplayTitle,
   useInlineRename,
+  type InlineRename,
 } from "@/lib/session-rename";
 import { pinLiveAnnouncement } from "@/lib/pin-live-announcement";
 import { labelEffort, type IntelligenceEffort } from "@/lib/session-tools";
@@ -56,6 +72,7 @@ export function SessionHeader({
   onToggleInspector,
   onRename,
   onPin,
+  onArchive,
   sandboxSlot,
   codexSlot,
   accessSlot,
@@ -65,6 +82,7 @@ export function SessionHeader({
   lastStartedLatencyMode,
   billingClass,
   modelLabel,
+  modelLogoUrl,
   policyLoading,
 }: {
   session: Session;
@@ -85,6 +103,8 @@ export function SessionHeader({
   onToggleInspector: () => void;
   onRename: (workspaceId: string, sessionId: string, title: string) => Promise<Session | null>;
   onPin: (session: Session, pinned: boolean) => Promise<Session | null>;
+  /** Archives or restores this root session. Absent hides the action. */
+  onArchive?: (session: Session, archived: boolean) => Promise<void>;
   /** The "Run on <machine>" control — a live component in production. */
   sandboxSlot?: ReactNode;
   /**
@@ -108,6 +128,7 @@ export function SessionHeader({
   billingClass?: BillingClass;
   /** Product model label (e.g. GPT-5.6 Luna). */
   modelLabel?: string;
+  modelLogoUrl?: string | undefined;
   /**
    * True while last-started policy and/or model catalog are still resolving.
    * Avoids flashing session defaults (wrong provider) before admitted truth.
@@ -136,6 +157,12 @@ export function SessionHeader({
     labelEffort(displayEffort),
     displayLatency === "fast" ? "Fast" : displayLatency === "priority" ? "Priority" : null,
   ].filter((bit): bit is string => Boolean(bit));
+  const rename = useInlineRename(session, onRename);
+  const pin = useSessionPinToggle(session, onPin);
+  const canArchive = Boolean(onArchive) && session.parentSessionId === null;
+  // Menu actions that move focus (rename input, find field) run after the menu
+  // has closed, so its focus restoration cannot steal focus back to the trigger.
+  const afterMenuClose = useRef<(() => void) | null>(null);
   const providerControl = isCodexRail ? (
     (codexSlot ?? (
       <BillingClassMark
@@ -147,7 +174,7 @@ export function SessionHeader({
   ) : (
     // The model maker's logo; the payment rail only when the maker has none.
     <ModelMark
-      model={modelId}
+      model={{ id: modelId, logoUrl: modelLogoUrl }}
       className="size-3.5 text-fg-muted"
       fallback={<BillingClassMark billingClass={resolvedBilling} className="size-3.5 shrink-0" />}
     />
@@ -157,8 +184,9 @@ export function SessionHeader({
     // bar was the light-theme fix — a near-white header on a near-white canvas
     // needs its own surface + a crisp divider to look intentional (and it lifts
     // the dark bar a touch above the canvas too).
-    <header className="flex min-h-14 min-w-0 shrink-0 flex-wrap items-center gap-1 border-b border-border bg-canvas/80 pb-1 pl-[max(clamp(0.5rem,2.5vw,1.25rem),env(safe-area-inset-left))] pr-[max(clamp(0.5rem,2.5vw,1.25rem),env(safe-area-inset-right))] pt-[max(0.375rem,env(safe-area-inset-top))] backdrop-blur supports-[backdrop-filter]:bg-canvas/65">
+    <header className="flex min-h-14 min-w-0 shrink-0 items-center gap-1 border-b border-border bg-canvas/80 pb-1 pl-[max(clamp(0.5rem,2.5vw,1.25rem),env(safe-area-inset-left))] pr-[max(clamp(0.5rem,2.5vw,1.25rem),env(safe-area-inset-right))] pt-[max(0.375rem,env(safe-area-inset-top))] backdrop-blur supports-[backdrop-filter]:bg-canvas/65 flex-wrap">
       {leading}
+      {/* The title takes every pixel the actions leave; it truncates last. */}
       <div className="flex min-w-20 flex-[1_1_5rem] flex-col justify-center gap-0.5">
         {/* Child sessions link back to the manager that spawned them, and a
             session links to its current schedules. */}
@@ -184,13 +212,21 @@ export function SessionHeader({
           ) : null}
         </div>
         <div className="flex min-w-0 items-center gap-1.5">
-          <SessionTitleEditor session={session} onRename={onRename} />
+          <SessionTitleEditor session={session} rename={rename} />
+          {/* Below lg the lifecycle is a dot beside the title; the full badge
+              and connection pill take over from lg. */}
+          <CompactSessionStatus
+            paused={session.effectiveControl.state !== "active"}
+            waiting={Boolean(waiting)}
+            status={status}
+            label={startupLabel}
+          />
           {accessSlot}
         </div>
       </div>
-      <div className="ml-auto flex min-w-0 max-w-full flex-wrap items-center justify-end gap-1.5 sm:gap-2">
+      <div className="ml-auto flex shrink-0 items-center justify-end gap-0.5 lg:min-w-0 lg:max-w-full lg:shrink lg:flex-wrap lg:gap-2">
         {/* Provider + model · effort · speed stay one cluster on the action side. */}
-        <div className="hidden min-w-0 max-w-[min(100%,18rem)] items-center gap-1.5 overflow-hidden text-2xs leading-4 text-fg-muted sm:flex md:max-w-[22rem]">
+        <div className="hidden min-w-0 max-w-[min(100%,18rem)] items-center gap-1.5 overflow-hidden text-2xs leading-4 text-fg-muted lg:flex xl:max-w-[22rem]">
           {policyLoading ? (
             <span
               className="inline-flex items-center gap-1.5"
@@ -214,9 +250,37 @@ export function SessionHeader({
             </span>
           )}
         </div>
-        {sandboxSlot}
-        <SessionPinButton session={session} onPin={onPin} />
-        <div className="hidden items-center gap-2 md:flex">
+        {/* Below lg, machine, find and pin live in the "…" menu. */}
+        <span className="hidden min-w-0 lg:contents">{sandboxSlot}</span>
+        <Button
+          type="button"
+          variant="ghost"
+          size="icon-sm"
+          onClick={requestConversationFind}
+          aria-label="Find in conversation"
+          data-conversation-find-trigger=""
+          title="Find in conversation (Ctrl/Cmd+F)"
+          className="hidden pointer-coarse:size-11 lg:inline-flex"
+        >
+          <SearchIcon className="size-4" />
+        </Button>
+        <Button
+          type="button"
+          variant={session.pinned ? "secondary" : "ghost"}
+          size="icon-sm"
+          aria-label={session.pinned ? "Unpin session" : "Pin session"}
+          aria-pressed={Boolean(session.pinned)}
+          aria-busy={pin.busy}
+          disabled={pin.busy}
+          className="hidden pointer-coarse:size-11 lg:inline-flex"
+          onClick={pin.toggle}
+        >
+          <PinIcon className={session.pinned ? "size-4 fill-current" : "size-4"} />
+        </Button>
+        <span className="sr-only" aria-live="polite" aria-atomic="true">
+          {pin.announcement}
+        </span>
+        <div className="hidden items-center gap-2 lg:flex">
           <ConnectionPill state={connectionState} />
           {/* Admission vs lifecycle are different axes, but showing both when
               control is Active (Running + Active) is redundant noise. When
@@ -238,15 +302,7 @@ export function SessionHeader({
             <WorkstreamControlIndicator session={session} />
           )}
         </div>
-        {/* Phones keep a compact, non-interactive lifecycle indicator; the
-            full badge and connection pill above take over from md. */}
-        <CompactSessionStatus
-          paused={session.effectiveControl.state !== "active"}
-          waiting={Boolean(waiting)}
-          status={status}
-          label={startupLabel}
-        />
-        <span className="sr-only md:hidden">Connection {connectionState}.</span>
+        <span className="sr-only lg:hidden">Connection {connectionState}.</span>
         {keyAuthRequired ? (
           <Button
             type="button"
@@ -274,12 +330,78 @@ export function SessionHeader({
             <PanelRightOpenIcon className="size-4" />
           )}
         </Button>
+        <DropdownMenu>
+          <DropdownMenuTrigger asChild>
+            <Button
+              type="button"
+              variant="ghost"
+              size="icon-sm"
+              aria-label="More session actions"
+              title="More"
+              className="pointer-coarse:size-11"
+            >
+              <MoreHorizontalIcon className="size-4" />
+            </Button>
+          </DropdownMenuTrigger>
+          <DropdownMenuContent
+            align="end"
+            className="w-56"
+            onCloseAutoFocus={(event) => {
+              const action = afterMenuClose.current;
+              if (!action) return;
+              afterMenuClose.current = null;
+              event.preventDefault();
+              action();
+            }}
+          >
+            <DropdownMenuItem
+              className="lg:hidden"
+              onSelect={() => {
+                afterMenuClose.current = requestConversationFind;
+              }}
+            >
+              <SearchIcon />
+              Find
+            </DropdownMenuItem>
+            <DropdownMenuItem
+              onSelect={() => {
+                afterMenuClose.current = rename.startEditing;
+              }}
+            >
+              <PencilIcon />
+              Rename
+            </DropdownMenuItem>
+            <DropdownMenuItem
+              className="lg:hidden"
+              disabled={pin.busy}
+              onSelect={() => pin.toggle()}
+            >
+              <PinIcon className={session.pinned ? "fill-current" : undefined} />
+              {session.pinned ? "Unpin" : "Pin"}
+            </DropdownMenuItem>
+            {sandboxSlot ? (
+              <div className="flex min-h-9 items-center px-2 empty:hidden lg:hidden">
+                {sandboxSlot}
+              </div>
+            ) : null}
+            {canArchive ? (
+              <>
+                <DropdownMenuSeparator />
+                <DropdownMenuItem onSelect={() => void onArchive?.(session, !session.archived)}>
+                  {session.archived ? <ArchiveRestoreIcon /> : <ArchiveIcon />}
+                  {session.archived ? "Restore" : "Archive"}
+                  {session.archived ? <DropdownMenuMeta>Archived</DropdownMenuMeta> : null}
+                </DropdownMenuItem>
+              </>
+            ) : null}
+          </DropdownMenuContent>
+        </DropdownMenu>
       </div>
     </header>
   );
 }
 
-/** Small-screen status: dot + short label, sized to wrap inside the header. */
+/** Small-screen status: a dot beside the title, named for assistive tech. */
 function CompactSessionStatus({
   paused,
   waiting,
@@ -295,10 +417,11 @@ function CompactSessionStatus({
     return (
       <span
         data-compact-session-status="paused"
-        className="inline-flex shrink-0 items-center gap-1 rounded-full border border-status-waiting/35 bg-status-waiting/10 px-1.5 py-px text-2xs font-medium text-fg md:hidden"
+        title="Paused"
+        className="inline-flex shrink-0 items-center lg:hidden"
       >
         <PauseIcon aria-hidden className="size-2.5 shrink-0 fill-current text-status-waiting" />
-        Paused
+        <span className="sr-only">Paused</span>
       </span>
     );
   }
@@ -306,21 +429,25 @@ function CompactSessionStatus({
     return (
       <span
         data-compact-session-status="waiting"
-        className="inline-flex shrink-0 items-center gap-1 rounded-full border border-border bg-surface px-1.5 py-px text-2xs font-medium text-fg-muted md:hidden"
+        title="Waiting"
+        className="inline-flex shrink-0 items-center lg:hidden"
       >
-        <span aria-hidden className="size-1 rounded-full bg-current" />
-        Waiting
+        <span aria-hidden className="size-2 rounded-full bg-status-waiting" />
+        <span className="sr-only">Waiting</span>
       </span>
     );
   }
+  const name =
+    status === "waiting_capacity" ? "Waiting" : (label ?? SESSION_STATUS_META[status].label);
   return (
-    <span data-compact-session-status={status} className="inline-flex shrink-0 md:hidden">
-      <SessionStatusBadge
-        status={status}
-        size="sm"
-        label={label}
-        {...(status === "waiting_capacity" ? { label: "Waiting" } : {})}
-      />
+    <span
+      data-compact-session-status={status}
+      data-status={status}
+      title={name}
+      className="inline-flex shrink-0 items-center lg:hidden"
+    >
+      <StatusDot status={status} className="size-2" />
+      <span className="sr-only">{name}</span>
     </span>
   );
 }
@@ -357,13 +484,11 @@ function WorkstreamControlIndicator({ session }: { session: Session }) {
   );
 }
 
-function SessionPinButton({
-  session,
-  onPin,
-}: {
-  session: Session;
-  onPin: (session: Session, pinned: boolean) => Promise<Session | null>;
-}) {
+/** Pin toggle shared by the desktop pin button and the phone "…" menu item. */
+function useSessionPinToggle(
+  session: Session,
+  onPin: (session: Session, pinned: boolean) => Promise<Session | null>,
+) {
   const [busy, setBusy] = useState(false);
   const [announcement, setAnnouncement] = useState("");
   const announcementSequence = useRef(0);
@@ -371,46 +496,29 @@ function SessionPinButton({
     announcementSequence.current += 1;
     setAnnouncement(pinLiveAnnouncement(message, announcementSequence.current));
   }, []);
-  return (
-    <>
-      <Button
-        type="button"
-        variant={session.pinned ? "secondary" : "ghost"}
-        size="icon-sm"
-        aria-label={session.pinned ? "Unpin session" : "Pin session"}
-        aria-pressed={Boolean(session.pinned)}
-        aria-busy={busy}
-        disabled={busy}
-        className="pointer-coarse:size-11"
-        onClick={() => {
-          const nextPinned = !session.pinned;
-          setBusy(true);
-          void onPin(session, nextPinned)
-            .then((updated) => {
-              announce(
-                updated
-                  ? `Session ${nextPinned ? "pinned" : "unpinned"}.`
-                  : `Session was not ${nextPinned ? "pinned" : "unpinned"}.`,
-              );
-            })
-            .catch(() => {
-              announce(`Session was not ${nextPinned ? "pinned" : "unpinned"}.`);
-            })
-            .finally(() => setBusy(false));
-        }}
-      >
-        <PinIcon className={session.pinned ? "size-4 fill-current" : "size-4"} />
-      </Button>
-      <span className="sr-only" aria-live="polite" aria-atomic="true">
-        {announcement}
-      </span>
-    </>
-  );
+  const toggle = useCallback(() => {
+    if (busy) return;
+    const nextPinned = !session.pinned;
+    setBusy(true);
+    void onPin(session, nextPinned)
+      .then((updated) => {
+        announce(
+          updated
+            ? `Session ${nextPinned ? "pinned" : "unpinned"}.`
+            : `Session was not ${nextPinned ? "pinned" : "unpinned"}.`,
+        );
+      })
+      .catch(() => {
+        announce(`Session was not ${nextPinned ? "pinned" : "unpinned"}.`);
+      })
+      .finally(() => setBusy(false));
+  }, [announce, busy, onPin, session]);
+  return { busy, toggle, announcement };
 }
 
 /**
  * The session header title — display by default, click the title (or the
- * always-visible pencil) to rename inline. Prefers the durable session.title
+ * hover pencil / "…" > Rename) to rename inline. Prefers the durable session.title
  * (agent- or user-set), falling back to the initial message / "Untitled
  * session" exactly like the rail list. Enter saves, Esc cancels, blur saves; an
  * empty/unchanged value is a no-op cancel. The live title (context.session)
@@ -419,12 +527,9 @@ function SessionPinButton({
  * reload. The shared `useInlineRename` hook keeps this behaviour identical to
  * the rail row's rename.
  */
-function SessionTitleEditor(props: {
-  session: Session;
-  onRename: (workspaceId: string, sessionId: string, title: string) => Promise<Session | null>;
-}) {
+function SessionTitleEditor(props: { session: Session; rename: InlineRename }) {
   const display = sessionDisplayTitle(props.session);
-  const rename = useInlineRename(props.session, props.onRename);
+  const rename = props.rename;
 
   if (rename.editing) {
     return (
@@ -467,16 +572,16 @@ function SessionTitleEditor(props: {
       >
         {display}
       </button>
-      {/* The pencil earns its pixels only when relevant: hidden at rest,
-          revealed on hover/focus, always present on coarse pointers where
-          hover doesn't exist. */}
+      {/* The pencil earns its pixels only when relevant: hidden at rest and
+          revealed on hover/focus. Touch screens rename by tapping the title
+          (or "…" > Rename), so the title keeps the row's width. */}
       <Button
         type="button"
         variant="ghost"
         size="icon-xs"
         onClick={rename.startEditing}
         aria-label="Rename session"
-        className="shrink-0 text-fg-subtle opacity-0 transition-opacity hover:text-fg focus-visible:opacity-100 group-hover/title:opacity-100 pointer-coarse:size-11 pointer-coarse:opacity-100"
+        className="shrink-0 text-fg-subtle opacity-0 transition-opacity hover:text-fg focus-visible:opacity-100 group-hover/title:opacity-100 pointer-coarse:hidden"
       >
         <PencilIcon className="size-3" />
       </Button>

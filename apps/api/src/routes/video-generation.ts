@@ -137,12 +137,12 @@ function videoGenerationFundingOptions(input: {
   return [
     {
       source: "opengeni_credits" as const,
-      label: "OpenGeni",
-      description: "Uses OpenGeni credits through the managed Gateway route.",
+      label: "Opengeni",
+      description: "Uses Opengeni credits through the managed Gateway route.",
       available: input.managedConfigured,
       unavailableReason: input.managedConfigured
         ? null
-        : "OpenGeni-managed video generation is not configured.",
+        : "Opengeni-managed video generation is not configured.",
     },
     {
       source: "supergrok_subscription" as const,

@@ -5,6 +5,7 @@ const CODES = [
   "api_startup_failed",
   "api_unhandled_rejection",
   "api_uncaught_exception",
+  "http_request_failed",
   "db_deadlock",
   "db_serialization_failure",
   "db_failure",
@@ -15,6 +16,7 @@ const CODES = [
 const STAGES = [
   "startup",
   "running",
+  "http.request",
   "session_events.append_generic",
   "session_events.append_for_turn_attempt",
   "preclaim",

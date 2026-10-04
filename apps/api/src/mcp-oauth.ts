@@ -79,7 +79,10 @@ export type McpOAuthRouteAccess = {
 };
 
 export function registerMcpOAuthRoutes(app: Hono, deps: ApiRouteDeps): void {
-  app.get("/.well-known/oauth-authorization-server", (c) => {
+  // RFC 8414 path-aware discovery: MCP clients (Claude among them) ask for the
+  // metadata at /.well-known/oauth-authorization-server/<resource path> first
+  // and give up on anything but JSON. Serve the same document at both.
+  const authorizationServerMetadata = (c: Context) => {
     requireMcpOAuthEnabled(deps);
     const issuer = mcpOAuthIssuer(deps);
     c.header("cache-control", "public, max-age=300");
@@ -97,7 +100,9 @@ export function registerMcpOAuthRoutes(app: Hono, deps: ApiRouteDeps): void {
         authorization_response_iss_parameter_supported: true,
       }),
     );
-  });
+  };
+  app.get("/.well-known/oauth-authorization-server", authorizationServerMetadata);
+  app.get("/.well-known/oauth-authorization-server/*", authorizationServerMetadata);
 
   app.get("/.well-known/oauth-protected-resource/*", (c) => {
     requireMcpOAuthEnabled(deps);
@@ -563,6 +568,7 @@ export function mcpOAuthConsentToolIdentities(catalog: ToolGatewayCatalog): Tool
 export function isMcpOAuthPublicProtocolPath(pathname: string): boolean {
   return (
     pathname === "/.well-known/oauth-authorization-server" ||
+    pathname.startsWith("/.well-known/oauth-authorization-server/") ||
     pathname.startsWith("/.well-known/oauth-protected-resource/") ||
     pathname === "/oauth/register" ||
     pathname === "/oauth/authorize" ||
@@ -864,7 +870,7 @@ export function renderMcpOAuthConsentPage(input: {
 <input type="hidden" name="request" value="${escapeHtml(input.requestToken)}">
 <label class="field"><span>Organization</span><select id="organization" name="organization" autocomplete="off">${accountOptions}</select></label>
 <label class="field"><span>Workspace</span><select id="workspace_id" name="workspace_id" autocomplete="off">${workspaceOptions}</select></label>
-<p class="note">The grant is limited to tools available in the workspace you authorize. OpenGeni rechecks live authority on every request.</p>
+<p class="note">The grant is limited to tools available in the workspace you authorize. Opengeni rechecks live authority on every request.</p>
 <div class="actions"><button class="approve" name="decision" value="approve">Authorize</button><button class="deny" name="decision" value="deny">Deny</button></div>
 </form>
 <script type="application/json" id="mcp-oauth-workspaces">${jsonForScript(workspacePayload)}</script>
@@ -967,7 +973,7 @@ function oauthDocument(input: {
   body: string;
   head?: string;
 }): string {
-  return `<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>${escapeHtml(input.title)}</title>${input.head ?? ""}<style>${OAUTH_PAGE_CSS}</style></head><body><main><p class="mark">OpenGeni</p><h1>${escapeHtml(input.heading)}</h1>${input.body}</main></body></html>`;
+  return `<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>${escapeHtml(input.title)}</title>${input.head ?? ""}<style>${OAUTH_PAGE_CSS}</style></head><body><main><p class="mark">Opengeni</p><h1>${escapeHtml(input.heading)}</h1>${input.body}</main></body></html>`;
 }
 
 const OAUTH_PAGE_CSS =

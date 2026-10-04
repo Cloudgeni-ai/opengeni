@@ -24,6 +24,8 @@ import {
   ensureManagedAccessForUser,
   getManagedUserProfilesByIds,
   ensureExternalIdentity,
+  ensureExternalWorkspaceMemberOnFirstUse,
+  USER_ISOLATION_WORKSPACE_SOURCE_PREFIX,
   lockExternalWorkspaceMembershipLifecycle,
   resolveExternalIdentityLink,
   managedPersonalWorkspacePermissions,
@@ -348,8 +350,29 @@ const externalActorContexts = new WeakMap<
     workspaceScope: OrganizationWorkspaceScope;
     permissionMode: "legacy" | "explicit";
     linked?: NonNullable<Awaited<ReturnType<typeof resolveExternalIdentityLink>>>;
+    /**
+     * Plain external mode (no native link, no service-initiator attribution):
+     * the only lane where a missing shared-workspace membership may be created
+     * on first use. See {@link provisionExternalMemberOnFirstUse}.
+     */
+    firstUseMembership: boolean;
   }
 >();
+
+/**
+ * Default permissions for a membership created on an external user's first
+ * request. Keep equal to `CONVERSATION_PERMISSIONS` in
+ * `packages/sdk/src/tenant-workspaces.ts`: conversation use only, no admin.
+ */
+export const EXTERNAL_FIRST_USE_MEMBER_PERMISSIONS: readonly Permission[] = [
+  "workspace:read",
+  "sessions:create",
+  "sessions:read",
+  "sessions:control",
+  "files:upload",
+  "files:read",
+  "mcp_servers:attach",
+];
 function attributionForExternalContext(context: AccessContext): ExternalActorAttribution {
   const external = externalActorContexts.get(context);
   if (!external) throw new Error("Verified external context required");
@@ -822,7 +845,11 @@ export async function requireAccessGrantAuthorization(
   permission?: Permission,
 ): Promise<AccessGrantAuthorization> {
   const context = await requireAccessContext(c, deps);
-  return await accessGrantAuthorization(context, deps, workspaceId, permission);
+  // Request entry only: a fresh re-check of a live connection never re-creates
+  // a membership that was removed while the connection was open.
+  return await accessGrantAuthorization(context, deps, workspaceId, permission, {
+    firstUseMembership: true,
+  });
 }
 
 /**
@@ -863,11 +890,84 @@ export async function requireWorkspaceSettingsGrant(
   });
 }
 
+/**
+ * Automatic membership for an organization key acting as an external user
+ * (`asUser`): the first request to a shared workspace in the key's own
+ * organization creates the user's missing membership with
+ * {@link EXTERNAL_FIRST_USE_MEMBER_PERMISSIONS}, then the request continues.
+ * It is exactly the authority of explicit `addExternalWorkspaceMember`: the
+ * calling key must hold `members:manage` (or legacy `workspace:admin`) plus
+ * every default permission, with the workspace in its scope, re-checked live
+ * under the organization membership fence together with the identity's own
+ * active status. Never for linked native identities, service-initiator
+ * requests, or any non-key principal (agent attempts, delegated/bearer user
+ * tokens, browser sessions), which never reach the external lane; never for
+ * Personal or SDK per-user workspaces; never when the request needs a
+ * permission outside the defaults. Never changes an existing membership.
+ * Returns true only when a membership now exists; any refusal leaves the
+ * ordinary 403 in place.
+ */
+async function provisionExternalMemberOnFirstUse(
+  deps: AccessDeps,
+  context: AccessContext,
+  external: NonNullable<ReturnType<typeof externalActorContexts.get>>,
+  workspaceId: string,
+  permission: Permission | undefined,
+): Promise<boolean> {
+  if (
+    !external.firstUseMembership ||
+    external.linked ||
+    // A request that would 403 on its own permission anyway creates nothing.
+    (permission !== undefined && !EXTERNAL_FIRST_USE_MEMBER_PERMISSIONS.includes(permission)) ||
+    context.subjectId !== external.identity.subjectId ||
+    !hasPermission(external.permissions, "members:manage", external.permissionMode) ||
+    EXTERNAL_FIRST_USE_MEMBER_PERMISSIONS.some(
+      (required) => !hasPermission(external.permissions, required, external.permissionMode),
+    )
+  )
+    return false;
+  const workspace = await requireWorkspace(deps.db, workspaceId).catch(() => null);
+  if (
+    !workspace ||
+    workspace.kind !== "shared" ||
+    workspace.accountId !== external.identity.accountId ||
+    // SDK per-user workspaces stay single-user: the SDK adds their owner.
+    workspace.externalSource?.startsWith(USER_ISOLATION_WORKSPACE_SOURCE_PREFIX)
+  )
+    return false;
+  try {
+    await ensureExternalWorkspaceMemberOnFirstUse(
+      deps.db,
+      {
+        organizationId: external.identity.accountId,
+        workspaceId,
+        actorSubjectId: `api_key:${external.keyId}`,
+      },
+      {
+        subjectId: external.identity.subjectId,
+        identity: { source: external.identity.source, externalId: external.identity.externalId },
+        permissions: EXTERNAL_FIRST_USE_MEMBER_PERMISSIONS,
+      },
+    );
+    return true;
+  } catch (error) {
+    // A changed/revoked key, narrowed policy or workspace scope keeps the
+    // ordinary denial. Anything else is an infrastructure failure.
+    if (
+      (error as { code?: unknown } | null)?.code === "42501" ||
+      nestedPostgresSqlState(error) === "42501"
+    )
+      return false;
+    throw error;
+  }
+}
+
 async function accessGrantAuthorization(
   context: AccessContext,
   deps: AccessDeps,
   workspaceId: string,
   permission?: Permission,
+  options: { firstUseMembership?: boolean } = {},
 ): Promise<AccessGrantAuthorization> {
   // No named-subject or organization-key fallback may widen verified OAuth
   // bounds. These grants came from this resolution's live native access only.
@@ -892,21 +992,32 @@ async function accessGrantAuthorization(
           message: "organization policy requires a shared workspace",
         });
     }
-    const grant: AccessGrant | null =
+    const personal =
       workspaceId ===
-      (external.linked?.personalWorkspaceId ?? external.identity.personalWorkspaceId)
-        ? {
-            accountId: external.identity.accountId,
-            workspaceId,
-            subjectId: context.subjectId,
-            principalKind: "human_session",
-            permissions: [...managedPersonalWorkspacePermissions],
-          }
-        : await withWorkspaceSubjectRls(deps.db, workspaceId, context.subjectId, (tx) =>
-            getWorkspaceGrant(tx, context.subjectId, workspaceId, {
-              principalKind: "human_session",
-            }),
-          );
+      (external.linked?.personalWorkspaceId ?? external.identity.personalWorkspaceId);
+    const membershipGrant = () =>
+      withWorkspaceSubjectRls(deps.db, workspaceId, context.subjectId, (tx) =>
+        getWorkspaceGrant(tx, context.subjectId, workspaceId, {
+          principalKind: "human_session",
+        }),
+      );
+    let grant: AccessGrant | null = personal
+      ? {
+          accountId: external.identity.accountId,
+          workspaceId,
+          subjectId: context.subjectId,
+          principalKind: "human_session",
+          permissions: [...managedPersonalWorkspacePermissions],
+        }
+      : await membershipGrant();
+    if (
+      !grant &&
+      !personal &&
+      options.firstUseMembership === true &&
+      (await provisionExternalMemberOnFirstUse(deps, context, external, workspaceId, permission))
+    ) {
+      grant = await membershipGrant();
+    }
     if (!grant || grant.accountId !== external.identity.accountId) {
       throw new HTTPException(403, { message: "external workspace access denied" });
     }
@@ -1290,19 +1401,28 @@ async function resolveDelegatedHumanAccessContext(
     throw new HTTPException(403, { message: "delegated native person authority is unavailable" });
   }
   const verifiedPermissions = [...proof.permissions];
+  // The person's own role expands as usual; the connection's access setting is
+  // literal, and so is the result: workspace:admin in a Custom setting is never
+  // a wildcard for the permissions the person left out.
   const intersectWorkspacePermissions = (permissions: Permission[]) =>
-    Permission.options.filter(
-      (permission) =>
-        hasPermission(permissions, permission) && hasPermission(verifiedPermissions, permission),
+    explicitPermissions(
+      Permission.options.filter(
+        (permission) =>
+          hasPermission(permissions, permission) &&
+          hasPermission(verifiedPermissions, permission, "explicit"),
+      ),
     );
   const accountGrant: AccountGrant = {
     ...accounts[0]!,
-    // Organization/billing authority must be literal on BOTH sides. A
-    // workspace:admin ceiling is never an account:admin or billing grant.
-    permissions: Permission.options.filter(
-      (permission) =>
-        hasLiteralPermission(accounts[0]!.permissions, permission) &&
-        hasLiteralPermission(verifiedPermissions, permission),
+    // Organization/billing authority must be literal on BOTH sides, and so is
+    // the result: a workspace:admin entry here never reads as account:admin or
+    // billing to a later permission check.
+    permissions: explicitPermissions(
+      Permission.options.filter(
+        (permission) =>
+          hasLiteralPermission(accounts[0]!.permissions, permission) &&
+          hasLiteralPermission(verifiedPermissions, permission),
+      ),
     ),
   };
   const workspaceGrants = live.workspaceGrants
@@ -1314,6 +1434,7 @@ async function resolveDelegatedHumanAccessContext(
     .map((grant) => ({
       ...grant,
       permissions: intersectWorkspacePermissions(grant.permissions),
+      permissionMode: "explicit" as const,
     }));
   // Proof-bearing authority cannot be changed in place and then reused as if
   // the resolver had authenticated a different subject, scope or ceiling.
@@ -1440,6 +1561,7 @@ async function apiKeyAccessContext(
       workspaceScope: apiKey.workspaceScope ?? { kind: "all" },
       permissionMode: apiKey.permissionMode ?? "legacy",
       ...(linked ? { linked } : {}),
+      firstUseMembership: selection.mode !== "linked_native" && !linked && !service,
     });
     if (organizationApiKeyAccess(apiKey.permissions) === "developer_setup") {
       developerSetupApiKeyContexts.add(context);

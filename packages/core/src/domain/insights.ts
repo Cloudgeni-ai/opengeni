@@ -228,7 +228,7 @@ export function insightsSessionLabel(input: {
 }
 
 export function insightsProjectLabel(input: {
-  kind: "project" | "other" | "unfiled" | "unavailable";
+  kind: "project" | "other" | "unfiled" | "unavailable" | "deleted";
   name: string | null;
   projects: number;
 }): string {
@@ -241,6 +241,8 @@ export function insightsProjectLabel(input: {
       return "No project";
     case "unavailable":
       return "Root session not visible";
+    case "deleted":
+      return "Deleted chats";
   }
 }
 
@@ -655,6 +657,7 @@ export async function getWorkspaceInsights(
     priorInputTokens,
     priorTotalTokens,
     priorCacheHitPct: cacheHitPct(priorCachedTokens, priorCacheInputTokens),
+    priorCacheInputTokens,
     priorCalls,
     goalsActive: depth.goalsActive,
     goalsCompleted: depth.goalsCompleted,

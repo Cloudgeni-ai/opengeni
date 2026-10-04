@@ -23,7 +23,7 @@ function session(capabilities: AgentCapabilities = "all", overrides: Partial<Ses
   const agent = resolveAgentConfig({
     creator: "api",
     request: { capabilities },
-    deployment: { unavailable: {}, admissionEnabled: true, defaultForNewSessions: false },
+    deployment: { unavailable: {} },
     workspace: { defaults: null, humanInputEnabled: true },
     goal: false,
   }).config!;
@@ -296,13 +296,27 @@ describe("server effectiveTools environment projection", () => {
 
   test("explicit empty bundles differ from the worker's omitted bundled defaults", () => {
     const absent = sessionEffectiveToolProjectionInput(
-      session("none", { bundledSkillIds: undefined }),
+      session("all", { bundledSkillIds: undefined }),
       [],
       context(),
     );
-    const empty = sessionEffectiveToolProjectionInput(session("none"), [], context());
+    const empty = sessionEffectiveToolProjectionInput(session("all"), [], context());
     expect(absent.environment.hasSkills).toBe(true);
     expect(empty.environment.hasSkills).toBe(false);
+  });
+
+  test('"none" without an explicit bundle list has no bundled guides', () => {
+    const omitted = projected(session("none", { bundledSkillIds: undefined }));
+    expect(omitted.effectiveTools!.tools.map((tool) => tool.name)).not.toContain("skill_read");
+    expect(
+      sessionEffectiveToolProjectionInput(
+        session("none", { bundledSkillIds: undefined }),
+        [],
+        context(),
+      ).environment.hasSkills,
+    ).toBe(false);
+    const listed = projected(session("none", { bundledSkillIds: ["builtin:opengeni-help"] }));
+    expect(listed.effectiveTools!.tools.map((tool) => tool.name)).toContain("skill_read");
   });
 
   test("model flags and workspace human-input switch narrow the all config", () => {
@@ -467,12 +481,39 @@ describe("server effectiveTools environment projection", () => {
   });
 
   test("configured recovery tools exist even with no first-party selection", () => {
-    const row = session("none", { firstPartyMcpTools: [] });
+    const row = session("none", { firstPartyMcpTools: [], sandboxBackend: "local" });
     const names = projected(row).effectiveTools!.tools.map((tool) => tool.name);
     expect(names).toContain("opengeni__wait_for_input");
     expect(names).toContain("opengeni__command_read");
     expect(names).toContain("opengeni__command_wait");
     expect(names).not.toContain("opengeni__set_session_title");
+  });
+
+  test("background-command tools need a sandbox or Connected Machine", () => {
+    for (const capabilities of ["none", "all"] as const) {
+      const detached = projected(session(capabilities, { sandboxBackend: "none" }));
+      const detachedNames = detached.effectiveTools!.tools.map((tool) => tool.name);
+      expect(detachedNames).toContain("opengeni__wait_for_input");
+      expect(detachedNames).not.toContain("opengeni__command_read");
+      expect(detachedNames).not.toContain("opengeni__command_wait");
+
+      const managed = projected(session(capabilities, { sandboxBackend: "local" }));
+      expect(managed.effectiveTools!.tools).toContainEqual(
+        expect.objectContaining({ name: "opengeni__command_read", capability: "sandbox" }),
+      );
+      expect(managed.effectiveTools!.tools.map((tool) => tool.name)).toContain(
+        "opengeni__command_wait",
+      );
+
+      const sandboxId = "44444444-4444-4444-8444-444444444444";
+      const machine = projected(
+        session(capabilities, { sandboxBackend: "none", activeSandboxId: sandboxId }),
+        context({ activeSandboxBackends: new Map([[sandboxId, "selfhosted"]]) }),
+      );
+      const machineNames = machine.effectiveTools!.tools.map((tool) => tool.name);
+      expect(machineNames).toContain("opengeni__command_read");
+      expect(machineNames).toContain("opengeni__command_wait");
+    }
   });
 
   test("code search follows frozen session, deployment key, workspace off and sandbox", () => {

@@ -28,6 +28,7 @@ export {
   type ChatSessionListOptions,
   type ChatSnapshot,
   type ChatTarget,
+  type WorkspaceTarget,
   type ChatToolStatus,
   type OpenGeniOptions,
 } from "./types";

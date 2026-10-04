@@ -69,11 +69,12 @@ export function projectClientModel(model: ConfiguredModel): ClientModel {
               ? { provider: "supergrok", providerLabel: "SuperGrok" }
               : source === "workspace_gateway"
                 ? { provider: "workspace-gateway", providerLabel: "Your Gateway" }
-                : { provider: "opengeni", providerLabel: "OpenGeni" };
+                : { provider: "opengeni", providerLabel: "Opengeni" };
   return ClientModel.parse({
     id: model.id,
     label: model.label,
     ...(model.shortLabel ? { shortLabel: model.shortLabel } : {}),
+    ...(model.logoUrl ? { logoUrl: model.logoUrl } : {}),
     ...publicProvider,
     ...(source === undefined ? {} : { source }),
     api: model.api,

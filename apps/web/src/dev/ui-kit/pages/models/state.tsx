@@ -300,13 +300,13 @@ export function modelChoices(
       available: true,
     });
   }
-  for (const model of modelCatalog.filter((each) => each.payer === "OpenGeni credits")) {
+  for (const model of modelCatalog.filter((each) => each.payer === "Opengeni credits")) {
     choices.push({
       id: model.id,
       label: model.label,
       payer: model.payer,
       description: model.description,
-      group: "OpenGeni credits",
+      group: "Opengeni credits",
       available: model.available,
       unavailableReason: model.unavailableReason,
     });

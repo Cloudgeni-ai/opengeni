@@ -52,6 +52,7 @@ import {
   recordSessionEventAppendPhase,
   recordSessionEventPublishLatency,
   recordTurnStartupPhase,
+  measureTurnStartupPhase,
   recordTurnStartupMilestone,
   turnLifecycleMetricsFor,
 } from "../../observability-metrics";
@@ -59,6 +60,7 @@ import { createTurnCredentialLeases } from "./credential-leases";
 import { createTurnMediaArtifacts } from "./media-artifacts";
 import { readTurnExecutionPolicyV1 } from "@opengeni/contracts";
 import { turnCredentialRestriction } from "./credential-restriction";
+import { readProviderRecoveryObservation } from "./provider-recovery-metrics";
 
 import {
   credentialSubjectIdForTurnInitiator,
@@ -186,8 +188,17 @@ export async function claimTurnAttempt(deps: ClaimTurnDeps): Promise<ClaimTurnOu
     acknowledgeLostAttemptOwnership,
   } = deps;
 
-  const deploymentCatalogSettings = (await resolveCatalogSettings(db, catalogSourceSettings))
-    .settings;
+  const deploymentCatalogSettings = (
+    await measureTurnStartupPhase(
+      observability,
+      {
+        phase: "claim_catalog_read",
+        provider: "unresolved",
+        backend: "unresolved",
+      },
+      () => resolveCatalogSettings(db, catalogSourceSettings),
+    )
+  ).settings;
 
   const validatePendingSystemUpdateAuthority: NonNullable<
     ClaimSessionWorkForAttemptInput["validatePendingSystemUpdateAuthority"]
@@ -199,16 +210,25 @@ export async function claimTurnAttempt(deps: ClaimTurnDeps): Promise<ClaimTurnOu
       sessionId: input.sessionId,
       update,
     });
-  const claim = await claimSessionWorkForAttempt(db, input.workspaceId, {
-    filesystemDiscontinuityProtocol: FILESYSTEM_DISCONTINUITY_PROTOCOL,
-    sessionId: input.sessionId,
-    workflowId: input.workflowId,
-    workflowRunId: input.workflowRunId,
-    attemptId: input.attemptId,
-    dispatchId,
-    trigger: input.trigger,
-    validatePendingSystemUpdateAuthority,
-  });
+  const claim = await measureTurnStartupPhase(
+    observability,
+    {
+      phase: "claim_atomic",
+      provider: "unresolved",
+      backend: "unresolved",
+    },
+    () =>
+      claimSessionWorkForAttempt(db, input.workspaceId, {
+        filesystemDiscontinuityProtocol: FILESYSTEM_DISCONTINUITY_PROTOCOL,
+        sessionId: input.sessionId,
+        workflowId: input.workflowId,
+        workflowRunId: input.workflowRunId,
+        attemptId: input.attemptId,
+        dispatchId,
+        trigger: input.trigger,
+        validatePendingSystemUpdateAuthority,
+      }),
+  );
   if (claim.action === "unclaimed") {
     control.activityStatus = "unclaimed";
     return { exit: { status: "unclaimed", reason: claim.reason } };
@@ -218,6 +238,7 @@ export async function claimTurnAttempt(deps: ClaimTurnDeps): Promise<ClaimTurnOu
   attempt.dispatchId = dispatchId;
   attempt.executionGeneration = turn.executionGeneration;
   attempt.providerRecoveryCount = providerRecoveryCountFromMetadata(turn.metadata);
+  attempt.providerRecoveryObservation = readProviderRecoveryObservation(turn.metadata ?? {});
   const authRecovery = turn.metadata?.claudeAuthRecovery;
   attempt.claudeAuthRecovery =
     authRecovery &&
@@ -247,25 +268,42 @@ export async function claimTurnAttempt(deps: ClaimTurnDeps): Promise<ClaimTurnOu
   // Therefore every failure with no turnId came from the one atomic claim
   // transaction and can be classified without conflating ordinary runtime
   // or transport failures with admission failures.
-  const session = await requireSession(db, input.workspaceId, input.sessionId);
   let installedApiIntegrations: readonly ApiIntegrationRuntime[] = [];
   const credentialSubjectId = credentialSubjectIdForTurnInitiator(turn);
   const fileAuthoritySubjectId = turn.initiatingHumanSubjectId ?? null;
-  const mcpSettings = await settingsWithEnabledCapabilityMcpServers(
-    db,
-    input.workspaceId,
-    deploymentCatalogSettings,
-    {
-      ...(credentialSubjectId
-        ? { subjectId: credentialSubjectId }
-        : {
-            personalConnectionDelegations: turn.personalConnectionDelegations,
-          }),
-      onResolvedApiIntegrations: (integrations) => {
-        installedApiIntegrations = integrations;
+  // Both are fresh scoped reads on the root pool after exact claim ownership.
+  // Neither consumes the other's result; retain the capability helper's own
+  // subject/delegation authority and await both before credential/policy gates.
+  const [session, mcpSettings] = await Promise.all([
+    measureTurnStartupPhase(
+      observability,
+      {
+        phase: "claim_session_read",
+        provider: "unresolved",
+        backend: turn.sandboxBackend,
       },
-    },
-  );
+      () => requireSession(db, input.workspaceId, input.sessionId),
+    ),
+    measureTurnStartupPhase(
+      observability,
+      {
+        phase: "claim_capability_settings",
+        provider: "unresolved",
+        backend: turn.sandboxBackend,
+      },
+      () =>
+        settingsWithEnabledCapabilityMcpServers(db, input.workspaceId, deploymentCatalogSettings, {
+          ...(credentialSubjectId
+            ? { subjectId: credentialSubjectId }
+            : {
+                personalConnectionDelegations: turn.personalConnectionDelegations,
+              }),
+          onResolvedApiIntegrations: (integrations) => {
+            installedApiIntegrations = integrations;
+          },
+        }),
+    ),
+  ]);
   // Read the active-credential flag once for the runtime capability overlay.
   // Accepted billing/provider identity comes from the turn policy below,
   // never from this mutable health snapshot.
@@ -355,6 +393,11 @@ export async function claimTurnAttempt(deps: ClaimTurnDeps): Promise<ClaimTurnOu
       latencyMode: turn.latencyMode,
     },
   );
+  // The durable same-turn recovery lane owns provider retries. Hidden SDK
+  // retries multiply that budget and keep the UI looking active during backoff.
+  // Apply before configuring/resolving clients so main, compaction and title
+  // requests all share this policy; standalone runtime consumers keep theirs.
+  capabilitySettings = { ...capabilitySettings, openaiMaxRetries: 0 };
   runtime.configure(capabilitySettings);
   const verifiedExecutionPolicy = assertTurnExecutionPolicyMatchesConfigV1(
     capabilitySettings,
@@ -366,6 +409,10 @@ export async function claimTurnAttempt(deps: ClaimTurnDeps): Promise<ClaimTurnOu
     },
   );
   const turnExecutionPolicy = verifiedExecutionPolicy.policy;
+  attempt.modelMetricRoute = {
+    provider: turnExecutionPolicy.providerId,
+    model: turnExecutionPolicy.productModelId,
+  };
   assertSessionAllowsProductModel(session, turnExecutionPolicy.productModelId);
   const billingIdentity = turnExecutionPolicyBillingIdentity(turnExecutionPolicy);
   billingState.isExternallyBilledTurn = billingIdentity.externallyBilled;
@@ -426,6 +473,7 @@ export async function claimTurnAttempt(deps: ClaimTurnDeps): Promise<ClaimTurnOu
         billingState.chargesOpenGeniCredits,
         billingState.countsTowardTokenCap,
         turn.initiatingHumanSubjectId,
+        turnExecutionPolicy.productModelId,
       ),
       cancellationSignal,
       undefined,

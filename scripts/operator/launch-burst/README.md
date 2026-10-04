@@ -4,6 +4,8 @@
 both staging gates and a **new capacity-parent message authorizing the exact wave**.
 No tiny smoke, signup, model prompt, session, sandbox create/shell, server allowlist
 change, CI dispatch, deployment, or production action is part of preparation.
+The paced enrollment path below is source preparation only: no current gate
+clearance or authority to enroll humans or release prompts is established here.
 
 ## Reused source paths
 
@@ -41,6 +43,8 @@ First authenticate/onboard and verify defaults, then release all ready prompt
 creates together. `promptLaunchSpreadMs` reports actual client launch skew;
 record whether it is below one second, rather than merely calling it simultaneous.
 Failed signup/default preparation stays in the original all-user denominator.
+The fresh waves measure 50/100 simultaneous genuine fresh-user **first turns**,
+not simultaneous signup throughput. Existing-user preparation remains concurrent.
 
 Fresh flow: public `/v1/auth/sign-up/email` → actual delivered verification link →
 public legacy sign-in or isolated session-set transaction/select → verified
@@ -53,6 +57,47 @@ signup request (one-second clock-skew tolerance). Missing evidence fails closed.
 The runner neither grants credits nor saves defaults nor connects subscriptions.
 Collect normal verified-signup trial ledger provenance through Monitoring where
 available; model-catalog evidence alone is not a claim about the grant amount.
+
+### Serial enrollment, concurrent first turns
+
+Fresh enrollment completes one entire verification/auth/onboarding/default pipeline
+at a time. `freshEnrollmentGapMs` defaults to 3100 and cannot be less than 3100.
+The gap starts **after the prior pipeline settles**, including failures, not after
+its signup request. This preserves at least 3100 ms between consecutive users'
+signup, verification and signin routes even with variable mailbox latency.
+The locked Better Auth database limiter is **inactivity-reset**, not rolling-window:
+each admitted request refreshes the per-client/per-path `lastRequest`, and a
+20-request counter resets only after **more than 60 seconds without admission**.
+Uninterrupted 3100 ms spacing alone therefore rejects the 21st enrollment.
+`freshEnrollmentBatchSize` defaults to 20 and cannot exceed 20. After every batch
+of settled pipeline **attempts**, `freshEnrollmentResetCooldownMs` replaces the
+ordinary gap with at least 61000 ms after settlement (default 61000). Failed or
+partial enrollments consume slots too; failures never reset the batch count.
+A slow pipeline does not substitute for this post-settlement cooldown. These
+counts do not reserve capacity against unrelated traffic sharing the same egress
+address: HTTP 429 remains an honest failure, with no retry or bucket evasion.
+The per-user signup deadline starts after pacing; waiting in the cohort queue
+does not consume that user's deadline. STOP and gate expiry are checked during
+pacing/mailbox waits and before release. A cutoff or expired gate blocks the whole
+dispatch, including already-ready users; failures remain in the original denominator.
+
+No sessions or turns are created during enrollment. Human cookies stay only in
+isolated in-memory jars. Once enrollment settles, the same exact dual-gate
+authorization is revalidated immediately before releasing ordinary concurrent
+session POSTs with initial prompts and fresh model/effort omitted. There is no
+earlier prompt, warm-up, credential export, persisted enrollment, or resume path.
+
+The earliest-to-final enrollment span has a default pacing floor of **267.7 seconds
+for 50 users / 538.5 seconds for 100**: 49/99 ordinary 3.1-second gaps, replacing
+two/four gaps with 61-second resets. Add the actual complete pipelines, including
+mail delivery and onboarding. This is not a signup-latency baseline or prompt TTFT.
+The aggregate `enrollment` windows/duration/total pacing wait, `ordinaryWaitMs`,
+`resetWaitMs`, and per-user `enrollmentStartedAt`, `enrollmentSettledAt`,
+`enrollmentPacingWaitMs`, `enrollmentResetWaitMs` are content-free
+and separate from `signupMs` and prompt latency. A slow cohort can exceed the real
+maximum 30-minute authorization TTL and create **zero sessions** despite partial
+account enrollment. That is an honest blocked wave, not grounds to extend the
+gate, drop users, persist cookies, retry, or dispatch a smaller unauthorized wave.
 
 ## Offline commands (safe now)
 
@@ -69,6 +114,12 @@ Default execution prints only intent, its canonical SHA-256, and zero remote
 requests. It does not inspect cohort credentials, invoke mailbox/checkpoint/stop
 callbacks, or fetch configuration. Offline fixtures inject an in-memory transport;
 they do not start even a loopback app/Temporal/DB/model/sandbox service.
+Rate regressions invoke the API's locked Better Auth `onRequestRateLimit` database
+consumer with the actual source rules, a pure memory adapter and virtual time;
+global fetch/preconnect are forbidden. They prove the old 21st-admission failure,
+the strict 60-second idle boundary and admitted 50/100 legacy/dual/broker cohorts.
+Session-set transactions keep their isolated protocol fixtures; they are not
+misrepresented as Better Auth HTTP limiter routes.
 
 ## Gated execution recipe — DO NOT RUN yet
 
@@ -78,6 +129,10 @@ on staging, and Monitoring confirms Launch dashboard LIVE on staging. Shape chec
 cannot authenticate those external confirmations; the parent's independently held
 token plus immutable message/confirmation references are operator evidence, not
 automatic gate detection. There is no approval generator in the harness.
+For a fresh wave, the **new** exact-source/intent/cohort authorization must cover
+both serial enrollment and concurrent first-turn dispatch. Its maximum 30-minute
+TTL includes both phases; all gap, batch and cooldown fields are bound by the
+canonical intent digest. The runner cannot reauthorize or extend an expired gate.
 
 Keep private inputs/results outside the repository. Cohort schema:
 
@@ -152,7 +207,8 @@ release, run ID and UTC windows with the result.
   Acceptance→latest-resume observations from existing traffic are not a burst
   baseline. Optional event-time receipt→first-output is separately named.
 - Signup: monotonic start of actual signup/auth preparation through completed
-  onboarding. It is separate from prompt TTFT and barrier wait; failures have null
+  onboarding, excluding enrollment pacing and the cohort queue. It is separate
+  from prompt TTFT and barrier wait; failures have null
   signup latency, not zero. Exact first-turn/attempt IDs and correlation IDs are
   retained without text, tool output, emails, cookies, verification URLs or secrets.
 - Sandbox: client observation and server duration of `sandbox_establish` where
@@ -237,12 +293,15 @@ and verifies physical scale-back/provider settlement separately.
 
 ## Known execution limits
 
-- Public auth uses real ingress/client-IP rate limits. Current source permits 20
-  signups/minute per client; one egress IP cannot truthfully emulate 50–100 distinct
-  client IPs. Do not spoof forwarding headers or relax auth limits. The parent must
-  use already-authorized genuine client topology, or explicitly interpret a
-  single-egress wave as a throttling test, not 99% launch acceptance. This runner is
-  one process/egress; distributed signup orchestration is not implemented here.
+- Public auth uses real ingress/client-IP rate limits. Current source
+  (`apps/api/src/auth/managed-auth-rate-limits.ts`) permits 20 signup, verification
+  and legacy signin calls per minute per client per route. Serial complete
+  pipelines plus at least 3100 ms after settlement pace this one-process/egress
+  enrollment; they do not emulate 50–100 client IPs or benchmark distributed signup
+  throughput. Other traffic sharing ingress limits can still cause honest 429
+  failures. Do not spoof forwarding headers, relax auth limits, or substitute
+  seeded/admin accounts. Distributed clients and persistent enrollment/resume
+  are not implemented; the target remains simultaneous genuine first turns.
 - An actual owned mailbox and compatible staging auth configuration are required.
   No OAuth provider, mail delivery integration or server allowlist is provisioned.
 - Example USD caps ($5 plain, $10 sandbox, $10/$20 fresh 50/100) are conservative

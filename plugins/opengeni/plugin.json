@@ -1,16 +1,16 @@
 {
   "$schema": "https://agent-plugins.org/schemas/1.0.0/plugin.schema.json",
   "name": "opengeni",
-  "version": "0.1.0",
-  "description": "Offload long-running or parallel work from your coding agent to an OpenGeni workspace, and build products on OpenGeni agents.",
-  "author": { "name": "OpenGeni", "url": "https://opengeni.ai" },
+  "version": "0.3.0",
+  "description": "Offload long-running or parallel work from your coding agent to an Opengeni workspace, and build products on Opengeni agents.",
+  "author": { "name": "Opengeni", "url": "https://opengeni.ai" },
   "homepage": "https://docs.opengeni.ai/guides/coding-agents",
   "repository": "https://github.com/Cloudgeni-ai/opengeni",
   "license": "Apache-2.0",
   "keywords": ["opengeni", "mcp", "agents", "background-agents", "cloud-agents", "sdk"],
   "extensions": {
     "com.openai": {
-      "interface": { "displayName": "OpenGeni", "shortDescription": "Build and set up OpenGeni" },
+      "interface": { "displayName": "Opengeni", "shortDescription": "Build and set up Opengeni" },
       "onboardingSkill": "./skills/opengeni-setup/SKILL.md"
     }
   }

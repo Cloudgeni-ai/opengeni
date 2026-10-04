@@ -209,10 +209,18 @@ describe("workflow execution graph manifest", () => {
 
     expect(inspection.violations).toEqual([]);
     expect(compareWorkflowExecutionManifest(committed, inspection.manifest)).toEqual([]);
-    expect(inspection.manifest.workflows).toHaveLength(25);
-    expect(inspection.manifest.actions).toHaveLength(2);
-    expect(inspection.manifest.uncappedRuns).toHaveLength(220);
-    expect(inspection.manifest.generatedLocalTargets).toHaveLength(3);
+    // Complete manifest comparison covers the inventory; aggregate totals are not invariants.
+    const workflows = new Set(inspection.manifest.workflows.map((record) => record.path));
+    const runIdentities = inspection.manifest.uncappedRuns.map((record) =>
+      canonicalJson([record.workflow, record.job, record.step]),
+    );
+    expect(new Set(runIdentities).size).toBe(runIdentities.length);
+    for (const record of [
+      ...inspection.manifest.uncappedRuns,
+      ...inspection.manifest.generatedLocalTargets,
+    ]) {
+      expect(workflows.has(record.workflow)).toBe(true);
+    }
     for (const record of [
       ...inspection.manifest.workflows,
       ...inspection.manifest.actions,

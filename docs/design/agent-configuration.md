@@ -177,10 +177,12 @@ Rules:
 
 1. **Derived tools follow automatically and cannot be toggled.**
    Sandbox attached ⇒ `exec_command`, `write_stdin`, `apply_patch`, `view_image`,
-   and `code_search` when the deployment and workspace offer it. Anything
-   deferred ⇒ the search router. A product MCP server attached ⇒ selected
-   (upfront by default). Runtime mechanics (`wait_for_input`, `command_read`,
-   `command_wait`, titling) are always present.
+   and `code_search` when the deployment and workspace offer it. Sandbox or
+   Connected Machine attached to the turn ⇒ `command_read` and `command_wait`
+   (owner `sandbox`; withheld for every session when no compute is attached).
+   Anything deferred ⇒ the search router. A product MCP server attached ⇒
+   selected (upfront by default). Runtime mechanics (`wait_for_input`,
+   titling) are always present.
 2. **Selectable capabilities** (each owns its tools and, where it has one, its
    prompt module). The single source of truth is the registry in
    `packages/contracts/src/agent-config.ts`; a test maps every first-party tool.
@@ -211,7 +213,9 @@ Rules:
 6. **Legacy fields keep working.** `firstPartyMcpTools`, `tools`,
    `excludedMcpServerIds` and `bundledSkillIds` refine inside the resolved
    capabilities; naming a tool of a capability that is off is a 422
-   `agent_config_conflict`. Without `agent`, resolution reproduces the creator's
+   `agent_config_conflict`. Under `"none"`, an omitted `bundledSkillIds`
+   freezes as `[]` at create (no bundled Opengeni guides); an explicit list
+   opts in exactly. Without `agent`, resolution reproduces the creator's
    legacy values exactly.
 
 ## Identity and instructions
@@ -374,14 +378,13 @@ privacy semantics are unchanged.
 
 ## Rollout
 
-Readers shipped before writers. `OPENGENI_AGENT_CONFIG_ADMISSION_ENABLED`
-(default off) admits `agent` on every surface, the workspace default and the
-update route; while it is off they return 422 `agent_config_not_enabled` and the
-client config reports `agentConfig.enabled: false`, which also hides the web UI.
-`OPENGENI_AGENT_CONFIG_DEFAULT_FOR_NEW_SESSIONS` makes omitted `agent` resolve to
-`{ from: "all" }` with the modular prompt (the web app's switch). Workers honor a
-stored configuration regardless of either switch, and an old worker ignoring an
-`"all"` configuration still produces the legacy tool set.
+Readers shipped before writers, behind two temporary deployment switches. Once
+every worker understood migration 0559 the switches were removed: agent
+configuration is always on, `agent` is admitted on every surface, the workspace
+default and the update route, and an omitted `agent` resolves to
+`{ from: "all" }` with the modular prompt. The client config still reports
+`agentConfig.enabled` and `defaultForNewSessions`, always `true`, for
+compatibility.
 
 ## Dropped from the proposal
 

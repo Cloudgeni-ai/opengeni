@@ -47,6 +47,8 @@ import { readMcpOperation } from "../mcp-operation-reader";
 import { createOperationReadAttemptToolDefinition } from "./mcp-operation-read-tool";
 import { buildGitHubRestMcpForTurn } from "../../github-rest-mcp";
 import { materializeConnectorAttachmentsInChannel } from "../connector-attachments";
+import { materializeGmailFile, readGmailFileFromChannel } from "../gmail-files";
+import { objectStorageForSandboxDownloads } from "./file-resources";
 import { allowedFirstPartyMcpToolsForSession, type Settings } from "@opengeni/config";
 import { CodemodeAttemptDispatcher } from "../codemode-dispatcher";
 import { buildCodexTokenResolver } from "../codex-auth";
@@ -80,6 +82,7 @@ import { createTurnMediaArtifacts } from "./media-artifacts";
 import { SandboxChannelAService } from "@opengeni/runtime/sandbox";
 import { sandboxRunAs } from "@opengeni/runtime";
 import {
+  bundledSkillSelectionForAgentConfig,
   DEFAULT_FIRST_PARTY_MCP_PERMISSIONS,
   resolveAgentToolFamilies,
   type ResourceRef,
@@ -594,7 +597,11 @@ export async function prepareTurnToolRuntime(deps: PrepareTurnToolRuntimeDeps) {
     session.firstPartyMcpPermissions,
     linkedAuthority,
   );
-  const toolFamilies = resolveAgentToolFamilies(session.agent);
+  // Background-command tools need compute: the effective route of this turn,
+  // a managed sandbox or an attached Connected Machine, not the durable home.
+  const toolFamilies = resolveAgentToolFamilies(session.agent, {
+    sandboxAttached: (activeSandboxBackend ?? groupBoxBackend) !== "none",
+  });
   const selectedFirstPartyMcpTools = toolFamilies.firstPartyTools(
     allowedFirstPartyMcpToolsForSession(runSettings, session.firstPartyMcpTools),
   );
@@ -667,7 +674,9 @@ export async function prepareTurnToolRuntime(deps: PrepareTurnToolRuntimeDeps) {
     }),
   ]);
   const bundledSkills = loadConfiguredBundledSkills({
-    bundledSkillIds: session.bundledSkillIds,
+    // Rows that could not freeze the "none" default at create (scheduled
+    // generated sessions, pre-existing rows) get the same rule here.
+    bundledSkillIds: bundledSkillSelectionForAgentConfig(session.bundledSkillIds, session.agent),
     firstPartyTools: selectedFirstPartyMcpTools,
     videoGenerationEnabled:
       skillConfiguration.defaultModelId !== null && skillConfiguration.enabledModelIds.length > 0,
@@ -1006,10 +1015,12 @@ export async function prepareTurnToolRuntime(deps: PrepareTurnToolRuntimeDeps) {
       "Connector attachment sandbox is unavailable",
     );
     const sandbox = sandboxAccess.sandbox;
+    const machineRoot = sandboxState.machinePrimarySession?.workspaceRoot;
     const runAs = sandboxRunAs(runSettings);
     const channel = new SandboxChannelAService({
       session: sandboxAccess.session,
-      workspaceRoot: "/workspace",
+      workspaceRoot: machineRoot ?? "/workspace",
+      ...(machineRoot ? { providerPathMode: "workspace-relative" as const } : {}),
       leaseEpoch: sandboxAccess.leaseEpoch,
       emit: async (events) => {
         await eventing.publish?.(events, true);
@@ -1089,6 +1100,44 @@ export async function prepareTurnToolRuntime(deps: PrepareTurnToolRuntimeDeps) {
           : {}),
         onAuthNeeded: publishToolAuthNeeded,
         materializeConnectorAttachments,
+        materializeGmailFile: async (request) => {
+          throwIfWorkerShuttingDown();
+          throwIfTurnCancelled();
+          if (!deps.objectStorage) throw new Error("Gmail file delivery requires object storage");
+          return await materializeGmailFile(request, {
+            workspaceId: input.workspaceId,
+            storage: deps.objectStorage,
+            downloadStorage: objectStorageForSandboxDownloads(
+              runSettings,
+              deps.objectStorage,
+              deps.activeSandboxBackend ?? deps.groupBoxBackend,
+            ),
+            materialize: materializeConnectorAttachments,
+            onCleanupFailure: (key) =>
+              console.warn("[gmail] Temporary transfer cleanup requires operator retry", {
+                objectKey: key,
+              }),
+          });
+        },
+        readGmailFile: async (request) => {
+          throwIfWorkerShuttingDown();
+          throwIfTurnCancelled();
+          const access = await resolveTurnSandboxAccess(
+            sandboxState,
+            media.sdkOwnedSandboxSession,
+            "Gmail attachment filesystem is unavailable",
+          );
+          const runAs = sandboxRunAs(runSettings);
+          const machineRoot = sandboxState.machinePrimarySession?.workspaceRoot;
+          const channel = new SandboxChannelAService({
+            session: access.session,
+            workspaceRoot: machineRoot ?? "/workspace",
+            ...(machineRoot ? { providerPathMode: "workspace-relative" as const } : {}),
+            leaseEpoch: access.leaseEpoch,
+            ...(runAs ? { runAs } : {}),
+          });
+          return await readGmailFileFromChannel(channel, request);
+        },
         refreshOwnedCommand: async (commandId) => {
           throwIfWorkerShuttingDown();
           throwIfTurnCancelled();

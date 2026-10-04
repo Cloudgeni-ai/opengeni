@@ -426,10 +426,10 @@ schedules, goal continuation, compaction, and coalesced internal batches use
 explicit service principals. An Agent Steer remains the causal initiator when
 authority-neutral ordinary machine notices coalesce into its inference; those
 notices cannot erase the steering subject merely because they arrived in the
-same batch. Child lifecycle, command and goal-continuation updates retain their
-exact target causal turn. Different originating turns may coalesce only when
-they resolve to the same receiving-session human and their frozen execution
-permissions match. Unresolved origins keep exact-turn isolation; Agent Steer
+same batch. Producer lineage retains each exact causal turn. Ordinary same-human
+agent messages and child results use the receiving request context described
+below; commands, goals and explicit-source lanes retain their frozen receipt
+checks. Unresolved origins keep exact-turn isolation; Agent Steer
 keeps its exact caller attempt. A malformed historical authority-bearing update also receives an
 isolated claim instead of borrowing a coalesced principal; Agent Steer lineage
 is complete only when the caller session, turn, attempt, and execution
@@ -587,6 +587,23 @@ The same database-owned transition covers a lost claim commit response: if the
 activity reports retryable pre-claim failure but the control lane finds its
 exact active attempt, that durable attempt wins and is recovered.
 
+During an executing turn, own-client PostgreSQL connection outages use only
+`ECONNREFUSED`, `ECONNRESET`, `CONNECT_TIMEOUT`, or SQLSTATE `57P01`–`57P03`/`08xxx`
+through an actual ORM or typed persistence boundary, never a driver name alone.
+These closed outage classes use the same
+exact-attempt DB-only recovery lane, including SDK function-tool `.error` and
+mandatory-history wrappers. The activity exits without `turn.failed`, without
+retrying a possibly committed delta/tool-ledger write, and without manufacturing
+writer settlement. Cleanup and the durable physical/inference gates still hold
+successors; once connectivity returns, recovery preserves the accepted turn,
+trigger and frozen authority with bounded, signal-interruptible backoff. Query
+text, generic provider socket errors, permanent DB rejections and unknown tool
+outcomes do not grant this recovery authority.
+Transport evidence belongs to its trusted DB source subtree, never an unrelated
+aggregate sibling. All permanent/uncertain DB and no-replay evidence vetoes
+regardless of sibling order. Duplicate references/cycles consume no extra node
+budget; an incomplete or overflowed cause graph grants no recovery authority.
+
 Versioned control observers distinguish unavailable session reads from idle
 business state. Missing and RLS-hidden rows are indistinguishable; neither is
 evidence of deletion, completion, or permission to resume. An unavailable
@@ -605,6 +622,23 @@ normal history rollover preserves the observer. Recovery of an orphaned live
 owner remains a separate exact-proof lifecycle operation, not an age-based
 fallback or a reuse of the closed-attempt quiescence reconciler.
 
+The `session-settled-owner-recovery-v1` workflow patch schedules that separate
+`reconcileSettledSessionAttempt` control operation only on an explicitly settled
+owner observation. It re-inspects the **stored original** Temporal run/activity,
+including after continue-as-new. Missing, pending or unknown inspection holds;
+the generic observer still never mutates an owner. Under canonical control,
+workspace, ordered child/parent session, exact turn and attempt locks, recovery
+revalidates account/workspace/session/turn/attempt/generation and all Temporal
+identities, current-owner pointers, effective control/lifecycle/Pause, pending
+interruptions, and **both** physical and inference writer predicates. Only
+authenticated settlement plus zero writers can close this exact owner, record
+the ordinary attempt quiescence receipt, preserve the same turn/trigger/frozen
+authority, and consume the existing bounded worker-loss budget. It invents no
+provider exit or timeout and never replays an unknown operation. Recovery and
+the durable workflow wake commit atomically, including the legacy exact-timeout
+path; stale ACKs and successor claims cannot erase newer wake debt. Pre-patch
+histories retain their observer timer/command order for deterministic replay.
+
 A permanent admission failure with no claimed turn records the supplied failure
 message and, when available, its classified admission cause on the durable
 `session.status.changed` event. The absence of a `turn.failed` event must not
@@ -620,13 +654,27 @@ snapshot; runtime never substitutes the session creator, current browser user,
 worker identity, or another member's account. See
 [`supergrok-subscription.md`](supergrok-subscription.md).
 
-Ordinary agent messages, like Steer, inherit initiating-human identity from the
-exact admitted sender turn. Empty personal-connection selections or workspace
-provider scope do not erase that identity. Different sender attempts own separate
-causal batches; malformed historical message lineage cannot borrow another
-update's human. Genuine service-only source turns remain service-only. This
-preserves identity without expanding accepted connection selections or replacing
-the receiving session's tool configuration.
+Ordinary same-human agent messages and child lifecycle results are informational:
+when the receiving chat has a started request context, that context owns the
+turn's accepted accounts and provider selections. Sender tool/account choices do
+not narrow or widen it. The server advances `sessions.execution_context_turn_id`
+only on the first durable `turn.started` for accepted user/API work, including a
+child's initial request. Queue admission, refused startup, recovery, schedules,
+compaction and informational follow-ups do not move it. Execution-authority
+revocation clears it; an audience-only private-to-shared change preserves it.
+A new queued human request uses its own accepted context for joined input.
+
+Different humans, genuine service inputs and external-linked/developer-setup
+restrictions keep the explicit source lane. Missing historical context falls
+back to that lane without guessing the creator's or current default accounts.
+Steer retains exact-caller isolation; an authoritative human Steer can carry its
+older same-human agent Steer as context. Replacement instructions render last.
+The immutable receiving-context reference on a new informational turn is checked
+by SQL against its delivered inputs and the locked session pointer. Personal
+connection receipts preserve their accepted generations; physical credential
+use still checks live revocation. Known selected-tool differences produce a
+factual model-memory note, with no execution or ordinary timeline effect.
+See [durable agent inputs](durable-agent-inputs.md).
 
 The same accepted logical-turn boundary governs prompt policy and structured
 preferences. After claim, the owning attempt installs immutable instruction-
@@ -906,6 +954,17 @@ tool/subject. A client
 cancellation authority. Attempt/turn interruption remains the sole cancellation
 boundary and still drains or closes journaled work under the existing lifecycle.
 
+Accepted reasoning-capable GPT-5-and-later models on direct OpenAI or Azure
+Responses request provider-generated summaries with `reasoning.summary: auto`.
+Their `response.reasoning_summary_text.delta` events use the existing fenced
+`agent.reasoning.delta`, SSE and visible reasoning-preview path before final
+message text when the provider emits them. Summary timing and presence are
+provider-dependent; this does not expose private or encrypted reasoning or
+promise a first-token deadline. Codex retains `detailed`; chat, unverified
+compatible/proxy routes, nonreasoning and other model families retain their
+existing settings. Effort, tools, instructions, history and admission do not
+change, and no extra startup publication or await is introduced.
+
 Retryable provider connectivity and 5xx failures recover the same accepted turn
 after a durable 2 s, 5 s, 15 s, 30 s, then 60 s capped delay, indexed by that
 turn's durable consecutive provider-recovery count rather than unrelated
@@ -933,6 +992,14 @@ of 10 s / 20 s / 40 s / 60 s / 120 s (`PROVIDER_RATE_LIMIT_BACKOFF_MS`). Without
 the floor, a one-second hint on a per-minute token limit spends every automatic
 recovery before the window resets. Other retryable classes keep their existing
 pacing.
+Ordinary model rate-limit, provider-unavailable and upstream-connectivity
+recoveries add positive-only random spread (up to 20% of the selected delay,
+capped at 5 s). The worker samples this once when settling the attempt; the
+returned delay and durable recovery event use the same value. Provider retry
+hints remain a lower bound. Subscription capacity waits retain their separate
+workflow jitter. Worker-owned main, compaction and title clients disable hidden
+OpenAI SDK retries before client resolution; the durable worker recovery budget
+owns retries. Standalone runtime clients retain `openaiMaxRetries`.
 An exhausted API-key provider quota is not a rate limit and is never retried:
 a daily or monthly allowance (OpenRouter `free-models-per-day`, requests or
 tokens per day), a used-up quota (`insufficient_quota`, "exceeded your current
@@ -1002,6 +1069,18 @@ Every Steer commits a control wake revision, including when
 the recovering turn has no live attempt. A later coalesced Send cannot downgrade
 it to an ordinary queue signal, so the workflow interrupts the hold and processes
 the new direction immediately.
+
+Provider recovery telemetry records structural provider/model/cause labels:
+`opengeni_model_recovery_total` distinguishes scheduled, recovered and exhausted
+observations; `opengeni_model_recovery_delay_seconds` records scheduled waits;
+`opengeni_model_recovery_duration_seconds` records elapsed episodes through the
+first successful response, committed context compaction, or exhaustion,
+including preparation and request time. The start timestamp survives worker
+replacement in turn metadata and is cleared with the successful response or
+compaction checkpoint. Skipped compaction does not close recovery. These are
+operational observations, not billing or exactly-once audit counters. They include classified
+HTTP-200 stream failures rather than treating HTTP acceptance as model success.
+No request text, provider error detail, credential or session identity is a label.
 
 Codex-subscription turns add one explicit recovery boundary before the model
 run. The worker always selects and leases a credential atomically under the
@@ -1161,7 +1240,7 @@ Before model/tool work, a claimed turn inserts a first-class
 `session_turn_attempts` row containing its exact Temporal activity id, current
 trigger, monotonic dispatch generation, verified control revision, and write
 lease. The same claim snapshots every per-session MCP approval policy under the
-session lock and adopts the selected machine-input batch's exact personal-MCP
+session lock and freezes the selected execution owner's exact personal-MCP
 delegation snapshot. A real Temporal activity retry retains the activity id; a
 re-dispatch creates a new attempt and captures the then-current policy. Every
 event, model-history write, run-state write, compaction transition, tool receipt,
@@ -1188,6 +1267,20 @@ properties with JavaScript `undefined` values are omitted as wire-absent
 without mutating the SDK object, while undefined array entries and every other
 non-JSON graph fail with the exact offending path. The lossless database codec
 stays strict rather than silently changing arbitrary input.
+
+A newly committed completed-tool receipt, followed by its durable structural
+output event, permits final acknowledgement of that exact tool's completed
+Connected Machine foreground operations. It does not wait for parallel SDK
+history to stabilize: attempt-ending recovery preserves the recorded result.
+Missing or duplicate receipts do not permit this incremental release. The
+complete-turn durability hook remains the boundary for other accepted output;
+session-owned background output uses its separate lifecycle. A complete verified
+replay and awaited PostgreSQL output capture create an exact terminal custody
+receipt. Its independent reconciliation claim retries final acknowledgement on
+the immutable launch connection after worker loss, without executing again or
+observing model completion. Publish success is a retry milestone; only an exact
+native absence observation settles release. Missing retained output before
+capture is recorded as unavailable, never inferred consumed.
 
 Pending-call registration retries only PostgreSQL-confirmed deadlock (`40P01`)
 or serialization (`40001`) rollback, with three total attempts and 25/50 ms
@@ -1778,7 +1871,29 @@ PID/PGID command line contains the same token. The wrapper publishes its marker
 before checking the tombstone, so a late accepted start cannot execute user code;
 the fence still waits for both exact process-group absence and the original
 provider promise to settle. Timeout, missing marker, and transport failure remain
-non-proof. The queue/chrome projection renders this period as stopping previous
+non-proof. If that original start instead registers a process on its exact
+retained route, pending-start cleanup hands off to the retained process's
+physical cancellation and settlement fence. It must not retry a new ordinary
+mutation after that handoff, since Steer may already fence ordinary admission.
+A rejected or rendered transport error, or an unretained numeric session id,
+does not authorize this handoff. An already-issued proof helper has its own
+physical fence, independent of the original start's registration: a running
+receipt or typed retained-outcome-unknown fault is joined through empty control
+reads on that helper's exact retained route, or exact durable terminal proof.
+The helper is never relaunched or cancelled with the original command's marker.
+Generic rejection, rendered errors, and unretained helper locators remain
+outcome-unknown and keep quiescence closed; only typed non-dispatch/rejection
+or call-scoped proof from routing's pre-provider admission-refusal boundary
+permits retrying the tombstone helper. Routing preserves the original refusal
+error and reports proof separately for that invocation only; an error name,
+message, or the same error thrown after provider dispatch is never proof. A
+run-credential or Codemode-token command decorator preserves trailing invocation
+options unchanged, including that callback, through the production session chain.
+Routing consumes the callback at admission and never passes it to the provider. A
+refused helper releases only its own join, not the original retained process's
+physical/durable settlement fence, and later trusted registration stops its
+ordinary-helper retries. The queue/chrome projection renders this
+period as stopping previous
 work (or current work under Pause), never as a first-step wait or a completed
 direction change.
 
@@ -2608,6 +2723,19 @@ missing SDK map entry nor failure to recover terminal output proves command loss
 including when a completed entry aged out in its original adapter.
 
 Observation backoff does not suppress provider-lifecycle checks during rotation.
+
+**Closed-attempt command recovery.** A missing quiescence receipt can leave
+queued successor work behind legacy retained commands whose provider output is
+unobservable. Once the control activity verifies settlement of the exact
+Temporal dispatch, reconciliation may enroll a `quiescence_containment` drain.
+Enrollment requires no nonclosed attempt in the group, only unsupervised
+processes of that exact attempt, no independently adopted background command,
+and no other holder or open admission. It bypasses neither a live owner nor an
+unresolved interruption. The existing drain saves the workspace and terminates
+the exact provider before settling those commands lost and atomically queuing
+an owner workflow wake. Admission and the quiescence receipt stay fenced until
+physical settlement and exact reconciliation; missing output or an elapsed
+observation window is never substituted for termination proof.
 
 **Idle command containment.** A legacy retained command keeps its Modal box
 warm through a non-expiring process holder, so the zero-holder idle drain never
@@ -3512,7 +3640,58 @@ timestamp. Their labels are limited to the closed provider/backend/outcome and,
 where applicable, phase/count/cache vocabularies; session, turn, request,
 credential, and content values remain only in authenticated durable events.
 Operation durations can nest and overlap; summing them does not produce a
-critical path. The historical `model_sdk_serialization` phase is Codex-only:
+critical path. Initial session creation adds content-free
+`api.session_create.authorization|body_read|site_origin|core_create|response_projection`
+child spans within the existing HTTP span. Authorization still precedes body
+handling and creation; response policy projection remains outside the create
+rejection envelope, after committed creation. Core children
+`workspace_read|model_catalog_initial|default_model|model_catalog_effective|capability_settings|initiator_freeze|allowance|shell_insert`
+attribute existing pre-initialization reads and admission work, including both
+keyed and unkeyed shell insertion. Conditional work emits a child only when it
+runs: an explicit model omits default resolution, while Site origin without
+headers does no persistence work. These boundaries do not cover every internal
+selection check; gaps and parent/child spans must not be added as sequential costs.
+Fresh model selection overlaps the existing policy/readiness batch with independent
+Claude catalog metadata reads on pooled connections. Subscription activation still
+joins its exact subject's readiness read; both batches are observed before admission
+continues, with input-batch errors taking precedence. Transaction handles retain
+serial batch ordering. No mutable authority is cached or query omitted; removed
+serialization is structural evidence, not measured first-token savings.
+The existing
+`core.session_start.initialize|event_fanout|workflow_wake|session_reload`
+children still cover atomic initialization, post-commit fanout,
+immediate workflow signal plus wake-ledger acknowledgement, and response reload.
+The initial turn, authority, event log and wake outbox still commit atomically
+before either notification. Initial live fanout and the immediate durable-revision
+workflow wake then overlap; both settle before response reload or error propagation.
+Wake-ledger acknowledgement stays after signal acceptance, and ordinary fanout
+transport failures remain best-effort. Durable SSE replay handles later committed
+events arriving ahead of initial live fanout. Worker child phases
+`services_initialization`, `claim_catalog_read`, `claim_atomic`,
+`claim_session_read`, and `claim_capability_settings` separate startup work
+before durable `turn.started`; provider/backend labels remain `unresolved`
+until the existing reads establish them. `learning_policy_freeze` and
+`attachment_authority_projection` cover the existing work after that start but
+before the historical worker-preparation timer. Service initialization precedes
+the execution root and claim timer; its completed span is backdated beneath
+the root, not evidence that it ran after the claim. These observations add no
+database reads or event publications, do not join telemetry exports, and leave
+historical metric boundaries intact. Missing observations are not zero durations.
+`session_mcp_settings` is a bounded child within runtime preparation. With a
+configured credential key, its independent exact-attempt policy and fresh
+server-credential reads overlap on root-pool connections; both settle before
+settings or credential provenance are exposed, retaining policy-error priority.
+Transaction handles and the missing-key metadata path retain serial ordering.
+No read, approval fence, credential refresh or model/tool authority is omitted.
+After successful exact claim ownership, session reload and capability settings
+overlap as fresh reads in separate root-pool RLS transactions; neither uses the
+other's result. Both results still precede credential selection, accepted-policy
+installation, allowance checks and durable turn start. This read join is fail-fast:
+the first observed error can replace the prior serial diagnostic priority, and a
+read-only sibling may retain its pooled connection/shared tenancy lock until it
+finishes, but cannot start tools, publish events or continue downstream authority.
+Neither overlap establishes a measured latency saving without matched live spans.
+The historical `model_sdk_serialization` phase is Codex-only:
 it runs from the worker checkpoint immediately before `runtime.runStream` to
 the Codex `transport_entry` callback. It includes SDK runner/tool/input
 preparation, not just JSON serialization CPU time. When reported,

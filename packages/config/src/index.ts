@@ -1,5 +1,12 @@
 export { managedUserEmailAllowed } from "./managed-user-admission";
+import { EnvCreditPromotionPolicy } from "./credit-promotions";
+export {
+  CreditPromotionPolicy,
+  signupCreditModelIds,
+  promotionalCreditScope,
+} from "./credit-promotions";
 import { isRetiredNativeAtlassianTool } from "@opengeni/contracts/atlassian-native-retirement";
+import { modelLogoUrl } from "@opengeni/contracts/model-display";
 import {
   directModelConnectionSpec,
   BillingMode,
@@ -263,6 +270,10 @@ const SettingsSchema = z.object({
   // Absent on dev/source builds — consumers must treat it as optional.
   serverVersion: z.string().optional(),
   databaseUrl: z.string().default("postgres://opengeni:opengeni@127.0.0.1:5432/opengeni"),
+  // API application pool only. Managed auth owns its separate pool; readiness
+  // reuses the application handle. Keep the historical default for existing
+  // deployments and let operators budget this per process with replica counts.
+  apiDatabasePoolMax: z.coerce.number().int().positive().default(32),
   // Step I (§7.8 runtime half). Dedicated Postgres schema for the EMBEDDED
   // topology. Default "" → standalone: no search_path scoping, server default
   // (`public`). When set (e.g. "opengeni"), the db handle + the managed-auth
@@ -382,30 +393,11 @@ const SettingsSchema = z.object({
     .regex(/^(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)$/u)
     .optional(),
   productAccessMode: ProductAccessMode.default("local"),
-  // --- canonical organization-tenancy authority activation, default OFF ---
-  // The named PRE-ACTIVATION opt-out for the organization-tenancy program. FALSE (the
-  // default, and the value an operator leaves in place to decline or defer) means
-  // this deployment stays on the reversible legacy workspace-owned lane: no phase-F
-  // subsystem may switch its access decision to organization/membership authority
-  // ids. TRUE is an operator's explicit statement that the activation preconditions
-  // in docs/organization-tenancy.md have been proven for this deployment and that
-  // the one-way boundary is accepted.
-  //
-  // This is NOT a kill switch and NOT a rollback: once an activation migration has
-  // committed, setting it back to false does not restore the legacy authority - only
-  // forward recovery is available. It also grants and revokes nothing by itself;
-  // every individual authorization decision keeps its own fences.
-  //
-  // No runtime path reads it yet: canonical activation (phase F) is unshipped, so
-  // the flag exists to reserve the name, pin the safe default, and give every future
-  // activation slice one gate to consult. EnvBoolean (NOT z.coerce.boolean(), which
-  // coerces "false" -> true and would activate the moment an operator wrote the
-  // variable out to disable it).
-  organizationTenancyCanonicalActivationEnabled: EnvBoolean.default(false),
   billingMode: BillingMode.default("disabled"),
   // Explicit launch gate for the one-time $10 verified self-service signup grant.
   // A migration or deployment alone must not start issuing live credits.
   verifiedSignupTrialCreditsEnabled: EnvBoolean.default(false),
+  creditPromotionPolicy: EnvCreditPromotionPolicy,
   entitlementsMode: EntitlementsMode.default("none"),
   usageLimitsMode: UsageLimitsMode.default("none"),
   // Gate new allowance policies until every API/worker in the fleet enforces
@@ -454,6 +446,10 @@ const SettingsSchema = z.object({
   integrationsOauthShortStateEnabled: EnvBoolean.default(false),
   integrationsAllowPrivateNetworkTargets: EnvBoolean.default(false),
   integrationsOauthClientsJson: z.string().default("{}"),
+  gmailWatchTopicName: z
+    .string()
+    .regex(/^projects\/[^/]+\/topics\/[^/]+$/u)
+    .optional(),
   slackClientId: z.string().optional(),
   slackClientSecret: z.string().optional(),
   slackSigningSecret: z.string().optional(),
@@ -851,17 +847,6 @@ const SettingsSchema = z.object({
   // merged with the MCP-server tools (getAllTools = [...mcpTools, ...tools])
   // and the sandbox capability tools, never replacing them.
   webSearchEnabled: EnvBoolean.default(true),
-  // Agent configuration rollout (packages/contracts/src/agent-config.ts).
-  // Admission: when false the API rejects every `agent` input (and the
-  // mid-session update) with 422 agent_config_not_enabled, and stored
-  // workspace agent defaults are ignored. Enable only after every worker
-  // understands sessions.agent_config (migration 0559). Workers always honor
-  // stored configurations regardless of this switch.
-  agentConfigAdmissionEnabled: EnvBoolean.default(false),
-  // When true, a new top-level session that omits `agent` (and has no
-  // legacy parent) resolves `{ capabilities: "all" }`. Old workers ignoring an
-  // "all" configuration still produce today's full tool set.
-  agentConfigDefaultForNewSessions: EnvBoolean.default(false),
   // Jev (TypeSafe's fast judge model) for worker-side agent tools. Without a
   // usable key every Jev-backed feature is off. The key stays on the server
   // (API and worker) and never reaches a sandbox or Connected Machine.
@@ -988,12 +973,10 @@ const SettingsSchema = z.object({
   // Shared desktop toggle: this module reads it for the 6080 port-merge; the
   // owner module (P4.x) acts on it to launch the display stack.
   sandboxDesktopEnabled: EnvBoolean.default(false),
-  // Human take-control toggle: when ON (default) the negotiated DesktopStream
-  // cell advertises mode "interactive" — the noVNC viewer can drive mouse+keyboard
-  // into :0 (x11vnc runs without -viewonly). Turn it OFF for a genuinely read-only
-  // deployment: the cell reports mode "read-only" and the client disables the
-  // "Take control" affordance. This gates the HUMAN viewer plane; agent
-  // interaction is authorized through managed ComputerSession tools.
+  // Human sandbox input policy. Canonical ComputerSession attachments reflect
+  // it and /actions enforces it independently of the client. The legacy
+  // DesktopStream adapter also reports read-only when disabled. Agent tools
+  // retain their separate session-control authority.
   sandboxDesktopInteractive: EnvBoolean.default(true),
   // REAL PTY terminal toggle (P5.t): gates the ttyd pty-ws plane (7681) the API
   // mints over the SAME tunnel as the desktop. Defaults ON — the interactive
@@ -1722,26 +1705,17 @@ export function usableJevApiKey(settings: Pick<Settings, "jevApiKey">): string |
   return usableDeploymentSecret(settings.jevApiKey);
 }
 
-/** Deployment half of agent configuration: rollout switches plus hard capability limits. */
+/** Deployment half of agent configuration: hard capability limits. */
 export function agentConfigDeploymentPolicy(
   settings: Pick<
     Settings,
-    | "agentConfigAdmissionEnabled"
-    | "agentConfigDefaultForNewSessions"
-    | "webSearchEnabled"
-    | "defaultFirstPartyMcpTools"
-    | "allowedFirstPartyMcpTools"
+    "webSearchEnabled" | "defaultFirstPartyMcpTools" | "allowedFirstPartyMcpTools"
   >,
-): AgentConfigDeploymentLimits & { admissionEnabled: boolean; defaultForNewSessions: boolean } {
-  const limits = agentConfigDeploymentLimitsFromAllowlist(
+): AgentConfigDeploymentLimits {
+  return agentConfigDeploymentLimitsFromAllowlist(
     resolveFirstPartyMcpToolPolicy(settings).allowed,
     settings.webSearchEnabled ? {} : { webSearch: "web search is turned off on this server" },
   );
-  return {
-    ...limits,
-    admissionEnabled: settings.agentConfigAdmissionEnabled === true,
-    defaultForNewSessions: settings.agentConfigDefaultForNewSessions === true,
-  };
 }
 
 /**
@@ -2199,6 +2173,13 @@ export const RegistryProviderKind = z.enum([
 export type RegistryProviderKind = z.infer<typeof RegistryProviderKind>;
 
 /** A single model exposed by a registry provider. */
+const ModelLogoUrlSchema = z
+  .string()
+  .refine(
+    (value) => modelLogoUrl({ id: "", logoUrl: value }) !== null,
+    "model logoUrl must be an HTTPS URL without embedded credentials, at most 2048 characters",
+  );
+
 const RegistryModelSchema = z
   .object({
     id: z.string().min(1), // canonical OpenGeni product id
@@ -2206,6 +2187,7 @@ const RegistryModelSchema = z
     aliases: z.array(z.string().min(1)).optional(), // accepted input only; never sent upstream
     label: z.string().min(1).optional(), // display name; defaults to id
     shortLabel: z.string().min(1).max(64).optional(), // compact UI label; optional
+    logoUrl: ModelLogoUrlSchema.optional(),
     contextWindowTokens: z.number().int().positive().optional(),
     effectiveContextWindowTokens: z.number().int().positive().optional(),
     autoCompactTokenLimit: z.number().int().positive().optional(),
@@ -2444,6 +2426,7 @@ export const GatewayCatalogModel = z
     upstreamModelId: z.string().min(1),
     label: z.string().min(1),
     shortLabel: z.string().min(1).max(64).optional(),
+    logoUrl: ModelLogoUrlSchema.optional(),
     providers: z.array(z.string().min(1)).min(1),
     implicitCaching: z.boolean().default(false),
     vision: z.boolean().default(false),
@@ -2464,6 +2447,7 @@ export const OpenRouterCatalogModel = z
     upstreamModelId: z.string().min(1).endsWith(":free"),
     label: z.string().min(1),
     shortLabel: z.string().min(1).max(64).optional(),
+    logoUrl: ModelLogoUrlSchema.optional(),
     aliases: z.array(z.string().min(1)).default([]),
     capabilities: ModelCapabilitiesV1Schema,
     contextWindowTokens: z.number().int().positive().optional(),
@@ -2799,6 +2783,8 @@ export interface ConfiguredModel {
   label: string;
   /** Optional curated compact label for dense UI (e.g. mobile composer). */
   shortLabel?: string | undefined;
+  /** Optional HTTPS maker logo; display metadata does not change execution identity. */
+  logoUrl?: string | undefined;
   providerId: string;
   providerLabel: string;
   api: ModelProviderApi;
@@ -3435,6 +3421,7 @@ export function getSettings(source: NodeJS.ProcessEnv = process.env): Settings {
       optional("GITHUB_SHA"),
     serverVersion: optional("OPENGENI_SERVER_VERSION"),
     databaseUrl: optional("OPENGENI_DATABASE_URL"),
+    apiDatabasePoolMax: optional("OPENGENI_API_DATABASE_POOL_MAX"),
     dbSchema: optional("OPENGENI_DB_SCHEMA"),
     rlsStrategy: optional("OPENGENI_RLS_STRATEGY"),
     runtimeDatabaseRole: optional("OPENGENI_RUNTIME_DATABASE_ROLE"),
@@ -3489,11 +3476,9 @@ export function getSettings(source: NodeJS.ProcessEnv = process.env): Settings {
     agentStableVersion: optional("OPENGENI_AGENT_STABLE_VERSION"),
     agentBetaVersion: optional("OPENGENI_AGENT_BETA_VERSION"),
     productAccessMode: optional("OPENGENI_PRODUCT_ACCESS_MODE"),
-    organizationTenancyCanonicalActivationEnabled: optional(
-      "OPENGENI_ORGANIZATION_TENANCY_CANONICAL_ACTIVATION_ENABLED",
-    ),
     billingMode: optional("OPENGENI_BILLING_MODE"),
     verifiedSignupTrialCreditsEnabled: optional("OPENGENI_VERIFIED_SIGNUP_TRIAL_CREDITS_ENABLED"),
+    creditPromotionPolicy: optional("OPENGENI_CREDIT_PROMOTION_POLICY_JSON"),
     entitlementsMode: optional("OPENGENI_ENTITLEMENTS_MODE"),
     usageLimitsMode: optional("OPENGENI_USAGE_LIMITS_MODE"),
     usageAllowancesEnabled: optional("OPENGENI_USAGE_ALLOWANCES_ENABLED"),
@@ -3521,6 +3506,7 @@ export function getSettings(source: NodeJS.ProcessEnv = process.env): Settings {
       "OPENGENI_INTEGRATIONS_ALLOW_PRIVATE_NETWORK_TARGETS",
     ),
     integrationsOauthClientsJson: optional("OPENGENI_INTEGRATIONS_OAUTH_CLIENTS_JSON"),
+    gmailWatchTopicName: optional("OPENGENI_GMAIL_WATCH_TOPIC_NAME"),
     slackClientId: optional("OPENGENI_SLACK_CLIENT_ID"),
     slackClientSecret: optional("OPENGENI_SLACK_CLIENT_SECRET"),
     slackSigningSecret: optional("OPENGENI_SLACK_SIGNING_SECRET"),
@@ -3658,8 +3644,6 @@ export function getSettings(source: NodeJS.ProcessEnv = process.env): Settings {
     openaiReasoningEncryptedContent: optional("OPENGENI_OPENAI_REASONING_ENCRYPTED_CONTENT"),
     openaiMaxRetries: optional("OPENGENI_OPENAI_MAX_RETRIES"),
     webSearchEnabled: optional("OPENGENI_WEB_SEARCH_ENABLED"),
-    agentConfigAdmissionEnabled: optional("OPENGENI_AGENT_CONFIG_ADMISSION_ENABLED"),
-    agentConfigDefaultForNewSessions: optional("OPENGENI_AGENT_CONFIG_DEFAULT_FOR_NEW_SESSIONS"),
     jevApiKey: optional("OPENGENI_JEV_API_KEY"),
     jevBaseUrl: optional("OPENGENI_JEV_BASE_URL"),
     jevModel: optional("OPENGENI_JEV_MODEL"),
@@ -3951,8 +3935,26 @@ export function getSettings(source: NodeJS.ProcessEnv = process.env): Settings {
       }
     }
   }
+  warnRetiredOrganizationTenancyActivationSwitch(source);
   validateSettings(settings, source);
   return settings;
+}
+
+let retiredOrganizationTenancyActivationSwitchWarned = false;
+
+/**
+ * Session-tenancy activation is universal since migration 0611, so the former
+ * deployment switch is accepted and ignored. Deployments that still set it keep
+ * booting; the one-time warning tells the operator to delete it.
+ */
+function warnRetiredOrganizationTenancyActivationSwitch(source: NodeJS.ProcessEnv): void {
+  if (retiredOrganizationTenancyActivationSwitchWarned) return;
+  if (source.OPENGENI_ORGANIZATION_TENANCY_CANONICAL_ACTIVATION_ENABLED === undefined) return;
+  retiredOrganizationTenancyActivationSwitchWarned = true;
+  console.warn(
+    "[config] OPENGENI_ORGANIZATION_TENANCY_CANONICAL_ACTIVATION_ENABLED is retired and ignored: " +
+      "every organization is session-tenancy activated (migration 0611). Remove it from the deployment.",
+  );
 }
 
 const LOCAL_FIRST_PARTY_DELEGATION_SECRET = "opengeni-local-first-party-delegation-secret-v1";
@@ -4520,6 +4522,7 @@ function gatewayRegistryProvider(
       upstreamModelId: model.upstreamModelId,
       label: model.label,
       ...(model.shortLabel ? { shortLabel: model.shortLabel } : {}),
+      ...(model.logoUrl ? { logoUrl: model.logoUrl } : {}),
       capabilities: gatewayModelCapabilities(settings, {
         implicitCaching: model.implicitCaching,
         vision: model.vision,
@@ -4625,6 +4628,7 @@ function openRouterRegistryProvider(
       aliases,
       label: model.label,
       ...(model.shortLabel ? { shortLabel: model.shortLabel } : {}),
+      ...(model.logoUrl ? { logoUrl: model.logoUrl } : {}),
       capabilities: model.capabilities,
       ...(model.contextWindowTokens === undefined
         ? {}
@@ -5850,6 +5854,7 @@ export function configuredModels(
           id: model.id,
           aliases: [...(model.aliases ?? [])],
           label: model.label ?? productLabelForModelId(model.id),
+          ...(model.logoUrl ? { logoUrl: model.logoUrl } : {}),
           ...(model.shortLabel
             ? { shortLabel: model.shortLabel }
             : productShortLabelForModelId(model.id)
@@ -6079,6 +6084,18 @@ export function resolveModelProviderForTurn(
 }
 
 /**
+ * The requested model cannot start new work: it is retired from new selection
+ * or absent from the configured catalog. Callers that own a durable refusal
+ * (for example a scheduled occurrence) record it instead of failing blindly.
+ */
+export class TurnExecutionPolicyModelUnavailableError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "TurnExecutionPolicyModelUnavailableError";
+  }
+}
+
+/**
  * Build a trusted, secret-safe execution policy from the normalized catalog.
  * The Codex overlay here contains static product/provider identity only; it
  * neither proves readiness nor chooses, decrypts, leases, or exposes an account.
@@ -6090,11 +6107,15 @@ export function resolveTurnExecutionPolicyV1(
   const catalogSettings = settingsForTurnExecutionPolicy(settings, input.modelId);
   const productModelId = canonicalizeConfiguredModelId(catalogSettings, input.modelId);
   if (!isModelAvailableForNewSelection(catalogSettings, productModelId)) {
-    throw new Error("Turn execution policy model is retired from new selection");
+    throw new TurnExecutionPolicyModelUnavailableError(
+      "Turn execution policy model is retired from new selection",
+    );
   }
   const resolved = resolveModelProvider(catalogSettings, productModelId);
   if (!resolved) {
-    throw new Error("Turn execution policy model is not present in the configured catalog");
+    throw new TurnExecutionPolicyModelUnavailableError(
+      "Turn execution policy model is not present in the configured catalog",
+    );
   }
   if (
     input.requestedModelId !== null &&
@@ -8644,6 +8665,19 @@ export function validateModelCatalogSettings(
   // validated even when managed billing is disabled.
   const models = configuredModels(settings, source);
   const defaultCatalogSettings = settingsForTurnExecutionPolicy(settings, settings.openaiModel);
+  const policy = settings.creditPromotionPolicy;
+  const promotionalModelIds = new Set([
+    ...(policy.defaultModelIds ?? []),
+    ...(policy.signupModelIds ?? []),
+    ...Object.values(policy.offers).flatMap((offer) => offer.eligibleModelIds ?? []),
+  ]);
+  for (const modelId of promotionalModelIds) {
+    if (!models.some((model) => model.id === modelId && model.cost === "credits")) {
+      throw new Error(
+        `Promotional credit model ${modelId} must be a canonical credits-billed model in the catalog`,
+      );
+    }
+  }
   const defaultCatalogModels =
     defaultCatalogSettings === settings ? models : configuredModels(defaultCatalogSettings, source);
   if (models.length === 0 && defaultCatalogModels.length === 0) {

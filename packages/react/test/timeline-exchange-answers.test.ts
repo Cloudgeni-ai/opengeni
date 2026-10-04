@@ -360,6 +360,39 @@ describe("answers stay visible across readable turns", () => {
     ]);
   });
 
+  test("live progress stays visible and is also listed, in order, in its work history", () => {
+    sequence = 0;
+    const events = [
+      event("user.message", { text: "Build the regional report" }, null),
+      event("turn.started", {}, "turn-1"),
+      ...note("Querying the regional tables.", "turn-1"),
+      ...tool("query", "exec_command", "turn-1"),
+      event(
+        "agent.message.completed",
+        { text: "Rendering the chart.", phase: "commentary", messageId: "turn-1-second" },
+        "turn-1",
+      ),
+      ...tool("render", "exec_command", "turn-1"),
+    ];
+    const groups = groupTimeline(buildTimeline(events), { readableTurns: true });
+    expect(visibleMessages(groups)).toEqual([
+      "Querying the regional tables.",
+      "Rendering the chart.",
+    ]);
+    const work = groups.find((group) => group.kind === "activity" && group.work);
+    if (work?.kind !== "activity") throw new Error("expected a live work row");
+    expect(work.work!.endedAt).toBeUndefined();
+    const noteIds = groups.flatMap((group) =>
+      group.kind === "item" && group.item.kind === "agent-message" ? [group.item.id] : [],
+    );
+    expect(work.work!.liveNoteIds).toEqual(noteIds);
+    expect(
+      work.work!.details.map((entry) =>
+        entry.kind === "item" && entry.item.kind === "agent-message" ? entry.item.text : entry.kind,
+      ),
+    ).toEqual(["Querying the regional tables.", "activity", "Rendering the chart.", "activity"]);
+  });
+
   test("a note that more work followed stays visible beside the earlier answer", () => {
     const events = [
       ...answeredFirstTurn(),

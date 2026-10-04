@@ -93,7 +93,7 @@ describe("registry dependency export smoke", () => {
       devDependencies: { "private-dev-fixture": "workspace:*" },
     };
     const candidate = candidateManifest(source, new Map([["@opengeni/connect", "0.3.0"]]));
-    expect(candidate.dependencies).toEqual({ "@opengeni/connect": "^0.3.0" });
+    expect(candidate.dependencies).toEqual({ "@opengeni/connect": "0.3.0" });
     expect(candidate.exports).toEqual({
       ".": { types: "./dist/index.d.ts", import: "./dist/index.js" },
     });

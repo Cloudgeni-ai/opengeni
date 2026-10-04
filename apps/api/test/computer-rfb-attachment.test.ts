@@ -28,6 +28,9 @@ const dbFunctions = {
   getComputerSessionControlRecord: realDb.getComputerSessionControlRecord,
   touchComputerSessionController: realDb.touchComputerSessionController,
   readLease: realDb.readLease,
+  getSession: realDb.getSession,
+  getAttachedBrowserDevice: realDb.getAttachedBrowserDevice,
+  getLiveEnrollmentConnection: realDb.getLiveEnrollmentConnection,
 };
 let permissions: AccessGrant["permissions"] = ["stream:view", "sessions:control"];
 let principalKind: AccessGrant["principalKind"] = "human_session";
@@ -35,7 +38,13 @@ let controlDenied = false;
 let controlUnavailable = false;
 let inputAvailable = true;
 let controllerUrl = "";
+let controllerGeneration = "controller-1";
+let controllerAdmitted = true;
+let attachedPlacement = false;
+let screenControlAllowed = false;
 const sourceOperations: string[] = [];
+const helperPaths: string[] = [];
+const dispatchedActions: Array<Record<string, unknown>> = [];
 const helpers: Array<ReturnType<typeof Bun.serve>> = [];
 
 function record(): ComputerSessionControlRecord {
@@ -45,10 +54,12 @@ function record(): ComputerSessionControlRecord {
     workspaceId,
     name: "Fixture Desktop",
     lifecycle: "active",
-    placement: { kind: "sandbox_group", sandboxGroupId },
+    placement: attachedPlacement
+      ? { kind: "attached_device", deviceId: "66666666-6666-4666-8666-666666666666" }
+      : { kind: "sandbox_group", sandboxGroupId },
     controller: {
       controllerId: "fixture-controller",
-      controllerGeneration: "controller-1",
+      controllerGeneration,
       placementInstanceId: "placement-1",
     },
     platform: "linux",
@@ -116,7 +127,10 @@ mock.module("@opengeni/db", () => ({
   ) => (args[0] === fakeDb ? record() : await dbFunctions.getComputerSessionControlRecord(...args)),
   touchComputerSessionController: async (
     ...args: Parameters<typeof realDb.touchComputerSessionController>
-  ) => (args[0] === fakeDb ? true : await dbFunctions.touchComputerSessionController(...args)),
+  ) =>
+    args[0] === fakeDb
+      ? controllerAdmitted
+      : await dbFunctions.touchComputerSessionController(...args),
   readLease: async (...args: Parameters<typeof realDb.readLease>) =>
     args[0] === fakeDb
       ? {
@@ -128,6 +142,35 @@ mock.module("@opengeni/db", () => ({
           controllerDataPlaneUrl: controllerUrl,
         }
       : await dbFunctions.readLease(...args),
+  getSession: async (...args: Parameters<typeof realDb.getSession>) =>
+    args[0] === fakeDb
+      ? ({ id: sourceSessionId, workspaceId, sandboxGroupId } as Awaited<
+          ReturnType<typeof realDb.getSession>
+        >)
+      : await dbFunctions.getSession(...args),
+  getAttachedBrowserDevice: async (...args: Parameters<typeof realDb.getAttachedBrowserDevice>) =>
+    args[0] === fakeDb
+      ? ({
+          state: "connected",
+          enrollmentId: "77777777-7777-4777-8777-777777777777",
+          connectionGeneration: "placement-1",
+        } as Awaited<ReturnType<typeof realDb.getAttachedBrowserDevice>>)
+      : await dbFunctions.getAttachedBrowserDevice(...args),
+  getLiveEnrollmentConnection: async (
+    ...args: Parameters<typeof realDb.getLiveEnrollmentConnection>
+  ) =>
+    args[0] === fakeDb
+      ? ({
+          status: "active",
+          connectionInstanceId: "connection-1",
+          workspaceRoot: "/fixture/workspace",
+          hasDisplay: true,
+          desktopUnavailableReason: null,
+          allowScreenControl: screenControlAllowed,
+          agentCapabilities: {},
+          operationPolicy: null,
+        } as Awaited<ReturnType<typeof realDb.getLiveEnrollmentConnection>>)
+      : await dbFunctions.getLiveEnrollmentConnection(...args),
 }));
 const { registerComputerSessionRoutes } = await import("../src/routes/computer-sessions");
 afterAll(() => mock.restore());
@@ -140,7 +183,13 @@ beforeEach(() => {
   controlDenied = false;
   controlUnavailable = false;
   inputAvailable = true;
+  controllerGeneration = "controller-1";
+  controllerAdmitted = true;
+  attachedPlacement = false;
+  screenControlAllowed = false;
   sourceOperations.length = 0;
+  helperPaths.length = 0;
+  dispatchedActions.length = 0;
 });
 
 function helper(scopedRfbInput: boolean, targetKind: "screen" | "window" = "screen") {
@@ -149,6 +198,7 @@ function helper(scopedRfbInput: boolean, targetKind: "screen" | "window" = "scre
     port: 0,
     async fetch(request) {
       const path = new URL(request.url).pathname;
+      helperPaths.push(path);
       if (path.endsWith("/targets"))
         return success([
           {
@@ -195,6 +245,22 @@ function helper(scopedRfbInput: boolean, targetKind: "screen" | "window" = "scre
             : 401,
         });
       }
+      if (path.endsWith("/actions")) {
+        const command = (await request.json()) as Record<string, unknown>;
+        dispatchedActions.push(command);
+        return success({
+          protocolVersion: 1,
+          operationId: command.operationId,
+          computerSessionId,
+          controllerGeneration: "controller-1",
+          targetId: command.targetId,
+          state: "completed",
+          dispatchedAt: new Date().toISOString(),
+          settledAt: new Date().toISOString(),
+          observation: null,
+          error: null,
+        });
+      }
       return new Response("fixture route missing", { status: 404 });
     },
   });
@@ -230,53 +296,217 @@ async function attach(instance: Hono, targetId = "screen-1") {
   );
 }
 
-describe("registered ComputerSession RFB attachment authority", () => {
-  test("binds interactive RFB only after native and source control authority", async () => {
+function input(instance: Hono) {
+  return instance.request(
+    `https://api.example.test/v1/workspaces/${workspaceId}/computer-sessions/${computerSessionId}/actions`,
+    {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        operationId: crypto.randomUUID(),
+        targetId: "screen-1",
+        expectedTargetGeneration: "target-1",
+        expectedObservationId: null,
+        expectedFrameId: "frame-painted-1",
+        action: { type: "pointer", frameId: "frame-painted-1", action: "click", x: 10, y: 20 },
+      }),
+    },
+  );
+}
+
+describe("registered canonical ComputerSession attachment and action authority", () => {
+  test("app posture rechecks attached-machine screen consent while retaining read permission", async () => {
+    permissions = ["sessions:read", "sessions:control"];
+    attachedPlacement = true;
+    const instance = app();
+    const denied = await posture(instance);
+    expect(denied.status).toBe(200);
+    expect((await denied.json()).inputAllowed).toBe(false);
+    expect(sourceOperations).toEqual(["session.read"]);
+    screenControlAllowed = true;
+    const allowed = await posture(instance);
+    expect(allowed.status).toBe(200);
+    expect((await allowed.json()).inputAllowed).toBe(true);
+    screenControlAllowed = false;
+    const revoked = await posture(instance);
+    expect(revoked.status).toBe(200);
+    expect((await revoked.json()).inputAllowed).toBe(false);
+    const rejectedAction = await input(instance);
+    expect(rejectedAction.status).toBe(403);
+    expect(helperPaths).toEqual([]);
+    expect(dispatchedActions).toEqual([]);
+  });
+
+  test.each([true, false])(
+    "reads human posture without native or media requests (%p)",
+    async (interactive) => {
+      permissions = ["sessions:read", "sessions:control"];
+      const grants = helper(false);
+      const response = await posture(app(interactive));
+      expect(response.status).toBe(200);
+      expect(response.headers.get("cache-control")).toBe("no-store");
+      expect(await response.json()).toEqual({
+        computerSessionId,
+        controllerGeneration: "controller-1",
+        inputAllowed: interactive,
+      });
+      expect(grants).toEqual([]);
+      expect(dispatchedActions).toEqual([]);
+      expect(helperPaths).toEqual([]);
+      expect(sourceOperations).toEqual(
+        interactive ? ["session.read", "session.control"] : ["session.read"],
+      );
+    },
+  );
+
+  test.each(["revoked", "unavailable", "no_control", "agent"] as const)(
+    "denies app posture from %s authority",
+    async (reason) => {
+      permissions =
+        reason === "no_control" ? ["sessions:read"] : ["sessions:read", "sessions:control"];
+      controlDenied = reason === "revoked";
+      controlUnavailable = reason === "unavailable";
+      principalKind = reason === "agent" ? "agent_attempt" : "human_session";
+      helper(false);
+      const response = await posture(app());
+      expect(response.status).toBe(200);
+      expect((await response.json()).inputAllowed).toBe(false);
+      expect(helperPaths).toEqual([]);
+    },
+  );
+
+  test("rechecks source control and current controller without granting action authority", async () => {
+    permissions = ["sessions:read", "sessions:control"];
+    helper(false);
+    const instance = app();
+    expect((await (await posture(instance)).json()).inputAllowed).toBe(true);
+    controlDenied = true;
+    expect((await (await posture(instance)).json()).inputAllowed).toBe(false);
+    expect((await input(instance)).status).toBe(404);
+    controllerGeneration = "controller-2";
+    controlDenied = false;
+    expect(await (await posture(instance)).json()).toEqual({
+      computerSessionId,
+      controllerGeneration: "controller-2",
+      inputAllowed: true,
+    });
+    controllerAdmitted = false;
+    expect((await posture(instance)).status).toBe(409);
+    expect(helperPaths).toEqual([]);
+    expect(dispatchedActions).toEqual([]);
+  });
+  test("uses canonical screen frames without minting RFB input authority", async () => {
     const grants = helper(true);
     const response = await attach(app());
     expect(response.status).toBe(201);
     const attachment = await response.json();
-    expect(attachment.stream).toMatchObject({ kind: "direct_rfb", inputAllowed: true });
-    expect(grants).toHaveLength(2);
-    expect(Object.keys(grants[0]!).sort()).toEqual([
-      "controllerGeneration",
-      "expiresAt",
-      "grantId",
-      "token",
-    ]);
-    expect(grants[1]).toMatchObject({
-      targetId: "screen-1",
-      targetGeneration: "target-1",
-      inputAllowed: true,
-    });
-    expect(grants[1]!.grantId).toBe(grants[0]!.grantId);
-    expect(grants[1]!.token).toBe(grants[0]!.token);
+    expect(attachment.stream.kind).toBe("direct_websocket");
+    expect(attachment.stream.url).toContain("/targets/screen-1/frames");
+    expect(attachment.inputAllowed).toBe(true);
+    expect(grants).toHaveLength(1);
+    expect(grants[0]).not.toHaveProperty("inputAllowed");
     expect(sourceOperations).toEqual(["session.viewer.read", "session.control"]);
   });
 
-  test.each(["permission", "source", "native", "policy", "agent"] as const)(
-    "keeps authorized viewing when %s does not permit RFB input",
+  test.each([false, true])(
+    "forwards the painted frame fence through canonical actions (scoped helper %p)",
+    async (scopedHelper) => {
+      const grants = helper(scopedHelper);
+      const instance = app();
+      expect((await attach(instance)).status).toBe(201);
+      const response = await input(instance);
+      expect(response.status).toBe(200);
+      expect((await response.json()).state).toBe("completed");
+      expect(grants).toHaveLength(1);
+      expect(Object.keys(grants[0]!).sort()).toEqual([
+        "controllerGeneration",
+        "expiresAt",
+        "grantId",
+        "token",
+      ]);
+      expect(dispatchedActions).toHaveLength(1);
+      expect(dispatchedActions[0]).toMatchObject({
+        computerSessionId,
+        controllerGeneration: "controller-1",
+        targetId: "screen-1",
+        expectedTargetGeneration: "target-1",
+        expectedObservationId: null,
+        expectedFrameId: "frame-painted-1",
+        action: { type: "pointer", frameId: "frame-painted-1", action: "click", x: 10, y: 20 },
+      });
+      expect(sourceOperations).toEqual([
+        "session.viewer.read",
+        "session.control",
+        "session.control",
+      ]);
+    },
+  );
+
+  test.each(["permission", "source", "policy", "agent"] as const)(
+    "keeps canonical viewing when %s does not permit human input",
     async (reason) => {
       const grants = helper(true);
       if (reason === "permission") permissions = ["stream:view"];
       if (reason === "source") controlDenied = true;
-      if (reason === "native") inputAvailable = false;
       if (reason === "agent") principalKind = "agent_attempt";
       const response = await attach(app(reason !== "policy"));
       expect(response.status).toBe(201);
-      expect((await response.json()).stream).toMatchObject({
-        kind: "direct_rfb",
-        inputAllowed: false,
-      });
-      expect(grants[1]).toMatchObject({ inputAllowed: false });
+      const attachment = await response.json();
+      expect(attachment.inputAllowed).toBe(false);
+      expect(attachment.stream.kind).toBe("direct_websocket");
+      expect(grants).toHaveLength(1);
+      expect(grants[0]).not.toHaveProperty("inputAllowed");
     },
   );
 
-  test("refuses an unavailable source-control decision instead of granting input", async () => {
+  test("keeps viewing but refuses input while source-control authorization is unavailable", async () => {
     const grants = helper(true);
     controlUnavailable = true;
-    expect((await attach(app())).status).toBe(503);
+    const instance = app();
+    const response = await attach(instance);
+    expect(response.status).toBe(201);
+    expect((await response.json()).inputAllowed).toBe(false);
     expect(grants).toHaveLength(1);
+    expect((await input(instance)).status).toBe(503);
+    expect(dispatchedActions).toEqual([]);
+  });
+
+  test("keeps partial native capabilities independent of human source authority", async () => {
+    helper(true);
+    inputAvailable = false;
+    const response = await attach(app());
+    expect(response.status).toBe(201);
+    expect((await response.json()).inputAllowed).toBe(true);
+    expect(record().session.capabilities).toMatchObject({
+      pointerInput: true,
+      keyboardInput: false,
+    });
+  });
+
+  test.each(["permission", "source", "policy"] as const)(
+    "rejects %s loss before native action dispatch even after an allowed attachment",
+    async (reason) => {
+      helper(true);
+      const instance = app();
+      const response = await attach(instance);
+      expect(response.status).toBe(201);
+      expect((await response.json()).inputAllowed).toBe(true);
+      if (reason === "permission") permissions = ["stream:view"];
+      if (reason === "source") controlDenied = true;
+      expect((await input(reason === "policy" ? app(false) : instance)).status).toBe(
+        reason === "source" ? 404 : 403,
+      );
+      expect(dispatchedActions).toEqual([]);
+    },
+  );
+
+  test("human sandbox policy does not disable authorized agent tool actions", async () => {
+    helper(true);
+    principalKind = "agent_attempt";
+    const instance = app(false);
+    expect((await input(instance)).status).toBe(200);
+    expect(dispatchedActions).toHaveLength(1);
+    expect(sourceOperations).toEqual(["session.control"]);
   });
 
   test.each(["screen", "window"] as const)(
@@ -318,7 +548,13 @@ describe("registered ComputerSession RFB attachment authority", () => {
           },
         )?.status,
       ).toBe(426);
-      expect(sourceOperations).toEqual(["session.viewer.read"]);
+      expect(sourceOperations).toEqual(["session.viewer.read", "session.control"]);
     },
   );
 });
+
+function posture(instance: Hono) {
+  return instance.request(
+    `https://api.example.test/v1/workspaces/${workspaceId}/computer-sessions/${computerSessionId}/input-posture`,
+  );
+}

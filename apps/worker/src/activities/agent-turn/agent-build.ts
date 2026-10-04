@@ -60,6 +60,7 @@ import {
   hostedWebSearchForTurn,
   connectedSubscriptionImageGenerationAuthority,
   textVerbosityForTurn,
+  reasoningSummaryForTurn,
 } from "./tool-policy";
 import type { ClaimTurnOk } from "./claim";
 import type { GovernanceModelOk } from "./governance-model";
@@ -576,6 +577,7 @@ export async function buildTurnAgent(deps: BuildTurnAgentDeps) {
     turnExecutionPolicy.latencyMode,
   );
   const textVerbosity = textVerbosityForTurn(resolvedModel, turnExecutionPolicy.upstreamModelId);
+  const reasoningSummary = reasoningSummaryForTurn(resolvedModel);
   const approvedToolCallId = approvedConnectorActionCallId(trigger);
   const modelVisibleSkillCatalogText = await ensureSessionSkillCatalog(db, {
     accountId: input.accountId,
@@ -664,6 +666,7 @@ export async function buildTurnAgent(deps: BuildTurnAgentDeps) {
         ...(preparedTools.inputWaitYield ? { inputWaitYield: preparedTools.inputWaitYield } : {}),
         ...(session.agent ? { agentConfig: session.agent, toolRouterInHistory } : {}),
         reasoningEffort: requestReasoningEffort,
+        ...(reasoningSummary ? { reasoningSummary } : {}),
         latencyMode: turnExecutionPolicy.latencyMode,
         ...(serviceTier ? { serviceTier } : {}),
         ...(textVerbosity ? { textVerbosity } : {}),

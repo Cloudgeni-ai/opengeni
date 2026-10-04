@@ -44,11 +44,18 @@ type ProxyFacade = {
   workspaceIdFor?(target: WorkspaceIdTarget, options: WorkspaceIdOptions): Promise<string>;
 };
 
-/** Who the authenticated request acts as. Never derive any of it from the request body or path. */
+/**
+ * Who the authenticated request acts as, in your own ids. Never derive any of
+ * it from the request body or path. `{ user, tenant }`: one workspace per
+ * tenant. `{ user }`: one workspace per user. `{ user, workspaceId }`: your
+ * own workspace. Tenant and per-user mapping require the `OpenGeni` facade
+ * from `@opengeni/sdk/chat`; workspaces are created on first use and Opengeni
+ * adds the user on their first request.
+ */
 export type SessionProxyResolution = (
   | { workspaceId: string; tenant?: undefined }
-  /** Tenant mapping requires passing the `OpenGeni` facade from `@opengeni/sdk/chat`. */
   | { tenant: string; workspaceId?: undefined }
+  | { tenant?: undefined; workspaceId?: undefined }
 ) & {
   /** Host-authenticated external user id; every call runs through `asUser(user)`. */
   user: string;
@@ -356,10 +363,22 @@ export function createSessionProxyHandler(
       }
       const source = resolved.source ?? defaultSource;
       let workspaceId: string;
+      // A tenant/workspaceId key that resolves to nothing must never fall
+      // through to the per-user workspace: that is a host auth bug, not a choice.
+      if (
+        ("workspaceId" in resolved && !resolved.workspaceId && !resolved.tenant) ||
+        ("tenant" in resolved && !resolved.tenant && !resolved.workspaceId) ||
+        resolved.workspaceId === "" ||
+        resolved.tenant === ""
+      ) {
+        throw new TypeError(
+          "resolve returned an empty tenant or workspaceId. Return a non-empty id, or omit the key for one workspace per user.",
+        );
+      }
       if (chats === "isolated") {
-        if (!resolved.tenant || !isFacade(target) || !target.workspaceIdFor) {
+        if (resolved.workspaceId || !isFacade(target) || !target.workspaceIdFor) {
           throw new TypeError(
-            'chats: "isolated" requires the OpenGeni facade and a tenant resolution.',
+            'chats: "isolated" requires the Opengeni facade and a tenant or user resolution.',
           );
         }
         workspaceId = await target.workspaceIdFor(
@@ -370,9 +389,20 @@ export function createSessionProxyHandler(
         workspaceId = resolved.workspaceId;
       } else if (resolved.tenant && isFacade(target)) {
         workspaceId = await target.workspaceId({ tenant: resolved.tenant });
+      } else if (
+        !("tenant" in resolved) &&
+        !("workspaceId" in resolved) &&
+        isFacade(target) &&
+        target.workspaceIdFor
+      ) {
+        // A user alone: their own workspace, keyed by the identity source.
+        workspaceId = await target.workspaceIdFor(
+          { user: resolved.user, source },
+          { isolation: "user" },
+        );
       } else {
         throw new TypeError(
-          "resolve must return a workspaceId (or a tenant when given the OpenGeni facade).",
+          "resolve must return a workspaceId (or a tenant or a user alone when given the Opengeni facade).",
         );
       }
       const client = service.asUser(resolved.user, { source });
@@ -521,6 +551,9 @@ export function createSessionProxyHandler(
           return json({
             ...conversationConfig,
             apiContractRevision: OPENGENI_API_CONTRACT_REVISION,
+            // The resolved workspace: a browser given only the proxy's baseUrl
+            // reads it here instead of knowing any Opengeni id.
+            workspaceId,
             sandboxFiles: sandboxFilesEnabled,
             ...(artifacts ? { artifacts } : {}),
             // Explicit true also tells stock UIs to offer end users the model picker.

@@ -2,7 +2,7 @@ output "capacity_contract" {
   description = "Sanitized intended bounds; live Ready capacity, quota, placement, and workload slots require separate evidence."
   value = {
     environment = var.environment
-    cluster_id  = data.azurerm_kubernetes_cluster.existing.id
+    cluster_id  = local.expected_cluster_id
     system = {
       owner     = local.manages_system_pool ? "azure-aks-capacity" : "azure"
       vm_size   = "Standard_D4ds_v4"

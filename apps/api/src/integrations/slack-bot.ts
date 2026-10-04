@@ -525,17 +525,17 @@ export async function resolveSlackBotConnectionForTool(input: {
   }
   const boundConnectionId = scheduledSlackBotConnectionId(session?.metadata);
   if (boundConnectionId && (!session || !isTrustedScheduledSlackBotSession(session))) {
-    throw new Error("OpenGeni Slack bot routing metadata is not scheduler-authorized");
+    throw new Error("Opengeni Slack bot routing metadata is not scheduler-authorized");
   }
   if (
     boundConnectionId &&
     input.requestedConnectionId &&
     input.requestedConnectionId !== boundConnectionId
   ) {
-    throw new Error("this scheduled session is bound to a different OpenGeni Slack bot connection");
+    throw new Error("this scheduled session is bound to a different Opengeni Slack bot connection");
   }
   if (!boundConnectionId && !input.grant.permissions.includes("connections:read")) {
-    throw new Error("connections:read is required to select an OpenGeni Slack bot connection");
+    throw new Error("connections:read is required to select an Opengeni Slack bot connection");
   }
   let connectionId = boundConnectionId ?? input.requestedConnectionId;
   if (!connectionId) {
@@ -545,7 +545,7 @@ export async function resolveSlackBotConnectionForTool(input: {
       (connection) => connection.status === "active" && isOpenGeniSlackBotConnection(connection),
     );
     if (activeConnections.length === 0) {
-      throw new Error("no active OpenGeni Slack bot connection is installed in this workspace");
+      throw new Error("no active Opengeni Slack bot connection is installed in this workspace");
     }
     if (activeConnections.length > 1) {
       const principals = new Set(
@@ -556,7 +556,7 @@ export async function resolveSlackBotConnectionForTool(input: {
       );
       if (principals.size > 1) {
         throw new Error(
-          "connectionId is required because this workspace has multiple active OpenGeni Slack bot connections",
+          "connectionId is required because this workspace has multiple active Opengeni Slack bot connections",
         );
       }
     }
@@ -569,7 +569,7 @@ export async function resolveSlackBotConnectionForTool(input: {
   );
   const metadata = openGeniSlackBotMetadata(connection.metadata);
   if (!metadata) {
-    throw new Error("OpenGeni Slack bot connection metadata is invalid");
+    throw new Error("Opengeni Slack bot connection metadata is invalid");
   }
   return {
     connection,
@@ -609,7 +609,7 @@ export async function resolveScheduledSlackBotPostTarget(input: {
   if (!input.sessionId) refuse("this is not a scheduled task run");
   const session = await getSession(input.db, input.grant.workspaceId, input.sessionId!);
   if (!session || !isTrustedScheduledSlackBotSession(session)) {
-    refuse("this is not a scheduled task run with an OpenGeni Slack bot");
+    refuse("this is not a scheduled task run with an Opengeni Slack bot");
   }
   const connectionId = scheduledSlackBotConnectionId(session!.metadata)!;
   const scheduledTaskId = String(session!.metadata.scheduledTaskId);
@@ -617,7 +617,7 @@ export async function resolveScheduledSlackBotPostTarget(input: {
   if (!task) refuse("the scheduled task was deleted");
   if (task!.runMode === "existing_session") refuse("the task continues an existing chat");
   if (task!.agentConfig.slackBotConnectionId !== connectionId) {
-    refuse("the task no longer uses this OpenGeni Slack bot");
+    refuse("the task no longer uses this Opengeni Slack bot");
   }
   const channelId = task!.agentConfig.slackBotChannelId;
   if (!channelId) refuse("no one has chosen a Slack channel for this task");
@@ -733,7 +733,7 @@ export async function sendScheduledSlackBotPost(input: {
   }
   const reason = channelChanged
     ? "The task's Slack channel changed after this message was prepared"
-    : "The OpenGeni Slack bot changed after this message was prepared";
+    : "The Opengeni Slack bot changed after this message was prepared";
   if (earlier?.status === "completed") {
     throw new Error(`${reason}. It had already been posted, so it was not sent again.`);
   }
@@ -770,7 +770,7 @@ export async function verifyScheduledTaskSlackChannel(
     channel = await client.verifyChannelAccess(input.channelId);
   } catch (error) {
     throw new HTTPException(422, {
-      message: `The OpenGeni bot cannot post in that Slack channel. Invite it to the channel first. (${safeFailureCode(error)})`,
+      message: `The Opengeni bot cannot post in that Slack channel. Invite it to the channel first. (${safeFailureCode(error)})`,
     });
   }
   if (
@@ -1518,7 +1518,7 @@ export class OpenGeniSlackBotClient {
         claimLeaseMs: SLACK_POST_CLAIM_LEASE_MS,
       });
       if (claim.kind === "connection_not_found") {
-        throw new Error("OpenGeni Slack bot connection no longer exists");
+        throw new Error("Opengeni Slack bot connection no longer exists");
       }
       if (claim.kind === "conflict") {
         throw new SlackBotOperationConflictError("post");
@@ -1660,7 +1660,7 @@ export class OpenGeniSlackBotClient {
         claimLeaseMs: SLACK_UPDATE_CLAIM_LEASE_MS,
       });
       if (claim.kind === "connection_not_found") {
-        throw new Error("OpenGeni Slack bot connection no longer exists");
+        throw new Error("Opengeni Slack bot connection no longer exists");
       }
       if (claim.kind === "conflict") {
         throw new SlackBotOperationConflictError("update");
@@ -1754,7 +1754,7 @@ export class OpenGeniSlackBotClient {
         claimLeaseMs: SLACK_DELETE_CLAIM_LEASE_MS,
       });
       if (claim.kind === "connection_not_found") {
-        throw new Error("OpenGeni Slack bot connection no longer exists");
+        throw new Error("Opengeni Slack bot connection no longer exists");
       }
       if (claim.kind === "conflict") {
         throw new SlackBotOperationConflictError("delete");
@@ -2113,7 +2113,7 @@ export class OpenGeniSlackBotClient {
       credentialResolutionMode,
     });
     if (result.status !== "ok" || result.connectionId !== this.connection.id) {
-      throw new Error("OpenGeni Slack bot connection needs to be reinstalled");
+      throw new Error("Opengeni Slack bot connection needs to be reinstalled");
     }
     const current = await requireOpenGeniSlackBotConnection(
       this.db,
@@ -2133,19 +2133,19 @@ export class OpenGeniSlackBotClient {
       currentMetadata.botId !== this.metadata.botId ||
       currentMetadata.botUserId !== this.metadata.botUserId
     ) {
-      throw new Error("OpenGeni Slack bot connection authority changed");
+      throw new Error("Opengeni Slack bot connection authority changed");
     }
     // The adapter callback is a fallible preflight. The canonical credential
     // callback must remain the final await before the physical fetch.
     if (this.authorizeProviderRequest && (await this.authorizeProviderRequest()) === false) {
-      throw new Error("OpenGeni Slack bot provider request is no longer authorized");
+      throw new Error("Opengeni Slack bot provider request is no longer authorized");
     }
     if (
       credentialResolutionMode === "execution" &&
       result.authorizeProviderRequest &&
       !(await result.authorizeProviderRequest())
     ) {
-      throw new Error("OpenGeni Slack bot provider request is no longer authorized");
+      throw new Error("Opengeni Slack bot provider request is no longer authorized");
     }
     return result.headers;
   }
@@ -2451,10 +2451,10 @@ export async function createOpenGeniSlackBotInteractionClient(
     input.connectionId,
   );
   if (connection.accountId !== input.accountId) {
-    throw new Error("OpenGeni Slack bot connection tenant mismatch");
+    throw new Error("Opengeni Slack bot connection tenant mismatch");
   }
   const metadata = openGeniSlackBotMetadata(connection.metadata);
-  if (!metadata) throw new Error("OpenGeni Slack bot connection metadata is invalid");
+  if (!metadata) throw new Error("Opengeni Slack bot connection metadata is invalid");
   return new OpenGeniSlackBotClient(
     deps.db,
     deps.settings,
@@ -2552,7 +2552,7 @@ function assertOpenGeniSlackBotScopes(grantedScopes: string[]): void {
     ];
     throw new SlackBotCredentialVerificationError(
       "scope_mismatch",
-      `Slack bot scopes do not satisfy the OpenGeni manifest (${facts.join("; ")})`,
+      `Slack bot scopes do not satisfy the Opengeni manifest (${facts.join("; ")})`,
     );
   }
 }

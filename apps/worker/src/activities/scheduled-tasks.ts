@@ -16,12 +16,12 @@ import {
   SessionMemoryScope,
   normalizeAutomaticSessionTitle,
   metadataWithTurnExecutionPolicyV1,
+  mergeResourceRefs,
   scheduledOccurrencePayloadUtf8Bytes,
   stableJson,
   TurnExecutionPolicyV1,
   type ScheduledTask,
   type ScheduledTaskRun,
-  AgentConfigError,
   type ResolvedAgentConfig,
 } from "@opengeni/contracts";
 import {
@@ -41,7 +41,6 @@ import {
   settingsWithEnabledCapabilityMcpServers,
   settingsWithSessionMcpServerMetadata,
   swapActiveSandbox,
-  agentConfigMayResolve,
   applySessionAgentConfigWriteThrough,
   resolveSessionAgentConfigForCreate,
   recordSessionCreated,
@@ -99,6 +98,7 @@ import {
   allowedFirstPartyMcpToolsForSession,
   resolveFirstPartyMcpToolPolicy,
   resolveTurnExecutionPolicyV1,
+  TurnExecutionPolicyModelUnavailableError,
 } from "@opengeni/config";
 import { Context } from "@temporalio/activity";
 import { createHash } from "node:crypto";
@@ -583,41 +583,41 @@ export function createScheduledTaskActivities(services: () => Promise<ControlAct
       // accepted execution so retries and recovery never resolve again.
       let resolvedAgentConfig: ResolvedAgentConfig | null = null;
       let resolvedAgentInstructions: string | undefined;
-      try {
-        const agentResolution = resolveSessionAgentConfigForCreate({
-          settings,
-          creator: "scheduled",
-          request: task.agentConfig.agent,
-          instructions: undefined,
-          workspaceSettings: agentConfigMayResolve(settings, task.agentConfig.agent)
-            ? (await requireWorkspace(db, task.workspaceId)).settings
-            : {},
-          parent: null,
-          goal: task.agentConfig.goal !== undefined,
-        });
-        resolvedAgentConfig = agentResolution.config;
-        resolvedAgentInstructions = agentResolution.instructions;
-        const written = applySessionAgentConfigWriteThrough({
-          config: resolvedAgentConfig,
-          firstPartyMcpTools,
-          tools: taskTools,
-          toolPolicy: { mode: "explicit", inheritedFromSessionId: null },
-          productServerIds: task.agentConfig.tools.map((tool) => tool.id),
-        });
-        firstPartyMcpTools = written.firstPartyMcpTools;
-        taskTools = written.tools;
-      } catch (error) {
-        const status =
-          error instanceof Error ? (error as Error & { status?: unknown }).status : undefined;
-        if (!(error instanceof Error) || status !== 422) throw error;
-        const notEnabled =
-          error.cause instanceof AgentConfigError &&
-          error.cause.code === "agent_config_not_enabled";
-        return await refuseAdmission(
-          "scheduled_authority_unavailable",
-          notEnabled,
-          `scheduled agent configuration is not admissible: ${error.message}`,
-        );
+      const generatedTarget =
+        task.runMode === "new_session_per_run" ||
+        (task.runMode === "reusable_session" && task.reusableSessionId === null);
+      if (generatedTarget) {
+        try {
+          const agentResolution = resolveSessionAgentConfigForCreate({
+            settings,
+            creator: "scheduled",
+            request: task.agentConfig.agent,
+            instructions: undefined,
+            workspaceSettings: (await requireWorkspace(db, task.workspaceId)).settings,
+            parent: null,
+            goal: task.agentConfig.goal !== undefined,
+          });
+          resolvedAgentConfig = agentResolution.config;
+          resolvedAgentInstructions = agentResolution.instructions;
+          const written = applySessionAgentConfigWriteThrough({
+            config: resolvedAgentConfig,
+            firstPartyMcpTools,
+            tools: taskTools,
+            toolPolicy: { mode: "explicit", inheritedFromSessionId: null },
+            productServerIds: task.agentConfig.tools.map((tool) => tool.id),
+          });
+          firstPartyMcpTools = written.firstPartyMcpTools;
+          taskTools = written.tools;
+        } catch (error) {
+          const status =
+            error instanceof Error ? (error as Error & { status?: unknown }).status : undefined;
+          if (!(error instanceof Error) || status !== 422) throw error;
+          return await refuseAdmission(
+            "scheduled_authority_unavailable",
+            false,
+            `scheduled agent configuration is not admissible: ${error.message}`,
+          );
+        }
       }
       const firstPartyMcpPermissions = creatorPolicy?.firstPartyMcpPermissions
         ? [...creatorPolicy.firstPartyMcpPermissions]
@@ -650,7 +650,7 @@ export function createScheduledTaskActivities(services: () => Promise<ControlAct
           ? settingsWithSessionMcpServerMetadata(connectionSettings, connectionTarget.mcpServers)
           : connectionSettings,
         tools: connectionTools,
-        resources: connectionTarget?.resources ?? task.agentConfig.resources,
+        resources: mergeResourceRefs(connectionTarget?.resources ?? [], task.agentConfig.resources),
         source: taskAuthoritySubjectId
           ? { kind: "subject", subjectId: taskAuthoritySubjectId, accountId: task.accountId }
           : { kind: "none" },
@@ -693,9 +693,6 @@ export function createScheduledTaskActivities(services: () => Promise<ControlAct
       const creatorSessionPolicy = scheduledCreatorSessionPolicyInput(
         creatorPolicy?.sessionPolicy ?? null,
       );
-      const generatedTarget =
-        task.runMode === "new_session_per_run" ||
-        (task.runMode === "reusable_session" && task.reusableSessionId === null);
       if (generatedTarget && task.agentConfig.machineTarget) {
         const access = {
           accountId: task.accountId,
@@ -964,7 +961,7 @@ export function createScheduledTaskActivities(services: () => Promise<ControlAct
         ? openGeniSlackBotMetadata(slackBotConnection.metadata)
         : null;
       if (slackBotConnection && !slackBotMetadata) {
-        throw new Error("OpenGeni Slack bot connection metadata is invalid");
+        throw new Error("Opengeni Slack bot connection metadata is invalid");
       }
       const xaiAuthoritySubjectId =
         taskXaiProviderAccountAuthoritySnapshot.scope === "user" &&
@@ -1086,8 +1083,9 @@ export function createScheduledTaskActivities(services: () => Promise<ControlAct
             }
           }
         : undefined;
-      const turnExecutionPolicy = scheduledTaskRunExecutionPolicy(
-        resolveTurnExecutionPolicyV1(settings, {
+      let acceptedTurnExecutionPolicy: ReturnType<typeof resolveTurnExecutionPolicyV1>;
+      try {
+        acceptedTurnExecutionPolicy = resolveTurnExecutionPolicyV1(settings, {
           modelId: acceptedModel,
           requestedModelId:
             generatedTarget && task.agentConfig.model ? task.agentConfig.model : null,
@@ -1104,7 +1102,20 @@ export function createScheduledTaskActivities(services: () => Promise<ControlAct
             : "session",
           latencyMode: acceptedLatencyMode,
           latencyModeSource: generatedTarget ? "deployment" : "session",
-        }),
+        });
+      } catch (error) {
+        // A retired or removed model refuses every occurrence until the task
+        // (or its target session) names an available model: record that as a
+        // visible terminal run instead of exhausting activity retries.
+        if (!(error instanceof TurnExecutionPolicyModelUnavailableError)) throw error;
+        return await refuseAdmission(
+          "scheduled_model_unavailable",
+          false,
+          `${error.message}: ${acceptedModel}`,
+        );
+      }
+      const turnExecutionPolicy = scheduledTaskRunExecutionPolicy(
+        acceptedTurnExecutionPolicy,
         input,
         creatorPolicy?.credentialRestriction,
       );
@@ -1503,7 +1514,7 @@ export function createScheduledTaskActivities(services: () => Promise<ControlAct
                 (task.agentConfig.slackBotConnectionId ?? null)
               ) {
                 throw new Error(
-                  "scheduled alert occurrence OpenGeni Slack bot binding does not match its canonical session",
+                  "scheduled alert occurrence Opengeni Slack bot binding does not match its canonical session",
                 );
               }
             }
@@ -1798,9 +1809,8 @@ export function createScheduledTaskActivities(services: () => Promise<ControlAct
             // the locked admission check below remains authoritative. Mirrors
             // apps/api/src/domain/sessions.ts.
             assertReusableSessionRevivable(session.status);
-            // Defensive backstop for the API-level 409: a reusable session keeps
-            // its creation-time attachment, so a diverged task attachment must
-            // fail the run instead of silently running with the wrong secrets.
+            // Slack routing remains bound to the reusable chat; execution
+            // attachments come from its accepted target snapshot.
             assertReusableSessionBindingMatches(session, task);
             const bundled = await addSessionSystemUpdateWithSourceMutation(
               dispatchDb,
@@ -2031,28 +2041,24 @@ class IncidentTelemetryPreflightBlockedError extends Error {
 }
 
 /**
- * Defensive backstop for the API-level 409: a reusable/existing target session
- * keeps its creation-time attachment, so a diverged task attachment or Slack
- * bot binding must settle the run terminally instead of silently running with
- * the wrong secrets - on the first attempt and on every recovery attempt.
+ * Defensive backstop for the API-level Slack binding guard. Variable Sets
+ * belong to the live target and are fenced by its accepted execution snapshot,
+ * not by the task's retained creation defaults.
  */
 function assertReusableSessionBindingMatches(
-  session: { variableSetId: string | null; metadata: Record<string, unknown> },
-  task: Pick<ScheduledTask, "variableSetId" | "agentConfig">,
+  session: { metadata: Record<string, unknown> },
+  task: Pick<ScheduledTask, "runMode" | "agentConfig">,
 ): void {
-  if ((session.variableSetId ?? null) !== (task.variableSetId ?? null)) {
-    throw new ScheduledRunTerminalAuthorityError(
-      "scheduled_reusable_binding_changed",
-      "scheduled task variableSet attachment does not match its reusable session",
-    );
-  }
+  // Existing-chat messages use the target policy frozen at admission. Task
+  // creation defaults are not an additional authority or binding constraint.
+  if (task.runMode === "existing_session") return;
   if (
     scheduledSlackBotConnectionId(session.metadata) !==
     (task.agentConfig.slackBotConnectionId ?? null)
   ) {
     throw new ScheduledRunTerminalAuthorityError(
       "scheduled_reusable_binding_changed",
-      "scheduled task OpenGeni Slack bot binding does not match its reusable session",
+      "scheduled task Opengeni Slack bot binding does not match its reusable session",
     );
   }
 }
@@ -2362,9 +2368,8 @@ async function recoverBoundScheduledTaskDispatch(input: {
   let session: Awaited<ReturnType<typeof createSession>>;
   if (input.run.sessionId) {
     session = await requireSession(input.db, task.workspaceId, input.run.sessionId);
-    // A bound existing/reusable target must still carry the exact Variable Set
-    // and Slack bot binding frozen with this occurrence; recovery must fail the
-    // run terminally rather than deliver into a diverged session.
+    // Preserve the reusable chat's Slack routing; the accepted target snapshot
+    // independently fences its current Variable Set attachments during recovery.
     if (!generatedSession) assertReusableSessionBindingMatches(session, task);
   } else if (generatedSession) {
     const variableSet = input.acceptedExecution.resolvedVariableSet;

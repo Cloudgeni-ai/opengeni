@@ -320,7 +320,9 @@ export function ManagedAuthPanel(props: {
                       ? mode === "signup"
                         ? `Create an account for ${invitation.targetEmail} to continue joining ${invitation.organizationName}.`
                         : `Sign in as ${invitation.targetEmail} to continue joining ${invitation.organizationName}.`
-                      : "Use your preferred account to access the managed console."}
+                      : mode === "signup"
+                        ? "Start free. Set up agents in your product in minutes."
+                        : "Welcome back."}
             </p>
           </div>
         </div>

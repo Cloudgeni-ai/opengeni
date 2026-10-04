@@ -17,6 +17,7 @@ export type PickerModelRow<TCatalog extends ClientModel = WorkspaceModelCatalogM
   billingClassLabel: string;
   selectable: boolean;
   unavailableReason: string | null;
+  fundingHint?: string | undefined;
   provider: string;
   providerLabel: string;
   catalog: TCatalog;
@@ -228,7 +229,7 @@ function workspaceProviderPayerSummary(model: ClientModel): string {
   if (model.provider === "workspace-anthropic")
     return "Billed to the workspace Anthropic API account";
   if (model.provider === "workspace-claude-subscription")
-    return "Uses the workspace Claude subscription · no OpenGeni credits";
+    return "Uses the workspace Claude subscription · no Opengeni credits";
   if (model.provider === "workspace-openrouter") {
     return "Billed to the workspace OpenRouter account";
   }
@@ -242,7 +243,7 @@ function organizationProviderPayerSummary(model: ClientModel): string {
   if (model.provider === "organization-anthropic")
     return "Billed to the organization Anthropic API account";
   if (model.provider === "organization-claude-subscription")
-    return "Uses the connected Claude subscription · no OpenGeni credits";
+    return "Uses the connected Claude subscription · no Opengeni credits";
   if (model.provider === "organization-openrouter") {
     return "Billed to the organization OpenRouter account";
   }
@@ -274,6 +275,14 @@ export function projectPickerRows(models: WorkspaceModelCatalogModel[]): PickerM
         billingClass,
         billingClassLabel: billingClassLabel(billingClass),
         selectable: catalog.availability.selectable,
+        fundingHint:
+          catalog.creditFunding === "promotional"
+            ? "Free credits"
+            : catalog.creditFunding === "general"
+              ? "Uses credits"
+              : catalog.creditFunding === "unavailable"
+                ? "Needs credits"
+                : undefined,
         unavailableReason: catalog.availability.selectable
           ? null
           : availabilityReasonLabel(catalog.availability.reason),

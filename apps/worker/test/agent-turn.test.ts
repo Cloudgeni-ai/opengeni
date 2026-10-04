@@ -288,6 +288,19 @@ describe("periodic workspace snapshot admission", () => {
 });
 
 describe("Connected Machine durable stream finalization", () => {
+  test("forwards exact durable tool owners without converting an empty scope to turn-end release", async () => {
+    const calls: Array<readonly string[] | undefined> = [];
+    const machine = {
+      finalizeOpStreamOps: async (callIds?: readonly string[]) => {
+        calls.push(callIds);
+      },
+    };
+    await finalizeDurableTurnOpStreams([machine, machine], null, ["call_first"]);
+    await finalizeDurableTurnOpStreams([], machine, []);
+    await finalizeDurableTurnOpStreams([machine], null);
+    expect(calls).toEqual([["call_first"], [], undefined]);
+  });
+
   test("finalizes every routed proxy once and does not bypass them for the raw fallback", async () => {
     const calls: string[] = [];
     const eagerProxy = {
@@ -2052,6 +2065,13 @@ describe("production model-response usage callback authority", () => {
         type: "response_done",
         response: { id: "resp-1", output: [] },
       } as any);
+      const emptyRawMirror = new RunRawModelStreamEvent({
+        type: "model",
+        providerData: { rawModelEventSource: OPENAI_RESPONSES_RAW_MODEL_EVENT_SOURCE },
+        event: { type: "response.completed", response: { id: "resp-2" } },
+      } as any);
+      expect(await process(emptyRawMirror)).toEqual({ status: "not_response" });
+      expect(state.responseCount).toBe(0);
       expect(await process(missingUsage)).toMatchObject({
         status: "processed",
         authoritative: true,
@@ -5649,7 +5669,7 @@ describe("transient provider error classifier", () => {
     expect(isTransientProviderError(observed)).toBe(true);
     expect(agentRunFailurePayload(observed)).toEqual({
       error:
-        "OpenGeni could not reach an upstream service. The same turn will retry after a short delay.",
+        "Opengeni could not reach an upstream service. The same turn will retry after a short delay.",
       code: "upstream_connectivity_unavailable",
       retryable: true,
     });

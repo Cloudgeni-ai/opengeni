@@ -31,8 +31,8 @@ function createWebsocketRealtimeTransportStarter(
     if (!negotiate) {
       throw new Error(
         dialect === "xai"
-          ? "The OpenGeni client does not support connected SuperGrok realtime"
-          : "The OpenGeni client does not support AI Gateway realtime",
+          ? "The Opengeni client does not support connected SuperGrok realtime"
+          : "The Opengeni client does not support AI Gateway realtime",
       );
     }
     const answer = await negotiate(
@@ -124,7 +124,7 @@ function createWebsocketRealtimeTransportStarter(
         websocket.readyState === WebSocket.OPEN ||
         websocket.readyState === WebSocket.CONNECTING
       ) {
-        websocket.close(1000, "OpenGeni realtime connection retired");
+        websocket.close(1000, "Opengeni realtime connection retired");
       }
     };
     input.signal.addEventListener("abort", stop, { once: true });

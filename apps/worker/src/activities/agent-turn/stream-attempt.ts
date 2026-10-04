@@ -18,6 +18,7 @@ import {
   updateSessionTitleWithEvent,
 } from "@opengeni/db";
 import { publishDurableSessionEvents } from "@opengeni/events";
+import { recordProviderRecoveryOutcome } from "./provider-recovery-metrics";
 import {
   AssistantMessagePhaseTracker,
   normalizeModelCallUsage,
@@ -121,6 +122,7 @@ import {
   completedToolCallFromSdkEvent,
 } from "./history";
 import {
+  aggregateCreditPolicyRevision,
   modelUsageSourceKey,
   recordCompletedModelCallBeforeOwnershipFences,
   TurnEventPublisher,
@@ -192,7 +194,7 @@ export type TurnStreamAttemptDeps = {
   toolResultSpill: ToolResultSpill;
   claimedResult: ClaimedResult;
   flushRuntimeBatcher: () => Promise<void>;
-  finalizeTurnOpStreamOps: () => Promise<void>;
+  finalizeTurnOpStreamOps: (toolCallIds?: readonly string[]) => Promise<void>;
   runWorkspaceMutationForSandbox: <T>(
     sandbox: ResumedTurnSandbox,
     operation: string,
@@ -383,6 +385,8 @@ export async function runTurnStreamAttempt(
   );
   let parallelSessionTitle: ReturnType<typeof startParallelSessionTitleGeneration> | null = null;
   let parallelSessionTitleFinished = false;
+  let creditPolicyRevision: number | undefined;
+  let titleCreditPolicyRevision: number | undefined;
   const finishParallelSessionTitle = async (): Promise<void> => {
     if (parallelSessionTitleFinished) return;
     parallelSessionTitleFinished = true;
@@ -392,6 +396,7 @@ export async function runTurnStreamAttempt(
     if (generated.usage) {
       await processSessionTitleModelUsageEvent({
         usage: generated.usage,
+        creditPolicyRevision: titleCreditPolicyRevision,
         state: sessionTitleUsageState,
         dispatchId: modelUsageDispatchId,
         settings,
@@ -594,7 +599,8 @@ export async function runTurnStreamAttempt(
   let finalReplyNudged = false;
   const revalidateModelCallAdmission = async () => {
     await historySink.reconcileConversationTruth({ requireDurable: true });
-    await ensureRunAllowedBetweenModelCalls({
+    creditPolicyRevision = await ensureRunAllowedBetweenModelCalls({
+      modelId: resolvedModel?.configured.id ?? turn.model,
       settings,
       db,
       accountId: input.accountId,
@@ -624,6 +630,7 @@ export async function runTurnStreamAttempt(
       signal: runtimeCancellationSignal,
       admit: revalidateModelCallAdmission,
     });
+    const responseCreditPolicyRevisions = new Set<number | undefined>();
     const responseCountBeforeStream = modelResponseState.responseCount;
     eventing.batcher = null;
     // The SDK emits every processed call item for one model response before
@@ -841,7 +848,10 @@ export async function runTurnStreamAttempt(
         attempt.modelRequestStarted = true;
         return await runtime.runStream(agent, runInput!, eventing.modelRunSettings, {
           beforeModelRequest: modelCallAdmission.beforeModelRequest,
-          onModelResponse: modelCallAdmission.onModelResponse,
+          onModelResponse: (event) => {
+            responseCreditPolicyRevisions.add(creditPolicyRevision);
+            return modelCallAdmission.onModelResponse(event);
+          },
           signal: runtimeCancellationSignal,
           sandboxEnvironment,
           onModelVisibleContext: async (snapshot) => {
@@ -1053,6 +1063,7 @@ export async function runTurnStreamAttempt(
         }
         await settleFallbackProviderFirstByte();
         let stableToolCallIdsToClear: string[] | null = null;
+        let newlyDurableToolCallId: string | null = null;
         let completedCurrentToolBatch = false;
         let retainedScreenshotMetadata: RetainedArtifactMetadata | null = null;
         let normalizedSdkEvents: ReturnType<typeof normalizeSdkEvent> | null = null;
@@ -1066,6 +1077,7 @@ export async function runTurnStreamAttempt(
           ? await media.retainNativeGeneratedImage(generatedImage)
           : null;
         const responseResult = await processModelResponseTerminalEvent({
+          creditPolicyRevision,
           event: next.value,
           state: modelResponseState,
           dispatchId: modelUsageDispatchId,
@@ -1131,6 +1143,15 @@ export async function runTurnStreamAttempt(
             ]);
             attempt.providerRecoveryCount = 0;
           }
+          if (attempt.providerRecoveryObservation) {
+            recordProviderRecoveryOutcome(observability, {
+              route: attempt.modelMetricRoute,
+              cause: attempt.providerRecoveryObservation.cause,
+              outcome: "recovered",
+              elapsedMs: Date.now() - attempt.providerRecoveryObservation.startedAt,
+            });
+            attempt.providerRecoveryObservation = undefined;
+          }
           const rawStreamHistory = (eventing.stream.state as { history?: unknown[] }).history;
           if (Array.isArray(rawStreamHistory)) {
             // The completed image item is normally retained from its own
@@ -1147,21 +1168,9 @@ export async function runTurnStreamAttempt(
           await historySink.reconcileConversationTruth();
           turnLifecycleMetricsFor(observability).progress({ attemptId: input.attemptId });
           modelCheckpointMemoryCollector.schedule(observability);
-          await ensureRunAllowedBetweenModelCalls({
-            settings,
-            db,
-            accountId: input.accountId,
-            workspaceId: input.workspaceId,
-            isExternallyBilledTurn: billingState.isExternallyBilledTurn,
-            entitlements,
-            chargesOpenGeniCredits: billingState.chargesOpenGeniCredits,
-            countsTowardTokenCap: billingState.countsTowardTokenCap,
-            initiatingHumanSubjectId: turn.initiatingHumanSubjectId,
-            serializedRunState: () =>
-              media.compactMediaRunState(String(eventing.stream!.state.toString())),
-          });
         }
-        // Release only after both the debit and frozen-human admission finish.
+        // Release after settlement. The producer checks fresh admission before
+        // its next request; a final response keeps the revision it ran under.
         modelCallAdmission.settle(next.value);
         const durableSdkEvent = generatedImageReceipt
           ? compactGeneratedImageSdkEvent(next.value, generatedImageReceipt)
@@ -1324,6 +1333,7 @@ export async function runTurnStreamAttempt(
               "turn attempt ended while recording a tool-call result",
             );
           }
+          if (recorded.recorded) newlyDurableToolCallId = completedToolCall.callId;
           const videoAcceptance = videoGenerationAcceptancesByCallId.get(completedToolCall.callId);
           if (videoAcceptance && startVideoGenerationWorkflow) {
             try {
@@ -1435,6 +1445,14 @@ export async function runTurnStreamAttempt(
             media.retainedSessionImageKindsByCallId.delete(callId);
           }
         }
+        if (newlyDurableToolCallId) {
+          // The exact call/result receipt and structural output event are now
+          // durable even when parallel SDK history is still non-monotonic.
+          // Release only this result owner's completed foreground ops. A
+          // missing/duplicate receipt cannot license new output collection;
+          // the complete-turn hook remains its later durability boundary.
+          await finalizeTurnOpStreamOps([newlyDurableToolCallId]);
+        }
       }
     } catch (error) {
       modelCallAdmission.fail(error);
@@ -1541,6 +1559,12 @@ export async function runTurnStreamAttempt(
     if (!streamSawPerResponseUsage) {
       const aggregateUsage = eventing.stream.state.usage;
       const normalizedAggregateUsage = normalizeModelCallUsage(aggregateUsage);
+      const aggregatePolicyRevision = aggregateCreditPolicyRevision({
+        responseRevisions: responseCreditPolicyRevisions,
+        lastAdmittedRevision: creditPolicyRevision,
+        chargesOpenGeniCredits: billingState.chargesOpenGeniCredits,
+        totalTokens: normalizedAggregateUsage.totalTokens,
+      });
       const aggregateInput = normalizedAggregateUsage.telemetry.inputTokens;
       const aggregateSourceKey = modelUsageSourceKey({
         responseId: null,
@@ -1563,6 +1587,7 @@ export async function runTurnStreamAttempt(
           leaseLostMessage: "Provider credential lease expired during the active turn",
           recordUsage: async () => {
             const billing = await recordModelUsageAndDebitCredits(settings, db, {
+              creditPolicyRevision: aggregatePolicyRevision,
               accountId: input.accountId,
               workspaceId: input.workspaceId,
               sessionId: input.sessionId,
@@ -1955,6 +1980,7 @@ export async function runTurnStreamAttempt(
       turnExecutionPolicy.providerId,
       turnExecutionPolicy.latencyMode,
     );
+    titleCreditPolicyRevision = creditPolicyRevision;
     parallelSessionTitle = startParallelSessionTitleGeneration({
       signal: runtimeCancellationSignal,
       generate: async (signal) =>

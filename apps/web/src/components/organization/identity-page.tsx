@@ -2,7 +2,6 @@ import { useNavigate } from "@tanstack/react-router";
 import { useCallback, useEffect, useState } from "react";
 
 import { RowButton } from "@/components/ui/page-actions";
-import { ChoiceCard, ChoiceCards } from "@/components/ui/choice-cards";
 import { EmptyState } from "@/components/ui/empty-state";
 import { ErrorMessage } from "@/components/ui/error-message";
 import { Notice } from "@/components/ui/notice";
@@ -10,13 +9,18 @@ import { Section, SectionStack } from "@/components/ui/section";
 import { SettingNavRow, SettingRowGroup, SettingRowSkeleton } from "@/components/ui/setting-row";
 import { useAppContext } from "@/context";
 import {
+  AGENT_LEARNING_TITLE,
+  IDENTITY_POLICY_MODE,
+  LEARNING_MODE_LABEL,
+} from "@/lib/agent-learning-vocabulary";
+import {
   apiErrorDetails,
   isPermissionDenied,
   userErrorTextWithoutReference,
 } from "@/lib/api-error";
 import { OrganizationKnowledgePrompt } from "@/routes/organization-knowledge-prompt";
 import { useCompanyProfileInventory } from "@/routes/workspace-state-loader";
-import type { CompanyProfileAgentPolicy, CompanyProfileAgentPolicyMode } from "@/types";
+import type { CompanyProfileAgentPolicy } from "@/types";
 
 /* ----------------------------------------------------------------------------
    Organization settings > Organization identity: the small identity and
@@ -24,139 +28,70 @@ import type { CompanyProfileAgentPolicy, CompanyProfileAgentPolicyMode } from "@
    of the organization's knowledge lives.
    -------------------------------------------------------------------------- */
 
-const AGENT_MODES: Record<CompanyProfileAgentPolicyMode, { label: string; description: string }> = {
-  off: {
-    label: "Off",
-    description: "Agents can't propose changes to the identity.",
-  },
-  suggest: {
-    label: "Require approval",
-    description: "An agent drafts the change and the owner who asked approves it.",
-  },
-  automatic: {
-    label: "Automatic",
-    description: "A change an owner asks for in a live chat applies without another prompt.",
-  },
-};
-
-const MODE_ORDER: CompanyProfileAgentPolicyMode[] = ["off", "suggest", "automatic"];
-
-function savedMessage(mode: CompanyProfileAgentPolicyMode): string {
-  if (mode === "automatic") return "Agents can now apply identity changes an owner asks for.";
-  if (mode === "suggest") return "Identity changes from agents now need an owner's approval.";
-  return "Agents can no longer change the identity.";
-}
-
+/**
+ * Whether agents may change the identity, as one line: the current Agent
+ * learning mode, opening the Agent learning page where owners change it with
+ * the workspace's other modes, in the same words.
+ */
 function AgentChangesSection({ workspaceId }: { workspaceId: string }) {
   const client = useAppContext().client;
+  const navigate = useNavigate();
   const [policy, setPolicy] = useState<CompanyProfileAgentPolicy | null>(null);
-  const [mode, setMode] = useState<CompanyProfileAgentPolicyMode>("suggest");
-  const [loading, setLoading] = useState(true);
-  const [saving, setSaving] = useState(false);
   const [error, setError] = useState<Error | null>(null);
-  const [message, setMessage] = useState<string | null>(null);
-
-  const load = useCallback(async () => {
-    setLoading(true);
-    setError(null);
-    try {
-      const value = await client.getCompanyProfileAgentPolicy(workspaceId);
-      setPolicy(value);
-      setMode(value.mode);
-    } catch (loadError) {
-      setError(loadError instanceof Error ? loadError : new Error(String(loadError)));
-    } finally {
-      setLoading(false);
-    }
-  }, [client, workspaceId]);
+  const [retry, setRetry] = useState(0);
+  const load = useCallback(() => setRetry((value) => value + 1), []);
 
   useEffect(() => {
-    void load();
-  }, [load]);
-
-  const save = async (nextMode: CompanyProfileAgentPolicyMode): Promise<void> => {
-    if (!policy || saving || nextMode === mode) return;
-    setMode(nextMode);
-    setSaving(true);
+    // A read for an earlier workspace (or retry) never overwrites a newer one.
+    let current = true;
     setError(null);
-    setMessage(null);
-    try {
-      const value = await client.updateCompanyProfileAgentPolicy(workspaceId, {
-        mode: nextMode,
-        expectedVersion: policy.version,
-        operationId: crypto.randomUUID(),
+    client
+      .getCompanyProfileAgentPolicy(workspaceId)
+      .then((value) => {
+        if (current) setPolicy(value);
+      })
+      .catch((loadError: unknown) => {
+        if (current) {
+          setError(loadError instanceof Error ? loadError : new Error(String(loadError)));
+        }
       });
-      setPolicy(value);
-      setMode(value.mode);
-      setMessage(savedMessage(value.mode));
-    } catch (saveError) {
-      setMode(policy.mode);
-      setError(saveError instanceof Error ? saveError : new Error(String(saveError)));
-    } finally {
-      setSaving(false);
-    }
-  };
+    return () => {
+      current = false;
+    };
+  }, [client, workspaceId, retry]);
 
   return (
-    <Section
-      title="Agent changes"
-      description="Whether agents may update the identity. Only a live chat started by an organization owner can."
-    >
-      <div className="mt-1 flex min-w-0 flex-col gap-3">
-        {error && !policy ? (
-          <ErrorMessage
-            variant="block"
-            title="Couldn't load whether agents can change the identity."
-            announce
-            action={<RowButton onClick={() => void load()}>Try again</RowButton>}
-            {...apiErrorDetails(error)}
-          >
-            {userErrorTextWithoutReference(error)}
-          </ErrorMessage>
-        ) : loading || !policy ? (
-          <div role="status" aria-label="Loading agent changes…">
-            <SettingRowSkeleton />
-          </div>
-        ) : (
-          <>
-            <ChoiceCards
-              aria-label="Agent-managed organization identity mode"
-              name="company-profile-agent-policy"
-              value={mode}
-              disabled={saving}
-              onValueChange={(value) => void save(value as CompanyProfileAgentPolicyMode)}
-            >
-              {MODE_ORDER.map((candidate) => (
-                <ChoiceCard
-                  key={candidate}
-                  value={candidate}
-                  title={AGENT_MODES[candidate].label}
-                  description={AGENT_MODES[candidate].description}
-                />
-              ))}
-            </ChoiceCards>
-            {mode === "automatic" ? (
-              <Notice tone="waiting">
-                This applies to the whole organization. Each change still has to come from a current
-                owner, and applies to new agent runs only.
-              </Notice>
-            ) : null}
-            {error ? (
-              <ErrorMessage
-                variant="inline"
-                title="Couldn't save that."
-                announce
-                {...apiErrorDetails(error)}
-              >
-                {userErrorTextWithoutReference(error)}
-              </ErrorMessage>
-            ) : null}
-            <p role="status" className="text-xs leading-[18px] text-fg-muted empty:hidden">
-              {saving ? "Saving…" : (message ?? "")}
-            </p>
-          </>
-        )}
-      </div>
+    <Section title="Agent changes">
+      {error && !policy ? (
+        <ErrorMessage
+          variant="block"
+          title="Couldn't load whether agents can change the identity."
+          announce
+          action={<RowButton onClick={load}>Try again</RowButton>}
+          {...apiErrorDetails(error)}
+        >
+          {userErrorTextWithoutReference(error)}
+        </ErrorMessage>
+      ) : !policy ? (
+        <div role="status" aria-label="Loading agent changes…">
+          <SettingRowSkeleton />
+        </div>
+      ) : (
+        <SettingRowGroup>
+          <SettingNavRow
+            label={AGENT_LEARNING_TITLE}
+            description="Whether agents may update the identity when an owner asks in a chat. Set with the other Agent learning modes."
+            value={LEARNING_MODE_LABEL[IDENTITY_POLICY_MODE[policy.mode]]}
+            onOpen={() =>
+              void navigate({
+                to: "/workspaces/$workspaceId/state",
+                params: { workspaceId },
+                search: { page: "learning" },
+              })
+            }
+          />
+        </SettingRowGroup>
+      )}
     </Section>
   );
 }
@@ -307,8 +242,8 @@ export function OrganizationIdentityPage({
         ) : (
           <Section title="Agent changes">
             <p className="text-xs leading-[18px] text-fg-muted">
-              Agent-managed organization identity is owner-only. Ask an organization owner to change
-              this mode.
+              Only organization owners can change whether agents may update the identity. Ask an
+              owner.
             </p>
           </Section>
         )
@@ -321,9 +256,9 @@ export function OrganizationIdentityPage({
             value="Open"
             onOpen={() =>
               void navigate({
-                to: "/workspaces/$workspaceId/documents",
+                to: "/workspaces/$workspaceId/state",
                 params: { workspaceId },
-                search: { authority: "organization" },
+                search: { scope: "organization" },
               })
             }
           />

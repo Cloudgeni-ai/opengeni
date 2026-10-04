@@ -621,7 +621,9 @@ export function SessionTenancyControl({
     : `Visible to people in ${scopeLabel}.`;
   const retryingFork = pendingFork !== null;
   const stateChip = (
-    <span className="inline-flex min-h-8 min-w-0 items-center gap-1.5 rounded-full border border-border bg-surface/55 px-2.5 text-xs font-medium text-fg pointer-coarse:min-h-11">
+    // Phones show just the icon (a 44px target, no chip chrome); the labelled
+    // chip with its chevron returns from sm.
+    <span className="inline-flex min-h-8 min-w-0 items-center gap-1.5 rounded-full text-xs font-medium text-fg pointer-coarse:min-h-11 max-sm:min-w-8 max-sm:justify-center max-sm:pointer-coarse:min-w-11 sm:border sm:border-border sm:bg-surface/55 sm:px-2.5">
       {privateSession ? (
         <LockKeyholeIcon className="size-3.5 shrink-0 text-brand" aria-hidden="true" />
       ) : (
@@ -629,7 +631,9 @@ export function SessionTenancyControl({
       )}
       <span className="hidden sm:inline">{stateLabel}</span>
       {failure ? <CircleAlertIcon className="size-3.5 text-status-waiting" aria-hidden /> : null}
-      {mayFork ? <ChevronDownIcon className="size-3.5 text-fg-muted" aria-hidden /> : null}
+      {mayFork ? (
+        <ChevronDownIcon className="hidden size-3.5 text-fg-muted sm:block" aria-hidden />
+      ) : null}
     </span>
   );
 

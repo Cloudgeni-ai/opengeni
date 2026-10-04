@@ -85,8 +85,6 @@ exports[`agent configuration reaches the production model request api creator re
     "opengeni__browser_tabs",
     "opengeni__capability_authorization_request",
     "opengeni__capability_catalog_search",
-    "opengeni__command_read",
-    "opengeni__command_wait",
     "opengeni__company_profile_confirm",
     "opengeni__company_profile_propose",
     "opengeni__computer_act",
@@ -235,7 +233,6 @@ exports[`agent configuration reaches the production model request api creator re
     "skill_search",
     "web_search",
   ],
-  "requestSha256": "4e24bb7f7d6e8362889ecd57a6604db49fa74ac027e989eafcda709ef0184461",
 }
 `;
 
@@ -324,8 +321,6 @@ exports[`agent configuration reaches the production model request slack creator 
     "opengeni__browser_tabs",
     "opengeni__capability_authorization_request",
     "opengeni__capability_catalog_search",
-    "opengeni__command_read",
-    "opengeni__command_wait",
     "opengeni__company_profile_confirm",
     "opengeni__company_profile_propose",
     "opengeni__computer_act",
@@ -474,7 +469,6 @@ exports[`agent configuration reaches the production model request slack creator 
     "skill_search",
     "web_search",
   ],
-  "requestSha256": "4e24bb7f7d6e8362889ecd57a6604db49fa74ac027e989eafcda709ef0184461",
 }
 `;
 
@@ -563,8 +557,6 @@ exports[`agent configuration reaches the production model request scheduled crea
     "opengeni__browser_tabs",
     "opengeni__capability_authorization_request",
     "opengeni__capability_catalog_search",
-    "opengeni__command_read",
-    "opengeni__command_wait",
     "opengeni__company_profile_confirm",
     "opengeni__company_profile_propose",
     "opengeni__computer_act",
@@ -713,7 +705,6 @@ exports[`agent configuration reaches the production model request scheduled crea
     "skill_search",
     "web_search",
   ],
-  "requestSha256": "4e24bb7f7d6e8362889ecd57a6604db49fa74ac027e989eafcda709ef0184461",
 }
 `;
 
@@ -802,8 +793,6 @@ exports[`agent configuration reaches the production model request automation cre
     "opengeni__browser_tabs",
     "opengeni__capability_authorization_request",
     "opengeni__capability_catalog_search",
-    "opengeni__command_read",
-    "opengeni__command_wait",
     "opengeni__company_profile_confirm",
     "opengeni__company_profile_propose",
     "opengeni__computer_act",
@@ -952,7 +941,6 @@ exports[`agent configuration reaches the production model request automation cre
     "skill_search",
     "web_search",
   ],
-  "requestSha256": "4e24bb7f7d6e8362889ecd57a6604db49fa74ac027e989eafcda709ef0184461",
 }
 `;
 
@@ -1041,8 +1029,6 @@ exports[`agent configuration reaches the production model request site_auth_main
     "opengeni__browser_tabs",
     "opengeni__capability_authorization_request",
     "opengeni__capability_catalog_search",
-    "opengeni__command_read",
-    "opengeni__command_wait",
     "opengeni__company_profile_confirm",
     "opengeni__company_profile_propose",
     "opengeni__computer_act",
@@ -1191,7 +1177,6 @@ exports[`agent configuration reaches the production model request site_auth_main
     "skill_search",
     "web_search",
   ],
-  "requestSha256": "4e24bb7f7d6e8362889ecd57a6604db49fa74ac027e989eafcda709ef0184461",
 }
 `;
 
@@ -1280,8 +1265,6 @@ exports[`agent configuration reaches the production model request omitted and nu
     "opengeni__browser_tabs",
     "opengeni__capability_authorization_request",
     "opengeni__capability_catalog_search",
-    "opengeni__command_read",
-    "opengeni__command_wait",
     "opengeni__company_profile_confirm",
     "opengeni__company_profile_propose",
     "opengeni__computer_act",
@@ -1430,6 +1413,5 @@ exports[`agent configuration reaches the production model request omitted and nu
     "skill_search",
     "web_search",
   ],
-  "requestSha256": "4e24bb7f7d6e8362889ecd57a6604db49fa74ac027e989eafcda709ef0184461",
 }
 `;

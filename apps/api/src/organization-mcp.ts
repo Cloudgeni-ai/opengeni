@@ -43,6 +43,23 @@ export type OrganizationMcpCaller =
     }
   | { kind: "key"; authorization: string; accessKey: string | null };
 
+/**
+ * Requests that only read but are sent as POST (a search query or a file path
+ * in the body). Read only connections may run them; each route still checks
+ * its own read permission.
+ */
+export const READ_ONLY_POST_ACTIONS: ReadonlySet<string> = new Set([
+  "/v1/workspaces/:workspaceId/knowledge/search",
+  "/v1/workspaces/:workspaceId/knowledge/entries/search",
+  "/v1/workspaces/:workspaceId/document-bases/:baseId/search",
+  "/v1/workspaces/:workspaceId/sessions/:sessionId/fs/read",
+  "/v1/workspaces/:workspaceId/sessions/:sessionId/git/diff",
+  "/v1/workspaces/:workspaceId/integrations/preview",
+  "/v1/workspaces/:workspaceId/plugins/preview",
+  "/v1/workspaces/:workspaceId/skills/preview",
+  "/v1/organizations/:organizationId/external-identities/lookup",
+]);
+
 const MAX_RESPONSE_BYTES = 256 * 1024;
 const STREAM_READ_MS = 2_000;
 
@@ -156,25 +173,43 @@ function words(value: string): string[] {
 }
 
 export function searchActions(input: { query: string; limit: number; offset: number }) {
-  const wanted = words(input.query);
+  // Singular and plural match ("workspace" finds listWorkspaces).
+  const stem = (word: string) =>
+    word.endsWith("ies") ? `${word.slice(0, -3)}y` : word.replace(/(?<!s)s$/u, "");
+  const wanted = words(input.query).map(stem);
+  // "workspaces" asks for a list; prefer list actions on a plural query.
+  const plural = words(input.query).some((word) => /[^s]s$/u.test(word));
   const scored = ACTION_CATALOG.map((entry) => {
-    const haystack = [
-      ...words(entry.id),
-      ...words(entry.path.replace(/:\w+/g, "")),
-      entry.method.toLowerCase(),
-    ];
+    // A word in the action's name matters far more than one in its path:
+    // nearly every path contains "workspaces".
+    const name = words(entry.id).map(stem);
+    const path = [...words(entry.path.replace(/:\w+/g, "")), entry.method.toLowerCase()].map(stem);
     const score = wanted.reduce(
       (total, word) =>
         total +
-        (haystack.includes(word) ? 2 : haystack.some((token) => token.startsWith(word)) ? 1 : 0),
+        (name.includes(word)
+          ? 4
+          : name.some((token) => token.startsWith(word))
+            ? 3
+            : path.includes(word)
+              ? 1
+              : path.some((token) => token.startsWith(word))
+                ? 0.5
+                : 0),
       0,
     );
-    return { entry, score, size: words(entry.id).length };
+    return {
+      entry,
+      score: score + (plural && score > 0 && name[0] === "list" ? 0.5 : 0),
+      size: name.length,
+    };
   }).filter((candidate) => wanted.length === 0 || candidate.score > 0);
   scored.sort(
     (left, right) =>
       right.score - left.score ||
       left.size - right.size ||
+      // On a tie, reads come before writes.
+      Number(left.entry.method !== "GET") - Number(right.entry.method !== "GET") ||
       left.entry.id.localeCompare(right.entry.id),
   );
   return {
@@ -228,6 +263,7 @@ async function callAction(
   if (
     context.caller.kind === "person" &&
     !reads &&
+    !READ_ONLY_POST_ACTIONS.has(entry.path) &&
     isReadOnlyPermissionSet(context.caller.access.permissions)
   ) {
     return failure("This connection is read only, so it can't change anything.");

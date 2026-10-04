@@ -1,22 +1,35 @@
 /**
- * Session dock > Agent: what this session's agent can do and who it is, in
- * product words, with Edit. Changes apply from the next turn (the running
- * turn keeps what it started with). A session created before agent settings
- * (no configuration) says so and converts on its first save, starting from
- * what it can do today. Tool names only appear under Technical details.
+ * Session dock > Agent: the one place for this chat's agent. Three sections,
+ * in product words: Identity (who the agent is), Capabilities (what it can
+ * do), each with where it comes from (the workspace default, or this chat),
+ * and Agent learning (whether its changes to knowledge, instructions and
+ * skills apply right away or wait for your OK). Identity and capabilities
+ * change with Edit and apply from the next turn (the running turn keeps what
+ * it started with); Agent learning saves at once. A session created before
+ * agent settings (no configuration) says so and converts on its first save,
+ * starting from what it can do today. Tool names only appear under Technical
+ * details.
  */
 import {
   AGENT_IDENTITY_MAX_CHARACTERS,
   legacyEffectiveAgentCapabilities,
+  resolveWorkspaceAgentDefaults,
+  resolveWorkspaceDefaultAgentIdentity,
 } from "@opengeni/contracts";
 import { PencilIcon } from "lucide-react";
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useId, useMemo, useRef, useState, type ReactNode, type Ref } from "react";
 import { toast } from "sonner";
 
 import {
   AgentCapabilityPicker,
   AgentCapabilitySummary,
 } from "@/components/agent/agent-capability-picker";
+import { InAppHelpLink } from "@/components/in-app-help-link";
+import {
+  learningModesEqual,
+  useLearningSettings,
+  type LearningModes,
+} from "@/components/agent/capability-learning";
 import { Button } from "@/components/ui/button";
 import { Disclosure } from "@/components/ui/disclosure";
 import { Field, TextArea } from "@/components/ui/field";
@@ -33,18 +46,33 @@ import {
   draftsEqual,
   requestFromDraft,
   toolOwnerLabel,
+  workspaceAgentDefaultsDraft,
   type AgentCapabilityDraft,
 } from "@/lib/agent-capabilities";
+import { chatLearningScope } from "@/lib/chat-learning-scope";
+import { isPersonalWorkspace } from "@/lib/managed-self-context";
 import { hasWorkspacePermission } from "@/lib/permissions";
 import { cn } from "@/lib/utils";
 import type { Session } from "@/types";
 import { apiErrorFacts } from "@/lib/api-error";
+
+/** Settings > General > Agent defaults: what new chats in the workspace start with. */
+export function workspaceAgentDefaultsHref(workspaceId: string): string {
+  return `/workspaces/${workspaceId}/settings?section=general&view=agent-defaults`;
+}
+
+/** Knowledge > Agent learning: the workspace and private-chat defaults. */
+export function agentLearningHref(workspaceId: string): string {
+  return `/workspaces/${workspaceId}/state?page=learning`;
+}
 
 export function AgentConfigurationPanel(props: {
   session: Session;
   /** The latest change to these settings, when one is in the loaded events. */
   lastChange?: { at: string; pending: boolean } | null;
   onReloadSession: () => Promise<void>;
+  /** A new value (composer + > Chat settings) scrolls to Agent learning and focuses it. */
+  learningFocusRequest?: number;
 }) {
   const { session } = props;
   const context = useAppContext();
@@ -55,6 +83,8 @@ export function AgentConfigurationPanel(props: {
     session.workspaceId,
     "sessions:control",
   );
+  const sectionId = useId();
+  const learningHeading = useRef<HTMLHeadingElement>(null);
   const config = session.agent ?? null;
   const availability = useMemo(
     () => capabilityAvailability(context.clientConfig.agentConfig, config?.unavailable ?? []),
@@ -83,6 +113,17 @@ export function AgentConfigurationPanel(props: {
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const scrollRegion = useRef<HTMLDivElement>(null);
+  const learningScope = chatLearningScope(
+    session,
+    isPersonalWorkspace(workspace, context.managedSelfContext),
+  );
+  // This chat's Agent learning: shown inside Skills and Knowledge, saved with them.
+  const learning = useLearningSettings({
+    workspaceId: session.workspaceId,
+    scope: learningScope,
+    source: { kind: "chat", id: session.id },
+  });
+  const [learningDraft, setLearningDraft] = useState<LearningModes | null>(learning.modes);
 
   // Someone else's save (or a reload) while not editing shows the new truth.
   const configKey = JSON.stringify(config);
@@ -90,11 +131,22 @@ export function AgentConfigurationPanel(props: {
     if (editing) return;
     setDraft(current);
     setIdentity(config?.identity ?? "");
+    setLearningDraft(learning.modes);
     // oxlint-disable-next-line react-hooks/exhaustive-deps -- follow the frozen configuration
-  }, [configKey, editing]);
+  }, [configKey, editing, learning.modes ? JSON.stringify(learning.modes) : null]);
+
+  // Settings that arrive after the editor opened fill an empty draft.
+  useEffect(() => {
+    if (learning.modes) setLearningDraft((previous) => previous ?? learning.modes);
+  }, [learning.modes]);
 
   const identityChanged = identity.trim() !== (config?.identity ?? "").trim();
-  const dirty = !draftsEqual(draft, current) || identityChanged || !config;
+  const agentChanged = !draftsEqual(draft, current) || identityChanged || !config;
+  const learningChanged =
+    learning.modes !== null &&
+    learningDraft !== null &&
+    !learningModesEqual(learning.modes, learningDraft);
+  const dirty = agentChanged || learningChanged;
   const identityTooLong = identity.trim().length > AGENT_IDENTITY_MAX_CHARACTERS;
 
   async function save() {
@@ -102,13 +154,16 @@ export function AgentConfigurationPanel(props: {
     setSaving(true);
     setError(null);
     try {
-      await context.client.updateSessionAgent(session.workspaceId, session.id, {
-        agent: {
-          capabilities: requestFromDraft(draft, availability),
-          ...(identityChanged ? { identity: identity.trim() || null } : {}),
-        },
-        expectedVersion: session.toolPolicyVersion,
-      });
+      if (agentChanged) {
+        await context.client.updateSessionAgent(session.workspaceId, session.id, {
+          agent: {
+            capabilities: requestFromDraft(draft, availability),
+            ...(identityChanged ? { identity: identity.trim() || null } : {}),
+          },
+          expectedVersion: session.toolPolicyVersion,
+        });
+      }
+      if (learningChanged && learningDraft) await learning.save(learningDraft);
       await props.onReloadSession();
       setEditing(false);
       toast.success("Agent settings saved", { description: "They apply from the next turn." });
@@ -128,6 +183,43 @@ export function AgentConfigurationPanel(props: {
 
   const startingPoint =
     AGENT_STARTING_POINTS.find((option) => option.value === current.from)?.title ?? "";
+
+  // Where each part comes from: the workspace's defaults for new chats, or
+  // this chat. A chat that matches the defaults says so.
+  const workspaceDefaults = useMemo(
+    () =>
+      workspaceAgentDefaultsDraft({
+        capabilities: resolveWorkspaceAgentDefaults(workspace?.settings)?.capabilities,
+        legacyHumanInputOff: workspace?.settings.agentHumanInputEnabled === false,
+      }),
+    [workspace?.settings],
+  );
+  const workspaceIdentity = resolveWorkspaceDefaultAgentIdentity(
+    workspace?.settings,
+    workspace?.agentInstructions,
+  ).identity;
+  const capabilitiesSource = !config
+    ? "Set when this chat started"
+    : draftsEqual(current, workspaceDefaults)
+      ? "Workspace default"
+      : config.source === "workspace_default" || config.source === "deployment_default"
+        ? "Defaults when this chat started"
+        : "Changed for this chat";
+  const identitySource = config?.identity ? "Set for this chat" : "Workspace default";
+  const defaultsHref = workspaceAgentDefaultsHref(session.workspaceId);
+  // Composer + > Chat settings: open the editor on what the agent can do.
+  const focusRequest = props.learningFocusRequest ?? 0;
+  useEffect(() => {
+    if (!focusRequest) return;
+    if (canEdit) setEditing(true);
+    const frame = requestAnimationFrame(() => {
+      const heading = learningHeading.current;
+      if (!heading) return;
+      heading.scrollIntoView({ block: "start" });
+      heading.focus({ preventScroll: true });
+    });
+    return () => cancelAnimationFrame(frame);
+  }, [focusRequest, canEdit]);
 
   return (
     <div
@@ -183,30 +275,42 @@ export function AgentConfigurationPanel(props: {
                   Saving converts this session to agent settings, starting from what it can do now.
                 </Notice>
               ) : null}
-              <AgentCapabilityPicker
-                draft={draft}
-                onChange={setDraft}
-                availability={availability}
-                disabled={saving}
-              />
-              <Field
-                label="Who the agent is"
-                optional
-                aside={`${identity.trim().length.toLocaleString()} / ${AGENT_IDENTITY_MAX_CHARACTERS.toLocaleString()}`}
-                error={
-                  identityTooLong
-                    ? `Use ${AGENT_IDENTITY_MAX_CHARACTERS.toLocaleString()} characters or fewer.`
-                    : undefined
-                }
-                hint="Empty uses the workspace's identity, or OpenGeni's default."
+              <PanelSection id={`${sectionId}-identity`} title="Identity">
+                <Field
+                  label="Who the agent is"
+                  optional
+                  aside={`${identity.trim().length.toLocaleString()} / ${AGENT_IDENTITY_MAX_CHARACTERS.toLocaleString()}`}
+                  error={
+                    identityTooLong
+                      ? `Use ${AGENT_IDENTITY_MAX_CHARACTERS.toLocaleString()} characters or fewer.`
+                      : undefined
+                  }
+                  hint="Empty uses the workspace default, or Opengeni's own."
+                >
+                  <TextArea
+                    rows={3}
+                    value={identity}
+                    disabled={saving}
+                    placeholder={workspaceIdentity ?? undefined}
+                    onChange={(event) => setIdentity(event.target.value)}
+                  />
+                </Field>
+              </PanelSection>
+              <PanelSection
+                id={`${sectionId}-capabilities`}
+                title="Capabilities"
+                headingRef={learningHeading}
               >
-                <TextArea
-                  rows={3}
-                  value={identity}
+                <AgentCapabilityPicker
+                  draft={draft}
+                  onChange={setDraft}
+                  availability={availability}
                   disabled={saving}
-                  onChange={(event) => setIdentity(event.target.value)}
+                  learning={
+                    learningDraft ? { modes: learningDraft, onChange: setLearningDraft } : undefined
+                  }
                 />
-              </Field>
+              </PanelSection>
             </>
           ) : (
             <>
@@ -228,18 +332,32 @@ export function AgentConfigurationPanel(props: {
                   You can see these settings. Changing them needs permission to run this session.
                 </p>
               ) : null}
-              <div className="flex min-w-0 flex-col gap-2">
-                <h3 className="text-xs leading-4.5 font-medium text-fg-subtle">Who the agent is</h3>
+              <PanelSection
+                id={`${sectionId}-identity`}
+                title="Identity"
+                source={<SourceLine label={identitySource} href={defaultsHref} />}
+              >
                 <p
                   className={cn(
                     "text-sm leading-5 break-words whitespace-pre-wrap",
-                    config?.identity ? "text-fg" : "text-fg-muted",
+                    config?.identity || workspaceIdentity ? "text-fg" : "text-fg-muted",
                   )}
                 >
-                  {config?.identity ?? "The workspace's identity, or OpenGeni's default."}
+                  {config?.identity ?? workspaceIdentity ?? "Opengeni's general assistant."}
                 </p>
-              </div>
-              <AgentCapabilitySummary values={current.values} availability={availability} />
+              </PanelSection>
+              <PanelSection
+                id={`${sectionId}-capabilities`}
+                title="Capabilities"
+                source={<SourceLine label={capabilitiesSource} href={defaultsHref} />}
+                headingRef={learningHeading}
+              >
+                <AgentCapabilitySummary
+                  values={current.values}
+                  availability={availability}
+                  learningModes={learning.modes}
+                />
+              </PanelSection>
               <ConnectedApps session={session} />
               <TechnicalDetails session={session} />
             </>
@@ -273,6 +391,51 @@ export function AgentConfigurationPanel(props: {
         </div>
       ) : null}
     </div>
+  );
+}
+
+/** One titled part of the Agent tab, with where its value comes from on the right. */
+function PanelSection({
+  id,
+  title,
+  source,
+  headingRef,
+  children,
+}: {
+  id: string;
+  title: string;
+  source?: ReactNode;
+  headingRef?: Ref<HTMLHeadingElement>;
+  children: ReactNode;
+}) {
+  return (
+    <section
+      aria-labelledby={id}
+      data-agent-section={title}
+      className="flex min-w-0 flex-col gap-3 border-t border-border pt-5 first:border-t-0 first:pt-0"
+    >
+      <div className="flex min-w-0 flex-wrap items-baseline justify-between gap-x-3 gap-y-1">
+        <h3
+          id={id}
+          ref={headingRef}
+          tabIndex={headingRef ? -1 : undefined}
+          className="scroll-mt-4 text-sm leading-5 font-medium text-fg outline-none"
+        >
+          {title}
+        </h3>
+        {source ? <p className="m-0 text-xs leading-4.5 text-fg-muted">{source}</p> : null}
+      </div>
+      {children}
+    </section>
+  );
+}
+
+/** "Workspace default · Defaults": where a value comes from, and the page that sets it. */
+function SourceLine({ label, href }: { label: string; href: string }) {
+  return (
+    <>
+      {label} · <InAppHelpLink href={href}>Defaults</InAppHelpLink>
+    </>
   );
 }
 

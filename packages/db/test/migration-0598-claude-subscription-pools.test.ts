@@ -13,6 +13,7 @@ import {
   type OwnerMigratedTestDatabase,
 } from "@opengeni/testing";
 import { migrate } from "../src/migrate";
+import { provisionRoles } from "../src/provision-roles";
 import { encryptEnvironmentValue, decryptEnvironmentValue } from "../src/environment-crypto";
 
 const migration = "0598_claude_subscription_account_pools.sql";
@@ -295,4 +296,95 @@ test("accepted turns, children, task digests and producer inputs retain their or
   const relations =
     await owned.admin`SELECT relname, relforcerowsecurity FROM pg_class WHERE relkind = 'r' AND (relname LIKE 'scheduled_task%authorit%' OR relname = 'scheduled_task_run_personal_resource_admissions')`;
   expect(relations.every((row) => row.relforcerowsecurity)).toBe(true);
+}, 180_000);
+
+test("cloned capacity waiters retain the enabled xAI tenancy fence and reject unfenced app mutations before effect", async () => {
+  const triggers = await owned.admin`SELECT relation.relname, trigger.tgenabled,
+    trigger.tgfoid::regprocedure::text AS function,
+    pg_get_triggerdef(trigger.oid) AS definition
+    FROM pg_trigger trigger JOIN pg_class relation ON relation.oid = trigger.tgrelid
+    WHERE trigger.tgrelid IN ('xai_capacity_waiters'::regclass, 'claude_capacity_waiters'::regclass)
+      AND trigger.tgname = 'session_tenancy_workspace_fence' AND NOT trigger.tgisinternal
+    ORDER BY relation.relname`;
+  expect(triggers).toHaveLength(2);
+  const claude = triggers.find((row) => row.relname === "claude_capacity_waiters")!;
+  const xai = triggers.find((row) => row.relname === "xai_capacity_waiters")!;
+  expect(xai.tgenabled).toBe("O");
+  expect(claude.tgenabled).toBe(xai.tgenabled);
+  expect(claude.function).toBe("opengeni_private.require_session_tenancy_fence()");
+  expect(claude.function).toBe(xai.function);
+  expect(claude.definition).toBe(xai.definition.replaceAll("xai_", "claude_"));
+  const posture = await owned.admin`SELECT relrowsecurity, relforcerowsecurity FROM pg_class
+    WHERE oid IN ('xai_capacity_waiters'::regclass, 'claude_capacity_waiters'::regclass)`;
+  expect(posture).toHaveLength(2);
+  expect(posture.every((row) => row.relrowsecurity && row.relforcerowsecurity)).toBe(true);
+
+  await provisionRoles(owned.adminUrl, { appRole: "opengeni_app", appPassword: owned.appPassword });
+  const url = new URL(owned.adminUrl);
+  url.username = "opengeni_app";
+  url.password = owned.appPassword;
+  const app = postgres(url.toString(), { max: 1 });
+  const waiterId = randomUUID();
+  try {
+    const [role] =
+      await app`SELECT rolsuper, rolbypassrls FROM pg_roles WHERE rolname = current_user`;
+    expect(role).toMatchObject({ rolsuper: false, rolbypassrls: false });
+    const insert = (tx: postgres.TransactionSql) => tx`INSERT INTO claude_capacity_waiters
+      (id, account_id, workspace_id, session_id, blocked_turn_id, blocked_turn_generation,
+        workflow_id, authority_scope, next_check_at)
+      VALUES (${waiterId}, ${ids.account}, ${ids.workspace}, ${work.session}, ${work.turn}, 1,
+        'synthetic-workflow', 'workspace', now())`;
+    const scoped = async (
+      mutation: (tx: postgres.TransactionSql) => Promise<unknown>,
+      fenced = false,
+    ) =>
+      await app.begin(async (tx) => {
+        await tx`SELECT set_config('opengeni.account_id', ${ids.account}, true),
+          set_config('opengeni.workspace_id', ${ids.workspace}, true),
+          set_config('opengeni.subject_id', 'user:fixture', true),
+          set_config('opengeni.session_variable_set_attachments_v1', '1', true)`;
+        if (fenced)
+          await tx`SELECT pg_advisory_xact_lock_shared(hashtextextended('session-tenancy:' || ${ids.workspace}, 0))`;
+        return await mutation(tx);
+      });
+    const fenceFailure = {
+      code: "55000",
+      message: "session tenancy mutation requires the workspace fence",
+      detail: "claude_capacity_waiters",
+    };
+    await expect(scoped(insert)).rejects.toMatchObject(fenceFailure);
+    expect(
+      await owned.admin`SELECT id FROM claude_capacity_waiters WHERE id = ${waiterId}`,
+    ).toHaveLength(0);
+    // The same role, tenant, row and RLS policies succeed only with the fence.
+    await scoped(insert, true);
+    const before = await owned.admin`SELECT * FROM claude_capacity_waiters WHERE id = ${waiterId}`;
+    expect(before).toHaveLength(1);
+    await scoped(async (tx) => {
+      expect(await tx`SELECT id FROM claude_capacity_waiters WHERE id = ${waiterId}`).toHaveLength(
+        1,
+      );
+    });
+    await expect(
+      scoped(
+        (tx) => tx`UPDATE claude_capacity_waiters SET wake_revision = wake_revision + 1
+      WHERE id = ${waiterId}`,
+      ),
+    ).rejects.toMatchObject(fenceFailure);
+    expect([
+      ...(await owned.admin`SELECT * FROM claude_capacity_waiters WHERE id = ${waiterId}`),
+    ]).toEqual([...before]);
+    await expect(
+      scoped((tx) => tx`DELETE FROM claude_capacity_waiters WHERE id = ${waiterId}`),
+    ).rejects.toMatchObject(fenceFailure);
+    expect([
+      ...(await owned.admin`SELECT * FROM claude_capacity_waiters WHERE id = ${waiterId}`),
+    ]).toEqual([...before]);
+    await scoped((tx) => tx`DELETE FROM claude_capacity_waiters WHERE id = ${waiterId}`, true);
+    expect(
+      await owned.admin`SELECT id FROM claude_capacity_waiters WHERE id = ${waiterId}`,
+    ).toHaveLength(0);
+  } finally {
+    await app.end();
+  }
 }, 180_000);

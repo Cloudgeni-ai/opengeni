@@ -1,15 +1,24 @@
+export { readCreditPromotionPolicy } from "./credit-promotion-policy";
+import { getBillingBalance, getSpendableCreditBalance, planCreditDebit } from "./credit-balances";
+export {
+  getBillingBalance,
+  getSpendableCreditBalance,
+  spendableCreditMicros,
+} from "./credit-balances";
+import {
+  agentSelectionNotes,
+  loadInboxExecutionContext,
+  turnHuman,
+  inboxOrigin,
+} from "./inbox-execution-context";
+import { parentOutboxAuthorityTx } from "./child-outbox-authority";
 export { SubscriptionAccountChangedError } from "./subscription-account-conflict";
+import type { GoalAdmissionPausedReason } from "@opengeni/contracts";
 import {
   claudeSubscriptionAccountRepository,
   claudeSubscriptionTables,
 } from "./claude-subscription-accounts";
 import { subscriptionExecutionAuthorityFromTurn } from "./accepted-subscription-authority";
-const claudeProviderAccountAuthoritySnapshotForTurnInTransaction = (
-  db: Database,
-  workspaceId: string,
-  sessionId: string,
-  turnId: string,
-) => subscriptionAuthorityForTurnInTransaction(db, "claude", workspaceId, sessionId, turnId);
 export const getScheduledTaskClaudeProviderAccountAuthoritySnapshot = (
   db: Database,
   workspaceId: string,
@@ -32,7 +41,6 @@ import {
   getAcceptedSubscriptionTaskAuthority,
   getAcceptedSubscriptionTurnAuthority,
   getAcceptedSubscriptionParentAuthority,
-  subscriptionAuthorityForTurnInTransaction,
 } from "./accepted-subscription-authority";
 export { resolveClaudeAccountCredential } from "./claude-subscription-account-tokens";
 export * from "./claude-subscription-accounts";
@@ -52,6 +60,23 @@ import {
   validateOrganizationApiKeyWorkspaceScope,
 } from "./organization-api-key-access";
 export { OrganizationApiKeyWorkspaceScopeError } from "./organization-api-key-access";
+import {
+  effectiveKeyPermissions,
+  insertOrganizationServiceAccount,
+  lockOrganizationServiceAccount,
+  OrganizationServiceAccountRoleError,
+  permissionsBeyondServiceAccountRole,
+  serviceAccountsForKeys,
+} from "./organization-service-accounts";
+export {
+  createOrganizationServiceAccount,
+  deleteOrganizationServiceAccount,
+  getOrganizationServiceAccount,
+  listOrganizationServiceAccounts,
+  OrganizationServiceAccountNotFoundError,
+  OrganizationServiceAccountRoleError,
+  updateOrganizationServiceAccount,
+} from "./organization-service-accounts";
 import { PROMPT_PREVIEW_SCAN_MAX_CODE_UNITS } from "@opengeni/contracts/session-titles";
 import { sessionListEntry } from "@opengeni/contracts/session-list-entries";
 import { currentSessionAttachmentReadAccess } from "./database";
@@ -186,7 +211,7 @@ import {
   getWorkspaceConnectionModelRestrictions as resolveWorkspaceConnectionModelRestrictions,
 } from "./workspace-model-connection-access";
 export * from "./model-connection-access";
-import { createHash, randomUUID } from "node:crypto";
+import { createHash, randomUUID, timingSafeEqual } from "node:crypto";
 import {
   SCHEDULED_HUMAN_WAIT_TIMEOUT_CLIENT_EVENT_PREFIX,
   scheduledRunHumanWaitsInRlsContext,
@@ -422,7 +447,6 @@ import {
   closePrivateSessionCreateCapability,
   openPrivateChildSessionCreateCapability,
   openPrivateSessionCreateCapability,
-  sessionTenancyProductActivated,
 } from "./session-tenancy";
 import {
   completeCodemodeOperationInTransaction,
@@ -510,6 +534,7 @@ import {
   VERCEL_AI_GATEWAY_CREDENTIAL_OPERATION_ID_METADATA_KEY,
 } from "@opengeni/contracts";
 import {
+  ClaudeSubscriptionCredential,
   environmentsEncryptionKeyBytes,
   SANDBOX_LIFECYCLE_TRANSITION_MAX_WAIT_MS,
   SANDBOX_DEADLINE_COMMAND_STOP_GRACE_MS,
@@ -722,6 +747,7 @@ import {
 
 export { sql as dbSql } from "drizzle-orm";
 export * from "./child-lifecycle-notices";
+export * from "./child-terminal-wake-repair";
 export { configureCodeSearchDeploymentPolicy } from "./code-search-policy";
 export { listRecentSessionRepositoryResources } from "./recent-session-repositories";
 export * from "./session-control";
@@ -810,6 +836,7 @@ export * from "./integration-facets";
 export * from "./insights";
 export * from "./insights-model-bundle";
 export * from "./insights-usage-bundle";
+export * from "./insights-unified";
 export * from "./organization-membership-lifecycle";
 import { assertActiveManagedHumanOrganizationMembership } from "./organization-membership-lifecycle";
 // Deliberately NOT `export *`: `accountIdInRlsScope` is an internal convenience
@@ -4266,6 +4293,9 @@ export async function createOrganizationApiKey(
     maxActiveKeys?: number | null;
     rotationSourceApiKeyId?: string | null;
     policy?: OrganizationAccessPolicy;
+    /** The holder; omitted creates a service account named after the key. */
+    serviceAccountId?: string | null;
+    createdBySubjectId?: string | null;
   },
 ): Promise<ApiKey> {
   return await withRlsContext(
@@ -4273,6 +4303,40 @@ export async function createOrganizationApiKey(
     { accountId: input.accountId, workspaceId: null },
     async (scopedDb) => {
       const policy = input.policy ? normalizeOrganizationAccessPolicy(input.policy) : undefined;
+      const storedPermissions = policy?.permissions ?? input.permissions;
+      const effective = effectiveKeyPermissions({
+        permissions: storedPermissions,
+        permissionMode: policy ? "explicit" : "legacy",
+      });
+      // A key creating a key (rotation) keeps it with the same service account.
+      const [rotationHolder] =
+        !input.serviceAccountId && input.rotationSourceApiKeyId
+          ? await scopedDb
+              .select({ serviceAccountId: schema.apiKeys.serviceAccountId })
+              .from(schema.apiKeys)
+              .where(
+                and(
+                  eq(schema.apiKeys.accountId, input.accountId),
+                  eq(schema.apiKeys.id, input.rotationSourceApiKeyId),
+                ),
+              )
+          : [];
+      const holderId = input.serviceAccountId ?? rotationHolder?.serviceAccountId ?? null;
+      const serviceAccount = holderId
+        ? await lockOrganizationServiceAccount(scopedDb, input.accountId, holderId)
+        : await insertOrganizationServiceAccount(scopedDb, {
+            accountId: input.accountId,
+            name: input.name,
+            description: input.description ?? null,
+            // Least privilege: admin only when the key needs it.
+            role:
+              permissionsBeyondServiceAccountRole("member", effective).length > 0
+                ? "admin"
+                : "member",
+            createdBySubjectId: input.createdBySubjectId ?? null,
+          });
+      const beyond = permissionsBeyondServiceAccountRole(serviceAccount.role, effective);
+      if (beyond.length > 0) throw new OrganizationServiceAccountRoleError(beyond);
       if (policy)
         await validateOrganizationApiKeyWorkspaceScope(
           scopedDb,
@@ -4319,9 +4383,10 @@ export async function createOrganizationApiKey(
           description: input.description ?? null,
           prefix: input.prefix,
           keyHash: input.keyHash,
-          permissions: policy?.permissions ?? input.permissions,
+          permissions: storedPermissions,
           permissionMode: policy ? "explicit" : "legacy",
           workspaceScope: policy?.workspaceScope.kind ?? "all",
+          serviceAccountId: serviceAccount.id,
           expiresAt: input.expiresAt ?? null,
         })
         .returning();
@@ -4333,10 +4398,17 @@ export async function createOrganizationApiKey(
           row.id,
           policy.workspaceScope,
         );
-      return mapApiKey(
-        row,
-        policy?.workspaceScope.kind === "selected" ? policy.workspaceScope.workspaceIds : [],
-      );
+      return {
+        ...mapApiKey(
+          row,
+          policy?.workspaceScope.kind === "selected" ? policy.workspaceScope.workspaceIds : [],
+        ),
+        serviceAccount: {
+          id: serviceAccount.id,
+          name: serviceAccount.name,
+          role: serviceAccount.role,
+        },
+      };
     },
   );
 }
@@ -4367,7 +4439,8 @@ export async function listOrganizationApiKeys(db: Database, accountId: string): 
       .orderBy(desc(schema.apiKeys.createdAt))
       .for("share");
     const scopes = await readOrganizationApiKeyWorkspaceScopes(scopedDb, rows);
-    return rows.map((row) => mapApiKey(row, scopes.get(row.id)));
+    const holders = await serviceAccountsForKeys(scopedDb, rows);
+    return rows.map((row) => withHolder(mapApiKey(row, scopes.get(row.id)), row, holders));
   });
 }
 
@@ -4391,7 +4464,11 @@ export async function getOrganizationApiKey(
       .for("share");
     if (!row) return null;
     const scopes = await readOrganizationApiKeyWorkspaceScopes(tx, [row]);
-    return mapApiKey(row, scopes.get(row.id));
+    return withHolder(
+      mapApiKey(row, scopes.get(row.id)),
+      row,
+      await serviceAccountsForKeys(tx, [row]),
+    );
   });
 }
 
@@ -4418,6 +4495,11 @@ export async function updateOrganizationApiKey(
     const policy = input.policy ? normalizeOrganizationAccessPolicy(input.policy) : undefined;
     if (policy)
       await validateOrganizationApiKeyWorkspaceScope(tx, accountId, policy.workspaceScope);
+    if (policy && prior.serviceAccountId) {
+      const holder = await lockOrganizationServiceAccount(tx, accountId, prior.serviceAccountId);
+      const beyond = permissionsBeyondServiceAccountRole(holder.role, policy.permissions);
+      if (beyond.length > 0) throw new OrganizationServiceAccountRoleError(beyond);
+    }
     const [row] = await tx
       .update(schema.apiKeys)
       .set({
@@ -4438,7 +4520,11 @@ export async function updateOrganizationApiKey(
     if (policy)
       await replaceOrganizationApiKeyWorkspaceScope(tx, accountId, keyId, policy.workspaceScope);
     const scopes = await readOrganizationApiKeyWorkspaceScopes(tx, [row]);
-    return mapApiKey(row, scopes.get(row.id));
+    return withHolder(
+      mapApiKey(row, scopes.get(row.id)),
+      row,
+      await serviceAccountsForKeys(tx, [row]),
+    );
   });
 }
 
@@ -4530,7 +4616,11 @@ export async function revokeOrganizationApiKey(
       .returning();
     if (!row) return null;
     const scopes = await readOrganizationApiKeyWorkspaceScopes(scopedDb, [row]);
-    return mapApiKey(row, scopes.get(row.id));
+    return withHolder(
+      mapApiKey(row, scopes.get(row.id)),
+      row,
+      await serviceAccountsForKeys(scopedDb, [row]),
+    );
   });
 }
 
@@ -5380,6 +5470,14 @@ export async function recordModelCallFact(
     pricedCostMicros: number;
     estimatedProviderCostMicros?: number | null;
     equivalentCreditCostMicros?: number | null;
+    /** Captured classes must conserve the already-recorded provider total. */
+    listByClassMicros?: {
+      uncachedInput: number;
+      cacheRead: number;
+      cacheWrite: number;
+      output: number;
+    } | null;
+    listByClassApprox?: boolean;
     pricingSource?: "configured_list_price" | "gateway_reported" | null;
     contextContributions?: readonly ModelContextContributionSummary[] | null;
     inputTokens?: number | null;
@@ -5426,6 +5524,18 @@ export async function recordModelCallFact(
     input.contextContributions == null
       ? null
       : ModelContextContributionSummaries.parse(input.contextContributions);
+  const classes = input.listByClassMicros;
+  if (
+    classes != null &&
+    (Object.values(classes).some((value) => !Number.isSafeInteger(value) || value < 0) ||
+      input.estimatedProviderCostMicros == null ||
+      Object.values(classes).reduce((total, value) => total + BigInt(value), 0n) !==
+        BigInt(input.estimatedProviderCostMicros))
+  ) {
+    throw new Error(
+      "recordModelCallFact: list classes must be non-negative safe integers conserving the recorded total",
+    );
+  }
   return await withRlsContext(
     db,
     { accountId: input.accountId, workspaceId: input.workspaceId },
@@ -5480,6 +5590,11 @@ export async function recordModelCallFact(
           estimatedProviderCostMicros: input.estimatedProviderCostMicros ?? null,
           equivalentCreditCostMicros: input.equivalentCreditCostMicros ?? null,
           pricingSource: input.pricingSource ?? null,
+          listUncachedInputCostMicros: classes?.uncachedInput ?? null,
+          listCacheReadCostMicros: classes?.cacheRead ?? null,
+          listCacheWriteCostMicros: classes?.cacheWrite ?? null,
+          listOutputCostMicros: classes?.output ?? null,
+          listCostIsApprox: classes == null ? null : (input.listByClassApprox ?? false),
           contextContributions,
           occurredAt,
         })
@@ -5498,6 +5613,11 @@ export async function recordModelCallFact(
             estimatedProviderCostMicros: sql`coalesce(${schema.modelCallFacts.estimatedProviderCostMicros}, excluded.estimated_provider_cost_micros)`,
             equivalentCreditCostMicros: sql`coalesce(${schema.modelCallFacts.equivalentCreditCostMicros}, excluded.equivalent_credit_cost_micros)`,
             pricingSource: sql`coalesce(${schema.modelCallFacts.pricingSource}, excluded.pricing_source)`,
+            listUncachedInputCostMicros: sql`coalesce(${schema.modelCallFacts.listUncachedInputCostMicros}, excluded.list_uncached_input_cost_micros)`,
+            listCacheReadCostMicros: sql`coalesce(${schema.modelCallFacts.listCacheReadCostMicros}, excluded.list_cache_read_cost_micros)`,
+            listCacheWriteCostMicros: sql`coalesce(${schema.modelCallFacts.listCacheWriteCostMicros}, excluded.list_cache_write_cost_micros)`,
+            listOutputCostMicros: sql`coalesce(${schema.modelCallFacts.listOutputCostMicros}, excluded.list_output_cost_micros)`,
+            listCostIsApprox: sql`coalesce(${schema.modelCallFacts.listCostIsApprox}, excluded.list_cost_is_approx)`,
             contextContributions: sql`coalesce(${schema.modelCallFacts.contextContributions}, excluded.context_contributions)`,
           },
         })
@@ -5588,6 +5708,7 @@ export async function applyCreditLedgerEntry(
     workspaceId?: string | null;
     type: string;
     amountMicros: number;
+    eligibleModelIds?: string[] | undefined;
     sourceType?: string | null;
     sourceId?: string | null;
     idempotencyKey: string;
@@ -5606,6 +5727,7 @@ export async function applyCreditLedgerEntry(
           workspaceId: input.workspaceId ?? null,
           type: input.type,
           amountMicros: input.amountMicros,
+          eligibleModelIds: input.eligibleModelIds ?? null,
           sourceType: input.sourceType ?? null,
           sourceId: input.sourceId ?? null,
           idempotencyKey: input.idempotencyKey,
@@ -5627,6 +5749,9 @@ export async function applyCreditDebitUpToBalance(
     workspaceId?: string | null;
     type: string;
     requestedAmountMicros: number;
+    /** Canonical, accepted model ID. Omitted for non-model usage. */
+    modelId?: string;
+    creditPolicyRevision?: number | undefined;
     sourceType?: string | null;
     sourceId?: string | null;
     idempotencyKey: string;
@@ -5645,35 +5770,42 @@ export async function applyCreditDebitUpToBalance(
     { accountId: input.accountId, workspaceId: input.workspaceId ?? null },
     async (scopedDb) => {
       await scopedDb.execute(sql`select pg_advisory_xact_lock(hashtext(${input.accountId}))`);
-      const before = await getBillingBalance(scopedDb, input.accountId);
-      const candidateDebitMicros = Math.min(
-        input.requestedAmountMicros,
-        Math.max(0, before.balanceMicros),
-      );
-      let debitedMicros = 0;
-      if (candidateDebitMicros > 0) {
-        const inserted = await scopedDb
-          .insert(schema.creditLedgerEntries)
-          .values({
+      const before = await getBillingBalance(scopedDb, input.accountId, input.creditPolicyRevision);
+      const plan = planCreditDebit(before, input.requestedAmountMicros, input.modelId);
+      const candidateDebitMicros = plan.debitedMicros;
+      // Keep a zero-cost receipt too: retrying after a top-up must not charge
+      // a response that was already settled while the eligible balance was empty.
+      const [inserted] = await scopedDb
+        .insert(schema.creditLedgerEntries)
+        .values({
+          accountId: input.accountId,
+          workspaceId: input.workspaceId ?? null,
+          type: input.type,
+          amountMicros: -candidateDebitMicros,
+          sourceType: input.sourceType ?? null,
+          sourceId: input.sourceId ?? null,
+          idempotencyKey: input.idempotencyKey,
+          metadata: {
+            ...input.metadata,
+            requestedAmountMicros: input.requestedAmountMicros,
+            debitedMicros: candidateDebitMicros,
+            creditPolicyRevision: before.creditPolicyRevision,
+          },
+          occurredAt: input.occurredAt ?? new Date(),
+        })
+        .onConflictDoNothing({
+          target: schema.creditLedgerEntries.idempotencyKey,
+        })
+        .returning({ id: schema.creditLedgerEntries.id });
+      const debitedMicros = inserted ? candidateDebitMicros : 0;
+      if (inserted && plan.allocations.length) {
+        await scopedDb.insert(schema.creditDebitAllocations).values(
+          plan.allocations.map((allocation) => ({
+            ...allocation,
             accountId: input.accountId,
-            workspaceId: input.workspaceId ?? null,
-            type: input.type,
-            amountMicros: -candidateDebitMicros,
-            sourceType: input.sourceType ?? null,
-            sourceId: input.sourceId ?? null,
-            idempotencyKey: input.idempotencyKey,
-            metadata: {
-              ...input.metadata,
-              requestedAmountMicros: input.requestedAmountMicros,
-              debitedMicros: candidateDebitMicros,
-            },
-            occurredAt: input.occurredAt ?? new Date(),
-          })
-          .onConflictDoNothing({
-            target: schema.creditLedgerEntries.idempotencyKey,
-          })
-          .returning({ id: schema.creditLedgerEntries.id });
-        debitedMicros = inserted.length === 1 ? candidateDebitMicros : 0;
+            debitEntryId: inserted.id,
+          })),
+        );
       }
       return {
         balance: await getBillingBalance(scopedDb, input.accountId),
@@ -5904,23 +6036,6 @@ export async function markStripeWebhookProcessed(db: Database, id: string): Prom
     .update(schema.stripeWebhookEvents)
     .set({ processedAt: new Date() })
     .where(eq(schema.stripeWebhookEvents.id, id));
-}
-
-export async function getBillingBalance(db: Database, accountId: string): Promise<BillingBalance> {
-  return await withAccountRls(db, accountId, async (scopedDb) => {
-    const [{ balance } = { balance: 0 }] = await scopedDb
-      .select({
-        balance: sql<number>`coalesce(sum(${schema.creditLedgerEntries.amountMicros}), 0)`,
-      })
-      .from(schema.creditLedgerEntries)
-      .where(eq(schema.creditLedgerEntries.accountId, accountId));
-    return {
-      accountId,
-      balanceMicros: Number(balance),
-      currency: "usd",
-      updatedAt: new Date().toISOString(),
-    };
-  });
 }
 
 /**
@@ -11816,7 +11931,7 @@ export class SlackInstallationBindingConflictError extends Error {
         ? "Slack team has conflicting legacy installations and is quarantined"
         : reason === "stale_reinstall"
           ? "Slack installation changed during reinstall; start again"
-          : "Slack team is already bound to a different OpenGeni installation",
+          : "Slack team is already bound to a different Opengeni installation",
     );
     this.name = "SlackInstallationBindingConflictError";
   }
@@ -18462,6 +18577,7 @@ export type ScheduledTaskAdmissionRefusalReason =
   | "machine_enrollment_inactive"
   | "variable_set_unavailable"
   | "rig_version_unavailable"
+  | "scheduled_model_unavailable"
   | "insufficient_credits"
   | "allowance_exhausted"
   | "monthly_model_cost_limit"
@@ -19364,6 +19480,23 @@ export async function markScheduledTaskRunAuthorityRejectedInTransaction(
   )`);
 }
 
+function scheduledRunPreclaimDenial(
+  run:
+    | Pick<
+        typeof schema.scheduledTaskRuns.$inferSelect,
+        "status" | "error" | "acceptedExecutionSnapshot"
+      >
+    | undefined,
+): string | null {
+  if (!run?.acceptedExecutionSnapshot) return "scheduled_authority_snapshot_missing";
+  if (run.status === "dispatched") return null;
+  return run.status === "skipped" &&
+    (run.error === "scheduled_task_paused_before_claim" ||
+      run.error === "scheduled_task_deleted_before_claim")
+    ? "scheduled_task_inactive_before_claim"
+    : "scheduled_run_terminal_before_claim";
+}
+
 async function validateScheduledTargetExecutionAtClaim(
   tx: Database,
   input: {
@@ -19390,14 +19523,8 @@ async function validateScheduledTargetExecutionAtClaim(
     )
     .limit(1)
     .for("update");
-  if (!run?.acceptedExecutionSnapshot) return "scheduled_authority_snapshot_missing";
-  if (run.status !== "dispatched") {
-    return run.status === "skipped" &&
-      (run.error === "scheduled_task_paused_before_claim" ||
-        run.error === "scheduled_task_deleted_before_claim")
-      ? "scheduled_task_inactive_before_claim"
-      : "scheduled_run_terminal_before_claim";
-  }
+  const preclaimDenial = scheduledRunPreclaimDenial(run);
+  if (preclaimDenial) return preclaimDenial;
   const [liveAuthority] = await rawRows<{ denial: string | null }>(
     tx,
     sql`select validate_scheduled_agent_run_live_authority(
@@ -19407,7 +19534,7 @@ async function validateScheduledTargetExecutionAtClaim(
     ) as denial`,
   );
   if (liveAuthority?.denial) return liveAuthority.denial;
-  const accepted = ScheduledTaskRunAcceptedExecution.parse(run.acceptedExecutionSnapshot);
+  const accepted = ScheduledTaskRunAcceptedExecution.parse(run!.acceptedExecutionSnapshot);
   const target = accepted.targetSessionExecution;
   if (!target) return null;
   const mcpServers = await tx
@@ -28112,6 +28239,7 @@ function createScopedSubscriptionCapacityWaiters(options: {
       leaseFence?: { holderId: string; generation: number };
       credentialQuarantine?: XaiCredentialLeaseQuarantine;
       expectedCredentialVersion?: number;
+      credentialTokenFence?: { encryptionKey: Uint8Array; observedAccessToken: string };
       now?: Date;
     },
   ): Promise<ArmXaiCapacityWaitResult> {
@@ -28130,6 +28258,8 @@ function createScopedSubscriptionCapacityWaiters(options: {
     if (input.credentialQuarantine && !input.leaseFence) {
       throw new Error(options.label + " credential quarantine requires an exact lease fence");
     }
+    if (options.provider === "claude" && input.credentialQuarantine && !input.credentialTokenFence)
+      throw new Error("Claude credential quarantine requires the exact dispatched token");
     if (
       input.credentialQuarantine?.kind === "cooldown" &&
       (!Number.isFinite(input.credentialQuarantine.until.getTime()) ||
@@ -28219,7 +28349,6 @@ function createScopedSubscriptionCapacityWaiters(options: {
                   and(
                     eq(tables.credentialLeases.workspaceId, input.workspaceId),
                     eq(tables.credentialLeases.turnId, input.turnId),
-                    gt(tables.credentialLeases.leasedUntil, now),
                   ),
                 )
                 .for("update")
@@ -28279,6 +28408,15 @@ function createScopedSubscriptionCapacityWaiters(options: {
               lease.ownerOrganizationMembershipId === ownerOrganizationMembershipId &&
               lease.holderId === input.leaseFence.holderId &&
               lease.generation === input.leaseFence.generation);
+          const leaseStillLive = async () => {
+            if (!input.leaseFence) return true;
+            if (!lease) return false;
+            const [clock] = await rawRows<{ live: boolean }>(
+              tx,
+              sql`select ${lease.leasedUntil.toISOString()}::timestamptz > clock_timestamp() as live`,
+            );
+            return clock?.live === true;
+          };
           if (
             !session ||
             !attempt ||
@@ -28291,6 +28429,7 @@ function createScopedSubscriptionCapacityWaiters(options: {
             (goalId !== null &&
               (!goal || goal.status !== "active" || goal.version !== goalVersion)) ||
             !leaseFenceValid ||
+            !(await leaseStillLive()) ||
             !xaiSnapshotMatchesTurn(turn, snapshot, input.subjectId)
           ) {
             return {
@@ -28303,6 +28442,43 @@ function createScopedSubscriptionCapacityWaiters(options: {
           if (input.credentialQuarantine) {
             if (!lease)
               throw new Error(options.label + " credential quarantine lost its lease fence");
+            const [credential] = await tx
+              .select({ encrypted: tables.credentials.credentialEncrypted })
+              .from(tables.credentials)
+              .where(
+                and(
+                  eq(tables.credentials.accountId, input.accountId),
+                  eq(tables.credentials.id, lease.credentialId),
+                ),
+              )
+              .for("update")
+              .limit(1);
+            if (!credential || !(await leaseStillLive()))
+              return {
+                action: "stale",
+                waiter: existing ? mapXaiCapacityWaiter(existing) : null,
+                events: [],
+              } as const;
+            if (options.provider === "claude" && input.credentialTokenFence) {
+              const fence = input.credentialTokenFence;
+              const token = credential
+                ? ClaudeSubscriptionCredential.parse(
+                    JSON.parse(decryptEnvironmentValue(fence.encryptionKey, credential.encrypted)),
+                  ).token
+                : null;
+              const current = Buffer.from(token ?? ""),
+                observed = Buffer.from(fence.observedAccessToken);
+              if (
+                !token ||
+                current.length !== observed.length ||
+                !timingSafeEqual(current, observed)
+              )
+                return {
+                  action: "stale",
+                  waiter: existing ? mapXaiCapacityWaiter(existing) : null,
+                  events: [],
+                } as const;
+            }
             const updated = await tx
               .update(tables.credentials)
               .set(
@@ -28323,6 +28499,7 @@ function createScopedSubscriptionCapacityWaiters(options: {
                   eq(tables.credentials.accountId, input.accountId),
                   options.credentialWorkspacePredicate(input.workspaceId),
                   eq(tables.credentials.id, lease.credentialId),
+                  sql`${lease.leasedUntil.toISOString()}::timestamptz > clock_timestamp()`,
                   ...(input.expectedCredentialVersion === undefined
                     ? []
                     : [eq(tables.credentials.version, input.expectedCredentialVersion)]),
@@ -28330,7 +28507,7 @@ function createScopedSubscriptionCapacityWaiters(options: {
               )
               .returning({ id: tables.credentials.id });
             if (updated.length !== 1) {
-              if (input.expectedCredentialVersion !== undefined)
+              if (input.leaseFence)
                 return {
                   action: "stale",
                   waiter: existing ? mapXaiCapacityWaiter(existing) : null,
@@ -35497,15 +35674,6 @@ export async function getSessionParentMcpAccountBindings(
   });
 }
 
-async function xaiProviderAccountAuthoritySnapshotForTurnInTransaction(
-  db: Database,
-  workspaceId: string,
-  sessionId: string,
-  turnId: string,
-): Promise<XaiProviderAccountAuthoritySnapshotV1> {
-  return subscriptionAuthorityForTurnInTransaction(db, "xai", workspaceId, sessionId, turnId);
-}
-
 export async function getSessionTurnXaiProviderAccountAuthoritySnapshot(
   db: Database,
   workspaceId: string,
@@ -37520,11 +37688,6 @@ async function readSessionListForSubject(
           throw new SessionListAccessError();
         }
 
-        const tenancyActivated = await sessionTenancyProductActivated(
-          tx as unknown as Database,
-          workspaceId,
-        );
-
         const archiveMode = options.archiveStatus ?? (options.archivedOnly ? "archived" : "active");
         const sortBy = options.sortBy ?? (archiveMode === "archived" ? "archivedAt" : "updatedAt");
         if (options.archivedOnly && archiveMode !== "archived") {
@@ -37974,7 +38137,7 @@ async function readSessionListForSubject(
                       ? { archivedAt: exactArchiveTimestamps.get(session.id)! }
                       : {}),
                   },
-                  { subjectId: options.subjectId, activated: tenancyActivated },
+                  { subjectId: options.subjectId },
                 ),
                 ...(sortBy === "updatedAt" && exactOrdinaryTimestamps.has(session.id)
                   ? { updatedAt: exactOrdinaryTimestamps.get(session.id)! }
@@ -38230,7 +38393,6 @@ export async function getSessionForSubject(
     const mcpServers = await sessionMcpServerMetadataForSessions(scopedDb, workspaceId, [
       sessionId,
     ]);
-    const tenancyActivated = await sessionTenancyProductActivated(scopedDb, workspaceId);
     const failureDiagnostics = await sessionFailureDiagnostics(scopedDb, workspaceId, session);
     return projectSessionForRelatedAccess(
       {
@@ -38242,7 +38404,7 @@ export async function getSessionForSubject(
           mapSessionAttention(session, row.pin),
           mapSessionArchive(row.pin),
           undefined,
-          { subjectId, activated: tenancyActivated },
+          { subjectId },
         )),
         failureDiagnostics,
       },
@@ -44397,6 +44559,19 @@ export async function applyContextCompaction(
             ),
           );
         const supersededFrom = Math.floor(Number(maxPosition)) + 1;
+        // Installing a successful summary is model progress, including a
+        // maintenance turn that never enters the ordinary response stream.
+        // Clear only provider recovery under the same locked attempt fence.
+        if (providerRecoveryCountFromTurnMetadata(fence.turn!.metadata) > 0) {
+          await tx
+            .update(schema.sessionTurns)
+            .set({
+              metadata: metadataWithoutProviderRecoveryCount(fence.turn!.metadata),
+              version: fence.turn!.version + 1,
+              updatedAt: new Date(),
+            })
+            .where(eq(schema.sessionTurns.id, input.turnId));
+        }
         await tx
           .update(schema.sessionHistoryItems)
           .set({ active: false })
@@ -46515,7 +46690,7 @@ export class SandboxPaidComputeAdmissionError extends Error {
     public readonly workspaceId: string,
     public readonly sandboxGroupId: string,
   ) {
-    super("Insufficient OpenGeni credits to admit paid sandbox compute");
+    super("Insufficient Opengeni credits to admit paid sandbox compute");
   }
 }
 
@@ -47680,7 +47855,7 @@ async function acquireLeaseOnce(
                 refusal,
               );
             }
-            const balance = await getBillingBalance(tx, accountId);
+            const balance = await getSpendableCreditBalance(tx, accountId);
             if (balance.balanceMicros <= 0) {
               throw new SandboxPaidComputeAdmissionError(workspaceId, sandboxGroupId);
             }
@@ -52641,8 +52816,8 @@ type LostProviderBlockerScope = {
 };
 
 /** Take the session-event write prefix (workspace control share, workspace,
- * sessions, cursors) for every session whose background command is linked to
- * an active process in the exact lost-provider scope. Call it before the
+ * sessions, cursors) for linked background commands and attempt owners in the
+ * exact lost-provider scope. Call it before the
  * process/admission/PTY/lease locks so terminal command delivery keeps the
  * canonical control -> session -> process -> admission -> lease order. */
 async function linkedLostProviderCommandSessionIdsTx(
@@ -52652,7 +52827,8 @@ async function linkedLostProviderCommandSessionIdsTx(
   const sessions = await rawRows<{ session_id: string }>(
     tx,
     sql`
-      select distinct command.session_id
+      select distinct session_id from (
+      select command.session_id
       from session_background_commands command
       join sandbox_retained_processes process on process.id = command.retained_process_id
         and process.workspace_id = command.workspace_id
@@ -52666,7 +52842,21 @@ async function linkedLostProviderCommandSessionIdsTx(
         and process.provider_instance_id = ${input.lostInstanceId}
         and process.state = 'active'
         and command.state in ('running', 'stopping')
-      order by command.session_id
+      union
+      select process.session_id
+      from sandbox_retained_processes process
+      join session_turn_attempts attempt on attempt.id = process.owner_attempt_id
+        and attempt.workspace_id = process.workspace_id
+        and attempt.session_id = process.session_id
+      where process.account_id = ${input.accountId}
+        and process.workspace_id = ${input.workspaceId}
+        and process.lease_id = ${input.leaseId}
+        and process.sandbox_group_id = ${input.sandboxGroupId}
+        and process.lease_epoch = ${input.lostEpoch}
+        and process.provider_backend = ${input.lostBackend}
+        and process.provider_instance_id = ${input.lostInstanceId}
+        and process.state = 'active'
+      ) owners order by session_id
     `,
   );
   return sessions.map((row) => row.session_id);
@@ -52885,6 +53075,37 @@ async function settleExactLostProviderWorkspaceBlockersTx(
         mutation,
       );
       delivery.events.push(...mutation.events);
+    }
+  }
+
+  if (lostProcesses.length) {
+    // The session prefix was locked before blockers and revalidated afterward.
+    // Unadopted writers have no background-command delivery to wake their owner;
+    // persist that obligation atomically with physical provider settlement.
+    const owners = await rawRows<{ session_id: string; temporal_workflow_id: string }>(
+      tx,
+      sql`
+        select distinct attempt.session_id, attempt.temporal_workflow_id
+        from session_turn_attempts attempt
+        join sandbox_retained_processes process on process.owner_attempt_id = attempt.id
+          and process.workspace_id = attempt.workspace_id
+          and process.session_id = attempt.session_id
+        where attempt.workspace_id = ${input.workspaceId}
+          and attempt.account_id = ${input.accountId}
+          and attempt.state = 'closed' and attempt.quiesced_at is null
+          and attempt.temporal_workflow_id is not null
+          and process.id = any(${`{${lostProcesses.map((p) => p.id).join(",")}}`}::uuid[])
+        order by attempt.session_id, attempt.temporal_workflow_id
+      `,
+    );
+    for (const owner of owners) {
+      await enqueueSessionWorkflowWakeInTransaction(tx, {
+        accountId: input.accountId,
+        workspaceId: input.workspaceId,
+        sessionId: owner.session_id,
+        temporalWorkflowId: owner.temporal_workflow_id,
+        reason: "attempt_writer_provider_settled",
+      });
     }
   }
 
@@ -53774,7 +53995,7 @@ export async function heartbeatLeaseHolderStatus(
           (input.billingMode ?? snapshot?.mode) === "credits" &&
           snapshot?.mode === "credits" &&
           snapshot.rateMicrosPerSecond > 0 &&
-          (await getBillingBalance(tx, input.accountId)).balanceMicros <= 0
+          (await getSpendableCreditBalance(tx, input.accountId)).balanceMicros <= 0
         ) {
           // Touching the holder above is essential: the running writer remains
           // protected while it winds down. The provider/lease TTL is not renewed.
@@ -54430,23 +54651,69 @@ export async function reapStaleLeaseHolders(
 }
 
 /** Settlement reasons for legacy retained commands that containment stopped
- * after a verified checkpoint. Neither is exit proof: the command settles
+ * after a verified checkpoint. None is exit proof: the command settles
  * `lost` with no exit code. */
 export const IDLE_COMMAND_CONTAINMENT_REASON = "idle_containment";
 export const DEADLINE_COMMAND_CONTAINMENT_REASON = "provider_deadline_containment";
+export const QUIESCENCE_COMMAND_CONTAINMENT_REASON = "quiescence_containment";
+
+type SettledCommandOwner = {
+  sessionId: string;
+  attemptId: string;
+  temporalWorkflowId: string;
+  temporalWorkflowRunId: string;
+  temporalActivityId: string;
+};
+
+/** Exact dispatch settlement is enrollment authority, never physical proof. */
+async function settledCommandOwnerMatchesTx(
+  tx: Database,
+  input: { accountId: string; workspaceId: string; sandboxGroupId: string },
+  owner: SettledCommandOwner,
+): Promise<boolean> {
+  const [row] = await rawRows<{ eligible: boolean }>(
+    tx,
+    sql`
+    select exists (
+      select 1 from session_turn_attempts attempt
+      join sessions session on session.id = attempt.session_id
+        and session.workspace_id = attempt.workspace_id
+      where attempt.account_id = ${input.accountId}
+        and attempt.workspace_id = ${input.workspaceId}
+        and attempt.session_id = ${owner.sessionId} and attempt.id = ${owner.attemptId}
+        and attempt.temporal_workflow_id = ${owner.temporalWorkflowId}
+        and attempt.temporal_workflow_run_id = ${owner.temporalWorkflowRunId}
+        and attempt.temporal_activity_id = ${owner.temporalActivityId}
+        and attempt.state = 'closed' and attempt.quiesced_at is null
+        and session.sandbox_group_id = ${input.sandboxGroupId}
+        and not exists (select 1 from session_attempt_interruptions interruption
+          where interruption.workspace_id = attempt.workspace_id
+            and interruption.session_id = attempt.session_id and interruption.attempt_id = attempt.id
+            and interruption.state in ('pending', 'delivered', 'acknowledged'))
+    ) and not exists (
+      select 1 from session_turn_attempts live
+      join sessions member on member.id = live.session_id and member.workspace_id = live.workspace_id
+      where live.workspace_id = ${input.workspaceId}
+        and member.sandbox_group_id = ${input.sandboxGroupId} and live.state <> 'closed'
+    ) as eligible
+  `,
+  );
+  return row?.eligible === true;
+}
 
 /** Bounded per-candidate containment inspection outcomes (metric labels). */
 export type CommandContainmentInspection =
   | "idle_enrolled"
   | "deadline_enrolled"
+  | "quiescence_enrolled"
   | "resumed_enrolled"
   | "not_eligible"
   | "inspection_failed";
 
 export type CommandContainmentEnrollment = ReapDrainable & {
-  /** `idle`/`deadline` newly enrolled this call; `resumed` continues an
+  /** `idle`/`deadline`/`quiescence` newly enrolled this call; `resumed` continues an
    * existing enrollment whose drain has not committed yet. */
-  mode: "idle" | "deadline" | "resumed";
+  mode: "idle" | "deadline" | "quiescence" | "resumed";
 };
 
 /** Whole-group "unused" from durable facts only. Every session of the group,
@@ -54649,6 +54916,8 @@ export async function enrollRetainedCommandContainment(
     sandboxGroupId: string;
     /** Omit to evaluate only the provider-deadline rule. */
     idleCommandContainmentMs?: number | undefined;
+    /** Internal recovery authority: caller verified exact Temporal settlement. */
+    settledOwner?: SettledCommandOwner;
   },
 ): Promise<CommandContainmentEnrollment | null> {
   const screened = await withRlsContext(db, input, async (tx) => {
@@ -54661,6 +54930,8 @@ export async function enrollRetainedCommandContainment(
       // Enrolled drains resume; any requested rotation also refreshes command
       // observation backoff below and may meet the deadline rule.
       (Boolean(lease.unobservableCommandDrainIds?.length) ||
+        (input.settledOwner !== undefined &&
+          (await settledCommandOwnerMatchesTx(tx, input, input.settledOwner))) ||
         lease.rotationRequestedAt !== null ||
         (input.idleCommandContainmentMs !== undefined &&
           (await sandboxGroupIdleForCommandContainmentTx(tx, {
@@ -54710,11 +54981,17 @@ export async function enrollRetainedCommandContainment(
       supervised: boolean;
       owned: boolean;
       deadline_ready: boolean;
+      adopted: boolean;
     }>(
       tx,
       sql`
       select process.id, process.session_id, process.owner_attempt_id,
         process.parent_admission_id, process.holder_id,
+        exists (select 1 from session_background_commands background
+          where background.retained_process_id = process.id
+            and background.workspace_id = process.workspace_id
+            and background.session_id = process.session_id
+            and background.state in ('running', 'stopping')) as adopted,
         (coalesce(process.provider_command, '{}'::jsonb) ? 'supervision') as supervised,
         (process.lease_epoch = ${initial.leaseEpoch}
           and process.provider_instance_id = ${initial.instanceId}
@@ -54788,8 +55065,19 @@ export async function enrollRetainedCommandContainment(
     };
     if (enrolled) return { ...target, mode: "resumed" };
     if (lease.archive_capture_id !== null) return null;
-    let mode: "idle" | "deadline" | null = null;
+    let mode: "idle" | "deadline" | "quiescence" | null = null;
     if (
+      input.settledOwner !== undefined &&
+      processes.every(
+        (p) =>
+          p.owner_attempt_id === input.settledOwner!.attemptId &&
+          p.session_id === input.settledOwner!.sessionId &&
+          !p.adopted,
+      ) &&
+      (await settledCommandOwnerMatchesTx(tx, input, input.settledOwner))
+    ) {
+      mode = "quiescence";
+    } else if (
       deadlineRotation &&
       processes.every((p) => p.deadline_ready) &&
       !(await deadlineOwnerQuiescencePending(tx, input.workspaceId, processes)) &&
@@ -54813,9 +55101,11 @@ export async function enrollRetainedCommandContainment(
     await tx.execute(sql`
       update sandbox_leases set unobservable_command_drain_ids = ${`{${ids.join(",")}}`}::uuid[],
         command_containment_reason = ${
-          mode === "deadline"
-            ? DEADLINE_COMMAND_CONTAINMENT_REASON
-            : IDLE_COMMAND_CONTAINMENT_REASON
+          mode === "quiescence"
+            ? QUIESCENCE_COMMAND_CONTAINMENT_REASON
+            : mode === "deadline"
+              ? DEADLINE_COMMAND_CONTAINMENT_REASON
+              : IDLE_COMMAND_CONTAINMENT_REASON
         },
         liveness = 'draining', rotation_requested_at = coalesce(rotation_requested_at, now()),
         rotation_reason = coalesce(rotation_reason, 'operator'), expires_at = now(), updated_at = now()
@@ -55171,7 +55461,7 @@ export async function reArmDrainingLease(
             ? snapshot.mode === "credits" && snapshot.rateMicrosPerSecond > 0
             : input.warmBilling?.rateMicrosPerSecond !== undefined &&
               input.warmBilling.rateMicrosPerSecond > 0) &&
-          (await getBillingBalance(tx, input.accountId)).balanceMicros <= 0
+          (await getSpendableCreditBalance(tx, input.accountId)).balanceMicros <= 0
         ) {
           throw new SandboxPaidComputeAdmissionError(input.workspaceId, input.sandboxGroupId);
         }
@@ -55355,7 +55645,8 @@ export async function confirmDrainCold(
             !input.providerMissingBeforeCapture &&
             row.archive_capture_published_at !== null &&
             (reason === IDLE_COMMAND_CONTAINMENT_REASON ||
-              reason === DEADLINE_COMMAND_CONTAINMENT_REASON) &&
+              reason === DEADLINE_COMMAND_CONTAINMENT_REASON ||
+              reason === QUIESCENCE_COMMAND_CONTAINMENT_REASON) &&
             row.unobservable_command_drain_ids?.length
               ? row.unobservable_command_drain_ids
               : [];
@@ -68176,6 +68467,16 @@ export async function updateSessionTitleWithEvent(
   );
 }
 
+/** Read-only admission at a locked paused-to-active transition. */
+export type SessionGoalResumeValidation = (
+  tx: Database,
+  session: Pick<
+    Session,
+    "accountId" | "workspaceId" | "model" | "codexCompactionMode" | "latencyMode"
+  >,
+  causalTurn: { id: string; initiatingHumanSubjectId: string | null } | null,
+) => Promise<void>;
+
 /**
  * Status transition helper. Idempotent: requesting the current status returns
  * `changed: false` so callers can skip emitting a duplicate event. `completed`
@@ -68195,6 +68496,8 @@ export async function setSessionGoalStatus(
     reportDeliveries?: SessionGoalReportDelivery[];
     reportArtifactActor?: ReportArtifactActor;
     commandActor?: Extract<SessionCommandActor, { type: "agent_attempt" }>;
+    /** Runs under the canonical control/session/goal locks, before a paused goal changes. */
+    beforeResume?: SessionGoalResumeValidation;
   },
 ): Promise<{
   goal: SessionGoal;
@@ -68243,6 +68546,51 @@ export async function setSessionGoalStatus(
     }
     if (existing.status === "completed") {
       throw new Error("session goal is completed; set a new goal to continue");
+    }
+    if (input.status === "active" && input.beforeResume) {
+      const [effectiveSession] = await withEffectiveSessionPolicy(scopedDb, workspaceId, [session]);
+      // An accepted running turn owns the work the goal will continue after it
+      // settles. An idle Resume uses the exact latest-finished causal row.
+      const causalTurnFilter = session.activeTurnId
+        ? or(
+            eq(schema.sessionTurns.id, session.activeTurnId),
+            sql`${schema.sessionTurns.finishedAt} is not null`,
+          )
+        : sql`${schema.sessionTurns.finishedAt} is not null`;
+      const [causalTurn] = await scopedDb
+        .select({
+          id: schema.sessionTurns.id,
+          initiatingHumanSubjectId: schema.sessionTurns.initiatingHumanSubjectId,
+        })
+        .from(schema.sessionTurns)
+        .where(
+          and(
+            eq(schema.sessionTurns.workspaceId, workspaceId),
+            eq(schema.sessionTurns.sessionId, sessionId),
+            causalTurnFilter,
+          ),
+        )
+        .orderBy(
+          ...(session.activeTurnId
+            ? [desc(sql`${schema.sessionTurns.id} = ${session.activeTurnId}`)]
+            : []),
+          desc(schema.sessionTurns.finishedAt),
+          desc(schema.sessionTurns.position),
+          desc(schema.sessionTurns.createdAt),
+          desc(schema.sessionTurns.id),
+        )
+        .limit(1);
+      await input.beforeResume(
+        scopedDb,
+        {
+          accountId: session.accountId,
+          workspaceId,
+          model: effectiveSession!.model,
+          latencyMode: effectiveSession!.latencyMode as Session["latencyMode"],
+          codexCompactionMode: session.codexCompactionMode as Session["codexCompactionMode"],
+        },
+        causalTurn ?? null,
+      );
     }
     if (input.status === "completed") {
       await verifyGoalReportDeliveries(scopedDb, {
@@ -68337,6 +68685,7 @@ export async function setSessionGoalStatusWithEvent(
     reportDeliveries?: SessionGoalReportDelivery[];
     reportArtifactActor?: ReportArtifactActor;
     commandActor?: Extract<SessionCommandActor, { type: "agent_attempt" }>;
+    beforeResume?: SessionGoalResumeValidation;
     event: SetSessionGoalStatusEvent;
   },
 ): Promise<{
@@ -68370,6 +68719,7 @@ export async function setSessionGoalStatusWithEvent(
           : {}),
         ...(input.reportArtifactActor ? { reportArtifactActor: input.reportArtifactActor } : {}),
         ...(input.commandActor ? { commandActor: input.commandActor } : {}),
+        ...(input.beforeResume ? { beforeResume: input.beforeResume } : {}),
         ...(input.evidence !== undefined ? { evidence: input.evidence } : {}),
         ...(input.rationale !== undefined ? { rationale: input.rationale } : {}),
         ...(input.pausedReason !== undefined ? { pausedReason: input.pausedReason } : {}),
@@ -68468,7 +68818,7 @@ export type GoalContinuationDecision =
   | { decision: "queue" }
   | {
       decision: "paused";
-      reason: "max_auto_continuations" | "limits" | "allowance";
+      reason: "max_auto_continuations" | "limits" | GoalAdmissionPausedReason;
       goal: SessionGoal;
     }
   | {
@@ -68547,7 +68897,7 @@ export async function evaluateGoalContinuation(
     // decision (before the counter bump) so a budget pause never consumes
     // continuation budget.
     budgetBlocked?: string | null;
-    budgetPausedReason?: "limits" | "allowance" | undefined;
+    budgetPausedReason?: "limits" | GoalAdmissionPausedReason | undefined;
   },
 ): Promise<GoalContinuationDecision> {
   return await withWorkspaceRls(
@@ -68809,7 +69159,7 @@ export async function materializeGoalContinuation(
     workflowId: string;
     defaultMaxAutoContinuations?: number | null;
     budgetBlocked?: string | null;
-    budgetPausedReason?: "limits" | "allowance" | undefined;
+    budgetPausedReason?: "limits" | GoalAdmissionPausedReason | undefined;
     /** Trusted worker admission, evaluated under the same session/goal locks
      * as lineage materialization. Never substitutes a mutable latest human. */
     admission?: (
@@ -68817,7 +69167,7 @@ export async function materializeGoalContinuation(
       causalTurn: { id: string; initiatingHumanSubjectId: string | null } | null,
     ) => Promise<{
       budgetBlocked: string | null;
-      budgetPausedReason?: "limits" | "allowance";
+      budgetPausedReason?: "limits" | GoalAdmissionPausedReason;
     }>;
     idleBackoff?: GoalIdleBackoffPolicy | null;
     policy: {
@@ -70496,13 +70846,6 @@ const frozenClaudeExecutionAuthority = (
   update: Parameters<typeof frozenSubscriptionExecutionAuthority>[0],
 ) => frozenSubscriptionExecutionAuthority(update, "claude");
 
-function frozenXaiExecutionAuthorityKey(authority: FrozenXaiExecutionAuthority): string {
-  return stableJson({
-    snapshot: authority.snapshot,
-    subjectId: authority.subjectId,
-  });
-}
-
 function systemUpdateExecutionAuthorityKey(update: BoundedSystemUpdate): string {
   const personalConnectionDelegations = parsedPersonalConnectionDelegations(
     update.personalConnectionDelegations,
@@ -70575,10 +70918,11 @@ function agentCommandCausalActor(update: Pick<BoundedSystemUpdate, "kind" | "lin
 function systemUpdateCausalExecutionKey(
   update: Pick<BoundedSystemUpdate, "id" | "kind" | "lineage">,
   causalExecutionKeys: ReadonlyMap<string, string | null>,
+  receivingSessionId: string,
 ): string | null {
   const targetTurnId = systemUpdateCausalHumanTurnId(update);
   if (targetTurnId) {
-    const human = causalExecutionKeys.get(targetTurnId);
+    const human = causalExecutionKeys.get(`${receivingSessionId}:${targetTurnId}`);
     return human ? `target-human:${human}` : `target-turn:${targetTurnId}`;
   }
   if (
@@ -70595,6 +70939,10 @@ function systemUpdateCausalExecutionKey(
   if (update.kind !== "agent_steer_instruction" && update.kind !== "agent_message") return null;
   const actor = agentCommandCausalActor(update);
   if (actor) {
+    if (update.kind === "agent_message") {
+      const human = causalExecutionKeys.get(`${actor.sessionId}:${actor.turnId}`);
+      if (human) return `target-human:${human}`;
+    }
     return `agent-command:${actor.sessionId}:${actor.turnId}:${actor.attemptId}:${actor.executionGeneration}`;
   }
   // A malformed historical agent command still owns a distinct claim. Let its
@@ -70607,6 +70955,7 @@ function systemUpdatesCanCoalesceForExecution<T extends BoundedSystemUpdate>(
   selected: readonly T[],
   candidate: T,
   causalExecutionKeys: ReadonlyMap<string, string | null>,
+  receivingSessionId: string,
 ): boolean {
   const first = selected[0];
   if (
@@ -70615,15 +70964,27 @@ function systemUpdatesCanCoalesceForExecution<T extends BoundedSystemUpdate>(
   ) {
     return false;
   }
+  // Steer has first refusal on a batch. Its own caller's messages remain
+  // compatible context, but another caller cannot borrow that command identity.
+  if (first.kind === "agent_steer_instruction" && candidate.kind === "agent_message") {
+    const actor = agentCommandCausalActor(first);
+    return actor !== null && stableJson(actor) === stableJson(agentCommandCausalActor(candidate));
+  }
   // Null is compatible context (for example an ordinary notice riding with a
   // goal continuation). Once a batch contains frozen causal execution, every
-  // further authority-bearing member must have equivalent inherited authority. Agent
-  // commands use their caller identity and therefore never borrow a child/goal
-  // continuation's target-turn human.
+  // further authority-bearing member must have equivalent inherited authority.
+  // Ordinary messages resolve their exact sender turn through the same check;
+  // Steer and unresolved origins keep their existing caller isolation.
   const selectedCausalKey = selected
-    .map((update) => systemUpdateCausalExecutionKey(update, causalExecutionKeys))
+    .map((update) =>
+      systemUpdateCausalExecutionKey(update, causalExecutionKeys, receivingSessionId),
+    )
     .find((key): key is string => key !== null);
-  const candidateCausalKey = systemUpdateCausalExecutionKey(candidate, causalExecutionKeys);
+  const candidateCausalKey = systemUpdateCausalExecutionKey(
+    candidate,
+    causalExecutionKeys,
+    receivingSessionId,
+  );
   return (
     selectedCausalKey === undefined ||
     candidateCausalKey === null ||
@@ -70672,6 +71033,17 @@ function internalUpdateEventMember(update: BoundedSystemUpdate) {
     : preview;
 }
 
+function systemUpdatesInModelOrder<T extends Pick<BoundedSystemUpdate, "kind">>(
+  updates: readonly T[],
+): T[] {
+  // Selection gives Steer first refusal; model context puts the replacement
+  // direction last so an older notice cannot override it.
+  return [
+    ...updates.filter((update) => update.kind !== "agent_steer_instruction"),
+    ...updates.filter((update) => update.kind === "agent_steer_instruction"),
+  ];
+}
+
 function selectBoundedSystemUpdateBatch<T extends BoundedSystemUpdate>(
   updates: readonly T[],
   canCoalesce: (selected: readonly T[], candidate: T) => boolean = () => true,
@@ -70708,6 +71080,126 @@ function selectBoundedSystemUpdateBatch<T extends BoundedSystemUpdate>(
     selectedBytes += updateBytes;
   }
   return selected;
+}
+
+function recognizedInboxPayload(
+  update: Pick<
+    typeof schema.sessionSystemUpdates.$inferSelect,
+    "kind" | "payload" | "payloadCodecVersion"
+  >,
+): SessionSystemUpdatePayload | null {
+  const parsed = SessionSystemUpdatePayload.safeParse(
+    fromPostgresLosslessJson(update.payload, update.payloadCodecVersion),
+  );
+  return SessionSystemUpdateKindSchema.safeParse(update.kind).success && parsed.success
+    ? parsed.data
+    : null;
+}
+
+/** Match claim's bounded read before validation, including goal supersession.
+ * Callers retain database ordering; Date would discard timestamp precision. */
+function pendingInboxReadWindow(
+  updates: Array<typeof schema.sessionSystemUpdates.$inferSelect>,
+  supersedeGoalContinuations: boolean,
+) {
+  const steer = updates.find((update) => update.kind === "agent_steer_instruction");
+  const ordinary = updates
+    .filter(
+      (update) =>
+        update.kind !== "agent_steer_instruction" &&
+        (!(steer || supersedeGoalContinuations) || update.kind !== "goal_continuation"),
+    )
+    .slice(0, MAX_INTERNAL_UPDATE_BATCH_MEMBERS + (steer ? 0 : 1));
+  return steer ? [steer, ...ordinary] : ordinary;
+}
+
+/** Select execution ownership before grouping canonical input; never rewrite producer receipts. */
+async function planInboxBatch(
+  tx: Database,
+  session: Pick<
+    typeof schema.sessions.$inferSelect,
+    "id" | "accountId" | "workspaceId" | "executionContextTurnId"
+  >,
+  updates: Array<typeof schema.sessionSystemUpdates.$inferSelect>,
+  receivingTurn?: typeof schema.sessionTurns.$inferSelect,
+) {
+  const loaded = await loadInboxExecutionContext(tx, {
+    accountId: session.accountId,
+    workspaceId: session.workspaceId,
+    sessionId: session.id,
+    contextTurnId: receivingTurn?.id ?? session.executionContextTurnId,
+    updates,
+  });
+  const compatible = (update: typeof schema.sessionSystemUpdates.$inferSelect) => {
+    if (loaded.eligibleIds.has(update.id)) return true;
+    const context = loaded.context;
+    if (
+      context &&
+      receivingTurn?.metadata.delivery === "steer" &&
+      update.kind === "agent_steer_instruction"
+    ) {
+      const actor = inboxOrigin(update, session.id);
+      const origin = actor ? loaded.origins.get(actor.turnId) : undefined;
+      return Boolean(
+        origin &&
+        origin.sessionId === actor?.sessionId &&
+        !origin.externalLink &&
+        turnHuman(origin) &&
+        turnHuman(origin) === turnHuman(context),
+      );
+    }
+    if (
+      !context ||
+      update.scheduledTaskRunId ||
+      update.kind === "agent_steer_instruction" ||
+      update.kind === "agent_message" ||
+      isChildLifecycleSystemUpdateKind(update.kind)
+    )
+      return false;
+    const human = turnHuman(context);
+    const contextReceipt = {
+      ...update,
+      personalConnectionDelegations: context.personalConnectionDelegations,
+      mcpAccountBindings: context.mcpAccountBindings,
+      xaiProviderAccountAuthoritySnapshot: context.xaiProviderAccountAuthoritySnapshot,
+      claudeProviderAccountAuthoritySnapshot: context.claudeProviderAccountAuthoritySnapshot,
+      lineage: {
+        connectionAuthoritySubjectId: human,
+        xaiAuthoritySubjectId: human,
+        claudeAuthoritySubjectId: human,
+      },
+    };
+    const causalKey = systemUpdateCausalExecutionKey(update, loaded.causalKeys, session.id);
+    const ownKey = loaded.causalKeys.get(`${session.id}:${context.id}`);
+    return (
+      systemUpdateExecutionAuthorityKey(update) ===
+        systemUpdateExecutionAuthorityKey(contextReceipt) &&
+      (causalKey === null || (ownKey !== null && causalKey === `target-human:${ownKey}`))
+    );
+  };
+  const receiverOwned = Boolean(
+    receivingTurn ||
+    (updates[0] &&
+      loaded.context &&
+      !loaded.context.externalLink &&
+      (loaded.eligibleIds.has(updates[0].id) ||
+        (updates[0].kind === "goal_continuation" && compatible(updates[0])))),
+  );
+  const candidates = receiverOwned && updates[0] && !compatible(updates[0]) ? [] : updates;
+  const selected = selectBoundedSystemUpdateBatch(
+    candidates,
+    (prior, candidate) =>
+      receiverOwned
+        ? compatible(candidate)
+        : systemUpdatesCanCoalesceForExecution(prior, candidate, loaded.causalKeys, session.id),
+    true,
+  );
+  const receiver = receiverOwned ? loaded.context : null;
+  return {
+    updates: selected,
+    receiverContext: receiver,
+    selectionNotes: receiver ? agentSelectionNotes(selected, receiver, loaded.origins) : {},
+  };
 }
 
 export type ClaimSessionWorkForAttemptInput = {
@@ -71936,15 +72428,16 @@ export async function claimSessionWorkForAttempt(
           nextSequence: number,
           occurredAt: Date,
           triggerEventId?: string,
-          expectedXaiAuthority?: FrozenXaiExecutionAuthority,
           options: {
             supersedeGoalContinuations?: boolean;
             deliverUpdates?: boolean;
             pendingEventSequenceBeforeOrAt?: number;
             commandOnlyMayRun?: boolean;
-            claudeAuthority?: FrozenXaiExecutionAuthority;
+            receivingTurn?: typeof schema.sessionTurns.$inferSelect;
           } = {},
         ): Promise<{
+          receiverContext: typeof schema.sessionTurns.$inferSelect | null;
+          selectionNotes: Record<string, string>;
           count: number;
           lastSequence: number;
           triggerEventId: string | null;
@@ -72060,9 +72553,14 @@ export async function claimSessionWorkForAttempt(
                   )
                   .limit(MAX_INTERNAL_UPDATE_BATCH_MEMBERS + (agentSteer ? 0 : 1))
                   .for("update");
-          const updates = agentSteer ? [agentSteer, ...ordinary] : ordinary;
+          const updates = pendingInboxReadWindow(
+            agentSteer ? [agentSteer, ...ordinary] : ordinary,
+            options.supersedeGoalContinuations === true,
+          );
           if (updates.length === 0 && supersededGoalUpdateIds.length === 0) {
             return {
+              receiverContext: null,
+              selectionNotes: {},
               count: 0,
               lastSequence: nextSequence - 1,
               triggerEventId: null,
@@ -72089,14 +72587,9 @@ export async function claimSessionWorkForAttempt(
             // condition, never an endless re-peek: mark that one row failed
             // and record `unrecognized_kind` on the timeline; the rest of the
             // batch is claimed normally.
-            const parsedPayload = SessionSystemUpdatePayload.safeParse(
-              fromPostgresLosslessJson(update.payload, update.payloadCodecVersion),
-            );
-            if (parsedPayload.success) parsedPayloadsById.set(update.id, parsedPayload.data);
-            if (
-              !SessionSystemUpdateKindSchema.safeParse(update.kind).success ||
-              !parsedPayload.success
-            ) {
+            const parsedPayload = recognizedInboxPayload(update);
+            if (parsedPayload) parsedPayloadsById.set(update.id, parsedPayload);
+            if (!parsedPayload) {
               await tx
                 .update(schema.sessionSystemUpdates)
                 .set({ state: "failed" })
@@ -72187,125 +72680,19 @@ export async function claimSessionWorkForAttempt(
             }
             validUpdates.push(update);
           }
-          const candidates = validUpdates.filter(
-            (update) =>
-              (!expectedXaiAuthority ||
-                frozenXaiExecutionAuthorityKey(frozenXaiExecutionAuthority(update)) ===
-                  frozenXaiExecutionAuthorityKey(expectedXaiAuthority)) &&
-              (!options.claudeAuthority ||
-                frozenXaiExecutionAuthorityKey(frozenClaudeExecutionAuthority(update)) ===
-                  frozenXaiExecutionAuthorityKey(options.claudeAuthority)),
-          );
           if (
             options.commandOnlyMayRun === false &&
-            candidates.every((update) => update.kind === "background_command_result")
+            validUpdates.every((update) => update.kind === "background_command_result")
           ) {
-            candidates.length = 0;
+            validUpdates.length = 0;
           }
-          const causalTurnIds = [
-            ...new Set(
-              candidates
-                .map(systemUpdateCausalHumanTurnId)
-                .filter((id): id is string => id !== null),
-            ),
-          ];
-          const causalTurns =
-            causalTurnIds.length === 0
-              ? []
-              : await tx
-                  .select({
-                    id: schema.sessionTurns.id,
-                    human: schema.sessionTurns.initiatingHumanSubjectId,
-                    initiatorKind: schema.sessionTurns.initiatorKind,
-                    initiatorSubjectId: schema.sessionTurns.initiatorSubjectId,
-                    // Inheritance copies these permissions from the first
-                    // causal turn. Equivalence must include all of them,
-                    // including revoked snapshots (never native fallback).
-                    externalLink: sql<unknown>`(select a.canonical_snapshot
-                      from external_link_turn_authorities a
-                      where a.account_id = ${accountId}::uuid
-                        and a.workspace_id = ${workspaceId}::uuid
-                        and a.session_id = ${sessionId}::uuid
-                        and a.turn_id = ${schema.sessionTurns.id})`,
-                  })
-                  .from(schema.sessionTurns)
-                  .where(
-                    and(
-                      eq(schema.sessionTurns.accountId, accountId),
-                      eq(schema.sessionTurns.workspaceId, workspaceId),
-                      eq(schema.sessionTurns.sessionId, sessionId),
-                      inArray(schema.sessionTurns.id, causalTurnIds),
-                    ),
-                  );
-          // Host authority is owner-scoped. Resolve one batch per causal
-          // human, never mistake RLS-hidden selections for an empty grant set.
-          const turnsByHuman = new Map<string, string[]>();
-          for (const turn of causalTurns) {
-            const human =
-              turn.human ?? (turn.initiatorKind === "subject" ? turn.initiatorSubjectId : null);
-            if (!human) continue;
-            turnsByHuman.set(human, [...(turnsByHuman.get(human) ?? []), turn.id]);
-          }
-          const hostAuthorityByTurn = new Map<string, unknown[]>();
-          const incomingSubjectId = await rlsSubjectIdOrEmpty(tx);
-          try {
-            for (const [human, turnIds] of turnsByHuman) {
-              const authorities = await withWorkspaceSubjectRls(
-                tx,
-                workspaceId,
-                human,
-                async (subjectTx) =>
-                  subjectTx
-                    .select({
-                      turnId: schema.hostMcpTurnAuthorities.turnId,
-                      authority: sql<unknown>`${schema.hostMcpTurnAuthorities.canonicalSnapshot} - 'acceptedWork' - 'source'`,
-                    })
-                    .from(schema.hostMcpTurnAuthorities)
-                    .where(
-                      and(
-                        eq(schema.hostMcpTurnAuthorities.accountId, accountId),
-                        eq(schema.hostMcpTurnAuthorities.workspaceId, workspaceId),
-                        eq(schema.hostMcpTurnAuthorities.sessionId, sessionId),
-                        eq(schema.hostMcpTurnAuthorities.ownerSubjectId, human),
-                        inArray(schema.hostMcpTurnAuthorities.turnId, turnIds),
-                      ),
-                    )
-                    .orderBy(asc(schema.hostMcpTurnAuthorities.serverId)),
-              );
-              for (const row of authorities) {
-                hostAuthorityByTurn.set(row.turnId, [
-                  ...(hostAuthorityByTurn.get(row.turnId) ?? []),
-                  row.authority,
-                ]);
-              }
-            }
-          } finally {
-            await tx.execute(sql`select set_config(
-              'opengeni.subject_id', ${incomingSubjectId}, true
-            )`);
-          }
-          const causalExecutionKeys = new Map(
-            causalTurns.map((turn) => {
-              const human =
-                turn.human ?? (turn.initiatorKind === "subject" ? turn.initiatorSubjectId : null);
-              return [
-                turn.id,
-                human
-                  ? stableJson({
-                      human,
-                      externalLink: turn.externalLink,
-                      hostMcp: hostAuthorityByTurn.get(turn.id) ?? [],
-                    })
-                  : null,
-              ] as const;
-            }),
+          const planned = await planInboxBatch(
+            tx as unknown as Database,
+            session!,
+            validUpdates,
+            options.receivingTurn,
           );
-          const deliverable = selectBoundedSystemUpdateBatch(
-            candidates,
-            (selected, candidate) =>
-              systemUpdatesCanCoalesceForExecution(selected, candidate, causalExecutionKeys),
-            true,
-          );
+          const deliverable = planned.updates;
           if (deliverable.length === 0) {
             let sequence = nextSequence - 1;
             const cancellationEvents: SessionEventInsertWithPayload[] = [];
@@ -72407,6 +72794,8 @@ export async function claimSessionWorkForAttempt(
               });
             }
             return {
+              receiverContext: null,
+              selectionNotes: {},
               count: 0,
               lastSequence: sequence,
               triggerEventId: null,
@@ -72419,20 +72808,12 @@ export async function claimSessionWorkForAttempt(
               event: null,
             };
           }
-          // Inclusion gives the newest Steer first refusal on the bounded
-          // batch. Model ordering is deliberately the opposite: ordinary
-          // updates establish context, then the authoritative replacement
-          // direction is last so it cannot be overridden by an older goal or
-          // lifecycle notice.
-          const modelOrdered = [
-            ...deliverable.filter((update) => update.kind !== "agent_steer_instruction"),
-            ...deliverable.filter((update) => update.kind === "agent_steer_instruction"),
-          ];
+          const modelOrdered = systemUpdatesInModelOrder(deliverable);
           const historyItemId = crypto.randomUUID();
           const historyItem = sessionSystemUpdateBatchHistoryItem(
             modelOrdered.map((update) => mapSessionSystemUpdate(update)),
             undefined,
-            { deliveredAt: occurredAt },
+            { deliveredAt: occurredAt, selectionNotes: planned.selectionNotes },
           ) as Record<string, unknown>;
           await tx
             .update(schema.sessionSystemUpdates)
@@ -72588,6 +72969,8 @@ export async function claimSessionWorkForAttempt(
           };
           events.push(event);
           return {
+            receiverContext: planned.receiverContext,
+            selectionNotes: planned.selectionNotes,
             count: deliverable.length,
             lastSequence: sequence,
             triggerEventId: eventId,
@@ -72638,9 +73021,14 @@ export async function claimSessionWorkForAttempt(
                   historyItemOverride ??
                     (goalSnapshot
                       ? sessionSystemUpdateBatchHistoryItem(
-                          delivered.updates.map((update) => mapSessionSystemUpdate(update)),
+                          systemUpdatesInModelOrder(delivered.updates).map((update) =>
+                            mapSessionSystemUpdate(update),
+                          ),
                           goalSnapshot,
-                          { deliveredAt: delivered.deliveredAt },
+                          {
+                            deliveredAt: delivered.deliveredAt,
+                            selectionNotes: delivered.selectionNotes,
+                          },
                         )
                       : delivered.historyItem),
                 ),
@@ -73044,9 +73432,6 @@ export async function claimSessionWorkForAttempt(
                 }
                 pendingEventSequenceBeforeOrAt = legacyResumeTrigger.sequence;
               }
-              const xaiSnapshot = XaiProviderAccountAuthoritySnapshotV1.parse(
-                activeTurn.xaiProviderAccountAuthoritySnapshot,
-              );
               const delivered = await deliverPendingUpdates(
                 session.accountId,
                 activeTurn.id,
@@ -73055,18 +73440,8 @@ export async function claimSessionWorkForAttempt(
                 now,
                 undefined,
                 {
-                  snapshot: xaiSnapshot,
-                  subjectId:
-                    xaiSnapshot.scope === "user"
-                      ? (activeTurn.initiatingHumanSubjectId ??
-                        (activeTurn.initiatorKind === "subject"
-                          ? activeTurn.initiatorSubjectId
-                          : null))
-                      : null,
-                },
-                {
                   pendingEventSequenceBeforeOrAt,
-                  claudeAuthority: subscriptionExecutionAuthorityFromTurn(activeTurn, "claude"),
+                  receivingTurn: activeTurn,
                 },
               );
               await persistDeliveredUpdateBatch(delivered, session.accountId, activeTurn.id);
@@ -73633,7 +74008,6 @@ export async function claimSessionWorkForAttempt(
             session.lastSequence + 1,
             now,
             triggerEventId,
-            undefined,
             { commandOnlyMayRun: commandWait.disposition === "held" },
           );
           if (delivered.count === 0) {
@@ -73692,18 +74066,44 @@ export async function claimSessionWorkForAttempt(
             },
           });
           let internalInitiator: FrozenTurnInitiator;
+          const receiverContext = delivered.receiverContext;
           const authorityUpdate = delivered.updates[0];
           if (!authorityUpdate) throw new Error("Delivered update batch has no authority source");
           const internalPersonalConnectionDelegations = parsedPersonalConnectionDelegations(
-            authorityUpdate.personalConnectionDelegations,
+            receiverContext?.personalConnectionDelegations ??
+              authorityUpdate.personalConnectionDelegations,
             `session_system_updates:${workspaceId}:${sessionId}:${authorityUpdate.id}`,
           );
-          const internalXaiAuthority = frozenXaiExecutionAuthority(authorityUpdate);
-          const internalClaudeAuthority = frozenClaudeExecutionAuthority(authorityUpdate);
-          // Messages and Steer inherit the exact admitted sender turn, even
-          // with no personal connections. Other notices are context; they
-          // cannot replace the command's causal human.
-          if (agentCommandUpdate) {
+          const internalXaiAuthority = receiverContext
+            ? subscriptionExecutionAuthorityFromTurn(receiverContext, "xai")
+            : frozenXaiExecutionAuthority(authorityUpdate);
+          const internalClaudeAuthority = receiverContext
+            ? subscriptionExecutionAuthorityFromTurn(receiverContext, "claude")
+            : frozenClaudeExecutionAuthority(authorityUpdate);
+          // Informational input retains the receiving context. Explicit control
+          // and restricted/foreign requests retain their admitted source.
+          if (receiverContext) {
+            internalInitiator = {
+              initiator: {
+                kind: "service",
+                subjectId: "internal-update",
+                label: "OpenGeni internal update",
+              },
+              initiatingHumanSubjectId: turnHuman(receiverContext),
+              context: contextForCausalTurn(
+                {},
+                {
+                  initiator: initiatorFromStorage(
+                    receiverContext.initiatorKind,
+                    receiverContext.initiatorSubjectId,
+                    receiverContext.initiatorContext,
+                  ),
+                  context: receiverContext.initiatorContext,
+                },
+                { sessionId, turnId: receiverContext.id },
+              ),
+            };
+          } else if (agentCommandUpdate) {
             const actor = agentCommandCausalActor(agentCommandUpdate);
             if (!actor) {
               // Corrupt/hand-inserted historical rows must not wedge every
@@ -73816,7 +74216,7 @@ export async function claimSessionWorkForAttempt(
           );
           let tools = Array.isArray(goalPolicy?.tools)
             ? goalPolicy.tools
-            : (latestStarted?.tools ?? session.tools);
+            : (receiverContext?.tools ?? latestStarted?.tools ?? session.tools);
           let sandboxBackend =
             typeof goalPolicy?.sandboxBackend === "string"
               ? goalPolicy.sandboxBackend
@@ -73967,6 +74367,7 @@ export async function claimSessionWorkForAttempt(
               ? internalInitiator.initiator.subjectId
               : null);
           const connectionAuthoritySubjectValue =
+            !receiverContext &&
             authorityUpdate.lineage &&
             typeof authorityUpdate.lineage === "object" &&
             !Array.isArray(authorityUpdate.lineage)
@@ -73988,9 +74389,11 @@ export async function claimSessionWorkForAttempt(
             }
             initiatingHumanSubjectId = connectionAuthoritySubjectId;
           }
-          const causalHumanTurnId = delivered.updates
-            .map((update) => systemUpdateCausalHumanTurnId(update))
-            .find((causalTurnId): causalTurnId is string => causalTurnId !== null);
+          const causalHumanTurnId =
+            receiverContext?.id ??
+            delivered.updates
+              .map((update) => systemUpdateCausalHumanTurnId(update))
+              .find((causalTurnId): causalTurnId is string => causalTurnId !== null);
           if (causalHumanTurnId) {
             // Child lifecycle notices freeze the parent turn that spawned the
             // child. Resolve that exact row on the receiving parent session;
@@ -74098,10 +74501,15 @@ export async function claimSessionWorkForAttempt(
           // coalesced message, including a later restricted sender. A frozen
           // goal/schedule model policy cannot remove this inherited ceiling.
           const initialCredentialPolicy = readTurnExecutionPolicyV1(session.metadata);
+          const receivingCredentialPolicy = readTurnExecutionPolicyV1(receiverContext?.metadata);
           internalInitiator.context = contextWithFrozenCredentialRestrictions(
             internalInitiator.context,
             [
               ...delivered.updates.map((update) => update.lineage),
+              receivingCredentialPolicy.kind === "valid" &&
+              receivingCredentialPolicy.policy.credentialRestriction === "developer_setup"
+                ? { credentialRestriction: "developer_setup" }
+                : undefined,
               initialCredentialPolicy.kind === "valid" &&
               initialCredentialPolicy.policy.credentialRestriction === "developer_setup"
                 ? { credentialRestriction: "developer_setup" }
@@ -74170,9 +74578,12 @@ export async function claimSessionWorkForAttempt(
                   ),
                   ...initiatorColumns(internalInitiator),
                   initiatingHumanSubjectId,
+                  executionContextTurnId: receiverContext?.id ?? null,
                   personalConnectionDelegations: internalPersonalConnectionDelegations,
                   mcpAccountBindings: parseAcceptedMcpAccountBindings(
-                    authorityUpdate.mcpAccountBindings,
+                    receiverContext
+                      ? receiverContext.mcpAccountBindings
+                      : authorityUpdate.mcpAccountBindings,
                   ),
                   scheduledTaskRunId,
                   xaiProviderAccountAuthoritySnapshot: internalXaiAuthority.snapshot,
@@ -74204,6 +74615,7 @@ export async function claimSessionWorkForAttempt(
               contextualUpdates.length > 0
                 ? renderSessionSystemUpdateBatch(contextualUpdates, {
                     deliveredAt: delivered.deliveredAt,
+                    selectionNotes: delivered.selectionNotes,
                   })
                 : undefined,
               frozenGoalSnapshot,
@@ -74235,7 +74647,20 @@ export async function claimSessionWorkForAttempt(
               turnId: internalTurn.id,
               runId: scheduledTaskRunId,
             });
-          } else if (causalHumanTurnId && initiatingHumanSubjectId) {
+          } else if (
+            agentCommandUpdate &&
+            !receiverContext &&
+            agentCommandCausalActor(agentCommandUpdate)
+          ) {
+            await inheritExternalLinkTurnAuthority(tx as unknown as Database, {
+              accountId: session.accountId,
+              workspaceId,
+              sessionId,
+              turnId: internalTurn.id,
+              sourceTurnId: agentCommandCausalActor(agentCommandUpdate)!.turnId,
+              kind: "agent",
+            });
+          } else if (!receiverContext && causalHumanTurnId && initiatingHumanSubjectId) {
             await inheritExternalLinkTurnAuthority(tx as unknown as Database, {
               accountId: session.accountId,
               workspaceId,
@@ -74390,7 +74815,6 @@ export async function claimSessionWorkForAttempt(
               session.lastSequence + 1,
               now,
               undefined,
-              undefined,
               { supersedeGoalContinuations: true, deliverUpdates: false },
             )
           : await deliverPendingUpdates(
@@ -74401,20 +74825,8 @@ export async function claimSessionWorkForAttempt(
               now,
               undefined,
               {
-                snapshot: XaiProviderAccountAuthoritySnapshotV1.parse(
-                  row.xaiProviderAccountAuthoritySnapshot,
-                ),
-                subjectId:
-                  XaiProviderAccountAuthoritySnapshotV1.parse(
-                    row.xaiProviderAccountAuthoritySnapshot,
-                  ).scope === "user"
-                    ? (row.initiatingHumanSubjectId ??
-                      (row.initiatorKind === "subject" ? row.initiatorSubjectId : null))
-                    : null,
-              },
-              {
                 supersedeGoalContinuations: true,
-                claudeAuthority: subscriptionExecutionAuthorityFromTurn(row, "claude"),
+                receivingTurn: row,
               },
             );
         await persistDeliveredUpdateBatch(delivered, session.accountId, row.id);
@@ -74498,6 +74910,69 @@ export type SessionAttemptQuiescenceCommit = {
    * the durable fallback; callers may deliver this fact immediately. */
   workflowWake: SessionWorkflowWake | null;
 };
+
+/** Call only after canonical session/turn/attempt locks and proof eligibility. */
+async function recordSessionAttemptQuiescenceInTransaction(
+  db: SessionActivityDatabase,
+  session: Pick<
+    typeof schema.sessions.$inferSelect,
+    "id" | "accountId" | "workspaceId" | "lastSequence" | "queueVersion"
+  >,
+  attempt: Pick<
+    typeof schema.sessionTurnAttempts.$inferSelect,
+    "id" | "turnId" | "executionGeneration"
+  >,
+  now: Date,
+): Promise<SessionEvent> {
+  const queueVersion = session.queueVersion + 1;
+  const [marked] = await db
+    .update(schema.sessionTurnAttempts)
+    .set({ quiescedAt: now, updatedAt: now })
+    .where(
+      and(
+        eq(schema.sessionTurnAttempts.accountId, session.accountId),
+        eq(schema.sessionTurnAttempts.workspaceId, session.workspaceId),
+        eq(schema.sessionTurnAttempts.sessionId, session.id),
+        eq(schema.sessionTurnAttempts.turnId, attempt.turnId),
+        eq(schema.sessionTurnAttempts.executionGeneration, attempt.executionGeneration),
+        eq(schema.sessionTurnAttempts.id, attempt.id),
+        isNull(schema.sessionTurnAttempts.quiescedAt),
+      ),
+    )
+    .returning({ id: schema.sessionTurnAttempts.id });
+  if (!marked) throw new SessionControlInvariantError(`Attempt ${attempt.id} quiescence CAS lost`);
+  const [event] = await db
+    .insert(schema.sessionEvents)
+    .values(
+      withLosslessContentWriteVersion(
+        {
+          accountId: session.accountId,
+          workspaceId: session.workspaceId,
+          sessionId: session.id,
+          sequence: session.lastSequence + 1,
+          type: "session.queue.changed",
+          payload: { operation: "attempt_quiesced", attemptId: attempt.id, queueVersion },
+          clientEventId: `opengeni:attempt-quiesced:${attempt.id}`,
+          turnId: attempt.turnId,
+          turnGeneration: attempt.executionGeneration,
+          turnAttemptId: attempt.id,
+          turnAssociation: null,
+          occurredAt: now,
+        },
+        "payload",
+        "payloadCodecVersion",
+      ),
+    )
+    .returning();
+  if (!event) throw new Error("Attempt-quiesced queue event was not inserted");
+  await db
+    .update(schema.sessions)
+    .set({ queueVersion, lastSequence: event.sequence, updatedAt: now })
+    .where(
+      and(eq(schema.sessions.workspaceId, session.workspaceId), eq(schema.sessions.id, session.id)),
+    );
+  return mapEvent(event);
+}
 
 export async function commitSessionAttemptQuiescence(
   db: Database,
@@ -74790,62 +75265,13 @@ export async function commitSessionAttemptQuiescence(
     }
 
     const now = new Date();
-    const queueVersion = session.queueVersion + 1;
-    const [marked] = await scopedDb
-      .update(schema.sessionTurnAttempts)
-      .set({
-        quiescedAt: now,
-        updatedAt: now,
-      })
-      .where(
-        and(
-          eq(schema.sessionTurnAttempts.workspaceId, input.workspaceId),
-          eq(schema.sessionTurnAttempts.id, input.attemptId),
-          isNull(schema.sessionTurnAttempts.quiescedAt),
-        ),
-      )
-      .returning({ id: schema.sessionTurnAttempts.id });
-    if (!marked) {
-      throw new SessionControlInvariantError(`Attempt ${input.attemptId} quiescence CAS lost`);
-    }
-    const [event] = await scopedDb
-      .insert(schema.sessionEvents)
-      .values(
-        withLosslessContentWriteVersion(
-          {
-            accountId: session.accountId,
-            workspaceId: input.workspaceId,
-            sessionId: input.sessionId,
-            sequence: session.lastSequence + 1,
-            type: "session.queue.changed",
-            payload: {
-              operation: "attempt_quiesced",
-              attemptId: input.attemptId,
-              queueVersion,
-            },
-            clientEventId,
-            turnId: attempt.turnId,
-            turnGeneration: attempt.executionGeneration,
-            turnAttemptId: attempt.id,
-            turnAssociation: null,
-            occurredAt: now,
-          },
-          "payload",
-          "payloadCodecVersion",
-        ),
-      )
-      .returning();
-    if (!event) throw new Error("Attempt-quiesced queue event was not inserted");
-    await scopedDb
-      .update(schema.sessions)
-      .set({ queueVersion, lastSequence: event.sequence, updatedAt: now })
-      .where(
-        and(
-          eq(schema.sessions.workspaceId, input.workspaceId),
-          eq(schema.sessions.id, input.sessionId),
-        ),
-      );
-    const projected = await projectPausedRecovery([mapEvent(event)], event.sequence);
+    const event = await recordSessionAttemptQuiescenceInTransaction(
+      scopedDb,
+      session,
+      attempt,
+      now,
+    );
+    const projected = await projectPausedRecovery([event], event.sequence);
     const effectiveControl = projected.effectiveControl;
     let workflowWake: SessionWorkflowWake | null = null;
     if (effectiveControl.state === "active") {
@@ -75058,6 +75484,28 @@ export async function reconcileSessionAttemptQuiescence(
     };
   }
   if (!input.activitySettled || eligibility.writer_pending) {
+    if (input.activitySettled && eligibility.writer_pending) {
+      const group = await withRlsContext(db, input, async (tx) => {
+        const [row] = await tx
+          .select({ id: schema.sessions.sandboxGroupId })
+          .from(schema.sessions)
+          .where(
+            and(
+              eq(schema.sessions.workspaceId, input.workspaceId),
+              eq(schema.sessions.id, input.sessionId),
+            ),
+          )
+          .limit(1);
+        return row?.id;
+      });
+      if (group)
+        await enrollRetainedCommandContainment(db, {
+          accountId: input.accountId,
+          workspaceId: input.workspaceId,
+          sandboxGroupId: group,
+          settledOwner: input,
+        });
+    }
     return { action: "pending", events: [] };
   }
   const events = await markSessionAttemptQuiesced(db, {
@@ -78632,6 +79080,8 @@ function metadataWithoutProviderRecoveryCount(
 ): Record<string, unknown> {
   const next = { ...(metadata ?? {}) };
   delete next.providerRecoveryCount;
+  delete next.providerRecoveryStartedAt;
+  delete next.providerRecoveryReason;
   return next;
 }
 
@@ -81074,7 +81524,15 @@ export async function requestSessionTurnRecovery(
                 }
               : {}),
             ...(input.providerRecoveryCount !== undefined
-              ? { providerRecoveryCount: input.providerRecoveryCount }
+              ? {
+                  providerRecoveryCount: input.providerRecoveryCount,
+                  providerRecoveryStartedAt:
+                    providerRecoveryCountFromTurnMetadata(turn.metadata) > 0 &&
+                    typeof turn.metadata?.providerRecoveryStartedAt === "string"
+                      ? turn.metadata.providerRecoveryStartedAt
+                      : now.toISOString(),
+                  providerRecoveryReason: input.reason,
+                }
               : {}),
           },
           updatedAt: now,
@@ -81133,6 +81591,21 @@ export type RecoverSessionDispatchInput = {
   sessionId: string;
   attemptId: string;
   timeoutType: "HEARTBEAT" | "SCHEDULE_TO_START";
+  maxRedispatches: number;
+};
+
+export type ReconcileSettledSessionAttemptInput = {
+  accountId: string;
+  workspaceId: string;
+  sessionId: string;
+  turnId: string;
+  attemptId: string;
+  executionGeneration: number;
+  temporalWorkflowId: string;
+  temporalWorkflowRunId: string;
+  temporalActivityId: string;
+  /** Server-authenticated inspection of this exact stored dispatch, not age. */
+  activitySettled: boolean;
   maxRedispatches: number;
 };
 
@@ -81221,6 +81694,45 @@ export type RecoverSessionDispatchResult =
       activeTurnId: string | null;
     };
 
+export type ReconcileSettledSessionAttemptResult =
+  | Exclude<RecoverSessionDispatchResult, { action: "unclaimed" }>
+  | { action: "pending"; events: [] };
+
+/** Separate proof-bearing live-owner close; the generic observer never writes. */
+export async function reconcileSettledSessionAttempt(
+  db: Database,
+  input: ReconcileSettledSessionAttemptInput,
+): Promise<ReconcileSettledSessionAttemptResult> {
+  const scopedSession = await withRlsContext(
+    db,
+    { accountId: input.accountId, workspaceId: input.workspaceId },
+    async (scopedDb) => {
+      const [visible] = await scopedDb
+        .select({ activeTurnId: schema.sessions.activeTurnId })
+        .from(schema.sessions)
+        .where(
+          and(
+            eq(schema.sessions.accountId, input.accountId),
+            eq(schema.sessions.workspaceId, input.workspaceId),
+            eq(schema.sessions.id, input.sessionId),
+          ),
+        )
+        .limit(1);
+      return visible;
+    },
+  );
+  if (!scopedSession) return { action: "stale", events: [], turnStatus: null, activeTurnId: null };
+  // The activity commit gate must own the outer transaction, not a savepoint
+  // in the read-only scope check. Recovery revalidates scope and every proof
+  // and current-owner edge under its own canonical locks.
+  const result = await recoverSessionOwner(db, input.workspaceId, input);
+  if (result.action === "unclaimed")
+    throw new SessionControlInvariantError(
+      "Settled owner recovery cannot expire an unclaimed dispatch",
+    );
+  return result;
+}
+
 /**
  * Atomically recover the exact attempt that owned a running turn. If timeout
  * wins before its claim, persist an expiry receipt so a delayed activity cannot
@@ -81231,6 +81743,19 @@ export async function recoverSessionDispatch(
   workspaceId: string,
   input: RecoverSessionDispatchInput,
 ): Promise<RecoverSessionDispatchResult> {
+  const result = await recoverSessionOwner(db, workspaceId, input);
+  if (result.action === "pending")
+    throw new SessionControlInvariantError("Timeout recovery cannot use settled-owner proof");
+  return result;
+}
+
+async function recoverSessionOwner(
+  db: Database,
+  workspaceId: string,
+  input: RecoverSessionDispatchInput | ReconcileSettledSessionAttemptInput,
+): Promise<RecoverSessionDispatchResult | { action: "pending"; events: [] }> {
+  const proof = "activitySettled" in input ? input : null;
+  const timeoutType = "timeoutType" in input ? input.timeoutType : null;
   const persistence = {
     stage: "session_lifecycle_outbox.recover_dispatch",
     eventTypes: [
@@ -81239,11 +81764,12 @@ export async function recoverSessionDispatch(
       "turn.failed",
       "turn.recovery.requested",
       "turn.dispatch.expired",
+      "session.queue.changed",
     ],
     maxAttempts: 3,
   };
   return await retrySessionActivityRls(db, workspaceId, persistence, async (scopedDb) => {
-    return await scopedDb.transaction(async (tx) => {
+    return await withSessionActivitySavepoint(scopedDb, async (tx) => {
       const locks = await lockChildLifecycleOutboxWriteRowsTx(
         tx as unknown as Database,
         workspaceId,
@@ -81258,6 +81784,13 @@ export async function recoverSessionDispatch(
       );
       const attempt = locks.attempts.find((row) => row.id === input.attemptId);
       if (!attempt) {
+        if (proof)
+          return {
+            action: "stale",
+            events: [],
+            turnStatus: null,
+            activeTurnId: session.activeTurnId,
+          };
         const expiryIdentity = {
           accountId: session.accountId,
           workspaceId,
@@ -81283,7 +81816,7 @@ export async function recoverSessionDispatch(
                   sessionId: input.sessionId,
                   sequence: session.lastSequence + 1,
                   type: "turn.dispatch.expired",
-                  payload: { attemptId: input.attemptId, timeoutType: input.timeoutType },
+                  payload: { attemptId: input.attemptId, timeoutType },
                   clientEventId: null,
                   producerId: sessionDispatchExpiryProducer(input.attemptId),
                   producerSeq: 1,
@@ -81323,7 +81856,7 @@ export async function recoverSessionDispatch(
               );
           }
         }
-        return input.timeoutType === "SCHEDULE_TO_START"
+        return timeoutType === "SCHEDULE_TO_START"
           ? { action: "unclaimed", events: [] }
           : {
               action: "stale",
@@ -81357,6 +81890,51 @@ export async function recoverSessionDispatch(
           turnStatus,
           activeTurnId: session.activeTurnId,
         };
+      }
+
+      if (proof) {
+        if (
+          session.accountId !== proof.accountId ||
+          locks.workspace.accountId !== proof.accountId ||
+          turn.workspaceId !== proof.workspaceId ||
+          attempt.workspaceId !== proof.workspaceId ||
+          turn.id !== proof.turnId ||
+          attempt.executionGeneration !== proof.executionGeneration ||
+          attempt.temporalWorkflowId !== proof.temporalWorkflowId ||
+          attempt.temporalWorkflowRunId !== proof.temporalWorkflowRunId ||
+          attempt.temporalActivityId !== proof.temporalActivityId ||
+          (attempt.state !== "claimed" && attempt.state !== "running") ||
+          session.admissionBlock !== null ||
+          turn.metadata?.[SANDBOX_SETUP_OUTCOME_UNKNOWN_METADATA_KEY] !== undefined ||
+          turn.metadata?.[SANDBOX_SETUP_RECOVERY_EXHAUSTED_METADATA_KEY] !== undefined ||
+          turn.metadata?.[SANDBOX_LIFECYCLE_WAIT_METADATA_KEY] !== undefined ||
+          effectiveControl.settlement !== null
+        )
+          return { action: "stale", events: [], turnStatus, activeTurnId: session.activeTurnId };
+        if (!proof.activitySettled) return { action: "pending", events: [] };
+        // The same prefix/exact owner locks serialize all writer admissions
+        // and lifecycle/control changes. Recheck BOTH canonical predicates
+        // while the owner is still live; never use a closed-owner inference
+        // exception as physical proof or synthesize an exit/unknown outcome.
+        const [writers] = await tx.execute<{
+          physical: boolean;
+          inference: boolean;
+          interrupted: boolean;
+        }>(sql`
+          select ${sessionAttemptPendingWritersSql(sql`attempt`, "physical")} as physical,
+            ${sessionAttemptPendingWritersSql(sql`attempt`, "inference")} as inference,
+            exists (select 1 from session_attempt_interruptions interruption
+              where interruption.workspace_id = attempt.workspace_id
+                and interruption.session_id = attempt.session_id
+                and interruption.attempt_id = attempt.id
+                and interruption.state in ('pending', 'delivered', 'acknowledged')) as interrupted
+          from session_turn_attempts attempt
+          where attempt.account_id = ${proof.accountId} and attempt.workspace_id = ${proof.workspaceId}
+            and attempt.session_id = ${proof.sessionId} and attempt.id = ${proof.attemptId}
+            and attempt.turn_id = ${proof.turnId} and attempt.execution_generation = ${proof.executionGeneration}
+        `);
+        if (!writers || writers.physical || writers.inference || writers.interrupted)
+          return { action: "pending", events: [] };
       }
 
       const redispatchMetadata = readWorkerDeathRedispatchMetadata(turn.metadata);
@@ -81406,6 +81984,17 @@ export async function recoverSessionDispatch(
         },
       );
       sequence = closedTools.sequence;
+      const quiescenceEvents: SessionEvent[] = [];
+      if (proof && !attempt.quiescedAt) {
+        const receipt = await recordSessionAttemptQuiescenceInTransaction(
+          tx,
+          { ...session, lastSequence: sequence },
+          attempt,
+          now,
+        );
+        sequence = receipt.sequence;
+        quiescenceEvents.push(receipt);
+      }
       if (redispatches > input.maxRedispatches) {
         const inserted = await tx
           .insert(schema.sessionEvents)
@@ -81425,7 +82014,7 @@ export async function recoverSessionDispatch(
                   payload: {
                     triggerEventId: turn.triggerEventId,
                     code: "worker_death_redispatch_exhausted",
-                    error: `Worker died ${redispatches} times while running this turn (heartbeat timeout); giving up after ${input.maxRedispatches} re-dispatches.`,
+                    error: `Worker ownership was lost ${redispatches} times while running this turn (${proof ? "settled activity" : "heartbeat timeout"}); giving up after ${input.maxRedispatches} re-dispatches.`,
                     redispatches: input.maxRedispatches,
                   },
                   occurredAt: now,
@@ -81511,7 +82100,7 @@ export async function recoverSessionDispatch(
           action: "exceeded" as const,
           turnId: turn.id,
           redispatches: input.maxRedispatches,
-          events: [...closedTools.events, ...inserted.map(mapEvent)],
+          events: [...closedTools.events, ...quiescenceEvents, ...inserted.map(mapEvent)],
         };
       }
 
@@ -81532,7 +82121,7 @@ export async function recoverSessionDispatch(
                 turnAssociation: "current",
                 payload: {
                   triggerEventId: turn.triggerEventId,
-                  reason: "worker_death",
+                  reason: proof ? "settled_activity" : "worker_death",
                   redispatches,
                 },
                 occurredAt: now,
@@ -81591,11 +82180,20 @@ export async function recoverSessionDispatch(
             eq(schema.sessions.id, input.sessionId),
           ),
         );
+      // Recovery must survive an observer crash/continue-as-new or lost ACK.
+      // The outbox coalesces any prior debt without acknowledging it here.
+      await enqueueSessionWorkflowWakeInTransaction(tx as unknown as Database, {
+        accountId: session.accountId,
+        workspaceId,
+        sessionId: input.sessionId,
+        temporalWorkflowId: attempt.temporalWorkflowId,
+        reason: "turn_recovery_requested",
+      });
       return {
         action: "recovering" as const,
         turnId: turn.id,
         redispatches,
-        events: [...closedTools.events, ...inserted.map(mapEvent)],
+        events: [...closedTools.events, ...quiescenceEvents, ...inserted.map(mapEvent)],
       };
     });
   });
@@ -81974,6 +82572,9 @@ export async function getSessionQueueSnapshot(
       )
       .orderBy(
         sql`case when ${schema.sessionSystemUpdates.kind} = 'agent_steer_instruction' then 0 else 1 end`,
+        sql`case when ${schema.sessionSystemUpdates.kind} = 'agent_steer_instruction' then ${schema.sessionSystemUpdates.createdAt} end desc`,
+        sql`case when ${schema.sessionSystemUpdates.kind} = 'agent_steer_instruction' then ${schema.sessionSystemUpdates.id} end desc`,
+        sql`case when ${schema.sessionSystemUpdates.kind} = 'background_command_result' then 1 else 0 end`,
         asc(schema.sessionSystemUpdates.createdAt),
         asc(schema.sessionSystemUpdates.id),
       );
@@ -82003,13 +82604,50 @@ export async function getSessionQueueSnapshot(
         sessionId,
         queuedSteerPredecessorIds,
       ));
-    const nextInputBatch = selectBoundedSystemUpdateBatch(pendingInputs);
+
     const hasPendingAgentSteer = pendingInputs.some(
       (update) => update.kind === "agent_steer_instruction",
     );
     const attachmentTurn = hasPendingAgentSteer
       ? physicalItems.find((turn) => turn.metadata.delivery === "steer")
       : physicalItems[0];
+    const attachmentRow = attachmentTurn
+      ? rows.find((row) => row.id === attachmentTurn.id)
+      : undefined;
+    let nextInputBatch: typeof pendingInputs = [];
+    if (attachmentRow && !isSessionRealtimeDelegationTurnMetadata(attachmentRow.metadata)) {
+      const window = pendingInboxReadWindow(pendingInputs, true);
+      const runIds = [...new Set(window.flatMap((update) => update.scheduledTaskRunId ?? []))];
+      const runs =
+        runIds.length === 0
+          ? []
+          : await scopedDb
+              .select({
+                id: schema.scheduledTaskRuns.id,
+                status: schema.scheduledTaskRuns.status,
+                error: schema.scheduledTaskRuns.error,
+                acceptedExecutionSnapshot: schema.scheduledTaskRuns.acceptedExecutionSnapshot,
+              })
+              .from(schema.scheduledTaskRuns)
+              .where(
+                and(
+                  eq(schema.scheduledTaskRuns.accountId, session.accountId),
+                  eq(schema.scheduledTaskRuns.workspaceId, workspaceId),
+                  eq(schema.scheduledTaskRuns.sessionId, sessionId),
+                  inArray(schema.scheduledTaskRuns.id, runIds),
+                ),
+              );
+      const runsById = new Map(runs.map((run) => [run.id, run]));
+      // Preview only reads durable rejection facts. Live authority and worker
+      // admission are revalidated under claim's locks and can still change.
+      const candidates = window.filter(
+        (update) =>
+          recognizedInboxPayload(update) &&
+          (!update.scheduledTaskRunId ||
+            scheduledRunPreclaimDenial(runsById.get(update.scheduledTaskRunId)) === null),
+      );
+      nextInputBatch = (await planInboxBatch(scopedDb, session, candidates, attachmentRow)).updates;
+    }
     return {
       version: session.queueVersion,
       effectiveControl: serializeEffectiveSessionControl(effectiveControl),
@@ -82017,15 +82655,19 @@ export async function getSessionQueueSnapshot(
       stoppingPreviousAttempt,
       items,
       pendingInputs: pendingInputs.map((update) => {
-        const canonical = mapSessionSystemUpdate(update);
+        // Queue labels do not expose the payload. A malformed payload remains
+        // visible here until claim records its failure, without breaking reads.
         return {
-          id: canonical.id,
-          sessionId: canonical.sessionId,
-          kind: canonical.kind,
-          classification: canonical.classification,
-          sourceId: boundedInternalUpdateEventText(canonical.sourceId, 256).text,
-          summary: boundedInternalUpdateEventText(canonical.summary, 512).text,
-          createdAt: canonical.createdAt,
+          id: update.id,
+          sessionId: update.sessionId,
+          kind: update.kind as SessionSystemUpdateKind,
+          classification: update.classification as SystemUpdateClassification,
+          sourceId: boundedInternalUpdateEventText(update.sourceId, 256).text,
+          summary: boundedInternalUpdateEventText(
+            fromPostgresLosslessText(update.summary, update.summaryCodecVersion),
+            512,
+          ).text,
+          createdAt: update.createdAt.toISOString(),
         };
       }),
       pendingInputAttachment:
@@ -82062,114 +82704,6 @@ type ChildOutboxSession = Pick<
   typeof schema.sessions.$inferSelect,
   "id" | "accountId" | "parentSessionId" | "parentTurnId"
 >;
-
-/**
- * The exact private authority a child lifecycle notice copies from its causal
- * parent turn: same-session-successor personal connection delegations, the
- * parent's xAI provider authority snapshot, and the bounded subject lineage the
- * parent's claim later revalidates. Every child -> parent outbox producer uses
- * this one resolution so the notice kinds cannot drift in authority.
- */
-async function parentOutboxAuthorityTx(
-  tx: Database,
-  workspaceId: string,
-  session: ChildOutboxSession & { parentSessionId: string },
-): Promise<{
-  personalConnectionDelegations: McpPersonalConnectionDelegation[];
-  mcpAccountBindings: McpConnectionAccountBinding[] | null;
-  xaiProviderAccountAuthoritySnapshot: XaiProviderAccountAuthoritySnapshotV1;
-  claudeProviderAccountAuthoritySnapshot: ClaudeProviderAccountAuthoritySnapshotV1;
-  lineage: Record<string, unknown>;
-}> {
-  const personalConnectionDelegations = session.parentTurnId
-    ? await personalConnectionDelegationsForTurnInTransaction(
-        tx,
-        workspaceId,
-        session.parentSessionId,
-        session.parentTurnId,
-      )
-    : [];
-  const mcpAccountBindings = session.parentTurnId
-    ? await mcpAccountBindingsForTurnInTransaction(
-        tx,
-        workspaceId,
-        session.parentSessionId,
-        session.parentTurnId,
-      )
-    : null;
-  const xaiProviderAccountAuthoritySnapshot = session.parentTurnId
-    ? await xaiProviderAccountAuthoritySnapshotForTurnInTransaction(
-        tx,
-        workspaceId,
-        session.parentSessionId,
-        session.parentTurnId,
-      )
-    : WORKSPACE_XAI_PROVIDER_ACCOUNT_AUTHORITY_SNAPSHOT_V1;
-  const claudeProviderAccountAuthoritySnapshot = session.parentTurnId
-    ? await claudeProviderAccountAuthoritySnapshotForTurnInTransaction(
-        tx,
-        workspaceId,
-        session.parentSessionId,
-        session.parentTurnId,
-      )
-    : WORKSPACE_CLAUDE_PROVIDER_ACCOUNT_AUTHORITY_SNAPSHOT_V1;
-  const [parentTurn] = session.parentTurnId
-    ? await tx
-        .select({
-          initiatingHumanSubjectId: schema.sessionTurns.initiatingHumanSubjectId,
-          initiatorKind: schema.sessionTurns.initiatorKind,
-          initiatorSubjectId: schema.sessionTurns.initiatorSubjectId,
-        })
-        .from(schema.sessionTurns)
-        .where(
-          and(
-            eq(schema.sessionTurns.workspaceId, workspaceId),
-            eq(schema.sessionTurns.sessionId, session.parentSessionId),
-            eq(schema.sessionTurns.id, session.parentTurnId),
-          ),
-        )
-        .limit(1)
-    : [];
-  const xaiAuthoritySubjectId =
-    xaiProviderAccountAuthoritySnapshot.scope === "user"
-      ? (parentTurn?.initiatingHumanSubjectId ??
-        (parentTurn?.initiatorKind === "subject" ? parentTurn.initiatorSubjectId : null))
-      : null;
-  const claudeAuthoritySubjectId =
-    claudeProviderAccountAuthoritySnapshot.scope === "user"
-      ? (parentTurn?.initiatingHumanSubjectId ??
-        (parentTurn?.initiatorKind === "subject" ? parentTurn.initiatorSubjectId : null))
-      : null;
-  if (xaiProviderAccountAuthoritySnapshot.scope === "user" && !xaiAuthoritySubjectId) {
-    throw new Error("Child lifecycle outbox lost its parent xAI authority subject");
-  }
-  if (claudeProviderAccountAuthoritySnapshot.scope === "user" && !claudeAuthoritySubjectId) {
-    throw new Error("Child lifecycle outbox lost its parent Claude authority subject");
-  }
-  const connectionAuthoritySubjectId =
-    parentTurn?.initiatingHumanSubjectId ??
-    (parentTurn?.initiatorKind === "subject" ? parentTurn.initiatorSubjectId : null);
-  const hasPersonalConnections = personalConnectionDelegations.length > 0;
-  if (hasPersonalConnections && !connectionAuthoritySubjectId) {
-    throw new Error("Child lifecycle outbox lost its parent connection authority subject");
-  }
-  return {
-    personalConnectionDelegations,
-    mcpAccountBindings,
-    xaiProviderAccountAuthoritySnapshot,
-    claudeProviderAccountAuthoritySnapshot,
-    lineage: {
-      childSessionId: session.id,
-      parentSessionId: session.parentSessionId,
-      ...(session.parentTurnId ? { parentTurnId: session.parentTurnId } : {}),
-      ...(connectionAuthoritySubjectId && hasPersonalConnections
-        ? { connectionAuthoritySubjectId }
-        : {}),
-      ...(xaiAuthoritySubjectId ? { xaiAuthoritySubjectId } : {}),
-      ...(claudeAuthoritySubjectId ? { claudeAuthoritySubjectId } : {}),
-    },
-  };
-}
 
 type ChildLifecycleOutboxPayload = Extract<
   SessionSystemUpdatePayload,
@@ -83910,7 +84444,9 @@ export async function addSessionSystemUpdateWithSourceMutation<
         // already-failed parent is settled authority and cannot be restarted
         // solely by a late child. An active session-level input wait is also an
         // explicit durable obligation, independent of whether the session has
-        // a goal, so an immediate child result may wake it.
+        // a goal, so an immediate child result may wake it. A parent with no
+        // goal at all (an ordinary chat that started a worker and promised its
+        // result) is woken by the child's terminal result.
         const waitingForInput =
           childLifecycleKind &&
           session.status !== "failed" &&
@@ -83918,7 +84454,10 @@ export async function addSessionSystemUpdateWithSourceMutation<
             .disposition === "held";
         const childNoticeMayWake =
           !childLifecycleKind ||
-          (session.status !== "failed" && (goalStatus === "active" || waitingForInput));
+          (session.status !== "failed" &&
+            (goalStatus === "active" ||
+              waitingForInput ||
+              (input.kind === "child_terminal_result" && goalStatus === null)));
         const shouldWake =
           !consumedByParentRead &&
           wakeClass === "immediate" &&
@@ -86437,7 +86976,7 @@ async function mapSessionWithControl(
   },
   archive: Pick<Session, "archived" | "archivedAt" | "archiveVersion"> = mapSessionArchive(null),
   workspaceControl?: WorkspaceControlRow,
-  tenancyViewer?: { subjectId: string; activated: boolean },
+  tenancyViewer?: { subjectId: string },
 ): Promise<Session> {
   const controls = await sessionControlProjections(db, row.workspaceId, [row.id], workspaceControl);
   const control = controls.get(row.id);
@@ -86574,7 +87113,7 @@ function mapSession(
     attentionVersion: 0,
   },
   archive: Pick<Session, "archived" | "archivedAt" | "archiveVersion"> = mapSessionArchive(null),
-  tenancyViewer?: { subjectId: string; activated: boolean },
+  tenancyViewer?: { subjectId: string },
 ): Session {
   const bundledSkillIds = bundledSkillSelectionFromMetadata(row.metadata);
   return {
@@ -86608,9 +87147,7 @@ function mapSession(
     toolPolicyVersion: Number(row.toolPolicyVersion),
     mcpApprovalPolicies: row.mcpApprovalPolicies,
     metadata: row.metadata,
-    ...(tenancyViewer?.activated
-      ? { tenancy: mapSessionTenancy(row, tenancyViewer.subjectId) }
-      : {}),
+    ...(tenancyViewer ? { tenancy: mapSessionTenancy(row, tenancyViewer.subjectId) } : {}),
     createdBy: initiatorFromStorage(
       row.createdByKind,
       row.createdBySubjectId,
@@ -87398,6 +87935,16 @@ async function withSocialConnectionSubjectRls<T>(
   return subjectId
     ? await withWorkspaceSubjectRls(db, workspaceId, subjectId, fn)
     : await withWorkspaceRls(db, workspaceId, fn);
+}
+
+function withHolder(
+  key: ApiKey,
+  row: typeof schema.apiKeys.$inferSelect,
+  holders: Awaited<ReturnType<typeof serviceAccountsForKeys>>,
+): ApiKey {
+  if (row.credentialKind !== "organization") return key;
+  const holder = row.serviceAccountId ? holders.get(row.serviceAccountId) : undefined;
+  return { ...key, serviceAccount: holder ? { ...holder } : null };
 }
 
 function mapApiKey(row: typeof schema.apiKeys.$inferSelect, workspaceIds?: string[]): ApiKey {

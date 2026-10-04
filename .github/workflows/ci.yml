@@ -43,9 +43,12 @@ concurrency:
   # only waste capacity. Movement on main alone does not invalidate an admitted
   # Version PR head or cancel its CI.
   # Pull-request heads are mutable in the same way: only the newest head can be
-  # merged. Main pushes remain independent because an ancestor can still be an
-  # admitted release source after a newer merge lands.
-  group: ${{ github.event_name == 'workflow_dispatch' && format('ci-automation-{0}', inputs.automation_pr_number) || github.event_name == 'pull_request' && format('ci-pr-{0}', github.event.pull_request.number) || format('ci-{0}', github.run_id) }}
+  # merged. Main pushes share one queue without cancelling: the running build
+  # finishes (its images stay usable), and only the newest waiting push runs
+  # next, so rapid merges cannot pile up dozens of queued runs.
+  # Version-PR merge commits keep their own run: stable releases require a
+  # successful CI run for that exact SHA.
+  group: ${{ github.event_name == 'workflow_dispatch' && format('ci-automation-{0}', inputs.automation_pr_number) || github.event_name == 'pull_request' && format('ci-pr-{0}', github.event.pull_request.number) || github.ref == 'refs/heads/main' && contains(github.event.head_commit.message, 'version packages') == false && 'ci-main-push' || format('ci-{0}', github.run_id) }}
   cancel-in-progress: ${{ github.event_name == 'workflow_dispatch' || github.event_name == 'pull_request' }}
 
 permissions:
@@ -121,6 +124,7 @@ jobs:
           (
             cd "$expected"
             bun "$GITHUB_WORKSPACE/node_modules/@changesets/cli/bin.js" version
+            bun scripts/release/lockstep-version.ts
             bun scripts/build-artifact-kernel-wasm-packages.ts --refresh-package-identities
             git add -A
             git diff --cached --check
@@ -350,6 +354,7 @@ jobs:
             (
               cd "$expected"
               bun "$GITHUB_WORKSPACE/node_modules/@changesets/cli/bin.js" version
+              bun scripts/release/lockstep-version.ts
               bun scripts/build-artifact-kernel-wasm-packages.ts --refresh-package-identities
               git add -A
               git diff --cached --check
@@ -669,9 +674,10 @@ jobs:
       - name: Recovery integration regressions
         timeout-minutes: 5
         run: |
+          bun test scripts/ci/recovery-selection.test.ts
           bun test --timeout 30000 \
             --test-name-pattern \
-            'an MCP stream timeout after a successful tool output checkpoints once and recovers the same turn' \
+            'a mcp failure after successful tool output checkpoints once and recovers the same turn' \
             ./test/integration/worker-activity.integration.ts
           bun test --timeout 180000 \
             --test-name-pattern \
