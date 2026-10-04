@@ -952,7 +952,7 @@ describe("attempt-fenced Agent session commands", () => {
     });
   });
 
-  test("a late child result stays pending without restarting a settled no-goal parent", async () => {
+  test("a late child result wakes a settled no-goal parent and stays pending until claimed", async () => {
     const grant = await fixture();
     const parent = await makeSession(grant);
     await submit(grant, parent.id, "finish parent work");
@@ -995,9 +995,9 @@ describe("attempt-fenced Agent session commands", () => {
       throw new Error("settled parent was unexpectedly cancelled");
     }
 
-    expect(update).toMatchObject({ added: true, shouldWake: false });
+    expect(update).toMatchObject({ added: true, shouldWake: true });
     expect(await getSession(client.db, grant.workspaceId!, parent.id)).toMatchObject({
-      status: "idle",
+      status: "queued",
       activeTurnId: null,
     });
     expect(
