@@ -22,6 +22,7 @@ import {
   withSessionRlsActorContext,
   withWorkspaceSessionActivityRls,
   withDatabaseStatementTimeout,
+  type Database,
   type DbClient,
 } from "@opengeni/db";
 import {
@@ -32,7 +33,7 @@ import {
 } from "@opengeni/testing";
 import { Hono } from "hono";
 import { createHash } from "node:crypto";
-import { sql } from "drizzle-orm";
+import { sql, type SQL } from "drizzle-orm";
 import { withAccessGrantSessionRlsContext } from "../src/access-grant-rls";
 import { registerInsightsUsageRoutes } from "../src/routes/insights-usage";
 import { createApp } from "../src/app";
@@ -45,6 +46,33 @@ beforeAll(async () => {
   if (!acquired) throw new Error("Unified Insights HTTP verification requires PostgreSQL");
   shared = acquired;
   client = createDb(shared.appUrl);
+  const [reader] = await shared.admin`select pg_get_functiondef(oid) as definition,
+    pg_get_userbyid(proowner) as owner from pg_proc where
+    oid='opengeni_private.insights_scoped_usage_rows(uuid,uuid,timestamptz,timestamptz,text,uuid[],boolean)'::regprocedure`;
+  let rawDefinition: string = reader!.definition;
+  for (const scope of ["w.id", "null"]) {
+    const current = `opengeni_private.insights_rollup_amount_inputs(a,${scope},p_since,p_until,p_granularity)`;
+    expect(rawDefinition.split(current)).toHaveLength(2);
+    rawDefinition = rawDefinition.replace(
+      current,
+      `opengeni_private.insights_raw_amount_inputs(a,${scope},p_since,p_until)`,
+    );
+  }
+  expect(rawDefinition.split("opengeni_private.insights_scoped_usage_rows(")).toHaveLength(2);
+  // Disposable public-schema oracle, with unchanged owner, authority and timeout.
+  // Reverse only the two reviewed data-input substitutions; never change the live reader.
+  await shared.admin.begin(async (tx) => {
+    await tx.unsafe(
+      rawDefinition.replace(
+        "opengeni_private.insights_scoped_usage_rows(",
+        "public.insights_test_raw_usage_rows(",
+      ),
+    );
+    await tx.unsafe(`alter function public.insights_test_raw_usage_rows(uuid,uuid,timestamptz,timestamptz,text,uuid[],boolean)
+      owner to "${reader!.owner.replaceAll('"', '""')}"`);
+    await tx`revoke all on function public.insights_test_raw_usage_rows(uuid,uuid,timestamptz,timestamptz,text,uuid[],boolean) from PUBLIC`;
+    await tx`grant execute on function public.insights_test_raw_usage_rows(uuid,uuid,timestamptz,timestamptz,text,uuid[],boolean) to opengeni_app`;
+  });
 }, 180_000);
 afterAll(async () => {
   await client?.close();
@@ -70,6 +98,45 @@ async function fixture() {
   return { accountId: grant.accountId, workspaceId, subjectId };
 }
 type Scope = Awaited<ReturnType<typeof fixture>>;
+
+// The existing DB raw-oracle recipe, without its optional diagnostic timeout.
+// Substitute only the compiled function identifier; bound values and RLS setup remain native.
+function rawOracleDatabase(db: Database): Database {
+  return new Proxy(db, {
+    get(target, key) {
+      if (key === "transaction")
+        return (
+          run: (tx: Database) => Promise<unknown>,
+          config: Parameters<Database["transaction"]>[1],
+        ) => target.transaction((tx) => run(rawOracleDatabase(tx as Database)), config);
+      if (key === "execute")
+        return (statement: SQL) => {
+          const compiled = statement.getSQL();
+          const toQuery = compiled.toQuery.bind(compiled);
+          const oracle = new Proxy(compiled, {
+            get(query, method) {
+              if (method === "getSQL") return () => oracle;
+              if (method === "toQuery")
+                return (config: Parameters<SQL["toQuery"]>[0]) => {
+                  const result = toQuery(config);
+                  return {
+                    ...result,
+                    sql: result.sql.replaceAll(
+                      "opengeni_private.insights_scoped_usage_rows(",
+                      "public.insights_test_raw_usage_rows(",
+                    ),
+                  };
+                };
+              return Reflect.get(query, method);
+            },
+          });
+          return target.execute(oracle);
+        };
+      const value = Reflect.get(target, key);
+      return typeof value === "function" ? value.bind(target) : value;
+    },
+  });
+}
 
 async function bearer(scope: Scope, permissions: Permission[]) {
   return `Bearer ${await signDelegatedAccessToken(secret, {
@@ -766,17 +833,22 @@ test("daily HTTP reads retain ledger-period money and live selected-key, project
   );
   const read = async (organization: boolean, query = "range=week&groupBy=rootSession") => {
     // Each read has a new cache: a hit must not conceal a stale daily projection.
-    const app = createApp({
-      db: client.db,
-      settings: testSettings({ productAccessMode: "managed", delegationSecret: secret }),
-      bus: new MemoryEventBus(),
-      workflowClient: {} as never,
-    });
-    const response = await app.request(path(scope, organization, "usage", query), {
-      headers: { authorization: `Bearer ${rawKey}` },
-    });
-    expect(response.status, await response.clone().text()).toBe(200);
-    return InsightsUsageResponse.parse(await response.json());
+    const from = async (db: Database) => {
+      const app = createApp({
+        db,
+        settings: testSettings({ productAccessMode: "managed", delegationSecret: secret }),
+        bus: new MemoryEventBus(),
+        workflowClient: {} as never,
+      });
+      const response = await app.request(path(scope, organization, "usage", query), {
+        headers: { authorization: `Bearer ${rawKey}` },
+      });
+      expect(response.status, await response.clone().text()).toBe(200);
+      return InsightsUsageResponse.parse(await response.json());
+    };
+    const daily = await from(client.db);
+    expect(daily).toEqual(await from(rawOracleDatabase(client.db)));
+    return daily;
   };
   try {
     for (const groupBy of ["model", "person", "rootSession", "project"] as const) {
