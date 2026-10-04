@@ -47,6 +47,7 @@ import {
   processCompactionModelUsageEvent,
 } from "./model-usage";
 import { waitForTurnOperation } from "./sandbox-provision";
+import { recordProviderRecoveryOutcome } from "./provider-recovery-metrics";
 
 import type { ClaimTurnOk } from "./claim";
 import type { GovernanceModelOk } from "./governance-model";
@@ -349,6 +350,20 @@ export async function prepareCompaction(deps: CompactionPrepDeps): Promise<Compa
     await publishDurableSessionEvents(bus, input.workspaceId, input.sessionId, events);
   };
   const publishCompactionOutcomeEvents = async (events: SessionEvent[]) => {
+    if (events.some((event) => event.type === "session.context.compacted")) {
+      // The summary and recovery reset already committed under the attempt
+      // fence. Skipped compaction does not prove successful model progress.
+      attempt.providerRecoveryCount = 0;
+      if (attempt.providerRecoveryObservation) {
+        recordProviderRecoveryOutcome(observability, {
+          route: attempt.modelMetricRoute,
+          cause: attempt.providerRecoveryObservation.cause,
+          outcome: "recovered",
+          elapsedMs: Date.now() - attempt.providerRecoveryObservation.startedAt,
+        });
+        attempt.providerRecoveryObservation = undefined;
+      }
+    }
     // `compaction.started` was already fanout via publishCompactionLiveEvents.
     await publishDurableSessionEvents(
       bus,
