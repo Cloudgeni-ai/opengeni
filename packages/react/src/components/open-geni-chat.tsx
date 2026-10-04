@@ -11,6 +11,7 @@ import {
 import { useOpenGeni, type ClientOverride } from "../session-context";
 import { SessionConversation, type SessionConversationProps } from "./session-conversation";
 import { SessionList, type SessionListLabels, type SessionListProps } from "./session-list";
+import { SessionProxyScope, type SessionProxyBaseUrl } from "./session-proxy-scope";
 
 export type OpenGeniChatLabels = SessionListLabels & {
   openChats: string;
@@ -31,41 +32,47 @@ const DEFAULT_LABELS: Omit<OpenGeniChatLabels, keyof SessionListLabels> = {
   newChatUnavailable: "New chats are not enabled for this product.",
 };
 
-export type OpenGeniChatProps = ClientOverride & {
-  /** Controlled selection. `null` shows the new-chat composer. */
-  sessionId?: string | null | undefined;
-  /** Initial selection when uncontrolled. Defaults to a new chat. */
-  defaultSessionId?: string | null | undefined;
-  onSessionChange?: ((sessionId: string | null) => void) | undefined;
-  /**
-   * Create a chat from its first message. Defaults to `client.createSession`
-   * with `{ initialMessage, idempotencyKey }`, which `createSessionProxyHandler`
-   * accepts when the server supplies a `createSession` hook. Return the new id.
-   */
-  createSession?: ((initialMessage: string, idempotencyKey: string) => Promise<string>) | undefined;
-  /** Hide the "New chat" entry point. */
-  newChat?: boolean | undefined;
-  /** Forwarded to the conversation (message rendering, tool renderers, composer...). */
-  conversationProps?: Omit<SessionConversationProps, "sessionId" | "client" | "workspaceId">;
-  /** Forwarded to the list (rename/archive toggles, page size). */
-  listProps?: Pick<SessionListProps, "rename" | "archive" | "pageSize"> | undefined;
-  labels?: Partial<OpenGeniChatLabels> | undefined;
-  className?: string | undefined;
-  /** Defaults to filling the host. */
-  height?: CSSProperties["height"];
-  /**
-   * Light or dark. Defaults to `auto`: follow the host page (an enclosing
-   * `data-og-theme`, `class="dark"`/`data-theme` on <html> or <body>, the
-   * host's `color-scheme`, then its background), not the OS setting alone.
-   */
-  theme?: HostThemePreference | undefined;
-  /**
-   * `host` (default) derives backgrounds and cards from the host background so
-   * the chat blends in; `theme` uses the `--og-color-*` surface tokens as they
-   * are. Customized surface tokens are always kept.
-   */
-  surface?: HostSurfacePreference | undefined;
-};
+export type OpenGeniChatProps = ClientOverride &
+  SessionProxyBaseUrl & {
+    /** Controlled selection. `null` shows the new-chat composer. */
+    sessionId?: string | null | undefined;
+    /** Initial selection when uncontrolled. Defaults to a new chat. */
+    defaultSessionId?: string | null | undefined;
+    onSessionChange?: ((sessionId: string | null) => void) | undefined;
+    /**
+     * Create a chat from its first message. Defaults to `client.createSession`
+     * with `{ initialMessage, idempotencyKey }`, which `createSessionProxyHandler`
+     * accepts when the server supplies a `createSession` hook. Return the new id.
+     */
+    createSession?:
+      | ((initialMessage: string, idempotencyKey: string) => Promise<string>)
+      | undefined;
+    /** Hide the "New chat" entry point. */
+    newChat?: boolean | undefined;
+    /** Forwarded to the conversation (message rendering, tool renderers, composer...). */
+    conversationProps?: Omit<
+      SessionConversationProps,
+      "sessionId" | "client" | "workspaceId" | "baseUrl"
+    >;
+    /** Forwarded to the list (rename/archive toggles, page size). */
+    listProps?: Pick<SessionListProps, "rename" | "archive" | "pageSize"> | undefined;
+    labels?: Partial<OpenGeniChatLabels> | undefined;
+    className?: string | undefined;
+    /** Defaults to filling the host. */
+    height?: CSSProperties["height"];
+    /**
+     * Light or dark. Defaults to `auto`: follow the host page (an enclosing
+     * `data-og-theme`, `class="dark"`/`data-theme` on <html> or <body>, the
+     * host's `color-scheme`, then its background), not the OS setting alone.
+     */
+    theme?: HostThemePreference | undefined;
+    /**
+     * `host` (default) derives backgrounds and cards from the host background so
+     * the chat blends in; `theme` uses the `--og-color-*` surface tokens as they
+     * are. Customized surface tokens are always kept.
+     */
+    surface?: HostSurfacePreference | undefined;
+  };
 
 type CreateClient = Partial<Pick<OpenGeniClient, "createSession">>;
 
@@ -73,8 +80,20 @@ type CreateClient = Partial<Pick<OpenGeniClient, "createSession">>;
  * A complete chat experience: the user's chat list plus the conversation.
  * The list is a sidebar when the component is wide and a drawer when narrow
  * (container-based, so it adapts inside panels as well as full pages).
+ * `<OpenGeniChat baseUrl="/api/opengeni" />` needs no provider: it talks to
+ * your session proxy and uses the workspace the proxy resolves.
  */
-export function OpenGeniChat({
+export function OpenGeniChat({ baseUrl, ...props }: OpenGeniChatProps) {
+  if (baseUrl === undefined) return <Chat {...props} />;
+  const { client: _client, workspaceId, ...rest } = props;
+  return (
+    <SessionProxyScope baseUrl={baseUrl} workspaceId={workspaceId}>
+      <Chat {...rest} />
+    </SessionProxyScope>
+  );
+}
+
+function Chat({
   client,
   workspaceId,
   sessionId: controlledSessionId,
@@ -89,7 +108,7 @@ export function OpenGeniChat({
   height = "100%",
   theme,
   surface,
-}: OpenGeniChatProps) {
+}: Omit<OpenGeniChatProps, "baseUrl">) {
   const labels = { ...DEFAULT_LABELS, ...labelOverrides } as OpenGeniChatLabels;
   const scope = { client, workspaceId };
   const context = useOpenGeni(scope);
