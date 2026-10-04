@@ -146,6 +146,11 @@ export interface ActivityDisclosureProps {
   /** Title shimmer + preview pulse while in flight. */
   running?: boolean | undefined;
   preview?: ReactNode | undefined;
+  /**
+   * A small trailing element (a thumbnail, an open action) shown in the right
+   * gutter in place of the preview and chip while collapsed, as on web.
+   */
+  media?: ReactNode | undefined;
   chip?: DisclosureChip | undefined;
   failed?: boolean | undefined;
   cancelled?: boolean | undefined;
@@ -165,6 +170,7 @@ export function ActivityDisclosure({
   titleMono,
   running,
   preview,
+  media,
   chip: chipProp,
   failed,
   cancelled,
@@ -288,9 +294,13 @@ export function ActivityDisclosure({
       {iconNode}
       <View style={{ flexDirection: "row", alignItems: "center", gap: 8, flex: 1, minWidth: 0 }}>
         <View style={{ flexShrink: 1, minWidth: 0 }}>{titleNode}</View>
-        {previewNode && !open ? <View style={{ flex: 1, minWidth: 0 }}>{previewNode}</View> : null}
+        {previewNode && !open && media == null ? (
+          <View style={{ flex: 1, minWidth: 0 }}>{previewNode}</View>
+        ) : null}
       </View>
-      {chip && !open ? (
+      {media != null && !open ? (
+        <View style={{ paddingLeft: 8, flexShrink: 0 }}>{media}</View>
+      ) : chip && !open ? (
         <View style={{ paddingLeft: 8 }}>
           <Chip chip={chip} />
         </View>

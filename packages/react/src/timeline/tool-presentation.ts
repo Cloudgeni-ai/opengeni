@@ -105,7 +105,28 @@ export type ToolBody =
       /** A single malformed op renders its raw patch without the path caption. */
       bare?: boolean | undefined;
     }
-  | { kind: "web-results"; results: WebSearchResult[] | null };
+  | { kind: "web-results"; results: WebSearchResult[] | null }
+  | {
+      /** A short labelled listing (disclosed tools, search hits) above payloads. */
+      kind: "listing";
+      note?: string | undefined;
+      entries: ToolListingEntry[];
+      /** Entries beyond the visible list ("+N more"). */
+      more?: number | undefined;
+      /** Shown instead of the list when it is known to be empty. */
+      empty?: string | undefined;
+      blocks: Array<{ label: string; value: unknown; failed?: boolean }>;
+    };
+
+export type ToolListingEntry = {
+  key: string;
+  title: string;
+  /** Quiet leading label (the tool's server). */
+  eyebrow?: string | null | undefined;
+  mono?: boolean | undefined;
+  /** Secondary text under the title (a search snippet). */
+  snippet?: string | undefined;
+};
 
 export type PresentedToolKind =
   | "exec"
@@ -114,6 +135,9 @@ export type PresentedToolKind =
   | "web_search"
   | "ask"
   | "run_on"
+  | "tool_search"
+  | "docs_search"
+  | "session_title"
   | "generic";
 
 export type ToolRowPresentation = {
@@ -815,13 +839,370 @@ export function genericToolPresentation(item: ToolCallItem): ToolRowPresentation
   });
 }
 
+/* ---- tool_search (progressive MCP disclosure) ------------------------------ */
+
+export type DisclosedTool = {
+  /** Full wire name (`server__leaf` or bare). */
+  name: string;
+  /** Server / namespace prefix before `__`, when present. */
+  source: string | null;
+  /** Leaf tool name after `__`. */
+  leaf: string;
+};
+
+export function splitToolWireName(name: string): DisclosedTool {
+  const boundary = name.indexOf("__");
+  if (boundary <= 0) {
+    return { name, source: null, leaf: name };
+  }
+  return {
+    name,
+    source: name.slice(0, boundary),
+    leaf: name.slice(boundary + 2),
+  };
+}
+
+/** Capability query from live tool_search args (object or JSON string). */
+export function toolSearchQuery(item: ToolCallItem): string {
+  const fromArgs = parseToolArgs(item.arguments);
+  if (typeof fromArgs.query === "string" && fromArgs.query.trim()) {
+    return fromArgs.query.trim();
+  }
+  const raw = item.raw;
+  if (raw && typeof raw === "object") {
+    const rawArgs = (raw as { arguments?: unknown }).arguments;
+    if (typeof rawArgs === "string" && rawArgs.trim()) {
+      const parsed = tryParseJson(rawArgs);
+      if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
+        const query = (parsed as { query?: unknown }).query;
+        if (typeof query === "string" && query.trim()) {
+          return query.trim();
+        }
+      }
+    } else if (rawArgs && typeof rawArgs === "object" && !Array.isArray(rawArgs)) {
+      const query = (rawArgs as { query?: unknown }).query;
+      if (typeof query === "string" && query.trim()) {
+        return query.trim();
+      }
+    }
+  }
+  return "";
+}
+
+/**
+ * Parse disclosed tools from the runtime event shape.
+ * `normalizeSdkEvent` collapses `tool_search_output.tools[]` into text:
+ *   "Disclosed tools: a, b" | "No matching tools found."
+ * Also accept a structured `tools` array when a host/enricher preserves it.
+ */
+export function parseDisclosedTools(output: unknown): DisclosedTool[] | null {
+  if (output && typeof output === "object" && !Array.isArray(output)) {
+    const tools = (output as { tools?: unknown }).tools;
+    if (Array.isArray(tools)) {
+      return tools
+        .map((tool) => {
+          if (typeof tool === "string" && tool.trim()) {
+            return splitToolWireName(tool.trim());
+          }
+          if (
+            tool &&
+            typeof tool === "object" &&
+            typeof (tool as { name?: unknown }).name === "string"
+          ) {
+            const name = (tool as { name: string }).name.trim();
+            return name ? splitToolWireName(name) : null;
+          }
+          return null;
+        })
+        .filter((tool): tool is DisclosedTool => tool != null);
+    }
+  }
+
+  const { text } = unwrapMcpOutput(output);
+  const trimmed = text.trim();
+  if (!trimmed) {
+    return null;
+  }
+  if (/^no matching tools found\.?$/i.test(trimmed)) {
+    return [];
+  }
+  const disclosed = trimmed.match(/^disclosed tools:\s*(.+)$/i);
+  if (disclosed?.[1]) {
+    return disclosed[1]
+      .split(",")
+      .map((part) => part.trim())
+      .filter(Boolean)
+      .map(splitToolWireName);
+  }
+  const parsed = tryParseJson(trimmed);
+  if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
+    return parseDisclosedTools(parsed);
+  }
+  return null;
+}
+
+export function toolSearchPreview(
+  tools: DisclosedTool[] | null,
+  cancelled: boolean,
+): string | undefined {
+  if (cancelled) {
+    return undefined;
+  }
+  if (!tools) {
+    return "Done";
+  }
+  if (tools.length === 0) {
+    return "No matches";
+  }
+  if (tools.length === 1) {
+    return tools[0]!.leaf;
+  }
+  const head = tools[0]!.leaf;
+  return `${tools.length} tools · ${truncatePreview(head, 28)}`;
+}
+
+export function toolSearchPresentation(item: ToolCallItem): ToolRowPresentation {
+  const query = toolSearchQuery(item);
+  const queryPreview = query ? truncatePreview(query, 64) : "";
+  const note = query ? `capability query: ${query}` : undefined;
+  const args = parseToolArgs(item.arguments);
+  const base = { tool: "tool_search" as const, icon: "package-search" as const };
+  if (item.status === "running") {
+    return {
+      ...base,
+      iconTone: "running",
+      title: "Looking up tools",
+      running: true,
+      preview: textPreview(queryPreview || "Matching capabilities…", true),
+      body: { kind: "listing", note, entries: [], blocks: [{ label: "Arguments", value: args }] },
+    };
+  }
+  const { text: outText, isError } = unwrapMcpOutput(item.output);
+  if ((isError || item.status === "failed") && item.status !== "cancelled") {
+    return {
+      ...base,
+      iconTone: "failed",
+      title: "Tool lookup failed",
+      failed: true,
+      preview: textPreview(truncatePreview(outText, 80) || queryPreview || "Lookup failed"),
+      body: {
+        kind: "listing",
+        note,
+        entries: [],
+        blocks: [
+          { label: "Arguments", value: args },
+          { label: "Error", value: outText, failed: true },
+        ],
+      },
+    };
+  }
+  const tools = parseDisclosedTools(item.output);
+  const preview = toolSearchPreview(tools, item.status === "cancelled");
+  return {
+    ...base,
+    iconTone: "muted",
+    title: "Looked up tools",
+    cancelled: item.status === "cancelled",
+    ...(preview ? { preview: textPreview(preview) } : {}),
+    body: {
+      kind: "listing",
+      note,
+      entries: (tools ?? []).slice(0, 12).map((tool) => ({
+        key: tool.name,
+        title: tool.leaf,
+        eyebrow: tool.source,
+        mono: true,
+      })),
+      more: tools && tools.length > 12 ? tools.length - 12 : undefined,
+      empty:
+        tools && tools.length === 0
+          ? "no deferred tools matched this capability query."
+          : undefined,
+      blocks:
+        tools == null && outText
+          ? [
+              { label: "Arguments", value: args },
+              { label: "Result", value: outText },
+            ]
+          : [{ label: "Arguments", value: args }],
+    },
+  };
+}
+
+/* ---- docs / knowledge search ----------------------------------------------- */
+
+export type SearchHit = { title: string; snippet: string };
+
+export function parseSearchHits(outText: string): SearchHit[] | null {
+  const parsed = tryParseJson(outText);
+  if (parsed == null) {
+    return null;
+  }
+  const list = Array.isArray(parsed)
+    ? parsed
+    : parsed &&
+        typeof parsed === "object" &&
+        Array.isArray((parsed as { results?: unknown }).results)
+      ? (parsed as { results: unknown[] }).results
+      : parsed && typeof parsed === "object" && Array.isArray((parsed as { hits?: unknown }).hits)
+        ? (parsed as { hits: unknown[] }).hits
+        : null;
+  if (!list) {
+    return null;
+  }
+  return list.map((row) => {
+    const r = row && typeof row === "object" ? (row as Record<string, unknown>) : {};
+    const title =
+      (typeof r.title === "string" && r.title) ||
+      (typeof r.name === "string" && r.name) ||
+      (typeof r.documentTitle === "string" && r.documentTitle) ||
+      (typeof r.path === "string" && r.path) ||
+      (typeof r.id === "string" && r.id) ||
+      "Result";
+    const snippet =
+      (typeof r.snippet === "string" && r.snippet) ||
+      (typeof r.text === "string" && r.text) ||
+      (typeof r.content === "string" && r.content) ||
+      "";
+    return { title, snippet: truncatePreview(snippet, 160) };
+  });
+}
+
+export function docsSearchPresentation(item: ToolCallItem): ToolRowPresentation {
+  const args = parseToolArgs(item.arguments);
+  const query = typeof args.query === "string" ? args.query.trim() : "";
+  const base = {
+    tool: "docs_search" as const,
+    icon: "file-search" as const,
+    title: query
+      ? `Search \u201c${truncatePreview(query, 48)}\u201d`
+      : toolDisplayName(item.name, item.display),
+  };
+  if (item.status === "running") {
+    return {
+      ...base,
+      iconTone: "running",
+      running: true,
+      preview: textPreview("Searching…", true),
+      body: { kind: "payloads", blocks: [{ label: "Arguments", value: args }] },
+    };
+  }
+  const { text: outText, isError } = unwrapMcpOutput(item.output);
+  if ((isError || item.status === "failed") && item.status !== "cancelled") {
+    return {
+      ...base,
+      iconTone: "failed",
+      failed: true,
+      preview: textPreview(truncatePreview(outText, 80) || "Search failed"),
+      body: {
+        kind: "payloads",
+        blocks: [
+          { label: "Arguments", value: args },
+          { label: "Error", value: outText, failed: true },
+        ],
+      },
+    };
+  }
+  const hits = parseSearchHits(outText);
+  const preview =
+    item.status === "cancelled"
+      ? undefined
+      : hits
+        ? hits.length === 0
+          ? "No hits"
+          : `${hits.length} hit${hits.length === 1 ? "" : "s"}`
+        : "Done";
+  return {
+    ...base,
+    iconTone: "muted",
+    cancelled: item.status === "cancelled",
+    ...(preview ? { preview: textPreview(preview) } : {}),
+    body: {
+      kind: "listing",
+      entries: (hits ?? []).slice(0, 8).map((hit) => ({
+        key: `${hit.title}\u0000${hit.snippet}`,
+        title: hit.title,
+        snippet: hit.snippet || undefined,
+      })),
+      blocks: [
+        { label: "Arguments", value: args },
+        { label: "Result", value: outText },
+      ],
+    },
+  };
+}
+
+/* ---- set_session_title / set_other_session_title --------------------------- */
+
+export function sessionTitlePresentation(item: ToolCallItem): ToolRowPresentation {
+  const args = parseToolArgs(item.arguments);
+  const titleArg = typeof args.title === "string" ? args.title.trim() : "";
+  const previewTitle = titleArg ? truncatePreview(titleArg, 72) : "";
+  const base = {
+    tool: "session_title" as const,
+    icon: "sessions" as const,
+    title: toolDisplayName(item.name, item.display),
+  };
+  if (item.status === "running") {
+    return {
+      ...base,
+      iconTone: "running",
+      running: true,
+      preview: textPreview(previewTitle || "Setting title…", true),
+      body: { kind: "payloads", blocks: [{ label: "Arguments", value: args }] },
+    };
+  }
+  const { text: outText, isError } = unwrapMcpOutput(item.output);
+  if ((isError || item.status === "failed") && item.status !== "cancelled") {
+    return {
+      ...base,
+      iconTone: "failed",
+      failed: true,
+      preview: textPreview(truncatePreview(outText, 80) || "Rename failed"),
+      body: {
+        kind: "payloads",
+        blocks: [
+          { label: "Arguments", value: args },
+          { label: "Error", value: outText, failed: true },
+        ],
+      },
+    };
+  }
+  // Prefer the submitted title; fall back to a title field in the tool result.
+  let settledTitle = previewTitle;
+  if (!settledTitle) {
+    const parsed = tryParseJson(outText);
+    if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
+      const fromResult = (parsed as { title?: unknown }).title;
+      if (typeof fromResult === "string" && fromResult.trim()) {
+        settledTitle = truncatePreview(fromResult.trim(), 72);
+      }
+    }
+  }
+  return {
+    ...base,
+    iconTone: "muted",
+    cancelled: item.status === "cancelled",
+    ...(item.status !== "cancelled" && settledTitle ? { preview: textPreview(settledTitle) } : {}),
+    body: {
+      kind: "payloads",
+      blocks: outText
+        ? [
+            { label: "Arguments", value: args },
+            { label: "Result", value: outText },
+          ]
+        : [{ label: "Arguments", value: args }],
+    },
+  };
+}
+
 /* ---- resolution ------------------------------------------------------------ */
 
 const PRESENTERS_BY_RAW_TYPE: Record<string, PresentedToolKind> = {
   apply_patch_call: "apply_patch",
   // Web renders these with richer media renderers; keep them off name matches.
   computer_call: "generic",
-  tool_search_call: "generic",
+  tool_search_call: "tool_search",
 };
 
 const PRESENTERS_BY_NAME: Record<string, PresentedToolKind> = {
@@ -832,6 +1213,11 @@ const PRESENTERS_BY_NAME: Record<string, PresentedToolKind> = {
   apply_patch_call: "apply_patch",
   apply_patch: "apply_patch",
   web_search_call: "web_search",
+  tool_search: "tool_search",
+  search_documents: "docs_search",
+  knowledge_search: "docs_search",
+  set_session_title: "session_title",
+  set_other_session_title: "session_title",
 };
 
 /**
@@ -873,6 +1259,12 @@ export function toolRowPresentation(
       return askPresentation(item);
     case "run_on":
       return runOnPresentation(item);
+    case "tool_search":
+      return toolSearchPresentation(item);
+    case "docs_search":
+      return docsSearchPresentation(item);
+    case "session_title":
+      return sessionTitlePresentation(item);
     default:
       return genericToolPresentation(item);
   }

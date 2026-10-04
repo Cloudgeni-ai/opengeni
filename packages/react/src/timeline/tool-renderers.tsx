@@ -68,9 +68,13 @@ import {
   askPresentation,
   execPresentation,
   genericToolPresentation,
+  parseDisclosedTools,
+  parseSearchHits,
   pathBasename,
   pathDirname,
   runOnPresentation,
+  toolSearchPreview,
+  toolSearchQuery,
   truncatePreview,
   webSearchPresentation,
   writeStdinPresentation,
@@ -1413,123 +1417,6 @@ function SecretSetRenderer({ item }: ToolRendererProps) {
 
 /* ---- tool_search (progressive MCP disclosure) ------------------------------ */
 
-type DisclosedTool = {
-  /** Full wire name (`server__leaf` or bare). */
-  name: string;
-  /** Server / namespace prefix before `__`, when present. */
-  source: string | null;
-  /** Leaf tool name after `__`. */
-  leaf: string;
-};
-
-function splitToolWireName(name: string): DisclosedTool {
-  const boundary = name.indexOf("__");
-  if (boundary <= 0) {
-    return { name, source: null, leaf: name };
-  }
-  return {
-    name,
-    source: name.slice(0, boundary),
-    leaf: name.slice(boundary + 2),
-  };
-}
-
-/** Capability query from live tool_search args (object or JSON string). */
-function toolSearchQuery(item: ToolRendererProps["item"]): string {
-  const fromArgs = parseToolArgs(item.arguments);
-  if (typeof fromArgs.query === "string" && fromArgs.query.trim()) {
-    return fromArgs.query.trim();
-  }
-  const raw = item.raw;
-  if (raw && typeof raw === "object") {
-    const rawArgs = (raw as { arguments?: unknown }).arguments;
-    if (typeof rawArgs === "string" && rawArgs.trim()) {
-      const parsed = tryParseJson(rawArgs);
-      if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
-        const query = (parsed as { query?: unknown }).query;
-        if (typeof query === "string" && query.trim()) {
-          return query.trim();
-        }
-      }
-    } else if (rawArgs && typeof rawArgs === "object" && !Array.isArray(rawArgs)) {
-      const query = (rawArgs as { query?: unknown }).query;
-      if (typeof query === "string" && query.trim()) {
-        return query.trim();
-      }
-    }
-  }
-  return "";
-}
-
-/**
- * Parse disclosed tools from the runtime event shape.
- * `normalizeSdkEvent` collapses `tool_search_output.tools[]` into text:
- *   "Disclosed tools: a, b" | "No matching tools found."
- * Also accept a structured `tools` array when a host/enricher preserves it.
- */
-function parseDisclosedTools(output: unknown): DisclosedTool[] | null {
-  if (output && typeof output === "object" && !Array.isArray(output)) {
-    const tools = (output as { tools?: unknown }).tools;
-    if (Array.isArray(tools)) {
-      return tools
-        .map((tool) => {
-          if (typeof tool === "string" && tool.trim()) {
-            return splitToolWireName(tool.trim());
-          }
-          if (
-            tool &&
-            typeof tool === "object" &&
-            typeof (tool as { name?: unknown }).name === "string"
-          ) {
-            const name = (tool as { name: string }).name.trim();
-            return name ? splitToolWireName(name) : null;
-          }
-          return null;
-        })
-        .filter((tool): tool is DisclosedTool => tool != null);
-    }
-  }
-
-  const { text } = unwrapMcpOutput(output);
-  const trimmed = text.trim();
-  if (!trimmed) {
-    return null;
-  }
-  if (/^no matching tools found\.?$/i.test(trimmed)) {
-    return [];
-  }
-  const disclosed = trimmed.match(/^disclosed tools:\s*(.+)$/i);
-  if (disclosed?.[1]) {
-    return disclosed[1]
-      .split(",")
-      .map((part) => part.trim())
-      .filter(Boolean)
-      .map(splitToolWireName);
-  }
-  const parsed = tryParseJson(trimmed);
-  if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
-    return parseDisclosedTools(parsed);
-  }
-  return null;
-}
-
-function toolSearchPreview(tools: DisclosedTool[] | null, cancelled: boolean): string | undefined {
-  if (cancelled) {
-    return undefined;
-  }
-  if (!tools) {
-    return "Done";
-  }
-  if (tools.length === 0) {
-    return "No matches";
-  }
-  if (tools.length === 1) {
-    return tools[0]!.leaf;
-  }
-  const head = tools[0]!.leaf;
-  return `${tools.length} tools · ${truncatePreview(head, 28)}`;
-}
-
 function ToolSearchRenderer({ item }: ToolRendererProps) {
   const query = toolSearchQuery(item);
   const icon = <PackageSearchIcon className={ICON_SIZE} />;
@@ -1754,43 +1641,6 @@ function SetSessionTitleRenderer({ item }: ToolRendererProps) {
       {outText ? <PayloadBlock label="Result" value={outText} /> : null}
     </ActivityDisclosure>
   );
-}
-
-type SearchHit = { title: string; snippet: string };
-
-function parseSearchHits(outText: string): SearchHit[] | null {
-  const parsed = tryParseJson(outText);
-  if (parsed == null) {
-    return null;
-  }
-  const list = Array.isArray(parsed)
-    ? parsed
-    : parsed &&
-        typeof parsed === "object" &&
-        Array.isArray((parsed as { results?: unknown }).results)
-      ? (parsed as { results: unknown[] }).results
-      : parsed && typeof parsed === "object" && Array.isArray((parsed as { hits?: unknown }).hits)
-        ? (parsed as { hits: unknown[] }).hits
-        : null;
-  if (!list) {
-    return null;
-  }
-  return list.map((row) => {
-    const r = row && typeof row === "object" ? (row as Record<string, unknown>) : {};
-    const title =
-      (typeof r.title === "string" && r.title) ||
-      (typeof r.name === "string" && r.name) ||
-      (typeof r.documentTitle === "string" && r.documentTitle) ||
-      (typeof r.path === "string" && r.path) ||
-      (typeof r.id === "string" && r.id) ||
-      "Result";
-    const snippet =
-      (typeof r.snippet === "string" && r.snippet) ||
-      (typeof r.text === "string" && r.text) ||
-      (typeof r.content === "string" && r.content) ||
-      "";
-    return { title, snippet: truncatePreview(snippet, 160) };
-  });
 }
 
 /* ---- company memory propose (docs MCP) ------------------------------------- */

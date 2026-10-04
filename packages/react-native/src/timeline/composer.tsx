@@ -114,6 +114,8 @@ export function ComposerSurface({
   const c = theme.colors;
   const glass = useLiquidGlass();
   if (glass) {
+    // Hosts must keep this surface's ancestors free of animated opacity: iOS
+    // does not render glass that was mounted beneath a fading parent.
     return (
       <GlassView
         glassEffectStyle="regular"

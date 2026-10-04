@@ -227,6 +227,78 @@ function ToolBodyView({ body }: { body: ToolBody }) {
           ))}
         </View>
       );
+    case "listing":
+      return (
+        <>
+          {body.note ? <BodyNote>{body.note}</BodyNote> : null}
+          {body.entries.length > 0 ? (
+            <View style={{ gap: body.entries.some((entry) => entry.snippet) ? 8 : 6 }}>
+              {body.entries.map((entry) => (
+                <View key={entry.key} style={{ minWidth: 0 }}>
+                  <View style={{ flexDirection: "row", alignItems: "baseline", gap: 8 }}>
+                    {entry.eyebrow ? (
+                      <Text
+                        style={{
+                          ...fontStyle(theme),
+                          fontSize: theme.size.xs,
+                          color: theme.colors["fg-subtle"],
+                        }}
+                      >
+                        {entry.eyebrow}
+                      </Text>
+                    ) : null}
+                    <Text
+                      numberOfLines={1}
+                      style={{
+                        ...(entry.mono ? fontStyle(theme, 400, "mono") : fontStyle(theme, 500)),
+                        fontSize: theme.size.sm,
+                        color: theme.colors.fg,
+                        flexShrink: 1,
+                      }}
+                    >
+                      {entry.title}
+                    </Text>
+                  </View>
+                  {entry.snippet ? (
+                    <Text
+                      numberOfLines={2}
+                      style={{
+                        ...fontStyle(theme),
+                        marginTop: 2,
+                        fontSize: theme.size.xs,
+                        color: theme.colors["fg-muted"],
+                      }}
+                    >
+                      {entry.snippet}
+                    </Text>
+                  ) : null}
+                </View>
+              ))}
+              {body.more ? (
+                <Text
+                  style={{
+                    ...fontStyle(theme),
+                    fontSize: theme.size.xs,
+                    color: theme.colors["fg-muted"],
+                  }}
+                >
+                  +{body.more} more
+                </Text>
+              ) : null}
+            </View>
+          ) : body.empty ? (
+            <BodyNote>{body.empty}</BodyNote>
+          ) : null}
+          {body.blocks.map((block) => (
+            <PayloadBlock
+              key={block.label}
+              label={block.label}
+              value={block.value}
+              failed={block.failed}
+            />
+          ))}
+        </>
+      );
   }
 }
 
