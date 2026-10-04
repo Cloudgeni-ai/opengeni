@@ -426,13 +426,13 @@ export function modelCallReservationQuantities(input: {
     input.providerId !== OPENGENI_GATEWAY_PROVIDER_ID &&
     input.providerId !== WORKSPACE_GATEWAY_PROVIDER_ID
   ) {
-    costMicros = calculateModelUsageReservationCostBreakdown(
-      input.settings,
-      pricedModel,
-      { inputTokens: inputBound, outputTokens: reservedOutput },
-      { latencyMode: input.latencyMode ?? "standard" },
-    ).creditCostMicros;
-    if (!Number.isSafeInteger(costMicros)) costMicros = null;
+    costMicros =
+      calculateModelUsageReservationCostBreakdown(
+        input.settings,
+        pricedModel,
+        { inputTokens: inputBound, outputTokens: reservedOutput },
+        { latencyMode: input.latencyMode ?? "standard" },
+      )?.creditCostMicros ?? null;
   }
   return { tokens, costMicros };
 }

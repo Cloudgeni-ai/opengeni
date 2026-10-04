@@ -1106,3 +1106,29 @@ test("reservation includes independently rounded margins of selected input tiers
     expect(actual.creditCostMicros).toBe(latencyMode === "standard" ? 5 : 10);
   }
 });
+
+test("safe final cost cannot admit an unsafe intermediate pricing product", () => {
+  const settings = testSettings({
+    modelPricingJson: JSON.stringify({
+      "scripted-model": {
+        inputMicrosPerMillionTokens: 702_905_000_000,
+        outputMicrosPerMillionTokens: 0,
+        marginBps: 0,
+      },
+    }),
+  });
+  const actual = calculateModelUsageCostBreakdown(settings, "scripted-model", {
+    inputTokens: 1_166_655,
+    outputTokens: 0,
+  });
+  expect(actual.creditCostMicros).toBe(820_047_632_776);
+  expect(Number.isSafeInteger(actual.creditCostMicros)).toBe(true);
+  const bound = modelCallReservationQuantities({
+    settings,
+    model: "scripted-model",
+    promptTokens: 1,
+    contextWindowTokens: 1_166_655,
+    maxOutputTokens: 1,
+  });
+  expect(bound.costMicros).toBeNull();
+});

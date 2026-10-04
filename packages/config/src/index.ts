@@ -6535,7 +6535,7 @@ export function calculateModelUsageReservationCostBreakdown(
   model: string,
   budget: { inputTokens: number; outputTokens: number },
   options?: { latencyMode?: LatencyMode },
-): ModelUsageCostBreakdown {
+): ModelUsageCostBreakdown | null {
   const schedule = configuredModelPricingSchedules(settings)[model];
   if (!schedule) throw new Error(`Missing model pricing for ${model}`);
   const prices = [
@@ -6558,14 +6558,47 @@ export function calculateModelUsageReservationCostBreakdown(
   );
   const inputTokens = positiveInt(budget.inputTokens);
   const outputTokens = positiveInt(budget.outputTokens);
+  // Settlement uses Number multiplication before division. A mathematically
+  // exact upper bound cannot cover its rounding artifacts when those products
+  // exceed integer precision; refuse a cost bound instead of under-reserving.
+  const inputRate = Math.max(
+    ...prices.flatMap((price) => [
+      price.inputMicrosPerMillionTokens,
+      price.cachedInputMicrosPerMillionTokens ?? price.inputMicrosPerMillionTokens,
+      price.cacheWriteMicrosPerMillionTokens ?? price.inputMicrosPerMillionTokens,
+    ]),
+  );
+  const outputRate = Math.max(...prices.map((price) => price.outputMicrosPerMillionTokens));
+  if (
+    !Number.isSafeInteger(inputTokens * inputRate) ||
+    !Number.isSafeInteger(outputTokens * outputRate)
+  )
+    return null;
   const providerCostMicros = inputTokens * inputUnit + outputTokens * outputUnit;
   const marginBps = Math.max(...prices.map((price) => price.marginBps ?? 0));
   // Actual pricing groups entries by selected schedule, then rounds each
   // group's margin. Sum of ceilings exceeds one ceiling by at most groups-1.
   const groups = Math.min(prices.length, inputTokens + outputTokens);
   const marginRounding = providerCostMicros > 0 && marginBps > 0 ? Math.max(0, groups - 1) : 0;
+  if (
+    !Number.isSafeInteger(providerCostMicros) ||
+    !Number.isSafeInteger(providerCostMicros * (10_000 + marginBps))
+  )
+    return null;
   const creditCostMicros =
     Math.ceil((providerCostMicros * (10_000 + marginBps)) / 10_000) + marginRounding;
+  const multiplier = modelUsageLatencyMultiplier(
+    settings,
+    model,
+    options?.latencyMode ?? "standard",
+  );
+  if (
+    !Number.isSafeInteger(creditCostMicros) ||
+    (multiplier !== undefined &&
+      (!Number.isSafeInteger(providerCostMicros * multiplier) ||
+        !Number.isSafeInteger(creditCostMicros * multiplier)))
+  )
+    return null;
   return applyModelUsageLatency(
     settings,
     model,
@@ -6909,6 +6942,23 @@ function calculateUsageCostBreakdown(
   );
 }
 
+function modelUsageLatencyMultiplier(
+  settings: Settings,
+  model: string,
+  latencyMode: LatencyMode,
+): number | undefined {
+  if (latencyMode === "standard") return undefined;
+  const catalogSettings = settingsForTurnExecutionPolicy(settings, model);
+  const resolved = resolveModelProvider(
+    catalogSettings,
+    canonicalizeConfiguredModelId(catalogSettings, model),
+  );
+  const multiplier = resolved?.model.capabilities.latencyModes.find(
+    (mode) => mode.id === latencyMode && mode.runnable,
+  )?.billingMultiplierBps;
+  return multiplier && multiplier > 0 ? multiplier : undefined;
+}
+
 function applyModelUsageLatency(
   settings: Settings,
   model: string,
@@ -6916,19 +6966,10 @@ function applyModelUsageLatency(
   latencyMode: LatencyMode,
 ): ModelUsageCostBreakdown {
   let { providerCostMicros, creditCostMicros } = cost;
-  if (latencyMode !== "standard") {
-    const catalogSettings = settingsForTurnExecutionPolicy(settings, model);
-    const resolved = resolveModelProvider(
-      catalogSettings,
-      canonicalizeConfiguredModelId(catalogSettings, model),
-    );
-    const multiplierBps = resolved?.model.capabilities.latencyModes.find(
-      (mode) => mode.id === latencyMode && mode.runnable,
-    )?.billingMultiplierBps;
-    if (multiplierBps && multiplierBps > 0) {
-      providerCostMicros = Math.ceil((providerCostMicros * multiplierBps) / 10_000);
-      creditCostMicros = Math.ceil((creditCostMicros * multiplierBps) / 10_000);
-    }
+  const multiplierBps = modelUsageLatencyMultiplier(settings, model, latencyMode);
+  if (multiplierBps !== undefined) {
+    providerCostMicros = Math.ceil((providerCostMicros * multiplierBps) / 10_000);
+    creditCostMicros = Math.ceil((creditCostMicros * multiplierBps) / 10_000);
   }
   return { providerCostMicros, creditCostMicros };
 }
