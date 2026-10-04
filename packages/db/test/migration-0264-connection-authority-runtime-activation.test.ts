@@ -46,12 +46,11 @@ const scheduledInheritedToolAdmissionMigrationName = "0416_scheduled_inherited_t
 // Reuse the shared dependency tail, extending only this fixture's replay.
 // 0598 clones the 0345 waiter fence and extends the 0275/0402 authority ledgers;
 // none may be treated as installed while those prerequisites are absent.
-// 0608 patches the sender-owned capture installed by 0478 and reads the frozen
-// Claude authority installed by 0598. Replay it after both, not before 0264.
+// The shared tail withholds 0608's sender-owned capture patch. It also reads the
+// frozen Claude authority installed by 0598, so replay both in filename order.
 const cutoverMigrationTail = [
   ...embeddingMigrationTail,
   "0598_claude_subscription_account_pools.sql",
-  "0608_receiver_execution_context.sql",
 ].sort();
 
 describe("migration 0264 connection authority runtime activation", () => {
