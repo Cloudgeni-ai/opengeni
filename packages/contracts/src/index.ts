@@ -7076,7 +7076,7 @@ export const CodexRealtimeWebrtcResponse = z
       .min(1)
       .max(1024 * 1024),
     version: CodexRealtimeWebrtcVersion,
-    model: z.literal("gpt-live-1-boulder-alpha"),
+    model: z.enum(["gpt-live-1-boulder-alpha", "opengeni-azure/gpt-live-1"]),
     connectionId: z.string().uuid(),
     connectionEpoch: z.number().int().positive(),
     startupFenceSequence: z.number().int().nonnegative(),
@@ -7233,6 +7233,7 @@ export const SyncSessionRealtimeLedgerResponse = z
 export type SyncSessionRealtimeLedgerResponse = z.infer<typeof SyncSessionRealtimeLedgerResponse>;
 
 export const SessionRealtimeModel = z.enum([
+  "opengeni-azure/gpt-live-1",
   "gpt-live-1-boulder-alpha",
   "supergrok/grok-voice-think-fast-2.0",
   "opengeni-gateway/openai/gpt-realtime-2.1",

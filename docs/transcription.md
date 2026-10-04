@@ -294,3 +294,26 @@ Credit/allowance refusals preserve the recording for manual retry and show a
 specific message. They do not trigger automatic retries. Client availability
 and provider choices are scoped to the authorized workspace; unscoped bootstrap
 cannot advertise a connected subscription belonging to another workspace.
+
+
+## Hosted realtime voice
+
+Dictation configuration is independent of live voice. Configure
+`OPENGENI_AZURE_LIVE_ENDPOINT`, `OPENGENI_AZURE_LIVE_API_KEY`,
+`OPENGENI_AZURE_LIVE_DEPLOYMENT` (default `gpt-live-1`) and
+`OPENGENI_AZURE_LIVE_VOICE` (default `marin`) to offer GPT Live as the hosted
+voice choice. Existing connected subscriptions and workspace Gateway choices
+remain available. Credentials stay in the API; the browser negotiates WebRTC
+using the ordinary session owner proof.
+
+Azure's timed transcript fragments are grouped into application segments,
+explicitly marked as such in ledger metadata; they are not reported as
+provider-finalized turns. Delegation flushes the preceding transcript before
+starting backend work. Stop and connection rotation drain output before sealing
+or retiring the old ledger connection. Progress uses quiet context; final results
+use speakable context on the current provider delegation ID. Results from a
+previous provider connection become general context after rotation.
+
+The transcription debit rules above apply to dictation only. Realtime provider
+charges are paid by the deployment; this adapter does not add per-second end-user
+credit billing. Backend delegated model work retains normal model billing.

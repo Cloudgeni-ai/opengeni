@@ -374,9 +374,15 @@ Diagnostics distinguish permission, device, autoplay, negotiation, rotation,
 reconnect, lost-owner, and terminal-stop transitions without SDP, credentials,
 audio, or transcript bodies.
 
-Only provider `turn.done` events persist transcript truth: one complete
-role-bearing user or assistant entry per provider turn. Live transcript deltas
-remain non-authoritative. Each `delegation.created` carries the bounded finalized
+Codex persists provider `turn.done` events as complete role-bearing turns;
+its live transcript deltas remain non-authoritative. Azure GPT Live instead
+provides timed transcript fragments. Its adapter preserves their observed order
+as `transcript.segment` entries tagged `provider_fragments` and
+`application_segment`, without inventing finalized provider turns. The adapter
+drains through `session.closed` (or transport close), then persists received
+fragments before replacement startup history is read or the mode ends. A close
+timeout stays uncertain and retryable. Old provider-session delegation IDs become
+general context on the replacement; durable task identity remains unchanged. Each `delegation.created` carries the bounded finalized
 dialogue since the previous delegation and records its transcript fence. When
 voice ends, the browser first seals and durably drains every already-parsed V3
 event. The same end transaction then selects only finalized transcript after the

@@ -1,3 +1,4 @@
+import { AZURE_LIVE_MODEL_ID, azureLiveConfigured } from "../azure-live";
 import { withDirectModelProviders } from "@opengeni/config";
 import { listConnectionsMetadata } from "@opengeni/db";
 import {
@@ -950,8 +951,22 @@ export function registerWorkspaceRoutes(app: Hono, deps: ApiRouteDeps): void {
         : { available: false, unavailableReason: credentialReason };
     };
     const gatewayModels = Object.values(AI_GATEWAY_REALTIME_MODELS);
+    const hostedAzure = azureLiveConfigured(deps.settings);
     const models = [
-      ...gatewayModels.map((model, index) => ({
+      ...(hostedAzure
+        ? [
+            {
+              id: AZURE_LIVE_MODEL_ID,
+              label: "GPT Live 1",
+              provider: "OpenGeni" as const,
+              description: "Realtime voice with session delegation",
+              available: true,
+              unavailableReason: null,
+              recommended: true,
+            },
+          ]
+        : []),
+      ...(hostedAzure ? [] : gatewayModels).map((model, index) => ({
         id: model.managedModelId,
         label: model.label,
         provider: "OpenGeni" as const,

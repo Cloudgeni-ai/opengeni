@@ -166,6 +166,8 @@ export function testSettings(overrides: Partial<Settings> = {}): Settings {
     voiceInputAzureApiKey: undefined,
     voiceInputAzureAdToken: undefined,
     voiceInputMaiApiVersion: "2025-10-15",
+    azureLiveDeployment: "gpt-live-1",
+    azureLiveVoice: "marin",
     voiceInputMaiModel: "MAI-Transcribe-2",
     voiceInputCodexExperimentalEnabled: false,
     modelPricingJson: JSON.stringify({
