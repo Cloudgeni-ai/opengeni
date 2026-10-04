@@ -698,7 +698,7 @@
   --_og-color-primary-hover: var(--og-color-primary-hover, var(--og-color-primary));
   --_og-color-diff-add-bg: var(--og-color-diff-add-bg, var(--og-color-status-idle));
   --_og-color-diff-del-bg: var(--og-color-diff-del-bg, var(--og-color-status-failed));
-  --_og-shadow-glow: var(--og-shadow-glow, 0 0 24px var(--og-color-accent));
+  --_og-shadow-glow: var(--og-shadow-glow, 0 0 24px color-mix(in oklch, var(--og-color-accent) 10%, transparent));
   --_og-session-chrome-surface: var(--og-session-chrome-surface, var(--og-color-surface-2));
   --_og-session-chrome-surface-open: var(--og-session-chrome-surface-open, var(--og-color-surface-2));
   --_og-session-chrome-border: var(--og-session-chrome-border, var(--og-color-border));
