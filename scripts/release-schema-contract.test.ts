@@ -2384,6 +2384,7 @@ describe("release schema contract", () => {
       "0605_insights_model_debit_period_index.sql",
       "0606_pending_child_terminal_wake_repair.sql",
       "0607_connected_command_output_release.sql",
+      "0608_receiver_execution_context.sql",
     ].filter((path) =>
       unfilteredSourceContract.migrations.some((migration) => migration.path === path),
     );

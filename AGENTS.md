@@ -386,6 +386,13 @@ authorized Resume or new Send/Steer requests recheck. Never repair missing
 membership/grants or invent a principal to make admission succeed. See
 `docs/run-lifecycle.md` for snapshot fencing and mixed-worker rollout limits.
 
+Ordinary same-human agent input uses the receiving session's last started
+user/API execution context. Advance its server-owned pointer only on the first
+durable `turn.started`, never queue/claim or recovery. Preserve exact receipt
+generations and live revocation; restricted/foreign inputs, schedules and Steer
+retain explicit authority. Migration 0608 requires drained writers and only
+context-aware images afterward. See `docs/durable-agent-inputs.md`.
+
 ## Pull-request delivery across moving `main`
 
 The workflow-wake reaper repairs authentic pending child terminal results for
