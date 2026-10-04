@@ -33467,12 +33467,22 @@ export async function beginConnectorActionExecution(
               : {}),
           });
           if (!resolved.managed) return { allowed: true, managed: false } as const;
+          const decision = connectorActionPolicyDecision(resolved);
+          // A recommended Allow with no explicit rule is ordinary tool use, not
+          // a reviewed action: no ledger row or audit pair. Every Ask, Block,
+          // explicit rule, and connector write keeps its execute-once record.
+          if (
+            resolved.source === "default" &&
+            decision === "allow" &&
+            normalized.approvalMode === "connector"
+          ) {
+            return { allowed: true, managed: false } as const;
+          }
           const durable = durableConnectorActionInvocation(
             identity,
             { ...normalized, connectionId: normalized.connectionId! },
             resolved,
           );
-          const decision = connectorActionPolicyDecision(resolved);
           const created = await insertConnectorActionRequest(tx as unknown as Database, {
             identity,
             invocation: durable,

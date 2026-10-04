@@ -5615,7 +5615,9 @@ function connectorActionGatewayLifecycle(input: {
             return;
           }
           // A provider-declared error is not evidence that no side effect occurred.
-          // Only a trusted in-process adapter can prove nonexecution.
+          // Only a trusted in-process adapter can prove nonexecution. The ledger
+          // records that judgement; the caller always receives the provider's
+          // own result, so its error text is never replaced or discarded.
           const returnedOutcome =
             input.resultOutcome?.(settlement.result) ??
             (settlement.result !== null &&
@@ -5628,14 +5630,6 @@ function connectorActionGatewayLifecycle(input: {
             requestId,
             outcome: returnedOutcome ?? "completed",
           });
-          if (returnedOutcome) {
-            throw new ConnectorActionExecutionError(
-              returnedOutcome === "not_executed"
-                ? "Connector action was not executed"
-                : "Connector action outcome is uncertain; inspect provider state before retrying",
-              returnedOutcome,
-            );
-          }
         },
       };
     },

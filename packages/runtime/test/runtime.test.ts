@@ -2859,7 +2859,7 @@ describe("runtime event normalization", () => {
     });
 
     test.each(["model", "codemode"] as const)(
-      "connector provider-declared errors settle uncertain through %s",
+      "connector provider-declared errors keep their text and settle the ledger uncertain through %s",
       async (transport) => {
         const fixture = await connectorPolicyFixture({
           connectorDecision: transport === "model" ? "allow" : "ask",
@@ -2878,18 +2878,23 @@ describe("runtime event normalization", () => {
               { toolCall: { callId: "call-provider-error" } } as any,
             );
             expect(result).toMatchObject({ isError: true });
-            expect(JSON.stringify(result)).toContain("uncertain");
+            // The model receives the provider's exact error, never a replacement.
+            expect(JSON.stringify(result)).toContain("found document for needle");
+            expect(JSON.stringify(result)).not.toContain("outcome is uncertain");
+            expect(JSON.stringify(result)).not.toContain("Please try again");
           } else {
             const environment = fixture.prepared.attemptToolEnvironment!;
-            await expect(
-              environment.call({
-                catalogDigest: environment.catalog.digest,
-                operationId: crypto.randomUUID(),
-                identity: { serverId: "docs", toolName: "search_documents" },
-                arguments: { query: "needle" },
-                caller: { kind: "codemode", subjectId: "worker:test" },
-              }),
-            ).rejects.toMatchObject({ connectorActionOutcome: "uncertain" });
+            const result = await environment.call({
+              catalogDigest: environment.catalog.digest,
+              operationId: crypto.randomUUID(),
+              identity: { serverId: "docs", toolName: "search_documents" },
+              arguments: { query: "needle" },
+              caller: { kind: "codemode", subjectId: "worker:test" },
+            });
+            expect(result).toMatchObject({
+              isError: true,
+              content: [{ type: "text", text: "found document for needle" }],
+            });
           }
           expect(fixture.mcp.calls).toEqual([
             { tool: "search_documents", args: { query: "needle" } },
@@ -3387,7 +3392,9 @@ describe("runtime event normalization", () => {
               toolCall: { callId: "call-not-executed" },
             } as any,
           ),
-        ).toMatchObject({ isError: true });
+          // The provider's own not-executed result reaches the model unchanged;
+          // only the connector ledger records the not_executed outcome.
+        ).toMatchObject({ text: "provider was not called" });
         expect(completed).toEqual(["not_executed"]);
       } finally {
         await prepared.close();
