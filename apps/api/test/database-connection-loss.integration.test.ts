@@ -6,9 +6,11 @@ import {
   acquireSharedTestDatabase,
   MemoryEventBus,
   testSettings,
+  waitFor,
   type SharedTestDatabase,
 } from "@opengeni/testing";
 import postgres from "postgres";
+import { sql } from "drizzle-orm";
 import { createAppComposition } from "../src/app";
 import { startSlackInteractionPump } from "../src/integrations/slack-interactions";
 import { startMemorySlackPublicationPump } from "../src/memory-slack-delivery";
@@ -122,6 +124,41 @@ type ErrorBody = {
 };
 
 describe("database connection loss", () => {
+  test("the first fresh-backend query cannot inherit a terminated backend's error", async () => {
+    if (!available) return;
+    const single = createDb(shared!.appUrl, { max: 1 });
+    try {
+      const [original] = await single.db.execute<{ pid: number }>(
+        sql`select pg_backend_pid() as pid`,
+      );
+      const interrupted = single.db.execute(sql`select pg_sleep(10)`).then(
+        () => null,
+        (error: unknown) => error,
+      );
+      // Observe dispatch before injecting the outage. This is not a recovery
+      // retry: the first query after termination must succeed without polling.
+      await waitFor(
+        async () => {
+          const [row] = await admin`
+            select state, query from pg_stat_activity where pid = ${original!.pid}`;
+          return row?.state === "active" && row.query.includes("pg_sleep(10)");
+        },
+        { timeoutMs: 2_000, intervalMs: 10 },
+      );
+      const [terminated] = await admin`
+        select pg_terminate_backend(${original!.pid}) as terminated`;
+      expect(terminated?.terminated).toBe(true);
+      expect(await interrupted).not.toBeNull();
+      const [recovered] = await single.db.execute<{ pid: number; ready: number }>(
+        sql`select pg_backend_pid() as pid, 1 as ready`,
+      );
+      expect(recovered?.ready).toBe(1);
+      expect(recovered?.pid).not.toBe(original!.pid);
+    } finally {
+      await single.close();
+    }
+  });
+
   test("terminated backends become retryable 503s and never crash the process", async () => {
     if (!available) return;
     const value = await fixture();
