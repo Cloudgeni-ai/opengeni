@@ -72,6 +72,7 @@ import {
   OPENGENI_SLACK_BOT_SESSION_METADATA_KEY,
   SessionSkills,
   resolveBundledSkillSelection,
+  bundledSkillSelectionForAgentConfig,
   SessionSpawnDenial,
   ServiceTurnInitiator,
   ServiceTurnInitiatorContext,
@@ -1045,6 +1046,13 @@ export async function createAndStartSessionWithOutcome(input: {
   allowNestedAgentDepthIncrease?: boolean;
   subjectId?: string | null;
 }): Promise<CreateSessionOutcome> {
+  const frozenBundledSkillIds = bundledSkillSelectionForAgentConfig(
+    input.bundledSkillIds,
+    input.agentConfig,
+  );
+  if (frozenBundledSkillIds !== input.bundledSkillIds) {
+    input = { ...input, bundledSkillIds: frozenBundledSkillIds };
+  }
   const sessionMetadata = metadataWithTurnExecutionPolicyV1(
     {
       ...input.metadata,
@@ -2539,6 +2547,9 @@ async function createSessionForRequestInFileScope(
   if (agentResolution.instructions !== undefined) {
     payload.instructions = agentResolution.instructions;
   }
+  // Freeze what the agent configuration implies before keyed replay compares
+  // it: a `"none"` agent omits the bundled guides unless the request lists them.
+  bundledSkillIds = bundledSkillSelectionForAgentConfig(bundledSkillIds, agentConfig);
   const parentCallingTurn =
     parentSession && creationInitiator.actor
       ? await getSessionTurnForAttempt(

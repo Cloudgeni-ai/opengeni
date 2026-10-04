@@ -1,10 +1,16 @@
-import { blocks, sentences, type AgentPromptContext } from "./types";
+import { blocks, hasSandbox, sentences, type AgentPromptContext } from "./types";
 
 function newMessages(context: AgentPromptContext): string {
   const { goals, subagents } = context.capabilities;
-  const inFlightExamples = subagents
-    ? "(a child, a command, or a timed recheck)"
-    : "(a command or a timed recheck)";
+  const commands = hasSandbox(context);
+  const inFlightExamples =
+    subagents && commands
+      ? "(a child, a command, or a timed recheck)"
+      : subagents
+        ? "(a child or a timed recheck)"
+        : commands
+          ? "(a command or a timed recheck)"
+          : "(a timed recheck)";
   return sentences(
     "The user may send a new message while you are still working.",
     "Decide whether it replaces the active request or adds to it.",
@@ -37,8 +43,9 @@ Command completion alone resumes you only while you have an explicit \`wait_for_
 
 /**
  * Always on: how the durable runtime behaves for every agent — messages that
- * arrive mid-turn, `wait_for_input`, compaction, and background commands.
- * Embedder instructions do not override these.
+ * arrive mid-turn, `wait_for_input`, compaction, and, when a sandbox or
+ * Connected Machine is attached, background commands. Embedder instructions do
+ * not override these.
  */
 export function renderRuntimeMechanics(context: AgentPromptContext): string {
   return blocks(
@@ -57,7 +64,8 @@ export function renderRuntimeMechanics(context: AgentPromptContext): string {
     WAITING,
     "## Compaction",
     COMPACTION,
-    "## Background commands",
-    BACKGROUND_COMMANDS,
+    // command_read/command_wait exist only with attached compute.
+    hasSandbox(context) && "## Background commands",
+    hasSandbox(context) && BACKGROUND_COMMANDS,
   );
 }

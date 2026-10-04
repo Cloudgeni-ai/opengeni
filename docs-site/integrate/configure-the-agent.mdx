@@ -43,7 +43,7 @@ capabilities: { from: "all", browser: false, workspaceAdmin: false }
 | `workspaceConnectors` | Use the workspace's connected apps and integrations                 | Off         |
 | `workspaceAdmin`      | Manage variable sets, projects, rigs, machines, and connector setup | Off         |
 
-Your own MCP servers and the integrations you name in `tools` stay available under `"none"`. Shell and file tools come with the sandbox; `sandboxBackend: "none"` removes them.
+Your own MCP servers and the integrations you name in `tools` stay available under `"none"`. `"none"` adds no bundled Opengeni guides unless `bundledSkillIds` lists them, so it needs no empty `tools`, `firstPartyMcpTools`, or `bundledSkillIds` lists. Shell, file, and background-command tools come with the sandbox or a Connected Machine; `sandboxBackend: "none"` removes them.
 
 Requesting a capability the server doesn't offer fails with `agent_capability_unavailable`.
 
