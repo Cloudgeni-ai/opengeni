@@ -1,5 +1,13 @@
 # @opengeni/runtime
 
+## 4.8.1
+
+### Patch Changes
+
+- Updated dependencies [627ff68]
+  - @opengeni/sdk@7.8.1
+  - @opengeni/codemode@0.7.2
+
 ## 4.8.0
 
 ### Minor Changes

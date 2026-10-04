@@ -1,5 +1,11 @@
 # @opengeni/db
 
+## 6.7.1
+
+### Patch Changes
+
+- @opengeni/codemode@0.7.2
+
 ## 6.7.0
 
 ### Minor Changes

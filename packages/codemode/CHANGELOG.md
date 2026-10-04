@@ -1,5 +1,12 @@
 # @opengeni/codemode
 
+## 0.7.2
+
+### Patch Changes
+
+- Updated dependencies [627ff68]
+  - @opengeni/sdk@7.8.1
+
 ## 0.7.1
 
 ### Patch Changes

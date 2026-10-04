@@ -1,5 +1,17 @@
 # @opengeni/api-router
 
+## 5.6.1
+
+### Patch Changes
+
+- Updated dependencies [627ff68]
+  - @opengeni/core@5.3.1
+  - @opengeni/codemode@0.7.2
+  - @opengeni/runtime@4.8.1
+  - @opengeni/db@6.7.1
+  - @opengeni/documents@0.8.43
+  - @opengeni/events@0.4.41
+
 ## 5.6.0
 
 ### Minor Changes
