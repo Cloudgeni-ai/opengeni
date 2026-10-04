@@ -9,6 +9,7 @@ import {
   createOrganizationApiKey,
   applyCreditLedgerEntry,
   recordModelCallFact,
+  recordUsageEvent,
   withSessionRlsActorContext,
   withWorkspaceSessionActivityRls,
   withDatabaseTimingObserver,
@@ -119,7 +120,7 @@ const evidence: Record<string, unknown> = {
   mode,
   dirtyPolicy:
     mode === "dirty"
-      ? "Before every timed request, commit one ordinary restricted-app fact and matching negative ledger entry on this copy; HTTP latency excludes writer time but includes any read reconciliation"
+      ? "Before every timed request, atomically commit one ordinary restricted-app fact, one warm usage event and a matching negative ledger entry on this copy; HTTP latency excludes writer time but includes any read reconciliation; no manual refresh between samples"
       : null,
   dirtyWrites: [],
   cases: [],
@@ -343,6 +344,7 @@ try {
           requestedMicros: 101,
           recordedListMicros: 73,
           actualDebitMicros: 1,
+          warmUsageQuantity: 1,
         };
         (evidence.dirtyWrites as unknown[]).push(writeReceipt);
         await persist();
@@ -362,6 +364,18 @@ try {
               pricedCostMicros: 101,
               estimatedProviderCostMicros: 73,
               pricingSource: "configured_list_price",
+              occurredAt: new NativeDate(writeReceipt.occurredAt),
+            });
+            await recordUsageEvent(bounded, {
+              accountId: fixture.accountId,
+              workspaceId: fixture.workspaceId,
+              sessionId: dirtySessionId!,
+              subjectId: fixture.subjectId,
+              eventType: "sandbox.warm_seconds",
+              quantity: 1,
+              unit: "seconds",
+              sourceResourceId: sourceKey,
+              idempotencyKey: `usage:isolated-dirty:${turnId}:${sourceKey}`,
               occurredAt: new NativeDate(writeReceipt.occurredAt),
             });
             await applyCreditLedgerEntry(bounded, {
@@ -463,6 +477,8 @@ try {
   const expectedCounts = { ...before.counts };
   for (const [field, delta] of Object.entries({
     facts: committedWrites,
+    usage: committedWrites,
+    warm: committedWrites,
     ledger: committedWrites,
     requested: 101 * committedWrites,
     list: 73 * committedWrites,
