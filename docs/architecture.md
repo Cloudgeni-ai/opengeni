@@ -1297,7 +1297,11 @@ never a retry of an existing or ambiguous operation. Submission conflicts never
 reconcile to an existing row; ambiguous failures adopt one only after exact
 scope, catalog, identity and argument comparison. Recovery never replays the
 tool ([run lifecycle](run-lifecycle.md#codemode-recovery)). The current-human
-gateway rebuilds live authority per request. Browsers use
+gateway rebuilds live authority per request. Native connection-backed providers
+use the same account-qualified identities as agent catalogs. Shared projection
+lives in `packages/core/src/domain/mcp-account-routes.ts`; services see workspace
+accounts only, and human transports may see their own eligible accounts.
+Browsers use
 `client.tools.forWorkspace(...)`; opaque-origin Sites use the parent-held
 `@opengeni/sdk/site` MessagePort adapter with no bearer or workspace context.
 A Site version's retained tool identities are only a maximum allowlist: the

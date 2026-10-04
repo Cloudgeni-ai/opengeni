@@ -355,7 +355,7 @@ content-addressed clients during setup; per-exec PATH and
 `OPENGENI_CODEMODE_CLIENT_MODULE` select the release without changing the manifest.
 Do not repair stale clients by weakening catalog integrity or choosing npm latest.
 
-Find current MCP behavior in config parsing, tool validation, runtime `prepareTools`, and API MCP server builders. Treat first-party document/file/scheduled-task tools as swappable defaults. If a user wants enterprise search, repo tools, web tools, or custom systems, point OpenGeni at a different MCP server if current config supports it.
+Find current MCP behavior in config parsing, tool validation, runtime `prepareTools`, and API MCP server builders. Account-qualified identity projection is shared by worker and current-caller gateways in `packages/core/src/domain/mcp-account-routes.ts`; compare exact catalog identities when debugging Site or OAuth tool availability. Treat first-party document/file/scheduled-task tools as swappable defaults. If a user wants enterprise search, repo tools, web tools, or custom systems, point OpenGeni at a different MCP server if current config supports it.
 
 ## Scheduling Discovery
 
