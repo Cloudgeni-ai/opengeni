@@ -22,6 +22,8 @@
 import { AsyncLocalStorage } from "node:async_hooks";
 
 interface ToolCallCorrelation {
+  /** Exact model call identity, kept separate from the transport token. */
+  sourceCallId: string;
   /** The sanitized sdk tool call id (a legal NATS subject-token fragment). */
   callId: string;
   /** The next sub-op ordinal within this tool invocation (mutable). */
@@ -65,6 +67,7 @@ export function runWithToolCallCorrelation<T>(
 ): T {
   return storage.run(
     {
+      sourceCallId: callId,
       callId: sanitizeOpIdToken(callId),
       ordinal: 0,
       ...(options.onDurableOpOwnershipTransferStarted
@@ -76,6 +79,11 @@ export function runWithToolCallCorrelation<T>(
     },
     fn,
   );
+}
+
+/** The exact tool whose result owns this async chain's foreground op output. */
+export function currentOpToolCallId(): string | null {
+  return storage.getStore()?.sourceCallId ?? null;
 }
 
 /**

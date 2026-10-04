@@ -419,53 +419,36 @@ Agent configuration: `packages/contracts/src/agent-config.ts`; null configs stay
 
 ### 3.8 A Connected Machine is first-class primary compute
 
-Connected Machines (`selfhosted`) run agents without sandboxes. [Native updates](../agent/README.md#distribution)
-fence admission and require idle commands, uploads and owned browser/computer controllers;
-unavailable proof defers updates. Mac updates preserve signed bundles and
-[write ACLs](../agent/TRANSACTIONAL-WRITES.md).
+Connected Machines (`selfhosted`) run agents without sandboxes. [Updates](../agent/README.md#distribution)
+fence admission, require idle commands/uploads and owned browser/computer controllers,
+and defer without proof. Mac updates preserve signed bundles and
+[ACLs](../agent/TRANSACTIONAL-WRITES.md).
 
-Machines own files, Git authentication, environment and [credential renewal](connected-machines.md).
-OpenGeni neither clones repositories nor installs durable control-plane credentials;
-children receive transient, exact-attempt Codemode authority.
-[Same-turn recovery](run-lifecycle.md) restores native capabilities without tool replay.
+Machines own files, Git auth, environment and [credential renewal](connected-machines.md).
+OpenGeni neither clones repos nor installs durable credentials;
+child Codemode authority is transient/attempt-bound.
+[Recovery](run-lifecycle.md) restores capabilities without tool replay.
 
-Machine paths are host-native and session-specific, not universal `/workspace`
-aliases. Unavailability produces a typed operation outcome; text-only reasoning
-can begin without contact. An offline machine never authorizes cold-creating a
-rival box, snapshotting it, or provider-terminating the user's computer.
+Foreground output releases once its exact tool-result receipt, output event and
+journal are durable, independently of turn completion. Other owners retain output.
+[Streaming exec](connected-machines.md#streaming-exec-op-stream).
 
-Structured Files exposes the selected machine's effective host-native working
-directory as `FileSystem.root`; links and tree nodes share this namespace.
-Connected Machine reads accept external absolute paths under the machine account's
-OS permissions; working directories remain browsing defaults.
-Managed reads and structured mutations stay workspace-confined, including `/`.
-Requests carry capability epoch and root. The API binds one route per request;
-target/root changes return retryable conflicts instead of reinterpreting paths
-on another filesystem.
+Machine paths are session-specific. Offline operations fail typed; reasoning continues.
+Availability never authorizes provisioning, snapshotting or terminating a user's computer.
 
-Generated-session schedules persist an exact workspace- or organization-scoped
-machine target and seed its active pointer before the first turn. Ingress
-rejects targetless `selfhosted` schedules; dispatch revalidates the frozen target
-without managed-compute fallback. Manual and generated creates preflight target
-liveness and workspace root, then recheck durable authority and atomically
-commit the active pointer with the session row. Rejection leaves no queued
-session shell in discovery or parent-tree projections.
+Structured Files binds paths, route, capability epoch and root per request; changes
+conflict. OS permissions govern machine reads; managed access remains workspace-confined.
 
-Child workers keep the ordinary low-friction rule: omitting placement shares
-the creator's box. Because a Connected Machine pointer is session-local, that
-default copies the trusted parent's exact active machine and working directory
-before the child's first turn. This includes a `backend:none` parent that has
-attached a Connected Machine: the child keeps the shared backend-none home and
-group while inheriting the exact active route. A selfhosted-only child with no
-inherited or explicit machine fails at create rather than reaching an unbound
-runtime.
+Creates preflight liveness/root then atomically bind verified machine authority.
+Generated schedules freeze/revalidate scoped targets without managed fallback.
+Unbound `selfhosted` creates leave no queued shell.
 
-Machine-home sessions never pre-provision hidden managed boxes. With a managed
-deployment backend, the fleet exposes the synthetic managed group explicitly.
-Selecting `session`/`default` clears the active machine pointer and verifies that
-group through the ordinary viewer/lease lifecycle before the next operation/turn
-uses it. This intentional user route change is not offline-machine fallback;
-`none`/`selfhosted`-only deployments expose no managed group.
+Omitted child placement inherits parent machine/root and shared home/group,
+including attached `backend:none`; selfhosted-only children require a machine.
+
+Machine homes never pre-provision boxes. Explicit `session`/`default` clears the
+machine pointer and verifies managed compute via viewer/lease authority;
+`none`/`selfhosted` offers none.
 
 Connected Machine event ingestion drains NATS immediately into exact-process
 queues, not one global database queue. Connection subjects progress concurrently
