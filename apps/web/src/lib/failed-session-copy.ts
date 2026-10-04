@@ -18,9 +18,8 @@ type KnownFailure = {
   suggestModel: boolean;
   /**
    * Whole headline when another model can be chosen, for transient refusals
-   * whose remedy reads as a choice; the banner then offers a model button
-   * instead of pointing below. Otherwise " Choose another model below." is
-   * appended to `message`.
+   * whose remedy reads as a choice. Otherwise " Choose another model below."
+   * is appended to `message`.
    */
   chooseModelMessage?: string;
 };
@@ -80,7 +79,7 @@ const RATE_LIMITED: KnownFailure = {
   kind: "rate_limited",
   message: "This model is throttled due to high demand. Try again in a few minutes.",
   chooseModelMessage:
-    "This model is throttled due to high demand. Choose another model to continue, or try again in a few minutes.",
+    "This model is throttled due to high demand. Select another model in the chat bar, or try again in a few minutes.",
   retryUnhelpful: false,
   suggestModel: true,
 };
@@ -88,7 +87,7 @@ const PROVIDER_ERROR: KnownFailure = {
   kind: "provider_error",
   message: "This model is temporarily unavailable. Try again in a few minutes.",
   chooseModelMessage:
-    "This model is temporarily unavailable. Choose another model to continue, or try again in a few minutes.",
+    "This model is temporarily unavailable. Select another model in the chat bar, or try again in a few minutes.",
   retryUnhelpful: false,
   suggestModel: true,
 };
@@ -202,8 +201,6 @@ export function failedSessionCopy(
   detail?: string;
   /** A daily allowance is spent; the banner may name the deployment's free model. */
   dailyLimit?: true;
-  /** The headline invites a model choice without pointing below; offer the picker. */
-  chooseModel?: true;
 } {
   const recorded = failure.reason?.replace(/\s+/g, " ").trim();
   const diagnostic = failure.recordedDetail || failure.reason;
@@ -263,7 +260,6 @@ export function failedSessionCopy(
       retryUnhelpful: known.retryUnhelpful,
       ...(detail && detail !== known.message ? { detail } : {}),
       ...(known === DAILY_LIMIT ? { dailyLimit: true as const } : {}),
-      ...(suggest && known.chooseModelMessage ? { chooseModel: true as const } : {}),
     };
   }
   // Unclassified preclaim text can also contain raw infrastructure diagnostics.

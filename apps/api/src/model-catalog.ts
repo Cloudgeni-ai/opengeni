@@ -74,6 +74,7 @@ export function projectClientModel(model: ConfiguredModel): ClientModel {
     id: model.id,
     label: model.label,
     ...(model.shortLabel ? { shortLabel: model.shortLabel } : {}),
+    ...(model.logoUrl ? { logoUrl: model.logoUrl } : {}),
     ...publicProvider,
     ...(source === undefined ? {} : { source }),
     api: model.api,

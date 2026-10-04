@@ -34,7 +34,7 @@ function billedSettings() {
 }
 
 function mockZeroBalance(): () => void {
-  const spy = spyOn(opengeniDb, "getBillingBalance").mockResolvedValue({
+  const spy = spyOn(opengeniDb, "getSpendableCreditBalance").mockResolvedValue({
     accountId: ACCOUNT,
     balanceMicros: 0,
     currency: "usd",
@@ -80,7 +80,7 @@ function mockAtomicWrites(input?: { failOnDebit?: boolean }) {
 describe("worker ensureRunAllowed — codex bypass", () => {
   test("(a) codex turn with 0 credits does NOT throw (credit gate skipped, balance never read)", async () => {
     let balanceRead = false;
-    const spy = spyOn(opengeniDb, "getBillingBalance").mockImplementation(async () => {
+    const spy = spyOn(opengeniDb, "getSpendableCreditBalance").mockImplementation(async () => {
       balanceRead = true;
       return {
         accountId: ACCOUNT,
@@ -109,9 +109,11 @@ describe("worker ensureRunAllowed — codex bypass", () => {
   });
 
   test("a deployment-funded free turn skips credits but still enforces the token cap", async () => {
-    const balanceSpy = spyOn(opengeniDb, "getBillingBalance").mockImplementation(async () => {
-      throw new Error("free turns must not read the credit balance");
-    });
+    const balanceSpy = spyOn(opengeniDb, "getSpendableCreditBalance").mockImplementation(
+      async () => {
+        throw new Error("free turns must not read the credit balance");
+      },
+    );
     const usageSpy = spyOn(opengeniDb, "sumUsageQuantity").mockResolvedValue(100);
     const openSpy = spyOn(opengeniDb, "openUsageReservationQuantity").mockResolvedValue(0);
     try {
@@ -150,7 +152,7 @@ describe("worker ensureRunAllowed — mid-stream monthly cost cap (BILL-01)", ()
     });
 
   function mockPositiveBalance() {
-    return spyOn(opengeniDb, "getBillingBalance").mockResolvedValue({
+    return spyOn(opengeniDb, "getSpendableCreditBalance").mockResolvedValue({
       accountId: ACCOUNT,
       balanceMicros: 10_000_000,
       currency: "usd",
@@ -176,7 +178,7 @@ describe("worker ensureRunAllowed — mid-stream monthly cost cap (BILL-01)", ()
   });
 
   test("a reservation request writes a bounded hold through the atomic ledger", async () => {
-    const balanceSpy = spyOn(opengeniDb, "getBillingBalance").mockResolvedValue({
+    const balanceSpy = spyOn(opengeniDb, "getSpendableCreditBalance").mockResolvedValue({
       accountId: ACCOUNT,
       balanceMicros: 10_000_000,
       currency: "usd",
@@ -858,6 +860,43 @@ describe("durable provider admission regressions", () => {
     chargesOpenGeniCredits: false,
     countsTowardTokenCap: true,
     initiatingHumanSubjectId: "accepted-human",
+  });
+  test("an uncapped grant retains model funding policy without creating a monthly hold", async () => {
+    const balance = spyOn(opengeniDb, "getSpendableCreditBalance").mockResolvedValue({
+      accountId: ACCOUNT,
+      balanceMicros: 100,
+      currency: "usd",
+      updatedAt: new Date().toISOString(),
+      creditPolicyRevision: 7,
+    });
+    try {
+      const first = await reserveModelCallBudget({
+        ...admission(),
+        model: "scripted-model",
+        settings: testSettings({ billingMode: "stripe", usageLimitsMode: "managed" }),
+        chargesOpenGeniCredits: true,
+      });
+      expect(balance.mock.calls[0]?.[2]).toBe("scripted-model");
+      expect(first.creditPolicyRevision).toBe(7);
+      expect(first.held).toBeNull();
+      expect(first.reservationReleases).toEqual([]);
+      balance.mockResolvedValue({
+        accountId: ACCOUNT,
+        balanceMicros: 100,
+        currency: "usd",
+        updatedAt: new Date().toISOString(),
+        creditPolicyRevision: 9,
+      });
+      const next = await reserveModelCallBudget({
+        ...admission(),
+        settings: testSettings({ billingMode: "stripe", usageLimitsMode: "managed" }),
+        chargesOpenGeniCredits: true,
+      });
+      expect(next.creditPolicyRevision).toBe(9);
+      expect(first.creditPolicyRevision).toBe(7);
+    } finally {
+      balance.mockRestore();
+    }
   });
   test("activity retries get fresh durable identities even for the same attempt", async () => {
     const reserve = spyOn(opengeniDb, "tryReserveUsageBudget").mockImplementation(

@@ -68,6 +68,47 @@ test("Resume uses scoped models and the original causal human for admission", as
   );
 });
 
+test("Resume uses only promotional credits eligible for the chosen model", async () => {
+  const settings = testSettings({
+    billingMode: "stripe",
+    openaiModel: "gpt-6-luna",
+    openaiAllowedModels: "gpt-6-luna,gpt-6-sol",
+  });
+  const scoped = spyOn(catalog, "resolveWorkspaceCatalogSettings").mockResolvedValue({
+    settings,
+  } as never);
+  const policy = spyOn(db, "getWorkspaceModelPolicy").mockResolvedValue(null);
+  const codex = spyOn(db, "isCodexBilledTurn").mockResolvedValue(false);
+  const allowance = spyOn(db, "checkWorkspaceAllowance").mockResolvedValue(null);
+  const balance = spyOn(db, "getBillingBalance").mockResolvedValue({
+    accountId,
+    balanceMicros: 100,
+    generalBalanceMicros: 0,
+    currency: "usd",
+    updatedAt: new Date().toISOString(),
+    promotionalCredits: [
+      {
+        grantId: crypto.randomUUID(),
+        label: "Welcome credits",
+        remainingMicros: 100,
+        eligibleModelIds: ["gpt-6-luna"],
+      },
+    ],
+  });
+  restores.push(
+    ...[scoped, policy, codex, allowance, balance].map((spy) => () => spy.mockRestore()),
+  );
+  for (const model of ["gpt-6-luna", "gpt-6-sol"]) {
+    const resume = assertGoalResumeAllowed(
+      { db: database, settings },
+      { accountId, workspaceId, model, codexCompactionMode: "portable" },
+      null,
+    );
+    if (model === "gpt-6-luna") await expect(resume).resolves.toBeUndefined();
+    else await expect(resume).rejects.toMatchObject({ pausedReason: "credits" });
+  }
+});
+
 test("Resume rejects an unsupported latency mode before funding admission", async () => {
   const value = fixture(testSettings().openaiModel);
   await expect(value.resume(null, "fast")).rejects.toThrow("latency mode");

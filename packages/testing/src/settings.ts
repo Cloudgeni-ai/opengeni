@@ -71,6 +71,7 @@ export function testSettings(overrides: Partial<Settings> = {}): Settings {
     organizationUserSetupQueryEdgeSanitizationConfirmed: false,
     billingMode: "disabled",
     verifiedSignupTrialCreditsEnabled: false,
+    creditPromotionPolicy: { offers: {} },
     sandboxWarmBillingMode: "usage_only",
     documentEmbeddingBillingMode: "usage_only",
     documentEmbeddingCreditsActivatedAt: undefined,

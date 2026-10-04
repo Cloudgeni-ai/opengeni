@@ -109,7 +109,10 @@ function normalizeFileList(stdout: string): string[] {
   return stdout
     .split("\n")
     .map((line) => line.trim())
-    .filter((line) => line && !line.includes("/node_modules/"));
+    .filter(
+      (line) =>
+        line && !line.includes("/node_modules/") && !line.startsWith("packages/react/demo-dist/"),
+    );
 }
 
 // The organization MCP server is a distinct, explicitly admitted endpoint, not
@@ -195,7 +198,14 @@ export async function checkForbiddenProviderImports(
   if (
     moduleSpecifiers.some((specifier) => specifier === "stripe" || specifier.startsWith("stripe/"))
   ) {
-    if (normalized !== "apps/api/src/routes/billing.ts") {
+    // Adapter tests exercise Stripe's real parameter and signature contracts.
+    if (
+      ![
+        "apps/api/src/routes/billing.ts",
+        "apps/api/test/scoped-credit-checkout.test.ts",
+        "apps/api/test/scoped-credits-postgres.test.ts",
+      ].includes(normalized)
+    ) {
       out.push({ file, message: "imports Stripe outside billing route/provider code" });
     }
   }
@@ -272,7 +282,12 @@ export function checkMcpDefaults(file: string, text: string, out: Finding[]): vo
   const withoutForeignUrls = text.replace(/https?:\/\/[^\s"'`\\)\]]+/g, (url) =>
     url.includes("opengeni") ? url : "",
   );
-  const defaultText = withoutOrganizationMcpEndpoint(file, withoutForeignUrls);
+  // RFC 8414 discovery names a resource in its suffix; it does not serve MCP.
+  const withoutDiscoveryRoutes = withoutForeignUrls.replace(
+    /\/\.well-known\/oauth-authorization-server\/v1\/mcp(?=["'`\s)\]]|$)/g,
+    "",
+  );
+  const defaultText = withoutOrganizationMcpEndpoint(file, withoutDiscoveryRoutes);
   if (
     // A different route such as the organization sign-in request endpoint
     // /v1/mcp-connections is not an unscoped MCP gateway default.

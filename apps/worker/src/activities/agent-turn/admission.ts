@@ -1,7 +1,7 @@
 import {
   recordUsageEventsAndApplyCreditDebit,
   checkWorkspaceAllowance,
-  getBillingBalance,
+  getSpendableCreditBalance,
   openUsageReservationQuantity,
   sumUsageQuantity,
   tryReserveUsageBudget,
@@ -15,6 +15,7 @@ import {
 } from "@opengeni/runtime";
 import {
   calculateModelUsageReservationCostBreakdown,
+  canonicalizeConfiguredModelId,
   OPENGENI_GATEWAY_PROVIDER_ID,
   WORKSPACE_GATEWAY_PROVIDER_ID,
   configuredModelPricingSchedules,
@@ -460,23 +461,27 @@ export async function ensureRunAllowedBetweenModelCalls(input: {
   chargesOpenGeniCredits: boolean;
   countsTowardTokenCap: boolean;
   initiatingHumanSubjectId: string | null;
+  modelId?: string;
   serializedRunState?: () => string | null;
   monthlyBudgetReserved?: boolean;
-}): Promise<void> {
+}): Promise<number | undefined> {
   try {
-    await ensureRunAllowed(
-      input.settings,
-      input.db,
-      input.accountId,
-      input.workspaceId,
-      input.isExternallyBilledTurn,
-      input.entitlements,
-      input.chargesOpenGeniCredits,
-      input.countsTowardTokenCap,
-      input.initiatingHumanSubjectId,
-      null,
-      input.monthlyBudgetReserved,
-    );
+    return (
+      await ensureRunAllowed(
+        input.settings,
+        input.db,
+        input.accountId,
+        input.workspaceId,
+        input.isExternallyBilledTurn,
+        input.entitlements,
+        input.chargesOpenGeniCredits,
+        input.countsTowardTokenCap,
+        input.initiatingHumanSubjectId,
+        null,
+        input.monthlyBudgetReserved,
+        input.modelId,
+      )
+    )?.creditPolicyRevision;
   } catch (limitError) {
     if (
       !(limitError instanceof UsageBudgetExceededError) &&
@@ -528,7 +533,9 @@ export async function ensureRunAllowed(
     costMicros?: number | null;
   } | null,
   monthlyBudgetReserved = false,
-): Promise<{ tokens?: number; costMicros?: number } | null> {
+  modelId?: string,
+): Promise<{ tokens?: number; costMicros?: number; creditPolicyRevision?: number } | null> {
+  let creditPolicyRevision: number | undefined;
   // Upstream settlement and workspace-facing cost are independent. External
   // metering skips the token cap; free/subscription/workspace cost skips the
   // OpenGeni credit gate. The agent-run COUNT cap below is a volume/fairness
@@ -563,7 +570,8 @@ export async function ensureRunAllowed(
     chargesOpenGeniCredits &&
     (settings.billingMode === "stripe" || settings.usageLimitsMode === "managed")
   ) {
-    const balance = await getBillingBalance(db, accountId);
+    const balance = await getSpendableCreditBalance(db, accountId, modelId);
+    creditPolicyRevision = balance.creditPolicyRevision;
     if (balance.balanceMicros <= 0) {
       throw new UsageBudgetExceededError("insufficient Opengeni credits");
     }
@@ -724,10 +732,10 @@ export async function ensureRunAllowed(
           limits.maxMonthlyCostMicrosPerAccount!,
         );
       }
-      return held;
+      return creditPolicyRevision === undefined ? held : { ...held, creditPolicyRevision };
     }
   }
-  return null;
+  return creditPolicyRevision === undefined ? null : { creditPolicyRevision };
 }
 
 export class UsageBudgetExceededError extends Error {
@@ -757,6 +765,7 @@ export async function reserveModelCallBudget(input: {
   maxOutputTokens?: number;
 }): Promise<{
   callId: string;
+  creditPolicyRevision?: number | undefined;
   held: { tokens?: number; costMicros?: number } | null;
   maxOutputTokens: number;
   reservationReleases: UsageEventWriteInput[];
@@ -775,9 +784,9 @@ export async function reserveModelCallBudget(input: {
     latencyMode: input.latencyMode ?? "standard",
     maxOutputTokens,
   });
-  let held: { tokens?: number; costMicros?: number } | null;
+  let admission: Awaited<ReturnType<typeof ensureRunAllowed>>;
   try {
-    held = await ensureRunAllowed(
+    admission = await ensureRunAllowed(
       input.settings,
       input.db,
       input.accountId,
@@ -794,6 +803,8 @@ export async function reserveModelCallBudget(input: {
         ordinal: callId,
         ...quantities,
       },
+      false,
+      canonicalizeConfiguredModelId(input.settings, input.model),
     );
   } catch (error) {
     if (!(error instanceof UsageBudgetExceededError) && !(error instanceof AllowanceExhaustedError))
@@ -804,8 +815,16 @@ export async function reserveModelCallBudget(input: {
       error instanceof AllowanceExhaustedError ? error.refusal : null,
     );
   }
+  const held =
+    admission && (admission.tokens !== undefined || admission.costMicros !== undefined)
+      ? {
+          ...(admission.tokens === undefined ? {} : { tokens: admission.tokens }),
+          ...(admission.costMicros === undefined ? {} : { costMicros: admission.costMicros }),
+        }
+      : null;
   return {
     callId,
+    creditPolicyRevision: admission?.creditPolicyRevision,
     held,
     maxOutputTokens,
     reservationReleases: held

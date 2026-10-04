@@ -9680,7 +9680,7 @@ export const sandboxLeases = pgTable(
     // Why an enrolled drain contains its commands (0547); cleared with the
     // enrollment. Null for a pre-0547 enrollment: settle with neutral wording.
     commandContainmentReason: text("command_containment_reason", {
-      enum: ["idle_containment", "provider_deadline_containment"],
+      enum: ["idle_containment", "provider_deadline_containment", "quiescence_containment"],
     }),
     liveness: text("liveness", { enum: sandboxLeaseLivenessValues }).notNull().default("cold"),
     refcount: integer("refcount").notNull().default(0),
@@ -12628,6 +12628,8 @@ export const creditLedgerEntries = pgTable(
     }),
     type: text("type").notNull(),
     amountMicros: bigint("amount_micros", { mode: "number" }).notNull(),
+    /** Null preserves the unrestricted terms of legacy credits. */
+    eligibleModelIds: text("eligible_model_ids").array(),
     currency: text("currency").notNull().default("usd"),
     sourceType: text("source_type"),
     sourceId: text("source_id"),
@@ -12638,6 +12640,19 @@ export const creditLedgerEntries = pgTable(
   },
   (table) => ({
     idempotency: uniqueIndex("credit_ledger_entries_idempotency_idx").on(table.idempotencyKey),
+    idAccount: uniqueIndex("credit_ledger_entries_id_account_idx").on(table.id, table.accountId),
+    scopedGrants: index("credit_ledger_scoped_grants_idx")
+      .on(table.accountId, table.createdAt, table.id)
+      .where(sql`${table.eligibleModelIds} is not null`),
+    scopeValid: check(
+      "credit_ledger_scope_valid",
+      sql`${table.eligibleModelIds} is null or (
+      ${table.type} = 'grant' and ${table.amountMicros} > 0
+      and cardinality(${table.eligibleModelIds}) between 1 and 40
+      and array_position(${table.eligibleModelIds}, null) is null
+      and array_position(${table.eligibleModelIds}, '') is null
+    )`,
+    ),
     modelDebitPeriod: index("credit_ledger_entries_model_debit_period_idx")
       .on(table.accountId, table.occurredAt, table.workspaceId)
       .where(
@@ -12647,6 +12662,30 @@ export const creditLedgerEntries = pgTable(
       table.accountId,
       table.createdAt,
     ),
+  }),
+);
+
+/** One debit can consume several grants; the remainder is paid by general credits. */
+export const creditDebitAllocations = pgTable(
+  "credit_debit_allocations",
+  {
+    accountId: uuid("account_id").notNull(),
+    debitEntryId: uuid("debit_entry_id").notNull(),
+    grantEntryId: uuid("grant_entry_id").notNull(),
+    amountMicros: bigint("amount_micros", { mode: "number" }).notNull(),
+  },
+  (table) => ({
+    pk: primaryKey({ columns: [table.debitEntryId, table.grantEntryId] }),
+    debit: foreignKey({
+      columns: [table.debitEntryId, table.accountId],
+      foreignColumns: [creditLedgerEntries.id, creditLedgerEntries.accountId],
+    }).onDelete("cascade"),
+    grant: foreignKey({
+      columns: [table.grantEntryId, table.accountId],
+      foreignColumns: [creditLedgerEntries.id, creditLedgerEntries.accountId],
+    }).onDelete("cascade"),
+    grantIndex: index("credit_debit_allocations_grant_idx").on(table.accountId, table.grantEntryId),
+    positive: check("credit_debit_allocations_positive", sql`${table.amountMicros} > 0`),
   }),
 );
 

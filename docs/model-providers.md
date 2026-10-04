@@ -211,6 +211,16 @@ workspace-facing cost are deliberately independent:
 Database documents use schema version 1 and contain only reviewed membership
 and optional line-safe notes:
 
+Model entries may set `logoUrl`, for example
+`"logoUrl": "https://cdn.example.test/model-logo.svg"`. The URL must use HTTPS,
+contain no embedded credentials, and fit within 2048 characters. Clients render
+it as the maker logo in model menus, the collapsed model picker, and session
+headers; failed images fall back to the bundled maker logo or neutral mark.
+An explicit billing-scope picker keeps its payment-group branding. Registry,
+Gateway, OpenRouter, and Codex catalog entries support this optional display
+metadata. Updating it through the database catalog needs no application rebuild
+or restart and does not change the model's execution definition version.
+
 The optional `codexModels` array replaces connected Codex membership without
 changing its credential broker. Omission preserves built-in defaults; `[]`
 removes all Codex models. Each entry requires `id: "codex/<slug>"`, matching
@@ -1055,10 +1065,12 @@ client.getWorkspaceModelCatalog(workspaceId);
 ```
 
 The response also carries `defaultSelection` (the default for new work that
-names no model, see below) and `creditsSelection` (what that default is while
-the organization holds a positive OpenGeni credit balance; `null` when the
-deployment does not bill credits). Both are `{ model, reasoningEffort, source }`
-and are additive: older API instances omit them.
+names no model, see below) and `creditsSelection` (the hypothetical default
+after buying general credits; `null` when the deployment does not bill
+credits). Both are `{ model, reasoningEffort, source }` and are
+additive: older API instances omit them. Credit-funded models also expose
+`creditFunding`: `promotional`, `general`, or `unavailable`. This describes
+current funding, independently of provider availability.
 
 ## Default model for new work
 
@@ -1074,23 +1086,22 @@ first match wins:
    operator catalog order (ChatGPT/Codex, then SuperGrok) with its own default
    reasoning. A deployment default that is itself a selectable subscription
    model wins inside this step.
-3. `credits`: while the organization holds a positive OpenGeni credit balance
-   and the deployment bills credits (`OPENGENI_BILLING_MODE=stripe`), the
-   configured credits default. Any source counts: a Stripe purchase, an
-   operator grant, a test credit, or the one-time verified-signup trial grant
-   (`source_type = 'verified_signup_trial'`, migration 0509), so a new user
-   with the trial starts on the credits default. Once usage brings the balance
-   to zero or below, new work falls back to the next step on its own.
+3. `credits`: when the deployment bills credits
+   (`OPENGENI_BILLING_MODE=stripe`), a model with a positive usable balance.
+   General credits fund any credits-billed model; promotional credits fund
+   only models in their current coverage. A new trial user therefore starts
+   on a covered model. With no funded selectable model, new work falls back
+   to the next step. See [promotional coverage](scoped-promotional-credits.md).
    `OPENGENI_CREDITS_DEFAULT_MODEL` (default `gpt-6-luna`) and
    `OPENGENI_CREDITS_DEFAULT_REASONING_EFFORT` (default `xhigh`, clamped to the
    highest effort the model supports at or below it) configure it. An explicit
    `OPENGENI_CREDITS_DEFAULT_MODEL` must name a credits-billed model in the code
    catalog or boot fails. The unset built-in value, and any value checked
    against a database catalog (edited independently of this env value), fall
-   back instead: when the configured model is not selectable, the first
-   selectable credits-billed model in operator catalog order is used at its own
-   default reasoning. When the deployment default is already a selectable
-   credits-billed model, it is never replaced: it keeps the deployment effort,
+   back instead: when the configured model is not selectable or has no usable
+   credits, the first funded selectable credits-billed model in operator catalog
+   order is used at its own default reasoning. When the deployment default is
+   already a funded selectable credits-billed model, it keeps the deployment effort,
    except that it uses `OPENGENI_CREDITS_DEFAULT_REASONING_EFFORT` (source
    `credits`) when it is the credits default model itself, so a deployment
    whose default is `gpt-6-luna` still starts credit holders on extra high
@@ -1130,16 +1141,15 @@ Where it applies:
   deployment default policy (model, reasoning, and standard speed). Slack and
   other draft-reusing creates copy only a chosen model.
 - **The web console** marks a picker, launch-URL, or onboarding-connect choice
-  as `modelProvided: true`. A credit purchase returns with the credits default
-  and `?modelSource=default`, which applies it at once (before the payment
-  webhook lands) while the draft keeps following the default, so a later
-  subscription connect still replaces it. The draft save response reports the
+  as `modelProvided: true`. A confirmed credit grant refreshes balances and
+  model funding. Onboarding loads the resulting catalog and saves the funded
+  default before continuing; a failed save stays retryable. The draft save response reports the
   same `modelProvided` marker a read of that row reports. Its fallback for an
   unselectable model takes the resolved default first. When a new
-  organization starts with a positive balance (for example the trial grant)
-  and its resolved default is a credits-billed model, the post-signup model
-  step shows that balance and the resolved default instead of the free-model
-  copy (see `docs/organization-tenancy.md`). The workspace **Default model** setting shows the
+  organization starts with a funded credits-billed model (for example from the
+  trial grant), the post-signup step shows its credit amount without promising
+  particular models. The shared picker shows the current payment source and
+  billing exposes promotional coverage. The workspace **Default model** setting shows the
   resolved default and its source until an admin saves one. New schedules
   follow the default and are saved without a model until someone picks one.
 

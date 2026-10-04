@@ -1,5 +1,6 @@
 import {
   configuredStaticUsageLimits,
+  canonicalizeConfiguredModelId,
   resolveModelProviderForTurn,
   type Settings,
 } from "@opengeni/config";
@@ -16,7 +17,7 @@ import {
   countActiveOrganizationApiKeysForAccount,
   countScheduledTasksForWorkspace,
   countWorkspacesForAccount,
-  getBillingBalance,
+  getSpendableCreditBalance,
   isCodexBilledTurn,
   recordUsageEvent,
   sumUsageQuantity,
@@ -148,11 +149,21 @@ async function checkCreditBalance(
   if (!usesCreditLimits(deps) || !isCostlyAction(input.action)) {
     return { allowed: true };
   }
-  const balance = await getBillingBalance(deps.db, input.accountId);
+  const balance = await getSpendableCreditBalance(
+    deps.db,
+    input.accountId,
+    input.model ? canonicalizeConfiguredModelId(deps.settings, input.model) : undefined,
+  );
   if (balance.balanceMicros > 0) {
     return { allowed: true };
   }
-  return { allowed: false, code: "insufficient_credits", message: "insufficient Opengeni credits" };
+  return {
+    allowed: false,
+    code: "insufficient_credits",
+    message: input.model
+      ? "No credits available for this model. Choose a model covered by your promotional credits or add credits."
+      : "No general credits available. Promotional credits cover eligible models only.",
+  };
 }
 
 async function checkStaticCaps(

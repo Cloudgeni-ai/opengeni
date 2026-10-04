@@ -17,6 +17,7 @@ import { isEditableArtifactKind } from "@/lib/artifact-catalog";
 import type { NativeConnectRequest } from "@/components/capabilities/native-connect-setup";
 import { FailureRecoveryBoundary } from "@/components/session/failure-recovery-boundary";
 import { createFailedSessionRetry, type FailedSessionRetryInput } from "@/lib/failed-session-retry";
+import { useSessionStartupTimeline } from "@/lib/session-startup-timeline";
 import { failedSessionCopy } from "@/lib/failed-session-copy";
 import { useStreamHealthTelemetry } from "@/lib/stream-health";
 import { markIntegrationConnectRedirect } from "@/lib/integration-connect-redirect";
@@ -1807,7 +1808,17 @@ function SessionChatPane(props: {
     window.addEventListener("keydown", onKeyDown);
     return () => window.removeEventListener("keydown", onKeyDown);
   }, [openFind]);
-  const modelCatalog = useWorkspaceModelCatalog(props.session.workspaceId);
+  const fundingRevision = useMemo(() => {
+    for (let index = props.events.length - 1; index >= 0; index -= 1) {
+      const event = props.events[index]!;
+      if (event.type === "agent.model.usage") return event.sequence;
+    }
+    return 0;
+  }, [props.events]);
+  const modelCatalog = useWorkspaceModelCatalog(
+    props.session.workspaceId,
+    `${props.session.id}:${props.session.status}:${fundingRevision}`,
+  );
   const fleet = useWorkspaceMachines({
     sessionId: props.session.id,
     pollIntervalMs: MACHINES_SESSION_POLL_MS,
@@ -2661,6 +2672,13 @@ function SessionChatPane(props: {
     props.queue.effectiveControl,
     composer.effectiveControl,
   );
+  const timelineWithStartup = useSessionStartupTimeline(timelineWithOptimisticSends, {
+    session: { ...props.session, effectiveControl: admissionControl },
+    events: props.events,
+    optimisticMessages,
+    hasNewer: props.hasNewer,
+    queue: props.queue.snapshot,
+  });
   const timelineEmptyStateCopy = sessionTimelineEmptyStateCopy(
     props.session.status,
     (props.queue.effectiveControl ?? props.session.effectiveControl).state === "paused",
@@ -2844,7 +2862,6 @@ function SessionChatPane(props: {
             }
             canChooseModel={canChooseRecoveryModel}
             hasModelPicker={hasComposerPolicy}
-            onChooseModel={() => setModelPickerSession(props.session.id)}
             freeModel={isDeploymentFreeModel(modelCatalog.rows, props.session.model)}
             subscriptions={connectableSubscriptions(context.clientConfig.models)}
             modelChanged={Boolean(composerPolicy && composerPolicy.model !== props.session.model)}
@@ -3010,7 +3027,7 @@ function SessionChatPane(props: {
                 turnSummary={{ rolling: true }}
                 key={props.session.id}
                 className="h-full"
-                items={timelineWithOptimisticSends}
+                items={timelineWithStartup}
                 searchTarget={activeSearchTarget}
                 events={props.events}
                 status={props.session.status}
@@ -3124,9 +3141,9 @@ function SessionChatPane(props: {
 
       {modelRecovery ? <ModelRecoveryNotice recovery={modelRecovery} /> : null}
 
-      {((props.session.inputWait && props.session.status === "idle") ||
-        (props.session.status === "queued" && !props.session.activeTurnId)) &&
-      props.session.effectiveControl.state === "active" ? (
+      {props.session.inputWait &&
+      props.session.status === "idle" &&
+      admissionControl.state === "active" ? (
         <Suspense fallback={null}>
           <LazySessionWaitStatus session={props.session} />
         </Suspense>
@@ -3348,7 +3365,10 @@ function SessionChatPane(props: {
                     (file) => file.status !== "failed" && file.contentType.startsWith("image/"),
                   )}
                   open={modelPickerSession === props.session.id && !pendingRetryInput}
-                  onOpenChange={(open) => setModelPickerSession(open ? props.session.id : null)}
+                  onOpenChange={(open) => {
+                    setModelPickerSession(open ? props.session.id : null);
+                    if (open) void modelCatalog.refresh();
+                  }}
                   rows={modelCatalog.rows}
                   model={model}
                   effort={reasoningEffort}

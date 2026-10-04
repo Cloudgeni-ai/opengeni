@@ -19,6 +19,7 @@
   ],
   "type": "module",
   "scripts": {
+    "credits:policy": "bun scripts/operator/credit-promotion-policy.ts",
     "dev": "bun scripts/run-development-stack.ts",
     "dev:stack": "bun scripts/run-development-stack.ts",
     "dev:check": "bun scripts/run-development-stack.ts --check",

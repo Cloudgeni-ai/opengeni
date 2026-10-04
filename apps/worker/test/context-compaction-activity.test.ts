@@ -9,6 +9,7 @@ import {
   ActiveSessionHistoryLimitExceededError,
   ApprovalRunStateLimitExceededError,
   addSessionSystemUpdate,
+  applySessionTurnSettlement,
   bootstrapWorkspace,
   claimSessionWorkForAttempt,
   createDb,
@@ -2366,11 +2367,54 @@ describe("standalone context compaction execution", () => {
         })),
       );
     });
-    const historyBefore = JSON.stringify(
-      (await getActiveSessionHistoryItems(client.db, grant.workspaceId!, session.id)).map(
-        (row) => row.item,
-      ),
+    // An earlier human request spawned the child whose result arrives after
+    // the failed compaction; the result carries that exact parent turn.
+    await withWorkspaceSubjectSessionActivityRls(
+      client.db,
+      grant.workspaceId!,
+      grant.subjectId,
+      async (db) =>
+        await submitHumanPromptInTransaction(db, {
+          accountId: grant.accountId,
+          workspaceId: grant.workspaceId!,
+          sessionId: session.id,
+          subjectId: grant.subjectId,
+          actor: { type: "human", subjectId: grant.subjectId },
+          operationKey: crypto.randomUUID(),
+          delivery: "send",
+          text: "Delegate the remaining work to a child session",
+          resources: [],
+          tools: [],
+          reasoningEffortFallback: "low",
+          source: "user",
+        }),
     );
+    const spawningAttemptId = crypto.randomUUID();
+    const spawningClaim = await claimSessionWorkForAttempt(client.db, grant.workspaceId!, {
+      sessionId: session.id,
+      workflowId: `session-${session.id}`,
+      workflowRunId: crypto.randomUUID(),
+      attemptId: spawningAttemptId,
+      dispatchId: `dispatch-${crypto.randomUUID()}`,
+      trigger: { kind: "next" },
+    });
+    if (spawningClaim.action !== "claimed") throw new Error("spawning turn was not claimed");
+    expect(
+      await applySessionTurnSettlement(client.db, grant.workspaceId!, {
+        sessionId: session.id,
+        turnId: spawningClaim.turn.id,
+        triggerEventId: spawningClaim.turn.triggerEventId,
+        attemptId: spawningAttemptId,
+        turnStatus: "completed",
+        sessionStatus: "idle",
+        activeTurnId: null,
+        events: [],
+      }),
+    ).toMatchObject({ action: "settled" });
+    const itemsBefore = (
+      await getActiveSessionHistoryItems(client.db, grant.workspaceId!, session.id)
+    ).map((row) => row.item);
+    const historyBefore = JSON.stringify(itemsBefore);
 
     const goal = await createSessionGoal(client.db, {
       accountId: grant.accountId,
@@ -2498,7 +2542,7 @@ describe("standalone context compaction execution", () => {
       grant.workspaceId!,
       session.id,
     );
-    expect(JSON.stringify(historyAfter.slice(0, originalItems.length).map((row) => row.item))).toBe(
+    expect(JSON.stringify(historyAfter.slice(0, itemsBefore.length).map((row) => row.item))).toBe(
       historyBefore,
     );
     expect(historyAfter.at(-1)?.item).toMatchObject({
@@ -2533,22 +2577,6 @@ describe("standalone context compaction execution", () => {
       kind: "idle",
     });
 
-    // Synthetic completed acceptance isolates wake/attachment from earlier
-    // execution. A child result needs the receiving human's accepted parent
-    // authority; a provenance-less notice must never enter their prompt.
-    const [parentTurn] = await shared.admin<Array<{ id: string }>>`
-      insert into session_turns
-        (account_id, workspace_id, session_id, trigger_event_id, temporal_workflow_id,
-         status, position, prompt, model, reasoning_effort, sandbox_backend,
-         initiator_kind, initiator_subject_id, initiating_human_subject_id)
-      select ${grant.accountId}, ${grant.workspaceId!}, ${session.id}, gen_random_uuid(),
-        ${`session-${session.id}`}, 'completed', coalesce(max(position), -1) + 1,
-        'Accepted parent work', 'scripted-model', 'medium', 'none', 'subject',
-        ${grant.subjectId}, ${grant.subjectId}
-      from session_turns where session_id = ${session.id}
-      returning id`;
-    if (!parentTurn) throw new Error("accepted parent turn was not inserted");
-    const childSessionId = crypto.randomUUID();
     const newUpdate = await addSessionSystemUpdate(client.db, {
       accountId: grant.accountId,
       workspaceId: grant.workspaceId!,
@@ -2558,19 +2586,30 @@ describe("standalone context compaction execution", () => {
       sourceId: crypto.randomUUID(),
       dedupeKey: `child-${crypto.randomUUID()}`,
       summary: "A genuinely new child completed",
-      lineage: {
-        parentTurnId: parentTurn.id,
-        parentSessionId: session.id,
-        childSessionId,
-        connectionAuthoritySubjectId: grant.subjectId,
-      },
       payload: {
         type: "child_terminal_result",
-        childSessionId,
+        childSessionId: crypto.randomUUID(),
+        status: "idle",
+      },
+      lineage: { parentTurnId: spawningClaim.turn.id },
+    });
+    if (!newUpdate.added) throw new Error("new update was not inserted");
+    const unprovenUpdate = await addSessionSystemUpdate(client.db, {
+      accountId: grant.accountId,
+      workspaceId: grant.workspaceId!,
+      sessionId: session.id,
+      kind: "child_terminal_result",
+      classification: "success",
+      sourceId: crypto.randomUUID(),
+      dedupeKey: `unproven-child-${crypto.randomUUID()}`,
+      summary: "A child notice without accepted parent authority",
+      payload: {
+        type: "child_terminal_result",
+        childSessionId: crypto.randomUUID(),
         status: "idle",
       },
     });
-    if (!newUpdate.added) throw new Error("new update was not inserted");
+    if (!unprovenUpdate.added) throw new Error("unproven update was not inserted");
     const heldClaim = await claimSessionWorkForAttempt(client.db, grant.workspaceId!, {
       sessionId: session.id,
       workflowId: `session-${session.id}`,
@@ -2581,10 +2620,10 @@ describe("standalone context compaction execution", () => {
     });
     expect(heldClaim).toEqual({ action: "unclaimed", reason: "no-work" });
     expect(
-      (await listOutstandingSessionSystemUpdates(client.db, grant.workspaceId!, session.id)).map(
-        (update) => update.id,
-      ),
-    ).toEqual([newUpdate.update.id]);
+      (await listOutstandingSessionSystemUpdates(client.db, grant.workspaceId!, session.id))
+        .map((update) => update.id)
+        .sort(),
+    ).toEqual([newUpdate.update.id, unprovenUpdate.update.id].sort());
 
     await withWorkspaceSubjectSessionActivityRls(
       client.db,
@@ -2619,6 +2658,9 @@ describe("standalone context compaction execution", () => {
       turn: { source: "user" },
     });
     if (retryClaim.action !== "claimed") throw new Error("human input did not wake the session");
+    // New human input attaches the notice with its exact accepted parent.
+    // A separate notice without lineage cannot borrow that authority and
+    // remains pending rather than being attached or lost.
     expect(
       (
         await listSessionSystemUpdatesForTurn(
@@ -2629,6 +2671,11 @@ describe("standalone context compaction execution", () => {
         )
       ).map((update) => update.id),
     ).toEqual([newUpdate.update.id]);
+    expect(
+      (await listOutstandingSessionSystemUpdates(client.db, grant.workspaceId!, session.id)).map(
+        (update) => update.id,
+      ),
+    ).toEqual([unprovenUpdate.update.id]);
   });
 
   test("consumes an operator request without replacing history when its summary is not smaller", async () => {
