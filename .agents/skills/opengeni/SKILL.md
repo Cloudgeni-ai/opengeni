@@ -196,6 +196,13 @@ Do not rely on this skill for exact route lists, env var lists, event types, mod
 
 ## Code Change Workflow
 
+For informational agent input, inspect `packages/db/src/inbox-execution-context.ts`
+and `docs/durable-agent-inputs.md`. Ordinary same-human messages use the receiving
+chat's last started user/API context; selected-account differences alone do not
+split batches. Other humans, restricted sources, schedules and Steer retain
+explicit authority. The context pointer advances on durable first `turn.started`,
+not queue/claim or recovery, and inherited receipts retain their generations.
+
 Before editing, identify which layer owns the behavior:
 
 - Public API or validation: routes, core domain helpers, contracts, tests.

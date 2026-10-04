@@ -4828,6 +4828,9 @@ export const sessions = pgTable(
     nestedAgentDepthPolicySessionId: uuid("nested_agent_depth_policy_session_id"),
     temporalWorkflowId: text("temporal_workflow_id"),
     activeTurnId: uuid("active_turn_id"),
+    // Server-owned accepted request governing informational agent input.
+    // Advances when a new user/API turn starts, never when it queues.
+    executionContextTurnId: uuid("execution_context_turn_id"),
     // Session-scoped out-of-turn wait (`wait_for_input`). The exact declaring
     // turn and absolute deadline are durable PostgreSQL authority; workflow
     // signals and timers only nudge reevaluation. A newer finished turn or a
@@ -7106,6 +7109,9 @@ export const sessionTurns = pgTable(
     // service initiator. It never authorizes by itself. Null means pure service
     // work has no human-bound authority.
     initiatingHumanSubjectId: text("initiating_human_subject_id"),
+    // Exact receiving-session authority copied by an informational inbox turn.
+    // Immutable and checked against the session pointer by the database.
+    executionContextTurnId: uuid("execution_context_turn_id"),
     // Exact goal authority frozen when the logical turn is accepted. The
     // migration trigger fills this for old and rolling writers; claim only
     // reconstructs legacy nulls from events as-of created_at.

@@ -426,10 +426,10 @@ schedules, goal continuation, compaction, and coalesced internal batches use
 explicit service principals. An Agent Steer remains the causal initiator when
 authority-neutral ordinary machine notices coalesce into its inference; those
 notices cannot erase the steering subject merely because they arrived in the
-same batch. Child lifecycle, command and goal-continuation updates retain their
-exact target causal turn. Different originating turns may coalesce only when
-they resolve to the same receiving-session human and their frozen execution
-permissions match. Unresolved origins keep exact-turn isolation; Agent Steer
+same batch. Producer lineage retains each exact causal turn. Ordinary same-human
+agent messages and child results use the receiving request context described
+below; commands, goals and explicit-source lanes retain their frozen receipt
+checks. Unresolved origins keep exact-turn isolation; Agent Steer
 keeps its exact caller attempt. A malformed historical authority-bearing update also receives an
 isolated claim instead of borrowing a coalesced principal; Agent Steer lineage
 is complete only when the caller session, turn, attempt, and execution
@@ -654,17 +654,27 @@ snapshot; runtime never substitutes the session creator, current browser user,
 worker identity, or another member's account. See
 [`supergrok-subscription.md`](supergrok-subscription.md).
 
-Ordinary agent messages, like Steer, inherit initiating-human identity from the
-exact admitted sender turn. Empty personal-connection selections or workspace
-provider scope do not erase that identity. Ordinary messages from different sender
-attempts may share a batch with each other and lifecycle results when their exact
-originating turns resolve to the same human and frozen execution permissions.
-Steer retains exact-caller isolation: messages from that same attempt can join its
-batch, with the replacement instruction last in both the timeline and persisted
-model context, including turns with a goal snapshot. Malformed historical message lineage cannot borrow another
-update's human. Genuine service-only source turns remain service-only. This
-preserves identity without expanding accepted connection selections or replacing
-the receiving session's tool configuration.
+Ordinary same-human agent messages and child lifecycle results are informational:
+when the receiving chat has a started request context, that context owns the
+turn's accepted accounts and provider selections. Sender tool/account choices do
+not narrow or widen it. The server advances `sessions.execution_context_turn_id`
+only on the first durable `turn.started` for accepted user/API work, including a
+child's initial request. Queue admission, refused startup, recovery, schedules,
+compaction and informational follow-ups do not move it. Execution-authority
+revocation clears it; an audience-only private-to-shared change preserves it.
+A new queued human request uses its own accepted context for joined input.
+
+Different humans, genuine service inputs and external-linked/developer-setup
+restrictions keep the explicit source lane. Missing historical context falls
+back to that lane without guessing the creator's or current default accounts.
+Steer retains exact-caller isolation; an authoritative human Steer can carry its
+older same-human agent Steer as context. Replacement instructions render last.
+The immutable receiving-context reference on a new informational turn is checked
+by SQL against its delivered inputs and the locked session pointer. Personal
+connection receipts preserve their accepted generations; physical credential
+use still checks live revocation. Known selected-tool differences produce a
+factual model-memory note, with no execution or ordinary timeline effect.
+See [durable agent inputs](durable-agent-inputs.md).
 
 The same accepted logical-turn boundary governs prompt policy and structured
 preferences. After claim, the owning attempt installs immutable instruction-
@@ -1210,7 +1220,7 @@ Before model/tool work, a claimed turn inserts a first-class
 `session_turn_attempts` row containing its exact Temporal activity id, current
 trigger, monotonic dispatch generation, verified control revision, and write
 lease. The same claim snapshots every per-session MCP approval policy under the
-session lock and adopts the selected machine-input batch's exact personal-MCP
+session lock and freezes the selected execution owner's exact personal-MCP
 delegation snapshot. A real Temporal activity retry retains the activity id; a
 re-dispatch creates a new attempt and captures the then-current policy. Every
 event, model-history write, run-state write, compaction transition, tool receipt,

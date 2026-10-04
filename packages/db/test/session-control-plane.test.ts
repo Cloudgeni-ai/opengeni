@@ -160,6 +160,7 @@ async function send(
   sessionId: string,
   text: string,
   delivery: "send" | "steer" = "send",
+  model?: string,
 ) {
   const accepted = await withWorkspaceSubjectSessionActivityRls(
     client.db,
@@ -177,6 +178,7 @@ async function send(
           delivery,
           text,
           resources: [],
+          ...(model ? { model } : {}),
           reasoningEffortFallback: "low",
           source: "user",
         }),
@@ -1442,15 +1444,22 @@ describe("clean session control plane", () => {
       { attemptId: firstAttemptId },
     );
     expect(runningTurn?.id).toBe(first.turn.id);
-    await appendSessionEvents(client.db, grant.workspaceId!, session.id, [
-      {
-        type: "turn.started",
-        turnId: runningTurn!.id,
-        turnGeneration: runningTurn!.executionGeneration,
-        payload: { triggerEventId: runningTurn!.triggerEventId },
-      },
-      { type: "agent.message.completed", payload: { text: "previous claimed response" } },
-    ]);
+    const started = await appendSessionEventsForTurnAttempt(
+      client.db,
+      grant.workspaceId!,
+      session.id,
+      runningTurn!.id,
+      runningTurn!.executionGeneration,
+      firstAttemptId,
+      [
+        {
+          type: "turn.started",
+          payload: { triggerEventId: runningTurn!.triggerEventId },
+        },
+        { type: "agent.message.completed", payload: { text: "previous claimed response" } },
+      ],
+    );
+    expect(started.accepted).toBe(true);
     const queuedText = "delegate this newly queued issue";
     const accepted = await send(grant, session.id, queuedText);
     expect(accepted.turn).toMatchObject({ status: "queued", startedAt: null });
@@ -4335,11 +4344,45 @@ describe("clean session control plane", () => {
   });
 
   test("queue projection attaches only the exact next eligible machine-input batch", async () => {
-    const ordinaryFixture = await fixture();
+    async function acceptedOriginFixture() {
+      const f = await fixture();
+      const sender = await createSession(client.db, {
+        accountId: f.grant.accountId,
+        workspaceId: f.grant.workspaceId!,
+        initialMessage: "Prepare context",
+        resources: [],
+        metadata: {},
+        model: "scripted-model",
+        reasoningEffort: "medium",
+        latencyMode: "standard",
+        sandboxBackend: "none",
+      });
+      await send(f.grant, sender.id, "Prepare context", "send", "scripted-model");
+      const caller = await claimTestSessionWork(
+        client.db,
+        f.grant.workspaceId!,
+        sender.id,
+        `session-${sender.id}`,
+      );
+      if (!caller?.activeAttemptId) throw new Error("Originating human turn was not claimed");
+      expect(caller.initiatingHumanSubjectId).toBe(f.grant.subjectId);
+      return {
+        ...f,
+        lineage: {
+          callerSessionId: sender.id,
+          callerTurnId: caller.id,
+          callerAttemptId: caller.activeAttemptId,
+          callerExecutionGeneration: caller.executionGeneration,
+        },
+      };
+    }
+    const ordinaryFixture = await acceptedOriginFixture();
     const ordinaryPrompt = await send(
       ordinaryFixture.grant,
       ordinaryFixture.session.id,
       "Use the incoming result",
+      "send",
+      "scripted-model",
     );
     const ordinary = await addSessionSystemUpdate(client.db, {
       accountId: ordinaryFixture.grant.accountId,
@@ -4350,6 +4393,7 @@ describe("clean session control plane", () => {
       sourceId: crypto.randomUUID(),
       dedupeKey: `agent-${crypto.randomUUID()}`,
       summary: "New agent context",
+      lineage: ordinaryFixture.lineage,
       payload: {
         type: "agent_message",
         text: "New agent context",
@@ -4357,6 +4401,22 @@ describe("clean session control plane", () => {
       },
     });
     if (!ordinary.added) throw new Error("ordinary system update was not inserted");
+    const missingOrigin = await addSessionSystemUpdate(client.db, {
+      accountId: ordinaryFixture.grant.accountId,
+      workspaceId: ordinaryFixture.grant.workspaceId!,
+      sessionId: ordinaryFixture.session.id,
+      kind: "agent_message",
+      classification: "info",
+      sourceId: crypto.randomUUID(),
+      dedupeKey: `agent-${crypto.randomUUID()}`,
+      summary: "Context without an origin",
+      payload: {
+        type: "agent_message",
+        text: "Context without an origin",
+        operationId: crypto.randomUUID(),
+      },
+    });
+    if (!missingOrigin.added) throw new Error("origin-less system update was not inserted");
     expect(
       await getSessionQueueSnapshot(
         client.db,
@@ -4369,9 +4429,39 @@ describe("clean session control plane", () => {
         inputIds: [ordinary.update.id],
       },
     });
+    const ordinaryClaim = await claimTestSessionWork(
+      client.db,
+      ordinaryFixture.grant.workspaceId!,
+      ordinaryFixture.session.id,
+      `session-${ordinaryFixture.session.id}`,
+    );
+    expect(ordinaryClaim?.id).toBe(ordinaryPrompt.turn.id);
+    expect(
+      (
+        await listSessionSystemUpdatesForTurn(
+          client.db,
+          ordinaryFixture.grant.workspaceId!,
+          ordinaryFixture.session.id,
+          ordinaryPrompt.turn.id,
+        )
+      ).map((update) => update.id),
+    ).toEqual([ordinary.update.id]);
+    expect(
+      await listOutstandingSessionSystemUpdates(
+        client.db,
+        ordinaryFixture.grant.workspaceId!,
+        ordinaryFixture.session.id,
+      ),
+    ).toMatchObject([{ id: missingOrigin.update.id, state: "pending" }]);
 
-    const agentSteerFixture = await fixture();
-    await send(agentSteerFixture.grant, agentSteerFixture.session.id, "Older queued send");
+    const agentSteerFixture = await acceptedOriginFixture();
+    await send(
+      agentSteerFixture.grant,
+      agentSteerFixture.session.id,
+      "Older queued send",
+      "send",
+      "scripted-model",
+    );
     const agentSteer = await addSessionSystemUpdate(client.db, {
       accountId: agentSteerFixture.grant.accountId,
       workspaceId: agentSteerFixture.grant.workspaceId!,
@@ -4381,6 +4471,7 @@ describe("clean session control plane", () => {
       sourceId: crypto.randomUUID(),
       dedupeKey: `agent-steer-${crypto.randomUUID()}`,
       summary: "Replace the current direction",
+      lineage: agentSteerFixture.lineage,
       payload: {
         type: "agent_steer_instruction",
         instruction: "Replace the current direction",
@@ -4404,6 +4495,7 @@ describe("clean session control plane", () => {
       agentSteerFixture.session.id,
       "Newest human direction",
       "steer",
+      "scripted-model",
     );
     expect(
       await getSessionQueueSnapshot(
@@ -4417,6 +4509,23 @@ describe("clean session control plane", () => {
         inputIds: [agentSteer.update.id],
       },
     });
+    const steerClaim = await claimTestSessionWork(
+      client.db,
+      agentSteerFixture.grant.workspaceId!,
+      agentSteerFixture.session.id,
+      `session-${agentSteerFixture.session.id}`,
+    );
+    expect(steerClaim?.id).toBe(humanSteer.turn.id);
+    expect(
+      (
+        await listSessionSystemUpdatesForTurn(
+          client.db,
+          agentSteerFixture.grant.workspaceId!,
+          agentSteerFixture.session.id,
+          humanSteer.turn.id,
+        )
+      ).map((update) => update.id),
+    ).toEqual([agentSteer.update.id]);
   });
 
   test("claim persists one exact machine-input batch and failure never requeues it", async () => {

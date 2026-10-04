@@ -93,8 +93,11 @@ selection does not broaden an existing pinned custom integration.
 Personal credentials belong to the person sending the message, even in a shared
 session. Another participant cannot inherit those credentials by replying. The
 results of an action in a shared session are still visible to its participants.
-Scheduled tasks use their execution owner's authorized account selections and
-revalidate access for each occurrence.
+Ordinary updates from your other agent sessions use this chat's accepted account
+selections. Different tool or account choices in the sending chat do not change
+the receiving chat's access. Another person's requests and restricted integrations
+keep their own authorization. Scheduled tasks use their execution owner's
+authorized account selections and revalidate access for each occurrence.
 
 Each attached account has its own tool route. A missing or revoked account is an
 access failure, not permission to silently switch to another identity. If you
