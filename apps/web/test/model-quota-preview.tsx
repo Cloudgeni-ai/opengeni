@@ -47,7 +47,6 @@ const code =
 function Preview() {
   const [status, setStatus] = useState<Session["status"]>(failed ? "failed" : "recovering");
   const [paused, setPaused] = useState(false);
-  const [pickerOpen, setPickerOpen] = useState(false);
   const composer = useComposer(SESSION_ID, {
     client,
     workspaceId: WORKSPACE_ID,
@@ -128,7 +127,6 @@ function Preview() {
               }}
               creditExhausted={scenario === "credits"}
               canChooseModel
-              onChooseModel={() => setPickerOpen(true)}
               modelChanged={composer.policy?.model !== models[0]!.id}
               actions={{
                 failureId: "fixture-failure",
@@ -150,8 +148,6 @@ function Preview() {
           controlsStart={
             <ModelPolicyPicker
               models={models}
-              open={pickerOpen}
-              onOpenChange={setPickerOpen}
               model={composer.policy?.model ?? models[0]!.id}
               effort={composer.policy?.reasoningEffort ?? "medium"}
               latencyMode={composer.policy?.latencyMode ?? "standard"}
