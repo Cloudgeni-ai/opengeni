@@ -27829,6 +27829,7 @@
       "previewOrganizationUserSetup": "value",
       "retryOrganizationUserSetupDelivery": "value"
     },
+    "@opengeni/sdk/package.json": {},
     "@opengeni/sdk/pr-review": {
       "CreatePrReviewAppRegistrationRequest": "type",
       "CreatePrReviewRepositoryBindingRequest": "type",

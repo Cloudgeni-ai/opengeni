@@ -64,11 +64,14 @@ export function GenieLoading({
   phase = "preparing",
   onShowDetails,
   detailsOpen = false,
+  notice,
 }: {
   startedAt: string;
   phase?: GenieLoadingRenderProps["phase"];
   onShowDetails: () => void;
   detailsOpen?: boolean;
+  /** An actionable startup problem takes precedence over decorative copy. */
+  notice?: string | undefined;
 }) {
   const options = useContext(GenieLoadingOptionsContext);
   const waiting = phase === "waiting";
@@ -79,15 +82,16 @@ export function GenieLoading({
   const [slow, setSlow] = useState(false);
   useEffect(() => {
     const update = () => {
-      setShowDetails(Date.now() - Date.parse(startedAt) >= 15_000);
-      setSlow(Date.now() - Date.parse(startedAt) >= 30_000);
+      setShowDetails(Date.now() - Date.parse(startedAt) >= 30_000);
+      setSlow(Date.now() - Date.parse(startedAt) >= 60_000);
       if (!document.hidden) setPhrase(Math.floor(Math.random() * phrases.length));
     };
     update();
     const timer = window.setInterval(update, 5_000);
     return () => window.clearInterval(timer);
   }, [startedAt, phrases]);
-  if (options?.render) return options.render({ startedAt, phase, detailsOpen, onShowDetails });
+  if (options?.render && !notice)
+    return options.render({ startedAt, phase, detailsOpen, onShowDetails });
   return (
     <div className="og-genie-loading">
       <div
@@ -103,21 +107,28 @@ export function GenieLoading({
       </div>
       <div className="og-genie-copy">
         <span className="sr-only" role="status">
-          {slow
-            ? (options?.messages?.slowStatus ??
-              (waiting
-                ? "Waiting for a response. Taking longer than usual."
-                : "Preparing your task. Taking longer than usual."))
-            : (options?.messages?.status ??
-              (waiting ? "Waiting for a response." : "Preparing your task."))}
+          {notice ??
+            (slow
+              ? (options?.messages?.slowStatus ??
+                (waiting
+                  ? "Waiting for a response. Taking longer than usual."
+                  : "Preparing your task. Taking longer than usual."))
+              : (options?.messages?.status ??
+                (waiting ? "Waiting for a response." : "Preparing your task.")))}
         </span>
-        <span key={slow ? "slow" : phrase} className="og-genie-phrase" aria-hidden="true">
-          {slow
-            ? (options?.messages?.slowText ??
-              (waiting ? "Still waiting for a response…" : "A little longer than usual…"))
-            : phrases[phrase % phrases.length]}
+        <span
+          key={notice ?? (slow ? "slow" : phrase)}
+          className="og-genie-phrase"
+          style={notice ? { animation: "none" } : undefined}
+          aria-hidden="true"
+        >
+          {notice ??
+            (slow
+              ? (options?.messages?.slowText ??
+                (waiting ? "Still waiting for a response…" : "A little longer than usual…"))
+              : phrases[phrase % phrases.length])}
         </span>
-        {showDetails || detailsOpen ? (
+        {showDetails || detailsOpen || notice ? (
           <button
             type="button"
             className="og-genie-details"
