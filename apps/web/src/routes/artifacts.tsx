@@ -136,6 +136,7 @@ function ArtifactListRoute({ workspaceId }: { workspaceId: string }) {
     context.accessKeyVersion,
   );
   const canCreate = hasWorkspacePermission(context.accessContext, workspaceId, "sessions:create");
+  const canPin = hasWorkspacePermission(context.accessContext, workspaceId, "artifacts:publish");
   // The catalog quietly omits Sites and editable artifacts without `artifacts:read`.
   const artifactKindsHidden = lacksWorkspacePermission(
     context.accessContext,
@@ -202,6 +203,15 @@ function ArtifactListRoute({ workspaceId }: { workspaceId: string }) {
             emptyAction={newArtifact}
             onEmptyChange={setEmpty}
             artifactKindsHidden={artifactKindsHidden}
+            onPin={
+              canPin
+                ? async (item, pinned) => {
+                    await context.client.updateArtifactPin(workspaceId, item.kind, item.id, pinned);
+                    invalidateArtifactCatalog(context.client, workspaceId);
+                    await catalog.refresh();
+                  }
+                : undefined
+            }
           />
         </LineTabsContent>
       </LineTabs>

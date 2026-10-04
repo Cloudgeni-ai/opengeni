@@ -20,6 +20,8 @@ export const ArtifactCatalogItem = z
     createdAt: z.string().datetime({ offset: true }),
     updatedAt: z.string().datetime({ offset: true }),
     status: z.enum(["active", "archived"]),
+    /** Shared workspace metadata, not content-access authority. */
+    pinned: z.boolean().optional(),
     sourceSessionId: z.string().uuid().optional(),
     versionId: z.string().min(1).max(128).optional(),
     file: RetainedArtifactReferenceSchema.optional(),
@@ -58,3 +60,15 @@ export const ArtifactCatalogListResponse = z
   })
   .strict();
 export type ArtifactCatalogListResponse = z.infer<typeof ArtifactCatalogListResponse>;
+
+export const UpdateArtifactPinRequest = z.object({ pinned: z.boolean() }).strict();
+export type UpdateArtifactPinRequest = z.infer<typeof UpdateArtifactPinRequest>;
+
+export const ArtifactPinResponse = z
+  .object({
+    kind: ArtifactCatalogKind,
+    artifactId: z.string().min(1).max(128),
+    pinned: z.boolean(),
+  })
+  .strict();
+export type ArtifactPinResponse = z.infer<typeof ArtifactPinResponse>;

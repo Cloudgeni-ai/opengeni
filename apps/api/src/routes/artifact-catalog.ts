@@ -4,6 +4,8 @@ import {
   ArtifactCatalogKind,
   ArtifactCatalogListQuery,
   ArtifactCatalogListResponse,
+  ArtifactPinResponse,
+  UpdateArtifactPinRequest,
   retainedArtifactReferenceFromFile,
   retainedGeneratedImageReferenceFromFile,
   type AccessGrant,
@@ -26,6 +28,8 @@ import {
   getGeneratedImageArtifact,
   getSessionAuthorityProjection,
   listArtifactCatalogCandidates,
+  nestedPostgresSqlState,
+  updateArtifactPin,
   withSessionRlsActorContext,
   type ArtifactCatalogCandidate,
   type ArtifactCatalogPosition,
@@ -33,6 +37,7 @@ import {
 } from "@opengeni/db";
 import type { Hono } from "hono";
 import { HTTPException } from "hono/http-exception";
+import { z } from "zod";
 import { artifactCatalogCursorCodec } from "../artifact-catalog-cursor";
 import {
   editableArtifactActorForGrant,
@@ -51,9 +56,90 @@ const position = (row: ArtifactCatalogCandidate): ArtifactCatalogPosition => ({
   key: row.sort_key,
   kind: row.kind,
   id: row.id,
+  pinned: row.pinned ?? false,
 });
 
 export function registerArtifactCatalogRoutes(app: Hono, deps: Dependencies): void {
+  app.put("/v1/workspaces/:workspaceId/artifact-catalog/:kind/:artifactId/pin", async (context) => {
+    const workspaceId = context.req.param("workspaceId");
+    const authorization = await requireAccessGrantAuthorization(context, deps, workspaceId);
+    const grant = authorization.grant;
+    if (!hasPermission(grant.permissions, "artifacts:publish"))
+      throw new HTTPException(403, { message: "Artifact publish access required" });
+    const kind = ArtifactCatalogKind.safeParse(context.req.param("kind"));
+    const body = UpdateArtifactPinRequest.safeParse(await context.req.json().catch(() => null));
+    const requestedId = context.req.param("artifactId");
+    if (
+      !kind.success ||
+      !body.success ||
+      !(editableKinds.has(kind.data)
+        ? /^[0-9a-f]{32}$/.test(requestedId)
+        : z.string().uuid().safeParse(requestedId).success)
+    )
+      throw new HTTPException(422, { message: "Invalid artifact pin request" });
+    const artifactId = editableKinds.has(kind.data) ? requestedId : requestedId.toLowerCase();
+    const fileKind = kind.data === "file" || kind.data === "image";
+    if (!hasPermission(grant.permissions, fileKind ? "files:read" : "artifacts:read"))
+      throw new HTTPException(403, { message: "Artifact read access required" });
+    const actor = fileKind
+      ? await fileOwnerContextForAccess(deps, authorization, "files:read")
+      : { subjectId: grant.subjectId, privateFileOwnerSubjectId: null };
+    context.header("cache-control", "private, no-store");
+    return withSessionRlsActorContext(actor, async () => {
+      if (editableKinds.has(kind.data)) {
+        if (!deps.editableArtifacts)
+          throw new HTTPException(503, { message: "Editable artifacts are unavailable" });
+        try {
+          const scope = editableArtifactScope({ accountId: grant.accountId, workspaceId });
+          const artifact = await deps.editableArtifacts.readArtifact({
+            scope,
+            actor: editableArtifactActorForGrant(grant, "0000000000000001"),
+            artifactId: editableArtifactId(artifactId),
+          });
+          if (
+            artifact.scope.accountId !== scope.accountId ||
+            artifact.scope.workspaceId !== scope.workspaceId ||
+            artifact.id !== artifactId ||
+            artifact.modality !== kind.data
+          )
+            throw new HTTPException(404, { message: "Artifact not found" });
+        } catch (error) {
+          if (isInvisibleListCandidate(error))
+            throw new HTTPException(404, { message: "Artifact not found" });
+          throw editableArtifactHttpError(error);
+        }
+      }
+      if (fileKind) {
+        const subjectId = await fileAuthoritySubjectIdForGrant(deps, grant);
+        const [file] = await getFilesForSubject(deps.db, {
+          accountId: grant.accountId,
+          workspaceId,
+          subjectId,
+          fileIds: [artifactId],
+        });
+        if (!file || file.status !== "ready")
+          throw new HTTPException(404, { message: "Artifact not found" });
+      }
+      try {
+        await updateArtifactPin(
+          deps.db,
+          { accountId: grant.accountId, workspaceId },
+          {
+            kind: kind.data,
+            artifactId,
+            pinned: body.data.pinned,
+          },
+        );
+      } catch (error) {
+        if (nestedPostgresSqlState(error) === "42501")
+          throw new HTTPException(404, { message: "Artifact not found" });
+        throw error;
+      }
+      return context.json(
+        ArtifactPinResponse.parse({ kind: kind.data, artifactId, pinned: body.data.pinned }),
+      );
+    });
+  });
   app.get("/v1/workspaces/:workspaceId/artifact-catalog", async (context) => {
     const workspaceId = context.req.param("workspaceId");
     const authorization = await requireAccessGrantAuthorization(context, deps, workspaceId);
@@ -210,6 +296,7 @@ async function projectCandidate(
     status: row.status,
     createdAt: iso(row.created_at),
     updatedAt: iso(row.updated_at),
+    ...(row.pinned !== undefined ? { pinned: row.pinned } : {}),
   };
   if (row.version_id) item.versionId = row.version_id;
   if (editableKinds.has(row.kind)) {

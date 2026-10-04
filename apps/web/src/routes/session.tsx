@@ -1457,6 +1457,21 @@ function SessionDock(props: {
             initialSelectedArtifactId={dockNavigation.artifactId}
             openArtifactRequest={currentArtifactRequest}
             onSelectedArtifactIdChange={rememberArtifact}
+            onPin={
+              hasWorkspacePermission(context.accessContext, props.workspaceId, "artifacts:publish")
+                ? async (item, pinned) => {
+                    await context.client.updateArtifactPin(
+                      props.workspaceId,
+                      item.kind,
+                      item.id,
+                      pinned,
+                    );
+                    artifactState.applyPin(item.kind, item.id, pinned);
+                    expireArtifactCatalog(context.client, props.workspaceId);
+                    artifactState.retry();
+                  }
+                : undefined
+            }
           />
         </Suspense>
       ),
@@ -1570,6 +1585,7 @@ function useSessionEditableArtifactSummaries(input: {
   artifacts: readonly SessionEditableArtifactSummary[];
   status: SessionEditableArtifactsStatus;
   retry: () => void;
+  applyPin: (kind: SessionEditableArtifactSummary["modality"], id: string, pinned: boolean) => void;
 }> {
   const context = useAppContext();
   const authorityKey = `${input.workspaceId}:${input.sessionId}:${context.accessKeyVersion}`;
@@ -1646,9 +1662,25 @@ function useSessionEditableArtifactSummaries(input: {
   ]);
 
   const retry = useCallback(() => setRetrySequence((value) => value + 1), []);
+  const applyPin = useCallback(
+    (kind: SessionEditableArtifactSummary["modality"], id: string, pinned: boolean) => {
+      setLoaded((previous) => {
+        if (previous?.key !== authorityKey || previous.client !== context.client) return previous;
+        return {
+          ...previous,
+          artifacts: previous.artifacts.map((artifact) =>
+            artifact.modality === kind && artifact.id === id && artifact.catalogItem
+              ? { ...artifact, catalogItem: { ...artifact.catalogItem, pinned } }
+              : artifact,
+          ),
+        };
+      });
+    },
+    [authorityKey, context.client],
+  );
   return loaded?.key === authorityKey && loaded.client === context.client
-    ? { artifacts: loaded.artifacts, status: loaded.status, retry }
-    : { artifacts: [], status: "loading", retry };
+    ? { artifacts: loaded.artifacts, status: loaded.status, retry, applyPin }
+    : { artifacts: [], status: "loading", retry, applyPin };
 }
 
 function SessionChatPane(props: {

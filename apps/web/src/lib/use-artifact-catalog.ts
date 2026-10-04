@@ -68,9 +68,14 @@ export function useArtifactCatalog(
     generation: 0,
     active: false,
     shown: null as (CatalogPages & { key: string; client: CatalogClient }) | null,
+    view: null as { key: string; client: CatalogClient } | null,
+    refresh: null as (() => Promise<void>) | null,
   }).current;
   const load = useCallback(
     async (more = false) => {
+      // A saved mutation or event handler may outlive its captured view. It must
+      // never invalidate requests belonging to newer filters or authority.
+      if (requests.view?.key !== key || requests.view.client !== client) return;
       const shown =
         requests.shown?.key === key && requests.shown.client === client ? requests.shown : null;
       if (more && (requests.active || !shown?.nextCursor)) return;
@@ -150,6 +155,8 @@ export function useArtifactCatalog(
     [client, workspaceId, key, requests, q, kind, sort, status],
   );
   useEffect(() => {
+    requests.view = { key, client };
+    requests.refresh = load;
     const cached = artifactCatalogs.get(client)?.get(key);
     requests.shown = cached ? { key, client, ...cached } : null;
     if (cached && isFresh(cached)) {
@@ -168,6 +175,8 @@ export function useArtifactCatalog(
       document.removeEventListener("visibilitychange", refreshIfStale);
       requests.generation++;
       requests.active = false;
+      requests.view = null;
+      requests.refresh = null;
     };
   }, [client, key, load, requests]);
   // Before the effect runs for a new view, show its cached rows instead of a spinner.
@@ -184,6 +193,10 @@ export function useArtifactCatalog(
     error: current?.error ?? null,
     nextCursor: current?.nextCursor ?? null,
     retry: () => void load(),
+    /** Saved mutations refresh the latest mounted view, not a pre-save closure. */
+    refresh: async () => {
+      await requests.refresh?.();
+    },
     loadMore: () => void load(true),
   };
 }

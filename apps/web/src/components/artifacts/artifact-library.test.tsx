@@ -257,6 +257,36 @@ test("shared library lists the type as a word and never executes Sites", async (
   }
 });
 
+test("pinned markers remain visible in both gallery and list without adding an action for read-only viewers", async () => {
+  localStorage.removeItem("opengeni:artifact-library:view:v1");
+  const container = document.createElement("div");
+  document.body.append(container);
+  const root = createRoot(container);
+  try {
+    await renderInRouter(root, () => (
+      <ArtifactLibrary
+        workspaceId="workspace"
+        items={[{ ...items[1]!, pinned: true }, items[0]!]}
+        filters={defaultArtifactFilters}
+        onFiltersChange={() => {}}
+        loading={false}
+        onRetry={() => {}}
+      />
+    ));
+    expect(container.querySelectorAll('[title="Pinned"]')).toHaveLength(1);
+    expect(container.querySelector('[title="Pinned"]')?.textContent).toBe("Pinned");
+    await act(async () =>
+      container.querySelector<HTMLButtonElement>('[role="radio"][aria-label="List"]')!.click(),
+    );
+    expect(container.querySelectorAll('[title="Pinned"]')).toHaveLength(1);
+    expect(container.querySelectorAll('[data-slot="list-row"]')).toHaveLength(2);
+  } finally {
+    await act(async () => root.unmount());
+    container.remove();
+    localStorage.removeItem("opengeni:artifact-library:view:v1");
+  }
+});
+
 test("loading, empty, and error states stay explicit with a retry", async () => {
   const container = document.createElement("div");
   document.body.append(container);

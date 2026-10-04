@@ -1550,6 +1550,19 @@
       ]
     },
     {
+      "method": "PUT",
+      "path": "/v1/workspaces/:workspaceId/artifact-catalog/:kind/:artifactId/pin",
+      "sdk": [
+        "OpenGeniClient.updateArtifactPin"
+      ],
+      "request": [
+        "ArtifactCatalogKind"
+      ],
+      "response": [
+        "ArtifactPinResponse"
+      ]
+    },
+    {
       "method": "GET",
       "path": "/v1/workspaces/:workspaceId/artifacts/:artifactId",
       "sdk": [
@@ -8886,6 +8899,7 @@
         "$.filename": "string?",
         "$.id": "string!",
         "$.kind": "ref(ArtifactCatalogKind)!",
+        "$.pinned": "boolean?",
         "$.sizeBytes": "integer?",
         "$.sourceSessionId": "string?",
         "$.status": "ref(TaskNoteStatus)!",
@@ -8896,6 +8910,7 @@
     },
     "ArtifactCatalogKind": {
       "io": [
+        "input",
         "output"
       ],
       "shape": {
@@ -8911,6 +8926,17 @@
         "$.items": "array!",
         "$.items[]": "ref(ArtifactCatalogItem)",
         "$.nextCursor": "string! null"
+      }
+    },
+    "ArtifactPinResponse": {
+      "io": [
+        "output"
+      ],
+      "shape": {
+        "$": "object",
+        "$.artifactId": "string!",
+        "$.kind": "ref(ArtifactCatalogKind)!",
+        "$.pinned": "boolean!"
       }
     },
     "AssignableWorkspaceMemberRole": {
@@ -25601,6 +25627,7 @@
       "ArtifactCatalogKind": "type",
       "ArtifactCatalogListOptions": "type",
       "ArtifactCatalogListResponse": "type",
+      "ArtifactPinResponse": "type",
       "artifactViewerCapability": "value",
       "AssignableWorkspaceMemberRole": "type",
       "AtlassianBrowseItem": "type",
@@ -30426,6 +30453,7 @@
       "uninstallPlugin",
       "uninstallSkill",
       "unlinkGitHubInstallation",
+      "updateArtifactPin",
       "updateBrowserIdentity",
       "updateChannel",
       "updateCompanyProfile",
@@ -31029,6 +31057,7 @@
       "uninstallPlugin",
       "uninstallSkill",
       "unlinkGitHubInstallation",
+      "updateArtifactPin",
       "updateBrowserIdentity",
       "updateChannel",
       "updateCompanyProfile",
@@ -31673,6 +31702,7 @@
       "uninstallPlugin",
       "uninstallSkill",
       "unlinkGitHubInstallation",
+      "updateArtifactPin",
       "updateBrowserIdentity",
       "updateChannel",
       "updateCompanyProfile",
@@ -33931,6 +33961,9 @@
       "unlinkGitHubInstallation": [
         "{\"kind\":\"method\",\"static\":false,\"optional\":false,\"readonly\":false,\"generics\":null,\"parameters\":[{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSNumberKeyword\"},\"optional\":false,\"rest\":false}],\"result\":{\"type\":\"TSTypeReference\",\"typeArguments\":{\"params\":[{\"type\":\"TSVoidKeyword\"}],\"type\":\"TSTypeParameterInstantiation\"},\"typeName\":{\"name\":\"Promise\",\"optional\":false,\"type\":\"Identifier\"}}}"
       ],
+      "updateArtifactPin": [
+        "{\"kind\":\"method\",\"static\":false,\"optional\":false,\"readonly\":false,\"generics\":null,\"parameters\":[{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"ArtifactCatalogKind\",\"optional\":false,\"type\":\"Identifier\"}},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSBooleanKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"members\":[{\"computed\":false,\"key\":{\"name\":\"signal\",\"optional\":false,\"type\":\"Identifier\"},\"optional\":true,\"readonly\":false,\"static\":false,\"type\":\"TSPropertySignature\",\"typeAnnotation\":{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"AbortSignal\",\"optional\":false,\"type\":\"Identifier\"}}}],\"type\":\"TSTypeLiteral\"},\"optional\":true,\"rest\":false}],\"result\":{\"type\":\"TSTypeReference\",\"typeArguments\":{\"params\":[{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"ArtifactPinResponse\",\"optional\":false,\"type\":\"Identifier\"}}],\"type\":\"TSTypeParameterInstantiation\"},\"typeName\":{\"name\":\"Promise\",\"optional\":false,\"type\":\"Identifier\"}}}"
+      ],
       "updateBrowserIdentity": [
         "{\"kind\":\"method\",\"static\":false,\"optional\":false,\"readonly\":false,\"generics\":null,\"parameters\":[{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"UpdateBrowserIdentityRequest\",\"optional\":false,\"type\":\"Identifier\"}},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"OpenGeniRequestOptions\",\"optional\":false,\"type\":\"Identifier\"}},\"optional\":true,\"rest\":false}],\"result\":{\"type\":\"TSTypeReference\",\"typeArguments\":{\"params\":[{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"BrowserIdentityMutationResponse\",\"optional\":false,\"type\":\"Identifier\"}}],\"type\":\"TSTypeParameterInstantiation\"},\"typeName\":{\"name\":\"Promise\",\"optional\":false,\"type\":\"Identifier\"}}}"
       ],
@@ -35956,6 +35989,9 @@
       "unlinkGitHubInstallation": [
         "{\"kind\":\"method\",\"static\":false,\"optional\":false,\"readonly\":false,\"generics\":null,\"parameters\":[{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSNumberKeyword\"},\"optional\":false,\"rest\":false}],\"result\":{\"type\":\"TSTypeReference\",\"typeArguments\":{\"params\":[{\"type\":\"TSVoidKeyword\"}],\"type\":\"TSTypeParameterInstantiation\"},\"typeName\":{\"name\":\"Promise\",\"optional\":false,\"type\":\"Identifier\"}}}"
       ],
+      "updateArtifactPin": [
+        "{\"kind\":\"method\",\"static\":false,\"optional\":false,\"readonly\":false,\"generics\":null,\"parameters\":[{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"ArtifactCatalogKind\",\"optional\":false,\"type\":\"Identifier\"}},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSBooleanKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"members\":[{\"computed\":false,\"key\":{\"name\":\"signal\",\"optional\":false,\"type\":\"Identifier\"},\"optional\":true,\"readonly\":false,\"static\":false,\"type\":\"TSPropertySignature\",\"typeAnnotation\":{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"AbortSignal\",\"optional\":false,\"type\":\"Identifier\"}}}],\"type\":\"TSTypeLiteral\"},\"optional\":true,\"rest\":false}],\"result\":{\"type\":\"TSTypeReference\",\"typeArguments\":{\"params\":[{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"ArtifactPinResponse\",\"optional\":false,\"type\":\"Identifier\"}}],\"type\":\"TSTypeParameterInstantiation\"},\"typeName\":{\"name\":\"Promise\",\"optional\":false,\"type\":\"Identifier\"}}}"
+      ],
       "updateBrowserIdentity": [
         "{\"kind\":\"method\",\"static\":false,\"optional\":false,\"readonly\":false,\"generics\":null,\"parameters\":[{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"UpdateBrowserIdentityRequest\",\"optional\":false,\"type\":\"Identifier\"}},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"OpenGeniRequestOptions\",\"optional\":false,\"type\":\"Identifier\"}},\"optional\":true,\"rest\":false}],\"result\":{\"type\":\"TSTypeReference\",\"typeArguments\":{\"params\":[{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"BrowserIdentityMutationResponse\",\"optional\":false,\"type\":\"Identifier\"}}],\"type\":\"TSTypeParameterInstantiation\"},\"typeName\":{\"name\":\"Promise\",\"optional\":false,\"type\":\"Identifier\"}}}"
       ],
@@ -37814,6 +37850,9 @@
       ],
       "unlinkGitHubInstallation": [
         "{\"kind\":\"method\",\"static\":false,\"optional\":false,\"readonly\":false,\"generics\":null,\"parameters\":[{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSNumberKeyword\"},\"optional\":false,\"rest\":false}],\"result\":{\"type\":\"TSTypeReference\",\"typeArguments\":{\"params\":[{\"type\":\"TSVoidKeyword\"}],\"type\":\"TSTypeParameterInstantiation\"},\"typeName\":{\"name\":\"Promise\",\"optional\":false,\"type\":\"Identifier\"}}}"
+      ],
+      "updateArtifactPin": [
+        "{\"kind\":\"method\",\"static\":false,\"optional\":false,\"readonly\":false,\"generics\":null,\"parameters\":[{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"ArtifactCatalogKind\",\"optional\":false,\"type\":\"Identifier\"}},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSBooleanKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"members\":[{\"computed\":false,\"key\":{\"name\":\"signal\",\"optional\":false,\"type\":\"Identifier\"},\"optional\":true,\"readonly\":false,\"static\":false,\"type\":\"TSPropertySignature\",\"typeAnnotation\":{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"AbortSignal\",\"optional\":false,\"type\":\"Identifier\"}}}],\"type\":\"TSTypeLiteral\"},\"optional\":true,\"rest\":false}],\"result\":{\"type\":\"TSTypeReference\",\"typeArguments\":{\"params\":[{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"ArtifactPinResponse\",\"optional\":false,\"type\":\"Identifier\"}}],\"type\":\"TSTypeParameterInstantiation\"},\"typeName\":{\"name\":\"Promise\",\"optional\":false,\"type\":\"Identifier\"}}}"
       ],
       "updateBrowserIdentity": [
         "{\"kind\":\"method\",\"static\":false,\"optional\":false,\"readonly\":false,\"generics\":null,\"parameters\":[{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"UpdateBrowserIdentityRequest\",\"optional\":false,\"type\":\"Identifier\"}},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"OpenGeniRequestOptions\",\"optional\":false,\"type\":\"Identifier\"}},\"optional\":true,\"rest\":false}],\"result\":{\"type\":\"TSTypeReference\",\"typeArguments\":{\"params\":[{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"BrowserIdentityMutationResponse\",\"optional\":false,\"type\":\"Identifier\"}}],\"type\":\"TSTypeParameterInstantiation\"},\"typeName\":{\"name\":\"Promise\",\"optional\":false,\"type\":\"Identifier\"}}}"
@@ -39849,6 +39888,9 @@
       "unlinkGitHubInstallation": [
         "{\"kind\":\"method\",\"static\":false,\"optional\":false,\"readonly\":false,\"generics\":null,\"parameters\":[{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSNumberKeyword\"},\"optional\":false,\"rest\":false}],\"result\":{\"type\":\"TSTypeReference\",\"typeArguments\":{\"params\":[{\"type\":\"TSVoidKeyword\"}],\"type\":\"TSTypeParameterInstantiation\"},\"typeName\":{\"name\":\"Promise\",\"optional\":false,\"type\":\"Identifier\"}}}"
       ],
+      "updateArtifactPin": [
+        "{\"kind\":\"method\",\"static\":false,\"optional\":false,\"readonly\":false,\"generics\":null,\"parameters\":[{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"ArtifactCatalogKind\",\"optional\":false,\"type\":\"Identifier\"}},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSBooleanKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"members\":[{\"computed\":false,\"key\":{\"name\":\"signal\",\"optional\":false,\"type\":\"Identifier\"},\"optional\":true,\"readonly\":false,\"static\":false,\"type\":\"TSPropertySignature\",\"typeAnnotation\":{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"AbortSignal\",\"optional\":false,\"type\":\"Identifier\"}}}],\"type\":\"TSTypeLiteral\"},\"optional\":true,\"rest\":false}],\"result\":{\"type\":\"TSTypeReference\",\"typeArguments\":{\"params\":[{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"ArtifactPinResponse\",\"optional\":false,\"type\":\"Identifier\"}}],\"type\":\"TSTypeParameterInstantiation\"},\"typeName\":{\"name\":\"Promise\",\"optional\":false,\"type\":\"Identifier\"}}}"
+      ],
       "updateBrowserIdentity": [
         "{\"kind\":\"method\",\"static\":false,\"optional\":false,\"readonly\":false,\"generics\":null,\"parameters\":[{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"UpdateBrowserIdentityRequest\",\"optional\":false,\"type\":\"Identifier\"}},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"OpenGeniRequestOptions\",\"optional\":false,\"type\":\"Identifier\"}},\"optional\":true,\"rest\":false}],\"result\":{\"type\":\"TSTypeReference\",\"typeArguments\":{\"params\":[{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"BrowserIdentityMutationResponse\",\"optional\":false,\"type\":\"Identifier\"}}],\"type\":\"TSTypeParameterInstantiation\"},\"typeName\":{\"name\":\"Promise\",\"optional\":false,\"type\":\"Identifier\"}}}"
       ],
@@ -41736,6 +41778,9 @@
       ],
       "unlinkGitHubInstallation": [
         "{\"kind\":\"method\",\"static\":false,\"optional\":false,\"readonly\":false,\"generics\":null,\"parameters\":[{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSNumberKeyword\"},\"optional\":false,\"rest\":false}],\"result\":{\"type\":\"TSTypeReference\",\"typeArguments\":{\"params\":[{\"type\":\"TSVoidKeyword\"}],\"type\":\"TSTypeParameterInstantiation\"},\"typeName\":{\"name\":\"Promise\",\"optional\":false,\"type\":\"Identifier\"}}}"
+      ],
+      "updateArtifactPin": [
+        "{\"kind\":\"method\",\"static\":false,\"optional\":false,\"readonly\":false,\"generics\":null,\"parameters\":[{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"ArtifactCatalogKind\",\"optional\":false,\"type\":\"Identifier\"}},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSBooleanKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"members\":[{\"computed\":false,\"key\":{\"name\":\"signal\",\"optional\":false,\"type\":\"Identifier\"},\"optional\":true,\"readonly\":false,\"static\":false,\"type\":\"TSPropertySignature\",\"typeAnnotation\":{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"AbortSignal\",\"optional\":false,\"type\":\"Identifier\"}}}],\"type\":\"TSTypeLiteral\"},\"optional\":true,\"rest\":false}],\"result\":{\"type\":\"TSTypeReference\",\"typeArguments\":{\"params\":[{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"ArtifactPinResponse\",\"optional\":false,\"type\":\"Identifier\"}}],\"type\":\"TSTypeParameterInstantiation\"},\"typeName\":{\"name\":\"Promise\",\"optional\":false,\"type\":\"Identifier\"}}}"
       ],
       "updateBrowserIdentity": [
         "{\"kind\":\"method\",\"static\":false,\"optional\":false,\"readonly\":false,\"generics\":null,\"parameters\":[{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"UpdateBrowserIdentityRequest\",\"optional\":false,\"type\":\"Identifier\"}},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"OpenGeniRequestOptions\",\"optional\":false,\"type\":\"Identifier\"}},\"optional\":true,\"rest\":false}],\"result\":{\"type\":\"TSTypeReference\",\"typeArguments\":{\"params\":[{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"BrowserIdentityMutationResponse\",\"optional\":false,\"type\":\"Identifier\"}}],\"type\":\"TSTypeParameterInstantiation\"},\"typeName\":{\"name\":\"Promise\",\"optional\":false,\"type\":\"Identifier\"}}}"
