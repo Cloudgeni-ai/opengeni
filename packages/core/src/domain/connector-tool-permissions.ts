@@ -36,6 +36,7 @@ import {
 import { HTTPException } from "hono/http-exception";
 import {
   GMAIL_REST_MCP_TOOLS,
+  gmailToolAvailableOnDeployment,
   gmailToolSupportsScopes,
   isOfficialGmailMcpConfig,
   isOfficialSlackMcpConfig,
@@ -261,9 +262,16 @@ async function resolveTarget(input: Input) {
 export function reviewedConnectorToolCatalog(
   server: Pick<Settings["mcpServers"][number], "url" | "connectionRef" | "allowedTools">,
   grantedScopes: readonly string[],
+  deployment: Pick<Settings, "gmailWatchTopicName">,
 ): ListedTool[] | null {
   const tools = isOfficialGmailMcpConfig(server.url, server.connectionRef)
-    ? GMAIL_REST_MCP_TOOLS.filter((tool) => gmailToolSupportsScopes(tool.name, grantedScopes))
+    ? GMAIL_REST_MCP_TOOLS.filter(
+        (tool) =>
+          gmailToolSupportsScopes(tool.name, grantedScopes) &&
+          gmailToolAvailableOnDeployment(tool.name, {
+            watchTopicName: deployment.gmailWatchTopicName,
+          }),
+      )
     : isOfficialSlackMcpConfig(server.url, server.connectionRef)
       ? slackRestMcpToolsForScopes(grantedScopes)
       : null;
@@ -280,6 +288,7 @@ async function listTools(
   const reviewed = reviewedConnectorToolCatalog(
     target.server,
     target.connection?.grantedScopes ?? [],
+    input.settings,
   );
   if (reviewed !== null) return reviewed;
   let headers = { ...target.server.headers };

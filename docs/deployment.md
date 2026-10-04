@@ -1736,6 +1736,17 @@ per-file-size ceilings before readiness. Helm projects only the selected
 `artifactMaterializer` database/object-storage credential keys; it never imports
 the shared runtime Secret wholesale.
 
+The API and workers learn that the materializer runs only from
+`OPENGENI_ARTIFACT_MATERIALIZER_DEPLOYED` (default `false`). Helm sets it from
+`artifactMaterializer.enabled` unless `config` already names it, and `bun run dev`
+sets it to `true`. While it is false, the `editable_artifact_export` and
+`editable_artifact_export_status` tools are removed from the first-party tool
+ceiling, Google Drive publication of editable artifacts is unavailable, and
+`POST .../editable-artifacts/:artifactId/materializations` returns a
+non-retryable 503 instead of queuing a job nothing would drain. Collaborative
+editing is unaffected. A deployment that runs the materializer outside the
+chart must set it to `true` explicitly.
+
 For Kubernetes nodes that restrict nested user namespaces or mask `/proc`, the
 materializer may require a pod user namespace in addition to its child sandbox:
 

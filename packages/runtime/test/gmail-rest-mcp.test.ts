@@ -22,6 +22,7 @@ function server(input: {
   fetchImpl: typeof fetch;
   resolveCredential?: GmailRestMcpServerOptions["resolveCredential"];
   onAuthNeeded?: GmailRestMcpServerOptions["onAuthNeeded"];
+  watchTopicName?: string;
 }) {
   return new GmailRestMcpServer({
     workspaceId: "ws_1",
@@ -36,11 +37,26 @@ function server(input: {
         connectionId: "conn_1",
       })),
     ...(input.onAuthNeeded ? { onAuthNeeded: input.onAuthNeeded } : {}),
+    ...(input.watchTopicName ? { watchTopicName: input.watchTopicName } : {}),
     fetchImpl: input.fetchImpl,
   });
 }
 
 describe("Gmail REST MCP adapter", () => {
+  test("offers watch_mailbox only when the deployment configures a Pub/Sub topic", async () => {
+    const fetchImpl = async () => Response.json({});
+    const without = (await server({ fetchImpl }).listTools()).map((tool) => tool.name);
+    expect(without).not.toContain("watch_mailbox");
+    expect(without).toContain("stop_watch");
+    expect(without).toHaveLength(GMAIL_REST_MCP_TOOLS.length - 1);
+    const withTopic = await server({
+      fetchImpl,
+      watchTopicName: "projects/example-project/topics/gmail-events",
+    }).listTools();
+    expect(withTopic.map((tool) => tool.name)).toContain("watch_mailbox");
+    expect(withTopic).toHaveLength(GMAIL_REST_MCP_TOOLS.length);
+  });
+
   test("registers through the reusable local bridge contract", () => {
     expect(
       GMAIL_REST_MCP_BRIDGE_ADAPTER.matches({

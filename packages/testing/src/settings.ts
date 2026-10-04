@@ -82,6 +82,8 @@ export function testSettings(overrides: Partial<Settings> = {}): Settings {
     staticEntitlementsJson: "{}",
     staticUsageLimitsJson: "{}",
     delegationSecret: "test-delegation-secret",
+    // Tests model a complete deployment; the production default is false.
+    artifactMaterializerDeployed: true,
     streamTokenSecret: undefined,
     streamControlEnabled: false,
     workDiscoveryEnabled: true,
