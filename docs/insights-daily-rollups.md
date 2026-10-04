@@ -359,6 +359,82 @@ this descendant-copy lane. This procedure changes neither the original fixture
 nor deployment history, and establishes no automatic production maintenance
 cadence or performance acceptance.
 
+### Scoped charge-scan correction retained-volume checkpoint
+
+On October 4, 2026, measured composed head
+`6394bfbfcf409cbff6bce7bf69208b4a8ef47aed` imported the completed DB delta
+`e78d37366cac8ef52d0a419f1776d9519518487f` without changing its two file bodies.
+The charge reader separates NULL/UUID workspace branches, pushes scalar bounds
+into existing indexes and gates empty edges before scanning links. Its DB author
+ran 130 PostgreSQL tests and 2,294 assertions with zero failures and one heavy
+historical fixture filtered. The composed head passed 14 actual-auth full-App/
+release tests (536 assertions), 93 runtime/Core/API units (635 assertions), touched
+types and migration/FORCE-RLS/budget/docs guards. Completed independent review
+approved the limited source delta with no new concrete defect and inspected the
+author's evidence without rerunning PostgreSQL; it did not establish the latency
+target or final composed-head readiness.
+
+A new physical descendant copy preserved the previous run's 42 committed test
+records, starting at **838,042 facts and 4,170,042 events**, not a freshly seeded
+838,000-fact fixture. Copy-only preparation installed the two source-derived
+readers and attested all 25 private Insights definitions, preserved routine
+identity/security/owner/ACL/configuration, unchanged other routines and source
+data, FORCE posture and history. One owner REPEATABLE READ reconciliation used
+the explicit 10-million budget, consumed 168 marks and took **378.119 seconds**;
+independent raw call/token/knownness/amount/usage/debit parity passed. Its command
+terminal observation was unavailable after recovery; completion is grounded in
+the persisted complete receipt and database attestations, not an observed exit.
+
+No migration was replayed. SQL outside the changed charge reader is byte-identical
+to measured `0c7caf63`, including bootstrap, writers, reconciliation and grants;
+that head's maintenance-only bootstrap/lock evidence remains applicable without
+relabeling its timings as a new bootstrap run. No automatic maintenance cadence
+or staging/production operation is implied by this laboratory preparation.
+
+Both states again used complete `createApp`, normal restricted-role canonical
+selected-key authorization and a fresh response-cache MISS per timed request.
+There were 84 HTTP 200s, zero errors, and one first plus twenty subsequent samples
+per scope/state, with unchanged exact current/prior calendar windows.
+
+| State | Scope | First | Subsequent p50 | Subsequent p95 |
+| --- | --- | ---: | ---: | ---: |
+| Clean | Workspace | 1,443.3 ms | 1,218.9 ms | 1,229.2 ms |
+| Clean | Organization | 2,398.6 ms | 2,313.4 ms | 2,384.3 ms |
+| Dirty | Workspace | 2,639.4 ms | 1,812.9 ms | 1,822.4 ms |
+| Dirty | Organization | 2,989.6 ms | 3,007.4 ms | 3,038.9 ms |
+
+**All four uncached sub-one-second p95 targets remain unmet.** Every dirty request
+followed a committed ordinary fact, warm usage event and matching negative debit,
+without intervening refresh. Current/prior wire totals and unknown coverage stayed
+exact. The copy gained another 42 records per stream and ended at 838,084 facts/
+4,170,084 events; original data, FORCE posture and history remained unchanged.
+There were zero true-cold samples. Hardware/database settings remained the local
+PostgreSQL 17.11, affinity 0–16, 16.125-CPU quota, 128 MiB shared buffers and 4 MiB
+work-memory environment, not staging or a dedicated four-vCPU server.
+
+The completed same-head dirty-state nested-plan capture has zero executed
+`insights_charge_links` scans, and uses exact source-index attribution for 3,608
+prior and 5,492 current debits. The 42 NULL-day charge invalidations require exact
+raw charge fallback in both windows. In the later organization diagnostic the
+charge helper took 306/432 ms and its enclosing amount-input query 326/458 ms;
+the unchanged primary-workspace live projector took 832/981 ms, including those
+inputs, with further workspace projections in the organization request. These
+are nested, non-additive diagnostic durations, not benchmark samples or proof
+that the privacy projector may be changed. No merge or rollout clearance follows.
+
+Retained primary evidence:
+
+- Exact-head targeted checks: `fd13c5d1-d46f-4919-abce-9d32e48afcd5`.
+- Physical descendant copy: `052915a2-a74d-49c2-b43d-0fbb555a83bf`.
+- Copy-only preparation and independent parity: `7e22316f-c52f-4be0-b6cf-7416af3a8884`.
+- Clean HTTP: `034cb836-87da-4190-abcf-0b7c0919a23a`, 543,913 bytes,
+  SHA-256 `194789840edfaa5d109c9c6f4b2f44cd3c7b08002d7c2871489dc85055285f22`.
+- Dirty HTTP: `2031b5dd-16a2-4e92-b762-b0953508b95f`, 638,470 bytes,
+  SHA-256 `bd57ad23aa6a91cabf5ab820fdee0b6021f4fcb5f8ea4a5ebe74b560cac64511`.
+- Native plans: `acf94888-ca9b-4173-a065-e2628e3bdaae`, 2,995,634 bytes,
+  SHA-256 `66cedd5ba296679c286c36369d8a08e2b8fdb3e9ab82c91ed21be35ffad305bc`.
+- Executed native-plan runner: `d319d38d-be20-4407-8ea2-326649022f9e`.
+
 ### Frozen-head full-volume bootstrap measurement
 
 On October 4, 2026, a new isolated physical copy of the retained synthetic data
