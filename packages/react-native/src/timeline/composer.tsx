@@ -162,6 +162,11 @@ export function SessionComposer(props: SessionComposerProps) {
   // inside modals and overlays; the animated keyboard height does not.
   const keyboard = useAnimatedKeyboard();
   const floating = props.floating ?? false;
+  // Only Liquid Glass lets the conversation scroll visibly beneath the composer;
+  // a solid surface (Android, older iOS) sits on an opaque band down to the
+  // screen edge, or text would peek out under the card and the gesture handle.
+  const glass = useLiquidGlass();
+  const seeThrough = floating && glass;
   // Floating: iOS tucks the glass toward the home indicator like system bars;
   // Android keeps clear of the gesture handle.
   const restingBottom = floating
@@ -225,7 +230,7 @@ export function SessionComposer(props: SessionComposerProps) {
           paddingHorizontal: props.inset ?? 12,
           paddingTop: 6,
           gap: 8,
-          backgroundColor: floating ? "transparent" : c.bg,
+          backgroundColor: seeThrough ? "transparent" : c.bg,
         },
         floating ? { position: "absolute", left: 0, right: 0, bottom: 0 } : null,
         lift,
