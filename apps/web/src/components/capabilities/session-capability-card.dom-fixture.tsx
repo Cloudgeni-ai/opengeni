@@ -1,7 +1,7 @@
 // Run explicitly through session-capability-card.test.tsx so Radix sees the DOM at import time.
 import { afterAll, beforeAll, describe, expect, mock, test } from "bun:test";
 import { GlobalRegistrator } from "@happy-dom/global-registrator";
-import { act } from "react";
+import { act, StrictMode } from "react";
 
 import { CapabilityCatalogItem } from "@opengeni/contracts";
 import type { AuthNeededItem } from "@opengeni/react";
@@ -238,12 +238,14 @@ async function render(
   }
   await act(async () =>
     root.render(
-      <SessionCapabilityCard
-        item={notice}
-        workspaceId="workspace"
-        sessionId="session"
-        visibility={visibility}
-      />,
+      <StrictMode>
+        <SessionCapabilityCard
+          item={notice}
+          workspaceId="workspace"
+          sessionId="session"
+          visibility={visibility}
+        />
+      </StrictMode>,
     ),
   );
   return {
@@ -252,7 +254,9 @@ async function render(
     rerender: async (workspaceId: string) => {
       await act(async () =>
         root.render(
-          <SessionCapabilityCard item={notice} workspaceId={workspaceId} sessionId="session" />,
+          <StrictMode>
+            <SessionCapabilityCard item={notice} workspaceId={workspaceId} sessionId="session" />
+          </StrictMode>,
         ),
       );
     },
@@ -367,6 +371,32 @@ describe("conversation connection card", () => {
       expect(h.container.textContent).not.toContain("Enable in parents and add tools");
       expect(updateSessionToolPolicy).not.toHaveBeenCalled();
     } finally {
+      await h.close();
+    }
+  });
+
+  test("retired in-flight preparation cannot block the new actor or clear its work", async () => {
+    const h = await renderFiken();
+    const original = context.client.getSession;
+    let completeRead!: (session: Session) => void;
+    context.client.getSession = async () =>
+      await new Promise<Session>((resolve) => {
+        completeRead = resolve;
+      });
+    try {
+      await act(async () => button(h.container, "Add tools").click());
+      expect(button(h.container, "Add tools").disabled).toBe(true);
+      context.accessContext.subjectId = "other-human";
+      context.client.getSession = original;
+      await h.rerender("workspace");
+      expect(button(h.container, "Add tools").disabled).toBe(false);
+      await act(async () => button(h.container, "Add tools").click());
+      expect(h.container.textContent).toContain("Enable in parents and add tools");
+      await act(async () => completeRead(sessionAccess!.get("session")!));
+      expect(h.container.textContent).toContain("Enable in parents and add tools");
+      expect(updateSessionToolPolicy).not.toHaveBeenCalled();
+    } finally {
+      context.client.getSession = original;
       await h.close();
     }
   });

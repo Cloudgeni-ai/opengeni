@@ -250,13 +250,14 @@ function SessionCapabilitySetup({
     message?: string | undefined;
   } | null>(null);
   const [authInspectionRevision, setAuthInspectionRevision] = useState(0);
-  const inFlight = useRef(false);
+  const inFlight = useRef<object | null>(null);
   const scope = useRef({
     client: context.client,
     workspaceId,
     sessionId,
     canReadConnections,
     subjectId,
+    authorityKey: catalog.authorityKey,
     alive: true,
   });
   if (
@@ -264,7 +265,8 @@ function SessionCapabilitySetup({
     scope.current.workspaceId !== workspaceId ||
     scope.current.sessionId !== sessionId ||
     scope.current.canReadConnections !== canReadConnections ||
-    scope.current.subjectId !== subjectId
+    scope.current.subjectId !== subjectId ||
+    scope.current.authorityKey !== catalog.authorityKey
   ) {
     scope.current = {
       client: context.client,
@@ -272,21 +274,34 @@ function SessionCapabilitySetup({
       sessionId,
       canReadConnections,
       subjectId,
+      authorityKey: catalog.authorityKey,
       alive: true,
     };
   }
   const parentAccessPlan =
     parentAccessReview?.invocation === scope.current ? parentAccessReview.plan : null;
   useEffect(() => {
+    // StrictMode replays setup after cleanup. Give the replay a new owner:
+    // reusing the retired object would either keep it dead or revive old work.
+    if (!scope.current.alive) scope.current = { ...scope.current, alive: true };
     const activeScope = scope.current;
     setParentAccessReview(null);
+    setBusy(false);
     void catalog.refresh();
     return () => {
       activeScope.alive = false;
     };
     // Refetch on a live read-grant change; the hook masks prior rows during render.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [context.client, workspaceId, sessionId, canReadConnections, subjectId]);
+  }, [
+    context.client,
+    workspaceId,
+    sessionId,
+    canReadConnections,
+    subjectId,
+    catalog.authorityKey,
+    setBusy,
+  ]);
   const rawItem = catalog.items.find((entry) => entry.id === capabilityId);
   const rawItemId = rawItem?.id;
   const inspectUrl = rawItem?.mcpUrl ?? rawItem?.endpointUrl;
@@ -346,12 +361,13 @@ function SessionCapabilitySetup({
     void context.refreshWorkspaceMcpServers(workspaceId);
   }, [context, workspaceId]);
   async function act(action: ConnectAction) {
-    if (!item || inFlight.current) return;
-    inFlight.current = true;
+    if (!item) return;
+    const invocation = scope.current;
+    if (inFlight.current === invocation) return;
+    inFlight.current = invocation;
     setBusy(true);
     setError(null);
     setParentAccessReview(null);
-    const invocation = scope.current;
     const current = () => scope.current === invocation && invocation.alive;
     try {
       await performCapabilityAction(
@@ -412,16 +428,17 @@ function SessionCapabilitySetup({
       if (current()) await catalog.refresh();
       if (current()) setError(capabilityErrorToast(failure, "Couldn't complete setup").description);
     } finally {
-      inFlight.current = false;
+      if (inFlight.current === invocation) inFlight.current = null;
       if (current()) setBusy(false);
     }
   }
   async function useConnected() {
-    if (!item || inFlight.current) return;
-    inFlight.current = true;
+    if (!item) return;
+    const invocation = scope.current;
+    if (inFlight.current === invocation) return;
+    inFlight.current = invocation;
     setBusy(true);
     setError(null);
-    const invocation = scope.current;
     const current = () => scope.current === invocation && invocation.alive;
     try {
       const plan =
@@ -451,7 +468,7 @@ function SessionCapabilitySetup({
         setError(`Couldn't add this connection. ${userErrorText(failure, "Try again.")}`);
       }
     } finally {
-      inFlight.current = false;
+      if (inFlight.current === invocation) inFlight.current = null;
       if (current()) setBusy(false);
     }
   }

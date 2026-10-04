@@ -178,3 +178,40 @@ test("capability clamping cannot claim success or proceed to the child", async (
   );
   expect(h.updateSessionToolPolicy).not.toHaveBeenCalled();
 });
+
+test("default additions preserve retained optional/eager refs and keep defaults optional", async () => {
+  const h = harness();
+  const child = h.sessions.get("child")!;
+  child.parentSessionId = null;
+  child.tools = [{ kind: "mcp", id: "existing", optional: true, eager: true }];
+  child.effectiveToolPolicy!.effectiveIds.push("default-only");
+  const plan = await prepareSessionCapabilityAccess(h.client, "workspace", "child", fiken);
+  expect(plan.sessions[0]!.request).toMatchObject({
+    tools: [
+      { kind: "mcp", id: "existing", optional: true, eager: true },
+      { kind: "mcp", id: "default-only", optional: true },
+    ],
+  });
+});
+
+test("explicit and inherited policies preserve full stored refs despite sampled effective IDs", async () => {
+  for (const mode of ["explicit", "inherited"] as const) {
+    const h = harness();
+    const child = h.sessions.get("child")!;
+    child.parentSessionId = null;
+    child.toolPolicy.mode = mode;
+    child.tools = Array.from({ length: 300 }, (_, index) => ({
+      kind: "mcp" as const,
+      id: `connector-${index}`,
+      optional: true,
+      eager: index === 299,
+    }));
+    child.effectiveToolPolicy!.idsTruncated = true;
+    child.effectiveToolPolicy!.effectiveIds = ["connector-0", "opengeni"];
+    const plan = await prepareSessionCapabilityAccess(h.client, "workspace", "child", fiken);
+    expect(plan.sessions[0]!.request).toMatchObject({ tools: child.tools });
+    await applySessionCapabilityAccess(h.client, plan);
+    expect(h.updateSessionToolPolicy.mock.calls[0]![2]).toMatchObject({ tools: child.tools });
+    expect(h.sessions.get("child")!.tools).toHaveLength(300);
+  }
+});

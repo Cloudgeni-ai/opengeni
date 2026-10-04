@@ -57,7 +57,14 @@ function capabilityToolPolicyUpdate(
     // automatic selection. Compare against the resolved defaults instead.
     existing = policy.effectiveIds
       .filter((id) => !policy.mandatoryIds.includes(id))
-      .map((id) => ({ kind: "mcp" as const, id }));
+      .map(
+        (id) =>
+          session.tools.find((tool) => tool.kind === "mcp" && tool.id === id) ?? {
+            kind: "mcp" as const,
+            id,
+            optional: true,
+          },
+      );
   }
   const additions = tools.filter(
     (tool) =>
