@@ -372,8 +372,6 @@ existing proxy; open the returned session ID in a view-only conversation with no
 Send or Steer. Continuing an imported archive is unsupported in v1; new work
 needs a separate new session, not silent history injection.
 
-The coding-agent walkthrough lives in
-[the client Skill's migration reference](../.agents/skills/opengeni-client/references/session-history-import.md).
 The public walkthrough is in
 [`docs-site/guides/integrate-your-product.mdx`](../docs-site/guides/integrate-your-product.mdx#migrating-from-embedded-opengeni).
 
