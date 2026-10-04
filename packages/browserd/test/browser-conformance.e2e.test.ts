@@ -8,7 +8,10 @@ import type {
   BrowserObservation,
   InteractionSemanticNodeValue,
 } from "@opengeni/contracts";
-import { InteractionDefiniteDriverError } from "@opengeni/interaction";
+import {
+  InteractionDefiniteDriverError,
+  InteractionOutcomeUnknownDriverError,
+} from "@opengeni/interaction";
 import {
   AgentBrowserDriver,
   AgentBrowserJsonRunner,
@@ -185,10 +188,16 @@ e2e(
         "locator_not_found",
       );
       if (!lightpandaBinary) {
-        await expectDefiniteError(
-          driver.dispatch(command(page, clickRole("button", "Covered target"))),
-          "invalid_action",
-        );
+        // Preparing the action point scrolls before hit-testing. That can run
+        // page handlers even when the covering layer prevents pointer input.
+        const failure = await driver
+          .dispatch(command(page, clickRole("button", "Covered target")))
+          .catch((error: unknown) => error);
+        expect(failure).toBeInstanceOf(InteractionOutcomeUnknownDriverError);
+        expect(failure).toMatchObject({ code: "outcome_unknown", retryable: false });
+        expect((failure as Error).message).toContain("invalid_action");
+        // Inspect after the potentially effectful preparation; do not replay.
+        page = await driver.observe(page.target.id);
       }
 
       if (!lightpandaBinary) {
