@@ -67,6 +67,14 @@ diff --git a/src/connection.js b/src/connection.js
      closedTime = performance.now()
      hadError && options.shared.retries++
      delay = (typeof backoff === 'function' ? backoff(options.shared.retries) : backoff) * 1000
+@@ -561,4 +586,6 @@
+       if (needsTypes) {
+         initial.reserve && (initial = null)
+-        return fetchArrayTypes()
++        // Startup catalog discovery is internal, not an application promise.
++        // Reject its waiting query without an unhandled async rejection.
++        return fetchArrayTypes().catch(error)
+       }
 diff --git a/cjs/src/connection.js b/cjs/src/connection.js
 --- a/cjs/src/connection.js
 +++ b/cjs/src/connection.js
@@ -136,6 +144,14 @@ diff --git a/cjs/src/connection.js b/cjs/src/connection.js
      closedTime = performance.now()
      hadError && options.shared.retries++
      delay = (typeof backoff === 'function' ? backoff(options.shared.retries) : backoff) * 1000
+@@ -561,4 +586,6 @@
+       if (needsTypes) {
+         initial.reserve && (initial = null)
+-        return fetchArrayTypes()
++        // Startup catalog discovery is internal, not an application promise.
++        // Reject its waiting query without an unhandled async rejection.
++        return fetchArrayTypes().catch(error)
+       }
 diff --git a/src/index.js b/src/index.js
 --- a/src/index.js
 +++ b/src/index.js
