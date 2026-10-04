@@ -17,6 +17,7 @@ import { isEditableArtifactKind } from "@/lib/artifact-catalog";
 import type { NativeConnectRequest } from "@/components/capabilities/native-connect-setup";
 import { FailureRecoveryBoundary } from "@/components/session/failure-recovery-boundary";
 import { createFailedSessionRetry, type FailedSessionRetryInput } from "@/lib/failed-session-retry";
+import { useSessionStartupTimeline } from "@/lib/session-startup-timeline";
 import { failedSessionCopy } from "@/lib/failed-session-copy";
 import { useStreamHealthTelemetry } from "@/lib/stream-health";
 import { markIntegrationConnectRedirect } from "@/lib/integration-connect-redirect";
@@ -2671,6 +2672,13 @@ function SessionChatPane(props: {
     props.queue.effectiveControl,
     composer.effectiveControl,
   );
+  const timelineWithStartup = useSessionStartupTimeline(timelineWithOptimisticSends, {
+    session: { ...props.session, effectiveControl: admissionControl },
+    events: props.events,
+    optimisticMessages,
+    hasNewer: props.hasNewer,
+    queue: props.queue.snapshot,
+  });
   const timelineEmptyStateCopy = sessionTimelineEmptyStateCopy(
     props.session.status,
     (props.queue.effectiveControl ?? props.session.effectiveControl).state === "paused",
@@ -3019,7 +3027,7 @@ function SessionChatPane(props: {
                 turnSummary={{ rolling: true }}
                 key={props.session.id}
                 className="h-full"
-                items={timelineWithOptimisticSends}
+                items={timelineWithStartup}
                 searchTarget={activeSearchTarget}
                 events={props.events}
                 status={props.session.status}
@@ -3133,9 +3141,9 @@ function SessionChatPane(props: {
 
       {modelRecovery ? <ModelRecoveryNotice recovery={modelRecovery} /> : null}
 
-      {((props.session.inputWait && props.session.status === "idle") ||
-        (props.session.status === "queued" && !props.session.activeTurnId)) &&
-      props.session.effectiveControl.state === "active" ? (
+      {props.session.inputWait &&
+      props.session.status === "idle" &&
+      admissionControl.state === "active" ? (
         <Suspense fallback={null}>
           <LazySessionWaitStatus session={props.session} />
         </Suspense>

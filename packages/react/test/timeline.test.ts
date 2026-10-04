@@ -674,8 +674,8 @@ describe("buildTimeline", () => {
     ]);
     const turns = turnGroups(groups);
     expect(turns).toHaveLength(2);
-    expect(flattenActivityIds(turns[0])).toEqual(["evt-6-queue", "evt-9", "evt-41"]);
-    expect(flattenActivityIds(turns[1])).toEqual(["evt-61-queue", "evt-62"]);
+    expect(flattenActivityIds(turns[0])).toEqual(["turn-a-queue", "evt-9", "evt-41"]);
+    expect(flattenActivityIds(turns[1])).toEqual(["turn-b-queue", "evt-62"]);
     expect(groups[2]?.kind === "item" ? groups[2].item : null).toMatchObject({
       kind: "agent-message",
       text: "Turn A final answer.",
@@ -952,7 +952,7 @@ describe("buildTimeline", () => {
     ).toEqual(["item:user-message", "turn", "item:agent-message"]);
     const [turn] = turnGroups(groups);
     expect(turn?.outcome).toBe("complete");
-    expect(flattenActivityIds(turn)).toEqual(["evt-6-queue", "evt-9", "evt-41"]);
+    expect(flattenActivityIds(turn)).toEqual(["turn-a-queue", "evt-9", "evt-41"]);
   });
 
   for (const operation of ["edit", "delete"] as const) {
