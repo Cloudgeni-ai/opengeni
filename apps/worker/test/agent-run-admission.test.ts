@@ -278,7 +278,7 @@ describe("worker agent-run admission funding", () => {
         ),
       ).toEqual({
         pausedReason: "allowance",
-        message: "Opengeni usage allowance exhausted",
+        message: "Opengeni usage allowance exhausted. Resume when your allowance is available.",
       });
       expect(allowance).toHaveBeenCalledWith(expect.anything(), {
         accountId: ACCOUNT,
@@ -310,9 +310,9 @@ describe("worker agent-run admission funding", () => {
       sessionId,
       metadata: metadataWithTurnExecutionPolicyV1({}, sourcePolicy),
     } as Awaited<ReturnType<typeof opengeniDb.getSessionTurn>>);
-    const catalog = spyOn(opengeniCore, "resolveCatalogSettings").mockResolvedValue({
+    const catalog = spyOn(opengeniCore, "resolveWorkspaceCatalogSettings").mockResolvedValue({
       settings,
-    } as Awaited<ReturnType<typeof opengeniCore.resolveCatalogSettings>>);
+    } as Awaited<ReturnType<typeof opengeniCore.resolveWorkspaceCatalogSettings>>);
     const goal = spyOn(opengeniDb, "getSessionGoal").mockResolvedValue({
       status: "active",
     } as Awaited<ReturnType<typeof opengeniDb.getSessionGoal>>);
@@ -340,7 +340,8 @@ describe("worker agent-run admission funding", () => {
             initiatingHumanSubjectId: "user:original-goal-human",
           }),
         ).toEqual({
-          budgetBlocked: "Opengeni usage allowance exhausted",
+          budgetBlocked:
+            "Opengeni usage allowance exhausted. Resume when your allowance is available.",
           budgetPausedReason: "allowance",
         });
         expect(source).toHaveBeenCalledWith(lockedDb, WORKSPACE, causalTurnId);

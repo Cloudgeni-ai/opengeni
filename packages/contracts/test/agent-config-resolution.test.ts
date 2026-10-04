@@ -284,7 +284,7 @@ describe("write-through", () => {
       const kept = agentConfigFirstPartyMcpTools(config, FIRST_PARTY_MCP_TOOL_NAMES);
       for (const tool of FIRST_PARTY_MCP_TOOL_NAMES) {
         const owner = FIRST_PARTY_MCP_TOOL_CAPABILITIES[tool];
-        const expected = owner === "runtime" || owner === id;
+        const expected = owner === "runtime" || owner === "sandbox" || owner === id;
         expect({ tool, kept: kept.includes(tool) }).toEqual({ tool, kept: expected });
       }
     }
@@ -559,6 +559,51 @@ describe("effective tools projection", () => {
       "command_read",
       "command_wait",
     ]);
+  });
+  test("background-command tools follow attached compute for every session", () => {
+    const none = resolve({ request: { capabilities: "none" } }).config!;
+    const all = resolve({ request: { capabilities: "all" } }).config!;
+    const selection = ["wait_for_input", "command_read", "command_wait", "goal_set"] as const;
+    for (const config of [none, all, null]) {
+      const detached = resolveAgentToolFamilies(config, { sandboxAttached: false });
+      const attached = resolveAgentToolFamilies(config, { sandboxAttached: true });
+      expect(detached.firstPartyTools(selection)).not.toContain("command_read");
+      expect(detached.firstPartyTools(selection)).not.toContain("command_wait");
+      expect(detached.firstPartyTools(selection)).toContain("wait_for_input");
+      expect(detached.allowsFirstPartyTool("command_wait")).toBe(false);
+      expect(detached.allowsFirstPartyTool("wait_for_input")).toBe(true);
+      expect(attached.firstPartyTools(selection)).toContain("command_read");
+      expect(attached.firstPartyTools(selection)).toContain("command_wait");
+      expect(attached.allowsFirstPartyTool("command_read")).toBe(true);
+    }
+    // A "none" agent still gets them as mechanics once compute is attached.
+    expect(resolveAgentToolFamilies(none, { sandboxAttached: true }).firstPartyTools([])).toEqual([
+      "wait_for_input",
+      "command_read",
+      "command_wait",
+    ]);
+    expect(resolveAgentToolFamilies(none, { sandboxAttached: false }).firstPartyTools([])).toEqual([
+      "wait_for_input",
+    ]);
+    const projection = projectAgentEffectiveTools({
+      config: none,
+      firstPartyMcpTools: ["wait_for_input", "command_read", "command_wait"],
+      mcpServerIds: ["opengeni"],
+      productServerIds: new Set(),
+      environment: { sandboxAttached: false },
+    });
+    expect(projection.tools.map((tool) => tool.name)).toEqual(["opengeni__wait_for_input"]);
+    const withSandbox = projectAgentEffectiveTools({
+      config: none,
+      firstPartyMcpTools: ["wait_for_input", "command_read"],
+      mcpServerIds: ["opengeni"],
+      productServerIds: new Set(),
+      environment: { sandboxAttached: true },
+    });
+    expect(withSandbox.tools.find((tool) => tool.name === "opengeni__command_read")).toMatchObject({
+      capability: "sandbox",
+      source: "first_party",
+    });
   });
   test("lists capability tools and classifies servers", () => {
     const config = resolve({ request: { capabilities: { from: "none", media: true } } }).config!;

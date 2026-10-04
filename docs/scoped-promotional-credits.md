@@ -46,7 +46,7 @@ if available, or pauses for credits.
 
 ## Activate
 
-Deploy migration 0611 and all API/worker readers and debit writers **before**
+Deploy migration 0613 and all API/worker readers and debit writers **before**
 enabling scoped credits. Provision database roles as usual. Apply the runtime
 policy using the command above. Keep the signup grant's existing enablement
 switches. Do not roll back readers/writers while scoped balances remain.

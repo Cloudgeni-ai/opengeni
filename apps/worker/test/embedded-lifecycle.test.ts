@@ -484,7 +484,6 @@ describe("embedded worker lifecycle contract", () => {
           rolbypassrls: false,
         },
       ],
-      [{ activated: false }],
       [{ present: true }],
       [{ present: true }],
       [],
@@ -785,7 +784,7 @@ describe("embedded worker lifecycle contract", () => {
         "session_tenancy_additional_organization_activation_evidence",
       ],
     })();
-    expect((catalogResults[10] as Array<{ name: string }>).map((routine) => routine.name)).toEqual([
+    expect((catalogResults[9] as Array<{ name: string }>).map((routine) => routine.name)).toEqual([
       ...RUNTIME_TARGET_SCHEMA_CAPABILITY_ROUTINES,
       ...RUNTIME_TARGET_SCHEMA_FORBIDDEN_ROUTINES,
     ]);
@@ -796,12 +795,10 @@ describe("embedded worker lifecycle contract", () => {
     expect(directExecutions).toBe(1);
   });
 
-  test("embedded readiness enforces durable session-tenancy activation for both switch states", async () => {
-    const embeddedDb = (
-      activated: boolean,
-      variableSetCutoverPresent = true,
-      claudePoolActivationPresent = true,
-    ) => {
+  test("embedded readiness enforces runtime receipts without a session-tenancy activation interlock", async () => {
+    // Migration 0611 retired the activation startup interlock: the embedded
+    // probe no longer queries session-tenancy activation at all.
+    const embeddedDb = (variableSetCutoverPresent = true, claudePoolActivationPresent = true) => {
       const results: unknown[] = [
         [
           {
@@ -820,7 +817,6 @@ describe("embedded worker lifecycle contract", () => {
             rolbypassrls: false,
           },
         ],
-        [{ activated }],
         [{ present: variableSetCutoverPresent }],
         [{ present: claudePoolActivationPresent }],
       ];
@@ -841,20 +837,11 @@ describe("embedded worker lifecycle contract", () => {
     };
     const options = { rlsStrategy: "scoped" as const, targetSchema: "embedded" };
 
-    await expect(dbReadyCheck(embeddedDb(true), options)()).rejects.toThrow(
-      /session-tenancy product activation is durable/,
-    );
-    await expect(
-      dbReadyCheck(embeddedDb(true), {
-        ...options,
-        organizationTenancyCanonicalActivationEnabled: true,
-      })(),
-    ).resolves.toBeUndefined();
-    await expect(dbReadyCheck(embeddedDb(false), options)()).resolves.toBeUndefined();
-    await expect(dbReadyCheck(embeddedDb(false, false), options)()).rejects.toThrow(
+    await expect(dbReadyCheck(embeddedDb(), options)()).resolves.toBeUndefined();
+    await expect(dbReadyCheck(embeddedDb(false), options)()).rejects.toThrow(
       /missing the 0352 session Variable Set attachment runtime receipt/,
     );
-    await expect(dbReadyCheck(embeddedDb(false, true, false), options)()).rejects.toThrow(
+    await expect(dbReadyCheck(embeddedDb(true, false), options)()).rejects.toThrow(
       /missing the Claude subscription account activation receipt/,
     );
   });

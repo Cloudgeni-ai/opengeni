@@ -1742,7 +1742,6 @@ export type RuntimeDatabasePostureOptions = {
   targetSchemaForbiddenRoutines?: readonly string[];
   /** Frozen binary contract; current callers require both additive Insights capabilities. */
   modelFactCapabilityRoutines?: readonly string[];
-  organizationTenancyCanonicalActivationEnabled?: boolean;
 };
 
 export type RuntimeDatabaseIdentity = {
@@ -1828,7 +1827,6 @@ export type RuntimeDatabasePosture = {
   privateTables: RuntimePrivateTablePosture[];
   targetRoutines: RuntimeTargetRoutinePosture[];
   privateRoutines: RuntimeRoutinePosture[];
-  sessionTenancyProductActivationPresent: boolean;
   sessionVariableSetAttachmentsCutoverPresent: boolean;
   claudeSubscriptionPoolActivationPresent: boolean;
 };
@@ -1954,14 +1952,6 @@ export async function inspectRuntimeDatabasePosture(
         bypassRls: identity.rolbypassrls,
       };
 
-      // The forward-only activation receipt outlives topology. Embedded/scoped
-      // deployments must enforce the same environment interlock as standalone
-      // FORCE-RLS deployments, so inspect the value-free predicate before the
-      // scoped catalog fast-path.
-      const activationRows = resultRows<{ activated: boolean }>(
-        await tx.execute(sql`select session_tenancy_any_product_activation() as activated`),
-      );
-      const sessionTenancyProductActivationPresent = activationRows[0]?.activated === true;
       const variableSetCutoverRows = resultRows<{ present: boolean }>(
         await tx.execute(sql`
           select to_regprocedure(
@@ -1992,7 +1982,6 @@ export async function inspectRuntimeDatabasePosture(
           privateTables: [],
           targetRoutines: [],
           privateRoutines: [],
-          sessionTenancyProductActivationPresent,
           sessionVariableSetAttachmentsCutoverPresent,
           claudeSubscriptionPoolActivationPresent,
         };
@@ -2306,7 +2295,6 @@ export async function inspectRuntimeDatabasePosture(
         privateTables,
         targetRoutines,
         privateRoutines,
-        sessionTenancyProductActivationPresent,
         sessionVariableSetAttachmentsCutoverPresent,
         claudeSubscriptionPoolActivationPresent,
       };
@@ -2341,15 +2329,6 @@ export function evaluateRuntimeDatabasePosture(
 
   if (!posture.sessionVariableSetAttachmentsCutoverPresent) {
     violations.push("database is missing the 0352 session Variable Set attachment runtime receipt");
-  }
-
-  if (
-    posture.sessionTenancyProductActivationPresent &&
-    options.organizationTenancyCanonicalActivationEnabled !== true
-  ) {
-    violations.push(
-      "session-tenancy product activation is durable but OPENGENI_ORGANIZATION_TENANCY_CANONICAL_ACTIVATION_ENABLED is not true",
-    );
   }
 
   if (!identity.currentUser || !identity.sessionUser) {

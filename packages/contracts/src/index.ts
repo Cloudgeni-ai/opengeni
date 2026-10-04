@@ -6726,6 +6726,16 @@ export const SessionGoalContinuation = z.object({
 });
 export type SessionGoalContinuation = z.infer<typeof SessionGoalContinuation>;
 
+/** New admission pauses are specific; the wire field remains open for older peers. */
+export type GoalAdmissionPausedReason =
+  | "model_unavailable"
+  | "model_policy"
+  | "credits"
+  | "budget"
+  | "usage_limit"
+  | "usage_policy"
+  | "allowance";
+
 export const SessionGoal = z.object({
   id: z.string().uuid(),
   accountId: z.string().uuid(),
@@ -10447,7 +10457,8 @@ export type KnowledgeSourceSyncRunSummary = z.infer<typeof KnowledgeSourceSyncRu
  * means every occurrence is refused until the task or a resource it names
  * changes. Known reasons: `scheduled_authority_unavailable`,
  * `machine_target_unavailable`, `machine_enrollment_inactive`,
- * `variable_set_unavailable`, `rig_version_unavailable` (terminal) and
+ * `variable_set_unavailable`, `rig_version_unavailable`, `scheduled_model_unavailable`
+ * (terminal) and
  * `insufficient_credits`, `allowance_exhausted`, `monthly_model_cost_limit`, `monthly_agent_run_limit`
  * (transient). Readers must tolerate new reasons.
  */

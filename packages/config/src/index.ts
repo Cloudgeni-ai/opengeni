@@ -392,26 +392,6 @@ const SettingsSchema = z.object({
     .regex(/^(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)$/u)
     .optional(),
   productAccessMode: ProductAccessMode.default("local"),
-  // --- canonical organization-tenancy authority activation, default OFF ---
-  // The named PRE-ACTIVATION opt-out for the organization-tenancy program. FALSE (the
-  // default, and the value an operator leaves in place to decline or defer) means
-  // this deployment stays on the reversible legacy workspace-owned lane: no phase-F
-  // subsystem may switch its access decision to organization/membership authority
-  // ids. TRUE is an operator's explicit statement that the activation preconditions
-  // in docs/organization-tenancy.md have been proven for this deployment and that
-  // the one-way boundary is accepted.
-  //
-  // This is NOT a kill switch and NOT a rollback: once an activation migration has
-  // committed, setting it back to false does not restore the legacy authority - only
-  // forward recovery is available. It also grants and revokes nothing by itself;
-  // every individual authorization decision keeps its own fences.
-  //
-  // No runtime path reads it yet: canonical activation (phase F) is unshipped, so
-  // the flag exists to reserve the name, pin the safe default, and give every future
-  // activation slice one gate to consult. EnvBoolean (NOT z.coerce.boolean(), which
-  // coerces "false" -> true and would activate the moment an operator wrote the
-  // variable out to disable it).
-  organizationTenancyCanonicalActivationEnabled: EnvBoolean.default(false),
   billingMode: BillingMode.default("disabled"),
   // Explicit launch gate for the one-time $10 verified self-service signup grant.
   // A migration or deployment alone must not start issuing live credits.
@@ -3483,9 +3463,6 @@ export function getSettings(source: NodeJS.ProcessEnv = process.env): Settings {
     agentStableVersion: optional("OPENGENI_AGENT_STABLE_VERSION"),
     agentBetaVersion: optional("OPENGENI_AGENT_BETA_VERSION"),
     productAccessMode: optional("OPENGENI_PRODUCT_ACCESS_MODE"),
-    organizationTenancyCanonicalActivationEnabled: optional(
-      "OPENGENI_ORGANIZATION_TENANCY_CANONICAL_ACTIVATION_ENABLED",
-    ),
     billingMode: optional("OPENGENI_BILLING_MODE"),
     verifiedSignupTrialCreditsEnabled: optional("OPENGENI_VERIFIED_SIGNUP_TRIAL_CREDITS_ENABLED"),
     creditPromotionPolicy: optional("OPENGENI_CREDIT_PROMOTION_POLICY_JSON"),
@@ -3945,8 +3922,26 @@ export function getSettings(source: NodeJS.ProcessEnv = process.env): Settings {
       }
     }
   }
+  warnRetiredOrganizationTenancyActivationSwitch(source);
   validateSettings(settings, source);
   return settings;
+}
+
+let retiredOrganizationTenancyActivationSwitchWarned = false;
+
+/**
+ * Session-tenancy activation is universal since migration 0611, so the former
+ * deployment switch is accepted and ignored. Deployments that still set it keep
+ * booting; the one-time warning tells the operator to delete it.
+ */
+function warnRetiredOrganizationTenancyActivationSwitch(source: NodeJS.ProcessEnv): void {
+  if (retiredOrganizationTenancyActivationSwitchWarned) return;
+  if (source.OPENGENI_ORGANIZATION_TENANCY_CANONICAL_ACTIVATION_ENABLED === undefined) return;
+  retiredOrganizationTenancyActivationSwitchWarned = true;
+  console.warn(
+    "[config] OPENGENI_ORGANIZATION_TENANCY_CANONICAL_ACTIVATION_ENABLED is retired and ignored: " +
+      "every organization is session-tenancy activated (migration 0611). Remove it from the deployment.",
+  );
 }
 
 const LOCAL_FIRST_PARTY_DELEGATION_SECRET = "opengeni-local-first-party-delegation-secret-v1";
@@ -6073,6 +6068,18 @@ export function resolveModelProviderForTurn(
 }
 
 /**
+ * The requested model cannot start new work: it is retired from new selection
+ * or absent from the configured catalog. Callers that own a durable refusal
+ * (for example a scheduled occurrence) record it instead of failing blindly.
+ */
+export class TurnExecutionPolicyModelUnavailableError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "TurnExecutionPolicyModelUnavailableError";
+  }
+}
+
+/**
  * Build a trusted, secret-safe execution policy from the normalized catalog.
  * The Codex overlay here contains static product/provider identity only; it
  * neither proves readiness nor chooses, decrypts, leases, or exposes an account.
@@ -6084,11 +6091,15 @@ export function resolveTurnExecutionPolicyV1(
   const catalogSettings = settingsForTurnExecutionPolicy(settings, input.modelId);
   const productModelId = canonicalizeConfiguredModelId(catalogSettings, input.modelId);
   if (!isModelAvailableForNewSelection(catalogSettings, productModelId)) {
-    throw new Error("Turn execution policy model is retired from new selection");
+    throw new TurnExecutionPolicyModelUnavailableError(
+      "Turn execution policy model is retired from new selection",
+    );
   }
   const resolved = resolveModelProvider(catalogSettings, productModelId);
   if (!resolved) {
-    throw new Error("Turn execution policy model is not present in the configured catalog");
+    throw new TurnExecutionPolicyModelUnavailableError(
+      "Turn execution policy model is not present in the configured catalog",
+    );
   }
   if (
     input.requestedModelId !== null &&

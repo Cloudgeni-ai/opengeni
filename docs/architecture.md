@@ -296,6 +296,8 @@ Organization/workspace membership, API keys, delegated grants, private-session
 ownership and personal-resource grants remain distinct. Organization keys with
 `workspace:admin` may change private-session product settings; DB fences recheck
 live keys, including replay. This grants no private-content access.
+Only-me chats are on by default for every organization (migration 0611); no
+per-organization activation receipt or deployment switch gates them.
 Sharing advances viewer-access epoch while preserving accepted execution and
 connection selections. Privatization/revocation advance the execution-epoch floor;
 privatization requires quiescence and clears staged personal selections.
