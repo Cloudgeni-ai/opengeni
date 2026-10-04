@@ -18,6 +18,10 @@
   "module": "./src/index.ts",
   "types": "./src/index.ts",
   "exports": {
+    "./modal-native-proof-v2": {
+      "types": "./src/modal-native-proof-v2.ts",
+      "default": "./src/modal-native-proof-v2.ts"
+    },
     "./allowance-refusal": {
       "types": "./src/allowance-refusal.ts",
       "default": "./src/allowance-refusal.ts"

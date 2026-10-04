@@ -108,6 +108,34 @@ failures; partial EOF and output; worker restart; concurrent router users;
 deadline rotation; and owner cancellation. Every test must count physical
 Starts/writes and verify durable session progress, not only a nonfailed status.
 
+## October 4 private host-transport groundwork
+
+`packages/core/src/application/modal-native-worker-host-transport.ts` is an
+unused internal transport helper, not an active recovery path or custody issuer.
+Its `ogmnp2_` envelope binds the exact body SHA-256, full original V2 scope,
+configuration/grant references, action and request ID to a separately derived
+HMAC-SHA256 subkey and message domain. Capture/reconciliation/settlement intents
+also bind the exact claim, nonce, record/claim revisions, capture and acquisition.
+Only an explicitly configured deployment `delegationSecret` selects its root;
+ordinary delegated tokens, access-key substitution and the fixed local/test
+fallback are excluded. No token, key or derived key is persisted or returned.
+
+The 60-second envelope lifetime bounds transport only, not original custody.
+Verification authenticates a previously signed host request, not its named
+human, live origin, grant, configuration, native page or physical settlement.
+A future narrow host authorizer must independently recheck these source joins,
+current expiry and action-specific CAS. The helper is not a public core entry
+and has no production consumer, database writer or provider caller. Root disposal
+is only in-memory key disposal; waiter rejection, claim expiry and transport
+timeout cannot release an acquisition or a physical writer. Actual underlying
+namespace/access/read/poll promises must remain counted until all settle.
+
+Raw request bytes are bounded, copied through native typed-array getters and
+hashed without caller getters or shared-memory backing. Signing inputs are
+strict, own-data JSON; malformed values return fixed errors. These checks do
+not replace authenticated provider acquisition or lost-COMMIT-ACK reconciliation.
+The earlier audit and all remaining continuity requirements above are unchanged.
+
 ## Evidence and ownership
 
 Before changes, 137 installed-SDK/native fault tests passed across eight files,
