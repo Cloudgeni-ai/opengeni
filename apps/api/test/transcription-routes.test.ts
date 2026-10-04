@@ -4,6 +4,7 @@ import type { TranscriptionService } from "@opengeni/core";
 import * as dbModule from "@opengeni/db";
 import { testSettings } from "@opengeni/testing";
 import { createApp } from "../src/app";
+import { createTranscriptionService } from "../src/transcription/service";
 
 const SECRET = "transcription-route-secret";
 const WORKSPACE = "00000000-0000-4000-8000-000000000001";
@@ -124,5 +125,63 @@ describe("transcription routes", () => {
       text: "transcribed",
       languages: ["en"],
     });
+  });
+  test("returns the transcript even when settlement fails, billing only server facts", async () => {
+    spyOn(dbModule, "getWorkspace").mockResolvedValue({ settings: {} } as never);
+    const settled: unknown[] = [];
+    const logged: string[] = [];
+    const transcription = createTranscriptionService({
+      settings: testSettings({
+        billingMode: "stripe",
+        voiceInputProviderOrder: "azure-mai",
+        voiceInputMaiEndpoint: "https://speech.example.test",
+        voiceInputMaiApiKey: "test-key",
+        voiceInputMaiPricingJson: JSON.stringify({ microsPerMinute: 6000 }),
+      }),
+      db: {} as never,
+      normalizeAudio: async () => ({ bytes: new Uint8Array([1]), durationSeconds: 4 }),
+      settlementRetryDelaysMilliseconds: [],
+      log: (message) => logged.push(message),
+      fetch: async () => Response.json({ combinedPhrases: [{ text: "dictated paragraph" }] }),
+      billing: {
+        admit: async () => undefined,
+        settle: async (input) => {
+          settled.push(input);
+          throw new Error("could not serialize access");
+        },
+      },
+    });
+    const form = new FormData();
+    form.append("audio", new Blob([new Uint8Array([1, 2])], { type: "audio/webm" }), "a.webm");
+    form.append("mimeType", "audio/webm");
+    form.append("durationSeconds", "0.01");
+    const response = await app(transcription).request(
+      `/v1/workspaces/${WORKSPACE}/transcriptions`,
+      {
+        method: "POST",
+        headers: {
+          authorization: await bearer(),
+          "x-opengeni-correlation-id": "client-chosen-id",
+        },
+        body: form,
+      },
+    );
+    const body = await response.json();
+    expect({ status: response.status, body }).toEqual({
+      status: 200,
+      body: { text: "dictated paragraph", languages: [] },
+    });
+    expect(settled).toHaveLength(1);
+    expect(settled[0]).toMatchObject({
+      usage: null,
+      billing: {
+        trustedDurationSeconds: 4,
+        attribution: { kind: "human", initiatingHumanSubjectId: "tester" },
+      },
+    });
+    const sourceId = (settled[0] as { billing: { sourceId: string } }).billing.sourceId;
+    expect(sourceId).not.toContain("client-chosen-id");
+    expect(sourceId).toMatch(/^[0-9a-f-]{36}$/);
+    expect(logged).toHaveLength(1);
   });
 });

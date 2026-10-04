@@ -58,10 +58,12 @@ export function VoiceInputPreferences({
   const capability = context.clientConfig.voiceInput;
   const [saving, setSaving] = useState(false);
   const enabled = resolveWorkspaceVoiceInputEnabled(workspace?.settings) ?? true;
-  const available = capability?.available === true;
-
   const preferences = workspace?.settings.voiceInput as WorkspaceVoiceInputSettings | undefined;
   const providers = capability?.providers ?? [];
+  // Settings stay editable while any provider is ready: `capability.available`
+  // honours the saved preference, so gating on it would lock an admin out of
+  // changing a preference whose provider stopped being available.
+  const available = capability?.available === true || providers.length > 0;
   const selected = preferences?.preferredProvider ?? null;
   const fallbackEnabled = preferences?.fallbackEnabled ?? true;
 
@@ -132,7 +134,10 @@ export function VoiceInputPreferences({
         />
       }
     >
-      {enabled && available && providers.length > 1 ? (
+      {enabled &&
+      available &&
+      // Also when the saved provider is gone, so it can be changed back.
+      (providers.length > 1 || (selected !== null && !providers.includes(selected))) ? (
         <>
           <SettingRow
             label="Transcription provider"

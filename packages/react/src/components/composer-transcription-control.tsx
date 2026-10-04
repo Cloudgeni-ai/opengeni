@@ -52,6 +52,7 @@ export type ComposerTranscriptionMessages = {
   errorUnavailable: string;
   errorInsufficientCredits: string;
   errorAllowanceExhausted: string;
+  errorPolicyBlocked: string;
   errorTooLarge: string;
   errorInvalidAudio: string;
   errorStorageUnavailable: string;
@@ -83,6 +84,7 @@ const defaultMessages: ComposerTranscriptionMessages = {
   errorInsufficientCredits:
     "Voice input needs Opengeni credits. Add credits, then retry your saved recording.",
   errorAllowanceExhausted: "Your usage limit was reached. Your recording is saved for later.",
+  errorPolicyBlocked: "Voice input isn't allowed for this account or workspace.",
   errorTooLarge: "Recording is too large. Try a shorter message.",
   errorInvalidAudio: "The recording could not be read. Try again.",
   errorStorageUnavailable: "Voice input stopped because audio could not be saved safely.",
@@ -528,6 +530,8 @@ function transcriptionErrorMessage(code: string, messages: ComposerTranscription
     case "allowance_exhausted":
     case "monthly_model_cost_limit":
       return messages.errorAllowanceExhausted;
+    case "policy_blocked":
+      return messages.errorPolicyBlocked;
     case "permission_denied":
       return messages.errorPermissionDenied;
     case "not_supported":

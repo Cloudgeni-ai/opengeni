@@ -12,9 +12,12 @@ import {
   checkWorkspaceAllowance,
   creditDebitAttributionMetadata,
   getSpendableCreditBalance,
+  listUnsettledVoiceTranscriptionCharges,
   recordUsageEvent,
   sumUsageQuantity,
-  withRlsContext,
+  VOICE_TRANSCRIPTION_DEBIT_TYPE,
+  VOICE_TRANSCRIPTION_SOURCE_TYPE,
+  voiceTranscriptionSettlementKeys,
   type CreditDebitAttribution,
   type Database,
 } from "@opengeni/db";
@@ -26,17 +29,23 @@ import {
 } from "../transcription";
 
 /** Credit debit type and usage source for deployment-funded voice input. */
-export const VOICE_INPUT_DEBIT_TYPE = "voice_transcription_debit";
-export const VOICE_INPUT_SOURCE_TYPE = "voice_transcription";
+export const VOICE_INPUT_DEBIT_TYPE = VOICE_TRANSCRIPTION_DEBIT_TYPE;
+export const VOICE_INPUT_SOURCE_TYPE = VOICE_TRANSCRIPTION_SOURCE_TYPE;
 
 /** How the billed quantity was measured; recorded on the ledger entry. */
-export type VoiceInputBillingBasis = "provider_tokens" | "provider_duration" | "server_duration";
+export type VoiceInputBillingBasis =
+  | "provider_tokens"
+  | "provider_duration"
+  | "server_duration"
+  | "reconciled_receipt";
 
 /**
- * Pick the billed measurement. Provider-reported usage always wins. Without
- * it, only a duration the server measured from bytes it produced is trusted;
- * otherwise settlement refuses to invent a charge. A client-reported duration is
- * never a billing input.
+ * Pick the billed measurement. Provider usage wins when this deployment can
+ * price it (token usage with token rates, or a reported duration). Otherwise
+ * the duration the server measured from WAV bytes it produced bills. Every
+ * deployment-funded call carries that server duration, so an unpriced usage
+ * shape never leaves a call unbillable. A client-reported duration is never a
+ * billing input.
  */
 export function voiceInputBillableUsage(input: {
   pricing: VoiceInputPricing;
@@ -86,15 +95,42 @@ function startOfUtcMonth(): Date {
 export function createVoiceInputBilling(deps: {
   db: Database;
   settings: Settings;
+  /** Reconciliation is best-effort at admission; failures are reported here. */
+  onReconcileError?: (error: unknown, scope: { accountId: string; workspaceId: string }) => void;
+  /** Minimum spacing of admission-time reconciliation per workspace (default 5 min). */
+  reconcileIntervalMilliseconds?: number;
 }): TranscriptionBilling {
+  const reconcileInterval = deps.reconcileIntervalMilliseconds ?? 5 * 60_000;
+  const lastReconciled = new Map<string, number>();
+  const reconcileDue = (key: string) => {
+    const now = Date.now();
+    const last = lastReconciled.get(key);
+    if (last !== undefined && now - last < reconcileInterval) return false;
+    if (lastReconciled.size >= 10_000) lastReconciled.clear();
+    lastReconciled.set(key, now);
+    return true;
+  };
   return {
     async admit({ accountId, workspaceId, attribution }) {
       if (!voiceInputCreditBillingActive(deps.settings)) return;
       if (attribution.kind === "unknown") {
+        // Not a microphone problem: the caller's credential has no payer the
+        // ledger can attribute, so the deployment refuses by policy.
         throw new TranscriptionServiceError({
-          code: "permission_denied",
+          code: "policy_blocked",
+          status: 403,
           message: "Voice input payer could not be verified.",
         });
+      }
+      // Debits whose receipt committed but whose ledger write failed are
+      // applied before the balance read, so unsettled use counts against it.
+      // Throttled per workspace: failed debits are rare, the scan is not free.
+      if (reconcileDue(`${accountId}:${workspaceId}`)) {
+        await reconcileUnsettledVoiceInputCharges(deps.db, { accountId, workspaceId }).catch(
+          (error: unknown) => {
+            deps.onReconcileError?.(error, { accountId, workspaceId });
+          },
+        );
       }
       const balance = await getSpendableCreditBalance(deps.db, accountId);
       if (balance.balanceMicros <= 0) {
@@ -140,7 +176,7 @@ export function createVoiceInputBilling(deps: {
       }
     },
 
-    async settle(input, transaction) {
+    async settle(input) {
       if (!voiceInputCreditBillingActive(deps.settings)) return { creditCostMicros: 0 };
       const { usage, basis } = voiceInputBillableUsage({
         pricing: input.pricing,
@@ -148,7 +184,7 @@ export function createVoiceInputBilling(deps: {
         trustedDurationSeconds: input.billing.trustedDurationSeconds,
       });
       const cost = calculateVoiceInputCost(input.pricing, usage);
-      return await settleVoiceInputUsage(transaction ?? deps.db, {
+      return await settleVoiceInputUsage(deps.db, {
         accountId: input.accountId,
         workspaceId: input.workspaceId,
         providerId: input.providerId,
@@ -164,10 +200,13 @@ export function createVoiceInputBilling(deps: {
 }
 
 /**
- * One transaction: the `model.cost` usage receipt (Insights spend, monthly
- * cost cap) and the post-use credit debit. The usage row is the first-writer
- * authority for the amount, so a retried unit (resumable segment re-sent to
- * the provider) settles exactly once at the originally recorded price.
+ * Two commits, in order: the `model.cost` usage receipt (Insights spend,
+ * monthly cost cap, member-allowance attribution), then the post-use credit
+ * debit. The receipt is the first-writer authority for the amount and the
+ * durable record of the charge: if the debit commit fails, the receipt stays
+ * and {@link reconcileUnsettledVoiceInputCharges} applies the same debit (same
+ * idempotency key) on the workspace's next admission. A retried unit settles
+ * exactly once at the originally recorded price.
  */
 export async function settleVoiceInputUsage(
   db: Database,
@@ -184,51 +223,88 @@ export async function settleVoiceInputUsage(
   },
 ): Promise<{ creditCostMicros: number }> {
   const attribution = input.billing.attribution;
-  return await withRlsContext(
-    db,
-    { accountId: input.accountId, workspaceId: input.workspaceId },
-    async (tx) => {
-      const receipt = await recordUsageEvent(tx, {
-        accountId: input.accountId,
+  const keys = voiceTranscriptionSettlementKeys({
+    workspaceId: input.workspaceId,
+    sourceId: input.billing.sourceId,
+  });
+  const receipt = await recordUsageEvent(db, {
+    accountId: input.accountId,
+    workspaceId: input.workspaceId,
+    eventType: "model.cost",
+    quantity: input.creditCostMicros,
+    unit: "usd_micros",
+    sourceResourceType: VOICE_TRANSCRIPTION_SOURCE_TYPE,
+    sourceResourceId: input.billing.sourceId,
+    idempotencyKey: keys.usageIdempotencyKey,
+    // The API is the writer; the payer is the trusted attribution snapshot.
+    initiator: { kind: "service", subjectId: "api:voice-input" },
+    initiatorContext: { creditDebitAttribution: attribution },
+  });
+  const amount = Number(receipt.quantity);
+  if (amount > 0) {
+    await applyCreditDebitAfterUse(db, {
+      accountId: input.accountId,
+      workspaceId: input.workspaceId,
+      type: VOICE_TRANSCRIPTION_DEBIT_TYPE,
+      amountMicros: amount,
+      sourceType: VOICE_TRANSCRIPTION_SOURCE_TYPE,
+      sourceId: input.billing.sourceId,
+      idempotencyKey: keys.debitIdempotencyKey,
+      metadata: {
+        providerId: input.providerId,
+        model: input.model,
+        basis: input.basis,
+        providerCostMicros: input.providerCostMicros,
+        ...(input.usage.kind === "tokens"
+          ? {
+              inputTokens: input.usage.inputTokens,
+              audioInputTokens: input.usage.audioInputTokens,
+              textInputTokens: input.usage.textInputTokens,
+              outputTokens: input.usage.outputTokens,
+            }
+          : { audioMilliseconds: Math.ceil(input.usage.seconds * 1_000) }),
+        ...(attribution.kind === "unknown" ? {} : creditDebitAttributionMetadata(attribution)),
+      },
+    });
+  }
+  return { creditCostMicros: amount };
+}
+
+/**
+ * Apply the debit for every voice usage receipt in this workspace whose debit
+ * never committed. Idempotent with the inline settlement (same key), bounded
+ * per call, and safe to run concurrently.
+ */
+export async function reconcileUnsettledVoiceInputCharges(
+  db: Database,
+  input: { accountId: string; workspaceId: string; minAgeMilliseconds?: number },
+): Promise<{ reconciled: number }> {
+  const pending = await listUnsettledVoiceTranscriptionCharges(db, {
+    accountId: input.accountId,
+    workspaceId: input.workspaceId,
+    ...(input.minAgeMilliseconds !== undefined
+      ? { minAgeMilliseconds: input.minAgeMilliseconds }
+      : {}),
+  });
+  for (const charge of pending) {
+    await applyCreditDebitAfterUse(db, {
+      accountId: input.accountId,
+      workspaceId: input.workspaceId,
+      type: VOICE_TRANSCRIPTION_DEBIT_TYPE,
+      amountMicros: charge.amountMicros,
+      sourceType: VOICE_TRANSCRIPTION_SOURCE_TYPE,
+      sourceId: charge.sourceId,
+      idempotencyKey: voiceTranscriptionSettlementKeys({
         workspaceId: input.workspaceId,
-        eventType: "model.cost",
-        quantity: input.creditCostMicros,
-        unit: "usd_micros",
-        sourceResourceType: input.billing.sourceType,
-        sourceResourceId: input.billing.sourceId,
-        idempotencyKey: `voice.transcription_cost:${input.billing.sourceId}`,
-        // The API is the writer; the payer is the trusted attribution snapshot.
-        initiator: { kind: "service", subjectId: "api:voice-input" },
-        initiatorContext: { creditDebitAttribution: attribution },
-      });
-      const amount = Number(receipt.quantity);
-      if (amount > 0) {
-        await applyCreditDebitAfterUse(tx, {
-          accountId: input.accountId,
-          workspaceId: input.workspaceId,
-          type: VOICE_INPUT_DEBIT_TYPE,
-          amountMicros: amount,
-          sourceType: input.billing.sourceType,
-          sourceId: input.billing.sourceId,
-          idempotencyKey: `credit:${VOICE_INPUT_DEBIT_TYPE}:${input.billing.idempotencyKey}`,
-          metadata: {
-            providerId: input.providerId,
-            model: input.model,
-            basis: input.basis,
-            providerCostMicros: input.providerCostMicros,
-            ...(input.usage.kind === "tokens"
-              ? {
-                  inputTokens: input.usage.inputTokens,
-                  audioInputTokens: input.usage.audioInputTokens,
-                  textInputTokens: input.usage.textInputTokens,
-                  outputTokens: input.usage.outputTokens,
-                }
-              : { audioMilliseconds: Math.ceil(input.usage.seconds * 1_000) }),
-            ...(attribution.kind === "unknown" ? {} : creditDebitAttributionMetadata(attribution)),
-          },
-        });
-      }
-      return { creditCostMicros: amount };
-    },
-  );
+        sourceId: charge.sourceId,
+      }).debitIdempotencyKey,
+      metadata: {
+        basis: "reconciled_receipt" satisfies VoiceInputBillingBasis,
+        ...(charge.attribution.kind === "unknown"
+          ? {}
+          : creditDebitAttributionMetadata(charge.attribution)),
+      },
+    });
+  }
+  return { reconciled: pending.length };
 }

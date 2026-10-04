@@ -23218,7 +23218,7 @@
         "$.chunkCount": "integer!",
         "$.completedSegmentCount": "integer!",
         "$.createdAt": "string!",
-        "$.errorCode": "ref(TranscriptionRecordingErrorCode)! null",
+        "$.errorCode": "ref(VoiceInputErrorCode)! null",
         "$.expiresAt": "string!",
         "$.id": "string!",
         "$.languages": "array!",
@@ -23248,14 +23248,6 @@
         "$.durationMilliseconds": "integer!",
         "$.sha256": "string!",
         "$.startMilliseconds": "integer!"
-      }
-    },
-    "TranscriptionRecordingErrorCode": {
-      "io": [
-        "output"
-      ],
-      "shape": {
-        "$": "enum=[\"\\\"cancelled\\\"\",\"\\\"invalid_audio\\\"\",\"\\\"network\\\"\",\"\\\"not_supported\\\"\",\"\\\"permission_denied\\\"\",\"\\\"policy_blocked\\\"\",\"\\\"provider\\\"\",\"\\\"timeout\\\"\",\"\\\"too_large\\\"\",\"\\\"unavailable\\\"\",\"\\\"unknown\\\"\"]"
       }
     },
     "TranscriptionRecordingListResponse": {
@@ -23288,7 +23280,7 @@
         "$": "object",
         "$.byteLength": "integer!",
         "$.durationMilliseconds": "integer!",
-        "$.errorCode": "ref(TranscriptionRecordingErrorCode)! null",
+        "$.errorCode": "ref(VoiceInputErrorCode)! null",
         "$.retryable": "boolean!",
         "$.segmentNumber": "integer!",
         "$.startMilliseconds": "integer!",
@@ -24529,6 +24521,14 @@
       "shape": {
         "$": "object",
         "$.alive": "boolean!"
+      }
+    },
+    "VoiceInputErrorCode": {
+      "io": [
+        "output"
+      ],
+      "shape": {
+        "$": "enum=[\"\\\"allowance_exhausted\\\"\",\"\\\"cancelled\\\"\",\"\\\"insufficient_credits\\\"\",\"\\\"invalid_audio\\\"\",\"\\\"monthly_model_cost_limit\\\"\",\"\\\"network\\\"\",\"\\\"not_supported\\\"\",\"\\\"permission_denied\\\"\",\"\\\"policy_blocked\\\"\",\"\\\"provider\\\"\",\"\\\"timeout\\\"\",\"\\\"too_large\\\"\",\"\\\"unavailable\\\"\",\"\\\"unknown\\\"\"]"
       }
     },
     "VoiceInputProviderId": {
@@ -28712,6 +28712,7 @@
       "ApplyPatchOperation": "type",
       "applyPatchOps": "value",
       "applyPatchOpsFromToolItem": "value",
+      "applySessionCapabilityAccess": "value",
       "approvalsFromRequiresAction": "value",
       "ApprovalSurface": "value",
       "ApprovalSurfaceMessages": "type",
@@ -29012,6 +29013,7 @@
       "PierreFileProps": "type",
       "planVoiceRecordingChunkCommit": "value",
       "pointsFor": "value",
+      "prepareSessionCapabilityAccess": "value",
       "prepareVoiceRecordingChunk": "value",
       "presentFailure": "value",
       "projectClientModelRows": "value",
@@ -29059,6 +29061,7 @@
       "SESSION_STATUS_META": "value",
       "sessionAuthRecommendation": "value",
       "SessionCapabilitiesState": "type",
+      "SessionCapabilityAccessPlan": "type",
       "SessionCapabilityFrame": "value",
       "SessionCapabilityFrameProps": "type",
       "SessionChrome": "value",

@@ -17,7 +17,6 @@ import {
   TRANSCRIPTION_PROVIDER_REQUEST_TIMEOUT_MILLISECONDS,
   TranscriptionBillingRefusedError,
   TranscriptionServiceError,
-  VOICE_INPUT_SOURCE_TYPE,
   type ApiRouteDeps,
 } from "@opengeni/core";
 import { retryWhileMissing } from "@opengeni/storage";
@@ -377,6 +376,8 @@ export function registerResumableTranscriptionRoutes(app: Hono, deps: ApiRouteDe
           !(await service.available({
             workspaceId: authority.workspaceId,
             subjectId: authority.subjectId,
+            preferredProvider: authority.voiceInput?.preferredProvider,
+            fallbackEnabled: authority.voiceInput?.fallbackEnabled,
           }))
         ) {
           return c.json({ code: "unavailable" }, 503);
@@ -451,7 +452,8 @@ export function registerResumableTranscriptionRoutes(app: Hono, deps: ApiRouteDe
               segmentNumber,
               attemptId,
               fallbackProviderId: null,
-              errorCode: "unavailable",
+              // The real refusal, so a reloaded recording still explains it.
+              errorCode: error.code,
               retryable: true,
             }).catch(() => null);
             return transcriptionBillingRefusal(c, error);
@@ -484,29 +486,30 @@ export function registerResumableTranscriptionRoutes(app: Hono, deps: ApiRouteDe
           billing: {
             // One settlement per prepared segment of this exact recording,
             // however many provider attempts it takes. The recording id is
-            // client-chosen, so the key also binds its server creation time
-            // and the server-produced segment bytes.
-            idempotencyKey: `voice_input:${authority.workspaceId}:${claim.recording.recording.id}:${Date.parse(claim.recording.recording.createdAt)}:${segmentNumber}:${claim.segment.sha256}`,
-            sourceType: VOICE_INPUT_SOURCE_TYPE,
+            // client-chosen, so the unit id also binds its server creation
+            // time and the server-produced segment bytes.
             sourceId: `${claim.recording.recording.id}:${Date.parse(claim.recording.recording.createdAt)}:${segmentNumber}:${claim.segment.sha256}`,
             attribution: authority.attribution,
             trustedDurationSeconds: wavDurationSeconds(stored.bytes) ?? undefined,
           },
         });
-        const completed = await completeTranscriptionRecordingSegment(
-          deps.db,
-          {
-            workspaceId: authority.workspaceId,
-            subjectId: authority.subjectId,
-            recordingId: uuidParam(c, "recordingId"),
-            segmentNumber,
-            attemptId,
-            text: result.text,
-            languages: result.languages,
-            providerId: claim.segment.providerId ?? result.providerId,
-          },
-          result.settleBilling,
-        );
+        // The transcript commits first and on its own: a billing failure can
+        // never roll back text the user already waited for. Only the attempt
+        // that durably completed the segment settles it (a stale attempt is
+        // refused here and never charges); settlement itself never throws.
+        const completed = await completeTranscriptionRecordingSegment(deps.db, {
+          workspaceId: authority.workspaceId,
+          subjectId: authority.subjectId,
+          recordingId: uuidParam(c, "recordingId"),
+          segmentNumber,
+          attemptId,
+          text: result.text,
+          languages: result.languages,
+          providerId: claim.segment.providerId ?? result.providerId,
+        });
+        // Never rejects for the built-in service (it logs and retries); a
+        // custom service's failure must not turn a durable transcript into an error.
+        await result.settleBilling?.().catch(() => undefined);
         return c.json(await cleanupTerminalObjects(deps, authority, completed));
       } catch (error) {
         if (authority && attemptId && segmentNumber !== null) {
@@ -700,7 +703,7 @@ function processingFailure(error: unknown): {
   }
   if (error instanceof TranscriptionBillingRefusedError) {
     // Refused before any audio was sent; retryable once the payer is funded.
-    return { code: "unavailable", retryable: true };
+    return { code: error.code, retryable: true };
   }
   if (error instanceof TranscriptionServiceError) {
     return {

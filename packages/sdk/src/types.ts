@@ -4393,7 +4393,10 @@ export type TranscriptionRecordingErrorCode =
   | "unavailable"
   | "too_large"
   | "invalid_audio"
-  | "unknown";
+  | "unknown"
+  | "insufficient_credits"
+  | "allowance_exhausted"
+  | "monthly_model_cost_limit";
 
 export type TranscriptionRecordingState =
   | "uploading"
