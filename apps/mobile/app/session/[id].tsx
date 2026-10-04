@@ -19,6 +19,7 @@ import { useSafeAreaInsets } from "react-native-safe-area-context";
 import { useAccount } from "@/account";
 import { BrandMark } from "@/brand-mark";
 import { copyText } from "@/clipboard";
+import { useSessionComputeLabel } from "@/compute-label";
 import { useWorkspaceModelCatalog } from "@/model-catalog";
 import { AppThemeProvider } from "@/theme";
 
@@ -60,6 +61,7 @@ function LiveSession(props: {
     [props.client, props.workspaceId, props.sessionId],
   );
   const catalog = useWorkspaceModelCatalog(props.workspaceId);
+  const computeLabel = useSessionComputeLabel(props.workspaceId, props.sessionId);
   const [pickerOpen, setPickerOpen] = useState(false);
   // The composer owns the next turn's policy, exactly as the web picker edits it.
   const composer = controller.composer;
@@ -112,6 +114,7 @@ function LiveSession(props: {
         onCopy={(text) => void copyText(text)}
         onOpenSession={(sessionId) => router.push(`/session/${sessionId}`)}
         bottomInset={insets.bottom}
+        computeLabel={computeLabel}
         feedback={feedback}
         composer={{
           options: pill ? (

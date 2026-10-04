@@ -23,7 +23,7 @@ import { Pressable, Text, View, type TextStyle } from "react-native";
 import Animated, { FadeIn, FadeInDown, FadeOut, FadeOutUp } from "react-native-reanimated";
 import { ActivityRow } from "./activity";
 import { Icon } from "./icon";
-import { PulseDot, ShimmerText, ROW_MIN_HEIGHT } from "./primitives";
+import { PulseDot, ShimmerText, ROW_MIN_HEIGHT, useReleaseFollow } from "./primitives";
 import { fontStyle, useNativeTimelineTheme } from "./theme";
 
 /* ----------------------------------------------------------------------------
@@ -119,6 +119,7 @@ export function TurnSummary({
   const theme = useNativeTimelineTheme();
   const foldMemory = useContext(FoldMemoryContext);
   const registerSticky = useContext(StickyWorkHeaderContext);
+  const releaseFollow = useReleaseFollow();
   const frame = useRef<{ top: number; height: number; headerHeight: number }>({
     top: 0,
     height: 0,
@@ -133,6 +134,7 @@ export function TurnSummary({
     if (status && defaultOpen && remembered === undefined && !readerOwnsOpen.current) setOpen(true);
   }, [status, defaultOpen, remembered]);
   const toggle = (next: boolean) => {
+    releaseFollow();
     readerOwnsOpen.current = true;
     if (foldKey !== undefined) foldMemory?.set(foldKey, next ? "open" : "closed");
     setOpen(next);

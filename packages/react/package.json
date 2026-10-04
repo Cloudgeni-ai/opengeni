@@ -86,6 +86,10 @@
       "types": "./src/composer-messages.ts",
       "default": "./src/composer-messages.ts"
     },
+    "./sandbox-label-model": {
+      "types": "./src/sandbox-label-model.ts",
+      "default": "./src/sandbox-label-model.ts"
+    },
     "./model-picker-model": {
       "types": "./src/model-picker-model.ts",
       "default": "./src/model-picker-model.ts"

@@ -1,5 +1,5 @@
 import { stringifyPayload } from "@opengeni/react/timeline-model";
-import { useEffect, useState, type ReactNode } from "react";
+import { createContext, useContext, useEffect, useState, type ReactNode } from "react";
 import { Pressable, ScrollView, Text, View, type TextStyle } from "react-native";
 import Animated, {
   cancelAnimation,
@@ -12,6 +12,16 @@ import Animated, {
 } from "react-native-reanimated";
 import { Icon, type NativeIconName } from "./icon";
 import { fontStyle, useNativeTimelineTheme, type NativeTimelineTheme } from "./theme";
+
+/**
+ * A reader opening or closing a disclosure owns the scroll position: the
+ * timeline stops following the tip (web: an aria-expanded click releases pin).
+ */
+const ReleaseFollowContext = createContext<() => void>(() => undefined);
+export const ReleaseFollowProvider = ReleaseFollowContext.Provider;
+export function useReleaseFollow(): () => void {
+  return useContext(ReleaseFollowContext);
+}
 
 /* ----------------------------------------------------------------------------
    Native counterparts of the web timeline primitives (timeline/shared.tsx).
@@ -166,6 +176,7 @@ export function ActivityDisclosure({
 }: ActivityDisclosureProps) {
   const theme = useNativeTimelineTheme();
   const [open, setOpen] = useState(defaultOpen ?? false);
+  const releaseFollow = useReleaseFollow();
   const iconTone = failed && iconToneProp === "muted" ? "failed" : iconToneProp;
   const chip =
     chipProp ??
@@ -293,7 +304,10 @@ export function ActivityDisclosure({
         accessibilityRole="button"
         accessibilityState={{ expanded: open }}
         accessibilityLabel={accessibilityLabel ?? (typeof title === "string" ? title : undefined)}
-        onPress={() => setOpen((value) => !value)}
+        onPress={() => {
+          releaseFollow();
+          setOpen((value) => !value);
+        }}
         style={({ pressed }) => ({
           borderRadius: theme.radius.sm,
           backgroundColor: pressed ? theme.colors["surface-1"] : "transparent",

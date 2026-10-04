@@ -40,7 +40,7 @@ import {
 import Animated, { FadeIn, FadeOut } from "react-native-reanimated";
 import { NativeActivityOptionsProvider, type NativeActivityOptions } from "./activity";
 import { Icon } from "./icon";
-import { withAlpha } from "./primitives";
+import { ReleaseFollowProvider, withAlpha } from "./primitives";
 import { fontStyle, useNativeTimelineTheme } from "./theme";
 import {
   ActivityRail,
@@ -126,6 +126,9 @@ export function MessageTimeline(props: NativeMessageTimelineProps) {
         : next,
     );
   }, [stickyHeaders]);
+  const releaseFollow = useCallback(() => {
+    following.current = false;
+  }, []);
   const registerSticky = useMemo(
     () => ({
       register: (key: string, entry: StickyWorkHeader | null) => {
@@ -201,117 +204,119 @@ export function MessageTimeline(props: NativeMessageTimelineProps) {
     <NativeActivityOptionsProvider value={activityOptions}>
       <FoldMemoryProvider value={foldMemory}>
         <StickyWorkHeaderProvider value={registerSticky}>
-          <View style={[{ flex: 1, backgroundColor: theme.colors.bg }, props.style]}>
-            <ScrollView
-              ref={scrollRef}
-              onScroll={onScroll}
-              onScrollBeginDrag={() => {
-                readerScrolling.current = true;
-              }}
-              onScrollEndDrag={onScrollEnd}
-              onMomentumScrollEnd={onScrollEnd}
-              onLayout={() => {
-                if (following.current) scrollRef.current?.scrollToEnd({ animated: false });
-              }}
-              scrollEventThrottle={32}
-              onContentSizeChange={onContentSizeChange}
-              keyboardDismissMode="interactive"
-              keyboardShouldPersistTaps="handled"
-              contentContainerStyle={{
-                paddingTop: props.contentInsetTop ?? 16,
-                paddingHorizontal: 16,
-                paddingBottom: props.contentInsetBottom ?? 24,
-                gap: 20,
-                flexGrow: 1,
-              }}
-            >
-              {props.header}
-              {groups.length === 0 && props.emptyState ? props.emptyState : null}
-              {groups.map((group) => {
-                const key = groupKey(group);
-                const prompt = group.kind === "item" && group.item.kind === "user-message";
-                return prompt ? (
-                  <View
-                    key={key}
-                    onLayout={(event) => {
-                      const { y, height } = event.nativeEvent.layout;
-                      promptFrames.set(key, { top: y, bottom: y + height });
-                    }}
-                  >
-                    <TimelineGroupView group={group} context={context} />
-                  </View>
-                ) : (
-                  <TimelineGroupView key={key} group={group} context={context} />
-                );
-              })}
-              {props.trailing}
-            </ScrollView>
-            {pinned && stickyHeaders.get(pinned.key) ? (
-              <View
-                style={{
-                  position: "absolute",
-                  top: 0,
-                  left: 0,
-                  right: 0,
+          <ReleaseFollowProvider value={releaseFollow}>
+            <View style={[{ flex: 1, backgroundColor: theme.colors.bg }, props.style]}>
+              <ScrollView
+                ref={scrollRef}
+                onScroll={onScroll}
+                onScrollBeginDrag={() => {
+                  readerScrolling.current = true;
+                }}
+                onScrollEndDrag={onScrollEnd}
+                onMomentumScrollEnd={onScrollEnd}
+                onLayout={() => {
+                  if (following.current) scrollRef.current?.scrollToEnd({ animated: false });
+                }}
+                scrollEventThrottle={32}
+                onContentSizeChange={onContentSizeChange}
+                keyboardDismissMode="interactive"
+                keyboardShouldPersistTaps="handled"
+                contentContainerStyle={{
+                  paddingTop: props.contentInsetTop ?? 16,
                   paddingHorizontal: 16,
-                  backgroundColor: theme.colors.bg,
-                  transform: [{ translateY: pinned.offset }],
+                  paddingBottom: props.contentInsetBottom ?? 24,
+                  gap: 20,
+                  flexGrow: 1,
                 }}
               >
-                {stickyHeaders.get(pinned.key)!.render()}
-              </View>
-            ) : null}
-            {/* Web timeline navigation: two identical small round arrow buttons at
+                {props.header}
+                {groups.length === 0 && props.emptyState ? props.emptyState : null}
+                {groups.map((group) => {
+                  const key = groupKey(group);
+                  const prompt = group.kind === "item" && group.item.kind === "user-message";
+                  return prompt ? (
+                    <View
+                      key={key}
+                      onLayout={(event) => {
+                        const { y, height } = event.nativeEvent.layout;
+                        promptFrames.set(key, { top: y, bottom: y + height });
+                      }}
+                    >
+                      <TimelineGroupView group={group} context={context} />
+                    </View>
+                  ) : (
+                    <TimelineGroupView key={key} group={group} context={context} />
+                  );
+                })}
+                {props.trailing}
+              </ScrollView>
+              {pinned && stickyHeaders.get(pinned.key) ? (
+                <View
+                  style={{
+                    position: "absolute",
+                    top: 0,
+                    left: 0,
+                    right: 0,
+                    paddingHorizontal: 16,
+                    backgroundColor: theme.colors.bg,
+                    transform: [{ translateY: pinned.offset }],
+                  }}
+                >
+                  {stickyHeaders.get(pinned.key)!.render()}
+                </View>
+              ) : null}
+              {/* Web timeline navigation: two identical small round arrow buttons at
               fixed, centered spots that never dodge the content beneath them. */}
-            {questionNav ? (
-              <View
-                pointerEvents="box-none"
-                style={{
-                  position: "absolute",
-                  // Below a pinned work header so that strip stays a full-width target.
-                  top: pinned ? pinned.height + pinned.offset + 8 : 12,
-                  left: 0,
-                  right: 0,
-                  alignItems: "center",
-                }}
-              >
-                <NavButton
-                  icon="arrow-up"
-                  label="Back to your message"
-                  onPress={() => {
-                    const frame = promptFrames.get(questionNav);
-                    if (!frame) return;
-                    following.current = false;
-                    scrollRef.current?.scrollTo({
-                      y: Math.max(0, frame.top - QUESTION_NAV_MARGIN_PX),
-                      animated: true,
-                    });
+              {questionNav ? (
+                <View
+                  pointerEvents="box-none"
+                  style={{
+                    position: "absolute",
+                    // Below a pinned work header so that strip stays a full-width target.
+                    top: pinned ? pinned.height + pinned.offset + 8 : 12,
+                    left: 0,
+                    right: 0,
+                    alignItems: "center",
                   }}
-                />
-              </View>
-            ) : null}
-            {showJump ? (
-              <View
-                pointerEvents="box-none"
-                style={{
-                  position: "absolute",
-                  bottom: 12,
-                  left: 0,
-                  right: 0,
-                  alignItems: "center",
-                }}
-              >
-                <NavButton
-                  icon="arrow-down"
-                  label="Jump to latest"
-                  onPress={() => {
-                    following.current = true;
-                    scrollRef.current?.scrollToEnd({ animated: true });
+                >
+                  <NavButton
+                    icon="arrow-up"
+                    label="Back to your message"
+                    onPress={() => {
+                      const frame = promptFrames.get(questionNav);
+                      if (!frame) return;
+                      following.current = false;
+                      scrollRef.current?.scrollTo({
+                        y: Math.max(0, frame.top - QUESTION_NAV_MARGIN_PX),
+                        animated: true,
+                      });
+                    }}
+                  />
+                </View>
+              ) : null}
+              {showJump ? (
+                <View
+                  pointerEvents="box-none"
+                  style={{
+                    position: "absolute",
+                    bottom: 12,
+                    left: 0,
+                    right: 0,
+                    alignItems: "center",
                   }}
-                />
-              </View>
-            ) : null}
-          </View>
+                >
+                  <NavButton
+                    icon="arrow-down"
+                    label="Jump to latest"
+                    onPress={() => {
+                      following.current = true;
+                      scrollRef.current?.scrollToEnd({ animated: true });
+                    }}
+                  />
+                </View>
+              ) : null}
+            </View>
+          </ReleaseFollowProvider>
         </StickyWorkHeaderProvider>
       </FoldMemoryProvider>
     </NativeActivityOptionsProvider>
