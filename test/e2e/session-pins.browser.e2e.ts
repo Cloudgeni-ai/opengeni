@@ -34,6 +34,7 @@ import {
   type Page,
   type Response as PlaywrightResponse,
   type Request as PlaywrightRequest,
+  type Frame as PlaywrightFrame,
   type Route,
 } from "playwright";
 import postgres from "postgres";
@@ -3993,12 +3994,12 @@ async function navigateWithProjectPages(
   // every first page and its loading state before dragging or snapshotting rows.
   const firstPages = new Map<string, Promise<unknown>>();
   const newDocumentRequests = new Set<PlaywrightRequest>();
-  let navigationStarted = false;
+  let navigationCommitted = false;
+  const observeNavigation = (frame: PlaywrightFrame) => {
+    if (frame === page.mainFrame()) navigationCommitted = true;
+  };
   const observeRequest = (request: PlaywrightRequest) => {
-    if (request.isNavigationRequest() && request.frame() === page.mainFrame()) {
-      navigationStarted = true;
-    }
-    if (navigationStarted) newDocumentRequests.add(request);
+    if (navigationCommitted) newDocumentRequests.add(request);
   };
   const observePage = (response: PlaywrightResponse) => {
     if (!newDocumentRequests.has(response.request())) return;
@@ -4007,6 +4008,7 @@ async function navigateWithProjectPages(
     if (channelId !== null) firstPages.set(channelId, response.json());
   };
   // Ignore refreshes from the document being replaced by this navigation.
+  page.on("framenavigated", observeNavigation);
   page.on("request", observeRequest);
   page.on("response", observePage);
   try {
@@ -4034,6 +4036,7 @@ async function navigateWithProjectPages(
       { timeoutMs: 30_000 },
     );
   } finally {
+    page.off("framenavigated", observeNavigation);
     page.off("request", observeRequest);
     page.off("response", observePage);
   }
