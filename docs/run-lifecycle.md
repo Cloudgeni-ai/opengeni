@@ -1371,7 +1371,9 @@ audit projection is durable. An HTTP-successful result with `isError: true`
 therefore remains a failed tool outcome in live SDK state, model-facing history,
 the pending receipt, the durable event, recovery, and the timeline. The
 model-facing projection of a prefixed MCP result
-(`packages/runtime/src/mcp-model-output.ts`) keeps the result envelope but drops
+(`omitStructuredContentTextDuplicates` in
+`packages/contracts/src/mcp-structured-content.ts`, also used by the default
+`ogtool call` print) keeps the result envelope but drops
 a plain text block whose text is exactly a JSON serialization of
 `structuredContent` (the MCP backwards-compatibility copy), so the payload is
 not paid for twice. Prose, differing JSON, annotated text, non-text blocks, and

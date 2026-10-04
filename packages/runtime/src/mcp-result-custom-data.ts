@@ -1,10 +1,10 @@
 import {
   AttemptToolResult,
+  omitStructuredContentTextDuplicates,
   type AttemptToolResult as AttemptToolResultValue,
 } from "@opengeni/contracts";
 import { UserError, type MCPServer } from "@openai/agents";
 import { randomUUID } from "node:crypto";
-import { modelVisibleMcpResult } from "./mcp-model-output";
 import { normalizeProtocolJsonValue } from "./protocol-json";
 
 export const OPENGENI_MCP_RESULT_CUSTOM_DATA_KEY = "__opengeniMcpResultV1" as const;
@@ -229,10 +229,10 @@ export class McpResultCustomDataBridge {
       // bridge retains the exact audit copy out of band. The exact result is
       // also attached privately so another prefixed wrapper can recover it
       // before parsing it at its own boundary.
-      const projected = { ...result, content: modelVisibleMcpResult(result) } as Record<
-        PropertyKey,
-        unknown
-      >;
+      const projected = {
+        ...result,
+        content: omitStructuredContentTextDuplicates(result),
+      } as Record<PropertyKey, unknown>;
       Object.defineProperty(projected, SDK_RESULT_PROJECTION, {
         value: result,
         enumerable: false,

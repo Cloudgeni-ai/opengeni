@@ -115,6 +115,7 @@ export * from "./editable-artifact-serialized-commit";
 export * from "./signup-attribution";
 export * from "./product-lifecycle-facts";
 export * from "./tool-catalog";
+export * from "./mcp-structured-content";
 export * from "./mcp-oauth";
 export * from "./tool-result-spill";
 export * from "./interaction";

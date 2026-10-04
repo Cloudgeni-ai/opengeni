@@ -1,18 +1,17 @@
 import { describe, expect, test } from "bun:test";
-import type { AttemptToolResult } from "@opengeni/contracts";
-import { modelVisibleMcpResult } from "../src/mcp-model-output";
+import { omitStructuredContentTextDuplicates, type AttemptToolResult } from "../src";
 
 const structured = {
   items: [{ id: 1, title: 'Bug "quoted"', labels: ["a", "b"] }],
   total: 1,
 };
 
-describe("modelVisibleMcpResult", () => {
+describe("omitStructuredContentTextDuplicates", () => {
   test("returns the same object when there is no structuredContent", () => {
     const result: AttemptToolResult = {
       content: [{ type: "text", text: JSON.stringify(structured) }],
     };
-    expect(modelVisibleMcpResult(result)).toBe(result);
+    expect(omitStructuredContentTextDuplicates(result)).toBe(result);
   });
 
   test("drops compact, pretty-printed, and reordered serializations of structuredContent", () => {
@@ -27,7 +26,7 @@ describe("modelVisibleMcpResult", () => {
         _meta: { trace: "t" },
         isError: false,
       };
-      expect(modelVisibleMcpResult(result)).toEqual({
+      expect(omitStructuredContentTextDuplicates(result)).toEqual({
         content: [],
         structuredContent: structured,
         _meta: { trace: "t" },
@@ -42,7 +41,7 @@ describe("modelVisibleMcpResult", () => {
       structuredContent: structured,
       isError: true,
     };
-    expect(JSON.stringify(modelVisibleMcpResult(result))).toBe(
+    expect(JSON.stringify(omitStructuredContentTextDuplicates(result))).toBe(
       JSON.stringify({ content: [], structuredContent: structured, isError: true }),
     );
   });
@@ -57,7 +56,7 @@ describe("modelVisibleMcpResult", () => {
       ],
       structuredContent: structured,
     };
-    expect(modelVisibleMcpResult(result).content).toEqual(result.content.slice(0, 3));
+    expect(omitStructuredContentTextDuplicates(result).content).toEqual(result.content.slice(0, 3));
   });
 
   test("keeps non-text content blocks", () => {
@@ -67,16 +66,35 @@ describe("modelVisibleMcpResult", () => {
       content: [{ type: "text", text: JSON.stringify(structured) }, image, link],
       structuredContent: structured,
     };
-    expect(modelVisibleMcpResult(result).content).toEqual([image, link]);
+    expect(omitStructuredContentTextDuplicates(result).content).toEqual([image, link]);
+  });
+
+  test("compares numbers by IEEE-754 value", () => {
+    const result: AttemptToolResult = {
+      content: [{ type: "text", text: '{"total":1.0,"ratio":0.50}' }],
+      structuredContent: { total: 1, ratio: 0.5 },
+    };
+    expect(omitStructuredContentTextDuplicates(result).content).toEqual([]);
+  });
+
+  test("keeps text with an unsafe integer even when it equals the compact serialization", () => {
+    const structuredContent = JSON.parse('{"id":12345678901234567000}') as NonNullable<
+      AttemptToolResult["structuredContent"]
+    >;
+    const result: AttemptToolResult = {
+      content: [{ type: "text", text: JSON.stringify(structuredContent) }],
+      structuredContent,
+    };
+    expect(omitStructuredContentTextDuplicates(result)).toBe(result);
   });
 
   test("keeps text whose integers are more precise than the parsed structuredContent", () => {
     const text = '{"id":12345678901234567891}';
     const result: AttemptToolResult = {
       content: [{ type: "text", text }],
-      structuredContent: JSON.parse(text) as Record<string, unknown>,
+      structuredContent: JSON.parse(text) as NonNullable<AttemptToolResult["structuredContent"]>,
     };
-    expect(modelVisibleMcpResult(result)).toBe(result);
+    expect(omitStructuredContentTextDuplicates(result)).toBe(result);
   });
 
   test("measures a realistic issue-search result", () => {
@@ -101,7 +119,7 @@ describe("modelVisibleMcpResult", () => {
       structuredContent,
     };
     const before = Buffer.byteLength(JSON.stringify(result));
-    const after = Buffer.byteLength(JSON.stringify(modelVisibleMcpResult(result)));
+    const after = Buffer.byteLength(JSON.stringify(omitStructuredContentTextDuplicates(result)));
     expect(after).toBeLessThan(before / 2);
   });
 });
