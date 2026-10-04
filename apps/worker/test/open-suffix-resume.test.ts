@@ -1,4 +1,6 @@
 import { describe, expect, test } from "bun:test";
+import { Agent, tool } from "@openai/agents";
+import { z } from "zod";
 import {
   matchingOpenSuffixCallId,
   openSuffixHistoryItems,
@@ -6,8 +8,9 @@ import {
   remainingPendingApprovalsFromSuffix,
   remainingRunStatePendingApprovalsFromSuffix,
   resolveOpenSuffixResumeTarget,
+  resultItemForOpenSuffixMember,
 } from "../src/activities/open-suffix-resume";
-import type { OpenSuffixPendingToolCall } from "@opengeni/db";
+import { interruptedToolCallResult, type OpenSuffixPendingToolCall } from "@opengeni/db";
 
 describe("open suffix resume helpers", () => {
   test("promotes reasoning, call, and result as one paired history suffix", () => {
@@ -166,5 +169,150 @@ describe("open suffix resume helpers", () => {
         (item) => (item as { id: string }).id,
       ),
     ).toEqual(["call_mcp", "call_interact"]);
+  });
+});
+
+describe("open suffix approval results", () => {
+  const rejectedDefault = "Tool approval was rejected. This proposed tool call was not executed.";
+  const originalDefault = "Tool approval was rejected.";
+
+  function fixture(
+    input: {
+      kind?: OpenSuffixPendingToolCall["interruptionKind"];
+      output?: string;
+      error?: Error;
+    } = {},
+  ) {
+    const calls: Array<{ title: string }> = [];
+    const agent = new Agent({
+      name: "approval-result-test",
+      tools: [
+        tool({
+          name: "change_article_title",
+          description: "Synthetic local invocation counter; no host or model is called.",
+          parameters: z.object({ title: z.string() }),
+          errorFunction: null,
+          execute: async (args) => {
+            calls.push(args);
+            if (input.error) {
+              throw input.error;
+            }
+            return input.output ?? "Title changed successfully.";
+          },
+        }),
+      ],
+    });
+    const row = {
+      callId: "call_proposed_title",
+      callType: "function_call",
+      callItem: {
+        type: "function_call",
+        callId: "call_proposed_title",
+        name: "change_article_title",
+        arguments: '{"title":"Proposed title"}',
+      },
+      interruptionKind: input.kind ?? "approval",
+      tiedReasoningItems: [],
+      resultItem: null,
+      modelToolOutputTruncationTokens: null,
+    } satisfies OpenSuffixPendingToolCall;
+    return {
+      calls,
+      resume: (decision: string | undefined, message?: unknown) =>
+        resultItemForOpenSuffixMember({
+          agent,
+          row,
+          trigger: {
+            type: "user.approvalDecision",
+            payload: { approvalId: row.callId, decision, message },
+          },
+          humanInputResume: null,
+        }),
+    };
+  }
+
+  function expectPairedResult(
+    result: Awaited<ReturnType<typeof resultItemForOpenSuffixMember>>,
+    output: string,
+  ) {
+    expect(result.eventOutput).toBe(output);
+    expect(result.resultItem).toMatchObject({
+      type: "function_call_result",
+      callId: "call_proposed_title",
+      name: "change_article_title",
+      output: { type: "text", text: output },
+    });
+  }
+
+  function expectInterruptedResult(
+    result: Awaited<ReturnType<typeof resultItemForOpenSuffixMember>>,
+    reason: string,
+  ) {
+    expect(result.eventOutput).toBe(reason);
+    expect(result.resultItem).toEqual(
+      interruptedToolCallResult({
+        callType: "function_call",
+        callId: "call_proposed_title",
+        callItem: { name: "change_article_title" },
+        reason,
+      }),
+    );
+    expect(result.resultItem.status).toBe("incomplete");
+  }
+
+  test("explicit ordinary rejection states only that this proposed call was not executed", async () => {
+    const { resume, calls } = fixture();
+    expectPairedResult(await resume("reject"), rejectedDefault);
+    expect(calls).toEqual([]);
+  });
+
+  test("preserves a nonempty custom rejection reason byte-for-byte", async () => {
+    const { resume, calls } = fixture();
+    const reason = "  Keep the original title.\nAnother call may already have run.  ";
+    expectInterruptedResult(await resume("reject", reason), reason);
+    expect(calls).toEqual([]);
+  });
+
+  for (const message of ["", " \n\t ", null, 42]) {
+    test(`ordinary rejection retains the default fallback for ${JSON.stringify(message)}`, async () => {
+      const { resume, calls } = fixture();
+      expectPairedResult(await resume("reject", message), rejectedDefault);
+      expect(calls).toEqual([]);
+    });
+  }
+
+  test("intervention rejection remains conservative about prior execution", async () => {
+    const { resume, calls } = fixture({ kind: "interaction_intervention" });
+    expectInterruptedResult(await resume("reject"), originalDefault);
+    expect(calls).toEqual([]);
+  });
+
+  test("intervention custom reason remains unchanged", async () => {
+    const { resume, calls } = fixture({ kind: "interaction_intervention" });
+    const reason = "Stop the interaction; prior actions are not rolled back.";
+    expectInterruptedResult(await resume("reject", reason), reason);
+    expect(calls).toEqual([]);
+  });
+
+  for (const decision of [undefined, "unknown"]) {
+    test(`non-approve ambiguity ${String(decision)} retains the conservative default`, async () => {
+      const { resume, calls } = fixture();
+      expectInterruptedResult(await resume(decision), originalDefault);
+      expect(calls).toEqual([]);
+    });
+  }
+
+  test("approved success invokes once and preserves the actual result", async () => {
+    const output = "Title changed successfully. Revision 1.";
+    const { resume, calls } = fixture({ output });
+    expectPairedResult(await resume("approve"), output);
+    expect(calls).toEqual([{ title: "Proposed title" }]);
+  });
+
+  test("approved unknown outcome is not rewritten as rejection or nonexecution", async () => {
+    const error = new Error("Tool execution outcome is unknown; do not replay this call.");
+    const { resume, calls } = fixture({ error });
+    expectPairedResult(await resume("approve"), error.message);
+    expect(calls).toEqual([{ title: "Proposed title" }]);
   });
 });

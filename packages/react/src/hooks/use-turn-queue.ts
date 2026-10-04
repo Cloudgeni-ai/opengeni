@@ -10,6 +10,7 @@ import type {
 } from "@opengeni/sdk";
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { useEmbeddedSession, type EmbeddedSessionClientOverride } from "../session-context";
+import { normalizeError } from "../lib/error-message";
 import {
   useDebouncedCallback,
   usePageLiveActivity,
@@ -463,7 +464,7 @@ function operationKey(): string {
 }
 
 function asError(cause: unknown): Error {
-  return cause instanceof Error ? cause : new Error(String(cause));
+  return normalizeError(cause);
 }
 
 function isOutcomeUnknownError(cause: unknown): boolean {

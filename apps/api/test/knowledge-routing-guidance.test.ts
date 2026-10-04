@@ -2,7 +2,10 @@ import { expect, test } from "bun:test";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
-import type { AccessGrant } from "@opengeni/contracts";
+import {
+  WORKSPACE_INSTRUCTION_POLICY_CONTENT_MAX_CHARS,
+  type AccessGrant,
+} from "@opengeni/contracts";
 import type { ApiRouteDeps } from "@opengeni/core";
 import { registerKnowledgeEntryTools } from "../src/mcp/knowledge-entries";
 
@@ -35,7 +38,10 @@ test("discovered save tools route future behavior away from retrieval-only Knowl
     }
     expect(description("knowledge_save")).toContain("not a behavioral preference");
     expect(description("instruction_policy_save")).toContain("Keep replies concise");
-    expect(description("instruction_policy_save")).toContain("600 characters");
+    expect(description("instruction_policy_save")).toContain(
+      `${WORKSPACE_INSTRUCTION_POLICY_CONTENT_MAX_CHARS} characters`,
+    );
+    expect(description("instruction_policy_save")).toContain("the same limit as the human editor");
     expect(description("instruction_policy_save")).toContain("pending");
     expect(description("instruction_policy_save")).toContain("not a workaround");
   } finally {

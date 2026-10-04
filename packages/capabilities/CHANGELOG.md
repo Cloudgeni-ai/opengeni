@@ -1,5 +1,21 @@
 # @opengeni/capabilities
 
+## 0.3.7
+
+### Patch Changes
+
+- aa41b15: Omit Outlook meeting suggestions, which need shared-calendar permissions and do not support personal Microsoft accounts, from the default calendar operation set. Keep calendar, event, and availability operations under the existing OAuth permissions.
+- Updated dependencies [3cc26b5]
+  - @opengeni/network@0.3.2
+
+## 0.3.6
+
+### Patch Changes
+
+- c60d38a: Include normalized effective OpenAPI operation destinations and the primary manifest URL in immutable revision identity. URL rotation no longer reuses a document-only revision, while equivalent destinations still deduplicate and existing immutable versions and installation fences remain intact.
+
+  Classify known credential Connection rejection at install-time revalidation separately from internal failures. Missing or inaccessible references return 404, and inactive or incompatible references return 422 without weakening ownership, scope, or optimistic-concurrency checks.
+
 ## 0.3.5
 
 ### Patch Changes

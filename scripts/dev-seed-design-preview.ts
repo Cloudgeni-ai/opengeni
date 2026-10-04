@@ -1853,7 +1853,13 @@ const artifactsByWorkspace: Record<string, Record<string, ArtifactRef>> = {};
 
 await linkArtifactsToSessions(sql);
 await seedScheduleRuns(sql);
-await seedPendingKnowledge(sql);
+try {
+  await seedPendingKnowledge(sql);
+} catch (error) {
+  // Knowledge review rows depend on agent-turn provenance the seed can't
+  // always fake; the rest of the preview doesn't need them.
+  console.warn(`Skipped Knowledge proposals: ${error instanceof Error ? error.message : error}`);
+}
 await seedUsage(sql);
 await sql.close();
 
@@ -2480,45 +2486,71 @@ async function seedUsage(db: SQL) {
     const sessions = await db`select id, created_by_subject_id from sessions
       where workspace_id = ${plan.workspaceId} order by updated_at desc limit 40`;
     if (!sessions.length) continue;
+    const schedules = await db`select id from scheduled_tasks
+      where workspace_id = ${plan.workspaceId} limit 5`;
+    // Chats deleted since they ran: their usage stays, their rows are gone.
+    const deleted = Array.from({ length: 3 }, () => ({
+      id: randomUUID(),
+      created_by_subject_id: sessions[0]!.created_by_subject_id,
+    }));
     const weight = weights[plan.name] ?? 0.3;
     let seed = plan.workspaceId.charCodeAt(0);
     const random = () => {
       seed = (seed * 9301 + 49297) % 233280;
       return seed / 233280;
     };
+    const between = ([low, high]: readonly [number, number]) => low + random() * (high - low);
     await db.begin(async (tx) => {
-      for (let day = 29; day >= 0; day--) {
+      for (let day = 89; day >= 0; day--) {
         const weekday = new Date(Date.now() - day * 86_400_000).getUTCDay();
-        const busy = weekday === 0 || weekday === 6 ? 0.25 : 1;
+        const busy =
+          (weekday === 0 || weekday === 6 ? 0.25 : 1) * (0.55 + (0.45 * (89 - day)) / 89);
         const calls = Math.round((6 + random() * 14) * weight * busy);
         for (let call = 0; call < calls; call++) {
-          const session = sessions[Math.floor(random() * sessions.length)]!;
+          const session =
+            random() < 0.04
+              ? deleted[Math.floor(random() * deleted.length)]!
+              : sessions[Math.floor(random() * sessions.length)]!;
           const pick = random();
           let cumulative = 0;
           const model =
             USAGE_MODELS.find((candidate) => (cumulative += candidate.share) >= pick) ??
             USAGE_MODELS[0];
-          const input = Math.round(8_000 + random() * 60_000);
-          const cached = Math.round(input * (0.3 + random() * 0.5));
-          const output = Math.round(300 + random() * 3_500);
+          const input = Math.round(12_000 + random() * 110_000);
+          const cached = Math.round(input * between(model.cacheRatio));
+          const cacheWrite = model.writes ? Math.round((input - cached) * between([0.4, 0.9])) : 0;
+          const uncached = input - cached - cacheWrite;
+          const output = Math.round(250 + random() * 3_800);
           const reasoning = Math.round(output * random() * 0.6);
-          const cost = Math.round(
-            ((input - cached + output * 4) / 1000) * model.costPerKToken * 1000,
+          const listMicros = Math.round(
+            uncached * model.price.input +
+              cached * model.price.cacheRead +
+              cacheWrite * model.price.cacheWrite +
+              output * model.price.output,
           );
+          // Credits carry a small margin over list price.
+          const chargedMicros = model.billing === "external" ? 0 : Math.round(listMicros * 1.05);
           const occurredAt = new Date(
             Date.now() - day * 86_400_000 - Math.floor(random() * 10 * 3_600_000),
           );
           const turnId = randomUUID();
           const subject = String(session.created_by_subject_id);
+          const scheduled =
+            schedules.length > 0 && random() < 0.12
+              ? schedules[Math.floor(random() * schedules.length)]!.id
+              : null;
           await tx`insert into model_call_facts (account_id, workspace_id, session_id, turn_id, source_key,
               provider, provider_api, model, billing_path, turn_source, initiator_kind, initiator_subject_id,
-              input_tokens, output_tokens, cached_tokens, reasoning_tokens, total_tokens,
-              priced_cost_micros, occurred_at, recorded_at)
+              scheduled_task_id, input_tokens, output_tokens, cached_tokens, cache_write_tokens,
+              reasoning_tokens, total_tokens, priced_cost_micros, estimated_provider_cost_micros,
+              equivalent_credit_cost_micros, pricing_source, occurred_at, recorded_at)
             values (${plan.accountId}, ${plan.workspaceId}, ${session.id}, ${turnId},
               ${`design-preview:${turnId}`}, ${model.provider}, 'responses', ${model.model},
-              ${model.billing}, 'user', 'subject', ${subject}, ${input}, ${output}, ${cached},
-              ${reasoning}, ${input + output}, ${model.billing === "external" ? 0 : cost},
-              ${occurredAt}, ${occurredAt})`;
+              ${model.billing}, ${scheduled ? "scheduled" : "user"}, ${scheduled ? "service" : "subject"},
+              ${scheduled ? "service:scheduler" : subject}, ${scheduled},
+              ${input}, ${output}, ${cached}, ${cacheWrite}, ${reasoning}, ${input + output},
+              ${chargedMicros}, ${listMicros}, ${Math.round(listMicros * 1.05)},
+              'configured_list_price', ${occurredAt}, ${occurredAt})`;
           await tx`insert into usage_events (account_id, workspace_id, subject_id, event_type, quantity,
               unit, source_resource_type, source_resource_id, idempotency_key, occurred_at, recorded_at,
               initiator_kind, initiator_subject_id, origin)
@@ -2529,7 +2561,7 @@ async function seedUsage(db: SQL) {
             await tx`insert into usage_events (account_id, workspace_id, subject_id, event_type, quantity,
                 unit, source_resource_type, source_resource_id, idempotency_key, occurred_at, recorded_at,
                 initiator_kind, initiator_subject_id, origin)
-              values (${plan.accountId}, ${plan.workspaceId}, ${subject}, 'model.cost', ${cost},
+              values (${plan.accountId}, ${plan.workspaceId}, ${subject}, 'model.cost', ${chargedMicros},
                 'usd_micros', 'model', ${model.model}, ${`design-preview:cost:${turnId}`}, ${occurredAt},
                 ${occurredAt}, 'subject', ${subject}, 'user')`;
           }

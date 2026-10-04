@@ -178,6 +178,7 @@ export type ChannelASession = ProviderCommandSession & {
     chars?: string;
     yieldTimeMs?: number;
     maxOutputTokens?: number;
+    signal?: AbortSignal;
   }): Promise<string>;
   writeStdinForProcessMutation?(args: {
     sessionId: number;
@@ -193,6 +194,8 @@ export type ChannelASession = ProviderCommandSession & {
   }): Promise<string>;
   cancelExecCommand?(opId: string): Promise<boolean>;
   hasRetainedProcess?(providerSessionId: number): boolean;
+  /** Cleanup only: forget the local route after exact durable terminal proof. */
+  reconcileRetainedProcess?(providerSessionId: number): Promise<boolean>;
   retainedProcessHasTypedHandleLoss?(providerSessionId: number): boolean;
   execCommandForProcessControl?(providerSessionId: number, args: ChannelAExecArgs): Promise<string>;
   createEditor?(runAs?: string): ChannelAEditor;

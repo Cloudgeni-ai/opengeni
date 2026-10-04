@@ -182,8 +182,8 @@ export const ProposeWorkspaceInstructionPolicyRequest = z
     operationId,
     ...exactEvidence,
     target: WorkspaceInstructionPolicyTarget,
-    // Agent-authored: this draft becomes prompt text in every session once a
-    // human activates it, so it is bounded far below the human editor limit.
+    // Instruction drafts use the same storage bound as the human editor.
+    // Prompt composition retains its separate byte limit after activation.
     content: z
       .string()
       .min(1)

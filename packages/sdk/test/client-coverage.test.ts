@@ -1775,50 +1775,70 @@ describe("OpenGeniClient files", () => {
     ).toBe(true);
   });
 
-  test("downloads a retained browser JPEG through the screenshot API", async () => {
-    const bytes = Uint8Array.of(0xff, 0xd8, 0xff, 0xd9);
-    const sha256 = [...new Uint8Array(await crypto.subtle.digest("SHA-256", bytes.buffer))]
-      .map((byte) => byte.toString(16).padStart(2, "0"))
-      .join("");
-    const metadata = {
-      available: true as const,
-      artifactId: FILE_ID,
-      kind: "browser_screenshot" as const,
-      contentType: "image/jpeg",
-      originalBytes: bytes.byteLength,
-      sha256,
-      retainedAt: "2026-09-24T00:00:00.000Z",
-      dimensions: { width: 1440, height: 900 },
-      retention: {
-        policy: "session_screenshot" as const,
-        expiresAt: "2026-10-24T00:00:00.000Z",
-      },
-      retrieval: {
-        method: "GET" as const,
-        path: `/v1/workspaces/${WORKSPACE_ID}/sessions/${SESSION_ID}/artifacts/${FILE_ID}/content`,
-        acceptRanges: "bytes" as const,
-        maxRangeBytes: RETAINED_OUTPUT_MAX_PAGE_BYTES,
-      },
-    };
-    const { client, requests } = makeClient((request) =>
-      request.url.endsWith(`/artifacts/${FILE_ID}`)
-        ? jsonResponse(metadata)
-        : new Response(bytes, {
-            status: 206,
-            headers: {
-              "Accept-Ranges": "bytes",
-              "Content-Length": String(bytes.byteLength),
-              "Content-Range": `bytes 0-${bytes.byteLength - 1}/${bytes.byteLength}`,
-              "Content-Type": "image/jpeg",
-            },
-          }),
-    );
+  test.each([
+    ["computer_screenshot", "image/png", true],
+    ["computer_screenshot", "image/jpeg", true],
+    ["computer_screenshot", "image/webp", true],
+    ["browser_screenshot", "image/png", true],
+    ["browser_screenshot", "image/jpeg", true],
+    ["browser_screenshot", "image/webp", true],
+    ["computer_screenshot", "image/svg+xml", false],
+    ["browser_screenshot", "image/svg+xml", false],
+    ["generated_image", "image/jpeg", false],
+  ] as const)(
+    "validates retained %s %s before screenshot download",
+    async (kind, contentType, supported) => {
+      const bytes = Uint8Array.of(0xff, 0xd8, 0xff, 0xd9);
+      const sha256 = [...new Uint8Array(await crypto.subtle.digest("SHA-256", bytes.buffer))]
+        .map((byte) => byte.toString(16).padStart(2, "0"))
+        .join("");
+      const metadata = {
+        available: true as const,
+        artifactId: FILE_ID,
+        kind,
+        contentType,
+        originalBytes: bytes.byteLength,
+        sha256,
+        retainedAt: "2026-09-24T00:00:00.000Z",
+        dimensions: { width: 1440, height: 900 },
+        retention: {
+          policy: "session_screenshot" as const,
+          expiresAt: "2026-10-24T00:00:00.000Z",
+        },
+        retrieval: {
+          method: "GET" as const,
+          path: `/v1/workspaces/${WORKSPACE_ID}/sessions/${SESSION_ID}/artifacts/${FILE_ID}/content`,
+          acceptRanges: "bytes" as const,
+          maxRangeBytes: RETAINED_OUTPUT_MAX_PAGE_BYTES,
+        },
+      };
+      const { client, requests } = makeClient((request) =>
+        request.url.endsWith(`/artifacts/${FILE_ID}`)
+          ? jsonResponse(metadata)
+          : new Response(bytes, {
+              status: 206,
+              headers: {
+                "Accept-Ranges": "bytes",
+                "Content-Length": String(bytes.byteLength),
+                "Content-Range": `bytes 0-${bytes.byteLength - 1}/${bytes.byteLength}`,
+                "Content-Type": contentType,
+              },
+            }),
+      );
 
-    const downloaded = await client.downloadRetainedScreenshot(WORKSPACE_ID, SESSION_ID, FILE_ID);
-    expect(downloaded.metadata).toEqual(metadata);
-    expect(downloaded.bytes).toEqual(bytes);
-    expect(requests.map((request) => request.headers.range)).toEqual([undefined, "bytes=0-3"]);
-  });
+      if (!supported) {
+        await expect(
+          client.downloadRetainedScreenshot(WORKSPACE_ID, SESSION_ID, FILE_ID),
+        ).rejects.toThrow("retained screenshot metadata is invalid");
+        expect(requests).toHaveLength(1);
+        return;
+      }
+      const downloaded = await client.downloadRetainedScreenshot(WORKSPACE_ID, SESSION_ID, FILE_ID);
+      expect(downloaded.metadata).toEqual(metadata);
+      expect(downloaded.bytes).toEqual(bytes);
+      expect(requests.map((request) => request.headers.range)).toEqual([undefined, "bytes=0-3"]);
+    },
+  );
 
   test("validates a generated-image receipt before minting its zero-copy URL", async () => {
     const reference = {
@@ -2440,6 +2460,8 @@ describe("OpenGeniClient billing", () => {
       nextWorkspaceCursor: null,
       personalWorkspaces: [],
       personalWorkspaceCount: 0,
+      privateChats: [],
+      privateChatsTruncated: false,
     };
     const { client, requests } = makeClient(() => jsonResponse(response));
     expect(
@@ -2462,6 +2484,15 @@ describe("OpenGeniClient billing", () => {
     expect(new URL(requests[1]!.url).pathname).toBe("/v1/billing/usage-workspaces");
     expect(new URL(requests[1]!.url).searchParams.get("afterWorkspaceId")).toBe(WORKSPACE_ID);
     expect(new URL(requests[1]!.url).searchParams.get("until")).toBe(response.until);
+    await client.getOrganizationModelUsage({
+      accountId: "acc-1",
+      period: "week",
+      afterWorkspaceId: WORKSPACE_ID,
+    });
+    expect(requests).toHaveLength(3);
+    expect(new URL(requests[2]!.url).pathname).toBe("/v1/billing/usage-models");
+    expect(new URL(requests[2]!.url).searchParams.get("period")).toBe("week");
+    expect(new URL(requests[2]!.url).searchParams.get("afterWorkspaceId")).toBe(WORKSPACE_ID);
   });
 
   test("billing reads pass account/workspace selectors as query params", async () => {
@@ -2484,6 +2515,7 @@ describe("OpenGeniClient billing", () => {
       accountId: "acc-1",
       returnUrl: "https://app.opengeni.ai/billing",
     });
+    await client.getBillingCheckout("cs_test_1", { accountId: "acc-1" });
     expect(
       requests.map(
         (request) =>
@@ -2495,6 +2527,7 @@ describe("OpenGeniClient billing", () => {
       "GET /v1/billing/entitlements",
       "POST /v1/billing/checkout",
       "POST /v1/billing/portal",
+      "GET /v1/billing/checkout/cs_test_1?accountId=acc-1",
     ]);
     expect(JSON.parse(requests[3]!.body!)).toEqual({ amountUsd: 25 });
     expect(JSON.parse(requests[4]!.body!)).toEqual({

@@ -55,6 +55,9 @@ describe("custom API control center diagnostics", () => {
     for (const query of [
       "view=page&limit=50&parentSessionId=null&sortBy=updatedAt&archiveStatus=active",
       "archiveStatus=active&sortBy=updatedAt&parentSessionId=null&limit=50&view=page",
+      "view=page&limit=4&parentSessionId=null&projection=summary&sortBy=updatedAt&archiveStatus=active&includePinned=false",
+      "view=page&limit=4&parentSessionId=null&projection=summary&sortBy=updatedAt&archiveStatus=active&includePinned=false&includeTotals=true",
+      "view=page&limit=1&projection=summary&pinsOnly=true",
     ]) {
       expect(
         isExpectedSessionPageCancellation("GET", `${sessionsUrl}?${query}`, "net::ERR_ABORTED"),
@@ -85,7 +88,16 @@ describe("custom API control center diagnostics", () => {
 
   test("retains other request failures as diagnostics", () => {
     const query = "view=page&limit=50&parentSessionId=null&sortBy=updatedAt&archiveStatus=active";
+    const totalsQuery =
+      "view=page&limit=4&parentSessionId=null&projection=summary&sortBy=updatedAt&archiveStatus=active&includePinned=false&includeTotals=true";
     for (const [method, url, error] of [
+      ["GET", `${sessionsUrl}?${totalsQuery}&unexpected=true`, "net::ERR_ABORTED"],
+      ["GET", `${sessionsUrl}?${totalsQuery}&includeTotals=true`, "net::ERR_ABORTED"],
+      [
+        "GET",
+        `${sessionsUrl}?${totalsQuery.replace("includeTotals=true", "includeTotals=false")}`,
+        "net::ERR_ABORTED",
+      ],
       ["POST", `${sessionsUrl}?${query}`, "net::ERR_ABORTED"],
       ["GET", `${sessionsUrl}?${query}`, "net::ERR_CONNECTION_RESET"],
       ["GET", `${sessionsUrl}?${query}&unexpected=true`, "net::ERR_ABORTED"],
@@ -553,9 +565,12 @@ function isExpectedSessionPageCancellation(
   return new Set([
     // Default root page on this fixture's capabilities route; keep exact keys and values.
     "archiveStatus=active&limit=50&parentSessionId=null&sortBy=updatedAt&view=page",
+    "archiveStatus=active&includePinned=false&limit=4&parentSessionId=null&projection=summary&sortBy=updatedAt&view=page",
+    "archiveStatus=active&includePinned=false&includeTotals=true&limit=4&parentSessionId=null&projection=summary&sortBy=updatedAt&view=page",
     "limit=50&parentSessionId=null&view=page",
     "archivedOnly=true&limit=50&parentSessionId=null&view=page",
     "limit=1&pinsOnly=true&view=page",
+    "limit=1&pinsOnly=true&projection=summary&view=page",
   ]).has(actual);
 }
 
@@ -658,6 +673,17 @@ async function installApi(page: Page, state: UiState): Promise<void> {
     }
     if (url.pathname === `/v1/workspaces/${workspaceId}/connect/attempts/fixture-connect`)
       return json(connectAttempt);
+    if (url.pathname === `/v1/workspaces/${workspaceId}/connect/catalog`)
+      return json([
+        {
+          id: "microsoft-outlook-mail",
+          label: "Outlook Mail",
+          family: "microsoft",
+          readiness: "available",
+          ownership: ["workspace", "personal"],
+          setup: ["oauth"],
+        },
+      ]);
     if (url.pathname === "/v1/workspaces") return json([workspace()]);
     if (url.pathname === `/v1/workspaces/${workspaceId}/channels`) return json([]);
     if (url.pathname === `/v1/workspaces/${workspaceId}/capabilities`) {
@@ -686,7 +712,19 @@ async function installApi(page: Page, state: UiState): Promise<void> {
       return json({ configured: false, missing: [], installUrl: null });
     }
     if (url.pathname === `/v1/workspaces/${workspaceId}/sessions`) {
-      return json({ sessions: [], pinned: [], pinnedTruncated: false, nextCursor: null });
+      return json({
+        sessions: [],
+        pinned: [],
+        pinnedTruncated: false,
+        nextCursor: null,
+        filtersApplied: true,
+        sortBy: url.searchParams.get("sortBy") ?? "updatedAt",
+        archiveStatus: url.searchParams.get("archiveStatus") ?? "active",
+        ...(url.searchParams.get("needsYouOnly") === "true" ? { needsYouOnly: true } : {}),
+        ...(url.searchParams.get("includeTotals") === "true"
+          ? { totals: { needsYouCount: 0, groups: [] } }
+          : {}),
+      });
     }
     if (url.pathname === `/v1/workspaces/${workspaceId}/integrations/definitions`) {
       if (state.loading) await new Promise((resolve) => setTimeout(resolve, 8_000));

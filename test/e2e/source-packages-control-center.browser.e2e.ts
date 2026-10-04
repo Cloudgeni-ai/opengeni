@@ -536,7 +536,19 @@ async function installApi(page: Page, state: UiState): Promise<void> {
       return json({ configured: false, missing: [], installUrl: null });
     }
     if (url.pathname === `/v1/workspaces/${workspaceId}/sessions`) {
-      return json({ sessions: [], pinned: [], pinnedTruncated: false, nextCursor: null });
+      return json({
+        sessions: [],
+        pinned: [],
+        pinnedTruncated: false,
+        nextCursor: null,
+        filtersApplied: true,
+        sortBy: url.searchParams.get("sortBy") ?? "updatedAt",
+        archiveStatus: url.searchParams.get("archiveStatus") ?? "active",
+        ...(url.searchParams.get("needsYouOnly") === "true" ? { needsYouOnly: true } : {}),
+        ...(url.searchParams.get("includeTotals") === "true"
+          ? { totals: { needsYouCount: 0, groups: [] } }
+          : {}),
+      });
     }
     if (url.pathname === `/v1/workspaces/${workspaceId}/integrations/definitions`) {
       return json({ definitions: [] });

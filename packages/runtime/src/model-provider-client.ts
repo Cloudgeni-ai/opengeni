@@ -26,11 +26,14 @@ import {
 } from "./model-provider-request-policy";
 import { isModelCallFetch, vercelGatewayRoutingFetch } from "./model-provider-transport";
 import { ReplayableJsonOpenAI } from "./replayable-json-body";
-import { recordModelTransportStarted } from "./model-preparation-diagnostics";
+import {
+  recordModelTransportDispatched,
+  recordModelTransportStarted,
+} from "./model-preparation-diagnostics";
 import { captureProviderRequestBody } from "./model-request-capture";
 import { withoutQuotaExhaustedRetries } from "./provider-quota";
 import {
-  observeClaudeUsageResponse,
+  captureClaudeRequestToken,
   prepareClaudeSubscriptionRequest,
 } from "./claude-subscription-usage";
 
@@ -266,6 +269,12 @@ function withoutAuthenticationHeaders(inner: typeof fetch): typeof fetch {
 }
 
 export function buildProviderClient(provider: ResolvedModelProvider, settings: Settings): OpenAI {
+  if (
+    (provider.kind === "direct-openai-workspace" || provider.kind === "direct-azure-workspace") &&
+    !provider.apiKey?.trim()
+  ) {
+    throw new Error("OpenAI or Azure OpenAI workspace key is unavailable");
+  }
   const workspaceGateway = provider.kind === "vercel-gateway-workspace";
   const scopedCredentialProvider =
     provider.credentialSource?.kind === "workspace_connection" ||
@@ -403,15 +412,18 @@ export function instrumentedModelFetch(provider: string, inner: typeof fetch): t
     if (!isModelCallFetch(input)) {
       return await inner(input, init);
     }
-    init = await prepareClaudeSubscriptionRequest(provider, input, init);
+    const prepared = await prepareClaudeSubscriptionRequest(provider, input, init);
+    init = prepared.init;
+    const claudeRequestToken = captureClaudeRequestToken(input, init);
     // The attempt-local observer durably checkpoints provider dispatch before
     // this process can place request bytes on the network.
     await recordModelTransportStarted();
     const capture = captureProviderRequestBody(provider, input, init);
     const started = performance.now();
+    recordModelTransportDispatched(started);
     try {
       const response = await inner(input, capture.init);
-      observeClaudeUsageResponse(provider, response);
+      prepared.observe(response, claudeRequestToken);
       recordModelCallMetric(provider, response.ok ? "completed" : "failed", started);
       return response;
     } catch (error) {

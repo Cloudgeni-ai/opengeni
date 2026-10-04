@@ -1,6 +1,7 @@
 import { describe, expect, mock, spyOn, test } from "bun:test";
 import { createRequire } from "node:module";
 import { DrizzleQueryError } from "drizzle-orm";
+import { ToolCallError } from "@openai/agents";
 
 import * as opengeniDb from "@opengeni/db";
 import { TurnExecutionPolicyDefinitionMismatchError } from "@opengeni/config";
@@ -8,6 +9,7 @@ import { CODEX_TRANSPORT_ERROR_HEADER } from "@opengeni/codex";
 import { ModalCommandStartPreDispatchUnavailableError } from "../../../packages/runtime/src/sandbox/providers/modal-command-router-wire";
 import {
   CompactionProviderResponseError,
+  ProviderCommandObservationUnavailableError,
   compactionProviderFailureDiagnostics,
 } from "@opengeni/runtime";
 import * as parentWake from "../src/activities/parent-wake";
@@ -20,6 +22,7 @@ import {
 } from "../src/activities/agent-turn/failure-settlement";
 import { CodexCredentialLeaseLostError } from "../src/activities/agent-turn/credential-leases";
 import {
+  MAX_AUTOMATIC_PROVIDER_RECOVERIES,
   providerRecoveryResult,
   shouldRecoverCompactionProviderFailure,
 } from "../src/activities/agent-turn/errors";
@@ -414,6 +417,89 @@ describe("raw database rollback settlement", () => {
   });
 });
 
+describe("executing-turn database outage handoff", () => {
+  function outage() {
+    return new DrizzleQueryError(
+      "select account_id from workspaces",
+      ["private-fixture"],
+      Object.assign(new Error("private connection detail"), { code: "CONNECT_TIMEOUT" }),
+    );
+  }
+
+  test.each(["delta", "function-tool", "history"])(
+    "%s outage stops without logical failure, ledger replay or invented writer proof",
+    async (stage) => {
+      const cause = outage();
+      const error =
+        stage === "function-tool"
+          ? new ToolCallError("Failed to run function tools", cause)
+          : stage === "history"
+            ? new Error("History persistence failed", { cause })
+            : cause;
+      const terminal = mock(async () => true);
+      const flush = mock(async () => undefined);
+      const history = mock(async () => undefined);
+      const recovery = spyOn(opengeniDb, "requestSessionTurnRecovery");
+      const { deps } = codexFailureDeps({ error, settle: terminal });
+      deps.flushRuntimeBatcher = flush;
+      deps.historySink.reconcileConversationTruth = history;
+      try {
+        await expect(settleTurnFailure(deps as any)).rejects.toMatchObject({
+          type: "OpenGeniPostClaimDatabaseRecovery",
+          nonRetryable: true,
+          details: [
+            {
+              turnId: "turn-1",
+              triggerEventId: "trigger-1",
+              executionGeneration: 1,
+              code: "db_failure",
+            },
+          ],
+        });
+        expect(terminal).not.toHaveBeenCalled();
+        expect(recovery).not.toHaveBeenCalled();
+        expect(flush).not.toHaveBeenCalled();
+        expect(history).not.toHaveBeenCalled();
+        expect(deps.control).toMatchObject({
+          activityStatus: "recovering",
+          turnMetricOutcome: "recovering",
+          acknowledgeQuiescence: false,
+        });
+        expect(deps.attempt.providerRecoveryCount).toBe(0);
+        expect(deps.control.activityError).toBe(error);
+      } finally {
+        recovery.mockRestore();
+      }
+    },
+  );
+
+  test.each(["flush", "history", "settlement"])(
+    "DB outage during %s of an unrelated error also exports exact recovery",
+    async (stage) => {
+      const terminal = mock(async () => {
+        if (stage === "settlement") throw outage();
+        return true;
+      });
+      const { deps } = codexFailureDeps({ error: new Error("ordinary failure"), settle: terminal });
+      deps.billingState.isCodexTurn = false;
+      deps.flushRuntimeBatcher = mock(async () => {
+        if (stage === "flush") throw outage();
+      });
+      deps.historySink.reconcileConversationTruth = mock(async () => {
+        if (stage === "history") throw outage();
+      });
+      await expect(settleTurnFailure(deps as any)).rejects.toMatchObject({
+        type: "OpenGeniPostClaimDatabaseRecovery",
+        nonRetryable: true,
+        details: [expect.objectContaining({ turnId: "turn-1", executionGeneration: 1 })],
+      });
+      expect(deps.control.activityStatus).toBe("recovering");
+      expect(deps.control.acknowledgeQuiescence).toBe(false);
+      expect(terminal).toHaveBeenCalledTimes(stage === "settlement" ? 1 : 0);
+    },
+  );
+});
+
 describe("early accepted-definition mismatch", () => {
   function earlyDeps(error: unknown = new TurnExecutionPolicyDefinitionMismatchError()) {
     const { deps } = codexFailureDeps({ error });
@@ -423,6 +509,55 @@ describe("early accepted-definition mismatch", () => {
     Object.assign(deps.eventing, { publish: undefined });
     return deps;
   }
+
+  test.each([0, 4, 5])(
+    "post-start internal observation uncertainty parks without replenishing recovery count %i",
+    async (count) => {
+      const command = {
+        kind: "modal-router-v1" as const,
+        sandboxId: "sb-test",
+        taskId: "task-test",
+        execId: "792e06b2-03c7-40f0-baa7-a51cf4bddaf8",
+        streams: {
+          stdout: { byteOffset: 17, utf8Remainder: "", eof: false, exitCode: null },
+          stderr: { byteOffset: 0, utf8Remainder: "", eof: false, exitCode: null },
+        },
+      };
+      const error = new Error("setup observer unwound", {
+        cause: new ProviderCommandObservationUnavailableError(command, { code: 14 }),
+      });
+      const recovery = spyOn(opengeniDb, "requestSessionTurnRecovery").mockResolvedValue({
+        action: "recovering",
+        events: [],
+      } as never);
+      const deps = earlyDeps(error);
+      deps.attempt.providerRecoveryCount = count;
+      const settled = mock(async () => true);
+      deps.eventing.settle = settled;
+      try {
+        expect(await settleTurnFailure(deps as any)).toMatchObject({
+          status: "recovering",
+          deferredUntilWake: true,
+        });
+        expect(recovery).toHaveBeenCalledTimes(1);
+        expect(recovery.mock.calls[0]?.[2]).toMatchObject({
+          reason: "sandbox_command_observation_unavailable",
+          sandboxSetupOutcomeUnknown: true,
+          detail: {
+            code: "sandbox_command_observation_unavailable",
+            retryable: false,
+            replay: "blocked",
+            providerRecoveryCount: count,
+          },
+        });
+        expect(recovery.mock.calls[0]?.[2]).not.toHaveProperty("providerRecoveryCount");
+        expect(settled).not.toHaveBeenCalled();
+        expect(deps.control.activityStatus).toBe("recovering");
+      } finally {
+        recovery.mockRestore();
+      }
+    },
+  );
 
   test.each([0, 4, 5])(
     "genuine setup uncertainty parks before eventing without resetting recovery count %i",
@@ -577,16 +712,83 @@ describe("early accepted-definition mismatch", () => {
       }
       const exhausted = earlyDeps(error);
       exhausted.attempt.providerRecoveryCount = 5;
-      await expect(settleTurnFailure(exhausted as any)).rejects.toMatchObject({
-        type: "SandboxCommandStartUnavailableError",
-        nonRetryable: true,
-        message: expect.stringContaining("stopped after 5 retries"),
+      expect(await settleTurnFailure(exhausted as any)).toMatchObject({
+        status: "recovering",
+        turnId: "turn-1",
       });
-      expect(recovery).toHaveBeenCalledTimes(5);
+      expect(exhausted.control.activityStatus).toBe("recovering");
+      expect(recovery).toHaveBeenCalledTimes(6);
+      const checkpoint = recovery.mock.calls[5]?.[2];
+      expect(checkpoint).toMatchObject({
+        turnId: "turn-1",
+        attemptId: "attempt-1",
+        triggerEventId: "trigger-1",
+        reason: "sandbox_command_start_recovery_exhausted",
+        sandboxSetupRecoveryExhausted: true,
+        detail: {
+          setupOutcome: "not_started",
+          retryable: false,
+          replay: "blocked",
+          recoveryExhausted: true,
+          providerRecoveryCount: 5,
+        },
+      });
+      expect(checkpoint).not.toHaveProperty("providerRecoveryCount");
+      expect(checkpoint).not.toHaveProperty("sandboxSetupOutcomeUnknown");
+      expect(opengeniDb.SANDBOX_SETUP_RECOVERY_LIMIT).toBe(5);
+      expect(MAX_AUTOMATIC_PROVIDER_RECOVERIES).toBe(opengeniDb.SANDBOX_SETUP_RECOVERY_LIMIT);
     } finally {
       recovery.mockRestore();
     }
   });
+
+  test.each(["stale", "db_deadlock", "db_failure"] as const)(
+    "exhausted pre-dispatch setup preserves the park fate on %s",
+    async (failure) => {
+      const error = await ModalCommandStartPreDispatchUnavailableError.ensureReady({
+        waitForReady: (_deadline: number, callback: (error: Error) => void) =>
+          callback(new Error("router not ready")),
+      } as never).catch((value) => value);
+      const recovery = spyOn(opengeniDb, "requestSessionTurnRecovery");
+      if (failure === "stale") {
+        recovery.mockResolvedValue({ action: "stale", events: [] } as never);
+      } else {
+        recovery.mockRejectedValue(
+          failure === "db_deadlock"
+            ? Object.assign(new Error("test rollback"), { name: "PostgresError", code: "40P01" })
+            : Object.assign(new Error("test disconnected DB"), { code: "ECONNRESET" }),
+        );
+      }
+      const deps = earlyDeps(error);
+      deps.attempt.providerRecoveryCount = 5;
+      deps.historySink.reconcileConversationTruth = mock(async () => undefined);
+      try {
+        if (failure === "stale") {
+          expect(await settleTurnFailure(deps as any)).toMatchObject({ status: "cancelled" });
+        } else {
+          await expect(settleTurnFailure(deps as any)).rejects.toMatchObject({
+            type: "OpenGeniPostClaimDatabaseRecovery",
+            nonRetryable: true,
+            details: [
+              {
+                turnId: "turn-1",
+                triggerEventId: "trigger-1",
+                executionGeneration: 1,
+                code: failure,
+                sandboxSetupRecoveryExhausted: true,
+              },
+            ],
+          });
+          expect(deps.control.activityStatus).toBe("recovering");
+        }
+        expect(recovery).toHaveBeenCalledTimes(1);
+        expect(deps.attempt.providerRecoveryCount).toBe(5);
+        expect(deps.historySink.reconcileConversationTruth).not.toHaveBeenCalled();
+      } finally {
+        recovery.mockRestore();
+      }
+    },
+  );
 
   test("raw gRPC lookalikes never gain early command-start recovery authority", async () => {
     const recovery = spyOn(opengeniDb, "requestSessionTurnRecovery");

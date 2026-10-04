@@ -76,7 +76,7 @@ import type {
   BrowserDownloadProgressEvent,
   BrowserDownloadProgressResult,
 } from "./downloads";
-import type { AgentBrowserJsonCommand } from "./runner";
+import type { AgentBrowserJsonCommand, OwnedManagedBrowserProcess } from "./runner";
 import {
   captureHeadlessSessionCookies,
   restoreHeadlessSessionCookies,
@@ -139,6 +139,11 @@ export type BrowserCommandRunner = {
   run: AgentBrowserJsonCommand;
   daemonPid?: () => Promise<number | null>;
   terminate?: (expectedPid?: number | null) => Promise<void>;
+  ownedProcessIdentity?: (
+    cdpEndpoint: string,
+    cdpBrowserPid?: number,
+  ) => Promise<OwnedManagedBrowserProcess | null>;
+  readonly reattachedOwnedProcess?: OwnedManagedBrowserProcess | null;
   externalAuth?: (
     command: BrowserExternalAuthCommand,
     options?: { timeoutMs?: number; signal?: AbortSignal },
@@ -345,6 +350,7 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
   private readonly browserSessionId: string;
   private readonly controllerGeneration: string;
   private readonly runner: BrowserCommandRunner;
+  private connectionEndpoint: string | null = null;
   private readonly now: () => Date;
   private readonly createId: () => string;
   /** Private physical-process fence. Provider target/loader ids are not
@@ -500,6 +506,17 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
     }
   }
 
+  /** Private launch attestation; never returned in observations or snapshots. */
+  async ownedProcessIdentity(): Promise<OwnedManagedBrowserProcess | null> {
+    if (!this.connection || !this.connectionEndpoint || !this.runner.ownedProcessIdentity)
+      return null;
+    const pid = await ownedCdpProcessId(this.connection);
+    const process = await this.runner.ownedProcessIdentity(this.connectionEndpoint, pid);
+    if (!process) return null;
+    await assertOwnedCdpProcess(this.connection, process);
+    return process;
+  }
+
   async listTargets(): Promise<BrowserTargetValue[]> {
     const connection = await this.ensureConnection();
     const infos = visibleTargets(await this.targetInfos(connection));
@@ -603,6 +620,18 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
       throw terminationError;
     }
     if (closeError && !this.runner.terminate) throw closeError;
+  }
+
+  async detach(): Promise<void> {
+    for (const unsubscribe of this.browserUnsubscribe.splice(0)) unsubscribe();
+    for (const targetId of [...this.states.keys()]) this.removeState(targetId);
+    this.firstSeenAt.clear();
+    this.ownedDownloads.clear();
+    this.connection?.close();
+    this.connection = null;
+    this.connectionPromise = null;
+    this.connectionEndpoint = null;
+    this.started = false;
   }
 
   async runtimeSnapshot(): Promise<BrowserRuntimeSnapshot> {
@@ -1336,6 +1365,15 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
         throw new Error("managed browser did not expose its private CDP endpoint");
       }
       const connection = await this.connect(result.cdpUrl);
+      this.connectionEndpoint = result.cdpUrl;
+      if (this.runner.reattachedOwnedProcess) {
+        try {
+          await assertOwnedCdpProcess(connection, this.runner.reattachedOwnedProcess);
+        } catch (error) {
+          connection.close();
+          throw error;
+        }
+      }
       const version = await connection.send<{
         product?: unknown;
         userAgent?: unknown;
@@ -4843,4 +4881,39 @@ function frameTreeFingerprint(frames: readonly MainFrame[]): string {
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+async function assertOwnedCdpProcess(
+  connection: BrowserCdpConnection,
+  process: OwnedManagedBrowserProcess,
+) {
+  if ((await ownedCdpProcessId(connection)) !== process.pid)
+    throw new Error("CDP endpoint does not identify the exact owned browser process");
+}
+
+async function ownedCdpProcessId(connection: BrowserCdpConnection): Promise<number> {
+  const result = await connection.send<{ processInfo?: unknown }>(
+    "SystemInfo.getProcessInfo",
+    {},
+    { timeoutMs: 2_000 },
+  );
+  if (!Array.isArray(result.processInfo))
+    throw new Error("owned browser CDP process identity is unavailable");
+  const browsers = result.processInfo.filter(
+    (value: unknown): value is { type: string; id: number } =>
+      typeof value === "object" &&
+      value !== null &&
+      (value as { type?: unknown }).type === "browser",
+  );
+  const pid = browsers[0]?.id;
+  if (
+    browsers.length !== 1 ||
+    !Number.isSafeInteger(pid) ||
+    pid === undefined ||
+    pid < 2 ||
+    pid > 2_147_483_647
+  ) {
+    throw new Error("CDP endpoint does not identify the exact owned browser process");
+  }
+  return pid;
 }

@@ -1,11 +1,12 @@
 # MCP surfaces — which one do you want?
 
-Audience: integrators. OpenGeni touches the Model Context Protocol in seven
+Audience: integrators. OpenGeni touches the Model Context Protocol in eight
 places. They are different products with different owners and lifecycles; this
 page exists so you pick the right one in one read.
 
 | Surface | Who configures it | Scope / lifecycle | Credentials | Use it when |
 | --- | --- | --- | --- | --- |
+| **Organization MCP server** (`/v1/mcp`) | The person who connects an agent, on the sign-in page; owners and admins can disconnect any agent | One URL for everyone. Every public API action through three tools (find, describe, run), each running the real route in process as the caller | MCP OAuth sign-in acting as the person, capped by the connection's access setting; or an organization API key | An outside agent (Claude Code, Cursor, Codex) should do what a person can do across an organization |
 | **Unified workspace tool MCP** (`/v1/workspaces/:id/mcp`) | Workspace enables integrations; session policy may narrow agent attempts | Current-human requests expose the enabled first-party, Files, Docs, capability, API-integration, and Codex Apps tools through one canonical gateway; `OPENGENI_ALLOWED_FIRST_PARTY_MCP_TOOLS` remains a hard ceiling on the broad `opengeni` server across catalog, execution, and OAuth consent, without narrowing Docs or Files. Entries requiring one-shot human approval stay in the canonical catalog but are omitted from this adapter until MCP has a server-verifiable approval transport. Agent attempts retain their exact frozen selection | Existing OpenGeni bearer or standard MCP OAuth `mcp:access`, always intersected with live workspace authority | An MCP client needs the callable unified tool surface without provider-specific wrappers |
 | **Codemode** (`/v1/workspaces/:id/codemode`) | OpenGeni worker, from the exact tools prepared for one attempt | Immutable attempt-frozen projection of every admitted model tool; approval-required entries remain visible but cannot execute programmatically | Exact `agent_attempt` bearer: protected renewable file in managed sandboxes; in-memory, per-exec snapshot on Connected Machines. Execution stays in the owning worker and reuses the same resolved credentials/executor as model MCP | Attempt code needs typed, idempotent tool calls without a model round trip |
 | **Workspace HTTP/SDK tools** (`/v1/workspaces/:id/tools/*`) | Current authenticated human | Live projection of the same unified gateway; `client.tools.forWorkspace(id)` provides catalog, direct typed calls, and declarations. Connection-backed entries that also require one-shot human approval are omitted until their provider adapter supplies side-effect-free credential/resource preflight | Current human's ordinary authenticated browser/API request | A browser or host application needs typed tools without speaking MCP |
@@ -15,6 +16,57 @@ page exists so you pick the right one in one read.
 | **Capability MCP servers** | Workspace admin (capabilities settings) | Workspace-wide; on for every session while enabled | Workspace-owned OAuth or admin-supplied headers, authenticated-encrypted at rest; ordinary projections are metadata-only. Dedicated permissioned plaintext reads are an approved release-held follow-up. Gmail and hosted Slack MCP support personal or workspace ownership; personal use follows the immutable initiating user | A third-party tool (e.g. a SaaS MCP) should be available to *all* sessions and schedules in a workspace |
 | **Per-session MCP servers** (`mcpServers` on session create) | The embedding host, per session | One session; static headers rotatable on every user turn; host connection refs resolved per request | Authenticated-encrypted headers with metadata-only ordinary projections, or a non-secret opaque `connectionRef` resolved by the standalone/host broker. Dedicated plaintext reads are an approved release-held follow-up | An embedding host injects its own tool server or binds an existing provider connection without duplicating it |
 | **Codex Apps MCP** | Deployment enables the feature; a scoped human explicitly designates one workspace credential; session policy selects it | Available only while that exact designation remains authorized; workspace-default sessions receive it as optional, while explicit/fixed sessions see it only when selected | Only the designated Apps credential, independent of inference | A compatible model should use connected ChatGPT apps without tying their authority to inference routing or silently widening an exact tool allowlist |
+
+### Organization MCP server
+
+Connect any MCP client to `<public origin>/v1/mcp`. Sign-in opens the web
+app's `/connect-agent` page, where the person picks the organization, what the
+agent can do (Full access, Read only without secret values, or Custom
+permissions) and where (all workspaces including new ones and their Personal
+workspace, or selected ones). The connection then acts as that person:
+
+- Every call re-resolves the person's live access and caps it by the
+  connection's access setting. Losing access or a narrower setting applies to
+  the next call; disconnecting refuses every token at once.
+- `opengeni_actions_search`, `opengeni_action_describe` and
+  `opengeni_action_call` cover every route the API registers, named from
+  `scripts/public-api/surface.gen.json` where the SDK has a method
+  (`scripts/public-api/action-catalog.ts`; a test fails when a registered route
+  is neither in the catalog nor exempt). Exempt, each with its reason in that
+  file: Opengeni sign-in, sign-in methods and account recovery, approving an
+  agent sign-in and managing connected agents (an agent can never approve or
+  widen its own access), provider redirects back to Opengeni, signed calls
+  from other services, git protocol, machine enrollment, browser telemetry and
+  static files.
+- A call runs the route in process with a request-local proof of the person
+  (`stampDelegatedHumanAuthorization` in `@opengeni/core`). Nothing a client
+  sends can create it, and the route's own permission checks decide.
+- Organization routes that otherwise read the person's browser cookie accept
+  the proof too (`apps/api/src/http/acting-person.ts`): only in the
+  connection's organization (another one reads as not found), only with the
+  permission the route needs in the connection's access setting
+  (`account:read` to read settings, `account:admin` to change them,
+  `members:manage` for people and invitations), and the database still checks
+  the person's own role. Same-origin checks don't apply: no browser credentials
+  ride along.
+- Read only connections are refused any change before it runs. Requests that
+  only read but are sent as POST (knowledge and document search, reading a
+  session file, a git diff, previews; `READ_ONLY_POST_ACTIONS` in
+  `apps/api/src/organization-mcp.ts`) still run.
+- The access setting is literal, like an explicit organization key: in Custom,
+  `workspace:admin` is one permission, never a wildcard for the ones left out.
+  The person's own role still expands as usual, so Full access reaches
+  everything the person can do.
+- Third-party provider sign-in (Codex, SuperGrok and Claude device or OAuth
+  steps, and integration OAuth starts) and actions outside the connected
+  organization (creating another organization, accepting an invitation) stay
+  with the person in the browser; calls return a hint to finish there.
+  Organization API keys may call the same server and act as the organization.
+
+Connected agents are listed, changed and disconnected at
+`/v1/organizations/:id/mcp-connections` (browser only; SDK
+`listOrganizationMcpConnections`, `updateOrganizationMcpConnection`,
+`deleteOrganizationMcpConnection`). Migration `0601` is rolling.
 
 The public OAuth authorization server is deliberately narrow: public dynamic
 client registration, authorization-code grant with mandatory PKCE S256, exact
@@ -51,6 +103,12 @@ detail: "full" })` returns canonical `model`, `reasoningEffort` and `latencyMode
 An agent retry remains bound to the same calling session and target across
 attempt replacement, while the current attempt must independently remain
 authorized. Replaying an old receipt does not overwrite a newer setting.
+
+`session_create` inherits omitted model and reasoning from the exact calling
+turn, but omitted `latencyMode` always starts a fresh session in `standard`.
+Explicit `fast` or `priority` is honored only when the selected model supports
+it. Sending another agent a message does not change that recipient's latency
+default; keyed creation replay returns the original accepted settings.
 
 This is a future-default change, not a prompt or a resume. Already accepted work
 keeps its frozen policy. Older queued turns cannot undo the choice when they
@@ -110,6 +168,15 @@ request, no shell dependency, and no change to eager/search policy defaults.
 
 ### Tool argument errors
 
+First-party structured inputs reuse the native contract schemas, including
+nested fields, discriminators, enums, and required properties. The MCP
+registration check rejects opaque named inputs and array elements; arbitrary
+metadata dictionaries remain supported. `apps/api/src/mcp/contract-input.ts`
+publishes a model-safe projection and validates the full contract without
+inserting defaults, trimming text, or erasing omitted fields before the
+application applies inheritance. Host-only controls stay outside that
+projection, including schedule Slack delivery and Agent learning settings.
+
 Every adapter validates arguments against the tool's advertised input schema in
 the shared gateway, including properties a provider lists as required but does
 not itself enforce. A rejected call never reaches the provider. The error names
@@ -123,6 +190,30 @@ rest) and never quotes argument values:
   same summary as `message` and `details: { code: "invalid_tool_arguments",
   issues, omittedIssueCount }`, where each issue is `{ path, keyword, message }`.
 - Codemode and the unified workspace MCP surface the same error message.
+
+Union requirements are alternatives. A schema-declared discriminator selects
+the applicable branch; an unknown or missing tag reports its allowed formats.
+Ambiguous unions describe alternative corrections rather than presenting every
+branch's requirements as cumulative. Additional native contract refinements
+retain their preflight messages so cross-field failures explain the required
+relationship. Downstream provider and storage exceptions are separate failures.
+
+Unexpected failures in `session_create`, `session_send_message`, and
+`session_steer` retain a bounded `error.diagnostic` in the ordinary failed-tool
+receipt. It contains cause classes, reviewed source locations or location
+fingerprints, line/column, a typed PostgreSQL SQLSTATE when available, and exact
+caller-attempt identity from the signed grant. It never contains raw messages,
+SQL, parameters, tool arguments/results, host paths, or a request-derived target
+identity. Existing authorization/refusal classifications remain unchanged.
+
+The same diagnostic ID correlates an optional protected diagnostics export.
+`diagnosticExport` is `disabled`, `queued`, or `unavailable`; `queued` is not a
+delivery receipt. The self-contained diagnostic remains useful without that
+sink. An observer failure never changes the original outcome or retries a
+mutation. These facts identify the failing boundary, not whether an uncertain
+mutation committed. Canonical implementations:
+`apps/api/src/mcp/orchestration-failure-diagnostic.ts` and
+`packages/observability/src/failure-diagnostic.ts`.
 
 The native Connected Machine Codemode client sends its compiled API contract
 acknowledgement for compatibility with older deployments whose Codemode routes
@@ -196,8 +287,10 @@ the operator without deleting durable evidence; see
 
 `CreateSessionRequest.firstPartyMcpTools` is an exact allowlist over the exported
 `FIRST_PARTY_MCP_TOOL_NAMES` catalog. Omission selects the safe default catalog,
-which excludes connector-wide `social_*`, `slack_bot_*`, `fiken_*`, and `atlassian_*` tools; those require
-explicit selection plus their normal connection permission. Explicit `[]` means
+which excludes connector-wide `social_*`, `slack_bot_*` and `fiken_*` tools; those require
+explicit selection plus their normal connection permission. Historical native
+`atlassian_*` names remain parseable but are excluded from execution; Atlassian
+agent access uses its hosted MCP connector. Explicit `[]` means
 no tools from the broad server. Unknown names fail validation. This field does
 not grant authority: every catalog entry also has an explicit registration-time
 permission predicate, and target-scoped authorization still runs on calls.

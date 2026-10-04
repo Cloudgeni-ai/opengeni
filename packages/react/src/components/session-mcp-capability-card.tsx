@@ -127,7 +127,19 @@ function ScopedCard({
     ]);
     if (!invocation || invocation.signal.aborted || lifetime.current !== invocation || !active())
       return null;
-    const resolved = catalog.items.find((entry) => entry.id === capabilityId);
+    let resolved = catalog.items.find((entry) => entry.id === capabilityId);
+    // Custom catalog entries may not declare authentication. Discover it from
+    // the live catalog's endpoint, never from recommendation/host copy.
+    if (resolved?.kind === "mcp" && !resolved.enabled && !resolved.authKind) {
+      const endpoint = resolved.mcpUrl ?? resolved.endpointUrl;
+      if (endpoint) {
+        const inspected = await client.inspectMcpAuthentication(workspaceId, endpoint);
+        if (invocation.signal.aborted || lifetime.current !== invocation || !active()) return null;
+        if (inspected.kind === "oauth2") resolved = { ...resolved, authKind: "oauth2" };
+        else if (inspected.kind === "unknown")
+          throw new Error(inspected.message ?? "Could not determine how to sign in. Try again.");
+      }
+    }
     if (!resolved || resolved.kind !== "mcp" || resolved.authKind !== "oauth2")
       throw new Error(
         "This recommendation is not an available OAuth MCP integration. Review the current connection catalog.",

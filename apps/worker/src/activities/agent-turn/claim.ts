@@ -1,3 +1,5 @@
+import { withDirectModelProviders } from "@opengeni/config";
+import { loadDirectModelProviderConnection } from "@opengeni/db";
 import { FILESYSTEM_DISCONTINUITY_PROTOCOL } from "./recovery-warning";
 import {
   applySessionTurnSettlement,
@@ -50,6 +52,7 @@ import {
   recordSessionEventAppendPhase,
   recordSessionEventPublishLatency,
   recordTurnStartupPhase,
+  measureTurnStartupPhase,
   recordTurnStartupMilestone,
   turnLifecycleMetricsFor,
 } from "../../observability-metrics";
@@ -184,8 +187,17 @@ export async function claimTurnAttempt(deps: ClaimTurnDeps): Promise<ClaimTurnOu
     acknowledgeLostAttemptOwnership,
   } = deps;
 
-  const deploymentCatalogSettings = (await resolveCatalogSettings(db, catalogSourceSettings))
-    .settings;
+  const deploymentCatalogSettings = (
+    await measureTurnStartupPhase(
+      observability,
+      {
+        phase: "claim_catalog_read",
+        provider: "unresolved",
+        backend: "unresolved",
+      },
+      () => resolveCatalogSettings(db, catalogSourceSettings),
+    )
+  ).settings;
 
   const validatePendingSystemUpdateAuthority: NonNullable<
     ClaimSessionWorkForAttemptInput["validatePendingSystemUpdateAuthority"]
@@ -197,16 +209,25 @@ export async function claimTurnAttempt(deps: ClaimTurnDeps): Promise<ClaimTurnOu
       sessionId: input.sessionId,
       update,
     });
-  const claim = await claimSessionWorkForAttempt(db, input.workspaceId, {
-    filesystemDiscontinuityProtocol: FILESYSTEM_DISCONTINUITY_PROTOCOL,
-    sessionId: input.sessionId,
-    workflowId: input.workflowId,
-    workflowRunId: input.workflowRunId,
-    attemptId: input.attemptId,
-    dispatchId,
-    trigger: input.trigger,
-    validatePendingSystemUpdateAuthority,
-  });
+  const claim = await measureTurnStartupPhase(
+    observability,
+    {
+      phase: "claim_atomic",
+      provider: "unresolved",
+      backend: "unresolved",
+    },
+    () =>
+      claimSessionWorkForAttempt(db, input.workspaceId, {
+        filesystemDiscontinuityProtocol: FILESYSTEM_DISCONTINUITY_PROTOCOL,
+        sessionId: input.sessionId,
+        workflowId: input.workflowId,
+        workflowRunId: input.workflowRunId,
+        attemptId: input.attemptId,
+        dispatchId,
+        trigger: input.trigger,
+        validatePendingSystemUpdateAuthority,
+      }),
+  );
   if (claim.action === "unclaimed") {
     control.activityStatus = "unclaimed";
     return { exit: { status: "unclaimed", reason: claim.reason } };
@@ -216,6 +237,21 @@ export async function claimTurnAttempt(deps: ClaimTurnDeps): Promise<ClaimTurnOu
   attempt.dispatchId = dispatchId;
   attempt.executionGeneration = turn.executionGeneration;
   attempt.providerRecoveryCount = providerRecoveryCountFromMetadata(turn.metadata);
+  const authRecovery = turn.metadata?.claudeAuthRecovery;
+  attempt.claudeAuthRecovery =
+    authRecovery &&
+    typeof authRecovery === "object" &&
+    "credentialId" in authRecovery &&
+    typeof authRecovery.credentialId === "string" &&
+    "credentialVersion" in authRecovery &&
+    typeof authRecovery.credentialVersion === "number" &&
+    Number.isSafeInteger(authRecovery.credentialVersion) &&
+    authRecovery.credentialVersion > 0
+      ? {
+          credentialId: authRecovery.credentialId,
+          credentialVersion: authRecovery.credentialVersion,
+        }
+      : undefined;
   attempt.triggerEventId = turn.triggerEventId;
   // The durable attempt UUID is stable for a Temporal retry of this activity
   // input and freshly generated for worker-death redispatch/continue-as-new.
@@ -230,25 +266,42 @@ export async function claimTurnAttempt(deps: ClaimTurnDeps): Promise<ClaimTurnOu
   // Therefore every failure with no turnId came from the one atomic claim
   // transaction and can be classified without conflating ordinary runtime
   // or transport failures with admission failures.
-  const session = await requireSession(db, input.workspaceId, input.sessionId);
   let installedApiIntegrations: readonly ApiIntegrationRuntime[] = [];
   const credentialSubjectId = credentialSubjectIdForTurnInitiator(turn);
   const fileAuthoritySubjectId = turn.initiatingHumanSubjectId ?? null;
-  const mcpSettings = await settingsWithEnabledCapabilityMcpServers(
-    db,
-    input.workspaceId,
-    deploymentCatalogSettings,
-    {
-      ...(credentialSubjectId
-        ? { subjectId: credentialSubjectId }
-        : {
-            personalConnectionDelegations: turn.personalConnectionDelegations,
-          }),
-      onResolvedApiIntegrations: (integrations) => {
-        installedApiIntegrations = integrations;
+  // Both are fresh scoped reads on the root pool after exact claim ownership.
+  // Neither consumes the other's result; retain the capability helper's own
+  // subject/delegation authority and await both before credential/policy gates.
+  const [session, mcpSettings] = await Promise.all([
+    measureTurnStartupPhase(
+      observability,
+      {
+        phase: "claim_session_read",
+        provider: "unresolved",
+        backend: turn.sandboxBackend,
       },
-    },
-  );
+      () => requireSession(db, input.workspaceId, input.sessionId),
+    ),
+    measureTurnStartupPhase(
+      observability,
+      {
+        phase: "claim_capability_settings",
+        provider: "unresolved",
+        backend: turn.sandboxBackend,
+      },
+      () =>
+        settingsWithEnabledCapabilityMcpServers(db, input.workspaceId, deploymentCatalogSettings, {
+          ...(credentialSubjectId
+            ? { subjectId: credentialSubjectId }
+            : {
+                personalConnectionDelegations: turn.personalConnectionDelegations,
+              }),
+          onResolvedApiIntegrations: (integrations) => {
+            installedApiIntegrations = integrations;
+          },
+        }),
+    ),
+  ]);
   // Read the active-credential flag once for the runtime capability overlay.
   // Accepted billing/provider identity comes from the turn policy below,
   // never from this mutable health snapshot.
@@ -288,6 +341,17 @@ export async function claimTurnAttempt(deps: ClaimTurnDeps): Promise<ClaimTurnOu
     workspaceProviderSettings,
     claimedPolicy.kind === "valid" ? claimedPolicy.policy.productModelId : turn.model,
   );
+  const selectedDirectConnection = await loadDirectModelProviderConnection(
+    db,
+    capabilitySettings,
+    input.workspaceId,
+    claimedPolicy.kind === "valid" ? claimedPolicy.policy.productModelId : (turn.model ?? ""),
+  );
+  // Execution only needs the selected customer connection. Ordinary turns
+  // must not load or install unrelated workspace provider configurations.
+  if (selectedDirectConnection) {
+    capabilitySettings = withDirectModelProviders(capabilitySettings, [selectedDirectConnection]);
+  }
   const codexAppsCredentialId = capabilitySettings.codexConnectedAppsEnabled
     ? await resolveCodexAppsCredentialIdForRun(db, input.workspaceId)
     : null;
@@ -345,6 +409,9 @@ export async function claimTurnAttempt(deps: ClaimTurnDeps): Promise<ClaimTurnOu
   billingState.countsTowardTokenCap = billingIdentity.countsTowardTokenCap;
   billingState.isCodexTurn = billingIdentity.codexSubscription;
   billingState.isXaiTurn = billingIdentity.xaiSubscription;
+  billingState.isClaudeTurn =
+    verifiedExecutionPolicy.provider.kind === "claude-subscription-workspace" ||
+    verifiedExecutionPolicy.provider.kind === "claude-subscription-organization";
   const trigger = await getSessionEvent(db, input.workspaceId, attempt.triggerEventId);
   if (!trigger) {
     throw new Error(`Trigger event not found: ${attempt.triggerEventId}`);

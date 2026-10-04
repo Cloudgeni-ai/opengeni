@@ -19,6 +19,7 @@ import {
   createScheduledTask,
   withSessionRlsActorContext,
   createOrganizationApiKey,
+  updateOrganizationApiKey,
   ensureExternalIdentity,
   migrate,
   provisionRoles,
@@ -413,7 +414,8 @@ async function waitForBlockedOperations(count: number) {
   while (Date.now() < deadline) {
     const [row] = await shared.admin`select count(*)::int as n from pg_stat_activity
       where datname = current_database() and wait_event_type = 'Lock'
-        and query like '%prepare_external_workspace_membership_operation%'`;
+        and (query like '%prepare_external_workspace_membership_operation%'
+          or query like '%pg_advisory_xact_lock(hashtextextended%')`;
     if (Number(row!.n) >= count) return;
     await Bun.sleep(5);
   }
@@ -436,6 +438,41 @@ test.each(["grant-first", "revoke-first"] as const)(
     if (order === "revoke-first") expect(results[1]).toMatchObject({ status: 409 });
     else expect(results[1]).toMatchObject({ removed: true });
     expect(await f.members()).toEqual([]);
+  },
+  30_000,
+);
+
+test.each(["scope", "permissions"] as const)(
+  "keyed grant rechecks committed policy %s narrowing after request authorization",
+  async (narrowing) => {
+    const f = await fixture();
+    const other = await createWorkspace(db.db, {
+      accountId: f.accountId,
+      name: "Other selected workspace",
+    });
+    let grant!: Promise<unknown>;
+    await shared.admin.begin(async (tx) => {
+      await tx`select pg_advisory_xact_lock(hashtextextended(${`organization-membership:${f.accountId}`}, 0))`;
+      grant = f.add().catch((error: unknown) => error);
+      await waitForBlockedOperations(1);
+      await updateOrganizationApiKey(db.db, f.accountId, f.key.id, {
+        policy: {
+          preset: "custom",
+          permissions:
+            narrowing === "scope"
+              ? ["workspace:read", "members:manage"]
+              : ["workspace:admin", "members:manage"],
+          workspaceScope: {
+            kind: "selected",
+            workspaceIds: [narrowing === "scope" ? other.id : f.workspace.id],
+          },
+        },
+      });
+    });
+    expect(await grant).toMatchObject({ status: 403 });
+    const [members] = await shared.admin`select count(*)::int as n from workspace_memberships
+      where workspace_id = ${f.workspace.id} and subject_id = ${f.identity.subjectId}`;
+    expect(members!.n).toBe(0);
   },
   30_000,
 );

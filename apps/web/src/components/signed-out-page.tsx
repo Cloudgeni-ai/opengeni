@@ -18,8 +18,30 @@ const highlights = [
   { icon: ActivityIcon, text: "Observability out of the box" },
 ];
 
+/** Operator-configured legal documents; absent unless the deployment publishes them. */
+export type SignedOutLegalLinks = {
+  privacyPolicyUrl?: string | undefined;
+  termsOfServiceUrl?: string | undefined;
+};
+
 /** Presentation only: the existing managed or broker panel owns authentication. */
-export function SignedOutPage({ children }: { children: ReactNode }) {
+export function SignedOutPage({
+  children,
+  legalLinks,
+  supportEmail,
+}: {
+  children: ReactNode;
+  legalLinks?: SignedOutLegalLinks | undefined;
+  /** Operator support address, offered as a mailto link when configured. */
+  supportEmail?: string | undefined;
+}) {
+  const legal = [
+    { href: legalLinks?.privacyPolicyUrl, label: "Privacy", external: true },
+    { href: legalLinks?.termsOfServiceUrl, label: "Terms", external: true },
+    { href: supportEmail ? `mailto:${supportEmail}` : undefined, label: "Contact support" },
+  ].filter((link): link is { href: string; label: string; external?: boolean } =>
+    Boolean(link.href),
+  );
   return (
     <div className="min-h-0 flex-1 overflow-y-auto">
       <div className="og-page-glow flex min-h-full flex-col text-fg">
@@ -72,8 +94,24 @@ export function SignedOutPage({ children }: { children: ReactNode }) {
           </div>
         </div>
         <footer className="border-t border-border">
-          <div className="mx-auto flex w-full max-w-[1040px] flex-wrap justify-between gap-3 px-4 py-5 text-xs text-fg-subtle min-[721px]:px-10">
-            <Wordmark className="text-[15px] text-fg-muted" />
+          <div className="mx-auto flex w-full max-w-[1040px] flex-wrap items-center justify-between gap-3 px-4 py-5 text-xs text-fg-subtle min-[721px]:px-10">
+            <div className="flex flex-wrap items-center gap-x-4 gap-y-2">
+              <Wordmark className="text-[15px] text-fg-muted" />
+              {legal.length > 0 ? (
+                <nav aria-label="Legal and support" className="flex items-center gap-4">
+                  {legal.map((link) => (
+                    <a
+                      key={link.label}
+                      href={link.href}
+                      {...(link.external ? { target: "_blank", rel: "noopener noreferrer" } : {})}
+                      className="underline-offset-4 hover:text-fg hover:underline"
+                    >
+                      {link.label}
+                    </a>
+                  ))}
+                </nav>
+              ) : null}
+            </div>
             <span>Your conversations. Your projects. One workspace.</span>
           </div>
         </footer>

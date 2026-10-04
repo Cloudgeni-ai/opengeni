@@ -1,7 +1,4 @@
-import {
-  OpenGeniSlackBotInstallStart,
-  OPENGENI_SLACK_BOT_REQUESTED_SCOPES,
-} from "@opengeni/contracts";
+import { OpenGeniSlackBotInstallStart, openGeniSlackBotRequestedScopes } from "@opengeni/contracts";
 import { ExternalActorContinuation } from "@opengeni/contracts/external-identities";
 import {
   isOpenGeniSlackBotConnection,
@@ -73,7 +70,10 @@ export async function startSlackBotInstall(
   });
   const url = new URL("https://slack.com/oauth/v2/authorize");
   url.searchParams.set("client_id", slack.clientId);
-  url.searchParams.set("scope", OPENGENI_SLACK_BOT_REQUESTED_SCOPES.join(","));
+  url.searchParams.set(
+    "scope",
+    openGeniSlackBotRequestedScopes(deps.settings.slackAccessMode).join(","),
+  );
   url.searchParams.set("redirect_uri", redirectUri);
   url.searchParams.set("state", state);
   return OpenGeniSlackBotInstallStart.parse({

@@ -513,6 +513,13 @@ case ",${OPENGENI_LOCAL_ALLOWED_ORIGINS:-}," in
 *) OPENGENI_LOCAL_ALLOWED_ORIGINS="${OPENGENI_LOCAL_ALLOWED_ORIGINS:+${OPENGENI_LOCAL_ALLOWED_ORIGINS},}${local_web_origin}" ;;
 esac
 export OPENGENI_LOCAL_ALLOWED_ORIGINS
+# Better Auth checks the browser Origin independently of the API CORS policy.
+# A managed local stack must trust the web server it just selected. Keep an
+# explicit operator-provided trusted-origin list authoritative.
+if [ "${OPENGENI_PRODUCT_ACCESS_MODE:-local}" = "managed" ] &&
+  [ -z "${OPENGENI_BETTER_AUTH_TRUSTED_ORIGINS:-}" ]; then
+  export OPENGENI_BETTER_AUTH_TRUSTED_ORIGINS="$OPENGENI_WEB_BASE_URL"
+fi
 
 # Host workers always reach first-party MCP through this worktree's API port.
 # OPENGENI_MCP_URL may later become a public Cloudflare edge for Modal and must
@@ -1189,6 +1196,9 @@ fi
   printf 'OPENGENI_WEB_PORT=%s\n' "${OPENGENI_WEB_PORT}"
   printf 'OPENGENI_WEB_BASE_URL=%s\n' "${OPENGENI_WEB_BASE_URL}"
   printf 'OPENGENI_LOCAL_ALLOWED_ORIGINS=%s\n' "${OPENGENI_LOCAL_ALLOWED_ORIGINS}"
+  if [ -n "${OPENGENI_BETTER_AUTH_TRUSTED_ORIGINS:-}" ]; then
+    printf 'OPENGENI_BETTER_AUTH_TRUSTED_ORIGINS=%s\n' "${OPENGENI_BETTER_AUTH_TRUSTED_ORIGINS}"
+  fi
   if [ -n "${OPENGENI_SANDBOX_EDGE_PORT:-}" ]; then
     printf 'OPENGENI_SANDBOX_EDGE_PORT=%s\n' "${OPENGENI_SANDBOX_EDGE_PORT}"
   fi

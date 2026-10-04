@@ -454,6 +454,47 @@ describe("applyConnectedModelToNewSessionDraft", () => {
   });
 });
 
+test("onboarding selects the newly saved provider instead of an unrelated existing subscription", async () => {
+  const saveNewSessionDraft = mock(async () => undefined);
+  const id = "workspace-openai-00000000-0000-4000-8000-000000000001/1/gpt-6-sol";
+  const client = {
+    getWorkspaceModelCatalog: async () => ({
+      models: [
+        catalogModel({
+          id: "codex/existing",
+          provider: "codex",
+          cost: "subscription",
+          source: "codex",
+        }),
+        catalogModel({
+          id,
+          provider: id.split("/")[0]!,
+          source: undefined,
+          cost: "workspace",
+          billing: { upstreamPayer: "workspace", metering: "external" },
+        }),
+      ],
+    }),
+    getNewSessionDraft: async () => ({
+      revision: 1,
+      text: "draft",
+      resources: [],
+      tools: [],
+      toolsProvided: false,
+      options: {},
+      latencyMode: "standard",
+    }),
+    saveNewSessionDraft,
+  };
+  expect(
+    await applyConnectedModelToNewSessionDraft(client as never, "workspace", "openai", id),
+  ).toEqual({ id, label: id });
+  expect(saveNewSessionDraft).toHaveBeenCalledWith(
+    "workspace",
+    expect.objectContaining({ model: id, text: "draft" }),
+  );
+});
+
 describe("onboarding draft authority", () => {
   test("does not touch the draft when there is no selectable connected model", async () => {
     const getNewSessionDraft = mock(async () => {

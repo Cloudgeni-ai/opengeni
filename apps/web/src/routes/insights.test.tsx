@@ -1,134 +1,29 @@
 import { afterAll, beforeAll, beforeEach, describe, expect, mock, test } from "bun:test";
 import { GlobalRegistrator } from "@happy-dom/global-registrator";
-import type { WorkspaceInsightsSnapshot } from "@opengeni/sdk";
 import { act } from "react";
 import { createRoot } from "react-dom/client";
 
 const workspaceId = "22222222-2222-4222-8222-222222222222";
 let canRead = true;
-let nextSnapshot: WorkspaceInsightsSnapshot;
-let nextError: Error | null = null;
-let pendingResponse: Promise<never> | null = null;
 
-const getWorkspaceInsights = mock(async () => {
-  if (pendingResponse) return pendingResponse;
-  if (nextError) throw nextError;
-  return { snapshot: nextSnapshot };
-});
-
+const requestJson = mock(async () => new Promise<never>(() => undefined));
+const getWorkspaceInsights = mock(async () => new Promise<never>(() => undefined));
+const getWorkspaceModelCatalog = mock(async () => ({ models: [] }));
 const context = {
-  workspaces: [{ id: workspaceId, name: "Product" }],
+  workspaces: [
+    { id: workspaceId, name: "Product", accountId: "33333333-3333-4333-8333-333333333333" },
+  ],
   get accessContext() {
     return {
       workspaceGrants: [{ workspaceId, permissions: canRead ? ["workspace:admin"] : [] }],
     };
   },
-  client: { getWorkspaceInsights },
+  client: { requestJson, getWorkspaceInsights, getWorkspaceModelCatalog },
 };
 mock.module("@/context", () => ({ useAppContext: () => context }));
-// Chart interaction and animated counting have their own component tests; these
-// route tests exercise the real toolbar, states, tables, and request wiring.
-mock.module("@/components/insights/charts", () => ({
-  AreaChart: () => <div data-test-chart="area" />,
-  DonutChart: () => <div data-test-chart="donut" />,
-  UsageMeter: ({ label }: { label: string }) => <div>{label}</div>,
-  donutTone: () => "text-brand",
-}));
-mock.module("@/components/insights/count-up", () => ({
-  CountUp: ({ value }: { value: number }) => <span>{value}</span>,
-}));
-mock.module("@/components/insights/causal-sheet", () => ({ CausalSheet: () => null }));
 const navigate = mock(async (_options: unknown) => undefined);
 const RouterPackage = await import("@tanstack/react-router");
 mock.module("@tanstack/react-router", () => ({ ...RouterPackage, useNavigate: () => navigate }));
-
-function snapshot(overrides: Partial<WorkspaceInsightsSnapshot> = {}): WorkspaceInsightsSnapshot {
-  return {
-    range: "week",
-    rangeLabel: "Last 7 days (UTC)",
-    priorLabel: "Prior 7 days",
-    seriesLabel: "Token usage / UTC day",
-    cacheSeriesLabel: "Cache hit % / UTC day",
-    windowStart: "2026-09-18T00:00:00.000Z",
-    windowEnd: "2026-09-25T00:00:00.000Z",
-    generatedAt: "2026-09-25T00:00:00.000Z",
-    timezone: "UTC",
-    models: [
-      {
-        id: "openai:gpt-5:opengeni_credits",
-        model: "gpt-5",
-        provider: "openai",
-        billing: "opengeni_credits",
-        calls: 10,
-        inputTokens: 1000,
-        outputTokens: 100,
-        cachedTokens: 400,
-        cacheInputTokens: 1000,
-        cacheWriteTokens: 0,
-        reasoningTokens: 0,
-        totalTokens: 1100,
-        tokenKnownCalls: 10,
-        cacheKnownCalls: 10,
-        creditUsd: 2.5,
-        estimatedProviderUsd: 2,
-        estimatedProviderCostKnownCalls: 8,
-        equivalentCreditUsd: 2.1,
-        equivalentCreditCostKnownCalls: 8,
-      },
-    ],
-    facets: [{ provider: "openai", model: "gpt-5" }],
-    series: [],
-    depth: [],
-    drivers: [],
-    schedules: [],
-    recentCalls: [],
-    promptContributions: {
-      estimatedTokens: 0,
-      utf8Bytes: 0,
-      coveredCalls: 0,
-      totalCalls: 0,
-      sources: [],
-    },
-    warmSeconds: 0,
-    priorWarmSeconds: 0,
-    warmGroups: [],
-    liveWarm: [],
-    floor: [],
-    selfhostedEnabled: false,
-    machinesOnline: 0,
-    workspaceCreditUsd: 3,
-    priorWorkspaceCreditUsd: 1,
-    creditUsd: 2.5,
-    priorCreditUsd: 1,
-    estimatedProviderUsd: 2,
-    priorEstimatedProviderUsd: 1,
-    estimatedProviderCostKnownCalls: 8,
-    priorEstimatedProviderCostKnownCalls: 4,
-    equivalentCreditUsd: 2.1,
-    priorEquivalentCreditUsd: 1.05,
-    equivalentCreditCostKnownCalls: 8,
-    priorEquivalentCreditCostKnownCalls: 4,
-    modelCalls: 10,
-    priorInputTokens: 500,
-    priorTotalTokens: 550,
-    priorCacheHitPct: 20,
-    priorCalls: 4,
-    goalsActive: 1,
-    goalsCompleted: 2,
-    sessionsTouched: 3,
-    rootSessions: 3,
-    deepestDepth: 0,
-    deepestSessionTitle: "",
-    avgDepth: 0,
-    warmIdleNow: 0,
-    billableTokensUsed: 1000,
-    billableTokenCap: 10_000,
-    agentRunsUsed: 5,
-    agentRunCap: 100,
-    modelFilterActive: false,
-    ...overrides,
-  };
-}
 
 beforeAll(() => {
   GlobalRegistrator.register();
@@ -136,7 +31,7 @@ beforeAll(() => {
     globalThis as typeof globalThis & { IS_REACT_ACT_ENVIRONMENT: boolean }
   ).IS_REACT_ACT_ENVIRONMENT = true;
   window.matchMedia = ((query: string) => ({
-    matches: query.includes("prefers-reduced-motion"),
+    matches: false,
     media: query,
     onchange: null,
     addListener() {},
@@ -154,20 +49,19 @@ afterAll(() => {
 
 beforeEach(() => {
   canRead = true;
-  nextSnapshot = snapshot();
-  nextError = null;
-  pendingResponse = null;
+  requestJson.mockClear();
   getWorkspaceInsights.mockClear();
+  navigate.mockClear();
 });
 
-const { InsightsRoute } = await import("./insights");
+const { InsightsRoute, parseInsightsSearch } = await import("./insights");
 
-async function renderRoute(returnTo?: { path: string; label: string }) {
+async function renderRoute(props: Partial<Parameters<typeof InsightsRoute>[0]> = {}) {
   const container = document.createElement("div");
   document.body.append(container);
   const root = createRoot(container);
   await act(async () => {
-    root.render(<InsightsRoute workspaceId={workspaceId} returnTo={returnTo} />);
+    root.render(<InsightsRoute workspaceId={workspaceId} {...props} />);
   });
   return {
     container,
@@ -178,142 +72,55 @@ async function renderRoute(returnTo?: { path: string; label: string }) {
   };
 }
 
-async function click(button: HTMLButtonElement | null) {
-  expect(button).not.toBeNull();
-  await act(async () => {
-    button?.click();
+describe("Insights route", () => {
+  test("Usage loads the usage query; Activity loads the workspace snapshot", async () => {
+    const usage = await renderRoute({ search: {} });
+    try {
+      expect(requestJson).toHaveBeenCalledTimes(1);
+      expect(getWorkspaceInsights).not.toHaveBeenCalled();
+      expect(usage.container.querySelector('[role="status"]')?.textContent).toBe(
+        "Loading Insights",
+      );
+    } finally {
+      await usage.unmount();
+    }
+    const activity = await renderRoute({ search: { view: "activity" } });
+    try {
+      expect(getWorkspaceInsights).toHaveBeenCalledTimes(1);
+    } finally {
+      await activity.unmount();
+    }
   });
-}
 
-describe("Insights route presentation", () => {
-  test("shows a skeleton during the initial request", async () => {
-    pendingResponse = new Promise<never>(() => undefined);
+  test("shows a calm permission line without requesting usage", async () => {
+    canRead = false;
     const rendered = await renderRoute();
     try {
-      expect(
-        rendered.container.querySelector(
-          '[role="status"][aria-label="Loading workspace insights"]',
-        ),
-      ).not.toBeNull();
-      expect(rendered.container.querySelectorAll('[data-slot="skeleton"]')).toHaveLength(4);
-      expect(getWorkspaceInsights).toHaveBeenCalledTimes(1);
+      expect(rendered.container.textContent).toContain("Only workspace admins can see Insights");
+      expect(requestJson).not.toHaveBeenCalled();
     } finally {
       await rendered.unmount();
     }
   });
 
-  test("opened from Billing & usage, the back link returns there", async () => {
+  test("opened from Billing, the back link returns there", async () => {
     const rendered = await renderRoute({
-      path: "/workspaces/w/organization?section=billing",
-      label: "Billing & usage",
+      returnTo: { path: "/workspaces/w/organization?section=billing", label: "Billing" },
     });
     try {
       const back = Array.from(rendered.container.querySelectorAll("button")).find(
-        (button) => button.textContent === "Billing & usage",
+        (button) => button.textContent === "Billing",
       );
-      await click(back ?? null);
+      await act(async () => back?.click());
       expect(navigate).toHaveBeenCalledWith({ href: "/workspaces/w/organization?section=billing" });
     } finally {
       await rendered.unmount();
     }
-    const plain = await renderRoute();
-    try {
-      expect(plain.container.textContent).not.toContain("Billing & usage");
-    } finally {
-      await plain.unmount();
-    }
   });
 
-  test("shows a permission message without requesting usage", async () => {
-    canRead = false;
-    const rendered = await renderRoute();
-    try {
-      expect(rendered.container.querySelector('[role="alert"]')?.textContent).toContain(
-        "Workspace access required",
-      );
-      expect(getWorkspaceInsights).not.toHaveBeenCalled();
-    } finally {
-      await rendered.unmount();
-    }
-  });
-
-  test("retries a failed load through the same insights API", async () => {
-    nextError = new Error("Service unavailable");
-    const rendered = await renderRoute();
-    try {
-      expect(rendered.container.querySelector('[role="alert"]')?.textContent).toContain(
-        "Insights couldn't load",
-      );
-      expect(rendered.container.textContent).not.toContain("Service unavailable");
-      nextError = null;
-      await click(rendered.container.querySelector<HTMLButtonElement>("button"));
-      expect(getWorkspaceInsights).toHaveBeenCalledTimes(2);
-      expect(rendered.container.textContent).toContain("Total tokens");
-    } finally {
-      await rendered.unmount();
-    }
-  });
-
-  test("a refusal from the server reads as missing access, without the raw API string", async () => {
-    nextError = Object.assign(
-      new Error("OpenGeni API 403: missing permission: workspace:admin Reference: req_403."),
-      { status: 403 },
-    );
-    const rendered = await renderRoute();
-    try {
-      const alert = rendered.container.querySelector('[role="alert"]')?.textContent ?? "";
-      expect(alert).toContain("Workspace access required");
-      expect(alert).not.toContain("Insights couldn't load");
-      expect(rendered.container.textContent).not.toContain("OpenGeni API");
-      expect(rendered.container.textContent).not.toContain("req_403");
-      expect(rendered.container.querySelector("button")).toBeNull();
-    } finally {
-      nextError = null;
-      await rendered.unmount();
-    }
-  });
-
-  test("keeps filters, measure, and range available when usage is empty", async () => {
-    nextSnapshot = snapshot({ models: [], modelCalls: 0 });
-    const rendered = await renderRoute();
-    try {
-      expect(rendered.container.textContent).toContain("No model calls in this window");
-      expect(rendered.container.querySelectorAll("select")).toHaveLength(2);
-      expect(
-        rendered.container.querySelector('[role="group"][aria-label="Usage measure"]'),
-      ).not.toBeNull();
-      expect(
-        rendered.container.querySelector('[role="group"][aria-label="Time range"]'),
-      ).not.toBeNull();
-      expect(
-        rendered.container.querySelector('[role="region"][aria-label="Usage by model"]'),
-      ).not.toBeNull();
-    } finally {
-      await rendered.unmount();
-    }
-  });
-
-  test("filters through a keyboard-reachable model action and preserves request shape", async () => {
-    const rendered = await renderRoute();
-    try {
-      const button = rendered.container.querySelector<HTMLButtonElement>(
-        'button[aria-label="Filter by gpt-5 from OpenAI"]',
-      );
-      await click(button);
-      expect(getWorkspaceInsights).toHaveBeenLastCalledWith(
-        workspaceId,
-        expect.objectContaining({
-          range: "week",
-          provider: "openai",
-          model: "gpt-5",
-          signal: expect.any(AbortSignal),
-        }),
-      );
-      expect(
-        rendered.container.querySelector<HTMLButtonElement>('button[aria-pressed="true"]'),
-      ).not.toBeNull();
-    } finally {
-      await rendered.unmount();
-    }
+  test("the URL selection keeps the tab and the dashboard keys", () => {
+    expect(
+      parseInsightsSearch({ view: "activity", range: "ytd", group: "person", bogus: "1" }),
+    ).toEqual({ view: "activity", range: "ytd", group: "person" });
   });
 });

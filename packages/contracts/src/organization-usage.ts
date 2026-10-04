@@ -49,6 +49,18 @@ export const OrganizationUsageSummary = z.object({
   personalWorkspaces: z.array(OrganizationUsagePersonalWorkspace).max(50).default([]),
   /** How many Personal workspaces had usage in the period, listed or not. */
   personalWorkspaceCount: z.number().int().nonnegative().default(0),
+  /** Other people's Only-me chats in shared workspaces: member amounts only. */
+  privateChats: z
+    .array(
+      z.object({
+        workspaceId: z.string().uuid(),
+        membershipId: z.string().uuid().nullable(),
+        name: z.string().nullable(),
+        totals: z.array(OrganizationUsageTotal),
+      }),
+    )
+    .default([]),
+  privateChatsTruncated: z.boolean().default(false),
 });
 export type OrganizationUsageSummary = z.infer<typeof OrganizationUsageSummary>;
 
@@ -61,5 +73,7 @@ export const OrganizationUsageWorkspacePage = OrganizationUsageSummary.omit({
   buckets: true,
   personalWorkspaces: true,
   personalWorkspaceCount: true,
+  privateChats: true,
+  privateChatsTruncated: true,
 });
 export type OrganizationUsageWorkspacePage = z.infer<typeof OrganizationUsageWorkspacePage>;

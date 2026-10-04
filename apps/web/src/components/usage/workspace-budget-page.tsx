@@ -20,7 +20,7 @@ import { MemberLimitsSection, type MemberName } from "./member-limits-section";
 import { useWorkspaceBudget } from "./use-workspace-budget";
 
 /**
- * Organization settings > Billing & usage > one workspace: its monthly budget,
+ * Organization settings > Billing > one workspace: its monthly budget,
  * this month's usage, and every member against their own limit.
  */
 export function WorkspaceBudgetPage({
@@ -47,7 +47,7 @@ export function WorkspaceBudgetPage({
     "workspace:admin",
   );
   const budget = useWorkspaceBudget(context.client, workspaceId, { roster: true, budget: true });
-  const back = { label: "Billing & usage", onClick: onBack };
+  const back = { label: "Billing", onClick: onBack };
 
   const names = useMemo(() => {
     const map = new Map<string, MemberName>();
@@ -75,7 +75,7 @@ export function WorkspaceBudgetPage({
           icon={<SquareStackIcon />}
           title="This workspace is gone"
           description="It may have been deleted. Budgets apply to shared workspaces in this organization."
-          action={<RowButton onClick={onBack}>Back to Billing & usage</RowButton>}
+          action={<RowButton onClick={onBack}>Back to Billing</RowButton>}
         />
       </DetailPage>
     );

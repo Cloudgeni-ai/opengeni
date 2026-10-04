@@ -25,15 +25,20 @@ export {
 export function projectClientModel(model: ConfiguredModel): ClientModel {
   const anonymousProvider =
     model.credentialSource.kind === "deployment" && model.credentialSource.mechanism === "none";
+  const directProvider =
+    model.providerId.startsWith("workspace-openai-") ||
+    model.providerId.startsWith("workspace-azure-openai-");
   const organizationProvider = model.credentialSource.kind === "organization_connection";
   // Keep the established closed `source` enum compatible for older same-major
   // clients. OpenRouter remains truthfully identified by its public provider
   // id/label and billing metadata; omitting this optional legacy grouping field
   // lets tolerant older contracts parse the additive provider.
   const source =
+    directProvider ||
     organizationProvider ||
     model.providerId === "workspace-anthropic" ||
     model.providerId === "workspace-claude-subscription" ||
+    model.providerId === "organization-claude-subscription" ||
     model.providerId === OPENROUTER_PROVIDER_ID ||
     model.providerId === WORKSPACE_OPENROUTER_PROVIDER_ID
       ? undefined
@@ -47,10 +52,12 @@ export function projectClientModel(model: ConfiguredModel): ClientModel {
             ? undefined
             : "opengeni";
   const publicProvider =
+    directProvider ||
     anonymousProvider ||
     organizationProvider ||
     model.providerId === "workspace-anthropic" ||
-    model.providerId === "workspace-claude-subscription"
+    model.providerId === "workspace-claude-subscription" ||
+    model.providerId === "organization-claude-subscription"
       ? { provider: model.providerId, providerLabel: model.providerLabel }
       : model.providerId === OPENROUTER_PROVIDER_ID
         ? { provider: "openrouter", providerLabel: "OpenRouter" }

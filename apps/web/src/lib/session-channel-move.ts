@@ -1,12 +1,13 @@
+import type { Session as SessionDetails } from "@/types";
 import type { GetSessionOptions } from "@opengeni/sdk/browser";
-import type { Session } from "@/types";
+import type { RailSession as Session } from "./session-list-entry";
 
 type SessionChannelPointReadClient = {
   getSession: (
     workspaceId: string,
     sessionId: string,
     options?: GetSessionOptions,
-  ) => Promise<Session>;
+  ) => Promise<SessionDetails>;
 };
 
 export type SessionChannelMoveOverride = Readonly<{
@@ -23,7 +24,7 @@ export function readSessionChannelMovePoint(
   workspaceId: string,
   sessionId: string,
   onRequestStart?: () => void,
-): Promise<Session> {
+): Promise<SessionDetails> {
   return client.getSession(workspaceId, sessionId, {
     fresh: true,
     ...(onRequestStart ? { onRequestStart } : {}),
@@ -31,10 +32,10 @@ export function readSessionChannelMovePoint(
 }
 
 /** Project one in-flight or committed move over a possibly stale list row. */
-export function applySessionChannelMove(
-  session: Session,
+export function applySessionChannelMove<T extends Session>(
+  session: T,
   override: SessionChannelMoveOverride | undefined,
-): Session {
+): T {
   if (!override || session.channelId === override.channelId) return session;
   return { ...session, channelId: override.channelId };
 }

@@ -1,7 +1,7 @@
 import { Link } from "@tanstack/react-router";
 import { PanelsTopLeftIcon } from "lucide-react";
 import { sessionSiteOrigin } from "@/lib/session-site-origin";
-import type { Session } from "@/types";
+import type { RailSession as Session } from "@/lib/session-list-entry";
 export function SiteOriginLink({
   session,
   compact = false,

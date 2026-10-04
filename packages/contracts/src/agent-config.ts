@@ -176,10 +176,12 @@ export const UpdateSessionAgentRequest = z
   .strict();
 export type UpdateSessionAgentRequest = z.infer<typeof UpdateSessionAgentRequest>;
 
-/** Client-safe rollout projection. */
+/** Client-safe agent-configuration projection. */
 export const ClientAgentConfig = z
   .object({
+    /** @deprecated Agent configuration is always on; servers always report `true`. */
     enabled: z.boolean(),
+    /** @deprecated Omitted `agent` always resolves `{ capabilities: "all" }`; always `true`. */
     defaultForNewSessions: z.boolean(),
     capabilities: z.array(
       z
@@ -308,6 +310,8 @@ export const FIRST_PARTY_MCP_TOOL_CAPABILITIES = {
   browser_act: "browser",
   browser_clipboard: "browser",
   browser_debug: "browser",
+  browser_downloads: "browser",
+  browser_download_save: "browser",
   browser_auth: "browser",
   interaction_request_human: "browser",
   browser_identity: "browser",
@@ -654,6 +658,7 @@ export const AGENT_PROMPT_MODULE_IDS = [
   "workspace_environment",
   "rig",
   "artifacts",
+  "media",
   "goals",
   "subagents",
   "knowledge",
@@ -674,6 +679,7 @@ export const AGENT_PROMPT_MODULE_TITLES: Readonly<Record<AgentPromptModuleId, st
   workspace_environment: "Workspace environment",
   rig: "Sandbox environment",
   artifacts: "Documents, files, and visuals",
+  media: "Images and video",
   goals: "Goals",
   subagents: "Session coordination",
   knowledge: "Knowledge",
@@ -687,6 +693,7 @@ export const AGENT_CAPABILITY_PROMPT_MODULES: Readonly<
   Partial<Record<AgentCapabilityId, readonly AgentPromptModuleId[]>>
 > = {
   artifacts: ["artifacts"],
+  media: ["media"],
   goals: ["goals"],
   subagents: ["subagents"],
   knowledge: ["knowledge"],
@@ -702,7 +709,6 @@ export const AgentConfigErrorCode = z.enum([
   "agent_capability_unavailable",
   "agent_config_conflict",
   "agent_config_widening",
-  "agent_config_not_enabled",
 ]);
 export type AgentConfigErrorCode = z.infer<typeof AgentConfigErrorCode>;
 
@@ -856,10 +862,7 @@ export type ResolveAgentConfigInput = {
   /** The legacy session `instructions` field (alias target). */
   instructions?: string | undefined;
   workspace: AgentConfigWorkspaceContext;
-  deployment: AgentConfigDeploymentLimits & {
-    admissionEnabled: boolean;
-    defaultForNewSessions: boolean;
-  };
+  deployment: AgentConfigDeploymentLimits;
   /** Undefined for a top-level session. */
   parent?: AgentConfigParent | undefined;
   /** Whether the new session carries a goal. */
@@ -948,19 +951,13 @@ function resolveInstructionsAlias(
  * Resolve the frozen agent configuration for a new session.
  *
  * Order: deployment limits, then the workspace default, then the request, then
- * the parent (children only narrow). Returns `config: null` (exact legacy)
- * when nothing asks for a configuration: no request `agent`, no configured
- * parent, no honored workspace default, and the default-for-new-sessions
- * switch off (or a legacy parent, which keeps its tree legacy).
+ * the parent (children only narrow). An omitted `agent` on a top-level
+ * session resolves the workspace default, else `{ capabilities: "all" }`.
+ * Returns `config: null` (exact legacy) only under a legacy parent, which
+ * keeps its tree legacy, and for site-auth maintenance sessions.
  */
 export function resolveAgentConfig(input: ResolveAgentConfigInput): ResolveAgentConfigResult {
   const { request } = input;
-  if (request !== undefined && !input.deployment.admissionEnabled) {
-    throw new AgentConfigError(
-      "agent_config_not_enabled",
-      "agent configuration is not enabled on this deployment",
-    );
-  }
   const instructions = resolveInstructionsAlias(request, input.instructions);
   const requestConfigFields =
     request !== undefined &&
@@ -970,7 +967,7 @@ export function resolveAgentConfig(input: ResolveAgentConfigInput): ResolveAgent
       request.instructions !== undefined);
 
   const parent = input.parent;
-  const workspaceDefaults = input.deployment.admissionEnabled ? input.workspace.defaults : null;
+  const workspaceDefaults = input.workspace.defaults;
 
   // --- Omitted agent ---------------------------------------------------------
   if (!requestConfigFields) {
@@ -991,11 +988,8 @@ export function resolveAgentConfig(input: ResolveAgentConfigInput): ResolveAgent
       const config = resolveTopLevel(input, workspaceDefaults, "workspace_default");
       return { config, instructions };
     }
-    if (input.deployment.defaultForNewSessions) {
-      const config = resolveTopLevel(input, { capabilities: "all" }, "deployment_default");
-      return { config, instructions };
-    }
-    return { config: null, instructions };
+    const config = resolveTopLevel(input, { capabilities: "all" }, "deployment_default");
+    return { config, instructions };
   }
 
   // --- Explicit agent ---------------------------------------------------------
@@ -1118,18 +1112,12 @@ export function resolveAgentConfigUpdate(input: {
   current: ResolvedAgentConfig | null;
   legacyCeiling: ResolvedAgentCapabilities;
   request: AgentConfigRequest;
-  deployment: AgentConfigDeploymentLimits & { admissionEnabled: boolean };
+  deployment: AgentConfigDeploymentLimits;
   onlyNarrow: boolean;
   /** A parent's configuration or legacy ceiling; children never widen past it. */
   parentCeiling?: ResolvedAgentCapabilities | undefined;
   goal: boolean;
 }): ResolvedAgentConfig {
-  if (!input.deployment.admissionEnabled) {
-    throw new AgentConfigError(
-      "agent_config_not_enabled",
-      "agent configuration is not enabled on this deployment",
-    );
-  }
   const current: ResolvedAgentConfig = input.current ?? {
     version: 1,
     from: "all",

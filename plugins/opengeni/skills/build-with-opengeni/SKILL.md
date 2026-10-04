@@ -27,6 +27,14 @@ hello world below. Without these files, fetch
 https://docs.opengeni.ai/llms.txt and the canonical guide at
 https://github.com/Cloudgeni-ai/opengeni/tree/main/.agents/skills/opengeni-client.
 
+When the `opengeni` MCP tools are available (this plugin connects them), use
+them to inspect and act on the user's OpenGeni organization while you build:
+find an action with `opengeni_actions_search`, read it with
+`opengeni_action_describe`, run it with `opengeni_action_call`, instead of
+hand-writing API calls. The first use opens a browser sign-in where the user
+chooses what the agent may access. The product's own code still uses its
+server-side API key.
+
 ## Quick local demo app
 
 If the user asks for a small, local, or demo web app with an OpenGeni agent
@@ -42,11 +50,12 @@ every chat becomes a session in the given workspace. It needs
 - Inspect the product first: framework, auth, tenancy model, data routes,
   package manager, tests, and deployment. Never ask what the repository
   answers.
-- Four choices belong to the user. If the request or repository does not
-  settle them, ask once, in one bundled question with a recommended answer for
-  each: who shares agents and chats (per user or shared per tenant), when work
-  runs (on demand, schedules, events), where outputs land, and whether the
-  agent may write or act.
+- Two choices belong to the user: who can see a chat (per user or shared per
+  tenant) and whether the agent may change data or act. Ask once, in one short
+  plain-language question with a recommended answer, only about what the
+  request or repository does not settle. Don't ask about background work,
+  schedules or session length up front; long sessions just work. Ask about
+  timing only when the requested feature itself is scheduled.
 - Trust the installed package types, `GET /v1/config/client`, and
   `GET /v1/access/me` over memory. Pin `@opengeni/sdk` and `@opengeni/react` to
   the same release.

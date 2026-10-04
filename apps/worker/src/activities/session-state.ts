@@ -6,19 +6,23 @@ import {
   blockSessionWorkBeforeAttemptClaim,
   requestSessionTurnRecovery,
   recoverSessionDispatch,
+  reconcileSettledSessionAttempt,
   reconcileSessionAttemptQuiescence,
+  reconcileCompletedSandboxSetup,
   peekSessionWork as peekSessionWorkDb,
   settleSessionInputWait as settleSessionInputWaitDb,
   countQueuedTurns,
   getSessionAttemptActivityRef,
   getSessionEvent,
   getSessionTurnForAttempt,
+  getWorkspace,
   expireSessionInteractionIntervention as expireSessionInteractionInterventionDb,
   expireScheduledRunHumanWait as expireScheduledRunHumanWaitDb,
   expireSessionHumanInputRequest,
   markSessionAttemptQuiesced,
   requireSession,
   settleSessionIdleWithParentOutbox,
+  SANDBOX_SETUP_RECOVERY_LIMIT,
 } from "@opengeni/db";
 import { publishDurableSessionEvents } from "@opengeni/events";
 import { CancelledFailure } from "@temporalio/activity";
@@ -45,6 +49,8 @@ import type {
   PersistSessionAttemptQuiescenceInput,
   ReconcileSessionAttemptQuiescenceInput,
   ReconcileSessionAttemptQuiescenceResult,
+  ReconcileSettledSessionAttemptInput,
+  ReconcileSettledSessionAttemptResult,
   RecoverDispatchInput,
   RecoverDispatchResult,
   RecoverEscapedMcpTimeoutInput,
@@ -61,13 +67,16 @@ export type SessionStateActivityOverrides = Partial<{
   blockSessionWorkBeforeAttemptClaim: typeof blockSessionWorkBeforeAttemptClaim;
   requestSessionTurnRecovery: typeof requestSessionTurnRecovery;
   recoverSessionDispatch: typeof recoverSessionDispatch;
+  reconcileSettledSessionAttempt: typeof reconcileSettledSessionAttempt;
   reconcileSessionAttemptQuiescence: typeof reconcileSessionAttemptQuiescence;
+  reconcileCompletedSandboxSetup: typeof reconcileCompletedSandboxSetup;
   peekSessionWork: typeof peekSessionWorkDb;
   settleSessionInputWait: typeof settleSessionInputWaitDb;
   countQueuedTurns: typeof countQueuedTurns;
   getSessionAttemptActivityRef: typeof getSessionAttemptActivityRef;
   getSessionEvent: typeof getSessionEvent;
   getSessionTurnForAttempt: typeof getSessionTurnForAttempt;
+  getWorkspace: typeof getWorkspace;
   expireSessionHumanInputRequest: typeof expireSessionHumanInputRequest;
   expireSessionInteractionIntervention: typeof expireSessionInteractionInterventionDb;
   expireScheduledRunHumanWait: typeof expireScheduledRunHumanWaitDb;
@@ -104,15 +113,20 @@ export function createSessionStateActivities(
   const requestSessionTurnRecoveryFn =
     overrides.requestSessionTurnRecovery ?? requestSessionTurnRecovery;
   const recoverSessionDispatchFn = overrides.recoverSessionDispatch ?? recoverSessionDispatch;
+  const reconcileSettledSessionAttemptFn =
+    overrides.reconcileSettledSessionAttempt ?? reconcileSettledSessionAttempt;
   const reconcileSessionAttemptQuiescenceFn =
     overrides.reconcileSessionAttemptQuiescence ?? reconcileSessionAttemptQuiescence;
   const peekSessionWorkFn = overrides.peekSessionWork ?? peekSessionWorkDb;
+  const reconcileCompletedSandboxSetupFn =
+    overrides.reconcileCompletedSandboxSetup ?? reconcileCompletedSandboxSetup;
   const settleSessionInputWaitFn = overrides.settleSessionInputWait ?? settleSessionInputWaitDb;
   const countQueuedTurnsFn = overrides.countQueuedTurns ?? countQueuedTurns;
   const getSessionAttemptActivityRefFn =
     overrides.getSessionAttemptActivityRef ?? getSessionAttemptActivityRef;
   const getSessionEventFn = overrides.getSessionEvent ?? getSessionEvent;
   const getSessionTurnForAttemptFn = overrides.getSessionTurnForAttempt ?? getSessionTurnForAttempt;
+  const getWorkspaceFn = overrides.getWorkspace ?? getWorkspace;
   const expireSessionHumanInputRequestFn =
     overrides.expireSessionHumanInputRequest ?? expireSessionHumanInputRequest;
   const expireSessionInteractionInterventionFn =
@@ -239,6 +253,9 @@ export function createSessionStateActivities(
       turn.triggerEventId === postClaimRecovery.triggerEventId &&
       turn.executionGeneration === postClaimRecovery.executionGeneration,
     );
+    if (postClaimRecovery?.sandboxSetupRecoveryExhausted && !postClaimIdentityMatches) {
+      return { action: "stale" };
+    }
     const providerRecoveryCount = postClaimIdentityMatches
       ? postClaimRecovery?.providerRecoveryCount
       : undefined;
@@ -249,7 +266,15 @@ export function createSessionStateActivities(
     const hasProviderFailureCode = providerFailureCode !== undefined;
     const setupOutcomeUnknown =
       postClaimIdentityMatches && postClaimRecovery?.sandboxSetupOutcomeUnknown === true;
-    if (setupOutcomeUnknown && (hasProviderRecoveryCount || hasProviderFailureCode)) {
+    const setupRecoveryExhausted =
+      postClaimIdentityMatches && postClaimRecovery?.sandboxSetupRecoveryExhausted === true;
+    if (
+      (setupOutcomeUnknown && setupRecoveryExhausted) ||
+      ((setupOutcomeUnknown || setupRecoveryExhausted) &&
+        (hasProviderRecoveryCount || hasProviderFailureCode)) ||
+      (setupRecoveryExhausted &&
+        turn.metadata?.providerRecoveryCount !== SANDBOX_SETUP_RECOVERY_LIMIT)
+    ) {
       return { action: "stale" };
     }
     if (hasProviderRecoveryCount !== hasProviderFailureCode) {
@@ -282,15 +307,28 @@ export function createSessionStateActivities(
         attemptId: input.attemptId,
         reason: setupOutcomeUnknown
           ? "sandbox_command_start_outcome_unknown"
-          : (providerFailureCode ?? "claimed_attempt_database_failure"),
+          : setupRecoveryExhausted
+            ? "sandbox_command_start_recovery_exhausted"
+            : (providerFailureCode ?? "claimed_attempt_database_failure"),
         ...(setupOutcomeUnknown ? { sandboxSetupOutcomeUnknown: true } : {}),
+        ...(setupRecoveryExhausted ? { sandboxSetupRecoveryExhausted: true } : {}),
         ...(providerRecoveryCount !== undefined ? { providerRecoveryCount } : {}),
         detail: {
           code: setupOutcomeUnknown
             ? "sandbox_command_start_outcome_unknown"
-            : (providerFailureCode ?? recoveredClaimCode),
-          retryable: !setupOutcomeUnknown,
+            : setupRecoveryExhausted
+              ? "sandbox_command_start_recovery_exhausted"
+              : (providerFailureCode ?? recoveredClaimCode),
+          retryable: !setupOutcomeUnknown && !setupRecoveryExhausted,
           ...(setupOutcomeUnknown ? { setupOutcome: "unknown", replay: "blocked" } : {}),
+          ...(setupRecoveryExhausted
+            ? {
+                setupOutcome: "not_started",
+                replay: "blocked",
+                recoveryExhausted: true,
+                providerRecoveryCount: SANDBOX_SETUP_RECOVERY_LIMIT,
+              }
+            : {}),
           ...(providerRecoveryCount !== undefined
             ? {
                 databaseFailureCode: recoveredClaimCode,
@@ -442,6 +480,63 @@ export function createSessionStateActivities(
     return { action: result.action };
   }
 
+  /** A new authenticated inspection, never trust the earlier observer hint.
+   * The DB seam independently revalidates the entire stored/current identity,
+   * control and both writer predicates under canonical locks before closing. */
+  async function reconcileSettledSessionAttemptActivity(
+    input: ReconcileSettledSessionAttemptInput,
+  ): Promise<ReconcileSettledSessionAttemptResult> {
+    const { db, bus, inspectSessionAttemptActivity, settings, observability, wakeSessionWorkflow } =
+      await services();
+    const ref = await getSessionAttemptActivityRefFn(db, {
+      ...input,
+      temporalWorkflowId: input.workflowId,
+    });
+    if (!ref || ref.workflowRunId !== input.workflowRunId || ref.activityId !== input.activityId)
+      return { action: "stale" };
+    if (!inspectSessionAttemptActivity) return { action: "pending" };
+    try {
+      if ((await inspectSessionAttemptActivity(ref)) !== "settled") return { action: "pending" };
+    } catch (error) {
+      if (error instanceof CancelledFailure) throw error;
+      if (currentActivityContext()?.cancellationSignal.aborted)
+        throw new CancelledFailure("Settled-owner reconciliation cancelled");
+      return { action: "pending" };
+    }
+    if (currentActivityContext()?.cancellationSignal.aborted)
+      throw new CancelledFailure("Settled-owner reconciliation cancelled");
+    const result = await reconcileSettledSessionAttemptFn(db, {
+      accountId: input.accountId,
+      workspaceId: input.workspaceId,
+      sessionId: input.sessionId,
+      turnId: input.turnId,
+      attemptId: input.attemptId,
+      executionGeneration: input.executionGeneration,
+      temporalWorkflowId: ref.workflowId,
+      temporalWorkflowRunId: ref.workflowRunId,
+      temporalActivityId: ref.activityId,
+      activitySettled: true,
+      maxRedispatches: WORKER_DEATH_MAX_REDISPATCHES,
+    });
+    // Atomic Postgres recovery/quiescence/wake truth is already sufficient if
+    // live fanout fails. It must not be replaced by an observer-only wake.
+    if (result.events.length > 0)
+      await publishDurableSessionEventsFn(
+        bus,
+        input.workspaceId,
+        input.sessionId,
+        result.events,
+      ).catch(() => undefined);
+    if (result.action === "exceeded")
+      await deliverFailedChildTurnToParentFn(
+        { db, bus, settings, observability, wakeSessionWorkflow },
+        input.workspaceId,
+        input.sessionId,
+        result.turnId,
+      );
+    return { action: result.action };
+  }
+
   /**
    * Recover the same current inference when its worker dies without completing
    * a graceful checkpoint (heartbeat timeout, SIGKILL, OOM, or node loss).
@@ -540,15 +635,48 @@ export function createSessionStateActivities(
   }
 
   async function peekSessionWork(input: PeekSessionWorkInput) {
-    const { db, observability, inspectSessionAttemptActivity } = await services();
-    const peek = await peekSessionWorkFn(
+    const { db, bus, observability, inspectSessionAttemptActivity } = await services();
+    // Already scheduled activities retain their old input across workflow upgrades.
+    // Resolve its workspace scope exactly as the legacy DB path did, then use the
+    // observer path so absent rows and a still-owned attempt are observations.
+    const observerAccountId =
+      input.observerAccountId ?? (await getWorkspaceFn(db, input.workspaceId))?.accountId;
+    if (!observerAccountId) return { kind: "unavailable" as const };
+    let peek = await peekSessionWorkFn(
       db,
       input.workspaceId,
       input.sessionId,
       input.includeAdmissionFence,
-      input.observerAccountId,
+      observerAccountId,
     );
     if (peek.kind === "unavailable") return peek;
+    if (peek.kind === "admission-blocked" && peek.reason === "sandbox_setup_outcome_unknown") {
+      const ref = peek.ref;
+      if (ref && "turnId" in ref && "attemptId" in ref) {
+        const settled = await reconcileCompletedSandboxSetupFn(db, {
+          accountId: observerAccountId,
+          workspaceId: input.workspaceId,
+          sessionId: input.sessionId,
+          turnId: ref.turnId,
+          attemptId: ref.attemptId,
+        });
+        if (settled.events.length > 0)
+          await publishDurableSessionEventsFn(
+            bus,
+            input.workspaceId,
+            input.sessionId,
+            settled.events,
+          );
+        if (settled.reconciled)
+          peek = await peekSessionWorkFn(
+            db,
+            input.workspaceId,
+            input.sessionId,
+            input.includeAdmissionFence,
+            observerAccountId,
+          );
+      }
+    }
     if (peek.kind === "attempt-owned") {
       // Observation never revokes a writer or recovers a live owner. In
       // particular, a settled Temporal activity is not physical-writer proof.
@@ -573,7 +701,7 @@ export function createSessionStateActivities(
         input.workspaceId,
         input.sessionId,
         input.includeAdmissionFence,
-        input.observerAccountId,
+        observerAccountId,
       );
       if (
         current.kind !== "attempt-owned" ||
@@ -669,6 +797,7 @@ export function createSessionStateActivities(
     settleSessionInterruptions,
     persistSessionAttemptQuiescence,
     reconcileSessionAttemptQuiescence: reconcileSessionAttemptQuiescenceActivity,
+    reconcileSettledSessionAttempt: reconcileSettledSessionAttemptActivity,
     recoverDispatch,
     recoverEscapedMcpTimeout,
     peekSessionWork,

@@ -22,6 +22,11 @@ relevant. Personal preferences must keep their intended scope rather than
 silently becoming rules for everyone in a shared workspace. If the appropriate
 destination is unavailable, the agent should explain that limitation.
 
+Agents and the manual editor use the same instruction size limit of 262,144
+characters. Agents append new rules or make exact localized edits, preserving
+unrelated instructions rather than rewriting the whole policy. Keep new rules
+concise: active instructions are included in applicable prompts.
+
 Each destination still follows its Agent learning setting. The agent should tell
 you whether the instruction or Skill is active, awaiting review, or not saved.
 Saving Knowledge does not guarantee that a behavior will apply in future chats.
@@ -75,11 +80,11 @@ evidence. A human can explicitly copy text into a new workspace entry.
 
 The SDK retains the compatibility names `memory` and `memoryScope` for selecting
 this scope. The chat facade accepts `memory: "workspace" | "user" | false`.
-With default `agentAccess: "session"`, omitted `memory` is `false`; with user or
-workspace access it follows that scope. `false` initializes Knowledge authoring
+Omitted `memory` follows `chats`: `"user"` for private chats (the default) and
+`"workspace"` for shared chats. `false` initializes Knowledge authoring
 to Off; it does not erase history or disable authorized Knowledge retrieval.
 Personal ownership requires the server-verified user, not an opaque label.
-See [Users, tenants & privacy](/integrate/users-and-tenants#choose-what-each-conversation-shares).
+See [Users, tenants & privacy](/integrate/users-and-tenants#choose-who-shares-chats).
 
 ## Agent learning and review
 
@@ -99,9 +104,9 @@ personal defaults apply unless a chat or scheduled task overrides that category.
 Chat options and the Advanced section of a schedule's form set overrides;
 existing schedule edits apply with Save and Cancel discards them.
 
-In **+ → Chat settings**, the choices are phrased as permissions: **Allow updates**,
-**Review first**, and **Don’t allow updates**. The closed control shows the effective
-permission; choose **Use default** inside its menu to remove a chat-specific override.
+In **+ → Chat settings**, each category offers **Automatic**, **Review first** and
+**Off**. The closed control shows the effective mode; choose **Default** in its menu
+to remove a chat-specific override.
 These controls govern what agents can add or update, not what they can read or use.
 
 Automatic publishes a change immediately. Review first stores a pending revision

@@ -2,6 +2,7 @@
 import { useCallback, useRef } from "react";
 import type { AppContextValue } from "../src/context";
 import type { OpenGeniClient } from "@opengeni/sdk";
+import { sessionListEntry } from "@opengeni/sdk/session-list-entries";
 export const workspaceId = "11111111-1111-4111-8111-111111111111";
 export const evidence = { sends: [] as unknown[], saves: [] as unknown[] };
 const noop = () => {};
@@ -46,6 +47,7 @@ export const fixtureClient = {
       id: `qa-session-${i}`,
       workspaceId,
       title: `QA recent session ${i + 1}`,
+      metadata: {},
       status: "idle",
       model: model.id,
       resources: [],
@@ -63,6 +65,15 @@ export const fixtureClient = {
     return structuredClone(draft);
   },
 } as unknown as OpenGeniClient;
+fixtureClient.listSessionSummaryPage = async (workspace, options) => {
+  const page = await fixtureClient.listSessionPage(workspace, options);
+  return {
+    ...page,
+    projection: "summary",
+    sessions: page.sessions.map(sessionListEntry),
+    pinned: page.pinned.map(sessionListEntry),
+  };
+};
 const context = {
   client: fixtureClient,
   accessKeyVersion: 0,

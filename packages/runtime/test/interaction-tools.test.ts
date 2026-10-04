@@ -217,6 +217,7 @@ describe("interaction attempt tools", () => {
       "browser_screenshot",
       "browser_clipboard",
       "browser_debug",
+      "browser_downloads",
       "computer_targets",
       "computer_observe",
       "computer_clipboard",
@@ -233,7 +234,7 @@ describe("interaction attempt tools", () => {
       generation: 1,
       definitions,
     });
-    expect(environment.catalog.entries).toHaveLength(9);
+    expect(environment.catalog.entries).toHaveLength(10);
     expect(environment.catalog.entries[0]).toMatchObject({
       identity: { serverId: "interaction", toolName: "interaction_discover" },
       modelName: "interaction__interaction_discover",

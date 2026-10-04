@@ -22,13 +22,14 @@ Install both packages from the same release.
     OPENGENI_API_KEY=ogk_...                        # server only
     ```
 
-    This one key is all the integration needs: it creates workspaces, adds your users as members, and creates and controls sessions as them. `GET /v1/access/me` lists only its organization grants (`account:read`, `workspace:create`, `api_keys:manage`) under `accountGrants`; that is expected. Check `credential.access` (`"full"`) and `credential.effectiveWorkspacePermissions` instead. A read-only key can inspect sessions but cannot create them. See [Authentication](/reference/authentication).
+    Use full permissions with **all shared workspaces** scope for this provisioning flow. The key creates workspaces, adds your users as members, and creates and controls sessions as them. `GET /v1/access/me` may have empty `workspaceGrants`; check `credential.policy`, `credential.workspaceScope`, and `credential.effectiveWorkspacePermissions` instead of relying on the legacy `access` label. A read-only policy cannot create sessions; selected-workspace scope does not admit future tenant workspaces. Personal workspaces are always excluded. See [Authentication](/reference/authentication).
 
   </Step>
   <Step title="Onboard each user">
     Map each tenant to an OpenGeni workspace and make each user a member, once, when your product admits them:
 
     ```ts
+    // lib/opengeni.ts
     import { OpenGeniClient } from "@opengeni/sdk";
 
     export const og = new OpenGeniClient({
@@ -53,7 +54,7 @@ Install both packages from the same release.
           "sessions:control",
           "files:upload",
           "files:read",
-          // add "mcp_servers:attach" when sessions carry per-session MCP servers
+          // add "mcp_servers:attach" for your own tools (toolServer) or per-session MCP servers
         ],
         operationId, // a UUID you persist first; reuse it only to retry this request
       });
@@ -70,6 +71,7 @@ Install both packages from the same release.
     ```ts
     import { createSessionProxyRoute } from "@opengeni/sdk/next";
     import { authenticate, verifyCsrf } from "@/lib/auth"; // your product's own checks
+    import { og, source } from "@/lib/opengeni";
 
     export const dynamic = "force-dynamic";
     export const { GET, POST, PUT, PATCH, DELETE } = createSessionProxyRoute(og, {
@@ -88,11 +90,15 @@ Install both packages from the same release.
           identity: "You are Acme's assistant. Friendly and brief.",
           capabilities: "none", // your tools plus asking questions: see "Configure the agent"
         },
-        tools: [], // add your product's tools: see "Give the agent your data"
+        tools: [], // workspace integrations to select; toolServer adds itself
         sandboxBackend: "none", // a chat-and-tools agent needs no sandbox
       }),
+      // Your product's own tools, as the signed-in user: see "Give the agent your data".
+      // toolServer: { url: "https://app.example.com/api/mcp", approvals: { ask: ["rename_post"] } },
     });
     ```
+
+    `agent` needs agent settings enabled on the deployment. If `getClientConfig()` reports `agentConfig.enabled: false`, leave it out and pass `firstPartyMcpTools: []` instead; see [Configure the agent](/integrate/configure-the-agent). Private chats need private sessions enabled for your organization; without them the proxy throws `OpenGeniSetupError`, which says who can turn it on.
 
     For Express or Connect, use `app.use("/api/opengeni", toNodeMiddleware(createSessionProxyHandler(og, options)))` from `@opengeni/sdk/express`; for Hono, `app.all("/api/opengeni/*", toHonoHandler(...))` from `@opengeni/sdk/hono`. See the [SDK reference](/reference/sdk#framework-adapters). A Django, Rails, Go, PHP, or Java backend needs no Node sidecar: see [Proxy from any backend](/integrate/proxy-from-any-backend).
 

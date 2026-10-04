@@ -11,6 +11,7 @@ import {
 } from "@openai/agents";
 import { testSettings } from "@opengeni/testing";
 import { bm25RankTools, searchToolPool, toolsNamedInQuery } from "../src/codex-tool-search";
+import { MCP_MAX_TOOL_DEFINITION_BYTES } from "../src/mcp-network";
 import {
   buildOpenGeniAgent,
   prepareRunInput,
@@ -156,6 +157,16 @@ describe("searchToolPool named tools", () => {
 });
 
 describe("searchToolPool disclosure bounds", () => {
+  test("discloses a rich nested schema admitted by discovery", () => {
+    const rich = connectorTool("rich", "Read a record");
+    if (rich.type !== "function") throw new Error("expected a function tool");
+    rich.parameters = {
+      type: "object",
+      properties: {},
+      description: "x".repeat(300 * 1024),
+    } as never;
+    expect(searchToolPool([rich], { names: ["codex_apps__rich"], query: "" })).toEqual([rich]);
+  });
   test("keyword search backfills beyond the original rank cutoff", () => {
     const oversized = connectorTool("first", "Find records");
     const small = connectorTool("second", "Find records");
@@ -163,7 +174,7 @@ describe("searchToolPool disclosure bounds", () => {
     oversized.parameters = {
       type: "object",
       properties: {},
-      description: "x".repeat(130 * 1024),
+      description: "x".repeat(MCP_MAX_TOOL_DEFINITION_BYTES),
     } as never;
     expect(bm25RankTools([oversized, small], "Find records", 1)).toEqual([oversized]);
     expect(searchToolPool([oversized, small], { query: "Find records", limit: 1 })).toEqual([
@@ -184,7 +195,7 @@ describe("searchToolPool disclosure bounds", () => {
   });
 
   test("backfills rank-limited results after rejecting an oversized definition", () => {
-    const oversized = connectorTool("oversized", "x".repeat(130 * 1024));
+    const oversized = connectorTool("oversized", "x".repeat(MCP_MAX_TOOL_DEFINITION_BYTES));
     const small = connectorTool("small", "Read an item");
     expect(
       searchToolPool([oversized, small], {
@@ -197,7 +208,7 @@ describe("searchToolPool disclosure bounds", () => {
 
   test("backfills smaller definitions after aggregate overflow without exceeding the budget", () => {
     const large = Array.from({ length: 3 }, (_, i) =>
-      connectorTool(`large_${i}`, "x".repeat(100 * 1024)),
+      connectorTool(`large_${i}`, "x".repeat(200 * 1024)),
     );
     const small = connectorTool("small", "Read an item");
     const pool = [...large, small];

@@ -194,6 +194,8 @@ export function DefaultSessionModelPreferenceRow(props: {
           loading={catalog.loading}
           error={catalog.error}
           messages={{ label: "Default model and reasoning" }}
+          // Models settings keeps its scope-aware presentation.
+          collapseScopes={false}
           triggerStyle="field"
           triggerMeta={selected ? payerShortLabel(selected) : null}
           // The secondary button's exact look, so every control on the row matches.

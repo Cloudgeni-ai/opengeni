@@ -160,6 +160,12 @@ describe("Developer setup organization API keys", () => {
         lane === "service" ? { "x-opengeni-service-initiator": "product.setup" } : {};
       if (lane === "asUser") {
         track(
+          spyOn(db, "withAccountRls").mockImplementation(async (_db, _account, callback) =>
+            callback({} as never),
+          ),
+        );
+        track(spyOn(db, "lockExternalWorkspaceMembershipLifecycle").mockResolvedValue(undefined));
+        track(
           spyOn(db, "ensureExternalIdentity").mockResolvedValue({
             id: "55555555-5555-4555-8555-555555555555",
             accountId,

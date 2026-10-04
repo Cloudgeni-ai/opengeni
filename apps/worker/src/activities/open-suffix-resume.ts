@@ -165,7 +165,7 @@ function memberResult(input: {
   };
 }
 
-async function resultItemForOpenSuffixMember(input: {
+export async function resultItemForOpenSuffixMember(input: {
   agent: Agent<any, any>;
   row: OpenSuffixPendingToolCall;
   trigger: Pick<SessionEvent, "type" | "payload">;
@@ -178,6 +178,18 @@ async function resultItemForOpenSuffixMember(input: {
   const name = toolNameFromCallItem(input.row.callItem);
   const rejected = (): { resultItem: Record<string, unknown>; eventOutput: unknown } => {
     const payload = input.trigger.payload as { message?: unknown; decision?: unknown };
+    if (
+      input.row.interruptionKind === "approval" &&
+      payload.decision === "reject" &&
+      !(typeof payload.message === "string" && payload.message.trim().length > 0)
+    ) {
+      // This approval was rejected before invocation, not interrupted during execution.
+      return memberResult({
+        callId: input.row.callId,
+        name,
+        output: "Tool approval was rejected. This proposed tool call was not executed.",
+      });
+    }
     const message =
       typeof payload.message === "string" && payload.message.trim().length > 0
         ? payload.message

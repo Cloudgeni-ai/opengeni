@@ -394,6 +394,12 @@ methods rather than whole-buffer reads.
 - The browser kernel runs in a dedicated Web Worker. One ref-counted SDK sync
   controller/socket owns each open artifact. IndexedDB retains verified
   snapshot, applied cursor, and pending idempotent transactions.
+- SDK `writable` describes edit permission. `authoringBlockedReason` separately
+  reports an unresolved serialized edit (`pending_conflict`) or retained intent
+  from a prior writer (`prior_writer`). Presentation mutation controls wait for
+  that barrier to clear while slide selection, browsing, and zoom remain usable.
+  Existing drafts survive the wait; cancellation and permission loss still clear
+  them. Exact receipt settlement remains the controller's authority.
 - WASM/worker asset URLs are configurable for CSP, CDN, and self-hosting. Kernel
   payloads split by model/calc, layout/render, and modality codec rather than
   one mandatory download.

@@ -656,6 +656,7 @@ export async function establishTurnSandbox(deps: EstablishTurnSandboxDeps): Prom
                 freshSandboxReadinessReplacementBudget,
                 onSandboxLost: publishSandboxLost,
                 objectStorage,
+                bus,
               },
               {
                 accountId: input.accountId,
@@ -735,6 +736,7 @@ export async function establishTurnSandbox(deps: EstablishTurnSandboxDeps): Prom
                 freshSandboxReadinessReplacementBudget,
                 onSandboxLost: publishSandboxLost,
                 objectStorage,
+                bus,
               },
               {
                 accountId: input.accountId,

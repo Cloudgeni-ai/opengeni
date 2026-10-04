@@ -60,6 +60,7 @@ import {
   hostedWebSearchForTurn,
   connectedSubscriptionImageGenerationAuthority,
   textVerbosityForTurn,
+  reasoningSummaryForTurn,
 } from "./tool-policy";
 import type { ClaimTurnOk } from "./claim";
 import type { GovernanceModelOk } from "./governance-model";
@@ -206,11 +207,12 @@ export async function buildTurnAgent(deps: BuildTurnAgentDeps) {
   const preparedTools = eventing.preparedTools!;
   // Durable recovery truth is read for every attempt, including reconstruction
   // after compaction. It is never inferred from transcript tool successes.
-  const sessionInstructions = await recoveryAwareSessionInstructions(
-    db,
-    input.workspaceId,
-    session,
-  );
+  // These scoped reads are independent. Keep the second live video-policy
+  // read here rather than reusing tool preparation's earlier policy snapshot.
+  const [sessionInstructions, videoGenerationPolicy] = await Promise.all([
+    recoveryAwareSessionInstructions(db, input.workspaceId, session),
+    getWorkspaceVideoGenerationPolicy(db, input.workspaceId),
+  ]);
 
   const missingSessionTitleHint = preparationIndependentToolNames.includes(
     SESSION_TITLE_MODEL_TOOL_NAME,
@@ -403,7 +405,6 @@ export async function buildTurnAgent(deps: BuildTurnAgentDeps) {
       },
     };
   })();
-  const videoGenerationPolicy = await getWorkspaceVideoGenerationPolicy(db, input.workspaceId);
   const videoGenerationEnabled =
     videoGenerationPolicy.defaultModelId !== null &&
     videoGenerationPolicy.enabledModelIds.length > 0;
@@ -576,6 +577,7 @@ export async function buildTurnAgent(deps: BuildTurnAgentDeps) {
     turnExecutionPolicy.latencyMode,
   );
   const textVerbosity = textVerbosityForTurn(resolvedModel, turnExecutionPolicy.upstreamModelId);
+  const reasoningSummary = reasoningSummaryForTurn(resolvedModel);
   const approvedToolCallId = approvedConnectorActionCallId(trigger);
   const modelVisibleSkillCatalogText = await ensureSessionSkillCatalog(db, {
     accountId: input.accountId,
@@ -664,6 +666,7 @@ export async function buildTurnAgent(deps: BuildTurnAgentDeps) {
         ...(preparedTools.inputWaitYield ? { inputWaitYield: preparedTools.inputWaitYield } : {}),
         ...(session.agent ? { agentConfig: session.agent, toolRouterInHistory } : {}),
         reasoningEffort: requestReasoningEffort,
+        ...(reasoningSummary ? { reasoningSummary } : {}),
         latencyMode: turnExecutionPolicy.latencyMode,
         ...(serviceTier ? { serviceTier } : {}),
         ...(textVerbosity ? { textVerbosity } : {}),

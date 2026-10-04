@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import { resolve } from "node:path";
-import { ComputerNativeClient, NativeComputerError } from "../src";
+import { ComputerNativeClient, ComputerBackendError } from "../src";
 
 describe("ComputerNativeClient", () => {
   test("correlates out-of-order responses, binary captures, and typed adapter errors", async () => {
@@ -27,11 +27,11 @@ describe("ComputerNativeClient", () => {
       expect(new TextDecoder().decode(frame.data)).toBe("fixture-png");
       expect(frame).toMatchObject({ frameId: "frame-1", width: 10, height: 20 });
       await expect(client.observe("missing")).rejects.toMatchObject({
-        name: "NativeComputerError",
+        name: "ComputerBackendError",
         code: "target_not_found",
         retryable: false,
         dispatched: false,
-      } satisfies Partial<NativeComputerError>);
+      } satisfies Partial<ComputerBackendError>);
     } finally {
       await client.close();
     }

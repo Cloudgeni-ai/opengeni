@@ -758,6 +758,7 @@ export async function failComputerSessionOperation(
     operationId: string;
     computerSessionId: string;
     state?: "failed" | "outcome_unknown";
+    onlyIfPreparedCreate?: boolean;
     error: InteractionErrorValue;
   },
 ): Promise<ComputerSessionMutationResponseValue> {
@@ -768,7 +769,13 @@ export async function failComputerSessionOperation(
       await lockOperation(tx, input.workspaceId, input.operationId);
       const operation = await loadOperation(tx, input.workspaceId, input.operationId);
       assertOperationResource(operation, input.computerSessionId);
-      if (["completed", "failed", "outcome_unknown"].includes(operation.state)) {
+      if (
+        ["completed", "failed", "outcome_unknown"].includes(operation.state) ||
+        (input.onlyIfPreparedCreate &&
+          (operation.kind !== "create" ||
+            operation.state !== "prepared" ||
+            operation.controllerGeneration !== null))
+      ) {
         return await replayedMutation(tx, input.workspaceId, operation, {
           kind: operation.kind,
           digest: operation.requestDigest,

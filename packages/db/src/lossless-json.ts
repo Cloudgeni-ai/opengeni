@@ -281,11 +281,7 @@ function defineJsonDataProperty(
 }
 
 function encodeUtf16(value: string): string {
-  const bytes = Buffer.allocUnsafe(value.length * 2);
-  for (let index = 0; index < value.length; index += 1) {
-    bytes.writeUInt16LE(value.charCodeAt(index), index * 2);
-  }
-  return bytes.toString("base64");
+  return Buffer.from(value, "utf16le").toString("base64");
 }
 
 function decodeTaggedString(value: string, prefix: string): string | null {
@@ -294,11 +290,9 @@ function decodeTaggedString(value: string, prefix: string): string | null {
   if (encoded.length === 0 || !/^[A-Za-z0-9+/]+={0,2}$/.test(encoded)) return null;
   const bytes = Buffer.from(encoded, "base64");
   if (bytes.byteLength % 2 !== 0 || bytes.toString("base64") !== encoded) return null;
-  let decoded = "";
-  for (let offset = 0; offset < bytes.byteLength; offset += 2) {
-    decoded += String.fromCharCode(bytes.readUInt16LE(offset));
-  }
-  return decoded;
+  // UTF-16LE preserves every code unit, including NUL and lone surrogates,
+  // without retaining a chain of per-character string concatenations.
+  return bytes.toString("utf16le");
 }
 
 function isPostgresSafeString(value: string): boolean {

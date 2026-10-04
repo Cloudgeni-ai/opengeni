@@ -1,7 +1,12 @@
+import { SubscriptionAccountRow } from "./subscription-account-ui";
+import { subscriptionAccountName } from "./use-subscription-account-pool";
+import type { ClaudeSubscriptions } from "./use-claude-subscriptions";
+import { ClaudeAccountRows, ClaudeSettingRows, claudePlan } from "./claude-subscription-models";
 import type {
   CodexAccount,
   ConnectionMetadata,
   SuperGrokAccount,
+  ClaudeSubscriptionAccount,
   WorkspaceModelCatalogModel,
 } from "@opengeni/sdk";
 import type { OpenGeniBrowserClient } from "@opengeni/sdk/browser";
@@ -66,7 +71,7 @@ import { accountKey, type GatewayId } from "@/lib/models-route";
    workspaces use, read-only: only owners and admins add accounts.
    -------------------------------------------------------------------------- */
 
-export const GATEWAYS = ["claude_subscription", "anthropic", "openrouter", "vercel"] as const;
+export const GATEWAYS: readonly GatewayId[] = ["anthropic", "openrouter", "vercel"];
 
 /** The catalog provider id of an organization key's models. */
 const ORGANIZATION_CATALOG_PROVIDER: Record<GatewayId, string> = {
@@ -114,6 +119,8 @@ export interface WorkspaceModelsSnapshot {
   codexOff: boolean;
   grokOwn: SuperGrokAccount[];
   grokShared: SuperGrokAccount[];
+  claudeOwn: ClaudeSubscriptionAccount[];
+  claudeShared: ClaudeSubscriptionAccount[];
   keysOwn: GatewayId[];
   keysShared: { id: GatewayId; models: number }[];
   /** "GPT-6 Astra · Codex", or null when it can't be read. */
@@ -127,16 +134,18 @@ async function readWorkspaceModels(
   workspace: ModelsWorkspace,
   claudeEnabled: boolean,
 ): Promise<WorkspaceModelsSnapshot> {
-  const [codex, grok, connections, catalog, policy] = await Promise.allSettled([
+  const [codex, grok, connections, catalog, policy, claude] = await Promise.allSettled([
     client.listCodexAccounts(workspace.id),
     client.listSuperGrokAccounts(workspace.id),
     client.listConnections(workspace.id),
     client.getWorkspaceModelCatalog(workspace.id),
     client.getWorkspaceModelAccessPolicy(workspace.id),
+    claudeEnabled ? client.listClaudeSubscriptionAccounts(workspace.id) : Promise.resolve(null),
   ]);
   const codexAccounts = codex.status === "fulfilled" ? codex.value.accounts : [];
   const grokData = grok.status === "fulfilled" ? grok.value : null;
   const grokInherited = grokData?.source === "organization";
+  const claudeData = claude.status === "fulfilled" ? claude.value : null;
   const models = catalog.status === "fulfilled" ? catalog.value.models : [];
   const own = (connections.status === "fulfilled" ? connections.value : []) as ConnectionMetadata[];
   const gateways = GATEWAYS.filter((id) => claudeEnabled || id !== "claude_subscription");
@@ -150,6 +159,8 @@ async function readWorkspaceModels(
     codexOff: codex.status === "fulfilled" && codex.value.source?.effectiveSource === "disabled",
     grokOwn: grokInherited ? [] : (grokData?.accounts ?? []),
     grokShared: grokInherited ? (grokData?.accounts ?? []) : [],
+    claudeOwn: claudeData?.source === "organization" ? [] : (claudeData?.accounts ?? []),
+    claudeShared: claudeData?.source === "organization" ? (claudeData?.accounts ?? []) : [],
     keysOwn: gateways.filter((id) =>
       own.some(
         (connection) =>
@@ -225,6 +236,7 @@ export function OrganizationModelsList({
   anchorWorkspaceId,
   orgCodex,
   orgGrok,
+  orgClaude,
   orgGateways,
   liveCodexUsage,
   onOpenAccount,
@@ -246,6 +258,7 @@ export function OrganizationModelsList({
   anchorWorkspaceId: string;
   orgCodex: OrganizationCodexSubscriptions;
   orgGrok: SuperGrokSubscriptions;
+  orgClaude: ClaudeSubscriptions;
   orgGateways: Record<GatewayId, ProviderConnection>;
   /** Weekly usage by account, as the settings workspace reads the accounts it uses. */
   liveCodexUsage: Readonly<Record<string, ReactNode>>;
@@ -297,6 +310,20 @@ export function OrganizationModelsList({
           onOpen={() => onOpenWorkspace(workspace.id, accountKey("supergrok", account.id))}
         />
       )),
+      ...snapshot.claudeOwn.map((account) => (
+        <SubscriptionAccountRow
+          key={`${workspace.id}:claude:${account.id}`}
+          provider="claude_subscription"
+          title={subscriptionAccountName(account)}
+          email={account.email}
+          primary={account.active}
+          meta={[account.scope === "user" ? tag + " · only you" : tag, claudePlan(account)]}
+          indicator={
+            account.status !== "active" ? { kind: "attention", label: "Needs reconnect" } : "open"
+          }
+          onOpen={() => onOpenWorkspace(workspace.id, accountKey("claude", account.id))}
+        />
+      )),
       ...snapshot.keysOwn.map((id) => (
         <ListRow
           key={`${workspace.id}:gateway:${id}`}
@@ -322,6 +349,20 @@ export function OrganizationModelsList({
         onOpen={(id) => onOpenAccount(accountKey("codex", id, true))}
         onConnect={() => onConnect()}
       />
+      {claudeEnabled ? (
+        <ClaudeAccountRows
+          claude={orgClaude}
+          places={{
+            scopeName: organizationName,
+            organizationName,
+            scope: labels,
+            openAccount: (id) => onOpenAccount(accountKey("claude", id, true)),
+            openConnect: () => onConnect(),
+            openAccess: (id) => onOpenAccount(accountKey("claude", id, true)),
+            backToList: onConnect,
+          }}
+        />
+      ) : null}
       {orgGrok.unavailable ? null : (
         <OrganizationSuperGrokRows
           grok={orgGrok}
@@ -345,11 +386,13 @@ export function OrganizationModelsList({
     (administrator &&
       (orgCodex.loading ||
         (!orgGrok.unavailable && orgGrok.loading) ||
+        (claudeEnabled && orgClaude.loading) ||
         GATEWAYS.some((id) => !orgGateways[id].hidden && !orgGateways[id].settled)));
   const organizationCount = administrator
     ? orgCodex.accounts.length +
       (orgCodex.pending || orgCodex.loadError ? 1 : 0) +
       (orgGrok.unavailable ? 0 : orgGrok.accounts.length + (orgGrok.loadError ? 1 : 0)) +
+      (claudeEnabled ? orgClaude.accounts.length + (orgClaude.loadError ? 1 : 0) : 0) +
       GATEWAYS.filter((id) => providerListed(orgGateways[id])).length
     : sharedRows.length;
   const empty =
@@ -456,6 +499,11 @@ export function OrganizationModelsList({
           </SettingRowGroup>
         </Section>
       ) : null}
+      {administrator && claudeEnabled && orgClaude.accounts.length > 1 ? (
+        <Section title="Claude">
+          <ClaudeSettingRows claude={orgClaude} />
+        </Section>
+      ) : null}
       {administrator && superGrokSectionVisible(orgGrok) ? (
         <Section title="SuperGrok">
           <SuperGrokSettingRows grok={orgGrok} label="Sharing work between accounts" />
@@ -492,6 +540,7 @@ function sharedAccountRows(
 ): ReactNode[] {
   const codex = new Map<string, { account: CodexAccount; where: string[] }>();
   const grok = new Map<string, { account: SuperGrokAccount; where: string[] }>();
+  const claude = new Map<string, { account: ClaudeSubscriptionAccount; where: string[] }>();
   const keys = new Map<GatewayId, { models: number; where: string[] }>();
   for (const { workspace, snapshot } of ready) {
     const where = workspace.personal ? "your Personal workspace" : workspace.name;
@@ -504,6 +553,11 @@ function sharedAccountRows(
       const entry = grok.get(account.id) ?? { account, where: [] };
       entry.where.push(where);
       grok.set(account.id, entry);
+    }
+    for (const account of snapshot.claudeShared) {
+      const entry = claude.get(account.id) ?? { account, where: [] };
+      entry.where.push(where);
+      claude.set(account.id, entry);
     }
     for (const key of snapshot.keysShared) {
       const entry = keys.get(key.id) ?? { models: key.models, where: [] };
@@ -528,6 +582,15 @@ function sharedAccountRows(
         leading={<ProviderTile provider="supergrok" size="lg" />}
         title={superGrokAccountName(account)}
         meta={[labels.organization, usedIn(where), superGrokPlan(account)]}
+      />
+    )),
+    ...[...claude.values()].map(({ account, where }) => (
+      <SubscriptionAccountRow
+        key={"shared:claude:" + account.id}
+        provider="claude_subscription"
+        title={subscriptionAccountName(account)}
+        email={account.email}
+        meta={[labels.organization, usedIn(where), claudePlan(account)]}
       />
     )),
     ...[...keys.entries()].map(([id, { models, where }]) => (

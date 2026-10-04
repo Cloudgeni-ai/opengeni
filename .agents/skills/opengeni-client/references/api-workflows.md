@@ -203,6 +203,67 @@ Beyond `initialMessage`/`tools`/`resources`, the create body (`POST /v1/workspac
 - Session creation exposes a workspace-scoped `idempotencyKey` (distinct from the per-call `clientEventId`): forward a stable value so concurrent/retried creates of the same logical session collapse to a single session. Without it every create is independent, so a blind retry can double-create — keep sending a stable key when you retry.
 - Treat unknown event types as extensible timeline entries, not client crashes.
 
+### Read a settled result without caching progress or losing text
+
+`agent.message.completed` means one message ended, not that the turn completed.
+`phase: "commentary"` is progress; even `final_answer` text precedes canonical
+settlement. For a text-result cache, wait for the expected logical turn's
+`turn.completed` and use its original `payload.output`. Empty output or
+`emptyFinalReply` is not a successful report; a wait-ended turn may contain
+`reply` for human attention without a result. Handle failure, cancellation,
+approval and human-input states separately. Do not mark the whole session/goal
+complete merely because one turn settled.
+
+REST `listEvents` defaults to a bounded monitoring/summary projection. A compact
+latest result is also a projection and can truncate long text. For an exact
+saved result, use bounded `listEventPage` reads of original events, check
+`forensicExact`, and follow the returned cursor, not a guessed sequence:
+
+```js
+async function readOriginalResultPage(client, workspaceId, sessionId, after) {
+  const page = await client.listEventPage(workspaceId, sessionId, {
+    mode: "forensic", payloadMode: "full", direction: "after", after, limit: 50,
+    includeTypes: ["agent.message.completed", "turn.completed", "turn.failed",
+      "turn.cancelled", "session.requiresAction", "session.humanInput.requested"],
+  });
+  if (!page.forensicExact ||
+      (page.hasMore && (!Number.isSafeInteger(page.nextAfter) || page.nextAfter <= after))) {
+    throw new Error("An exact result page is not available.");
+  }
+  return page; // truncated/hasMore may mean more exact events, not truncated text
+}
+
+function settledTurnResult(event, expectedTurnId) {
+  if (event.turnId !== expectedTurnId ||
+      ["late_rejected", "duplicate"].includes(event.turnAssociation)) return null;
+  if (event.type === "turn.failed" || event.type === "turn.cancelled") {
+    return { state: event.type === "turn.failed" ? "failed" : "cancelled", text: null };
+  }
+  if (event.type !== "turn.completed") return null;
+  const payload = event.payload ?? {};
+  if (payload.emptyFinalReply === true || typeof payload.output !== "string" || !payload.output.trim()) {
+    return { state: "settled_without_result", text: null };
+  }
+  return { state: "completed", text: payload.output };
+}
+```
+
+Keep the newest candidate plus its original event ID/sequence while following
+`hasMore`; publish/cache only after reaching the current page boundary. Preserve
+the original full text rather than stripping a summary's truncation marker.
+If exact retrieval is unavailable, report that explicitly; do not cache a
+snippet as the final answer. Render only authorized result fields, never raw
+forensic payloads. The existing UI/facade projections are preferable when they
+already fit; this is a narrow backend text-result example, not a new timeline.
+
+Use a background job or nonblocking bounded status ticks when a turn's tools
+call back into the same host. Holding every scarce synchronous request worker
+in a blocking wait can starve those callbacks under concurrency; it is a
+deployment-dependent risk, not an inevitable failure. Bound each read/deadline,
+retain callback capacity, and resume from the saved cursor. For static pages,
+initialize enhancement scripts after their DOM targets exist (`defer`, modules
+or `DOMContentLoaded`); retain the native form/POST fallback.
+
 ## Files
 
 The usual flow is:

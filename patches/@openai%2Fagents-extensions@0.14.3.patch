@@ -302,7 +302,7 @@ index 0d118abe05044cca502e167daaee6eb10b46793b..d36d1c9a82d3b38f5bd0cfdd6865aec6
      configuredExposedPorts?: number[];
      modalEnvironment?: string;
 diff --git a/dist/sandbox/modal/sandbox.js b/dist/sandbox/modal/sandbox.js
-index ca96b807fe5661ee9e60fbddf145fa1150a19cd0..04c49fdad333abfa96fb936345e1fbc2bc22367f 100644
+index ca96b80..f3cfd04 100644
 --- a/dist/sandbox/modal/sandbox.js
 +++ b/dist/sandbox/modal/sandbox.js
 @@ -525,6 +525,10 @@ class ModalSandboxSession {
@@ -374,8 +374,83 @@ index ca96b807fe5661ee9e60fbddf145fa1150a19cd0..04c49fdad333abfa96fb936345e1fbc2
      ]) {
          if (value !== undefined &&
              (typeof value !== 'number' || !Number.isFinite(value) || value <= 0)) {
+@@ -1373,6 +1393,20 @@ function createActiveProcess(process) {
+         done: false,
+         exitCode: null,
+         donePromise: Promise.resolve(),
++        failed: false,
++    };
++    let notifyFailure;
++    activeProcess.failurePromise = new Promise((resolve) => {
++        notifyFailure = resolve;
++    });
++    const errors = [];
++    const recordFailure = (error) => {
++        errors.push(error);
++        activeProcess.failed = true;
++        activeProcess.waitError = errors.length === 1
++            ? error
++            : new AggregateError([...errors], 'Modal process observation failed.');
++        notifyFailure();
+     };
+     const stdoutPump = startTextStreamPump(process.stdout, (chunk) => {
+         appendActiveProcessOutput(activeProcess, chunk, 'stdout');
+@@ -1380,21 +1414,22 @@ function createActiveProcess(process) {
+     const stderrPump = startTextStreamPump(process.stderr, (chunk) => {
+         appendActiveProcessOutput(activeProcess, chunk, 'stderr');
+     });
++    // Observe failures immediately, including while Wait is still pending.
++    // Preserve the actual error graph; output failure is not consumed EOF.
++    const stdoutDone = stdoutPump.promise.catch(recordFailure);
++    const stderrDone = stderrPump.promise.catch(recordFailure);
+     activeProcess.stopOutputPumps = async () => {
+         await Promise.allSettled([stdoutPump.cancel(), stderrPump.cancel()]);
+     };
+     activeProcess.donePromise = (async () => {
+         try {
+             activeProcess.exitCode = await process.wait();
+-            await Promise.allSettled([stdoutPump.promise, stderrPump.promise]);
+         }
+         catch (error) {
+-            activeProcess.waitError = error;
+-            await Promise.allSettled([stdoutPump.promise, stderrPump.promise]);
+-        }
+-        finally {
+-            activeProcess.done = true;
++            recordFailure(error);
+         }
++        await Promise.all([stdoutDone, stderrDone]);
++        activeProcess.done = true;
+     })();
+     return activeProcess;
+ }
+@@ -1449,6 +1484,7 @@ async function waitForProcessOrTimeout(activeProcess, timeoutMs) {
+     try {
+         await Promise.race([
+             activeProcess.donePromise,
++            activeProcess.failurePromise,
+             new Promise((resolve) => {
+                 timeout = setTimeout(resolve, timeoutMs);
+                 unrefTimer(timeout);
+@@ -1460,13 +1496,13 @@ async function waitForProcessOrTimeout(activeProcess, timeoutMs) {
+             clearTimeout(timeout);
+         }
+     }
+-    if (activeProcess.waitError) {
++    if (activeProcess.failed) {
+         await activeProcess.stopOutputPumps?.();
+-        throw new sandbox_1.SandboxProviderError('ModalSandboxClient failed to wait for process completion.', {
++        throw Object.assign(new sandbox_1.SandboxProviderError('ModalSandboxClient failed to wait for process completion.', {
+             provider: 'modal',
+             operation: 'wait process',
+             cause: modalErrorMessage(activeProcess.waitError),
+-        });
++        }), { cause: activeProcess.waitError });
+     }
+ }
+ function modalErrorMessage(error) {
 diff --git a/dist/sandbox/modal/sandbox.mjs b/dist/sandbox/modal/sandbox.mjs
-index da2ef8d7ae856e81b0903a0d09f0c45a7e0b44b7..c6d13f1cafefb99bac4ec6e7a806dbdb7f602d1b 100644
+index da2ef8d..9ad2436 100644
 --- a/dist/sandbox/modal/sandbox.mjs
 +++ b/dist/sandbox/modal/sandbox.mjs
 @@ -487,6 +487,10 @@ export class ModalSandboxSession {
@@ -447,6 +522,81 @@ index da2ef8d7ae856e81b0903a0d09f0c45a7e0b44b7..c6d13f1cafefb99bac4ec6e7a806dbdb
      ]) {
          if (value !== undefined &&
              (typeof value !== 'number' || !Number.isFinite(value) || value <= 0)) {
+@@ -1333,6 +1353,20 @@ function createActiveProcess(process) {
+         done: false,
+         exitCode: null,
+         donePromise: Promise.resolve(),
++        failed: false,
++    };
++    let notifyFailure;
++    activeProcess.failurePromise = new Promise((resolve) => {
++        notifyFailure = resolve;
++    });
++    const errors = [];
++    const recordFailure = (error) => {
++        errors.push(error);
++        activeProcess.failed = true;
++        activeProcess.waitError = errors.length === 1
++            ? error
++            : new AggregateError([...errors], 'Modal process observation failed.');
++        notifyFailure();
+     };
+     const stdoutPump = startTextStreamPump(process.stdout, (chunk) => {
+         appendActiveProcessOutput(activeProcess, chunk, 'stdout');
+@@ -1340,21 +1374,22 @@ function createActiveProcess(process) {
+     const stderrPump = startTextStreamPump(process.stderr, (chunk) => {
+         appendActiveProcessOutput(activeProcess, chunk, 'stderr');
+     });
++    // Observe failures immediately, including while Wait is still pending.
++    // Preserve the actual error graph; output failure is not consumed EOF.
++    const stdoutDone = stdoutPump.promise.catch(recordFailure);
++    const stderrDone = stderrPump.promise.catch(recordFailure);
+     activeProcess.stopOutputPumps = async () => {
+         await Promise.allSettled([stdoutPump.cancel(), stderrPump.cancel()]);
+     };
+     activeProcess.donePromise = (async () => {
+         try {
+             activeProcess.exitCode = await process.wait();
+-            await Promise.allSettled([stdoutPump.promise, stderrPump.promise]);
+         }
+         catch (error) {
+-            activeProcess.waitError = error;
+-            await Promise.allSettled([stdoutPump.promise, stderrPump.promise]);
+-        }
+-        finally {
+-            activeProcess.done = true;
++            recordFailure(error);
+         }
++        await Promise.all([stdoutDone, stderrDone]);
++        activeProcess.done = true;
+     })();
+     return activeProcess;
+ }
+@@ -1409,6 +1444,7 @@ async function waitForProcessOrTimeout(activeProcess, timeoutMs) {
+     try {
+         await Promise.race([
+             activeProcess.donePromise,
++            activeProcess.failurePromise,
+             new Promise((resolve) => {
+                 timeout = setTimeout(resolve, timeoutMs);
+                 unrefTimer(timeout);
+@@ -1420,13 +1456,13 @@ async function waitForProcessOrTimeout(activeProcess, timeoutMs) {
+             clearTimeout(timeout);
+         }
+     }
+-    if (activeProcess.waitError) {
++    if (activeProcess.failed) {
+         await activeProcess.stopOutputPumps?.();
+-        throw new SandboxProviderError('ModalSandboxClient failed to wait for process completion.', {
++        throw Object.assign(new SandboxProviderError('ModalSandboxClient failed to wait for process completion.', {
+             provider: 'modal',
+             operation: 'wait process',
+             cause: modalErrorMessage(activeProcess.waitError),
+-        });
++        }), { cause: activeProcess.waitError });
+     }
+ }
+ function modalErrorMessage(error) {
 diff --git a/dist/sandbox/runloop/sandbox.d.ts b/dist/sandbox/runloop/sandbox.d.ts
 index 99e9131d49c18987c997adf493795a648cd8f261..7484dd5d704ca3b22b095eaffdf43b2823258eb1 100644
 --- a/dist/sandbox/runloop/sandbox.d.ts

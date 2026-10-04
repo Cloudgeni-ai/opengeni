@@ -1055,7 +1055,7 @@ export type InteractionFrameStreamAttachment<RelayKind extends 3 | 4 = 3 | 4> =
 
 export type ComputerFrameStreamAttachment =
   | InteractionFrameStreamAttachment<4>
-  | { kind: "direct_rfb"; url: string; protocols: string[] };
+  | { kind: "direct_rfb"; url: string; protocols: string[]; inputAllowed: boolean };
 
 export type BrowserSessionAttachment = {
   browserSessionId: string;
@@ -1117,6 +1117,8 @@ export type ComputerSessionCapabilities = {
   keyboardInput: boolean;
   clipboard: boolean;
   backgroundActions: boolean;
+  /** Raw window input stays in the background. Absent means foreground-only. */
+  backgroundInput?: boolean | undefined;
   parallelApps: boolean;
 };
 
@@ -1264,8 +1266,17 @@ export type ComputerSessionAttachment = {
   computerSessionId: string;
   controllerGeneration: string;
   targetId: string;
+  /** Viewer posture when attached; actions still reauthorize the live source. */
+  inputAllowed?: boolean | undefined;
   stream: ComputerFrameStreamAttachment;
   expiresAt: string;
+};
+
+/** Caller-specific hint only; every action still requires live authorization. */
+export type ComputerSessionInputPosture = {
+  computerSessionId: string;
+  controllerGeneration: string;
+  inputAllowed: boolean;
 };
 
 export type ComputerSessionAttachmentRequest = {
@@ -1600,6 +1611,11 @@ export interface InteractionTransport {
     computerSessionId: string,
     options?: OpenGeniRequestOptions,
   ): Promise<ComputerSession>;
+  getComputerInputPosture?(
+    workspaceId: string,
+    computerSessionId: string,
+    options?: OpenGeniRequestOptions,
+  ): Promise<ComputerSessionInputPosture>;
   readComputerClipboard(
     workspaceId: string,
     computerSessionId: string,
@@ -2550,6 +2566,13 @@ export class ComputerSessionResource {
     options: OpenGeniRequestOptions = {},
   ): Promise<ComputerSessionAttachment> {
     return await this.transport.attachComputerSession(this.workspaceId, this.id, request, options);
+  }
+
+  async inputPosture(options: OpenGeniRequestOptions = {}): Promise<ComputerSessionInputPosture> {
+    if (!this.transport.getComputerInputPosture) {
+      throw new Error("Computer input posture requires a current interaction transport.");
+    }
+    return await this.transport.getComputerInputPosture(this.workspaceId, this.id, options);
   }
 
   async heartbeat(options: OpenGeniRequestOptions = {}): Promise<ComputerSessionHeartbeatResponse> {

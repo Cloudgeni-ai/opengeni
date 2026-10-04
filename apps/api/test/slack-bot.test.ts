@@ -15,6 +15,7 @@ import {
 import {
   claimSlackBotDeleteOperation,
   claimSlackBotPostOperation,
+  buildSlackApiRateLimiter,
   createConnection,
   createDb,
   createOrganizationApiKey,
@@ -107,6 +108,7 @@ afterEach(async () => {
     await sql`delete from memory_slack_publications where account_id in (select id from managed_accounts where name = 'slack bot acct')`;
     await sql`delete from memory_slack_publication_configurations where account_id in (select id from managed_accounts where name = 'slack bot acct')`;
     await sql`delete from managed_accounts where name = 'slack bot acct'`;
+    await sql`delete from slack_api_rate_limits`;
     await sql`alter table memory_slack_publication_configurations enable trigger memory_slack_publication_configurations_immutable`;
     await sql`alter table memory_slack_publication_receipts enable trigger memory_slack_publication_receipts_immutable`;
   });
@@ -1111,6 +1113,7 @@ async function connectedTestBot(
   workspace: { accountId: string; workspaceId: string },
   slackFetch: typeof globalThis.fetch,
   authorizeProviderRequest?: () => Promise<boolean | void>,
+  slackAccessMode: Settings["slackAccessMode"] = "full",
 ) {
   const connected = await connectBot(workspace, slackFetch);
   const connection = await getConnectionMetadata(
@@ -1133,10 +1136,11 @@ async function connectedTestBot(
   });
   return {
     connection,
+    resolved,
     bot: createOpenGeniSlackBotClient(
       {
         db: client.db,
-        settings,
+        settings: { ...settings, slackAccessMode },
         slackFetch,
         ...(authorizeProviderRequest ? { authorizeProviderRequest } : {}),
       },
@@ -2452,7 +2456,10 @@ describe("OpenGeni Slack bot connection", () => {
     expect(JSON.parse(providerCalls[2]!.params!.get("files")!)).toEqual([
       { id: "FUPLOAD1", title: "preview.png" },
     ]);
-    expect(authorizations).toBe(slack.calls.length - before + providerCalls.length);
+    // API calls recheck before quota reservation and again immediately before
+    // dispatch. The temporary token-free upload endpoint has only the final check.
+    const apiCalls = slack.calls.length - before + providerCalls.length - 1;
+    expect(authorizations).toBe(2 * apiCalls + 1);
   });
 
   test("refuses uploads from legacy bot grants before provider I/O", async () => {
@@ -2603,7 +2610,7 @@ describe("OpenGeni Slack bot connection", () => {
     expect(slack.calls.filter((call) => call.method === "files.list")).toHaveLength(3);
   });
 
-  test("authorizes every physical Slack call and denies a revoked continuation page", async () => {
+  test("reauthorizes after quota reservation and denies a revoked continuation page", async () => {
     if (!available) return;
     const workspace = await freshWorkspace();
     const slack = fakeSlack({
@@ -2619,7 +2626,9 @@ describe("OpenGeni Slack bot connection", () => {
     });
     const before = slack.calls.length;
     const first = await bot.listFiles({ channelId: "C_MEMBER", limit: 1 });
-    expect(authorizations).toBe(slack.calls.length - before);
+    // Both the pre-quota authority check and the final post-quota check are
+    // required; revocation before either one prevents physical dispatch.
+    expect(authorizations).toBe(2 * (slack.calls.length - before));
     expect(first.nextCursor).toBeString();
     const current = await getConnectionMetadata(
       client.db,
@@ -2975,7 +2984,11 @@ describe("OpenGeni Slack bot connection", () => {
       requestedConnectionId: connection!.id,
     });
     const bot = createOpenGeniSlackBotClient(
-      { db: client.db, settings, slackFetch: slack.fetch },
+      {
+        db: client.db,
+        settings: { ...settings, slackAccessMode: "full" },
+        slackFetch: slack.fetch,
+      },
       resolved,
     );
     const channels = await bot.listChannels();
@@ -3453,11 +3466,14 @@ describe("OpenGeni Slack bot connection", () => {
   test("searches public Slack through the bot with pinned channel types and bounded projections", async () => {
     if (!available) return;
     const workspace = await freshWorkspace();
-    const slack = fakeSlack();
+    const slack = fakeSlack({
+      scopes: [...OPENGENI_SLACK_BOT_REQUIRED_SCOPES, ...OPENGENI_SLACK_BOT_SAFE_OPTIONAL_SCOPES],
+    });
     const { bot } = await connectedTestBot(workspace, slack.fetch);
 
     const result = await bot.searchContext({
       query: "launch decision",
+      actionToken: "server-owned-action-fixture",
       contentTypes: ["messages", "files", "channels"],
       limit: 5,
       sort: "timestamp",
@@ -3507,9 +3523,11 @@ describe("OpenGeni Slack bot connection", () => {
   test("defaults search to messages and Slack's page cap when the caller omits options", async () => {
     if (!available) return;
     const workspace = await freshWorkspace();
-    const slack = fakeSlack();
+    const slack = fakeSlack({
+      scopes: [...OPENGENI_SLACK_BOT_REQUIRED_SCOPES, ...OPENGENI_SLACK_BOT_SAFE_OPTIONAL_SCOPES],
+    });
     const { bot } = await connectedTestBot(workspace, slack.fetch);
-    await bot.searchContext({ query: "standup" });
+    await bot.searchContext({ query: "standup", actionToken: "server-owned-action-fixture" });
     const call = slack.calls.find((entry) => entry.method === "assistant.search.context");
     expect(call!.contentTypes).toBe("messages");
     expect(call!.channelTypes).toBe("public_channel");
@@ -3522,9 +3540,9 @@ describe("OpenGeni Slack bot connection", () => {
     // A legacy install: required scopes only, no search:read.* grants.
     const slack = fakeSlack({ scopes: [...OPENGENI_SLACK_BOT_REQUIRED_SCOPES] });
     const { bot } = await connectedTestBot(workspace, slack.fetch);
-    await expect(bot.searchContext({ query: "anything" })).rejects.toThrow(
-      "slack_bot_search_scopes_missing",
-    );
+    await expect(
+      bot.searchContext({ query: "anything", actionToken: "server-owned-action-fixture" }),
+    ).rejects.toThrow("slack_bot_search_scopes_missing");
     // Fails before any provider call: Slack never sees the request.
     expect(slack.calls.some((entry) => entry.method === "assistant.search.context")).toBe(false);
     // The denial leaves the same failed audit evidence as a provider rejection.
@@ -3543,18 +3561,151 @@ describe("OpenGeni Slack bot connection", () => {
   test("accepts long natural-language queries up to the schema cap and rejects beyond it", async () => {
     if (!available) return;
     const workspace = await freshWorkspace();
-    const slack = fakeSlack();
+    const slack = fakeSlack({
+      scopes: [...OPENGENI_SLACK_BOT_REQUIRED_SCOPES, ...OPENGENI_SLACK_BOT_SAFE_OPTIONAL_SCOPES],
+    });
     const { bot } = await connectedTestBot(workspace, slack.fetch);
 
     // A 300-char semantic prompt is a legitimate Real-time Search query.
     const longQuery = "what did we decide about the launch ".repeat(9).slice(0, 300);
-    await bot.searchContext({ query: longQuery });
+    await bot.searchContext({ query: longQuery, actionToken: "server-owned-action-fixture" });
     const call = slack.calls.find((entry) => entry.method === "assistant.search.context");
     // The client sends the trimmed query.
     expect(call!.searchQuery).toBe(longQuery.trim());
 
     await expect(bot.searchContext({ query: "x".repeat(501) })).rejects.toThrow("invalid_query");
     await expect(bot.searchContext({ query: "   " })).rejects.toThrow("invalid_query");
+  });
+
+  test("disables bot search in limited mode even when a prior installation has search grants", async () => {
+    if (!available) return;
+    const workspace = await freshWorkspace();
+    const slack = fakeSlack({
+      scopes: [...OPENGENI_SLACK_BOT_REQUIRED_SCOPES, ...OPENGENI_SLACK_BOT_SAFE_OPTIONAL_SCOPES],
+    });
+    const { bot } = await connectedTestBot(workspace, slack.fetch, undefined, "limited");
+    await expect(
+      bot.searchContext({
+        query: "launch decision",
+        actionToken: "server-owned-action-fixture",
+      }),
+    ).rejects.toThrow("slack_bot_search_unavailable");
+    expect(slack.calls.some((call) => call.method === "assistant.search.context")).toBe(false);
+  });
+
+  test("approved bot search still requires a server-owned Slack action token", async () => {
+    if (!available) return;
+    const workspace = await freshWorkspace();
+    const slack = fakeSlack({
+      scopes: [...OPENGENI_SLACK_BOT_REQUIRED_SCOPES, ...OPENGENI_SLACK_BOT_SAFE_OPTIONAL_SCOPES],
+    });
+    const { bot } = await connectedTestBot(workspace, slack.fetch);
+    await expect(bot.searchContext({ query: "launch decision" })).rejects.toThrow(
+      "slack_bot_search_action_required",
+    );
+    expect(slack.calls.some((call) => call.method === "assistant.search.context")).toBe(false);
+  });
+
+  test("limited history pages and cooldowns are shared by separate bot clients", async () => {
+    if (!available) return;
+    const workspace = await freshWorkspace();
+    const slack = fakeSlack();
+    const { bot, resolved } = await connectedTestBot(workspace, slack.fetch, undefined, "limited");
+    const replica = createOpenGeniSlackBotClient(
+      {
+        db: client.db,
+        settings: { ...settings, slackAccessMode: "limited" },
+        slackFetch: slack.fetch,
+      },
+      resolved,
+    );
+    await bot.channelHistory({ channelId: "C_MEMBER", limit: 100 });
+    await expect(replica.channelHistory({ channelId: "C_MEMBER", limit: 100 })).rejects.toThrow(
+      "rate_limited",
+    );
+    expect(slack.calls.filter((call) => call.method === "conversations.history")).toEqual([
+      expect.objectContaining({ limit: "15" }),
+    ]);
+    // Slack limits the methods independently, but each method's allowance is
+    // shared across every client and token of this app in the provider team.
+    await bot.threadReplies({ channelId: "C_MEMBER", threadTimestamp: "1.000", limit: 100 });
+    await expect(
+      replica.threadReplies({ channelId: "C_MEMBER", threadTimestamp: "1.000" }),
+    ).rejects.toThrow("rate_limited");
+    expect(slack.calls.filter((call) => call.method === "conversations.replies")).toEqual([
+      expect.objectContaining({ limit: "15" }),
+    ]);
+  });
+
+  test("a quota refusal checks authority without recording provider use or dispatching", async () => {
+    if (!available) return;
+    const workspace = await freshWorkspace();
+    const slack = fakeSlack();
+    let adapterChecks = 0;
+    const { bot, connection, resolved } = await connectedTestBot(
+      workspace,
+      slack.fetch,
+      async () => {
+        adapterChecks += 1;
+        return true;
+      },
+      "limited",
+    );
+    const before = await getConnectionMetadata(
+      client.db,
+      workspace.workspaceId,
+      connection.id,
+      null,
+    );
+    const quota = buildSlackApiRateLimiter(client.db, { ...settings, slackAccessMode: "limited" });
+    await quota(resolved.metadata.slackTeamId, "conversations.list", 60);
+    const providerCalls = slack.calls.length;
+    await expect(bot.listChannels()).rejects.toThrow("rate_limited");
+    const after = await getConnectionMetadata(
+      client.db,
+      workspace.workspaceId,
+      connection.id,
+      null,
+    );
+    expect(after!.lastUsedAt).toEqual(before!.lastUsedAt);
+    expect(adapterChecks).toBe(1);
+    expect(slack.calls).toHaveLength(providerCalls);
+  });
+
+  test("limited bot post reconciliation never crawls or resends an unknown mutation", async () => {
+    if (!available) return;
+    const workspace = await freshWorkspace();
+    const slack = fakeSlack({
+      loseFirstPostResponse: true,
+      postReadDecoyCount: 20,
+      postReadPageSize: 15,
+    });
+    const { bot, connection } = await connectedTestBot(
+      workspace,
+      slack.fetch,
+      undefined,
+      "limited",
+    );
+    const request = {
+      operationId: crypto.randomUUID(),
+      channelId: "C_MEMBER",
+      text: "unknown post fixture",
+    };
+    await expect(bot.postMessage(request)).rejects.toThrow("transport_error");
+    await expect(bot.postMessage(request)).rejects.toThrow("post_reconciliation_truncated");
+    expect(slack.calls.filter((call) => call.method === "chat.postMessage")).toHaveLength(1);
+    expect(slack.calls.filter((call) => call.method === "conversations.history")).toHaveLength(1);
+    expect(
+      await getSlackBotPostOperation(
+        client.db,
+        workspace.workspaceId,
+        connection.id,
+        request.operationId,
+      ),
+    ).toMatchObject({
+      status: "outcome_unknown",
+      claimHolderId: null,
+    });
   });
 
   test("retries explicit provider rejection and preserves distinct operation IDs", async () => {
@@ -3570,6 +3721,8 @@ describe("OpenGeni Slack bot connection", () => {
     };
 
     await expect(bot.postMessage(first)).rejects.toThrow("rate_limited");
+    // Simulate the provider cooldown elapsing without sleeping in this fixture.
+    await shared!.admin`delete from slack_api_rate_limits`;
     expect(
       await getSlackBotPostOperation(
         client.db,

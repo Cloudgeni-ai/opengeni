@@ -1,3 +1,5 @@
+import { OPENGENI_SLACK_REST_USER_SCOPES } from "./slack-rest-mcp";
+
 export const OPENGENI_SLACK_BOT_REQUIRED_SCOPES = [
   "app_mentions:read",
   "canvases:read",
@@ -47,8 +49,14 @@ export const OPENGENI_SLACK_BOT_REQUESTED_SCOPES = [
   ...OPENGENI_SLACK_BOT_REQUIRED_SCOPES,
   OPENGENI_SLACK_REACTION_REQUIRED_SCOPE,
   OPENGENI_SLACK_FILE_UPLOAD_REQUIRED_SCOPE,
-  ...OPENGENI_SLACK_BOT_SEARCH_SCOPES,
 ] as const;
+
+export function openGeniSlackBotRequestedScopes(mode: "limited" | "full" = "limited"): string[] {
+  return [
+    ...OPENGENI_SLACK_BOT_REQUESTED_SCOPES,
+    ...(mode === "full" ? OPENGENI_SLACK_BOT_SEARCH_SCOPES : []),
+  ];
+}
 
 export const OPENGENI_SLACK_BOT_EVENTS = [
   "app_home_opened",
@@ -60,34 +68,8 @@ export const OPENGENI_SLACK_BOT_EVENTS = [
   "reaction_added",
 ] as const;
 
-/** Full user-token scope set for every tool currently exposed by Slack's hosted MCP server. */
-export const OPENGENI_SLACK_MCP_USER_SCOPES = [
-  "search:read.public",
-  "search:read.private",
-  "search:read.mpim",
-  "search:read.im",
-  "search:read.files",
-  "files:read",
-  "emoji:read",
-  "search:read.users",
-  "chat:write",
-  "channels:history",
-  "groups:history",
-  "mpim:history",
-  "im:history",
-  "channels:write",
-  "groups:write",
-  "im:write",
-  "mpim:write",
-  "reactions:write",
-  "canvases:read",
-  "canvases:write",
-  "users:read",
-  "users:read.email",
-  "channels:read",
-  "groups:read",
-  "mpim:read",
-] as const;
+/** User grants required by the reviewed Slack API MCP tools. */
+export const OPENGENI_SLACK_MCP_USER_SCOPES = OPENGENI_SLACK_REST_USER_SCOPES;
 
 export const OPENGENI_MANAGED_PUBLIC_BASE_URL = "https://app.opengeni.ai" as const;
 
@@ -96,6 +78,7 @@ export type OpenGeniSlackBotManifestOptions = Readonly<{
   botDisplayName?: string;
   slashCommand?: string;
   shortcutName?: string;
+  accessMode?: "limited" | "full";
 }>;
 
 function normalizedSlackManifestText(
@@ -184,7 +167,7 @@ export function buildOpenGeniSlackBotManifest(
         `${baseUrl}/v1/integrations/slack/callback`,
       ],
       scopes: {
-        bot: [...OPENGENI_SLACK_BOT_REQUESTED_SCOPES],
+        bot: openGeniSlackBotRequestedScopes(options.accessMode),
         user: [...OPENGENI_SLACK_MCP_USER_SCOPES],
       },
     },

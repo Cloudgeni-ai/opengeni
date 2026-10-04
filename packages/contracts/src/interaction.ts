@@ -2702,6 +2702,8 @@ const DirectComputerRfbAttachment = z
     kind: z.literal("direct_rfb"),
     url: boundedUrl,
     protocols: z.array(z.string().min(1).max(2_048)).min(2).max(3),
+    /** Absent on an older API means pixel viewing only. */
+    inputAllowed: z.boolean().default(false),
   })
   .strict();
 
@@ -2939,6 +2941,8 @@ export const ComputerSessionCapabilities = z
     keyboardInput: z.boolean(),
     clipboard: z.boolean(),
     backgroundActions: z.boolean(),
+    /** Raw window input stays in the background. Absent means foreground-only. */
+    backgroundInput: z.boolean().optional(),
     parallelApps: z.boolean(),
   })
   .strict();
@@ -3303,11 +3307,25 @@ export const ComputerSessionAttachment = z
     computerSessionId: z.string().uuid(),
     controllerGeneration: opaqueGeneration,
     targetId: boundedOpaqueId,
+    // Viewer posture only. Canonical actions still require live source authority.
+    // Older API responses omit it; their existing action authorization remains.
+    inputAllowed: z.boolean().optional(),
     stream: ComputerFrameStreamAttachment,
     expiresAt: z.string().datetime({ offset: true }),
   })
   .strict();
 export type ComputerSessionAttachment = z.infer<typeof ComputerSessionAttachment>;
+
+/** Caller-specific human input posture, independent of media/native capability.
+ * It is a current-controller hint; every action still reauthorizes. */
+export const ComputerSessionInputPosture = z
+  .object({
+    computerSessionId: z.string().uuid(),
+    controllerGeneration: opaqueGeneration,
+    inputAllowed: z.boolean(),
+  })
+  .strict();
+export type ComputerSessionInputPosture = z.infer<typeof ComputerSessionInputPosture>;
 
 export const ComputerSessionAttachmentRequest = z
   .object({

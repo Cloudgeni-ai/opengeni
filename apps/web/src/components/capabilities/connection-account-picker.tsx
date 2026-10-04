@@ -40,6 +40,7 @@ export type ConnectionAccountPickerProps = {
   onChoose: (serverId: string, connectionIds: string[]) => void;
   disabled?: boolean;
   presentation?: "menu" | "dialog";
+  emptySelectionHint?: string;
 };
 
 export type ConnectionAccountControls = ConnectionAccountPickerProps & {
@@ -145,7 +146,7 @@ export function ConnectionAccountPicker(props: ConnectionAccountPickerProps) {
         ) : null}
         {!chosen.length && group.accounts.length > 0 ? (
           <p role="status" className="px-2 py-2 text-xs text-fg-muted">
-            No accounts selected.
+            {props.emptySelectionHint ?? "No accounts selected."}
           </p>
         ) : null}
       </div>

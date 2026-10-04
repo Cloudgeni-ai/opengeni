@@ -132,7 +132,7 @@ export async function collectDevelopmentPrerequisites(
   const dockerUsable =
     requested !== "native" &&
     Boolean(host.which("docker")) &&
-    (await host.probe("docker", ["info"])).ok;
+    (await host.probe("docker", ["version", "--format", "{{.Server.Version}}"])).ok;
   const backend =
     requested === "docker" || (requested === "auto" && dockerUsable) ? "docker" : "native";
   const fixture = environment.OPENGENI_OBJECT_STORAGE_FIXTURE || "garage";
@@ -154,7 +154,7 @@ export async function collectDevelopmentPrerequisites(
   if (backend === "docker") {
     if (!dockerUsable)
       errors.push(
-        "Docker backend requires an installed Docker CLI and a responsive daemon. Start Docker Desktop on macOS/WSL2 or the Docker Engine service on Linux, check socket permissions/context, then run docker info. Auto fallback is not used for explicit docker.",
+        "Docker backend requires an installed Docker CLI and a responsive daemon. Start Docker Desktop on macOS/WSL2 or the Docker Engine service on Linux, check socket permissions/context, then run docker version. Auto fallback is not used for explicit docker.",
       );
     if (host.which("docker")) {
       await requireProbe(
@@ -177,7 +177,7 @@ export async function collectDevelopmentPrerequisites(
   } else {
     if (host.platform === "darwin")
       errors.push(
-        "Native development infrastructure is Linux-only; macOS native supervision is unsupported for both Garage and MinIO. Install/start Docker Desktop, verify docker info, and select OPENGENI_DEV_BACKEND=docker. Installing GNU utilities alone does not provide a supported native macOS stack.",
+        "Native development infrastructure is Linux-only; macOS native supervision is unsupported for both Garage and MinIO. Install/start Docker Desktop, verify docker version, and select OPENGENI_DEV_BACKEND=docker. Installing GNU utilities alone does not provide a supported native macOS stack.",
       );
     if (!["x64", "arm64"].includes(host.arch))
       errors.push(

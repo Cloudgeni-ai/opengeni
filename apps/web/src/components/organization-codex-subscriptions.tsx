@@ -1,4 +1,5 @@
 import type { OpenGeniBrowserClient } from "@opengeni/sdk/browser";
+import { beginModelConnectJourney } from "@/lib/integration-connect-analytics";
 import type {
   CodexAccount,
   CodexConnectPoll,
@@ -71,6 +72,7 @@ export function useOrganizationCodexSubscriptions({
 
   const connect = useCallback(
     async (options?: { onConnected?: (accountId: string | null) => void }) => {
+      const recordOutcome = beginModelConnectJourney("codex", "device_code");
       setBusy(true);
       try {
         const start = await client.requestJson<CodexConnectStart>(
@@ -100,10 +102,12 @@ export function useOrganizationCodexSubscriptions({
             if (!result || controller.signal.aborted || cancelled.current) return;
             setPending(null);
             if (result.status === "expired") {
+              recordOutcome("expired");
               toast.error("The code expired before it was used. Try again.");
               return;
             }
             if (result.status === "connected") {
+              recordOutcome("connected");
               toast.success(
                 `Codex connected for the organization${result.plan ? ` (${planLabel(result.plan, "ChatGPT")})` : ""}`,
               );
@@ -116,6 +120,7 @@ export function useOrganizationCodexSubscriptions({
             }
           })
           .catch((error) => {
+            recordOutcome("outcome_unknown");
             if (controller.signal.aborted || cancelled.current) return;
             setPending(null);
             toast.error("Couldn't confirm the ChatGPT sign-in", {
@@ -123,6 +128,7 @@ export function useOrganizationCodexSubscriptions({
             });
           });
       } catch (error) {
+        recordOutcome("outcome_unknown");
         setPending(null);
         toast.error("Couldn't start the ChatGPT sign-in", { description: userErrorText(error) });
       } finally {

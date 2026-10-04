@@ -20,7 +20,15 @@ import {
 } from "../src";
 
 const repair = "0552_usage_allowances.sql";
-const currentSessionWriterMigration = "0559_session_agent_config.sql";
+// Current adapters require the actual nullable agent config and canonical
+// subscription pool schema, even when seeding non-Claude historical work.
+// Neither changes the attribution/visibility policies under test. Install the
+// real migrations rather than inventing a permissive reader-only pool table.
+const currentWriterMigrations = [
+  "0559_session_agent_config.sql",
+  "0598_claude_subscription_account_pools.sql",
+];
+const visibilityPlanningMigration = "0591_insights_aggregate_query_plans.sql";
 const directory = fileURLToPath(new URL("../drizzle/", import.meta.url));
 
 async function expectSqlState(action: () => Promise<unknown>, state: string) {
@@ -59,7 +67,7 @@ test("0552 attribution lifecycle does not rewrite source visibility or read priv
   expect(source).toContain("receipt.idempotency_key='knowledge.query_cost:'||NEW.source_id");
 });
 
-test("real non-bypass owner migrates receipts while all original source policies remain byte-identical", async () => {
+test("real non-bypass owner preserves source policy bytes through receipt repair and exact visibility through later planning", async () => {
   const owned = await acquireOwnerMigratedTestDatabase("0552-attribution-visibility");
   if (!owned) {
     if (process.env.OPENGENI_REQUIRE_REAL_DB === "1")
@@ -75,7 +83,7 @@ test("real non-bypass owner migrates receipts while all original source policies
     await owner.unsafe(`CREATE TABLE IF NOT EXISTS schema_migrations (
       name text PRIMARY KEY, applied_at timestamptz NOT NULL DEFAULT now())`);
     const deferred = (await readdir(directory)).filter(
-      (file) => file.endsWith(".sql") && file >= repair && file !== currentSessionWriterMigration,
+      (file) => file.endsWith(".sql") && file >= repair && !currentWriterMigrations.includes(file),
     );
     for (const name of deferred) await owner`insert into schema_migrations(name) values(${name})`;
     await migrate(owned.ownerUrl);
@@ -87,12 +95,16 @@ test("real non-bypass owner migrates receipts while all original source policies
       ADD COLUMN imported_archive_request_hash text,
       ADD COLUMN imported_archive_subject_id text,
       ADD COLUMN imported_archive_next_offset integer`;
+    // Current event writers read this additive field while seeding legacy rows.
+    // Remove it before replay so the actual attention backfill still runs.
+    await owner`ALTER TABLE session_event_cursors
+      ADD COLUMN last_meaningful_sequence integer NOT NULL DEFAULT 0`;
     // Renumbering the independent nullable agent-config column after this
     // repair must not break current session writers used to seed legacy rows.
-    // Apply only that additive migration early; allowance/collaborator repairs
+    // Apply those adapter prerequisites early; allowance/collaborator repairs
     // stay deferred until historical rows and the original policy snapshot exist.
     await owner`delete from schema_migrations
-      where name >= ${repair} and name <> ${currentSessionWriterMigration}`;
+      where name >= ${repair} and not (name = any(${currentWriterMigrations}::text[]))`;
     const [staged] = await owner`select
       to_regclass('opengeni_private.usage_allowance_attribution_receipts') as receipts`;
     expect(staged!.receipts).toBeNull();
@@ -201,6 +213,11 @@ test("real non-bypass owner migrates receipts while all original source policies
         causalHumanSubjectId: subjectId,
         causalHumanAuthority,
         xaiProviderAccountAuthoritySnapshot: { version: 1, scope: "workspace" },
+        claudeProviderAccountAuthoritySnapshot: {
+          version: 1 as const,
+          scope: "workspace" as const,
+        },
+        claudeAuthoritySubjectId: null,
         xaiAuthoritySubjectId: null,
         connectionAuthoritySubjectId: null,
         triggerInitiator: { kind: "service", subjectId: "scheduler" },
@@ -238,8 +255,41 @@ test("real non-bypass owner migrates receipts while all original source policies
       DROP COLUMN imported_archive_request_hash,
       DROP COLUMN imported_archive_subject_id,
       DROP COLUMN imported_archive_next_offset`;
+    await owner`ALTER TABLE session_event_cursors DROP COLUMN last_meaningful_sequence`;
+    // Assert the attribution repair's literal policy invariance before the
+    // separately governed 0591 planner optimization. This fixture already
+    // stages future receipts to replay a historical migration boundary; retain
+    // only that suffix temporarily, then actually replay it below.
+    const planningSuffix = deferred.filter((name) => name >= visibilityPlanningMigration);
+    for (const name of planningSuffix)
+      await owner`insert into schema_migrations(name) values(${name})`;
     await migrate(owned.ownerUrl);
     expect([...(await snapshot())]).toEqual([...before]);
+    // Parse the exact approved SELECT predicate in PostgreSQL. Do not strip or
+    // ignore policy expressions: roles, permissiveness, all writes, and every
+    // other SELECT policy must remain byte-identical after the full replay.
+    await owner.unsafe(`CREATE POLICY attribution_expected_planned_visibility ON usage_events
+      AS RESTRICTIVE FOR SELECT USING (
+        CASE WHEN (SELECT organization_usage_policy_capability_active(current_user)) THEN true
+        ELSE CASE WHEN (SELECT insights_fact_read_policy_capability_active(current_user,
+          pg_catalog.pg_get_userbyid((SELECT relation.relowner FROM pg_catalog.pg_class relation
+            WHERE relation.oid = 'usage_events'::pg_catalog.regclass)), 'usage_events')) THEN true
+          ELSE session_reference_visible(account_id, workspace_id, session_id) END END
+      )`);
+    const [planned] = await owner`select pg_get_expr(polqual, polrelid) as qual
+      from pg_policy where polrelid = 'usage_events'::regclass
+        and polname = 'attribution_expected_planned_visibility'`;
+    expect(planned?.qual).toBeDefined();
+    await owner.unsafe("DROP POLICY attribution_expected_planned_visibility ON usage_events");
+    for (const name of planningSuffix)
+      await owner`delete from schema_migrations where name=${name}`;
+    await migrate(owned.ownerUrl);
+    const plannedPolicies = before.map((row) =>
+      row.relname === "usage_events" && row.polname === "session_visibility_isolation"
+        ? { ...row, qual: planned!.qual }
+        : row,
+    );
+    expect([...(await snapshot())]).toEqual(plannedPolicies);
     const [backfill] =
       await owned.admin`select attribution from opengeni_private.usage_allowance_attribution_receipts
       where account_id=${accountId} and workspace_id=${workspaceId} and source_kind='turn' and source_id=${String(turn!.id)}`;
@@ -425,7 +475,7 @@ test("real non-bypass owner migrates receipts while all original source policies
     const [closed] =
       await owned.admin`select count(*)::int as count from opengeni_private.usage_allowance_capabilities`;
     expect(closed!.count).toBe(0);
-    expect([...(await snapshot())]).toEqual([...before]);
+    expect([...(await snapshot())]).toEqual(plannedPolicies);
   } finally {
     await appSql?.end();
     await app?.close();

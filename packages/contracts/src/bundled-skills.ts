@@ -7,6 +7,7 @@ export const BundledSkillId = z.enum([
   "builtin:document-parsing",
   "builtin:opengeni-skills",
   "builtin:opengeni-projects",
+  "builtin:opengeni-schedules",
   "builtin:opengeni-documents",
   "builtin:opengeni-spreadsheets",
   "builtin:opengeni-presentations",

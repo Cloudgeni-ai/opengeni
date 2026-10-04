@@ -21,7 +21,7 @@ UI, while a standalone OpenGeni deployment owns agent sessions and execution.
 For first-time organization and workspace provisioning, start with
 [OpenGeni developer setup](https://docs.opengeni.ai/guides/developer-plugin), then return here to write
 the embedding code. That skills-only workflow uses the coding agent's own
-browser and public REST/SDK, with a scoped Developer setup key; no OpenGeni MCP
+browser and public REST/SDK, with a full-access setup key; no OpenGeni MCP
 server is required.
 
 Do not confuse two meanings of "skill": this file teaches a customer's coding
@@ -63,13 +63,22 @@ Embedded products may narrow bundled guidance with `bundledSkillIds`.
   Continue useful discovery without requesting broad credentials or pretending
   missing access is configured. Read
   [Discovery and autonomy](references/discovery-and-autonomy.md) for that workflow.
-- Four choices belong to the user: who shares what (`chats`: private, shared
-  or isolated), when things run (schedule and time zone), where outputs land
-  (which screen, record, or channel), and whether the agent may write. If the
-  request or repository does not settle any of them, ask ONE bundled question
-  (the structured question UI when available) with a recommended answer for
-  each, before building. This is the expected step, not an option: asking once
-  is cheap, rebuilding is not. Never ask what the repository answers. See
+- Two choices belong to the user: who can see a chat (only the person who
+  started it, or their team) and whether the agent may change data. If the
+  request or repository does not settle one, ask ONE short, plain-language
+  question with a recommended answer, before building. Never ask what the
+  repository answers. How chats map to OpenGeni workspaces (including
+  `chats: "isolated"`) is your implementation decision: never offer it as an
+  option or mention OpenGeni workspaces in a question.
+- Decide local-development mechanics yourself (ports, local HTTPS, cookie
+  flags, seed data, test logins). When you test against a local app, OpenGeni
+  must reach its tool endpoint over public HTTPS, so open a temporary tunnel
+  (for example `cloudflared`) and tell the user you did; don't ask.
+- Do not ask about background work, schedules, session length or credential
+  lifetime up front. Long agent sessions just work. Only when the requested
+  feature itself is scheduled or runs in the background (for example "email me
+  a weekly report"), ask for the missing details (day, time, time zone, where
+  results appear) and say in one sentence why you need them. See
   [Discovery and autonomy](references/discovery-and-autonomy.md).
 - Use a reversible, clearly stated default only for choices outside those four,
   or when the user explicitly said not to ask. A busy user is not that signal.
@@ -83,8 +92,11 @@ Embedded products may narrow bundled guidance with `bundledSkillIds`.
 
 Default to OpenGeni's complete conversation experience: `OpenGeniProvider`,
 `OpenGeniChat` (the user's chat list plus `SessionConversation`) from
-`@opengeni/react/session-ui`, and `@opengeni/react/compiled.css` (brand it with
-`--og-*` tokens). Import from `session-ui`, not the package root: the root also
+`@opengeni/react/session-ui`, and `@opengeni/react/compiled.css`. For custom-branded
+embeds, theme with scoped `--og-*` tokens. For stock UI, use the shipped components
+and stylesheet without cosmetic host CSS or token overrides; see
+[Stock and host-branded appearance](references/product-shapes-and-ui.md#stock-and-host-branded-appearance).
+Import from `session-ui`, not the package root: the root also
 exports the workbench, whose editors, terminal and desktop viewer are optional
 peer dependencies your bundler would try to resolve. The UI is backed by the
 normal session SDK through `createSessionProxyHandler`, a tenant/user-scoped
@@ -115,14 +127,13 @@ const { workspace } = await og.ensureWorkspace({
 await og.addExternalWorkspaceMember(workspace.id, {
   identity: { externalId: user.id, source },
   permissions: ["workspace:read", "sessions:create", "sessions:read", "sessions:control",
-    "files:upload", "files:read", "mcp_servers:attach"], // attach: per-session mcpServers
+    "files:upload", "files:read", "mcp_servers:attach"], // attach: the toolServer below
   operationId,
 });
 
 // 2. The proxy, as a Next.js App Router catch-all: app/api/opengeni/[...path]/route.ts.
 //    Express: toNodeMiddleware(createSessionProxyHandler(og, options)) from
 //    "@opengeni/sdk/express"; Hono: toHonoHandler(...) from "@opengeni/sdk/hono".
-const acme = (token: string) => ({ id: "acme", headers: { Authorization: `Bearer ${token}` } });
 export const dynamic = "force-dynamic";
 export const { GET, POST, PUT, PATCH, DELETE } = createSessionProxyRoute(og, {
   chats: "private", // the default: each user's chats are theirs; "shared" | "isolated"
@@ -134,7 +145,7 @@ export const { GET, POST, PUT, PATCH, DELETE } = createSessionProxyRoute(og, {
   },
   authorizeMutation: verifyCsrf, // the product's existing CSRF policy
   // New chats: the browser sends only the first message; the server picks the rest.
-  createSession: async ({ initialMessage, idempotencyKey }, { user }) => ({
+  createSession: ({ initialMessage, idempotencyKey }) => ({
     initialMessage,
     idempotencyKey,
     agent: {
@@ -142,16 +153,24 @@ export const { GET, POST, PUT, PATCH, DELETE } = createSessionProxyRoute(og, {
       capabilities: "none", // Acme's tools, asking questions, reading Skills; nothing else
     },
     skills: productSkills, // product-owned, inline
-    mcpServers: [{ ...acme(await mintUserToken(user)), url: ACME_MCP_URL, allowedTools }],
-    tools: [{ kind: "mcp", id: "acme" }], // a per-session server must also be selected here
+    tools: [], // workspace integrations to select; the toolServer adds itself (eager)
     sandboxBackend: "none", // pure chat/tool agent: no sandbox to start or shell around tools
   }),
-  // Every forwarded message: fresh per-user token and server-owned page context.
-  beforeForwardMessage: async (_message, { user }) => ({
-    mcpCredentialUpdates: [acme(await mintUserToken(user))],
+  // Acme's own tools as the signed-in user: the proxy attaches this MCP endpoint to
+  // every chat with a short-lived per-user token and refreshes it on every message,
+  // approval, and answer. Writes listed in `ask` wait for the user's approval.
+  // url defaults to OPENGENI_TOOL_SERVER_URL (public HTTPS), also read by verifyToolRequest.
+  toolServer: { approvals: { ask: ["update_ticket"] } }, // list the write tools
+  // Every forwarded message: server-owned page context.
+  beforeForwardMessage: () => ({
     modelContext: `Today ${new Date().toISOString().slice(0, 10)}, time zone ${tz}`,
   }),
 });
+
+// 3. Acme's MCP endpoint (app/api/mcp/route.ts), built with any MCP library; see
+//    references/data-tools-and-credentials.md. Verify first, scope every tool to `user`.
+import { verifyToolRequest } from "@opengeni/sdk/tool-auth";
+const { user, tenant } = await verifyToolRequest(request); // throws ToolRequestError (401)
 ```
 
 ```tsx
@@ -255,11 +274,16 @@ only own usage. These are post-call ceilings, not prepaid reservations.
 
 - Always pass `baseUrl` (`process.env.OPENGENI_API_BASE_URL`); the chat facade
   otherwise targets production `app.opengeni.ai`. The SDK is ESM-only.
-- A per-session `mcpServers` entry is usable only when also selected in
-  `tools: [{ kind: "mcp", id, eager? }]`, and attaching it needs
-  `mcp_servers:attach` for the acting user. MCP and OpenAPI spec URLs must be
-  public HTTPS the deployment can reach; tunnel local servers (for example
-  `cloudflared`).
+- On a Node backend, give the agent the product's own data with the proxy's
+  `toolServer` plus `verifyToolRequest`; do not hand-build token minting,
+  per-session wiring, or refresh. Attaching needs `mcp_servers:attach` for the
+  acting user. MCP and OpenAPI spec URLs must be public HTTPS the deployment can
+  reach; tunnel local servers (`cloudflared tunnel --url http://localhost:PORT`)
+  and use the tunnel URL as `toolServer.url`.
+- The packaged proxy already rejects cross-site mutations and requires JSON.
+  Don't put your own Origin/CSRF check in front of it (browsers often omit
+  `Origin` on same-origin requests), and don't format-validate the product's
+  own IDs; authorize them with the product's normal lookup instead.
 - Install `@opengeni/sdk` and `@opengeni/react` from the same release. If the
   repository enforces a release-age policy (for example pnpm
   `minimumReleaseAge`), a just-published version may be refused: pin an older

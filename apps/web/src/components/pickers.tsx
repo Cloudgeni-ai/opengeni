@@ -1,6 +1,12 @@
 import { ChevronDownIcon, PlugIcon } from "lucide-react";
 import { Suspense } from "react";
 import type { FirstPartyMcpToolName } from "@opengeni/contracts";
+import {
+  ModelPolicyPicker,
+  ModelPolicyPickerMenu,
+  type ModelPolicyPickerGroupPresentation,
+  type ModelPolicyPickerProps,
+} from "@opengeni/react";
 
 import { Button } from "@/components/ui/button";
 import {
@@ -11,15 +17,46 @@ import {
 import type { McpServerOption } from "@/lib/session-tools";
 import { capabilityGroupSelection, sessionCapabilityGroupsFor } from "@/lib/session-capabilities";
 import { cn } from "@/lib/utils";
+import { openGeniGroupPresentation } from "./billing-class-mark";
 
-export {
-  ModelPolicyPicker as ModelPicker,
-  ModelPolicyPickerMenu as ModelPickerMenu,
-  PickerAnimatedPage,
-  PickerBackHeader,
-  PickerNavRow,
-} from "@opengeni/react";
+export { PickerAnimatedPage, PickerBackHeader, PickerNavRow } from "@opengeni/react";
 export type { ModelPolicyPickerProps as ModelPickerProps, PickerModelRow } from "@opengeni/react";
+
+function firstPartyGroupPresentation(
+  presentation: ModelPolicyPickerGroupPresentation | undefined,
+): ModelPolicyPickerGroupPresentation {
+  return {
+    ...presentation,
+    opengeni_credits: {
+      ...openGeniGroupPresentation.opengeni_credits,
+      ...presentation?.opengeni_credits,
+      label:
+        presentation?.opengeni_credits?.label ?? openGeniGroupPresentation.opengeni_credits?.label,
+      icon:
+        presentation?.opengeni_credits?.icon === undefined
+          ? openGeniGroupPresentation.opengeni_credits?.icon
+          : presentation.opengeni_credits.icon,
+    },
+  };
+}
+
+export function ModelPicker(props: ModelPolicyPickerProps) {
+  return (
+    <ModelPolicyPicker
+      {...props}
+      groupPresentation={firstPartyGroupPresentation(props.groupPresentation)}
+    />
+  );
+}
+
+export function ModelPickerMenu(props: ModelPolicyPickerProps) {
+  return (
+    <ModelPolicyPickerMenu
+      {...props}
+      groupPresentation={firstPartyGroupPresentation(props.groupPresentation)}
+    />
+  );
+}
 
 function pillClass(active: boolean, className?: string): string {
   return cn(

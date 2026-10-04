@@ -1,6 +1,7 @@
 import type { GeneratedVideoReceipt, VideoArtifactPlaybackSource } from "@opengeni/sdk";
 import { useEffect, useState } from "react";
 import { cn } from "../lib/cn";
+import { useErrorMessage } from "../lib/error-message";
 import type { VideoArtifactPlaybackLoader } from "../timeline";
 
 export type GeneratedVideoPlayerProps = {
@@ -22,6 +23,7 @@ export function GeneratedVideoPlayer({
   className,
   label = "Generated video",
 }: GeneratedVideoPlayerProps) {
+  const formatError = useErrorMessage();
   const [retry, setRetry] = useState(0);
   const [state, setState] = useState<SourceState>({ kind: "loading" });
 
@@ -36,12 +38,12 @@ export function GeneratedVideoPlayer({
         if (controller.signal.aborted) return;
         setState({
           kind: "error",
-          message: error instanceof Error ? error.message : "Playback is unavailable.",
+          message: formatError(error),
         });
       },
     );
     return () => controller.abort();
-  }, [loadPlaybackSource, receipt.artifact.artifactId, retry]);
+  }, [loadPlaybackSource, receipt.artifact.artifactId, retry, formatError]);
 
   if (state.kind === "loading") {
     return (

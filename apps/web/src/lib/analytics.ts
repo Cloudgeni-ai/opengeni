@@ -1,6 +1,11 @@
 import { installAnalyticsObserver } from "./analytics-observer";
 import { clearLoginAnalytics, takeSuccessfulLogin } from "./analytics-login";
 import {
+  beginIntegrationConnect,
+  captureIntegrationConnectReturn,
+  modelConnectionClass,
+} from "./integration-connect-analytics";
+import {
   ANALYTICS_COLLECTION_ENABLED_EVENT,
   analyticsHasProviders,
   storedAnalyticsConsent,
@@ -44,7 +49,15 @@ export type AnalyticsEventName =
   | "organization_setup_completed"
   | "checkout_started"
   | "checkout_completed"
-  | "first_turn_completed";
+  | "checkout_cancelled"
+  | "first_turn_completed"
+  | "integration_connect_started"
+  | "integration_connect_finished"
+  | "turn_failure_viewed"
+  | "turn_failure_action"
+  | "onboarding_step_viewed"
+  | "onboarding_step_completed"
+  | "onboarding_abandoned";
 
 type AnalyticsConfig = ClientConfig["analytics"];
 export type AnalyticsProperty = boolean | number | string;
@@ -218,6 +231,7 @@ async function initializeProviders(config: AnalyticsConfig): Promise<void> {
       applyActiveIdentity();
       dispatchPageView(latestPathname);
       captureAuthReturn(takePendingAuthReturn());
+      captureIntegrationConnectReturn();
       window.dispatchEvent?.(new Event(ANALYTICS_COLLECTION_ENABLED_EVENT));
     }
   });
@@ -501,8 +515,14 @@ export function trackModelConnection(
   const generation = identityGeneration;
   const consentGeneration = initializationGeneration;
   const allowed = analyticsCollectionAllowed();
+  // The same flow is also one step of the integration connect journey.
+  const journey = beginIntegrationConnect(
+    modelConnectionClass(provider) ?? "other",
+    provider === "codex" || provider === "supergrok" ? "device_code" : "api_key",
+  );
   let finished = false;
   return (outcome) => {
+    journey.finish(outcome === "expired" ? "abandoned" : outcome);
     if (
       !allowed ||
       finished ||

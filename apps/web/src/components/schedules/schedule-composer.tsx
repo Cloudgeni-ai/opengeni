@@ -17,7 +17,7 @@ import {
 } from "lucide-react";
 
 import { CapabilityLogo } from "@/components/capabilities/capability-logo";
-import { payerShortLabel } from "@/components/models/models-ui";
+import { modelPayerHint } from "@/lib/model-payer";
 import { ModelPicker, type PickerModelRow } from "@/components/pickers";
 import {
   DropdownMenu,
@@ -162,6 +162,8 @@ export interface ComposerFieldProps {
   canAttachOpenGeniTool: boolean;
   /** The existing tools and attachments stay with the chat a run posts into. */
   existingChat: boolean;
+  /** A materialized reusable chat also owns its execution settings. */
+  inheritsChatSettings: boolean;
 }
 
 export function ComposerField({
@@ -175,6 +177,7 @@ export function ComposerField({
   modelsError,
   canAttachOpenGeniTool,
   existingChat,
+  inheritsChatSettings,
 }: ComposerFieldProps) {
   const context = useAppContext();
   const fieldProps = useFieldControlProps();
@@ -184,9 +187,9 @@ export function ComposerField({
     hasWorkspacePermission(context.accessContext, workspaceId, permission);
   const canAttachSets = can("variable-sets:attach") && can("variable-sets:use");
   const canListSets = canAttachSets && can("variable-sets:list");
-  const variableSets = useVariableSets({ enabled: canListSets && !existingChat });
+  const variableSets = useVariableSets({ enabled: canListSets && !inheritsChatSettings });
   const canUseRigs = can("rigs:use");
-  const rigs = useWorkspaceRigs({ enabled: canUseRigs && !existingChat });
+  const rigs = useWorkspaceRigs({ enabled: canUseRigs && !inheritsChatSettings });
 
   /* ----- repositories */
   const repositories = draft.resources.filter(
@@ -296,19 +299,21 @@ export function ComposerField({
   /* ----- model */
   const followed = draft.modelFollowsDefault ? defaultModelSelection : null;
   const selectedRow = modelRows.find((row) => row.id === (followed?.model ?? draft.model));
-  const payer = selectedRow ? payerShortLabel(selectedRow) : null;
+  const payer = selectedRow ? modelPayerHint(selectedRow) : null;
   const modelMeta = draft.modelFollowsDefault ? (payer ? `Default · ${payer}` : null) : payer;
 
-  const showSetChip = canAttachSets && (setOptions.length > 0 || variableSets.loading);
-  const showRigChip = canUseRigs && (rigOptions.length > 0 || rigs.loading);
+  const showSetChip =
+    !inheritsChatSettings && canAttachSets && (setOptions.length > 0 || variableSets.loading);
+  const showRigChip =
+    !inheritsChatSettings && canUseRigs && (rigOptions.length > 0 || rigs.loading);
   const showContext =
     !existingChat &&
     (repositories.length > 0 ||
       repositoryOptions.length > 0 ||
       showSetChip ||
       showRigChip ||
-      (draft.includeOpenGeniTool && !agentSettings) ||
-      selectedTools.length > 0);
+      (!inheritsChatSettings &&
+        ((draft.includeOpenGeniTool && !agentSettings) || selectedTools.length > 0)));
   return (
     <div
       className={cn(
@@ -368,7 +373,7 @@ export function ComposerField({
               loading={rigs.loading && liveRigs.length === 0}
             />
           ) : null}
-          {draft.includeOpenGeniTool && !agentSettings ? (
+          {!inheritsChatSettings && draft.includeOpenGeniTool && !agentSettings ? (
             <RemovableChip
               icon={<PlugIcon />}
               label="Workspace tools"
@@ -376,7 +381,7 @@ export function ComposerField({
               disabled={disabled}
             />
           ) : null}
-          {selectedTools.map((id) => {
+          {(inheritsChatSettings ? [] : selectedTools).map((id) => {
             const name = toolName(id);
             return (
               <RemovableChip
@@ -412,7 +417,7 @@ export function ComposerField({
         )}
       />
       <div className="flex min-w-0 items-center gap-2 px-3 pb-3">
-        {!existingChat ? (
+        {!inheritsChatSettings ? (
           <DropdownMenu>
             <DropdownMenuTrigger asChild>
               <button
@@ -484,64 +489,66 @@ export function ComposerField({
           </DropdownMenu>
         ) : (
           <span className="text-xs leading-4.5 text-fg-muted">
-            Uses the chat's own tools and attachments.
+            Uses this chat's model, tools and machine.
           </span>
         )}
-        <div className="ml-auto flex min-w-0 items-center gap-1">
-          {!draft.modelFollowsDefault ? (
-            <Tooltip>
-              <TooltipTrigger asChild>
-                <button
-                  type="button"
-                  aria-label="Use the workspace default model"
-                  disabled={disabled}
-                  onClick={() =>
-                    update({
-                      modelFollowsDefault: true,
-                      ...(defaultModelSelection
-                        ? {
-                            model: defaultModelSelection.model,
-                            reasoningEffort: defaultModelSelection.reasoningEffort,
-                          }
-                        : {}),
-                    })
-                  }
-                  className={cn(
-                    "grid size-7 shrink-0 place-items-center rounded-full text-fg-subtle transition-colors duration-[120ms] hover:bg-surface-2 hover:text-fg",
-                    TOUCH_TARGET,
-                  )}
-                >
-                  <RotateCcwIcon aria-hidden="true" className="size-3.5" />
-                </button>
-              </TooltipTrigger>
-              <TooltipContent>Use the workspace default</TooltipContent>
-            </Tooltip>
-          ) : null}
-          <ModelPicker
-            rows={modelRows}
-            // Following a default the client can't resolve to a runnable model:
-            // name the policy instead of printing a raw model id.
-            model={draft.modelFollowsDefault && !selectedRow ? "Workspace default" : draft.model}
-            effort={draft.reasoningEffort}
-            latencyMode="standard"
-            allowLatencyMode={false}
-            disabled={disabled}
-            loading={modelsLoading}
-            error={modelsError}
-            messages={{ label: "Model and reasoning" }}
-            triggerStyle="field"
-            triggerMeta={modelMeta}
-            className={cn(
-              "inline-flex h-7 max-w-full min-w-0 shrink items-center gap-1.5 rounded-full border border-border bg-surface pr-2 pl-2.5 text-xs text-fg transition-colors duration-[120ms] hover:border-border-strong pointer-coarse:h-8",
-              TOUCH_TARGET,
-            )}
-            onModelChange={(model) => update({ model, modelFollowsDefault: false })}
-            onEffortChange={(reasoningEffort) =>
-              update({ reasoningEffort, modelFollowsDefault: false })
-            }
-            onLatencyModeChange={() => {}}
-          />
-        </div>
+        {!inheritsChatSettings ? (
+          <div className="ml-auto flex min-w-0 items-center gap-1">
+            {!draft.modelFollowsDefault ? (
+              <Tooltip>
+                <TooltipTrigger asChild>
+                  <button
+                    type="button"
+                    aria-label="Use the workspace default model"
+                    disabled={disabled}
+                    onClick={() =>
+                      update({
+                        modelFollowsDefault: true,
+                        ...(defaultModelSelection
+                          ? {
+                              model: defaultModelSelection.model,
+                              reasoningEffort: defaultModelSelection.reasoningEffort,
+                            }
+                          : {}),
+                      })
+                    }
+                    className={cn(
+                      "grid size-7 shrink-0 place-items-center rounded-full text-fg-subtle transition-colors duration-[120ms] hover:bg-surface-2 hover:text-fg",
+                      TOUCH_TARGET,
+                    )}
+                  >
+                    <RotateCcwIcon aria-hidden="true" className="size-3.5" />
+                  </button>
+                </TooltipTrigger>
+                <TooltipContent>Use the workspace default</TooltipContent>
+              </Tooltip>
+            ) : null}
+            <ModelPicker
+              rows={modelRows}
+              // Following a default the client can't resolve to a runnable model:
+              // name the policy instead of printing a raw model id.
+              model={draft.modelFollowsDefault && !selectedRow ? "Workspace default" : draft.model}
+              effort={draft.reasoningEffort}
+              latencyMode="standard"
+              allowLatencyMode={false}
+              disabled={disabled}
+              loading={modelsLoading}
+              error={modelsError}
+              messages={{ label: "Model and reasoning" }}
+              triggerStyle="field"
+              triggerMeta={modelMeta}
+              className={cn(
+                "inline-flex h-7 max-w-full min-w-0 shrink items-center gap-1.5 rounded-full border border-border bg-surface pr-2 pl-2.5 text-xs text-fg transition-colors duration-[120ms] hover:border-border-strong pointer-coarse:h-8",
+                TOUCH_TARGET,
+              )}
+              onModelChange={(model) => update({ model, modelFollowsDefault: false })}
+              onEffortChange={(reasoningEffort) =>
+                update({ reasoningEffort, modelFollowsDefault: false })
+              }
+              onLatencyModeChange={() => {}}
+            />
+          </div>
+        ) : null}
       </div>
     </div>
   );

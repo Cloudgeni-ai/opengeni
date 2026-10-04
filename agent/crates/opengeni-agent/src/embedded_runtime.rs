@@ -18,6 +18,9 @@ const AGENT_BROWSER: &[u8] = include_bytes!(env!("OPENGENI_EMBEDDED_AGENT_BROWSE
 #[cfg(opengeni_embedded_runtime)]
 const COMPUTER_NATIVE: &[u8] = include_bytes!(env!("OPENGENI_EMBEDDED_COMPUTER_NATIVE"));
 
+#[cfg(opengeni_embedded_cua)]
+const CUA_RUNTIME: &[(&str, &[u8])] = &include!(env!("OPENGENI_EMBEDDED_CUA_RUNTIME"));
+
 /// Materializes the release-contained runtime and returns its browserd path.
 /// Development builds carry no payload and return `None`, preserving explicit
 /// local/operator sidecar discovery.
@@ -42,6 +45,12 @@ pub fn materialize(config_dir: &Path) -> PlatformResult<Option<PathBuf>> {
         ] {
             materialize_executable(&directory.join(name), bytes)?;
         }
+        #[cfg(opengeni_embedded_cua)]
+        for (name, bytes) in CUA_RUNTIME {
+            let path = directory.join(name);
+            create_private_directory(path.parent().expect("CUA asset parent"))?;
+            materialize_executable(&path, bytes)?;
+        }
         Ok(Some(directory.join(companion_name("opengeni-browserd"))))
     }
 }
@@ -50,6 +59,13 @@ pub fn materialize(config_dir: &Path) -> PlatformResult<Option<PathBuf>> {
 fn runtime_digest() -> String {
     let mut hasher = blake3::Hasher::new();
     for bytes in [BROWSERD, AGENT_BROWSER, COMPUTER_NATIVE] {
+        hasher.update(&(bytes.len() as u64).to_le_bytes());
+        hasher.update(bytes);
+    }
+    #[cfg(opengeni_embedded_cua)]
+    for (name, bytes) in CUA_RUNTIME {
+        hasher.update(&(name.len() as u64).to_le_bytes());
+        hasher.update(name.as_bytes());
         hasher.update(&(bytes.len() as u64).to_le_bytes());
         hasher.update(bytes);
     }
@@ -129,6 +145,25 @@ mod tests {
             COMPUTER_NATIVE
         );
         assert_eq!(materialize(root.path()).expect("replay"), Some(browserd));
+    }
+
+    #[cfg(opengeni_embedded_cua)]
+    #[test]
+    fn embeds_cua_assets_and_refuses_modified_materialized_code() {
+        let root = tempfile::tempdir().expect("runtime root");
+        let browserd = materialize(root.path())
+            .expect("materialize")
+            .expect("embedded");
+        let directory = browserd.parent().expect("runtime directory");
+        for (name, bytes) in CUA_RUNTIME {
+            assert_eq!(
+                std::fs::read(directory.join(name)).expect("CUA asset"),
+                *bytes
+            );
+        }
+        let (name, _) = CUA_RUNTIME.first().expect("CUA SDK asset");
+        std::fs::write(directory.join(name), b"changed SDK").expect("modify SDK");
+        assert!(materialize(root.path()).is_err());
     }
 }
 

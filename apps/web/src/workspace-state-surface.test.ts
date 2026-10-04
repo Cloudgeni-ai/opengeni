@@ -60,9 +60,11 @@ describe("Knowledge surface", () => {
     }
   });
 
-  test("teaches agents the three durable destinations and compact instruction budget", async () => {
+  test("teaches agents the three durable destinations and shared instruction limit", async () => {
     const prompt = await source("routes/agent-brain-prompt.tsx");
-    expect(prompt).toContain("normally 1–3 sentences and no more than 600 characters");
+    expect(prompt).toContain("normally 1–3 sentences");
+    expect(prompt).toContain("Use the same size limit as the manual editor");
+    expect(prompt).not.toContain("600 characters");
     expect(prompt).toContain("fact, decision, incident, bug fix, or outcome");
     expect(prompt).toContain("Describe a reusable skill");
     expect(prompt).toContain("one-sentence always-visible summary");

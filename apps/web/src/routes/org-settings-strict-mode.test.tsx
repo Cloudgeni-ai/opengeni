@@ -50,6 +50,8 @@ const getOrganizationUsageSummary = mock(
     nextWorkspaceCursor: null,
     personalWorkspaces: [],
     personalWorkspaceCount: 0,
+    privateChats: [],
+    privateChatsTruncated: false,
   }),
 );
 const getOrganizationUsageWorkspacePage = mock(
@@ -109,6 +111,15 @@ const updateCompanyProfileAgentPolicy = mock(
   }),
 );
 const getWorkspaceModelCatalog = mock(async (_workspaceId: string) => ({ models: [] }));
+// The Developer page lists shared workspaces for "Only selected workspaces"
+// and the person's connected agents; these tests don't read them.
+const getOrganizationAdministrationOverview = mock(async (_accountId: string) => {
+  throw new Error("not used");
+});
+const listOrganizationMcpConnections = mock(async (_accountId: string) => ({
+  connections: [],
+  canManageAll: true,
+}));
 const useBillingUsage = mock((_options: unknown) => ({
   loading: false,
   error: null,
@@ -131,6 +142,8 @@ const context = {
     getCompanyProfileAgentPolicy,
     updateCompanyProfileAgentPolicy,
     getWorkspaceModelCatalog,
+    getOrganizationAdministrationOverview,
+    listOrganizationMcpConnections,
   } as unknown as OpenGeniBrowserClient,
   clientConfig: { auth: { mode: "managedSession" } },
   authSession: { user: { email: "owner@example.test" } },
@@ -352,48 +365,22 @@ describe("organization billing StrictMode ownership", () => {
     expect(container.querySelector('input[name="credit-amount"]')?.getAttribute("aria-label")).toBe(
       "Amount to add (USD)",
     );
-    expect(getOrganizationUsageSummary.mock.calls.at(-1)?.[0]).toEqual({
-      accountId,
-      period: "month",
-      afterWorkspaceId: undefined,
-    });
-    expect(container.textContent).toContain("No usage recorded in this period.");
+    // Usage moved to Organization > Insights; Billing links there and reads no usage.
+    expect(getOrganizationUsageSummary).not.toHaveBeenCalled();
+    expect(container.textContent).toContain("Open Insights");
     expect(useBillingUsage).not.toHaveBeenCalled();
     expect(container.textContent).toContain("Invoices and payment details");
     expect(container.textContent).not.toContain("OG-0042");
 
-    const usageSection = container.querySelector('[aria-label="Organization usage dashboard"]')!;
-    const period = (label: string) =>
-      Array.from(
-        usageSection.querySelectorAll<HTMLButtonElement>(
-          '[aria-label="Usage period"] [data-slot=segmented-control-item]',
-        ),
-      ).find((item) => item.textContent?.trim() === label)!;
-    const readsBeforeChange = getOrganizationUsageSummary.mock.calls.length;
-    await act(async () => period("Today").click());
-    await flush();
-    expect(getOrganizationUsageSummary.mock.calls.length).toBe(readsBeforeChange + 1);
-    expect(getOrganizationUsageSummary.mock.calls.at(-1)?.[0]).toEqual({
-      accountId,
-      period: "today",
-    });
-    getOrganizationUsageSummary.mockImplementationOnce(async () => {
-      throw new Error("usage unavailable");
-    });
-    // No Refresh button: another period reloads, and a failure offers Try again.
-    await act(async () => period("This month").click());
-    await flush();
-    expect(usageSection.textContent).toContain("Couldn't load period usage");
-    expect(usageSection.textContent).toContain("Try again. If it keeps happening");
-    // The server's own message stays behind Technical details.
-    expect(usageSection.textContent!.split("Technical details")[0]).not.toContain(
-      "usage unavailable",
-    );
-    expect(usageSection.textContent).not.toContain("No usage recorded");
-
     await act(async () => button(container, "Add credits").click());
     await flush();
     expect(createBillingCheckout).toHaveBeenCalledTimes(1);
+    expect(createBillingCheckout).toHaveBeenCalledWith({
+      amountUsd: 25,
+      accountId,
+      successUrl: `${window.location.origin}/workspaces/${workspaceId}/organization?section=billing&checkout=success&checkoutSession={CHECKOUT_SESSION_ID}`,
+      cancelUrl: `${window.location.origin}/workspaces/${workspaceId}/organization?section=billing&checkout=cancelled`,
+    });
     expect(toastError).toHaveBeenCalledWith("Couldn't open checkout", {
       description: "bounded checkout failure",
     });
@@ -411,54 +398,6 @@ describe("organization billing StrictMode ownership", () => {
     });
     expect(button(container, "Open Stripe billing").disabled).toBe(false);
 
-    await act(async () => root.unmount());
-    container.remove();
-  });
-
-  test("workspace pagination retains totals and never refetches the organization summary", async () => {
-    getOrganizationUsageSummary.mockClear();
-    getOrganizationUsageWorkspacePage.mockClear();
-    const total = { eventType: "model.cost", unit: "usd_micros", quantity: "100", eventCount: "1" };
-    getOrganizationUsageSummary.mockImplementationOnce(async () => ({
-      accountId,
-      period: "month",
-      since: "2026-08-01T00:00:00.000Z",
-      until: timestamp,
-      granularity: "day",
-      totals: [total],
-      buckets: [],
-      workspaces: [{ workspaceId, name: "First page workspace", totals: [total] }],
-      nextWorkspaceCursor: workspaceId,
-      personalWorkspaces: [],
-      personalWorkspaceCount: 0,
-    }));
-    const container = document.createElement("div");
-    document.body.appendChild(container);
-    const root = createRoot(container);
-    await act(async () =>
-      root.render(<OrgSettingsRoute workspaceId={workspaceId} section="billing" />),
-    );
-    await flush();
-    expect(container.textContent).toContain("First page workspace");
-    await act(async () => button(container, "Show more workspaces").click());
-    await flush();
-    expect(getOrganizationUsageSummary).toHaveBeenCalledTimes(1);
-    expect(getOrganizationUsageWorkspacePage).toHaveBeenCalledTimes(1);
-    expect(getOrganizationUsageWorkspacePage.mock.calls[0]?.[0]).toEqual({
-      accountId,
-      period: "month",
-      until: timestamp,
-      afterWorkspaceId: workspaceId,
-    });
-    // More workspaces add to the list; the first page stays.
-    expect(container.textContent).toContain("Second page workspace");
-    expect(container.textContent).toContain("First page workspace");
-    // Amounts read in cents; a sliver under a cent says so instead of $0.00.
-    expect(container.textContent).toContain("< $0.01");
-    expect(container.textContent).not.toContain("$0.000100");
-    expect(container.textContent).not.toContain("Show more workspaces");
-    expect(getOrganizationUsageSummary).toHaveBeenCalledTimes(1);
-    expect(getOrganizationUsageWorkspacePage).toHaveBeenCalledTimes(1);
     await act(async () => root.unmount());
     container.remove();
   });

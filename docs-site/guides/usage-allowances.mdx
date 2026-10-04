@@ -48,6 +48,7 @@ session proxy (it serves only that read; budgets and member limits stay on
 your backend):
 
 ```tsx
+import { ChatComposer } from "@opengeni/react";
 import { UsageLimitNotice, UsageMeter } from "@opengeni/react/usage";
 
 <UsageMeter workspaceId={workspaceId} />              // "38% left · Resets Nov 1"
@@ -74,7 +75,7 @@ receive the typed refusal (which limit, when it resets).
 ## In OpenGeni
 
 Organization owners set each shared workspace's monthly budget under
-**Organization settings → Billing & usage**, in the same dollars as the
+**Organization settings → Billing**, in the same dollars as the
 credit balance. Workspace admins shape member limits under **Workspace
 settings → Usage**, where everyone also sees their own limit. The account
 menu and the composer show your own usage when you're close.

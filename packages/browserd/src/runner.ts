@@ -16,6 +16,10 @@ import {
 } from "node:fs/promises";
 import { basename, dirname, join, resolve } from "node:path";
 import { resolvePinnedAgentBrowserBinary, type ResolvedAgentBrowserBinary } from "./binary";
+import {
+  readLinuxManagedBrowserIdentity,
+  type LinuxManagedBrowserIdentity,
+} from "./linux-process-identity";
 
 const DEFAULT_COMMAND_TIMEOUT_MS = 120_000;
 const MAX_COMMAND_TIMEOUT_MS = 10 * 60_000;
@@ -87,6 +91,25 @@ export type AgentBrowserRunnerOptions = {
   launchArguments?: readonly string[];
   timezone?: string;
   binary?: ResolvedAgentBrowserBinary;
+  /** Private completed launch receipt, checked again before attaching/launching. */
+  recoverOwnedProcess?: OwnedManagedBrowserProcess;
+  allowOwnedProcessLaunch?: boolean;
+};
+
+export type OwnedManagedBrowserProcess = {
+  pid: number;
+  birth: string;
+  executablePath: string;
+  profileDirectory: string;
+  cdpEndpoint: string;
+};
+
+type OwnedAgentBrowserDaemon = {
+  pid: number;
+  birth: string;
+  executablePath: string;
+  pidFile: string;
+  pidFileIdentity: { device: number; inode: number };
 };
 
 export type BrowserProfileCryptoPolicy =
@@ -110,6 +133,11 @@ export class AgentBrowserJsonRunner {
   private readonly profileDirectory: string;
   private readonly managedBrowserExecutable: string | null;
   private readonly chromeStderrDrainPaths: readonly string[];
+  private readonly recoveredProcess: OwnedManagedBrowserProcess | null;
+  private readonly headlessManaged: boolean;
+  private readonly daemonRunDirectory: string;
+  private predecessorDaemon: OwnedAgentBrowserDaemon | null = null;
+  private recoveredBrowserClosed = false;
 
   private constructor(
     binary: ResolvedAgentBrowserBinary,
@@ -139,12 +167,30 @@ export class AgentBrowserJsonRunner {
         ? (browserLaunch.actualExecutablePath ?? null)
         : (options.browserExecutablePath ?? null));
     this.chromeStderrDrainPaths = browserLaunch?.cleanupPaths ?? [];
+    this.recoveredProcess = options.recoverOwnedProcess ?? null;
+    this.headlessManaged = !options.headed && !options.provider;
+    this.daemonRunDirectory = dirname(this.daemonPidFile);
   }
 
   static async create(options: AgentBrowserRunnerOptions): Promise<AgentBrowserJsonRunner> {
     validateSegment(options.namespace, "namespace");
     validateSegment(options.sessionName, "session name");
     assertAgentBrowserSocketPath(options);
+    if (options.recoverOwnedProcess) {
+      const state = await inspectOwnedManagedBrowserProcess(options.recoverOwnedProcess);
+      if (state === "live") {
+        const binary = options.binary ?? (await resolvePinnedAgentBrowserBinary());
+        const runner = new AgentBrowserJsonRunner(binary, options);
+        if (!runner.headlessManaged) throw daemonLineageUnavailable();
+        runner.predecessorDaemon = await runner.headlessDaemonIdentity(options.recoverOwnedProcess);
+        return runner;
+      }
+      // A positively exited process permits a new launch only in this exact
+      // directory. No missing-memory/PID-file inference or pre-launch kill.
+      if (state !== "exited" || options.allowOwnedProcessLaunch !== true)
+        throw new AgentBrowserCommandError("process_failed", "owned browser outcome is unknown");
+      await assertNoLiveDaemonRecords(options.socketDirectory, options.namespace);
+    }
     for (const directory of [
       options.socketDirectory,
       options.profileDirectory,
@@ -157,17 +203,18 @@ export class AgentBrowserJsonRunner {
     const binary = options.binary ?? (await resolvePinnedAgentBrowserBinary());
     const browserLaunch = await managedBrowserLaunch(options);
     const browserPidFile = join(resolve(options.profileDirectory), "..", "browser.pid");
-    if (browserLaunch?.backgroundBrowserExecutable) {
+    if (browserLaunch?.backgroundBrowserExecutable && !options.recoverOwnedProcess) {
       await terminateManagedBrowser({
         pidFile: browserPidFile,
         profileDirectory: resolve(options.profileDirectory),
         executablePath: browserLaunch.backgroundBrowserExecutable,
       });
     }
+    const { recoverOwnedProcess: _recoverOwnedProcess, ...launchOptions } = options;
     return new AgentBrowserJsonRunner(
       binary,
       {
-        ...options,
+        ...launchOptions,
         ...(browserLaunch
           ? {
               browserExecutablePath: browserLaunch.executablePath,
@@ -192,6 +239,19 @@ export class AgentBrowserJsonRunner {
     args: readonly string[],
     options: AgentBrowserRunOptions = {},
   ): Promise<T> {
+    if (this.recoveredProcess) {
+      if (args.length === 2 && args[0] === "get" && args[1] === "cdp-url") {
+        if ((await inspectOwnedManagedBrowserProcess(this.recoveredProcess)) !== "live") {
+          throw new AgentBrowserCommandError("process_failed", "owned browser is unavailable");
+        }
+        return { cdpUrl: this.recoveredProcess.cdpEndpoint } as T;
+      }
+      if (args.length === 1 && args[0] === "close") return {} as T;
+      throw new AgentBrowserCommandError(
+        "driver_rejected",
+        "reattached browser accepts only its CDP transport",
+      );
+    }
     validateArguments(args);
     const timeoutMs = boundedTimeout(options.timeoutMs);
     if (options.signal?.aborted) {
@@ -311,6 +371,11 @@ export class AgentBrowserJsonRunner {
    * pinned executable. Used when upstream `close` cannot reconcile a failed
    * browser launch; never scans or kills by name. */
   async daemonPid(): Promise<number | null> {
+    if (this.recoveredProcess) {
+      const daemon = this.predecessorDaemon;
+      if (!daemon) throw daemonLineageUnavailable();
+      return (await assertDaemonIdentity(daemon)) ? daemon.pid : null;
+    }
     const pid = await readDaemonPid(this.daemonPidFile);
     if (pid === null || !(await processRunning(pid))) return null;
     if (!(await sameExecutable(pid, this.binary.path))) {
@@ -323,6 +388,23 @@ export class AgentBrowserJsonRunner {
   }
 
   async terminate(expectedPid?: number | null): Promise<void> {
+    if (this.recoveredProcess) {
+      const daemon = this.predecessorDaemon;
+      if (!daemon || (expectedPid != null && expectedPid !== daemon.pid))
+        throw daemonLineageUnavailable();
+      const daemonLive = await assertDaemonIdentity(daemon);
+      if (!this.recoveredBrowserClosed) {
+        if (daemonLive && (await processParentPid(this.recoveredProcess.pid)) !== daemon.pid)
+          throw daemonLineageUnavailable();
+        await terminateOwnedManagedBrowserProcess(this.recoveredProcess);
+        // Preserve a proved stop for the same cleanup retry; a missing macOS
+        // PID still cannot authorize a fresh exact-directory launch.
+        this.recoveredBrowserClosed = true;
+      }
+      await terminateOwnedAgentBrowserDaemon(daemon);
+      await this.cleanupChromeStderrDrain();
+      return;
+    }
     const recordedPid = await readDaemonPid(this.daemonPidFile);
     if (recordedPid !== null && expectedPid != null && recordedPid !== expectedPid) {
       throw new AgentBrowserCommandError(
@@ -365,12 +447,101 @@ export class AgentBrowserJsonRunner {
   }
 
   private async terminateManagedBrowser(): Promise<void> {
+    if (this.recoveredProcess) {
+      await terminateOwnedManagedBrowserProcess(this.recoveredProcess);
+      return;
+    }
     await terminateManagedBrowser({
       pidFile: this.browserPidFile,
       profileDirectory: this.profileDirectory,
       executablePath: this.managedBrowserExecutable,
       discoverByProfile: this.chromeStderrDrainPaths.length > 0,
     });
+  }
+
+  async ownedProcessIdentity(
+    cdpEndpoint: string,
+    cdpBrowserPid?: number,
+  ): Promise<OwnedManagedBrowserProcess | null> {
+    if (this.recoveredProcess) {
+      return (await inspectOwnedManagedBrowserProcess(this.recoveredProcess)) === "live"
+        ? this.recoveredProcess
+        : null;
+    }
+    if (process.platform !== "linux" && process.platform !== "darwin") return null;
+    const recordedPid = await readManagedBrowserPid(this.browserPidFile);
+    const discovered =
+      recordedPid === null && process.platform === "linux"
+        ? await findLinuxManagedBrowserProcess(this.profileDirectory, this.managedBrowserExecutable)
+        : null;
+    let pid = recordedPid ?? discovered?.pid;
+    const needsHeadlessWitness = this.headlessManaged && cdpBrowserPid !== undefined;
+    if (!pid && needsHeadlessWitness && process.platform === "darwin")
+      pid = await readProfileBrowserPid(this.profileDirectory);
+    if (!pid || !(await processRunning(pid))) return null;
+    if (cdpBrowserPid !== undefined && cdpBrowserPid !== pid) throw daemonLineageUnavailable();
+    const executablePath =
+      this.managedBrowserExecutable ??
+      discovered?.executablePath ??
+      (needsHeadlessWitness ? await processExecutablePath(pid) : null);
+    if (!executablePath) return null;
+    await assertManagedBrowserIdentity(pid, this.profileDirectory, executablePath);
+    const receipt = {
+      pid,
+      birth: await processBirth(pid),
+      executablePath: await realpath(executablePath),
+      profileDirectory: this.profileDirectory,
+      cdpEndpoint,
+    };
+    if ((await inspectOwnedManagedBrowserProcess(receipt)) !== "live") return null;
+    if (needsHeadlessWitness) await this.headlessDaemonIdentity(receipt, this.daemonPidFile);
+    return receipt;
+  }
+
+  private async headlessDaemonIdentity(
+    browser: OwnedManagedBrowserProcess,
+    initialPidFile?: string,
+  ): Promise<OwnedAgentBrowserDaemon> {
+    if (
+      !this.headlessManaged ||
+      (await readProfileBrowserPid(this.profileDirectory)) !== browser.pid
+    )
+      throw daemonLineageUnavailable();
+    const parentPid = await processParentPid(browser.pid);
+    const files = await daemonPidRecords(this.daemonRunDirectory);
+    const live: { pid: number; path: string }[] = [];
+    for (const path of files) {
+      const pid = await readDaemonPid(path);
+      if (pid !== null && (await processRunning(pid))) live.push({ pid, path });
+    }
+    if (
+      live.length !== 1 ||
+      live[0]!.pid !== parentPid ||
+      (initialPidFile !== undefined && live[0]!.path !== initialPidFile) ||
+      !(await sameExecutable(parentPid, this.binary.path))
+    )
+      throw daemonLineageUnavailable();
+    const pidFile = live[0]!.path;
+    const metadata = await lstat(pidFile);
+    const daemon = {
+      pid: parentPid,
+      birth: await processBirth(parentPid),
+      executablePath: await realpath(this.binary.path),
+      pidFile,
+      pidFileIdentity: { device: metadata.dev, inode: metadata.ino },
+    };
+    await assertDaemonIdentity(daemon);
+    if (
+      (await processBirth(browser.pid)) !== browser.birth ||
+      (await processParentPid(browser.pid)) !== daemon.pid ||
+      (await readProfileBrowserPid(this.profileDirectory)) !== browser.pid
+    )
+      throw daemonLineageUnavailable();
+    return daemon;
+  }
+
+  get reattachedOwnedProcess(): OwnedManagedBrowserProcess | null {
+    return this.recoveredProcess;
   }
 
   private async cleanupChromeStderrDrain(): Promise<void> {
@@ -383,7 +554,10 @@ export class AgentBrowserJsonRunner {
 /** Reap only browser processes bound to an exact private OpenGeni profile.
  * A controller restart never adopts an unfenced native process; active durable
  * sessions are rebuilt on their next causal request. */
-export async function reapManagedBrowserProcesses(rootDirectory: string): Promise<void> {
+export async function reapManagedBrowserProcesses(
+  rootDirectory: string,
+  preserveSession?: (sessionDirectory: string) => Promise<boolean>,
+): Promise<void> {
   if (process.platform !== "darwin" && process.platform !== "linux") return;
   const sessionsDirectory = join(resolve(rootDirectory), "sessions");
   let entries;
@@ -396,6 +570,7 @@ export async function reapManagedBrowserProcesses(rootDirectory: string): Promis
   for (const entry of entries) {
     if (!entry.isDirectory() || !/^[0-9a-f-]{36}$/iu.test(entry.name)) continue;
     const sessionDirectory = join(sessionsDirectory, entry.name);
+    if (await preserveSession?.(sessionDirectory)) continue;
     await terminateManagedBrowser({
       pidFile: join(sessionDirectory, "browser.pid"),
       profileDirectory: join(sessionDirectory, "profile"),
@@ -639,7 +814,10 @@ async function processRunning(pid: number): Promise<boolean> {
     try {
       const stat = await readFile(`/proc/${pid}/stat`, "utf8");
       const commandEnd = stat.lastIndexOf(")");
-      return commandEnd >= 0 && stat.slice(commandEnd + 2, commandEnd + 3) !== "Z";
+      if (commandEnd < 0 || !/^[A-Z]$/u.test(stat.slice(commandEnd + 2, commandEnd + 3))) {
+        throw new AgentBrowserCommandError("process_failed", "process liveness is unproven");
+      }
+      return stat.slice(commandEnd + 2, commandEnd + 3) !== "Z";
     } catch (error) {
       const code = (error as NodeJS.ErrnoException).code;
       if (code === "ENOENT" || code === "ESRCH") return false;
@@ -676,10 +854,15 @@ async function terminateManagedBrowser(input: {
     return;
   }
   const executablePath = input.executablePath ?? discovered?.executablePath ?? null;
-  await assertManagedBrowserIdentity(pid, input.profileDirectory, executablePath);
+  const startTime = await assertManagedBrowserIdentity(
+    pid,
+    input.profileDirectory,
+    executablePath,
+    discovered?.startTime,
+  );
   signalProcess(pid, "SIGTERM");
   if (!(await waitForProcessStop(pid, DAEMON_STOP_TIMEOUT_MS))) {
-    await assertManagedBrowserIdentity(pid, input.profileDirectory, executablePath);
+    await assertManagedBrowserIdentity(pid, input.profileDirectory, executablePath, startTime);
     signalProcess(pid, "SIGKILL");
     if (!(await waitForProcessStop(pid, DAEMON_STOP_TIMEOUT_MS))) {
       throw new AgentBrowserCommandError("process_failed", "managed browser did not terminate");
@@ -692,27 +875,27 @@ async function assertManagedBrowserIdentity(
   pid: number,
   profileDirectory: string,
   executablePath: string | null,
-): Promise<void> {
-  const profileArgument = `--user-data-dir=${resolve(profileDirectory)}`;
+  expectedStartTime?: string,
+): Promise<string | undefined> {
   if (process.platform === "linux") {
-    const argv = await linuxProcessArguments(pid);
-    if (
-      !argv.includes(profileArgument) ||
-      argv.some((argument) => argument.startsWith("--type="))
-    ) {
+    const identity =
+      executablePath === null
+        ? null
+        : await readLinuxManagedBrowserIdentity({
+            pid,
+            profileDirectory,
+            executablePath,
+            ...(expectedStartTime !== undefined ? { expectedStartTime } : {}),
+          });
+    if (!identity) {
       throw new AgentBrowserCommandError(
         "process_failed",
-        "managed browser PID does not identify the exact private profile",
+        "managed browser PID does not identify the exact live private profile and executable",
       );
     }
-    if (!executablePath || !(await sameExecutable(pid, executablePath))) {
-      throw new AgentBrowserCommandError(
-        "process_failed",
-        "managed browser PID does not identify the configured executable",
-      );
-    }
-    return;
+    return identity.startTime;
   }
+  const profileArgument = `--user-data-dir=${resolve(profileDirectory)}`;
   const command = await boundedProcessOutput("/bin/ps", [
     "-ww",
     "-p",
@@ -743,39 +926,45 @@ async function assertManagedBrowserIdentity(
 async function findLinuxManagedBrowserProcess(
   profileDirectory: string,
   executablePath: string | null,
-): Promise<{ pid: number; executablePath: string } | null> {
+  requireCompleteInventory = false,
+): Promise<LinuxManagedBrowserIdentity | null> {
   const procEntries = await readdir("/proc", { withFileTypes: true });
-  const matches: Array<{ pid: number; executablePath: string }> = [];
-  const profileArgument = `--user-data-dir=${resolve(profileDirectory)}`;
+  const matches: LinuxManagedBrowserIdentity[] = [];
+  const profileArgument = Buffer.from(`--user-data-dir=${resolve(profileDirectory)}`);
   for (const entry of procEntries) {
     if (!entry.isDirectory() || !/^[1-9][0-9]*$/u.test(entry.name)) continue;
     const pid = Number(entry.name);
-    let argv: string[];
-    let resolvedExecutable: string;
-    try {
-      argv = await linuxProcessArguments(pid);
-      resolvedExecutable = await realpath(await readlink(`/proc/${pid}/exe`));
-    } catch (error) {
-      // A process can exit after readdir or while procfs is reading its cmdline.
-      if (
-        ["EACCES", "ENOENT", "EPERM", "ESRCH"].includes((error as NodeJS.ErrnoException).code ?? "")
-      ) {
-        continue;
+    if (requireCompleteInventory) {
+      try {
+        const commandLine = await readFile(`/proc/${pid}/cmdline`);
+        await realpath(await readlink(`/proc/${pid}/exe`));
+        // This is refusal evidence only. Even an unverified or rewritten
+        // profile mention prevents a new exact-directory launch.
+        if (commandLine.includes(profileArgument)) {
+          throw new AgentBrowserCommandError(
+            "process_failed",
+            "exact directory launch absence is unproven",
+          );
+        }
+      } catch (error) {
+        const code = (error as NodeJS.ErrnoException).code ?? "";
+        if (["EACCES", "EPERM"].includes(code)) {
+          throw new AgentBrowserCommandError(
+            "process_failed",
+            "exact profile process inventory is incomplete",
+          );
+        }
+        if (["ENOENT", "ESRCH"].includes(code)) continue;
+        throw error;
       }
-      throw error;
-    }
-    if (
-      !argv.includes(profileArgument) ||
-      argv.some((argument) => argument.startsWith("--type="))
-    ) {
       continue;
     }
-    if (executablePath) {
-      if (resolvedExecutable !== (await realpath(executablePath))) continue;
-    } else if (!isRecognizedLinuxBrowserExecutable(resolvedExecutable)) {
-      continue;
-    }
-    matches.push({ pid, executablePath: resolvedExecutable });
+    const identity = await readLinuxManagedBrowserIdentity({
+      pid,
+      profileDirectory,
+      executablePath,
+    });
+    if (identity) matches.push(identity);
   }
   if (matches.length > 1) {
     throw new AgentBrowserCommandError(
@@ -784,24 +973,6 @@ async function findLinuxManagedBrowserProcess(
     );
   }
   return matches[0] ?? null;
-}
-
-async function linuxProcessArguments(pid: number): Promise<string[]> {
-  const commandLine = await readFile(`/proc/${pid}/cmdline`);
-  return commandLine
-    .toString("utf8")
-    .split("\0")
-    .filter((argument) => argument.length > 0);
-}
-
-function isRecognizedLinuxBrowserExecutable(executablePath: string): boolean {
-  return [
-    "chrome",
-    "chromium",
-    "chromium-browser",
-    "google-chrome",
-    "chrome-headless-shell",
-  ].includes(basename(executablePath));
 }
 
 async function readManagedBrowserPid(path: string): Promise<number | null> {
@@ -1187,4 +1358,255 @@ function boundedDriverMessage(value: string | null): string | null {
   if (!value) return null;
   const normalized = value.replace(/[\r\n\t]+/gu, " ").trim();
   return normalized.slice(0, 2_048) || null;
+}
+
+/** Read-only proof shared by initial attestation, recovery and bounded cleanup.
+ * Any inaccessible/ambiguous/PID-reused outcome rejects; only positive exit
+ * permits a new exact-directory launch. */
+export async function inspectOwnedManagedBrowserProcess(
+  receipt: OwnedManagedBrowserProcess,
+): Promise<"live" | "exited"> {
+  if (process.platform !== "linux" && process.platform !== "darwin") {
+    throw new AgentBrowserCommandError("process_failed", "owned browser identity is unsupported");
+  }
+  const profile = await lstat(receipt.profileDirectory);
+  if (!profile.isDirectory() || profile.isSymbolicLink()) {
+    throw new AgentBrowserCommandError("process_failed", "owned browser profile is invalid");
+  }
+  validateOwnedCdpEndpoint(receipt.cdpEndpoint);
+  if (!(await processRunning(receipt.pid))) {
+    if (process.platform !== "linux") {
+      // macOS has no existing exhaustive profile-process inventory. Never
+      // infer absence of a successor from a missing pid alone.
+      throw new AgentBrowserCommandError(
+        "process_failed",
+        "exact directory launch absence is unproven",
+      );
+    }
+    if (await findLinuxManagedBrowserProcess(receipt.profileDirectory, null, true)) {
+      throw new AgentBrowserCommandError(
+        "process_failed",
+        "another process owns the exact profile",
+      );
+    }
+    return "exited";
+  }
+  if ((await processBirth(receipt.pid)) !== receipt.birth) {
+    throw new AgentBrowserCommandError("process_failed", "owned browser PID birth changed");
+  }
+  await assertManagedBrowserIdentity(receipt.pid, receipt.profileDirectory, receipt.executablePath);
+  const activePort = join(receipt.profileDirectory, "DevToolsActivePort");
+  const metadata = await lstat(activePort);
+  if (
+    !metadata.isFile() ||
+    metadata.isSymbolicLink() ||
+    metadata.size < 3 ||
+    metadata.size > 1024
+  ) {
+    throw new AgentBrowserCommandError(
+      "process_failed",
+      "owned browser CDP identity is unavailable",
+    );
+  }
+  const [port, browserPath] = (await readFile(activePort, "utf8")).trim().split("\n");
+  const endpoint = new URL(receipt.cdpEndpoint);
+  if (port !== endpoint.port || browserPath !== endpoint.pathname) {
+    throw new AgentBrowserCommandError("process_failed", "owned browser CDP identity changed");
+  }
+  if ((await processBirth(receipt.pid)) !== receipt.birth) {
+    throw new AgentBrowserCommandError(
+      "process_failed",
+      "owned browser identity changed during proof",
+    );
+  }
+  return "live";
+}
+
+export function validateOwnedCdpEndpoint(value: string): void {
+  const endpoint = new URL(value);
+  if (
+    endpoint.protocol !== "ws:" ||
+    !["127.0.0.1", "localhost", "[::1]"].includes(endpoint.hostname) ||
+    !endpoint.port ||
+    endpoint.username ||
+    endpoint.password ||
+    endpoint.search ||
+    endpoint.hash ||
+    !/^\/devtools\/browser\/[A-Za-z0-9-]{16,128}$/u.test(endpoint.pathname)
+  ) {
+    throw new AgentBrowserCommandError("process_failed", "owned browser CDP endpoint is invalid");
+  }
+}
+
+async function processBirth(pid: number): Promise<string> {
+  if (process.platform === "linux") {
+    const stat = await readFile(`/proc/${pid}/stat`, "utf8");
+    const fields = stat
+      .slice(stat.lastIndexOf(")") + 2)
+      .trim()
+      .split(/\s+/u);
+    const startTime = fields[19];
+    const bootId = (await readFile("/proc/sys/kernel/random/boot_id", "utf8")).trim();
+    if (!startTime || !/^[0-9]+$/u.test(startTime) || !/^[0-9a-f-]{36}$/iu.test(bootId)) {
+      throw new AgentBrowserCommandError("process_failed", "owned browser birth is unavailable");
+    }
+    return `${bootId}:${startTime}`;
+  }
+  const birth = (
+    await boundedProcessOutput("/bin/ps", ["-p", String(pid), "-o", "lstart="])
+  ).trim();
+  if (!birth || birth.length > 128)
+    throw new AgentBrowserCommandError("process_failed", "owned browser birth is unavailable");
+  return birth;
+}
+
+function daemonLineageUnavailable(): AgentBrowserCommandError {
+  return new AgentBrowserCommandError("process_failed", "owned browser daemon lineage is unproven");
+}
+
+async function readProfileBrowserPid(profileDirectory: string): Promise<number> {
+  const path = join(profileDirectory, "SingletonLock");
+  const before = await lstat(path);
+  if (!before.isSymbolicLink()) throw daemonLineageUnavailable();
+  const value = await readlink(path);
+  const match = /^[^/\u0000]{1,200}-([1-9][0-9]{0,9})$/u.exec(value);
+  const pid = Number(match?.[1]);
+  const after = await lstat(path);
+  if (
+    !Number.isSafeInteger(pid) ||
+    pid < 2 ||
+    pid > 2_147_483_647 ||
+    before.dev !== after.dev ||
+    before.ino !== after.ino
+  )
+    throw daemonLineageUnavailable();
+  return pid;
+}
+
+async function processParentPid(pid: number): Promise<number> {
+  const raw =
+    process.platform === "linux"
+      ? (await readFile(`/proc/${pid}/stat`, "utf8")).split(/\) /u).at(-1)!.trim().split(/\s+/u)[1]
+      : (await boundedProcessOutput("/bin/ps", ["-p", String(pid), "-o", "ppid="])).trim();
+  const parent = Number(raw);
+  if (
+    !raw ||
+    !/^[1-9][0-9]{0,9}$/u.test(raw) ||
+    !Number.isSafeInteger(parent) ||
+    parent < 2 ||
+    parent > 2_147_483_647
+  )
+    throw daemonLineageUnavailable();
+  return parent;
+}
+
+async function processExecutablePath(pid: number): Promise<string> {
+  const path =
+    process.platform === "linux"
+      ? await readlink(`/proc/${pid}/exe`)
+      : (await boundedProcessOutput("/bin/ps", ["-p", String(pid), "-o", "comm="])).trim();
+  if (!path || !path.startsWith("/")) throw daemonLineageUnavailable();
+  return await realpath(path);
+}
+
+async function daemonPidRecords(directory: string): Promise<string[]> {
+  const namespace = dirname(directory);
+  const namespaces = dirname(namespace);
+  for (const path of [dirname(namespaces), namespaces, namespace, directory]) {
+    const metadata = await lstat(path);
+    if (!metadata.isDirectory() || metadata.isSymbolicLink()) throw daemonLineageUnavailable();
+  }
+  const entries = await readdir(directory, { withFileTypes: true });
+  if (entries.length > 64) throw daemonLineageUnavailable();
+  const paths: string[] = [];
+  for (const entry of entries) {
+    if (!entry.name.endsWith(".pid")) continue;
+    if (
+      !/^[A-Za-z0-9][A-Za-z0-9_-]{0,127}\.pid$/u.test(entry.name) ||
+      !entry.isFile() ||
+      entry.isSymbolicLink()
+    )
+      throw daemonLineageUnavailable();
+    paths.push(join(directory, entry.name));
+  }
+  return paths;
+}
+
+async function assertNoLiveDaemonRecords(
+  socketDirectory: string,
+  namespace: string,
+): Promise<void> {
+  const directory = join(resolve(socketDirectory), "namespaces", namespace, "run");
+  for (const path of await daemonPidRecords(directory)) {
+    const pid = await readDaemonPid(path);
+    if (pid !== null && (await processRunning(pid))) throw daemonLineageUnavailable();
+  }
+}
+
+async function assertDaemonIdentity(daemon: OwnedAgentBrowserDaemon): Promise<boolean> {
+  for (const path of await daemonPidRecords(dirname(daemon.pidFile))) {
+    const pid = await readDaemonPid(path);
+    if (
+      pid !== null &&
+      (await processRunning(pid)) &&
+      (path !== daemon.pidFile || pid !== daemon.pid)
+    )
+      throw daemonLineageUnavailable();
+  }
+  const live = await processRunning(daemon.pid);
+  if (live) {
+    if ((await processBirth(daemon.pid)) !== daemon.birth)
+      throw new AgentBrowserCommandError(
+        "process_failed",
+        "owned agent-browser daemon birth changed",
+      );
+    if (!(await sameExecutable(daemon.pid, daemon.executablePath)))
+      throw daemonLineageUnavailable();
+  }
+  const pid = await readDaemonPid(daemon.pidFile);
+  if (pid === null && !live) return false;
+  const metadata = pid === null ? null : await lstat(daemon.pidFile);
+  if (
+    pid !== daemon.pid ||
+    metadata?.dev !== daemon.pidFileIdentity.device ||
+    metadata?.ino !== daemon.pidFileIdentity.inode
+  )
+    throw new AgentBrowserCommandError(
+      "process_failed",
+      "owned agent-browser daemon identity changed",
+    );
+  if (live && (await processBirth(daemon.pid)) !== daemon.birth) throw daemonLineageUnavailable();
+  return live;
+}
+
+async function terminateOwnedAgentBrowserDaemon(daemon: OwnedAgentBrowserDaemon): Promise<void> {
+  if (await assertDaemonIdentity(daemon)) {
+    signalProcess(daemon.pid, "SIGTERM");
+    if (!(await waitForProcessStop(daemon.pid, DAEMON_STOP_TIMEOUT_MS))) {
+      if (await assertDaemonIdentity(daemon)) {
+        signalProcess(daemon.pid, "SIGKILL");
+        if (!(await waitForProcessStop(daemon.pid, DAEMON_STOP_TIMEOUT_MS)))
+          throw new AgentBrowserCommandError(
+            "process_failed",
+            "owned agent-browser daemon did not stop",
+          );
+      }
+    }
+  }
+  await assertDaemonIdentity(daemon);
+  await rm(daemon.pidFile, { force: true });
+}
+
+async function terminateOwnedManagedBrowserProcess(
+  receipt: OwnedManagedBrowserProcess,
+): Promise<void> {
+  if ((await inspectOwnedManagedBrowserProcess(receipt)) === "exited") return;
+  signalProcess(receipt.pid, "SIGTERM");
+  if (!(await waitForProcessStop(receipt.pid, DAEMON_STOP_TIMEOUT_MS))) {
+    if ((await inspectOwnedManagedBrowserProcess(receipt)) !== "live") return;
+    signalProcess(receipt.pid, "SIGKILL");
+    if (!(await waitForProcessStop(receipt.pid, DAEMON_STOP_TIMEOUT_MS))) {
+      throw new AgentBrowserCommandError("process_failed", "owned browser did not terminate");
+    }
+  }
 }

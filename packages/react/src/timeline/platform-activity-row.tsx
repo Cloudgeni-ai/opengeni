@@ -67,10 +67,9 @@ export default function PlatformActivityRow({
   return j(ActivityDisclosure, {
     icon: j(BotIcon, { className: "size-3.5" }),
     iconTone: failed ? "failed" : running ? "running" : "muted",
-    title:
-      item.blockedReason === "rotation_in_progress"
-        ? "Waiting for sandbox rotation"
-        : startupPhaseTitle(item.phase, item.status, item.outcome),
+    title: item.blockedReason
+      ? STARTUP_WAIT_TITLES[item.blockedReason]
+      : startupPhaseTitle(item.phase, item.status, item.outcome),
     preview:
       item.phase === "model_preparation"
         ? "Includes overlapping sandbox startup, custom environment setup, repository preparation, and runtime setup shown below."
@@ -146,6 +145,12 @@ function startupPhaseTitle(
     status === "running" ? 0 : status === "failed" ? 1 : status === "cancelled" ? 2 : 3;
   return STARTUP_PHASE_TITLES[phase][statusIndex];
 }
+
+const STARTUP_WAIT_TITLES: Record<NonNullable<StartupPhaseItem["blockedReason"]>, string> = {
+  capture_in_progress: "Waiting for sandbox checkpoint",
+  rotation_in_progress: "Waiting for sandbox rotation",
+  provider_recovery_in_progress: "Waiting for sandbox recovery",
+};
 
 const STARTUP_PHASE_TITLES: Record<
   StartupPhaseItem["phase"],

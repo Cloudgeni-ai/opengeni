@@ -26,19 +26,20 @@ See [Conversation UI & theming](/integrate/conversation-ui) for props, tool rend
 
 ## Entry points
 
-| Import                         | Contents                                                                          |
-| ------------------------------ | --------------------------------------------------------------------------------- |
-| `@opengeni/react`              | Provider, conversation, timeline, composer, hooks, and the sandbox workbench      |
-| `@opengeni/react/session`      | Headless session hooks with no styles or optional peers                           |
-| `@opengeni/react/composer`     | Advanced composer composition                                                     |
-| `@opengeni/react/machines`     | Connected Machines dashboard and enrollment flow                                  |
-| `@opengeni/react/realtime`     | Voice controls, lazily loadable                                                   |
-| `@opengeni/react/diffs`        | `enablePierreDiffs()` for highlighted diffs with the optional `@pierre/diffs`     |
-| `@opengeni/react/terminal`     | `enableSandboxTerminal()` and terminal components; opt into installed xterm peers |
-| `@opengeni/react/editor`       | `enableCodeEditor()` and editor components; supply only installed grammar loaders |
-| `@opengeni/react/desktop`      | `enableDesktopViewer()` and desktop components; opt into noVNC                    |
-| `@opengeni/react/compiled.css` | Scoped styles; needs no Tailwind                                                  |
-| `@opengeni/react/tokens.css`   | The `--og-*` design tokens alone                                                  |
+| Import                         | Contents                                                                                      |
+| ------------------------------ | --------------------------------------------------------------------------------------------- |
+| `@opengeni/react`              | Provider, conversation, timeline, composer, hooks, and the sandbox workbench                  |
+| `@opengeni/react/session`      | Headless session hooks with no styles or optional peers                                       |
+| `@opengeni/react/composer`     | Advanced composer composition                                                                 |
+| `@opengeni/react/machines`     | Connected Machines dashboard and enrollment flow                                              |
+| `@opengeni/react/usage`        | `UsageMeter`, `UsageLimitNotice`, `useUsage` for [usage allowances](/guides/usage-allowances) |
+| `@opengeni/react/realtime`     | Voice controls, lazily loadable                                                               |
+| `@opengeni/react/diffs`        | `enablePierreDiffs()` for highlighted diffs with the optional `@pierre/diffs`                 |
+| `@opengeni/react/terminal`     | `enableSandboxTerminal()` and terminal components; opt into installed xterm peers             |
+| `@opengeni/react/editor`       | `enableCodeEditor()` and editor components; supply only installed grammar loaders             |
+| `@opengeni/react/desktop`      | `enableDesktopViewer()` and desktop components; opt into noVNC                                |
+| `@opengeni/react/compiled.css` | Scoped styles; needs no Tailwind                                                              |
+| `@opengeni/react/tokens.css`   | The `--og-*` design tokens alone                                                              |
 
 ## Hooks
 

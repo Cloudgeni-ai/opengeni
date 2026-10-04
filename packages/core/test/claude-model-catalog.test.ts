@@ -184,7 +184,14 @@ test("managed Claude catalog enables reasoning only for verified adaptive models
     models.find((candidate) => candidate.upstreamModelId === "claude-custom-future")?.label,
   ).toBe("claude-custom-future");
   expect(verified.capabilities.reasoning.runnable).toBe(true);
-  expect(verified.capabilities.reasoning.efforts).toEqual(["low", "medium", "high"]);
+  expect(verified.capabilities.reasoning.efforts).toEqual([
+    "low",
+    "medium",
+    "high",
+    "xhigh",
+    "max",
+  ]);
+  expect(verified.capabilities.reasoning.defaultEffort).toBe("medium");
   for (const model of models.filter((candidate) => candidate !== verified)) {
     expect(model.reasoningEffort).toBe(false);
     expect(model.capabilities.reasoning).toMatchObject({
@@ -195,6 +202,72 @@ test("managed Claude catalog enables reasoning only for verified adaptive models
     });
   }
 });
+
+test.each(["workspace", "organization"] as const)(
+  "Claude native capabilities are per model on both connection kinds (%s)",
+  (scope) => {
+    const models = [
+      "claude-opus-5-5",
+      "claude-sonnet-5-5",
+      "claude-opus-4-7",
+      "claude-opus-4-6",
+      "claude-sonnet-4-6",
+      "claude-haiku-4-5-20251001",
+      "claude-unknown",
+    ].map((upstreamModelId) => ({ upstreamModelId }));
+    const settings = withClaudeConnectionCatalog(
+      testSettings({ claudeSubscriptionEnabled: true }),
+      {
+        anthropic: { models },
+        claude_subscription: { models },
+      },
+      scope,
+    );
+    for (const kind of ["anthropic", "claude-subscription"]) {
+      const catalog = configuredModels(settings).filter(
+        (model) => model.providerId === `${scope}-${kind}`,
+      );
+      for (const id of ["claude-opus-5-5", "claude-sonnet-5-5"]) {
+        const model = catalog.find((candidate) => candidate.upstreamModelId === id)!;
+        expect(model.capabilities.reasoning).toMatchObject({
+          runnable: true,
+          efforts: ["low", "medium", "high", "xhigh", "max"],
+          defaultEffort: "medium",
+        });
+        expect(model.executionLimits).toMatchObject({
+          contextWindowTokens: 1_000_000,
+          effectiveContextWindowTokens: 872_000,
+          autoCompactTokenLimit: 800_000,
+        });
+      }
+      expect(
+        catalog.find((model) => model.upstreamModelId === "claude-opus-4-7")?.capabilities.reasoning
+          .defaultEffort,
+      ).toBe("xhigh");
+      for (const id of ["claude-opus-4-6", "claude-sonnet-4-6"]) {
+        expect(
+          catalog.find((model) => model.upstreamModelId === id)?.capabilities.reasoning,
+        ).toMatchObject({
+          runnable: true,
+          efforts: ["low", "medium", "high", "max"],
+          defaultEffort: "high",
+        });
+      }
+      for (const id of ["claude-haiku-4-5-20251001", "claude-unknown"]) {
+        const model = catalog.find((candidate) => candidate.upstreamModelId === id)!;
+        expect(model.capabilities.reasoning).toMatchObject({
+          runnable: false,
+          efforts: [],
+          defaultEffort: null,
+        });
+        expect(model.executionLimits.contextWindowTokens).toBe(200_000);
+        expect(model.executionLimits.autoCompactTokenLimit!).toBeLessThan(
+          model.executionLimits.effectiveContextWindowTokens!,
+        );
+      }
+    }
+  },
+);
 
 test("subscription identity stays inside scoped credentials without changing model admission", () => {
   const settings = withClaudeConnectionCatalog(testSettings({ claudeSubscriptionEnabled: true }), {

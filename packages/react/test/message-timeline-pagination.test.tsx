@@ -1,5 +1,6 @@
 import { afterEach, describe, expect, test } from "bun:test";
 import type { SessionEvent } from "@opengeni/sdk";
+import { OpenGeniApiError } from "@opengeni/sdk";
 import { StrictMode, useState, type ComponentType } from "react";
 import { flushSync } from "react-dom";
 import {
@@ -214,7 +215,12 @@ test.each(["promise", "synchronous"])(
     const onLoadNewer = () => {
       calls += 1;
       if (calls === 1) {
-        const failure = new Error("Sign in again to read this session");
+        const failure = new OpenGeniApiError(
+          401,
+          JSON.stringify({
+            error: { code: "unauthorized", message: "Sign in again to read this OpenGeni session" },
+          }),
+        );
         if (mode === "synchronous") throw failure;
         return Promise.reject(failure);
       }
@@ -226,7 +232,7 @@ test.each(["promise", "synchronous"])(
     await intersect(r.container);
     expect(calls).toBe(1);
     expect(r.container.querySelector("[data-og-newer-error]")?.textContent).toContain(
-      "Sign in again",
+      "Sign in to continue.",
     );
     await intersect(r.container);
     await intersect(r.container);
@@ -893,6 +899,45 @@ describe("MessageTimeline pagination affordances", () => {
       expect(scroller.ownerDocument.activeElement).toBe(scroller);
       expect(distanceFromBottom(scroller)).toBe(0);
       expect(scroller.dataset.ogBottomFollow).toBe("true");
+    } finally {
+      layout.restore();
+      await r.unmount();
+    }
+  });
+
+  test("a control used at the live bottom shows Jump to latest only once something is below", async () => {
+    const events = manyEvents(20);
+    const props = { events, turnSummary: { rolling: true } };
+    const r = await renderComponent(<MessageTimeline {...props} />);
+    const scroller = r.container.querySelector<HTMLElement>("[data-og-timeline-scroller]")!;
+    const layout = mockScrollerLayout(scroller, {
+      clientHeight: 400,
+      contentHeight: 2400,
+      tipHeight: 80,
+      paddingBottom: 24,
+    });
+    try {
+      layout.syncTipAtBottom();
+      await actRun(() => scroller.dispatchEvent(new Event("scroll")));
+      expect(r.container.textContent).not.toContain("Jump to latest");
+
+      // Clicking a control in the conversation (Copy, a Connect card) focuses
+      // it: the reader owns the view, but is still at the bottom.
+      await actRun(() =>
+        scroller.querySelector<HTMLElement>("[data-og-prompt]")!.focus({ preventScroll: true }),
+      );
+      await r.rerender(<MessageTimeline {...props} />);
+      expect(scroller.dataset.ogBottomFollow).toBe("false");
+      expect(distanceFromBottom(scroller)).toBe(0);
+      expect(r.container.textContent).not.toContain("Jump to latest");
+
+      // A reply lands below the reader: now there is something to jump to.
+      layout.setContentHeight(2600);
+      await r.rerender(
+        <MessageTimeline {...props} events={[...events, agentDelta(21, "more below")]} />,
+      );
+      expect(distanceFromBottom(scroller)).toBeGreaterThan(48);
+      expect(r.container.textContent).toContain("Jump to latest");
     } finally {
       layout.restore();
       await r.unmount();

@@ -376,6 +376,8 @@ test("benign top-level and dependency key reordering remains unchanged published
 });
 
 for (const selection of ["files", ".npmignore", ".gitignore"] as const) {
+  // Real npm packing/staging can exceed Bun's 5s default on a cold CI runner.
+  // Bound only these integration cases; inventory and asset checks stay fail-closed.
   test(`candidate staging matches npm publication inventory with ${selection} selection`, async () => {
     await fixture(async (root) => {
       const source = join(root, "source");
@@ -463,7 +465,7 @@ for (const selection of ["files", ".npmignore", ".gitignore"] as const) {
       for (const directory of ["node_modules", ".cache", ".turbo", ".bun-cache"])
         await expect(lstat(join(staging, "package", directory))).rejects.toThrow("ENOENT");
     });
-  });
+  }, 30_000);
 }
 
 test("effective closure rejects changed unpublished Connect bytes labelled as the existing 0.3.0 version", async () => {

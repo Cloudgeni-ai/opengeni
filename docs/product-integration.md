@@ -196,12 +196,9 @@ for OpenGeni's React components (`sandbox:`/`artifact:` links and inline
 visuals) or `"markdown"` for any other UI; the chat facade defaults to
 `"markdown"`.
 
-`agent` is admitted when the deployment sets
-`OPENGENI_AGENT_CONFIG_ADMISSION_ENABLED` (the client config reports
-`agentConfig.enabled`); otherwise it is 422 `agent_config_not_enabled` and the
-older fields (`firstPartyMcpTools`, `tools`, `instructions`) remain the way to
-narrow an agent. Sessions created before agent settings keep `agent: null` and
-their exact tools and prompt. See [Agent configuration](design/agent-configuration.md)
+`agent` is always admitted; a new session that omits it resolves to the
+workspace default or `"all"`. Sessions created before agent settings keep
+`agent: null` and their exact tools and prompt. See [Agent configuration](design/agent-configuration.md)
 for the design and enforcement details.
 
 ### Choose who shares chats
@@ -477,31 +474,37 @@ reconciliation and cleanup rather than repeated manual setup.
 | Credential | Use it when | Do not use it for |
 | --- | --- | --- |
 | Organization API key | One server-side product integration provisions or manages many organization workspaces in one organization | Browser/mobile clients or Personal workspaces |
-| Organization API key with `access: "read"` | A reporting, audit, or analytics backend that must read every shared workspace's sessions and transcripts and nothing else | Creating sessions, controlling turns, or minting keys |
+| Organization API key with an explicit policy | A backend needs individually selected permissions across all or selected shared workspaces | Personal workspaces or treating a preset label as a grant |
+| Organization API key with legacy `access: "read"` | A reporting backend needs shared-workspace inventory, sessions, events, and files | Creating sessions, controlling turns, or minting keys |
 | Workspace API key | One backend or automation is deliberately constrained to a single organization workspace | Multi-workspace provisioning or organization administration |
 | Delegated token | A host acts with short-lived, explicit user/workspace authority | A standing multi-tenant backend credential |
 | Deployment access key | An operator needs a coarse configured/self-hosted deployment perimeter | Tenant identity, account selection, or workspace authorization |
 
 An organization API key is the default for the product shape on this page. A
-full-access organization key is all the integration needs: it creates
+full-access organization key with all-shared-workspace scope is all the integration needs: it creates
 workspaces, adds external members, and creates and controls sessions as those
 users (`asUser`). Its `/v1/access/me` `accountGrants` (`account:read`,
 `workspace:create`, `api_keys:manage`) and empty `workspaceGrants` do not list
-that workspace authority; check `credential.access === "full"` and
-`credential.effectiveWorkspacePermissions` instead, and on a deployment that
+that workspace authority. Check `credential.policy`, `credential.workspaceScope`,
+and `credential.effectiveWorkspacePermissions`; the legacy `credential.access`
+label alone does not establish an explicit policy's grants. On a deployment that
 omits `credential`, make the idempotent call (`ensureWorkspace`) rather than
 concluding the key is too weak.
 Choosing it does not remove the product backend's obligation to authenticate
 its own users and resolve their allowed tenant before every proxy call.
 
-Either organization key reads every shared workspace in the organization. To
-read all transcripts without touching each workspace, call
+Organization-key inventory and operational requests honor the key's live
+shared-workspace scope and exact permissions. To read authorized transcripts
+without touching each workspace, call
 `listOrganizationSessions(organizationId, { limit, cursor, scopeSubjectId?, status? })`
 or iterate `iterateOrganizationSessions`; the route is
 `GET /v1/organizations/:organizationId/sessions`, every row carries its
 `workspaceId`, and events are then read through the ordinary workspace routes.
 Personal workspaces and managed-human **Only me** sessions are never included.
-Mint the narrower key with `createOrganizationApiKey(organizationId, { name, access: "read" })`.
+For the legacy sessions-and-files-only tier, use
+`createOrganizationApiKey(organizationId, { name, access: "read" })`.
+An explicit `read_only` preset is broader: it includes every canonical
+read/list/view/search permission except plaintext secret values.
 
 ## Canonical provisioning flow
 
@@ -512,10 +515,15 @@ Organization API-key administration uses the organization control plane:
 | Operation | SDK method | Route |
 | --- | --- | --- |
 | List keys | `listOrganizationApiKeys` | `GET /v1/organizations/:organizationId/api-keys` |
+| Read key metadata and policy | `getOrganizationApiKey` | `GET /v1/organizations/:organizationId/api-keys/:apiKeyId` |
 | Create a key | `createOrganizationApiKey` | `POST /v1/organizations/:organizationId/api-keys` |
+| Edit key metadata or policy | `updateOrganizationApiKey` | `PATCH /v1/organizations/:organizationId/api-keys/:apiKeyId` |
 | Revoke a key | `deleteOrganizationApiKey` | `DELETE /v1/organizations/:organizationId/api-keys/:apiKeyId` |
 
-The create response returns the token once. Store it in the product's secret
+Creation returns `{ apiKey, token }`, with the token shown once. Detail and PATCH
+return the raw `ApiKey`, not a wrapper, and never return the token. List returns
+`{ apiKeys }` over HTTP; the SDK unwraps it to `ApiKey[]`.
+Store the token in the product's secret
 manager and persist only non-secret key metadata in ordinary application data.
 Rotate by creating the replacement, switching backend traffic, and then
 revoking the old key. Do not use the legacy workspace-scoped API-key routes for
@@ -531,13 +539,93 @@ sessions through `asUser`. Their effective workspace permissions include
 `sessions:create` and `members:manage`; user requests additionally require the
 user's live membership and intersect it with the key's permissions.
 Read-only keys cannot provision workspaces or members, create sessions, or mint
-keys. Workspace admin implies ordinary workspace operations but not the literal
-`secrets:read` permission. Neither tier reaches Personal workspaces directly or
+keys. For legacy keys, workspace admin implies ordinary workspace operations
+but not the literal `secrets:read` permission. For explicit policies, every
+permission is selected individually: `workspace:admin` is not a wildcard.
+Neither form reaches Personal workspaces directly or
 bypasses session visibility. `api_keys:manage` also permits issuing narrower
 workspace keys when an integration component should be constrained to one tenant
 workspace. Those
 child keys cannot receive account, member, workspace-creation, billing, or
 plaintext-secret permissions that the workspace grant does not literally hold.
+
+#### Explicit organization-key policies
+
+`OrganizationAccessPolicy` has three required fields:
+
+```ts
+type OrganizationAccessPolicy = {
+  preset: "read_only" | "full" | "custom";
+  permissions: Permission[];
+  workspaceScope:
+    | { kind: "all" }
+    | { kind: "selected"; workspaceIds: string[] };
+};
+```
+
+| Preset | Permission selection |
+| --- | --- |
+| `read_only` | Every canonical permission ending in `:read`, `:list`, `:view`, or `:search`, except the secret-value reads `secrets:read` and `variable-sets:read` |
+| `full` | Every canonical, non-deprecated `Permission`, including explicit administration and plaintext-secret permissions |
+| `custom` | Exactly the permissions chosen, including an empty list; no implicit permissions or workspace scopes |
+
+The supplied preset is only a label: it never adds grants. For example,
+`preset: "full"` with only `permissions: ["sessions:read"]` grants only
+`sessions:read` and is returned as `custom`, not full access. The contracts
+helpers in `packages/contracts/src/organization-access.ts` are canonical:
+`organizationAccessPresetPermissions` builds preset permission lists;
+`normalizeOrganizationAccessPolicy` maps deprecated aliases to canonical names,
+deduplicates and orders permissions, and recomputes the preset from the actual
+set. The SDK has handwritten wire mirrors and sends the supplied list unchanged;
+it does not import contracts at runtime or expand labels.
+
+`{ kind: "all" }` includes all current and future shared workspaces in the
+organization. `{ kind: "selected", workspaceIds }` takes up to 500 unique UUIDs
+for existing shared workspaces in that same organization; cross-organization,
+missing, and Personal IDs are rejected. When selected workspaces are deleted the
+key simply stops reaching them; an empty selection reaches none. Personal workspaces are excluded from
+both scopes, regardless of preset. Workspace and organization-session lists
+filter to the live scope; a selected scope never silently falls back to all.
+
+Create a narrowly scoped reporting key from an authorized administrative backend:
+
+```ts
+import type { OrganizationAccessPolicy } from "@opengeni/sdk";
+
+const policy: OrganizationAccessPolicy = {
+  preset: "custom",
+  permissions: ["workspace:read", "sessions:read", "files:read"],
+  workspaceScope: { kind: "selected", workspaceIds: [authorizedWorkspaceId] },
+};
+const { apiKey, token } = await adminClient.createOrganizationApiKey(organizationId, {
+  name: "Tenant reporting",
+  policy,
+});
+await secretManager.store(token); // creation is the only token-returning response
+
+const current = await adminClient.getOrganizationApiKey(organizationId, apiKey.id);
+const updated = await adminClient.updateOrganizationApiKey(organizationId, current.id, {
+  description: null, // clear it; omit the field to leave it unchanged
+  policy: { ...policy, permissions: ["workspace:read", "sessions:read"] },
+});
+```
+
+PATCH accepts `name?`, `description?: string | null`, and `policy?`, and requires
+at least one change. A policy replaces the complete prior policy; it is not a
+permission append or a merge of workspace IDs. Permission or scope narrowing
+takes effect on the next request with the same token. Metadata-only edits
+preserve legacy stored permissions and their historical `workspace:admin`
+wildcard. Supplying `policy` transitions that key to `permissionMode: "explicit"`:
+every `Permission`, including `workspace:admin`, must then be chosen individually
+and grants no unselected permission. No token rotation is needed for an edit.
+
+Legacy creation remains additive: omit `policy` and retain `access: "full"`,
+`access: "read"`, `access: "developer_setup"`, or the top-level
+`preset: "developer_setup"` alias. Omitting both policy and legacy selectors
+retains full legacy semantics, not the new explicit full preset. Do not combine
+an explicit policy with a legacy access tier or setup preset. `ApiKey` adds
+optional `policy`, `workspaceScope`, and `permissionMode: "legacy" | "explicit"`;
+`AccessGrant` adds optional `permissionMode`. Older servers may omit these fields.
 
 ### 2. Ensure an organization workspace
 
@@ -626,18 +714,20 @@ should call the same idempotent reconciler.
 `getAccessContext()` / `GET /v1/access/me` intentionally returns the
 organization account grant without enumerating every organization workspace in
 `workspaceGrants`. Use `listWorkspaces()` / `GET /v1/workspaces` for the complete
-organization-workspace inventory; an empty `workspaceGrants` array does not mean
+authorized organization-workspace inventory; an empty `workspaceGrants` array does not mean
 the organization has no workspaces.
 
 Direct organization and workspace API-key requests also return optional
 `credential` metadata, separate from the unchanged `accountGrants` and
 `workspaceGrants`. It contains `kind` (`organization_api_key` or
-`workspace_api_key`), organization-only `access` (`full` or `read`), `accountId`,
-`workspaceId`, `effectiveWorkspacePermissions`, and a plain-language `note`.
-An organization key's null `workspaceId` means all shared workspaces in the same
-organization, never Personal workspaces; a workspace key names its one workspace.
-`credential.effectiveWorkspacePermissions` expands `workspace:admin` into
-ordinary workspace permissions, excludes account-only permissions, and includes
+`workspace_api_key`), organization-only legacy `access` (`full`, `read`, or
+`developer_setup`), `accountId`, `workspaceId`, `effectiveWorkspacePermissions`,
+and a plain-language `note`. Organization keys also expose optional `policy`
+and `workspaceScope`. Their null `workspaceId` identifies an organization key,
+not an all-workspaces grant: consult its all/selected shared-workspace scope.
+Personal workspaces are always excluded; a workspace key names its one workspace.
+`credential.effectiveWorkspacePermissions` expands `workspace:admin` only for
+legacy keys, preserves exact explicit-policy grants, excludes account-only permissions, and includes
 `secrets:read` only when explicitly granted. Full organization keys include
 `sessions:create` and `members:manage`, so the backend can provision workspaces,
 external members, and `asUser` sessions. User requests still require live
@@ -754,6 +844,10 @@ This does not disable workspace-authored/installed Skills or your inline
 `skill_read` tool remains available even with no bundled guidance. Bundle
 selection does not wait for lazy tool discovery or sandbox startup.
 
+`builtin:opengeni-schedules` provides schedule-creation guidance when
+`scheduled_tasks_create` is configured. Like other bundles, it can be excluded
+by an explicit selection and does not grant tool permissions.
+
 For an embedded support bot, put `bundledSkillIds: []` in the raw create request
 or `create: { bundledSkillIds: [] }` in the chat facade's resolved options. Select
 only the product's own inline Skills and intended tools, and use a workspace
@@ -818,6 +912,40 @@ Use each prompt surface for its actual lifetime:
 may return them. If the agent needs current product state or must mutate product
 records, expose a tenant-scoped tool surface instead of copying the product's
 database into OpenGeni or embedding long-lived credentials in a prompt.
+
+### Your own tools as the signed-in user (Node)
+
+A Node backend that already mounts the session proxy gets per-user product
+tools from one option. Build the MCP endpoint with any MCP library (the
+official `@modelcontextprotocol/sdk` or `mcp-handler`), call
+`verifyToolRequest` first, and scope every tool to the returned user:
+
+```ts
+createSessionProxyHandler(og, {
+  resolve, createSession, // unchanged
+  toolServer: {
+    url: "https://app.example.com/api/mcp", // public HTTPS, reachable by OpenGeni
+    approvals: { ask: ["rename_post"] }, // writes wait for the user's approval
+  },
+});
+
+// app/api/mcp: verify, then run tools for that user only.
+const { user, tenant } = await verifyToolRequest(request); // throws ToolRequestError (401)
+```
+
+On every session the `createSession` hook creates, the proxy attaches the
+server as a per-session `mcpServers` entry with an HS256 bearer token for the
+user `resolve` authenticated (plus an eager `tools` ref when the hook returns an
+explicit list). It rotates that token through `mcpCredentialUpdates` on every
+send, steer, composer submit, approval decision, and human-input answer, only
+for sessions that carry this exact server, and only when the chat's creator acts
+(tools act as the creator, also in shared chats). Tokens last 24 hours by default.
+The signing key is derived from `OPENGENI_API_KEY` (or an explicit `secret` on
+both sides; `deriveToolTokenKey()` gives non-Node verifiers that key); `aud` is
+the full tool URL, which `OPENGENI_TOOL_SERVER_URL` can supply to both sides.
+List write tools in `approvals.ask`. Members need `mcp_servers:attach`. A non-Node tool server
+verifies the same documented JWT (`docs-site/integrate/your-data.mdx`); runnable
+reference: [`examples/tool-server`](../examples/tool-server/README.md).
 
 ### Existing APIs without MCP
 

@@ -6,6 +6,7 @@ import type { WorkspaceIdOptions, WorkspaceIdTarget } from "./tenant-workspaces"
 import { proxySessionEventStream } from "./proxy";
 import { OPENGENI_API_CONTRACT_HEADER, OPENGENI_API_CONTRACT_REVISION } from "./types";
 import type { CreateSessionRequest, SessionMcpCredentialUpdateInput } from "./types";
+import { mintToolToken, resolveToolTokenSecret } from "./tool-auth";
 import {
   downloadSessionProxySiteHtml,
   getSessionProxyArtifactAssociation,
@@ -76,27 +77,55 @@ export type SessionProxyCreateInput = {
   idempotencyKey?: string | undefined;
 };
 
-/** Which browser action is about to forward a user message. */
+/** Which browser action is about to forward a user message or response. */
 export type SessionProxyMessageInput = {
   /** Absent for `create`. */
   sessionId?: string | undefined;
   delivery: "create" | "send" | "steer" | "submit";
 };
 
-/** Server-side additions the host attaches to one forwarded user message. */
+/** Server-side additions the host attaches to one forwarded user message or response. */
 export type SessionProxyMessageExtras = {
   /**
    * Model-visible context for this message (current page, time zone, today's
-   * date). Placed before any context the browser sent. Not secret.
+   * date). Placed before any context the browser sent. Not secret. Ignored for
+   * approval decisions and human-input responses, which are not new messages.
    */
   modelContext?: string | undefined;
   /**
    * Header-only credential rotation for MCP servers already attached to the
    * session (for example a fresh short-lived per-user bearer), applied
-   * atomically as the message is accepted. Ignored for `create`, where the
-   * `createSession` hook sets the initial headers.
+   * atomically as the message or response is accepted. Ignored for `create`,
+   * where the `createSession` hook sets the initial headers.
    */
   mcpCredentialUpdates?: SessionMcpCredentialUpdateInput[] | undefined;
+};
+
+/**
+ * Your product's own MCP tool server, attached to every session this proxy
+ * creates with a per-user bearer token. Verify it on every MCP request with
+ * `verifyToolRequest` from `@opengeni/sdk/tool-auth`. Tools always act as the
+ * chat's creator: in a shared chat, other members' messages do not change it.
+ */
+export type SessionProxyToolServer = {
+  /**
+   * Public HTTPS URL of your MCP endpoint, e.g. `https://app.example.com/api/mcp`.
+   * Defaults to `OPENGENI_TOOL_SERVER_URL`, which `verifyToolRequest` also reads.
+   */
+  url?: string | undefined;
+  /** Session MCP server id (model-facing tool prefix). Defaults to `"app"`. */
+  id?: string | undefined;
+  /** Display name. */
+  name?: string | undefined;
+  /**
+   * Tools the user must approve before each call: list your write tools here
+   * (unprefixed MCP tool names), or `true` for every tool. Others run directly.
+   */
+  approvals?: { ask: string[] | true } | undefined;
+  /** Token signing secret. Defaults to `OPENGENI_API_KEY`; `verifyToolRequest` must use the same. */
+  secret?: string | undefined;
+  /** Token lifetime in seconds. Defaults to 24 hours; refreshed on every message, approval, and answer. */
+  ttlSeconds?: number | undefined;
 };
 
 export type SessionProxyHandlerOptions = {
@@ -135,8 +164,9 @@ export type SessionProxyHandlerOptions = {
     | undefined;
   /**
    * Called before every forwarded user message (send, steer, composer submit,
-   * and browser-started create). Return server-owned `modelContext` and MCP
-   * credential rotations, or a `Response` to reject the message.
+   * and browser-started create), approval decision, and human-input response.
+   * Return server-owned `modelContext` (messages only) and MCP credential
+   * rotations, or a `Response` to reject the action.
    */
   beforeForwardMessage?:
     | ((
@@ -148,6 +178,14 @@ export type SessionProxyHandlerOptions = {
         | undefined
         | Promise<SessionProxyMessageExtras | Response | undefined>)
     | undefined;
+  /**
+   * Attach your product's MCP tool server to every session the `createSession`
+   * hook creates, authenticated as the resolved user. The proxy mints the
+   * token, adds the `mcpServers` entry (plus an eager ref when the hook lists
+   * explicit `tools`), and rotates the token on every send, steer, submit,
+   * approval decision, and human-input answer.
+   */
+  toolServer?: SessionProxyToolServer | undefined;
   /** Mount prefix, e.g. `/api/opengeni`. Defaults to everything before the first `/v1/`. */
   basePath?: string | undefined;
   /** Maximum JSON request body. Defaults to 1 MiB. */
@@ -201,6 +239,8 @@ export type SessionProxyHandlerOptions = {
    * the saved policy unchanged as an integrity fence, not a new selection: the
    * API atomically checks the saved revision/content or replays the original
    * receipt. Hide the composer's model picker to match. Defaults to true.
+   * Pass `true` explicitly to also show end users the stock model picker
+   * (`SessionConversation`/`OpenGeniChat` hide it unless asked).
    */
   modelSelection?: boolean | undefined;
   /** SSE heartbeat interval. Defaults to 15 seconds. */
@@ -273,6 +313,9 @@ export function createSessionProxyHandler(
   const archiveEnabled = options.archive ?? true;
   const chats = options.chats ?? "private";
   const defaults = chatDefaults(chats);
+  const toolServer = options.toolServer ? normalizeToolServer(options.toolServer) : undefined;
+  // Whether a session carries this proxy's tool server (attachments are immutable).
+  const toolSessions = new Map<string, Promise<string | null>>();
   // Canonical subject per external user, for the "mine" list filter.
   const subjects = new Map<string, Promise<string>>();
   const subjectOf = (client: ProxyClient, key: string): Promise<string> => {
@@ -290,7 +333,10 @@ export function createSessionProxyHandler(
     try {
       const method = request.method;
       if (!["GET", "POST", "PUT", "PATCH"].includes(method)) {
-        return new Response(null, { status: 405, headers: { Allow: "GET, POST, PUT, PATCH" } });
+        return new Response(null, {
+          status: 405,
+          headers: { Allow: "GET, POST, PUT, PATCH" },
+        });
       }
       const resolved = await options.resolve(request);
       if (resolved instanceof Response) return resolved;
@@ -339,10 +385,63 @@ export function createSessionProxyHandler(
       };
 
       const call = { signal: request.signal };
-      const messageExtras = async (input: SessionProxyMessageInput) =>
-        options.beforeForwardMessage
+      const toolToken = async () =>
+        await mintToolToken({
+          audience: toolServer!.url,
+          user: resolved.user,
+          tenant: resolved.tenant,
+          workspaceId,
+          source,
+          secret: toolServer!.secret,
+          ttlSeconds: toolServer!.ttlSeconds,
+        });
+      /** The creator's subject when the session carries this tool server, else null. */
+      const toolServerOwner = (sessionId: string): Promise<string | null> => {
+        const key = `${workspaceId}\u0000${sessionId}`;
+        let attached = toolSessions.get(key);
+        if (!attached) {
+          attached = client
+            .getSession(workspaceId, sessionId, call)
+            .then((session) =>
+              (session.mcpServers ?? []).some(
+                (server) => server.id === toolServer!.id && server.url === toolServer!.url,
+              )
+                ? (session.createdBy?.subjectId ?? null)
+                : null,
+            );
+          attached.catch(() => toolSessions.delete(key));
+          if (toolSessions.size >= 1_000) toolSessions.delete(toolSessions.keys().next().value!);
+          toolSessions.set(key, attached);
+        }
+        return attached;
+      };
+      const messageExtras = async (
+        input: SessionProxyMessageInput,
+      ): Promise<SessionProxyMessageExtras | Response | undefined> => {
+        const extras = options.beforeForwardMessage
           ? await options.beforeForwardMessage(input, context)
           : undefined;
+        if (extras instanceof Response || !toolServer || !input.sessionId) return extras;
+        const updates = extras?.mcpCredentialUpdates ?? [];
+        // A host-supplied rotation for the same id wins; sessions created
+        // without this tool server (or for an older URL) are left alone.
+        if (updates.some((update) => update.id === toolServer.id)) return extras;
+        // Only the chat's creator refreshes: tools keep acting as that user.
+        const owner = await toolServerOwner(input.sessionId);
+        if (!owner || owner !== (await subjectOf(client, `${source}\u0000${resolved.user}`))) {
+          return extras;
+        }
+        return {
+          ...extras,
+          mcpCredentialUpdates: [
+            ...updates,
+            {
+              id: toolServer.id,
+              headers: { Authorization: `Bearer ${await toolToken()}` },
+            },
+          ],
+        };
+      };
       /** Browser input sanitized, then server-owned extras merged in. */
       const forwardMessage = async (
         value: unknown,
@@ -361,6 +460,21 @@ export function createSessionProxyHandler(
         return {
           ...message,
           ...(modelContext ? { modelContext } : {}),
+          ...(extras?.mcpCredentialUpdates?.length
+            ? { mcpCredentialUpdates: extras.mcpCredentialUpdates }
+            : {}),
+        };
+      };
+      /** Responses reuse send hooks unchanged; only credentials are added. */
+      const forwardResponse = async (
+        value: unknown,
+        input: SessionProxyMessageInput,
+      ): Promise<Record<string, unknown> | Response> => {
+        const payload = browserPayload(value);
+        const extras = await messageExtras(input);
+        if (extras instanceof Response) return extras;
+        return {
+          ...payload,
           ...(extras?.mcpCredentialUpdates?.length
             ? { mcpCredentialUpdates: extras.mcpCredentialUpdates }
             : {}),
@@ -409,7 +523,12 @@ export function createSessionProxyHandler(
             apiContractRevision: OPENGENI_API_CONTRACT_REVISION,
             sandboxFiles: sandboxFilesEnabled,
             ...(artifacts ? { artifacts } : {}),
-            ...(modelSelection ? {} : { modelSelection: false }),
+            // Explicit true also tells stock UIs to offer end users the model picker.
+            ...(modelSelection
+              ? options.modelSelection === true
+                ? { modelSelection: true }
+                : {}
+              : { modelSelection: false }),
           });
         }
         return errorJson(404, "route_not_allowed", "Not found.");
@@ -569,8 +688,9 @@ export function createSessionProxyHandler(
           return errorJson(404, "route_not_allowed", "Not found.");
         }
         const input = createInput(await readJsonBody(request, maxBodyBytes));
-        const created = await options.createSession(input, context);
-        if (created instanceof Response) return created;
+        const hooked = await options.createSession(input, context);
+        if (hooked instanceof Response) return hooked;
+        const created = toolServer ? withToolServer(hooked, toolServer, await toolToken()) : hooked;
         const extras = await messageExtras({ delivery: "create" });
         if (extras instanceof Response) return extras;
         const modelContext = joinContext(extras?.modelContext, created.modelContext);
@@ -644,10 +764,16 @@ export function createSessionProxyHandler(
           });
         case "POST events": {
           const event = clientEvent(body);
-          if (event.type !== "user.message") {
-            return json(await client.requestJson("POST", `${session}/events`, event));
-          }
-          const payload = await forwardMessage(event.payload, { sessionId, delivery: "send" });
+          const payload =
+            event.type === "user.message"
+              ? await forwardMessage(event.payload, {
+                  sessionId,
+                  delivery: "send",
+                })
+              : await forwardResponse(event.payload, {
+                  sessionId,
+                  delivery: "send",
+                });
           return await forward(
             `${session}/events`,
             payload instanceof Response ? payload : { ...event, payload },
@@ -671,7 +797,10 @@ export function createSessionProxyHandler(
             ),
           );
         case "POST composer-draft/submit": {
-          const message = await forwardMessage(body, { sessionId, delivery: "submit" });
+          const message = await forwardMessage(body, {
+            sessionId,
+            delivery: "submit",
+          });
           return await forward(`${session}/composer-draft/submit`, message);
         }
         case "POST control": {
@@ -711,6 +840,86 @@ export function createSessionProxyHandler(
 }
 
 const UPLOAD_FIELDS = ["scope", "filename", "contentType", "sizeBytes", "sha256"] as const;
+
+type NormalizedToolServer = SessionProxyToolServer & {
+  url: string;
+  id: string;
+  secret: string;
+};
+
+function normalizeToolServer(toolServer: SessionProxyToolServer): NormalizedToolServer {
+  const configured =
+    toolServer.url ??
+    (globalThis as { process?: { env?: Record<string, string | undefined> } }).process?.env
+      ?.OPENGENI_TOOL_SERVER_URL;
+  let url: URL;
+  try {
+    url = new URL(configured ?? "");
+  } catch {
+    throw new TypeError(
+      "toolServer.url (or OPENGENI_TOOL_SERVER_URL) must be an absolute https:// URL.",
+    );
+  }
+  if (url.protocol !== "https:") {
+    // OpenGeni calls the tool server from its own network; use a tunnel locally.
+    throw new TypeError("toolServer.url must be an absolute https:// URL.");
+  }
+  const id = toolServer.id ?? "app";
+  if (!/^[A-Za-z0-9_-]+$/.test(id)) {
+    throw new TypeError("toolServer.id may contain only letters, digits, _ and -.");
+  }
+  const ask = toolServer.approvals?.ask;
+  if (ask !== undefined && ask !== true && !(Array.isArray(ask) && ask.every(isToolName))) {
+    throw new TypeError("toolServer.approvals.ask must be true or a list of tool names.");
+  }
+  // Resolve now so a missing secret fails at startup, not on the first chat.
+  return {
+    ...toolServer,
+    url: configured!,
+    id,
+    secret: resolveToolTokenSecret(toolServer.secret),
+  };
+}
+
+function isToolName(value: unknown): value is string {
+  return typeof value === "string" && value.length > 0;
+}
+
+/** Attach the product tool server with a fresh per-user token. */
+function withToolServer(
+  created: CreateSessionRequest,
+  toolServer: NormalizedToolServer,
+  token: string,
+): CreateSessionRequest {
+  const servers = created.mcpServers ?? [];
+  if (servers.some((server) => server.id === toolServer.id)) {
+    throw new TypeError(
+      `createSession already attaches an MCP server with the toolServer id "${toolServer.id}".`,
+    );
+  }
+  const ask = toolServer.approvals?.ask;
+  const tools = created.tools;
+  return {
+    ...created,
+    mcpServers: [
+      ...servers,
+      {
+        id: toolServer.id,
+        ...(toolServer.name ? { name: toolServer.name } : {}),
+        url: toolServer.url,
+        headers: { Authorization: `Bearer ${token}` },
+        ...(ask === true ? { requireApproval: true } : ask?.length ? { requireApproval: ask } : {}),
+      },
+    ],
+    // Omitted tools keep workspace defaults; the attachment alone selects the
+    // server. An explicit allow-list gets the server's tools on the first request.
+    ...(Array.isArray(tools) && !tools.some((tool) => tool.id === toolServer.id)
+      ? {
+          tools: [...tools, { kind: "mcp" as const, id: toolServer.id, eager: true }],
+        }
+      : {}),
+  };
+}
 
 const EDITABLE_ARTIFACT_LIVE_PATH = "/v1/editable-artifacts/live";
 const TICKET_FIELDS = [
@@ -820,7 +1029,11 @@ export async function artifactViewerCapability(input: {
   editableLiveUrl?: string | undefined;
 }): Promise<{
   editableLiveUrl: string;
-  cachePartition: { accountId: string; principalId: string; authorizationEpoch: string };
+  cachePartition: {
+    accountId: string;
+    principalId: string;
+    authorizationEpoch: string;
+  };
 }> {
   return {
     editableLiveUrl: liveSocketUrl(
@@ -844,7 +1057,11 @@ async function cachePartition(
   grant: import("./types").AccessGrant,
   workspaceId: string,
   source: string,
-): Promise<{ accountId: string; principalId: string; authorizationEpoch: string }> {
+): Promise<{
+  accountId: string;
+  principalId: string;
+  authorizationEpoch: string;
+}> {
   if (grant.workspaceId !== workspaceId) {
     reject(403, "workspace_not_allowed", "This workspace is not available.");
   }
@@ -1020,8 +1237,8 @@ function createInput(body: Record<string, unknown> | undefined): SessionProxyCre
   return { initialMessage, ...(idempotencyKey ? { idempotencyKey } : {}) };
 }
 
-/** Browser message/draft input: no credential rotation, file resources only, optional model lock. */
-function sanitizeMessage(value: unknown, modelSelection: boolean): Record<string, unknown> {
+/** Browser payloads cannot supply server-owned credential rotations. */
+function browserPayload(value: unknown): Record<string, unknown> {
   if (!value || typeof value !== "object" || Array.isArray(value)) {
     reject(400, "invalid_body", "A JSON object body is required.");
   }
@@ -1029,6 +1246,12 @@ function sanitizeMessage(value: unknown, modelSelection: boolean): Record<string
   if (Object.hasOwn(input, "mcpCredentialUpdates")) {
     reject(403, "credential_update_not_allowed", "MCP credentials are server-owned.");
   }
+  return input;
+}
+
+/** Browser message/draft input: no credential rotation, file resources only, optional model lock. */
+function sanitizeMessage(value: unknown, modelSelection: boolean): Record<string, unknown> {
+  const input = browserPayload(value);
   if (input.resources !== undefined) {
     if (
       !Array.isArray(input.resources) ||
@@ -1110,7 +1333,10 @@ function workspaceLiveStream(
   };
   const upstream = new AbortController();
   if (request.signal.aborted) upstream.abort();
-  else request.signal.addEventListener("abort", () => upstream.abort(), { once: true });
+  else
+    request.signal.addEventListener("abort", () => upstream.abort(), {
+      once: true,
+    });
   const events = client.streamWorkspaceLiveEvents(workspaceId, {
     controlAfter: cursor("controlAfter"),
     interactionAfter: cursor("interactionAfter"),
@@ -1187,7 +1413,10 @@ function errorResponse(error: unknown): Response {
     if (error.body) {
       return new Response(error.body, {
         status,
-        headers: { "Content-Type": "application/json; charset=utf-8", "Cache-Control": "no-store" },
+        headers: {
+          "Content-Type": "application/json; charset=utf-8",
+          "Cache-Control": "no-store",
+        },
       });
     }
     return json(

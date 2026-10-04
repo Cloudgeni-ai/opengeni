@@ -1,7 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import { readFile, rm } from "node:fs/promises";
 import { dirname } from "node:path";
-import type { AttemptToolResult } from "@opengeni/contracts";
+import type { AttemptToolResult, BrowserDownload } from "@opengeni/contracts";
 import {
   CodemodeClient,
   CodemodeToolExecutionError,
@@ -13,6 +13,106 @@ const browserSessionId = "11111111-1111-4111-8111-111111111111";
 const computerSessionId = "22222222-2222-4222-8222-222222222222";
 
 describe("OpenGeni Codemode interaction facade", () => {
+  test("exposes exact browser downloads and preserves save operation identity", async () => {
+    const downloadId = "33333333-3333-4333-8333-333333333333";
+    const operationId = "44444444-4444-4444-8444-444444444444";
+    const download: BrowserDownload = {
+      id: downloadId,
+      browserSessionId,
+      controllerGeneration: "controller-1",
+      targetId: "tab-1",
+      filename: "synthetic.csv",
+      status: "completed",
+      receivedBytes: 46,
+      totalBytes: 46,
+      sha256: "0e9ba0cd29d7b88fa02b369c70aee7080847a6efe176dce34ac598b84097c52c",
+      version: 2,
+      startedAt: "2026-08-10T12:00:00.000Z",
+      settledAt: "2026-08-10T12:00:01.000Z",
+      failureCode: null,
+    };
+    const listing = {
+      browserSessionId,
+      controllerGeneration: "controller-1",
+      downloads: [download],
+    };
+    const saved = {
+      download,
+      operationId,
+      destinationPath: "exports/synthetic.csv",
+      fileId: "55555555-5555-4555-8555-555555555555",
+      replayed: false,
+    };
+    const fake = fakeClient((path, args) =>
+      result(
+        path === "interaction.browser.downloadSave"
+          ? saved
+          : args.operation === "get"
+            ? download
+            : listing,
+      ),
+    );
+    const downloads = createOpenGeniCodemode(fake.client).browsers.use(browserSessionId).downloads;
+    expect(await downloads.list()).toEqual(listing);
+    const file = downloads.download(downloadId);
+    expect(await file.get()).toEqual(download);
+    const options = Object.assign(
+      { overwrite: true },
+      {
+        browserSessionId: "another-session",
+        downloadId: "another-download",
+        destinationPath: "other.csv",
+      },
+    );
+    expect(await file.saveToWorkspace("exports/synthetic.csv", options, { operationId })).toEqual(
+      saved,
+    );
+    expect(fake.calls).toEqual([
+      {
+        path: "interaction.browser.downloads",
+        args: { browserSessionId, operation: "list" },
+        options: {},
+      },
+      {
+        path: "interaction.browser.downloads",
+        args: { browserSessionId, operation: "get", downloadId },
+        options: {},
+      },
+      {
+        path: "interaction.browser.downloadSave",
+        args: {
+          browserSessionId,
+          downloadId,
+          destinationPath: "exports/synthetic.csv",
+          overwrite: true,
+        },
+        options: { operationId },
+      },
+    ]);
+  });
+
+  test("download save preserves an unsupported controller refusal", async () => {
+    const fake = fakeClient(() => ({
+      isError: true,
+      content: [],
+      structuredContent: {
+        error: {
+          code: "unsupported",
+          message: "Browser placement cannot publish managed downloads",
+          retryable: false,
+        },
+      },
+    }));
+    const file = createOpenGeniCodemode(fake.client)
+      .browsers.use(browserSessionId)
+      .downloads.download("33333333-3333-4333-8333-333333333333");
+    await expect(file.saveToWorkspace("exports/synthetic.csv")).rejects.toMatchObject({
+      name: "CodemodeToolExecutionError",
+      code: "unsupported",
+      retryable: false,
+    });
+  });
+
   test("forwards attached-only discovery scope and returns bridge metadata", async () => {
     const discovery = {
       browserRevision: 42,

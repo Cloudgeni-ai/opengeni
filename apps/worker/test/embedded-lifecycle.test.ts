@@ -1,4 +1,5 @@
 import { afterEach, describe, expect, spyOn, test } from "bun:test";
+import { createTurnActivities } from "../src/activities-turn";
 import { mkdir, mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, resolve as resolvePath } from "node:path";
@@ -30,6 +31,7 @@ import {
   combineWorkerRunTargets,
   constructWithOwnedConnection,
   createWorkerServiceLifecycle,
+  createWorkerCleanupContainment,
 } from "../src/worker-service-lifecycle";
 
 const temporaryRoots: string[] = [];
@@ -41,6 +43,68 @@ afterEach(async () => {
 });
 
 describe("embedded worker lifecycle contract", () => {
+  test("bare turn activities refuse execution without the host cleanup drain edge", async () => {
+    const activities = createTurnActivities();
+    await expect(activities.runAgentTurn({} as never)).rejects.toThrow(
+      "host requestWorkerDrain lifecycle edge",
+    );
+  });
+
+  test("cleanup containment drains once and keeps the host exit backstop until successful shutdown", async () => {
+    const observability = createObservability(testSettings(), { component: "worker-turn" });
+    let drains = 0;
+    let exits = 0;
+    const containment = createWorkerCleanupContainment({
+      drain: () => {
+        drains++;
+        return true;
+      },
+      terminate: () => {
+        exits++;
+      },
+      observability,
+      timeoutMs: 40,
+    });
+    containment.request();
+    containment.request();
+    expect(drains).toBe(1);
+    expect(exits).toBe(0);
+    await Bun.sleep(60);
+    expect(exits).toBe(1);
+    containment.finished();
+
+    const healthy = createWorkerCleanupContainment({
+      drain: () => true,
+      terminate: () => {
+        exits++;
+      },
+      observability,
+      timeoutMs: 10,
+    });
+    healthy.request();
+    healthy.finished();
+    await Bun.sleep(20);
+    expect(exits).toBe(1);
+  });
+
+  test("a rejected cleanup drain still preserves final host containment", async () => {
+    let exits = 0;
+    const containment = createWorkerCleanupContainment({
+      drain: () => {
+        throw new Error("shutdown request failed");
+      },
+      terminate: () => {
+        exits++;
+      },
+      observability: createObservability(testSettings(), { component: "worker-turn" }),
+      timeoutMs: 10,
+    });
+    containment.request();
+    await Bun.sleep(20);
+    expect(exits).toBe(1);
+    containment.finished();
+  });
+
   test("a multi-queue worker starts and drains every Temporal poller as one service", async () => {
     let finishFirst!: () => void;
     let finishSecond!: () => void;
@@ -422,6 +486,7 @@ describe("embedded worker lifecycle contract", () => {
       ],
       [{ activated: false }],
       [{ present: true }],
+      [{ present: true }],
       [],
       [
         { name: "opengeni_private", owner: "opengeni_migrator", usage: true, create: false },
@@ -712,7 +777,7 @@ describe("embedded worker lifecycle contract", () => {
         "session_tenancy_additional_organization_activation_evidence",
       ],
     })();
-    expect((catalogResults[9] as Array<{ name: string }>).map((routine) => routine.name)).toEqual([
+    expect((catalogResults[10] as Array<{ name: string }>).map((routine) => routine.name)).toEqual([
       ...RUNTIME_TARGET_SCHEMA_CAPABILITY_ROUTINES,
       ...RUNTIME_TARGET_SCHEMA_FORBIDDEN_ROUTINES,
     ]);
@@ -724,7 +789,11 @@ describe("embedded worker lifecycle contract", () => {
   });
 
   test("embedded readiness enforces durable session-tenancy activation for both switch states", async () => {
-    const embeddedDb = (activated: boolean, variableSetCutoverPresent = true) => {
+    const embeddedDb = (
+      activated: boolean,
+      variableSetCutoverPresent = true,
+      claudePoolActivationPresent = true,
+    ) => {
       const results: unknown[] = [
         [
           {
@@ -745,6 +814,7 @@ describe("embedded worker lifecycle contract", () => {
         ],
         [{ activated }],
         [{ present: variableSetCutoverPresent }],
+        [{ present: claudePoolActivationPresent }],
       ];
       let index = 0;
       return {
@@ -776,6 +846,9 @@ describe("embedded worker lifecycle contract", () => {
     await expect(dbReadyCheck(embeddedDb(false, false), options)()).rejects.toThrow(
       /missing the 0352 session Variable Set attachment runtime receipt/,
     );
+    await expect(dbReadyCheck(embeddedDb(false, true, false), options)()).rejects.toThrow(
+      /missing the Claude subscription account activation receipt/,
+    );
   });
 
   test("database readiness coalesces overlapping probe attempts", async () => {
@@ -802,6 +875,65 @@ describe("embedded worker lifecycle contract", () => {
     await Promise.all([first, second]);
     await check();
     expect(executions).toBe(2);
+  });
+
+  test("timed-out readiness requests reuse the pending catalog check", async () => {
+    let executions = 0;
+    let catalogChecks = 0;
+    let release!: () => void;
+    let started!: () => void;
+    const catalogStarted = new Promise<void>((resolve) => {
+      started = resolve;
+    });
+    const catalogPending = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const db = {
+      execute: async () => {
+        executions += 1;
+        return [];
+      },
+    } as unknown as Database;
+    const check = dbReadyCheck(db, undefined, async () => {
+      catalogChecks += 1;
+      if (catalogChecks === 1) {
+        started();
+        await catalogPending;
+      }
+    });
+    const pending = check();
+    await catalogStarted;
+    const settings = testSettings();
+    const fetch = createWorkerHttpHandler({
+      settings,
+      observability: createObservability(settings, { component: "worker-test" }),
+      checks: { db: check, nats: () => undefined, temporal: () => undefined },
+      timeoutMs: 5,
+    });
+    const responses = await Promise.all([
+      fetch(new Request("http://localhost/readyz")),
+      fetch(new Request("http://localhost/readyz")),
+    ]);
+    expect(responses.map((response) => response.status)).toEqual([503, 503]);
+    expect(executions).toBe(1);
+    expect(catalogChecks).toBe(1);
+    release();
+    await pending;
+    expect((await fetch(new Request("http://localhost/readyz"))).status).toBe(200);
+    expect(executions).toBe(2);
+    expect(catalogChecks).toBe(2);
+  });
+
+  test("catalog failure resets database readiness for a later successful check", async () => {
+    let catalogChecks = 0;
+    const db = { execute: async () => [] } as unknown as Database;
+    const check = dbReadyCheck(db, undefined, async () => {
+      catalogChecks += 1;
+      if (catalogChecks === 1) throw new Error("catalog unavailable");
+    });
+    await expect(check()).rejects.toThrow("catalog unavailable");
+    await expect(check()).resolves.toBeUndefined();
+    expect(catalogChecks).toBe(2);
   });
 
   test("readiness follows role lifecycle while health stays live during drain", async () => {

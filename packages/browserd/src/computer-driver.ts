@@ -26,14 +26,14 @@ import {
   type NormalizedComputerFrameStreamOptions,
 } from "./computer-media";
 import {
-  NativeComputerError,
-  type NativeComputerActionCommand,
-  type NativeComputerCaptureOptions,
-  type NativeComputerFrame,
-  type NativeComputerObservation,
-  type NativeComputerTarget,
-  type ComputerNativeTransport,
-} from "./computer-native-client";
+  ComputerBackendError,
+  type ComputerBackendActionCommand,
+  type ComputerBackendCaptureOptions,
+  type ComputerBackendFrame,
+  type ComputerBackendObservation,
+  type ComputerBackendTarget,
+  type ComputerBackend,
+} from "./computer-backend";
 
 const MAX_FRAME_PROFILES_PER_TARGET = 8;
 const MAX_FRAME_SUBSCRIBERS_PER_TARGET = 32;
@@ -50,44 +50,44 @@ type TargetFrameProfile = {
 
 type TargetFrameGroup = {
   profiles: Map<string, TargetFrameProfile>;
-  sourceClient: ComputerNativeTransport | null;
+  sourceClient: ComputerBackend | null;
   sourceKey: string | null;
   sourceTransition: Promise<void>;
   stopping: boolean;
   done: Promise<void> | null;
 };
 
-export type NativeComputerDriverOptions = {
+export type ComputerDriverOptions = {
   computerSessionId: string;
   controllerGeneration: string;
-  client: ComputerNativeTransport;
-  clientFactory?: (() => Promise<ComputerNativeTransport>) | undefined;
+  client: ComputerBackend;
+  clientFactory?: (() => Promise<ComputerBackend>) | undefined;
   now?: () => Date;
 };
 
-/** Provider-neutral Computer driver over one exact native-helper incarnation. */
-export class NativeComputerDriver implements ComputerInteractionDriver {
+/** Shared controller/viewer adapter over one placement-local desktop backend. */
+export class ComputerDriver implements ComputerInteractionDriver {
   readonly platform: "linux" | "macos" | "windows";
   readonly adapterId: string;
   readonly capabilities: ComputerSessionCapabilities;
   private readonly computerSessionId: string;
   private readonly controllerGeneration: string;
-  private client: ComputerNativeTransport;
-  private readonly clientFactory: (() => Promise<ComputerNativeTransport>) | undefined;
-  private recovery: Promise<ComputerNativeTransport> | null = null;
+  private client: ComputerBackend;
+  private readonly clientFactory: (() => Promise<ComputerBackend>) | undefined;
+  private recovery: Promise<ComputerBackend> | null = null;
   private readonly now: () => Date;
   private readonly frameStreams = new Map<string, TargetFrameGroup>();
   private closed = false;
 
-  constructor(options: NativeComputerDriverOptions) {
+  constructor(options: ComputerDriverOptions) {
     this.computerSessionId = options.computerSessionId;
     this.controllerGeneration = options.controllerGeneration;
     this.client = options.client;
     this.clientFactory = options.clientFactory;
     this.now = options.now ?? (() => new Date());
-    this.platform = options.client.handshake.platform;
-    this.adapterId = `opengeni.native.${this.platform}.v1`;
-    this.capabilities = options.client.handshake.capabilities;
+    this.platform = options.client.identity.platform;
+    this.adapterId = options.client.identity.adapterId;
+    this.capabilities = options.client.initialCapabilities;
   }
 
   async listTargets(): Promise<ComputerTargetValue[]> {
@@ -156,7 +156,7 @@ export class NativeComputerDriver implements ComputerInteractionDriver {
       const observation = await (await this.activeClient()).dispatch(nativeCommand(command));
       return observation === null ? null : this.projectObservation(observation);
     } catch (error) {
-      if (error instanceof NativeComputerError) {
+      if (error instanceof ComputerBackendError) {
         const code = interactionErrorCode(error.code);
         if (!error.dispatched) {
           throw new InteractionDefiniteDriverError(code, error.message, error.retryable);
@@ -307,7 +307,7 @@ export class NativeComputerDriver implements ComputerInteractionDriver {
     await this.client.close();
   }
 
-  private projectTarget(target: NativeComputerTarget): ComputerTargetValue {
+  private projectTarget(target: ComputerBackendTarget): ComputerTargetValue {
     return ComputerTarget.parse({
       ...target,
       computerSessionId: this.computerSessionId,
@@ -315,7 +315,7 @@ export class NativeComputerDriver implements ComputerInteractionDriver {
     });
   }
 
-  private projectObservation(observation: NativeComputerObservation): ComputerObservationValue {
+  private projectObservation(observation: ComputerBackendObservation): ComputerObservationValue {
     return ComputerObservation.parse({
       protocolVersion: 1,
       observationId: observation.observationId,
@@ -337,7 +337,7 @@ export class NativeComputerDriver implements ComputerInteractionDriver {
     group: TargetFrameGroup,
     profile: TargetFrameProfile,
   ): Promise<void> {
-    const captureOptions: NativeComputerCaptureOptions = {
+    const captureOptions: ComputerBackendCaptureOptions = {
       format: profile.options.format,
       quality: profile.options.quality,
       maxWidth: profile.options.maxWidth,
@@ -410,7 +410,7 @@ export class NativeComputerDriver implements ComputerInteractionDriver {
   private async ensureFrameSource(
     targetId: string,
     group: TargetFrameGroup,
-  ): Promise<ComputerNativeTransport> {
+  ): Promise<ComputerBackend> {
     const transition = group.sourceTransition
       .catch(() => undefined)
       .then(async () => {
@@ -421,7 +421,7 @@ export class NativeComputerDriver implements ComputerInteractionDriver {
         );
         if (activeProfiles.length === 0) throw new Error("computer frame source has no viewers");
         const client = await this.activeClient();
-        const sourceOptions: NativeComputerCaptureOptions = {
+        const sourceOptions: ComputerBackendCaptureOptions = {
           format: "png",
           quality: 100,
           maxWidth: Math.max(...activeProfiles.map((profile) => profile.options.maxWidth)),
@@ -444,7 +444,7 @@ export class NativeComputerDriver implements ComputerInteractionDriver {
     return group.sourceClient;
   }
 
-  private async stopCapturesOnClient(client: ComputerNativeTransport): Promise<void> {
+  private async stopCapturesOnClient(client: ComputerBackend): Promise<void> {
     await Promise.allSettled(
       [...this.frameStreams.entries()].map(async ([targetId, group]) => {
         await group.sourceTransition.catch(() => undefined);
@@ -479,7 +479,7 @@ export class NativeComputerDriver implements ComputerInteractionDriver {
       });
   }
 
-  private projectFrame(frame: NativeComputerFrame, sequence: number): ComputerImageFrame {
+  private projectFrame(frame: ComputerBackendFrame, sequence: number): ComputerImageFrame {
     return {
       frameId: frame.frameId,
       computerSessionId: this.computerSessionId,
@@ -500,14 +500,14 @@ export class NativeComputerDriver implements ComputerInteractionDriver {
       throw new InteractionControllerError("controller_lost", "computer driver closed");
   }
 
-  private async activeClient(): Promise<ComputerNativeTransport> {
+  private async activeClient(): Promise<ComputerBackend> {
     if (this.recovery) await this.recovery;
     this.assertOpen();
     return this.client;
   }
 
   private async readWithRecovery<T>(
-    operation: (client: ComputerNativeTransport) => Promise<T>,
+    operation: (client: ComputerBackend) => Promise<T>,
   ): Promise<T> {
     const client = await this.activeClient();
     try {
@@ -516,15 +516,13 @@ export class NativeComputerDriver implements ComputerInteractionDriver {
       // Typed adapter failures describe the OS operation and leave the helper
       // healthy. Everything else is a helper transport/protocol failure. Reads
       // are side-effect-free, so replace the poisoned process once and retry.
-      if (error instanceof NativeComputerError) throw error;
+      if (error instanceof ComputerBackendError || !this.clientFactory) throw error;
       const replacement = await this.recoverClient(client);
       return await operation(replacement);
     }
   }
 
-  private async recoverClient(
-    failedClient: ComputerNativeTransport,
-  ): Promise<ComputerNativeTransport> {
+  private async recoverClient(failedClient: ComputerBackend): Promise<ComputerBackend> {
     if (this.client !== failedClient) return await this.activeClient();
     if (this.recovery) return await this.recovery;
     if (!this.clientFactory) {
@@ -537,8 +535,8 @@ export class NativeComputerDriver implements ComputerInteractionDriver {
       await failedClient.close().catch(() => undefined);
       const replacement = await this.clientFactory!();
       if (
-        replacement.handshake.platform !== this.platform ||
-        replacement.handshake.protocolVersion !== failedClient.handshake.protocolVersion
+        replacement.identity.platform !== this.platform ||
+        replacement.identity.adapterId !== failedClient.identity.adapterId
       ) {
         await replacement.close().catch(() => undefined);
         throw new Error("replacement native computer helper is incompatible");
@@ -560,14 +558,14 @@ export class NativeComputerDriver implements ComputerInteractionDriver {
 }
 
 function recoverableNativeFailure(error: unknown): boolean {
-  if (!(error instanceof NativeComputerError)) return false;
+  if (!(error instanceof ComputerBackendError)) return false;
   return (
     error.retryable &&
     (error.code === "timeout" || error.code === "driver_failed" || error.code === "unavailable")
   );
 }
 
-function nativeCommand(command: ComputerActionCommand): NativeComputerActionCommand {
+function nativeCommand(command: ComputerActionCommand): ComputerBackendActionCommand {
   return {
     targetId: command.targetId,
     expectedTargetGeneration: command.expectedTargetGeneration,
@@ -578,7 +576,7 @@ function nativeCommand(command: ComputerActionCommand): NativeComputerActionComm
 }
 
 function predispatchError(error: unknown): Error {
-  if (!(error instanceof NativeComputerError)) {
+  if (!(error instanceof ComputerBackendError)) {
     return error instanceof Error ? error : new Error(String(error));
   }
   return new InteractionControllerError(
@@ -588,7 +586,7 @@ function predispatchError(error: unknown): Error {
   );
 }
 
-function interactionErrorCode(code: NativeComputerError["code"]): InteractionError["code"] {
+function interactionErrorCode(code: ComputerBackendError["code"]): InteractionError["code"] {
   if (code === "unavailable") return "resource_unavailable";
   return code;
 }

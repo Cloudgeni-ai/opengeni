@@ -91,10 +91,9 @@ export const QUIESCENCE_PROOF_SIGNAL_MAX_RETRY_MS = 5_000;
 export const TURN_QUIESCENCE_WATCHDOG_MS = 5 * 60_000;
 export const TURN_FINALIZER_STEP_TIMEOUT_MS = 30_000;
 
-/** A fenced activity must never heartbeat forever while its physical writer
- * drain is stuck. The last-resort worker exit stops every in-process writer;
- * Kubernetes replaces the pod and the workflow's heartbeat-lease reconciler
- * then commits the exact quiescence receipt. */
+/** A fenced activity must never heartbeat forever while physical cleanup is
+ * stuck. The callback requests host-owned containment, which drains peer turns
+ * before applying its final exit policy. A timeout is never quiescence proof. */
 export function armTurnQuiescenceWatchdog(input: {
   enabled: boolean;
   timeoutMs?: number;

@@ -52,6 +52,12 @@ Legacy unpinned selectors retain their existing eligible-account behavior.
 New catalog OAuth/API-key enables explicitly select this mode. Reconnects retain
 an existing selector or exact pin; adding an account never silently converts an
 existing exact installation into a selector.
+Slack's reviewed Web API bridge retains the official MCP catalog/OAuth identity
+and native accepted-account authority. It requires actual reported user scopes,
+normalizes legacy comma-packed grants, and uses scope-filtered discovery rather
+than authenticating to Slack's hosted MCP endpoint. The shared database quota and
+bot context limits are described in [Slack](slack-bot.md#unlisted-pilot-and-rollout).
+
 The dedicated Slack account setup enables a previously disabled stock Slack
 capability with this selector after successful account connection. Bot setup and
 reconnects of already-enabled capabilities do not rewrite their bindings.

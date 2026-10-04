@@ -9,6 +9,7 @@ import {
   type ClaudeUsageState,
 } from "@/components/models/claude-usage";
 import { trackModelConnection } from "@/lib/analytics-observer";
+import { beginModelConnectJourney } from "@/lib/integration-connect-analytics";
 
 import type { ConnectionMetadata, WorkspaceGatewayCustomModel } from "@opengeni/sdk";
 import { WORKSPACE_GATEWAY_CUSTOM_MODEL_UPSTREAM_ID_MAX_LENGTH } from "@opengeni/contracts";
@@ -185,7 +186,7 @@ const OPENROUTER_CONFIG: ProviderConnectionConfig = {
   summary: "Use models through your OpenRouter account, billed to OpenRouter.",
   keyHelp: "Create one on openrouter.ai under Keys.",
   billingDescription:
-    "Use models through this workspace's OpenRouter account. The workspace's OpenRouter account is billed directly. This is separate from deployment-provided OpenRouter models, including free models and models funded by deployment credits.",
+    "Use models through this workspace's OpenRouter account. The workspace's OpenRouter account is billed directly. This is separate from any OpenRouter models this deployment provides.",
   connectionManagerDescription:
     "Members with connection-management access manage this workspace OpenRouter connection.",
   keyAriaLabel: "OpenRouter API key",
@@ -269,6 +270,8 @@ export type ProviderConnectionProps = {
   canManageCustomModels: boolean;
   onConnectionChange?: (() => void) | undefined;
   enabled?: boolean;
+  /** Reuse model management with an independently managed subscription pool. */
+  catalogConnection?: { connected: boolean; loaded: boolean; error: Error | null };
 };
 
 export const PROVIDER_CONNECTION_CONFIGS = {
@@ -374,6 +377,7 @@ export function useProviderConnection(
   const client = props.client;
   const config = props.config;
   const enabled = props.enabled !== false;
+  const hasCatalogConnection = Boolean(props.catalogConnection);
   const [connections, setConnections] = useState<ConnectionMetadata[]>([]);
   const [readOnlyConnected, setReadOnlyConnected] = useState(false);
   const [customModels, setCustomModels] = useState<WorkspaceProviderCustomModel[]>([]);
@@ -419,7 +423,9 @@ export function useProviderConnection(
       null
     );
   }, [config, connections]);
-  const connected = props.canManageConnection ? connection?.status === "active" : readOnlyConnected;
+  const connected =
+    props.catalogConnection?.connected ??
+    (props.canManageConnection ? connection?.status === "active" : readOnlyConnected);
 
   const modelSlugValid =
     modelSlug.length <= WORKSPACE_GATEWAY_CUSTOM_MODEL_UPSTREAM_ID_MAX_LENGTH &&
@@ -459,7 +465,7 @@ export function useProviderConnection(
   }, [client, config, props.workspaceId, enabled]);
 
   const refreshConnection = useCallback(async (): Promise<ConnectionMetadata[] | null> => {
-    if (!enabled) return null;
+    if (!enabled || hasCatalogConnection) return null;
     const requestGeneration = ++connectionRequestGenerationRef.current;
     try {
       if (props.canManageConnection) {
@@ -496,13 +502,20 @@ export function useProviderConnection(
       setLoaded(true);
       return null;
     }
-  }, [client, config.readinessProvider, props.canManageConnection, props.workspaceId, enabled]);
+  }, [
+    client,
+    config.readinessProvider,
+    props.canManageConnection,
+    props.workspaceId,
+    enabled,
+    hasCatalogConnection,
+  ]);
 
   const claudeUsage = useClaudeUsage({
     client,
     scope: "workspace",
     scopeId: props.workspaceId,
-    enabled: enabled && config.provider === "claude_subscription",
+    enabled: enabled && !props.catalogConnection && config.provider === "claude_subscription",
     connected: Boolean(connected),
     credentialVersion: props.canManageConnection ? connection?.version : undefined,
     credentialId: props.canManageConnection ? connection?.id : undefined,
@@ -542,7 +555,8 @@ export function useProviderConnection(
   /** Connects or replaces the key. Resolves true once it's saved; toasts on failure. */
   async function saveKey(apiKey: string): Promise<boolean> {
     const token = apiKey.trim();
-    if (!token || !enabled || !props.canManageConnection || busy) return false;
+    if (!token || !enabled || props.catalogConnection || !props.canManageConnection || busy)
+      return false;
     const value = token;
     const recordOutcome =
       config.id === "openrouter" || config.id === "vercel-ai-gateway"
@@ -550,7 +564,7 @@ export function useProviderConnection(
             config.id === "openrouter" ? "openrouter" : "ai-gateway",
             props.workspaceId,
           )
-        : () => {};
+        : beginModelConnectJourney(config.id, "api_key");
     const operationId = crypto.randomUUID();
     connectionRequestGenerationRef.current += 1;
     setBusy(true);
@@ -622,7 +636,7 @@ export function useProviderConnection(
 
   /** Resolves true once no active key remains; toasts either way. */
   async function disconnect(): Promise<boolean> {
-    if (!enabled || !props.canManageConnection || busy) return false;
+    if (!enabled || props.catalogConnection || !props.canManageConnection || busy) return false;
     if (!connection) return false;
     connectionRequestGenerationRef.current += 1;
     setBusy(true);
@@ -809,7 +823,9 @@ export function useProviderConnection(
     }
   }
 
-  const settled = loaded && customModelsLoaded;
+  const connectionLoaded = props.catalogConnection?.loaded ?? loaded;
+  const connectionError = props.catalogConnection?.error ?? error;
+  const settled = connectionLoaded && customModelsLoaded;
   // Hide an empty provider only when the caller can manage neither the
   // credential nor custom models. Read-only members still see an existing
   // connection or catalog, and either authority can reach its own controls.
@@ -828,16 +844,16 @@ export function useProviderConnection(
       kind: config.provider === "vercel" ? "vercel_gateway" : config.provider,
       connectionId: "current",
     },
-    canManageConnection: enabled && props.canManageConnection,
+    canManageConnection: enabled && !props.catalogConnection && props.canManageConnection,
     canManageCustomModels: enabled && props.canManageCustomModels,
     connection,
     connected,
-    loaded,
+    loaded: connectionLoaded,
     customModelsLoaded,
     claudeUsage: config.provider === "claude_subscription" ? claudeUsage : undefined,
     settled: !enabled || settled,
-    hidden: !enabled || hidden,
-    error,
+    hidden: !enabled || Boolean(props.catalogConnection) || hidden,
+    error: connectionError,
     customModelsError,
     customModels,
     busy,
@@ -965,9 +981,55 @@ export function ProviderConnectionRow({
    The provider's page.
    -------------------------------------------------------------------------- */
 
-function CustomModels({ state }: { state: ProviderConnection }) {
+export type ReadOnlyProviderCatalog = {
+  models: readonly { id: string; label: string }[];
+  loading: boolean;
+  error: string | null;
+};
+function ProviderCatalogModels({
+  state,
+  catalog,
+}: {
+  state: ProviderConnection;
+  catalog: ReadOnlyProviderCatalog;
+}) {
+  return (
+    <DetailSection
+      title={state.config.customModelsHeading}
+      description="Models made available by the organization. Ask an owner or admin to change them."
+    >
+      {catalog.loading ? (
+        <p className="text-sm text-fg-muted">Loading models…</p>
+      ) : catalog.error ? (
+        <p role="alert" className="text-sm text-danger">
+          Couldn’t load models.
+        </p>
+      ) : catalog.models.length ? (
+        <SettingRowGroup>
+          {catalog.models.map((model) => (
+            <SettingRow
+              key={model.id}
+              label={model.label}
+              description="Uses the connected Claude subscription"
+            />
+          ))}
+        </SettingRowGroup>
+      ) : (
+        <p className="text-sm text-fg-muted">No models available here.</p>
+      )}
+    </DetailSection>
+  );
+}
+export function ProviderCustomModels({
+  state,
+  readOnlyCatalog,
+}: {
+  state: ProviderConnection;
+  readOnlyCatalog?: ReadOnlyProviderCatalog | undefined;
+}) {
   const { config } = state;
   const modelSlugHelpId = useId();
+  if (readOnlyCatalog) return <ProviderCatalogModels state={state} catalog={readOnlyCatalog} />;
   const isClaude = config.provider === "anthropic" || config.provider === "claude_subscription";
   const readiness = state.error
     ? config.unavailableModelDescription
@@ -1409,7 +1471,7 @@ export function ProviderConnectionPage({
           </DetailSection>
         ) : null}
         {state.claudeUsage && state.connected ? <ClaudeUsage state={state.claudeUsage} /> : null}
-        <CustomModels state={state} />
+        <ProviderCustomModels state={state} />
         {showAccess && onEditAccess ? (
           <DetailSection title="Access">
             <SettingRowGroup className="-my-3">

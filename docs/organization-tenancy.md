@@ -559,6 +559,17 @@ The managed-human API surface is:
   Personal workspaces; and
 - `GET|PATCH /v1/organizations/:organizationId/retention-policy`.
 
+Workspace deletion is a hard delete, not an archive or retirement command.
+Both workspace DELETE routes return `409` when retained audit or other linked
+records prevent deletion; the transaction rolls back and no external schedule
+cleanup runs. Keep that workspace and use the existing key-revocation,
+membership-revocation, and scheduled-task pause/delete operations to remove
+operational access and automation. These separate operations require their
+existing permissions and concurrency preconditions; DELETE does not perform
+them. There is currently no supported workspace archive/retirement endpoint,
+so this containment does not remove the retained workspace from inventory.
+Do not delete audit/history rows or weaken their foreign keys to force cleanup.
+
 The organization overview, organization/shared-workspace metadata, member
 inventory, retention, and organization Codex routes require either a direct
 managed-human cookie session or the exact provenance-stamped single-user local
@@ -872,6 +883,14 @@ No session is created until normal sign-in, no temporary or plaintext password
 exists, and the user has only the inviting organization, their canonical
 Personal workspace, and the invitation's selected shared-workspace grants.
 
+This invitation-bound setup is independent of public sign-up. When an operator
+pauses new account sign-ups (the 0585 runtime switch or the
+`OPENGENI_MANAGED_AUTH_NEW_SIGNUPS_ENABLED` ceiling, see
+[New account sign-up switch](deployment.md#new-account-sign-up-switch-0585)),
+ordinary email and implicit social sign-up are refused, but an invited person
+can still create their account here and an already-registered invitee can
+still sign in and accept.
+
 0348 is a drained maintenance protocol cutover, not a rolling migration. Stop
 every old API, control worker, and turn worker; provide the exact old/new
 application database role list through
@@ -965,22 +984,35 @@ remain visible but disabled with the instruction to assign another active owner
 first. The setup screen renders the frozen invitation preview and states that
 no Personal workspace is shared.
 
-Organization usage (`GET /v1/billing/usage-summary`, Organization settings >
-Billing & usage) is the one place billing readers see Personal workspaces, and
-only as amounts. Period totals always counted Personal usage; migration 0543
-adds `personalWorkspaces`: one row per member whose Personal workspace had
-visible usage in the period, keyed by that member's organization membership
-id, carrying the same metric totals as a shared workspace row. The rows never
-carry the Personal workspace id, its name, a session, or any content, zero-use
-Personal workspaces are absent, and the list is the 50 that spent the most
-with `personalWorkspaceCount` saying how many had usage. The same actor-visible
-session rule as the totals applies, so another member's Only me chats do not
-count in a reader's view. The console names each row from the People roster the
-reader can already see, and a Personal row never links anywhere: seeing its
-cost grants no access to the workspace, its sessions or its Insights. The
-aggregate reads the canonical Personal pointers through the membership
-lifecycle read scope inside the existing SECURITY DEFINER function and restores
-the caller's scope before it reads any usage fact.
+Organization usage (`GET /v1/billing/usage-summary` and the Insights usage
+query, Organization settings > Insights) exposes Personal workspaces only as
+amounts. Organization and
+workspace totals count every usage ledger row in the period, including another
+member's Only me/private chats and retained usage whose session is missing or
+deleted; billing debits are not rewritten and missing owners are not invented.
+Detail/sample lists remain actor-visible: totals never grant access to unseen
+content, titles, session/root ids, or drilldown links. Shared-workspace
+per-person private amounts appear only in `privateChats`. Organization summary
+rows contain only `workspaceId`, nullable `membershipId`/`name`, and
+`eventType`/`unit`/`quantity` totals for other members' Only me chats, capped at
+200 person/workspace rows with the largest `model.cost`; `privateChatsTruncated` defaults to
+false. Workspace Insights private rows identify the invisible session owner by
+opaque `ownerKey`, nullable `name`, and `you`, with calls, tokens, credit USD,
+estimated provider USD, and known-provider-cost call counts; they are capped at
+200, ordered by tokens descending, obey the same provider/model filters, and
+are empty for root/session scopes. Both `privateChats` lists default to `[]`
+for older replicas. Existing `personalWorkspaces` amounts remain one row per
+member whose Personal workspace had usage, keyed by organization membership
+id with the same metric totals as shared workspace rows: no Personal workspace
+id/name, session identity, content, or link. Zero-use rows are absent; the list
+contains the 50 largest spenders and `personalWorkspaceCount` counts all with
+usage. Names come from the already-visible People roster. Organization model
+usage also returns top-level `payers` totals from all facts, uncapped and
+independent of the 50-model cap, never per-workspace payer rows. Payer totals
+carry the model-usage metrics without `billingPath`: credits map to
+`opengeni_credits`, external `codex-subscription`/`supergrok-subscription` to
+`subscription`, and other external calls to `own_key`. The additive payer list
+defaults to `[]`; unknown provider cost remains unknown, not zero.
 
 Migration `0331_managed_organization_creation.sql` introduced the
 managed-cookie-only `POST /v1/organizations` factory with a provisional initial
@@ -1110,6 +1142,32 @@ provisionable through the organization-key integration flow. An external
 backend must not fall back to `/v1/access/me`'s personal/default workspace when
 a tenant mapping is absent. Organization API keys receive no Personal-workspace
 authority through organization administration, key scope, or workspace ensure.
+
+### Service accounts
+
+Every organization API key belongs to a **service account**: an organization
+identity with no person behind it (`/v1/organizations/:id/service-accounts`,
+SDK `listOrganizationServiceAccounts`, `createOrganizationServiceAccount`,
+`updateOrganizationServiceAccount`, `deleteOrganizationServiceAccount`).
+Whoever may manage the organization's keys (`api_keys:manage`) manages service
+accounts; only an organization administrator can make one an admin.
+
+- Role is `admin` or `member`, never owner. A member's keys never hold
+  `account:admin`, `members:manage`, `billing:manage`, `api_keys:manage` or
+  `usage_allowances:manage`; creating or editing such a key is refused.
+  Making a service account a member narrows its live keys in the same
+  transaction (each becomes an explicit key without those permissions; a
+  legacy `workspace:admin` wildcard never turns into organization-level
+  permissions it didn't literally hold). The cap lives in the stored key
+  permissions, so every TypeScript and SQL check that reads a key sees it.
+- A key created without `serviceAccountId` gets its own service account named
+  after it (admin only when the key needs administrator permissions). A key
+  creating a key (rotation) keeps it with the same service account.
+- Deleting a service account revokes every key it holds at once.
+- Migration `0603_organization_service_accounts.sql` is a drained maintenance
+  cutover (same procedure as 0600). It gives every existing organization key
+  its own admin service account named after the key, so no key loses access;
+  keys that were already revoked get a deleted one.
 
 The external backend also remains the source of truth for product Skills. It
 stores and versions them outside OpenGeni and passes the selected definitions

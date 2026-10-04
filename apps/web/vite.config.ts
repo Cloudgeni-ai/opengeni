@@ -88,13 +88,14 @@ export default defineConfig({
               priority: 20,
             },
             {
-              // Zod is a dependency-free runtime shared by the contracts schemas
-              // and app modules. Keep it in its own chunk: entry-aware merging
-              // can otherwise co-locate app code that reads contracts constants
-              // at module scope with Zod, creating a chunk cycle in which that
-              // code evaluates before the contracts chunk has initialized.
+              // Zod, Permission and the pure Skill receipt schemas initialize
+              // before the contracts barrel and organization-access read them.
+              // Keep these leaves outside shared app chunks that import their
+              // consumers back; otherwise eager Permission.options or
+              // SkillWriteReceipt reads can run before initialization.
+              // Co-locating them avoids an extra initial graph request too.
               name: "zod-runtime",
-              test: /(?:node_modules|\.bun)[\\/]zod(?:@|[\\/])/,
+              test: /(?:(?:node_modules|\.bun)[\\/]zod(?:@|[\\/])|packages[\\/]contracts[\\/]src[\\/](?:permissions|skills)\.ts$)/,
               includeDependenciesRecursively: false,
               priority: 22,
             },
@@ -210,6 +211,12 @@ export default defineConfig({
               priority: 5,
             },
             {
+              // Isolate list title helpers so older-server fallbacks can load
+              // them without promoting the shared chat route graph to startup.
+              name: "session-list-titles",
+              test: /packages[\\/]contracts[\\/]src[\\/](?:session-titles|session-list-entries)\.ts$/,
+            },
+            {
               // The SDK's error and wire-type runtime, and the attribution and
               // analytics helpers beside them, load at startup for every route.
               // Entry-aware splitting otherwise cuts this one unit in two as
@@ -252,10 +259,21 @@ export default defineConfig({
               // CalendarClock is also a session header/rail glyph. Keep it
               // here so management revision UI cannot share its route chunk
               // and make management controls static session dependencies.
+              // The mobile menu also belongs to sessions. Keep its glyph here
+              // so it cannot pull lazy settings glyphs into the shared graph.
+              // Plus is already rendered by the composer. Coalesce its tiny
+              // shared chunk here to avoid another direct-session request.
               // The usage-limit gauge and allowance wording are drawn by the
               // conversation's refusal row and by the lazy usage pages.
+              // The composer's voice-input switch shares the SDK transcription
+              // helper with the lazy settings page; keep it here so the
+              // settings merge cannot fold it in beside payment and identity
+              // glyphs and make that chunk a direct-session dependency.
+              // List sort arrows are shared by the direct session graph and
+              // the lazy conversation cards' repository list; keep them here
+              // instead of in their own tiny direct-session chunk.
               name: "session-shared-primitives",
-              test: /(?:packages[\\/]contracts[\\/]src[\\/](?:session-titles|session-final-reply)\.ts|apps[\\/]web[\\/]src[\\/]lib[\\/](?:format|machine-selectability)\.ts|apps[\\/]web[\\/]src[\\/]components[\\/]personal-workspace-badge\.tsx|packages[\\/]react[\\/]src[\\/](?:hooks[\\/]use-machines|workstream-control-event)\.ts|lucide-react[\\/]dist[\\/]esm[\\/]icons[\\/](?:calendar-clock|chevron-up|gauge|git-branch|message-square-text|rotate-ccw|rotate-cw|save|server)\.mjs)$/,
+              test: /(?:packages[\\/]contracts[\\/]src[\\/](?:session-titles|session-final-reply)\.ts|packages[\\/]sdk[\\/]src[\\/]transcription\.ts|apps[\\/]web[\\/]src[\\/]lib[\\/](?:format|machine-selectability)\.ts|apps[\\/]web[\\/]src[\\/]components[\\/]personal-workspace-badge\.tsx|packages[\\/]react[\\/]src[\\/](?:hooks[\\/]use-machines|workstream-control-event)\.ts|lucide-react[\\/]dist[\\/]esm[\\/]icons[\\/](?:arrow-down|arrow-up|calendar-clock|chevron-up|gauge|git-branch|menu|message-square-text|plus|rotate-ccw|rotate-cw|save|server)\.mjs)$/,
               includeDependenciesRecursively: false,
               priority: 16,
             },
@@ -270,6 +288,17 @@ export default defineConfig({
               priority: 17,
             },
             {
+              // Payment and organization-identity glyphs are lazy-only, but
+              // CreditCard also appears in new-chat and credit prompts. Keep
+              // these leaves separate from settings implementations so those
+              // consumers do not load management pages. Explicit grouping also
+              // prevents entry-aware merging with eager shared session glyphs.
+              name: "payment-identity-glyphs",
+              test: /lucide-react[\\/]dist[\\/]esm[\\/]icons[\\/](?:credit-card|fingerprint-pattern)\.mjs$/,
+              includeDependenciesRecursively: false,
+              priority: 20,
+            },
+            {
               // Keep settings-only implementations in one explicit lazy unit.
               // Recursive consumer-aware grouping can otherwise pair one
               // shared primitive with these routes and make the complete
@@ -280,7 +309,7 @@ export default defineConfig({
               // lands in a chunk the workspace route imports and pulls this
               // whole surface into a sessions load.
               name: "workspace-management-surfaces",
-              test: /apps[\\/]web[\\/]src[\\/](?:components[\\/](?:ai-gateway-connection|codex-connection|default-session-model|model-access-policy|permission-picker|supergrok-connection|supergrok-device-poll|transcription-settings|video-generation-settings|workspace-capability-defaults|workspace-runtime-control)\.(?:ts|tsx)|components[\\/]settings[\\/](?:(?:workspace-settings-shell|settings-sidebar|settings-rail|default-sandbox-environment-row)\.tsx|organization-settings-pages\.ts)|routes[\\/](?:workspace-learning-loader\.ts|workspace-members-section\.tsx|workspace-settings\.tsx))$/,
+              test: /apps[\\/]web[\\/]src[\\/](?:components[\\/](?:ai-gateway-connection|codex-connection|default-session-model|model-access-policy|permission-picker|supergrok-connection|supergrok-device-poll|transcription-settings|video-generation-settings|workspace-capability-defaults|workspace-developer-settings|workspace-runtime-control)\.(?:ts|tsx)|components[\\/]settings[\\/](?:(?:workspace-settings-shell|settings-sidebar|settings-rail|default-sandbox-environment-row)\.tsx|organization-settings-pages\.ts)|routes[\\/](?:workspace-learning-loader\.ts|workspace-members-section\.tsx|workspace-settings\.tsx))$/,
               includeDependenciesRecursively: false,
               priority: 20,
             },
@@ -331,8 +360,12 @@ export default defineConfig({
               // Organization API-key setup is dynamically imported by Developer
               // settings. Pin its implementation here too so shared dependencies
               // cannot merge it into the direct-session graph.
+              // The shared organization access form eagerly combines workspace
+              // permission groups. Keep its helper and fields with those groups
+              // so the lazy agent consent route cannot read uninitialized data
+              // across a settings-pages/organization-access-fields chunk cycle.
               name: "settings-pages",
-              test: /apps[\\/]web[\\/]src[\\/](?:components[\\/](?:connection-access-settings|organization-api-keys-section|organization-codex-subscriptions|organization-model-provider-connection|models[\\/][\w-]+|settings[\\/](?:agent-activity|default-sandbox-environment-row|row-select|settings-frame))\.tsx|routes[\\/](?:workspace-api-keys|workspace-managed-access)\.tsx|lib[\\/]api-key-(?:presets|status)\.ts)$/,
+              test: /apps[\\/]web[\\/]src[\\/](?:components[\\/](?:connection-access-settings|organization-api-keys-section|organization-codex-subscriptions|organization-model-provider-connection|organization-access[\\/]organization-access-fields|models[\\/][\w-]+|settings[\\/](?:agent-activity|default-sandbox-environment-row|row-select|settings-frame))\.tsx|routes[\\/](?:workspace-api-keys|workspace-managed-access)\.tsx|lib[\\/](?:api-key-(?:presets|status)|organization-access)\.ts)$/,
               includeDependenciesRecursively: false,
               priority: 20,
             },
@@ -424,6 +457,22 @@ export default defineConfig({
               test: /packages[\\/]contracts[\\/]src[\\/](?:document-artifact-(?:commands|query)|presentation-artifact-(?:commands|query)|spreadsheet-artifact-(?:commands|date|query)|editable-artifact-(?:binary|causal-frontier|codec-registry|committed-transaction|live|serialized-commit|versions)|editable-artifacts)\.ts$/,
               includeDependenciesRecursively: false,
               priority: 5,
+            },
+            {
+              // The provider logos and connect list are shared by the Models
+              // pages and the post-signup model step. Pin them apart from
+              // settings-pages so onboarding never loads the settings surface.
+              name: "provider-connect-list",
+              test: /apps[\\/]web[\\/]src[\\/]components[\\/]models[\\/]provider-(?:mark|connect-list)\.tsx$/,
+              includeDependenciesRecursively: false,
+              priority: 21,
+            },
+            {
+              // Keep customer model setup in its own lazy feature boundary.
+              name: "customer-model-setup",
+              test: /apps[\\/]web[\\/]src[\\/]components[\\/]direct-model-provider-connections?\.tsx$/,
+              includeDependenciesRecursively: false,
+              priority: 20,
             },
             {
               // Skills administration is lazy workspace governance. Pinning

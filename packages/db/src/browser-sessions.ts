@@ -1443,6 +1443,7 @@ export async function failBrowserSessionOperation(
     operationId: string;
     browserSessionId: string;
     state?: "failed" | "outcome_unknown";
+    onlyIfPreparedCreate?: boolean;
     error: InteractionErrorValue;
   },
 ): Promise<BrowserSessionMutationResponseValue> {
@@ -1459,7 +1460,11 @@ export async function failBrowserSessionOperation(
         if (
           operation!.state === "completed" ||
           operation!.state === "failed" ||
-          operation!.state === "outcome_unknown"
+          operation!.state === "outcome_unknown" ||
+          (input.onlyIfPreparedCreate &&
+            (operation!.kind !== "create" ||
+              operation!.state !== "prepared" ||
+              operation!.controllerGeneration !== null))
         ) {
           return await replayedMutation(tx, input.workspaceId, operation!, {
             kind: operation!.kind,

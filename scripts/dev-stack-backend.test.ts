@@ -26,7 +26,8 @@ async function resolveBackend(
   await writeFile(
     docker,
     `#!/bin/sh
-[ "\${1:-}" = info ] || exit 99
+[ "\${1:-}" = version ] || exit 99
+[ "\${2:-}" = --format ] || exit 99
 ${dockerDelaySeconds ? `sleep ${dockerDelaySeconds}` : ""}
 exit ${dockerExitCode}
 `,

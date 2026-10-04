@@ -63,7 +63,7 @@ const DEFAULT_PRESENTATION_TEXT_STYLE: PresentationArtifactTextStyle = Object.fr
 
 export type EditablePresentationArtifactSurfaceProps = Omit<
   PresentationProjectionArtifactSurfaceProps,
-  "projection" | "commit" | "readOnly" | "busy" | "subtitle"
+  "projection" | "commit" | "readOnly" | "busy" | "subtitle" | "authoringBlockedReason"
 > & {
   session: EditableArtifactSession;
   subtitle?: ReactNode | undefined;
@@ -143,6 +143,7 @@ export function EditablePresentationArtifactSurface({
       const composed = state.composed;
       if (!composed) throw new Error("Presentation projection is not ready");
       if (!writable) throw new Error("This presentation is read only");
+      if (view.authoringBlockedReason) throw new Error("An earlier change must settle first");
       if (
         commit.revision !== undefined &&
         String(commit.revision) !== String(composed.projection.revision)
@@ -262,7 +263,15 @@ export function EditablePresentationArtifactSurface({
       notifyPresentationCommit(onCommit, onCommandError, commit);
       refresh();
     },
-    [onCommandError, onCommit, refresh, session, state.composed, writable],
+    [
+      onCommandError,
+      onCommit,
+      refresh,
+      session,
+      state.composed,
+      view.authoringBlockedReason,
+      writable,
+    ],
   );
 
   const projection = state.composed?.projection ?? null;
@@ -280,6 +289,7 @@ export function EditablePresentationArtifactSurface({
       projection={projection}
       commit={writable ? applyCommit : undefined}
       readOnly={!writable}
+      authoringBlockedReason={view.authoringBlockedReason}
       busy={state.loading}
       onCommandError={onCommandError}
     />

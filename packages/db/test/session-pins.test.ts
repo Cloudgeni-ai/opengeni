@@ -11,6 +11,7 @@ import {
   getWorkspaceGrant,
   grantWorkspaceAccess,
   listSessionsForSubject,
+  listSessionEntriesForSubject,
   listSessionDiscoverySummaries,
   removeWorkspaceMember,
   reapExpiredSessionListSnapshots,
@@ -185,6 +186,252 @@ afterAll(async () => {
 }, 180_000);
 
 describe("session pins (real PostgreSQL + FORCE RLS)", () => {
+  test("complete totals and attention discovery survive small pages, pins and target grants", async () => {
+    if (!available) return;
+    const workspace = await freshWorkspace();
+    const subjectId = "user:complete-attention";
+    await grantMember(workspace, subjectId);
+    const channel = await createChannel(db, { ...workspace, name: "Example project" });
+    const root = await session({ ...workspace, message: "older root", channelId: channel.id });
+    const child = await session({
+      ...workspace,
+      message: "pinned child",
+      parentSessionId: root.id,
+    });
+    const grandchild = await session({
+      ...workspace,
+      message: "attention grandchild",
+      parentSessionId: child.id,
+    });
+    const failedRoot = await session({ ...workspace, message: "failed root" });
+    const failedChild = await session({
+      ...workspace,
+      message: "failed child",
+      parentSessionId: failedRoot.id,
+    });
+    for (let i = 0; i < 6; i++) await session({ ...workspace, message: `new idle ${i}` });
+    await executeSessionActivity(
+      workspace.workspaceId,
+      sql`
+      update sessions set status = case when id = ${grandchild.id} then 'requires_action' else 'failed' end
+      where id in (${grandchild.id}, ${failedRoot.id}, ${failedChild.id})`,
+    );
+    await setSessionPin(db, {
+      workspaceId: workspace.workspaceId,
+      subjectId,
+      sessionId: child.id,
+      pinned: true,
+    });
+    const options = {
+      subjectId,
+      parentSessionId: null,
+      includePinned: false,
+      includeTotals: true,
+      limit: 1,
+    };
+    const page = await listSessionEntriesForSubject(db, workspace.workspaceId, options);
+    expect(page.sessions).toHaveLength(1);
+    expect(page.totals?.needsYouCount).toBe(2);
+    expect(page.totals?.groups.find((group) => group.channelId === channel.id)).toMatchObject({
+      total: 1,
+      attention: 0,
+    });
+    const attention = await listSessionEntriesForSubject(db, workspace.workspaceId, {
+      ...options,
+      needsYouOnly: true,
+    });
+    expect(attention.needsYouOnly).toBe(true);
+    const next = await listSessionEntriesForSubject(db, workspace.workspaceId, {
+      ...options,
+      needsYouOnly: true,
+      cursor: decodeSessionListCursor(attention.nextCursor!)!,
+    });
+    expect(new Set([...attention.sessions, ...next.sessions].map((row) => row.id))).toEqual(
+      new Set([root.id, failedRoot.id]),
+    );
+    await expect(
+      listSessionEntriesForSubject(db, workspace.workspaceId, {
+        ...options,
+        cursor: decodeSessionListCursor(attention.nextCursor!)!,
+      }),
+    ).rejects.toBeInstanceOf(SessionListCursorError);
+    const target = await listSessionEntriesForSubject(db, workspace.workspaceId, {
+      ...options,
+      authorizationScope: { kind: "scoped", rootSessionIds: [], sessionIds: [root.id] },
+    });
+    expect(target.totals?.needsYouCount).toBe(0);
+    expect(target.totals?.groups[0]).toMatchObject({ total: 1, attention: 0 });
+    expect(
+      (
+        await listSessionEntriesForSubject(db, workspace.workspaceId, {
+          ...options,
+          needsYouOnly: true,
+          authorizationScope: { kind: "scoped", rootSessionIds: [], sessionIds: [root.id] },
+        })
+      ).sessions,
+    ).toHaveLength(0);
+    await setSessionPin(db, {
+      workspaceId: workspace.workspaceId,
+      subjectId,
+      sessionId: failedRoot.id,
+      pinned: true,
+    });
+    const pinned = await listSessionEntriesForSubject(db, workspace.workspaceId, options);
+    expect(pinned.totals?.needsYouCount).toBe(2);
+    expect(pinned.totals?.groups.reduce((n, group) => n + group.total, 0)).toBe(7);
+    await setSessionArchive(db, {
+      workspaceId: workspace.workspaceId,
+      subjectId,
+      sessionId: root.id,
+      archived: true,
+    });
+    expect(
+      (await listSessionEntriesForSubject(db, workspace.workspaceId, options)).totals
+        ?.needsYouCount,
+    ).toBe(1);
+    await expect(
+      listSessionEntriesForSubject(db, workspace.workspaceId, {
+        ...options,
+        subjectId: "user:unrelated",
+      }),
+    ).rejects.toBeInstanceOf(SessionListAccessError);
+  });
+
+  test("complete metadata exceeds painted-tree caps without hydrating configuration", async () => {
+    if (!available) return;
+    const workspace = await freshWorkspace();
+    const subjectId = "user:large-metadata";
+    await grantMember(workspace, subjectId);
+    const root = await session({ ...workspace, message: "large root" });
+    await executeSessionActivity(
+      workspace.workspaceId,
+      sql`
+      with generated as materialized (
+        select gen_random_uuid() as id, ordinal from generate_series(1, 1536) ordinal
+      )
+      insert into sessions (id, account_id, workspace_id, initial_message, model, reasoning_effort,
+        latency_mode, sandbox_backend, sandbox_group_id, tool_policy, parent_session_id, root_session_id, status)
+      select generated.id, ${workspace.accountId}, ${workspace.workspaceId}, 'generated metadata fixture',
+        'test-model', 'medium', 'standard', 'none', generated.id,
+        jsonb_build_object('mode', 'explicit', 'inheritedFromSessionId', null),
+        case when generated.ordinal = 1024 then (select id from generated where ordinal = 1)
+          when generated.ordinal <= 1024 then ${root.id}::uuid else null end,
+        case when generated.ordinal <= 1024 then ${root.id}::uuid else generated.id end,
+        case when generated.ordinal = 1024 then 'requires_action' else 'idle' end
+      from generated
+    `,
+    );
+    const page = await listSessionEntriesForSubject(db, workspace.workspaceId, {
+      subjectId,
+      parentSessionId: null,
+      includeTotals: true,
+      limit: 1,
+      includePinned: false,
+    });
+    expect(page.sessions).toHaveLength(1);
+    expect(page.totals?.needsYouCount).toBe(1);
+    expect(page.totals?.groups[0]).toMatchObject({ total: 1537, attention: 1 });
+    expect(page.sessions[0]).not.toHaveProperty("initialMessage");
+    const grantedRoots = await listSessionEntriesForSubject(db, workspace.workspaceId, {
+      subjectId,
+      parentSessionId: null,
+      includeTotals: true,
+      authorizationScope: { kind: "scoped", rootSessionIds: [root.id], sessionIds: [] },
+      limit: 1,
+      includePinned: false,
+    });
+    expect(grantedRoots.totals?.groups[0]).toMatchObject({ total: 1025, attention: 1 });
+    expect(grantedRoots.totals?.needsYouCount).toBe(1);
+    const attention = await listSessionEntriesForSubject(db, workspace.workspaceId, {
+      subjectId,
+      parentSessionId: null,
+      needsYouOnly: true,
+      includeTotals: true,
+      includePinned: false,
+    });
+    expect(attention.sessions.map((row) => row.id)).toEqual([root.id]);
+    expect(attention.totals?.groups[0]).toMatchObject({ total: 1025, attention: 1 });
+    expect(attention.sessions[0]?.treeStats?.totalDescendants).toBe(1000);
+    const pins = await listSessionEntriesForSubject(db, workspace.workspaceId, {
+      subjectId,
+      pinsOnly: true,
+      includeTotals: true,
+    });
+    expect(pins.totals).toEqual(page.totals);
+    await setSessionPin(db, {
+      workspaceId: workspace.workspaceId,
+      subjectId,
+      sessionId: root.id,
+      pinned: true,
+    });
+    const pinnedAttention = await listSessionEntriesForSubject(db, workspace.workspaceId, {
+      subjectId,
+      parentSessionId: null,
+      needsYouOnly: true,
+      includeTotals: true,
+      includePinned: true,
+    });
+    expect(pinnedAttention.sessions).toHaveLength(0);
+    expect(pinnedAttention.pinned.map((row) => row.id)).toEqual([root.id]);
+    expect(pinnedAttention.needsYouOnly).toBe(true);
+    expect(pinnedAttention.totals?.needsYouCount).toBe(1);
+    expect(pinnedAttention.pinned[0]?.treeStats?.totalDescendants).toBe(1000);
+    expect(pinnedAttention.pinned[0]?.treeStats?.attentionDescendants).toBe(0);
+  });
+
+  test("compact pages retain authority and display state while excluding large configuration", async () => {
+    if (!available) return;
+    const workspace = await freshWorkspace();
+    const subjectId = "user:compact-list";
+    await grantWorkspaceAccess(db, {
+      ...workspace,
+      subjectId,
+      role: "owner",
+      permissions: ["workspace:read", "sessions:read", "sessions:create", "sessions:control"],
+    });
+    const siteId = crypto.randomUUID();
+    const root = await session({
+      ...workspace,
+      message: "Plan a generated example\0" + "x".repeat(32_768),
+      metadata: {
+        scheduledTaskId: "generated-task",
+        _opengeniSiteOrigin: { siteId, title: "Example Site" },
+        large: "x".repeat(65_536),
+      },
+      createdBy: { kind: "subject", subjectId, label: "Example member" },
+    });
+    await setSessionPin(db, {
+      workspaceId: workspace.workspaceId,
+      subjectId,
+      sessionId: root.id,
+      pinned: true,
+    });
+    const options = { subjectId, pinsOnly: true };
+    const full = await listSessionsForSubject(db, workspace.workspaceId, options);
+    const compact = await listSessionEntriesForSubject(db, workspace.workspaceId, options);
+    const row = compact.pinned[0]!;
+    const { sessionListEntry } = await import("@opengeni/contracts/session-list-entries");
+    expect(row).toEqual(sessionListEntry(full.pinned[0]!));
+    expect(row.siteOrigin).toEqual({ siteId, title: "Example Site" });
+    expect(row.scheduledTaskId).toBe("generated-task");
+    expect(row.createdBy.label).toBe("Example member");
+    expect(row).not.toHaveProperty("metadata");
+    expect(row).not.toHaveProperty("initialMessage");
+    expect(row).not.toHaveProperty("tools");
+    expect(full.pinned[0]!.initialMessage).toBe("Plan a generated example\0" + "x".repeat(32_768));
+    expect(full.pinned[0]!.metadata.large).toHaveLength(65_536);
+    const target = await listSessionEntriesForSubject(db, workspace.workspaceId, {
+      subjectId,
+      pinsOnly: true,
+      authorizationScope: { kind: "scoped", rootSessionIds: [], sessionIds: [root.id] },
+    });
+    expect(target.pinned[0]?.treeStats?.totalDescendants).toBe(0);
+    expect(target.pinned[0]?.parentSessionId).toBeNull();
+    await expect(
+      listSessionEntriesForSubject(db, workspace.workspaceId, { subjectId: "user:unrelated" }),
+    ).rejects.toBeInstanceOf(SessionListAccessError);
+  });
+
   test("keeps filtered row content from the same statement as page selection", async () => {
     if (!available) return;
     const workspace = await freshWorkspace();
@@ -488,7 +735,10 @@ describe("session pins (real PostgreSQL + FORCE RLS)", () => {
     const before = await listSessionsForSubject(db, workspace.workspaceId, {
       subjectId: viewer,
       parentSessionId: null,
+      includeTotals: true,
     });
+    expect(before.totals?.groups[0]).toMatchObject({ failed: 1, unread: 1 });
+    expect(before.totals?.needsYouCount).toBe(0);
     expect(before.sessions.find((row) => row.id === root.id)?.treeStats).toMatchObject({
       failedDescendants: 1,
       unreadFailedDescendants: 1,
@@ -508,7 +758,9 @@ describe("session pins (real PostgreSQL + FORCE RLS)", () => {
     const after = await listSessionsForSubject(db, workspace.workspaceId, {
       subjectId: viewer,
       parentSessionId: null,
+      includeTotals: true,
     });
+    expect(after.totals?.groups[0]).toMatchObject({ failed: 0, unread: 0 });
     expect(after.sessions.find((row) => row.id === root.id)?.treeStats).toMatchObject({
       failedDescendants: 1,
       unreadFailedDescendants: 0,
@@ -517,7 +769,9 @@ describe("session pins (real PostgreSQL + FORCE RLS)", () => {
     const other = await listSessionsForSubject(db, workspace.workspaceId, {
       subjectId: otherViewer,
       parentSessionId: null,
+      includeTotals: true,
     });
+    expect(other.totals?.groups[0]).toMatchObject({ failed: 1, unread: 1 });
     expect(other.sessions.find((row) => row.id === root.id)?.treeStats).toMatchObject({
       failedDescendants: 1,
       unreadFailedDescendants: 1,
@@ -528,6 +782,16 @@ describe("session pins (real PostgreSQL + FORCE RLS)", () => {
   test("counts effective pauses and excludes paused descendants from active totals", async () => {
     if (!available) return;
     const workspace = await freshWorkspace();
+    const subjectId = "user:pause-metadata";
+    await grantMember(workspace, subjectId);
+    const readTotals = async () =>
+      (
+        await listSessionEntriesForSubject(db, workspace.workspaceId, {
+          subjectId,
+          parentSessionId: null,
+          includeTotals: true,
+        })
+      ).totals?.groups[0];
     const root = await session({ ...workspace, message: "effective pause root" });
     const pausedChild = await session({
       ...workspace,
@@ -592,6 +856,7 @@ describe("session pins (real PostgreSQL + FORCE RLS)", () => {
       pausedDescendants: 2,
     });
 
+    expect(await readTotals()).toMatchObject({ total: 4, active: 0, queued: 2 });
     await admin`
       update workspace_inference_controls
       set revision = 20, workspace_state = 'paused', workspace_pause_revision = 20
@@ -607,6 +872,7 @@ describe("session pins (real PostgreSQL + FORCE RLS)", () => {
       pausedDescendants: 3,
     });
 
+    expect(await readTotals()).toMatchObject({ total: 4, active: 0, queued: 0 });
     await executeSessionActivity(
       workspace.workspaceId,
       sql`
@@ -618,6 +884,7 @@ describe("session pins (real PostgreSQL + FORCE RLS)", () => {
     const resumedStats = await withWorkspaceRls(db, workspace.workspaceId, (scoped) =>
       sessionTreeStatsForSessions(scoped, workspace.workspaceId, [root.id]),
     );
+    expect(await readTotals()).toMatchObject({ total: 4, active: 0, queued: 1 });
     expect(resumedStats.get(root.id)).toMatchObject({
       totalDescendants: 3,
       runningDescendants: 0,
@@ -1142,6 +1409,47 @@ describe("session pins (real PostgreSQL + FORCE RLS)", () => {
       where workspace_id = ${workspace.workspaceId}
         and subject_id = ${subjectId}`;
     expect(count?.count).toBe(0);
+  }, 60_000);
+
+  test("ordinary-only pages skip pin hydration without changing pin exclusion or cursors", async () => {
+    if (!available) return;
+    const workspace = await freshWorkspace();
+    const subjectId = "user:ordinary-page";
+    await grantMember(workspace, subjectId);
+    const first = await session({ ...workspace, message: "ordinary first" });
+    const second = await session({ ...workspace, message: "ordinary second" });
+    const pinned = await session({ ...workspace, message: "pinned shortcut" });
+    await setSessionPin(db, {
+      workspaceId: workspace.workspaceId,
+      subjectId,
+      sessionId: pinned.id,
+      pinned: true,
+    });
+    const baseline = await listSessionsForSubject(db, workspace.workspaceId, {
+      subjectId,
+      limit: 1,
+    });
+    const page = await listSessionsForSubject(db, workspace.workspaceId, {
+      subjectId,
+      limit: 1,
+      includePinned: false,
+    });
+    expect(baseline.pinned.map((row) => row.id)).toEqual([pinned.id]);
+    expect(page.pinned).toEqual([]);
+    expect(page.pinnedTruncated).toBe(false);
+    expect(page.sessions.map((row) => row.id)).toEqual(baseline.sessions.map((row) => row.id));
+    expect(page.sessions[0]!.id).toBe(second.id);
+    const cursor = decodeSessionListCursor(page.nextCursor!);
+    expect(cursor).not.toBeNull();
+    const next = await listSessionsForSubject(db, workspace.workspaceId, {
+      subjectId,
+      limit: 1,
+      includePinned: false,
+      cursor: cursor!,
+    });
+    expect(next.pinned).toEqual([]);
+    expect(next.sessions.map((row) => row.id)).toEqual([first.id]);
+    expect(next.nextCursor).toBeNull();
   }, 60_000);
 
   test("Site origin filters before pagination, survives project moves and binds cursors", async () => {

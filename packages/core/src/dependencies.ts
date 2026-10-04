@@ -69,7 +69,15 @@ export type SessionWorkflowClient = {
     workflowId: string;
     workflowWakeRevision: number;
   }) => Promise<void>;
-  syncScheduledTask: (input: { task: ScheduledTask }) => Promise<void>;
+  syncScheduledTask: (input: {
+    task: ScheduledTask;
+    /**
+     * Compensate under the same per-schedule writer lock. Return the error to
+     * throw only after this transaction commits; lock/commit failures bypass
+     * that receipt. A failing compensation must roll back its own savepoint.
+     */
+    onFailure?: (tx: Database, error: unknown) => Promise<Error>;
+  }) => Promise<void>;
   deleteScheduledTaskSchedule: (input: { temporalScheduleId: string }) => Promise<void>;
   triggerScheduledTask: (input: {
     task: ScheduledTask;
@@ -206,6 +214,8 @@ export type AppDependencies = {
   managedEmailTransport?: ManagedEmailTransport;
   /** Injectable Codex HTTP transport for deterministic API/provider tests. */
   codexFetch?: typeof fetch;
+  /** Injectable transport for customer OpenAI/Azure connection checks. */
+  directModelFetch?: typeof fetch;
   /** Injectable GitHub transport for deterministic personal-OAuth tests. */
   githubPersonalFetch?: typeof fetch;
   /** Injectable credential-free GitHub transport for public repository verification tests. */

@@ -24,18 +24,25 @@ for (const file of ["manifest.json", "popup.html", "popup.css"]) {
   await cp(resolve(root, file), resolve(output, file));
 }
 await cp(resolve(root, "icons"), resolve(output, "icons"), { recursive: true });
+await cp(resolve(root, "fonts"), resolve(output, "fonts"), { recursive: true });
 
 // Chrome deliberately requires an explicit user install for an ordinary
 // existing profile. Ship one deterministic unpacked-extension archive for the
-// first-party setup surface; production may replace that link with the Chrome
-// Web Store without changing the React contract.
+// development fallback on the first-party setup surface. Ordinary installs
+// use the Chrome Web Store without changing the React contract.
 const installFiles = [
   "manifest.json",
   "popup.html",
   "popup.css",
   "popup.js",
   "service-worker.js",
+  "icons/brand-mark.svg",
+  "icons/icon-16.png",
+  "icons/icon-32.png",
+  "icons/icon-48.png",
   "icons/icon-128.png",
+  "fonts/dm-sans-latin-wght-normal.woff2",
+  "fonts/OFL.txt",
 ] as const;
 const archiveEntries: Record<string, Uint8Array> = {};
 for (const file of installFiles) {

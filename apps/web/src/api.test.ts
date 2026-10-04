@@ -2,6 +2,7 @@ import { describe, expect, jest, test } from "bun:test";
 import { OPENGENI_API_CONTRACT_REVISION } from "@opengeni/sdk";
 import {
   AuthApiError,
+  checkDeploymentRevision,
   apiErrorFromResponseBody,
   authHeadersForAccessKey,
   configureManagedActorEpoch,
@@ -29,6 +30,79 @@ import {
 import { resetSignupAttributionForTests, retainSignupAttribution } from "./lib/signup-attribution";
 
 describe("web API auth helpers", () => {
+  test("deployment checks wait for a foreground read response body before settling", async () => {
+    const originalFetch = globalThis.fetch;
+    let foregroundBody!: ReadableStreamDefaultController<Uint8Array>;
+    let configReads = 0;
+    globalThis.fetch = (async (input: Parameters<typeof fetch>[0]) => {
+      if (String(input).endsWith("/v1/config/client")) {
+        configReads++;
+        return Response.json({
+          apiContractRevision: OPENGENI_API_CONTRACT_REVISION,
+          deploymentRevision: "",
+        });
+      }
+      return new Response(
+        new ReadableStream({
+          start(controller) {
+            foregroundBody = controller;
+          },
+        }),
+      );
+    }) as typeof fetch;
+    const controller = new AbortController();
+    try {
+      configureManagedActorEpoch(null);
+      const foreground = await managedActorFetch("https://api.example.test/v1/resource", {
+        method: "GET",
+      });
+      let settled = false;
+      const check = checkDeploymentRevision(controller.signal).then(() => {
+        settled = true;
+      });
+      await Bun.sleep(0);
+      expect(configReads).toBe(1);
+      expect(settled).toBe(false);
+      foregroundBody.close();
+      await foreground.text();
+      await check;
+      expect(settled).toBe(true);
+    } finally {
+      controller.abort();
+      configureManagedActorEpoch(null);
+      globalThis.fetch = originalFetch;
+    }
+  });
+
+  test("cleanup cancels a deployment check waiting for foreground work", async () => {
+    const originalFetch = globalThis.fetch;
+    globalThis.fetch = (async (input: Parameters<typeof fetch>[0]) => {
+      if (String(input).endsWith("/v1/config/client"))
+        return Response.json({
+          apiContractRevision: OPENGENI_API_CONTRACT_REVISION,
+          deploymentRevision: "",
+        });
+      return new Response(new ReadableStream());
+    }) as typeof fetch;
+    const controller = new AbortController();
+    let foreground: Response | undefined;
+    try {
+      configureManagedActorEpoch(null);
+      foreground = await managedActorFetch("https://api.example.test/v1/resource", {
+        method: "GET",
+      });
+      const check = checkDeploymentRevision(controller.signal);
+      await Bun.sleep(0);
+      controller.abort(new DOMException("The check was canceled", "AbortError"));
+      await expect(check).rejects.toMatchObject({ name: "AbortError" });
+    } finally {
+      controller.abort();
+      await foreground?.body?.cancel();
+      configureManagedActorEpoch(null);
+      globalThis.fetch = originalFetch;
+    }
+  });
+
   test.each(["text", "json"] as const)(
     "managed actor %s preserves decoding and single body consumption",
     async (method) => {

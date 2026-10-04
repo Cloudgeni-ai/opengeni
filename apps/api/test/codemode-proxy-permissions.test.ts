@@ -47,6 +47,28 @@ describe("permissionsRequiredByFirstPartyTools", () => {
 describe("codemodeSessionProxyPermissions", () => {
   const settings = testSettings();
 
+  test("download tools require save authority without widening the SDK proxy ceiling", () => {
+    expect(FIRST_PARTY_TOOL_AUTHORIZATION.browser_downloads).toEqual({
+      sessionRequired: true,
+      allOf: ["sessions:read"],
+    });
+    expect(FIRST_PARTY_TOOL_AUTHORIZATION.browser_download_save).toEqual({
+      sessionRequired: true,
+      allOf: ["sessions:control", "files:upload"],
+    });
+    expect(permissionsRequiredByFirstPartyTools(["browser_download_save"])).toEqual([
+      "sessions:control",
+      "files:upload",
+    ]);
+    expect(
+      codemodeSessionProxyPermissions(settings, {
+        firstPartyMcpTools: ["browser_download_save"],
+        firstPartyMcpPermissions: ["sessions:control", "files:upload"],
+      }),
+    ).toEqual(["sessions:control"]);
+    expect(CODEMODE_SESSION_PROXY_PERMISSION_CEILING).not.toContain("files:upload");
+  });
+
   test("a selection without session tools yields only workspace:read", () => {
     // The hole: the proxy used to hand every session the whole four-permission
     // allowlist from its permission set alone, so a session whose model could

@@ -36,10 +36,16 @@ export type ConnectedModelFamily =
   | "supergrok"
   | "vercel_gateway"
   | "openrouter"
-  | "credits";
+  | "credits"
+  | "openai"
+  | "azure_openai";
 
 function rowMatchesFamily(row: PickerModelRow, family: ConnectedModelFamily): boolean {
   switch (family) {
+    case "openai":
+      return row.provider.startsWith("workspace-openai-");
+    case "azure_openai":
+      return row.provider.startsWith("workspace-azure-openai-");
     case "codex":
       return row.billingClass === "codex_subscription";
     case "supergrok":
@@ -117,9 +123,14 @@ export async function applyConnectedModelToNewSessionDraft(
   client: OpenGeniBrowserClient,
   workspaceId: string,
   family?: ConnectedModelFamily,
+  preferredModelId?: string,
 ): Promise<{ id: string; label: string } | null> {
   const catalog = await client.getWorkspaceModelCatalog(workspaceId);
-  const modelId = preferredConnectedModelId(catalog.models, family);
+  const modelId = preferredModelId
+    ? (projectPickerRows(catalog.models).find(
+        (row) => row.id === preferredModelId && row.selectable,
+      )?.id ?? null)
+    : preferredConnectedModelId(catalog.models, family);
   if (!modelId) return null;
   const model = catalog.models.find((candidate) => candidate.id === modelId);
   const draft = await client.getNewSessionDraft(workspaceId);

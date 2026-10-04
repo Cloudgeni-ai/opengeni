@@ -8,6 +8,7 @@ import { sql } from "drizzle-orm";
 import postgres from "postgres";
 import {
   acquireXaiCredentialLease,
+  heartbeatXaiCredentialLeaseUntil,
   armXaiCapacityWait,
   createDb,
   createXaiSubscriptionCredential,
@@ -452,6 +453,57 @@ describe("migration 0234 xAI subscription authority", () => {
         }
       }
     }
+  }, 180_000);
+
+  test("a heartbeat delayed behind an unchanged row lock cannot renew an expired lease", async () => {
+    if (!shared || !client) return;
+    const fixture = await seedWorkspace();
+    const subjectId = fixture.subjects[0]!;
+    await createXaiSubscriptionCredential(client.db, {
+      ...fixture,
+      subjectId,
+      encryptionKey,
+      secret: { version: 1, accessToken: "lock-expiry-fixture" },
+    });
+    const turn = await seedSessionTurn(fixture);
+    const lease = await acquireXaiCredentialLease(client.db, {
+      ...fixture,
+      ...turn,
+      subjectId,
+      holderId: "holder:lock-expiry-fixture",
+      authoritySnapshot: workspaceSnapshot,
+    });
+    let rowLocked!: () => void;
+    const locked = new Promise<void>((resolve) => {
+      rowLocked = resolve;
+    });
+    let releaseLock!: () => void;
+    const unlock = new Promise<void>((resolve) => {
+      releaseLock = resolve;
+    });
+    await shared.admin`update xai_credential_leases set leased_until = clock_timestamp() + interval '700 milliseconds'
+      where turn_id = ${turn.turnId}`;
+    const blocking = shared.admin.begin(async (tx) => {
+      await tx`select id from xai_credential_leases where turn_id = ${turn.turnId} for update`;
+      // An unchanged locked tuple makes a pre-lock clock predicate insufficient.
+      rowLocked();
+      await unlock;
+    });
+    await locked;
+    const renewal = heartbeatXaiCredentialLeaseUntil(client.db, {
+      workspaceId: fixture.workspaceId,
+      subjectId,
+      turnId: turn.turnId,
+      holderId: lease.holderId!,
+      generation: lease.generation!,
+    });
+    try {
+      await Bun.sleep(800);
+    } finally {
+      releaseLock();
+      await blocking;
+    }
+    expect(await renewal).toBeNull();
   }, 180_000);
 
   test("serializes rotating OAuth refresh tokens across concurrent sessions", async () => {
@@ -1019,6 +1071,7 @@ describe("migration 0234 xAI subscription authority", () => {
     const fixture = await seedWorkspace();
     const [subjectId] = fixture.subjects;
     const turn = await seedSessionTurn(fixture, workspaceSnapshot, 3);
+    const now = new Date();
     const armed = await armXaiCapacityWait(client.db, {
       ...fixture,
       subjectId: subjectId!,
@@ -1027,7 +1080,8 @@ describe("migration 0234 xAI subscription authority", () => {
       attemptId: turn.attemptId,
       workflowId: turn.workflowId,
       authoritySnapshot: workspaceSnapshot,
-      earliestResetAt: new Date(Date.now() + 86_400_000),
+      now,
+      earliestResetAt: new Date(now.getTime() + 86_400_000),
       failurePayload: {
         error: "all connected SuperGrok subscriptions are unavailable",
         code: "xai_capacity_unavailable",
@@ -1037,7 +1091,7 @@ describe("migration 0234 xAI subscription authority", () => {
     if (armed.action !== "waiting") throw new Error("xAI capacity waiter did not arm");
     const waiter = armed.waiter;
     // External resets must be detected without waiting until tomorrow's reset.
-    expect(waiter.nextCheckAt.getTime() - waiter.createdAt.getTime()).toBeLessThanOrEqual(60_000);
+    expect(waiter.nextCheckAt.getTime() - now.getTime()).toBe(60_000);
     expect(waiter.nextCheckAt.getTime()).toBeLessThan(waiter.earliestResetAt!.getTime());
     expect(waiter).toMatchObject({
       status: "waiting",

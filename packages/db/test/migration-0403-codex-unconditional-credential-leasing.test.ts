@@ -80,9 +80,13 @@ describe("migration 0403 unconditional Codex credential leasing", () => {
       readFile(deploymentDocUrl, "utf8"),
       readFile(rotationDocUrl, "utf8"),
     ]);
-    expect(dbIndex).toMatch(
-      /heartbeatCodexCredentialLeaseUntil[\s\S]*?leased_until = clock_timestamp\(\)[\s\S]*?leased_until > clock_timestamp\(\)/u,
+    const heartbeat = await readFile(
+      new URL("../src/subscription-credential-leases.ts", import.meta.url),
+      "utf8",
     );
+    expect(dbIndex).toContain("heartbeatSubscriptionCredentialLeaseUntil");
+    expect(heartbeat).toContain("for update");
+    expect(heartbeat).toContain("clock_timestamp()");
     expect(dbIndex).toContain("leased_until <= clock_timestamp()");
     expect(schema).toMatch(
       /activeCredential:\s*index\("codex_credential_leases_active_credential_idx"\)\.on\(\s*table\.credentialId,\s*table\.leasedUntil,\s*\)/su,

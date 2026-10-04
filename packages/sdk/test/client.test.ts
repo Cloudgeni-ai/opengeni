@@ -73,6 +73,32 @@ function makeClient(
 const STRICT = { apiContract: "strict" } as const;
 
 describe("OpenGeniClient", () => {
+  test.each([undefined, false, true])(
+    "defaults legacy Computer RFB grants to view only (%p)",
+    async (inputAllowed) => {
+      const { client } = makeClient(() =>
+        jsonResponse({
+          computerSessionId: SESSION_ID,
+          controllerGeneration: "controller-1",
+          targetId: "screen-1",
+          expiresAt: "2026-08-10T12:00:00.000Z",
+          stream: {
+            kind: "direct_rfb",
+            url: "wss://computer.example.test/rfb",
+            protocols: ["binary", "opengeni.computer.rfb.v1", "opengeni.auth.fixture"],
+            ...(inputAllowed === undefined ? {} : { inputAllowed }),
+          },
+        }),
+      );
+      const attachment = await client.attachComputerSession(WORKSPACE_ID, SESSION_ID, {
+        targetId: "screen-1",
+      });
+      expect(attachment.stream.kind).toBe("direct_rfb");
+      if (attachment.stream.kind === "direct_rfb")
+        expect(attachment.stream.inputAllowed).toBe(inputAllowed === true);
+    },
+  );
+
   test("Claude sign-in uses scoped JSON browser mutations without passing tokens or requesting inference", async () => {
     const { client, requests } = makeClient(() =>
       jsonResponse({ connected: true, credentialVersion: 1 }),
@@ -2219,6 +2245,80 @@ describe("OpenGeniClient", () => {
     expect(requests[0]!.headers.authorization).toBe("Bearer og_test_key");
   });
 
+  test("requires a dedicated attention-filter receipt and forwards complete totals", async () => {
+    const old = makeClient(() =>
+      jsonResponse({ pinned: [], sessions: [], nextCursor: null, filtersApplied: true }),
+    );
+    await expect(
+      old.client.listSessionSummaryPage(WORKSPACE_ID, { needsYouOnly: true }),
+    ).rejects.toThrow("attention session filtering");
+    await expect(
+      old.client.listSessionSummaryPage(WORKSPACE_ID, {
+        parentSessionId: null,
+        includeTotals: true,
+      }),
+    ).rejects.toThrow("complete session totals");
+    const totals = { needsYouCount: 12, groups: [] };
+    const { client, requests } = makeClient(() =>
+      jsonResponse({
+        pinned: [],
+        sessions: [],
+        nextCursor: null,
+        filtersApplied: true,
+        needsYouOnly: true,
+        totals,
+      }),
+    );
+    expect(
+      (
+        await client.listSessionSummaryPage(WORKSPACE_ID, {
+          parentSessionId: null,
+          includeTotals: true,
+          needsYouOnly: true,
+        })
+      ).totals,
+    ).toEqual(totals);
+    expect(requests[0]!.url).toContain("includeTotals=true");
+    expect(requests[0]!.url).toContain("needsYouOnly=true");
+  });
+
+  test("compact session pages retain cursors and filters across a rolling API upgrade", async () => {
+    const { client, requests } = makeClient(() =>
+      jsonResponse({
+        pinned: [],
+        sessions: [],
+        nextCursor: "next-page",
+        filtersApplied: true,
+        sortBy: "name",
+      }),
+    );
+    expect(
+      await client.listSessionSummaryPage(WORKSPACE_ID, { channelId: null, sortBy: "name" }),
+    ).toEqual({
+      projection: "summary",
+      pinned: [],
+      sessions: [],
+      nextCursor: "next-page",
+      filtersApplied: true,
+      sortBy: "name",
+    });
+    expect(new URL(requests[0]!.url).searchParams.get("projection")).toBe("summary");
+    const older = makeClient(() => jsonResponse([])).client;
+    await expect(older.listSessionSummaryPage(WORKSPACE_ID, { cursor: "opaque" })).rejects.toThrow(
+      "stable session-page cursors",
+    );
+    await expect(older.listSessionSummaryPage(WORKSPACE_ID, { channelId: null })).rejects.toThrow(
+      "filtered session lists",
+    );
+    const summaryServer = makeClient(() =>
+      jsonResponse({ projection: "summary", pinned: [], sessions: [], nextCursor: null }),
+    ).client;
+    await expect(summaryServer.listSessionPage(WORKSPACE_ID)).rejects.toThrow(
+      "full session details",
+    );
+    expect((await summaryServer.listSessionSummaryPage(WORKSPACE_ID)).projection).toBe("summary");
+  });
+
   test("listSessions stays array-shaped while listSessionPage adds pin cursors", async () => {
     const { client, requests } = makeClient((request) =>
       request.url.includes("view=page")
@@ -2262,6 +2362,16 @@ describe("OpenGeniClient", () => {
     );
     expect(requests[5]!.url).toBe(
       `https://api.example.test/v1/workspaces/${WORKSPACE_ID}/sessions/${SESSION_ID}/lineage`,
+    );
+  });
+
+  test("can request ordinary pages without repeatedly hydrating pinned details", async () => {
+    const { client, requests } = makeClient(() =>
+      jsonResponse({ pinned: [], sessions: [], nextCursor: null }),
+    );
+    await client.listSessionPage(WORKSPACE_ID, { limit: 4, includePinned: false });
+    expect(requests[0]!.url).toBe(
+      `https://api.example.test/v1/workspaces/${WORKSPACE_ID}/sessions?view=page&limit=4&includePinned=false`,
     );
   });
 
@@ -2640,4 +2750,22 @@ test("sets a workspace duration timer through the public endpoint", async () => 
   expect(requests[0]!.url).toEndWith(`/v1/workspaces/${WORKSPACE_ID}/pause-timer`);
   expect(requests[0]!.method).toBe("POST");
   expect(JSON.parse(requests[0]!.body!)).toEqual(request);
+});
+
+test("Claude account disconnects send JSON for scoped browser mutation guards", async () => {
+  const { client, requests } = makeClient(() => jsonResponse({ disconnected: true }));
+  await client.disconnectClaudeSubscriptionAccount(
+    WORKSPACE_ID,
+    "11111111-1111-4111-8111-111111111111",
+  );
+  await client.disconnectOrganizationClaudeSubscriptionAccount(
+    "22222222-2222-4222-8222-222222222222",
+    "11111111-1111-4111-8111-111111111111",
+  );
+  expect(requests).toHaveLength(2);
+  for (const request of requests) {
+    expect(request.method).toBe("DELETE");
+    expect(request.headers["content-type"]).toBe("application/json");
+    expect(request.body).toBe("{}");
+  }
 });

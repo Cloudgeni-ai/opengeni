@@ -1,3 +1,4 @@
+import { registerClaudeSubscriptionAccountRoutes } from "./routes/claude-subscription-accounts";
 import { registerWorkspaceModelProviderRoutes } from "./routes/workspace-model-providers";
 import { registerClaudeSubscriptionOAuthRoutes } from "./routes/claude-subscription-oauth";
 import { registerConnectCallbackReturns } from "./integrations/connect-callback-return";
@@ -23,6 +24,7 @@ import {
   configuredAllowedReasoningEfforts,
   resolveFirstPartyMcpToolPolicy,
   resolveVoiceInputProviderRegistry,
+  UnsupportedLatencyModeError,
   type Settings,
 } from "@opengeni/config";
 import {
@@ -87,6 +89,8 @@ import {
   ApiHttpError,
   agentConfigHttpError,
   allowanceExhaustedHttpError,
+  modelUnavailableHttpError,
+  scheduledTaskTargetAccessHttpError,
   workspaceControlBusyHttpError,
 } from "./http/api-error";
 import {
@@ -111,6 +115,7 @@ import {
   hasPermission,
   requireAccessGrant,
   requireAccessGrantAuthorization,
+  accountScopedApiKeyWorkspaceAuthority,
   requireAccessContext,
   requirePermission,
   releaseManagedAuthRequestActorLease,
@@ -124,13 +129,16 @@ import {
   validateManagedAuthRequestActorLease,
   requireSessionAuthorization,
   SessionAuthorizationDeniedError,
+  withSessionAuthorizationReadReuse,
   SessionAuthorizationUnavailableError,
   createUserPresenceRecorder,
   registerProductUsageMetricBaselines,
 } from "@opengeni/core";
+import { createManagedAuthNewSignupsGate } from "./auth/new-signups-gate";
 import {
   createManagedAuth,
   isolatedManagedAuthOAuthCallbackRequest,
+  managedAuthNewSignupsPausedResponse,
   managedAuthOAuthReturnMatches,
   resolveManagedAuthOAuthAttempt,
 } from "./auth/managed-auth";
@@ -171,9 +179,12 @@ import {
   isMcpOAuthResourcePath,
   mcpOAuthAuthenticateHeader,
   mcpOAuthBearerToken,
+  ORGANIZATION_MCP_PATH,
   registerMcpOAuthRoutes,
   resolveMcpOAuthRouteAccess,
+  resolveOrganizationMcpOAuthAccess,
 } from "./mcp-oauth";
+import { buildOrganizationMcpServer, type OrganizationMcpCaller } from "./organization-mcp";
 import {
   CodemodeAuthorityError,
   CodemodeCatalogNotReadyError,
@@ -218,6 +229,8 @@ import { registerMemorySlackPublicationRoutes } from "./routes/memory-slack-publ
 import { registerEnvironmentRoutes } from "./routes/environments";
 import { registerFileRoutes } from "./routes/files";
 import { registerApiKeyRoutes } from "./routes/api-keys";
+import { registerOrganizationMcpConnectionRoutes } from "./routes/organization-mcp-connections";
+import { registerOrganizationServiceAccountRoutes } from "./routes/organization-service-accounts";
 import { registerBillingRoutes } from "./routes/billing";
 import { registerBrowserIdentityRoutes } from "./routes/browser-identities";
 import { registerBrowserSessionRoutes } from "./routes/browser-sessions";
@@ -258,6 +271,7 @@ import { registerWorkspaceArtifactRoutes } from "./routes/workspace-artifacts";
 import { registerArtifactCatalogRoutes } from "./routes/artifact-catalog";
 import { registerPreferenceRegistryRoutes } from "./routes/preference-registry";
 import { registerInsightsRoutes } from "./routes/insights";
+import { registerInsightsUsageRoutes } from "./routes/insights-usage";
 import { registerTranscriptionRoutes } from "./routes/transcriptions";
 import { registerEditableArtifactRoutes } from "./routes/editable-artifacts";
 import { registerSessionArtifactAssociationRoutes } from "./routes/session-artifact-associations";
@@ -363,9 +377,17 @@ export function createAppComposition(deps: AppDependencies): {
   assertManagedEmailTransportMetadata(managedEmailTransport);
   const observability =
     deps.observability ?? createObservability(deps.settings, { component: "api" });
+  const managedAuthNewSignupsGate = createManagedAuthNewSignupsGate({
+    db: deps.db,
+    settings: deps.settings,
+    observability,
+  });
   const managedAuth =
     deps.managedAuth ??
-    createManagedAuth(deps.settings, deps.db, managedEmailTransport, { observability });
+    createManagedAuth(deps.settings, deps.db, managedEmailTransport, {
+      observability,
+      newSignupsGate: managedAuthNewSignupsGate,
+    });
   const managedAuthSessionAdapter =
     deps.managedAuthSessionAdapter ??
     (managedAuth ? createBetterAuthSessionAdapter(managedAuth, deps.db) : null);
@@ -876,6 +898,16 @@ export function createAppComposition(deps: AppDependencies): {
     app.on(["GET", "POST"], "/v1/auth/*", async (c) => {
       const pathname = new URL(c.req.url).pathname;
       const oauthCallbackProvider = managedAuthOAuthCallbackProvider(pathname);
+      if (
+        pathname === "/v1/auth/sign-up/email" &&
+        c.req.method === "POST" &&
+        !(await managedAuthNewSignupsGate.signupsOpen())
+      ) {
+        // Launch-load safety switch: refuse before Better Auth hashes the
+        // password or sends mail. Better Auth's own disableSignUp flags and
+        // the user-create hook remain the backstop for every other path.
+        return managedAuthNewSignupsPausedResponse();
+      }
       if (pathname === "/v1/auth/sign-in/social" && c.req.method === "POST") {
         const body = await c.req.raw
           .clone()
@@ -1254,15 +1286,83 @@ export function createAppComposition(deps: AppDependencies): {
         productAccessMode: deps.settings.productAccessMode,
         billingMode: deps.settings.billingMode,
         managedAuthSessionSetMode: deps.settings.managedAuthSessionSetMode,
-        auth: clientAuthConfig(deps.settings),
+        auth: clientAuthConfig(
+          deps.settings,
+          deps.settings.productAccessMode === "managed"
+            ? await managedAuthNewSignupsGate.signupsOpen()
+            : true,
+        ),
         documentationUrl: deps.settings.documentationUrl,
         analytics: clientAnalyticsConfig(deps.settings),
+        legal: clientLegalConfig(deps.settings),
+        ...(deps.settings.supportEmail ? { supportEmail: deps.settings.supportEmail } : {}),
         // Channel-A structured services (P4.4) ride exec/readFile/createEditor,
         // available on every real backend; `none` has no box so they are all off.
         // Per-session availability is still negotiated on /stream-capabilities.
         structuredServices: structuredServicesHint(deps.settings.sandboxBackend),
       }),
     );
+  });
+
+  // The organization MCP server: every public action, as a person who signed
+  // in (capped by their connection's access setting) or as an organization
+  // API key. Each action runs the real route in this process.
+  app.all(ORGANIZATION_MCP_PATH, async (c) => {
+    let boundedRequest: Request;
+    try {
+      boundedRequest = await boundedMcpRequest(c.req.raw);
+    } catch (error) {
+      if (error instanceof McpPayloadTooLargeError) {
+        throw new HTTPException(413, { message: "MCP request body exceeds the safety limit" });
+      }
+      throw error;
+    }
+    const challenge = () => {
+      if (deps.settings.mcpOauthEnabled) {
+        c.header("www-authenticate", mcpOAuthAuthenticateHeader(routeDeps, ORGANIZATION_MCP_PATH));
+      }
+    };
+    let caller: OrganizationMcpCaller;
+    try {
+      const connection = await resolveOrganizationMcpOAuthAccess(routeDeps, c.req.raw);
+      if (connection) {
+        caller = {
+          kind: "person",
+          accountId: connection.accountId,
+          subjectId: connection.subjectId,
+          access: connection.organizationAccess,
+        };
+      } else {
+        const context = await requireAccessContext(c, routeDeps);
+        const authorization = c.req.header("authorization");
+        if (!accountScopedApiKeyWorkspaceAuthority(context) || !authorization) {
+          throw new HTTPException(403, {
+            message: "Connect with Opengeni sign-in or an organization API key.",
+          });
+        }
+        caller = {
+          kind: "key",
+          authorization,
+          accessKey: c.req.header("x-opengeni-access-key") ?? null,
+        };
+      }
+    } catch (error) {
+      if (error instanceof HTTPException && error.status === 401) challenge();
+      throw error;
+    }
+    const transport = new WebStandardStreamableHTTPServerTransport({ enableJsonResponse: true });
+    const mcp = buildOrganizationMcpServer({
+      caller,
+      origin: new URL(c.req.url).origin,
+      dispatch: async (request) => await app.fetch(request, c.env),
+      signal: c.req.raw.signal,
+    });
+    try {
+      await mcp.connect(transport);
+      return await handleMcpRequestWithClientAbort(transport, boundedRequest, c.req.raw.signal);
+    } finally {
+      await mcp.close().catch(() => undefined);
+    }
   });
 
   app.use("/v1/workspaces/:workspaceId/*", async (c, next) => {
@@ -1342,71 +1442,86 @@ export function createAppComposition(deps: AppDependencies): {
       throw error;
     }
     const grant = authorization.grant;
-    return await withAccessGrantSessionRlsContext(routeDeps, grant, async () => {
-      const boundSessionId = grant.metadata?.sessionId;
-      if (typeof boundSessionId === "string") {
-        try {
-          await requireSessionAuthorization(routeDeps, grant, {
-            sessionId: boundSessionId,
-            operation: "session.first_party_mcp.call",
-            surface: "first_party_mcp",
-          });
-        } catch (error) {
-          if (error instanceof SessionAuthorizationDeniedError) {
-            throw new HTTPException(404, { message: "session not found" });
-          }
-          if (error instanceof SessionAuthorizationUnavailableError) {
-            throw new HTTPException(503, {
-              message: "session authorization is unavailable",
+    // The agent-attempt context, this route check, and a tool's own entry check
+    // re-read the same caller session and attempt; share those reads.
+    return await withSessionAuthorizationReadReuse((reads) =>
+      withAccessGrantSessionRlsContext(routeDeps, grant, async () => {
+        const boundSessionId = grant.metadata?.sessionId;
+        if (typeof boundSessionId === "string") {
+          try {
+            await requireSessionAuthorization(routeDeps, grant, {
+              sessionId: boundSessionId,
+              operation: "session.first_party_mcp.call",
+              surface: "first_party_mcp",
             });
+          } catch (error) {
+            if (error instanceof SessionAuthorizationDeniedError) {
+              throw new HTTPException(404, { message: "session not found" });
+            }
+            if (error instanceof SessionAuthorizationUnavailableError) {
+              throw new HTTPException(503, {
+                message: "session authorization is unavailable",
+              });
+            }
+            throw error;
           }
-          throw error;
         }
-      }
-      const workspace = await getWorkspace(routeDeps.db, workspaceId);
-      const workspaceMemoryEnabled = resolveWorkspaceMemoryEnabled(workspace?.settings);
-      const workspaceMemoryPromptMode = resolveWorkspaceMemoryPromptMode();
-      const transport = new WebStandardStreamableHTTPServerTransport({
-        enableJsonResponse: true,
-      });
-      if (!grantUsesAttemptScopedMcp(grant)) {
-        const prepared = await prepareWorkspaceToolGateway(routeDeps, authorization);
-        const mcp = buildWorkspaceToolGatewayMcpServer(prepared, grant, routeDeps.observability);
+        reads.handOffToToolDispatch();
+        const workspace = await getWorkspace(routeDeps.db, workspaceId);
+        const workspaceMemoryEnabled = resolveWorkspaceMemoryEnabled(workspace?.settings);
+        const workspaceMemoryPromptMode = resolveWorkspaceMemoryPromptMode();
+        const transport = new WebStandardStreamableHTTPServerTransport({
+          enableJsonResponse: true,
+        });
+        if (!grantUsesAttemptScopedMcp(grant)) {
+          const prepared = await prepareWorkspaceToolGateway(routeDeps, authorization);
+          const mcp = buildWorkspaceToolGatewayMcpServer(prepared, grant, routeDeps.observability);
+          try {
+            await mcp.connect(transport);
+            return await handleMcpRequestWithClientAbort(
+              transport,
+              boundedRequest,
+              c.req.raw.signal,
+            );
+          } finally {
+            await Promise.allSettled([mcp.close(), prepared.close()]);
+          }
+        }
+        const mcpDeps = await resolveWorkspaceMcpRouteDeps(routeDeps, grant);
+        // The bound session's frozen Memory selector (migration 0427) decides
+        // which Memory tools the attempt receives and which typed layers they
+        // read and write. A missing row resolves to no Memory tools.
+        const sessionMemory =
+          typeof boundSessionId === "string"
+            ? ((await resolveSessionMemoryAgentScope(
+                routeDeps.db,
+                workspaceId,
+                boundSessionId,
+                grant.metadata,
+              )) ?? {
+                mode: "off" as const,
+                userSubjectId: null,
+                rootSessionId: null,
+              })
+            : null;
+        const mcp = buildOpenGeniMcpServer(mcpDeps, grant, {
+          requestOrigin: new URL(c.req.url).origin,
+          workspaceMemoryEnabled,
+          workspaceMemoryPromptMode,
+          sessionMemory,
+        });
+        // Bind tool handlers' `extra.signal` to the HTTP client's connection: a
+        // worker that drops the call (Steer/Pause) aborts a blocking tool here.
+        // Each POST builds a fresh server; close it once the JSON response is
+        // ready, like the gateway paths above, so it can't outlive the request.
         try {
           await mcp.connect(transport);
           return await handleMcpRequestWithClientAbort(transport, boundedRequest, c.req.raw.signal);
         } finally {
-          await Promise.allSettled([mcp.close(), prepared.close()]);
+          await mcp.close().catch(() => undefined);
         }
-      }
-      const mcpDeps = await resolveWorkspaceMcpRouteDeps(routeDeps, grant);
-      // The bound session's frozen Memory selector (migration 0427) decides
-      // which Memory tools the attempt receives and which typed layers they
-      // read and write. A missing row resolves to no Memory tools.
-      const sessionMemory =
-        typeof boundSessionId === "string"
-          ? ((await resolveSessionMemoryAgentScope(
-              routeDeps.db,
-              workspaceId,
-              boundSessionId,
-              grant.metadata,
-            )) ?? {
-              mode: "off" as const,
-              userSubjectId: null,
-              rootSessionId: null,
-            })
-          : null;
-      const mcp = buildOpenGeniMcpServer(mcpDeps, grant, {
-        requestOrigin: new URL(c.req.url).origin,
-        workspaceMemoryEnabled,
-        workspaceMemoryPromptMode,
-        sessionMemory,
-      });
-      await mcp.connect(transport);
-      // Bind tool handlers' `extra.signal` to the HTTP client's connection: a
-      // worker that drops the call (Steer/Pause) aborts a blocking tool here.
-      return await handleMcpRequestWithClientAbort(transport, boundedRequest, c.req.raw.signal);
-    });
+      }),
+    );
   });
 
   app.get("/v1/workspaces/:workspaceId/tools/catalog", async (c) => {
@@ -1583,6 +1698,8 @@ export function createAppComposition(deps: AppDependencies): {
   registerFileRoutes(app, routeDeps);
   registerSessionArtifactAssociationRoutes(app, routeDeps);
   registerApiKeyRoutes(app, routeDeps);
+  registerOrganizationMcpConnectionRoutes(app, routeDeps);
+  registerOrganizationServiceAccountRoutes(app, routeDeps);
   registerBillingRoutes(app, routeDeps);
   registerBrowserIdentityRoutes(app, routeDeps);
   registerBrowserSessionRoutes(app, routeDeps);
@@ -1595,6 +1712,7 @@ export function createAppComposition(deps: AppDependencies): {
   registerWorkspaceRoutes(app, routeDeps);
   registerUsageAllowanceRoutes(app, routeDeps);
   registerInsightsRoutes(app, routeDeps);
+  registerInsightsUsageRoutes(app, routeDeps);
   registerWorkspaceInstructionPolicyRoutes(app, routeDeps);
   registerWorkspaceLearningRoutes(app, routeDeps);
   registerCompanyProfileRoutes(app, routeDeps);
@@ -1638,6 +1756,7 @@ export function createAppComposition(deps: AppDependencies): {
   registerOrganizationIntegrationPolicyRoutes(app, routeDeps);
   registerModelConnectionAccessRoutes(app, routeDeps);
   registerSuperGrokRoutes(app, routeDeps);
+  registerClaudeSubscriptionAccountRoutes(app, routeDeps);
   registerTranscriptionRoutes(app, routeDeps);
   registerEditableArtifactRoutes(app, routeDeps);
   registerVideoGenerationRoutes(app, routeDeps);
@@ -1681,7 +1800,23 @@ export function createAppComposition(deps: AppDependencies): {
         ? new HTTPException(403, { message: rawError.message })
         : (allowanceExhaustedHttpError(rawError) ??
           workspaceControlBusyHttpError(rawError) ??
+          scheduledTaskTargetAccessHttpError(rawError) ??
           agentConfigHttpError(rawError) ??
+          modelUnavailableHttpError(rawError) ??
+          (rawError instanceof UnsupportedLatencyModeError
+            ? new ApiHttpError(422, {
+                code: "validation_failed",
+                message: rawError.message,
+                retryable: false,
+                outcomeUnknown: false,
+                details: {
+                  code: rawError.code,
+                  modelId: rawError.modelId,
+                  latencyMode: rawError.latencyMode,
+                  allowedLatencyModes: [...rawError.allowedLatencyModes],
+                },
+              })
+            : null) ??
           requestBodyValidationHttpError(rawError) ??
           invalidPathIdentifierHttpError(rawError, new URL(c.req.url).pathname) ??
           rawError);
@@ -1832,12 +1967,13 @@ async function requireMcpAccessGrantAuthorization(
   return authorization;
 }
 
-function clientAuthConfig(settings: AppDependencies["settings"]) {
+function clientAuthConfig(settings: AppDependencies["settings"], newSignupsEnabled: boolean) {
   if (settings.productAccessMode === "managed") {
     return {
       mode: "managedSession" as const,
       session: "cookie" as const,
       emailVerificationRequired: settings.environment !== "local",
+      newSignupsEnabled,
       socialProviders: [
         ...(settings.managedAuthGoogleClientId && settings.managedAuthGoogleClientSecret
           ? (["google"] as const)
@@ -2085,6 +2221,15 @@ function clientAnalyticsConfig(settings: AppDependencies["settings"]) {
         ? { ga4: { measurementId: settings.analyticsGa4MeasurementId } }
         : {}),
     },
+  };
+}
+
+function clientLegalConfig(settings: AppDependencies["settings"]) {
+  return {
+    ...(settings.legalPrivacyPolicyUrl ? { privacyPolicyUrl: settings.legalPrivacyPolicyUrl } : {}),
+    ...(settings.legalTermsOfServiceUrl
+      ? { termsOfServiceUrl: settings.legalTermsOfServiceUrl }
+      : {}),
   };
 }
 
@@ -2363,6 +2508,22 @@ const routeLabelPatterns: Array<{
   {
     pattern: /^\/v1\/workspaces\/[^/]+\/insights$/,
     label: "/v1/workspaces/:workspaceId/insights",
+  },
+  {
+    pattern: /^\/v1\/workspaces\/[^/]+\/insights\/usage$/,
+    label: "/v1/workspaces/:workspaceId/insights/usage",
+  },
+  {
+    pattern: /^\/v1\/workspaces\/[^/]+\/insights\/calls$/,
+    label: "/v1/workspaces/:workspaceId/insights/calls",
+  },
+  {
+    pattern: /^\/v1\/organizations\/[^/]+\/insights\/usage$/,
+    label: "/v1/organizations/:accountId/insights/usage",
+  },
+  {
+    pattern: /^\/v1\/organizations\/[^/]+\/insights\/calls$/,
+    label: "/v1/organizations/:accountId/insights/calls",
   },
   {
     pattern: /^\/v1\/billing\/entitlements$/,
@@ -3309,12 +3470,13 @@ export function isApiContractProtectedMutation(method: string, pathname: string)
   return !segments.includes("mcp") && !segments.includes("codemode");
 }
 
-/** Client-safe agent-configuration rollout projection. */
+/** Client-safe agent-configuration projection. */
 function clientAgentConfig(settings: Settings): ClientAgentConfig {
   const policy = agentConfigDeploymentPolicy(settings);
   return {
-    enabled: policy.admissionEnabled,
-    defaultForNewSessions: policy.defaultForNewSessions,
+    // Deprecated: agent configuration is always on. Kept for client compatibility.
+    enabled: true,
+    defaultForNewSessions: true,
     capabilities: AGENT_CAPABILITY_IDS.map((id) => {
       const reason = policy.unavailable[id];
       return reason === undefined ? { id, available: true } : { id, available: false, reason };

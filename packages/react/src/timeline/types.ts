@@ -229,7 +229,11 @@ export type StartupPhaseItem = {
   durationMs: number | null;
   /** Sandbox origin and rig marker outcomes refine the settled label only. */
   outcome: "created" | "restored" | "resumed" | "skipped" | null;
-  blockedReason?: "rotation_in_progress" | undefined;
+  blockedReason?:
+    | "capture_in_progress"
+    | "rotation_in_progress"
+    | "provider_recovery_in_progress"
+    | undefined;
   occurredAt: string;
 };
 

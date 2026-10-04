@@ -23,7 +23,7 @@ function session(capabilities: AgentCapabilities = "all", overrides: Partial<Ses
   const agent = resolveAgentConfig({
     creator: "api",
     request: { capabilities },
-    deployment: { unavailable: {}, admissionEnabled: true, defaultForNewSessions: false },
+    deployment: { unavailable: {} },
     workspace: { defaults: null, humanInputEnabled: true },
     goal: false,
   }).config!;
@@ -70,6 +70,29 @@ function projected(row = session(), env = context()) {
 }
 
 describe("server effectiveTools environment projection", () => {
+  test("browser downloads follow capability selection and both save permissions", () => {
+    for (const permissions of [
+      ["sessions:read"],
+      ["sessions:read", "sessions:control"],
+      ["sessions:read", "sessions:control", "files:upload"],
+    ] as NonNullable<Session["firstPartyMcpPermissions"]>[]) {
+      const row = session("all", {
+        firstPartyMcpTools: ["browser_downloads", "browser_download_save"],
+        firstPartyMcpPermissions: permissions,
+      });
+      const input = sessionEffectiveToolProjectionInput(row, [], context());
+      expect(input.firstPartyMcpTools).toContain("browser_downloads");
+      expect(input.firstPartyMcpTools.includes("browser_download_save")).toBe(
+        permissions.includes("files:upload"),
+      );
+    }
+    const disabled = session("none", {
+      firstPartyMcpTools: ["browser_downloads", "browser_download_save"],
+    });
+    expect(sessionEffectiveToolProjectionInput(disabled, [], context()).firstPartyMcpTools).toEqual(
+      [],
+    );
+  });
   test.each(["codex/gpt-5.6-sol", "supergrok/grok-4.6", "gpt-6-astra"])(
     "%s metadata does not infer media attachment from model or pool readiness",
     async (model) => {

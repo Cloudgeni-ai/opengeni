@@ -48,7 +48,7 @@ import {
   appendSessionEvents,
   authorizeHistoricalSandboxCheckpointRecovery,
   registerSandboxCheckpointArtifact,
-  enrollUnobservableCommandIdleDrain,
+  enrollRetainedCommandContainment,
   reapStaleLeaseHoldersGlobal,
   advanceWorkspaceGeneration,
   advanceWorkspaceGenerationForDirectRequest,
@@ -3620,7 +3620,9 @@ describe("P1.3 reapSandboxLeases — the one global reaper (real lease + RLS, sp
         workspaceId: ids.workspaceId,
         sandboxGroupId: ids.groupId,
       };
-      expect(await enrollUnobservableCommandIdleDrain(db, { ...scope, idleGraceMs: 1 })).toBeNull();
+      expect(
+        await enrollRetainedCommandContainment(db, { ...scope, idleCommandContainmentMs: 1 }),
+      ).toBeNull();
       // Model enrollment from an older worker/rollout, not fresh authority.
       // Current DB writers must reject it even if application checks are skipped.
       await expect(
@@ -3641,7 +3643,9 @@ describe("P1.3 reapSandboxLeases — the one global reaper (real lease + RLS, sp
         (tx) => tx`update sandbox_leases set liveness='draining',
         unobservable_command_drain_ids=array[${processId}::uuid] where id=${leaseId}`,
       );
-      expect(await enrollUnobservableCommandIdleDrain(db, { ...scope, idleGraceMs: 1 })).toBeNull();
+      expect(
+        await enrollRetainedCommandContainment(db, { ...scope, idleCommandContainmentMs: 1 }),
+      ).toBeNull();
       const captureId = crypto.randomUUID();
       const capture = {
         ...scope,
@@ -3818,13 +3822,13 @@ describe("P1.3 reapSandboxLeases — the one global reaper (real lease + RLS, sp
     }, 180_000);
   }
 
-  for (const [lateExit, stoppingErrors] of [
+  for (const [lateExit, providerErrors] of [
     [false, false],
     [true, false],
     [false, true],
     [true, true],
   ] as const) {
-    test(`idle unobservable commands use the existing drain; late exit=${lateExit}, stopping errors=${stoppingErrors}`, async () => {
+    test(`idle legacy commands use the existing drain; late exit=${lateExit}, provider errors=${providerErrors}`, async () => {
       if (!available) throw new Error("Real PostgreSQL required for idle drain regression");
       const ids = await freshWorkspace();
       const attempt = await freshWarmSnapshotAttempt(ids);
@@ -3887,7 +3891,7 @@ describe("P1.3 reapSandboxLeases — the one global reaper (real lease + RLS, sp
         accountId: ids.accountId,
         workspaceId: ids.workspaceId,
         sandboxGroupId: ids.groupId,
-        idleGraceMs: 1,
+        idleCommandContainmentMs: 1,
       };
       await admin`update sandbox_retained_processes set
         last_reconcile_outcome = 'quarantined_process_observation_unavailable',
@@ -3913,42 +3917,40 @@ describe("P1.3 reapSandboxLeases — the one global reaper (real lease + RLS, sp
           })
         ).get(attempt.sessionId),
       ).toMatchObject({ count: 1, unavailableCount: 1 });
-      if (stoppingErrors) {
+      if (providerErrors) {
+        // Repeated observer errors without any stop intent: command health is
+        // not the containment policy, whole-group idleness is.
         await admin`update sandbox_retained_processes set last_reconcile_outcome = 'provider_error',
-          reconcile_attempts = 5 where id = ${processId}`;
-        await admin`update session_background_commands set state = 'stopping',
-          cancel_requested_at = now() - interval '2 minutes', cancel_requested_by = 'test:stop-request'
-          where id = ${processId}`;
+          reconcile_attempts = 7 where id = ${processId}`;
       }
-      expect(await enrollUnobservableCommandIdleDrain(db, scope)).toBeNull();
+      expect(await enrollRetainedCommandContainment(db, scope)).toBeNull();
       await admin`delete from sandbox_lease_holders where lease_id = ${leaseId} and kind = 'turn'`;
       // A live attempt without a holder is still protected.
-      expect(await enrollUnobservableCommandIdleDrain(db, scope)).toBeNull();
+      expect(await enrollRetainedCommandContainment(db, scope)).toBeNull();
       await admin`update session_turn_attempts set state = 'closed', outcome = 'completed',
       closed_at = now(), quiesced_at = now() where id = ${attempt.attemptId}`;
       await insertHolder(ids, leaseId, "viewer", "viewer-idle-regression", 0, attempt.sessionId);
-      expect(await enrollUnobservableCommandIdleDrain(db, scope)).toBeNull();
+      expect(await enrollRetainedCommandContainment(db, scope)).toBeNull();
       await admin`delete from sandbox_lease_holders where lease_id = ${leaseId} and kind = 'viewer'`;
       await admin`update sandbox_leases set refcount = 1, turn_holders = 0, viewer_holders = 0 where id = ${leaseId}`;
       const sibling = await freshWarmSnapshotAttempt({ ...ids, sandboxGroupId: ids.groupId });
-      expect(await enrollUnobservableCommandIdleDrain(db, scope)).toBeNull();
+      expect(await enrollRetainedCommandContainment(db, scope)).toBeNull();
       await admin`update session_turn_attempts set state = 'closed', outcome = 'completed',
       closed_at = now(), quiesced_at = null where id = ${sibling.attemptId}`;
       expect(
-        await enrollUnobservableCommandIdleDrain(db, { ...scope, idleGraceMs: 60_000 }),
+        await enrollRetainedCommandContainment(db, { ...scope, idleCommandContainmentMs: 60_000 }),
       ).toBeNull();
       await admin`update session_turn_attempts set quiesced_at = null, closed_at = now() - interval '2 minutes'
       where id in (${sibling.attemptId}, ${attempt.attemptId})`;
-      if (stoppingErrors) {
-        // A failed owner cannot inherit the completed owner's closed-at proof.
-        await admin`update session_turn_attempts set outcome = 'failed'
-          where id = ${attempt.attemptId}`;
-        expect(await enrollUnobservableCommandIdleDrain(db, scope)).toBeNull();
-        await admin`update session_turn_attempts set outcome = 'completed'
-          where id = ${attempt.attemptId}`;
-      }
+      // Both turns settled: an open turn in any group session would still block.
+      expect(await enrollRetainedCommandContainment(db, scope)).toBeNull();
+      await admin`update session_turns set status = 'completed', active_attempt_id = null,
+        finished_at = now() - interval '2 minutes'
+        where id in (${sibling.turnId}, ${attempt.turnId})`;
+      await admin`update sessions set status = 'idle', active_turn_id = null
+        where id in (${sibling.sessionId}, ${attempt.sessionId})`;
       await verifyPendingQuiescenceBlocks(ids, sibling, async () => {
-        expect(await enrollUnobservableCommandIdleDrain(db, scope)).toBeNull();
+        expect(await enrollRetainedCommandContainment(db, scope)).toBeNull();
       });
       const child = await advanceWorkspaceGenerationForRetainedProcess(db, {
         accountId: ids.accountId,
@@ -3957,7 +3959,7 @@ describe("P1.3 reapSandboxLeases — the one global reaper (real lease + RLS, sp
         processId,
         operation: "pollUnknownCommand",
       });
-      expect(await enrollUnobservableCommandIdleDrain(db, scope)).toBeNull();
+      expect(await enrollRetainedCommandContainment(db, scope)).toBeNull();
       await verifyRetainedProcessMutationSettlement(db, {
         accountId: ids.accountId,
         workspaceId: ids.workspaceId,
@@ -3967,23 +3969,10 @@ describe("P1.3 reapSandboxLeases — the one global reaper (real lease + RLS, sp
         admission: child,
         outcome: "resolved",
       });
-      if (stoppingErrors) {
-        await admin`update sandbox_retained_processes set reconcile_attempts = 4 where id = ${processId}`;
-        expect(await enrollUnobservableCommandIdleDrain(db, scope)).toBeNull();
-        await admin`update sandbox_retained_processes set reconcile_attempts = 5 where id = ${processId}`;
-        await admin`update session_background_commands set state = 'running', cancel_requested_at = null,
-          cancel_requested_by = null
-          where id = ${processId}`;
-        expect(await enrollUnobservableCommandIdleDrain(db, scope)).toBeNull();
-        await admin`update session_background_commands set state = 'stopping', cancel_requested_at = now(),
-          cancel_requested_by = 'test:stop-request'
-          where id = ${processId}`;
-        expect(
-          await enrollUnobservableCommandIdleDrain(db, { ...scope, idleGraceMs: 60_000 }),
-        ).toBeNull();
-        await admin`update session_background_commands set cancel_requested_at = now() - interval '2 minutes'
-          where id = ${processId}`;
-      }
+      // The child write just settled: that admission is fresh activity.
+      expect(
+        await enrollRetainedCommandContainment(db, { ...scope, idleCommandContainmentMs: 60_000 }),
+      ).toBeNull();
       if (!lateExit) {
         const ordinaryIds = await freshWorkspace();
         await insertLease(ordinaryIds, {
@@ -4003,7 +3992,8 @@ describe("P1.3 reapSandboxLeases — the one global reaper (real lease + RLS, sp
           const inventory = await reapStaleLeaseHoldersGlobal(db, {
             viewerHolderTtlMs: 60_000,
             idleGraceMs: REAPER_SETTINGS.sandboxIdleGraceMs,
-            onUnobservableCommandDrainError: (error) => {
+            idleCommandContainmentMs: 1,
+            onCommandContainmentError: (error) => {
               failures.push(error);
             },
           });
@@ -4020,9 +4010,10 @@ describe("P1.3 reapSandboxLeases — the one global reaper (real lease + RLS, sp
         await reapStaleLeaseHoldersGlobal(db, {
           viewerHolderTtlMs: 60_000,
           idleGraceMs: REAPER_SETTINGS.sandboxIdleGraceMs,
+          idleCommandContainmentMs: 1,
         })
       ).find((row) => row.sandboxGroupId === ids.groupId);
-      expect(target).not.toBeNull();
+      expect(target).toBeDefined();
       expect(
         (
           await getRetainedProcess(db, {
@@ -4233,16 +4224,16 @@ describe("P1.3 reapSandboxLeases — the one global reaper (real lease + RLS, sp
       accountId: ids.accountId,
       workspaceId: ids.workspaceId,
       sandboxGroupId: ids.groupId,
-      idleGraceMs: 15 * 60_000,
+      idleCommandContainmentMs: 30 * 60_000,
     };
     // A live owner remains a writer, even after the command stop window.
-    expect(await enrollUnobservableCommandIdleDrain(db, scope)).toBeNull();
+    expect(await enrollRetainedCommandContainment(db, scope)).toBeNull();
     await admin`delete from sandbox_lease_holders where lease_id = ${leaseId} and kind = 'turn'`;
     await admin`update session_turn_attempts set state = 'closed', outcome = 'completed',
       closed_at = now() - interval '3 minutes', quiesced_at = null
       where id = ${attempt.attemptId}`;
     // The command itself still gets the full stop window.
-    expect(await enrollUnobservableCommandIdleDrain(db, scope)).toBeNull();
+    expect(await enrollRetainedCommandContainment(db, scope)).toBeNull();
     // Deadline capture must not depend on an observer reason or a crashed claim.
     const strandedClaimId = crypto.randomUUID();
     await admin`update sandbox_retained_processes
@@ -4253,24 +4244,23 @@ describe("P1.3 reapSandboxLeases — the one global reaper (real lease + RLS, sp
       where id = ${secondProcessId}`;
     await admin`update sandbox_retained_processes
       set started_at = now() - interval '3 minutes' where id in (${processId}, ${secondProcessId})`;
-    // A closed failure has no physical-quiescence receipt: unlike an ordinary
-    // completed attempt, it cannot license a potentially lossy capture.
-    await admin`update session_turn_attempts set outcome = 'failed'
-      where id = ${attempt.attemptId}`;
-    expect(await enrollUnobservableCommandIdleDrain(db, scope)).toBeNull();
-    await admin`update session_turn_attempts set outcome = 'completed'
-      where id = ${attempt.attemptId}`;
+    // A closed owner with pending quiescence (an unsettled interruption or
+    // writer) cannot license the capture, whatever its outcome.
+    await verifyPendingQuiescenceBlocks(ids, attempt, async () => {
+      expect(await enrollRetainedCommandContainment(db, scope)).toBeNull();
+    });
     const strandedProcess = await getRetainedProcess(db, {
       workspaceId: ids.workspaceId,
       sessionId: attempt.sessionId,
       processId: secondProcessId,
     });
     expect(strandedProcess).not.toBeNull();
-    expect(await enrollUnobservableCommandIdleDrain(db, scope)).not.toBeNull();
+    expect(await enrollRetainedCommandContainment(db, scope)).not.toBeNull();
     const target = (
       await reapStaleLeaseHoldersGlobal(db, {
         viewerHolderTtlMs: 60_000,
-        idleGraceMs: scope.idleGraceMs,
+        idleGraceMs: 15 * 60_000,
+        idleCommandContainmentMs: scope.idleCommandContainmentMs,
       })
     ).find((row) => row.sandboxGroupId === ids.groupId);
     expect(target).toBeDefined();
@@ -4407,15 +4397,15 @@ describe("P1.3 reapSandboxLeases — the one global reaper (real lease + RLS, sp
       accountId: ids.accountId,
       workspaceId: ids.workspaceId,
       sandboxGroupId: ids.groupId,
-      idleGraceMs: 15 * 60_000,
+      idleCommandContainmentMs: 30 * 60_000,
     };
-    expect(await enrollUnobservableCommandIdleDrain(db, scope)).toBeNull();
+    expect(await enrollRetainedCommandContainment(db, scope)).toBeNull();
     await releaseLeaseHolder(db, {
       ...scope,
       kind: "direct",
       holderId,
     });
-    const target = await enrollUnobservableCommandIdleDrain(db, scope);
+    const target = await enrollRetainedCommandContainment(db, scope);
     expect(target).not.toBeNull();
     const spy = makeTerminateSpy();
     const { drainSandboxLease } = createSandboxLeaseActivities(reaperServices(), {
@@ -4980,6 +4970,7 @@ describe("P1.3 reapSandboxLeases — the one global reaper (real lease + RLS, sp
       admittedWorkspaceGeneration: admission.workspaceGeneration,
       operation: "preFixRetainedProcess",
       providerBinding: MODAL_PROVIDER_BINDING,
+      backgroundCommand: { commandId: processId, command: "pre-fix server" },
       owner: {
         kind: "turn",
         turnId: attempt.turnId,
@@ -5603,6 +5594,13 @@ describe("P1.3 reapSandboxLeases — the one global reaper (real lease + RLS, sp
     expect(rows).toEqual([
       { id: admission.id, outcome: "rejected", state: "lost" },
       { id: orphan.id, outcome: "rejected", state: null },
+    ]);
+    // The operator settlement tells the owning session, like automatic loss.
+    const finished = await admin<{ payload: { state: string; reason: string } }[]>`
+      select payload from session_events where session_id = ${attempt.sessionId}
+        and type = 'session.command.finished'`;
+    expect(finished.map((event) => event.payload)).toEqual([
+      expect.objectContaining({ state: "lost", reason: "provider_instance_lost" }),
     ]);
 
     const duplicate = await reconcileColdLostLeaseInstanceBlockers(db, {

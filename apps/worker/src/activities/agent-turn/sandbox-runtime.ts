@@ -13,6 +13,7 @@ import { createProviderCommandRetainer } from "@opengeni/db/retained-provider-co
 import {
   RoutingMutationOutcomeUnknownError,
   ProviderCommandStartOutcomeUnknownError,
+  ProviderCommandObservationUnavailableError,
   isModalCommandStartOutcomeUnknownError,
   withModalCommandStartSignal,
   resolveModalCheckpointProviderBindingForSession,
@@ -84,7 +85,10 @@ function internalMutationUnknownCommand(
     if (!value || typeof value !== "object" || seen.has(value)) continue;
     seen.add(value);
     try {
-      if (value instanceof ProviderCommandStartOutcomeUnknownError) {
+      if (
+        value instanceof ProviderCommandStartOutcomeUnknownError ||
+        value instanceof ProviderCommandObservationUnavailableError
+      ) {
         unknown = true;
         // Zod reads ordinary properties. First make a bounded own-data-only
         // copy so neither validation nor equality executes descriptor getters.

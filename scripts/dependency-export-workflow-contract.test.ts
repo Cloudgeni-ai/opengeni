@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { cp, mkdir, mkdtemp, readFile, rm, unlink, writeFile } from "node:fs/promises";
+import { cp, mkdir, mkdtemp, readFile, realpath, rm, unlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 
@@ -231,12 +231,16 @@ if [[ "$*" == "run test:effective-dependency-exports" ]]; then exit 37; fi
         );
       }
       const sentinel = join(tooling, "scripts/dependency-export-workflow-contract.test.ts");
+      const toolingCwd = await realpath(tooling);
       await writeFile(
         sentinel,
-        `import { test, expect } from "bun:test";\ntest("matching tooling executes", () => expect(process.cwd()).toBe(${JSON.stringify(tooling)}));\n`,
+        `import { test, expect } from "bun:test";\ntest("matching tooling executes", () => expect(process.cwd()).toBe(${JSON.stringify(toolingCwd)}));\n`,
       );
       const corrected = await command(["bash", "-e", "-c", guard.run!], tooling);
-      expect(corrected.status).toBe(0);
+      expect(
+        corrected.status,
+        `Workflow-owned export regression failed.\nstdout:\n${corrected.stdout}\nstderr:\n${corrected.stderr}`,
+      ).toBe(0);
       expect(corrected.stderr).toContain(
         "browser linking rejects a missing ConnectPopupClosedError",
       );

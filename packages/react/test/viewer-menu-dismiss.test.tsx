@@ -54,3 +54,56 @@ test("pointer input inside stays open; outside dismisses without swallowing inpu
     await rendered.unmount();
   }
 });
+
+function AdjacentMenus() {
+  const first = useViewerMenuDismiss();
+  const second = useViewerMenuDismiss();
+  return (
+    <>
+      <details ref={first}>
+        <summary>Browser sessions</summary>
+        <button type="button">Choose session</button>
+      </details>
+      <details ref={second}>
+        <summary>Browser profiles</summary>
+        <button type="button">Choose profile</button>
+      </details>
+    </>
+  );
+}
+
+test("keyboard focus leaving a menu closes it without stealing the next menu's focus", async () => {
+  const rendered = await renderComponent(<AdjacentMenus />);
+  let dockEscapes = 0;
+  const dock = () => {
+    dockEscapes += 1;
+  };
+  document.addEventListener("keydown", dock);
+  try {
+    const [first, second] = [...rendered.container.querySelectorAll<HTMLDetailsElement>("details")];
+    first!.open = true;
+    first!.querySelector("button")!.focus();
+    const next = second!.querySelector("summary")!;
+    next.focus();
+    expect(first!.open).toBe(false);
+    expect(document.activeElement === next).toBe(true);
+    second!.open = true;
+    second!.querySelector("button")!.focus();
+    second!
+      .querySelector("button")!
+      .dispatchEvent(
+        new KeyboardEvent("keydown", { key: "Escape", bubbles: true, cancelable: true }),
+      );
+    expect(second!.open).toBe(false);
+    expect(document.activeElement === next).toBe(true);
+    expect(dockEscapes).toBe(0);
+    first!.open = true;
+    next.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true }));
+    expect(first!.open).toBe(true);
+    expect(document.activeElement === next).toBe(true);
+    expect(dockEscapes).toBe(1);
+  } finally {
+    document.removeEventListener("keydown", dock);
+    await rendered.unmount();
+  }
+});

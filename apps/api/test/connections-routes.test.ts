@@ -13,6 +13,7 @@ import {
   OPENGENI_API_CONTRACT_REVISION,
   OPENROUTER_CREDENTIAL_OPERATION_DIGEST_METADATA_KEY,
   OPENROUTER_CREDENTIAL_OPERATION_ID_METADATA_KEY,
+  OPENGENI_SLACK_REST_USER_SCOPES,
   VERCEL_AI_GATEWAY_CREDENTIAL_OPERATION_DIGEST_METADATA_KEY,
   VERCEL_AI_GATEWAY_CREDENTIAL_OPERATION_ID_METADATA_KEY,
   signDelegatedAccessToken,
@@ -3880,7 +3881,8 @@ describe("connections routes", () => {
         const body = (await response.json()) as { state: string; authorizationUrl: string };
         const authUrl = new URL(body.authorizationUrl);
         expect(authUrl.searchParams.get("client_id")).toBe("slack-client-id");
-        expect(authUrl.searchParams.get("scope")).toBe("search:read.public chat:write");
+        expect(authUrl.searchParams.get("scope")).toBe(OPENGENI_SLACK_REST_USER_SCOPES.join(" "));
+        expect(authUrl.searchParams.get("scope")).not.toContain("search:");
         const state = await readMcpOAuthState(body.state);
         expect(state?.providerDomain).toBe("slack.com");
         expect(state?.ownership).toBe(ownership);

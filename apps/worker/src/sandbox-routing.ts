@@ -1,3 +1,4 @@
+import { isDeepStrictEqual } from "node:util";
 // apps/worker/src/sandbox-routing.ts — wire the agent-loop-free routing proxy
 // (`@opengeni/runtime` RoutingSandboxSession + makeActiveBackendResolver) to the
 // real DB pointer + the live NATS control plane for the WORKER TURN path (M7).
@@ -47,6 +48,7 @@ import { observeSessionBackgroundCommandCompletion } from "@opengeni/db/session-
 import { appendSessionCommandOutput } from "@opengeni/db/session-command-output";
 import type { OpStreamOutputFrame } from "@opengeni/runtime/sandbox";
 import type { EventBus } from "@opengeni/events";
+import { publishDurableSessionEvents } from "./session-event-fanout";
 import {
   buildSelfhostedBackendSession,
   ActiveBackendUnresolvableError,
@@ -401,6 +403,11 @@ async function resolveCurrentHomeBackend(
       diagnostic: "provider_not_found_during_home_route_rebind",
     });
     if (marked.status === "marked") {
+      await publishDurableSessionEvents(
+        services.bus,
+        ids.workspaceId,
+        marked.backgroundCommandEvents,
+      );
       await services.onHomeSandboxLost?.({
         sandboxGroupId: ids.sandboxGroupId,
         instanceId: lease.instanceId,
@@ -785,6 +792,62 @@ function settleRetainedProcessForTurn(
   };
 }
 
+/** Cleanup can observe the independently settled row even when this worker's
+ * pending output receipt or original provider transport can no longer advance. */
+function isRetainedProcessSettledForTurn(services: RoutingWiringServices, ids: RoutingWiringIds) {
+  const fence = ids.workspaceMutationFence;
+  if (!fence) return undefined;
+  return async ({
+    backend,
+    process,
+  }: {
+    backend: ResolvedActiveBackend;
+    process: RoutingRetainedProcess;
+  }): Promise<boolean> => {
+    const durable = await getRetainedProcess(services.db, {
+      workspaceId: ids.workspaceId,
+      sessionId: ids.sessionId,
+      processId: process.id,
+    });
+    if (
+      !durable ||
+      durable.state === "active" ||
+      durable.providerSessionId !== process.providerSessionId ||
+      durable.providerBackend !== (sandboxBackendForSdkBackendId(backend.kind) ?? backend.kind) ||
+      durable.providerInstanceId !== backend.providerInstanceId ||
+      durable.leaseEpoch !== backend.leaseEpoch ||
+      durable.routeKind !== (backend.sandboxId === null ? "home" : "active") ||
+      durable.routeTargetId !== backend.sandboxId ||
+      durable.routeEpoch !== backend.activeEpoch
+    )
+      return false;
+    if (process.providerCommand) {
+      // The general process projection deliberately omits the provider locator.
+      // Load its immutable identity through the exact protected persistence seam.
+      const command = await retainedProviderCommandPersistence(services.db, {
+        accountId: fence.accountId,
+        workspaceId: ids.workspaceId,
+        sessionId: ids.sessionId,
+        processId: process.id,
+      }).load();
+      if (
+        !command ||
+        command.kind !== process.providerCommand.kind ||
+        command.execId !== process.providerCommand.execId ||
+        command.taskId !== process.providerCommand.taskId ||
+        command.sandboxId !== process.providerCommand.sandboxId ||
+        Boolean(command.pty) !== Boolean(process.providerCommand.pty) ||
+        (command.kind === "modal-router-v1" &&
+          process.providerCommand.kind === "modal-router-v1" &&
+          !isDeepStrictEqual(command.supervision, process.providerCommand.supervision))
+      )
+        return false;
+    }
+    // Terminal rows are written only through proof-gated physical settlement.
+    return true;
+  };
+}
+
 function adoptRetainedProcessAsBackgroundCommandForTurn(
   services: RoutingWiringServices,
   ids: RoutingWiringIds,
@@ -867,6 +930,7 @@ export function wrapTurnBoxWithRouting(
   const beforeProcessMutation = beforeRetainedProcessMutation(services, ids);
   const afterProcessMutation = afterRetainedProcessMutation(services, ids);
   const settleProcess = settleRetainedProcessForTurn(services, ids);
+  const isProcessSettled = isRetainedProcessSettledForTurn(services, ids);
   const adoptProcessAsBackgroundCommand = adoptRetainedProcessAsBackgroundCommandForTurn(
     services,
     ids,
@@ -1063,6 +1127,7 @@ export function wrapTurnBoxWithRouting(
     ...(beforeProcessMutation ? { beforeProcessMutation } : {}),
     ...(afterProcessMutation ? { afterProcessMutation } : {}),
     ...(settleProcess ? { settleProcess } : {}),
+    ...(isProcessSettled ? { isProcessSettled } : {}),
     ...(ids.workspaceMutationFence
       ? { observeProcessTerminal: observeRetainedProcessTerminalForTurn(services, ids)! }
       : {}),
@@ -1093,6 +1158,11 @@ export function wrapTurnBoxWithRouting(
               diagnostic: "provider_not_found_during_routed_operation",
             });
             if (marked.status === "marked") {
+              await publishDurableSessionEvents(
+                services.bus,
+                ids.workspaceId,
+                marked.backgroundCommandEvents,
+              );
               await services.onHomeSandboxLost?.({
                 sandboxGroupId: home.sandboxGroupId,
                 instanceId: expectedInstanceId,
@@ -1149,6 +1219,7 @@ export function wrapLazyTurnBoxWithRouting(
   const beforeProcessMutation = beforeRetainedProcessMutation(services, ids);
   const afterProcessMutation = afterRetainedProcessMutation(services, ids);
   const settleProcess = settleRetainedProcessForTurn(services, ids);
+  const isProcessSettled = isRetainedProcessSettledForTurn(services, ids);
   const adoptProcessAsBackgroundCommand = adoptRetainedProcessAsBackgroundCommandForTurn(
     services,
     ids,
@@ -1324,6 +1395,7 @@ export function wrapLazyTurnBoxWithRouting(
     ...(beforeProcessMutation ? { beforeProcessMutation } : {}),
     ...(afterProcessMutation ? { afterProcessMutation } : {}),
     ...(settleProcess ? { settleProcess } : {}),
+    ...(isProcessSettled ? { isProcessSettled } : {}),
     ...(ids.workspaceMutationFence
       ? { observeProcessTerminal: observeRetainedProcessTerminalForTurn(services, ids)! }
       : {}),
@@ -1355,6 +1427,11 @@ export function wrapLazyTurnBoxWithRouting(
               diagnostic: "provider_not_found_during_routed_operation",
             });
             if (marked.status === "marked") {
+              await publishDurableSessionEvents(
+                services.bus,
+                ids.workspaceId,
+                marked.backgroundCommandEvents,
+              );
               await services.onHomeSandboxLost?.({
                 sandboxGroupId: home.sandboxGroupId,
                 instanceId: backend.providerInstanceId,

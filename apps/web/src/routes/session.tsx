@@ -2,7 +2,7 @@ import { enablePierreDiffs } from "@opengeni/react/diffs";
 import { enableSandboxTerminal } from "@opengeni/react/terminal";
 import { enableCodeEditor } from "@opengeni/react/editor";
 import { enableDesktopViewer } from "@opengeni/react/desktop";
-import { retainedImageId } from "@opengeni/react";
+import { isModelUnavailableSubmissionError, retainedImageId } from "@opengeni/react";
 import { useConnectionAccounts } from "@/components/capabilities/use-connection-accounts";
 import { sessionAuthRecommendation } from "@/components/capabilities/session-auth-recommendation";
 import {
@@ -18,6 +18,9 @@ import type { NativeConnectRequest } from "@/components/capabilities/native-conn
 import { FailureRecoveryBoundary } from "@/components/session/failure-recovery-boundary";
 import { createFailedSessionRetry, type FailedSessionRetryInput } from "@/lib/failed-session-retry";
 import { failedSessionCopy } from "@/lib/failed-session-copy";
+import { useStreamHealthTelemetry } from "@/lib/stream-health";
+import { markIntegrationConnectRedirect } from "@/lib/integration-connect-redirect";
+import { noteTurnFailureAction } from "@/lib/turn-failure-actions";
 import { observeSessionTurnEvents } from "@/lib/analytics-observer";
 import { needsSandboxRecoveryCheck } from "@/lib/sandbox-failure";
 import {
@@ -150,6 +153,12 @@ import {
 } from "@/lib/model-policy";
 import { sessionTimelineEmptyStateCopy } from "@/lib/session-empty-state";
 import {
+  sessionModelMissingFromCatalog,
+  unavailableModelName,
+  unavailableModelReplacement,
+} from "@/lib/unavailable-session-model";
+import { UnavailableModelNotice } from "@/components/session/unavailable-model-notice";
+import {
   consumeSessionComposerFocusIntent,
   FOCUS_SESSION_COMPOSER_EVENT,
   sessionComposerFocusIntentIsEligible,
@@ -160,6 +169,7 @@ import {
   applySessionAttentionProjection,
   updateLocalSessionDeliveryAttention,
   notifySessionAttentionChanged,
+  sessionAttentionReadThroughSequence,
   sessionReadProjectionKey,
   shouldAcknowledgeActiveSession,
   shouldProjectActiveSessionRead,
@@ -182,7 +192,9 @@ import {
   firstPartySessionToolOptionsFor,
   sessionPolicyPickerIds,
 } from "@/lib/session-tools";
+import { stableJson } from "@opengeni/contracts";
 import { useFollowUpRepositories } from "@/lib/use-follow-up-repositories";
+import type { ChatSendContext } from "@/components/capabilities/session-github-repositories";
 import { githubAppConnectRequest } from "@/lib/github-app-connect";
 import {
   useFixedResourceScopes,
@@ -352,7 +364,6 @@ export function SessionRoute({
     loadNewer,
     loadingOldest,
     loadOldest,
-    lastSequence: renderedThroughSequence,
     jumpToLatest,
     jumpToSequence,
     error: streamError,
@@ -619,9 +630,13 @@ export function SessionRoute({
     },
     [setContextSession],
   );
-  const readThroughSequence = session
-    ? Math.max(session.lastSequence, renderedThroughSequence)
-    : renderedThroughSequence;
+  // Raw token/progress batches do not create unread attention. Acknowledge
+  // completed output or an actionable boundary, rather than every stream flush.
+  const attentionThroughSequence = useMemo(
+    () => sessionAttentionReadThroughSequence(events),
+    [events],
+  );
+  const readThroughSequence = Math.max(session?.lastSequence ?? 0, attentionThroughSequence);
   const activeReadProjectionKey = session
     ? sessionReadProjectionKey(session.id, readThroughSequence)
     : null;
@@ -743,6 +758,8 @@ export function SessionRoute({
   useEffect(() => {
     setContextConnectionState(connectionState);
   }, [connectionState, setContextConnectionState]);
+  // Content-free operational signal; see lib/stream-health.ts.
+  useStreamHealthTelemetry("session", connectionState);
   useEffect(() => {
     sessionEventFeedStore.set({ sessionId, events });
   }, [events, sessionId, sessionEventFeedStore]);
@@ -960,6 +977,7 @@ export function SessionRoute({
                 : "GitHub is not configured on this deployment.",
             );
           }
+          await markIntegrationConnectRedirect("github", "app_install");
           window.location.assign(status.linkUrl);
           return;
         }
@@ -989,6 +1007,7 @@ export function SessionRoute({
           if (!response.authorizationUrl) {
             throw new Error("The provider did not return an authorization link.");
           }
+          await markIntegrationConnectRedirect({ domain: mcpUrl }, "oauth");
           window.location.assign(response.authorizationUrl);
           return;
         }
@@ -1027,6 +1046,7 @@ export function SessionRoute({
       if (!response.authorizationUrl) {
         throw new Error("The provider did not return an authorization link.");
       }
+      await markIntegrationConnectRedirect({ domain: item.providerDomain }, "oauth");
       window.location.assign(response.authorizationUrl);
     },
     [
@@ -1709,6 +1729,11 @@ function SessionChatPane(props: {
   const composerRegionRef = useRef<HTMLDivElement | null>(null);
   const [composerFocusSignal, setComposerFocusSignal] = useState(0);
   const [modelPickerSession, setModelPickerSession] = useState<string | null>(null);
+  // The API's authoritative "model is not available" refusal for this session,
+  // which also covers connection-owned models the catalog cannot judge.
+  const [refusedModel, setRefusedModel] = useState<{ sessionId: string; model: string } | null>(
+    null,
+  );
   useEffect(() => {
     const onFocusRequest = (event: Event) => {
       const detail = (event as CustomEvent<SessionComposerFocusIntent>).detail;
@@ -1898,6 +1923,19 @@ function SessionChatPane(props: {
           "connections:read",
         ),
   );
+  // A conversation card's human attach is an ordinary Send. It reads the
+  // composer's policy, control and account choices at click time.
+  const chatSendContext = useRef<ChatSendContext>({
+    blocked: null,
+    awaitingHuman: false,
+    extras: {},
+  });
+  const readChatSendContext = useCallback(() => chatSendContext.current, []);
+  // Session reads return a new resources array; keep the identity while the
+  // contents match so timeline renderers keyed on it do not reset.
+  const sessionResourcesKey = stableJson(props.session.resources);
+  // eslint-disable-next-line react-hooks/exhaustive-deps -- keyed by content
+  const stableSessionResources = useMemo(() => props.session.resources, [sessionResourcesKey]);
   const reloadSessionAfterSetup = props.onReloadSession;
   const refreshConnectionAccounts = connectionAccounts.refresh;
   const afterConnectionSetup = useCallback(async () => {
@@ -1923,6 +1961,8 @@ function SessionChatPane(props: {
             workspaceId={props.session.workspaceId}
             sessionId={props.session.id}
             visibility={props.session.tenancy?.visibility ?? "workspace"}
+            resources={stableSessionResources}
+            sendContext={readChatSendContext}
             onConfigured={afterConnectionSetup}
           />
         </Suspense>
@@ -1934,6 +1974,8 @@ function SessionChatPane(props: {
       props.session.workspaceId,
       props.session.tenancy?.visibility,
       props.session.tenancy?.authorityEpoch,
+      stableSessionResources,
+      readChatSendContext,
       afterConnectionSetup,
     ],
   );
@@ -2173,6 +2215,7 @@ function SessionChatPane(props: {
     // that immutable optimistic operation; later additions belong to the next
     // draft, while retry keeps the original resource refs in the failed bubble.
     onSubmitted: (_text, input) => {
+      noteTurnFailureAction("send_message");
       attachments.removeReadyFiles(
         (input.resources ?? []).flatMap((resource) =>
           resource.kind === "file" ? [resource.fileId] : [],
@@ -2192,7 +2235,17 @@ function SessionChatPane(props: {
       repositories.commitSent(input.resources ?? []);
       personalAttachment.onAccepted(input);
     },
-    onDeliveryError: personalAttachment.onDeliveryError,
+    onDeliveryError: (error, input, delivery) => {
+      personalAttachment.onDeliveryError(error, input, delivery);
+      // Retrying cannot help: re-read the catalog so the composer offers a
+      // replacement, and open the picker so the next step is visible.
+      if (isModelUnavailableSubmissionError(error)) {
+        const refused = refusedModelId(error, input);
+        if (refused) setRefusedModel({ sessionId: props.session.id, model: refused });
+        void modelCatalog.refresh();
+        setModelPickerSession(props.session.id);
+      }
+    },
   });
   useBrowserAccountBridgeBlocker(`session-composer:${props.session.id}`, () => {
     if (attachments.hasUnresolved) {
@@ -2217,6 +2270,28 @@ function SessionChatPane(props: {
         }
       : null;
   });
+  chatSendContext.current = {
+    blocked: isTerminalSessionStatus(props.session.status)
+      ? "This chat has ended. Start a new chat to use a repository."
+      : connectionAccounts.requiresAccountChoice
+        ? "Choose an account for this chat's connected tools in the composer first."
+        : personalAttachment.requiresDecision
+          ? "Finish the personal access choice in the composer first."
+          : null,
+    awaitingHuman: props.session.status === "requires_action",
+    extras: {
+      ...(composer.policy ?? {}),
+      ...((props.queue.effectiveControl ?? props.session.effectiveControl)?.controlEtag
+        ? {
+            controlEtag: (props.queue.effectiveControl ?? props.session.effectiveControl)!
+              .controlEtag,
+          }
+        : {}),
+      ...(connectionAccounts.selections.length > 0
+        ? { connectionAccounts: connectionAccounts.selections }
+        : {}),
+    },
+  };
   const composerPolicy = composer.policy;
   const [retryOperation, setRetryOperation] = useState<FailedSessionRetryInput | null>(null);
   const pendingRetryInput =
@@ -2277,8 +2352,34 @@ function SessionChatPane(props: {
     (latencyMode === "standard" ||
       runnableLatencyModesForModel(selectedPolicyRow.catalog).includes(latencyMode)),
   );
+  // A model the catalog no longer lists (retired or removed) is refused by the
+  // API, so the frozen session policy stops counting as sendable for it.
+  const refusedSessionModel =
+    refusedModel?.sessionId === props.session.id ? refusedModel.model : null;
+  const composerModelUnavailable =
+    model === refusedSessionModel ||
+    sessionModelMissingFromCatalog({
+      model,
+      models: modelCatalog.models,
+      error: modelCatalog.error,
+    });
+  const sessionModelUnavailable =
+    props.session.model === refusedSessionModel ||
+    sessionModelMissingFromCatalog({
+      model: props.session.model,
+      models: modelCatalog.models,
+      error: modelCatalog.error,
+    });
+  // Only someone who can send may have the composer's model replaced: the
+  // replacement is saved to their durable draft.
+  const canControlSession = Boolean(
+    context.accessContext.workspaceGrants
+      .find((grant) => grant.workspaceId === props.session.workspaceId)
+      ?.permissions.includes("sessions:control"),
+  );
   const composerPolicyValid = Boolean(
-    composerPolicy && (catalogComboValid || matchesFrozenSessionPolicy),
+    composerPolicy &&
+    (catalogComboValid || (matchesFrozenSessionPolicy && !composerModelUnavailable)),
   );
   const noRunnableModel =
     !modelCatalog.loading &&
@@ -2286,9 +2387,67 @@ function SessionChatPane(props: {
     !modelCatalog.rows.some((row) => row.selectable);
   const composerPolicyError =
     composerPolicy && !modelCatalog.loading && !composerPolicyValid && !noRunnableModel
-      ? "Choose a model, reasoning level, and speed supported by this session."
+      ? composerModelUnavailable
+        ? "This model is no longer available. Choose another model to continue."
+        : "Choose a model, reasoning level, and speed supported by this session."
       : null;
   composerPolicyValidRef.current = composerPolicyValid;
+
+  // Preselect a runnable model for the next message when the composer still
+  // names an unavailable one. Accepted turns and history keep their frozen
+  // model; the notice above the input names the replacement.
+  const unavailableReplacement = useMemo(
+    () =>
+      composerModelUnavailable || sessionModelUnavailable
+        ? unavailableModelReplacement({
+            rows: modelCatalog.rows,
+            defaultSelection: modelCatalog.defaultSelection,
+            latencyMode,
+            codexOnly: props.session.codexCompactionMode === "remote_v2",
+          })
+        : null,
+    [
+      composerModelUnavailable,
+      sessionModelUnavailable,
+      modelCatalog.rows,
+      modelCatalog.defaultSelection,
+      latencyMode,
+      props.session.codexCompactionMode,
+    ],
+  );
+  useEffect(() => {
+    if (!composerModelUnavailable || !unavailableReplacement) return;
+    if (composerDraftLoading || !hasComposerPolicy || modelPickerDisabled || terminal) return;
+    // A failed session keeps its model until the person chooses: the
+    // failure banner's Retry re-runs that turn with the composer's model.
+    if (!canControlSession || props.failure) return;
+    setComposerModel(unavailableReplacement.model);
+    setComposerReasoningEffort(unavailableReplacement.reasoningEffort);
+    if (unavailableReplacement.latencyMode) {
+      setComposerLatencyMode(unavailableReplacement.latencyMode);
+    }
+  }, [
+    canControlSession,
+    props.failure,
+    composerDraftLoading,
+    composerModelUnavailable,
+    hasComposerPolicy,
+    modelPickerDisabled,
+    setComposerLatencyMode,
+    setComposerModel,
+    setComposerReasoningEffort,
+    terminal,
+    unavailableReplacement,
+  ]);
+  const unavailableModelNotice =
+    (sessionModelUnavailable || composerModelUnavailable) && !terminal ? (
+      <UnavailableModelNotice
+        modelName={unavailableModelName(sessionModelUnavailable ? props.session.model : model)}
+        replacementLabel={composerModelUnavailable ? null : (selectedPolicyRow?.label ?? null)}
+        canChooseModel={canControlSession && !modelPickerDisabled}
+        onChooseModel={() => setModelPickerSession(props.session.id)}
+      />
+    ) : null;
 
   useEffect(() => {
     if (
@@ -2573,6 +2732,10 @@ function SessionChatPane(props: {
           <LazyFailedSessionBanner
             key={props.session.id}
             failure={props.failure}
+            analyticsKey={
+              props.failure.failureEventId ??
+              `${props.session.id}:${props.failure.failedAt ?? "unknown"}`
+            }
             canChooseModel={canChooseRecoveryModel}
             hasModelPicker={hasComposerPolicy}
             freeModel={isDeploymentFreeModel(modelCatalog.rows, props.session.model)}
@@ -2980,6 +3143,7 @@ function SessionChatPane(props: {
                 `/workspaces/${props.session.workspaceId}/sessions/${sessionId}`,
             }}
             disabled={terminal}
+            header={unavailableModelNotice}
             commandContext={commandContext}
             onClearView={props.onClearView}
             fileUploadsEnabled={context.clientConfig.fileUploads.enabled === true}
@@ -3150,4 +3314,12 @@ function SessionChatPane(props: {
       </div>
     </ChatViewportFileDropTarget>,
   );
+}
+
+/** The model a "model is not available" refusal named: the API detail, else the attempted input. */
+function refusedModelId(error: Error, input: unknown): string | null {
+  const details = (error as { details?: Record<string, unknown> }).details;
+  if (typeof details?.modelId === "string" && details.modelId) return details.modelId;
+  const attempted = (input as { model?: unknown } | null)?.model;
+  return typeof attempted === "string" && attempted ? attempted : null;
 }

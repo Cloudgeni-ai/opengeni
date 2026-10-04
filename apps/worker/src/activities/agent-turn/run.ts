@@ -1,9 +1,9 @@
+import { withClaudeConnectionCredential } from "@opengeni/config";
 import {
   getSessionAuthorityProjection,
   readActiveSandbox,
   getWorkspaceCredentialProvider,
-  loadClaudeSubscriptionUsageCredential,
-  resolveClaudeSubscriptionCredential,
+  resolveClaudeAccountCredential,
   ClaudeSubscriptionReconnectRequired,
 } from "@opengeni/db";
 import { routingEnabled } from "../../sandbox-routing";
@@ -66,6 +66,7 @@ import {
   recordModelRequestPhase,
   recordCompanyBrainContributions,
   recordTurnStartupPhase,
+  measureTurnStartupPhase,
   runtimeMetricsHooksForObservability,
 } from "../../observability-metrics";
 import { summarizeCompanyBrainContributions } from "../../model-context-contributions";
@@ -102,7 +103,7 @@ import {
   establishTurnSandbox,
   bindLazySandboxProvisioner,
 } from "./sandbox-establish";
-import { selectXaiTurnCapacity } from "./xai-capacity";
+import { selectXaiTurnCapacity, selectClaudeTurnCapacity } from "./xai-capacity";
 import { prepareRunCredentials } from "./run-credentials";
 import { prepareTurnToolPolicy, prepareTurnToolRuntime } from "./tool-environment";
 import { applyTurnGitHubRepositoryBindings } from "./github-repository-bindings";
@@ -183,6 +184,8 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
       bus,
       runtime,
       summarizeContextForCompaction,
+      requestWorkerDrain,
+      turnFinalizationTimeoutMs,
       objectStorage,
       observability,
       wakeSessionWorkflow,
@@ -449,21 +452,35 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
       if (!attempt.turnId) {
         throw new Error("Turn id was not initialized");
       }
-      const learning = await freezeAgentLearningPolicy(db, {
-        accountId: input.accountId,
-        workspaceId: input.workspaceId,
-        actor: {
-          kind: "agent",
-          sessionId: input.sessionId,
-          turnId: attempt.turnId,
-          attemptId: input.attemptId,
-          executionGeneration: attempt.executionGeneration,
+      const learningActor = {
+        kind: "agent" as const,
+        sessionId: input.sessionId,
+        turnId: attempt.turnId,
+        attemptId: input.attemptId,
+        executionGeneration: attempt.executionGeneration,
+      };
+      const learning = await measureTurnStartupPhase(
+        observability,
+        {
+          phase: "learning_policy_freeze",
+          provider: turnExecutionPolicy.providerId,
+          backend: turn.sandboxBackend,
         },
-      });
-      const attachmentAuthority = await getSessionAuthorityProjection(
-        db,
-        input.workspaceId,
-        input.sessionId,
+        () =>
+          freezeAgentLearningPolicy(db, {
+            accountId: input.accountId,
+            workspaceId: input.workspaceId,
+            actor: learningActor,
+          }),
+      );
+      const attachmentAuthority = await measureTurnStartupPhase(
+        observability,
+        {
+          phase: "attachment_authority_projection",
+          provider: turnExecutionPolicy.providerId,
+          backend: turn.sandboxBackend,
+        },
+        () => getSessionAuthorityProjection(db, input.workspaceId, input.sessionId),
       );
       if (!attachmentAuthority) throw new Error("Session attachment authority unavailable");
       return await withSessionRlsActorContext(
@@ -527,8 +544,38 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
             if ("exit" in codexCapacity) return codexCapacity.exit;
             const xaiCapacity = await selectXaiTurnCapacity(capacityDeps);
             if ("exit" in xaiCapacity) return xaiCapacity.exit;
+            const claudeCapacity = await selectClaudeTurnCapacity(capacityDeps);
+            if ("exit" in claudeCapacity) return claudeCapacity.exit;
           }
 
+          let selectedCapabilitySettings = capabilitySettings;
+          if (billingState.isClaudeTurn) {
+            const credentialId = providerTurn.effectiveClaudeCredentialId;
+            const subjectId = leases.claude.subjectId;
+            const authoritySnapshot = providerTurn.claudeAuthoritySnapshot;
+            if (!credentialId || !subjectId || !authoritySnapshot)
+              throw new Error("Claude serving account has no accepted authority");
+            leases.claude.assertUsable();
+            const credential = await resolveClaudeAccountCredential(db, settings, {
+              accountId: input.accountId,
+              workspaceId: input.workspaceId,
+              subjectId,
+              credentialId,
+              authoritySnapshot,
+            });
+            providerTurn.effectiveClaudeCredentialVersion = credential.version;
+            if ("reconnectRequired" in credential) throw new ClaudeSubscriptionReconnectRequired();
+            selectedCapabilitySettings = withClaudeConnectionCredential(
+              capabilitySettings,
+              "claude_subscription",
+              JSON.stringify(credential.secret),
+              authoritySnapshot.scope === "organization" ? "organization" : "workspace",
+              {
+                connectionId: credentialId,
+                credentialVersion: credential.version,
+              },
+            );
+          }
           const governance = await prepareGovernanceAndModel({
             input,
             db,
@@ -539,7 +586,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
             media,
             turn,
             session,
-            capabilitySettings,
+            capabilitySettings: selectedCapabilitySettings,
             fileAuthoritySubjectId,
             humanInputResume,
             turnExecutionPolicy,
@@ -552,6 +599,8 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
             modelId: turnExecutionPolicy.productModelId,
             codexCredentialId: providerTurn.effectiveCodexCredentialId,
             xaiCredentialId: providerTurn.effectiveXaiCredentialId,
+            claudeCredentialId: providerTurn.effectiveClaudeCredentialId,
+            claudeAuthoritySnapshot: turn.claudeProviderAccountAuthoritySnapshot,
           });
           const {
             runtimePreparationStartedAt,
@@ -935,37 +984,61 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
           const claudeUsageObserver = await createClaudeUsageObserver(
             parseModelProvidersJson(runSettings.modelProvidersJson),
             providerTurn.latestClaudeUsage,
-            (scope) =>
-              loadClaudeSubscriptionUsageCredential(db, settings, {
-                accountId: input.accountId,
-                workspaceId: input.workspaceId,
-                scope,
-              }),
+            async () => null,
           );
           const withClaudeUsage = <T>(fn: () => Promise<T>): Promise<T> =>
             withClaudeUsageObserver(claudeUsageObserver, fn, async (providerId, headers) => {
-              const binding = claudeUsageObserver.binding(providerId);
-              if (!binding) return headers;
-              const credential = await resolveClaudeSubscriptionCredential(
-                db,
-                settings,
-                {
-                  accountId: input.accountId,
-                  workspaceId: input.workspaceId,
-                  scope: binding.scope,
-                },
-                {
-                  expectedConnectionId: binding.expectedConnectionId,
-                  expectedCredentialVersion: binding.expectedCredentialVersion,
+              return claudeUsageObserver.prepareRequestWithObserver(
+                providerId,
+                headers,
+                async (binding) => {
+                  const credentialId = providerTurn.effectiveClaudeCredentialId;
+                  const authoritySnapshot = providerTurn.claudeAuthoritySnapshot;
+                  const subjectId = leases.claude.subjectId;
+                  if (
+                    !credentialId ||
+                    !authoritySnapshot ||
+                    !subjectId ||
+                    binding.expectedConnectionId !== credentialId ||
+                    binding.expectedCredentialVersion !==
+                      providerTurn.effectiveClaudeCredentialVersion ||
+                    binding.scope !==
+                      (authoritySnapshot.scope === "organization" ? "organization" : "workspace")
+                  )
+                    throw new Error(
+                      "Claude physical request is outside its accepted serving account",
+                    );
+                  await leases.claude.renew("runtime_event");
+                  leases.claude.assertUsable();
+                  await assertModelConnectionAllowsTurn(db, {
+                    workspaceId: input.workspaceId,
+                    subjectId,
+                    modelId: turnExecutionPolicy.productModelId,
+                    claudeCredentialId: credentialId,
+                    claudeAuthoritySnapshot: authoritySnapshot,
+                  });
+                  const credential = await resolveClaudeAccountCredential(
+                    db,
+                    settings,
+                    {
+                      accountId: input.accountId,
+                      workspaceId: input.workspaceId,
+                      subjectId,
+                      credentialId,
+                      authoritySnapshot,
+                    },
+                    { expectedCredentialVersion: binding.expectedCredentialVersion },
+                  );
+                  if ("reconnectRequired" in credential)
+                    throw new ClaudeSubscriptionReconnectRequired();
+                  leases.claude.assertUsable();
+                  return {
+                    token: credential.secret.token,
+                    connectionId: credential.id,
+                    credentialVersion: credential.version,
+                  };
                 },
               );
-              if (!credential) return headers; // A replaced connection never lends its new token to this turn.
-              if ("reconnectRequired" in credential)
-                throw new ClaudeSubscriptionReconnectRequired();
-              claudeUsageObserver.renew(providerId, credential);
-              headers.set("authorization", `Bearer ${credential.token}`);
-              headers.delete("x-api-key");
-              return headers;
             });
           const withCodex = <T>(fn: () => Promise<T>): Promise<T> =>
             codexContext ? codexRequestStorage.run(codexContext, fn) : fn();
@@ -1844,6 +1917,8 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
       });
     } finally {
       await finalizeTurnAttempt({
+        turnFinalizationTimeoutMs,
+        requestWorkerDrain,
         input,
         settings,
         db,
@@ -1877,7 +1952,9 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
     }
   };
   return async (input: RunAgentTurnInput): Promise<RunAgentTurnResult> => {
+    const servicesStartedAt = performance.now();
     const resolvedServices = await services();
+    const servicesDurationSeconds = (performance.now() - servicesStartedAt) / 1_000;
     const correlationId = turnExecutionTelemetryKey(
       input.workspaceId,
       input.sessionId,
@@ -1894,6 +1971,17 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
     try {
       return await withMcpTelemetry(resolvedServices.observability, correlationId, () =>
         withTraceContext(span, () => {
+          try {
+            recordTurnStartupPhase(resolvedServices.observability, {
+              phase: "services_initialization",
+              provider: "unresolved",
+              backend: "unresolved",
+              outcome: "completed",
+              durationSeconds: servicesDurationSeconds,
+            });
+          } catch {
+            // Service initialization telemetry never gates a claimed attempt.
+          }
           try {
             resolvedServices.observability.info("worker execution started", { correlationId });
           } catch {

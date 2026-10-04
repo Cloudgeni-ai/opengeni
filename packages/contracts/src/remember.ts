@@ -37,8 +37,8 @@ export type RememberScope = z.infer<typeof RememberScope>;
 
 /**
  * Ceiling for the Knowledge lane, which is retrieval evidence rather than
- * always-composed prompt text. The prompt-composed lanes are bounded far more
- * tightly: see `AGENT_AUTHORED_INSTRUCTION_POLICY_CONTENT_MAX_CHARS` and
+ * always-composed prompt text. Other lanes have their own destination bounds:
+ * see `AGENT_AUTHORED_INSTRUCTION_POLICY_CONTENT_MAX_CHARS` and
  * `AGENT_AUTHORED_PREFERENCE_CONTENT_MAX_CHARS`.
  */
 export const REMEMBER_CONTENT_MAX_CHARS = 4_000;
@@ -59,8 +59,7 @@ export const RememberRequest = z.discriminatedUnion("lane", [
       lane: z.literal("preference"),
       // Only the short title/description descriptors are prompt-composed; the
       // content is retrieved on demand, so this length is retrieval cost rather
-      // than standing prompt cost, and gets more room than a rule rather than
-      // less.
+      // than standing prompt cost.
       content: z
         .string()
         .trim()
@@ -83,8 +82,8 @@ export const RememberRequest = z.discriminatedUnion("lane", [
       ...rememberBase,
       lane: z.literal("instruction_policy"),
       // A mandatory rule is composed verbatim into the prompt of every session
-      // it applies to, for as long as it stays active, so this is the tightest
-      // agent budget in Agent Knowledge.
+      // it applies to, for as long as it stays active. Its storage bound is
+      // shared with the human workspace-instruction editor.
       content: z
         .string()
         .trim()

@@ -8,7 +8,10 @@ import type {
   ComputerTarget,
 } from "@opengeni/sdk/interaction";
 import { useCallback, useEffect, useRef, useState } from "react";
-import { isNonRetryableInteractionError } from "../lib/interaction-errors";
+import {
+  isInteractionControlUnavailable,
+  isNonRetryableInteractionError,
+} from "../lib/interaction-errors";
 import {
   type EmbeddedComputerInteractionClientOverride,
   useEmbeddedComputerInteraction,
@@ -29,6 +32,8 @@ export type UseComputerSessionResult = {
   loading: boolean;
   mutating: boolean;
   error: Error | null;
+  /** Control service loss, independent of target accessibility inspection and media. */
+  controlError: Error | null;
   refresh: () => Promise<void>;
   readClipboard: () => Promise<ComputerClipboard>;
   /** Changes only this viewer's target cursor; it never takes ownership or
@@ -105,6 +110,7 @@ export function useComputerSession(options: UseComputerSessionOptions): UseCompu
     requestRef.current.controller?.abort();
     const controller = new AbortController();
     requestRef.current = { id, controller };
+    let discoveryCompleted = false;
     try {
       const [session, targetResponse] = await Promise.all([
         client.getComputerSession(workspaceId, computerSessionId, {
@@ -114,9 +120,10 @@ export function useComputerSession(options: UseComputerSessionOptions): UseCompu
           signal: controller.signal,
         }),
       ]);
+      discoveryCompleted = true;
       if (!mountedRef.current || requestRef.current.id !== id) return;
       const targets = sortComputerTargets(targetResponse.targets);
-      const selected = chooseTarget(targets, selectedTargetIdRef.current, session.platform);
+      const selected = chooseTarget(targets, selectedTargetIdRef.current);
       // Discovery is useful independently of semantic observation. Publish it
       // now so a slow/unresponsive application cannot block the frame stream
       // or prevent the person from choosing a different window or screen.
@@ -141,6 +148,7 @@ export function useComputerSession(options: UseComputerSessionOptions): UseCompu
               observation: retainedObservation,
               loading: false,
               error: null,
+              controlError: null,
             }
           : current,
       );
@@ -168,12 +176,19 @@ export function useComputerSession(options: UseComputerSessionOptions): UseCompu
       );
     } catch (cause) {
       if (controller.signal.aborted || !mountedRef.current || requestRef.current.id !== id) return;
+      const error = cause instanceof Error ? cause : new Error(String(cause));
       setState((current) =>
         current.computerSessionId === computerSessionId
           ? {
               ...current,
               loading: false,
-              error: cause instanceof Error ? cause : new Error(String(cause)),
+              error,
+              controlError: isInteractionControlUnavailable(
+                error,
+                discoveryCompleted ? "observation" : "control",
+              )
+                ? error
+                : current.controlError,
             }
           : current,
       );
@@ -239,11 +254,23 @@ export function useComputerSession(options: UseComputerSessionOptions): UseCompu
           : current,
       );
       try {
-        return await operation();
+        const result = await operation();
+        setState((current) =>
+          current.computerSessionId === scopeComputerSessionId
+            ? { ...current, controlError: null }
+            : current,
+        );
+        return result;
       } catch (cause) {
         const error = cause instanceof Error ? cause : new Error(String(cause));
         setState((current) =>
-          current.computerSessionId === scopeComputerSessionId ? { ...current, error } : current,
+          current.computerSessionId === scopeComputerSessionId
+            ? {
+                ...current,
+                error,
+                controlError: isInteractionControlUnavailable(error) ? error : current.controlError,
+              }
+            : current,
         );
         throw error;
       } finally {
@@ -298,7 +325,14 @@ export function useComputerSession(options: UseComputerSessionOptions): UseCompu
         const error = cause instanceof Error ? cause : new Error(String(cause));
         setState((current) =>
           current.computerSessionId === computerSessionId && current.selectedTargetId === target.id
-            ? { ...current, loading: false, error }
+            ? {
+                ...current,
+                loading: false,
+                error,
+                controlError: isInteractionControlUnavailable(error, "observation")
+                  ? error
+                  : current.controlError,
+              }
             : current,
         );
         throw error;
@@ -405,7 +439,21 @@ export function useComputerSession(options: UseComputerSessionOptions): UseCompu
 
   const readClipboard = useCallback(async (): Promise<ComputerClipboard> => {
     if (!computerSessionId) throw new Error("No desktop is selected.");
-    return await client.readComputerClipboard(workspaceId, computerSessionId);
+    try {
+      return await client.readComputerClipboard(workspaceId, computerSessionId);
+    } catch (cause) {
+      const error = cause instanceof Error ? cause : new Error(String(cause));
+      setState((current) =>
+        current.computerSessionId === computerSessionId
+          ? {
+              ...current,
+              error,
+              controlError: isInteractionControlUnavailable(error) ? error : current.controlError,
+            }
+          : current,
+      );
+      throw error;
+    }
   }, [client, computerSessionId, workspaceId]);
 
   return {
@@ -417,6 +465,7 @@ export function useComputerSession(options: UseComputerSessionOptions): UseCompu
     loading: visible.loading,
     mutating: visible.mutating,
     error: visible.error,
+    controlError: visible.controlError,
     refresh,
     readClipboard,
     selectTarget,
@@ -434,6 +483,7 @@ type ComputerControlState = {
   loading: boolean;
   mutating: boolean;
   error: Error | null;
+  controlError: Error | null;
 };
 
 function emptyState(computerSessionId: string | null, loading: boolean): ComputerControlState {
@@ -446,30 +496,21 @@ function emptyState(computerSessionId: string | null, loading: boolean): Compute
     loading,
     mutating: false,
     error: null,
+    controlError: null,
   };
 }
 
 function chooseTarget(
   targets: readonly ComputerTarget[],
   preferredId: string | null,
-  platform: ComputerSession["platform"],
 ): ComputerTarget | null {
   const preferred = targets.find((target) => target.id === preferredId);
   if (preferred) return preferred;
-  if (platform === "linux") {
-    return (
-      targets.find((target) => target.focused && target.kind === "screen") ??
-      targets.find((target) => target.kind === "screen") ??
-      targets.find((target) => target.focused && target.kind === "window") ??
-      targets.find((target) => target.kind === "window") ??
-      targets[0] ??
-      null
-    );
-  }
   return (
+    targets.find((target) => target.focused && target.kind === "screen") ??
+    targets.find((target) => target.kind === "screen") ??
     targets.find((target) => target.focused && target.kind === "window") ??
     targets.find((target) => target.kind === "window") ??
-    targets.find((target) => target.kind === "screen") ??
     targets.find((target) => target.focused && target.kind === "app") ??
     targets.find((target) => target.kind === "app") ??
     targets[0] ??

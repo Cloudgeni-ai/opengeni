@@ -193,6 +193,84 @@ describe("durable BrowserSession lifecycle", () => {
     ).rejects.toBeInstanceOf(BrowserSessionOperationConflictError);
   });
 
+  test("settles an undispatched browser create failure and replays its durable receipt", async () => {
+    if (!available) return;
+    const scope = await fixture();
+    const input = createInput(scope);
+    const prepared = await prepareBrowserSessionCreate(client.db, input);
+    const failed = await failBrowserSessionOperation(client.db, {
+      ...scope,
+      operationId: input.operationId,
+      browserSessionId: prepared.session.id,
+      onlyIfPreparedCreate: true,
+      error: { code: "driver_failed", message: "Placement unavailable", retryable: true },
+    });
+    expect(failed).toMatchObject({
+      session: { lifecycle: "failed", controller: null, failureCode: "driver_failed" },
+      operation: { state: "failed", dispatchedAt: null },
+    });
+    expect(
+      await getBrowserSessionControlRecord(client.db, {
+        ...scope,
+        browserSessionId: prepared.session.id,
+        operationId: input.operationId,
+      }),
+    ).toMatchObject({ operation: { state: "failed", controllerGeneration: null } });
+    const replay = await prepareBrowserSessionCreate(client.db, input);
+    expect(replay.session.id).toBe(prepared.session.id);
+    expect(replay.operation).toMatchObject({ state: "failed", replayed: true });
+  });
+
+  test("a late browser placement failure cannot erase a dispatched or accepted binding", async () => {
+    if (!available) return;
+    const scope = await fixture();
+    const input = createInput(scope);
+    const prepared = await prepareBrowserSessionCreate(client.db, input);
+    const controller = {
+      controllerId: "browserd:test",
+      controllerGeneration: crypto.randomUUID(),
+      placementInstanceId: "placement:test",
+    };
+    await dispatchBrowserSessionOperation(client.db, {
+      ...scope,
+      operationId: input.operationId,
+      browserSessionId: prepared.session.id,
+      controllerGeneration: controller.controllerGeneration,
+      controller,
+    });
+    const failure = {
+      ...scope,
+      operationId: input.operationId,
+      browserSessionId: prepared.session.id,
+      onlyIfPreparedCreate: true,
+      error: { code: "driver_failed" as const, message: "Placement unavailable", retryable: true },
+    };
+    expect(await failBrowserSessionOperation(client.db, failure)).toMatchObject({
+      session: { lifecycle: "starting", controller, failureCode: null },
+      operation: { state: "dispatched", settledAt: null, error: null, replayed: true },
+    });
+    expect(
+      await getBrowserSessionControlRecord(client.db, {
+        ...scope,
+        browserSessionId: prepared.session.id,
+        operationId: input.operationId,
+      }),
+    ).toMatchObject({
+      operation: { state: "dispatched", controllerGeneration: controller.controllerGeneration },
+    });
+    await activateBrowserSession(client.db, {
+      ...scope,
+      operationId: input.operationId,
+      browserSessionId: prepared.session.id,
+      controller,
+      engineVersion: null,
+    });
+    expect(await failBrowserSessionOperation(client.db, failure)).toMatchObject({
+      session: { lifecycle: "active", controller, failureCode: null },
+      operation: { state: "completed", error: null, replayed: true },
+    });
+  });
+
   test("restores a browser when end placement fails before dispatch", async () => {
     if (!available) return;
     const scope = await fixture();

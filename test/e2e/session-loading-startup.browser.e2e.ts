@@ -1,12 +1,12 @@
 // Production app + staged API responses, not a component imitation.
-// The production artifact is built once and shared by both viewport tests.
+// The production artifact is built once and shared by the suite.
 import { afterAll, beforeAll, test } from "bun:test";
 import { strict as assert } from "node:assert";
 import { existsSync } from "node:fs";
 import { mkdir, readFile } from "node:fs/promises";
 import { chromium, type Browser, type Page } from "playwright";
 import { freePort, runCommand, startProcess, type StartedProcess } from "@opengeni/testing";
-import { OPENGENI_API_CONTRACT_REVISION } from "@opengeni/sdk";
+import { OPENGENI_API_CONTRACT_REVISION, type BrowserSession } from "@opengeni/sdk";
 import { fakeCapabilities } from "../../packages/react/test/sandbox-fixtures";
 
 const repo = new URL("../..", import.meta.url).pathname;
@@ -17,6 +17,7 @@ const accountId = "22222222-2222-4222-8222-222222222222";
 const sessionId = "33333333-3333-4333-8333-333333333333";
 const otherSessionId = "33333333-3333-4333-8333-444444444444";
 const turnId = "44444444-4444-4444-8444-444444444444";
+const bundleRevision = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
 let base: string;
 let web: StartedProcess | undefined;
 let browser: Browser;
@@ -34,7 +35,11 @@ beforeAll(async () => {
     // with one build for the suite rather than a build per viewport/state.
     const build = await runCommand(["bun", "run", "build"], {
       cwd: `${repo}/apps/web`,
-      env: { NODE_ENV: "production", VITE_API_BASE_URL: "" },
+      env: {
+        NODE_ENV: "production",
+        VITE_API_BASE_URL: "",
+        VITE_OPENGENI_DEPLOYMENT_REVISION: bundleRevision,
+      },
       timeoutMs: 180_000,
     });
     if (build.exitCode !== 0)
@@ -267,6 +272,10 @@ function fixtures() {
     paginatedHistory: false,
     enableCreate: false,
     created: false,
+    deploymentRevision: "",
+    configContractRevision: OPENGENI_API_CONTRACT_REVISION,
+    configContractHeader: OPENGENI_API_CONTRACT_REVISION,
+    configReads: 0,
     failStream: false,
     failQueue: false,
     deferQueue: false,
@@ -320,14 +329,20 @@ async function installApi(page: Page, state: ReturnType<typeof fixtures>) {
       route.fulfill({
         status,
         contentType: "application/json",
-        headers: { "x-opengeni-api-contract": OPENGENI_API_CONTRACT_REVISION },
+        headers: {
+          "x-opengeni-api-contract":
+            path === "/v1/config/client"
+              ? state.configContractHeader
+              : OPENGENI_API_CONTRACT_REVISION,
+        },
         body: JSON.stringify(body),
       });
     if (path === "/v1/config/client") {
+      state.configReads++;
       await state.gates.config.wait();
       return json({
-        deploymentRevision: "",
-        apiContractRevision: OPENGENI_API_CONTRACT_REVISION,
+        deploymentRevision: state.deploymentRevision,
+        apiContractRevision: state.configContractRevision,
         defaultModel: state.session.model,
         allowedModels: [state.session.model],
         models: [],
@@ -404,22 +419,76 @@ async function installApi(page: Page, state: ReturnType<typeof fixtures>) {
       };
       return json(state.session);
     }
-    if (path === `/v1/workspaces/${workspaceId}/sessions`)
+    if (path === `/v1/workspaces/${workspaceId}/sessions`) {
+      const params = new URL(request.url()).searchParams;
+      const rows =
+        state.enableCreate && !state.created
+          ? []
+          : [
+              state.session,
+              {
+                ...state.session,
+                id: otherSessionId,
+                rootSessionId: otherSessionId,
+                title: "Unloaded other session",
+              },
+            ];
+      const needsYou = (row: (typeof rows)[number]) =>
+        row.status === "requires_action" || row.status === "failed";
+      const needsYouOnly = params.get("needsYouOnly") === "true";
+      const pinsOnly = params.get("pinsOnly") === "true";
+      const archiveStatus = params.get("archiveStatus") ?? "active";
+      const filtered = needsYouOnly ? rows.filter(needsYou) : rows;
+      // All fixture roots are unarchived and unpinned. Global pin metadata
+      // remains complete when ordinary browse rows are filtered or absent.
+      const measured = pinsOnly ? rows : archiveStatus === "archived" ? [] : filtered;
       return json({
         sessions:
-          state.enableCreate && !state.created
+          pinsOnly ||
+          archiveStatus === "archived" ||
+          (params.has("parentSessionId") && params.get("parentSessionId") !== "null")
             ? []
-            : [
-                state.session,
-                { ...state.session, id: otherSessionId, title: "Unloaded other session" },
-              ],
+            : filtered,
         pinned: [],
         pinnedTruncated: false,
         nextCursor: null,
         filtersApplied: true,
-        sortBy: new URL(request.url()).searchParams.get("sortBy") ?? "updated",
-        archiveStatus: new URL(request.url()).searchParams.get("archiveStatus") ?? "active",
+        sortBy: params.get("sortBy") ?? "updatedAt",
+        archiveStatus,
+        ...(needsYouOnly ? { needsYouOnly: true } : {}),
+        ...(params.get("includeTotals") === "true"
+          ? {
+              totals: {
+                needsYouCount: rows.filter(needsYou).length,
+                groups: measured.length
+                  ? [
+                      {
+                        channelId: null,
+                        total: measured.length,
+                        attention: measured.filter((row) => row.status === "requires_action")
+                          .length,
+                        attentionSince: null,
+                        failed: 0,
+                        active: measured.filter(
+                          (row) =>
+                            row.effectiveControl.state !== "paused" &&
+                            (row.status === "running" || row.status === "recovering"),
+                        ).length,
+                        queued: measured.filter(
+                          (row) =>
+                            row.effectiveControl.state !== "paused" &&
+                            (row.status === "queued" || row.status === "waiting_capacity"),
+                        ).length,
+                        unread: 0,
+                        activeWork: 0,
+                      },
+                    ]
+                  : [],
+              },
+            }
+          : {}),
       });
+    }
     if (
       path === `/v1/workspaces/${workspaceId}/sessions/${otherSessionId}` ||
       path === `/v1/workspaces/${workspaceId}/sessions/${otherSessionId}/events`
@@ -1454,6 +1523,417 @@ for (const width of [1280, 390]) {
     } finally {
       first.release();
       second.release();
+      await context.close();
+    }
+  }, 45_000);
+}
+
+test("a mounted tab refreshes a changed deployment while retaining its URL, draft and browser", async () => {
+  const context = await browser.newContext({
+    viewport: { width: 1280, height: 900 },
+    reducedMotion: "reduce",
+  });
+  const page = await context.newPage();
+  const state = fixtures();
+  state.deploymentRevision = bundleRevision;
+  for (const pendingGate of Object.values(state.gates)) pendingGate.release();
+  const browserId = "77777777-7777-4777-8777-777777777777";
+  const retainedBrowser: BrowserSession = {
+    id: browserId,
+    accountId,
+    workspaceId,
+    name: "Retained browser",
+    lifecycle: "active",
+    placement: { kind: "sandbox_group", sandboxGroupId: sessionId },
+    controller: {
+      controllerId: "opengeni-browserd",
+      controllerGeneration: "controller-1",
+      placementInstanceId: "placement-1",
+    },
+    driverId: "opengeni.cdp.v1",
+    engine: "chromium",
+    engineVersion: "151",
+    headless: true,
+    identityId: null,
+    baseRevisionId: null,
+    networkRouteId: null,
+    linkedComputerSessionId: null,
+    capabilities: {
+      semanticObservation: false,
+      screenshots: false,
+      liveFrames: false,
+      humanInput: false,
+      tabs: true,
+      downloads: false,
+      uploads: false,
+      clipboard: false,
+      permissions: false,
+      diagnostics: false,
+      rawCdp: false,
+      linkedComputer: false,
+      privateCheckpoint: false,
+      identityPublication: false,
+      parallelTargets: true,
+    },
+    associations: [
+      {
+        sessionId,
+        turnId: null,
+        attemptId: null,
+        relationship: "using",
+        actorSubjectId: "fixture",
+        lastUsedAt: state.session.updatedAt,
+      },
+    ],
+    createdBySubjectId: "fixture",
+    createdAt: state.session.createdAt,
+    lastUsedAt: state.session.updatedAt,
+    failureCode: null,
+  };
+  let browserReads = 0;
+  const pin = gate();
+  const lifecycleWrites: string[] = [];
+  let documents = 0;
+  page.on("request", (request) => {
+    if (
+      request.isNavigationRequest() &&
+      request.resourceType() === "document" &&
+      request.frame() === page.mainFrame()
+    )
+      documents++;
+  });
+  await installApi(page, state);
+  await page.route(
+    `${base}/v1/workspaces/${workspaceId}/sessions/${sessionId}/pin`,
+    async (route) => {
+      await pin.wait();
+      return route.fulfill({
+        contentType: "application/json",
+        headers: { "x-opengeni-api-contract": OPENGENI_API_CONTRACT_REVISION },
+        body: JSON.stringify({
+          ...state.session,
+          pinned: true,
+          pinVersion: 1,
+          pinnedAt: state.session.updatedAt,
+        }),
+      });
+    },
+  );
+  await page.route(`${base}/v1/workspaces/${workspaceId}/browser-sessions**`, async (route) => {
+    const request = route.request();
+    const path = new URL(request.url()).pathname;
+    let payload: unknown;
+    if (path.endsWith("/heartbeat") && request.method() === "POST") {
+      payload = { browserSessionId: browserId, controllerGeneration: "controller-1", alive: true };
+    } else if (request.method() !== "GET") {
+      lifecycleWrites.push(path);
+      return route.fulfill({ status: 500, body: "Unexpected browser lifecycle write" });
+    } else if (path.endsWith("/browser-sessions")) {
+      browserReads++;
+      payload = { revision: 1, sessions: [retainedBrowser] };
+    } else if (path.endsWith(`/${browserId}`)) payload = retainedBrowser;
+    else if (path.endsWith("/targets"))
+      payload = { browserSessionId: browserId, activeTargetId: null, targets: [] };
+    else return route.fallback();
+    return route.fulfill({
+      contentType: "application/json",
+      headers: { "x-opengeni-api-contract": OPENGENI_API_CONTRACT_REVISION },
+      body: JSON.stringify(payload),
+    });
+  });
+  try {
+    await page.clock.install();
+    const url = `${base}/workspaces/${workspaceId}/sessions/${sessionId}`;
+    await page.goto(url);
+    const input = page.getByRole("textbox", { name: "Message the agent" });
+    await input.waitFor();
+    await page.getByRole("button", { name: "Open workspace", exact: true }).click();
+    await page.getByRole("tab", { name: "Browser", exact: true }).click();
+    await page.getByText("Retained browser", { exact: true }).first().waitFor();
+    assert.equal(documents, 1);
+    assert(browserReads > 0);
+    await input.fill("Keep this unsent draft.");
+    state.deploymentRevision = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
+    const beforeCheck = state.configReads;
+    const configResponse = page.waitForResponse((response) =>
+      response.url().endsWith("/v1/config/client"),
+    );
+    await page.clock.fastForward(60_001);
+    await configResponse;
+    assert(state.configReads > beforeCheck);
+    assert.equal(documents, 1, "A deployment check must leave an unsent draft mounted");
+    assert.equal(await input.inputValue(), "Keep this unsent draft.");
+    assert.equal(
+      await page.evaluate(
+        (revision) => sessionStorage.getItem(`opengeni.reloadForRevision:${revision}`),
+        state.deploymentRevision,
+      ),
+      null,
+      "Deferring for a draft must not consume the reload loop guard",
+    );
+    await page.screenshot({ path: `${output}/deployment-refresh-draft-protected.png` });
+    await input.fill("");
+    await page.clock.runFor(1_000);
+    await page.locator("header").getByRole("button", { name: "Pin session", exact: true }).click();
+    await pin.entered;
+    const duringPin = page.waitForResponse((response) =>
+      response.url().endsWith("/v1/config/client"),
+    );
+    await page.clock.fastForward(60_001);
+    await duringPin;
+    await page.clock.runFor(1_000);
+    assert.equal(documents, 1, "A deployment check must leave an active mutation running");
+    assert.equal(
+      await page.evaluate(
+        (revision) => sessionStorage.getItem(`opengeni.reloadForRevision:${revision}`),
+        state.deploymentRevision,
+      ),
+      null,
+    );
+    const pinned = page.waitForResponse((response) => response.url().endsWith(`/${sessionId}/pin`));
+    pin.release();
+    await pinned;
+    await page.clock.runFor(1_000);
+    const navigation = page.waitForNavigation({ waitUntil: "domcontentloaded" });
+    await page.clock.fastForward(60_001);
+    await navigation;
+    await page.getByText("Retained browser", { exact: true }).first().waitFor();
+    assert.equal(page.url(), url);
+    assert.equal(documents, 2);
+    assert(browserReads > 1, "Reload rehydrates the same owned browser");
+    assert.equal(retainedBrowser.id, browserId);
+    assert.equal(retainedBrowser.controller?.controllerGeneration, "controller-1");
+    assert.deepEqual(lifecycleWrites, []);
+    await page.clock.fastForward(120_001);
+    assert.equal(documents, 2, "The existing revision guard prevents repeated reloads");
+  } finally {
+    pin.release();
+    await context.close();
+  }
+}, 45_000);
+
+for (const [mismatch, width] of [
+  ["header", 1280],
+  ["config", 1280],
+  ["header", 390],
+] as const) {
+  test(`contract ${mismatch} notice preserves controls and drafts at ${width}px`, async () => {
+    const context = await browser.newContext({
+      viewport: { width, height: 900 },
+      reducedMotion: "reduce",
+    });
+    const page = await context.newPage();
+    const state = fixtures();
+    for (const pendingGate of Object.values(state.gates)) pendingGate.release();
+    let documents = 0;
+    page.on("request", (request) => {
+      if (
+        request.isNavigationRequest() &&
+        request.resourceType() === "document" &&
+        request.frame() === page.mainFrame()
+      )
+        documents++;
+    });
+    await installApi(page, state);
+    const pin = gate();
+    const pinWrites: boolean[] = [];
+    await page.route(
+      `${base}/v1/workspaces/${workspaceId}/sessions/${sessionId}/pin`,
+      async (route) => {
+        const request = route.request().postDataJSON() as { pinned: boolean };
+        pinWrites.push(request.pinned);
+        await pin.wait();
+        Object.assign(state.session, {
+          pinned: request.pinned,
+          pinVersion: pinWrites.length,
+          pinnedAt: request.pinned ? state.session.updatedAt : null,
+        });
+        return route.fulfill({
+          contentType: "application/json",
+          headers: { "x-opengeni-api-contract": OPENGENI_API_CONTRACT_REVISION },
+          body: JSON.stringify(state.session),
+        });
+      },
+    );
+    try {
+      await page.clock.install();
+      const url = `${base}/workspaces/${workspaceId}/sessions/${sessionId}`;
+      await page.goto(url);
+      const input = page.getByRole("textbox", { name: "Message the agent" });
+      await input.waitFor();
+      await page.clock.pauseAt(await page.evaluate(() => Date.now() + 1_000));
+      await input.fill("Preserve the existing draft.");
+      const contract = "synthetic-contract-next";
+      const setContract = (revision: string) => {
+        if (mismatch === "header") state.configContractHeader = revision;
+        else state.configContractRevision = revision;
+      };
+      const key = `opengeni.reloadForApiContract:${contract}`;
+      const reloadNotice =
+        mismatch === "header"
+          ? page.locator("#opengeni-api-update-notice")
+          : page.getByText("Opengeni updated — reloading…", { exact: true });
+      const check = async () => {
+        const checked = page.waitForResponse(
+          (response) =>
+            response.url().endsWith("/v1/config/client") &&
+            response.request().headers()["content-type"] === "application/json",
+        );
+        await page.evaluate(() => window.dispatchEvent(new Event("online")));
+        await (await checked).finished();
+      };
+      // Returning also reconciles the stock provider. It must not bypass the
+      // console's guard with an independent unconditional reload.
+      await page.evaluate(() => {
+        Object.defineProperty(document, "visibilityState", { configurable: true, value: "hidden" });
+        document.dispatchEvent(new Event("visibilitychange"));
+      });
+      await page.clock.runFor(2_001);
+      setContract(contract);
+      const returned = page.waitForResponse(
+        (response) =>
+          response.url().endsWith("/v1/config/client") &&
+          response.request().headers()["content-type"] === "application/json",
+      );
+      await page.evaluate(() => {
+        Object.defineProperty(document, "visibilityState", {
+          configurable: true,
+          value: "visible",
+        });
+        document.dispatchEvent(new Event("visibilitychange"));
+      });
+      await (await returned).finished();
+      assert.equal(
+        await page.evaluate((storageKey) => sessionStorage.getItem(storageKey), key),
+        null,
+        "The stock provider must leave the contract guard unconsumed while a draft is active",
+      );
+      await page.clock.runFor(151);
+      assert.equal(documents, 1, "A contract update must preserve an existing draft");
+      assert.equal(await input.count(), 1, "The stock provider must keep the draft mounted");
+      assert.equal(await input.inputValue(), "Preserve the existing draft.");
+      const notice = page.locator("#opengeni-api-update-notice");
+      await notice.waitFor();
+      const noticeBounds = await notice.boundingBox();
+      const headerBounds = await page.locator("header").boundingBox();
+      const inputBounds = await input.boundingBox();
+      assert(noticeBounds && headerBounds && inputBounds);
+      assert(
+        noticeBounds.y + noticeBounds.height <= headerBounds.y,
+        "The update notice must reserve space above the header controls",
+      );
+      assert(
+        inputBounds.y >= headerBounds.y + headerBounds.height &&
+          inputBounds.y + inputBounds.height <= 900,
+        "The notice must leave the composer within the viewport",
+      );
+      assert.equal(
+        await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth),
+        true,
+        "The notice must not introduce horizontal overflow",
+      );
+      await page.screenshot({
+        path: `${output}/contract-${mismatch}-${width}-notice-controls.png`,
+      });
+      const pinButton = page
+        .locator("header")
+        .getByRole("button", { name: "Pin session", exact: true });
+      await pinButton.click();
+      await pin.entered;
+      assert.deepEqual(pinWrites, [true], "A real pointer click must reach the save exactly once");
+      await input.fill("");
+      await page.clock.runFor(1_000);
+      await check();
+      await page.clock.runFor(151);
+      assert.equal(documents, 1, "A contract update must leave a save running");
+      assert.equal(
+        await page.evaluate((storageKey) => sessionStorage.getItem(storageKey), key),
+        null,
+      );
+      await input.fill("Preserve while the save settles.");
+      const pinned = page.waitForResponse((response) =>
+        response.url().endsWith(`/${sessionId}/pin`),
+      );
+      pin.release();
+      await pinned;
+      await page.clock.runFor(1_000);
+      const unpinButton = page
+        .locator("header")
+        .getByRole("button", { name: "Unpin session", exact: true });
+      await unpinButton.focus();
+      const unpinned = page.waitForResponse((response) =>
+        response.url().endsWith(`/${sessionId}/pin`),
+      );
+      await unpinButton.press("Enter");
+      await unpinned;
+      assert.deepEqual(pinWrites, [true, false], "Keyboard activation must reach the second save");
+      assert.equal(await input.inputValue(), "Preserve while the save settles.");
+      assert.equal(documents, 1, "The notice and both saves must leave the draft mounted");
+      setContract(OPENGENI_API_CONTRACT_REVISION);
+      await page.clock.runFor(1_000);
+      await input.fill("");
+      await page.clock.runFor(1_000);
+      setContract(contract);
+      await check();
+      await reloadNotice.waitFor();
+      await page.clock.runFor(149);
+      await input.fill("Draft started during the update notice.");
+      await page.clock.runFor(2);
+      assert.equal(documents, 1, "The delayed reload must recheck foreground work");
+      assert.equal(await input.inputValue(), "Draft started during the update notice.");
+      assert.equal(
+        await page.evaluate((storageKey) => sessionStorage.getItem(storageKey), key),
+        null,
+      );
+      await page.screenshot({
+        path: `${output}/contract-${mismatch}-${width}-draft-protected.png`,
+      });
+      setContract(OPENGENI_API_CONTRACT_REVISION);
+      await page.clock.runFor(1_000);
+      await input.fill("");
+      await page.clock.runFor(1_000);
+      setContract(contract);
+      await check();
+      await reloadNotice.waitFor();
+      await page.clock.runFor(149);
+      await page.evaluate(() => {
+        Object.defineProperty(document, "visibilityState", { configurable: true, value: "hidden" });
+        document.dispatchEvent(new Event("visibilitychange"));
+      });
+      await page.clock.runFor(2);
+      assert.equal(documents, 1, "The delayed reload must leave a hidden tab alone");
+      assert.equal(
+        await page.evaluate((storageKey) => sessionStorage.getItem(storageKey), key),
+        null,
+      );
+      const available = page.waitForResponse(
+        (response) =>
+          response.url().endsWith("/v1/config/client") &&
+          response.request().headers()["content-type"] === "application/json",
+      );
+      // Resume ordinary browser time for the successful reload; only the
+      // foreground-work races above need a precisely paused clock.
+      await page.clock.resume();
+      const navigation = page.waitForNavigation({ waitUntil: "domcontentloaded" });
+      await page.evaluate(() => {
+        Object.defineProperty(document, "visibilityState", {
+          configurable: true,
+          value: "visible",
+        });
+        document.dispatchEvent(new Event("visibilitychange"));
+      });
+      await (await available).finished();
+      await navigation;
+      assert.equal(page.url(), url);
+      assert.equal(documents, 2);
+      assert.equal(
+        await page.evaluate((storageKey) => sessionStorage.getItem(storageKey), key),
+        OPENGENI_API_CONTRACT_REVISION,
+      );
+      await page.clock.runFor(1_000);
+      assert.equal(documents, 2, "The contract guard still prevents repeated reloads");
+    } finally {
+      pin.release();
       await context.close();
     }
   }, 45_000);

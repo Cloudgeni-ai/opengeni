@@ -11,6 +11,7 @@ import {
   LinuxVirtualComputerEnvironmentAllocator,
 } from "./computer-environment";
 import { ComputerSupervisor } from "./computer-supervisor";
+import { createCuaComputerDriver } from "./cua/factory";
 import { BrowserControlServer } from "./server";
 import { BrowserSupervisor } from "./supervisor";
 import { retainControllerDiagnostic } from "./controller-diagnostics";
@@ -22,6 +23,13 @@ export const INTERACTION_RUNTIME_BUILD_ID = process.env.OPENGENI_RUNTIME_BUILD_I
 
 export async function runBrowserd(environment: NodeJS.ProcessEnv = process.env): Promise<void> {
   const config = await browserdConfig(environment);
+  if (
+    config.computerBackend === "cua" &&
+    (!["darwin", "win32"].includes(process.platform) ||
+      config.computerEnvironmentMode !== "existing")
+  ) {
+    throw new Error("CUA computer pilot requires an existing macOS or interactive Windows desktop");
+  }
   const agentBrowserBinary = config.agentBrowserBinaryPath
     ? await resolvePinnedAgentBrowserBinary({ binaryPath: config.agentBrowserBinaryPath })
     : undefined;
@@ -31,9 +39,10 @@ export async function runBrowserd(environment: NodeJS.ProcessEnv = process.env):
   const headlessShell = config.headlessShellDirectory
     ? await resolvePinnedHeadlessShell(config.headlessShellDirectory)
     : undefined;
-  const computerNativeBinaryPath = config.computerNativeBinaryPath
-    ? await resolveExecutable(config.computerNativeBinaryPath, "computer native helper")
-    : undefined;
+  const computerNativeBinaryPath =
+    config.computerBackend === "native" && config.computerNativeBinaryPath
+      ? await resolveExecutable(config.computerNativeBinaryPath, "computer native helper")
+      : undefined;
   const supervisor = await BrowserSupervisor.open({
     rootDirectory: config.rootDirectory,
     ...(config.socketRootDirectory ? { socketRootDirectory: config.socketRootDirectory } : {}),
@@ -45,16 +54,19 @@ export async function runBrowserd(environment: NodeJS.ProcessEnv = process.env):
   });
   let computerSupervisor: ComputerSupervisor | undefined;
   try {
-    if (computerNativeBinaryPath) {
+    if (computerNativeBinaryPath || config.computerBackend === "cua") {
       computerSupervisor = await ComputerSupervisor.open({
         rootDirectory: config.rootDirectory,
-        nativeBinaryPath: computerNativeBinaryPath,
+        ...(computerNativeBinaryPath ? { nativeBinaryPath: computerNativeBinaryPath } : {}),
+        ...(config.computerBackend === "cua" ? { createDriver: createCuaComputerDriver } : {}),
         maxSessions: config.maxComputerSessions,
         displaceExistingSessions: config.computerEnvironmentMode === "existing",
         environmentAllocator:
           config.computerEnvironmentMode === "isolated_linux"
             ? new LinuxVirtualComputerEnvironmentAllocator()
-            : new ExistingComputerEnvironmentAllocator(),
+            : new ExistingComputerEnvironmentAllocator({
+                allowWindows: config.computerBackend === "cua",
+              }),
       });
     }
   } catch (error) {
@@ -158,6 +170,7 @@ type BrowserdConfig = {
   lightpandaBinaryPath?: string;
   headlessShellDirectory?: string;
   computerNativeBinaryPath?: string;
+  computerBackend: "native" | "cua";
   maxComputerSessions: number;
   computerEnvironmentMode: "existing" | "isolated_linux";
 };
@@ -167,6 +180,7 @@ async function browserdConfig(environment: NodeJS.ProcessEnv): Promise<BrowserdC
   const tokenFile = resolve(requiredEnvironment(environment, "OPENGENI_BROWSERD_ADMIN_TOKEN_FILE"));
   return {
     rootDirectory,
+    computerBackend: computerBackend(environment.OPENGENI_BROWSERD_COMPUTER_BACKEND),
     ...(environment.OPENGENI_BROWSERD_SOCKET_ROOT
       ? { socketRootDirectory: resolve(environment.OPENGENI_BROWSERD_SOCKET_ROOT) }
       : {}),
@@ -215,6 +229,12 @@ async function browserdConfig(environment: NodeJS.ProcessEnv): Promise<BrowserdC
         }
       : {}),
   };
+}
+
+function computerBackend(value: string | undefined): "native" | "cua" {
+  if (value === undefined || value === "native") return "native";
+  if (value === "cua") return "cua";
+  throw new Error("OPENGENI_BROWSERD_COMPUTER_BACKEND is invalid");
 }
 
 function computerEnvironmentMode(value: string | undefined): "existing" | "isolated_linux" {

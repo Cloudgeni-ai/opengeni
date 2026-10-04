@@ -126,6 +126,12 @@ function externalMapping(found = true) {
 function asUser(permissions: Permission[] = ["sessions:create", "workspace:read"]) {
   const headers = key();
   track(
+    spyOn(db, "withAccountRls").mockImplementation(async (_db, _account, callback) =>
+      callback({} as never),
+    ),
+  );
+  track(spyOn(db, "lockExternalWorkspaceMembershipLifecycle").mockResolvedValue(undefined));
+  track(
     spyOn(db, "ensureExternalIdentity").mockResolvedValue({
       id: externalId,
       accountId,

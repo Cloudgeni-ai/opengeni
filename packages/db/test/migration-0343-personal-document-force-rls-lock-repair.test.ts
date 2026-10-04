@@ -80,8 +80,22 @@ describe("migration 0343 personal Document FORCE-RLS lock repair", () => {
       add column memory_scope text not null default 'workspace',
       add column execution_authority_epoch integer not null default 1,
       add column initial_mcp_account_bindings jsonb,
+      add column initial_claude_provider_account_authority_snapshot jsonb not null
+        default '{"version":1,"scope":"workspace"}'::jsonb,
       add column code_search_enabled boolean,
       add column agent_config jsonb`;
+    // 0598 owns these immutable accepted-authority receipts. This non-Claude
+    // historical work has workspace authority; do not query nonexistent pools
+    // or install their runtime guards ahead of the actual cutover.
+    for (const table of [
+      "session_turns",
+      "session_system_updates",
+      "session_system_update_outbox",
+    ]) {
+      await admin.unsafe(`alter table ${table}
+        add column claude_provider_account_authority_snapshot jsonb not null
+        default '{"version":1,"scope":"workspace"}'::jsonb`);
+    }
     // Current session/claim adapters project 0494 receipts. Keep historical
     // NULL semantics and install no account-binding runtime guards here: this
     // fixture must still exercise the actual pre-0343 authority boundary.
@@ -166,6 +180,7 @@ describe("migration 0343 personal Document FORCE-RLS lock repair", () => {
       latencyMode: "standard",
       sandboxBackend: "modal",
       firstPartyMcpTools: [],
+      initialClaudeProviderAccountAuthoritySnapshot: { version: 1, scope: "workspace" },
     });
     // The current claim adapter locks the durable cursor while this fixture
     // intentionally holds the database below 0343. Supply only the later row
@@ -177,6 +192,7 @@ describe("migration 0343 personal Document FORCE-RLS lock repair", () => {
         account_id uuid not null,
         workspace_id uuid not null,
         last_sequence integer not null default 0,
+        last_meaningful_sequence integer not null default 0,
         revision bigint not null default 0,
         created_at timestamptz not null default now(),
         updated_at timestamptz not null default now()
@@ -308,8 +324,18 @@ describe("migration 0343 personal Document FORCE-RLS lock repair", () => {
       drop column memory_scope,
       drop column execution_authority_epoch,
       drop column initial_mcp_account_bindings,
+      drop column initial_claude_provider_account_authority_snapshot,
       drop column code_search_enabled,
       drop column agent_config`;
+    for (const table of [
+      "session_turns",
+      "session_system_updates",
+      "session_system_update_outbox",
+    ]) {
+      await admin.unsafe(
+        `alter table ${table} drop column claude_provider_account_authority_snapshot`,
+      );
+    }
     await admin`alter table session_turns drop column mcp_account_bindings`;
     await admin`alter table session_turns drop column surface`;
     await admin`alter table session_system_updates drop column mcp_account_bindings`;
@@ -326,6 +352,15 @@ describe("migration 0343 personal Document FORCE-RLS lock repair", () => {
       from sessions s join session_turns t on t.session_id = s.id
       where s.id = ${session.id} and t.id = ${turn!.id}`;
     expect(historicalBindings).toEqual({ session_bindings: null, turn_bindings: null });
+    const [historicalClaudeAuthority] = await admin`
+      select s.initial_claude_provider_account_authority_snapshot as session_authority,
+        t.claude_provider_account_authority_snapshot as turn_authority
+      from sessions s join session_turns t on t.session_id = s.id
+      where s.id = ${session.id} and t.id = ${turn!.id}`;
+    expect(historicalClaudeAuthority).toEqual({
+      session_authority: { version: 1, scope: "workspace" },
+      turn_authority: { version: 1, scope: "workspace" },
+    });
     app = openApp();
 
     const afterDocument = crypto.randomUUID();

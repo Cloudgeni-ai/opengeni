@@ -1,4 +1,4 @@
-import { chmod, mkdir } from "node:fs/promises";
+import { chmod, lstat, mkdir } from "node:fs/promises";
 import { dirname, resolve } from "node:path";
 import type { InteractionOperationState } from "@opengeni/contracts";
 import { Database } from "bun:sqlite";
@@ -48,6 +48,8 @@ export type SqliteInteractionOperationJournalOptions<TReceipt extends JournalRec
   maxEntries?: number;
   maxRecordBytes?: number;
   maxTotalReceiptBytes?: number;
+  /** Existing-file inspection only; never creates or changes the journal. */
+  readOnly?: boolean;
 };
 
 /** Resource-neutral, crash-safe placement operation authority. It persists
@@ -69,6 +71,7 @@ export class SqliteInteractionOperationJournal<TReceipt extends JournalReceipt> 
   private readonly maxRecordBytes: number;
   private readonly maxTotalReceiptBytes: number;
   private readonly database: Database;
+  private readonly readOnly: boolean;
   private closed = false;
 
   private constructor(
@@ -92,6 +95,7 @@ export class SqliteInteractionOperationJournal<TReceipt extends JournalReceipt> 
       "maxRecordBytes",
     );
     this.database = database;
+    this.readOnly = options.readOnly === true;
     this.maxTotalReceiptBytes = boundedPositiveInteger(
       options.maxTotalReceiptBytes ?? DEFAULT_MAX_TOTAL_RECEIPT_BYTES,
       "maxTotalReceiptBytes",
@@ -102,6 +106,14 @@ export class SqliteInteractionOperationJournal<TReceipt extends JournalReceipt> 
     options: SqliteInteractionOperationJournalOptions<TReceipt>,
   ): Promise<SqliteInteractionOperationJournal<TReceipt>> {
     const path = resolve(options.path);
+    if (options.readOnly) {
+      const metadata = await lstat(path);
+      if (!metadata.isFile() || metadata.isSymbolicLink()) {
+        throw new Error("operation journal must be an existing regular file");
+      }
+      const database = new Database(path, { readonly: true, strict: true });
+      return new SqliteInteractionOperationJournal({ ...options, path }, database);
+    }
     await mkdir(dirname(path), { recursive: true, mode: 0o700 });
     const database = new Database(path, { create: true, readwrite: true, strict: true });
     try {
@@ -148,7 +160,7 @@ export class SqliteInteractionOperationJournal<TReceipt extends JournalReceipt> 
   }
 
   write(recordInput: InteractionJournalRecord<TReceipt>): void {
-    this.assertOpen();
+    this.assertWritable();
     const record = this.validate(recordInput);
     this.immediateTransaction(() => this.writeInTransaction(record));
   }
@@ -166,6 +178,27 @@ export class SqliteInteractionOperationJournal<TReceipt extends JournalReceipt> 
     return row ? this.recordFromRow(row) : null;
   }
 
+  /** Inspect the newest resource receipt, then enforce the caller's exact
+   * generation authority. Filtering out a newer generation would resurrect an
+   * earlier completed receipt. No recovery or unbounded history scan occurs. */
+  readLatest(): InteractionJournalRecord<TReceipt> | null {
+    this.assertOpen();
+    const row = this.database
+      .query<JournalRow & { controller_generation: string }, [string, string]>(
+        `SELECT sequence, operation_id, command_digest, state, receipt_json, receipt_bytes,
+                controller_generation
+           FROM interaction_operation_journal
+          WHERE resource_kind = ? AND resource_id = ?
+          ORDER BY sequence DESC LIMIT 1`,
+      )
+      .get(this.resourceKind, this.resourceId);
+    if (!row) return null;
+    if (row.controller_generation !== this.controllerGeneration) {
+      throw new Error(`${this.resourceLabel} latest operation is outside journal authority`);
+    }
+    return this.recordFromRow(row);
+  }
+
   loadAndRecover(settledAt = new Date().toISOString()): InteractionJournalRecord<TReceipt>[] {
     return this.withRecoveredRecords((records) => Array.from(records), settledAt);
   }
@@ -176,7 +209,7 @@ export class SqliteInteractionOperationJournal<TReceipt extends JournalReceipt> 
     consume: (records: Iterable<InteractionJournalRecord<TReceipt>>) => T,
     settledAt = new Date().toISOString(),
   ): T {
-    this.assertOpen();
+    this.assertWritable();
     const parsedSettledAt = new Date(settledAt);
     if (
       !Number.isFinite(parsedSettledAt.valueOf()) ||
@@ -209,6 +242,11 @@ export class SqliteInteractionOperationJournal<TReceipt extends JournalReceipt> 
 
   close(): void {
     if (this.closed) return;
+    if (this.readOnly) {
+      this.database.close();
+      this.closed = true;
+      return;
+    }
     let checkpointFailure: unknown;
     try {
       this.database.exec("PRAGMA wal_checkpoint(TRUNCATE)");
@@ -415,7 +453,12 @@ export class SqliteInteractionOperationJournal<TReceipt extends JournalReceipt> 
   }
 
   private recordFromRow(row: JournalRow): InteractionJournalRecord<TReceipt> {
-    if (row.receipt_bytes !== Buffer.byteLength(row.receipt_json)) {
+    if (
+      !Number.isSafeInteger(row.receipt_bytes) ||
+      row.receipt_bytes < 1 ||
+      row.receipt_bytes > Math.min(this.maxRecordBytes, this.maxTotalReceiptBytes) ||
+      row.receipt_bytes !== Buffer.byteLength(row.receipt_json)
+    ) {
       throw new Error(`${this.resourceLabel} operation journal receipt byte count is corrupt`);
     }
     let receipt: unknown;
@@ -424,11 +467,20 @@ export class SqliteInteractionOperationJournal<TReceipt extends JournalReceipt> 
     } catch {
       throw new Error(`${this.resourceLabel} operation journal receipt JSON is corrupt`);
     }
-    return this.validate({
+    const record = this.validate({
       operationId: row.operation_id,
       commandDigest: row.command_digest,
       receipt,
     });
+    if (record.receipt.state !== row.state) {
+      throw new Error(`${this.resourceLabel} operation journal state is corrupt`);
+    }
+    return record;
+  }
+
+  private assertWritable(): void {
+    this.assertOpen();
+    if (this.readOnly) throw new Error(`${this.resourceLabel} operation journal is read-only`);
   }
 
   private immediateTransaction<T>(callback: () => T): T {

@@ -123,6 +123,11 @@ export const FIRST_PARTY_TOOL_AUTHORIZATION = {
   browser_act: { sessionRequired: true, allOf: ["sessions:control"] },
   browser_clipboard: { sessionRequired: true, allOf: ["sessions:read"] },
   browser_debug: { sessionRequired: true, allOf: ["sessions:read"] },
+  browser_downloads: { sessionRequired: true, allOf: ["sessions:read"] },
+  browser_download_save: {
+    sessionRequired: true,
+    allOf: ["sessions:control", "files:upload"],
+  },
   browser_auth: { sessionRequired: true, allOf: ["sessions:control"] },
   interaction_request_human: {
     sessionRequired: true,

@@ -22,6 +22,7 @@ import {
 } from "@opengeni/contracts";
 import { InteractionControllerError, InteractionDefiniteDriverError } from "@opengeni/interaction";
 import { CdpCommandTimeoutError, CdpTransportError } from "./cdp";
+import { BrowserWorkingRuntimeUnavailableError } from "./working-runtime-journal";
 import type { ComputerFrameSubscription, ComputerFrameStreamOptions } from "./computer-media";
 import {
   COMPUTER_CONTROL_WEBSOCKET_PROTOCOL,
@@ -49,6 +50,7 @@ import {
   type BrowserStateRestoreInput,
   type BrowserSupervisorSessionOptions,
 } from "./supervisor";
+import { RfbClientFilter } from "./rfb-client-filter";
 
 const TOKEN_PATTERN = /^[A-Za-z0-9._~-]{32,2048}$/u;
 const MAX_TOKEN_GENERATION = Number.MAX_SAFE_INTEGER;
@@ -63,6 +65,13 @@ type ViewGrant = {
   expiresAt: string;
   expiresAtMs: number;
 };
+
+type ComputerRfbScope = {
+  targetId: string;
+  targetGeneration: string;
+  inputAllowed: boolean;
+};
+type ComputerViewGrant = ViewGrant & { rfbScope: ComputerRfbScope | null };
 
 type SessionAuthority = BrowserSessionReference & {
   tokenGeneration: number;
@@ -92,12 +101,12 @@ type ComputerSessionAuthority = ComputerSessionReference & {
   tokenGeneration: number;
   controlDigest: Buffer;
   viewDigest: Buffer;
-  viewGrants: Map<string, ViewGrant>;
+  viewGrants: Map<string, ComputerViewGrant>;
 };
 
 type ComputerSessionAuthorization =
   | { authority: ComputerSessionAuthority; kind: "session" }
-  | { authority: ComputerSessionAuthority; kind: "grant"; grant: ViewGrant };
+  | { authority: ComputerSessionAuthority; kind: "grant"; grant: ComputerViewGrant };
 
 type ComputerSocketData = {
   kind: "computer";
@@ -119,6 +128,11 @@ type ComputerRfbSocketData = {
     | { kind: "session"; tokenGeneration: number }
     | { kind: "grant"; grantId: string; expiresAtMs: number };
   targetId: string;
+  targetGeneration: string;
+  inputAllowed: boolean;
+  filter: RfbClientFilter;
+  incoming: Promise<void>;
+  incomingBytes: number;
   rfbPort: number;
   upstream: Socket | null;
   pending: Uint8Array[];
@@ -183,9 +197,9 @@ export class BrowserControlServer {
       maxRequestBodySize: BROWSER_CONTROL_MAX_JSON_BYTES,
       fetch: async (request, server) => await this.handleFetch(request, server),
       websocket: {
-        // Frame sockets are server-only, but RFB carries keyboard, pointer and
-        // clipboard messages from noVNC. Keep a bounded envelope large enough
-        // for an ordinary clipboard without permitting unbounded buffering.
+        // Frame sockets are server-only. Scoped RFB accepts bounded pixel
+        // negotiation and authorized keyboard/pointer messages; clipboard
+        // and other control extensions stay outside this transport.
         maxPayloadLength: 1024 * 1024,
         backpressureLimit: 32 * 1024 * 1024,
         closeOnBackpressureLimit: true,
@@ -763,6 +777,15 @@ export class BrowserControlServer {
           browserSessionId: body.browserSessionId,
           controllerGeneration: body.controllerGeneration,
           headed: body.headed,
+          ...(body.recoverExistingWorkingDirectory
+            ? { recoverExistingWorkingDirectory: true }
+            : {}),
+          workingRuntimeAuthority: {
+            tokenGeneration: body.tokenGeneration,
+            placementDigest: this.adminDigest.toString("hex"),
+            controlDigest: controlDigest.toString("hex"),
+            viewDigest: viewDigest.toString("hex"),
+          },
           ...(body.initialUrl ? { initialUrl: body.initialUrl } : {}),
           ...(body.restore ? { restore: body.restore } : {}),
           ...(body.transport ? { transport: body.transport } : {}),
@@ -940,11 +963,30 @@ export class BrowserControlServer {
     request: Request,
   ): Promise<Response> {
     const body = await readJsonObject(request);
-    assertOnlyKeys(body, ["grantId", "controllerGeneration", "token", "expiresAt"]);
+    assertOnlyKeys(body, [
+      "grantId",
+      "controllerGeneration",
+      "token",
+      "expiresAt",
+      "targetId",
+      "targetGeneration",
+      "inputAllowed",
+    ]);
     const grantId = requireUuid(body.grantId, "view grant id");
     const controllerGeneration = requireGeneration(body.controllerGeneration);
     const token = requireToken(body.token, "view grant token");
     const expiresAt = requireFutureTimestamp(body.expiresAt, "view grant expiry");
+    const hasScope =
+      body.targetId !== undefined ||
+      body.targetGeneration !== undefined ||
+      body.inputAllowed !== undefined;
+    const rfbScope = hasScope
+      ? {
+          targetId: requireOpaqueId(body.targetId, "RFB target id"),
+          targetGeneration: requireGeneration(body.targetGeneration),
+          inputAllowed: requireBoolean(body.inputAllowed, "RFB input scope"),
+        }
+      : null;
     return await this.withLifecycleLock(`computer:${computerSessionId}`, async () => {
       const authority = this.computerAuthorities.get(computerSessionId);
       if (!authority) {
@@ -953,6 +995,13 @@ export class BrowserControlServer {
       if (authority.controllerGeneration !== controllerGeneration) {
         throw new ProtocolError("controller_stale", "computer controller generation is stale", 409);
       }
+      if (rfbScope) {
+        await this.computerSupervisor!.rfbPort(
+          computerBinding(authority),
+          rfbScope.targetId,
+          rfbScope,
+        );
+      }
       this.pruneViewGrants(authority);
       const digest = tokenDigest(token);
       const current = authority.viewGrants.get(grantId);
@@ -960,7 +1009,18 @@ export class BrowserControlServer {
         if (!sameDigest(current.digest, digest) || current.expiresAt !== expiresAt.value) {
           throw new ProtocolError("operation_conflict", "view grant id is already bound", 409);
         }
-        return success({ grantId, expiresAt: current.expiresAt });
+        if (rfbScope) {
+          if (current.rfbScope !== null && !sameRfbScope(current.rfbScope, rfbScope)) {
+            throw new ProtocolError("operation_conflict", "RFB grant scope is already bound", 409);
+          }
+          current.rfbScope = rfbScope;
+        }
+        return success({
+          grantId,
+          expiresAt: current.expiresAt,
+          scopedRfbInput: true,
+          ...(current.rfbScope ?? {}),
+        });
       }
       if (authority.viewGrants.size >= MAX_VIEW_GRANTS_PER_SESSION) {
         throw new ProtocolError(
@@ -974,8 +1034,12 @@ export class BrowserControlServer {
         digest,
         expiresAt: expiresAt.value,
         expiresAtMs: expiresAt.milliseconds,
+        rfbScope,
       });
-      return success({ grantId, expiresAt: expiresAt.value }, 201);
+      return success(
+        { grantId, expiresAt: expiresAt.value, scopedRfbInput: true, ...(rfbScope ?? {}) },
+        201,
+      );
     });
   }
 
@@ -1225,7 +1289,20 @@ export class BrowserControlServer {
     if (!supervisor) {
       throw new ProtocolError("unsupported", "computer controller is unavailable", 422);
     }
-    const rfbPort = await supervisor.rfbPort(reference, boundedTargetId);
+    const scope = authorization.kind === "grant" ? authorization.grant.rfbScope : null;
+    if (scope && scope.targetId !== boundedTargetId) {
+      throw new ProtocolError("permission_denied", "RFB grant targets another screen", 401);
+    }
+    const target = (await supervisor.listTargets(reference)).find(
+      (candidate) => candidate.id === boundedTargetId,
+    );
+    if (!target) throw new ProtocolError("target_not_found", "RFB screen is unavailable", 404);
+    const targetGeneration = scope?.targetGeneration ?? target.targetGeneration;
+    const inputAllowed = scope?.inputAllowed === true;
+    const rfbPort = await supervisor.rfbPort(reference, boundedTargetId, {
+      targetGeneration,
+      inputAllowed,
+    });
     const upgraded = server.upgrade(request, {
       data: {
         kind: "computer_rfb",
@@ -1239,6 +1316,11 @@ export class BrowserControlServer {
                 expiresAtMs: authorization.grant.expiresAtMs,
               },
         targetId: boundedTargetId,
+        targetGeneration,
+        inputAllowed,
+        filter: new RfbClientFilter(inputAllowed),
+        incoming: Promise.resolve(),
+        incomingBytes: 0,
         rfbPort,
         upstream: null,
         pending: [],
@@ -1287,11 +1369,11 @@ export class BrowserControlServer {
         return;
       }
       socket.data.expiryTimer = setTimeout(() => {
-        if (!socket.data.closed) socket.close(1008, "authorization expired");
+        if (!socket.data.closed) this.closeSocket(socket, 1008, "authorization expired");
       }, remainingMs);
     }
     if (socket.data.kind === "computer_rfb") {
-      this.openComputerRfb(socket);
+      void this.openComputerRfb(socket);
     } else {
       void this.pumpFrames(socket);
     }
@@ -1304,39 +1386,95 @@ export class BrowserControlServer {
       return;
     }
     if (typeof message === "string") {
-      socket.close(1003, "RFB requires binary messages");
+      this.closeSocket(socket, 1003, "RFB requires binary messages");
       return;
     }
-    const bytes = new Uint8Array(message.buffer, message.byteOffset, message.byteLength);
-    if (data.upstream && !data.upstream.destroyed) {
-      // net.Socket.write() accepts data even after returning false; without an
-      // explicit bound a malicious/buggy viewer can therefore grow Node's TCP
-      // write queue without limit while x11vnc is stalled. Ordinary RFB input is
-      // tiny (pointer/key events and bounded clipboard payloads), so one shared
-      // 1 MiB envelope covers both pre-connect and connected buffering.
-      if (data.upstream.writableLength + bytes.byteLength > MAX_RFB_INPUT_BUFFER_BYTES) {
-        socket.close(1009, "RFB input buffer exceeded");
-        return;
+    if (data.closed) return;
+    if (
+      data.incomingBytes +
+        data.pendingBytes +
+        (data.upstream?.writableLength ?? 0) +
+        message.byteLength >
+      MAX_RFB_INPUT_BUFFER_BYTES
+    ) {
+      this.closeSocket(socket, 1009, "RFB input buffer exceeded");
+      return;
+    }
+    // Own Bun's reusable receive buffer before asynchronous native validation.
+    const bytes = new Uint8Array(message.buffer, message.byteOffset, message.byteLength).slice();
+    data.incomingBytes += bytes.byteLength;
+    data.incoming = data.incoming.then(async () => {
+      try {
+        if (data.closed) return;
+        await this.validateComputerRfb(socket);
+        const messages = data.filter.accept(bytes);
+        if (messages.length === 0) return;
+        const parsed = Buffer.concat(messages);
+        if (data.upstream && !data.upstream.destroyed && !data.upstream.connecting) {
+          data.upstream.write(parsed);
+        } else {
+          data.pending.push(parsed);
+          data.pendingBytes += parsed.byteLength;
+        }
+      } catch {
+        this.closeSocket(socket, 1008, "RFB input or authorization is not permitted");
+      } finally {
+        data.incomingBytes -= bytes.byteLength;
       }
-      // Bun may reuse the WebSocket receive buffer after this callback. TCP
-      // writes can outlive the callback under even brief backpressure, so own
-      // the bytes before enqueueing them; otherwise rapid noVNC key packets can
-      // be overwritten by the following packet while slower probes still pass.
-      data.upstream.write(bytes.slice());
-      return;
-    }
-    if (data.pendingBytes + bytes.byteLength > MAX_RFB_INPUT_BUFFER_BYTES) {
-      socket.close(1009, "RFB input buffer exceeded");
-      return;
-    }
-    const copy = bytes.slice();
-    data.pending.push(copy);
-    data.pendingBytes += copy.byteLength;
+    });
   }
 
-  private openComputerRfb(socket: BrowserSocket): void {
+  private async validateComputerRfb(socket: BrowserSocket): Promise<void> {
+    const data = socket.data;
+    if (data.kind !== "computer_rfb" || data.closed) throw new Error("RFB socket is closed");
+    const validateAuthority = () => {
+      const authority = this.computerAuthorities.get(data.reference.computerSessionId);
+      if (!authority || authority.controllerGeneration !== data.reference.controllerGeneration)
+        throw new Error("RFB controller is stale");
+      if (data.authorization.kind === "session") {
+        if (authority.tokenGeneration !== data.authorization.tokenGeneration || data.inputAllowed)
+          throw new Error("RFB session authority is stale");
+      } else {
+        const grant = authority.viewGrants.get(data.authorization.grantId);
+        if (
+          !grant ||
+          grant.expiresAtMs !== data.authorization.expiresAtMs ||
+          grant.expiresAtMs <= Date.now()
+        )
+          throw new Error("RFB grant is stale");
+        if (
+          grant.rfbScope &&
+          (grant.rfbScope.targetId !== data.targetId ||
+            grant.rfbScope.targetGeneration !== data.targetGeneration ||
+            grant.rfbScope.inputAllowed !== data.inputAllowed)
+        )
+          throw new Error("RFB scope changed");
+        if (!grant.rfbScope && data.inputAllowed) throw new Error("RFB input scope is absent");
+      }
+    };
+    validateAuthority();
+    const port = await this.computerSupervisor!.rfbPort(data.reference, data.targetId, {
+      targetGeneration: data.targetGeneration,
+      inputAllowed: data.inputAllowed,
+    });
+    validateAuthority();
+    if (data.closed || port !== data.rfbPort) throw new Error("RFB seat changed");
+  }
+
+  private closeSocket(socket: BrowserSocket, code: number, reason: string): void {
+    this.onSocketClose(socket);
+    socket.close(code, reason);
+  }
+
+  private async openComputerRfb(socket: BrowserSocket): Promise<void> {
     const data = socket.data;
     if (data.kind !== "computer_rfb") return;
+    try {
+      await this.validateComputerRfb(socket);
+    } catch {
+      this.closeSocket(socket, 1008, "RFB authorization is stale");
+      return;
+    }
     const upstream = connect({ host: "127.0.0.1", port: data.rfbPort });
     data.upstream = upstream;
     upstream.setNoDelay(true);
@@ -1345,9 +1483,18 @@ export class BrowserControlServer {
         upstream.destroy();
         return;
       }
-      for (const pending of data.pending) upstream.write(pending);
-      data.pending = [];
-      data.pendingBytes = 0;
+      data.incoming = data.incoming.then(async () => {
+        try {
+          for (const pending of data.pending) {
+            await this.validateComputerRfb(socket);
+            upstream.write(pending);
+          }
+          data.pending = [];
+          data.pendingBytes = 0;
+        } catch {
+          this.closeSocket(socket, 1008, "RFB authorization is stale");
+        }
+      });
     });
     upstream.on("data", (chunk) => {
       if (data.closed) return;
@@ -1590,12 +1737,13 @@ export class BrowserControlServer {
   ): void {
     for (const socket of [...this.sockets]) {
       const matches =
-        socket.data.kind === kind &&
+        (socket.data.kind === kind ||
+          (kind === "computer" && socket.data.kind === "computer_rfb")) &&
         (socket.data.kind === "browser"
           ? socket.data.reference.browserSessionId === resourceId
           : socket.data.reference.computerSessionId === resourceId);
       if (matches) {
-        socket.close(code, reason);
+        this.closeSocket(socket, code, reason);
       }
     }
   }
@@ -1690,6 +1838,9 @@ async function browserReadResponse(
 }
 
 function protocolResponse(error: unknown): Response {
+  if (error instanceof BrowserWorkingRuntimeUnavailableError) {
+    return failure("resource_unavailable", error.message, false, 409);
+  }
   if (error instanceof ProtocolError)
     return failure(error.code, error.message, error.retryable, error.status);
   if (error instanceof InteractionControllerError) {
@@ -1850,6 +2001,7 @@ function parseCreateSession(value: Record<string, unknown>): {
   viewToken: string;
   headed: boolean;
   initialUrl?: string;
+  recoverExistingWorkingDirectory?: true;
   transport?: NonNullable<BrowserSupervisorSessionOptions["transport"]>;
   networkRoute?: NonNullable<BrowserSupervisorSessionOptions["networkRoute"]>;
   linkedComputer?: { computerSessionId: string; controllerGeneration: string };
@@ -1867,7 +2019,20 @@ function parseCreateSession(value: Record<string, unknown>): {
     "networkRoute",
     "linkedComputer",
     "restore",
+    "recoverExistingWorkingDirectory",
   ]);
+  if (
+    value.recoverExistingWorkingDirectory !== undefined &&
+    (value.recoverExistingWorkingDirectory !== true ||
+      value.restore !== undefined ||
+      value.initialUrl !== undefined)
+  ) {
+    throw new ProtocolError(
+      "invalid_action",
+      "working directory recovery cannot restore or navigate",
+      400,
+    );
+  }
   return {
     browserSessionId: requireUuid(value.browserSessionId, "browserSessionId"),
     controllerGeneration: requireGeneration(value.controllerGeneration),
@@ -1880,6 +2045,9 @@ function parseCreateSession(value: Record<string, unknown>): {
     controlToken: requireToken(value.controlToken, "controlToken"),
     viewToken: requireToken(value.viewToken, "viewToken"),
     headed: requireBoolean(value.headed, "headed"),
+    ...(value.recoverExistingWorkingDirectory
+      ? { recoverExistingWorkingDirectory: true as const }
+      : {}),
     ...(value.initialUrl === undefined
       ? {}
       : { initialUrl: requireString(value.initialUrl, "initialUrl", 16_384) }),
@@ -2503,4 +2671,12 @@ function safeNormalizeOrigin(value: string): string | null {
 
 function formatHost(hostname: string): string {
   return hostname.includes(":") && !hostname.startsWith("[") ? `[${hostname}]` : hostname;
+}
+
+function sameRfbScope(left: ComputerRfbScope, right: ComputerRfbScope): boolean {
+  return (
+    left.targetId === right.targetId &&
+    left.targetGeneration === right.targetGeneration &&
+    left.inputAllowed === right.inputAllowed
+  );
 }

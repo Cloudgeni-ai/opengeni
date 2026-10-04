@@ -165,6 +165,63 @@ function queueSnapshot(
 }
 
 describe("useWorkspaceSessions", () => {
+  test("compact reads use the optional summary transport and retain causal revisions", async () => {
+    let reads = 0;
+    const client = fakeClient({
+      listSessionPage: async () => {
+        throw new Error("unexpected full read");
+      },
+      listSessionSummaryPage: async () => {
+        reads++;
+        return { projection: "summary", pinned: [], sessions: [], nextCursor: "next" };
+      },
+    });
+    const beginRead = () => 37;
+    const hook = await renderHook(
+      () =>
+        useWorkspaceSessions({
+          client,
+          workspaceId: WORKSPACE_ID,
+          projection: "summary",
+          beginRead,
+        }),
+      undefined,
+    );
+    await flush();
+    expect(reads).toBe(1);
+    expect(hook.result.current.nextCursor).toBe("next");
+    expect(hook.result.current.readGeneration).toBe(37);
+    expect(hook.result.current.readRevision).toBe(1);
+    await hook.unmount();
+  });
+
+  test("changing pin inclusion starts a fresh page and drops the previous pinned projection", async () => {
+    const pinned = { id: "shortcut", pinned: true } as never;
+    const seen: Array<boolean | undefined> = [];
+    const client = fakeClient({
+      listSessionPage: async (_workspaceId, options) => {
+        seen.push(options?.includePinned);
+        return {
+          pinned: options?.includePinned === false ? [] : [pinned],
+          sessions: [],
+          nextCursor: null,
+        };
+      },
+    });
+    const hook = await renderHook(
+      (includePinned: boolean) =>
+        useWorkspaceSessions({ client, workspaceId: WORKSPACE_ID, includePinned }),
+      true as boolean,
+    );
+    await flush();
+    expect(hook.result.current.pinned).toEqual([pinned]);
+    await hook.rerender(false);
+    await flush();
+    expect(hook.result.current.pinned).toEqual([]);
+    expect(seen).toEqual([undefined, false]);
+    await hook.unmount();
+  });
+
   test("forwards sorting and archive mode and reloads on either change", async () => {
     const seen: string[] = [];
     const client = fakeClient({

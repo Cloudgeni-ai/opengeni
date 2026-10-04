@@ -392,6 +392,7 @@ describe("managed organization onboarding", () => {
       body: JSON.stringify({
         organizationName: "Orbital Mechanics",
         operationId,
+        useCase: "embed",
       }),
     });
     expect(complete.status).toBe(200);
@@ -412,6 +413,14 @@ describe("managed organization onboarding", () => {
           as "sharedWorkspaceMemberships"
       from managed_accounts account where account.id = ${completion.organizationId}`;
     expect(provisioned?.organizationName).toBe("Orbital Mechanics");
+    // The signup answer is kept once, for this person in this organization.
+    const signupUseCases = await shared.admin<Array<{ subjectId: string; useCase: string }>>`
+      select subject_id as "subjectId", use_case as "useCase"
+      from opengeni_private.organization_signup_use_cases
+      where account_id = ${completion.organizationId}`;
+    expect(signupUseCases).toHaveLength(1);
+    expect(signupUseCases[0]?.useCase).toBe("embed");
+    expect(signupUseCases[0]?.subjectId).toStartWith("user:");
     expect(provisioned?.workspaces).toBe(1);
     expect(provisioned?.sharedWorkspaceMemberships).toBe(0);
     expect(completion.personalWorkspaceId).toBeTruthy();

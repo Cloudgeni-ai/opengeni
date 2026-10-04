@@ -114,6 +114,12 @@ only: it terminates at the same API journal and `AttemptToolEnvironment`.
 
 ## Clients
 
+Managed browser downloads use the ordinary exact download/save APIs through
+`browser_downloads` and `browser_download_save`; the typed facade exposes
+`browser.downloads`. Save requires session control plus file-upload authority
+and materializes into the browser's source session workspace. The sandbox SDK
+proxy permission ceiling remains unchanged.
+
 `@opengeni/codemode` exposes a persistent typed client and generates a nested,
 collision-safe namespace from `codemodePath`. `@opengeni/ogtool` is the small
 JavaScript command-line client; the installed Connected Machine agent contains

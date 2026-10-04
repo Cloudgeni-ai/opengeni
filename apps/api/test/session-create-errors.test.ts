@@ -1,5 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import { signDelegatedAccessToken } from "@opengeni/contracts";
+import { UnsupportedLatencyModeError } from "@opengeni/config";
 import type { ApiRouteDeps } from "@opengeni/core";
 import { SessionTenancyManagedHumanRequiredError } from "@opengeni/core";
 import {
@@ -49,6 +50,22 @@ function routeDeps(): ApiRouteDeps {
 }
 
 describe("session create error envelope", () => {
+  test("unsupported latency is an actionable non-500 create rejection", async () => {
+    const app = new Hono();
+    app.post("/rejected", (c) =>
+      sessionCreateErrorResponse(
+        c,
+        new UnsupportedLatencyModeError("scripted-model", "fast", ["standard"]),
+      ),
+    );
+    const response = await app.request("http://x/rejected", { method: "POST" });
+    expect(response.status).toBe(422);
+    expect(await response.json()).toMatchObject({
+      code: "SESSION_CREATE_REJECTED",
+      message: "latency mode fast is not runnable for model scripted-model (allowed: standard)",
+      details: { code: "UNSUPPORTED_LATENCY_MODE", allowedLatencyModes: ["standard"] },
+    });
+  });
   test("connection selection refusal is actionable without returning its private driver cause", async () => {
     const app = new Hono();
     const failure = new SessionCreateConnectionSelectionUnavailableError(

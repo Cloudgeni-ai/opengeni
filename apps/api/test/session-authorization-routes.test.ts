@@ -1,6 +1,7 @@
 import { afterAll, beforeAll, describe, expect, setDefaultTimeout, test } from "bun:test";
 import {
   signDelegatedAccessToken,
+  SessionBackgroundCommandListResponse,
   type McpMutationReceiptType,
   type SessionAuthorizationPort,
 } from "@opengeni/contracts";
@@ -596,6 +597,64 @@ async function expectControlledVariableSetCreateRemovalRace(
 }
 
 describe("embedding host session authorization routes", () => {
+  test("background-command diagnostics preserve the read boundary without observing the command", async () => {
+    if (!available || !shared) return;
+    const value = await fixture();
+    const commandId = crypto.randomUUID();
+    await shared.admin`insert into session_background_commands ${shared.admin({
+      id: commandId,
+      account_id: value.grant.accountId,
+      workspace_id: value.grant.workspaceId,
+      session_id: value.root.id,
+      provider: "connected_machine",
+      state: "running",
+      control_workspace_id: value.grant.workspaceId,
+      enrollment_id: crypto.randomUUID(),
+      connection_instance_id: crypto.randomUUID(),
+      op_id: crypto.randomUUID(),
+      last_reconcile_outcome: "provider_offline",
+      reconcile_attempts: 2,
+    })}`;
+    const before =
+      await shared.admin`select row_to_json(c) as value from session_background_commands c where id=${commandId}`;
+    const targets: string[] = [];
+    const app = fullAppWith({
+      authorizeSession: async ({ target: { sessionId } }) => {
+        targets.push(sessionId);
+        return sessionId === value.root.id
+          ? { allowed: true, relatedSessionAccess: "target" }
+          : { allowed: false, reason: "not_found" };
+      },
+      resolveListScope: async () => ({ kind: "all" }),
+    });
+    const authorization = `Bearer ${await signDelegatedAccessToken(SECRET, {
+      accountId: value.grant.accountId,
+      workspaceId: value.grant.workspaceId,
+      subjectId: value.grant.subjectId,
+      permissions: ["sessions:read"],
+      principalKind: "human_session",
+      exp: Math.floor(Date.now() / 1000) + 3_600,
+    })}`;
+    const path = (id: string) =>
+      `/v1/workspaces/${value.grant.workspaceId}/sessions/${id}/background-commands`;
+    const response = await app.request(path(value.root.id), { headers: { authorization } });
+    expect(response.status).toBe(200);
+    const body = SessionBackgroundCommandListResponse.parse(await response.json());
+    expect(body.commands[0]).toMatchObject({
+      id: commandId,
+      state: "running",
+      observationStatus: "unavailable",
+      reconciliation: { lastOutcome: "provider_offline", attempts: 2, terminalProof: null },
+    });
+    const denied = await app.request(path(value.hidden.id), { headers: { authorization } });
+    expect(denied.status).toBe(404);
+    expect(targets).toContain(value.root.id);
+    expect(targets).toContain(value.hidden.id);
+    const after =
+      await shared.admin`select row_to_json(c) as value from session_background_commands c where id=${commandId}`;
+    expect(Array.from(after)).toEqual(Array.from(before));
+  });
+
   test("rejects operator-disabled HTTP relevance discovery before storage", async () => {
     const accountId = crypto.randomUUID();
     const workspaceId = crypto.randomUUID();

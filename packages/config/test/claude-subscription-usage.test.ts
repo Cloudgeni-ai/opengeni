@@ -42,7 +42,7 @@ test("canonical included-overage headers and representative model caps retain ex
       }),
       now,
     ),
-  ).toBeNull();
+  ).toMatchObject({ requestStatus: { status: "rejected", representativeClaim: null } });
 });
 test("captured quota headers normalize the 5-hour and weekly windows independently", () => {
   const observation = parseClaudeUsageHeaders(
@@ -139,5 +139,39 @@ test("merging partial and out-of-order observations preserves each window's newe
   )!;
   const current = mergeClaudeUsage(mergeClaudeUsage(emptyClaudeUsage(1), first), later);
   expect(current.windows.map((window) => window.usedPercent)).toEqual([30, 50]);
+  expect(mergeClaudeUsage(current, first)).toEqual(current);
+});
+
+test("dispatch statuses merge atomically and a later quota snapshot clears paid-fallback authority", () => {
+  const first = parseClaudeUsageHeaders(
+    new Headers({
+      "anthropic-ratelimit-unified-status": "rejected",
+      "anthropic-ratelimit-unified-overage-status": "allowed",
+      "anthropic-ratelimit-unified-representative-claim": "five_hour",
+    }),
+    now,
+    "claude-opus-5-5",
+  )!;
+  const newer = new Date(now.getTime() + 1000);
+  const denied = parseClaudeUsageHeaders(
+    new Headers({
+      "anthropic-ratelimit-unified-status": "rejected",
+    }),
+    newer,
+    "claude-opus-5-5",
+  )!;
+  let current = mergeClaudeUsage(mergeClaudeUsage(emptyClaudeUsage(1), first), denied);
+  expect(current.requestStatus).toMatchObject({ status: "rejected", overageStatus: null });
+  expect(mergeClaudeUsage(current, first)).toEqual(current);
+  current = mergeClaudeUsage(
+    current,
+    parseClaudeUsageResponse(
+      {
+        five_hour: { utilization: 100, resets_at: "2026-10-01T00:00:00Z" },
+      },
+      new Date(now.getTime() + 2000),
+    )!,
+  );
+  expect(current.requestStatus).toBeNull();
   expect(mergeClaudeUsage(current, first)).toEqual(current);
 });

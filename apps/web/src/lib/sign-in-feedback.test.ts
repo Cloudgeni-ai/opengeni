@@ -42,3 +42,9 @@ test("integration callbacks and success hints cannot claim a login change", () =
   expect(readSignInCallbackError("?signin=connected")).toBeNull();
   expect(signInCallbackError(null)).toBeNull();
 });
+
+test("a refused social sign-up while new accounts are paused says so and points to sign-in", () => {
+  const message = readSignInCallbackError("?error=signup_disabled");
+  expect(message).toContain("We're at capacity for new accounts right now.");
+  expect(message).toContain("sign in with the method you used before");
+});

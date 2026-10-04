@@ -40,8 +40,6 @@ import {
   listWorkspaceProviderCustomModels,
   getWorkspaceProviderCustomModelForExecution,
   loadWorkspaceProviderApiKey,
-  loadClaudeSubscriptionUsageCredential,
-  assertModelConnectionAllowsTurn,
   type Database,
   type SessionMcpServerForRun,
 } from "@opengeni/db";
@@ -305,30 +303,16 @@ export async function settingsWithOrganizationProviderCredentials(
     if (kind === "claude_subscription" && !settings.claudeSubscriptionEnabled) continue;
     const models = await buildModels(kind, claudeProviderId(kind) + "/");
     result = withClaudeConnectionCatalog(result, { [kind]: { models } });
-    const binding =
-      kind === "claude_subscription"
-        ? await loadClaudeSubscriptionUsageCredential(db, settings, {
-            accountId,
-            workspaceId,
-            scope: "organization",
-          })
-        : null;
     const credential =
       kind === "claude_subscription"
-        ? binding?.serializedCredential
+        ? null
         : await loadOrganizationModelProviderApiKey(db, settings, {
             accountId,
             workspaceId,
             providerKind: kind,
           });
     if (credential)
-      result = withClaudeConnectionCredential(
-        result,
-        kind,
-        credential,
-        "organization",
-        binding ?? undefined,
-      );
+      result = withClaudeConnectionCredential(result, kind, credential, "organization", undefined);
     const workspaceModels = await listWorkspaceProviderCustomModels(db, {
       accountId,
       workspaceId,
@@ -353,24 +337,9 @@ export async function settingsWithOrganizationProviderCredentials(
       { [kind]: { models: workspaceModels } },
       "workspace",
     );
-    const workspaceBinding =
-      kind === "claude_subscription"
-        ? await loadClaudeSubscriptionUsageCredential(db, settings, {
-            accountId,
-            workspaceId,
-            scope: "workspace",
-          })
-        : null;
-    if (workspaceBinding && workspaceModelId)
-      await assertModelConnectionAllowsTurn(db, {
-        workspaceId,
-        subjectId: "worker:model-access",
-        modelId: workspaceModelId,
-        workspaceProviderConnectionId: workspaceBinding.connectionId,
-      });
     const workspaceCredential =
       kind === "claude_subscription"
-        ? workspaceBinding?.serializedCredential
+        ? null
         : await loadWorkspaceProviderApiKey(db, settings, workspaceId, kind, workspaceModelId);
     if (workspaceCredential)
       result = withClaudeConnectionCredential(
@@ -378,7 +347,7 @@ export async function settingsWithOrganizationProviderCredentials(
         kind,
         workspaceCredential,
         "workspace",
-        workspaceBinding ?? undefined,
+        undefined,
       );
   }
   return result;

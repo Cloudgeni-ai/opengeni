@@ -11,7 +11,7 @@ import {
   OPEN_WORKSTREAM_CONTROL_EVENT,
   SessionStatus as SessionStatusBadge,
 } from "@opengeni/react";
-import type { SessionEventsConnectionState } from "@opengeni/react";
+import { ModelMark, modelDisplayName, type SessionEventsConnectionState } from "@opengeni/react";
 import type { SessionSummary } from "@opengeni/sdk";
 import { SiteOriginLink } from "@/components/session/site-origin-link";
 import {
@@ -32,7 +32,6 @@ import { Button } from "@/components/ui/button";
 import { Skeleton } from "@/components/ui/skeleton";
 import { sessionInputWait } from "@/lib/session-rail";
 import { useSessionStartup } from "@/lib/session-startup";
-import { displayModel } from "@/lib/format";
 import { isCodexProductModel } from "@/lib/session-model";
 import {
   SESSION_TITLE_MAX_LENGTH,
@@ -105,7 +104,7 @@ export function SessionHeader({
   lastStartedModel?: string;
   lastStartedReasoningEffort?: IntelligenceEffort;
   lastStartedLatencyMode?: LatencyMode;
-  /** Billing rail for the provider mark (OpenGeni / Codex / BYOK). */
+  /** Billing rail: Codex account chip, or the mark for makers without a logo. */
   billingClass?: BillingClass;
   /** Product model label (e.g. GPT-5.6 Luna). */
   modelLabel?: string;
@@ -126,7 +125,7 @@ export function SessionHeader({
   const modelId = lastStartedModel?.trim() || session.model;
   const resolvedBilling: BillingClass =
     billingClass ?? (isCodexProductModel(modelId) ? "codex_subscription" : "opengeni_credits");
-  const resolvedModel = modelLabel?.trim() || displayModel(modelId);
+  const resolvedModel = modelLabel?.trim() || modelDisplayName(modelId);
   const displayEffort: IntelligenceEffort = lastStartedReasoningEffort ?? session.reasoningEffort;
   const displayLatency: LatencyMode = lastStartedLatencyMode ?? session.latencyMode;
   // Codex → clickable account chip. Other rails → static provider icon only
@@ -146,7 +145,12 @@ export function SessionHeader({
       />
     ))
   ) : (
-    <BillingClassMark billingClass={resolvedBilling} className="size-3.5 shrink-0 text-fg-muted" />
+    // The model maker's logo; the payment rail only when the maker has none.
+    <ModelMark
+      model={modelId}
+      className="size-3.5 text-fg-muted"
+      fallback={<BillingClassMark billingClass={resolvedBilling} className="size-3.5 shrink-0" />}
+    />
   );
   return (
     // An elevated band, not just canvas-with-a-hairline: reading as a real top

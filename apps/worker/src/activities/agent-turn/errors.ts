@@ -1,4 +1,7 @@
+import { ClaudeSubscriptionReconnectRequired } from "@opengeni/db";
+import { DrizzleQueryError } from "drizzle-orm";
 import { SandboxCapabilitiesChangedError } from "./provider-dispatch-barrier";
+import { ClaudeSubscriptionConnectionUnavailable } from "./claude-usage-observer";
 import {
   ActiveSessionHistoryLimitExceededError,
   ApprovalRunStateLimitExceededError,
@@ -12,6 +15,7 @@ import {
 } from "@opengeni/db";
 import {
   ActiveBackendUnresolvableError,
+  AnthropicProviderRejection,
   CompactionProviderResponseError,
   EmptyCompactionSummaryError,
   compactionProviderRejection,
@@ -21,6 +25,7 @@ import {
   isMcpTransportConnectivityError,
   isModalTaskExecStartPreDispatchUnavailableError,
   isModalCommandStartOutcomeUnknownError,
+  isProviderCommandObservationUnavailableError,
   isRoutingMutationOutcomeUnknownError,
   RoutingWorkspaceRootChangedError,
   ResponsesStreamingTerminalError,
@@ -34,6 +39,7 @@ import {
   providerQuotaExhaustedMessage,
   SelfhostedWorkspaceRootChangedError,
   UNKNOWN_MODEL_FINISH_REASON_CODE,
+  AnthropicRequestError,
 } from "@opengeni/runtime";
 import {
   mcpTransportRequestFailureDiagnostic,
@@ -227,6 +233,13 @@ export function providerRetryAfterMs(error: unknown, nowMs = Date.now()): number
       value.error && typeof value.error === "object"
         ? (value.error as Record<string, unknown>)
         : null;
+    const milliseconds = Number(
+      headerValue(value.headers, "retry-after-ms") ??
+        headerValue(value.responseHeaders, "retry-after-ms") ??
+        headerValue(body?.headers, "retry-after-ms") ??
+        undefined,
+    );
+    if (Number.isFinite(milliseconds) && milliseconds > 0) return Math.ceil(milliseconds);
     const directSeconds = Number(
       value.retry_after_seconds ?? body?.retry_after_seconds ?? value.retryAfterSeconds,
     );
@@ -350,27 +363,177 @@ export function preClaimAdmissionFailure(error: unknown): ApplicationFailure {
   });
 }
 
+/** Complete structured-cause graph or no recovery authority. Budget distinct
+ * objects (including array containers), not queue positions/duplicate refs.
+ * The separate link ceiling bounds huge duplicate arrays without truncating
+ * them into permission. Cycles are harmless; overflow/unreadable edges hold. */
+function databaseRecoveryCauseGraph(error: unknown): Map<object, Set<object>> | null {
+  const graph = new Map<object, Set<object>>();
+  const queue: object[] = [];
+  let links = 0;
+  const add = (value: unknown): boolean => {
+    if (!value || typeof value !== "object" || graph.has(value)) return true;
+    if (graph.size >= 64) return false;
+    graph.set(value, new Set());
+    queue.push(value);
+    return true;
+  };
+  if (!add(error)) return null;
+  try {
+    for (const current of queue) {
+      const record = current as Record<string, unknown>;
+      const children = Array.isArray(current)
+        ? current
+        : ["cause", "original", "driverError", "error", "errors"].map((key) => record[key]);
+      for (const child of children) {
+        if (++links > 4096 || !add(child)) return null;
+        if (child && typeof child === "object") graph.get(current)!.add(child);
+      }
+    }
+  } catch {
+    return null;
+  }
+  return graph;
+}
+
 function retryableDatabaseFailureCode(
   error: unknown,
+  requireDatabaseProvenance = false,
 ): PostClaimDatabaseRecoveryDetail["code"] | null {
-  const persistenceFailure = isSessionEventPersistenceError(error) ? error : null;
-  if (!persistenceFailure) {
-    const driver = findPostgresDriverError(error);
-    const driverSqlState = typeof driver?.code === "string" ? driver.code : null;
-    if (isRetryablePersistenceSqlState(driverSqlState)) {
-      return databaseFailureCode(driverSqlState);
+  try {
+    const graph = databaseRecoveryCauseGraph(error);
+    if (!graph) return null;
+    const transports = new Set<object>();
+    const boundaries = new Set<object>();
+    const ownDatabaseNodes = new Set<object>();
+    const codes = new Set<PostClaimDatabaseRecoveryDetail["code"]>();
+    // Ask the canonical transport predicate about ONLY this node's facts. Its
+    // recursive search must not pair a DB sibling with an unrelated provider.
+    for (const node of graph.keys()) {
+      if (isRoutingMutationOutcomeUnknownError(node)) return null;
+      const record = node as Record<string, unknown>;
+      if (
+        requireDatabaseProvenance
+          ? isRunningTurnDatabaseTransportFailure(record)
+          : isRetryableDatabaseTransportFailure({ code: record.code, errno: record.errno })
+      )
+        transports.add(node);
+      const sqlState = isSessionEventPersistenceError(node)
+        ? node.details.sqlState
+        : record.name === "PostgresError" && typeof record.code === "string"
+          ? record.code
+          : null;
+      if (
+        requireDatabaseProvenance
+          ? isRunningTurnDatabaseConnectionSqlState(sqlState)
+          : isDatabaseConnectionSqlState(sqlState)
+      )
+        transports.add(node);
+      if (node instanceof DrizzleQueryError || isSessionEventPersistenceError(node)) {
+        // Only actual errors raised at our ORM/typed persistence boundary own
+        // their driver subtree. A PostgresError name, SDK wrapper or provider
+        // socket by itself is never own-client provenance for a running turn.
+        const queue: object[] = [node];
+        for (const source of queue) {
+          if (ownDatabaseNodes.has(source)) continue;
+          ownDatabaseNodes.add(source);
+          queue.push(...graph.get(source)!);
+        }
+      }
     }
+    const hasOwnTransport = (boundary: object): boolean => {
+      const seen = new Set<object>();
+      const queue = [boundary];
+      for (const node of queue) {
+        if (seen.has(node)) continue;
+        seen.add(node);
+        if (transports.has(node)) return true;
+        queue.push(...graph.get(node)!);
+      }
+      return false;
+    };
+    // Inspect ALL trusted DB evidence before returning a permit. A permanent,
+    // auth or uncertain SQLSTATE vetoes every sibling regardless of traversal
+    // order; a deeper transport/reset cannot override it either.
+    for (const node of graph.keys()) {
+      const record = node as Record<string, unknown>;
+      if (node instanceof DrizzleQueryError) {
+        boundaries.add(node);
+        if (hasOwnTransport(node)) codes.add("db_failure");
+      }
+      const typed = isSessionEventPersistenceError(node);
+      if (!typed && record.name !== "PostgresError") continue;
+      boundaries.add(node);
+      const sqlState = typed
+        ? node.details.sqlState
+        : typeof record.code === "string"
+          ? record.code
+          : null;
+      const connectionOutage = requireDatabaseProvenance
+        ? isRunningTurnDatabaseConnectionSqlState(sqlState)
+        : isDatabaseConnectionSqlState(sqlState);
+      const code = typed
+        ? retryablePersistenceFailureCode(sqlState)
+        : connectionOutage || isRetryablePersistenceSqlState(sqlState)
+          ? databaseFailureCode(sqlState)
+          : null;
+      if (
+        !code ||
+        (requireDatabaseProvenance &&
+          !connectionOutage &&
+          !(sqlState === null && hasOwnTransport(node)))
+      )
+        return null;
+      if (!requireDatabaseProvenance || ownDatabaseNodes.has(node)) codes.add(code);
+    }
+    // Preserve the legacy pre-execution transport-only allowance, but never
+    // borrow it across an explicit DB boundary with no eligible own evidence.
+    if (!requireDatabaseProvenance && boundaries.size === 0 && transports.size > 0)
+      codes.add("db_failure");
+    // Stable classification for multiple positive DB siblings too.
+    for (const code of ["db_failure", "db_deadlock", "db_serialization_failure"] as const)
+      if (codes.has(code)) return code;
+    return null;
+  } catch {
+    // Unreadable structured facts are no more authority than unreadable edges.
+    return null;
   }
-  const sqlState = persistenceFailure?.details.sqlState ?? null;
-  if (sqlState === null && isRetryableDatabaseTransportFailure(error)) {
-    return "db_failure";
-  }
+}
+
+const RUNNING_TURN_DATABASE_TRANSPORT_CODES = new Set([
+  "ECONNREFUSED",
+  "ECONNRESET",
+  "CONNECT_TIMEOUT",
+]);
+
+function isRunningTurnDatabaseTransportFailure(record: Record<string, unknown>): boolean {
+  return [record.code, record.errno].some(
+    (code) => typeof code === "string" && RUNNING_TURN_DATABASE_TRANSPORT_CODES.has(code),
+  );
+}
+
+function isRunningTurnDatabaseConnectionSqlState(sqlState: string | null): boolean {
+  return (
+    sqlState !== null &&
+    (/^08[0-9A-Z]{3}$/.test(sqlState) || ["57P01", "57P02", "57P03"].includes(sqlState))
+  );
+}
+
+function isDatabaseConnectionSqlState(sqlState: string | null): boolean {
+  return (
+    sqlState !== null &&
+    (sqlState.startsWith("08") || ["57P01", "57P02", "57P03"].includes(sqlState))
+  );
+}
+
+function retryablePersistenceFailureCode(
+  sqlState: string | null,
+): PostClaimDatabaseRecoveryDetail["code"] | null {
   if (
-    !persistenceFailure ||
     !(
       sqlState === null ||
       sqlState.startsWith("08") ||
-      sqlState.startsWith("40") ||
+      isRetryablePersistenceSqlState(sqlState) ||
       sqlState.startsWith("53") ||
       sqlState === "55P03" ||
       sqlState === "57014" ||
@@ -382,28 +545,43 @@ function retryableDatabaseFailureCode(
   ) {
     return null;
   }
-  return persistenceFailure.details.code;
+  return databaseFailureCode(sqlState);
 }
 
 /**
- * Carry one exact claimed-but-not-started attempt into the workflow's DB-only
- * recovery lane. Permanent database/state failures remain terminal; only the
- * same operational outage classes that are safe before claim are admitted.
+ * Carry one exact claimed attempt into the workflow's DB-only
+ * recovery lane. Permanent database/state failures remain terminal. The
+ * running-turn lane additionally requires a closed own-client outage class;
+ * existing pre-execution recovery classifications are unchanged.
  */
 export function postClaimDatabaseRecoveryFailure(input: {
   error: unknown;
   turnId: string;
   triggerEventId: string;
   executionGeneration: number;
+  /** Require an actual own-client boundary and the closed running-turn allowlist. */
+  requireDatabaseProvenance?: boolean;
   sandboxSetupOutcomeUnknown?: true;
+  sandboxSetupRecoveryExhausted?: true;
   providerRecovery?: {
     failureCode: string;
     providerRecoveryCount: number;
   };
 }): ApplicationFailure | null {
-  const code = retryableDatabaseFailureCode(input.error);
-  if (!code || input.executionGeneration < 1) return null;
-  if (input.sandboxSetupOutcomeUnknown && input.providerRecovery) return null;
+  const code = retryableDatabaseFailureCode(input.error, input.requireDatabaseProvenance);
+  if (
+    !code ||
+    input.executionGeneration < 1 ||
+    (input.requireDatabaseProvenance && code !== "db_failure")
+  )
+    return null;
+  if (
+    (input.sandboxSetupOutcomeUnknown && input.sandboxSetupRecoveryExhausted) ||
+    ((input.sandboxSetupOutcomeUnknown || input.sandboxSetupRecoveryExhausted) &&
+      input.providerRecovery)
+  ) {
+    return null;
+  }
   if (
     input.providerRecovery &&
     (!Number.isSafeInteger(input.providerRecovery.providerRecoveryCount) ||
@@ -419,6 +597,7 @@ export function postClaimDatabaseRecoveryFailure(input: {
     executionGeneration: input.executionGeneration,
     code,
     ...(input.sandboxSetupOutcomeUnknown ? { sandboxSetupOutcomeUnknown: true } : {}),
+    ...(input.sandboxSetupRecoveryExhausted ? { sandboxSetupRecoveryExhausted: true } : {}),
     ...(input.providerRecovery
       ? {
           providerFailureCode: input.providerRecovery.failureCode,
@@ -503,6 +682,23 @@ export function sandboxLifecycleTransitionDiagnostic(
   }
 
   return null;
+}
+
+export function modelPreparationFailureEventPayload(error: unknown, durationMs: number) {
+  const transition = sandboxLifecycleTransitionDiagnostic(error);
+  return {
+    phase: "model_preparation",
+    durationMs: Math.max(0, Math.round(durationMs)),
+    expectedTransition: transition !== null,
+    ...(transition
+      ? {
+          failureCategory: "drain_capture_wait",
+          failureStage: "lifecycle_wait",
+          failureCode: transition.reason,
+          retryable: true,
+        }
+      : {}),
+  };
 }
 
 /**
@@ -880,7 +1076,7 @@ function providerSafetyRefusalDiagnostic(error: unknown): string | undefined {
   }
   return collectErrorStrings(error).find(
     (value) =>
-      /^(?:content_policy_violation|content_filter|safety_violation|bio_policy|cyber_policy)$/.test(
+      /^(?:content_policy_violation|content_filter|safety_violation|bio_policy|cyber_policy|misalignment_policy_violation)$/.test(
         value,
       ) || /\bthis request was blocked by our safety systems\b/i.test(value),
   );
@@ -1032,13 +1228,48 @@ function isRawDatabaseQueryError(error: unknown): boolean {
   );
 }
 
+function anthropicRequestDiagnostic(error: unknown): AnthropicRequestError | undefined {
+  if (error instanceof AnthropicRequestError) return error;
+  return error instanceof Error && error.cause instanceof AnthropicRequestError
+    ? error.cause
+    : undefined;
+}
+
 export function agentRunFailurePayload(
   error: unknown,
   options: { isCodexTurn?: boolean } = {},
 ): ReturnType<typeof baseAgentRunFailurePayload> {
   const failure = baseAgentRunFailurePayload(error, options);
   const diagnostic = materializationVerificationDiagnostic(error);
+  const anthropic = anthropicRequestDiagnostic(error);
+  if (anthropic) {
+    const authenticationRejected =
+      anthropic.status === 401 &&
+      (error === anthropic ||
+        (error instanceof Error && (error as Error & { status?: unknown }).status === 401));
+    return {
+      ...failure,
+      code:
+        failure.code ??
+        (authenticationRejected ? "anthropic_authentication_error" : anthropic.code),
+      retryable: failure.retryable ?? false,
+      ...(anthropic.detail ? { detail: anthropic.detail } : {}),
+      ...(anthropic.request_id ? { requestId: anthropic.request_id } : {}),
+    };
+  }
   return diagnostic ? { ...failure, materializationDiagnostic: diagnostic } : failure;
+}
+
+/** Keep Anthropic provider text on terminal failures, never recovery events. */
+export function agentRunRecoveryFailurePayload(
+  error: unknown,
+  failure: ReturnType<typeof agentRunFailurePayload>,
+): ReturnType<typeof agentRunFailurePayload> {
+  if (!anthropicRequestDiagnostic(error)) return failure;
+  // Project a copy: retry exhaustion still needs the terminal diagnostic.
+  const recovery = { ...failure };
+  delete recovery.detail;
+  return recovery;
 }
 
 function baseAgentRunFailurePayload(
@@ -1109,6 +1340,17 @@ function baseAgentRunFailurePayload(
       code: databaseFailureCode(sqlState),
       sqlState,
       ...(Object.keys(database).length > 0 ? { database } : {}),
+    };
+  }
+  if (error instanceof ClaudeSubscriptionConnectionUnavailable) {
+    return { error: error.message, code: error.code, retryable: false };
+  }
+  if (error instanceof AnthropicProviderRejection) {
+    return {
+      error: error.message,
+      code: error.code === "content_policy_violation" ? "provider_safety_refusal" : error.code,
+      retryable: false,
+      ...(error.request_id ? { requestId: error.request_id } : {}),
     };
   }
   const safetyRefusalDiagnostic = providerSafetyRefusalDiagnostic(error);
@@ -1192,6 +1434,14 @@ function baseAgentRunFailurePayload(
         "Context compaction completed, but the continuation ended before a new model response. The same turn will retry from the compacted checkpoint.",
       code: POST_COMPACTION_CONTINUATION_EMPTY_CODE,
       retryable: true,
+    };
+  }
+  if (isProviderCommandObservationUnavailableError(error)) {
+    return {
+      error:
+        "A managed sandbox command cannot be observed. Its exact invocation and writer remain retained; setup is blocked without replay until the incomplete operation can be reconciled.",
+      code: "sandbox_command_observation_unavailable",
+      retryable: false,
     };
   }
   if (isModalCommandStartOutcomeUnknownError(error)) {
@@ -1366,6 +1616,14 @@ function baseAgentRunFailurePayload(
   // the finite same-turn budget can succeed. Fail the turn promptly with a
   // distinct code so the client can offer another model; ordinary short rate
   // limits fall through to the retryable branch below.
+  if (status === 402 && code === "anthropic_billing_error") {
+    return {
+      error: "Claude could not bill this request. Check the account's billing and payment details.",
+      code: "provider_billing_error",
+      retryable: false,
+      ...(message ? { detail: message } : {}),
+    };
+  }
   const quota = classifyProviderQuotaExhaustionError(error);
   if (quota) {
     return {
@@ -1378,8 +1636,9 @@ function baseAgentRunFailurePayload(
   }
   if (
     status === 429 ||
-    code === "rate_limit_exceeded" ||
-    /(?:too many requests|rate.?limit|\b429\b)/i.test(message)
+    ((status === undefined || !Number.isFinite(status)) &&
+      (code === "rate_limit_exceeded" ||
+        /(?:too many requests|rate.?limit|\b429\b)/i.test(message)))
   ) {
     return {
       error: "Model provider rate limit hit. Try again in a minute or lower the reasoning effort.",
@@ -1606,3 +1865,29 @@ export function codexUsageLimitFailurePayload(
 // open indefinitely for a goal-bearing session; cap the continuation hold so the
 // goal re-evaluates at most this far out (it will re-pause if still capped).
 export const CODEX_USAGE_LIMIT_MAX_RESUME_MS = 60 * 60_000; // 1h
+
+/** Only typed provider backpressure or a verified reconnect requirement can rotate Claude. */
+export function classifyClaudeCredentialFailure(
+  error: unknown,
+): (XaiCredentialFailure & { requestId?: string }) | null {
+  if (isProviderSafetyRefusal(error)) return null;
+  let current: unknown = error;
+  for (let depth = 0; depth < 6 && current instanceof Error; depth++) {
+    if (current instanceof ClaudeSubscriptionReconnectRequired)
+      return { kind: "auth", cooldownMs: null };
+    if (current instanceof AnthropicRequestError && current.status === 401)
+      return {
+        kind: "auth",
+        cooldownMs: null,
+        ...(current.request_id ? { requestId: current.request_id } : {}),
+      };
+    if (current instanceof AnthropicRequestError && current.status === 429)
+      return {
+        kind: "rate_limit",
+        cooldownMs: providerRetryAfterMs(current) ?? PROVIDER_BACKPRESSURE_DELAY_MS,
+        ...(current.request_id ? { requestId: current.request_id } : {}),
+      };
+    current = current.cause;
+  }
+  return null;
+}

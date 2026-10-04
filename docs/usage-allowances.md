@@ -513,7 +513,7 @@ the same reads and administration as free functions over `requestJson`
 
 The OpenGeni console shows budgets in dollars, the unit of the credit balance
 they draw on: owners set a shared workspace's monthly budget under
-Organization settings → Billing & usage (a budgets list and one page per
+Organization settings → Billing (a budgets list and one page per
 workspace), workspace admins set member limits under Workspace settings →
 Usage, everyone sees their own limit there and in the account menu, and the
 composer shows the near/at-limit notice. Personal workspaces have no budget.

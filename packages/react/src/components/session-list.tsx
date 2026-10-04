@@ -4,6 +4,7 @@ import { useEffect, useRef, useState, type FormEvent } from "react";
 import { useWorkspaceSessions } from "../hooks/use-workspace-sessions";
 import { cn } from "../lib/cn";
 import { formatRelativeTime } from "../lib/format";
+import { useErrorMessage } from "../lib/error-message";
 import { useOpenGeni, type ClientOverride } from "../session-context";
 
 export type SessionListLabels = {
@@ -90,7 +91,8 @@ export function SessionList({
   }, [refresh, refreshKey]);
   const [editing, setEditing] = useState<{ id: string; title: string } | null>(null);
   const [busy, setBusy] = useState<string | null>(null);
-  const [error, setError] = useState<string | null>(null);
+  const [error, setError] = useState<{ cause: unknown } | null>(null);
+  const formatError = useErrorMessage();
   const archiveClient = context.client as unknown as ArchiveClient;
   const canArchive = archive && typeof archiveClient.updateSessionArchive === "function";
 
@@ -101,7 +103,7 @@ export function SessionList({
       await action();
       await list.refresh();
     } catch (cause) {
-      setError(cause instanceof Error ? cause.message : String(cause));
+      setError({ cause });
     } finally {
       setBusy(null);
     }
@@ -148,16 +150,16 @@ export function SessionList({
           </button>
         ) : null}
       </div>
-      {error ? (
+      {error || list.error ? (
         <p role="alert" className="px-2 text-og-xs text-og-status-failed">
-          {error}
+          {formatError(error ? error.cause : list.error)}
         </p>
       ) : null}
       <ul className="flex min-h-0 flex-1 flex-col gap-0.5 overflow-y-auto px-1 pb-2">
         {list.loading && sessions.length === 0 ? (
           <li className="px-2 py-2 text-og-xs text-og-fg-subtle">{labels.loading}</li>
         ) : null}
-        {!list.loading && sessions.length === 0 ? (
+        {!list.loading && !list.error && sessions.length === 0 ? (
           <li className="px-2 py-2 text-og-xs text-og-fg-subtle">{labels.empty}</li>
         ) : null}
         {sessions.map((session) => {

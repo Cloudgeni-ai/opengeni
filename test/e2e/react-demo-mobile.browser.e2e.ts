@@ -238,6 +238,68 @@ describe("public React demo mobile product acceptance", () => {
     await context.close();
   }, 90_000);
 
+  test("desktop composition commits text once with either final input event order", async () => {
+    for (const inputBeforeEnd of [false, true]) {
+      const page = await browser.newPage();
+      try {
+        await page.goto(`${baseUrl}/computer.html?mode=mock`);
+        const keyboard = page.getByRole("textbox", { name: "Desktop keyboard input" });
+        await page.waitForFunction(
+          () =>
+            document.querySelector<HTMLTextAreaElement>(
+              "textarea[aria-label='Desktop keyboard input']",
+            )?.disabled === false,
+        );
+        await keyboard.focus();
+        await page.evaluate(async () => {
+          const modulePath = "/mock.ts";
+          const { MockOpenGeniClient } = (await import(modulePath)) as {
+            MockOpenGeniClient: {
+              prototype: { actInComputer: (...args: unknown[]) => Promise<unknown> };
+            };
+          };
+          const state = window as typeof window & { desktopImeActions: unknown[] };
+          state.desktopImeActions = [];
+          const dispatch = MockOpenGeniClient.prototype.actInComputer;
+          MockOpenGeniClient.prototype.actInComputer = async function (
+            this: unknown,
+            ...args: unknown[]
+          ) {
+            state.desktopImeActions.push((args[2] as { action: unknown }).action);
+            return await Reflect.apply(dispatch, this, args);
+          };
+        });
+        await keyboard.evaluate((node: HTMLTextAreaElement) => {
+          node.dispatchEvent(new CompositionEvent("compositionstart", { bubbles: true }));
+          node.value = "ni";
+          node.dispatchEvent(new InputEvent("input", { bubbles: true, isComposing: true }));
+          node.dispatchEvent(new KeyboardEvent("keydown", { bubbles: true, key: "ArrowDown" }));
+        });
+        await page.waitForTimeout(40);
+        const actions = () =>
+          page.evaluate(
+            () => (window as typeof window & { desktopImeActions: unknown[] }).desktopImeActions,
+          );
+        expect(await actions()).toEqual([]);
+        await keyboard.evaluate((node: HTMLTextAreaElement, beforeEnd) => {
+          node.value = "你";
+          const finalInput = new InputEvent("input", { bubbles: true, data: "你" });
+          if (beforeEnd) node.dispatchEvent(finalInput);
+          node.dispatchEvent(new CompositionEvent("compositionend", { bubbles: true, data: "你" }));
+          if (!beforeEnd) node.dispatchEvent(finalInput);
+        }, inputBeforeEnd);
+        await page.waitForFunction(
+          () =>
+            (window as typeof window & { desktopImeActions: unknown[] }).desktopImeActions.length >
+            0,
+        );
+        expect(await actions()).toEqual([{ type: "keyboard", action: "type", value: "你" }]);
+      } finally {
+        await page.close();
+      }
+    }
+  }, 30_000);
+
   test("withheld script delivery shows a stable, accessible boot state before hydration", async () => {
     const context = await browser.newContext({
       viewport: { width: 360, height: 800 },

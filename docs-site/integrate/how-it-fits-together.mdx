@@ -14,12 +14,12 @@ flowchart LR
   T["Your API<br/>MCP server or OpenAPI"]
   B -- "/api/opengeni/*<br/>your session cookie" --> P
   P -- "organization API key<br/>acting as the user" --> O
-  O -- "tool calls<br/>short-lived user token" --> T
+  O -- "tool calls<br/>credential you issue" --> T
 ```
 
 1. The browser runs the stock SDK client against your own origin, `/api/opengeni`.
 2. Your proxy authenticates each request with your existing session check, resolves the user's workspace, and forwards only the routes the conversation needs, acting as that user.
-3. OpenGeni runs the agent. When it needs product data, it calls your MCP server or OpenAPI Integration with a credential you issued for that user.
+3. OpenGeni runs the agent. When it needs product data, it calls your MCP server with a short-lived token you issued for that user, or your OpenAPI Integration with the workspace connection you installed.
 
 The organization API key stays on your server. The browser can never pick another workspace, choose tools, or send credentials.
 

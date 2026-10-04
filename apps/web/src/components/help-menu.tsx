@@ -1,4 +1,10 @@
-import { BookOpenIcon, CircleHelpIcon, ExternalLinkIcon, MessageSquareIcon } from "lucide-react";
+import {
+  BookOpenIcon,
+  CircleHelpIcon,
+  ExternalLinkIcon,
+  MailIcon,
+  MessageSquareIcon,
+} from "lucide-react";
 
 import {
   DropdownMenuItem,
@@ -11,20 +17,23 @@ import type { ClientConfig } from "@/types";
 
 export type HelpMenuProps = {
   documentationUrl: ClientConfig["documentationUrl"];
+  /** Operator support address; adds a "Contact support" mailto entry when set. */
+  supportEmail?: ClientConfig["supportEmail"];
   /** Opens the feedback dialog; omit when the person can't send feedback. */
   onSendFeedback?: (() => void) | undefined;
 };
 
 /**
  * The account menu's "Help & feedback" row and its submenu: Documentation (when
- * the deployment publishes a link, see documentationLinkFromClientConfig) and
- * Send feedback (when the person may send it). It renders nothing when neither
+ * the deployment publishes a link, see documentationLinkFromClientConfig),
+ * Contact support (when the deployment configures a support address) and Send
+ * feedback (when the person may send it). It renders nothing when none
  * applies. Both account menus import it statically, so opening a menu never
  * waits on or fails with a separately fetched chunk.
  */
-export function HelpMenu({ documentationUrl, onSendFeedback }: HelpMenuProps) {
+export function HelpMenu({ documentationUrl, supportEmail, onSendFeedback }: HelpMenuProps) {
   const href = documentationLinkFromClientConfig({ documentationUrl });
-  if (!href && !onSendFeedback) return null;
+  if (!href && !supportEmail && !onSendFeedback) return null;
   return (
     <DropdownMenuSub>
       <DropdownMenuSubTrigger>
@@ -39,6 +48,14 @@ export function HelpMenu({ documentationUrl, onSendFeedback }: HelpMenuProps) {
               Documentation
               <ExternalLinkIcon className="ml-auto size-3.5 text-fg-muted" aria-hidden="true" />
               <span className="sr-only">(opens in a new tab)</span>
+            </a>
+          </DropdownMenuItem>
+        ) : null}
+        {supportEmail ? (
+          <DropdownMenuItem asChild>
+            <a href={`mailto:${supportEmail}`}>
+              <MailIcon />
+              Contact support
             </a>
           </DropdownMenuItem>
         ) : null}

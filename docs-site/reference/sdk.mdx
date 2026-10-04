@@ -31,17 +31,19 @@ Keep credential-bearing clients on the server, whether loaded with `import` or d
 
 ## Entry points
 
-| Import                                          | Use it for                                                                                    |
-| ----------------------------------------------- | --------------------------------------------------------------------------------------------- |
-| `@opengeni/sdk`                                 | `OpenGeniClient`: sessions, workspaces, files, tools, events, and `createSessionProxyHandler` |
-| `@opengeni/sdk/next`                            | `createSessionProxyRoute` and `toNextRouteHandlers` for the App Router                        |
-| `@opengeni/sdk/express`                         | `toNodeMiddleware` for Express, Connect, and `node:http`                                      |
-| `@opengeni/sdk/hono`                            | `toHonoHandler` for Hono                                                                      |
-| `@opengeni/sdk/session-proxy`                   | Server-only proxy read helpers for artifact and Site delivery                                 |
-| `@opengeni/sdk/session-history-import`          | Server-only archived-session creation and event-batch append helpers                          |
-| `@opengeni/sdk/chat`                            | The chat facade for an existing chat UI or server-side bots                                   |
-| `@opengeni/sdk/automations`                     | `OpenGeniAutomationsClient` for inbound event automations                                     |
-| `@opengeni/sdk/organization-integration-policy` | Which integrations an organization allows                                                     |
+| Import                                          | Use it for                                                                                                                     |
+| ----------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------ |
+| `@opengeni/sdk`                                 | `OpenGeniClient`: sessions, workspaces, files, tools, events, and `createSessionProxyHandler`                                  |
+| `@opengeni/sdk/next`                            | `createSessionProxyRoute` and `toNextRouteHandlers` for the App Router                                                         |
+| `@opengeni/sdk/express`                         | `toNodeMiddleware` for Express, Connect, and `node:http`                                                                       |
+| `@opengeni/sdk/hono`                            | `toHonoHandler` for Hono                                                                                                       |
+| `@opengeni/sdk/session-proxy`                   | Server-only proxy read helpers for artifact and Site delivery                                                                  |
+| `@opengeni/sdk/session-history-import`          | Server-only archived-session creation and event-batch append helpers                                                           |
+| `@opengeni/sdk/chat`                            | The chat facade for an existing chat UI or server-side bots                                                                    |
+| `@opengeni/sdk/automations`                     | `OpenGeniAutomationsClient` for inbound event automations                                                                      |
+| `@opengeni/sdk/organization-integration-policy` | Which integrations an organization allows                                                                                      |
+| `@opengeni/sdk/usage-allowances`                | Server helpers for workspace and member [usage allowances](/guides/usage-allowances)                                           |
+| `@opengeni/sdk/workspace-integrations`          | Organization webhooks and credential provider; `verifyWebhookEvent` and `verifyCredentialProviderRequest` are also on the root |
 
 For the default embed, see [Embed manually](/embed-manually).
 
@@ -69,20 +71,20 @@ for await (const event of og.streamEvents(workspaceId, session.id)) {
 
 `og.asUser(externalUserId, { source })` returns a client that acts as one of your onboarded users.
 
-| Area                         | Highlights                                                                                                                                    |
-| ---------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------- |
-| Organizations and workspaces | Organization API keys, idempotent `ensureWorkspace`, external members, workspace settings, `deleteWorkspace`                                  |
-| Organization sessions        | `listOrganizationSessions` and `iterateOrganizationSessions` across shared workspaces                                                         |
-| Sessions                     | Create with an `agent`, resources, files, Skills, tools, MCP servers, a goal, and a compute target; list, get, archive, delete                |
-| Agent settings               | `updateSessionAgent` for a running session; `sessionAgentDefaults` in `updateWorkspaceSettings`; `session.agent` and `session.effectiveTools` |
-| Input and control            | `sendMessage`, `steerMessage`, queue management, `pauseSession`, `resumeSession`, `cancelSession`                                             |
-| Decisions                    | `sendApprovalDecision`, `listHumanInputRequests`, `submitHumanInputResponse`                                                                  |
-| Events                       | Replay by sequence, and `streamEvents` with reconnect, resume, gap backfill, and duplicate suppression                                        |
-| Files                        | Upload, attach, and download workspace files                                                                                                  |
-| Goals                        | Read, update, pause, resume, and clear a session goal                                                                                         |
-| Scheduled tasks              | Create, update, pause, resume, trigger, and delete schedules; list runs                                                                       |
-| Integrations                 | Preview and install OpenAPI and GraphQL Integrations                                                                                          |
-| Connected Machines           | Enrollment tokens, device-flow approval, machine discovery and metrics, active-target swap                                                    |
+| Area                         | Highlights                                                                                                                                                             |
+| ---------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Organizations and workspaces | Organization API-key create/list/get/update/delete and explicit access policies, idempotent `ensureWorkspace`, external members, workspace settings, `deleteWorkspace` |
+| Organization sessions        | `listOrganizationSessions` and `iterateOrganizationSessions` across shared workspaces                                                                                  |
+| Sessions                     | Create with an `agent`, resources, files, Skills, tools, MCP servers, a goal, and a compute target; list, get, archive, delete                                         |
+| Agent settings               | `updateSessionAgent` for a running session; `sessionAgentDefaults` in `updateWorkspaceSettings`; `session.agent` and `session.effectiveTools`                          |
+| Input and control            | `sendMessage`, `steerMessage`, queue management, `pauseSession`, `resumeSession`, `cancelSession`                                                                      |
+| Decisions                    | `sendApprovalDecision`, `listHumanInputRequests`, `submitHumanInputResponse`                                                                                           |
+| Events                       | Replay by sequence, and `streamEvents` with reconnect, resume, gap backfill, and duplicate suppression                                                                 |
+| Files                        | Upload, attach, and download workspace files                                                                                                                           |
+| Goals                        | Read, update, pause, resume, and clear a session goal                                                                                                                  |
+| Scheduled tasks              | Create, update, pause, resume, trigger, and delete schedules; list runs                                                                                                |
+| Integrations                 | Preview and install OpenAPI and GraphQL Integrations                                                                                                                   |
+| Connected Machines           | Enrollment tokens, device-flow approval, machine discovery and metrics, active-target swap                                                                             |
 
 In a chat UI, wire Stop to `pauseSession`: it is resumable, and messages sent while paused queue until `resumeSession`. `cancelSession` is terminal for the session and its children.
 

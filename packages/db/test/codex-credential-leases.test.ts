@@ -347,6 +347,45 @@ afterAll(async () => {
 }, 180_000);
 
 describe("credential allocator atomic Codex credential allocation", () => {
+  test("heartbeat cannot revive a lease expired behind an unchanged row lock", async () => {
+    if (!available) return;
+    const [ws] = await freshAccount();
+    await connectCredential(ws!, "contended-heartbeat-fixture");
+    const turnId = await seedTurn(ws!);
+    const lease = await acquire(dbA, ws!, turnId);
+    await admin`update codex_credential_leases set leased_until = clock_timestamp() + interval '700 milliseconds'
+      where turn_id = ${turnId}`;
+    let notifyLocked!: () => void;
+    const locked = new Promise<void>((resolve) => {
+      notifyLocked = resolve;
+    });
+    let releaseLock!: () => void;
+    const unlock = new Promise<void>((resolve) => {
+      releaseLock = resolve;
+    });
+    const blocking = admin.begin(async (tx) => {
+      await tx`select id from codex_credential_leases where turn_id = ${turnId} for update`;
+      notifyLocked();
+      await unlock;
+    });
+    await locked;
+    const renewal = heartbeatCodexCredentialLeaseUntil(
+      dbA,
+      ws!.accountId,
+      ws!.workspaceId,
+      turnId,
+      lease.holderId!,
+      lease.generation!,
+    );
+    try {
+      await Bun.sleep(800);
+    } finally {
+      releaseLock();
+      await blocking;
+    }
+    expect(await renewal).toBeNull();
+  }, 180_000);
+
   for (const source of ["workspace", "organization"] as const) {
     for (const acceptedPolicy of [false, true]) {
       test(`lease ${source} ${acceptedPolicy ? "reacquisition" : "first allocation"} does not invert queued workspace and turn locks`, async () => {

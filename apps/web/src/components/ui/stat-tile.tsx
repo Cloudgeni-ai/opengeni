@@ -50,7 +50,7 @@ export interface StatTileProps {
   /** A small unit after the value: "GB", "sessions". */
   unit?: ReactNode;
   delta?: StatDelta;
-  /** One muted line under the value when there's no delta: "Of 16 GB". */
+  /** One muted line under the value (and under the delta when both): "Of 16 GB". */
   caption?: ReactNode;
   /** Values oldest to newest; drawn as a line under the number. */
   sparkline?: number[];
@@ -180,7 +180,8 @@ export function StatTile({
                 <span className="min-w-0 text-fg-subtle">{delta.comparison}</span>
               ) : null}
             </p>
-          ) : caption ? (
+          ) : null}
+          {caption ? (
             <p className="mt-1 truncate text-xs leading-4.5 text-fg-subtle">{caption}</p>
           ) : null}
         </>

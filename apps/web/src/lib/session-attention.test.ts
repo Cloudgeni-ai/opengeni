@@ -1,12 +1,14 @@
 import { describe, expect, test } from "bun:test";
 
 import type { Session } from "@/types";
+import type { SessionEvent } from "@opengeni/sdk";
 import {
   applySessionAttentionProjection,
   applySessionAttentionProjections,
   localSessionDeliveryAttentionCounts,
   latestSessionAttentionProjection,
   notifySessionAttentionChanged,
+  sessionAttentionReadThroughSequence,
   sessionReadProjectionKey,
   shouldAcknowledgeActiveSession,
   shouldProjectActiveSessionRead,
@@ -14,6 +16,75 @@ import {
   subscribeToLocalSessionDeliveryAttention,
   updateLocalSessionDeliveryAttention,
 } from "./session-attention";
+
+describe("attention acknowledgment scheduling", () => {
+  const event = (
+    sequence: number,
+    type: string,
+    payload: unknown = {},
+    extra = {},
+  ): SessionEvent => ({
+    id: `event-${sequence}`,
+    workspaceId: "00000000-0000-4000-8000-000000000001",
+    sessionId: "00000000-0000-4000-8000-000000000002",
+    sequence,
+    type,
+    payload,
+    occurredAt: "2026-01-01T00:00:00.000Z",
+    ...extra,
+  });
+
+  test("thousands of raw deltas and completed commentary do not advance the attention frontier", () => {
+    const output = event(1, "agent.message.completed", { text: "Answer", phase: "final" });
+    const activity = Array.from({ length: 1000 }, (_, index) =>
+      event(index + 2, "agent.message.delta", { text: "token", messageId: "progress" }),
+    );
+    expect(sessionAttentionReadThroughSequence(activity)).toBe(0);
+    expect(
+      sessionAttentionReadThroughSequence([
+        output,
+        ...activity,
+        event(1002, "agent.message.completed", { text: "Still working", phase: "commentary" }),
+        event(1003, "workspace.revision.captured"),
+      ]),
+    ).toBe(1);
+    expect(
+      sessionAttentionReadThroughSequence([
+        output,
+        ...activity,
+        event(1002, "agent.message.completed", { text: "New answer" }),
+      ]),
+    ).toBe(1002);
+  });
+
+  test("wait replies and actionable requests advance while empty or maintenance outcomes do not", () => {
+    expect(
+      sessionAttentionReadThroughSequence([
+        event(1, "turn.completed", { output: null, reply: "Please choose" }),
+        event(2, "turn.completed", { output: "" }),
+        event(3, "turn.completed", { output: "Maintenance", maintenance: true }),
+        event(4, "turn.completed", { output: "Limit", segmentLimit: true }),
+      ]),
+    ).toBe(1);
+    expect(sessionAttentionReadThroughSequence([event(5, "session.humanInput.requested")])).toBe(5);
+    expect(sessionAttentionReadThroughSequence([event(6, "tool.auth_needed")])).toBe(6);
+  });
+
+  test("rejected and duplicate events cannot acknowledge new attention", () => {
+    expect(
+      sessionAttentionReadThroughSequence([
+        event(1, "turn.failed"),
+        event(2, "agent.message.completed", { text: "Late" }, { turnAssociation: "late_rejected" }),
+        event(
+          3,
+          "agent.message.completed",
+          { text: "Duplicate" },
+          { duplicateOfEventId: "00000000-0000-4000-8000-000000000003" },
+        ),
+      ]),
+    ).toBe(1);
+  });
+});
 
 const session = {
   id: "00000000-0000-4000-8000-000000000026",

@@ -71,6 +71,18 @@ await tab.getByRole("button", { name: "Save" }).click();
 const still = await tab.screenshot({ quality: 40 });
 console.log(still.path); // Open this local PNG/JPEG/WebP with view_image.
 
+const { downloads } = await browser.downloads.list();
+const completed = downloads.find((download) => download.status === "completed");
+if (completed) {
+  const operationId = crypto.randomUUID(); // Retain for any reconciliation.
+  const saved = await browser.downloads.download(completed.id).saveToWorkspace(
+    "exports/report.csv",
+    { overwrite: false },
+    { operationId },
+  );
+  console.log(saved.destinationPath); // Read exact bytes with workspace file tools.
+}
+
 const computer = await openGeni.computers.open();
 const app = await computer.apps.focused();
 await app.getByRole("button", { name: "1" }).invoke();
@@ -120,6 +132,14 @@ retains it and should not be printed wholesale.
 It does not request server cancellation and cannot prove that an operation
 stopped. The attempt/turn lifecycle remains the only cancellation authority; a
 caller that aborts after submission must reconcile with the same operation id.
+
+`browser.downloads.list()` and `browser.downloads.download(id).get()` use the
+read-only `browser_downloads` tool. `saveToWorkspace(path, options, callOptions)`
+uses `browser_download_save`, requiring both `sessions:control` and `files:upload`.
+It publishes and materializes the exact completed bytes into the browser's
+source session workspace, retaining size/SHA-256 verification and the durable
+operation id. Downloads stay controller-private until this explicit save.
+Attached browsers and Lightpanda do not support managed download export.
 
 Editable artifacts use the same path. The object remains in OpenGeni; files are
 only explicit import/export boundaries:

@@ -70,6 +70,8 @@ const forwardMigrations = [
   "0560_archived_session_imports.sql",
   // Patches the scheduled producer fence after its withheld prerequisites.
   "0561_scheduled_session_agent_identity.sql",
+  // Replaces the private instruction helper created by withheld 0466.
+  "0584_agent_instruction_size_parity.sql",
 ];
 const sourceTaskId = crypto.randomUUID();
 let owned: OwnerMigratedTestDatabase | null = null;
