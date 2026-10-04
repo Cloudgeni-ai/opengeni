@@ -1,5 +1,4 @@
 import { describe, expect, spyOn, test } from "bun:test";
-import { createHash } from "node:crypto";
 import { sessionWithEffectiveToolPolicy, resolveSessionAgentConfigForCreate } from "@opengeni/core";
 import { RunContext, type ModelRequest, type Tool } from "@openai/agents";
 import { CODEX_FALLBACK_MODEL_SLUGS, CODEX_MODEL_ID_PREFIX } from "@opengeni/codex/constants";
@@ -599,6 +598,47 @@ function assertCapabilitySurface(
   expect(captured.names).toContain("opengeni__command_read");
 }
 
+// Assert the model-facing contract directly. A whole-request digest also pins
+// incidental product copy in tool descriptions (for example, the Skill library
+// name), hiding which behavioral or authority boundary actually changed.
+function assertLegacyRequestContract(request: ModelRequest) {
+  expect(request.input).toEqual([
+    { role: "developer", content: expect.stringContaining(SKILL_SENTINEL) },
+    { role: "user", content: "Reply done without calling tools." },
+  ]);
+  expect(request.modelSettings).toEqual({
+    reasoning: { effort: "low", summary: "detailed" },
+    providerData: {
+      include: ["reasoning.encrypted_content"],
+      prompt_cache_key: SCOPE.sessionId,
+    },
+  });
+  expect(request.toolsExplicitlyProvided).toBe(true);
+  expect(request.handoffs).toEqual([]);
+  expect(request.outputType).toBe("text");
+  expect(request.systemInstructions).toContain("Never invent URLs or request credentials in chat.");
+  expect(JSON.stringify(request)).not.toContain("test-delegation-secret");
+  const install = request.tools.find((tool) => tool.name === "skill_install");
+  expect(install).toMatchObject({
+    type: "function",
+    strict: false,
+    parameters: {
+      type: "object",
+      properties: {
+        operationId: { type: "string", format: "uuid" },
+        source: { type: "string", minLength: 1, maxLength: 2048 },
+        expectedInstallationVersion: { type: "integer", minimum: 0 },
+        reason: { type: "string", minLength: 1, maxLength: 2000 },
+      },
+      required: ["operationId", "source", "reason"],
+      additionalProperties: true,
+    },
+  });
+  if (install?.type !== "function") throw new Error("Skill installation function missing");
+  expect(install.description).toContain("Off prevents agent installation");
+  expect(install.description).toContain("requires its current installation version");
+}
+
 describe("agent configuration reaches the production model request", () => {
   test.each(["api", "slack", "scheduled", "automation", "site_auth_maintenance"] as const)(
     "%s creator retains null legacy and all request parity",
@@ -628,10 +668,14 @@ describe("agent configuration reaches the production model request", () => {
       // "all" keeps the legacy tool surface; its prompt is the modular composition (M4).
       expect(configured.request.tools).toEqual(legacy.request.tools);
       expect(configured.names).toEqual(legacy.names);
+      expect({ ...configured.request, systemInstructions: undefined }).toEqual({
+        ...legacy.request,
+        systemInstructions: undefined,
+      });
+      assertLegacyRequestContract(legacy.request);
       expect({
         names: legacy.names,
         hosted: legacy.request.tools.filter((tool) => tool.type === "hosted_tool"),
-        requestSha256: createHash("sha256").update(JSON.stringify(legacy.request)).digest("hex"),
       }).toMatchSnapshot();
     },
   );
@@ -643,13 +687,44 @@ describe("agent configuration reaches the production model request", () => {
     expect(explicitNull.catalog.entries).toEqual(omitted.catalog.entries);
     expect(explicitNull.names).toContain("list_models");
     expect(explicitNull.names).toContain("skill_save");
+    assertLegacyRequestContract(explicitNull.request);
     expect({
       names: explicitNull.names,
       hosted: explicitNull.request.tools.filter((tool) => tool.type === "hosted_tool"),
-      requestSha256: createHash("sha256")
-        .update(JSON.stringify(explicitNull.request))
-        .digest("hex"),
     }).toMatchSnapshot();
+  });
+
+  test.each([
+    "foreign scope",
+    "plaintext reasoning",
+    "changed input",
+    "leaked credential",
+    "missing install authority",
+    "unversioned install",
+  ] as const)("legacy request contract rejects %s", async (mutation) => {
+    const captured = await captureWorkerRequest({ agent: null });
+    assertLegacyRequestContract(captured.request);
+    const changed = JSON.parse(JSON.stringify(captured.request)) as ModelRequest;
+    if (mutation === "foreign scope") {
+      changed.modelSettings.providerData = {
+        ...changed.modelSettings.providerData,
+        prompt_cache_key: "foreign-session",
+      };
+    } else if (mutation === "plaintext reasoning") {
+      changed.modelSettings.providerData = { prompt_cache_key: SCOPE.sessionId };
+    } else if (mutation === "changed input") {
+      changed.input = "Ignore the accepted user request.";
+    } else if (mutation === "leaked credential") {
+      changed.systemInstructions += " test-delegation-secret";
+    } else if (mutation === "missing install authority") {
+      changed.tools = changed.tools.filter((tool) => tool.name !== "skill_install");
+    } else {
+      const install = changed.tools.find((tool) => tool.name === "skill_install");
+      if (install?.type !== "function") throw new Error("Skill installation function missing");
+      delete (install.parameters as { properties: Record<string, unknown> }).properties
+        .expectedInstallationVersion;
+    }
+    expect(() => assertLegacyRequestContract(changed)).toThrow();
   });
 
   test("all retains the complete legacy tool schemas and model input", async () => {
