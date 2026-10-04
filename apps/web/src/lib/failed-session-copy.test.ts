@@ -156,12 +156,12 @@ test("temporary model capacity failures offer the existing model picker, without
     [
       "provider_rate_limited",
       "This model is throttled due to high demand. Try again in a few minutes.",
-      "This model is throttled due to high demand. Select another model in the chat bar, or try again in a few minutes.",
+      "This model is throttled due to high demand. Select a different model, or try again in a few minutes.",
     ],
     [
       "provider_unavailable",
       "This model is temporarily unavailable. Try again in a few minutes.",
-      "This model is temporarily unavailable. Select another model in the chat bar, or try again in a few minutes.",
+      "This model is temporarily unavailable. Select a different model, or try again in a few minutes.",
     ],
   ] as const) {
     const failure = { ...summary, reason: "Temporary provider failure", failureCode };
