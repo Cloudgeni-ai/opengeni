@@ -16,12 +16,7 @@ If your product already has a chat UI that speaks the Vercel AI SDK `useChat` pr
 ```ts
 import { OpenGeni, createChatHandler } from "@opengeni/sdk/chat";
 
-const og = new OpenGeni({
-  baseUrl: process.env.OPENGENI_API_BASE_URL!,
-  apiKey: process.env.OPENGENI_API_KEY!,
-  organizationId: process.env.OPENGENI_ORGANIZATION_ID!,
-  source: "acme-product",
-});
+const og = new OpenGeni({ apiKey: process.env.OPENGENI_API_KEY! });
 
 export const handleChat = createChatHandler(og, {
   resolve: async (request) => {
@@ -30,7 +25,7 @@ export const handleChat = createChatHandler(og, {
     return {
       tenant: me.tenantId,
       user: me.userId,
-      chats: "private", // the default with a user; "shared" or "isolated"
+      chats: "private", // the default with a user; or "shared"
       agent: { identity: "You are Acme's assistant.", capabilities: "none" },
     };
   },
@@ -47,7 +42,7 @@ Register `handleChat` for:
 | `POST /api/chat`         | Send a message and stream the reply             |
 | `POST /api/chat/respond` | Answer a pending approval or question           |
 
-Each tenant maps to a workspace and each conversation to a session. Keep one stable conversation id per thread (custom clients send it in `x-opengeni-conversation`). Users must be [onboarded](/integrate/users-and-tenants#onboard-users) first. `agent` takes the same object as [Configure the agent](/integrate/configure-the-agent). Always pass `baseUrl`.
+Each tenant maps to a workspace and each conversation to a session. Keep one stable conversation id per thread (custom clients send it in `x-opengeni-conversation`). The workspace and the user's membership are created on first use (see [Users & tenants](/integrate/users-and-tenants)). `agent` takes the same object as [Configure the agent](/integrate/configure-the-agent).
 
 The Vercel and OpenAI formats send only the latest user message. Earlier messages are imported once, when the session is created; after that, Opengeni keeps the history.
 

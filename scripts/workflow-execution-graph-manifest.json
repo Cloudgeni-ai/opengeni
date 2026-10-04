@@ -21,6 +21,10 @@
       "sha256": "823169781ba22bebfb1eb033970fe82810327de6acfe406bd3d9d28bb3878684"
     },
     {
+      "path": ".github/workflows/deprecate-pre-1.0.yml",
+      "sha256": "eefc69afb4a4e480515828d34069a8c7159c5c71b5db19f2c4a0924244757ba3"
+    },
+    {
       "path": ".github/workflows/desktop-e2e.yml",
       "sha256": "1e91ea9240f054e85160a461fd40bf92d1480709c0cf77ac41a41f0b4dbe815c"
     },
@@ -832,6 +836,24 @@
       "job": "unit-shards",
       "step": "Install dependencies",
       "sha256": "7cb809eb1ef393bbc5a2636bd2b170fa2e07cb82a5abc8a5d8bf3b6c16444b71"
+    },
+    {
+      "workflow": ".github/workflows/deprecate-pre-1.0.yml",
+      "job": "deprecate",
+      "step": "Admit protected main",
+      "sha256": "998e6f15f48d9a3c324a267201fc87783b0cc31396ec6d2161a60b0b755f9c4b"
+    },
+    {
+      "workflow": ".github/workflows/deprecate-pre-1.0.yml",
+      "job": "deprecate",
+      "step": "Deprecate",
+      "sha256": "a1fccaa054353c5a8919d2a44d485b336a081085ee6be63f91ecf212bb870f86"
+    },
+    {
+      "workflow": ".github/workflows/deprecate-pre-1.0.yml",
+      "job": "deprecate",
+      "step": "Install dependencies",
+      "sha256": "d4d8249940209553aac5a8bfba42fe6d8023806d37f3042bfd080c271d851584"
     },
     {
       "workflow": ".github/workflows/desktop-e2e.yml",

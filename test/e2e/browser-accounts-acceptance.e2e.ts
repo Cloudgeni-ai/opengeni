@@ -13,6 +13,10 @@ import {
   type ManagedAuthSessionSetProjection,
 } from "@opengeni/contracts/managed-auth-session-sets";
 import { createDb, provisionRoles, type DbClient } from "@opengeni/db";
+import {
+  acquireManagedAuthActorMutationLease,
+  releaseManagedAuthActorMutationLease,
+} from "@opengeni/db/managed-auth-session-sets";
 import { migrate } from "@opengeni/db/migrate";
 import { OpenGeniClient } from "@opengeni/sdk";
 import {
@@ -2682,6 +2686,62 @@ const selectAdmissionDiagnostics: Array<{
   }>;
 }> = [];
 
+type SelectionRaceSearchScope = {
+  authorityHash: string;
+  actorEpoch: string;
+  pathname: string;
+};
+type SelectionRaceSearchBoundary = SelectionRaceSearchScope & {
+  released: Promise<void>;
+  release: () => void;
+  deferred: Set<Promise<void>>;
+};
+let selectionRaceSearchBoundary: SelectionRaceSearchBoundary | null = null;
+
+function isSelectionRaceSearch(request: Request, scope: SelectionRaceSearchScope): boolean {
+  return (
+    request.method === "POST" &&
+    new URL(request.url).pathname === scope.pathname &&
+    /^\/v1\/workspaces\/[^/]+\/knowledge\/entries\/search$/.test(scope.pathname) &&
+    request.headers.get(MANAGED_AUTH_ACTOR_EPOCH_HEADER) === scope.actorEpoch &&
+    sessionSetAuthorityHash(request.headers.get("cookie")) === scope.authorityHash
+  );
+}
+
+async function withSelectionRaceSearchBoundary<T>(
+  scope: SelectionRaceSearchScope,
+  race: () => Promise<T>,
+): Promise<T> {
+  if (selectionRaceSearchBoundary) throw new Error("selection race boundary already active");
+  const { promise: released, resolve: release } = Promise.withResolvers<void>();
+  const boundary: SelectionRaceSearchBoundary = {
+    ...scope,
+    released,
+    release,
+    deferred: new Set(),
+  };
+  selectionRaceSearchBoundary = boundary;
+  try {
+    // Browser request terminals do not prove the outer API handler released its
+    // actor lease. Include already-admitted searches from responsive contexts,
+    // and defer new exact-scope searches before they acquire a production lease.
+    const deadline = Date.now() + 30_000;
+    while (
+      [...pendingAccountApiRequests.keys()].some((request) => isSelectionRaceSearch(request, scope))
+    ) {
+      if (Date.now() >= deadline) throw new Error("selection race companion search did not settle");
+      await Bun.sleep(25);
+    }
+    return await race();
+  } finally {
+    selectionRaceSearchBoundary = null;
+    boundary.release();
+    // Forward every deferred request unchanged, including its original actor.
+    // Its real stale-actor response remains subject to the strict browser ledger.
+    await Promise.all(boundary.deferred);
+  }
+}
+
 async function observeAccountApiRequest(
   request: Request,
   dispatch: () => Response | Promise<Response>,
@@ -2694,6 +2754,13 @@ async function observeAccountApiRequest(
     actorEpoch: request.headers.get(MANAGED_AUTH_ACTOR_EPOCH_HEADER),
     authorityHash: sessionSetAuthorityHash(request.headers.get("cookie")),
   });
+  const boundary = selectionRaceSearchBoundary;
+  const deferred =
+    boundary && isSelectionRaceSearch(request, boundary) ? Promise.withResolvers<void>() : null;
+  if (deferred) {
+    boundary!.deferred.add(deferred.promise);
+    await boundary!.released;
+  }
   if (metadata.pathname === "/v1/auth/session-set/select") {
     selectAdmissionDiagnostics.push({
       authorityHash: metadata.authorityHash,
@@ -2711,6 +2778,7 @@ async function observeAccountApiRequest(
     throw failure;
   } finally {
     pendingAccountApiRequests.delete(request);
+    deferred?.resolve();
   }
 }
 
@@ -3214,6 +3282,75 @@ afterAll(async () => {
 }, 180_000);
 
 describe("provider-neutral browser account acceptance", () => {
+  test("selection race admission defers only the exact actor's knowledge search and forwards on failure", async () => {
+    const authority = "a".repeat(43);
+    const scope: SelectionRaceSearchScope = {
+      authorityHash: managedAuthSha256(authority),
+      actorEpoch: "2",
+      pathname: "/v1/workspaces/workspace/knowledge/entries/search",
+    };
+    const request = (
+      method = "POST",
+      pathname = scope.pathname,
+      actorEpoch = scope.actorEpoch,
+      cookie = authority,
+    ) =>
+      new Request(`${publicOrigin}${pathname}`, {
+        method,
+        headers: {
+          cookie: `${MANAGED_AUTH_SESSION_SET_COOKIE}=${cookie}`,
+          [MANAGED_AUTH_ACTOR_EPOCH_HEADER]: actorEpoch,
+        },
+      });
+    expect(isSelectionRaceSearch(request(), scope)).toBe(true);
+    for (const other of [
+      request("GET"),
+      request("POST", "/v1/auth/session-set/select"),
+      request("POST", `${scope.pathname}/other`),
+      request("POST", scope.pathname.replace("workspace/", "other/")),
+      request("POST", scope.pathname, "3"),
+      request("POST", scope.pathname, "2", "b".repeat(43)),
+      request("POST", scope.pathname, "2", ""),
+    ])
+      expect(isSelectionRaceSearch(other, scope)).toBe(false);
+
+    const forwarded: string[] = [];
+    const sentinel = new Error("race failed");
+    let companion: Promise<Response> | undefined;
+    await expect(
+      withSelectionRaceSearchBoundary(scope, async () => {
+        companion = observeAccountApiRequest(request(), () => {
+          forwarded.push("companion");
+          return new Response(null, { status: 409 });
+        });
+        await observeAccountApiRequest(request("POST", "/v1/auth/session-set/select"), () => {
+          forwarded.push("select");
+          return new Response(null, { status: 200 });
+        });
+        expect(forwarded).toEqual(["select"]);
+        throw sentinel;
+      }),
+    ).rejects.toBe(sentinel);
+    expect((await companion!).status).toBe(409);
+    expect(forwarded).toEqual(["select", "companion"]);
+    expect(selectionRaceSearchBoundary).toBeNull();
+    expect(pendingAccountApiRequests.size).toBe(0);
+
+    const admitted = Promise.withResolvers<Response>();
+    const oldSearch = observeAccountApiRequest(request(), () => admitted.promise);
+    let raceStarted = false;
+    const race = withSelectionRaceSearchBoundary(scope, async () => {
+      raceStarted = true;
+      expect(pendingAccountApiRequests.size).toBe(0);
+    });
+    expect(raceStarted).toBe(false);
+    admitted.resolve(new Response(null, { status: 200 }));
+    expect((await oldSearch).status).toBe(200);
+    await race;
+    expect(raceStarted).toBe(true);
+    expect(selectionRaceSearchBoundary).toBeNull();
+  });
+
   test("actor transition reads include only the exact read-only POST search", () => {
     const path = "/v1/workspaces/workspace/knowledge/entries/search";
     expect(isActorTransitionRead("POST", path)).toBe(true);
@@ -4910,15 +5047,61 @@ describe("provider-neutral browser account acceptance", () => {
       projection = await sessionSet(page);
       const betaSlot = projection.slots.find((slot) => slot.displayName === beta.displayName);
       if (!betaSlot) throw new Error("Beta slot missing after add");
-      const [pageProjection, tabProjection] = await Promise.all([
-        sessionSet(page),
-        sessionSet(secondTab),
-      ]);
-      selectAdmissionDiagnostics.length = 0;
-      const raced = await Promise.all([
-        raceSelect(page, pageProjection, betaSlot.id),
-        raceSelect(secondTab, tabProjection, betaSlot.id),
-      ]);
+      const authority = (await context.cookies(publicOrigin)).find(
+        (cookie) => cookie.name === MANAGED_AUTH_SESSION_SET_COOKIE,
+      )?.value;
+      if (!authority || !client) throw new Error("selection race authority unavailable");
+      const scope: SelectionRaceSearchScope = {
+        authorityHash: managedAuthSha256(authority),
+        actorEpoch: projection.actorEpoch,
+        pathname: `/v1/workspaces/${alpha.workspaceId}/knowledge/entries/search`,
+      };
+      // The CI double-409 was truthful: a search held this exact actor's lease.
+      // Reproduce that denial through canonical restricted-role lease routines;
+      // failed selects must neither advance the actor nor change the selection.
+      const companionRequestId = crypto.randomUUID();
+      await acquireManagedAuthActorMutationLease(client.db, {
+        authorityHash: scope.authorityHash,
+        actorEpoch: scope.actorEpoch,
+        requestId: companionRequestId,
+        leaseSeconds: 30,
+      });
+      try {
+        const blocked = await Promise.all([
+          raceSelect(page, projection, betaSlot.id),
+          raceSelect(secondTab, projection, betaSlot.id),
+        ]);
+        expect(blocked.map(({ status, managedAuthCode }) => ({ status, managedAuthCode }))).toEqual(
+          [
+            { status: 409, managedAuthCode: "actor_mutation_in_flight" },
+            { status: 409, managedAuthCode: "actor_mutation_in_flight" },
+          ],
+        );
+        expect(sanitizeRaceProjection(await sessionSet(page))).toEqual(
+          sanitizeRaceProjection(projection),
+        );
+      } finally {
+        expect(
+          await releaseManagedAuthActorMutationLease(client.db, {
+            authorityHash: scope.authorityHash,
+            requestId: companionRequestId,
+          }),
+        ).toBe(true);
+      }
+      const { raced, pageProjection } = await withSelectionRaceSearchBoundary(scope, async () => {
+        const [primaryProjection, companionProjection] = await Promise.all([
+          sessionSet(page),
+          sessionSet(secondTab),
+        ]);
+        expect(primaryProjection.actorEpoch).toBe(scope.actorEpoch);
+        expect(companionProjection.actorEpoch).toBe(scope.actorEpoch);
+        selectAdmissionDiagnostics.length = 0;
+        const results = await Promise.all([
+          raceSelect(page, primaryProjection, betaSlot.id),
+          raceSelect(secondTab, companionProjection, betaSlot.id),
+        ]);
+        return { raced: results, pageProjection: primaryProjection };
+      });
       const racedStatuses = raced.map(({ status }) => status).sort();
       if (racedStatuses[0] !== 200 || racedStatuses[1] !== 409) {
         const currentProjections = await Promise.all(

@@ -20,34 +20,30 @@ icon: "palette"
 </Frame>
 
 ```tsx
-<OpenGeniProvider client={client} workspaceId={workspaceId}>
-  <OpenGeniChat conversationProps={{ toolRegistry }} />
-</OpenGeniProvider>
+<OpenGeniChat baseUrl="/api/opengeni" conversationProps={{ toolRegistry }} />
 ```
+
+`baseUrl` is your proxy's mount. The component creates the browser client and uses the workspace your proxy resolved for the signed-in user.
 
 The list shows the chats the user created. Set `sessionList: "visible"` on the proxy to list every chat they can read. Control the selection with `sessionId` and `onSessionChange` (for example from the URL).
 
 For a single conversation, use `SessionConversation`. It includes streaming replies, tool activity, approvals, questions, attachments, the message queue, Steer, and Pause/Resume.
 
 ```tsx
-import { OpenGeniClient } from "@opengeni/sdk";
-import { OpenGeniProvider, SessionConversation } from "@opengeni/react/session-ui";
+import { SessionConversation } from "@opengeni/react/session-ui";
 import "@opengeni/react/compiled.css";
 
-const client = new OpenGeniClient({ baseUrl: "/api/opengeni" });
-
-<OpenGeniProvider client={client} workspaceId={workspaceId}>
-  <SessionConversation sessionId={sessionId} height="100%" />
-</OpenGeniProvider>;
+<SessionConversation baseUrl="/api/opengeni" sessionId={sessionId} height="100%" />;
 ```
 
-Import from `@opengeni/react/session-ui`; it has no optional peer dependencies.
+Import from `@opengeni/react/session-ui` for the smallest bundle; it has no optional peer dependencies. To share one client across several components or use the headless hooks, wrap them in `<OpenGeniProvider client={client} workspaceId={workspaceId}>` instead of passing `baseUrl`.
 
 ## Props
 
 | Prop                                                   | Purpose                                                                                  |
 | ------------------------------------------------------ | ---------------------------------------------------------------------------------------- |
 | `sessionId`                                            | Required. The session to show                                                            |
+| `baseUrl`                                              | Your proxy's mount, such as `/api/opengeni`. Not needed inside an `OpenGeniProvider`     |
 | `attachments`                                          | File attachments in the composer. Defaults to `true`                                     |
 | `modelPicker`                                          | Show the model picker. Hidden when the proxy fixes the model                             |
 | `toolRegistry`                                         | Your own renderers for your tools                                                        |

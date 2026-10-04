@@ -27297,7 +27297,8 @@
       "UIMessageStreamOptions": "type",
       "uiMessageStreamParts": "value",
       "uiMessageStreamResponse": "value",
-      "uuidV5": "value"
+      "uuidV5": "value",
+      "WorkspaceTarget": "type"
     },
     "@opengeni/sdk/codex-realtime-controller": {
       "CODEX_REALTIME_NEGOTIATION_TIMEOUT_MS": "value",
@@ -29846,6 +29847,7 @@
       "chatBySessionId",
       "client",
       "organizationId",
+      "resolveOrganizationId",
       "sessions",
       "source",
       "workspaceId",
@@ -38167,6 +38169,9 @@
       "organizationId": [
         "{\"kind\":\"property\",\"static\":false,\"optional\":false,\"readonly\":true,\"generics\":null,\"parameters\":[],\"result\":{\"type\":\"TSStringKeyword\"}}"
       ],
+      "resolveOrganizationId": [
+        "{\"kind\":\"method\",\"static\":false,\"optional\":false,\"readonly\":false,\"generics\":null,\"parameters\":[],\"result\":{\"type\":\"TSTypeReference\",\"typeArguments\":{\"params\":[{\"type\":\"TSStringKeyword\"}],\"type\":\"TSTypeParameterInstantiation\"},\"typeName\":{\"name\":\"Promise\",\"optional\":false,\"type\":\"Identifier\"}}}"
+      ],
       "sessions": [
         "{\"kind\":\"property\",\"static\":false,\"optional\":false,\"readonly\":true,\"generics\":null,\"parameters\":[],\"result\":{\"members\":[{\"computed\":false,\"key\":{\"name\":\"list\",\"optional\":false,\"type\":\"Identifier\"},\"optional\":false,\"readonly\":false,\"static\":false,\"type\":\"TSPropertySignature\",\"typeAnnotation\":{\"params\":[{\"name\":\"options\",\"optional\":false,\"type\":\"Identifier\",\"typeAnnotation\":{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"ChatSessionListOptions\",\"optional\":false,\"type\":\"Identifier\"}}}],\"returnType\":{\"type\":\"TSTypeReference\",\"typeArguments\":{\"params\":[{\"elementType\":{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"Session\",\"optional\":false,\"type\":\"Identifier\"}},\"type\":\"TSArrayType\"}],\"type\":\"TSTypeParameterInstantiation\"},\"typeName\":{\"name\":\"Promise\",\"optional\":false,\"type\":\"Identifier\"}},\"type\":\"TSFunctionType\"}}],\"type\":\"TSTypeLiteral\"}}"
       ],
@@ -38174,7 +38179,7 @@
         "{\"kind\":\"property\",\"static\":false,\"optional\":false,\"readonly\":true,\"generics\":null,\"parameters\":[],\"result\":{\"type\":\"TSStringKeyword\"}}"
       ],
       "workspaceId": [
-        "{\"kind\":\"method\",\"static\":false,\"optional\":false,\"readonly\":false,\"generics\":null,\"parameters\":[{\"type\":{\"type\":\"TSUnionType\",\"types\":[{\"members\":[{\"computed\":false,\"key\":{\"name\":\"tenant\",\"optional\":false,\"type\":\"Identifier\"},\"optional\":true,\"readonly\":false,\"static\":false,\"type\":\"TSPropertySignature\",\"typeAnnotation\":{\"type\":\"TSUnionType\",\"types\":[{\"type\":\"TSStringKeyword\"},{\"type\":\"TSUndefinedKeyword\"}]}},{\"computed\":false,\"key\":{\"name\":\"workspaceId\",\"optional\":false,\"type\":\"Identifier\"},\"optional\":true,\"readonly\":false,\"static\":false,\"type\":\"TSPropertySignature\",\"typeAnnotation\":{\"type\":\"TSUnionType\",\"types\":[{\"type\":\"TSStringKeyword\"},{\"type\":\"TSUndefinedKeyword\"}]}}],\"type\":\"TSTypeLiteral\"},{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"ChatTarget\",\"optional\":false,\"type\":\"Identifier\"}}]},\"optional\":false,\"rest\":false}],\"result\":{\"type\":\"TSTypeReference\",\"typeArguments\":{\"params\":[{\"type\":\"TSStringKeyword\"}],\"type\":\"TSTypeParameterInstantiation\"},\"typeName\":{\"name\":\"Promise\",\"optional\":false,\"type\":\"Identifier\"}}}"
+        "{\"kind\":\"method\",\"static\":false,\"optional\":false,\"readonly\":false,\"generics\":null,\"parameters\":[{\"type\":{\"type\":\"TSUnionType\",\"types\":[{\"members\":[{\"computed\":false,\"key\":{\"name\":\"tenant\",\"optional\":false,\"type\":\"Identifier\"},\"optional\":true,\"readonly\":false,\"static\":false,\"type\":\"TSPropertySignature\",\"typeAnnotation\":{\"type\":\"TSUnionType\",\"types\":[{\"type\":\"TSStringKeyword\"},{\"type\":\"TSUndefinedKeyword\"}]}},{\"computed\":false,\"key\":{\"name\":\"workspaceId\",\"optional\":false,\"type\":\"Identifier\"},\"optional\":true,\"readonly\":false,\"static\":false,\"type\":\"TSPropertySignature\",\"typeAnnotation\":{\"type\":\"TSUnionType\",\"types\":[{\"type\":\"TSStringKeyword\"},{\"type\":\"TSUndefinedKeyword\"}]}}],\"type\":\"TSTypeLiteral\"},{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"ChatTarget\",\"optional\":false,\"type\":\"Identifier\"}},{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"WorkspaceTarget\",\"optional\":false,\"type\":\"Identifier\"}}]},\"optional\":false,\"rest\":false}],\"result\":{\"type\":\"TSTypeReference\",\"typeArguments\":{\"params\":[{\"type\":\"TSStringKeyword\"}],\"type\":\"TSTypeParameterInstantiation\"},\"typeName\":{\"name\":\"Promise\",\"optional\":false,\"type\":\"Identifier\"}}}"
       ],
       "workspaceIdFor": [
         "{\"kind\":\"method\",\"static\":false,\"optional\":false,\"readonly\":false,\"generics\":null,\"parameters\":[{\"type\":{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"WorkspaceIdTarget\",\"optional\":false,\"type\":\"Identifier\"}},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"WorkspaceIdOptions\",\"optional\":false,\"type\":\"Identifier\"}},\"optional\":false,\"rest\":false}],\"result\":{\"type\":\"TSTypeReference\",\"typeArguments\":{\"params\":[{\"type\":\"TSStringKeyword\"}],\"type\":\"TSTypeParameterInstantiation\"},\"typeName\":{\"name\":\"Promise\",\"optional\":false,\"type\":\"Identifier\"}}}"

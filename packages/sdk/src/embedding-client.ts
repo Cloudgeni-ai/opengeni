@@ -490,7 +490,12 @@ export class OpenGeniEmbeddingClient extends OpenGeniArtifactClient {
     );
   }
 
-  /** Explicit organization-service-key onboarding; asUser never grants membership. */
+  /**
+   * Explicit organization-service-key onboarding with chosen permissions. Not
+   * needed for the default path: an `asUser` request through a key with
+   * `members:manage` adds a missing member with conversation permissions on
+   * first use. Change an existing member with `updateExternalWorkspaceMember`.
+   */
   async addExternalWorkspaceMember(
     workspaceId: string,
     request: {

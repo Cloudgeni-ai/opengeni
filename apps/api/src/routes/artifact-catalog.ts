@@ -62,7 +62,12 @@ const position = (row: ArtifactCatalogCandidate): ArtifactCatalogPosition => ({
 export function registerArtifactCatalogRoutes(app: Hono, deps: Dependencies): void {
   app.put("/v1/workspaces/:workspaceId/artifact-catalog/:kind/:artifactId/pin", async (context) => {
     const workspaceId = context.req.param("workspaceId");
-    const authorization = await requireAccessGrantAuthorization(context, deps, workspaceId);
+    const authorization = await requireAccessGrantAuthorization(
+      context,
+      deps,
+      workspaceId,
+      "artifacts:publish",
+    );
     const grant = authorization.grant;
     if (!hasPermission(grant.permissions, "artifacts:publish"))
       throw new HTTPException(403, { message: "Artifact publish access required" });
