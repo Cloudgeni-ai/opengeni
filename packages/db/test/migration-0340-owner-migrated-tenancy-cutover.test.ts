@@ -40,8 +40,8 @@ import { migrate } from "../src/migrate";
 
 const requireRealDatabase = process.env.OPENGENI_REQUIRE_REAL_DB === "1";
 
-/** Byte-identical to `scripts/activate-session-tenancy.ts` and to the SQL
- *  `opengeni_private.tenancy_activation_canonical_json`. */
+/** Byte-identical to the retired operator activation command (removed with
+ *  migration 0611) and to the SQL `opengeni_private.tenancy_activation_canonical_json`. */
 function canonicalJson(value: unknown): string {
   if (Array.isArray(value)) return `[${value.map(canonicalJson).join(",")}]`;
   if (value !== null && typeof value === "object") {
