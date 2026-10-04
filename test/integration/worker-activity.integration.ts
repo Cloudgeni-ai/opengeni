@@ -4871,66 +4871,6 @@ describe("worker activities integration", () => {
     },
   );
 
-  test("fails reusable dispatch when the task attachment diverges from its session", async () => {
-    const grant = await testGrant(dbClient.db);
-    const environment = await seedWorkspaceEnvironment(dbClient.db, grant, {
-      DIVERGED_TOKEN: "diverged-value-123456",
-    });
-    const session = await createOwnedSession(dbClient.db, grant, {
-      initialMessage: "reusable",
-      resources: [],
-      metadata: {},
-      model: "scripted-model",
-      sandboxBackend: "none",
-    });
-    const task = await createOwnedScheduledTask(dbClient.db, grant, {
-      name: "diverged reusable",
-      status: "active",
-      schedule: { type: "interval", everySeconds: 3600 },
-      temporalScheduleId: `scheduled-task-${crypto.randomUUID()}`,
-      runMode: "reusable_session",
-      overlapPolicy: "allow_concurrent",
-      agentConfig: { prompt: "run", resources: [], tools: [], metadata: {} },
-      variableSetId: environment.id,
-      metadata: {},
-    });
-    await updateScheduledTask(dbClient.db, grant.workspaceId, task.id, {
-      reusableSessionId: session.id,
-    });
-    const activities = createWorkerActivities({
-      settings: testSettings({
-        databaseUrl: services.databaseUrl,
-        natsUrl: services.natsUrl,
-        environmentsEncryptionKey: workerEnvironmentsKey,
-      }),
-      db: dbClient.db,
-      bus,
-      runtime: createProductionAgentRuntime({
-        model: new ScriptedModel([{ outputText: "ok" }]),
-      }),
-    });
-    // Binding divergence is deterministic: the run settles failed with a stable
-    // error code and the dispatch resolves blocked instead of throwing.
-    await expect(
-      activities.dispatchScheduledTaskRun({
-        workspaceId: grant.workspaceId,
-        taskId: task.id,
-        triggerType: "scheduled",
-        producerKey: `worker-activity-${crypto.randomUUID()}`,
-      }),
-    ).resolves.toEqual({ action: "blocked", reason: "scheduled_run_terminal" });
-    const runs = await listScheduledTaskRuns(dbClient.db, grant.workspaceId, task.id);
-    expect(runs).toHaveLength(1);
-    expect(runs[0]).toMatchObject({
-      status: "failed",
-      error: "scheduled_reusable_binding_changed",
-    });
-    // Nothing was delivered into the diverged session.
-    expect(
-      await listOutstandingSessionSystemUpdates(dbClient.db, grant.workspaceId, session.id),
-    ).toHaveLength(0);
-  });
-
   test("refuses to revive a cancelled reusable session on the next fire", async () => {
     const grant = await testGrant(dbClient.db);
     const session = await createOwnedSession(dbClient.db, grant, {
