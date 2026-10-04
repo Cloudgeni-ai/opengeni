@@ -69,13 +69,11 @@ export function SignedOutPage({
                 id="signed-out-heading"
                 className="font-display text-[40px] leading-[1.08] font-medium tracking-[-1.5px] text-balance min-[721px]:text-[48px] min-[721px]:tracking-[-2px]"
               >
-                Infrastructure <span className="whitespace-nowrap">for agents</span>{" "}
-                <em className="font-serif text-[1.18em] leading-none font-normal">
-                  that actually finish the job.
-                </em>
+                Built for{" "}
+                <em className="font-serif text-[1.18em] leading-none font-normal">the long run.</em>
               </h1>
               <p className="mt-5 max-w-[330px] text-[15px] leading-[1.6] text-fg-muted">
-                Build AI products without building the infrastructure from scratch.
+                AI infrastructure out of the box.
               </p>
               <ul className="mt-8 space-y-4">
                 {highlights.map(({ icon: Icon, text }) => (
