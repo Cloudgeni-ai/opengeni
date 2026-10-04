@@ -8,7 +8,7 @@ import {
   MailIcon,
   RefreshCwIcon,
 } from "lucide-react";
-import { useEffect, useRef, useState, type ReactNode } from "react";
+import { useEffect, useRef, useState, type ComponentProps, type ReactNode } from "react";
 import { toast } from "sonner";
 import type { ClientModel } from "@opengeni/sdk";
 import type { OpenGeniBrowserClient } from "@opengeni/sdk/browser";
@@ -49,6 +49,7 @@ import {
   type OrganizationInvitationContinuation,
 } from "@/lib/organization-invitation-continuation";
 import type { OrganizationInvitation } from "@/types";
+import { rememberPendingDeveloperSetup } from "@/lib/pending-developer-setup";
 
 export function OrganizationOnboardingPanel({
   onComplete,
@@ -287,6 +288,13 @@ export function OrganizationOnboardingPanel({
           ...(useCase ? { useCase } : {}),
         });
         onboardingJourney().completed("organization_name", "created");
+        if (useCase === "embed" && activeEmail) {
+          rememberPendingDeveloperSetup({
+            account: activeEmail,
+            organizationId: created.organizationId,
+            organizationName: normalizedName,
+          });
+        }
         setCreatedSetup({
           organizationId: created.organizationId,
           personalWorkspaceId: created.personalWorkspaceId,
@@ -583,6 +591,39 @@ export function OrganizationOnboardingPanel({
         ) : null}
       </form>
     </section>,
+  );
+}
+
+/**
+ * The developer setup step again after a reload, a closed tab or another
+ * device: the person chose "Add AI agents to my product" and has not picked
+ * an option or skipped yet. It mints a fresh key, like the first time.
+ */
+export function ResumedDeveloperSetup({
+  client,
+  organizationId,
+  organizationName,
+  activeEmail,
+  onSignOut,
+  onComplete,
+}: {
+  client: ComponentProps<typeof DeveloperSetupStep>["client"];
+  organizationId: string;
+  organizationName?: string | undefined;
+  activeEmail: string | null;
+  onSignOut?: (() => Promise<void> | void) | undefined;
+  onComplete: (destination?: OnboardingDestination) => void;
+}) {
+  return (
+    <div className="flex min-h-0 flex-1 flex-col overflow-y-auto">
+      <OnboardingAccountHeader email={activeEmail} onSignOut={onSignOut} />
+      <DeveloperSetupStep
+        client={client}
+        organizationId={organizationId}
+        organizationName={organizationName}
+        onComplete={onComplete}
+      />
+    </div>
   );
 }
 
