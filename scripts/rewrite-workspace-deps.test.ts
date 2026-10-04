@@ -25,7 +25,7 @@ describe("release workspace dependency rewriting", () => {
         field: "dependencies",
         dependency: "@opengeni/sdk",
         before: "workspace:*",
-        after: "^0.50.0",
+        after: "0.50.0",
       },
       {
         field: "peerDependencies",

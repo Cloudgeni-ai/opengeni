@@ -57,8 +57,8 @@ every chat becomes a session in the given workspace. It needs
   schedules or session length up front; long sessions just work. Ask about
   timing only when the requested feature itself is scheduled.
 - Trust the installed package types, `GET /v1/config/client`, and
-  `GET /v1/access/me` over memory. Pin `@opengeni/sdk` and `@opengeni/react` to
-  the same release.
+  `GET /v1/access/me` over memory. Use the same version for all `@opengeni`
+  packages.
 - Do not deploy, publish, or change production without the user's permission.
 
 ## Credentials

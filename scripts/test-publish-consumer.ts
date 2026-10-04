@@ -433,16 +433,14 @@ try {
     ({ manifest }) => manifest.name === "@opengeni/codemode",
   );
   if (!codemode) throw new Error("runtime package closure did not stage @opengeni/codemode");
-  if (sdk.manifest.dependencies?.["@opengeni/contracts"] !== `^${contracts.manifest.version}`) {
+  if (sdk.manifest.dependencies?.["@opengeni/contracts"] !== contracts.manifest.version) {
     throw new Error("SDK tarball does not declare the staged canonical contracts version");
   }
   for (const consumer of [sdk, react]) {
-    if (consumer.manifest.dependencies?.["@opengeni/connect"] !== `^${connect.manifest.version}`)
+    if (consumer.manifest.dependencies?.["@opengeni/connect"] !== connect.manifest.version)
       throw new Error(`${consumer.manifest.name} does not declare the staged Connect version`);
   }
-  if (
-    codemode.manifest.dependencies?.["@opengeni/contracts"] !== `^${contracts.manifest.version}`
-  ) {
+  if (codemode.manifest.dependencies?.["@opengeni/contracts"] !== contracts.manifest.version) {
     throw new Error("Codemode tarball does not declare the staged canonical contracts version");
   }
   const codemodeTarballContents = await run(["tar", "-tzf", codemode.tarball], consumerRoot, true);
