@@ -37,6 +37,7 @@ describe("completed turn physical finalization", () => {
       expect(result.stdout).toContain('"phase":"finalizing"');
       expect(result.stdout).toContain('"opAcks":{"settled_op":"42"}');
       expect(result.stdout).toContain(`"reason":"${stage}"`);
+      expect(result.stdout).toMatch(/"correlationId":"turn_[0-9a-f]{32}"/);
       expect(result.stdout).toContain("graceful_drain_requested");
       expect(result.stdout).toContain("host_exit_backstop");
       expect(result.stdout.indexOf("graceful_drain_requested")).toBeLessThan(

@@ -108,7 +108,9 @@ has origin `system`.
 After execution ends, every physical finalization stage has a five-minute
 containment deadline, including normally completed turns. This is not a
 run-length limit. Heartbeats report `finalizing` and the current bounded
-`finalizationStage`; Grafana exposes stage occupancy and thirty-second slow-stage observations;
+`finalizationStage`; slow and containment logs carry the same hashed attempt
+`correlationId` as worker execution, never raw session or attempt IDs or metric labels.
+Grafana exposes stage occupancy and thirty-second slow-stage observations;
 the bounded containment log and worker restarts identify actual exits.
 A stuck writer drain is never detached to release a successor. At the deadline,
 the host stops polling and requests the ordinary graceful worker shutdown. Other

@@ -1,5 +1,5 @@
 import { describe, expect, spyOn, test } from "bun:test";
-import { createObservability } from "@opengeni/observability";
+import { createObservability, turnExecutionTelemetryKey } from "@opengeni/observability";
 import type { TurnHeartbeatDetails } from "../src/op-journal";
 import { startTurnFinalizationMonitor } from "../src/activities/agent-turn/finalization-monitor";
 
@@ -84,10 +84,23 @@ describe("turn finalization diagnostics", () => {
 
   test("retains a readable bounded cause through the real public telemetry filter", async () => {
     const logs: string[] = [];
+    const execution = {
+      workspaceId: "private-workspace",
+      sessionId: "private-session",
+      attemptId: "private-attempt",
+    };
+    const correlationId = turnExecutionTelemetryKey(
+      execution.workspaceId,
+      execution.sessionId,
+      execution.attemptId,
+    );
     const output = spyOn(console, "error").mockImplementation((...args) =>
       logs.push(args.join(" ")),
     );
-    const warning = spyOn(console, "warn").mockImplementation(() => {});
+    const warnings: string[] = [];
+    const warning = spyOn(console, "warn").mockImplementation((...args) =>
+      warnings.push(args.join(" ")),
+    );
     const obs = observability();
     let drains = 0;
     const monitor = startTurnFinalizationMonitor({
@@ -96,6 +109,7 @@ describe("turn finalization diagnostics", () => {
       heartbeat() {},
       timeoutMs: 10,
       slowAfterMs: 1,
+      execution,
       requestWorkerDrain() {
         drains++;
       },
@@ -106,6 +120,14 @@ describe("turn finalization diagnostics", () => {
       expect(drains).toBe(1);
       expect(logs.join("\n")).toContain('"reason":"credential_cleanup"');
       expect(logs.join("\n")).toContain('"surface":"turn_finalization"');
+      expect(logs.join("\n")).toContain(`"correlationId":"${correlationId}"`);
+      expect(warnings.join("\n")).toContain(`"correlationId":"${correlationId}"`);
+      for (const identity of Object.values(execution)) {
+        expect(logs.join("\n")).not.toContain(identity);
+        expect(warnings.join("\n")).not.toContain(identity);
+        expect(await obs.prometheusMetrics()).not.toContain(identity);
+      }
+      expect(await obs.prometheusMetrics()).not.toContain(correlationId);
       expect(
         sample(
           await obs.prometheusMetrics(),
@@ -113,6 +135,38 @@ describe("turn finalization diagnostics", () => {
           "credential_cleanup",
         ),
       ).toBe(1);
+    } finally {
+      monitor.stop();
+      output.mockRestore();
+      warning.mockRestore();
+    }
+  });
+
+  test("correlation diagnostics cannot disable physical containment", async () => {
+    const output = spyOn(console, "error").mockImplementation(() => {});
+    const warning = spyOn(console, "warn").mockImplementation(() => {});
+    let drains = 0;
+    const monitor = startTurnFinalizationMonitor({
+      observability: observability(),
+      details: { opAcks: {} },
+      heartbeat() {},
+      execution: {
+        get workspaceId(): string {
+          throw new Error("diagnostic identity unavailable");
+        },
+        sessionId: "private-session",
+        attemptId: "private-attempt",
+      },
+      timeoutMs: 10,
+      slowAfterMs: 1,
+      requestWorkerDrain() {
+        drains++;
+      },
+    });
+    try {
+      monitor.enter("tool_writers");
+      await Bun.sleep(15);
+      expect(drains).toBe(1);
     } finally {
       monitor.stop();
       output.mockRestore();
