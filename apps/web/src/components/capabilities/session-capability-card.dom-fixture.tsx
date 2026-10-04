@@ -5,6 +5,7 @@ import { act } from "react";
 
 import { CapabilityCatalogItem } from "@opengeni/contracts";
 import type { AuthNeededItem } from "@opengeni/react";
+import type { Session, UpdateSessionToolPolicyRequest } from "@opengeni/sdk";
 
 const catalogItem = CapabilityCatalogItem.parse({
   id: "example",
@@ -43,6 +44,13 @@ const getGitHubApp = mock(async () => ({
   linkUrl: "https://api.example.test/github/connect",
 }));
 const refreshGitHub = mock(async () => {});
+let sessionAccess: Map<string, Session> | null = null;
+const updateSessionToolPolicy = mock(
+  async (_workspaceId: string, _id: string, request: UpdateSessionToolPolicyRequest) =>
+    ({
+      firstPartyMcpTools: request.mode === "explicit" ? request.firstPartyMcpTools : [],
+    }) as Session,
+);
 const context = {
   client: {
     connectTransport: () => ({}),
@@ -93,15 +101,18 @@ const context = {
     createConnection,
     updateConnection,
     enableCapability,
-    getSession: async () => ({
-      id: "session",
-      workspaceId: "workspace",
-      tenancy: { visibility: "workspace", authorityEpoch: 4 },
-      tools: [{ kind: "mcp", id: "example" }],
-      toolPolicy: { mode: "explicit" },
-      firstPartyMcpTools: [],
-      toolPolicyVersion: 1,
-    }),
+    updateSessionToolPolicy,
+    getSession: async (_workspaceId: string, id: string): Promise<Session> =>
+      sessionAccess?.get(id) ??
+      ({
+        id: "session",
+        workspaceId: "workspace",
+        tenancy: { visibility: "workspace", authorityEpoch: 4 },
+        tools: [{ kind: "mcp", id: "example" }],
+        toolPolicy: { mode: "explicit" },
+        firstPartyMcpTools: [],
+        toolPolicyVersion: 1,
+      } as unknown as Session),
   },
   workspaceCapabilityCatalog: [catalogItem],
   githubStatus: null as { status: string } | null,
@@ -116,6 +127,7 @@ const context = {
   workspaces: [],
   refreshWorkspaceMcpServers: async () => {},
   accessContext: {
+    subjectId: "human",
     workspaceGrants: [{ workspaceId: "workspace", permissions: ["connections:read"] }],
   },
 };
@@ -156,6 +168,9 @@ async function render(
   visibility: "private" | "workspace" = "workspace",
   noticeOverride: AuthNeededItem = item,
 ) {
+  sessionAccess = null;
+  updateSessionToolPolicy.mockClear();
+  context.accessContext.subjectId = "human";
   personal = personalAccount;
   liveCatalogItem = currentCatalogItem;
   context.workspaceCapabilityCatalog = [cachedCatalogItem];
@@ -256,6 +271,106 @@ function button(container: HTMLElement, label: string) {
 }
 
 describe("conversation connection card", () => {
+  const fiken = CapabilityCatalogItem.parse({
+    id: "api:fiken",
+    name: "Fiken",
+    kind: "api",
+    source: "built_in",
+    surfaceType: "first_party_fiken",
+    providerDomain: "fiken.no",
+    enabled: true,
+    tools: [{ kind: "mcp", id: "opengeni" }],
+    metadata: { firstPartyMcpTools: ["fiken_companies_list", "fiken_invoices_list"] },
+  });
+  async function renderFiken() {
+    const notice = {
+      ...item,
+      capability: { ...item.capability!, id: fiken.id, name: "Fiken", kind: "api" as const },
+    };
+    const h = await render(false, fiken, fiken, false, "workspace", notice);
+    enabled = true;
+    connections = [
+      { ...row, providerDomain: "fiken.no", metadata: { credentialRole: "fiken_api_token" } },
+    ];
+    sessionAccess = new Map(
+      ["parent", "session"].map((id) => [
+        id,
+        {
+          id,
+          title: id === "parent" ? "Accounting parent" : "Accounting child",
+          parentSessionId: id === "parent" ? null : "parent",
+          tools: [{ kind: "mcp", id: "existing" }],
+          firstPartyMcpTools: ["session_pause"],
+          toolPolicyVersion: 3,
+          toolPolicy: {
+            mode: "explicit",
+            inheritedFromSessionId: id === "parent" ? null : "parent",
+          },
+          effectiveToolPolicy: { mandatoryIds: ["opengeni"] },
+        } as Session,
+      ]),
+    );
+    await act(async () => button(h.container, "Review").click());
+    return h;
+  }
+  test("child Fiken review makes no writes until explicit parent confirmation", async () => {
+    const h = await renderFiken();
+    try {
+      await act(async () => button(h.container, "Add tools").click());
+      expect(h.container.textContent).toContain("This chat inherits its tool access");
+      expect(h.container.textContent).toContain("Accounting parent");
+      expect(
+        h.container.querySelector('a[href="/workspaces/workspace/sessions/parent"]'),
+      ).not.toBeNull();
+      expect(h.container.textContent).not.toContain("Ask an admin");
+      expect(updateSessionToolPolicy).not.toHaveBeenCalled();
+      await act(async () => button(h.container, "Enable in parents and add tools").click());
+      expect(updateSessionToolPolicy.mock.calls.map((call) => call[1])).toEqual([
+        "parent",
+        "session",
+      ]);
+      expect(createConnection).not.toHaveBeenCalled();
+      expect(updateConnection).not.toHaveBeenCalled();
+    } finally {
+      await h.close();
+    }
+  });
+  test("canceling parent review makes no policy changes", async () => {
+    const h = await renderFiken();
+    try {
+      await act(async () => button(h.container, "Add tools").click());
+      await act(async () => button(h.container, "Cancel").click());
+      expect(updateSessionToolPolicy).not.toHaveBeenCalled();
+    } finally {
+      await h.close();
+    }
+  });
+  test("stale parent review stays incomplete and requires another review", async () => {
+    const h = await renderFiken();
+    try {
+      await act(async () => button(h.container, "Add tools").click());
+      sessionAccess!.get("parent")!.toolPolicyVersion++;
+      await act(async () => button(h.container, "Enable in parents and add tools").click());
+      expect(h.container.textContent).toContain("Chat access changed");
+      expect(button(h.container, "Add tools")).toBeDefined();
+      expect(updateSessionToolPolicy).not.toHaveBeenCalled();
+    } finally {
+      await h.close();
+    }
+  });
+  test("changing the human actor invalidates a pending parent approval", async () => {
+    const h = await renderFiken();
+    try {
+      await act(async () => button(h.container, "Add tools").click());
+      context.accessContext.subjectId = "other-human";
+      await h.rerender("workspace");
+      expect(h.container.textContent).not.toContain("Enable in parents and add tools");
+      expect(updateSessionToolPolicy).not.toHaveBeenCalled();
+    } finally {
+      await h.close();
+    }
+  });
+
   test("URL-less setup keeps provider guidance without offering an ineffective retry", async () => {
     context.client.inspectMcpAuthentication.mockClear();
     const custom = CapabilityCatalogItem.parse({

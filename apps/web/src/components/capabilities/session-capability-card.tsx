@@ -1,4 +1,9 @@
-import { attachSessionCapability } from "./attach-session-capability";
+import {
+  attachSessionCapability,
+  prepareSessionCapabilityAccess,
+  applySessionCapabilityAccess,
+  type SessionCapabilityAccessPlan,
+} from "./attach-session-capability";
 import { lazy, Suspense, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { SessionMcpCapabilityCard, type AuthNeededItem } from "@opengeni/react";
 import { CheckIcon, Loader2Icon } from "lucide-react";
@@ -233,6 +238,11 @@ function SessionCapabilitySetup({
       ? null
       : hasWorkspacePermission(context.accessContext, workspaceId, "connections:read");
   const [error, setError] = useState<string | null>(null);
+  const subjectId = context.accessContext?.subjectId ?? null;
+  const [parentAccessReview, setParentAccessReview] = useState<{
+    plan: SessionCapabilityAccessPlan;
+    invocation: object;
+  } | null>(null);
   const [authInspection, setAuthInspection] = useState<{
     id: string;
     url: string;
@@ -246,31 +256,37 @@ function SessionCapabilitySetup({
     workspaceId,
     sessionId,
     canReadConnections,
+    subjectId,
     alive: true,
   });
   if (
     scope.current.client !== context.client ||
     scope.current.workspaceId !== workspaceId ||
     scope.current.sessionId !== sessionId ||
-    scope.current.canReadConnections !== canReadConnections
+    scope.current.canReadConnections !== canReadConnections ||
+    scope.current.subjectId !== subjectId
   ) {
     scope.current = {
       client: context.client,
       workspaceId,
       sessionId,
       canReadConnections,
+      subjectId,
       alive: true,
     };
   }
+  const parentAccessPlan =
+    parentAccessReview?.invocation === scope.current ? parentAccessReview.plan : null;
   useEffect(() => {
     const activeScope = scope.current;
+    setParentAccessReview(null);
     void catalog.refresh();
     return () => {
       activeScope.alive = false;
     };
     // Refetch on a live read-grant change; the hook masks prior rows during render.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [context.client, workspaceId, sessionId, canReadConnections]);
+  }, [context.client, workspaceId, sessionId, canReadConnections, subjectId]);
   const rawItem = catalog.items.find((entry) => entry.id === capabilityId);
   const rawItemId = rawItem?.id;
   const inspectUrl = rawItem?.mcpUrl ?? rawItem?.endpointUrl;
@@ -334,6 +350,7 @@ function SessionCapabilitySetup({
     inFlight.current = true;
     setBusy(true);
     setError(null);
+    setParentAccessReview(null);
     const invocation = scope.current;
     const current = () => scope.current === invocation && invocation.alive;
     try {
@@ -360,7 +377,19 @@ function SessionCapabilitySetup({
             if (!current()) return;
             if (!updated?.enabled)
               throw new Error("Setup could not be verified. Refresh and try again.");
-            await attachSessionCapability(context.client, workspaceId, sessionId, updated, current);
+            const plan = await prepareSessionCapabilityAccess(
+              context.client,
+              workspaceId,
+              sessionId,
+              updated,
+              current,
+            );
+            if (!current()) return;
+            if (plan.sessions.some((chat) => chat.id !== sessionId && chat.request)) {
+              setParentAccessReview({ plan, invocation });
+              return;
+            }
+            await applySessionCapabilityAccess(context.client, plan, current);
             await onConfigured?.();
             if (current()) onComplete();
           },
@@ -395,12 +424,32 @@ function SessionCapabilitySetup({
     const invocation = scope.current;
     const current = () => scope.current === invocation && invocation.alive;
     try {
-      await attachSessionCapability(context.client, workspaceId, sessionId, item, current);
+      const plan =
+        parentAccessPlan ??
+        (await prepareSessionCapabilityAccess(
+          context.client,
+          workspaceId,
+          sessionId,
+          item,
+          current,
+        ));
+      if (!current()) return;
+      if (
+        !parentAccessPlan &&
+        plan.sessions.some((chat) => chat.id !== sessionId && chat.request)
+      ) {
+        setParentAccessReview({ plan, invocation });
+        return;
+      }
+      await applySessionCapabilityAccess(context.client, plan, current);
+      if (current()) setParentAccessReview(null);
       if (current()) await onConfigured?.();
       if (current()) onComplete();
     } catch (failure) {
-      if (current())
+      if (current()) {
+        setParentAccessReview(null);
         setError(`Couldn't add this connection. ${userErrorText(failure, "Try again.")}`);
+      }
     } finally {
       inFlight.current = false;
       if (current()) setBusy(false);
@@ -463,6 +512,38 @@ function SessionCapabilitySetup({
           }
         />
       )}
+      {parentAccessPlan && item ? (
+        <Notice tone="waiting" live="polite">
+          <p>
+            This chat inherits its tool access from its parent. To add {item.name}, enable its tools
+            in these parent chats first:
+          </p>
+          <ul className="mt-2 list-disc pl-5">
+            {parentAccessPlan.sessions
+              .filter((chat) => chat.id !== sessionId && chat.request)
+              .map((chat) => (
+                <li key={chat.id}>
+                  <a
+                    className="underline"
+                    href={`/workspaces/${encodeURIComponent(workspaceId)}/sessions/${encodeURIComponent(chat.id)}`}
+                  >
+                    {chat.title || "Parent chat"}
+                  </a>
+                </li>
+              ))}
+          </ul>
+          <p className="mt-2">
+            Confirming adds {item.name}'s tools to these chats and this chat. Parent chats and
+            future children can then use them. Existing tool choices are preserved; workspace
+            defaults become chat-specific selections where needed. Current turns keep their accepted
+            access.
+          </p>
+          <p className="mt-2">
+            Updates are saved separately. If a later update fails, approved parent changes may
+            already be saved.
+          </p>
+        </Notice>
+      ) : null}
       <div className="mt-2 flex justify-end gap-2">
         {!ownsActionRow ? (
           <Button size="sm" variant="ghost" disabled={busy} onClick={onClose}>
@@ -471,7 +552,8 @@ function SessionCapabilitySetup({
         ) : null}
         {item?.enabled && health?.state !== "attention" && health?.state !== "unverified" ? (
           <Button size="sm" disabled={busy} onClick={() => void useConnected()}>
-            {busy ? <Loader2Icon className="animate-spin" /> : <CheckIcon />}Add tools
+            {busy ? <Loader2Icon className="animate-spin" /> : <CheckIcon />}
+            {parentAccessPlan ? "Enable in parents and add tools" : "Add tools"}
           </Button>
         ) : null}
       </div>

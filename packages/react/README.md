@@ -28,6 +28,17 @@ animation. Override the tokens to rebrand everything.
 
 ## Embedded connections and Sites
 
+For a child chat's capability selection, `prepareSessionCapabilityAccess` reads
+an ancestor-to-child access plan without writing. Show the parent chats whose
+`request` is non-null and obtain an explicit confirmation before calling
+`applySessionCapabilityAccess`. The plan preserves existing choices, applies
+version-fenced updates root first, and grants no authority: each ordinary API
+request still authorizes its caller. Invalidate the review on actor/workspace
+changes. A partial failure may leave approved parent changes saved; prepare a
+new plan for retry instead of rolling them back. Existing
+`attachSessionCapability` remains a single-chat operation and never changes
+parents implicitly.
+
 Optional `@opengeni/react/connect` exports `useConnect`, `ConnectChooser`,
 `ConnectSetup`, `ConnectAccounts`, and the composed `ConnectPanel`. Inject one
 `@opengeni/connect` controller per authenticated actor/workspace and dispose it
