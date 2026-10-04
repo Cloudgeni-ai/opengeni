@@ -28,6 +28,48 @@ describe("portable local compaction capability boundary", () => {
   });
 });
 
+describe("filesystem function tool schemas", () => {
+  test("apply_patch declares string command items and preserves tuple invocation", async () => {
+    const operations: unknown[] = [];
+    const session = {
+      createEditor: () => ({
+        createFile: async (operation: unknown) => {
+          operations.push(operation);
+          return { status: "completed", output: "created" };
+        },
+      }),
+    };
+    for (const structuredToolTransport of [undefined, false]) {
+      const filesystem = buildAgentCapabilities(testSettings(), [], {
+        structuredToolTransport,
+      }).find((cap) => cap.type === "filesystem")!;
+      const patch = filesystem
+        .clone()
+        .bind(session as never)
+        .tools()
+        .find((tool) => tool.name === "apply_patch");
+      if (!patch || patch.type !== "function") throw new Error("No apply_patch function");
+      expect(patch.parameters.properties?.command).toMatchObject({
+        type: "array",
+        items: { type: "string" },
+      });
+      await patch.invoke(
+        {} as never,
+        JSON.stringify({
+          command: [
+            "apply_patch",
+            "*** Begin Patch\n*** Add File: example.txt\n+example\n*** End Patch",
+          ],
+        }),
+      );
+    }
+    expect(operations).toEqual([
+      { type: "create_file", path: "example.txt", diff: "+example\n" },
+      { type: "create_file", path: "example.txt", diff: "+example\n" },
+    ]);
+  });
+});
+
 describe("turn sandbox-tool cancellation boundary", () => {
   test("the production shell tool propagates pre-dispatch proof, not DNS-shaped server replies", async () => {
     const host = "task-fbhzq89jcdq2rfyqsxjs1uuk3.w.modal.host";

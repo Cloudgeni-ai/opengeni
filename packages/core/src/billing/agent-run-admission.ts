@@ -1,9 +1,13 @@
-import { configuredStaticUsageLimits, type Settings } from "@opengeni/config";
+import {
+  canonicalizeConfiguredModelId,
+  configuredStaticUsageLimits,
+  type Settings,
+} from "@opengeni/config";
 import type { EntitlementsPort } from "@opengeni/contracts";
 import { modelFundingForAdmission } from "./limits";
 import {
   checkWorkspaceAllowance,
-  getBillingBalance,
+  getSpendableCreditBalance,
   isCodexBilledTurn,
   sumUsageQuantity,
   type Database,
@@ -51,7 +55,11 @@ export async function agentRunAdmissionDenial(
       });
       if (!decision.allowed) return "insufficient_credits";
     } else {
-      const balance = await getBillingBalance(services.db, input.accountId);
+      const balance = await getSpendableCreditBalance(
+        services.db,
+        input.accountId,
+        canonicalizeConfiguredModelId(services.settings, input.model),
+      );
       if (balance.balanceMicros <= 0) return "insufficient_credits";
     }
   }

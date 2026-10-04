@@ -82,6 +82,7 @@ export function SessionHeader({
   lastStartedLatencyMode,
   billingClass,
   modelLabel,
+  modelLogoUrl,
   policyLoading,
 }: {
   session: Session;
@@ -127,6 +128,7 @@ export function SessionHeader({
   billingClass?: BillingClass;
   /** Product model label (e.g. GPT-5.6 Luna). */
   modelLabel?: string;
+  modelLogoUrl?: string | undefined;
   /**
    * True while last-started policy and/or model catalog are still resolving.
    * Avoids flashing session defaults (wrong provider) before admitted truth.
@@ -172,7 +174,7 @@ export function SessionHeader({
   ) : (
     // The model maker's logo; the payment rail only when the maker has none.
     <ModelMark
-      model={modelId}
+      model={{ id: modelId, logoUrl: modelLogoUrl }}
       className="size-3.5 text-fg-muted"
       fallback={<BillingClassMark billingClass={resolvedBilling} className="size-3.5 shrink-0" />}
     />

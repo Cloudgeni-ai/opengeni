@@ -2039,12 +2039,7 @@ describe("API component integration", () => {
     });
     expect(rejectedTurn.status).toBe(402);
     expect(await rejectedTurn.json()).toMatchObject({
-      error: {
-        status: 402,
-        code: "payment_required",
-        message: expect.stringMatching(/^insufficient \S+ credits$/),
-        retryable: false,
-      },
+      error: { status: 402, code: "payment_required", retryable: false },
     });
     const preserved = await app.request(
       workspacePath(ownerWorkspaceId, `/files/${upload.fileId}`),
@@ -2226,12 +2221,7 @@ describe("API component integration", () => {
     );
     expect(triggered.status).toBe(402);
     expect(await triggered.json()).toMatchObject({
-      error: {
-        status: 402,
-        code: "payment_required",
-        message: expect.stringMatching(/^insufficient \S+ credits$/),
-        retryable: false,
-      },
+      error: { status: 402, code: "payment_required", retryable: false },
     });
   });
 

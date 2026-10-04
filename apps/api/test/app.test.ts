@@ -1117,7 +1117,7 @@ describe("API helpers", () => {
     });
 
     expect(params.mode).toBe("payment");
-    expect(params.allow_promotion_codes).toBe(true);
+    expect(params.allow_promotion_codes).toBe(false);
     expect(params.customer).toBe("cus_test");
     expect(params.customer_update).toEqual({ address: "auto", name: "auto" });
     expect(params.automatic_tax).toEqual({ enabled: true });

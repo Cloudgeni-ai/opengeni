@@ -2389,6 +2389,7 @@ describe("release schema contract", () => {
       "0610_artifact_catalog_pins.sql",
       "0611_universal_session_tenancy_activation.sql",
       "0612_scheduled_model_unavailable_refusal.sql",
+      "0613_model_scoped_promotional_credits.sql",
       "0613_quiescence_command_containment.sql",
     ].filter((path) =>
       unfilteredSourceContract.migrations.some((migration) => migration.path === path),

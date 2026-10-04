@@ -17,6 +17,7 @@ import { rawRows, withRlsContext, withWorkspaceRls } from "./database";
 import * as schema from "./schema";
 import { checkWorkspaceAllowance } from "./usage-allowances";
 import { creditDebitAttributionForTurn } from "./credit-debit-attribution";
+import { getSpendableCreditBalance } from "./credit-balances";
 
 export const ACTIVE_VIDEO_GENERATION_STATUSES = [
   "preparing",
@@ -1381,13 +1382,7 @@ async function debitVideoGenerationCredits(
     subjectId: attribution.kind === "turn" ? attribution.initiatingHumanSubjectId : null,
   });
   if (refusal) throw Object.assign(new VideoGenerationCreditError(refusal.message), refusal);
-  const [balanceRow] = await tx
-    .select({
-      balanceMicros: sql<number>`coalesce(sum(${schema.creditLedgerEntries.amountMicros}), 0)`,
-    })
-    .from(schema.creditLedgerEntries)
-    .where(eq(schema.creditLedgerEntries.accountId, operation.accountId));
-  const balanceMicros = Number(balanceRow?.balanceMicros ?? 0);
+  const { balanceMicros } = await getSpendableCreditBalance(tx, operation.accountId);
   if (!Number.isSafeInteger(balanceMicros) || balanceMicros < operation.pricedCostMicros) {
     throw new VideoGenerationCreditError();
   }

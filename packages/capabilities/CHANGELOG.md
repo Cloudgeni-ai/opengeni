@@ -1,5 +1,11 @@
 # @opengeni/capabilities
 
+## 1.1.0
+
+### Patch Changes
+
+- @opengeni/network@1.1.0
+
 ## 1.0.2
 
 ### Patch Changes

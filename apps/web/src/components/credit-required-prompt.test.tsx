@@ -80,6 +80,49 @@ afterEach(async () => {
 });
 
 describe("credit required prompt", () => {
+  test("the notice follows selected-model funding rather than the total credit balance", async () => {
+    getBilling.mockResolvedValue({ mode: "stripe", balance: { balanceMicros: 100_000_000 } });
+    const container = document.createElement("div");
+    document.body.append(container);
+    root = createRoot(container);
+    const render = async (creditFunding: "unavailable" | "promotional" | "general") =>
+      act(async () =>
+        root!.render(
+          <EmptyCreditsNotice
+            workspaceId="workspace-a"
+            accountId="account-a"
+            canBuyCredits
+            canReadBilling
+            creditFunding={creditFunding}
+          />,
+        ),
+      );
+    await render("unavailable");
+    expect(container.textContent).toContain("No credits are available for this model");
+    await render("promotional");
+    expect(container.textContent).toBe("");
+    await render("general");
+    expect(container.textContent).toBe("");
+  });
+
+  test("usable free credits do not show a warning when general charges made the total negative", async () => {
+    getBilling.mockResolvedValue({ mode: "stripe", balance: { balanceMicros: -1_000_000 } });
+    const container = document.createElement("div");
+    document.body.append(container);
+    root = createRoot(container);
+    await act(async () =>
+      root!.render(
+        <EmptyCreditsNotice
+          workspaceId="workspace-a"
+          accountId="account-a"
+          canBuyCredits
+          canReadBilling
+          creditFunding="promotional"
+        />,
+      ),
+    );
+    expect(container.textContent).toBe("");
+  });
   test("create-session dialog names buy credits and connect a model", async () => {
     const container = document.createElement("div");
     document.body.append(container);
@@ -126,7 +169,7 @@ describe("credit required prompt", () => {
       ),
     );
     expect(container.textContent).toContain("Add Opengeni credits");
-    expect(container.textContent).toContain("Have a coupon code?");
+    expect(container.textContent).toContain("Have a code?");
     expect(container.textContent).not.toContain("Connect a model");
     const preset = container.querySelector<HTMLSelectElement>("#credit-preset")!;
     await act(async () => {
