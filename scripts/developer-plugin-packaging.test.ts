@@ -295,7 +295,7 @@ describe("shared OpenGeni package", () => {
     expect(guide).not.toContain("opengeni-developer@");
     const page = readFileSync(join(root, "docs-site/guides/developer-plugin.mdx"), "utf8");
     expect(page).toContain("opengeni@opengeni");
-    expect(page).toContain("has not been published");
+    expect(page).toContain("plugin marketplace add Cloudgeni-ai/opengeni");
     expect(page).toContain(ORGANIZATION_MCP_URL);
     expect(
       json("docs-site/docs.json").navigation.groups.flatMap(
