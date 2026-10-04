@@ -71,6 +71,18 @@ export function createNativeTimelineTheme(
   };
 }
 
+/**
+ * Fill for an inset block on the page (code blocks). Web uses `surface-1`, which reads
+ * as a block on the component `bg`; when the host page itself is `surface-1` (the
+ * white or near-black app canvas), the block falls back to the web component `bg` so
+ * it never disappears into the page.
+ */
+export function insetSurface(theme: NativeTimelineTheme): string {
+  const { colors } = theme;
+  if (colors["surface-1"] !== colors.bg) return colors["surface-1"];
+  return (theme.scheme === "dark" ? webColorsDark : webColorsLight).bg;
+}
+
 const ThemeContext = createContext<NativeTimelineTheme>(createNativeTimelineTheme("light"));
 
 export function NativeTimelineThemeProvider({

@@ -320,7 +320,7 @@ export function ActivityDisclosure({
         }}
         style={({ pressed }) => ({
           borderRadius: theme.radius.sm,
-          backgroundColor: pressed ? theme.colors["surface-1"] : "transparent",
+          backgroundColor: pressed ? theme.colors.hover : "transparent",
         })}
       >
         {row}

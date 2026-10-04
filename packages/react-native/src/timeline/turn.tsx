@@ -229,7 +229,7 @@ export function TurnSummary({
           ? { gap: 8, paddingHorizontal: 6 }
           : { gap: 10, paddingHorizontal: 8, marginLeft: -8, marginRight: 8 }),
         backgroundColor: pressed
-          ? theme.colors["surface-1"]
+          ? theme.colors.hover
           : !bare && open
             ? theme.colors.bg
             : "transparent",

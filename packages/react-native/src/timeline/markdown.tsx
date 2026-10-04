@@ -1,16 +1,29 @@
 import { createContext, useContext, useMemo, useState, type ReactNode } from "react";
 import { Pressable, ScrollView, Text, View } from "react-native";
-import Markdown, { renderRules, type RenderRules } from "react-native-markdown-display";
+import Markdown, { MarkdownIt, renderRules, type RenderRules } from "react-native-markdown-display";
 import { isReservedOpenGeniLink, parseOpenGeniLink, type OpenGeniLinkTarget } from "@opengeni/sdk";
 import { Icon } from "./icon";
 import { withAlpha as withAlphaColor } from "./primitives";
 import type { NativeMarkdownRenderer } from "./message-timeline";
 import {
   fontStyle,
+  insetSurface,
   MONO_FALLBACK,
   useNativeTimelineTheme,
   type NativeTimelineTheme,
 } from "./theme";
+
+/**
+ * One parser for every message, configured like the web's `remark-gfm`: no typographic
+ * substitution (quotes, dashes and `(c)` stay as written), and bare `http(s)://` URLs
+ * autolink while file-like words (`fib.py`) do not. The library default would build a
+ * new typographer parser on every render, including every streaming delta.
+ */
+const PARSER = (() => {
+  const parser = MarkdownIt({ typographer: false, linkify: true });
+  parser.linkify.set({ fuzzyLink: false, fuzzyEmail: false });
+  return parser;
+})();
 
 /* ----------------------------------------------------------------------------
    Web Markdown (components/markdown.tsx) styles for react-native-markdown-display.
@@ -76,7 +89,7 @@ export function webMarkdownStyles(theme: NativeTimelineTheme, tone: "body" | "mu
       fontSize: theme.size.sm,
       lineHeight: 20,
       color: c["fg-muted"],
-      backgroundColor: c["surface-1"],
+      backgroundColor: insetSurface(theme),
       borderWidth: 0,
       borderRadius: theme.radius.md,
       paddingHorizontal: 12,
@@ -89,7 +102,7 @@ export function webMarkdownStyles(theme: NativeTimelineTheme, tone: "body" | "mu
       fontSize: theme.size.sm,
       lineHeight: 20,
       color: c["fg-muted"],
-      backgroundColor: c["surface-1"],
+      backgroundColor: insetSurface(theme),
       borderWidth: 0,
       borderRadius: theme.radius.md,
       paddingHorizontal: 12,
@@ -151,7 +164,7 @@ function CodeFence({
       <View
         style={{
           borderRadius: theme.radius.md,
-          backgroundColor: theme.colors["surface-1"],
+          backgroundColor: insetSurface(theme),
           paddingLeft: 12,
           paddingRight: 64,
           paddingVertical: 10,
@@ -450,7 +463,12 @@ function TrimmedMarkdown({
   const rules = useMemo(() => webRules(theme, tone, onCopy), [theme, tone, onCopy]);
   return (
     <View style={{ marginBottom: -10 }}>
-      <Markdown style={styles} rules={rules} {...(onLinkPress ? { onLinkPress } : {})}>
+      <Markdown
+        markdownit={PARSER}
+        style={styles}
+        rules={rules}
+        {...(onLinkPress ? { onLinkPress } : {})}
+      >
         {text}
       </Markdown>
     </View>
