@@ -182,46 +182,69 @@ RETURNS TABLE(dimensions jsonb,occurred_at timestamptz,quantity bigint) LANGUAGE
 -- the existing workspace/turn/source unique index instead of hashing the
 -- account's entire fact history. This setting is local to this read helper.
 SET search_path=pg_catalog,%1$I,opengeni_private,pg_temp SET enable_nestloop=on AS $fn$
-  WITH pending AS MATERIALIZED(SELECT EXISTS(SELECT 1 FROM opengeni_private.insights_rollup_invalidations i
-    WHERE i.account_id=a AND i.workspace_id IS NOT DISTINCT FROM w AND i.stream='charges'
-      AND (i.day IS NULL OR (i.day>=(lo AT TIME ZONE 'UTC')::date AND
-        i.day<=(hi AT TIME ZONE 'UTC')::date))) AS dirty),
+  -- Separate NULL/UUID scopes so each table has an indexable workspace key.
+  -- NOT MATERIALIZED preserves scalar range pushdown through each UNION arm;
+  -- it must never turn a small edge into a cached account-history stream.
+  WITH scoped_invalidations AS NOT MATERIALIZED(
+    SELECT i.day FROM opengeni_private.insights_rollup_invalidations i
+      WHERE w IS NOT NULL AND i.account_id=a AND i.workspace_id=w AND i.stream='charges'
+    UNION ALL SELECT i.day FROM opengeni_private.insights_rollup_invalidations i
+      WHERE w IS NULL AND i.account_id=a AND i.workspace_id IS NULL AND i.stream='charges'),
+  pending AS MATERIALIZED(SELECT EXISTS(SELECT 1 FROM scoped_invalidations i
+      WHERE i.day IS NULL OR (i.day>=(lo AT TIME ZONE 'UTC')::date AND
+        i.day<=(hi AT TIME ZONE 'UTC')::date)) AS dirty),
+  scoped_debits AS NOT MATERIALIZED(
+    SELECT c.occurred_at,c.amount_micros,c.source_id,c.metadata->'sessionId' AS session_metadata
+      FROM %1$I.credit_ledger_entries c WHERE w IS NOT NULL AND c.account_id=a AND c.workspace_id=w
+        AND c.type='model_usage_debit' AND c.source_type='model_response' AND c.amount_micros<0
+    UNION ALL SELECT c.occurred_at,c.amount_micros,c.source_id,c.metadata->'sessionId'
+      FROM %1$I.credit_ledger_entries c WHERE w IS NULL AND c.account_id=a AND c.workspace_id IS NULL
+        AND c.type='model_usage_debit' AND c.source_type='model_response' AND c.amount_micros<0),
+  scoped_daily AS NOT MATERIALIZED(
+    SELECT d.day,d.dimensions,d.quantity FROM opengeni_private.insights_charge_daily d
+      WHERE w IS NOT NULL AND d.account_id=a AND d.workspace_id=w
+    UNION ALL SELECT d.day,d.dimensions,d.quantity FROM opengeni_private.insights_charge_daily d
+      WHERE w IS NULL AND d.account_id=a AND d.workspace_id IS NULL),
+  scoped_links AS NOT MATERIALIZED(
+    SELECT l.dimensions,l.occurred_at,l.quantity FROM opengeni_private.insights_charge_links l
+      WHERE w IS NOT NULL AND l.account_id=a AND l.workspace_id=w
+    UNION ALL SELECT l.dimensions,l.occurred_at,l.quantity FROM opengeni_private.insights_charge_links l
+      WHERE w IS NULL AND l.account_id=a AND l.workspace_id IS NULL),
   bounds AS MATERIALIZED(SELECT CASE WHEN lo=date_trunc('day',lo AT TIME ZONE 'UTC') AT TIME ZONE 'UTC' THEN lo
       WHEN granularity='day' AND NOT (SELECT dirty FROM pending) AND NOT EXISTS(
-        SELECT 1 FROM %1$I.credit_ledger_entries c WHERE c.account_id=a AND c.workspace_id IS NOT DISTINCT FROM w
-          AND c.type='model_usage_debit' AND c.source_type='model_response' AND c.amount_micros<0
-          AND c.occurred_at>=date_trunc('day',lo AT TIME ZONE 'UTC') AT TIME ZONE 'UTC' AND c.occurred_at<lo)
+        SELECT 1 FROM scoped_debits c
+          WHERE c.occurred_at>=date_trunc('day',lo AT TIME ZONE 'UTC') AT TIME ZONE 'UTC' AND c.occurred_at<lo)
       THEN date_trunc('day',lo AT TIME ZONE 'UTC') AT TIME ZONE 'UTC'
       ELSE (date_trunc('day',lo AT TIME ZONE 'UTC')+interval '1 day') AT TIME ZONE 'UTC' END AS first_day,
     CASE WHEN granularity='day' AND hi>date_trunc('day',hi AT TIME ZONE 'UTC') AT TIME ZONE 'UTC'
       AND NOT (SELECT dirty FROM pending) AND NOT EXISTS(
-        SELECT 1 FROM %1$I.credit_ledger_entries c WHERE c.account_id=a AND c.workspace_id IS NOT DISTINCT FROM w
-          AND c.type='model_usage_debit' AND c.source_type='model_response' AND c.amount_micros<0
-          AND c.occurred_at>=hi AND c.occurred_at<(date_trunc('day',hi AT TIME ZONE 'UTC')+interval '1 day') AT TIME ZONE 'UTC')
+        SELECT 1 FROM scoped_debits c
+          WHERE c.occurred_at>=hi AND c.occurred_at<(date_trunc('day',hi AT TIME ZONE 'UTC')+interval '1 day') AT TIME ZONE 'UTC')
       THEN (date_trunc('day',hi AT TIME ZONE 'UTC')+interval '1 day') AT TIME ZONE 'UTC'
       ELSE date_trunc('day',hi AT TIME ZONE 'UTC') AT TIME ZONE 'UTC' END AS last_day),
   bounded_debits AS MATERIALIZED(
     -- Normalize keys on the already-authorized bounded debit side before the
     -- FORCE-RLS fact join. Typed keys allow the existing unique source index;
     -- malformed keys remain unmatched and source-key case is never changed.
-    SELECT c.occurred_at,-c.amount_micros AS quantity,c.metadata->'sessionId' AS session_metadata,
+    SELECT c.occurred_at,-c.amount_micros AS quantity,c.session_metadata,
       CASE WHEN c.source_id~'^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}:.'
         THEN left(c.source_id,36)::uuid END AS debit_turn_id,substr(c.source_id,38) AS debit_source_key
-    FROM %1$I.credit_ledger_entries c WHERE (SELECT dirty FROM pending) AND c.account_id=a AND c.workspace_id IS NOT DISTINCT FROM w
-      AND c.type='model_usage_debit' AND c.source_type='model_response' AND c.amount_micros<0
-      AND c.occurred_at>=lo AND c.occurred_at<hi)
-  SELECT d.dimensions,greatest(d.day::timestamp AT TIME ZONE 'UTC',lo),d.quantity FROM opengeni_private.insights_charge_daily d CROSS JOIN bounds
-    WHERE NOT (SELECT dirty FROM pending) AND granularity='day' AND d.account_id=a AND d.workspace_id IS NOT DISTINCT FROM w
-      AND d.day>=(first_day AT TIME ZONE 'UTC')::date AND d.day<(last_day AT TIME ZONE 'UTC')::date
-  UNION ALL SELECT l.dimensions,l.occurred_at,l.quantity FROM opengeni_private.insights_charge_links l CROSS JOIN bounds
-    WHERE NOT (SELECT dirty FROM pending) AND (granularity<>'day' OR first_day>=last_day) AND l.account_id=a AND l.workspace_id IS NOT DISTINCT FROM w
+    FROM scoped_debits c WHERE (SELECT dirty FROM pending) AND c.occurred_at>=lo AND c.occurred_at<hi)
+  SELECT d.dimensions,greatest(d.day::timestamp AT TIME ZONE 'UTC',lo),d.quantity FROM scoped_daily d
+    WHERE NOT (SELECT dirty FROM pending) AND granularity='day'
+      AND d.day>=((SELECT first_day FROM bounds) AT TIME ZONE 'UTC')::date
+      AND d.day<((SELECT last_day FROM bounds) AT TIME ZONE 'UTC')::date
+  -- Scalar InitPlans make both endpoints scan conditions, not later join
+  -- filters. Empty reused edges are gated before touching any link table.
+  UNION ALL SELECT l.dimensions,l.occurred_at,l.quantity FROM scoped_links l
+    WHERE NOT (SELECT dirty FROM pending) AND (granularity<>'day' OR (SELECT first_day>=last_day FROM bounds))
       AND l.occurred_at>=lo AND l.occurred_at<hi
-  UNION ALL SELECT l.dimensions,l.occurred_at,l.quantity FROM opengeni_private.insights_charge_links l CROSS JOIN bounds
-    WHERE NOT (SELECT dirty FROM pending) AND granularity='day' AND first_day<last_day AND l.account_id=a AND l.workspace_id IS NOT DISTINCT FROM w
-      AND l.occurred_at>=lo AND l.occurred_at<first_day
-  UNION ALL SELECT l.dimensions,l.occurred_at,l.quantity FROM opengeni_private.insights_charge_links l CROSS JOIN bounds
-    WHERE NOT (SELECT dirty FROM pending) AND granularity='day' AND first_day<last_day AND l.account_id=a AND l.workspace_id IS NOT DISTINCT FROM w
-      AND l.occurred_at>=last_day AND l.occurred_at<hi
+  UNION ALL SELECT l.dimensions,l.occurred_at,l.quantity FROM scoped_links l
+    WHERE NOT (SELECT dirty FROM pending) AND granularity='day' AND (SELECT first_day<last_day AND first_day>lo FROM bounds)
+      AND l.occurred_at>=lo AND l.occurred_at<(SELECT first_day FROM bounds)
+  UNION ALL SELECT l.dimensions,l.occurred_at,l.quantity FROM scoped_links l
+    WHERE NOT (SELECT dirty FROM pending) AND granularity='day' AND (SELECT first_day<last_day AND last_day<hi FROM bounds)
+      AND l.occurred_at>=(SELECT last_day FROM bounds) AND l.occurred_at<hi
   UNION ALL SELECT opengeni_private.insights_charge_dimensions(
       jsonb_build_object('metadata',jsonb_build_object('sessionId',c.session_metadata)),
       jsonb_build_object('session_id',f.session_id,'provider',f.provider,'model',f.model,'scheduled_task_id',f.scheduled_task_id)),

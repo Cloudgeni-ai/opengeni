@@ -1074,6 +1074,175 @@ test("clean near-midnight edges reuse cache only when authoritative excluded ran
   await assertExact();
 });
 
+test("charge edges skip empty scans and bind both clock endpoints in UUID and NULL scopes", async () => {
+  const turn = crypto.randomUUID();
+  const lo = "2026-08-01T00:00:00.001Z";
+  const hi = "2026-08-07T23:59:59.999Z";
+  type NativeNode = {
+    "Node Type": string;
+    "Relation Name"?: string;
+    "Index Name"?: string;
+    "Index Cond"?: string;
+    "Actual Rows"?: number;
+    "Actual Loops"?: number;
+    "Rows Removed by Filter"?: number;
+    Plans?: NativeNode[];
+  };
+  const captured: { query: string; plan: NativeNode }[] = [];
+  const parseErrors: string[] = [];
+  const diagnostic = postgres(shared!.adminUrl, {
+    max: 1,
+    onnotice(notice) {
+      if (typeof notice.message !== "string" || !notice.message.includes("plan:")) return;
+      try {
+        const parsed = JSON.parse(notice.message.slice(notice.message.indexOf("{")));
+        const query = parsed["Query Text"] as string;
+        if (query?.includes("insights_charge_links") && query.includes("insights_charge_daily")) {
+          captured.push({ query, plan: parsed.Plan });
+        }
+      } catch (error) {
+        parseErrors.push(String(error));
+      }
+    },
+  });
+  await scope(async (tx) => {
+    // Mostly out-of-window rows make an unnecessarily executed edge visible
+    // without importing or rebuilding the parent's retained-volume fixture.
+    await tx`insert into credit_ledger_entries(account_id,workspace_id,type,amount_micros,source_type,source_id,idempotency_key,metadata,occurred_at)
+      select ${accountId},${workspaceId},'model_usage_debit',-1,'model_response',${turn}||':outside-'||n,
+        ${turn}||':charge-scalar-outside-'||n,jsonb_build_object('sessionId',${sessionId}::text),
+        '2026-02-01T03:00Z'::timestamptz+n*interval '1 microsecond' from generate_series(1,512)n`;
+    await tx`insert into credit_ledger_entries(account_id,workspace_id,type,amount_micros,source_type,source_id,idempotency_key,metadata,occurred_at)
+      values(${accountId},${workspaceId},'model_usage_debit',-5,'model_response',${turn + ":Case"},${turn + ":charge-scalar-lower"},
+          jsonb_build_object('sessionId',${sessionId}::text),'2026-08-01T03:00Z'),
+        (${accountId},${workspaceId},'model_usage_debit',-7,'model_response',${turn.toUpperCase() + ":case"},${turn + ":charge-scalar-upper"},
+          jsonb_build_object('sessionId',${sessionId}::text),'2026-08-07T03:00Z'),
+        (${accountId},null,'model_usage_debit',-7,'model_response','malformed:Case',${turn + ":charge-scalar-null-lower"},
+          jsonb_build_object('sessionId',${sessionId}::text),'2026-08-01T03:00Z'),
+        (${accountId},null,'model_usage_debit',-7,'model_response','malformed:case',${turn + ":charge-scalar-null-upper"},
+          jsonb_build_object('sessionId',${sessionId}::text),'2026-08-07T03:00Z')`;
+  });
+  await assertExact();
+  await shared!.admin`analyze opengeni_private.insights_charge_links`;
+  await shared!.admin`analyze opengeni_private.insights_charge_daily`;
+  await shared!.admin`analyze credit_ledger_entries`;
+  const inspect = async (label: string, selected: string | null, lower = lo, upper = hi) => {
+    const start = captured.length;
+    const quantity = await diagnostic.begin(async (tx) => {
+      // Module setup is privileged fixture instrumentation only. The query
+      // itself executes as the exact NOSUPERUSER/NOBYPASSRLS data owner.
+      await tx`load 'auto_explain'`;
+      await tx`set local auto_explain.log_nested_statements=on`;
+      await tx`set local auto_explain.log_analyze=on`;
+      await tx`set local auto_explain.log_buffers=on`;
+      await tx`set local auto_explain.log_timing=off`;
+      await tx`set local auto_explain.log_format='json'`;
+      await tx`set local auto_explain.log_level='notice'`;
+      await tx`set local auto_explain.log_min_duration=0`;
+      await tx.unsafe(`set local role "${shared!.ownerRole.replaceAll('"', '""')}"`);
+      const [role] =
+        await tx`select rolsuper,rolbypassrls from pg_roles where rolname=current_user`;
+      expect(role!.rolsuper).toBe(false);
+      expect(role!.rolbypassrls).toBe(false);
+      const contextWorkspace = selected ?? workspaceId;
+      await tx`select set_config('opengeni.account_id',${accountId},true),set_config('opengeni.workspace_id',${contextWorkspace},true),
+        set_config('enable_nestloop','off',true),set_config('jit','off',true),
+        set_config('plan_cache_mode','force_custom_plan',true),set_config('statement_timeout','10s',true)`;
+      await tx`insert into opengeni_private.insights_fact_read_runtime_capabilities
+        (backend_pid,transaction_id,capability_kind,account_id,workspace_id)
+        values(pg_backend_pid(),pg_current_xact_id(),'model_call_facts',${accountId},${contextWorkspace})`;
+      const [fast] = await tx`select coalesce(sum(quantity),0)::text as quantity
+        from opengeni_private.insights_charge_window(${accountId},${selected},${lower},${upper},'day')`;
+      const [raw] = await tx`select coalesce(sum((m->>'chargedMicros')::bigint),0)::text as quantity
+        from opengeni_private.insights_raw_amount_inputs(${accountId},${selected},${lower},${upper}) where charge_row`;
+      expect(fast!.quantity).toBe(raw!.quantity);
+      const [restored] = await tx`select current_setting('enable_nestloop') as value`;
+      expect(restored!.value).toBe("off");
+      await tx`delete from opengeni_private.insights_fact_read_runtime_capabilities where backend_pid=pg_backend_pid()`;
+      return fast!.quantity as string;
+    });
+    expect(parseErrors).toEqual([]);
+    const plans = captured.slice(start);
+    expect(plans).toHaveLength(1);
+    const nodes: NativeNode[] = [];
+    const visit = (node: NativeNode) => {
+      nodes.push(node);
+      for (const child of node.Plans ?? []) visit(child);
+    };
+    visit(plans[0]!.plan);
+    const links = nodes.filter((node) => node["Relation Name"] === "insights_charge_links");
+    console.info("bounded scalar charge plan", {
+      label,
+      quantity,
+      linkNodes: links.map((node) => ({
+        type: node["Node Type"],
+        rows: node["Actual Rows"],
+        loops: node["Actual Loops"],
+        index: node["Index Name"],
+        condition: node["Index Cond"],
+      })),
+      note: "512-row local native diagnostic, NOT retained-volume HTTP acceptance",
+    });
+    return { quantity, nodes, links };
+  };
+  const expectSkipped = async (
+    label: string,
+    selected: string | null,
+    lower?: string,
+    upper?: string,
+  ) => {
+    const result = await inspect(label, selected, lower, upper);
+    expect(result.links.every((node) => (node["Actual Loops"] ?? 0) === 0)).toBe(true);
+    return result;
+  };
+  const expectBounded = async (label: string, selected: string | null) => {
+    const result = await inspect(label, selected);
+    expect(
+      result.nodes.some((node) => {
+        const condition = node["Index Cond"] ?? "";
+        return (
+          (node["Actual Loops"] ?? 0) > 0 &&
+          node["Index Name"] === "insights_charge_links_window_idx" &&
+          condition.includes("workspace_id") &&
+          condition.includes("occurred_at >=") &&
+          condition.includes("occurred_at <")
+        );
+      }),
+    ).toBe(true);
+    return result;
+  };
+  try {
+    expect(
+      (await expectSkipped("clean UUID lower edge", workspaceId, lo, "2026-08-08Z")).quantity,
+    ).toBe("12");
+    expect(
+      (await expectSkipped("clean UUID upper edge", workspaceId, "2026-08-01Z", hi)).quantity,
+    ).toBe("12");
+    expect((await expectSkipped("clean NULL edges", null)).quantity).toBe("14");
+    expect((await expectSkipped("empty UUID scope", crypto.randomUUID())).quantity).toBe("0");
+    await scope(async (tx) => {
+      await tx`insert into credit_ledger_entries(account_id,workspace_id,type,amount_micros,source_type,source_id,idempotency_key,occurred_at)
+        values(${accountId},${workspaceId},'model_usage_debit',-19,'model_response',${turn + ":Case"},${turn + ":charge-scalar-excluded-lower"},'2026-08-01T00:00:00.000999Z'),
+          (${accountId},${workspaceId},'model_usage_debit',-23,'model_response',${turn + ":case"},${turn + ":charge-scalar-excluded-upper"},${hi}),
+          (${accountId},null,'model_usage_debit',-29,'model_response','malformed:Case',${turn + ":charge-scalar-null-excluded-upper"},${hi})`;
+    });
+    await assertExact();
+    expect((await expectBounded("excluded UUID edges", workspaceId)).quantity).toBe("12");
+    expect((await expectBounded("excluded NULL upper edge", null)).quantity).toBe("14");
+    await scope(async (tx) => {
+      await tx`insert into credit_ledger_entries(account_id,workspace_id,type,amount_micros,source_type,source_id,idempotency_key,occurred_at)
+        values(${accountId},${workspaceId},'model_usage_debit',-11,'model_response',${turn + ":Case"},${turn + ":charge-scalar-pending"},'2026-08-03T05:00Z')`;
+    });
+    expect((await expectSkipped("pending authoritative ledger", workspaceId)).quantity).toBe("23");
+  } finally {
+    await diagnostic.end();
+    await scope(async (tx) => {
+      await tx`delete from credit_ledger_entries where account_id=${accountId} and idempotency_key like ${turn + ":charge-scalar-%"}`;
+    });
+    await assertExact();
+  }
+});
+
 test("dirty charge attribution permits indexed source lookups only inside the read helper", async () => {
   const turn = crypto.randomUUID();
   await scope(async (tx) => {
