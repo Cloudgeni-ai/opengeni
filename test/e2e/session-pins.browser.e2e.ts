@@ -33,6 +33,7 @@ import {
   type BrowserContextOptions,
   type Page,
   type Response as PlaywrightResponse,
+  type Request as PlaywrightRequest,
   type Route,
 } from "playwright";
 import postgres from "postgres";
@@ -3991,23 +3992,36 @@ async function navigateWithProjectPages(
   // Workspace rows can paint before independent folder reads finish. Wait for
   // every first page and its loading state before dragging or snapshotting rows.
   const firstPages = new Map<string, Promise<unknown>>();
+  const newDocumentRequests = new Set<PlaywrightRequest>();
+  let navigationStarted = false;
+  const observeRequest = (request: PlaywrightRequest) => {
+    if (request.isNavigationRequest() && request.frame() === page.mainFrame()) {
+      navigationStarted = true;
+    }
+    if (navigationStarted) newDocumentRequests.add(request);
+  };
   const observePage = (response: PlaywrightResponse) => {
+    if (!newDocumentRequests.has(response.request())) return;
     if (!successfulSessionPageResponse(response, workspaceId, { cursor: null })) return;
     const channelId = new URL(response.url()).searchParams.get("channelId");
     if (channelId !== null) firstPages.set(channelId, response.json());
   };
+  // Ignore refreshes from the document being replaced by this navigation.
+  page.on("request", observeRequest);
   page.on("response", observePage);
   try {
-    const [channelsResponse] = await Promise.all([
-      page.waitForResponse(
-        (response) =>
-          response.ok() &&
-          response.request().method() === "GET" &&
-          new URL(response.url()).pathname === `/v1/workspaces/${workspaceId}/channels`,
-      ),
+    const [channels] = await Promise.all([
+      page
+        .waitForResponse(
+          (response) =>
+            newDocumentRequests.has(response.request()) &&
+            response.ok() &&
+            response.request().method() === "GET" &&
+            new URL(response.url()).pathname === `/v1/workspaces/${workspaceId}/channels`,
+        )
+        .then((response) => response.json() as Promise<BrowserChannel[]>),
       navigate(),
     ]);
-    const channels = (await channelsResponse.json()) as BrowserChannel[];
     const channelIds = ["null", ...channels.map((channel) => channel.id)];
     await waitFor(() => channelIds.every((channelId) => firstPages.has(channelId)), {
       timeoutMs: 30_000,
@@ -4020,6 +4034,7 @@ async function navigateWithProjectPages(
       { timeoutMs: 30_000 },
     );
   } finally {
+    page.off("request", observeRequest);
     page.off("response", observePage);
   }
 }
