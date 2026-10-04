@@ -97,7 +97,7 @@ acknowledgement rules above keep the revision open until it does. Terminal
 background-command settlement registers the same wake but does not signal from
 its settlement callers, so the dispatcher delivers it. Claim, supersession, and
 explicit control remain authoritative; deferred notices and late child results
-without ongoing intent do not create new work.
+for completed/paused goals without a held wait do not create new work.
 
 The workflow-wake reaper also inventories authentic pending child terminal
 results for idle parents with no goal and a fully acknowledged old wake. A

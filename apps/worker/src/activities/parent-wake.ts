@@ -391,15 +391,20 @@ export async function reconcilePendingSessionWorkflowWakes(
       pendingAdmissionBlockers: {},
     };
   }
-  const repairChildren = overrides.repairPendingChildTerminalResultWakes ??
-    repairPendingChildTerminalResultWakes;
-  const inventory = await repairChildren(svc.db, Math.min(100, limit),
-    childTerminalRepairCursors.get(svc.db) ?? null);
+  const repairChildren =
+    overrides.repairPendingChildTerminalResultWakes ?? repairPendingChildTerminalResultWakes;
+  const inventory = await repairChildren(
+    svc.db,
+    Math.min(100, limit),
+    childTerminalRepairCursors.get(svc.db) ?? null,
+  );
   if (inventory.cursor) childTerminalRepairCursors.set(svc.db, inventory.cursor);
   else childTerminalRepairCursors.delete(svc.db);
   if (inventory.failed > 0) {
     svc.observability.error("Pending child-result wake repair failed", {
-      examined: inventory.examined, registered: inventory.registered, failed: inventory.failed,
+      examined: inventory.examined,
+      registered: inventory.registered,
+      failed: inventory.failed,
     });
   }
   const repairs = await claimPendingSessionWorkflowWakesFn(svc.db, limit);

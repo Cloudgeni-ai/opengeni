@@ -1,6 +1,10 @@
 import { afterAll, beforeAll, expect, test } from "bun:test";
 import type { Settings } from "@opengeni/config";
 import {
+  WORKSPACE_XAI_PROVIDER_ACCOUNT_AUTHORITY_SNAPSHOT_V1,
+  WORKSPACE_CLAUDE_PROVIDER_ACCOUNT_AUTHORITY_SNAPSHOT_V1,
+} from "@opengeni/contracts";
+import {
   addSessionSystemUpdateWithSourceMutation,
   applySessionTurnSettlement,
   bootstrapWorkspace,
@@ -12,6 +16,8 @@ import {
   listSessionSystemUpdatesForTurn,
   markSessionSystemUpdateOutboxDeliveredInTransaction,
   markSessionWorkflowWakeDelivered,
+  mutateSessionControlInTransaction,
+  withWorkspaceSubjectSessionActivityRls,
 } from "@opengeni/db";
 import type { EventBus } from "@opengeni/events";
 import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/testing";
@@ -123,6 +129,10 @@ async function pendingResult(ctx: Awaited<ReturnType<typeof fixture>>, suffix = 
       status: "idle" as const,
     },
     lineage: { parentSessionId: ctx.parent.id, childSessionId: ctx.child.id },
+    personalConnectionDelegations: [],
+    mcpAccountBindings: null,
+    xaiProviderAccountAuthoritySnapshot: WORKSPACE_XAI_PROVIDER_ACCOUNT_AUTHORITY_SNAPSHOT_V1,
+    claudeProviderAccountAuthoritySnapshot: WORKSPACE_CLAUDE_PROVIDER_ACCOUNT_AUTHORITY_SNAPSHOT_V1,
   };
   const outbox = await getOrCreateSessionSystemUpdateOutbox(client.db, input);
   const result = await addSessionSystemUpdateWithSourceMutation(
@@ -145,7 +155,10 @@ function services(signals: Array<{ sessionId: string; wakeRevision: number }>): 
     db: client.db,
     bus: { publish: async () => undefined } as unknown as EventBus,
     settings: {} as Settings,
-    observability: { info: () => undefined, error: () => undefined } as unknown as NotifyServices["observability"],
+    observability: {
+      info: () => undefined,
+      error: () => undefined,
+    } as unknown as NotifyServices["observability"],
     wakeSessionWorkflow: async (wake) => {
       signals.push(wake);
       return markSessionWorkflowWakeDelivered(client.db, {
@@ -161,6 +174,27 @@ async function wakeRow(sessionId: string) {
     select wake_revision::int, delivered_revision::int
     from session_workflow_wake_outbox where session_id = ${sessionId}`;
   return row!;
+}
+
+async function pauseTarget(ctx: Awaited<ReturnType<typeof fixture>>, sessionId: string) {
+  await withWorkspaceSubjectSessionActivityRls(
+    client.db,
+    ctx.grant.workspaceId!,
+    ctx.grant.subjectId,
+    (db) =>
+      db.transaction((tx) =>
+        mutateSessionControlInTransaction(tx as unknown as typeof db, {
+          workspaceId: ctx.grant.workspaceId!,
+          sessionId,
+          actor: { type: "human", subjectId: ctx.grant.subjectId },
+          operationKey: crypto.randomUUID(),
+          action: "pause",
+        }),
+      ),
+  );
+  // The historical Pause transport is settled separately from repair debt.
+  await shared.admin`update session_workflow_wake_outbox set delivered_revision = wake_revision
+    where workspace_id = ${ctx.grant.workspaceId!}`;
 }
 
 test("reaper discovers an authentic no-goal child result behind a fully ACKed ended-wait wake", async () => {
@@ -179,13 +213,15 @@ test("reaper discovers an authentic no-goal child result behind a fully ACKed en
     from sessions where id = ${ctx.parent.id}`;
   expect(parent).toEqual({ status: "queued", active_turn_id: null, input_wait_turn_id: null });
   // Transport acceptance cannot retire this repaired revision before claim.
-  expect(await markSessionWorkflowWakeDelivered(client.db, {
-    accountId: ctx.grant.accountId,
-    workspaceId: ctx.grant.workspaceId!,
-    sessionId: ctx.parent.id,
-    temporalWorkflowId: `session-${ctx.parent.id}`,
-    wakeRevision: before.wake_revision + 1,
-  })).toEqual({ action: "pending_admission", blocker: "pending_machine_input" });
+  expect(
+    await markSessionWorkflowWakeDelivered(client.db, {
+      accountId: ctx.grant.accountId,
+      workspaceId: ctx.grant.workspaceId!,
+      sessionId: ctx.parent.id,
+      temporalWorkflowId: `session-${ctx.parent.id}`,
+      wakeRevision: before.wake_revision + 1,
+    }),
+  ).toEqual({ action: "pending_admission", blocker: "pending_machine_input" });
   await reconcilePendingSessionWorkflowWakes(svc, 1000);
   expect((await wakeRow(ctx.parent.id)).wake_revision).toBe(before.wake_revision + 1);
   const attemptId = crypto.randomUUID();
@@ -198,7 +234,12 @@ test("reaper discovers an authentic no-goal child result behind a fully ACKed en
     trigger: { kind: "next" },
   });
   if (claimed.action !== "claimed") throw new Error("repaired input was not claimed");
-  const batch = await listSessionSystemUpdatesForTurn(client.db, ctx.grant.workspaceId!, ctx.parent.id, claimed.turn.id);
+  const batch = await listSessionSystemUpdatesForTurn(
+    client.db,
+    ctx.grant.workspaceId!,
+    ctx.parent.id,
+    claimed.turn.id,
+  );
   expect(batch.map((update) => update.id)).toContain(updateId);
 });
 
@@ -213,26 +254,60 @@ test("coalesces multiple already-pending child results into one repair revision"
   expect((await wakeRow(ctx.parent.id)).wake_revision).toBe(before.wake_revision + 1);
 });
 
-for (const scenario of ["paused", "ancestor_paused", "failed", "cancelled", "delivered", "forged_link", "completed_goal", "paused_goal"] as const) {
+for (const scenario of [
+  "paused",
+  "ancestor_paused",
+  "failed",
+  "cancelled",
+  "superseded",
+  "forged_link",
+  "cross_tenant",
+  "nonterminal",
+  "unquiesced",
+  "completed_goal",
+  "paused_goal",
+] as const) {
   test(`repair preserves ${scenario} exclusion`, async () => {
     const ctx = await fixture();
     const updateId = await pendingResult(ctx);
     if (scenario === "paused") {
-      await shared.admin`update sessions set direct_control_state = 'paused', direct_pause_revision = 1
-        where id = ${ctx.parent.id}`;
+      await pauseTarget(ctx, ctx.parent.id);
     } else if (scenario === "ancestor_paused") {
       // Test-only historical control fixture; scoped repair must still evaluate
       // the entire ancestry rather than just this parent's direct state.
-      await shared.admin`update sessions set parent_session_id = ${ctx.child.id}
+      const ancestor = await createSession(client.db, {
+        accountId: ctx.grant.accountId,
+        workspaceId: ctx.grant.workspaceId!,
+        initialMessage: "ancestor",
+        resources: [],
+        tools: [],
+        metadata: {},
+        createdBy: { kind: "subject", subjectId: ctx.grant.subjectId },
+        model: "scripted-model",
+        reasoningEffort: "medium",
+        latencyMode: "standard",
+        sandboxBackend: "none",
+      });
+      await shared.admin`update sessions set parent_session_id = ${ancestor.id}
         where id = ${ctx.parent.id}`;
-      await shared.admin`update sessions set parent_session_id = null,
-        direct_control_state = 'paused', direct_pause_revision = 1 where id = ${ctx.child.id}`;
+      await pauseTarget(ctx, ancestor.id);
     } else if (scenario === "failed" || scenario === "cancelled") {
       await shared.admin`update sessions set status = ${scenario} where id = ${ctx.parent.id}`;
-    } else if (scenario === "delivered") {
+    } else if (scenario === "superseded") {
       await shared.admin`update session_system_updates set state = 'superseded' where id = ${updateId}`;
     } else if (scenario === "forged_link") {
       await shared.admin`update sessions set parent_session_id = null where id = ${ctx.child.id}`;
+    } else if (scenario === "cross_tenant") {
+      const other = await fixture();
+      await shared.admin`update session_system_updates set source_id = ${other.child.id},
+        payload = jsonb_set(payload, '{childSessionId}', to_jsonb(${other.child.id}::text))
+        where id = ${updateId}`;
+    } else if (scenario === "nonterminal") {
+      await shared.admin`update session_system_updates set kind = 'child_progress',
+        payload = jsonb_set(payload, '{type}', '"child_progress"'::jsonb) where id = ${updateId}`;
+    } else if (scenario === "unquiesced") {
+      await shared.admin`update session_turn_attempts set quiesced_at = null, outcome = 'interrupted_recoverable'
+        where session_id = ${ctx.parent.id}`;
     } else {
       await shared.admin`insert into session_goals (account_id, workspace_id, session_id, text, status)
         values (${ctx.grant.accountId}, ${ctx.grant.workspaceId!}, ${ctx.parent.id}, 'settled goal',
@@ -245,3 +320,22 @@ for (const scenario of ["paused", "ancestor_paused", "failed", "cancelled", "del
     expect(await wakeRow(ctx.parent.id)).toEqual(before);
   });
 }
+
+test("content-free discovery inherits only the existing wake dispatcher owner and runtime ACL", async () => {
+  const [posture] = await shared.admin`
+    select repair.proowner = wake.proowner as same_owner, repair.prosecdef as definer,
+      repair.proconfig = array['search_path=pg_catalog']::text[] as safe_path,
+      has_function_privilege('opengeni_app', repair.oid, 'EXECUTE') as app_execute,
+      exists (select 1 from aclexplode(coalesce(repair.proacl, acldefault('f', repair.proowner))) acl
+        where acl.grantee = 0 and acl.privilege_type = 'EXECUTE') as public_execute
+    from pg_proc repair, pg_proc wake
+    where repair.oid = 'opengeni_private.list_pending_child_terminal_wake_repairs_v1(integer,uuid,uuid)'::regprocedure
+      and wake.oid = 'opengeni_private.claim_session_workflow_wakes(integer)'::regprocedure`;
+  expect(posture).toEqual({
+    same_owner: true,
+    definer: true,
+    safe_path: true,
+    app_execute: true,
+    public_execute: false,
+  });
+});
