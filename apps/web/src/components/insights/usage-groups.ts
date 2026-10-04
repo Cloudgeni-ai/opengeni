@@ -141,12 +141,22 @@ export function breakdownRows(
   const field = FILTER_FIELD_OF[response.groupBy];
   for (const group of response.groups) {
     const { label, detail } = rowLabel(group, response.groupBy, catalog);
+    // Native groups namespace display identities; selectors take the underlying value.
+    // Legacy adapters already return bare values. Keep the display key for row/chart identity.
+    const selector =
+      group.kind === "item" && group.key.startsWith("item:")
+        ? group.key.slice("item:".length)
+        : group.kind === "unfiled" && response.groupBy === "project"
+          ? "unfiled"
+          : group.key;
     const filterable =
       group.kind === "item" || (group.kind === "unfiled" && response.groupBy === "project");
     const filterValue =
       response.groupBy === "model" && group.provider && group.model
         ? modelFilterKey(group.provider, group.model)
-        : group.key;
+        : response.groupBy === "provider" && group.provider
+          ? group.provider
+          : selector;
     const identity =
       group.kind === "item" && (response.groupBy === "model" || response.groupBy === "provider")
         ? `item:${label}:${detail ?? ""}`
@@ -171,7 +181,7 @@ export function breakdownRows(
             ? { field: "person", values: [group.personKey] }
             : null,
         ...(response.groupBy === "rootSession" && group.kind === "item"
-          ? { sessionId: group.key }
+          ? { sessionId: selector }
           : {}),
         ...(group.workspaceId ? { workspaceId: group.workspaceId } : {}),
       },
