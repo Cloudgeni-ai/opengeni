@@ -351,7 +351,9 @@ test schema, verifies all other Insights definitions are unchanged, replaces
 only those readers under the preserved owner, and checks identities, ownership,
 ACLs and configuration. One bounded owner repeatable-read reconciliation makes
 the copy clean before measurements; it records its duration and explicit
-10-million-source-row budget. No refresh is allowed between the subsequent dirty
+10-million-source-row budget, then independently compares cache call/token/money/
+knownness and usage/debit counts and quantities to raw source aggregates.
+No refresh is allowed between the subsequent dirty
 samples. The HTTP harness requires completed exact-head preparation evidence for
 this descendant-copy lane. This procedure changes neither the original fixture
 nor deployment history, and establishes no automatic production maintenance

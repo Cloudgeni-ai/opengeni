@@ -181,6 +181,64 @@ try {
   });
   evidence.reconciliationElapsedMs = performance.now() - reconcileStarted;
   evidence.pendingAfter = await pending(target);
+  // Independent source aggregates, not the rollup measure-construction helper.
+  const rawModel = (
+    await target`select jsonb_build_object(
+      'calls',count(*),'input_tokens',coalesce(sum(input_tokens),0),
+      'output_tokens',coalesce(sum(output_tokens),0),'cached_tokens',coalesce(sum(cached_tokens),0),
+      'cache_write_tokens',coalesce(sum(cache_write_tokens),0),
+      'reasoning_tokens',coalesce(sum(reasoning_tokens),0),'total_tokens',coalesce(sum(total_tokens),0),
+      'token_known_calls',count(total_tokens),'cache_write_known_calls',count(cache_write_tokens),
+      'priced_cost_micros',coalesce(sum(priced_cost_micros) filter(where billing_path='opengeni_credits'),0),
+      'estimated_provider_cost_micros',coalesce(sum(estimated_provider_cost_micros),0),
+      'estimated_provider_cost_known_calls',count(estimated_provider_cost_micros),
+      'equivalent_credit_cost_micros',coalesce(sum(equivalent_credit_cost_micros),0),
+      'equivalent_credit_cost_known_calls',count(equivalent_credit_cost_micros),
+      'list_class_known_calls',count(list_uncached_input_cost_micros),
+      'list_approx_calls',count(*) filter(where list_cost_is_approx),
+      'list_uncached_input_cost_micros',coalesce(sum(list_uncached_input_cost_micros),0),
+      'list_cache_read_cost_micros',coalesce(sum(list_cache_read_cost_micros),0),
+      'list_cache_write_cost_micros',coalesce(sum(list_cache_write_cost_micros),0),
+      'list_output_cost_micros',coalesce(sum(list_output_cost_micros),0)) as measures
+      from model_call_facts`
+  )[0]!.measures;
+  const dailyModel = (
+    await target`select jsonb_object_agg(key,amount) as measures from (
+      select e.key,sum(e.value::numeric) as amount
+      from opengeni_private.insights_model_daily d
+      cross join lateral jsonb_each_text(d.measures)e group by e.key) summed`
+  )[0]!.measures;
+  const usageParity = (
+    await target`select
+      (select count(*)::text from usage_events) as raw_count,
+      (select sum(event_count)::text from opengeni_private.insights_usage_daily) as daily_count,
+      (select sum(quantity)::text from usage_events) as raw_quantity,
+      (select sum(quantity)::text from opengeni_private.insights_usage_daily) as daily_quantity`
+  )[0]!;
+  const chargeParity = (
+    await target`select
+      (select count(*)::text from credit_ledger_entries
+        where type='model_usage_debit' and source_type='model_response' and amount_micros<0) as raw_count,
+      (select count(*)::text from opengeni_private.insights_charge_links) as link_count,
+      (select sum(entries)::text from opengeni_private.insights_charge_daily) as daily_count,
+      (select (-sum(amount_micros))::text from credit_ledger_entries
+        where type='model_usage_debit' and source_type='model_response' and amount_micros<0) as raw_quantity,
+      (select sum(quantity)::text from opengeni_private.insights_charge_daily) as daily_quantity`
+  )[0]!;
+  evidence.parity = {
+    rawModel,
+    dailyModel,
+    checkedModelKeys: Object.keys(rawModel),
+    usage: usageParity,
+    charges: chargeParity,
+    matches:
+      Object.entries(rawModel).every(([key, value]) => value === dailyModel[key]) &&
+      usageParity.raw_count === usageParity.daily_count &&
+      usageParity.raw_quantity === usageParity.daily_quantity &&
+      chargeParity.raw_count === chargeParity.link_count &&
+      chargeParity.raw_count === chargeParity.daily_count &&
+      chargeParity.raw_quantity === chargeParity.daily_quantity,
+  };
   evidence.after = await snapshot(target);
   evidence.routinesAfter = summarize(await inventory(target));
   evidence.sourceDataUnchanged = same(before, evidence.after);
@@ -189,6 +247,7 @@ try {
   if (
     !evidence.sourceDataUnchanged ||
     !evidence.originalUnchanged ||
+    !(evidence.parity as { matches: boolean }).matches ||
     !same(evidence.pendingAfter, []) ||
     evidence.sourceEndHead !== sourceHead
   )

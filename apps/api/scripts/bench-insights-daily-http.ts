@@ -75,6 +75,7 @@ if (
     !preparation.allDefinitionsMatchSource ||
     !preparation.sourceDataUnchanged ||
     !preparation.originalUnchanged ||
+    !preparation.parity?.matches ||
     JSON.stringify(preparation.pendingAfter) !== "[]" ||
     JSON.stringify(preparation.after) !== JSON.stringify(copy.after))
 )
