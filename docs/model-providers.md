@@ -754,6 +754,13 @@ Assistant content omits response-only metadata on the Chat wire; canonical
 history and provider cache extensions stay unchanged. Claude adaptive thinking
 explicitly requests visible summaries.
 
+The shared Chat adapter retains both `reasoning` and `reasoning_content` replies
+as canonical reasoning items and forwards streamed text to the existing thinking
+timeline. Request-local projection restores the original field at assistant-message
+scope, alongside its answer and tool calls. Older replies with reasoning nested
+inside text metadata are recovered at that boundary; output-only `tools` metadata
+is omitted. This behavior is shared by configured providers and Chat BYOK routes.
+
 Chat Completions receives one request-local transcript view for
 canonical record types that its SDK converter cannot represent; that view is
 never persisted. Historical `tool_search` calls/outputs remain inert completed
