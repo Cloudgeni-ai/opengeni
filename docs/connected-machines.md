@@ -726,6 +726,9 @@ generation. A machine returning after a longer offline period uses the same
 renewal path. Revocation, removal and a superseding re-enrollment deny renewal;
 renewal cannot change ownership, scope or screen-control consent. Updated
 credentials load into the existing process, preserving host operations.
+The signed `/v1/enrollments/renew` machine protocol is outside the browser API
+contract-revision fence, like device polling and token exchange. Its install-key,
+enrollment-generation and revocation checks still apply in production.
 
 Deploy the API renewal endpoint before upgrading agents. An older API returns
 404 and the agent retries with jitter while retaining its existing credentials.
