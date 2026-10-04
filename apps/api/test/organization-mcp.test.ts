@@ -116,7 +116,10 @@ describe("organization MCP server", () => {
     async (path) => {
       const { client, call, seen } = await connect(person(readOnly));
       try {
-        const id = `GET ${path}`;
+        // Generated ids follow the SDK method name when one maps the route.
+        const id = ACTION_CATALOG.find(
+          (entry) => entry.method === "GET" && entry.path === path,
+        )!.id;
         const found = (await call("opengeni_actions_search", { query: "insights", limit: 50 }))
           .value as { actions: Array<{ id: string; method: string; path: string }> };
         expect(found.actions).toContainEqual({ id, method: "GET", path });
