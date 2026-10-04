@@ -659,7 +659,9 @@ exact admitted sender turn. Empty personal-connection selections or workspace
 provider scope do not erase that identity. Ordinary messages from different sender
 attempts may share a batch with each other and lifecycle results when their exact
 originating turns resolve to the same human and frozen execution permissions.
-Steer retains exact-caller isolation; malformed historical message lineage cannot borrow another
+Steer retains exact-caller isolation: messages from that same attempt can join its
+batch, with the replacement instruction last in both the timeline and persisted
+model context, including turns with a goal snapshot. Malformed historical message lineage cannot borrow another
 update's human. Genuine service-only source turns remain service-only. This
 preserves identity without expanding accepted connection selections or replacing
 the receiving session's tool configuration.

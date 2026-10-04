@@ -125,9 +125,20 @@ async function activeAgent(
   grant: Awaited<ReturnType<typeof fixture>>,
   parentSessionId: string | null = null,
   personalConnectionDelegations: McpPersonalConnectionDelegation[] = [],
+  origin: "human" | "service" = "human",
 ) {
   const session = await makeSession(grant, parentSessionId);
-  await submit(grant, session.id, "agent is working", "send", personalConnectionDelegations);
+  if (origin === "service") {
+    await initializeSessionStartAtomically(client.db, {
+      accountId: grant.accountId,
+      workspaceId: grant.workspaceId!,
+      sessionId: session.id,
+      reasoningEffortFallback: "medium",
+      createdEventPayload: {},
+    });
+  } else {
+    await submit(grant, session.id, "agent is working", "send", personalConnectionDelegations);
+  }
   const attemptId = crypto.randomUUID();
   const claim = await claimSessionWorkForAttempt(client.db, grant.workspaceId!, {
     sessionId: session.id,
@@ -165,6 +176,170 @@ async function wakeRow(workspaceId: string, sessionId: string) {
 }
 
 describe("attempt-fenced Agent session commands", () => {
+  test.each([
+    ["human", false],
+    ["service", false],
+    ["human", true],
+    ["service", true],
+  ] as const)(
+    "same-attempt message and Steer keep one correctly ordered delivery (origin=%s, goal=%s)",
+    async (origin, withGoal) => {
+      const grant = await fixture();
+      const caller = await activeAgent(grant, null, [], origin);
+      const target = await makeSession(grant, caller.session.id);
+      const workspaceId = grant.workspaceId!;
+      if (withGoal) {
+        await createSessionGoal(client.db, {
+          accountId: grant.accountId,
+          workspaceId,
+          sessionId: target.id,
+          text: "Complete the current task",
+          createdBy: "api",
+        });
+      }
+      const message = await withWorkspaceRls(client.db, workspaceId, (db) =>
+        db.transaction((tx) =>
+          sendAgentMessageInTransaction(tx as unknown as typeof db, {
+            accountId: grant.accountId,
+            workspaceId,
+            targetSessionId: target.id,
+            actor: caller.actor,
+            operationKey: crypto.randomUUID(),
+            text: "Older helper request",
+          }),
+        ),
+      );
+      const steer = await withWorkspaceRls(client.db, workspaceId, (db) =>
+        db.transaction((tx) =>
+          steerAgentSessionInTransaction(tx as unknown as typeof db, {
+            accountId: grant.accountId,
+            workspaceId,
+            targetSessionId: target.id,
+            actor: caller.actor,
+            operationKey: crypto.randomUUID(),
+            instruction: "New helper direction",
+          }),
+        ),
+      );
+      const attemptId = crypto.randomUUID();
+      const claim = await claimSessionWorkForAttempt(client.db, workspaceId, {
+        sessionId: target.id,
+        workflowId: `session-${target.id}`,
+        workflowRunId: crypto.randomUUID(),
+        attemptId,
+        dispatchId: crypto.randomUUID(),
+        trigger: { kind: "next" },
+      });
+      if (claim.action !== "claimed") throw new Error(`Not claimed: ${claim.reason}`);
+      expect(claim.turn.initiatingHumanSubjectId).toBe(origin === "human" ? grant.subjectId : null);
+      expect(claim.turn.goalSnapshot).toMatchObject({ state: withGoal ? "active" : "none" });
+      const updates = await listSessionSystemUpdatesForTurn(
+        client.db,
+        workspaceId,
+        target.id,
+        claim.turn.id,
+      );
+      expect(updates.map((update) => update.id)).toEqual([message.updateId, steer.updateId]);
+      expect(await listOutstandingSessionSystemUpdates(client.db, workspaceId, target.id)).toEqual(
+        [],
+      );
+      const history = await getActiveSessionHistoryItems(client.db, workspaceId, target.id);
+      expect(history).toHaveLength(1);
+      expect(updates.every((update) => update.deliveredHistoryItemId === history[0]!.id)).toBe(
+        true,
+      );
+      const modelText = JSON.stringify(history[0]!.item);
+      expect(modelText.indexOf("Older helper request")).toBeGreaterThanOrEqual(0);
+      expect(modelText.indexOf("New helper direction")).toBeGreaterThan(
+        modelText.indexOf("Older helper request"),
+      );
+      const [event] = await withWorkspaceRls(client.db, workspaceId, (db) =>
+        db
+          .select({ payload: schema.sessionEvents.payload })
+          .from(schema.sessionEvents)
+          .where(
+            and(
+              eq(schema.sessionEvents.sessionId, target.id),
+              eq(schema.sessionEvents.turnId, claim.turn.id),
+              eq(schema.sessionEvents.type, "system.update.delivered"),
+            ),
+          ),
+      );
+      expect(event?.payload).toMatchObject({
+        members: [{ id: message.updateId }, { id: steer.updateId }],
+      });
+      if (!withGoal) {
+        await applySessionTurnSettlement(client.db, workspaceId, {
+          sessionId: target.id,
+          turnId: claim.turn.id,
+          triggerEventId: claim.turn.triggerEventId,
+          attemptId,
+          turnStatus: "completed",
+          sessionStatus: "idle",
+          activeTurnId: null,
+          events: [],
+        });
+        expect(
+          await claimSessionWorkForAttempt(client.db, workspaceId, {
+            sessionId: target.id,
+            workflowId: `session-${target.id}`,
+            workflowRunId: crypto.randomUUID(),
+            attemptId: crypto.randomUUID(),
+            dispatchId: crypto.randomUUID(),
+            trigger: { kind: "next" },
+          }),
+        ).toEqual({ action: "unclaimed", reason: "no-work" });
+      }
+    },
+  );
+
+  test("Steer does not coalesce another caller's message with the same human and access", async () => {
+    const grant = await fixture();
+    const caller = await activeAgent(grant);
+    const other = await activeAgent(grant);
+    const target = await makeSession(grant, caller.session.id);
+    const workspaceId = grant.workspaceId!;
+    const message = await withWorkspaceRls(client.db, workspaceId, (db) =>
+      db.transaction((tx) =>
+        sendAgentMessageInTransaction(tx as unknown as typeof db, {
+          accountId: grant.accountId,
+          workspaceId,
+          targetSessionId: target.id,
+          actor: other.actor,
+          operationKey: crypto.randomUUID(),
+          text: "Separate caller request",
+        }),
+      ),
+    );
+    const steer = await withWorkspaceRls(client.db, workspaceId, (db) =>
+      db.transaction((tx) =>
+        steerAgentSessionInTransaction(tx as unknown as typeof db, {
+          accountId: grant.accountId,
+          workspaceId,
+          targetSessionId: target.id,
+          actor: caller.actor,
+          operationKey: crypto.randomUUID(),
+          instruction: "New direction",
+        }),
+      ),
+    );
+    const claim = await claimSessionWorkForAttempt(client.db, workspaceId, {
+      sessionId: target.id,
+      workflowId: `session-${target.id}`,
+      workflowRunId: crypto.randomUUID(),
+      attemptId: crypto.randomUUID(),
+      dispatchId: crypto.randomUUID(),
+      trigger: { kind: "next" },
+    });
+    if (claim.action !== "claimed") throw new Error(`Not claimed: ${claim.reason}`);
+    expect(
+      await listSessionSystemUpdatesForTurn(client.db, workspaceId, target.id, claim.turn.id),
+    ).toMatchObject([{ id: steer.updateId }]);
+    expect(
+      await listOutstandingSessionSystemUpdates(client.db, workspaceId, target.id),
+    ).toMatchObject([{ id: message.updateId, state: "pending" }]);
+  });
+
   test("interleaved helper messages and a terminal result share one compatible parent turn", async () => {
     const grant = await fixture();
     const parent = await activeAgent(grant);
