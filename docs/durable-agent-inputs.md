@@ -97,7 +97,15 @@ acknowledgement rules above keep the revision open until it does. Terminal
 background-command settlement registers the same wake but does not signal from
 its settlement callers, so the dispatcher delivers it. Claim, supersession, and
 explicit control remain authoritative; deferred notices and late child results
-without ongoing intent do not create new work.
+for completed/paused goals without a held wait do not create new work.
+
+The workflow-wake reaper also inventories authentic pending child terminal
+results for idle parents with no goal and a fully acknowledged old wake. A
+bounded keyset scan returns identities only; scoped repair rechecks effective
+control, the child-parent producer ledger, ownership and both writer gates,
+then reserves the pending batch and registers one wake atomically. It never
+replays child/provider work or fabricates output. Completed/paused goals remain
+settled; paused or busy candidates cannot starve later inventory pages.
 
 Public session reads expose `inputWait` only for an idle, active-control session
 whose newest finished turn that can decide the wait is the declaring turn.

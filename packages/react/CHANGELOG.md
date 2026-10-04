@@ -1,5 +1,15 @@
 # @opengeni/react
 
+## 1.0.0
+
+### Major Changes
+
+- Reset package versioning: every published `@opengeni/*` package now releases together at one shared version, starting at 1.0.0. Install all `@opengeni` packages at the same version. Earlier versions are retired.
+
+### Patch Changes
+
+- Back to your message now floats 12px below the top of the conversation, and drops just below an expanded work-header strip only while that strip is pinned to the top, instead of always sitting below where the strip would be.
+
 ## 7.8.1
 
 ### Patch Changes
