@@ -166,9 +166,9 @@ describe("shared OpenGeni package", () => {
 
   test("plugin metadata is shared and needs no install-time settings", () => {
     const manifest = json("plugins/opengeni/.claude-plugin/plugin.json");
-    expect(manifest.displayName).toBe("OpenGeni");
+    expect(manifest.displayName).toBe("Opengeni");
     expect(manifest.author).toEqual({
-      name: "OpenGeni",
+      name: "Opengeni",
       url: "https://opengeni.ai",
     });
     expect(manifest.homepage).toBe("https://docs.opengeni.ai/guides/coding-agents");
@@ -242,7 +242,7 @@ describe("shared OpenGeni package", () => {
     "plugins/opengeni/skills/build-with-opengeni/opengeni-client/SKILL.md",
   ])("client setup handoff stays portable in %s", (path) => {
     const text = readFileSync(join(root, path), "utf8");
-    const handoffs = [...text.matchAll(/\[OpenGeni developer setup\]\(([^)\s]+)\)/g)];
+    const handoffs = [...text.matchAll(/\[(?:OpenGeni|Opengeni) developer setup\]\(([^)\s]+)\)/g)];
     expect(handoffs).toHaveLength(1);
     expect(new URL(handoffs[0]![1]!).href).toBe("https://docs.opengeni.ai/guides/developer-plugin");
   });

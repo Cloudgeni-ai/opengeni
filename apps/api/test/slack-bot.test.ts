@@ -1730,7 +1730,7 @@ describe("OpenGeni Slack bot connection", () => {
         sessionId: null,
         requestedConnectionId: legacyFabricated.id,
       }),
-    ).rejects.toThrow("OpenGeni Slack bot connection");
+    ).rejects.toThrow("Opengeni Slack bot connection");
   });
 
   test("accepts only explicitly safe additional Slack scopes", async () => {
@@ -2395,7 +2395,7 @@ describe("OpenGeni Slack bot connection", () => {
         sessionId: null,
         requestedConnectionId: connected.body.connection.id,
       }),
-    ).rejects.toThrow("OpenGeni Slack bot connection");
+    ).rejects.toThrow("Opengeni Slack bot connection");
   });
 
   test("uploads bytes without bot headers and completes in the exact task thread", async () => {
@@ -2945,7 +2945,7 @@ describe("OpenGeni Slack bot connection", () => {
         sessionId: null,
         requestedConnectionId: personal.id,
       }),
-    ).rejects.toThrow("OpenGeni Slack bot connection");
+    ).rejects.toThrow("Opengeni Slack bot connection");
     const automaticallyResolved = await resolveSlackBotConnectionForTool({
       db: client.db,
       grant,

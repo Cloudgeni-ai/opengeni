@@ -11935,7 +11935,7 @@ export class SlackInstallationBindingConflictError extends Error {
         ? "Slack team has conflicting legacy installations and is quarantined"
         : reason === "stale_reinstall"
           ? "Slack installation changed during reinstall; start again"
-          : "Slack team is already bound to a different OpenGeni installation",
+          : "Slack team is already bound to a different Opengeni installation",
     );
     this.name = "SlackInstallationBindingConflictError";
   }
@@ -46686,7 +46686,7 @@ export class SandboxPaidComputeAdmissionError extends Error {
     public readonly workspaceId: string,
     public readonly sandboxGroupId: string,
   ) {
-    super("Insufficient OpenGeni credits to admit paid sandbox compute");
+    super("Insufficient Opengeni credits to admit paid sandbox compute");
   }
 }
 

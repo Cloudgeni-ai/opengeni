@@ -726,7 +726,7 @@ function hasSessionPageFilters(options: SessionListPageOptions): boolean {
 }
 
 function unsupportedSessionPage(feature: string): Error {
-  return new Error(`The connected OpenGeni API does not support ${feature}`);
+  return new Error(`The connected Opengeni API does not support ${feature}`);
 }
 
 function sessionPath(workspaceId: string, sessionId: string): string {
@@ -972,7 +972,7 @@ function createLazyToolsFacade(transport: OpenGeniToolTransport): OpenGeniToolsF
               target = (target as Record<string, unknown>)[segment];
             }
             if (typeof target !== "function")
-              throw new TypeError("OpenGeni tool path is not callable");
+              throw new TypeError("Opengeni tool path is not callable");
             return await Reflect.apply(target, undefined, args);
           }) as unknown as OpenGeniWorkspaceTools,
           {
@@ -9756,7 +9756,7 @@ async function assertJsonResponse(
     retryable: true,
     correlationId: response.headers.get(OPENGENI_CORRELATION_HEADER) ?? context.correlationId,
     outcomeUnknown: isMutationMethod(context.method),
-    displayMessage: "OpenGeni is temporarily unavailable — retry.",
+    displayMessage: "Opengeni is temporarily unavailable — retry.",
   });
 }
 
@@ -9793,7 +9793,7 @@ function mutationTransportError(correlationId: string): OpenGeniApiError {
     correlationId,
     outcomeUnknown: true,
     mutation: true,
-    displayMessage: "OpenGeni could not confirm the request — reconcile before retrying.",
+    displayMessage: "Opengeni could not confirm the request — reconcile before retrying.",
   });
 }
 

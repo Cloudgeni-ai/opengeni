@@ -5416,7 +5416,7 @@ export function sessionListQuery(
     const parsedEndUser = SessionScopeSubjectId.safeParse(query.scopeSubjectId);
     if (!parsedEndUser.success) {
       throw new HTTPException(400, {
-        message: "scopeSubjectId must be a canonical OpenGeni user subject",
+        message: "scopeSubjectId must be a canonical Opengeni user subject",
       });
     }
     scopeSubjectId = parsedEndUser.data;

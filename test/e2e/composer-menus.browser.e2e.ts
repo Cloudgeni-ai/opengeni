@@ -58,7 +58,7 @@ describe("consistent production composer menus", () => {
     await page.getByRole("button", { name: "More composer actions" }).click();
     await page.getByRole("menuitem", { name: new RegExp(name) }).click();
   }
-  test("real resource menus share geometry and preserve mounted switches at desktop and mobile", async () => {
+  test("real resource menus share geometry and settings keep one home at desktop and mobile", async () => {
     for (const isNew of [false, true])
       for (const width of [1000, 390, 320]) {
         await page.setViewportSize({ width, height: 800 });
@@ -66,11 +66,23 @@ describe("consistent production composer menus", () => {
         for (const name of ["Connectors", "Repositories", "Chat settings", "Variable sets"]) {
           await open(name);
           const menu = page.getByRole("menu");
-          await menu.waitFor();
-          const box = (await menu.boundingBox())!;
-          expect(box.width).toBeLessThanOrEqual(Math.min(384, width - 24) + 1);
-          expect(box.x).toBeGreaterThanOrEqual(0);
-          expect(box.x + box.width).toBeLessThanOrEqual(width);
+          const settingsInAgentTab = name === "Chat settings" && !isNew;
+          const agentTab = page.getByRole("region", { name: "Agent tab", exact: true });
+          if (settingsInAgentTab) {
+            await menu.waitFor({ state: "hidden" });
+            await agentTab.waitFor();
+            expect(await agentTab.count()).toBe(1);
+            expect(await page.getByRole("dialog").count()).toBe(0);
+            const box = (await agentTab.boundingBox())!;
+            expect(box.x).toBeGreaterThanOrEqual(0);
+            expect(box.x + box.width).toBeLessThanOrEqual(width);
+          } else {
+            await menu.waitFor();
+            const box = (await menu.boundingBox())!;
+            expect(box.width).toBeLessThanOrEqual(Math.min(384, width - 24) + 1);
+            expect(box.x).toBeGreaterThanOrEqual(0);
+            expect(box.x + box.width).toBeLessThanOrEqual(width);
+          }
           expect(await page.evaluate(() => document.documentElement.scrollWidth > innerWidth)).toBe(
             false,
           );
@@ -97,20 +109,31 @@ describe("consistent production composer menus", () => {
               .scrollIntoViewIfNeeded();
           }
           if (name === "Chat settings") {
-            const select = menu.getByLabel("Knowledge", { exact: true });
+            const surface = settingsInAgentTab ? agentTab : menu;
+            const select = surface.getByLabel("Knowledge", { exact: true });
             await select.waitFor();
+            expect(await page.getByLabel("Knowledge", { exact: true }).count()).toBe(1);
             const shown = () =>
-              select.locator("..").locator('[aria-hidden="true"]').first().innerText();
+              settingsInAgentTab
+                ? select.locator("option:checked").textContent()
+                : select.locator("..").locator('[aria-hidden="true"]').first().innerText();
             expect(await select.inputValue()).toBe("inherit");
             // An inherited value names the effective default, so it is never
             // mistaken for an override.
             expect(await shown()).toBe("Default (Automatic)");
             await select.selectOption("off");
+            if (settingsInAgentTab)
+              await surface
+                .getByRole("status")
+                .filter({ hasText: /^Saved\./ })
+                .waitFor();
             expect(await select.inputValue()).toBe("off");
             expect(await shown()).toBe("Off");
             await select.selectOption("inherit");
+            expect(await select.inputValue()).toBe("inherit");
+            expect(await shown()).toBe("Default (Automatic)");
           }
-          await page.keyboard.press("Escape");
+          if (!settingsInAgentTab) await page.keyboard.press("Escape");
           await menu.waitFor({ state: "hidden" });
         }
       }

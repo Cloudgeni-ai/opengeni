@@ -18,7 +18,10 @@ Preflight: `scripts/run-development-stack.ts`; ownership: `scripts/dev-stack-loc
 
 ## 2. OpenGeni
 
-External users require live membership/`asUser()`. Visibility differs from `agentAccess`;
+External users require live membership/`asUser()`; an organization key holding
+`members:manage` creates a missing shared-workspace membership on the user's first
+request (`provisionExternalMemberOnFirstUse` in `packages/core/src/access`, never
+changing an existing one; SDK per-user workspaces stay single-user). Visibility differs from `agentAccess`;
 Personal Knowledge follows the verified active-turn user. Links never merge users.
 [Product integration](product-integration.md),
 [embedding authority](embedding-authority-internals.md),
@@ -505,7 +508,7 @@ registration. See [run lifecycle](run-lifecycle.md).
 Global Modal inventory uses an owner-only SELECT capability under FORCE RLS (0497).
 
 `packages/db/src/modal-native-live-origin.ts` is an inert, trusted-server-only
-LIVE-origin projection (0610), not a host authenticator or custody grant. Its
+LIVE-origin projection (0611), not a host authenticator or custody grant. Its
 transaction joins the exact accepted attempt, immutable initiating human,
 current membership/Personal pointer, control, route and execution-authority
 floor before any lease acquisition. Function-lifetime owner-only read

@@ -21,6 +21,10 @@
       "sha256": "823169781ba22bebfb1eb033970fe82810327de6acfe406bd3d9d28bb3878684"
     },
     {
+      "path": ".github/workflows/deprecate-pre-1.0.yml",
+      "sha256": "eefc69afb4a4e480515828d34069a8c7159c5c71b5db19f2c4a0924244757ba3"
+    },
+    {
       "path": ".github/workflows/desktop-e2e.yml",
       "sha256": "1e91ea9240f054e85160a461fd40bf92d1480709c0cf77ac41a41f0b4dbe815c"
     },
@@ -55,6 +59,10 @@
     {
       "path": ".github/workflows/publish-packages.yml",
       "sha256": "a1e47042ec795b4f9ebe00ebffceafa739709a41d88905bc35228eea9ea25a9b"
+    },
+    {
+      "path": ".github/workflows/publish-stable.yml",
+      "sha256": "0476ffae6b70b6d5313461fed00f4c40fc4c401dde49ee5d0ee3e680d7bdba75"
     },
     {
       "path": ".github/workflows/reconcile-production-packages.yml",
@@ -830,6 +838,24 @@
       "sha256": "7cb809eb1ef393bbc5a2636bd2b170fa2e07cb82a5abc8a5d8bf3b6c16444b71"
     },
     {
+      "workflow": ".github/workflows/deprecate-pre-1.0.yml",
+      "job": "deprecate",
+      "step": "Admit protected main",
+      "sha256": "998e6f15f48d9a3c324a267201fc87783b0cc31396ec6d2161a60b0b755f9c4b"
+    },
+    {
+      "workflow": ".github/workflows/deprecate-pre-1.0.yml",
+      "job": "deprecate",
+      "step": "Deprecate",
+      "sha256": "a1fccaa054353c5a8919d2a44d485b336a081085ee6be63f91ecf212bb870f86"
+    },
+    {
+      "workflow": ".github/workflows/deprecate-pre-1.0.yml",
+      "job": "deprecate",
+      "step": "Install dependencies",
+      "sha256": "d4d8249940209553aac5a8bfba42fe6d8023806d37f3042bfd080c271d851584"
+    },
+    {
       "workflow": ".github/workflows/desktop-e2e.yml",
       "job": "desktop-image",
       "step": "Install dependencies",
@@ -966,6 +992,30 @@
       "job": "publish",
       "step": "Verify registry dependency exports from packed and published packages",
       "sha256": "7986bbc8ce65680397fe7eaa11add0cbf0778bf62bf0e45fef71547b85d7dc18"
+    },
+    {
+      "workflow": ".github/workflows/publish-stable.yml",
+      "job": "publish",
+      "step": "Admit protected main source",
+      "sha256": "de29203de6f47635b85d8fcc7050fff78c23f587300a29c812d9e13e7de284bd"
+    },
+    {
+      "workflow": ".github/workflows/publish-stable.yml",
+      "job": "publish",
+      "step": "Install dependencies",
+      "sha256": "9f8fdb1dae5e8619e966aaed8cd149c52ed4a915491e98245fd2a69cdb9a2287"
+    },
+    {
+      "workflow": ".github/workflows/publish-stable.yml",
+      "job": "publish",
+      "step": "Publish stable versions",
+      "sha256": "30fefdb25cbf18ba00a9e7c5cc497de9e137cb590de3132aebba534dab6e2d47"
+    },
+    {
+      "workflow": ".github/workflows/publish-stable.yml",
+      "job": "publish",
+      "step": "Verify exact source",
+      "sha256": "d7a6ea98d18789bfa7cefb07dc532bd7d386b9a11c4f6ccf9e38c9c2d814c78a"
     },
     {
       "workflow": ".github/workflows/reconcile-production-packages.yml",

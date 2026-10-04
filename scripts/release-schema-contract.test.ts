@@ -2385,7 +2385,8 @@ describe("release schema contract", () => {
       "0606_pending_child_terminal_wake_repair.sql",
       "0607_connected_command_output_release.sql",
       "0608_receiver_execution_context.sql",
-      "0610_modal_native_live_origin.sql",
+      "0609_captured_command_output_priority.sql",
+      "0611_modal_native_live_origin.sql",
     ].filter((path) =>
       unfilteredSourceContract.migrations.some((migration) => migration.path === path),
     );

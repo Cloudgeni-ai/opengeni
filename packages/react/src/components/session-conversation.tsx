@@ -37,6 +37,7 @@ import {
 import type { UserMessageDisclosureLabels } from "./user-message-body";
 import { conversationTimeline } from "../conversation-timeline";
 import { cn } from "../lib/cn";
+import { SessionProxyScope, type SessionProxyBaseUrl } from "./session-proxy-scope";
 import { useErrorMessage } from "../lib/error-message";
 import {
   useHostTheme,
@@ -56,81 +57,94 @@ const DEFAULT_CONVERSATION_LABELS: SessionConversationLabels = {
   tryAgain: "Try again",
 };
 
-export type SessionConversationProps = ClientOverride & {
-  sessionId: string;
-  /** Host-owned artifact links, previews and other message presentation. */
-  renderMessageText?: MessageTimelineProps["renderMessageText"];
-  /**
-   * Open OpenGeni object links in agent replies (`artifact:`, `sandbox:`,
-   * editable artifacts, Sites). Asked first; by default retained files and
-   * sandbox files download only when the proxy explicitly enables them, while
-   * editable artifacts and Sites stay unavailable until the host resolves them.
-   */
-  resolveLink?: OpenGeniLinkResolver | undefined;
-  /**
-   * Open agent links to editable artifacts and Sites in a host viewer, for
-   * example `SessionArtifactViewer` mounted beside the conversation. Asked
-   * after `resolveLink`.
-   */
-  onOpenArtifact?: ((target: OpenGeniViewerTarget) => void) | undefined;
-  /**
-   * Inline previews for assistant `opengeni-site` / `opengeni-html` fences.
-   * Defaults to the OpenGeni preview (Site reads need the proxy's
-   * `artifacts` option); `false` shows the fence as code.
-   */
-  renderInteractiveBlock?: MessageTimelineProps["renderInteractiveBlock"] | false;
-  /** Product-specific tool-call renderers; defaults to the built-in registry. */
-  toolRegistry?: MessageTimelineProps["toolRegistry"];
-  /**
-   * Replace the "usage limit reached" row for an `allowance_exhausted`
-   * refusal, for example to link your own plan or admin page.
-   */
-  renderAllowanceExhausted?: MessageTimelineProps["renderAllowanceExhausted"];
-  /** Replace the words of the default "usage limit reached" row. */
-  allowanceExhaustedLabels?: MessageTimelineProps["allowanceExhaustedLabels"];
-  /**
-   * File attachments in the composer. Defaults to true; the attach control
-   * appears only when the deployment's client config enables file uploads.
-   */
-  attachments?: boolean | undefined;
-  /**
-   * Show the model/reasoning picker. End users of an embedded product rarely
-   * choose models, so it is hidden unless this is `true` or the client config
-   * reports `modelSelection: true` (`createSessionProxyHandler({ modelSelection: true })`).
-   */
-  modelPicker?: boolean | undefined;
-  /** Model-picker appearance only; visibility, policy and delivery remain owned here. */
-  modelPickerProps?: Pick<ModelPolicyPickerProps, "groupPresentation" | "messages"> | undefined;
-  /** Localized actions for already-sent user-message disclosure. */
-  userMessageDisclosureLabels?: UserMessageDisclosureLabels | undefined;
-  loadSkillReview?: HumanInputSurfaceProps["loadSkillReview"];
-  className?: string;
-  /** Defaults to filling the host. The host owns available height. */
-  height?: CSSProperties["height"];
-  /**
-   * Light or dark. Defaults to `auto`: follow the host page (an enclosing
-   * `data-og-theme`, `class="dark"`/`data-theme` on <html> or <body>, the
-   * host's `color-scheme`, then its background), not the OS setting alone.
-   */
-  theme?: HostThemePreference | undefined;
-  /**
-   * `host` (default) derives backgrounds and cards from the host background so
-   * the conversation blends in; `theme` uses the `--og-color-*` surface tokens
-   * as they are. Customized surface tokens are always kept.
-   */
-  surface?: HostSurfacePreference | undefined;
-  /** Conversation-owned copy (error actions). */
-  labels?: Partial<SessionConversationLabels> | undefined;
-  /** Presentation/custom controls only; queue and delivery wiring stay owned here. */
-  composerProps?: Omit<
-    ChatComposerProps,
-    "composer" | "effectiveControl" | "queuedAheadCount" | "attachments"
-  >;
-};
+export type SessionConversationProps = ClientOverride &
+  SessionProxyBaseUrl & {
+    sessionId: string;
+    /** Host-owned artifact links, previews and other message presentation. */
+    renderMessageText?: MessageTimelineProps["renderMessageText"];
+    /**
+     * Open OpenGeni object links in agent replies (`artifact:`, `sandbox:`,
+     * editable artifacts, Sites). Asked first; by default retained files and
+     * sandbox files download only when the proxy explicitly enables them, while
+     * editable artifacts and Sites stay unavailable until the host resolves them.
+     */
+    resolveLink?: OpenGeniLinkResolver | undefined;
+    /**
+     * Open agent links to editable artifacts and Sites in a host viewer, for
+     * example `SessionArtifactViewer` mounted beside the conversation. Asked
+     * after `resolveLink`.
+     */
+    onOpenArtifact?: ((target: OpenGeniViewerTarget) => void) | undefined;
+    /**
+     * Inline previews for assistant `opengeni-site` / `opengeni-html` fences.
+     * Defaults to the OpenGeni preview (Site reads need the proxy's
+     * `artifacts` option); `false` shows the fence as code.
+     */
+    renderInteractiveBlock?: MessageTimelineProps["renderInteractiveBlock"] | false;
+    /** Product-specific tool-call renderers; defaults to the built-in registry. */
+    toolRegistry?: MessageTimelineProps["toolRegistry"];
+    /**
+     * Replace the "usage limit reached" row for an `allowance_exhausted`
+     * refusal, for example to link your own plan or admin page.
+     */
+    renderAllowanceExhausted?: MessageTimelineProps["renderAllowanceExhausted"];
+    /** Replace the words of the default "usage limit reached" row. */
+    allowanceExhaustedLabels?: MessageTimelineProps["allowanceExhaustedLabels"];
+    /**
+     * File attachments in the composer. Defaults to true; the attach control
+     * appears only when the deployment's client config enables file uploads.
+     */
+    attachments?: boolean | undefined;
+    /**
+     * Show the model/reasoning picker. End users of an embedded product rarely
+     * choose models, so it is hidden unless this is `true` or the client config
+     * reports `modelSelection: true` (`createSessionProxyHandler({ modelSelection: true })`).
+     */
+    modelPicker?: boolean | undefined;
+    /** Model-picker appearance only; visibility, policy and delivery remain owned here. */
+    modelPickerProps?: Pick<ModelPolicyPickerProps, "groupPresentation" | "messages"> | undefined;
+    /** Localized actions for already-sent user-message disclosure. */
+    userMessageDisclosureLabels?: UserMessageDisclosureLabels | undefined;
+    loadSkillReview?: HumanInputSurfaceProps["loadSkillReview"];
+    className?: string;
+    /** Defaults to filling the host. The host owns available height. */
+    height?: CSSProperties["height"];
+    /**
+     * Light or dark. Defaults to `auto`: follow the host page (an enclosing
+     * `data-og-theme`, `class="dark"`/`data-theme` on <html> or <body>, the
+     * host's `color-scheme`, then its background), not the OS setting alone.
+     */
+    theme?: HostThemePreference | undefined;
+    /**
+     * `host` (default) derives backgrounds and cards from the host background so
+     * the conversation blends in; `theme` uses the `--og-color-*` surface tokens
+     * as they are. Customized surface tokens are always kept.
+     */
+    surface?: HostSurfacePreference | undefined;
+    /** Conversation-owned copy (error actions). */
+    labels?: Partial<SessionConversationLabels> | undefined;
+    /** Presentation/custom controls only; queue and delivery wiring stay owned here. */
+    composerProps?: Omit<
+      ChatComposerProps,
+      "composer" | "effectiveControl" | "queuedAheadCount" | "attachments"
+    >;
+  };
 
 /** Complete existing-session conversation. Uses the provider's normal SDK client
- * (including Site clients), one shared event feed, and authoritative queue state. */
-export function SessionConversation(props: SessionConversationProps) {
+ * (including Site clients), one shared event feed, and authoritative queue state.
+ * `<SessionConversation baseUrl="/api/opengeni" sessionId={id} />` needs no
+ * provider: it talks to your session proxy and its resolved workspace. */
+export function SessionConversation({ baseUrl, ...props }: SessionConversationProps) {
+  if (baseUrl === undefined) return <RetryingConversation {...props} />;
+  const { client: _client, workspaceId, ...rest } = props;
+  return (
+    <SessionProxyScope baseUrl={baseUrl} workspaceId={workspaceId}>
+      <RetryingConversation {...rest} />
+    </SessionProxyScope>
+  );
+}
+
+function RetryingConversation(props: Omit<SessionConversationProps, "baseUrl">) {
   // A failed initial load retries by remounting the whole conversation.
   const [attempt, setAttempt] = useState(0);
   return (

@@ -228,7 +228,7 @@ function workspaceProviderPayerSummary(model: ClientModel): string {
   if (model.provider === "workspace-anthropic")
     return "Billed to the workspace Anthropic API account";
   if (model.provider === "workspace-claude-subscription")
-    return "Uses the workspace Claude subscription · no OpenGeni credits";
+    return "Uses the workspace Claude subscription · no Opengeni credits";
   if (model.provider === "workspace-openrouter") {
     return "Billed to the workspace OpenRouter account";
   }
@@ -242,7 +242,7 @@ function organizationProviderPayerSummary(model: ClientModel): string {
   if (model.provider === "organization-anthropic")
     return "Billed to the organization Anthropic API account";
   if (model.provider === "organization-claude-subscription")
-    return "Uses the connected Claude subscription · no OpenGeni credits";
+    return "Uses the connected Claude subscription · no Opengeni credits";
   if (model.provider === "organization-openrouter") {
     return "Billed to the organization OpenRouter account";
   }

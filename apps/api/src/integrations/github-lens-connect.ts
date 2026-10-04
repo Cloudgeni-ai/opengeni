@@ -11,7 +11,7 @@ import { HTTPException } from "hono/http-exception";
 
 export async function requireGitHubLensConnect(deps: ApiRouteDeps) {
   if (deps.settings.sandboxBackend === "selfhosted")
-    throw new HTTPException(409, { message: "OpenGeni Lens requires managed compute" });
+    throw new HTTPException(409, { message: "Opengeni Lens requires managed compute" });
   if (!environmentsEncryptionKeyBytes(deps.settings))
     throw new HTTPException(503, { message: "Lens secret encryption is unavailable" });
   return { template: PR_REVIEW_AUTOMATION_SETUP };

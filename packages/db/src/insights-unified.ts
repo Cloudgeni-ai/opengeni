@@ -121,10 +121,41 @@ function rows<T>(value: unknown): T[] {
 }
 
 function sum(field: string, payer?: string): SQL {
-  const selected = sql`(payload->'m'->>${field})::bigint`;
+  const selected = sql`${sql.identifier(field)}`;
   return payer === undefined
     ? sql`coalesce(sum(${selected}),0)`
-    : sql`coalesce(sum(${selected}) filter(where payload->>'payer'=${payer}),0)`;
+    : sql`coalesce(sum(${selected}) filter(where payer=${payer}),0)`;
+}
+
+const USAGE_MEASURE_FIELDS = [
+  "calls",
+  "tokenKnownCalls",
+  "cacheKnownCalls",
+  "cacheWriteKnownCalls",
+  "listClassKnownCalls",
+  "uncachedInput",
+  "cacheRead",
+  "cacheWrite",
+  "output",
+  "reasoning",
+  "chargedMicros",
+  "listMicros",
+  "pricedCalls",
+  "listApproxCalls",
+  "listUncachedInput",
+  "listCacheRead",
+  "listCacheWrite",
+  "listOutput",
+] as const;
+
+/** Decode once before repeated aggregates; intermediate rows retain only needed columns. */
+function usageMeasureColumns(): SQL {
+  return sql.join(
+    USAGE_MEASURE_FIELDS.map(
+      (field) => sql`(payload->'m'->>${field})::bigint as ${sql.identifier(field)}`,
+    ),
+    sql`, `,
+  );
 }
 
 function tokens(): SQL {
@@ -215,6 +246,23 @@ export async function readInsightsUsage(
   const window = insightsUsageWindow(query.range, input.now);
   const group = grouping(query.groupBy);
   const queryJson = JSON.stringify(query);
+  // The capability already masks hidden identities. Do not call a SQL function
+  // once per fact when the request has no identity/dimension predicates.
+  const filteredQuery = Object.keys(query).some((key) =>
+    [
+      "workspaceId",
+      "provider",
+      "model",
+      "payer",
+      "projectId",
+      "person",
+      "rootSessionId",
+      "scheduleId",
+    ].includes(key),
+  );
+  const filter = filteredQuery
+    ? sql`opengeni_private.insights_usage_filter(payload,${queryJson}::jsonb)`
+    : sql`true`;
   const details = sql`array[${sql.join(
     (input.detailsWorkspaceIds ?? []).map((id) => sql`${id}::uuid`),
     sql`, `,
@@ -226,31 +274,40 @@ export async function readInsightsUsage(
   ) => sql`opengeni_private.insights_scoped_usage_rows(
     ${input.accountId}::uuid,${input.workspaceId}::uuid,${since.toISOString()}::timestamptz,
     ${until.toISOString()}::timestamptz,${bucket}::text,${details},${input.detailsSharedWorkspaces === true}::boolean)`;
-  const payload = await withRlsContext(
+  const payload: Record<string, unknown> = await withRlsContext(
     db,
     { accountId: input.accountId, workspaceId: input.workspaceId },
     async (scoped) => {
       await scoped.execute(
         sql`select set_config('statement_timeout','10s',true),set_config('jit','off',true)`,
       );
+      // Bound each independent window separately on the same scoped transaction.
+      // Combining both raw scans in one statement exhausted its timeout before
+      // the current-period dashboard could finish at staging's data volume.
+      const [prior] = rows<{ prior: unknown }>(
+        await scoped.execute(sql`
+        select case when ${sum("calls")}>0 or ${sum("chargedMicros")}>0 or ${sum("listMicros")}>0
+          then ${measures()} end as prior
+        from(select ${usageMeasureColumns()},payload->>'payer' as payer
+          from ${source(window.priorSince, window.priorUntil, "day")} where ${filter}) prior_filtered`),
+      );
       const result = await scoped.execute(sql`
       with current_rows as materialized(select payload from ${source(window.since, window.until, window.bucket)}),
-      prior_rows as materialized(select payload from ${source(window.priorSince, window.priorUntil, "day")}),
-      filtered as materialized(select payload from current_rows where opengeni_private.insights_usage_filter(payload,${queryJson}::jsonb)),
-      prior_filtered as materialized(select payload from prior_rows where opengeni_private.insights_usage_filter(payload,${queryJson}::jsonb)),
-      categorized as materialized(select payload,${group.key} as key,${group.kind} as kind,${group.label} as label,
+      filtered as not materialized(select payload from current_rows where ${filter}),
+      categorized as materialized(select ${usageMeasureColumns()},payload->>'payer' as payer,
+        ${group.key} as key,${group.kind} as kind,${group.label} as label,
+        case when payload->>'kind'='item' then payload->>'provider' end as provider,
+        case when payload->>'kind'='item' then payload->>'model' end as model,
+        payload->>'workspaceId' as workspace_id,coalesce((payload->>'you')::boolean,false) as you,
         date_trunc(${window.bucket},(payload->>'occurredAt')::timestamptz at time zone 'UTC') at time zone 'UTC' as bucket
         from filtered),
       group_rows as materialized(select key,max(kind) as kind,max(label) as label,${measures()} as measures,
-        max(payload->>'provider') filter(where payload->>'kind'='item') as provider,
-        max(payload->>'model') filter(where payload->>'kind'='item') as model,
-        max(payload->>'workspaceId') as workspace_id,
-        bool_or(coalesce((payload->>'you')::boolean,false)) as you
+        max(provider) as provider,max(model) as model,max(workspace_id) as workspace_id,bool_or(you) as you
         from categorized group by key),
       ranked as materialized(select *,row_number() over(partition by kind in ('private','personal','deleted','restricted')
         order by (measures->>'chargedMicros')::bigint+(measures->>'listMicros')::bigint desc,
         (measures->>'calls')::bigint desc,key) as rank from group_rows),
-      tail as materialized(select c.payload from categorized c join ranked r using(key)
+      tail as materialized(select c.* from categorized c join ranked r using(key)
         where r.kind not in ('private','personal','deleted','restricted') and r.rank>${query.limit}),
       selected_groups as (select key,kind,label,measures,provider,model,workspace_id,you from ranked
         where kind in ('private','personal','deleted','restricted') or rank<=${query.limit}
@@ -263,12 +320,12 @@ export async function readInsightsUsage(
       points as (select generate_series(date_trunc(${window.bucket},${window.since.toISOString()}::timestamptz at time zone 'UTC') at time zone 'UTC',
         ${window.until.toISOString()}::timestamptz-interval '1 microsecond',
         case when ${window.bucket}='hour' then interval '1 hour' else interval '1 day' end) as start),
-      zero as(select ${measures()} as measures from filtered where false),
-      visible as materialized(select payload from current_rows where payload->>'kind'='item')
+      zero as(select ${measures()} as measures from categorized where false),
+      visible as materialized(select distinct payload-array['m','occurredAt','recordedAt','rootSessionId','rootTitle'] as payload
+        from current_rows where payload->>'kind'='item')
       select jsonb_build_object(
-        'totals',(select ${measures()} from filtered),
-        'prior',(select case when ${sum("calls")}>0 or ${sum("chargedMicros")}>0 or ${sum("listMicros")}>0 then ${measures()} end from prior_filtered),
-        'dataThrough',(select max((payload->>'recordedAt')::timestamptz) from visible),
+        'totals',(select ${measures()} from categorized),
+        'dataThrough',(select max((payload->>'recordedAt')::timestamptz) from current_rows where payload->>'kind'='item'),
         'groupCount',(select count(*) from group_rows),'groupsTruncated',exists(select 1 from tail),
         'groups',coalesce((select jsonb_agg(jsonb_build_object('key',key,'kind',kind,'label',label,'measures',measures)
           ||jsonb_strip_nulls(jsonb_build_object(
@@ -296,7 +353,10 @@ export async function readInsightsUsage(
           'schedules',coalesce((select jsonb_agg(jsonb_build_object('id',id,'name',name) order by name,id)
             from(select distinct payload->>'scheduleId' as id,payload->>'scheduleName' as name from visible where payload->>'scheduleId' is not null and payload->>'scheduleName' is not null) v),'[]'::jsonb))
       ) as payload`);
-      return rows<{ payload: Record<string, unknown> }>(result)[0]!.payload;
+      return {
+        ...rows<{ payload: Record<string, unknown> }>(result)[0]!.payload,
+        prior: prior!.prior,
+      };
     },
   );
   numericTree(payload);

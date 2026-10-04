@@ -205,7 +205,7 @@ export function InstructionsTab({
                     className="pointer-coarse:h-11"
                   >
                     <SparklesIcon aria-hidden="true" />
-                    Ask OpenGeni…
+                    Ask Opengeni…
                   </Button>
                   {showHistory && revisions.length > 0 && state !== "empty" ? (
                     <Button
@@ -266,7 +266,7 @@ export function InstructionsTab({
           }
         }}
         size="sm"
-        title="Ask OpenGeni to change the instructions"
+        title="Ask Opengeni to change the instructions"
         description="It starts a chat that proposes the change. You review it before it applies."
         submitLabel="Start chat"
         pendingLabel="Starting…"

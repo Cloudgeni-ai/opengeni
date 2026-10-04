@@ -259,7 +259,7 @@ export function InstructionsTab({
       <InlineHelp>
         Every prompt in {workspaceName} starts with who the agent is, then your organization, then
         these instructions, then anything set for one chat. Instructions take priority over
-        OpenGeni's default way of working, but never over its safety rules or how it runs tools.
+        Opengeni's default way of working, but never over its safety rules or how it runs tools.
       </InlineHelp>
       <InlineHelp>
         These are added to every chat and schedule in {workspaceName}, before anything agents look
@@ -511,7 +511,7 @@ function AgentIdentityRow({ workspaceId }: { workspaceId: string }) {
       meta={[
         resolved.identity
           ? firstLine(resolved.identity)
-          : "OpenGeni's general assistant (the default)",
+          : "Opengeni's general assistant (the default)",
         resolved.source === "legacy_agent_instructions"
           ? "from this workspace's earlier custom persona"
           : null,

@@ -1551,6 +1551,7 @@ function projectPublicTelemetryAttributes(attributes: Attributes): Attributes {
       ...projectStartupDependencyAttributes(attributes),
       ...projectPublicChannelADiagnosticAttributes(attributes),
       ...projectApiFatalDiagnosticAttributes(attributes),
+      ...projectHttpDiagnosticAttributes(attributes),
       ...projectSnapshotDiagnosticAttributes(attributes),
       ...projectKnowledgeIndexDiagnosticAttributes(attributes),
       ...projectPublicDiagnosticAttributes(attributes),
@@ -1574,6 +1575,46 @@ function projectApiFatalDiagnosticAttributes(attributes: Attributes): Attributes
     ...(typeof phase === "string" && PUBLIC_API_FATAL_PHASES.has(phase) ? { phase } : {}),
     ...(typeof reasonKind === "string" && PUBLIC_API_FATAL_REASON_KINDS.has(reasonKind)
       ? { reasonKind }
+      : {}),
+  };
+}
+
+function projectHttpDiagnosticAttributes(attributes: Attributes): Attributes {
+  if (attributes.errorClass !== "HttpOperationError") return {};
+  const method = attributes.method;
+  const route = attributes.route;
+  const reasonKind = attributes.reasonKind;
+  const diagnosticId = attributes.diagnosticId;
+  return {
+    ...(typeof method === "string" &&
+    ["GET", "HEAD", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"].includes(method)
+      ? { method }
+      : {}),
+    // Callers supply routeLabel(), not a URL, query, or concrete tenant path.
+    ...(typeof route === "string" &&
+    route.length <= 256 &&
+    /^\/(?:[A-Za-z0-9_-]+|:[A-Za-z][A-Za-z0-9_]*)(?:\/(?:[A-Za-z0-9_-]+|:[A-Za-z][A-Za-z0-9_]*))*$/.test(
+      route,
+    )
+      ? { route }
+      : {}),
+    ...(typeof reasonKind === "string" &&
+    [
+      "Error",
+      "TypeError",
+      "RangeError",
+      "AggregateError",
+      "PostgresError",
+      "DrizzleQueryError",
+      "SessionEventPersistenceError",
+      "SandboxWorkspaceMutationFencedError",
+      "Response",
+    ].includes(reasonKind)
+      ? { reasonKind }
+      : {}),
+    ...(typeof diagnosticId === "string" &&
+    /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(diagnosticId)
+      ? { diagnosticId }
       : {}),
   };
 }

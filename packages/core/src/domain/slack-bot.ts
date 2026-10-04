@@ -77,12 +77,12 @@ export async function requireOpenGeniSlackBotConnection(
   const connection = await getConnectionMetadata(db, workspaceId, connectionId, null);
   if (!connection || !isOpenGeniSlackBotConnection(connection)) {
     throw new HTTPException(422, {
-      message: "slackBotConnectionId must reference an OpenGeni Slack bot connection",
+      message: "slackBotConnectionId must reference an Opengeni Slack bot connection",
     });
   }
   if (connection.status !== "active") {
     throw new HTTPException(422, {
-      message: `OpenGeni Slack bot connection is not active (${connection.status})`,
+      message: `Opengeni Slack bot connection is not active (${connection.status})`,
     });
   }
   return connection;
