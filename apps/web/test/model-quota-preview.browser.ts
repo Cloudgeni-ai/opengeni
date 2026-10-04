@@ -15,9 +15,9 @@ page.on("pageerror", (error) => errors.push(error.message));
 const base = "http://127.0.0.1:4331/test/model-quota-preview.html";
 try {
   for (const [state, headline] of [
-    ["recovering", "This model is busy"],
-    ["unavailable", "The model is temporarily unavailable"],
-    ["rate-limit", "This model is busy. Automatic retries stopped"],
+    ["recovering", "High demand right now"],
+    ["unavailable", "This model is temporarily unavailable"],
+    ["rate-limit", "This model is throttled due to high demand. Choose another model"],
     ["quota", "The model provider's usage quota for this model is used up"],
     ["daily", "This model's daily limit has been reached"],
     ["credits", "This workspace is out of Opengeni credits"],
@@ -33,8 +33,11 @@ try {
     console.log(`PASS ${state}: desktop and phone`);
   }
   await page.goto(`${base}?state=recovering`);
-  await page.getByText("Your request is saved.", { exact: false }).waitFor();
+  await page.getByText("Your message is saved", { exact: false }).waitFor();
   assert.equal(await page.getByRole("button", { name: "Retry", exact: true }).count(), 0);
+  await page.getByRole("button", { name: "Choose model", exact: true }).click();
+  await page.getByTestId("model-picker-choice-gpt-6-sol").waitFor();
+  await page.keyboard.press("Escape");
   await page.getByRole("button", { name: "Pause preview", exact: true }).click();
   assert.equal(await page.locator("[data-model-recovery-notice]").count(), 0);
   await page.getByRole("button", { name: "Unpause preview", exact: true }).click();

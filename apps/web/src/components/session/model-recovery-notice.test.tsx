@@ -23,14 +23,37 @@ test("live status explains saved work without promising timing or creating anoth
   document.body.append(container);
   root = createRoot(container);
   await act(async () => root!.render(<ModelRecoveryNotice recovery={{ kind: "rate_limited" }} />));
-  expect(container.querySelector('[role="status"]')?.textContent).toContain("This model is busy");
-  expect(container.textContent).toContain("Your request is saved. We’ll retry automatically.");
+  expect(container.querySelector('[role="status"]')?.textContent).toContain(
+    "High demand right now",
+  );
+  expect(container.textContent).toContain(
+    "Some models are being throttled. Your message is saved and will retry automatically, or choose another model.",
+  );
   expect(container.textContent).not.toMatch(/next retry at|reset|\b\d{1,2}:\d{2}\b/i);
   expect(container.querySelector("button")).toBeNull();
   expect(container.querySelector("details")).toBeNull();
   await act(async () => root!.render(<ModelRecoveryNotice recovery={{ kind: "unavailable" }} />));
-  expect(container.textContent).toContain("The model is temporarily unavailable");
-  expect(container.textContent).toContain("Your request is saved. We’ll retry automatically.");
+  expect(container.textContent).toContain("This model is temporarily unavailable");
+  expect(container.textContent).toContain(
+    "Your message is saved and will retry automatically, or choose another model.",
+  );
+  expect(container.textContent).not.toContain("throttled");
   expect(container.textContent).not.toMatch(/next retry at|reset|\b\d{1,2}:\d{2}\b/i);
   expect(container.textContent).not.toContain("Waiting for the next retry.");
+});
+
+test("Choose model opens the existing picker and is the only action", async () => {
+  const container = document.createElement("div");
+  document.body.append(container);
+  root = createRoot(container);
+  let opened = 0;
+  await act(async () =>
+    root!.render(
+      <ModelRecoveryNotice recovery={{ kind: "rate_limited" }} onChooseModel={() => opened++} />,
+    ),
+  );
+  const buttons = [...container.querySelectorAll("button")];
+  expect(buttons.map((button) => button.textContent)).toEqual(["Choose model"]);
+  await act(async () => buttons[0]!.click());
+  expect(opened).toBe(1);
 });

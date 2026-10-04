@@ -109,7 +109,7 @@ test("a bare HTTP status classifies only 401, 402, 403 and 429", () => {
     retryUnhelpful: false,
   });
   expect(failedSessionCopy({ ...summary, reason: "429 Too Many Requests" }).reason).toBe(
-    "This model is busy. Automatic retries stopped; try again shortly.",
+    "This model is throttled due to high demand. Try again in a few minutes.",
   );
   // Other statuses say nothing about the cause: keep the evidence in Details.
   for (const reason of [
@@ -146,22 +146,33 @@ test("provider rate limits separate daily limits and quota from transient thrott
     retryUnhelpful: false,
   });
   expect(failedSessionCopy(coded("429 Too Many Requests"))).toMatchObject({
-    reason: "This model is busy. Automatic retries stopped; try again shortly.",
+    reason: "This model is throttled due to high demand. Try again in a few minutes.",
     retryUnhelpful: false,
   });
 });
 
 test("temporary model capacity failures offer the existing model picker, without promising a reset", () => {
-  for (const [failureCode, message] of [
-    ["provider_rate_limited", "This model is busy. Automatic retries stopped; try again shortly."],
-    ["provider_unavailable", "The model is temporarily unavailable. Try again shortly."],
+  for (const [failureCode, message, chooseMessage] of [
+    [
+      "provider_rate_limited",
+      "This model is throttled due to high demand. Try again in a few minutes.",
+      "This model is throttled due to high demand. Choose another model to continue, or try again in a few minutes.",
+    ],
+    [
+      "provider_unavailable",
+      "This model is temporarily unavailable. Try again in a few minutes.",
+      "This model is temporarily unavailable. Choose another model to continue, or try again in a few minutes.",
+    ],
   ] as const) {
     const failure = { ...summary, reason: "Temporary provider failure", failureCode };
-    expect(failedSessionCopy(failure, false, false, true).reason).toBe(
-      `${message} Choose another model below.`,
-    );
+    expect(failedSessionCopy(failure, false, false, true)).toMatchObject({
+      reason: chooseMessage,
+      chooseModel: true,
+    });
     expect(failedSessionCopy(failure, false, true, true).reason).toBe(message);
+    expect(failedSessionCopy(failure, false, true, true).chooseModel).toBeUndefined();
     expect(failedSessionCopy(failure, false, false, false).reason).toBe(message);
+    expect(failedSessionCopy(failure, false, false, false).chooseModel).toBeUndefined();
     expect(failedSessionCopy(failure, true, false, true).reason).toBe(
       "This workspace is out of Opengeni credits.",
     );

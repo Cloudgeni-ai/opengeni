@@ -2806,6 +2806,7 @@ function SessionChatPane(props: {
             }
             canChooseModel={canChooseRecoveryModel}
             hasModelPicker={hasComposerPolicy}
+            onChooseModel={() => setModelPickerSession(props.session.id)}
             freeModel={isDeploymentFreeModel(modelCatalog.rows, props.session.model)}
             subscriptions={connectableSubscriptions(context.clientConfig.models)}
             modelChanged={Boolean(composerPolicy && composerPolicy.model !== props.session.model)}
@@ -3081,7 +3082,16 @@ function SessionChatPane(props: {
         </div>
       ) : null}
 
-      {modelRecovery ? <ModelRecoveryNotice recovery={modelRecovery} /> : null}
+      {modelRecovery ? (
+        <ModelRecoveryNotice
+          recovery={modelRecovery}
+          onChooseModel={
+            canControlSession && canChooseRecoveryModel
+              ? () => setModelPickerSession(props.session.id)
+              : undefined
+          }
+        />
+      ) : null}
 
       {((props.session.inputWait && props.session.status === "idle") ||
         (props.session.status === "queued" && !props.session.activeTurnId)) &&
