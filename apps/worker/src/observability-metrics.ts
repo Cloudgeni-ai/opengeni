@@ -1629,6 +1629,7 @@ export type TurnStartupPhase =
   | "post_tool_preparation"
   | "agent_construction"
   | "post_agent_preparation"
+  | "programmatic_operation_recovery"
   | "file_materialization"
   | "history_preparation"
   | "history_system_update_load"
