@@ -340,13 +340,13 @@ const JUMP_TO_LATEST_CATCHUP_DEBT_PX = 240;
 const QUESTION_NAV_MARGIN_PX = 12;
 /**
  * Floating timeline navigation: two identical small round arrow buttons at fixed
- * spots, centered on the conversation. Back to your message floats just below
- * the pinned work-header strip (32px, 44px on coarse pointers) so that strip
- * stays a full-width target; Jump to latest floats just above the bottom edge.
- * They never measure or
- * dodge the content beneath them (floating over a sliver of text is fine), so
- * they cannot wander as rows stream in or the host resizes. Coarse pointers get
- * a larger invisible hit area instead of a larger button.
+ * spots, centered on the conversation. Back to your message floats 12px below
+ * the top edge, or just below an expanded work-header strip while that strip is
+ * pinned (32px, 44px on coarse pointers) so the strip stays a full-width
+ * target. Jump to latest floats 12px above the bottom edge. They never dodge
+ * the content beneath them (floating over a sliver of text is fine), so they
+ * cannot wander as rows stream in or the host resizes. Coarse pointers get a
+ * larger invisible hit area instead of a larger button.
  */
 const NAV_BUTTON_CLASS =
   "pointer-events-auto relative inline-flex size-8 items-center justify-center rounded-full border border-og-border bg-og-surface-3/90 text-og-fg-muted shadow-og-md backdrop-blur hover:border-og-border-strong hover:text-og-fg focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-og-accent pointer-coarse:before:absolute pointer-coarse:before:-inset-1.5 pointer-coarse:before:content-['']";
@@ -489,7 +489,11 @@ function contentTopOf(node: HTMLElement, groupKey: string): number | null {
 }
 
 /** The question the reader is inside of, once its start has scrolled out of view. */
-type QuestionNav = { key: string };
+/**
+ * `belowHeader`: an expanded work header is pinned to the top of the scrollport,
+ * so the up arrow sits just below that strip instead of covering it.
+ */
+type QuestionNav = { key: string; belowHeader: boolean };
 
 /** How far a question's start must be above the viewport before navigation shows. */
 const QUESTION_NAV_HIDDEN_PX = 24;
@@ -509,11 +513,22 @@ function readQuestionNav(node: HTMLElement): QuestionNav | null {
   if (bounds.top >= view.top - QUESTION_NAV_HIDDEN_PX || bounds.bottom > view.top) {
     return null;
   }
-  return { key };
+  return { key, belowHeader: workHeaderPinned(node, view) };
+}
+
+/** True while an expanded outer work header is stuck to the scrollport's top edge. */
+function workHeaderPinned(node: HTMLElement, view: DOMRect): boolean {
+  for (const header of node.querySelectorAll<HTMLElement>(
+    '[data-og-work-header="outer"][data-state="open"]',
+  )) {
+    const box = header.getBoundingClientRect();
+    if (Math.abs(box.top - view.top) <= 1 && box.bottom > view.top) return true;
+  }
+  return false;
 }
 
 function sameQuestionNav(a: QuestionNav | null, b: QuestionNav | null): boolean {
-  return a === b || (!!a && !!b && a.key === b.key);
+  return a === b || (!!a && !!b && a.key === b.key && a.belowHeader === b.belowHeader);
 }
 
 /** Escape a value for use inside a CSS attribute selector. */
@@ -2596,7 +2611,10 @@ export function MessageTimeline({
 
                       <div
                         data-og-timeline-nav="top"
-                        className="pointer-events-none absolute inset-x-0 top-10 z-10 flex justify-center pointer-coarse:top-13"
+                        className={cn(
+                          "pointer-events-none absolute inset-x-0 z-10 flex justify-center",
+                          questionNav?.belowHeader ? "top-10 pointer-coarse:top-13" : "top-3",
+                        )}
                       >
                         <AnimatePresence>
                           {questionNav ? (

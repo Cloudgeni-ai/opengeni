@@ -52,7 +52,10 @@ test("statement cancellation maps to a bounded friendly error without SQL or sec
     insightsWithFriendlyTimeout(async () => {
       throw { cause: { code: "57014", message: "private SQL parameters" } };
     }),
-  ).rejects.toMatchObject({ status: 408, message: "This range has too much data right now. Try a shorter range." });
+  ).rejects.toMatchObject({
+    status: 408,
+    message: "This range has too much data right now. Try a shorter range.",
+  });
   await expect(
     insightsWithFriendlyTimeout(async () => {
       throw new Error("unrelated failure");
