@@ -7252,6 +7252,12 @@ export const WorkspaceRealtimeModelCatalogItem = z.object({
   description: z.string().min(1),
   available: z.boolean(),
   unavailableReason: z.string().nullable(),
+  /**
+   * Machine-readable reason when unavailable. Credit refusals use the same
+   * codes as voice input (`insufficient_credits`, `allowance_exhausted`,
+   * `monthly_model_cost_limit`).
+   */
+  unavailableCode: z.string().min(1).max(64).nullable().optional(),
   recommended: z.boolean(),
 });
 export type WorkspaceRealtimeModelCatalogItem = z.infer<typeof WorkspaceRealtimeModelCatalogItem>;
@@ -7307,9 +7313,21 @@ export const EndSessionRealtimeRequest = RenewSessionRealtimeRequest.extend({
 });
 export type EndSessionRealtimeRequest = z.infer<typeof EndSessionRealtimeRequest>;
 
+/**
+ * Server instruction to end a live call now. Deployment-funded voice returns
+ * it from a heartbeat when credits run out; the lease is then no longer
+ * extended, so the client should drain and end the call gracefully.
+ */
+export const SessionRealtimeStopInstruction = z.object({
+  code: z.string().min(1).max(64),
+  message: z.string().min(1).max(512),
+});
+export type SessionRealtimeStopInstruction = z.infer<typeof SessionRealtimeStopInstruction>;
+
 export const SessionRealtimeMutationResponse = z.object({
   mode: SessionRealtimeMode,
   replay: z.boolean(),
+  stop: SessionRealtimeStopInstruction.optional(),
 });
 export type SessionRealtimeMutationResponse = z.infer<typeof SessionRealtimeMutationResponse>;
 

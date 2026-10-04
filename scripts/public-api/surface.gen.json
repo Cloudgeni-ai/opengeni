@@ -21789,7 +21789,8 @@
       "shape": {
         "$": "object",
         "$.mode": "ref(SessionRealtimeMode)!",
-        "$.replay": "boolean!"
+        "$.replay": "boolean!",
+        "$.stop": "ref(SessionRealtimeStopInstruction)?"
       }
     },
     "SessionRealtimeState": {
@@ -21798,6 +21799,16 @@
       ],
       "shape": {
         "$": "enum=[\"\\\"active\\\"\",\"\\\"ended\\\"\"]"
+      }
+    },
+    "SessionRealtimeStopInstruction": {
+      "io": [
+        "output"
+      ],
+      "shape": {
+        "$": "object",
+        "$.code": "string!",
+        "$.message": "string!"
       }
     },
     "SessionRetryRequest": {
@@ -25647,6 +25658,7 @@
         "$.label": "string!",
         "$.provider": "enum!=[\"\\\"Connected Codex\\\"\",\"\\\"Connected SuperGrok\\\"\",\"\\\"OpenGeni\\\"\",\"\\\"Your Gateway\\\"\"]",
         "$.recommended": "boolean!",
+        "$.unavailableCode": "string? null",
         "$.unavailableReason": "string! null"
       }
     },
@@ -26304,6 +26316,8 @@
       "CodexRealtimeMicrophoneState": "type",
       "CodexRealtimeNegotiator": "type",
       "CodexRealtimeOwnerStorage": "type",
+      "codexRealtimeRefusal": "value",
+      "CodexRealtimeRefusal": "type",
       "CodexRealtimeV3Bridge": "type",
       "CodexRealtimeV3BridgeOptions": "type",
       "CodexRealtimeV3BridgeSnapshot": "type",
@@ -27264,6 +27278,7 @@
       "SessionRealtimeModel": "type",
       "SessionRealtimeMutationResponse": "type",
       "SessionRealtimeState": "type",
+      "SessionRealtimeStopInstruction": "type",
       "SessionRetryRequest": "type",
       "SessionRetryResponse": "type",
       "SessionStatus": "type",
@@ -27826,6 +27841,8 @@
       "CodexRealtimeDiagnosticKind": "type",
       "CodexRealtimeMicrophoneState": "type",
       "CodexRealtimeOwnerStorage": "type",
+      "codexRealtimeRefusal": "value",
+      "CodexRealtimeRefusal": "type",
       "createCodexRealtimeController": "value",
       "CreateCodexRealtimeControllerOptions": "type",
       "hasStoredSessionRealtimeOwnerProof": "value",

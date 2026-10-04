@@ -374,6 +374,30 @@ Diagnostics distinguish permission, device, autoplay, negotiation, rotation,
 reconnect, lost-owner, and terminal-stop transitions without SDP, credentials,
 audio, or transcript bodies.
 
+Deployment-funded live voice (hosted Azure GPT Live and the Opengeni-managed
+AI Gateway models) is credit-gated and time-metered; connected Codex, SuperGrok,
+and a workspace's own Gateway key are paid by the workspace and are not.
+`packages/core/src/domain/realtime-voice-billing.ts` owns it. While credit
+billing is active (`OPENGENI_BILLING_MODE=stripe` or
+`OPENGENI_USAGE_LIMITS_MODE=managed`) such a model is offered and startable only
+when configured, priced (`OPENGENI_AZURE_LIVE_PRICING_JSON`,
+`OPENGENI_AI_GATEWAY_REALTIME_PRICING_JSON`), and the account has spendable
+credits. Begin and every provider connection mint run the same admission and
+refusal codes as voice input (`insufficient_credits`, `allowance_exhausted`,
+`monthly_model_cost_limit`); an unpriced or unconfigured model is
+`realtime_voice_unavailable`. Metering uses only server-observed time: each
+issued connection is billed per started minute from its claim until it closed,
+bounded by the owner's last heartbeat (an expired lease is never billed past
+it) or the owner-proven end. Each (connection, minute) is one idempotent
+`model.cost` receipt plus one post-use debit, so Insights shows it. Settlement
+runs at mint, every heartbeat, and end. When the balance is no longer positive
+at a heartbeat, the server stops extending the lease and returns a `stop`
+instruction; the browser drains final speech and ends the call, and an ignoring
+client lapses within the remaining lease. A balance may end at most about one
+minute negative. The server cannot cut the provider media itself: a client that
+stops heartbeating keeps its provider connection open unbilled until the
+provider's own session limit.
+
 Codex persists provider `turn.done` events as complete role-bearing turns;
 its live transcript deltas remain non-authoritative. Azure GPT Live instead
 provides timed transcript fragments. Its adapter preserves their observed order

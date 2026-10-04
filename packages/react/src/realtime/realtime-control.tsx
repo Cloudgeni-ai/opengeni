@@ -63,8 +63,25 @@ export type RealtimeModelOption = {
   description: string;
   available: boolean;
   unavailableReason: string | null;
+  /** Machine-readable reason, e.g. `insufficient_credits` (same codes as voice input). */
+  unavailableCode?: string | null | undefined;
   recommended: boolean;
 };
+
+/** Short status label for a credit/availability refusal (shared with the model menu). */
+function realtimeRefusalLabel(code: string | null | undefined): string | null {
+  switch (code) {
+    case "insufficient_credits":
+      return "Out of credits";
+    case "allowance_exhausted":
+    case "monthly_model_cost_limit":
+      return "Usage limit reached";
+    case "realtime_voice_unavailable":
+      return "Voice unavailable";
+    default:
+      return null;
+  }
+}
 
 const CODEX_LIVE_MODEL: RealtimeModelOption = {
   id: "gpt-live-1-boulder-alpha",
@@ -822,6 +839,7 @@ export function RealtimeVoiceControl(props: {
     props.canStart,
     props.admissionBlocker ?? null,
     selectedModel.label,
+    selectedModel.unavailableCode ?? null,
   );
   const modeOwned = props.snapshot.mode?.state === "active";
   const retryConnection =
@@ -1333,6 +1351,7 @@ function statusContent(
   canStart: boolean,
   admissionBlocker: string | null,
   modelLabel: string,
+  unavailableCode: string | null = null,
 ): { phase: RealtimeVisualPhase; label: string; detail: string } {
   if (snapshot.audibleOutput === "blocked" && !snapshot.outputMuted) {
     return {
@@ -1379,6 +1398,13 @@ function statusContent(
         detail: "Return to the browser that started it, or wait for that connection to expire.",
       };
     case "error":
+      if (snapshot.refusal) {
+        return {
+          phase: "unavailable",
+          label: realtimeRefusalLabel(snapshot.refusal.code) ?? "Voice unavailable",
+          detail: snapshot.refusal.message,
+        };
+      }
       return {
         phase: "error",
         label: "Voice unavailable",
@@ -1388,7 +1414,7 @@ function statusContent(
       if (!modelAvailable) {
         return {
           phase: "unavailable",
-          label: "Voice model unavailable",
+          label: realtimeRefusalLabel(unavailableCode) ?? "Voice model unavailable",
           detail: admissionBlocker ?? "Choose another voice model.",
         };
       }
