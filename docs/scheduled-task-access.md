@@ -60,6 +60,19 @@ on an outdated execution configuration. Merged patches also compare their
 server-read digest under the database write lock, so a concurrent edit returns
 409 instead of being overwritten.
 
+For a task with frozen accounts, an explicit `connectionAccounts` edit replaces
+the complete accepted selection. Include unchanged accounts that should remain;
+an empty array clears the selection. Omitting the field preserves saved choices.
+It never silently fills an omitted connector with newly available accounts.
+Use the access refresh flow below to review and adopt current defaults.
+
+Scheduler synchronization reads the latest saved task while holding a per-task
+lock shared with deletion cleanup. A failed synchronization restores the previous
+definition only if the task still matches that exact write; it cannot undo a
+newer edit or pause. Compensation commits before releasing the synchronization
+lock, so queued writers observe the restored state. Remote timeouts remain errors with potentially unknown
+outcomes, not confirmation that Temporal accepted the change.
+
 If a move removes Variable Sets or changes the environment, it returns a
 409 with `details.code = scheduled_target_access_change` and the affected
 identifiers. Review the destination's attachments, then retry with

@@ -9,6 +9,7 @@ import { createValidatedScheduledTask, validatedScheduledTaskUpdate } from "@ope
 import {
   createDb,
   createRig,
+  createScheduledTask,
   createSession,
   createVariableSet,
   getScheduledTask,
@@ -19,6 +20,8 @@ import {
   replacePersonalGitHubRepositorySelections,
   requireSession,
   setWorkspaceDefaultRig,
+  updateScheduledTask,
+  updateSessionVariableSets,
   type DbClient,
 } from "@opengeni/db";
 import {
@@ -145,6 +148,79 @@ function activities(overrides: Partial<import("@opengeni/config").Settings> = {}
 }
 
 describe("scheduled task default Sandbox Environment", () => {
+  test("a materialized reusable task inherits changed chat Variable Sets on dispatch and recovery", async () => {
+    if (!available) throw new Error("PostgreSQL required");
+    const workspace = await workspaceFixture();
+    const credentials = await createVariableSet(client.db, {
+      ...workspace,
+      scope: "workspace",
+      name: "Updated reusable chat credentials",
+    });
+    const session = await createSession(client.db, {
+      ...workspace,
+      initialMessage: "Reusable chat",
+      resources: [],
+      tools: [],
+      metadata: {},
+      model: "scripted-model",
+      reasoningEffort: "medium",
+      latencyMode: "standard",
+      sandboxBackend: "none",
+    });
+    const task = await createScheduledTask(client.db, {
+      ...workspace,
+      name: "Reusable message",
+      status: "paused",
+      schedule: { type: "manual" },
+      temporalScheduleId: crypto.randomUUID(),
+      runMode: "reusable_session",
+      targetSessionId: session.id,
+      overlapPolicy: "buffer_one",
+      agentConfig: {
+        prompt: "Read the current chat's environment",
+        tools: [],
+        resources: [],
+        metadata: {},
+        connectionAccounts: [],
+        connectionAccountsFrozen: true,
+      },
+      createdBy: { kind: "subject", subjectId: workspace.subjectId },
+      metadata: {},
+    });
+    expect(
+      await updateSessionVariableSets(client.db, {
+        ...workspace,
+        sessionId: session.id,
+        variableSets: [credentials],
+      }),
+    ).toMatchObject({ status: "updated" });
+    await updateScheduledTask(client.db, workspace.workspaceId, task.id, { status: "active" });
+    const input = {
+      workspaceId: workspace.workspaceId,
+      taskId: task.id,
+      triggerType: "scheduled" as const,
+      producerKey: `reusable-message-${crypto.randomUUID()}`,
+    };
+    const dispatched = await activities().dispatchScheduledTaskRun(input);
+    const [run] = await listScheduledTaskRuns(client.db, workspace.workspaceId, task.id, 10);
+    expect(dispatched, run?.error ?? undefined).toMatchObject({ action: "signal" });
+    if (dispatched.action !== "signal") throw new Error("Reusable-chat dispatch refused");
+    expect(dispatched.sessionId).toBe(session.id);
+    const accepted = await getScheduledTaskRunAcceptedExecution(client.db, {
+      workspaceId: workspace.workspaceId,
+      runId: run!.id,
+    });
+    expect(accepted?.targetSessionExecution?.variableSets.map((set) => set.id)).toEqual([
+      credentials.id,
+    ]);
+    expect(accepted?.task.variableSetId).toBeNull();
+    const recovered = await activities().dispatchScheduledTaskRun(input);
+    expect(["signal", "already_dispatched"]).toContain(recovered.action);
+    expect(await listScheduledTaskRuns(client.db, workspace.workspaceId, task.id, 10)).toHaveLength(
+      1,
+    );
+  }, 60_000);
+
   test("target chat and occurrence repositories both enter frozen account authority at admission", async () => {
     if (!available) throw new Error("PostgreSQL required");
     const workspace = await workspaceFixture();
