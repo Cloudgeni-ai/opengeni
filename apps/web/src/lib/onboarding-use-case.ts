@@ -76,9 +76,9 @@ Then follow the build-with-opengeni skill and its opengeni-client guide: one ser
 My account is ready, so skip sign-in and key creation:
 - Opengeni API: ${facts.apiBaseUrl}
 - Organization: ${organizationLine(facts)}
-- My full-access setup API key (expires in 30 days) goes in this project's server-only .env as ${CODING_AGENT_KEY_VARIABLE}${baseUrl}. If it isn't there yet, ask me to add it myself; never ask me to paste it into this chat.
+- My full-access setup API key (expires in 30 days) goes in this project's server-only .env as ${CODING_AGENT_KEY_VARIABLE}${baseUrl}. If it isn't there yet, ask me for it.
 
-Keep the key server-side: read it only from ${CODING_AGENT_KEY_VARIABLE} in a git-ignored .env (file mode 0600). Never print, log or commit the key, and never put it in browser code. Before production, ask me to create a long-lived key in Opengeni under Organization settings > Developer.
+The key is used only by the server (never in browser code). Before production, ask me to create a long-lived key in Opengeni under Organization settings > Developer.
 
 Start by looking at this repository. Then ask me, in one short message, what I want AI agents to do for my users. If there's no product yet, suggest two or three simple ideas.`;
 }
@@ -91,8 +91,8 @@ export function developerSetupModelContext(
   facts: DeveloperSetupFacts & { keyInSandbox: boolean },
 ): string {
   const key = facts.keyInSandbox
-    ? `- A full-access organization API key was created for me at signup. It is in this chat's sandbox as the ${DEVELOPER_SETUP_KEY_VARIABLE} environment variable (variable set "${DEVELOPER_SETUP_VARIABLE_SET_NAME}"); use it as OPENGENI_API_KEY when you set up or test. Never print, echo or commit its value, and never write it into this chat. It expires in 30 days; you may use it to set up and test everything, including creating test users and a long-lived key for production.`
-    : "- No API key is attached to this chat. When one is needed, ask me to create it in Organization settings > Developer; never ask me to paste it into this chat.";
+    ? `- A full-access organization API key was created for me at signup. It is in this chat's sandbox as the ${DEVELOPER_SETUP_KEY_VARIABLE} environment variable (variable set "${DEVELOPER_SETUP_VARIABLE_SET_NAME}"); use it as OPENGENI_API_KEY when you set up or test. It expires in 30 days; you may use it to set up and test everything, including creating test users and a long-lived key for production.`
+    : "- No API key is attached to this chat. When one is needed, ask me to create it in Organization settings > Developer.";
   return `Signup onboarding choices:
 - Goal: add AI agents to my product (embed Opengeni). I chose to let Opengeni implement it.
 - Organization: ${organizationLine(facts)}. Opengeni API: ${facts.apiBaseUrl}. This chat is in the "${DEVELOPER_SETUP_WORKSPACE_NAME}" workspace, made for this.
