@@ -194,7 +194,16 @@ const HOSTED_SLACK_PROFILE: OAuthProviderProfile = {
       ) {
         throw new Error("Slack account verification failed");
       }
-      return { slackTeamId: payload.team_id, slackUserId: payload.user_id };
+      return {
+        slackTeamId: payload.team_id,
+        slackUserId: payload.user_id,
+        ...(typeof payload.team === "string" && payload.team.trim()
+          ? { slackTeamName: payload.team }
+          : {}),
+        ...(typeof payload.user === "string" && payload.user.trim()
+          ? { slackUserName: payload.user }
+          : {}),
+      };
     },
     toolsForScopes: slackRestMcpToolsForScopes,
   },
