@@ -23,7 +23,6 @@ import type {
 import {
   buildConnectionTokenResolver,
   getConnectionMetadata,
-  listConnectionsMetadata,
   listEnabledMcpCapabilityServers,
   listConnectorToolPermissionPolicies,
   listChangedConnectorToolPermissions,
@@ -42,6 +41,10 @@ import {
   isOfficialSlackMcpConfig,
 } from "@opengeni/runtime";
 import { hasPermission } from "../access";
+import {
+  personalConnectionDelegationSourceForGrant,
+  visibleMcpAccountConnections,
+} from "./personal-connection-delegations";
 import {
   buildCapabilityCatalog,
   settingsWithMcpCapabilityServers,
@@ -195,12 +198,14 @@ async function resolveTarget(input: Input) {
     throw new HTTPException(403, {
       message: "Only the authenticated connection owner may manage personal tool permissions",
     });
+  const source = personalConnectionDelegationSourceForGrant(input.grant);
   const visible = ref
-    ? await listConnectionsMetadata(
-        input.db,
-        input.workspaceId,
-        input.personalOwnerVerified ? input.grant.subjectId : null,
-      )
+    ? await visibleMcpAccountConnections(input.db, {
+        accountId: input.grant.accountId,
+        workspaceId: input.workspaceId,
+        source:
+          input.personalOwnerVerified && source.kind === "subject" ? source : { kind: "none" },
+      })
     : [];
   const bindings = mcpAccountBindingsFromVisibleConnections({
     accountId: input.grant.accountId,
@@ -283,7 +288,9 @@ async function listTools(
       input.db,
       input.settings,
     )({
-      workspaceId: input.workspaceId,
+      // The selected account's credentials remain in its origin workspace;
+      // approval preferences remain scoped to the workspace being configured.
+      workspaceId: target.connection?.workspaceId ?? input.workspaceId,
       ...(target.connection?.subjectId ? { subjectId: input.grant.subjectId } : {}),
       serverId: target.server.id,
       toolName: "tools/list",
