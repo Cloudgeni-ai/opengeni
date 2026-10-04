@@ -26,6 +26,17 @@ Managed Postgres defaults to `edition = "ENTERPRISE"` and `availability_type = "
 
 Regional GKE clusters distribute node pools across zones by default. Short-lived evaluation stacks can set `gke.node_locations = ["<zone>"]` and smaller node counts to avoid creating one node group per zone; omit `node_locations` for production multi-zone resilience.
 
+Private nodes on a network created by this root (`network.create_network = true`
+and `gke.enable_private_nodes = true`) get a regional Cloud Router and Cloud NAT.
+NAT covers the created subnet's primary and secondary ranges so nodes and pods
+can reach public model providers and external Temporal endpoints. Cloud NAT adds
+provider charges; public-node deployments do not create it.
+
+For `network.create_network = false`, the operator must supply internet egress
+for private nodes and pods, through existing Cloud NAT or another routing path.
+This root does not change routing on an existing network. See
+[Google's GKE NAT guidance](https://docs.cloud.google.com/nat/docs/nat-product-interactions).
+
 ## Validate
 
 ```bash

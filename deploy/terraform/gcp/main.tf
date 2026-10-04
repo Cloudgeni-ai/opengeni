@@ -27,6 +27,29 @@ resource "google_compute_subnetwork" "this" {
   region        = var.region
 }
 
+# Private GKE nodes and pods need public egress for model-provider and external
+# Temporal endpoints. Existing networks keep their operator-owned NAT/routing.
+resource "google_compute_router" "private_nodes" {
+  count   = var.network.create_network && var.gke.enable_private_nodes ? 1 : 0
+  name    = "${var.name_prefix}-private-nodes"
+  region  = var.region
+  network = google_compute_network.this[0].id
+}
+
+resource "google_compute_router_nat" "private_nodes" {
+  count                              = var.network.create_network && var.gke.enable_private_nodes ? 1 : 0
+  name                               = "${var.name_prefix}-private-nodes"
+  region                             = var.region
+  router                             = google_compute_router.private_nodes[0].name
+  nat_ip_allocate_option             = "AUTO_ONLY"
+  source_subnetwork_ip_ranges_to_nat = "LIST_OF_SUBNETWORKS"
+
+  subnetwork {
+    name                    = google_compute_subnetwork.this[0].id
+    source_ip_ranges_to_nat = ["ALL_IP_RANGES"]
+  }
+}
+
 resource "google_project_service" "servicenetworking" {
   count              = local.postgres_private_ip_enabled ? 1 : 0
   project            = var.project_id
