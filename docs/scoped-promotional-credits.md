@@ -59,7 +59,11 @@ behavior. Enabling policy does not restrict previously unrestricted grants.
 ## Customer flow
 
 Signup and redemption show the credit amount without promising specific models.
-The model picker shows **Free credits**, **General credits**, or **Needs credits**, including after selection.
+The model picker shows **Free credits**, **Uses credits**, or **Needs credits**, including after selection.
+**Free credits** appears only while a remaining promotional balance covers that
+model. With general credits only, credit-funded models show **Uses credits**.
+With no usable balance for a model, it shows **Needs credits**. Subscriptions,
+customer provider connections and unmetered models keep their ordinary labels.
 Billing shows each remaining balance; **View models** reveals current coverage.
 Eligible model usage spends free credits first, then general credits. General
 credits include purchases and unrestricted legacy grants.

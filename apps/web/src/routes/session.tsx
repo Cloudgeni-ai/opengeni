@@ -1805,7 +1805,17 @@ function SessionChatPane(props: {
     window.addEventListener("keydown", onKeyDown);
     return () => window.removeEventListener("keydown", onKeyDown);
   }, [openFind]);
-  const modelCatalog = useWorkspaceModelCatalog(props.session.workspaceId);
+  const fundingRevision = useMemo(() => {
+    for (let index = props.events.length - 1; index >= 0; index -= 1) {
+      const event = props.events[index]!;
+      if (event.type === "agent.model.usage") return event.sequence;
+    }
+    return 0;
+  }, [props.events]);
+  const modelCatalog = useWorkspaceModelCatalog(
+    props.session.workspaceId,
+    `${props.session.id}:${props.session.status}:${fundingRevision}`,
+  );
   const fleet = useWorkspaceMachines({
     sessionId: props.session.id,
     pollIntervalMs: MACHINES_SESSION_POLL_MS,

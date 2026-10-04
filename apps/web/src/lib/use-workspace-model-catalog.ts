@@ -12,14 +12,17 @@ export type WorkspaceModelCatalogState = {
   rows: PickerModelRow[];
   /** Server-resolved default for new chats and scheduled tasks; null until known. */
   defaultSelection: DefaultModelSelection | null;
-  /** What the default becomes once the organization holds OpenGeni credits. */
+  /** Hypothetical default after a general-credit purchase. */
   creditsSelection: DefaultModelSelection | null;
   loading: boolean;
   error: string | null;
   refresh: () => Promise<void>;
 };
 
-export function useWorkspaceModelCatalog(workspaceId: string | null): WorkspaceModelCatalogState {
+export function useWorkspaceModelCatalog(
+  workspaceId: string | null,
+  fundingRevision?: string | number,
+): WorkspaceModelCatalogState {
   const client = useAppContext().client;
   const [models, setModels] = useState<WorkspaceModelCatalogModel[]>([]);
   const [defaults, setDefaults] = useState<{
@@ -86,14 +89,14 @@ export function useWorkspaceModelCatalog(workspaceId: string | null): WorkspaceM
   }, [beginLoad]);
 
   useEffect(() => {
-    const request = beginLoad();
+    const request = beginLoad(true);
     void request.promise;
     return () => {
       const currentRequestAbort = requestAbortRef.current;
       currentRequestAbort?.abort();
       if (requestAbortRef.current === currentRequestAbort) requestAbortRef.current = null;
     };
-  }, [beginLoad]);
+  }, [beginLoad, fundingRevision]);
 
   useEffect(() => {
     const changed = () => {
@@ -101,9 +104,11 @@ export function useWorkspaceModelCatalog(workspaceId: string | null): WorkspaceM
     };
     window.addEventListener("model-connections-changed", changed);
     window.addEventListener(CREDIT_BALANCE_CHANGED, changed);
+    window.addEventListener("focus", changed);
     return () => {
       window.removeEventListener("model-connections-changed", changed);
       window.removeEventListener(CREDIT_BALANCE_CHANGED, changed);
+      window.removeEventListener("focus", changed);
     };
   }, [refresh]);
 

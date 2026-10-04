@@ -279,7 +279,7 @@ export function projectPickerRows(models: WorkspaceModelCatalogModel[]): PickerM
           catalog.creditFunding === "promotional"
             ? "Free credits"
             : catalog.creditFunding === "general"
-              ? "General credits"
+              ? "Uses credits"
               : catalog.creditFunding === "unavailable"
                 ? "Needs credits"
                 : undefined,

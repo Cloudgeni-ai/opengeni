@@ -777,6 +777,11 @@ describe("ModelPolicyPicker", () => {
       expect(trigger.getAttribute("aria-description")).toContain("Free credits");
       expect(trigger.title).toContain("Medium");
 
+      await act(async () => mounted!.root.render(render("Uses credits")));
+      expect(trigger.textContent).toContain("Uses credits");
+      expect(trigger.textContent).not.toContain("Free credits");
+      expect(trigger.getAttribute("aria-description")).toContain("Uses credits");
+
       await act(async () => mounted!.root.render(render("Needs credits")));
       expect(trigger.textContent).toContain("Needs credits");
       expect(trigger.textContent).not.toContain("Free credits");

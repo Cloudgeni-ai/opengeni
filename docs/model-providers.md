@@ -1055,9 +1055,9 @@ client.getWorkspaceModelCatalog(workspaceId);
 ```
 
 The response also carries `defaultSelection` (the default for new work that
-names no model, see below) and `creditsSelection` (the same policy evaluated
-against current per-model credit eligibility; `null` when the deployment does
-not bill credits). Both are `{ model, reasoningEffort, source }` and are
+names no model, see below) and `creditsSelection` (the hypothetical default
+after buying general credits; `null` when the deployment does not bill
+credits). Both are `{ model, reasoningEffort, source }` and are
 additive: older API instances omit them. Credit-funded models also expose
 `creditFunding`: `promotional`, `general`, or `unavailable`. This describes
 current funding, independently of provider availability.

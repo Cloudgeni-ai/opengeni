@@ -43,7 +43,7 @@ describe("model-policy", () => {
     );
     expect(projectPickerRows(models).map((row) => row.fundingHint)).toEqual([
       "Free credits",
-      "General credits",
+      "Uses credits",
       "Needs credits",
     ]);
   });
