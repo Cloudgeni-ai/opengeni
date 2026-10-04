@@ -1700,7 +1700,11 @@ describe("Codex realtime browser controller", () => {
     );
   });
 
-  function refusalController(options: { heartbeatStop?: boolean; negotiateRefusal?: boolean }) {
+  function refusalController(options: {
+    heartbeatStop?: boolean;
+    negotiateRefusal?: boolean;
+    negotiateTerminal?: boolean;
+  }) {
     const browser = rotatingBrowserFixture();
     const timers = timerFixture();
     let current = mode();
@@ -1726,6 +1730,18 @@ describe("Codex realtime browser controller", () => {
           return { mode: current, replay: false };
         },
         negotiateCodexRealtimeWebrtc: async (_workspaceId, _sessionId, request) => {
+          if (options.negotiateTerminal) {
+            throw new OpenGeniApiError(
+              409,
+              JSON.stringify({
+                error: {
+                  code: "GATEWAY_REALTIME_CREDENTIAL_UNAVAILABLE",
+                  message: "Opengeni voice is temporarily unavailable. Try another voice model.",
+                  retryable: false,
+                },
+              }),
+            );
+          }
           if (options.negotiateRefusal) {
             throw new OpenGeniApiError(
               402,
@@ -1789,6 +1805,23 @@ describe("Codex realtime browser controller", () => {
       diagnostic: { kind: "terminal_stop", recoverable: false },
     });
     expect(browser.calls).toEqual(expect.arrayContaining(["peer.0.close", "track.0.stop"]));
+  });
+
+  test("a definitive failure before any connection ends the mode with the server's message", async () => {
+    const { controller, ends } = refusalController({ negotiateTerminal: true });
+    await expect(controller.start()).rejects.toThrow();
+    expect(ends).toEqual(["user_stop"]);
+    expect(controller.snapshot()).toMatchObject({
+      status: "error",
+      mode: null,
+      refusal: null,
+      error: "Opengeni voice is temporarily unavailable. Try another voice model.",
+    });
+    // The server's later end projection must not wipe the explanation.
+    await controller.observeLifecycle(null);
+    expect(controller.snapshot().error).toBe(
+      "Opengeni voice is temporarily unavailable. Try another voice model.",
+    );
   });
 
   test("a credit refusal at negotiation ends the owned mode instead of retrying", async () => {

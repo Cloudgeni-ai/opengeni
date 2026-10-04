@@ -526,6 +526,14 @@ describe("API helpers", () => {
     expect(external.headers.get("access-control-allow-headers")).toContain("Authorization");
     expect(external.headers.get("access-control-allow-headers")).toContain("Range");
     expect(external.headers.get("access-control-allow-headers")).toContain("X-OpenGeni-Site-Id");
+    // Resumable dictation uploads from a cross-origin embed send these per chunk.
+    for (const chunkHeader of [
+      "X-OpenGeni-Chunk-Duration-Milliseconds",
+      "X-OpenGeni-Chunk-Sha256",
+      "X-OpenGeni-Chunk-Start-Milliseconds",
+    ]) {
+      expect(external.headers.get("access-control-allow-headers")).toContain(chunkHeader);
+    }
     expect(external.headers.get("access-control-allow-headers")).toContain(
       "X-OpenGeni-Site-Version",
     );

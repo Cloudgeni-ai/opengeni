@@ -103,18 +103,25 @@ type RealtimeModelProvider = (typeof REALTIME_MODEL_PROVIDERS)[number];
 
 const REALTIME_PROVIDER_META: Record<
   RealtimeModelProvider,
-  { billingClass: BillingClass; hint: string }
+  { billingClass: BillingClass; label: string; hint: string }
 > = {
-  OpenGeni: { billingClass: "opengeni_credits", hint: "Will use credits" },
+  // The wire value keeps its historical spelling; the product name is Opengeni.
+  OpenGeni: { billingClass: "opengeni_credits", label: "Opengeni", hint: "Uses Opengeni credits" },
   "Connected Codex": {
     billingClass: "codex_subscription",
+    label: "Connected Codex",
     hint: "ChatGPT / Codex plan",
   },
   "Connected SuperGrok": {
     billingClass: "supergrok_subscription",
+    label: "Connected SuperGrok",
     hint: "SuperGrok / xAI plan",
   },
-  "Your Gateway": { billingClass: "byok", hint: "Billed to your AI Gateway" },
+  "Your Gateway": {
+    billingClass: "byok",
+    label: "Your Gateway",
+    hint: "Billed to your AI Gateway",
+  },
 };
 /** Display name; the catalog's `provider` value stays the wire identifier. */
 function realtimeProviderLabel(provider: RealtimeModelProvider): string {
@@ -545,14 +552,13 @@ export function SessionRealtimeControl(props: {
     }
     if (!canStart) return;
     autostartStartedRef.current = true;
-    void start()
-      .then(() => {
-        autostartModelRef.current = null;
-        onRealtimeAutostartConsumed?.();
-      })
-      .catch(() => {
-        autostartStartedRef.current = false;
-      });
+    // One automatic attempt. A failed start stays visible with its reason and
+    // the user retries explicitly; re-arming would loop on a definitive refusal.
+    const consume = () => {
+      autostartModelRef.current = null;
+      onRealtimeAutostartConsumed?.();
+    };
+    void start().then(consume, consume);
   }, [
     canStart,
     lifecycleActive,
@@ -588,6 +594,18 @@ export function SessionRealtimeControl(props: {
   );
 }
 
+/**
+ * First available model; otherwise the model whose blocker the user can act on
+ * (for example adding credits) rather than an unrelated "connect" prompt.
+ */
+function fallbackRealtimeModelId(models: readonly RealtimeModelOption[]): SessionRealtimeModel {
+  return (
+    models.find((model) => model.available)?.id ??
+    models.find((model) => model.unavailableCode)?.id ??
+    CODEX_LIVE_MODEL.id
+  );
+}
+
 export function useRealtimeModelSelection(options: {
   client?: RealtimeControllerClient | undefined;
   workspaceId?: string | undefined;
@@ -614,7 +632,7 @@ export function useRealtimeModelSelection(options: {
     if (initialCachedCatalog.some((model) => model.id === preferred && model.available)) {
       return preferred;
     }
-    return initialCachedCatalog.find((model) => model.available)?.id ?? CODEX_LIVE_MODEL.id;
+    return fallbackRealtimeModelId(initialCachedCatalog);
   });
 
   useEffect(() => {
@@ -625,7 +643,7 @@ export function useRealtimeModelSelection(options: {
       setCatalog(models);
       setSelectedModelId((current) => {
         if (models.some((model) => model.id === current && model.available)) return current;
-        return models.find((model) => model.available)?.id ?? CODEX_LIVE_MODEL.id;
+        return fallbackRealtimeModelId(models);
       });
     };
     const cached = readCachedRealtimeModelCatalog(client, workspaceId);
@@ -863,7 +881,9 @@ export function RealtimeVoiceControl(props: {
       ? "Retry voice connection"
       : modeOwned
         ? "End voice conversation"
-        : `Start voice with ${selectedModel.label}`;
+        : !props.canStart && status.phase === "unavailable"
+          ? `${status.label}: ${status.detail}`
+          : `Start voice with ${selectedModel.label}`;
   const runMainAction = audioBlocked
     ? props.onRetryAudibleOutput
     : retryConnection

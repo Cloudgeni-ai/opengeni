@@ -938,10 +938,14 @@ describe("ordinary session Codex realtime control", () => {
     });
 
     const start = container.querySelector<HTMLButtonElement>(
-      'button[aria-label="Start voice with Codex Live"]',
+      '[data-testid="realtime-primary-action"]',
     );
     expect(start?.dataset.phase).toBe("unavailable");
     expect(start?.disabled).toBe(true);
+    // The disabled control names its blocker instead of offering to start.
+    expect(start?.getAttribute("aria-label")).toBe(
+      "Voice model unavailable: Connect Codex to use this voice model.",
+    );
     expect(container.querySelector('[role="status"]')?.textContent).toContain(
       "Voice model unavailable",
     );

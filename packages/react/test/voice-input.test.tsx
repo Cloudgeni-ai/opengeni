@@ -945,6 +945,86 @@ describe("useVoiceInput", () => {
     await hook.unmount();
   });
 
+  test("Cancel and Escape keep a real dictation; only an accidental start is discarded", async () => {
+    let clock = Date.parse("2026-10-05T00:00:00.000Z");
+    const transcribeCalls: unknown[] = [];
+    const renderRecorder = async (store: MemoryVoiceRecordingStore, recordingId: string) =>
+      await renderHook(
+        () =>
+          useVoiceInput({
+            client: {
+              transcribeAudio: async (input: unknown) => {
+                transcribeCalls.push(input);
+                return { text: "unexpected", languages: [] };
+              },
+            },
+            workspaceId: "ws-1",
+            capability,
+            enabled: true,
+            value: "draft",
+            setValue: () => undefined,
+            focusInput: () => undefined,
+            now: () => new Date(clock),
+            createRecordingStore: () => store,
+            createRecordingId: () => recordingId,
+            createOwnerId: () => `owner-${recordingId}`,
+          }),
+        undefined,
+      );
+
+    for (const via of ["cancel", "escape"] as const) {
+      installMediaMocks();
+      const store = new MemoryVoiceRecordingStore();
+      const hook = await renderRecorder(store, `recording-keep-${via}`);
+      await act(async () => {
+        await hook.result.current.start();
+      });
+      expect(hook.result.current.status).toBe("recording");
+      clock += 45_000;
+      await act(async () => {
+        if (via === "cancel") hook.result.current.cancel();
+        else document.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape" }));
+        await settle();
+      });
+      expect(hook.result.current.status).toBe("recovered");
+      expect(hook.result.current.hasRecoverableRecording).toBe(true);
+      expect(store.manifests.get(`recording-keep-${via}`)?.captureState).toBe("stopped");
+      expect(transcribeCalls).toHaveLength(0);
+      await hook.unmount();
+    }
+
+    // An Escape already handled by a dialog or menu does not touch dictation.
+    installMediaMocks();
+    const handledStore = new MemoryVoiceRecordingStore();
+    const handled = await renderRecorder(handledStore, "recording-escape-handled");
+    await act(async () => {
+      await handled.result.current.start();
+    });
+    await act(async () => {
+      const event = new KeyboardEvent("keydown", { key: "Escape", cancelable: true });
+      event.preventDefault();
+      document.dispatchEvent(event);
+      await settle();
+    });
+    expect(handled.result.current.status).toBe("recording");
+    await handled.unmount();
+
+    installMediaMocks();
+    const accidentalStore = new MemoryVoiceRecordingStore();
+    const accidental = await renderRecorder(accidentalStore, "recording-accidental");
+    await act(async () => {
+      await accidental.result.current.start();
+    });
+    clock += 1_000;
+    await act(async () => {
+      accidental.result.current.cancel();
+      await settle();
+    });
+    expect(accidental.result.current.status).toBe("idle");
+    expect(accidentalStore.manifests.has("recording-accidental")).toBe(false);
+    await accidental.unmount();
+  });
+
   test("composer mic stop auto-transcribes and never auto-sends", async () => {
     installMediaMocks();
     const store = new MemoryVoiceRecordingStore();
@@ -983,7 +1063,9 @@ describe("useVoiceInput", () => {
     });
     expect(mounted.container.querySelector("[data-voice-waveform]")).toBeTruthy();
     expect(
-      mounted.container.querySelector<HTMLButtonElement>("[aria-label='Cancel recording']"),
+      mounted.container.querySelector<HTMLButtonElement>(
+        "[aria-label='Stop without transcribing']",
+      ),
     ).toBeTruthy();
     const stop = mounted.container.querySelector<HTMLButtonElement>(
       "[aria-label='Stop and transcribe']",
@@ -1126,7 +1208,7 @@ describe("useVoiceInput", () => {
     });
     await act(async () => {
       mounted?.container
-        .querySelector<HTMLButtonElement>("[aria-label='Cancel recording']")
+        .querySelector<HTMLButtonElement>("[aria-label='Stop without transcribing']")
         ?.click();
       await settle();
     });

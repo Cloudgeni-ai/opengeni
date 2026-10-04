@@ -661,6 +661,10 @@ export function createAppComposition(deps: AppDependencies): {
       "X-OpenGeni-Access-Key",
       "X-OpenGeni-Api-Contract",
       "X-OpenGeni-Actor-Epoch",
+      // Resumable voice-input chunk integrity/timing (cross-origin embeds).
+      "X-OpenGeni-Chunk-Duration-Milliseconds",
+      "X-OpenGeni-Chunk-Sha256",
+      "X-OpenGeni-Chunk-Start-Milliseconds",
       "X-OpenGeni-Correlation-Id",
       "X-OpenGeni-Session-Csrf",
       // Session scope for a session proxy; the API itself ignores it.
