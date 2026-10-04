@@ -314,6 +314,8 @@ or retiring the old ledger connection. Progress uses quiet context; final result
 use speakable context on the current provider delegation ID. Results from a
 previous provider connection become general context after rotation.
 
-The transcription debit rules above apply to dictation only. Realtime provider
-charges are paid by the deployment; this adapter does not add per-second end-user
-credit billing. Backend delegated model work retains normal model billing.
+The transcription debit rules above apply to dictation only. Hosted live voice
+is credit-gated and billed per started minute of server-observed connection time
+with the same refusal codes; see the realtime section of
+[`run-lifecycle.md`](run-lifecycle.md). Backend delegated model work retains
+normal model billing.

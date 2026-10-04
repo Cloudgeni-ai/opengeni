@@ -1,4 +1,9 @@
 export { managedUserEmailAllowed } from "./managed-user-admission";
+import {
+  parseRealtimeVoicePricingJson,
+  parseRealtimeVoicePricingTableJson,
+} from "./realtime-voice-pricing";
+export * from "./realtime-voice-pricing";
 import { EnvCreditPromotionPolicy } from "./credit-promotions";
 export {
   CreditPromotionPolicy,
@@ -730,6 +735,11 @@ const SettingsSchema = z.object({
   azureLiveApiKey: z.string().optional(),
   azureLiveDeployment: z.string().default("gpt-live-1"),
   azureLiveVoice: z.string().default("marin"),
+  // Credit price of deployment-funded live voice (RealtimeVoicePricing JSON).
+  // Required while credit billing is active, otherwise the model is withheld.
+  azureLivePricingJson: z.string().optional(),
+  // Managed AI Gateway live voice prices keyed by upstream model id.
+  aiGatewayRealtimePricingJson: z.string().optional(),
   // Azure Speech credentials are explicit: a different resource can host MAI.
   voiceInputMaiEndpoint: z.string().url().optional(),
   voiceInputMaiApiKey: z.string().optional(),
@@ -3924,6 +3934,8 @@ export function getSettings(source: NodeJS.ProcessEnv = process.env): Settings {
     azureLiveApiKey: optional("OPENGENI_AZURE_LIVE_API_KEY"),
     azureLiveDeployment: optional("OPENGENI_AZURE_LIVE_DEPLOYMENT"),
     azureLiveVoice: optional("OPENGENI_AZURE_LIVE_VOICE"),
+    azureLivePricingJson: optional("OPENGENI_AZURE_LIVE_PRICING_JSON"),
+    aiGatewayRealtimePricingJson: optional("OPENGENI_AI_GATEWAY_REALTIME_PRICING_JSON"),
     voiceInputMaiEndpoint: optional("OPENGENI_VOICE_INPUT_MAI_ENDPOINT"),
     voiceInputMaiApiKey: optional("OPENGENI_VOICE_INPUT_MAI_API_KEY"),
     voiceInputMaiApiVersion: optional("OPENGENI_VOICE_INPUT_MAI_API_VERSION"),
@@ -8700,6 +8712,11 @@ function validateSettings(settings: Settings, source: NodeJS.ProcessEnv = proces
   parseVoiceInputPricingJson(
     settings.voiceInputAzurePricingJson,
     "OPENGENI_VOICE_INPUT_AZURE_PRICING_JSON",
+  );
+  parseRealtimeVoicePricingJson(settings.azureLivePricingJson, "OPENGENI_AZURE_LIVE_PRICING_JSON");
+  parseRealtimeVoicePricingTableJson(
+    settings.aiGatewayRealtimePricingJson,
+    "OPENGENI_AI_GATEWAY_REALTIME_PRICING_JSON",
   );
   sandboxEnvironmentVariableNames(settings);
   sandboxLifecycleHookIds(settings);

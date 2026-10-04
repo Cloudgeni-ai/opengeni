@@ -816,6 +816,7 @@ export * from "./session-queue-commands";
 export * from "./session-realtime";
 export * from "./session-realtime-context";
 export * from "./session-realtime-ledger";
+export * from "./session-realtime-billing";
 export * from "./new-session-drafts";
 export * from "./workspace-instruction-policies";
 export * from "./company-profile";

@@ -10,6 +10,14 @@ import { SessionMessageSearchRequest } from "@opengeni/contracts";
 import { scheduledSessionIds } from "@opengeni/db";
 import { isVerifiedDelegatedHumanAuthorization, withSiteSessionOrigin } from "@opengeni/core";
 import { freezeSessionRealtimeConnectionAccounts } from "@opengeni/core";
+import {
+  createRealtimeVoiceBilling,
+  RealtimeVoiceUnavailableError,
+  TranscriptionBillingRefusedError,
+} from "@opengeni/core";
+import type { CreditDebitAttribution } from "@opengeni/db";
+import { creditDebitAttributionForGrant } from "../access-grant-rls";
+import { transcriptionBillingRefusal } from "../transcription/billing-refusal";
 import { resolveSiteSessionOrigin, withOptionalSiteCommandOrigin } from "../site-session-origin";
 import { SandboxRecoveryRequest } from "@opengeni/contracts";
 import { getManagedHumanSandboxRecovery, consentManagedHumanSandboxRecovery } from "@opengeni/core";
@@ -377,6 +385,58 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
     observability: deps.observability,
   };
   const workspaceCaptureManifestCache = new WorkspaceCaptureManifestCache();
+  const realtimeVoiceBilling = createRealtimeVoiceBilling({ db, settings });
+  /** Credit refusal / unavailable deployment voice as an HTTP response, else null. */
+  const realtimeVoiceRefusalResponse = (c: Context, error: unknown): Response | null => {
+    if (error instanceof TranscriptionBillingRefusedError) {
+      return transcriptionBillingRefusal(c, error);
+    }
+    if (error instanceof RealtimeVoiceUnavailableError) {
+      return c.json(
+        {
+          error: {
+            status: 409,
+            code: "realtime_voice_unavailable",
+            message: error.message,
+            retryable: false,
+            details: { reason: error.code },
+          },
+        },
+        409,
+      );
+    }
+    return null;
+  };
+  /**
+   * Bill every started minute observed so far for a deployment-funded call.
+   * Owner attribution only when the caller is the voice owner. A settlement
+   * failure is logged and retried idempotently on the next heartbeat.
+   */
+  const settleRealtimeVoice = async (input: {
+    grant: { subjectId: string };
+    attribution: CreditDebitAttribution;
+    workspaceId: string;
+    sessionId: string;
+    realtimeId: string;
+  }) => {
+    try {
+      return await realtimeVoiceBilling.settle({
+        workspaceId: input.workspaceId,
+        sessionId: input.sessionId,
+        realtimeId: input.realtimeId,
+        callerSubjectId: input.grant.subjectId,
+        attribution: input.attribution,
+      });
+    } catch (error) {
+      console.error("realtime voice settlement failed", {
+        workspaceId: input.workspaceId,
+        sessionId: input.sessionId,
+        realtimeId: input.realtimeId,
+        error: error instanceof Error ? error.message : String(error),
+      });
+      return null;
+    }
+  };
   const withSiteCommandOrigin = <T>(c: Context, workspaceId: string, run: () => Promise<T>) =>
     withOptionalSiteCommandOrigin(
       db,
@@ -1309,6 +1369,18 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
       });
     }
     try {
+      await realtimeVoiceBilling.admit({
+        accountId: grant.accountId,
+        workspaceId,
+        model: parsed.data.model,
+        attribution: creditDebitAttributionForGrant(grant),
+      });
+    } catch (error) {
+      const refused = realtimeVoiceRefusalResponse(c, error);
+      if (refused) return refused;
+      throw error;
+    }
+    try {
       const result = await withWorkspaceSessionActivityRls(db, workspaceId, async (scopedDb) => {
         const accounts = await freezeSessionRealtimeConnectionAccounts({
           db: scopedDb as unknown as Database,
@@ -1356,6 +1428,16 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
         });
       }
       try {
+        // Settle observed minutes before renewing; out of credits keeps the
+        // current lease so the call drains and ends instead of running free.
+        const settlement = await settleRealtimeVoice({
+          grant,
+          attribution: creditDebitAttributionForGrant(grant),
+          workspaceId,
+          sessionId,
+          realtimeId,
+        });
+        const stop = settlement?.stop ?? null;
         const result = await withWorkspaceSessionActivityRls(db, workspaceId, async (scopedDb) =>
           renewSessionRealtimeInTransaction(scopedDb, {
             workspaceId,
@@ -1363,11 +1445,18 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
             realtimeId,
             ownerSubjectId: grant.subjectId,
             ...parsed.data,
+            extendLease: stop === null,
           }),
         );
         await publishRealtimeMutation(grant.accountId, workspaceId, sessionId, result);
         c.header("cache-control", "private, no-store");
-        return c.json({ mode: result.mode, replay: result.replay });
+        return c.json({
+          mode: result.mode,
+          replay: result.replay,
+          ...(stop && result.mode.state === "active"
+            ? { stop: { code: stop.code, message: stop.message } }
+            : {}),
+        });
       } catch (error) {
         throw sessionRealtimeHttpError(error);
       }
@@ -1404,6 +1493,13 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
         }),
       );
       await publishRealtimeMutation(grant.accountId, workspaceId, sessionId, result);
+      await settleRealtimeVoice({
+        grant,
+        attribution: creditDebitAttributionForGrant(grant),
+        workspaceId,
+        sessionId,
+        realtimeId,
+      });
       c.header("cache-control", "private, no-store");
       return c.json({ mode: result.mode, replay: result.replay });
     } catch (error) {
@@ -1509,6 +1605,31 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
           replay: true,
         });
       }
+      try {
+        await realtimeVoiceBilling.admit({
+          accountId: grant.accountId,
+          workspaceId,
+          model: claim.mode.model,
+          attribution: creditDebitAttributionForGrant(grant),
+        });
+      } catch (error) {
+        const refused = realtimeVoiceRefusalResponse(c, error);
+        if (!refused) throw error;
+        await withWorkspaceRls(db, workspaceId, async (scopedDb) =>
+          scopedDb.transaction(async (tx) =>
+            failSessionRealtimeConnectionInTransaction(tx as unknown as Database, {
+              workspaceId,
+              sessionId,
+              realtimeId,
+              connectionId: claim.connection.id,
+              operationId,
+              connectionEpoch: claim.connection.connectionEpoch,
+              failureCode: "billing_refused",
+            }),
+          ),
+        ).catch(() => undefined);
+        return refused;
+      }
       const broker = (
         claim.mode.model === AZURE_LIVE_MODEL_ID
           ? buildSessionAzureLiveBroker
@@ -1552,6 +1673,13 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
                 ),
               )
             : null;
+        await settleRealtimeVoice({
+          grant,
+          attribution: creditDebitAttributionForGrant(grant),
+          workspaceId,
+          sessionId,
+          realtimeId,
+        });
         return c.json({
           ...answer,
           connectionId: completed.connection.id,
@@ -1652,6 +1780,12 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
           "Realtime Gateway tokens are single-use; reconnect with a new operation",
         );
       }
+      await realtimeVoiceBilling.admit({
+        accountId: grant.accountId,
+        workspaceId,
+        model: claim.mode.model,
+        attribution: creditDebitAttributionForGrant(grant),
+      });
       const secret = await createGatewayRealtimeConnectionSecret({
         db,
         settings,
@@ -1675,6 +1809,13 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
         ),
       );
       connectionCompleted = true;
+      await settleRealtimeVoice({
+        grant,
+        attribution: creditDebitAttributionForGrant(grant),
+        workspaceId,
+        sessionId,
+        realtimeId,
+      });
       return c.json({
         ...secret,
         connectionId: completed.connection.id,
@@ -1696,11 +1837,18 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
               operationId,
               connectionEpoch: claimed.connection.connectionEpoch,
               failureCode:
-                error instanceof GatewayRealtimeBrokerError ? error.code : "gateway_error",
+                error instanceof GatewayRealtimeBrokerError
+                  ? error.code
+                  : error instanceof TranscriptionBillingRefusedError ||
+                      error instanceof RealtimeVoiceUnavailableError
+                    ? "billing_refused"
+                    : "gateway_error",
             }),
           ),
         ).catch(() => undefined);
       }
+      const refused = realtimeVoiceRefusalResponse(c, error);
+      if (refused) return refused;
       if (error instanceof SessionRealtimeConflictError) throw sessionRealtimeHttpError(error);
       if (!(error instanceof GatewayRealtimeBrokerError)) throw error;
       const status = error.code === "credential_unavailable" ? 409 : 502;

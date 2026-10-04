@@ -1700,6 +1700,109 @@ describe("Codex realtime browser controller", () => {
     );
   });
 
+  function refusalController(options: { heartbeatStop?: boolean; negotiateRefusal?: boolean }) {
+    const browser = rotatingBrowserFixture();
+    const timers = timerFixture();
+    let current = mode();
+    const ends: string[] = [];
+    let uuid = 500;
+    const controller = createCodexRealtimeController({
+      workspaceId: WORKSPACE_ID,
+      sessionId: SESSION_ID,
+      storage: storageFixture(),
+      remoteAudio: browser.remoteAudio,
+      randomUUID: () => `72000000-0000-4000-8000-${String(++uuid).padStart(12, "0")}`,
+      createPeerConnection: browser.createPeerConnection,
+      getUserMedia: browser.getUserMedia,
+      reconnectBackoffMs: [10],
+      ...timers,
+      client: {
+        beginSessionRealtime: async (_workspaceId, _sessionId, request) => {
+          current = mode({
+            ...current,
+            operationId: request.operationId,
+            browserInstanceId: request.browserInstanceId,
+          });
+          return { mode: current, replay: false };
+        },
+        negotiateCodexRealtimeWebrtc: async (_workspaceId, _sessionId, request) => {
+          if (options.negotiateRefusal) {
+            throw new OpenGeniApiError(
+              402,
+              JSON.stringify({
+                code: "insufficient_credits",
+                message: "Live voice needs Opengeni credits. Add credits to continue.",
+              }),
+            );
+          }
+          return {
+            sdp: ANSWER,
+            version: "v3",
+            model: "gpt-live-1-boulder-alpha",
+            connectionId: "73000000-0000-4000-8000-000000000001",
+            connectionEpoch: request.expectedConnectionEpoch,
+            startupFenceSequence: 0,
+            modeVersion: current.version,
+            replay: false,
+          };
+        },
+        activateCodexRealtimeConnection: async () => ({ mode: current, replay: false }),
+        heartbeatSessionRealtime: async () =>
+          options.heartbeatStop
+            ? {
+                mode: current,
+                replay: false,
+                stop: {
+                  code: "insufficient_credits",
+                  message: "Live voice needs Opengeni credits. Add credits to continue.",
+                },
+              }
+            : { mode: current, replay: false },
+        syncSessionRealtimeLedger: async () => ({ accepted: [], outbound: [] }),
+        endSessionRealtime: async (_workspaceId, _sessionId, _realtimeId, request) => {
+          ends.push(request.reason);
+          current = mode({
+            ...current,
+            state: "ended",
+            version: current.version + 1,
+            endedAt: "2026-07-29T07:01:00.000Z",
+            endReason: "user_stop",
+          });
+          return { mode: current, replay: false };
+        },
+      },
+    });
+    return { controller, browser, ends };
+  }
+
+  test("a heartbeat stop instruction ends the call gracefully with a credit refusal", async () => {
+    const { controller, browser, ends } = refusalController({ heartbeatStop: true });
+    await controller.start();
+    expect(controller.snapshot().status).toBe("active");
+    await controller.heartbeat();
+    expect(ends).toEqual(["user_stop"]);
+    expect(controller.snapshot()).toMatchObject({
+      status: "error",
+      mode: null,
+      error: "Live voice needs Opengeni credits. Add credits to continue.",
+      refusal: { code: "insufficient_credits" },
+      diagnostic: { kind: "terminal_stop", recoverable: false },
+    });
+    expect(browser.calls).toEqual(expect.arrayContaining(["peer.0.close", "track.0.stop"]));
+  });
+
+  test("a credit refusal at negotiation ends the owned mode instead of retrying", async () => {
+    const { controller, ends } = refusalController({ negotiateRefusal: true });
+    await controller.start();
+    expect(ends).toEqual(["user_stop"]);
+    expect(controller.snapshot()).toMatchObject({
+      status: "error",
+      mode: null,
+      refusal: { code: "insufficient_credits" },
+      error: "Live voice needs Opengeni credits. Add credits to continue.",
+    });
+  });
+
   test("stop during replacement negotiation fences a late answer and leaves no reconnect timers", async () => {
     const browser = rotatingBrowserFixture();
     const timers = timerFixture();

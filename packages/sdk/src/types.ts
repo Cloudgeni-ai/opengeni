@@ -288,6 +288,8 @@ export type WorkspaceRealtimeModelCatalogItem = {
   description: string;
   available: boolean;
   unavailableReason: string | null;
+  /** Machine-readable reason when unavailable, e.g. `insufficient_credits`. */
+  unavailableCode?: string | null | undefined;
   recommended: boolean;
 };
 
@@ -334,9 +336,17 @@ export type EndSessionRealtimeRequest = RenewSessionRealtimeRequest & {
   reason: Extract<SessionRealtimeEndReason, "user_stop" | "browser_unload">;
 };
 
+/** Server instruction to end a live call now (for example, out of credits). */
+export type SessionRealtimeStopInstruction = {
+  code: string;
+  message: string;
+};
+
 export type SessionRealtimeMutationResponse = {
   mode: SessionRealtimeMode;
   replay: boolean;
+  /** Present on a heartbeat when the server stopped extending the lease. */
+  stop?: SessionRealtimeStopInstruction | undefined;
 };
 
 export type SessionStatus =
