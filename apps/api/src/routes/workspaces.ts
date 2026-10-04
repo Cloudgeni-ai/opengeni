@@ -48,6 +48,8 @@ import {
 import { loadWorkspaceCodexModelAvailability } from "@opengeni/core";
 import {
   allWorkspacePermissions,
+  getBillingBalance,
+  spendableCreditMicros,
   createWorkspace,
   ensureWorkspaceByExternalIdentity,
   findWorkspaceByExternalIdentity,
@@ -621,25 +623,38 @@ export function registerWorkspaceRoutes(app: Hono, deps: ApiRouteDeps): void {
     // The same precedence the server applies when a new chat, API create, or
     // scheduled occurrence names no model; published so pickers show it.
     const workspaceSettings = workspace?.settings ?? {};
+    const creditBalance =
+      deps.settings.billingMode === "stripe"
+        ? await getBillingBalance(deps.db, grant.accountId)
+        : undefined;
     const defaultSelection = await resolveDefaultSessionModelForSelections(deps.db, {
       settings: workspaceCatalogSettings,
       accountId: grant.accountId,
       workspaceSettings,
       selections,
     });
+    const catalog = projectWorkspaceModelCatalog(selections, {
+      defaultSelection,
+      creditsSelection: creditsDefaultSessionModel({
+        settings: workspaceCatalogSettings,
+        selections,
+        workspaceSettings,
+      }),
+    });
+    if (creditBalance) {
+      for (const model of catalog.models) {
+        if (model.cost !== "credits") continue;
+        model.creditFunding = creditBalance.promotionalCredits?.some(
+          (credit) => credit.remainingMicros > 0 && credit.eligibleModelIds.includes(model.id),
+        )
+          ? "promotional"
+          : spendableCreditMicros(creditBalance, model.id) > 0
+            ? "general"
+            : "unavailable";
+      }
+    }
     c.header("cache-control", "private, no-store");
-    return c.json(
-      WorkspaceModelCatalogResponse.parse(
-        projectWorkspaceModelCatalog(selections, {
-          defaultSelection,
-          creditsSelection: creditsDefaultSessionModel({
-            settings: workspaceCatalogSettings,
-            selections,
-            workspaceSettings,
-          }),
-        }),
-      ),
-    );
+    return c.json(WorkspaceModelCatalogResponse.parse(catalog));
   });
 
   app.get("/v1/workspaces/:workspaceId/gateway-custom-models", async (c) => {

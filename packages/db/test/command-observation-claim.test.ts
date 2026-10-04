@@ -36,20 +36,17 @@ afterAll(async () => {
   await shared?.release();
 }, 60_000);
 
-async function submitHumanSend(
-  grant: { accountId: string; workspaceId: string | null; subjectId: string },
-  sessionId: string,
+async function send(
+  identity: { accountId: string; workspaceId: string; sessionId: string },
+  subjectId: string,
   text: string,
 ) {
-  const workspaceId = grant.workspaceId!;
-  await withWorkspaceSessionActivityRls(client.db, workspaceId, (db) =>
+  return withWorkspaceSessionActivityRls(client.db, identity.workspaceId, (db) =>
     db.transaction((tx) =>
       submitHumanPromptInTransaction(tx as unknown as typeof db, {
-        accountId: grant.accountId,
-        workspaceId,
-        sessionId,
-        subjectId: grant.subjectId,
-        actor: { type: "human", subjectId: grant.subjectId },
+        ...identity,
+        subjectId,
+        actor: { type: "human", subjectId },
         operationKey: crypto.randomUUID(),
         delivery: "send",
         text,
@@ -61,24 +58,7 @@ async function submitHumanSend(
   );
 }
 
-async function claimNext(workspaceId: string, sessionId: string) {
-  const attemptId = crypto.randomUUID();
-  const claim = await claimSessionWorkForAttempt(client.db, workspaceId, {
-    sessionId,
-    workflowId: `session-${sessionId}`,
-    workflowRunId: crypto.randomUUID(),
-    attemptId,
-    dispatchId: crypto.randomUUID(),
-    trigger: { kind: "next" },
-  });
-  if (claim.action !== "claimed") throw new Error(`Expected claim: ${claim.reason}`);
-  return { turn: claim.turn, attemptId };
-}
-
-/** `launchedByHuman` adopts the command from an exact claimed human turn
- * attempt, as production adoption always does, and settles that turn before
- * the command exits. */
-async function fixture(command = "printf output", terminal = true, launchedByHuman = false) {
+async function fixture(command = "printf output", terminal = true, humanLaunch = false) {
   const suffix = crypto.randomUUID();
   const access = await bootstrapWorkspace(client.db, {
     accountExternalSource: "test",
@@ -103,41 +83,44 @@ async function fixture(command = "printf output", terminal = true, launchedByHum
   };
   const session = await createSession(client.db, sessionInput);
   const identity = { ...scope, sessionId: session.id, commandId: crypto.randomUUID() };
+  let launch:
+    | { turnId: string; triggerEventId: string; attemptId: string; executionGeneration: number }
+    | undefined;
+  if (humanLaunch) {
+    await send(identity, grant.subjectId, "Run the command in the background");
+    const attemptId = crypto.randomUUID();
+    const claimed = await claimSessionWorkForAttempt(client.db, scope.workspaceId, {
+      sessionId: session.id,
+      workflowId: `session-${session.id}`,
+      workflowRunId: crypto.randomUUID(),
+      attemptId,
+      dispatchId: crypto.randomUUID(),
+      trigger: { kind: "next" },
+    });
+    if (claimed.action !== "claimed") throw new Error("Command launch turn was not claimed");
+    launch = {
+      turnId: claimed.turn.id,
+      triggerEventId: claimed.turn.triggerEventId,
+      attemptId,
+      executionGeneration: claimed.turn.executionGeneration,
+    };
+  }
   const provider = {
     controlWorkspaceId: scope.workspaceId,
     enrollmentId: crypto.randomUUID(),
     connectionInstanceId: crypto.randomUUID(),
     opId: crypto.randomUUID(),
   };
-  let launch:
-    | { turnId: string; triggerEventId: string; attemptId: string; executionGeneration: number }
-    | undefined;
-  if (launchedByHuman) {
-    await submitHumanSend(grant, session.id, "Start the command");
-    const launched = await claimNext(scope.workspaceId, session.id);
-    launch = {
-      turnId: launched.turn.id,
-      triggerEventId: launched.turn.triggerEventId,
-      attemptId: launched.attemptId,
-      executionGeneration: launched.turn.executionGeneration,
-    };
-  }
   await withWorkspaceSessionActivityRls(client.db, scope.workspaceId, (db) =>
     insertConnectedMachineSessionBackgroundCommandInTransaction(db, {
       ...identity,
       ...provider,
-      ...(launch
-        ? {
-            turnId: launch.turnId,
-            attemptId: launch.attemptId,
-            executionGeneration: launch.executionGeneration,
-          }
-        : {}),
+      ...launch,
       command,
     }),
   );
   if (launch) {
-    const settled = await applySessionTurnSettlement(client.db, scope.workspaceId, {
+    await applySessionTurnSettlement(client.db, scope.workspaceId, {
       sessionId: session.id,
       turnId: launch.turnId,
       triggerEventId: launch.triggerEventId,
@@ -145,9 +128,8 @@ async function fixture(command = "printf output", terminal = true, launchedByHum
       turnStatus: "completed",
       sessionStatus: "idle",
       activeTurnId: null,
-      events: [],
+      events: [{ type: "turn.completed", payload: { output: "Command started" } }],
     });
-    if (settled.action !== "settled") throw new Error("Launching turn did not settle");
   }
   if (terminal) {
     await settleConnectedMachineSessionBackgroundCommand(client.db, {
@@ -158,7 +140,7 @@ async function fixture(command = "printf output", terminal = true, launchedByHum
       reason: "process exited",
     });
   }
-  return { identity, sessionInput, grant };
+  return { identity, sessionInput, grant, launch };
 }
 
 for (const outcome of ["provider_offline", "provider_error", "provider_running"] as const) {
@@ -277,17 +259,32 @@ test("command reads preserve exact text and safely bound unicode previews", asyn
 });
 
 test("terminal reads preserve notification and history delivered by the ordinary claim API", async () => {
-  const { identity, grant } = await fixture("printf output", true, true);
-  // The terminal notice rides the same human's eligible new input; it does
-  // not itself wake idle.
-  await submitHumanSend(grant, identity.sessionId, "Inspect the command result");
-  await claimNext(identity.workspaceId, identity.sessionId);
+  const { identity, grant, launch } = await fixture("printf output", true, true);
+  // The immutable human launch receipt makes this notice eligible to ride the
+  // same human's new input; an unattributed legacy command must remain pending.
+  await send(identity, grant.subjectId, "Inspect the command result");
+  const claim = await claimSessionWorkForAttempt(client.db, identity.workspaceId, {
+    sessionId: identity.sessionId,
+    workflowId: `session-${identity.sessionId}`,
+    workflowRunId: crypto.randomUUID(),
+    attemptId: crypto.randomUUID(),
+    dispatchId: crypto.randomUUID(),
+    trigger: { kind: "next" },
+  });
+  expect(claim.action).toBe("claimed");
+  if (claim.action !== "claimed") throw new Error("Command-result follow-up was not claimed");
+  expect(claim.turn.id).not.toBe(launch!.turnId);
   const updates = () => shared.admin`
     select * from session_system_updates where workspace_id = ${identity.workspaceId}
       and session_id = ${identity.sessionId} and source_id = ${identity.commandId}`;
   const before = await updates();
   expect(before).toHaveLength(1);
   expect(before[0]!.state).toBe("delivered");
+  expect(before[0]!.lineage).toMatchObject({
+    causalTurnId: launch!.turnId,
+    causalAttemptId: launch!.attemptId,
+    causalExecutionGeneration: launch!.executionGeneration,
+  });
   expect(before[0]!.delivered_history_item_id).not.toBeNull();
   const history = await getActiveSessionHistoryItems(
     client.db,

@@ -37,17 +37,15 @@ Every visible tool costs prompt tokens and widens what the agent can do. For an 
 createSession: ({ initialMessage, idempotencyKey }) => ({
   initialMessage,
   idempotencyKey,
+  agent: { identity: "You are Acme's assistant.", capabilities: "none" }, // only this session's tools
+  sandboxBackend: "none", // no sandbox, shell, or file tools
   mcpServers: [{ id: "acme", url: ACME_MCP_URL, allowedTools: ["get_ticket", "update_ticket"] }],
   tools: [{ kind: "mcp", id: "acme" }], // exactly your server
-  firstPartyMcpTools: [], // no Opengeni workspace or session tools
-  bundledSkillIds: [], // no bundled Opengeni guidance
-  sandboxBackend: "none", // no sandbox, shell, or file tools
-  agentLearning: { knowledge: "off", instructions: "off", skills: "off" },
   skills: productSkills, // your own versioned Skills, if any
 }),
 ```
 
-Omitting `tools` or `firstPartyMcpTools` inherits workspace defaults, so pass explicit lists. `agent: { capabilities: "none" }` also limits the agent to the session's own tools plus the essentials; see [Configure the agent](/integrate/configure-the-agent).
+`capabilities: "none"` limits the agent to the session's own tools plus the essentials: no Opengeni workspace or session tools, workspace connectors, or bundled Opengeni guides, so empty `firstPartyMcpTools` or `bundledSkillIds` lists add nothing. See [Configure the agent](/integrate/configure-the-agent).
 
 Organization owners can restrict which integrations may be set up in **Organization settings → Integrations**.
 

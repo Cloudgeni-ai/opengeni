@@ -54,7 +54,6 @@ const postureOptions = {
   expectedRole: "opengeni_app",
   rlsStrategy: "force" as const,
   targetSchema: "public",
-  organizationTenancyCanonicalActivationEnabled: true,
 };
 let stagingBaselineViolations: Record<"current" | "old" | "restored", string[]>;
 let preMigrationBaselineViolations: Record<"current" | "old" | "restored", string[]>;
@@ -674,7 +673,6 @@ test("unattested helper, scope mismatches, PUBLIC execution and residual capabil
   const options = {
     expectedRole: "opengeni_app",
     rlsStrategy: "force" as const,
-    organizationTenancyCanonicalActivationEnabled: true,
   };
   expect(
     evaluateRuntimeDatabasePosture(

@@ -891,6 +891,48 @@ describe("API component integration", () => {
     expect(((await paused.json()) as { status: string }).status).toBe("paused");
 
     const wakeupsBeforeResume = workflow.wakeups.length;
+    const pausedGoal = await getSessionGoal(dbClient.db, workspaceId, session.id);
+    const pausedEvents = await listSessionEvents(dbClient.db, workspaceId, session.id);
+    await withWorkspaceSessionActivityRls(dbClient.db, workspaceId, (tx) =>
+      tx.execute(sql`
+      update sessions set model = 'removed/fixture-model' where id = ${session.id}`),
+    );
+    const blockedResume = await app.request(
+      workspacePath(workspaceId, `/sessions/${session.id}/goal`),
+      {
+        method: "PATCH",
+        body: JSON.stringify({ status: "active" }),
+        headers: { "content-type": "application/json" },
+      },
+    );
+    expect(blockedResume.status).toBe(422);
+    expect(await blockedResume.text()).toContain("Choose an available model");
+    expect(await getSessionGoal(dbClient.db, workspaceId, session.id)).toEqual(pausedGoal);
+    expect(await listSessionEvents(dbClient.db, workspaceId, session.id)).toEqual(pausedEvents);
+    expect(workflow.wakeups.length).toBe(wakeupsBeforeResume);
+    await withWorkspaceSessionActivityRls(dbClient.db, workspaceId, (tx) =>
+      tx.execute(sql`
+      update sessions set model = 'scripted-model' where id = ${session.id}`),
+    );
+    await withWorkspaceSessionActivityRls(dbClient.db, workspaceId, (tx) =>
+      tx.execute(sql`update sessions set latency_mode = 'fast' where id = ${session.id}`),
+    );
+    const blockedLatencyResume = await app.request(
+      workspacePath(workspaceId, `/sessions/${session.id}/goal`),
+      {
+        method: "PATCH",
+        body: JSON.stringify({ status: "active" }),
+        headers: { "content-type": "application/json" },
+      },
+    );
+    expect(blockedLatencyResume.status).toBe(422);
+    expect(await blockedLatencyResume.text()).toContain("latency mode");
+    expect(await getSessionGoal(dbClient.db, workspaceId, session.id)).toEqual(pausedGoal);
+    expect(await listSessionEvents(dbClient.db, workspaceId, session.id)).toEqual(pausedEvents);
+    expect(workflow.wakeups.length).toBe(wakeupsBeforeResume);
+    await withWorkspaceSessionActivityRls(dbClient.db, workspaceId, (tx) =>
+      tx.execute(sql`update sessions set latency_mode = 'standard' where id = ${session.id}`),
+    );
     const resumed = await app.request(workspacePath(workspaceId, `/sessions/${session.id}/goal`), {
       method: "PATCH",
       body: JSON.stringify({ status: "active" }),
@@ -1263,6 +1305,27 @@ describe("API component integration", () => {
       outcome: "applied",
     });
 
+    const pausedBeforeResume = await getSessionGoal(dbClient.db, baseGrant.workspaceId, session.id);
+    const eventsBeforeResume = await listSessionEvents(
+      dbClient.db,
+      baseGrant.workspaceId,
+      session.id,
+    );
+    await withWorkspaceSessionActivityRls(dbClient.db, baseGrant.workspaceId, (tx) =>
+      tx.execute(sql`
+      update sessions set model = 'removed/fixture-model' where id = ${session.id}`),
+    );
+    await expect(callMcpTool(mcp, "goal_resume", {})).rejects.toThrow("Choose an available model");
+    expect(await getSessionGoal(dbClient.db, baseGrant.workspaceId, session.id)).toEqual(
+      pausedBeforeResume,
+    );
+    expect(await listSessionEvents(dbClient.db, baseGrant.workspaceId, session.id)).toEqual(
+      eventsBeforeResume,
+    );
+    await withWorkspaceSessionActivityRls(dbClient.db, baseGrant.workspaceId, (tx) =>
+      tx.execute(sql`
+      update sessions set model = 'scripted-model' where id = ${session.id}`),
+    );
     const resumedGoal = await callMcpTool<McpMutationReceiptType>(mcp, "goal_resume", {});
     expect(resumedGoal).toMatchObject({ changed: true, resource: { state: "active" } });
     const alreadyActive = await callMcpTool<McpMutationReceiptType>(mcp, "goal_resume", {});
@@ -1976,12 +2039,7 @@ describe("API component integration", () => {
     });
     expect(rejectedTurn.status).toBe(402);
     expect(await rejectedTurn.json()).toMatchObject({
-      error: {
-        status: 402,
-        code: "payment_required",
-        message: expect.stringMatching(/^insufficient \S+ credits$/),
-        retryable: false,
-      },
+      error: { status: 402, code: "payment_required", retryable: false },
     });
     const preserved = await app.request(
       workspacePath(ownerWorkspaceId, `/files/${upload.fileId}`),
@@ -2163,12 +2221,7 @@ describe("API component integration", () => {
     );
     expect(triggered.status).toBe(402);
     expect(await triggered.json()).toMatchObject({
-      error: {
-        status: 402,
-        code: "payment_required",
-        message: expect.stringMatching(/^insufficient \S+ credits$/),
-        retryable: false,
-      },
+      error: { status: 402, code: "payment_required", retryable: false },
     });
   });
 

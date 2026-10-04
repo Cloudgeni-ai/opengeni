@@ -183,6 +183,26 @@ describe("modular composer: module selection (AC12)", () => {
     });
   }
 
+  test("background-command guidance needs a sandbox or Connected Machine", () => {
+    for (const capabilities of [allAgentCapabilities(), noneAgentCapabilities()]) {
+      const detached = compose(capabilities, NO_RESOURCES).composed;
+      expect(detached).not.toContain("## Background commands");
+      expect(detached).not.toContain("command_wait");
+      expect(detached).not.toContain("command_read");
+      expect(detached).not.toContain("a command");
+      expect(detached).toContain("`wait_for_input`");
+      for (const resources of [
+        { ...NO_RESOURCES, managedSandbox: true },
+        { ...NO_RESOURCES, connectedMachine: true },
+      ]) {
+        const attached = compose(capabilities, resources).composed;
+        expect(attached).toContain("## Background commands");
+        expect(attached).toContain("`command_read`");
+        expect(attached).toContain("`command_wait`");
+      }
+    }
+  });
+
   test("sandbox guidance appears for a Connected Machine alone", () => {
     const result = compose(allAgentCapabilities(), { ...NO_RESOURCES, connectedMachine: true });
     expect(moduleIds(result)).toEqual(expect.arrayContaining(["sandbox", "connected_machine"]));

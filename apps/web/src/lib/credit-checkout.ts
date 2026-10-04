@@ -77,6 +77,7 @@ export async function startCreditCheckout(
     amountUsd?: number | undefined;
     promotionCode?: string | undefined;
     tab: Window | null;
+    signal?: AbortSignal;
     origin?: string;
     navigate?: (url: string) => void;
   },
@@ -85,6 +86,7 @@ export async function startCreditCheckout(
   const inNewTab = input.tab !== null;
   let session: Awaited<ReturnType<CreditCheckoutClient["createBillingCheckout"]>>;
   try {
+    input.signal?.throwIfAborted();
     session = await client.createBillingCheckout({
       accountId: input.accountId,
       ...(input.amountUsd !== undefined ? { amountUsd: input.amountUsd } : {}),
@@ -96,6 +98,8 @@ export async function startCreditCheckout(
         ? checkoutTabReturnUrl(origin, "cancelled")
         : billingCheckoutReturnUrl(origin, input.workspaceId, "cancelled"),
     });
+    // A late response must not navigate after leaving this account or form.
+    input.signal?.throwIfAborted();
   } catch (error) {
     input.tab?.close();
     throw error;

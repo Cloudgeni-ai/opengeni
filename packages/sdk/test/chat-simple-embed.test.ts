@@ -113,6 +113,23 @@ describe("simple embed path", () => {
     expect(api.ensures()).toHaveLength(0);
   });
 
+  test("blank env values fall back to the hosted API and the key's organization", async () => {
+    const seen: string[] = [];
+    const og = new OpenGeni({
+      apiKey: "og_test",
+      // What `process.env.X` yields for `OPENGENI_API_BASE_URL=` in a copied .env.example.
+      baseUrl: "",
+      organizationId: "  ",
+      fetch: async (input) => {
+        seen.push(String(input instanceof Request ? input.url : input));
+        return new Response(JSON.stringify({ error: { message: "stop" } }), { status: 500 });
+      },
+    });
+    expect(og.organizationId).toBe("");
+    await og.resolveOrganizationId().catch(() => undefined);
+    expect(seen[0]?.startsWith("https://app.opengeni.ai/")).toBe(true);
+  });
+
   test("workspaceId translates tenant, user and explicit ids; only per-user workspaces add their owner", async () => {
     const api = fakeApi();
     const og = new OpenGeni({ apiKey: "og_test", baseUrl: API, fetch: api.fetch });

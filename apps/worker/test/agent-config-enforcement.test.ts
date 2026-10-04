@@ -24,6 +24,7 @@ import {
   type AgentCapabilityId,
   type AgentConfigCreator,
   type AgentSkillsCapability,
+  type BundledSkillId,
   type FirstPartyMcpToolName,
   type ResolvedAgentConfig,
   type AgentMediaAttachment,
@@ -109,6 +110,10 @@ type FixtureOptions = {
   localMediaCredential?: boolean;
   foreignMediaCredential?: boolean;
   credentialRestrictionSource?: "accepted" | "initial" | "spoof" | "none";
+  /** Route this turn to an attached Connected Machine (home stays `none`). */
+  machineAttached?: boolean;
+  /** The stored bundled selection; `"omit"` leaves it undefined. Default `[]`. */
+  bundledSkillIds?: BundledSkillId[] | "omit";
 };
 
 // Execute all three production worker phases and the production runtime builder.
@@ -292,7 +297,9 @@ async function captureWorkerRequest(options: FixtureOptions = {}) {
     })),
     toolPolicy: { mode: "explicit", inheritedFromSessionId: null },
     variableSetIds: [],
-    bundledSkillIds: [],
+    ...(options.bundledSkillIds === "omit"
+      ? {}
+      : { bundledSkillIds: options.bundledSkillIds ?? [] }),
     skills: [],
     firstPartyMcpTools: [...FIRST_PARTY_MCP_TOOL_NAMES],
     firstPartyMcpPermissions: null,
@@ -388,6 +395,7 @@ async function captureWorkerRequest(options: FixtureOptions = {}) {
       ...policy,
       sandboxArtifactRuntime: { available: false, environment: {} },
       groupBoxBackend: "none",
+      ...(options.machineAttached ? { activeSandboxBackend: "selfhosted" as const } : {}),
       routingOn: false,
       credentialSubjectId: null,
       interactionInterventionResume: null,
@@ -537,10 +545,16 @@ test.each(["accepted", "initial", "spoof", "none"] as const)(
   },
 );
 
-function expectedFirstPartyTools(config: ResolvedAgentConfig | null, settings: Settings) {
+// The fixture turn has no sandbox or Connected Machine unless `sandboxAttached`.
+function expectedFirstPartyTools(
+  config: ResolvedAgentConfig | null,
+  settings: Settings,
+  sandboxAttached = false,
+) {
   return allowedFirstPartyMcpToolsForSession(settings, [...FIRST_PARTY_MCP_TOOL_NAMES]).filter(
     (name) => {
       const owner = FIRST_PARTY_MCP_TOOL_CAPABILITIES[name];
+      if (owner === "sandbox") return sandboxAttached;
       return (
         !config ||
         owner === "runtime" ||
@@ -573,7 +587,7 @@ function assertCapabilitySurface(
     if (!["opengeni", "interaction"].includes(entry.identity.serverId)) continue;
     const owner =
       FIRST_PARTY_MCP_TOOL_CAPABILITIES[entry.identity.toolName as FirstPartyMcpToolName];
-    if (owner && owner !== "runtime") {
+    if (owner && owner !== "runtime" && owner !== "sandbox") {
       expect(enabled(owner)).toBe(true);
     }
   }
@@ -595,7 +609,9 @@ function assertCapabilitySurface(
   expect(captured.selectedServerIds.includes("docs")).toBe(enabled("knowledge"));
   expect(captured.names).toContain(prefixedMcpToolName("customer-product", "search_documents"));
   expect(captured.names).toContain("opengeni__wait_for_input");
-  expect(captured.names).toContain("opengeni__command_read");
+  // No sandbox or Connected Machine is attached, so no command can exist.
+  expect(captured.names).not.toContain("opengeni__command_read");
+  expect(captured.names).not.toContain("opengeni__command_wait");
 }
 
 // Assert the model-facing contract directly. A whole-request digest also pins
@@ -754,6 +770,28 @@ describe("agent configuration reaches the production model request", () => {
     expect(captured.names).not.toContain("list_models");
     expect(captured.names).not.toContain("skill_search");
   });
+
+  test.each(["all", "none", "legacy"] as const)(
+    "%s receives command tools only with an attached sandbox or Connected Machine",
+    async (from) => {
+      const config = from === "legacy" ? null : agentConfig(from);
+      const detached = await captureWorkerRequest({ agent: config });
+      expect(detached.preparation.firstPartyTools).toEqual(
+        expectedFirstPartyTools(config, detached.settings),
+      );
+      expect(detached.names).toContain("opengeni__wait_for_input");
+      expect(detached.names).not.toContain("opengeni__command_read");
+      expect(detached.names).not.toContain("opengeni__command_wait");
+
+      const attached = await captureWorkerRequest({ agent: config, machineAttached: true });
+      expect(attached.preparation.firstPartyTools).toEqual(
+        expectedFirstPartyTools(config, attached.settings, true),
+      );
+      expect(attached.names).toContain("opengeni__wait_for_input");
+      expect(attached.names).toContain("opengeni__command_read");
+      expect(attached.names).toContain("opengeni__command_wait");
+    },
+  );
 
   test.each(["all", "none"] as const)(
     "%s effectiveTools matches the captured next model request",
@@ -1034,6 +1072,33 @@ describe("Skill attachment is distinct from Skill catalog availability", () => {
       expect(captured.names.includes("tool_list")).toBe(skills === "manage");
     },
   );
+
+  test("none omits bundled Opengeni guides unless listed; all keeps the defaults", async () => {
+    const base = { hasSkills: false, productMcp: false, builtins: false } as const;
+    const noneOmitted = await captureWorkerRequest({
+      ...base,
+      agent: agentConfig("none"),
+      bundledSkillIds: "omit",
+    });
+    expect(noneOmitted.skillCatalog).toEqual([]);
+    expect(noneOmitted.names).not.toContain("skill_read");
+
+    const noneExplicit = await captureWorkerRequest({
+      ...base,
+      agent: agentConfig("none"),
+      bundledSkillIds: ["builtin:opengeni-help"],
+    });
+    expect(noneExplicit.skillCatalog.map((entry) => entry.id)).toEqual(["builtin:opengeni-help"]);
+    expect(noneExplicit.names).toContain("skill_read");
+
+    const allOmitted = await captureWorkerRequest({
+      ...base,
+      agent: agentConfig("all"),
+      bundledSkillIds: "omit",
+    });
+    expect(allOmitted.skillCatalog.map((entry) => entry.id)).toContain("builtin:opengeni-help");
+    expect(allOmitted.names).toContain("skill_read");
+  });
 
   test("legacy null still attaches Skill management and the router with no catalog", async () => {
     const captured = await captureWorkerRequest({

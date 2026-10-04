@@ -475,8 +475,9 @@ be verified separately from core private-session access.
 
 An organization-admin backend may read and update
 `/v1/organizations/:organizationId/private-session-settings` with its organization
-key (`workspace:admin`), without a browser login or synthetic membership. Enabling
-the setting still requires platform readiness. Updates require `expectedVersion`
+key (`workspace:admin`), without a browser login or synthetic membership. Every
+organization is session-tenancy activated (migration 0611), so enabling needs no
+separate platform readiness. Updates require `expectedVersion`
 and `operationId`; retries preserve their result and recheck live key authority.
 This product setting grants no private-session access: create and use sessions
 through the intended user's `asUser` context.
@@ -860,7 +861,9 @@ The old `opengeni-product-integration` Pack is not needed or restored.
 
 Control OpenGeni's bundled guidance separately from your product Skills with
 `CreateSessionRequest.bundledSkillIds`. Omit it for the default bundles; pass
-`[]` for none, or explicit IDs such as `"builtin:opengeni-documents"`. Selection
+`[]` for none, or explicit IDs such as `"builtin:opengeni-documents"`. An agent
+that starts from `capabilities: "none"` has no default bundles: create freezes
+an omitted selection as `[]`, and only an explicit list opts in. Selection
 only narrows each bundle's normal inclusion conditions and grants no tool
 permissions. Child sessions inherit the choice and may only narrow it.
 Scheduled-task `agentConfig` and automation `sessionTemplate` accept the same
@@ -875,8 +878,10 @@ selection does not wait for lazy tool discovery or sandbox startup.
 `scheduled_tasks_create` is configured. Like other bundles, it can be excluded
 by an explicit selection and does not grant tool permissions.
 
-For an embedded support bot, put `bundledSkillIds: []` in the raw create request
-or `create: { bundledSkillIds: [] }` in the chat facade's resolved options. Select
+For an embedded support bot, start the agent from `capabilities: "none"`, which
+already omits the bundled guides; for any other agent, put
+`bundledSkillIds: []` in the raw create request or
+`create: { bundledSkillIds: [] }` in the chat facade's resolved options. Select
 only the product's own inline Skills and intended tools, and use a workspace
 whose shared Skills match that product. For example, a documents-capable bot
 can select only `builtin:opengeni-documents`. Removing bundled guides does not
