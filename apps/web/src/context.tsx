@@ -2528,21 +2528,22 @@ export function RootRouteComponent() {
   );
   // Onboarding may finish somewhere other than home (developer setup opens
   // its workspace's new chat); go there while access revalidates, so the app
-  // opens on it.
+  // opens on it. Resolves once the destination is the current location.
   const completeOrganizationOnboarding = useCallback(
-    (destination?: { workspaceId: string; sessionId?: string }) => {
-      if (destination?.sessionId) {
-        void navigate({
-          to: "/workspaces/$workspaceId/sessions/$sessionId",
-          params: { workspaceId: destination.workspaceId, sessionId: destination.sessionId },
-        });
-      } else if (destination) {
-        void navigate({
-          to: "/workspaces/$workspaceId/sessions",
-          params: { workspaceId: destination.workspaceId },
-        });
-      }
+    async (destination?: { workspaceId: string; sessionId?: string }) => {
+      const arrived = destination?.sessionId
+        ? navigate({
+            to: "/workspaces/$workspaceId/sessions/$sessionId",
+            params: { workspaceId: destination.workspaceId, sessionId: destination.sessionId },
+          })
+        : destination
+          ? navigate({
+              to: "/workspaces/$workspaceId/sessions",
+              params: { workspaceId: destination.workspaceId },
+            })
+          : null;
       revalidatePrincipalAccess();
+      await arrived;
     },
     [navigate, revalidatePrincipalAccess],
   );
@@ -2998,8 +2999,11 @@ export function RootRouteComponent() {
         onSignOut={handleManagedSignOut}
         onComplete={(destination) => {
           clearPendingDeveloperSetup();
-          setDeveloperSetupRevision((revision) => revision + 1);
-          completeOrganizationOnboarding(destination);
+          // Reach the destination before the app's routes return: the home
+          // route would otherwise redirect to the landing workspace first.
+          void completeOrganizationOnboarding(destination).finally(() =>
+            setDeveloperSetupRevision((revision) => revision + 1),
+          );
         }}
       />
     </Suspense>
