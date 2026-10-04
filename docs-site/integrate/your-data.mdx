@@ -167,7 +167,7 @@ Integrations belong to a workspace, so any session there can select them. Use th
 
 ## Reachability
 
-Tool servers and APIs must be public HTTPS URLs. You can pass an OpenAPI document inline (`kind: "openapi_document"`), but the API itself must still be reachable. For local development, use a tunnel: `cloudflared tunnel --url http://localhost:4101` or `ngrok http 4101`.
+Tool servers and APIs must be public HTTPS URLs. You can pass an OpenAPI document inline (`kind: "openapi_document"`), but the API itself must still be reachable. For local development, tunnel only the tool endpoint, never the whole app: a tunnel to your dev app's port (`cloudflared tunnel --url http://localhost:3000`) publishes every page, including sign-in and admin. If the tool server runs on its own port, tunnel that port; otherwise run a small forwarder that passes only the tool path and tunnel its port (copy-paste snippet under "Local development" in `references/tools-and-auth.md` of the [client skill](/reference/opengeni-client-skill)).
 
 ## Keep the tool surface small
 
