@@ -77,6 +77,7 @@ export const RUNTIME_INSIGHTS_ROLLUP_PRIVATE_TABLES = [
   "insights_charge_daily",
   "insights_charge_links",
   "insights_list_rate_snapshots",
+  "insights_rollup_invalidations",
 ] as const;
 
 const AUTOMATIC_SESSION_TITLE_FANOUT_MIGRATION_ROUTINE =
@@ -2176,6 +2177,7 @@ export async function inspectRuntimeDatabasePosture(
               'insights_charge_daily',
               'insights_charge_links',
               'insights_list_rate_snapshots',
+              'insights_rollup_invalidations',
               'usage_allowance_capabilities',
               'workspace_usage_allowances',
               'workspace_member_allowances',
@@ -4258,6 +4260,7 @@ export function evaluateRuntimeDatabasePosture(
       "maintain_insights_model_charges()",
       "allocate_insights_model_list_classes()",
       "insights_rollup_amount_inputs(uuid, uuid, timestamp with time zone, timestamp with time zone, text)",
+      "insights_reconcile_rollups(uuid, uuid, integer)",
     ]) {
       const routine = posture.privateRoutines.find((candidate) => candidate.name === name);
       if (
@@ -4265,7 +4268,8 @@ export function evaluateRuntimeDatabasePosture(
         !routine.execute ||
         routine.publicExecute ||
         routine.owner !== modelCallFactsOwner ||
-        routine.securityDefiner !== (name.startsWith("maintain_") || name.startsWith("allocate_")) ||
+        routine.securityDefiner !==
+          (name.startsWith("maintain_") || name.startsWith("allocate_")) ||
         !routine.configuration?.some((value) => paths.includes(value))
       ) {
         violations.push(`Insights rollup routine ${name} is missing or unsafe`);

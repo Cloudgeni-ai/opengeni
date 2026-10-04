@@ -48,6 +48,21 @@ CREATE TABLE opengeni_private.insights_model_daily_timestamps (
 CREATE INDEX insights_model_daily_occurrence_idx ON opengeni_private.insights_model_daily_timestamps
   (account_id,workspace_id,day,dimensions,occurred_at);
 
+-- Source writers never update a shared analytics group or lookup row. Each
+-- mutation appends its own invalidation in the SAME transaction as the source.
+-- Pending scopes are read from authoritative facts until owner reconciliation;
+-- NULL day means the entire stream (late fact attribution can change old debits).
+CREATE TABLE opengeni_private.insights_rollup_invalidations (
+  id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+  account_id uuid NOT NULL,
+  workspace_id uuid,
+  stream text NOT NULL CHECK (stream IN ('usage_events','model_call_facts','charges')),
+  day date,
+  source_id uuid NOT NULL
+);
+CREATE INDEX insights_rollup_invalidations_scope_idx
+  ON opengeni_private.insights_rollup_invalidations(account_id,workspace_id,stream,day);
+
 CREATE FUNCTION opengeni_private.insights_add_measures(a jsonb, b jsonb, sign integer)
 RETURNS jsonb LANGUAGE sql IMMUTABLE STRICT
 SET search_path = pg_catalog
@@ -214,7 +229,7 @@ CREATE FUNCTION opengeni_private.maintain_insights_daily_rollup()
 RETURNS trigger LANGUAGE plpgsql SECURITY DEFINER
 SET search_path = pg_catalog, opengeni_private, pg_temp
 AS $$
-DECLARE old_value jsonb; new_value jsonb; fence bigint;
+DECLARE old_value jsonb; new_value jsonb; value jsonb;
 BEGIN
   IF TG_WHEN<>'AFTER' OR TG_LEVEL<>'ROW' OR TG_RELID NOT IN('usage_events'::regclass,'model_call_facts'::regclass) THEN
     RAISE EXCEPTION 'Insights maintenance requires the exact source trigger' USING ERRCODE='42501';
@@ -222,15 +237,11 @@ BEGIN
   IF TG_OP <> 'INSERT' THEN old_value := to_jsonb(OLD); END IF;
   IF TG_OP <> 'DELETE' THEN new_value := to_jsonb(NEW); END IF;
   IF old_value IS NOT DISTINCT FROM new_value THEN RETURN NULL; END IF;
-  -- Sorted group fences prevent opposite dimension moves from deadlocking.
-  -- These are transaction-local; rollback also rolls back every delta.
-  FOR fence IN SELECT DISTINCT hashtextextended(TG_TABLE_NAME || ':' || (value->>'account_id') || ':' ||
-      (value->>'workspace_id') || ':' || (((value->>'occurred_at')::timestamptz AT TIME ZONE 'UTC')::date)::text || ':' ||
-      opengeni_private.insights_rollup_dimensions(TG_TABLE_NAME, value)::text, 596)
-    FROM unnest(ARRAY[old_value, new_value]) value WHERE value IS NOT NULL ORDER BY 1
-  LOOP PERFORM pg_advisory_xact_lock(fence); END LOOP;
-  IF old_value IS NOT NULL THEN PERFORM opengeni_private.insights_apply_delta(TG_TABLE_NAME, old_value, -1); END IF;
-  IF new_value IS NOT NULL THEN PERFORM opengeni_private.insights_apply_delta(TG_TABLE_NAME, new_value, 1); END IF;
+  FOR value IN SELECT DISTINCT v FROM unnest(ARRAY[old_value,new_value]) v WHERE v IS NOT NULL LOOP
+    INSERT INTO opengeni_private.insights_rollup_invalidations(account_id,workspace_id,stream,day,source_id)
+      VALUES((value->>'account_id')::uuid,(value->>'workspace_id')::uuid,TG_TABLE_NAME,
+        ((value->>'occurred_at')::timestamptz AT TIME ZONE 'UTC')::date,(value->>'id')::uuid);
+  END LOOP;
   RETURN NULL;
 END
 $$;
@@ -331,6 +342,11 @@ BEGIN
         SELECT CASE WHEN p_since = date_trunc('day', p_since AT TIME ZONE 'UTC') AT TIME ZONE 'UTC'
           THEN p_since ELSE (date_trunc('day', p_since AT TIME ZONE 'UTC') + interval '1 day') AT TIME ZONE 'UTC' END AS lo,
           date_trunc('day', p_until AT TIME ZONE 'UTC') AT TIME ZONE 'UTC' AS hi
+      ), pending AS MATERIALIZED (
+        SELECT EXISTS(SELECT 1 FROM opengeni_private.insights_rollup_invalidations i CROSS JOIN bounds
+          WHERE i.account_id=p_account AND (p_workspace IS NULL OR i.workspace_id=p_workspace)
+            AND i.stream='usage_events' AND (i.day IS NULL OR
+              (i.day>=(lo AT TIME ZONE 'UTC')::date AND i.day<(hi AT TIME ZONE 'UTC')::date))) AS dirty
       ), ledger AS (
         SELECT d.account_id, d.workspace_id, (d.dimensions->>'session_id')::uuid AS session_id,
           d.dimensions->>'event_type' AS event_type, d.dimensions->>'unit' AS unit,
@@ -338,6 +354,7 @@ BEGIN
           d.dimensions->>'warm_group' AS source_resource_id
         FROM opengeni_private.insights_usage_daily d CROSS JOIN bounds
         WHERE p_granularity = 'day' AND d.account_id = p_account
+          AND NOT (SELECT dirty FROM pending)
           AND (p_workspace IS NULL OR d.workspace_id = p_workspace)
           AND d.day >= (lo AT TIME ZONE 'UTC')::date AND d.day < (hi AT TIME ZONE 'UTC')::date
           AND (p_events IS NULL OR d.dimensions->>'event_type' = ANY(p_events))
@@ -345,7 +362,8 @@ BEGIN
         SELECT u.account_id, u.workspace_id, u.session_id, u.event_type, u.unit,
           u.quantity, 1::bigint, u.occurred_at,
           CASE WHEN u.event_type = 'sandbox.warm_seconds' THEN split_part(u.source_resource_id, ':', 1) END
-        FROM %1$I.usage_events u CROSS JOIN opengeni_private.insights_rollup_edge_ranges(p_since,p_until,p_granularity) edge
+        FROM %1$I.usage_events u CROSS JOIN opengeni_private.insights_rollup_edge_ranges(p_since,p_until,
+          CASE WHEN (SELECT dirty FROM pending) THEN 'hour' ELSE p_granularity END) edge
         WHERE u.account_id = p_account AND (p_workspace IS NULL OR u.workspace_id = p_workspace)
           AND u.occurred_at >= edge.since AND u.occurred_at < edge.until
           AND (p_events IS NULL OR u.event_type = ANY(p_events))
@@ -372,11 +390,17 @@ BEGIN
         SELECT CASE WHEN p_since = date_trunc('day', p_since AT TIME ZONE 'UTC') AT TIME ZONE 'UTC'
           THEN p_since ELSE (date_trunc('day', p_since AT TIME ZONE 'UTC') + interval '1 day') AT TIME ZONE 'UTC' END AS lo,
           date_trunc('day', p_until AT TIME ZONE 'UTC') AT TIME ZONE 'UTC' AS hi
+      ), pending AS MATERIALIZED (
+        SELECT EXISTS(SELECT 1 FROM opengeni_private.insights_rollup_invalidations i CROSS JOIN bounds
+          WHERE i.account_id=p_account AND (p_workspace IS NULL OR i.workspace_id=p_workspace)
+            AND i.stream='model_call_facts' AND (i.day IS NULL OR
+              (i.day>=(lo AT TIME ZONE 'UTC')::date AND i.day<(hi AT TIME ZONE 'UTC')::date))) AS dirty
       ), inputs AS (
         SELECT d.account_id, d.workspace_id, d.dimensions, d.day::timestamp AT TIME ZONE 'UTC' AS occurred_at,
           d.recorded_at, d.measures AS m, d.contributions AS c
         FROM opengeni_private.insights_model_daily d CROSS JOIN bounds
         WHERE p_granularity = 'day' AND d.account_id = p_account
+          AND NOT (SELECT dirty FROM pending)
           AND (p_workspace IS NULL OR d.workspace_id = p_workspace)
           AND d.day >= (lo AT TIME ZONE 'UTC')::date AND d.day < (hi AT TIME ZONE 'UTC')::date
           AND (p_provider IS NULL OR d.dimensions->>'provider' = p_provider)
@@ -385,7 +409,8 @@ BEGIN
         SELECT f.account_id, f.workspace_id, opengeni_private.insights_rollup_dimensions('model_call_facts', to_jsonb(f)),
           f.occurred_at, f.recorded_at, opengeni_private.insights_fact_measures(to_jsonb(f)),
           opengeni_private.insights_fact_contributions(to_jsonb(f))
-        FROM %1$I.model_call_facts f CROSS JOIN opengeni_private.insights_rollup_edge_ranges(p_since,p_until,p_granularity) edge
+        FROM %1$I.model_call_facts f CROSS JOIN opengeni_private.insights_rollup_edge_ranges(p_since,p_until,
+          CASE WHEN (SELECT dirty FROM pending) THEN 'hour' ELSE p_granularity END) edge
         WHERE f.account_id = p_account AND (p_workspace IS NULL OR f.workspace_id = p_workspace)
           AND f.occurred_at >= edge.since AND f.occurred_at < edge.until
           AND (p_provider IS NULL OR f.provider = p_provider) AND (p_model IS NULL OR f.model = p_model)
@@ -409,7 +434,8 @@ DO $acl$
 DECLARE target regclass; routine regprocedure; role_name text; columns text;
 BEGIN
   FOREACH target IN ARRAY ARRAY['opengeni_private.insights_usage_daily'::regclass,
-    'opengeni_private.insights_model_daily'::regclass, 'opengeni_private.insights_model_daily_timestamps'::regclass] LOOP
+    'opengeni_private.insights_model_daily'::regclass, 'opengeni_private.insights_model_daily_timestamps'::regclass,
+    'opengeni_private.insights_rollup_invalidations'::regclass] LOOP
     SELECT string_agg(quote_ident(attname), ',') INTO columns FROM pg_attribute
       WHERE attrelid = target AND attnum > 0 AND NOT attisdropped;
     EXECUTE format('REVOKE ALL ON TABLE %s FROM PUBLIC', target);

@@ -25,6 +25,7 @@ import {
 import { migrate } from "../src/migrate";
 import { provisionRoles } from "../src/provision-roles";
 import { LOSSLESS_CONTENT_WRITER_APPLICATION_NAME } from "../src/lossless-json";
+import { withRestoredSessionActivityRlsContext } from "../src/database";
 import {
   allocateRecordedModelListCostByClass,
   configuredModelListPricingSchedules,
@@ -50,10 +51,11 @@ let readerDefinition: string;
 let readerPosture: postgres.Row;
 let policyBaseline: Awaited<ReturnType<typeof policies>>;
 let rawOpposingRows: Awaited<ReturnType<typeof opposingRows>>;
+let rawOpposingStreams: Awaited<ReturnType<typeof opposingRows>>;
 
 // Two analytics groups in opposite transaction-wide order, with four disjoint
 // source fact rows. Run unchanged SQL before installation as the raw control.
-async function opposingRows(tag: string) {
+async function opposingRows(tag: string, forceImmediate = false, mixedStreams = false) {
   const barrier = Promise.withResolvers<void>();
   let arrived = 0;
   const turn = crypto.randomUUID();
@@ -66,10 +68,24 @@ async function opposingRows(tag: string) {
         values(${accountId},${workspaceId},${sessionId},${turn},${`${tag}-${side}-${n}`},'openai','responses',
           ${`${tag}-group-${n === 0 ? side : 1 - side}`},'external','2026-09-10T04:00:00Z')`;
           if (n === 0) {
+            if (forceImmediate) await tx`set constraints all immediate`;
             if (++arrived === 2) barrier.resolve();
             await barrier.promise;
           }
+          // Barrier precedes baseline accounting locks: unlike facts, legacy
+          // ledger/allowance writers may legitimately serialize on account
+          // state. Do not mistake that pre-existing order for analytics locks.
+          if (mixedStreams) {
+            const key = `${tag}-${side}-${n}`;
+            await tx`insert into usage_events(account_id,workspace_id,session_id,event_type,unit,quantity,idempotency_key,occurred_at)
+              values(${accountId},${workspaceId},${sessionId},'model.tokens','tokens',1,${key},'2026-09-10T04:00:00Z')`;
+            await tx`insert into credit_ledger_entries(account_id,workspace_id,type,amount_micros,source_type,source_id,idempotency_key,occurred_at)
+              values(${accountId},${workspaceId},'model_usage_debit',-1,'model_response',${turn + ":" + key},${key},'2026-09-10T04:00:00Z')`;
+          }
         }
+      }).catch((error) => {
+        barrier.resolve();
+        throw error;
       }),
     ),
   );
@@ -173,6 +189,7 @@ beforeAll(async () => {
   await shared.admin`revoke all on function public.insights_test_raw_usage_rows(uuid,uuid,timestamptz,timestamptz,text,uuid[],boolean) from PUBLIC`;
   await shared.admin`grant execute on function public.insights_test_raw_usage_rows(uuid,uuid,timestamptz,timestamptz,text,uuid[],boolean) to opengeni_app`;
   rawOpposingRows = await opposingRows("raw-opposing-control");
+  rawOpposingStreams = await opposingRows("raw-opposing-streams-control", false, true);
   await shared.admin`delete from schema_migrations where name=any(${migrations}::text[])`;
   await migrate(shared.ownerUrl, undefined, {
     preinstalledVector: true,
@@ -331,6 +348,25 @@ test("filtered daily API parity includes conjunctive filters, money-only prior a
 });
 
 async function assertExact() {
+  // Cache contents are deliberately not authoritative while invalidations
+  // exist. Public reads remain exact via raw fallback; explicit owner recovery
+  // reconciles each scope before independently comparing materialized contents.
+  const owner = postgres(shared!.ownerUrl, {
+    max: 1,
+    connection: { application_name: LOSSLESS_CONTENT_WRITER_APPLICATION_NAME },
+  });
+  try {
+    const scopes =
+      await owner`select distinct workspace_id from opengeni_private.insights_rollup_invalidations
+      where account_id=${accountId}`;
+    for (const row of scopes) {
+      await owner.begin("isolation level repeatable read", async (tx) => {
+        await tx`select opengeni_private.insights_reconcile_rollups(${accountId},${row.workspace_id},100000)`;
+      });
+    }
+  } finally {
+    await owner.end();
+  }
   const model = await shared!.admin`with raw as(
       select account_id,workspace_id,(occurred_at at time zone 'UTC')::date as day,
         opengeni_private.insights_rollup_dimensions('model_call_facts',to_jsonb(f)) as dimensions,
@@ -402,7 +438,7 @@ test("historical owner bootstrap is complete, policy-preserving and journal-idem
   ]);
   const [money] = await shared!
     .admin`select sum(quantity)::int as quantity from opengeni_private.insights_charge_daily where account_id=${accountId}`;
-  expect(money!.quantity).toBe(31);
+  expect(money!.quantity).toBe(35);
   await migrate(shared!.ownerUrl, undefined, {
     preinstalledVector: true,
     applicationDatabaseRoles: ["opengeni_app"],
@@ -567,25 +603,218 @@ test("mixed-case debit UUIDs match raw attribution at bootstrap, late capture, c
   await assertExact();
 });
 
-test("diagnostic: raw opposing multirow control commits, unresolved analytics fence cycle aborts atomically", async () => {
+test("raw and repaired opposing multirow transactions both commit, including forced-immediate later writes", async () => {
   expect(rawOpposingRows.outcomes.map((row) => row.status)).toEqual(["fulfilled", "fulfilled"]);
-  const rolled = await opposingRows("rollup-opposing-diagnostic");
-  const rejected = rolled.outcomes.filter(
-    (row): row is PromiseRejectedResult => row.status === "rejected",
-  );
-  console.info(
-    "UNRESOLVED Insights multirow fence cycle",
-    rejected.map((row) => ({ code: row.reason.code, detail: row.reason.detail })),
-  );
-  // This records the launch blocker, NOT a successful deadlock repair. Root
-  // disposition of whole-transaction retry/batching is deliberately separate.
-  expect(rejected).toHaveLength(1);
-  expect(rejected[0]!.reason.code).toBe("40P01");
-  expect(rejected[0]!.reason.detail).toContain("advisory lock");
+  expect(rawOpposingStreams.outcomes.map((row) => row.status)).toEqual(["fulfilled", "fulfilled"]);
+  for (const forced of [false, true]) {
+    const rolled = await opposingRows(`rollup-opposing-repaired-${forced}`, forced, true);
+    console.info("Insights opposing control/repair", {
+      forced,
+      outcomes: rolled.outcomes.map((row) => row.status),
+    });
+    expect(rolled.outcomes.map((row) => row.status)).toEqual(["fulfilled", "fulfilled"]);
+    const [rows] = await shared!
+      .admin`select count(*)::int as count from model_call_facts where workspace_id=${workspaceId} and turn_id=${rolled.turn}`;
+    expect(rows!.count).toBe(4);
+  }
+  await assertExact();
+});
+
+async function assertPendingWire(db: Database = client.db) {
+  const input = {
+    accountId,
+    workspaceId,
+    detailsWorkspaceIds: [workspaceId],
+    query: InsightsUsageQuery.parse({ range: "ytd", groupBy: "model" }),
+    now: new Date("2026-10-03T12:00:00Z"),
+  };
+  await withSessionRlsActorContext({ subjectId }, async () => {
+    expect(await readInsightsUsage(db, input)).toEqual(
+      await readInsightsUsage(rawOracleDatabase(db), input),
+    );
+  });
+}
+
+test("unchanged activity finalizers and forced-immediate later scopes preserve read-your-writes and savepoint rollback", async () => {
+  const turn = crypto.randomUUID();
+  await withSessionRlsActorContext({ subjectId }, async () => {
+    await client.db.transaction(async (tx) => {
+      await tx.execute(sql`set constraints all immediate`);
+      for (const n of [0, 1]) {
+        await withRestoredSessionActivityRlsContext(
+          tx,
+          { accountId, workspaceId },
+          async (scoped) => {
+            await scoped.execute(sql`insert into model_call_facts(account_id,workspace_id,session_id,turn_id,source_key,
+              provider,provider_api,model,billing_path,occurred_at) values(${accountId},${workspaceId},${sessionId},${turn},
+              ${"forced-scope-" + n},'openai','responses','forced-scope','opengeni_credits','2026-09-13T04:00:00Z')`);
+            await scoped.execute(sql`set constraints all immediate`);
+            await scoped.execute(sql`insert into credit_ledger_entries(account_id,workspace_id,type,amount_micros,
+              source_type,source_id,idempotency_key,occurred_at) values(${accountId},${workspaceId},'model_usage_debit',-3,
+              'model_response',${turn + ":forced-scope-" + n},${turn + ":forced-scope-" + n},'2026-09-14T04:00:00Z')`);
+            await assertPendingWire(scoped as Database);
+          },
+        );
+      }
+      // This uses the real protected finalizer twice, not a reimplemented gate.
+      await tx.execute(sql`savepoint insights_repair_savepoint`);
+      await withRestoredSessionActivityRlsContext(
+        tx,
+        { accountId, workspaceId },
+        async (scoped) => {
+          await scoped.execute(
+            sql`delete from model_call_facts where workspace_id=${workspaceId} and turn_id=${turn}`,
+          );
+          await assertPendingWire(scoped as Database);
+        },
+      );
+      await tx.execute(sql`rollback to savepoint insights_repair_savepoint`);
+      await tx.execute(sql`release savepoint insights_repair_savepoint`);
+      await assertPendingWire(tx as Database);
+    });
+  });
+  await assertPendingWire();
   const [rows] = await shared!
-    .admin`select count(*)::int as count from model_call_facts where workspace_id=${workspaceId} and turn_id=${rolled.turn}`;
+    .admin`select count(*)::int as count from model_call_facts where turn_id=${turn}`;
   expect(rows!.count).toBe(2);
   await assertExact();
+});
+
+test("pending raw reconciliation preserves two populated case-sensitive suffixes and late ledger-period correction", async () => {
+  const turn = "abcdefab-cdef-4abc-8def-012345abcdef";
+  await scope(async (tx) => {
+    for (const [key, model, amount] of [
+      ["Case", "suffix-upper", -5],
+      ["case", "suffix-lower", -7],
+    ] as const) {
+      await tx`insert into credit_ledger_entries(account_id,workspace_id,type,amount_micros,source_type,source_id,idempotency_key,occurred_at)
+        values(${accountId},${workspaceId},'model_usage_debit',${amount},'model_response',${turn.toUpperCase() + ":" + key},
+          ${turn + ":" + key},'2026-09-15T04:00:00Z')`;
+      await tx`insert into model_call_facts(account_id,workspace_id,session_id,turn_id,source_key,provider,provider_api,model,billing_path,occurred_at)
+        values(${accountId},${workspaceId},${sessionId},${turn},${key},'openai','responses',${model},'opengeni_credits','2026-09-14T04:00:00Z')`;
+    }
+  });
+  await assertPendingWire();
+  await assertExact();
+  const links = await shared!
+    .admin`select source_id,dimensions->>'model' as model from opengeni_private.insights_charge_links
+    where account_id=${accountId} and source_id=any(${[turn + ":Case", turn + ":case"]}::text[]) order by source_id`;
+  expect(links.map((row) => [row.source_id, row.model])).toEqual([
+    [turn + ":Case", "suffix-upper"],
+    [turn + ":case", "suffix-lower"],
+  ]);
+  await scope(async (tx) => {
+    await tx`update model_call_facts set model='suffix-moved',occurred_at='2026-09-16T04:00:00Z'
+      where workspace_id=${workspaceId} and turn_id=${turn} and source_key='Case'`;
+    await tx`delete from model_call_facts where workspace_id=${workspaceId} and turn_id=${turn} and source_key='case'`;
+    await tx`update credit_ledger_entries set amount_micros=-11,occurred_at='2026-09-17T04:00:00Z'
+      where workspace_id=${workspaceId} and source_id=${turn.toUpperCase() + ":Case"}`;
+  });
+  await assertPendingWire();
+  await assertExact();
+});
+
+test("repeatable-read owner reconciliation cannot acknowledge a concurrent unseen writer", async () => {
+  const turn = crypto.randomUUID();
+  const insert = async (key: string) =>
+    scope(async (tx) => {
+      await tx`insert into model_call_facts(account_id,workspace_id,session_id,turn_id,source_key,provider,provider_api,model,billing_path,occurred_at)
+      values(${accountId},${workspaceId},${sessionId},${turn},${key},'openai','responses','refresh-race','external','2026-09-18T04:00:00Z')`;
+    });
+  await insert("seen");
+  const owner = postgres(shared!.ownerUrl, {
+    max: 1,
+    connection: { application_name: LOSSLESS_CONTENT_WRITER_APPLICATION_NAME },
+  });
+  try {
+    await owner.begin("isolation level repeatable read", async (tx) => {
+      await tx`select count(*) from opengeni_private.insights_rollup_invalidations where account_id=${accountId}`;
+      // The source transaction commits after the rebuilder's snapshot. Its
+      // marks must survive even if the old snapshot is otherwise fully rebuilt.
+      await insert("unseen");
+      await tx`select opengeni_private.insights_reconcile_rollups(${accountId},${workspaceId},100000)`;
+    });
+  } finally {
+    await owner.end();
+  }
+  const [pending] = await shared!
+    .admin`select count(*)::int as count from opengeni_private.insights_rollup_invalidations
+    where source_id in(select id from model_call_facts where turn_id=${turn} and source_key='unseen')`;
+  expect(pending!.count).toBeGreaterThan(0);
+  await assertPendingWire();
+  await assertExact();
+});
+
+test("reconciliation budget failures preserve pending fallback, owner posture and private ACL", async () => {
+  await scope(async (tx) => {
+    await tx`update model_call_facts set model='refresh-race-corrected' where workspace_id=${workspaceId} and model='refresh-race'`;
+  });
+  await expect(
+    scope(async (tx) => {
+      await tx`select opengeni_private.insights_reconcile_rollups(${accountId},${workspaceId},100000)`;
+    }),
+  ).rejects.toMatchObject({ code: "42501" });
+  const owner = postgres(shared!.ownerUrl, {
+    max: 1,
+    connection: { application_name: LOSSLESS_CONTENT_WRITER_APPLICATION_NAME },
+  });
+  try {
+    await expect(
+      owner.begin("isolation level repeatable read", async (tx) => {
+        await tx`select opengeni_private.insights_reconcile_rollups(${accountId},${workspaceId},1)`;
+      }),
+    ).rejects.toMatchObject({ code: "54000" });
+    await expect(
+      (async () =>
+        await owner`select opengeni_private.insights_reconcile_rollups(${accountId},${workspaceId},100000)`)(),
+    ).rejects.toMatchObject({ code: "22023" });
+  } finally {
+    await owner.end();
+  }
+  await assertPendingWire();
+  expect(await policies()).toEqual(policyBaseline);
+  const [caps] = await shared!
+    .admin`select count(*)::int as count from opengeni_private.insights_fact_read_runtime_capabilities`;
+  expect(caps!.count).toBe(0);
+  await assertExact();
+});
+
+test("seven-day workspace and organization readers stay raw-equivalent before and after explicit cache recovery", async () => {
+  const turn = crypto.randomUUID();
+  await scope(async (tx) => {
+    await tx`insert into model_call_facts(account_id,workspace_id,session_id,turn_id,source_key,provider,provider_api,model,billing_path,
+      input_tokens,cached_tokens,cache_write_tokens,output_tokens,reasoning_tokens,total_tokens,estimated_provider_cost_micros,occurred_at)
+      values(${accountId},${workspaceId},${sessionId},${turn},'week-read','openai','responses','week-read','opengeni_credits',
+        3,1,1,1,0,4,37,'2026-09-18T04:00:00Z')`;
+    await tx`insert into credit_ledger_entries(account_id,workspace_id,type,amount_micros,source_type,source_id,idempotency_key,occurred_at)
+      values(${accountId},${workspaceId},'model_usage_debit',-7,'model_response',${turn + ":week-read"},${turn + ":week-read"},'2026-09-19T04:00:00Z')`;
+  });
+  for (const phase of ["pending", "reconciled"] as const) {
+    if (phase === "reconciled") await assertExact();
+    for (const scopeWorkspace of [workspaceId, null]) {
+      const input = {
+        accountId,
+        workspaceId: scopeWorkspace,
+        detailsWorkspaceIds: [workspaceId],
+        query: InsightsUsageQuery.parse({ range: "week", groupBy: "person" }),
+        now: new Date("2026-09-20T12:00:00Z"),
+      };
+      await withSessionRlsActorContext({ subjectId }, async () => {
+        const start = performance.now();
+        const result = await readInsightsUsage(client.db, input);
+        const elapsedMs = performance.now() - start;
+        expect(result).toEqual(await readInsightsUsage(rawOracleDatabase(client.db), input));
+        expect(result.totals.calls).toBeGreaterThan(0);
+        console.info({
+          benchmark: "small-local-seven-day-db-reader",
+          phase,
+          scope: scopeWorkspace === null ? "organization" : "workspace",
+          elapsedMs: Math.round(elapsedMs),
+          note: "small real PG fixture; NOT HTTP/retained-volume p95 or launch proof",
+        });
+      });
+    }
+  }
 });
 
 test("racing independent ledger/fact inserts converge without fabricated attribution", async () => {
@@ -614,6 +843,7 @@ test("application invokers cannot mutate private tables or attach an owner trigg
     "insights_model_daily_timestamps",
     "insights_charge_daily",
     "insights_charge_links",
+    "insights_rollup_invalidations",
   ]) {
     await expect(
       (async () => {

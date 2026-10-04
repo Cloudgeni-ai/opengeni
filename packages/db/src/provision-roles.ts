@@ -2141,7 +2141,8 @@ BEGIN
     BEGIN
       FOR rollup_table IN SELECT c.oid::regclass FROM pg_class c JOIN pg_namespace n ON n.oid=c.relnamespace
         WHERE n.nspname='opengeni_private' AND c.relname IN('insights_usage_daily','insights_model_daily',
-          'insights_model_daily_timestamps','insights_charge_daily','insights_charge_links','insights_list_rate_snapshots') LOOP
+          'insights_model_daily_timestamps','insights_charge_daily','insights_charge_links','insights_list_rate_snapshots',
+          'insights_rollup_invalidations') LOOP
         SELECT string_agg(quote_ident(attname),',') INTO rollup_columns FROM pg_attribute
           WHERE attrelid=rollup_table AND attnum>0 AND NOT attisdropped;
         EXECUTE format('REVOKE ALL ON TABLE %s FROM %I',rollup_table,${literal(role)});
@@ -2154,7 +2155,7 @@ BEGIN
           'insights_fact_telemetry_known','insights_fact_measures','insights_fact_contributions','insights_rollup_dimensions',
           'insights_apply_delta','maintain_insights_daily_rollup','insights_rollup_edge_ranges','insights_usage_window','insights_model_window',
           'insights_charge_dimensions','insights_charge_row','insights_charge_delta','insights_apply_charge',
-          'maintain_insights_model_charges','insights_charge_window','insights_rollup_public_measures','insights_rollup_amount_inputs',
+          'maintain_insights_model_charges','insights_charge_window','insights_rollup_public_measures','insights_rollup_amount_inputs','insights_reconcile_rollups',
           'insights_allocate_recorded_list_classes','allocate_insights_model_list_classes','insights_backfill_list_snapshot','guard_insights_list_rate_snapshot') LOOP
         EXECUTE format('REVOKE ALL ON FUNCTION %s FROM PUBLIC',rollup_routine);
       END LOOP;

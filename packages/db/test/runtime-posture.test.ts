@@ -844,6 +844,7 @@ describe("runtime database posture evaluator", () => {
       "maintain_insights_model_charges()",
       "allocate_insights_model_list_classes()",
       "insights_rollup_amount_inputs(uuid, uuid, timestamp with time zone, timestamp with time zone, text)",
+      "insights_reconcile_rollups(uuid, uuid, integer)",
     ])
       posture.privateRoutines.push({
         name,
