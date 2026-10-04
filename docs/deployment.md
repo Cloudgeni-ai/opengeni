@@ -4169,3 +4169,17 @@ The default `OPENGENI_SLACK_ACCESS_MODE=limited` uses the reviewed Web API MCP
 bridge with one shared history/replies slot per minute and no search. Apply the
 generated Slack app scopes before rollout. See [Slack](slack-bot.md#unlisted-pilot-and-rollout)
 for the feature limits and external-workspace release acceptance.
+
+
+### Reservation balance projection cutover
+
+Migration `0614_usage_reservation_balance_projection.sql` requires maintenance.
+Drain API, control-worker, and turn-worker writers before applying it, and run
+role provisioning with the projection-aware release before resuming that release.
+Older binaries reject its owner-only internal routines during database posture
+checks and must not restart after activation. The migration takes a ledger writer
+lock while backfilling account and session-scoped balances, verifies exact
+convergence, and restores FORCE RLS in the same transaction. Lock acquisition
+fails after five seconds; the migration aborts atomically after five minutes.
+Keep unresolved holds across this cutover. The projection does not expire them
+or change the authoritative usage ledger. No down migration is provided.

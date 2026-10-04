@@ -1,8 +1,11 @@
--- deployment-mode: rolling
+-- deployment-mode: maintenance
 -- Transactional reservation projection. The ledger remains authoritative;
 -- settled source tombstones stay out of the partial read indexes. Account
 -- balances retain cross-workspace source grouping. Workspace balances retain
 -- per-session visibility before grouping, including partial/negative releases.
+-- Drain API/control/turn writers before installation and resume only the
+-- projection-aware binary: older posture checks reject the new owner-only
+-- internal routines. The ledger/projection update itself remains transactional.
 -- Installation briefly serializes ledger writers; lock/statement timeout aborts
 -- atomically rather than installing an incomplete projection.
 SET LOCAL lock_timeout = '5s';
