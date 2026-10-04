@@ -288,7 +288,9 @@ export function SessionHeaderTitle({
   const theme = useNativeTimelineTheme();
   const c = theme.colors;
   const presentation = status ? SESSION_STATUS_PRESENTATION[status] : null;
-  const label = statusLabel ?? presentation?.label;
+  // A settled, idle session needs no status line: the title stands alone, as in
+  // native messaging apps. Running, waiting, paused and failed states still say so.
+  const label = statusLabel ?? (status === "idle" ? undefined : presentation?.label);
   // Live and attention states take their status colour; settled ones stay quiet.
   const emphasized =
     presentation?.tone === "running" ||
