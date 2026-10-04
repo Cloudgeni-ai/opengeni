@@ -1,5 +1,29 @@
 # @opengeni/react
 
+## 1.0.2
+
+### Patch Changes
+
+- 43da85e: Write the product name as "Opengeni" in user-visible messages. Code identifiers, the `OpenGeni API <status>:` error prefix, and protocol values are unchanged.
+- ba5a639: Fix a dark composer on light pages: stock theme tokens rewritten by the host's CSS minifier (for example Next.js turning `#333333` into `#333`) are no longer mistaken for host customizations.
+- d4ada81: Expanding a live turn's work row now reads like a finished turn: its progress notes are listed in order between the steps, and the copies above the row fold away in one short motion while the row rises into the first note's place (or the top edge) with its list beginning just beneath. Closing reverses it. Nothing else on screen jumps: the reader's position is held through the moment the page is briefly shorter, and closing from the sticky header lands back on the closed row.
+- cbe4357: Simple embedding path. An organization API key acting as a user (`asUser`) on a
+  shared workspace of its own organization now adds that user's missing membership
+  once, with conversation permissions, when the key holds `members:manage` plus
+  those permissions; existing memberships are never changed. The `@opengeni/sdk/chat`
+  `OpenGeni` facade derives `organizationId` from the key, maps `{ user, tenant }`,
+  `{ user }` (one workspace per user), or `{ user, workspaceId }` to a workspace
+  created on first use, and `og.workspaceId({ tenant } | { user } | { workspaceId })`
+  translates your ids. The session proxy reports its resolved workspace in client
+  config, so `<OpenGeniChat baseUrl="/api/opengeni" />` and
+  `<SessionConversation baseUrl="/api/opengeni" sessionId={id} />` need no provider
+  or workspace id. Explicit membership APIs and provider-based usage are unchanged.
+- Updated dependencies [43da85e]
+- Updated dependencies [4476ca7]
+- Updated dependencies [cbe4357]
+  - @opengeni/sdk@1.0.1
+  - @opengeni/connect@1.0.1
+
 ## 1.0.0
 
 ### Major Changes
