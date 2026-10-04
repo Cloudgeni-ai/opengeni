@@ -90,7 +90,12 @@ BEGIN
       IF eligible THEN
         PERFORM opengeni_private.insights_charge_delta(a,w,d,k,-(c->>'amount_micros')::bigint,1);
         INSERT INTO opengeni_private.insights_charge_links
-          VALUES(ledger,a,w,coalesce(c->>'source_id','unmatched:'||ledger::text),d,(c->>'occurred_at')::timestamptz,k,-(c->>'amount_micros')::bigint,opengeni_private.insights_charge_row(c))
+          -- Normalize only the valid UUID prefix in the private lookup key.
+          -- Source-key case and the original ledger row remain unchanged.
+          VALUES(ledger,a,w,CASE WHEN c->>'source_id' ~ '^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}:.'
+            THEN lower(left(c->>'source_id',36))||substr(c->>'source_id',37)
+            ELSE coalesce(c->>'source_id','unmatched:'||ledger::text) END,
+            d,(c->>'occurred_at')::timestamptz,k,-(c->>'amount_micros')::bigint,opengeni_private.insights_charge_row(c))
         ON CONFLICT(ledger_id) DO UPDATE SET account_id=excluded.account_id,workspace_id=excluded.workspace_id,
           source_id=excluded.source_id,day=excluded.day,occurred_at=excluded.occurred_at,dimensions=excluded.dimensions,
           quantity=excluded.quantity,credit_row=excluded.credit_row;
@@ -118,7 +123,10 @@ BEGIN
       -'input_tokens'-'output_tokens'-'cached_tokens'-'cache_write_tokens'-'reasoning_tokens'-'total_tokens'
       -'list_uncached_input_cost_micros'-'list_cache_read_cost_micros'-'list_cache_write_cost_micros'-'list_output_cost_micros'-'list_cost_is_approx') THEN RETURN NULL;END IF;
   FOR fence IN SELECT DISTINCT hashtextextended('model-charge:'||(v->>'account_id')||':'||coalesce(v->>'workspace_id','')||':'||
-      CASE WHEN TG_TABLE_NAME='model_call_facts' THEN (v->>'turn_id')||':'||(v->>'source_key') ELSE coalesce(v->>'source_id','unmatched:'||(v->>'id')) END,601)
+      CASE WHEN TG_TABLE_NAME='model_call_facts' THEN (v->>'turn_id')||':'||(v->>'source_key')
+        WHEN v->>'source_id' ~ '^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}:.'
+          THEN lower(left(v->>'source_id',36))||substr(v->>'source_id',37)
+        ELSE coalesce(v->>'source_id','unmatched:'||(v->>'id')) END,601)
     FROM unnest(ARRAY[old_value,new_value]) v WHERE v IS NOT NULL AND
       (TG_TABLE_NAME='model_call_facts' OR v->>'type'='model_usage_debit') ORDER BY 1
     LOOP PERFORM pg_advisory_xact_lock(fence);END LOOP;
@@ -149,10 +157,13 @@ CREATE TRIGGER insights_actual_debit_delta AFTER INSERT OR UPDATE OR DELETE ON c
 CREATE TRIGGER insights_model_charge_dimensions AFTER INSERT OR UPDATE OR DELETE ON model_call_facts
   FOR EACH ROW EXECUTE FUNCTION opengeni_private.maintain_insights_model_charges();
 INSERT INTO opengeni_private.insights_charge_links
-  SELECT c.id,c.account_id,c.workspace_id,coalesce(c.source_id,'unmatched:'||c.id::text),(c.occurred_at AT TIME ZONE 'UTC')::date,c.occurred_at,
+  SELECT c.id,c.account_id,c.workspace_id,CASE WHEN c.source_id ~ '^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}:.'
+      THEN lower(left(c.source_id,36))||substr(c.source_id,37) ELSE coalesce(c.source_id,'unmatched:'||c.id::text) END,
+    (c.occurred_at AT TIME ZONE 'UTC')::date,c.occurred_at,
     opengeni_private.insights_charge_dimensions(to_jsonb(c),to_jsonb(f)),-c.amount_micros,opengeni_private.insights_charge_row(to_jsonb(c))
   FROM credit_ledger_entries c LEFT JOIN model_call_facts f ON f.account_id=c.account_id AND f.workspace_id=c.workspace_id
-    AND c.source_id=f.turn_id::text||':'||f.source_key
+    AND f.turn_id=CASE WHEN c.source_id ~ '^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}:.'
+      THEN left(c.source_id,36)::uuid END AND f.source_key=substr(c.source_id,38)
   WHERE c.type='model_usage_debit' AND c.source_type='model_response' AND c.amount_micros<0;
 INSERT INTO opengeni_private.insights_charge_daily
   SELECT account_id,workspace_id,day,dimensions,sum(quantity),count(*) FROM opengeni_private.insights_charge_links GROUP BY 1,2,3,4;

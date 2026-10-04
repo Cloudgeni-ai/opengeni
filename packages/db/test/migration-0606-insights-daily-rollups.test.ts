@@ -49,6 +49,32 @@ let subjectId: string;
 let readerDefinition: string;
 let readerPosture: postgres.Row;
 let policyBaseline: Awaited<ReturnType<typeof policies>>;
+let rawOpposingRows: Awaited<ReturnType<typeof opposingRows>>;
+
+// Two analytics groups in opposite transaction-wide order, with four disjoint
+// source fact rows. Run unchanged SQL before installation as the raw control.
+async function opposingRows(tag: string) {
+  const barrier = Promise.withResolvers<void>();
+  let arrived = 0;
+  const turn = crypto.randomUUID();
+  const outcomes = await Promise.allSettled(
+    [0, 1].map((side) =>
+      scope(async (tx) => {
+        await tx`select set_config('statement_timeout','10s',true)`;
+        for (let n = 0; n < 2; n++) {
+          await tx`insert into model_call_facts(account_id,workspace_id,session_id,turn_id,source_key,provider,provider_api,model,billing_path,occurred_at)
+        values(${accountId},${workspaceId},${sessionId},${turn},${`${tag}-${side}-${n}`},'openai','responses',
+          ${`${tag}-group-${n === 0 ? side : 1 - side}`},'external','2026-09-10T04:00:00Z')`;
+          if (n === 0) {
+            if (++arrived === 2) barrier.resolve();
+            await barrier.promise;
+          }
+        }
+      }),
+    ),
+  );
+  return { outcomes, turn };
+}
 
 async function policies() {
   return await shared!
@@ -105,7 +131,7 @@ beforeAll(async () => {
     createdByContext: {},
   });
   sessionId = session.id;
-  historicalTurn = crypto.randomUUID();
+  historicalTurn = "abcdefab-cdef-4abc-8def-abcdefabcdef";
   await shared.admin`insert into model_call_facts(account_id,workspace_id,session_id,turn_id,source_key,provider,provider_api,
     model,billing_path,input_tokens,output_tokens,cached_tokens,cache_write_tokens,reasoning_tokens,total_tokens,
     priced_cost_micros,estimated_provider_cost_micros,context_contributions,occurred_at,recorded_at)
@@ -122,7 +148,7 @@ beforeAll(async () => {
     values(${accountId},${workspaceId},${sessionId},'model.cost','usd_micros',999,'historic-usage','2026-09-02T03:00:00Z'),
       (${accountId},${workspaceId},${sessionId},'sandbox.warm_seconds','seconds',5,'warm-a','2026-09-02T00:00:00Z')`;
   await shared.admin`insert into credit_ledger_entries(account_id,workspace_id,type,amount_micros,source_type,source_id,idempotency_key,metadata,occurred_at)
-    values(${accountId},${workspaceId},'model_usage_debit',-7,'model_response',${historicalTurn + ":historical-1"},'historic-debit',
+    values(${accountId},${workspaceId},'model_usage_debit',-7,'model_response',${historicalTurn.toUpperCase() + ":historical-1"},'historic-debit',
       jsonb_build_object('sessionId',${sessionId}::text),'2026-09-02T03:00:00Z'),
       (${accountId},${workspaceId},'model_usage_debit',-11,'model_response',${crypto.randomUUID() + ":orphan"},'historic-orphan','{}','2026-09-02T03:00:00Z'),
       (${accountId},null,'model_usage_debit',-13,'model_response',null,'historic-account-orphan','{}','2026-09-02T03:00:00Z')`;
@@ -146,6 +172,7 @@ beforeAll(async () => {
     owner to "${reader!.owner.replaceAll('"', '""')}"`);
   await shared.admin`revoke all on function public.insights_test_raw_usage_rows(uuid,uuid,timestamptz,timestamptz,text,uuid[],boolean) from PUBLIC`;
   await shared.admin`grant execute on function public.insights_test_raw_usage_rows(uuid,uuid,timestamptz,timestamptz,text,uuid[],boolean) to opengeni_app`;
+  rawOpposingRows = await opposingRows("raw-opposing-control");
   await shared.admin`delete from schema_migrations where name=any(${migrations}::text[])`;
   await migrate(shared.ownerUrl, undefined, {
     preinstalledVector: true,
@@ -335,7 +362,8 @@ async function assertExact() {
       (c.occurred_at at time zone 'UTC')::date as day,-c.amount_micros as quantity,
       opengeni_private.insights_charge_dimensions(to_jsonb(c),to_jsonb(f)) as dimensions
       from credit_ledger_entries c left join model_call_facts f on f.account_id=c.account_id and f.workspace_id=c.workspace_id
-        and c.source_id=f.turn_id::text||':'||f.source_key
+        and f.turn_id=case when c.source_id~'^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}:.'
+          then left(c.source_id,36)::uuid end and f.source_key=substr(c.source_id,38)
       where c.account_id=${accountId} and c.type='model_usage_debit' and c.source_type='model_response' and c.amount_micros<0),
       groups as(select account_id,workspace_id,day,dimensions,sum(quantity) as quantity,count(*) as entries from raw group by 1,2,3,4)
     select coalesce(g.dimensions,d.dimensions) as dimensions from groups g full join opengeni_private.insights_charge_daily d
@@ -358,6 +386,12 @@ test("historical owner bootstrap is complete, policy-preserving and journal-idem
     ('usage_events'::regclass,'model_call_facts'::regclass,'credit_ledger_entries'::regclass)`;
   expect(forced.every((row) => row.relforcerowsecurity)).toBe(true);
   await assertExact();
+  const [bootstrapLink] = await shared!
+    .admin`select dimensions,source_id,credit_row from opengeni_private.insights_charge_links
+    where credit_row->>'source_id'=${historicalTurn.toUpperCase() + ":historical-1"}`;
+  expect(bootstrapLink!.dimensions.model).toBe("historical");
+  expect(bootstrapLink!.source_id).toBe(historicalTurn + ":historical-1");
+  expect(bootstrapLink!.credit_row.source_id).toBe(historicalTurn.toUpperCase() + ":historical-1");
   const [row] = await shared!
     .admin`select measures,contributions from opengeni_private.insights_model_daily
     where workspace_id=${workspaceId} and dimensions->>'model'='historical' and dimensions->>'billing_path'='opengeni_credits'`;
@@ -461,6 +495,99 @@ test("ledger first, late fact enrichment, source moves and deletions conserve ac
   await assertExact();
 });
 
+test("mixed-case debit UUIDs match raw attribution at bootstrap, late capture, corrections and deletion", async () => {
+  const turn = "abcdefab-cdef-4abc-8def-fedcbafedcba";
+  const source = "Late:MiXeD";
+  const sourceIds = [
+    turn.toUpperCase() + ":" + source,
+    "AbCdEfAb-CdEf-4AbC-8DeF-FeDcBaFeDcBa:" + source,
+    turn.toUpperCase() + ":" + source.toLowerCase(),
+    "not-a-uuid:" + source,
+    turn.toUpperCase() + ":",
+  ];
+  const ledgers = await scope(async (tx) => {
+    const ids: string[] = [];
+    for (const [n, sourceId] of sourceIds.entries()) {
+      const [row] =
+        await tx`insert into credit_ledger_entries(account_id,workspace_id,type,amount_micros,source_type,source_id,idempotency_key,occurred_at)
+        values(${accountId},${workspaceId},'model_usage_debit',${-(n + 1)},'model_response',${sourceId},
+          ${`mixed-case-ledger-${n}`},'2026-09-11T04:00:00Z') returning id`;
+      ids.push(row!.id);
+    }
+    return ids;
+  });
+  await assertExact();
+  await scope(async (tx) => {
+    await tx`insert into model_call_facts(account_id,workspace_id,session_id,turn_id,source_key,provider,provider_api,model,billing_path,occurred_at)
+      values(${accountId},${workspaceId},${sessionId},${turn},${source},'openai','responses','mixed-case-late','opengeni_credits','2026-09-11T04:00:00Z')`;
+  });
+  await assertExact();
+  const links = await shared!
+    .admin`select ledger_id,source_id,dimensions,credit_row from opengeni_private.insights_charge_links
+    where ledger_id=any(${ledgers}::uuid[])`;
+  for (const [n, id] of ledgers.entries()) {
+    const link = links.find((entry) => entry.ledger_id === id)!;
+    expect(link.credit_row.source_id).toBe(sourceIds[n]);
+    expect(link.dimensions.model).toBe(n < 2 ? "mixed-case-late" : null);
+    expect(link.source_id).toBe(n < 3 ? turn + ":" + sourceIds[n]!.slice(37) : sourceIds[n]);
+  }
+  await scope(async (tx) => {
+    await tx`update model_call_facts set provider='other',model='mixed-case-corrected'
+      where workspace_id=${workspaceId} and turn_id=${turn} and source_key=${source}`;
+    await tx`update credit_ledger_entries set amount_micros=-9,occurred_at='2026-09-12T00:00:00Z' where id=${ledgers[0]!}`;
+    await tx`insert into credit_ledger_entries(account_id,workspace_id,type,amount_micros,source_type,source_id,idempotency_key,occurred_at)
+      values(${accountId},${workspaceId},'model_usage_debit',-7,'model_response',${sourceIds[0]!},'mixed-case-current','2026-09-12T04:00:00Z')`;
+  });
+  await assertExact();
+  const input = {
+    accountId,
+    workspaceId,
+    detailsWorkspaceIds: [workspaceId],
+    query: InsightsUsageQuery.parse({ range: "ytd", groupBy: "model" }),
+    now: new Date("2026-10-03T12:00:00Z"),
+  };
+  await withSessionRlsActorContext({ subjectId }, async () => {
+    expect(await readInsightsUsage(client.db, input)).toEqual(
+      await readInsightsUsage(rawOracleDatabase(client.db), input),
+    );
+  });
+  await scope(async (tx) => {
+    await tx`update model_call_facts set source_key='Moved:MiXeD'
+      where workspace_id=${workspaceId} and turn_id=${turn} and source_key=${source}`;
+    await tx`update credit_ledger_entries set source_id=${turn.toUpperCase() + ":Moved:MiXeD"} where id=${ledgers[0]!}`;
+  });
+  await assertExact();
+  await scope(async (tx) => {
+    await tx`delete from model_call_facts where workspace_id=${workspaceId} and turn_id=${turn}`;
+  });
+  await assertExact();
+  await scope(async (tx) => {
+    await tx`delete from credit_ledger_entries where id=any(${ledgers}::uuid[]) or idempotency_key='mixed-case-current'`;
+  });
+  await assertExact();
+});
+
+test("diagnostic: raw opposing multirow control commits, unresolved analytics fence cycle aborts atomically", async () => {
+  expect(rawOpposingRows.outcomes.map((row) => row.status)).toEqual(["fulfilled", "fulfilled"]);
+  const rolled = await opposingRows("rollup-opposing-diagnostic");
+  const rejected = rolled.outcomes.filter(
+    (row): row is PromiseRejectedResult => row.status === "rejected",
+  );
+  console.info(
+    "UNRESOLVED Insights multirow fence cycle",
+    rejected.map((row) => ({ code: row.reason.code, detail: row.reason.detail })),
+  );
+  // This records the launch blocker, NOT a successful deadlock repair. Root
+  // disposition of whole-transaction retry/batching is deliberately separate.
+  expect(rejected).toHaveLength(1);
+  expect(rejected[0]!.reason.code).toBe("40P01");
+  expect(rejected[0]!.reason.detail).toContain("advisory lock");
+  const [rows] = await shared!
+    .admin`select count(*)::int as count from model_call_facts where workspace_id=${workspaceId} and turn_id=${rolled.turn}`;
+  expect(rows!.count).toBe(2);
+  await assertExact();
+});
+
 test("racing independent ledger/fact inserts converge without fabricated attribution", async () => {
   await Promise.all(
     Array.from({ length: 16 }, (_, n) => {
@@ -472,7 +599,7 @@ test("racing independent ledger/fact inserts converge without fabricated attribu
         }),
         scope(async (tx) => {
           await tx`insert into credit_ledger_entries(account_id,workspace_id,type,amount_micros,source_type,source_id,idempotency_key,occurred_at)
-        values(${accountId},${workspaceId},'model_usage_debit',${-(n + 1)},'model_response',${turn + ":race"},${"race-ledger-" + n},'2026-09-07T03:00:00Z')`;
+        values(${accountId},${workspaceId},'model_usage_debit',${-(n + 1)},'model_response',${(n % 2 === 0 ? turn.toUpperCase() : turn) + ":race"},${"race-ledger-" + n},'2026-09-07T03:00:00Z')`;
         }),
       ]);
     }),
