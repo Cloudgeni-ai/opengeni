@@ -400,7 +400,8 @@ The resulting internal-update inference is an ordinary billed run: it meters
 `agent_run.created` with source `session_system_update` and streams like a
 user-triggered inference without appearing in the prompt queue. If billing or
 usage limits would block another run, the goal pauses visibly
-(`goal.paused`, `reason: "limits"`) instead of failing the session; the limits
+(`goal.paused`, with `credits`, `allowance`, `budget` for model spending, or
+`usage_limit` for agent run quotas) instead of failing the session; the limits
 gate is applied inside the same locked decision, before the counter bump, so a
 budget pause never consumes continuation budget. Re-arming a goal (resume or
 replace) starts a fresh continuation epoch: counters and the
@@ -422,7 +423,13 @@ recovery of the same turn, not creation or charging of another continuation.
   pacing rather than intent.
 - Terminal sessions skip catalog/model validation entirely. An eligible goal
   whose inherited model is missing, retired, or disallowed pauses visibly with
-  `limits` and a model-specific rationale. It never silently chooses another
+  `model_unavailable` or `model_policy` and an actionable rationale. Goal admission
+  uses the same scoped catalog as ordinary turns, including organization and
+  workspace connections. Catalog membership never grants credential authority:
+  the exact causal turn's accepted snapshots and credential ceiling remain in force.
+  The existing goal tooltip and panel show the stored rationale; legacy `limits`
+  pauses remain neutral rather than being mislabeled as spending limits.
+  It never silently chooses another
   model or retries a deterministic selection error through Temporal.
 - Provider backpressure persists a capacity waiter. It blocks goal
   materialization until authoritative allocator re-evaluation records recovery;
@@ -462,7 +469,12 @@ recovery of the same turn, not creation or charging of another continuation.
 - `PATCH /v1/workspaces/:id/sessions/:sessionId/goal` with
   `{ status: "paused" | "active", rationale? }` is the operator override
   (`sessions:control`). Pausing emits `goal.paused` (`actor: "api"`). Resuming
-  is only valid from `paused`: it resets the counters, emits `goal.resumed`
+  is only valid from `paused`: model and funding admission are checked under
+  the control/session/goal locks first, using the effective model and exact
+  latest-finished causal human. A rejected Resume returns an actionable 422
+  and preserves the paused goal, counters, event sequence and wake revisions.
+  The agent Resume tool uses the same validation. An admitted Resume resets
+  the counters, emits `goal.resumed`
   (`actor: "api"`, `reason: "api"`), and wakes the session workflow - resume
   works even on a fully idle session because `signalWithStart` restarts a
   completed workflow. Invalid transitions (e.g. resuming a completed goal)

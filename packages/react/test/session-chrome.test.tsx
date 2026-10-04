@@ -1170,7 +1170,17 @@ describe("SessionChrome goal pill reasons", () => {
     expect(sessionChromeGoalPillLabel("paused", paused("max_auto_continuations").goal)).toBe(
       "Paused · cap",
     );
-    expect(sessionChromeGoalPillLabel("paused", paused("limits").goal)).toBe("Paused · budget");
+    expect(sessionChromeGoalPillLabel("paused", paused("limits").goal)).toBe("Paused · limits");
+    for (const [reason, label] of [
+      ["model_unavailable", "model"],
+      ["model_policy", "policy"],
+      ["credits", "credits"],
+      ["budget", "budget"],
+      ["usage_limit", "usage limit"],
+      ["allowance", "allowance"],
+    ]) {
+      expect(sessionChromeGoalPillLabel("paused", paused(reason!).goal)).toBe(`Paused · ${label}`);
+    }
     expect(sessionChromeGoalPillLabel("paused", paused("user_pause").goal)).toBe(
       "Paused · manually",
     );
@@ -1184,7 +1194,9 @@ describe("SessionChrome goal pill reasons", () => {
     expect(
       sessionChromeGoalPillExplanation("paused", paused("max_auto_continuations").goal),
     ).toContain("continuation cap");
-    expect(sessionChromeGoalPillExplanation("paused", paused("limits").goal)).toContain("limits");
+    expect(sessionChromeGoalPillExplanation("paused", paused("limits").goal)).toContain(
+      "admission limit",
+    );
     expect(sessionChromeGoalPillExplanation("paused", paused("agent").goal)).toContain(
       "human decision",
     );
@@ -1252,6 +1264,33 @@ describe("SessionChrome goal pill reasons", () => {
     expect(
       panel?.querySelector("[data-og-session-chrome-goal-explanation]")?.textContent,
     ).toContain("New input");
+  });
+
+  test("shows the actual pause rationale in the existing tooltip and goal panel", async () => {
+    const rationale =
+      "The selected model is unavailable. Choose an available model before resuming.";
+    const value = goal({ status: "paused", pausedReason: "model_unavailable", rationale });
+    mounted = await renderComponent(
+      <SessionChrome queue={queue({ queue: [] })} composer={composer()} goal={value} />,
+    );
+    const chip = mounted.container.querySelector<HTMLButtonElement>(
+      '[data-og-session-chrome-signal="goal"]',
+    );
+    expect(chip?.textContent).toContain("Paused · model");
+    expect(chip?.getAttribute("title")).toBe(rationale);
+    await act(async () => chip?.click());
+    expect(
+      mounted.container.querySelector("[data-og-session-chrome-goal-explanation]")?.textContent,
+    ).toBe(rationale);
+    expect(mounted.container.textContent).not.toContain("budget");
+    // Older servers used the limits bucket for model failures. Preserve their explanation.
+    expect(
+      sessionChromeGoalPillExplanation("paused", {
+        status: "paused",
+        pausedReason: "limits",
+        rationale,
+      }),
+    ).toBe(rationale);
   });
 });
 

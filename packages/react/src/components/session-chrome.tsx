@@ -162,13 +162,19 @@ const GOAL_LABEL: Record<GoalPillState, string> = {
 
 /**
  * Short pill suffix per `pausedReason`. `max_auto_continuations` is pacing
- * (new input resumes it); `limits` is budget/admission; `user_pause`/`api` is
+ * (new input resumes it); `limits` is an unspecified legacy admission gate; `user_pause`/`api` is
  * the human's own override; `agent` is the model declaring it is blocked on a
  * human decision. Unknown or legacy reasons keep the bare "Paused".
  */
 const GOAL_PAUSED_REASON_SUFFIX: Record<string, string> = {
   max_auto_continuations: "cap",
-  limits: "budget",
+  limits: "limits",
+  model_unavailable: "model",
+  model_policy: "policy",
+  credits: "credits",
+  budget: "budget",
+  usage_limit: "usage limit",
+  allowance: "allowance",
   user_pause: "manually",
   api: "manually",
   agent: "agent",
@@ -177,7 +183,14 @@ const GOAL_PAUSED_REASON_SUFFIX: Record<string, string> = {
 const GOAL_PAUSED_REASON_EXPLANATION: Record<string, string> = {
   max_auto_continuations:
     "Paused at the automatic continuation cap. New input (a child result, an agent message, or your prompt) resumes it; you can also resume it here.",
-  limits: "Paused because budget or usage limits block another run. Resume once limits allow.",
+  limits: "Paused by an admission limit. Resume when the blocker is resolved.",
+  model_unavailable:
+    "The selected model is unavailable. Choose an available model before resuming.",
+  model_policy: "The selected model is blocked by policy. Choose an allowed model before resuming.",
+  credits: "Insufficient OpenGeni credits. Add credits before resuming.",
+  budget: "Monthly model spending limit reached. Resume when the spending limit allows.",
+  usage_limit: "Monthly agent run limit reached. Resume when the run limit allows.",
+  allowance: "OpenGeni usage allowance exhausted. Resume when your allowance is available.",
   user_pause:
     "Paused manually by a person or an API call. Resume to let the goal continue on its own.",
   api: "Paused manually by a person or an API call. Resume to let the goal continue on its own.",
@@ -185,6 +198,7 @@ const GOAL_PAUSED_REASON_EXPLANATION: Record<string, string> = {
 };
 
 type GoalPillRecord = Pick<SessionGoal, "status" | "pausedReason"> & {
+  rationale?: SessionGoal["rationale"];
   continuation?: SessionGoal["continuation"] | null | undefined;
 };
 
@@ -212,6 +226,8 @@ export function sessionChromeGoalPillExplanation(
     return "Resolve the session failure, then use Continue or send a message to continue this active goal.";
   }
   if (state === "paused") {
+    const rationale = record?.rationale?.trim();
+    if (rationale) return rationale;
     return record?.pausedReason
       ? (GOAL_PAUSED_REASON_EXPLANATION[record.pausedReason] ?? null)
       : null;

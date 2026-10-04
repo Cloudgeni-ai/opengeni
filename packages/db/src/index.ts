@@ -1,4 +1,5 @@
 export { SubscriptionAccountChangedError } from "./subscription-account-conflict";
+import type { GoalAdmissionPausedReason } from "@opengeni/contracts";
 import {
   claudeSubscriptionAccountRepository,
   claudeSubscriptionTables,
@@ -68345,6 +68346,12 @@ export async function updateSessionTitleWithEvent(
  * completed goal. Resuming to `active` clears the pause fields and resets the
  * continuation counters.
  */
+export type SessionGoalResumeValidation = (
+  tx: Database,
+  session: Pick<Session, "accountId" | "workspaceId" | "model" | "codexCompactionMode">,
+  causalTurn: { id: string; initiatingHumanSubjectId: string | null } | null,
+) => Promise<void>;
+
 export async function setSessionGoalStatus(
   db: Database,
   workspaceId: string,
@@ -68357,6 +68364,8 @@ export async function setSessionGoalStatus(
     reportDeliveries?: SessionGoalReportDelivery[];
     reportArtifactActor?: ReportArtifactActor;
     commandActor?: Extract<SessionCommandActor, { type: "agent_attempt" }>;
+    /** Runs under the canonical control/session/goal locks, before a paused goal changes. */
+    beforeResume?: SessionGoalResumeValidation;
   },
 ): Promise<{
   goal: SessionGoal;
@@ -68405,6 +68414,39 @@ export async function setSessionGoalStatus(
     }
     if (existing.status === "completed") {
       throw new Error("session goal is completed; set a new goal to continue");
+    }
+    if (input.status === "active" && input.beforeResume) {
+      const [effectiveSession] = await withEffectiveSessionPolicy(scopedDb, workspaceId, [session]);
+      const [causalTurn] = await scopedDb
+        .select({
+          id: schema.sessionTurns.id,
+          initiatingHumanSubjectId: schema.sessionTurns.initiatingHumanSubjectId,
+        })
+        .from(schema.sessionTurns)
+        .where(
+          and(
+            eq(schema.sessionTurns.workspaceId, workspaceId),
+            eq(schema.sessionTurns.sessionId, sessionId),
+            sql`${schema.sessionTurns.finishedAt} is not null`,
+          ),
+        )
+        .orderBy(
+          desc(schema.sessionTurns.finishedAt),
+          desc(schema.sessionTurns.position),
+          desc(schema.sessionTurns.createdAt),
+          desc(schema.sessionTurns.id),
+        )
+        .limit(1);
+      await input.beforeResume(
+        scopedDb,
+        {
+          accountId: session.accountId,
+          workspaceId,
+          model: effectiveSession!.model,
+          codexCompactionMode: session.codexCompactionMode as Session["codexCompactionMode"],
+        },
+        causalTurn ?? null,
+      );
     }
     if (input.status === "completed") {
       await verifyGoalReportDeliveries(scopedDb, {
@@ -68499,6 +68541,7 @@ export async function setSessionGoalStatusWithEvent(
     reportDeliveries?: SessionGoalReportDelivery[];
     reportArtifactActor?: ReportArtifactActor;
     commandActor?: Extract<SessionCommandActor, { type: "agent_attempt" }>;
+    beforeResume?: SessionGoalResumeValidation;
     event: SetSessionGoalStatusEvent;
   },
 ): Promise<{
@@ -68532,6 +68575,7 @@ export async function setSessionGoalStatusWithEvent(
           : {}),
         ...(input.reportArtifactActor ? { reportArtifactActor: input.reportArtifactActor } : {}),
         ...(input.commandActor ? { commandActor: input.commandActor } : {}),
+        ...(input.beforeResume ? { beforeResume: input.beforeResume } : {}),
         ...(input.evidence !== undefined ? { evidence: input.evidence } : {}),
         ...(input.rationale !== undefined ? { rationale: input.rationale } : {}),
         ...(input.pausedReason !== undefined ? { pausedReason: input.pausedReason } : {}),
@@ -68630,7 +68674,7 @@ export type GoalContinuationDecision =
   | { decision: "queue" }
   | {
       decision: "paused";
-      reason: "max_auto_continuations" | "limits" | "allowance";
+      reason: "max_auto_continuations" | "limits" | GoalAdmissionPausedReason;
       goal: SessionGoal;
     }
   | {
@@ -68709,7 +68753,7 @@ export async function evaluateGoalContinuation(
     // decision (before the counter bump) so a budget pause never consumes
     // continuation budget.
     budgetBlocked?: string | null;
-    budgetPausedReason?: "limits" | "allowance" | undefined;
+    budgetPausedReason?: "limits" | GoalAdmissionPausedReason | undefined;
   },
 ): Promise<GoalContinuationDecision> {
   return await withWorkspaceRls(
@@ -68971,7 +69015,7 @@ export async function materializeGoalContinuation(
     workflowId: string;
     defaultMaxAutoContinuations?: number | null;
     budgetBlocked?: string | null;
-    budgetPausedReason?: "limits" | "allowance" | undefined;
+    budgetPausedReason?: "limits" | GoalAdmissionPausedReason | undefined;
     /** Trusted worker admission, evaluated under the same session/goal locks
      * as lineage materialization. Never substitutes a mutable latest human. */
     admission?: (
@@ -68979,7 +69023,7 @@ export async function materializeGoalContinuation(
       causalTurn: { id: string; initiatingHumanSubjectId: string | null } | null,
     ) => Promise<{
       budgetBlocked: string | null;
-      budgetPausedReason?: "limits" | "allowance";
+      budgetPausedReason?: "limits" | GoalAdmissionPausedReason;
     }>;
     idleBackoff?: GoalIdleBackoffPolicy | null;
     policy: {

@@ -62,6 +62,7 @@ export {
 } from "./managed-session";
 export * from "./transcription";
 export * from "./model-catalog";
+export * from "./goal-admission";
 export * from "./codex-model-availability";
 export * from "./default-session-model";
 
@@ -85,6 +86,7 @@ export * from "./session-authorization";
 
 // Billing / usage-limit admission (checkLimit / requireLimit / recordWorkspaceUsage).
 export * from "./billing/limits";
+export * from "./billing/agent-run-admission";
 
 // Domain layer — the off-HTTP V2 surface (createSessionForRequest,
 

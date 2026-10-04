@@ -1,27 +1,16 @@
 import {
   allowedFirstPartyMcpToolsForSession,
-  configuredStaticUsageLimits,
-  isModelAvailableForNewSelection,
-  policyProviderIdForModel,
-  resolveModelProvider,
   resolveTurnExecutionPolicyV1,
-  withCodexCatalogProvider,
-  withXaiSubscriptionCatalogProvider,
-  WORKSPACE_GATEWAY_MODEL_ID_PREFIX,
-  WORKSPACE_OPENROUTER_MODEL_ID_PREFIX,
   type Settings,
 } from "@opengeni/config";
 import {
-  evaluateWorkspaceModelPolicy,
   mergeToolRefs,
   readTurnExecutionPolicyV1,
   type SessionGoal,
   type ToolRef,
 } from "@opengeni/contracts";
-import { isCodexBilledModel } from "@opengeni/codex";
 import {
   enqueueSessionWorkflowWakeIfRunnable,
-  getWorkspaceModelPolicy,
   getSessionGoal,
   getSessionTurn,
   materializeGoalContinuation,
@@ -34,10 +23,10 @@ import type {
 } from "./types";
 import {
   modelFundingForAdmission,
-  resolveCatalogSettings,
-  resolveWorkspaceCatalogSettings,
+  goalRunBudgetBlocked,
+  resolveGoalModelAdmission,
 } from "@opengeni/core";
-import { agentRunAdmissionDenial } from "./agent-run-admission";
+export { goalContinuationModelDecision, goalRunBudgetBlocked } from "@opengeni/core";
 import { turnCredentialRestriction } from "./agent-turn/credential-restriction";
 
 export function createGoalActivities(services: () => Promise<ControlActivityServices>) {
@@ -80,42 +69,17 @@ export function createGoalActivities(services: () => Promise<ControlActivityServ
     if (session.status === "failed" || session.status === "cancelled") {
       return { action: "none" };
     }
-    let settings = (await resolveCatalogSettings(db, catalogSourceSettings)).settings;
-    const inheritedContinuationModel = session.model;
-    let continuationModel = inheritedContinuationModel;
+    const modelDecision = await resolveGoalModelAdmission(db, catalogSourceSettings, {
+      accountId: input.accountId,
+      workspaceId: input.workspaceId,
+      model: session.model,
+      codexCompactionMode: session.codexCompactionMode,
+    });
+    const settings = modelDecision.settings;
+    const continuationModel = modelDecision.model;
     const continuationReasoningEffort = session.reasoningEffort;
     const continuationLatencyMode = session.latencyMode;
-    const workspaceModelPolicy = await getWorkspaceModelPolicy(db, input.workspaceId);
-    if (
-      inheritedContinuationModel.startsWith(WORKSPACE_GATEWAY_MODEL_ID_PREFIX) ||
-      inheritedContinuationModel.startsWith(WORKSPACE_OPENROUTER_MODEL_ID_PREFIX) ||
-      session.model.startsWith(WORKSPACE_GATEWAY_MODEL_ID_PREFIX) ||
-      session.model.startsWith(WORKSPACE_OPENROUTER_MODEL_ID_PREFIX)
-    ) {
-      settings = (
-        await resolveWorkspaceCatalogSettings(db, catalogSourceSettings, {
-          accountId: input.accountId,
-          workspaceId: input.workspaceId,
-          retainedProductModelIds: [inheritedContinuationModel, session.model],
-        })
-      ).settings;
-    }
-    const modelDecision = goalContinuationModelDecision({
-      settings,
-      workspaceModelPolicy,
-      inheritedModel: inheritedContinuationModel,
-    });
-    continuationModel = modelDecision.model;
-    let modelPolicyBlocked = modelDecision.blocked;
-    // remote_v2 sessions may only continue on Codex models — refuse synthesis
-    // that would leave the portable/non-Codex path (and mixed history shapes).
-    if (
-      !modelPolicyBlocked &&
-      session.codexCompactionMode === "remote_v2" &&
-      !isCodexBilledModel(continuationModel)
-    ) {
-      modelPolicyBlocked = `session is locked to Codex remote compaction v2; model "${continuationModel}" is not a Codex subscription model`;
-    }
+    const modelPolicyBlocked = modelDecision.blocked;
     const turnExecutionPolicy = modelPolicyBlocked
       ? undefined
       : resolveTurnExecutionPolicyV1(settings, {
@@ -183,11 +147,12 @@ export function createGoalActivities(services: () => Promise<ControlActivityServ
                 initiatingHumanSubjectId: causalTurn?.initiatingHumanSubjectId ?? null,
               },
             );
+        const pausedReason = modelPolicyBlocked
+          ? modelDecision.pausedReason
+          : budgetBlocked?.pausedReason;
         return {
           budgetBlocked: modelPolicyBlocked ?? budgetBlocked?.message ?? null,
-          budgetPausedReason: modelPolicyBlocked
-            ? "limits"
-            : (budgetBlocked?.pausedReason ?? "limits"),
+          ...(pausedReason ? { budgetPausedReason: pausedReason } : {}),
         };
       },
       policy: continuationPolicy,
@@ -217,47 +182,6 @@ export function createGoalActivities(services: () => Promise<ControlActivityServ
   return {
     enqueueGoalRetryWake,
     maybeContinueGoal,
-  };
-}
-
-export function goalContinuationModelDecision(input: {
-  settings: Settings;
-  workspaceModelPolicy: Awaited<ReturnType<typeof getWorkspaceModelPolicy>>;
-  inheritedModel: string;
-}): { model: string; blocked: string | null } {
-  const catalogSettings = input.settings.supergrokSubscriptionEnabled
-    ? withXaiSubscriptionCatalogProvider(
-        input.settings.codexSubscriptionEnabled
-          ? withCodexCatalogProvider(input.settings)
-          : input.settings,
-      )
-    : input.settings.codexSubscriptionEnabled
-      ? withCodexCatalogProvider(input.settings)
-      : input.settings;
-  const policyBlocks = (modelId: string): boolean =>
-    input.workspaceModelPolicy !== null &&
-    !evaluateWorkspaceModelPolicy(input.workspaceModelPolicy, {
-      providerId: policyProviderIdForModel(catalogSettings, modelId),
-      modelId,
-    }).allowed;
-  if (!resolveModelProvider(catalogSettings, input.inheritedModel)) {
-    return {
-      model: input.inheritedModel,
-      blocked: `model "${input.inheritedModel}" is no longer in the deployment or workspace catalog; choose an available model before resuming the goal`,
-    };
-  }
-  if (!isModelAvailableForNewSelection(catalogSettings, input.inheritedModel)) {
-    return {
-      model: input.inheritedModel,
-      blocked: `model "${input.inheritedModel}" is retired from new selection; choose an available model before resuming the goal`,
-    };
-  }
-  if (!policyBlocks(input.inheritedModel)) {
-    return { model: input.inheritedModel, blocked: null };
-  }
-  return {
-    model: input.inheritedModel,
-    blocked: `workspace model policy blocks model "${input.inheritedModel}"; pick an allowed model or change the workspace model policy`,
   };
 }
 
@@ -363,25 +287,4 @@ export function withFirstPartyTools(settings: Settings, tools: ToolRef[]): ToolR
     return tools;
   }
   return mergeToolRefs(tools, [{ kind: "mcp", id: "opengeni" }]);
-}
-
-/**
- * Goals share scheduled admission and pause visibly without synthesizing work.
- */
-export async function goalRunBudgetBlocked(
-  services: Parameters<typeof agentRunAdmissionDenial>[0],
-  input: Omit<Parameters<typeof agentRunAdmissionDenial>[1], "requestedAgentRuns">,
-): Promise<{ pausedReason: "limits" | "allowance"; message: string } | null> {
-  const denial = await agentRunAdmissionDenial(services, { ...input, requestedAgentRuns: 1 });
-  if (denial === null) return null;
-  if (denial === "allowance_exhausted") {
-    return { pausedReason: "allowance", message: "OpenGeni usage allowance exhausted" };
-  }
-  const limits = configuredStaticUsageLimits(services.settings);
-  const messages = {
-    insufficient_credits: "insufficient OpenGeni credits",
-    monthly_model_cost_limit: `monthly model cost limit reached (${limits.maxMonthlyCostMicrosPerAccount} micros)`,
-    monthly_agent_run_limit: `monthly agent run limit reached (${limits.maxMonthlyAgentRunsPerWorkspace})`,
-  };
-  return { pausedReason: "limits", message: messages[denial] };
 }
