@@ -5,7 +5,13 @@ import { SESSION_SCOPE_HEADER } from "./message-links";
 import type { WorkspaceIdOptions, WorkspaceIdTarget } from "./tenant-workspaces";
 import { proxySessionEventStream } from "./proxy";
 import { OPENGENI_API_CONTRACT_HEADER, OPENGENI_API_CONTRACT_REVISION } from "./types";
-import type { CreateSessionRequest, SessionMcpCredentialUpdateInput } from "./types";
+import type {
+  CreateSessionRequest,
+  FileResourceRef,
+  LatencyMode,
+  ReasoningEffort,
+  SessionMcpCredentialUpdateInput,
+} from "./types";
 import { mintToolToken, resolveToolTokenSecret } from "./tool-auth";
 import {
   downloadSessionProxySiteHtml,
@@ -77,11 +83,26 @@ export type SessionProxyContext = {
   client: ProxyClient;
 };
 
-/** The only fields a browser may send when creating a session through the proxy. */
+/**
+ * The only fields a browser may send when creating a session through the proxy.
+ * After the `createSession` hook returns, the proxy adds the attached files to
+ * the created request (deduplicated by file id) and, when `modelSelection` is
+ * not `false`, applies the browser's explicit model choices over the hook's,
+ * exactly as follow-up messages carry them. Return a `Response` from the hook
+ * to refuse an input.
+ */
 export type SessionProxyCreateInput = {
   initialMessage: string;
   /** Browser retry key; replay is scoped to the acting user by the API. */
   idempotencyKey?: string | undefined;
+  /** Files attached to the first message (uploaded through this proxy). */
+  resources?: FileResourceRef[] | undefined;
+  /** The user's model choice; only when `modelSelection` is not `false`. */
+  model?: string | undefined;
+  /** The user's reasoning choice; only when `modelSelection` is not `false`. */
+  reasoningEffort?: ReasoningEffort | undefined;
+  /** The user's latency choice; only when `modelSelection` is not `false`. */
+  latencyMode?: LatencyMode | undefined;
 };
 
 /** Which browser action is about to forward a user message or response. */
@@ -200,6 +221,14 @@ export type SessionProxyHandlerOptions = {
   /** Expose composer file attachments (upload begin/complete, download URL). Defaults to true. */
   files?: boolean | undefined;
   /**
+   * Forward composer voice input (`POST .../transcriptions`, one recording per
+   * request) as the resolved user; OpenGeni still requires that user's
+   * `sessions:create` permission and the workspace's voice-input setting.
+   * `false` reports voice input unavailable in the client config so stock UIs
+   * hide the microphone. Defaults to true.
+   */
+  voiceInput?: boolean | undefined;
+  /**
    * Let the browser read a file from the session's sandbox (`POST .../fs/read`)
    * so `sandbox:` links in agent replies can be downloaded. Only `path`,
    * `encoding`, and `maxBytes` are forwarded; OpenGeni still requires the
@@ -239,15 +268,18 @@ export type SessionProxyHandlerOptions = {
   /** Let the user archive or restore their own chats. Defaults to true. */
   archive?: boolean | undefined;
   /**
-   * Let the browser choose model, reasoning effort, and latency per message
-   * or draft (still limited by the workspace model catalog). When false those
-   * choices are removed from messages and draft saves. Saves use the actor's
+   * Let the browser choose model, reasoning effort, and latency per message,
+   * draft, or new chat (still limited by the workspace model catalog). When
+   * false those choices are removed from messages and draft saves, and refused
+   * on create. Saves use the actor's
    * server-owned draft policy (initially the session defaults). Submit must repeat
    * the saved policy unchanged as an integrity fence, not a new selection: the
    * API atomically checks the saved revision/content or replays the original
    * receipt. Hide the composer's model picker to match. Defaults to true.
    * Pass `true` explicitly to also show end users the stock model picker
-   * (`SessionConversation`/`OpenGeniChat` hide it unless asked).
+   * (`SessionConversation`/`OpenGeniChat` hide it unless asked). The picker
+   * lists the workspace's model catalog, so the workspace's allowed-model
+   * settings decide which models end users see.
    */
   modelSelection?: boolean | undefined;
   /** SSE heartbeat interval. Defaults to 15 seconds. */
@@ -257,8 +289,14 @@ export type SessionProxyHandlerOptions = {
 const DEFAULT_MAX_BODY_BYTES = 1024 * 1024;
 const SEGMENT = /^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$/;
 const QUEUE_OPERATIONS: ReadonlySet<string> = new Set(["move", "edit", "steer", "delete"]);
-const CREATE_FIELDS: ReadonlySet<string> = new Set(["initialMessage", "idempotencyKey"]);
+const CREATE_FIELDS: ReadonlySet<string> = new Set([
+  "initialMessage",
+  "idempotencyKey",
+  "resources",
+]);
 const MODEL_FIELDS = ["model", "reasoningEffort", "latencyMode"] as const;
+/** The API's single-recording ceiling (25 MiB) plus multipart framing. */
+const MAX_TRANSCRIPTION_BODY_BYTES = 25 * 1024 * 1024 + 64 * 1024;
 
 class ProxyRejection extends Error {
   constructor(
@@ -306,6 +344,7 @@ export function createSessionProxyHandler(
   const defaultSource = isFacade(target) ? target.source : "default";
   const maxBodyBytes = options.maxBodyBytes ?? DEFAULT_MAX_BODY_BYTES;
   const filesEnabled = options.files ?? true;
+  const voiceInputEnabled = options.voiceInput ?? true;
   const sandboxFilesEnabled = options.sandboxFiles === true;
   const artifactsEnabled = options.artifacts !== undefined && options.artifacts !== false;
   const editableLiveUrl = artifactsEnabled
@@ -548,6 +587,14 @@ export function createSessionProxyHandler(
           }
           // Upstream proxy capabilities never authorize this host's routes.
           const { artifacts: _upstreamArtifacts, ...conversationConfig } = config;
+          const upstreamVoice = config.voiceInput;
+          if (upstreamVoice && typeof upstreamVoice === "object") {
+            // Only one-shot recordings are forwarded, never resumable chunk uploads.
+            const { resumable: _resumable, ...voice } = upstreamVoice as Record<string, unknown>;
+            conversationConfig.voiceInput = voiceInputEnabled
+              ? voice
+              : { ...voice, available: false };
+          }
           return json({
             ...conversationConfig,
             apiContractRevision: OPENGENI_API_CONTRACT_REVISION,
@@ -627,6 +674,11 @@ export function createSessionProxyHandler(
           );
         }
         return errorJson(404, "route_not_allowed", "Not found.");
+      }
+
+      if (area === "transcriptions" && tail.length === 0 && method === "POST") {
+        if (!voiceInputEnabled) return errorJson(404, "route_not_allowed", "Not found.");
+        return json(await client.transcribeAudio(workspaceId, await transcriptionInput(request)));
       }
 
       if (area === "editable-artifacts" || area === "published-artifacts") {
@@ -720,10 +772,13 @@ export function createSessionProxyHandler(
         if (method !== "POST" || !options.createSession) {
           return errorJson(404, "route_not_allowed", "Not found.");
         }
-        const input = createInput(await readJsonBody(request, maxBodyBytes));
+        const input = createInput(await readJsonBody(request, maxBodyBytes), modelSelection);
         const hooked = await options.createSession(input, context);
         if (hooked instanceof Response) return hooked;
-        const created = toolServer ? withToolServer(hooked, toolServer, await toolToken()) : hooked;
+        const created = withBrowserCreateChoices(
+          toolServer ? withToolServer(hooked, toolServer, await toolToken()) : hooked,
+          input,
+        );
         const extras = await messageExtras({ delivery: "create" });
         if (extras instanceof Response) return extras;
         const modelContext = joinContext(extras?.modelContext, created.modelContext);
@@ -1195,6 +1250,31 @@ async function readJsonBody(
   maxBytes: number,
   optional = false,
 ): Promise<Record<string, unknown> | undefined> {
+  const bytes = await readBoundedBytes(request, maxBytes);
+  if (bytes.byteLength === 0) {
+    if (optional) return undefined;
+    reject(400, "invalid_body", "A JSON object body is required.");
+  }
+  const contentType = request.headers.get("content-type") ?? "";
+  if (!/^application\/json\b/i.test(contentType)) {
+    reject(415, "unsupported_media_type", "Send application/json.");
+  }
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(new TextDecoder().decode(bytes));
+  } catch {
+    reject(400, "invalid_body", "Body is not valid JSON.");
+  }
+  if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+    reject(400, "invalid_body", "A JSON object body is required.");
+  }
+  return parsed as Record<string, unknown>;
+}
+
+async function readBoundedBytes(
+  request: Request,
+  maxBytes: number,
+): Promise<Uint8Array<ArrayBuffer>> {
   const declared = Number(request.headers.get("content-length") ?? "0");
   if (declared > maxBytes) reject(413, "body_too_large", "Request body is too large.");
   const reader = request.body?.getReader();
@@ -1212,30 +1292,13 @@ async function readJsonBody(
       chunks.push(value);
     }
   }
-  if (total === 0) {
-    if (optional) return undefined;
-    reject(400, "invalid_body", "A JSON object body is required.");
-  }
-  const contentType = request.headers.get("content-type") ?? "";
-  if (!/^application\/json\b/i.test(contentType)) {
-    reject(415, "unsupported_media_type", "Send application/json.");
-  }
   const bytes = new Uint8Array(total);
   let offset = 0;
   for (const chunk of chunks) {
     bytes.set(chunk, offset);
     offset += chunk.byteLength;
   }
-  let parsed: unknown;
-  try {
-    parsed = JSON.parse(new TextDecoder().decode(bytes));
-  } catch {
-    reject(400, "invalid_body", "Body is not valid JSON.");
-  }
-  if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
-    reject(400, "invalid_body", "A JSON object body is required.");
-  }
-  return parsed as Record<string, unknown>;
+  return bytes;
 }
 
 function pick(
@@ -1249,9 +1312,12 @@ function pick(
   return picked;
 }
 
-function createInput(body: Record<string, unknown> | undefined): SessionProxyCreateInput {
+function createInput(
+  body: Record<string, unknown> | undefined,
+  modelSelection: boolean,
+): SessionProxyCreateInput {
   for (const key of Object.keys(body ?? {})) {
-    if (!CREATE_FIELDS.has(key)) {
+    if (!CREATE_FIELDS.has(key) && !(modelSelection && isModelField(key))) {
       reject(
         400,
         "create_field_not_allowed",
@@ -1267,7 +1333,108 @@ function createInput(body: Record<string, unknown> | undefined): SessionProxyCre
   if (idempotencyKey !== undefined && (typeof idempotencyKey !== "string" || !idempotencyKey)) {
     reject(400, "invalid_idempotency_key", "idempotencyKey must be a non-empty string.");
   }
-  return { initialMessage, ...(idempotencyKey ? { idempotencyKey } : {}) };
+  const resources = createResources(body?.resources);
+  const policy: Pick<SessionProxyCreateInput, "model" | "reasoningEffort" | "latencyMode"> = {};
+  for (const field of MODEL_FIELDS) {
+    const value = body?.[field];
+    if (value === undefined) continue;
+    if (typeof value !== "string" || !value) {
+      reject(400, "invalid_model_policy", `${field} must be a non-empty string.`);
+    }
+    (policy as Record<string, string>)[field] = value;
+  }
+  return {
+    initialMessage,
+    ...(idempotencyKey ? { idempotencyKey } : {}),
+    ...(resources.length > 0 ? { resources } : {}),
+    ...policy,
+  };
+}
+
+function isModelField(key: string): boolean {
+  return (MODEL_FIELDS as readonly string[]).includes(key);
+}
+
+/** First-message attachments: file references only, nothing else on them. */
+function createResources(value: unknown): FileResourceRef[] {
+  if (value === undefined) return [];
+  if (!Array.isArray(value)) {
+    reject(403, "resource_not_allowed", "Only file attachments may be added from the browser.");
+  }
+  return value.map((resource: unknown) => {
+    const file = resource as Partial<FileResourceRef> | null;
+    if (
+      !file ||
+      typeof file !== "object" ||
+      file.kind !== "file" ||
+      typeof file.fileId !== "string" ||
+      !file.fileId ||
+      (file.mountPath !== undefined && typeof file.mountPath !== "string")
+    ) {
+      reject(403, "resource_not_allowed", "Only file attachments may be added from the browser.");
+    }
+    return {
+      kind: "file",
+      fileId: file.fileId,
+      ...(file.mountPath !== undefined ? { mountPath: file.mountPath } : {}),
+    };
+  });
+}
+
+/** Browser attachments are added; explicit browser model choices win, as for messages. */
+function withBrowserCreateChoices(
+  created: CreateSessionRequest,
+  input: SessionProxyCreateInput,
+): CreateSessionRequest {
+  const existing = created.resources ?? [];
+  const attached = new Set(
+    existing.flatMap((resource) => (resource.kind === "file" ? [resource.fileId] : [])),
+  );
+  const added = (input.resources ?? []).filter((resource) => !attached.has(resource.fileId));
+  return {
+    ...created,
+    ...(added.length > 0 ? { resources: [...existing, ...added] } : {}),
+    ...(input.model ? { model: input.model } : {}),
+    ...(input.reasoningEffort ? { reasoningEffort: input.reasoningEffort } : {}),
+    ...(input.latencyMode ? { latencyMode: input.latencyMode } : {}),
+  };
+}
+
+/** One multipart recording: only the audio, its MIME type, and its duration pass. */
+async function transcriptionInput(request: Request): Promise<{
+  audio: File;
+  mimeType: string;
+  durationSeconds?: number;
+  signal: AbortSignal;
+}> {
+  const contentType = request.headers.get("content-type") ?? "";
+  if (!/^multipart\/form-data\b/i.test(contentType)) {
+    reject(415, "unsupported_media_type", "Send multipart/form-data.");
+  }
+  const bytes = await readBoundedBytes(request, MAX_TRANSCRIPTION_BODY_BYTES);
+  let form: FormData;
+  try {
+    form = await new Response(bytes, { headers: { "Content-Type": contentType } }).formData();
+  } catch {
+    reject(400, "invalid_audio", "The recording could not be read.");
+  }
+  const audio = form.get("audio");
+  const mimeType = form.get("mimeType");
+  const duration = form.get("durationSeconds");
+  if (!(audio instanceof File)) reject(400, "invalid_audio", "Audio file is required.");
+  const durationSeconds = typeof duration === "string" && duration ? Number(duration) : undefined;
+  if (
+    durationSeconds !== undefined &&
+    !(Number.isFinite(durationSeconds) && durationSeconds >= 0)
+  ) {
+    reject(400, "invalid_audio", "durationSeconds must be a non-negative number.");
+  }
+  return {
+    audio,
+    mimeType: typeof mimeType === "string" && mimeType ? mimeType : audio.type,
+    ...(durationSeconds !== undefined ? { durationSeconds } : {}),
+    signal: request.signal,
+  };
 }
 
 /** Browser payloads cannot supply server-owned credential rotations. */

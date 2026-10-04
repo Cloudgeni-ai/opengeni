@@ -98,6 +98,14 @@ import "@opengeni/react/compiled.css";
 // or one conversation: <SessionConversation baseUrl="/api/opengeni" sessionId={sessionId} />
 ```
 
+Bearer-token apps pass `headers` (a function runs per request) or a custom
+`fetch`; a `client` passed with `baseUrl` replaces the one the component
+creates:
+
+```tsx
+<OpenGeniChat baseUrl="/api/opengeni" headers={() => ({ Authorization: `Bearer ${getToken()}` })} />
+```
+
 The provider form keeps working, for example for several components sharing one
 client or the headless hooks:
 

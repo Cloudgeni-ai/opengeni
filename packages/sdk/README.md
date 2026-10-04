@@ -183,8 +183,12 @@ resolved user server-side, so each user sees only the chats they started;
 `sessionList: "visible"` lists every chat OpenGeni lets the user read in the
 workspace, and `false` disables listing. Archive and restore go through
 `updateSessionArchive` unless `archive: false`. A "New chat" in `OpenGeniChat`
-sends only `{ initialMessage, idempotencyKey }`, so it needs the
-`createSession` hook.
+sends `{ initialMessage, idempotencyKey }` plus any attached file `resources`
+and, unless `modelSelection: false`, the user's explicit model choices, so it
+needs the `createSession` hook. The hook sees them as input; the proxy adds the
+files and applies those choices to the request the hook returns. Voice input
+(`POST .../transcriptions`) is forwarded as the resolved user unless
+`voiceInput: false`.
 
 `listSessionPage` includes personal pinned details by default. A caller with a
 separate `pinsOnly: true` read can pass `includePinned: false` on ordinary pages
