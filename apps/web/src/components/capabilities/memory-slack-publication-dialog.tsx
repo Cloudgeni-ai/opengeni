@@ -67,7 +67,7 @@ export function MemorySlackPublicationDialog({
         <DialogHeader>
           <DialogTitle>Publish important decisions to Slack</DialogTitle>
           <DialogDescription>
-            Route bounded summaries of workspace Memory changes and completed governed-learning
+            Route short summaries of workspace Knowledge changes and finished Agent learning
             outcomes to one verified, bot-member channel. Major items can publish automatically;
             lower-signal items can wait for review or stay quiet. Slack is a notification surface,
             never the authoritative record.
