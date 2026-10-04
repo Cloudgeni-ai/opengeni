@@ -1,5 +1,28 @@
 # @opengeni/db
 
+## 1.2.0
+
+### Minor Changes
+
+- d870f32: Support model-scoped signup and coupon credits with a shared operator default and
+  per-offer overrides. Update coverage at runtime, spend eligible promotions before
+  general credits, and preserve allocation and retry accounting. Keep scoped coupon
+  redemption separate from paid top-ups. Show credit funding in model selection and
+  current coverage on demand in billing. Legacy unrestricted grants stay unrestricted.
+
+### Patch Changes
+
+- 7424e7c: Reject empty coupon IDs and invalid text boundaries in SQL credit policy updates,
+  preserving the active policy when an update cannot be read by the application.
+- Updated dependencies [21c8904]
+- Updated dependencies [d870f32]
+  - @opengeni/config@1.2.0
+  - @opengeni/contracts@1.2.0
+  - @opengeni/codemode@1.2.0
+  - @opengeni/codex@1.2.0
+  - @opengeni/observability@1.2.0
+  - @opengeni/network@1.2.0
+
 ## 1.1.0
 
 ### Patch Changes
