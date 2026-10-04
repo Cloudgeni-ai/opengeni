@@ -12,13 +12,31 @@ documented transaction-local `NO FORCE ROW LEVEL SECURITY` owner window, locks
 its source tables, installs the exact-source `AFTER INSERT OR UPDATE OR DELETE`
 triggers, aggregates history once and checks convergence before restoring FORCE.
 Migration journal replay is idempotent; a failed transaction leaves neither the
-bootstrap nor its triggers partially installed. No runtime backfill is needed.
+bootstrap nor its triggers partially installed. Bootstrap is maintenance-only;
+the full-volume historical fence measurements below are not online-rollout proof.
+
+Normal old and current writers append transactional rows to the private
+`insights_rollup_invalidations` table instead of locking shared daily groups or
+charge links. Rollback also removes those marks. Model reads replace affected
+days with authoritative raw inputs; charge reads use raw ledger inputs for a
+pending scope, including OLD/NEW scopes after fact moves or late attribution.
+There is no automatic reconciliation cadence in this checkpoint.
+
+The schema owner can explicitly call
+`opengeni_private.insights_reconcile_rollups(account, workspace, max_source_rows)`
+inside a REPEATABLE READ transaction. The default source-row budget is 100,000
+(maximum 10,000,000); exceeding it aborts rather than partially publishing.
+A nonblocking cache-rebuilder fence does not serialize normal source writers.
+Rebuilt caches and deletion of the exact snapshot-visible mark IDs commit
+atomically; concurrent unseen invalidations remain pending. The application role
+cannot execute this recovery operation. Dirty scopes can retain raw-query cost
+until supported owner maintenance runs.
 
 Usage groups retain quantity and source-row count. Model groups retain every
 nullable counter's sum and known count, frozen prices/classes, normalized
-contributions, and an exact joint timestamp multiset. Removing or moving an
-extremal source row therefore updates minimum/maximum occurrence and recording
-times without stale facets. Uncached input is derived separately per fact only
+contributions, and an exact joint timestamp multiset. Invalidated reads and
+explicit reconstruction preserve minimum/maximum occurrence and recording
+times after source corrections. Uncached input is derived separately per fact only
 when input, cache-read and cache-write are all known, nonnegative and consistent.
 
 Actual charge groups come only from negative `model_usage_debit` ledger entries
@@ -28,11 +46,11 @@ and fact mutations, deleted facts and NULL-workspace residual money remain exact
 unmatched money has zero calls and no invented model or tokens. The nominal
 `priced_cost_micros` and `model.cost` event amounts are not actual debit authority.
 
-Sorted per-row source/group fences cover the tested single-row opposing moves.
-They do not establish a transaction-wide order across multiple source statements;
-the independent review found a multirow deadlock blocker described below.
-`ON CONFLICT DO NOTHING` source retries do not run an extra insertion delta.
-Transaction rollback also rolls back all projections.
+The append-only writer hooks replace the historical shared source/group fences
+that introduced an opposing-multirow analytics deadlock. They do not depend on
+whole-transaction retries, deferred final flushes or changes to the existing
+forced-immediate activity gate. `ON CONFLICT DO NOTHING` source retries do not
+append an extra insertion mark.
 
 ## Read integration seam
 
@@ -40,14 +58,24 @@ Transaction rollback also rolls back all projections.
 since timestamptz, until timestamptz, granularity text)` is **SECURITY INVOKER** and
 checks the source owner and exact tenant context. It returns the existing narrow
 raw-input shape: session/provider/model/payer/schedule, occurrence/recording time,
-flat numeric measures, and charge-row flag. Complete UTC days use daily groups;
-only the two incomplete day edges read facts/charge links. Hourly windows must be
+flat numeric measures, and charge-row flag. Clean complete UTC days use daily
+groups; pending model days and incomplete day edges read facts, while dirty
+charge scopes and charge edges read the actual ledger. Hourly windows must be
 at most one day; day windows must be at most 370 days. Equal bounds return no rows.
 Raw model edges are issued separately with scalar timestamp index bounds, not a
 join against an estimated edge relation. A complete UTC-day window issues no raw
-model query. The owner fixture uses `row_security=off` (fail on RLS, not bypass):
+model query when its cached days are clean. The owner fixture uses
+`row_security=off` (fail on RLS, not bypass):
 a FORCE-bound raw query is rejected, but complete-day history is still returned
 without opening a fact-read capability or changing FORCE posture.
+
+The amount helper is STABLE and read-only: dirty selection, cached/raw inputs
+and current debit attribution share its calling SELECT snapshot. This does not
+introduce request-wide isolation across separate organization/current/prior
+SELECTs. Native column aggregation batches the existing leaf-session, provider,
+model, payer, schedule and UTC-bucket grain before JSON and live metadata joins;
+per-fact nullable-counter knownness and actual-negative-debit attribution remain
+unchanged.
 
 Rolling migration `0609_insights_daily_usage_reader.sql` switches only the two
 amount-input calls in the existing scoped usage reader to this seam. Definition
@@ -202,6 +230,24 @@ row-lock cycles. The diagnostic regression deliberately asserts the unresolved
 corrective strategy and completed regression evidence remain separate from the
 frozen-head measurement. Neither finding reopens the already
 merged raw API, and no rollup merge or deployment is implied by these notes.
+
+The subsequent immutable DB checkpoint
+`77dad806ace707f424d7ce41fdc687ef1d1e6fd0` replaces shared writer-cache mutation
+with the append-only invalidation and owner-reconciliation design above. Its
+executed opposing multirow and mixed-stream regressions make both transactions
+commit, including forced-immediate constraints followed by later writes. The
+author reports 125 PostgreSQL tests and 1,771 assertions; those tests are not a
+retained-volume latency or bootstrap measurement.
+
+Checkpoint `28d48b1396d6d8dfcb223ec69d4475084083cb51` then pins the read-only amount
+helper to a single calling SELECT snapshot. Frozen-reader red versus repaired
+green tests exercise a concurrent clean-to-dirty fact move and debit correction,
+plus move/delete/insert interleavings. A 192-input-row fixture batches to two
+rows with identical measures and timestamps. Its exact-head owner/app suite
+passes 127 tests and 2,179 assertions, including existing mutation, knownness,
+privacy and frozen-runtime checks. This is focused correctness and row-reduction
+evidence, not the full-App sub-second acceptance result; maintenance cadence and
+dirty-charge scan cost remain explicit limits.
 
 ## Versioned historical list-class allocation
 

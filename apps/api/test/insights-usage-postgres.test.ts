@@ -677,8 +677,8 @@ test("daily HTTP reads retain ledger-period money and live selected-key, project
         totalTokens: 130,
       });
     });
-    // The source mutation deliberately moves an old-writer fact into a complete
-    // UTC day. The trigger, not a test-populated aggregate, must maintain it.
+    // Move an old-writer fact into a complete UTC day. The trigger must mark
+    // the cached day dirty; HTTP reads below must be exact without reconciliation.
     await shared.admin`update model_call_facts set occurred_at='2026-09-29T03:00:00Z',
       recorded_at='2026-09-29T03:01:00Z' where account_id=${scope.accountId} and turn_id=${turnId}`;
     sessions.push({ id: session.id, title, workspaceId: selected.workspaceId, turnId, sourceKey });
@@ -719,12 +719,27 @@ test("daily HTTP reads retain ledger-period money and live selected-key, project
     await shared.admin`update credit_ledger_entries set occurred_at=${occurredAt}::timestamptz
       where account_id=${scope.accountId} and idempotency_key=${idempotencyKey}`;
   }
-  const [maintained] = await shared.admin`select
+  const [pending] = await shared.admin`select
+    (select count(*)::int from model_call_facts where account_id=${scope.accountId}) as source_calls,
+    (select (-sum(amount_micros))::int from credit_ledger_entries
+      where account_id=${scope.accountId} and type='model_usage_debit'
+        and source_type='model_response' and amount_micros<0) as source_charged,
+    (select count(*)::int from opengeni_private.insights_rollup_invalidations
+      where account_id=${scope.accountId} and stream='model_call_facts') as pending_model,
+    (select count(*)::int from opengeni_private.insights_rollup_invalidations
+      where account_id=${scope.accountId} and stream='charges') as pending_charges,
     (select sum((measures->>'calls')::bigint)::int from opengeni_private.insights_model_daily
       where account_id=${scope.accountId}) as calls,
     (select sum(quantity)::int from opengeni_private.insights_charge_daily
       where account_id=${scope.accountId}) as charged`;
-  expect(maintained).toMatchObject({ calls: 3, charged: 48 });
+  expect(pending).toMatchObject({
+    source_calls: 3,
+    source_charged: 48,
+    calls: null,
+    charged: null,
+  });
+  expect(pending!.pending_model).toBeGreaterThan(0);
+  expect(pending!.pending_charges).toBeGreaterThan(0);
 
   const rawKey = `ogk_${crypto.randomUUID().replaceAll("-", "")}`;
   const permissions: Permission[] = [
