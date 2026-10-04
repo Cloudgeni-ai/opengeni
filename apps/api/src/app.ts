@@ -3430,7 +3430,10 @@ export function isApiContractProtectedMutation(method: string, pathname: string)
     pathname === ANALYTICS_CONSENT_PATH ||
     pathname === "/v1/enrollments/device/start" ||
     pathname === "/v1/enrollments/device/poll" ||
-    pathname === "/v1/enrollments/token/exchange"
+    pathname === "/v1/enrollments/token/exchange" ||
+    // The runner authenticates this protocol with its install-key proof, not
+    // a browser cookie or the product-client revision header.
+    pathname === "/v1/enrollments/renew"
   ) {
     return false;
   }
