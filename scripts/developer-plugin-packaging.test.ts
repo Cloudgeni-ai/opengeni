@@ -80,7 +80,7 @@ describe("shared OpenGeni package", () => {
     const portable = json("plugins/opengeni/plugin.json");
     for (const manifest of [claude, portable]) {
       expect(manifest.name).toBe("opengeni");
-      expect(manifest.version).toBe("0.3.0");
+      expect(manifest.version).toBe("0.3.1");
       expect(manifest).not.toHaveProperty("skills");
       const { mcpServers: _claudeMcp, ...rest } = manifest;
       noTransport(rest);
@@ -174,6 +174,27 @@ describe("shared OpenGeni package", () => {
     expect(manifest.homepage).toBe("https://docs.opengeni.ai/guides/coding-agents");
     // The skills read OPENGENI_* from the project's env; no plugin settings are required.
     expect(manifest.userConfig).toBeUndefined();
+  });
+
+  test("every host icon field names a contained square brand PNG", () => {
+    // Claude's directory reads `icon`; Codex/ChatGPT read the `com.openai` interface.
+    const claude = json("plugins/opengeni/.claude-plugin/plugin.json");
+    const ui = json("plugins/opengeni/plugin.json").extensions["com.openai"].interface;
+    expect(claude.icon).toBe("./assets/logo.png");
+    expect(ui.logo).toBe(claude.icon);
+    expect(ui.composerIcon).toBe(claude.icon);
+    expect(ui.logoDark).toBe("./assets/logo-dark.png");
+    expect(ui.composerIconDark).toBe(ui.logoDark);
+    const light = readFileSync(contained(join(pluginRoot, claude.icon)));
+    const dark = readFileSync(contained(join(pluginRoot, ui.logoDark)));
+    for (const png of [light, dark]) {
+      expect(png.subarray(0, 8)).toEqual(Buffer.from([137, 80, 78, 71, 13, 10, 26, 10]));
+      const width = png.readUInt32BE(16);
+      expect(png.readUInt32BE(20)).toBe(width);
+      expect(width).toBeGreaterThanOrEqual(48);
+      expect(width).toBeLessThanOrEqual(4096);
+    }
+    expect(dark.equals(light)).toBe(false);
   });
 
   test("all catalogs use the same identity and nested repository-relative source", () => {

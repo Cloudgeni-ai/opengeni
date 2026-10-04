@@ -21,6 +21,7 @@ import { registerModelConnectionAccessRoutes } from "./routes/model-connection-a
 import {
   codeSearchDeploymentPolicy,
   agentConfigDeploymentPolicy,
+  canonicalPublicOrigin,
   configuredAllowedReasoningEfforts,
   resolveFirstPartyMcpToolPolicy,
   resolveVoiceInputProviderRegistry,
@@ -1416,6 +1417,7 @@ export function createAppComposition(deps: AppDependencies): {
     const mcp = buildOrganizationMcpServer({
       caller,
       origin: new URL(c.req.url).origin,
+      publicOrigin: canonicalPublicOrigin(deps.settings.publicBaseUrl),
       dispatch: async (request) => await app.fetch(request, c.env),
       signal: c.req.raw.signal,
     });

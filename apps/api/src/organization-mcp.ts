@@ -3,6 +3,7 @@ import {
   CallToolRequestSchema,
   ListToolsRequestSchema,
   type CallToolResult,
+  type Icon,
 } from "@modelcontextprotocol/sdk/types.js";
 import * as contracts from "@opengeni/contracts";
 import {
@@ -112,15 +113,62 @@ const TOOLS = [
   },
 ] as const;
 
+/** The brand mark from `apps/web/public/favicon.svg`. */
+const BRAND_MARK_PATH =
+  "M251 83.5966L207 109L163 83.5966L119 109L75 83.5966L141 45.4915A44 44 0 0 1 185 45.4915ZM185.25 172.3642A44.5 44.5 0 0 1 140.75 172.3642L75 134.4034L119 109L163 134.4034L207 109L251 134.4034Z";
+
+function brandMarkSvgDataUri(fill: string): string {
+  const svg = `<svg xmlns="http://www.w3.org/2000/svg" viewBox="71 17 184 184" width="184" height="184"><path fill="${fill}" d="${BRAND_MARK_PATH}"/></svg>`;
+  return `data:image/svg+xml;base64,${Buffer.from(svg).toString("base64")}`;
+}
+
+/**
+ * MCP `serverInfo.icons` (spec 2025-11-25). Self-contained data URIs work for
+ * every deployment; the web app's PNG is added when its public origin is known.
+ */
+export function organizationMcpIcons(publicOrigin: string | null): Icon[] {
+  const icons: Icon[] = [
+    {
+      src: brandMarkSvgDataUri("#111111"),
+      mimeType: "image/svg+xml",
+      sizes: ["any"],
+      theme: "light",
+    },
+    {
+      src: brandMarkSvgDataUri("#FFFFFF"),
+      mimeType: "image/svg+xml",
+      sizes: ["any"],
+      theme: "dark",
+    },
+  ];
+  if (publicOrigin) {
+    icons.push({
+      src: new URL("/icon-512.png", publicOrigin).href,
+      mimeType: "image/png",
+      sizes: ["512x512"],
+      theme: "light",
+    });
+  }
+  return icons;
+}
+
 export function buildOrganizationMcpServer(input: {
   caller: OrganizationMcpCaller;
   /** This API's own origin; the call never leaves the process. */
   origin: string;
+  /** The web app's public origin, when configured; serves the PNG icon. */
+  publicOrigin?: string | null;
   dispatch: (request: Request) => Promise<Response>;
   signal?: AbortSignal;
 }): Server {
   const server = new Server(
-    { name: "opengeni", version: "1.0.0" },
+    {
+      name: "opengeni",
+      title: "Opengeni",
+      version: "1.0.0",
+      websiteUrl: "https://opengeni.ai",
+      icons: organizationMcpIcons(input.publicOrigin ?? null),
+    },
     {
       capabilities: { tools: {} },
       instructions:
