@@ -14,7 +14,9 @@ import { AnthropicMessagesModel } from "./anthropic-messages";
 import { projectChatToolImages } from "./chat-tool-images";
 import { projectHistoryForProvider } from "./provider-history-adapter";
 import {
+  appendChatReasoningDetails,
   chatReasoning,
+  chatReasoningDetails,
   primaryChatChoice,
   projectChatReasoning,
   withChatReasoning,
@@ -53,16 +55,20 @@ function chatCompletionFinishReason(value: unknown): unknown {
     : undefined;
 }
 
-/**
- * Chat-compatible providers can report `finish_reason: "unknown"` after an
- * interrupted generation. The upstream SDK otherwise converts that terminal
- * into an ordinary `response_done`, which can commit a truncated answer. Fail
- * before that boundary so the worker's fenced same-turn recovery owns the
- * continuation and no OpenGeni tool call from the ambiguous response executes.
- */
+function chatRequest(request: ModelRequest): ModelRequest {
+  const input =
+    typeof request.input === "string"
+      ? request.input
+      : (projectHistoryForProvider(request.input, "chat") as ModelRequest["input"]);
+  return projectChatReasoning(
+    projectChatToolImages(input === request.input ? request : { ...request, input }),
+  );
+}
+
+/** Reject ambiguous completion before the SDK can commit output or execute tools. */
 export class OpenGeniChatCompletionsModel extends OpenAIChatCompletionsModel {
   override async getResponse(request: ModelRequest): Promise<ModelResponse> {
-    const response = await super.getResponse(projectChatReasoning(projectChatToolImages(request)));
+    const response = await super.getResponse(chatRequest(request));
     if (isUnknownFinishReason(chatCompletionFinishReason(response.providerData))) {
       throw new UnknownModelFinishReasonError();
     }
@@ -71,6 +77,7 @@ export class OpenGeniChatCompletionsModel extends OpenAIChatCompletionsModel {
       output: withChatReasoning(
         response.output,
         chatReasoning(primaryChatChoice(response.providerData)?.message),
+        chatReasoningDetails(primaryChatChoice(response.providerData)?.message),
       ),
     };
   }
@@ -78,15 +85,16 @@ export class OpenGeniChatCompletionsModel extends OpenAIChatCompletionsModel {
   override async *getStreamedResponse(request: ModelRequest): AsyncIterable<ResponseStreamEvent> {
     let finishReason: unknown;
     let reasoning: ChatReasoning | undefined;
-    for await (const event of super.getStreamedResponse(
-      projectChatReasoning(projectChatToolImages(request)),
-    )) {
+    let reasoningDetails: Record<string, unknown>[] | undefined;
+    for await (const event of super.getStreamedResponse(chatRequest(request))) {
       if (event.type === "model") {
         const observed = chatCompletionFinishReason(event.event);
         if (observed !== undefined && observed !== null) {
           finishReason = observed;
         }
         const delta = chatReasoning(primaryChatChoice(event.event)?.delta);
+        const details = chatReasoningDetails(primaryChatChoice(event.event)?.delta);
+        if (details) appendChatReasoningDetails((reasoningDetails ??= []), details);
         if (delta)
           reasoning = {
             field: delta.field,
@@ -101,7 +109,7 @@ export class OpenGeniChatCompletionsModel extends OpenAIChatCompletionsModel {
             ...event,
             response: {
               ...event.response,
-              output: withChatReasoning(event.response.output, reasoning),
+              output: withChatReasoning(event.response.output, reasoning, reasoningDetails),
             },
           }
         : event;

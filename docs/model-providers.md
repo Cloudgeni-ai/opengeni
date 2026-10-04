@@ -759,7 +759,14 @@ as canonical reasoning items and forwards streamed text to the existing thinking
 timeline. Request-local projection restores the original field at assistant-message
 scope, alongside its answer and tool calls. Older replies with reasoning nested
 inside text metadata are recovered at that boundary; output-only `tools` metadata
-is omitted. This behavior is shared by configured providers and Chat BYOK routes.
+is omitted. Structured `reasoning_details` retain their full ordered sequence,
+including signatures/encrypted blocks, through streaming, persistence and Chat
+tool continuation. Only text/summary details enter the thinking timeline;
+consecutive streamed text/summary fragments are assembled into logical blocks,
+while opaque blocks remain separate. Explicit empty detail arrays are preserved.
+Parallel plaintext aliases do not emit a duplicate delta. This behavior is
+shared by configured providers and Chat BYOK routes. See the
+[structured reasoning contract](https://openrouter.ai/docs/guides/best-practices/reasoning-tokens).
 When switching to Responses or native Claude, plaintext Chat reasoning becomes
 labelled historical assistant text; it is not sent as an empty foreign reasoning
 artifact. Responses also omits Chat reply-message metadata from text/refusal
@@ -767,7 +774,11 @@ blocks and nested Chat function envelopes from tool calls. Both adapters apply
 this projection at their request boundary, including SDK-driven continuations.
 Canonical history stays unchanged, so switching back
 to Chat restores its original reasoning field. Native encrypted Responses and
-signed Claude reasoning retain their existing paths.
+signed Claude reasoning retain their exact artifacts on their own API. When
+switching API families, their readable summaries become labelled historical
+assistant text; an opaque-only item becomes an unavailable marker. Signatures
+and ciphertext never enter another API's request. Chat also applies the shared
+projection at its adapter boundary, covering SDK-driven continuations.
 Older replies with reasoning only in nested Chat metadata retain that text too;
 newer replies with a separate reasoning item do not duplicate it.
 

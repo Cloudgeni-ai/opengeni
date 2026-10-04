@@ -28,12 +28,64 @@ export function chatReasoning(value: unknown): ChatReasoning | undefined {
   return undefined;
 }
 
+/** Keep the complete ordered sequence, including signatures and unknown fields. */
+export function chatReasoningDetails(value: unknown): JsonObject[] | undefined {
+  const details = object(value)?.reasoning_details;
+  return Array.isArray(details) && details.every((part) => object(part))
+    ? (details as JsonObject[])
+    : undefined;
+}
+
+/** Reassemble consecutive readable deltas like OpenRouter's native adapter.
+ * Stream indexes may repeat across logical blocks. Opaque blocks stay discrete.
+ * The accumulator belongs to one response; incoming provider objects are untouched.
+ */
+export function appendChatReasoningDetails(accumulated: JsonObject[], deltas: JsonObject[]): void {
+  for (const delta of deltas) {
+    const previous = accumulated.at(-1);
+    const field =
+      delta.type === "reasoning.text"
+        ? "text"
+        : delta.type === "reasoning.summary"
+          ? "summary"
+          : undefined;
+    if (field && previous && previous.type === delta.type) {
+      const text =
+        (typeof previous[field] === "string" ? previous[field] : "") +
+        (typeof delta[field] === "string" ? delta[field] : "");
+      // Keep first-block identity and extensions, accepting late metadata such
+      // as a signature-only delta after answer text has already started.
+      const merged = { ...structuredClone(delta), ...previous, [field]: text };
+      for (const key of ["signature", "format"]) {
+        if (!previous[key] && delta[key] !== undefined) merged[key] = structuredClone(delta[key]);
+      }
+      accumulated[accumulated.length - 1] = merged;
+    } else accumulated.push(structuredClone(delta));
+  }
+}
+
+/** Only readable detail types may enter the thinking UI or foreign-model text. */
+export function chatReasoningDetailsText(details: JsonObject[] | undefined): string {
+  return (details ?? [])
+    .map((part) => {
+      const text =
+        part.type === "reasoning.text"
+          ? part.text
+          : part.type === "reasoning.summary"
+            ? part.summary
+            : undefined;
+      return typeof text === "string" ? text : "";
+    })
+    .join("");
+}
+
 /** Retain reasoning independently of answer text, with its native replay field. */
 export function withChatReasoning<T extends ModelResponse["output"][number]>(
   output: T[],
   reasoning: ChatReasoning | undefined,
+  details?: JsonObject[],
 ) {
-  if (!reasoning) return output;
+  if (!reasoning && details === undefined) return output;
   return [
     {
       type: "reasoning" as const,
@@ -41,10 +93,15 @@ export function withChatReasoning<T extends ModelResponse["output"][number]>(
       rawContent: [
         {
           type: "reasoning_text" as const,
-          text: reasoning.text,
+          text: reasoning?.text ?? chatReasoningDetailsText(details),
           // Raw-content provenance is not serialized as a foreign wire field
           // when this history is later projected to the Responses API.
-          providerData: { chatCompletions: { reasoningField: reasoning.field } },
+          providerData: {
+            chatCompletions: {
+              ...(reasoning ? { reasoningField: reasoning.field } : {}),
+              ...(details !== undefined ? { reasoningDetails: structuredClone(details) } : {}),
+            },
+          },
         },
       ],
     },
@@ -61,19 +118,23 @@ export function projectChatReasoning(request: ModelRequest): ModelRequest {
   let changed = false;
   const input = request.input.map((item) => {
     if (item.type !== "reasoning") return item;
-    const field = object(
-      object(item.rawContent?.[0]?.providerData)?.chatCompletions,
-    )?.reasoningField;
-    if (field !== "reasoning" && field !== "reasoning_content") return item;
+    const metadata = object(object(item.rawContent?.[0]?.providerData)?.chatCompletions);
+    const field = metadata?.reasoningField;
+    const details = chatReasoningDetails({ reasoning_details: metadata?.reasoningDetails });
+    const hasField = field === "reasoning" || field === "reasoning_content";
+    if (!hasField && !details) return item;
     const text = item.rawContent?.map((part) => part.text).join("");
-    if (!text) return item;
+    if (!text && !details) return item;
     changed = true;
     return {
       type: "message" as const,
       role: "assistant" as const,
       content: [],
       status: "completed" as const,
-      providerData: { [field]: text },
+      providerData: {
+        ...(hasField && text ? { [field]: text } : {}),
+        ...(details ? { reasoning_details: details } : {}),
+      },
     };
   });
   return changed ? { ...request, input } : request;
@@ -95,6 +156,10 @@ export function joinChatReasoningMessages(messages: JsonObject[]): JsonObject[] 
   for (const message of messages) {
     const reasoning = chatReasoning(message);
     const previousReasoning = chatReasoning(carrier);
+    const details = chatReasoningDetails(message);
+    const previousDetails = chatReasoningDetails(carrier);
+    const sameDetails =
+      details && previousDetails && JSON.stringify(details) === JSON.stringify(previousDetails);
     if (
       carrier &&
       message?.role === "assistant" &&
@@ -102,11 +167,13 @@ export function joinChatReasoningMessages(messages: JsonObject[]): JsonObject[] 
         (!emptyContent(message.content) &&
           reasoning.field === previousReasoning?.field &&
           reasoning.text === previousReasoning.text)) &&
+      (!details || (!emptyContent(message.content) && sameDetails)) &&
       !carrier.audio &&
       !message.audio &&
       Object.keys(message).every(
         (key) =>
           ["role", "content", "tool_calls"].includes(key) ||
+          (key === "reasoning_details" && sameDetails) ||
           !Object.hasOwn(carrier!, key) ||
           carrier![key] === message[key],
       )
@@ -141,7 +208,7 @@ export function joinChatReasoningMessages(messages: JsonObject[]): JsonObject[] 
       continue;
     }
     result.push(message);
-    carrier = message?.role === "assistant" && reasoning ? message : undefined;
+    carrier = message?.role === "assistant" && (reasoning || details) ? message : undefined;
   }
   return result.length === messages.length ? messages : result;
 }
