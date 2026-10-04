@@ -674,9 +674,10 @@ jobs:
       - name: Recovery integration regressions
         timeout-minutes: 5
         run: |
+          bun test scripts/ci/recovery-selection.test.ts
           bun test --timeout 30000 \
             --test-name-pattern \
-            'an MCP stream timeout after a successful tool output checkpoints once and recovers the same turn' \
+            'a mcp failure after successful tool output checkpoints once and recovers the same turn' \
             ./test/integration/worker-activity.integration.ts
           bun test --timeout 180000 \
             --test-name-pattern \
