@@ -37,7 +37,7 @@ import {
   type StyleProp,
   type ViewStyle,
 } from "react-native";
-import Animated, { FadeIn } from "react-native-reanimated";
+import Animated, { FadeIn, FadeOut } from "react-native-reanimated";
 import { NativeActivityOptionsProvider, type NativeActivityOptions } from "./activity";
 import { Icon } from "./icon";
 import { withAlpha } from "./primitives";
@@ -203,45 +203,41 @@ export function MessageTimeline(props: NativeMessageTimelineProps) {
             })}
             {props.trailing}
           </ScrollView>
-          {/* One fixed anchor for floating navigation, as on web: centered above
-              the composer; the up-pointing action stacks above Jump to latest. */}
-          {questionNav || showJump ? (
+          {/* Web timeline navigation: two identical small round arrow buttons at
+              fixed, centered spots that never dodge the content beneath them. */}
+          {questionNav ? (
             <View
               pointerEvents="box-none"
-              style={{
-                position: "absolute",
-                left: 16,
-                right: 16,
-                bottom: 16,
-                alignItems: "center",
-                gap: 8,
-              }}
+              style={{ position: "absolute", top: 12, left: 0, right: 0, alignItems: "center" }}
             >
-              {questionNav ? (
-                <NavPill
-                  icon="arrow-up"
-                  label="Back to your message"
-                  onPress={() => {
-                    const frame = promptFrames.get(questionNav);
-                    if (!frame) return;
-                    following.current = false;
-                    scrollRef.current?.scrollTo({
-                      y: Math.max(0, frame.top - QUESTION_NAV_MARGIN_PX),
-                      animated: true,
-                    });
-                  }}
-                />
-              ) : null}
-              {showJump ? (
-                <NavPill
-                  icon="arrow-down"
-                  label="Jump to latest"
-                  onPress={() => {
-                    following.current = true;
-                    scrollRef.current?.scrollToEnd({ animated: true });
-                  }}
-                />
-              ) : null}
+              <NavButton
+                icon="arrow-up"
+                label="Back to your message"
+                onPress={() => {
+                  const frame = promptFrames.get(questionNav);
+                  if (!frame) return;
+                  following.current = false;
+                  scrollRef.current?.scrollTo({
+                    y: Math.max(0, frame.top - QUESTION_NAV_MARGIN_PX),
+                    animated: true,
+                  });
+                }}
+              />
+            </View>
+          ) : null}
+          {showJump ? (
+            <View
+              pointerEvents="box-none"
+              style={{ position: "absolute", bottom: 12, left: 0, right: 0, alignItems: "center" }}
+            >
+              <NavButton
+                icon="arrow-down"
+                label="Jump to latest"
+                onPress={() => {
+                  following.current = true;
+                  scrollRef.current?.scrollToEnd({ animated: true });
+                }}
+              />
             </View>
           ) : null}
         </View>
@@ -250,26 +246,29 @@ export function MessageTimeline(props: NativeMessageTimelineProps) {
   );
 }
 
-/** The web timeline's floating navigation pill (NAV_PILL_CLASS). */
-function NavPill(props: { icon: "arrow-up" | "arrow-down"; label: string; onPress: () => void }) {
+/**
+ * The web timeline's navigation button (NAV_BUTTON_CLASS): 32pt round, surface-3
+ * at 90% with a border and shadow, a 16pt fg-muted arrow, and a 44pt touch target.
+ */
+function NavButton(props: { icon: "arrow-up" | "arrow-down"; label: string; onPress: () => void }) {
   const theme = useNativeTimelineTheme();
   const c = theme.colors;
   return (
-    <Animated.View entering={FadeIn.duration(150)}>
+    <Animated.View entering={FadeIn.duration(150)} exiting={FadeOut.duration(150)}>
       <Pressable
         accessibilityRole="button"
         accessibilityLabel={props.label}
         onPress={props.onPress}
+        hitSlop={6}
         style={({ pressed }) => ({
-          flexDirection: "row",
+          width: 32,
+          height: 32,
+          borderRadius: 16,
           alignItems: "center",
-          gap: 6,
-          minHeight: 44,
-          paddingHorizontal: 12,
-          borderRadius: 999,
+          justifyContent: "center",
           borderWidth: 1,
           borderColor: pressed ? c["border-strong"] : c.border,
-          backgroundColor: withAlpha(c["surface-3"], 0.92),
+          backgroundColor: withAlpha(c["surface-3"], 0.9),
           shadowColor: "#000",
           shadowOpacity: 0.1,
           shadowRadius: 6,
@@ -277,10 +276,9 @@ function NavPill(props: { icon: "arrow-up" | "arrow-down"; label: string; onPres
           elevation: 3,
         })}
       >
-        <Icon name={props.icon} size={14} color={c.fg} />
-        <Text style={{ ...fontStyle(theme, 500), fontSize: theme.size.sm, color: c.fg }}>
-          {props.label}
-        </Text>
+        {({ pressed }) => (
+          <Icon name={props.icon} size={16} color={pressed ? c.fg : c["fg-muted"]} />
+        )}
       </Pressable>
     </Animated.View>
   );
