@@ -162,7 +162,7 @@ impl CodemodeError {
         };
         json!({ "error": { "operationId": operation_id, "state": state,
             "code": code, "message": self.to_string(),
-            "recovery": operation_id.map(|_| "Observe the existing operation only while its original agent attempt is active. If that attempt ended, inspect retained command output or session tool receipts instead; a new attempt cannot read the old operation. Do not automatically start another call.") } })
+            "recovery": operation_id.map(|_| "Read this operation with the current authorized attempt of the same turn. Approval resumes the stored operation. Do not automatically start another call.") } })
     }
 
     fn observing(self, operation_id: &str) -> Self {
@@ -321,6 +321,7 @@ impl CodemodeClient {
         let request = CallRequest {
             operation_id: operation_id.clone(),
             catalog_digest: catalog.digest.clone(),
+            durable_approval: true,
             identity: entry.identity.clone(),
             arguments,
         };
@@ -357,6 +358,14 @@ impl CodemodeClient {
             };
 
             match next.state {
+                OperationState::WaitingForApproval => {
+                    return Err(CodemodeError::Operation {
+                        operation_id: operation_id.clone(),
+                        state: "waiting_for_approval".to_string(),
+                        code: Some("codemode_approval_pending".to_string()),
+                        message: "Waiting for review. The worker resumes this stored operation after approval; read this handle without submitting the arguments again.".to_string(),
+                    });
+                }
                 OperationState::Completed => {
                     return next.result.ok_or_else(|| {
                         CodemodeError::InvalidResponse(
@@ -367,7 +376,8 @@ impl CodemodeClient {
                 }
                 OperationState::Failed
                 | OperationState::Cancelled
-                | OperationState::OutcomeUnknown => {
+                | OperationState::OutcomeUnknown
+                | OperationState::Unknown => {
                     return Err(CodemodeError::Operation {
                         operation_id: operation_id.clone(),
                         state: serde_json::to_value(next.state)?
@@ -401,6 +411,7 @@ impl CodemodeClient {
         let response = self
             .http
             .get(self.url(&format!("calls/{operation_id}"))?)
+            .header("x-opengeni-codemode-capabilities", "durable-approval-v1")
             .bearer_auth(&self.token)
             .send()
             .await
@@ -708,6 +719,7 @@ fn short_description(entry: &CatalogEntry) -> String {
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 struct CallRequest {
+    durable_approval: bool,
     operation_id: String,
     catalog_digest: String,
     identity: ToolIdentity,
@@ -723,11 +735,14 @@ struct Submission {
 #[serde(rename_all = "snake_case")]
 enum OperationState {
     Queued,
+    WaitingForApproval,
     Running,
     Completed,
     Failed,
     OutcomeUnknown,
     Cancelled,
+    #[serde(other)]
+    Unknown,
 }
 
 #[derive(Debug, Deserialize, Serialize)]
@@ -800,6 +815,51 @@ mod tests {
     use super::*;
     use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
     use tokio::net::{TcpListener, TcpStream};
+
+    #[tokio::test]
+    async fn waiting_returns_a_compact_receipt_without_polling_or_resubmitting() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.expect("listen");
+        let address = listener.local_addr().expect("address");
+        let server = tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.expect("catalog");
+            read_request(&mut stream).await;
+            write_response(&mut stream, &json!({
+                "attemptId": "11111111-1111-4111-8111-111111111111", "digest": "b".repeat(64),
+                "entries": [{ "identity": { "serverId": "mail", "toolName": "change" },
+                    "modelName": "mail__change", "codemodePath": ["mail", "change"],
+                    "inputSchema": { "type": "object" }, "source": "mcp", "approval": "policy" }]
+            })).await;
+            let (mut stream, _) = listener.accept().await.expect("call");
+            let request = read_request(&mut stream).await;
+            write_response(
+                &mut stream,
+                &json!({"operation": {"state": "waiting_for_approval"}}),
+            )
+            .await;
+            request
+        });
+        let client = CodemodeClient::new(
+            &format!("http://{address}/codemode"),
+            "fixture-bearer".to_string(),
+        )
+        .expect("client");
+        let error = tokio::time::timeout(
+            Duration::from_secs(2),
+            client.call(CodemodeCallArgs {
+                tool: "mail.change".to_string(),
+                arguments: "{}".to_string(),
+            }),
+        )
+        .await
+        .expect("waiting must exit promptly")
+        .expect_err("pending receipt");
+        let receipt = error.receipt();
+        assert_eq!(receipt["error"]["state"], "waiting_for_approval");
+        assert_eq!(receipt["error"]["code"], "codemode_approval_pending");
+        assert!(!receipt.to_string().contains("\"arguments\":"));
+        let request = server.await.expect("server");
+        assert!(request.contains("\"durableApproval\":true"));
+    }
 
     #[test]
     fn document_ids_preserve_namespace_and_sdk_counter_contract() {

@@ -1227,6 +1227,7 @@ export async function prepareTurnToolRuntime(deps: PrepareTurnToolRuntimeDeps) {
       {},
       (name) => mcpToolDisplayMetadata(tools.mcpServers, name),
       (entry) => toolFamilyForCatalogIdentity(entry, runSettings.mcpServers),
+      tools.inputWaitYield,
     );
     eventing.codemodeDispatcher.start();
   };

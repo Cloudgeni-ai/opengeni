@@ -10,7 +10,11 @@ export { AnthropicProviderRejection } from "./anthropic-messages";
 import { instrumentedModelFetch } from "./model-provider-client";
 import type { ModelProviderApi, ResolvedModelProvider, Settings } from "@opengeni/config";
 import { isRunMcpCredentialError, RunMcpCredentials } from "./mcp-run-credentials";
-import { normalizeCredentialProviderMcpUrl } from "@opengeni/contracts";
+import {
+  normalizeCredentialProviderMcpUrl,
+  toolPolicyActionName,
+  toolReviewContextFromSchema,
+} from "@opengeni/contracts";
 export { RunMcpCredentials, RunMcpCredentialError } from "./mcp-run-credentials";
 export { AnthropicRequestError } from "./anthropic-request-error";
 import { executeCommandReadWithRefresh } from "./command-read-refresh";
@@ -74,6 +78,7 @@ import {
   digestCanonicalJson,
   type ToolGateway,
   type ToolGatewayAuthorization,
+  type ToolGatewayApprovalResolver,
   type ToolGatewayCallLifecycle,
   type ToolGatewayDefinition,
 } from "@opengeni/tool-gateway";
@@ -1982,12 +1987,21 @@ export type ConnectorActionToolCall = {
   serverId: string;
   toolName: string;
   arguments: unknown;
+  reviewContext?: import("@opengeni/contracts").ToolReviewContext;
   approvalMode?: "session_mcp" | "connector_write";
+  defaultDecision?: "allow" | "ask";
+  actionName?: string;
 };
 
 export type ConnectorActionPolicyPreparation =
   | { managed: false; decision: "unmanaged" }
-  | { managed: true; decision: "allow" | "ask" | "block" };
+  | {
+      managed: true;
+      decision: "allow" | "ask" | "block";
+      requestId?: string;
+      actionFingerprint?: string;
+      approvalStatus?: string;
+    };
 
 export type ConnectorActionExecutionAdmission =
   | { allowed: true; managed: false }
@@ -3311,6 +3325,7 @@ type McpApprovalPolicy = {
   serverId: string;
   requireApproval: boolean | ReadonlySet<string>;
   connectorBacked: boolean;
+  reviewKind: "generic" | "gmail";
   connectionId: () => string | null;
 };
 
@@ -3358,9 +3373,9 @@ function modelMcpSourceCallId(modelName: string): string | undefined {
 }
 
 /**
- * Install the approval wrap on a single agent instance: replace `getMcpTools`
- * with one that stamps `needsApproval: () => true` on every MCP tool whose
- * server policy demands it. Prepared tools resolve through their frozen model
+ * Install the canonical connector decision on each agent instance's MCP tools.
+ * The SDK approval hook reflects that decision, while standalone adapters keep
+ * their safe compatibility behavior. Prepared tools use their frozen model
  * name -> original server/tool map; legacy unwrapped servers retain longest-
  * prefix matching. Never infer account authority from a sanitized SDK name.
  *
@@ -3385,7 +3400,17 @@ function installMcpApprovalPolicy(
   const listMcpTools = agent.getMcpTools.bind(agent);
   agent.getMcpTools = async (resolutionContext: unknown) => {
     const tools = await listMcpTools(resolutionContext);
-    const identities = new Map<string, { serverId: string; toolName: string }>();
+    const identities = new Map<
+      string,
+      {
+        serverId: string;
+        toolName: string;
+        inputSchema: unknown;
+        title?: string;
+        accountLabel?: string | undefined;
+        readReview: ToolReviewReader;
+      }
+    >();
     for (const server of agent.mcpServers ?? []) {
       if (!(server instanceof PrefixedMcpServer || server instanceof DeferredPreparedMcpServer))
         continue;
@@ -3394,6 +3419,12 @@ function installMcpApprovalPolicy(
         identities.set(descriptor.name, {
           serverId: server.registryId,
           toolName: await server.unprefixedToolName(descriptor.name),
+          inputSchema: descriptor.inputSchema,
+          readReview: (name, args) => server.reviewContext(name, args),
+          ...(descriptor.title ? { title: descriptor.title } : {}),
+          ...(server.toolDisplayMetadata(descriptor.name)?.accountLabel
+            ? { accountLabel: server.toolDisplayMetadata(descriptor.name)!.accountLabel }
+            : {}),
         });
       }
     }
@@ -3427,7 +3458,16 @@ function installMcpApprovalPolicy(
           serverId: policy.serverId,
           toolName: unprefixed,
           arguments: args,
+          reviewContext: toolReviewContextFromSchema(identity?.inputSchema, {
+            kind: policy.reviewKind,
+            ...(identity?.title ? { title: identity.title } : {}),
+            ...(identity?.accountLabel ? { accountLabel: identity.accountLabel } : {}),
+          }),
+          actionName: toolPolicyActionName(unprefixed, identity?.inputSchema, args),
           ...(legacyApproval ? { approvalMode: "session_mcp" as const } : {}),
+          defaultDecision: mcpToolRequiresApproval(policy.requireApproval, unprefixed)
+            ? "ask"
+            : "allow",
         };
       };
       return {
@@ -3446,19 +3486,20 @@ function installMcpApprovalPolicy(
           if (!callId) {
             throw new Error("Connector action is missing its durable approval identity");
           }
-          const preparation = await connectorActionPolicy.prepare(
+          const preparation = await prepareConnectorReview(
             connectorCall(callId, parsedInput),
+            connectorActionPolicy,
+            identity?.readReview,
           );
           preparations.set(callId, preparation);
           if (preparation.managed && preparation.decision === "block") {
             approvalRequiredCallIds.delete(callId);
             return false;
           }
-          const approvalRequired =
-            mcpToolRequiresApproval(policy.requireApproval, unprefixed) ||
-            (await originalNeedsApproval(runContext, parsedInput, callId));
-          const requiresApproval =
-            (preparation.managed && preparation.decision === "ask") || approvalRequired;
+          // An explicit Allow is a decision, not an exemption from one of several floors.
+          const requiresApproval = preparation.managed
+            ? preparation.decision === "ask"
+            : mcpToolRequiresApproval(policy.requireApproval, unprefixed);
           if (requiresApproval) approvalRequiredCallIds.add(callId);
           else approvalRequiredCallIds.delete(callId);
           return requiresApproval;
@@ -3584,9 +3625,7 @@ function installAttemptConnectorActionPolicy(
             approvalRequiredCallIds.delete(callId);
             return false;
           }
-          const requiresApproval =
-            preparation.decision === "ask" ||
-            (await originalNeedsApproval(runContext, parsedInput, callId));
+          const requiresApproval = preparation.decision === "ask";
           if (requiresApproval) approvalRequiredCallIds.add(callId);
           else approvalRequiredCallIds.delete(callId);
           return requiresApproval;
@@ -3716,30 +3755,12 @@ function installInteractionInterventionPolicy(
 }
 
 /**
- * Enforce per-MCP-server human approval. `settings.mcpServers[].requireApproval`
- * is `true` (every tool of that server requires approval) or a string[] of
- * UNPREFIXED tool names (only those do); absent = auto-run. The SDK converts MCP
- * tools to function tools with `needsApproval` unset (defaults false) and exposes
- * no per-server/agent approval knob, so we wrap the agent's `getMcpTools` to
- * attach a `needsApproval: () => true` predicate to the matching tools — matched
- * by exact prepared server/tool identity (legacy unwrapped servers use their
- * `<id>__` prefix). A tool that
- * needs approval raises a run INTERRUPTION, which the worker turns into
- * `session.requiresAction` and resolves via `user.approvalDecision`
- * (resumeApproval) — the same generic path other tool approvals use, so
- * no extra plumbing. No-op when no server requests approval, so the default
- * (auto-run everything) is byte-for-byte unchanged.
- *
- * Two robustness properties the wrap must hold:
- *  - LONGEST-PREFIX-FIRST. Server ids can be prefixes of one another (`my` vs
- *    `my_`), so their tool prefixes collide (`my__` vs `my___`): a tool like
- *    `my___run` (from server `my_`) also `startsWith` `my__` (server `my`). A
- *    first-match `find` over unsorted policies could bind it to the WRONG
- *    server's policy and bypass gating. Sorting policies by DESCENDING prefix
- *    length makes the most-specific (longest) prefix win, so each tool resolves
- *    to its own server.
- *  - CLONE SURVIVAL. The wrap is re-installed onto every clone; see
- *    {@link installMcpApprovalPolicy}.
+ * Translate the canonical decision into the model SDK interruption protocol.
+ * Legacy requireApproval is a recommendation only when no explicit choice exists.
+ * Standalone runtimes without policy hooks retain their configured behavior;
+ * they cannot execute an approval-gated call without the durable authority.
+ * Prepared server/tool identities take precedence over longest-prefix legacy
+ * matching, and clones keep the same attempt-frozen resolver.
  */
 function applyMcpApprovalPolicy(
   agent: Agent<any, any>,
@@ -3771,6 +3792,9 @@ function applyMcpApprovalPolicy(
             ? true
             : new Set(Array.isArray(server.requireApproval) ? server.requireApproval : []),
         connectorBacked: Boolean(server.connectionRef),
+        reviewKind: isOfficialGmailMcpConfig(server.url ?? "", server.connectionRef)
+          ? ("gmail" as const)
+          : ("generic" as const),
         connectionId,
       };
     })
@@ -4109,6 +4133,8 @@ export type LocalMcpServerRegistration = {
   resolvedConnectionId?: string;
   /** Metadata-only authority revision bound into current-human approvals. */
   approvalAuthority?: unknown;
+  /** Stable operation semantics for cross-attempt continuation, evaluated per tool. */
+  effectAuthority?: (toolName: string) => unknown;
   /** Provider-free argument/credential preflight for the current-human gateway. */
   preflightCall?: (
     toolName: string,
@@ -4220,6 +4246,8 @@ export type PrepareToolsOptions = {
     generation?: number;
     createdAt?: Date;
     authorize?: ToolGatewayAuthorization;
+    resolveApproval?: ToolGatewayApprovalResolver;
+    mapDefinition?: (definition: ToolGatewayDefinition) => ToolGatewayDefinition;
     requireApproval?: (
       entry: ToolGatewayCatalogEntry,
       caller: ToolGatewayCaller,
@@ -4446,6 +4474,10 @@ class DeferredPreparedMcpServer implements MCPServer {
     return this.preparedTarget?.toolDisplayMetadata(name);
   }
 
+  async reviewContext(toolName: string, args: Record<string, unknown>) {
+    return (await this.preparedTarget?.reviewContext(toolName, args)) ?? {};
+  }
+
   async unprefixedToolName(name: string): Promise<string> {
     const target = await this.requiredTarget();
     if (!(target instanceof PrefixedMcpServer)) throw new Error("Unknown prepared MCP identity");
@@ -4618,6 +4650,8 @@ export async function prepareAgentTools(
                 undefined,
                 undefined,
                 options.mcpAccountLabels?.get(config.id),
+                undefined,
+                local.effectAuthority,
               ),
               config,
               options,
@@ -5263,6 +5297,13 @@ async function prepareAttemptToolEnvironment(
     resolvedMcpConnectionIds,
     options.attemptConnectorActionBindings ?? [],
     options.connectorActionPolicy,
+    options.mcpAccountLabels,
+    new Map(
+      prepared.servers.map(({ server }) => [
+        server.registryId,
+        (name: string, args: Record<string, unknown>) => server.reviewContext(name, args),
+      ]),
+    ),
   );
   const subjectId = options.subjectId ?? "worker:mcp-model";
   const guardedDefinitions = options.authorizeAttemptExecution
@@ -5278,6 +5319,9 @@ async function prepareAttemptToolEnvironment(
                 await options.authorizeAttemptExecution!();
                 await prior?.begin?.();
               },
+              ...(prior?.waitingForApproval
+                ? { waitingForApproval: prior.waitingForApproval }
+                : {}),
               ...(prior?.complete ? { complete: prior.complete } : {}),
             };
           },
@@ -5305,6 +5349,8 @@ function installAttemptConnectorActionGatewayLifecycle(
   resolvedMcpConnectionIds: ReadonlyMap<string, string>,
   bindings: readonly AttemptConnectorActionBinding[],
   connectorActionPolicy?: ConnectorActionPolicyHooks,
+  accountLabels?: ReadonlyMap<string, string>,
+  reviewReaders?: ReadonlyMap<string, ToolReviewReader>,
 ): AttemptToolDefinition[] {
   const byModelName = new Map<string, AttemptConnectorActionBinding>();
   for (const binding of bindings) {
@@ -5343,6 +5389,15 @@ function installAttemptConnectorActionGatewayLifecycle(
               serverId: definition.identity.serverId,
               toolName: definition.identity.toolName,
               arguments: arguments_,
+              actionName: toolPolicyActionName(
+                definition.identity.toolName,
+                definition.inputSchema,
+                arguments_,
+              ),
+              defaultDecision:
+                attemptToolApproval(config!, definition.identity.toolName) === "human"
+                  ? "ask"
+                  : "allow",
             };
           }
         : (approvalId: string, arguments_: unknown): ConnectorActionToolCall => ({
@@ -5351,13 +5406,36 @@ function installAttemptConnectorActionGatewayLifecycle(
             serverId: definition.identity.serverId,
             toolName: definition.identity.toolName,
             arguments: arguments_,
+            actionName: toolPolicyActionName(
+              definition.identity.toolName,
+              definition.inputSchema,
+              arguments_,
+            ),
             ...(legacyMcpApproval ? { approvalMode: "session_mcp" as const } : {}),
+            defaultDecision: legacyMcpApproval ? "ask" : "allow",
           });
     return {
       ...definition,
+      // Argument-sensitive preparation decides approval for every attempt transport.
+      approval: connectorActionPolicy ? "policy" : definition.approval,
       lifecycle: connectorActionGatewayLifecycle({
         modelName: definition.modelName,
-        call,
+        ...(reviewReaders?.get(definition.identity.serverId)
+          ? { readReview: reviewReaders.get(definition.identity.serverId)! }
+          : {}),
+        call: (approvalId, arguments_) => ({
+          ...call(approvalId, arguments_),
+          reviewContext: toolReviewContextFromSchema(definition.inputSchema, {
+            kind:
+              config && isOfficialGmailMcpConfig(config.url ?? "", config.connectionRef)
+                ? "gmail"
+                : "generic",
+            ...(definition.title ? { title: definition.title } : {}),
+            ...(accountLabels?.get(definition.identity.serverId)
+              ? { accountLabel: accountLabels.get(definition.identity.serverId)! }
+              : {}),
+          }),
+        }),
         ...(binding?.resultOutcome
           ? { resultOutcome: binding.resultOutcome }
           : config && isOfficialGmailMcpConfig(config.url ?? "", config.connectionRef)
@@ -5369,14 +5447,42 @@ function installAttemptConnectorActionGatewayLifecycle(
   });
 }
 
+type ToolReviewReader = (
+  toolName: string,
+  args: Record<string, unknown>,
+) => Promise<Partial<import("@opengeni/contracts").ToolReviewContext>>;
+
+async function prepareConnectorReview(
+  call: ConnectorActionToolCall,
+  policy: ConnectorActionPolicyHooks,
+  readReview?: ToolReviewReader,
+) {
+  if (readReview && policy.preview) {
+    const preview = await policy.preview(call);
+    if (
+      preview.managed &&
+      preview.decision === "ask" &&
+      !preview.requestId &&
+      call.arguments &&
+      typeof call.arguments === "object" &&
+      !Array.isArray(call.arguments)
+    ) {
+      const extra = await readReview(call.toolName, call.arguments as Record<string, unknown>);
+      call = { ...call, reviewContext: { kind: "generic", ...call.reviewContext, ...extra } };
+    }
+  }
+  return await policy.prepare(call);
+}
+
 function connectorActionGatewayLifecycle(input: {
   modelName: string;
+  readReview?: ToolReviewReader;
   call: AttemptConnectorActionBinding["call"];
   resultOutcome?: AttemptConnectorActionBinding["resultOutcome"];
   connectorActionPolicy?: ConnectorActionPolicyHooks;
 }): ToolGatewayCallLifecycle {
   return {
-    prepare: async ({ call }) => {
+    prepare: async ({ call, context }) => {
       if (!input.connectorActionPolicy) {
         throw new ConnectorActionExecutionError(
           "Connector action was not executed: durable execution policy is unavailable",
@@ -5401,9 +5507,15 @@ function connectorActionGatewayLifecycle(input: {
       }
       const preparation =
         modelInvocation?.preparation ??
-        (call.caller.kind === "codemode" && input.connectorActionPolicy.preview
+        (call.caller.kind === "codemode" &&
+        context.transportMeta?.durableApproval !== true &&
+        input.connectorActionPolicy.preview
           ? await input.connectorActionPolicy.preview(connectorCall)
-          : await input.connectorActionPolicy.prepare(connectorCall));
+          : await prepareConnectorReview(
+              connectorCall,
+              input.connectorActionPolicy,
+              input.readReview,
+            ));
       if (preparation.managed && preparation.decision === "block") {
         throw new ConnectorActionExecutionError(
           "Connector action was not executed: blocked",
@@ -5413,8 +5525,23 @@ function connectorActionGatewayLifecycle(input: {
       if (
         preparation.managed &&
         preparation.decision === "ask" &&
-        modelInvocation?.approvalConfirmed !== true
+        modelInvocation?.approvalConfirmed !== true &&
+        preparation.approvalStatus !== "approved"
       ) {
+        if (
+          call.caller.kind === "codemode" &&
+          context.transportMeta?.durableApproval === true &&
+          preparation.requestId &&
+          preparation.actionFingerprint &&
+          (!preparation.approvalStatus || preparation.approvalStatus === "pending")
+        ) {
+          return {
+            waitingForApproval: {
+              requestId: preparation.requestId,
+              actionFingerprint: preparation.actionFingerprint,
+            },
+          };
+        }
         throw new AttemptToolApprovalRequiredError();
       }
       let requestId: string | null = null;
@@ -5466,9 +5593,12 @@ async function prepareWorkspaceToolGatewayEnvironment(
     throw new Error("workspace tool gateway requires account and workspace scope");
   }
   const prepared = await prepareToolGatewayDefinitionsFromServers(servers, registry);
-  const definitions = options.workspaceToolGateway.filterDefinition
+  const admittedDefinitions = options.workspaceToolGateway.filterDefinition
     ? prepared.definitions.filter(options.workspaceToolGateway.filterDefinition)
     : prepared.definitions;
+  const definitions = options.workspaceToolGateway.mapDefinition
+    ? admittedDefinitions.map(options.workspaceToolGateway.mapDefinition)
+    : admittedDefinitions;
   return createWorkspaceToolGateway({
     accountId: options.accountId,
     workspaceId: options.workspaceId,
@@ -5479,6 +5609,9 @@ async function prepareWorkspaceToolGatewayEnvironment(
       : {}),
     ...(options.workspaceToolGateway.authorize
       ? { authorize: options.workspaceToolGateway.authorize }
+      : {}),
+    ...(options.workspaceToolGateway.resolveApproval
+      ? { resolveApproval: options.workspaceToolGateway.resolveApproval }
       : {}),
     ...(options.workspaceToolGateway.requireApproval
       ? { requireApproval: options.workspaceToolGateway.requireApproval }
@@ -5564,6 +5697,14 @@ async function prepareToolGatewayDefinitionsFromServers(
           ...(tool.icons ? { icons: tool.icons } : {}),
           source: attemptToolSource(server.registryId),
           approval: attemptToolApproval(config, toolName),
+          effectAuthorityDigest: digestCanonicalJson({
+            version: 1,
+            serverId: server.registryId,
+            toolName,
+            endpoint: config.url,
+            connectionRef: config.connectionRef ?? null,
+            authority: server.catalogEffectAuthority(toolName) ?? null,
+          }),
           ...(config.connectionRef ? { requiresProviderPreflight: true } : {}),
           ...(config.connectionRef || server.catalogApprovalAuthority() !== undefined
             ? {
@@ -7555,6 +7696,7 @@ export class PrefixedMcpServer implements MCPServer {
     private readonly refreshOwnedCommand?: (commandId: string) => Promise<boolean>,
     private readonly accountLabel?: string,
     private readonly runMcpCredentials?: RunMcpCredentials,
+    private readonly effectAuthority?: LocalMcpServerRegistration["effectAuthority"],
   ) {
     this.registryId = registryId;
     // The SDK uses `name` for cache keys, traces, and lifecycle diagnostics.
@@ -7713,6 +7855,17 @@ export class PrefixedMcpServer implements MCPServer {
 
   catalogApprovalAuthority(): unknown {
     return this.approvalAuthority;
+  }
+
+  async reviewContext(toolName: string, args: Record<string, unknown>) {
+    const bridge = this.inner as MCPServer & { reviewContext?: ToolReviewReader };
+    return typeof bridge.reviewContext === "function"
+      ? await bridge.reviewContext(toolName, args)
+      : {};
+  }
+
+  catalogEffectAuthority(toolName: string): unknown {
+    return this.effectAuthority ? this.effectAuthority(toolName) : this.approvalAuthority;
   }
 
   async preflightCatalogTool(
@@ -8373,9 +8526,9 @@ export const CODE_SEARCH_DIRECTIVE =
 
 export const CODEMODE_PROGRAMMATIC_DIRECTIVE =
   "Default `ogtool list` enumerates every authorized tool with a compact summary, without schemas or an output-size cutoff. " +
-  "Codemode calls and result reads require the same live execution attempt. While a Codemode command is pending, keep this attempt alive with `command_wait`/`command_read`; do not end the turn or call `wait_for_input` to await it. After an attempt ends, its CLI credentials expire and a new attempt cannot read its operation ID. Inspect retained command output and session tool receipts before deciding whether another call is needed; an observation error does not prove execution failed. Never automatically replay a mutation. " +
+  "Codemode uses current-attempt credentials. Keep ordinary running commands alive with `command_wait`/`command_read`. When a call returns `codemode_approval_pending`, retain its operation ID and let the review pause work. The worker resumes that exact stored operation after human approval; JavaScript locals do not resume. A later authorized attempt of the same turn can use `ogtool read <operation-id>` or `environmentCodemodeClient().status(operationId)` / `.resume(operationId)` to observe its result. Never copy the payload into another call to request approval. Observation failure or outcome_unknown does not prove execution failed; inspect actual state before any separately authorized retry. " +
   "Managed sandboxes select the worker-release client on PATH for every command, including warm boxes. When OPENGENI_CODEMODE_CLIENT_MODULE is set, persistent Bun programs must use `const { tools, openGeni } = await import(process.env.OPENGENI_CODEMODE_CLIENT_MODULE!)`; do not import the older image-baked package or invoke /usr/local/bin/ogtool directly. The stock-package import below is only for environments without that deployment-selected module. " +
-  'Every tool available to you is also callable programmatically from the sandbox through the same frozen catalog, authority, credentials, policy, and execution path. In stock sandboxes, write persistent Bun code with `import { tools, openGeni } from "@opengeni/codemode"`; run `ogtool declarations <file.d.ts>` when project-local catalog types are useful. For shell calls, discover tools with `ogtool list`, inspect an unfamiliar tool with `ogtool show <tool-path>`, then use `ogtool call <tool-path> \'<json-args>\'`. Listing is compact by default; `list --json` gives compact structured discovery and `list --full` explicitly includes all schemas. When $OPENGENI_CODEMODE_NATIVE_CLIENT is available, prefer the connection-bound native client even if an older `ogtool` is installed: use `"$OPENGENI_CODEMODE_NATIVE_CLIENT" codemode` with the same list, show, and call commands; this uses the same public Codemode operation journal, not another tool path. If no compatible installed client is available and Bun plus $OPENGENI_OGTOOL_PACKAGE_SPEC are available, run the exact deployment-pinned package with `bun x -p "$OPENGENI_OGTOOL_PACKAGE_SPEC" ogtool ...`; never guess a version or install `latest`. Prefer Codemode for loops, polling, bulk filtering, and intermediate data that should remain in the sandbox instead of consuming your context window. Tools requiring human approval return a typed error in Codemode and must be invoked normally.';
+  'Every tool available to you is also callable programmatically from the sandbox through the same frozen catalog, authority, credentials, policy, and execution path. In stock sandboxes, write persistent Bun code with `import { tools, openGeni } from "@opengeni/codemode"`; run `ogtool declarations <file.d.ts>` when project-local catalog types are useful. For shell calls, discover tools with `ogtool list`, inspect an unfamiliar tool with `ogtool show <tool-path>`, then use `ogtool call <tool-path> \'<json-args>\'`. Listing is compact by default; `list --json` gives compact structured discovery and `list --full` explicitly includes all schemas. When $OPENGENI_CODEMODE_NATIVE_CLIENT is available, prefer the connection-bound native client even if an older `ogtool` is installed: use `"$OPENGENI_CODEMODE_NATIVE_CLIENT" codemode` with the same list, show, and call commands; this uses the same public Codemode operation journal, not another tool path. If no compatible installed client is available and Bun plus $OPENGENI_OGTOOL_PACKAGE_SPEC are available, run the exact deployment-pinned package with `bun x -p "$OPENGENI_OGTOOL_PACKAGE_SPEC" ogtool ...`; never guess a version or install `latest`. Prefer Codemode for loops, polling, bulk filtering, and intermediate data that should remain in the sandbox instead of consuming your context window. Tools needing review return a compact durable pending handle in Codemode. New calls use the current permission snapshot; an existing review keeps its original action.';
 
 function modelModalityProjectionFilterForAgent(
   agent: object,

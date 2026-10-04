@@ -6,9 +6,9 @@ icon: "hand"
 
 A session can pause mid-turn and wait for a person: to approve a tool call, or to answer a question. `SessionConversation` renders both inline, and the turn continues once someone answers. See [Approvals and human input](/concepts/approvals-and-human-input) for the full model.
 
-## Require approval for tools
+## Set tool approval defaults
 
-Set `requireApproval` on a per-session MCP server: `true` for every tool, or a list of tool names:
+Set the initial recommendation with `requireApproval` on a per-session MCP server: `true` for every tool, or a list of tool names. Explicit account choices take precedence:
 
 ```ts
 mcpServers: [
@@ -22,7 +22,7 @@ mcpServers: [
 tools: [{ kind: "mcp", id: "acme" }],
 ```
 
-Use the names from the server's `tools/list` (`update_ticket`, not `acme__update_ticket`). For API Integrations, set `autoApprovedTools` at install instead; see [Your data](/integrate/your-data).
+Use the names from the server's `tools/list` (`update_ticket`, not `acme__update_ticket`). Use `getConnectorToolPermissions` and `updateConnectorToolPermissions` for account-specific Allow, Ask first, Block and reset choices. Pass the returned revision as `expectedRevision` to detect concurrent changes. API Integration `autoApprovedTools` remains a compatibility input: omission preserves existing choices, while an explicit value updates them. See [Your data](/integrate/your-data).
 
 When the agent proposes a gated call, the session enters `requires_action` and the conversation shows Approve and Reject. A rejection goes back to the agent as the tool's result so it can adapt. Only people can approve tool calls.
 
@@ -39,7 +39,9 @@ The agent can ask free-text, single-select, or multi-select questions and gets t
 
 Custom React UIs can use `projectPendingApprovals` and `useHumanInputRequests` from `@opengeni/react/session`.
 
-Pass the approval's `id` from the `session.requiresAction` event to `sendApprovalDecision`. Show the tool name and arguments before enabling Approve, so the person knows what they are approving.
+Pass the approval's `id` from the `session.requiresAction` event to `sendApprovalDecision`. Fetch its portable facts with `getToolActionReview`, and paginated saved arguments with `getToolReviewDetails`. The shared `ToolActionReviewCard` and `ToolActionReviewDetails` components use the same data as the web console. Present the exact account, action and consequences before enabling approval; keep full details accessible without dumping large JSON into the primary view.
+
+The current Codemode client returns a durable pending handle for an action that needs review. After a decision, a current authorized attempt reads or resumes that handle. Preserve the operation ID; do not rebuild or resubmit its arguments. Older clients receive a safe approval-required error. External MCP clients without a supported human approval round trip cannot execute tools whose effective setting asks for review.
 
 If a user sends a normal message while a session waits, the pending approval or question is cancelled and the message runs as a Steer.
 

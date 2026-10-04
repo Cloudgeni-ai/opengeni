@@ -2537,6 +2537,7 @@ describe("runtime event normalization", () => {
 
     async function connectorPolicyFixture(input: {
       connectorDecision: "allow" | "ask" | "block";
+      previewReview?: boolean;
       serverId?: string;
       accountLabel?: string;
       lazyToolTransport?: "codex_native" | "generic_dispatch";
@@ -2556,6 +2557,9 @@ describe("runtime event normalization", () => {
       };
       const calls: string[] = [];
       const hooks: ConnectorActionPolicyHooks = {
+        ...(input.previewReview
+          ? { preview: async () => ({ managed: true as const, decision: input.connectorDecision }) }
+          : {}),
         prepare: async (call) => {
           calls.push(`prepare:${call.approvalId}:${String((call.arguments as any).query)}`);
           return { managed: true, decision: input.connectorDecision };
@@ -2787,7 +2791,36 @@ describe("runtime event normalization", () => {
       }
     });
 
-    test("connector Allow executes once and preserves an existing Ask requirement", async () => {
+    test("review metadata is read only for a new Ask", async () => {
+      for (const connectorDecision of ["allow", "ask", "block"] as const) {
+        const fixture = await connectorPolicyFixture({ connectorDecision, previewReview: true });
+        let reads = 0;
+        for (const server of fixture.prepared.mcpServers) {
+          (server as unknown as { reviewContext: () => Promise<object> }).reviewContext =
+            async () => {
+              reads++;
+              return {};
+            };
+        }
+        try {
+          const tool = (await fixture.agent.getMcpTools(new RunContext())).find(
+            (candidate) =>
+              candidate.type === "function" && candidate.name === "docs__search_documents",
+          );
+          if (!tool || tool.type !== "function") throw new Error("Tool missing");
+          expect(
+            await tool.needsApproval(new RunContext(), { query: "synthetic" }, "metadata-fixture"),
+          ).toBe(connectorDecision === "ask");
+          expect(reads).toBe(connectorDecision === "ask" ? 1 : 0);
+          expect(fixture.mcp.calls).toHaveLength(0);
+        } finally {
+          await fixture.prepared.close();
+          fixture.mcp.close();
+        }
+      }
+    });
+
+    test("connector Allow executes once and overrides an Ask recommendation", async () => {
       const fixture = await connectorPolicyFixture({
         connectorDecision: "allow",
         legacyApproval: true,
@@ -2799,7 +2832,7 @@ describe("runtime event normalization", () => {
         );
         if (!tool || tool.type !== "function") throw new Error("connector tool missing");
         expect(await tool.needsApproval(new RunContext(), { query: "needle" }, "call-allow")).toBe(
-          true,
+          false,
         );
         const output = await tool.invoke(new RunContext(), JSON.stringify({ query: "needle" }), {
           toolCall: { callId: "call-allow" },
@@ -3322,7 +3355,13 @@ describe("runtime event normalization", () => {
           },
           prepare: async (call) => {
             events.push(`prepare:${call.approvalId}`);
-            return { managed: true, decision };
+            return {
+              managed: true,
+              decision,
+              requestId: "77777777-7777-4777-8777-777777777777",
+              actionFingerprint: "a".repeat(64),
+              approvalStatus: "pending",
+            };
           },
           begin: async (call) => {
             events.push(`begin:${call.approvalId}`);
@@ -3408,6 +3447,22 @@ describe("runtime event normalization", () => {
         } finally {
           await fixture.prepared.close();
         }
+      }
+
+      const waiting = await prepareFixture("ask");
+      try {
+        const operationId = "66666666-6666-4666-8666-666666666660";
+        const prepared = await waiting.prepared.attemptToolEnvironment!.prepareCall(
+          waiting.call(operationId, "completed"),
+          { transportMeta: { durableApproval: true } },
+        );
+        expect(prepared.waitingForApproval).toMatchObject({
+          requestId: "77777777-7777-4777-8777-777777777777",
+        });
+        await expect(prepared.execute()).rejects.toThrow("approval");
+        expect(waiting.events).toEqual([`prepare:${operationId}`]);
+      } finally {
+        await waiting.prepared.close();
       }
 
       const unavailable = await prepareFixture("allow", false);

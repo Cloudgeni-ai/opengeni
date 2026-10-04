@@ -273,14 +273,14 @@ describe("session MCP approval-policy attempt snapshots", () => {
             null,
           ),
         ).toEqual([]);
-        // A curated capability's mandatory floor cannot be removed by a session override.
+        // An explicit session choice overrides the catalog recommendation; the active attempt stays frozen.
         await shared.admin`update capability_catalog_items set workspace_id = null, account_id = null,
         metadata = '{"mcpServerId":"external","requireApproval":["mandated_write"]}'
         where workspace_id = ${workspace!.id} and id = 'external'`;
         await updatePolicy(firstDb, workspace!.id, session.id, false);
         expect(
           (await getSession(firstDb, workspace!.id, session.id))?.mcpApprovalPolicies?.external,
-        ).toEqual(["mandated_write"]);
+        ).toBe(false);
         expect(
           (
             await getSessionAttemptMcpApprovalPolicies(

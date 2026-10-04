@@ -1,6 +1,7 @@
 import { afterEach, describe, expect, test } from "bun:test";
 import { act, createElement } from "react";
 import { ApprovalSurface } from "../src";
+import { OpenGeniApiError } from "@opengeni/sdk";
 import { approvalsFromRequiresAction } from "../src/approvals";
 import { registerDom, renderComponent, type RenderedComponent } from "./render-hook";
 
@@ -51,7 +52,7 @@ describe("ApprovalSurface", () => {
     expect(mounted.container.textContent).toContain("Documents — Workspace: Team inbox");
     expect(mounted.container.textContent).not.toContain("a".repeat(64));
     const approve = [...mounted.container.querySelectorAll("button")].find(
-      (button) => button.textContent === "Approve",
+      (button) => button.textContent === "Approve action",
     );
     await act(async () => approve!.click());
     expect(seen).toEqual(["exact-call"]);
@@ -73,27 +74,45 @@ describe("ApprovalSurface", () => {
     expect(values).toEqual(["project-1"]);
     expect(mounted.container.textContent).not.toContain('"projectId"');
 
-    const toggle = [...mounted.container.querySelectorAll("button")].find(
-      (button) => button.textContent === "Show exact arguments",
+    const details = [...mounted.container.querySelectorAll("button")].find(
+      (button) => button.textContent === "View full details",
     );
-    await act(async () => toggle!.click());
-    expect(mounted.container.querySelector("pre")?.textContent).toContain(
-      '"projectId": "project-1"',
-    );
+    await act(async () => {
+      details!.click();
+      await Promise.resolve();
+    });
+    expect(mounted.container.querySelector("[data-og-review-details]")).not.toBeNull();
+    expect(mounted.container.textContent).toContain("project-1");
+    expect(mounted.container.querySelector("pre")).toBeNull();
   });
 
-  test("keeps nested arguments as exact JSON instead of a lossy summary", async () => {
+  test("nested arguments navigate to complete values and hide credentials", async () => {
     mounted = await renderComponent(
       createElement(ApprovalSurface, {
         approvals: [
-          { ...approval, arguments: { projectId: "project-1", patch: { name: "Renamed" } } },
+          {
+            ...approval,
+            arguments: {
+              projectId: "project-1",
+              patch: { name: "Renamed", apiKey: "secret-canary" },
+            },
+          },
         ],
         onApprove: () => undefined,
         onReject: () => undefined,
       }),
     );
-    expect(mounted.container.querySelector("dl")).toBeNull();
-    expect(mounted.container.querySelector("pre")?.textContent).toContain('"name": "Renamed"');
+    expect(mounted.container.textContent).not.toContain("secret-canary");
+    const field = [...mounted.container.querySelectorAll("button")].find((button) =>
+      button.textContent?.includes("2 fields"),
+    );
+    await act(async () => {
+      field!.click();
+      await Promise.resolve();
+    });
+    expect(mounted.container.textContent).toContain("Renamed");
+    expect(mounted.container.textContent).toContain("[Protected value]");
+    expect(mounted.container.textContent).not.toContain("secret-canary");
   });
 
   test("supports host copy and presentation while returning the native approval", async () => {
@@ -189,5 +208,52 @@ describe("ApprovalSurface", () => {
       await Promise.resolve();
     });
     expect(calls).toBe(2);
+  });
+  test("large queues render one action and release decision fencing after authoritative removal", async () => {
+    const approvals = Array.from({ length: 100 }, (_, i) => ({ ...approval, id: `action-${i}` }));
+    const calls: string[] = [];
+    const props = {
+      approvals,
+      onApprove: (value: import("../src/approvals").PendingApproval) => {
+        calls.push(value.id);
+      },
+      onReject: () => undefined,
+    };
+    mounted = await renderComponent(createElement(ApprovalSurface, props));
+    expect(mounted.container.querySelectorAll("[data-og-tool-review]")).toHaveLength(1);
+    const button = () =>
+      [...mounted!.container.querySelectorAll("button")].find(
+        (value) => value.textContent === "Approve action",
+      )!;
+    await act(async () => button().click());
+    await mounted.rerender(
+      createElement(ApprovalSurface, { ...props, approvals: approvals.slice(1) }),
+    );
+    await act(async () => button().click());
+    expect(calls).toEqual(["action-0", "action-1"]);
+  });
+
+  test("older SDK reviews retain safe detail access on 404 but access refusals never enable buttons", async () => {
+    const props = { approvals: [approval], onApprove: () => undefined, onReject: () => undefined };
+    mounted = await renderComponent(
+      createElement(ApprovalSurface, {
+        ...props,
+        loadReview: async () => {
+          throw new OpenGeniApiError(404, "Review not found");
+        },
+      }),
+    );
+    expect(mounted.container.textContent).toContain("Approve action");
+    await mounted.unmount();
+    mounted = await renderComponent(
+      createElement(ApprovalSurface, {
+        ...props,
+        loadReview: async () => {
+          throw new OpenGeniApiError(403, "Access denied");
+        },
+      }),
+    );
+    expect(mounted.container.querySelector('[role="alert"]')).not.toBeNull();
+    expect(mounted.container.textContent).not.toContain("Approve action");
   });
 });

@@ -1,4 +1,14 @@
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
+import { tool } from "@openai/agents";
+import { z } from "zod";
+import {
+  collectIdPages,
+  planIdBatches,
+  CodemodeClient,
+  CodemodeApprovalPendingError,
+  codemodeDispatchSubject,
+  encodeCodemodeDispatchRequest,
+} from "@opengeni/codemode";
 import { readSkillCatalogContext } from "@opengeni/contracts";
 import { generateKeyPairSync } from "node:crypto";
 import {
@@ -11,6 +21,8 @@ import {
 import type { ObjectStorage } from "../../packages/storage/src/index";
 import * as dbSchema from "../../packages/db/src/schema";
 import {
+  submitCodemodeOperation,
+  getCodemodeOperation,
   acceptSessionApprovalDecision,
   appendSessionEvents,
   applySessionTurnSettlement,
@@ -147,6 +159,248 @@ describe("worker activities integration", () => {
     await dbClient?.close();
     await services?.down();
   }, 120_000);
+
+  test("programmatic approvals pause and resume distinct stored operations without open SDK calls", async () => {
+    const grant = await testGrant(dbClient.db);
+    const session = await createOwnedSession(dbClient.db, grant, {
+      initialMessage: "Review synthetic changes",
+      resources: [],
+      metadata: {},
+      model: "scripted-model",
+      sandboxBackend: "none",
+    });
+    await appendOwnedEvents(dbClient.db, grant, session.id, [
+      { type: "user.message", payload: { text: "Review synthetic changes" } },
+    ]);
+    const model = new ScriptedModel([
+      { output: [functionCall("run_program", {}, "call_program")] },
+      { outputText: "Stored operations finished." },
+    ]);
+    const runtime = createProductionAgentRuntime({ model });
+    runtime.generateSessionTitle = async () => ({ title: null, usage: null });
+    const prepare = runtime.prepareTools,
+      build = runtime.buildAgent;
+    let currentScope!: {
+      accountId: string;
+      workspaceId: string;
+      sessionId: string;
+      turnId: string;
+      attemptId: string;
+      executionGeneration: number;
+    };
+    let readyCatalog!: () => Promise<
+      NonNullable<Awaited<ReturnType<OpenGeniRuntime["prepareTools"]>>["attemptToolCatalog"]>
+    >;
+    const effects: number[] = [];
+    let pageReads = 0;
+    let frozenPlan: ReturnType<typeof planIdBatches> | null = null;
+    runtime.prepareTools = async (settings, tools, options = {}) => {
+      currentScope = {
+        accountId: options.accountId!,
+        workspaceId: options.workspaceId!,
+        sessionId: options.sessionId!,
+        turnId: options.turnId!,
+        attemptId: options.attemptId!,
+        executionGeneration: options.executionGeneration!,
+      };
+      const prepared = await prepare(settings, tools, {
+        ...options,
+        attemptConnectorActionBindings: [
+          ...(options.attemptConnectorActionBindings ?? []),
+          {
+            modelName: "fixture__change",
+            call: (approvalId, args) => ({
+              approvalId,
+              connectionId: "session-mcp:fixture:synthetic",
+              serverId: "fixture",
+              toolName: "change",
+              arguments: args,
+              approvalMode: "session_mcp",
+            }),
+          },
+        ],
+        attemptToolDefinitions: [
+          ...(options.attemptToolDefinitions ?? []),
+          {
+            identity: { serverId: "fixture", toolName: "change" },
+            modelName: "fixture__change",
+            source: "mcp",
+            approval: "policy",
+            inputSchema: {
+              type: "object",
+              properties: {
+                batch: { type: "integer" },
+                ids: { type: "array", items: { type: "string" } },
+              },
+              required: ["batch", "ids"],
+              additionalProperties: false,
+            },
+            execute: (args) => {
+              expect(pageReads).toBe(2);
+              expect(args.ids).toEqual(frozenPlan!.batches[Number(args.batch) - 1]!.ids);
+              effects.push(args.batch as number);
+              return { content: [{ type: "text", text: "Accepted synthetic changes." }] };
+            },
+          },
+        ],
+      });
+      readyCatalog = async () =>
+        (await (prepared.ready ?? Promise.resolve(prepared))).attemptToolCatalog!;
+      return prepared;
+    };
+    const programClient = new CodemodeClient({
+      baseUrl: "https://program.example.test/codemode",
+      token: "synthetic-attempt-token",
+      pollIntervalMs: 50,
+      fetch: async (url, init) => {
+        const catalog = await readyCatalog();
+        if (String(url).endsWith("/catalog")) return Response.json(catalog);
+        if (init?.method === "POST") {
+          const { durableApproval, ...request } = JSON.parse(String(init.body));
+          const submitted = await submitCodemodeOperation(dbClient.db, {
+            ...currentScope,
+            durableApproval,
+            call: {
+              ...request,
+              caller: { kind: "codemode", subjectId: "sandbox:" + currentScope.attemptId },
+            },
+          });
+          await bus.request(
+            codemodeDispatchSubject(currentScope.workspaceId, currentScope.attemptId),
+            encodeCodemodeDispatchRequest({
+              version: 1,
+              operationId: request.operationId,
+              catalogDigest: catalog.digest,
+            }),
+            { timeoutMs: 5000 },
+          );
+          return Response.json({ operation: submitted.operation, dispatch: "accepted" });
+        }
+        const operationId = String(url).split("/").at(-1)!;
+        return Response.json(
+          await getCodemodeOperation(dbClient.db, { ...currentScope, operationId }),
+        );
+      },
+    });
+    runtime.buildAgent = (settings, resources, options) => {
+      const agent = build(settings, resources, options);
+      agent.tools.push(
+        tool({
+          name: "run_program",
+          description: "Run the synthetic program",
+          parameters: z.object({}),
+          execute: async () => {
+            const handles: string[] = [];
+            const selection = await collectIdPages(async (cursor) => {
+              pageReads++;
+              return cursor
+                ? { ids: Array.from({ length: 402 }, (_, i) => "synthetic-message-" + (i + 599)) }
+                : {
+                    ids: Array.from({ length: 600 }, (_, i) => "synthetic-message-" + i),
+                    nextPageToken: "page-two",
+                  };
+            });
+            // The resumed worker uses durable server arguments; this program never runs again.
+            frozenPlan = JSON.parse(JSON.stringify(planIdBatches(selection)));
+            expect(frozenPlan!.count).toBe(1001);
+            expect(frozenPlan!.batches.map((batch) => batch.ids.length)).toEqual([1000, 1]);
+            for (const [index, chunk] of frozenPlan!.batches.entries()) {
+              const batch = index + 1;
+              try {
+                await programClient.call(
+                  { serverId: "fixture", toolName: "change" },
+                  {
+                    batch,
+                    ids: [...chunk.ids],
+                  },
+                  { operationId: chunk.operationId },
+                );
+              } catch (error) {
+                if (!(error instanceof CodemodeApprovalPendingError)) throw error;
+                handles.push(error.operationId);
+              }
+            }
+            return JSON.stringify({ state: "waiting_for_approval", handles });
+          },
+        }),
+      );
+      return agent;
+    };
+    const activities = createWorkerActivities({
+      settings: testSettings({ databaseUrl: services.databaseUrl, natsUrl: services.natsUrl }),
+      db: dbClient.db,
+      bus,
+      runtime,
+    });
+    const run = (trigger: { kind: "next" } | { kind: "approval"; triggerEventId: string }) =>
+      activities.runAgentTurn({
+        attemptId: crypto.randomUUID(),
+        accountId: grant.accountId,
+        workspaceId: grant.workspaceId,
+        sessionId: session.id,
+        trigger,
+        workflowId: "workflow-programmatic-review",
+        workflowRunId: crypto.randomUUID(),
+      });
+    expect((await run({ kind: "next" })).status).toBe("requires_action");
+    expect(effects).toEqual([]);
+    expect(model.calls).toBe(1);
+    const events = await listSessionEvents(dbClient.db, grant.workspaceId, session.id, 0, 200);
+    const approvals = (
+      events.findLast((event) => event.type === "session.requiresAction")!.payload as {
+        approvals: Array<{ id: string; source: string }>;
+      }
+    ).approvals;
+    expect(approvals).toHaveLength(2);
+    expect(
+      approvals.every(
+        (approval) => approval.source === "codemode" && approval.id !== "call_program",
+      ),
+    ).toBe(true);
+    const active = await getSession(dbClient.db, grant.workspaceId, session.id);
+    expect(
+      await listTurnOpenSuffixToolCalls(
+        dbClient.db,
+        grant.workspaceId,
+        session.id,
+        active!.activeTurnId!,
+      ),
+    ).toEqual([]);
+    for (let index = 0; index < approvals.length; index++) {
+      const decision = await acceptSessionApprovalDecision(dbClient.db, {
+        accountId: grant.accountId,
+        workspaceId: grant.workspaceId,
+        sessionId: session.id,
+        subjectId: grant.subjectId,
+        payload: { approvalId: approvals[index]!.id, decision: index === 0 ? "approve" : "reject" },
+        clientEventId: crypto.randomUUID(),
+      });
+      if (decision.action !== "accepted") throw new Error("Expected accepted review");
+      const resumed = await run({ kind: "approval", triggerEventId: decision.event.id });
+      if (resumed.status === "failed") {
+        const failedEvents = await listSessionEvents(
+          dbClient.db,
+          grant.workspaceId,
+          session.id,
+          0,
+          200,
+        );
+        throw new Error(
+          JSON.stringify({
+            resumed,
+            events: failedEvents.filter(
+              (event) => event.type === "turn.failed" || event.type === "agent.error",
+            ),
+          }),
+        );
+      }
+      expect(resumed.status).toBe(index === 0 ? "requires_action" : "idle");
+      expect(effects).toEqual([1]);
+    }
+    expect(pageReads).toBe(2);
+    expect(model.calls).toBe(2);
+    expect(JSON.stringify(model.requests)).not.toContain("synthetic-message-599");
+  }, 180_000);
 
   test("streams scripted SDK model deltas into persisted session events", async () => {
     const grant = await testGrant(dbClient.db);

@@ -298,6 +298,14 @@ every sandbox file, live mid-session remount, or an unbounded artifact system.
 
 ## Sandbox Backend Discovery
 
+Tool approval work starts at `docs/tool-approvals.md`. Connector Allow/Ask/Block
+choices have one resolver; legacy flags are recommendations, not extra floors.
+Keep live access checks independent. Durable Codemode review preserves original
+attempt/catalog provenance and adopts exact stored operations into a current
+authorized attempt; waiting releases capacity and uncertain writes never replay.
+Web, React, SDK and Slack consume shared saved review facts with scoped details.
+Check migration compatibility, owned clients and frozen selections together.
+
 Modal command-start transport safety spans the native router and the pinned SDK
 patch, including internal setup, path/filesystem and archive helpers. Only local
 pre-dispatch proof permits finite same-turn recovery; preserve typed causes

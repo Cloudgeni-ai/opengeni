@@ -2386,6 +2386,10 @@ describe("release schema contract", () => {
       "0607_connected_command_output_release.sql",
       "0608_receiver_execution_context.sql",
       "0609_captured_command_output_priority.sql",
+      "0611_tool_approval_defaults.sql",
+      "0612_codemode_approval_continuation.sql",
+      "0613_tool_action_review_details.sql",
+      "0614_legacy_api_tool_preferences.sql",
     ].filter((path) =>
       unfilteredSourceContract.migrations.some((migration) => migration.path === path),
     );
