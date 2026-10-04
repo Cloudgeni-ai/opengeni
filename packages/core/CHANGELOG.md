@@ -1,5 +1,22 @@
 # @opengeni/core
 
+## 1.1.2
+
+### Patch Changes
+
+- Updated dependencies [21c8904]
+  - @opengeni/config@1.1.1
+  - @opengeni/contracts@1.1.1
+  - @opengeni/runtime@1.1.1
+  - @opengeni/db@1.1.1
+  - @opengeni/documents@1.1.1
+  - @opengeni/storage@1.1.1
+  - @opengeni/codex@1.1.1
+  - @opengeni/events@1.1.1
+  - @opengeni/observability@1.1.1
+  - @opengeni/capabilities@1.1.1
+  - @opengeni/network@1.1.1
+
 ## 1.1.0
 
 ### Patch Changes

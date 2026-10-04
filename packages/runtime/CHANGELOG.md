@@ -1,5 +1,23 @@
 # @opengeni/runtime
 
+## 1.1.2
+
+### Patch Changes
+
+- 21c8904: Support optional HTTPS model catalog logos with safe image fallbacks, and declare the item type of the SDK filesystem function tool's command tuple.
+- Updated dependencies [21c8904]
+  - @opengeni/config@1.1.1
+  - @opengeni/contracts@1.1.1
+  - @opengeni/sdk@1.1.1
+  - @opengeni/codemode@1.1.1
+  - @opengeni/codex@1.1.1
+  - @opengeni/observability@1.1.1
+  - @opengeni/tool-gateway@1.1.1
+  - @opengeni/agent-proto@1.1.1
+  - @opengeni/capabilities@1.1.1
+  - @opengeni/network@1.1.1
+  - @opengeni/xai-subscription@1.1.1
+
 ## 1.1.0
 
 ### Patch Changes

@@ -1,5 +1,14 @@
 # @opengeni/react
 
+## 1.1.2
+
+### Patch Changes
+
+- 21c8904: Support optional HTTPS model catalog logos with safe image fallbacks, and declare the item type of the SDK filesystem function tool's command tuple.
+- Updated dependencies [21c8904]
+  - @opengeni/sdk@1.1.1
+  - @opengeni/connect@1.1.1
+
 ## 1.1.0
 
 ### Patch Changes

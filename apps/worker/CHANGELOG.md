@@ -1,5 +1,31 @@
 # @opengeni/worker-bundle
 
+## 1.1.2
+
+### Patch Changes
+
+- Updated dependencies [21c8904]
+  - @opengeni/config@1.1.1
+  - @opengeni/contracts@1.1.1
+  - @opengeni/runtime@1.1.1
+  - @opengeni/sdk@1.1.1
+  - @opengeni/core@1.1.1
+  - @opengeni/db@1.1.1
+  - @opengeni/documents@1.1.1
+  - @opengeni/github@1.1.1
+  - @opengeni/storage@1.1.1
+  - @opengeni/codemode@1.1.1
+  - @opengeni/codex@1.1.1
+  - @opengeni/events@1.1.1
+  - @opengeni/interaction@1.1.1
+  - @opengeni/observability@1.1.1
+  - @opengeni/tool-gateway@1.1.1
+  - @opengeni/agent-proto@1.1.1
+  - @opengeni/capabilities@1.1.1
+  - @opengeni/jev@1.1.1
+  - @opengeni/network@1.1.1
+  - @opengeni/xai-subscription@1.1.1
+
 ## 1.1.0
 
 ### Patch Changes
