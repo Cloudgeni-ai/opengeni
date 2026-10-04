@@ -414,12 +414,12 @@ OpenGeni neither clones repositories nor installs durable control-plane credenti
 children receive transient, exact-attempt Codemode authority.
 [Same-turn recovery](run-lifecycle.md) restores native capabilities without tool replay.
 
-Foreground command output releases after its exact tool-result receipt, output event and
+Foreground output releases after its exact tool-result receipt, output event and
 journal are durable, independently of turn completion. Other owners retain output.
 See [streaming exec](connected-machines.md#streaming-exec-op-stream).
 
 Machine paths follow session working directories. Offline operations fail typed;
-reasoning can continue. Never provision, snapshot or terminate a user's computer
+reasoning continues. Never provision, snapshot or terminate a user's computer
 as an availability fallback.
 
 Structured Files binds machine paths, route, capability epoch and root per request;
