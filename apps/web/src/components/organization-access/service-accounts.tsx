@@ -557,7 +557,7 @@ function ServiceAccountPage({
                   title={key.name}
                   description={[
                     key.prefix,
-                    key.policy
+                    key.permissionMode === "explicit" && key.policy
                       ? policySummary(key.policy)
                       : key.access === "read"
                         ? "Read only"
