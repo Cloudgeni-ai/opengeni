@@ -388,6 +388,13 @@ membership/grants or invent a principal to make admission succeed. See
 
 ## Pull-request delivery across moving `main`
 
+The workflow-wake reaper repairs authentic pending child terminal results for
+idle goalless parents behind fully acknowledged wake debt. Its bounded global
+identity selector is only discovery: scoped repair revalidates effective Pause,
+child-parent producer linkage, ownership and both writer gates before atomic
+queue/wake registration. Completed/paused goals remain settled; no child work
+or provider operation is replayed. See `docs/durable-agent-inputs.md`.
+
 Accepted model policies may tolerate additive latency modes and input modalities
 only by reconstructing the exact historical subset digest. Preserve the frozen
 mode/request tier, all retained declarations, and every other executable field;
