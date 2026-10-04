@@ -17,6 +17,9 @@ export type ChatComposerMessages = {
   attachFiles: string;
   pauseAriaLabel: string;
   pauseTitle: string;
+  /** Stop control shown while a response runs (`runControl="stop"`). */
+  stopAriaLabel?: string | undefined;
+  stopTitle?: string | undefined;
   sendMessageAriaLabel: string;
   sendAndResumeAriaLabel: string;
   sendTitle: string;
@@ -87,6 +90,8 @@ export const defaultChatComposerMessages: ChatComposerMessages = {
   attachFiles: "Attach files",
   pauseAriaLabel: "Pause this workstream",
   pauseTitle: "Pause this workstream; queued prompts and approvals are preserved",
+  stopAriaLabel: "Stop",
+  stopTitle: "Stop the response",
   sendMessageAriaLabel: "Send message",
   sendAndResumeAriaLabel: "Add message to queue",
   sendTitle: "Queue message (Enter); steer with Cmd/Ctrl+Enter",

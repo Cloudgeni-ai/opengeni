@@ -492,7 +492,10 @@ export { SessionList } from "./components/session-list";
 export type { SessionListLabels, SessionListProps } from "./components/session-list";
 export { OpenGeniChat } from "./components/open-geni-chat";
 export type { OpenGeniChatLabels, OpenGeniChatProps } from "./components/open-geni-chat";
-export type { SessionConversationProps } from "./components/session-conversation";
+export type {
+  SessionConversationLabels,
+  SessionConversationProps,
+} from "./components/session-conversation";
 export type { ChatComposerProps } from "./components/chat-composer";
 export { ComposerTranscriptionControl } from "./components/composer-transcription-control";
 export type {

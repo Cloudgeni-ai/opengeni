@@ -64,7 +64,15 @@ type ModelPreparationObservation = {
 };
 
 const modelPreparationObserver = new AsyncLocalStorage<ModelPreparationObservation>();
-const modelTransportStartedObserver = new AsyncLocalStorage<() => Promise<void> | void>();
+export type ModelTransportDispatchClock = {
+  dispatchedAtUnixMs: number;
+  monotonicTimeMs: number;
+};
+
+const modelTransportStartedObserver = new AsyncLocalStorage<{
+  started: (() => Promise<void> | void) | undefined;
+  dispatched: ((clock: ModelTransportDispatchClock) => void) | undefined;
+}>();
 type ModelTransportAdmission = { refusal?: { error: unknown } };
 type ModelTransportFetch = (...args: Parameters<typeof fetch>) => ReturnType<typeof fetch>;
 const modelTransportAdmission = new AsyncLocalStorage<ModelTransportAdmission>();
@@ -127,18 +135,36 @@ export function withModelPreparationObserver<T>(
 export function withModelTransportStartedObserver<T>(
   observer: (() => Promise<void> | void) | undefined,
   callback: () => T,
+  dispatched?: (clock: ModelTransportDispatchClock) => void,
 ): T {
-  return observer ? modelTransportStartedObserver.run(observer, callback) : callback();
+  return observer || dispatched
+    ? modelTransportStartedObserver.run({ started: observer, dispatched }, callback)
+    : callback();
 }
 
 export async function recordModelTransportStarted(): Promise<void> {
   try {
     await beforeModelRequest();
-    await modelTransportStartedObserver.getStore()?.();
+    await modelTransportStartedObserver.getStore()?.started?.();
   } catch (error) {
     const admission = modelTransportAdmission.getStore();
     if (admission) admission.refusal = { error };
     throw error;
+  }
+}
+
+/** Synchronous diagnostic at literal fetch entry, after all awaited admission
+ * and request-capture setup. Never join the observer or change outcomes. */
+export function recordModelTransportDispatched(monotonicTimeMs: number): void {
+  const observer = modelTransportStartedObserver.getStore()?.dispatched;
+  if (!observer) return;
+  try {
+    const result = observer({ dispatchedAtUnixMs: Date.now(), monotonicTimeMs }) as unknown;
+    // The contract is synchronous, but an accidentally async diagnostic must
+    // neither be joined nor leak a rejected promise into the provider loop.
+    if (result instanceof Promise) void result.catch(() => undefined);
+  } catch {
+    // A diagnostic cannot fence, retry or fail the provider request.
   }
 }
 

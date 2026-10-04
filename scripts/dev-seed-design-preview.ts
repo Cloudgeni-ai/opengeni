@@ -2503,7 +2503,8 @@ async function seedUsage(db: SQL) {
     await db.begin(async (tx) => {
       for (let day = 89; day >= 0; day--) {
         const weekday = new Date(Date.now() - day * 86_400_000).getUTCDay();
-        const busy = (weekday === 0 || weekday === 6 ? 0.25 : 1) * (0.55 + (0.45 * (89 - day)) / 89);
+        const busy =
+          (weekday === 0 || weekday === 6 ? 0.25 : 1) * (0.55 + (0.45 * (89 - day)) / 89);
         const calls = Math.round((6 + random() * 14) * weight * busy);
         for (let call = 0; call < calls; call++) {
           const session =
@@ -2534,7 +2535,10 @@ async function seedUsage(db: SQL) {
           );
           const turnId = randomUUID();
           const subject = String(session.created_by_subject_id);
-          const scheduled = schedules.length > 0 && random() < 0.12 ? schedules[Math.floor(random() * schedules.length)]!.id : null;
+          const scheduled =
+            schedules.length > 0 && random() < 0.12
+              ? schedules[Math.floor(random() * schedules.length)]!.id
+              : null;
           await tx`insert into model_call_facts (account_id, workspace_id, session_id, turn_id, source_key,
               provider, provider_api, model, billing_path, turn_source, initiator_kind, initiator_subject_id,
               scheduled_task_id, input_tokens, output_tokens, cached_tokens, cache_write_tokens,

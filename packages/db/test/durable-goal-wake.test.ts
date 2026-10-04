@@ -2710,6 +2710,41 @@ describe("session-level wait_for_input", () => {
     expect((await waitColumns(ctx)).input_wait_turn_id).toBeNull();
   });
 
+  test("a child result wakes an idle goalless parent that is not waiting", async () => {
+    // An ordinary chat (no goal) that started a worker and promised its result:
+    // its turn ended without a held wait, so only the result can wake it.
+    const ctx = await runningGoalFixture();
+    await clearSessionGoal(client.db, ctx.grant.workspaceId!, ctx.session.id);
+    await settleClaimedIdle(ctx, ctx, ctx.attemptId);
+    const childSessionId = crypto.randomUUID();
+    const childResult = await addSessionSystemUpdate(client.db, {
+      accountId: ctx.grant.accountId,
+      workspaceId: ctx.grant.workspaceId!,
+      sessionId: ctx.session.id,
+      kind: "child_terminal_result",
+      classification: "success",
+      sourceId: childSessionId,
+      dedupeKey: `child-completion:${childSessionId}:1`,
+      summary: "A worker session you spawned has finished its work and gone idle.",
+      payload: { type: "child_terminal_result", childSessionId, status: "idle" },
+      lineage: { parentSessionId: ctx.session.id, parentTurnId: ctx.turn.id, childSessionId },
+    });
+    if (!childResult.added) throw new Error("child result was not inserted");
+    const wake = (await outboxRow(ctx))!;
+    expect(Number(wake.wake_revision)).toBeGreaterThan(Number(wake.delivered_revision));
+    const resumed = await claimNext(ctx);
+    expect(
+      (
+        await listSessionSystemUpdatesForTurn(
+          client.db,
+          ctx.grant.workspaceId!,
+          ctx.session.id,
+          resumed.claimed.turn.id,
+        )
+      ).map((update) => update.kind),
+    ).toEqual(["child_terminal_result"]);
+  }, 180_000);
+
   async function addPendingChildUpdate(
     ctx: GoalFixture,
     kind: "child_terminal_result" | "child_progress",
@@ -3701,7 +3736,7 @@ describe("session-level wait_for_input", () => {
   });
 
   test.each([true, false])(
-    "child results retain delivery until claimed only with ongoing intent: %s",
+    "a goalless parent is woken by a child result and claims it (waiting: %s)",
     async (holding) => {
       const ctx = await runningGoalFixture();
       await clearSessionGoal(client.db, ctx.grant.workspaceId!, ctx.session.id);
@@ -3728,12 +3763,11 @@ describe("session-level wait_for_input", () => {
         temporalWorkflowId: `session-${ctx.session.id}`,
         wakeRevision: Number(wake.wake_revision),
       };
-      expect(await markSessionWorkflowWakeDelivered(client.db, receipt)).toEqual(
-        holding
-          ? { action: "pending_admission", blocker: "pending_machine_input" }
-          : { action: "acknowledged" },
-      );
-      if (holding) {
+      expect(await markSessionWorkflowWakeDelivered(client.db, receipt)).toEqual({
+        action: "pending_admission",
+        blocker: "pending_machine_input",
+      });
+      {
         const attemptId = crypto.randomUUID();
         const claimed = await claimSessionWorkForAttempt(client.db, ctx.grant.workspaceId!, {
           sessionId: ctx.session.id,

@@ -981,7 +981,7 @@ export function stripeCustomerProvider(
 /** Billing routes do not traverse the workspace actor middleware. Always bind
  * these reads explicitly; only a revalidated live attempt may supply a human
  * initiator. Neither query parameters nor serviceInitiator claims are proof. */
-async function withBillingUsageActor<T>(
+export async function withBillingUsageActor<T>(
   deps: ApiRouteDeps,
   context: AccessContext,
   accountId: string,
@@ -997,7 +997,7 @@ async function withBillingUsageActor<T>(
   return await withSessionRlsActorContext({ subjectId: context.subjectId }, read);
 }
 
-function requireSelectedAccount(
+export function requireSelectedAccount(
   context: AccessContext,
   requested: string | undefined,
   permission: Permission,

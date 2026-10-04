@@ -16,12 +16,12 @@
     {
       "mcpUrl": "https://gmailmcp.googleapis.com/mcp/v1",
       "name": "Gmail",
-      "description": "Search and read Gmail, draft and send mail, and organize messages through OpenGeni's reviewed Gmail bridge.",
+      "description": "Search and read Gmail, download original messages and attachments, manage drafts and labels, organize mail, import messages, and read mailbox changes and settings through the reviewed Gmail bridge.",
       "category": "communication",
       "featured": true,
-      "official": true,
+      "official": false,
       "tier": "verified",
-      "provenance": "official:developers.google.com/workspace/gmail/api/reference/mcp",
+      "provenance": "first-party:opengeni-gmail-rest",
       "authKind": "oauth2",
       "scopesHint": [
         "https://www.googleapis.com/auth/gmail.readonly",
@@ -32,24 +32,65 @@
         "create_draft",
         "send_message",
         "send_draft",
-        "get_message",
-        "get_thread",
-        "label_message",
-        "label_thread",
         "list_drafts",
-        "list_labels",
+        "get_thread",
+        "get_message",
         "search_threads",
+        "label_thread",
+        "unlabel_thread",
+        "list_labels",
+        "label_message",
         "unlabel_message",
-        "unlabel_thread"
+        "get_profile",
+        "search_messages",
+        "get_draft",
+        "update_draft",
+        "delete_draft",
+        "get_label",
+        "create_label",
+        "update_label",
+        "delete_label",
+        "modify_message",
+        "modify_thread",
+        "batch_modify_messages",
+        "trash_message",
+        "restore_message",
+        "trash_thread",
+        "restore_thread",
+        "download_attachment",
+        "download_message",
+        "get_history",
+        "watch_mailbox",
+        "stop_watch",
+        "get_settings",
+        "list_settings",
+        "import_message",
+        "insert_message"
       ],
       "requireApproval": [
         "create_draft",
         "send_message",
         "send_draft",
-        "label_message",
         "label_thread",
+        "unlabel_thread",
+        "label_message",
         "unlabel_message",
-        "unlabel_thread"
+        "update_draft",
+        "delete_draft",
+        "create_label",
+        "update_label",
+        "delete_label",
+        "modify_message",
+        "modify_thread",
+        "batch_modify_messages",
+        "trash_message",
+        "restore_message",
+        "trash_thread",
+        "restore_thread",
+        "watch_mailbox",
+        "stop_watch",
+        "import_message",
+        "insert_message"
       ],
       "defaultConnectionOwnership": "personal",
       "presentation": {
@@ -68,6 +109,14 @@
           {
             "title": "Organize the mailbox",
             "description": "Work with labels, drafts, messages, and threads through the reviewed tools."
+          },
+          {
+            "title": "Retrieve original files",
+            "description": "Download any attachment or complete original email to the agent filesystem."
+          },
+          {
+            "title": "Monitor and inspect Gmail",
+            "description": "Read mailbox changes, account settings and configuration. Optional notifications use an operator-configured Pub/Sub topic."
           }
         ],
         "permissionSummary": "Google asks for read, compose, and organize access to the mailbox you approve. OpenGeni exposes only the reviewed tools listed for this connector, and every send requires your approval before it goes out.",
@@ -82,16 +131,16 @@
           },
           "https://www.googleapis.com/auth/gmail.modify": {
             "label": "Organize your mailbox",
-            "description": "Apply and remove labels on messages and threads."
+            "description": "Manage labels, drafts and mailbox organization, move mail to Trash or restore it, and import messages."
           }
         }
       },
       "logoSourceUrl": null,
-      "homepageUrl": "https://developers.google.com/workspace/gmail/api/reference/mcp",
-      "installUrl": "https://developers.google.com/workspace/gmail/api/guides/configure-mcp-server",
-      "documentationUrl": "https://developers.google.com/workspace/gmail/api/reference/mcp",
+      "homepageUrl": "https://developers.google.com/workspace/gmail/api/reference/rest",
+      "installUrl": "https://developers.google.com/identity/protocols/oauth2/web-server",
+      "documentationUrl": "https://developers.google.com/workspace/gmail/api/reference/rest",
       "notes": [
-        "scopesHint keeps the consent surface to the union required by the reviewed tools instead of requesting every scope advertised by PRM.",
+        "scopesHint keeps consent to the reviewed Gmail REST tools. OAuth discovery uses pinned Google metadata and verifies the consenting mailbox with Gmail users/me/profile, without depending on the Developer Preview MCP server. Gmail connections are personal-only; every member connects their own mailbox.",
         "allowedTools freezes the reviewed tool surface. Every tool call executes through OpenGeni's first-party Gmail REST bridge (packages/runtime/src/gmail-rest-mcp.ts), never Google's Developer Preview MCP endpoint directly; this connection's mcpUrl identity is unchanged so existing consents and reconnect flows keep working. send_message and send_draft are OpenGeni additions the Developer Preview server does not offer; both require durable human approval, non-optional and not workspace-configurable.",
         "logoSourceUrl is null because Google has not published a reusable Gmail MCP logo asset. Keep the self-hosted monogram rather than hotlinking a brand asset."
       ]
@@ -192,14 +241,6 @@
       "featured": true,
       "official": true,
       "notes": ["Snapshot name was lowercase 'stripe'."]
-    },
-    {
-      "mcpUrl": "https://mcp.figma.com/mcp",
-      "name": "Figma",
-      "description": "Read frames, components, and comments straight from a design file.",
-      "category": "design",
-      "featured": true,
-      "official": true
     },
     {
       "mcpUrl": "https://mcp.canva.com/mcp",

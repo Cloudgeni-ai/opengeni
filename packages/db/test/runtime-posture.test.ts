@@ -273,6 +273,8 @@ function companyProfileAgentAdminAuthorityTables(): RuntimeTablePosture[] {
 function organizationMembershipLifecycleAuthorityTables(): RuntimeTablePosture[] {
   return [
     "api_keys",
+    "organization_api_key_workspaces",
+    "organization_service_accounts",
     "additional_organization_creation_receipts",
     "organization_invitation_binding_events",
     "organization_membership_invitations",
@@ -592,6 +594,14 @@ describe("runtime database posture evaluator", () => {
 
   const modelFactCapabilities = [
     {
+      name: "insights_scoped_usage_rows(uuid, uuid, timestamp with time zone, timestamp with time zone, text, uuid[], boolean)",
+      violation: "Insights unified usage projection is missing or unsafe",
+    },
+    {
+      name: "insights_scoped_calls_rows(uuid, uuid, timestamp with time zone, timestamp with time zone, jsonb, timestamp with time zone, uuid, integer, uuid[], boolean)",
+      violation: "Insights unified visible calls projection is missing or unsafe",
+    },
+    {
       name: "complete_workspace_insights_usage_projection(uuid, timestamp with time zone, timestamp with time zone, text[])",
       violation: "Insights complete usage amount projection is missing or unsafe",
     },
@@ -786,6 +796,7 @@ describe("runtime database posture evaluator", () => {
       ]),
     );
   });
+
   test("usage allowance capability rejects direct runtime access and split lifecycle ownership", () => {
     const posture = safePosture();
     posture.privateTables.push({
@@ -1147,11 +1158,12 @@ describe("runtime database posture evaluator", () => {
                       ? 8
                       : 0;
         const expectedLength =
-          // Individual Claude accounts share the six subscription runtime tables.
+          // Individual Claude accounts share the six subscription runtime tables;
+          // the organization key scope join and service accounts add two more.
           (tables === FORCE_RLS_TABLES ||
           tables === RUNTIME_FULL_DML_TABLES ||
           tables === RUNTIME_DML_TABLES
-            ? 6
+            ? 8
             : 0) +
           (tables === FORCE_RLS_TABLES || tables === PROTECTED_NO_DIRECT_DML_TABLES ? 8 : 0) +
           // 0546 adds three organization integration tables.
@@ -1266,6 +1278,7 @@ describe("runtime database posture evaluator", () => {
       ]);
       expect(new Set([...RUNTIME_DML_TABLES, ...PROTECTED_NO_DIRECT_DML_TABLES]).size).toBe(
         tableCount +
+          2 + // 0600 organization key workspace scope join and 0603 service accounts.
           3 +
           personalResourceProtectedTableCount +
           managedAuthSessionSetProtectedTableCount +
@@ -1274,6 +1287,7 @@ describe("runtime database posture evaluator", () => {
       );
       expect(new Set([...FORCE_RLS_TABLES, ...NON_RLS_RUNTIME_TABLES]).size).toBe(
         tableCount +
+          2 + // 0600 organization key workspace scope join and 0603 service accounts.
           3 +
           personalResourceProtectedTableCount +
           managedAuthSessionSetProtectedTableCount +

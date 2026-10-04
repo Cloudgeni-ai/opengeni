@@ -2060,7 +2060,16 @@ function groupReadableTurns(items: TimelineItem[]): TimelineGroup[] {
         item.text.startsWith("Approval needed") &&
         current !== undefined &&
         !current.endedAt;
-      if (!liveApprovalWait) groups.push({ kind: "item", item });
+      // Likewise the live "waiting on you" divider: the open turn's header
+      // already reads "Waiting for you · <elapsed>". It returns, resolved, as
+      // the "work resumed" divider once the session runs again.
+      const liveStatusWait =
+        item.kind === "session-status" &&
+        item.status === "requires_action" &&
+        !item.resolvedAt &&
+        current !== undefined &&
+        !current.endedAt;
+      if (!liveApprovalWait && !liveStatusWait) groups.push({ kind: "item", item });
       if (current && !current.endedAt) {
         if (
           item.kind === "notice" &&

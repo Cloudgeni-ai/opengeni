@@ -1,4 +1,4 @@
-import { knowledgeContextForGateway } from "@opengeni/core";
+import { isVerifiedDelegatedHumanAuthorization, knowledgeContextForGateway } from "@opengeni/core";
 import { createHash, randomBytes } from "node:crypto";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
@@ -43,7 +43,7 @@ import {
   buildCodexTokenResolver,
   buildConnectionTokenResolver,
   buildSlackApiRateLimiter,
-  lockActiveExternalOrganizationKey,
+  lockActiveExternalOrganizationKeyAuthority,
   withAccountRls,
   requireWorkspace,
   withCodexAppsRequestAuthorization,
@@ -137,6 +137,7 @@ export function requireWorkspaceToolGatewayAuthorization(
   if (
     !authorization.canonicalManagedHumanSession &&
     !authorization.canonicalLocalHumanSession &&
+    !isVerifiedDelegatedHumanAuthorization(authorization) &&
     !externalActorContinuationForAuthorization(authorization)
   ) {
     throw new HTTPException(403, { message: "current-human tool access required" });
@@ -164,15 +165,18 @@ export async function prepareWorkspaceToolGateway(
           await withAccountRls(routeDeps.db, scope.accountId, async (tx) => {
             if (reauthorizeExternal) await reauthorizeExternal(tx);
             else {
-              const live = await lockActiveExternalOrganizationKey(
+              const live = await lockActiveExternalOrganizationKeyAuthority(
                 tx,
                 scope.accountId,
                 scope.subjectId.slice("api_key:".length),
+                scope.workspaceId,
               );
               const workspace = await requireWorkspace(tx, scope.workspaceId);
               if (
                 !live ||
-                permissions.some((permission) => !hasPermission(live, permission)) ||
+                permissions.some(
+                  (permission) => !hasPermission(live.permissions, permission, live.permissionMode),
+                ) ||
                 workspace.accountId !== scope.accountId ||
                 workspace.kind !== "shared"
               )

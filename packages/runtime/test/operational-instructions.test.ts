@@ -236,6 +236,9 @@ describe("provider-neutral operational instructions", () => {
 
   test("defaults to direct handling but honors independent delegation and result-bearing wakes", () => {
     expect(OPENGENI_OPERATIONAL_INSTRUCTIONS).toContain(
+      "When you are a child session, your final answer is delivered automatically to your parent session. Send a separate message when the parent needs information before you finish, or when you need to message another session.",
+    );
+    expect(OPENGENI_OPERATIONAL_INSTRUCTIONS).toContain(
       "Delegation has setup and coordination overhead: by default",
     );
     expect(OPENGENI_OPERATIONAL_INSTRUCTIONS).not.toContain("A child costs minutes");

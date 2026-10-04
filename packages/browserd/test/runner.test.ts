@@ -440,43 +440,65 @@ console.log(JSON.stringify({ success: true, data: { argv: process.argv.slice(2),
 
 test("Linux directory relaunch requires complete absence of verified and unverified profile processes", async () => {
   const directory = await mkdtemp("/tmp/og-inventory-proof-");
+  const profileDirectory = join(directory, "profile");
+  await mkdir(profileDirectory);
   const scriptPath = join(directory, "synthetic-inventory.ts");
-  const script = `import { mock } from "bun:test";
+  const script = `import { expect, mock } from "bun:test";
     import * as fs from "node:fs/promises";
     Object.defineProperty(process, "platform", { value: "linux" });
+    const profileDirectory = ${JSON.stringify(profileDirectory)};
+    const native = { readdir: fs.readdir, readFile: fs.readFile, readlink: fs.readlink, realpath: fs.realpath };
     let scenario = "absent";
     const missing = code => Object.assign(new Error("synthetic procfs observation"), { code });
     mock.module("node:fs/promises", () => ({
       ...fs,
-      async lstat(path) {
-        if (path === "/synthetic/profile") return { isDirectory: () => true, isSymbolicLink: () => false };
-        throw new Error("unexpected synthetic lstat");
-      },
-      async readdir(path) {
+      async readdir(path, options) {
         if (path === "/proc") return [{ name: "2002", isDirectory: () => true }];
-        throw new Error("unexpected synthetic directory");
+        return await native.readdir(path, options);
       },
-      async readFile(path) {
+      async readFile(path, options) {
         if (path === "/proc/2001/stat") throw missing("ENOENT");
-        if (path !== "/proc/2002/cmdline") throw new Error("unexpected synthetic read");
+        if (path !== "/proc/2002/cmdline") return await native.readFile(path, options);
         if (scenario === "inaccessible") throw missing("EACCES");
+        if (scenario === "forbidden") throw missing("EPERM");
         if (scenario === "exiting") throw missing("ENOENT");
-        const profile = scenario === "absent" ? "/synthetic/other" : "/synthetic/profile";
+        const profile = ["rewritten", "unknown-executable"].includes(scenario) ? profileDirectory : "/synthetic/other";
         return Buffer.from("/synthetic/chromium --user-data-dir=" + profile + "\\0");
       },
       async readlink(path) {
-        if (path !== "/proc/2002/exe") throw new Error("unexpected synthetic link");
+        if (path !== "/proc/2002/exe") return await native.readlink(path);
+        if (scenario === "inaccessible-executable") throw missing("EACCES");
+        if (scenario === "forbidden-executable") throw missing("EPERM");
         return scenario === "unknown-executable" ? "/synthetic/unrecognized" : "/synthetic/chromium";
       },
-      async realpath(path) { return path; },
+      async realpath(path) { return path.startsWith("/synthetic/") ? path : await native.realpath(path); },
     }));
-    const { inspectOwnedManagedBrowserProcess } = await import(${JSON.stringify(new URL("../src/runner.ts", import.meta.url).href)});
-    const receipt = { pid: 2001, birth: "synthetic-birth", executablePath: "/synthetic/chromium", profileDirectory: "/synthetic/profile",
+    const { AgentBrowserJsonRunner, inspectOwnedManagedBrowserProcess } = await import(${JSON.stringify(new URL("../src/runner.ts", import.meta.url).href)});
+    const receipt = { pid: 2001, birth: "synthetic-birth", executablePath: "/synthetic/chromium", profileDirectory,
       cdpEndpoint: "ws://127.0.0.1:12345/devtools/browser/11111111-1111-4111-8111-111111111111" };
+    const options = {
+      namespace: "og", sessionName: "fixture", headed: false, profileDirectory,
+      socketDirectory: ${JSON.stringify(join(directory, "socket"))},
+      downloadDirectory: ${JSON.stringify(join(directory, "downloads"))},
+      screenshotDirectory: ${JSON.stringify(join(directory, "screenshots"))},
+      browserExecutablePath: process.execPath,
+      binary: { path: process.execPath, name: "agent-browser-linux-x64", version: "0.33.2", sha256: "synthetic" },
+      recoverOwnedProcess: receipt,
+    };
     const results = [];
-    for (scenario of ["absent", "rewritten", "unknown-executable", "inaccessible", "exiting"]) {
+    for (scenario of ["absent", "rewritten", "unknown-executable", "inaccessible", "forbidden", "inaccessible-executable", "forbidden-executable", "exiting"]) {
       try { results.push({ scenario, result: await inspectOwnedManagedBrowserProcess(receipt) }); }
       catch (error) { results.push({ scenario, code: error.code, message: error.message }); }
+      if (["absent", "exiting"].includes(scenario)) {
+        await expect(AgentBrowserJsonRunner.create(options)).rejects.toThrow("outcome is unknown");
+        await fs.mkdir(${JSON.stringify(join(directory, "socket", "namespaces", "og", "run"))}, { recursive: true });
+        const permitted = await AgentBrowserJsonRunner.create({ ...options, allowOwnedProcessLaunch: true });
+        expect(permitted.reattachedOwnedProcess).toBeNull();
+      } else {
+        // Explicit launch permission cannot bypass a successor or any denied
+        // observation, including an unrelated process's executable.
+        await expect(AgentBrowserJsonRunner.create({ ...options, allowOwnedProcessLaunch: true })).rejects.toThrow(results.at(-1).message);
+      }
     }
     console.log(JSON.stringify(results));`;
   await writeFile(scriptPath, script, { mode: 0o600 });
@@ -509,6 +531,11 @@ test("Linux directory relaunch requires complete absence of verified and unverif
         code: "process_failed",
         message: "exact profile process inventory is incomplete",
       },
+      ...["forbidden", "inaccessible-executable", "forbidden-executable"].map((scenario) => ({
+        scenario,
+        code: "process_failed",
+        message: "exact profile process inventory is incomplete",
+      })),
       { scenario: "exiting", result: "exited" },
     ]);
   } finally {
@@ -586,21 +613,10 @@ test.skipIf(process.platform !== "linux" && process.platform !== "darwin")(
       // Explicit bound cleanup targets only this generated Bun fixture PID.
       await runner.terminate();
       await child.exited;
-      if (process.platform === "linux") {
-        expect(await inspectOwnedManagedBrowserProcess(receipt!)).toBe("exited");
-        await expect(
-          AgentBrowserJsonRunner.create({ ...options, recoverOwnedProcess: receipt! }),
-        ).rejects.toThrow("outcome is unknown");
-        await mkdir(join(options.socketDirectory, "namespaces", options.namespace, "run"), {
-          recursive: true,
-        });
-        const permitted = await AgentBrowserJsonRunner.create({
-          ...options,
-          recoverOwnedProcess: receipt!,
-          allowOwnedProcessLaunch: true,
-        });
-        expect(permitted.reattachedOwnedProcess).toBeNull();
-      } else {
+      expect(() => process.kill(child.pid, 0)).toThrow();
+      // Complete Linux absence/relaunch proof belongs to the isolated inventory
+      // fixture above: a CI host may have unrelated, unreadable procfs entries.
+      if (process.platform === "darwin") {
         await expect(inspectOwnedManagedBrowserProcess(receipt!)).rejects.toThrow(
           "absence is unproven",
         );

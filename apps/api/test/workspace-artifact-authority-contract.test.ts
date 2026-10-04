@@ -54,7 +54,8 @@ describe("workspace artifact causal-human authority contract", () => {
     for (const document of [agents, lifecycle, architecture]) {
       expect(document).toContain("initiating_human_subject_id");
       expect(document).toContain("artifacts:publish");
-      expect(document.toLowerCase()).toContain("pure service work");
+      // Prose wrapping is formatting, not a change to the authority contract.
+      expect(document.toLowerCase().replace(/\s+/gu, " ")).toContain("pure service work");
       expect(document.toLowerCase()).toContain("archive");
       expect(document.toLowerCase()).toContain("restore");
     }

@@ -1,6 +1,5 @@
 import { registerSubscriptionAccountPoolRoutes } from "./subscription-account-pools";
 import {
-  managedCookieHuman,
   requireSameOriginBrowserMutation,
   requirePrivateSubscriptionHuman,
   requireSubscriptionScopeMutation,
@@ -18,10 +17,7 @@ import {
   environmentsEncryptionKeyBytes,
   withXaiSubscriptionCatalogProvider,
 } from "@opengeni/config";
-import {
-  WORKSPACE_XAI_PROVIDER_ACCOUNT_AUTHORITY_SNAPSHOT_V1,
-  type XaiProviderAccountAuthoritySnapshotV1,
-} from "@opengeni/contracts";
+import type { XaiProviderAccountAuthoritySnapshotV1 } from "@opengeni/contracts";
 import {
   disconnectXaiSubscriptionCredentialAndRepick,
   ensureXaiRotationSettings,
@@ -40,12 +36,10 @@ import {
   wakeXaiCapacityWaiters,
   encryptEnvironmentValue,
   decryptEnvironmentValue,
-  getWorkspaceGrant,
   type XaiSubscriptionAccountMetadata,
 } from "@opengeni/db";
 import { createSignedState, readSignedState } from "@opengeni/github";
 import {
-  getManagedSession,
   requireAccessGrant,
   requireAccessGrantAuthorization,
   externalActorContinuationForAuthorization,
@@ -87,12 +81,6 @@ const connectStartBody = z.object({
   scope: z.enum(["workspace", "user"]).default("workspace"),
 });
 const connectPollBody = z.object({ state: z.string().min(1).max(16_384) });
-const allocatorBody = z.object({
-  enabled: z.boolean(),
-  expectedVersion: z.number().int().positive(),
-});
-const settingsBody = z.object({ rotationEnabled: z.boolean() });
-const renameBody = z.object({ label: z.string().trim().max(200).nullable() });
 
 function requireEnabled(deps: ApiRouteDeps): void {
   if (!deps.settings.supergrokSubscriptionEnabled) {
@@ -265,27 +253,6 @@ async function materializedAuthContext(
   };
 }
 
-async function authorityForAccountMutation(
-  c: Context,
-  deps: ApiRouteDeps,
-  workspaceId: string,
-  credentialId: string,
-): Promise<{
-  accountId: string;
-  subjectId: string;
-  snapshot: XaiAuthoritySnapshot;
-}> {
-  const readGrant = await requireAccessGrant(c, deps, workspaceId, "workspace:read");
-  const snapshot = await getXaiSubscriptionAccountAuthoritySnapshot(deps.db, {
-    workspaceId,
-    subjectId: readGrant.subjectId,
-    credentialId,
-  });
-  if (!snapshot) throw new HTTPException(404, { message: "SuperGrok account not found" });
-  const mutation = await requireScopeMutation(c, deps, workspaceId, snapshot.scope);
-  return { ...mutation, snapshot };
-}
-
 export function registerSuperGrokRoutes(app: Hono, deps: ApiRouteDeps): void {
   registerSubscriptionAccountPoolRoutes(app, deps, {
     provider: "xai",
@@ -314,15 +281,15 @@ export function registerSuperGrokRoutes(app: Hono, deps: ApiRouteDeps): void {
   const { db } = deps;
 
   const organizationPath = "/v1/organizations/:organizationId/supergrok";
-  const organizationActor = async (c: Context, mutation = false) => {
+  const organizationActor = async (c: Context, mutation = false, providerConsent = false) => {
     requireEnabled(deps);
     if (mutation) requireSameOriginBrowserMutation(c, deps);
     const organizationId = c.req.param("organizationId")!;
-    const human = await requireOrganizationCodexHuman(c, deps, organizationId);
+    const human = await requireOrganizationCodexHuman(c, deps, organizationId, { providerConsent });
     return { organizationId, actorSubjectId: human.subjectId };
   };
   app.post(`${organizationPath}/connect/start`, async (c) => {
-    const actor = await organizationActor(c, true);
+    const actor = await organizationActor(c, true, true);
     try {
       const start = await requestXaiDeviceCode({ fetch: (deps.xaiFetch ?? fetch) as XaiFetch });
       const expiresAt = Math.floor(Date.now() / 1000) + start.expiresInSeconds;
@@ -342,7 +309,7 @@ export function registerSuperGrokRoutes(app: Hono, deps: ApiRouteDeps): void {
     }
   });
   app.post(`${organizationPath}/connect/poll`, async (c) => {
-    const actor = await organizationActor(c, true);
+    const actor = await organizationActor(c, true, true);
     const parsed = connectPollBody.safeParse(await c.req.json().catch(() => null));
     if (!parsed.success) throw new HTTPException(400, { message: "SuperGrok state is required" });
     const state = readSignedState(parsed.data.state, deps.githubStateSecret) as {

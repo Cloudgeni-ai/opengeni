@@ -5,6 +5,7 @@ import {
   meaningfulSessionEventSql,
 } from "./session-meaningful-events";
 import type {
+  OrganizationAccessPolicy,
   SandboxProviderCommand,
   CommandSupervisionReceipt,
   AutomationAcceptedExecution,
@@ -1286,6 +1287,51 @@ export const organizationUserResourceAuthorities = pgTable(
   }),
 );
 
+export type OrganizationServiceAccountRole = "admin" | "member";
+
+/** An organization identity with no person behind it; it holds organization API keys. */
+export const organizationServiceAccounts = pgTable(
+  "organization_service_accounts",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    accountId: uuid("account_id")
+      .notNull()
+      .references(() => managedAccounts.id, { onDelete: "cascade" }),
+    name: text("name").notNull(),
+    description: text("description"),
+    role: text("role").$type<OrganizationServiceAccountRole>().notNull().default("admin"),
+    createdBySubjectId: text("created_by_subject_id"),
+    deletedAt: timestamp("deleted_at", { withTimezone: true }),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+    updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (table) => ({
+    accountIdentity: uniqueIndex("organization_service_accounts_id_account_idx").on(
+      table.id,
+      table.accountId,
+    ),
+    account: index("organization_service_accounts_account_idx")
+      .on(table.accountId, table.createdAt)
+      .where(sql`${table.deletedAt} is null`),
+    roleValid: check(
+      "organization_service_accounts_role_check",
+      sql`${table.role} in ('admin', 'member')`,
+    ),
+    nameValid: check(
+      "organization_service_accounts_name_check",
+      sql`length(btrim(${table.name})) between 1 and 200`,
+    ),
+    descriptionValid: check(
+      "organization_service_accounts_description_check",
+      sql`${table.description} is null or length(${table.description}) between 1 and 500`,
+    ),
+    creatorValid: check(
+      "organization_service_accounts_creator_check",
+      sql`${table.createdBySubjectId} is null or length(btrim(${table.createdBySubjectId})) between 1 and 1024`,
+    ),
+  }),
+);
+
 export type ApiKeyCredentialKind = "workspace" | "organization" | "legacy_account";
 
 export const apiKeys = pgTable(
@@ -1301,9 +1347,16 @@ export const apiKeys = pgTable(
     name: text("name").notNull(),
     description: text("description"),
     credentialKind: text("credential_kind").$type<ApiKeyCredentialKind>().notNull(),
+    workspaceScope: text("workspace_scope").$type<"all" | "selected">().notNull().default("all"),
+    permissionMode: text("permission_mode")
+      .$type<"legacy" | "explicit">()
+      .notNull()
+      .default("legacy"),
     prefix: text("prefix").notNull(),
     keyHash: text("key_hash").notNull(),
     permissions: jsonb("permissions").$type<string[]>().notNull().default([]),
+    /** Organization keys: the service account that holds the key. */
+    serviceAccountId: uuid("service_account_id"),
     expiresAt: timestamp("expires_at", { withTimezone: true }),
     revokedAt: timestamp("revoked_at", { withTimezone: true }),
     lastUsedAt: timestamp("last_used_at", { withTimezone: true }),
@@ -1315,6 +1368,26 @@ export const apiKeys = pgTable(
     hash: uniqueIndex("api_keys_key_hash_idx").on(table.keyHash),
     account: index("api_keys_account_idx").on(table.accountId),
     workspace: index("api_keys_workspace_idx").on(table.workspaceId),
+    accountIdentity: uniqueIndex("api_keys_id_account_idx").on(table.id, table.accountId),
+    serviceAccountIndex: index("api_keys_service_account_idx")
+      .on(table.serviceAccountId)
+      .where(sql`${table.serviceAccountId} is not null`),
+    serviceAccount: foreignKey({
+      name: "api_keys_service_account_fk",
+      columns: [table.serviceAccountId, table.accountId],
+      foreignColumns: [organizationServiceAccounts.id, organizationServiceAccounts.accountId],
+    }).onDelete("restrict"),
+    serviceAccountKind: check(
+      "api_keys_service_account_kind_check",
+      sql`${table.serviceAccountId} is null or ${table.credentialKind} = 'organization'`,
+    ),
+    accessPolicyValid: check(
+      "api_keys_access_policy_check",
+      sql`${table.workspaceScope} in ('all', 'selected')
+        and ${table.permissionMode} in ('legacy', 'explicit')
+        and (${table.workspaceScope} = 'all' or (${table.credentialKind} = 'organization' and ${table.permissionMode} = 'explicit'))
+        and (${table.permissionMode} = 'legacy' or ${table.credentialKind} = 'organization')`,
+    ),
     descriptionValid: check(
       "api_keys_description_check",
       sql`${table.description} is null or length(${table.description}) between 1 and 500`,
@@ -1333,6 +1406,32 @@ export const apiKeys = pgTable(
         and ${table.revokedAt} is not null
       )`,
     ),
+  }),
+);
+
+export const organizationApiKeyWorkspaces = pgTable(
+  "organization_api_key_workspaces",
+  {
+    apiKeyId: uuid("api_key_id").notNull(),
+    workspaceId: uuid("workspace_id").notNull(),
+    accountId: uuid("account_id").notNull(),
+  },
+  (table) => ({
+    keyWorkspace: primaryKey({ columns: [table.apiKeyId, table.workspaceId] }),
+    workspace: index("organization_api_key_workspaces_workspace_idx").on(
+      table.workspaceId,
+      table.accountId,
+    ),
+    keyAccount: foreignKey({
+      name: "organization_api_key_workspaces_key_account_fk",
+      columns: [table.apiKeyId, table.accountId],
+      foreignColumns: [apiKeys.id, apiKeys.accountId],
+    }).onDelete("cascade"),
+    workspaceAccount: foreignKey({
+      name: "organization_api_key_workspaces_workspace_account_fk",
+      columns: [table.workspaceId, table.accountId],
+      foreignColumns: [workspaces.id, workspaces.accountId],
+    }).onDelete("cascade"),
   }),
 );
 
@@ -4131,13 +4230,13 @@ const mcpOauthGrantColumns = () => ({
   accountId: uuid("account_id")
     .notNull()
     .references(() => managedAccounts.id, { onDelete: "cascade" }),
-  workspaceId: uuid("workspace_id")
-    .notNull()
-    .references(() => workspaces.id, { onDelete: "cascade" }),
+  // Null for an organization connection, which holds organizationAccess instead.
+  workspaceId: uuid("workspace_id").references(() => workspaces.id, { onDelete: "cascade" }),
   subjectId: text("subject_id").notNull(),
   resource: text("resource").notNull(),
   permissions: jsonb("permissions").$type<Permission[]>().notNull(),
   toolIdentities: jsonb("tool_identities").$type<ToolGatewayIdentity[]>().notNull(),
+  organizationAccess: jsonb("organization_access").$type<OrganizationAccessPolicy>(),
 });
 
 export const mcpOauthAuthorizationRequests = pgTable(
@@ -4198,6 +4297,7 @@ export const mcpOauthRefreshTokens = pgTable(
       .references(() => mcpOauthClients.clientId, { onDelete: "cascade" }),
     ...mcpOauthGrantColumns(),
     expiresAt: timestamp("expires_at", { withTimezone: true }).notNull(),
+    connectedAt: timestamp("connected_at", { withTimezone: true }),
     revokedAt: timestamp("revoked_at", { withTimezone: true }),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
   },
@@ -12129,6 +12229,11 @@ export const modelCallFacts = pgTable(
       mode: "number",
     }),
     pricingSource: text("pricing_source"),
+    listUncachedInputCostMicros: bigint("list_uncached_input_cost_micros", { mode: "number" }),
+    listCacheReadCostMicros: bigint("list_cache_read_cost_micros", { mode: "number" }),
+    listCacheWriteCostMicros: bigint("list_cache_write_cost_micros", { mode: "number" }),
+    listOutputCostMicros: bigint("list_output_cost_micros", { mode: "number" }),
+    listCostIsApprox: boolean("list_cost_is_approx"),
     contextContributions:
       jsonb("context_contributions").$type<readonly ModelContextContributionSummary[]>(),
     occurredAt: timestamp("occurred_at", { withTimezone: true }).notNull(),
@@ -12181,6 +12286,34 @@ export const modelCallFacts = pgTable(
       sql`(${table.estimatedProviderCostMicros} is null and ${table.pricingSource} is null)
         or (${table.estimatedProviderCostMicros} is not null
           and ${table.pricingSource} in ('configured_list_price', 'gateway_reported'))`,
+    ),
+    listUncachedInputCostValid: check(
+      "model_call_facts_list_uncached_input_cost_micros_check",
+      sql`${table.listUncachedInputCostMicros} >= 0`,
+    ),
+    listCacheReadCostValid: check(
+      "model_call_facts_list_cache_read_cost_micros_check",
+      sql`${table.listCacheReadCostMicros} >= 0`,
+    ),
+    listCacheWriteCostValid: check(
+      "model_call_facts_list_cache_write_cost_micros_check",
+      sql`${table.listCacheWriteCostMicros} >= 0`,
+    ),
+    listOutputCostValid: check(
+      "model_call_facts_list_output_cost_micros_check",
+      sql`${table.listOutputCostMicros} >= 0`,
+    ),
+    listClassesValid: check(
+      "model_call_facts_list_classes_check",
+      sql`
+      (${table.listUncachedInputCostMicros} is null and ${table.listCacheReadCostMicros} is null
+        and ${table.listCacheWriteCostMicros} is null and ${table.listOutputCostMicros} is null)
+      or (${table.estimatedProviderCostMicros} is not null and ${table.listCostIsApprox} is not null
+        and ${table.listUncachedInputCostMicros} is not null and ${table.listCacheReadCostMicros} is not null
+        and ${table.listCacheWriteCostMicros} is not null and ${table.listOutputCostMicros} is not null
+        and ${table.estimatedProviderCostMicros}::numeric = ${table.listUncachedInputCostMicros}::numeric
+          + ${table.listCacheReadCostMicros}::numeric + ${table.listCacheWriteCostMicros}::numeric
+          + ${table.listOutputCostMicros}::numeric)`,
     ),
     initiatorConsistent: check(
       "model_call_facts_initiator_check",
@@ -12449,6 +12582,11 @@ export const creditLedgerEntries = pgTable(
   },
   (table) => ({
     idempotency: uniqueIndex("credit_ledger_entries_idempotency_idx").on(table.idempotencyKey),
+    modelDebitPeriod: index("credit_ledger_entries_model_debit_period_idx")
+      .on(table.accountId, table.occurredAt, table.workspaceId)
+      .where(
+        sql`${table.type}='model_usage_debit' and ${table.sourceType}='model_response' and ${table.amountMicros}<0`,
+      ),
     accountCreated: index("credit_ledger_entries_account_created_idx").on(
       table.accountId,
       table.createdAt,

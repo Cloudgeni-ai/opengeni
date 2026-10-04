@@ -4,6 +4,7 @@
  * deployment doesn't serve the route at all.
  */
 import type { OpenGeniBrowserClient as OpenGeniClient } from "@opengeni/sdk/browser";
+import type { InsightsUsageResponse } from "@opengeni/contracts/insights-usage";
 
 import {
   legacyRange,
@@ -11,13 +12,14 @@ import {
   organizationUsageFromModelUsage,
   workspaceUsageFromSnapshot,
 } from "./usage-adapter";
-import type {
-  UsageCall,
-  UsageFilterField,
-  UsageFilters,
-  UsageQuery,
-  UsageResponse,
-  UsageScope,
+import {
+  usageResponseForGrouping,
+  type UsageCall,
+  type UsageFilterField,
+  type UsageFilters,
+  type UsageQuery,
+  type UsageResponse,
+  type UsageScope,
 } from "./usage-contract";
 
 export type UsageLoad = {
@@ -39,6 +41,7 @@ const ALL_CAPABILITIES: UsageResponse["capabilities"] = {
     "rootSession",
     "person",
     "schedule",
+    "source",
   ],
   filters: [
     "workspaceId",
@@ -49,14 +52,18 @@ const ALL_CAPABILITIES: UsageResponse["capabilities"] = {
     "person",
     "rootSessionId",
     "scheduleId",
+    "source",
   ],
-  ranges: ["today", "week", "month", "30d", "90d", "ytd"],
+  ranges: ["today", "week", "month", "30d", "90d", "ytd", "custom"],
   seriesGroups: true,
 };
 
 function queryParams(query: UsageQuery): Record<string, string> {
   const params: Record<string, string> = {
     range: query.range,
+    ...(query.range === "custom" && query.from && query.to
+      ? { from: query.from, to: query.to }
+      : {}),
     groupBy: query.groupBy,
     seriesGroups: "true",
   };
@@ -135,11 +142,19 @@ export async function loadUsage(
   if ((legacyUntil.get(memo) ?? 0) <= Date.now()) {
     try {
       const usage = await client.requestJson<
-        Omit<UsageResponse, "capabilities"> & { capabilities?: UsageResponse["capabilities"] }
+        InsightsUsageResponse & { capabilities?: UsageResponse["capabilities"] }
       >("GET", `${basePath(scope)}/usage`, undefined, queryParams(query), { signal });
-      const capabilities = usage.capabilities ?? ALL_CAPABILITIES;
+      // The source dimension and custom ranges arrived together; a server that
+      // lists no source facet answers neither (its query schema is strict).
+      const extended = Array.isArray(usage.facets?.sources);
+      const capabilities = usage.capabilities ?? {
+        ...ALL_CAPABILITIES,
+        groupBy: ALL_CAPABILITIES.groupBy.filter((group) => extended || group !== "source"),
+        filters: ALL_CAPABILITIES.filters.filter((field) => extended || field !== "source"),
+        ranges: ALL_CAPABILITIES.ranges.filter((range) => extended || range !== "custom"),
+      };
       return {
-        usage: { ...usage, capabilities },
+        usage: usageResponseForGrouping(usage, query.groupBy, capabilities),
         calls: null,
         source: "usage",
         ignoredFilters: ignored(query, capabilities.filters),

@@ -8,6 +8,7 @@ export const subagentsModule: AgentPromptModule = {
     const { goals, workspaceAdmin } = context.capabilities;
     return blocks(
       "# Session coordination",
+      "When you are a child session, your final answer is delivered automatically to your parent session. Send a separate message when the parent needs information before you finish, or when you need to message another session.",
       "Use `session_events` for conversation history: its default returns user and completed assistant messages, not execution noise. Cursors only paginate. Request `results` for final outcomes, `tools` for tool receipts, or `debug` for explicit diagnostics; request large tool bodies only when needed. Use the returned continuation cursor rather than rereading whole pages. Audit reads do not acknowledge command completion.",
       "If the user asks to create, inspect, continue, pause, resume, steer, rename, or otherwise manage a session, use the corresponding session tool. Pause affects the selected workstream and its descendants: pausing an ancestor also stops you, so you cannot then Resume yourself. Coordinate disjoint edits through messages instead of ancestor Pause.",
       sentences(

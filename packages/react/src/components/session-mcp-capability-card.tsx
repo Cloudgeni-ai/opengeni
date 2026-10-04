@@ -136,6 +136,8 @@ function ScopedCard({
         const inspected = await client.inspectMcpAuthentication(workspaceId, endpoint);
         if (invocation.signal.aborted || lifetime.current !== invocation || !active()) return null;
         if (inspected.kind === "oauth2") resolved = { ...resolved, authKind: "oauth2" };
+        else if (inspected.kind === "unknown")
+          throw new Error(inspected.message ?? "Could not determine how to sign in. Try again.");
       }
     }
     if (!resolved || resolved.kind !== "mcp" || resolved.authKind !== "oauth2")

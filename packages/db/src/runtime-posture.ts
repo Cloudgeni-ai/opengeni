@@ -44,6 +44,14 @@ const AUTOMATIC_SESSION_TITLE_FANOUT_RUNTIME_ROUTINES = [
 
 const MODEL_FACT_CAPABILITY_ROUTINES = [
   [
+    "insights_scoped_usage_rows(uuid, uuid, timestamp with time zone, timestamp with time zone, text, uuid[], boolean)",
+    "Insights unified usage projection is missing or unsafe",
+  ],
+  [
+    "insights_scoped_calls_rows(uuid, uuid, timestamp with time zone, timestamp with time zone, jsonb, timestamp with time zone, uuid, integer, uuid[], boolean)",
+    "Insights unified visible calls projection is missing or unsafe",
+  ],
+  [
     "complete_workspace_insights_usage_projection(uuid, timestamp with time zone, timestamp with time zone, text[])",
     "Insights complete usage amount projection is missing or unsafe",
   ],
@@ -997,6 +1005,7 @@ export const FORCE_RLS_TABLES = [
   "model_call_facts",
   "network_routes",
   "new_session_drafts",
+  "organization_api_key_workspaces",
   "organization_codex_rotation_settings",
   "organization_company_profile_agent_policies",
   "organization_company_profile_agent_policy_events",
@@ -1024,6 +1033,7 @@ export const FORCE_RLS_TABLES = [
   "organization_recovery_operations",
   "organization_recovery_policies",
   "organization_recovery_policy_heads",
+  "organization_service_accounts",
   "organization_shared_workspace_administration_capabilities",
   "organization_user_resource_authorities",
   "organization_user_resource_grants",
@@ -1322,11 +1332,13 @@ export const RUNTIME_FULL_DML_TABLES = [
   "memory_slack_publications",
   "model_call_facts",
   "new_session_drafts",
+  "organization_api_key_workspaces",
   "organization_codex_rotation_settings",
   "organization_credential_providers",
   "organization_model_provider_connection_operations",
   "organization_model_provider_connections",
   "organization_model_provider_custom_models",
+  "organization_service_accounts",
   "organization_webhook_deliveries",
   "organization_webhooks",
   "pr_review_app_registrations",

@@ -72,13 +72,14 @@ export function useScheduleAccess(workspaceId: string): ScheduleAccess {
 export function schedulePermissions(task: ScheduledTask, access: ScheduleAccess) {
   const own = ownsSchedule(task, access.viewerSubjectId);
   const knowledge = isKnowledgeSync(task);
+  const retired = scheduledTaskStateLabel(task).reason === "provider_retired";
   return {
     own,
-    canEdit: own && access.canManage,
-    canRun: own && access.canRun,
+    canEdit: own && access.canManage && !retired,
+    canRun: own && access.canRun && !retired,
     canPauseOrDelete: own && access.canManage,
     /** Knowledge syncs belong to their source; they aren't copied. */
-    canDuplicate: access.canManage && !knowledge,
+    canDuplicate: access.canManage && !knowledge && !retired,
   };
 }
 
@@ -249,7 +250,9 @@ export function ScheduleMenuItems({
 }) {
   const perms = schedulePermissions(task, access);
   const paused = task.status === "paused";
-  const active = scheduledTaskStateLabel(task).active;
+  const state = scheduledTaskStateLabel(task);
+  const active = state.active;
+  const retired = state.reason === "provider_retired";
   return (
     <>
       {perms.own ? null : (
@@ -261,13 +264,13 @@ export function ScheduleMenuItems({
           <DropdownMenuSeparator />
         </>
       )}
-      {perms.canRun ? (
+      {perms.canRun && !retired ? (
         <DropdownMenuItem disabled={busy || !active} onSelect={onRunNow}>
           <PlayIcon />
           Run now
         </DropdownMenuItem>
       ) : null}
-      {perms.canPauseOrDelete ? (
+      {perms.canPauseOrDelete && !retired ? (
         <DropdownMenuItem disabled={busy} onSelect={paused ? onResume : onPause}>
           {paused ? <PlayIcon /> : <PauseIcon />}
           {paused ? "Resume" : "Pause"}

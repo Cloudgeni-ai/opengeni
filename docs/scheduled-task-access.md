@@ -1,6 +1,7 @@
 # Scheduled task access: drift, refresh, and failed-access notices
 
-A scheduled task freezes what its runs may use when it is saved:
+A scheduled task captures its account authority when it is saved. For runs that
+create a chat, it also stores the chat's initial tool selection:
 
 - its connectors (`agentConfig.tools`);
 - the connector accounts it uses (`agentConfig.connectionAccounts`, frozen with
@@ -9,18 +10,86 @@ A scheduled task freezes what its runs may use when it is saved:
 - for a task an agent created, the creating session's OpenGeni tools,
   permissions and access policy (the creator policy, migration 0428).
 
-Later workspace changes never reach a task on their own. That is deliberate:
-a schedule must not widen itself, and an agent must not widen a narrowed
-session through a schedule. The cost is that a task quietly falls behind: a
+Later workspace defaults do not widen those saved selections. Existing chats,
+including a reusable schedule's chat after its first run, supply their own
+model, tools and machine. Their scheduled runs still use the schedule's
+captured account authority. A task can therefore fall behind: a
 connector the workspace now gives every new schedule is missing, newer OpenGeni
 tools are absent, or the account it chose was disconnected. This page describes
 how OpenGeni shows that, how the owner refreshes it, and how the owner learns
 that a run could not use a connector.
 
+## Scheduling a message in a chat
+
+Conversational scheduling defaults to the calling chat. The first-party
+`scheduled_tasks_create` tool accepts `name`, `schedule` and `prompt`; its
+destination comes from the signed session claim. An explicit `targetSessionId`
+chooses another authorized chat. Sessionless callers must choose a destination
+or explicitly choose a separate-agent run mode.
+
+HTTP and SDK callers can create an existing-chat schedule with
+`{ name, schedule, prompt, targetSessionId }`. No model, tools, machine, Variable
+Set or Sandbox Environment is required. The target supplies those execution
+settings when an occurrence is admitted. Its accepted snapshot remains fixed
+through dispatch recovery. The schedule stores the message and its captured
+account choices, rather than a second copy of the chat's execution settings.
+
+A scheduled message enters the ordinary session-turn runtime with scheduled
+provenance and the schedule's initiating authority. It does not impersonate a
+fresh human interaction or borrow the destination chat creator's credentials.
+Account selection, current owner authority, target access and resource
+generations are still revalidated before execution.
+
+Separate-agent work is explicit: `reusable_session` creates a chat for the
+schedule; `new_session_per_run` creates a fresh chat per occurrence. Those modes
+take `agentConfig` creation settings. After a reusable chat exists, change its
+execution settings in that chat. The schedule editor and MCP summary identify
+those settings as inherited rather than displaying stale creation defaults.
+
+## Editing messages and destinations
+
+`scheduled_tasks_update`, HTTP PATCH and the SDK accept `prompt` for a lossless
+message edit. All omitted fields remain unchanged. Use `targetSessionId` to move
+a schedule to an existing chat; the server preserves message data and account
+choices and removes obsolete creation settings atomically. This also works
+after a reusable schedule has created its first chat. Existing runs keep their
+accepted snapshots.
+
+Supply `expectedExecutionDigest` from the read result to reject an edit based
+on an outdated execution configuration. Merged patches also compare their
+server-read digest under the database write lock, so a concurrent edit returns
+409 instead of being overwritten.
+
+For a task with frozen accounts, an explicit `connectionAccounts` edit replaces
+the complete accepted selection. Include unchanged accounts that should remain;
+an empty array clears the selection. Omitting the field preserves saved choices.
+It never silently fills an omitted connector with newly available accounts.
+Use the access refresh flow below to review and adopt current defaults.
+
+Scheduler synchronization reads the latest saved task while holding a per-task
+lock shared with deletion cleanup. A failed synchronization restores the previous
+definition only if the task still matches that exact write; it cannot undo a
+newer edit or pause. Compensation commits before releasing the synchronization
+lock, so queued writers observe the restored state. Remote timeouts remain errors with potentially unknown
+outcomes, not confirmation that Temporal accepted the change.
+
+If a move removes Variable Sets or changes the environment, it returns a
+409 with `details.code = scheduled_target_access_change` and the affected
+identifiers. Review the destination's attachments, then retry with
+`adoptSessionSettings: true` and the reviewed `expectedExecutionDigest` to accept
+the change. Nothing changes on the rejected attempt.
+
+`scheduled_tasks_get` is a bounded projection, not a replacement document.
+For exact complete message text, request `promptOffset: 0`, then follow
+`prompt.nextOffset` with the returned `executionDigest` as
+`expectedExecutionDigest`. Offsets are UTF-16 units and must be used unchanged;
+pages preserve whitespace, Unicode and legacy text exactly. Restart the read if
+the task changes. Ordinary edits do not require recovering creation history.
+
 ## Changing model defaults without replacing configuration
 
 `scheduled_tasks_update`, the scheduled-task HTTP PATCH route and the SDK's
-`updateScheduledTask` accept `agentConfigPatch: { model?, reasoningEffort? }`.
+`updateScheduledTask` accept `agentConfigPatch: { prompt?, model?, reasoningEffort? }`.
 Supply at least one field. Omitted fields stay unchanged; null, unrelated fields,
 and combining the patch with a full `agentConfig` replacement are rejected.
 The server merges against the complete stored configuration. Never reconstruct
@@ -246,4 +315,3 @@ from durable facts and never acts early; a person answering first wins.
 Further pending approvals of the same wait are rejected one by one as they
 surface, since their deadline has already passed. Skill-review questions need a
 person and are never timed out. An agent still can never decide an approval.
-

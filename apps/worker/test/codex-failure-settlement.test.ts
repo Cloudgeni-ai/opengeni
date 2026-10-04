@@ -1,6 +1,7 @@
 import { describe, expect, mock, spyOn, test } from "bun:test";
 import { createRequire } from "node:module";
 import { DrizzleQueryError } from "drizzle-orm";
+import { ToolCallError } from "@openai/agents";
 
 import * as opengeniDb from "@opengeni/db";
 import { TurnExecutionPolicyDefinitionMismatchError } from "@opengeni/config";
@@ -414,6 +415,89 @@ describe("raw database rollback settlement", () => {
     expect(JSON.stringify(settle.mock.calls)).not.toContain("fixture-value");
     expect(deps.control.activityError).toBe(error);
   });
+});
+
+describe("executing-turn database outage handoff", () => {
+  function outage() {
+    return new DrizzleQueryError(
+      "select account_id from workspaces",
+      ["private-fixture"],
+      Object.assign(new Error("private connection detail"), { code: "CONNECT_TIMEOUT" }),
+    );
+  }
+
+  test.each(["delta", "function-tool", "history"])(
+    "%s outage stops without logical failure, ledger replay or invented writer proof",
+    async (stage) => {
+      const cause = outage();
+      const error =
+        stage === "function-tool"
+          ? new ToolCallError("Failed to run function tools", cause)
+          : stage === "history"
+            ? new Error("History persistence failed", { cause })
+            : cause;
+      const terminal = mock(async () => true);
+      const flush = mock(async () => undefined);
+      const history = mock(async () => undefined);
+      const recovery = spyOn(opengeniDb, "requestSessionTurnRecovery");
+      const { deps } = codexFailureDeps({ error, settle: terminal });
+      deps.flushRuntimeBatcher = flush;
+      deps.historySink.reconcileConversationTruth = history;
+      try {
+        await expect(settleTurnFailure(deps as any)).rejects.toMatchObject({
+          type: "OpenGeniPostClaimDatabaseRecovery",
+          nonRetryable: true,
+          details: [
+            {
+              turnId: "turn-1",
+              triggerEventId: "trigger-1",
+              executionGeneration: 1,
+              code: "db_failure",
+            },
+          ],
+        });
+        expect(terminal).not.toHaveBeenCalled();
+        expect(recovery).not.toHaveBeenCalled();
+        expect(flush).not.toHaveBeenCalled();
+        expect(history).not.toHaveBeenCalled();
+        expect(deps.control).toMatchObject({
+          activityStatus: "recovering",
+          turnMetricOutcome: "recovering",
+          acknowledgeQuiescence: false,
+        });
+        expect(deps.attempt.providerRecoveryCount).toBe(0);
+        expect(deps.control.activityError).toBe(error);
+      } finally {
+        recovery.mockRestore();
+      }
+    },
+  );
+
+  test.each(["flush", "history", "settlement"])(
+    "DB outage during %s of an unrelated error also exports exact recovery",
+    async (stage) => {
+      const terminal = mock(async () => {
+        if (stage === "settlement") throw outage();
+        return true;
+      });
+      const { deps } = codexFailureDeps({ error: new Error("ordinary failure"), settle: terminal });
+      deps.billingState.isCodexTurn = false;
+      deps.flushRuntimeBatcher = mock(async () => {
+        if (stage === "flush") throw outage();
+      });
+      deps.historySink.reconcileConversationTruth = mock(async () => {
+        if (stage === "history") throw outage();
+      });
+      await expect(settleTurnFailure(deps as any)).rejects.toMatchObject({
+        type: "OpenGeniPostClaimDatabaseRecovery",
+        nonRetryable: true,
+        details: [expect.objectContaining({ turnId: "turn-1", executionGeneration: 1 })],
+      });
+      expect(deps.control.activityStatus).toBe("recovering");
+      expect(deps.control.acknowledgeQuiescence).toBe(false);
+      expect(terminal).toHaveBeenCalledTimes(stage === "settlement" ? 1 : 0);
+    },
+  );
 });
 
 describe("early accepted-definition mismatch", () => {

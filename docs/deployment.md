@@ -1433,38 +1433,19 @@ deployment keeps the legacy workspace-owned lane and an image rollback stays an
 ordinary deployment decision. Every rolling tenancy migration still applies
 normally with the switch off.
 
-Explicit embedding-host MCP connection authority has an independent rolling
-admission switch: `OPENGENI_HOST_MCP_AUTHORITY_SOURCE_ADMISSION_ENABLED`
-defaults to `false` in config and Helm. Deploy the new API, control worker, turn
-worker, and web image everywhere with the switch false. Only after the complete
-fleet has converged should a second rollout set it true and begin admitting
-`authoritySource: "host"` connection refs. This prevents a new API from
-persisting a discriminator that an old turn worker could reinterpret as native
-connection authority. Host auth-needed events remain safe for cached old web
-bundles: their legacy reason is unavailable/non-actionable, while new bundles
-read the exact `hostReason` and host authorization URL. After marked refs
-exist, never restart a pre-contract image; turning the switch off does not
-remove, drain, or disable those durable refs. Upgraded readers, child
-inheritance, and workers consume them regardless of their local switch value;
-the switch gates only new external admission and static configuration.
+Connection-backed MCP servers use ordinary native connections. Host-provenance
+connection refs and the former host credential callback are retired. Integrating
+backends provision connections through the normal connection APIs under the
+canonical actor; see [MCP connection cutover](remote-mcp-credentials.md).
 
-Agent configuration (`sessions.agent_config`, rolling migration
-`0559_session_agent_config.sql`) has two switches, both `false` in config and
-Helm. Deploy the 0559-aware API, control worker, and turn worker everywhere
-with both off: every session keeps a NULL configuration and byte-identical
-legacy behavior, and an old worker reading a new row ignores the column. Then
-set `OPENGENI_AGENT_CONFIG_ADMISSION_ENABLED=true` to admit `agent` on session
-create, `PUT .../sessions/:id/agent`, MCP `session_create`, scheduled-task
-`agentConfig.agent`, automation templates, and workspace
-`settings.sessionAgentDefaults`; with it off each of those is a 422 whose
-`details.code` is `agent_config_not_enabled`, and stored workspace defaults are
-ignored. `OPENGENI_AGENT_CONFIG_DEFAULT_FOR_NEW_SESSIONS=true` additionally
-resolves omitted-`agent` top-level sessions to `{ capabilities: "all" }`; an old
-worker ignoring an `"all"` configuration still runs today's full tool set.
-Turning either switch off later changes only new admissions: stored
-configurations stay authoritative for their sessions, and a scheduled task
-whose stored `agent` is no longer admissible is refused (skipped) rather than
-run without it. See `packages/contracts/src/agent-config.ts`.
+Agent configuration (`sessions.agent_config`, migration
+`0559_session_agent_config.sql`) is always on; it has no deployment switch.
+`agent` is admitted on session create, `PUT .../sessions/:id/agent`, MCP
+`session_create`, scheduled-task `agentConfig.agent`, automation templates, and
+workspace `settings.sessionAgentDefaults`, and a top-level session that omits
+`agent` resolves to the workspace default or `{ capabilities: "all" }`. Sessions
+created before 0559 keep their NULL configuration and legacy behavior. See
+`packages/contracts/src/agent-config.ts`.
 
 Migration 0303 is intentionally rolling and applies while the switch remains
 `false`; applying the ordinary migration chain does not activate an
@@ -3450,6 +3431,13 @@ or delete an agent release tag. A baked asset still takes precedence so a
 deployed control-plane image serves its release-coherent binary directly.
 Explicit `/agent/v<version>/<asset>` binary and signature requests always use
 that immutable archive release; a baked canary cannot override a version pin.
+Linux canary builds use `scripts/bake-agent.sh` with the exact source commit as
+`OPENGENI_RUNTIME_BUILD_ID`. The signed agent embeds matching browserd, the
+pinned browser driver, and the native computer helper; adjacent helpers from
+another download are not its default runtime. The image gate requires all four
+assets plus checksums and signatures for each architecture. The API serves a
+complete baked target or falls back when that whole target is absent; a partial
+baked target returns 503 rather than combining image and archive assets.
 The same deployment serves signed `/agent/stable/manifest.json` and
 `manifest.json.minisig` routes so an enrolled agent updates through a control
 plane it already trusts instead of depending on public DNS. Beta is independent

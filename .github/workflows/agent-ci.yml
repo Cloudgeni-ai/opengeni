@@ -145,6 +145,30 @@ jobs:
       - name: cargo test --workspace
         run: cargo test --workspace --all-features
 
+      - name: Prove embedded helper selection with synthetic payloads
+        if: runner.os == 'Linux'
+        env:
+          OPENGENI_RUNTIME_BUILD_ID: ${{ github.sha }}
+        run: |
+          set -euo pipefail
+          runtime_fixture="$(mktemp -d)"
+          trap 'rm -rf "$runtime_fixture"' EXIT
+          printf '%s\n' 'synthetic browserd bytes' > "$runtime_fixture/browserd"
+          printf '%s\n' 'synthetic pinned driver bytes' > "$runtime_fixture/agent-browser"
+          printf '%s\n' 'synthetic computer helper bytes' > "$runtime_fixture/computer-native"
+          chmod 0600 "$runtime_fixture/browserd" "$runtime_fixture/agent-browser" "$runtime_fixture/computer-native"
+          export OPENGENI_EMBEDDED_BROWSERD="$runtime_fixture/browserd"
+          export OPENGENI_EMBEDDED_AGENT_BROWSER="$runtime_fixture/agent-browser"
+          export OPENGENI_EMBEDDED_COMPUTER_NATIVE="$runtime_fixture/computer-native"
+          for proof in \
+            browser_sidecar::tests::complete_embedded_bundle_ignores_stale_adjacent_helpers_and_refuses_changed_materialization \
+            embedded_runtime::tests::materializes_the_exact_complete_runtime_idempotently \
+            browser_sidecar::tests::ready_document_requires_the_exact_runtime_identity \
+            browser_sidecar::tests::incompatible_ready_document_names_every_mismatched_field; do
+            cargo test --locked -p opengeni-agent "$proof" -- --exact | tee "$runtime_fixture/proof.log"
+            grep -Fq 'test result: ok. 1 passed; 0 failed;' "$runtime_fixture/proof.log"
+          done
+
       - name: cargo build --release --workspace
         run: cargo build --release --workspace
 

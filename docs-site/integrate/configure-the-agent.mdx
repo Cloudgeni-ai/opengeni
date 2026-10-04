@@ -17,13 +17,6 @@ agent: {
 
 The same object works when you create a session, in the proxy's `createSession` hook, in the chat facade, on schedules, as the workspace default, and for a running session. A session with agent settings reports what they resolved to.
 
-<Note>
-  Agent settings need the deployment switch `OPENGENI_AGENT_CONFIG_ADMISSION_ENABLED`. When it is
-  off, `getClientConfig()` reports `agentConfig.enabled: false` and a request with `agent` is
-  refused with `agent_config_not_enabled`. Use `firstPartyMcpTools: []` and `tools` to narrow an
-  agent until then.
-</Note>
-
 ## Capabilities
 
 Start from `"all"` (everything the workspace offers, which is what a session without `agent` gets) or `"none"` (the session's own tools plus asking questions and reading Skills). Then switch single capabilities:

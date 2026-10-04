@@ -673,6 +673,17 @@ async function installApi(page: Page, state: UiState): Promise<void> {
     }
     if (url.pathname === `/v1/workspaces/${workspaceId}/connect/attempts/fixture-connect`)
       return json(connectAttempt);
+    if (url.pathname === `/v1/workspaces/${workspaceId}/connect/catalog`)
+      return json([
+        {
+          id: "microsoft-outlook-mail",
+          label: "Outlook Mail",
+          family: "microsoft",
+          readiness: "available",
+          ownership: ["workspace", "personal"],
+          setup: ["oauth"],
+        },
+      ]);
     if (url.pathname === "/v1/workspaces") return json([workspace()]);
     if (url.pathname === `/v1/workspaces/${workspaceId}/channels`) return json([]);
     if (url.pathname === `/v1/workspaces/${workspaceId}/capabilities`) {

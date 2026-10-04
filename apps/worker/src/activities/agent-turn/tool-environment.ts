@@ -47,6 +47,8 @@ import { readMcpOperation } from "../mcp-operation-reader";
 import { createOperationReadAttemptToolDefinition } from "./mcp-operation-read-tool";
 import { buildGitHubRestMcpForTurn } from "../../github-rest-mcp";
 import { materializeConnectorAttachmentsInChannel } from "../connector-attachments";
+import { materializeGmailFile, readGmailFileFromChannel } from "../gmail-files";
+import { objectStorageForSandboxDownloads } from "./file-resources";
 import { allowedFirstPartyMcpToolsForSession, type Settings } from "@opengeni/config";
 import { CodemodeAttemptDispatcher } from "../codemode-dispatcher";
 import { buildCodexTokenResolver } from "../codex-auth";
@@ -64,6 +66,7 @@ import {
   resolveTurnToolPolicy,
   scheduledTurnMcpServerIds,
   hasPermission,
+  requireExplicitPermissionDelegation,
 } from "@opengeni/core";
 import { loadWorkspaceEnvironmentForRunWithCredentials } from "../environment";
 import { withFirstPartyTools } from "../goals";
@@ -82,6 +85,7 @@ import {
   DEFAULT_FIRST_PARTY_MCP_PERMISSIONS,
   resolveAgentToolFamilies,
   type ResourceRef,
+  type Permission,
   type ToolAuthNeededPayload,
 } from "@opengeni/contracts";
 
@@ -115,6 +119,19 @@ import { createWorkspaceSkillTools } from "./skill-tools";
 import { loadConfiguredBundledSkills } from "./skill-selection";
 import { guardSkillFilesystem } from "./skill-transfer";
 import { turnCredentialRestriction } from "./credential-restriction";
+
+/** A linked turn's immutable policy must survive array and token boundaries. */
+export function linkedTurnFirstPartyPermissions(
+  selected: Permission[] | null,
+  linked: { permissions: Permission[]; permissionMode?: "legacy" | "explicit" } | null,
+): Permission[] | null {
+  if (!linked) return selected;
+  const permissions = (selected ?? DEFAULT_FIRST_PARTY_MCP_PERMISSIONS).filter((permission) =>
+    hasPermission(linked.permissions, permission, linked.permissionMode),
+  );
+  requireExplicitPermissionDelegation(linked, permissions);
+  return permissions;
+}
 
 export type PrepareTurnToolPolicyDeps = {
   input: RunAgentTurnInput;
@@ -575,11 +592,10 @@ export async function prepareTurnToolRuntime(deps: PrepareTurnToolRuntimeDeps) {
   );
   if (linkedAuthority && !linkedAuthority.authorized)
     throw new Error("Native identity link was revoked");
-  const effectiveFirstPartyPermissions = linkedAuthority
-    ? (session.firstPartyMcpPermissions ?? DEFAULT_FIRST_PARTY_MCP_PERMISSIONS).filter(
-        (permission) => hasPermission(linkedAuthority.permissions, permission),
-      )
-    : session.firstPartyMcpPermissions;
+  const effectiveFirstPartyPermissions = linkedTurnFirstPartyPermissions(
+    session.firstPartyMcpPermissions,
+    linkedAuthority,
+  );
   const toolFamilies = resolveAgentToolFamilies(session.agent);
   const selectedFirstPartyMcpTools = toolFamilies.firstPartyTools(
     allowedFirstPartyMcpToolsForSession(runSettings, session.firstPartyMcpTools),
@@ -642,7 +658,16 @@ export async function prepareTurnToolRuntime(deps: PrepareTurnToolRuntimeDeps) {
         outcome,
       }),
   };
-  const skillConfiguration = await getWorkspaceVideoGenerationPolicy(db, input.workspaceId);
+  // Independent scoped reads after the native-link authority check. Both
+  // finish before assembling the Skill index or preparing executable tools.
+  const [skillConfiguration, sharedSkillDescriptors] = await Promise.all([
+    getWorkspaceVideoGenerationPolicy(db, input.workspaceId),
+    listSkillDescriptors(db, {
+      accountId: input.accountId,
+      workspaceId: input.workspaceId,
+      ...(deps.fileAuthoritySubjectId ? { subjectId: deps.fileAuthoritySubjectId } : {}),
+    }),
+  ]);
   const bundledSkills = loadConfiguredBundledSkills({
     bundledSkillIds: session.bundledSkillIds,
     firstPartyTools: selectedFirstPartyMcpTools,
@@ -656,11 +681,6 @@ export async function prepareTurnToolRuntime(deps: PrepareTurnToolRuntimeDeps) {
       artifact: skill,
     })),
   ];
-  const sharedSkillDescriptors = await listSkillDescriptors(db, {
-    accountId: input.accountId,
-    workspaceId: input.workspaceId,
-    ...(deps.fileAuthoritySubjectId ? { subjectId: deps.fileAuthoritySubjectId } : {}),
-  });
   const skillCatalog =
     toolFamilies.skills === false
       ? []
@@ -988,10 +1008,12 @@ export async function prepareTurnToolRuntime(deps: PrepareTurnToolRuntimeDeps) {
       "Connector attachment sandbox is unavailable",
     );
     const sandbox = sandboxAccess.sandbox;
+    const machineRoot = sandboxState.machinePrimarySession?.workspaceRoot;
     const runAs = sandboxRunAs(runSettings);
     const channel = new SandboxChannelAService({
       session: sandboxAccess.session,
-      workspaceRoot: "/workspace",
+      workspaceRoot: machineRoot ?? "/workspace",
+      ...(machineRoot ? { providerPathMode: "workspace-relative" as const } : {}),
       leaseEpoch: sandboxAccess.leaseEpoch,
       emit: async (events) => {
         await eventing.publish?.(events, true);
@@ -1071,6 +1093,44 @@ export async function prepareTurnToolRuntime(deps: PrepareTurnToolRuntimeDeps) {
           : {}),
         onAuthNeeded: publishToolAuthNeeded,
         materializeConnectorAttachments,
+        materializeGmailFile: async (request) => {
+          throwIfWorkerShuttingDown();
+          throwIfTurnCancelled();
+          if (!deps.objectStorage) throw new Error("Gmail file delivery requires object storage");
+          return await materializeGmailFile(request, {
+            workspaceId: input.workspaceId,
+            storage: deps.objectStorage,
+            downloadStorage: objectStorageForSandboxDownloads(
+              runSettings,
+              deps.objectStorage,
+              deps.activeSandboxBackend ?? deps.groupBoxBackend,
+            ),
+            materialize: materializeConnectorAttachments,
+            onCleanupFailure: (key) =>
+              console.warn("[gmail] Temporary transfer cleanup requires operator retry", {
+                objectKey: key,
+              }),
+          });
+        },
+        readGmailFile: async (request) => {
+          throwIfWorkerShuttingDown();
+          throwIfTurnCancelled();
+          const access = await resolveTurnSandboxAccess(
+            sandboxState,
+            media.sdkOwnedSandboxSession,
+            "Gmail attachment filesystem is unavailable",
+          );
+          const runAs = sandboxRunAs(runSettings);
+          const machineRoot = sandboxState.machinePrimarySession?.workspaceRoot;
+          const channel = new SandboxChannelAService({
+            session: access.session,
+            workspaceRoot: machineRoot ?? "/workspace",
+            ...(machineRoot ? { providerPathMode: "workspace-relative" as const } : {}),
+            leaseEpoch: access.leaseEpoch,
+            ...(runAs ? { runAs } : {}),
+          });
+          return await readGmailFileFromChannel(channel, request);
+        },
         refreshOwnedCommand: async (commandId) => {
           throwIfWorkerShuttingDown();
           throwIfTurnCancelled();

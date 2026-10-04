@@ -76,6 +76,8 @@ export const HostMcpCreateSelections = z
 export type HostMcpCreateSelection = z.input<typeof HostMcpCreateSelections>[number];
 import { Permission } from "./permissions";
 import { OrganizationApiKeyPreset } from "./api-key-presets";
+import { OrganizationAccessPolicy, OrganizationWorkspaceScope } from "./organization-access";
+export * from "./organization-access";
 import { ScopedKnowledgeScope } from "./scoped-knowledge";
 export { siteSessionPath, SiteSessionPathError } from "./site-session-http";
 import {
@@ -1123,6 +1125,10 @@ export function currentAgentLearningToolSelection(
 
 const FIRST_PARTY_COMPATIBILITY_ONLY_TOOL_NAMES = [
   "slack_bot_post_message",
+  // Keep historical policies parseable without advertising native API execution.
+  "atlassian_sources_list",
+  "atlassian_search",
+  "atlassian_get",
   ...RETIRED_AGENT_LEARNING_TOOL_NAMES,
 ] as const satisfies readonly FirstPartyMcpToolName[];
 
@@ -2852,6 +2858,8 @@ export const AccessGrant = z.object({
   subjectId: z.string().min(1),
   subjectLabel: z.string().optional(),
   permissions: z.array(Permission),
+  /** Explicit policies do not expand workspace:admin into unselected permissions. */
+  permissionMode: z.enum(["legacy", "explicit"]).optional(),
   // Trusted principal provenance. Delegated grants copy this from the signed
   // token claim; managed/local grants derive it from their authenticated path.
   principalKind: AccessPrincipalKind.optional(),
@@ -2889,6 +2897,8 @@ export const AccessCredential = z.object({
    * from organization-key authority. Account permissions remain in accountGrants.
    */
   effectiveWorkspacePermissions: z.array(Permission),
+  policy: OrganizationAccessPolicy.optional(),
+  workspaceScope: OrganizationWorkspaceScope.optional(),
   note: z.string(),
 });
 export type AccessCredential = z.infer<typeof AccessCredential>;
@@ -3495,6 +3505,15 @@ export const ApiKey = z.object({
    * Omitted for workspace-scoped keys, whose permissions are explicit.
    */
   access: OrganizationApiKeyAccess.optional(),
+  policy: OrganizationAccessPolicy.optional(),
+  workspaceScope: OrganizationWorkspaceScope.optional(),
+  /** Legacy keys retain their historical workspace-admin wildcard. */
+  permissionMode: z.enum(["legacy", "explicit"]).optional(),
+  /** Organization keys: the service account that holds the key. */
+  serviceAccount: z
+    .object({ id: z.string().uuid(), name: z.string(), role: z.enum(["admin", "member"]) })
+    .nullable()
+    .optional(),
   expiresAt: z.string().nullable(),
   revokedAt: z.string().nullable(),
   lastUsedAt: z.string().nullable(),
@@ -3527,13 +3546,30 @@ export const CreateOrganizationApiKeyRequest = z
     access: OrganizationApiKeyAccess.default("full"),
     /** Optional creation alias for the developer_setup access tier. */
     preset: OrganizationApiKeyPreset.optional(),
+    policy: OrganizationAccessPolicy.optional(),
+    /** The service account that holds the key; omitted creates one named after the key. */
+    serviceAccountId: z.string().uuid().optional(),
   })
   .strict()
   .refine((request) => request.preset !== "developer_setup" || request.access !== "read", {
     path: ["access"],
     message: "Developer setup is not read-only organization API key access",
+  })
+  .refine((request) => !request.policy || (!request.preset && request.access === "full"), {
+    path: ["policy"],
+    message: "Choose either a policy or a legacy access tier/preset",
   });
 export type CreateOrganizationApiKeyRequest = z.infer<typeof CreateOrganizationApiKeyRequest>;
+
+export const UpdateOrganizationApiKeyRequest = z
+  .object({
+    name: z.string().trim().min(1).max(200).optional(),
+    description: z.string().trim().min(1).max(500).nullable().optional(),
+    policy: OrganizationAccessPolicy.optional(),
+  })
+  .strict()
+  .refine((request) => Object.keys(request).length > 0, "At least one change is required");
+export type UpdateOrganizationApiKeyRequest = z.infer<typeof UpdateOrganizationApiKeyRequest>;
 
 // A person (or API key) with access to a workspace: one workspace_memberships
 // row. `subjectId` is `user:<betterAuthUserId>` or `api_key:<id>`; the People
@@ -3830,12 +3866,13 @@ export type InsightsSpendDriver = z.infer<typeof InsightsSpendDriver>;
 
 /**
  * Usage grouped by each root session's current project. `other` folds the
- * projects past the listed limit; `unavailable` holds trees whose root the
- * viewer cannot read. Rows sum to the window totals.
+ * projects past the listed limit; `unavailable` holds private trees whose root
+ * the viewer cannot read; `deleted` holds retained usage without a session.
+ * Rows sum to the window totals. Neither amounts-only bucket identifies chats.
  */
 export const InsightsProjectRow = z.object({
   id: z.string().min(1),
-  kind: z.enum(["project", "other", "unfiled", "unavailable"]),
+  kind: z.enum(["project", "other", "unfiled", "unavailable", "deleted"]),
   label: z.string().min(1),
   projects: z.number().int().nonnegative(),
   rootSessions: z.number().int().nonnegative(),
@@ -4004,6 +4041,8 @@ export const WorkspaceInsightsSnapshot = z.object({
   priorInputTokens: z.number().nonnegative(),
   priorTotalTokens: z.number().nonnegative(),
   priorCacheHitPct: z.number().int().min(0).max(100),
+  /** Prior input whose cache details are known. Omitted by older API replicas. */
+  priorCacheInputTokens: z.number().nonnegative().optional(),
   priorCalls: z.number().int().nonnegative(),
   /** Lifetime workspace topology (not scoped to the selected Insights range). */
   goalsActive: z.number().int().nonnegative(),
@@ -10049,7 +10088,8 @@ export const ScheduledTaskAgentConfigInput = /* @__PURE__ */ z
       context.addIssue({
         code: "custom",
         path: ["sandboxBackend"],
-        message: "selfhosted scheduled tasks require machineTarget",
+        message:
+          "Omit sandboxBackend and select machineTarget for a separate agent; existing-chat schedules inherit the chat's machine",
       });
     }
     if (scheduledTaskJsonUtf8Bytes(value) > SCHEDULED_TASK_AGENT_CONFIG_MAX_BYTES) {
@@ -10677,11 +10717,56 @@ const CreateKnowledgeSourceSyncScheduledTaskRequest = /* @__PURE__ */ z
     connectionAccounts: [],
   }));
 
+/** Schedule a message in an existing chat, whose execution settings are inherited. */
+export const CreateSessionScheduledTaskRequest = /* @__PURE__ */ z
+  .object({
+    name: ScheduledTaskNameInput,
+    schedule: ScheduledTaskScheduleSpec,
+    prompt: ScheduledTaskAgentConfigInput.shape.prompt,
+    targetSessionId: z.string().uuid(),
+    connectionAccounts: McpConnectionAccountSelections.default([]),
+    runMode: z.literal("existing_session").default("existing_session"),
+    overlapPolicy: ScheduledTaskOverlapPolicy.default("buffer_one"),
+    status: ScheduledTaskStatus.default("active"),
+    metadata: ScheduledTaskMetadataInput.default({}),
+  })
+  .strict()
+  .superRefine((value, context) => {
+    const result = ScheduledTaskAgentConfigInput.safeParse({ prompt: value.prompt });
+    if (!result.success) for (const issue of result.error.issues) context.addIssue({ ...issue });
+  })
+  .transform(({ prompt, ...value }) => ({
+    ...value,
+    action: { kind: "agent_turn" as const },
+    agentConfig: {
+      prompt,
+      resources: [],
+      tools: [],
+      metadata: {},
+    } as ScheduledTaskAgentConfigInput,
+    variableSetId: undefined,
+    environmentId: undefined,
+    rigId: undefined,
+  }));
+
 export const CreateScheduledTaskRequest = /* @__PURE__ */ z.union([
   CreateKnowledgeSourceSyncScheduledTaskRequest,
   CreateAgentScheduledTaskRequest,
+  CreateSessionScheduledTaskRequest,
 ]);
 export type CreateScheduledTaskRequest = z.infer<typeof CreateScheduledTaskRequest>;
+
+/** Reviewable access consequences of moving a schedule to another chat. */
+export const ScheduledTaskTargetAccessChange = z
+  .object({
+    code: z.literal("scheduled_target_access_change"),
+    targetSessionId: z.uuid(),
+    removedVariableSetIds: z.array(z.uuid()).max(100),
+    removedVariableSetCount: z.number().int().min(0).max(100),
+    removedRigId: z.uuid().nullable(),
+    resolution: z.string().max(512),
+  })
+  .strict();
 
 export const UpdateScheduledTaskRequest =
   /* @__PURE__ */ withVariableSetIdAlias(
@@ -10705,17 +10790,25 @@ export const UpdateScheduledTaskRequest =
       connectionAuthorities: z.never().optional(),
       connectionAccounts: McpConnectionAccountSelections.optional(),
 
+      /** Compare against the reviewed execution digest; rejects concurrent edits. */
+      expectedExecutionDigest: z.string().min(1).max(128).optional(),
+      /** Accept a retarget's explicitly reported changes to attached access. */
+      adoptSessionSettings: z.literal(true).optional(),
+      /** Lossless instruction edit; all other saved fields are preserved. */
+      prompt: ScheduledTaskAgentConfigInput.shape.prompt.optional(),
+
       agentConfig: ScheduledTaskAgentConfigInput.optional(),
       // Narrow, lossless update: never reconstruct agentConfig from its
       // bounded MCP projection. Full agentConfig retains replacement semantics.
       agentConfigPatch: z
         .object({
+          prompt: ScheduledTaskAgentConfigInput.shape.prompt.optional(),
           model: scheduledTaskBoundedString(512, "scheduled task model").optional(),
           reasoningEffort: ReasoningEffort.optional(),
         })
         .strict()
-        .refine((patch) => patch.model !== undefined || patch.reasoningEffort !== undefined, {
-          message: "agentConfigPatch requires model or reasoningEffort",
+        .refine((patch) => Object.keys(patch).length > 0, {
+          message: "agentConfigPatch requires prompt, model or reasoningEffort",
         })
         .optional(),
       status: ScheduledTaskStatus.optional(),
@@ -10728,6 +10821,24 @@ export const UpdateScheduledTaskRequest =
     },
     { rejectKeys: ["selectedHostMcpDelegations"] },
   ).superRefine((value, context) => {
+    if (value.adoptSessionSettings && !value.expectedExecutionDigest) {
+      context.addIssue({
+        code: "custom",
+        path: ["expectedExecutionDigest"],
+        message:
+          "Review the current schedule and supply expectedExecutionDigest when accepting destination access changes",
+      });
+    }
+    if (
+      value.prompt !== undefined &&
+      (value.agentConfig || value.agentConfigPatch?.prompt !== undefined)
+    ) {
+      context.addIssue({
+        code: "custom",
+        path: ["prompt"],
+        message: "Supply prompt once, without agentConfig replacement or agentConfigPatch.prompt",
+      });
+    }
     if (value.agentConfig && value.agentConfigPatch) {
       context.addIssue({
         code: "custom",
@@ -18251,8 +18362,8 @@ export const ClientConfig = /* @__PURE__ */ defineModelContractSchema(() =>
       maxSizeBytes: VOICE_INPUT_MAX_SIZE_BYTES,
       acceptedMimeTypes: [...VOICE_INPUT_ACCEPTED_MIME_TYPES],
     }),
-    // Agent configuration rollout: whether `agent` is admitted, whether new
-    // sessions default to a configuration, and per-capability availability.
+    // Agent configuration: per-capability availability. `enabled` and
+    // `defaultForNewSessions` are deprecated; current servers report `true`.
     agentConfig: ClientAgentConfig.default({
       enabled: false,
       defaultForNewSessions: false,
@@ -18444,3 +18555,4 @@ export * from "./mcp-catalog-limits";
 export * from "./slack-rest-mcp";
 export * from "./skill-catalog-context";
 export * from "./sandbox-recovery";
+export * from "./modal-native-proof-v2";

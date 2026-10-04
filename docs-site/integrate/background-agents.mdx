@@ -24,9 +24,31 @@ await og.createScheduledTask(workspaceId, {
 
 `agent` is optional: without it each run uses the workspace's agent defaults. See [Configure the agent](/integrate/configure-the-agent).
 
-Always set an explicit schedule and time zone. `runMode` chooses a new session per run, one reusable session, or an existing session. Scheduled tasks cannot carry a per-session MCP server, so their tools come from a workspace [OpenAPI Integration or MCP connection](/integrate/your-data#openapi-integration), selected by id.
+Always set an explicit schedule and time zone. `runMode` chooses a new session per run, one reusable session, or an existing session. For tasks that create chats, select tools from a workspace [OpenAPI Integration or MCP connection](/integrate/your-data#openapi-integration) by id. Existing chats supply their own tools.
+
+A reusable schedule's creation settings apply to its first chat. Once that chat exists, change its model, tools, or machine in the chat itself; the schedule editor links to it. You can still edit the schedule's timing and message.
 
 Manage tasks with `listScheduledTasks`, `updateScheduledTask`, `pauseScheduledTask`, `resumeScheduledTask`, `triggerScheduledTask`, and `deleteScheduledTask`.
+
+To continue an existing conversation, schedule a message for that session:
+
+```ts
+const task = await og.createScheduledTask(workspaceId, {
+  name: "Daily follow-up",
+  schedule: { type: "calendar", hour: 9, minute: 0, timeZone: "Europe/Oslo" },
+  targetSessionId: session.id,
+  prompt: "Review new tickets and report any that need attention.",
+});
+
+await og.updateScheduledTask(workspaceId, task.id, {
+  prompt: "Review urgent tickets and report any that need attention.",
+  expectedExecutionDigest: task.executionDigest,
+});
+```
+
+An existing-session schedule uses that chat's model, tools, machine, and attachments at each new run. It does not need a second agent configuration. The message enters as a scheduled user turn, under the schedule owner's authority; accepted runs retain their settings during retries. When an agent creates a schedule from a chat without choosing a run mode, that chat is the default destination. Creating a separate chat requires an explicit choice.
+
+Updates preserve fields you omit. Use `expectedExecutionDigest` from the latest task read to reject a conflicting edit. Changing `targetSessionId` moves future runs; if the destination would lose Variable Sets or a Sandbox Environment, the API returns a conflict describing the change. Review it, then repeat with the same digest and `adoptSessionSettings: true` to accept the destination's settings.
 
 ## From your product's events
 

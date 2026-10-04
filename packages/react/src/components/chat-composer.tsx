@@ -31,10 +31,12 @@ import {
   Root,
   SendButton,
   Status,
+  StopButton,
   Surface,
   useChatComposerController,
   type ChatComposerMessages,
   type ComposerControlLinks,
+  type ComposerRunControl,
   type ResponsiveBasis,
 } from "./composer";
 import {
@@ -103,6 +105,14 @@ export type ChatComposerProps = {
   onClearView?: (() => void) | undefined;
   /** Partial overrides for all composer-owned visible and accessible copy. */
   messages?: Partial<ChatComposerMessages> | undefined;
+  /**
+   * Run control: `pause` (default) shows the workstream Pause control and
+   * paused strip; `stop` shows Stop only while `running`, and the next message
+   * continues a stopped conversation; `none` shows neither.
+   */
+  runControl?: ComposerRunControl | undefined;
+  /** A response is in progress (drives the Stop control). */
+  running?: boolean | undefined;
 };
 
 /**
@@ -143,6 +153,8 @@ export function ChatComposer({
   focusRef,
   inputProps,
   surfaceClassName,
+  runControl,
+  running,
 }: ChatComposerProps) {
   const controller = useChatComposerController({
     delivery: composer,
@@ -159,6 +171,8 @@ export function ChatComposer({
     onClearView,
     onPaste,
     messages,
+    runControl,
+    running,
   });
   const hasControls = Boolean(
     attachments || models || controlsLeading || controlsStart || transcription,
@@ -253,6 +267,7 @@ export function ChatComposer({
                   >
                     {actionsStart}
                     <PauseButton />
+                    <StopButton />
                     <SendButton />
                   </Actions>
                 </LayoutGroup>

@@ -9,6 +9,7 @@ import {
   PauseIcon,
   PlayIcon,
   RotateCwIcon,
+  SquareIcon,
   XIcon,
 } from "lucide-react";
 import { AnimatePresence, motion } from "motion/react";
@@ -120,6 +121,17 @@ export type ComposerSubmitBlocker =
   | "empty"
   | null;
 
+/**
+ * How the composer offers run control.
+ * - `pause`: the workstream Pause control and paused-state strip (default; the
+ *   OpenGeni console).
+ * - `stop`: a Stop control only while a response runs. Stopping pauses this
+ *   conversation; the next message continues it, so people never see a paused
+ *   state they have to resume. Pauses applied elsewhere still show.
+ * - `none`: no run control.
+ */
+export type ComposerRunControl = "pause" | "stop" | "none";
+
 export type UseChatComposerControllerOptions = {
   delivery: ComposerDelivery;
   draft?: ComposerDraftState | undefined;
@@ -135,6 +147,10 @@ export type UseChatComposerControllerOptions = {
   onClearView?: (() => void) | undefined;
   onPaste?: ((event: ClipboardEvent<HTMLTextAreaElement>) => void) | undefined;
   messages?: Partial<ChatComposerMessages> | undefined;
+  /** Run control presentation. Defaults to `pause`. */
+  runControl?: ComposerRunControl | undefined;
+  /** A response is in progress; shows the Stop control under `runControl="stop"`. */
+  running?: boolean | undefined;
 };
 
 /**
@@ -241,6 +257,8 @@ export function useChatComposerController({
   onClearView,
   onPaste,
   messages: messageOverrides,
+  runControl = "pause",
+  running = false,
 }: UseChatComposerControllerOptions) {
   const formatError = useErrorMessage();
   const messages = useMemo(
@@ -253,7 +271,24 @@ export function useChatComposerController({
   const pauseButtonRef = useRef<HTMLButtonElement | null>(null);
   const fileInputRef = useRef<HTMLInputElement | null>(null);
   const listboxId = useId();
-  const paused = effectiveControl?.state === "paused";
+  const controlPaused = effectiveControl?.state === "paused";
+  // Set when this composer's Stop paused the conversation; cleared once it runs
+  // again. Pauses from anyone or anywhere else are never reinterpreted.
+  const [stoppedHere, setStoppedHere] = useState(false);
+  useEffect(() => {
+    if (!controlPaused) setStoppedHere(false);
+  }, [controlPaused]);
+  // Under Stop, the stopped response is not a state to manage: hide it and let
+  // the next message continue (a Steer resumes a paused branch). It applies
+  // only to this conversation's own pause with nothing queued behind it.
+  const resumesOnSend =
+    runControl === "stop" &&
+    stoppedHere &&
+    controlPaused &&
+    effectiveControl?.directState === "paused" &&
+    effectiveControl.additionalBlockerCount === 0 &&
+    queuedAheadCount === 0;
+  const paused = controlPaused && !resumesOnSend;
   const [controlDetailsOpen, setControlDetailsOpen] = useState(false);
   const [paletteMounted, setPaletteMounted] = useState(false);
   const [submitting, setSubmitting] = useState(false);
@@ -470,7 +505,7 @@ export function useChatComposerController({
       submittingRef.current = true;
       setSubmitting(true);
       try {
-        return mode === "steer" ? await delivery.steer() : await delivery.send();
+        return mode === "steer" || resumesOnSend ? await delivery.steer() : await delivery.send();
       } finally {
         submittingRef.current = false;
         if (mountedRef.current) setSubmitting(false);
@@ -484,6 +519,7 @@ export function useChatComposerController({
       disabled,
       messages.annotationNotesRequired,
       messages.slashCommandBlocked,
+      resumesOnSend,
     ],
   );
 
@@ -586,6 +622,12 @@ export function useChatComposerController({
     [control, runControlOperation],
   );
 
+  const stop = useCallback(async (): Promise<boolean> => {
+    const stopped = await pause();
+    if (stopped && mountedRef.current) setStoppedHere(true);
+    return stopped;
+  }, [pause]);
+
   return {
     id,
     rootRef,
@@ -610,9 +652,12 @@ export function useChatComposerController({
     removeRestoredResource: draft?.removeRestoredResource,
     resolveDraftConflict: draft?.resolveDraftConflict,
     hasControl: control !== undefined,
+    runControl,
+    running,
     pausing: control?.pausing ?? false,
     resuming: control?.resuming ?? false,
     pause,
+    stop,
     resume,
     resumeScope,
     paused,
@@ -1145,7 +1190,13 @@ export const PauseButton = forwardRef<HTMLButtonElement, ComposerPauseButtonProp
     ref,
   ) {
     const controller = useComposerController();
-    if (!controller.effectiveControl || controller.paused || !controller.hasControl) return null;
+    if (
+      controller.runControl !== "pause" ||
+      !controller.effectiveControl ||
+      controller.paused ||
+      !controller.hasControl
+    )
+      return null;
     const busy = controller.pausing || controller.resuming;
     const tip = title ?? controller.messages.pauseTitle;
     return (
@@ -1171,6 +1222,62 @@ export const PauseButton = forwardRef<HTMLButtonElement, ComposerPauseButtonProp
               <LoaderCircleIcon className="size-3.5 animate-og-spin" />
             ) : (
               <PauseIcon className="size-3.5 fill-current" />
+            ))}
+        </button>
+      </ComposerTip>
+    );
+  },
+);
+
+export type ComposerStopButtonProps = Omit<
+  ButtonHTMLAttributes<HTMLButtonElement>,
+  OwnedButtonProps
+>;
+
+/**
+ * Stop the running response. Rendered only under `runControl="stop"` while a
+ * response runs; stopping pauses this conversation and the next message
+ * continues it.
+ */
+export const StopButton = forwardRef<HTMLButtonElement, ComposerStopButtonProps>(
+  function ComposerStopButton(
+    { className, "aria-label": ariaLabel, title, children, ...props },
+    ref,
+  ) {
+    const controller = useComposerController();
+    if (
+      controller.runControl !== "stop" ||
+      !controller.running ||
+      !controller.hasControl ||
+      controller.effectiveControl?.state === "paused"
+    )
+      return null;
+    const busy = controller.pausing;
+    const label = ariaLabel ?? controller.messages.stopAriaLabel ?? "Stop";
+    const tip = title ?? controller.messages.stopTitle ?? label;
+    return (
+      <ComposerTip tip={tip}>
+        <button
+          data-analytics-action="stop"
+          data-og-composer-stop=""
+          {...props}
+          ref={ref}
+          type="button"
+          onClick={() => void controller.stop()}
+          disabled={busy}
+          aria-label={label}
+          className={cn(
+            "inline-flex size-8 items-center justify-center rounded-og-md border border-og-border pointer-coarse:size-11",
+            "bg-og-surface-1 text-og-fg transition-colors duration-150",
+            "hover:bg-og-surface-2 disabled:opacity-50",
+            className,
+          )}
+        >
+          {children ??
+            (busy ? (
+              <LoaderCircleIcon className="size-3.5 animate-og-spin" />
+            ) : (
+              <SquareIcon className="size-3 fill-current" />
             ))}
         </button>
       </ComposerTip>

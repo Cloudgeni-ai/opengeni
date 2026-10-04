@@ -1,3 +1,4 @@
+import { isRetiredNativeAtlassianSource } from "@opengeni/contracts/atlassian-native-retirement";
 import type { AttemptToolDefinition } from "@opengeni/codemode";
 import {
   freezeAgentLearningPolicy,
@@ -24,6 +25,7 @@ export async function createKnowledgeSourceAttemptTools(input: {
   });
   const source = accepted?.task.agentConfig.knowledgeSource;
   if (!accepted || !source || accepted.task.action.kind !== "agent_turn") return [];
+  if (isRetiredNativeAtlassianSource(source)) return [];
   const actor = input.context.actor;
   const authorize = async () => {
     const current = await freezeAgentLearningPolicy(input.db, input.context);

@@ -142,6 +142,7 @@ import {
   type ComputerSessionAttachment,
   type ComputerSessionAttachmentRequest,
   type ComputerSessionHeartbeatResponse,
+  type ComputerSessionInputPosture,
   type ComputerSessionLifecycleRequest,
   type ComputerSessionListResponse,
   type ComputerSessionMutationResponse,
@@ -290,6 +291,15 @@ import type {
   CreateApiKeyRequest,
   CreateApiKeyResponse,
   CreateOrganizationApiKeyRequest,
+  OrganizationMcpConnection,
+  OrganizationMcpConnectionList,
+  OrganizationServiceAccount,
+  ListOrganizationServiceAccountsResponse,
+  CreateOrganizationServiceAccountRequest,
+  UpdateOrganizationServiceAccountRequest,
+  UpdateOrganizationMcpConnectionRequest,
+  McpConnectionRequest,
+  McpConnectionDecision,
   CreateCapabilityCatalogItemRequest,
   InstallSkillRequest,
   InstallLibrarySkillRequest,
@@ -4510,6 +4520,20 @@ export class OpenGeniClient {
     );
   }
 
+  async getComputerInputPosture(
+    workspaceId: string,
+    computerSessionId: string,
+    options: OpenGeniRequestOptions = {},
+  ): Promise<ComputerSessionInputPosture> {
+    return await this.requestJson<ComputerSessionInputPosture>(
+      "GET",
+      `/v1/workspaces/${workspaceId}/computer-sessions/${encodeURIComponent(computerSessionId)}/input-posture`,
+      undefined,
+      {},
+      options,
+    );
+  }
+
   async createComputerSession(
     workspaceId: string,
     request: CreateComputerSessionRequest,
@@ -5218,8 +5242,8 @@ export class OpenGeniClient {
 
   /**
    * The caller's subject, grants, defaults, and optional direct API-key authority.
-   * `credential.effectiveWorkspacePermissions` expands workspace admin without
-   * changing existing grants or including account-only permissions. Full
+   * `credential.effectiveWorkspacePermissions` expands workspace admin only for
+   * legacy keys; explicit policies retain exactly their selected grants. Full
    * organization keys can provision shared workspaces, external members, and
    * `asUser` sessions; user requests additionally need live membership.
    * Organization-key scope excludes Personal workspaces. Neither key kind bypasses
@@ -7670,7 +7694,7 @@ export class OpenGeniClient {
   ): Promise<import("@opengeni/contracts").PluginDiscoveryPage> {
     return this.requestJson(
       "GET",
-      "/v1/workspaces/" + workspaceId + "/capabilities/discovery/plugins",
+      `/v1/workspaces/${workspaceId}/capabilities/discovery/plugins`,
       undefined,
       {
         ...(options.id ? { id: options.id } : {}),
@@ -8565,11 +8589,127 @@ export class OpenGeniClient {
     );
   }
 
+  // --- Connected agents (organization MCP server) ------------------------------------------------
+
+  /**
+   * Agents people connected to the organization MCP server (`/v1/mcp`).
+   * Everyone sees their own; owners and admins see everyone's. Browser only:
+   * keys and agents are refused, so an agent can't widen its own access.
+   */
+  async listOrganizationMcpConnections(
+    organizationId: string,
+  ): Promise<OrganizationMcpConnectionList> {
+    return await this.requestJson<OrganizationMcpConnectionList>(
+      "GET",
+      `/v1/organizations/${organizationId}/mcp-connections`,
+    );
+  }
+
+  /** Change what a connected agent can do and where; its next request uses it. Only its person. */
+  async updateOrganizationMcpConnection(
+    organizationId: string,
+    connectionId: string,
+    request: UpdateOrganizationMcpConnectionRequest,
+  ): Promise<OrganizationMcpConnection> {
+    return await this.requestJson<OrganizationMcpConnection>(
+      "PATCH",
+      `/v1/organizations/${organizationId}/mcp-connections/${connectionId}`,
+      request,
+    );
+  }
+
+  /** Disconnect an agent: every token it holds is refused from now on. */
+  async deleteOrganizationMcpConnection(
+    organizationId: string,
+    connectionId: string,
+  ): Promise<void> {
+    await this.requestVoid(
+      "DELETE",
+      `/v1/organizations/${organizationId}/mcp-connections/${connectionId}`,
+    );
+  }
+
+  /** Service accounts: organization identities with no person behind them. */
+  async listOrganizationServiceAccounts(
+    organizationId: string,
+  ): Promise<ListOrganizationServiceAccountsResponse> {
+    return await this.requestJson<ListOrganizationServiceAccountsResponse>(
+      "GET",
+      `/v1/organizations/${organizationId}/service-accounts`,
+    );
+  }
+
+  async getOrganizationServiceAccount(
+    organizationId: string,
+    serviceAccountId: string,
+  ): Promise<OrganizationServiceAccount> {
+    return await this.requestJson<OrganizationServiceAccount>(
+      "GET",
+      `/v1/organizations/${organizationId}/service-accounts/${serviceAccountId}`,
+    );
+  }
+
+  /** Create a service account; give it keys with `createOrganizationApiKey({ serviceAccountId })`. */
+  async createOrganizationServiceAccount(
+    organizationId: string,
+    request: CreateOrganizationServiceAccountRequest,
+  ): Promise<OrganizationServiceAccount> {
+    return await this.requestJson<OrganizationServiceAccount>(
+      "POST",
+      `/v1/organizations/${organizationId}/service-accounts`,
+      request,
+    );
+  }
+
+  /** Rename it or change its role; making it a member narrows its keys at once. */
+  async updateOrganizationServiceAccount(
+    organizationId: string,
+    serviceAccountId: string,
+    request: UpdateOrganizationServiceAccountRequest,
+  ): Promise<OrganizationServiceAccount> {
+    return await this.requestJson<OrganizationServiceAccount>(
+      "PATCH",
+      `/v1/organizations/${organizationId}/service-accounts/${serviceAccountId}`,
+      request,
+    );
+  }
+
+  /** Delete a service account; every key it holds is revoked at once. */
+  async deleteOrganizationServiceAccount(
+    organizationId: string,
+    serviceAccountId: string,
+  ): Promise<void> {
+    await this.requestVoid(
+      "DELETE",
+      `/v1/organizations/${organizationId}/service-accounts/${serviceAccountId}`,
+    );
+  }
+
+  /** The pending sign-in an agent started; read by the web app's sign-in page. */
+  async getMcpConnectionRequest(requestToken: string): Promise<McpConnectionRequest> {
+    return await this.requestJson<McpConnectionRequest>(
+      "GET",
+      `/v1/mcp-connections/requests/${encodeURIComponent(requestToken)}`,
+    );
+  }
+
+  /** Allow or deny an agent's sign-in. Returns where to send the browser next. */
+  async answerMcpConnectionRequest(
+    requestToken: string,
+    decision: McpConnectionDecision,
+  ): Promise<{ redirectTo: string }> {
+    return await this.requestJson<{ redirectTo: string }>(
+      "POST",
+      `/v1/mcp-connections/requests/${encodeURIComponent(requestToken)}`,
+      decision,
+    );
+  }
+
   // --- Organization-wide sessions ----------------------------------------------------------------
 
   /**
    * One page of sessions across every shared workspace of the organization the
-   * caller may read (an organization API key, `full` or `read`, or an
+   * caller may read within its live workspace scope (an organization API key or
    * organization owner). Each row carries its `workspaceId`; read events,
    * history, and files through the ordinary workspace methods. Personal
    * workspaces are never included and private sessions stay invisible.

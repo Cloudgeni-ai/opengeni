@@ -56,10 +56,13 @@ to the saved host return URL but cannot recover credential-exchange authority.
 Core `application/connect-authority.ts` shares
 native, service-key and external callback checks; `prepareFikenTokenInstall`
 shares verified Fiken token persistence between native routes and Connect.
-First-party Atlassian and Google Drive knowledge/publication callbacks retain
+First-party Google Drive knowledge/publication callbacks retain
 their account/resource proofs while committing credentials and completion in
 one transaction. The native entry points use `NativeConnectSetup`; source-sync
-destination controls remain explicit. Public OpenAPI/GraphQL source setup stores
+destination controls remain explicit. Native Atlassian setup and sync are retired;
+in-flight callbacks preserve their authority checks and exact navigation but
+settle failed without exchanging a grant. Hosted Atlassian MCP is unchanged.
+Public OpenAPI/GraphQL source setup stores
 an immutable source after preview, then re-resolves revision/hash and explicit
 selected operations through the existing installation validator. No-auth API
 sources do not invent credentials. Custom-header MCP setup uses the runtime's

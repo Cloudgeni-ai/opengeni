@@ -14,6 +14,7 @@ import { nestedPostgresSqlState } from "@opengeni/db";
 import type { Context, Hono } from "hono";
 import { HTTPException } from "hono/http-exception";
 import { z } from "zod";
+import { agentActingAsPerson } from "../http/acting-person";
 import { requireSameOriginBrowserMutation } from "./codex";
 import { managedCookieHuman } from "./supergrok";
 
@@ -37,7 +38,9 @@ async function authorizeAdministration(
     if (mutation) requireSameOriginBrowserMutation(context, deps);
     return { accountId, subjectId: local.subjectId };
   }
-  const human = await managedCookieHuman(context, deps);
+  const human =
+    agentActingAsPerson(context, accountId, mutation ? "account:admin" : "account:read") ??
+    (await managedCookieHuman(context, deps));
   if (!human || human.subjectId !== access.subjectId) {
     throw new HTTPException(403, { message: "Organization administration required" });
   }

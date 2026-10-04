@@ -6,8 +6,10 @@
  * older Insights and billing endpoints, so the dashboard never branches on the
  * source.
  */
+import type { InsightsUsageResponse } from "@opengeni/contracts/insights-usage";
 
-export type UsageRange = "today" | "week" | "month" | "30d" | "90d" | "ytd";
+/** "custom" pairs with `from`/`to` (UTC days, `to` inclusive). */
+export type UsageRange = "today" | "week" | "month" | "30d" | "90d" | "ytd" | "custom";
 
 export type UsageGroupBy =
   | "model"
@@ -17,7 +19,9 @@ export type UsageGroupBy =
   | "project"
   | "rootSession"
   | "person"
-  | "schedule";
+  | "schedule"
+  /** Where the work came from: web app, API/SDK/embed, Slack, schedule, agent. */
+  | "source";
 
 export type UsagePayerId = "opengeni_credits" | "subscription" | "own_key";
 
@@ -84,6 +88,8 @@ export type UsageGroup = {
   payer?: UsagePayerId;
   workspaceId?: string;
   you?: boolean;
+  /** On private rows: the person's key in `facets.people`, to filter by them. */
+  personKey?: string;
   measures: UsageMeasures;
 };
 
@@ -102,10 +108,13 @@ export type UsageFacets = {
   workspaces: Array<{ id: string; name: string; personal: boolean }>;
   providers: string[];
   models: Array<{ provider: string; model: string }>;
-  payers: UsagePayerId[];
+  /** Payer ids; unknown values are ignored by the UI. */
+  payers: string[];
   projects: Array<{ id: string; name: string }>;
   people: Array<{ key: string; name: string | null; you: boolean }>;
   schedules: Array<{ id: string; name: string }>;
+  /** Present when the server answers the source dimension and custom ranges. */
+  sources?: string[];
 };
 
 export type UsageFilters = {
@@ -118,6 +127,7 @@ export type UsageFilters = {
   person?: string[];
   rootSessionId?: string[];
   scheduleId?: string[];
+  source?: string[];
 };
 
 export type UsageFilterField = keyof UsageFilters;
@@ -128,6 +138,9 @@ export type UsageScope =
 
 export type UsageQuery = {
   range: UsageRange;
+  /** Custom range only: UTC days, `to` inclusive. */
+  from?: string;
+  to?: string;
   groupBy: UsageGroupBy;
   filters: UsageFilters;
 };
@@ -161,6 +174,18 @@ export type UsageResponse = {
     multiValue?: boolean;
   };
 };
+
+/** The API supports more groupings than this dashboard requests. Never relabel a different one. */
+export function usageResponseForGrouping(
+  response: InsightsUsageResponse,
+  groupBy: UsageGroupBy,
+  capabilities: UsageResponse["capabilities"],
+): UsageResponse {
+  if (response.groupBy !== groupBy) {
+    throw new Error("Usage response grouping does not match the request");
+  }
+  return { ...response, groupBy, capabilities };
+}
 
 export type UsageCallKind = "visible" | "private" | "deleted";
 
@@ -259,3 +284,24 @@ export function addMeasures(target: UsageMeasures, source: UsageMeasures): Usage
 export function sumMeasures(rows: readonly UsageMeasures[]): UsageMeasures {
   return rows.reduce((total, row) => addMeasures(total, row), emptyMeasures());
 }
+
+/*
+ * Drift guard (types only, nothing ships): the shared contract
+ * (`@opengeni/contracts/insights-usage`) must stay assignable to the shapes
+ * this dashboard reads after its requested grouping is verified above.
+ * Every dashboard grouping must remain supported by the shared query contract;
+ * additive API-only groupings do not automatically become dashboard controls.
+ */
+type AssertAssignable<_T extends true> = true;
+type DashboardUsageResponse = Omit<InsightsUsageResponse, "groupBy"> & {
+  groupBy: Extract<InsightsUsageResponse["groupBy"], UsageGroupBy>;
+};
+export type UsageContractGuard = [
+  AssertAssignable<
+    DashboardUsageResponse extends Omit<UsageResponse, "capabilities"> ? true : false
+  >,
+  AssertAssignable<UsageGroupBy extends InsightsUsageResponse["groupBy"] ? true : false>,
+  AssertAssignable<
+    import("@opengeni/contracts/insights-usage").InsightsCall extends UsageCall ? true : false
+  >,
+];

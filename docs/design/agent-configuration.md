@@ -198,7 +198,7 @@ Rules:
 | `browser` | `interaction_*`, `browser_*`, `computer_*` | off |
 | `media` | `generate_image`, `generate_video`, hosted `image_generation` | off |
 | `workspaceFiles` | files server | off |
-| `workspaceConnectors` | workspace default connectors, API Integrations, Drive publishing, GitHub/Slack/social/X/Reddit/Fiken/Atlassian families | off |
+| `workspaceConnectors` | workspace default connectors, API Integrations, Drive publishing, GitHub/Slack/social/X/Reddit/Fiken families; hosted Atlassian MCP | off |
 | `workspaceAdmin` | variable sets and environments, capability and connector setup, machines, sandboxes, rigs, projects | off |
 
 3. **Omitted ⇒ the workspace default, else `"all"`.** Explicit ⇒ starting point
@@ -374,14 +374,13 @@ privacy semantics are unchanged.
 
 ## Rollout
 
-Readers shipped before writers. `OPENGENI_AGENT_CONFIG_ADMISSION_ENABLED`
-(default off) admits `agent` on every surface, the workspace default and the
-update route; while it is off they return 422 `agent_config_not_enabled` and the
-client config reports `agentConfig.enabled: false`, which also hides the web UI.
-`OPENGENI_AGENT_CONFIG_DEFAULT_FOR_NEW_SESSIONS` makes omitted `agent` resolve to
-`{ from: "all" }` with the modular prompt (the web app's switch). Workers honor a
-stored configuration regardless of either switch, and an old worker ignoring an
-`"all"` configuration still produces the legacy tool set.
+Readers shipped before writers, behind two temporary deployment switches. Once
+every worker understood migration 0559 the switches were removed: agent
+configuration is always on, `agent` is admitted on every surface, the workspace
+default and the update route, and an omitted `agent` resolves to
+`{ from: "all" }` with the modular prompt. The client config still reports
+`agentConfig.enabled` and `defaultForNewSessions`, always `true`, for
+compatibility.
 
 ## Dropped from the proposal
 

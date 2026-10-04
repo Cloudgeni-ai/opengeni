@@ -1,5 +1,10 @@
 import { describe, expect, test } from "bun:test";
 import path from "node:path";
+import { OpenGeniBrowserClient } from "../src/browser";
+import { OpenGeniClient } from "../src/index";
+import { OpenGeniCoreClient } from "../src/core";
+import { OpenGeniClient as OpenGeniArtifactClient } from "../src/artifacts";
+import { OpenGeniDocumentAuthorityClient } from "../src/document-authority";
 
 const repoRoot = path.resolve(import.meta.dir, "../../..");
 const clientPath = path.join(repoRoot, "packages/sdk/src/client.ts");
@@ -34,6 +39,10 @@ const legacyBrowserUnusedMethods = [
   "getEnvironment",
   "getLatestEventResult",
   "getLatestStartedTurn",
+  // Keep the existing summary/workspace reads available to SDK callers after
+  // Insights moved to getOrganizationModelUsage.
+  "getOrganizationUsageSummary",
+  "getOrganizationUsageWorkspacePage",
   "getPreferenceRegistryFullContent",
   "getPreferenceRegistrySummary",
   "getRetainedArtifactContent",
@@ -99,6 +108,23 @@ async function readBrowserProductionSources(): Promise<string> {
 }
 
 describe("browser client runtime surface", () => {
+  test.each(["getOrganizationApiKey", "updateOrganizationApiKey"] as const)(
+    "keeps %s on all non-browser public clients but out of the browser client",
+    (methodName) => {
+      const options = { baseUrl: "https://api.example.test" };
+      const clients = [
+        new OpenGeniClient(options),
+        new OpenGeniCoreClient(options),
+        new OpenGeniArtifactClient(options),
+        new OpenGeniDocumentAuthorityClient(options),
+      ];
+      const browserClient = new OpenGeniBrowserClient(options);
+
+      for (const client of clients) expect(client[methodName]).toBeFunction();
+      expect(browserClient).not.toHaveProperty(methodName);
+    },
+  );
+
   test("rejects new SDK methods that the browser does not use", async () => {
     const [clientSource, browserSource] = await Promise.all([
       Bun.file(clientPath).text(),

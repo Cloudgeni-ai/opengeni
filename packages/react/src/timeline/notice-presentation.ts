@@ -1,10 +1,13 @@
 import type { NoticeItem } from "./types";
 
-/** A resolved approval notice reads as history ("Approval was needed."). */
+/** An approval notice the person has since answered. */
+export function noticeIsResolvedApproval(item: Pick<NoticeItem, "text" | "resolvedAt">): boolean {
+  return Boolean(item.resolvedAt && item.text.startsWith("Approval needed"));
+}
+
+/** A resolved approval notice reads as history. */
 export function noticeDisplayText(item: Pick<NoticeItem, "text" | "resolvedAt">): string {
-  return item.resolvedAt && item.text.startsWith("Approval needed")
-    ? "Approval was needed."
-    : item.text;
+  return noticeIsResolvedApproval(item) ? "You responded to this approval." : item.text;
 }
 
 /** Notice pill tone: failures stay red, an open wait keeps the waiting hue. */

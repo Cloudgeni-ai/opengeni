@@ -49,9 +49,9 @@ your product restricts sessions further).
 
 Message rules (send, steer, draft, submit): reject `mcpCredentialUpdates`;
 `resources` may only contain `{ "kind": "file", ... }`. If your product fixes
-the model, drop `model`, `reasoningEffort` and `latencyMode` on send and steer;
-a draft PUT requires them, so copy them from the user's saved draft
-(`GET .../composer-draft`), and submit keeps them. Your server may add
+the model, overwrite `model`, `reasoningEffort` and `latencyMode` with your
+fixed values rather than dropping them: the composer-draft save requires them
+and returns 400 without them. Your server may add
 `modelContext` (page state) and `mcpCredentialUpdates` (fresh tool tokens)
 before forwarding.
 

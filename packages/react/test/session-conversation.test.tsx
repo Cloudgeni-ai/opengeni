@@ -547,10 +547,13 @@ test("the model picker follows the proxy's modelSelection flag and the modelPick
       "[aria-label='Model and effort'], [aria-label='Loading model catalog…']",
     );
   for (const [modelSelection, prop, expected] of [
-    [undefined, undefined, true],
+    // End users only see the picker on an explicit offer.
+    [undefined, undefined, false],
+    [true, undefined, true],
     [false, undefined, false],
     [false, true, true],
-    [undefined, false, false],
+    [undefined, true, true],
+    [true, false, false],
   ] as const) {
     const view = await renderComponent(
       <SessionConversation
@@ -605,6 +608,7 @@ test("the complete conversation forwards only picker appearance without replacin
         sessionId={SESSION_ID}
         client={client}
         workspaceId={WORKSPACE_ID}
+        modelPicker
         {...(customized ? { modelPickerProps: appearance } : {})}
       />,
     );

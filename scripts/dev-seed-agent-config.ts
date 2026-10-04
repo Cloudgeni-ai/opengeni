@@ -7,9 +7,6 @@
  *   bun scripts/dev-fake-mcp-server.ts &            # "Acme Tickets" and friends
  *   bun scripts/dev-seed-agent-config.ts --yes [--credentials <file>] [--no-turns]
  *
- * Needs the stack started with OPENGENI_AGENT_CONFIG_ADMISSION_ENABLED=true and
- * OPENGENI_AGENT_CONFIG_DEFAULT_FOR_NEW_SESSIONS=true.
- *
  * Creates (idempotent, looked up by name):
  * - "Support desk" (workspace A): 12 connectors pointing at the fake MCP server,
  *   a custom agent identity and instructions, and agent defaults "Only what you
@@ -66,12 +63,8 @@ const API = `http://127.0.0.1:${runtime.OPENGENI_API_PORT}`;
 const clientConfig = (await (await fetch(`${API}/v1/config/client`)).json()) as {
   apiContractRevision: string;
   productAccessMode: string;
-  agentConfig?: { enabled: boolean; defaultForNewSessions: boolean };
 };
 if (clientConfig.productAccessMode !== "managed") fail("the API is not in managed mode.");
-if (!clientConfig.agentConfig?.enabled) {
-  fail("agent settings are off; set OPENGENI_AGENT_CONFIG_ADMISSION_ENABLED=true and restart.");
-}
 const CONTRACT = clientConfig.apiContractRevision;
 const ORIGIN =
   readEnvFile(resolve(repositoryRoot, ".env")).OPENGENI_PUBLIC_BASE_URL ?? "http://127.0.0.1:3000";

@@ -17,6 +17,7 @@ type WorkflowStep = {
   env?: Record<string, string>;
   run?: string;
   with?: Record<string, unknown>;
+  "working-directory"?: string;
 };
 
 type ParsedWorkflow = {
@@ -142,6 +143,81 @@ function stepIndex(parsed: ParsedWorkflow, jobName: string, name: string): numbe
 }
 
 describe("release image workflow contract", () => {
+  test("both agent bake consumers install source dependencies and bind the checked-out source identity", async () => {
+    const [ci, candidate] = await Promise.all([
+      workflow("ci.yml"),
+      workflow("release-candidate.yml"),
+    ]);
+    const consumers = [
+      {
+        steps: (Bun.YAML.parse(ci) as ParsedWorkflow).jobs["api-image"]!.steps!,
+        checkout: exactCiSource,
+        buildId: "${{ github.sha }}",
+        installName: "Install canary interaction dependencies",
+      },
+      {
+        steps: (Bun.YAML.parse(candidate) as ParsedWorkflow).jobs.candidate!.steps!,
+        checkout: "${{ inputs.source_sha }}",
+        buildId: "${{ inputs.source_sha }}",
+        installName: "Install source interaction dependencies",
+      },
+    ];
+    const validConsumer = (consumer: (typeof consumers)[number]) => {
+      const steps = consumer.steps;
+      const bake = steps.findIndex((step) => step.run === "scripts/bake-agent.sh");
+      const install = steps.findIndex((step) => step.name === consumer.installName);
+      const setup = steps.findLastIndex(
+        (step, index) => index < bake && step.uses?.startsWith("oven-sh/setup-bun@"),
+      );
+      const checkout = steps.findIndex(
+        (step) =>
+          step.uses?.startsWith("actions/checkout@") && step.with?.ref === consumer.checkout,
+      );
+      return (
+        checkout >= 0 &&
+        setup > checkout &&
+        steps[setup]?.with?.["bun-version-file"] === ".bun-version" &&
+        install > setup &&
+        bake > install &&
+        steps[install]?.run === "bun install --frozen-lockfile" &&
+        [undefined, "."].includes(steps[install]?.["working-directory"]) &&
+        steps[install]?.if === steps[bake]?.if &&
+        steps[setup]?.if === steps[bake]?.if &&
+        steps[bake]?.env?.OPENGENI_RUNTIME_BUILD_ID === consumer.buildId
+      );
+    };
+    for (const consumer of consumers) {
+      expect(validConsumer(consumer)).toBe(true);
+      for (const mutate of [
+        (steps: WorkflowStep[]) => {
+          const install = steps.find((step) => step.name === consumer.installName)!;
+          install.run = "bun install";
+        },
+        (steps: WorkflowStep[]) => {
+          const install = steps.find((step) => step.name === consumer.installName)!;
+          install["working-directory"] = ".release/controller";
+        },
+        (steps: WorkflowStep[]) => {
+          const install = steps.findIndex((step) => step.name === consumer.installName);
+          steps.push(...steps.splice(install, 1));
+        },
+        (steps: WorkflowStep[]) => {
+          const bake = steps.find((step) => step.run === "scripts/bake-agent.sh")!;
+          delete bake.env!.OPENGENI_RUNTIME_BUILD_ID;
+        },
+      ]) {
+        const invalid = structuredClone(consumer);
+        mutate(invalid.steps);
+        expect(validConsumer(invalid)).toBe(false);
+      }
+    }
+    const wrongControllerIdentity = structuredClone(consumers[1]!);
+    wrongControllerIdentity.steps.find(
+      (step) => step.run === "scripts/bake-agent.sh",
+    )!.env!.OPENGENI_RUNTIME_BUILD_ID = "${{ github.sha }}";
+    expect(validConsumer(wrongControllerIdentity)).toBe(false);
+  });
+
   test("runs controller and source phases with their owner-specific Bun pins", async () => {
     const [candidate, acceptance, release, embedded] = await Promise.all([
       workflow("release-candidate.yml"),
@@ -868,6 +944,7 @@ describe("release image workflow contract", () => {
     expect(bake?.if).toBe("${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}");
     expect(bake?.env).toEqual({
       OPENGENI_AGENT_MINISIGN_KEY: "${{ secrets.OPENGENI_AGENT_MINISIGN_KEY }}",
+      OPENGENI_RUNTIME_BUILD_ID: "${{ github.sha }}",
     });
     expect(bake?.run).toBe("scripts/bake-agent.sh");
     const requireBake = apiSteps.find(

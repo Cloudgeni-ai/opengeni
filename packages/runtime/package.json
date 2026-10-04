@@ -1,6 +1,6 @@
 {
   "name": "@opengeni/runtime",
-  "version": "4.7.0",
+  "version": "4.8.0",
   "license": "Apache-2.0",
   "repository": {
     "type": "git",
@@ -81,6 +81,7 @@
     "debug": "4.4.3",
     "modal": "0.9.0",
     "openai": "6.47.0",
+    "postal-mime": "2.7.5",
     "protobufjs": "7.6.5",
     "sharp": "0.34.5",
     "ws": "8.21.1",

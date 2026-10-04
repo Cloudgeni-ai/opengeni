@@ -1,0 +1,21 @@
+{
+  "name": "@opengeni/example-tool-server",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "setup": "bun --env-file=.env.local setup.ts",
+    "dev": "bun --env-file=.env.local server.ts",
+    "e2e": "bun --env-file=.env.local e2e.ts",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.29.0",
+    "@opengeni/sdk": "workspace:*",
+    "express": "^5.1.0",
+    "zod": "^4.2.1"
+  },
+  "devDependencies": {
+    "@types/express": "^5.0.3",
+    "typescript": "7.0.2"
+  }
+}

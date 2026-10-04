@@ -7,6 +7,7 @@ export const RANGES: ReadonlyArray<{ id: UsageRange; label: string; short: strin
   { id: "month", label: "This month", short: "MTD" },
   { id: "90d", label: "Last 90 days", short: "90D" },
   { id: "ytd", label: "Year to date", short: "YTD" },
+  { id: "custom", label: "Custom range", short: "Custom" },
 ];
 
 export function rangeLabel(range: UsageRange): string {
@@ -27,6 +28,8 @@ export function priorLabel(range: UsageRange): string {
       return "last month to date";
     case "ytd":
       return "last year to date";
+    case "custom":
+      return "the period before";
   }
 }
 
@@ -106,6 +109,20 @@ const PAYER_NAMES: Record<UsagePayerId, string> = {
   subscription: "Plans",
   own_key: "Your API keys",
 };
+
+const SOURCE_NAMES: Readonly<Record<string, string>> = {
+  web: "Web app",
+  api: "API & SDK",
+  slack: "Slack",
+  schedule: "Schedules",
+  agent: "Agents",
+  other: "Other",
+};
+
+/** Where usage came from, in product words. */
+export function sourceName(source: string): string {
+  return SOURCE_NAMES[source] ?? source.charAt(0).toUpperCase() + source.slice(1);
+}
 
 export function payerName(payer: UsagePayerId): string {
   return PAYER_NAMES[payer];

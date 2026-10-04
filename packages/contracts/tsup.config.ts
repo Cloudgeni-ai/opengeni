@@ -4,6 +4,7 @@ import { defineConfig } from "tsup";
 // stay external so consumers can deduplicate their schema and hashing runtimes.
 export default defineConfig({
   entry: [
+    "src/modal-native-proof-v2.ts",
     "src/allowance-refusal.ts",
     "src/usage-allowances.ts",
     "src/mcp-endpoint.ts",
@@ -14,6 +15,7 @@ export default defineConfig({
     "src/external-identities.ts",
     "src/host-mcp-bindings.ts",
     "src/atlassian.ts",
+    "src/atlassian-native-retirement.ts",
     "src/canonical-human-identities.ts",
     "src/client-error-report.ts",
     "src/analytics-consent-report.ts",
@@ -29,6 +31,7 @@ export default defineConfig({
     "src/model-display.ts",
     "src/code-search.ts",
     "src/workspace-integration-wire.ts",
+    "src/organization-access.ts",
     "src/organization-recovery.ts",
     "src/personal-github.ts",
     "src/session-titles.ts",

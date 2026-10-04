@@ -197,7 +197,7 @@ describe("Insights usage dashboard", () => {
     }
   });
 
-  test("other people's private chats are amount rows: no title, no link, not filterable", async () => {
+  test("other people's private chats are amount rows that filter to the person, never to a chat", async () => {
     nextUsage = fixtureUsage({ groupBy: "rootSession" });
     const view = await render({ group: "rootSession" });
     try {
@@ -205,12 +205,15 @@ describe("Insights usage dashboard", () => {
       expect(titles).toContain("Private chats");
       expect(titles).toContain("Deleted chats");
       expect(titles).toContain("Insights redesign");
-      // The private row names the person only, and can't be opened or filtered.
       const privateRow = [...view.container.querySelectorAll('[role="row"]')].find((row) =>
         row.textContent?.startsWith("Private chats"),
       );
+      // Names the person only; no session id, no "Open session".
       expect(privateRow?.textContent).toContain("Ada Lovelace");
-      expect(privateRow?.querySelector("button[data-row-action]")).toBeNull();
+      expect(privateRow?.querySelector('[aria-label^="More for"]')).toBeNull();
+      expect(view.container.innerHTML).not.toContain("private:owner-1");
+      await act(async () => rowAction(view.container, "Private chats")?.click());
+      expect(view.changes.at(-1)).toEqual({ who: "person-2" });
       const deletedRow = [...view.container.querySelectorAll('[role="row"]')].find((row) =>
         row.textContent?.startsWith("Deleted chats"),
       );
@@ -220,6 +223,38 @@ describe("Insights usage dashboard", () => {
       await act(async () => rowAction(view.container, "Insights redesign")?.click());
       expect(view.changes.at(-1)).toEqual({
         root: "aaaaaaaa-0000-4000-8000-000000000002",
+      });
+    } finally {
+      await view.unmount();
+    }
+  });
+
+  test("filters combine, show as chips and travel to the server", async () => {
+    const filtered = await render({ who: "person-2", src: "slack" });
+    try {
+      expect(requests.at(-1)?.query).toMatchObject({ person: "person-2", source: "slack" });
+      const chips = [
+        ...filtered.container.querySelectorAll('[aria-label="Active filters"] li'),
+      ].map((chip) => chip.textContent);
+      expect(chips).toEqual(["Person:Ada Lovelace", "Source:Slack", "Clear all"]);
+      await act(async () =>
+        filtered.container
+          .querySelector<HTMLButtonElement>('[aria-label="Remove filter Source: Slack"]')
+          ?.click(),
+      );
+      expect(filtered.changes.at(-1)).toEqual({ who: "person-2" });
+    } finally {
+      await filtered.unmount();
+    }
+  });
+
+  test("a custom date range travels to the server", async () => {
+    const view = await render({ range: "custom", start: "2026-09-01", end: "2026-09-15" });
+    try {
+      expect(requests[0]?.query).toMatchObject({
+        range: "custom",
+        from: "2026-09-01",
+        to: "2026-09-15",
       });
     } finally {
       await view.unmount();
