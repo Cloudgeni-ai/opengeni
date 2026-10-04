@@ -114,7 +114,7 @@ describe("production web handler", () => {
     const handler = createWebHandler(await fixture());
     for (const path of [
       "/.well-known/openid-configuration",
-      "/.well-known/oauth-authorization-server/v1/mcp",
+      "/.well-known/oauth-authorization-server/tenant/unknown",
       "/.well-known/security.txt",
     ]) {
       const missing = await handler(new Request(`https://example.test${path}`));
