@@ -377,6 +377,7 @@ export function useProviderConnection(
   const client = props.client;
   const config = props.config;
   const enabled = props.enabled !== false;
+  const hasCatalogConnection = Boolean(props.catalogConnection);
   const [connections, setConnections] = useState<ConnectionMetadata[]>([]);
   const [readOnlyConnected, setReadOnlyConnected] = useState(false);
   const [customModels, setCustomModels] = useState<WorkspaceProviderCustomModel[]>([]);
@@ -464,7 +465,7 @@ export function useProviderConnection(
   }, [client, config, props.workspaceId, enabled]);
 
   const refreshConnection = useCallback(async (): Promise<ConnectionMetadata[] | null> => {
-    if (!enabled || props.catalogConnection) return null;
+    if (!enabled || hasCatalogConnection) return null;
     const requestGeneration = ++connectionRequestGenerationRef.current;
     try {
       if (props.canManageConnection) {
@@ -507,7 +508,7 @@ export function useProviderConnection(
     props.canManageConnection,
     props.workspaceId,
     enabled,
-    Boolean(props.catalogConnection),
+    hasCatalogConnection,
   ]);
 
   const claudeUsage = useClaudeUsage({
@@ -1303,8 +1304,8 @@ export function ProviderDisconnectDialog({
           : `Models billed to ${config.title} stop working for new work.`,
         "Work already running finishes first.",
         config.provider === "claude_subscription"
-          ? "The saved token is removed from OpenGeni. Your Claude subscription stays active."
-          : "The saved API key is removed from OpenGeni. You can reconnect with a valid key.",
+          ? "The saved token is removed from Opengeni. Your Claude subscription stays active."
+          : "The saved API key is removed from Opengeni. You can reconnect with a valid key.",
       ]}
       confirmLabel="Disconnect"
       pendingLabel="Disconnecting…"

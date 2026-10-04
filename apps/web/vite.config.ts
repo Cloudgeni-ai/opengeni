@@ -88,13 +88,14 @@ export default defineConfig({
               priority: 20,
             },
             {
-              // Zod and the pure Skill receipt schemas initialize before the
-              // contracts barrel reads them. Keep them outside shared app chunks
-              // that import the barrel back: otherwise its SkillWriteReceipt
-              // consumer can evaluate before that schema exists. Co-locating
-              // these leaves also avoids an extra initial graph request.
+              // Zod, Permission and the pure Skill receipt schemas initialize
+              // before the contracts barrel and organization-access read them.
+              // Keep these leaves outside shared app chunks that import their
+              // consumers back; otherwise eager Permission.options or
+              // SkillWriteReceipt reads can run before initialization.
+              // Co-locating them avoids an extra initial graph request too.
               name: "zod-runtime",
-              test: /(?:(?:node_modules|\.bun)[\\/]zod(?:@|[\\/])|packages[\\/]contracts[\\/]src[\\/]skills\.ts$)/,
+              test: /(?:(?:node_modules|\.bun)[\\/]zod(?:@|[\\/])|packages[\\/]contracts[\\/]src[\\/](?:permissions|skills)\.ts$)/,
               includeDependenciesRecursively: false,
               priority: 22,
             },
@@ -287,6 +288,17 @@ export default defineConfig({
               priority: 17,
             },
             {
+              // Payment and organization-identity glyphs are lazy-only, but
+              // CreditCard also appears in new-chat and credit prompts. Keep
+              // these leaves separate from settings implementations so those
+              // consumers do not load management pages. Explicit grouping also
+              // prevents entry-aware merging with eager shared session glyphs.
+              name: "payment-identity-glyphs",
+              test: /lucide-react[\\/]dist[\\/]esm[\\/]icons[\\/](?:credit-card|fingerprint-pattern)\.mjs$/,
+              includeDependenciesRecursively: false,
+              priority: 20,
+            },
+            {
               // Keep settings-only implementations in one explicit lazy unit.
               // Recursive consumer-aware grouping can otherwise pair one
               // shared primitive with these routes and make the complete
@@ -297,7 +309,7 @@ export default defineConfig({
               // lands in a chunk the workspace route imports and pulls this
               // whole surface into a sessions load.
               name: "workspace-management-surfaces",
-              test: /apps[\\/]web[\\/]src[\\/](?:components[\\/](?:ai-gateway-connection|codex-connection|default-session-model|model-access-policy|permission-picker|supergrok-connection|supergrok-device-poll|transcription-settings|video-generation-settings|workspace-capability-defaults|workspace-developer-settings|workspace-runtime-control)\.(?:ts|tsx)|components[\\/]settings[\\/](?:(?:workspace-settings-shell|settings-sidebar|settings-rail|default-sandbox-environment-row)\.tsx|organization-settings-pages\.ts)|routes[\\/](?:workspace-learning-loader\.ts|workspace-members-section\.tsx|workspace-settings\.tsx))$/,
+              test: /apps[\\/]web[\\/]src[\\/](?:components[\\/](?:ai-gateway-connection|codex-connection|default-session-model|model-access-policy|permission-picker|supergrok-connection|supergrok-device-poll|transcription-settings|video-generation-settings|workspace-capability-defaults|workspace-developer-settings|workspace-runtime-control)\.(?:ts|tsx)|components[\\/]settings[\\/](?:(?:workspace-settings-shell|settings-sidebar|settings-rail|default-sandbox-environment-row)\.tsx|organization-settings-pages\.ts)|routes[\\/](?:workspace-members-section\.tsx|workspace-settings\.tsx))$/,
               includeDependenciesRecursively: false,
               priority: 20,
             },
@@ -348,11 +360,12 @@ export default defineConfig({
               // Organization API-key setup is dynamically imported by Developer
               // settings. Pin its implementation here too so shared dependencies
               // cannot merge it into the direct-session graph.
-              // Payment and organization-identity glyphs are lazy-only too.
-              // Entry-aware merging otherwise pairs them with shared session
-              // glyphs and makes them eager; leave their icon factory shared.
+              // The shared organization access form eagerly combines workspace
+              // permission groups. Keep its helper and fields with those groups
+              // so the lazy agent consent route cannot read uninitialized data
+              // across a settings-pages/organization-access-fields chunk cycle.
               name: "settings-pages",
-              test: /(?:apps[\\/]web[\\/]src[\\/](?:components[\\/](?:connection-access-settings|organization-api-keys-section|organization-codex-subscriptions|organization-model-provider-connection|models[\\/][\w-]+|settings[\\/](?:agent-activity|default-sandbox-environment-row|row-select|settings-frame))\.tsx|routes[\\/](?:workspace-api-keys|workspace-managed-access)\.tsx|lib[\\/]api-key-(?:presets|status)\.ts)|lucide-react[\\/]dist[\\/]esm[\\/]icons[\\/](?:credit-card|fingerprint-pattern)\.mjs)$/,
+              test: /apps[\\/]web[\\/]src[\\/](?:components[\\/](?:connection-access-settings|organization-api-keys-section|organization-codex-subscriptions|organization-model-provider-connection|organization-access[\\/]organization-access-fields|models[\\/][\w-]+|settings[\\/](?:agent-activity|default-sandbox-environment-row|row-select|settings-frame))\.tsx|routes[\\/](?:workspace-api-keys|workspace-managed-access)\.tsx|lib[\\/](?:api-key-(?:presets|status)|organization-access)\.ts)$/,
               includeDependenciesRecursively: false,
               priority: 20,
             },

@@ -157,11 +157,7 @@ import {
   HumanInputResponseValidationError,
 } from "@opengeni/db";
 import { appendAndPublishTurnEventsFenced, publishDurableSessionEvents } from "@opengeni/events";
-import {
-  agentConfigDeploymentPolicy,
-  allowedFirstPartyMcpToolsForSession,
-  codemodeWorkspaceUrl,
-} from "@opengeni/config";
+import { allowedFirstPartyMcpToolsForSession, codemodeWorkspaceUrl } from "@opengeni/config";
 import {
   createSignedState,
   GitHubAppConfigurationError,
@@ -177,7 +173,13 @@ import type { ToolAnnotations } from "@modelcontextprotocol/sdk/types.js";
 import { HTTPException } from "hono/http-exception";
 import * as z4 from "zod/v4";
 import { normalizeObjectSchema } from "@modelcontextprotocol/sdk/server/zod-compat.js";
+import { ApiHttpError, scheduledTaskTargetAccessHttpError } from "../http/api-error";
 import { assertDescribedToolInput, contractToolInput } from "./contract-input";
+import {
+  resolveScheduledTaskCreateInput,
+  scheduledTaskCreateToolInput as buildScheduledTaskCreateToolInput,
+  scheduledTaskCreateToolValidation,
+} from "./scheduled-task-input";
 import { editableArtifactActorForGrant } from "../routes/editable-artifacts";
 import { registerKnowledgeEntryTools } from "./knowledge-entries";
 import {
@@ -188,7 +190,6 @@ import {
   hasLiteralPermission,
   hasPermission,
   authorizedSocialConnectionsForGrant,
-  authorizedAtlassianConnectionsForGrant,
   buildCapabilityCatalog,
   nativeConnectionCapabilityRecommendations,
   requireLiveAgentAttemptAuthorization,
@@ -197,6 +198,7 @@ import {
   resolveWorkspaceCatalogSettings,
   SessionAuthorizationDeniedError,
   SessionAuthorizationUnavailableError,
+  dispatchWithSessionAuthorizationReadReuse,
   searchCapabilityCatalogItems,
   type ResolvedSessionAuthorization,
 } from "@opengeni/core";
@@ -207,7 +209,6 @@ import {
   workflowIdForSession,
 } from "@opengeni/core";
 import type { ApiRouteDeps } from "@opengeni/core";
-import { requireAgentConfigAdmission, scheduledTaskAgentInput } from "@opengeni/core";
 import {
   githubBindingStatus,
   listWorkspaceGitHubInstallationBindings,
@@ -330,6 +331,7 @@ import {
   boundScheduledTaskDetailMcp,
   boundScheduledTaskMcpPage,
   scheduledTaskMcpSummary,
+  scheduledTaskPromptPage,
 } from "./scheduled-task-view";
 import { ensureSessionGroupReady as ensureViewerSessionGroupReady } from "../sandbox/viewer";
 import {
@@ -342,12 +344,6 @@ import {
 import { uploadSlackTaskFile } from "../integrations/slack-task-file-upload";
 import { createFikenClient, resolveFikenConnectionForTool } from "../integrations/fiken";
 import {
-  browseAtlassianSources,
-  getAtlassianLiveItem,
-  searchAtlassianLive,
-} from "../integrations/atlassian";
-import { AtlassianConnectionMetadata } from "@opengeni/contracts/atlassian";
-import {
   allowanceExhaustedMessage,
   parseAllowanceExhaustedRefusal,
 } from "@opengeni/contracts/allowance-refusal";
@@ -356,6 +352,7 @@ import { registerCompanyProfileAgentAdminTools } from "./company-profile-agent-a
 import { mintSandboxCodemodeToken } from "@opengeni/runtime/sandbox";
 import { deleteScheduledTaskWithDurableCleanup } from "../scheduled-task-deletion";
 import { observeWorkDiscovery, summarizeWorkDiscoveryRows } from "../work-discovery-observability";
+import { orchestrationFailureDiagnostic } from "./orchestration-failure-diagnostic";
 
 export type McpServerOptions = {
   // Origin of the HTTP request that reached the MCP route. Browser-oriented
@@ -385,7 +382,7 @@ type OrchestrationToolName = "session_create" | "session_send_message" | "sessio
 
 function boundedOrchestrationFailureMessage(value: string): string {
   const normalized = value.replace(/[\u0000-\u001f\u007f]+/g, " ").trim();
-  if (!normalized) return "OpenGeni could not complete the request.";
+  if (!normalized) return "Opengeni could not complete the request.";
   const encoded = new TextEncoder().encode(normalized);
   if (encoded.byteLength <= ORCHESTRATION_FAILURE_MESSAGE_MAX_UTF8_BYTES) return normalized;
   let end = ORCHESTRATION_FAILURE_MESSAGE_MAX_UTF8_BYTES;
@@ -486,7 +483,7 @@ function orchestrationFailureEnvelope(tool: OrchestrationToolName, error: unknow
         code: orchestrationFailureCode(tool, error),
         message:
           error.status >= 500
-            ? "OpenGeni is temporarily unavailable — retry."
+            ? "Opengeni is temporarily unavailable — retry."
             : boundedOrchestrationFailureMessage(error.message),
       },
     };
@@ -539,21 +536,224 @@ function orchestrationFailureEnvelope(tool: OrchestrationToolName, error: unknow
   return {
     error: {
       code: `${tool}_failed`,
-      message: "OpenGeni could not complete the request.",
+      message: "Opengeni could not complete the request.",
     },
   };
 }
 
-function orchestrationFailureResult(tool: OrchestrationToolName, error: unknown) {
+function orchestrationFailureResult(
+  tool: OrchestrationToolName,
+  error: unknown,
+  deps: ApiRouteDeps,
+  grant: AccessGrant,
+) {
   const envelope = orchestrationFailureEnvelope(tool, error);
+  let result: Record<string, unknown> = envelope;
+  if (envelope.error.code === `${tool}_failed` || envelope.error.code === `${tool}_unavailable`) {
+    try {
+      result = {
+        error: {
+          ...envelope.error,
+          ...orchestrationFailureDiagnostic(deps, tool, error, exactAgentAttemptClaims(grant)),
+        },
+      };
+    } catch {
+      // Diagnostic construction must never replace the original tool outcome.
+    }
+  }
   return {
-    content: [{ type: "text" as const, text: JSON.stringify(envelope, null, 2) }],
-    structuredContent: envelope,
+    content: [{ type: "text" as const, text: JSON.stringify(result, null, 2) }],
+    structuredContent: result,
     isError: true as const,
   };
 }
 
 const FIRST_PARTY_MCP_TOOL_NAME_SET = new Set<string>(FIRST_PARTY_MCP_TOOL_NAMES);
+// Tool names whose input passed `assertDescribedToolInput` in this process.
+// The check is about code structure, which cannot change while the process
+// runs, so converting every input to JSON Schema per request only re-proves it.
+const DESCRIBED_TOOL_INPUTS = new Set<string>();
+
+/**
+ * Build a caller-independent tool input once per process. Zod construction and
+ * JSON Schema conversion are a large part of building the per-request server.
+ */
+function staticToolInput<T>(build: () => T): () => T {
+  let value: T | undefined;
+  return () => (value ??= build());
+}
+
+const scheduledTaskCreateToolProjection = staticToolInput(buildScheduledTaskCreateToolInput);
+const scheduledTaskUpdateToolInput = staticToolInput(() =>
+  contractToolInput(
+    z4
+      .object({
+        ...UpdateScheduledTaskRequest.out.shape,
+        id: z4.string().uuid(),
+        action: CreateScheduledTaskRequest.options[1].out.shape.action.optional(),
+        agentConfig: z4
+          .object(ScheduledTaskAgentConfigInput.shape)
+          .omit({ slackBotChannelId: true })
+          .strict()
+          .optional(),
+      })
+      .omit({ agentLearning: true, connectionAuthorities: true })
+      .strict(),
+    UpdateScheduledTaskRequest,
+  ),
+);
+
+const sessionCreateToolInput = staticToolInput(() => {
+  const capabilityToggle = z4.boolean().optional();
+  const sessionCreateAgentInput = z4
+    .object({
+      capabilities: z4
+        .union([
+          z4.enum(["all", "none"]),
+          z4
+            .object({
+              from: z4.enum(["all", "none"]),
+              webSearch: capabilityToggle,
+              humanInput: capabilityToggle,
+              skills: z4
+                .union([z4.literal("read"), z4.literal("manage"), z4.literal(false)])
+                .optional(),
+              goals: capabilityToggle,
+              subagents: capabilityToggle,
+              knowledge: capabilityToggle,
+              schedules: capabilityToggle,
+              artifacts: capabilityToggle,
+              browser: capabilityToggle,
+              media: capabilityToggle,
+              workspaceFiles: capabilityToggle,
+              workspaceConnectors: capabilityToggle,
+              workspaceAdmin: capabilityToggle,
+            })
+            .strict(),
+        ])
+        .optional(),
+      identity: z4.string().min(1).max(AGENT_IDENTITY_MAX_CHARACTERS).nullable().optional(),
+      instructions: z4.string().min(1).max(SESSION_INSTRUCTIONS_MAX_CHARACTERS).optional(),
+      renderer: z4.enum(["opengeni", "markdown"]).optional(),
+    })
+    .strict()
+    .optional()
+    .describe(
+      "Optional agent configuration for the child. Omit to inherit this session's. capabilities 'all' means everything this session has; 'none' keeps only essentials; an object starts from one and switches capabilities off (or back on within this session's own set). A child may only narrow: enabling a capability this session lacks is rejected.",
+    );
+  const sessionCreateInput = z4
+    .object({
+      initialMessage: z4.string().min(1),
+      projectId: z4
+        .string()
+        .uuid()
+        .nullable()
+        .optional()
+        .describe(
+          "Workspace project to file the new session into. Omit for existing default behavior; does not change runtime or visibility.",
+        ),
+      title: z4
+        .string()
+        .min(1)
+        .max(SESSION_TITLE_MAX_CHARACTERS)
+        .optional()
+        .describe(
+          "Concise semantic title for the child session. Omit only when the delegated goal or initial message already provides a suitable title; Opengeni derives a sensitive-safe bounded fallback from that text.",
+        ),
+      instructions: z4.string().min(1).max(SESSION_INSTRUCTIONS_MAX_CHARACTERS).optional(),
+      goal: GoalSpec.optional(),
+      resources: z4
+        .array(ResourceRef)
+        .optional()
+        .describe(
+          "Omit to inherit parent repositories only. Files are never inherited automatically; explicitly include file resources to attach them. An empty array inherits no resources.",
+        ),
+      tools: z4.array(ToolRef).optional(),
+      mcpServers: z4.array(SessionMcpServerInput).optional(),
+      variableSetId: z4.string().uuid().optional(),
+      variableSetIds: z4.array(z4.string().uuid()).max(MAX_SELECTED_VARIABLE_SETS).optional(),
+      environmentId: z4.string().uuid().optional(),
+      rigId: z4.string().uuid().optional(),
+      model: z4
+        .string()
+        .min(1)
+        .optional()
+        .describe(
+          "Model for the worker. Omit to inherit the exact calling turn's model, including its Codex subscription billing path.",
+        ),
+      reasoningEffort: CreateSessionRequest.out.shape.reasoningEffort.describe(
+        "Omit to inherit the exact calling turn's reasoning effort.",
+      ),
+      latencyMode: z4
+        .enum(["standard", "priority", "fast"])
+        .optional()
+        .describe(
+          "Omit for standard latency, even when model and reasoning are inherited. Fast or priority must be selected explicitly and supported by the model.",
+        ),
+      sandboxBackend: CreateSessionRequest.out.shape.sandboxBackend,
+      // Model-only structural coupling: workingDir cannot exist without a
+      // targetSandboxId because both live inside one optional object. The
+      // handler maps this back to the stable public REST/SDK request fields.
+      machineTarget: z4
+        .object({
+          targetSandboxId: z4.string().uuid(),
+          workingDir: z4.string().optional(),
+        })
+        .strict()
+        .optional(),
+      metadata: z4.record(z4.string(), z4.unknown()).optional(),
+      idempotencyKey: z4.string().min(1).max(200).optional(),
+      firstPartyMcpPermissions: z4
+        .array(Permission)
+        .optional()
+        .describe(
+          "Optional first-party capability set for the child. Omit to inherit this session's effective permissions. An explicit set may only narrow capabilities held by this session. A goal-bearing child requires goals:manage in the resulting set; creation fails rather than adding it implicitly.",
+        ),
+      firstPartyMcpTools: z4
+        .array(z4.enum(FIRST_PARTY_MCP_TOOL_NAMES))
+        .optional()
+        .describe(
+          "Exact model-visible first-party tool selection for the child. Omit to inherit this session's effective selection. An explicit selection may only narrow that selection: every listed tool must already be available to this session, and a wider list is rejected. To create a non-delegating leaf, provide a selection that omits session_create. This does not grant permissions.",
+        ),
+      // The child's agent-access scope and end-user label are never model
+      // choices: it inherits this session's exactly. Only the Memory
+      // selector may be narrowed here (workspace > user > off).
+      memoryScope: z4
+        .enum(["workspace", "user", "off"])
+        .optional()
+        .describe(
+          "Optional Memory selector for the child. Omit to inherit this session's selector. An explicit value may only narrow it (workspace > user > off); off gives the child no Memory tools. Use task notes for task-local findings.",
+        ),
+      // Omission is the ordinary safe sharing path. Literal "shared" remains
+      // available to advanced REST/SDK callers but is intentionally absent
+      // from the model surface because it turns compatibility drift into a
+      // deterministic failure instead of the omission path's safe own-box fallback.
+      sandbox: z4.union([z4.literal("new"), z4.object({ groupId: z4.string().uuid() })]).optional(),
+      agent: sessionCreateAgentInput,
+    })
+    .superRefine((value, context) => {
+      if (!value.variableSetIds) return;
+      if (new Set(value.variableSetIds).size !== value.variableSetIds.length) {
+        context.addIssue({
+          code: z4.ZodIssueCode.custom,
+          path: ["variableSetIds"],
+          message: "variableSetIds must not contain duplicates",
+        });
+      }
+      const singular = value.variableSetId ?? value.environmentId;
+      if (singular === undefined) return;
+      const expected = value.variableSetIds[value.variableSetIds.length - 1];
+      if (singular !== expected) {
+        context.addIssue({
+          code: z4.ZodIssueCode.custom,
+          path: ["variableSetId"],
+          message: "variableSetId must match the last variableSetIds entry",
+        });
+      }
+    })
+    .strict();
+  return contractToolInput(sessionCreateInput);
+});
 
 class PolicyMcpServer extends McpServer {
   private registeredToolCount = 0;
@@ -609,7 +809,7 @@ class PolicyMcpServer extends McpServer {
         remove() {},
       };
     }
-    if (config.inputSchema) {
+    if (config.inputSchema && !DESCRIBED_TOOL_INPUTS.has(name)) {
       const schema =
         normalizeObjectSchema(config.inputSchema) ??
         (Object.keys(config.inputSchema).length === 0 ? z4.object({}) : undefined);
@@ -618,9 +818,14 @@ class PolicyMcpServer extends McpServer {
         z4.toJSONSchema(schema as z4.ZodType, { io: "input", target: "draft-7" }),
         name,
       );
+      DESCRIBED_TOOL_INPUTS.add(name);
     }
     this.registeredToolCount += 1;
-    return super.registerTool(name, config, cb);
+    const handler = cb as (...args: unknown[]) => unknown;
+    return super.registerTool(name, config, ((...args: unknown[]) =>
+      dispatchWithSessionAuthorizationReadReuse(() =>
+        handler(...args),
+      )) as ToolCallback<InputArgs>);
   }
 
   ensureToolsListHandler(): void {
@@ -853,7 +1058,6 @@ export function buildOpenGeniMcpServer(
   registerRigTools(server, deps, grant, can, sessionId, json);
   registerSlackBotTools(server, deps, grant, sessionId, json);
   registerFikenTools(server, deps, grant, sessionId, json);
-  registerAtlassianTools(server, deps, grant, json);
 
   // Orchestration, variableSet, and GitHub status tools are permission-gated
   // at registration: a grant without the permission does not see the tool.
@@ -931,7 +1135,7 @@ export function buildOpenGeniMcpServer(
     server.registerTool(
       "social_posts_recent",
       {
-        description: "List recent social media posts imported or synced into OpenGeni.",
+        description: "List recent social media posts imported or synced into Opengeni.",
         inputSchema: {
           connectionIds: z4.array(z4.string().uuid()).optional(),
           since: z4.string().optional(),
@@ -1246,7 +1450,7 @@ export function buildOpenGeniMcpServer(
       "social_posts_sync",
       {
         description:
-          "Sync the connected account's own recent posts from the provider into OpenGeni's social_posts store (idempotent), so social_posts_recent and daily analysis see fresh data.",
+          "Sync the connected account's own recent posts from the provider into Opengeni's social_posts store (idempotent), so social_posts_recent and daily analysis see fresh data.",
         inputSchema: {
           connectionId: z4.string().uuid(),
           limit: z4.number().int().positive().optional(),
@@ -1343,7 +1547,7 @@ export function buildOpenGeniMcpServer(
       server.registerTool(
         `${provider}_posts_sync`,
         {
-          description: `Sync one exact connected ${providerName} account's recent posts into OpenGeni (idempotent).`,
+          description: `Sync one exact connected ${providerName} account's recent posts into Opengeni (idempotent).`,
           inputSchema: {
             connectionId: z4.string().uuid(),
             limit: z4.number().int().positive().optional(),
@@ -1466,17 +1670,21 @@ export function buildOpenGeniMcpServer(
       "scheduled_tasks_get",
       {
         description:
-          "Get one scheduled task. The default is the same compact summary used by scheduled_tasks_list; pass includeEntity=true for a bounded projection with an 8 KiB prompt preview, bounded goal fields, resource/tool identity previews, and metadata keys without values.",
+          "Get one scheduled task. The default is the same compact summary used by scheduled_tasks_list; pass includeEntity=true for a bounded projection with an 8 KiB prompt preview, bounded goal fields, resource/tool identity previews, and metadata keys without values. For exact complete message text, pass promptOffset=0, then follow prompt.nextOffset with expectedExecutionDigest from the first page. This returns only the prompt page and preserves every character.",
         inputSchema: {
           id: z4.string().uuid(),
           includeEntity: z4.boolean().optional(),
+          promptOffset: z4.number().int().nonnegative().max(2_147_483_647).optional(),
+          expectedExecutionDigest: z4.string().min(1).max(128).optional(),
         },
       },
-      async ({ id, includeEntity }) => {
+      async ({ id, includeEntity, promptOffset, expectedExecutionDigest }) => {
         const task = scheduledTaskForGrant(
           await requireScheduledTask(deps.db, grant.workspaceId, id),
           grant,
         );
+        if (promptOffset !== undefined)
+          return json(scheduledTaskPromptPage(task, promptOffset, expectedExecutionDigest));
         return json(
           includeEntity ? boundScheduledTaskDetailMcp(task) : scheduledTaskMcpSummary(task),
         );
@@ -1487,24 +1695,14 @@ export function buildOpenGeniMcpServer(
       "scheduled_tasks_create",
       {
         description:
-          "Create a scheduled task. Sessions generated for a task created from this session inherit this session's effective first-party tool selection and permission set; they never receive the deployment default catalog. To have runs post to Slack as the OpenGeni bot, a person must choose the channel in the schedule editor; you cannot set agentConfig.slackBotChannelId.",
+          "Schedule a message in this chat by supplying name, schedule and prompt. Omitted destination uses the calling chat, with its model, tools, machine and attachments at run time. Choose reusable_session or new_session_per_run and agentConfig only when the user explicitly wants a separate agent. Runs retain the schedule owner’s captured account choices and revalidate access; they do not acquire another chat owner’s credentials.",
         inputSchema: contractToolInput(
-          z4
-            .object({
-              ...CreateScheduledTaskRequest.options[1].out.shape,
-              agentConfig: z4
-                .object(ScheduledTaskAgentConfigInput.shape)
-                .omit({ slackBotChannelId: true })
-                .strict(),
-            })
-            .omit({ agentLearning: true, connectionAuthorities: true })
-            .strict(),
-          CreateScheduledTaskRequest.options[1],
+          scheduledTaskCreateToolProjection(),
+          scheduledTaskCreateToolValidation(sessionId),
         ),
       },
       async (args) => {
-        const payload = CreateScheduledTaskRequest.parse(args);
-        requireAgentConfigAdmission(deps.settings, scheduledTaskAgentInput(payload));
+        const payload = resolveScheduledTaskCreateInput(args, sessionId);
         requireVariableSetsUseForMcpAttachment(grant, payload.variableSetId);
         await requireLimit(deps, {
           accountId: grant.accountId,
@@ -1549,38 +1747,23 @@ export function buildOpenGeniMcpServer(
       "scheduled_tasks_update",
       {
         description:
-          "Update a scheduled task. For model/reasoning-only edits use agentConfigPatch: { model?, reasoningEffort? }; all omitted configuration is preserved. agentConfig is a complete replacement, and scheduled_tasks_get is a bounded projection, not replacement input. Task model settings apply to newly created sessions; existing-session targets and already-created reusable sessions keep their own model/reasoning.",
-        inputSchema: contractToolInput(
-          z4
-            .object({
-              ...UpdateScheduledTaskRequest.out.shape,
-              id: z4.string().uuid(),
-              action: CreateScheduledTaskRequest.options[1].out.shape.action.optional(),
-              agentConfig: z4
-                .object(ScheduledTaskAgentConfigInput.shape)
-                .omit({ slackBotChannelId: true })
-                .strict()
-                .optional(),
-            })
-            .omit({ agentLearning: true, connectionAuthorities: true })
-            .strict(),
-          UpdateScheduledTaskRequest,
-        ),
+          "Update a schedule without reconstructing its configuration: use prompt for message edits or targetSessionId to move it to an existing chat. Omitted fields are preserved. Send expectedExecutionDigest from get to reject stale edits. A move inherits the destination chat’s execution settings; if it reports an attached-access change, review it before retrying with adoptSessionSettings=true. For separate-agent model defaults use agentConfigPatch. agentConfig is full replacement; bounded get output is not replacement input.",
+        inputSchema: scheduledTaskUpdateToolInput(),
       },
       async ({ id, ...raw }) => {
         const existing = await requireScheduledTask(deps.db, grant.workspaceId, id);
         const previous = await captureScheduledTaskRestoreState(deps.db, existing);
         const payload = UpdateScheduledTaskRequest.parse(raw);
-        requireAgentConfigAdmission(deps.settings, scheduledTaskAgentInput(payload));
         const patchWarnings = (task: ScheduledTask) =>
-          payload.agentConfigPatch &&
+          (payload.agentConfigPatch?.model !== undefined ||
+            payload.agentConfigPatch?.reasoningEffort !== undefined) &&
           (task.runMode === "existing_session" || task.reusableSessionId)
             ? [
                 "The task uses an existing session, whose model and reasoning are unchanged. Change that session separately if intended.",
               ]
             : [];
         requireVariableSetsUseForMcpAttachment(grant, payload.variableSetId);
-        const update = await validatedScheduledTaskUpdate({
+        const updateOrError = await validatedScheduledTaskUpdate({
           settings: deps.settings,
           db: deps.db,
           objectStorage: deps.objectStorage,
@@ -1590,7 +1773,24 @@ export function buildOpenGeniMcpServer(
           toolsProvided: scheduledTaskToolsProvided(raw),
           sessionAuthorization: deps.sessionAuthorization,
           authorizationSurface: "first_party_mcp",
+        }).catch((error: unknown) => {
+          const conflict = scheduledTaskTargetAccessHttpError(error);
+          if (conflict) return conflict;
+          throw error;
         });
+        if (updateOrError instanceof ApiHttpError) {
+          return {
+            isError: true,
+            ...json({
+              error: {
+                code: updateOrError.code,
+                message: updateOrError.message,
+                details: updateOrError.details,
+              },
+            }),
+          };
+        }
+        const update = updateOrError;
         if (!scheduledTaskUpdateChangesState(existing, update)) {
           return json(
             scheduledTaskReceipt("scheduled_tasks_update", existing, "unchanged", false, {
@@ -1882,7 +2082,7 @@ function registerSlackBotTools(
     "slack_bot_list_channels",
     {
       description:
-        "List public and bot-visible private Slack channels through the workspace-shared OpenGeni bot. isMember identifies channels the bot may read/post in; the bot never joins channels automatically.",
+        "List public and bot-visible private Slack channels through the workspace-shared Opengeni bot. isMember identifies channels the bot may read/post in; the bot never joins channels automatically.",
       inputSchema: {
         connectionId: z4.string().uuid().optional(),
         cursor: z4.string().max(1024).optional(),
@@ -1907,7 +2107,7 @@ function registerSlackBotTools(
     "slack_bot_channel_history",
     {
       description:
-        "Read Slack channel history as the workspace-shared OpenGeni bot. Public and private channels both require bot membership; invite the bot to private channels first.",
+        "Read Slack channel history as the workspace-shared Opengeni bot. Public and private channels both require bot membership; invite the bot to private channels first.",
       inputSchema: {
         connectionId: z4.string().uuid().optional(),
         channelId: z4.string().min(1).max(64),
@@ -1931,7 +2131,7 @@ function registerSlackBotTools(
     "slack_bot_thread_replies",
     {
       description:
-        "Read a Slack thread as the workspace-shared OpenGeni bot. Pass the channel ID and the parent message timestamp returned by channel history. The result includes the parent followed by its replies.",
+        "Read a Slack thread as the workspace-shared Opengeni bot. Pass the channel ID and the parent message timestamp returned by channel history. The result includes the parent followed by its replies.",
       inputSchema: {
         connectionId: z4.string().uuid().optional(),
         channelId: z4.string().min(1).max(64),
@@ -1956,7 +2156,7 @@ function registerSlackBotTools(
   server.registerTool(
     "slack_bot_list_users",
     {
-      description: "List Slack workspace users through the workspace-shared OpenGeni bot.",
+      description: "List Slack workspace users through the workspace-shared Opengeni bot.",
       inputSchema: {
         connectionId: z4.string().uuid().optional(),
         cursor: z4.string().max(1024).optional(),
@@ -1978,7 +2178,7 @@ function registerSlackBotTools(
     "slack_bot_list_files",
     {
       description:
-        "List Slack files and canvases shared with a channel where the workspace-shared OpenGeni bot is already a member.",
+        "List Slack files and canvases shared with a channel where the workspace-shared Opengeni bot is already a member.",
       inputSchema: {
         connectionId: z4.string().uuid().optional(),
         channelId: z4.string().min(1).max(64),
@@ -2002,7 +2202,7 @@ function registerSlackBotTools(
     "slack_bot_file_info",
     {
       description:
-        "Read safe metadata for a Slack file or canvas shared with a channel where the workspace-shared OpenGeni bot is already a member. For an embedded huddle transcript, also pass the shared canvas file ID as parentFileId so OpenGeni can verify the indirect share.",
+        "Read safe metadata for a Slack file or canvas shared with a channel where the workspace-shared Opengeni bot is already a member. For an embedded huddle transcript, also pass the shared canvas file ID as parentFileId so Opengeni can verify the indirect share.",
       inputSchema: {
         connectionId: z4.string().uuid().optional(),
         channelId: z4.string().min(1).max(64),
@@ -2026,7 +2226,7 @@ function registerSlackBotTools(
     "slack_bot_file_content",
     {
       description:
-        "Read a bounded page of text or view a PNG, JPEG, or WebP image from a Slack file shared with a channel where the workspace-shared OpenGeni bot is already a member. Use the file ID from thread replies to view images in earlier thread messages. Images are returned as viewable content, only when directly shared to a non-shared channel, up to 640 KiB; offset must be 0. For an embedded huddle transcript, also pass the shared canvas file ID as parentFileId so OpenGeni can verify the channel-to-canvas-to-transcript chain. Slack may still restrict a huddle transcript body to participants; that returns huddle_transcript_requires_participant_access. Private Slack URLs and credentials are never returned. Continue with nextOffset for truncated text.",
+        "Read a bounded page of text or view a PNG, JPEG, or WebP image from a Slack file shared with a channel where the workspace-shared Opengeni bot is already a member. Use the file ID from thread replies to view images in earlier thread messages. Images are returned as viewable content, only when directly shared to a non-shared channel, up to 640 KiB; offset must be 0. For an embedded huddle transcript, also pass the shared canvas file ID as parentFileId so Opengeni can verify the channel-to-canvas-to-transcript chain. Slack may still restrict a huddle transcript body to participants; that returns huddle_transcript_requires_participant_access. Private Slack URLs and credentials are never returned. Continue with nextOffset for truncated text.",
       inputSchema: {
         connectionId: z4.string().uuid().optional(),
         channelId: z4.string().min(1).max(64),
@@ -2060,7 +2260,7 @@ function registerSlackBotTools(
     "slack_bot_upload_file",
     {
       description:
-        "Upload one explicitly selected retained workspace file (including generated images) into this session's existing Slack task thread as the OpenGeni bot. Use the file/artifact UUID returned by sandbox_file_publish or image generation. No channel or URL is accepted. Generate one operationId UUID per intended delivery and reuse the same operationId on every retry, including unknown outcomes; never start a replacement delivery to retry. Requires the bot's optional files:write scope: a Slack administrator must apply the bot manifest and reinstall an older bot, not connect a personal Slack account. Nonempty files up to 25 MiB; personal files stay in private task threads. Does not automatically upload files merely because they appear in a message.",
+        "Upload one explicitly selected retained workspace file (including generated images) into this session's existing Slack task thread as the Opengeni bot. Use the file/artifact UUID returned by sandbox_file_publish or image generation. No channel or URL is accepted. Generate one operationId UUID per intended delivery and reuse the same operationId on every retry, including unknown outcomes; never start a replacement delivery to retry. Requires the bot's optional files:write scope: a Slack administrator must apply the bot manifest and reinstall an older bot, not connect a personal Slack account. Nonempty files up to 25 MiB; personal files stay in private task threads. Does not automatically upload files merely because they appear in a message.",
       inputSchema: { fileId: z4.string().uuid(), operationId: z4.string().uuid() },
     },
     async ({ fileId, operationId }) => {
@@ -2097,7 +2297,7 @@ function registerSlackBotTools(
     "slack_bot_prepare_message",
     {
       description:
-        "Prepare a message for this scheduled task's Slack channel, posted as the OpenGeni workspace bot. The channel was chosen by a person on the task; you cannot pick another one. This saves the exact text without sending it. Then call slack_bot_send_prepared_message with the returned messageId. Pass threadTimestamp (a timestamp returned by an earlier send) to reply in that thread of the same channel.",
+        "Prepare a message for this scheduled task's Slack channel, posted as the Opengeni workspace bot. The channel was chosen by a person on the task; you cannot pick another one. This saves the exact text without sending it. Then call slack_bot_send_prepared_message with the returned messageId. Pass threadTimestamp (a timestamp returned by an earlier send) to reply in that thread of the same channel.",
       inputSchema: {
         text: z4.string().min(1).max(40_000),
         threadTimestamp: z4
@@ -2123,7 +2323,7 @@ function registerSlackBotTools(
     "slack_bot_send_prepared_message",
     {
       description:
-        "Send a message prepared by slack_bot_prepare_message in this chat, exactly as saved, to the task's Slack channel as the OpenGeni workspace bot. If a send is interrupted or its outcome is unclear, retry with the same messageId: OpenGeni checks Slack and never posts the same message twice. Do not prepare a new message just to retry.",
+        "Send a message prepared by slack_bot_prepare_message in this chat, exactly as saved, to the task's Slack channel as the Opengeni workspace bot. If a send is interrupted or its outcome is unclear, retry with the same messageId: Opengeni checks Slack and never posts the same message twice. Do not prepare a new message just to retry.",
       inputSchema: { messageId: z4.string().uuid() },
     },
     async ({ messageId }) => {
@@ -2146,7 +2346,7 @@ function registerSlackBotTools(
     "slack_bot_delete_message",
     {
       description:
-        "Delete a message authored by the workspace-shared OpenGeni bot. Pass the channel ID and exact message timestamp returned by a prior post or channel/thread read. Generate one operationId UUID per intended deletion and reuse it on every retry, including after an unknown outcome. Slack refuses deletion of messages not authored by this bot.",
+        "Delete a message authored by the workspace-shared Opengeni bot. Pass the channel ID and exact message timestamp returned by a prior post or channel/thread read. Generate one operationId UUID per intended deletion and reuse it on every retry, including after an unknown outcome. Slack refuses deletion of messages not authored by this bot.",
       inputSchema: {
         connectionId: z4.string().uuid().optional(),
         operationId: z4.string().uuid(),
@@ -2405,144 +2605,6 @@ function registerFikenTools(
     },
     async ({ connectionId, ...input }) =>
       json(await (await clientFor(connectionId)).listSales(input)),
-  );
-}
-
-function registerAtlassianTools(
-  server: McpServer,
-  deps: ApiRouteDeps,
-  grant: AccessGrant,
-  json: JsonResult,
-): void {
-  const connectionFor = async (connectionId?: string) => {
-    const authorized = await authorizedAtlassianConnectionsForGrant({
-      db: deps.db,
-      grant,
-    });
-    const candidates = authorized.filter(({ connection }) =>
-      connectionId ? connection.id === connectionId : true,
-    );
-    if (candidates.length === 0) {
-      throw new Error(
-        connectionId
-          ? "the requested Atlassian connection is unavailable for this turn"
-          : "no Atlassian connection is available for this turn",
-      );
-    }
-    if (!connectionId && candidates.length > 1) {
-      throw new Error(
-        "connectionId is required because multiple Atlassian connections are available",
-      );
-    }
-    const authority = candidates[0]!;
-    const metadata = AtlassianConnectionMetadata.safeParse(authority.connection.metadata);
-    if (!metadata.success) throw new Error("Atlassian connection metadata is invalid");
-    const claims = exactAgentAttemptClaims(grant);
-    if (grant.principalKind === "agent_attempt" && !claims) {
-      throw new Error("Atlassian access requires the exact active agent attempt");
-    }
-    return {
-      ...(claims
-        ? {
-            connectionUseContext: {
-              ...claims,
-              accountId: grant.accountId,
-              workspaceId: grant.workspaceId,
-            },
-          }
-        : {}),
-      connection: authority.connection,
-      metadata: metadata.data,
-      subjectId: authority.subjectId ?? grant.subjectId,
-    };
-  };
-
-  server.registerTool(
-    "atlassian_sources_list",
-    {
-      description:
-        "List the Jira projects and Confluence spaces available through the authorized Atlassian connection, including which sources are selected for OpenGeni. Use this before search when the site or boundary is unclear.",
-      inputSchema: { connectionId: z4.string().uuid().optional() },
-    },
-    async ({ connectionId }) => {
-      const authority = await connectionFor(connectionId);
-      const response = await browseAtlassianSources(deps, {
-        workspaceId: authority.connection.workspaceId,
-        ...(authority.connectionUseContext
-          ? { connectionUseContext: authority.connectionUseContext }
-          : {}),
-        subjectId: authority.subjectId,
-        connectionId: authority.connection.id,
-      });
-      const selected = new Set(authority.metadata.selectedSources.map((source) => source.id));
-      return json({
-        connectionId: authority.connection.id,
-        account: authority.metadata.displayName,
-        items: response.items.map((item) => ({
-          ...item,
-          selected: selected.has(item.id),
-        })),
-      });
-    },
-  );
-
-  server.registerTool(
-    "atlassian_search",
-    {
-      description:
-        "Search Jira issues and Confluence pages live within the projects and spaces selected for OpenGeni. Results reflect current Atlassian data and permissions, independent of the knowledge sync index.",
-      inputSchema: {
-        connectionId: z4.string().uuid().optional(),
-        query: z4.string().min(1).max(500),
-        product: z4.enum(["jira", "confluence"]).optional(),
-        limit: z4.number().int().min(1).max(50).optional(),
-      },
-    },
-    async ({ connectionId, query, product, limit }) => {
-      const authority = await connectionFor(connectionId);
-      return json({
-        connectionId: authority.connection.id,
-        results: await searchAtlassianLive(deps, {
-          workspaceId: authority.connection.workspaceId,
-          ...(authority.connectionUseContext
-            ? { connectionUseContext: authority.connectionUseContext }
-            : {}),
-          subjectId: authority.subjectId,
-          connectionId: authority.connection.id,
-          query,
-          ...(product ? { product } : {}),
-          limit: limit ?? 20,
-        }),
-      });
-    },
-  );
-
-  server.registerTool(
-    "atlassian_get",
-    {
-      description:
-        "Open one current Jira issue or Confluence page, including description or page content and comments. The item must belong to a project or space selected for OpenGeni.",
-      inputSchema: {
-        connectionId: z4.string().uuid().optional(),
-        kind: z4.enum(["jira_issue", "confluence_page"]),
-        id: z4.string().min(1).max(256),
-      },
-    },
-    async ({ connectionId, kind, id }) => {
-      const authority = await connectionFor(connectionId);
-      return json(
-        await getAtlassianLiveItem(deps, {
-          workspaceId: authority.connection.workspaceId,
-          ...(authority.connectionUseContext
-            ? { connectionUseContext: authority.connectionUseContext }
-            : {}),
-          subjectId: authority.subjectId,
-          connectionId: authority.connection.id,
-          kind,
-          id,
-        }),
-      );
-    },
   );
 }
 
@@ -2809,7 +2871,7 @@ function registerGoalTools(
     "wait_for_input",
     {
       description:
-        "End the current turn and wait out of turn for relevant session input. This is self-only and does not require a goal. After success, the production runtime ends the turn at the tool-batch boundary without another model step or final message. Use it for long or uncertain waits, including right after spawning a child that needs minutes, instead of sleeping or repeatedly calling session_wait, session_get, or command_wait. No preliminary short wait or status recheck is required. timeoutSeconds is a relative safety-wake duration, not a blocking execution wait; choose it for the dependency or a meaningful user/task/Skill monitoring cadence, potentially hours or days within the schema limits. Do not schedule wakeups merely for unchanged reassurance unless an explicit update cadence requires it. OpenGeni persists the first absolute deadline for the turn, and repeated calls do not extend it. After answering a question during a wait, preserve the existing deadline by passing the time remaining, not a fresh full timeout. If less than the schema minimum remains or the deadline has passed, a question-only human/API turn that consumed no immediate machine input may finish without replacing the retained wait; its deadline machinery remains authoritative. Do not send an invalid timeout or silently extend the deadline. Otherwise do not assume the old wait remains armed; register a valid wait if needed and make any unavoidable deadline adjustment explicit. Timeout never cancels a background command. A human/API prompt, agent message or Steer, child terminal result (it carries the child's final answer in payload.finalAnswer), scheduled input, terminal background-command result, or the deadline wakes the session. Use goal_pause instead when the active goal itself should stop pending a human decision. Pending Codemode calls require the same live attempt: observe them with command_wait/command_read rather than ending the turn.",
+        "End the current turn and wait out of turn for relevant session input. This is self-only and does not require a goal. After success, the production runtime ends the turn at the tool-batch boundary without another model step or final message. Use it for long or uncertain waits, including right after spawning a child that needs minutes, instead of sleeping or repeatedly calling session_wait, session_get, or command_wait. No preliminary short wait or status recheck is required. timeoutSeconds is a relative safety-wake duration, not a blocking execution wait; choose it for the dependency or a meaningful user/task/Skill monitoring cadence, potentially hours or days within the schema limits. Do not schedule wakeups merely for unchanged reassurance unless an explicit update cadence requires it. Opengeni persists the first absolute deadline for the turn, and repeated calls do not extend it. After answering a question during a wait, preserve the existing deadline by passing the time remaining, not a fresh full timeout. If less than the schema minimum remains or the deadline has passed, a question-only human/API turn that consumed no immediate machine input may finish without replacing the retained wait; its deadline machinery remains authoritative. Do not send an invalid timeout or silently extend the deadline. Otherwise do not assume the old wait remains armed; register a valid wait if needed and make any unavoidable deadline adjustment explicit. Timeout never cancels a background command. A human/API prompt, agent message or Steer, child terminal result (it carries the child's final answer in payload.finalAnswer), scheduled input, terminal background-command result, or the deadline wakes the session. Use goal_pause instead when the active goal itself should stop pending a human decision. Pending Codemode calls require the same live attempt: observe them with command_wait/command_read rather than ending the turn.",
       inputSchema: {
         reason: inputWaitReasonSchema.describe(
           "Shown directly to the user; at most 2048 UTF-8 bytes. Write one short, natural sentence explaining what you are waiting for, with normal spacing. Exclude internal IDs, cursors, commit hashes, paths, and continuation instructions. Example: Waiting for the build and database checks to finish.",
@@ -3094,7 +3156,10 @@ function registerWorkspaceArtifactTools(
     await projectWorkspaceArtifactMutationProvenance(response, canReadProvenanceSession);
   const prepare = (
     html: string | undefined,
-    source?: { entrypoint: string; files: Array<{ path: string; content: string }> },
+    source?: {
+      entrypoint: string;
+      files: Array<{ path: string; content: string }>;
+    },
     requestedTools?: Array<{ serverId: string; toolName: string }>,
     uploadId?: string,
   ) => {
@@ -3929,7 +3994,7 @@ function registerFleetTools(
     "sandbox_attach",
     {
       description:
-        'Attach this session to a sandbox for subsequent sandbox operations. The target must be owned and verified ready. A managed-home session currently running on a Connected Machine crosses a safe attempt boundary when attached back to home: OpenGeni checkpoints completed work and continues the same logical turn on home without another user message. A same-target attach is a repair request: it revalidates readiness and advances the route epoch rather than returning unchanged success. Recovery-in-progress/degraded/unrecoverable outcomes are typed. Use a sandboxes_list `id`, or "session"/"default" for home.',
+        'Attach this session to a sandbox for subsequent sandbox operations. The target must be owned and verified ready. A managed-home session currently running on a Connected Machine crosses a safe attempt boundary when attached back to home: Opengeni checkpoints completed work and continues the same logical turn on home without another user message. A same-target attach is a repair request: it revalidates readiness and advances the route epoch rather than returning unchanged success. Recovery-in-progress/degraded/unrecoverable outcomes are typed. Use a sandboxes_list `id`, or "session"/"default" for home.',
       inputSchema: { target: z4.string().min(1) },
     },
     async ({ target }) => json(await swapActiveSandbox(services, await fleetContext(), target)),
@@ -3939,7 +4004,7 @@ function registerFleetTools(
     "sandbox_swap",
     {
       description:
-        'Swap the active sandbox for this session mid-conversation. Validates ownership and verified readiness, then advances the route epoch. A managed-home session currently running on a Connected Machine crosses a safe attempt boundary when swapped back to home: OpenGeni checkpoints completed work and continues the same logical turn on home without another user message. Same-target swaps also revalidate and fence stale route caches. An operation that encountered provider disappearance is not replayed; retry only after a typed recovery-ready result. Use a sandboxes_list `id`, or "session"/"default" for home.',
+        'Swap the active sandbox for this session mid-conversation. Validates ownership and verified readiness, then advances the route epoch. A managed-home session currently running on a Connected Machine crosses a safe attempt boundary when swapped back to home: Opengeni checkpoints completed work and continues the same logical turn on home without another user message. Same-target swaps also revalidate and fence stale route caches. An operation that encountered provider disappearance is not replayed; retry only after a typed recovery-ready result. Use a sandboxes_list `id`, or "session"/"default" for home.',
       inputSchema: { target: z4.string().min(1) },
     },
     async ({ target }) => json(await swapActiveSandbox(services, await fleetContext(), target)),
@@ -4767,17 +4832,30 @@ function registerWorkspaceOrchestrationTools(
       "session_events",
       {
         description:
-          "Read session history. Default view=conversation returns roughly ten complete user/assistant messages, including completed commentary, in a 16 KiB envelope; no token deltas or execution records. Prefer fewer complete messages; a single oversized message has fragment offsets and a lossless nextCursor continuation over retained source text, including large legacy rows. Fragment unit is codepoint for plain text or utf16 for codec text; pass the opaque v2 cursor unchanged (v1 cursors must restart). Pass cursor=nextCursor with sessionId, omitting other selectors; it binds the view, detail and direction. after/nextAfter and before/nextBefore only change position, never view or detail; use nextCursor when present to avoid skipping a message fragment. view=results returns final turn answers and actionable outcomes without duplicate message-completion text. view=tools returns compact call/result identities; includeArguments/includeOutput opt into one text or JSON-encoded value, and callId selects an exact call (sparse scans can return an empty advancing page). sourceExact=false and sourceOmitted identify oversized structured values that were omitted, never partial JSON presented as complete; scalar text remains resumable. Conversation/results/tools omit never-claimed human/API prompts and stale duplicate events. view=debug exposes the existing authorized audit query with explicit type/class filters, mode=monitoring|forensic and payloadMode=none|summary|full; raw deltas and never-claimed prompts require mode=forensic. Explicit legacy audit selectors remain supported without view. latest is an exclusive semantic-class lookup; resultMode=compact requires latest. No read observes commands or changes append-only history. REST behavior is unchanged.",
+          "Read session history. Default view=conversation returns roughly ten complete user/assistant messages, including completed commentary, in a 16 KiB envelope; no token deltas or execution records. Prefer fewer complete messages; a single oversized message has fragment offsets and a lossless nextCursor continuation over retained source text, including large legacy rows. Fragment unit is codepoint for plain text or utf16 for codec text; pass the opaque v2 cursor unchanged (v1 cursors must restart). Pass cursor=nextCursor with sessionId, omitting other selectors; it preserves the view, detail, direction and page size. limit is 1–50 for content views; larger values are rejected. after/nextAfter and before/nextBefore only change position, never view or detail; use nextCursor when present to avoid skipping a message fragment. view=results returns final turn answers and actionable outcomes without duplicate message-completion text. view=tools returns compact call/result identities; toolName finds exact named calls across retained history, then use a returned callId to read its result. includeArguments/includeOutput opt into one text or JSON-encoded value, and callId selects an exact call (sparse scans can return an empty advancing page). sourceExact=false and sourceOmitted identify oversized structured values that were omitted, never partial JSON presented as complete; scalar text remains resumable. Conversation/results/tools omit never-claimed human/API prompts and stale duplicate events. view=debug exposes the existing authorized audit query with explicit type/class filters, mode=monitoring|forensic and payloadMode=none|summary|full; raw deltas and never-claimed prompts require mode=forensic. Explicit legacy audit selectors remain supported without view. latest is an exclusive semantic-class lookup; resultMode=compact requires latest. No read observes commands or changes append-only history. REST behavior is unchanged.",
         inputSchema: {
           sessionId: z4.string().uuid(),
           view: z4.enum(["conversation", "results", "tools", "debug"]).optional(),
           cursor: z4.string().max(4096).optional(),
           callId: z4.string().max(512).optional(),
+          toolName: z4
+            .string()
+            .min(1)
+            .max(256)
+            .optional()
+            .describe(
+              "Exact tool name; selects calls in view=tools. Use a returned callId for its result.",
+            ),
           includeArguments: z4.boolean().optional(),
           includeOutput: z4.boolean().optional(),
           after: z4.number().int().nonnegative().optional(),
           before: z4.number().int().positive().optional(),
-          limit: z4.number().int().positive().optional(),
+          limit: z4
+            .number()
+            .int()
+            .positive()
+            .optional()
+            .describe("Page size, 1–50 for conversation/results/tools. Continuations preserve it."),
           direction: z4.enum(SessionEventReadDirection.options).optional(),
           mode: z4.enum(SessionEventReadMode.options).optional(),
           payloadMode: z4.enum(SessionEventPayloadMode.options).optional(),
@@ -4827,6 +4905,7 @@ function registerWorkspaceOrchestrationTools(
           view,
           cursor,
           callId,
+          toolName,
           includeArguments,
           includeOutput,
           after,
@@ -4879,6 +4958,7 @@ function registerWorkspaceOrchestrationTools(
               view,
               cursor,
               callId,
+              toolName,
               includeArguments,
               includeOutput,
               after,
@@ -4904,10 +4984,13 @@ function registerWorkspaceOrchestrationTools(
         if (
           cursor !== undefined ||
           callId !== undefined ||
+          toolName !== undefined ||
           includeArguments !== undefined ||
           includeOutput !== undefined
         ) {
-          throw new Error("cursor/callId/includeArguments/includeOutput require a non-debug view");
+          throw new Error(
+            "cursor/callId/toolName/includeArguments/includeOutput require a non-debug view",
+          );
         }
         if (
           latest &&
@@ -5176,166 +5259,12 @@ function registerWorkspaceOrchestrationTools(
   }
 
   if (can("sessions:create") && sessionCreateVisible) {
-    const capabilityToggle = z4.boolean().optional();
-    const sessionCreateAgentInput = z4
-      .object({
-        capabilities: z4
-          .union([
-            z4.enum(["all", "none"]),
-            z4
-              .object({
-                from: z4.enum(["all", "none"]),
-                webSearch: capabilityToggle,
-                humanInput: capabilityToggle,
-                skills: z4
-                  .union([z4.literal("read"), z4.literal("manage"), z4.literal(false)])
-                  .optional(),
-                goals: capabilityToggle,
-                subagents: capabilityToggle,
-                knowledge: capabilityToggle,
-                schedules: capabilityToggle,
-                artifacts: capabilityToggle,
-                browser: capabilityToggle,
-                media: capabilityToggle,
-                workspaceFiles: capabilityToggle,
-                workspaceConnectors: capabilityToggle,
-                workspaceAdmin: capabilityToggle,
-              })
-              .strict(),
-          ])
-          .optional(),
-        identity: z4.string().min(1).max(AGENT_IDENTITY_MAX_CHARACTERS).nullable().optional(),
-        instructions: z4.string().min(1).max(SESSION_INSTRUCTIONS_MAX_CHARACTERS).optional(),
-        renderer: z4.enum(["opengeni", "markdown"]).optional(),
-      })
-      .strict()
-      .optional()
-      .describe(
-        "Optional agent configuration for the child. Omit to inherit this session's. capabilities 'all' means everything this session has; 'none' keeps only essentials; an object starts from one and switches capabilities off (or back on within this session's own set). A child may only narrow: enabling a capability this session lacks is rejected.",
-      );
-    const sessionCreateInput = z4
-      .object({
-        initialMessage: z4.string().min(1),
-        projectId: z4
-          .string()
-          .uuid()
-          .nullable()
-          .optional()
-          .describe(
-            "Workspace project to file the new session into. Omit for existing default behavior; does not change runtime or visibility.",
-          ),
-        title: z4
-          .string()
-          .min(1)
-          .max(SESSION_TITLE_MAX_CHARACTERS)
-          .optional()
-          .describe(
-            "Concise semantic title for the child session. Omit only when the delegated goal or initial message already provides a suitable title; OpenGeni derives a sensitive-safe bounded fallback from that text.",
-          ),
-        instructions: z4.string().min(1).max(SESSION_INSTRUCTIONS_MAX_CHARACTERS).optional(),
-        goal: GoalSpec.optional(),
-        resources: z4
-          .array(ResourceRef)
-          .optional()
-          .describe(
-            "Omit to inherit parent repositories only. Files are never inherited automatically; explicitly include file resources to attach them. An empty array inherits no resources.",
-          ),
-        tools: z4.array(ToolRef).optional(),
-        mcpServers: z4.array(SessionMcpServerInput).optional(),
-        variableSetId: z4.string().uuid().optional(),
-        variableSetIds: z4.array(z4.string().uuid()).max(MAX_SELECTED_VARIABLE_SETS).optional(),
-        environmentId: z4.string().uuid().optional(),
-        rigId: z4.string().uuid().optional(),
-        model: z4
-          .string()
-          .min(1)
-          .optional()
-          .describe(
-            "Model for the worker. Omit to inherit the exact calling turn's model, including its Codex subscription billing path.",
-          ),
-        reasoningEffort: CreateSessionRequest.out.shape.reasoningEffort.describe(
-          "Omit to inherit the exact calling turn's reasoning effort.",
-        ),
-        latencyMode: z4
-          .enum(["standard", "priority", "fast"])
-          .optional()
-          .describe(
-            "Omit for standard latency, even when model and reasoning are inherited. Fast or priority must be selected explicitly and supported by the model.",
-          ),
-        sandboxBackend: CreateSessionRequest.out.shape.sandboxBackend,
-        // Model-only structural coupling: workingDir cannot exist without a
-        // targetSandboxId because both live inside one optional object. The
-        // handler maps this back to the stable public REST/SDK request fields.
-        machineTarget: z4
-          .object({
-            targetSandboxId: z4.string().uuid(),
-            workingDir: z4.string().optional(),
-          })
-          .strict()
-          .optional(),
-        metadata: z4.record(z4.string(), z4.unknown()).optional(),
-        idempotencyKey: z4.string().min(1).max(200).optional(),
-        firstPartyMcpPermissions: z4
-          .array(Permission)
-          .optional()
-          .describe(
-            "Optional first-party capability set for the child. Omit to inherit this session's effective permissions. An explicit set may only narrow capabilities held by this session. A goal-bearing child requires goals:manage in the resulting set; creation fails rather than adding it implicitly.",
-          ),
-        firstPartyMcpTools: z4
-          .array(z4.enum(FIRST_PARTY_MCP_TOOL_NAMES))
-          .optional()
-          .describe(
-            "Exact model-visible first-party tool selection for the child. Omit to inherit this session's effective selection. An explicit selection may only narrow that selection: every listed tool must already be available to this session, and a wider list is rejected. To create a non-delegating leaf, provide a selection that omits session_create. This does not grant permissions.",
-          ),
-        // The child's agent-access scope and end-user label are never model
-        // choices: it inherits this session's exactly. Only the Memory
-        // selector may be narrowed here (workspace > user > off).
-        memoryScope: z4
-          .enum(["workspace", "user", "off"])
-          .optional()
-          .describe(
-            "Optional Memory selector for the child. Omit to inherit this session's selector. An explicit value may only narrow it (workspace > user > off); off gives the child no Memory tools. Use task notes for task-local findings.",
-          ),
-        // Omission is the ordinary safe sharing path. Literal "shared" remains
-        // available to advanced REST/SDK callers but is intentionally absent
-        // from the model surface because it turns compatibility drift into a
-        // deterministic failure instead of the omission path's safe own-box fallback.
-        sandbox: z4
-          .union([z4.literal("new"), z4.object({ groupId: z4.string().uuid() })])
-          .optional(),
-        // Registered only while agent configuration is admitted, so a
-        // deployment with the switch off keeps a byte-identical tool schema.
-        ...(agentConfigDeploymentPolicy(deps.settings).admissionEnabled
-          ? { agent: sessionCreateAgentInput }
-          : {}),
-      })
-      .superRefine((value, context) => {
-        if (!value.variableSetIds) return;
-        if (new Set(value.variableSetIds).size !== value.variableSetIds.length) {
-          context.addIssue({
-            code: z4.ZodIssueCode.custom,
-            path: ["variableSetIds"],
-            message: "variableSetIds must not contain duplicates",
-          });
-        }
-        const singular = value.variableSetId ?? value.environmentId;
-        if (singular === undefined) return;
-        const expected = value.variableSetIds[value.variableSetIds.length - 1];
-        if (singular !== expected) {
-          context.addIssue({
-            code: z4.ZodIssueCode.custom,
-            path: ["variableSetId"],
-            message: "variableSetId must match the last variableSetIds entry",
-          });
-        }
-      })
-      .strict();
     server.registerTool(
       "session_create",
       {
         description:
-          "Spawn a new agent session (a worker) only for a concrete, bounded subtask that can run independently and has a defined integration point in your current work. Delegation has setup and coordination overhead: by default, answer directly when the work takes only a few steps, and send a related follow-up to a worker you already spawned with session_send_message instead of spawning another. Explicit user requests and applicable Skill guidance for delegation, independent review, or fresh workers override that default within existing authority. After spawning work that needs minutes, once nothing else can advance, call wait_for_input and end the turn instead of alternating session_wait and session_get; no preliminary short wait or status recheck is required. The worker's terminal result wakes you and carries its final answer (payload.finalAnswer). Do not duplicate a child's implementation; independent review or comparison may intentionally examine the same subject with a distinct deliverable. Track the child and join its actual result before completing dependent work. Give the child a concise semantic title; if omitted, OpenGeni derives one from its delegated goal or initial message. The child inherits this session's visibility, agent-access scope and end-user label; a private session can only create a same-owner private child, and memoryScope may only narrow this session's selector. Give a goal-bearing child its delegated objective. Its goal.rootConstraints may be an exact applicable subset of this accepted turn's frozen root constraints; omit that field to inherit all of them. Omit sandbox for the safe default: compatible children share the creator's box, while a different Variable Set, Sandbox Environment, or machineTarget gets its own box. Use 'new' for deliberate isolation or {groupId} for a strict compatible sibling join. Put targetSandboxId and its optional workingDir together inside machineTarget; a machineTarget is always an own-box create even when the parent is backend none. To create a non-delegating leaf, pass a narrowed firstPartyMcpTools list that omits session_create; do not use a child-local depth override. Public REST/SDK callers retain advanced absolute depth and explicit shared-placement controls.",
-        inputSchema: contractToolInput(sessionCreateInput),
+          "Spawn a new agent session (a worker) only for a concrete, bounded subtask that can run independently and has a defined integration point in your current work. Delegation has setup and coordination overhead: by default, answer directly when the work takes only a few steps, and send a related follow-up to a worker you already spawned with session_send_message instead of spawning another. Explicit user requests and applicable Skill guidance for delegation, independent review, or fresh workers override that default within existing authority. After spawning work that needs minutes, once nothing else can advance, call wait_for_input and end the turn instead of alternating session_wait and session_get; no preliminary short wait or status recheck is required. The worker's terminal result wakes you and carries its final answer (payload.finalAnswer). Do not duplicate a child's implementation; independent review or comparison may intentionally examine the same subject with a distinct deliverable. Track the child and join its actual result before completing dependent work. Give the child a concise semantic title; if omitted, Opengeni derives one from its delegated goal or initial message. The child inherits this session's visibility, agent-access scope and end-user label; a private session can only create a same-owner private child, and memoryScope may only narrow this session's selector. Give a goal-bearing child its delegated objective. Its goal.rootConstraints may be an exact applicable subset of this accepted turn's frozen root constraints; omit that field to inherit all of them. Omit sandbox for the safe default: compatible children share the creator's box, while a different Variable Set, Sandbox Environment, or machineTarget gets its own box. Use 'new' for deliberate isolation or {groupId} for a strict compatible sibling join. Put targetSandboxId and its optional workingDir together inside machineTarget; a machineTarget is always an own-box create even when the parent is backend none. To create a non-delegating leaf, pass a narrowed firstPartyMcpTools list that omits session_create; do not use a child-local depth override. Public REST/SDK callers retain advanced absolute depth and explicit shared-placement controls.",
+        inputSchema: sessionCreateToolInput(),
       },
       async (args) => {
         try {
@@ -5375,7 +5304,7 @@ function registerWorkspaceOrchestrationTools(
           );
           return json(sessionCreateMutationReceipt(result, Boolean(request.idempotencyKey)));
         } catch (error) {
-          return orchestrationFailureResult("session_create", error);
+          return orchestrationFailureResult("session_create", error, deps, grant);
         }
       },
     );
@@ -5480,7 +5409,7 @@ function registerWorkspaceOrchestrationTools(
             }),
           );
         } catch (error) {
-          return orchestrationFailureResult("session_send_message", error);
+          return orchestrationFailureResult("session_send_message", error, deps, grant);
         }
       },
     );
@@ -5665,7 +5594,7 @@ function registerWorkspaceOrchestrationTools(
               }),
             );
           } catch (error) {
-            return orchestrationFailureResult("session_steer", error);
+            return orchestrationFailureResult("session_steer", error, deps, grant);
           }
         },
       );
@@ -6272,7 +6201,7 @@ function registerCapabilityDiscoveryTools(
     "capability_catalog_search",
     {
       description:
-        "Find integrations in OpenGeni's reviewed workspace catalog when the user asks to add one or needed access is missing. Search by integration name or task outcome. Results describe setup status and provide setup.nextAction when human setup can be requested. Use available tools directly for ready candidates. This reads metadata only and does not connect or authorize anything.",
+        "Find integrations in Opengeni's reviewed workspace catalog when the user asks to add one or needed access is missing. Search by integration name or task outcome. Results describe setup status and provide setup.nextAction when human setup can be requested. Use available tools directly for ready candidates. This reads metadata only and does not connect or authorize anything.",
       inputSchema: {
         query: z4.string().min(1).max(500),
         limit: z4.number().int().min(1).max(20).optional(),

@@ -59,7 +59,8 @@ export function trustedRequestSourceAddress(c: Context, trust: RequestSourceTrus
   // server-side position and could promote a caller-prepended value.
   const forwarded = header.split(",");
   const sourceIndex = forwarded.length - trustedProxyHops;
-  if (sourceIndex < 0) return peer;
+  if (sourceIndex < 0 || forwarded.some((address) => normalizedAddress(address) === null))
+    return peer;
   return normalizedAddress(forwarded[sourceIndex]) ?? peer;
 }
 
@@ -143,7 +144,11 @@ function normalizedAddress(value: string | null | undefined): string | null {
     if (ipv4WithPort) candidate = ipv4WithPort[1]!;
   }
   const zone = candidate.indexOf("%");
-  if (zone >= 0) candidate = candidate.slice(0, zone);
+  if (zone >= 0) {
+    const address = candidate.slice(0, zone);
+    if (isIP(address) !== 6 || !/^[A-Za-z0-9_.~-]+$/u.test(candidate.slice(zone + 1))) return null;
+    candidate = address;
+  }
   const family = isIP(candidate);
   if (family === 4) return candidate;
   if (family === 6) return candidate.toLowerCase();

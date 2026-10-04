@@ -315,7 +315,7 @@ async function discoverWorkspaceSkillsUnmeasured(
       throw new Error(`Repository skill "${name}" has an invalid description`);
     }
     if (reservedNames.has(key)) {
-      throw new Error(`Workspace skill "${name}" conflicts with a configured OpenGeni skill`);
+      throw new Error(`Workspace skill "${name}" conflicts with a configured Opengeni skill`);
     }
     const candidate: DiscoveredWorkspaceSkill = {
       name,

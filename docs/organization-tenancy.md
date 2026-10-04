@@ -1143,6 +1143,32 @@ backend must not fall back to `/v1/access/me`'s personal/default workspace when
 a tenant mapping is absent. Organization API keys receive no Personal-workspace
 authority through organization administration, key scope, or workspace ensure.
 
+### Service accounts
+
+Every organization API key belongs to a **service account**: an organization
+identity with no person behind it (`/v1/organizations/:id/service-accounts`,
+SDK `listOrganizationServiceAccounts`, `createOrganizationServiceAccount`,
+`updateOrganizationServiceAccount`, `deleteOrganizationServiceAccount`).
+Whoever may manage the organization's keys (`api_keys:manage`) manages service
+accounts; only an organization administrator can make one an admin.
+
+- Role is `admin` or `member`, never owner. A member's keys never hold
+  `account:admin`, `members:manage`, `billing:manage`, `api_keys:manage` or
+  `usage_allowances:manage`; creating or editing such a key is refused.
+  Making a service account a member narrows its live keys in the same
+  transaction (each becomes an explicit key without those permissions; a
+  legacy `workspace:admin` wildcard never turns into organization-level
+  permissions it didn't literally hold). The cap lives in the stored key
+  permissions, so every TypeScript and SQL check that reads a key sees it.
+- A key created without `serviceAccountId` gets its own service account named
+  after it (admin only when the key needs administrator permissions). A key
+  creating a key (rotation) keeps it with the same service account.
+- Deleting a service account revokes every key it holds at once.
+- Migration `0603_organization_service_accounts.sql` is a drained maintenance
+  cutover (same procedure as 0600). It gives every existing organization key
+  its own admin service account named after the key, so no key loses access;
+  keys that were already revoked get a deleted one.
+
 The external backend also remains the source of truth for product Skills. It
 stores and versions them outside OpenGeni and passes the selected definitions
 inline in `CreateSessionRequest.skills` for each product-created session. There

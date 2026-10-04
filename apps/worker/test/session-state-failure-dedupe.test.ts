@@ -3,6 +3,49 @@ import { CancelledFailure } from "@temporalio/activity";
 import { createSessionStateActivities } from "../src/activities/session-state";
 
 describe("failSessionAttempt child-terminal identity", () => {
+  test.each([true, false])(
+    "setup reconciliation re-peeks only after committed completion (%s)",
+    async (completed) => {
+      const blocked = {
+        kind: "admission-blocked" as const,
+        reason: "sandbox_setup_outcome_unknown",
+        ref: {
+          turnId: "turn",
+          attemptId: "attempt",
+          version: 1,
+          reason: "sandbox_command_start_outcome_unknown",
+        },
+      };
+      let reads = 0;
+      const peek = mock(async () => (++reads === 1 ? blocked : { kind: "runnable" as const }));
+      const reconcile = mock(async () => ({ reconciled: completed, events: [] }));
+      const db = {};
+      const activities = createSessionStateActivities(
+        async () => ({ db, observability: {} }) as any,
+        {
+          peekSessionWork: peek as any,
+          reconcileCompletedSandboxSetup: reconcile,
+          countQueuedTurns: mock(async () => 0),
+          recordTurnsQueuedGauge: mock(() => undefined),
+        },
+      );
+      expect(
+        await activities.peekSessionWork({
+          workspaceId: "workspace",
+          sessionId: "session",
+          observerAccountId: "account",
+        }),
+      ).toEqual(completed ? { kind: "runnable" } : blocked);
+      expect(reconcile).toHaveBeenCalledWith(db, {
+        accountId: "account",
+        workspaceId: "workspace",
+        sessionId: "session",
+        turnId: "turn",
+        attemptId: "attempt",
+      });
+      expect(reads).toBe(completed ? 2 : 1);
+    },
+  );
   test("legacy activity inputs use the workspace account for both owner observations", async () => {
     const owned = {
       kind: "attempt-owned" as const,

@@ -193,3 +193,25 @@ describe("trusted client address header", () => {
     ).toBeNull();
   });
 });
+
+test("malformed nonselected forwarding entries never establish a trusted source", async () => {
+  for (const forwardedFor of [
+    "198.51.100.1, bad-hop",
+    "bad-prefix, 198.51.100.1, 10.0.0.9",
+    "198.51.100.1, ,10.0.0.9",
+  ]) {
+    expect(await resolve(2, { peer: "10.0.0.10", forwardedFor })).toBe("10.0.0.10");
+  }
+});
+
+test("malformed IPv4 zone suffixes cannot pass whole-chain validation", async () => {
+  expect(
+    await resolve(1, {
+      peer: "10.0.0.10",
+      forwardedFor: "198.51.100.1%not-ipv6, 203.0.113.7",
+    }),
+  ).toBe("10.0.0.10");
+  expect(await resolve(1, { peer: "fe80::1%en0", forwardedFor: "[fe80::2%en1]:443" })).toBe(
+    "fe80::2",
+  );
+});

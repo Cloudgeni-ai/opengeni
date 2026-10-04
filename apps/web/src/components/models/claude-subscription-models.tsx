@@ -199,7 +199,7 @@ export function ClaudeAccessPage({
   accountId: string;
   onClose: () => void;
 }) {
-  const account = claude.accounts.find((account) => account.id === accountId);
+  const account = claude.accounts.find((candidate) => candidate.id === accountId);
   const access = useConnectionAccess({
     client: claude.client,
     organizationId: claude.organizationId,
@@ -229,6 +229,7 @@ export function ClaudeConnectPage({
   footerStart,
   blockedReason,
   afterSave,
+  onPendingChange,
 }: {
   claude: ClaudeSubscriptions;
   onClose: () => void;
@@ -241,6 +242,7 @@ export function ClaudeConnectPage({
   footerStart?: React.ReactNode;
   blockedReason?: string | null | undefined;
   afterSave?: ((accountId?: string) => Promise<void>) | undefined;
+  onPendingChange?: ((pending: boolean) => void) | undefined;
 }) {
   const [chosenScope, setChosenScope] = useState<"workspace" | "user">("workspace");
   const reconnectAccount = reconnectAccountId
@@ -283,6 +285,7 @@ export function ClaudeConnectPage({
       footerStart={footerStart}
       blockedReason={reconnectBlocked ?? blockedReason}
       afterSave={afterSave}
+      onPendingChange={onPendingChange}
       state={{
         organization: !!claude.organizationId,
         connected: !!reconnectAccountId,

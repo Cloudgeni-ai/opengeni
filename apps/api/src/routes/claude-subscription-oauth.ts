@@ -41,7 +41,9 @@ export function registerClaudeSubscriptionOAuthRoutes(
       .safeParse(c.req.param(organization ? "organizationId" : "workspaceId"));
     if (!id.success) throw new HTTPException(404, { message: "Scope not found" });
     if (organization) {
-      const human = await requireOrganizationCodexHuman(c, deps, id.data);
+      const human = await requireOrganizationCodexHuman(c, deps, id.data, {
+        providerConsent: true,
+      });
       return {
         accountId: id.data,
         workspaceId: null,
@@ -75,7 +77,7 @@ export function registerClaudeSubscriptionOAuthRoutes(
         browserSessionHash: await hashCodexBrowserSession("local:" + grant.subjectId),
       };
     throw new HTTPException(401, {
-      message: "Sign in to OpenGeni to connect Claude.",
+      message: "Sign in to Opengeni to connect Claude.",
     });
   }
   for (const organization of [false, true]) {

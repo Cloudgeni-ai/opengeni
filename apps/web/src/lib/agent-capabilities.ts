@@ -79,7 +79,7 @@ export const AGENT_STARTING_POINTS: readonly {
 export const SKILLS_OPTIONS: readonly { value: "off" | "read" | "manage"; label: string }[] = [
   { value: "off", label: "Off" },
   { value: "read", label: "Read" },
-  { value: "manage", label: "Read and manage" },
+  { value: "manage", label: "Read and write" },
 ];
 
 export function skillsOptionValue(value: AgentSkillsCapability): "off" | "read" | "manage" {
@@ -282,8 +282,6 @@ export function agentConfigErrorText(error: unknown, fallback: string): string {
       ? capabilityLabel(details.capability as AgentCapabilityId)
       : null;
   switch (code) {
-    case "agent_config_not_enabled":
-      return "Agent settings aren't turned on for this OpenGeni server yet. Ask whoever runs it.";
     case "agent_capability_unavailable":
       return capability
         ? `${capability} isn't enabled on this server. Turn it off and save again.`

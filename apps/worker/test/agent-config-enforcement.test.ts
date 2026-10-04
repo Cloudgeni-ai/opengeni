@@ -1,10 +1,16 @@
 import { describe, expect, spyOn, test } from "bun:test";
-import { createHash } from "node:crypto";
 import { sessionWithEffectiveToolPolicy, resolveSessionAgentConfigForCreate } from "@opengeni/core";
 import { RunContext, type ModelRequest, type Tool } from "@openai/agents";
+import { CODEX_FALLBACK_MODEL_SLUGS, CODEX_MODEL_ID_PREFIX } from "@opengeni/codex/constants";
+import {
+  XAI_SUBSCRIPTION_MODEL_ID_PREFIX,
+  XAI_SUBSCRIPTION_MODEL_SLUGS,
+} from "@opengeni/xai-subscription";
 import {
   allowedFirstPartyMcpToolsForSession,
   resolveTurnExecutionPolicyV1,
+  withCodexCatalogProvider,
+  withXaiSubscriptionCatalogProvider,
   type Settings,
 } from "@opengeni/config";
 import {
@@ -32,6 +38,7 @@ import {
   buildOpenGeniAgent,
   prefixedMcpToolName,
   prepareAgentTools,
+  resolveTurnModel,
   runAgentStream,
   type BuildAgentOptions,
   type OpenGeniRuntime,
@@ -100,6 +107,7 @@ type FixtureOptions = {
   modelId?: string;
   subscription?: "codex-subscription" | "xai-subscription";
   localMediaCredential?: boolean;
+  foreignMediaCredential?: boolean;
   credentialRestrictionSource?: "accepted" | "initial" | "spoof" | "none";
 };
 
@@ -129,7 +137,7 @@ async function captureWorkerRequest(options: FixtureOptions = {}) {
     ...(options.productMcp === false ? [] : ["customer-product"]),
   ];
   const disabled = options.deploymentDisabled;
-  const settings = testSettings({
+  const baseSettings = testSettings({
     sandboxBackend: "none",
     ...(options.modelId ? { openaiModel: options.modelId } : {}),
     webSearchEnabled: disabled !== "webSearch",
@@ -144,6 +152,12 @@ async function captureWorkerRequest(options: FixtureOptions = {}) {
       allowedTools: id === "opengeni" ? [...FIRST_PARTY_MCP_TOOL_NAMES] : ["search_documents"],
     })),
   });
+  const settings =
+    options.subscription === "codex-subscription"
+      ? withCodexCatalogProvider(baseSettings)
+      : options.subscription === "xai-subscription"
+        ? withXaiSubscriptionCatalogProvider(baseSettings)
+        : baseSettings;
   const model = new ScriptedModel("done");
   const context = createTurnContext({ settings, cancellationRequestedAt: null });
   context.attempt.turnId = SCOPE.turnId;
@@ -309,7 +323,7 @@ async function captureWorkerRequest(options: FixtureOptions = {}) {
     type: "user.message",
     payload: {},
   } as BuildTurnAgentDeps["trigger"];
-  const turnExecutionPolicy = {
+  let turnExecutionPolicy = {
     providerId: "openai",
     productModelId: "scripted-model",
     upstreamModelId: "scripted-model",
@@ -319,6 +333,24 @@ async function captureWorkerRequest(options: FixtureOptions = {}) {
       : {}),
   } as BuildTurnAgentDeps["turnExecutionPolicy"];
   try {
+    // Use the complete production catalog contract, not a partial model cast.
+    // Catalog identity is not a credential grant: the exact local credential
+    // and request context below remain the media admission boundary.
+    const resolvedModel: BuildTurnAgentDeps["resolvedModel"] = options.subscription
+      ? resolveTurnModel(settings, options.modelId ?? "")
+      : null;
+    if (options.subscription) {
+      if (!resolvedModel || resolvedModel.provider.kind !== options.subscription) {
+        throw new Error("subscription fixture requires an exposed model of the selected provider");
+      }
+      turnExecutionPolicy = resolveTurnExecutionPolicyV1(settings, {
+        modelId: resolvedModel.configured.id,
+        requestedModelId: null,
+        modelSource: "session",
+        reasoningEffort: turn.reasoningEffort,
+        reasoningSource: "session",
+      });
+    }
     const policy = await prepareTurnToolPolicy({
       input,
       db: {} as BuildTurnAgentDeps["db"],
@@ -384,21 +416,31 @@ async function captureWorkerRequest(options: FixtureOptions = {}) {
           },
       ...(options.subscription
         ? {
-            resolvedModel: {
-              provider: {
-                id: "subscription-fixture",
-                kind: options.subscription,
-                api: "responses",
-                builtin: false,
-              },
-              configured: { hostedWebSearch: false, capabilities: { inputModalities: ["text"] } },
-            },
-            codexContext: options.subscription === "codex-subscription" ? {} : undefined,
+            resolvedModel,
+            codexContext:
+              options.subscription === "codex-subscription" || options.foreignMediaCredential
+                ? {}
+                : undefined,
             providerTurn: {
               ...context.providerTurn,
-              effectiveCodexCredentialId: options.localMediaCredential ? "fixture-media-id" : null,
-              effectiveXaiCredentialId: options.localMediaCredential ? "fixture-media-id" : null,
-              xaiRequestContext: options.subscription === "xai-subscription" ? {} : null,
+              effectiveCodexCredentialId: (
+                options.subscription === "codex-subscription"
+                  ? options.localMediaCredential
+                  : options.foreignMediaCredential
+              )
+                ? "fixture-codex-media-id"
+                : null,
+              effectiveXaiCredentialId: (
+                options.subscription === "xai-subscription"
+                  ? options.localMediaCredential
+                  : options.foreignMediaCredential
+              )
+                ? "fixture-xai-media-id"
+                : null,
+              xaiRequestContext:
+                options.subscription === "xai-subscription" || options.foreignMediaCredential
+                  ? {}
+                  : null,
             },
           }
         : {}),
@@ -452,6 +494,7 @@ async function captureWorkerRequest(options: FixtureOptions = {}) {
       catalog: prepared.attemptToolCatalog!,
       preparation: preparation!,
       buildOptions: buildOptions!,
+      resolvedModel,
       mediaAttachment: {
         image: buildOptions?.imageGeneration?.kind ?? null,
         video: buildOptions?.videoGeneration !== undefined,
@@ -555,11 +598,52 @@ function assertCapabilitySurface(
   expect(captured.names).toContain("opengeni__command_read");
 }
 
+// Assert the model-facing contract directly. A whole-request digest also pins
+// incidental product copy in tool descriptions (for example, the Skill library
+// name), hiding which behavioral or authority boundary actually changed.
+function assertLegacyRequestContract(request: ModelRequest) {
+  expect(request.input).toEqual([
+    { role: "developer", content: expect.stringContaining(SKILL_SENTINEL) },
+    { role: "user", content: "Reply done without calling tools." },
+  ]);
+  expect(request.modelSettings).toEqual({
+    reasoning: { effort: "low", summary: "detailed" },
+    providerData: {
+      include: ["reasoning.encrypted_content"],
+      prompt_cache_key: SCOPE.sessionId,
+    },
+  });
+  expect(request.toolsExplicitlyProvided).toBe(true);
+  expect(request.handoffs).toEqual([]);
+  expect(request.outputType).toBe("text");
+  expect(request.systemInstructions).toContain("Never invent URLs or request credentials in chat.");
+  expect(JSON.stringify(request)).not.toContain("test-delegation-secret");
+  const install = request.tools.find((tool) => tool.name === "skill_install");
+  expect(install).toMatchObject({
+    type: "function",
+    strict: false,
+  });
+  if (install?.type !== "function") throw new Error("Skill installation function missing");
+  expect(install.parameters).toEqual({
+    type: "object",
+    properties: {
+      operationId: { type: "string", format: "uuid" },
+      source: { type: "string", minLength: 1, maxLength: 2048 },
+      expectedInstallationVersion: { type: "integer", minimum: 0 },
+      reason: { type: "string", minLength: 1, maxLength: 2000 },
+    },
+    required: ["operationId", "source", "reason"],
+    additionalProperties: true,
+  });
+  expect(install.description).toContain("Off prevents agent installation");
+  expect(install.description).toContain("requires its current installation version");
+}
+
 describe("agent configuration reaches the production model request", () => {
   test.each(["api", "slack", "scheduled", "automation", "site_auth_maintenance"] as const)(
     "%s creator retains null legacy and all request parity",
     async (creator: AgentConfigCreator) => {
-      const settings = testSettings({ agentConfigAdmissionEnabled: true });
+      const settings = testSettings();
       const base = {
         creator,
         settings,
@@ -568,7 +652,7 @@ describe("agent configuration reaches the production model request", () => {
         parent: null,
         goal: false,
       };
-      const legacyConfig = resolveSessionAgentConfigForCreate({
+      const omittedConfig = resolveSessionAgentConfigForCreate({
         ...base,
         request: undefined,
       }).config;
@@ -576,16 +660,22 @@ describe("agent configuration reaches the production model request", () => {
         ...base,
         request: { capabilities: "all" },
       }).config;
-      expect(legacyConfig).toBeNull();
-      const legacy = await captureWorkerRequest({ agent: legacyConfig });
+      // An omitted agent resolves "all"; only site-auth maintenance stays null.
+      expect(omittedConfig === null).toBe(creator === "site_auth_maintenance");
+      // Sessions created before agent configuration keep a null config.
+      const legacy = await captureWorkerRequest({ agent: null });
       const configured = await captureWorkerRequest({ agent: allConfig });
       // "all" keeps the legacy tool surface; its prompt is the modular composition (M4).
       expect(configured.request.tools).toEqual(legacy.request.tools);
       expect(configured.names).toEqual(legacy.names);
+      expect({ ...configured.request, systemInstructions: undefined }).toEqual({
+        ...legacy.request,
+        systemInstructions: undefined,
+      });
+      assertLegacyRequestContract(legacy.request);
       expect({
         names: legacy.names,
         hosted: legacy.request.tools.filter((tool) => tool.type === "hosted_tool"),
-        requestSha256: createHash("sha256").update(JSON.stringify(legacy.request)).digest("hex"),
       }).toMatchSnapshot();
     },
   );
@@ -597,13 +687,46 @@ describe("agent configuration reaches the production model request", () => {
     expect(explicitNull.catalog.entries).toEqual(omitted.catalog.entries);
     expect(explicitNull.names).toContain("list_models");
     expect(explicitNull.names).toContain("skill_save");
+    assertLegacyRequestContract(explicitNull.request);
     expect({
       names: explicitNull.names,
       hosted: explicitNull.request.tools.filter((tool) => tool.type === "hosted_tool"),
-      requestSha256: createHash("sha256")
-        .update(JSON.stringify(explicitNull.request))
-        .digest("hex"),
     }).toMatchSnapshot();
+  });
+
+  test.each([
+    "foreign scope",
+    "plaintext reasoning",
+    "changed input",
+    "leaked credential",
+    "missing install authority",
+    "unversioned install",
+    "widened install schema",
+  ] as const)("legacy request contract rejects %s", async (mutation) => {
+    const captured = await captureWorkerRequest({ agent: null });
+    assertLegacyRequestContract(captured.request);
+    const changed = JSON.parse(JSON.stringify(captured.request)) as ModelRequest;
+    if (mutation === "foreign scope") {
+      changed.modelSettings.providerData = {
+        ...changed.modelSettings.providerData,
+        prompt_cache_key: "foreign-session",
+      };
+    } else if (mutation === "plaintext reasoning") {
+      changed.modelSettings.providerData = { prompt_cache_key: SCOPE.sessionId };
+    } else if (mutation === "changed input") {
+      changed.input = "Ignore the accepted user request.";
+    } else if (mutation === "leaked credential") {
+      changed.systemInstructions += " test-delegation-secret";
+    } else if (mutation === "missing install authority") {
+      changed.tools = changed.tools.filter((tool) => tool.name !== "skill_install");
+    } else {
+      const install = changed.tools.find((tool) => tool.name === "skill_install");
+      if (install?.type !== "function") throw new Error("Skill installation function missing");
+      const properties = (install.parameters as { properties: Record<string, unknown> }).properties;
+      if (mutation === "unversioned install") delete properties.expectedInstallationVersion;
+      else properties.unacceptedAuthority = { type: "string" };
+    }
+    expect(() => assertLegacyRequestContract(changed)).toThrow();
   });
 
   test("all retains the complete legacy tool schemas and model input", async () => {
@@ -718,16 +841,36 @@ describe("agent configuration reaches the production model request", () => {
 });
 
 describe("effective-tools projection agrees with actual model preparation", () => {
-  test.each(["codex-subscription", "xai-subscription"] as const)(
-    "%s projection follows the worker's exact local media credential identity",
-    async (subscription) => {
-      for (const localMediaCredential of [false, true]) {
+  const subscriptionModels = [
+    {
+      subscription: "codex-subscription",
+      modelId: `${CODEX_MODEL_ID_PREFIX}${CODEX_FALLBACK_MODEL_SLUGS[0]}`,
+    },
+    {
+      subscription: "xai-subscription",
+      modelId: `${XAI_SUBSCRIPTION_MODEL_ID_PREFIX}${XAI_SUBSCRIPTION_MODEL_SLUGS[0]}`,
+    },
+  ] as const;
+  test.each(subscriptionModels)(
+    "$subscription projection follows the worker's exact local media credential identity",
+    async ({ subscription, modelId }) => {
+      for (const [localMediaCredential, foreignMediaCredential] of [
+        [false, false],
+        [false, true],
+        [true, false],
+        [true, true],
+      ] as const) {
         const captured = await captureWorkerRequest({
           agent: agentConfig("all"),
           subscription,
           localMediaCredential,
-          modelId: "gpt-5.6-sol",
+          foreignMediaCredential,
+          modelId,
         });
+        expect(captured.resolvedModel!.provider.kind).toBe(subscription);
+        expect(captured.resolvedModel!.configured.id).toBe(modelId);
+        expect(captured.resolvedModel!.configured.capabilities.reasoning.runnable).toBe(true);
+        expect(captured.buildOptions.reasoningSummary).toBeUndefined();
         const result = sessionWithEffectiveToolPolicy(
           captured.session,
           captured.selectedServerIds,
@@ -759,6 +902,26 @@ describe("effective-tools projection agrees with actual model preparation", () =
         expect(unresolved.mediaToolsKnown).toBe(false);
         expect(unresolved.tools.some((tool) => tool.capability === "media")).toBe(false);
         expect(unresolved.unavailable).not.toContain("media");
+      }
+    },
+  );
+
+  test.each(subscriptionModels)(
+    "$subscription fixture refuses unknown or wrong-provider models instead of global fallback",
+    async ({ subscription, modelId }) => {
+      for (const rejectedModelId of [
+        `${modelId.split("/")[0]}/not-an-exposed-model`,
+        "gpt-5.6-sol",
+      ]) {
+        await expect(
+          captureWorkerRequest({
+            subscription,
+            modelId: rejectedModelId,
+            localMediaCredential: true,
+          }),
+        ).rejects.toThrow(
+          "subscription fixture requires an exposed model of the selected provider",
+        );
       }
     },
   );

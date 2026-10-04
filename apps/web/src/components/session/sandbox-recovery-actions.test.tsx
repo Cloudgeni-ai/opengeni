@@ -143,7 +143,7 @@ for (const lane of ["checkpoint", "fresh_workspace"] as const) {
       );
     } else {
       expect(container.textContent).toContain(
-        "Retry will continue with an empty workspace. OpenGeni cannot restore the previous sandbox files automatically.",
+        "Retry will continue with an empty workspace. Opengeni cannot restore the previous sandbox files automatically.",
       );
       expect(container.textContent).not.toContain("checkpoint from");
     }

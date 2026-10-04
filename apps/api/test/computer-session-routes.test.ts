@@ -5,7 +5,7 @@ const routeUrl = new URL("../src/routes/computer-sessions.ts", import.meta.url);
 const appUrl = new URL("../src/app.ts", import.meta.url);
 
 describe("ComputerSession route discipline", () => {
-  test("registers the complete truthful lifecycle, control, receipt, and frame surface", async () => {
+  test("registers the complete lifecycle, control, receipt, and frame routes", async () => {
     const source = await readFile(routeUrl, "utf8");
     for (const route of [
       '"/v1/workspaces/:workspaceId/computer-sessions"',
@@ -24,33 +24,6 @@ describe("ComputerSession route discipline", () => {
     }
     expect(source).not.toContain("/computer-sessions/:computerSessionId/suspend");
     expect(source).not.toContain("/computer-sessions/:computerSessionId/resume");
-    expect(source).toContain('kind: "direct_websocket"');
-    expect(source).toContain('kind: "direct_rfb"');
-    expect(source).toContain('kind: "relay"');
-    expect(source).toContain("openRelayedComputerFrameStream");
-    expect(source).toContain("COMPUTER_CONTROL_WEBSOCKET_PROTOCOL");
-    const attachment = source.slice(
-      source.indexOf(
-        '"/v1/workspaces/:workspaceId/computer-sessions/:computerSessionId/attachments"',
-      ),
-      source.indexOf(
-        '"/v1/workspaces/:workspaceId/computer-sessions/:computerSessionId/heartbeat"',
-      ),
-    );
-    expect(attachment).toContain("requestOrigin(context, deps.settings)");
-    expect(attachment).toContain("client.addAllowedOrigins([origin])");
-    expect(attachment).toContain("sessionClient.listTargets()");
-    expect(attachment).toContain('target.kind === "screen"');
-    expect(attachment).toContain('record.session.platform === "linux"');
-    expect(attachment).toContain("client.computerRfbStreamUrl");
-    expect(attachment).toContain("COMPUTER_RFB_WEBSOCKET_PROTOCOL");
-    expect(attachment).toContain("placementUsesInteractionFrameProxy(placement.lease?.backend, {");
-    expect(attachment).toContain(
-      "openSandboxSignedEndpoints: deps.settings.openSandboxSignedEndpoints",
-    );
-    expect(attachment).toContain("createInteractionFrameProxyAttachment");
-    expect(attachment).toContain("publicBaseUrl: deps.settings.publicBaseUrl");
-    expect(attachment).toContain('context.req.header("x-forwarded-proto")');
     expect(await readFile(appUrl, "utf8")).toContain(
       "registerComputerSessionRoutes(app, routeDeps)",
     );

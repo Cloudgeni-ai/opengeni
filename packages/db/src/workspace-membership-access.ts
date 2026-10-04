@@ -36,6 +36,34 @@ export async function grantWorkspaceAccess(
     });
 }
 
+/** Insert-only membership grant: never overwrites an existing row. True when inserted. */
+export async function insertWorkspaceMembershipIfAbsent(
+  db: Database,
+  input: {
+    accountId: string;
+    workspaceId: string;
+    subjectId: string;
+    role?: string;
+    permissions: Permission[];
+  },
+): Promise<boolean> {
+  const inserted = await db
+    .insert(schema.workspaceMemberships)
+    .values({
+      accountId: input.accountId,
+      workspaceId: input.workspaceId,
+      subjectId: input.subjectId,
+      subjectLabel: null,
+      role: input.role ?? "member",
+      permissions: input.permissions,
+    })
+    .onConflictDoNothing({
+      target: [schema.workspaceMemberships.subjectId, schema.workspaceMemberships.workspaceId],
+    })
+    .returning({ subjectId: schema.workspaceMemberships.subjectId });
+  return inserted.length > 0;
+}
+
 export async function listWorkspaceMembers(
   db: Database,
   workspaceId: string,

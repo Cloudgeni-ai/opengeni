@@ -917,6 +917,8 @@ describe("createSessionProxyHandler", () => {
     expect((await locked.browser.getClientConfig()).modelSelection).toBe(false);
     const open = setup();
     expect((await open.browser.getClientConfig()).modelSelection).toBeUndefined();
+    const offered = setup({ modelSelection: true });
+    expect((await offered.browser.getClientConfig()).modelSelection).toBe(true);
   });
 
   test("lists only the resolved user's chats by default, filtered server-side", async () => {

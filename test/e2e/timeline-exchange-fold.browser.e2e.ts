@@ -419,17 +419,35 @@ describe("readable timeline browser regression", () => {
           window.exchangeFoldHarness!.show(window.exchangeFoldHarness!.total, true);
           return { before, after: selection.toString(), connected: paragraph.isConnected };
         });
+        expect(result.before.length).toBeGreaterThan(0);
         expect(result.connected).toBe(true);
         expect(result.after).toBe(result.before);
+        await nextPaint(page);
+        expect((await sample(page)).following).toBe(false);
+        // Selection owns the reader without moving them away from the tip.
+        // The jump stays quiet until there is actually content below them.
+        expect(await page.locator("[data-og-jump-to-latest]").count()).toBe(0);
+        const gap = await page
+          .locator("[data-og-timeline-scroller]")
+          .evaluate((node) => node.scrollHeight - node.clientHeight - node.scrollTop);
+        expect(gap).toBeLessThan(48);
         const output = process.env.OPENGENI_TIMELINE_PREVIEW_DIR;
         if (output) {
           mkdirSync(output, { recursive: true });
           writeFileSync(`${output}/selection-${width}.json`, JSON.stringify(result, null, 2));
           await page.screenshot({ path: `${output}/selection-${width}.png` });
         }
+        await page.locator("[data-og-timeline-scroller]").hover();
+        await page.mouse.wheel(0, -250);
+        await page.locator("[data-og-jump-to-latest]").waitFor();
+        expect(await page.evaluate(() => window.getSelection()!.toString())).toBe(result.before);
+        if (output) await page.screenshot({ path: `${output}/selection-away-${width}.png` });
         await page.locator("[data-og-jump-to-latest]").click();
         await nextPaint(page);
+        expect(await page.evaluate(() => window.getSelection()!.toString())).toBe("");
+        expect((await sample(page)).following).toBe(true);
         expect(await page.locator("[data-og-wide-table-message]").count()).toBe(1);
+        if (output) await page.screenshot({ path: `${output}/selection-returned-${width}.png` });
       } finally {
         await page.context().close();
       }
@@ -564,6 +582,116 @@ describe("readable timeline browser regression", () => {
         }
       }, 30_000);
     }
+  }
+
+  for (const width of [390, 1280]) {
+    test(`expanding live work pulls its progress notes into the row at ${width}px`, async () => {
+      const page = await openHarness("tail", width, width === 390, true);
+      const output = process.env.OPENGENI_TIMELINE_PREVIEW_DIR;
+      try {
+        await page.evaluate(() => {
+          const driver = window.exchangeFoldHarness!;
+          driver.show(driver.indexOf("session.status.changed")[0]!);
+        });
+        const header = page.locator('[data-og-work-header="outer"]').last();
+        await header.waitFor();
+        await page.waitForTimeout(800);
+        const shown = page.locator('[data-og-live-note="shown"]');
+        const folded = page.locator('[data-og-live-note="folded"]');
+        const section = page.locator("[data-og-work-section]").last();
+        expect(await shown.count()).toBe(3);
+        expect(await header.getAttribute("aria-expanded")).toBe("false");
+        const top = async (locator: typeof header) =>
+          await locator.evaluate((node) => node.getBoundingClientRect().top);
+        const firstNoteTop = await top(shown.first());
+        const scrollerTop = await top(page.locator("[data-og-timeline-scroller]"));
+        // Per frame: the prompt above the notes, and the work row.
+        const trace = async () =>
+          await page.evaluate(async () => {
+            const prompts = document.querySelectorAll("[data-og-prompt]");
+            const headers = document.querySelectorAll('[data-og-work-header="outer"]');
+            const prompt = prompts[prompts.length - 1]!;
+            const row = headers[headers.length - 1]!;
+            const frames: { prompt: number; row: number }[] = [];
+            for (let frame = 0; frame < 24; frame += 1) {
+              await new Promise((resolve) => requestAnimationFrame(resolve));
+              frames.push({
+                prompt: prompt.getBoundingClientRect().top,
+                row: row.getBoundingClientRect().top,
+              });
+            }
+            return frames;
+          });
+        const range = (values: number[]) => Math.max(...values) - Math.min(...values);
+
+        await header.click();
+        const opening = await trace();
+        // The row rises into the first note's place. When that place is on
+        // screen, nothing above the notes moves; when it is above the screen,
+        // the row stops at the top edge so its list starts right beneath.
+        if (firstNoteTop >= scrollerTop)
+          expect(range(opening.map((frame) => frame.prompt))).toBeLessThanOrEqual(1);
+        const rows = opening.map((frame) => frame.row);
+        expect(rows.every((value, index) => index === 0 || value <= rows[index - 1]! + 1)).toBe(
+          true,
+        );
+        // It stops where the first note began, or sticks at the top edge.
+        expect(Math.abs(rows.at(-1)! - Math.max(firstNoteTop, scrollerTop))).toBeLessThanOrEqual(
+          16,
+        );
+        expect(await header.getAttribute("aria-expanded")).toBe("true");
+        expect(await folded.count()).toBe(3);
+        expect(await shown.count()).toBe(0);
+        for (const note of await folded.all()) {
+          expect((await note.boundingBox())?.height ?? 0).toBeLessThanOrEqual(1);
+        }
+        for (const check of [1, 2, 3]) {
+          expect(await section.getByText(`Check ${check}: reconcile sources`).isVisible()).toBe(
+            true,
+          );
+        }
+        await page.waitForTimeout(1200);
+
+        const stuck = Math.abs((await top(header)) - scrollerTop) <= 2;
+        await header.click();
+        const closing = await trace();
+        const back = closing.map((frame) => frame.row);
+        if (stuck) {
+          // Closed from the sticky header after reading down the list: land on
+          // the closed row in one step, resting at the bottom edge with its
+          // notes back above it.
+          await page.waitForTimeout(300);
+          const edge = await page.locator("[data-og-timeline-scroller]").evaluate((node) => {
+            const box = node.getBoundingClientRect();
+            return { top: box.top, bottom: box.top + node.clientHeight };
+          });
+          const row = await header.evaluate((node) => {
+            const box = node.closest("[data-og-timeline-group-anchor]")!.getBoundingClientRect();
+            return { top: box.top, bottom: box.bottom };
+          });
+          expect(row.top).toBeGreaterThanOrEqual(edge.top);
+          expect(row.bottom).toBeLessThanOrEqual(edge.bottom);
+        } else {
+          // Closed in flow: nothing above the notes moves, and the row moves
+          // only down, steadily, as the notes come back above it.
+          expect(range(closing.map((frame) => frame.prompt))).toBeLessThanOrEqual(1);
+          expect(back.every((value, index) => index === 0 || value >= back[index - 1]! - 1)).toBe(
+            true,
+          );
+          expect(back.at(-1)!).toBeGreaterThan(back[0]! + 100);
+        }
+        expect(await header.getAttribute("aria-expanded")).toBe("false");
+        expect(await shown.count()).toBe(3);
+        expect(await folded.count()).toBe(0);
+        await page.waitForTimeout(1200);
+      } finally {
+        await page.context().close();
+        if (output) {
+          mkdirSync(`${output}/motion`, { recursive: true });
+          await page.video()?.saveAs(`${output}/motion/live-notes-fold-${width}.webm`);
+        }
+      }
+    }, 30_000);
   }
 
   for (const width of [390, 1280]) {
@@ -868,7 +996,7 @@ describe("readable timeline browser regression", () => {
           expect(await page.locator('[data-og-exchange-status="working"]').count()).toBe(1);
           expect(await page.locator('[data-og-exchange-status="waiting"]').count()).toBe(0);
           await page
-            .getByText("Approval was needed.", { exact: true })
+            .getByText("You responded to this approval.", { exact: true })
             .waitFor({ state: "visible" });
           expect(await page.getByText("waiting on you", { exact: false }).count()).toBe(0);
           await page

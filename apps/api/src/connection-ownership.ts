@@ -1,14 +1,27 @@
 import type { ConnectionOwnership } from "@opengeni/contracts";
 import {
   externalActorContinuationForAuthorization,
+  isVerifiedDelegatedHumanAuthorization,
   type AccessGrantAuthorization,
 } from "@opengeni/core";
 import { HTTPException } from "hono/http-exception";
+
+/** Signing in to a third-party provider is the person's own step in the
+ * browser; an agent acting as them through the organization MCP server is told
+ * to finish it there. */
+export function requireProviderConsentInBrowser(access: AccessGrantAuthorization): void {
+  if (isVerifiedDelegatedHumanAuthorization(access))
+    throw new HTTPException(403, {
+      message:
+        "Signing in to a provider has to be done by the person in the Opengeni app in a browser.",
+    });
+}
 
 /** A verified external actor must not enter a native callback that has no
  * corresponding key/identity reauthorization proof. Remove at an entry point
  * only when that provider's signed continuation and commit fence are wired. */
 export function requireLegacyOAuthActor(access: AccessGrantAuthorization): void {
+  requireProviderConsentInBrowser(access);
   if (externalActorContinuationForAuthorization(access))
     throw new HTTPException(422, {
       message: "This provider does not yet support external-user OAuth continuation",

@@ -37,6 +37,11 @@ portable guarantee that an Undici `dispatcher` is honored. This package does not
 follow redirects; each caller must make a manual redirect decision and call the
 transport again so every hop is independently resolved and pinned.
 
+The default pinned request adapter sends `User-Agent: OpenGeni` unless the
+caller supplies its own value, including through a `Request` object. This keeps
+OAuth discovery and provider requests compatible with servers that require an
+identified HTTP client.
+
 The package also exports `readJsonBase64Field` for provider APIs that return
 large binary artifacts inside JSON. It validates declared and streamed limits,
 decodes canonical base64 incrementally, and avoids retaining the JSON envelope

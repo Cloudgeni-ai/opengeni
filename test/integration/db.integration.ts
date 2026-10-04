@@ -1960,9 +1960,9 @@ async function createRlsAppRole(
   );
   // Match the runtime role's exact target-schema-local capabilities. These
   // functions are intentionally excluded from the broad private helper grant
-  // and remain unavailable to PUBLIC. The session reference helper and xAI
-  // validator are invoker-rights; the latter evaluates immutable snapshot
-  // CHECK constraints on ordinary session inserts.
+  // and remain unavailable to PUBLIC. The session reference helper and provider
+  // snapshot validators are invoker-rights; the latter evaluate immutable
+  // snapshot CHECK constraints on ordinary session inserts.
   await db.execute(
     dbSql.raw(
       `GRANT EXECUTE ON FUNCTION public.session_private_actor_visible(uuid, uuid, uuid, text) TO "${role}"`,
@@ -1981,6 +1981,11 @@ async function createRlsAppRole(
   await db.execute(
     dbSql.raw(
       `GRANT EXECUTE ON FUNCTION public.xai_provider_account_authority_snapshot_v1_valid(jsonb) TO "${role}"`,
+    ),
+  );
+  await db.execute(
+    dbSql.raw(
+      `GRANT EXECUTE ON FUNCTION public.claude_provider_account_authority_snapshot_v1_valid(jsonb) TO "${role}"`,
     ),
   );
   const url = new URL(ownerUrl);

@@ -289,10 +289,11 @@ export function createSandboxTurnRuntime(deps: SandboxTurnRuntimeDeps) {
   // Platform setup (beforeAgentStart hooks + file materialization) execs against
   // THIS handle so a mid-turn sandbox_swap can never re-route those execs onto a
   // connected machine (the user's real computer).
-  const finalizeTurnOpStreamOps = async (): Promise<void> => {
+  const finalizeTurnOpStreamOps = async (toolCallIds?: readonly string[]): Promise<void> => {
     await finalizeDurableTurnOpStreams(
       [sandboxState.lazyOwnedSandbox?.session, sandboxState.resolvedSandbox?.established.session],
       sandboxState.machinePrimarySession,
+      toolCallIds,
     );
   };
   // A same-target API repair can replace the home provider while this turn is
@@ -823,7 +824,7 @@ export function createSandboxTurnRuntime(deps: SandboxTurnRuntimeDeps) {
           if (status.fence === "funding") {
             stopLeaseHeartbeat();
             sandboxRotationController.abort(
-              new Error("Insufficient OpenGeni credits to extend paid sandbox compute"),
+              new Error("Insufficient Opengeni credits to extend paid sandbox compute"),
             );
             return;
           }

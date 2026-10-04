@@ -1,0 +1,13 @@
+diff --git a/overrides.d.ts b/overrides.d.ts
+index ec4f620289d9ee01ce6b09d7d8837255b3e730b2..fc537dca0b8a80cfe2c658e6f8c3243f42f00f0b 100644
+--- a/overrides.d.ts
++++ b/overrides.d.ts
+@@ -110,6 +110,8 @@ declare global {
+       on(event: "memoryPressure", listener: (level: "warning" | "critical") => void): this;
+       once(event: "memoryPressure", listener: (level: "warning" | "critical") => void): this;
+       off(event: "memoryPressure", listener: (level: "warning" | "critical") => void): this;
++      // Keep EventEmitter.off available for Node-compatible process listeners.
++      off(event: string | symbol, listener: (...args: any[]) => void): this;
+       addListener(event: "memoryPressure", listener: (level: "warning" | "critical") => void): this;
+       removeListener(event: "memoryPressure", listener: (level: "warning" | "critical") => void): this;
+       prependListener(event: "memoryPressure", listener: (level: "warning" | "critical") => void): this;

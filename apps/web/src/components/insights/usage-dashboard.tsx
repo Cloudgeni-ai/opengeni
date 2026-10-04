@@ -1,8 +1,6 @@
-import { CalendarIcon, LockIcon, Trash2Icon } from "lucide-react";
+import { CalendarIcon } from "lucide-react";
 import { useEffect, useMemo, useState, type ReactNode } from "react";
 
-import { ModelTile } from "@/components/model-identity";
-import { OpenGeniCreditsTile, ProviderTile } from "@/components/models/provider-mark";
 import { Button } from "@/components/ui/button";
 import { DropdownMenuItem } from "@/components/ui/dropdown-menu";
 import { EmptyState } from "@/components/ui/empty-state";
@@ -14,19 +12,12 @@ import {
   type RowListColumn,
   type RowListSort,
 } from "@/components/ui/list-row";
-import { LogoTile } from "@/components/ui/logo-tile";
 import { Notice } from "@/components/ui/notice";
 import { ReasonTooltip } from "@/components/ui/disabled-reason";
 import { SECTION_TITLE_CLASS } from "@/components/ui/section";
 import { SegmentedControl } from "@/components/ui/segmented-control";
 import { SelectMenu } from "@/components/ui/select-menu";
 import { StatGroup, StatTile, type StatDelta } from "@/components/ui/stat-tile";
-import {
-  ToolbarFilterChips,
-  ToolbarFilterMenu,
-  type ToolbarFilterGroup,
-  type ToolbarFilterValue,
-} from "@/components/ui/toolbar";
 import { useAppContext } from "@/context";
 import { apiErrorAdvice, isPermissionDenied } from "@/lib/api-error";
 import { cn } from "@/lib/utils";
@@ -35,9 +26,9 @@ import {
   catalogLabels,
   modelDisplayName,
   providerDisplayName,
-  type MarkId,
   type ModelLabelSource,
 } from "./model-display";
+import { FilterChips, FilterPicker, type FilterDimension } from "./filter-picker";
 import { StackedBarChart, type ChartBucket, type ChartSeries } from "./usage-chart";
 import {
   modelFilterKey,
@@ -46,6 +37,7 @@ import {
   type UsageFilterField,
   type UsageGroupBy,
   type UsageMeasures,
+  type UsagePayerId,
   type UsageResponse,
   type UsageScope,
 } from "./usage-contract";
@@ -78,6 +70,7 @@ import {
   payerName,
   priorLabel,
   rangeLabel,
+  sourceName,
   relativeChange,
   tokenTotal,
   type TokenClassId,
@@ -273,15 +266,25 @@ export function UsageDashboard(props: UsageDashboardProps) {
           <>
             <KpiTiles usage={usage} />
             <div className="@container/insights-panels min-w-0">
-              <div className="grid min-w-0 gap-6 @5xl/insights-panels:grid-cols-[minmax(0,1.55fr)_minmax(0,1fr)]">
-                <OverTimePanel
-                  usage={usage}
-                  rows={rows}
-                  metric={metric}
-                  split={props.search.split === "group"}
-                  onMetric={(next) => update({ metric: next })}
-                  onSplit={(next) => update({ split: next })}
-                />
+              {/* A source without a time series (older servers at organization
+                  scope) shows the type mix alone rather than an empty chart. */}
+              <div
+                className={cn(
+                  "grid min-w-0 gap-6",
+                  usage.series.length > 0 &&
+                    "@5xl/insights-panels:grid-cols-[minmax(0,1.55fr)_minmax(0,1fr)]",
+                )}
+              >
+                {usage.series.length > 0 ? (
+                  <OverTimePanel
+                    usage={usage}
+                    rows={rows}
+                    metric={metric}
+                    split={props.search.split === "group"}
+                    onMetric={(next) => update({ metric: next })}
+                    onSplit={(next) => update({ split: next })}
+                  />
+                ) : null}
                 <CompositionPanel measures={usage.totals} />
               </div>
             </div>
@@ -337,6 +340,7 @@ const FILTER_FIELD_LABEL: Record<UsageFilterField, string> = {
   person: "Person",
   rootSessionId: "Session",
   scheduleId: "Schedule",
+  source: "Source",
 };
 
 function FilterBar(props: {
@@ -356,9 +360,11 @@ function FilterBar(props: {
   // One option per name: the same model on a workspace and an organization
   // Claude plan reads (and filters) as one. An option's id is its raw ids
   // joined by "," (the URL's own separator), so picking it applies them all.
-  const groups: ToolbarFilterGroup[] = [];
-  const value: ToolbarFilterValue = {};
-  const push = (field: UsageFilterField, options: Array<{ ids: string[]; label: string }>) => {
+  const dimensions: FilterDimension[] = [];
+  const push = (
+    field: UsageFilterField,
+    options: Array<{ ids: string[]; label: string; hint?: string }>,
+  ) => {
     if (!allowed(field) && (filters[field]?.length ?? 0) === 0) return;
     const selected = new Set(filters[field] ?? []);
     const merged = mergeOptions(options);
@@ -379,14 +385,22 @@ function FilterBar(props: {
       });
       chosen.push(id);
     }
-    if (merged.length < 2 && selected.size === 0) return;
-    value[field] = chosen;
-    groups.push({
+    if (merged.length === 0) return;
+    dimensions.push({
       id: field,
       label: FILTER_FIELD_LABEL[field],
-      options: merged.map(({ id, label }) => ({ id, label })),
+      selected: chosen,
+      options: merged.map(({ id, label, hint }) => ({ id, label, ...(hint ? { hint } : {}) })),
     });
   };
+  push(
+    "person",
+    facets.people.map((p) => ({
+      ids: [p.key],
+      label: p.name ?? "Someone",
+      ...(p.you ? { hint: "You" } : {}),
+    })),
+  );
   push(
     "workspaceId",
     facets.workspaces.filter((w) => !w.personal).map((w) => ({ ids: [w.id], label: w.name })),
@@ -412,82 +426,129 @@ function FilterBar(props: {
   );
   push(
     "payer",
-    facets.payers.map((p) => ({ ids: [p], label: payerName(p) })),
+    facets.payers
+      .filter((p): p is UsagePayerId => (PAYER_IDS as readonly string[]).includes(p))
+      .map((p) => ({ ids: [p], label: payerName(p) })),
   );
   push(
     "projectId",
     facets.projects.map((p) => ({ ids: [p.id], label: p.name })),
   );
-  push(
-    "person",
-    facets.people.map((p) => ({
-      ids: [p.key],
-      label: p.you ? `${p.name ?? "You"} (you)` : (p.name ?? "Someone"),
-    })),
-  );
+  push("rootSessionId", []);
   push(
     "scheduleId",
     facets.schedules.map((s) => ({ ids: [s.id], label: s.name })),
   );
-  push("rootSessionId", []);
+  push(
+    "source",
+    (facets.sources ?? []).map((source) => ({ ids: [source], label: sourceName(source) })),
+  );
 
-  const single = capabilities.multiValue === false;
-  const onValueChange = (next: ToolbarFilterValue) => {
-    const fields = new Set([...Object.keys(next), ...Object.keys(value)]) as Set<UsageFilterField>;
-    let change: UsageSearchChange | null = null;
-    for (const field of fields) {
-      const before = value[field] ?? [];
-      let after = [...(next[field] ?? [])];
-      if (before.join("\n") === after.join("\n")) continue;
-      // The older endpoints take one value per filter: the newest pick wins.
-      if (single && after.length > 1) after = after.filter((id) => !before.includes(id)).slice(-1);
-      change = { filter: { field, values: after.flatMap((id) => id.split(",")) } };
-    }
-    if (Object.keys(next).every((field) => (next[field] ?? []).length === 0)) {
-      props.onChange({ clearFilters: true });
-      return;
-    }
-    if (change) props.onChange(change);
-  };
+  const setDimension = (field: string, selected: string[]) =>
+    props.onChange({
+      filter: {
+        field: field as UsageFilterField,
+        values: selected.flatMap((id) => id.split(",")),
+      },
+    });
   const ranges = RANGES.filter((range) => capabilities.ranges.includes(range.id));
+  const custom = props.query.range === "custom";
+  const day = (iso: string) => iso.slice(0, 10);
 
   return (
-    <div role="group" aria-label="Filters" className="flex min-w-0 flex-wrap items-center gap-2">
-      <SelectMenu
-        aria-label="Period"
-        size="sm"
-        value={props.usage.range}
-        onValueChange={(range) => props.onChange({ range })}
-        options={ranges.map((range) => ({ value: range.id, label: range.label }))}
-        className="w-40"
-      />
-      {groups.length > 0 ? (
-        <ToolbarFilterMenu
-          groups={groups}
-          value={value}
-          onValueChange={onValueChange}
-          align="start"
-          className="h-8 rounded-[8px]"
+    <div className="flex min-w-0 flex-col gap-2">
+      <div role="group" aria-label="Filters" className="flex min-w-0 flex-wrap items-center gap-2">
+        <SelectMenu
+          aria-label="Period"
+          size="sm"
+          value={custom ? "custom" : props.usage.range}
+          onValueChange={(range) =>
+            range === "custom"
+              ? props.onChange({
+                  range,
+                  from: day(props.usage.windowStart),
+                  to: day(props.usage.windowEnd),
+                })
+              : props.onChange({ range })
+          }
+          options={ranges.map((range) => ({ value: range.id, label: range.label }))}
+          className="w-40"
         />
-      ) : null}
-      <ToolbarFilterChips groups={groups} value={value} onValueChange={onValueChange} />
+        {custom ? (
+          <span className="inline-flex items-center gap-1.5 text-sm text-fg-muted">
+            <DateField
+              label="From"
+              value={props.query.from ?? ""}
+              max={props.query.to}
+              onChange={(from) => props.onChange({ range: "custom", from })}
+            />
+            <span aria-hidden="true">–</span>
+            <DateField
+              label="To"
+              value={props.query.to ?? ""}
+              min={props.query.from}
+              onChange={(to) => props.onChange({ range: "custom", to })}
+            />
+          </span>
+        ) : null}
+        {dimensions.length > 0 ? (
+          <FilterPicker
+            dimensions={dimensions}
+            onChange={setDimension}
+            single={capabilities.multiValue === false}
+          />
+        ) : null}
+      </div>
+      <FilterChips
+        dimensions={dimensions}
+        onChange={setDimension}
+        onClear={() => props.onChange({ clearFilters: true })}
+      />
     </div>
   );
 }
 
+function DateField(props: {
+  label: string;
+  value: string;
+  min?: string | undefined;
+  max?: string | undefined;
+  onChange: (value: string) => void;
+}) {
+  return (
+    <input
+      type="date"
+      aria-label={props.label}
+      value={props.value}
+      min={props.min}
+      max={props.max ?? new Date().toISOString().slice(0, 10)}
+      onChange={(event) => {
+        if (/^\d{4}-\d{2}-\d{2}$/.test(event.target.value)) props.onChange(event.target.value);
+      }}
+      className="h-8 rounded-[8px] border border-border bg-surface px-2 text-sm text-fg tabular-nums [color-scheme:inherit] focus-visible:border-border-strong focus-visible:outline-none"
+    />
+  );
+}
+
 function mergeOptions(
-  options: Array<{ ids: string[]; label: string }>,
-): Array<{ id: string; ids: string[]; label: string }> {
-  const byLabel = new Map<string, string[]>();
+  options: Array<{ ids: string[]; label: string; hint?: string }>,
+): Array<{ id: string; ids: string[]; label: string; hint?: string }> {
+  const byLabel = new Map<string, { ids: string[]; hint?: string }>();
   for (const option of options) {
-    byLabel.set(option.label, [...(byLabel.get(option.label) ?? []), ...option.ids]);
+    const existing = byLabel.get(option.label);
+    byLabel.set(option.label, {
+      ids: [...(existing?.ids ?? []), ...option.ids],
+      ...((existing?.hint ?? option.hint) ? { hint: existing?.hint ?? option.hint } : {}),
+    });
   }
   return [...byLabel.entries()]
-    .map(([label, ids]) => {
+    .map(([label, { ids, hint }]) => {
       const unique = [...new Set(ids)].sort();
-      return { id: unique.join(","), ids: unique, label };
+      return { id: unique.join(","), ids: unique, label, ...(hint ? { hint } : {}) };
     })
-    .sort((a, b) => a.label.localeCompare(b.label));
+    .sort((a, b) =>
+      a.hint === "You" ? -1 : b.hint === "You" ? 1 : a.label.localeCompare(b.label),
+    );
 }
 
 function chipFallback(field: UsageFilterField, id: string, labels: ModelLabelSource): string {
@@ -982,19 +1043,6 @@ function sortValue(row: BreakdownRow, column: SortColumn): number | string {
   return row.measures.tokensTotal !== undefined ? -1 : row.measures.tokens[column];
 }
 
-function RowMark(props: {
-  mark: MarkId;
-  modelId?: string | undefined;
-  kind: BreakdownRow["kind"];
-}) {
-  if (props.modelId) return <ModelTile model={props.modelId} />;
-  if (props.kind === "private") return <LogoTile icon={<LockIcon />} />;
-  if (props.kind === "deleted") return <LogoTile icon={<Trash2Icon />} />;
-  if (props.mark === "opengeni") return <OpenGeniCreditsTile />;
-  if (props.mark) return <ProviderTile provider={props.mark} />;
-  return null;
-}
-
 function BreakdownPanel(props: {
   usage: UsageResponse;
   rows: readonly BreakdownRow[];
@@ -1011,11 +1059,6 @@ function BreakdownPanel(props: {
   const { usage, rows } = props;
   const [sort, setSort] = useState<RowListSort>({ column: "cost", direction: "desc" });
   const groupBy = usage.groupBy;
-  const marks =
-    groupBy === "model" ||
-    groupBy === "provider" ||
-    groupBy === "payer" ||
-    rows.some((row) => row.kind === "private" || row.kind === "deleted");
   const sorted = useMemo(() => {
     const column = sort.column as SortColumn;
     const direction = sort.direction === "asc" ? 1 : -1;
@@ -1092,7 +1135,8 @@ function BreakdownPanel(props: {
               const unknownClasses = row.measures.tokensTotal !== undefined;
               const share =
                 totalCost > 0 && !costUnknown(row.measures) ? row.cost / totalCost : null;
-              const canDrill = row.filter !== null && filterAllowed;
+              const canDrill =
+                row.filter !== null && usage.capabilities.filters.includes(row.filter.field);
               const tokenCell = (id: TokenClassId) =>
                 unknownClasses ? (
                   id === "uncachedInput" ? (
@@ -1112,11 +1156,6 @@ function BreakdownPanel(props: {
               return (
                 <ListRow
                   key={row.id}
-                  leading={
-                    marks ? (
-                      <RowMark mark={row.mark} modelId={row.modelId} kind={row.kind} />
-                    ) : undefined
-                  }
                   title={row.label}
                   titleAddon={
                     row.you ? <span className="text-xs text-fg-subtle">You</span> : undefined
@@ -1327,11 +1366,8 @@ function RecentCalls(props: {
             ]}
             cells={{
               model: (
-                <span className="inline-flex min-w-0 items-center gap-2 text-sm text-fg-muted">
-                  <ModelTile model={call.model} size="sm" />
-                  <span className="truncate">
-                    {modelDisplayName(call.provider, call.model, props.labels)}
-                  </span>
+                <span className="block min-w-0 truncate text-sm text-fg-muted">
+                  {modelDisplayName(call.provider, call.model, props.labels)}
                 </span>
               ),
               input: <Quiet>{call.tokens ? formatCount(inputTotal(call.tokens)) : "—"}</Quiet>,

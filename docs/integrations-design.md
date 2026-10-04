@@ -51,7 +51,7 @@ Decisions baked in:
 - `credential_encrypted` is the only column that may hold secret material; `metadata` is UI-renderable verbatim. API list/get helpers never select `credential_encrypted`.
 - Revoking sets `status='revoked'` (row kept for audit) and best-effort calls the provider's revocation endpoint when known.
 
-**Ownership defaults.** New providers default to workspace ownership. Mail, calendar, contacts and drive setup suggest personal ownership. Users can explicitly choose either. OAuth profiles describe protocol requirements and optional `defaultOwnership`; they cannot prohibit a supported ownership choice. Reconnecting preserves the saved ownership.
+**Ownership defaults.** New providers default to workspace ownership. Mail, calendar, contacts and drive setup suggest personal ownership. Users can explicitly choose either when the provider supports both. OAuth profiles describe protocol requirements and optional `defaultOwnership`; reviewed built-in profiles may also require one ownership. The exact built-in Gmail bridge requires personal ownership at start, callback, reconnect and capability enablement. Historical workspace Gmail grants remain available for cleanup, never personal execution. Reconnecting preserves the saved ownership and cannot bypass the provider's ownership restriction.
 
 Generic MCP OAuth applies its profile default when ownership is omitted. The Integration Definition OAuth API requires an explicit ownership for a new account, while native setup supplies the user's choice. Workspace sharing uses the authorized provider account; it does not create a separate provider identity.
 
@@ -111,9 +111,10 @@ in their parsers.
 **OAuth callbacks enforce a signed claim, not a subject shape.** A callback
 carries signed state and no live principal, so it cannot re-evaluate
 `principalKind`. Every start path that may persist a personal owner therefore
-stamps a `personalOwnerVerified` claim into its HMAC-signed state, and all five
-callbacks that can persist one — Integration Definition OAuth, MCP OAuth,
-Google Drive, Atlassian, and social — require it. A state minted before the
+stamps a `personalOwnerVerified` claim into its HMAC-signed state, and the active
+callbacks that persist one — Integration Definition OAuth, MCP OAuth,
+Google Drive, and social — require it; retired Atlassian callbacks retain the
+same check before settling historical attempts. A state minted before the
 claim existed simply lacks it and fails closed, which closes the one
 `oauthStateTtlMs` in-flight window across a rolling deploy. This is also why the
 MCP callback's legacy `ownership: … ?? "personal"` decode cannot land a
@@ -122,10 +123,23 @@ redirect/error projection rather than sharing one HTTP status: for example,
 Integration Definition OAuth reports `connection_conflict`, while social OAuth
 reports `not_authorized`.
 
-The two personal-only first-party connectors (`google-drive/install`,
-`atlassian/install`) carry no ownership field at all and always write
-`subject_id = <caller>`, so their start routes apply the principal fence
-directly.
+The personal-only `google-drive/install` connector carries no ownership field
+and writes `subject_id = <caller>`, so its start route applies the principal
+fence directly. Historical `atlassian/install` states retain the same owner
+contract, but new native starts are retired.
+
+**Native Atlassian retirement.** Jira/Confluence agent access now uses the existing
+hosted Atlassian MCP connector and its OAuth flow. The native `atlassian` Connect
+provider and native live tools are no longer offered. Native setup, browsing,
+source selection, resume and manual schedule triggers refuse with `410` before
+provider requests. Older native callbacks retain signed-state/owner/replay checks
+and exact return navigation, settling pending attempts as failed without token
+exchange. Existing source schedules show **Sync retired**; future and queued
+runs cannot create new agent sessions, and already accepted attempts cannot fetch
+native content. Historical grants, imported Documents and run history remain;
+disconnect, pause and schedule deletion retain their cleanup semantics. Native
+wire types and old tool names are compatibility-only. Google Drive is unchanged.
+See [Atlassian](atlassian.md) for the exact boundaries.
 
 ## 3. Credential encryption
 
@@ -257,14 +271,14 @@ parameters are expressed as an `OAuthProviderProfile`
 the flow. `oauth-client.ts` resolves exactly one profile per start and reads
 every quirk from it: start-time payload fences (caller-client rejection,
 provider identity, exact MCP URL, required deployment client), ownership
-defaults, exact-URL reconnect binding and connection
+defaults and reviewed restrictions, exact-URL reconnect binding and connection
 selection, post-discovery authorization-server origin pins, `resource`
 parameter suppression, extra authorize parameters, and an exact scope override.
 
 Profiles come from two layers with a fixed resolution order — built-in, then
 catalog, then default:
 
-- **Built-in profiles** (hosted Slack MCP, official Gmail) live in code as data
+- **Built-in profiles** (Slack and Gmail API bridges) live in code as data
   because their fences are security invariants that must not depend on catalog
   import state. Reserved authorization servers (Google's) are an adjacent data
   table. Deployment-managed client
@@ -317,7 +331,7 @@ Served publicly at `GET /v1/integrations/oauth/client-metadata.json`:
   omitted in legacy 2025-03-26 mode.
 - Exact-match redirect URI only; never follow AS-supplied alternative redirects.
 - SSRF guard on PRM/AS-metadata/token-endpoint fetches: no private-range targets unless running in local/test or `OPENGENI_INTEGRATIONS_ALLOW_PRIVATE_NETWORK_TARGETS=true`.
-- No token passthrough: tokens minted for an MCP server go only to that server; our own first-party MCP servers keep validating audience on inbound tokens.
+- No arbitrary token passthrough: hosted MCP credentials go only to their exact bound server. Reviewed first-party API bridges may send their provider grant only to explicitly approved provider API destinations, with the same owner, resource and scope fences. Gmail's historical MCP resource identifies the local REST bridge: setup uses pinned Google OAuth metadata and a required Gmail profile check, without contacting Google's MCP preview server. Our own first-party MCP servers keep validating audience on inbound tokens.
 - Token responses stored, never logged.
 
 ## 6. Tool↔connection contract and `tool.auth_needed`

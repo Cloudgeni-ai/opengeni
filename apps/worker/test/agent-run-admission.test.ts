@@ -224,7 +224,7 @@ describe("worker agent-run admission funding", () => {
         ),
       ).toEqual({
         pausedReason: "allowance",
-        message: "OpenGeni usage allowance exhausted",
+        message: "Opengeni usage allowance exhausted",
       });
       expect(allowance).toHaveBeenCalledWith(expect.anything(), {
         accountId: ACCOUNT,
@@ -286,7 +286,7 @@ describe("worker agent-run admission funding", () => {
             initiatingHumanSubjectId: "user:original-goal-human",
           }),
         ).toEqual({
-          budgetBlocked: "OpenGeni usage allowance exhausted",
+          budgetBlocked: "Opengeni usage allowance exhausted",
           budgetPausedReason: "allowance",
         });
         expect(source).toHaveBeenCalledWith(lockedDb, WORKSPACE, causalTurnId);

@@ -43,6 +43,7 @@ export function useOrganizationProviderConnection({
   catalogConnection?: { connected: boolean; loaded: boolean; error: Error | null };
 }): ProviderConnectionView {
   const meta = ORGANIZATION_PROVIDER_META[providerKind];
+  const hasCatalogConnection = Boolean(catalogConnection);
   const [connection, setConnection] = useState<Connection | null>(null);
   const [models, setModels] = useState<CustomModel[]>([]);
   const [slug, setSlug] = useState("");
@@ -93,7 +94,7 @@ export function useOrganizationProviderConnection({
         : `Add models now; they become selectable after ${meta.shortName} is connected.`;
 
   const refreshConnection = useCallback(async (): Promise<Connection | null | undefined> => {
-    if (!enabled || catalogConnection) return undefined;
+    if (!enabled || hasCatalogConnection) return undefined;
     const generation = ++connectionGenerationRef.current;
     try {
       const result = await client.getOrganizationModelProviderConnection(
@@ -111,7 +112,7 @@ export function useOrganizationProviderConnection({
       setLoaded(true);
       return undefined;
     }
-  }, [client, organizationId, providerKind, enabled, Boolean(catalogConnection)]);
+  }, [client, organizationId, providerKind, enabled, hasCatalogConnection]);
 
   const claudeUsage = useClaudeUsage({
     client,

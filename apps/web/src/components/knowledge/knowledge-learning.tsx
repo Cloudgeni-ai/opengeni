@@ -17,16 +17,26 @@ import { Notice } from "@/components/ui/notice";
 import { SegmentedControl } from "@/components/ui/segmented-control";
 import { SettingRow, SettingRowGroup, SettingRowSkeleton } from "@/components/ui/setting-row";
 import { useAppContext } from "@/context";
+import {
+  AGENT_LEARNING_TITLE,
+  IDENTITY_POLICY_MODE,
+  IDENTITY_POLICY_VALUE,
+  LEARNING_MODE_LABEL,
+} from "@/lib/agent-learning-vocabulary";
+import { isPermissionDenied } from "@/lib/api-error";
+import type { CompanyProfileAgentPolicy } from "@/types";
 
-import { LEARNING_MODE_LABEL } from "./agent-learning-settings";
 import { errorText } from "./knowledge-data";
 
 /* ----------------------------------------------------------------------------
-   Learning: what agents may change on their own, and what waits in Review.
-   One control, "Automatic | Review first | Off", worded the same everywhere.
-   Shared chats and your private chats are two labelled groups; each change
-   saves at once, so the page has no footer.
+   Agent learning: what agents may change on their own, and what waits for
+   your OK. One control, "Automatic | Review first | Off", worded the same
+   everywhere. Shared chats and your private chats are two labelled groups;
+   organization owners also get the organization identity here, in the same
+   words. Each change saves at once, so the page has no footer.
    -------------------------------------------------------------------------- */
+
+export { AGENT_LEARNING_TITLE };
 
 export const LEARNING_DESTINATIONS: AgentLearningCategory[] = [
   "knowledge",
@@ -58,7 +68,77 @@ const CONSEQUENCE: Record<AgentLearningCategory, Record<AgentLearningMode, strin
   },
 };
 
+const IDENTITY_CONSEQUENCE: Record<AgentLearningMode, string> = {
+  automatic: "Agents apply identity and mission changes an owner asks for in a chat right away.",
+  review_first:
+    "Agents draft identity and mission changes an owner asks for, and that owner confirms them in the chat.",
+  off: "Agents can't change the organization identity. Owners still can.",
+};
+
 const MODES: AgentLearningMode[] = ["automatic", "review_first", "off"];
+
+export interface IdentityLearningPolicy {
+  mode: AgentLearningMode | null;
+  loading: boolean;
+  error: unknown;
+  reload: () => void;
+  save: (mode: AgentLearningMode) => Promise<void>;
+}
+
+/**
+ * Whether agents may change the organization identity (owner-only). Reads
+ * nothing when `enabled` is false and returns null, so callers render no row.
+ */
+export function useIdentityLearningPolicy(
+  workspaceId: string,
+  enabled: boolean,
+): IdentityLearningPolicy | null {
+  const { client } = useAppContext();
+  const [policy, setPolicy] = useState<CompanyProfileAgentPolicy | null>(null);
+  const [error, setError] = useState<unknown>(null);
+  const [retry, setRetry] = useState(0);
+  const latest = useRef<CompanyProfileAgentPolicy | null>(null);
+  latest.current = policy;
+  useEffect(() => {
+    if (!enabled) return;
+    let current = true;
+    setPolicy(null);
+    setError(null);
+    void client
+      .getCompanyProfileAgentPolicy(workspaceId)
+      .then((value) => {
+        if (current) setPolicy(value);
+      })
+      .catch((reason: unknown) => {
+        if (current) setError(reason);
+      });
+    return () => {
+      current = false;
+    };
+  }, [client, workspaceId, enabled, retry]);
+  const save = useCallback(
+    async (mode: AgentLearningMode) => {
+      const base = latest.current;
+      if (!base) return;
+      const next = await client.updateCompanyProfileAgentPolicy(workspaceId, {
+        mode: IDENTITY_POLICY_VALUE[mode],
+        expectedVersion: base.version,
+        operationId: crypto.randomUUID(),
+      });
+      setPolicy(next);
+    },
+    [client, workspaceId],
+  );
+  const reload = useCallback(() => setRetry((value) => value + 1), []);
+  if (!enabled) return null;
+  return {
+    mode: policy ? IDENTITY_POLICY_MODE[policy.mode] : null,
+    loading: policy === null && error === null,
+    error,
+    reload,
+    save,
+  };
+}
 
 export type LearningScope = "workspace" | "personal";
 
@@ -149,12 +229,15 @@ export function reviewEmptyLine(modes: Record<AgentLearningCategory, AgentLearni
 }
 
 function ModeRow({
-  category,
+  label,
+  description,
   value,
   disabled,
   onChange,
 }: {
-  category: AgentLearningCategory;
+  label: string;
+  /** One sentence: what this row governs, in the mode it is in. */
+  description: string;
   value: AgentLearningMode;
   disabled: boolean;
   onChange: (mode: AgentLearningMode) => Promise<void>;
@@ -163,12 +246,12 @@ function ModeRow({
   return (
     <SettingRow
       controlWidth="auto"
-      label={LEARNING_DESTINATION_LABEL[category]}
-      description={CONSEQUENCE[category][value]}
+      label={label}
+      description={description}
       control={
         <SegmentedControl<AgentLearningMode>
           size="sm"
-          aria-label={`${LEARNING_DESTINATION_LABEL[category]}: what agents may change`}
+          aria-label={`${label}: what agents may change`}
           options={MODES.map((mode) => ({ value: mode, label: LEARNING_MODE_LABEL[mode] }))}
           value={value}
           disabled={disabled}
@@ -227,7 +310,8 @@ function GroupRows({
       {categories.map((category) => (
         <ModeRow
           key={category}
-          category={category}
+          label={LEARNING_DESTINATION_LABEL[category]}
+          description={CONSEQUENCE[category][defaults.modes[category]]}
           value={defaults.modes[category]}
           disabled={!canEdit}
           onChange={async (mode) => {
@@ -249,6 +333,58 @@ function GroupRows({
   );
 }
 
+/** The organization identity, in the same words as the rows above it. */
+function IdentityRow({ policy }: { policy: IdentityLearningPolicy }) {
+  if (policy.loading) {
+    return (
+      <SettingRowGroup>
+        <SettingRowSkeleton />
+      </SettingRowGroup>
+    );
+  }
+  if (!policy.mode) {
+    return isPermissionDenied(policy.error) ? (
+      <p className="text-sm text-fg-muted">
+        Only organization owners can change this. Ask an owner for access.
+      </p>
+    ) : (
+      <Notice
+        tone="failed"
+        title="Couldn't load the organization identity setting"
+        action={
+          <Button type="button" size="sm" variant="outline" onClick={policy.reload}>
+            Try again
+          </Button>
+        }
+        actionLayout="responsive"
+      >
+        {errorText(policy.error)}
+      </Notice>
+    );
+  }
+  return (
+    <SettingRowGroup>
+      <ModeRow
+        label="Organization identity"
+        description={IDENTITY_CONSEQUENCE[policy.mode]}
+        value={policy.mode}
+        disabled={false}
+        onChange={async (mode) => {
+          try {
+            await policy.save(mode);
+            toast(`Organization identity: ${LEARNING_MODE_LABEL[mode]}. Applies to new messages.`);
+          } catch (reason) {
+            toast.error("Couldn't change Organization identity", {
+              description: errorText(reason),
+            });
+            policy.reload();
+          }
+        }}
+      />
+    </SettingRowGroup>
+  );
+}
+
 export function LearningPage({
   workspaceName,
   organizationName,
@@ -256,6 +392,7 @@ export function LearningPage({
   canManageWorkspace,
   shared,
   mine,
+  identity,
   onClose,
 }: {
   workspaceName: string;
@@ -266,14 +403,16 @@ export function LearningPage({
   shared: LearningDefaults;
   /** Defaults for your private chats. */
   mine: LearningDefaults;
+  /** Organization owners only: whether agents may change the organization identity. */
+  identity?: IdentityLearningPolicy | null;
   onClose: () => void;
 }) {
   return (
     <DetailPage back={{ label: "Knowledge", onClick: onClose }}>
       <DetailPageHeader
         leading={<LogoTile icon={<GraduationCapIcon />} />}
-        title="Learning"
-        meta="What agents can change on their own, and what waits in Review"
+        title={AGENT_LEARNING_TITLE}
+        meta="What agents can change on their own, and what waits for your OK"
       />
       <DetailPageBody>
         {!personal ? (
@@ -312,9 +451,17 @@ export function LearningPage({
             </InlineHelp>
           ) : null}
         </DetailSection>
+        {identity ? (
+          <DetailSection
+            title={`All of ${organizationName ?? "your organization"}`}
+            description="Only organization owners see and change this."
+          >
+            <IdentityRow policy={identity} />
+          </DetailSection>
+        ) : null}
         <DetailSection>
           <InlineHelp icon>
-            A chat or schedule can use its own settings. Change them in the chat's settings or on
+            A chat or schedule can use its own settings. Change them in the chat's Agent tab or on
             the schedule.
           </InlineHelp>
         </DetailSection>

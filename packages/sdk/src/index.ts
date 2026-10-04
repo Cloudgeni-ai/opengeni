@@ -1,4 +1,5 @@
-export {
+// Types only: a value re-export would pull the contracts runtime into the root entry.
+export type {
   SubscriptionAccountSummary,
   SubscriptionPoolSettings,
   ClaudeSubscriptionSetupTokenRequest,
@@ -6,6 +7,7 @@ export {
   ClaudeSubscriptionAccountsResponse,
 } from "@opengeni/contracts";
 export type {
+  ArtifactPinResponse,
   ArtifactCatalogKind,
   ArtifactCatalogItem,
   ArtifactCatalogListOptions,
@@ -227,6 +229,8 @@ export {
   sessionTitleIsPending,
 } from "./session-titles";
 export type { SessionDisplayTitleInput, SessionDisplayTitleOptions } from "./session-titles";
+// Preserve the published root aliases through the dependency-free leaf, never
+// the contracts root (which would load its schema runtime in native bundles).
 export {
   humanizeModelSlug,
   isRawModelLabel,
@@ -265,7 +269,10 @@ export type {
   SessionProxyMessageInput,
   SessionProxyResolution,
   SessionProxyResolve,
+  SessionProxyToolServer,
 } from "./session-proxy";
+export { ToolRequestError, verifyToolRequest } from "./tool-auth";
+export type { ToolRequestIdentity, ToolRequestLike, VerifyToolRequestOptions } from "./tool-auth";
 export {
   openGeniConsolePath,
   parseOpenGeniLink,
@@ -625,6 +632,10 @@ export type {
   OrganizationAdministrationMemberWorkspaceAccess,
   OrganizationAdministrationOverview,
   OrganizationApiKeyAccess,
+  OrganizationAccessPreset,
+  OrganizationWorkspaceScope,
+  OrganizationAccessPolicy,
+  OrganizationActor,
   OrganizationInvitation,
   OrganizationMember,
   OrganizationMembershipRole,
@@ -821,6 +832,17 @@ export type {
   CreateApiKeyRequest,
   CreateApiKeyResponse,
   CreateOrganizationApiKeyRequest,
+  UpdateOrganizationApiKeyRequest,
+  OrganizationMcpConnection,
+  OrganizationMcpConnectionList,
+  UpdateOrganizationMcpConnectionRequest,
+  OrganizationServiceAccount,
+  OrganizationServiceAccountRole,
+  ListOrganizationServiceAccountsResponse,
+  CreateOrganizationServiceAccountRequest,
+  UpdateOrganizationServiceAccountRequest,
+  McpConnectionRequest,
+  McpConnectionDecision,
   CreateCapabilityCatalogItemRequest,
   OpenGeniSlackBotInstallRequest,
   OpenGeniSlackBotInstallStart,
@@ -852,6 +874,7 @@ export type {
   CreateKnowledgeDropRequest,
   CreateKnowledgeMemoryRequest,
   CreateScheduledTaskRequest,
+  CreateSessionScheduledTaskRequest,
   CreateSessionRequest,
   CreateVariableSetRequest,
   CreateWorkspaceEnvironmentRequest,

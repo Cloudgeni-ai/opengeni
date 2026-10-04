@@ -1,4 +1,4 @@
-import { afterAll, beforeAll, describe, expect, test } from "bun:test";
+import { afterAll, beforeAll, describe, expect, setDefaultTimeout, test } from "bun:test";
 import { createHash, randomBytes, randomUUID } from "node:crypto";
 import {
   ToolGatewayApprovalResponse,
@@ -20,6 +20,9 @@ import {
   type TestMcpServer,
 } from "@opengeni/testing";
 import { createApp } from "../src/app";
+
+// Registered routes exercise real PostgreSQL/RLS and MCP lifecycle cleanup.
+setDefaultTimeout(30_000);
 
 let shared: SharedTestDatabase;
 let client: DbClient;

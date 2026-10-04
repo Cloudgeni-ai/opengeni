@@ -1,0 +1,30 @@
+diff --git a/src/connection.js b/src/connection.js
+--- a/src/connection.js
++++ b/src/connection.js
+@@ -287,6 +287,11 @@
+ 
+     socket.removeAllListeners()
+     socket = tls.connect(options)
++    // Bun's native TLS upgrade still pushes wire bytes to the original TCP
++    // readable stream. No consumer remains after removeAllListeners(), so its
++    // queue otherwise retains every encrypted query result for the connection
++    // lifetime. Drain that duplicate stream only after TLS owns the transport.
++    if (typeof Bun !== 'undefined') options.socket.on('data', noop)
+     socket.on('secureConnect', connected)
+     socket.on('error', error)
+     socket.on('close', closed)
+diff --git a/cjs/src/connection.js b/cjs/src/connection.js
+--- a/cjs/src/connection.js
++++ b/cjs/src/connection.js
+@@ -287,6 +287,11 @@
+ 
+     socket.removeAllListeners()
+     socket = tls.connect(options)
++    // Bun's native TLS upgrade still pushes wire bytes to the original TCP
++    // readable stream. No consumer remains after removeAllListeners(), so its
++    // queue otherwise retains every encrypted query result for the connection
++    // lifetime. Drain that duplicate stream only after TLS owns the transport.
++    if (typeof Bun !== 'undefined') options.socket.on('data', noop)
+     socket.on('secureConnect', connected)
+     socket.on('error', error)
+     socket.on('close', closed)

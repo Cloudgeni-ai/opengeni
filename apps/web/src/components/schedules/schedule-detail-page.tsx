@@ -1,3 +1,7 @@
+import {
+  ATLASSIAN_NATIVE_RETIRED_MESSAGE,
+  isRetiredNativeAtlassianTask,
+} from "@opengeni/contracts/atlassian-native-retirement";
 /**
  * One schedule's own page: back to Schedules, the header with its actions,
  * then Overview (on/off, instructions, setup) and Runs. Never a side sheet.
@@ -99,6 +103,7 @@ import {
   runTimeLabel,
   scheduleErrorReference,
   scheduleErrorText,
+  scheduleInheritsChatSettings,
   scheduleWords,
 } from "./schedule-model";
 import {
@@ -392,7 +397,9 @@ export function ScheduleDetailPage({
                     Edit
                   </Button>
                 ) : null}
-                {task.status === "paused" && perms.canPauseOrDelete ? (
+                {task.status === "paused" &&
+                perms.canPauseOrDelete &&
+                !isRetiredNativeAtlassianTask(task) ? (
                   <Button
                     type="button"
                     size="sm"
@@ -403,7 +410,7 @@ export function ScheduleDetailPage({
                     <PlayIcon aria-hidden="true" />
                     Resume
                   </Button>
-                ) : perms.canRun ? (
+                ) : perms.canRun && !isRetiredNativeAtlassianTask(task) ? (
                   <Button
                     type="button"
                     size="sm"
@@ -567,6 +574,7 @@ function Overview({
   const perms = schedulePermissions(task, access);
   const knowledge = isKnowledgeSync(task);
   const state = scheduledTaskStateLabel(task);
+  const retired = state.reason === "provider_retired";
   const next = nextRunOf(task, now);
   const sentence = `${scheduleWords(task.schedule, now).sentence}.`;
   const status =
@@ -591,33 +599,45 @@ function Overview({
             {latest.error?.trim() || "Open the run's chat to see what went wrong."}
           </Notice>
         ) : null}
-        <SettingRow
-          label="Active"
-          description={
-            <>
-              <span className="block">{sentence}</span>
-              {status ? <span className="block">{status}</span> : null}
-            </>
-          }
-          control={
-            <Switch
-              aria-label={`${task.name} is active`}
-              checked={task.status === "active"}
-              onCheckedChange={onActiveChange}
-              pending={busy}
-              disabled={!perms.canPauseOrDelete}
-              disabledReason={
-                perms.own
-                  ? "You need permission to manage schedules in this workspace."
-                  : `Only ${owner} can pause or resume it.`
-              }
-            />
-          }
-        />
+        {retired ? (
+          <Notice tone="muted" title="Jira and Confluence sync retired">
+            {ATLASSIAN_NATIVE_RETIRED_MESSAGE} Imported documents and previous runs remain.
+          </Notice>
+        ) : (
+          <SettingRow
+            label="Active"
+            description={
+              <>
+                <span className="block">{sentence}</span>
+                {status ? <span className="block">{status}</span> : null}
+              </>
+            }
+            control={
+              <Switch
+                aria-label={`${task.name} is active`}
+                checked={task.status === "active"}
+                onCheckedChange={onActiveChange}
+                pending={busy}
+                disabled={!perms.canPauseOrDelete}
+                disabledReason={
+                  perms.own
+                    ? "You need permission to manage schedules in this workspace."
+                    : `Only ${owner} can pause or resume it.`
+                }
+              />
+            }
+          />
+        )}
         {!perms.own ? (
           <InlineHelp icon className="mt-3">
-            It runs with {firstName}'s connected accounts, so only {firstName} can change, run,
-            pause or delete it. Duplicate it to make your own.
+            {retired ? (
+              <>Only {firstName} can remove this retired schedule.</>
+            ) : (
+              <>
+                It runs with {firstName}'s connected accounts, so only {firstName} can change, run,
+                pause or delete it. Duplicate it to make your own.
+              </>
+            )}
           </InlineHelp>
         ) : null}
       </DetailSection>
@@ -633,7 +653,7 @@ function Overview({
           </p>
         </DetailSection>
       ) : (
-        <DetailSection title="Instructions">
+        <DetailSection title="Message">
           <Instructions text={task.agentConfig.prompt} />
         </DetailSection>
       )}
@@ -733,8 +753,15 @@ function Setup({
   const variableSets = useVariableSets({ enabled: canListSets });
   const rigs = useWorkspaceRigs({ enabled: Boolean(task.rigId) });
   const [chat, setChat] = useState<Session | null>(null);
-  const targetId = task.runMode === "existing_session" ? task.targetSessionId : null;
+  const inheritsChatSettings = scheduleInheritsChatSettings(task);
+  const targetId =
+    task.runMode === "existing_session"
+      ? task.targetSessionId
+      : task.runMode === "reusable_session"
+        ? task.reusableSessionId
+        : null;
   useEffect(() => {
+    setChat(null);
     if (!targetId || !access.canTargetSessions) return;
     let live = true;
     void client
@@ -766,7 +793,7 @@ function Setup({
   return (
     <DetailFacts>
       <DetailFact label="Each run">{EACH_RUN[task.runMode]}</DetailFact>
-      {task.runMode === "existing_session" && targetId ? (
+      {inheritsChatSettings && targetId ? (
         <DetailFact label="Chat">
           {chat || access.canReadSessionIds ? (
             <button
@@ -784,7 +811,7 @@ function Setup({
       {task.runMode !== "new_session_per_run" ? (
         <DetailFact label="If still running">{IF_STILL_RUNNING[task.overlapPolicy]}</DetailFact>
       ) : null}
-      {task.variableSetId ? (
+      {!inheritsChatSettings && task.variableSetId ? (
         <DetailFact label="Variable set">
           <Link
             to="/workspaces/$workspaceId/variable-sets/$variableSetId"
@@ -807,7 +834,7 @@ function Setup({
           </span>
         </DetailFact>
       ) : null}
-      {task.rigId ? (
+      {!inheritsChatSettings && task.rigId ? (
         <DetailFact label="Environment">
           <Link
             to="/workspaces/$workspaceId/rigs/$rigId"
@@ -818,7 +845,9 @@ function Setup({
           </Link>
         </DetailFact>
       ) : null}
-      {tools.length > 0 ? <DetailFact label="Tools">{tools.join(", ")}</DetailFact> : null}
+      {!inheritsChatSettings && tools.length > 0 ? (
+        <DetailFact label="Tools">{tools.join(", ")}</DetailFact>
+      ) : null}
       {description ? <DetailFact label="Description">{description}</DetailFact> : null}
     </DetailFacts>
   );
@@ -845,7 +874,7 @@ function ScheduleAside({
   const state = scheduledTaskStateLabel(task);
   const next = nextRunOf(task, now);
   const model = useMemo(() => {
-    if (isKnowledgeSync(task)) return null;
+    if (isKnowledgeSync(task) || scheduleInheritsChatSettings(task)) return null;
     const chosen = task.agentConfig.model;
     const id = chosen ?? catalog.defaultSelection?.model;
     const row = id ? catalog.rows.find((candidate) => candidate.id === id) : undefined;
@@ -890,7 +919,11 @@ function ScheduleAside({
           {catalog.loading ? "Loading…" : model}
         </DetailAsideItem>
       ) : null}
-      {isKnowledgeSync(task) ? null : (
+      {isKnowledgeSync(task) ? null : scheduleInheritsChatSettings(task) ? (
+        <DetailAsideItem label="Settings">
+          Uses the chat’s model, tools and machine.
+        </DetailAsideItem>
+      ) : (
         <DetailAsideItem label="Where it runs" icon={<ServerIcon />}>
           {where}
         </DetailAsideItem>
@@ -986,7 +1019,9 @@ function RunsList({
       <p className="m-0 mb-2 text-xs leading-4.5 text-fg-muted">
         {knowledge
           ? "Each run syncs the source into Knowledge."
-          : "Each run opens its own chat. Open a run to see what it did."}
+          : task.runMode === "new_session_per_run"
+            ? "Each run opens its own chat. Open a run to see what it did."
+            : "Runs continue in the same chat. Open a run to see what it did."}
       </p>
       <RowList label={`Runs of ${task.name}`} flush>
         {runs.runs.map((run) => {
@@ -1088,11 +1123,7 @@ function RenameDialog({
       onSubmitted={() => onOpenChange(false)}
     >
       <FieldStack>
-        <Field
-          label="Name"
-          error={error}
-          hint="Shown in the list and as the title of each run's chat."
-        >
+        <Field label="Name" error={error} hint="Shown in the schedules list.">
           <TextInput
             value={name}
             onChange={(event) => {

@@ -129,6 +129,42 @@ function mutablePointer(initial: ActivePointer = { activeSandboxId: null, active
 }
 
 describe("RoutingSandboxSession — per-call re-read + per-epoch dispatch", () => {
+  test("tool-scoped finalization preserves reached backends for other durable results", async () => {
+    const acknowledgments: Array<{ backend: string; callIds?: readonly string[] }> = [];
+    const backend = (name: string): RoutableBackendSession => ({
+      exec: async () => ({ stdout: name, exitCode: 0 }),
+      finalizeOpStreamOps: async (callIds) => {
+        acknowledgments.push({ backend: name, callIds });
+      },
+    });
+    const first = backend("first");
+    const second = backend("second");
+    let pointer: ActivePointer = { activeSandboxId: "first", activeEpoch: 1 };
+    const proxy = new RoutingSandboxSession({
+      defaultResolved: { session: first, sandboxId: "first", kind: "selfhosted" },
+      readPointer: async () => pointer,
+      resolveActiveBackend: async () => ({
+        session: pointer.activeSandboxId === "first" ? first : second,
+        sandboxId: pointer.activeSandboxId,
+        kind: "selfhosted",
+      }),
+    });
+    await proxy.exec({ cmd: "first tool" });
+    pointer = { activeSandboxId: "second", activeEpoch: 2 };
+    await proxy.exec({ cmd: "parallel tool on successor route" });
+    await proxy.finalizeOpStreamOps(["call_first"]);
+    await proxy.finalizeOpStreamOps(["call_second"]);
+    await proxy.finalizeOpStreamOps();
+    expect(acknowledgments).toEqual([
+      { backend: "first", callIds: ["call_first"] },
+      { backend: "second", callIds: ["call_first"] },
+      { backend: "first", callIds: ["call_second"] },
+      { backend: "second", callIds: ["call_second"] },
+      { backend: "first", callIds: undefined },
+      { backend: "second", callIds: undefined },
+    ]);
+  });
+
   test("finalizes every machine backend reached across route epochs", async () => {
     const finalized: string[] = [];
     const first: RoutableBackendSession = {

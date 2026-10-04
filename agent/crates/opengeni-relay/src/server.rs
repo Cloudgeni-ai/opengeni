@@ -373,18 +373,26 @@ pub(crate) mod conn {
                     }
                     match msg {
                         RelayMessage::Frame(frame) => {
-                            state
-                                .registry
-                                .forward(&est.key, est.role, frame, Instant::now());
+                            state.registry.forward(
+                                &est.key,
+                                est.role,
+                                est.conn_gen,
+                                frame,
+                                Instant::now(),
+                            );
                             true
                         }
                         msg @ RelayMessage::DesktopInput(_) => {
                             // Typed computer-use input → forward verbatim.
-                            state.registry.forward_message(&est.key, est.role, msg);
+                            state
+                                .registry
+                                .forward_message(&est.key, est.role, est.conn_gen, msg);
                             true
                         }
                         close @ RelayMessage::Close(_) => {
-                            state.registry.close(&est.key, est.role, close);
+                            state
+                                .registry
+                                .close(&est.key, est.role, est.conn_gen, close);
                             false // channel torn down; this side is done.
                         }
                         // A duplicate Open/OpenAck mid-stream is ignored (already attached).
@@ -565,7 +573,10 @@ pub(crate) mod conn {
                     && control_claim
                     && stream_control_enabled
             }
-            RelayMessage::Close(close) => close.channel_id == channel_id,
+            RelayMessage::Close(close) => {
+                close.channel_id == channel_id
+                    && (role == Role::Agent || port != PTY_STREAM_PORT || control_claim)
+            }
             RelayMessage::Open(_) | RelayMessage::OpenAck(_) => true,
         }
     }
@@ -689,7 +700,6 @@ pub(crate) mod conn {
             let desktop_input = channel_input(channel_id);
             let wrong_channel_desktop_input = channel_input("channel-b");
             let lifecycle = [
-                channel_close(channel_id),
                 RelayMessage::Open(v1::StreamOpen::default()),
                 RelayMessage::OpenAck(v1::StreamOpenAck::default()),
             ];
@@ -726,6 +736,11 @@ pub(crate) mod conn {
                             );
                             assert!(!forward(&wrong_channel_frame));
                             assert!(!forward(&wrong_channel_desktop_input));
+                            assert_eq!(
+                                forward(&channel_close(channel_id)),
+                                role == Role::Agent || port != PTY_STREAM_PORT || control_claim,
+                                "Close on port {port}, role {role:?}, claim {control_claim}, flag {stream_control_enabled}"
+                            );
                             for message in &lifecycle {
                                 assert!(forward(message));
                             }

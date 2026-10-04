@@ -3,21 +3,15 @@ import {
   subscriptionAccountName,
 } from "./models/use-subscription-account-pool";
 import type { OpenGeniBrowserClient } from "@opengeni/sdk/browser";
-import { OpenGeniApiError } from "@opengeni/sdk/browser";
 import { trackModelConnection } from "@/lib/analytics-observer";
 import { beginModelConnectJourney } from "@/lib/integration-connect-analytics";
 
-import type {
-  SuperGrokAccount,
-  SuperGrokAccountsResponse,
-  SuperGrokAccountScope,
-} from "@opengeni/sdk";
+import type { SuperGrokAccount, SuperGrokAccountScope } from "@opengeni/sdk";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { toast } from "sonner";
 import { SubscriptionDeviceCodePanel } from "@/components/subscription-device-code-panel";
 
-import { ApiError } from "@/api";
-import { apiErrorAdvice, userErrorText } from "@/lib/api-error";
+import { userErrorText } from "@/lib/api-error";
 import { pollSuperGrokDeviceLogin } from "./supergrok-device-poll";
 
 // SuperGrok (xAI) subscriptions for Settings > Models at workspace and
@@ -40,14 +34,6 @@ export function superGrokAccountName(account: SuperGrokAccount): string {
 type SubscriptionScope =
   | { workspaceId: string; organizationId?: never; canManage: boolean }
   | { organizationId: string; workspaceId?: never; canManage: boolean };
-
-/** The deployment has SuperGrok turned off: the API answers 404 for the whole family. */
-function deploymentDisabled(error: unknown): boolean {
-  return (
-    (error instanceof OpenGeniApiError || error instanceof ApiError) &&
-    (error as { status: number }).status === 404
-  );
-}
 
 export type SuperGrokSubscriptions = ReturnType<typeof useSuperGrokSubscriptions>;
 

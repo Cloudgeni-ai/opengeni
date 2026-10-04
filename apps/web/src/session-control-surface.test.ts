@@ -57,6 +57,23 @@ describe("session control surface architecture", () => {
     expect(plus).not.toContain("setSettingsOpen");
   });
 
+  test("an existing chat's Chat settings opens the dock's Agent tab at Agent learning", async () => {
+    const route = await source("routes/session.tsx");
+    // The composer hands the click to the route, which opens the dock...
+    expect(route).toContain("onOpen: props.onOpenAgentSettings,");
+    expect(route).toContain("onOpenAgentSettings={openAgentSettings}");
+    expect(route).toContain("openAgentSettingsRequest={");
+    // ...on its Agent tab (always present for a loaded chat), focused on Agent learning.
+    expect(route).toContain('tab: "agent",');
+    expect(route).toContain("openTabRequest={currentTabRequest}");
+    expect(route).toContain("learningFocusRequest={agentLearningFocus}");
+    expect(route).not.toContain("agentConfig?.enabled");
+    // There is no second copy of the per-chat editor in the composer.
+    const panel = await source("components/composer-mobile-plus-panel.tsx");
+    expect(panel).not.toContain("AgentLearningSettingsEditor");
+    expect(panel).toContain("props.chatSettings?.onOpen()");
+  });
+
   test("renders SessionChrome above the composer", async () => {
     const route = await source("routes/session.tsx");
     expect(route.match(/<SessionChrome\b/g)).toHaveLength(1);

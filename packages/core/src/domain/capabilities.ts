@@ -302,6 +302,15 @@ export async function prepareCapabilityEnable(input: EnableCapabilityInput) {
   delete installationConfig.headerNames;
   delete installationConfig.connectionRef;
   if (item.kind === "mcp") {
+    if (
+      item.endpointUrl?.replace(/\/+$/u, "") === "https://gmailmcp.googleapis.com/mcp/v1" &&
+      (input.payload.connectionRef?.subjectScope !== "subject" ||
+        Object.keys(input.payload.headers ?? {}).length > 0)
+    ) {
+      throw new HTTPException(422, {
+        message: "Gmail requires a personal-owned connection reference",
+      });
+    }
     // This generic, potentially workspace-authored catalog is not proof of a
     // curated provider identity. Dedicated Connect adapters classify separately.
     const unchanged = await withOrganizationIntegrationPolicyFence(
@@ -770,9 +779,9 @@ function mcpProbeErrorMessage(error: unknown, endpointUrl: string): string {
       normalized,
     )
   ) {
-    return `OpenGeni could not reach a valid Streamable HTTP MCP server at ${endpoint}. Check the endpoint URL or choose a different catalog entry.`;
+    return `Opengeni could not reach a valid Streamable HTTP MCP server at ${endpoint}. Check the endpoint URL or choose a different catalog entry.`;
   }
-  return `OpenGeni could not initialize ${endpoint}. Check the endpoint configuration or try again.`;
+  return `Opengeni could not initialize ${endpoint}. Check the endpoint configuration or try again.`;
 }
 
 function safeEndpointLabel(endpointUrl: string): string {
@@ -1183,7 +1192,7 @@ function configuredMcpCatalogItems(settings: Settings): CapabilityCatalogItem[] 
             available: true,
             mcpServerId: server.id,
             transport: "streamable-http",
-            notes: "Managed by this OpenGeni deployment through OPENGENI_MCP_SERVERS.",
+            notes: "Managed by this Opengeni deployment through OPENGENI_MCP_SERVERS.",
           },
           metadata: {
             mcpServerId: server.id,
@@ -1319,7 +1328,7 @@ function fikenCatalogItem(fikenConnections: ConnectionMetadata[]): CapabilityCat
     runtime: {
       available: true,
       mcpServerId: "opengeni",
-      notes: "Fiken access is provided through OpenGeni's first-party fiken tools.",
+      notes: "Fiken access is provided through Opengeni's first-party fiken tools.",
     },
     enabled: fikenEnabled,
     enabledReason: fikenEnabled
@@ -1362,11 +1371,11 @@ function providerIntegrationCatalogItems(
         available: true,
         mcpServerId: "opengeni",
         notes:
-          "OpenGeni's social provider adapter routes every call through an exact visible account Connection.",
+          "Opengeni's social provider adapter routes every call through an exact visible account Connection.",
       },
       enabled,
       enabledReason: socialConnectionSummary(counts),
-      provenance: "OpenGeni provider adapter",
+      provenance: "Opengeni provider adapter",
       metadata: {
         providerAdapter: "social",
         provider: definition.provider,
@@ -1391,7 +1400,7 @@ export function nativeConnectionCapabilityRecommendations(): CapabilityCatalogIt
       kind: "api",
       source: "built_in",
       name: "GitHub App",
-      description: "Connect repositories through OpenGeni's GitHub resource picker.",
+      description: "Connect repositories through Opengeni's GitHub resource picker.",
       category: "source-control",
       tags: ["github", "repositories", "source-control"],
       homepageUrl: "https://github.com",

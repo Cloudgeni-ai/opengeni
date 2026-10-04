@@ -94,7 +94,12 @@ The settings page lists editable defaults and context overrides. Contextual
 shortcuts edit those same records:
 
 - Scheduled task: collapsed Advanced > Agent learning.
-- Chat: + > Chat settings > Agent learning, with no persistent composer toggle.
+- Chat: the session dock's Agent tab, beside the chat's identity and
+  capabilities; + > Chat settings opens it. A new chat sets its draft choice in
+  + > Chat settings. No persistent composer toggle.
+- Organization identity (owners only): a row on Knowledge > Agent learning in the
+  same Off / Review first / Automatic words, backed by the separate
+  company-profile agent policy.
 
 Knowledge, Instructions and Skills appear together in the browsing area while
 their content and activation authorities remain distinct. The existing unified
@@ -161,9 +166,11 @@ confirmation recovery remain; conversation history and task notes are separate.
 This is a maintenance cutover: stop old API and workers, migrate and provision
 roles, and start only the matching runtime. Do not restart an old binary.
 
-Built-in Drive/Atlassian sources use ordinary scheduled agent turns. Their fetch
+Built-in Drive sources use ordinary scheduled agent turns. Their fetch
 adapter retains originals/source text under the frozen policy; the agent selects
 useful findings. Task lifecycle owns completion; source adapters own checkpoints.
+Native Jira/Confluence source sync is retired; its imported Documents and
+historical configuration remain, but native schedules cannot fetch new content.
 Legacy source schedules keep their IDs and configuration. Those with no active
 owning-human authority are preserved paused, and require a current authorized
 edit. The change does not extend the managed scheduled-authority lifecycle to

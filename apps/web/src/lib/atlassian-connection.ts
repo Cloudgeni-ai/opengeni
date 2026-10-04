@@ -1,7 +1,7 @@
 import type { AtlassianConnectionMetadata, ConnectionMetadata } from "@/types";
 
 export const ATLASSIAN_APP_DESCRIPTION =
-  "Search Jira and Confluence live, with optional knowledge synchronization.";
+  "Previous Jira and Confluence knowledge sync is retired. Use Atlassian agent tools for live access.";
 
 export function atlassianConnectionMetadata(
   value: Record<string, unknown>,

@@ -18,8 +18,6 @@ import {
   FORCE_RLS_TABLES,
   inspectRuntimeDatabasePosture,
   PROTECTED_NO_DIRECT_DML_TABLES,
-  RUNTIME_TABLE_PRIVILEGES,
-  RUNTIME_TARGET_SCHEMA_CAPABILITY_ROUTINES,
   RUNTIME_TARGET_SCHEMA_FORBIDDEN_ROUTINES,
 } from "../src/runtime-posture";
 import {
@@ -796,7 +794,7 @@ describe("migrations 0353-0355 automatic session title policy fence", () => {
     });
   }, 180_000);
 
-  test("keeps the pre-policy runtime posture ready with invoker-only compatibility grants", async () => {
+  test("keeps title routines least-privileged with invoker-only migration and trigger helpers", async () => {
     const database = shared;
     if (!database) return;
 
@@ -916,8 +914,8 @@ describe("migrations 0353-0355 automatic session title policy fence", () => {
     ).rejects.toThrow(/trigger functions can only be called as triggers/iu);
   }, 180_000);
 
-  test("keeps custom old binaries ready immediately after 0353 and converges deferred roles", async () => {
-    const blank = await acquireBlankTestDatabase("automatic-title-custom-role-rolling");
+  test("preserves historical title authority and converges custom roles only on the complete schema", async () => {
+    const blank = await acquireBlankTestDatabase("automatic-title-custom-role-convergence");
     if (!blank) {
       if (requireRealDatabase) throw new Error("real blank database unavailable");
       return;
@@ -931,271 +929,44 @@ describe("migrations 0353-0355 automatic session title policy fence", () => {
     const admin = postgres(blank.databaseUrl, { max: 1, prepare: false });
     let customClient: DbClient | null = null;
     let deferredClient: DbClient | null = null;
-
     const roleUrl = (role: string, password: string) => {
       const value = new URL(blank.databaseUrl);
       value.username = role;
       value.password = password;
       return value.toString();
     };
-    const titleRoutineNames = new Set([
-      "claim_automatic_session_title_fanout_v1(integer)",
-      "enforce_automatic_session_title_policy_v1()",
-      "enqueue_automatic_session_title_fanout_v1(uuid, uuid, uuid, uuid)",
-      "mark_automatic_session_title_fanout_delivered_v1(uuid, uuid)",
-      "mark_automatic_session_title_fanout_failed_v1(uuid, uuid, text)",
-    ]);
-    // This test deliberately freezes the database immediately after 0353. Keep
-    // today's evaluator strict for every table that existed at that boundary,
-    // while explicitly removing tables introduced by later migrations.
-    const post0353RuntimeTables = new Set([
-      "additional_organization_creation_receipts",
-      "company_profile_agent_automatic_activation_receipts",
-      "deployment_model_catalog",
-      "mcp_oauth_access_tokens",
-      "mcp_oauth_authorization_codes",
-      "mcp_oauth_authorization_requests",
-      "mcp_oauth_clients",
-      "mcp_oauth_refresh_tokens",
-      "organization_company_profile_agent_policies",
-      "organization_company_profile_agent_policy_events",
-      "organization_codex_rotation_settings",
-      "organization_model_provider_connection_operations",
-      "organization_model_provider_connections",
-      "organization_model_provider_custom_models",
-      "organization_recovery_approvals",
-      "organization_recovery_command_receipts",
-      "organization_recovery_custodian_acceptances",
-      "organization_recovery_custodians",
-      "organization_recovery_events",
-      "organization_recovery_notification_attempts",
-      "organization_recovery_notification_outbox",
-      "organization_recovery_operations",
-      "organization_recovery_policies",
-      "organization_recovery_policy_heads",
-      "pr_review_managed_github_authority_nonces",
-      "pr_review_managed_github_routes",
-      "remember_knowledge_memory_materializations",
-      "session_tenancy_additional_organization_activation_evidence",
-      "session_event_cursors",
-      "session_work_claim_revisions",
-      "session_work_claim_write_capabilities",
-      "session_work_claims",
-      "slack_api_rate_limits",
-      "tool_gateway_approval_capabilities",
-      "workspace_codex_subscription_preferences",
-      "workspace_gateway_custom_models",
-    ]);
-    // The current runtime evaluator intentionally requires every capability in
-    // today's schema. A database frozen immediately after 0353 predates the
-    // 0361 Memory materialization table/function and the 0380 company-profile
-    // autonomy policy tables/functions, the 0400 model-context snapshot table,
-    // the 0401 setup-delivery transport routines, the 0422 Codex inventory,
-    // the 0429 message-boundary fork overload,
-    // the 0433 unified Skill tables/lifecycle capability, and the 0461 protected
-    // MCP operation ledger/command capability (which grants no direct DML), and
-    // the 0470 organization integration policy tables (SELECT-only at runtime),
-    // and the 0477 protected managed sign-in ledger and five runtime capabilities.
-    // It also predates the 0507 pending MCP OAuth state table.
-    // It also retains the three Pack tables removed from the runtime contract
-    // by 0482 and predates the 0492 accepted Codex source table/capture capability.
-    // The allowance helpers introduced by 0552-0554 are likewise absent;
-    // private storage preserves the old table inventory, not these new helpers.
-    // Preserve those exact expected boundary gaps while continuing to
-    // reject every other posture violation in this
-    // rolling-compatibility test.
-    const expectedPost0353EvaluatorGaps = [
-      "runtime privilege tables are missing: codex_turn_source_bindings, connect_attempts, external_identity_links, external_link_task_authorities, external_link_turn_authorities, feedback_submissions, host_mcp_bindings, host_mcp_delegations, host_mcp_resolver_operations, host_mcp_resolvers, host_mcp_task_authorities, host_mcp_turn_authorities, integration_oauth_pending_states, organization_credential_providers, organization_integration_policies, organization_integration_policy_operations, organization_webhook_deliveries, organization_webhooks, session_attempt_model_context_snapshots, skill_source_bindings, skill_write_receipts, workspace_artifact_uploads, workspace_credential_providers, workspace_webhook_deliveries, workspace_webhooks",
-      "protected tables are missing: agent_instruction_operations, agent_learning_revisions, agent_learning_snapshots, codex_turn_source_bindings, connect_attempts, external_identities, external_identity_links, external_link_task_authorities, external_link_turn_authorities, feedback_submissions, host_mcp_bindings, host_mcp_delegations, host_mcp_resolver_operations, host_mcp_resolvers, host_mcp_task_authorities, host_mcp_turn_authorities, integration_oauth_pending_states, knowledge_entries, knowledge_entry_decisions, knowledge_entry_links, knowledge_entry_operations, knowledge_entry_revisions, knowledge_entry_search, knowledge_entry_vectors, knowledge_index_jobs, knowledge_review_batches, managed_sign_in_method_operations, mcp_operations, organization_credential_providers, organization_integration_policies, organization_integration_policy_operations, organization_webhook_deliveries, organization_webhooks, session_attempt_model_context_snapshots, skill_config_conversion_receipts, skill_source_bindings, skill_write_receipts, workspace_artifact_uploads, workspace_credential_providers, workspace_webhook_deliveries, workspace_webhooks",
-      "RLS tables are absent from the declared contract: pack_installation_components, pack_installations, workspace_packs",
-      "owner-internal target-schema helper enable_organization_private_sessions_from_activation(uuid, text[]) is missing or ambiguous",
-      "owner-internal target-schema helper usage_allowance_members(uuid, uuid) is missing or ambiguous",
-      "owner-internal target-schema helper usage_allowance_effective_period(uuid, jsonb, timestamp with time zone) is missing or ambiguous",
-      "owner-internal target-schema helper count_workspace_allowance_debit() is missing or ambiguous",
-      "owner-internal target-schema helper capture_usage_allowance_attribution() is missing or ambiguous",
-      "owner-internal target-schema helper reverse_video_allowance_refund() is missing or ambiguous",
-      "owner-internal target-schema helper capture_usage_allowance_period(uuid, uuid, jsonb, timestamp with time zone) is missing or ambiguous",
-      "owner-internal target-schema helper emit_usage_allowance_notifications(uuid, uuid, jsonb, text, timestamp with time zone, text) is missing or ambiguous",
-      "owner-internal target-schema helper usage_allowance_period(jsonb, timestamp with time zone) is missing or ambiguous",
-      "owner-internal target-schema helper validate_usage_allowance_config(jsonb) is missing or ambiguous",
-      "owner-internal target-schema helper validate_usage_allowance_rule(jsonb) is missing or ambiguous",
-      "owner-internal target-schema helper guard_slack_file_upload_operation() is missing or ambiguous",
-      "target-schema runtime capability maintain_usage_allowances(integer, integer) is missing or ambiguous",
-      "target-schema runtime capability usage_allowance_command(jsonb) is missing or ambiguous",
-      "target-schema runtime capability usage_allowance_capability_active(uuid, uuid) is missing or ambiguous",
-      "target-schema runtime capability knowledge_index_claim(text, integer, integer) is missing or ambiguous",
-      "target-schema runtime capability knowledge_index_work(uuid, uuid, uuid, jsonb) is missing or ambiguous",
-      "target-schema runtime capability knowledge_index_billing_policy(uuid, uuid, uuid, text, timestamp with time zone, bigint) is missing or ambiguous",
-      "target-schema runtime capability knowledge_index_wait_for_funding(uuid, uuid, uuid) is missing or ambiguous",
-      "target-schema runtime capability knowledge_index_paid_publication_guard(uuid, uuid, uuid) is missing or ambiguous",
-      "target-schema runtime capability knowledge_visible_index_status(uuid, uuid, jsonb, jsonb, text) is missing or ambiguous",
-      "target-schema runtime capability knowledge_entry_apply(uuid, uuid, jsonb, jsonb) is missing or ambiguous",
-      "target-schema runtime capability knowledge_entry_confirm_legacy(uuid, uuid, jsonb, jsonb) is missing or ambiguous",
-      "target-schema runtime capability agent_instruction_apply(uuid, uuid, jsonb, jsonb) is missing or ambiguous",
-      "target-schema runtime capability knowledge_entry_read(uuid, uuid, jsonb, jsonb) is missing or ambiguous",
-      "target-schema runtime capability knowledge_entry_prepare_file(uuid, uuid, jsonb, jsonb) is missing or ambiguous",
-      "target-schema runtime capability knowledge_document_prepare(uuid, uuid, uuid, jsonb) is missing or ambiguous",
-      "target-schema runtime capability agent_learning_manage(uuid, uuid, jsonb, jsonb) is missing or ambiguous",
-      "target-schema runtime capability mcp_operation_command(jsonb, text, jsonb) is missing or ambiguous",
-      "target-schema runtime capability skill_apply_lifecycle(uuid, uuid, jsonb, jsonb) is missing or ambiguous",
-      "target-schema runtime capability propose_company_profile_for_attempt(uuid, uuid, uuid, uuid, uuid, integer, uuid, text, text, text) authority tables are missing: company_profile_agent_automatic_activation_receipts, organization_company_profile_agent_policies, organization_company_profile_agent_policy_events",
-      "target-schema runtime capability propose_company_profile_for_attempt_v2(uuid, uuid, uuid, uuid, uuid, integer, uuid, uuid, text, text, text) is missing or ambiguous",
-      "target-schema runtime capability confirm_company_profile_for_attempt(uuid, uuid, uuid, uuid, uuid, integer, uuid, uuid, uuid) authority tables are missing: company_profile_agent_automatic_activation_receipts, organization_company_profile_agent_policies, organization_company_profile_agent_policy_events",
-      "target-schema runtime capability get_company_profile_agent_policy(uuid, uuid, text) is missing or ambiguous",
-      "target-schema runtime capability update_company_profile_agent_policy(uuid, uuid, text, text, bigint, uuid) is missing or ambiguous",
-      "target-schema runtime capability undo_governed_learning_activation(uuid, uuid, uuid, uuid) authority tables are missing: remember_knowledge_memory_materializations",
-      "target-schema runtime capability fork_session_content(uuid, uuid, uuid, text, uuid, text, boolean, text, text, integer, uuid) is missing or ambiguous",
-      "target-schema runtime capability get_external_identity_link_reference(uuid, uuid, text) is missing or ambiguous",
-      "target-schema runtime capability get_external_identity_link_inventory_references(uuid, uuid[]) is missing or ambiguous",
-      "target-schema runtime capability ensure_external_identity(uuid, text, text) is missing or ambiguous",
-      "target-schema runtime capability lookup_external_identity(uuid, text, text, text) is missing or ambiguous",
-      "target-schema runtime capability prepare_external_workspace_membership_operation(jsonb) is missing or ambiguous",
-      "target-schema runtime capability record_external_workspace_membership_operation(jsonb, jsonb) is missing or ambiguous",
-      "target-schema runtime capability capture_legacy_codex_turn_sources(uuid, uuid) is missing or ambiguous",
-      "target-schema runtime capability list_organization_workspace_ids(uuid) is missing or ambiguous",
-      "target-schema runtime capability list_organization_codex_workspace_ids(uuid) is missing or ambiguous",
-      "target-schema runtime capability authorize_organization_shared_workspace_administration(uuid, uuid, text) is missing or ambiguous",
-      "target-schema runtime capability claim_organization_user_setup_delivery_v2(jsonb) is missing or ambiguous",
-      "target-schema runtime capability prepare_organization_user_setup_delivery_v2(jsonb) is missing or ambiguous",
-      "target-schema runtime capability list_owned_connection_accounts(uuid, uuid) is missing or ambiguous",
-      "target-schema runtime capability mutate_managed_sign_in_method(text, text, jsonb) is missing or ambiguous",
-      "target-schema runtime capability assert_managed_sign_in_recovery(text, text, uuid, jsonb) is missing or ambiguous",
-      "target-schema runtime capability replay_managed_sign_in_method(text, text, jsonb) is missing or ambiguous",
-      "target-schema runtime capability claim_managed_sign_in_notification(uuid, text, text, integer) is missing or ambiguous",
-      "target-schema runtime capability settle_managed_sign_in_notification(uuid, uuid, text) is missing or ambiguous",
-    ];
-    const sessionSetTables = new Set([
-      "managed_auth_actor_mutation_leases",
-      "managed_auth_browser_installations",
-      "managed_auth_login_return_intents",
-      "managed_auth_login_slots",
-      "managed_auth_login_transaction_rate_limits",
-      "managed_auth_login_transactions",
-      "managed_auth_session_set_operations",
-      "managed_auth_session_sets",
-    ]);
-    const sessionSetRoutines = new Set([
-      "get_canonical_human_exact_login_binding(text, text)",
-      "managed_auth_session_set_authority_state(text)",
-      "managed_auth_session_set_snapshot(text, text, boolean, boolean, boolean)",
-      "managed_auth_session_set_bootstrap(text, text, text, text, uuid, text, bigint, bigint)",
-      "managed_auth_session_set_begin_transaction(text, text, text, uuid, text, bigint, uuid, bigint, text, text, uuid, uuid, text, timestamp with time zone)",
-      "managed_auth_session_set_complete_transaction(text, text, uuid, text, bigint, bigint, uuid, text, text, text)",
-      "managed_auth_session_set_mutate(text, text, uuid, text, bigint, bigint, text, uuid, uuid, uuid, text, text)",
-      "managed_auth_actor_mutation_fence(text, bigint, uuid)",
-      "managed_auth_actor_mutation_lease_acquire(text, bigint, uuid, integer)",
-      "managed_auth_actor_mutation_lease_release(text, uuid)",
-      "managed_auth_actor_mutation_lease_validate(text, bigint, uuid)",
-      "managed_auth_adopted_session_snapshot(text)",
-      "managed_auth_isolated_session_reap(integer)",
-      "managed_auth_expired_session_set_reap(integer)",
-      "managed_auth_session_set_operation_receipt(text, uuid, text, text)",
-      "get_organization_recovery_overview(uuid, text, jsonb, text, text)",
-      "organization_recovery_command(jsonb)",
-      "upsert_session_work_claim_for_attempt(uuid, uuid, uuid, uuid, uuid, integer, uuid, integer, text, text, text, text, text, text, text)",
-      "release_session_work_claim_for_attempt(uuid, uuid, uuid, uuid, uuid, integer, uuid, uuid, integer, text)",
-    ]);
-    const post0353CapabilityRoutines = new Set([
-      ...sessionSetRoutines,
-      "create_additional_managed_organization(text, text, text, text, uuid)",
-      "issue_self_local_connection_use_grant(uuid, uuid, uuid, text, boolean)",
-      "resolve_workspace_codex_subscription_source(uuid, uuid)",
-    ]);
-    const post0353ForbiddenRoutines = new Set([
-      "activate_session_tenancy_from_additional_organization(uuid)",
-      "set_verified_signup_trial_credits_enabled(boolean, text, text)",
-      "set_managed_auth_new_signups_enabled(boolean, text, text)",
-    ]);
-    const post0353ProtectedTables = new Set([...post0353RuntimeTables, ...sessionSetTables]);
-    const preSessionSetProtectedTables = FORCE_RLS_TABLES.filter(
-      (table) => !post0353ProtectedTables.has(table),
-    );
-    const preSessionSetNoDirectDmlTables = PROTECTED_NO_DIRECT_DML_TABLES.filter(
-      (table) => !post0353ProtectedTables.has(table),
-    );
-    const preSessionSetTablePrivileges = Object.fromEntries(
-      Object.entries(RUNTIME_TABLE_PRIVILEGES).filter(
-        ([table]) => !post0353ProtectedTables.has(table),
-      ),
-    );
-    const preSessionSetCapabilityRoutines = RUNTIME_TARGET_SCHEMA_CAPABILITY_ROUTINES.filter(
-      (routine) => !post0353CapabilityRoutines.has(routine),
-    );
     const postureOptions = (expectedRole: string) => ({
       rlsStrategy: "force" as const,
       expectedRole,
       targetSchema: "public",
-      protectedTables: preSessionSetProtectedTables,
-      protectedNoDirectDmlTables: preSessionSetNoDirectDmlTables,
-      tablePrivileges: preSessionSetTablePrivileges,
-      targetSchemaCapabilityRoutines: preSessionSetCapabilityRoutines,
-      // This binary predates both additive Insights model-fact routines. Keep
-      // its required capabilities frozen just like its table/target-routine sets.
-      modelFactCapabilityRoutines: [],
-      targetSchemaForbiddenRoutines: RUNTIME_TARGET_SCHEMA_FORBIDDEN_ROUTINES.filter(
-        (routine) => !post0353ForbiddenRoutines.has(routine),
-      ),
     });
-
-    try {
-      await admin.unsafe(
-        `CREATE TABLE schema_migrations (
-          name text PRIMARY KEY,
-          applied_at timestamptz NOT NULL DEFAULT now()
-        )`,
-      );
-      const migrationFiles = (await readdir(migrationsDirectoryUrl))
-        .filter((file) => file.endsWith(".sql"))
-        .sort();
-      const heldMigrations = migrationFiles.filter(
-        (file) =>
-          Buffer.compare(
-            Buffer.from(file, "utf8"),
-            Buffer.from("0353_automatic_session_title_policy_fence.sql", "utf8"),
-          ) >= 0,
-      );
-      for (const file of heldMigrations) {
-        await admin`insert into schema_migrations (name) values (${file})`;
-      }
-
-      await migrate(blank.databaseUrl, undefined, {
-        applicationDatabaseRoles: [customRole],
+    const titleRoutines = [
+      ["claim_automatic_session_title_fanout_v1(integer)", true],
+      ["enforce_automatic_session_title_policy_v1()", false],
+      ["enqueue_automatic_session_title_fanout_v1(uuid, uuid, uuid, uuid)", false],
+      ["mark_automatic_session_title_fanout_delivered_v1(uuid, uuid)", true],
+      ["mark_automatic_session_title_fanout_failed_v1(uuid, uuid, text)", true],
+    ] as const;
+    const inspectTitleAuthority = async (runtime: DbClient, role: string, password: string) => {
+      const posture = await inspectRuntimeDatabasePosture(runtime.db, postureOptions(role));
+      expect(posture.identity).toMatchObject({
+        currentUser: role,
+        sessionUser: role,
+        rowSecurity: "on",
+        canLogin: true,
+        superuser: false,
+        bypassRls: false,
+        inherit: false,
+        createRole: false,
+        createDatabase: false,
+        replication: false,
       });
-      await provisionRoles(blank.databaseUrl, {
-        appRole: customRole,
-        appPassword: customPassword,
-      });
-
-      await admin`
-        delete from schema_migrations
-        where name = '0353_automatic_session_title_policy_fence.sql'
-      `;
-      await migrate(blank.databaseUrl, undefined, {
-        applicationDatabaseRoles: [customRole, deferredRole],
-      });
-
+      expect(posture.memberships).toEqual([]);
       expect(
-        Array.from(
-          await admin<Array<{ exists: boolean }>>`
-          select exists(
-            select 1 from pg_roles where rolname = ${deferredRole}
-          ) as exists
-        `,
-        ),
-      ).toEqual([{ exists: false }]);
-
-      customClient = createDb(roleUrl(customRole, customPassword), { max: 1 });
-      const customPosture = await inspectRuntimeDatabasePosture(
-        customClient.db,
-        postureOptions(customRole),
-      );
-      expect(
-        customPosture.tables.some(
-          (table) => table.name === "automatic_session_title_fanout_outbox_v1",
-        ),
+        posture.tables.some((table) => table.name === "automatic_session_title_fanout_outbox_v1"),
       ).toBe(false);
       expect(
-        customPosture.privateTables.find(
+        posture.privateTables.find(
           (table) => table.name === "automatic_session_title_fanout_outbox_v1",
         ),
       ).toMatchObject({
@@ -1208,77 +979,164 @@ describe("migrations 0353-0355 automatic session title policy fence", () => {
         update: false,
         delete: false,
       });
-      expect(evaluateRuntimeDatabasePosture(customPosture, postureOptions(customRole))).toEqual(
-        expectedPost0353EvaluatorGaps,
-      );
-      // The current binary must not become ready on this historical schema:
-      // only the explicitly frozen old binary omits these later requirements.
-      const { modelFactCapabilityRoutines, ...currentBinaryOptions } = postureOptions(customRole);
-      expect(modelFactCapabilityRoutines).toEqual([]);
-      expect(evaluateRuntimeDatabasePosture(customPosture, currentBinaryOptions)).toEqual([
-        ...expectedPost0353EvaluatorGaps,
-        "Insights complete usage amount projection is missing or unsafe",
-        "Insights amount fact projection is missing or unsafe",
-        "organization model usage aggregate is missing or unsafe",
-        "Insights scoped fact projection is missing or unsafe",
-      ]);
+      for (const [name, securityDefiner] of titleRoutines) {
+        expect(posture.privateRoutines.filter((routine) => routine.name === name)).toEqual([
+          expect.objectContaining({ execute: true, publicExecute: false, securityDefiner }),
+        ]);
+      }
+      // Use the actual restricted login, not SET ROLE on an owner connection.
+      const runtimeSql = postgres(roleUrl(role, password), { max: 1, prepare: false });
+      try {
+        const readOutbox = async () =>
+          await runtimeSql`select * from opengeni_private.automatic_session_title_fanout_outbox_v1`;
+        await expect(readOutbox()).rejects.toMatchObject({ code: "42501" });
+      } finally {
+        await runtimeSql.end();
+      }
+      return posture;
+    };
 
-      // Model the complete pre-policy posture with its original target-table
-      // contract and private-routine generic loop. The current evaluator covers
-      // every unchanged identity/schema/table/routine invariant after removing
-      // only the new title catalog, then the old generic loop evaluates all five
-      // newly visible private routines exactly as the old binary did.
-      const legacyPosture = {
-        ...customPosture,
-        privateTables: customPosture.privateTables.filter(
-          (table) => table.name !== "automatic_session_title_fanout_outbox_v1",
-        ),
-        privateRoutines: customPosture.privateRoutines.filter(
-          (routine) => !titleRoutineNames.has(routine.name),
-        ),
-      };
-      expect(evaluateRuntimeDatabasePosture(legacyPosture, postureOptions(customRole))).toEqual(
-        expectedPost0353EvaluatorGaps,
+    try {
+      await admin.unsafe(
+        `CREATE TABLE schema_migrations (
+          name text PRIMARY KEY,
+          applied_at timestamptz NOT NULL DEFAULT now()
+        )`,
       );
+      const titleMigration = "0353_automatic_session_title_policy_fence.sql";
+      const heldMigrations = (await readdir(migrationsDirectoryUrl))
+        .filter((file) => file.endsWith(".sql"))
+        .sort()
+        .filter((file) => Buffer.compare(Buffer.from(file), Buffer.from(titleMigration)) >= 0);
+      for (const file of heldMigrations) {
+        await admin`insert into schema_migrations (name) values (${file})`;
+      }
+      await migrate(blank.databaseUrl, undefined, { applicationDatabaseRoles: [customRole] });
+      await provisionRoles(blank.databaseUrl, { appRole: customRole, appPassword: customPassword });
+      await admin`delete from schema_migrations where name = ${titleMigration}`;
+      await migrate(blank.databaseUrl, undefined, {
+        applicationDatabaseRoles: [customRole, deferredRole],
+      });
+      const [deferredBeforeProvision] = await admin<Array<{ exists: boolean }>>`
+        select exists(select 1 from pg_roles where rolname = ${deferredRole}) as exists
+      `;
+      expect(deferredBeforeProvision).toEqual({ exists: false });
+
+      customClient = createDb(roleUrl(customRole, customPassword), { max: 1 });
+      const historicalPosture = await inspectTitleAuthority(
+        customClient,
+        customRole,
+        customPassword,
+      );
+      // 0353's rolling title ACLs remain testable, but a pre-cutover schema is
+      // never a supported readiness baseline for today's binary. Do not freeze
+      // the incidental list of all capabilities added since this migration.
+      expect(historicalPosture.claudeSubscriptionPoolActivationPresent).toBe(false);
       expect(
-        customPosture.privateRoutines
-          .filter((routine) => titleRoutineNames.has(routine.name))
-          .map((routine) => ({
-            name: routine.name,
-            execute: routine.execute,
-            publicExecute: routine.publicExecute,
-          }))
-          .sort((left, right) => left.name.localeCompare(right.name)),
-      ).toEqual(
-        [...titleRoutineNames]
-          .sort((left, right) => left.localeCompare(right))
-          .map((name) => ({ name, execute: true, publicExecute: false })),
-      );
+        evaluateRuntimeDatabasePosture(historicalPosture, postureOptions(customRole)),
+      ).not.toEqual([]);
 
       await provisionRoles(blank.databaseUrl, {
         appRole: deferredRole,
         appPassword: deferredPassword,
       });
-      deferredClient = createDb(roleUrl(deferredRole, deferredPassword), {
-        max: 1,
-      });
-      const deferredPosture = await inspectRuntimeDatabasePosture(
-        deferredClient.db,
-        postureOptions(deferredRole),
+      deferredClient = createDb(roleUrl(deferredRole, deferredPassword), { max: 1 });
+      const deferredHistoricalPosture = await inspectTitleAuthority(
+        deferredClient,
+        deferredRole,
+        deferredPassword,
       );
-      expect(evaluateRuntimeDatabasePosture(deferredPosture, postureOptions(deferredRole))).toEqual(
-        expectedPost0353EvaluatorGaps,
-      );
+      expect(deferredHistoricalPosture.claudeSubscriptionPoolActivationPresent).toBe(false);
       expect(
-        deferredPosture.privateTables.find(
-          (table) => table.name === "automatic_session_title_fanout_outbox_v1",
-        ),
-      ).toMatchObject({
-        select: false,
-        insert: false,
-        update: false,
-        delete: false,
+        evaluateRuntimeDatabasePosture(deferredHistoricalPosture, postureOptions(deferredRole)),
+      ).not.toEqual([]);
+
+      // Drain both real runtime logins before the later maintenance cutovers,
+      // replay actual withheld SQL, and provision the complete current contract.
+      await customClient.close();
+      customClient = null;
+      await deferredClient.close();
+      deferredClient = null;
+      await admin`delete from schema_migrations where name = any(${heldMigrations.filter((file) => file !== titleMigration)}::text[])`;
+      await migrate(blank.databaseUrl, undefined, {
+        applicationDatabaseRoles: [customRole, deferredRole],
       });
+      await provisionRoles(blank.databaseUrl, { appRole: customRole, appPassword: customPassword });
+      await provisionRoles(blank.databaseUrl, {
+        appRole: deferredRole,
+        appPassword: deferredPassword,
+      });
+      customClient = createDb(roleUrl(customRole, customPassword), { max: 1 });
+      deferredClient = createDb(roleUrl(deferredRole, deferredPassword), { max: 1 });
+      for (const [runtime, role, password] of [
+        [customClient, customRole, customPassword],
+        [deferredClient, deferredRole, deferredPassword],
+      ] as const) {
+        const posture = await inspectTitleAuthority(runtime, role, password);
+        expect(posture.claudeSubscriptionPoolActivationPresent).toBe(true);
+        expect(evaluateRuntimeDatabasePosture(posture, postureOptions(role))).toEqual([]);
+      }
+
+      await admin.unsafe(
+        `REVOKE EXECUTE ON FUNCTION opengeni_private.enforce_automatic_session_title_policy_v1() FROM "${customRole}"`,
+      );
+      try {
+        const missingAuthority = await inspectRuntimeDatabasePosture(
+          customClient.db,
+          postureOptions(customRole),
+        );
+        expect(
+          missingAuthority.privateRoutines.find(
+            (routine) => routine.name === "enforce_automatic_session_title_policy_v1()",
+          )?.execute,
+        ).toBe(false);
+        expect(
+          evaluateRuntimeDatabasePosture(missingAuthority, postureOptions(customRole)),
+        ).not.toEqual([]);
+      } finally {
+        await provisionRoles(blank.databaseUrl, {
+          appRole: customRole,
+          appPassword: customPassword,
+        });
+      }
+
+      await admin`grant execute on function opengeni_private.enforce_automatic_session_title_policy_v1() to public`;
+      try {
+        const publicAuthority = await inspectRuntimeDatabasePosture(
+          customClient.db,
+          postureOptions(customRole),
+        );
+        expect(
+          publicAuthority.privateRoutines.find(
+            (routine) => routine.name === "enforce_automatic_session_title_policy_v1()",
+          )?.publicExecute,
+        ).toBe(true);
+        expect(
+          evaluateRuntimeDatabasePosture(publicAuthority, postureOptions(customRole)),
+        ).not.toEqual([]);
+      } finally {
+        await admin`revoke execute on function opengeni_private.enforce_automatic_session_title_policy_v1() from public`;
+      }
+
+      await admin`alter table opengeni_private.automatic_session_title_fanout_outbox_v1 no force row level security`;
+      try {
+        const unforced = await inspectRuntimeDatabasePosture(
+          customClient.db,
+          postureOptions(customRole),
+        );
+        expect(
+          unforced.privateTables.find(
+            (table) => table.name === "automatic_session_title_fanout_outbox_v1",
+          )?.rlsForced,
+        ).toBe(false);
+        expect(evaluateRuntimeDatabasePosture(unforced, postureOptions(customRole))).not.toEqual(
+          [],
+        );
+      } finally {
+        await admin`alter table opengeni_private.automatic_session_title_fanout_outbox_v1 force row level security`;
+      }
+      const restored = await inspectTitleAuthority(customClient, customRole, customPassword);
+      expect(evaluateRuntimeDatabasePosture(restored, postureOptions(customRole))).toEqual([]);
     } finally {
       await customClient?.close().catch(() => undefined);
       await deferredClient?.close().catch(() => undefined);

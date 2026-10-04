@@ -123,17 +123,6 @@
       "fetchedAt": "2026-08-17T12:23:21.963Z"
     },
     {
-      "capabilityId": "mcp:integrations-sh:figma-com-a632f1ea0cb3",
-      "domain": "figma.com",
-      "mcpUrl": "https://mcp.figma.com/mcp",
-      "file": "figma-com-a632f1ea0cb3.jpg",
-      "sourceUrl": "https://integrations.sh/logo/figma.com",
-      "sha256": "70ccbbc57edbc6ce00b5f8965e869b2198c3310ef3f524b9447aa3edf1bf95a6",
-      "contentType": "image/jpeg",
-      "sizeBytes": 1198,
-      "fetchedAt": "2026-08-17T12:23:22.678Z"
-    },
-    {
       "capabilityId": "mcp:integrations-sh:front-com-96ac210c4196",
       "domain": "front.com",
       "mcpUrl": "https://mcp.frontapp.com/mcp",

@@ -70,6 +70,7 @@ import {
   runnerFailureToControlError,
   type OpStreamJournal,
   type OpStreamOutputFrame,
+  type OpStreamOutputReceipt,
 } from "./op-stream";
 import { OpStreamUnavailableError, type OpStreamTransport } from "./op-transport";
 import { connectedMachineWorkspaceRootsEqual, resolveConnectedMachinePath } from "./workspace-path";
@@ -362,6 +363,7 @@ export interface SelfhostedSessionDeps {
     exitCode: number | null;
     reason: string;
     failure?: import("@opengeni/contracts").SessionCommandFailure;
+    outputReceipt?: OpStreamOutputReceipt;
   }) => void | Promise<void>;
   /** The clock the bounded control-op retry loop drives (sleep + jitter). Injected
    *  so tests are deterministic; defaults to a real timer + `Math.random()`. */
@@ -1043,6 +1045,9 @@ export class SelfhostedSession {
                     await this.captureBackgroundCommandOutput?.(adopted.commandId, frames);
                   });
                   const terminal = replay.status === "completed" ? replay : replay.terminal;
+                  const outputReceipt =
+                    replay.outputReceipt ??
+                    (replay.status === "running" ? replay.terminal?.outputReceipt : undefined);
                   if (terminal) {
                     await this.settleBackgroundCommand?.({
                       commandId: adopted.commandId,
@@ -1051,6 +1056,9 @@ export class SelfhostedSession {
                       connectionInstanceId: admission.connectionInstanceId,
                       opId,
                       outcome: "exited",
+                      ...(this.captureBackgroundCommandOutput && outputReceipt
+                        ? { outputReceipt }
+                        : {}),
                       exitCode: terminal.outcome.response.exitCode,
                       reason: terminal.outcome.failure
                         ? `op_failure_${terminal.outcome.failure.failureCode.replace(/[^A-Za-z0-9_-]/g, "_").slice(0, 128)}`
@@ -1089,6 +1097,9 @@ export class SelfhostedSession {
               connectionInstanceId: admission.connectionInstanceId,
               opId,
               outcome: "exited",
+              ...(this.captureBackgroundCommandOutput && result.terminal.outputReceipt
+                ? { outputReceipt: result.terminal.outputReceipt }
+                : {}),
               exitCode: result.terminal.outcome.response.exitCode,
               reason: result.terminal.outcome.failure
                 ? `op_failure_${result.terminal.outcome.failure.failureCode.replace(/[^A-Za-z0-9_-]/g, "_").slice(0, 128)}`
@@ -1200,15 +1211,16 @@ export class SelfhostedSession {
   }
 
   /**
-   * The turn-end op-stream durability hook: persists each settled op's frontier
+   * The result/turn-end durability hook: persists each settled op's frontier
    * to the journal, then final-acks it on the wire (licensing the runner to GC
-   * its retained frames). The WORKER calls this after the turn's results are
-   * durably recorded — never mid-turn (the durable-before-wire-ack ordering).
+   * its retained frames). A tool-scoped call releases only that tool's output
+   * after its result is durably recorded. Omit scope only once every settled
+   * result has been accepted at the complete turn or one-off API boundary.
    * A no-op for sessions without the op-stream transport.
    */
-  async finalizeOpStreamOps(): Promise<void> {
+  async finalizeOpStreamOps(toolCallIds?: readonly string[]): Promise<void> {
     for (const client of this.opStreamClients.values()) {
-      await client.finalizeSettledOps();
+      await client.finalizeSettledOps(toolCallIds);
     }
   }
 
@@ -2298,8 +2310,8 @@ function execRequiresOpStream(cause?: OpStreamUnavailableError): SelfhostedContr
   const runnerUpgrade = cause?.unavailableKind === "runner" || cause === undefined;
   return new SelfhostedControlError({
     message: runnerUpgrade
-      ? "This Connected Machine does not advertise the streaming command protocol required for exec. Update and reconnect the OpenGeni agent. The command was not started."
-      : "The Connected Machine streaming channel is temporarily unavailable. OpenGeni did not downgrade to an ambiguous request/reply command; the command was not started. Retry after the machine reconnects.",
+      ? "This Connected Machine does not advertise the streaming command protocol required for exec. Update and reconnect the Opengeni agent. The command was not started."
+      : "The Connected Machine streaming channel is temporarily unavailable. Opengeni did not downgrade to an ambiguous request/reply command; the command was not started. Retry after the machine reconnects.",
     code: runnerUpgrade ? ErrorCode.ERROR_CODE_UNSUPPORTED : ErrorCode.ERROR_CODE_STREAM,
     reason: runnerUpgrade ? null : "agent_reconnecting",
     retryable: !runnerUpgrade,

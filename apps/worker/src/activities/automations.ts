@@ -4,7 +4,6 @@ import {
   WORKSPACE_OPENROUTER_MODEL_ID_PREFIX,
 } from "@opengeni/config";
 import {
-  agentConfigMayResolve,
   applySessionAgentConfigWriteThrough,
   assertWorkspaceModelPolicyAllows,
   canonicalConfiguredModel,
@@ -189,9 +188,7 @@ export function createAutomationActivities(
           tools: typeof template.tools;
         };
         try {
-          const workspaceSettings = agentConfigMayResolve(catalogSettings, template.agent)
-            ? (await readWorkspace(service.db, input.workspaceId)).settings
-            : {};
+          const workspaceSettings = (await readWorkspace(service.db, input.workspaceId)).settings;
           const resolution = resolveSessionAgentConfigForCreate({
             settings: catalogSettings,
             creator: "automation",

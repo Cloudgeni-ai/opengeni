@@ -158,12 +158,12 @@ export function useSubscriptionAccountPool<Account extends SubscriptionPoolAccou
     busy: mutation.epoch === current && mutation.working !== null,
     working: mutation.epoch === current ? mutation.working : null,
     refresh,
-    setRotation: (enabled: boolean) =>
+    setRotation: (rotationEnabled: boolean) =>
       canManageAccounts
         ? mutate(
             "rotation",
-            () => input.operations.rotation(enabled),
-            enabled
+            () => input.operations.rotation(rotationEnabled),
+            rotationEnabled
               ? `New work is spread across ${input.providerName} accounts`
               : `New work uses the primary ${input.providerName} account only`,
           )
@@ -176,12 +176,12 @@ export function useSubscriptionAccountPool<Account extends SubscriptionPoolAccou
             `${subscriptionAccountName(account)} is now the primary account`,
           )
         : Promise.resolve(),
-    setAllocator: (account: Account, enabled: boolean) =>
+    setAllocator: (account: Account, allocatorEnabled: boolean) =>
       canManageAccounts
         ? mutate(
             `allocator:${account.id}`,
-            () => input.operations.allocator(account, enabled),
-            enabled
+            () => input.operations.allocator(account, allocatorEnabled),
+            allocatorEnabled
               ? `${subscriptionAccountName(account)} is used for new work again`
               : `${subscriptionAccountName(account)} won't be used for new work`,
           )

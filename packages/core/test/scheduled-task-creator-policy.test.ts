@@ -265,6 +265,33 @@ describe("scheduled task frozen setup restriction", () => {
       }),
     ).toEqual({ missing: [], policy: null });
   });
+  test("organization policy tasks freeze the literal caller ceiling without an agent actor", async () => {
+    const limited: AccessGrant = {
+      ...grant,
+      permissions: ["workspace:admin", "sessions:read", "scheduled_tasks:manage"],
+      permissionMode: "explicit",
+    };
+    expect(
+      await frozenScheduledTaskCreatorPolicy({
+        db: {} as never,
+        settings,
+        grant: limited,
+        actor: null,
+      }),
+    ).toEqual({
+      firstPartyMcpTools: null,
+      firstPartyMcpPermissions: ["scheduled_tasks:manage", "sessions:read"],
+      sessionPolicy: null,
+    });
+    await expect(
+      frozenScheduledTaskCreatorPolicy({
+        db: {} as never,
+        settings,
+        grant: { ...limited, permissions: ["workspace:admin"] },
+        actor: null,
+      }),
+    ).rejects.toMatchObject({ status: 403 });
+  });
 
   test.each(["turn", "session"] as const)(
     "inherits the server-frozen %s restriction without widening tools or permissions",

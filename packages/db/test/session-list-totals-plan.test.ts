@@ -140,7 +140,9 @@ test("complete totals keep base-table work bounded across deep trees and populat
         relforcerowsecurity: true,
       });
       const result = await tx.execute(explainStatement(query.query, query.parameters));
-      const plan = (result[0]?.["QUERY PLAN"] as { Plan: PlanNode }[])[0]!.Plan;
+      const plans = result[0]?.["QUERY PLAN"] as { Plan: PlanNode }[] | undefined;
+      const plan = plans?.[0]?.Plan;
+      if (!plan) throw new Error("Exact totals query returned no execution plan");
       const visits = { sessions: 0, session_pins: 0 };
       function walk(node: PlanNode) {
         const relation = node["Relation Name"];

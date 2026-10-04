@@ -38,6 +38,12 @@ import {
   capabilityPresentation,
   presentationPermissions,
 } from "@/components/capabilities/integration-experience";
+import type { IntegrationViewModel } from "./integration-view-model";
+import { McpAuthDiscoveryNotice } from "./mcp-auth-discovery-notice";
+import {
+  CatalogConnectedAccounts,
+  type CatalogConnectedAccountsProps,
+} from "./catalog-connected-accounts";
 import { MoreMenu, RowButton } from "@/components/ui/page-actions";
 import { Button } from "@/components/ui/button";
 import { ChoiceCard, ChoiceCards } from "@/components/ui/choice-cards";
@@ -80,8 +86,13 @@ export function CatalogItemPage({
   canManageSkills,
   onAction,
   onConnectAccount,
+  onRetryAuthInspection,
   onBack,
   backLabel,
+  setupUnavailable,
+  fikenSetup,
+  socialSetupAvailable = true,
+  connectionAccounts,
 }: {
   workspaceId: string;
   item: CapabilityCatalogItem;
@@ -95,9 +106,17 @@ export function CatalogItemPage({
   onAction: (action: ConnectAction) => void;
   /** Sign-in connections run their short connect step (a popup flow) in a dialog. */
   onConnectAccount?: (() => void) | undefined;
+  onRetryAuthInspection?: (() => void) | undefined;
   onBack: () => void;
   backLabel?: string;
+  /** A native readiness check blocks only fresh setup, never existing management. */
+  setupUnavailable?: IntegrationViewModel["notice"];
+  fikenSetup?: { oauthAvailable: boolean; tokenAvailable: boolean };
+  /** Existing social rows stay manageable; any new OAuth attempt still needs provider readiness. */
+  socialSetupAvailable?: boolean;
+  connectionAccounts?: Omit<CatalogConnectedAccountsProps, "item">;
 }) {
+  const setupBlocked = !item.enabled && setupUnavailable !== undefined;
   const plan = useMemo(() => capabilityConnectPlan(item), [item]);
   const personalOnly = personalOnlyCapability(item);
   const defaultOwnership = personalOnly ? "personal" : defaultCapabilityConnectionOwnership(item);
@@ -216,7 +235,7 @@ export function CatalogItemPage({
   } else if (item.surfaceType === "codex_apps") {
     primary = null;
   } else if (plan.mode === "social_oauth") {
-    primary = (
+    primary = socialSetupAvailable ? (
       <Button
         type="button"
         size="sm"
@@ -231,7 +250,7 @@ export function CatalogItemPage({
             ? "Add another account"
             : `Connect ${title}`}
       </Button>
-    );
+    ) : null;
   } else if (item.enabled) {
     if (reconnect?.kind === "oauth") {
       primary = (
@@ -425,6 +444,7 @@ export function CatalogItemPage({
               keyPageUrl={keyPageUrl}
               busy={busy}
               onAction={onAction}
+              {...(!item.enabled ? fikenSetup : {})}
             />
           </div>
         </DetailSection>
@@ -507,11 +527,15 @@ export function CatalogItemPage({
     } else if (plan.mode === "setup_required") {
       setup = (
         <DetailSection>
-          <p role="status" className="m-0 text-sm leading-5 text-fg-muted">
-            {item.metadata.authDiscovery === "checking"
-              ? "Checking how to sign in…"
-              : "This connection needs setup the catalog can't describe yet. Follow the provider's instructions, then come back to connect it."}
-          </p>
+          <McpAuthDiscoveryNotice
+            checking={item.metadata.authDiscovery === "checking"}
+            message={
+              typeof item.metadata.authDiscoveryMessage === "string"
+                ? item.metadata.authDiscoveryMessage
+                : undefined
+            }
+            onRetry={onRetryAuthInspection}
+          />
         </DetailSection>
       );
     }
@@ -532,13 +556,13 @@ export function CatalogItemPage({
         />
       }
       title={title}
-      status={status}
+      status={setupBlocked ? undefined : status}
       chips={community ? <MetaChip variant="outline">Community</MetaChip> : undefined}
       meta={[publisher ? `By ${publisher}` : null, category, isSkill ? "Skill" : null]}
       actions={
-        primary || menu.length ? (
+        (!setupBlocked && primary) || menu.length ? (
           <>
-            {primary}
+            {setupBlocked ? null : primary}
             {menu.length ? <MoreMenu label={`More actions for ${title}`}>{menu}</MoreMenu> : null}
           </>
         ) : undefined
@@ -616,7 +640,33 @@ export function CatalogItemPage({
         ) : null}
       </DetailSection>
 
-      {setup}
+      {setupBlocked ? (
+        <DetailSection>
+          <Notice
+            tone={setupUnavailable.tone}
+            title={setupUnavailable.title}
+            live="polite"
+            action={
+              setupUnavailable.action ? (
+                <Button
+                  type="button"
+                  variant="outline"
+                  size="sm"
+                  onClick={setupUnavailable.action.onClick}
+                >
+                  {setupUnavailable.action.label}
+                </Button>
+              ) : undefined
+            }
+          >
+            {setupUnavailable.description}
+          </Notice>
+        </DetailSection>
+      ) : (
+        setup
+      )}
+
+      {connectionAccounts ? <CatalogConnectedAccounts item={item} {...connectionAccounts} /> : null}
 
       {workspaceId && hasConnectorToolPermissionTarget(item, health) ? (
         <DetailSection

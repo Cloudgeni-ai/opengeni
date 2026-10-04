@@ -341,6 +341,20 @@ async fn control_mode_pty_frames_reach_the_producer_with_desktop_flag_off() {
         .expect("viewer recv timed out")
         .expect("viewer frame");
     assert_eq!(&got.data[..], b"tty-out");
+    let close = RelayMessage::Close(v1::StreamClose {
+        channel_id: viewer.channel_id.clone(),
+        ..Default::default()
+    });
+    viewer
+        .socket
+        .send(WsMessage::Binary(close.encode()))
+        .await
+        .unwrap();
+    let received = tokio::time::timeout(Duration::from_secs(5), producer.recv())
+        .await
+        .expect("control close timed out")
+        .expect("control close receive");
+    assert_eq!(received.unwrap().encode(), close.encode());
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -586,6 +600,69 @@ async fn desktop_input_is_rejected_on_pty_and_unknown_ports_even_with_control() 
     }
 }
 
+async fn assert_bound_close_authority(
+    channel_port: u32,
+    producer: &mut Viewer,
+    viewer: &mut Viewer,
+) {
+    // Closing a PTY is a process-control operation. Capture channels still
+    // allow their view-only consumer to stop an obsolete capture.
+    let close = RelayMessage::Close(v1::StreamClose {
+        channel_id: viewer.channel_id.clone(),
+        ..Default::default()
+    });
+    let wrong_channel_close = RelayMessage::Close(v1::StreamClose {
+        channel_id: format!("forged-channel-{channel_port}"),
+        ..Default::default()
+    });
+    viewer
+        .socket
+        .send(WsMessage::Binary(wrong_channel_close.encode()))
+        .await
+        .unwrap();
+    assert!(
+        tokio::time::timeout(Duration::from_millis(250), next_msg(&mut producer.socket))
+            .await
+            .is_err(),
+        "a close bound to another channel must not tear down the attached channel"
+    );
+    viewer
+        .socket
+        .send(WsMessage::Binary(close.encode()))
+        .await
+        .unwrap();
+    if channel_port == PTY_STREAM_PORT {
+        assert!(
+            tokio::time::timeout(Duration::from_millis(250), next_msg(&mut producer.socket))
+                .await
+                .is_err(),
+            "view-only clients must not terminate a PTY"
+        );
+        producer.send_frame(1, b"still running").await;
+        let output = tokio::time::timeout(Duration::from_secs(5), viewer.recv_frame())
+            .await
+            .expect("PTY must remain attached")
+            .expect("PTY output");
+        assert_eq!(&output.data[..], b"still running");
+        producer
+            .socket
+            .send(WsMessage::Binary(close.encode()))
+            .await
+            .unwrap();
+        let received = tokio::time::timeout(Duration::from_secs(5), next_msg(&mut viewer.socket))
+            .await
+            .expect("producer close timed out")
+            .expect("producer close message");
+        assert_eq!(received.encode(), close.encode());
+    } else {
+        let received = tokio::time::timeout(Duration::from_secs(5), next_msg(&mut producer.socket))
+            .await
+            .expect("close timed out")
+            .expect("close message");
+        assert_eq!(received.encode(), close.encode());
+    }
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn agent_desktop_input_is_rejected_but_frames_and_close_are_forwarded() {
     let port = free_port().await;
@@ -644,36 +721,7 @@ async fn agent_desktop_input_is_rejected_but_frames_and_close_are_forwarded() {
             .expect("agent output frame");
         assert_eq!(&output.data[..], b"agent output");
 
-        // A view-mode peer can still close even when input is forbidden.
-        let close = RelayMessage::Close(v1::StreamClose {
-            channel_id: viewer.channel_id.clone(),
-            ..Default::default()
-        });
-        let wrong_channel_close = RelayMessage::Close(v1::StreamClose {
-            channel_id: format!("forged-channel-{channel_port}"),
-            ..Default::default()
-        });
-        viewer
-            .socket
-            .send(WsMessage::Binary(wrong_channel_close.encode()))
-            .await
-            .unwrap();
-        assert!(
-            tokio::time::timeout(Duration::from_millis(250), next_msg(&mut producer.socket))
-                .await
-                .is_err(),
-            "a close bound to another channel must not tear down the attached channel"
-        );
-        viewer
-            .socket
-            .send(WsMessage::Binary(close.encode()))
-            .await
-            .unwrap();
-        let received = tokio::time::timeout(Duration::from_secs(5), next_msg(&mut producer.socket))
-            .await
-            .expect("close timed out")
-            .expect("close message");
-        assert_eq!(received.encode(), close.encode());
+        assert_bound_close_authority(channel_port, &mut producer, &mut viewer).await;
     }
 }
 

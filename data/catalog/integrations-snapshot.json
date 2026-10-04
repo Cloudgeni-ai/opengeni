@@ -4,18 +4,18 @@
   "cleanedAt": "2026-08-17T11:18:21.937Z",
   "cleaning": {
     "inputRows": 1334,
-    "outputRows": 644,
+    "outputRows": 643,
     "skippedRows": 687,
-    "quarantinedRows": 3,
+    "quarantinedRows": 4,
     "duplicateDomainNameRows": 109,
     "duplicateEndpointRows": 18,
     "unverifiedRows": 0,
     "controlCharacterFields": 0
   },
   "probe": {
-    "kept": 644,
-    "dropped": 142,
-    "real": 644,
+    "kept": 643,
+    "dropped": 143,
+    "real": 643,
     "unverified": 111,
     "googleapisDropped": 2
   },
@@ -31,10 +31,6 @@
         "mcpUrl": "https://mcp.excalidraw.com/mcp"
       },
       {
-        "domain": "figma.com",
-        "mcpUrl": "https://mcp.figma.com/mcp"
-      },
-      {
         "domain": "gmailmcp.googleapis.com",
         "mcpUrl": "https://gmailmcp.googleapis.com/mcp/v1"
       },
@@ -48,6 +44,11 @@
       }
     ],
     "droppedRows": [
+      {
+        "domain": "figma.com",
+        "mcpUrl": "https://mcp.figma.com/mcp",
+        "reason": "requires_approved_mcp_client"
+      },
       {
         "domain": "betterstack.com",
         "mcpUrl": "https://betterstack.com/mcp",
@@ -4572,35 +4573,6 @@
         "status": "real",
         "reason": "mcp_sse",
         "httpStatus": 200
-      }
-    },
-    {
-      "domain": "figma.com",
-      "name": "Figma",
-      "description": "Read frames, components, and comments straight from a design file.",
-      "category": "design",
-      "featured": true,
-      "official": true,
-      "mcpUrl": "https://mcp.figma.com/mcp",
-      "transport": "streamable-http",
-      "authKind": "oauth2",
-      "scopesHint": [],
-      "credentialFacts": [
-        {
-          "id": "figma_oauth_app",
-          "type": "oauth2",
-          "generateUrl": null,
-          "setup": "## OAuth 2.0 — self-onboarding\nPoint your MCP client at the server URL and approve access in the browser. The server supports OAuth Dynamic Client Registration (RFC 7591), so the client registers itself automatically — no developer-portal app, `client_id`, or `client_secret` to create.",
-          "fields": null
-        }
-      ],
-      "tier": "verified",
-      "provenance": "detected",
-      "logoSourceUrl": "https://integrations.sh/logo/figma.com",
-      "probe": {
-        "status": "real",
-        "reason": "auth_challenge",
-        "httpStatus": 401
       }
     },
     {
@@ -18018,6 +17990,38 @@
     }
   ],
   "quarantined": [
+    {
+      "row": {
+        "domain": "figma.com",
+        "name": "Figma",
+        "description": "Read frames, components, and comments straight from a design file.",
+        "category": "design",
+        "featured": true,
+        "official": true,
+        "mcpUrl": "https://mcp.figma.com/mcp",
+        "transport": "streamable-http",
+        "authKind": "oauth2",
+        "scopesHint": [],
+        "credentialFacts": [
+          {
+            "id": "figma_oauth_app",
+            "type": "oauth2",
+            "generateUrl": null,
+            "setup": "## OAuth 2.0 — self-onboarding\nPoint your MCP client at the server URL and approve access in the browser. The server supports OAuth Dynamic Client Registration (RFC 7591), so the client registers itself automatically — no developer-portal app, `client_id`, or `client_secret` to create.",
+            "fields": null
+          }
+        ],
+        "tier": "verified",
+        "provenance": "detected",
+        "logoSourceUrl": "https://integrations.sh/logo/figma.com",
+        "probe": {
+          "status": "real",
+          "reason": "auth_challenge",
+          "httpStatus": 401
+        }
+      },
+      "reason": "Figma requires an approved MCP client; OpenGeni remote access must be approved before stock setup is offered"
+    },
     {
       "row": {
         "domain": "activepieces.com",

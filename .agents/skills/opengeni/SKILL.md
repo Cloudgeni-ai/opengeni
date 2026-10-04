@@ -39,6 +39,10 @@ Then open the smallest source files that answer the question:
 - API routes: `apps/api/src/routes/`, plus `apps/api/src/app.ts` and `apps/api/src/index.ts`.
 - Core domain/access/billing helpers: `packages/core/src/` (`access/`, `domain/`, `billing/`, and `dependencies.ts`). These moved out of `apps/api`; API routes are HTTP adapters over `@opengeni/core`.
 - Public shapes: `packages/contracts/src/index.ts`, especially workspace, access, billing, usage, session, file, document, schedule, and MCP contracts.
+- Organization API-key policy/preset normalization and all/selected shared-workspace scope:
+  `packages/contracts/src/organization-access.ts`, then `packages/core/src/access/`
+  and `apps/api/src/routes/api-keys.ts`. Explicit policies have exact grants;
+  legacy wildcard semantics are separate. See `docs/product-integration.md`.
 - External host identities and credential authority: `packages/core/src/access/`,
   `packages/contracts/src/external-identities.ts`, and `packages/db/src/connection-authority.ts`.
   Verified external owning-user authority is distinct from a managed login cookie.
@@ -59,6 +63,11 @@ Then open the smallest source files that answer the question:
 - Database/state: `packages/db/src/schema.ts`, `packages/db/src/index.ts`, `packages/db/drizzle/`.
 - Event bus/SSE: `packages/events/src/index.ts`, `apps/api/src/http/sse.ts`.
 - Worker/orchestration: `apps/worker/src/workflows/`, `apps/worker/src/activities/`. Physical finalization after execution has a five-minute per-stage containment deadline on normal and cancelled exits; `agent-turn/finalization-monitor.ts` owns the bounded stage heartbeat/metrics. The deadline requests host-owned graceful worker drain so peer turns checkpoint and resume; the standalone host retains a 100-second exit backstop if cleanup cannot quiesce. Embedded hosts supply their termination policy. Cleanup consumes only exact durable terminal process proof, including independent reaper settlement. This is never a limit on agent execution. Closed-attempt writers still gate successors; adopted background commands retain their independent lifetime.
+- Command-output collection follows durable custody independently of model
+  completion. Inspect foreground finalization in
+  `apps/worker/src/activities/agent-turn/quiescence.ts`, background replay/release
+  in `apps/worker/src/activities/sandbox-lease.ts`, and
+  `packages/db/src/session-background-commands.ts` before diagnosing retention.
 - Startup telemetry: `apps/worker/src/observability-metrics.ts` separates blocking
   preparation from background MCP work. Phase durations can overlap; use durable
   milestones for elapsed startup latency. Runtime stream initialization is not
@@ -191,6 +200,13 @@ For architecture, documentation, implementation, debugging, or operational work,
 Do not rely on this skill for exact route lists, env var lists, event types, model names, or backend names. Re-discover those from contracts/config/routes every time exactness matters.
 
 ## Code Change Workflow
+
+For informational agent input, inspect `packages/db/src/inbox-execution-context.ts`
+and `docs/durable-agent-inputs.md`. Ordinary same-human messages use the receiving
+chat's last started user/API context; selected-account differences alone do not
+split batches. Other humans, restricted sources, schedules and Steer retain
+explicit authority. The context pointer advances on durable first `turn.started`,
+not queue/claim or recovery, and inherited receipts retain their generations.
 
 Before editing, identify which layer owns the behavior:
 
@@ -351,7 +367,7 @@ content-addressed clients during setup; per-exec PATH and
 `OPENGENI_CODEMODE_CLIENT_MODULE` select the release without changing the manifest.
 Do not repair stale clients by weakening catalog integrity or choosing npm latest.
 
-Find current MCP behavior in config parsing, tool validation, runtime `prepareTools`, and API MCP server builders. Treat first-party document/file/scheduled-task tools as swappable defaults. If a user wants enterprise search, repo tools, web tools, or custom systems, point OpenGeni at a different MCP server if current config supports it.
+Find current MCP behavior in config parsing, tool validation, runtime `prepareTools`, and API MCP server builders. Account-qualified identity projection is shared by worker and current-caller gateways in `packages/core/src/domain/mcp-account-routes.ts`; compare exact catalog identities when debugging Site or OAuth tool availability. Treat first-party document/file/scheduled-task tools as swappable defaults. If a user wants enterprise search, repo tools, web tools, or custom systems, point OpenGeni at a different MCP server if current config supports it.
 
 ## Scheduling Discovery
 

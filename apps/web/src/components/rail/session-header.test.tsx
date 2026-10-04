@@ -153,7 +153,7 @@ test("reuses the compact Schedule button without requiring creation metadata", a
   }
 });
 
-test("phones keep a compact lifecycle indicator instead of hiding status", async () => {
+test("narrow headers keep a compact lifecycle dot instead of hiding status", async () => {
   const container = document.createElement("div");
   document.body.append(container);
   const root = createRoot(container);
@@ -182,7 +182,7 @@ test("phones keep a compact lifecycle indicator instead of hiding status", async
       await act(async () => root.render(render(session, status)));
       expect(compact()?.dataset.compactSessionStatus).toBe(status);
       expect(compact()?.textContent).toBe(label);
-      expect(compact()?.className).toContain("md:hidden");
+      expect(compact()?.className).toContain("lg:hidden");
     }
     await act(async () =>
       root.render(
@@ -214,7 +214,7 @@ test("phones keep a compact lifecycle indicator instead of hiding status", async
       ),
     );
     expect(compact()?.textContent).toBe("Paused");
-    expect(container.querySelector(".sr-only.md\\:hidden")?.textContent).toBe("Connection live.");
+    expect(container.querySelector(".sr-only.lg\\:hidden")?.textContent).toBe("Connection live.");
   } finally {
     await act(async () => root.unmount());
     container.remove();

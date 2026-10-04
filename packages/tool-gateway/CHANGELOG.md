@@ -1,5 +1,47 @@
 # @opengeni/tool-gateway
 
+## 1.0.2
+
+### Patch Changes
+
+- Updated dependencies [4476ca7]
+- Updated dependencies [f9e33b5]
+- Updated dependencies [e16aa17]
+  - @opengeni/contracts@1.0.1
+  - @opengeni/observability@1.0.1
+
+## 1.0.0
+
+### Major Changes
+
+- Reset package versioning: every published `@opengeni/*` package now releases together at one shared version, starting at 1.0.0. Install all `@opengeni` packages at the same version. Earlier versions are retired.
+
+## 0.1.20
+
+### Patch Changes
+
+- e6036b3: Publish native structured first-party tool input contracts without changing omission-sensitive arguments. Reject opaque input definitions during registration, and report applicable union validation requirements across tool adapters.
+- Updated dependencies [aa41b15]
+- Updated dependencies [af57cf9]
+- Updated dependencies [8ce490f]
+- Updated dependencies [692a1f5]
+- Updated dependencies [e0d4bd4]
+- Updated dependencies [c7c09fd]
+- Updated dependencies [2f09c54]
+- Updated dependencies [303ed6c]
+- Updated dependencies [9ca494c]
+- Updated dependencies [3395acc]
+- Updated dependencies [18216d2]
+- Updated dependencies [81a5d9d]
+- Updated dependencies [746464c]
+- Updated dependencies [6cdc0aa]
+- Updated dependencies [0fba21e]
+- Updated dependencies [97d4f07]
+- Updated dependencies [14e95e9]
+- Updated dependencies [8323e90]
+  - @opengeni/contracts@5.8.0
+  - @opengeni/observability@0.8.39
+
 ## 0.1.19
 
 ### Patch Changes

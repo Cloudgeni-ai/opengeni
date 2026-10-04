@@ -1,6 +1,6 @@
 import { afterAll, beforeAll, describe, expect, setDefaultTimeout, test } from "bun:test";
 import { signDelegatedAccessToken, type Session } from "@opengeni/contracts";
-import { bootstrapWorkspace, createDb, type DbClient } from "@opengeni/db";
+import { bootstrapWorkspace, createDb, createSession, type DbClient } from "@opengeni/db";
 import {
   acquireSharedTestDatabase,
   MemoryEventBus,
@@ -57,7 +57,6 @@ describe("effectiveTools on session responses (PostgreSQL)", () => {
         delegationSecret: secret,
         environmentsEncryptionKey: Buffer.alloc(32, 57).toString("base64"),
         sandboxBackend: "none",
-        agentConfigAdmissionEnabled: true,
         webSearchEnabled: false,
         lazyToolSearchEnabled: true,
       }),
@@ -89,11 +88,26 @@ describe("effectiveTools on session responses (PostgreSQL)", () => {
       expect(response.status).toBe(202);
       return (await response.json()) as Session;
     };
-    const legacy = await create();
+    // A session created before agent configuration keeps a null config.
+    const legacy = await createSession(client.db, {
+      accountId: grant.accountId,
+      workspaceId: grant.workspaceId,
+      initialMessage: "hello",
+      resources: [],
+      tools: [],
+      metadata: {},
+      model: testSettings().openaiModel,
+      reasoningEffort: "medium",
+      latencyMode: "standard",
+      sandboxBackend: "none",
+      createdBy: { kind: "subject", subjectId: grant.subjectId, label: "Test owner" },
+      createdByContext: {},
+    });
+    const omitted = await create();
     const all = await create({ capabilities: "all" });
     const none = await create({ capabilities: "none" });
-    expect(Object.hasOwn(legacy, "effectiveTools")).toBe(false);
-    for (const created of [all, none]) {
+    expect(omitted.agent).toMatchObject({ source: "deployment_default" });
+    for (const created of [omitted, all, none]) {
       const names = created.effectiveTools!.tools.map((tool) => tool.name);
       expect(names).not.toContain("web_search");
       expect(names).not.toContain("generate_image");

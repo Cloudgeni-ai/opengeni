@@ -1,3 +1,4 @@
+import { connectionAccountIdentityLabel } from "@opengeni/contracts/connection-account-label";
 import type { ConnectionMetadata } from "@opengeni/sdk";
 import { DropdownMenuItem } from "@/components/ui/dropdown-menu";
 import { ComposerMenuSwitchIndicator } from "@/components/ui/composer-menu";
@@ -7,31 +8,7 @@ import type {
 } from "./session-connection-accounts";
 
 export function connectionAccountLabel(account: ConnectionMetadata, fallback: string): string {
-  const metadata = account.metadata;
-  const label = [
-    metadata.email,
-    metadata.displayName,
-    metadata.accountName,
-    metadata.teamName,
-    metadata.workspaceName,
-    metadata.team_name,
-    metadata.workspace_name,
-    typeof metadata.team === "object" && metadata.team !== null
-      ? (metadata.team as Record<string, unknown>).name
-      : metadata.team,
-    typeof metadata.workspace === "object" && metadata.workspace !== null
-      ? (metadata.workspace as Record<string, unknown>).name
-      : metadata.workspace,
-  ].find((value) => typeof value === "string" && value.trim());
-  const team = [
-    metadata.slackTeamName,
-    metadata.teamName,
-    metadata.workspaceName,
-    metadata.team_name,
-    metadata.workspace_name,
-  ].find((value) => typeof value === "string" && value.trim());
-  const name = typeof label === "string" ? label.trim() : fallback;
-  return typeof team === "string" && team.trim() !== name ? `${name} · ${team.trim()}` : name;
+  return connectionAccountIdentityLabel(account.metadata, fallback);
 }
 
 export type ConnectionAccountPickerProps = {
@@ -40,6 +17,7 @@ export type ConnectionAccountPickerProps = {
   onChoose: (serverId: string, connectionIds: string[]) => void;
   disabled?: boolean;
   presentation?: "menu" | "dialog";
+  emptySelectionHint?: string;
 };
 
 export type ConnectionAccountControls = ConnectionAccountPickerProps & {
@@ -145,7 +123,7 @@ export function ConnectionAccountPicker(props: ConnectionAccountPickerProps) {
         ) : null}
         {!chosen.length && group.accounts.length > 0 ? (
           <p role="status" className="px-2 py-2 text-xs text-fg-muted">
-            No accounts selected.
+            {props.emptySelectionHint ?? "No accounts selected."}
           </p>
         ) : null}
       </div>

@@ -25,15 +25,28 @@ test("every agent reconstruction reads durable recovery truth before building in
     statement.type === "VariableDeclaration" ? statement.declarations : [],
   );
   const warning = variables.find(
-    (node) => node.id.type === "Identifier" && node.id.name === "sessionInstructions",
+    (node) =>
+      node.id.type === "ArrayPattern" &&
+      node.id.elements.some(
+        (element) => element?.type === "Identifier" && element.name === "sessionInstructions",
+      ),
   );
   // Top-level, unconditional and awaited: neither context history nor a
   // compaction branch can suppress the receipt read. Real-DB tests separately
   // prove persistence across reconstruction in a new database client.
   if (warning?.init?.type !== "AwaitExpression" || warning.init.argument.type !== "CallExpression")
     throw new Error("Recovery read must be unconditionally awaited");
-  const read = warning.init.argument;
-  expect(source.slice(read.callee.start, read.callee.end)).toBe("recoveryAwareSessionInstructions");
+  const paired = warning.init.argument;
+  expect(source.slice(paired.callee.start, paired.callee.end)).toBe("Promise.all");
+  const reads = paired.arguments[0];
+  if (reads?.type !== "ArrayExpression") throw new Error("Recovery read must join its pair");
+  const read = reads.elements.find(
+    (element) =>
+      element?.type === "CallExpression" &&
+      element.callee.type === "Identifier" &&
+      element.callee.name === "recoveryAwareSessionInstructions",
+  );
+  if (read?.type !== "CallExpression") throw new Error("Missing unconditional recovery read");
   expect(read.arguments.map((argument) => source.slice(argument.start, argument.end))).toEqual([
     "db",
     "input.workspaceId",

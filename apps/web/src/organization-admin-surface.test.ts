@@ -169,9 +169,11 @@ describe("organization administration surface", () => {
     expect(routeSource).toContain("canManageOrganizationKnowledge");
     expect(accessSource).toContain('accountGrant?.role === "owner"');
     expect(accessSource).toContain('"account:admin"');
-    expect(identitySource).toContain("client.getCompanyProfileAgentPolicy(");
-    expect(identitySource).toContain("client.updateCompanyProfileAgentPolicy(");
-    expect(identitySource).toContain('label: "Automatic"');
+    // Identity shows its agent policy as one row; owners change it on Agent learning,
+    // in the same words as the workspace's modes.
+    expect(identitySource).toContain(".getCompanyProfileAgentPolicy(workspaceId)");
+    expect(identitySource).not.toContain("updateCompanyProfileAgentPolicy(");
+    expect(identitySource).toContain("LEARNING_MODE_LABEL[IDENTITY_POLICY_MODE[policy.mode]]");
     expect(identitySource).toContain("Organization identity is read-only for you");
     expect(recoverySource).toContain("overview.eligibleMembers");
     expect(recoverySource).not.toContain("listOrganizationAdministrationMembers");
@@ -202,7 +204,8 @@ describe("organization administration surface", () => {
     expect(apiKeySource).toContain(
       "Server credentials that create and run every shared workspace, never Personal ones.",
     );
-    expect(apiKeySource).toContain("It can't open Personal workspaces or read secret values.");
+    expect(apiKeySource).toContain("It never opens Personal workspaces.");
+    expect(apiKeySource).toContain("Can't change anything or read secret values.");
     expect(apiKeySource).toContain('title="API key created"');
     expect(apiKeySource).not.toContain("fixedPermissions");
     expect(apiKeySource).not.toContain('"workspace:read"');

@@ -487,7 +487,7 @@ describe("scheduled OpenGeni Slack bot routing", () => {
         triggerType: "scheduled",
         producerKey: `slack-routing-${crypto.randomUUID()}`,
       }),
-    ).rejects.toThrow("OpenGeni Slack bot connection");
+    ).rejects.toThrow("Opengeni Slack bot connection");
 
     const otherWorkspace = await workspaceFixture();
     const { connection: otherBot } = await botConnection(otherWorkspace);
@@ -499,7 +499,7 @@ describe("scheduled OpenGeni Slack bot routing", () => {
         triggerType: "scheduled",
         producerKey: `slack-routing-${crypto.randomUUID()}`,
       }),
-    ).rejects.toThrow("OpenGeni Slack bot connection");
+    ).rejects.toThrow("Opengeni Slack bot connection");
   });
 
   test("a new bot installation never silently rebinds an existing scheduled task", async () => {

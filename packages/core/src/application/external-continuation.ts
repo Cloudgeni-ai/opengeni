@@ -4,7 +4,9 @@ import {
   ensureExternalIdentity,
   resolveExternalIdentityLink,
   getWorkspaceGrant,
-  lockActiveExternalOrganizationKey,
+  lockActiveExternalOrganizationKeyAuthority,
+  getOrganizationApiKey,
+  requireWorkspace,
   lockExternalWorkspaceMembershipLifecycle,
   managedPersonalWorkspacePermissions,
   nestedPostgresSqlState,
@@ -13,6 +15,7 @@ import {
 } from "@opengeni/db";
 import {
   hasPermission,
+  organizationWorkspaceInScope,
   externalActorContinuationForAuthorization,
   type AccessGrantAuthorization,
 } from "../access";
@@ -65,12 +68,26 @@ export async function requireExternalContinuationAuthority(
   };
   if (actor.accountId !== scope.accountId || actor.effectiveSubjectId !== scope.subjectId) deny();
   await lockExternalWorkspaceMembershipLifecycle(tx, scope.accountId);
-  const permissions = await lockActiveExternalOrganizationKey(
+  const authority = await lockActiveExternalOrganizationKeyAuthority(
     tx,
     scope.accountId,
     actor.authenticatingApiKeyId,
   );
-  if (!permissions || required.some((value) => !hasPermission(permissions, value))) deny();
+  const key = authority
+    ? await getOrganizationApiKey(tx, scope.accountId, actor.authenticatingApiKeyId)
+    : null;
+  if (
+    !authority ||
+    !key ||
+    !organizationWorkspaceInScope(key.workspaceScope ?? { kind: "all" }, scope.workspaceId) ||
+    required.some((value) => !hasPermission(authority.permissions, value, authority.permissionMode))
+  )
+    deny();
+  if (
+    key?.permissionMode === "explicit" &&
+    (await requireWorkspace(tx, scope.workspaceId)).kind !== "shared"
+  )
+    deny();
   const identity = await ensureExternalIdentity(tx, { accountId: scope.accountId, ...reference });
   if (
     identity.id !== actor.externalIdentityId ||

@@ -68,6 +68,8 @@ export function filterArtifactCatalog(
         (!query || item.title.toLocaleLowerCase().includes(query)),
     )
     .sort((a, b) => {
+      const pinOrder = Number(Boolean(b.pinned)) - Number(Boolean(a.pinned));
+      if (pinOrder) return pinOrder;
       const order =
         filters.sort === "title"
           ? a.title.localeCompare(b.title)

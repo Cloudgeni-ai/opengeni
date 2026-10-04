@@ -26,6 +26,7 @@ import {
 import { migrate } from "@opengeni/db/migrate";
 import {
   freezePersonalConnectionDelegations,
+  listOwnConnectionAccountsForGrant,
   googleDrivePublicationDelegationFromVisibleConnections,
   personalAtlassianDelegationsFromVisibleConnections,
   personalConnectionDelegationSourceForGrant,
@@ -220,6 +221,39 @@ describe("personal MCP connection delegation", () => {
         return row!;
       });
       const selection = { serverId: "linear", connectionId: connection.id };
+      const inactive = await sql.begin(async (tx) => {
+        await tx`select set_config('opengeni.account_id', ${account!.id}, true)`;
+        await tx`select set_config('opengeni.workspace_id', ${origin!.id}, true)`;
+        await tx`select set_config('opengeni.subject_id', ${subjectId}, true)`;
+        const [row] = await tx<{ id: string }[]>`
+          insert into connections (account_id, workspace_id, subject_id, provider_domain, kind, credential_encrypted, status)
+          values (${account!.id}, ${origin!.id}, ${subjectId}, 'slack.example.test', 'oauth2', 'ciphertext', 'needs_reauth') returning id
+        `;
+        return row!;
+      });
+      const inventoryGrant = {
+        accountId: account!.id,
+        workspaceId: target!.id,
+        subjectId,
+      } as Parameters<typeof listOwnConnectionAccountsForGrant>[1];
+      expect(
+        (await listOwnConnectionAccountsForGrant(client.db, inventoryGrant)).map((row) => row.id),
+      ).toEqual([connection.id]);
+      const settingsInventory = await listOwnConnectionAccountsForGrant(client.db, inventoryGrant, {
+        includeInactive: true,
+      });
+      expect(settingsInventory.map((row) => row.id).sort()).toEqual(
+        [connection.id, inactive.id].sort(),
+      );
+      expect(settingsInventory.find((row) => row.id === inactive.id)?.status).toBe("needs_reauth");
+      expect(settingsInventory.every((row) => row.workspaceId === origin!.id)).toBe(true);
+      expect(
+        await listOwnConnectionAccountsForGrant(
+          client.db,
+          { ...inventoryGrant, principalKind: "service" },
+          { includeInactive: true },
+        ),
+      ).toEqual([]);
       const frozen = await freezePersonalConnectionDelegations({
         db: client.db,
         workspaceId: target!.id,
@@ -1103,7 +1137,7 @@ describe("personal MCP connection delegation", () => {
     ).toEqual([social]);
   });
 
-  test("captures canonical Atlassian accounts and excludes legacy account rows", () => {
+  test("retired native Atlassian accounts never become execution authority", () => {
     const authorityId = crypto.randomUUID();
     const atlassian = googleDriveConnection({
       id: crypto.randomUUID(),
@@ -1117,20 +1151,46 @@ describe("personal MCP connection delegation", () => {
         subjectId: "user:owner",
         connections: [atlassian],
       }),
-    ).toEqual([
-      expect.objectContaining({
-        connectionId: atlassian.id,
-        originWorkspaceId: atlassian.workspaceId,
-        ownerSubjectId: "user:owner",
-        connectionType: "atlassian",
-      }),
-    ]);
+    ).toEqual([]);
     expect(
       personalAtlassianDelegationsFromVisibleConnections({
         subjectId: "user:owner",
         connections: [{ ...atlassian, authorityId: null }],
       }),
     ).toEqual([]);
+  });
+
+  test("children drop native Atlassian authority while retaining the hosted MCP binding", () => {
+    const hosted = {
+      ...personalServer,
+      id: "atlassian",
+      url: "https://mcp.atlassian.com/v1/mcp",
+      connectionRef: { ...personalServer.connectionRef, providerDomain: "mcp.atlassian.com" },
+    };
+    const native = {
+      ...hosted,
+      id: "old-native",
+      connectionRef: { ...hosted.connectionRef, providerDomain: "api.atlassian.com" },
+    };
+    const hostedGrant: McpPersonalConnectionDelegation = {
+      serverId: hosted.id,
+      connectionId: crypto.randomUUID(),
+      ownerSubjectId: "user:owner",
+      providerDomain: "mcp.atlassian.com",
+      kind: "oauth2",
+    };
+    const nativeGrant: McpPersonalConnectionDelegation = {
+      ...hostedGrant,
+      serverId: native.id,
+      providerDomain: "api.atlassian.com",
+      connectionType: "atlassian",
+    };
+    expect(
+      personalConnectionDelegationsFromParent({
+        servers: [hosted, native],
+        parentDelegations: [hostedGrant, nativeGrant],
+      }),
+    ).toEqual([hostedGrant]);
   });
 
   test("freezes, inherits, and composes one exact Google Drive publication connection", async () => {

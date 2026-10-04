@@ -69,7 +69,15 @@ export type SessionWorkflowClient = {
     workflowId: string;
     workflowWakeRevision: number;
   }) => Promise<void>;
-  syncScheduledTask: (input: { task: ScheduledTask }) => Promise<void>;
+  syncScheduledTask: (input: {
+    task: ScheduledTask;
+    /**
+     * Compensate under the same per-schedule writer lock. Return the error to
+     * throw only after this transaction commits; lock/commit failures bypass
+     * that receipt. A failing compensation must roll back its own savepoint.
+     */
+    onFailure?: (tx: Database, error: unknown) => Promise<Error>;
+  }) => Promise<void>;
   deleteScheduledTaskSchedule: (input: { temporalScheduleId: string }) => Promise<void>;
   triggerScheduledTask: (input: {
     task: ScheduledTask;

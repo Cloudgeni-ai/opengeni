@@ -69,9 +69,6 @@ exports[`agent configuration reaches the production model request api creator re
     "opengeni__artifacts_publish",
     "opengeni__artifacts_restore",
     "opengeni__artifacts_rollback",
-    "opengeni__atlassian_get",
-    "opengeni__atlassian_search",
-    "opengeni__atlassian_sources_list",
     "opengeni__browser_act",
     "opengeni__browser_auth",
     "opengeni__browser_clipboard",
@@ -238,7 +235,6 @@ exports[`agent configuration reaches the production model request api creator re
     "skill_search",
     "web_search",
   ],
-  "requestSha256": "b1c97484db89bdb37fc6e06d46d7a530cfc0cb0a38eadf776673c3c2beabe3f8",
 }
 `;
 
@@ -311,9 +307,6 @@ exports[`agent configuration reaches the production model request slack creator 
     "opengeni__artifacts_publish",
     "opengeni__artifacts_restore",
     "opengeni__artifacts_rollback",
-    "opengeni__atlassian_get",
-    "opengeni__atlassian_search",
-    "opengeni__atlassian_sources_list",
     "opengeni__browser_act",
     "opengeni__browser_auth",
     "opengeni__browser_clipboard",
@@ -480,7 +473,6 @@ exports[`agent configuration reaches the production model request slack creator 
     "skill_search",
     "web_search",
   ],
-  "requestSha256": "b1c97484db89bdb37fc6e06d46d7a530cfc0cb0a38eadf776673c3c2beabe3f8",
 }
 `;
 
@@ -553,9 +545,6 @@ exports[`agent configuration reaches the production model request scheduled crea
     "opengeni__artifacts_publish",
     "opengeni__artifacts_restore",
     "opengeni__artifacts_rollback",
-    "opengeni__atlassian_get",
-    "opengeni__atlassian_search",
-    "opengeni__atlassian_sources_list",
     "opengeni__browser_act",
     "opengeni__browser_auth",
     "opengeni__browser_clipboard",
@@ -722,7 +711,6 @@ exports[`agent configuration reaches the production model request scheduled crea
     "skill_search",
     "web_search",
   ],
-  "requestSha256": "b1c97484db89bdb37fc6e06d46d7a530cfc0cb0a38eadf776673c3c2beabe3f8",
 }
 `;
 
@@ -795,9 +783,6 @@ exports[`agent configuration reaches the production model request automation cre
     "opengeni__artifacts_publish",
     "opengeni__artifacts_restore",
     "opengeni__artifacts_rollback",
-    "opengeni__atlassian_get",
-    "opengeni__atlassian_search",
-    "opengeni__atlassian_sources_list",
     "opengeni__browser_act",
     "opengeni__browser_auth",
     "opengeni__browser_clipboard",
@@ -964,7 +949,6 @@ exports[`agent configuration reaches the production model request automation cre
     "skill_search",
     "web_search",
   ],
-  "requestSha256": "b1c97484db89bdb37fc6e06d46d7a530cfc0cb0a38eadf776673c3c2beabe3f8",
 }
 `;
 
@@ -1037,9 +1021,6 @@ exports[`agent configuration reaches the production model request site_auth_main
     "opengeni__artifacts_publish",
     "opengeni__artifacts_restore",
     "opengeni__artifacts_rollback",
-    "opengeni__atlassian_get",
-    "opengeni__atlassian_search",
-    "opengeni__atlassian_sources_list",
     "opengeni__browser_act",
     "opengeni__browser_auth",
     "opengeni__browser_clipboard",
@@ -1206,7 +1187,6 @@ exports[`agent configuration reaches the production model request site_auth_main
     "skill_search",
     "web_search",
   ],
-  "requestSha256": "b1c97484db89bdb37fc6e06d46d7a530cfc0cb0a38eadf776673c3c2beabe3f8",
 }
 `;
 
@@ -1279,9 +1259,6 @@ exports[`agent configuration reaches the production model request omitted and nu
     "opengeni__artifacts_publish",
     "opengeni__artifacts_restore",
     "opengeni__artifacts_rollback",
-    "opengeni__atlassian_get",
-    "opengeni__atlassian_search",
-    "opengeni__atlassian_sources_list",
     "opengeni__browser_act",
     "opengeni__browser_auth",
     "opengeni__browser_clipboard",
@@ -1448,6 +1425,5 @@ exports[`agent configuration reaches the production model request omitted and nu
     "skill_search",
     "web_search",
   ],
-  "requestSha256": "b1c97484db89bdb37fc6e06d46d7a530cfc0cb0a38eadf776673c3c2beabe3f8",
 }
 `;

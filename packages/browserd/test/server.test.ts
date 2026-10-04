@@ -16,6 +16,8 @@ import {
   BrowserControlServer,
   CdpCommandTimeoutError,
   CdpTransportError,
+  CdpSessionDetachedError,
+  CdpProtocolError,
   BrowserSupervisor,
   ComputerSupervisor,
   LatestBrowserFrameSubscription,
@@ -72,6 +74,22 @@ describe("BrowserControlServer", () => {
   });
 
   test.each([
+    {
+      operation: "observe" as const,
+      label: "observation",
+      suffix: "/observation",
+      code: "resource_unavailable",
+      status: 503,
+      error: new CdpProtocolError("Page.getFrameTree", -32_000, "synthetic debugger rejection"),
+    },
+    {
+      operation: "observe" as const,
+      label: "observation",
+      suffix: "/observation",
+      code: "resource_unavailable",
+      status: 503,
+      error: new CdpSessionDetachedError("Page.getFrameTree"),
+    },
     {
       operation: "listTargets" as const,
       label: "target inventory",

@@ -40,7 +40,7 @@ const MIT_ATTRIBUTION =
 
 // Bump deliberately whenever normalization or import semantics can change
 // persisted output without changing the reviewed snapshot bytes.
-export const CATALOG_IMPORT_SEMANTIC_VERSION = 3;
+export const CATALOG_IMPORT_SEMANTIC_VERSION = 4;
 
 export const deadDemoDomains = new Set([
   "auto-calculator.onrender.com",
@@ -64,6 +64,10 @@ export const deadDemoDomains = new Set([
 ]);
 
 export const suspiciousSurfaceUrls = new Map([
+  [
+    "figma.com\nhttps://mcp.figma.com/mcp",
+    "Figma requires an approved MCP client; OpenGeni remote access must be approved before stock setup is offered",
+  ],
   [
     "activepieces.com\nhttps://www.activepieces.com/.well-known/mcp/server-card.json",
     "server-card JSON URL needs manual confirmation before enablement",

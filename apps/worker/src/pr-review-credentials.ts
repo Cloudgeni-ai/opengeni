@@ -111,7 +111,7 @@ async function resolveStandaloneGitCredentials(
       authority.credentialKind === "managed_github_app" &&
       settings.prReviewGithubAppId !== authority.appId
     ) {
-      throw new Error("OpenGeni Lens App identity no longer matches this registration");
+      throw new Error("Opengeni Lens App identity no longer matches this registration");
     }
     const minted = await createGitHubAppInstallationTokenWithSigningSettings(signingSettings, {
       installationId: request.installationId,
