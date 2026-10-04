@@ -1,6 +1,6 @@
 name: Publish canary packages
 
-# Custom per-package {version}-canary.N to dist-tag canary. Does not consume
+# Lockstep {next-patch}-canary.N to dist-tag canary. Does not consume
 # changeset files, does not commit, never moves latest.
 on:
   workflow_dispatch:

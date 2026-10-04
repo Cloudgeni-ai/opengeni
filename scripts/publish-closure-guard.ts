@@ -356,9 +356,9 @@ if (
   failures.push("@opengeni/connect must remain dependency-free and framework-neutral.");
 }
 const reactPeerDependencies = reactPkg.peerDependencies ?? {};
-if (reactPeerDependencies["@opengeni/artifact-tool"] !== ">=0.1.0 <0.4.0") {
+if (reactPeerDependencies["@opengeni/artifact-tool"] !== "^1.0.0") {
   failures.push(
-    `@opengeni/react must expose the supported @opengeni/artifact-tool 0.1, 0.2, and 0.3 lines as a compatible peer.`,
+    `@opengeni/react must expose the lockstep @opengeni/artifact-tool 1.x line as a compatible peer.`,
   );
 }
 const reactPeerMetadata = (

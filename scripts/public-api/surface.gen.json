@@ -1,7 +1,7 @@
 {
   "schemaVersion": 1,
   "generatedBy": "bun run public-api:refresh",
-  "sdkMajor": 7,
+  "sdkMajor": 1,
   "routes": [
     {
       "method": "GET",
