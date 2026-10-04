@@ -4,7 +4,7 @@ Server-side work uses the same workspaces the proxy creates. Translate the
 product's ids first:
 
 ```ts
-const workspaceId = await og.workspaceId({ tenant: team.id });
+const workspaceId = await og.workspaceId({ tenant: team.id }); // or { user: user.id }
 ```
 
 Ask the user for schedule details (day, time, time zone, where results go)
@@ -13,7 +13,7 @@ only when the requested feature is itself scheduled, and say why.
 ## A chat started by the server
 
 Create the session as the user, with a stable idempotency key, so it appears in
-their chat list:
+their chat list. Opengeni adds the user to the workspace if needed:
 
 ```ts
 const session = await og.client
@@ -80,7 +80,7 @@ import {
   verifyWebhookEvent,
 } from "@opengeni/sdk/workspace-integrations";
 
-// organizationId: shown in Opengeni under Organization settings.
+const organizationId = await og.resolveOrganizationId(); // read from the API key
 const { secret } = await createOrganizationWebhook(og.client, organizationId, {
   url: "https://app.example.com/api/opengeni-events",
   eventTypes: ["turn.completed", "session.requiresAction"],

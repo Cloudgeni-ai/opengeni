@@ -25,7 +25,10 @@ check that this user may open this record's chat.
 Compose the headless hooks from `@opengeni/react/session` (`useSession`,
 `useSessionEvents`, `useTurnQueue`, `useSessionControl`,
 `useHumanInputRequests`, `projectPendingApprovals`) with `MessageTimeline` from
-`@opengeni/react/session-ui`, behind the same proxy. They handle streaming,
+`@opengeni/react/session-ui`, behind the same proxy. Wrap them in
+`OpenGeniProvider` with `new OpenGeniClient({ baseUrl: "/api/opengeni" })` and
+the `workspaceId` from that client's `getClientConfig()`, which the proxy
+fills in for the signed-in user. They handle streaming,
 reconnect, replay, queueing, approvals, and questions; do not rebuild those.
 Wire Stop to `pauseSession`, which is resumable. `cancelSession` ends the
 session for good.

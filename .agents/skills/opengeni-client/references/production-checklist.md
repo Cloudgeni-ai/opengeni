@@ -33,21 +33,25 @@ server logs.
 
 ## Members and permissions
 
-New members get workspace read, session create/read/control, file
-upload/read, and MCP attachment, with no admin rights. Change the default for
-new members with `memberPermissions` on `new OpenGeni(...)`. Change an existing
-member with
-`og.client.updateExternalWorkspaceMember(organizationId, workspaceId, membershipId, { permissions, operationId })`;
-remove one with `cancelExternalWorkspaceMemberGrant`, which also stops their
-running turns.
+Opengeni adds a user to the workspace on their first request, with workspace
+read, session create/read/control, file upload/read, and MCP attachment, and no
+admin rights. The API key needs `members:manage` for this; full-access keys
+have it. Change an existing member's permissions with
+`og.client.updateExternalWorkspaceMember(organizationId, workspaceId, membershipId, { permissions, operationId })`
+(`organizationId` from `await og.resolveOrganizationId()`). To remove a user,
+stop resolving them; removing the membership alone does not stop them, because
+their next request adds it again. `cancelExternalWorkspaceMemberGrant` also
+stops their running turns.
 
 ## Explicit provisioning
 
-Products that must create workspaces ahead of time, or map identities
-themselves, can call the lower-level API on `og.client`: `ensureWorkspace` (an
+Products that create workspaces ahead of time, or choose member permissions up
+front, can call the lower-level API on `og.client`: `ensureWorkspace` (an
 idempotent tenant-to-workspace mapping), `addExternalWorkspaceMember`, and
 `asUser(userId, { source })` to act as a user. Return `{ user, workspaceId }`
-from `resolve` to use those workspaces with the proxy.
+from `resolve` to use those workspaces with the proxy. Adding a member
+explicitly after their first request returns 409 when the permissions differ;
+update the member instead.
 
 ## Usage and billing
 

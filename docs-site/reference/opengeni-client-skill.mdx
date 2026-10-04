@@ -66,15 +66,17 @@ Install `@opengeni/sdk` and `@opengeni/react` at the same version. Put
 `OPENGENI_API_KEY` in the server's git-ignored env. Self-hosted deployments
 also pass `baseUrl: process.env.OPENGENI_API_BASE_URL`.
 
-Server, one catch-all route at `/api/opengeni/*`:
+Server, one catch-all route at `/api/opengeni/*` (Next.js App Router shown):
 
 ```ts
+// app/api/opengeni/[...path]/route.ts
 import { OpenGeni } from "@opengeni/sdk/chat";
-import { createSessionProxyHandler } from "@opengeni/sdk/session-proxy";
+import { createSessionProxyRoute } from "@opengeni/sdk/next";
 
 const og = new OpenGeni({ apiKey: process.env.OPENGENI_API_KEY! });
 
-export const handler = createSessionProxyHandler(og, {
+export const dynamic = "force-dynamic";
+export const { GET, POST, PUT, PATCH, DELETE } = createSessionProxyRoute(og, {
   resolve: async (request) => {
     const user = await getSignedInUser(request); // the product's own auth
     if (!user) return new Response("Unauthorized", { status: 401 });
@@ -89,10 +91,10 @@ export const handler = createSessionProxyHandler(og, {
 });
 ```
 
-Mount it with `createSessionProxyRoute(og, options)` from `@opengeni/sdk/next`
-in `app/api/opengeni/[...path]/route.ts` (export `GET`, `POST`, `PUT`, `PATCH`,
-`DELETE`), `toNodeMiddleware(handler)` from `@opengeni/sdk/express` before any
-body parser, `toHonoHandler(handler)` from `@opengeni/sdk/hono`, or call
+Other servers: build `const handler = createSessionProxyHandler(og, options)`
+from `@opengeni/sdk/session-proxy` with the same options, then mount
+`toNodeMiddleware(handler)` from `@opengeni/sdk/express` (before any body
+parser), `toHonoHandler(handler)` from `@opengeni/sdk/hono`, or call
 `handler(request)` on any web-standard server.
 
 Browser:
@@ -105,8 +107,10 @@ import "@opengeni/react/compiled.css";
 ```
 
 `OpenGeniChat` is the user's chat list plus the conversation, with streaming,
-approvals, questions, and attachments. Import it from `session-ui`; the package
-root pulls in optional heavy peers. Brand it with `--og-*` CSS tokens.
+approvals, questions, and attachments. It needs no provider or workspace id:
+the proxy tells it which workspace the user is in. Importing from `session-ui`
+instead of the package root avoids pulling in optional heavy peers. Brand it
+with `--og-*` CSS tokens.
 
 ### Who sees what
 
@@ -116,11 +120,14 @@ root pulls in optional heavy peers. Brand it with `--og-*` CSS tokens.
 | `{ user }`              | one per user   |
 | `{ user, workspaceId }` | yours          |
 
-Workspaces and memberships are created on first use. Chats are private to the
-user who started them; `chats: "shared"` on the handler shares them with the
-workspace. A tenant is the product's team, organization, or customer: the group
-that shares data and tools. Derive `user` and `tenant` from the product's
-session, never from the request body or path.
+Workspaces and memberships are created on first use (the key needs
+`members:manage`, which full-access keys have). To remove a user, stop
+resolving them. Chats are private to the user who started them;
+`chats: "shared"` on the handler shares them with the workspace. A tenant is
+the product's team, organization, or customer: the group that shares data and
+tools. Derive `user` and `tenant` from the product's session, never from the
+request body or path. Server-side code gets the same workspace with
+`og.workspaceId({ tenant })` or `og.workspaceId({ user })`.
 
 ### The agent
 
@@ -136,7 +143,7 @@ Per-message facts such as today's date or the current page go in
 Expose the product's data as an MCP endpoint that acts as the signed-in user:
 
 ```ts
-createSessionProxyHandler(og, {
+createSessionProxyRoute(og, {
   resolve,
   createSession,
   toolServer: { approvals: { ask: ["update_ticket"] } }, // every write tool
@@ -180,8 +187,8 @@ Before production, and for the handoff, read the
 
 ## Advanced
 
-The lower-level `ensureWorkspace`, `addExternalWorkspaceMember`, and `asUser`
-still work for products that provision workspaces themselves; see the
+Products that provision workspaces and members themselves can still use
+`ensureWorkspace`, `addExternalWorkspaceMember`, and `asUser`; see the
 [Production checklist](references/production-checklist.md#explicit-provisioning).
 ````
 
@@ -203,7 +210,7 @@ Server-side work uses the same workspaces the proxy creates. Translate the
 product's ids first:
 
 ```ts
-const workspaceId = await og.workspaceId({ tenant: team.id });
+const workspaceId = await og.workspaceId({ tenant: team.id }); // or { user: user.id }
 ```
 
 Ask the user for schedule details (day, time, time zone, where results go)
@@ -212,7 +219,7 @@ only when the requested feature is itself scheduled, and say why.
 ## A chat started by the server
 
 Create the session as the user, with a stable idempotency key, so it appears in
-their chat list:
+their chat list. Opengeni adds the user to the workspace if needed:
 
 ```ts
 const session = await og.client
@@ -279,7 +286,7 @@ import {
   verifyWebhookEvent,
 } from "@opengeni/sdk/workspace-integrations";
 
-// organizationId: shown in Opengeni under Organization settings.
+const organizationId = await og.resolveOrganizationId(); // read from the API key
 const { secret } = await createOrganizationWebhook(og.client, organizationId, {
   url: "https://app.example.com/api/opengeni-events",
   eventTypes: ["turn.completed", "session.requiresAction"],
@@ -408,7 +415,10 @@ check that this user may open this record's chat.
 Compose the headless hooks from `@opengeni/react/session` (`useSession`,
 `useSessionEvents`, `useTurnQueue`, `useSessionControl`,
 `useHumanInputRequests`, `projectPendingApprovals`) with `MessageTimeline` from
-`@opengeni/react/session-ui`, behind the same proxy. They handle streaming,
+`@opengeni/react/session-ui`, behind the same proxy. Wrap them in
+`OpenGeniProvider` with `new OpenGeniClient({ baseUrl: "/api/opengeni" })` and
+the `workspaceId` from that client's `getClientConfig()`, which the proxy
+fills in for the signed-in user. They handle streaming,
 reconnect, replay, queueing, approvals, and questions; do not rebuild those.
 Wire Stop to `pauseSession`, which is resumable. `cancelSession` ends the
 session for good.
@@ -482,21 +492,25 @@ server logs.
 
 ## Members and permissions
 
-New members get workspace read, session create/read/control, file
-upload/read, and MCP attachment, with no admin rights. Change the default for
-new members with `memberPermissions` on `new OpenGeni(...)`. Change an existing
-member with
-`og.client.updateExternalWorkspaceMember(organizationId, workspaceId, membershipId, { permissions, operationId })`;
-remove one with `cancelExternalWorkspaceMemberGrant`, which also stops their
-running turns.
+Opengeni adds a user to the workspace on their first request, with workspace
+read, session create/read/control, file upload/read, and MCP attachment, and no
+admin rights. The API key needs `members:manage` for this; full-access keys
+have it. Change an existing member's permissions with
+`og.client.updateExternalWorkspaceMember(organizationId, workspaceId, membershipId, { permissions, operationId })`
+(`organizationId` from `await og.resolveOrganizationId()`). To remove a user,
+stop resolving them; removing the membership alone does not stop them, because
+their next request adds it again. `cancelExternalWorkspaceMemberGrant` also
+stops their running turns.
 
 ## Explicit provisioning
 
-Products that must create workspaces ahead of time, or map identities
-themselves, can call the lower-level API on `og.client`: `ensureWorkspace` (an
+Products that create workspaces ahead of time, or choose member permissions up
+front, can call the lower-level API on `og.client`: `ensureWorkspace` (an
 idempotent tenant-to-workspace mapping), `addExternalWorkspaceMember`, and
 `asUser(userId, { source })` to act as a user. Return `{ user, workspaceId }`
-from `resolve` to use those workspaces with the proxy.
+from `resolve` to use those workspaces with the proxy. Adding a member
+explicitly after their first request returns 409 when the permissions differ;
+update the member instead.
 
 ## Usage and billing
 
@@ -526,7 +540,7 @@ not through prompts. Two ways:
 ## Per-user MCP tools
 
 ```ts
-createSessionProxyHandler(og, {
+createSessionProxyRoute(og, {
   resolve,
   createSession,
   toolServer: {

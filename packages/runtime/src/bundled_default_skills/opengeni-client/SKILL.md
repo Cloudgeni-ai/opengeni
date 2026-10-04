@@ -52,15 +52,17 @@ Install `@opengeni/sdk` and `@opengeni/react` at the same version. Put
 `OPENGENI_API_KEY` in the server's git-ignored env. Self-hosted deployments
 also pass `baseUrl: process.env.OPENGENI_API_BASE_URL`.
 
-Server, one catch-all route at `/api/opengeni/*`:
+Server, one catch-all route at `/api/opengeni/*` (Next.js App Router shown):
 
 ```ts
+// app/api/opengeni/[...path]/route.ts
 import { OpenGeni } from "@opengeni/sdk/chat";
-import { createSessionProxyHandler } from "@opengeni/sdk/session-proxy";
+import { createSessionProxyRoute } from "@opengeni/sdk/next";
 
 const og = new OpenGeni({ apiKey: process.env.OPENGENI_API_KEY! });
 
-export const handler = createSessionProxyHandler(og, {
+export const dynamic = "force-dynamic";
+export const { GET, POST, PUT, PATCH, DELETE } = createSessionProxyRoute(og, {
   resolve: async (request) => {
     const user = await getSignedInUser(request); // the product's own auth
     if (!user) return new Response("Unauthorized", { status: 401 });
@@ -75,10 +77,10 @@ export const handler = createSessionProxyHandler(og, {
 });
 ```
 
-Mount it with `createSessionProxyRoute(og, options)` from `@opengeni/sdk/next`
-in `app/api/opengeni/[...path]/route.ts` (export `GET`, `POST`, `PUT`, `PATCH`,
-`DELETE`), `toNodeMiddleware(handler)` from `@opengeni/sdk/express` before any
-body parser, `toHonoHandler(handler)` from `@opengeni/sdk/hono`, or call
+Other servers: build `const handler = createSessionProxyHandler(og, options)`
+from `@opengeni/sdk/session-proxy` with the same options, then mount
+`toNodeMiddleware(handler)` from `@opengeni/sdk/express` (before any body
+parser), `toHonoHandler(handler)` from `@opengeni/sdk/hono`, or call
 `handler(request)` on any web-standard server.
 
 Browser:
@@ -91,8 +93,10 @@ import "@opengeni/react/compiled.css";
 ```
 
 `OpenGeniChat` is the user's chat list plus the conversation, with streaming,
-approvals, questions, and attachments. Import it from `session-ui`; the package
-root pulls in optional heavy peers. Brand it with `--og-*` CSS tokens.
+approvals, questions, and attachments. It needs no provider or workspace id:
+the proxy tells it which workspace the user is in. Importing from `session-ui`
+instead of the package root avoids pulling in optional heavy peers. Brand it
+with `--og-*` CSS tokens.
 
 ### Who sees what
 
@@ -102,11 +106,14 @@ root pulls in optional heavy peers. Brand it with `--og-*` CSS tokens.
 | `{ user }`              | one per user   |
 | `{ user, workspaceId }` | yours          |
 
-Workspaces and memberships are created on first use. Chats are private to the
-user who started them; `chats: "shared"` on the handler shares them with the
-workspace. A tenant is the product's team, organization, or customer: the group
-that shares data and tools. Derive `user` and `tenant` from the product's
-session, never from the request body or path.
+Workspaces and memberships are created on first use (the key needs
+`members:manage`, which full-access keys have). To remove a user, stop
+resolving them. Chats are private to the user who started them;
+`chats: "shared"` on the handler shares them with the workspace. A tenant is
+the product's team, organization, or customer: the group that shares data and
+tools. Derive `user` and `tenant` from the product's session, never from the
+request body or path. Server-side code gets the same workspace with
+`og.workspaceId({ tenant })` or `og.workspaceId({ user })`.
 
 ### The agent
 
@@ -122,7 +129,7 @@ Per-message facts such as today's date or the current page go in
 Expose the product's data as an MCP endpoint that acts as the signed-in user:
 
 ```ts
-createSessionProxyHandler(og, {
+createSessionProxyRoute(og, {
   resolve,
   createSession,
   toolServer: { approvals: { ask: ["update_ticket"] } }, // every write tool
@@ -166,6 +173,6 @@ Before production, and for the handoff, read the
 
 ## Advanced
 
-The lower-level `ensureWorkspace`, `addExternalWorkspaceMember`, and `asUser`
-still work for products that provision workspaces themselves; see the
+Products that provision workspaces and members themselves can still use
+`ensureWorkspace`, `addExternalWorkspaceMember`, and `asUser`; see the
 [Production checklist](references/production-checklist.md#explicit-provisioning).

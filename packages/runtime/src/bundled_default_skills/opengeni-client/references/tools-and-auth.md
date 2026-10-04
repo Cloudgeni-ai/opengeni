@@ -11,7 +11,7 @@ not through prompts. Two ways:
 ## Per-user MCP tools
 
 ```ts
-createSessionProxyHandler(og, {
+createSessionProxyRoute(og, {
   resolve,
   createSession,
   toolServer: {
