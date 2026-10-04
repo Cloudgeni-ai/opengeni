@@ -999,12 +999,25 @@ for (const [control, started] of [
         effectDigest: "1".repeat(64),
       }),
     ).rejects.toThrow("active running");
+    // Status polling is a plain read of the exact live attempt: a pending
+    // control never blocks it; only the settled end of the attempt does.
+    const statusRead = {
+      ...scope,
+      operationId: call.operationId,
+      callerSubjectId: call.caller.subjectId,
+    };
+    expect(await readTurnCodemodeOperation(client.db, statusRead)).toMatchObject({
+      operationId: call.operationId,
+    });
     if (control === "cancel") {
       await settleSessionAttemptInterruptions(
         client.db,
         scope.workspaceId,
         scope.sessionId,
         scope.attemptId,
+      );
+      await expect(readTurnCodemodeOperation(client.db, statusRead)).rejects.toThrow(
+        "active running",
       );
     }
     expect(

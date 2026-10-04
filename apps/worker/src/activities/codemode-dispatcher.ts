@@ -380,7 +380,17 @@ export class CodemodeAttemptDispatcher {
     try {
       if (operation.durableApproval) {
         if (!this.approvalWait) throw new Error("Durable approval yield is unavailable");
-        releaseWait = this.approvalWait.beginWait();
+        // The wait gate is sealed while a model request is in flight or the
+        // stream is settling. A call arriving then cannot durably wait, but it
+        // must not fail outright: prepare it like a non-waiting client, so an
+        // allowed call still executes and an Ask settles approval_required.
+        try {
+          releaseWait = this.approvalWait.beginWait();
+        } catch {
+          releaseWait = undefined;
+        }
+      }
+      if (releaseWait) {
         if (
           !(await bindCodemodePreparation(this.db, {
             ...this.scope,
@@ -407,10 +417,11 @@ export class CodemodeAttemptDispatcher {
         },
         {
           signal,
-          ...(operation.durableApproval ? { transportMeta: { durableApproval: true } } : {}),
+          ...(releaseWait ? { transportMeta: { durableApproval: true } } : {}),
         },
       );
       if (preparedCall.waitingForApproval) {
+        if (!releaseWait) throw new AttemptToolApprovalRequiredError();
         const waiting = await waitForCodemodeApproval(this.db, {
           ...this.scope,
           operationId: operation.operationId,

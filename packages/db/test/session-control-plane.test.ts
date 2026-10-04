@@ -7915,6 +7915,30 @@ describe("clean session control plane", () => {
       allowed: true,
       managed: false,
     });
+    // A recommended Allow with no explicit rule writes no ledger row or audit
+    // pair; a recommended Ask still creates its durable pending review.
+    const defaultAllow = {
+      ...call("connector-default-allow", "unmanaged"),
+      defaultDecision: "allow" as const,
+    };
+    expect(
+      await prepareConnectorActionApproval(client.db, firstIdentity, defaultAllow),
+    ).toMatchObject({ managed: true, decision: "allow" });
+    expect(await beginConnectorActionExecution(client.db, firstIdentity, defaultAllow)).toEqual({
+      allowed: true,
+      managed: false,
+    });
+    expect(await beginConnectorActionExecution(client.db, firstIdentity, defaultAllow)).toEqual({
+      allowed: true,
+      managed: false,
+    });
+    const defaultAsk = {
+      ...call("connector-default-ask", "unmanaged"),
+      defaultDecision: "ask" as const,
+    };
+    expect(await beginConnectorActionExecution(client.db, firstIdentity, defaultAsk)).toMatchObject(
+      { allowed: false, managed: true, reason: "approval_required" },
+    );
     const capabilityWrite = {
       ...call("connector-capability-write", "unmanaged"),
       approvalMode: "connector_write" as const,
@@ -8200,6 +8224,8 @@ describe("clean session control plane", () => {
       creationAttemptId: firstAttemptId,
       executionAttemptId: secondAttemptId,
     });
+    expect(requestsByApproval.has("connector-default-allow")).toBe(false);
+    expect(requestsByApproval.get("connector-default-ask")?.status).toBe("pending");
     expect(requestsByApproval.get(blockCall.approvalId)?.status).toBe("blocked");
     const wildcardRequest = requestsByApproval.get(wildcardBlockCall.approvalId);
     expect(wildcardRequest).toMatchObject({
