@@ -1,3 +1,4 @@
+import { providerReportedTokenUsage } from "./usage-telemetry";
 import { createHash, randomUUID } from "node:crypto";
 import { applyClaudeCodeIdentity } from "./claude-code-identity";
 import { AnthropicRequestError } from "./anthropic-request-error";
@@ -596,7 +597,9 @@ export function anthropicResponse(
     throw new AnthropicProtocolError("Claude tool_use stop has no tool calls");
   return {
     output,
-    usage: normalizeUsage(message.usage ?? {}),
+    usage: Object.assign(normalizeUsage(message.usage ?? {}), {
+      providerUsageReported: providerReportedTokenUsage(message.usage),
+    }),
     responseId: message.id,
     ...(requestId ? { requestId } : {}),
     providerData: {

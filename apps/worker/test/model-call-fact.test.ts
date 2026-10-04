@@ -158,6 +158,8 @@ describe("recordAuthoritativeModelCallFact", () => {
   test.each([
     { inputTokens: 100 },
     { outputTokens: 50 },
+    { inputTokens: 0, outputTokens: 0, totalTokens: 0 },
+    { inputTokens: 100, outputTokens: 50, providerUsageReported: false },
     { inputTokens: 100, outputTokens: 50, inputTokensDetails: { cached_tokens: -1 } },
   ])(
     "incomplete or rejected telemetry keeps a hold until complete usage arrives: %j",
@@ -196,6 +198,48 @@ describe("recordAuthoritativeModelCallFact", () => {
       expect(usageEvents).toContainEqual(release);
       expect(usageEvents.find((event) => event.eventType === "model.tokens")?.quantity).toBe(150);
       expect(creditDebits).toHaveLength(1);
+    },
+  );
+
+  test.each([undefined, false, true])(
+    "zero usage requires explicit provider evidence (reported=%s)",
+    async (providerUsageReported) => {
+      const { spy } = mockAtomicWrites();
+      try {
+        const result = await recordModelUsageAndDebitCredits(billedSettings(), db, {
+          accountId: ACCOUNT,
+          workspaceId: WORKSPACE,
+          sessionId: "zero",
+          turnId: "zero",
+          turnAttemptId: "zero",
+          model: "gpt-5.6-sol",
+          externallyBilled: false,
+          sourceKey: "zero-proof",
+          usage: {
+            inputTokens: 0,
+            outputTokens: 0,
+            totalTokens: 0,
+            ...(providerUsageReported === undefined ? {} : { providerUsageReported }),
+          },
+          reservationReleases: [
+            {
+              eventType: "model.tokens.reserved",
+              quantity: -2_000,
+              unit: "tokens",
+              idempotencyKey: "zero-proof:release",
+            },
+          ],
+        });
+        if (providerUsageReported === true) {
+          expect(result).not.toBeNull();
+          expect(spy).toHaveBeenCalledTimes(1);
+        } else {
+          expect(result).toBeNull();
+          expect(spy).not.toHaveBeenCalled();
+        }
+      } finally {
+        spy.mockRestore();
+      }
     },
   );
 

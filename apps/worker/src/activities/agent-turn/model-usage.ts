@@ -666,8 +666,12 @@ export type ModelUsageBillingRecord = {
 
 function hasCompleteModelCallTelemetry(usage: ModelCallUsageNormalization): boolean {
   return (
+    usage.providerUsageReported !== false &&
     usage.telemetry.inputTokens !== null &&
     usage.telemetry.outputTokens !== null &&
+    (usage.providerUsageReported === true ||
+      usage.telemetry.inputTokens > 0 ||
+      usage.telemetry.outputTokens > 0) &&
     usage.rejectedFields.length === 0
   );
 }

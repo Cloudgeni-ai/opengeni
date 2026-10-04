@@ -57,6 +57,7 @@ describe("empty final reply production runtime with PostgreSQL", () => {
     unrelatedGoal = false,
     aggregateOnlyBilling = false,
     titleUsageMode?: "callback-no-id" | "fallback-no-id" | "callback-with-id",
+    providerUsageMode?: "missing" | "partial" | "zero" | "mirrored",
   ) {
     const suffix = crypto.randomUUID();
     const access = await bootstrapWorkspace(client.db, {
@@ -102,7 +103,23 @@ describe("empty final reply production runtime with PostgreSQL", () => {
       createdEventPayload: {},
       goal: unrelatedGoal ? null : { text: "Deliver the result." },
     });
+    const boundedBilling = aggregateOnlyBilling || providerUsageMode !== undefined;
     const model = new ScriptedModel(steps);
+    if (providerUsageMode && providerUsageMode !== "mirrored") {
+      const getStreamedResponse = model.getStreamedResponse.bind(model);
+      model.getStreamedResponse = async function* (request) {
+        for await (const event of getStreamedResponse(request)) {
+          if (event.type === "response_done")
+            Object.assign(event.response.usage, {
+              inputTokens: providerUsageMode === "partial" ? 100 : 0,
+              outputTokens: 0,
+              totalTokens: providerUsageMode === "partial" ? 100 : 0,
+              providerUsageReported: providerUsageMode === "zero",
+            });
+          yield event;
+        }
+      };
+    }
     const production = createProductionAgentRuntime({ model });
     const titleModel = new ScriptedModel([
       { inputTokens: 100, outputText: "Budget accounting proof" },
@@ -114,7 +131,7 @@ describe("empty final reply production runtime with PostgreSQL", () => {
         responseId: titleUsageMode === "callback-with-id" ? "parallel-title-response" : undefined,
       });
     }
-    if (aggregateOnlyBilling) {
+    if (boundedBilling) {
       await applyCreditLedgerEntry(client.db, {
         accountId: grant.accountId,
         workspaceId: grant.workspaceId!,
@@ -179,6 +196,29 @@ describe("empty final reply production runtime with PostgreSQL", () => {
           });
         }
         const stream = await production.runStream(...args);
+        if (providerUsageMode === "mirrored") {
+          const toStream = stream.toStream.bind(stream);
+          stream.toStream = () => {
+            let firstTerminal: import("@openai/agents").RunStreamEvent | undefined;
+            return toStream().pipeThrough(
+              new TransformStream({
+                transform(event, controller) {
+                  if (
+                    event.type === "raw_model_stream_event" &&
+                    event.data.type === "response_done"
+                  ) {
+                    if (!firstTerminal) firstTerminal = event;
+                    else {
+                      controller.enqueue(firstTerminal);
+                      firstTerminal = undefined;
+                    }
+                  }
+                  controller.enqueue(event);
+                },
+              }),
+            );
+          };
+        }
         if (aggregateOnlyBilling) {
           // This runtime reports billing only through its final SDK aggregate.
           // Keep the production producer, model admission, usage accumulator,
@@ -221,7 +261,7 @@ describe("empty final reply production runtime with PostgreSQL", () => {
         databaseUrl: shared.appUrl,
         openaiModel: "scripted-model",
         sandboxBackend: "none",
-        ...(aggregateOnlyBilling
+        ...(boundedBilling
           ? {
               billingMode: "stripe" as const,
               usageLimitsMode: "static" as const,
@@ -313,6 +353,62 @@ describe("empty final reply production runtime with PostgreSQL", () => {
     },
     60_000,
   );
+
+  test.each(["missing", "partial", "zero"] as const)(
+    "terminal %s usage cannot be replaced by synthetic SDK aggregate spend",
+    async (mode) => {
+      const actual = await run("Completed result.", false, false, false, undefined, mode);
+      expect(actual.model.calls).toBe(1);
+      expect(actual.turn?.status).toBe("completed");
+      const open = await openUsageReservationQuantity(client.db, {
+        accountId: actual.grant.accountId,
+        eventType: "model.tokens.reserved",
+        since: new Date(0),
+        holdSince: new Date(0),
+      });
+      if (mode === "zero") expect(open).toBe(0);
+      else expect(open).toBeGreaterThan(0);
+      const debits =
+        await shared.admin`select id from credit_ledger_entries where account_id=${actual.grant.accountId} and type='model_usage_debit'`;
+      expect(debits).toHaveLength(0);
+    },
+    60_000,
+  );
+
+  test("a late terminal mirror cannot consume the next admitted call's reservation", async () => {
+    const actual = await run(
+      [
+        { inputTokens: 100, outputText: "Checking", output: [functionCall("verified_result", {})] },
+        { inputTokens: 200, outputText: "Completed result." },
+      ],
+      false,
+      false,
+      false,
+      undefined,
+      "mirrored",
+    );
+    expect(actual.model.calls).toBe(2);
+    expect(actual.turn?.status).toBe("completed");
+    const debits =
+      await shared.admin`select id from credit_ledger_entries where account_id=${actual.grant.accountId} and type='model_usage_debit'`;
+    expect(debits).toHaveLength(2);
+    expect(
+      await openUsageReservationQuantity(client.db, {
+        accountId: actual.grant.accountId,
+        eventType: "model.tokens.reserved",
+        since: new Date(0),
+        holdSince: new Date(0),
+      }),
+    ).toBe(0);
+    expect(
+      await openUsageReservationQuantity(client.db, {
+        accountId: actual.grant.accountId,
+        eventType: "model.cost.reserved",
+        since: new Date(0),
+        holdSince: new Date(0),
+      }),
+    ).toBe(0);
+  }, 60_000);
 
   test("aggregate-only usage bills both streams of a same-turn final-reply handoff", async () => {
     const answer = "Completed result: verified.";

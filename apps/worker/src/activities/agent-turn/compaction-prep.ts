@@ -292,6 +292,7 @@ export async function prepareCompaction(deps: CompactionPrepDeps): Promise<Compa
           turnId: turn.id,
           turnAttemptId: input.attemptId,
           model: resolvedModel?.configured.id ?? turn.model,
+          providerId: resolvedModel?.provider.id ?? turnExecutionPolicy.providerId,
           isExternallyBilledTurn: billingState.isExternallyBilledTurn,
           ...(deps.entitlements ? { entitlements: deps.entitlements } : {}),
           chargesOpenGeniCredits: billingState.chargesOpenGeniCredits,

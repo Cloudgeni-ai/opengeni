@@ -10,6 +10,7 @@ import {
   type ResponseStreamEvent,
 } from "@openai/agents";
 import OpenAI, { APIError } from "openai";
+import { providerReportedTokenUsage } from "./usage-telemetry";
 import { AnthropicMessagesModel } from "./anthropic-messages";
 import { instrumentedModelFetch } from "./model-provider-client";
 import { CODEX_MODEL_ID_PREFIX } from "@opengeni/codex";
@@ -27,6 +28,16 @@ import {
   UnknownModelFinishReasonError,
   XaiSubscriptionUnavailableError,
 } from "./model-provider-errors";
+
+function responseWithUsageEvidence(response: OpenAI.Responses.Response): OpenAI.Responses.Response {
+  const annotated = {
+    ...response,
+    providerUsageReported: providerReportedTokenUsage(response.usage),
+  };
+  const requestId = Object.getOwnPropertyDescriptor(response, "_request_id");
+  if (requestId) Object.defineProperty(annotated, "_request_id", requestId);
+  return annotated;
+}
 
 function isUnknownFinishReason(value: unknown): boolean {
   return typeof value === "string" && value.trim().toLowerCase() === "unknown";
@@ -57,13 +68,22 @@ export class OpenGeniChatCompletionsModel extends OpenAIChatCompletionsModel {
     if (isUnknownFinishReason(chatCompletionFinishReason(response.providerData))) {
       throw new UnknownModelFinishReasonError();
     }
+    Object.assign(response.usage, {
+      providerUsageReported: providerReportedTokenUsage(
+        (response.providerData as { usage?: unknown } | undefined)?.usage,
+      ),
+    });
     return response;
   }
 
   override async *getStreamedResponse(request: ModelRequest): AsyncIterable<ResponseStreamEvent> {
     let finishReason: unknown;
+    let usageReported = false;
     for await (const event of super.getStreamedResponse(request)) {
       if (event.type === "model") {
+        const rawUsage = (event.event as { usage?: unknown } | undefined)?.usage;
+        if (rawUsage !== undefined && rawUsage !== null)
+          usageReported = providerReportedTokenUsage(rawUsage);
         const observed = chatCompletionFinishReason(event.event);
         if (observed !== undefined && observed !== null) {
           finishReason = observed;
@@ -72,6 +92,8 @@ export class OpenGeniChatCompletionsModel extends OpenAIChatCompletionsModel {
       if (event.type === "response_done" && isUnknownFinishReason(finishReason)) {
         throw new UnknownModelFinishReasonError();
       }
+      if (event.type === "response_done")
+        Object.assign(event.response.usage, { providerUsageReported: usageReported });
       yield event;
     }
   }
@@ -100,7 +122,11 @@ export class OpenGeniResponsesModel extends AppendOnlyOpenAIResponsesModel {
   ): Promise<OpenAI.Responses.Response | AsyncIterable<OpenAI.Responses.ResponseStreamEvent>> {
     if (!stream || !this.ownsResponsesTerminalClassification()) {
       // Subscription transports retain the SDK's request-id and error handling.
-      return await super._fetchResponse(request, stream as false);
+      const response = await super._fetchResponse(request, stream as false);
+      if (!stream) return responseWithUsageEvidence(response);
+      return this.responseUsageEvidenceStream(
+        response as unknown as AsyncIterable<OpenAI.Responses.ResponseStreamEvent>,
+      );
     }
     // Reuse the SDK's full request conversion, but retain its HTTP receipt
     // before the SDK's stream wrapper discards the response headers.
@@ -119,14 +145,26 @@ export class OpenGeniResponsesModel extends AppendOnlyOpenAIResponsesModel {
     if (typeof pending.withResponse !== "function") {
       // The SDK also permits custom clients returning only the stream promise.
       // Such clients cannot supply HTTP evidence, but must remain usable.
-      return this.classifiedResponseStream(await pending, new Headers(), null);
+      return this.responseUsageEvidenceStream(
+        this.classifiedResponseStream(await pending, new Headers(), null),
+      );
     }
     const receipt = await pending.withResponse();
-    return this.classifiedResponseStream(
-      receipt.data,
-      receipt.response.headers,
-      receipt.request_id,
+    return this.responseUsageEvidenceStream(
+      this.classifiedResponseStream(receipt.data, receipt.response.headers, receipt.request_id),
     );
+  }
+
+  private async *responseUsageEvidenceStream(
+    stream: AsyncIterable<OpenAI.Responses.ResponseStreamEvent>,
+  ): AsyncIterable<OpenAI.Responses.ResponseStreamEvent> {
+    for await (const event of stream) {
+      if ("response" in event && event.response) {
+        // The SDK copies extra response fields into providerData before it
+        // fills absent usage with zeros. Preserve the provider's presence proof.
+        yield { ...event, response: responseWithUsageEvidence(event.response) };
+      } else yield event;
+    }
   }
 
   private async *classifiedResponseStream(

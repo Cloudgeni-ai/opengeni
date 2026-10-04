@@ -905,6 +905,59 @@ describe("durable provider admission regressions", () => {
       usage.mockRestore();
     }
   });
+  test.each(["opengeni-gateway", "workspace-gateway"])(
+    "Gateway reported cost cannot use token prices as a cost-cap bound: %s",
+    async (providerId) => {
+      const input = admission();
+      // The accepted provider must win over a substituted openaiModel/registry.
+      const settings = testSettings({
+        ...input.settings,
+        openaiProvider: "openai",
+        openaiModel: input.model,
+        modelPricingJson: JSON.stringify({
+          [input.model]: {
+            inputMicrosPerMillionTokens: 1_000_000,
+            outputMicrosPerMillionTokens: 1_000_000,
+          },
+        }),
+        staticUsageLimitsJson: JSON.stringify({ maxMonthlyCostMicrosPerAccount: 100_000 }),
+      });
+      const reserve = spyOn(opengeniDb, "tryReserveUsageBudget").mockResolvedValue({
+        allowed: true,
+        holds: [],
+      });
+      try {
+        expect(
+          modelCallReservationQuantities({
+            settings,
+            model: input.model,
+            providerId,
+            promptTokens: 1,
+            contextWindowTokens: 1000,
+          }).costMicros,
+        ).toBeNull();
+        await expect(
+          reserveModelCallBudget({ ...input, settings, providerId, chargesOpenGeniCredits: true }),
+        ).rejects.toThrow("Cannot bound model cost");
+        expect(reserve).not.toHaveBeenCalled();
+        await reserveModelCallBudget({ ...input, providerId }); // token-only
+        await reserveModelCallBudget({
+          ...input,
+          settings,
+          providerId,
+          isExternallyBilledTurn: true,
+        });
+        await reserveModelCallBudget({
+          ...input,
+          settings: testSettings({ ...settings, staticUsageLimitsJson: "{}" }),
+          providerId,
+          chargesOpenGeniCredits: true,
+        });
+      } finally {
+        reserve.mockRestore();
+      }
+    },
+  );
   test("cache-write rates are included in the conservative cost bound", () => {
     const settings = testSettings({
       contextWindowTokens: 1000,

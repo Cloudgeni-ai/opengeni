@@ -103,6 +103,7 @@ import {
   stableInteractionInterventionId,
   stableInteractionInterventionOperationId,
   reserveModelCallBudget,
+  takeAdmittedModelCall,
   usageReservationReleaseEvents,
   ensureRunAllowedBetweenModelCalls,
 } from "./admission";
@@ -608,6 +609,7 @@ export async function runTurnStreamAttempt(
   // Fresh UUIDs survive retries without colliding with already-released grants.
   // Terminal responses consume their own call identity in dispatch order.
   const admittedCallOrdinals: string[] = [];
+  const responseCallIds = new Map<string, string>();
   // Text of the newest assistant message any stream of this activity completed
   // durably: the reply a wait-ended human turn records on turn.completed.
   let latestAssistantMessageText: string | null = null;
@@ -659,6 +661,7 @@ export async function runTurnStreamAttempt(
     let currentToolBatchCallIds = new Set<string>();
     let currentToolBatchCompletedCallIds = new Set<string>();
     let streamSawPerResponseUsage = false;
+    let streamSawTerminalResponse = false;
     // Deltas learn the phase a provider declares when it announces a message;
     // undeclared messages the SDK runs past (same response asks for tools)
     // are commentary. Every SDK event of this stream is normalized once.
@@ -889,6 +892,7 @@ export async function runTurnStreamAttempt(
               turnId: activeTurnId,
               turnAttemptId: input.attemptId,
               model: turn.model,
+              providerId: resolvedModel?.provider.id ?? turnExecutionPolicy.providerId,
               isExternallyBilledTurn: billingState.isExternallyBilledTurn,
               entitlements,
               chargesOpenGeniCredits: billingState.chargesOpenGeniCredits,
@@ -1130,8 +1134,16 @@ export async function runTurnStreamAttempt(
         // rejected before producing a response still consumed an admission
         // ordinal, so response and admission ordinals diverge after a
         // rejection.
-        const isTerminalResponse = modelTerminalResponseFromSdkEvent(next.value) !== null;
-        const queuedCallOrdinal = isTerminalResponse ? admittedCallOrdinals.shift() : undefined;
+        const terminalResponse = modelTerminalResponseFromSdkEvent(next.value);
+        streamSawTerminalResponse ||= terminalResponse !== null;
+        const queuedCallOrdinal = terminalResponse
+          ? takeAdmittedModelCall({
+              ...(terminalResponse.responseId ? { responseId: terminalResponse.responseId } : {}),
+              admittedCalls: admittedCallOrdinals,
+              responseCalls: responseCallIds,
+              settledResponses: claimedModelUsageSourceKeys,
+            })
+          : undefined;
         const responseCallOrdinal =
           queuedCallOrdinal ?? String(modelResponseState.responseCount + 1);
         const responseCallHold = billingState.pendingUsageReservations.get(responseCallOrdinal);
@@ -1633,7 +1645,8 @@ export async function runTurnStreamAttempt(
       throw new PostCompactionContinuationEmptyError();
     }
     assertAgentStreamNotCancelled(eventing.stream.cancelled);
-    if (!streamSawPerResponseUsage) {
+    // Aggregate SDK counters cannot repair a terminal response with missing usage.
+    if (!streamSawPerResponseUsage && !streamSawTerminalResponse) {
       const aggregateUsage = eventing.stream.state.usage;
       const normalizedAggregateUsage = normalizeModelCallUsage(aggregateUsage);
       const aggregateInput = normalizedAggregateUsage.telemetry.inputTokens;
@@ -2093,6 +2106,7 @@ export async function runTurnStreamAttempt(
                 turnId: activeTurnId,
                 turnAttemptId: input.attemptId,
                 model: resolvedModel?.configured.id ?? turn.model,
+                providerId: resolvedModel?.provider.id ?? turnExecutionPolicy.providerId,
                 isExternallyBilledTurn: billingState.isExternallyBilledTurn,
                 entitlements,
                 chargesOpenGeniCredits: billingState.chargesOpenGeniCredits,

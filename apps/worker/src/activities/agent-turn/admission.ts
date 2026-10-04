@@ -14,6 +14,8 @@ import {
 } from "@opengeni/runtime";
 import {
   calculateModelUsageCostBreakdown,
+  OPENGENI_GATEWAY_PROVIDER_ID,
+  WORKSPACE_GATEWAY_PROVIDER_ID,
   configuredModelPricingSchedules,
   configuredStaticUsageLimits,
   resolveTurnExecutionPolicyV1,
@@ -378,10 +380,28 @@ export function estimateModelCallPromptTokens(call: {
   );
 }
 
+/** A normalized terminal and its raw mirror must consume the same call hold. */
+export function takeAdmittedModelCall(input: {
+  responseId?: string;
+  admittedCalls: string[];
+  responseCalls: Map<string, string>;
+  settledResponses: Set<string>;
+}): string | undefined {
+  if (input.responseId) {
+    const existing = input.responseCalls.get(input.responseId);
+    if (existing) return existing;
+    if (input.settledResponses.has(input.responseId)) return undefined;
+  }
+  const callId = input.admittedCalls.shift();
+  if (callId && input.responseId) input.responseCalls.set(input.responseId, callId);
+  return callId;
+}
+
 /** Conservative input/context and output bounds, priced across all token classes and tiers. */
 export function modelCallReservationQuantities(input: {
   settings: Settings;
   model: string;
+  providerId?: string;
   promptTokens: number;
   contextWindowTokens: number;
   latencyMode?: LatencyMode;
@@ -399,7 +419,12 @@ export function modelCallReservationQuantities(input: {
       ? input.model.slice("codex/".length)
       : null;
   let costMicros: number | null = null;
-  if (pricedModel) {
+  // Gateway settlement uses its reported charge, which token list prices cannot bound.
+  if (
+    pricedModel &&
+    input.providerId !== OPENGENI_GATEWAY_PROVIDER_ID &&
+    input.providerId !== WORKSPACE_GATEWAY_PROVIDER_ID
+  ) {
     const schedule = schedules[pricedModel]!;
     const prices = [
       schedule.default,
@@ -738,6 +763,7 @@ export async function reserveModelCallBudget(input: {
   turnId: string;
   turnAttemptId: string;
   model: string;
+  providerId?: string;
   isExternallyBilledTurn: boolean;
   entitlements?: ActivityServices["entitlements"];
   chargesOpenGeniCredits: boolean;
@@ -759,6 +785,7 @@ export async function reserveModelCallBudget(input: {
   const quantities = modelCallReservationQuantities({
     settings: input.settings,
     model: input.model,
+    ...(input.providerId === undefined ? {} : { providerId: input.providerId }),
     promptTokens: 0,
     contextWindowTokens: input.settings.contextWindowTokens,
     latencyMode: input.latencyMode ?? "standard",

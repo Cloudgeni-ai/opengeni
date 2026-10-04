@@ -14,6 +14,8 @@ type RequestUsageEntry = {
 };
 
 export type ModelCallUsageInput = {
+  /** Provider supplied both core counters before SDK defaults were applied. */
+  providerUsageReported?: boolean;
   inputTokens?: unknown;
   outputTokens?: unknown;
   totalTokens?: unknown;
@@ -39,6 +41,7 @@ export type ModelCallUsageTelemetry = {
 };
 
 export type ModelCallUsageNormalization = {
+  providerUsageReported?: boolean;
   telemetry: ModelCallUsageTelemetry;
   totalTokens: number | null;
   /** Validated provider TTL evidence for forward-only pricing snapshots, never a debit override. */
@@ -68,12 +71,22 @@ export function modelUsageTokenCountOrNull(value: unknown): number | null {
     : null;
 }
 
+/** Inspect raw provider counters before an SDK can synthesize missing zeros. */
+export function providerReportedTokenUsage(raw: unknown): boolean {
+  if (!raw || typeof raw !== "object" || Array.isArray(raw)) return false;
+  const record = raw as Record<string, unknown>;
+  const input = record.input_tokens ?? record.prompt_tokens;
+  const output = record.output_tokens ?? record.completion_tokens;
+  return modelUsageTokenCountOrNull(input) !== null && modelUsageTokenCountOrNull(output) !== null;
+}
+
 export function normalizeModelCallUsage(
   usage: ModelCallUsageInput | null | undefined,
 ): ModelCallUsageNormalization {
   const rejectedFields = new Set<string>();
-  if (!usage) {
+  if (!usage || usage.providerUsageReported === false) {
     return {
+      ...(usage?.providerUsageReported === false ? { providerUsageReported: false } : {}),
       telemetry: {
         inputTokens: null,
         outputTokens: null,
@@ -206,6 +219,9 @@ export function normalizeModelCallUsage(
       : undefined;
 
   return {
+    ...(usage.providerUsageReported === undefined
+      ? {}
+      : { providerUsageReported: usage.providerUsageReported }),
     telemetry: {
       inputTokens,
       outputTokens,
