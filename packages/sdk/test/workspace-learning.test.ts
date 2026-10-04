@@ -1,13 +1,14 @@
 import { describe, expect, test } from "bun:test";
-import { OpenGeniClient } from "../src/client";
+import { OpenGeniClient } from "../src/index";
+import { OpenGeniBrowserClient } from "../src/browser";
 
 const workspaceId = "00000000-0000-4000-8000-000000000001";
 const activationId = "00000000-0000-4000-8000-000000000004";
 
 describe("workspace learning SDK", () => {
-  test("preserves historical inspection and undo while retiring old settings writers", async () => {
+  const historicalLearningContract = async (Client: typeof OpenGeniBrowserClient) => {
     const requests: Request[] = [];
-    const client = new OpenGeniClient({
+    const client = new Client({
       baseUrl: "https://api.example.test",
       fetch: (async (input, init) => {
         requests.push(new Request(input, init));
@@ -30,5 +31,9 @@ describe("workspace learning SDK", () => {
     expect("createWorkspaceLearningPolicyRevision" in client).toBe(false);
     expect("activateWorkspaceLearningPolicyRevision" in client).toBe(false);
     expect("rollbackWorkspaceLearningPolicyRevision" in client).toBe(false);
-  });
+  };
+  test.each([OpenGeniClient, OpenGeniBrowserClient])(
+    "%p preserves historical inspection and undo while retiring old settings writers",
+    historicalLearningContract,
+  );
 });

@@ -40,6 +40,7 @@ import {
 import { LightboxProvider, type WorkspaceTab } from "@opengeni/react";
 import { MACHINES_SESSION_POLL_MS } from "@opengeni/react/machines";
 import {
+  ApprovalSurface,
   MessageTimeline,
   SessionChrome,
   KnowledgeActivityProvider,
@@ -72,12 +73,10 @@ import { useNavigate } from "@tanstack/react-router";
 import {
   BotIcon,
   BugIcon,
-  CheckIcon,
   Loader2Icon,
   MenuIcon,
   MessagesSquareIcon,
   PanelsTopLeftIcon,
-  XIcon,
 } from "lucide-react";
 import {
   createElement,
@@ -119,7 +118,6 @@ import { SessionVariableSetPicker } from "@/components/session/session-variable-
 import { useSessionVariableSetPickerState } from "@/lib/use-session-variable-set-picker-state";
 import { Button } from "@/components/ui/button";
 import { EmptyState } from "@/components/ui/empty-state";
-import { Notice } from "@/components/ui/notice";
 import { useAppContext } from "@/context";
 import { useBrowserAccountBridgeBlocker } from "@/lib/browser-account-bridge";
 import type {
@@ -1957,14 +1955,14 @@ function SessionChatPane(props: {
         return;
       }
       setApprovalPending((current) => ({ ...current, [approvalId]: decision }));
+      // A failure propagates so the approval surface releases its fence and
+      // the buttons stay live for a retry.
       try {
         await (decision === "approve" ? props.onApprove(approvalId) : props.onReject(approvalId));
         setApprovalSettled((current) => ({
           ...current,
           [approvalId]: decision,
         }));
-      } catch {
-        // The route already surfaced a toast; leave the buttons live to retry.
       } finally {
         setApprovalPending((current) => {
           const next = { ...current };
@@ -3107,47 +3105,12 @@ function SessionChatPane(props: {
           actionable Approve/Reject buttons for an already-resumed turn. */}
       {props.approvals.length > 0 && props.session.status === "requires_action" ? (
         <div className="mx-auto w-full max-w-3xl shrink-0 px-4 sm:px-6">
-          <div className="grid max-h-64 gap-3 overflow-y-auto pb-2">
-            {props.approvals.map((approval) => {
-              const pending = approvalPending[approval.id];
-              const settled = approvalSettled[approval.id];
-              const busy = Boolean(pending) || Boolean(settled);
-              const payload = JSON.stringify(approval.arguments ?? approval.raw ?? {}, null, 2);
-              return (
-                <Notice key={approval.id} tone="waiting" title={approval.name}>
-                  <pre className="mt-2 max-h-40 overflow-auto whitespace-pre-wrap rounded-md border border-border bg-surface-2/60 p-2.5 font-mono text-xs leading-5 text-fg-muted">
-                    {payload}
-                  </pre>
-                  <div className="mt-3 flex justify-end gap-2">
-                    <Button
-                      size="sm"
-                      disabled={busy}
-                      onClick={() => void decideApproval(approval.id, "approve")}
-                    >
-                      {pending === "approve" ? (
-                        <Loader2Icon className="size-3.5 animate-spin" />
-                      ) : (
-                        <CheckIcon className="size-3.5" />
-                      )}
-                      {settled === "approve" ? "Approved" : "Approve"}
-                    </Button>
-                    <Button
-                      size="sm"
-                      variant="destructive"
-                      disabled={busy}
-                      onClick={() => void decideApproval(approval.id, "reject")}
-                    >
-                      {pending === "reject" ? (
-                        <Loader2Icon className="size-3.5 animate-spin" />
-                      ) : (
-                        <XIcon className="size-3.5" />
-                      )}
-                      {settled === "reject" ? "Rejected" : "Reject"}
-                    </Button>
-                  </div>
-                </Notice>
-              );
-            })}
+          <div className="max-h-80 overflow-y-auto pb-2">
+            <ApprovalSurface
+              approvals={props.approvals}
+              onApprove={(approval) => decideApproval(approval.id, "approve")}
+              onReject={(approval) => decideApproval(approval.id, "reject")}
+            />
           </div>
         </div>
       ) : null}

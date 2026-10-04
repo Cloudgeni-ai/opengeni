@@ -615,6 +615,136 @@ e2e(
 );
 
 e2e(
+  "covered click preparation preserves scroll effects without pointer input or replay",
+  async () => {
+    const directory = await mkdtemp("/tmp/ogb-covered-scroll-");
+    const effects = { scroll: 0, pointer: 0, later: 0 };
+    const server = Bun.serve({
+      hostname: "127.0.0.1",
+      port: 0,
+      fetch(request) {
+        const path = new URL(request.url).pathname;
+        if (request.method === "POST") {
+          if (path === "/scroll") effects.scroll += 1;
+          if (path === "/pointer") effects.pointer += 1;
+          if (path === "/later") effects.later += 1;
+          return new Response(null, { status: 204 });
+        }
+        return new Response(
+          `<!doctype html><title>Covered scroll effects</title>
+          <style>
+            #covered { position: relative; margin-top: 1800px; width: 180px; height: 40px; }
+            #covered button, #cover { position: absolute; inset: 0; }
+            #cover { z-index: 2; background: gray; }
+          </style>
+          <button onclick="fetch('/later', {method:'POST'})">Later target</button>
+          <div id="covered"><button>Covered target</button><div id="cover">Cover</div></div>
+          <script>
+            addEventListener('scroll', () => fetch('/scroll', {method:'POST'}));
+            for (const type of ['pointerdown', 'pointerup', 'click'])
+              document.addEventListener(type, () => fetch('/pointer', {method:'POST'}));
+          </script>`,
+          { headers: { "content-type": "text/html" } },
+        );
+      },
+    });
+    const browserSessionId = randomUUID();
+    const controllerGeneration = `controller-${randomUUID()}`;
+    const runner = await AgentBrowserJsonRunner.create({
+      namespace: `covered_${randomUUID().slice(0, 8)}`,
+      sessionName: "s",
+      socketDirectory: join(directory, "s"),
+      profileDirectory: join(directory, "profile"),
+      downloadDirectory: join(directory, "downloads"),
+      screenshotDirectory: join(directory, "screenshots"),
+      headed: false,
+      ...(process.env.OPENGENI_BROWSER_EXECUTABLE
+        ? { browserExecutablePath: process.env.OPENGENI_BROWSER_EXECUTABLE }
+        : {}),
+    });
+    const driver = new AgentBrowserDriver({ browserSessionId, controllerGeneration, runner });
+    const controller = new BrowserInteractionController({
+      browserSessionId,
+      controllerGeneration,
+      driver,
+    });
+    let cdp: CdpConnection | null = null;
+    const waitForScroll = async (previous: number) => {
+      const deadline = Date.now() + 5_000;
+      while (effects.scroll <= previous && Date.now() < deadline) await Bun.sleep(25);
+      expect(effects.scroll).toBeGreaterThan(previous);
+    };
+    try {
+      const initial = await driver.start(String(server.url));
+      const beforeEffect = await controller.run(
+        command(initial, {
+          type: "click",
+          locator: { kind: "role", role: "button", name: "Missing target", exact: true },
+        }),
+      );
+      expect(beforeEffect.state).toBe("failed");
+      expect(beforeEffect.error?.code).toBe("locator_not_found");
+      expect(effects).toEqual({ scroll: 0, pointer: 0, later: 0 });
+
+      const operation = command(initial, {
+        type: "batch",
+        actions: [
+          {
+            type: "click",
+            locator: { kind: "role", role: "button", name: "Covered target", exact: true },
+          },
+          {
+            type: "click",
+            locator: { kind: "role", role: "button", name: "Later target", exact: true },
+          },
+        ],
+      });
+      const receipt = await controller.run(operation);
+      expect(receipt.state).toBe("outcome_unknown");
+      expect(receipt.error).toMatchObject({ code: "outcome_unknown", retryable: false });
+      expect(receipt.error?.message).toContain("invalid_action");
+      await waitForScroll(0);
+      expect(effects.pointer).toBe(0);
+      expect(effects.later).toBe(0);
+
+      // Restore the offscreen condition through the native inspection API. A
+      // redispatched click would scroll again and emit another local request.
+      const endpoint = await runner.run<{ cdpUrl: string }>(["get", "cdp-url"]);
+      cdp = await CdpConnection.connect(endpoint.cdpUrl);
+      const attached = await cdp.send<{ sessionId: string }>("Target.attachToTarget", {
+        targetId: initial.target.id,
+        flatten: true,
+      });
+      const scrollCount = effects.scroll;
+      await cdp.send(
+        "Runtime.evaluate",
+        { expression: "scrollTo(0, 0)" },
+        { sessionId: attached.sessionId },
+      );
+      await waitForScroll(scrollCount);
+      const settledEffects = { ...effects };
+      expect(await controller.run(operation)).toEqual(receipt);
+      await driver.observe(initial.target.id);
+      const position = await cdp.send<{ result: { value: number } }>(
+        "Runtime.evaluate",
+        { expression: "scrollY", returnByValue: true },
+        { sessionId: attached.sessionId },
+      );
+      expect(position.result.value).toBe(0);
+      expect(effects).toEqual(settledEffects);
+      expect(effects.pointer).toBe(0);
+      expect(effects.later).toBe(0);
+    } finally {
+      cdp?.close();
+      await driver.close();
+      server.stop(true);
+      await rm(directory, { recursive: true, force: true });
+    }
+  },
+  30_000,
+);
+
+e2e(
   "preserves partial batch uncertainty without claiming controller loss or replaying actions",
   async () => {
     const directory = await mkdtemp("/tmp/ogb-partial-");
