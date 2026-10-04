@@ -72,7 +72,9 @@ export async function insightsWithFriendlyTimeout<T>(read: () => Promise<T>): Pr
         (typeof candidate.message === "string" &&
           candidate.message.toLowerCase().includes("statement timeout"))
       ) {
-        throw new HTTPException(408, { message: "This range has too much data right now. Try a shorter range." });
+        throw new HTTPException(408, {
+          message: "This range has too much data right now. Try a shorter range.",
+        });
       }
       current = candidate.cause;
     }
