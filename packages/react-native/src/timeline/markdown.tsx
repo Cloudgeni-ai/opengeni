@@ -1,6 +1,7 @@
 import { createContext, useContext, useMemo, useState, type ReactNode } from "react";
 import { Pressable, ScrollView, Text, View } from "react-native";
 import Markdown, { renderRules, type RenderRules } from "react-native-markdown-display";
+import { isReservedOpenGeniLink, parseOpenGeniLink, type OpenGeniLinkTarget } from "@opengeni/sdk";
 import { Icon } from "./icon";
 import { withAlpha as withAlphaColor } from "./primitives";
 import type { NativeMarkdownRenderer } from "./message-timeline";
@@ -94,10 +95,11 @@ export function webMarkdownStyles(theme: NativeTimelineTheme, tone: "body" | "mu
       paddingHorizontal: 12,
       paddingVertical: 10,
     },
+    // Web MARKDOWN_LINK_CLASS: medium weight in accent-strong, no underline.
     link: {
-      color: c.fg,
-      textDecorationLine: "underline" as const,
-      textDecorationColor: c["border-strong"],
+      ...fontStyle(theme, 500),
+      color: c["accent-strong"],
+      textDecorationLine: "none" as const,
     },
     blockquote: {
       // Web blockquote text is fg-muted; text styles inherit through the renderer.
@@ -456,16 +458,24 @@ function TrimmedMarkdown({
 }
 
 export function createWebMarkdownRenderer(
-  options: { onLinkPress?: (url: string) => boolean; onCopy?: (text: string) => void } = {},
+  options: {
+    onLinkPress?: (url: string) => boolean;
+    onCopy?: (text: string) => void;
+    /** OpenGeni links (sandbox files, artifacts, Sites); never handed to the OS. */
+    onOpenGeniLink?: (target: OpenGeniLinkTarget) => void;
+  } = {},
 ): NativeMarkdownRenderer {
+  const onLinkPress = (url: string): boolean => {
+    const target = parseOpenGeniLink(url);
+    if (target || isReservedOpenGeniLink(url)) {
+      if (target) options.onOpenGeniLink?.(target);
+      return false;
+    }
+    return options.onLinkPress ? options.onLinkPress(url) : true;
+  };
   return (text, { tone }): ReactNode =>
     text.trim() ? (
-      <TrimmedMarkdown
-        text={text}
-        tone={tone}
-        onLinkPress={options.onLinkPress}
-        onCopy={options.onCopy}
-      />
+      <TrimmedMarkdown text={text} tone={tone} onLinkPress={onLinkPress} onCopy={options.onCopy} />
     ) : (
       <Text />
     );
