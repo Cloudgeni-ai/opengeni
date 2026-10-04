@@ -4,6 +4,11 @@ export type {
   ToolReviewDetailsPage,
   ToolReviewStatus,
 } from "@opengeni/contracts";
+export {
+  toolReviewAction,
+  toolReviewFields,
+  toolReviewDetails,
+} from "@opengeni/contracts/tool-review-presentation";
 export type {
   SubscriptionAccountSummary,
   SubscriptionPoolSettings,

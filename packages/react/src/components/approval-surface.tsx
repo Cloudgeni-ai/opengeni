@@ -1,6 +1,11 @@
 import { useEffect, useRef, useState, type ReactNode } from "react";
-import { toolReviewAction, toolReviewFields, toolReviewDetails } from "@opengeni/contracts";
-import { OpenGeniApiError, type ToolActionReview } from "@opengeni/sdk";
+import {
+  OpenGeniApiError,
+  toolReviewAction,
+  toolReviewFields,
+  toolReviewDetails,
+  type ToolActionReview,
+} from "@opengeni/sdk";
 import type { PendingApproval } from "../approvals";
 import { cn } from "../lib/cn";
 import { useErrorMessage } from "../lib/error-message";

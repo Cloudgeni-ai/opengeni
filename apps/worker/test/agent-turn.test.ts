@@ -874,7 +874,7 @@ describe("turn exact-content boundaries", () => {
       postCompactionRecovery,
     );
     const interruptionPath = source.indexOf(
-      "if (eventing.stream.interruptions.length > 0)",
+      "if (eventing.stream.interruptions.length > 0 || programmaticPending.length > 0)",
       cancelledStreamGuard,
     );
     const completionPath = source.indexOf(

@@ -668,7 +668,7 @@ describe("native branded-host error paths", () => {
             "[data-approval-id='approval'] button",
           ),
         ]
-          .find((button) => button.textContent === "Approve")!
+          .find((button) => button.textContent === "Approve action")!
           .click(),
       );
       await flush(20);
