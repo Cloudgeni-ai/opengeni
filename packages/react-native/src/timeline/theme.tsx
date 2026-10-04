@@ -1,5 +1,5 @@
 import { createContext, useContext, useMemo, type ReactNode } from "react";
-import type { TextStyle } from "react-native";
+import { Platform, type TextStyle } from "react-native";
 import { webColorsDark, webColorsLight, webLengths } from "../ui/web-tokens.generated";
 
 /* ----------------------------------------------------------------------------
@@ -114,7 +114,12 @@ export function fontStyle(
   }
   const key = `${weight}` as "400" | "500" | "600" | "700";
   const family = theme.fonts.sans?.[key];
-  const tracking = theme.fonts.sansTracking ? { letterSpacing: theme.fonts.sansTracking } : {};
+  // Android measures single-line text without letter spacing, so tracked text loses
+  // its last glyphs (a truncated "…" shows as ".."); the tweak only matters on iOS.
+  const tracking =
+    theme.fonts.sansTracking && Platform.OS !== "android"
+      ? { letterSpacing: theme.fonts.sansTracking }
+      : {};
   return family ? { fontFamily: family, ...tracking } : { fontWeight: key, ...tracking };
 }
 
