@@ -144,7 +144,11 @@ async function fixture(options: { ancestor?: boolean; unrelatedChild?: boolean }
   return { grant, parent, child, ancestor };
 }
 
-async function pendingResult(ctx: Awaited<ReturnType<typeof fixture>>, suffix = "terminal") {
+async function pendingResult(
+  ctx: Awaited<ReturnType<typeof fixture>>,
+  suffix = "terminal",
+  changedAuthority = false,
+) {
   const input = {
     accountId: ctx.grant.accountId,
     workspaceId: ctx.grant.workspaceId!,
@@ -169,7 +173,13 @@ async function pendingResult(ctx: Awaited<ReturnType<typeof fixture>>, suffix = 
   const outbox = await getOrCreateSessionSystemUpdateOutbox(client.db, input);
   const result = await addSessionSystemUpdateWithSourceMutation(
     client.db,
-    { ...input, sessionId: ctx.parent.id },
+    {
+      ...input,
+      sessionId: ctx.parent.id,
+      // Both are valid immutable snapshots; this negative input deliberately
+      // differs from its original producer receipt at insertion, not UPDATE.
+      mcpAccountBindings: changedAuthority ? [] : input.mcpAccountBindings,
+    },
     (tx) => markSessionSystemUpdateOutboxDeliveredInTransaction(tx, outbox),
   );
   if (result.reason !== "added") throw new Error("result not added");
@@ -307,7 +317,7 @@ for (const scenario of [
       ancestor: scenario === "ancestor_paused",
       unrelatedChild: scenario === "forged_link",
     });
-    const updateId = await pendingResult(ctx);
+    const updateId = await pendingResult(ctx, "terminal", scenario === "changed_authority");
     if (scenario === "paused") {
       await pauseTarget(ctx, ctx.parent.id);
     } else if (scenario === "ancestor_paused") {
@@ -326,8 +336,11 @@ for (const scenario of [
         set lineage = jsonb_set(lineage, '{parentSessionId}', to_jsonb(${ctx.child.id}::text))
         where id = ${updateId}`;
     } else if (scenario === "changed_authority") {
-      await shared.admin`update session_system_updates set mcp_account_bindings = '[]'::jsonb
-        where id = ${updateId}`;
+      // The producer retained NULL; the input accepted a valid empty binding
+      // snapshot. Exact receipt matching must reject their inequivalence.
+      const [input] = await shared.admin`select mcp_account_bindings
+        from session_system_updates where id = ${updateId}`;
+      expect(input!.mcp_account_bindings).toEqual([]);
     } else if (scenario === "cross_tenant") {
       const other = await fixture();
       await shared.admin`update session_system_updates set source_id = ${other.child.id},
