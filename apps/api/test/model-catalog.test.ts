@@ -21,6 +21,12 @@ import {
 import { modelPickerBillingClassFor } from "@opengeni/contracts/model-picker-order";
 import { resolveWorkspaceModelSelection } from "@opengeni/core";
 
+test("client catalog retains configured model logos", () => {
+  const model = configuredModels(testSettings())[0]!;
+  const logoUrl = "https://cdn.example.test/model.svg";
+  expect(projectClientModel({ ...model, logoUrl }).logoUrl).toBe(logoUrl);
+});
+
 test("public Claude catalog preserves provider and payment identity without leaking credentials", () => {
   let settings = withClaudeConnectionCatalog(testSettings({ claudeSubscriptionEnabled: true }), {
     anthropic: { models: [{ upstreamModelId: "claude-opus-5-5" }] },

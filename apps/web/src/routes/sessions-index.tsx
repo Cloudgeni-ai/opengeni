@@ -2036,10 +2036,11 @@ function sessionRepoLabel(session: Session): string | null {
 function recentSessionModelPresentation(
   modelId: string,
   catalogRows: readonly PickerModelRow[],
-): { label: string; billingClass: PickerModelRow["billingClass"] } {
+): { label: string; billingClass: PickerModelRow["billingClass"]; logoUrl?: string | undefined } {
   const row = findPickerRow([...catalogRows], modelId);
   return {
     label: row?.label ?? modelDisplayName(modelId),
+    logoUrl: row?.catalog.logoUrl,
     billingClass:
       row?.billingClass ??
       (isCodexProductModel(modelId) ? "codex_subscription" : "opengeni_credits"),
@@ -2076,7 +2077,7 @@ function RecentSessionRow({
           {metaBits.length > 0 ? (
             <span className="mt-0.5 flex min-w-0 items-center gap-1.5 text-2xs text-fg-subtle">
               <ModelMark
-                model={session.model}
+                model={{ id: session.model, logoUrl: model.logoUrl }}
                 className="size-3 text-fg-muted"
                 fallback={
                   <BillingClassMark

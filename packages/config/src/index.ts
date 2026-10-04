@@ -6,6 +6,7 @@ export {
   promotionalCreditScope,
 } from "./credit-promotions";
 import { isRetiredNativeAtlassianTool } from "@opengeni/contracts/atlassian-native-retirement";
+import { modelLogoUrl } from "@opengeni/contracts/model-display";
 import {
   directModelConnectionSpec,
   BillingMode,
@@ -2172,6 +2173,13 @@ export const RegistryProviderKind = z.enum([
 export type RegistryProviderKind = z.infer<typeof RegistryProviderKind>;
 
 /** A single model exposed by a registry provider. */
+const ModelLogoUrlSchema = z
+  .string()
+  .refine(
+    (value) => modelLogoUrl({ id: "", logoUrl: value }) !== null,
+    "model logoUrl must be an HTTPS URL without embedded credentials, at most 2048 characters",
+  );
+
 const RegistryModelSchema = z
   .object({
     id: z.string().min(1), // canonical OpenGeni product id
@@ -2179,6 +2187,7 @@ const RegistryModelSchema = z
     aliases: z.array(z.string().min(1)).optional(), // accepted input only; never sent upstream
     label: z.string().min(1).optional(), // display name; defaults to id
     shortLabel: z.string().min(1).max(64).optional(), // compact UI label; optional
+    logoUrl: ModelLogoUrlSchema.optional(),
     contextWindowTokens: z.number().int().positive().optional(),
     effectiveContextWindowTokens: z.number().int().positive().optional(),
     autoCompactTokenLimit: z.number().int().positive().optional(),
@@ -2417,6 +2426,7 @@ export const GatewayCatalogModel = z
     upstreamModelId: z.string().min(1),
     label: z.string().min(1),
     shortLabel: z.string().min(1).max(64).optional(),
+    logoUrl: ModelLogoUrlSchema.optional(),
     providers: z.array(z.string().min(1)).min(1),
     implicitCaching: z.boolean().default(false),
     vision: z.boolean().default(false),
@@ -2437,6 +2447,7 @@ export const OpenRouterCatalogModel = z
     upstreamModelId: z.string().min(1).endsWith(":free"),
     label: z.string().min(1),
     shortLabel: z.string().min(1).max(64).optional(),
+    logoUrl: ModelLogoUrlSchema.optional(),
     aliases: z.array(z.string().min(1)).default([]),
     capabilities: ModelCapabilitiesV1Schema,
     contextWindowTokens: z.number().int().positive().optional(),
@@ -2772,6 +2783,8 @@ export interface ConfiguredModel {
   label: string;
   /** Optional curated compact label for dense UI (e.g. mobile composer). */
   shortLabel?: string | undefined;
+  /** Optional HTTPS maker logo; display metadata does not change execution identity. */
+  logoUrl?: string | undefined;
   providerId: string;
   providerLabel: string;
   api: ModelProviderApi;
@@ -4509,6 +4522,7 @@ function gatewayRegistryProvider(
       upstreamModelId: model.upstreamModelId,
       label: model.label,
       ...(model.shortLabel ? { shortLabel: model.shortLabel } : {}),
+      ...(model.logoUrl ? { logoUrl: model.logoUrl } : {}),
       capabilities: gatewayModelCapabilities(settings, {
         implicitCaching: model.implicitCaching,
         vision: model.vision,
@@ -4614,6 +4628,7 @@ function openRouterRegistryProvider(
       aliases,
       label: model.label,
       ...(model.shortLabel ? { shortLabel: model.shortLabel } : {}),
+      ...(model.logoUrl ? { logoUrl: model.logoUrl } : {}),
       capabilities: model.capabilities,
       ...(model.contextWindowTokens === undefined
         ? {}
@@ -5839,6 +5854,7 @@ export function configuredModels(
           id: model.id,
           aliases: [...(model.aliases ?? [])],
           label: model.label ?? productLabelForModelId(model.id),
+          ...(model.logoUrl ? { logoUrl: model.logoUrl } : {}),
           ...(model.shortLabel
             ? { shortLabel: model.shortLabel }
             : productShortLabelForModelId(model.id)
