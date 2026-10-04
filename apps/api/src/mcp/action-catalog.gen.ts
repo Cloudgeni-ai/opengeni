@@ -6107,6 +6107,17 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     ]
   },
   {
+    "id": "updateArtifactPin",
+    "method": "PUT",
+    "path": "/v1/workspaces/:workspaceId/artifact-catalog/:kind/:artifactId/pin",
+    "request": [
+      "ArtifactCatalogKind"
+    ],
+    "response": [
+      "ArtifactPinResponse"
+    ]
+  },
+  {
     "id": "updateBrowserIdentity",
     "method": "PATCH",
     "path": "/v1/workspaces/:workspaceId/browser-identities/:identityId",

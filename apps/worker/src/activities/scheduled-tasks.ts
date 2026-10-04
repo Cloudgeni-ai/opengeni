@@ -98,6 +98,7 @@ import {
   allowedFirstPartyMcpToolsForSession,
   resolveFirstPartyMcpToolPolicy,
   resolveTurnExecutionPolicyV1,
+  TurnExecutionPolicyModelUnavailableError,
 } from "@opengeni/config";
 import { Context } from "@temporalio/activity";
 import { createHash } from "node:crypto";
@@ -1082,8 +1083,9 @@ export function createScheduledTaskActivities(services: () => Promise<ControlAct
             }
           }
         : undefined;
-      const turnExecutionPolicy = scheduledTaskRunExecutionPolicy(
-        resolveTurnExecutionPolicyV1(settings, {
+      let acceptedTurnExecutionPolicy: ReturnType<typeof resolveTurnExecutionPolicyV1>;
+      try {
+        acceptedTurnExecutionPolicy = resolveTurnExecutionPolicyV1(settings, {
           modelId: acceptedModel,
           requestedModelId:
             generatedTarget && task.agentConfig.model ? task.agentConfig.model : null,
@@ -1100,7 +1102,20 @@ export function createScheduledTaskActivities(services: () => Promise<ControlAct
             : "session",
           latencyMode: acceptedLatencyMode,
           latencyModeSource: generatedTarget ? "deployment" : "session",
-        }),
+        });
+      } catch (error) {
+        // A retired or removed model refuses every occurrence until the task
+        // (or its target session) names an available model: record that as a
+        // visible terminal run instead of exhausting activity retries.
+        if (!(error instanceof TurnExecutionPolicyModelUnavailableError)) throw error;
+        return await refuseAdmission(
+          "scheduled_model_unavailable",
+          false,
+          `${error.message}: ${acceptedModel}`,
+        );
+      }
+      const turnExecutionPolicy = scheduledTaskRunExecutionPolicy(
+        acceptedTurnExecutionPolicy,
         input,
         creatorPolicy?.credentialRestriction,
       );
