@@ -1391,6 +1391,27 @@ export function createAppComposition(deps: AppDependencies): {
       if (error instanceof HTTPException && error.status === 401) challenge();
       throw error;
     }
+    // Stateless JSON-response transport: there is no server-to-client stream.
+    // Answering GET with an empty 200 made clients (Claude) reconnect every
+    // second; refuse it after authorization, as the workspace endpoint does.
+    if (c.req.method === "GET") {
+      const version = c.req.header("mcp-protocol-version");
+      if (version && !SUPPORTED_PROTOCOL_VERSIONS.includes(version)) {
+        return c.json(
+          {
+            jsonrpc: "2.0",
+            id: null,
+            error: { code: -32000, message: "Unsupported protocol version." },
+          },
+          400,
+        );
+      }
+      return c.json(
+        { jsonrpc: "2.0", id: null, error: { code: -32000, message: "Method not allowed." } },
+        405,
+        { allow: "POST" },
+      );
+    }
     const transport = new WebStandardStreamableHTTPServerTransport({ enableJsonResponse: true });
     const mcp = buildOrganizationMcpServer({
       caller,
