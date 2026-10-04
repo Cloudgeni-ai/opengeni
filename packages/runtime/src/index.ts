@@ -3914,6 +3914,35 @@ function withoutImageInputTools(tools: Tool<unknown>[]): Tool<unknown>[] {
   );
 }
 
+/** The SDK's function fallback accepts a string tuple but omits its item schema. */
+function withTypedApplyPatchCommand(tools: Tool<unknown>[]): Tool<unknown>[] {
+  return tools.map((capabilityTool) => {
+    if (capabilityTool.type !== "function" || capabilityTool.name !== "apply_patch") {
+      return capabilityTool;
+    }
+    const parameters = capabilityTool.parameters;
+    const command = parameters.properties?.command;
+    if (
+      !command ||
+      typeof command !== "object" ||
+      command.type !== "array" ||
+      command.items !== undefined
+    ) {
+      return capabilityTool;
+    }
+    return {
+      ...capabilityTool,
+      parameters: {
+        ...parameters,
+        properties: {
+          ...parameters.properties,
+          command: { ...command, items: { type: "string" } },
+        },
+      },
+    };
+  });
+}
+
 export function buildAgentCapabilities(
   settings: Settings,
   skillActivations: readonly RuntimeSkillActivation[] = [],
@@ -3974,10 +4003,11 @@ function buildAgentCapabilitiesFromComposition(
   // results below; text-only/unproven wires remove the image tool entirely.
   // Scoped to filesystem: shell() is always a function-tool transport.
   const configureFilesystemTools = (tools: Tool<unknown>[]): Tool<unknown>[] => {
+    const typedTools = withTypedApplyPatchCommand(tools);
     const transportTools =
       options.structuredToolTransport === false
-        ? withStructuredViewImageFunctionResults(tools)
-        : tools;
+        ? withStructuredViewImageFunctionResults(typedTools)
+        : typedTools;
     const imageCapableTools =
       options.supportsImageInput === false
         ? withoutImageInputTools(transportTools)
@@ -3988,11 +4018,7 @@ function buildAgentCapabilitiesFromComposition(
     );
   };
   const filesystemCapability = filesystem({
-    ...(options.structuredToolTransport === false ||
-    options.supportsImageInput === false ||
-    options.onRetainableSessionImageOutput
-      ? { configureTools: configureFilesystemTools }
-      : {}),
+    configureTools: configureFilesystemTools,
   });
   if (options.structuredToolTransport === false || options.authorizeAttemptExecution) {
     neutralizeStructuredToolTransport(filesystemCapability);

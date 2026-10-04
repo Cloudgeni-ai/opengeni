@@ -211,6 +211,16 @@ workspace-facing cost are deliberately independent:
 Database documents use schema version 1 and contain only reviewed membership
 and optional line-safe notes:
 
+Model entries may set `logoUrl`, for example
+`"logoUrl": "https://cdn.example.test/model-logo.svg"`. The URL must use HTTPS,
+contain no embedded credentials, and fit within 2048 characters. Clients render
+it as the maker logo in model menus, the collapsed model picker, and session
+headers; failed images fall back to the bundled maker logo or neutral mark.
+An explicit billing-scope picker keeps its payment-group branding. Registry,
+Gateway, OpenRouter, and Codex catalog entries support this optional display
+metadata. Updating it through the database catalog needs no application rebuild
+or restart and does not change the model's execution definition version.
+
 The optional `codexModels` array replaces connected Codex membership without
 changing its credential broker. Omission preserves built-in defaults; `[]`
 removes all Codex models. Each entry requires `id: "codex/<slug>"`, matching

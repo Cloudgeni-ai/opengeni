@@ -120,6 +120,35 @@ async function mount(node: React.ReactElement): Promise<HTMLElement> {
 }
 
 describe("ModelPolicyPicker", () => {
+  test.each([true, false])(
+    "catalog logo respects model versus billing presentation (collapseScopes=%s)",
+    async (collapseScopes) => {
+      const model: ClientModel = {
+        ...MODELS[0]!,
+        id: "example/model",
+        source: "opengeni",
+        cost: "credits",
+        logoUrl: "https://cdn.example.test/model.svg",
+      };
+      const container = await mount(
+        <ModelPolicyPicker
+          models={[model]}
+          model={model.id}
+          effort="low"
+          latencyMode="standard"
+          collapseScopes={collapseScopes}
+          groupPresentation={{ opengeni_credits: { icon: <svg data-testid="example-group" /> } }}
+          onModelChange={() => {}}
+          onEffortChange={() => {}}
+          onLatencyModeChange={() => {}}
+        />,
+      );
+      expect(container.querySelector("img") !== null).toBe(collapseScopes);
+      expect(container.querySelector('[data-testid="example-group"]') !== null).toBe(
+        !collapseScopes,
+      );
+    },
+  );
   test.each(["credits", "free"] as const)(
     "stock deployment %s presentation is neutral without changing model truth",
     async (cost) => {
