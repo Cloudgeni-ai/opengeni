@@ -5859,6 +5859,71 @@ function matchesAdditiveCapabilityDefinitionVersion(
   return false;
 }
 
+/** The one pre-enablement hosted web-search declaration an operator may upgrade from. */
+function webSearchPreEnablementState(): CapabilityStateV1 {
+  return { upstream: "unknown", runnable: false };
+}
+
+function matchesWebSearchEnablementDefinitionVersion(
+  model: ConfiguredModel,
+  provider: ResolvedModelProvider,
+  policy: TurnExecutionPolicyV1,
+): boolean {
+  // An operator turning on hosted web search for an existing model changes
+  // only capabilities.hostedTools.webSearch from the exact unknown/off
+  // declaration to a runnable one. Reconstruct that single historical
+  // declaration and require every other current field to reproduce the frozen
+  // digest; never ignore the digest. Turning web search off, or changing any
+  // other capability, still fails closed. Do not compose this with the
+  // latency/input-modality subsets or the wire-profile, implicit-caching, or
+  // Claude-accounting migration exceptions.
+  if (!model.capabilities.hostedTools.webSearch.runnable) return false;
+  const { definitionVersion: _definitionVersion, ...modelWithoutVersion } = model;
+  const capabilities = {
+    ...model.capabilities,
+    hostedTools: { ...model.capabilities.hostedTools, webSearch: webSearchPreEnablementState() },
+  };
+  return (
+    policy.definitionVersion ===
+    definitionVersionFor({ ...modelWithoutVersion, capabilities }, provider)
+  );
+}
+
+/**
+ * The executable model an accepted turn runs: the current definition, except
+ * that a turn frozen before hosted web search was enabled keeps its frozen
+ * tool set (no web_search) on every recovery attempt. Only the next accepted
+ * logical turn resolves the newly enabled tool. Call only with a policy that
+ * already passed assertTurnExecutionPolicyMatchesConfigV1.
+ */
+export function configuredModelForAcceptedTurnExecutionPolicy(
+  model: ConfiguredModel,
+  provider: ResolvedModelProvider,
+  policy: TurnExecutionPolicyV1,
+): ConfiguredModel {
+  if (
+    policy.definitionVersion === model.definitionVersion ||
+    // Runtime test doubles may resolve a partial shape; a model without a
+    // runnable web-search declaration has nothing to withhold.
+    model.capabilities?.hostedTools?.webSearch?.runnable !== true ||
+    !matchesWebSearchEnablementDefinitionVersion(model, provider, policy)
+  ) {
+    return model;
+  }
+  return {
+    ...model,
+    capabilities: {
+      ...model.capabilities,
+      hostedTools: {
+        ...model.capabilities.hostedTools,
+        webSearch: webSearchPreEnablementState(),
+      },
+    },
+    hostedWebSearch: false,
+    definitionVersion: policy.definitionVersion,
+  };
+}
+
 /**
  * The built-in provider's stable id: "openai" on the OpenAI platform, "azure"
  * on Azure. Exported because the workspace model-policy gate must attribute
@@ -6678,7 +6743,8 @@ export function assertTurnExecutionPolicyMatchesConfigV1(
     parsed.definitionVersion === legacyImplicitOpenAiDefinitionVersion ||
     parsed.definitionVersion ===
       legacyCodexAstraImplicitCachingDefinitionVersionFor(resolved.model, resolved.provider) ||
-    matchesAdditiveCapabilityDefinitionVersion(resolved.model, resolved.provider, parsed);
+    matchesAdditiveCapabilityDefinitionVersion(resolved.model, resolved.provider, parsed) ||
+    matchesWebSearchEnablementDefinitionVersion(resolved.model, resolved.provider, parsed);
   const identityMismatched =
     parsed.providerId !== resolved.provider.id ||
     parsed.upstreamModelId !== resolved.model.upstreamModelId ||
@@ -6693,7 +6759,11 @@ export function assertTurnExecutionPolicyMatchesConfigV1(
   if (!definitionVersionMatches && !legacyClaudeAccountingMatches) {
     throw new TurnExecutionPolicyDefinitionMismatchError();
   }
-  return { policy: parsed, provider: resolved.provider, model: resolved.model };
+  return {
+    policy: parsed,
+    provider: resolved.provider,
+    model: configuredModelForAcceptedTurnExecutionPolicy(resolved.model, resolved.provider, parsed),
+  };
 }
 
 /**
