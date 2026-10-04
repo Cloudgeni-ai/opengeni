@@ -1,3 +1,9 @@
+export {
+  lockLiveNativeOriginalOriginTx,
+  type ModalNativeLiveOriginScope,
+  type ModalNativeLiveOriginProjection,
+  type ModalNativeLiveOriginResult,
+} from "./modal-native-live-origin";
 export { SubscriptionAccountChangedError } from "./subscription-account-conflict";
 import {
   claudeSubscriptionAccountRepository,

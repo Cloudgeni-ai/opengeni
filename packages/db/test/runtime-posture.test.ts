@@ -458,6 +458,20 @@ function safePosture(): RuntimeDatabasePosture {
     ],
     privateTables: [
       {
+        name: "modal_native_origin_read_capabilities",
+        owner: "opengeni_migrator",
+        rlsEnabled: true,
+        rlsForced: true,
+        rlsActive: true,
+        select: false,
+        insert: false,
+        update: false,
+        delete: false,
+        truncate: false,
+        references: false,
+        trigger: false,
+      },
+      {
         name: "personal_resource_delegation_capabilities",
         owner: "opengeni_migrator",
         select: false,
@@ -687,6 +701,36 @@ describe("runtime database posture evaluator", () => {
       ).toContain(violation);
     });
   }
+
+  test("native LIVE-origin helper requires its private exact-read capability with safe owner and no ACLs", () => {
+    const violation = "Native LIVE-origin read capability has unsafe owner, RLS or privileges";
+    for (const unsafe of [
+      { owner: "opengeni_app" },
+      { owner: "other_owner" },
+      { rlsEnabled: false },
+      { rlsForced: false },
+      { rlsActive: false },
+      { select: true },
+      { insert: true },
+      { update: true },
+      { delete: true },
+      { truncate: true },
+      { references: true },
+      { trigger: true },
+    ]) {
+      const posture = safePosture();
+      Object.assign(
+        posture.privateTables.find((t) => t.name === "modal_native_origin_read_capabilities")!,
+        unsafe,
+      );
+      expect(evaluateRuntimeDatabasePosture(posture, options)).toContain(violation);
+    }
+    const missing = safePosture();
+    missing.privateTables = missing.privateTables.filter(
+      (t) => t.name !== "modal_native_origin_read_capabilities",
+    );
+    expect(evaluateRuntimeDatabasePosture(missing, options)).toContain(violation);
+  });
 
   test("archived import receipts require private FORCE RLS and scoped non-public capabilities", () => {
     const posture = safePosture();
@@ -1685,7 +1729,9 @@ describe("runtime database posture evaluator", () => {
 
   test("enforces the exact personal-resource private capability boundary", () => {
     const posture = safePosture();
-    const capabilityTable = posture.privateTables[0]!;
+    const capabilityTable = posture.privateTables.find(
+      (table) => table.name === "personal_resource_delegation_capabilities",
+    )!;
     const capabilityRoutine = posture.privateRoutines.find(
       (routine) => routine.name === "personal_resource_delegation_capability_active(text)",
     )!;

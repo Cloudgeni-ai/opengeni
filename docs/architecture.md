@@ -281,6 +281,21 @@ native response, current custody claim, physical settlement or effect permit.
 No host entry, provider caller or durable recovery is activated by this helper.
 See [Modal recovery assurance](design/modal-recovery-assurance-2026-10-02.md).
 
+`modal-native-original-configuration.ts` is likewise unused private groundwork.
+It samples explicit deployment settings once, pins the direct read/TLS policy,
+and derives a separately domain-bound private equality commitment. Its draft
+and opaque sample are configuration data, not host/grant/capture authority.
+Tokens and keys never enter the draft; keyed equality must remain protected.
+
+`modal-native-live-declaration-join.ts` is an unused private request/data join,
+not the canonical claimed-worker issuer or a native context. It owns the exact
+bytes before MAC verification/parsing, joins the accepted LIVE origin, frozen
+human, Temporal tuple and unchanged recovery count, then rechecks current
+transport expiry and deployment configuration after blocking DB locks. Its
+immutable output must remain request-local and be consumed in that transaction.
+Protected cold/config/grant insertion and actual worker provenance are still
+required; this helper creates no permission to observe, dispatch or publish.
+
 Organization/workspace membership, API keys, delegated grants, private-session
 ownership and personal-resource grants remain distinct. Organization keys with
 `workspace:admin` may change private-session product settings; DB fences recheck
@@ -497,6 +512,16 @@ invocation options up to routing, which never forwards proof callbacks to the
 provider. Issued helpers retain independent physical joins after original retained
 registration. See [run lifecycle](run-lifecycle.md).
 Global Modal inventory uses an owner-only SELECT capability under FORCE RLS (0497).
+
+`packages/db/src/modal-native-live-origin.ts` is an inert, trusted-server-only
+LIVE-origin projection (0610), not a host authenticator or custody grant. Its
+transaction joins the exact accepted attempt, immutable initiating human,
+current membership/Personal pointer, control, route and execution-authority
+floor before any lease acquisition. Function-lifetime owner-only read
+capabilities preserve private-session isolation without changing the caller's
+subject. Host request authentication and cold reservation remain separate;
+there is no provider call, closed-origin maintenance authority, budget reset or
+native producer activation in this seam.
 
 Stock Modal non-PTY/no-`runAs` commands support native subreaper supervision.
 Exact-instance capability verification precedes admission; durable invocation
