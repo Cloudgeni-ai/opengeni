@@ -5,7 +5,7 @@ import { chromium } from "playwright";
 const output = process.env.PREVIEW_OUTPUT ?? "/workspace/model-quota-preview-evidence";
 await mkdir(output, { recursive: true });
 const browser = await chromium.launch({
-  executablePath: "/usr/local/bin/chromium",
+  executablePath: process.env.MODEL_QUOTA_PREVIEW_CHROMIUM ?? "/usr/local/bin/chromium",
   headless: true,
   args: ["--no-sandbox"],
 });
@@ -33,11 +33,9 @@ try {
     console.log(`PASS ${state}: desktop and phone`);
   }
   await page.goto(`${base}?state=recovering`);
-  await page.getByText("Your message is saved", { exact: false }).waitFor();
+  await page.getByText("Your work is saved", { exact: false }).waitFor();
   assert.equal(await page.getByRole("button", { name: "Retry", exact: true }).count(), 0);
-  await page.getByRole("button", { name: "Choose model", exact: true }).click();
-  await page.getByTestId("model-picker-choice-gpt-6-sol").waitFor();
-  await page.keyboard.press("Escape");
+  assert.equal(await page.getByRole("button", { name: "Choose model", exact: true }).count(), 0);
   await page.getByRole("button", { name: "Pause preview", exact: true }).click();
   assert.equal(await page.locator("[data-model-recovery-notice]").count(), 0);
   await page.getByRole("button", { name: "Unpause preview", exact: true }).click();

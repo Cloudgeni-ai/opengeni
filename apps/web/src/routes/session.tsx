@@ -3084,16 +3084,7 @@ function SessionChatPane(props: {
         </div>
       ) : null}
 
-      {modelRecovery ? (
-        <ModelRecoveryNotice
-          recovery={modelRecovery}
-          onChooseModel={
-            canControlSession && canChooseRecoveryModel
-              ? () => setModelPickerSession(props.session.id)
-              : undefined
-          }
-        />
-      ) : null}
+      {modelRecovery ? <ModelRecoveryNotice recovery={modelRecovery} /> : null}
 
       {((props.session.inputWait && props.session.status === "idle") ||
         (props.session.status === "queued" && !props.session.activeTurnId)) &&

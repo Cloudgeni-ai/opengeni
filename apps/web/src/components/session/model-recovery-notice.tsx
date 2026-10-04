@@ -1,19 +1,11 @@
 import { Clock3Icon } from "lucide-react";
-import { Button } from "@/components/ui/button";
 import type { ModelRecovery } from "@/lib/model-recovery";
 
 /**
- * Status while the worker owns backoff and resuming the saved turn. The only
- * action opens the composer's model picker; it never creates another retry.
+ * Status while the worker resumes the accepted turn with its frozen model.
+ * Changing the composer draft cannot switch that turn's recovery model.
  */
-export function ModelRecoveryNotice({
-  recovery,
-  onChooseModel,
-}: {
-  recovery: ModelRecovery;
-  /** Opens the composer's model picker; omitted when the model cannot be changed. */
-  onChooseModel?: () => void;
-}) {
+export function ModelRecoveryNotice({ recovery }: { recovery: ModelRecovery }) {
   const throttled = recovery.kind === "rate_limited";
   return (
     <div className="shrink-0 px-4 py-2 sm:px-6" data-model-recovery-notice="">
@@ -24,21 +16,10 @@ export function ModelRecoveryNotice({
             {throttled ? "High demand right now" : "This model is temporarily unavailable"}
           </p>
           <p className="mt-0.5 text-xs">
-            {throttled ? "Some models are being throttled. " : ""}
-            Your message is saved and will retry automatically, or choose another model.
+            {throttled ? "This model is being throttled. " : ""}
+            Your work is saved. We’ll retry automatically.
           </p>
         </div>
-        {onChooseModel ? (
-          <Button
-            type="button"
-            size="xs"
-            variant="outline"
-            className="-mt-0.5 shrink-0"
-            onClick={onChooseModel}
-          >
-            Choose model
-          </Button>
-        ) : null}
       </div>
     </div>
   );

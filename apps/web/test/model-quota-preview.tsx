@@ -142,9 +142,7 @@ function Preview() {
           ) : null
         }
       />
-      {recovery ? (
-        <ModelRecoveryNotice recovery={recovery} onChooseModel={() => setPickerOpen(true)} />
-      ) : null}
+      {recovery ? <ModelRecoveryNotice recovery={recovery} /> : null}
       <div className="mx-auto w-full max-w-3xl px-4 pb-6">
         <ChatComposer
           composer={composer}
