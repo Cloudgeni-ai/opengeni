@@ -158,9 +158,12 @@ To see which models a workspace can use, call
 organization key sees no models and an "unavailable" fallback; that is expected,
 not a blocked model. A real chat turn is the true test.
 
-Locally, Opengeni must reach the tool endpoint over public HTTPS: run
-`cloudflared tunnel --url http://localhost:3000`, set
-`OPENGENI_TOOL_SERVER_URL` to the tunnel's endpoint URL, and tell the user.
+Locally, Opengeni must reach the tool endpoint over public HTTPS. Never tunnel
+the whole app (that publishes every page, including sign-in and admin): run the
+tool-only forwarder from
+[Tools and auth](references/tools-and-auth.md#local-development), tunnel only
+its port, set `OPENGENI_TOOL_SERVER_URL` to the tunnel URL plus the tool path,
+and tell the user.
 
 Before production, and for the handoff, read the
 [Production checklist](references/production-checklist.md).

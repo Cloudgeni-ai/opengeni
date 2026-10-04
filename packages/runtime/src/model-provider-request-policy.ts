@@ -27,6 +27,7 @@ import {
   XaiSubscriptionUnavailableError,
 } from "./model-provider-errors";
 import type { ModelJsonRequestPolicy } from "./replayable-json-body";
+import { chatReasoning, joinChatReasoningMessages } from "./chat-reasoning";
 
 /**
  * Gateway's Kimi Responses adapter rejects the standard grouped parallel-tool
@@ -287,10 +288,14 @@ export const chatModelRequestPolicy: ModelJsonRequestPolicy = ({ path, body }) =
     if (!message || typeof message !== "object" || message.role !== "assistant") return message;
     if (!Array.isArray(message.content)) return message;
     let contentChanged = false;
+    // Older non-streamed SDK replies retained message fields inside text parts.
+    // Recover their reasoning at message scope before removing invalid nesting.
+    let retainedReasoning = chatReasoning(message);
     const content = message.content.map((part: unknown) => {
       if (!part || typeof part !== "object" || Array.isArray(part)) return part;
       const record = part as Record<string, unknown>;
       if (record.type !== "text" && record.type !== "refusal") return part;
+      retainedReasoning ??= chatReasoning(record);
       const outputOnlyKeys = [
         "annotations",
         "logprobs",
@@ -299,6 +304,8 @@ export const chatModelRequestPolicy: ModelJsonRequestPolicy = ({ path, body }) =
         "function_call",
         "audio",
         "reasoning",
+        "reasoning_content",
+        "tools",
         ...(record.type === "text" ? ["refusal"] : ["content"]),
       ];
       if (!outputOnlyKeys.some((key) => Object.hasOwn(record, key))) return part;
@@ -309,7 +316,12 @@ export const chatModelRequestPolicy: ModelJsonRequestPolicy = ({ path, body }) =
     });
     if (!contentChanged) return message;
     changed = true;
-    return { ...message, content };
+    return {
+      ...message,
+      content,
+      ...(retainedReasoning ? { [retainedReasoning.field]: retainedReasoning.text } : {}),
+    };
   });
-  return changed ? { body: { ...body, messages } } : undefined;
+  const joined = joinChatReasoningMessages(messages);
+  return changed || joined !== messages ? { body: { ...body, messages: joined } } : undefined;
 };

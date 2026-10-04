@@ -11,7 +11,8 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     ],
     "response": [
       "AcceptOrganizationInvitationResponse"
-    ]
+    ],
+    "browserOnly": "it acts on the person's own account across organizations (creating an organization, listing their memberships or invitations, accepting an invitation), and a connection is limited to one organization"
   },
   {
     "id": "acceptOrganizationRecoveryCustody",
@@ -22,7 +23,8 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     ],
     "response": [
       "OrganizationRecoveryMutationResponse"
-    ]
+    ],
+    "browserOnly": "organization recovery is a ceremony in the person's own browser session"
   },
   {
     "id": "acknowledgeStream",
@@ -264,7 +266,8 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     ],
     "response": [
       "OrganizationRecoveryMutationResponse"
-    ]
+    ],
+    "browserOnly": "organization recovery is a ceremony in the person's own browser session"
   },
   {
     "id": "approveSlackUserLinkAccessRequest",
@@ -359,7 +362,8 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     ],
     "response": [
       "BeginExternalIdentityLinkResponse"
-    ]
+    ],
+    "browserOnly": "linking a product user to an Opengeni account is confirmed by that person signed in to Opengeni, or started by the embedding product as its user"
   },
   {
     "id": "beginSessionRealtime",
@@ -420,7 +424,8 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     ],
     "response": [
       "OrganizationRecoveryMutationResponse"
-    ]
+    ],
+    "browserOnly": "organization recovery is a ceremony in the person's own browser session"
   },
   {
     "id": "cancelSessionBackgroundCommand",
@@ -611,7 +616,8 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     ],
     "response": [
       "OrganizationRecoveryMutationResponse"
-    ]
+    ],
+    "browserOnly": "organization recovery is a ceremony in the person's own browser session"
   },
   {
     "id": "confirmIdentityLink",
@@ -623,7 +629,8 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     "response": [
       "ExternalIdentityLink",
       "ExternalIdentityLinkPreview"
-    ]
+    ],
+    "browserOnly": "linking a product user to an Opengeni account is confirmed by that person signed in to Opengeni, or started by the embedding product as its user"
   },
   {
     "id": "connectClaudeSubscriptionSetupToken",
@@ -676,7 +683,8 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     ],
     "response": [
       "CreateAdditionalOrganizationResponse"
-    ]
+    ],
+    "browserOnly": "it acts on the person's own account across organizations (creating an organization, listing their memberships or invitations, accepting an invitation), and a connection is limited to one organization"
   },
   {
     "id": "createApiKey",
@@ -901,7 +909,8 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     ],
     "response": [
       "CreateOrganizationResponse"
-    ]
+    ],
+    "browserOnly": "it acts on the person's own account across organizations (creating an organization, listing their memberships or invitations, accepting an invitation), and a connection is limited to one organization"
   },
   {
     "id": "createOrganizationApiKey",
@@ -1484,7 +1493,8 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     ],
     "response": [
       "OrganizationRecoveryMutationResponse"
-    ]
+    ],
+    "browserOnly": "organization recovery is a ceremony in the person's own browser session"
   },
   {
     "id": "disableSource",
@@ -1651,7 +1661,8 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     ],
     "response": [
       "OrganizationRecoveryMutationResponse"
-    ]
+    ],
+    "browserOnly": "organization recovery is a ceremony in the person's own browser session"
   },
   {
     "id": "exportCompanyBrainOkf",
@@ -1911,7 +1922,8 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     "method": "GET",
     "path": "/v1/workspaces/:workspaceId/identity-links/:linkId/:operation",
     "request": [],
-    "response": []
+    "response": [],
+    "browserOnly": "linking a product user to an Opengeni account is confirmed by that person signed in to Opengeni, or started by the embedding product as its user"
   },
   {
     "id": "GET /v1/workspaces/:workspaceId/insights/calls",
@@ -2362,7 +2374,8 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     "request": [],
     "response": [
       "ExternalIdentityLink"
-    ]
+    ],
+    "browserOnly": "linking a product user to an Opengeni account is confirmed by that person signed in to Opengeni, or started by the embedding product as its user"
   },
   {
     "id": "getInstalledPluginDetails",
@@ -2542,7 +2555,8 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     "request": [],
     "response": [
       "OrganizationRecoveryOverview"
-    ]
+    ],
+    "browserOnly": "organization recovery is a ceremony in the person's own browser session"
   },
   {
     "id": "getOrganizationRetentionPolicy",
@@ -3593,7 +3607,8 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     "request": [],
     "response": [
       "ExternalIdentityLinkPage"
-    ]
+    ],
+    "browserOnly": "linking a product user to an Opengeni account is confirmed by that person signed in to Opengeni, or started by the embedding product as its user"
   },
   {
     "id": "listInstalledPlugins",
@@ -3768,7 +3783,8 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     "request": [],
     "response": [
       "ListOrganizationInvitationsPageResponse"
-    ]
+    ],
+    "browserOnly": "it acts on the person's own account across organizations (creating an organization, listing their memberships or invitations, accepting an invitation), and a connection is limited to one organization"
   },
   {
     "id": "listOrganizationInvitationsForOrganization",
@@ -3786,7 +3802,8 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     "request": [],
     "response": [
       "ListManagedOrganizationMembershipsResponse"
-    ]
+    ],
+    "browserOnly": "it acts on the person's own account across organizations (creating an organization, listing their memberships or invitations, accepting an invitation), and a connection is limited to one organization"
   },
   {
     "id": "listOrganizationProviderCustomModels",
@@ -4539,7 +4556,8 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     "method": "POST",
     "path": "/v1/workspaces/:workspaceId/identity-links/:linkId",
     "request": [],
-    "response": []
+    "response": [],
+    "browserOnly": "linking a product user to an Opengeni account is confirmed by that person signed in to Opengeni, or started by the embedding product as its user"
   },
   {
     "id": "POST /v1/workspaces/:workspaceId/integrations/:capabilityId/instances/:instanceKey/facets/:facetKey/pause",
@@ -5826,7 +5844,8 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     ],
     "response": [
       "OrganizationRecoveryMutationResponse"
-    ]
+    ],
+    "browserOnly": "organization recovery is a ceremony in the person's own browser session"
   },
   {
     "id": "startPersonalGitHubOAuth",

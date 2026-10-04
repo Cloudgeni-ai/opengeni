@@ -57,7 +57,8 @@ export type AnalyticsEventName =
   | "turn_failure_action"
   | "onboarding_step_viewed"
   | "onboarding_step_completed"
-  | "onboarding_abandoned";
+  | "onboarding_abandoned"
+  | "playground_step_completed";
 
 type AnalyticsConfig = ClientConfig["analytics"];
 export type AnalyticsProperty = boolean | number | string;

@@ -191,6 +191,7 @@ export function buildOrganizationMcpServer(input: {
         if (!parsed.success) return invalid(parsed.error);
         const entry = findAction(parsed.data.id);
         if (!entry) return failure(`No action "${parsed.data.id}". Search for it first.`);
+        if (entry.browserOnly) return browserOnly(entry);
         return json(describeAction(entry));
       }
       case "opengeni_action_call": {
@@ -220,6 +221,9 @@ function words(value: string): string[] {
     .filter(Boolean);
 }
 
+/** Actions an MCP caller can complete: browser-only ones are left out. */
+const CALLABLE_ACTIONS = ACTION_CATALOG.filter((entry) => !entry.browserOnly);
+
 export function searchActions(input: { query: string; limit: number; offset: number }) {
   // Singular and plural match ("workspace" finds listWorkspaces).
   const stem = (word: string) =>
@@ -227,7 +231,7 @@ export function searchActions(input: { query: string; limit: number; offset: num
   const wanted = words(input.query).map(stem);
   // "workspaces" asks for a list; prefer list actions on a plural query.
   const plural = words(input.query).some((word) => /[^s]s$/u.test(word));
-  const scored = ACTION_CATALOG.map((entry) => {
+  const scored = CALLABLE_ACTIONS.map((entry) => {
     // A word in the action's name matters far more than one in its path:
     // nearly every path contains "workspaces".
     const name = words(entry.id).map(stem);
@@ -307,6 +311,7 @@ async function callAction(
 ): Promise<CallToolResult> {
   const entry = findAction(input.id);
   if (!entry) return failure(`No action "${input.id}". Search for it first.`);
+  if (entry.browserOnly) return browserOnly(entry);
   const reads = entry.method === "GET" || entry.method === "HEAD";
   if (
     context.caller.kind === "person" &&
@@ -395,7 +400,7 @@ async function toolResult(response: Response): Promise<CallToolResult> {
       result.truncated = { returnedBytes: MAX_RESPONSE_BYTES, totalBytes: bytes.byteLength };
   }
   if (
-    status === 403 &&
+    (status === 401 || status === 403) &&
     /human|browser|cookie|same-origin/i.test(JSON.stringify(result.body ?? ""))
   ) {
     result.hint = "This action has to be done by the person in the Opengeni app in a browser.";
@@ -434,6 +439,13 @@ async function readStream(response: Response): Promise<string> {
 
 function json(value: unknown): CallToolResult {
   return { content: [{ type: "text", text: JSON.stringify(value) }] };
+}
+
+/** A browser-only action: say why, and that the person has to do it. */
+function browserOnly(entry: ActionCatalogEntry): CallToolResult {
+  return failure(
+    `${entry.id} isn't available to connected agents or API keys: ${entry.browserOnly}. The person has to do it in the Opengeni app in a browser.`,
+  );
 }
 
 function failure(message: string): CallToolResult {

@@ -18,6 +18,7 @@
 //   /workspaces/:id/schedules/new            → new schedule (?template, ?from, ?sourceSessionId)
 //   /workspaces/:id/schedules/:scheduleId    → one schedule (overview + runs)
 //   /workspaces/:id/schedules/:scheduleId/edit → edit schedule
+//   /workspaces/:id/playground               → playground: Opengeni inside a sample product, with a guided tour
 //   /workspaces/:id/state                    → Knowledge (?view, ?entry, ?page)
 //   /workspaces/:id/documents, /memory       → old links, redirect to Knowledge
 //   /workspaces/:id/insights                 → workspace insights (admin usage rollup)
@@ -157,6 +158,10 @@ const LazyScheduleFormRoute = lazyRouteComponent(
   "ScheduleFormRoute",
 );
 const LazySessionRoute = lazyRouteComponent(() => import("@/routes/session"), "SessionRoute");
+const LazyPlaygroundRoute = lazyRouteComponent(
+  () => import("@/routes/playground"),
+  "PlaygroundRoute",
+);
 const LazySessionDeepLinkRoute = lazyRouteComponent(
   () => import("@/routes/session-deep-link"),
   "SessionDeepLinkRoute",
@@ -515,6 +520,11 @@ const workspaceScheduleEditRoute = createRoute({
   path: "schedules/$scheduleId/edit",
   component: ScheduleEdit,
 });
+const workspacePlaygroundRoute = createRoute({
+  getParentRoute: () => workspaceRoute,
+  path: "playground",
+  component: Playground,
+});
 const workspaceDocumentsRoute = createRoute({
   getParentRoute: () => workspaceRoute,
   path: "documents",
@@ -736,6 +746,7 @@ const routeTree = rootRoute.addChildren([
     workspaceScheduleNewRoute,
     workspaceScheduleDetailRoute,
     workspaceScheduleEditRoute,
+    workspacePlaygroundRoute,
     workspaceDocumentsRoute,
     workspaceMemoryRoute,
     workspaceStateRoute,
@@ -933,6 +944,11 @@ function ScheduleNew() {
       mode={{ kind: "create", template, from, sourceSessionId }}
     />
   );
+}
+
+function Playground() {
+  const { workspaceId } = workspacePlaygroundRoute.useParams();
+  return <LazyPlaygroundRoute key={workspaceId} workspaceId={workspaceId} />;
 }
 
 function ScheduleDetail() {

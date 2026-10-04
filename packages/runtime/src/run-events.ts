@@ -1,4 +1,9 @@
-import { isOpenAIResponsesRawModelStreamEvent, type RunStreamEvent } from "@openai/agents";
+import {
+  isOpenAIChatCompletionsRawModelStreamEvent,
+  isOpenAIResponsesRawModelStreamEvent,
+  type RunStreamEvent,
+} from "@openai/agents";
+import { chatReasoning, primaryChatChoice } from "./chat-reasoning";
 import {
   INTERACTION_REQUEST_HUMAN_MODEL_TOOL_NAME,
   approvalIdentifier,
@@ -540,6 +545,15 @@ export function normalizeSdkEvent(
     if (webSearch) {
       pushProtocolEvent(webSearch);
     }
+    return out;
+  }
+  if (isOpenAIChatCompletionsRawModelStreamEvent(event)) {
+    const reasoning = chatReasoning(primaryChatChoice(event.data.event)?.delta);
+    if (reasoning)
+      out.push({
+        type: "agent.reasoning.delta",
+        payload: { text: reasoning.text },
+      });
     return out;
   }
   if (event.type === "agent_updated_stream_event") {

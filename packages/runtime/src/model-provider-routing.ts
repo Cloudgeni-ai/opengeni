@@ -19,6 +19,14 @@ import {
 import { providerReportedTokenUsage } from "./usage-telemetry";
 import { AnthropicMessagesModel } from "./anthropic-messages";
 import { projectChatToolImages } from "./chat-tool-images";
+import { projectHistoryForProvider } from "./provider-history-adapter";
+import {
+  chatReasoning,
+  primaryChatChoice,
+  projectChatReasoning,
+  withChatReasoning,
+  type ChatReasoning,
+} from "./chat-reasoning";
 import { instrumentedModelFetch } from "./model-provider-client";
 import { CODEX_MODEL_ID_PREFIX } from "@opengeni/codex";
 import { XAI_SUBSCRIPTION_MODEL_ID_PREFIX } from "@opengeni/xai-subscription";
@@ -144,7 +152,7 @@ export class OpenGeniChatCompletionsModel extends OpenAIChatCompletionsModel {
     let response: ModelResponse;
     try {
       response = await chatTransportEntry.run(entry, () =>
-        super.getResponse(projectChatToolImages(request)),
+        super.getResponse(projectChatReasoning(projectChatToolImages(request))),
       );
     } catch (error) {
       await refundUnenteredChatFailure(error, entry.entered);
@@ -159,16 +167,23 @@ export class OpenGeniChatCompletionsModel extends OpenAIChatCompletionsModel {
     if (!response.responseId?.trim()) response.responseId = `opengeni-response:${randomUUID()}`;
     Object.assign(response.usage, { providerUsageReported });
     response.providerData = { ...response.providerData, providerUsageReported };
-    return response;
+    return {
+      ...response,
+      output: withChatReasoning(
+        response.output,
+        chatReasoning(primaryChatChoice(response.providerData)?.message),
+      ),
+    };
   }
 
   override async *getStreamedResponse(request: ModelRequest): AsyncIterable<ResponseStreamEvent> {
     let finishReason: unknown;
+    let reasoning: ChatReasoning | undefined;
     let usageReported = false;
     let providerResponseId: string | undefined;
     const fallbackId = `opengeni-response:${randomUUID()}`;
     for await (const event of chatEntryTrackedStream(() =>
-      super.getStreamedResponse(projectChatToolImages(request)),
+      super.getStreamedResponse(projectChatReasoning(projectChatToolImages(request))),
     )) {
       if (event.type === "model") {
         const rawId = (event.event as { id?: unknown } | undefined)?.id;
@@ -180,6 +195,12 @@ export class OpenGeniChatCompletionsModel extends OpenAIChatCompletionsModel {
         if (observed !== undefined && observed !== null) {
           finishReason = observed;
         }
+        const delta = chatReasoning(primaryChatChoice(event.event)?.delta);
+        if (delta)
+          reasoning = {
+            field: delta.field,
+            text: (reasoning?.text ?? "") + delta.text,
+          };
       }
       if (event.type === "response_done" && isUnknownFinishReason(finishReason)) {
         throw new UnknownModelFinishReasonError();
@@ -194,7 +215,15 @@ export class OpenGeniChatCompletionsModel extends OpenAIChatCompletionsModel {
           providerUsageReported: usageReported,
         };
       }
-      yield event;
+      yield event.type === "response_done"
+        ? {
+            ...event,
+            response: {
+              ...event.response,
+              output: withChatReasoning(event.response.output, reasoning),
+            },
+          }
+        : event;
     }
   }
 }
@@ -329,7 +358,14 @@ export class OpenGeniResponsesModel extends AppendOnlyOpenAIResponsesModel {
     const startedAt = performance.now();
     let outcome: "completed" | "failed" = "completed";
     try {
-      return super._buildResponsesCreateRequest(request, stream);
+      const input =
+        typeof request.input === "string"
+          ? request.input
+          : (projectHistoryForProvider(request.input, "responses") as ModelRequest["input"]);
+      return super._buildResponsesCreateRequest(
+        input === request.input ? request : { ...request, input },
+        stream,
+      );
     } catch (error) {
       outcome = "failed";
       markModelRequestPreparationFailure(error);
