@@ -1418,7 +1418,13 @@ export function createAppComposition(deps: AppDependencies): {
       await next();
       return;
     }
-    const grant = await requireAccessGrant(c, routeDeps, workspaceId);
+    // Match Hono's decoded routing path before first-use membership and RLS.
+    const permission =
+      c.req.method === "PUT" &&
+      /^\/v1\/workspaces\/[^/]+\/artifact-catalog\/[^/]+\/[^/]+\/pin$/.test(c.req.path)
+        ? "artifacts:publish"
+        : undefined;
+    const grant = await requireAccessGrant(c, routeDeps, workspaceId, permission);
     await withAccessGrantSessionRlsContext(routeDeps, grant, next);
   });
 
