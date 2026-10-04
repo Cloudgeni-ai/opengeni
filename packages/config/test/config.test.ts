@@ -1825,6 +1825,37 @@ describe("sandbox preparation profiles", () => {
     });
   });
 
+  test("offers editable-artifact export only when the materializer is deployed", async () => {
+    const { resolveFirstPartyMcpToolPolicy, allowedFirstPartyMcpToolsForSession } =
+      await import("../src/index");
+    const exportTools = ["editable_artifact_export", "editable_artifact_export_status"];
+    const absent = withEnv({}, () => getSettings());
+    expect(absent.artifactMaterializerDeployed).toBe(false);
+    const absentPolicy = resolveFirstPartyMcpToolPolicy(absent);
+    for (const tool of exportTools) {
+      expect(absentPolicy.allowed).not.toContain(tool);
+      expect(absentPolicy.default).not.toContain(tool);
+    }
+    // Collaborative editing stays available.
+    expect(absentPolicy.default).toContain("editable_artifact_apply");
+    // A stored selection naming export loses it at execution.
+    expect(
+      allowedFirstPartyMcpToolsForSession(absent, [
+        "editable_artifact_get",
+        "editable_artifact_export",
+      ]),
+    ).toEqual(["editable_artifact_get"]);
+
+    const deployed = withEnv({ OPENGENI_ARTIFACT_MATERIALIZER_DEPLOYED: "true" }, () =>
+      getSettings(),
+    );
+    const deployedPolicy = resolveFirstPartyMcpToolPolicy(deployed);
+    for (const tool of exportTools) {
+      expect(deployedPolicy.allowed).toContain(tool);
+      expect(deployedPolicy.default).toContain(tool);
+    }
+  });
+
   test("rejects defaults outside the deployment first-party tool ceiling", () => {
     expect(() =>
       withEnv(

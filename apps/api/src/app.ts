@@ -27,6 +27,7 @@ import {
   UnsupportedLatencyModeError,
   voiceInputPricingIssues,
   type Settings,
+  type FirstPartyMcpToolPolicySettings,
 } from "@opengeni/config";
 import {
   AGENT_CAPABILITY_IDS,
@@ -2142,7 +2143,7 @@ function clientAuthConfig(settings: AppDependencies["settings"], newSignupsEnabl
 
 /** Configured SDK credentials cannot regain tools from widened legacy columns. */
 export function configuredCodemodeSessionProxyTools(
-  settings: Pick<Settings, "defaultFirstPartyMcpTools" | "allowedFirstPartyMcpTools">,
+  settings: FirstPartyMcpToolPolicySettings,
   session: Pick<Session, "agent">,
 ): FirstPartyMcpToolName[] | null {
   if (!session.agent) return null;

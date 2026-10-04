@@ -2708,6 +2708,7 @@ async function verifyMcpToolsListNonFatal(
       providerIdentity = local.validateIdentity(payload);
       const verifiedTools = local.toolsForScopes(
         grantedScopes(token.scopeText, state.authorizeScopes, profile),
+        settings,
       );
       if (local.required && verifiedTools.length === 0)
         throw new Error("Connector verification did not report an authorized tool scope");

@@ -28,7 +28,7 @@ import { getSession } from "@opengeni/db";
 import {
   allowedFirstPartyMcpToolsForSession,
   resolveFirstPartyDelegationSecret,
-  type Settings,
+  type FirstPartyMcpToolPolicySettings,
 } from "@opengeni/config";
 import {
   DEFAULT_FIRST_PARTY_MCP_PERMISSIONS,
@@ -59,7 +59,7 @@ export const CODEMODE_SESSION_PROXY_PERMISSION_CEILING = [
  * exactly as its MCP surface would.
  */
 export function codemodeSessionProxyPermissions(
-  settings: Pick<Settings, "defaultFirstPartyMcpTools" | "allowedFirstPartyMcpTools">,
+  settings: FirstPartyMcpToolPolicySettings,
   session: Pick<Session, "firstPartyMcpTools" | "firstPartyMcpPermissions">,
 ): Permission[] {
   const sessionPermissions = session.firstPartyMcpPermissions ?? [
@@ -82,9 +82,7 @@ export async function codemodeSessionRequest(
   grant: AccessGrant,
   request: Request,
   path: string,
-  resolveProxySettings?: (
-    session: Session,
-  ) => Pick<Settings, "defaultFirstPartyMcpTools" | "allowedFirstPartyMcpTools">,
+  resolveProxySettings?: (session: Session) => FirstPartyMcpToolPolicySettings,
 ): Promise<Request> {
   siteSessionPath(path, grant.workspaceId, request.method);
   const { authority, turn } = await requireActiveCodemodeCatalog(deps, grant);

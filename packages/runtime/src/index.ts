@@ -211,6 +211,7 @@ export {
   GmailRestMcpServer,
   OFFICIAL_GMAIL_MCP_URL,
   gmailRestToolIsMutation,
+  gmailToolAvailableOnDeployment,
   gmailToolSupportsScopes,
   isOfficialGmailMcpConfig,
   type GmailRestMcpServerOptions,

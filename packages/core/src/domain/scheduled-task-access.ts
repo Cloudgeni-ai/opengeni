@@ -14,6 +14,7 @@ import {
   allowedFirstPartyMcpToolsForSession,
   resolveFirstPartyMcpToolPolicy,
   type Settings,
+  type FirstPartyMcpToolPolicySettings,
 } from "@opengeni/config";
 import {
   DEFAULT_FIRST_PARTY_MCP_PERMISSIONS,
@@ -256,7 +257,7 @@ export function planScheduledTaskOpenGeniTools(input: {
     ScheduledTaskCreatorPolicy,
     "firstPartyMcpTools" | "firstPartyMcpPermissions"
   > | null;
-  settings: Pick<Settings, "defaultFirstPartyMcpTools" | "allowedFirstPartyMcpTools">;
+  settings: FirstPartyMcpToolPolicySettings;
   grantPermissions: readonly Permission[];
   grantPermissionMode?: AccessGrant["permissionMode"];
   permissionsRequiredByTools: FirstPartyToolPermissionRequirements;

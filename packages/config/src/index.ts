@@ -413,6 +413,11 @@ const SettingsSchema = z.object({
   delegationSecret: z.string().optional(),
   defaultFirstPartyMcpTools: EnvFirstPartyMcpTools,
   allowedFirstPartyMcpTools: EnvFirstPartyMcpTools,
+  // Deployment fact: the isolated artifact materializer workload runs and
+  // drains export jobs. Without it an export is queued forever, so the export
+  // tools leave the first-party ceiling. Helm sets this from
+  // artifactMaterializer.enabled.
+  artifactMaterializerDeployed: EnvBoolean.default(false),
   // sandbox workspace scoped stream-token HMAC secret (sandbox contract §C.3 / stream-token availability contract).
   // When unset, the API falls back to `delegationSecret` (the same HMAC envelope
   // family, `ogs_` vs `ogd_` prefix). REQUIRED-WHEN-DESKTOP, but the absence of
@@ -1757,10 +1762,7 @@ export function usableJevApiKey(settings: Pick<Settings, "jevApiKey">): string |
 
 /** Deployment half of agent configuration: hard capability limits. */
 export function agentConfigDeploymentPolicy(
-  settings: Pick<
-    Settings,
-    "webSearchEnabled" | "defaultFirstPartyMcpTools" | "allowedFirstPartyMcpTools"
-  >,
+  settings: FirstPartyMcpToolPolicySettings & Pick<Settings, "webSearchEnabled">,
 ): AgentConfigDeploymentLimits {
   return agentConfigDeploymentLimitsFromAllowlist(
     resolveFirstPartyMcpToolPolicy(settings).allowed,
@@ -3883,6 +3885,7 @@ export function getSettings(source: NodeJS.ProcessEnv = process.env): Settings {
     delegationSecret: optional("OPENGENI_DELEGATION_SECRET"),
     defaultFirstPartyMcpTools: optional("OPENGENI_DEFAULT_FIRST_PARTY_MCP_TOOLS"),
     allowedFirstPartyMcpTools: optional("OPENGENI_ALLOWED_FIRST_PARTY_MCP_TOOLS"),
+    artifactMaterializerDeployed: optional("OPENGENI_ARTIFACT_MATERIALIZER_DEPLOYED"),
     streamTokenSecret: optional("OPENGENI_STREAM_TOKEN_SECRET"),
     streamControlEnabled: optional("OPENGENI_STREAM_CONTROL_ENABLED"),
     workDiscoveryEnabled: optional("OPENGENI_WORK_DISCOVERY_ENABLED"),
@@ -4393,13 +4396,35 @@ export type FirstPartyMcpToolPolicy = {
   allowed: FirstPartyMcpToolNameType[];
 };
 
+export type FirstPartyMcpToolPolicySettings = Pick<
+  Settings,
+  "defaultFirstPartyMcpTools" | "allowedFirstPartyMcpTools" | "artifactMaterializerDeployed"
+>;
+
+const EDITABLE_ARTIFACT_EXPORT_TOOLS: readonly FirstPartyMcpToolNameType[] = [
+  "editable_artifact_export",
+  "editable_artifact_export_status",
+];
+
+/**
+ * First-party tools whose backing workload this deployment does not run. They
+ * are absent from the ceiling (never offered) and an explicit request for one
+ * is dropped rather than rejected: it is a deployment fact, not a caller error.
+ */
+export function deploymentUnavailableFirstPartyMcpTools(
+  settings: Pick<Settings, "artifactMaterializerDeployed">,
+): ReadonlySet<FirstPartyMcpToolNameType> {
+  return new Set(settings.artifactMaterializerDeployed ? [] : EDITABLE_ARTIFACT_EXPORT_TOOLS);
+}
+
 /** Resolve the deployment's session-tool defaults and hard execution ceiling. */
 export function resolveFirstPartyMcpToolPolicy(
-  settings: Pick<Settings, "defaultFirstPartyMcpTools" | "allowedFirstPartyMcpTools">,
+  settings: FirstPartyMcpToolPolicySettings,
 ): FirstPartyMcpToolPolicy {
+  const unavailable = deploymentUnavailableFirstPartyMcpTools(settings);
   const allowed = currentAgentLearningToolSelection(
     settings.allowedFirstPartyMcpTools ?? [...FIRST_PARTY_MCP_TOOL_NAMES],
-  ).filter((tool) => !isRetiredNativeAtlassianTool(tool));
+  ).filter((tool) => !isRetiredNativeAtlassianTool(tool) && !unavailable.has(tool));
   const allowedSet = new Set(allowed);
   const defaults = currentAgentLearningToolSelection(
     settings.defaultFirstPartyMcpTools ?? [...DEFAULT_FIRST_PARTY_MCP_TOOLS],
@@ -4412,7 +4437,7 @@ export function resolveFirstPartyMcpToolPolicy(
 
 /** Apply the deployment ceiling to an existing durable session selection. */
 export function allowedFirstPartyMcpToolsForSession(
-  settings: Pick<Settings, "defaultFirstPartyMcpTools" | "allowedFirstPartyMcpTools">,
+  settings: FirstPartyMcpToolPolicySettings,
   selected: readonly FirstPartyMcpToolNameType[] | null | undefined,
 ): FirstPartyMcpToolNameType[] {
   const policy = resolveFirstPartyMcpToolPolicy(settings);
