@@ -1,5 +1,11 @@
 # @opengeni/documents
 
+## 0.8.43
+
+### Patch Changes
+
+- @opengeni/db@6.7.1
+
 ## 0.8.42
 
 ### Patch Changes
