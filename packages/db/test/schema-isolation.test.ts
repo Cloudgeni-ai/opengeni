@@ -157,7 +157,6 @@ describe("embedded dedicated-schema isolation", () => {
           expectedRole: "opengeni_app",
           targetSchema: "opengeni",
           rlsStrategy: "force" as const,
-          organizationTenancyCanonicalActivationEnabled: true,
         };
         const posture = await inspectRuntimeDatabasePosture(sessionClient.db, postureOptions);
         expect(evaluateRuntimeDatabasePosture(posture, postureOptions)).toEqual([]);

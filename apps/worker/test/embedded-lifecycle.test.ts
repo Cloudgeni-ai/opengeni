@@ -839,7 +839,6 @@ describe("embedded worker lifecycle contract", () => {
     await expect(
       dbReadyCheck(embeddedDb(true), {
         ...options,
-        organizationTenancyCanonicalActivationEnabled: true,
       })(),
     ).resolves.toBeUndefined();
     await expect(dbReadyCheck(embeddedDb(false), options)()).resolves.toBeUndefined();

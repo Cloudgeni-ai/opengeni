@@ -967,7 +967,7 @@ describe("organization membership routes", () => {
     }
   }, 120_000);
 
-  test("exposes owner-managed private-session settings behind readiness", async () => {
+  test("exposes owner-managed private-session settings for every organization", async () => {
     if (!shared || !client || !app) return;
     const membershipResponse = await app.request("http://x/v1/organization-memberships", {
       headers: { cookie: "session=present" },
@@ -1022,20 +1022,10 @@ describe("organization membership routes", () => {
     expect(await initial.json()).toMatchObject({
       organizationId: accountId,
       enabled: false,
-      available: false,
+      // Universal session-tenancy activation (0611): no readiness receipt.
+      available: true,
       version: 0,
     });
-
-    const beforeReadiness = await app.request(endpoint, {
-      method: "PATCH",
-      headers: { cookie: "session=present", "content-type": "application/json" },
-      body: JSON.stringify({
-        enabled: true,
-        expectedVersion: 0,
-        operationId: crypto.randomUUID(),
-      }),
-    });
-    expect(beforeReadiness.status).toBe(409);
 
     const memberShapedRequest = await app.request(endpoint, {
       method: "PATCH",
@@ -1049,10 +1039,6 @@ describe("organization membership routes", () => {
     });
     expect(memberShapedRequest.status).toBe(422);
 
-    await shared.admin`
-      insert into session_tenancy_activations (
-        account_id, activation_version, inventory_digest, parity_digest, activated_by
-      ) values (${accountId}, 1, ${"3".repeat(64)}, ${"4".repeat(64)}, 'api-settings-test')`;
     const enabled = await app.request(endpoint, {
       method: "PATCH",
       headers: { cookie: "session=present", "content-type": "application/json" },

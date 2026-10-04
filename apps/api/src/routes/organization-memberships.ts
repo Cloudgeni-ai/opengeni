@@ -691,11 +691,6 @@ export function registerOrganizationMembershipRoutes(app: Hono, deps: ApiRouteDe
         ),
       );
     } catch (error) {
-      if (nestedPostgresSqlState(error) === "55000") {
-        throw new HTTPException(409, {
-          message: "private-session readiness is not activated for this organization",
-        });
-      }
       rethrowMembershipError(error);
     }
   });

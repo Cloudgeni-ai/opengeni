@@ -110,7 +110,6 @@ async function inventoryPostureViolations() {
     const options = {
       expectedRole: appRole,
       rlsStrategy: "force" as const,
-      organizationTenancyCanonicalActivationEnabled: true,
     };
     const posture = await inspectRuntimeDatabasePosture(client.db, options);
     return evaluateRuntimeDatabasePosture(posture, options).filter((message) =>

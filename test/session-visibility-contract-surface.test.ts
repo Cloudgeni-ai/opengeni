@@ -12,10 +12,11 @@ import { join } from "node:path";
 // literals, and a `session.visibility.changed` event type. The surrounding
 // database authority (owner derivation on insert, the capability-fenced direct
 // write guard, and the restrictive `session_visibility_isolation` policies) is
-// ACTIVE for organizations carrying the durable activation receipt. The first
-// public caller is deliberately narrow: one core application service reached
-// by the two HTTP routes and the framework-neutral SDK, with the activation-
-// gated web control using only that SDK boundary. Worker, MCP, runtime, React,
+// ACTIVE for every organization: maintenance migration 0611 retired the
+// per-organization activation receipt prerequisite. The first public caller is
+// deliberately narrow: one core application service reached by the two HTTP
+// routes and the framework-neutral SDK, with the web control using only that
+// SDK boundary. Worker, MCP, runtime, React,
 // cross-workspace, attachment, and personal-grant callers remain forbidden.
 // ---------------------------------------------------------------------------
 
@@ -131,10 +132,54 @@ describe("session visibility and fork product activation stays on its exact publ
       expect(posture).toContain(marker);
     }
     expect(adapter).toContain("const SESSION_TENANCY_ACTIVATION_VERSION = 1");
-    // One probe plus the exact version supplied to visibility transition, the
+    // The exact frozen protocol version supplied to visibility transition, the
     // base and runtime-configured fork paths, and both applied-fork receipt
-    // recovery paths.
-    expect(adapter.match(/\$\{SESSION_TENANCY_ACTIVATION_VERSION\}/gu)).toHaveLength(6);
+    // recovery paths. There is no activation probe since 0611.
+    expect(adapter.match(/\$\{SESSION_TENANCY_ACTIVATION_VERSION\}/gu)).toHaveLength(5);
+  });
+
+  test("no product path consults a per-organization activation receipt (0611)", async () => {
+    const migration = await readFile(
+      join(repo, "packages/db/drizzle/0611_universal_session_tenancy_activation.sql"),
+      "utf8",
+    );
+    expect(migration.startsWith("-- deployment-mode: maintenance\n")).toBe(true);
+    for (const routine of [
+      "session_tenancy_product_activated(uuid,integer)",
+      "session_tenancy_any_product_activation()",
+      "list_self_user_resource_authorities(uuid,uuid,text,uuid,integer)",
+      "issue_self_user_resource_grant(uuid,uuid,uuid,text,text,text,uuid,integer,boolean)",
+      "revoke_self_user_resource_grant(uuid,uuid,uuid)",
+      "accept_turn_personal_resource_attachment(uuid,uuid,uuid,uuid,text,integer,boolean,integer)",
+    ]) {
+      expect(migration).toContain(routine);
+    }
+    const roots = [
+      "apps/api/src",
+      "apps/worker/src",
+      "apps/web/src",
+      "packages/core/src",
+      "packages/db/src",
+      "packages/runtime/src",
+      "packages/sdk/src",
+      "packages/react/src",
+      "scripts",
+    ];
+    for (const root of roots) {
+      for (const file of await sourceFiles(root)) {
+        const content = await readFile(join(repo, file), "utf8");
+        for (const marker of [
+          "sessionTenancyProductActivated",
+          "select session_tenancy_any_product_activation()",
+          "organizationTenancyCanonicalActivationEnabled",
+        ]) {
+          expect(
+            content.includes(marker),
+            `${file} must not gate on per-organization session-tenancy activation (${marker})`,
+          ).toBe(false);
+        }
+      }
+    }
   });
 
   test("the two authorization operations are enforced only by core and the HTTP classifier", async () => {

@@ -475,8 +475,9 @@ be verified separately from core private-session access.
 
 An organization-admin backend may read and update
 `/v1/organizations/:organizationId/private-session-settings` with its organization
-key (`workspace:admin`), without a browser login or synthetic membership. Enabling
-the setting still requires platform readiness. Updates require `expectedVersion`
+key (`workspace:admin`), without a browser login or synthetic membership. Every
+organization is session-tenancy activated (migration 0611), so enabling needs no
+separate platform readiness. Updates require `expectedVersion`
 and `operationId`; retries preserve their result and recheck live key authority.
 This product setting grants no private-session access: create and use sessions
 through the intended user's `asUser` context.

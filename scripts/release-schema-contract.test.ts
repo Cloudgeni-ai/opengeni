@@ -2387,6 +2387,7 @@ describe("release schema contract", () => {
       "0608_receiver_execution_context.sql",
       "0609_captured_command_output_priority.sql",
       "0610_artifact_catalog_pins.sql",
+      "0611_universal_session_tenancy_activation.sql",
     ].filter((path) =>
       unfilteredSourceContract.migrations.some((migration) => migration.path === path),
     );

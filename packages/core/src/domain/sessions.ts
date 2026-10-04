@@ -182,7 +182,6 @@ import {
   SessionToolPolicyVersionConflictError,
   SessionCreateIdempotencyConflictError,
   PersonalResourceAttachmentAcceptanceError,
-  sessionTenancyProductActivated,
   workspaceControlRequestLockTimeoutMs,
   WorkspaceControlBusyError,
   type SessionCommandActor,
@@ -325,11 +324,6 @@ async function requireAtomicPersonalResourceAttachment(
     throw new HTTPException(403, {
       message: "Personal resources require the owning managed-human session.",
       cause: error,
-    });
-  }
-  if (!(await sessionTenancyProductActivated(deps.db, workspaceId))) {
-    throw new HTTPException(409, {
-      message: "Session tenancy is not activated for this organization.",
     });
   }
   if (existingSession && intent.expectedAuthorityEpoch === undefined) {

@@ -72,9 +72,10 @@ test("organization admin keys manage private-session settings without a human me
     });
   const initial = await app.request(endpoint, { headers });
   expect(initial.status).toBe(200);
+  // Every organization is session-tenancy activated (0611): no receipt is needed.
   expect(await initial.json()).toMatchObject({
     enabled: false,
-    available: false,
+    available: true,
     version: 0,
   });
   expect(
@@ -86,9 +87,6 @@ test("organization admin keys manage private-session settings without a human me
     expectedVersion: 0,
     operationId: crypto.randomUUID(),
   };
-  expect((await patch(operation)).status).toBe(409);
-  await shared.admin`insert into session_tenancy_activations (account_id, activation_version, inventory_digest, parity_digest, activated_by)
-    values (${account!.id}, 1, ${"3".repeat(64)}, ${"4".repeat(64)}, 'private-session-admin-test')`;
   const enabled = await patch(operation);
   expect(enabled.status).toBe(200);
   const result = await enabled.json();
