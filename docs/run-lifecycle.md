@@ -992,6 +992,14 @@ of 10 s / 20 s / 40 s / 60 s / 120 s (`PROVIDER_RATE_LIMIT_BACKOFF_MS`). Without
 the floor, a one-second hint on a per-minute token limit spends every automatic
 recovery before the window resets. Other retryable classes keep their existing
 pacing.
+Ordinary model rate-limit, provider-unavailable and upstream-connectivity
+recoveries add positive-only random spread (up to 20% of the selected delay,
+capped at 5 s). The worker samples this once when settling the attempt; the
+returned delay and durable recovery event use the same value. Provider retry
+hints remain a lower bound. Subscription capacity waits retain their separate
+workflow jitter. Worker-owned main, compaction and title clients disable hidden
+OpenAI SDK retries before client resolution; the durable worker recovery budget
+owns retries. Standalone runtime clients retain `openaiMaxRetries`.
 An exhausted API-key provider quota is not a rate limit and is never retried:
 a daily or monthly allowance (OpenRouter `free-models-per-day`, requests or
 tokens per day), a used-up quota (`insufficient_quota`, "exceeded your current
@@ -1061,6 +1069,18 @@ Every Steer commits a control wake revision, including when
 the recovering turn has no live attempt. A later coalesced Send cannot downgrade
 it to an ordinary queue signal, so the workflow interrupts the hold and processes
 the new direction immediately.
+
+Provider recovery telemetry records structural provider/model/cause labels:
+`opengeni_model_recovery_total` distinguishes scheduled, recovered and exhausted
+observations; `opengeni_model_recovery_delay_seconds` records scheduled waits;
+`opengeni_model_recovery_duration_seconds` records elapsed episodes through the
+first successful response, committed context compaction, or exhaustion,
+including preparation and request time. The start timestamp survives worker
+replacement in turn metadata and is cleared with the successful response or
+compaction checkpoint. Skipped compaction does not close recovery. These are
+operational observations, not billing or exactly-once audit counters. They include classified
+HTTP-200 stream failures rather than treating HTTP acceptance as model success.
+No request text, provider error detail, credential or session identity is a label.
 
 Codex-subscription turns add one explicit recovery boundary before the model
 run. The worker always selects and leases a credential atomically under the

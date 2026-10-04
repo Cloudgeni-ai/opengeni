@@ -1975,7 +1975,14 @@ describe("API component integration", () => {
       }),
     });
     expect(rejectedTurn.status).toBe(402);
-    expect(await rejectedTurn.text()).toContain("insufficient OpenGeni credits");
+    expect(await rejectedTurn.json()).toMatchObject({
+      error: {
+        status: 402,
+        code: "payment_required",
+        message: expect.stringMatching(/^insufficient \S+ credits$/),
+        retryable: false,
+      },
+    });
     const preserved = await app.request(
       workspacePath(ownerWorkspaceId, `/files/${upload.fileId}`),
       {
@@ -2155,7 +2162,14 @@ describe("API component integration", () => {
       },
     );
     expect(triggered.status).toBe(402);
-    expect(await triggered.text()).toContain("insufficient OpenGeni credits");
+    expect(await triggered.json()).toMatchObject({
+      error: {
+        status: 402,
+        code: "payment_required",
+        message: expect.stringMatching(/^insufficient \S+ credits$/),
+        retryable: false,
+      },
+    });
   });
 
   test("static usage limits enforce operator caps without Better Auth or Stripe", async () => {
