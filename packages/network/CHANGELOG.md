@@ -1,5 +1,11 @@
 # @opengeni/network
 
+## 0.3.2
+
+### Patch Changes
+
+- 3cc26b5: Identify the default pinned HTTP client with a User-Agent, preserve caller overrides, and show retryable MCP sign-in discovery failures in connection setup.
+
 ## 0.3.1
 
 ### Patch Changes

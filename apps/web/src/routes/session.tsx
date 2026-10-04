@@ -46,6 +46,7 @@ import {
   type TimelineSearchTarget,
 } from "@opengeni/react/session-ui";
 import type { SessionSearchRoute } from "@/lib/session-search-route";
+import { OPEN_CONVERSATION_FIND_EVENT } from "@/lib/conversation-find-event";
 import { expireArtifactCatalog } from "@/lib/artifact-catalog-cache";
 import {
   creditExhaustedFromEvents,
@@ -75,7 +76,6 @@ import {
   MenuIcon,
   MessagesSquareIcon,
   PanelsTopLeftIcon,
-  SearchIcon,
   XIcon,
 } from "lucide-react";
 import {
@@ -1656,8 +1656,12 @@ function SessionChatPane(props: {
   const [findMounted, setFindMounted] = useState(!!props.searchTarget.find);
   const [findFocusRevision, setFindFocusRevision] = useState(0);
   const [activeSearchTarget, setActiveSearchTarget] = useState<TimelineSearchTarget | null>(null);
-  const findButton = useRef<HTMLButtonElement>(null);
+  // Find opens from the session header (or Ctrl/Cmd+F); closing returns focus
+  // to whatever opened it.
+  const findReturnFocus = useRef<HTMLElement | null>(null);
   const openFind = useCallback(() => {
+    const active = document.activeElement;
+    if (active instanceof HTMLElement && active !== document.body) findReturnFocus.current = active;
     setFindMounted(true);
     setFindOpen(true);
     setFindFocusRevision((value) => value + 1);
@@ -1669,8 +1673,23 @@ function SessionChatPane(props: {
     setFindOpen(false);
     setActiveSearchTarget(null);
     onSearchOriginConsumed();
-    requestAnimationFrame(() => findButton.current?.focus({ preventScroll: true }));
+    requestAnimationFrame(() => {
+      // Back to whatever opened Find, else the header's Find button when shown.
+      const opener = findReturnFocus.current;
+      findReturnFocus.current = null;
+      const trigger = document.querySelector<HTMLElement>("[data-conversation-find-trigger]");
+      const target = opener?.isConnected
+        ? opener
+        : trigger && trigger.getClientRects().length > 0
+          ? trigger
+          : null;
+      target?.focus({ preventScroll: true });
+    });
   }, [onSearchOriginConsumed]);
+  useEffect(() => {
+    document.addEventListener(OPEN_CONVERSATION_FIND_EVENT, openFind);
+    return () => document.removeEventListener(OPEN_CONVERSATION_FIND_EVENT, openFind);
+  }, [openFind]);
   useEffect(() => {
     if (props.searchTarget.find) openFind();
   }, [
@@ -2823,21 +2842,6 @@ function SessionChatPane(props: {
       enabled={!terminal && context.clientConfig.fileUploads.enabled === true}
       onFiles={attachments.addFiles}
     >
-      <div className="flex shrink-0 justify-end px-3 py-1">
-        <Button
-          ref={findButton}
-          type="button"
-          variant="ghost"
-          size="sm"
-          onClick={openFind}
-          aria-label="Find in conversation"
-          title="Find in conversation (Ctrl/Cmd+F)"
-          className="text-xs text-fg-muted"
-        >
-          <SearchIcon className="size-3.5" />
-          Find
-        </Button>
-      </div>
       {findMounted ? (
         <Suspense fallback={null}>
           <ConversationFind

@@ -177,7 +177,7 @@ export function DeveloperSetupStep({
       setPromptCopied(true);
     } else {
       toast.error("Couldn't copy the prompt", {
-        description: "Open Preview the prompt and copy it by hand.",
+        description: "Expand “Preview the prompt” below and copy it from there.",
       });
     }
   }

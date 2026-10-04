@@ -3046,6 +3046,8 @@ export type ScheduledTaskAgentConfig = {
   /** Agent configuration for every generated session; omitted keeps legacy behavior. */
   agent?: AgentConfigRequest | undefined;
   connectionAccounts?: McpConnectionAccountSelection[] | undefined;
+  /** Read-only: the complete accepted account set, including an empty set. */
+  connectionAccountsFrozen?: true | undefined;
   knowledgeSource?: Extract<ScheduledTaskAction, { kind: "knowledge_source_sync" }> | undefined;
   bundledSkillIds?: BundledSkillId[] | undefined;
   prompt: string;
@@ -8304,7 +8306,7 @@ export type InsightsSpendDriver = {
 
 export type InsightsProjectRow = {
   id: string;
-  kind: "project" | "other" | "unfiled" | "unavailable";
+  kind: "project" | "other" | "unfiled" | "unavailable" | "deleted";
   label: string;
   projects: number;
   rootSessions: number;

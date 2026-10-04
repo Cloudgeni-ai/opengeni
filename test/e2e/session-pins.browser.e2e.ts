@@ -2005,6 +2005,9 @@ describe("session pins browser e2e (real API + non-superuser PostgreSQL)", () =>
     });
     const page = await context.newPage();
     try {
+      // Keep this search/cursor fixture in one Today bucket. Date is fixed,
+      // but real timers and polling still run; midnight is a different query.
+      await page.clock.setFixedTime(new Date());
       await page.goto(webBaseUrl);
       await workspaceFromPage(page, "Last activity");
       // Isolate browse pagination without relying on the retired inline filter.
@@ -3501,17 +3504,14 @@ describe("session pins browser e2e (real API + non-superuser PostgreSQL)", () =>
     await page.goto(`${webBaseUrl}/workspaces/${workspaceId}/sessions/${target.id}`);
     // Wait for the session shell before sampling React commits — a cold goto can
     // read the probe at 0 before the first paint registers.
-    await page
-      .locator("header")
-      .getByRole("button", { name: "Pin session", exact: true })
-      .waitFor();
+    // Phones pin from the header's "…" menu.
+    const more = page.locator("header").getByRole("button", { name: "More session actions" });
+    await more.waitFor();
     const initialCommits = await reactCommitCount(page);
     expect(initialCommits).toBeGreaterThan(0);
-    await page.locator("header").getByRole("button", { name: "Pin session", exact: true }).click();
-    await page
-      .locator("header")
-      .getByRole("button", { name: "Unpin session", exact: true })
-      .waitFor();
+    await more.click();
+    await page.getByRole("menuitem", { name: "Pin", exact: true }).click();
+    await page.getByText("Session pinned.").waitFor({ state: "attached" });
     expect((await reactCommitCount(page)) - initialCommits).toBeLessThanOrEqual(64);
 
     // Stress the compact pinned section with many long rows through the normal
@@ -3530,20 +3530,18 @@ describe("session pins browser e2e (real API + non-superuser PostgreSQL)", () =>
     // the responsive assertion from a fresh server projection instead of
     // racing the rail's 15-second background reconciliation interval.
     await page.reload();
-    await page
-      .locator("header")
-      .getByRole("button", { name: "Unpin session", exact: true })
-      .waitFor();
+    await more.click();
+    await page.getByRole("menuitem", { name: "Unpin", exact: true }).waitFor();
+    await page.keyboard.press("Escape");
 
     for (const viewport of mobileViewports) {
       await page.setViewportSize(viewport);
       for (const theme of ["light", "dark"] as const) {
         await setTheme(page, theme);
         await expectNoPageOverflow(page);
-        const pin = page.locator("header").getByRole("button", { name: /^(Pin|Unpin) session$/ });
         const inspector = page.getByRole("button", { name: /^(Open|Hide) workspace$/ });
         const hamburger = page.getByRole("button", { name: "Open navigation" });
-        for (const control of [pin, inspector, hamburger]) {
+        for (const control of [more, inspector, hamburger]) {
           const box = await control.boundingBox();
           expect(box?.width ?? 0).toBeGreaterThanOrEqual(44);
           expect(box?.height ?? 0).toBeGreaterThanOrEqual(44);

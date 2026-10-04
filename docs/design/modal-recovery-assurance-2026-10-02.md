@@ -108,6 +108,34 @@ failures; partial EOF and output; worker restart; concurrent router users;
 deadline rotation; and owner cancellation. Every test must count physical
 Starts/writes and verify durable session progress, not only a nonfailed status.
 
+## October 4 private host-transport groundwork
+
+`packages/core/src/application/modal-native-worker-host-transport.ts` is an
+unused internal transport helper, not an active recovery path or custody issuer.
+Its `ogmnp2_` envelope binds the exact body SHA-256, full original V2 scope,
+configuration/grant references, action and request ID to a separately derived
+HMAC-SHA256 subkey and message domain. Capture/reconciliation/settlement intents
+also bind the exact claim, nonce, record/claim revisions, capture and acquisition.
+Only an explicitly configured deployment `delegationSecret` selects its root;
+ordinary delegated tokens, access-key substitution and the fixed local/test
+fallback are excluded. No token, key or derived key is persisted or returned.
+
+The 60-second envelope lifetime bounds transport only, not original custody.
+Verification authenticates a previously signed host request, not its named
+human, live origin, grant, configuration, native page or physical settlement.
+A future narrow host authorizer must independently recheck these source joins,
+current expiry and action-specific CAS. The helper is not a public core entry
+and has no production consumer, database writer or provider caller. Root disposal
+is only in-memory key disposal; waiter rejection, claim expiry and transport
+timeout cannot release an acquisition or a physical writer. Actual underlying
+namespace/access/read/poll promises must remain counted until all settle.
+
+Raw request bytes are bounded, copied through native typed-array getters and
+hashed without caller getters or shared-memory backing. Signing inputs are
+strict, own-data JSON; malformed values return fixed errors. These checks do
+not replace authenticated provider acquisition or lost-COMMIT-ACK reconciliation.
+The earlier audit and all remaining continuity requirements above are unchanged.
+
 ## Evidence and ownership
 
 Before changes, 137 installed-SDK/native fault tests passed across eight files,
@@ -118,3 +146,36 @@ Final validation is recorded in the implementing PR.
 The implementing PR records the focused correction's validation and ownership.
 Durable eventual continuity is tracked separately from the existing rollout and
 live capture diagnosis. The DNS root-cause investigation also remains separate.
+
+## Dormant explicit original-read transport, October 4, 2026
+
+`packages/runtime/src/sandbox/providers/modal-original-read-wire.ts` adds only a
+private, unwired transport building block. The installed Modal 0.9.0 constructor
+reads ambient profile/endpoint settings even with an explicit pair; its advertised
+endpoint parameter is not applied, and an empty environment leaves ambient
+selection intact. The new narrow grpc-js/protobuf projection instead owns the
+explicit sampled pair and HTTPS channel. It uses explicit Node bundled trust
+roots (or isolated test roots), not grpc's ambient root-file override. This TLS
+policy and endpoint must be included in any future protected configuration
+capture; neither the transport nor a copied snapshot establishes that capture.
+
+The sole wire methods are `AuthTokenGet`, `WorkspaceNameLookup` and
+`TaskGetCommandRouterAccess`, pinned to the installed SDK source. Each local
+observation has one bounded auth/read chain, no retry, and no token-refresh
+background task. The namespace result retains whether the actual response used
+`workspaceName` or `username`; neither is relabelled as an immutable principal.
+Environment selection is retained in the snapshot but these RPCs do not send it.
+Router credentials stay ephemeral. Errors omit provider details and causes.
+
+Cancellation requests abort the exact underlying RPC; only its actual callback
+settles the promise. The single local observation slot remains held until that
+chain settles, and close joins it before closing the owned channel. These facts
+describe local observation I/O, not provider-process exit, another writer's
+quiescence, a committed capture or permission to resume a helper.
+
+There is no production caller, new public sandbox export, SDK patch, compiler
+change or database activation. Canonical authenticated host issuance, protected
+original configuration/equality/grant joins, genuine opaque acquisitions and
+atomic once-binding/capture ingress remain required before integration. This
+building block alone does not address readiness timeout, exhausted recovery,
+closed-original continuation or any of the four continuity requirements above.

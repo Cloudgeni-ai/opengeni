@@ -83,6 +83,11 @@ choices retain the schedule's captured authority. Keep message edits narrow and
 retargeting server-owned, with execution-digest checks for concurrent edits.
 See `docs/scheduled-task-access.md`.
 
+Temporal schedule synchronization and deletion share a per-schedule lock across
+API replicas. Read current desired state inside it, keep failed-write
+compensation under the same lock, and restore only the unchanged saved task.
+Never interpret a transport timeout as a known remote outcome.
+
 Fresh local checkouts leave Connected Machines disabled. An explicit
 `OPENGENI_SANDBOX_SELFHOSTED_ENABLED=true` enables self-initializing enrollment,
 NATS auth-callout and the local relay. Its cold build completes before application
@@ -270,6 +275,7 @@ disabled tools or grant execution outside the current catalog.
 - OpenAI Agents SDK execution happens inside non-retryable worker activities.
 - Agent activities are side-effectful. Do not add automatic Temporal retries around full agent turns unless each model/tool/sandbox boundary has been made idempotent.
 - Structured PostgreSQL outages during execution use exact-attempt DB-only recovery, never `turn.failed` or automatic replay of ambiguous writes/tools. Preserve writer quiescence and frozen turn authority; see `docs/run-lifecycle.md`.
+- Native Modal custody-proof transport is a separate private worker-host purpose, never ordinary service/agent delegation. Its MAC authenticates request bytes only; live original-human/grant/config/claim joins and physical-I/O settlement remain independent. Missing an explicitly configured deployment delegation root is OFF, not local/access-key fallback. See `docs/design/modal-recovery-assurance-2026-10-02.md`.
 - Live agent session authority is capability-first. An exact current agent attempt may read, message, and control peer workspace sessions; parent/child lineage is not an access deny. Slack-private stays same-root for agents, and `user_private` still requires the initiating human as owner. An agent cannot Steer itself. Goal tools stay self-only. A live attempt may answer another session's structured human-input request (`session_human_input_respond`, `session.human_input.write`) but `session.approval.write` is denied to every agent attempt: tool approvals stay human-only. Compact `sessions_list` discovery still validates the live attempt. An optional embedding-host callback may narrow access; it cannot grant a private session OpenGeni denied. See `docs/agent-session-authority.md`.
 - **Agent access scope is one seam and never widens.** Every session freezes `agentAccess` (`session` | `user` | `workspace`, raw default `workspace`), an optional opaque `endUser: { source, id }` label, and `memoryScope`; children inherit and may only narrow, and `endUser` is a label (list filter), never a principal. `requireSessionAuthorization` plus `SessionAuthorizationListScope.agentAccessViewer` are the only places the rule lives: own tree always allowed, most restrictive side wins for peers. A child never widens `firstPartyMcpTools`, `firstPartyMcpPermissions`, access, label, or memory scope; an agent attempt cannot widen a parentless session through `PUT /tool-policy`; an agent-created scheduled task freezes the creator policy (migration 0428) for every session it generates, and only its owner's signed-in `refresh-access` re-freezes its tools and permissions, within that person's grants and never through an agent (see `docs/scheduled-task-access.md`); the Codemode SDK proxy derives its token permissions from the selected tools and `siteSessionPath` is an explicit allowlist without tool-policy/visibility/fork/steer/control; a session-scoped grant without a `firstPartyMcpTools` claim registers nothing. Adding a session-read route or target-session MCP tool requires updating `test/session-agent-access-contract-surface.test.ts` deliberately. Human visibility stays a separate axis, so organization API keys (including `access: "read"` keys and `GET /v1/organizations/:id/sessions`) still read every shared-workspace session.
 - Advisory work discovery never becomes authority. Apply tenancy/private-session rules, exact attempt validation, Slack-private scope, and optional host list narrowing before lifecycle filters, title/active-goal/typed-claim matching, ranking, counts, cursors, or ancestor expansion. Never search `initialMessage`, instructions, resources, tools, files, or full history. Work claims are bounded, durable, non-exclusive evidence with exact-attempt CAS/idempotency and lifecycle settlement; they do not lock, reserve, reassign, authorize, cancel, steer, message, or require a search. Preserve the literal `advisoryOnly` and `noAdditionalAccess` projection facts, keep automatic nudges off until separately reviewed, and use the independent rollout switches instead of deleting evidence or rolling back migrations. See `docs/work-discovery.md`.
@@ -381,6 +387,13 @@ membership/grants or invent a principal to make admission succeed. See
 `docs/run-lifecycle.md` for snapshot fencing and mixed-worker rollout limits.
 
 ## Pull-request delivery across moving `main`
+
+The workflow-wake reaper repairs authentic pending child terminal results for
+idle goalless parents behind fully acknowledged wake debt. Its bounded global
+identity selector is only discovery: scoped repair revalidates effective Pause,
+child-parent producer linkage, ownership and both writer gates before atomic
+queue/wake registration. Completed/paused goals remain settled; no child work
+or provider operation is replayed. See `docs/durable-agent-inputs.md`.
 
 Accepted model policies may tolerate additive latency modes and input modalities
 only by reconstructing the exact historical subset digest. Preserve the frozen

@@ -31,6 +31,7 @@ import type {
 import { GOOGLE_DRIVE_PUBLICATION_SERVER_ID } from "@opengeni/contracts/google-drive";
 import { PERSONAL_GITHUB_CONNECTION_SURFACE_ID } from "@opengeni/contracts/personal-github";
 import { mergeResourceRefs } from "@opengeni/contracts";
+import { connectionAccountChoices } from "@/components/capabilities/session-connection-accounts";
 import type { ScheduledTask, ScheduledTaskRun, ScheduledTaskScheduleSpec, Session } from "@/types";
 
 /** Agent learning overrides sent with an edit (not in the SDK's update type yet). */
@@ -340,6 +341,37 @@ export function scheduleInheritsChatSettings(
     task.runMode === "existing_session" ||
     (task.runMode === "reusable_session" && Boolean(task.reusableSessionId))
   );
+}
+
+/** Newly enabled connectors can use their displayed defaults; other groups keep their saved set. */
+export function scheduleConnectionAccountIntent(input: {
+  saved: McpConnectionAccountSelection[];
+  frozen: boolean;
+  initialServerIds: string[];
+  selectedServerIds: string[];
+  editedServerIds: string[];
+  destinationChanged: boolean;
+  toolsChanged: boolean;
+}) {
+  const prior = new Set(input.initialServerIds);
+  const newlySelected = new Set(
+    input.destinationChanged || input.toolsChanged
+      ? input.selectedServerIds.filter((id) => !prior.has(id))
+      : [],
+  );
+  const changedServerIds = [...new Set([...input.editedServerIds, ...newlySelected])];
+  const choices = connectionAccountChoices(input.saved);
+  if (input.frozen) {
+    for (const id of input.selectedServerIds) {
+      if (!newlySelected.has(id) && choices[id] === undefined) choices[id] = [];
+    }
+  }
+  return {
+    choices,
+    changedServerIds,
+    // A move must also discard selections the destination cannot use.
+    changed: input.destinationChanged || changedServerIds.length > 0,
+  };
 }
 
 /** Retain unshown choices only where the destination can still use them. */

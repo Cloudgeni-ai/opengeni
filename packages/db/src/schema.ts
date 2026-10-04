@@ -8586,6 +8586,9 @@ export const sessionSystemUpdates = pgTable(
     pendingKindSource: index("session_system_updates_pending_kind_source_idx")
       .on(table.workspaceId, table.sessionId, table.kind, table.sourceId)
       .where(sql`${table.state} = 'pending'`),
+    pendingTerminalRepair: index("session_system_updates_pending_terminal_repair_idx")
+      .on(table.workspaceId, table.sessionId, table.sourceId, table.dedupeKey)
+      .where(sql`${table.state} = 'pending' and ${table.kind} = 'child_terminal_result'`),
     onePendingSteer: uniqueIndex("session_system_updates_one_pending_steer_idx")
       .on(table.workspaceId, table.sessionId)
       .where(sql`${table.kind} = 'agent_steer_instruction' and ${table.state} = 'pending'`),

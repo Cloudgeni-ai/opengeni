@@ -83,7 +83,12 @@ function flush(): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, 20));
 }
 
-async function render(channelId = "", onChange = mock(() => {}), active = true) {
+async function render(
+  channelId = "",
+  onChange = mock(() => {}),
+  active = true,
+  options: { connectionId?: string; connectionLocked?: boolean } = {},
+) {
   const container = document.createElement("div");
   document.body.append(container);
   const root = createRoot(container);
@@ -91,7 +96,8 @@ async function render(channelId = "", onChange = mock(() => {}), active = true) 
     root.render(
       <ScheduleSlackPosting
         workspaceId={WORKSPACE_ID}
-        connectionId=""
+        connectionId={options.connectionId ?? ""}
+        connectionLocked={options.connectionLocked}
         channelId={channelId}
         disabled={false}
         active={active}
@@ -136,6 +142,90 @@ async function openChannelMenu(container: HTMLElement): Promise<HTMLButtonElemen
 }
 
 describe("ScheduleSlackPosting", () => {
+  test("a materialized chat without a bot cannot offer an impossible posting choice", async () => {
+    const { container, onChange, root } = await render(
+      "",
+      mock(() => {}),
+      true,
+      { connectionLocked: true },
+    );
+    expect(container.textContent).toContain("This schedule's chat has no Slack bot");
+    expect(container.querySelector('[role="combobox"]')).toBeNull();
+    expect(listScheduledTaskSlackChannels).not.toHaveBeenCalled();
+    expect(onChange).not.toHaveBeenCalled();
+    await act(async () => {
+      root.render(
+        <ScheduleSlackPosting
+          workspaceId={WORKSPACE_ID}
+          connectionId=""
+          channelId=""
+          disabled={false}
+          active
+          connectionLocked={false}
+          onChange={onChange}
+        />,
+      );
+      await flush();
+    });
+    await act(flush);
+    expect(container.querySelectorAll('[role="combobox"]')).toHaveLength(1);
+    expect(listScheduledTaskSlackChannels).toHaveBeenCalledWith(WORKSPACE_ID, BOT_ID, undefined);
+    await act(async () => root.unmount());
+  });
+
+  test("a materialized chat can change its channel while keeping its bot", async () => {
+    listConnections.mockImplementationOnce(async () => [
+      botConnection(),
+      {
+        ...botConnection(),
+        id: "44444444-4444-4444-8444-444444444444",
+        metadata: {
+          ...botConnection().metadata,
+          slackTeamId: "T0TEAM02",
+          slackTeamName: "Second example team",
+        },
+      },
+    ]);
+    const { container, onChange, root } = await render(
+      "C0SCHED01",
+      mock(() => {}),
+      true,
+      {
+        connectionId: BOT_ID,
+        connectionLocked: true,
+      },
+    );
+    expect(container.querySelectorAll('[role="combobox"]')).toHaveLength(1);
+    expect(container.textContent).toContain("Slack workspace");
+    expect(container.textContent).toContain("Example team · OpenGeni");
+    expect(container.textContent).not.toContain("Second example team");
+    await openChannelMenu(container);
+    await act(async () => {
+      document.querySelectorAll<HTMLElement>('[role="option"]')[2]!.click();
+      await flush();
+    });
+    expect(onChange).toHaveBeenCalledWith({ connectionId: BOT_ID, channelId: "G0PRIVATE1" });
+    await act(async () => root.unmount());
+  });
+
+  test("a materialized chat identifies an unavailable stored bot instead of naming another workspace", async () => {
+    listConnections.mockImplementationOnce(async () => []);
+    const { container, root } = await render(
+      "C0SCHED01",
+      mock(() => {}),
+      true,
+      {
+        connectionId: BOT_ID,
+        connectionLocked: true,
+      },
+    );
+    expect(container.textContent).toContain("Slack workspace");
+    expect(container.textContent).toContain("The selected bot is unavailable");
+    expect(container.textContent).not.toContain("Example team");
+    expect(container.querySelectorAll('[role="combobox"]')).toHaveLength(1);
+    await act(async () => root.unmount());
+  });
+
   test("a person picks one bot channel; the only bot is used implicitly", async () => {
     const { container, onChange, root } = await render();
     expect(container.textContent).toContain("Post to Slack");

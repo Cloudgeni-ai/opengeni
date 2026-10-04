@@ -740,6 +740,7 @@ import {
 
 export { sql as dbSql } from "drizzle-orm";
 export * from "./child-lifecycle-notices";
+export * from "./child-terminal-wake-repair";
 export { configureCodeSearchDeploymentPolicy } from "./code-search-policy";
 export { listRecentSessionRepositoryResources } from "./recent-session-repositories";
 export * from "./session-control";
@@ -70783,6 +70784,12 @@ function systemUpdatesCanCoalesceForExecution<T extends BoundedSystemUpdate>(
   ) {
     return false;
   }
+  // Steer has first refusal on a batch. Its own caller's messages remain
+  // compatible context, but another caller cannot borrow that command identity.
+  if (first.kind === "agent_steer_instruction" && candidate.kind === "agent_message") {
+    const actor = agentCommandCausalActor(first);
+    return actor !== null && stableJson(actor) === stableJson(agentCommandCausalActor(candidate));
+  }
   // Null is compatible context (for example an ordinary notice riding with a
   // goal continuation). Once a batch contains frozen causal execution, every
   // further authority-bearing member must have equivalent inherited authority.
@@ -70844,6 +70851,17 @@ function internalUpdateEventMember(update: BoundedSystemUpdate) {
   return payload.success && payload.data.type === "media_generation_result"
     ? { ...preview, result: payload.data }
     : preview;
+}
+
+function systemUpdatesInModelOrder<T extends Pick<BoundedSystemUpdate, "kind">>(
+  updates: readonly T[],
+): T[] {
+  // Selection gives Steer first refusal; model context puts the replacement
+  // direction last so an older notice cannot override it.
+  return [
+    ...updates.filter((update) => update.kind !== "agent_steer_instruction"),
+    ...updates.filter((update) => update.kind === "agent_steer_instruction"),
+  ];
 }
 
 function selectBoundedSystemUpdateBatch<T extends BoundedSystemUpdate>(
@@ -72603,15 +72621,7 @@ export async function claimSessionWorkForAttempt(
               event: null,
             };
           }
-          // Inclusion gives the newest Steer first refusal on the bounded
-          // batch. Model ordering is deliberately the opposite: ordinary
-          // updates establish context, then the authoritative replacement
-          // direction is last so it cannot be overridden by an older goal or
-          // lifecycle notice.
-          const modelOrdered = [
-            ...deliverable.filter((update) => update.kind !== "agent_steer_instruction"),
-            ...deliverable.filter((update) => update.kind === "agent_steer_instruction"),
-          ];
+          const modelOrdered = systemUpdatesInModelOrder(deliverable);
           const historyItemId = crypto.randomUUID();
           const historyItem = sessionSystemUpdateBatchHistoryItem(
             modelOrdered.map((update) => mapSessionSystemUpdate(update)),
@@ -72822,7 +72832,9 @@ export async function claimSessionWorkForAttempt(
                   historyItemOverride ??
                     (goalSnapshot
                       ? sessionSystemUpdateBatchHistoryItem(
-                          delivered.updates.map((update) => mapSessionSystemUpdate(update)),
+                          systemUpdatesInModelOrder(delivered.updates).map((update) =>
+                            mapSessionSystemUpdate(update),
+                          ),
                           goalSnapshot,
                           { deliveredAt: delivered.deliveredAt },
                         )
@@ -84248,7 +84260,9 @@ export async function addSessionSystemUpdateWithSourceMutation<
         // already-failed parent is settled authority and cannot be restarted
         // solely by a late child. An active session-level input wait is also an
         // explicit durable obligation, independent of whether the session has
-        // a goal, so an immediate child result may wake it.
+        // a goal, so an immediate child result may wake it. A parent with no
+        // goal at all (an ordinary chat that started a worker and promised its
+        // result) is woken by the child's terminal result.
         const waitingForInput =
           childLifecycleKind &&
           session.status !== "failed" &&
@@ -84256,7 +84270,10 @@ export async function addSessionSystemUpdateWithSourceMutation<
             .disposition === "held";
         const childNoticeMayWake =
           !childLifecycleKind ||
-          (session.status !== "failed" && (goalStatus === "active" || waitingForInput));
+          (session.status !== "failed" &&
+            (goalStatus === "active" ||
+              waitingForInput ||
+              (input.kind === "child_terminal_result" && goalStatus === null)));
         const shouldWake =
           !consumedByParentRead &&
           wakeClass === "immediate" &&

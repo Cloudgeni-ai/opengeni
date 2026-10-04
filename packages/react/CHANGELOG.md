@@ -1,5 +1,55 @@
 # @opengeni/react
 
+## 7.8.1
+
+### Patch Changes
+
+- Updated dependencies [627ff68]
+  - @opengeni/sdk@7.8.1
+
+## 7.8.0
+
+### Minor Changes
+
+- 692a1f5: Show models by their clean display name and maker logo outside model settings. Add `modelDisplayName`/`modelVendor` (`@opengeni/sdk/model-display`) and `ModelName`/`ModelMark` (`@opengeni/react`). Picker rows, triggers, queue rows and fleet tiles no longer show routing ids, and organization- and workspace-connected copies of one model share one "API keys" group and render identically.
+- 395becb: Make the embedded chat look native inside host products. `OpenGeniChat` and `SessionConversation` now follow the host page's light/dark theme (an enclosing `data-og-theme`, `class="dark"`/`data-theme` on `<html>`/`<body>`, the host `color-scheme`, then the page background) instead of defaulting to dark, and derive their backgrounds and cards from the host background (`surface="host"`; `surface="theme"` and customized `--og-color-*` tokens are kept). Their composer shows a Stop control only while a response runs instead of the workstream Pause control, and the next message continues a stopped conversation (`composerProps.runControl` opts back into `"pause"`); `ChatComposer` gains `runControl`/`running` and the composer subpath exports `StopButton`. The model picker is hidden in these embeds unless `modelPicker` is set or the proxy reports `createSessionProxyHandler({ modelSelection: true })`. In these embeds a yes/no question renders as two buttons without "Other" (`HumanInputForm`/`HumanInputSurface` `decisionButtons`), the live "waiting on you" divider no longer repeats the turn's waiting header, the "Back to your message" pill stays inside the timeline and hides in short viewports, a failed load offers Try again (`labels` localizes it), the new-chat state has a heading, and with `compiled.css` host global list/paragraph/heading styles no longer leak into SDK markup. `MessageTimeline` gains `questionNavMinViewportHeight`.
+
+### Patch Changes
+
+- f893cb5: Preserve annotation review scrolling and focus across parent and layout updates by consuming each requested note focus once.
+- 92e4045: Add accessible Back and Forward controls to the Browser address bar using the existing target and document fenced history actions. Disable them while navigation is pending or no tab is selected, refuse observations from a previously selected tab, and retain existing address draft, focus, and failure handling.
+- af57cf9: Use canonical ComputerSession frames and actions for screen and window viewers. Preserve the painted frame fence, reflect authorized human input availability, and enforce human sandbox input policy on each action while retaining separate agent tool authority. Older controllers keep frame viewing behind an encrypted proxy without receiving RFB input grants.
+
+  App-only viewers require an explicit current input posture before enabling mutations. Refresh rechecks permission without starting a stream or native action, and physical machine screen-control consent remains separate from viewing.
+
+- 8ce490f: Support multiple Claude subscription accounts with shared workspace, organization and owning-user account controls, verified browser sign-in profiles, usage windows, exact credential leases and quota-aware rotation. Preserve accepted work during capacity waits and recovery. Upgrade existing encrypted subscription credentials through the documented maintenance migration before starting matching runtime binaries.
+- 424f44d: Make the conversation's floating navigation compact. Jump to latest and Back to your message are now identical small round arrow buttons at fixed, centered spots: the down arrow just above the bottom of the conversation and the up arrow just below the top. Their labels remain available to assistive technology and as tooltips, and touch screens get a larger invisible tap area instead of a larger button.
+- e518530: Keep Desktop menus inside the viewer, make long lists scroll, and close viewer menus with Escape, an outside pointer, or focus moving out. Return focus to the menu trigger after keyboard choices without taking focus from pointer actions.
+- 49fc1c0: `SessionCapabilityFrame` accepts optional `details` content inside the card and an `actionUnavailable` explanation that replaces the action when the viewer cannot start setup.
+- b96f26e: Show an active goal as Waiting while other session work runs, with an explanation that the goal continues automatically after that work finishes.
+- 3caca71: Jump to latest no longer shows while the reader is already at the bottom. Using a control in the conversation (Copy, a connection card) hands the view to the reader; the pill now appears only once something lands below them.
+- 3cc26b5: Identify the default pinned HTTP client with a User-Agent, preserve caller overrides, and show retryable MCP sign-in discovery failures in connection setup.
+- fe1739f: Use neutral model-group labels and icons in the stock embedded picker, while keeping explicit host branding and external-provider identities. Expose appearance-only picker customization on the complete conversation and preserve explicit first-party console branding.
+- 978981a: Present expected sandbox lifecycle waits during model preparation as waiting rather than failed. Retain technical failure receipts and keep actual model and provider failures visible.
+- 272c016: Expose command readiness separately from edit permission. Pause presentation mutations while earlier changes await settlement, preserving drafts, slide navigation, and zoom.
+- 97d4f07: Require an explicit server-enforced screen grant for managed ComputerSession RFB input. Preserve viewing with pixel-only grants, recheck controller and target authority before forwarding packets, and use canonical frames and actions with older controllers. Desktop viewers default old attachments to view only.
+- bb52f56: Open the whole desktop by default, show a screen selector for multiple displays, and move app/window views into the Advanced menu. Preserve explicit target choices and existing input authority across refreshes.
+- Updated dependencies [af57cf9]
+- Updated dependencies [8ce490f]
+- Updated dependencies [692a1f5]
+- Updated dependencies [395becb]
+- Updated dependencies [3395acc]
+- Updated dependencies [00000d7]
+- Updated dependencies [746464c]
+- Updated dependencies [272c016]
+- Updated dependencies [6cdc0aa]
+- Updated dependencies [0fba21e]
+- Updated dependencies [97d4f07]
+- Updated dependencies [1826595]
+- Updated dependencies [b4d1c5b]
+- Updated dependencies [14e95e9]
+  - @opengeni/sdk@7.8.0
+
 ## 7.7.0
 
 ### Minor Changes
