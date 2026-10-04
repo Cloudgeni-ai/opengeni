@@ -1932,7 +1932,11 @@ Workspace timers: [implementation and rollout](workspace-pause-timers.md).
 ### In-conversation connection setup
 
 `SessionCapabilityCard` shares native Connection APIs; hosts retain authorization.
-OAuth never replays tools. Skills retain workspace scope/reviewed hashes.
+OAuth never replays tools. The web connection card reviews missing parent tool
+selections before an explicit human click applies root-to-child updates through
+the ordinary version-fenced API; child ceilings and accepted turn snapshots stay
+unchanged. `packages/react/src/session-capability-policy.ts` owns that client
+review/apply plan. Skills retain workspace scope/reviewed hashes.
 Messages authorize sender accounts; queues, retries and children retain that
 identity. Personal schedules have immutable owners. Personal/Workspace setup
 uses provider defaults unless explicitly chosen; reconnect preserves ownership.
