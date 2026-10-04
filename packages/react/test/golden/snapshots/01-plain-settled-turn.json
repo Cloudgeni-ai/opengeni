@@ -21,7 +21,7 @@
     },
     {
       "kind": "startup-phase",
-      "id": "00000000-0000-4000-8000-000000000105-queue",
+      "id": "aaaaaaaa-0000-4000-8000-000000000001-queue",
       "turnId": "aaaaaaaa-0000-4000-8000-000000000001",
       "occurredAt": "2026-01-02T10:00:04.000Z",
       "phase": "queue",
@@ -109,7 +109,7 @@
       "groups": [
         {
           "kind": "activity",
-          "id": "activity-00000000-0000-4000-8000-000000000105-queue",
+          "id": "activity-aaaaaaaa-0000-4000-8000-000000000001-queue",
           "itemCount": 1,
           "itemKinds": {
             "startup-phase": 1
@@ -118,7 +118,7 @@
           "items": [
             {
               "kind": "startup-phase",
-              "id": "00000000-0000-4000-8000-000000000105-queue",
+              "id": "aaaaaaaa-0000-4000-8000-000000000001-queue",
               "turnId": "aaaaaaaa-0000-4000-8000-000000000001",
               "occurredAt": "2026-01-02T10:00:04.000Z",
               "phase": "queue",

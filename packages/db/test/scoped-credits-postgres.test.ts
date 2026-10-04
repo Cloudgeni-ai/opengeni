@@ -4,6 +4,7 @@ import { join } from "node:path";
 import { rawRows } from "../src/database";
 import { afterAll, beforeAll, expect, test } from "bun:test";
 import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/testing";
+import { CreditPromotionPolicy } from "@opengeni/config";
 import { sql } from "drizzle-orm";
 import {
   evaluateRuntimeDatabasePosture,
@@ -247,6 +248,41 @@ test("operator changes live coverage, per-offer overrides, and in-flight settlem
           .admin`select set_credit_promotion_policy(${shared.admin.json(invalid)}::jsonb, 'test operator', 'Reject invalid policy')`)(),
     ).rejects.toThrow();
   }
+}, 180_000);
+
+test("SQL rejects policies the runtime cannot read and preserves the active revision", async () => {
+  if (!client || !shared) return;
+  const valid = {
+    defaultModelIds: ["model-a"],
+    offers: { coupon_example: { label: "Launch credits" } },
+  };
+  await shared.admin`select set_credit_promotion_policy(${shared.admin.json(valid)}::jsonb, 'test operator', 'Keep valid coverage')`;
+  const [before] =
+    await shared.admin`select max(revision) as revision from opengeni_private.credit_promotion_policy_revisions`;
+  for (const invalid of [
+    { ...valid, offers: { "": { label: "Launch credits" } } },
+    { ...valid, offers: { coupon_example: { label: "\t\n\u00a0\ufeff" } } },
+    { ...valid, offers: { coupon_example: { label: "\u{1f680}".repeat(61) } } },
+    { ...valid, defaultModelIds: ["\t"] },
+    { ...valid, defaultModelIds: ["\u{1f680}".repeat(101)] },
+  ]) {
+    expect(CreditPromotionPolicy.safeParse(invalid).success).toBe(false);
+    await expect(
+      (async () =>
+        await shared!
+          .admin`select set_credit_promotion_policy(${shared.admin.json(invalid)}::jsonb, 'test operator', 'Reject unreadable policy')`)(),
+    ).rejects.toThrow();
+    expect(await readCreditPromotionPolicy(client.db)).toEqual(valid);
+    const [after] =
+      await shared.admin`select max(revision) as revision from opengeni_private.credit_promotion_policy_revisions`;
+    expect(after?.revision).toBe(before?.revision);
+  }
+  const boundary = {
+    defaultModelIds: ["\u{1f680}".repeat(100)],
+    offers: { coupon_example: { label: `\t${"\u{1f680}".repeat(60)}\u00a0` } },
+  };
+  await shared.admin`select set_credit_promotion_policy(${shared.admin.json(boundary)}::jsonb, 'test operator', 'Accept valid boundary')`;
+  expect(await readCreditPromotionPolicy(client.db)).toEqual(CreditPromotionPolicy.parse(boundary));
 }, 180_000);
 
 test("operator command validates catalog IDs, applies policy and reads it back", async () => {

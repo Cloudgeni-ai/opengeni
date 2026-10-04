@@ -1838,11 +1838,11 @@ describe("release schema contract", () => {
       "0597_slack_api_rate_limits.sql",
       "0598_claude_subscription_account_pools.sql",
       "0599_paused_recovery_command_containment.sql",
-      "0615_usage_reservation_export_exclusion.sql",
-      "0616_account_usage_read_capability.sql",
+      "0616_usage_reservation_export_exclusion.sql",
+      "0617_account_usage_read_capability.sql",
       "0600_organization_api_key_access_policy.sql",
       "0601_organization_mcp_connections.sql",
-      "0617_organization_usage_reserved_exclusion.sql",
+      "0618_organization_usage_reserved_exclusion.sql",
       // Keep this historical fixture at its existing published frontier.
       ...unfilteredSourceContract.migrations
         .filter((migration) => migration.path > "0515_autonomous_learning_defaults.sql")
@@ -2394,11 +2394,11 @@ describe("release schema contract", () => {
       "0597_slack_api_rate_limits.sql",
       "0598_claude_subscription_account_pools.sql",
       "0599_paused_recovery_command_containment.sql",
-      "0615_usage_reservation_export_exclusion.sql",
-      "0616_account_usage_read_capability.sql",
+      "0616_usage_reservation_export_exclusion.sql",
+      "0617_account_usage_read_capability.sql",
       "0600_organization_api_key_access_policy.sql",
       "0601_organization_mcp_connections.sql",
-      "0617_organization_usage_reserved_exclusion.sql",
+      "0618_organization_usage_reserved_exclusion.sql",
       "0602_claude_account_lifecycle_facts.sql",
       "0603_organization_service_accounts.sql",
       "0604_insights_raw_usage_api.sql",
@@ -2408,11 +2408,12 @@ describe("release schema contract", () => {
       "0608_receiver_execution_context.sql",
       "0609_captured_command_output_priority.sql",
       "0610_artifact_catalog_pins.sql",
-      "0618_usage_reservation_balance_projection.sql",
+      "0619_usage_reservation_balance_projection.sql",
       "0611_universal_session_tenancy_activation.sql",
       "0612_scheduled_model_unavailable_refusal.sql",
       "0613_model_scoped_promotional_credits.sql",
       "0614_quiescence_command_containment.sql",
+      "0615_credit_promotion_policy_validation.sql",
     ].filter((path) =>
       unfilteredSourceContract.migrations.some((migration) => migration.path === path),
     );

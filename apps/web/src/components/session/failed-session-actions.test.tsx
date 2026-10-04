@@ -232,7 +232,7 @@ test("the free model keeps ordinary wording for failures other than its daily li
   );
   const row = container.querySelector<HTMLElement>('[data-testid="failed-session-banner"]')!;
   expect(row.querySelector("span")!.textContent).toBe(
-    "This model is throttled due to high demand. Select another model in the chat bar, or try again in a few minutes.",
+    "This model is throttled due to high demand. Select a different model, or try again in a few minutes.",
   );
   expect([...row.querySelectorAll("a, button")].map((node) => node.textContent)).toEqual(["Retry"]);
 });
@@ -253,7 +253,7 @@ test("throttling points at the chat bar's model picker and keeps only Retry", as
   const container = await render(banner(false));
   const row = container.querySelector<HTMLElement>('[data-testid="failed-session-banner"]')!;
   expect(row.querySelector("span")!.textContent).toBe(
-    "This model is throttled due to high demand. Select another model in the chat bar, or try again in a few minutes.",
+    "This model is throttled due to high demand. Select a different model, or try again in a few minutes.",
   );
   expect([...row.querySelectorAll("button")].map((node) => node.textContent)).toEqual(["Retry"]);
 

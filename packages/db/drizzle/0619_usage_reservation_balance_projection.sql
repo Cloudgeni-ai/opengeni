@@ -127,7 +127,7 @@ END $backfill_convergence$;
 ALTER TABLE usage_events FORCE ROW LEVEL SECURITY;
 
 -- Replace only the read, preserving the exact account-only context, capability
--- lifecycle, function signature, ownership, and ACL installed by 0616.
+-- lifecycle, function signature, ownership, and ACL installed by 0617.
 DO $account_read$
 DECLARE
   data_schema text:=current_schema();
