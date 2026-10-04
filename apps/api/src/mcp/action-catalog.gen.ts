@@ -2437,6 +2437,15 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     ]
   },
   {
+    "id": "getOpenGeniSlackBotOrganizationAccess",
+    "method": "GET",
+    "path": "/v1/workspaces/:workspaceId/connections/:connectionId/slack-bot/organization-access",
+    "request": [],
+    "response": [
+      "OpenGeniSlackBotOrganizationAccess"
+    ]
+  },
+  {
     "id": "getOrganizationAdministrationOverview",
     "method": "GET",
     "path": "/v1/organizations/:organizationId/overview",
@@ -3333,6 +3342,15 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     "request": [],
     "response": [
       "AuthRunListResponse"
+    ]
+  },
+  {
+    "id": "listAvailableOpenGeniSlackBots",
+    "method": "GET",
+    "path": "/v1/workspaces/:workspaceId/connections/slack-bot/available",
+    "request": [],
+    "response": [
+      "AvailableOpenGeniSlackBots"
     ]
   },
   {
@@ -5645,6 +5663,17 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     ],
     "response": [
       "MemberAllowance"
+    ]
+  },
+  {
+    "id": "setOpenGeniSlackBotOrganizationAccess",
+    "method": "PUT",
+    "path": "/v1/workspaces/:workspaceId/connections/:connectionId/slack-bot/organization-access",
+    "request": [
+      "UpdateOpenGeniSlackBotOrganizationAccess"
+    ],
+    "response": [
+      "OpenGeniSlackBotOrganizationAccess"
     ]
   },
   {
