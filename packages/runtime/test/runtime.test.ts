@@ -6882,6 +6882,80 @@ describe("runtime event normalization", () => {
     expect(secondRequest).toContain("vendor-receipt-1");
   });
 
+  test("the Agents SDK sends a structuredContent duplicate text block to the model once while retaining the exact audit result", async () => {
+    const structuredContent = { issues: [{ number: 7, title: 'Fix "quoted" title' }], total: 1 };
+    const fullResult = {
+      content: [
+        { type: "text" as const, text: JSON.stringify(structuredContent, null, 2) },
+        { type: "text" as const, text: "Showing the first page." },
+      ],
+      structuredContent,
+      _meta: { providerTrace: "trace-dup" },
+    };
+    const inner: MCPServer = {
+      name: "dup-inner",
+      cacheToolsList: false,
+      async connect() {},
+      async close() {},
+      async listTools() {
+        return [
+          {
+            name: "search",
+            description: "Search issues.",
+            inputSchema: { type: "object", properties: {}, additionalProperties: false },
+          },
+        ];
+      },
+      async callTool() {
+        return fullResult.content;
+      },
+      async callToolResult() {
+        return fullResult;
+      },
+      async invalidateToolsCache() {},
+    };
+    // A prefixed wrapper around another prefixed wrapper must still recover
+    // the exact inner result rather than the outer model projection.
+    const wrapped = new PrefixedMcpServer(new PrefixedMcpServer(inner, "dup"), "outer");
+    const settings = testSettings({ sandboxBackend: "none", webSearchEnabled: false });
+    const model = new ScriptedModel([
+      { output: [scriptedFunctionCall("outer__dup__search", {}, "dup-call")] },
+      { outputText: "done" },
+    ]);
+    const agent = buildOpenGeniAgent(settings, [], {
+      model,
+      hostedWebSearch: false,
+      mcpServers: [wrapped],
+    });
+
+    const result = await runAgentStream(agent, "Search", settings);
+    const streamed: any[] = [];
+    for await (const event of result.toStream()) streamed.push(event);
+    await result.completed;
+
+    const outputEvent = streamed.find(
+      (event) =>
+        event.type === "run_item_stream_event" && event.item?.type === "tool_call_output_item",
+    );
+    expect(outputEvent?.item.customData).toEqual({
+      [OPENGENI_MCP_RESULT_CUSTOM_DATA_KEY]: fullResult,
+    });
+    const [durable] = normalizeSdkEvent(outputEvent);
+    expect((durable!.payload as { output?: unknown }).output).toEqual(fullResult);
+
+    const toolOutput = ((model.requests[1]?.input ?? []) as any[]).find(
+      (item) => item.type === "function_call_result",
+    )?.output;
+    expect(toolOutput).toEqual({
+      type: "text",
+      text: JSON.stringify({
+        content: [{ type: "text", text: "Showing the first page." }],
+        structuredContent,
+        _meta: { providerTrace: "trace-dup" },
+      }),
+    });
+  });
+
   test("rejects MCP result values the Agents SDK custom-data boundary would rewrite", async () => {
     const bridge = new McpResultCustomDataBridge();
 
