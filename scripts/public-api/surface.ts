@@ -1342,7 +1342,23 @@ function shapeFindings(
       push(path, true, "field removed");
       continue;
     }
-    if (old.t !== next.t) {
+    // A one-value enum is emitted as a const by JSON Schema. Expanding it
+    // into same-scalar enum values follows the ordinary enum policy below.
+    const literalPair = [old, next].every(
+      (field) => (field.t === "const" || field.t === "enum") && field.enum?.length,
+    );
+    const literalTypes = new Set(
+      literalPair
+        ? [...(old.enum ?? []), ...(next.enum ?? [])].map((value) => typeof JSON.parse(value))
+        : [],
+    );
+    const sameScalarEnum =
+      literalPair &&
+      literalTypes.size === 1 &&
+      [...literalTypes].every(
+        (type) => type === "string" || type === "number" || type === "boolean",
+      );
+    if (old.t !== next.t && !sameScalarEnum) {
       const widenedInput = input && !output && next.t === "unknown";
       const narrowedOutput = output && !input && old.t === "unknown";
       const oldRef = REF_TYPE.exec(old.t)?.[1];

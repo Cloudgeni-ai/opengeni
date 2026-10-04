@@ -178,6 +178,7 @@ export type CodexRealtimeOwnerStorage = Pick<Storage, "getItem" | "setItem" | "r
 
 /** Canonical browser-owner storage namespace for a public realtime model. */
 export function sessionRealtimeOwnerStorageNamespace(model: SessionRealtimeModel): string {
+  if (model === "opengeni-azure/gpt-live-1") return "azure-live-owner";
   if (model === "gpt-live-1-boulder-alpha") return "codex-realtime-owner";
   if (model === "supergrok/grok-voice-think-fast-2.0") return "xai-realtime-owner";
   return "gateway-realtime-owner";
@@ -883,6 +884,15 @@ export function createCodexRealtimeController(
     });
     let connected: CodexRealtimeWebrtcSession;
     try {
+      // Persist a fragment provider's tail before the replacement broker reads
+      // its startup history, while the old connection still owns the ledger.
+      if (active?.transport.drain) {
+        await active.transport.drain();
+        await active.bridge.flush();
+      }
+      if (closed || stopping || abort.signal.aborted || pendingGeneration !== targetGeneration) {
+        throw abort.signal.reason ?? new DOMException("Aborted", "AbortError");
+      }
       const media = await ensureMicrophone(replaceMicrophone, abort.signal);
       const operationId = randomUUID();
       const commonTransportInput = {
@@ -1337,6 +1347,7 @@ export function createCodexRealtimeController(
       connectionTask = null;
       void retiredTask?.catch(() => undefined);
       try {
+        await active?.transport.drain?.();
         await active?.bridge.sealAndFlush();
         closeBrowserResources();
         let current = state.mode;

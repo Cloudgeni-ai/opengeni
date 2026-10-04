@@ -725,6 +725,11 @@ const SettingsSchema = z.object({
   voiceInputAzureApiVersion: z.string().optional(),
   voiceInputAzureApiKey: z.string().optional(),
   voiceInputAzureAdToken: z.string().optional(),
+  // Hosted realtime voice is configured independently of dictation.
+  azureLiveEndpoint: z.string().url().optional(),
+  azureLiveApiKey: z.string().optional(),
+  azureLiveDeployment: z.string().default("gpt-live-1"),
+  azureLiveVoice: z.string().default("marin"),
   // Azure Speech credentials are explicit: a different resource can host MAI.
   voiceInputMaiEndpoint: z.string().url().optional(),
   voiceInputMaiApiKey: z.string().optional(),
@@ -3915,6 +3920,10 @@ export function getSettings(source: NodeJS.ProcessEnv = process.env): Settings {
     voiceInputAzureApiVersion: optional("OPENGENI_VOICE_INPUT_AZURE_API_VERSION"),
     voiceInputAzureApiKey: optional("OPENGENI_VOICE_INPUT_AZURE_API_KEY"),
     voiceInputAzureAdToken: optional("OPENGENI_VOICE_INPUT_AZURE_AD_TOKEN"),
+    azureLiveEndpoint: optional("OPENGENI_AZURE_LIVE_ENDPOINT"),
+    azureLiveApiKey: optional("OPENGENI_AZURE_LIVE_API_KEY"),
+    azureLiveDeployment: optional("OPENGENI_AZURE_LIVE_DEPLOYMENT"),
+    azureLiveVoice: optional("OPENGENI_AZURE_LIVE_VOICE"),
     voiceInputMaiEndpoint: optional("OPENGENI_VOICE_INPUT_MAI_ENDPOINT"),
     voiceInputMaiApiKey: optional("OPENGENI_VOICE_INPUT_MAI_API_KEY"),
     voiceInputMaiApiVersion: optional("OPENGENI_VOICE_INPUT_MAI_API_VERSION"),

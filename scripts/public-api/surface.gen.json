@@ -10987,7 +10987,7 @@
         "$.connectionEpoch": "integer!",
         "$.connectionId": "string!",
         "$.modeVersion": "integer!",
-        "$.model": "const!=[\"\\\"gpt-live-1-boulder-alpha\\\"\"]",
+        "$.model": "enum!=[\"\\\"gpt-live-1-boulder-alpha\\\"\",\"\\\"opengeni-azure/gpt-live-1\\\"\"]",
         "$.replay": "boolean!",
         "$.sdp": "string!",
         "$.startupFenceSequence": "integer!",
@@ -21779,7 +21779,7 @@
         "output"
       ],
       "shape": {
-        "$": "enum=[\"\\\"gpt-live-1-boulder-alpha\\\"\",\"\\\"opengeni-gateway/openai/gpt-realtime-2.1\\\"\",\"\\\"opengeni-gateway/openai/gpt-realtime-mini\\\"\",\"\\\"opengeni-gateway/xai/grok-voice-think-fast-2.0\\\"\",\"\\\"supergrok/grok-voice-think-fast-2.0\\\"\",\"\\\"workspace-gateway/openai/gpt-realtime-2.1\\\"\",\"\\\"workspace-gateway/openai/gpt-realtime-mini\\\"\",\"\\\"workspace-gateway/xai/grok-voice-think-fast-2.0\\\"\"]"
+        "$": "enum=[\"\\\"gpt-live-1-boulder-alpha\\\"\",\"\\\"opengeni-azure/gpt-live-1\\\"\",\"\\\"opengeni-gateway/openai/gpt-realtime-2.1\\\"\",\"\\\"opengeni-gateway/openai/gpt-realtime-mini\\\"\",\"\\\"opengeni-gateway/xai/grok-voice-think-fast-2.0\\\"\",\"\\\"supergrok/grok-voice-think-fast-2.0\\\"\",\"\\\"workspace-gateway/openai/gpt-realtime-2.1\\\"\",\"\\\"workspace-gateway/openai/gpt-realtime-mini\\\"\",\"\\\"workspace-gateway/xai/grok-voice-think-fast-2.0\\\"\"]"
       }
     },
     "SessionRealtimeMutationResponse": {
@@ -23207,7 +23207,7 @@
         "$.chunkCount": "integer!",
         "$.completedSegmentCount": "integer!",
         "$.createdAt": "string!",
-        "$.errorCode": "ref(VoiceInputErrorCode)! null",
+        "$.errorCode": "ref(TranscriptionRecordingErrorCode)! null",
         "$.expiresAt": "string!",
         "$.id": "string!",
         "$.languages": "array!",
@@ -23237,6 +23237,14 @@
         "$.durationMilliseconds": "integer!",
         "$.sha256": "string!",
         "$.startMilliseconds": "integer!"
+      }
+    },
+    "TranscriptionRecordingErrorCode": {
+      "io": [
+        "output"
+      ],
+      "shape": {
+        "$": "enum=[\"\\\"cancelled\\\"\",\"\\\"invalid_audio\\\"\",\"\\\"network\\\"\",\"\\\"not_supported\\\"\",\"\\\"permission_denied\\\"\",\"\\\"policy_blocked\\\"\",\"\\\"provider\\\"\",\"\\\"timeout\\\"\",\"\\\"too_large\\\"\",\"\\\"unavailable\\\"\",\"\\\"unknown\\\"\"]"
       }
     },
     "TranscriptionRecordingListResponse": {
@@ -23269,7 +23277,7 @@
         "$": "object",
         "$.byteLength": "integer!",
         "$.durationMilliseconds": "integer!",
-        "$.errorCode": "ref(VoiceInputErrorCode)! null",
+        "$.errorCode": "ref(TranscriptionRecordingErrorCode)! null",
         "$.retryable": "boolean!",
         "$.segmentNumber": "integer!",
         "$.startMilliseconds": "integer!",
@@ -24512,21 +24520,13 @@
         "$.alive": "boolean!"
       }
     },
-    "VoiceInputErrorCode": {
-      "io": [
-        "output"
-      ],
-      "shape": {
-        "$": "enum=[\"\\\"cancelled\\\"\",\"\\\"invalid_audio\\\"\",\"\\\"network\\\"\",\"\\\"not_supported\\\"\",\"\\\"permission_denied\\\"\",\"\\\"policy_blocked\\\"\",\"\\\"provider\\\"\",\"\\\"timeout\\\"\",\"\\\"too_large\\\"\",\"\\\"unavailable\\\"\",\"\\\"unknown\\\"\"]"
-      }
-    },
     "VoiceInputProviderId": {
       "io": [
         "input",
         "output"
       ],
       "shape": {
-        "$": "enum=[\"\\\"azure-openai\\\"\",\"\\\"codex-subscription\\\"\",\"\\\"openai\\\"\",\"\\\"supergrok-subscription\\\"\"]"
+        "$": "enum=[\"\\\"azure-mai\\\"\",\"\\\"azure-openai\\\"\",\"\\\"codex-subscription\\\"\",\"\\\"openai\\\"\",\"\\\"supergrok-subscription\\\"\"]"
       }
     },
     "WorkClaimDiscoverySummary": {
@@ -30209,6 +30209,13 @@
       "protectedFill",
       "report",
       "verify"
+    ],
+    "AzureLiveDataChannel": [
+      "asRtcDataChannel",
+      "close",
+      "drain",
+      "readyState",
+      "send"
     ],
     "BrowserAccountsApiError": [
       "name"

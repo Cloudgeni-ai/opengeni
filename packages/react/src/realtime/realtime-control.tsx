@@ -1580,6 +1580,7 @@ function writeRealtimeModelPreference(workspaceId: string, model: SessionRealtim
 
 function isRealtimeModel(value: string | null): value is SessionRealtimeModel {
   return (
+    value === "opengeni-azure/gpt-live-1" ||
     value === "gpt-live-1-boulder-alpha" ||
     value === "opengeni-gateway/openai/gpt-realtime-2.1" ||
     value === "opengeni-gateway/openai/gpt-realtime-mini" ||

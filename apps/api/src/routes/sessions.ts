@@ -1,3 +1,4 @@
+import { AZURE_LIVE_MODEL_ID, buildSessionAzureLiveBroker } from "../azure-live";
 import { getRetainedProviderCommand } from "@opengeni/db/retained-provider-commands";
 import { assertGoalResumeAllowed, GoalResumeBlockedError } from "@opengeni/core";
 import { UnsupportedLatencyModeError } from "@opengeni/config";
@@ -1438,21 +1439,34 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
         ...providerRequest
       } = parsed.data;
       const claim = await withWorkspaceRls(db, workspaceId, async (scopedDb) =>
-        scopedDb.transaction(async (tx) =>
-          claimSessionRealtimeConnectionInTransaction(tx as unknown as Database, {
-            workspaceId,
-            sessionId,
-            realtimeId,
-            operationId,
-            ownerSubjectId: grant.subjectId,
-            browserInstanceId,
-            ownerKey,
-            expectedVersion,
-            expectedConnectionEpoch,
-            rotate,
-            promotionMode: browserActivation === "required" ? "staged" : "legacy",
-          }),
-        ),
+        scopedDb.transaction(async (tx) => {
+          const claimed = await claimSessionRealtimeConnectionInTransaction(
+            tx as unknown as Database,
+            {
+              workspaceId,
+              sessionId,
+              realtimeId,
+              operationId,
+              ownerSubjectId: grant.subjectId,
+              browserInstanceId,
+              ownerKey,
+              expectedVersion,
+              expectedConnectionEpoch,
+              rotate,
+              promotionMode: browserActivation === "required" ? "staged" : "legacy",
+            },
+          );
+          if (
+            claimed.mode.model !== "gpt-live-1-boulder-alpha" &&
+            claimed.mode.model !== AZURE_LIVE_MODEL_ID
+          ) {
+            throw new CodexRealtimeBrokerError(
+              "invalid_request",
+              "This voice model does not use WebRTC negotiation",
+            );
+          }
+          return claimed;
+        }),
       );
       if (claim.replay) {
         if (
@@ -1487,7 +1501,7 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
         return c.json({
           sdp: claim.connection.sdpAnswer,
           version: "v3" as const,
-          model: "gpt-live-1-boulder-alpha" as const,
+          model: claim.mode.model,
           connectionId: claim.connection.id,
           connectionEpoch: claim.connection.connectionEpoch,
           startupFenceSequence: claim.connection.startupFenceSequence,
@@ -1495,13 +1509,11 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
           replay: true,
         });
       }
-      const broker = buildSessionCodexRealtimeBroker(
-        db,
-        settings,
-        workspaceId,
-        sessionId,
-        deps.codexFetch,
-      );
+      const broker = (
+        claim.mode.model === AZURE_LIVE_MODEL_ID
+          ? buildSessionAzureLiveBroker
+          : buildSessionCodexRealtimeBroker
+      )(db, settings, workspaceId, sessionId, deps.codexFetch);
       try {
         const answer = await broker({
           request: providerRequest,
