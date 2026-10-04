@@ -115,7 +115,11 @@ export function ComposerSurface({
   const glass = useLiquidGlass();
   if (glass) {
     return (
-      <GlassView glassEffectStyle="regular" style={[{ borderRadius: radius }, style]}>
+      <GlassView
+        glassEffectStyle="regular"
+        colorScheme={theme.scheme}
+        style={[{ borderRadius: radius }, style]}
+      >
         {children}
       </GlassView>
     );
