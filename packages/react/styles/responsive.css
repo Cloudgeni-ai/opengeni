@@ -169,14 +169,53 @@
   }
 
   [data-og-responsive-basis="container"]
+    .og-composer-footer:has([data-transcription-attention])
+    .og-composer-actions
+    > :not(:is([data-analytics-action], :has([data-analytics-action]))) {
+    display: none;
+  }
+
+  [data-og-responsive-basis="container"]
     [data-transcription-attention]
     :is(.og-transcription-recovered-label, .og-transcription-error-label) {
     max-width: 15rem;
     white-space: normal;
     display: -webkit-box;
     -webkit-box-orient: vertical;
-    -webkit-line-clamp: 2;
+    -webkit-line-clamp: 3;
     line-height: 1.2;
+  }
+
+  [data-og-responsive-basis="container"]
+    .og-composer-footer:has([data-realtime-attention])
+    .og-composer-controls {
+    display: none;
+  }
+
+  [data-og-responsive-basis="container"]
+    .og-composer-footer:has([data-realtime-attention])
+    .og-composer-actions,
+  [data-og-responsive-basis="container"]
+    .og-composer-footer
+    .og-realtime-control:has([data-realtime-attention]),
+  [data-og-responsive-basis="container"] .og-composer-footer [data-realtime-attention] {
+    flex: 1 1 auto;
+    min-width: 0;
+  }
+
+  [data-og-responsive-basis="container"]
+    .og-composer-footer:has([data-realtime-attention])
+    .og-composer-actions
+    > :not(:has([data-realtime-attention])) {
+    flex-shrink: 0;
+  }
+
+  [data-og-responsive-basis="container"]
+    .og-composer-footer
+    [data-realtime-attention]
+    .og-realtime-failure-label {
+    max-width: none;
+    -webkit-line-clamp: 3;
   }
 }
 

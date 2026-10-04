@@ -11,6 +11,7 @@ import {
 } from "../voice-recording-store";
 import {
   acquireDefaultVoiceRecordingOwnerLease,
+  liveVoiceRecordingOwnerIds,
   type VoiceRecordingOwnerLease,
 } from "../voice-recording-owner";
 import { appendFinalTranscript } from "./use-transcription";
@@ -333,15 +334,31 @@ export function useVoiceInput({
         generation === generationRef.current && workspaceIdRef.current === workspaceId;
       const [store, ownerId] = await Promise.all([ensureStore(), ensureOwnerId()]);
       if (!active()) return;
-      const staleBefore = new Date(
+      const heartbeatStaleBefore = new Date(
         readNow().getTime() - VOICE_RECORDING_OWNER_STALE_MILLISECONDS,
       ).toISOString();
-      await store.cleanupHandedOffManifests({ ownerId, staleBefore }).catch(() => undefined);
+      await store
+        .cleanupHandedOffManifests({ ownerId, staleBefore: heartbeatStaleBefore })
+        .catch(() => undefined);
       if (!active()) return;
-      const manifests = await store.listRecoverableManifests(workspaceId, {
-        ownerId,
-        staleBefore,
-      });
+      // A closed or crashed tab releases its owner lock at once: recover its
+      // recording now rather than after the heartbeat window (the user who
+      // reopens the app right away must still see their dictation).
+      const liveOwners =
+        createOwnerIdRef.current === undefined ? await liveVoiceRecordingOwnerIds() : null;
+      if (!active()) return;
+      const staleBefore = liveOwners ? readNow().toISOString() : heartbeatStaleBefore;
+      const manifests = (
+        await store.listRecoverableManifests(workspaceId, { ownerId, staleBefore })
+      ).filter(
+        (manifest) =>
+          !liveOwners ||
+          !manifest.ownerId ||
+          manifest.ownerId === ownerId ||
+          !liveOwners.has(manifest.ownerId) ||
+          !manifest.ownerHeartbeatAt ||
+          manifest.ownerHeartbeatAt <= heartbeatStaleBefore,
+      );
       if (!active()) return;
       for (const candidate of manifests) {
         try {
@@ -377,7 +394,7 @@ export function useVoiceInput({
           // An append-mode transcript may already be in the draft (the page
           // closed between appending and recording the handoff).
           setError(
-            transcriptReady && claimed.handoffMode === "append" ? "handoff_uncertain" : null,
+            transcriptReady && candidate.handoffMode === "append" ? "handoff_uncertain" : null,
           );
           return;
         } catch (reason) {

@@ -918,6 +918,58 @@ describe("ordinary session Codex realtime control", () => {
     expect(container.querySelector('button[aria-label="Resume voice audio"]')).not.toBeNull();
   });
 
+  test("shows why a voice start failed until the user dismisses or retries it", async () => {
+    const calls: string[] = [];
+    const failed: SessionRealtimeControllerSnapshot = {
+      ...idle,
+      status: "error",
+      error: "Opengeni voice is temporarily unavailable. Try another voice model.",
+    };
+    const render = async (snapshot: SessionRealtimeControllerSnapshot) =>
+      await act(async () => {
+        root.render(
+          <RealtimeVoiceControl
+            snapshot={snapshot}
+            canStart={true}
+            modelAvailable={true}
+            audioRef={createRef<HTMLAudioElement>()}
+            onStart={async () => {
+              calls.push("start");
+            }}
+            onStop={async () => undefined}
+            onRetry={async () => undefined}
+            onRetryAudibleOutput={async () => undefined}
+            onSetInputMuted={() => undefined}
+            onSetOutputMuted={() => undefined}
+          />,
+        );
+      });
+    await render(failed);
+
+    const reason = () =>
+      container.querySelector<HTMLButtonElement>('[data-testid="realtime-failure-reason"]');
+    // Visible text, not only a tooltip or the model menu.
+    expect(reason()?.textContent).toBe(
+      "Opengeni voice is temporarily unavailable. Try another voice model.",
+    );
+    const start = container.querySelector<HTMLButtonElement>(
+      '[data-testid="realtime-primary-action"]',
+    );
+    expect(start?.getAttribute("aria-label")).toBe("Try voice again with Codex Live");
+    await act(async () => start?.click());
+    expect(calls).toEqual(["start"]);
+
+    await act(async () => reason()?.click());
+    expect(reason()).toBeNull();
+
+    // A new failure after another attempt is shown again.
+    await render({ ...idle, status: "starting" });
+    await render(failed);
+    expect(reason()).not.toBeNull();
+    await render(idle);
+    expect(reason()).toBeNull();
+  });
+
   test("keeps an unavailable provider quiet and explains why start is disabled", async () => {
     await act(async () => {
       root.render(

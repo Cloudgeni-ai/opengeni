@@ -1822,6 +1822,19 @@ describe("Codex realtime browser controller", () => {
     expect(controller.snapshot().error).toBe(
       "Opengeni voice is temporarily unavailable. Try another voice model.",
     );
+    // Nor may the ended lifecycle event for the mode that failed to start.
+    await controller.observeLifecycle({
+      state: "ended",
+      realtimeId: "abababab-abab-4bab-8bab-abababababab",
+      operationId: "cdcdcdcd-cdcd-4dcd-8dcd-cdcdcdcdcdcd",
+      version: 2,
+      connectionEpoch: 1,
+      reason: "user_stop",
+    });
+    expect(controller.snapshot()).toMatchObject({
+      status: "error",
+      error: "Opengeni voice is temporarily unavailable. Try another voice model.",
+    });
   });
 
   test("a credit refusal at negotiation ends the owned mode instead of retrying", async () => {
@@ -1998,7 +2011,7 @@ describe("Codex realtime browser controller", () => {
     await controller.stop();
   });
 
-  test("turns a microphone prompt that never resolves into a user-retryable device failure", async () => {
+  test("ends a call whose microphone prompt never resolves and says how to retry", async () => {
     const timers = timerFixture();
     let current = mode();
     const controller = createCodexRealtimeController({
@@ -2045,15 +2058,64 @@ describe("Codex realtime browser controller", () => {
     await expect(starting).rejects.toThrow(
       "Microphone did not become available before voice startup timed out",
     );
+    // No conversation started: the empty call ends instead of waiting on a
+    // "reconnecting" spinner, and the user learns what to do.
     expect(controller.snapshot()).toMatchObject({
-      status: "recovering",
-      microphone: "acquisition_failed",
+      status: "error",
+      mode: null,
       reconnectAttempt: 0,
-      diagnostic: { kind: "device_failure", recoverable: true },
-      error: "Microphone did not become available before voice startup timed out",
+      diagnostic: { kind: "terminal_stop", recoverable: false },
+      error:
+        "Microphone access wasn't granted in time. Allow it when your browser asks, then try again.",
     });
     expect(timers.timeoutDelays()).not.toContain(10);
     await controller.stop();
+  });
+
+  test("ends a call when microphone permission is denied before it connects", async () => {
+    let current = mode();
+    const ends: string[] = [];
+    const controller = createCodexRealtimeController({
+      workspaceId: WORKSPACE_ID,
+      sessionId: SESSION_ID,
+      storage: storageFixture(),
+      randomUUID: uuidSource(),
+      ...timerFixture(),
+      getUserMedia: async () => {
+        throw new DOMException("Permission denied", "NotAllowedError");
+      },
+      client: {
+        beginSessionRealtime: async (_workspaceId, _sessionId, request) => {
+          current = mode({
+            operationId: request.operationId,
+            browserInstanceId: request.browserInstanceId,
+          });
+          return { mode: current, replay: false };
+        },
+        negotiateCodexRealtimeWebrtc: async () => {
+          throw new Error("provider negotiation must not start without a microphone");
+        },
+        activateCodexRealtimeConnection: async () => {
+          throw new Error("activation must not start without a microphone");
+        },
+        heartbeatSessionRealtime: async () => ({ mode: current, replay: false }),
+        syncSessionRealtimeLedger: async () => ({ accepted: [], outbound: [] }),
+        endSessionRealtime: async (_workspaceId, _sessionId, _realtimeId, request) => {
+          ends.push(request.reason);
+          current = mode({ ...current, state: "ended", version: current.version + 1 });
+          return { mode: current, replay: false };
+        },
+      },
+    });
+
+    await expect(controller.start()).rejects.toThrow();
+    expect(ends).toEqual(["user_stop"]);
+    expect(controller.snapshot()).toMatchObject({
+      status: "error",
+      mode: null,
+      error:
+        "Microphone access is blocked. Allow it in site settings, then try again.",
+    });
   });
 
   test("aborts a data channel that misses the 20-second open deadline and fences late open", async () => {

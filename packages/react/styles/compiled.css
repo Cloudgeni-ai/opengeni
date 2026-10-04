@@ -1236,13 +1236,30 @@
   :where(.og-root).og-composer-footer:has([data-transcription-attention]) .og-composer-controls > :not([data-transcription-attention]),:where(.og-root) .og-composer-footer:has([data-transcription-attention]) .og-composer-controls > :not([data-transcription-attention]) {
     display: none;
   }
+  :where(.og-root).og-composer-footer:has([data-transcription-attention]) .og-composer-actions > :not(:is([data-analytics-action], :has([data-analytics-action]))),:where(.og-root) .og-composer-footer:has([data-transcription-attention]) .og-composer-actions > :not(:is([data-analytics-action], :has([data-analytics-action]))) {
+    display: none;
+  }
   :where(.og-root).og-composer-footer [data-transcription-attention] :is(.og-transcription-recovered-label, .og-transcription-error-label),:where(.og-root) .og-composer-footer [data-transcription-attention] :is(.og-transcription-recovered-label, .og-transcription-error-label) {
     max-width: min(15rem, 52vw);
     white-space: normal;
     display: -webkit-box;
     -webkit-box-orient: vertical;
-    -webkit-line-clamp: 2;
+    -webkit-line-clamp: 3;
     line-height: 1.2;
+  }
+  :where(.og-root).og-composer-footer:has([data-realtime-attention]) .og-composer-controls,:where(.og-root) .og-composer-footer:has([data-realtime-attention]) .og-composer-controls {
+    display: none;
+  }
+  :where(.og-root).og-composer-footer:has([data-realtime-attention]) .og-composer-actions,:where(.og-root) .og-composer-footer:has([data-realtime-attention]) .og-composer-actions,:where(.og-root) .og-composer-footer .og-realtime-control:has([data-realtime-attention]),:where(.og-root)  .og-composer-footer .og-realtime-control:has([data-realtime-attention]),:where(.og-root) .og-composer-footer [data-realtime-attention],:where(.og-root)  .og-composer-footer [data-realtime-attention] {
+    flex: 1 1 auto;
+    min-width: 0;
+  }
+  :where(.og-root).og-composer-footer:has([data-realtime-attention]) .og-composer-actions > :not(:has([data-realtime-attention])),:where(.og-root) .og-composer-footer:has([data-realtime-attention]) .og-composer-actions > :not(:has([data-realtime-attention])) {
+    flex-shrink: 0;
+  }
+  :where(.og-root).og-composer-footer [data-realtime-attention] .og-realtime-failure-label,:where(.og-root) .og-composer-footer [data-realtime-attention] .og-realtime-failure-label {
+    max-width: none;
+    -webkit-line-clamp: 3;
   }
 }
 @media (forced-colors: active) {
@@ -6727,13 +6744,30 @@
   :where(.og-root)[data-og-responsive-basis="container"] .og-composer-footer:has([data-transcription-attention]) .og-composer-controls > :not([data-transcription-attention]),:where(.og-root) [data-og-responsive-basis="container"] .og-composer-footer:has([data-transcription-attention]) .og-composer-controls > :not([data-transcription-attention]) {
     display: none;
   }
+  :where(.og-root)[data-og-responsive-basis="container"] .og-composer-footer:has([data-transcription-attention]) .og-composer-actions > :not(:is([data-analytics-action], :has([data-analytics-action]))),:where(.og-root) [data-og-responsive-basis="container"] .og-composer-footer:has([data-transcription-attention]) .og-composer-actions > :not(:is([data-analytics-action], :has([data-analytics-action]))) {
+    display: none;
+  }
   :where(.og-root)[data-og-responsive-basis="container"] [data-transcription-attention] :is(.og-transcription-recovered-label, .og-transcription-error-label),:where(.og-root) [data-og-responsive-basis="container"] [data-transcription-attention] :is(.og-transcription-recovered-label, .og-transcription-error-label) {
     max-width: 15rem;
     white-space: normal;
     display: -webkit-box;
     -webkit-box-orient: vertical;
-    -webkit-line-clamp: 2;
+    -webkit-line-clamp: 3;
     line-height: 1.2;
+  }
+  :where(.og-root)[data-og-responsive-basis="container"] .og-composer-footer:has([data-realtime-attention]) .og-composer-controls,:where(.og-root) [data-og-responsive-basis="container"] .og-composer-footer:has([data-realtime-attention]) .og-composer-controls {
+    display: none;
+  }
+  :where(.og-root)[data-og-responsive-basis="container"] .og-composer-footer:has([data-realtime-attention]) .og-composer-actions,:where(.og-root) [data-og-responsive-basis="container"] .og-composer-footer:has([data-realtime-attention]) .og-composer-actions,:where(.og-root) [data-og-responsive-basis="container"] .og-composer-footer .og-realtime-control:has([data-realtime-attention]),:where(.og-root)  [data-og-responsive-basis="container"] .og-composer-footer .og-realtime-control:has([data-realtime-attention]),:where(.og-root) [data-og-responsive-basis="container"] .og-composer-footer [data-realtime-attention],:where(.og-root)  [data-og-responsive-basis="container"] .og-composer-footer [data-realtime-attention] {
+    flex: 1 1 auto;
+    min-width: 0;
+  }
+  :where(.og-root)[data-og-responsive-basis="container"] .og-composer-footer:has([data-realtime-attention]) .og-composer-actions > :not(:has([data-realtime-attention])),:where(.og-root) [data-og-responsive-basis="container"] .og-composer-footer:has([data-realtime-attention]) .og-composer-actions > :not(:has([data-realtime-attention])) {
+    flex-shrink: 0;
+  }
+  :where(.og-root)[data-og-responsive-basis="container"] .og-composer-footer [data-realtime-attention] .og-realtime-failure-label,:where(.og-root) [data-og-responsive-basis="container"] .og-composer-footer [data-realtime-attention] .og-realtime-failure-label {
+    max-width: none;
+    -webkit-line-clamp: 3;
   }
 }
 @container og-composer (max-width: 24.999rem) {

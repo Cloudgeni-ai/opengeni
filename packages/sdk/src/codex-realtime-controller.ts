@@ -735,6 +735,12 @@ export function createCodexRealtimeController(
     if (closed || stopping || isAbortError(error)) return;
     const message = safeError(error);
     if (error instanceof CodexRealtimeMicrophoneError) {
+      if (error.code !== "track_ended" && !connectedInMode) {
+        // No conversation exists yet: end the call and say how to fix the
+        // microphone instead of holding an empty "reconnecting" call open.
+        await endAfterFailure(microphoneFailureMessage(error), null);
+        return;
+      }
       if (error.code === "track_ended" && state.mode?.state === "active") {
         reconnectAttempt += 1;
         publish({
@@ -1350,6 +1356,9 @@ export function createCodexRealtimeController(
           await connectionTask;
           return;
         }
+        // The server's end of a call that failed to start must not wipe the
+        // failure the user still needs to read.
+        if (state.status === "error" && !state.mode) return;
         if (state.realtimeId === null || lifecycle.realtimeId === state.realtimeId) {
           transitionEnded(`Realtime ended: ${lifecycle.reason}`);
         }
@@ -1807,6 +1816,21 @@ function stringValue(value: unknown): string | null {
 
 function isAbortError(error: unknown): boolean {
   return error instanceof Error && error.name === "AbortError";
+}
+
+function microphoneFailureMessage(error: CodexRealtimeMicrophoneError): string {
+  switch (error.code) {
+    case "permission_denied":
+      return "Microphone access is blocked. Allow it in site settings, then try again.";
+    case "device_not_found":
+      return "No microphone was found. Connect one, then try again.";
+    case "device_unavailable":
+      return "Your microphone is busy or unavailable. Close other apps using it, then try again.";
+    default:
+      return /timed out/i.test(error.message)
+        ? "Microphone access wasn't granted in time. Allow it when your browser asks, then try again."
+        : "The microphone could not start. Try again.";
+  }
 }
 
 /** The server's own message, without the transport prefix or reference id. */

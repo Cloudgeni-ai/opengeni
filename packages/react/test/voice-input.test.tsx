@@ -2446,6 +2446,74 @@ describe("useVoiceInput", () => {
     await recovered.unmount();
   });
 
+  test("recovers a recording from a closed tab at once, but never from a live one", async () => {
+    installMediaMocks();
+    const held = new Set<string>();
+    const originalLocks = Object.getOwnPropertyDescriptor(navigator, "locks");
+    Object.defineProperty(navigator, "locks", {
+      configurable: true,
+      value: {
+        request: (name: string, _options: unknown, callback: () => Promise<void>) => {
+          held.add(name);
+          return callback().finally(() => held.delete(name));
+        },
+        query: async () => ({
+          held: [...held].map((name) => ({ name, mode: "exclusive" })),
+          pending: [],
+        }),
+      },
+    });
+    try {
+      const store = new MemoryVoiceRecordingStore();
+      await seedStoppedRecording(store, "recording-closed-tab", "2026-08-03T20:00:00.000Z");
+      // The tab that owned it heartbeated a moment ago and then closed.
+      await store.updateManifest(
+        "recording-closed-tab",
+        { ownerId: "closed-tab", ownerHeartbeatAt: new Date().toISOString() },
+        new Date().toISOString(),
+      );
+      await seedStoppedRecording(store, "recording-live-tab", "2026-08-03T20:01:00.000Z");
+      await store.updateManifest(
+        "recording-live-tab",
+        { ownerId: "live-tab", ownerHeartbeatAt: new Date().toISOString() },
+        new Date().toISOString(),
+      );
+      held.add("opengeni.voice-recording-owner:live-tab");
+
+      const hook = await renderHook(
+        () =>
+          useVoiceInput({
+            client: { transcribeAudio: async () => ({ text: "unused", languages: [] }) },
+            workspaceId: "ws-1",
+            capability,
+            enabled: true,
+            value: "",
+            setValue: () => undefined,
+            focusInput: () => undefined,
+            createRecordingStore: () => store,
+          }),
+        undefined,
+      );
+      await act(async () => {
+        await settle(40);
+      });
+      expect(hook.result.current.recordingId).toBe("recording-closed-tab");
+      expect(hook.result.current.status).toBe("recovered");
+
+      await act(async () => {
+        await hook.result.current.discard();
+        await settle(40);
+      });
+      // The other tab is still open: its recording stays private to it.
+      expect(hook.result.current.recordingId).toBeNull();
+      expect(store.manifests.get("recording-live-tab")?.ownerId).toBe("live-tab");
+      await hook.unmount();
+    } finally {
+      if (originalLocks) Object.defineProperty(navigator, "locks", originalLocks);
+      else delete (navigator as { locks?: unknown }).locks;
+    }
+  });
+
   test("advances through every retained recording after the current one is discarded", async () => {
     installMediaMocks();
     const store = new MemoryVoiceRecordingStore();

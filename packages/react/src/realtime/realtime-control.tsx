@@ -22,6 +22,7 @@ import {
   SquareIcon,
   Volume2Icon,
   VolumeXIcon,
+  XIcon,
 } from "lucide-react";
 import { AnimatePresence, motion, useReducedMotion } from "motion/react";
 import {
@@ -870,6 +871,11 @@ export function RealtimeVoiceControl(props: {
     props.snapshot.status !== "active" &&
     props.snapshot.diagnostic?.recoverable === true;
   const audioBlocked = props.snapshot.audibleOutput === "blocked" && !props.snapshot.outputMuted;
+  // A call that ended in a failure keeps its reason on screen, not only in a
+  // tooltip or the model menu, until the user starts again or changes model.
+  const startFailed = props.snapshot.status === "error" && !modeOwned;
+  const failureText =
+    status.label === "Voice unavailable" ? status.detail : `${status.label}. ${status.detail}`;
   const mainDisabled =
     props.snapshot.status === "stopping" ||
     props.snapshot.status === "lost_owner" ||
@@ -883,7 +889,9 @@ export function RealtimeVoiceControl(props: {
         ? "End voice conversation"
         : !props.canStart && status.phase === "unavailable"
           ? `${status.label}: ${status.detail}`
-          : `Start voice with ${selectedModel.label}`;
+          : startFailed
+            ? `Try voice again with ${selectedModel.label}`
+            : `Start voice with ${selectedModel.label}`;
   const runMainAction = audioBlocked
     ? props.onRetryAudibleOutput
     : retryConnection
@@ -900,6 +908,10 @@ export function RealtimeVoiceControl(props: {
     selectedModel.provider,
   );
   const [pickerDirection, setPickerDirection] = useState<1 | -1>(1);
+  const [failureDismissed, setFailureDismissed] = useState(false);
+  useEffect(() => {
+    if (!startFailed) setFailureDismissed(false);
+  }, [startFailed]);
 
   useEffect(() => {
     if (!pickerOpen) setPickerProvider(selectedModel.provider);
@@ -988,6 +1000,20 @@ export function RealtimeVoiceControl(props: {
           </motion.div>
         ) : null}
       </AnimatePresence>
+      {startFailed && !failureDismissed ? (
+        <button
+          type="button"
+          data-realtime-attention=""
+          data-testid="realtime-failure-reason"
+          title="Dismiss"
+          aria-label={`Dismiss: ${failureText}`}
+          onClick={() => setFailureDismissed(true)}
+          className="og-realtime-failure mr-1.5 inline-flex min-w-0 items-center gap-1 rounded-og-sm text-right text-og-xs leading-tight text-og-status-failed outline-hidden focus-visible:ring-2 focus-visible:ring-og-accent/45"
+        >
+          <span className="og-realtime-failure-label line-clamp-2 max-w-56">{failureText}</span>
+          <XIcon className="size-3 shrink-0 opacity-70" aria-hidden />
+        </button>
+      ) : null}
       <div className="inline-flex shrink-0 items-center">
         <motion.button
           type="button"

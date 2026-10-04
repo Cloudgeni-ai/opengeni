@@ -84,7 +84,7 @@ const defaultMessages: ComposerTranscriptionMessages = {
   discardRecovered: "Discard saved recording",
   unavailableDisabled: "Voice input is unavailable while the composer is disabled.",
   unavailable: "Voice input is unavailable for this workspace.",
-  errorPermissionDenied: "Microphone permission was denied. Your draft was not changed.",
+  errorPermissionDenied: "Microphone access is blocked. Allow it in site settings, then retry.",
   errorNotSupported: "Voice input is not supported on this device.",
   errorUnavailable: "Voice input is not configured.",
   errorInsufficientCredits: "Out of credits. Recording saved; retry after adding credits.",
