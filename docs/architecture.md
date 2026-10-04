@@ -1056,8 +1056,15 @@ the [checkpoint](insights-raw-usage-api.md) documents gates, residuals, privacy 
 interim performance. Its bounded 60-second successful-response cache reauthorizes
 every hit and fences live permissions/visibility; normal statement cancellation
 returns an actionable range-too-large error rather than a hung request.
+Daily usage reads substitute write-maintained model and actual-debit inputs for
+complete UTC days behind the same live privacy projection; partial-day/hour
+edges and visible cursor calls remain raw. The owner-only bootstrap holds a
+source-write fence, so rolling compatibility is not a zero-lock rollout claim.
+See [daily storage and allocation](insights-daily-rollups.md) for the mutation,
+raw-parity, frozen-runtime and owner-invoked allocation gates.
 Canonical: `packages/db/src/insights-usage-bundle.ts`,
 `packages/db/src/insights-model-bundle.ts`,
+`packages/db/src/insights-unified.ts`,
 `packages/core/src/domain/insights-usage.ts`, and
 `apps/api/src/routes/insights-usage.ts`.
 Workspace Insights and Organization settings > Insights render one dashboard

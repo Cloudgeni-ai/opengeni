@@ -5,6 +5,7 @@ import {
   NON_RLS_RUNTIME_TABLES,
   PROTECTED_NO_DIRECT_DML_TABLES,
   RUNTIME_ALLOWANCE_PRIVATE_TABLES,
+  RUNTIME_INSIGHTS_ROLLUP_PRIVATE_TABLES,
   RUNTIME_DML_TABLES,
   RUNTIME_FULL_DML_TABLES,
   RUNTIME_READ_INSERT_TABLES,
@@ -831,6 +832,47 @@ describe("runtime database posture evaluator", () => {
           "usage allowance capability has unsafe owner or direct runtime privileges",
         ),
         expect.stringContaining("allowance authority owners do not match"),
+      ]),
+    );
+  });
+  test("Insights rollup storage rejects direct runtime access and unsafe owner/invoker seams", () => {
+    const posture = modelFactPosture();
+    for (const name of RUNTIME_INSIGHTS_ROLLUP_PRIVATE_TABLES)
+      posture.privateTables.push({ ...knowledgeAuthorityTables()[0]!, name });
+    for (const name of [
+      "maintain_insights_daily_rollup()",
+      "maintain_insights_model_charges()",
+      "allocate_insights_model_list_classes()",
+      "insights_rollup_amount_inputs(uuid, uuid, timestamp with time zone, timestamp with time zone, text)",
+      "insights_reconcile_rollups(uuid, uuid, integer)",
+    ])
+      posture.privateRoutines.push({
+        name,
+        owner: "opengeni_migrator",
+        execute: true,
+        publicExecute: false,
+        securityDefiner: name.startsWith("maintain_") || name.startsWith("allocate_"),
+        volatility: name.startsWith("insights_rollup_amount_inputs(") ? "s" : "v",
+        configuration: ["search_path=pg_catalog, public, opengeni_private, pg_temp"],
+      });
+    expect(evaluateRuntimeDatabasePosture(posture, options)).toEqual([]);
+    const input = posture.privateRoutines.find((routine) =>
+      routine.name.startsWith("insights_rollup_amount_inputs("),
+    )!;
+    input.volatility = "v";
+    expect(evaluateRuntimeDatabasePosture(posture, options)).toContain(
+      "Insights rollup routine insights_rollup_amount_inputs(uuid, uuid, timestamp with time zone, timestamp with time zone, text) is missing or unsafe",
+    );
+    input.volatility = "s";
+    expect(evaluateRuntimeDatabasePosture(posture, options)).toEqual([]);
+    posture.privateTables.find((table) => table.name === "insights_model_daily")!.update = true;
+    posture.privateRoutines.find((routine) =>
+      routine.name.startsWith("insights_rollup_amount_inputs("),
+    )!.securityDefiner = true;
+    expect(evaluateRuntimeDatabasePosture(posture, options)).toEqual(
+      expect.arrayContaining([
+        "Insights rollup private table insights_model_daily is missing or unsafe",
+        "Insights rollup routine insights_rollup_amount_inputs(uuid, uuid, timestamp with time zone, timestamp with time zone, text) is missing or unsafe",
       ]),
     );
   });

@@ -69,6 +69,17 @@ const MODEL_FACT_CAPABILITY_ROUTINES = [
   ],
 ] as const;
 
+/** Owner-only analytic storage. App EXECUTE on invokers conveys no table access. */
+export const RUNTIME_INSIGHTS_ROLLUP_PRIVATE_TABLES = [
+  "insights_usage_daily",
+  "insights_model_daily",
+  "insights_model_daily_timestamps",
+  "insights_charge_daily",
+  "insights_charge_links",
+  "insights_list_rate_snapshots",
+  "insights_rollup_invalidations",
+] as const;
+
 const AUTOMATIC_SESSION_TITLE_FANOUT_MIGRATION_ROUTINE =
   "enqueue_automatic_session_title_fanout_v1(uuid, uuid, uuid, uuid)";
 
@@ -1782,6 +1793,7 @@ export type RuntimeRoutinePosture = {
   execute: boolean;
   publicExecute?: boolean;
   securityDefiner: boolean;
+  volatility?: string;
   configuration?: string[] | null;
 };
 
@@ -2128,15 +2140,15 @@ export async function inspectRuntimeDatabasePosture(
             -- particular INSERT can mint authority without a table grant.
             (has_table_privilege(current_user, c.oid, 'SELECT') or
               ((c.relname in ('modal_inventory_read_capabilities','usage_allowance_capabilities','session_import_batches') or
-                c.relname in (select jsonb_array_elements_text(${JSON.stringify(RUNTIME_ALLOWANCE_PRIVATE_TABLES)}::jsonb))) and
+                c.relname in (select jsonb_array_elements_text(${JSON.stringify([...RUNTIME_ALLOWANCE_PRIVATE_TABLES, ...RUNTIME_INSIGHTS_ROLLUP_PRIVATE_TABLES])}::jsonb))) and
                 has_any_column_privilege(current_user, c.oid, 'SELECT'))) as can_select,
             (has_table_privilege(current_user, c.oid, 'INSERT') or
               ((c.relname in ('modal_inventory_read_capabilities','usage_allowance_capabilities','session_import_batches') or
-                c.relname in (select jsonb_array_elements_text(${JSON.stringify(RUNTIME_ALLOWANCE_PRIVATE_TABLES)}::jsonb))) and
+                c.relname in (select jsonb_array_elements_text(${JSON.stringify([...RUNTIME_ALLOWANCE_PRIVATE_TABLES, ...RUNTIME_INSIGHTS_ROLLUP_PRIVATE_TABLES])}::jsonb))) and
                 has_any_column_privilege(current_user, c.oid, 'INSERT'))) as can_insert,
             (has_table_privilege(current_user, c.oid, 'UPDATE') or
               ((c.relname in ('modal_inventory_read_capabilities','usage_allowance_capabilities','session_import_batches') or
-                c.relname in (select jsonb_array_elements_text(${JSON.stringify(RUNTIME_ALLOWANCE_PRIVATE_TABLES)}::jsonb))) and
+                c.relname in (select jsonb_array_elements_text(${JSON.stringify([...RUNTIME_ALLOWANCE_PRIVATE_TABLES, ...RUNTIME_INSIGHTS_ROLLUP_PRIVATE_TABLES])}::jsonb))) and
                 has_any_column_privilege(current_user, c.oid, 'UPDATE'))) as can_update,
             has_table_privilege(current_user, c.oid, 'DELETE') as can_delete,
             has_table_privilege(current_user, c.oid, 'TRUNCATE') as can_truncate,
@@ -2160,6 +2172,13 @@ export async function inspectRuntimeDatabasePosture(
               ${ORGANIZATION_SIGNUP_USE_CASES_TABLE},
               ${SLACK_FILE_UPLOAD_OPERATIONS_TABLE},
               'organization_usage_read_capabilities',
+              'insights_usage_daily',
+              'insights_model_daily',
+              'insights_model_daily_timestamps',
+              'insights_charge_daily',
+              'insights_charge_links',
+              'insights_list_rate_snapshots',
+              'insights_rollup_invalidations',
               'usage_allowance_capabilities',
               'workspace_usage_allowances',
               'workspace_member_allowances',
@@ -2245,6 +2264,7 @@ export async function inspectRuntimeDatabasePosture(
         can_execute: boolean;
         public_execute: boolean;
         security_definer: boolean;
+        volatility: string;
         configuration: string[] | null;
       }>(
         await tx.execute(sql`
@@ -2258,6 +2278,7 @@ export async function inspectRuntimeDatabasePosture(
               where acl.grantee = 0 and acl.privilege_type = 'EXECUTE'
             ) as public_execute,
             p.prosecdef as security_definer,
+            p.provolatile::text as volatility,
             p.proconfig as configuration
           from pg_proc p
           join pg_namespace n on n.oid = p.pronamespace
@@ -2271,6 +2292,7 @@ export async function inspectRuntimeDatabasePosture(
         execute: row.can_execute,
         publicExecute: row.public_execute,
         securityDefiner: row.security_definer,
+        volatility: row.volatility,
         configuration: row.configuration,
       }));
 
@@ -4211,6 +4233,54 @@ export function evaluateRuntimeDatabasePosture(
     }
   }
   const modelCallFactsOwner = tableByName.get("model_call_facts")?.owner;
+  if (
+    posture.privateTables.some((table) =>
+      (RUNTIME_INSIGHTS_ROLLUP_PRIVATE_TABLES as readonly string[]).includes(table.name),
+    )
+  ) {
+    for (const name of RUNTIME_INSIGHTS_ROLLUP_PRIVATE_TABLES) {
+      const table = posture.privateTables.find((candidate) => candidate.name === name);
+      if (
+        !table ||
+        table.owner !== modelCallFactsOwner ||
+        table.owner === expectedRole ||
+        table.select ||
+        table.insert ||
+        table.update ||
+        table.delete ||
+        table.truncate ||
+        table.references ||
+        table.trigger
+      ) {
+        violations.push(`Insights rollup private table ${name} is missing or unsafe`);
+      }
+    }
+    const paths = [
+      `search_path=pg_catalog, ${targetSchema}, opengeni_private, pg_temp`,
+      `search_path=pg_catalog, "${targetSchema.replaceAll('"', '""')}", opengeni_private, pg_temp`,
+    ];
+    for (const name of [
+      "maintain_insights_daily_rollup()",
+      "maintain_insights_model_charges()",
+      "allocate_insights_model_list_classes()",
+      "insights_rollup_amount_inputs(uuid, uuid, timestamp with time zone, timestamp with time zone, text)",
+      "insights_reconcile_rollups(uuid, uuid, integer)",
+    ]) {
+      const routine = posture.privateRoutines.find((candidate) => candidate.name === name);
+      if (
+        !routine ||
+        !routine.execute ||
+        routine.publicExecute ||
+        routine.owner !== modelCallFactsOwner ||
+        routine.securityDefiner !==
+          (name.startsWith("maintain_") || name.startsWith("allocate_")) ||
+        (name.startsWith("insights_rollup_amount_inputs(") && routine.volatility !== "s") ||
+        !routine.configuration?.some((value) => paths.includes(value))
+      ) {
+        violations.push(`Insights rollup routine ${name} is missing or unsafe`);
+      }
+    }
+  }
   const modelFactCapabilityRoutines = new Set(
     options.modelFactCapabilityRoutines ?? MODEL_FACT_CAPABILITY_ROUTINES.map(([name]) => name),
   );

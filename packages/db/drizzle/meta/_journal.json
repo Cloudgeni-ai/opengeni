@@ -176,6 +176,34 @@
       "when": 1791057900000,
       "tag": "0605_insights_model_debit_period_index",
       "breakpoints": true
+    },
+    {
+      "idx": 25,
+      "version": "7",
+      "when": 1791067200000,
+      "tag": "0610_insights_daily_rollups",
+      "breakpoints": true
+    },
+    {
+      "idx": 26,
+      "version": "7",
+      "when": 1791067200001,
+      "tag": "0611_insights_actual_model_debits",
+      "breakpoints": true
+    },
+    {
+      "idx": 27,
+      "version": "7",
+      "when": 1791067200002,
+      "tag": "0612_insights_historical_list_allocations",
+      "breakpoints": true
+    },
+    {
+      "idx": 28,
+      "version": "7",
+      "when": 1791067200003,
+      "tag": "0613_insights_daily_usage_reader",
+      "breakpoints": true
     }
   ]
 }

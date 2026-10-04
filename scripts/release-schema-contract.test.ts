@@ -2386,6 +2386,10 @@ describe("release schema contract", () => {
       "0607_connected_command_output_release.sql",
       "0608_receiver_execution_context.sql",
       "0609_captured_command_output_priority.sql",
+      "0610_insights_daily_rollups.sql",
+      "0611_insights_actual_model_debits.sql",
+      "0612_insights_historical_list_allocations.sql",
+      "0613_insights_daily_usage_reader.sql",
     ].filter((path) =>
       unfilteredSourceContract.migrations.some((migration) => migration.path === path),
     );

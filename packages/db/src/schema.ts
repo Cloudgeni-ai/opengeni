@@ -1,4 +1,6 @@
 import { createSubscriptionPoolTables } from "./subscription-pool-schema";
+export * from "./insights-rollup-schema";
+import { insightsListRateSnapshots } from "./insights-rollup-schema";
 import type { StoredSessionAdmissionBlock } from "./session-admission-block";
 import {
   commentaryInclusiveMeaningfulSessionEventSql,
@@ -12273,6 +12275,10 @@ export const modelCallFacts = pgTable(
     listCacheWriteCostMicros: bigint("list_cache_write_cost_micros", { mode: "number" }),
     listOutputCostMicros: bigint("list_output_cost_micros", { mode: "number" }),
     listCostIsApprox: boolean("list_cost_is_approx"),
+    listAllocationSnapshotId: text("list_allocation_snapshot_id").references(
+      () => insightsListRateSnapshots.id,
+    ),
+    listAllocationModel: text("list_allocation_model"),
     contextContributions:
       jsonb("context_contributions").$type<readonly ModelContextContributionSummary[]>(),
     occurredAt: timestamp("occurred_at", { withTimezone: true }).notNull(),
@@ -12353,6 +12359,12 @@ export const modelCallFacts = pgTable(
         and ${table.estimatedProviderCostMicros}::numeric = ${table.listUncachedInputCostMicros}::numeric
           + ${table.listCacheReadCostMicros}::numeric + ${table.listCacheWriteCostMicros}::numeric
           + ${table.listOutputCostMicros}::numeric)`,
+    ),
+    listAllocationProvenanceValid: check(
+      "model_call_facts_list_allocation_provenance_check",
+      sql`(${table.listAllocationSnapshotId} is null and ${table.listAllocationModel} is null) or
+        (${table.listAllocationSnapshotId} is not null and ${table.listAllocationModel} is not null
+          and ${table.listCostIsApprox} is true and ${table.listUncachedInputCostMicros} is not null)`,
     ),
     initiatorConsistent: check(
       "model_call_facts_initiator_check",

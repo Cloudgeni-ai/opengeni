@@ -830,6 +830,7 @@ export * from "./insights";
 export * from "./insights-model-bundle";
 export * from "./insights-usage-bundle";
 export * from "./insights-unified";
+export * from "./insights-list-allocation";
 export * from "./organization-membership-lifecycle";
 import { assertActiveManagedHumanOrganizationMembership } from "./organization-membership-lifecycle";
 // Deliberately NOT `export *`: `accountIdInRlsScope` is an internal convenience
