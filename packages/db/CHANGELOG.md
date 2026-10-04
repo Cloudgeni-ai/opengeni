@@ -1,5 +1,38 @@
 # @opengeni/db
 
+## 1.0.2
+
+### Patch Changes
+
+- ee6b145: Prioritize release acknowledgements for durably captured command output before replaying older uncaptured results.
+- 6fccfa0: Release completed Connected Machine command output once its exact tool result is
+  durable, instead of retaining it until a long turn ends. Preserve parallel and
+  background output ownership, and allow failed final acknowledgements to retry.
+  Persist independent background output custody after verified PostgreSQL capture,
+  then reconcile release on its original connection even after worker loss.
+- e16aa17: Use the receiving chat's accepted execution context for ordinary same-user agent updates, so different sender account selections do not fragment batches or change the receiving chat's accounts. Preserve explicit authorization for other users and restricted sources, and add factual model-only notes for known tool selection differences.
+- cbe4357: Simple embedding path. An organization API key acting as a user (`asUser`) on a
+  shared workspace of its own organization now adds that user's missing membership
+  once, with conversation permissions, when the key holds `members:manage` plus
+  those permissions; existing memberships are never changed. The `@opengeni/sdk/chat`
+  `OpenGeni` facade derives `organizationId` from the key, maps `{ user, tenant }`,
+  `{ user }` (one workspace per user), or `{ user, workspaceId }` to a workspace
+  created on first use, and `og.workspaceId({ tenant } | { user } | { workspaceId })`
+  translates your ids. The session proxy reports its resolved workspace in client
+  config, so `<OpenGeniChat baseUrl="/api/opengeni" />` and
+  `<SessionConversation baseUrl="/api/opengeni" sessionId={id} />` need no provider
+  or workspace id. Explicit membership APIs and provider-based usage are unchanged.
+- 9925fe2: Reduce raw Insights query overhead and read the current and comparison windows in separate bounded statements so larger default views can finish within the database timeout.
+- Updated dependencies [4476ca7]
+- Updated dependencies [f9e33b5]
+- Updated dependencies [e16aa17]
+  - @opengeni/contracts@1.0.1
+  - @opengeni/observability@1.0.1
+  - @opengeni/codemode@1.0.1
+  - @opengeni/codex@1.0.1
+  - @opengeni/config@1.0.1
+  - @opengeni/network@1.0.1
+
 ## 1.0.0
 
 ### Major Changes

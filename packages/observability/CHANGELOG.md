@@ -1,5 +1,14 @@
 # @opengeni/observability
 
+## 1.0.2
+
+### Patch Changes
+
+- f9e33b5: Retain bounded HTTP method, route, cause-kind and diagnostic correlation in error logs without exposing request contents or exception text. Record protected cause diagnostics for unexpected API failures.
+- Updated dependencies [4476ca7]
+- Updated dependencies [e16aa17]
+  - @opengeni/contracts@1.0.1
+
 ## 1.0.0
 
 ### Major Changes

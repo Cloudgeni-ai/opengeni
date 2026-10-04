@@ -1,6 +1,6 @@
 {
   "name": "@opengeni/ogtool",
-  "version": "1.0.0",
+  "version": "1.0.2",
   "description": "Codemode CLI and typed client entrypoint for an OpenGeni execution attempt.",
   "license": "Apache-2.0",
   "repository": {
