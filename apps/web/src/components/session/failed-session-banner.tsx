@@ -32,7 +32,6 @@ export function FailedSessionBanner({
   freeModel = false,
   subscriptions = NO_SUBSCRIPTIONS,
   hasModelPicker,
-  onChooseModel,
   actions,
   sandboxRecovery,
   analyticsKey,
@@ -55,8 +54,6 @@ export function FailedSessionBanner({
    * locks it. Keeps the free model's remedies steady; defaults to `canChooseModel`.
    */
   hasModelPicker?: boolean;
-  /** Opens the composer's model picker, offered when the headline invites a model choice. */
-  onChooseModel?: () => void;
   actions?: ComponentProps<typeof FailedSessionActions>;
   sandboxRecovery?: Omit<
     SandboxRecoveryActionsProps,
@@ -67,14 +64,12 @@ export function FailedSessionBanner({
   const structuralFailure = Boolean(failure.structuralSandboxFailure);
   const billingFailure = creditExhausted && !structuralFailure;
   const chooseModel = canChooseModel && !structuralFailure;
-  const {
-    reason,
-    unavailableModel,
-    retryUnhelpful,
-    detail,
-    dailyLimit,
-    chooseModel: offerModel,
-  } = failedSessionCopy(failure, billingFailure, modelChanged, chooseModel);
+  const { reason, unavailableModel, retryUnhelpful, detail, dailyLimit } = failedSessionCopy(
+    failure,
+    billingFailure,
+    modelChanged,
+    chooseModel,
+  );
   // The free model's daily allowance is deployment-wide: name it and offer the
   // ways to keep going. Every other model keeps the generic daily-limit copy.
   const freeModelLimit = freeModel && dailyLimit && !structuralFailure;
@@ -141,11 +136,6 @@ export function FailedSessionBanner({
               />
             ) : null}
           </>
-        ) : null}
-        {offerModel && onChooseModel ? (
-          <Button type="button" size="sm" variant="outline" onClick={onChooseModel}>
-            Choose model
-          </Button>
         ) : null}
         {billingFailure ? (
           workspaceId && canBuyCredits ? (
