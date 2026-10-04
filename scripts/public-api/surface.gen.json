@@ -23195,7 +23195,7 @@
         "output"
       ],
       "shape": {
-        "$": "enum=[\"\\\"approved\\\"\",\"\\\"cancelled\\\"\",\"\\\"completed\\\"\",\"\\\"executing\\\"\",\"\\\"expired\\\"\",\"\\\"failed\\\"\",\"\\\"partial\\\"\",\"\\\"pending\\\"\",\"\\\"rejected\\\"\",\"\\\"revoked\\\"\",\"\\\"stale\\\"\",\"\\\"unavailable\\\"\",\"\\\"unknown\\\"\"]"
+        "$": "enum=[\"\\\"approved\\\"\",\"\\\"blocked\\\"\",\"\\\"cancelled\\\"\",\"\\\"completed\\\"\",\"\\\"executing\\\"\",\"\\\"expired\\\"\",\"\\\"failed\\\"\",\"\\\"partial\\\"\",\"\\\"pending\\\"\",\"\\\"rejected\\\"\",\"\\\"revoked\\\"\",\"\\\"stale\\\"\",\"\\\"unavailable\\\"\",\"\\\"unknown\\\"\"]"
       }
     },
     "TranscribeAudioResponse": {

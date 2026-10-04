@@ -69,7 +69,7 @@ test("all Gmail label and thread effects remain visible and unknown labels canno
       { kind: "gmail" },
     ),
   ).toMatchObject({
-    title: "Update 1 thread",
+    title: "Update 1 conversation",
     selectionKind: "threads",
     effects: ["Add star", "Mark as read"],
   });
