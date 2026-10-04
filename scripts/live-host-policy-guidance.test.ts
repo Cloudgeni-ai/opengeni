@@ -311,7 +311,9 @@ test("client/setup/public UI expectations preserve host matching, stock ownershi
   const client = await readGuide("product-shapes-and-ui");
   const setup = await Bun.file(new URL(".agents/skills/opengeni-setup/SKILL.md", root)).text();
   const primary = await Bun.file(new URL("docs-site/integrate/conversation-ui.mdx", root)).text();
-  for (const text of [client, setup, primary]) {
+  // The public page keeps only the developer-facing stock-styling promise; the
+  // evaluation/handoff expectations live in the agent guides.
+  for (const text of [client, setup]) {
     const prose = text.replaceAll(/\s+/g, " ");
     expect(prose).toContain("1440px");
     expect(prose).toContain("390px");
@@ -398,10 +400,12 @@ test("exact host formatter example preserves neutral action guidance and referen
     expect(prose).toContain("string | undefined");
     expect(prose).toContain("empty string");
     expect(prose).toContain("throwing callback");
-    expect(prose).toContain("interrupt delivery-state settlement");
     expect(prose).toContain("original error");
-    expect(prose).toContain("retry policy");
-    expect(prose).toContain("older installed/published package");
   }
+  // Agent-guide-only detail; the public page stays to the API contract.
+  const guideProse = guide.replaceAll(/\s+/g, " ");
+  expect(guideProse).toContain("interrupt delivery-state settlement");
+  expect(guideProse).toContain("retry policy");
+  expect(guideProse).toContain("older installed/published package");
   // Package implementation tests belong to the independent SDK/React source owner.
 });
