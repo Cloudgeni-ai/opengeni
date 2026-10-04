@@ -143,8 +143,16 @@ function HumanInputForm({
       answers: result.answers,
     } as SubmitHumanInputResponseRequest);
   };
-  const update = (id: string, next: (draft: HumanInputAnswerDraft) => HumanInputAnswerDraft) =>
+  const update = (id: string, next: (draft: HumanInputAnswerDraft) => HumanInputAnswerDraft) => {
     setDrafts((current) => ({ ...current, [id]: next(current[id] ?? emptyDraft()) }));
+    // Editing a question clears its validation message, as on web.
+    setErrors((current) => {
+      if (!(id in current)) return current;
+      const remaining = { ...current };
+      delete remaining[id];
+      return remaining;
+    });
+  };
 
   return (
     <View
