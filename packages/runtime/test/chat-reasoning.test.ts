@@ -1,9 +1,16 @@
 import { describe, expect, test } from "bun:test";
 import type { ModelRequest, ModelResponse, ResponseStreamEvent } from "@openai/agents";
-import { Agent, Runner, OpenAIResponsesModel } from "@openai/agents";
+import { Agent, Runner } from "@openai/agents";
 import { getOrCreateTrace } from "@openai/agents-core";
 import type { ResolvedModelProvider } from "@opengeni/config";
-import { OpenGeniChatCompletionsModel } from "../src/model-provider-routing";
+import { canonicalizePersistedHistoryItem } from "@opengeni/codex";
+import {
+  OpenGeniChatCompletionsModel,
+  OpenGeniResponsesModel,
+} from "../src/model-provider-routing";
+import { AnthropicMessagesModel } from "../src/anthropic-messages";
+import { sanitizeHistoryItemsForModel } from "../src/history-sanitizer";
+import { stripProviderItemIdsFilter } from "../src/model-input";
 import {
   chatModelRequestPolicy,
   modelRequestPolicyForProvider,
@@ -418,32 +425,161 @@ test("legacy nonstreamed answer metadata stays with its following tool calls", a
   expect(input).toEqual(before);
 });
 
-test("native Chat provenance never becomes a Responses wire field", async () => {
-  const output = withChatReasoning([], { field: "reasoning_content", text: "Synthetic summary" });
-  const before = structuredClone(output);
-  const client = new ReplayableJsonOpenAI({
-    apiKey: "fixture-key",
-    baseURL: "https://example.test/v1",
-    maxRetries: 0,
-    fetch: async (_url, init) => {
-      const text = await requestBodyText(init?.body);
-      expect(text).not.toContain("chatCompletions");
-      expect(text).not.toContain("chat_completions");
-      expect(text).not.toContain("reasoningField");
-      const body = JSON.parse(text);
-      expect(body.input[0]).toEqual({ type: "reasoning", summary: [] });
-      return Response.json({
-        id: "response-fixture",
-        object: "response",
-        status: "completed",
-        output: [],
+for (const field of ["reasoning", "reasoning_content"] as const) {
+  for (const { stream, legacy } of [
+    { stream: false, legacy: false },
+    { stream: true, legacy: false },
+    { stream: false, legacy: true },
+  ]) {
+    test(`persisted Chat ${field}, stream=${stream}, legacy=${legacy}: Responses/Claude switch and return`, async () => {
+      const chatRequests: Record<string, any>[] = [];
+      const chat = new OpenGeniChatCompletionsModel(
+        new ReplayableJsonOpenAI(
+          {
+            apiKey: "fixture-key",
+            baseURL: "https://example.test/v1",
+            maxRetries: 0,
+            fetch: async (_url, init) => {
+              const body = JSON.parse(await requestBodyText(init?.body));
+              chatRequests.push(body);
+              return wireReply(body, field, chatRequests.length === 1);
+            },
+          },
+          { modelRequestPolicy: chatModelRequestPolicy },
+        ),
+        "fixture-chat",
+      );
+      const first = await response(chat, "Start", stream);
+      const history = sanitizeHistoryItemsForModel(
+        JSON.parse(
+          JSON.stringify([
+            { type: "message", role: "user", content: "Start" },
+            // Older nonstream reasoning_content replies retained reasoning only
+            // in output_text metadata, without a separate reasoning record.
+            ...first.output.filter((item) => !legacy || item.type !== "reasoning"),
+            {
+              type: "function_call_result",
+              callId: "call-fixture",
+              name: "lookup",
+              output: "Found",
+            },
+            { type: "message", role: "user", content: "Continue" },
+          ]),
+        ).map(canonicalizePersistedHistoryItem),
+      );
+      const before = JSON.stringify(history);
+      const expectedReason = "[Historical reasoning from another model]\nCompare the fixtures.";
+      const provider: ResolvedModelProvider = {
+        id: "fixture",
+        label: "Fixture",
+        kind: "api-key",
+        api: "responses",
+        builtin: false,
+        baseUrl: "https://example.test/v1",
+        apiKey: "fixture-key",
+      };
+      const responsesRequests: Record<string, any>[] = [];
+      const responses = new OpenGeniResponsesModel(
+        new ReplayableJsonOpenAI(
+          {
+            apiKey: "fixture-key",
+            baseURL: provider.baseUrl,
+            maxRetries: 0,
+            fetch: async (_url, init) => {
+              const body = JSON.parse(await requestBodyText(init?.body));
+              responsesRequests.push(body);
+              expect(body.input.some((item: any) => item.type === "reasoning")).toBe(false);
+              const texts = body.input
+                .filter((item: any) => item.role === "assistant")
+                .flatMap((item: any) => item.content);
+              expect(texts).toEqual([
+                { type: "output_text", text: expectedReason, annotations: [] },
+                { type: "output_text", text: "Checking.", annotations: [] },
+              ]);
+              expect(
+                body.input.filter((item: any) => item.type?.startsWith("function_call")),
+              ).toEqual([
+                { type: "function_call", call_id: "call-fixture", name: "lookup", arguments: "{}" },
+                { type: "function_call_output", call_id: "call-fixture", output: "Found" },
+              ]);
+              return Response.json({
+                id: "response-fixture",
+                object: "response",
+                status: "completed",
+                output: [
+                  {
+                    id: "message-fixture",
+                    type: "message",
+                    role: "assistant",
+                    status: "completed",
+                    content: [{ type: "output_text", text: "Complete.", annotations: [] }],
+                  },
+                ],
+              });
+            },
+          },
+          { modelRequestPolicy: modelRequestPolicyForProvider(provider) },
+        ),
+        "fixture-responses",
+        provider,
+      );
+      const runner = new Runner({
+        tracingDisabled: true,
+        callModelInputFilter: stripProviderItemIdsFilter,
       });
-    },
-  });
-  const model = new OpenAIResponsesModel(client, "fixture-model");
-  await getOrCreateTrace(() => model.getResponse({ ...base, input: output }));
-  expect(output).toEqual(before);
-});
+      await runner.run(new Agent({ name: "Fixture", model: responses }), history as never);
+      expect(responsesRequests).toHaveLength(1);
+
+      const claudeRequests: Record<string, any>[] = [];
+      const claude = new AnthropicMessagesModel(
+        { ...provider, api: "anthropic-messages" },
+        "claude-fixture",
+        (async (_url, init) => {
+          const body = JSON.parse(await requestBodyText(init?.body));
+          claudeRequests.push(body);
+          expect(body.messages.map((message: any) => message.role)).toEqual([
+            "user",
+            "assistant",
+            "user",
+          ]);
+          expect(body.messages[1].content).toEqual([
+            { type: "text", text: expectedReason },
+            { type: "text", text: "Checking." },
+            { type: "tool_use", id: "call-fixture", name: "lookup", input: {} },
+          ]);
+          expect(body.messages[2].content[0]).toMatchObject({
+            type: "tool_result",
+            tool_use_id: "call-fixture",
+            content: [{ type: "text", text: "Found" }],
+          });
+          return Response.json({
+            id: "message-fixture",
+            type: "message",
+            role: "assistant",
+            content: [{ type: "text", text: "Complete." }],
+            stop_reason: "end_turn",
+            usage: { input_tokens: 1, output_tokens: 1 },
+          });
+        }) as typeof fetch,
+      );
+      await runner.run(new Agent({ name: "Fixture", model: claude }), history as never);
+      expect(claudeRequests).toHaveLength(1);
+      expect(JSON.stringify(history)).toBe(before);
+
+      // Switching back reads the original canonical reasoning/native field.
+      await response(chat, history as never, false);
+      expect(chatRequests[1]!.messages[1]).toMatchObject({
+        role: "assistant",
+        [field]: "Compare the fixtures.",
+        content: [{ type: "text", text: "Checking." }],
+        tool_calls: [
+          { id: "call-fixture", type: "function", function: { name: "lookup", arguments: "{}" } },
+        ],
+      });
+      expect(JSON.stringify(history)).toBe(before);
+    });
+  }
+}
 
 test("identical reasoning in separate responses keeps both assistant boundaries", async () => {
   const input = ["First answer", "Second answer"].flatMap((text) =>

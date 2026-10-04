@@ -12,6 +12,7 @@ import {
 import OpenAI, { APIError } from "openai";
 import { AnthropicMessagesModel } from "./anthropic-messages";
 import { projectChatToolImages } from "./chat-tool-images";
+import { projectHistoryForProvider } from "./provider-history-adapter";
 import {
   chatReasoning,
   primaryChatChoice,
@@ -211,7 +212,14 @@ export class OpenGeniResponsesModel extends AppendOnlyOpenAIResponsesModel {
     const startedAt = performance.now();
     let outcome: "completed" | "failed" = "completed";
     try {
-      return super._buildResponsesCreateRequest(request, stream);
+      const input =
+        typeof request.input === "string"
+          ? request.input
+          : (projectHistoryForProvider(request.input, "responses") as ModelRequest["input"]);
+      return super._buildResponsesCreateRequest(
+        input === request.input ? request : { ...request, input },
+        stream,
+      );
     } catch (error) {
       outcome = "failed";
       throw error;

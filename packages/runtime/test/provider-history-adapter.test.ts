@@ -5,11 +5,137 @@ import {
 } from "../src/provider-history-adapter";
 
 describe("projectHistoryForProvider", () => {
+  test("legacy Chat raw reasoning becomes inert assistant context without truncation or mutation", () => {
+    const text = "Synthetic reasoning. ".repeat(2000);
+    const items = [
+      { type: "reasoning", content: [], rawContent: [{ type: "reasoning_text", text }] },
+    ];
+    const before = JSON.stringify(items);
+    for (const api of ["responses", "anthropic-messages"] as const) {
+      const projected = projectHistoryForProvider(items, api);
+      expect(projected).toEqual([
+        {
+          type: "message",
+          role: "assistant",
+          status: "completed",
+          content: [
+            { type: "output_text", text: `[Historical reasoning from another model]\n${text}` },
+          ],
+        },
+      ]);
+      expect(projectHistoryForProvider(projected, api)).toBe(projected);
+      expect(JSON.stringify(items)).toBe(before);
+    }
+  });
+
+  test("native encrypted/signed reasoning and Responses annotations retain their original references", () => {
+    const rawContent = [{ type: "reasoning_text", text: "Native raw text" }];
+    const items = [
+      { type: "reasoning", content: [], rawContent, providerData: { encrypted_content: "opaque" } },
+      { type: "reasoning", content: [], rawContent, encrypted_content: "opaque" },
+      {
+        type: "reasoning",
+        content: [],
+        rawContent,
+        providerData: {
+          anthropic: {
+            block: {
+              type: "thinking",
+              thinking: "Native raw text",
+              signature: "signature-fixture",
+            },
+          },
+        },
+      },
+      { type: "reasoning", content: [{ type: "input_text", text: "Native summary" }], rawContent },
+      {
+        type: "message",
+        role: "assistant",
+        content: [
+          {
+            type: "output_text",
+            text: "Answer",
+            providerData: {
+              annotations: [
+                {
+                  type: "url_citation",
+                  url: "https://example.test/source",
+                  title: "Fixture",
+                  start_index: 0,
+                  end_index: 6,
+                },
+              ],
+            },
+          },
+        ],
+      },
+    ];
+    for (const api of ["responses", "anthropic-messages"] as const)
+      expect(projectHistoryForProvider(items, api)).toBe(items);
+  });
+
+  test("Responses removes only Chat reply metadata from assistant text/refusal parts", () => {
+    const items = [
+      {
+        type: "message",
+        role: "assistant",
+        content: [
+          {
+            type: "output_text",
+            text: "Answer",
+            providerData: { role: "assistant", tools: [], reasoning_content: "Summary" },
+          },
+          {
+            type: "refusal",
+            refusal: "Cannot help",
+            providerData: { role: "assistant", refusal: "Cannot help", annotations: [] },
+          },
+          { type: "output_text", text: "Cited", providerData: { annotations: [] } },
+        ],
+      },
+    ];
+    const before = JSON.stringify(items);
+    const projected = projectHistoryForProvider(items, "responses");
+    expect(projected[0]!.content).toEqual([
+      { type: "output_text", text: "[Historical reasoning from another model]\nSummary" },
+      { type: "output_text", text: "Answer" },
+      { type: "refusal", refusal: "Cannot help" },
+      items[0]!.content[2],
+    ]);
+    expect((projected[0]!.content as unknown[])[3]).toBe(items[0]!.content[2]);
+    expect(JSON.stringify(items)).toBe(before);
+    expect(projectHistoryForProvider(projected, "responses")).toBe(projected);
+    const claude = projectHistoryForProvider(items, "anthropic-messages");
+    expect(claude).toEqual(projected);
+    expect(projectHistoryForProvider(claude, "anthropic-messages")).toBe(claude);
+  });
+
   test("Responses uses canonical history by reference", () => {
     const items = [{ type: "tool_search_call", call_id: "search-1", execution: "client" }];
     const projected = projectHistoryForProvider(items, "responses");
     expect(projected).toBe(items);
     expect(projected[0]).toBe(items[0]);
+  });
+
+  test("Responses strips the Chat function envelope while retaining independent call extensions", () => {
+    const items = [
+      {
+        type: "function_call",
+        name: "lookup",
+        arguments: "{}",
+        callId: "call-fixture",
+        providerData: {
+          type: "function",
+          function: { name: "lookup", arguments: "{}" },
+          namespace: "tools",
+        },
+      },
+    ];
+    const before = JSON.stringify(items);
+    const projected = projectHistoryForProvider(items, "responses");
+    expect(projected).toEqual([{ ...items[0], providerData: { namespace: "tools" } }]);
+    expect(projectHistoryForProvider(projected, "responses")).toBe(projected);
+    expect(JSON.stringify(items)).toBe(before);
   });
 
   test("Codex subscription A to B to A keeps the same opaque Responses history", () => {
