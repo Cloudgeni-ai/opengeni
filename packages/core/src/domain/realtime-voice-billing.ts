@@ -43,6 +43,25 @@ export type DeploymentRealtimeVoice = {
  * return null. (The catalog lists hosted GPT Live instead of the managed
  * Gateway choices when both are configured; both remain priced and gated.)
  */
+const reportedPricingErrors = new Set<string>();
+
+/**
+ * Malformed pricing withholds the model (like voice input) instead of failing
+ * API/worker boot; each distinct error is logged once.
+ */
+function tolerantPricing<T>(parse: () => T, fallback: T): T {
+  try {
+    return parse();
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    if (!reportedPricingErrors.has(message)) {
+      reportedPricingErrors.add(message);
+      console.error(`Live voice pricing ignored: ${message}`);
+    }
+    return fallback;
+  }
+}
+
 export function deploymentRealtimeVoice(
   settings: Settings,
   model: SessionRealtimeModel | string,
@@ -52,7 +71,14 @@ export function deploymentRealtimeVoice(
     return {
       provider: "azure-live",
       configured: azureConfigured,
-      pricing: parseRealtimeVoicePricingJson(settings.azureLivePricingJson),
+      pricing: tolerantPricing(
+        () =>
+          parseRealtimeVoicePricingJson(
+            settings.azureLivePricingJson,
+            "OPENGENI_AZURE_LIVE_PRICING_JSON",
+          ),
+        null,
+      ),
     };
   }
   for (const gateway of Object.values(AI_GATEWAY_REALTIME_MODELS)) {
@@ -61,9 +87,14 @@ export function deploymentRealtimeVoice(
       provider: "ai-gateway",
       configured: Boolean(settings.vercelAiGatewayApiKey),
       pricing:
-        parseRealtimeVoicePricingTableJson(settings.aiGatewayRealtimePricingJson)[
-          gateway.upstreamModelId
-        ] ?? null,
+        tolerantPricing(
+          () =>
+            parseRealtimeVoicePricingTableJson(
+              settings.aiGatewayRealtimePricingJson,
+              "OPENGENI_AI_GATEWAY_REALTIME_PRICING_JSON",
+            ),
+          {} as Record<string, RealtimeVoicePricing>,
+        )[gateway.upstreamModelId] ?? null,
     };
   }
   return null;

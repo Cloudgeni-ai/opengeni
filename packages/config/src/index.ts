@@ -1,8 +1,4 @@
 export { managedUserEmailAllowed } from "./managed-user-admission";
-import {
-  parseRealtimeVoicePricingJson,
-  parseRealtimeVoicePricingTableJson,
-} from "./realtime-voice-pricing";
 export * from "./realtime-voice-pricing";
 export * from "./web-search";
 import { EnvCreditPromotionPolicy } from "./credit-promotions";
@@ -8922,11 +8918,6 @@ function validateSettings(settings: Settings, source: NodeJS.ProcessEnv = proces
   // Malformed voice-input pricing deliberately does not fail boot: every
   // process shares this config, and a voice-only typo must not crash-loop
   // workers. The provider is withheld and the API logs voiceInputPricingIssues.
-  parseRealtimeVoicePricingJson(settings.azureLivePricingJson, "OPENGENI_AZURE_LIVE_PRICING_JSON");
-  parseRealtimeVoicePricingTableJson(
-    settings.aiGatewayRealtimePricingJson,
-    "OPENGENI_AI_GATEWAY_REALTIME_PRICING_JSON",
-  );
   sandboxEnvironmentVariableNames(settings);
   sandboxLifecycleHookIds(settings);
   // Fail fast on a malformed warm-rate table (P2.1).

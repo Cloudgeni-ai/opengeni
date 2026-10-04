@@ -63,4 +63,11 @@ test("only deployment-funded voice is gated; enabled without pricing is unavaila
     "opengeni-azure/gpt-live-1",
   )!;
   expect(realtimeVoiceOfferProblem(settings, unconfigured)?.code).toBe("not_configured");
+  // Malformed pricing withholds the model rather than throwing (no boot failure).
+  const malformed = deploymentRealtimeVoice(
+    { ...settings, azureLivePricingJson: "{not json" },
+    "opengeni-azure/gpt-live-1",
+  )!;
+  expect(malformed.pricing).toBeNull();
+  expect(realtimeVoiceOfferProblem(settings, malformed)?.code).toBe("pricing_unconfigured");
 });
