@@ -8,9 +8,11 @@ import {
   claimSessionWorkForAttempt,
   createDb,
   createSession,
+  DatabaseTransactionError,
   mutateSessionControlInTransaction,
   registerPendingSessionToolCall,
   recordPendingSessionToolCallResult,
+  SessionEventPersistenceError,
   submitHumanPromptInTransaction,
   withWorkspaceSubjectSessionActivityRls,
   type PendingSessionToolCallInput,
@@ -347,10 +349,20 @@ describe("pending tool registration rollback retries", () => {
         return Reflect.get(target, key, receiver);
       },
     });
-    await expect(registerPendingSessionToolCall(unavailable, input)).rejects.toMatchObject({
-      details: { attempts: 2, retryOutcome: "not_retryable", sqlState: null },
-      cause: failure,
+    const error = await registerPendingSessionToolCall(unavailable, input).catch(
+      (caughtError: unknown) => caughtError,
+    );
+    expect(error).toBeInstanceOf(SessionEventPersistenceError);
+    if (!(error instanceof SessionEventPersistenceError)) throw error;
+    expect(error.details).toMatchObject({
+      attempts: 2,
+      retryOutcome: "not_retryable",
+      sqlState: null,
     });
+    expect(error.cause).toBeInstanceOf(DatabaseTransactionError);
+    if (!(error.cause instanceof DatabaseTransactionError)) throw error.cause;
+    expect(error.cause.stage).toBe("admission");
+    expect(error.cause.cause).toBe(failure);
     expect(attempts).toBe(2);
     expect(await receipts(input)).toHaveLength(0);
   });
