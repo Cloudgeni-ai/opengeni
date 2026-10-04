@@ -1,5 +1,24 @@
 # @opengeni/react
 
+## 1.2.0
+
+### Minor Changes
+
+- d870f32: Support model-scoped signup and coupon credits with a shared operator default and
+  per-offer overrides. Update coverage at runtime, spend eligible promotions before
+  general credits, and preserve allocation and retry accounting. Keep scoped coupon
+  redemption separate from paid top-ups. Show credit funding in model selection and
+  current coverage on demand in billing. Legacy unrestricted grants stay unrestricted.
+
+### Patch Changes
+
+- 21c8904: Support optional HTTPS model catalog logos with safe image fallbacks, and declare the item type of the SDK filesystem function tool's command tuple.
+- Updated dependencies [11c4d3c]
+- Updated dependencies [21c8904]
+- Updated dependencies [d870f32]
+  - @opengeni/sdk@1.2.0
+  - @opengeni/connect@1.2.0
+
 ## 1.1.0
 
 ### Patch Changes

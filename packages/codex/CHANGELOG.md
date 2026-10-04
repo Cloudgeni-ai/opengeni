@@ -1,5 +1,14 @@
 # @opengeni/codex
 
+## 1.2.0
+
+### Patch Changes
+
+- Updated dependencies [21c8904]
+- Updated dependencies [d870f32]
+  - @opengeni/contracts@1.2.0
+  - @opengeni/network@1.2.0
+
 ## 1.1.0
 
 ### Patch Changes
