@@ -262,7 +262,7 @@ export function ClaudeUsage({
   return (
     <DetailSection
       title="Usage"
-      description="Limits apply to the connected Claude plan, including usage outside OpenGeni."
+      description="Limits apply to the connected Claude plan, including usage outside Opengeni."
     >
       <UsageMeterGroup
         windows={readings}

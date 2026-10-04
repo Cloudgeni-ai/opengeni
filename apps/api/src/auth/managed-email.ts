@@ -33,7 +33,7 @@ export class InMemoryManagedEmailTransport implements ManagedEmailTransport {
       idempotency?: ManagedEmailTransport["idempotency"];
     } = {},
   ) {
-    this.sender = options.sender ?? "OpenGeni <auth@mail.opengeni.ai>";
+    this.sender = options.sender ?? "Opengeni <auth@mail.opengeni.ai>";
     this.idempotency = options.idempotency ?? {
       scope: "opengeni-in-memory-v1",
       retentionSeconds: 86_400,

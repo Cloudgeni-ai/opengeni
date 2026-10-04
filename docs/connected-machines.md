@@ -597,7 +597,9 @@ verified exit sequence and attach generation. It is recorded only after all
 retained bytes have been captured in PostgreSQL. A terminal-only reconciliation
 queue retries the final acknowledgement against the original operation and
 connection, including after worker loss; a newer enrollment route is never
-substituted. Publish success leaves the obligation pending until an exact runner
+substituted. Already captured output takes priority over full replay, so older
+uncaptured results cannot delay final acknowledgements for saved results. Publish
+success leaves the obligation pending until an exact runner
 observation establishes that output is no longer retained. Completion input to
 the model remains independent. Legacy rows require full replay before a receipt
 can be recorded; output lost before capture is explicitly marked unavailable

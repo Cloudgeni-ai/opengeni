@@ -251,7 +251,7 @@ export default function PageVariableSetDetailSection() {
         avoid={[
           "Reveal, Copy, version numbers or a •••••• pill on every row.",
           "An Add variable button in the header, a one-variable page, or a right-side sheet.",
-          "Rotate and Revoke for values OpenGeni only stores.",
+          "Rotate and Revoke for values Opengeni only stores.",
         ]}
       />
     </KitSection>

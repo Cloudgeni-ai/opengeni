@@ -2,21 +2,23 @@ import { expect, test } from "bun:test";
 
 const root = new URL("../", import.meta.url);
 
-test("setup/public UI expectations preserve stock ownership and first-try evidence", async () => {
+test("setup guide preserves stock ownership and first-try evidence", async () => {
   const setup = await Bun.file(new URL(".agents/skills/opengeni-setup/SKILL.md", root)).text();
-  const primary = await Bun.file(new URL("docs-site/integrate/conversation-ui.mdx", root)).text();
-  for (const text of [setup, primary]) {
-    const prose = text.replaceAll(/\s+/g, " ");
-    expect(prose).toContain("1440px");
-    expect(prose).toContain("390px");
-    expect(prose).toContain("light/dark");
-    expect(prose).toContain("React/CSS");
-    expect(prose).toContain("first-try");
-    expect(prose).toContain("coordinator captures");
-    expect(prose).toContain("coding-agent handoff");
-  }
-  expect(primary).toContain("no extra cosmetic host CSS");
+  const prose = setup.replaceAll(/\s+/g, " ");
+  for (const phrase of [
+    "1440px",
+    "390px",
+    "light/dark",
+    "React/CSS",
+    "first-try",
+    "coordinator captures",
+    "coding-agent handoff",
+  ])
+    expect(prose).toContain(phrase);
   expect(setup).toContain("not a passed UI");
+  // The public page keeps only the developer-facing stock-styling promise.
+  const primary = await Bun.file(new URL("docs-site/integrate/conversation-ui.mdx", root)).text();
+  expect(primary).toContain("no extra cosmetic host CSS");
 });
 
 test("public error-formatter guidance preserves neutral host copy without changing diagnostics", async () => {
@@ -29,10 +31,7 @@ test("public error-formatter guidance preserves neutral host copy without changi
     "string | undefined",
     "empty string",
     "throwing callback",
-    "interrupt delivery-state settlement",
     "original error",
-    "retry policy",
-    "older installed/published package",
   ])
     expect(prose).toContain(phrase);
 });

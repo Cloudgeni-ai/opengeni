@@ -215,7 +215,7 @@ export function codexCapacityWaitFailurePayload(input: {
     return {
       error:
         input.planEntitlement?.error ??
-        "The serving ChatGPT account's plan does not include this model. OpenGeni is waiting for another connected account to become available.",
+        "The serving ChatGPT account's plan does not include this model. Opengeni is waiting for another connected account to become available.",
       code: "codex_plan_entitlement",
       detail: input.detail,
       retryable: false,

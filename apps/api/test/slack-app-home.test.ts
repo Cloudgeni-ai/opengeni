@@ -144,13 +144,13 @@ describe("Slack App Home projection", () => {
 
   test("access views contain no stale task content", () => {
     const blocks = buildSlackAppHomeAccessBlocks({
-      title: "OpenGeni access changed",
+      title: "Opengeni access changed",
       message: "Reconnect before tasks are shown here.",
       actionLabel: "Reconnect OpenGeni",
       actionUrl: "https://app.example.test/workspaces/workspace/capabilities#slack_link=signed",
     });
     expect(JSON.stringify(blocks)).toContain("Reconnect OpenGeni");
-    expect(JSON.stringify(blocks)).not.toContain("Your OpenGeni tasks");
+    expect(JSON.stringify(blocks)).not.toContain("Your Opengeni tasks");
   });
 });
 

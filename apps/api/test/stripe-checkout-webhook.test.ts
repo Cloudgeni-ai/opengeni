@@ -103,7 +103,7 @@ describe("Stripe checkout credit decision", () => {
     delete metadata.opengeni_credit_micros;
 
     expect(() => decide(openGeniCheckoutSession({ metadata, paymentStatus: "paid" }))).toThrow(
-      "is missing OpenGeni credit metadata",
+      "is missing Opengeni credit metadata",
     );
   });
 });

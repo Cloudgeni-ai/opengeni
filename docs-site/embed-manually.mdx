@@ -1,20 +1,20 @@
 ---
 title: "Embed manually"
-description: "Add the full OpenGeni conversation to your product in four steps."
+description: "Add the Opengeni conversation to your product in four steps."
 icon: "code"
 ---
 
-The default integration is the complete OpenGeni conversation inside your product: `OpenGeniChat` (the user's chats plus the conversation) in the browser, backed by a packaged proxy on your backend. The browser talks only to your backend, and the organization API key never leaves it.
+You add one proxy route to your backend and render `<OpenGeniChat />` in your frontend. The browser talks to your backend; your backend holds the API key.
 
 ```bash
 bun add @opengeni/sdk @opengeni/react
 ```
 
-Use the same version for all `@opengeni` packages; they release together at one shared version.
+Keep all `@opengeni` packages on the same version.
 
 <Steps>
-  <Step title="Create an organization API key">
-    In **Organization settings → Developer**, create a **full-access** organization API key and store the token in your secret manager. Copy the **Organization ID** from **Organization settings → General**. Your backend needs:
+  <Step title="Get an API key">
+    Sign up at [app.opengeni.ai](https://app.opengeni.ai). In **Organization settings → Developer**, create a **full-access** API key scoped to **all shared workspaces**. Copy the **Organization ID** from **Organization settings → General**.
 
     ```bash
     OPENGENI_API_BASE_URL=https://app.opengeni.ai   # or your self-hosted API
@@ -22,11 +22,11 @@ Use the same version for all `@opengeni` packages; they release together at one 
     OPENGENI_API_KEY=ogk_...                        # server only
     ```
 
-    Use full permissions with **all shared workspaces** scope for this provisioning flow. The key creates workspaces, adds your users as members, and creates and controls sessions as them. `GET /v1/access/me` may have empty `workspaceGrants`; check `credential.policy`, `credential.workspaceScope`, and `credential.effectiveWorkspacePermissions` instead of relying on the legacy `access` label. A read-only policy cannot create sessions; selected-workspace scope does not admit future tenant workspaces. Personal workspaces are always excluded. See [Authentication](/reference/authentication).
+    See [Authentication](/reference/authentication) for key scopes.
 
   </Step>
   <Step title="Onboard each user">
-    Map each tenant to an OpenGeni workspace and make each user a member, once, when your product admits them:
+    Each tenant maps to an Opengeni workspace, and each user must be a member of it. Run this once when your product admits a user:
 
     ```ts
     // lib/opengeni.ts
@@ -36,7 +36,7 @@ Use the same version for all `@opengeni` packages; they release together at one 
       baseUrl: process.env.OPENGENI_API_BASE_URL!,
       apiKey: process.env.OPENGENI_API_KEY!,
     });
-    export const source = "acme-product"; // stable namespace for your user ids
+    export const source = "acme-product"; // namespace for your user ids
 
     export async function onboard(tenant: Tenant, user: User, operationId: string) {
       const { workspace } = await og.ensureWorkspace({
@@ -54,19 +54,19 @@ Use the same version for all `@opengeni` packages; they release together at one 
           "sessions:control",
           "files:upload",
           "files:read",
-          // add "mcp_servers:attach" for your own tools (toolServer) or per-session MCP servers
+          // add "mcp_servers:attach" to give the agent your own tools
         ],
-        operationId, // a UUID you persist first; reuse it only to retry this request
+        operationId, // a UUID you store; reuse it only to retry this call
       });
-      return workspace.id; // persist the tenant -> workspace mapping
+      return workspace.id; // store the tenant -> workspace mapping
     }
     ```
 
-    `ensureWorkspace` is idempotent. Without membership the API answers `403`. See [Users, tenants & privacy](/integrate/users-and-tenants).
+    If each user should get their own workspace instead, skip this step: pass the `OpenGeni` facade from `@opengeni/sdk/chat` to the proxy with `chats: "isolated"` and return `{ tenant, user }` from `resolve`. It creates the workspace and membership on first use. See [Users, tenants & privacy](/integrate/users-and-tenants).
 
   </Step>
   <Step title="Mount the proxy">
-    Add one catch-all route. With the Next.js App Router, in `app/api/opengeni/[...path]/route.ts`:
+    With the Next.js App Router, in `app/api/opengeni/[...path]/route.ts`:
 
     ```ts
     import { createSessionProxyRoute } from "@opengeni/sdk/next";
@@ -75,32 +75,32 @@ Use the same version for all `@opengeni` packages; they release together at one 
 
     export const dynamic = "force-dynamic";
     export const { GET, POST, PUT, PATCH, DELETE } = createSessionProxyRoute(og, {
-      chats: "private", // each user's chats are theirs; "shared" lets the team see them
+      chats: "private", // "shared" lets the team see each other's chats
       resolve: async (request) => {
         const me = await authenticate(request);
         if (!me) return new Response("Unauthorized", { status: 401 });
         return { workspaceId: me.workspaceId, user: me.userId, source };
       },
       authorizeMutation: (request) => verifyCsrf(request),
-      // New chats: the browser sends only the first message; you choose the rest.
+      // The browser sends only the first message; you choose the rest.
       createSession: ({ initialMessage, idempotencyKey }) => ({
         initialMessage,
         idempotencyKey,
         agent: {
           identity: "You are Acme's assistant. Friendly and brief.",
-          capabilities: "none", // your tools plus asking questions: see "Configure the agent"
+          capabilities: "none",
         },
-        tools: [], // workspace integrations to select; toolServer adds itself
+        tools: [],
         sandboxBackend: "none", // a chat-and-tools agent needs no sandbox
       }),
-      // Your product's own tools, as the signed-in user: see "Give the agent your data".
+      // Your own tools, called as the signed-in user:
       // toolServer: { url: "https://app.example.com/api/mcp", approvals: { ask: ["rename_post"] } },
     });
     ```
 
-    `agent` needs agent settings enabled on the deployment. If `getClientConfig()` reports `agentConfig.enabled: false`, leave it out and pass `firstPartyMcpTools: []` instead; see [Configure the agent](/integrate/configure-the-agent). Private chats need private sessions enabled for your organization; without them the proxy throws `OpenGeniSetupError`, which says who can turn it on.
+    Private chats must be enabled for your organization; if they aren't, the proxy throws `OpenGeniSetupError` saying who can turn them on. For agent options, see [Configure the agent](/integrate/configure-the-agent).
 
-    For Express or Connect, use `app.use("/api/opengeni", toNodeMiddleware(createSessionProxyHandler(og, options)))` from `@opengeni/sdk/express`; for Hono, `app.all("/api/opengeni/*", toHonoHandler(...))` from `@opengeni/sdk/hono`. See the [SDK reference](/reference/sdk#framework-adapters). A Django, Rails, Go, PHP, or Java backend needs no Node sidecar: see [Proxy from any backend](/integrate/proxy-from-any-backend).
+    Express and Hono have adapters in `@opengeni/sdk/express` and `@opengeni/sdk/hono` (see the [SDK reference](/reference/sdk#framework-adapters)). For other backends, see [Proxy from any backend](/integrate/proxy-from-any-backend).
 
   </Step>
   <Step title="Render the conversation">
@@ -120,7 +120,7 @@ Use the same version for all `@opengeni` packages; they release together at one 
     }
     ```
 
-    `OpenGeniChat` lists the chats the signed-in user started (a sidebar when wide, a drawer when narrow) and starts new ones through your `createSession` hook. For an assistant bound to one record, create the session on your server as the user (`og.asUser(userId, { source }).createSession(...)` with a stable `idempotencyKey`) and render `<SessionConversation sessionId={id} />`. The stylesheet is scoped and needs no Tailwind setup. See [Conversation UI & theming](/integrate/conversation-ui).
+    `OpenGeniChat` shows the user's chats and the conversation. For an assistant tied to one record, create the session on your server with `og.asUser(userId, { source }).createSession(...)` and render `<SessionConversation sessionId={id} />`. The stylesheet is scoped and needs no Tailwind. See [Conversation UI & theming](/integrate/conversation-ui).
 
   </Step>
 </Steps>
@@ -132,7 +132,7 @@ Use the same version for all `@opengeni` packages; they release together at one 
     Connect your API through MCP or OpenAPI, as the signed-in user.
   </Card>
   <Card title="Going to production" icon="rocket" href="/integrate/production">
-    Key storage, costs, versions, cleanup, and a minimal tool surface.
+    Key storage, costs, versions, and cleanup.
   </Card>
 </CardGroup>
 

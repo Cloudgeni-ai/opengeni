@@ -887,7 +887,7 @@ describe("API helpers", () => {
       error: {
         status: 503,
         code: "upstream_unavailable",
-        message: "OpenGeni is temporarily unavailable — retry.",
+        message: "Opengeni is temporarily unavailable — retry.",
         retryable: true,
         requestId: "browser-safe-503",
       },
@@ -912,7 +912,7 @@ describe("API helpers", () => {
     });
     const body = (await response.json()) as { error: { requestId: string; message: string } };
     expect(response.status).toBe(500);
-    expect(body.error.message).toBe("OpenGeni could not complete the request.");
+    expect(body.error.message).toBe("Opengeni could not complete the request.");
     expect(body.error.requestId).toMatch(/^[0-9a-f-]{36}$/);
     expect(JSON.stringify(body)).not.toContain("PRIVATE-DATABASE-CREDENTIAL");
   });
@@ -1206,7 +1206,7 @@ describe("API helpers", () => {
         successUrl: "https://evil.example/checkout",
         idempotencyKey: "checkout:test-open-redirect",
       }),
-    ).toThrow("successUrl must use the OpenGeni public origin");
+    ).toThrow("successUrl must use the Opengeni public origin");
   });
 
   test("returns local Stripe Checkout to the configured web origin", () => {
@@ -1236,7 +1236,7 @@ describe("API helpers", () => {
         ...base,
         successUrl: "https://evil.example/checkout",
       }),
-    ).toThrow("successUrl must use the OpenGeni public or web origin");
+    ).toThrow("successUrl must use the Opengeni public or web origin");
   });
 
   test("namespaces Stripe customer mirrors by live and test mode", () => {
@@ -1267,7 +1267,7 @@ describe("API helpers", () => {
         publicBaseUrl: "https://app.opengeni.ai",
         returnUrl: "https://evil.example/billing",
       }),
-    ).toThrow("returnUrl must use the OpenGeni public origin");
+    ).toThrow("returnUrl must use the Opengeni public origin");
     expect(
       stripeBillingPortalSessionCreateParams({
         customerId: "cus_test",
@@ -1644,7 +1644,7 @@ describe("API helpers", () => {
       message = error instanceof Error ? error.message : String(error);
     }
 
-    expect(message).toContain("OpenGeni could not initialize configured.example");
+    expect(message).toContain("Opengeni could not initialize configured.example");
     expect(message).not.toContain(fixturePassword);
     expect(message).not.toContain(fixtureSecret);
     expect(message).not.toContain("fixture-user");
@@ -1670,7 +1670,7 @@ describe("API helpers", () => {
         throw new Error("Streamable HTTP error: POSTing to endpoint: HTTP 404 Not Found");
       }),
     ).rejects.toThrow(
-      'MCP capability "Gmail" could not be enabled because OpenGeni could not reach a valid Streamable HTTP MCP server at gmail.googleapis.com. Check the endpoint URL or choose a different catalog entry.',
+      'MCP capability "Gmail" could not be enabled because Opengeni could not reach a valid Streamable HTTP MCP server at gmail.googleapis.com. Check the endpoint URL or choose a different catalog entry.',
     );
   });
 
@@ -1990,7 +1990,7 @@ describe("GET /v1/config/client", () => {
     const defaultModel = config.models.find((model) => model.id === settings.openaiModel);
     expect(defaultModel).toMatchObject({
       provider: "opengeni",
-      providerLabel: "OpenGeni",
+      providerLabel: "Opengeni",
       source: "opengeni",
       api: "responses",
     });
@@ -2230,7 +2230,7 @@ describe("GET /v1/config/client", () => {
       id: "accounts/fireworks/models/glm-5p2",
       label: "GLM 5.2",
       provider: "opengeni",
-      providerLabel: "OpenGeni",
+      providerLabel: "Opengeni",
       source: "opengeni",
       api: "chat",
       contextWindowTokens: 1_048_576,

@@ -163,12 +163,12 @@ export function registerPrReviewRoutes(app: Hono, deps: ApiRouteDeps): void {
         payload.accessTokenExpiresAt !== undefined
       ) {
         throw new HTTPException(422, {
-          message: "OpenGeni Lens credentials are managed by the deployment",
+          message: "Opengeni Lens credentials are managed by the deployment",
         });
       }
       if (payload.status === "active") {
         throw new HTTPException(409, {
-          message: "Reconnect OpenGeni Lens to reactivate and resync its repositories",
+          message: "Reconnect Opengeni Lens to reactivate and resync its repositories",
         });
       }
     }
@@ -586,7 +586,7 @@ function assertPrReviewSandboxBackend(deps: ApiRouteDeps): void {
   if (deps.settings.sandboxBackend === "selfhosted") {
     throw new HTTPException(409, {
       message:
-        "OpenGeni Review Bot requires managed compute so it can materialize and verify the exact pull-request head",
+        "Opengeni Review Bot requires managed compute so it can materialize and verify the exact pull-request head",
     });
   }
 }
@@ -595,7 +595,7 @@ function requirePrReviewEncryptionKey(deps: ApiRouteDeps): Uint8Array {
   const key = environmentsEncryptionKeyBytes(deps.settings);
   if (!key) {
     throw new HTTPException(503, {
-      message: "OpenGeni Review Bot requires configured secret encryption",
+      message: "Opengeni Review Bot requires configured secret encryption",
     });
   }
   return key;

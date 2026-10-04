@@ -1637,7 +1637,7 @@ export async function validatedScheduledTaskUpdate(input: {
     ) {
       throw new HTTPException(409, {
         message:
-          "cannot change the OpenGeni Slack bot connection of a task with a live reusable session; recreate the task",
+          "cannot change the Opengeni Slack bot connection of a task with a live reusable session; recreate the task",
       });
     }
     // Update text is exact, even when a full form submission reuses the saved
