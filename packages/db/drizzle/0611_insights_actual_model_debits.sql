@@ -177,15 +177,40 @@ BEGIN
 EXECUTE format($ddl$
 CREATE FUNCTION opengeni_private.insights_charge_window(a uuid,w uuid,lo timestamptz,hi timestamptz,granularity text)
 RETURNS TABLE(dimensions jsonb,occurred_at timestamptz,quantity bigint) LANGUAGE sql STABLE
-SET search_path=pg_catalog,%1$I,opengeni_private,pg_temp AS $fn$
-  WITH bounds AS(SELECT CASE WHEN lo=date_trunc('day',lo AT TIME ZONE 'UTC') AT TIME ZONE 'UTC' THEN lo
-      ELSE (date_trunc('day',lo AT TIME ZONE 'UTC')+interval '1 day') AT TIME ZONE 'UTC' END AS first_day,
-    date_trunc('day',hi AT TIME ZONE 'UTC') AT TIME ZONE 'UTC' AS last_day),
-  pending AS MATERIALIZED(SELECT EXISTS(SELECT 1 FROM opengeni_private.insights_rollup_invalidations i
+-- The unchanged projector disables nested loops for its metadata inventory.
+-- Dirty ledger attribution has a different shape: bounded debit rows can use
+-- the existing workspace/turn/source unique index instead of hashing the
+-- account's entire fact history. This setting is local to this read helper.
+SET search_path=pg_catalog,%1$I,opengeni_private,pg_temp SET enable_nestloop=on AS $fn$
+  WITH pending AS MATERIALIZED(SELECT EXISTS(SELECT 1 FROM opengeni_private.insights_rollup_invalidations i
     WHERE i.account_id=a AND i.workspace_id IS NOT DISTINCT FROM w AND i.stream='charges'
       AND (i.day IS NULL OR (i.day>=(lo AT TIME ZONE 'UTC')::date AND
-        i.day<=(hi AT TIME ZONE 'UTC')::date))) AS dirty)
-  SELECT d.dimensions,d.day::timestamp AT TIME ZONE 'UTC',d.quantity FROM opengeni_private.insights_charge_daily d CROSS JOIN bounds
+        i.day<=(hi AT TIME ZONE 'UTC')::date))) AS dirty),
+  bounds AS MATERIALIZED(SELECT CASE WHEN lo=date_trunc('day',lo AT TIME ZONE 'UTC') AT TIME ZONE 'UTC' THEN lo
+      WHEN granularity='day' AND NOT (SELECT dirty FROM pending) AND NOT EXISTS(
+        SELECT 1 FROM %1$I.credit_ledger_entries c WHERE c.account_id=a AND c.workspace_id IS NOT DISTINCT FROM w
+          AND c.type='model_usage_debit' AND c.source_type='model_response' AND c.amount_micros<0
+          AND c.occurred_at>=date_trunc('day',lo AT TIME ZONE 'UTC') AT TIME ZONE 'UTC' AND c.occurred_at<lo)
+      THEN date_trunc('day',lo AT TIME ZONE 'UTC') AT TIME ZONE 'UTC'
+      ELSE (date_trunc('day',lo AT TIME ZONE 'UTC')+interval '1 day') AT TIME ZONE 'UTC' END AS first_day,
+    CASE WHEN granularity='day' AND hi>date_trunc('day',hi AT TIME ZONE 'UTC') AT TIME ZONE 'UTC'
+      AND NOT (SELECT dirty FROM pending) AND NOT EXISTS(
+        SELECT 1 FROM %1$I.credit_ledger_entries c WHERE c.account_id=a AND c.workspace_id IS NOT DISTINCT FROM w
+          AND c.type='model_usage_debit' AND c.source_type='model_response' AND c.amount_micros<0
+          AND c.occurred_at>=hi AND c.occurred_at<(date_trunc('day',hi AT TIME ZONE 'UTC')+interval '1 day') AT TIME ZONE 'UTC')
+      THEN (date_trunc('day',hi AT TIME ZONE 'UTC')+interval '1 day') AT TIME ZONE 'UTC'
+      ELSE date_trunc('day',hi AT TIME ZONE 'UTC') AT TIME ZONE 'UTC' END AS last_day),
+  bounded_debits AS MATERIALIZED(
+    -- Normalize keys on the already-authorized bounded debit side before the
+    -- FORCE-RLS fact join. Typed keys allow the existing unique source index;
+    -- malformed keys remain unmatched and source-key case is never changed.
+    SELECT c.occurred_at,-c.amount_micros AS quantity,c.metadata->'sessionId' AS session_metadata,
+      CASE WHEN c.source_id~'^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}:.'
+        THEN left(c.source_id,36)::uuid END AS debit_turn_id,substr(c.source_id,38) AS debit_source_key
+    FROM %1$I.credit_ledger_entries c WHERE (SELECT dirty FROM pending) AND c.account_id=a AND c.workspace_id IS NOT DISTINCT FROM w
+      AND c.type='model_usage_debit' AND c.source_type='model_response' AND c.amount_micros<0
+      AND c.occurred_at>=lo AND c.occurred_at<hi)
+  SELECT d.dimensions,greatest(d.day::timestamp AT TIME ZONE 'UTC',lo),d.quantity FROM opengeni_private.insights_charge_daily d CROSS JOIN bounds
     WHERE NOT (SELECT dirty FROM pending) AND granularity='day' AND d.account_id=a AND d.workspace_id IS NOT DISTINCT FROM w
       AND d.day>=(first_day AT TIME ZONE 'UTC')::date AND d.day<(last_day AT TIME ZONE 'UTC')::date
   UNION ALL SELECT l.dimensions,l.occurred_at,l.quantity FROM opengeni_private.insights_charge_links l CROSS JOIN bounds
@@ -197,13 +222,12 @@ SET search_path=pg_catalog,%1$I,opengeni_private,pg_temp AS $fn$
   UNION ALL SELECT l.dimensions,l.occurred_at,l.quantity FROM opengeni_private.insights_charge_links l CROSS JOIN bounds
     WHERE NOT (SELECT dirty FROM pending) AND granularity='day' AND first_day<last_day AND l.account_id=a AND l.workspace_id IS NOT DISTINCT FROM w
       AND l.occurred_at>=last_day AND l.occurred_at<hi
-  UNION ALL SELECT opengeni_private.insights_charge_dimensions(to_jsonb(c),to_jsonb(f)),c.occurred_at,-c.amount_micros
-    FROM %1$I.credit_ledger_entries c LEFT JOIN %1$I.model_call_facts f ON f.account_id=c.account_id AND f.workspace_id=c.workspace_id
-      AND f.turn_id=CASE WHEN c.source_id~'^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}:.'
-        THEN left(c.source_id,36)::uuid END AND f.source_key=substr(c.source_id,38)
-    WHERE (SELECT dirty FROM pending) AND c.account_id=a AND c.workspace_id IS NOT DISTINCT FROM w
-      AND c.type='model_usage_debit' AND c.source_type='model_response' AND c.amount_micros<0
-      AND c.occurred_at>=lo AND c.occurred_at<hi
+  UNION ALL SELECT opengeni_private.insights_charge_dimensions(
+      jsonb_build_object('metadata',jsonb_build_object('sessionId',c.session_metadata)),
+      jsonb_build_object('session_id',f.session_id,'provider',f.provider,'model',f.model,'scheduled_task_id',f.scheduled_task_id)),
+      c.occurred_at,c.quantity
+    FROM bounded_debits c LEFT JOIN %1$I.model_call_facts f ON f.account_id=a AND f.workspace_id=w
+      AND f.turn_id=c.debit_turn_id AND f.source_key=c.debit_source_key
 $fn$;
 $ddl$,current_schema());
 END
@@ -254,9 +278,27 @@ BEGIN
         FROM opengeni_private.insights_rollup_invalidations i WHERE i.account_id=a AND i.workspace_id=w
           AND i.stream='model_call_facts' AND i.day>=(first_day AT TIME ZONE 'UTC')::date
           AND i.day<(last_day AT TIME ZONE 'UTC')::date;
+      -- Released inclusive-date windows exclude tiny fractions at midnight.
+      -- Never round them: a clean edge can reuse its whole-day cache ONLY if
+      -- authoritative indexed probes find no excluded facts in that day. The
+      -- same STABLE snapshot covers probes, invalidations and cached amounts.
+      IF model_granularity='day' THEN
+        IF first_day>lo AND NOT EXISTS(SELECT 1 FROM opengeni_private.insights_rollup_invalidations i
+          WHERE i.account_id=a AND i.workspace_id=w AND i.stream='model_call_facts' AND i.day=(lo AT TIME ZONE 'UTC')::date)
+          AND NOT EXISTS(SELECT 1 FROM %1$I.model_call_facts f WHERE f.account_id=a AND f.workspace_id=w
+            AND f.occurred_at>=date_trunc('day',lo AT TIME ZONE 'UTC') AT TIME ZONE 'UTC' AND f.occurred_at<lo) THEN
+          first_day:=date_trunc('day',lo AT TIME ZONE 'UTC') AT TIME ZONE 'UTC';
+        END IF;
+        IF last_day<hi AND NOT EXISTS(SELECT 1 FROM opengeni_private.insights_rollup_invalidations i
+          WHERE i.account_id=a AND i.workspace_id=w AND i.stream='model_call_facts' AND i.day=(hi AT TIME ZONE 'UTC')::date)
+          AND NOT EXISTS(SELECT 1 FROM %1$I.model_call_facts f WHERE f.account_id=a AND f.workspace_id=w
+            AND f.occurred_at>=hi AND f.occurred_at<(date_trunc('day',hi AT TIME ZONE 'UTC')+interval '1 day') AT TIME ZONE 'UTC') THEN
+          last_day:=(date_trunc('day',hi AT TIME ZONE 'UTC')+interval '1 day') AT TIME ZONE 'UTC';
+        END IF;
+      END IF;
       RETURN QUERY SELECT (d.dimensions->>'session_id')::uuid,d.dimensions->>'provider',d.dimensions->>'model',
         opengeni_private.insights_usage_payer(d.dimensions->>'provider',d.dimensions->>'billing_path'),
-        (d.dimensions->>'scheduled_task_id')::uuid,d.day::timestamp AT TIME ZONE 'UTC',d.recorded_at,
+        (d.dimensions->>'scheduled_task_id')::uuid,greatest(d.day::timestamp AT TIME ZONE 'UTC',lo),d.recorded_at,
         opengeni_private.insights_rollup_public_measures(d.measures),false
         FROM opengeni_private.insights_model_daily d
         WHERE model_granularity='day' AND d.account_id=a AND d.workspace_id=w
@@ -266,7 +308,10 @@ BEGIN
       -- a set-returning edge function whose cardinality/disabled nested loops
       -- could turn a small edge into an account-history scan. Full-day windows
       -- with no pending invalidations issue no raw model query at all.
-      FOR edge IN SELECT * FROM opengeni_private.insights_rollup_edge_ranges(lo,hi,model_granularity)
+      FOR edge IN SELECT * FROM opengeni_private.insights_rollup_edge_ranges(lo,hi,model_granularity) raw_range
+        WHERE NOT(model_granularity='day' AND first_day<=date_trunc('day',raw_range.since AT TIME ZONE 'UTC') AT TIME ZONE 'UTC'
+          AND last_day>=CASE WHEN raw_range.until=date_trunc('day',raw_range.until AT TIME ZONE 'UTC') AT TIME ZONE 'UTC'
+            THEN raw_range.until ELSE (date_trunc('day',raw_range.until AT TIME ZONE 'UTC')+interval '1 day') AT TIME ZONE 'UTC' END)
         UNION ALL SELECT day::timestamp AT TIME ZONE 'UTC',(day+1)::timestamp AT TIME ZONE 'UTC'
           FROM unnest(dirty_model_days) day WHERE model_granularity='day' LOOP
         -- Privacy depends on live session/root metadata, not individual model

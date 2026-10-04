@@ -956,6 +956,248 @@ test("one helper snapshot prevents frozen-reader mixed cache/raw results across 
   await assertExact();
 }, 180_000);
 
+test("clean near-midnight edges reuse cache only when authoritative excluded ranges are empty", async () => {
+  const turn = crypto.randomUUID();
+  const label = "exact-cached-edge";
+  const lo = "2026-07-20T00:00:00.001Z";
+  const hi = "2026-07-26T23:59:59.999Z";
+  await scope(async (tx) => {
+    await tx`insert into model_call_facts(account_id,workspace_id,session_id,turn_id,source_key,provider,provider_api,model,
+      billing_path,input_tokens,cached_tokens,cache_write_tokens,output_tokens,reasoning_tokens,total_tokens,
+      estimated_provider_cost_micros,occurred_at,recorded_at)
+      select ${accountId},${workspaceId},${sessionId},${turn},'edge-'||n,'openai','responses',${label},'opengeni_credits',
+        100,case when n%2=0 then 20 end,case when n%3=0 then 10 end,30,0,case when n%5=0 then 130 end,37,
+        (case when n<=32 then '2026-07-20T03:00Z' else '2026-07-26T03:00Z' end)::timestamptz+n*interval '1 microsecond',
+        '2026-07-26T05:00Z'::timestamptz+n*interval '1 microsecond' from generate_series(1,64)n`;
+    await tx`insert into credit_ledger_entries(account_id,workspace_id,type,amount_micros,source_type,source_id,idempotency_key,occurred_at)
+      values(${accountId},${workspaceId},'model_usage_debit',-5,'model_response',${turn + ":edge-1"},${turn + ":lower"},'2026-07-20T04:00Z'),
+        (${accountId},${workspaceId},'model_usage_debit',-7,'model_response',${turn + ":edge-64"},${turn + ":upper"},'2026-07-26T04:00Z')`;
+  });
+  await assertExact();
+  const [routine] = await shared!.admin`select pg_get_functiondef(oid) as definition from pg_proc
+    where oid='opengeni_private.insights_rollup_amount_inputs(uuid,uuid,timestamptz,timestamptz,text)'::regprocedure`;
+  const marker = "RETURN QUERY SELECT f.session_id";
+  const definition = routine!.definition as string;
+  expect(definition.split(marker)).toHaveLength(2);
+  // Test-only clone proves that clean eligible edges do not execute the raw
+  // model query. No instrumentation enters the production helper or projector.
+  await shared!.admin.unsafe(
+    definition
+      .replace(
+        "opengeni_private.insights_rollup_amount_inputs(",
+        "public.insights_test_cached_edges(",
+      )
+      .replace(marker, `RAISE EXCEPTION 'raw-model-edge-path' USING ERRCODE='P0001'; ${marker}`),
+  );
+  await shared!.admin
+    .unsafe(`alter function public.insights_test_cached_edges(uuid,uuid,timestamptz,timestamptz,text)
+    owner to "${shared!.ownerRole.replaceAll('"', '""')}"`);
+  await shared!
+    .admin`revoke all on function public.insights_test_cached_edges(uuid,uuid,timestamptz,timestamptz,text) from PUBLIC`;
+  const owner = postgres(shared!.ownerUrl, {
+    max: 1,
+    connection: { application_name: LOSSLESS_CONTENT_WRITER_APPLICATION_NAME },
+  });
+  const collect = async (fn: string, lower = lo, upper = hi) =>
+    owner.begin(async (tx) => {
+      await tx`select set_config('opengeni.account_id',${accountId},true),set_config('opengeni.workspace_id',${workspaceId},true)`;
+      await tx`insert into opengeni_private.insights_fact_read_runtime_capabilities
+        (backend_pid,transaction_id,capability_kind,account_id,workspace_id)
+        values(pg_backend_pid(),pg_current_xact_id(),'model_call_facts',${accountId},${workspaceId})`;
+      const [result] = await tx.unsafe(
+        `with inputs as materialized(select * from ${fn}($1,$2,$3,$4${fn.endsWith("insights_raw_amount_inputs") ? "" : ",'day'"}) where model=$5),
+         fields as(select field.key,sum(field.value::bigint)::bigint amount from inputs cross join lateral jsonb_each_text(m) field group by field.key)
+         select (select jsonb_object_agg(key,amount) from fields) measures,(select max(recorded_at)::text from inputs) recorded,
+           (select min(occurred_at) from inputs) earliest,(select count(*)::int from inputs) rows`,
+        [accountId, workspaceId, lower, upper, label],
+      );
+      await tx`delete from opengeni_private.insights_fact_read_runtime_capabilities where backend_pid=pg_backend_pid()`;
+      return result!;
+    });
+  const parity = async () => {
+    const fast = await collect("opengeni_private.insights_rollup_amount_inputs");
+    const raw = await collect("opengeni_private.insights_raw_amount_inputs");
+    expect(fast.measures).toEqual(raw.measures);
+    expect(fast.recorded).toBe(raw.recorded);
+    expect(new Date(fast.earliest).getTime()).toBeGreaterThanOrEqual(new Date(lo).getTime());
+    return fast;
+  };
+  try {
+    const clean = await collect("public.insights_test_cached_edges");
+    expect(clean.measures.calls).toBe(64);
+    expect(clean.measures.chargedMicros).toBe(12);
+    expect(clean.rows).toBe(4);
+    expect(new Date(clean.earliest).toISOString()).toBe(lo);
+    await parity();
+
+    // Inclusive lower and exclusive upper microsecond boundaries must never
+    // be rounded. An excluded fact makes that clean edge use the raw path.
+    await scope(async (tx) => {
+      await tx`insert into model_call_facts(account_id,workspace_id,session_id,turn_id,source_key,provider,provider_api,model,
+        billing_path,estimated_provider_cost_micros,occurred_at,recorded_at)
+        values(${accountId},${workspaceId},${sessionId},${turn},'excluded-lower','openai','responses',${label},
+          'opengeni_credits',13,'2026-07-20T00:00:00.000999Z','2026-07-27T00:00Z')`;
+    });
+    await assertExact();
+    await expect(collect("public.insights_test_cached_edges")).rejects.toMatchObject({
+      code: "P0001",
+    });
+    expect((await parity()).measures.calls).toBe(64);
+    await scope(async (tx) => {
+      await tx`delete from model_call_facts where workspace_id=${workspaceId} and turn_id=${turn} and source_key='excluded-lower'`;
+      await tx`insert into credit_ledger_entries(account_id,workspace_id,type,amount_micros,source_type,source_id,idempotency_key,occurred_at)
+        values(${accountId},${workspaceId},'model_usage_debit',-19,'model_response',${turn + ":edge-64"},${turn + ":excluded-debit"},${hi})`;
+    });
+    await assertExact();
+    // Model edges are still eligible; only the independently bounded ledger
+    // edge must fall back, preserving its actual ledger-period amount.
+    expect((await collect("public.insights_test_cached_edges")).measures.chargedMicros).toBe(12);
+    await parity();
+    await scope(async (tx) => {
+      await tx`update model_call_facts set estimated_provider_cost_micros=91
+        where workspace_id=${workspaceId} and turn_id=${turn} and source_key='edge-1'`;
+    });
+    await expect(collect("public.insights_test_cached_edges")).rejects.toMatchObject({
+      code: "P0001",
+    });
+    await parity();
+    console.info("bounded exact edge cache", {
+      sourceFacts: 64,
+      cachedInputRows: clean.rows,
+      excludedBoundaryFallback: true,
+    });
+  } finally {
+    await owner.end();
+    await shared!
+      .admin`drop function public.insights_test_cached_edges(uuid,uuid,timestamptz,timestamptz,text)`;
+  }
+  await assertExact();
+});
+
+test("dirty charge attribution permits indexed source lookups only inside the read helper", async () => {
+  const turn = crypto.randomUUID();
+  await scope(async (tx) => {
+    await tx`insert into model_call_facts(account_id,workspace_id,session_id,turn_id,source_key,provider,provider_api,model,billing_path,occurred_at)
+      select ${accountId},${workspaceId},${sessionId},${turn},'join-'||n,'openai','responses','bounded-join-plan','external',
+        '2026-06-20T04:00Z' from generate_series(1,256)n`;
+    await tx`insert into credit_ledger_entries(account_id,workspace_id,type,amount_micros,source_type,source_id,idempotency_key,occurred_at)
+      select ${accountId},${workspaceId},'model_usage_debit',-7,'model_response',${turn.toUpperCase()}||':join-'||n,
+        ${turn}||':join-'||n,'2026-06-20T05:00Z' from generate_series(1,2)n`;
+  });
+  const owner = postgres(shared!.ownerUrl, {
+    max: 1,
+    connection: { application_name: LOSSLESS_CONTENT_WRITER_APPLICATION_NAME },
+  });
+  try {
+    await owner.begin(async (tx) => {
+      await tx`select set_config('opengeni.account_id',${accountId},true),set_config('opengeni.workspace_id',${workspaceId},true),
+        set_config('jit','off',true),set_config('plan_cache_mode','force_custom_plan',true),set_config('statement_timeout','10s',true)`;
+      await tx`insert into opengeni_private.insights_fact_read_runtime_capabilities
+        (backend_pid,transaction_id,capability_kind,account_id,workspace_id)
+        values(pg_backend_pid(),pg_current_xact_id(),'model_call_facts',${accountId},${workspaceId})`;
+      // This tiny freshly populated fixture otherwise retains empty-template
+      // statistics. Analyze only these local test tables before comparing plans.
+      await tx`analyze model_call_facts`;
+      await tx`analyze credit_ledger_entries`;
+      const plans = [];
+      for (const mode of ["off", "on"]) {
+        await tx`select set_config('enable_nestloop',${mode},true)`;
+        const [untyped] = await tx`explain (analyze,buffers,format json)
+          select f.session_id,f.provider,f.model,c.occurred_at,-c.amount_micros
+          from credit_ledger_entries c left join model_call_facts f on f.account_id=c.account_id and f.workspace_id=c.workspace_id
+            and f.turn_id=case when c.source_id~'^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}:.'
+              then left(c.source_id,36)::uuid end and f.source_key=substr(c.source_id,38)
+          where c.account_id=${accountId} and c.workspace_id is not distinct from ${workspaceId}::uuid
+            and c.type='model_usage_debit' and c.source_type='model_response' and c.amount_micros<0
+            and c.occurred_at>='2026-06-20Z' and c.occurred_at<'2026-06-21Z'`;
+        let result = untyped!;
+        if (mode === "on") {
+          const [typed] = await tx`explain (analyze,buffers,format json)
+            with bounded_debits as materialized(
+              select c.occurred_at,c.amount_micros,
+                case when c.source_id~'^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}:.'
+                  then left(c.source_id,36)::uuid end as debit_turn_id,substr(c.source_id,38) as debit_source_key
+              from credit_ledger_entries c where c.account_id=${accountId} and c.workspace_id is not distinct from ${workspaceId}::uuid
+                and c.type='model_usage_debit' and c.source_type='model_response' and c.amount_micros<0
+                and c.occurred_at>='2026-06-20Z' and c.occurred_at<'2026-06-21Z')
+            select f.session_id,f.provider,f.model,c.occurred_at,-c.amount_micros
+            from bounded_debits c left join model_call_facts f on f.account_id=${accountId} and f.workspace_id=${workspaceId}
+              and f.turn_id=c.debit_turn_id and f.source_key=c.debit_source_key`;
+          result = typed!;
+        }
+        const plan = result["QUERY PLAN"][0];
+        const nodes: Record<string, unknown>[] = [];
+        type PlanNode = {
+          "Relation Name"?: string;
+          "Node Type": string;
+          "Index Name"?: string;
+          "Actual Rows": number;
+          "Actual Loops": number;
+          "Index Cond"?: string;
+          "Rows Removed by Filter"?: number;
+          Plans?: PlanNode[];
+        };
+        const visit = (node: PlanNode) => {
+          if (node["Relation Name"] === "model_call_facts") {
+            nodes.push({
+              type: node["Node Type"],
+              index: node["Index Name"],
+              rows: node["Actual Rows"],
+              loops: node["Actual Loops"],
+              indexCondition: node["Index Cond"],
+              rowsRemovedByFilter: node["Rows Removed by Filter"],
+            });
+          }
+          for (const child of node.Plans ?? []) visit(child);
+        };
+        visit(plan.Plan);
+        if (mode === "on") {
+          expect(
+            nodes.some(
+              (node) =>
+                node.index === "model_call_facts_workspace_turn_source_uq" &&
+                String(node.indexCondition).includes("debit_turn_id") &&
+                String(node.indexCondition).includes("debit_source_key"),
+            ),
+          ).toBe(true);
+        }
+        plans.push({
+          mode,
+          join: plan.Plan["Node Type"],
+          executionMs: plan["Execution Time"],
+          factNodes: nodes,
+        });
+        expect(plan.Plan["Actual Rows"]).toBe(2);
+      }
+      console.info(
+        "bounded native dirty attribution plans",
+        JSON.stringify({
+          plans,
+          note: "256-fact local diagnostic, NOT retained-volume HTTP proof",
+        }),
+      );
+      await tx`select set_config('enable_nestloop','off',true)`;
+      const [charged] =
+        await tx`select sum(quantity)::int as value from opengeni_private.insights_charge_window(
+        ${accountId},${workspaceId},'2026-06-20Z','2026-06-21Z','day')`;
+      expect(charged!.value).toBe(14);
+      const [restored] = await tx`select current_setting('enable_nestloop') as value`;
+      expect(restored!.value).toBe("off");
+      await tx`delete from opengeni_private.insights_fact_read_runtime_capabilities where backend_pid=pg_backend_pid()`;
+    });
+    const [routine] = await shared!.admin`select proconfig from pg_proc
+      where oid='opengeni_private.insights_charge_window(uuid,uuid,timestamptz,timestamptz,text)'::regprocedure`;
+    expect(routine!.proconfig).toContain("enable_nestloop=on");
+  } finally {
+    await owner.end();
+    await scope(async (tx) => {
+      await tx`delete from credit_ledger_entries where account_id=${accountId} and idempotency_key like ${turn + ":join-%"}`;
+      await tx`delete from model_call_facts where workspace_id=${workspaceId} and turn_id=${turn}`;
+    });
+  }
+  await assertExact();
+});
+
 test("native dirty input batching reduces rows without changing per-fact coverage, UTC buckets or wire output", async () => {
   const turn = crypto.randomUUID();
   await scope(async (tx) => {
