@@ -1,9 +1,9 @@
+import { parentOutboxAuthorityTx } from "./child-outbox-authority";
 import { createHash } from "node:crypto";
 import { isDeepStrictEqual } from "node:util";
 import {
   boundWorkspaceControlEvent,
   childPausedClassification,
-  McpPersonalConnectionDelegations,
   workspaceControlUtf8Bytes,
   type WorkspacePauseTimerRequest,
   type SessionMcpApprovalPolicy,
@@ -2940,37 +2940,10 @@ async function insertChildOutboxRowInTransaction(
       `Child outbox ${input.kind} payload discriminator mismatch`,
     );
   }
-  let personalConnectionDelegations: (typeof schema.sessionTurns.$inferSelect)["personalConnectionDelegations"] =
-    [];
-  let mcpAccountBindings: (typeof schema.sessionTurns.$inferSelect)["mcpAccountBindings"] = null;
-  if (input.childSession.parentTurnId) {
-    const [parentTurn] = await db
-      .select({
-        delegations: schema.sessionTurns.personalConnectionDelegations,
-        mcpAccountBindings: schema.sessionTurns.mcpAccountBindings,
-      })
-      .from(schema.sessionTurns)
-      .where(
-        and(
-          eq(schema.sessionTurns.workspaceId, input.workspaceId),
-          eq(schema.sessionTurns.sessionId, parentSessionId),
-          eq(schema.sessionTurns.id, input.childSession.parentTurnId),
-        ),
-      )
-      .limit(1);
-    if (parentTurn) {
-      mcpAccountBindings = parentTurn.mcpAccountBindings;
-      const parsed = McpPersonalConnectionDelegations.safeParse(parentTurn.delegations);
-      if (!parsed.success) {
-        throw new SessionControlInvariantError(
-          `Invalid personal MCP delegation snapshot at session_turns:${input.workspaceId}:${parentSessionId}:${input.childSession.parentTurnId}`,
-        );
-      }
-      personalConnectionDelegations = parsed.data.map((delegation) => ({
-        ...delegation,
-      }));
-    }
-  }
+  const authority = await parentOutboxAuthorityTx(db, input.workspaceId, {
+    ...input.childSession,
+    parentSessionId,
+  });
   await db
     .insert(schema.sessionSystemUpdateOutbox)
     .values(
@@ -2987,16 +2960,8 @@ async function insertChildOutboxRowInTransaction(
             sourceId: input.childSession.id,
             summary: input.summary,
             payload: input.payload,
-            lineage: {
-              childSessionId: input.childSession.id,
-              parentSessionId,
-              ...(input.childSession.parentTurnId
-                ? { parentTurnId: input.childSession.parentTurnId }
-                : {}),
-              ...(input.lineage ?? {}),
-            },
-            personalConnectionDelegations,
-            mcpAccountBindings,
+            ...authority,
+            lineage: { ...authority.lineage, ...(input.lineage ?? {}) },
           },
           "summary",
           "summaryCodecVersion",

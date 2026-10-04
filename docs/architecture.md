@@ -113,9 +113,10 @@ exactly-once atomic history batches.
 
 `wait_for_input` settles tool-batch execution, preserving trusted authority and
 immutable same-turn deadlines. Command results wake only explicit waits; notices
-never block inbox input. Ordinary messages and lifecycle results batch by equivalent
-human and frozen access; Steer retains exact-caller isolation. Each update keeps its
-own lineage. [Details](run-lifecycle.md).
+never block inbox input. Ordinary same-human agent messages and lifecycle results use the receiving
+chat's last started request context, so different sender account selections do not
+split a batch or replace credentials. Restricted/foreign requests and Steer retain
+their explicit authority. Each update keeps its own lineage. [Details](run-lifecycle.md).
 
 Agent-created sessions inherit omitted model/reasoning from the calling turn;
 latency defaults to `standard`.
@@ -249,11 +250,13 @@ CAS and budgets apply. Retired writers remain audit/compatibility evidence. See
 [`knowledge.md`](knowledge.md).
 
 Organization identity has a separate organization-owner autonomy policy: Off rejects
-agent-authored changes before proposal creation, Require approval binds human
-confirmation, and Autonomous activates eligible proposals without another
+agent-authored changes before proposal creation, Review first (`suggest`) binds human
+confirmation, and Automatic activates eligible proposals without another
 prompt. Every mode requires an exact live turn from the active organization
 owner and the company-profile compare-and-swap lifecycle; workspace Learning
-mode and admin authority cannot widen this scope.
+mode and admin authority cannot widen this scope. The web app shows it as an
+owner-only row on Knowledge > Agent learning, in the same Off / Review first /
+Automatic words as the workspace modes, while each store stays separate.
 
 Accepted conversation and tool content stays intact at its canonical boundary;
 OpenGeni does not rewrite arbitrary credential-like text. Configured secrets
@@ -434,53 +437,36 @@ Agent configuration: `packages/contracts/src/agent-config.ts`; null configs stay
 
 ### 3.8 A Connected Machine is first-class primary compute
 
-Connected Machines (`selfhosted`) run agents without sandboxes. [Native updates](../agent/README.md#distribution)
-fence admission and require idle commands, uploads and owned browser/computer controllers;
-unavailable proof defers updates. Mac updates preserve signed bundles and
-[write ACLs](../agent/TRANSACTIONAL-WRITES.md).
+Connected Machines (`selfhosted`) run agents without sandboxes. [Updates](../agent/README.md#distribution)
+fence admission, require idle commands/uploads and owned browser/computer controllers,
+and defer without proof. Mac updates preserve signed bundles and
+[ACLs](../agent/TRANSACTIONAL-WRITES.md).
 
-Machines own files, Git authentication, environment and [credential renewal](connected-machines.md).
-OpenGeni neither clones repositories nor installs durable control-plane credentials;
-children receive transient, exact-attempt Codemode authority.
-[Same-turn recovery](run-lifecycle.md) restores native capabilities without tool replay.
+Machines own files, Git auth, environment and [credential renewal](connected-machines.md).
+OpenGeni neither clones repos nor installs durable credentials;
+child Codemode authority is transient/attempt-bound.
+[Recovery](run-lifecycle.md) restores capabilities without tool replay.
 
-Machine paths are host-native and session-specific, not universal `/workspace`
-aliases. Unavailability produces a typed operation outcome; text-only reasoning
-can begin without contact. An offline machine never authorizes cold-creating a
-rival box, snapshotting it, or provider-terminating the user's computer.
+Foreground output releases once its exact tool-result receipt, output event and
+journal are durable, independently of turn completion. Other owners retain output.
+[Streaming exec](connected-machines.md#streaming-exec-op-stream).
 
-Structured Files exposes the selected machine's effective host-native working
-directory as `FileSystem.root`; links and tree nodes share this namespace.
-Connected Machine reads accept external absolute paths under the machine account's
-OS permissions; working directories remain browsing defaults.
-Managed reads and structured mutations stay workspace-confined, including `/`.
-Requests carry capability epoch and root. The API binds one route per request;
-target/root changes return retryable conflicts instead of reinterpreting paths
-on another filesystem.
+Machine paths are session-specific. Offline operations fail typed; reasoning continues.
+Availability never authorizes provisioning, snapshotting or terminating a user's computer.
 
-Generated-session schedules persist an exact workspace- or organization-scoped
-machine target and seed its active pointer before the first turn. Ingress
-rejects targetless `selfhosted` schedules; dispatch revalidates the frozen target
-without managed-compute fallback. Manual and generated creates preflight target
-liveness and workspace root, then recheck durable authority and atomically
-commit the active pointer with the session row. Rejection leaves no queued
-session shell in discovery or parent-tree projections.
+Structured Files binds paths, route, capability epoch and root per request; changes
+conflict. OS permissions govern machine reads; managed access remains workspace-confined.
 
-Child workers keep the ordinary low-friction rule: omitting placement shares
-the creator's box. Because a Connected Machine pointer is session-local, that
-default copies the trusted parent's exact active machine and working directory
-before the child's first turn. This includes a `backend:none` parent that has
-attached a Connected Machine: the child keeps the shared backend-none home and
-group while inheriting the exact active route. A selfhosted-only child with no
-inherited or explicit machine fails at create rather than reaching an unbound
-runtime.
+Creates preflight liveness/root then atomically bind verified machine authority.
+Generated schedules freeze/revalidate scoped targets without managed fallback.
+Unbound `selfhosted` creates leave no queued shell.
 
-Machine-home sessions never pre-provision hidden managed boxes. With a managed
-deployment backend, the fleet exposes the synthetic managed group explicitly.
-Selecting `session`/`default` clears the active machine pointer and verifies that
-group through the ordinary viewer/lease lifecycle before the next operation/turn
-uses it. This intentional user route change is not offline-machine fallback;
-`none`/`selfhosted`-only deployments expose no managed group.
+Omitted child placement inherits parent machine/root and shared home/group,
+including attached `backend:none`; selfhosted-only children require a machine.
+
+Machine homes never pre-provision boxes. Explicit `session`/`default` clears the
+machine pointer and verifies managed compute via viewer/lease authority;
+`none`/`selfhosted` offers none.
 
 Connected Machine event ingestion drains NATS immediately into exact-process
 queues, not one global database queue. Connection subjects progress concurrently
@@ -1053,7 +1039,13 @@ See `docs/session-attachments.md`. Generated media follows paid-operation and re
 Knowledge is the product destination for retained sources and findings, with
 Library, Instructions and Review tabs on the Knowledge page (`/state`).
 `apps/web/src/components/knowledge/knowledge-page.tsx` owns that page's
-navigation, including old Files, Skills, Memory and Documents links. Groups appear
+navigation, including old Files, Skills, Memory and Documents links (a Documents
+`?authority=` link keeps its scope as the Library filter). Agent learning has one
+home per scope in the web app: workspace and private-chat defaults (plus the
+owner-only organization identity row) on Knowledge > Agent learning, and one
+chat's override in the session dock's Agent tab beside its identity and
+capabilities (`apps/web/src/components/session/agent-configuration-panel.tsx`);
+the composer's Chat settings opens that tab. Groups appear
 as collections; detailed finding types are optional browsing metadata. File previews, revision-pinned
 citations and shared groups connect information from different sources without
 changing its ownership. Connector ingestion runs through ordinary scheduled
@@ -1291,6 +1283,16 @@ selections suppress restoration. Children inherit captured authority. Canonical:
 `packages/core/src/domain/personal-connection-delegations.ts` and
 [shared connection presentation](connection-presentation.md).
 
+Capabilities detail pages list backend-authorized native accounts through
+`apps/web/src/components/capabilities/catalog-connected-accounts.tsx`.
+`packages/contracts/src/connection-account-label.ts` owns their shared identity
+labels for the web picker and core MCP account bindings. Labels are presentation
+only; exact connection references and accepted selections remain authority.
+Settings opt into inactive rows through the owning-human `/connections/accounts`
+inventory; execution pickers retain its active-only default. Shared accounts are
+current-workspace scoped, while personal accounts use their existing same-owner,
+same-organization authority across origin workspaces.
+
 Connector permission management: `packages/core/src/domain/connector-tool-permissions.ts`.
 See [`session-mcp-servers.md`](session-mcp-servers.md).
 
@@ -1322,7 +1324,11 @@ never a retry of an existing or ambiguous operation. Submission conflicts never
 reconcile to an existing row; ambiguous failures adopt one only after exact
 scope, catalog, identity and argument comparison. Recovery never replays the
 tool ([run lifecycle](run-lifecycle.md#codemode-recovery)). The current-human
-gateway rebuilds live authority per request. Browsers use
+gateway rebuilds live authority per request. Native connection-backed providers
+use the same account-qualified identities as agent catalogs. Shared projection
+lives in `packages/core/src/domain/mcp-account-routes.ts`; services see workspace
+accounts only, and human transports may see their own eligible accounts.
+Browsers use
 `client.tools.forWorkspace(...)`; opaque-origin Sites use the parent-held
 `@opengeni/sdk/site` MessagePort adapter with no bearer or workspace context.
 A Site version's retained tool identities are only a maximum allowlist: the
@@ -1423,6 +1429,14 @@ full observations; Code Mode receives local image handles. Human computer contro
 requires consent. Computer frames bind screenshot digest to controller/session/target;
 runtime, API and SDK independently verify. The browser extension only attaches;
 Lightpanda is semantic-only.
+
+An attached tab's debugger disconnect invalidates only its cached target,
+document, frame and element authority. Read-only recovery can attach the same
+surviving tab with fresh fences; explicit cancellation and uncertain effects
+require profile reconnection. Chrome and unrelated tabs remain intact, and
+mutations are never replayed. Partially dispatched input remains outcome unknown;
+queued input, DOM changes, navigation and emulation cannot cross into a replacement
+attachment. See [Connected Machines](connected-machines.md).
 
 ComputerSession attachments use canonical frame streams, including relay kind 4,
 for screens and windows. The viewer paints those exact authenticated pixels and

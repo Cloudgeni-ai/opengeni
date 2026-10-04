@@ -288,6 +288,19 @@ describe("periodic workspace snapshot admission", () => {
 });
 
 describe("Connected Machine durable stream finalization", () => {
+  test("forwards exact durable tool owners without converting an empty scope to turn-end release", async () => {
+    const calls: Array<readonly string[] | undefined> = [];
+    const machine = {
+      finalizeOpStreamOps: async (callIds?: readonly string[]) => {
+        calls.push(callIds);
+      },
+    };
+    await finalizeDurableTurnOpStreams([machine, machine], null, ["call_first"]);
+    await finalizeDurableTurnOpStreams([], machine, []);
+    await finalizeDurableTurnOpStreams([machine], null);
+    expect(calls).toEqual([["call_first"], [], undefined]);
+  });
+
   test("finalizes every routed proxy once and does not bypass them for the raw fallback", async () => {
     const calls: string[] = [];
     const eagerProxy = {

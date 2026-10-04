@@ -202,9 +202,12 @@ function CapabilityRow({
 export function AgentCapabilitySummary({
   values,
   availability,
+  rowAside,
 }: {
   values: ResolvedAgentCapabilities;
   availability: CapabilityAvailability;
+  /** Quiet extra line under one capability that is on (for example, a related setting). */
+  rowAside?: (id: AgentCapabilityId) => ReactNode;
 }) {
   const on = (id: AgentCapabilityId) =>
     availability.isAvailable(id) &&
@@ -239,6 +242,11 @@ export function AgentCapabilitySummary({
                       : "Reads installed Skills."
                     : capabilityDescription(id)}
                 </span>
+                {rowAside?.(id) ? (
+                  <span className="mt-0.5 block text-xs leading-4.5 text-fg-subtle">
+                    {rowAside(id)}
+                  </span>
+                ) : null}
               </li>
             ))}
           </CapabilityGroup>
