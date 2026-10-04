@@ -16,8 +16,9 @@ import { Switch } from "@/components/ui/switch";
 export const voiceInputProviderLabels: Record<VoiceInputProviderId, string> = {
   "supergrok-subscription": "SuperGrok subscription",
   "codex-subscription": "Codex subscription",
-  openai: "OpenAI API · API billing",
-  "azure-openai": "Azure OpenAI · Azure billing",
+  openai: "OpenAI · Opengeni credits",
+  "azure-openai": "Azure OpenAI · Opengeni credits",
+  "azure-mai": "MAI Transcribe · Opengeni credits",
 };
 
 /** The Voice input row of Settings > General > New session defaults. */
@@ -85,7 +86,7 @@ export function VoiceInputPreferences({
   }
 
   const reason = !available
-    ? "This deployment has no transcription provider. Your operator can add one."
+    ? "Voice input isn’t available in this workspace. Connect a supported subscription or ask your operator to enable it."
     : !canManage
       ? "Only workspace admins can change this."
       : undefined;

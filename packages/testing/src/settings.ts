@@ -165,6 +165,8 @@ export function testSettings(overrides: Partial<Settings> = {}): Settings {
     voiceInputAzureApiVersion: undefined,
     voiceInputAzureApiKey: undefined,
     voiceInputAzureAdToken: undefined,
+    voiceInputMaiApiVersion: "2025-10-15",
+    voiceInputMaiModel: "MAI-Transcribe-2",
     voiceInputCodexExperimentalEnabled: false,
     modelPricingJson: JSON.stringify({
       "scripted-model": {

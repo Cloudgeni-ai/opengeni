@@ -1,4 +1,6 @@
+import type { VoiceInputPricing, VoiceInputUsage } from "@opengeni/config";
 import type { TranscribeAudioResponse, VoiceInputErrorCode } from "@opengeni/contracts";
+import type { CreditDebitAttribution, Database } from "@opengeni/db";
 
 /**
  * Server-owned upstream budget for one provider attempt. Resumable recording
@@ -34,6 +36,33 @@ export type TranscriptionRequest = {
   preferredProvider?: string | null | undefined;
   fallbackEnabled?: boolean | undefined;
   excludedProviders?: readonly string[] | undefined;
+  /**
+   * Credit settlement facts for a deployment-funded provider. Required when
+   * the selected provider is deployment-funded and credit billing is active;
+   * the service fails closed without it.
+   */
+  billing?: TranscriptionBillingContext | undefined;
+  /** Internal: settle with durable segment completion instead of before returning. */
+  deferBillingSettlement?: boolean;
+};
+
+/** Trusted, server-built settlement identity for one transcription unit. */
+export type TranscriptionBillingContext = {
+  /**
+   * Server-derived idempotency key. Never a client-chosen value: a reused key
+   * settles once, so a client-controlled key would make later calls free.
+   */
+  idempotencyKey: string;
+  /** Ledger/usage source type, e.g. `voice_transcription`. */
+  sourceType: string;
+  sourceId: string;
+  /** Trusted payer facts from the authenticated request boundary. */
+  attribution: CreditDebitAttribution;
+  /**
+   * Audio duration measured by the server from bytes it produced (resumable
+   * WAV segments). Used only when the provider reports no billable usage.
+   */
+  trustedDurationSeconds?: number | undefined;
 };
 
 export type TranscriptionResult = TranscribeAudioResponse & {
@@ -41,17 +70,74 @@ export type TranscriptionResult = TranscribeAudioResponse & {
   providerId: string;
   audioSeconds: number;
   latencyMs: number;
+  /** Opengeni credits charged for this call (0 for subscription/free providers). */
+  creditCostMicros?: number | undefined;
+  /** Server-only settlement callback; never serialized into a public response. */
+  settleBilling?: (transaction: Database) => Promise<void>;
+};
+
+export type TranscriptionBillingRefusalCode =
+  | "insufficient_credits"
+  | "allowance_exhausted"
+  | "monthly_model_cost_limit";
+
+/**
+ * Pre-use refusal for deployment-funded transcription: 402 for credits and
+ * allowances (same codes as session admission), 429 for a static monthly cap.
+ */
+export class TranscriptionBillingRefusedError extends Error {
+  readonly status: 402 | 429;
+  readonly code: TranscriptionBillingRefusalCode;
+  readonly details: { scope?: string; resetsAt?: string | null; subjectId?: string };
+
+  constructor(input: {
+    code: TranscriptionBillingRefusalCode;
+    message: string;
+    details?: { scope?: string; resetsAt?: string | null; subjectId?: string };
+  }) {
+    super(input.message);
+    this.name = "TranscriptionBillingRefusedError";
+    this.code = input.code;
+    this.status = input.code === "monthly_model_cost_limit" ? 429 : 402;
+    this.details = input.details ?? {};
+  }
+}
+
+/**
+ * Credit admission and settlement for deployment-funded transcription.
+ * Subscription providers (Codex, SuperGrok) never reach this port.
+ */
+export type TranscriptionBilling = {
+  /** Refuse before any audio is sent when the payer cannot fund the call. */
+  admit(input: {
+    accountId: string;
+    workspaceId: string;
+    attribution: CreditDebitAttribution;
+  }): Promise<void>;
+  /** Record usage and debit credits once per idempotency key, after use. */
+  settle(
+    input: {
+      accountId: string;
+      workspaceId: string;
+      providerId: string;
+      model: string;
+      pricing: VoiceInputPricing;
+      usage: VoiceInputUsage | null;
+      billing: TranscriptionBillingContext;
+    },
+    transaction?: Database,
+  ): Promise<{ creditCostMicros: number }>;
 };
 
 export class TranscriptionServiceError extends Error {
-  readonly code: VoiceInputErrorCode;
+  readonly code: Exclude<VoiceInputErrorCode, TranscriptionBillingRefusalCode>;
   readonly status: number;
   readonly retryable: boolean;
   /** Explicit rejection before any transcription result; safe to try another provider. */
   readonly fallbackSafe: boolean;
 
   constructor(input: {
-    code: VoiceInputErrorCode;
+    code: Exclude<VoiceInputErrorCode, TranscriptionBillingRefusalCode>;
     message: string;
     status?: number;
     retryable?: boolean;
@@ -115,6 +201,14 @@ export type TranscriptionProvider = {
   readonly supportsServerDeadline: true;
   readonly experimental?: boolean | undefined;
   /**
+   * Present when the deployment pays the upstream provider (OpenAI/Azure):
+   * the call is admitted against and settled in Opengeni credits. Absent for
+   * the workspace's own subscriptions, which are never charged.
+   */
+  readonly deploymentFunded?:
+    | { readonly model: string; readonly pricing: VoiceInputPricing | null }
+    | undefined;
+  /**
    * Deployment readiness when called without a workspace. When `workspaceId` is
    * provided, providers may require a workspace-attached credential (e.g. Codex).
    */
@@ -128,17 +222,29 @@ export type TranscriptionProvider = {
     subjectId: string;
     requestId: string;
     signal?: AbortSignal | undefined;
-  }): Promise<{ text: string; languages: string[] }>;
+  }): Promise<{ text: string; languages: string[]; usage?: VoiceInputUsage | null | undefined }>;
 };
 
 export type TranscriptionService = {
   limits(): TranscriptionLimits;
   /** True when at least one ready provider can serve requests. */
   available(context?: TranscriptionAvailabilityContext): boolean | Promise<boolean>;
+  availableProviderIds?(context: TranscriptionAvailabilityContext): Promise<string[]>;
   /** Select one provider before a durable segment attempt; retries pin this id. */
   selectProvider?(
     context: TranscriptionAvailabilityContext,
   ): string | null | Promise<string | null>;
+  /**
+   * Credit admission for an exact provider before durable work is claimed.
+   * Resolves for subscription providers; throws TranscriptionBillingRefusedError
+   * when a deployment-funded provider cannot be paid for.
+   */
+  admit?(input: {
+    providerId: string;
+    accountId: string;
+    workspaceId: string;
+    attribution: CreditDebitAttribution;
+  }): Promise<void>;
   transcribe(request: TranscriptionRequest): Promise<TranscriptionResult>;
 };
 

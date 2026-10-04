@@ -603,6 +603,7 @@ describe("resumable transcription recording routes", () => {
     expect(completeSegment).toHaveBeenCalledWith(
       expect.anything(),
       expect.objectContaining({ attemptId: firstAttemptId }),
+      undefined,
     );
     expect(startProviderCall).toHaveBeenCalledWith(
       expect.anything(),
@@ -734,6 +735,7 @@ describe("resumable transcription recording routes", () => {
     expect(completeSegment).toHaveBeenCalledWith(
       expect.anything(),
       expect.objectContaining({ attemptId: CORRELATION_ID }),
+      undefined,
     );
     expect(startProviderCall).toHaveBeenCalledWith(
       expect.anything(),
@@ -835,6 +837,7 @@ describe("resumable transcription recording routes", () => {
     expect(completeSegment).toHaveBeenCalledWith(
       expect.anything(),
       expect.objectContaining({ attemptId: CORRELATION_ID }),
+      undefined,
     );
     expect(failSegment).not.toHaveBeenCalled();
     expect(claimSegment).toHaveBeenCalledTimes(1);
@@ -948,6 +951,7 @@ describe("resumable transcription recording routes", () => {
     expect(completeSegment).toHaveBeenCalledWith(
       expect.anything(),
       expect.objectContaining({ attemptId: secondAttemptId }),
+      undefined,
     );
     expect(claimSegment).toHaveBeenCalledTimes(2);
   });

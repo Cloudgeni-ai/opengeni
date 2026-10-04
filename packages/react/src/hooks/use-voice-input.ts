@@ -1503,6 +1503,12 @@ function errorCode(error: unknown): string {
 }
 
 function isRetryableVoiceInputError(error: unknown): boolean {
+  if (
+    ["insufficient_credits", "allowance_exhausted", "monthly_model_cost_limit"].includes(
+      errorCode(error),
+    )
+  )
+    return false;
   if (error instanceof OpenGeniApiError) {
     return error.retryable && error.status !== 409;
   }

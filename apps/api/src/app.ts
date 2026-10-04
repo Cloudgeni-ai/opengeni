@@ -24,7 +24,6 @@ import {
   canonicalPublicOrigin,
   configuredAllowedReasoningEfforts,
   resolveFirstPartyMcpToolPolicy,
-  resolveVoiceInputProviderRegistry,
   UnsupportedLatencyModeError,
   type Settings,
 } from "@opengeni/config";
@@ -40,6 +39,7 @@ import {
   resolveWorkspaceMemoryEnabled,
   resolveWorkspaceMemoryPromptMode,
   VOICE_INPUT_ACCEPTED_MIME_TYPES,
+  WorkspaceVoiceInputSettings,
   TRANSCRIPTION_RECORDING_PROVIDER_SEGMENT_SECONDS,
   ToolGatewayApprovalRequest,
   ToolGatewayCallRequest,
@@ -1191,6 +1191,8 @@ export function createAppComposition(deps: AppDependencies): {
       creditsAvailable: false,
     });
     let modelSelectionForbidden = false;
+    let voiceInputAvailable = false;
+    let voiceInputProviders: string[] = [];
     const requestedWorkspaceId = c.req.query("workspaceId");
     if (requestedWorkspaceId !== undefined && requestedWorkspaceId.trim() === "") {
       throw new HTTPException(422, { message: "workspaceId must not be empty" });
@@ -1241,6 +1243,20 @@ export function createAppComposition(deps: AppDependencies): {
             selections = [];
           }
           const workspace = await getWorkspace(deps.db, workspaceId);
+          const voicePreferences = WorkspaceVoiceInputSettings.safeParse(
+            workspace?.settings.voiceInput,
+          ).data;
+          const voiceContext = {
+            workspaceId,
+            subjectId: grant.subjectId,
+            preferredProvider: voicePreferences?.preferredProvider,
+            fallbackEnabled: voicePreferences?.fallbackEnabled,
+          };
+          if (hasPermission(grant.permissions, "sessions:create") && transcription) {
+            voiceInputProviders = (await transcription.availableProviderIds?.(voiceContext)) ?? [];
+            voiceInputAvailable = voiceInputProviders.length > 0;
+          }
+
           defaultSelection = await resolveDefaultSessionModelForSelections(deps.db, {
             settings: catalogSettings,
             accountId: grant.accountId,
@@ -1303,10 +1319,8 @@ export function createAppComposition(deps: AppDependencies): {
           maxSizeBytes: objectStorage?.maxSinglePutSizeBytes ?? 5_000_000_000,
         },
         voiceInput: {
-          providers: resolveVoiceInputProviderRegistry(deps.settings).map(
-            (provider) => provider.id,
-          ),
-          available: (await transcription?.available()) ?? false,
+          providers: voiceInputProviders,
+          available: voiceInputAvailable,
           maxDurationSeconds: deps.settings.voiceInputMaxDurationSeconds,
           maxSizeBytes: deps.settings.voiceInputMaxSizeBytes,
           acceptedMimeTypes: [...VOICE_INPUT_ACCEPTED_MIME_TYPES],
@@ -1314,7 +1328,7 @@ export function createAppComposition(deps: AppDependencies): {
           objectStorage &&
           transcription &&
           transcriptionSegmenter &&
-          (await transcription.available()) &&
+          voiceInputAvailable &&
           (await transcriptionSegmenter.available())
             ? {
                 resumable: {

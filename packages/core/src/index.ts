@@ -7,6 +7,7 @@ export * from "./domain/session-connection-accounts";
 export * from "./domain/organization-integration-catalog";
 export * from "./domain/knowledge";
 export * from "./domain/knowledge-search";
+export * from "./domain/voice-input-billing";
 // @opengeni/core — the framework-agnostic OpenGeni core.
 //
 // WHAT THIS PACKAGE IS: the OpenGeni domain, access, and billing layers carved

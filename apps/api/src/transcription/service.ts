@@ -1,16 +1,23 @@
-import { resolveVoiceInputProviderRegistry, type Settings } from "@opengeni/config";
+import {
+  resolveVoiceInputProviderRegistry,
+  voiceInputCreditBillingActive,
+  type Settings,
+} from "@opengeni/config";
 import { VOICE_INPUT_ACCEPTED_MIME_TYPES } from "@opengeni/contracts";
 import {
+  createVoiceInputBilling,
   filenameForMimeType,
   isAcceptedMimeType,
   normalizeMimeType,
   TRANSCRIPTION_PROVIDER_REQUEST_TIMEOUT_MILLISECONDS,
   type TranscriptionAvailabilityContext,
+  type TranscriptionBilling,
   type TranscriptionProvider,
   type TranscriptionService,
   TranscriptionServiceError,
 } from "@opengeni/core";
 import type { Database } from "@opengeni/db";
+import { createMaiTranscriptionProvider } from "./providers/azure-mai";
 import { createAzureOpenAiTranscriptionProvider } from "./providers/azure-openai";
 import { createCodexSubscriptionTranscriptionProvider } from "./providers/codex-subscription";
 import { createOpenAiTranscriptionProvider } from "./providers/openai";
@@ -26,6 +33,8 @@ export function createTranscriptionService(input: {
   providerRequestTimeoutMilliseconds?: number;
   /** Test seam for evaluating persisted absolute deadlines after delayed setup. */
   now?: () => Date;
+  /** Credit admission/settlement for deployment-funded providers. */
+  billing?: TranscriptionBilling;
 }): TranscriptionService {
   const providers: TranscriptionProvider[] = resolveVoiceInputProviderRegistry(input.settings).map(
     (config) => {
@@ -33,6 +42,12 @@ export function createTranscriptionService(input: {
         case "openai":
           return createOpenAiTranscriptionProvider({
             ...config,
+            ...(input.fetch ? { fetch: input.fetch } : {}),
+          });
+        case "azure-mai":
+          return createMaiTranscriptionProvider({
+            ...config,
+            ffmpegPath: input.settings.voiceInputFfmpegPath,
             ...(input.fetch ? { fetch: input.fetch } : {}),
           });
         case "azure-openai":
@@ -66,15 +81,34 @@ export function createTranscriptionService(input: {
   const providerRequestTimeoutMilliseconds =
     input.providerRequestTimeoutMilliseconds ?? TRANSCRIPTION_PROVIDER_REQUEST_TIMEOUT_MILLISECONDS;
   const now = input.now ?? (() => new Date());
+  const billing =
+    input.billing ?? createVoiceInputBilling({ db: input.db, settings: input.settings });
+  const creditBillingActive = voiceInputCreditBillingActive(input.settings);
+  /** Deployment-funded calls are charged; the workspace's own subscriptions never are. */
+  const chargeable = (provider: TranscriptionProvider) =>
+    creditBillingActive && provider.deploymentFunded !== undefined;
   return {
     limits: () => limits,
     async available(context) {
-      return (await Promise.all(providers.map((provider) => provider.available(context)))).some(
-        Boolean,
+      return Boolean(
+        await firstAvailable(orderedProviders(providers, context ?? {}), context ?? {}),
       );
+    },
+    async availableProviderIds(context) {
+      const available = await Promise.all(
+        providers.map(async (provider) =>
+          (await provider.available(context)) ? provider.id : null,
+        ),
+      );
+      return available.filter((id): id is string => id !== null);
     },
     async selectProvider(context) {
       return (await firstAvailable(orderedProviders(providers, context), context))?.id ?? null;
+    },
+    async admit({ providerId, accountId, workspaceId, attribution }) {
+      const provider = providers.find((candidate) => candidate.id === providerId);
+      if (!provider || !chargeable(provider)) return;
+      await billing.admit({ accountId, workspaceId, attribution });
     },
     async transcribe(request) {
       const mimeType = normalizeMimeType(request.mimeType);
@@ -120,6 +154,21 @@ export function createTranscriptionService(input: {
           message: "Transcription provider does not support bounded requests.",
         });
       }
+      if (chargeable(provider)) {
+        // Fail closed: a deployment-paid call is never sent without a price
+        // and a trusted settlement identity.
+        if (!provider.deploymentFunded?.pricing || !request.billing) {
+          throw new TranscriptionServiceError({
+            code: "unavailable",
+            message: "Transcription billing is not configured.",
+          });
+        }
+        await billing.admit({
+          accountId: request.accountId,
+          workspaceId: request.workspaceId,
+          attribution: request.billing.attribution,
+        });
+      }
       const startedAt = performance.now();
       const remainingMilliseconds = request.providerDeadlineAt
         ? remainingTranscriptionProviderRequestMilliseconds(request.providerDeadlineAt, now())
@@ -135,7 +184,7 @@ export function createTranscriptionService(input: {
         });
       }
       const deadline = createProviderRequestDeadline(request.signal, remainingMilliseconds);
-      let result: { text: string; languages: string[] };
+      let result: Awaited<ReturnType<TranscriptionProvider["transcribe"]>>;
       try {
         result = await provider.transcribe({
           audio: request.audio,
@@ -183,11 +232,33 @@ export function createTranscriptionService(input: {
       } finally {
         deadline.dispose();
       }
+      const latencyMs = Math.round(performance.now() - startedAt);
+      let creditCostMicros = 0;
+      const settle = async (transaction?: Database) => {
+        if (chargeable(provider) && provider.deploymentFunded?.pricing && request.billing) {
+          ({ creditCostMicros } = await billing.settle(
+            {
+              accountId: request.accountId,
+              workspaceId: request.workspaceId,
+              providerId: provider.id,
+              model: provider.deploymentFunded.model,
+              pricing: provider.deploymentFunded.pricing,
+              usage: result.usage ?? null,
+              billing: request.billing,
+            },
+            transaction,
+          ));
+        }
+      };
+      if (!request.deferBillingSettlement) await settle();
       return {
-        ...result,
+        text: result.text,
+        languages: result.languages,
         providerId: provider.id,
         audioSeconds: request.durationSeconds ?? 0,
-        latencyMs: Math.round(performance.now() - startedAt),
+        latencyMs,
+        creditCostMicros,
+        ...(request.deferBillingSettlement ? { settleBilling: settle } : {}),
       };
     },
   };
