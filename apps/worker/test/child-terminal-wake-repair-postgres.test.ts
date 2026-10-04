@@ -39,7 +39,7 @@ afterAll(async () => {
   await shared?.release();
 }, 60_000);
 
-async function fixture() {
+async function fixture(options: { ancestor?: boolean; unrelatedChild?: boolean } = {}) {
   const suffix = crypto.randomUUID();
   const access = await bootstrapWorkspace(client.db, {
     accountExternalSource: "child-terminal-wake-repair",
@@ -64,52 +64,84 @@ async function fixture() {
     latencyMode: "standard" as const,
     sandboxBackend: "none",
   };
-  const parent = await createSession(client.db, input);
-  await initializeSessionStartAtomically(client.db, {
-    accountId: grant.accountId,
-    workspaceId: grant.workspaceId!,
-    sessionId: parent.id,
-    clientEventId: `initial:${parent.id}`,
-    reasoningEffortFallback: "low",
-    createdEventPayload: {},
+  async function startSession(sessionId: string) {
+    await initializeSessionStartAtomically(client.db, {
+      accountId: grant.accountId,
+      workspaceId: grant.workspaceId!,
+      sessionId,
+      clientEventId: `initial:${sessionId}`,
+      reasoningEffortFallback: "low",
+      createdEventPayload: {},
+    });
+    const attemptId = crypto.randomUUID();
+    const claimed = await claimSessionWorkForAttempt(client.db, grant.workspaceId!, {
+      sessionId,
+      workflowId: `session-${sessionId}`,
+      workflowRunId: crypto.randomUUID(),
+      attemptId,
+      dispatchId: crypto.randomUUID(),
+      trigger: { kind: "next" },
+    });
+    if (claimed.action !== "claimed") throw new Error("fixture session not claimed");
+    return { claimed, attemptId };
+  }
+  async function finishSession(
+    sessionId: string,
+    started: Awaited<ReturnType<typeof startSession>>,
+  ) {
+    expect(
+      await applySessionTurnSettlement(client.db, grant.workspaceId!, {
+        sessionId,
+        turnId: started.claimed.turn.id,
+        triggerEventId: started.claimed.turn.triggerEventId,
+        attemptId: started.attemptId,
+        turnStatus: "completed",
+        sessionStatus: "idle",
+        activeTurnId: null,
+        events: [{ type: "turn.completed", payload: { reason: "test" } }],
+      }),
+    ).toMatchObject({ action: "settled" });
+  }
+  const ancestor = options.ancestor ? await createSession(client.db, input) : null;
+  const ancestorStarted = ancestor ? await startSession(ancestor.id) : null;
+  const parent = await createSession(client.db, {
+    ...input,
+    ...(ancestor && ancestorStarted
+      ? {
+          parentSessionId: ancestor.id,
+          createdByActor: {
+            type: "agent_attempt" as const,
+            sessionId: ancestor.id,
+            turnId: ancestorStarted.claimed.turn.id,
+            attemptId: ancestorStarted.attemptId,
+            executionGeneration: ancestorStarted.claimed.turn.executionGeneration,
+          },
+        }
+      : {}),
   });
-  const attemptId = crypto.randomUUID();
-  const claimed = await claimSessionWorkForAttempt(client.db, grant.workspaceId!, {
-    sessionId: parent.id,
-    workflowId: `session-${parent.id}`,
-    workflowRunId: crypto.randomUUID(),
-    attemptId,
-    dispatchId: crypto.randomUUID(),
-    trigger: { kind: "next" },
-  });
-  if (claimed.action !== "claimed") throw new Error("parent not claimed");
+  const started = await startSession(parent.id);
+  const { claimed, attemptId } = started;
   const child = await createSession(client.db, {
     ...input,
     initialMessage: "child task",
-    parentSessionId: parent.id,
-    createdByActor: {
-      type: "agent_attempt",
-      sessionId: parent.id,
-      turnId: claimed.turn.id,
-      attemptId,
-      executionGeneration: claimed.turn.executionGeneration,
-    },
+    ...(options.unrelatedChild
+      ? {}
+      : {
+          parentSessionId: parent.id,
+          createdByActor: {
+            type: "agent_attempt" as const,
+            sessionId: parent.id,
+            turnId: claimed.turn.id,
+            attemptId,
+            executionGeneration: claimed.turn.executionGeneration,
+          },
+        }),
   });
-  expect(
-    await applySessionTurnSettlement(client.db, grant.workspaceId!, {
-      sessionId: parent.id,
-      turnId: claimed.turn.id,
-      triggerEventId: claimed.turn.triggerEventId,
-      attemptId,
-      turnStatus: "completed",
-      sessionStatus: "idle",
-      activeTurnId: null,
-      events: [{ type: "turn.completed", payload: { reason: "test" } }],
-    }),
-  ).toMatchObject({ action: "settled" });
+  await finishSession(parent.id, started);
+  if (ancestor && ancestorStarted) await finishSession(ancestor.id, ancestorStarted);
   await shared.admin`update session_workflow_wake_outbox
     set delivered_revision = wake_revision where session_id = ${parent.id}`;
-  return { grant, parent, child };
+  return { grant, parent, child, ancestor };
 }
 
 async function pendingResult(ctx: Awaited<ReturnType<typeof fixture>>, suffix = "terminal") {
@@ -184,6 +216,7 @@ async function pauseTarget(ctx: Awaited<ReturnType<typeof fixture>>, sessionId: 
     (db) =>
       db.transaction((tx) =>
         mutateSessionControlInTransaction(tx as unknown as typeof db, {
+          accountId: ctx.grant.accountId,
           workspaceId: ctx.grant.workspaceId!,
           sessionId,
           actor: { type: "human", subjectId: ctx.grant.subjectId },
@@ -270,35 +303,24 @@ for (const scenario of [
   "paused_goal",
 ] as const) {
   test(`repair preserves ${scenario} exclusion`, async () => {
-    const ctx = await fixture();
+    const ctx = await fixture({
+      ancestor: scenario === "ancestor_paused",
+      unrelatedChild: scenario === "forged_link",
+    });
     const updateId = await pendingResult(ctx);
     if (scenario === "paused") {
       await pauseTarget(ctx, ctx.parent.id);
     } else if (scenario === "ancestor_paused") {
-      // Test-only historical control fixture; scoped repair must still evaluate
-      // the entire ancestry rather than just this parent's direct state.
-      const ancestor = await createSession(client.db, {
-        accountId: ctx.grant.accountId,
-        workspaceId: ctx.grant.workspaceId!,
-        initialMessage: "ancestor",
-        resources: [],
-        tools: [],
-        metadata: {},
-        createdBy: { kind: "subject", subjectId: ctx.grant.subjectId },
-        model: "scripted-model",
-        reasoningEffort: "medium",
-        latencyMode: "standard",
-        sandboxBackend: "none",
-      });
-      await shared.admin`update sessions set parent_session_id = ${ancestor.id}
-        where id = ${ctx.parent.id}`;
-      await pauseTarget(ctx, ancestor.id);
+      // A genuine immutable delegation chain, not a rewritten lineage row.
+      await pauseTarget(ctx, ctx.ancestor!.id);
     } else if (scenario === "failed" || scenario === "cancelled") {
       await shared.admin`update sessions set status = ${scenario} where id = ${ctx.parent.id}`;
     } else if (scenario === "superseded") {
       await shared.admin`update session_system_updates set state = 'superseded' where id = ${updateId}`;
     } else if (scenario === "forged_link") {
-      await shared.admin`update sessions set parent_session_id = null where id = ${ctx.child.id}`;
+      // The authentic source ledger names a real session which was never this
+      // parent's child. Discovery must not invent the missing delegation.
+      expect(ctx.child.parentSessionId).toBeNull();
     } else if (scenario === "forged_lineage") {
       await shared.admin`update session_system_updates
         set lineage = jsonb_set(lineage, '{parentSessionId}', to_jsonb(${ctx.child.id}::text))
