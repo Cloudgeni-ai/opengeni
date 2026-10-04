@@ -1,10 +1,10 @@
 ---
 title: "Self-host"
-description: "Deploy OpenGeni on your own infrastructure."
+description: "Deploy Opengeni on your own infrastructure."
 icon: "server"
 ---
 
-OpenGeni is Apache-2.0: the API, web app, workers, Helm chart, and reference Terraform are all open source.
+Opengeni is Apache-2.0: the API, web app, workers, Helm chart, and reference Terraform are all open source.
 
 ## What you run
 
@@ -55,7 +55,7 @@ The plan lists the resources, dependencies, required secrets, and the deploy, ve
 | ------------ | ------------------------------------------------------------------------ |
 | `local`      | Local development with one `dev` user                                    |
 | `configured` | Your product signs delegated tokens, or callers share one deployment key |
-| `managed`    | OpenGeni sign-up, organizations, API keys, credits, and limits           |
+| `managed`    | Opengeni sign-up, organizations, API keys, credits, and limits           |
 
 Outside local development, `configured` mode needs either `OPENGENI_DELEGATION_SECRET` (delegated tokens) or `OPENGENI_AUTH_REQUIRED=true` with `OPENGENI_ACCESS_KEY` (a shared key sent as `x-opengeni-access-key`). The shared key is a simple perimeter, not per-tenant access control. See the [security boundary](https://github.com/Cloudgeni-ai/opengeni/blob/main/docs/deployment.md#security-boundary).
 
@@ -84,7 +84,7 @@ Review sandbox preparation profiles and environment allowlists: they decide whic
 
 ## Console links
 
-The console's Help entry opens the public OpenGeni docs. Set `OPENGENI_DOCUMENTATION_URL` to your own docs, or `none` to hide it.
+The console's Help entry opens the public Opengeni docs. Set `OPENGENI_DOCUMENTATION_URL` to your own docs, or `none` to hide it.
 
 For link previews in Slack and other chat tools, set `OPENGENI_PUBLIC_BASE_URL` to the public address, and `OPENGENI_WEB_BASE_URL` to the console origin if it differs from the API.
 

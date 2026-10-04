@@ -50,7 +50,7 @@ Requesting a capability the server doesn't offer fails with `agent_capability_un
 ## Identity and instructions
 
 - `identity` is who the agent is: its name, your product, its domain and voice. Defaults to the workspace's identity.
-- `instructions` are rules for this agent. They override OpenGeni's default working style, but not its safety rules.
+- `instructions` are rules for this agent. They override Opengeni's default working style, but not its safety rules.
 
 Put facts about the current page in the message's `modelContext`, not in instructions.
 
@@ -123,7 +123,7 @@ for (const tool of session.effectiveTools?.tools ?? []) {
 const knowledgeTools = byCapability.get("knowledge") ?? [];
 ```
 
-`effectiveTools.tools` is a flat list; group it yourself as above. A missing `effectiveTools` or `tenancy` on an older session means unknown, not off. The OpenGeni web app shows the same settings in the session's Agent panel, and the prompt sent in Debug > Context.
+`effectiveTools.tools` is a flat list; group it yourself as above. A missing `effectiveTools` or `tenancy` on an older session means unknown, not off. The Opengeni web app shows the same settings in the session's Agent panel, and the prompt sent in Debug > Context.
 
 <Tip>
   Using a coding agent? The [opengeni-client skill](/reference/for-ai-agents) walks it through these

@@ -1,10 +1,23 @@
 ---
 title: "Conversation UI & theming"
-description: "Render the full OpenGeni conversation, brand it, and customize how tools appear."
+description: "Render the full Opengeni conversation, brand it, and customize how tools appear."
 icon: "palette"
 ---
 
 `OpenGeniChat` shows the user's chats and the open conversation. The chat list is a sidebar when there is room and a drawer when there is not, so it fits a side panel or a full page. Users can start, rename, and archive chats.
+
+<Frame caption="Example: OpenGeniChat embedded in a support app. Acme Support is a demo host app, not part of Opengeni.">
+  <img
+    className="block dark:hidden"
+    src="/images/embedded-conversation.png"
+    alt="The Opengeni chat embedded in a demo support app, asking to approve a refund"
+  />
+  <img
+    className="hidden dark:block"
+    src="/images/embedded-conversation-dark.png"
+    alt="The Opengeni chat embedded in a demo support app, asking to approve a refund"
+  />
+</Frame>
 
 ```tsx
 <OpenGeniProvider client={client} workspaceId={workspaceId}>

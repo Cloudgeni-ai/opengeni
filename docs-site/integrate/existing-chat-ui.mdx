@@ -1,10 +1,10 @@
 ---
 title: "Keep your existing chat UI"
-description: "Serve an existing Vercel AI SDK or OpenAI-shaped chat UI from OpenGeni with the chat facade."
+description: "Serve an existing Vercel AI SDK or OpenAI-shaped chat UI from Opengeni with the chat facade."
 icon: "message-dots"
 ---
 
-If your product already has a chat UI that speaks the Vercel AI SDK `useChat` protocol or an OpenAI-shaped protocol, the chat facade in `@opengeni/sdk/chat` gives it an OpenGeni backend. It also powers server-side bots.
+If your product already has a chat UI that speaks the Vercel AI SDK `useChat` protocol or an OpenAI-shaped protocol, the chat facade in `@opengeni/sdk/chat` gives it an Opengeni backend. It also powers server-side bots.
 
 <Warning>
   The facade is text only: no tool outputs, files, artifacts, images, goals, queue, or Steer. For
@@ -49,7 +49,7 @@ Register `handleChat` for:
 
 Each tenant maps to a workspace and each conversation to a session. Keep one stable conversation id per thread (custom clients send it in `x-opengeni-conversation`). Users must be [onboarded](/integrate/users-and-tenants#onboard-users) first. `agent` takes the same object as [Configure the agent](/integrate/configure-the-agent). Always pass `baseUrl`.
 
-The Vercel and OpenAI formats send only the latest user message. Earlier messages are imported once, when the session is created; after that, OpenGeni keeps the history.
+The Vercel and OpenAI formats send only the latest user message. Earlier messages are imported once, when the session is created; after that, Opengeni keeps the history.
 
 ## Stream into an existing AI SDK route
 

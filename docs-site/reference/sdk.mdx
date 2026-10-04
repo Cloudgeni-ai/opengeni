@@ -36,7 +36,6 @@ module.exports = { createOpenGeniClient };
 | `@opengeni/sdk/express`                         | `toNodeMiddleware` for Express, Connect, and `node:http`                                                                       |
 | `@opengeni/sdk/hono`                            | `toHonoHandler` for Hono                                                                                                       |
 | `@opengeni/sdk/session-proxy`                   | Server-only proxy read helpers for artifact and Site delivery                                                                  |
-| `@opengeni/sdk/session-history-import`          | Server-only helpers for importing archived sessions                                                                            |
 | `@opengeni/sdk/chat`                            | The chat facade for an existing chat UI or server-side bots                                                                    |
 | `@opengeni/sdk/automations`                     | `OpenGeniAutomationsClient` for inbound event automations                                                                      |
 | `@opengeni/sdk/organization-integration-policy` | Which integrations an organization allows                                                                                      |
@@ -140,35 +139,6 @@ app.all("/api/opengeni/*", toHonoHandler(createSessionProxyHandler(og, options))
 The Node middleware streams bodies and SSE, works after a body parser, and aborts when the client disconnects.
 
 Pass the chat facade's `OpenGeni` instead of a client to resolve `{ tenant, user }` instead of a workspace id. Don't replace the proxy with a passthrough that forwards any path under the organization key.
-
-## Archived session import (server only)
-
-`@opengeni/sdk/session-history-import` imports read-only session archives from
-another system. Each function takes an `OpenGeniClient` as its first argument.
-
-| Function                                       | Remaining arguments                     |
-| ---------------------------------------------- | --------------------------------------- |
-| `importArchivedSession`                        | `workspaceId, request`                  |
-| `appendArchivedSessionEvents`                  | `workspaceId, importId, request`        |
-| `importExternalWorkspaceArchivedSession`       | `source, externalId, request`           |
-| `appendExternalWorkspaceArchivedSessionEvents` | `source, externalId, importId, request` |
-
-| Request type                         | Fields                                                                                                                                  |
-| ------------------------------------ | --------------------------------------------------------------------------------------------------------------------------------------- |
-| `ImportArchivedSessionRequest`       | `importId`, `title`, ISO `createdAt`, optional `visibility: "workspace_shared" \| "user_private"`, optional `events` (defaults to `[]`) |
-| `ArchivedSessionImportEvent`         | Supported historical `type`, ISO `createdAt`, optional UUID/null `turnId`, JSON-object `payload`                                        |
-| `AppendArchivedSessionEventsRequest` | `batchId`, zero-based integer `offset`, non-empty `events`                                                                              |
-
-Onboard the workspace and users first, and call through
-`.asUser(originalUserId, { source })` to keep the original owner. Create needs
-`sessions:create`; append needs `sessions:control`.
-
-Limits: IDs and titles up to 200 characters; up to 100 events and 1 MiB per
-request; 256 KiB per event. Retrying the same `importId` or `batchId`/`offset`
-is safe; reusing one with different content returns `409`.
-
-Imported sessions are read-only. `SessionConversation` renders them with
-messaging disabled, and they cannot be continued.
 
 ## Chat facade
 

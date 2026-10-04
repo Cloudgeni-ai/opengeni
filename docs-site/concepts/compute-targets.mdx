@@ -8,14 +8,14 @@ Each session runs its commands, files, and tools on one of two targets.
 
 |                   | Managed sandbox               | Connected Machine                                  |
 | ----------------- | ----------------------------- | -------------------------------------------------- |
-| Ownership         | OpenGeni, created per session | You, always on                                     |
+| Ownership         | Opengeni, created per session | You, always on                                     |
 | Repositories      | Cloned into `/workspace`      | Not cloned; uses what's already on the machine     |
 | Working directory | `/workspace`                  | The agent's launch folder, or one the session sets |
 | Network           | Inside the deployment         | The machine connects out; no inbound ports         |
 
 ## Managed sandboxes
 
-OpenGeni provisions a fresh sandbox for the session. Backends include Docker (the local default), Modal, local, and several cloud sandbox providers.
+Opengeni provisions a fresh sandbox for the session. Backends include Docker (the local default), Modal, local, and several cloud sandbox providers.
 
 The stock images include Terraform, Checkov, GitHub CLI, git, `psql`, a Python toolchain, common shell tools, and a Chromium-based browser. The headless image adds Azure CLI; the desktop image adds a graphical desktop and FFmpeg.
 
@@ -27,7 +27,7 @@ A Connected Machine is a computer you enroll: a laptop, workstation, build serve
 
 - **Your credentials.** The machine uses its own SSH keys, `gh` login, and Git setup.
 - **Your files.** Each session works in a folder on the machine.
-- **Outbound only.** The machine connects to OpenGeni; it doesn't need to be reachable from the internet.
+- **Outbound only.** The machine connects to Opengeni; it doesn't need to be reachable from the internet.
 - **Explicit consent.** Enrollment asks for machine access, screen control is a separate consent, and you can revoke access in one click.
 
 Self-hosted deployments must enable Connected Machines first. See [Connect a machine](/guides/connect-a-machine).

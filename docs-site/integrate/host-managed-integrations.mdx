@@ -15,7 +15,7 @@ Configure the credential provider and webhooks per workspace or once for the org
 
 ## One signature scheme
 
-Every request OpenGeni sends to your endpoints is signed:
+Every request Opengeni sends to your endpoints is signed:
 
 ```text
 OpenGeni-Signature: t=<unix seconds>,v1=<hex HMAC-SHA256(secret, "<t>.<raw body>")>
@@ -32,7 +32,7 @@ const request = await verifyCredentialProviderRequest({ body: rawBody, headers, 
 
 ## Credential provider
 
-An HTTPS endpoint that supplies short-lived credentials for sandbox work: environment variables, files, Git credentials, and MCP credentials. OpenGeni calls it before a turn's sandbox work and again before they expire.
+An HTTPS endpoint that supplies short-lived credentials for sandbox work: environment variables, files, Git credentials, and MCP credentials. Opengeni calls it before a turn's sandbox work and again before they expire.
 
 ```ts
 const { secret } = await og.putWorkspaceCredentialProvider(workspaceId, {

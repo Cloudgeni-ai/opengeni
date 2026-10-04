@@ -4,13 +4,13 @@ description: "Expose your product's data and actions to the agent through an MCP
 icon: "database"
 ---
 
-The agent reaches your product through tools you expose. OpenGeni calls them; your API authorizes every call.
+The agent reaches your product through tools you expose. Opengeni calls them; your API authorizes every call.
 
 | Use                                      | When                                                                      |
 | ---------------------------------------- | ------------------------------------------------------------------------- |
 | **Your tools with the proxy (Node)**     | Your backend mounts the session proxy. Add one `toolServer` option        |
 | **Per-session MCP server (any backend)** | You mint and rotate a per-user token yourself                             |
-| **OpenAPI Integration**                  | You already have an HTTP API. OpenGeni compiles its operations into tools |
+| **OpenAPI Integration**                  | You already have an HTTP API. Opengeni compiles its operations into tools |
 
 A session only sees tools it selects. The proxy's `toolServer` and a per-session `mcpServers` entry select themselves; workspace integrations need `tools`.
 

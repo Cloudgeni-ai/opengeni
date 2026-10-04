@@ -1,16 +1,16 @@
 ---
 title: "How it fits together"
-description: "The browser, your backend, and OpenGeni, and how your tenants and users map onto OpenGeni."
+description: "The browser, your backend, and Opengeni, and how your tenants and users map onto Opengeni."
 icon: "diagram-project"
 ---
 
-Your product keeps its users, tenants, data, and pages. OpenGeni runs the agent sessions. They meet at one backend route and at the tools you expose.
+Your product keeps its users, tenants, data, and pages. Opengeni runs the agent sessions. They meet at one backend route and at the tools you expose.
 
 ```mermaid
 flowchart LR
   B["Browser<br/>OpenGeniProvider + OpenGeniChat"]
   P["Your backend<br/>createSessionProxyHandler"]
-  O["OpenGeni API<br/>sessions, events, approvals"]
+  O["Opengeni API<br/>sessions, events, approvals"]
   T["Your API<br/>MCP server or OpenAPI"]
   B -- "/api/opengeni/*<br/>your session cookie" --> P
   P -- "organization API key<br/>acting as the user" --> O
@@ -18,14 +18,14 @@ flowchart LR
 ```
 
 1. The browser talks to your own origin at `/api/opengeni`.
-2. Your proxy checks your session, picks the user's workspace, and forwards the request to OpenGeni as that user.
-3. OpenGeni runs the agent, which calls your API through the tools you gave it.
+2. Your proxy checks your session, picks the user's workspace, and forwards the request to Opengeni as that user.
+3. Opengeni runs the agent, which calls your API through the tools you gave it.
 
 The organization API key stays on your server.
 
-## Mapping your product onto OpenGeni
+## Mapping your product onto Opengeni
 
-| Your product                   | OpenGeni                          | Created by                                  |
+| Your product                   | Opengeni                          | Created by                                  |
 | ------------------------------ | --------------------------------- | ------------------------------------------- |
 | Your company                   | Organization                      | Sign-up, once                               |
 | A customer, team, or tenant    | Workspace                         | `ensureWorkspace` with your tenant id       |
@@ -37,7 +37,7 @@ A workspace is where sessions, files, knowledge, and connections are shared. One
 
 ## Who does what
 
-| Your product                         | OpenGeni                                  |
+| Your product                         | Opengeni                                  |
 | ------------------------------------ | ----------------------------------------- |
 | Authenticates users                  | Checks workspace membership on every call |
 | Maps tenants to workspaces           | Stores sessions, events, and files        |

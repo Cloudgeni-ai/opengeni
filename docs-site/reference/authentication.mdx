@@ -1,6 +1,6 @@
 ---
 title: "Authentication"
-description: "How callers identify themselves to the OpenGeni API."
+description: "How callers identify themselves to the Opengeni API."
 icon: "key"
 ---
 
@@ -10,7 +10,7 @@ Sessions belong to workspaces; organization routes manage shared workspaces, key
 
 | You are                                              | Use                                                                         |
 | ---------------------------------------------------- | --------------------------------------------------------------------------- |
-| A product backend integrating OpenGeni               | An **organization API key**                                                 |
+| A product backend integrating Opengeni               | An **organization API key**                                                 |
 | A backend or automation constrained to one workspace | A **workspace API key**                                                     |
 | A host acting on behalf of its own signed-in users   | A **delegated access token** signed with the deployment's delegation secret |
 | A person in the web console                          | A managed web session (email/password or an enabled Google/GitHub provider) |
@@ -30,7 +30,7 @@ Sessions belong to workspaces; organization routes manage shared workspaces, key
 
 In managed mode, Google, GitHub, and email/password can all sign in the same
 user. When a social provider presents an email that matches an existing user,
-OpenGeni links it automatically if both emails are verified. Linking keeps the
+Opengeni links it automatically if both emails are verified. Linking keeps the
 user's workspaces, history, memberships, and billing. Unverified or different
 emails are not linked.
 
@@ -122,7 +122,7 @@ tokens.
 
 ## Authenticate users of your chat
 
-`createSessionProxyHandler` and `createChatHandler` call your `resolve(request)` hook on every request. Verify your product's session cookie or bearer there, and return the user's tenant and user ID. The organization key authenticates your backend to OpenGeni; your backend authenticates your users.
+`createSessionProxyHandler` and `createChatHandler` call your `resolve(request)` hook on every request. Verify your product's session cookie or bearer there, and return the user's tenant and user ID. The organization key authenticates your backend to Opengeni; your backend authenticates your users.
 
 A conversation ID is not scoped to a user. Your backend decides which conversations a user may open. An end-user label does not grant workspace membership.
 

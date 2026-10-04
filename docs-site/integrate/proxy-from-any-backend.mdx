@@ -1,12 +1,12 @@
 ---
 title: "Proxy from any backend"
-description: "Serve the OpenGeni conversation from Django, Rails, Go, PHP, or Java."
+description: "Serve the Opengeni conversation from Django, Rails, Go, PHP, or Java."
 icon: "server"
 ---
 
 [`createSessionProxyHandler`](/embed-manually) is JavaScript. On any other backend, write the same proxy in your own framework and point the browser SDK (`OpenGeniClient` with `baseUrl: "/api/opengeni"`) and `@opengeni/react` at it.
 
-The proxy forwards a fixed list of routes to the OpenGeni API, adds the organization key and the signed-in user's identity, and returns 404 for everything else.
+The proxy forwards a fixed list of routes to the Opengeni API, adds the organization key and the signed-in user's identity, and returns 404 for everything else.
 
 ## Routes to forward
 

@@ -1,10 +1,10 @@
 ---
 title: "Embed with your coding agent"
-description: "Let Claude Code, Codex, or Cursor add an OpenGeni agent to your product."
+description: "Let Claude Code, Codex, or Cursor add an Opengeni agent to your product."
 icon: "wand-magic-sparkles"
 ---
 
-The `opengeni-client` skill teaches a coding agent how to add OpenGeni to your product. Install it, describe what you want, and let the agent build it.
+The `opengeni-client` skill teaches a coding agent how to add Opengeni to your product. Install it, describe what you want, and let the agent build it.
 
 ## Before you start
 
@@ -55,13 +55,13 @@ bunx skills add Cloudgeni-ai/opengeni --skill opengeni-client --yes
 
 </CodeGroup>
 
-The [OpenGeni plugin](/guides/developer-plugin) bundles this skill with `opengeni-setup`, which creates the organization and API key with you.
+The [Opengeni plugin](/guides/developer-plugin) bundles this skill with `opengeni-setup`, which creates the organization and API key with you.
 
 ## What you get
 
 - **A proxy route** at `/api/opengeni/*` that checks your existing user session.
 - **The chat UI**: `<OpenGeniChat />`, or `<SessionConversation />` for one record, styled with your brand.
-- **User onboarding**: each user gets access to their OpenGeni workspace.
+- **User onboarding**: each user gets access to their Opengeni workspace.
 - **Your tools**: an MCP server or OpenAPI integration so the agent can use your product's data as the signed-in user.
 - **Tests** for the proxy and tenant isolation.
 
