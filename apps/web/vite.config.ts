@@ -72,12 +72,14 @@ export default defineConfig({
               priority: 21,
             },
             {
-              // The playground is a lazy page around the packaged embedded chat
-              // (provider, chat, chat list, conversation, human input). Nothing
-              // the app's own session page uses is listed here; left floating,
-              // these merge into the shared chunks every direct session loads.
+              // The playground is a lazy page around the packaged embedded chat.
+              // Only modules nothing else in the app imports belong here (the
+              // app's rail has its own session list; the provider, the
+              // workspace sessions hook and the approval surface stay with the
+              // eager workspace shell). Left floating, these merge into the
+              // shared chunks every workspace and direct session loads.
               name: "embedded-chat",
-              test: /(?:apps[\\/]web[\\/]src[\\/](?:components[\\/]playground[\\/][\w-]+\.(?:tsx?|css)|routes[\\/]playground\.tsx)|packages[\\/]react[\\/]src[\\/](?:provider\.tsx|lib[\\/]host-theme\.ts|components[\\/](?:open-geni-chat|session-conversation|session-list|session-commands-panel|session-commands|session-proxy-scope|human-input-form|human-input-surface)\.tsx|hooks[\\/](?:use-workspace-sessions|use-session-control|use-available-models|use-session-background-commands)\.ts))$/,
+              test: /(?:apps[\\/]web[\\/]src[\\/](?:components[\\/]playground[\\/][\w-]+\.(?:tsx?|css)|routes[\\/]playground\.tsx)|packages[\\/]react[\\/]src[\\/](?:lib[\\/]host-theme\.ts|components[\\/](?:open-geni-chat|session-conversation|session-list|session-proxy-scope)\.tsx|hooks[\\/](?:use-session-control|use-available-models)\.ts))$/,
               includeDependenciesRecursively: false,
               priority: 21,
             },
