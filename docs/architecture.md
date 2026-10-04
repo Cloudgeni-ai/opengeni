@@ -271,6 +271,16 @@ Workspace operations require API-resolved authenticated access contexts and gran
 before data access. Transaction-local Postgres FORCE RLS adds defense-in-depth;
 resource UUIDs grant nothing.
 
+The unused private Modal worker-host proof transport
+(`packages/core/src/application/modal-native-worker-host-transport.ts`) has a
+separate prefix, version, purpose and HMAC subkey/message domain. It accepts only
+the explicitly configured deployment delegation root, never ordinary delegated
+tokens or the access-key/local fallback. A verified request MAC is transport
+correlation, not a resolved workspace grant, initiating-human authorization,
+native response, current custody claim, physical settlement or effect permit.
+No host entry, provider caller or durable recovery is activated by this helper.
+See [Modal recovery assurance](design/modal-recovery-assurance-2026-10-02.md).
+
 Organization/workspace membership, API keys, delegated grants, private-session
 ownership and personal-resource grants remain distinct. Organization keys with
 `workspace:admin` may change private-session product settings; DB fences recheck
