@@ -18,6 +18,10 @@
   "module": "./src/index.ts",
   "types": "./src/index.ts",
   "exports": {
+    "./connection-account-label": {
+      "types": "./src/connection-account-label.ts",
+      "default": "./src/connection-account-label.ts"
+    },
     "./modal-native-proof-v2": {
       "types": "./src/modal-native-proof-v2.ts",
       "default": "./src/modal-native-proof-v2.ts"

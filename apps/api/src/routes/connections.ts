@@ -208,9 +208,19 @@ export function registerConnectionRoutes(app: Hono, deps: ApiRouteDeps): void {
   app.get("/v1/workspaces/:workspaceId/connections/accounts", async (c) => {
     const workspaceId = c.req.param("workspaceId");
     const grant = await requireAccessGrant(c, deps, workspaceId, "connections:read");
+    const includeInactive = c.req.query("includeInactive");
+    if (
+      includeInactive !== undefined &&
+      includeInactive !== "true" &&
+      includeInactive !== "false"
+    ) {
+      throw new HTTPException(400, { message: "includeInactive must be true or false" });
+    }
     return c.json(
       ListConnectionsResponse.parse({
-        connections: await listOwnConnectionAccountsForGrant(db, grant),
+        connections: await listOwnConnectionAccountsForGrant(db, grant, {
+          includeInactive: includeInactive === "true",
+        }),
       }),
     );
   });
