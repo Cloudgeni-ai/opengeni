@@ -199,7 +199,7 @@ export function ClaudeAccessPage({
   accountId: string;
   onClose: () => void;
 }) {
-  const account = claude.accounts.find((account) => account.id === accountId);
+  const account = claude.accounts.find((candidate) => candidate.id === accountId);
   const access = useConnectionAccess({
     client: claude.client,
     organizationId: claude.organizationId,

@@ -39,6 +39,10 @@ Then open the smallest source files that answer the question:
 - API routes: `apps/api/src/routes/`, plus `apps/api/src/app.ts` and `apps/api/src/index.ts`.
 - Core domain/access/billing helpers: `packages/core/src/` (`access/`, `domain/`, `billing/`, and `dependencies.ts`). These moved out of `apps/api`; API routes are HTTP adapters over `@opengeni/core`.
 - Public shapes: `packages/contracts/src/index.ts`, especially workspace, access, billing, usage, session, file, document, schedule, and MCP contracts.
+- Organization API-key policy/preset normalization and all/selected shared-workspace scope:
+  `packages/contracts/src/organization-access.ts`, then `packages/core/src/access/`
+  and `apps/api/src/routes/api-keys.ts`. Explicit policies have exact grants;
+  legacy wildcard semantics are separate. See `docs/product-integration.md`.
 - External host identities and credential authority: `packages/core/src/access/`,
   `packages/contracts/src/external-identities.ts`, and `packages/db/src/connection-authority.ts`.
   Verified external owning-user authority is distinct from a managed login cookie.

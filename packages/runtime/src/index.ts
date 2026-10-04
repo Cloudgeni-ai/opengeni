@@ -447,6 +447,7 @@ import {
   withModelTransportStartedObserver,
   type ModelPreparationMeasurement,
   type ModelPreparationPhase,
+  type ModelTransportDispatchClock,
 } from "./model-preparation-diagnostics";
 import {
   HUMAN_INPUT_TOOL_NAME,
@@ -503,6 +504,7 @@ export {
 export type {
   ModelPreparationMeasurement,
   ModelPreparationPhase,
+  ModelTransportDispatchClock,
 } from "./model-preparation-diagnostics";
 export {
   markModelPreparationFirstSandboxOperation,
@@ -8268,6 +8270,8 @@ export type RunAgentStreamOptions = {
   onModelPreparationPhase?: (measurement: ModelPreparationMeasurement) => void;
   /** Awaited at the generic provider's literal pre-fetch boundary. */
   onModelTransportStarted?: () => Promise<void> | void;
+  /** Synchronous diagnostic after admission/audit, immediately before fetch. */
+  onModelTransportDispatched?: (clock: ModelTransportDispatchClock) => void;
   sandboxClient?: unknown;
   sandboxEnvironment?: Record<string, string>;
   onRuntimeEvent?: (event: NormalizedRuntimeEvent) => Promise<void> | void;
@@ -8821,7 +8825,9 @@ async function runAgentStreamInternal(
     return await withModelCallOutputBound(modelCallOutputBoundCell, () =>
       withModelRequestCapture(modelRequestCapture, () =>
         withModelPreparationObserver(overrides.onModelPreparationPhase, () =>
-          withModelTransportStartedObserver(overrides.onModelTransportStarted, () => {
+          withModelTransportStartedObserver(
+            overrides.onModelTransportStarted,
+            () => {
             recordModelPreparationManifestInventory(
               "sandbox_agent_manifest_inventory",
               (agent as { defaultManifest?: Manifest }).defaultManifest,
@@ -8835,7 +8841,9 @@ async function runAgentStreamInternal(
               prepared.input,
               ownedRunOptions,
             );
-          }),
+            },
+            overrides.onModelTransportDispatched,
+          ),
         ),
       ),
     );
@@ -8991,7 +8999,9 @@ async function runAgentStreamInternal(
   return await withModelCallOutputBound(modelCallOutputBoundCell, () =>
     withModelRequestCapture(modelRequestCapture, () =>
       withModelPreparationObserver(overrides.onModelPreparationPhase, () =>
-        withModelTransportStartedObserver(overrides.onModelTransportStarted, () => {
+        withModelTransportStartedObserver(
+          overrides.onModelTransportStarted,
+          () => {
           recordModelPreparationManifestInventory(
             "sandbox_agent_manifest_inventory",
             (agent as { defaultManifest?: Manifest }).defaultManifest,
@@ -9001,7 +9011,9 @@ async function runAgentStreamInternal(
             prepared.input,
             runOptions,
           );
-        }),
+          },
+          overrides.onModelTransportDispatched,
+        ),
       ),
     ),
   );

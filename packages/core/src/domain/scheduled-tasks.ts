@@ -12,6 +12,11 @@ import {
   resolveFirstPartyMcpToolPolicy,
   type Settings,
 } from "@opengeni/config";
+import {
+  ATLASSIAN_NATIVE_RETIRED_MESSAGE,
+  isRetiredNativeAtlassianSource,
+  isRetiredNativeAtlassianTask,
+} from "@opengeni/contracts/atlassian-native-retirement";
 import type {
   AccessGrant,
   KnowledgeSourceSyncAction,
@@ -80,6 +85,7 @@ import { fileOwnerContextForAccess, fileOwnerContextForAgent } from "./file-owne
 import { isDeepStrictEqual } from "node:util";
 import {
   hasPermission,
+  requireExplicitPermissionDelegation,
   isDeveloperSetupAuthorization,
   isDeveloperSetupGrant,
   requirePermission,
@@ -207,9 +213,7 @@ export function scheduledConnectionSurfaceEligibility(
       tools.includes("editable_artifact_export_status") &&
       permissions.includes("artifacts:read") &&
       permissions.includes("artifacts:publish"),
-    atlassianEnabled:
-      tools.some((tool) => tool.startsWith("atlassian_")) &&
-      permissions.includes("connections:read"),
+    atlassianEnabled: false,
   };
 }
 
@@ -550,6 +554,23 @@ export async function frozenScheduledTaskCreatorPolicy(input: {
       isDeveloperSetupAuthorization(input.authorization)) ||
     isDeveloperSetupGrant(input.grant);
   if (!input.actor) {
+    if (input.grant.permissionMode === "explicit") {
+      const permissions = DEFAULT_FIRST_PARTY_MCP_PERMISSIONS.filter((permission) =>
+        hasPermission(input.grant.permissions, permission, "explicit"),
+      );
+      if (permissions.length === 0) {
+        throw new HTTPException(403, {
+          message:
+            "the organization key holds no first-party MCP permission it could delegate to scheduled runs",
+        });
+      }
+      return {
+        firstPartyMcpTools: null,
+        firstPartyMcpPermissions: permissions,
+        sessionPolicy: null,
+        ...(restricted ? { credentialRestriction: "developer_setup" as const } : {}),
+      };
+    }
     // A restriction is not an agent tool/permission selection. Keep the exact
     // first-party and session defaults of ordinary API/service/asUser tasks.
     return restricted
@@ -592,7 +613,10 @@ export async function frozenScheduledTaskCreatorPolicy(input: {
   );
   const firstPartyMcpPermissions = (
     session.firstPartyMcpPermissions ?? [...DEFAULT_FIRST_PARTY_MCP_PERMISSIONS]
-  ).filter((permission) => hasPermission(input.grant.permissions, permission));
+  ).filter((permission) =>
+    hasPermission(input.grant.permissions, permission, input.grant.permissionMode),
+  );
+  requireExplicitPermissionDelegation(input.grant, firstPartyMcpPermissions);
   if (firstPartyMcpPermissions.length === 0) {
     throw new HTTPException(403, {
       message:
@@ -781,6 +805,8 @@ export async function triggerScheduledTaskForGrant(
 ): Promise<void> {
   await db.transaction(async (tx) => {
     await assertScheduledTaskMutationOwner(tx, grant, input.task.id);
+    if (isRetiredNativeAtlassianTask(input.task))
+      throw new HTTPException(410, { message: ATLASSIAN_NATIVE_RETIRED_MESSAGE });
     const actor = creationInitiatorForGrant(grant).actor ?? null;
     const restriction = await scheduledTaskCredentialRestrictionForGrant(tx, grant, actor);
     // A caller cannot supply or clear the trusted ceiling. Ownerless and
@@ -1160,6 +1186,11 @@ export async function validatedScheduledTaskUpdate(input: {
   }
   const update: UpdateScheduledTaskInput = {};
   const requestedKnowledgeSource = input.payload.agentConfig?.knowledgeSource ?? null;
+  if (
+    isRetiredNativeAtlassianTask(input.existing) &&
+    (input.payload.status === "active" || requestedKnowledgeSource)
+  )
+    throw new HTTPException(410, { message: ATLASSIAN_NATIVE_RETIRED_MESSAGE });
   const existingKnowledgeSource = scheduledTaskKnowledgeSource(input.existing);
   // Editing an ordinary source task's prompt/settings must not orphan its
   // connector binding. Deleting the task is the explicit source-disable path.
@@ -1687,6 +1718,8 @@ async function validateKnowledgeSourceSyncAction(input: {
   grant: AccessGrant;
   action: KnowledgeSourceSyncAction;
 }): Promise<void> {
+  if (isRetiredNativeAtlassianSource(input.action))
+    throw new HTTPException(410, { message: ATLASSIAN_NATIVE_RETIRED_MESSAGE });
   if (input.action.initiatingSubjectId !== input.grant.subjectId) {
     throw new HTTPException(403, {
       message: "knowledge source sync must preserve the exact initiating subject",

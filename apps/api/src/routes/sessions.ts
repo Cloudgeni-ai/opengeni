@@ -6,7 +6,7 @@ import * as sessionPreviewSchema from "@opengeni/db/schema";
 import { and, eq, sql } from "drizzle-orm";
 import { SessionMessageSearchRequest } from "@opengeni/contracts";
 import { scheduledSessionIds } from "@opengeni/db";
-import { withSiteSessionOrigin } from "@opengeni/core";
+import { isVerifiedDelegatedHumanAuthorization, withSiteSessionOrigin } from "@opengeni/core";
 import { freezeSessionRealtimeConnectionAccounts } from "@opengeni/core";
 import { resolveSiteSessionOrigin, withOptionalSiteCommandOrigin } from "../site-session-origin";
 import { SandboxRecoveryRequest } from "@opengeni/contracts";
@@ -3693,7 +3693,9 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
           response: event.payload.response,
           respondedBy: grant.subjectId,
           canonicalHumanSession:
-            authorization.canonicalManagedHumanSession || authorization.canonicalLocalHumanSession,
+            authorization.canonicalManagedHumanSession ||
+            authorization.canonicalLocalHumanSession ||
+            isVerifiedDelegatedHumanAuthorization(authorization),
           respondedByKind: childRequiresActionRespondedByKindForGrant(grant),
           clientEventId: event.clientEventId ?? null,
           mcpCredentialUpdates,

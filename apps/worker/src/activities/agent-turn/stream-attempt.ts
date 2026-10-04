@@ -998,6 +998,12 @@ export async function runTurnStreamAttempt(
           ...(!providerPublishesNativeRequestEvents
             ? {
                 onModelTransportStarted: recordFallbackProviderDispatchAtWire,
+                onModelTransportDispatched: (clock) => {
+                  eventing.initialModelWireDispatch.record(
+                    { provider: streamProvider, dispatchId },
+                    clock,
+                  );
+                },
               }
             : {}),
           ...(eventing.toolCancellationFenceRef.current
@@ -1079,6 +1085,7 @@ export async function runTurnStreamAttempt(
             attemptId: input.attemptId,
             dispatchId,
             executionGeneration: attempt.executionGeneration,
+            ...eventing.initialModelWireDispatch.payload({ provider: streamProvider, dispatchId }),
           },
         },
       ]);
@@ -1193,6 +1200,10 @@ export async function runTurnStreamAttempt(
                   attemptId: input.attemptId,
                   dispatchId,
                   executionGeneration: attempt.executionGeneration,
+                  ...eventing.initialModelWireDispatch.payload({
+                    provider: streamProvider,
+                    dispatchId,
+                  }),
                 },
               },
             ]);
@@ -1527,6 +1538,10 @@ export async function runTurnStreamAttempt(
               attemptId: input.attemptId,
               dispatchId,
               executionGeneration: attempt.executionGeneration,
+              ...eventing.initialModelWireDispatch.payload({
+                provider: streamProvider,
+                dispatchId,
+              }),
             },
           },
         ]);

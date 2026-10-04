@@ -1,5 +1,5 @@
 /**
- * Breakdown rows from the usage response: display names, marks, merging of
+ * Breakdown rows from the usage response: display names, merging of
  * rows that read the same (a model served by both an organization and a
  * workspace Claude plan is one row), and what clicking a row does.
  */
@@ -12,14 +12,8 @@ import {
   type UsageMeasures,
   type UsageResponse,
 } from "./usage-contract";
-import {
-  modelDisplayName,
-  providerDisplayName,
-  providerMark,
-  type MarkId,
-  type ModelLabelSource,
-} from "./model-display";
-import { costMicros, payerName } from "./usage-format";
+import { modelDisplayName, providerDisplayName, type ModelLabelSource } from "./model-display";
+import { costMicros, payerName, sourceName } from "./usage-format";
 
 export const GROUP_LABELS: Record<UsageGroupBy, string> = {
   model: "Model",
@@ -30,6 +24,7 @@ export const GROUP_LABELS: Record<UsageGroupBy, string> = {
   rootSession: "Session",
   person: "Person",
   schedule: "Schedule",
+  source: "Source",
 };
 
 /** Group-bys in menu order, per scope. */
@@ -42,6 +37,7 @@ export const GROUP_ORDER: readonly UsageGroupBy[] = [
   "rootSession",
   "person",
   "schedule",
+  "source",
 ];
 
 export const FILTER_FIELD_OF: Record<UsageGroupBy, UsageFilterField> = {
@@ -53,6 +49,7 @@ export const FILTER_FIELD_OF: Record<UsageGroupBy, UsageFilterField> = {
   rootSession: "rootSessionId",
   person: "person",
   schedule: "scheduleId",
+  source: "source",
 };
 
 /** Where a click on a row goes next: filter to it, then look one level down. */
@@ -65,6 +62,7 @@ export const DRILL_NEXT: Record<UsageGroupBy, UsageGroupBy> = {
   rootSession: "model",
   person: "rootSession",
   schedule: "model",
+  source: "model",
 };
 
 export type BreakdownRow = {
@@ -72,9 +70,6 @@ export type BreakdownRow = {
   label: string;
   /** Muted words after the title ("ChatGPT plan", "Ada Lovelace"). */
   detail?: string;
-  mark: MarkId;
-  /** Model rows wear the maker's logo (`ModelTile`) instead of a connection mark. */
-  modelId?: string;
   kind: UsageGroup["kind"];
   you?: boolean;
   /** Filter values a click applies; null when the row can't be filtered (private, deleted, other). */
@@ -90,31 +85,29 @@ function rowLabel(
   group: UsageGroup,
   groupBy: UsageGroupBy,
   catalog?: ModelLabelSource,
-): { label: string; detail?: string; mark: MarkId; modelId?: string } {
+): { label: string; detail?: string } {
   switch (group.kind) {
     case "private":
       return {
         label: "Private chats",
         ...(group.label && group.label !== "Private chats" ? { detail: group.label } : {}),
-        mark: null,
       };
     case "deleted":
-      return { label: "Deleted chats", mark: null };
+      return { label: "Deleted chats" };
     case "personal":
       return {
         label:
           group.label && group.label !== "Personal workspaces"
             ? `${group.label}'s Personal`
             : "Personal workspaces",
-        mark: null,
       };
     case "unfiled":
-      return { label: groupBy === "project" ? "No project" : group.label, mark: null };
+      return { label: groupBy === "project" ? "No project" : group.label };
     case "service":
-      return { label: "Automations", detail: "Schedules and agent-started work", mark: null };
+      return { label: "Automations", detail: "Schedules and agent-started work" };
     case "other":
     case "restricted":
-      return { label: group.label, mark: null };
+      return { label: group.label };
     case "item":
       break;
   }
@@ -122,20 +115,18 @@ function rowLabel(
     return {
       label: modelDisplayName(group.provider, group.model, catalog),
       detail: providerDisplayName(group.provider),
-      mark: null,
-      modelId: group.model,
     };
   }
   if (groupBy === "provider" && group.provider) {
-    return { label: providerDisplayName(group.provider), mark: providerMark(group.provider) };
+    return { label: providerDisplayName(group.provider) };
   }
   if (groupBy === "payer" && group.payer) {
     return {
       label: payerName(group.payer),
-      mark: group.payer === "opengeni_credits" ? "opengeni" : null,
     };
   }
-  return { label: group.label, mark: null };
+  if (groupBy === "source") return { label: sourceName(group.key) };
+  return { label: group.label };
 }
 
 /** The response's groups as display rows, merged by what they read as, biggest cost first. */
@@ -149,7 +140,7 @@ export function breakdownRows(
   >();
   const field = FILTER_FIELD_OF[response.groupBy];
   for (const group of response.groups) {
-    const { label, detail, mark, modelId } = rowLabel(group, response.groupBy, catalog);
+    const { label, detail } = rowLabel(group, response.groupBy, catalog);
     const filterable =
       group.kind === "item" || (group.kind === "unfiled" && response.groupBy === "project");
     const filterValue =
@@ -171,11 +162,14 @@ export function breakdownRows(
         id: identity,
         label,
         ...(detail ? { detail } : {}),
-        mark,
-        ...(modelId ? { modelId } : {}),
         kind: group.kind,
         ...(group.you ? { you: true } : {}),
-        filter: filterable ? { field, values: [filterValue] } : null,
+        // A private row filters to its person (amounts only); other folded rows can't be filtered.
+        filter: filterable
+          ? { field, values: [filterValue] }
+          : group.kind === "private" && group.personKey
+            ? { field: "person", values: [group.personKey] }
+            : null,
         ...(response.groupBy === "rootSession" && group.kind === "item"
           ? { sessionId: group.key }
           : {}),
@@ -184,10 +178,19 @@ export function breakdownRows(
       parts: [group.measures],
     });
   }
-  const rows = [...merged.values()].map(({ row, parts }) => {
-    const measures = parts.length === 1 ? parts[0]! : sumMeasures(parts);
-    return { ...row, measures, cost: costMicros(measures) };
-  });
+  const rows = [...merged.values()]
+    .map(({ row, parts }) => {
+      const measures = parts.length === 1 ? parts[0]! : sumMeasures(parts);
+      return { ...row, measures, cost: costMicros(measures) };
+    })
+    // A workspace or schedule with nothing in the period is not a row of zeros.
+    .filter(
+      (row) =>
+        row.measures.calls > 0 ||
+        row.cost > 0 ||
+        row.measures.chargedMicros > 0 ||
+        (row.measures.tokensTotal ?? 0) > 0,
+    );
   // Folded and amount-only rows sit after the named ones.
   const rank = (row: BreakdownRow) => (row.kind === "item" ? 0 : row.kind === "other" ? 2 : 1);
   return rows.sort(

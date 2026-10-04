@@ -96,9 +96,11 @@ import { HTTPException } from "hono/http-exception";
 import {
   getManagedAuthRequestActorEpoch,
   accountScopedApiKeyWorkspaceAuthority,
+  organizationWorkspaceInScope,
   hasPermission,
   requireAccessContext,
   requireApiKeyDelegationContext,
+  requireExplicitPermissionDelegation,
   isDeveloperSetupApiKeyContext,
   listExternalActorWorkspaces,
   addExternalWorkspaceMemberForRequest,
@@ -282,14 +284,14 @@ export function registerWorkspaceRoutes(app: Hono, deps: ApiRouteDeps): void {
     if (externalWorkspaces !== null)
       return c.json(externalWorkspaces.map((workspace) => Workspace.parse(workspace)));
     const accountScopedAuthority = accountScopedApiKeyWorkspaceAuthority(context);
-    if (
-      accountScopedAuthority &&
-      hasPermission(accountScopedAuthority.permissions, "workspace:read")
-    ) {
+    if (accountScopedAuthority) {
+      if (!hasPermission(accountScopedAuthority.permissions, "workspace:read")) return c.json([]);
       return c.json(
-        (await listSharedWorkspacesForAccount(deps.db, accountScopedAuthority.accountId)).map(
-          (workspace) => Workspace.parse(workspace),
-        ),
+        (await listSharedWorkspacesForAccount(deps.db, accountScopedAuthority.accountId))
+          .filter((workspace) =>
+            organizationWorkspaceInScope(accountScopedAuthority.workspaceScope, workspace.id),
+          )
+          .map((workspace) => Workspace.parse(workspace)),
       );
     }
     const readableWorkspaceIds = [
@@ -328,6 +330,9 @@ export function registerWorkspaceRoutes(app: Hono, deps: ApiRouteDeps): void {
         if (existing.accountId !== payload.accountId || existing.kind !== "shared") {
           throw new WorkspaceExternalIdentityConflictError();
         }
+        const authority = accountScopedApiKeyWorkspaceAuthority(context);
+        if (authority && !organizationWorkspaceInScope(authority.workspaceScope, existing.id))
+          throw new HTTPException(403, { message: "workspace is outside organization key scope" });
         return c.json(
           EnsureWorkspaceResponse.parse({
             workspace: existing,
@@ -354,6 +359,13 @@ export function registerWorkspaceRoutes(app: Hono, deps: ApiRouteDeps): void {
         maxWorkspacesPerAccount: workspaceLimit(deps),
       });
       const response = EnsureWorkspaceResponse.parse(result);
+      const authority = accountScopedApiKeyWorkspaceAuthority(context);
+      if (
+        !result.created &&
+        authority &&
+        !organizationWorkspaceInScope(authority.workspaceScope, result.workspace.id)
+      )
+        throw new HTTPException(403, { message: "workspace is outside organization key scope" });
       return result.created ? c.json(response, 201) : c.json(response);
     } catch (error) {
       if (error instanceof WorkspaceExternalIdentityConflictError) {
@@ -399,7 +411,10 @@ export function registerWorkspaceRoutes(app: Hono, deps: ApiRouteDeps): void {
       });
       // Setup keys already have canonical same-organization workspace access.
       // Do not widen that ceiling with an all-permissions creator membership.
-      if (!isDeveloperSetupApiKeyContext(context)) {
+      if (
+        !isDeveloperSetupApiKeyContext(context) &&
+        accountScopedApiKeyWorkspaceAuthority(context)?.permissionMode !== "explicit"
+      ) {
         await grantWorkspaceAccess(deps.db, {
           accountId,
           workspaceId: workspace.id,
@@ -1150,6 +1165,7 @@ export function registerWorkspaceRoutes(app: Hono, deps: ApiRouteDeps): void {
     const grant = await requireAccessGrant(c, deps, workspaceId, "members:manage");
     const payload = await parseRequestJson(c, AddWorkspaceMemberRequest);
     requireApiKeyDelegationContext(await requireAccessContext(c, deps), payload.permissions);
+    requireExplicitPermissionDelegation(grant, payload.permissions);
     let candidates: WorkspaceMemberCandidate[];
     try {
       candidates = await listWorkspaceMemberManagementCandidates(deps.db, {
@@ -1203,6 +1219,7 @@ export function registerWorkspaceRoutes(app: Hono, deps: ApiRouteDeps): void {
     const subjectId = decodeURIComponent(c.req.param("subjectId"));
     const payload = await parseRequestJson(c, UpdateWorkspaceMemberRequest);
     requireApiKeyDelegationContext(await requireAccessContext(c, deps), payload.permissions);
+    requireExplicitPermissionDelegation(grant, payload.permissions);
     const existing = await listWorkspacePeople(deps, workspaceId);
     const current = existing.find((member) => member.subjectId === subjectId);
     if (!current) {

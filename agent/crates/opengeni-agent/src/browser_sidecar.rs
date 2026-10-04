@@ -71,13 +71,11 @@ impl BrowserSidecarManager {
     /// owner-only configuration directory.
     pub fn discover(config_dir: impl Into<PathBuf>) -> PlatformResult<Self> {
         let config_dir = config_dir.into();
-        let binary = if std::env::var_os(BROWSERD_BINARY_ENV).is_some() {
-            discover_browserd_binary()?
-        } else if let Some(embedded) = crate::embedded_runtime::materialize(&config_dir)? {
-            embedded
-        } else {
-            discover_browserd_binary()?
-        };
+        let binary = select_packaged_browserd(
+            &config_dir,
+            std::env::var_os(BROWSERD_BINARY_ENV).is_some(),
+            discover_browserd_binary,
+        )?;
         Self::with_binary(config_dir, binary)
     }
 
@@ -697,6 +695,20 @@ fn append_platform_error(error: PlatformError, diagnostic: &str) -> PlatformErro
     }
 }
 
+fn select_packaged_browserd(
+    config_dir: &Path,
+    explicit: bool,
+    adjacent: impl FnOnce() -> PlatformResult<PathBuf>,
+) -> PlatformResult<PathBuf> {
+    if explicit {
+        adjacent()
+    } else if let Some(embedded) = crate::embedded_runtime::materialize(config_dir)? {
+        Ok(embedded)
+    } else {
+        adjacent()
+    }
+}
+
 fn discover_browserd_binary() -> PlatformResult<PathBuf> {
     let candidates = if let Some(explicit) = std::env::var_os(BROWSERD_BINARY_ENV) {
         vec![PathBuf::from(explicit)]
@@ -1084,6 +1096,65 @@ mod tests {
             serde_json::from_str::<ReadyDocument>(&current).expect("current ready document");
         assert_eq!(ready.runtime_build_id, expected_runtime_build_id());
         assert!(ready_document_mismatches(&ready, "test-secret").is_none());
+    }
+
+    #[cfg(opengeni_embedded_runtime)]
+    #[test]
+    fn complete_embedded_bundle_ignores_stale_adjacent_helpers_and_refuses_changed_materialization()
+    {
+        let directory = tempfile::tempdir().expect("fixture runtime root");
+        let adjacent = directory.path().join("adjacent");
+        std::fs::create_dir(&adjacent).expect("adjacent fixture directory");
+        for name in [
+            "opengeni-browserd",
+            "agent-browser",
+            "opengeni-computer-native",
+        ] {
+            std::fs::write(adjacent.join(companion_name(name)), b"stale helper")
+                .expect("stale adjacent fixture");
+        }
+        let binary = select_packaged_browserd(directory.path(), false, || {
+            panic!("embedded runtime must not select adjacent helpers")
+        })
+        .expect("select embedded runtime");
+        let runtime = binary.parent().expect("embedded directory");
+        assert_ne!(runtime, adjacent);
+        let mut command = Command::new(&binary);
+        configure_companion_binaries(&mut command, &binary);
+        let environment = command.as_std().get_envs().collect::<HashMap<_, _>>();
+        for (key, name) in [
+            (AGENT_BROWSER_BINARY_ENV, "agent-browser"),
+            (COMPUTER_NATIVE_BINARY_ENV, "opengeni-computer-native"),
+        ] {
+            let expected = runtime.join(companion_name(name));
+            assert_eq!(
+                environment
+                    .get(std::ffi::OsStr::new(key))
+                    .copied()
+                    .flatten(),
+                Some(expected.as_os_str())
+            );
+        }
+        let ready = ReadyDocument {
+            service: "opengeni-browserd".to_string(),
+            status: "ready".to_string(),
+            protocol_version: 1,
+            runtime_build_id: expected_runtime_build_id().to_string(),
+            _computer_available: true,
+            hostname: "127.0.0.1".to_string(),
+            port: 1234,
+        };
+        assert!(ready_document_mismatches(&ready, "test-secret").is_none());
+        let stale_ready = ReadyDocument {
+            runtime_build_id: "other-build".to_string(),
+            ..ready
+        };
+        assert!(ready_document_mismatches(&stale_ready, "test-secret").is_some());
+        std::fs::write(&binary, b"changed materialized helper").expect("modify fixture helper");
+        assert!(select_packaged_browserd(directory.path(), false, || {
+            panic!("failed embedded digest must not fall back to adjacent helpers")
+        })
+        .is_err());
     }
 
     #[test]

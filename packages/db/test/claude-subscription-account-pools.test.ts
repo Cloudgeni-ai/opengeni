@@ -45,9 +45,9 @@ const tokenSettings = getSettings({
   OPENGENI_ENVIRONMENTS_ENCRYPTION_KEY: encryptionKey.toString("base64"),
 });
 beforeAll(async () => {
-  const fixture = await acquireSharedTestDatabase("claude-account-pools");
-  if (!fixture) throw new Error("Real PostgreSQL required");
-  shared = fixture;
+  const databaseFixture = await acquireSharedTestDatabase("claude-account-pools");
+  if (!databaseFixture) throw new Error("Real PostgreSQL required");
+  shared = databaseFixture;
   client = createDb(shared.appUrl);
 }, 180_000);
 afterAll(async () => {
@@ -593,8 +593,6 @@ test("another user cannot read or materialize a private subscription", async () 
 });
 
 test("usage binds the exact account, token and generation across renewal and replacement", async () => {
-  const { recordClaudeAccountUsage, listClaudeAccountUsage } =
-    await import("../src/claude-subscription-account-usage");
   const input = await fixture(),
     { a, b } = await pool(input);
   const current = await materializeClaudeSubscriptionAccountForRun(client.db, {
@@ -685,8 +683,6 @@ test("usage binds the exact account, token and generation across renewal and rep
 });
 
 test("usage bulk reads do not reveal another user's private account", async () => {
-  const { recordClaudeAccountUsage, listClaudeAccountUsage } =
-    await import("../src/claude-subscription-account-usage");
   const input = await fixture(),
     connected = await account(input, "user");
   const current = await materializeClaudeSubscriptionAccountForRun(client.db, {
@@ -780,23 +776,23 @@ test("model admission uses the exact frozen Claude account and keeps exhausted m
   };
   const policy = (await getModelConnectionAccess(client.db, target))!;
   await updateModelConnectionAccess(client.db, target, { ...policy, allowedModels: [sonnet] });
-  const turn = {
+  const modelTurn = {
     workspaceId: input.workspaceId,
     subjectId: input.subjectId,
     modelId: opus,
     claudeCredentialId: a.account.id,
     claudeAuthoritySnapshot: authoritySnapshot,
   };
-  await expect(assertModelConnectionAllowsTurn(client.db, turn)).rejects.toThrow("disabled");
+  await expect(assertModelConnectionAllowsTurn(client.db, modelTurn)).rejects.toThrow("disabled");
   await expect(
-    assertModelConnectionAllowsTurn(client.db, { ...turn, claudeCredentialId: b.account.id }),
+    assertModelConnectionAllowsTurn(client.db, { ...modelTurn, claudeCredentialId: b.account.id }),
   ).resolves.toBeUndefined();
   await expect(
-    assertModelConnectionAllowsTurn(client.db, { ...turn, modelId: sonnet }),
+    assertModelConnectionAllowsTurn(client.db, { ...modelTurn, modelId: sonnet }),
   ).resolves.toBeUndefined();
   await expect(
     assertModelConnectionAllowsTurn(client.db, {
-      ...turn,
+      ...modelTurn,
       claudeAuthoritySnapshot: { version: 1, scope: "organization" },
     }),
   ).rejects.toThrow("accepted");
@@ -848,7 +844,6 @@ test("capacity deadlines respect a manual pin instead of another account's earli
 });
 
 test("a retained lease obeys a changed manual pin and primary-only account", async () => {
-  const { setActiveClaudeCredential } = await import("../src/claude-subscription-accounts");
   const input = await fixture(),
     { a, b } = await pool(input),
     accepted = await turn(input);

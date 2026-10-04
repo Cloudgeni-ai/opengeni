@@ -10,7 +10,9 @@ const requestJson = mock(async () => new Promise<never>(() => undefined));
 const getWorkspaceInsights = mock(async () => new Promise<never>(() => undefined));
 const getWorkspaceModelCatalog = mock(async () => ({ models: [] }));
 const context = {
-  workspaces: [{ id: workspaceId, name: "Product", accountId: "33333333-3333-4333-8333-333333333333" }],
+  workspaces: [
+    { id: workspaceId, name: "Product", accountId: "33333333-3333-4333-8333-333333333333" },
+  ],
   get accessContext() {
     return {
       workspaceGrants: [{ workspaceId, permissions: canRead ? ["workspace:admin"] : [] }],
@@ -25,8 +27,9 @@ mock.module("@tanstack/react-router", () => ({ ...RouterPackage, useNavigate: ()
 
 beforeAll(() => {
   GlobalRegistrator.register();
-  (globalThis as typeof globalThis & { IS_REACT_ACT_ENVIRONMENT: boolean }).IS_REACT_ACT_ENVIRONMENT =
-    true;
+  (
+    globalThis as typeof globalThis & { IS_REACT_ACT_ENVIRONMENT: boolean }
+  ).IS_REACT_ACT_ENVIRONMENT = true;
   window.matchMedia = ((query: string) => ({
     matches: false,
     media: query,
@@ -75,7 +78,9 @@ describe("Insights route", () => {
     try {
       expect(requestJson).toHaveBeenCalledTimes(1);
       expect(getWorkspaceInsights).not.toHaveBeenCalled();
-      expect(usage.container.querySelector('[role="status"]')?.textContent).toBe("Loading Insights");
+      expect(usage.container.querySelector('[role="status"]')?.textContent).toBe(
+        "Loading Insights",
+      );
     } finally {
       await usage.unmount();
     }

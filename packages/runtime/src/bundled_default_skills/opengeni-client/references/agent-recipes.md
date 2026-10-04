@@ -79,8 +79,17 @@ runtime mechanics keep their own authorization paths.
 
 ## Per-user tool tokens
 
-When the product's MCP server should act as the signed-in user, give each
-session a short-lived per-user bearer and rotate it on every message:
+On a Node backend that mounts `createSessionProxyHandler`, this is one option:
+`toolServer: { url, approvals: { ask: [writeTools] } }` attaches the product's MCP
+endpoint to every session the `createSession` hook creates, mints the
+per-user token from the `resolve` result, and rotates it on every send, steer,
+submit, approval, and answer. The endpoint calls `verifyToolRequest(request)`
+from `@opengeni/sdk/tool-auth` and scopes every tool to the returned `user` and
+`tenant`. See
+[Data tools and credentials](data-tools-and-credentials.md#default-for-node-the-proxy-toolserver).
+
+Without the Node proxy, give each session a short-lived per-user bearer and
+rotate it on every message yourself:
 
 1. Onboard the user with `mcp_servers:attach` among their permissions.
 2. Create the session as that user with

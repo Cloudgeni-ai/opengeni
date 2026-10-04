@@ -1,16 +1,20 @@
 {
   "name": "@opengeni/browser-extension",
-  "version": "0.1.1",
+  "version": "0.1.2",
   "private": true,
   "type": "module",
   "scripts": {
     "build": "bun scripts/build.ts",
+    "build:store": "bun scripts/build.ts --store",
+    "brand:assets": "bun scripts/brand-assets.ts",
     "typecheck": "tsc --noEmit",
     "test": "bun test"
   },
   "devDependencies": {
+    "@fontsource-variable/dm-sans": "5.3.0",
     "@types/bun": "^1.4.0",
     "@types/chrome": "^0.1.35",
+    "sharp": "0.34.5",
     "typescript": "7.0.2"
   }
 }

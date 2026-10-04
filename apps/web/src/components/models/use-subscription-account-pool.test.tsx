@@ -20,7 +20,7 @@ function deferred<T>() {
   });
   return { promise, resolve, reject };
 }
-const account = (id: string): SubscriptionPoolAccount => ({
+const poolAccount = (id: string): SubscriptionPoolAccount => ({
   id,
   subject: id,
   email: "person@example.test",
@@ -29,7 +29,7 @@ const account = (id: string): SubscriptionPoolAccount => ({
   allocatorVersion: 1,
 });
 const data = (id: string): SubscriptionAccountPoolData<SubscriptionPoolAccount> => ({
-  accounts: [account(id)],
+  accounts: [poolAccount(id)],
   activeAccountId: id,
   source: "workspace",
   settings: { rotationEnabled: true, rotationStrategy: "sharded", activeCredentialId: id },

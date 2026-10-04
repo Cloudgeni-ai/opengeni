@@ -26,6 +26,7 @@ import type { TurnOutcome } from "../../observability-metrics";
 import type { ResumedTurnSandbox, TurnSandboxLeaseHolderId } from "../../sandbox-resume";
 import type { TurnEventPublisher } from "./model-usage";
 import type { TurnSandboxProvisioner } from "./sandbox-provision";
+import { InitialModelWireDispatchClock } from "./model-wire-dispatch";
 
 /** Stamps the claimed turn/attempt ids onto a phase's own outcome. */
 export type ClaimedResult = (
@@ -159,6 +160,7 @@ export type EventingState = {
   firstModelRequestPreparationStartedAt: number | null;
   firstModelRequestPreparationRecorded: boolean;
   firstModelRequestCheckpointAt: number | null;
+  initialModelWireDispatch: InitialModelWireDispatchClock;
   companyBrainContextContributions: readonly ModelContextContributionSummary[] | null;
   /** Skill ids in this turn's frozen, model-visible Skill index; telemetry only. */
   modelVisibleSkillIds: ReadonlySet<string> | null;
@@ -307,6 +309,7 @@ export function createTurnContext(input: {
       firstModelRequestPreparationStartedAt: null,
       firstModelRequestPreparationRecorded: false,
       firstModelRequestCheckpointAt: null,
+      initialModelWireDispatch: new InitialModelWireDispatchClock(),
       companyBrainContextContributions: null,
       modelVisibleSkillIds: null,
     },

@@ -958,6 +958,15 @@ describe("release schema contract", () => {
     const claudeSubscriptionAccountPools = completeSourceContract.migrations.some(
       (migration) => migration.path === "0598_claude_subscription_account_pools.sql",
     );
+    const pausedRecoveryCommandContainment = completeSourceContract.migrations.some(
+      (migration) => migration.path === "0599_paused_recovery_command_containment.sql",
+    );
+    const organizationApiKeyAccessPolicy = completeSourceContract.migrations.some(
+      (migration) => migration.path === "0600_organization_api_key_access_policy.sql",
+    );
+    const organizationMcpConnections = completeSourceContract.migrations.some(
+      (migration) => migration.path === "0601_organization_mcp_connections.sql",
+    );
     const slackApiRateLimits = completeSourceContract.migrations.some(
       (migration) => migration.path === "0597_slack_api_rate_limits.sql",
     );
@@ -1249,8 +1258,11 @@ describe("release schema contract", () => {
     );
     expect(completeSourceContract).toMatchObject({
       fileCount:
+        (pausedRecoveryCommandContainment ? 1 : 0) +
         (usageReservationExportExclusion ? 1 : 0) +
+        (organizationApiKeyAccessPolicy ? 1 : 0) +
         (accountUsageReadCapability ? 1 : 0) +
+        (organizationMcpConnections ? 1 : 0) +
         (organizationUsageReservedExclusion ? 1 : 0) +
         (claudeSubscriptionAccountPools ? 1 : 0) +
         (slackApiRateLimits ? 1 : 0) +
@@ -1876,11 +1888,20 @@ describe("release schema contract", () => {
       ...(claudeSubscriptionAccountPools
         ? { latestMigration: "0598_claude_subscription_account_pools.sql" }
         : {}),
+      ...(pausedRecoveryCommandContainment
+        ? { latestMigration: "0599_paused_recovery_command_containment.sql" }
+        : {}),
       ...(usageReservationExportExclusion
         ? { latestMigration: "0599_usage_reservation_export_exclusion.sql" }
         : {}),
+      ...(organizationApiKeyAccessPolicy
+        ? { latestMigration: "0600_organization_api_key_access_policy.sql" }
+        : {}),
       ...(accountUsageReadCapability
         ? { latestMigration: "0600_account_usage_read_capability.sql" }
+        : {}),
+      ...(organizationMcpConnections
+        ? { latestMigration: "0601_organization_mcp_connections.sql" }
         : {}),
       ...(organizationUsageReservedExclusion
         ? { latestMigration: "0601_organization_usage_reserved_exclusion.sql" }
@@ -1975,8 +1996,11 @@ describe("release schema contract", () => {
             "0596_managed_auth_new_signups_switch.sql",
             "0597_slack_api_rate_limits.sql",
             "0598_claude_subscription_account_pools.sql",
+            "0599_paused_recovery_command_containment.sql",
             "0599_usage_reservation_export_exclusion.sql",
             "0600_account_usage_read_capability.sql",
+            "0600_organization_api_key_access_policy.sql",
+            "0601_organization_mcp_connections.sql",
             "0601_organization_usage_reserved_exclusion.sql",
           ].includes(migration.path),
       ),
@@ -3826,8 +3850,11 @@ describe("release schema contract", () => {
       "0596_managed_auth_new_signups_switch.sql",
       "0597_slack_api_rate_limits.sql",
       "0598_claude_subscription_account_pools.sql",
+      "0599_paused_recovery_command_containment.sql",
       "0599_usage_reservation_export_exclusion.sql",
       "0600_account_usage_read_capability.sql",
+      "0600_organization_api_key_access_policy.sql",
+      "0601_organization_mcp_connections.sql",
       "0601_organization_usage_reserved_exclusion.sql",
     ]);
     const unifiedSkillLifecycle = completeSourceContract.migrations.some(
@@ -4375,8 +4402,11 @@ describe("release schema contract", () => {
       "0596_managed_auth_new_signups_switch.sql",
       "0597_slack_api_rate_limits.sql",
       "0598_claude_subscription_account_pools.sql",
+      "0599_paused_recovery_command_containment.sql",
       "0599_usage_reservation_export_exclusion.sql",
       "0600_account_usage_read_capability.sql",
+      "0600_organization_api_key_access_policy.sql",
+      "0601_organization_mcp_connections.sql",
       "0601_organization_usage_reserved_exclusion.sql",
     ].filter((path) =>
       unfilteredSourceContract.migrations.some((migration) => migration.path === path),

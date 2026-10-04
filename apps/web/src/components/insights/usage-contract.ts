@@ -7,7 +7,8 @@
  * source.
  */
 
-export type UsageRange = "today" | "week" | "month" | "30d" | "90d" | "ytd";
+/** "custom" pairs with `from`/`to` (UTC days, `to` inclusive). */
+export type UsageRange = "today" | "week" | "month" | "30d" | "90d" | "ytd" | "custom";
 
 export type UsageGroupBy =
   | "model"
@@ -17,7 +18,9 @@ export type UsageGroupBy =
   | "project"
   | "rootSession"
   | "person"
-  | "schedule";
+  | "schedule"
+  /** Where the work came from: web app, API/SDK/embed, Slack, schedule, agent. */
+  | "source";
 
 export type UsagePayerId = "opengeni_credits" | "subscription" | "own_key";
 
@@ -84,6 +87,8 @@ export type UsageGroup = {
   payer?: UsagePayerId;
   workspaceId?: string;
   you?: boolean;
+  /** On private rows: the person's key in `facets.people`, to filter by them. */
+  personKey?: string;
   measures: UsageMeasures;
 };
 
@@ -102,10 +107,13 @@ export type UsageFacets = {
   workspaces: Array<{ id: string; name: string; personal: boolean }>;
   providers: string[];
   models: Array<{ provider: string; model: string }>;
-  payers: UsagePayerId[];
+  /** Payer ids; unknown values are ignored by the UI. */
+  payers: string[];
   projects: Array<{ id: string; name: string }>;
   people: Array<{ key: string; name: string | null; you: boolean }>;
   schedules: Array<{ id: string; name: string }>;
+  /** Present when the server answers the source dimension and custom ranges. */
+  sources?: string[];
 };
 
 export type UsageFilters = {
@@ -118,6 +126,7 @@ export type UsageFilters = {
   person?: string[];
   rootSessionId?: string[];
   scheduleId?: string[];
+  source?: string[];
 };
 
 export type UsageFilterField = keyof UsageFilters;
@@ -128,6 +137,9 @@ export type UsageScope =
 
 export type UsageQuery = {
   range: UsageRange;
+  /** Custom range only: UTC days, `to` inclusive. */
+  from?: string;
+  to?: string;
   groupBy: UsageGroupBy;
   filters: UsageFilters;
 };
@@ -259,3 +271,23 @@ export function addMeasures(target: UsageMeasures, source: UsageMeasures): Usage
 export function sumMeasures(rows: readonly UsageMeasures[]): UsageMeasures {
   return rows.reduce((total, row) => addMeasures(total, row), emptyMeasures());
 }
+
+/*
+ * Drift guard (types only, nothing ships): the shared contract
+ * (`@opengeni/contracts/insights-usage`) must stay assignable to the shapes
+ * this dashboard reads.
+ */
+type AssertAssignable<_T extends true> = true;
+export type UsageContractGuard = [
+  AssertAssignable<
+    import("@opengeni/contracts/insights-usage").InsightsUsageResponse extends Omit<
+      UsageResponse,
+      "capabilities"
+    >
+      ? true
+      : false
+  >,
+  AssertAssignable<
+    import("@opengeni/contracts/insights-usage").InsightsCall extends UsageCall ? true : false
+  >,
+];

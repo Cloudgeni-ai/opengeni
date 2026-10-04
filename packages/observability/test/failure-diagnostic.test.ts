@@ -3,6 +3,32 @@ import { failureDiagnostic } from "../src/failure-diagnostic";
 import { createObservability } from "../src";
 
 const sentinel = "SECRET_CANARY_481FA";
+test("caller-supplied correlation IDs and generations are validated, with driver SQLSTATE recovered", () => {
+  const error = Object.assign(new Error(sentinel), { name: "PostgresError", code: "40P01" });
+  const id = "00000000-0000-4000-8000-000000000009";
+  const record = failureDiagnostic({
+    code: "mcp_orchestration_failed",
+    stage: "mcp.session_create",
+    diagnosticId: id,
+    executionGeneration: 7,
+    error: new Error(sentinel, { cause: error }),
+  });
+  expect(record).toMatchObject({ diagnosticId: id, executionGeneration: 7, sqlState: "40P01" });
+  expect(record.attempts).toBeUndefined();
+  for (const executionGeneration of [0, -1, 1.5, Number.MAX_SAFE_INTEGER]) {
+    const invalid = failureDiagnostic({
+      code: "mcp_orchestration_failed",
+      stage: "mcp.session_create",
+      diagnosticId: sentinel,
+      executionGeneration,
+      error: { name: "Error", code: "42501" },
+    });
+    expect(invalid.diagnosticId).not.toBe(sentinel);
+    expect(invalid.executionGeneration).toBeUndefined();
+    expect(invalid.sqlState).toBeUndefined();
+    expect(JSON.stringify(invalid)).not.toContain(sentinel);
+  }
+});
 test("protected diagnostic retains cause location and typed facts, never arbitrary error text", () => {
   const cause = Object.assign(new Error(sentinel), {
     name: "PostgresError",

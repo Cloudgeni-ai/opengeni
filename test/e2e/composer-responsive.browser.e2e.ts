@@ -150,7 +150,7 @@ describe("container-responsive public composer demo", () => {
     60_000,
   );
 
-  // Two cold demo navigations and real accessibility scans need the same
+  // Cold demo navigations and real accessibility scans need the same
   // explicit browser-test budget as the adjacent resize journey, not Bun's
   // default five seconds (baseline CI already measures this case near four).
   test("conversation paints a matched surface on light hosts in both themes", async () => {
@@ -158,8 +158,9 @@ describe("container-responsive public composer demo", () => {
     const page = await context.newPage();
     try {
       const colors: string[] = [];
-      for (const theme of ["light", "dark"]) {
-        await page.goto(`${baseUrl}/conversation-layout.html?theme=${theme}`);
+      for (const theme of ["light", "dark", "auto"]) {
+        const query = theme === "auto" ? "" : `?theme=${theme}`;
+        await page.goto(`${baseUrl}/conversation-layout.html${query}`);
         const reply = page.getByText("Readable assistant reply in the selected theme.", {
           exact: true,
         });
@@ -167,10 +168,12 @@ describe("container-responsive public composer demo", () => {
         const styles = await reply.evaluate((element) => {
           const conversation = element.closest("[data-og-conversation]")!;
           return {
+            theme: conversation.closest("[data-og-theme]")?.getAttribute("data-og-theme"),
             foreground: getComputedStyle(element).color,
             background: getComputedStyle(conversation).backgroundColor,
           };
         });
+        expect(styles.theme).toBe(theme === "auto" ? "light" : theme);
         expect(styles.background).not.toBe("rgba(0, 0, 0, 0)");
         expect(styles.foreground).not.toBe(styles.background);
         colors.push(styles.foreground);
@@ -181,6 +184,7 @@ describe("container-responsive public composer demo", () => {
         expect(accessibility.violations).toEqual([]);
       }
       expect(colors[0]).not.toBe(colors[1]);
+      expect(colors[2]).toBe(colors[0]);
     } finally {
       await context.close();
     }

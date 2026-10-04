@@ -8,6 +8,7 @@ import {
 } from "@opengeni/core";
 import type { Context } from "hono";
 import { HTTPException } from "hono/http-exception";
+import { agentActingAsPersonBeforeGrantCheck, isAgentActingAsPerson } from "../http/acting-person";
 type ManagedCookieHuman = { subjectId: string };
 export async function managedCookieHuman(
   c: Context,
@@ -30,6 +31,9 @@ export async function managedCookieHuman(
 }
 
 export function requireSameOriginBrowserMutation(c: Context, deps: ApiRouteDeps): void {
+  // Built in process for an agent acting as a person: no browser credentials
+  // ride along, so there is no cross-site request to guard against.
+  if (isAgentActingAsPerson(c)) return;
   const contentType = c.req.header("content-type")?.split(";", 1)[0]?.trim().toLowerCase();
   if (contentType !== "application/json") {
     throw new HTTPException(403, { message: "JSON browser request required" });
@@ -83,7 +87,7 @@ export async function requirePrivateSubscriptionHuman(
       message: `Private ${displayName} accounts require a verified owning user`,
     });
   }
-  const human = await managedCookieHuman(c, deps);
+  const human = (await managedCookieHuman(c, deps)) ?? agentActingAsPersonBeforeGrantCheck(c);
   if (!human) {
     throw new HTTPException(401, {
       message: "managed browser session required",

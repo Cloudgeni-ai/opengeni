@@ -83,7 +83,7 @@ async function target(deps: ApiRouteDeps, scope: ClaudeOAuthScope, credentialId:
       organizationId: scope.accountId,
       actorSubjectId: scope.actorSubjectId,
     });
-    const account = pool.accounts.find((account) => account.id === credentialId);
+    const account = pool.accounts.find((candidate) => candidate.id === credentialId);
     return account
       ? { account, authoritySnapshot: { version: 1, scope: "organization" } as const }
       : null;

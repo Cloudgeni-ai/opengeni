@@ -7,6 +7,7 @@ import {
   requestSessionTurnRecovery,
   recoverSessionDispatch,
   reconcileSessionAttemptQuiescence,
+  reconcileCompletedSandboxSetup,
   peekSessionWork as peekSessionWorkDb,
   settleSessionInputWait as settleSessionInputWaitDb,
   countQueuedTurns,
@@ -64,6 +65,7 @@ export type SessionStateActivityOverrides = Partial<{
   requestSessionTurnRecovery: typeof requestSessionTurnRecovery;
   recoverSessionDispatch: typeof recoverSessionDispatch;
   reconcileSessionAttemptQuiescence: typeof reconcileSessionAttemptQuiescence;
+  reconcileCompletedSandboxSetup: typeof reconcileCompletedSandboxSetup;
   peekSessionWork: typeof peekSessionWorkDb;
   settleSessionInputWait: typeof settleSessionInputWaitDb;
   countQueuedTurns: typeof countQueuedTurns;
@@ -110,6 +112,8 @@ export function createSessionStateActivities(
   const reconcileSessionAttemptQuiescenceFn =
     overrides.reconcileSessionAttemptQuiescence ?? reconcileSessionAttemptQuiescence;
   const peekSessionWorkFn = overrides.peekSessionWork ?? peekSessionWorkDb;
+  const reconcileCompletedSandboxSetupFn =
+    overrides.reconcileCompletedSandboxSetup ?? reconcileCompletedSandboxSetup;
   const settleSessionInputWaitFn = overrides.settleSessionInputWait ?? settleSessionInputWaitDb;
   const countQueuedTurnsFn = overrides.countQueuedTurns ?? countQueuedTurns;
   const getSessionAttemptActivityRefFn =
@@ -568,14 +572,14 @@ export function createSessionStateActivities(
   }
 
   async function peekSessionWork(input: PeekSessionWorkInput) {
-    const { db, observability, inspectSessionAttemptActivity } = await services();
+    const { db, bus, observability, inspectSessionAttemptActivity } = await services();
     // Already scheduled activities retain their old input across workflow upgrades.
     // Resolve its workspace scope exactly as the legacy DB path did, then use the
     // observer path so absent rows and a still-owned attempt are observations.
     const observerAccountId =
       input.observerAccountId ?? (await getWorkspaceFn(db, input.workspaceId))?.accountId;
     if (!observerAccountId) return { kind: "unavailable" as const };
-    const peek = await peekSessionWorkFn(
+    let peek = await peekSessionWorkFn(
       db,
       input.workspaceId,
       input.sessionId,
@@ -583,6 +587,33 @@ export function createSessionStateActivities(
       observerAccountId,
     );
     if (peek.kind === "unavailable") return peek;
+    if (peek.kind === "admission-blocked" && peek.reason === "sandbox_setup_outcome_unknown") {
+      const ref = peek.ref;
+      if (ref && "turnId" in ref && "attemptId" in ref) {
+        const settled = await reconcileCompletedSandboxSetupFn(db, {
+          accountId: observerAccountId,
+          workspaceId: input.workspaceId,
+          sessionId: input.sessionId,
+          turnId: ref.turnId,
+          attemptId: ref.attemptId,
+        });
+        if (settled.events.length > 0)
+          await publishDurableSessionEventsFn(
+            bus,
+            input.workspaceId,
+            input.sessionId,
+            settled.events,
+          );
+        if (settled.reconciled)
+          peek = await peekSessionWorkFn(
+            db,
+            input.workspaceId,
+            input.sessionId,
+            input.includeAdmissionFence,
+            observerAccountId,
+          );
+      }
+    }
     if (peek.kind === "attempt-owned") {
       // Observation never revokes a writer or recovers a live owner. In
       // particular, a settled Temporal activity is not physical-writer proof.

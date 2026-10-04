@@ -377,6 +377,7 @@ export function useProviderConnection(
   const client = props.client;
   const config = props.config;
   const enabled = props.enabled !== false;
+  const hasCatalogConnection = Boolean(props.catalogConnection);
   const [connections, setConnections] = useState<ConnectionMetadata[]>([]);
   const [readOnlyConnected, setReadOnlyConnected] = useState(false);
   const [customModels, setCustomModels] = useState<WorkspaceProviderCustomModel[]>([]);
@@ -464,7 +465,7 @@ export function useProviderConnection(
   }, [client, config, props.workspaceId, enabled]);
 
   const refreshConnection = useCallback(async (): Promise<ConnectionMetadata[] | null> => {
-    if (!enabled || props.catalogConnection) return null;
+    if (!enabled || hasCatalogConnection) return null;
     const requestGeneration = ++connectionRequestGenerationRef.current;
     try {
       if (props.canManageConnection) {
@@ -507,7 +508,7 @@ export function useProviderConnection(
     props.canManageConnection,
     props.workspaceId,
     enabled,
-    Boolean(props.catalogConnection),
+    hasCatalogConnection,
   ]);
 
   const claudeUsage = useClaudeUsage({

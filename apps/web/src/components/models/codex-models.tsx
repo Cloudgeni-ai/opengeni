@@ -46,7 +46,6 @@ import { EmptyState } from "@/components/ui/empty-state";
 import { ErrorMessage } from "@/components/ui/error-message";
 import { FieldStack } from "@/components/ui/field";
 import { ListRow, ListRowSkeleton, RowList, type RowListColumn } from "@/components/ui/list-row";
-import { MetaChip } from "@/components/ui/meta-chip";
 import { Notice } from "@/components/ui/notice";
 import { formatAbsoluteTime, RelativeTime } from "@/components/ui/relative-time";
 import { SegmentedControl } from "@/components/ui/segmented-control";

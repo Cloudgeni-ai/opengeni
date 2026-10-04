@@ -1,12 +1,10 @@
 /**
- * How Insights names models and providers. Models use the app-wide clean name
- * and maker logo (`components/model-identity`): "codex/gpt-6.1-sol" reads
- * "GPT-6.1 Sol" with the OpenAI mark. Providers read as the Models page names
- * the connection, with no workspace/organization difference.
+ * How Insights names models and providers, as text only (no per-row logos).
+ * Models use the app-wide clean name (`@opengeni/sdk/model-display`):
+ * "codex/gpt-6.1-sol" reads "GPT-6.1 Sol". Providers read as the Models page
+ * names the connection, with no workspace/organization difference.
  */
 import { modelDisplayName as sharedModelDisplayName } from "@opengeni/sdk/model-display";
-
-import type { ModelProviderId } from "@/components/models/provider-mark";
 
 /** A connection's raw provider id as model_call_facts records it. */
 export type RawProvider = string;
@@ -36,31 +34,6 @@ const PROVIDER_NAMES: Readonly<Record<string, string>> = {
   google: "Google",
 };
 
-const PROVIDER_MARKS: Readonly<Record<string, ModelProviderId | "opengeni">> = {
-  "codex-subscription": "codex",
-  codex: "codex",
-  "workspace-claude-subscription": "claude_subscription",
-  "organization-claude-subscription": "claude_subscription",
-  "claude-subscription": "claude_subscription",
-  "supergrok-subscription": "supergrok",
-  xai: "supergrok",
-  "opengeni-gateway": "opengeni",
-  opengeni: "opengeni",
-  "workspace-gateway": "vercel",
-  "organization-gateway": "vercel",
-  "vercel-gateway": "vercel",
-  "workspace-openrouter": "openrouter",
-  "organization-openrouter": "openrouter",
-  openrouter: "openrouter",
-  openai: "openai",
-  "azure-openai": "azure_openai",
-  anthropic: "anthropic",
-  "workspace-anthropic": "anthropic",
-  "organization-anthropic": "anthropic",
-};
-
-export type MarkId = ModelProviderId | "opengeni" | null;
-
 function titleWord(word: string): string {
   if (/^\d/.test(word)) return word;
   if (/^[a-z]\d/i.test(word)) return word.toUpperCase();
@@ -76,10 +49,6 @@ export function providerDisplayName(provider: RawProvider): string {
     .filter(Boolean)
     .map(titleWord)
     .join(" ");
-}
-
-export function providerMark(provider: RawProvider): MarkId {
-  return PROVIDER_MARKS[provider] ?? null;
 }
 
 /**

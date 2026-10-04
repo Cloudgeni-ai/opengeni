@@ -273,74 +273,12 @@ export async function authorizedSocialConnectionsForGrant(input: {
   return [...workspace.map((connection) => ({ connection, subjectId: null })), ...personal];
 }
 
-export async function authorizedAtlassianConnectionsForGrant(input: {
+/** Historical native Atlassian grants no longer authorize API execution. */
+export async function authorizedAtlassianConnectionsForGrant(_input: {
   db: Database;
   grant: AccessGrant;
 }): Promise<AuthorizedAtlassianConnection[]> {
-  const workspace = (await listConnectionsMetadata(input.db, input.grant.workspaceId, null)).filter(
-    (connection) =>
-      connection.subjectId === null &&
-      connection.status === "active" &&
-      sameProviderDomain(connection.providerDomain, "api.atlassian.com"),
-  );
-  const source = personalConnectionDelegationSourceForGrant(input.grant);
-  if (source.kind === "none") {
-    return workspace.map((connection) => ({ connection, subjectId: null }));
-  }
-  if (source.kind === "subject") {
-    const visible = await listConnectionsMetadata(
-      input.db,
-      input.grant.workspaceId,
-      source.subjectId,
-    );
-    return visible
-      .filter(
-        (connection) =>
-          connection.status === "active" &&
-          sameProviderDomain(connection.providerDomain, "api.atlassian.com"),
-      )
-      .map((connection) => ({
-        connection,
-        subjectId: connection.subjectId === null ? null : source.subjectId,
-      }));
-  }
-  const delegations = (
-    await getSessionTurnPersonalConnectionDelegations(
-      input.db,
-      input.grant.workspaceId,
-      source.sessionId,
-      source.turnId,
-    )
-  ).filter((item) => item.connectionType === "atlassian");
-  const personal: AuthorizedAtlassianConnection[] = [];
-  for (const delegation of delegations) {
-    if (
-      !(await ownerStillBelongsToWorkspace(input.db, {
-        accountId: input.grant.accountId,
-        workspaceId: input.grant.workspaceId,
-        subjectId: delegation.ownerSubjectId,
-      }))
-    ) {
-      continue;
-    }
-    const connection = await getConnectionMetadata(
-      input.db,
-      delegation.originWorkspaceId ?? input.grant.workspaceId,
-      delegation.connectionId,
-      delegation.ownerSubjectId,
-    );
-    if (
-      !connection ||
-      connection.subjectId !== delegation.ownerSubjectId ||
-      connection.status !== "active" ||
-      !sameProviderDomain(connection.providerDomain, delegation.providerDomain) ||
-      !sameProviderDomain(connection.providerDomain, "api.atlassian.com")
-    ) {
-      continue;
-    }
-    personal.push({ connection, subjectId: delegation.ownerSubjectId });
-  }
-  return [...workspace.map((connection) => ({ connection, subjectId: null })), ...personal];
+  return [];
 }
 
 export function selectedPersonalConnectionServers(
@@ -455,6 +393,7 @@ export function personalConnectionDelegationsFromParent(input: {
     if (!isNativeSubjectConnectionRef(ref)) return [];
     const delegation = input.parentDelegations.find(
       (candidate) =>
+        candidate.connectionType !== "atlassian" &&
         candidate.serverId === server.id &&
         sameProviderDomain(candidate.providerDomain, ref.providerDomain) &&
         (!ref.kind || !candidate.kind || candidate.kind === ref.kind),
@@ -467,7 +406,6 @@ export function personalConnectionDelegationsFromParent(input: {
       .filter(
         (item) =>
           item.connectionType === "social" ||
-          item.connectionType === "atlassian" ||
           item.connectionType === "github_personal" ||
           item.serverId === GOOGLE_DRIVE_PUBLICATION_SERVER_ID,
       )
@@ -572,27 +510,12 @@ export function googleDrivePublicationDelegationFromVisibleConnections(input: {
   };
 }
 
-export function personalAtlassianDelegationsFromVisibleConnections(input: {
+/** Native Atlassian credentials remain stored but are not new turn authority. */
+export function personalAtlassianDelegationsFromVisibleConnections(_input: {
   subjectId: string;
   connections: ConnectionMetadata[];
 }): McpPersonalConnectionDelegation[] {
-  const eligible = input.connections.filter(
-    (connection) =>
-      connection.subjectId === input.subjectId &&
-      connection.status === "active" &&
-      sameProviderDomain(connection.providerDomain, "api.atlassian.com"),
-  );
-  return eligible
-    .filter((connection) => connection.authorityId != null)
-    .map((connection) => ({
-      serverId: `atlassian:${connection.id}`,
-      connectionId: connection.id,
-      originWorkspaceId: connection.workspaceId,
-      ownerSubjectId: input.subjectId,
-      providerDomain: connection.providerDomain,
-      kind: connection.kind,
-      connectionType: "atlassian" as const,
-    }));
+  return [];
 }
 
 async function personalGitHubDelegationFromVisibleConnections(input: {
@@ -1008,7 +931,7 @@ export async function freezePersonalConnectionDelegations(input: {
         return input.googleDrivePublicationEnabled === true;
       }
       if (item.connectionType === "atlassian") {
-        return includeFirstPartyConnections && input.atlassianEnabled === true;
+        return false;
       }
       if (item.connectionType === "social") {
         return includeFirstPartyConnections;

@@ -1,4 +1,4 @@
-# Developer setup: exact REST and SDK calls
+# Setup: exact REST and SDK calls
 
 Execute in this order. The coding agent uses ordinary HTTPS and its own
 computer; it does not call an OpenGeni MCP server. Requests below are checked
@@ -13,7 +13,7 @@ its ignored `.env`, preserving unrelated values:
 ```dotenv
 OPENGENI_API_BASE_URL=https://staging.app.opengeni.ai
 OPENGENI_ORGANIZATION_ID=<verified organization UUID>
-OPENGENI_API_KEY=<once-shown Developer setup token>
+OPENGENI_API_KEY=<once-shown setup token>
 ```
 
 Load `.env` with the product's existing environment loader. Do not print it or
@@ -55,7 +55,7 @@ Authenticate at the explicit target app, let the human finish sign-in,
 verification and MFA, then complete its organization-name onboarding or reuse
 the intended organization. Organization settings → Developer holds organization
 keys; workspace settings → API keys creates the wrong scope for provisioning.
-Select **Developer setup** and retain its short expiry. Read the current app's
+Select **Full access** with a 30-day expiry. Read the current app's
 labels rather than assuming old screen coordinates. Capture its one-time token
 directly to `.env`, not through chat or a screenshot.
 
@@ -63,15 +63,13 @@ The authenticated organization administrator's browser API equivalent is
 `POST /v1/organizations/:organizationId/api-keys`. Its body is:
 
 ```json
-{"name":"Product developer setup","access":"developer_setup"}
+{"name":"Product setup","access":"full","expiresAt":"<now + 30 days, ISO 8601>"}
 ```
 
 SDK in that authenticated browser/admin context:
-`createOrganizationApiKey(organizationId, { name, access: "developer_setup" })`.
-The setup key itself must **not** mint keys. Do not send a `permissions` array
-to this organization-key route. The preset chooses the exact permission set.
-Omit `expiresAt` to keep the short default; the API honors an explicit expiry
-override, so 24 hours is a default rather than a hard maximum. Save the one-time `token`
+`createOrganizationApiKey(organizationId, { name, access: "full", expiresAt })`
+with a 30-day `expiresAt`. A full-access key lets the agent finish setup and
+testing without the person opening the UI. Save the one-time `token`
 without logging the response. A lost creation response needs inventory and
 administrator revocation/replacement, not a blind repeated POST.
 
@@ -438,7 +436,7 @@ by the authenticated administrator, without widening this setup key.
 | Result | Recovery |
 | --- | --- |
 | 401 | Check target and local key presence/expiry; authenticate to replace a revoked/expired key. Never echo it. |
-| 403 | Read `/v1/access/me` and the exact denied permission; verify organization/scope/preset. Do not switch to Full access. |
+| 403 | Read `/v1/access/me` and the exact denied permission; verify the organization and that the key is the full-access setup key. |
 | 404 | Recheck deployment feature availability and workspace ownership; never fall back to Personal or production. |
 | 409 | Read current version/digest/grant and compare intended change. Repreview schema drift. Don't reuse an operation id with changed inputs. |
 | 422 `agent_config_not_enabled` | Send no `agent`/`sessionAgentDefaults`; use the explicit legacy path and report agent defaults unconfigured. |

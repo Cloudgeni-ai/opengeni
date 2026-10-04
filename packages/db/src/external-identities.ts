@@ -5,6 +5,7 @@ import {
   ExternalIdentityReference,
 } from "@opengeni/contracts/external-identities";
 import { rawRows, withAccountRls, type Database } from "./database";
+import { organizationApiKeyAllowsWorkspace } from "./organization-api-key-access";
 export * from "./external-membership-operations";
 
 /** Pass an open transaction to retain the key lock through the protected write. */
@@ -12,16 +13,50 @@ export async function lockActiveExternalOrganizationKey(
   tx: Database,
   accountId: string,
   keyId: string,
+  workspaceId?: string,
 ): Promise<Permission[] | null> {
+  const key = await lockActiveExternalOrganizationKeyAuthority(tx, accountId, keyId, workspaceId);
+  return key?.permissions ?? null;
+}
+
+/** Mode travels with the locked authority so explicit workspace:admin never
+ * becomes a wildcard when callers evaluate a fresh policy. */
+export async function lockActiveExternalOrganizationKeyAuthority(
+  tx: Database,
+  accountId: string,
+  keyId: string,
+  workspaceId?: string,
+): Promise<{ permissions: Permission[]; permissionMode: "legacy" | "explicit" } | null> {
   return withAccountRls(tx, accountId, async (scoped) => {
-    const [row] = await rawRows<{ permissions: unknown }>(
+    const [row] = await rawRows<{
+      permissions: unknown;
+      workspace_scope: "all" | "selected";
+      permission_mode: "legacy" | "explicit";
+    }>(
       scoped,
-      sql`select permissions from api_keys
+      sql`select permissions, workspace_scope, permission_mode from api_keys
       where account_id = ${accountId}::uuid and id = ${keyId}::uuid
         and workspace_id is null and credential_kind = 'organization'
         and revoked_at is null and (expires_at is null or expires_at > clock_timestamp()) for share`,
     );
-    return row ? Permission.array().parse(row.permissions) : null;
+    if (
+      !row ||
+      (workspaceId !== undefined &&
+        !(await organizationApiKeyAllowsWorkspace(
+          scoped,
+          {
+            id: keyId,
+            accountId,
+            workspaceScope: row.workspace_scope,
+          },
+          workspaceId,
+        )))
+    )
+      return null;
+    return {
+      permissions: Permission.array().parse(row.permissions),
+      permissionMode: row.permission_mode,
+    };
   });
 }
 

@@ -25,8 +25,12 @@ import {
 import type { Context, Hono } from "hono";
 import { HTTPException } from "hono/http-exception";
 import { z } from "zod";
-import { requireOrganizationCodexHuman, requireSameOriginBrowserMutation } from "./codex";
-import { managedCookieHuman, requireScopeMutation } from "./supergrok";
+import {
+  managedHumanOrAgent,
+  requireOrganizationCodexHuman,
+  requireSameOriginBrowserMutation,
+} from "./codex";
+import { requireScopeMutation } from "./supergrok";
 import {
   requirePrivateSubscriptionHuman,
   requireSubscriptionScopeMutation,
@@ -81,7 +85,7 @@ export function registerModelConnectionAccessRoutes(app: Hono, deps: ApiRouteDep
         });
         if (!snapshot) throw new HTTPException(404, { message: "Subscription not found" });
         if (snapshot.scope === "user") {
-          const human = await managedCookieHuman(c, deps);
+          const human = await managedHumanOrAgent(c, deps);
           if (!human || human.subjectId !== grant.subjectId)
             throw new HTTPException(403, {
               message: "Subscription owner browser session required",

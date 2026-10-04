@@ -77,7 +77,12 @@ const context = {
         return createdCatalogItem;
       },
     ),
-    inspectMcpAuthentication: mock(async () => ({ kind: "none" as const })),
+    inspectMcpAuthentication: mock(
+      async (): Promise<{
+        kind: "oauth2" | "none" | "unknown";
+        message?: string;
+      }> => ({ kind: "none" }),
+    ),
     listConnections: async () => connections,
     listSocialConnections: async () => [],
     listSlackInstallationBindings: async () => [],
@@ -251,6 +256,56 @@ function button(container: HTMLElement, label: string) {
 }
 
 describe("conversation connection card", () => {
+  test("URL-less setup keeps provider guidance without offering an ineffective retry", async () => {
+    context.client.inspectMcpAuthentication.mockClear();
+    const custom = CapabilityCatalogItem.parse({
+      ...catalogItem,
+      authKind: null,
+      mcpUrl: null,
+      endpointUrl: null,
+      metadata: {},
+    });
+    const h = await render(false, custom, custom);
+    try {
+      await act(async () => button(h.container, "Connect Example").click());
+      expect(h.container.textContent).toContain("Check the provider's instructions.");
+      expect(
+        [...h.container.querySelectorAll("button")].some((node) => node.textContent === "Retry"),
+      ).toBe(false);
+      expect(context.client.inspectMcpAuthentication).not.toHaveBeenCalled();
+    } finally {
+      await h.close();
+    }
+  });
+
+  test("shows discovery failures and retries into OAuth without writing a connection", async () => {
+    let inspections = 0;
+    context.client.inspectMcpAuthentication.mockImplementation(async () => {
+      inspections += 1;
+      return inspections === 1
+        ? {
+            kind: "unknown",
+            message: "The provider returned HTTP 403 while checking how to sign in.",
+          }
+        : { kind: "oauth2" };
+    });
+    const custom = { ...catalogItem, authKind: null, metadata: { authDiscovery: "unknown" } };
+    const h = await render(false, custom, custom);
+    try {
+      await act(async () => button(h.container, "Connect Example").click());
+      expect(h.container.textContent).toContain("HTTP 403");
+      await act(async () => button(h.container, "Retry").click());
+      expect(inspections).toBe(2);
+      expect(h.container.textContent).not.toContain("HTTP 403");
+      expect(button(h.container, "Connect for workspace").disabled).toBe(false);
+      expect(createConnection).not.toHaveBeenCalled();
+      expect(enableCapability).not.toHaveBeenCalled();
+    } finally {
+      context.client.inspectMcpAuthentication.mockImplementation(async () => ({ kind: "none" }));
+      await h.close();
+    }
+  });
+
   test("reviews an agent-suggested URL before a human adds the MCP catalog entry", async () => {
     createdCatalogItem = null;
     context.client.createCapability.mockClear();

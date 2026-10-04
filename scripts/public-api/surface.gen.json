@@ -236,6 +236,24 @@
     },
     {
       "method": "GET",
+      "path": "/v1/mcp-connections/requests/:request",
+      "sdk": [
+        "OpenGeniClient.getMcpConnectionRequest"
+      ],
+      "request": [],
+      "response": []
+    },
+    {
+      "method": "POST",
+      "path": "/v1/mcp-connections/requests/:request",
+      "sdk": [
+        "OpenGeniClient.answerMcpConnectionRequest"
+      ],
+      "request": [],
+      "response": []
+    },
+    {
+      "method": "GET",
       "path": "/v1/organization-invitations",
       "sdk": [
         "OpenGeniClient.listOrganizationInvitations"
@@ -326,6 +344,30 @@
         "OpenGeniClient.deleteOrganizationApiKey"
       ],
       "request": [],
+      "response": [
+        "ApiKey"
+      ]
+    },
+    {
+      "method": "GET",
+      "path": "/v1/organizations/:organizationId/api-keys/:apiKeyId",
+      "sdk": [
+        "OpenGeniClient.getOrganizationApiKey"
+      ],
+      "request": [],
+      "response": [
+        "ApiKey"
+      ]
+    },
+    {
+      "method": "PATCH",
+      "path": "/v1/organizations/:organizationId/api-keys/:apiKeyId",
+      "sdk": [
+        "OpenGeniClient.updateOrganizationApiKey"
+      ],
+      "request": [
+        "UpdateOrganizationApiKeyRequest"
+      ],
       "response": [
         "ApiKey"
       ]
@@ -575,6 +617,33 @@
       "response": [
         "OrganizationInvitation"
       ]
+    },
+    {
+      "method": "GET",
+      "path": "/v1/organizations/:organizationId/mcp-connections",
+      "sdk": [
+        "OpenGeniClient.listOrganizationMcpConnections"
+      ],
+      "request": [],
+      "response": []
+    },
+    {
+      "method": "DELETE",
+      "path": "/v1/organizations/:organizationId/mcp-connections/:connectionId",
+      "sdk": [
+        "OpenGeniClient.deleteOrganizationMcpConnection"
+      ],
+      "request": [],
+      "response": []
+    },
+    {
+      "method": "PATCH",
+      "path": "/v1/organizations/:organizationId/mcp-connections/:connectionId",
+      "sdk": [
+        "OpenGeniClient.updateOrganizationMcpConnection"
+      ],
+      "request": [],
+      "response": []
     },
     {
       "method": "GET",
@@ -2731,6 +2800,17 @@
       "request": [],
       "response": [
         "ComputerSessionHeartbeatResponse"
+      ]
+    },
+    {
+      "method": "GET",
+      "path": "/v1/workspaces/:workspaceId/computer-sessions/:computerSessionId/input-posture",
+      "sdk": [
+        "OpenGeniClient.getComputerInputPosture"
+      ],
+      "request": [],
+      "response": [
+        "ComputerSessionInputPosture"
       ]
     },
     {
@@ -8034,7 +8114,9 @@
         "$.effectiveWorkspacePermissions[]": "ref(Permission)",
         "$.kind": "enum!=[\"\\\"organization_api_key\\\"\",\"\\\"workspace_api_key\\\"\"]",
         "$.note": "string!",
-        "$.workspaceId": "string! null"
+        "$.policy": "unknown?",
+        "$.workspaceId": "string! null",
+        "$.workspaceScope": "ref(OrganizationWorkspaceScope)?"
       }
     },
     "AccessGrant": {
@@ -8046,6 +8128,7 @@
         "$.accountId": "string!",
         "$.metadata": "object?",
         "$.metadata{}": "unknown",
+        "$.permissionMode": "enum?=[\"\\\"explicit\\\"\",\"\\\"legacy\\\"\"]",
         "$.permissions": "array!",
         "$.permissions[]": "ref(Permission)",
         "$.principalKind": "ref(AccessPrincipalKind)?",
@@ -8633,12 +8716,15 @@
         "$.id": "string!",
         "$.lastUsedAt": "string! null",
         "$.name": "string!",
+        "$.permissionMode": "enum?=[\"\\\"explicit\\\"\",\"\\\"legacy\\\"\"]",
         "$.permissions": "array!",
         "$.permissions[]": "ref(Permission)",
+        "$.policy": "unknown?",
         "$.prefix": "string!",
         "$.revokedAt": "string! null",
         "$.updatedAt": "string!",
-        "$.workspaceId": "string! null"
+        "$.workspaceId": "string! null",
+        "$.workspaceScope": "ref(OrganizationWorkspaceScope)?"
       }
     },
     "AppendArchivedSessionEventsRequest": {
@@ -11192,6 +11278,7 @@
         "$|kind=direct_websocket.protocols[]": "string",
         "$|kind=direct_websocket.url": "string!",
         "$|kind=direct_rfb": "object",
+        "$|kind=direct_rfb.inputAllowed": "boolean!",
         "$|kind=direct_rfb.kind": "const!=[\"\\\"direct_rfb\\\"\"]",
         "$|kind=direct_rfb.protocols": "array!",
         "$|kind=direct_rfb.protocols[]": "string",
@@ -11289,6 +11376,7 @@
         "$.computerSessionId": "string!",
         "$.controllerGeneration": "string!",
         "$.expiresAt": "string!",
+        "$.inputAllowed": "boolean?",
         "$.stream": "ref(ComputerFrameStreamAttachment)!",
         "$.targetId": "string!"
       }
@@ -11333,6 +11421,17 @@
         "$.alive": "const!=[\"true\"]",
         "$.computerSessionId": "string!",
         "$.controllerGeneration": "string!"
+      }
+    },
+    "ComputerSessionInputPosture": {
+      "io": [
+        "output"
+      ],
+      "shape": {
+        "$": "object",
+        "$.computerSessionId": "string!",
+        "$.controllerGeneration": "string!",
+        "$.inputAllowed": "boolean!"
       }
     },
     "ComputerSessionLifecycleRequest": {
@@ -12074,6 +12173,7 @@
         "$.description": "string?",
         "$.expiresAt": "string?",
         "$.name": "string!",
+        "$.policy": "ref(OrganizationAccessPolicy)?",
         "$.preset": "enum?=[\"\\\"developer_setup\\\"\"]"
       }
     },
@@ -17259,6 +17359,26 @@
         "$.expiresAt": "string!"
       }
     },
+    "OrganizationAccessPolicy": {
+      "io": [
+        "input"
+      ],
+      "shape": {
+        "$": "object",
+        "$.permissions": "array!",
+        "$.permissions[]": "ref(Permission)",
+        "$.preset": "ref(OrganizationAccessPreset)!",
+        "$.workspaceScope": "ref(OrganizationWorkspaceScope)!"
+      }
+    },
+    "OrganizationAccessPreset": {
+      "io": [
+        "input"
+      ],
+      "shape": {
+        "$": "enum=[\"\\\"custom\\\"\",\"\\\"full\\\"\",\"\\\"read_only\\\"\"]"
+      }
+    },
     "OrganizationAdministrationMember": {
       "io": [
         "output"
@@ -17957,6 +18077,21 @@
         "$.permissions": "array!",
         "$.permissions[]": "ref(Permission)",
         "$.role": "ref(AssignableWorkspaceMemberRole)!"
+      }
+    },
+    "OrganizationWorkspaceScope": {
+      "io": [
+        "input",
+        "output"
+      ],
+      "shape": {
+        "$": "union=[\"kind=all\",\"kind=selected\"]",
+        "$|kind=all": "object",
+        "$|kind=all.kind": "const!=[\"\\\"all\\\"\"]",
+        "$|kind=selected": "object",
+        "$|kind=selected.kind": "const!=[\"\\\"selected\\\"\"]",
+        "$|kind=selected.workspaceIds": "array!",
+        "$|kind=selected.workspaceIds[]": "string"
       }
     },
     "Permission": {
@@ -22814,6 +22949,17 @@
         "$.status": "ref(TaskNoteStatus)?"
       }
     },
+    "UpdateOrganizationApiKeyRequest": {
+      "io": [
+        "input"
+      ],
+      "shape": {
+        "$": "object",
+        "$.description": "string? null",
+        "$.name": "string?",
+        "$.policy": "ref(OrganizationAccessPolicy)?"
+      }
+    },
     "UpdateOrganizationIntegrationPolicyRequest": {
       "io": [
         "input"
@@ -25408,12 +25554,12 @@
       "ChangePreferenceRegistryScopeRequest": "type",
       "Channel": "type",
       "Chats": "type",
-      "ClaudeSubscriptionAccount": "value",
-      "ClaudeSubscriptionAccountsResponse": "value",
+      "ClaudeSubscriptionAccount": "type",
+      "ClaudeSubscriptionAccountsResponse": "type",
       "ClaudeSubscriptionOAuthCompleteRequest": "type",
       "ClaudeSubscriptionOAuthCompleteResponse": "type",
       "ClaudeSubscriptionOAuthStartResponse": "type",
-      "ClaudeSubscriptionSetupTokenRequest": "value",
+      "ClaudeSubscriptionSetupTokenRequest": "type",
       "ClaudeSubscriptionUsage": "type",
       "ClaudeUsageRequestStatus": "type",
       "ClaudeUsageWindow": "type",
@@ -25521,6 +25667,7 @@
       "ComputerSessionCapabilities": "type",
       "ComputerSessionCollection": "value",
       "ComputerSessionHeartbeatResponse": "type",
+      "ComputerSessionInputPosture": "type",
       "ComputerSessionLifecycleRequest": "type",
       "ComputerSessionListResponse": "type",
       "ComputerSessionMutationResponse": "type",
@@ -25958,6 +26105,8 @@
       "MachineView": "type",
       "ManagedOrganizationMembership": "type",
       "McpConnectionAccountSelection": "type",
+      "McpConnectionDecision": "type",
+      "McpConnectionRequest": "type",
       "McpPersonalConnectionDelegation": "type",
       "McpPersonalConnectionSummary": "type",
       "McpServerConnectionRef": "type",
@@ -26083,6 +26232,9 @@
       "OpenGeniToolsFacade": "type",
       "OpenGeniToolTransport": "type",
       "OpenGeniWorkspaceTools": "type",
+      "OrganizationAccessPolicy": "type",
+      "OrganizationAccessPreset": "type",
+      "OrganizationActor": "type",
       "OrganizationAdministrationMember": "type",
       "OrganizationAdministrationMemberWorkspaceAccess": "type",
       "OrganizationAdministrationOverview": "type",
@@ -26090,6 +26242,8 @@
       "OrganizationCodexAccountsResponse": "type",
       "OrganizationCredentialProvider": "type",
       "OrganizationInvitation": "type",
+      "OrganizationMcpConnection": "type",
+      "OrganizationMcpConnectionList": "type",
       "OrganizationMember": "type",
       "OrganizationMembershipRole": "type",
       "OrganizationModelProviderConnection": "type",
@@ -26116,6 +26270,7 @@
       "OrganizationWorkspaceAccess": "type",
       "OrganizationWorkspaceAccessMember": "type",
       "OrganizationWorkspaceRoleDefinition": "type",
+      "OrganizationWorkspaceScope": "type",
       "parseBrowserFrameMetadata": "value",
       "parseCodexRealtimeV3Event": "value",
       "parseComputerFrameMetadata": "value",
@@ -26389,6 +26544,7 @@
       "SessionProxyMessageInput": "type",
       "SessionProxyResolution": "type",
       "SessionProxyResolve": "type",
+      "SessionProxyToolServer": "type",
       "SessionQueueMutationResponse": "type",
       "SessionQueueSnapshot": "type",
       "SessionRealtimeEndReason": "type",
@@ -26484,8 +26640,8 @@
       "SubmitComposerDraftResponse": "type",
       "SubmitHumanInputResponseRequest": "type",
       "SubmittedTimelineAnnotation": "type",
-      "SubscriptionAccountSummary": "value",
-      "SubscriptionPoolSettings": "value",
+      "SubscriptionAccountSummary": "type",
+      "SubscriptionPoolSettings": "type",
       "SuperGrokAccount": "type",
       "SuperGrokAccountScope": "type",
       "SuperGrokAccountsResponse": "type",
@@ -26522,6 +26678,9 @@
       "ToolGatewayIdentity": "type",
       "ToolGatewayResult": "type",
       "ToolRef": "type",
+      "ToolRequestError": "value",
+      "ToolRequestIdentity": "type",
+      "ToolRequestLike": "type",
       "TranscribeAudioInput": "type",
       "TranscribeAudioResponse": "type",
       "TranscriptionAdapter": "type",
@@ -26569,6 +26728,8 @@
       "UpdateMachineOperationPolicyRequest": "type",
       "UpdateMemorySlackPublicationConfigurationRequest": "type",
       "UpdateNetworkRouteRequest": "type",
+      "UpdateOrganizationApiKeyRequest": "type",
+      "UpdateOrganizationMcpConnectionRequest": "type",
       "UpdateOrganizationNameRequest": "type",
       "UpdateOrganizationPrivateSessionSettingsRequest": "type",
       "UpdateOrganizationWebhookRequest": "type",
@@ -26624,6 +26785,8 @@
       "VerifyPersonalGitHubRepositorySelectionsRequest": "type",
       "VerifyPublicGitHubRepositoryRefRequest": "type",
       "VerifyPublicGitHubRepositoryRefResponse": "type",
+      "verifyToolRequest": "value",
+      "VerifyToolRequestOptions": "type",
       "verifyWebhookEvent": "value",
       "VideoArtifactPlaybackSource": "type",
       "VideoGenerationAspectRatio": "type",
@@ -27281,6 +27444,7 @@
       "ComputerSessionCapabilities": "type",
       "ComputerSessionCollection": "value",
       "ComputerSessionHeartbeatResponse": "type",
+      "ComputerSessionInputPosture": "type",
       "ComputerSessionLifecycleRequest": "type",
       "ComputerSessionListResponse": "type",
       "ComputerSessionMutationResponse": "type",
@@ -27596,7 +27760,8 @@
       "SessionProxyMessageInput": "type",
       "SessionProxyResolution": "type",
       "SessionProxyResolve": "type",
-      "SessionProxySiteHtmlTooLargeError": "value"
+      "SessionProxySiteHtmlTooLargeError": "value",
+      "SessionProxyToolServer": "type"
     },
     "@opengeni/sdk/site": {
       "createOpenGeniSiteClient": "value",
@@ -27644,6 +27809,20 @@
       "WorkspaceIdOptions": "type",
       "WorkspaceIdResolverOptions": "type",
       "WorkspaceIdTarget": "type"
+    },
+    "@opengeni/sdk/tool-auth": {
+      "deriveToolTokenKey": "value",
+      "mintToolToken": "value",
+      "resolveToolTokenSecret": "value",
+      "TOOL_SERVER_URL_ENV": "value",
+      "TOOL_TOKEN_DEFAULT_TTL_SECONDS": "value",
+      "TOOL_TOKEN_ISSUER": "value",
+      "TOOL_TOKEN_KEY_LABEL": "value",
+      "ToolRequestError": "value",
+      "ToolRequestIdentity": "type",
+      "ToolRequestLike": "type",
+      "verifyToolRequest": "value",
+      "VerifyToolRequestOptions": "type"
     },
     "@opengeni/sdk/usage-allowances": {
       "AllowanceExhaustedRefusal": "type",
@@ -28133,6 +28312,7 @@
       "SessionConnectionRequest": "value",
       "SessionConnectionRequestProps": "type",
       "SessionConversation": "value",
+      "SessionConversationLabels": "type",
       "SessionConversationProps": "type",
       "sessionDisplayTitle": "value",
       "SessionEventsConnectionState": "type",
@@ -28633,7 +28813,9 @@
       "ComposerModelPickerProps": "type",
       "ComposerPauseButtonProps": "type",
       "ComposerRootProps": "type",
+      "ComposerRunControl": "type",
       "ComposerSendButtonProps": "type",
+      "ComposerStopButtonProps": "type",
       "ComposerSubmitBlocker": "type",
       "ComposerSubmitMode": "type",
       "ComposerSurfaceProps": "type",
@@ -28672,6 +28854,7 @@
       "Root": "value",
       "SendButton": "value",
       "Status": "value",
+      "StopButton": "value",
       "Surface": "value",
       "useChatComposer": "value",
       "useChatComposerController": "value",
@@ -29130,6 +29313,7 @@
       "SessionCommands": "value",
       "SessionCommandsPanel": "value",
       "SessionConversation": "value",
+      "SessionConversationLabels": "type",
       "SessionConversationProps": "type",
       "sessionLinkResolver": "value",
       "SessionList": "value",
@@ -29392,6 +29576,7 @@
       "end",
       "get",
       "heartbeat",
+      "inputPosture",
       "observe",
       "receipt",
       "targets"
@@ -29516,6 +29701,7 @@
       "addDocument",
       "addWorkspaceMember",
       "advanceExternalBrowserAuthRun",
+      "answerMcpConnectionRequest",
       "apiUrl",
       "applyGoalRevision",
       "approveDeviceEnrollment",
@@ -29613,6 +29799,7 @@
       "deleteEnvironmentVariable",
       "deleteGoal",
       "deleteOrganizationApiKey",
+      "deleteOrganizationMcpConnection",
       "deleteOrganizationProviderCustomModel",
       "deleteOrganizationWorkspace",
       "deleteQueueItem",
@@ -29688,6 +29875,7 @@
       "getCompanyProfileRevision",
       "getComposerDraft",
       "getComputerActionReceipt",
+      "getComputerInputPosture",
       "getComputerSession",
       "getConnectorToolPermissions",
       "getDocumentBase",
@@ -29705,10 +29893,12 @@
       "getKnowledgeEntry",
       "getLatestEventResult",
       "getLatestStartedTurn",
+      "getMcpConnectionRequest",
       "getModelConnectionAccess",
       "getNetworkRoute",
       "getNewSessionDraft",
       "getOrganizationAdministrationOverview",
+      "getOrganizationApiKey",
       "getOrganizationClaudeSubscriptionAccountUsage",
       "getOrganizationClaudeSubscriptionUsage",
       "getOrganizationModelProviderConnection",
@@ -29825,6 +30015,7 @@
       "listOrganizationClaudeSubscriptionAccounts",
       "listOrganizationInvitations",
       "listOrganizationInvitationsForOrganization",
+      "listOrganizationMcpConnections",
       "listOrganizationMembers",
       "listOrganizationMemberships",
       "listOrganizationProviderCustomModels",
@@ -30049,6 +30240,8 @@
       "updateModelConnectionAccess",
       "updateNetworkRoute",
       "updateOpenGeniSlackChannelRoutes",
+      "updateOrganizationApiKey",
+      "updateOrganizationMcpConnection",
       "updateOrganizationMember",
       "updateOrganizationName",
       "updateOrganizationRetentionPolicy",
@@ -30190,6 +30383,10 @@
     "SiteAuthConnectionResource": [
       "get",
       "update"
+    ],
+    "ToolRequestError": [
+      "status",
+      "toResponse"
     ]
   }
 }

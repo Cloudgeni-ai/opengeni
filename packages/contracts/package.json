@@ -58,6 +58,10 @@
       "types": "./src/external-identities.ts",
       "default": "./src/external-identities.ts"
     },
+    "./organization-access": {
+      "types": "./src/organization-access.ts",
+      "default": "./src/organization-access.ts"
+    },
     "./connect": {
       "types": "./src/connect.ts",
       "default": "./src/connect.ts"
@@ -105,6 +109,10 @@
     "./atlassian": {
       "types": "./src/atlassian.ts",
       "default": "./src/atlassian.ts"
+    },
+    "./atlassian-native-retirement": {
+      "types": "./src/atlassian-native-retirement.ts",
+      "default": "./src/atlassian-native-retirement.ts"
     },
     "./connector-destinations": {
       "types": "./src/connector-destinations.ts",

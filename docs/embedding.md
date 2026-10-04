@@ -70,7 +70,7 @@ should use `SessionConversation` from `@opengeni/react` (or `/session-ui`) for
 a complete existing-session chat: `<SessionConversation sessionId={id} />`
 under `OpenGeniProvider`. A standalone product backs both with
 `createSessionProxyHandler`. It wires queue actions, composer drafts, model policy,
-pause/resume, tool approvals, attachments, human-input forms, optimistic delivery, and paged timeline history.
+Stop, tool approvals, attachments, human-input forms, optimistic delivery, and paged timeline history. It follows the host page's light/dark theme and background by default and hides the model picker unless the host opts in (see the `@opengeni/react` README).
 `ChatComposer` alone is only the input surface. Hosts with deliberately custom
 flows can still compose the individual hooks and components.
 
@@ -94,6 +94,11 @@ lease expiry runs independently of pending authorization. Older APIs omit only
 artifact capability, leaving conversation bootstrap available.
 Its Site HTML delivery streams with cancellation and a 25 MiB
 actual-byte ceiling; server-side helpers live on `@opengeni/sdk/session-proxy`.
+The proxy's `toolServer` option attaches a product MCP endpoint to every session
+it creates with a short-lived per-user token and rotates it on every message,
+approval, and answer; the endpoint checks it with `verifyToolRequest` from
+`@opengeni/sdk/tool-auth`
+([your own tools](product-integration.md#your-own-tools-as-the-signed-in-user-node)).
 Other routing uses `resolveLink` (also on
 `MessageTimeline` and `OpenGeniLinkProvider`), or `parseOpenGeniLink` from
 `@opengeni/sdk` outside React. See
@@ -487,7 +492,7 @@ and then consults this port with their durable caller authority.
 A delegated grant never selects a subject's **personal** connections - not in a
 personal workspace, and not in an ordinary shared workspace either. A session
 created or steered through a host-minted delegated token gets workspace-owned
-connections only; personal X/Reddit/Atlassian/Google Drive delegation is
+connections only; personal X/Reddit/Google Drive delegation is
 omitted, exactly as it is for a member who never connected that provider.
 
 This is deliberate and is a change in behaviour: before, a delegated grant did

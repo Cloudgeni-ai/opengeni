@@ -39,6 +39,19 @@ export * from "./claude-subscription-accounts";
 export * from "./claude-subscription-account-usage";
 import { heartbeatSubscriptionCredentialLeaseUntil } from "./subscription-credential-leases";
 import { directModelConnectionSpec, isDirectModelId } from "@opengeni/contracts";
+import {
+  normalizeOrganizationAccessPolicy,
+  type OrganizationAccessPolicy,
+  type UpdateOrganizationApiKeyRequest,
+} from "@opengeni/contracts";
+import {
+  organizationApiKeyAllowsWorkspace,
+  organizationApiKeyPolicyProjection,
+  readOrganizationApiKeyWorkspaceScopes,
+  replaceOrganizationApiKeyWorkspaceScope,
+  validateOrganizationApiKeyWorkspaceScope,
+} from "./organization-api-key-access";
+export { OrganizationApiKeyWorkspaceScopeError } from "./organization-api-key-access";
 import { PROMPT_PREVIEW_SCAN_MAX_CODE_UNITS } from "@opengeni/contracts/session-titles";
 import { sessionListEntry } from "@opengeni/contracts/session-list-entries";
 import { currentSessionAttachmentReadAccess } from "./database";
@@ -4254,12 +4267,20 @@ export async function createOrganizationApiKey(
     expiresAt?: Date | null;
     maxActiveKeys?: number | null;
     rotationSourceApiKeyId?: string | null;
+    policy?: OrganizationAccessPolicy;
   },
 ): Promise<ApiKey> {
   return await withRlsContext(
     db,
     { accountId: input.accountId, workspaceId: null },
     async (scopedDb) => {
+      const policy = input.policy ? normalizeOrganizationAccessPolicy(input.policy) : undefined;
+      if (policy)
+        await validateOrganizationApiKeyWorkspaceScope(
+          scopedDb,
+          input.accountId,
+          policy.workspaceScope,
+        );
       if (input.maxActiveKeys !== null && input.maxActiveKeys !== undefined) {
         await scopedDb.execute(
           sql`select pg_advisory_xact_lock(hashtextextended(${`organization-api-key:${input.accountId}`}, 0))`,
@@ -4300,12 +4321,24 @@ export async function createOrganizationApiKey(
           description: input.description ?? null,
           prefix: input.prefix,
           keyHash: input.keyHash,
-          permissions: input.permissions,
+          permissions: policy?.permissions ?? input.permissions,
+          permissionMode: policy ? "explicit" : "legacy",
+          workspaceScope: policy?.workspaceScope.kind ?? "all",
           expiresAt: input.expiresAt ?? null,
         })
         .returning();
       if (!row) throw new Error("Failed to create organization API key");
-      return mapApiKey(row);
+      if (policy)
+        await replaceOrganizationApiKeyWorkspaceScope(
+          scopedDb,
+          input.accountId,
+          row.id,
+          policy.workspaceScope,
+        );
+      return mapApiKey(
+        row,
+        policy?.workspaceScope.kind === "selected" ? policy.workspaceScope.workspaceIds : [],
+      );
     },
   );
 }
@@ -4317,7 +4350,7 @@ export async function listApiKeys(db: Database, workspaceId: string): Promise<Ap
       .from(schema.apiKeys)
       .where(eq(schema.apiKeys.workspaceId, workspaceId))
       .orderBy(desc(schema.apiKeys.createdAt));
-    return rows.map(mapApiKey);
+    return rows.map((row) => mapApiKey(row));
   });
 }
 
@@ -4333,8 +4366,81 @@ export async function listOrganizationApiKeys(db: Database, accountId: string): 
           eq(schema.apiKeys.credentialKind, "organization"),
         ),
       )
-      .orderBy(desc(schema.apiKeys.createdAt));
-    return rows.map(mapApiKey);
+      .orderBy(desc(schema.apiKeys.createdAt))
+      .for("share");
+    const scopes = await readOrganizationApiKeyWorkspaceScopes(scopedDb, rows);
+    return rows.map((row) => mapApiKey(row, scopes.get(row.id)));
+  });
+}
+
+export async function getOrganizationApiKey(
+  db: Database,
+  accountId: string,
+  keyId: string,
+): Promise<ApiKey | null> {
+  return withRlsContext(db, { accountId, workspaceId: null }, async (tx) => {
+    const [row] = await tx
+      .select()
+      .from(schema.apiKeys)
+      .where(
+        and(
+          eq(schema.apiKeys.accountId, accountId),
+          eq(schema.apiKeys.id, keyId),
+          isNull(schema.apiKeys.workspaceId),
+          eq(schema.apiKeys.credentialKind, "organization"),
+        ),
+      )
+      .for("share");
+    if (!row) return null;
+    const scopes = await readOrganizationApiKeyWorkspaceScopes(tx, [row]);
+    return mapApiKey(row, scopes.get(row.id));
+  });
+}
+
+export async function updateOrganizationApiKey(
+  db: Database,
+  accountId: string,
+  keyId: string,
+  input: UpdateOrganizationApiKeyRequest,
+): Promise<ApiKey | null> {
+  return withRlsContext(db, { accountId, workspaceId: null }, async (tx) => {
+    const [prior] = await tx
+      .select()
+      .from(schema.apiKeys)
+      .where(
+        and(
+          eq(schema.apiKeys.accountId, accountId),
+          eq(schema.apiKeys.id, keyId),
+          isNull(schema.apiKeys.workspaceId),
+          eq(schema.apiKeys.credentialKind, "organization"),
+        ),
+      )
+      .for("update");
+    if (!prior) return null;
+    const policy = input.policy ? normalizeOrganizationAccessPolicy(input.policy) : undefined;
+    if (policy)
+      await validateOrganizationApiKeyWorkspaceScope(tx, accountId, policy.workspaceScope);
+    const [row] = await tx
+      .update(schema.apiKeys)
+      .set({
+        ...(input.name !== undefined ? { name: input.name } : {}),
+        ...(input.description !== undefined ? { description: input.description } : {}),
+        ...(policy
+          ? {
+              permissions: policy.permissions,
+              permissionMode: "explicit" as const,
+              workspaceScope: policy.workspaceScope.kind,
+            }
+          : {}),
+        updatedAt: new Date(),
+      })
+      .where(and(eq(schema.apiKeys.accountId, accountId), eq(schema.apiKeys.id, keyId)))
+      .returning();
+    if (!row) return null;
+    if (policy)
+      await replaceOrganizationApiKeyWorkspaceScope(tx, accountId, keyId, policy.workspaceScope);
+    const scopes = await readOrganizationApiKeyWorkspaceScopes(tx, [row]);
+    return mapApiKey(row, scopes.get(row.id));
   });
 }
 
@@ -4424,7 +4530,9 @@ export async function revokeOrganizationApiKey(
         ),
       )
       .returning();
-    return row ? mapApiKey(row) : null;
+    if (!row) return null;
+    const scopes = await readOrganizationApiKeyWorkspaceScopes(scopedDb, [row]);
+    return mapApiKey(row, scopes.get(row.id));
   });
 }
 
@@ -4444,17 +4552,22 @@ export async function findActiveApiKeyByHash(
           sql`(${schema.apiKeys.expiresAt} is null or ${schema.apiKeys.expiresAt} > now())`,
         ),
       )
-      .limit(1);
+      .limit(1)
+      .for("update");
     if (!row) {
       return null;
     }
+    // Hash visibility proves this account. The join-table hash lane requires
+    // both settings and remains bounded to this key, not sibling key scopes.
+    await tx.execute(sql`select set_config('opengeni.account_id', ${row.accountId}, true)`);
+    const scopes = await readOrganizationApiKeyWorkspaceScopes(tx, [row]);
     const now = new Date();
     await tx
       .update(schema.apiKeys)
       .set({ lastUsedAt: now, updatedAt: now })
       .where(eq(schema.apiKeys.id, row.id));
     return {
-      ...mapApiKey({ ...row, lastUsedAt: now }),
+      ...mapApiKey({ ...row, lastUsedAt: now }, scopes.get(row.id)),
       credentialKind: row.credentialKind,
     };
   });
@@ -4483,15 +4596,23 @@ export async function findActiveWorkspaceApiKeyById(
             ),
           ),
         )
-        .limit(1);
+        .limit(1)
+        .for("share");
       if (!row) {
         return null;
       }
       if (row.workspaceId !== null && row.workspaceId !== input.workspaceId) {
         return null;
       }
+      if (
+        row.workspaceId === null &&
+        (row.credentialKind !== "organization" ||
+          !(await organizationApiKeyAllowsWorkspace(scopedDb, row, input.workspaceId)))
+      )
+        return null;
+      const scopes = await readOrganizationApiKeyWorkspaceScopes(scopedDb, [row]);
       return {
-        ...mapApiKey(row),
+        ...mapApiKey(row, scopes.get(row.id)),
         credentialKind: row.credentialKind,
       };
     },
@@ -54798,7 +54919,7 @@ export type CommandContainmentEnrollment = ReapDrainable & {
 
 /** Whole-group "unused" from durable facts only. Every session of the group,
  * and every session owning a process on the lease, must have no open turn
- * (queued, running, requires_action, recovering, waiting_capacity), no
+ * (queued, running, requires_action, waiting_capacity), no unpaused recovery, no
  * non-closed attempt, no pending quiescence and no held `wait_for_input`; and
  * the newest attempt close, turn finish, holder-set change and admission (or
  * settlement) on this lease epoch must all be older than the window. A held input wait means
@@ -54817,6 +54938,7 @@ async function sandboxGroupIdleForCommandContainmentTx(
   const [facts] = await rawRows<{
     idle: boolean;
     session_ids: string[];
+    recovering_session_ids: string[];
     idle_before: Date | string;
   }>(
     tx,
@@ -54841,7 +54963,7 @@ async function sandboxGroupIdleForCommandContainmentTx(
             select 1 from session_turns turn
             where turn.workspace_id = ${input.workspaceId}
               and turn.session_id in (select id from member_sessions)
-              and turn.status in ('queued', 'running', 'requires_action', 'recovering',
+              and turn.status in ('queued', 'running', 'requires_action',
                 'waiting_capacity'))
           and coalesce(greatest(
             (select lease.holders_changed_at from sandbox_leases lease
@@ -54878,10 +55000,24 @@ async function sandboxGroupIdleForCommandContainmentTx(
                 and admission.lease_epoch = lease.lease_epoch)
           ) < now() - (${input.windowMs}::bigint * interval '1 millisecond'), false) as idle,
         array(select id from member_sessions order by id) as session_ids,
+        array(select distinct turn.session_id from session_turns turn
+          where turn.workspace_id = ${input.workspaceId}
+            and turn.session_id in (select id from member_sessions)
+            and turn.status = 'recovering') as recovering_session_ids,
         now() - (${input.windowMs}::bigint * interval '1 millisecond') as idle_before
     `,
   );
   if (!facts?.idle) return false;
+  for (const sessionId of facts.recovering_session_ids) {
+    // Recovery is queued work, not an executing writer. An effective pause
+    // keeps that work pending across a cold restore; it must not pin a box.
+    // The locked enrollment rechecks control under the existing workspace
+    // fence, while open attempts and physical quiescence still gate cleanup.
+    const control = await evaluateSessionWriteAdmissionControl(tx, input.workspaceId, sessionId, {
+      lock: "none",
+    });
+    if (control.state !== "paused") return false;
+  }
   const idleBefore = new Date(facts.idle_before).getTime();
   const sessions = facts.session_ids.length
     ? await tx
@@ -57578,7 +57714,18 @@ async function verifyWorkspaceMutationSettlementForAuthority(
                 provider_outcome = ${input.outcome}, settled_at = now()
               where id = ${input.admission.id} and settled_at is null
             `);
-            if (pendingAttempt) {
+            if (
+              pendingAttempt ||
+              (authorityInput.kind !== "direct" &&
+                (!authority || authority.session.status === "recovering") &&
+                (await hasWaitingSandboxSetupForWriterTx(
+                  tx,
+                  authorityInput.workspaceId,
+                  authorityInput.sessionId,
+                  actorKind,
+                  actorId,
+                )))
+            ) {
               const [wakeTarget] = await tx
                 .select({ workflowId: schema.sessions.temporalWorkflowId })
                 .from(schema.sessions)
@@ -58882,9 +59029,20 @@ async function settleRetainedProcessWithAuthority(
         },
         commandMutation,
       );
+      const setupAwaitingCompletion =
+        process.ownerAttemptId &&
+        session.status === "recovering" &&
+        (await hasWaitingSandboxSetupForWriterTx(
+          tx,
+          input.workspaceId,
+          input.sessionId,
+          "turn",
+          process.ownerAttemptId,
+        ));
       if (
         process.ownerAttemptId &&
-        (wasAwaitingQuiescence ||
+        (setupAwaitingCompletion ||
+          wasAwaitingQuiescence ||
           (await hasPendingSessionAttemptQuiescenceTx(tx, {
             workspaceId: input.workspaceId,
             sessionId: input.sessionId,
@@ -73486,7 +73644,8 @@ export async function claimSessionWorkForAttempt(
             if (activeTurn.status === "recovering") {
               // Unknown dispatch cannot replay an unwound helper. Positive
               // non-dispatch also cannot replenish its exhausted budget.
-              // Neither a wake nor lease/command loss clears either fence.
+              // Control reconciliation clears uncertainty only after exact
+              // physical completion. Wakes or loss cannot reset exhaustion.
               if (
                 sandboxSetupOutcomeUnknownFromTurnMetadata(activeTurn.metadata) ||
                 sandboxSetupRecoveryExhaustedFromTurnMetadata(activeTurn.metadata)
@@ -78692,8 +78851,8 @@ function sandboxSetupRecoveryExhaustedFromTurnMetadata(
   return marker as SandboxSetupRecoveryExhausted;
 }
 
-/** Logical setup is incomplete even if one retained physical command exits.
- * There is deliberately no deadline or lease-liveness clearing condition. */
+/** Setup may be retried after every invocation of its exact unwound attempt
+ * has positively settled. Time or missing provider state is never exit proof. */
 export type SandboxSetupOutcomeUnknown = {
   version: 1;
   turnId: string;
@@ -78718,6 +78877,167 @@ function sandboxSetupOutcomeUnknownFromTurnMetadata(
     return null;
   }
   return marker as SandboxSetupOutcomeUnknown;
+}
+
+/** Completion may arrive after the attempt quiesced. Both a process exit and
+ * its last child admission must wake the exact setup waiter. */
+async function hasWaitingSandboxSetupForWriterTx(
+  tx: Database,
+  workspaceId: string,
+  sessionId: string,
+  actorKind: string,
+  actorId: string,
+): Promise<boolean> {
+  const [row] = await tx.execute<{ waiting: boolean }>(sql`
+    select exists (
+      select 1 from sessions s join session_turns t
+        on t.workspace_id=s.workspace_id and t.session_id=s.id and t.id=s.active_turn_id
+      left join sandbox_retained_processes p on p.workspace_id=s.workspace_id
+        and p.session_id=s.id and p.id=${actorId}::uuid
+      where s.workspace_id=${workspaceId} and s.id=${sessionId}
+        and s.status='recovering' and t.status='recovering'
+        and t.metadata->'sandboxSetupOutcomeUnknown' @> jsonb_build_object(
+          'version',1,'turnId',t.id::text,'reason','sandbox_command_start_outcome_unknown',
+          'attemptId',${actorKind === "process" ? sql`p.owner_attempt_id::text` : sql`${actorId}::text`})
+    ) as waiting
+  `);
+  return row?.waiting === true;
+}
+
+/** Retire an uncertainty marker after physical completion, not after a timeout.
+ * Setup reruns its idempotent preparation; this does not declare setup successful
+ * or replay an uncertain provider command. Peek itself remains read-only. */
+export async function reconcileCompletedSandboxSetup(
+  db: Database,
+  input: {
+    accountId: string;
+    workspaceId: string;
+    sessionId: string;
+    turnId: string;
+    attemptId: string;
+  },
+): Promise<{ reconciled: boolean; events: SessionEvent[] }> {
+  return withWorkspaceSessionActivityRls(db, input.workspaceId, async (scopedDb) =>
+    scopedDb.transaction(async (tx) => {
+      const locks = await lockSessionEventWriteRows(tx as unknown as Database, {
+        workspaceId: input.workspaceId,
+        controlLock: "share",
+        sessionIds: [input.sessionId],
+        turnIds: [input.turnId],
+        attemptIds: [input.attemptId],
+      });
+      const session = locks.sessions[0],
+        turn = locks.turns[0],
+        attempt = locks.attempts[0];
+      const marker = sandboxSetupOutcomeUnknownFromTurnMetadata(turn?.metadata);
+      if (
+        !session ||
+        !turn ||
+        !attempt ||
+        session.accountId !== input.accountId ||
+        session.activeTurnId !== turn.id ||
+        turn.sessionId !== session.id ||
+        turn.status !== "recovering" ||
+        turn.activeAttemptId !== null ||
+        marker?.turnId !== turn.id ||
+        marker.attemptId !== attempt.id ||
+        attempt.sessionId !== session.id ||
+        attempt.turnId !== turn.id ||
+        attempt.executionGeneration !== turn.executionGeneration ||
+        attempt.state !== "closed" ||
+        !attempt.quiescedAt ||
+        sandboxSetupRecoveryExhaustedFromTurnMetadata(turn.metadata)
+      )
+        return { reconciled: false, events: [] };
+      const control = await evaluateSessionControl(
+        tx as unknown as Database,
+        input.workspaceId,
+        input.sessionId,
+        { workspaceControl: locks.control ?? undefined },
+      );
+      if (control.state !== "active") return { reconciled: false, events: [] };
+      // Closed attempt + canonical session/attempt locks prevent new admissions.
+      // Terminal rows cannot revert to active, so no provider or lease I/O is needed.
+      const [proof] = await tx.execute<{ completed: boolean }>(sql`
+        select exists (
+          select 1 from sandbox_workspace_mutation_admissions a
+          where a.account_id = ${input.accountId} and a.workspace_id = ${input.workspaceId}
+            and a.session_id = ${input.sessionId} and a.attempt_id = ${attempt.id}
+            and a.turn_id = ${turn.id} and a.execution_generation = ${turn.executionGeneration}
+            and a.actor_kind = 'turn' and a.actor_id = ${attempt.id}
+            and a.operation in ('lazyOwnedSandboxSetup', 'eagerOwnedSandboxSetup')
+            and a.route_kind = 'home' and a.route_target_id is null
+            and exists (
+              select 1 from sandbox_retained_processes p
+              where p.parent_admission_id = a.id and p.owner_attempt_id = ${attempt.id}
+                and p.session_id = a.session_id and p.lease_id = a.lease_id
+                and p.lease_epoch = a.lease_epoch and p.provider_instance_id = a.provider_instance_id
+                and p.state = 'exited' and p.exit_code is not null
+            )
+        ) and not exists (
+          select 1 from sandbox_workspace_mutation_admissions a
+          where a.workspace_id = ${input.workspaceId} and a.session_id = ${input.sessionId}
+            and (a.attempt_id = ${attempt.id} or (a.actor_kind = 'process' and exists (
+              select 1 from sandbox_retained_processes p where p.id = a.actor_id
+                and p.owner_attempt_id = ${attempt.id}
+            ))) and (a.settled_at is null or a.provider_outcome is null
+              or a.provider_outcome not in ('resolved', 'rejected'))
+        ) and not exists (
+          select 1 from sandbox_retained_processes p
+          where p.workspace_id = ${input.workspaceId} and p.session_id = ${input.sessionId}
+            and p.owner_attempt_id = ${attempt.id}
+            and (p.state <> 'exited' or p.exit_code is null)
+        ) as completed
+      `);
+      if (!proof?.completed) return { reconciled: false, events: [] };
+      const metadata = { ...(turn.metadata ?? {}) };
+      delete metadata[SANDBOX_SETUP_OUTCOME_UNKNOWN_METADATA_KEY];
+      const now = new Date();
+      await tx
+        .update(schema.sessionTurns)
+        .set({ metadata, version: turn.version + 1, updatedAt: now })
+        .where(eq(schema.sessionTurns.id, turn.id));
+      const inserted = await tx
+        .insert(schema.sessionEvents)
+        .values(
+          withLosslessContentWriteVersion(
+            [
+              {
+                accountId: input.accountId,
+                workspaceId: input.workspaceId,
+                sessionId: input.sessionId,
+                sequence: session.lastSequence + 1,
+                type: "turn.recovery.requested" as const,
+                payload: {
+                  reason: "sandbox_setup_physically_settled",
+                  retryable: true,
+                },
+                turnId: turn.id,
+                turnGeneration: turn.executionGeneration,
+                turnAttemptId: attempt.id,
+                turnAssociation: "current" as const,
+                occurredAt: now,
+              },
+            ],
+            "payload",
+            "payloadCodecVersion",
+          ),
+        )
+        .returning();
+      await tx
+        .update(schema.sessions)
+        .set({ lastSequence: session.lastSequence + 1, updatedAt: now })
+        .where(eq(schema.sessions.id, session.id));
+      await enqueueSessionWorkflowWakeInTransaction(tx as unknown as Database, {
+        accountId: input.accountId,
+        workspaceId: input.workspaceId,
+        sessionId: session.id,
+        temporalWorkflowId: session.temporalWorkflowId ?? `session-${session.id}`,
+        reason: "sandbox_setup_physically_settled",
+      });
+      return { reconciled: true, events: inserted.map(mapEvent) };
+    }),
+  );
 }
 
 export type SandboxLifecycleWait = {
@@ -87650,7 +87970,7 @@ async function withSocialConnectionSubjectRls<T>(
     : await withWorkspaceRls(db, workspaceId, fn);
 }
 
-function mapApiKey(row: typeof schema.apiKeys.$inferSelect): ApiKey {
+function mapApiKey(row: typeof schema.apiKeys.$inferSelect, workspaceIds?: string[]): ApiKey {
   return {
     id: row.id,
     accountId: row.accountId,
@@ -87659,6 +87979,7 @@ function mapApiKey(row: typeof schema.apiKeys.$inferSelect): ApiKey {
     description: row.description,
     prefix: row.prefix,
     permissions: row.permissions as Permission[],
+    ...organizationApiKeyPolicyProjection(row, workspaceIds),
     expiresAt: row.expiresAt ? row.expiresAt.toISOString() : null,
     revokedAt: row.revokedAt ? row.revokedAt.toISOString() : null,
     lastUsedAt: row.lastUsedAt ? row.lastUsedAt.toISOString() : null,

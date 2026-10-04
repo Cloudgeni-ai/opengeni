@@ -4,6 +4,12 @@ import { join } from "node:path";
 
 const repo = join(import.meta.dir, "..");
 
+// The organization MCP catalog lists every route an agent acting as a person
+// may call, including this one: an owner decision (OPE-647) allows reset
+// credits under Full access. The route still requires the person, in their
+// browser or through a verified agent acting as them; nothing else may name it.
+const ORGANIZATION_MCP_CATALOG = "apps/api/src/mcp/action-catalog.gen.ts";
+
 async function sourceFiles(root: string): Promise<string[]> {
   const files: string[] = [];
   for await (const path of new Bun.Glob("**/*.{ts,tsx}").scan({
@@ -33,6 +39,7 @@ describe("Codex quota human-only reset-credit surface", () => {
     ];
     for (const root of roots) {
       for (const file of await sourceFiles(root)) {
+        if (file === ORGANIZATION_MCP_CATALOG) continue;
         const content = await readFile(join(repo, file), "utf8");
         for (const marker of forbidden) {
           expect(content.includes(marker), `${file} must not contain ${marker}`).toBe(false);
@@ -44,7 +51,7 @@ describe("Codex quota human-only reset-credit surface", () => {
     // entire API source tree and allow the irreversible markers only in the one
     // reviewed human route adapter.
     for (const file of await sourceFiles("apps/api/src")) {
-      if (file === "apps/api/src/routes/codex.ts") continue;
+      if (file === "apps/api/src/routes/codex.ts" || file === ORGANIZATION_MCP_CATALOG) continue;
       const content = await readFile(join(repo, file), "utf8");
       for (const marker of forbidden) {
         expect(content.includes(marker), `${file} must not contain ${marker}`).toBe(false);

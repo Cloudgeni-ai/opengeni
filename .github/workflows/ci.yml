@@ -1593,10 +1593,21 @@ jobs:
           rustup toolchain install 1.97.1 --profile minimal --no-self-update
           rustup default 1.97.1
 
+      - name: Install Bun for canary interaction bundle
+        if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
+        uses: oven-sh/setup-bun@v2
+        with:
+          bun-version-file: .bun-version
+
+      - name: Install canary interaction dependencies
+        if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
+        run: bun install --frozen-lockfile
+
       - name: Bake and sign exact-SHA canary agent
         if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
         env:
           OPENGENI_AGENT_MINISIGN_KEY: ${{ secrets.OPENGENI_AGENT_MINISIGN_KEY }}
+          OPENGENI_RUNTIME_BUILD_ID: ${{ github.sha }}
         run: scripts/bake-agent.sh
 
       - name: Require complete exact-SHA canary agent bake
@@ -1604,10 +1615,12 @@ jobs:
         run: |
           set -euo pipefail
           for target in x86_64-unknown-linux-musl aarch64-unknown-linux-musl; do
-            asset="agent/install/baked/opengeni-agent-$target"
-            test -s "$asset"
-            test -s "$asset.sha256"
-            test -s "$asset.minisig"
+            for component in opengeni-agent opengeni-browserd opengeni-agent-browser opengeni-computer-native; do
+              asset="agent/install/baked/$component-$target"
+              test -s "$asset"
+              test -s "$asset.sha256"
+              test -s "$asset.minisig"
+            done
           done
 
       - name: Set up QEMU

@@ -11,6 +11,7 @@ import {
   disableCapabilityInstallation,
   encryptEnvironmentValue,
   getCapabilityInstallation,
+  getConnectionMetadata,
   listEnabledMcpCapabilityServers,
   upsertCapabilityCatalogItem,
   updateWorkspaceSettings,
@@ -956,7 +957,7 @@ describe("subject-owned capability connection references", () => {
     expect(entry?.actions).toContain("disconnect");
   });
 
-  test("Gmail preserves explicit workspace and personal ownership", async () => {
+  test("Gmail enables only an exact personal-owned connection and preserves legacy shared rows", async () => {
     if (!available) return;
     const workspace = await freshWorkspace();
     const capabilityId = `mcp:gmail-personal-${crypto.randomUUID()}`;
@@ -979,24 +980,51 @@ describe("subject-owned capability connection references", () => {
       credentialEncrypted: encryptedFixture(),
     });
 
-    await enableCapability({
-      db,
-      grant: grant(workspace, "subject-alice"),
-      ...workspace,
-      settings,
-      capabilityId,
-      payload: {
-        config: {},
-        metadata: {},
-        headers: {},
+    for (const credentials of [
+      {
         connectionRef: {
           connectionId: sharedConnection.id,
           providerDomain: "gmailmcp.googleapis.com",
-          kind: "oauth2",
-          subjectScope: "workspace",
+          kind: "oauth2" as const,
+          subjectScope: "workspace" as const,
         },
       },
-    });
+      {
+        connectionRef: {
+          connectionId: sharedConnection.id,
+          providerDomain: "gmailmcp.googleapis.com",
+          kind: "oauth2" as const,
+        },
+      },
+      { headers: { authorization: "Bearer synthetic" } },
+      {
+        headers: { authorization: "Bearer synthetic" },
+        connectionRef: {
+          connectionId: alice.id,
+          providerDomain: "gmailmcp.googleapis.com",
+          kind: "oauth2" as const,
+          subjectScope: "subject" as const,
+        },
+      },
+      {},
+    ]) {
+      await expect(
+        enableCapability({
+          db,
+          grant: grant(workspace, "subject-alice"),
+          ...workspace,
+          settings,
+          capabilityId,
+          probeMcpServer: async () => {
+            throw new Error("Gmail admission must precede provider probing");
+          },
+          payload: { config: {}, metadata: {}, headers: {}, ...credentials },
+        }),
+      ).rejects.toThrow("personal-owned connection reference");
+    }
+    expect(
+      await getConnectionMetadata(db, workspace.workspaceId, sharedConnection.id, "subject-alice"),
+    ).toEqual(sharedConnection);
 
     await expect(
       enableCapability({

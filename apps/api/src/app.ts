@@ -114,6 +114,7 @@ import {
   hasPermission,
   requireAccessGrant,
   requireAccessGrantAuthorization,
+  accountScopedApiKeyWorkspaceAuthority,
   requireAccessContext,
   requirePermission,
   releaseManagedAuthRequestActorLease,
@@ -176,9 +177,12 @@ import {
   isMcpOAuthResourcePath,
   mcpOAuthAuthenticateHeader,
   mcpOAuthBearerToken,
+  ORGANIZATION_MCP_PATH,
   registerMcpOAuthRoutes,
   resolveMcpOAuthRouteAccess,
+  resolveOrganizationMcpOAuthAccess,
 } from "./mcp-oauth";
+import { buildOrganizationMcpServer, type OrganizationMcpCaller } from "./organization-mcp";
 import {
   CodemodeAuthorityError,
   CodemodeCatalogNotReadyError,
@@ -223,6 +227,7 @@ import { registerMemorySlackPublicationRoutes } from "./routes/memory-slack-publ
 import { registerEnvironmentRoutes } from "./routes/environments";
 import { registerFileRoutes } from "./routes/files";
 import { registerApiKeyRoutes } from "./routes/api-keys";
+import { registerOrganizationMcpConnectionRoutes } from "./routes/organization-mcp-connections";
 import { registerBillingRoutes } from "./routes/billing";
 import { registerBrowserIdentityRoutes } from "./routes/browser-identities";
 import { registerBrowserSessionRoutes } from "./routes/browser-sessions";
@@ -1295,6 +1300,67 @@ export function createAppComposition(deps: AppDependencies): {
     );
   });
 
+  // The organization MCP server: every public action, as a person who signed
+  // in (capped by their connection's access setting) or as an organization
+  // API key. Each action runs the real route in this process.
+  app.all(ORGANIZATION_MCP_PATH, async (c) => {
+    let boundedRequest: Request;
+    try {
+      boundedRequest = await boundedMcpRequest(c.req.raw);
+    } catch (error) {
+      if (error instanceof McpPayloadTooLargeError) {
+        throw new HTTPException(413, { message: "MCP request body exceeds the safety limit" });
+      }
+      throw error;
+    }
+    const challenge = () => {
+      if (deps.settings.mcpOauthEnabled) {
+        c.header("www-authenticate", mcpOAuthAuthenticateHeader(routeDeps, ORGANIZATION_MCP_PATH));
+      }
+    };
+    let caller: OrganizationMcpCaller;
+    try {
+      const connection = await resolveOrganizationMcpOAuthAccess(routeDeps, c.req.raw);
+      if (connection) {
+        caller = {
+          kind: "person",
+          accountId: connection.accountId,
+          subjectId: connection.subjectId,
+          access: connection.organizationAccess,
+        };
+      } else {
+        const context = await requireAccessContext(c, routeDeps);
+        const authorization = c.req.header("authorization");
+        if (!accountScopedApiKeyWorkspaceAuthority(context) || !authorization) {
+          throw new HTTPException(403, {
+            message: "Connect with Opengeni sign-in or an organization API key.",
+          });
+        }
+        caller = {
+          kind: "key",
+          authorization,
+          accessKey: c.req.header("x-opengeni-access-key") ?? null,
+        };
+      }
+    } catch (error) {
+      if (error instanceof HTTPException && error.status === 401) challenge();
+      throw error;
+    }
+    const transport = new WebStandardStreamableHTTPServerTransport({ enableJsonResponse: true });
+    const mcp = buildOrganizationMcpServer({
+      caller,
+      origin: new URL(c.req.url).origin,
+      dispatch: async (request) => await app.fetch(request, c.env),
+      signal: c.req.raw.signal,
+    });
+    try {
+      await mcp.connect(transport);
+      return await handleMcpRequestWithClientAbort(transport, boundedRequest, c.req.raw.signal);
+    } finally {
+      await mcp.close().catch(() => undefined);
+    }
+  });
+
   app.use("/v1/workspaces/:workspaceId/*", async (c, next) => {
     const workspaceId = c.req.param("workspaceId");
     if (workspaceRequestRequiresCodexAccountPrevalidation(c.req.raw)) {
@@ -1619,6 +1685,7 @@ export function createAppComposition(deps: AppDependencies): {
   registerFileRoutes(app, routeDeps);
   registerSessionArtifactAssociationRoutes(app, routeDeps);
   registerApiKeyRoutes(app, routeDeps);
+  registerOrganizationMcpConnectionRoutes(app, routeDeps);
   registerBillingRoutes(app, routeDeps);
   registerBrowserIdentityRoutes(app, routeDeps);
   registerBrowserSessionRoutes(app, routeDeps);

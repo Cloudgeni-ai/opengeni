@@ -7,7 +7,7 @@ import {
   XaiProviderAccountAuthoritySnapshotV1 as SubscriptionAuthoritySnapshotV1,
   type XaiProviderAccountAuthoritySnapshotV1 as SubscriptionAuthoritySnapshot,
 } from "@opengeni/contracts";
-import { inArray, and, asc, eq, gt, isNull, lte, or, sql } from "drizzle-orm";
+import { inArray, and, asc, eq, isNull, lte, or, sql } from "drizzle-orm";
 import type { Database } from "./database";
 import { rawRows, withWorkspaceSubjectRls, withRlsContext, setSubjectRlsContext } from "./database";
 import { decryptEnvironmentValue, encryptEnvironmentValue } from "./environment-crypto";

@@ -66,6 +66,7 @@ export const embeddingMigrationTail = [
   // Installs inventory read policies with the session-tenancy fence helper
   // from withheld 0345; replay after it.
   "0547_idle_command_containment.sql",
+  "0599_paused_recovery_command_containment.sql",
   // Allowance receipts compile against the withheld Knowledge/embedding and
   // scheduled-refusal lifecycle. Replay them after those prerequisites.
   ...allowanceMigrationTail,

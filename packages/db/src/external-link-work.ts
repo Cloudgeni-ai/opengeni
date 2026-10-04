@@ -71,6 +71,7 @@ export async function getExternalLinkTurnAuthorization(db: Database, scope: Scop
   return {
     authorized: await externalLinkWorkSnapshotIsLive(db, snapshot),
     permissions: snapshot.permissions,
+    ...(snapshot.permissionMode ? { permissionMode: snapshot.permissionMode } : {}),
   };
 }
 

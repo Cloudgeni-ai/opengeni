@@ -8,7 +8,7 @@ import {
   lockExternalWorkspaceMembershipLifecycle,
   withWorkspaceSubjectRls,
   type Database,
-  lockConnectionSetupKey,
+  lockConnectionSetupKeyAuthority,
   nestedPostgresSqlState,
 } from "@opengeni/db";
 import { HTTPException } from "hono/http-exception";
@@ -53,8 +53,8 @@ export async function requireConnectOwnerAuthority(
   if (state.subjectId.startsWith("external_user:"))
     throw new HTTPException(403, { message: "External Connect continuation required" });
   if (state.subjectId.startsWith("api_key:")) {
-    const permissions = await lockConnectionSetupKey(db, state);
-    if (!permissions || !hasPermission(permissions, permission))
+    const authority = await lockConnectionSetupKeyAuthority(db, state);
+    if (!authority || !hasPermission(authority.permissions, permission, authority.permissionMode))
       throw new HTTPException(403, { message: "Connection API key authority changed" });
     return;
   }

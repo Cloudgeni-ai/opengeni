@@ -260,6 +260,12 @@ export type MessageTimelineProps = {
   autoFollow?: boolean | undefined;
   /** Capture a same-row text selection into the host's canonical composer draft. */
   onAnnotate?: ((annotation: DraftTimelineAnnotation) => void) | undefined;
+  /**
+   * Hide the floating "Back to your message" pill while the timeline viewport
+   * is shorter than this (px), e.g. a narrow embed above a decision card.
+   * Defaults to 0 (always available).
+   */
+  questionNavMinViewportHeight?: number | undefined;
   /** Composer draft quotes currently attached to the next send. */
   draftAnnotations?: readonly DraftTimelineAnnotation[] | undefined;
   /** Open the composer review list for one numbered draft badge. */
@@ -333,17 +339,21 @@ const JUMP_TO_LATEST_CATCHUP_DEBT_PX = 240;
 /** Breathing room above the question when following stops at an answer. */
 const QUESTION_NAV_MARGIN_PX = 12;
 /**
- * Floating timeline navigation (Back to your message, Jump to latest) shares one
- * fixed anchor: centered at the bottom of the conversation, above the composer.
- * The pills never measure or dodge the content beneath them, so they cannot
- * wander sideways or drift vertically as rows stream in or the host resizes.
+ * Floating timeline navigation: two identical small round arrow buttons at fixed
+ * spots, centered on the conversation. Back to your message floats just below
+ * the pinned work-header strip (32px, 44px on coarse pointers) so that strip
+ * stays a full-width target; Jump to latest floats just above the bottom edge.
+ * They never measure or
+ * dodge the content beneath them (floating over a sliver of text is fine), so
+ * they cannot wander as rows stream in or the host resizes. Coarse pointers get
+ * a larger invisible hit area instead of a larger button.
  */
-const NAV_PILL_CLASS =
-  "pointer-events-auto inline-flex max-w-full items-center gap-1.5 whitespace-nowrap rounded-full border border-og-border bg-og-surface-3/90 px-3 py-1.5 text-og-control font-medium text-og-fg shadow-og-md backdrop-blur hover:border-og-border-strong focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-og-accent pointer-coarse:min-h-11";
-const NAV_PILL_MOTION = {
-  initial: { opacity: 0, y: 8 },
-  animate: { opacity: 1, y: 0 },
-  exit: { opacity: 0, y: 8 },
+const NAV_BUTTON_CLASS =
+  "pointer-events-auto relative inline-flex size-8 items-center justify-center rounded-full border border-og-border bg-og-surface-3/90 text-og-fg-muted shadow-og-md backdrop-blur hover:border-og-border-strong hover:text-og-fg focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-og-accent pointer-coarse:before:absolute pointer-coarse:before:-inset-1.5 pointer-coarse:before:content-['']";
+const NAV_FADE = {
+  initial: { opacity: 0 },
+  animate: { opacity: 1 },
+  exit: { opacity: 0 },
   transition: { duration: 0.15, ease: "easeOut" },
 } as const;
 /**
@@ -547,6 +557,7 @@ export function MessageTimeline({
   turnSummary,
   autoFollow = true,
   onAnnotate,
+  questionNavMinViewportHeight = 0,
   draftAnnotations,
   onDraftAnnotationSelect,
   hasOlder = false,
@@ -746,7 +757,15 @@ export function MessageTimeline({
   const resizeFollowRafRef = useRef<number | null>(null);
   const questionNavFrameRef = useRef<number | null>(null);
   const [questionNav, setQuestionNav] = useState<QuestionNav | null>(null);
-  const jumpPillShown = autoFollow && (!pinned || hasNewer || canSkipTipCatchup);
+  const questionNavMinViewportRef = useRef(questionNavMinViewportHeight);
+  questionNavMinViewportRef.current = questionNavMinViewportHeight;
+  const scheduleQuestionNavRef = useRef<() => void>(() => {});
+  // Unpinned is not the same as away from the tip: focusing a control in the
+  // conversation (Copy, a connection card) hands the view to the reader while
+  // they are still at the bottom. Offer the jump only once there is something
+  // below them, or a newer window / catch-up to skip.
+  const [awayFromTip, setAwayFromTip] = useState(false);
+  const jumpPillShown = autoFollow && ((!pinned && awayFromTip) || hasNewer || canSkipTipCatchup);
   const firstGroupKey = allGroups[0] ? timelineGroupKey(allGroups[0]) : null;
   // Content stays invisible until the tip is hard-parked across a short
   // post-commit settle (two rAFs). That absorbs sync late layout while hidden
@@ -1330,10 +1349,17 @@ export function MessageTimeline({
     questionNavFrameRef.current = requestFrame(() => {
       questionNavFrameRef.current = null;
       const node = scrollRef.current;
-      const next = node ? readQuestionNav(node) : null;
+      // A short viewport (a narrow embed above a decision card) has no room
+      // for a floating pill that would cover the very rows being read.
+      // clientHeight <= 1 is pre-layout/headless, not a short viewport.
+      const roomy =
+        node !== null &&
+        (node.clientHeight <= 1 || node.clientHeight >= questionNavMinViewportRef.current);
+      const next = node && roomy ? readQuestionNav(node) : null;
       setQuestionNav((current) => (sameQuestionNav(current, next) ? current : next));
     });
   }, [readableTurns]);
+  scheduleQuestionNavRef.current = scheduleQuestionNav;
   useEffect(
     () => () => {
       if (questionNavFrameRef.current != null) {
@@ -1971,6 +1997,9 @@ export function MessageTimeline({
         if (!current) {
           return;
         }
+        // A viewport that shrank below the pill's minimum hides it now, not
+        // on the next scroll.
+        if (questionNavMinViewportRef.current > 0) scheduleQuestionNavRef.current();
         requestOlderIfUnderfilled(current);
         if (!autoFollow || !pinnedRef.current || hasNewerRef.current) {
           return;
@@ -2026,6 +2055,15 @@ export function MessageTimeline({
     }
   }, [hasNewer, autoFollow, applyPinned, snapToBottom, stopFollow]);
 
+  // After the scroll authority above has settled each commit, record whether
+  // the reader is away from the tip (content can land below an unpinned
+  // reader without any scroll event).
+  // oxlint-disable-next-line react-hooks/exhaustive-deps -- Deliberately runs after every commit.
+  useLayoutEffect(() => {
+    const node = scrollRef.current;
+    if (node && !pinnedRef.current) setAwayFromTip(!isNearBottom(node));
+  });
+
   // Pinned: layout/camera recover tip debt; wheel/keys/pointer-arm unpin
   // immediately; extension jumps settle via scrollend (or one-rAF fallback).
   // Do not tip-follow-yank an in-flight unarmed scroll-away — that ate Vimium.
@@ -2034,6 +2072,8 @@ export function MessageTimeline({
     if (!node) {
       return;
     }
+    // Only an unpinned reader's distance matters for the jump.
+    if (!pinnedRef.current) setAwayFromTip(!isNearBottom(node));
     scheduleQuestionNav();
     const previousTop = lastScrollTopRef.current;
     const previousMaxScroll = lastMaxScrollRef.current;
@@ -2555,19 +2595,36 @@ export function MessageTimeline({
                       ) : null}
 
                       <div
-                        data-og-timeline-nav=""
-                        // One fixed anchor for every floating navigation control: a
-                        // centered column at the bottom of the conversation. Newest
-                        // stays nearest the composer; the up-pointing action and the
-                        // later-activity status stack above it.
-                        className="pointer-events-none absolute inset-x-0 bottom-4 z-10 flex flex-col items-center gap-2 px-4 sm:px-6"
+                        data-og-timeline-nav="top"
+                        className="pointer-events-none absolute inset-x-0 top-10 z-10 flex justify-center pointer-coarse:top-13"
                       >
-                        <AnimatePresence mode="popLayout">
+                        <AnimatePresence>
+                          {questionNav ? (
+                            <motion.button
+                              key="question-nav"
+                              {...NAV_FADE}
+                              type="button"
+                              data-og-question-nav=""
+                              data-og-jump-to-question=""
+                              title="Back to your message"
+                              onClick={() => jumpToQuestion(questionNav.key)}
+                              className={NAV_BUTTON_CLASS}
+                            >
+                              <ArrowUpIcon aria-hidden className="size-4" />
+                              <span className="sr-only">Back to your message</span>
+                            </motion.button>
+                          ) : null}
+                        </AnimatePresence>
+                      </div>
+                      <div
+                        data-og-timeline-nav="bottom"
+                        className="pointer-events-none absolute inset-x-0 bottom-3 z-10 flex flex-col items-center gap-2"
+                      >
+                        <AnimatePresence>
                           {loadingNewer ? (
                             <motion.div
                               key="loading-newer"
-                              layout="position"
-                              {...NAV_PILL_MOTION}
+                              {...NAV_FADE}
                               data-og-loading-newer=""
                               aria-live="polite"
                               className="flex max-w-full justify-center"
@@ -2577,28 +2634,13 @@ export function MessageTimeline({
                               </span>
                             </motion.div>
                           ) : null}
-                          {questionNav ? (
-                            <motion.button
-                              key="question-nav"
-                              layout="position"
-                              {...NAV_PILL_MOTION}
-                              type="button"
-                              data-og-question-nav=""
-                              data-og-jump-to-question=""
-                              onClick={() => jumpToQuestion(questionNav.key)}
-                              className={NAV_PILL_CLASS}
-                            >
-                              <ArrowUpIcon aria-hidden className="size-3.5 shrink-0" />
-                              Back to your message
-                            </motion.button>
-                          ) : null}
                           {jumpPillShown ? (
                             <motion.button
                               key="jump-to-latest"
-                              layout="position"
-                              {...NAV_PILL_MOTION}
+                              {...NAV_FADE}
                               type="button"
                               data-og-jump-to-latest=""
+                              title="Jump to latest"
                               onClick={() => {
                                 // Returning to the tip explicitly releases reader-owned
                                 // prose. Clear only this timeline's selection before the
@@ -2653,10 +2695,10 @@ export function MessageTimeline({
                                   snapToBottom(node);
                                 }
                               }}
-                              className={NAV_PILL_CLASS}
+                              className={NAV_BUTTON_CLASS}
                             >
-                              <ArrowDownIcon aria-hidden className="size-3.5 shrink-0" />
-                              Jump to latest
+                              <ArrowDownIcon aria-hidden className="size-4" />
+                              <span className="sr-only">Jump to latest</span>
                             </motion.button>
                           ) : null}
                         </AnimatePresence>
@@ -4611,6 +4653,7 @@ function NoticeRow({ item }: { item: NoticeItem }) {
       </details>
     );
   }
+  const resolvedApproval = Boolean(item.resolvedAt && item.text.startsWith("Approval needed"));
   const tone =
     item.tone === "failed"
       ? "border-og-status-failed/35 bg-og-status-failed/10 text-og-status-failed"
@@ -4626,14 +4669,16 @@ function NoticeRow({ item }: { item: NoticeItem }) {
       )}
       role="status"
     >
-      <TriangleAlertIcon
-        className={cn("mt-0.5 size-4 shrink-0", item.tone === "cancelled" && "opacity-60")}
-      />
+      {resolvedApproval ? (
+        <CheckIcon className="mt-0.5 size-4 shrink-0 opacity-70" aria-hidden="true" />
+      ) : (
+        <TriangleAlertIcon
+          className={cn("mt-0.5 size-4 shrink-0", item.tone === "cancelled" && "opacity-60")}
+        />
+      )}
       <div className="min-w-0 flex-1">
         <span className="whitespace-pre-wrap break-words">
-          {item.resolvedAt && item.text.startsWith("Approval needed")
-            ? "Approval was needed."
-            : item.text}
+          {resolvedApproval ? "You responded to this approval." : item.text}
         </span>
         {item.details ? (
           <details className="mt-2 text-og-control">

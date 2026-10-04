@@ -20,7 +20,7 @@ describe("scheduled connection-authority surface eligibility", () => {
     });
     expect(scheduledConnectionSurfaceEligibility(runtimeSettings, null)).toEqual({
       googleDrivePublicationEnabled: true,
-      atlassianEnabled: true,
+      atlassianEnabled: false,
     });
   });
 
@@ -44,7 +44,7 @@ describe("scheduled connection-authority surface eligibility", () => {
     };
     expect(scheduledConnectionSurfaceEligibility(defaultOff, targetOn)).toEqual({
       googleDrivePublicationEnabled: true,
-      atlassianEnabled: true,
+      atlassianEnabled: false,
     });
   });
 });

@@ -150,6 +150,7 @@ import {
   assertPersonalConnectionOwnerPrincipal,
   isPersonalConnectionOwnerPrincipal,
   requireLegacyOAuthActor,
+  requireProviderConsentInBrowser,
 } from "../connection-ownership";
 import { canonicalProviderDomain } from "../integrations/provider-domain";
 import { externalActorContinuationForAuthorization } from "@opengeni/core";
@@ -1454,6 +1455,7 @@ export function registerConnectionRoutes(app: Hono, deps: ApiRouteDeps): void {
     assertIntegrationsEnabled();
     const workspaceId = c.req.param("workspaceId");
     const access = await requireAccessGrantAuthorization(c, deps, workspaceId, "connections:write");
+    requireProviderConsentInBrowser(access);
     const grant = access.grant;
     const parsed = OAuthStartRequest.safeParse(await c.req.json());
     if (!parsed.success) {
@@ -1483,6 +1485,7 @@ export function registerConnectionRoutes(app: Hono, deps: ApiRouteDeps): void {
     assertIntegrationsEnabled();
     const workspaceId = c.req.param("workspaceId");
     const access = await requireAccessGrantAuthorization(c, deps, workspaceId, "connections:write");
+    requireProviderConsentInBrowser(access);
     const grant = access.grant;
     const parsed = ApiIntegrationOAuthStartRequest.safeParse(await c.req.json());
     if (!parsed.success) {

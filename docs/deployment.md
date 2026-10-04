@@ -3450,6 +3450,13 @@ or delete an agent release tag. A baked asset still takes precedence so a
 deployed control-plane image serves its release-coherent binary directly.
 Explicit `/agent/v<version>/<asset>` binary and signature requests always use
 that immutable archive release; a baked canary cannot override a version pin.
+Linux canary builds use `scripts/bake-agent.sh` with the exact source commit as
+`OPENGENI_RUNTIME_BUILD_ID`. The signed agent embeds matching browserd, the
+pinned browser driver, and the native computer helper; adjacent helpers from
+another download are not its default runtime. The image gate requires all four
+assets plus checksums and signatures for each architecture. The API serves a
+complete baked target or falls back when that whole target is absent; a partial
+baked target returns 503 rather than combining image and archive assets.
 The same deployment serves signed `/agent/stable/manifest.json` and
 `manifest.json.minisig` routes so an enrolled agent updates through a control
 plane it already trusts instead of depending on public DNS. Beta is independent

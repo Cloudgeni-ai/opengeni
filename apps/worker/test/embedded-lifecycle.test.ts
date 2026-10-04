@@ -486,6 +486,7 @@ describe("embedded worker lifecycle contract", () => {
       ],
       [{ activated: false }],
       [{ present: true }],
+      [{ present: true }],
       [],
       [
         { name: "opengeni_private", owner: "opengeni_migrator", usage: true, create: false },
@@ -776,7 +777,7 @@ describe("embedded worker lifecycle contract", () => {
         "session_tenancy_additional_organization_activation_evidence",
       ],
     })();
-    expect((catalogResults[9] as Array<{ name: string }>).map((routine) => routine.name)).toEqual([
+    expect((catalogResults[10] as Array<{ name: string }>).map((routine) => routine.name)).toEqual([
       ...RUNTIME_TARGET_SCHEMA_CAPABILITY_ROUTINES,
       ...RUNTIME_TARGET_SCHEMA_FORBIDDEN_ROUTINES,
     ]);
@@ -788,7 +789,11 @@ describe("embedded worker lifecycle contract", () => {
   });
 
   test("embedded readiness enforces durable session-tenancy activation for both switch states", async () => {
-    const embeddedDb = (activated: boolean, variableSetCutoverPresent = true) => {
+    const embeddedDb = (
+      activated: boolean,
+      variableSetCutoverPresent = true,
+      claudePoolActivationPresent = true,
+    ) => {
       const results: unknown[] = [
         [
           {
@@ -809,6 +814,7 @@ describe("embedded worker lifecycle contract", () => {
         ],
         [{ activated }],
         [{ present: variableSetCutoverPresent }],
+        [{ present: claudePoolActivationPresent }],
       ];
       let index = 0;
       return {
@@ -839,6 +845,9 @@ describe("embedded worker lifecycle contract", () => {
     await expect(dbReadyCheck(embeddedDb(false), options)()).resolves.toBeUndefined();
     await expect(dbReadyCheck(embeddedDb(false, false), options)()).rejects.toThrow(
       /missing the 0352 session Variable Set attachment runtime receipt/,
+    );
+    await expect(dbReadyCheck(embeddedDb(false, true, false), options)()).rejects.toThrow(
+      /missing the Claude subscription account activation receipt/,
     );
   });
 

@@ -1,3 +1,7 @@
+import {
+  ATLASSIAN_NATIVE_RETIRED_MESSAGE,
+  isRetiredNativeAtlassianTask,
+} from "@opengeni/contracts/atlassian-native-retirement";
 /**
  * One schedule's own page: back to Schedules, the header with its actions,
  * then Overview (on/off, instructions, setup) and Runs. Never a side sheet.
@@ -392,7 +396,9 @@ export function ScheduleDetailPage({
                     Edit
                   </Button>
                 ) : null}
-                {task.status === "paused" && perms.canPauseOrDelete ? (
+                {task.status === "paused" &&
+                perms.canPauseOrDelete &&
+                !isRetiredNativeAtlassianTask(task) ? (
                   <Button
                     type="button"
                     size="sm"
@@ -403,7 +409,7 @@ export function ScheduleDetailPage({
                     <PlayIcon aria-hidden="true" />
                     Resume
                   </Button>
-                ) : perms.canRun ? (
+                ) : perms.canRun && !isRetiredNativeAtlassianTask(task) ? (
                   <Button
                     type="button"
                     size="sm"
@@ -567,6 +573,7 @@ function Overview({
   const perms = schedulePermissions(task, access);
   const knowledge = isKnowledgeSync(task);
   const state = scheduledTaskStateLabel(task);
+  const retired = state.reason === "provider_retired";
   const next = nextRunOf(task, now);
   const sentence = `${scheduleWords(task.schedule, now).sentence}.`;
   const status =
@@ -591,33 +598,45 @@ function Overview({
             {latest.error?.trim() || "Open the run's chat to see what went wrong."}
           </Notice>
         ) : null}
-        <SettingRow
-          label="Active"
-          description={
-            <>
-              <span className="block">{sentence}</span>
-              {status ? <span className="block">{status}</span> : null}
-            </>
-          }
-          control={
-            <Switch
-              aria-label={`${task.name} is active`}
-              checked={task.status === "active"}
-              onCheckedChange={onActiveChange}
-              pending={busy}
-              disabled={!perms.canPauseOrDelete}
-              disabledReason={
-                perms.own
-                  ? "You need permission to manage schedules in this workspace."
-                  : `Only ${owner} can pause or resume it.`
-              }
-            />
-          }
-        />
+        {retired ? (
+          <Notice tone="muted" title="Jira and Confluence sync retired">
+            {ATLASSIAN_NATIVE_RETIRED_MESSAGE} Imported documents and previous runs remain.
+          </Notice>
+        ) : (
+          <SettingRow
+            label="Active"
+            description={
+              <>
+                <span className="block">{sentence}</span>
+                {status ? <span className="block">{status}</span> : null}
+              </>
+            }
+            control={
+              <Switch
+                aria-label={`${task.name} is active`}
+                checked={task.status === "active"}
+                onCheckedChange={onActiveChange}
+                pending={busy}
+                disabled={!perms.canPauseOrDelete}
+                disabledReason={
+                  perms.own
+                    ? "You need permission to manage schedules in this workspace."
+                    : `Only ${owner} can pause or resume it.`
+                }
+              />
+            }
+          />
+        )}
         {!perms.own ? (
           <InlineHelp icon className="mt-3">
-            It runs with {firstName}'s connected accounts, so only {firstName} can change, run,
-            pause or delete it. Duplicate it to make your own.
+            {retired ? (
+              <>Only {firstName} can remove this retired schedule.</>
+            ) : (
+              <>
+                It runs with {firstName}'s connected accounts, so only {firstName} can change, run,
+                pause or delete it. Duplicate it to make your own.
+              </>
+            )}
           </InlineHelp>
         ) : null}
       </DetailSection>

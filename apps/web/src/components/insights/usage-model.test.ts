@@ -46,6 +46,26 @@ describe("usage search", () => {
     });
   });
 
+  test("a custom range needs both days in order", () => {
+    expect(parseUsageSearch({ range: "custom", start: "2026-09-01", end: "2026-09-15" })).toEqual({
+      range: "custom",
+      start: "2026-09-01",
+      end: "2026-09-15",
+    });
+    expect(parseUsageSearch({ range: "custom", start: "2026-09-15", end: "2026-09-01" })).toEqual(
+      {},
+    );
+    expect(parseUsageSearch({ range: "custom", start: "nope" })).toEqual({});
+    expect(
+      nextUsageSearch(
+        { range: "custom", start: "2026-09-01", end: "2026-09-02" },
+        { range: "ytd" },
+      ),
+    ).toEqual({
+      range: "ytd",
+    });
+  });
+
   test("filters round-trip, models split on the first slash", () => {
     const search = nextUsageSearch(
       {},
@@ -123,6 +143,17 @@ describe("breakdown rows", () => {
       "organization-claude-subscription/claude-opus-5-5",
       "workspace-claude-subscription/claude-opus-5-5",
     ]);
+  });
+
+  test("groups with no usage in the period are left out", () => {
+    const rows = breakdownRows({
+      groupBy: "workspace",
+      groups: [
+        group({ key: "w1", label: "Busy" }),
+        group({ key: "w2", label: "Idle", measures: emptyMeasures() }),
+      ],
+    });
+    expect(rows.map((row) => row.label)).toEqual(["Busy"]);
   });
 
   test("private, deleted and folded rows are amounts only, after the named rows", () => {

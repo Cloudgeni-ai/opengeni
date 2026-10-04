@@ -203,7 +203,9 @@ async function finishTurn(
 
 /** One singleton sandbox group whose completed turn left a legacy background
  * command running (e.g. a dev server) under a non-expiring process holder. */
-async function idleFixture(options: { outcome?: string; reconcileAttempts?: number } = {}) {
+async function idleFixture(
+  options: { outcome?: string; reconcileAttempts?: number; parent?: boolean } = {},
+) {
   const [account] = await admin<{ id: string }[]>`
     insert into managed_accounts (name) values ('containment') returning id`;
   const [workspace] = await admin<{ id: string }[]>`
@@ -211,7 +213,9 @@ async function idleFixture(options: { outcome?: string; reconcileAttempts?: numb
   await admin`insert into workspace_inference_controls (workspace_id, account_id)
     values (${workspace!.id}, ${account!.id})`;
   const ids = { accountId: account!.id, workspaceId: workspace!.id };
-  const attempt = await startAttempt(ids, undefined);
+  const parent = options.parent ? await startAttempt(ids, undefined) : null;
+  if (parent) await finishTurn(parent);
+  const attempt = await startAttempt(ids, undefined, parent?.sessionId);
   const instanceId = `box-${crypto.randomUUID()}`;
   const [lease] = await admin<{ id: string }[]>`
     insert into sandbox_leases (account_id, workspace_id, sandbox_group_id, liveness, refcount,
@@ -225,6 +229,7 @@ async function idleFixture(options: { outcome?: string; reconcileAttempts?: numb
   const fixture = {
     ...ids,
     attempt,
+    parent,
     leaseId: lease!.id,
     instanceId,
     sandboxGroupId: attempt.sandboxGroupId,
@@ -358,6 +363,94 @@ async function drain(
 }
 
 describe("idle command containment", () => {
+  async function recoveringFixture(parent = false) {
+    const fixture = await idleFixture({ parent });
+    await admin`update session_turn_attempts set outcome = 'lease_lost_recoverable',
+      quiesced_at = null where id = ${fixture.attempt.attemptId}`;
+    await admin`update session_turns set status = 'recovering', finished_at = null
+      where id = ${fixture.attempt.turnId}`;
+    await admin`update sessions set status = 'recovering', active_turn_id = ${fixture.attempt.turnId}
+      where id = ${fixture.attempt.sessionId}`;
+    await idleFor(fixture, 31);
+    return fixture;
+  }
+
+  async function pauseRecovery(fixture: Fixture, kind: "session" | "ancestor" | "workspace") {
+    if (kind === "workspace") {
+      await admin`update workspace_inference_controls set workspace_state = 'paused',
+        workspace_pause_revision = 10, revision = 10 where workspace_id = ${fixture.workspaceId}`;
+    } else {
+      let sessionId = fixture.attempt.sessionId;
+      if (kind === "ancestor") {
+        sessionId = fixture.parent!.sessionId;
+      }
+      await admin`update sessions set direct_control_state = 'paused',
+        direct_pause_revision = 10, control_version = 10 where id = ${sessionId}`;
+    }
+  }
+
+  for (const kind of ["session", "ancestor", "workspace"] as const) {
+    test(`idle ${kind}-paused recovery saves files and releases the box without resuming work`, async () => {
+      const fixture = await recoveringFixture(kind === "ancestor");
+      await pauseRecovery(fixture, kind);
+      const [before] = await admin<{ direct_control_state: string; active_turn_id: string }[]>`
+        select direct_control_state, active_turn_id from sessions where id = ${fixture.attempt.sessionId}`;
+      const activities = createSandboxLeaseActivities(services());
+      const target = (await activities.prepareSandboxLeaseSweep()).drainable.find(
+        (row) => row.sandboxGroupId === fixture.sandboxGroupId,
+      );
+      expect(target).toBeDefined();
+      // Existing capture-before-stop and real command settlement, not a ledger clear.
+      const stopped = await drain(fixture);
+      expect(stopped.result.status).toBe("terminated");
+      expect(stopped.persisted).toEqual([true]);
+      const lease = await readLease(db, fixture.workspaceId, fixture.sandboxGroupId);
+      expect(lease?.liveness).toBe("cold");
+      expect(lease?.recovery.archive.status).toBe("available");
+      expect((await commandTerminalRecord(fixture)).command).toMatchObject({
+        state: "lost",
+        exit_code: null,
+        settlement_reason: "idle_containment",
+      });
+      const [after] = await admin<{ direct_control_state: string; active_turn_id: string }[]>`
+        select direct_control_state, active_turn_id from sessions where id = ${fixture.attempt.sessionId}`;
+      expect(after).toEqual(before);
+      const [turn] = await admin<
+        { status: string }[]
+      >`select status from session_turns where id = ${fixture.attempt.turnId}`;
+      expect(turn?.status).toBe("recovering");
+    }, 180_000);
+  }
+
+  test("unpaused recovery and explicit resume overrides keep their box", async () => {
+    for (const kind of [null, "ancestor", "workspace"] as const) {
+      const fixture = await recoveringFixture(kind === "ancestor");
+      if (kind) {
+        await pauseRecovery(fixture, kind);
+        await admin`update sessions set subtree_run_override_revision = 11, control_version = 11
+          where id = ${fixture.attempt.sessionId}`;
+      }
+      const activities = createSandboxLeaseActivities(services());
+      expect((await activities.prepareSandboxLeaseSweep()).drainable).not.toContainEqual(
+        expect.objectContaining({ sandboxGroupId: fixture.sandboxGroupId }),
+      );
+      expect(await enrollRetainedCommandContainment(db, scope(fixture))).toBeNull();
+    }
+  }, 180_000);
+
+  test("paused recovery still keeps active attempts and recent activity", async () => {
+    const fixture = await recoveringFixture();
+    await pauseRecovery(fixture, "session");
+    await admin`update session_turn_attempts set state = 'running', outcome = null,
+      closed_at = null where id = ${fixture.attempt.attemptId}`;
+    expect(await enrollRetainedCommandContainment(db, scope(fixture))).toBeNull();
+    await admin`update session_turn_attempts set state = 'closed', outcome = 'lease_lost_recoverable',
+      closed_at = now() where id = ${fixture.attempt.attemptId}`;
+    expect(await enrollRetainedCommandContainment(db, scope(fixture))).toBeNull();
+    await idleFor(fixture, 31);
+    expect((await enrollRetainedCommandContainment(db, scope(fixture)))?.mode).toBe("idle");
+  }, 180_000);
+
   for (const [label, outcome, reconcileAttempts] of [
     ["a healthy provider_running", "provider_running", 3],
     ["a repeatedly provider_error (no stop intent)", "provider_error", 9],
