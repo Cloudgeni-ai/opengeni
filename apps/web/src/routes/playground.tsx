@@ -7,10 +7,6 @@ import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } fro
 import { ADD_AGENT_DEFAULT_PROMPT } from "@/components/new-session-starters";
 import { AcmeProduct } from "@/components/playground/acme-product";
 import { DEMO_AUTHORIZATION_URL, QUESTIONS } from "@/components/playground/acme-script";
-import {
-  ADD_TO_PRODUCT_FIRST_REPLY,
-  ADD_TO_PRODUCT_INSTRUCTIONS,
-} from "@/components/playground/add-to-product";
 import { Callout, type CalloutSide } from "@/components/playground/callout";
 import { chatSnippet } from "@/components/playground/chat-snippet";
 import { ChatSnippetView } from "@/components/playground/chat-snippet-view";
@@ -34,6 +30,8 @@ import { Input } from "@/components/ui/input";
 import { SegmentedControl } from "@/components/ui/segmented-control";
 import { useAppContext } from "@/context";
 import { captureAnalyticsEvent } from "@/lib/analytics-observer";
+import { queueComposerPrefill } from "@/lib/composer-prefill";
+import { writeFirstChatDraft } from "@/lib/first-agent";
 import { useFirstRunStarters } from "@/lib/first-run-starters";
 import { markOnboarding, onboardingJourneyStorageKey } from "@/lib/onboarding-journey";
 import { cn } from "@/lib/utils";
@@ -65,7 +63,7 @@ const TARGETS: Record<Tip, string | readonly string[]> = {
  * inside, next to the few lines that put it there. The chat is the real
  * component on a recorded client: it never calls a model or creates anything.
  * A color and light/dark restyle it live and mark the lines they change; "Add
- * it to your product" opens a real chat that walks through the integration.
+ * it to your product" opens the new-chat page with a prompt for it, ready to send.
  * A few callouts point the way; each waits for the person to act.
  */
 export function PlaygroundRoute({ workspaceId }: { workspaceId: string }) {
@@ -87,8 +85,8 @@ export function PlaygroundRoute({ workspaceId }: { workspaceId: string }) {
     captureAnalyticsEvent("playground_step_completed", { step });
   }, []);
 
-  // Every visit starts with the tips; Skip hides them for this visit only,
-  // and "Show tips" brings them back.
+  // Every visit starts with the tips; "Hide tips" hides them for this visit
+  // only, and "Show tips" brings them back.
   const [tip, setTip] = useState<Tip | null>("chat");
   const endTips = () => setTip(null);
 
@@ -138,14 +136,15 @@ export function PlaygroundRoute({ workspaceId }: { workspaceId: string }) {
     setEpoch((value) => value + 1);
   };
 
-  // "Add it to your product" opens a real chat in this workspace, on its
-  // default model, that walks the person through the integration. Without a
-  // real workspace (the walkthrough preview) it shows how that chat starts.
+  // "Add it to your product" opens the new-chat page with the integration
+  // prompt in the composer, so the person can send it, edit it, or clear it
+  // when they're in the middle of something else. Without a real workspace
+  // (the walkthrough preview) it shows the prompt instead.
   const prompt = firstRun.productPrompt || ADD_AGENT_DEFAULT_PROMPT;
   const [shipping, setShipping] = useState(false);
   const [previewOpen, setPreviewOpen] = useState(false);
   const ship = async () => {
-    if (shipping || context.busy) return;
+    if (shipping) return;
     report("ship");
     if (tip) endTips();
     if (typeof context.startSession !== "function") {
@@ -154,32 +153,16 @@ export function PlaygroundRoute({ workspaceId }: { workspaceId: string }) {
     }
     setShipping(true);
     try {
-      const created = await context.startSession(
-        workspaceId,
-        { text: prompt },
-        { instructions: ADD_TO_PRODUCT_INSTRUCTIONS },
-      );
-      if (created)
-        await navigate({
-          to: "/workspaces/$workspaceId/sessions/$sessionId",
-          params: { workspaceId, sessionId: created.id },
-        });
+      const written = await writeFirstChatDraft(context.client, workspaceId, prompt, {
+        replace: true,
+      }).catch(() => false);
+      // The draft couldn't be saved: hand the prompt over in memory instead.
+      if (!written) queueComposerPrefill(workspaceId, prompt);
+      await navigate({ to: "/workspaces/$workspaceId/sessions", params: { workspaceId } });
     } finally {
       setShipping(false);
     }
   };
-
-  const skip = (
-    <Button
-      type="button"
-      size="xs"
-      variant="ghost"
-      className="text-canvas/80 hover:bg-canvas/15 hover:text-canvas"
-      onClick={endTips}
-    >
-      Skip
-    </Button>
-  );
   const callouts: Record<Tip, { text: ReactNode; actions: ReactNode }> = {
     chat: {
       text: (
@@ -189,29 +172,26 @@ export function PlaygroundRoute({ workspaceId }: { workspaceId: string }) {
           is the whole chat - streaming, chat list, new chat, light and dark. Ask it something.
         </>
       ),
-      actions: skip,
+      actions: null,
     },
-    color: { text: "Try a color.", actions: skip },
+    color: { text: "Try a color.", actions: null },
     code: {
       text: "That's all it took - one prop.",
       actions: (
-        <>
-          {skip}
-          <Button
-            type="button"
-            size="xs"
-            className="border-transparent bg-canvas text-fg hover:bg-canvas/90"
-            onClick={() => setTip("tool")}
-          >
-            Next
-          </Button>
-        </>
+        <Button
+          type="button"
+          size="xs"
+          className="border-transparent bg-canvas text-fg hover:bg-canvas/90"
+          onClick={() => setTip("tool")}
+        >
+          Next
+        </Button>
       ),
     },
-    tool: { text: "Agents ask users to connect tools right in the chat.", actions: skip },
+    tool: { text: "Agents ask users to connect tools right in the chat.", actions: null },
     ship: {
-      text: "Ready? This opens a chat where an agent adds it to your product with you.",
-      actions: skip,
+      text: "Ready? This opens a new chat with a prompt for adding it to your product.",
+      actions: null,
     },
   };
   // The first callout waits while the answer plays.
@@ -384,7 +364,7 @@ export function PlaygroundRoute({ workspaceId }: { workspaceId: string }) {
               <p
                 className={cn("max-w-56 text-xs text-fg-muted", showTip === "ship" && "invisible")}
               >
-                Opens a chat where an agent adds it to your product with you.
+                Opens a new chat with a prompt for adding it to your product.
               </p>
             </div>
           </section>
@@ -404,17 +384,12 @@ export function PlaygroundRoute({ workspaceId }: { workspaceId: string }) {
       <Dialog open={previewOpen} onOpenChange={setPreviewOpen}>
         <DialogContent className="sm:max-w-lg" data-ship-preview="">
           <DialogHeader>
-            <DialogTitle>A chat like this opens</DialogTitle>
+            <DialogTitle>A new chat opens with this prompt</DialogTitle>
             <DialogDescription>
-              In your workspace, this starts a real chat with an agent.
+              In your workspace, it's ready to send, edit or clear.
             </DialogDescription>
           </DialogHeader>
-          <div className="grid gap-3 text-sm">
-            <p className="max-w-[85%] justify-self-end rounded-[14px] bg-surface-2 px-3 py-2 text-fg">
-              {prompt}
-            </p>
-            <p className="max-w-[90%] text-fg">{ADD_TO_PRODUCT_FIRST_REPLY}</p>
-          </div>
+          <p className="rounded-[14px] bg-surface-2 px-3 py-2 text-sm text-fg">{prompt}</p>
           <DialogFooter>
             <Button type="button" variant="outline" onClick={() => setPreviewOpen(false)}>
               Close

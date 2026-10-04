@@ -70,6 +70,7 @@ mock.module("@tanstack/react-router", () => ({
 const { PlaygroundRoute } = await import("./playground");
 const { ADD_AGENT_DEFAULT_PROMPT } = await import("@/components/new-session-starters");
 const journeys = await import("@/lib/onboarding-journey");
+const { takeComposerPrefill, takeComposerSend } = await import("@/lib/composer-prefill");
 
 const realSetTimeout = globalThis.setTimeout;
 
@@ -155,7 +156,7 @@ describe("playground", () => {
       expect(container.textContent).not.toContain("server.ts");
       expect(buttonIn(container, "Add it to your product")).toBeTruthy();
       expect(container.textContent).toContain(
-        "Opens a chat where an agent adds it to your product with you.",
+        "Opens a new chat with a prompt for adding it to your product.",
       );
       expect(unexpected).not.toHaveBeenCalled();
     } finally {
@@ -211,20 +212,53 @@ describe("playground", () => {
     }
   });
 
-  test("Add it to your product starts a guided chat in this workspace", async () => {
+  test("Add it to your product puts its prompt in the new-chat composer, unsent", async () => {
+    const draft = {
+      text: "Something I was typing",
+      resources: [],
+      tools: [],
+      toolsProvided: false,
+      model: "codex/gpt-6-astra",
+      reasoningEffort: "low",
+      latencyMode: "standard",
+      options: {},
+      revision: 3,
+    };
+    const saveNewSessionDraft = mock(async (_workspaceId: string, _draft: unknown) => draft);
+    const real = context.client;
+    (context as { client: unknown }).client = {
+      getNewSessionDraft: async () => draft,
+      getWorkspaceModelCatalog: async () => ({ models: [] }),
+      saveNewSessionDraft,
+    };
     const { container, unmount } = await mount();
     try {
       await press(buttonIn(container, "Add it to your product"));
-      expect(startSession).toHaveBeenCalledTimes(1);
-      const [workspace, submission, options] = startSession.mock.calls[0]!;
+      expect(startSession).not.toHaveBeenCalled();
+      expect(saveNewSessionDraft).toHaveBeenCalledTimes(1);
+      const [workspace, saved] = saveNewSessionDraft.mock.calls[0]!;
       expect(workspace).toBe(DEVELOPMENT);
-      expect(submission).toEqual({ text: ADD_AGENT_DEFAULT_PROMPT });
-      expect((options as { instructions: string }).instructions).toContain(
-        "read the opengeni-client Skill",
-      );
+      // It replaces what was there; the person can still edit or clear it.
+      expect((saved as { text: string }).text).toBe(ADD_AGENT_DEFAULT_PROMPT);
+      expect(takeComposerSend(DEVELOPMENT)).toBe(false);
       expect(navigate).toHaveBeenCalledWith({
-        to: "/workspaces/$workspaceId/sessions/$sessionId",
-        params: { workspaceId: DEVELOPMENT, sessionId: "00000000-0000-4000-8000-0000000000f1" },
+        to: "/workspaces/$workspaceId/sessions",
+        params: { workspaceId: DEVELOPMENT },
+      });
+    } finally {
+      context.client = real;
+      await unmount();
+    }
+  });
+
+  test("when the draft can't be saved, the prompt still reaches the composer", async () => {
+    const { container, unmount } = await mount();
+    try {
+      await press(buttonIn(container, "Add it to your product"));
+      expect(takeComposerPrefill(DEVELOPMENT)).toBe(ADD_AGENT_DEFAULT_PROMPT);
+      expect(navigate).toHaveBeenCalledWith({
+        to: "/workspaces/$workspaceId/sessions",
+        params: { workspaceId: DEVELOPMENT },
       });
     } finally {
       await unmount();
@@ -283,16 +317,18 @@ describe("playground", () => {
       expect(chat(container)).toContain("Your calendar is free Thursday 10-12");
 
       expect(callout(container)!.dataset.callout).toBe("ship");
-      expect(callout(container)!.textContent).toContain("This opens a chat where an agent");
+      expect(callout(container)!.textContent).toContain("This opens a new chat with a prompt");
       // The caption steps aside while the callout says it.
       expect(
         Array.from(container.querySelectorAll("p")).find((p) =>
-          p.textContent?.startsWith("Opens a chat"),
+          p.textContent?.startsWith("Opens a new chat"),
         )!.className,
       ).toContain("invisible");
-      await press(buttonIn(callout(container)!, "Skip"));
+      // No callout offers a way past it; only the header hides the tips.
+      expect(callout(container)!.querySelector("button")).toBeNull();
+      await press(buttonIn(container.querySelector("header")!, "Hide tips"));
       expect(callout(container)).toBeNull();
-      // Skip is for this visit only, and the tips can come back.
+      // Hiding is for this visit only, and the tips can come back.
       await press(buttonIn(container.querySelector("header")!, "Show tips"));
       expect(callout(container)!.dataset.callout).toBe("color");
     } finally {
@@ -300,9 +336,10 @@ describe("playground", () => {
     }
   });
 
-  test("a new visit starts with the tips again, even after Skip", async () => {
+  test("a new visit starts with the tips again, even after hiding them", async () => {
     const first = await mount();
-    await press(buttonIn(callout(first.container)!, "Skip"));
+    expect(callout(first.container)!.querySelector("button")).toBeNull();
+    await press(buttonIn(first.container.querySelector("header")!, "Hide tips"));
     expect(callout(first.container)).toBeNull();
     await first.unmount();
     const { container, unmount } = await mount();
@@ -334,14 +371,14 @@ describe("playground", () => {
     }
   });
 
-  test("without a workspace to start chats in, it shows how the chat opens", async () => {
+  test("without a workspace to start chats in, it shows the prompt the chat opens with", async () => {
     const real = context.startSession;
     (context as { startSession?: unknown }).startSession = undefined;
     const { container, unmount } = await mount();
     try {
       await press(buttonIn(container, "Add it to your product"));
       const dialog = document.querySelector("[data-ship-preview]")!;
-      expect(dialog.textContent).toContain("A chat like this opens");
+      expect(dialog.textContent).toContain("A new chat opens with this prompt");
       expect(dialog.textContent).toContain(ADD_AGENT_DEFAULT_PROMPT);
       expect(navigate).not.toHaveBeenCalled();
     } finally {

@@ -3,7 +3,6 @@ import { Link } from "@tanstack/react-router";
 import { ModelPaymentChoice } from "@/components/model-payment/model-payment-choice";
 import { useAppContext } from "@/context";
 import {
-  creditsMarginLabel,
   modelPaymentOptions,
   type ModelPaymentOption,
   type ModelPaymentOptionId,
@@ -46,7 +45,6 @@ export function ModelPaymentMenu({ workspaceId }: { workspaceId: string }) {
     codexEnabled: models.some((model) => model.source === "codex"),
     supergrokEnabled: models.some((model) => model.source === "supergrok"),
     balance: credits.balance,
-    creditsMargin: creditsMarginLabel(catalog.models),
     lead: "credits",
   }).filter(
     // A subscription this server doesn't offer is not a choice here.

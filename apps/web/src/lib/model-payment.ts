@@ -43,8 +43,6 @@ export type ModelPaymentFacts = Readonly<{
   supergrokEnabled: boolean;
   /** The organization's credit balance, when known. */
   balance: { balanceMicros: number; currency: string } | null;
-  /** "5%": the markup on the provider's price, when every credits model agrees. */
-  creditsMargin: string | null;
   /** Which headline choice leads: credits for building, the ChatGPT plan for cloud work. */
   lead: "credits" | "codex";
 }>;
@@ -91,7 +89,7 @@ export function modelPaymentOptions(facts: ModelPaymentFacts): ModelPaymentOptio
   const credits: ModelPaymentOption = {
     id: "credits",
     title: "Opengeni credits",
-    description: creditsPriceSentence(facts.creditsMargin),
+    description: "Pay as you go.",
     ...(facts.billingMode !== "stripe"
       ? { state: "unavailable" as const, reason: CREDITS_UNAVAILABLE_REASON }
       : facts.canBuyCredits
