@@ -72,6 +72,18 @@ export default defineConfig({
               priority: 21,
             },
             {
+              // The playground is a lazy page around the packaged embedded chat.
+              // Only modules nothing else in the app imports belong here (the
+              // app's rail has its own session list; the provider, the
+              // workspace sessions hook and the approval surface stay with the
+              // eager workspace shell). Left floating, these merge into the
+              // shared chunks every workspace and direct session loads.
+              name: "embedded-chat",
+              test: /(?:apps[\\/]web[\\/]src[\\/](?:components[\\/]playground[\\/][\w-]+\.(?:tsx?|css)|routes[\\/]playground\.tsx)|packages[\\/]react[\\/]src[\\/](?:lib[\\/]host-theme\.ts|components[\\/](?:open-geni-chat|session-conversation|session-list|session-proxy-scope)\.tsx|hooks[\\/](?:use-session-control|use-available-models)\.ts))$/,
+              includeDependenciesRecursively: false,
+              priority: 21,
+            },
+            {
               // Account setup is interaction-driven. Do not let shared icons
               // co-locate these forms/controllers with the eager session graph.
               name: "connect-setup",

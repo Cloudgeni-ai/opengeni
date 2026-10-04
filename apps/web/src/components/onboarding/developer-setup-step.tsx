@@ -25,12 +25,19 @@ import {
 } from "@/lib/onboarding-use-case";
 import { clearPendingDeveloperSetup } from "@/lib/pending-developer-setup";
 
-/** Where onboarding sends the person when it finishes somewhere other than home. */
-export type OnboardingDestination = { workspaceId: string; sessionId: string };
+/**
+ * Where onboarding sends the person when it finishes somewhere other than
+ * home: a chat, or a workspace's new-chat page when there is no `sessionId`.
+ */
+export type OnboardingDestination = { workspaceId: string; sessionId?: string };
 
 type DeveloperSetupClient = Pick<
   OpenGeniBrowserClient,
-  "createOrganizationApiKey" | "createWorkspace" | "createVariableSet" | "createSession"
+  | "createOrganizationApiKey"
+  | "createWorkspace"
+  | "createVariableSet"
+  | "getNewSessionDraft"
+  | "saveNewSessionDraft"
 >;
 
 type KeyState =
@@ -43,11 +50,12 @@ type KeyState =
  * signed-in owner's click on that path is what creates the organization's
  * full-access setup key, once, and shows it only here. From there the
  * person either lets Opengeni implement the integration in a new "Opengeni
- * setup" workspace, or uses their own coding agent: copy the key into the
+ * setup" workspace (its new-chat page opens with the setup chat ready to
+ * send, so it works before any model is connected), or uses their own coding agent: copy the key into the
  * product's server-only env, then copy a prompt that names that variable.
  *
  * The key never enters a chat: the setup chat reads it from a write-only
- * variable set in its sandbox, its model context names only where it is, and
+ * variable set in its sandbox, its instructions name only where it is, and
  * the coding-agent prompt carries the variable name, never the key.
  */
 export function DeveloperSetupStep({
@@ -71,7 +79,6 @@ export function DeveloperSetupStep({
   );
   // What "Let Opengeni implement it" already created, so a retry resumes.
   const implementProgress = useRef<{ workspaceId?: string; variableSetId?: string | null }>({});
-  const sessionRequestKey = useRef(`onboarding-developer-setup:${crypto.randomUUID()}`);
   const promptCopy = useCopyToClipboard();
   const keyCopy = useCopyToClipboard();
   const facts = {
@@ -134,7 +141,7 @@ export function DeveloperSetupStep({
       ).id;
       const workspaceId = progress.workspaceId;
       if (token && progress.variableSetId === undefined) {
-        // Without it the chat still starts; its context says no key is attached.
+        // Without it the chat still works; its instructions say no key is attached.
         progress.variableSetId = await client
           .createVariableSet(workspaceId, {
             scope: "workspace",
@@ -148,18 +155,36 @@ export function DeveloperSetupStep({
           );
       }
       const variableSetId = progress.variableSetId ?? null;
-      const session = await client.createSession(workspaceId, {
-        initialMessage: DEVELOPER_SETUP_INITIAL_MESSAGE,
-        modelContext: developerSetupModelContext({
-          ...facts,
-          keyInSandbox: variableSetId !== null,
-        }),
-        ...(variableSetId ? { variableSetIds: [variableSetId] } : {}),
-        idempotencyKey: sessionRequestKey.current,
+      // The setup chat waits in that workspace's composer, ready to send. It
+      // starts on whatever model the person has, and with none yet the
+      // composer offers to connect one, so this works before any model or
+      // credits exist.
+      const draft = await client.getNewSessionDraft(workspaceId);
+      await client.saveNewSessionDraft(workspaceId, {
+        text: DEVELOPER_SETUP_INITIAL_MESSAGE,
+        resources: draft.resources,
+        tools: draft.tools,
+        toolsProvided: draft.toolsProvided,
+        model: draft.model,
+        reasoningEffort: draft.reasoningEffort,
+        latencyMode: draft.latencyMode,
+        ...(draft.modelProvided !== undefined ? { modelProvided: draft.modelProvided } : {}),
+        options: {
+          ...draft.options,
+          ...(variableSetId ? { variableSetIds: [variableSetId], variableSetId } : {}),
+          agent: {
+            ...draft.options.agent,
+            instructions: developerSetupModelContext({
+              ...facts,
+              keyInSandbox: variableSetId !== null,
+            }),
+          },
+        },
+        expectedRevision: draft.revision,
       });
       onboardingJourney().completed("developer_setup", "implement_with_opengeni");
       clearPendingDeveloperSetup();
-      onComplete({ workspaceId, sessionId: session.id });
+      onComplete({ workspaceId });
     } catch (error) {
       toast.error("Couldn't open your setup chat", { description: userErrorText(error) });
       setOpening(false);
