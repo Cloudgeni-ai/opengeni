@@ -152,9 +152,97 @@ Primary evidence is retained as artifact
 `35d7a831-de14-48bc-9432-f0e18146fefc` (310,511 bytes,
 SHA-256 `8468d0a1287a93bd370f23561e4137c09273708fb4883ee981fc8e4e7482c031`).
 The physical-copy attestation is artifact
-`7efa32ca-4f5b-4fcb-b61e-da76544a12d2`. Final repaired-head clean and dirty-write
-measurements remain separate work; cached responses and the small DB builder
-fixture do not satisfy the uncached target.
+`7efa32ca-4f5b-4fcb-b61e-da76544a12d2`. Subsequent repaired-head measurements are
+recorded separately below; cached responses and the small DB builder fixture do
+not satisfy the uncached target.
+
+### Composed repaired-head retained-volume checkpoint
+
+On October 4, 2026, head `a763ff312233ba9f77307fe65242d88cf773d36a`
+combined the completed snapshot/batching repair `28d48b1396d6d8dfcb223ec69d4475084083cb51`,
+mechanical migration renumbering `9212564afb44973004b0ef08f8c82aca2009ae5f`,
+and inspected main `e64a5a9177e4c2c8528022f9532245ed5874d892`.
+The four migration bodies remained byte-identical after renumbering to 0610–0613.
+Full-App authorization/raw-oracle parity and release checks passed 14 tests with
+536 assertions; DB/Core/API types, 18 unit tests with 146 assertions, ordinal,
+schema, FORCE-RLS and test-budget guards also passed. Independent review approved
+the limited DB source delta, not the performance or rollout outcome.
+
+One new physical copy of the same 838,000-fact/4,170,000-event fixture ran the
+four migrations once. No original, historical allocation or rate snapshot was
+changed, and no applied migration was replayed.
+
+| Migration | Total elapsed | Sampled source AccessExclusiveLock hold bounds |
+| --- | ---: | --- |
+| 0610 | 526.884 s | 526.567–526.884 s on facts and usage events |
+| 0611 | 26.261 s | 26.000–26.261 s on facts and credit ledger entries |
+| 0612 | 0.231 s | Below the 250 ms sampling resolution; not a no-lock claim |
+| 0613 | 0.005 s | No source-table lock observed |
+
+Four normal-app write probes were cancelled with `57014` under explicit LOCAL
+10-second diagnostic timeouts; native pool statement/lock timeouts were zero.
+Fourteen post-phase probes succeeded and rolled back. Count, amount, knownness,
+policy and FORCE parity held, with zero runtime-posture violations before and
+after. These source-write fences still require maintenance-only owner disposition;
+the append-only steady-state repair does not make bootstrap online-safe.
+
+Both clean and immediately-after-write HTTP runs used the same frozen head,
+exact calendar/prior windows described above, normal canonical selected-key
+authority, FORCE RLS, and a fresh full App response cache for every timed request.
+Each cell below has one separately reported first request and twenty subsequent
+samples. All 84 timed responses were HTTP 200 with zero errors.
+
+| State | Scope | First | Subsequent p50 | Subsequent p95 |
+| --- | --- | ---: | ---: | ---: |
+| Clean | Workspace | 2.187 s | 1.870 s | 1.892 s |
+| Clean | Organization | 5.281 s | 4.946 s | 5.177 s |
+| Immediately after writes | Workspace | 6.532 s | 6.569 s | 6.686 s |
+| Immediately after writes | Organization | 9.703 s | 9.719 s | 9.787 s |
+
+The sub-one-second uncached target is **unmet in both scopes and states**.
+Before every dirty request, one ordinary restricted-app fact, warm usage event
+and matching negative actual debit committed atomically; no manual reconciliation
+ran between samples. Entire current totals, prior totals and unknown coverage
+matched the expected wire deltas. The isolated copy gained exactly 42 facts,
+42 usage events and 42 ledger rows, requested/list amounts of 4,242/3,066 micros,
+and actual debits of 42 micros. Original source data, copy FORCE posture and
+migration history were unchanged. All start/end source hashes matched.
+
+The first requests were not true-cold measurements. Both the benchmark and
+postmaster affinity were captured as 0–16, with the same PostgreSQL 17.11,
+16.125-CPU quota, 128 MiB shared buffers and 4 MiB work memory. This is synthetic
+local evidence, not staging p95 or merge/launch clearance.
+
+A subsequent bounded full-App nested-plan diagnostic retained normal selected-key
+authority, the restricted app role and the ten-second read budget. Session-local
+`auto_explain` captured 12 workspace and 59 organization JSON plans with analysis
+and buffers, timing disabled and a 10 ms threshold. Both diagnostic requests
+succeeded; their elapsed times are not benchmark samples. The dirty workspace
+charge-input queries consumed about 2.7 s current and 2.4 s prior, while daily
+model reads took about 90/83 ms and raw model edges about 240/54 ms. The DB owner
+received those native plans for a contained helper-local optimization; no query,
+privacy projector, source data or global setting was changed by the diagnostic.
+
+A separate comparison against a new copy of the already-built exact-head test
+template found all 25 Insights routine definitions, volatility, security-definer
+flags and configurations byte-identical to the measured database. Fixture owners
+and ACLs are recorded separately; this is not a claim that the template's superuser
+owner represents the measured non-superuser FORCE-RLS role.
+
+Retained primary evidence:
+
+- Bootstrap: `3fec20ae-fb68-4f5d-9156-d529f15429bc`, 6,730,328 bytes,
+  SHA-256 `651edb8a8191454723604c72c64be2291c0e974f75674420880674722673bf9c`.
+- Physical-copy attestation: `e8ac4f90-b183-466d-921b-be01566c7f13`, 94,505 bytes,
+  SHA-256 `ce2faf2969d07fea39dcb7a59e353ff80551c68d26cb0eabab8165a7c7ef468c`.
+- Clean HTTP: `31fce32c-520e-4e9f-afdc-eaf62d8d92e3`, 537,508 bytes,
+  SHA-256 `63b3f81e3913600e769d7077dd53f96f865a4adb094880b6c6e5bf37ac72cbb3`.
+- Dirty HTTP: `238bfb61-5b86-4545-b137-b0fbcf17561e`, 635,064 bytes,
+  SHA-256 `56248b0532ca915eae59eeb667e2d831644aaba95bc45827d220feb841a7606b`.
+- Routine provenance: `845bec4a-c398-43d6-9c61-3f17bc80463b`, 37,874 bytes,
+  SHA-256 `a0f30addcf188c2c0165ea54fc2fee888da01d1ea0e2a3cd1c4ca94832830003`.
+- Native plans: `15a47f77-3d11-4b09-9ce4-c333d000e016`, 3,987,720 bytes,
+  SHA-256 `10d5c830c3638e9cc06a02e089abb2a6e891a5c686c00b38b01fce73279ecb1e`.
 
 ### Frozen-head full-volume bootstrap measurement
 
@@ -217,7 +305,9 @@ the original ledger row. Its real PostgreSQL owner/app suite passes 120 tests an
 1,719 assertions, including mixed-case history, late attribution, corrections,
 deletion and raw-oracle parity. The integration retains those two DB file bodies
 unchanged. These checks are correctness evidence, not a repeat of the frozen-head
-volume measurement; the changed 0607 bootstrap has not been timed at that volume.
+volume measurement; at that UUID-only checkpoint the changed 0607 bootstrap had
+not yet been timed at that volume. The composed repaired-head measurement above
+subsequently timed its renumbered 0611 body.
 
 The bounded DB worker also reported a real PostgreSQL reproduction in which
 opposing multirow transactions on disjoint source rows both commit before
