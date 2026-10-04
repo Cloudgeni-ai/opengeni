@@ -25,6 +25,7 @@ import {
   getManagedUserProfilesByIds,
   ensureExternalIdentity,
   ensureExternalWorkspaceMemberOnFirstUse,
+  USER_ISOLATION_WORKSPACE_SOURCE_PREFIX,
   lockExternalWorkspaceMembershipLifecycle,
   resolveExternalIdentityLink,
   managedPersonalWorkspacePermissions,
@@ -897,25 +898,31 @@ export async function requireWorkspaceSettingsGrant(
  * It is exactly the authority of explicit `addExternalWorkspaceMember`: the
  * calling key must hold `members:manage` (or legacy `workspace:admin`) plus
  * every default permission, with the workspace in its scope, re-checked live
- * under the organization membership fence. Never for linked native identities,
- * service-initiator requests, or any non-key principal (agent attempts,
- * delegated/bearer user tokens, browser sessions), which never reach the
- * external lane. Never changes an existing membership. Returns true only when
- * a membership now exists; any refusal leaves the ordinary 403 in place.
+ * under the organization membership fence together with the identity's own
+ * active status. Never for linked native identities, service-initiator
+ * requests, or any non-key principal (agent attempts, delegated/bearer user
+ * tokens, browser sessions), which never reach the external lane; never for
+ * Personal or SDK per-user workspaces; never when the request needs a
+ * permission outside the defaults. Never changes an existing membership.
+ * Returns true only when a membership now exists; any refusal leaves the
+ * ordinary 403 in place.
  */
 async function provisionExternalMemberOnFirstUse(
   deps: AccessDeps,
   context: AccessContext,
   external: NonNullable<ReturnType<typeof externalActorContexts.get>>,
   workspaceId: string,
+  permission: Permission | undefined,
 ): Promise<boolean> {
   if (
     !external.firstUseMembership ||
     external.linked ||
+    // A request that would 403 on its own permission anyway creates nothing.
+    (permission !== undefined && !EXTERNAL_FIRST_USE_MEMBER_PERMISSIONS.includes(permission)) ||
     context.subjectId !== external.identity.subjectId ||
     !hasPermission(external.permissions, "members:manage", external.permissionMode) ||
     EXTERNAL_FIRST_USE_MEMBER_PERMISSIONS.some(
-      (permission) => !hasPermission(external.permissions, permission, external.permissionMode),
+      (required) => !hasPermission(external.permissions, required, external.permissionMode),
     )
   )
     return false;
@@ -923,7 +930,9 @@ async function provisionExternalMemberOnFirstUse(
   if (
     !workspace ||
     workspace.kind !== "shared" ||
-    workspace.accountId !== external.identity.accountId
+    workspace.accountId !== external.identity.accountId ||
+    // SDK per-user workspaces stay single-user: the SDK adds their owner.
+    workspace.externalSource?.startsWith(USER_ISOLATION_WORKSPACE_SOURCE_PREFIX)
   )
     return false;
   try {
@@ -936,6 +945,7 @@ async function provisionExternalMemberOnFirstUse(
       },
       {
         subjectId: external.identity.subjectId,
+        identity: { source: external.identity.source, externalId: external.identity.externalId },
         permissions: EXTERNAL_FIRST_USE_MEMBER_PERMISSIONS,
       },
     );
@@ -1004,7 +1014,7 @@ async function accessGrantAuthorization(
       !grant &&
       !personal &&
       options.firstUseMembership === true &&
-      (await provisionExternalMemberOnFirstUse(deps, context, external, workspaceId))
+      (await provisionExternalMemberOnFirstUse(deps, context, external, workspaceId, permission))
     ) {
       grant = await membershipGrant();
     }

@@ -265,7 +265,7 @@ test("settings reads deny foreign workspaces, foreign sources, absent sources an
   expect(forged.status).toBe(422);
 });
 
-test("existing document-reader access is preserved, membership reductions deny reads, removal re-admits on first use", async () => {
+test("existing document-reader access is preserved, but membership reductions and removal deny reads", async () => {
   const f = await fixture();
   expect(await f.actor.getAgentLearningSettings(f.workspaceId, "workspace")).toMatchObject({
     version: 0,
@@ -281,10 +281,9 @@ test("existing document-reader access is preserved, membership reductions deny r
     status: 403,
   });
   await f.service.removeWorkspaceMember(f.workspaceId, f.identity.subjectId);
-  // No tombstone: the host owns its users, so the next request re-creates the
-  // membership with the default conversation permissions.
-  expect(await f.actor.getAgentLearningSettings(f.workspaceId, "workspace")).toMatchObject({
-    version: 0,
+  // An SDK per-user workspace never admits anyone on first use, so removal sticks.
+  await expect(f.actor.getAgentLearningSettings(f.workspaceId, "workspace")).rejects.toMatchObject({
+    status: 403,
   });
 });
 

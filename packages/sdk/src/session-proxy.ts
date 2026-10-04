@@ -363,6 +363,18 @@ export function createSessionProxyHandler(
       }
       const source = resolved.source ?? defaultSource;
       let workspaceId: string;
+      // A tenant/workspaceId key that resolves to nothing must never fall
+      // through to the per-user workspace: that is a host auth bug, not a choice.
+      if (
+        ("workspaceId" in resolved && !resolved.workspaceId && !resolved.tenant) ||
+        ("tenant" in resolved && !resolved.tenant && !resolved.workspaceId) ||
+        resolved.workspaceId === "" ||
+        resolved.tenant === ""
+      ) {
+        throw new TypeError(
+          "resolve returned an empty tenant or workspaceId. Return a non-empty id, or omit the key for one workspace per user.",
+        );
+      }
       if (chats === "isolated") {
         if (resolved.workspaceId || !isFacade(target) || !target.workspaceIdFor) {
           throw new TypeError(
@@ -377,7 +389,12 @@ export function createSessionProxyHandler(
         workspaceId = resolved.workspaceId;
       } else if (resolved.tenant && isFacade(target)) {
         workspaceId = await target.workspaceId({ tenant: resolved.tenant });
-      } else if (!resolved.tenant && isFacade(target) && target.workspaceIdFor) {
+      } else if (
+        !("tenant" in resolved) &&
+        !("workspaceId" in resolved) &&
+        isFacade(target) &&
+        target.workspaceIdFor
+      ) {
         // A user alone: their own workspace, keyed by the identity source.
         workspaceId = await target.workspaceIdFor(
           { user: resolved.user, source },

@@ -43,12 +43,13 @@ export type OpenGeniOptions = {
   /** Display name for a tenant workspace created on first use. Defaults to the tenant id. */
   workspaceName?: ((tenant: string) => string) | undefined;
   /**
-   * Legacy `chats: "isolated"` with a tenant only: permissions for the member
-   * the SDK adds explicitly. Every other path relies on Opengeni, which adds a
-   * user on their first request with workspace read, session
-   * create/read/control (including sending messages), file upload/read, and
-   * per-session MCP attachment; no admin permissions. Never updates an
-   * existing membership: use `client.updateExternalWorkspaceMember` for that.
+   * Per-user workspaces only (`{ user }` alone, or `chats: "isolated"`):
+   * permissions for the one owner the SDK adds explicitly. Tenant workspaces
+   * rely on Opengeni, which adds a user on their first request. Both default
+   * to workspace read, session create/read/control (including sending
+   * messages), file upload/read, and per-session MCP attachment; no admin
+   * permissions. Never updates an existing membership: use
+   * `client.updateExternalWorkspaceMember` for that.
    */
   memberPermissions?: WorkspaceIdResolverOptions["memberPermissions"];
 };
@@ -60,7 +61,7 @@ export type OpenGeniOptions = {
 export type ChatTarget =
   | { tenant: string; workspaceId?: undefined }
   | { workspaceId: string; tenant?: undefined }
-  | { tenant?: undefined; workspaceId?: undefined };
+  | { user: string; tenant?: undefined; workspaceId?: undefined };
 
 /**
  * A workspace in your own ids, for `og.workspaceId(...)`: `{ tenant }` (one

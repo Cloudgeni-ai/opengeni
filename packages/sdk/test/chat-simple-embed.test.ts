@@ -113,7 +113,7 @@ describe("simple embed path", () => {
     expect(api.ensures()).toHaveLength(0);
   });
 
-  test("workspaceId translates tenant, user and explicit ids without member provisioning", async () => {
+  test("workspaceId translates tenant, user and explicit ids; only per-user workspaces add their owner", async () => {
     const api = fakeApi();
     const og = new OpenGeni({ apiKey: "og_test", baseUrl: API, fetch: api.fetch });
     const tenant = await og.workspaceId({ tenant: "acme" });
@@ -129,28 +129,40 @@ describe("simple embed path", () => {
     expect(await og.workspaceId({ tenant: "acme", user: "alice" })).toBe(tenant);
     // A per-user workspace never aliases a tenant called like the user.
     expect(await og.workspaceId({ tenant: "alice" })).not.toBe(alice);
-    expect(api.memberCalls()).toHaveLength(0);
+    // Tenant workspaces rely on first-use membership; a per-user workspace is
+    // single-user, so the SDK adds exactly its owner (the API never auto-admits there).
+    expect(api.memberCalls().map((request) => [request.path, request.body.identity])).toEqual([
+      [`/v1/workspaces/${alice}/external-members`, { source: "app", externalId: "alice" }],
+      [`/v1/workspaces/${bob}/external-members`, { source: "app", externalId: "bob" }],
+    ]);
     await expect(og.workspaceId({})).rejects.toThrow("tenant, user, or workspaceId");
+    // A tenant/workspaceId key without a value never falls back to the user's workspace.
+    await expect(og.workspaceId({ tenant: undefined, user: "alice" })).rejects.toThrow("undefined");
+    await expect(og.workspaceId({ tenant: "", user: "alice" })).rejects.toThrow("non-empty");
+    await expect(og.workspaceId({ workspaceId: "", user: "alice" })).rejects.toThrow("non-empty");
   });
 
   test.each([
-    ["{ user, tenant }", { tenant: "acme" }],
-    ["{ user }", {}],
-    ["{ user, workspaceId }", { workspaceId: OWN_WORKSPACE_ID }],
-  ] as const)("chat() with %s acts as the user in the mapped workspace", async (_label, target) => {
-    const api = fakeApi();
-    const og = new OpenGeni({ apiKey: "og_test", baseUrl: API, fetch: api.fetch });
-    const expected = await og.workspaceId({ ...target, user: "alice" });
-    const chat = await og.chat({ ...target, user: "alice", conversation: "c1" });
-    expect(chat.workspaceId).toBe(expected);
-    const lookup = api.requests.find((request) => /\/sessions\/[^/]+$/.test(request.path))!;
-    expect(lookup.path.startsWith(`/v1/workspaces/${expected}/sessions/`)).toBe(true);
-    expect(actorOf(lookup)).toEqual({
-      mode: "external",
-      identity: { externalId: "alice", source: "app" },
-    });
-    expect(api.memberCalls()).toHaveLength(0);
-  });
+    ["{ user, tenant }", { tenant: "acme" }, 0],
+    ["{ user }", {}, 1],
+    ["{ user, workspaceId }", { workspaceId: OWN_WORKSPACE_ID }, 0],
+  ] as const)(
+    "chat() with %s acts as the user in the mapped workspace",
+    async (_label, target, owners) => {
+      const api = fakeApi();
+      const og = new OpenGeni({ apiKey: "og_test", baseUrl: API, fetch: api.fetch });
+      const expected = await og.workspaceId({ ...target, user: "alice" });
+      const chat = await og.chat({ ...target, user: "alice", conversation: "c1" });
+      expect(chat.workspaceId).toBe(expected);
+      const lookup = api.requests.find((request) => /\/sessions\/[^/]+$/.test(request.path))!;
+      expect(lookup.path.startsWith(`/v1/workspaces/${expected}/sessions/`)).toBe(true);
+      expect(actorOf(lookup)).toEqual({
+        mode: "external",
+        identity: { externalId: "alice", source: "app" },
+      });
+      expect(api.memberCalls()).toHaveLength(owners);
+    },
+  );
 
   test("the proxy's client config names the resolved workspace for a baseUrl-only browser", async () => {
     const api = fakeApi();
@@ -167,16 +179,19 @@ describe("simple embed path", () => {
   test("chat() without tenant, workspaceId or user is refused", async () => {
     const api = fakeApi();
     const og = new OpenGeni({ apiKey: "og_test", baseUrl: API, fetch: api.fetch });
-    await expect(og.chat({ conversation: "c1" })).rejects.toThrow("tenant, user, or workspaceId");
+    // The type requires user, tenant or workspaceId; check the runtime guard too.
+    await expect(og.chat({ conversation: "c1" } as never)).rejects.toThrow(
+      "tenant, user, or workspaceId",
+    );
   });
 
   test.each([
-    ["{ user, tenant }", { tenant: "acme" }],
-    ["{ user }", {}],
-    ["{ user, workspaceId }", { workspaceId: OWN_WORKSPACE_ID }],
+    ["{ user, tenant }", { tenant: "acme" }, 0],
+    ["{ user }", {}, 1],
+    ["{ user, workspaceId }", { workspaceId: OWN_WORKSPACE_ID }, 0],
   ] as const)(
     "the session proxy resolves %s to the same workspace as og.workspaceId",
-    async (_label, target) => {
+    async (_label, target, owners) => {
       const api = fakeApi();
       const og = new OpenGeni({ apiKey: "og_test", baseUrl: API, fetch: api.fetch });
       const handler = createSessionProxyHandler(og, {
@@ -201,7 +216,26 @@ describe("simple embed path", () => {
         mode: "external",
         identity: { externalId: "alice", source: "app" },
       });
-      expect(api.memberCalls()).toHaveLength(0);
+      expect(api.memberCalls()).toHaveLength(owners);
     },
   );
+
+  test.each([
+    ["undefined tenant", { tenant: undefined }],
+    ["undefined workspaceId", { workspaceId: undefined }],
+    ["empty tenant", { tenant: "" }],
+    ["empty workspaceId", { workspaceId: "" }],
+  ] as const)("the session proxy refuses a resolve with an %s", async (_label, target) => {
+    const api = fakeApi();
+    const og = new OpenGeni({ apiKey: "og_test", baseUrl: API, fetch: api.fetch });
+    const handler = createSessionProxyHandler(og, {
+      resolve: () => ({ ...target, user: "alice" }) as never,
+    });
+    const outcome = await handler(
+      new Request("https://product.test/api/opengeni/v1/config/client"),
+    ).catch((error: unknown) => error);
+    if (outcome instanceof Response) expect(outcome.status).toBeGreaterThanOrEqual(500);
+    else expect(String(outcome)).toContain("empty tenant or workspaceId");
+    expect(api.ensures()).toHaveLength(0);
+  });
 });

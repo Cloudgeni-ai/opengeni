@@ -92,7 +92,11 @@ re-check) creates a missing shared-workspace row with the conversation defaults
 through `ensureExternalWorkspaceMemberOnFirstUse` in
 `packages/db/src/external-membership-operations.ts`: same fence and live key
 authority (`members:manage` or legacy `workspace:admin`, every default
-permission, workspace in scope), plain external mode only, existing rows untouched. External lifecycle administration
+permission, workspace in scope), the keyed-grant prepare/record functions
+(identity re-validated active under the fence, Personal workspaces refused,
+receipt plus key-attributed lifecycle event), insert-on-conflict-do-nothing,
+plain external mode only, never for `opengeni-sdk:user-isolation:*`
+workspaces or a requested permission outside the defaults. External lifecycle administration
 reuses native settlement commands; core private/Personal admission uses a
 dedicated verified-owning-user proof. Explicit linked-native admission uses the
 separate link proof; no external request is stamped as a managed-cookie login.

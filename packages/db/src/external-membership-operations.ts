@@ -18,7 +18,11 @@ import {
   setSubjectRlsContext,
   type Database,
 } from "./database";
-import { grantWorkspaceAccess, listWorkspaceMembers } from "./workspace-membership-access";
+import {
+  grantWorkspaceAccess,
+  insertWorkspaceMembershipIfAbsent,
+  listWorkspaceMembers,
+} from "./workspace-membership-access";
 import { removeWorkspaceMember } from "./organization-membership-lifecycle";
 import {
   lockActiveExternalOrganizationKeyAuthority,
@@ -157,47 +161,81 @@ export async function addExternalWorkspaceMemberOperation(
   });
 }
 
+/** SDK-provisioned per-user workspaces stay single-user: never auto-admitted. */
+export const USER_ISOLATION_WORKSPACE_SOURCE_PREFIX = "opengeni-sdk:user-isolation:";
+
 /**
  * First-use membership for an organization key acting as an external user
- * (`asUser`). This is the explicit onboarding effect, not new authority: the
- * same organization lifecycle fence, the same live key check (`members:manage`,
- * or a legacy `workspace:admin` key, holding every requested permission, with
- * the workspace in the key's scope), and the same membership write. It only
- * creates a missing row: an existing membership is returned unchanged, even
- * with reduced permissions. There is no tombstone: a member removed from the
- * workspace is created again on their next authenticated request, because the
- * host owns its users. A suspended or removed organization identity never
- * reaches this function. Concurrent first requests serialize on the
- * organization fence, so exactly one row is written.
+ * (`asUser`). This is the explicit keyed onboarding effect, not new authority:
+ * the same organization lifecycle fence, the same live key check
+ * (`members:manage`, or a legacy `workspace:admin` key, holding every requested
+ * permission, with the workspace in the key's scope), the same in-database
+ * identity re-check (`ensure_external_identity` locks the identity and its
+ * organization membership and requires both active), and the same receipt and
+ * lifecycle event attributed to the key. It only inserts a missing row (insert
+ * ... on conflict do nothing): an existing membership is returned unchanged.
+ * There is no tombstone: a member removed from a shared workspace is created
+ * again on their next request, because the host owns its users. Personal and
+ * SDK per-user (`opengeni-sdk:user-isolation:*`) workspaces are refused.
+ * Concurrent first requests serialize on the organization fence.
  */
 export async function ensureExternalWorkspaceMemberOnFirstUse(
   db: Database,
   scope: ServiceScope & { workspaceId: string },
-  input: { subjectId: string; permissions: readonly Permission[] },
+  input: {
+    subjectId: string;
+    identity: { source: string; externalId: string };
+    permissions: readonly Permission[];
+  },
 ): Promise<"created" | "existing"> {
   const permissions = [...new Set(input.permissions)].sort();
+  const refuse = (message: string): never => {
+    throw Object.assign(new Error(message), { code: "42501" });
+  };
   return withWorkspaceSubjectRls(db, scope.workspaceId, scope.actorSubjectId, async (tx) => {
     const authority = await requireLiveServiceKey(tx, scope, permissions);
     if (
       authority.permissionMode === "legacy" &&
       !authority.permissions.includes("workspace:admin") &&
       permissions.some((permission) => !authority.permissions.includes(permission))
-    ) {
-      throw Object.assign(new Error("External membership exceeds organization key authority"), {
-        code: "42501",
-      });
-    }
+    )
+      refuse("External membership exceeds organization key authority");
+    const [workspace] = await rawRows<{ account_id: string; external_source: string | null }>(
+      tx,
+      sql`select account_id, external_source from workspaces where id = ${scope.workspaceId}::uuid`,
+    );
+    if (
+      !workspace ||
+      workspace.account_id !== scope.organizationId ||
+      workspace.external_source?.startsWith(USER_ISOLATION_WORKSPACE_SOURCE_PREFIX)
+    )
+      refuse("Workspace does not admit members on first use");
     const existing = (await listWorkspaceMembers(tx, scope.workspaceId)).some(
       (member) => member.subjectId === input.subjectId,
     );
     if (existing) return "existing";
-    await grantWorkspaceAccess(tx, {
+    const command = {
+      ...scope,
+      action: "grant",
+      identity: input.identity,
+      permissions,
+      operationId: crypto.randomUUID(),
+    };
+    // Re-validates the identity and its organization membership under the
+    // fence (suspended/offboarded -> 42501) and refuses Personal workspaces.
+    const prepared = await prepare(tx, command);
+    const identity = ExternalIdentity.parse(prepared.identity);
+    if (identity.subjectId !== input.subjectId || identity.status !== "active")
+      refuse("External identity changed");
+    const inserted = await insertWorkspaceMembershipIfAbsent(tx, {
       accountId: scope.organizationId,
       workspaceId: scope.workspaceId,
       subjectId: input.subjectId,
       role: "member",
       permissions,
     });
+    if (!inserted) return "existing";
+    await record(tx, command, { workspaceId: scope.workspaceId, identity });
     return "created";
   });
 }

@@ -224,11 +224,9 @@ test("isolated users can create, read and send with a host per-session MCP serve
   await expect(
     og.client.asUser(f.owner.externalId, { source: f.source }).listApiKeys(workspaceId),
   ).rejects.toMatchObject({ status: 403 });
-  // Another product user of the same key is admitted to the workspace on
-  // first use, but the owner's private chat stays invisible to them.
   await expect(
     og.client.asUser(f.other.externalId, { source: f.source }).getSession(workspaceId, session.id),
-  ).rejects.toMatchObject({ status: 404 });
+  ).rejects.toMatchObject({ status: 403 });
 }, 60_000);
 
 test("custom isolated member permissions can deny MCP attachment without denying ordinary chat", async () => {
@@ -301,7 +299,7 @@ test.each([
     ["workspace:read", "sessions:create", "sessions:read", "sessions:control"],
   ],
 ] as const)(
-  "changed onboarding options preserve %s and a persisted reduction; withdrawal re-admits on first use",
+  "changed onboarding options preserve %s, including persisted reduction and withdrawal",
   async (_label, permissions) => {
     const f = await fixture(true);
     const target = { tenant: crypto.randomUUID(), user: f.owner.externalId };
@@ -337,20 +335,14 @@ test.each([
       "fc398712-b4db-5b0b-8842-57cb4f2a65f9",
     );
     await seedGrantCancellation(f, workspaceId, grantOperationId);
-    // The SDK's keyed onboarding replay never restores the withdrawn grant.
     expect(await resolveAgain()).toBe(workspaceId);
     expect(await members()).toEqual([]);
-    // No tombstone: the host owns its users, so the user's next request
-    // creates a fresh membership with the default conversation permissions.
-    expect(await actor.getWorkspace(workspaceId)).toMatchObject({ id: workspaceId });
-    expect((await members()).map((member) => member.permissions)).toEqual([
-      [...FIRST_USE_PERMISSIONS].sort(),
-    ]);
+    await expect(actor.getWorkspace(workspaceId)).rejects.toMatchObject({ status: 403 });
   },
   60_000,
 );
 
-test("a persisted cancellation before the first isolated grant fences the keyed grant; first use re-admits", async () => {
+test("a persisted cancellation before the first isolated grant remains fenced after permission changes", async () => {
   const f = await fixture(true);
   const target = { tenant: crypto.randomUUID(), user: f.owner.externalId };
   const namespace = "fc398712-b4db-5b0b-8842-57cb4f2a65f9";
@@ -369,13 +361,12 @@ test("a persisted cancellation before the first isolated grant fences the keyed 
   const og = new OpenGeni(f.facadeOptions);
   expect(await og.workspaceIdFor(target, { isolation: "user" })).toBe(workspace.id);
   expect(await f.service.listWorkspaceMembers(workspace.id)).toEqual([]);
-  await og.client.asUser(target.user, { source: f.source }).createSession(workspace.id, {
-    initialMessage: "The user's own request admits them with default permissions",
-    model: "scripted-model",
-  });
-  expect(
-    (await f.service.listWorkspaceMembers(workspace.id)).map((member) => member.permissions),
-  ).toEqual([[...FIRST_USE_PERMISSIONS].sort()]);
+  await expect(
+    og.client.asUser(target.user, { source: f.source }).createSession(workspace.id, {
+      initialMessage: "The cancelled user is still denied",
+      model: "scripted-model",
+    }),
+  ).rejects.toMatchObject({ status: 403 });
 }, 60_000);
 
 test("a key without members:manage never admits a user on first use", async () => {
@@ -395,6 +386,25 @@ test("a key without members:manage never admits a user on first use", async () =
   });
   const stranger = limited.asUser(crypto.randomUUID(), { source: f.source });
   await expect(stranger.getWorkspace(f.workspace.id)).rejects.toMatchObject({ status: 403 });
+}, 60_000);
+
+test("a per-user workspace stays single-user: another user gets 403, never a membership", async () => {
+  const f = await fixture(true);
+  const og = new OpenGeni(f.facadeOptions);
+  const workspaceId = await og.workspaceId({ user: f.owner.externalId });
+  expect(
+    (await f.service.listWorkspaceMembers(workspaceId)).map((member) => member.subjectId),
+  ).toEqual([f.owner.subjectId]);
+  const owner = og.client.asUser(f.owner.externalId, { source: f.source });
+  expect(await owner.getWorkspace(workspaceId)).toMatchObject({ id: workspaceId });
+  const intruder = og.client.asUser(f.other.externalId, { source: f.source });
+  await expect(intruder.getWorkspace(workspaceId)).rejects.toMatchObject({ status: 403 });
+  await expect(
+    intruder.createSession(workspaceId, { initialMessage: "let me in", model: "scripted-model" }),
+  ).rejects.toMatchObject({ status: 403 });
+  expect(
+    (await f.service.listWorkspaceMembers(workspaceId)).map((member) => member.subjectId),
+  ).toEqual([f.owner.subjectId]);
 }, 60_000);
 
 test("chats: private creates an external asUser-owned user_private session through the proxy", async () => {

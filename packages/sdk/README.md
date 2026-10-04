@@ -102,20 +102,22 @@ What `resolve` returns decides the workspace:
 
 - `{ user, tenant }`: one workspace per tenant; chats are private per user by
   default.
-- `{ user }`: one workspace per user.
+- `{ user }`: one workspace per user. It stays single-user: the SDK adds its
+  owner once, and Opengeni never admits anyone else to it.
 - `{ user, workspaceId }`: bring your own workspace id.
 
 Workspaces are created on first use and cached per `OpenGeni` instance.
 `og.workspaceId({ tenant })` and `og.workspaceId({ user })` return the same ids
 the proxy uses. There is no onboarding step: the first request a user makes
-adds them to the workspace with conversation permissions (workspace read,
-session create/read/control, file upload/read, and attaching your per-session
-MCP servers; no admin). That needs an organization API key with
-`members:manage` (full access includes it) plus those permissions. Opengeni
-never changes an existing membership, so narrowing or widening one with
-`updateExternalWorkspaceMember` sticks. A user you remove from a workspace is
-added again on their next request, because your product decides who its users
-are; stop resolving a user you no longer admit. `organizationId` is optional:
+adds them to a tenant (or your own) workspace with conversation permissions
+(workspace read, session create/read/control, file upload/read, and attaching
+your per-session MCP servers; no admin). That needs an organization API key
+with `members:manage` (full access includes it) plus those permissions.
+Opengeni never changes an existing membership, so narrowing or widening one
+with `updateExternalWorkspaceMember` sticks. A user you remove from a tenant
+workspace is added again on their next request, because your product decides
+who its users are; stop resolving a user you no longer admit. A removal from a
+per-user workspace sticks. `organizationId` is optional:
 the facade reads it once from the key. Keep `user` and `tenant`
 host-authenticated, never from the request body or path.
 
@@ -135,9 +137,10 @@ membership APIs (`ensureWorkspace`, `addExternalWorkspaceMember`,
 `updateExternalWorkspaceMember`, `cancelExternalWorkspaceMemberGrant`) keep
 working for products that manage access themselves. Legacy
 `chats: "isolated"` with `{ tenant, user }` still provisions a separate
-workspace per user and tenant with an explicitly added member
-(`memberPermissions` replaces that member's permissions on first onboarding
-only); the standalone resolver is on the server-only
+workspace per user and tenant. Per-user workspaces add their owner with a
+stable onboarding key, so a retry never restores a revoked grant;
+`memberPermissions` replaces that owner's permissions on first onboarding
+only. The standalone resolver is on the server-only
 `@opengeni/sdk/tenant-workspaces` subpath.
 
 The facade also accepts `agent` (identity, capabilities, instructions, renderer)
@@ -425,10 +428,14 @@ file upload/read, `mcp_servers:attach`) and continues the request. This needs
 the same authority as explicit onboarding: the key holds `members:manage` (or a
 legacy `workspace:admin`) and every one of those permissions, with the
 workspace in its scope; otherwise the request is a `403` as before. It never
-applies to linked native identities, Personal workspaces, other organizations,
-or any non-key caller, and it never changes an existing membership. A user
-removed from a workspace is added again on their next request; a suspended or
-offboarded identity stays refused.
+applies to linked native identities, Personal workspaces, SDK per-user
+workspaces (`opengeni-sdk:user-isolation:*` external source), other
+organizations, requests that need a permission outside those defaults, or any
+non-key caller, and it never changes an existing membership. The identity is
+re-checked as active under the same lock, and the grant writes the same
+receipt and lifecycle event as explicit onboarding, attributed to the key. A
+user removed from a shared workspace is added again on their next request; a
+suspended or offboarded identity stays refused.
 
 Use the service client—not an `asUser` client—to call
 `addExternalWorkspaceMember(workspaceId, { identity: { externalId, source? }, permissions })`

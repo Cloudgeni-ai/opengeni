@@ -11,7 +11,8 @@ followed by `getAccessContext()` may provision the identity anchor, but never gr
 shared-workspace membership. An `asUser` request to a shared workspace does: when
 the key holds `members:manage` plus the default conversation permissions, a
 missing membership is created once with those defaults (never changing an
-existing one, and re-created after a workspace removal; see
+existing one, re-checking the identity as active under the same lock, and
+re-created after a workspace removal; never for SDK per-user workspaces; see
 [product integration](product-integration.md)). Use explicit onboarding to choose
 permissions before that first request. Retain its subject before starting onboarding.
 

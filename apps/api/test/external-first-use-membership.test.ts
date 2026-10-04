@@ -6,7 +6,7 @@ import { createHash } from "node:crypto";
 import { Hono } from "hono";
 import { HTTPException } from "hono/http-exception";
 import { OpenGeniApiError, OpenGeniClient } from "@opengeni/sdk";
-import { type ApiRouteDeps } from "@opengeni/core";
+import { requireFreshAccessGrant, type ApiRouteDeps } from "@opengeni/core";
 import {
   acquireOwnerMigratedTestDatabase,
   testSettings,
@@ -18,11 +18,17 @@ import {
   createWorkspace,
   createOrganizationApiKey,
   ensureExternalIdentity,
+  ensureExternalWorkspaceMemberOnFirstUse,
   migrate,
+  nestedPostgresSqlState,
   provisionRoles,
   type DbClient,
 } from "@opengeni/db";
-import type { Permission } from "@opengeni/contracts";
+import {
+  normalizeOrganizationAccessPolicy,
+  signDelegatedAccessToken,
+  type Permission,
+} from "@opengeni/contracts";
 import { registerWorkspaceRoutes } from "../src/routes/workspaces";
 import { registerOrganizationMembershipRoutes } from "../src/routes/organization-memberships";
 
@@ -85,29 +91,54 @@ app.onError((error, c) => {
   throw error;
 });
 let routesRegistered = false;
+const delegationSecret = "first-use-membership-test-secret-at-least-32-bytes";
 
-async function organization(permissions: Permission[] = CAPABLE) {
+async function organization(
+  permissions: Permission[] = CAPABLE,
+  options: { scopeTo?: "self" | "other" } = {},
+) {
   if (!routesRegistered) {
     const deps = {
       db: db.db,
-      settings: testSettings({ productAccessMode: "configured", sandboxBackend: "none" }),
+      settings: testSettings({
+        productAccessMode: "configured",
+        sandboxBackend: "none",
+        delegationSecret,
+      }),
       bus: new MemoryEventBus(),
     } as unknown as ApiRouteDeps;
     registerWorkspaceRoutes(app, deps);
     registerOrganizationMembershipRoutes(app, deps);
+    // A long-lived connection's re-check (e.g. an open SSE stream).
+    app.get("/test/fresh/:workspaceId", async (c) =>
+      c.json(await requireFreshAccessGrant(c, deps, c.req.param("workspaceId"), "workspace:read")),
+    );
     routesRegistered = true;
   }
   const [account] =
     await shared.admin`insert into managed_accounts (name) values ('First-use fixture') returning id`;
   const accountId = String(account!.id);
   const workspace = await createWorkspace(db.db, { accountId, name: "Tenant workspace" });
+  const other = await createWorkspace(db.db, { accountId, name: "Other workspace" });
   const token = crypto.randomUUID();
-  await createOrganizationApiKey(db.db, {
+  const key = await createOrganizationApiKey(db.db, {
     accountId,
     name: "Embedding key",
     prefix: "test",
     keyHash: createHash("sha256").update(token).digest("hex"),
     permissions,
+    ...(options.scopeTo
+      ? {
+          policy: normalizeOrganizationAccessPolicy({
+            preset: "custom",
+            permissions,
+            workspaceScope: {
+              kind: "selected",
+              workspaceIds: [options.scopeTo === "self" ? workspace.id : other.id],
+            },
+          }),
+        }
+      : {}),
   });
   const service = new OpenGeniClient({
     baseUrl: "http://fixture",
@@ -118,7 +149,16 @@ async function organization(permissions: Permission[] = CAPABLE) {
     externalId,
     client: service.asUser(externalId, { source: "product" }),
   });
-  return { accountId, workspace, service, user };
+  const actorHeader = (selection: unknown) => encodeURIComponent(JSON.stringify(selection));
+  const raw = (path: string, headers: Record<string, string>) =>
+    app.request(path, { headers: { authorization: `Bearer ${token}`, ...headers } });
+  return { accountId, workspace, other, service, user, key, token, actorHeader, raw };
+}
+
+async function lifecycleEvents(workspaceId: string) {
+  return await shared.admin<{ actor_service_subject: string | null; kind: string }[]>`
+    select actor_service_subject, kind from organization_workspace_lifecycle_events
+    where workspace_id = ${workspaceId}::uuid`;
 }
 
 async function memberships(workspaceId: string, subjectId: string) {
@@ -153,6 +193,10 @@ test("a capable key creates the missing membership once and the request succeeds
   // A second request reuses it.
   expect((await client.getWorkspace(org.workspace.id)).id).toBe(org.workspace.id);
   expect(await memberships(org.workspace.id, subjectId)).toHaveLength(1);
+  // The same lifecycle event explicit onboarding writes, attributed to the key.
+  expect(await lifecycleEvents(org.workspace.id)).toEqual([
+    { actor_service_subject: `api_key:${org.key.id}`, kind: "grant" },
+  ]);
 }, 60_000);
 
 test("a key without the onboarding authority keeps the 403", async () => {
@@ -244,4 +288,164 @@ test("the organization key's own service requests never create memberships", asy
   const after = await shared.admin<{ n: number }[]>`
     select count(*)::int as n from workspace_memberships where workspace_id = ${org.workspace.id}::uuid`;
   expect(after).toEqual(before);
+}, 60_000);
+
+test("an identity suspended while its first request is in flight never gets a membership", async () => {
+  const org = await organization([...CAPABLE, "account:admin"]);
+  const { externalId, client } = org.user();
+  // The request resolved this identity as active before it was suspended.
+  await client.getAccessContext();
+  const identity = await ensureExternalIdentity(db.db, {
+    accountId: org.accountId,
+    source: "product",
+    externalId,
+  });
+  await org.service.updateExternalIdentityMembership(
+    org.accountId,
+    identity.organizationMembershipId,
+    {
+      kind: "suspend",
+      expectedAuthorizationRevision: identity.authorizationRevision,
+      operationId: crypto.randomUUID(),
+    },
+  );
+  // The provisioning step re-checks the identity under the organization fence.
+  const refused = await ensureExternalWorkspaceMemberOnFirstUse(
+    db.db,
+    {
+      organizationId: org.accountId,
+      workspaceId: org.workspace.id,
+      actorSubjectId: `api_key:${org.key.id}`,
+    },
+    {
+      subjectId: identity.subjectId,
+      identity: { source: "product", externalId },
+      permissions: [...CONVERSATION_PERMISSIONS],
+    },
+  ).then(
+    () => null,
+    (error: unknown) => (error as { code?: string }).code ?? nestedPostgresSqlState(error),
+  );
+  expect(refused).toBe("42501");
+  expect(await memberships(org.workspace.id, identity.subjectId)).toHaveLength(0);
+  expect(await status(client.getWorkspace(org.workspace.id))).toBe(403);
+  expect(await memberships(org.workspace.id, identity.subjectId)).toHaveLength(0);
+}, 60_000);
+
+test("a request needing a permission outside the defaults creates nothing", async () => {
+  const org = await organization();
+  const { externalId, client } = org.user();
+  // PATCH /v1/workspaces/:id requires workspace:admin.
+  expect(await status(client.updateWorkspace(org.workspace.id, { name: "Renamed" }))).toBe(403);
+  expect(
+    await memberships(org.workspace.id, await subjectOf(org.accountId, externalId)),
+  ).toHaveLength(0);
+}, 60_000);
+
+test("a selected-scope key admits only inside its scope", async () => {
+  const outside = await organization(CAPABLE, { scopeTo: "other" });
+  const a = outside.user();
+  expect(await status(a.client.getWorkspace(outside.workspace.id))).toBe(403);
+  expect(
+    await memberships(outside.workspace.id, await subjectOf(outside.accountId, a.externalId)),
+  ).toHaveLength(0);
+  expect((await a.client.getWorkspace(outside.other.id)).id).toBe(outside.other.id);
+  expect(
+    await memberships(outside.other.id, await subjectOf(outside.accountId, a.externalId)),
+  ).toHaveLength(1);
+}, 60_000);
+
+test("a legacy workspace:admin-only key admits with the defaults", async () => {
+  const org = await organization(["workspace:admin"]);
+  const { externalId, client } = org.user();
+  expect((await client.getWorkspace(org.workspace.id)).id).toBe(org.workspace.id);
+  const rows = await memberships(org.workspace.id, await subjectOf(org.accountId, externalId));
+  expect(rows.map((row) => [...row.permissions].sort())).toEqual([
+    [...CONVERSATION_PERMISSIONS].sort(),
+  ]);
+}, 60_000);
+
+test("linked-native, service-initiator, delegated and agent principals never auto-admit", async () => {
+  const org = await organization();
+  const externalId = crypto.randomUUID();
+  const identity = await ensureExternalIdentity(db.db, {
+    accountId: org.accountId,
+    source: "product",
+    externalId,
+  });
+  const workspacePath = `/v1/workspaces/${org.workspace.id}`;
+  const linked = await org.raw(workspacePath, {
+    "x-opengeni-external-actor": org.actorHeader({
+      mode: "linked_native",
+      identity: { source: "product", externalId },
+      linkId: crypto.randomUUID(),
+      expectedLinkRevision: 1,
+    }),
+  });
+  expect(linked.status).toBe(403);
+  const service = await org.raw(workspacePath, {
+    "x-opengeni-external-actor": org.actorHeader({
+      mode: "external",
+      identity: { source: "product", externalId },
+    }),
+    "x-opengeni-service-initiator": "embedding-job",
+  });
+  expect(service.status).toBe(422);
+  for (const claims of [
+    { principalKind: "human_session" as const },
+    { principalKind: "service" as const },
+    {
+      principalKind: "agent_attempt" as const,
+      sessionId: crypto.randomUUID(),
+      turnId: crypto.randomUUID(),
+      attemptId: crypto.randomUUID(),
+      executionGeneration: 1,
+    },
+  ]) {
+    const token = await signDelegatedAccessToken(delegationSecret, {
+      accountId: org.accountId,
+      workspaceId: org.workspace.id,
+      subjectId: identity.subjectId,
+      permissions: ["workspace:read"],
+      exp: Math.floor(Date.now() / 1000) + 60,
+      ...claims,
+    });
+    // Whatever the delegated lane answers, it never writes a membership.
+    await app.request(workspacePath, { headers: { authorization: `Bearer ${token}` } });
+    expect(await memberships(org.workspace.id, identity.subjectId)).toHaveLength(0);
+  }
+  expect(await memberships(org.workspace.id, identity.subjectId)).toHaveLength(0);
+}, 60_000);
+
+test("a fresh re-check of an open connection never re-creates a removed membership", async () => {
+  const org = await organization();
+  const { externalId } = org.user();
+  const subjectId = await subjectOf(org.accountId, externalId);
+  const external = {
+    "x-opengeni-external-actor": org.actorHeader({
+      mode: "external",
+      identity: { source: "product", externalId },
+    }),
+  };
+  const fresh = `/test/fresh/${org.workspace.id}`;
+  // A fresh re-check alone never admits.
+  expect((await org.raw(fresh, external)).status).toBe(403);
+  expect(await memberships(org.workspace.id, subjectId)).toHaveLength(0);
+  // Request entry admits; the open connection's re-check then succeeds.
+  expect((await org.raw(`/v1/workspaces/${org.workspace.id}`, external)).status).toBe(200);
+  expect((await org.raw(fresh, external)).status).toBe(200);
+  // Removed while the connection is open: the re-check denies and re-creates nothing.
+  const identity = await ensureExternalIdentity(db.db, {
+    accountId: org.accountId,
+    source: "product",
+    externalId,
+  });
+  await org.service.cancelExternalWorkspaceMemberGrant(
+    org.accountId,
+    org.workspace.id,
+    identity.organizationMembershipId,
+    { operationId: crypto.randomUUID(), cancelGrantOperationId: crypto.randomUUID() },
+  );
+  expect((await org.raw(fresh, external)).status).toBe(403);
+  expect(await memberships(org.workspace.id, subjectId)).toHaveLength(0);
 }, 60_000);

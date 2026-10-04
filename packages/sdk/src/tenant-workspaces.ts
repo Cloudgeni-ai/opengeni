@@ -45,13 +45,13 @@ export type WorkspaceIdResolverOptions = {
   /** Workspace display name; receives the tenant id, or the user id for a per-user workspace. */
   workspaceName?: ((tenant: string) => string) | undefined;
   /**
-   * Legacy `chats: "isolated"` with a tenant only: permissions for the member
-   * this resolver adds explicitly. Replaces the defaults: workspace read,
-   * session create/read/control (including sending messages), file
+   * Per-user workspaces only (user isolation): permissions for the one member
+   * this resolver adds explicitly, its owner. Replaces the defaults: workspace
+   * read, session create/read/control (including sending messages), file
    * upload/read, and attaching the host's per-session MCP servers. No admin
-   * permissions are granted by default. Every other path relies on the API,
-   * which creates a missing membership with those defaults on the user's first
-   * request. Existing grants are never changed here; change them with
+   * permissions are granted by default. Tenant workspaces rely on the API,
+   * which adds a missing member with those defaults on their first request.
+   * Existing grants are never changed here; change them with
    * `updateExternalWorkspaceMember`. The organization API key must also allow
    * the selected permissions.
    */
@@ -60,10 +60,11 @@ export type WorkspaceIdResolverOptions = {
 
 /**
  * Server-only workspace resolution using external workspace provisioning.
- * Workspaces are created on first use and cached. The API creates a missing
- * membership on the user's first `asUser` request (the organization key needs
- * `members:manage`). Only legacy tenant-plus-user isolation still adds the
- * member explicitly; keyed retries never restore a revoked grant there.
+ * Workspaces are created on first use and cached. A tenant workspace's members
+ * are added by the API on their first `asUser` request (the organization key
+ * needs `members:manage`). A per-user workspace stays single-user: the API
+ * never auto-admits anyone there, and this resolver adds its owner with a
+ * stable onboarding key, so retries never restore a revoked grant.
  */
 export function createWorkspaceIdResolver(
   client: Pick<OpenGeniEmbeddingClient, "ensureWorkspace" | "addExternalWorkspaceMember">,
@@ -109,7 +110,7 @@ export function createWorkspaceIdResolver(
           externalId: isolated ? await uuidV5(key, ISOLATION_NAMESPACE) : target.tenant!,
           name: options.workspaceName?.(label) ?? label,
         });
-        if (isolated && target.tenant) {
+        if (isolated) {
           try {
             await client.addExternalWorkspaceMember(workspace.id, {
               identity: { source, externalId: target.user! },

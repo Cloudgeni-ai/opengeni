@@ -128,8 +128,9 @@ export class OpenGeni {
    * Translate your own ids to the Opengeni workspace id, creating the
    * workspace on first use (cached per instance):
    * `{ tenant }` is one workspace per tenant, `{ user }` (no tenant) is one
-   * workspace per user, and `{ workspaceId }` is returned as is. Membership
-   * is created by Opengeni on the user's first request.
+   * workspace per user, and `{ workspaceId }` is returned as is. Opengeni adds
+   * a tenant workspace's users on their first request; a per-user workspace
+   * gets its one owner from the SDK and admits nobody else.
    */
   async workspaceId(
     target:
@@ -137,9 +138,19 @@ export class OpenGeni {
       | { tenant?: string | undefined; workspaceId?: string | undefined }
       | WorkspaceTarget,
   ): Promise<string> {
+    if (target.workspaceId === "" || target.tenant === "") {
+      throw new TypeError("tenant and workspaceId must be non-empty ids.");
+    }
     if (target.workspaceId) return target.workspaceId;
     if (target.tenant) {
       return await this.workspaceIdFor({ tenant: target.tenant }, { isolation: "tenant" });
+    }
+    if ("tenant" in target || "workspaceId" in target) {
+      // A tenant/workspaceId key with no value is a host bug: never silently
+      // fall back to the user's own workspace.
+      throw new TypeError(
+        "tenant or workspaceId is undefined. Pass a non-empty id, or omit the key for one workspace per user.",
+      );
     }
     const user = "user" in target ? target.user : undefined;
     if (user) {
@@ -149,9 +160,9 @@ export class OpenGeni {
   }
 
   /**
-   * Resolve a tenant workspace or a user's own workspace. With a tenant and a
-   * user (`chats: "isolated"`), the user's separate tenant workspace and its
-   * explicit external member are provisioned (legacy).
+   * Resolve a tenant workspace or a user's own workspace (user isolation, per
+   * tenant when one is given). A user's own workspace is provisioned with that
+   * user as its only explicit member.
    */
   async workspaceIdFor(target: WorkspaceIdTarget, options: WorkspaceIdOptions): Promise<string> {
     return await this.resolveWorkspaceId(target, options);

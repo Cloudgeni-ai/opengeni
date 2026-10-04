@@ -159,11 +159,17 @@ is a `403` as before. It is serialized on the organization membership fence,
 so parallel first requests write one row. It never runs for agent attempts,
 delegated or bearer user tokens, browser sessions, service-initiator requests,
 linked native identities, Personal workspaces, or another organization, and it
-never changes an existing membership. A user removed from a workspace is added
-again on their next authenticated request (no tombstone: the product owns its
-users; stop resolving a user it no longer admits), while a suspended or
-offboarded identity stays refused. A fresh re-check of an open stream never
-re-adds a membership removed while it was open.
+never changes an existing membership. It also never runs for SDK per-user
+workspaces (external source `opengeni-sdk:user-isolation:*`): those stay
+single-user, and the SDK adds their owner explicitly with a stable onboarding
+key. It never runs when the request needs a permission outside the defaults.
+The identity is re-checked as active under the same lock, and the grant
+writes the same receipt and `organization_workspace_lifecycle_events` row as
+explicit onboarding, attributed to the key. A user removed from a shared
+workspace is added again on their next authenticated request (no tombstone: the
+product owns its users; stop resolving a user it no longer admits), while a
+suspended or offboarded identity stays refused. A fresh re-check of an open
+stream never re-adds a membership removed while it was open.
 
 Explicit membership still works for products that manage access themselves:
 `addExternalWorkspaceMember` with an `operationId` you store first (see
@@ -240,13 +246,16 @@ explicit values in the `createSession` hook still win, and the API authorizes
 each one. Private chats need the organization's private-session setting;
 without it the SDK throws `OpenGeniSetupError`, which names who can enable it
 (an organization owner or admin, in the API, SDK or web app). For one
-workspace per user, return `{ user }` from `resolve` instead of a tenant.
-Legacy `"isolated"` needs the `OpenGeni` facade as the proxy target; with
-`{ tenant, user }` it provisions a separate workspace per tenant user and adds
-the member explicitly through `og.workspaceIdFor({ tenant, user }, { isolation: "user" })`
-(standalone: `createWorkspaceIdResolver` from `@opengeni/sdk/tenant-workspaces`),
-where `memberPermissions` replaces that first grant's permissions; with only
-`{ user }` it is the same as the per-user default.
+workspace per user, return `{ user }` from `resolve` instead of a tenant: the
+SDK provisions the workspace and adds that user as its only member through
+`og.workspaceIdFor({ user }, { isolation: "user" })`, and the API never admits
+anyone else to it. Legacy `"isolated"` needs the `OpenGeni` facade as the proxy
+target; with `{ tenant, user }` it does the same per tenant user (standalone:
+`createWorkspaceIdResolver` from `@opengeni/sdk/tenant-workspaces`).
+`memberPermissions` replaces that first owner grant's permissions; a
+retry never restores a revoked owner grant. A `resolve` that returns a
+`tenant` or `workspaceId` key with an empty or undefined value is refused
+rather than falling back to the per-user workspace.
 
 Automatically added users receive workspace read, session create/read/control
 (including Send), file upload/read, and `mcp_servers:attach` for the host's
