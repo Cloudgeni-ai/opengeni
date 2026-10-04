@@ -2,7 +2,12 @@ import { AsyncLocalStorage } from "node:async_hooks";
 import { managedUserEmailAllowed } from "@opengeni/config";
 import type { Context } from "hono";
 import type { ManagedAuth } from "./managed-auth-type";
-import { DatabaseUnavailableError, isDatabaseConnectionLoss, type Database } from "@opengeni/db";
+import {
+  DatabaseUnavailableError,
+  isDatabaseConnectionLoss,
+  isRetryableDatabaseTransportFailure,
+  type Database,
+} from "@opengeni/db";
 import {
   acquireManagedAuthActorMutationLease,
   getManagedAuthAdoptedSessionSnapshot,
@@ -54,7 +59,14 @@ export async function withManagedAuthSessionLookup<T>(lookup: () => Promise<T>):
   try {
     return await managedAuthLookupFailures.run(store, lookup);
   } catch (error) {
-    if (isBetterAuthInternalServerError(error) && store.errors.some(isDatabaseConnectionLoss)) {
+    // Better Auth's session endpoint only reads its database adapter, so a
+    // socket failure it logged is that adapter's connection, not another service.
+    if (
+      isBetterAuthInternalServerError(error) &&
+      store.errors.some(
+        (logged) => isDatabaseConnectionLoss(logged) || isRetryableDatabaseTransportFailure(logged),
+      )
+    ) {
       throw new DatabaseUnavailableError("managed auth session store unavailable", {
         cause: error,
       });

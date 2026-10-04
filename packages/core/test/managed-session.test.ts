@@ -554,6 +554,16 @@ describe("managed auth session lookup failures", () => {
     expect((failure as Error).cause).toBe(generic);
   });
 
+  test("treats a socket failure Better Auth's adapter logged as database loss", async () => {
+    const failure = await withManagedAuthSessionLookup(async () => {
+      recordManagedAuthLoggedFailure([
+        Object.assign(new Error("read ECONNRESET"), { code: "ECONNRESET" }),
+      ]);
+      throw betterAuthInternalError();
+    }).catch((error: unknown) => error);
+    expect(failure).toBeInstanceOf(DatabaseUnavailableError);
+  });
+
   test("keeps any other Better Auth failure unchanged", async () => {
     const generic = betterAuthInternalError();
     const unrelated = await withManagedAuthSessionLookup(async () => {

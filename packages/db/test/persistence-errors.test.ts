@@ -320,8 +320,20 @@ describe("database connection loss", () => {
     for (const failure of [
       adminShutdown,
       wrapped,
-      Object.assign(new Error("write CONNECTION_CLOSED"), { code: "CONNECTION_CLOSED" }),
-      Object.assign(new Error("read ECONNRESET"), { code: "ECONNRESET" }),
+      // postgres.js connection error shape.
+      Object.assign(new Error("write CONNECTION_CLOSED 10.0.0.4:5432"), {
+        code: "CONNECTION_CLOSED",
+        errno: "CONNECTION_CLOSED",
+        address: ["10.0.0.4"],
+        port: [5432],
+      }),
+      // A socket failure postgres.js stamped with the failed query.
+      Object.assign(new Error("read ECONNRESET"), { code: "ECONNRESET", query: "select 1" }),
+      Object.assign(new Error("Failed query: select 1"), {
+        query: "select 1",
+        params: [],
+        cause: Object.assign(new Error("read ECONNRESET"), { code: "ECONNRESET" }),
+      }),
       Object.assign(new Error("the database system is starting up"), { code: "57P03" }),
       Object.assign(new Error("server closed the connection"), { code: "08006" }),
       new Error("Connection terminated unexpectedly"),
@@ -341,6 +353,15 @@ describe("database connection loss", () => {
       Object.assign(new Error("canceling statement due to statement timeout"), { code: "57014" }),
       Object.assign(new Error("deadlock detected"), { code: "40P01" }),
       new Error("Connection terminated unexpectedly while parsing"),
+      // The same transport codes from another service are not database loss.
+      Object.assign(new Error("read ECONNRESET"), { code: "ECONNRESET" }),
+      Object.assign(new Error("getaddrinfo ENOTFOUND api.example.com"), { code: "ENOTFOUND" }),
+      Object.assign(new Error("closed"), { name: "NatsError", code: "CONNECTION_CLOSED" }),
+      Object.assign(new Error("browser control failed"), {
+        cause: Object.assign(new TypeError("fetch failed"), {
+          cause: Object.assign(new Error("connect ECONNREFUSED"), { code: "ECONNREFUSED" }),
+        }),
+      }),
       new Error("Failed to get session"),
       null,
       "Connection terminated unexpectedly",

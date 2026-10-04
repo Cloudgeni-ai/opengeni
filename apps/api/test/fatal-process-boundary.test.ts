@@ -230,7 +230,11 @@ describe("API fatal process boundary", () => {
     runtime.emit("unhandledRejection", terminated);
     runtime.emit(
       "unhandledRejection",
-      Object.assign(new Error("closed"), { code: "CONNECTION_CLOSED" }),
+      Object.assign(new Error("write CONNECTION_CLOSED 10.0.0.4:5432"), {
+        code: "CONNECTION_CLOSED",
+        errno: "CONNECTION_CLOSED",
+        address: ["10.0.0.4"],
+      }),
     );
     await Bun.sleep(20);
 
@@ -272,5 +276,19 @@ describe("API fatal process boundary", () => {
     running.emit("uncaughtException", Object.assign(new Error("x"), { code: "57P01" }));
     expect(await running.exit).toBe(1);
     runningBoundary.dispose();
+
+    // The same transport code from another service (here NATS) is not survivable.
+    const nats = fakeProcess();
+    const natsBoundary = installApiFatalProcessBoundary({
+      process: nats.process,
+      fallbackLog: () => undefined,
+    });
+    natsBoundary.markRunning();
+    nats.emit(
+      "unhandledRejection",
+      Object.assign(new Error("closed"), { name: "NatsError", code: "CONNECTION_CLOSED" }),
+    );
+    expect(await nats.exit).toBe(1);
+    natsBoundary.dispose();
   });
 });

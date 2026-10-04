@@ -1144,8 +1144,9 @@ public telemetry boundary. Embedded API composition does not install process
 handlers because its host owns process lifecycle. One class is survivable once
 the API is serving: an unhandled rejection that only reports a lost database
 connection (`isDatabaseConnectionLoss` in `packages/db/src/persistence-errors.ts`:
-SQLSTATE 57P01-57P03/08xxx, postgres.js and socket transport codes, exact
-node-postgres socket-loss sentences) is logged as
+SQLSTATE 57P01-57P03/08xxx, exact node-postgres socket-loss sentences, and
+socket or postgres.js transport codes only when the failure carries database
+origin, so the same codes from NATS or a provider fetch never qualify) is logged as
 `api_unhandled_database_connection_loss` and the process keeps running, because
 the driver has already discarded that connection. Background claim loops still
 catch and log their own failures and retry on the next tick. On request paths

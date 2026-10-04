@@ -198,11 +198,18 @@ export class DatabaseUnavailableError extends Error {
  * rejected. Such a failure is transient: a fresh pooled connection succeeds once
  * the server accepts connections again. It says nothing about whether a write
  * in flight committed.
+ *
+ * Socket and postgres.js transport codes (`ECONNRESET`, `CONNECTION_CLOSED`,
+ * ...) count only when the same failure proves it came from the database: a
+ * query-bearing driver or ORM error, a PostgresError, or postgres.js's own
+ * connection error. The same codes from NATS, a provider fetch, or a browser
+ * transport are not database loss.
  */
 export function isDatabaseConnectionLoss(error: unknown): boolean {
-  if (isRetryableDatabaseTransportFailure(error)) return true;
   const queue: unknown[] = [error];
   const seen = new Set<unknown>();
+  let transportFailure = false;
+  let databaseOrigin = false;
   while (queue.length > 0 && seen.size < 64) {
     const current = queue.shift();
     if (!isRecord(current) || seen.has(current)) continue;
@@ -223,6 +230,9 @@ export function isDatabaseConnectionLoss(error: unknown): boolean {
     ) {
       return true;
     }
+    if (hasTransportCode(current)) transportFailure = true;
+    if (isDatabaseOrigin(current)) databaseOrigin = true;
+    if (transportFailure && databaseOrigin) return true;
     for (const key of NESTED_ERROR_KEYS) {
       const nested = current[key];
       if (Array.isArray(nested)) queue.push(...nested);
@@ -230,6 +240,28 @@ export function isDatabaseConnectionLoss(error: unknown): boolean {
     }
   }
   return false;
+}
+
+function hasTransportCode(current: Record<string, unknown>): boolean {
+  return (["code", "errno"] as const).some((key) => {
+    const value = current[key];
+    return typeof value === "string" && RETRYABLE_DATABASE_TRANSPORT_CODES.has(value.toUpperCase());
+  });
+}
+
+function isDatabaseOrigin(current: Record<string, unknown>): boolean {
+  if (typeof current.name === "string" && DATABASE_ERROR_NAMES.has(current.name)) return true;
+  // postgres.js stamps the failed query onto its error; Drizzle wraps it as
+  // DrizzleQueryError with `query` + `params`.
+  if (typeof current.query === "string") return true;
+  // postgres.js connection errors: `write <CODE> <host:port>` with errno === code.
+  return (
+    typeof current.code === "string" &&
+    current.errno === current.code &&
+    "address" in current &&
+    typeof current.message === "string" &&
+    current.message.startsWith(`write ${current.code} `)
+  );
 }
 
 /**
