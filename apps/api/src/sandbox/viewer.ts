@@ -911,7 +911,9 @@ export async function mintDesktopStream(
           workspaceId: active.workspaceId,
           ...(input.resourceSubjectId ? { resourceSubjectId: input.resourceSubjectId } : {}),
           port: DESKTOP_STREAM_PORT,
-          mode: settings.streamControlEnabled && canControl ? "control" : "view",
+          // This cell advertises the first-party frame-only, read-only viewer.
+          // Explicit relay controllers use mintSelfhostedStream and its gates.
+          mode: "view",
           sandbox: active,
           viewerAuthority,
         },

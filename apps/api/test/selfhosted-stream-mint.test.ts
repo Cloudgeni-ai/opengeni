@@ -178,6 +178,28 @@ describe("mintSelfhostedStream — relay stream cell fenced by active_epoch (M8b
     expect(claims?.mode).toBe("view");
   });
 
+  test("an explicit desktop controller retains its control claim when enabled", async () => {
+    const controlSettings = testSettings({
+      streamTokenSecret: "selfhosted-stream-secret",
+      streamControlEnabled: true,
+    });
+    const cell = await mintSelfhostedStream(
+      { db: {} as never, settings: controlSettings },
+      {
+        workspaceId: WS,
+        sessionId: SESSION,
+        viewerId: VIEWER,
+        activeEpoch: 1,
+        port: 6080,
+        mode: "control",
+        session: fakeSelfhostedSession(6080),
+      },
+    );
+    expect(cell).not.toBeNull();
+    const claims = await verifyStreamToken(resolveStreamTokenSecret(controlSettings)!, cell!.token);
+    expect(claims?.mode).toBe("control");
+  });
+
   test("the terminal port keeps its control claim with the desktop flag off", async () => {
     // `settings` leaves streamControlEnabled at its false default: PTY typing
     // is authorized by terminal:attach alone, so a flag-off deploy must still
@@ -216,7 +238,7 @@ describe("stream control authorization", () => {
     expect(shouldGrantStreamControl(allGranted)).toBe(true);
   });
 
-  test("a desktop token carries control only after every API gate passes", async () => {
+  test("the frame-only desktop viewer remains view-only despite available control authority", async () => {
     const controlSettings = testSettings({
       streamTokenSecret: "selfhosted-stream-secret",
       streamControlEnabled: true,
@@ -241,7 +263,7 @@ describe("stream control authorization", () => {
     );
     expect(cell).not.toBeNull();
     const claims = await verifyStreamToken(resolveStreamTokenSecret(controlSettings)!, cell!.token);
-    expect(claims?.mode).toBe("control");
+    expect(claims?.mode).toBe("view");
   });
 });
 

@@ -1,10 +1,18 @@
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
-import { describe, expect, test } from "bun:test";
+import { describe, expect, spyOn, test } from "bun:test";
 import type { MCPServer } from "@openai/agents";
 import { IntegrationInvocationError } from "@opengeni/capabilities";
 import type { AccessContext, AccessGrant } from "@opengeni/contracts";
-import { accessGrantAuthorizationFromContext, type AccessGrantAuthorization } from "@opengeni/core";
+import {
+  accessGrantAuthorizationFromContext,
+  requireAccessGrantAuthorization,
+  stampDelegatedHumanAuthorization,
+  isVerifiedDelegatedHumanAuthorization,
+  type AccessGrantAuthorization,
+} from "@opengeni/core";
+import * as opengeniDb from "@opengeni/db";
+import { Hono } from "hono";
 import type { Settings } from "@opengeni/config";
 import {
   ToolGatewayApprovalOperationStartedError,
@@ -509,6 +517,102 @@ describe("workspace tool gateway adapters", () => {
     });
     expect(JSON.stringify(mistyped?.details)).not.toContain("synthetic-note-value");
     expect(JSON.stringify(mistyped?.details)).not.toContain("12345");
+  });
+
+  test("verified native OAuth humans retain single-use tool approvals; cloned proof is rejected", async () => {
+    const access = grant();
+    const context: AccessContext = {
+      mode: "managed",
+      subjectId,
+      accountGrants: [{ accountId, subjectId, permissions: ["account:read"] }],
+      workspaceGrants: [access],
+      defaultAccountId: accountId,
+      defaultWorkspaceId: workspaceId,
+    };
+    const profiles = spyOn(opengeniDb, "getManagedUserProfilesByIds").mockResolvedValue([
+      { id: "workspace-tool-gateway-test", name: "Native person", email: "human@example.test" },
+    ]);
+    const native = spyOn(opengeniDb, "ensureManagedAccessForUser").mockImplementation(async () =>
+      structuredClone(context),
+    );
+    let authorization: AccessGrantAuthorization | undefined;
+    try {
+      const app = new Hono();
+      app.get("/", async (c) => {
+        authorization = await requireAccessGrantAuthorization(
+          c,
+          {
+            db: {} as never,
+            settings: testSettings({ productAccessMode: "managed" }),
+          },
+          workspaceId,
+          "workspace:read",
+        );
+        return c.text("resolved");
+      });
+      const request = new Request("http://test/");
+      stampDelegatedHumanAuthorization(request, {
+        organizationId: accountId,
+        subjectId,
+        permissions: ["workspace:read"],
+        workspaceScope: { kind: "selected", workspaceIds: [workspaceId] },
+      });
+      expect((await app.fetch(request)).status).toBe(200);
+      if (!authorization) throw new Error("Native authorization missing");
+      expect(isVerifiedDelegatedHumanAuthorization(authorization, request)).toBe(true);
+      expect(authorization.canonicalManagedHumanSession).toBe(false);
+      const calls: Array<{ kind: string; argumentsValue: Record<string, unknown> }> = [];
+      const prepared = preparedGateway(calls, "human", { onPreflight: () => {} });
+      const operation = {
+        operationId: crypto.randomUUID(),
+        catalogDigest: prepared.toolGatewayCatalog.digest,
+        identity: { serverId: "inventory", toolName: "lookup" },
+        arguments: { sku: "OAUTH-HUMAN" },
+      };
+      let issued = false;
+      const approved = await approveWorkspaceToolGatewayCall(
+        prepared,
+        authorization,
+        {} as never,
+        operation,
+        async () => {
+          issued = true;
+        },
+      );
+      expect(issued).toBe(true);
+      await expect(
+        approveWorkspaceToolGatewayCall(
+          prepared,
+          { ...authorization },
+          {} as never,
+          operation,
+          async () => {
+            throw new Error("cloned proof must not issue");
+          },
+        ),
+      ).rejects.toMatchObject({ status: 403 });
+      let consumed = false;
+      const execute = () =>
+        callWorkspaceToolGateway(
+          prepared,
+          authorization!,
+          { ...operation, approvalToken: approved.approvalToken },
+          {} as never,
+          async () => {
+            if (consumed) return false;
+            consumed = true;
+            return true;
+          },
+        );
+      await expect(execute()).resolves.toMatchObject({
+        result: { structuredContent: { count: 7 } },
+      });
+      await expect(execute()).rejects.toMatchObject({ status: 409 });
+      expect(calls).toHaveLength(1);
+    } finally {
+      profiles.mockRestore();
+      native.mockRestore();
+    }
   });
 
   test("issues an opaque approval capability bound to the exact operation", async () => {

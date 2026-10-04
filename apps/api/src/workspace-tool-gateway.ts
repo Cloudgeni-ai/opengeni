@@ -148,8 +148,14 @@ export function requireWorkspaceToolGatewayAuthorization(
   return grant;
 }
 
-function requireCanonicalHumanToolApprovalAuthority(authorization: AccessGrantAuthorization): void {
-  if (!authorization.canonicalManagedHumanSession && !authorization.canonicalLocalHumanSession) {
+function requireHumanToolApprovalAuthority(authorization: AccessGrantAuthorization): void {
+  // Native OAuth dispatch resolves the owning person's live access and binds
+  // proof to the exact authorization object. Service/header claims cannot mint it.
+  if (
+    !authorization.canonicalManagedHumanSession &&
+    !authorization.canonicalLocalHumanSession &&
+    !isVerifiedDelegatedHumanAuthorization(authorization)
+  ) {
     throw new HTTPException(403, {
       message: "canonical human session required for tool approval",
     });
@@ -584,7 +590,7 @@ export async function callWorkspaceToolGateway(
       entry?.approval === "human" &&
       request.catalogDigest === prepared.toolGatewayCatalog.digest
     ) {
-      requireCanonicalHumanToolApprovalAuthority(authorization);
+      requireHumanToolApprovalAuthority(authorization);
     }
     if (siteContext) {
       if (!db) throw new HTTPException(503, { message: "site_tool_authorization_unavailable" });
@@ -606,7 +612,7 @@ export async function callWorkspaceToolGateway(
     await prepared.reauthorize?.();
     let approvalConfirmed = false;
     const approvalRequired = preparedCall.entry.approval === "human";
-    if (approvalRequired) requireCanonicalHumanToolApprovalAuthority(authorization);
+    if (approvalRequired) requireHumanToolApprovalAuthority(authorization);
     if (approvalRequired && request.approvalToken && db) {
       approvalConfirmed = await consumeApproval(db, {
         tokenHash: hashOpaqueValue(request.approvalToken),
@@ -671,7 +677,7 @@ export async function approveWorkspaceToolGatewayCall(
     catalogEntry?.approval === "human" &&
     request.catalogDigest === prepared.toolGatewayCatalog.digest
   ) {
-    requireCanonicalHumanToolApprovalAuthority(authorization);
+    requireHumanToolApprovalAuthority(authorization);
   }
   let preparedCall: PreparedToolGatewayCall;
   try {
@@ -692,7 +698,7 @@ export async function approveWorkspaceToolGatewayCall(
   if (preparedCall.entry.approval !== "human") {
     throw new HTTPException(422, { message: "tool_does_not_require_human_approval" });
   }
-  requireCanonicalHumanToolApprovalAuthority(authorization);
+  requireHumanToolApprovalAuthority(authorization);
   const observation = startWorkspaceToolGatewayObservation(observability, {
     adapter: "http",
     operation: "approval",

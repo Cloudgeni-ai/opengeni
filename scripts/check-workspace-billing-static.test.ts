@@ -108,6 +108,7 @@ describe("workspace and organization MCP route guard", () => {
     "apps/api/src/organization-mcp.ts",
     "apps/api/test/organization-mcp-e2e.test.ts",
     "apps/web/src/App.tsx",
+    "apps/web/src/server.test.ts",
     "apps/web/src/components/organization-access/organization-connected-agents.tsx",
     "apps/web/src/dev/ui-kit/sections/page-connected-agents.tsx",
     "packages/sdk/src/client.ts",
