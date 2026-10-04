@@ -75,11 +75,17 @@ import {
 } from "@opengeni/db";
 import { requireSessionEventDurableFanoutCapability } from "@opengeni/events";
 import { githubAppBotIdentityWarnings } from "@opengeni/github";
-import { createObservability, withTraceContext, withMcpTelemetry } from "@opengeni/observability";
+import {
+  createObservability,
+  failureDiagnostic,
+  withTraceContext,
+  withMcpTelemetry,
+} from "@opengeni/observability";
 import { createObjectStorage } from "@opengeni/storage";
 import { WebStandardStreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/webStandardStreamableHttp.js";
+import { SUPPORTED_PROTOCOL_VERSIONS } from "@modelcontextprotocol/sdk/types.js";
 import { handleMcpRequestWithClientAbort } from "./mcp/request-abort";
-import { Hono } from "hono";
+import { Hono, type Context } from "hono";
 import { bodyLimit } from "hono/body-limit";
 import { compress } from "hono/compress";
 import { cors } from "hono/cors";
@@ -523,12 +529,58 @@ export function createAppComposition(deps: AppDependencies): {
     resumeBoxById,
   };
   const app = new Hono();
-  const correlationIds = new WeakMap<Request, string>();
+  // Body/auth middleware may replace c.req.raw. The Hono context remains the
+  // same for the response, diagnostic and completion log of this request.
+  const correlationIds = new WeakMap<Context, string>();
+  const loggedHttpFailures = new WeakSet<Context>();
+  const logHttpFailure = (c: Context, status: number, code: ErrorCode, error?: unknown) => {
+    if (loggedHttpFailures.has(c)) return;
+    loggedHttpFailures.add(c);
+    const correlationId = correlationIds.get(c) ?? crypto.randomUUID();
+    const route = routeLabel(new URL(c.req.url).pathname, registeredHandlerRoutePath(c));
+    const input =
+      error === undefined
+        ? null
+        : {
+            code: "http_request_failed" as const,
+            stage: "http.request" as const,
+            error,
+          };
+    const diagnostic = input ? failureDiagnostic(input, deps.settings.deploymentRevision) : null;
+    // Diagnostics and logging are observers, never a new response failure.
+    try {
+      if (input && diagnostic) {
+        observability.recordFailureDiagnostic({ ...input, diagnosticId: diagnostic.diagnosticId });
+      }
+    } catch {
+      /* Preserve the original error response if the diagnostic sink fails. */
+    }
+    try {
+      observability.error("HTTP request failed", {
+        method: c.req.method,
+        route,
+        status,
+        correlationId,
+        errorCode: code,
+        errorClass: "HttpOperationError",
+        origin: "api",
+        reasonKind: diagnostic?.causes[0]?.kind ?? "Response",
+        ...(diagnostic ? { diagnosticId: diagnostic.diagnosticId } : {}),
+      });
+      observability.incrementCounter({
+        name: "opengeni_http_errors_total",
+        help: "Total OpenGeni HTTP request failures by bounded route, status, and stable code.",
+        labels: { route, status: String(status), code },
+      });
+    } catch {
+      /* Preserve the original error response if the logger fails. */
+    }
+  };
 
   app.use("*", async (c, next) => {
     const correlationId =
       boundedCorrelationId(c.req.header(OPENGENI_CORRELATION_HEADER)) ?? crypto.randomUUID();
-    correlationIds.set(c.req.raw, correlationId);
+    correlationIds.set(c, correlationId);
     c.header(OPENGENI_CORRELATION_HEADER, correlationId);
     await next();
   });
@@ -711,7 +763,7 @@ export function createAppComposition(deps: AppDependencies): {
   app.use("*", async (c, next) => {
     const url = new URL(c.req.url);
     const route = routeLabel(url.pathname, registeredHandlerRoutePath(c));
-    const correlationId = correlationIds.get(c.req.raw) ?? crypto.randomUUID();
+    const correlationId = correlationIds.get(c) ?? crypto.randomUUID();
     const start = performance.now();
     const span = observability.startSpan(
       `HTTP ${c.req.method} ${route}`,
@@ -726,6 +778,9 @@ export function createAppComposition(deps: AppDependencies): {
         try {
           await next();
           const status = c.res.status || 200;
+          // Hono normally handles exceptions in onError before next() resolves.
+          // Also cover a handler returning a 5xx without throwing.
+          if (status >= 500) logHttpFailure(c, status, errorCodeForStatus(status), c.error);
           const durationSeconds = (performance.now() - start) / 1000;
           observability.recordHttpRequest({
             method: c.req.method,
@@ -738,6 +793,7 @@ export function createAppComposition(deps: AppDependencies): {
               "http.response.status_code": status,
               "opengeni.duration_ms": Math.round(durationSeconds * 1000),
             },
+            ...(c.error ? { error: c.error } : {}),
           });
           observability.info("HTTP request completed", {
             method: c.req.method,
@@ -758,11 +814,6 @@ export function createAppComposition(deps: AppDependencies): {
             status,
             durationSeconds,
           });
-          observability.incrementCounter({
-            name: "opengeni_http_errors_total",
-            help: "Total OpenGeni HTTP request failures by bounded route, status, and stable code.",
-            labels: { route, status: String(status), code: errorCode },
-          });
           span.end({
             attributes: {
               "http.response.status_code": status,
@@ -770,17 +821,7 @@ export function createAppComposition(deps: AppDependencies): {
             },
             error,
           });
-          observability.error("HTTP request failed", {
-            method: c.req.method,
-            route,
-            status,
-            durationMs: Math.round(durationSeconds * 1000),
-            traceId: span.traceId,
-            spanId: span.spanId,
-            correlationId,
-            errorCode,
-            errorClass: "HttpOperationError",
-          });
+          logHttpFailure(c, status, errorCode, error);
           throw error;
         }
       }),
@@ -816,7 +857,7 @@ export function createAppComposition(deps: AppDependencies): {
       await next();
       return;
     }
-    const requestId = correlationIds.get(c.req.raw) ?? crypto.randomUUID();
+    const requestId = correlationIds.get(c) ?? crypto.randomUUID();
     c.header(OPENGENI_API_CONTRACT_HEADER, OPENGENI_API_CONTRACT_REVISION);
     if (unmatched.status === 405) c.header("allow", unmatched.allow.join(", "));
     return c.json(
@@ -1383,6 +1424,27 @@ export function createAppComposition(deps: AppDependencies): {
 
   app.all("/v1/workspaces/:workspaceId/mcp", async (c) => {
     const workspaceId = c.req.param("workspaceId");
+    // This endpoint uses a fresh stateless JSON-response transport per POST;
+    // there is no persistent server-to-client stream. Refuse GET only after
+    // the existing OAuth/workspace/session authorization, before tool setup.
+    const unsupportedGet = () => {
+      const version = c.req.header("mcp-protocol-version");
+      if (version && !SUPPORTED_PROTOCOL_VERSIONS.includes(version)) {
+        return c.json(
+          {
+            jsonrpc: "2.0",
+            id: null,
+            error: { code: -32000, message: "Unsupported protocol version." },
+          },
+          400,
+        );
+      }
+      return c.json(
+        { jsonrpc: "2.0", id: null, error: { code: -32000, message: "Method not allowed." } },
+        405,
+        { allow: "POST" },
+      );
+    };
     let boundedRequest: Request;
     try {
       boundedRequest = await boundedMcpRequest(c.req.raw);
@@ -1408,6 +1470,7 @@ export function createAppComposition(deps: AppDependencies): {
     }
     if (oauthAccess) {
       return await withAccessGrantSessionRlsContext(routeDeps, oauthAccess.grant, async () => {
+        if (c.req.method === "GET") return unsupportedGet();
         const prepared = await prepareMcpOAuthWorkspaceToolGateway(
           routeDeps,
           oauthAccess.grant,
@@ -1466,6 +1529,7 @@ export function createAppComposition(deps: AppDependencies): {
             throw error;
           }
         }
+        if (c.req.method === "GET") return unsupportedGet();
         reads.handOffToToolDispatch();
         const workspace = await getWorkspace(routeDeps.db, workspaceId);
         const workspaceMemoryEnabled = resolveWorkspaceMemoryEnabled(workspace?.settings);
@@ -1769,7 +1833,7 @@ export function createAppComposition(deps: AppDependencies): {
 
   app.notFound((c) => {
     if (!new URL(c.req.url).pathname.startsWith("/v1/")) return c.text("Not Found", 404);
-    const requestId = correlationIds.get(c.req.raw) ?? crypto.randomUUID();
+    const requestId = correlationIds.get(c) ?? crypto.randomUUID();
     return c.json(
       ErrorEnvelope.parse({
         error: {
@@ -1785,7 +1849,7 @@ export function createAppComposition(deps: AppDependencies): {
   });
 
   app.onError((rawError, c) => {
-    const requestId = correlationIds.get(c.req.raw) ?? crypto.randomUUID();
+    const requestId = correlationIds.get(c) ?? crypto.randomUUID();
     c.header(OPENGENI_CORRELATION_HEADER, requestId);
     if (new URL(c.req.url).pathname.startsWith("/v1/")) {
       c.header(OPENGENI_API_CONTRACT_HEADER, OPENGENI_API_CONTRACT_REVISION);
@@ -1826,6 +1890,7 @@ export function createAppComposition(deps: AppDependencies): {
     const code: ErrorCode = compactionLock
       ? compactionLock.code
       : (apiError?.code ?? errorCodeForStatus(status));
+    if (status >= 500) logHttpFailure(c, status, code, rawError);
     const envelope = ErrorEnvelope.parse({
       error: {
         status,
