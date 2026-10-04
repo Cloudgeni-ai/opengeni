@@ -1,6 +1,6 @@
 /** Timing-only, loopback-only full-App benchmark on an attested isolated copy. */
 import { createHash } from "node:crypto";
-import { readFile } from "node:fs/promises";
+import { readFile, readdir } from "node:fs/promises";
 import { availableParallelism, cpus, totalmem } from "node:os";
 import postgres from "postgres";
 import { sql } from "drizzle-orm";
@@ -46,6 +46,19 @@ if (
 const hash = (value: string) => createHash("sha256").update(value).digest("hex");
 const head = () =>
   Bun.spawnSync(["git", "rev-parse", "HEAD"], { stdout: "pipe" }).stdout.toString().trim();
+const ledger = await readdir(`${repo}/packages/db/drizzle`);
+const migrationFiles = [
+  "insights_daily_rollups.sql",
+  "insights_actual_model_debits.sql",
+  "insights_historical_list_allocations.sql",
+  "insights_daily_usage_reader.sql",
+].map((basename) => {
+  const matches = ledger.filter((name) => /^\d{4}_/.test(name) && name.endsWith(`_${basename}`));
+  if (matches.length !== 1) throw new Error(`Expected one exact ${basename} migration`);
+  return matches[0]!;
+});
+if (migrationFiles.some((name, index) => index > 0 && name <= migrationFiles[index - 1]!))
+  throw new Error("Daily migrations must retain their dependency order");
 const paths = [
   "apps/api/scripts/bench-insights-daily-http.ts",
   "apps/api/src/app.ts",
@@ -55,12 +68,7 @@ const paths = [
   "packages/db/src/database.ts",
   "packages/core/src/domain/insights-usage.ts",
   "packages/core/src/session-authorization.ts",
-  ...[
-    "0606_insights_daily_rollups.sql",
-    "0607_insights_actual_model_debits.sql",
-    "0608_insights_historical_list_allocations.sql",
-    "0609_insights_daily_usage_reader.sql",
-  ].map((name) => `packages/db/drizzle/${name}`),
+  ...migrationFiles.map((name) => `packages/db/drizzle/${name}`),
 ];
 const sourceHashes = async () =>
   Object.fromEntries(
