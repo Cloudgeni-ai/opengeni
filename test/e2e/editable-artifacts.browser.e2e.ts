@@ -226,6 +226,9 @@ describe("public editable-artifact browser composition", () => {
       await waitForEditorIdle(page, "presentation");
       await page.reload();
       await page.getByRole("option", { name: /^Slide 1/u }).waitFor({ timeout: 30_000 });
+      // Restored text is visible before a prior writer's WAL settles; Enter is
+      // intentionally ignored while that authoring barrier remains active.
+      await waitForEditorIdle(page, "presentation");
       const reloadedSlideEditor = page.getByRole("application", { name: "Slide 1 editor" });
       await reloadedSlideEditor.focus();
       expect(
