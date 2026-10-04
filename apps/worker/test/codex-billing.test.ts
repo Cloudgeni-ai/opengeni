@@ -1019,3 +1019,90 @@ test("reservation covers independently rounded mixed input classes", () => {
     }
   }
 });
+
+test("reservation bounds per-entry rounding across arbitrarily split valid usage", () => {
+  for (const latencyMode of ["standard", "fast"] as const) {
+    const settings = testSettings({
+      modelPricingJson: JSON.stringify({
+        "gpt-5.6-sol": {
+          inputMicrosPerMillionTokens: 125000,
+          cachedInputMicrosPerMillionTokens: 125000,
+          cacheWriteMicrosPerMillionTokens: 125000,
+          outputMicrosPerMillionTokens: 125000,
+          marginBps: 1000,
+        },
+      }),
+    });
+    const bound = modelCallReservationQuantities({
+      settings,
+      model: "gpt-5.6-sol",
+      promptTokens: 1,
+      contextWindowTokens: 1000,
+      maxOutputTokens: 1,
+      latencyMode,
+    });
+    const actual = calculateModelUsageCostBreakdown(
+      settings,
+      "gpt-5.6-sol",
+      {
+        inputTokens: 1000,
+        outputTokens: 1,
+        totalTokens: 1001,
+        requestUsageEntries: [
+          ...Array.from({ length: 1000 }, (_, i) => ({
+            inputTokens: 1,
+            outputTokens: 0,
+            totalTokens: 1,
+            inputTokensDetails:
+              i % 3 === 0 ? { cached_tokens: 1 } : i % 3 === 1 ? { cache_write_tokens: 1 } : {},
+          })),
+          { inputTokens: 0, outputTokens: 1, totalTokens: 1 },
+        ],
+      },
+      { latencyMode },
+    );
+    expect(bound.costMicros).toBeGreaterThanOrEqual(actual.creditCostMicros);
+  }
+});
+
+test("reservation includes independently rounded margins of selected input tiers", () => {
+  const price = {
+    inputMicrosPerMillionTokens: 1_000_000,
+    outputMicrosPerMillionTokens: 0,
+    marginBps: 3333,
+  };
+  const settings = testSettings({
+    modelPricingJson: JSON.stringify({
+      "gpt-5.6-sol": {
+        default: price,
+        inputTokenTiers: [{ minimumInputTokens: 2, pricing: price }],
+      },
+    }),
+  });
+  for (const latencyMode of ["standard", "fast"] as const) {
+    const bound = modelCallReservationQuantities({
+      settings,
+      model: "gpt-5.6-sol",
+      promptTokens: 1,
+      contextWindowTokens: 3,
+      maxOutputTokens: 1,
+      latencyMode,
+    });
+    const actual = calculateModelUsageCostBreakdown(
+      settings,
+      "gpt-5.6-sol",
+      {
+        inputTokens: 3,
+        outputTokens: 0,
+        totalTokens: 3,
+        requestUsageEntries: [
+          { inputTokens: 1, outputTokens: 0, totalTokens: 1 },
+          { inputTokens: 2, outputTokens: 0, totalTokens: 2 },
+        ],
+      },
+      { latencyMode },
+    );
+    expect(bound.costMicros).toBeGreaterThanOrEqual(actual.creditCostMicros);
+    expect(actual.creditCostMicros).toBe(latencyMode === "standard" ? 5 : 10);
+  }
+});

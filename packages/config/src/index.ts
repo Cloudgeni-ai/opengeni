@@ -6523,10 +6523,55 @@ export function calculateModelUsageCostBreakdown(
   settings: Settings,
   model: string,
   usage: ModelUsageInput,
-  options?: { latencyMode?: LatencyMode; reserveInputClassRounding?: boolean },
+  options?: { latencyMode?: LatencyMode },
 ): ModelUsageCostBreakdown {
   const schedule = configuredModelPricingSchedules(settings)[model];
   return calculateUsageCostBreakdown(settings, model, usage, schedule, options);
+}
+
+/** Cost upper bound for any entry/class partition within one admitted token budget. */
+export function calculateModelUsageReservationCostBreakdown(
+  settings: Settings,
+  model: string,
+  budget: { inputTokens: number; outputTokens: number },
+  options?: { latencyMode?: LatencyMode },
+): ModelUsageCostBreakdown {
+  const schedule = configuredModelPricingSchedules(settings)[model];
+  if (!schedule) throw new Error(`Missing model pricing for ${model}`);
+  const prices = [
+    schedule.default,
+    ...(schedule.inputTokenTiers ?? []).map((tier) => tier.pricing),
+  ];
+  // Each nonzero token may occupy its own independently rounded entry/class.
+  // ceil(n * rate) <= n * ceil(rate) for every integer token count n.
+  const inputUnit = Math.ceil(
+    Math.max(
+      ...prices.flatMap((price) => [
+        price.inputMicrosPerMillionTokens,
+        price.cachedInputMicrosPerMillionTokens ?? price.inputMicrosPerMillionTokens,
+        price.cacheWriteMicrosPerMillionTokens ?? price.inputMicrosPerMillionTokens,
+      ]),
+    ) / 1_000_000,
+  );
+  const outputUnit = Math.ceil(
+    Math.max(...prices.map((price) => price.outputMicrosPerMillionTokens)) / 1_000_000,
+  );
+  const inputTokens = positiveInt(budget.inputTokens);
+  const outputTokens = positiveInt(budget.outputTokens);
+  const providerCostMicros = inputTokens * inputUnit + outputTokens * outputUnit;
+  const marginBps = Math.max(...prices.map((price) => price.marginBps ?? 0));
+  // Actual pricing groups entries by selected schedule, then rounds each
+  // group's margin. Sum of ceilings exceeds one ceiling by at most groups-1.
+  const groups = Math.min(prices.length, inputTokens + outputTokens);
+  const marginRounding = providerCostMicros > 0 && marginBps > 0 ? Math.max(0, groups - 1) : 0;
+  const creditCostMicros =
+    Math.ceil((providerCostMicros * (10_000 + marginBps)) / 10_000) + marginRounding;
+  return applyModelUsageLatency(
+    settings,
+    model,
+    { providerCostMicros, creditCostMicros },
+    options?.latencyMode ?? "standard",
+  );
 }
 
 /** Provider-list/equivalent-credit comparison only; never debit authority. */
@@ -6832,7 +6877,7 @@ function calculateUsageCostBreakdown(
   model: string,
   usage: ModelUsageInput,
   schedule: ModelPricingScheduleV1 | undefined,
-  options?: { latencyMode?: LatencyMode; reserveInputClassRounding?: boolean },
+  options?: { latencyMode?: LatencyMode },
 ): ModelUsageCostBreakdown {
   if (!schedule) {
     throw new Error(`Missing model pricing for ${model}`);
@@ -6844,17 +6889,9 @@ function calculateUsageCostBreakdown(
   const rawCostByPricing = new Map<ModelPricing, number>();
   for (const entry of entries) {
     const pricing = selectModelPricing(schedule, positiveInt(entry.inputTokens));
-    // Admission collapses three input classes to their worst rate. Separate
-    // ceil operations can add at most two micros before margin/tier multipliers.
-    const inputRoundingAllowance =
-      options?.reserveInputClassRounding && pricing.inputMicrosPerMillionTokens % 1_000_000 !== 0
-        ? Math.min(2, Math.max(0, positiveInt(entry.inputTokens) - 1))
-        : 0;
     rawCostByPricing.set(
       pricing,
-      (rawCostByPricing.get(pricing) ?? 0) +
-        calculateEntryCostMicros(pricing, entry) +
-        inputRoundingAllowance,
+      (rawCostByPricing.get(pricing) ?? 0) + calculateEntryCostMicros(pricing, entry),
     );
   }
   let providerCostMicros = 0;
@@ -6864,7 +6901,21 @@ function calculateUsageCostBreakdown(
     providerCostMicros += rawCost;
     creditCostMicros += Math.ceil((rawCost * (10_000 + marginBps)) / 10_000);
   }
-  const latencyMode = options?.latencyMode ?? "standard";
+  return applyModelUsageLatency(
+    settings,
+    model,
+    { providerCostMicros, creditCostMicros },
+    options?.latencyMode ?? "standard",
+  );
+}
+
+function applyModelUsageLatency(
+  settings: Settings,
+  model: string,
+  cost: ModelUsageCostBreakdown,
+  latencyMode: LatencyMode,
+): ModelUsageCostBreakdown {
+  let { providerCostMicros, creditCostMicros } = cost;
   if (latencyMode !== "standard") {
     const catalogSettings = settingsForTurnExecutionPolicy(settings, model);
     const resolved = resolveModelProvider(

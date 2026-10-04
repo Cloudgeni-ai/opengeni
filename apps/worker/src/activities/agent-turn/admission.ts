@@ -14,7 +14,7 @@ import {
   type CompactionItem,
 } from "@opengeni/runtime";
 import {
-  calculateModelUsageCostBreakdown,
+  calculateModelUsageReservationCostBreakdown,
   OPENGENI_GATEWAY_PROVIDER_ID,
   WORKSPACE_GATEWAY_PROVIDER_ID,
   configuredModelPricingSchedules,
@@ -426,30 +426,13 @@ export function modelCallReservationQuantities(input: {
     input.providerId !== OPENGENI_GATEWAY_PROVIDER_ID &&
     input.providerId !== WORKSPACE_GATEWAY_PROVIDER_ID
   ) {
-    const schedule = schedules[pricedModel]!;
-    const prices = [
-      schedule.default,
-      ...(schedule.inputTokenTiers ?? []).map((tier) => tier.pricing),
-    ];
-    const worst = {
-      inputMicrosPerMillionTokens: Math.max(
-        ...prices.flatMap((price) => [
-          price.inputMicrosPerMillionTokens,
-          price.cachedInputMicrosPerMillionTokens ?? price.inputMicrosPerMillionTokens,
-          price.cacheWriteMicrosPerMillionTokens ?? price.inputMicrosPerMillionTokens,
-        ]),
-      ),
-      outputMicrosPerMillionTokens: Math.max(
-        ...prices.map((price) => price.outputMicrosPerMillionTokens),
-      ),
-      marginBps: Math.max(...prices.map((price) => price.marginBps ?? 0)),
-    };
-    costMicros = calculateModelUsageCostBreakdown(
-      { ...input.settings, modelPricingJson: JSON.stringify({ [pricedModel]: worst }) },
+    costMicros = calculateModelUsageReservationCostBreakdown(
+      input.settings,
       pricedModel,
-      { inputTokens: inputBound, outputTokens: reservedOutput, totalTokens: tokens },
-      { latencyMode: input.latencyMode ?? "standard", reserveInputClassRounding: true },
+      { inputTokens: inputBound, outputTokens: reservedOutput },
+      { latencyMode: input.latencyMode ?? "standard" },
     ).creditCostMicros;
+    if (!Number.isSafeInteger(costMicros)) costMicros = null;
   }
   return { tokens, costMicros };
 }

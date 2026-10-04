@@ -80,7 +80,8 @@ describe("empty final reply production runtime with PostgreSQL", () => {
       | "responses-preparation"
       | "chat-preparation"
       | "claude-preparation"
-      | "claude-after-dispatch",
+      | "claude-after-dispatch"
+      | "multi-entry-cap",
   ) {
     const suffix = crypto.randomUUID();
     const access = await bootstrapWorkspace(client.db, {
@@ -429,6 +430,20 @@ describe("empty final reply production runtime with PostgreSQL", () => {
               }),
             }
           : {}),
+        ...(providerUsageMode === "multi-entry-cap"
+          ? {
+              contextWindowTokens: 100_000,
+              contextReservedOutputTokens: 1000,
+              staticUsageLimitsJson: JSON.stringify({ maxMonthlyCostMicrosPerAccount: 30_000 }),
+              modelPricingJson: JSON.stringify({
+                "scripted-model": {
+                  inputMicrosPerMillionTokens: 125000,
+                  outputMicrosPerMillionTokens: 125000,
+                  marginBps: 1000,
+                },
+              }),
+            }
+          : {}),
       }),
       db: client.db,
       bus: new MemoryEventBus(),
@@ -694,6 +709,25 @@ describe("empty final reply production runtime with PostgreSQL", () => {
       await shared.admin`select id from usage_events where account_id=${actual.grant.accountId}
       and event_type like '%.reserved' and quantity<0`;
     expect(releases).toHaveLength(2);
+  }, 60_000);
+
+  test("cost cap refuses the full entry-partition bound before provider dispatch", async () => {
+    const actual = await run(
+      "Completed result.",
+      false,
+      false,
+      false,
+      undefined,
+      "multi-entry-cap",
+    );
+    expect(actual.model.calls).toBe(0);
+    const rows =
+      await shared.admin`select id from usage_events where account_id=${actual.grant.accountId}
+      and event_type in ('model.cost','model.cost.reserved')`;
+    expect(rows).toHaveLength(0);
+    const debits =
+      await shared.admin`select id from credit_ledger_entries where account_id=${actual.grant.accountId} and type='model_usage_debit'`;
+    expect(debits).toHaveLength(0);
   }, 60_000);
 
   test("aggregate-only usage bills both streams of a same-turn final-reply handoff", async () => {

@@ -1055,7 +1055,9 @@ SDK-normalized zeros do not prove that a provider reported usage. Preserve raw
 counter-presence evidence before SDK defaults and retain it through SDK schema
 parsing; missing or partial usage keeps
 its hold, while explicitly reported zero usage can settle. A terminal response's
-SDK aggregate cannot replace missing telemetry. Normalized terminals and raw
+SDK aggregate cannot replace missing telemetry. Cost reservations bound each
+token at its worst rounded unit price across all input classes and price tiers,
+including independently rounded usage entries and pricing-group margins. Normalized terminals and raw
 mirrors retain one response-to-call binding and cannot consume the next hold.
 Owned transports assign a unique local identity per dispatch when the provider
 omits an ID, including Chat SDK placeholder IDs. Overflow recovery retires
