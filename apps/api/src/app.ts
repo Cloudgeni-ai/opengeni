@@ -2486,7 +2486,7 @@ const routeLabelPatterns: Array<{
   label: string | ((match: RegExpMatchArray) => string);
 }> = [
   {
-    pattern: /^\/\.well-known\/oauth-authorization-server$/,
+    pattern: /^\/\.well-known\/oauth-authorization-server(?:\/.*)?$/,
     label: "/.well-known/oauth-authorization-server",
   },
   {
