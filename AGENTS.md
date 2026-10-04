@@ -394,6 +394,15 @@ generations and live revocation; restricted/foreign inputs, schedules and Steer
 retain explicit authority. Migration 0608 requires drained writers and only
 context-aware images afterward. See `docs/durable-agent-inputs.md`.
 
+Organization Slack bot sharing is an explicit organization-admin setting. Bot
+credentials and provider delivery receipts stay in their installation workspace;
+authorized target workspaces use the current sharing generation. Ordinary chats
+prepare an explicit channel message before sending its server-owned message ID.
+Scheduled occurrences, including child work and tasks that continue an existing
+chat, never gain arbitrary-channel posting from the ordinary tools. Recheck bot,
+sharing and the schedule's person-chosen destination before physical writes;
+never fall back to a personal Slack account. See `docs/slack-bot.md`.
+
 ## Pull-request delivery across moving `main`
 
 The workflow-wake reaper repairs authentic pending child terminal results for

@@ -1,5 +1,10 @@
 // Types only: a value re-export would pull the contracts runtime into the root entry.
 export type {
+  AvailableOpenGeniSlackBots,
+  OpenGeniSlackBotOrganizationAccess,
+  UpdateOpenGeniSlackBotOrganizationAccess,
+} from "./types";
+export type {
   ToolActionReview,
   ToolReviewDetailsPage,
   ToolReviewStatus,

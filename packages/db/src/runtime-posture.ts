@@ -89,8 +89,14 @@ const ARTIFACT_PINS_TABLE = "artifact_catalog_pins";
 export const SCHEDULED_SLACK_BOT_MESSAGE_RUNTIME_ROUTINES = [
   "prepare_scheduled_slack_bot_message(uuid, uuid, uuid, uuid, uuid, integer, text, text, text)",
   "read_scheduled_slack_bot_message(uuid, uuid, uuid, uuid)",
+  "set_organization_slack_bot_access(uuid, uuid, uuid, text, boolean)",
+  "read_organization_slack_bot_access(uuid, uuid, uuid)",
+  "list_organization_slack_bots(uuid, uuid)",
+  "prepare_organization_slack_bot_message(uuid, uuid, uuid, uuid, uuid, integer, uuid, bigint, text, text, text)",
+  "read_organization_slack_bot_message(uuid, uuid, uuid, uuid)",
 ] as const;
 const SCHEDULED_SLACK_BOT_MESSAGES_TABLE = "scheduled_slack_bot_messages";
+const ORGANIZATION_SLACK_BOT_ACCESS_TABLE = "organization_slack_bot_access";
 export const ORGANIZATION_SIGNUP_USE_CASE_RUNTIME_ROUTINES = [
   "record_organization_signup_use_case(uuid, text, text)",
 ] as const;
@@ -2166,6 +2172,7 @@ export async function inspectRuntimeDatabasePosture(
               ${SANDBOX_FILE_PUBLICATIONS_TABLE},
               ${ARTIFACT_PINS_TABLE},
               ${SCHEDULED_SLACK_BOT_MESSAGES_TABLE},
+              ${ORGANIZATION_SLACK_BOT_ACCESS_TABLE},
               ${ORGANIZATION_SIGNUP_USE_CASES_TABLE},
               ${SLACK_FILE_UPLOAD_OPERATIONS_TABLE},
               'organization_usage_read_capabilities',
@@ -4011,6 +4018,31 @@ export function evaluateRuntimeDatabasePosture(
         violations.push(`scheduled Slack bot message capability ${name} is missing or unsafe`);
       }
     }
+  }
+
+  const botAccessTables = posture.privateTables.filter(
+    (table) => table.name === ORGANIZATION_SLACK_BOT_ACCESS_TABLE,
+  );
+  if (botAccessTables.length !== 1) {
+    if (!options.protectedTables)
+      violations.push("organization Slack bot access relation is missing or ambiguous");
+  } else {
+    const table = botAccessTables[0]!;
+    if (!table.rlsEnabled || !table.rlsForced || !table.rlsActive || (table.policyCount ?? 0) < 1)
+      violations.push("organization Slack bot access lacks active FORCE-RLS isolation");
+    if (
+      table.select ||
+      table.insert ||
+      table.update ||
+      table.delete ||
+      table.truncate ||
+      table.references ||
+      table.trigger ||
+      table.owner === expectedRole
+    )
+      violations.push("runtime role has forbidden direct organization Slack bot access authority");
+    if (table.owner !== scheduledSlackMessageTables[0]?.owner)
+      violations.push("organization Slack bot access owner does not match Slack post authority");
   }
 
   const signupUseCaseTables = posture.privateTables.filter(

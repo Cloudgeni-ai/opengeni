@@ -1010,6 +1010,13 @@ export type OpenGeniSlackBotInstallRequest = {
   connectionId?: string | undefined;
 };
 
+export type AvailableOpenGeniSlackBots = {
+  connections: ConnectionMetadata[];
+  organizationSharedConnectionIds: string[];
+};
+export type UpdateOpenGeniSlackBotOrganizationAccess = { enabled: boolean };
+export type OpenGeniSlackBotOrganizationAccess = { enabled: boolean; generation: number };
+
 export type FikenInstallRequest = {
   apiToken: string;
   defaultCompanySlug?: string | undefined;

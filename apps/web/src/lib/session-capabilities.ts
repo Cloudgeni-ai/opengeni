@@ -51,8 +51,8 @@ const CONNECTED_APP_GROUPS: CapabilityGroupDefinition[] = [
   },
   {
     id: "slack",
-    name: "Slack",
-    description: "Search workspace conversations and work with messages.",
+    name: "Opengeni Slack bot",
+    description: "Use the installed bot to read conversations and post as Opengeni.",
     kind: "connected_app",
     matches: (tool) => tool.startsWith("slack_bot_"),
   },

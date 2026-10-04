@@ -98,4 +98,5 @@ export const embeddingMigrationTail = [
   "0611_universal_session_tenancy_activation.sql",
   // Extends the containment reason installed by withheld 0547; replay after it.
   "0614_quiescence_command_containment.sql",
+  "0622_organization_slack_bot_delivery.sql",
 ];
