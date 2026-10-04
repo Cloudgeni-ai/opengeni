@@ -519,6 +519,15 @@ consumers use unpatched Modal: the runtime owns its error class and recognizes
 SDK boundaries by a local own-Symbol marker, never patch-only imports, names,
 codes or text.
 
+`modal-original-read-wire.ts` is a dormant private read-only transport, with no
+production caller or public sandbox export. Its pinned Modal 0.9.0 projection
+owns an explicit pair, TLS endpoint/channel and bundled Node trust roots;
+namespace and exact-task router-access reads have no ambient SDK profile or
+transport retry. Local observation slots and joined close wait for actual RPC
+callbacks, not waiter abort. It issues no host grant, authenticated original
+context, capture receipt or effect permit. See
+[the recovery design](design/modal-recovery-assurance-2026-10-02.md).
+
 Snapshots use `OPENGENI_SANDBOX_SNAPSHOT_TIMEOUT_MS`; zero-holder drains/rotations
 may override with `OPENGENI_SANDBOX_DRAIN_SNAPSHOT_TIMEOUT_MS`. Boot reserves the
 larger budget plus reaper period, even for historical Modal leases after backend

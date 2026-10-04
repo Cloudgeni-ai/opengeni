@@ -118,3 +118,36 @@ Final validation is recorded in the implementing PR.
 The implementing PR records the focused correction's validation and ownership.
 Durable eventual continuity is tracked separately from the existing rollout and
 live capture diagnosis. The DNS root-cause investigation also remains separate.
+
+## Dormant explicit original-read transport, October 4, 2026
+
+`packages/runtime/src/sandbox/providers/modal-original-read-wire.ts` adds only a
+private, unwired transport building block. The installed Modal 0.9.0 constructor
+reads ambient profile/endpoint settings even with an explicit pair; its advertised
+endpoint parameter is not applied, and an empty environment leaves ambient
+selection intact. The new narrow grpc-js/protobuf projection instead owns the
+explicit sampled pair and HTTPS channel. It uses explicit Node bundled trust
+roots (or isolated test roots), not grpc's ambient root-file override. This TLS
+policy and endpoint must be included in any future protected configuration
+capture; neither the transport nor a copied snapshot establishes that capture.
+
+The sole wire methods are `AuthTokenGet`, `WorkspaceNameLookup` and
+`TaskGetCommandRouterAccess`, pinned to the installed SDK source. Each local
+observation has one bounded auth/read chain, no retry, and no token-refresh
+background task. The namespace result retains whether the actual response used
+`workspaceName` or `username`; neither is relabelled as an immutable principal.
+Environment selection is retained in the snapshot but these RPCs do not send it.
+Router credentials stay ephemeral. Errors omit provider details and causes.
+
+Cancellation requests abort the exact underlying RPC; only its actual callback
+settles the promise. The single local observation slot remains held until that
+chain settles, and close joins it before closing the owned channel. These facts
+describe local observation I/O, not provider-process exit, another writer's
+quiescence, a committed capture or permission to resume a helper.
+
+There is no production caller, new public sandbox export, SDK patch, compiler
+change or database activation. Canonical authenticated host issuance, protected
+original configuration/equality/grant joins, genuine opaque acquisitions and
+atomic once-binding/capture ingress remain required before integration. This
+building block alone does not address readiness timeout, exhausted recovery,
+closed-original continuation or any of the four continuity requirements above.
