@@ -760,6 +760,14 @@ timeline. Request-local projection restores the original field at assistant-mess
 scope, alongside its answer and tool calls. Older replies with reasoning nested
 inside text metadata are recovered at that boundary; output-only `tools` metadata
 is omitted. This behavior is shared by configured providers and Chat BYOK routes.
+When switching to Responses or native Claude, plaintext Chat reasoning becomes
+labelled historical assistant text; it is not sent as an empty foreign reasoning
+artifact. Responses also omits Chat reply-message metadata from text/refusal
+blocks and nested Chat function envelopes from tool calls. Both adapters apply
+this projection at their request boundary, including SDK-driven continuations.
+Canonical history stays unchanged, so switching back
+to Chat restores its original reasoning field. Native encrypted Responses and
+signed Claude reasoning retain their existing paths.
 
 Chat Completions receives one request-local transcript view for
 canonical record types that its SDK converter cannot represent; that view is

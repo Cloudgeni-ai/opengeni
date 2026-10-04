@@ -12,6 +12,7 @@ import {
 import { claudeNativeModelProfile, type ResolvedModelProvider } from "@opengeni/config";
 import { withClaudeModelRequest } from "./claude-subscription-usage";
 import { createModelImageSizer } from "./model-image-sizing";
+import { projectHistoryForProvider } from "./provider-history-adapter";
 
 type Json = Record<string, any>;
 type Message = { role: "user" | "assistant" | "system"; content: Json[] };
@@ -400,7 +401,11 @@ export function buildAnthropicRequest(
       );
     return matches[0]![0];
   };
-  let messages = anthropicMessages(request.input);
+  const input =
+    typeof request.input === "string"
+      ? request.input
+      : (projectHistoryForProvider(request.input, "anthropic-messages") as ModelRequest["input"]);
+  let messages = anthropicMessages(input);
   if (!messages.length) throw new AnthropicProtocolError("Claude requires at least one message");
   const system = request.systemInstructions
     ? ([{ type: "text", text: request.systemInstructions }] as Json[])
