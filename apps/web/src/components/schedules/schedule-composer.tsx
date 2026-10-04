@@ -159,7 +159,6 @@ export interface ComposerFieldProps {
   defaultModelSelection: DefaultModelSelection | null;
   modelsLoading: boolean;
   modelsError: string | null;
-  canAttachOpenGeniTool: boolean;
   /** The existing tools and attachments stay with the chat a run posts into. */
   existingChat: boolean;
   /** A materialized reusable chat also owns its execution settings. */
@@ -175,7 +174,6 @@ export function ComposerField({
   defaultModelSelection,
   modelsLoading,
   modelsError,
-  canAttachOpenGeniTool,
   existingChat,
   inheritsChatSettings,
 }: ComposerFieldProps) {
@@ -267,9 +265,8 @@ export function ComposerField({
   ];
 
   /* ----- tools */
-  // With agent settings, built-in tools follow "What the agent can do"; the
-  // menu then only picks connected apps.
-  const agentSettings = context.clientConfig.agentConfig?.enabled === true;
+  // Built-in tools follow "What the agent can do"; the menu only picks
+  // connected apps.
   // The built-in "files" and "docs" servers share names with the Workspace
   // files and Knowledge capabilities. Name them for what they attach, and say
   // which capability they also need.
@@ -280,9 +277,7 @@ export function ComposerField({
         ? {
             ...server,
             name: BUILT_IN_SERVER_COPY[server.id as keyof typeof BUILT_IN_SERVER_COPY].name,
-            detail: agentSettings
-              ? BUILT_IN_SERVER_COPY[server.id as keyof typeof BUILT_IN_SERVER_COPY].needs
-              : server.detail,
+            detail: BUILT_IN_SERVER_COPY[server.id as keyof typeof BUILT_IN_SERVER_COPY].needs,
           }
         : server,
     );
@@ -312,8 +307,7 @@ export function ComposerField({
       repositoryOptions.length > 0 ||
       showSetChip ||
       showRigChip ||
-      (!inheritsChatSettings &&
-        ((draft.includeOpenGeniTool && !agentSettings) || selectedTools.length > 0)));
+      (!inheritsChatSettings && selectedTools.length > 0));
   return (
     <div
       className={cn(
@@ -373,14 +367,6 @@ export function ComposerField({
               loading={rigs.loading && liveRigs.length === 0}
             />
           ) : null}
-          {!inheritsChatSettings && draft.includeOpenGeniTool && !agentSettings ? (
-            <RemovableChip
-              icon={<PlugIcon />}
-              label="Workspace tools"
-              onRemove={() => update({ includeOpenGeniTool: false })}
-              disabled={disabled}
-            />
-          ) : null}
           {(inheritsChatSettings ? [] : selectedTools).map((id) => {
             const name = toolName(id);
             return (
@@ -434,34 +420,12 @@ export function ComposerField({
               </button>
             </DropdownMenuTrigger>
             <DropdownMenuContent align="start" className="w-72">
-              <DropdownMenuLabel>
-                {agentSettings
-                  ? "Connected apps this schedule can use"
-                  : "Tools this schedule can use"}
-              </DropdownMenuLabel>
-              {agentSettings && servers.length === 0 ? (
+              <DropdownMenuLabel>Connected apps this schedule can use</DropdownMenuLabel>
+              {servers.length === 0 ? (
                 <p className="px-2 pb-2 text-xs leading-4.5 text-fg-muted">
                   No apps are connected to this workspace yet.
                 </p>
               ) : null}
-              {agentSettings ? null : (
-                <DropdownMenuCheckboxItem
-                  checked={draft.includeOpenGeniTool}
-                  disabled={!canAttachOpenGeniTool}
-                  onCheckedChange={(checked) => update({ includeOpenGeniTool: checked === true })}
-                  onSelect={(event) => event.preventDefault()}
-                >
-                  <PlugIcon />
-                  <span className="min-w-0 flex-1">
-                    <span className="block truncate">Workspace tools</span>
-                    <span className="block text-xs leading-4.5 text-fg-muted">
-                      {canAttachOpenGeniTool
-                        ? "Chats, schedules and other work in this workspace."
-                        : "Not available on this Opengeni server."}
-                    </span>
-                  </span>
-                </DropdownMenuCheckboxItem>
-              )}
               {servers.map((server) => (
                 <DropdownMenuCheckboxItem
                   key={server.id}

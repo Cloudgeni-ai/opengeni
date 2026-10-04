@@ -249,11 +249,13 @@ CAS and budgets apply. Retired writers remain audit/compatibility evidence. See
 [`knowledge.md`](knowledge.md).
 
 Organization identity has a separate organization-owner autonomy policy: Off rejects
-agent-authored changes before proposal creation, Require approval binds human
-confirmation, and Autonomous activates eligible proposals without another
+agent-authored changes before proposal creation, Review first (`suggest`) binds human
+confirmation, and Automatic activates eligible proposals without another
 prompt. Every mode requires an exact live turn from the active organization
 owner and the company-profile compare-and-swap lifecycle; workspace Learning
-mode and admin authority cannot widen this scope.
+mode and admin authority cannot widen this scope. The web app shows it as an
+owner-only row on Knowledge > Agent learning, in the same Off / Review first /
+Automatic words as the workspace modes, while each store stays separate.
 
 Accepted conversation and tool content stays intact at its canonical boundary;
 OpenGeni does not rewrite arbitrary credential-like text. Configured secrets
@@ -1011,7 +1013,13 @@ See `docs/session-attachments.md`. Generated media follows paid-operation and re
 Knowledge is the product destination for retained sources and findings, with
 Library, Instructions and Review tabs on the Knowledge page (`/state`).
 `apps/web/src/components/knowledge/knowledge-page.tsx` owns that page's
-navigation, including old Files, Skills, Memory and Documents links. Groups appear
+navigation, including old Files, Skills, Memory and Documents links (a Documents
+`?authority=` link keeps its scope as the Library filter). Agent learning has one
+home per scope in the web app: workspace and private-chat defaults (plus the
+owner-only organization identity row) on Knowledge > Agent learning, and one
+chat's override in the session dock's Agent tab beside its identity and
+capabilities (`apps/web/src/components/session/agent-configuration-panel.tsx`);
+the composer's Chat settings opens that tab. Groups appear
 as collections; detailed finding types are optional browsing metadata. File previews, revision-pinned
 citations and shared groups connect information from different sources without
 changing its ownership. Connector ingestion runs through ordinary scheduled

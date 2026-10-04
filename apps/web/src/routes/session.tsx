@@ -133,6 +133,7 @@ import {
 } from "@/lib/capabilities";
 import { startMcpOAuthWithTimeout } from "@/lib/mcp-oauth";
 import { hasAccountPermission, hasWorkspacePermission } from "@/lib/permissions";
+import { chatLearningScope } from "@/lib/chat-learning-scope";
 import { isPersonalWorkspace } from "@/lib/managed-self-context";
 import {
   isTerminalSessionStatus,
@@ -1097,6 +1098,16 @@ export function SessionRoute({
     setSandboxFileRequest(null);
   }, [sessionId]);
   const setInspectorOpen = context.setInspectorOpen;
+  // Composer + > Chat settings opens the dock's Agent tab at its Agent learning.
+  const agentSettingsRequestSeq = useRef(0);
+  const [agentSettingsRequest, setAgentSettingsRequest] = useState<{
+    sessionId: string;
+    requestId: number;
+  } | null>(null);
+  const openAgentSettings = useCallback(() => {
+    setAgentSettingsRequest({ sessionId, requestId: ++agentSettingsRequestSeq.current });
+    setInspectorOpen(true);
+  }, [sessionId, setInspectorOpen]);
   const openSandboxFile = useCallback(
     (path: string, line?: number) => {
       setSandboxFileRequest({
@@ -1218,6 +1229,7 @@ export function SessionRoute({
       resolveProviderLogo={resolveProviderLogo}
       onReloadSession={refreshSession}
       onOpenSandboxFile={openSandboxFile}
+      onOpenAgentSettings={openAgentSettings}
     />
   );
 
@@ -1255,6 +1267,9 @@ export function SessionRoute({
         dockCollapsed={!context.inspectorOpen}
         onDockCollapsedChange={(collapsed) => context.setInspectorOpen(!collapsed)}
         openFileRequest={sandboxFileRequest}
+        openAgentSettingsRequest={
+          agentSettingsRequest?.sessionId === sessionId ? agentSettingsRequest : null
+        }
         onOpenNavigation={() => {
           context.setInspectorOpen(false);
           rail.setDrawerOpen(true);
@@ -1310,8 +1325,30 @@ function SessionDock(props: {
     line?: number | null;
     requestId: number;
   } | null;
+  /** Open the Agent tab at its Agent learning section. A new requestId reopens it. */
+  openAgentSettingsRequest?: { requestId: number } | null;
 }) {
   const context = useAppContext();
+  // One request sequence for every tab the host opens (an artifact, the Agent
+  // tab): the dock ignores a requestId it has already handled.
+  const tabRequestSeq = useRef(0);
+  const [tabRequest, setTabRequest] = useState<{
+    sessionId: string;
+    tab: string;
+    requestId: number;
+  } | null>(null);
+  const agentSettingsRequestId = props.openAgentSettingsRequest?.requestId ?? null;
+  const [agentLearningFocus, setAgentLearningFocus] = useState(0);
+  useEffect(() => {
+    if (agentSettingsRequestId === null) return;
+    setTabRequest({
+      sessionId: props.sessionId,
+      tab: "agent",
+      requestId: ++tabRequestSeq.current,
+    });
+    setAgentLearningFocus((value) => value + 1);
+  }, [agentSettingsRequestId, props.sessionId]);
+  const currentTabRequest = tabRequest?.sessionId === props.sessionId ? tabRequest : null;
   const dockLayoutStorageId = sessionDockLayoutStorageId(
     context.accessContext.subjectId,
     props.sessionId,
@@ -1361,6 +1398,15 @@ function SessionDock(props: {
   } | null>(null);
   const currentArtifactRequest =
     artifactRequest?.sessionId === props.sessionId ? artifactRequest : null;
+  const artifactTabRequestId = currentArtifactRequest?.requestId ?? null;
+  useEffect(() => {
+    if (artifactTabRequestId === null) return;
+    setTabRequest({
+      sessionId: props.sessionId,
+      tab: "artifacts",
+      requestId: ++tabRequestSeq.current,
+    });
+  }, [artifactTabRequestId, props.sessionId]);
   const artifactSummaries = [...artifactState.artifacts];
   // A just-published artifact may be linked before discovery refresh completes, or
   // belong to another session in this workspace. The viewer still authorizes its read.
@@ -1416,7 +1462,7 @@ function SessionDock(props: {
       ),
     },
   ];
-  if (props.session && context.clientConfig.agentConfig?.enabled) {
+  if (props.session) {
     trailingTabs.push({
       id: "agent",
       label: "Agent",
@@ -1428,6 +1474,7 @@ function SessionDock(props: {
             session={props.session}
             lastChange={lastAgentChange(props.events)}
             onReloadSession={props.onReloadSession}
+            learningFocusRequest={agentLearningFocus}
           />
         </Suspense>
       ),
@@ -1494,7 +1541,7 @@ function SessionDock(props: {
           {props.primary}
         </ArtifactLinkBoundary>
       }
-      openTabRequest={currentArtifactRequest}
+      openTabRequest={currentTabRequest}
       trailingTabs={trailingTabs}
       collapsed={props.dockCollapsed}
       onCollapsedChange={props.onDockCollapsedChange}
@@ -1650,6 +1697,8 @@ function SessionChatPane(props: {
   resolveProviderLogo: (providerDomain: string) => string | null;
   onReloadSession: () => Promise<void>;
   onOpenSandboxFile: (path: string, line?: number) => void;
+  /** Composer + > Chat settings: open this chat's Agent tab. */
+  onOpenAgentSettings: () => void;
 }) {
   const context = useAppContext();
   const [findOpen, setFindOpen] = useState(!!props.searchTarget.find);
@@ -3171,13 +3220,12 @@ function SessionChatPane(props: {
                   chatSettings={{
                     workspaceId: props.session.workspaceId,
                     sessionId: props.session.id,
-                    scope:
-                      props.session.tenancy?.visibility === "private" ||
-                      props.session.memoryScope === "user" ||
-                      isPersonalWorkspace(workspace, context.managedSelfContext)
-                        ? "personal"
-                        : "workspace",
+                    scope: chatLearningScope(
+                      props.session,
+                      isPersonalWorkspace(workspace, context.managedSelfContext),
+                    ),
                     canEdit: workspacePermissions.includes("sessions:control"),
+                    onOpen: props.onOpenAgentSettings,
                   }}
                   workspaceId={props.session.workspaceId}
                   disabled={terminal || composer.sending}
