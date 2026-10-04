@@ -57,7 +57,6 @@ import { VideoGenerationRejectedResult, resolveAgentToolFamilies } from "@openge
 
 import {
   structuredToolTransportForTurn,
-  hostedWebSearchForTurn,
   connectedSubscriptionImageGenerationAuthority,
   textVerbosityForTurn,
   reasoningSummaryForTurn,
@@ -80,6 +79,7 @@ import type {
 import { SESSION_TITLE_MODEL_TOOL_NAME } from "./session-title";
 import { resolveTurnSandboxAccess } from "./turn-sandbox-access";
 import { resolveVideoReferenceSandboxAccess } from "./video-reference-sandbox";
+import { turnWebSearchPlan } from "./web-search";
 
 export type BuildTurnAgentDeps = {
   skillCatalog: NonNullable<BuildAgentOptions["skillCatalog"]>;
@@ -246,7 +246,9 @@ export async function buildTurnAgent(deps: BuildTurnAgentDeps) {
           },
         }
       : {};
-  const hostedWebSearch = hostedWebSearchForTurn(resolvedModel, runSettings.webSearchEnabled);
+  // Fallback mode (the default) keeps hosted search exactly as resolved; the
+  // operator's `replace` mode withholds it in favour of provider tools.
+  const hostedWebSearch = turnWebSearchPlan(resolvedModel, runSettings).hostedWebSearch;
   const resolveImageReferences = async (
     references: Parameters<typeof resolveImageGenerationReferencesForTool>[0]["references"],
   ) =>

@@ -552,3 +552,77 @@ describe("server effectiveTools environment projection", () => {
     ).toEqual([]);
   });
 });
+
+describe("provider web search projection", () => {
+  const providerSettings = (overrides: Partial<typeof settings> = {}) => {
+    const current = configuredModels(settings)[0]!.capabilities;
+    return testSettings({
+      ...settings,
+      webSearchProvider: "tinyfish",
+      webSearchApiKey: "tinyfish-key",
+      modelProvidersJson: JSON.stringify([
+        {
+          id: "acme",
+          api: "chat",
+          baseUrl: "https://acme.example/v1",
+          apiKey: "fake-test-key",
+          models: [
+            {
+              id: "acme/no-search",
+              upstreamModelId: "no-search",
+              capabilities: {
+                ...current,
+                hostedTools: {
+                  ...current.hostedTools,
+                  webSearch: { upstream: "unknown", runnable: false },
+                },
+              },
+            },
+          ],
+        },
+      ]),
+      ...overrides,
+    });
+  };
+  const names = (row: ReturnType<typeof session>, env: SessionEffectiveToolsContext) =>
+    projected(row, env)
+      .effectiveTools!.tools.filter((tool) => tool.capability === "webSearch")
+      .map((tool) => [tool.name, tool.source, tool.visibility]);
+
+  test("a model without hosted search reports the provider tools upfront", () => {
+    const env = context({ settings: providerSettings() });
+    expect(names(session("all", { model: "acme/no-search" }), env)).toEqual([
+      ["web_search", "runtime", "upfront"],
+      ["web_fetch", "runtime", "upfront"],
+    ]);
+    const result = projected(session("all", { model: "acme/no-search" }), env).effectiveTools!;
+    expect(result.capabilities.webSearch).toBe(true);
+    expect(result.unavailable).not.toContain("webSearch");
+  });
+
+  test("hosted search is kept in fallback mode and replaced in replace mode", () => {
+    expect(names(session(), context({ settings: providerSettings() }))).toEqual([
+      ["web_search", "hosted", "upfront"],
+    ]);
+    expect(
+      names(
+        session(),
+        context({ settings: providerSettings({ webSearchProviderMode: "replace" }) }),
+      ),
+    ).toEqual([
+      ["web_search", "runtime", "upfront"],
+      ["web_fetch", "runtime", "upfront"],
+    ]);
+  });
+
+  test("unconfigured deployments and disabled web search offer nothing new", () => {
+    const row = session("all", { model: "acme/no-search" });
+    expect(
+      names(row, context({ settings: providerSettings({ webSearchProvider: undefined }) })),
+    ).toEqual([]);
+    const disabled = session({ webSearch: false } as AgentCapabilities, {
+      model: "acme/no-search",
+    });
+    expect(names(disabled, context({ settings: providerSettings() }))).toEqual([]);
+  });
+});

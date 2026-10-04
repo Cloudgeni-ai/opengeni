@@ -6,6 +6,7 @@ import {
   deploymentProfiles,
   EXTERNAL_BROWSER_PROVIDER_PASSTHROUGH_ENV,
   JEV_CODE_SEARCH_PASSTHROUGH_ENV,
+  WEB_SEARCH_PROVIDER_PASSTHROUGH_ENV,
   generateRuntimeArtifacts,
   MCP_OAUTH_AND_TOOL_GATEWAY_MAINTENANCE_CUTOVER,
   MODEL_CATALOG_MAINTENANCE_CUTOVER,
@@ -1855,6 +1856,26 @@ describe("deployment contract", () => {
       {},
     );
     for (const key of JEV_CODE_SEARCH_PASSTHROUGH_ENV) {
+      expect(absent.runtimeEnv).not.toContain(`${key}=`);
+      expect(absent.missingEnvVars).not.toContain(key);
+    }
+  });
+
+  test("passes provider web search settings through only when configured", () => {
+    const outputs = {
+      temporal_host: { value: "host:7233" },
+      object_storage_bucket: { value: "opengeni-files" },
+      object_storage_azure_connection_string: { value: "x", sensitive: true },
+      helm_set_values: { value: {} },
+    };
+    const configured = generateRuntimeArtifacts(withSandboxBackend("docker"), outputs, {
+      OPENGENI_WEB_SEARCH_PROVIDER: "tinyfish",
+      OPENGENI_WEB_SEARCH_API_KEY: "search-key",
+    });
+    expect(configured.runtimeEnv).toContain("OPENGENI_WEB_SEARCH_PROVIDER=tinyfish");
+    expect(configured.runtimeEnv).toContain("OPENGENI_WEB_SEARCH_API_KEY=search-key");
+    const absent = generateRuntimeArtifacts(withSandboxBackend("docker"), outputs, {});
+    for (const key of WEB_SEARCH_PROVIDER_PASSTHROUGH_ENV) {
       expect(absent.runtimeEnv).not.toContain(`${key}=`);
       expect(absent.missingEnvVars).not.toContain(key);
     }
