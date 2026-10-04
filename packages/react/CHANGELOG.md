@@ -1,5 +1,50 @@
 # @opengeni/react
 
+## 1.3.0
+
+### Minor Changes
+
+- 178b5ae: Unify connector Allow, Ask first and Block decisions across tool transports and settings. Add durable programmatic approval handles, exact stored-operation continuation, and shared review facts with portable React presentation and paginated protected details.
+
+  Add lightweight Gmail message selection and bounded pagination/chunk helpers. Preserve exact access checks, uncertain outcomes and existing client compatibility. Deploy matching API, worker and native runtime artifacts through the documented maintenance migration.
+
+### Patch Changes
+
+- 2aed1a1: Embedded chat fixes for proxied embeds:
+
+  - `OpenGeniChat`'s new-chat composer is now the follow-up composer: file attachments, the model picker when offered, and `conversationProps.composerProps` (custom controls, voice input, copy). The first message's files and explicit model choice reach `createSession`, whose hook input now carries `resources` and, unless `modelSelection: false`, `model`, `reasoningEffort`, and `latencyMode`; the proxy adds those files and applies those choices to the request the hook returns.
+  - The session proxy forwards voice input (`POST .../transcriptions`) as the resolved user, and reports only one-shot recordings in the client config. `voiceInput: false` reports voice unavailable and refuses the route. Previously the config advertised voice while the route returned 404.
+  - `OpenGeniChat` and `SessionConversation` in `baseUrl` mode accept `headers` (static or per request) and `fetch` for bearer-token apps, and use a `client` passed alongside `baseUrl` instead of silently dropping it.
+
+- Updated dependencies [178b5ae]
+- Updated dependencies [2aed1a1]
+- Updated dependencies [414d416]
+  - @opengeni/sdk@1.3.0
+  - @opengeni/connect@1.3.0
+
+## 1.2.0
+
+### Minor Changes
+
+- d870f32: Support model-scoped signup and coupon credits with a shared operator default and
+  per-offer overrides. Update coverage at runtime, spend eligible promotions before
+  general credits, and preserve allocation and retry accounting. Keep scoped coupon
+  redemption separate from paid top-ups. Show credit funding in model selection and
+  current coverage on demand in billing. Legacy unrestricted grants stay unrestricted.
+
+### Patch Changes
+
+- e70ddfe: Refresh model funding when the embedded conversation's model picker opens, so
+  credit labels reflect current balances and promotional coverage without closing
+  the menu or adding labels to the closed selector.
+- 21c8904: Support optional HTTPS model catalog logos with safe image fallbacks, and declare the item type of the SDK filesystem function tool's command tuple.
+- d081155: Keep accepted startup feedback in the conversation with continuous loading presentation and immediate dispatch diagnostics. Show loading details after 30 seconds and slower-start copy after 60 seconds.
+- Updated dependencies [11c4d3c]
+- Updated dependencies [21c8904]
+- Updated dependencies [d870f32]
+  - @opengeni/sdk@1.2.0
+  - @opengeni/connect@1.2.0
+
 ## 1.1.0
 
 ### Patch Changes

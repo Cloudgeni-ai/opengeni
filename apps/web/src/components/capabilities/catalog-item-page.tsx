@@ -671,7 +671,7 @@ export function CatalogItemPage({
       {workspaceId && hasConnectorToolPermissionTarget(item, health) ? (
         <DetailSection
           title="Approvals"
-          description="Choose which actions need your OK. Applies to new messages."
+          description="Choose which actions run automatically and which need your review."
         >
           <ConnectorToolPermissions
             key={`${workspaceId}:${item.id}`}

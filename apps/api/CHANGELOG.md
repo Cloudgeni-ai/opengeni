@@ -1,5 +1,79 @@
 # @opengeni/api-router
 
+## 1.3.0
+
+### Patch Changes
+
+- 1670f64: Keep the API process alive and answer a retryable 503 (`upstream_unavailable`, `details.code: DATABASE_UNAVAILABLE`) when the database terminates its connections during a deploy drain, failover, or restart, instead of crashing on an unhandled Slack interaction claim rejection or answering an opaque 500.
+- 178b5ae: Unify connector Allow, Ask first and Block decisions across tool transports and settings. Add durable programmatic approval handles, exact stored-operation continuation, and shared review facts with portable React presentation and paginated protected details.
+
+  Add lightweight Gmail message selection and bounded pagination/chunk helpers. Preserve exact access checks, uncertain outcomes and existing client compatibility. Deploy matching API, worker and native runtime artifacts through the documented maintenance migration.
+
+- Updated dependencies [1670f64]
+- Updated dependencies [62006f1]
+- Updated dependencies [fd4346c]
+- Updated dependencies [178b5ae]
+- Updated dependencies [757a7e4]
+- Updated dependencies [414d416]
+  - @opengeni/core@1.3.0
+  - @opengeni/db@1.3.0
+  - @opengeni/runtime@1.3.0
+  - @opengeni/contracts@1.3.0
+  - @opengeni/capabilities@1.3.0
+  - @opengeni/codemode@1.3.0
+  - @opengeni/observability@1.3.0
+  - @opengeni/tool-gateway@1.3.0
+  - @opengeni/documents@1.3.0
+  - @opengeni/events@1.3.0
+  - @opengeni/artifact-tool@1.3.0
+  - @opengeni/codex@1.3.0
+  - @opengeni/config@1.3.0
+  - @opengeni/github@1.3.0
+  - @opengeni/interaction@1.3.0
+  - @opengeni/storage@1.3.0
+  - @opengeni/agent-proto@1.3.0
+  - @opengeni/network@1.3.0
+  - @opengeni/xai-subscription@1.3.0
+
+## 1.2.0
+
+### Minor Changes
+
+- d870f32: Support model-scoped signup and coupon credits with a shared operator default and
+  per-offer overrides. Update coverage at runtime, spend eligible promotions before
+  general credits, and preserve allocation and retry accounting. Keep scoped coupon
+  redemption separate from paid top-ups. Show credit funding in model selection and
+  current coverage on demand in billing. Legacy unrestricted grants stay unrestricted.
+
+### Patch Changes
+
+- e70ddfe: Restore disputed credits correctly when Stripe delivers the resolution before
+  the hold. Record the matching hold and release atomically and idempotently so
+  late or repeated webhooks cannot withhold restored credits.
+- Updated dependencies [7424e7c]
+- Updated dependencies [1033595]
+- Updated dependencies [21c8904]
+- Updated dependencies [d870f32]
+  - @opengeni/db@1.2.0
+  - @opengeni/config@1.2.0
+  - @opengeni/contracts@1.2.0
+  - @opengeni/runtime@1.2.0
+  - @opengeni/core@1.2.0
+  - @opengeni/documents@1.2.0
+  - @opengeni/events@1.2.0
+  - @opengeni/codemode@1.2.0
+  - @opengeni/github@1.2.0
+  - @opengeni/storage@1.2.0
+  - @opengeni/artifact-tool@1.2.0
+  - @opengeni/codex@1.2.0
+  - @opengeni/interaction@1.2.0
+  - @opengeni/observability@1.2.0
+  - @opengeni/tool-gateway@1.2.0
+  - @opengeni/agent-proto@1.2.0
+  - @opengeni/capabilities@1.2.0
+  - @opengeni/network@1.2.0
+  - @opengeni/xai-subscription@1.2.0
+
 ## 1.1.0
 
 ### Patch Changes

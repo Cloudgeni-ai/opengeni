@@ -12,7 +12,11 @@ message and approval, and `verifyToolRequest` checks it on every MCP call.
 # OPENGENI_ORGANIZATION_ID=...
 # OPENGENI_API_KEY=ogk_...          # full-access organization key, server only
 bun run setup                       # prints OPENGENI_WORKSPACE_ID=...; add it to .env.local
-cloudflared tunnel --url http://localhost:4101   # OpenGeni must reach /api/mcp over HTTPS
+# OpenGeni must reach /api/mcp over HTTPS. Tunnel only that path, never port 4101
+# itself (its demo proxy trusts x-demo-user): run the tool-only forwarder from
+# .agents/skills/opengeni-client/references/tools-and-auth.md ("Local development")
+# with TOOL_PATH="/api/mcp" and APP="http://localhost:4101", then:
+cloudflared tunnel --url http://localhost:3999
 # add OPENGENI_TOOL_SERVER_URL=https://<name>.trycloudflare.com/api/mcp to .env.local
 bun run dev                         # http://localhost:4101
 bun run e2e ada                     # chat through the proxy as "ada"

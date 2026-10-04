@@ -182,7 +182,7 @@ index e1794ee4..fab308dc 100644
 +        if (this.closed) throw new ClientClosedError();
 +        signal.throwIfAborted();
 +        try {
-+          await awaitCommandStartOperation(() => (0, import_nice_grpc11.waitForChannelReady)(this.channel, new Date(Date.now() + 5000)), signal);
++          await awaitCommandStartOperation(() => (0, import_nice_grpc11.waitForChannelReady)(this.channel, new Date(Date.now() + 12000)), signal);
 +        } catch (error) {
 +          signal.throwIfAborted();
 +          if (this.closed) throw new ClientClosedError();
@@ -839,7 +839,7 @@ index 83068162..5273839c 100644
 +        if (this.closed) throw new ClientClosedError();
 +        signal.throwIfAborted();
 +        try {
-+          await awaitCommandStartOperation(() => waitForChannelReady(this.channel, new Date(Date.now() + 5000)), signal);
++          await awaitCommandStartOperation(() => waitForChannelReady(this.channel, new Date(Date.now() + 12000)), signal);
 +        } catch (error) {
 +          signal.throwIfAborted();
 +          if (this.closed) throw new ClientClosedError();

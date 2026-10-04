@@ -21,10 +21,11 @@ import { registerModelConnectionAccessRoutes } from "./routes/model-connection-a
 import {
   codeSearchDeploymentPolicy,
   agentConfigDeploymentPolicy,
+  canonicalPublicOrigin,
   configuredAllowedReasoningEfforts,
   resolveFirstPartyMcpToolPolicy,
-  resolveVoiceInputProviderRegistry,
   UnsupportedLatencyModeError,
+  voiceInputPricingIssues,
   type Settings,
 } from "@opengeni/config";
 import {
@@ -39,6 +40,7 @@ import {
   resolveWorkspaceMemoryEnabled,
   resolveWorkspaceMemoryPromptMode,
   VOICE_INPUT_ACCEPTED_MIME_TYPES,
+  WorkspaceVoiceInputSettings,
   TRANSCRIPTION_RECORDING_PROVIDER_SEGMENT_SECONDS,
   ToolGatewayApprovalRequest,
   ToolGatewayCallRequest,
@@ -58,6 +60,7 @@ import {
   CodemodeOperationConflictError,
   CodemodeOperationNotExecutableError,
   CodemodePayloadTooLargeError,
+  CodemodeOperationLimitError,
   CodemodeToolApprovalRequiredError,
   CodemodeToolNotInCatalogError,
   ConnectAttemptConflictError,
@@ -95,6 +98,8 @@ import {
   ApiHttpError,
   agentConfigHttpError,
   allowanceExhaustedHttpError,
+  DATABASE_UNAVAILABLE_ERROR_DETAIL_CODE,
+  databaseUnavailableHttpError,
   modelUnavailableHttpError,
   scheduledTaskTargetAccessHttpError,
   workspaceControlBusyHttpError,
@@ -272,6 +277,7 @@ import { registerWorkspaceLearningRoutes } from "./routes/workspace-learning";
 import { registerCompanyProfileRoutes } from "./routes/company-profile";
 import { registerCompanyBrainRoutes } from "./routes/company-brain";
 import { registerSlackTaskPolicyRoutes } from "./routes/slack-task-policy";
+import { registerSlackBotAccessRoutes } from "./routes/slack-bot-access";
 import { registerWorkspaceStateRoutes } from "./routes/workspace-state";
 import { registerWorkspaceArtifactRoutes } from "./routes/workspace-artifacts";
 import { registerArtifactCatalogRoutes } from "./routes/artifact-catalog";
@@ -486,12 +492,27 @@ export function createAppComposition(deps: AppDependencies): {
     }, MANAGED_AUTH_REAPER_INTERVAL_MS);
     (timer as ReturnType<typeof setInterval> & { unref?: () => void }).unref?.();
   }
+  if (deps.transcription === undefined) {
+    // Voice pricing problems never fail boot (workers share this config); the
+    // affected provider is withheld and the operator sees exactly why, once.
+    for (const issue of voiceInputPricingIssues(deps.settings)) {
+      observability.error(
+        `Voice input provider ${issue.providerId} is unavailable: ${issue.message}`,
+        {
+          providerId: issue.providerId,
+          env: issue.env,
+          reason: issue.reason,
+        },
+      );
+    }
+  }
   const transcription =
     deps.transcription === undefined
       ? createTranscriptionService({
           settings: deps.settings,
           db: deps.db,
           ...(deps.codexFetch ? { codexFetch: deps.codexFetch } : {}),
+          log: (message, attributes) => observability.error(message, attributes),
         })
       : deps.transcription;
   const transcriptionSegmenter =
@@ -1186,6 +1207,8 @@ export function createAppComposition(deps: AppDependencies): {
       creditsAvailable: false,
     });
     let modelSelectionForbidden = false;
+    let voiceInputAvailable = false;
+    let voiceInputProviders: string[] = [];
     const requestedWorkspaceId = c.req.query("workspaceId");
     if (requestedWorkspaceId !== undefined && requestedWorkspaceId.trim() === "") {
       throw new HTTPException(422, { message: "workspaceId must not be empty" });
@@ -1236,6 +1259,25 @@ export function createAppComposition(deps: AppDependencies): {
             selections = [];
           }
           const workspace = await getWorkspace(deps.db, workspaceId);
+          const voicePreferences = WorkspaceVoiceInputSettings.safeParse(
+            workspace?.settings.voiceInput,
+          ).data;
+          const voiceContext = {
+            workspaceId,
+            subjectId: grant.subjectId,
+            preferredProvider: voicePreferences?.preferredProvider,
+            fallbackEnabled: voicePreferences?.fallbackEnabled,
+          };
+          if (hasPermission(grant.permissions, "sessions:create") && transcription) {
+            // `providers` lists every ready provider (the workspace picker);
+            // `available` honours the workspace preference and fallback, so
+            // the composer never offers a mic every request would refuse.
+            voiceInputProviders = (await transcription.availableProviderIds?.(voiceContext)) ?? [];
+            voiceInputAvailable =
+              voiceInputProviders.length > 0 &&
+              (await Promise.resolve(transcription.available(voiceContext)).catch(() => false));
+          }
+
           defaultSelection = await resolveDefaultSessionModelForSelections(deps.db, {
             settings: catalogSettings,
             accountId: grant.accountId,
@@ -1298,10 +1340,8 @@ export function createAppComposition(deps: AppDependencies): {
           maxSizeBytes: objectStorage?.maxSinglePutSizeBytes ?? 5_000_000_000,
         },
         voiceInput: {
-          providers: resolveVoiceInputProviderRegistry(deps.settings).map(
-            (provider) => provider.id,
-          ),
-          available: (await transcription?.available()) ?? false,
+          providers: voiceInputProviders,
+          available: voiceInputAvailable,
           maxDurationSeconds: deps.settings.voiceInputMaxDurationSeconds,
           maxSizeBytes: deps.settings.voiceInputMaxSizeBytes,
           acceptedMimeTypes: [...VOICE_INPUT_ACCEPTED_MIME_TYPES],
@@ -1309,7 +1349,7 @@ export function createAppComposition(deps: AppDependencies): {
           objectStorage &&
           transcription &&
           transcriptionSegmenter &&
-          (await transcription.available()) &&
+          voiceInputAvailable &&
           (await transcriptionSegmenter.available())
             ? {
                 resumable: {
@@ -1391,10 +1431,32 @@ export function createAppComposition(deps: AppDependencies): {
       if (error instanceof HTTPException && error.status === 401) challenge();
       throw error;
     }
+    // Stateless JSON-response transport: there is no server-to-client stream.
+    // Answering GET with an empty 200 made clients (Claude) reconnect every
+    // second; refuse it after authorization, as the workspace endpoint does.
+    if (c.req.method === "GET") {
+      const version = c.req.header("mcp-protocol-version");
+      if (version && !SUPPORTED_PROTOCOL_VERSIONS.includes(version)) {
+        return c.json(
+          {
+            jsonrpc: "2.0",
+            id: null,
+            error: { code: -32000, message: "Unsupported protocol version." },
+          },
+          400,
+        );
+      }
+      return c.json(
+        { jsonrpc: "2.0", id: null, error: { code: -32000, message: "Method not allowed." } },
+        405,
+        { allow: "POST" },
+      );
+    }
     const transport = new WebStandardStreamableHTTPServerTransport({ enableJsonResponse: true });
     const mcp = buildOrganizationMcpServer({
       caller,
       origin: new URL(c.req.url).origin,
+      publicOrigin: canonicalPublicOrigin(deps.settings.publicBaseUrl),
       dispatch: async (request) => await app.fetch(request, c.env),
       signal: c.req.raw.signal,
     });
@@ -1752,7 +1814,9 @@ export function createAppComposition(deps: AppDependencies): {
       throw new HTTPException(403, { message: "Codemode access denied" });
     }
     try {
-      const operation = await readCodemodeOperation(routeDeps, grant, c.req.param("operationId"));
+      const operation = await readCodemodeOperation(routeDeps, grant, c.req.param("operationId"), {
+        durableApproval: c.req.header("x-opengeni-codemode-capabilities") === "durable-approval-v1",
+      });
       if (!operation)
         throw new HTTPException(404, {
           message: "Codemode operation not found",
@@ -1788,6 +1852,7 @@ export function createAppComposition(deps: AppDependencies): {
   registerCompanyProfileRoutes(app, routeDeps);
   registerCompanyBrainRoutes(app, routeDeps);
   registerSlackTaskPolicyRoutes(app, routeDeps);
+  registerSlackBotAccessRoutes(app, routeDeps);
   registerWorkspaceStateRoutes(app, routeDeps);
   registerMemorySlackPublicationRoutes(app, routeDeps);
   registerWorkspaceArtifactRoutes(app, routeDeps);
@@ -1889,6 +1954,7 @@ export function createAppComposition(deps: AppDependencies): {
             : null) ??
           requestBodyValidationHttpError(rawError) ??
           invalidPathIdentifierHttpError(rawError, new URL(c.req.url).pathname) ??
+          databaseUnavailableHttpError(rawError, c.req.method) ??
           rawError);
     const compactionLock = codexCompactionV2ProviderLockedError(error);
     const apiError = error instanceof ApiHttpError ? error : null;
@@ -1897,6 +1963,9 @@ export function createAppComposition(deps: AppDependencies): {
       ? compactionLock.code
       : (apiError?.code ?? errorCodeForStatus(status));
     if (status >= 500) logHttpFailure(c, status, code, rawError);
+    if (apiError?.details?.code === DATABASE_UNAVAILABLE_ERROR_DETAIL_CODE) {
+      c.header("retry-after", "1");
+    }
     const envelope = ErrorEnvelope.parse({
       error: {
         status,
@@ -2261,6 +2330,9 @@ function codemodeHttpError(error: unknown): HTTPException {
   }
   if (error instanceof CodemodePayloadTooLargeError) {
     return new HTTPException(413, { message: error.message, cause: error });
+  }
+  if (error instanceof CodemodeOperationLimitError) {
+    return new HTTPException(429, { message: error.message, cause: error });
   }
   return error instanceof HTTPException
     ? error

@@ -5293,6 +5293,7 @@ export const sessionRealtimeModes = pgTable(
     modelValid: check(
       "session_realtime_modes_model_check",
       sql`${table.model} in (
+        'opengeni-azure/gpt-live-1',
         'gpt-live-1-boulder-alpha',
         'supergrok/grok-voice-think-fast-2.0',
         'opengeni-gateway/openai/gpt-realtime-2.1',
@@ -7954,12 +7955,26 @@ export const sessionAttemptCodemodeCalls = pgTable(
     executionGeneration: integer("execution_generation").notNull(),
     catalogDigest: text("catalog_digest").notNull(),
     requestDigest: text("request_digest").notNull(),
+    durableApproval: boolean("durable_approval").notNull().default(false),
+    approvalRequestId: uuid("approval_request_id").references(() => connectorActionRequests.id),
+    effectDigest: text("effect_digest"),
+    executionAttemptId: uuid("execution_attempt_id"),
+    executionAttemptGeneration: integer("execution_attempt_generation"),
+    executionCatalogDigest: text("execution_catalog_digest"),
     serverId: text("server_id").notNull(),
     toolName: text("tool_name").notNull(),
     arguments: jsonb("arguments").$type<Record<string, unknown>>().notNull(),
     callerSubjectId: text("caller_subject_id").notNull(),
     state: text("state", {
-      enum: ["queued", "running", "completed", "failed", "outcome_unknown", "cancelled"],
+      enum: [
+        "queued",
+        "waiting_for_approval",
+        "running",
+        "completed",
+        "failed",
+        "outcome_unknown",
+        "cancelled",
+      ],
     })
       .notNull()
       .default("queued"),
@@ -7998,6 +8013,34 @@ export const sessionAttemptCodemodeCalls = pgTable(
         sessionAttemptToolCatalogs.digest,
       ],
     }).onDelete("cascade"),
+    executionCatalog: foreignKey({
+      name: "session_codemode_execution_catalog_fk",
+      columns: [
+        table.accountId,
+        table.workspaceId,
+        table.sessionId,
+        table.turnId,
+        table.executionAttemptId,
+        table.executionAttemptGeneration,
+        table.executionCatalogDigest,
+      ],
+      foreignColumns: [
+        sessionAttemptToolCatalogs.accountId,
+        sessionAttemptToolCatalogs.workspaceId,
+        sessionAttemptToolCatalogs.sessionId,
+        sessionAttemptToolCatalogs.turnId,
+        sessionAttemptToolCatalogs.attemptId,
+        sessionAttemptToolCatalogs.executionGeneration,
+        sessionAttemptToolCatalogs.digest,
+      ],
+    }).onDelete("cascade"),
+    continuationValid: check(
+      "session_codemode_continuation_check",
+      sql`(
+      (${table.executionAttemptId} is null and ${table.executionAttemptGeneration} is null and ${table.executionCatalogDigest} is null)
+      or (${table.executionAttemptId} is not null and ${table.executionAttemptGeneration} is not null and ${table.executionAttemptGeneration} > 0 and ${table.executionCatalogDigest} is not null and ${table.executionCatalogDigest} ~ '^[0-9a-f]{64}$')
+    ) and (${table.approvalRequestId} is null or (${table.durableApproval} and ${table.effectDigest} is not null and ${table.effectDigest} ~ '^[0-9a-f]{64}$'))`,
+    ),
     sessionTurn: index("session_attempt_codemode_calls_session_turn_idx").on(
       table.workspaceId,
       table.sessionId,
@@ -8036,7 +8079,8 @@ export const sessionAttemptCodemodeCalls = pgTable(
     lifecycleValid: check(
       "session_attempt_codemode_calls_lifecycle_check",
       sql`(
-        ${table.state} = 'queued'
+        ${table.state} in ('queued', 'waiting_for_approval')
+        and (${table.state} <> 'waiting_for_approval' or ${table.approvalRequestId} is not null)
         and ${table.claimId} is null
         and ${table.claimedAt} is null
         and ${table.executionStartedAt} is null
@@ -8125,9 +8169,11 @@ export const connectorActionRequests = pgTable(
     // Attempt-frozen provenance intentionally survives policy deletion.
     policyId: uuid("policy_id"),
     policyVersion: integer("policy_version"),
-    policySource: text("policy_source").$type<"explicit" | "ambiguous">().notNull(),
+    policySource: text("policy_source").$type<"explicit" | "default" | "ambiguous">().notNull(),
     policyDecision: text("policy_decision").$type<ConnectorActionPolicyDecision>().notNull(),
     actionFingerprint: text("action_fingerprint").notNull(),
+    reviewArguments: text("review_arguments"),
+    reviewContext: jsonb("review_context").$type<import("@opengeni/contracts").ToolReviewContext>(),
     status: text("status")
       .$type<
         | "pending"
@@ -8209,6 +8255,14 @@ export const connectorActionRequests = pgTable(
     policyDecisionValid: check(
       "connector_action_requests_policy_decision_chk",
       sql`${table.policyDecision} in ('allow', 'ask', 'block')`,
+    ),
+    reviewArgumentsBound: check(
+      "connector_review_arguments_bound",
+      sql`${table.reviewArguments} is null or octet_length(${table.reviewArguments}) <= 4194304`,
+    ),
+    reviewContextBound: check(
+      "connector_review_context_bound",
+      sql`${table.reviewContext} is null or octet_length(${table.reviewContext}::text) <= 4194304`,
     ),
     statusValid: check(
       "connector_action_requests_status_chk",

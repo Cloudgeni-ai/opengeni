@@ -1,5 +1,20 @@
 // Types only: a value re-export would pull the contracts runtime into the root entry.
 export type {
+  AvailableOpenGeniSlackBots,
+  OpenGeniSlackBotOrganizationAccess,
+  UpdateOpenGeniSlackBotOrganizationAccess,
+} from "./types";
+export type {
+  ToolActionReview,
+  ToolReviewDetailsPage,
+  ToolReviewStatus,
+} from "@opengeni/contracts";
+export {
+  toolReviewAction,
+  toolReviewFields,
+  toolReviewDetails,
+} from "@opengeni/contracts/tool-review-presentation";
+export type {
   SubscriptionAccountSummary,
   SubscriptionPoolSettings,
   ClaudeSubscriptionSetupTokenRequest,
@@ -341,9 +356,11 @@ export type {
   CodexRealtimeControllerStatus,
   CodexRealtimeMicrophoneState,
   CodexRealtimeOwnerStorage,
+  CodexRealtimeRefusal,
   CreateCodexRealtimeControllerOptions,
   RealtimeControllerTransportStarter,
 } from "./codex-realtime-controller";
+export { codexRealtimeRefusal } from "./codex-realtime-controller";
 export {
   createGatewayRealtimeTransportStarter,
   createXaiSubscriptionRealtimeTransportStarter,
@@ -734,6 +751,7 @@ export type {
   SessionRealtimeMode,
   SessionRealtimeModel,
   SessionRealtimeMutationResponse,
+  SessionRealtimeStopInstruction,
   SessionRealtimeState,
   WorkspaceModelCatalogModel,
   WorkspaceModelCatalogResponse,

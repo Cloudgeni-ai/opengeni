@@ -83,3 +83,54 @@ test("provider selection and toggles preserve the other workspace preferences", 
     container.remove();
   }
 });
+
+test("an unavailable saved preference never locks an admin out of choosing another provider", async () => {
+  const writes: unknown[] = [];
+  const context = {
+    workspaces: [
+      {
+        id: "workspace",
+        settings: {
+          voiceInput: {
+            enabled: true,
+            preferredProvider: "codex-subscription",
+            fallbackEnabled: false,
+          },
+        },
+      },
+    ],
+    clientConfig: {
+      // The preferred Codex subscription is gone and fallback is off, so the
+      // composer is unavailable, but MAI is ready for this workspace.
+      voiceInput: { available: false, providers: ["azure-mai"] },
+    },
+    captureWorkspaceInvocation: () => ({}),
+    ownsWorkspaceInvocation: () => true,
+    updateWorkspaceSettings: async (_id: string, patch: unknown) => {
+      writes.push(patch);
+      return {};
+    },
+  } as unknown as ComponentProps<typeof VoiceInputPreferences>["context"];
+  const container = document.createElement("div");
+  document.body.append(container);
+  const root = createRoot(container);
+  try {
+    await act(async () =>
+      root.render(<VoiceInputPreferences workspaceId="workspace" canManage context={context} />),
+    );
+    const trigger = container.querySelector<HTMLButtonElement>('[role="combobox"]')!;
+    expect(trigger.disabled).toBe(false);
+    await act(async () => trigger.click());
+    await act(async () => await new Promise((resolve) => setTimeout(resolve, 20)));
+    const automatic = [...document.querySelectorAll<HTMLElement>('[role="option"]')].find(
+      (option) => option.textContent?.includes("Automatic"),
+    )!;
+    await act(async () => automatic.click());
+    expect(writes[0]).toEqual({
+      voiceInput: { enabled: true, preferredProvider: null, fallbackEnabled: false },
+    });
+  } finally {
+    await act(async () => root.unmount());
+    container.remove();
+  }
+});

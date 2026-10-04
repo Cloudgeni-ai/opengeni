@@ -11,7 +11,18 @@ export const ConnectorToolPermissionEntry = z.object({
   group: z.enum(["read", "write", "other"]),
   permission: ConnectorToolPermission,
   inherited: z.boolean(),
+  resetReason: z.literal("operation_changed").optional(),
   approvalRequired: z.boolean(),
+  source: z.enum(["recommended", "connector_default", "tool", "action", "conflict"]).optional(),
+  conditional: z.boolean().optional(),
+  actionPermissions: z
+    .array(
+      z.object({
+        actionName: z.string(),
+        permission: ConnectorToolPermission,
+      }),
+    )
+    .optional(),
 });
 export type ConnectorToolPermissionEntry = z.infer<typeof ConnectorToolPermissionEntry>;
 
@@ -22,6 +33,20 @@ export const ConnectorToolPermissionsResponse = z.object({
   tools: z.array(ConnectorToolPermissionEntry),
   discoveryError: z.string().nullable(),
   canManage: z.boolean(),
+  appliesTo: z.literal("next_attempt").optional(),
+  revision: z.string().optional(),
+  accountLabel: z.string().optional(),
+  instanceKey: z.string().optional(),
+  accounts: z
+    .array(
+      z.object({
+        connectionId: z.string(),
+        label: z.string(),
+        scope: z.enum(["personal", "workspace", "none"]),
+        instanceKey: z.string().optional(),
+      }),
+    )
+    .optional(),
 });
 export type ConnectorToolPermissionsResponse = z.infer<typeof ConnectorToolPermissionsResponse>;
 
@@ -32,7 +57,9 @@ export const UpdateConnectorToolPermissionsRequest = z.discriminatedUnion("targe
     .object({
       connectionId: z.string().min(1).max(512),
       target: z.literal("default"),
-      permission: ConnectorToolPermission,
+      permission: ConnectorToolPermission.nullable(),
+      expectedRevision: z.string().optional(),
+      instanceKey: z.string().optional(),
     })
     .strict(),
   z
@@ -51,7 +78,28 @@ export const UpdateConnectorToolPermissionsRequest = z.discriminatedUnion("targe
         )
         .min(1)
         .max(MCP_MAX_CATALOG_TOOL_ENTRIES),
-      permission: ConnectorToolPermission,
+      permission: ConnectorToolPermission.nullable(),
+      expectedRevision: z.string().optional(),
+      instanceKey: z.string().optional(),
+    })
+    .strict(),
+  z
+    .object({
+      connectionId: z.string().min(1).max(512),
+      target: z.literal("action"),
+      toolName: z
+        .string()
+        .min(1)
+        .max(512)
+        .refine((value) => value !== "*" && value === value.trim()),
+      actionName: z
+        .string()
+        .min(1)
+        .max(512)
+        .refine((value) => value !== "*" && value === value.trim()),
+      permission: ConnectorToolPermission.nullable(),
+      expectedRevision: z.string().optional(),
+      instanceKey: z.string().optional(),
     })
     .strict(),
 ]);

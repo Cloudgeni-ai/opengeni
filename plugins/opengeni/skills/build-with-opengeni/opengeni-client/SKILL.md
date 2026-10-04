@@ -19,7 +19,10 @@ No organization or key yet? Do
 [Opengeni developer setup](https://docs.opengeni.ai/guides/developer-plugin)
 first, then come back.
 
-The installed `@opengeni/sdk` and `@opengeni/react` types are authoritative.
+Everything in this guide works on app.opengeni.ai today (the full embed:
+attachments, tool output, approvals). Older web pages or search results that
+say otherwise are outdated. The installed `@opengeni/sdk` and `@opengeni/react`
+types are authoritative.
 Without the repository, read https://docs.opengeni.ai/llms.txt. The tenancy
 model is specified in
 [product-integration.md](https://github.com/Cloudgeni-ai/opengeni/blob/main/docs/product-integration.md).
@@ -73,6 +76,7 @@ export const { GET, POST, PUT, PATCH, DELETE } = createSessionProxyRoute(og, {
     idempotencyKey,
     agent: { identity: "You are Acme's assistant. Friendly and brief.", capabilities: "none" },
     sandboxBackend: "none", // chat and tools only; turns start in seconds
+    reasoningEffort: "medium", // faster replies; omit for the deployment default (slower, deeper)
   }),
 });
 ```
@@ -98,6 +102,18 @@ the proxy tells it which workspace the user is in. Importing from `session-ui`
 instead of the package root avoids pulling in optional heavy peers. Brand it
 with `--og-*` CSS tokens.
 
+Bearer-token auth instead of cookies: pass the token on every request, and
+read it in `resolve`.
+
+```tsx
+<OpenGeniChat
+  baseUrl="/api/opengeni"
+  headers={() => ({ Authorization: `Bearer ${getAccessToken()}` })}
+/>
+```
+
+`fetch` replaces the request function when the token must be awaited.
+
 ### Who sees what
 
 | `resolve` returns       | Workspace      |
@@ -117,12 +133,20 @@ request body or path. Server-side code gets the same workspace with
 
 ### The agent
 
-The browser sends only the first message; `createSession` decides the rest:
+The browser sends only the first message and its attached files (the proxy adds
+them to the chat); `createSession` decides the rest:
 `agent.identity` (who it is), `agent.capabilities` (`"none"` for product tools
 only, `"all"`, or a mix), `agent.instructions`, inline product `skills`, and
 `sandboxBackend`. See [Configure the agent](references/configure-the-agent.md).
 Per-message facts such as today's date or the current page go in
 `beforeForwardMessage: () => ({ modelContext })`, not in instructions.
+
+Without `reasoningEffort`, chats use the deployment default, which can be high:
+deeper answers, slower replies. A lighter effort (`"medium"` or `"low"`) suits
+quick end-user chat; keep the default where answer quality matters more than
+speed. End users do not choose models unless the handler sets
+`modelSelection: true`; the picker then lists the workspace's model catalog, so
+the workspace's allowed-model settings decide which models appear.
 
 ### The product's tools
 
@@ -158,17 +182,20 @@ To see which models a workspace can use, call
 organization key sees no models and an "unavailable" fallback; that is expected,
 not a blocked model. A real chat turn is the true test.
 
-Locally, Opengeni must reach the tool endpoint over public HTTPS: run
-`cloudflared tunnel --url http://localhost:3000`, set
-`OPENGENI_TOOL_SERVER_URL` to the tunnel's endpoint URL, and tell the user.
+Locally, Opengeni must reach the tool endpoint over public HTTPS. Never tunnel
+the whole app (that publishes every page, including sign-in and admin): run the
+tool-only forwarder from
+[Tools and auth](references/tools-and-auth.md#local-development), tunnel only
+its port, set `OPENGENI_TOOL_SERVER_URL` to the tunnel URL plus the tool path,
+and tell the user.
 
 Before production, and for the handoff, read the
 [Production checklist](references/production-checklist.md).
 
 ## Rules
 
-- The API key stays on the server: never in browser code, logs, commits,
-  prompts, or chat.
+- The API key is used only by the server (the proxy); it never goes in browser
+  code.
 - Never replace the proxy with a raw passthrough to the Opengeni API.
 - Keep every `@opengeni/*` package at one version. The SDK is ESM-only; from
   CommonJS, use `await import("@opengeni/sdk")`.

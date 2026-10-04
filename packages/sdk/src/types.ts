@@ -83,7 +83,7 @@ export type CodexRealtimeWebrtcRequest = {
 export type CodexRealtimeWebrtcResponse = {
   sdp: string;
   version: CodexRealtimeWebrtcVersion;
-  model: "gpt-live-1-boulder-alpha";
+  model: "gpt-live-1-boulder-alpha" | "opengeni-azure/gpt-live-1";
   connectionId: string;
   connectionEpoch: number;
   startupFenceSequence: number;
@@ -271,6 +271,7 @@ export type SyncSessionRealtimeLedgerResponse = {
 };
 
 export type SessionRealtimeModel =
+  | "opengeni-azure/gpt-live-1"
   | "gpt-live-1-boulder-alpha"
   | "supergrok/grok-voice-think-fast-2.0"
   | "opengeni-gateway/openai/gpt-realtime-2.1"
@@ -287,6 +288,8 @@ export type WorkspaceRealtimeModelCatalogItem = {
   description: string;
   available: boolean;
   unavailableReason: string | null;
+  /** Machine-readable reason when unavailable, e.g. `insufficient_credits`. */
+  unavailableCode?: string | null | undefined;
   recommended: boolean;
 };
 
@@ -333,9 +336,17 @@ export type EndSessionRealtimeRequest = RenewSessionRealtimeRequest & {
   reason: Extract<SessionRealtimeEndReason, "user_stop" | "browser_unload">;
 };
 
+/** Server instruction to end a live call now (for example, out of credits). */
+export type SessionRealtimeStopInstruction = {
+  code: string;
+  message: string;
+};
+
 export type SessionRealtimeMutationResponse = {
   mode: SessionRealtimeMode;
   replay: boolean;
+  /** Present on a heartbeat when the server stopped extending the lease. */
+  stop?: SessionRealtimeStopInstruction | undefined;
 };
 
 export type SessionStatus =
@@ -1009,6 +1020,13 @@ export type OpenGeniSlackBotInstallRequest = {
   /** Existing OpenGeni Slack bot connection to reinstall in place. */
   connectionId?: string | undefined;
 };
+
+export type AvailableOpenGeniSlackBots = {
+  connections: ConnectionMetadata[];
+  organizationSharedConnectionIds: string[];
+};
+export type UpdateOpenGeniSlackBotOrganizationAccess = { enabled: boolean };
+export type OpenGeniSlackBotOrganizationAccess = { enabled: boolean; generation: number };
 
 export type FikenInstallRequest = {
   apiToken: string;
@@ -4375,7 +4393,10 @@ export type TranscriptionRecordingErrorCode =
   | "unavailable"
   | "too_large"
   | "invalid_audio"
-  | "unknown";
+  | "unknown"
+  | "insufficient_credits"
+  | "allowance_exhausted"
+  | "monthly_model_cost_limit";
 
 export type TranscriptionRecordingState =
   | "uploading"
@@ -5068,6 +5089,7 @@ export type UpdateSlackChannelRoutesRequest = {
 };
 
 export type VoiceInputProviderId =
+  | "azure-mai"
   | "supergrok-subscription"
   | "codex-subscription"
   | "openai"
@@ -9008,6 +9030,9 @@ export type ConnectorToolPermissionEntry = {
   permission: ConnectorToolPermission;
   inherited: boolean;
   approvalRequired: boolean;
+  source?: "recommended" | "connector_default" | "tool" | "action" | "conflict";
+  conditional?: boolean;
+  actionPermissions?: Array<{ actionName: string; permission: ConnectorToolPermission }>;
 };
 export type ConnectorToolPermissionsResponse = {
   connectionId: string;
@@ -9016,11 +9041,27 @@ export type ConnectorToolPermissionsResponse = {
   tools: ConnectorToolPermissionEntry[];
   discoveryError: string | null;
   canManage: boolean;
+  appliesTo?: "next_attempt";
+  revision?: string;
+  accountLabel?: string;
+  instanceKey?: string;
+  accounts?: Array<{
+    connectionId: string;
+    label: string;
+    scope: "personal" | "workspace" | "none";
+    instanceKey?: string;
+  }>;
 };
 export type UpdateConnectorToolPermissionsRequest = {
   connectionId: string;
-  permission: ConnectorToolPermission;
-} & ({ target: "default" } | { target: "tools"; toolNames: string[] });
+  permission: ConnectorToolPermission | null;
+  expectedRevision?: string;
+  instanceKey?: string;
+} & (
+  | { target: "default" }
+  | { target: "tools"; toolNames: string[] }
+  | { target: "action"; toolName: string; actionName: string }
+);
 
 /** Agent capability ids (see `@opengeni/contracts` agent-config). */
 export type AgentCapabilityId =
@@ -9155,3 +9196,8 @@ export type AgentConfigErrorCode =
   | "agent_config_widening"
   /** Returned only by older servers that predate always-on agent configuration. */
   | "agent_config_not_enabled";
+export type {
+  ToolActionReview,
+  ToolReviewDetailsPage,
+  ToolReviewStatus,
+} from "@opengeni/contracts";

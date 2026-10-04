@@ -1,5 +1,51 @@
 # @opengeni/db
 
+## 1.3.0
+
+### Minor Changes
+
+- 414d416: Support explicit organization sharing of installed Slack bots and durable bot posting from ordinary chats. Add bot inventory and organization-access SDK methods, preserve person-chosen scheduled destinations, and keep personal Slack identities separate.
+
+### Patch Changes
+
+- 1670f64: Keep the API process alive and answer a retryable 503 (`upstream_unavailable`, `details.code: DATABASE_UNAVAILABLE`) when the database terminates its connections during a deploy drain, failover, or restart, instead of crashing on an unhandled Slack interaction claim rejection or answering an opaque 500.
+- 178b5ae: Unify connector Allow, Ask first and Block decisions across tool transports and settings. Add durable programmatic approval handles, exact stored-operation continuation, and shared review facts with portable React presentation and paginated protected details.
+
+  Add lightweight Gmail message selection and bounded pagination/chunk helpers. Preserve exact access checks, uncertain outcomes and existing client compatibility. Deploy matching API, worker and native runtime artifacts through the documented maintenance migration.
+
+- Updated dependencies [178b5ae]
+- Updated dependencies [414d416]
+  - @opengeni/contracts@1.3.0
+  - @opengeni/codemode@1.3.0
+  - @opengeni/observability@1.3.0
+  - @opengeni/codex@1.3.0
+  - @opengeni/config@1.3.0
+  - @opengeni/network@1.3.0
+
+## 1.2.0
+
+### Minor Changes
+
+- d870f32: Support model-scoped signup and coupon credits with a shared operator default and
+  per-offer overrides. Update coverage at runtime, spend eligible promotions before
+  general credits, and preserve allocation and retry accounting. Keep scoped coupon
+  redemption separate from paid top-ups. Show credit funding in model selection and
+  current coverage on demand in billing. Legacy unrestricted grants stay unrestricted.
+
+### Patch Changes
+
+- 7424e7c: Reject empty coupon IDs and invalid text boundaries in SQL credit policy updates,
+  preserving the active policy when an update cannot be read by the application.
+- 1033595: Preserve own-client provenance for database transaction admission and settlement failures so running sessions can recover their exact accepted turn after connection loss.
+- Updated dependencies [21c8904]
+- Updated dependencies [d870f32]
+  - @opengeni/config@1.2.0
+  - @opengeni/contracts@1.2.0
+  - @opengeni/codemode@1.2.0
+  - @opengeni/codex@1.2.0
+  - @opengeni/observability@1.2.0
+  - @opengeni/network@1.2.0
+
 ## 1.1.0
 
 ### Patch Changes

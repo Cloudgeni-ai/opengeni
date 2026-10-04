@@ -657,6 +657,13 @@ deployment-owned credentials. Its provider ID is `openrouter`, and product IDs
 use `openrouter/<upstream>`. This deployment rail is independent of any
 workspace-owned OpenRouter connection.
 
+For explicit `anthropic/…` Chat targets on any OpenRouter rail, the request
+adapter moves unsigned historical reasoning into labeled assistant text instead
+of sending it as native thinking. It preserves signed text and encrypted
+reasoning details and leaves stored history unchanged. This also handles older
+non-streamed replies whose reasoning was nested inside text metadata. Other
+Chat targets retain their native reasoning fields.
+
 The reviewed code catalog currently ships one v1 starter:
 
 ```text
@@ -747,7 +754,42 @@ remain fail-closed; this path does not compose with historical digest migrations
 Credential identity is also not a conversation-history compatibility boundary.
 Changing the selected Codex or SuperGrok subscription does not rewrite canonical history or
 a saved approval `RunState`. Responses providers receive canonical structured
-items directly. Chat Completions receives one request-local transcript view for
+items directly. Image-capable Chat Completions models receive attached images
+and `view_image` results. Tool images are delivered in a labelled image envelope
+after their paired tool results because Chat tool messages accept text only.
+Assistant content omits response-only metadata on the Chat wire; canonical
+history and provider cache extensions stay unchanged. Claude adaptive thinking
+explicitly requests visible summaries.
+
+The shared Chat adapter retains both `reasoning` and `reasoning_content` replies
+as canonical reasoning items and forwards streamed text to the existing thinking
+timeline. Request-local projection restores the original field at assistant-message
+scope, alongside its answer and tool calls. Older replies with reasoning nested
+inside text metadata are recovered at that boundary; output-only `tools` metadata
+is omitted. Structured `reasoning_details` retain their full ordered sequence,
+including signatures/encrypted blocks, through streaming, persistence and Chat
+tool continuation. Only text/summary details enter the thinking timeline;
+consecutive streamed text/summary fragments are assembled into logical blocks,
+while opaque blocks remain separate. Explicit empty detail arrays are preserved.
+Parallel plaintext aliases do not emit a duplicate delta. This behavior is
+shared by configured providers and Chat BYOK routes. See the
+[structured reasoning contract](https://openrouter.ai/docs/guides/best-practices/reasoning-tokens).
+When switching to Responses or native Claude, plaintext Chat reasoning becomes
+labelled historical assistant text; it is not sent as an empty foreign reasoning
+artifact. Responses also omits Chat reply-message metadata from text/refusal
+blocks and nested Chat function envelopes from tool calls. Both adapters apply
+this projection at their request boundary, including SDK-driven continuations.
+Canonical history stays unchanged, so switching back
+to Chat restores its original reasoning field. Native encrypted Responses and
+signed Claude reasoning retain their exact artifacts on their own API. When
+switching API families, their readable summaries become labelled historical
+assistant text; an opaque-only item becomes an unavailable marker. Signatures
+and ciphertext never enter another API's request. Chat also applies the shared
+projection at its adapter boundary, covering SDK-driven continuations.
+Older replies with reasoning only in nested Chat metadata retain that text too;
+newer replies with a separate reasoning item do not duplicate it.
+
+Chat Completions receives one request-local transcript view for
 canonical record types that its SDK converter cannot represent; that view is
 never persisted. Historical `tool_search` calls/outputs remain inert completed
 facts. A session frozen to `remote_v2` compaction admits only Codex models;

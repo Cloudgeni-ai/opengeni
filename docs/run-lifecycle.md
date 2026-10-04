@@ -374,9 +374,39 @@ Diagnostics distinguish permission, device, autoplay, negotiation, rotation,
 reconnect, lost-owner, and terminal-stop transitions without SDP, credentials,
 audio, or transcript bodies.
 
-Only provider `turn.done` events persist transcript truth: one complete
-role-bearing user or assistant entry per provider turn. Live transcript deltas
-remain non-authoritative. Each `delegation.created` carries the bounded finalized
+Deployment-funded live voice (hosted Azure GPT Live and the Opengeni-managed
+AI Gateway models) is credit-gated and time-metered; connected Codex, SuperGrok,
+and a workspace's own Gateway key are paid by the workspace and are not.
+`packages/core/src/domain/realtime-voice-billing.ts` owns it. While credit
+billing is active (`OPENGENI_BILLING_MODE=stripe` or
+`OPENGENI_USAGE_LIMITS_MODE=managed`) such a model is offered and startable only
+when configured, priced (`OPENGENI_AZURE_LIVE_PRICING_JSON`,
+`OPENGENI_AI_GATEWAY_REALTIME_PRICING_JSON`), and the account has spendable
+credits. Begin and every provider connection mint run the same admission and
+refusal codes as voice input (`insufficient_credits`, `allowance_exhausted`,
+`monthly_model_cost_limit`); an unpriced or unconfigured model is
+`realtime_voice_unavailable`. Metering uses only server-observed time: each
+issued connection is billed per started minute from its claim until it closed,
+bounded by the owner's last heartbeat (an expired lease is never billed past
+it) or the owner-proven end. Each (connection, minute) is one idempotent
+`model.cost` receipt plus one post-use debit, so Insights shows it. Settlement
+runs at mint, every heartbeat, and end. When the balance is no longer positive
+at a heartbeat, the server stops extending the lease and returns a `stop`
+instruction; the browser drains final speech and ends the call, and an ignoring
+client lapses within the remaining lease. A balance may end at most about one
+minute negative. The server cannot cut the provider media itself: a client that
+stops heartbeating keeps its provider connection open unbilled until the
+provider's own session limit.
+
+Codex persists provider `turn.done` events as complete role-bearing turns;
+its live transcript deltas remain non-authoritative. Azure GPT Live instead
+provides timed transcript fragments. Its adapter preserves their observed order
+as `transcript.segment` entries tagged `provider_fragments` and
+`application_segment`, without inventing finalized provider turns. The adapter
+drains through `session.closed` (or transport close), then persists received
+fragments before replacement startup history is read or the mode ends. A close
+timeout stays uncertain and retryable. Old provider-session delegation IDs become
+general context on the replacement; durable task identity remains unchanged. Each `delegation.created` carries the bounded finalized
 dialogue since the previous delegation and records its transcript fence. When
 voice ends, the browser first seals and durably drains every already-parsed V3
 event. The same end transaction then selects only finalized transcript after the
@@ -590,8 +620,17 @@ activity reports retryable pre-claim failure but the control lane finds its
 exact active attempt, that durable attempt wins and is recovered.
 
 During an executing turn, own-client PostgreSQL connection outages use only
-`ECONNREFUSED`, `ECONNRESET`, `CONNECT_TIMEOUT`, or SQLSTATE `57P01`–`57P03`/`08xxx`
-through an actual ORM or typed persistence boundary, never a driver name alone.
+`CONNECTION_CLOSED`, `CONNECTION_DESTROYED`, `CONNECTION_ENDED`, `ECONNREFUSED`,
+`ECONNRESET`, `CONNECT_TIMEOUT`, or SQLSTATE `57P01`–`57P03`/`08xxx` through an
+actual ORM, typed persistence or own transaction boundary, never a driver name
+alone. RLS transaction admission/settlement preserves raw driver provenance;
+application callback errors remain unbranded, and rollback failures retain the
+callback's no-replay evidence. The postgres.js patch rejects late writes from
+a physically closed reserved connection as `CONNECTION_CLOSED`, fences stale
+transaction/reservation callbacks after pool reuse, clears unsent bytes and the
+rejected active query on close, releases closed-connection drain obligations,
+and preserves the existing Bun TLS drainage. It never replays a
+transaction whose commit acknowledgement was lost.
 These closed outage classes use the same
 exact-attempt DB-only recovery lane, including SDK function-tool `.error` and
 mandatory-history wrappers. The activity exits without `turn.failed`, without
@@ -942,8 +981,19 @@ converge to one creation plus one replay. Client abort is observer-only; server
 cancellation remains owned by the attempt/turn lifecycle.
 Worker dispatch performs catalog, identity, approval, input-schema,
 authorization, and argument-sensitive connector-policy prepare before writing
-the execution-start marker. Ask, Block, unavailable policy, and rejected frozen
-connector authority therefore settle before the provider executor can run.
+the execution-start marker. Block, unavailable policy, and rejected frozen
+connector authority settle before the provider executor can run. Ask creates a
+linked `waiting_for_approval` operation when the client acknowledges durable
+approval support. Its compact handle exits client polling; the InputWaitYield
+receipt fences the next model dispatch until the waiting row is durable. The
+worker stores programmatic reviews separately from open SDK call identities,
+then settles requires_action. Human decisions use the existing transactional
+approval event and workflow wake. A resumed attempt checks the exact logical
+turn, caller, tool schema/effect and account, and claims the stored arguments
+without changing the original attempt/catalog provenance. Old attempt tokens
+stay invalid. The current attempt can read the same-turn handle. Rejection or
+stale semantics produce a terminal nonexecution receipt; a crossed execution
+marker is never automatically replayed.
 After the marker, the prepared gateway call performs durable connector begin at
 the executor boundary and completes the same request as `completed`,
 `not_executed`, or `uncertain`. Model MCP and Codemode use this same canonical
@@ -1319,7 +1369,16 @@ For MCP, the runtime reads the complete provider `CallToolResult` through the
 SDK's `callToolResult` seam and carries a private duplicate only until the exact
 audit projection is durable. An HTTP-successful result with `isError: true`
 therefore remains a failed tool outcome in live SDK state, model-facing history,
-the pending receipt, the durable event, recovery, and the timeline. The physical
+the pending receipt, the durable event, recovery, and the timeline. The
+model-facing projection of a prefixed MCP result
+(`omitStructuredContentTextDuplicates` in
+`packages/contracts/src/mcp-structured-content.ts`, also used by the default
+`ogtool call` print) keeps the result envelope but drops
+a plain text block whose text is exactly a JSON serialization of
+`structuredContent` (the MCP backwards-compatibility copy), so the payload is
+not paid for twice. Prose, differing JSON, annotated text, non-text blocks, and
+text carrying integers beyond the safe range stay; the durable event keeps the
+exact result, and stored history rows are never rewritten. The physical
 invocation boundary also records
 `opengeni_mcp_tool_calls_total{outcome}` and
 `opengeni_mcp_tool_call_duration_seconds{outcome}` with one closed structural

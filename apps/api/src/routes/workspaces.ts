@@ -1,3 +1,9 @@
+import { AZURE_LIVE_MODEL_ID } from "../azure-live";
+import {
+  createRealtimeVoiceBilling,
+  deploymentRealtimeVoice,
+  realtimeVoiceOfferProblem,
+} from "@opengeni/core";
 import { withDirectModelProviders } from "@opengeni/config";
 import { listConnectionsMetadata } from "@opengeni/db";
 import {
@@ -950,16 +956,47 @@ export function registerWorkspaceRoutes(app: Hono, deps: ApiRouteDeps): void {
         : { available: false, unavailableReason: credentialReason };
     };
     const gatewayModels = Object.values(AI_GATEWAY_REALTIME_MODELS);
-    const models = [
-      ...gatewayModels.map((model, index) => ({
+    // Deployment-funded voice is listed only when this deployment can offer
+    // it (configured, and priced while credits are enforced). Hosted GPT Live
+    // replaces the managed Gateway choices when configured.
+    const managedCandidates = [
+      {
+        id: AZURE_LIVE_MODEL_ID,
+        label: "GPT Live 1",
+        description: "Realtime voice with session delegation",
+      },
+      ...gatewayModels.map((model) => ({
         id: model.managedModelId,
         label: model.label,
-        provider: "OpenGeni" as const,
         description: model.description,
-        ...availability(
-          Boolean(deps.settings.vercelAiGatewayApiKey),
-          "Opengeni Gateway voice is not configured",
-        ),
+      })),
+    ]
+      .filter((model) => {
+        const voice = deploymentRealtimeVoice(deps.settings, model.id);
+        return voice !== null && realtimeVoiceOfferProblem(deps.settings, voice) === null;
+      })
+      .filter((model, _index, offered) =>
+        offered.some((candidate) => candidate.id === AZURE_LIVE_MODEL_ID)
+          ? model.id === AZURE_LIVE_MODEL_ID
+          : true,
+      );
+    const hasCredits =
+      managedCandidates.length > 0 &&
+      (await createRealtimeVoiceBilling({
+        db: deps.db,
+        settings: deps.settings,
+      }).hasSpendableCredits(grant.accountId));
+    const models = [
+      ...managedCandidates.map((model, index) => ({
+        ...model,
+        provider: "OpenGeni" as const,
+        ...(hasCredits
+          ? { available: true, unavailableReason: null, unavailableCode: null }
+          : {
+              available: false,
+              unavailableReason: "Add Opengeni credits to use live voice",
+              unavailableCode: "insufficient_credits",
+            }),
         recommended: index === 0,
       })),
       {

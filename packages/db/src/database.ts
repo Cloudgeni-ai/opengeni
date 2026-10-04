@@ -6,6 +6,8 @@ import { drizzle } from "drizzle-orm/postgres-js";
 import postgres from "postgres";
 
 import {
+  DatabaseTransactionError,
+  isDatabasePersistenceFailure,
   runIdempotentPersistenceTransaction,
   type IdempotentPersistenceTransactionOptions,
 } from "./persistence-errors";
@@ -343,6 +345,11 @@ export async function withSandboxProviderReadLock<T>(
   });
 }
 
+/** Jittered reconnect delay in seconds after `retries` consecutive connection failures. */
+export function databaseReconnectBackoffSeconds(retries: number): number {
+  return (0.5 + Math.random() / 2) * Math.min(3 ** retries / 100, 2);
+}
+
 export function createDb(databaseUrl: string, options: CreateDbOptions = {}): DbClient {
   // `prepare: false` is REQUIRED for Azure Database for PostgreSQL Flexible
   // Server's transaction-pooling PgBouncer: postgres-js's default named prepared
@@ -358,6 +365,12 @@ export function createDb(databaseUrl: string, options: CreateDbOptions = {}): Db
     prepare: false,
     idle_timeout: 30,
     max_lifetime: 1800,
+    // postgres.js grows one pool-wide reconnect delay after every refused or
+    // reset connection (3^n / 100 s, up to 20 s) and queues queries behind it.
+    // After a restart or failover that left the server refusing connections
+    // for a while, requests then hung for up to 20 s after it was back. Keep
+    // the same jittered growth but cap it at 2 s.
+    backoff: databaseReconnectBackoffSeconds,
     // `connection` carries per-session Postgres STARTUP parameters. The exact
     // `application_name` is also the PgBouncer-compatible current-image receipt
     // for migration 0352's restrictive sessions policy; arbitrary custom startup
@@ -521,6 +534,39 @@ async function restoreRlsContextSettings(
   }
 }
 
+/** Attribute only failures outside the application callback to our transaction
+ * driver. BEGIN/COMMIT/ROLLBACK can throw raw postgres.js errors, unlike ORM
+ * queries. This supplies provenance, never transaction retry permission. */
+async function withDatabaseTransactionProvenance<T>(
+  db: Database,
+  fn: (db: Database) => Promise<T>,
+  transactionConfig?: PgTransactionConfig,
+): Promise<T> {
+  let entered = false;
+  let callbackFailure: { error: unknown } | undefined;
+  try {
+    return await db.transaction(async (tx) => {
+      entered = true;
+      try {
+        return await fn(tx as unknown as Database);
+      } catch (error) {
+        callbackFailure = { error };
+        throw error;
+      }
+    }, transactionConfig);
+  } catch (error) {
+    // A provider/tool rejection propagated by a successful rollback is still
+    // the provider/tool's error, even if it has a connection-looking code.
+    if (callbackFailure && callbackFailure.error === error) throw error;
+    if (!isDatabasePersistenceFailure(error)) throw error;
+    throw new DatabaseTransactionError(
+      entered ? "settlement" : "admission",
+      error,
+      callbackFailure?.error,
+    );
+  }
+}
+
 export async function withRlsContext<T>(
   db: Database,
   context: RlsContext,
@@ -535,49 +581,53 @@ export async function withRlsContext<T>(
     restoreParentScope ? "savepoint_admission" : "transaction_admission",
   );
   try {
-    return await db.transaction(async (tx) => {
-      admission("completed");
-      const setup = startDatabaseTiming("rls_setup");
-      const scoped = tx as unknown as Database;
-      let parentScope: RlsContextSettings | null;
-      try {
-        parentScope = restoreParentScope ? await readRlsContextSettings(scoped) : null;
-        await setRlsContext(scoped, context);
-        if (context.workspaceId && sessionTenancyFence === "shared") {
-          await scoped.execute(
-            sql`select pg_advisory_xact_lock_shared(hashtextextended(${`session-tenancy:${context.workspaceId}`}, 0))`,
-          );
+    return await withDatabaseTransactionProvenance(
+      db,
+      async (tx) => {
+        admission("completed");
+        const setup = startDatabaseTiming("rls_setup");
+        const scoped = tx as unknown as Database;
+        let parentScope: RlsContextSettings | null;
+        try {
+          parentScope = restoreParentScope ? await readRlsContextSettings(scoped) : null;
+          await setRlsContext(scoped, context);
+          if (context.workspaceId && sessionTenancyFence === "shared") {
+            await scoped.execute(
+              sql`select pg_advisory_xact_lock_shared(hashtextextended(${`session-tenancy:${context.workspaceId}`}, 0))`,
+            );
+          }
+          // Defense-in-depth: read the LOCAL GUC back on THIS backend BEFORE running
+          // the scoped query. The set_config and this read share one db.transaction,
+          // which a transaction pooler pins to a single backend — so a mismatch here
+          // means the context was genuinely lost (a torn transaction / pooler backend
+          // swap), not normal operation. Without this guard such an event runs the
+          // scoped read with an empty account_id and returns zero RLS-visible rows,
+          // manufacturing a phantom "no active subscription" from a credential that is
+          // in fact active. Convert that silent false into a loud, root-cause-bearing
+          // error so the caller can retry rather than permanently mis-decide.
+          await assertRlsContextApplied(scoped, context);
+          setup("completed");
+        } catch (error) {
+          setup("failed");
+          throw error;
         }
-        // Defense-in-depth: read the LOCAL GUC back on THIS backend BEFORE running
-        // the scoped query. The set_config and this read share one db.transaction,
-        // which a transaction pooler pins to a single backend — so a mismatch here
-        // means the context was genuinely lost (a torn transaction / pooler backend
-        // swap), not normal operation. Without this guard such an event runs the
-        // scoped read with an empty account_id and returns zero RLS-visible rows,
-        // manufacturing a phantom "no active subscription" from a credential that is
-        // in fact active. Convert that silent false into a loud, root-cause-bearing
-        // error so the caller can retry rather than permanently mis-decide.
-        await assertRlsContextApplied(scoped, context);
-        setup("completed");
-      } catch (error) {
-        setup("failed");
-        throw error;
-      }
-      const callback = startDatabaseTiming("scoped_callback");
-      let value: T;
-      try {
-        value = await fn(scoped);
-        callback("completed");
-      } catch (error) {
-        callback("failed");
-        throw error;
-      }
-      // A nested transaction is a savepoint, and SET LOCAL survives successful
-      // savepoint release. Restore the parent tenant and actor proof together;
-      // writer/protocol capabilities intentionally remain transaction-wide.
-      if (parentScope) await restoreRlsContextSettings(scoped, parentScope);
-      return value;
-    }, transactionConfig);
+        const callback = startDatabaseTiming("scoped_callback");
+        let value: T;
+        try {
+          value = await fn(scoped);
+          callback("completed");
+        } catch (error) {
+          callback("failed");
+          throw error;
+        }
+        // A nested transaction is a savepoint, and SET LOCAL survives successful
+        // savepoint release. Restore the parent tenant and actor proof together;
+        // writer/protocol capabilities intentionally remain transaction-wide.
+        if (parentScope) await restoreRlsContextSettings(scoped, parentScope);
+        return value;
+      },
+      transactionConfig,
+    );
   } catch (error) {
     // No-op after callback entry; only admission failures are counted here.
     admission("failed");

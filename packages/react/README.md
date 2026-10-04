@@ -28,6 +28,17 @@ animation. Override the tokens to rebrand everything.
 
 ## Embedded connections and Sites
 
+For a child chat's capability selection, `prepareSessionCapabilityAccess` reads
+an ancestor-to-child access plan without writing. Show the parent chats whose
+`request` is non-null and obtain an explicit confirmation before calling
+`applySessionCapabilityAccess`. The plan preserves existing choices, applies
+version-fenced updates root first, and grants no authority: each ordinary API
+request still authorizes its caller. Invalidate the review on actor/workspace
+changes. A partial failure may leave approved parent changes saved; prepare a
+new plan for retry instead of rolling them back. Existing
+`attachSessionCapability` remains a single-chat operation and never changes
+parents implicitly.
+
 Optional `@opengeni/react/connect` exports `useConnect`, `ConnectChooser`,
 `ConnectSetup`, `ConnectAccounts`, and the composed `ConnectPanel`. Inject one
 `@opengeni/connect` controller per authenticated actor/workspace and dispose it
@@ -96,6 +107,14 @@ import "@opengeni/react/compiled.css";
 
 <OpenGeniChat baseUrl="/api/opengeni" />;
 // or one conversation: <SessionConversation baseUrl="/api/opengeni" sessionId={sessionId} />
+```
+
+Bearer-token apps pass `headers` (a function runs per request) or a custom
+`fetch`; a `client` passed with `baseUrl` replaces the one the component
+creates:
+
+```tsx
+<OpenGeniChat baseUrl="/api/opengeni" headers={() => ({ Authorization: `Bearer ${getToken()}` })} />
 ```
 
 The provider form keeps working, for example for several components sharing one
@@ -1383,3 +1402,26 @@ Copy and the timestamp for user messages and completed assistant messages.
 The host owns feedback, fork authorization, and mutations; streaming assistant
 messages omit this slot. Use the `group/copy` hover/focus state and preserve
 visible touch targets when styling actions.
+
+### Portable action reviews
+
+`ApprovalSurface` accepts `loadReview(approval)` and `onViewDetails(review, path)`;
+load the versioned facts with `client.getToolActionReview`. It shows one selected
+action, counts and bounded fields instead of raw argument JSON. Keep
+`selectedApprovalId` and `onSelectedApprovalChange` in the host if a full-page
+detail route unmounts the surface, so returning cannot silently select a different
+action. The native `onApprove` / `onReject` identity is unchanged and duplicate
+submission is fenced until authoritative events remove the request.
+
+Render `ToolActionReviewDetails` on the host's normal page with
+`client.getToolReviewDetails`, passing the review's `actionDigest`, path and offset.
+Details are immutable, authenticated, paginated, and redact protected values.
+Restore focus to the original `data-review-path` button on return. No web-app
+imports, iframe, second confirmation, or nested scrolling pane is required.
+The standalone fallback retains bounded details for older SDK approvals.
+
+Wrap `MessageTimeline` in `ToolReviewHistoryProvider` with its visible events,
+authenticated `load(approvalId)` callback and `onViewDetails` to keep recorded
+reviews readable inside the corresponding tool activity. Historical receipts
+never render decision buttons. The same semantic tokens support light/dark
+embeds; `demo/approval-review.html` is the synthetic state gallery.

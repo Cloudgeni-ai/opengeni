@@ -1,5 +1,24 @@
 # @opengeni/capabilities
 
+## 1.3.0
+
+### Patch Changes
+
+- 178b5ae: Unify connector Allow, Ask first and Block decisions across tool transports and settings. Add durable programmatic approval handles, exact stored-operation continuation, and shared review facts with portable React presentation and paginated protected details.
+
+  Add lightweight Gmail message selection and bounded pagination/chunk helpers. Preserve exact access checks, uncertain outcomes and existing client compatibility. Deploy matching API, worker and native runtime artifacts through the documented maintenance migration.
+
+- Updated dependencies [178b5ae]
+- Updated dependencies [414d416]
+  - @opengeni/contracts@1.3.0
+  - @opengeni/network@1.3.0
+
+## 1.2.0
+
+### Patch Changes
+
+- @opengeni/network@1.2.0
+
 ## 1.1.0
 
 ### Patch Changes

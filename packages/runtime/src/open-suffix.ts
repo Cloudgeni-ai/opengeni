@@ -62,17 +62,14 @@ export function extractOpenSuffixFromRunState(state: unknown): OpenSuffixMember[
     history?: unknown;
     toString?: () => string;
   };
-  const fromGenerated = extractOpenSuffixMembers(
-    protocolItemsFromGeneratedItems(record.generatedItems ?? record._generatedItems),
-  );
-  if (fromGenerated.length > 0) {
-    return fromGenerated;
+  const generatedItems = record.generatedItems ?? record._generatedItems;
+  if (Array.isArray(generatedItems)) {
+    // A programmatic approval can pause with every SDK call already paired.
+    // An empty suffix is complete evidence, not a reason to serialize history.
+    return extractOpenSuffixMembers(protocolItemsFromGeneratedItems(generatedItems));
   }
   if (Array.isArray(record.history)) {
-    const fromHistory = extractOpenSuffixMembers(record.history as HistoryItem[]);
-    if (fromHistory.length > 0) {
-      return fromHistory;
-    }
+    return extractOpenSuffixMembers(record.history as HistoryItem[]);
   }
   if (typeof record.toString === "function") {
     const serialized = record.toString();

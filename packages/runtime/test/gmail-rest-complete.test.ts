@@ -532,7 +532,7 @@ describe("Gmail complete mailbox operations", () => {
       return Response.json({});
     });
     for (const [name, args] of [
-      ["modify_message", { messageId: "a", addLabelIds: ["TRASH"] }],
+      ["modify_message", { messageId: "a", addLabelIds: ["TRASH"], removeLabelIds: ["TRASH"] }],
       ["delete_label", { labelId: "INBOX" }],
       ["get_settings", { resource: "../../other" }],
       ["list_settings", { resource: "delegates" }],
@@ -555,7 +555,7 @@ describe("Gmail complete mailbox operations", () => {
     expect((await changing.callToolResult("get_profile", {})).isError).toBe(true);
   });
 
-  test("catalog scope hints and mandatory approval cover every mutation", async () => {
+  test("catalog scopes and recommended approval defaults cover every mutation", async () => {
     const catalog = await Bun.file(
       new URL("../../../data/catalog/curated.json", import.meta.url),
     ).json();
@@ -782,5 +782,212 @@ describe("Gmail complete mailbox operations", () => {
         await prepared.close();
       }
     }
+  });
+});
+
+describe("Gmail review snapshots", () => {
+  test("reads at most three distinct saved IDs, never a new search or a mutation", async () => {
+    const seen: string[] = [];
+    const server = make(async (input, init) => {
+      const url = new URL(input.toString());
+      expect(init?.method ?? "GET").toBe("GET");
+      expect(url.searchParams.get("format")).toBe("metadata");
+      expect(url.searchParams.getAll("metadataHeaders")).toEqual(["Subject", "From"]);
+      const id = url.pathname.split("/").at(-1)!;
+      seen.push(id);
+      return Response.json({
+        id,
+        payload: {
+          headers: [
+            { name: "Subject", value: `Example ${id}` },
+            { name: "From", value: "sender@example.test" },
+          ],
+        },
+      });
+    });
+    const result = await server.reviewContext("batch_modify_messages", {
+      messageIds: ["one", "one", "two", "three", "four"],
+    });
+    expect(seen).toEqual(["one", "two", "three"]);
+    expect(result.samples?.map((sample) => sample.id)).toEqual(seen);
+    expect(result.samples?.every((sample) => sample.provenance === "provider_metadata")).toBe(true);
+  });
+  test("missing samples stay missing; wrong provider identities and access refusals fail closed", async () => {
+    const missing = make(async () =>
+      Response.json({ error: { message: "Missing" } }, { status: 404 }),
+    );
+    expect(await missing.reviewContext("trash_message", { messageId: "gone" })).toEqual({
+      samples: [],
+    });
+    const wrong = make(async () => Response.json({ id: "different" }));
+    await expect(wrong.reviewContext("trash_message", { messageId: "one" })).rejects.toThrow(
+      "did not match",
+    );
+    const denied = make(async () =>
+      Response.json({ error: { message: "Denied" } }, { status: 403 }),
+    );
+    await expect(denied.reviewContext("trash_message", { messageId: "one" })).rejects.toThrow();
+  });
+  test("send-draft facts include original recipients and body only after exact content hash matches", async () => {
+    const bytes = Buffer.from(
+      "From: owner@example.test\r\nTo: recipient@example.test\r\nBcc: hidden@example.test\r\nSubject: Review this draft\r\n\r\nThe exact body.",
+    );
+    let gets = 0;
+    const server = make(async (_input, init) => {
+      expect(init?.method ?? "GET").toBe("GET");
+      gets += 1;
+      return Response.json({ id: "draft-1", message: { raw: b64(bytes) } });
+    });
+    const review = await server.reviewContext("send_draft", {
+      draftId: "draft-1",
+      expectedContentSha256: digest(bytes),
+    });
+    expect(review.email).toMatchObject({
+      to: "recipient@example.test",
+      bcc: "hidden@example.test",
+      subject: "Review this draft",
+      textBody: "The exact body.\n",
+      contentSha256: digest(bytes),
+    });
+    await expect(
+      server.reviewContext("send_draft", {
+        draftId: "draft-1",
+        expectedContentSha256: "0".repeat(64),
+      }),
+    ).rejects.toThrow();
+    expect(gets).toBe(2);
+  });
+});
+
+describe("Gmail lightweight selection and truthful results", () => {
+  test("IDs-only message and thread search each issue exactly one list request with unchanged cursors", async () => {
+    const requests: URL[] = [];
+    const server = make(async (input) => {
+      const url = new URL(input.toString());
+      requests.push(url);
+      expect(["messages", "threads"]).toContain(url.pathname.split("/").at(-1));
+      expect(url.searchParams.get("fields")).toContain("nextPageToken");
+      return Response.json({
+        messages: [{ id: "one", threadId: "thread-one" }],
+        threads: [{ id: "thread-one" }],
+        nextPageToken: "next",
+        resultSizeEstimate: 99,
+      });
+    });
+    const messages = await value(server, "search_messages", {
+      query: "label:example",
+      messageFormat: "IDS_ONLY",
+      pageToken: "before",
+      pageSize: 50,
+    });
+    const threads = await value(server, "search_threads", {
+      query: "label:example",
+      view: "IDS_ONLY",
+      pageToken: "before",
+      pageSize: 50,
+    });
+    expect(requests).toHaveLength(2);
+    expect(
+      requests.every(
+        (url) =>
+          url.searchParams.get("q") === "label:example" &&
+          url.searchParams.get("pageToken") === "before",
+      ),
+    ).toBe(true);
+    expect(messages).toEqual({
+      messages: [{ id: "one", threadId: "thread-one" }],
+      nextPageToken: "next",
+      resultCountEstimate: 99,
+    });
+    expect(threads.threads).toEqual([{ id: "thread-one" }]);
+  });
+  test("batch response acknowledges the exact distinct count without fabricating state verification", async () => {
+    let ids: string[] = [];
+    const server = make(async (_input, init) => {
+      ids = JSON.parse(String(init?.body)).ids;
+      return new Response(null, { status: 204 });
+    });
+    const result = await value(server, "batch_modify_messages", {
+      messageIds: ["one", "one", "two"],
+      addLabelIds: ["TRASH"],
+    });
+    expect(ids).toEqual(["one", "two"]);
+    expect(result).toMatchObject({
+      status: "acknowledged",
+      submittedCount: 2,
+      reconciliation: "not_checked",
+    });
+    expect(result.modified).toBeUndefined();
+    expect(result.messageIds).toBeUndefined();
+    const tooMany = await server.callToolResult("batch_modify_messages", {
+      messageIds: Array.from({ length: 1001 }, (_, i) => `id-${i}`),
+      addLabelIds: ["TRASH"],
+    });
+    expect(tooMany.isError).toBe(true);
+    expect(ids).toEqual(["one", "two"]);
+  });
+  test("provider errors retain retry classification without private provider prose or automatic scope claims", async () => {
+    for (const fixture of [
+      { status: 403, reason: "domainPolicy", code: "access_denied", retryable: false },
+      { status: 403, reason: "userRateLimitExceeded", code: "rate_limited", retryable: true },
+      { status: 403, reason: "unrecognizedReason", code: "access_denied", retryable: false },
+      { status: 429, reason: "rateLimitExceeded", code: "rate_limited", retryable: true },
+      { status: 404, reason: "notFound", code: "not_found", retryable: false },
+      { status: 400, reason: "invalidArgument", code: "invalid_input", retryable: false },
+    ]) {
+      let requests = 0;
+      const server = make(async () => {
+        requests++;
+        return Response.json(
+          { error: { message: "private-provider-canary", errors: [{ reason: fixture.reason }] } },
+          { status: fixture.status, headers: { "retry-after": "12" } },
+        );
+      });
+      const result = await server.callToolResult("get_profile", {});
+      expect(result.structuredContent.error).toMatchObject({
+        status: fixture.status,
+        code: fixture.code,
+        retryable: fixture.retryable,
+        retryAfterMs: 12000,
+        connectorActionOutcome: "not_executed",
+      });
+      expect(JSON.stringify(result)).not.toContain("private-provider-canary");
+      expect(requests).toBe(1);
+    }
+  });
+  test("metadata is effect-specific; hints never authorize replay of uncertain writes", async () => {
+    const byName = new Map(GMAIL_REST_MCP_TOOLS.map((tool) => [tool.name, tool.annotations]));
+    expect(byName.get("create_draft")).toMatchObject({
+      readOnlyHint: false,
+      destructiveHint: false,
+      idempotentHint: false,
+    });
+    expect(byName.get("send_message")).toMatchObject({
+      readOnlyHint: false,
+      destructiveHint: true,
+      idempotentHint: false,
+    });
+    expect(byName.get("batch_modify_messages")).toMatchObject({
+      readOnlyHint: false,
+      destructiveHint: true,
+      idempotentHint: true,
+    });
+    expect(byName.get("get_profile")).toMatchObject({
+      readOnlyHint: true,
+      destructiveHint: false,
+      idempotentHint: true,
+    });
+    let requests = 0;
+    const server = make(async () => {
+      requests++;
+      throw new Error("transport");
+    });
+    await expect(
+      server.callToolResult("batch_modify_messages", {
+        messageIds: ["one"],
+        addLabelIds: ["TRASH"],
+      }),
+    ).rejects.toThrow("uncertain");
+    expect(requests).toBe(1);
   });
 });

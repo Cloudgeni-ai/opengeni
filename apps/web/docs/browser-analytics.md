@@ -42,6 +42,7 @@ once that lookup has finished.
 | `integration_connect_started` / `integration_connect_finished` | One connect journey for an integration, capability, or model provider. See "Integration connect journey" below. |
 | `turn_failure_viewed` / `turn_failure_action` | The failed-turn banner was shown, and the person's first next step. See "Failed-turn recovery" below. |
 | `onboarding_step_viewed` / `onboarding_step_completed` / `onboarding_abandoned` | Post-sign-in onboarding steps. See "Onboarding steps" below. |
+| `playground_step_completed` | A playground action, once per visit: `step` is `ask` (a question answered), `style` (a color or theme changed) or `ship` ("Add it to your product"). |
 
 ## Pages and control labels
 
@@ -50,7 +51,7 @@ once that lookup has finished.
 `/workspaces/<id>/`: `sessions`, `agents`, `variable-sets`, `environments`,
 `rigs`, `machines`, `insights`, `priority`, `plugins`, `capabilities`,
 `schedules`, `documents`, `memory`, `state`, `artifacts`, `settings`,
-`organization`, and `files`; a session page also carries `session_id`.
+`organization`, `files`, and `playground`; a session page also carries `session_id`.
 `environments`, `capabilities`, `agents` and `priority` are legacy redirects, so they appear only
 when an old link or bookmark opens them. Pages outside a workspace are matched by
 exact path and never carry an id: `home` (`/`, including the sign-in panel),

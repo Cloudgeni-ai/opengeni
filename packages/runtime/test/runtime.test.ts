@@ -2537,6 +2537,9 @@ describe("runtime event normalization", () => {
 
     async function connectorPolicyFixture(input: {
       connectorDecision: "allow" | "ask" | "block";
+      toolResultIsError?: boolean;
+      alreadyApproved?: boolean;
+      previewReview?: boolean;
       serverId?: string;
       accountLabel?: string;
       lazyToolTransport?: "codex_native" | "generic_dispatch";
@@ -2546,7 +2549,7 @@ describe("runtime event normalization", () => {
       complete?: ConnectorActionPolicyHooks["complete"];
       sandboxBackend?: "none" | "modal";
     }) {
-      const mcp = startTestMcpServer();
+      const mcp = startTestMcpServer({ toolResultIsError: input.toolResultIsError });
       const baseConfig = {
         id: input.serverId ?? (input.withoutConnection ? "remote" : "docs"),
         name: "Document Search",
@@ -2556,9 +2559,16 @@ describe("runtime event normalization", () => {
       };
       const calls: string[] = [];
       const hooks: ConnectorActionPolicyHooks = {
+        ...(input.previewReview
+          ? { preview: async () => ({ managed: true as const, decision: input.connectorDecision }) }
+          : {}),
         prepare: async (call) => {
           calls.push(`prepare:${call.approvalId}:${String((call.arguments as any).query)}`);
-          return { managed: true, decision: input.connectorDecision };
+          return {
+            managed: true,
+            decision: input.connectorDecision,
+            ...(input.alreadyApproved ? { approvalStatus: "approved" as const } : {}),
+          };
         },
         begin:
           input.begin ??
@@ -2787,7 +2797,36 @@ describe("runtime event normalization", () => {
       }
     });
 
-    test("connector Allow executes once and preserves an existing Ask requirement", async () => {
+    test("review metadata is read only for a new Ask", async () => {
+      for (const connectorDecision of ["allow", "ask", "block"] as const) {
+        const fixture = await connectorPolicyFixture({ connectorDecision, previewReview: true });
+        let reads = 0;
+        for (const server of fixture.prepared.mcpServers) {
+          (server as unknown as { reviewContext: () => Promise<object> }).reviewContext =
+            async () => {
+              reads++;
+              return {};
+            };
+        }
+        try {
+          const tool = (await fixture.agent.getMcpTools(new RunContext())).find(
+            (candidate) =>
+              candidate.type === "function" && candidate.name === "docs__search_documents",
+          );
+          if (!tool || tool.type !== "function") throw new Error("Tool missing");
+          expect(
+            await tool.needsApproval(new RunContext(), { query: "synthetic" }, "metadata-fixture"),
+          ).toBe(connectorDecision === "ask");
+          expect(reads).toBe(connectorDecision === "ask" ? 1 : 0);
+          expect(fixture.mcp.calls).toHaveLength(0);
+        } finally {
+          await fixture.prepared.close();
+          fixture.mcp.close();
+        }
+      }
+    });
+
+    test("connector Allow executes once and overrides an Ask recommendation", async () => {
       const fixture = await connectorPolicyFixture({
         connectorDecision: "allow",
         legacyApproval: true,
@@ -2799,7 +2838,7 @@ describe("runtime event normalization", () => {
         );
         if (!tool || tool.type !== "function") throw new Error("connector tool missing");
         expect(await tool.needsApproval(new RunContext(), { query: "needle" }, "call-allow")).toBe(
-          true,
+          false,
         );
         const output = await tool.invoke(new RunContext(), JSON.stringify({ query: "needle" }), {
           toolCall: { callId: "call-allow" },
@@ -2818,6 +2857,52 @@ describe("runtime event normalization", () => {
         fixture.mcp.close();
       }
     });
+
+    test.each(["model", "codemode"] as const)(
+      "connector provider-declared errors settle uncertain through %s",
+      async (transport) => {
+        const fixture = await connectorPolicyFixture({
+          connectorDecision: transport === "model" ? "allow" : "ask",
+          alreadyApproved: true,
+          toolResultIsError: true,
+        });
+        try {
+          if (transport === "model") {
+            const tool = (await fixture.agent.getMcpTools(new RunContext())).find(
+              (candidate) => candidate.name === "docs__search_documents",
+            );
+            if (!tool || tool.type !== "function") throw new Error("connector tool missing");
+            const result = await tool.invoke(
+              new RunContext(),
+              JSON.stringify({ query: "needle" }),
+              { toolCall: { callId: "call-provider-error" } } as any,
+            );
+            expect(result).toMatchObject({ isError: true });
+            expect(JSON.stringify(result)).toContain("uncertain");
+          } else {
+            const environment = fixture.prepared.attemptToolEnvironment!;
+            await expect(
+              environment.call({
+                catalogDigest: environment.catalog.digest,
+                operationId: crypto.randomUUID(),
+                identity: { serverId: "docs", toolName: "search_documents" },
+                arguments: { query: "needle" },
+                caller: { kind: "codemode", subjectId: "worker:test" },
+              }),
+            ).rejects.toMatchObject({ connectorActionOutcome: "uncertain" });
+          }
+          expect(fixture.mcp.calls).toEqual([
+            { tool: "search_documents", args: { query: "needle" } },
+          ]);
+          expect(fixture.calls.filter((call) => call.startsWith("complete:"))).toEqual([
+            "complete:request-1:uncertain",
+          ]);
+        } finally {
+          await fixture.prepared.close();
+          fixture.mcp.close();
+        }
+      },
+    );
 
     test("connector Ask pauses and Block/reject paths never invoke the provider", async () => {
       for (const connectorDecision of ["ask", "block"] as const) {
@@ -3322,7 +3407,13 @@ describe("runtime event normalization", () => {
           },
           prepare: async (call) => {
             events.push(`prepare:${call.approvalId}`);
-            return { managed: true, decision };
+            return {
+              managed: true,
+              decision,
+              requestId: "77777777-7777-4777-8777-777777777777",
+              actionFingerprint: "a".repeat(64),
+              approvalStatus: "pending",
+            };
           },
           begin: async (call) => {
             events.push(`begin:${call.approvalId}`);
@@ -3408,6 +3499,22 @@ describe("runtime event normalization", () => {
         } finally {
           await fixture.prepared.close();
         }
+      }
+
+      const waiting = await prepareFixture("ask");
+      try {
+        const operationId = "66666666-6666-4666-8666-666666666660";
+        const prepared = await waiting.prepared.attemptToolEnvironment!.prepareCall(
+          waiting.call(operationId, "completed"),
+          { transportMeta: { durableApproval: true } },
+        );
+        expect(prepared.waitingForApproval).toMatchObject({
+          requestId: "77777777-7777-4777-8777-777777777777",
+        });
+        await expect(prepared.execute()).rejects.toThrow("approval");
+        expect(waiting.events).toEqual([`prepare:${operationId}`]);
+      } finally {
+        await waiting.prepared.close();
       }
 
       const unavailable = await prepareFixture("allow", false);
@@ -6773,6 +6880,80 @@ describe("runtime event normalization", () => {
     expect(secondRequest).toContain("structuredOnly");
     expect(secondRequest).toContain("providerTrace");
     expect(secondRequest).toContain("vendor-receipt-1");
+  });
+
+  test("the Agents SDK sends a structuredContent duplicate text block to the model once while retaining the exact audit result", async () => {
+    const structuredContent = { issues: [{ number: 7, title: 'Fix "quoted" title' }], total: 1 };
+    const fullResult = {
+      content: [
+        { type: "text" as const, text: JSON.stringify(structuredContent, null, 2) },
+        { type: "text" as const, text: "Showing the first page." },
+      ],
+      structuredContent,
+      _meta: { providerTrace: "trace-dup" },
+    };
+    const inner: MCPServer = {
+      name: "dup-inner",
+      cacheToolsList: false,
+      async connect() {},
+      async close() {},
+      async listTools() {
+        return [
+          {
+            name: "search",
+            description: "Search issues.",
+            inputSchema: { type: "object", properties: {}, additionalProperties: false },
+          },
+        ];
+      },
+      async callTool() {
+        return fullResult.content;
+      },
+      async callToolResult() {
+        return fullResult;
+      },
+      async invalidateToolsCache() {},
+    };
+    // A prefixed wrapper around another prefixed wrapper must still recover
+    // the exact inner result rather than the outer model projection.
+    const wrapped = new PrefixedMcpServer(new PrefixedMcpServer(inner, "dup"), "outer");
+    const settings = testSettings({ sandboxBackend: "none", webSearchEnabled: false });
+    const model = new ScriptedModel([
+      { output: [scriptedFunctionCall("outer__dup__search", {}, "dup-call")] },
+      { outputText: "done" },
+    ]);
+    const agent = buildOpenGeniAgent(settings, [], {
+      model,
+      hostedWebSearch: false,
+      mcpServers: [wrapped],
+    });
+
+    const result = await runAgentStream(agent, "Search", settings);
+    const streamed: any[] = [];
+    for await (const event of result.toStream()) streamed.push(event);
+    await result.completed;
+
+    const outputEvent = streamed.find(
+      (event) =>
+        event.type === "run_item_stream_event" && event.item?.type === "tool_call_output_item",
+    );
+    expect(outputEvent?.item.customData).toEqual({
+      [OPENGENI_MCP_RESULT_CUSTOM_DATA_KEY]: fullResult,
+    });
+    const [durable] = normalizeSdkEvent(outputEvent);
+    expect((durable!.payload as { output?: unknown }).output).toEqual(fullResult);
+
+    const toolOutput = ((model.requests[1]?.input ?? []) as any[]).find(
+      (item) => item.type === "function_call_result",
+    )?.output;
+    expect(toolOutput).toEqual({
+      type: "text",
+      text: JSON.stringify({
+        content: [{ type: "text", text: "Showing the first page." }],
+        structuredContent,
+        _meta: { providerTrace: "trace-dup" },
+      }),
+    });
   });
 
   test("rejects MCP result values the Agents SDK custom-data boundary would rewrite", async () => {

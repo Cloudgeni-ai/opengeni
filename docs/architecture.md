@@ -510,7 +510,7 @@ registration. See [run lifecycle](run-lifecycle.md).
 Global Modal inventory uses an owner-only SELECT capability under FORCE RLS (0497).
 
 `packages/db/src/modal-native-live-origin.ts` is an inert, trusted-server-only
-LIVE-origin projection (0626), not a host authenticator or custody grant. Its
+LIVE-origin projection (0632), not a host authenticator or custody grant. Its
 transaction joins the exact accepted attempt, immutable initiating human,
 current membership/Personal pointer, control, route and execution-authority
 floor before any lease acquisition. Function-lifetime owner-only read
@@ -680,7 +680,7 @@ flowchart LR
   Machine["Connected Machine"]
   NATS(["NATS\nlive fanout + machine transport"])
   Relay(["Relay\nConnected Machine pixels + terminal"])
-  Realtime(["Realtime provider\nCodex WebRTC / Gateway WebSocket"])
+  Realtime(["Realtime provider\nCodex + Azure Live WebRTC / Gateway WebSocket"])
   Objects[("Object storage\nfiles and retained bytes")]
 
   Client --> API
@@ -744,7 +744,7 @@ Large or high-frequency bytes take separate paths:
 - files, generated media, recordings, and retained evidence use object storage;
 - terminal and desktop streams use the sandbox/provider transport or the
   dedicated relay edge for Connected Machines;
-- realtime voice uses Codex WebRTC or the AI Gateway WebSocket while durable
+- realtime voice uses Codex or Azure Live WebRTC, or the AI Gateway WebSocket while durable
   ownership, ledger, delegation, context, and recovery remain in OpenGeni;
   the voice lease freezes connector accounts at authenticated admission and
   supplies that exact authority to delegations and transcript handoff;
@@ -753,7 +753,8 @@ Large or high-frequency bytes take separate paths:
   than treating Office files or rendered output as mutable truth.
 
 Realtime: [`run-lifecycle.md`](run-lifecycle.md); public transport:
-[`../packages/sdk/README.md`](../packages/sdk/README.md).
+[`../packages/sdk/README.md`](../packages/sdk/README.md). Azure Live adaptation:
+`packages/sdk/src/azure-live-transport.ts` and `apps/api/src/azure-live.ts`.
 
 ### 4.3 Dependency direction
 
@@ -878,6 +879,12 @@ revalidates the immutable attempt through ordinary same-turn recovery and bounde
 redispatch. A lost claim response revealing the exact active attempt follows that
 path. Permanent database/state faults remain terminal; model, tool, or provider
 work is never replayed or requeued.
+Running-turn own-database connection loss, including postgres.js lifecycle
+closure codes and raw RLS transaction admission/settlement errors, enters that
+same exact-attempt recovery lane. Physical writer and unknown-tool-outcome
+fences remain authoritative; database transactions are never blindly replayed.
+See [`run-lifecycle.md`](run-lifecycle.md) for the closed outage classes and
+provenance boundaries.
 
 Transient provider recovery uses a durable consecutive-failure streak, not lifetime
 failures. An exact-current-attempt model completion atomically clears that streak
@@ -948,6 +955,8 @@ Tool approval and structured human input durably interrupt execution. The worker
 retains exact protocol state without pairing unfinished calls into model history.
 Responses bind the pending request, target turn, execution generation, requester,
 and current authorization.
+
+See [Tool approvals](tool-approvals.md) for canonical policy, portable review and durable programmatic continuation.
 
 Tool approvals are human-only. Agent-session authority may permit answering
 another session's structured human-input request, never self-approval of tools.
@@ -1137,7 +1146,7 @@ Workspaces: `apps/*`, `examples/*`, `packages/*`. Bun consumes internal packages
 from source; Connected Machine agent/relay use Rust Cargo workspace
 `agent/`.
 
-`examples/vue-conversation/app` has its own npm lock and builds against the
+`examples/vue-conversation/app` has its own `bun.lock` and builds against the
 published SDK, not repository source.
 
 Manifests and `.changeset/config.json` own publication; this map describes responsibilities.
@@ -1158,7 +1167,21 @@ structural diagnostics plus an opaque correlation id, drain accepted OTLP
 exports for a bounded interval, and then exit nonzero. Exception messages,
 stacks, enumerable fields, and arbitrary rejection values never cross the
 public telemetry boundary. Embedded API composition does not install process
-handlers because its host owns process lifecycle.
+handlers because its host owns process lifecycle. One class is survivable once
+the API is serving: an unhandled rejection that only reports a lost database
+connection (`isDatabaseConnectionLoss` in `packages/db/src/persistence-errors.ts`:
+SQLSTATE 57P01-57P03/08xxx, exact node-postgres socket-loss sentences, and
+socket or postgres.js transport codes only when the failure carries database
+origin, so the same codes from NATS or a provider fetch never qualify) is logged as
+`api_unhandled_database_connection_loss` and the process keeps running, because
+the driver has already discarded that connection. Background claim loops still
+catch and log their own failures and retry on the next tick. On request paths
+`app.onError` renders the same class as a retryable HTTP 503
+`upstream_unavailable` with `details.code: DATABASE_UNAVAILABLE` and
+`Retry-After: 1`; mutations also carry `outcomeUnknown: true` because the
+connection may have dropped after a commit. Better Auth hides driver errors
+behind a generic 500, so its session lookups run through
+`withManagedAuthSessionLookup`, which recovers the logged cause.
 
 ### 6.2 Packages
 
@@ -1204,7 +1227,7 @@ handlers because its host owns process lifecycle.
 | `examples/northstar-support` | `@opengeni/example-northstar-support` | Standalone product reference (proxy, MCP, React, streams) |
 | `examples/tool-server` | `@opengeni/example-tool-server` | Proxy `toolServer` reference |
 | `examples/site-session-embed` | `@opengeni/example-site-session-embed` | Site SDK/React embed and sandbox preview reference |
-| `examples/vue-conversation` | Standalone npm consumer in `app` | Published-SDK Vue conversation behind the Bun session proxy; [recipe](../examples/vue-conversation/README.md) |
+| `examples/vue-conversation` | Standalone Bun consumer in `app` (own `bun.lock`) | Published-SDK Vue conversation behind the Bun session proxy; [recipe](../examples/vue-conversation/README.md) |
 
 ### 6.4 Rust agent and relay
 
@@ -1336,7 +1359,14 @@ Wiring: `apps/worker/src/sandbox-routing.ts` and
 `apps/worker/src/activities/agent-turn/sandbox-runtime.ts`.
 
 Codemode adds attempt scope, active-attempt fencing, a durable operation journal,
-sandbox delivery and recovery. Preflight finishes before the execution-start
+sandbox delivery and recovery. Programmatic review uses a linked durable action
+request and `waiting_for_approval`; the original attempt/catalog foreign key
+never changes. A separate execution claim binds an approved continuation to the
+current attempt of the same turn and compatible tool/account semantics.
+`packages/db/src/codemode-approvals.ts` owns that transition, and the existing
+human-decision transaction supplies the durable workflow wake. Waiting releases
+capacity and yields at the SDK tool boundary; it is not an open SDK call or a
+JavaScript stack checkpoint. Preflight finishes before the execution-start
 marker; a pre-creation `codemode_catalog_stale` allows one safe client refresh,
 never a retry of an existing or ambiguous operation. Submission conflicts never
 reconcile to an existing row; ambiguous failures adopt one only after exact
@@ -1865,7 +1895,7 @@ organization-workspace lifecycle authority; see [external membership operation r
 
 | Change area | Canonical source | Read first |
 | --- | --- | --- |
-| Model registry, routing, pricing, provider identity, OpenAI-compatible or Claude inference | `packages/config/src/index.ts`, `packages/runtime/src/model-provider*.ts`, `packages/runtime/src/anthropic-messages.ts` | [`model-providers.md`](model-providers.md) (start at Configuring inference) |
+| Model registry, routing, pricing, provider identity, OpenAI-compatible or Claude inference | `packages/config/src/index.ts`, `packages/runtime/src/model-provider*.ts`, `packages/runtime/src/chat-reasoning.ts`, `packages/runtime/src/anthropic-messages.ts` | [`model-providers.md`](model-providers.md) (start at Configuring inference) |
 | Claude sign-in, renewal or quota | apps/api/src/routes/claude-subscription-accounts.ts, packages/db/src/claude-subscription-account-tokens.ts | [model-providers.md](model-providers.md#claude-subscription-usage) |
 | Codex subscription authority or capacity | `packages/codex/`, `apps/worker/src/activities/codex-rotation.ts` | [`codex-subscription-rotation.md`](codex-subscription-rotation.md) |
 | SuperGrok/xAI subscription authority or capacity | `packages/xai-subscription/`, `packages/db/src/xai-subscription.ts`, `packages/db/src/subscription-account-repository.ts`, `packages/db/src/subscription-pool-schema.ts`, `packages/db/src/organization-xai-subscriptions.ts` | [`supergrok-subscription.md`](supergrok-subscription.md) |
@@ -1891,6 +1921,7 @@ organization-workspace lifecycle authority; see [external membership operation r
 | Composer draft submission or native embedding host seam | `packages/core/src/application/composer-submit.ts`, `apps/api/src/routes/sessions.ts`, `packages/react/src/embedded-session-client.ts` | [`embedding.md`](embedding.md), package READMEs, and §7.1 |
 | Providers and social connectors | `apps/api/src/integrations/`, `apps/api/src/mcp/server.ts`, `packages/core/src/application/new-session-drafts.ts`, `packages/network/src/mcp-oauth-discovery.ts`, `packages/github/` | [`integrations-design.md`](integrations-design.md), [`github-app.md`](github-app.md), [`google-drive.md`](google-drive.md), [`slack-bot.md`](slack-bot.md), [`social-connectors.md`](social-connectors.md), [`fiken.md`](fiken.md) |
 | Slack user-token MCP tools and shared provider quota | `packages/runtime/src/slack-rest-mcp.ts`, `packages/contracts/src/slack-rest-mcp.ts`, `packages/db/src/slack-api-rate-limits.ts` | [`design/first-party-mcp-bridges.md`](design/first-party-mcp-bridges.md), [`slack-bot.md`](slack-bot.md) |
+| Organization Slack bot sharing and prepared delivery | `packages/db/src/organization-slack-bots.ts`, `apps/api/src/routes/slack-bot-access.ts`, `apps/api/src/integrations/slack-bot.ts` | [`slack-bot.md`](slack-bot.md) |
 | Slack task files | `apps/api/src/integrations/slack-task-file-upload.ts`, `apps/api/src/integrations/slack-file-upload-flow.ts`, `packages/db/src/slack-file-uploads.ts` | [`slack-bot.md`](slack-bot.md#explicit-file-delivery-in-the-task-thread) |
 | OpenGeni Review Bot and pull-request automation | `packages/core/src/domain/pr-review.ts`, `apps/api/src/routes/pr-review.ts`, `apps/api/src/routes/pr-review-github.ts` | [`automations.md`](automations.md), [`pr-review.md`](pr-review.md) |
 | HTTP routes or SSE | `apps/api/src/app.ts`, `apps/api/src/http/sse.ts` | §4, [`../packages/sdk/README.md`](../packages/sdk/README.md), and [`design/api-compatibility-policy.md`](design/api-compatibility-policy.md) for public routes |
@@ -1926,7 +1957,11 @@ Workspace timers: [implementation and rollout](workspace-pause-timers.md).
 ### In-conversation connection setup
 
 `SessionCapabilityCard` shares native Connection APIs; hosts retain authorization.
-OAuth never replays tools. Skills retain workspace scope/reviewed hashes.
+OAuth never replays tools. The web connection card reviews missing parent tool
+selections before an explicit human click applies root-to-child updates through
+the ordinary version-fenced API; child ceilings and accepted turn snapshots stay
+unchanged. `packages/react/src/session-capability-policy.ts` owns that client
+review/apply plan. Skills retain workspace scope/reviewed hashes.
 Messages authorize sender accounts; queues, retries and children retain that
 identity. Personal schedules have immutable owners. Personal/Workspace setup
 uses provider defaults unless explicitly chosen; reconnect preserves ownership.

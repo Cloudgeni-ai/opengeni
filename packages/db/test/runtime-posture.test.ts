@@ -1098,6 +1098,7 @@ describe("runtime database posture evaluator", () => {
       delete: false,
     };
     posture.privateTables.push(table);
+    posture.privateTables.push({ ...table, name: "organization_slack_bot_access" });
     posture.privateRoutines.push(
       ...SCHEDULED_SLACK_BOT_MESSAGE_RUNTIME_ROUTINES.map((name) => ({
         name,
@@ -1122,7 +1123,7 @@ describe("runtime database posture evaluator", () => {
     table.rlsForced = true;
     posture.privateRoutines.at(-1)!.publicExecute = true;
     expect(evaluateRuntimeDatabasePosture(posture, options)).toContain(
-      "scheduled Slack bot message capability read_scheduled_slack_bot_message(uuid, uuid, uuid, uuid) is missing or unsafe",
+      "scheduled Slack bot message capability read_organization_slack_bot_message(uuid, uuid, uuid, uuid) is missing or unsafe",
     );
   });
 

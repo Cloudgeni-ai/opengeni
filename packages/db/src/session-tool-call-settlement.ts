@@ -140,6 +140,41 @@ function mapEvent(row: typeof schema.sessionEvents.$inferSelect): SessionEvent {
   };
 }
 
+/** Same terminal fence for model and programmatic calls. Started effects remain unknown. */
+export async function settleInterruptedCodemodeCallsInTransaction(
+  tx: Database,
+  input: Pick<
+    ClosePendingSessionToolCallsInput,
+    "workspaceId" | "sessionId" | "turnId" | "reason" | "now"
+  >,
+): Promise<void> {
+  await tx
+    .update(schema.sessionAttemptCodemodeCalls)
+    .set({
+      state: sql`case when ${schema.sessionAttemptCodemodeCalls.executionStartedAt} is null then 'cancelled' else 'outcome_unknown' end`,
+      claimId: sql`case when ${schema.sessionAttemptCodemodeCalls.executionStartedAt} is null then null else ${schema.sessionAttemptCodemodeCalls.claimId} end`,
+      claimedAt: sql`case when ${schema.sessionAttemptCodemodeCalls.executionStartedAt} is null then null else ${schema.sessionAttemptCodemodeCalls.claimedAt} end`,
+      claimExpiresAt: sql`case when ${schema.sessionAttemptCodemodeCalls.executionStartedAt} is null then null else ${schema.sessionAttemptCodemodeCalls.claimExpiresAt} end`,
+      errorCode: input.reason,
+      errorMessage:
+        "The owning turn ended. Started effects require reconciliation before retrying.",
+      completedAt: input.now,
+      updatedAt: input.now,
+    })
+    .where(
+      and(
+        eq(schema.sessionAttemptCodemodeCalls.workspaceId, input.workspaceId),
+        eq(schema.sessionAttemptCodemodeCalls.sessionId, input.sessionId),
+        eq(schema.sessionAttemptCodemodeCalls.turnId, input.turnId),
+        inArray(schema.sessionAttemptCodemodeCalls.state, [
+          "queued",
+          "running",
+          "waiting_for_approval",
+        ]),
+      ),
+    );
+}
+
 /**
  * Close raw tool calls for a logical turn while its owning session/turn locks
  * are held. Recoverable transitions preserve interruption rows because those
@@ -153,6 +188,7 @@ export async function closePendingSessionToolCallsInTransaction(
   tx: Database,
   input: ClosePendingSessionToolCallsInput,
 ): Promise<{ sequence: number; events: SessionEvent[]; closed: number }> {
+  if (!input.preserveInterruptionRows) await settleInterruptedCodemodeCallsInTransaction(tx, input);
   const pendingRows = await tx
     .select()
     .from(schema.sessionPendingToolCalls)

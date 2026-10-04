@@ -5,7 +5,7 @@ import {
   ScheduledTaskTargetAccessChange,
   type ErrorCode,
 } from "@opengeni/contracts";
-import { WorkspaceControlBusyError } from "@opengeni/db";
+import { isDatabaseConnectionLoss, WorkspaceControlBusyError } from "@opengeni/db";
 import type { ContentfulStatusCode } from "hono/utils/http-status";
 import { HTTPException } from "hono/http-exception";
 
@@ -88,6 +88,31 @@ export function workspaceControlBusyHttpError(error: unknown): ApiHttpError | nu
     retryable: true,
     outcomeUnknown: false,
     details: { code: busy.code, lockTimeoutMs: busy.lockTimeoutMs },
+  });
+}
+
+/** `details.code` of the retryable 503 for a request whose database connection was lost. */
+export const DATABASE_UNAVAILABLE_ERROR_DETAIL_CODE = "DATABASE_UNAVAILABLE";
+
+/**
+ * The request's database connection went away (an operator drain, failover,
+ * restart, or socket loss) rather than the statement being rejected. That is a
+ * brief, retryable outage, not an internal error. A read is safe to repeat. A
+ * mutation's outcome is unknown: the connection may have dropped after COMMIT,
+ * or after an earlier transaction of the same request committed, so the client
+ * must reconcile by its own idempotency key before resending.
+ */
+export function databaseUnavailableHttpError(error: unknown, method: string): ApiHttpError | null {
+  if (error instanceof ApiHttpError) return null;
+  if (error instanceof HTTPException && error.status < 500) return null;
+  if (!isDatabaseConnectionLoss(error)) return null;
+  const safeMethod = method === "GET" || method === "HEAD" || method === "OPTIONS";
+  return new ApiHttpError(503, {
+    code: "upstream_unavailable",
+    message: "Opengeni is temporarily unavailable. Retry shortly.",
+    retryable: true,
+    outcomeUnknown: !safeMethod,
+    details: { code: DATABASE_UNAVAILABLE_ERROR_DETAIL_CODE },
   });
 }
 

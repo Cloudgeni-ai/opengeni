@@ -73,7 +73,7 @@ if (import.meta.main) {
         return new Response("Not found", { status: 404 });
       const file = Bun.file(resolve(dist, path === "/" ? "index.html" : `.${path}`));
       if (!(await file.exists()))
-        return new Response("Run npm run build first, or use Vite on port 3104.", { status: 404 });
+        return new Response("Run bun run build first, or use Vite on port 3104.", { status: 404 });
       return new Response(request.method === "HEAD" ? null : file, {
         headers: {
           "content-type": file.type,

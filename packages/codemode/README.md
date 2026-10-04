@@ -103,8 +103,15 @@ by the shared attempt executor. Catalog, approval, authorization, input
 validation, and argument-sensitive connector-policy prepare complete before the
 durable execution-start marker. The prepared call performs connector begin at
 the executor boundary and completion afterward, so model MCP and Codemode share
-one lifecycle while invalid, blocked, Ask, or unavailable-policy calls settle
-before provider execution. Human-gated model calls additionally require the
+one lifecycle. Invalid, blocked, or unavailable-policy calls settle before
+provider execution. With the `durableApproval` protocol capability, Ask becomes
+`waiting_for_approval` and returns `CodemodeApprovalPendingError` with a compact
+operation handle. It releases the claim and pauses the owning turn for review.
+Human approval resumes the stored operation once; it does not restore a
+JavaScript stack. Use `environmentCodemodeClient().status(id)` or `.resume(id)`
+from the current authorized attempt of the same turn to observe results.
+`ogtool read <id>` and `ogtool resume <id>` expose the same behavior. Older
+clients receive an upgrade-required failure before an approval can execute. Human-gated model calls additionally require the
 attempt host's exact approved SDK invocation context; calling the environment
 directly cannot bypass approval. The dispatcher keeps its claim alive during
 gateway preparation and reuses a deterministic durable tool-created event if a
@@ -161,3 +168,31 @@ await workbook.apply([
   },
 ]);
 ```
+
+### Frozen paginated selections
+
+`collectIdPages(load, { maxItems, maxPages, signal })` reads all pages, removes
+repeated IDs and refuses incomplete selections (repeated cursor, empty continued
+page, cap, provider error or cancellation). Defaults: 10,000 IDs and 200 pages;
+hard bounds: 50,000 IDs and 1,000 pages. `planIdBatches(ids, 1000)` freezes a
+selection digest and distinct operation IDs for chunks of at most 1,000 IDs.
+It performs no writes. Save the plan in the agent workspace before submitting
+chunks; keep the arrays out of model output. Never continue searching after a
+mutation changes the search membership.
+
+For Gmail, use `search_messages` with `messageFormat: "IDS_ONLY"` (or
+`search_threads` with `view: "IDS_ONLY"`). These return one list page without
+hydration requests; existing rich views keep their defaults. Adapt that page's
+`messages.map(message => message.id)` and `nextPageToken` to `collectIdPages`.
+Each planned chunk is an independently authorized durable call. An Ask returns
+a waiting handle; catch that typed result and retain its operation ID rather
+than copying arguments into another call. Original JavaScript locals are not
+restored when a turn resumes. Inspect saved handles on the next attempt.
+
+`batch_modify_messages` returns `status: "acknowledged"`, `submittedCount` and
+`reconciliation: "not_checked"`. Gmail's empty success response establishes
+batch acceptance, not a per-message verification. The former `modified: true`
+claim and echoed ID array are removed. `summarizeIdBatches(plan, receipts)`
+counts acknowledged, failed-before-effect, unknown, waiting and unstarted IDs
+separately. Only mark a receipt acknowledged after that provider response;
+transport uncertainty is unknown and must not be retried automatically.

@@ -2022,6 +2022,62 @@ describe("useVoiceInput", () => {
     await hook.unmount();
   });
 
+  test.each(["insufficient_credits", "allowance_exhausted", "monthly_model_cost_limit"])(
+    "keeps billing refusal %s for manual retry",
+    async (code) => {
+      installMediaMocks();
+      const store = new MemoryVoiceRecordingStore();
+      let transcriptionCalls = 0;
+      const hook = await renderHook(
+        () =>
+          useVoiceInput({
+            client: {
+              transcribeAudio: async () => {
+                transcriptionCalls += 1;
+                throw new OpenGeniApiError(
+                  code === "monthly_model_cost_limit" ? 429 : 402,
+                  JSON.stringify({
+                    error: {
+                      status: code === "monthly_model_cost_limit" ? 429 : 402,
+                      code,
+                      message: "Credits required.",
+                      retryable: true,
+                    },
+                  }),
+                );
+              },
+            },
+            workspaceId: "ws-1",
+            capability,
+            enabled: true,
+            value: "",
+            setValue: () => undefined,
+            focusInput: () => undefined,
+            createRecordingStore: () => store,
+            createRecordingId: () => "recording-conflict",
+            automaticRetryDelayMilliseconds: 0,
+          }),
+        undefined,
+      );
+
+      await act(async () => {
+        await hook.result.current.start();
+        hook.result.current.stop();
+        await settle(30);
+      });
+      await act(async () => {
+        await new Promise((resolve) => setTimeout(resolve, 0));
+        await settle(20);
+      });
+
+      expect(transcriptionCalls).toBe(1);
+      expect(hook.result.current.status).toBe("error");
+      expect(hook.result.current.error).toBe(code);
+      expect(store.manifests.has("recording-conflict")).toBe(true);
+      await hook.unmount();
+    },
+  );
+
   test("waits for a deferred final chunk before exposing same-recording retry", async () => {
     const { getUserMedia } = installMediaMocks();
     const store = new MemoryVoiceRecordingStore();

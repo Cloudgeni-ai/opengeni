@@ -1,3 +1,19 @@
+export * from "./organization-slack-bots";
+export * from "./voice-transcription-settlement";
+import {
+  connectionMetadataColumns,
+  connectionSubjectVisibility,
+  getConnectionMetadata,
+  listConnectionsMetadata,
+  mapConnectionMetadata,
+  withConnectionSubjectRls,
+  type ConnectionMetadataWithVerification,
+} from "./connection-metadata";
+export {
+  getConnectionMetadata,
+  listConnectionsMetadata,
+  type ConnectionMetadataWithVerification,
+} from "./connection-metadata";
 export { readCreditPromotionPolicy } from "./credit-promotion-policy";
 import { getBillingBalance, getSpendableCreditBalance, planCreditDebit } from "./credit-balances";
 export {
@@ -5,6 +21,30 @@ export {
   getSpendableCreditBalance,
   spendableCreditMicros,
 } from "./credit-balances";
+import {
+  lockTurnAttemptWriteFenceTx,
+  type TurnAttemptFenceRejectReason,
+} from "./session-attempt-fence";
+export type { TurnAttemptFenceRejectReason } from "./session-attempt-fence";
+import { ToolReviewContext } from "@opengeni/contracts";
+import { recordToolApproval } from "@opengeni/observability";
+import { connectorActionFingerprint } from "./connector-action-fingerprint";
+import {
+  resolveConnectorActionPolicy,
+  connectorActionPolicyDecision,
+  connectorActionPoliciesForAccountRoutes,
+  connectorToolPolicyRevision,
+  ConnectorToolPermissionConflictError,
+  type ResolvedConnectorActionPolicy,
+} from "./connector-action-policy";
+export {
+  resolveConnectorActionPolicy,
+  connectorActionPolicyDecision,
+  projectConnectorToolPermission,
+  connectorActionPoliciesForAccountRoutes,
+  connectorToolPolicyRevision,
+  ConnectorToolPermissionConflictError,
+} from "./connector-action-policy";
 import {
   agentSelectionNotes,
   loadInboxExecutionContext,
@@ -458,6 +498,7 @@ import {
   completeCodemodeOperationInTransaction,
   failCodemodeOperationInTransaction,
 } from "./codemode-operations";
+import { adoptCodemodeApproval } from "./codemode-approvals";
 import {
   cancelTurnInteractionInterventionsInTransaction,
   InteractionResourceStateError,
@@ -629,6 +670,7 @@ import {
   SessionEventPersistenceError,
   type IdempotentPersistenceTransactionOptions,
 } from "./persistence-errors";
+export { DatabaseTransactionError } from "./persistence-errors";
 import {
   assertCapabilityComponentVersionCanChange,
   effectiveCapabilityOwnerSql,
@@ -636,6 +678,7 @@ import {
 } from "./capability-components";
 import {
   closePendingSessionToolCallsInTransaction,
+  settleInterruptedCodemodeCallsInTransaction,
   historyCallId,
   historyItemType,
   TOOL_RESULT_TYPE_BY_CALL_TYPE,
@@ -780,6 +823,7 @@ export * from "./session-queue-commands";
 export * from "./session-realtime";
 export * from "./session-realtime-context";
 export * from "./session-realtime-ledger";
+export * from "./session-realtime-billing";
 export * from "./new-session-drafts";
 export * from "./workspace-instruction-policies";
 export * from "./company-profile";
@@ -901,6 +945,7 @@ import {
 } from "./database";
 export {
   createDb,
+  databaseReconnectBackoffSeconds,
   registerDbBinding,
   retrySessionActivityRls,
   rlsContextForWorkspace,
@@ -6522,12 +6567,6 @@ export class PersonalGitHubRepositorySelectionUnavailableError extends Error {
   }
 }
 
-/** Server-owned verification facts; public schemas expose them read-only and nullable. */
-export type ConnectionMetadataWithVerification = ConnectionMetadata & {
-  verifiedInstallAt: string | null;
-  verifiedInstallVersion: number | null;
-};
-
 export type SlackBotPostOperation = {
   id: string;
   accountId: string;
@@ -10374,10 +10413,9 @@ export async function listEnabledMcpCapabilityServers(
     const allowedTools = stringArrayConfig(config.allowedTools ?? metadata.allowedTools);
     const timeoutMs = positiveIntegerConfig(config.timeoutMs ?? metadata.timeoutMs);
     const cacheToolsList = booleanConfig(config.cacheToolsList ?? metadata.cacheToolsList);
-    const requireApproval = requireApprovalWithFloor(
+    const requireApproval = resolveMcpApprovalRecommendation(
       config.requireApproval,
       metadata.requireApproval,
-      item.workspaceId === null,
     );
     return [
       {
@@ -10609,37 +10647,6 @@ export function mcpServerIdForCapability(
   return `cap-${body}-${shortHash(capabilityId)}`;
 }
 
-const connectionMetadataColumns = {
-  id: schema.connections.id,
-  authorityId: schema.connections.authorityId,
-  authorityGeneration: schema.connections.authorityGeneration,
-  accountId: schema.connections.accountId,
-  workspaceId: schema.connections.workspaceId,
-  subjectId: schema.connections.subjectId,
-  providerDomain: schema.connections.providerDomain,
-  kind: schema.connections.kind,
-  status: schema.connections.status,
-  grantedScopes: schema.connections.grantedScopes,
-  expiresAt: schema.connections.expiresAt,
-  lastRefreshAt: schema.connections.lastRefreshAt,
-  lastUsedAt: schema.connections.lastUsedAt,
-  lastError: schema.connections.lastError,
-  version: schema.connections.version,
-  verifiedInstallAt: schema.connections.verifiedInstallAt,
-  verifiedInstallVersion: schema.connections.verifiedInstallVersion,
-  metadata: schema.connections.metadata,
-  createdBySubjectId: schema.connections.createdBySubjectId,
-  updatedBySubjectId: schema.connections.updatedBySubjectId,
-  createdAt: schema.connections.createdAt,
-  updatedAt: schema.connections.updatedAt,
-};
-
-function connectionSubjectVisibility(subjectId?: string | null): SQL {
-  return subjectId
-    ? or(isNull(schema.connections.subjectId), eq(schema.connections.subjectId, subjectId))!
-    : isNull(schema.connections.subjectId);
-}
-
 function connectionExactSubject(subjectId?: string | null): SQL {
   return subjectId
     ? eq(schema.connections.subjectId, subjectId)
@@ -10659,17 +10666,6 @@ function personalSlackCanonicalConnectionOrder(): SQL[] {
     desc(schema.connections.createdAt),
     desc(schema.connections.id),
   ];
-}
-
-async function withConnectionSubjectRls<T>(
-  db: Database,
-  workspaceId: string,
-  subjectId: string | null | undefined,
-  fn: (db: Database) => Promise<T>,
-): Promise<T> {
-  return subjectId
-    ? await withWorkspaceSubjectRls(db, workspaceId, subjectId, fn)
-    : await withWorkspaceRls(db, workspaceId, fn);
 }
 
 const connectionAccessPolicyColumns = {
@@ -11390,51 +11386,6 @@ export async function persistProviderOAuthConnection(
       });
     },
   );
-}
-
-export async function listConnectionsMetadata(
-  db: Database,
-  workspaceId: string,
-  subjectId?: string | null,
-): Promise<ConnectionMetadataWithVerification[]> {
-  return await withConnectionSubjectRls(db, workspaceId, subjectId, async (scopedDb) => {
-    const rows = await scopedDb
-      .select(connectionMetadataColumns)
-      .from(schema.connections)
-      .where(
-        and(
-          eq(schema.connections.workspaceId, workspaceId),
-          connectionSubjectVisibility(subjectId),
-        ),
-      )
-      // Legacy rows can share created_at. UUID DESC is the immutable stable
-      // tie-breaker, so every caller that intentionally selects the first row
-      // collapses duplicates in the same documented direction.
-      .orderBy(desc(schema.connections.createdAt), desc(schema.connections.id));
-    return rows.map(mapConnectionMetadata);
-  });
-}
-
-export async function getConnectionMetadata(
-  db: Database,
-  workspaceId: string,
-  connectionId: string,
-  subjectId?: string | null,
-): Promise<ConnectionMetadataWithVerification | null> {
-  return await withConnectionSubjectRls(db, workspaceId, subjectId, async (scopedDb) => {
-    const [row] = await scopedDb
-      .select(connectionMetadataColumns)
-      .from(schema.connections)
-      .where(
-        and(
-          eq(schema.connections.workspaceId, workspaceId),
-          eq(schema.connections.id, connectionId),
-          connectionSubjectVisibility(subjectId),
-        ),
-      )
-      .limit(1);
-    return row ? mapConnectionMetadata(row) : null;
-  });
 }
 
 function personalGitHubRepositorySelectionStateFromDatabase(
@@ -32411,7 +32362,7 @@ async function updateSessionMcpApprovalPolicyInTransaction(
       .limit(1);
     if (!session) return { server: null, changed: false };
     const policy =
-      requireApprovalWithFloor(input.requireApproval, inherited.approvalFloor, true) ?? false;
+      resolveMcpApprovalRecommendation(input.requireApproval, inherited.approvalFloor) ?? false;
     const server = { id: input.serverId, source: "workspace" as const, requireApproval: policy };
     if (
       Object.hasOwn(session.policies, input.serverId) &&
@@ -32542,7 +32493,12 @@ export type ConnectorActionInvocation = {
   serverId: string;
   toolName: string;
   arguments: unknown;
-  /** Explicit per-session approval or capability-authorized mutation ledger mode. */
+  reviewContext?: import("@opengeni/contracts").ToolReviewContext;
+  /** Recommended decision when no explicit user choice matches. */
+  defaultDecision?: "allow" | "ask";
+  /** Schema-validated discriminator supplied by the trusted tool adapter. */
+  actionName?: string;
+  /** Legacy recommendation or capability-authorized mutation ledger mode. */
   approvalMode?: "session_mcp" | "connector_write";
 };
 
@@ -32552,6 +32508,7 @@ export type PrepareConnectorActionApprovalResult =
       managed: true;
       decision: ConnectorActionPolicyDecision;
       requestId?: string;
+      approvalStatus?: string;
       actionFingerprint: string;
     };
 
@@ -32591,118 +32548,10 @@ function boundedConnectorActionText(value: string, label: string, max: number): 
   return trimmed;
 }
 
-/**
- * Resolve the request's policy selector. This caller-controlled value is used
- * only transiently to match the attempt-frozen policy snapshot; it must never
- * be copied into a request row or audit event.
- */
-function connectorActionPolicySelector(toolName: string, args: unknown): string {
-  if (args && typeof args === "object" && !Array.isArray(args)) {
-    const action = (args as Record<string, unknown>).action;
-    if (typeof action === "string" && action.trim().length > 0) {
-      return boundedConnectorActionText(action, "connector action name", CONNECTOR_ACTION_NAME_MAX);
-    }
-  }
-  return toolName;
-}
-
 function connectorActionEvidenceName(
   resolved: Exclude<ResolvedConnectorActionPolicy, { managed: false }>,
 ): string {
   return resolved.entry?.actionName ?? ("actionName" in resolved ? resolved.actionName : "*");
-}
-
-function connectorActionPolicyDecision(
-  resolved: Exclude<ResolvedConnectorActionPolicy, { managed: false }>,
-): ConnectorActionPolicyDecision {
-  if (resolved.entry) return resolved.entry.policy;
-  return resolved.decision;
-}
-
-function connectorActionFingerprint(input: {
-  workspaceId: string;
-  connectionId: string;
-  serverId: string;
-  toolName: string;
-  actionName: string;
-  arguments: unknown;
-}): string {
-  return createHash("sha256")
-    .update(
-      stableJson({
-        workspaceId: input.workspaceId,
-        connectionId: input.connectionId,
-        serverId: input.serverId,
-        toolName: input.toolName,
-        actionName: input.actionName,
-        arguments: input.arguments ?? null,
-      }),
-      "utf8",
-    )
-    .digest("hex");
-}
-
-type ResolvedConnectorActionPolicy =
-  | { managed: false }
-  | {
-      managed: true;
-      source: "explicit";
-      entry: ConnectorActionPolicySnapshotEntry;
-    }
-  | {
-      managed: true;
-      source: "explicit";
-      entry: null;
-      decision: "allow" | "ask";
-      actionName: string;
-    }
-  | {
-      managed: true;
-      source: "ambiguous";
-      entry: null;
-      decision: "block";
-    };
-
-/** Resolve one immutable attempt snapshot with exact-over-wildcard precedence. */
-export function resolveConnectorActionPolicy(
-  snapshot: readonly ConnectorActionPolicySnapshotEntry[],
-  input: {
-    connectionId: string;
-    serverId: string;
-    toolName: string;
-    actionName: string;
-  },
-): ResolvedConnectorActionPolicy {
-  const candidates = snapshot
-    .filter(
-      (entry) =>
-        entry.connectionId === input.connectionId &&
-        (entry.serverId === input.serverId || entry.serverId === "*") &&
-        (entry.toolName === input.toolName || entry.toolName === "*") &&
-        (entry.actionName === input.actionName || entry.actionName === "*"),
-    )
-    .map((entry) => ({
-      entry,
-      specificity:
-        Number(entry.serverId !== "*") +
-        Number(entry.toolName !== "*") +
-        Number(entry.actionName !== "*"),
-    }))
-    .sort(
-      (left, right) =>
-        right.specificity - left.specificity || left.entry.id.localeCompare(right.entry.id),
-    );
-  const selected = candidates[0];
-  if (!selected) return { managed: false };
-  if (candidates[1]?.specificity === selected.specificity) {
-    return {
-      managed: true,
-      source: "ambiguous",
-      entry: null,
-      decision: "block",
-    };
-  }
-  return { managed: true, source: "explicit", entry: selected.entry };
 }
 
 function connectorActionAuditMetadata(
@@ -32770,7 +32619,9 @@ function normalizedConnectorActionInvocation(
   toolName: string;
   policyActionSelector: string;
   arguments: unknown;
+  reviewContext?: import("@opengeni/contracts").ToolReviewContext;
   approvalMode: "connector" | "session_mcp" | "connector_write";
+  defaultDecision?: "allow" | "ask";
 } {
   const approvalId = boundedConnectorActionText(
     invocation.approvalId,
@@ -32787,7 +32638,14 @@ function normalizedConnectorActionInvocation(
     "connector tool name",
     CONNECTOR_ACTION_NAME_MAX,
   );
-  const policyActionSelector = connectorActionPolicySelector(toolName, invocation.arguments);
+  const policyActionSelector =
+    invocation.actionName === undefined
+      ? toolName
+      : boundedConnectorActionText(
+          invocation.actionName,
+          "connector action name",
+          CONNECTOR_ACTION_NAME_MAX,
+        );
   const connectionId = invocation.connectionId?.trim()
     ? boundedConnectorActionText(
         invocation.connectionId,
@@ -32813,43 +32671,18 @@ function normalizedConnectorActionInvocation(
     toolName,
     policyActionSelector,
     arguments: invocation.arguments,
+    ...(invocation.reviewContext
+      ? { reviewContext: ToolReviewContext.parse(invocation.reviewContext) }
+      : {}),
     approvalMode,
+    ...(invocation.defaultDecision !== undefined
+      ? { defaultDecision: invocation.defaultDecision }
+      : approvalMode === "session_mcp"
+        ? { defaultDecision: "ask" as const }
+        : approvalMode === "connector_write"
+          ? { defaultDecision: "allow" as const }
+          : {}),
   };
-}
-
-function resolvedSessionMcpApproval(
-  actionName: string,
-): Exclude<ResolvedConnectorActionPolicy, { managed: false }> {
-  return {
-    managed: true,
-    source: "explicit",
-    entry: null,
-    decision: "ask",
-    actionName,
-  };
-}
-
-function resolvedConnectorWritePolicy(
-  resolved: ResolvedConnectorActionPolicy,
-  approvalMode: "connector" | "connector_write" | "session_mcp",
-  actionName: string,
-): ResolvedConnectorActionPolicy {
-  if (approvalMode === "session_mcp") {
-    // Explicit Block still wins for header-backed / credential-free servers.
-    // Allow cannot lower the separately frozen session approval floor.
-    return resolved.managed && connectorActionPolicyDecision(resolved) !== "allow"
-      ? resolved
-      : resolvedSessionMcpApproval(actionName);
-  }
-  return approvalMode === "connector_write" && !resolved.managed
-    ? {
-        managed: true,
-        source: "explicit",
-        entry: null,
-        decision: "allow",
-        actionName,
-      }
-    : resolved;
 }
 
 function durableConnectorActionInvocation(
@@ -32865,14 +32698,29 @@ function durableConnectorActionInvocation(
   toolName: string;
   actionName: string;
   actionFingerprint: string;
+  reviewArguments: string;
+  reviewContext?: import("@opengeni/contracts").ToolReviewContext;
 } {
   const actionName = connectorActionEvidenceName(resolved);
+  const reviewArguments = JSON.stringify(invocation.arguments) ?? "null";
+  const reviewContext = invocation.reviewContext
+    ? ToolReviewContext.parse(invocation.reviewContext)
+    : undefined;
+  if (
+    Buffer.byteLength(reviewArguments, "utf8") > 4 * 1024 * 1024 ||
+    (reviewContext && Buffer.byteLength(JSON.stringify(reviewContext), "utf8") > 4 * 1024 * 1024)
+  ) {
+    recordToolApproval("size_rejected");
+    throw new Error("Tool review exceeds the supported size. Prepare smaller independent actions.");
+  }
   return {
     approvalId: invocation.approvalId,
     connectionId: invocation.connectionId,
     serverId: invocation.serverId,
     toolName: invocation.toolName,
     actionName,
+    reviewArguments,
+    ...(reviewContext ? { reviewContext } : {}),
     actionFingerprint: connectorActionFingerprint({
       workspaceId: identity.workspaceId,
       connectionId: invocation.connectionId,
@@ -32896,8 +32744,16 @@ async function connectorActionAttemptSnapshot(
       executionGeneration: schema.sessionTurnAttempts.executionGeneration,
       state: schema.sessionTurnAttempts.state,
       connectorActionPolicies: schema.sessionTurnAttempts.connectorActionPolicies,
+      mcpAccountBindings: schema.sessionTurns.mcpAccountBindings,
     })
     .from(schema.sessionTurnAttempts)
+    .innerJoin(
+      schema.sessionTurns,
+      and(
+        eq(schema.sessionTurns.id, schema.sessionTurnAttempts.turnId),
+        eq(schema.sessionTurns.workspaceId, schema.sessionTurnAttempts.workspaceId),
+      ),
+    )
     .where(
       and(
         eq(schema.sessionTurnAttempts.workspaceId, identity.workspaceId),
@@ -32918,7 +32774,10 @@ async function connectorActionAttemptSnapshot(
   if (attempt.connectorActionPolicies.length > CONNECTOR_ACTION_POLICY_SNAPSHOT_MAX) {
     throw new Error("connector action policy snapshot exceeds the runtime bound");
   }
-  return attempt.connectorActionPolicies;
+  return connectorActionPoliciesForAccountRoutes(
+    attempt.connectorActionPolicies,
+    attempt.mcpAccountBindings,
+  );
 }
 
 function connectorActionRequestMatches(
@@ -33015,6 +32874,12 @@ async function insertConnectorActionRequest(
       policySource: input.resolved.source,
       policyDecision: connectorActionPolicyDecision(input.resolved),
       actionFingerprint: input.invocation.actionFingerprint!,
+      ...(input.status === "pending"
+        ? {
+            reviewArguments: input.invocation.reviewArguments,
+            reviewContext: input.invocation.reviewContext ?? null,
+          }
+        : {}),
       status: input.status,
       ...(input.status === "executing"
         ? {
@@ -33413,6 +33278,37 @@ export async function ensureConnectorActionPolicyDefault(
   );
 }
 
+/** An already prepared action keeps its original choice across resumed attempts. */
+async function priorConnectorActionPreparation(
+  db: Database,
+  identity: ConnectorActionAttemptIdentity,
+  invocation: ReturnType<typeof normalizedConnectorActionInvocation>,
+): Promise<PrepareConnectorActionApprovalResult | null> {
+  const [row] = await db
+    .select()
+    .from(schema.connectorActionRequests)
+    .where(
+      and(
+        eq(schema.connectorActionRequests.workspaceId, identity.workspaceId),
+        eq(schema.connectorActionRequests.sessionId, identity.sessionId),
+        eq(schema.connectorActionRequests.turnId, identity.turnId),
+        eq(schema.connectorActionRequests.approvalId, invocation.approvalId),
+      ),
+    )
+    .limit(1);
+  if (!row) return null;
+  if (!connectorActionRequestMatchesLogicalCall(row, identity, invocation)) {
+    throw new Error("connector action approval id conflicts with different immutable inputs");
+  }
+  return {
+    managed: true,
+    decision: row.policyDecision,
+    approvalStatus: row.status,
+    requestId: row.id,
+    actionFingerprint: row.actionFingerprint,
+  };
+}
+
 export async function prepareConnectorActionApproval(
   db: Database,
   identity: ConnectorActionAttemptIdentity,
@@ -33428,16 +33324,21 @@ export async function prepareConnectorActionApproval(
     async (scopedDb) =>
       await scopedDb.transaction(async (tx) => {
         const snapshot = await connectorActionAttemptSnapshot(tx as unknown as Database, identity);
-        const resolved = resolvedConnectorWritePolicy(
-          resolveConnectorActionPolicy(snapshot, {
-            connectionId: normalized.connectionId!,
-            serverId: normalized.serverId,
-            toolName: normalized.toolName,
-            actionName: normalized.policyActionSelector,
-          }),
-          normalized.approvalMode,
-          normalized.policyActionSelector,
+        const prior = await priorConnectorActionPreparation(
+          tx as unknown as Database,
+          identity,
+          normalized,
         );
+        if (prior) return prior;
+        const resolved = resolveConnectorActionPolicy(snapshot, {
+          connectionId: normalized.connectionId!,
+          serverId: normalized.serverId,
+          toolName: normalized.toolName,
+          actionName: normalized.policyActionSelector,
+          ...(normalized.defaultDecision !== undefined
+            ? { defaultDecision: normalized.defaultDecision }
+            : {}),
+        });
         if (!resolved.managed) return { managed: false, decision: "unmanaged" } as const;
         const durable = durableConnectorActionInvocation(
           identity,
@@ -33445,6 +33346,7 @@ export async function prepareConnectorActionApproval(
           resolved,
         );
         const decision = connectorActionPolicyDecision(resolved);
+        recordToolApproval(decision, resolved.source);
         if (decision === "allow") {
           return {
             managed: true,
@@ -33472,6 +33374,7 @@ export async function prepareConnectorActionApproval(
         return {
           managed: true,
           decision,
+          approvalStatus: row.status,
           requestId: row.id,
           actionFingerprint: row.actionFingerprint,
         } as const;
@@ -33494,16 +33397,17 @@ export async function previewConnectorActionApproval(
     { accountId: identity.accountId, workspaceId: identity.workspaceId },
     async (scopedDb) => {
       const snapshot = await connectorActionAttemptSnapshot(scopedDb, identity);
-      const resolved = resolvedConnectorWritePolicy(
-        resolveConnectorActionPolicy(snapshot, {
-          connectionId: normalized.connectionId!,
-          serverId: normalized.serverId,
-          toolName: normalized.toolName,
-          actionName: normalized.policyActionSelector,
-        }),
-        normalized.approvalMode,
-        normalized.policyActionSelector,
-      );
+      const prior = await priorConnectorActionPreparation(scopedDb, identity, normalized);
+      if (prior) return prior;
+      const resolved = resolveConnectorActionPolicy(snapshot, {
+        connectionId: normalized.connectionId!,
+        serverId: normalized.serverId,
+        toolName: normalized.toolName,
+        actionName: normalized.policyActionSelector,
+        ...(normalized.defaultDecision !== undefined
+          ? { defaultDecision: normalized.defaultDecision }
+          : {}),
+      });
       if (!resolved.managed) return { managed: false, decision: "unmanaged" } as const;
       const durable = durableConnectorActionInvocation(
         identity,
@@ -33553,16 +33457,15 @@ export async function beginConnectorActionExecution(
         let row = existing;
         let inserted = false;
         if (!row) {
-          const resolved = resolvedConnectorWritePolicy(
-            resolveConnectorActionPolicy(snapshot, {
-              connectionId: normalized.connectionId!,
-              serverId: normalized.serverId,
-              toolName: normalized.toolName,
-              actionName: normalized.policyActionSelector,
-            }),
-            normalized.approvalMode,
-            normalized.policyActionSelector,
-          );
+          const resolved = resolveConnectorActionPolicy(snapshot, {
+            connectionId: normalized.connectionId!,
+            serverId: normalized.serverId,
+            toolName: normalized.toolName,
+            actionName: normalized.policyActionSelector,
+            ...(normalized.defaultDecision !== undefined
+              ? { defaultDecision: normalized.defaultDecision }
+              : {}),
+          });
           if (!resolved.managed) return { allowed: true, managed: false } as const;
           const durable = durableConnectorActionInvocation(
             identity,
@@ -42565,144 +42468,6 @@ export async function getHumanInputResumeForEvent(
         response: request.response,
       }
     : null;
-}
-
-export type TurnAttemptFenceRejectReason =
-  | "workspace_paused"
-  | "session_paused"
-  | "pending_control"
-  | "active_turn_changed"
-  | "generation_changed"
-  | "attempt_changed"
-  | "turn_terminal"
-  | "not_found";
-
-type TurnAttemptFenceResult =
-  | {
-      allowed: true;
-      workspace: typeof schema.workspaces.$inferSelect;
-      session: typeof schema.sessions.$inferSelect;
-      turn: typeof schema.sessionTurns.$inferSelect;
-      attempt: typeof schema.sessionTurnAttempts.$inferSelect;
-    }
-  | {
-      allowed: false;
-      reason: TurnAttemptFenceRejectReason;
-      workspace: typeof schema.workspaces.$inferSelect | null;
-      session: typeof schema.sessions.$inferSelect | null;
-      turn: typeof schema.sessionTurns.$inferSelect | null;
-      attempt: typeof schema.sessionTurnAttempts.$inferSelect | null;
-    };
-
-/**
- * Lock order for every activity write fence: workspace control -> actual
- * workspace -> session -> exact turn -> exact attempt.
- *
- * Activity writes only need a shared workspace admission lock: concurrent
- * sessions may write independently, while an exclusive workspace Pause/Resume
- * still waits for every admitted write and prevents later writes from crossing
- * the control boundary. Using FOR UPDATE here serialized every active session in
- * one workspace behind a single row and turned streaming into a workspace-wide
- * lock queue.
- */
-async function lockTurnAttemptWriteFenceTx(
-  tx: Database,
-  input: {
-    workspaceId: string;
-    sessionId: string;
-    turnId: string;
-    executionGeneration: number;
-    attemptId: string;
-    sessionLock?: "no_key_update" | "key_share";
-  },
-): Promise<TurnAttemptFenceResult> {
-  const locks = await lockSessionEventWriteRows(tx, {
-    workspaceId: input.workspaceId,
-    controlLock: "share",
-    sessionLock: input.sessionLock ?? "no_key_update",
-    sessionIds: [input.sessionId],
-    turnIds: [input.turnId],
-    attemptIds: [input.attemptId],
-  });
-  const workspace = locks.workspace;
-  const session = locks.sessions.find((row) => row.id === input.sessionId) ?? null;
-  const turn = locks.turns.find((row) => row.id === input.turnId) ?? null;
-  const attempt = locks.attempts.find((row) => row.id === input.attemptId) ?? null;
-  const base = { workspace, session, turn, attempt };
-  if (!workspace || !session || !turn || !attempt) {
-    return { allowed: false, reason: "not_found", ...base };
-  }
-  const effectiveControl = await evaluateSessionWriteAdmissionControl(
-    tx,
-    input.workspaceId,
-    input.sessionId,
-    {
-      workspaceControl: locks.control ?? undefined,
-    },
-  );
-  if (effectiveControl.state === "paused") {
-    return {
-      allowed: false,
-      reason:
-        effectiveControl.primaryBlockerKind === "workspace" ? "workspace_paused" : "session_paused",
-      ...base,
-    };
-  }
-  if (session.activeTurnId !== input.turnId) {
-    return { allowed: false, reason: "active_turn_changed", ...base };
-  }
-  if (turn.executionGeneration !== input.executionGeneration) {
-    return { allowed: false, reason: "generation_changed", ...base };
-  }
-  if (turn.activeAttemptId !== input.attemptId) {
-    return { allowed: false, reason: "attempt_changed", ...base };
-  }
-  if (
-    turn.accountId !== session.accountId ||
-    turn.sessionId !== input.sessionId ||
-    attempt.accountId !== session.accountId ||
-    attempt.sessionId !== input.sessionId ||
-    attempt.turnId !== input.turnId ||
-    attempt.executionGeneration !== input.executionGeneration ||
-    !["claimed", "running"].includes(attempt.state)
-  ) {
-    return { allowed: false, reason: "attempt_changed", ...base };
-  }
-  let authoritySnapshot;
-  try {
-    authoritySnapshot = assertSessionAuthoritySnapshot({
-      attemptId: input.attemptId,
-      authorityEpoch: attempt.authorityEpoch,
-      authorityVisibility: attempt.authorityVisibility,
-      authorityOwnerOrganizationMembershipId: attempt.authorityOwnerOrganizationMembershipId,
-    });
-  } catch {
-    // The 0222 insert trigger keeps old writers rolling-safe, but no missing
-    // or partial tuple may cross an accepted-attempt write fence.
-    return { allowed: false, reason: "attempt_changed", ...base };
-  }
-  if (!sessionAuthoritySnapshotMatchesSession(authoritySnapshot, session)) {
-    return { allowed: false, reason: "attempt_changed", ...base };
-  }
-  const [interruption] = await tx
-    .select({ id: schema.sessionAttemptInterruptions.id })
-    .from(schema.sessionAttemptInterruptions)
-    .where(
-      and(
-        eq(schema.sessionAttemptInterruptions.workspaceId, input.workspaceId),
-        eq(schema.sessionAttemptInterruptions.sessionId, input.sessionId),
-        eq(schema.sessionAttemptInterruptions.attemptId, input.attemptId),
-        inArray(schema.sessionAttemptInterruptions.state, ["pending", "delivered", "acknowledged"]),
-      ),
-    )
-    .limit(1);
-  if (interruption) {
-    return { allowed: false, reason: "pending_control", ...base };
-  }
-  if (!["running", "requires_action"].includes(turn.status)) {
-    return { allowed: false, reason: "turn_terminal", ...base };
-  }
-  return { allowed: true, workspace, session, turn, attempt };
 }
 
 export class SessionBackgroundCommandAdoptionFencedError extends Error {
@@ -73165,10 +72930,9 @@ export async function claimSessionWorkForAttempt(
                 !Object.hasOwn(mcpApprovalPolicies, server.id)
               ) {
                 mcpApprovalPolicies[server.id] =
-                  requireApprovalWithFloor(
+                  resolveMcpApprovalRecommendation(
                     inheritedPolicies[server.id],
                     server.approvalFloor,
-                    true,
                   ) ?? false;
               }
             }
@@ -80051,6 +79815,15 @@ export async function applySessionTurnSettlement(
               : {}),
           }
         : null;
+      if (input.turnStatus === "completed") {
+        await settleInterruptedCodemodeCallsInTransaction(tx as unknown as Database, {
+          workspaceId,
+          sessionId: input.sessionId,
+          turnId: input.turnId,
+          reason: "turn_completed",
+          now,
+        });
+      }
       const terminalHumanInputRows = ["completed", "failed", "cancelled", "superseded"].includes(
         input.turnStatus,
       )
@@ -86479,6 +86252,51 @@ export type SettleCodemodeOperationWithOutputInput = {
  * ordinary durable event replay repairs; it cannot leave a completed call
  * permanently spinning in the timeline.
  */
+export async function adoptCodemodeApprovalWithOutput(
+  db: Database,
+  input: Parameters<typeof adoptCodemodeApproval>[1],
+) {
+  const events: SessionEvent[] = [];
+  const operation = await withSessionActivityRlsContext(db, input, (scoped) =>
+    adoptCodemodeApproval(scoped, input, async (tx, terminal) => {
+      const appended = await appendSessionEventsForTurnAttempt(
+        tx,
+        input.workspaceId,
+        input.sessionId,
+        input.turnId,
+        input.executionGeneration,
+        input.attemptId,
+        [
+          {
+            type: "agent.toolCall.output",
+            clientEventId: `opengeni:codemode-terminal:${terminal.operationId}`,
+            turnId: input.turnId,
+            turnGeneration: input.executionGeneration,
+            turnAttemptId: input.attemptId,
+            producerId: terminal.caller.subjectId,
+            payload: {
+              id: terminal.operationId,
+              origin: "codemode",
+              subjectId: terminal.caller.subjectId,
+              error: true,
+              output: {
+                isError: true,
+                content: [
+                  { type: "text", text: terminal.errorMessage ?? "Action ended before execution." },
+                ],
+                _meta: { codemodeState: terminal.state, errorCode: terminal.errorCode },
+              },
+            },
+          },
+        ],
+      );
+      if (!appended.accepted) throw new Error("Continuation lost its execution fence");
+      events.push(...appended.events);
+    }),
+  );
+  return { operation, events };
+}
+
 export async function settleCodemodeOperationWithOutput(
   db: Database,
   input: SettleCodemodeOperationWithOutputInput,
@@ -87733,67 +87551,6 @@ function projectInstallationConfig(config: Record<string, unknown>): Record<stri
   return { ...rest, headerNames: Object.keys(headersEncrypted).sort() };
 }
 
-function mapConnectionMetadata(row: {
-  id: string;
-  authorityId?: string | null;
-  authorityGeneration: number;
-  accountId: string;
-  workspaceId: string;
-  subjectId: string | null;
-  providerDomain: string;
-  kind: string;
-  status: string;
-  grantedScopes: string[];
-  expiresAt: Date | null;
-  lastRefreshAt: Date | null;
-  lastUsedAt: Date | null;
-  lastError: string | null;
-  version: number;
-  verifiedInstallAt: Date | null;
-  verifiedInstallVersion: number | null;
-  metadata: Record<string, unknown>;
-  createdBySubjectId: string | null;
-  updatedBySubjectId: string | null;
-  createdAt: Date;
-  updatedAt: Date;
-}): ConnectionMetadataWithVerification {
-  const {
-    [OPENROUTER_CREDENTIAL_OPERATION_ID_METADATA_KEY]: _openRouterOperationId,
-    [OPENROUTER_CREDENTIAL_OPERATION_DIGEST_METADATA_KEY]: _openRouterOperationDigest,
-    [VERCEL_AI_GATEWAY_CREDENTIAL_OPERATION_ID_METADATA_KEY]: _operationId,
-    [VERCEL_AI_GATEWAY_CREDENTIAL_OPERATION_DIGEST_METADATA_KEY]: _operationDigest,
-    anthropicCredentialOperationId: _anthropicOperationId,
-    anthropicCredentialOperationDigest: _anthropicOperationDigest,
-    claude_subscriptionCredentialOperationId: _claudeOperationId,
-    claude_subscriptionCredentialOperationDigest: _claudeOperationDigest,
-    ...publicMetadata
-  } = row.metadata;
-  return {
-    id: row.id,
-    ...(row.subjectId !== null && row.authorityId ? { authorityId: row.authorityId } : {}),
-    connectionAuthorityGeneration: row.authorityGeneration,
-    accountId: row.accountId,
-    workspaceId: row.workspaceId,
-    subjectId: row.subjectId,
-    providerDomain: row.providerDomain,
-    kind: row.kind as ConnectionKind,
-    status: row.status as ConnectionStatus,
-    grantedScopes: row.grantedScopes,
-    expiresAt: row.expiresAt?.toISOString() ?? null,
-    lastRefreshAt: row.lastRefreshAt?.toISOString() ?? null,
-    lastUsedAt: row.lastUsedAt?.toISOString() ?? null,
-    lastError: row.lastError,
-    version: row.version,
-    verifiedInstallAt: row.verifiedInstallAt?.toISOString() ?? null,
-    verifiedInstallVersion: row.verifiedInstallVersion,
-    metadata: publicMetadata,
-    createdBySubjectId: row.createdBySubjectId,
-    updatedBySubjectId: row.updatedBySubjectId,
-    createdAt: row.createdAt.toISOString(),
-    updatedAt: row.updatedAt.toISOString(),
-  };
-}
-
 function mapSlackBotPostOperation(
   row: typeof schema.slackBotPostOperations.$inferSelect,
 ): SlackBotPostOperation {
@@ -88047,29 +87804,21 @@ function sessionMcpApprovalPolicyConfig(value: unknown): SessionMcpApprovalPolic
   return parsed.success ? parsed.data : undefined;
 }
 
-/**
- * Unions a workspace's configured approval policy with a global catalog row's
- * mandated floor, so `enableCapability`'s ordinary config override can only
- * ADD approval requirements beyond a curated minimum, never remove one -
- * closing the gap where a bare `??` let a workspace-supplied `false` or a
- * narrower array silently erase a reviewed row's mandate (e.g. Gmail's
- * approval-gated send tools). `true` on either side is maximal. Applies only
- * to global rows (`workspaceId === null`): a workspace's own custom MCP
- * registration owns its policy outright, with no OpenGeni-reviewed floor to
- * protect.
- */
+/** Resolve explicit configuration before the provider recommendation. */
+export function resolveMcpApprovalRecommendation(
+  rawConfigValue: unknown,
+  rawMetadataValue: unknown,
+): SessionMcpApprovalPolicy | undefined {
+  return sessionMcpApprovalPolicyConfig(rawConfigValue ?? rawMetadataValue);
+}
+
+/** @deprecated Compatibility alias. Recommendations never impose an approval floor. */
 export function requireApprovalWithFloor(
   rawConfigValue: unknown,
   rawMetadataValue: unknown,
-  isGlobalRow: boolean,
+  _isGlobalRow: boolean,
 ): SessionMcpApprovalPolicy | undefined {
-  const resolved = sessionMcpApprovalPolicyConfig(rawConfigValue ?? rawMetadataValue);
-  if (!isGlobalRow) return resolved;
-  const floor = sessionMcpApprovalPolicyConfig(rawMetadataValue);
-  if (floor === undefined || floor === false) return resolved;
-  if (floor === true || resolved === true) return true;
-  const resolvedNames = resolved === undefined || resolved === false ? [] : resolved;
-  return [...new Set([...resolvedNames, ...floor])].sort();
+  return resolveMcpApprovalRecommendation(rawConfigValue, rawMetadataValue);
 }
 
 function cleanDbString(value: string | undefined | null): string | undefined {
@@ -88436,6 +88185,8 @@ export * from "./editable-artifact-materialization";
 export * from "./attempt-tool-catalogs";
 export * from "./model-context-snapshots";
 export * from "./codemode-operations";
+export * from "./codemode-approvals";
+export * from "./tool-action-reviews";
 export * from "./browser-sessions";
 export * from "./browser-deadline-checkpoints";
 export * from "./computer-sessions";
@@ -88495,6 +88246,37 @@ export async function listConnectorToolPermissionPolicies(
   );
 }
 
+/** A reset notice lasts until that exact policy version is changed by the user. */
+export async function listChangedConnectorToolPermissions(
+  db: Database,
+  input: { accountId: string; workspaceId: string; connectionId: string; serverId: string },
+): Promise<string[]> {
+  return withRlsContext(db, input, async (tx) => {
+    const rows = await tx
+      .selectDistinct({ toolName: schema.connectorActionPolicies.toolName })
+      .from(schema.connectorActionPolicies)
+      .innerJoin(
+        schema.auditEvents,
+        and(
+          eq(schema.auditEvents.workspaceId, input.workspaceId),
+          eq(schema.auditEvents.action, "connector.action.policy_reset"),
+          sql`${schema.auditEvents.targetId} = ${schema.connectorActionPolicies.id}::text`,
+          sql`${schema.auditEvents.metadata}->>'version' = ${schema.connectorActionPolicies.version}::text`,
+        ),
+      )
+      .where(
+        and(
+          eq(schema.connectorActionPolicies.workspaceId, input.workspaceId),
+          eq(schema.connectorActionPolicies.connectionId, input.connectionId),
+          eq(schema.connectorActionPolicies.serverId, input.serverId),
+          eq(schema.connectorActionPolicies.policy, "ask"),
+        ),
+      )
+      .limit(2048);
+    return rows.map((row) => row.toolName);
+  });
+}
+
 /** All tools in a group change together, and never exceed the attempt snapshot bound. */
 export async function updateConnectorToolPermissionPolicies(
   db: Database,
@@ -88505,7 +88287,9 @@ export async function updateConnectorToolPermissionPolicies(
     connectionId: string;
     serverId: string;
     toolNames: string[];
-    policy: ConnectorToolPermission;
+    policy: ConnectorToolPermission | null;
+    actionName?: string;
+    expectedRevision?: string;
   },
 ): Promise<void> {
   await withRlsContext(db, input, async (scoped) =>
@@ -88517,7 +88301,57 @@ export async function updateConnectorToolPermissionPolicies(
         .select()
         .from(schema.connectorActionPolicies)
         .where(eq(schema.connectorActionPolicies.workspaceId, input.workspaceId));
+      if (
+        input.expectedRevision !== undefined &&
+        input.expectedRevision !==
+          connectorToolPolicyRevision(existing, input.connectionId, input.serverId)
+      ) {
+        throw new ConnectorToolPermissionConflictError();
+      }
       const names = [...new Set(input.toolNames)].sort((left, right) => left.localeCompare(right));
+      // A whole-tool choice replaces its action exceptions. Reset removes only
+      // the selected overrides and reveals the inherited recommendation again.
+      const removed =
+        input.policy !== null && input.actionName !== undefined
+          ? []
+          : await tx
+              .delete(schema.connectorActionPolicies)
+              .where(
+                and(
+                  eq(schema.connectorActionPolicies.workspaceId, input.workspaceId),
+                  eq(schema.connectorActionPolicies.connectionId, input.connectionId),
+                  eq(schema.connectorActionPolicies.serverId, input.serverId),
+                  inArray(schema.connectorActionPolicies.toolName, names),
+                  ...(input.actionName !== undefined
+                    ? [eq(schema.connectorActionPolicies.actionName, input.actionName)]
+                    : []),
+                  ...(input.policy !== null
+                    ? [ne(schema.connectorActionPolicies.actionName, "*")]
+                    : []),
+                ),
+              )
+              .returning();
+      if (removed.length)
+        await tx.insert(schema.auditEvents).values(
+          withLosslessContentWriteVersion(
+            {
+              accountId: input.accountId,
+              workspaceId: input.workspaceId,
+              subjectId: input.subjectId,
+              action: "connector.action.preferences_replaced",
+              targetType: "connector_action_policy",
+              targetId: input.connectionId,
+              metadata: {
+                serverId: input.serverId,
+                policyIds: removed.map((row) => row.id),
+                reset: input.policy === null,
+              },
+            },
+            "metadata",
+            "metadataCodecVersion",
+          ),
+        );
+      if (input.policy === null) return;
       const added = names.filter(
         (name) =>
           !existing.some(
@@ -88525,13 +88359,18 @@ export async function updateConnectorToolPermissionPolicies(
               row.connectionId === input.connectionId &&
               row.serverId === input.serverId &&
               row.toolName === name &&
-              row.actionName === "*",
+              row.actionName === (input.actionName ?? "*"),
           ),
       );
-      if (existing.length + added.length > 2048)
+      if (existing.length - removed.length + added.length > 2048)
         throw new Error("The workspace tool permission limit has been reached");
       for (const toolName of names) {
-        await upsertConnectorActionPolicy(tx, { ...input, toolName, actionName: "*" });
+        await upsertConnectorActionPolicy(tx, {
+          ...input,
+          policy: input.policy,
+          toolName,
+          actionName: input.actionName ?? "*",
+        });
       }
     }),
   );
@@ -88572,3 +88411,4 @@ export async function loadDirectModelProviderConnection(
   });
   return { ...metadata, apiKey: connection.credential.apiKey };
 }
+export { apiIntegrationToolEffect } from "./api-integration-approvals";

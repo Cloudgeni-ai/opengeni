@@ -10,6 +10,7 @@ import { verifiedDelegatedHumanAuthorizationForRequest } from "@opengeni/core";
 
 import surface from "../../../scripts/public-api/surface.gen.json";
 import {
+  ACTION_CATALOG_BROWSER_ONLY,
   buildActionCatalog,
   isActionCatalogExempt,
   registeredApiRoutes,
@@ -18,6 +19,7 @@ import {
 import { ACTION_CATALOG } from "../src/mcp/action-catalog.gen";
 import {
   buildOrganizationMcpServer,
+  organizationMcpIcons,
   READ_ONLY_POST_ACTIONS,
   type OrganizationMcpCaller,
   searchActions,
@@ -142,6 +144,37 @@ describe("organization MCP action catalog", () => {
       expect(listed.has(key)).toBe(false);
   });
 
+  test("marks exactly the actions that need the person's own browser session", () => {
+    const browserOnly = ACTION_CATALOG.filter((entry) => entry.browserOnly);
+    // A change here is deliberate: each one is refused for every MCP caller.
+    expect(browserOnly.map(routeKey).sort()).toEqual(
+      [
+        "POST /v1/organizations",
+        "POST /v1/organizations/additional",
+        "GET /v1/organization-memberships",
+        "GET /v1/organization-invitations",
+        "POST /v1/organization-invitations/:invitationId/accept",
+        "GET /v1/organizations/:organizationId/recovery",
+        "PUT /v1/organizations/:organizationId/recovery/policy",
+        "POST /v1/organizations/:organizationId/recovery/policy/accept",
+        "POST /v1/organizations/:organizationId/recovery/policy/disable",
+        "POST /v1/organizations/:organizationId/recovery/operations",
+        "POST /v1/organizations/:organizationId/recovery/operations/:recoveryOperationId/approve",
+        "POST /v1/organizations/:organizationId/recovery/operations/:recoveryOperationId/cancel",
+        "POST /v1/organizations/:organizationId/recovery/operations/:recoveryOperationId/execute",
+        "GET /v1/workspaces/:workspaceId/identity-links",
+        "POST /v1/workspaces/:workspaceId/identity-links",
+        "GET /v1/workspaces/:workspaceId/identity-links/:linkId",
+        "POST /v1/workspaces/:workspaceId/identity-links/:linkId",
+        "GET /v1/workspaces/:workspaceId/identity-links/:linkId/:operation",
+        "POST /v1/workspaces/:workspaceId/identity-links/:linkId/:operation",
+      ].sort(),
+    );
+    // Every rule still names a real action.
+    for (const rule of ACTION_CATALOG_BROWSER_ONLY)
+      expect(ACTION_CATALOG.some((entry) => rule.pattern.test(routeKey(entry)))).toBe(true);
+  });
+
   test("catalog parity is order-independent but rejects missing, extra and ambiguous actions", () => {
     const expected: ActionCatalogEntry[] = [
       {
@@ -182,6 +215,35 @@ describe("organization MCP action catalog", () => {
 });
 
 describe("organization MCP server", () => {
+  test("advertises the brand icons in serverInfo", async () => {
+    const { client } = await connect(person(readOnly));
+    try {
+      const info = client.getServerVersion()!;
+      expect(info.name).toBe("opengeni");
+      expect(info.title).toBe("Opengeni");
+      expect(info.icons?.map(({ mimeType, sizes, theme }) => ({ mimeType, sizes, theme }))).toEqual(
+        [
+          { mimeType: "image/svg+xml", sizes: ["any"], theme: "light" },
+          { mimeType: "image/svg+xml", sizes: ["any"], theme: "dark" },
+        ],
+      );
+      const marks = info.icons!.map(({ src }) => {
+        expect(src.startsWith("data:image/svg+xml;base64,")).toBe(true);
+        return Buffer.from(src.slice(src.indexOf(",") + 1), "base64").toString("utf8");
+      });
+      expect(marks[0]).toContain('fill="#111111"');
+      expect(marks[1]).toContain('fill="#FFFFFF"');
+    } finally {
+      await client.close();
+    }
+    expect(organizationMcpIcons("https://app.example.test").at(-1)).toEqual({
+      src: "https://app.example.test/icon-512.png",
+      mimeType: "image/png",
+      sizes: ["512x512"],
+      theme: "light",
+    });
+  });
+
   test.each(insightsRoutes)(
     "discovers, describes and dispatches %s with the original read-only person proof",
     async (path) => {
@@ -284,7 +346,7 @@ describe("organization MCP server", () => {
       total: number;
       actions: unknown[];
     };
-    expect(everything.total).toBe(ACTION_CATALOG.length);
+    expect(everything.total).toBe(ACTION_CATALOG.filter((entry) => !entry.browserOnly).length);
     expect(everything.actions).toHaveLength(5);
     const described = (await call("opengeni_action_describe", { id: "createSession" })).value as {
       method: string;
@@ -395,6 +457,73 @@ describe("organization MCP server", () => {
     });
     expect(refused.isError).toBe(true);
     expect(refused.value).toMatchObject({ status: 403, hint: expect.stringContaining("browser") });
+  });
+});
+
+describe("organization MCP browser-only actions", () => {
+  const hidden = ACTION_CATALOG.find((entry) => entry.id === "listOrganizationMemberships")!;
+  const key: OrganizationMcpCaller = {
+    kind: "key",
+    authorization: "Bearer ogk_fixture",
+    accessKey: null,
+  };
+
+  test("are never found by search, at any page", async () => {
+    expect(hidden.browserOnly).toBeTruthy();
+    const { client, call } = await connect(person(full));
+    try {
+      for (const query of ["organization memberships", "list organization memberships", ""]) {
+        const ids: string[] = [];
+        let total = Infinity;
+        for (let offset = 0; offset < total; offset += 50) {
+          const page = (await call("opengeni_actions_search", { query, limit: 50, offset }))
+            .value as { total: number; actions: Array<{ id: string }> };
+          total = page.total;
+          ids.push(...page.actions.map((action) => action.id));
+        }
+        expect(ids).toHaveLength(total);
+        for (const entry of ACTION_CATALOG.filter((candidate) => candidate.browserOnly))
+          expect(ids).not.toContain(entry.id);
+      }
+    } finally {
+      await client.close();
+    }
+  });
+
+  test.each([
+    ["a person", person(full)],
+    ["an organization API key", key],
+  ] as const)(
+    "describe and call explain the browser requirement to %s without running anything",
+    async (_label, caller) => {
+      const { client, call, seen } = await connect(caller);
+      try {
+        for (const id of [hidden.id, `${hidden.method} ${hidden.path}`]) {
+          for (const tool of ["opengeni_action_describe", "opengeni_action_call"]) {
+            expect(await call(tool, { id })).toEqual({
+              isError: true,
+              value: `listOrganizationMemberships isn't available to connected agents or API keys: ${hidden.browserOnly}. The person has to do it in the Opengeni app in a browser.`,
+            });
+          }
+        }
+        expect(seen).toHaveLength(0);
+      } finally {
+        await client.close();
+      }
+    },
+  );
+
+  test("a route's own browser-session 401 still carries the browser hint", async () => {
+    const { client, call } = await connect(person(full), () =>
+      Response.json({ message: "managed human session required" }, { status: 401 }),
+    );
+    try {
+      const result = await call("opengeni_action_call", { id: "getAccessContext" });
+      expect(result.isError).toBe(true);
+      expect(result.value).toMatchObject({ status: 401, hint: expect.stringContaining("browser") });
+    } finally {
+      await client.close();
+    }
   });
 });
 

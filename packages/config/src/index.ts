@@ -1,4 +1,9 @@
 export { managedUserEmailAllowed } from "./managed-user-admission";
+import {
+  parseRealtimeVoicePricingJson,
+  parseRealtimeVoicePricingTableJson,
+} from "./realtime-voice-pricing";
+export * from "./realtime-voice-pricing";
 import { EnvCreditPromotionPolicy } from "./credit-promotions";
 export {
   CreditPromotionPolicy,
@@ -725,6 +730,35 @@ const SettingsSchema = z.object({
   voiceInputAzureApiVersion: z.string().optional(),
   voiceInputAzureApiKey: z.string().optional(),
   voiceInputAzureAdToken: z.string().optional(),
+  // Hosted realtime voice is configured independently of dictation.
+  azureLiveEndpoint: z.string().url().optional(),
+  azureLiveApiKey: z.string().optional(),
+  azureLiveDeployment: z.string().default("gpt-live-1"),
+  azureLiveVoice: z.string().default("marin"),
+  // Credit price of deployment-funded live voice (RealtimeVoicePricing JSON).
+  // Required while credit billing is active, otherwise the model is withheld.
+  azureLivePricingJson: z.string().optional(),
+  // Managed AI Gateway live voice prices keyed by upstream model id.
+  aiGatewayRealtimePricingJson: z.string().optional(),
+  // Azure Speech credentials are explicit: a different resource can host MAI.
+  voiceInputMaiEndpoint: z.string().url().optional(),
+  voiceInputMaiApiKey: z.string().optional(),
+  voiceInputMaiApiVersion: z.string().default("2025-10-15"),
+  voiceInputMaiPricingJson: z.string().optional(),
+  voiceInputMaiModel: z.string().default("MAI-Transcribe-2"),
+  // Underlying model of the Azure deployment (for example gpt-4o-transcribe or
+  // whisper). Azure routes by deployment name, so this only selects built-in
+  // pricing and the provider-reported usage shape (Whisper requests
+  // verbose_json so Azure reports the billed audio duration). Defaults to the
+  // deployment name.
+  voiceInputAzureModel: z.string().trim().min(1).max(256).optional(),
+  // Opengeni credit pricing for deployment-funded voice input (`openai`,
+  // `azure-openai`). JSON VoiceInputPricing; overrides the built-in list price
+  // for the configured model. Validated at boot. When credit billing is active
+  // (OPENGENI_BILLING_MODE=stripe or OPENGENI_USAGE_LIMITS_MODE=managed) a
+  // deployment-funded provider without any pricing is not offered at all.
+  voiceInputOpenaiPricingJson: z.string().optional(),
+  voiceInputAzurePricingJson: z.string().optional(),
   // Legacy opt-in for undocumented ChatGPT /backend-api/transcribe. When
   // OPENGENI_CODEX_SUBSCRIPTION_ENABLED is true, Codex STT is included without
   // this flag. Set false and omit codex-subscription from PROVIDER_ORDER to
@@ -1665,16 +1699,28 @@ export function personalGitHubOAuthCallbackUrl(publicBaseUrl: string | undefined
 export type VoiceInputProviderId =
   | "openai"
   | "azure-openai"
+  | "azure-mai"
   | "codex-subscription"
   | "supergrok-subscription";
 
 export type VoiceInputProviderConfig =
+  | {
+      id: "azure-mai";
+      kind: "azure-mai";
+      pricing: VoiceInputPricing | null;
+      endpoint: string;
+      apiKey: string;
+      apiVersion: string;
+      model: string;
+    }
   | {
       id: "openai";
       kind: "openai";
       apiKey: string;
       baseUrl: string;
       model: string;
+      /** Deployment-funded: Opengeni pays upstream and charges credits. */
+      pricing: VoiceInputPricing | null;
     }
   | {
       id: "azure-openai";
@@ -1684,6 +1730,10 @@ export type VoiceInputProviderConfig =
       apiVersion: string;
       apiKey: string | null;
       adToken: string | null;
+      /** Underlying model (pricing + response shape); defaults to the deployment name. */
+      model: string;
+      /** Deployment-funded: Opengeni pays upstream and charges credits. */
+      pricing: VoiceInputPricing | null;
     }
   | {
       id: "codex-subscription";
@@ -1767,6 +1817,58 @@ export function isUsableVoiceInputSecret(value: string | null | undefined): valu
  * whether at least one non-experimental (or probed experimental) provider exists.
  */
 export function resolveVoiceInputProviderRegistry(settings: Settings): VoiceInputProviderConfig[] {
+  return voiceInputProviderRegistryWithIssues(settings).providers;
+}
+
+/** Why a credentialed deployment-funded voice provider is withheld. */
+export type VoiceInputPricingIssue = {
+  providerId: "openai" | "azure-openai" | "azure-mai";
+  env: string;
+  reason: "malformed" | "unpriced";
+  message: string;
+};
+
+/**
+ * Pricing problems that withhold a credentialed deployment-funded provider.
+ * A malformed PRICING_JSON never fails boot (workers share this config and
+ * must not crash-loop over a voice-only setting); the API logs each issue
+ * once at startup and the provider stays unavailable.
+ */
+export function voiceInputPricingIssues(settings: Settings): VoiceInputPricingIssue[] {
+  return voiceInputProviderRegistryWithIssues(settings).issues;
+}
+
+function voiceInputProviderPricing(
+  settings: Settings,
+  issues: VoiceInputPricingIssue[],
+  providerId: VoiceInputPricingIssue["providerId"],
+  env: string,
+  raw: string | undefined,
+  model: string,
+): { usable: true; pricing: VoiceInputPricing | null } | { usable: false } {
+  const resolved = safeResolveVoiceInputPricing(raw, model, env);
+  if (!resolved.ok) {
+    issues.push({ providerId, env, reason: "malformed", message: resolved.error });
+    return { usable: false };
+  }
+  if (!resolved.pricing && voiceInputCreditBillingActive(settings)) {
+    // Never serve unpriced deployment-paid audio on a credit-billed deployment.
+    issues.push({
+      providerId,
+      env,
+      reason: "unpriced",
+      message: `${env} is required: credit billing is active and model "${model}" has no built-in voice price`,
+    });
+    return { usable: false };
+  }
+  return { usable: true, pricing: resolved.pricing };
+}
+
+function voiceInputProviderRegistryWithIssues(settings: Settings): {
+  providers: VoiceInputProviderConfig[];
+  issues: VoiceInputPricingIssue[];
+} {
+  const issues: VoiceInputPricingIssue[] = [];
   const order = settings.voiceInputProviderOrder
     .split(",")
     .map((part) => part.trim())
@@ -1774,6 +1876,7 @@ export function resolveVoiceInputProviderRegistry(settings: Settings): VoiceInpu
       (part): part is VoiceInputProviderId =>
         part === "openai" ||
         part === "azure-openai" ||
+        part === "azure-mai" ||
         part === "codex-subscription" ||
         part === "supergrok-subscription",
     );
@@ -1782,6 +1885,32 @@ export function resolveVoiceInputProviderRegistry(settings: Settings): VoiceInpu
   for (const id of order) {
     if (seen.has(id)) continue;
     seen.add(id);
+    if (id === "azure-mai") {
+      if (
+        !settings.voiceInputMaiEndpoint ||
+        !isUsableVoiceInputSecret(settings.voiceInputMaiApiKey)
+      )
+        continue;
+      const priced = voiceInputProviderPricing(
+        settings,
+        issues,
+        "azure-mai",
+        "OPENGENI_VOICE_INPUT_MAI_PRICING_JSON",
+        settings.voiceInputMaiPricingJson,
+        settings.voiceInputMaiModel,
+      );
+      if (!priced.usable) continue;
+      providers.push({
+        id,
+        kind: "azure-mai",
+        pricing: priced.pricing,
+        endpoint: settings.voiceInputMaiEndpoint.replace(/\/+$/, ""),
+        apiKey: settings.voiceInputMaiApiKey,
+        apiVersion: settings.voiceInputMaiApiVersion,
+        model: settings.voiceInputMaiModel,
+      });
+      continue;
+    }
     if (id === "openai") {
       if (!settings.voiceInputOpenaiEnabled) continue;
       const apiKey = settings.voiceInputOpenaiApiKey ?? settings.openaiApiKey;
@@ -1795,9 +1924,19 @@ export function resolveVoiceInputProviderRegistry(settings: Settings): VoiceInpu
       ) {
         continue;
       }
+      const priced = voiceInputProviderPricing(
+        settings,
+        issues,
+        "openai",
+        "OPENGENI_VOICE_INPUT_OPENAI_PRICING_JSON",
+        settings.voiceInputOpenaiPricingJson,
+        settings.voiceInputOpenaiModel,
+      );
+      if (!priced.usable) continue;
       providers.push({
         id: "openai",
         kind: "openai",
+        pricing: priced.pricing,
         apiKey,
         baseUrl: (
           settings.voiceInputOpenaiBaseUrl ??
@@ -1840,6 +1979,17 @@ export function resolveVoiceInputProviderRegistry(settings: Settings): VoiceInpu
       ) {
         continue;
       }
+      const model = settings.voiceInputAzureModel ?? deployment;
+      const priced = voiceInputProviderPricing(
+        settings,
+        issues,
+        "azure-openai",
+        "OPENGENI_VOICE_INPUT_AZURE_PRICING_JSON",
+        settings.voiceInputAzurePricingJson,
+        model,
+      );
+      if (!priced.usable) continue;
+      const pricing = priced.pricing;
       providers.push({
         id: "azure-openai",
         kind: "azure-openai",
@@ -1848,6 +1998,8 @@ export function resolveVoiceInputProviderRegistry(settings: Settings): VoiceInpu
         apiVersion,
         apiKey: isUsableVoiceInputSecret(apiKey) ? apiKey : null,
         adToken: isUsableVoiceInputSecret(adToken) ? adToken : null,
+        model,
+        pricing,
       });
       continue;
     }
@@ -1874,7 +2026,251 @@ export function resolveVoiceInputProviderRegistry(settings: Settings): VoiceInpu
       });
     }
   }
-  return providers;
+  return { providers, issues };
+}
+
+/**
+ * Opengeni credit price for one deployment-funded transcription provider.
+ * Rates are upstream list prices in integer USD micros; `marginBps` (500 =
+ * +5%) is added on top, exactly like model pricing. `microsPerMinute` prices
+ * provider-reported audio duration (Whisper, `usage.type: "duration"`) and is
+ * a server-measured WAV duration when provider usage is absent. Token
+ * rates price `usage.type: "tokens"` (gpt-4o-transcribe family); `input`
+ * covers text input tokens and, unless `audioInput` is set, audio tokens.
+ */
+export type VoiceInputPricing = {
+  microsPerMinute: number;
+  inputMicrosPerMillionTokens?: number | undefined;
+  audioInputMicrosPerMillionTokens?: number | undefined;
+  outputMicrosPerMillionTokens?: number | undefined;
+  marginBps?: number | undefined;
+};
+
+const VoiceInputPricingSchema = z
+  .object({
+    microsPerMinute: z.number().int().positive().max(100_000_000),
+    inputMicrosPerMillionTokens: z.number().int().nonnegative().max(1_000_000_000).optional(),
+    audioInputMicrosPerMillionTokens: z.number().int().nonnegative().max(1_000_000_000).optional(),
+    outputMicrosPerMillionTokens: z.number().int().nonnegative().max(1_000_000_000).optional(),
+    marginBps: z.number().int().min(0).max(100_000).optional(),
+  })
+  .strict()
+  .superRefine((pricing, ctx) => {
+    const input = pricing.inputMicrosPerMillionTokens !== undefined;
+    const output = pricing.outputMicrosPerMillionTokens !== undefined;
+    if (input !== output) {
+      ctx.addIssue({
+        code: "custom",
+        message: "inputMicrosPerMillionTokens and outputMicrosPerMillionTokens are set together",
+      });
+    }
+    if (pricing.audioInputMicrosPerMillionTokens !== undefined && !input) {
+      ctx.addIssue({
+        code: "custom",
+        message: "audioInputMicrosPerMillionTokens requires the token input/output rates",
+      });
+    }
+  });
+
+/**
+ * Built-in list prices (OpenAI API pricing, "Transcription models" table)
+ * plus the default 5% Opengeni margin used for model pricing. Azure Global
+ * Standard deployments use the same list prices; set the provider
+ * PRICING_JSON when a deployment's contracted or regional price differs.
+ */
+export const defaultVoiceInputPricing: Readonly<Record<string, VoiceInputPricing>> = {
+  // Audio tokens are listed separately from text tokens on the model pages;
+  // set explicitly so the audio rate never silently follows a text-rate edit.
+  "gpt-4o-transcribe": {
+    microsPerMinute: 6_000,
+    inputMicrosPerMillionTokens: 2_500_000,
+    audioInputMicrosPerMillionTokens: 2_500_000,
+    outputMicrosPerMillionTokens: 10_000_000,
+    marginBps: 500,
+  },
+  "gpt-4o-transcribe-diarize": {
+    microsPerMinute: 6_000,
+    inputMicrosPerMillionTokens: 2_500_000,
+    audioInputMicrosPerMillionTokens: 2_500_000,
+    outputMicrosPerMillionTokens: 10_000_000,
+    marginBps: 500,
+  },
+  "gpt-4o-mini-transcribe": {
+    microsPerMinute: 3_000,
+    inputMicrosPerMillionTokens: 1_250_000,
+    audioInputMicrosPerMillionTokens: 1_250_000,
+    outputMicrosPerMillionTokens: 5_000_000,
+    marginBps: 500,
+  },
+  "gpt-transcribe": { microsPerMinute: 4_500, marginBps: 500 },
+  whisper: { microsPerMinute: 6_000, marginBps: 500 },
+  "whisper-1": { microsPerMinute: 6_000, marginBps: 500 },
+};
+
+/** Lowercased model with a dated snapshot suffix (`-2025-03-20`) removed. */
+export function canonicalVoiceInputModel(model: string): string {
+  return model
+    .trim()
+    .toLowerCase()
+    .replace(/-\d{4}-\d{2}-\d{2}$/, "");
+}
+
+/** Whisper reports its billed audio duration only in `verbose_json`. */
+export function voiceInputModelReportsDurationOnly(model: string): boolean {
+  return canonicalVoiceInputModel(model).startsWith("whisper");
+}
+
+/** Parse one provider pricing JSON. Throws a configuration error when malformed. */
+export function parseVoiceInputPricingJson(
+  raw: string | undefined,
+  env = "voice-input pricing JSON",
+): VoiceInputPricing | null {
+  if (raw === undefined || raw.trim() === "") return null;
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(raw);
+  } catch {
+    throw new Error(`${env} must be valid JSON`);
+  }
+  const result = VoiceInputPricingSchema.safeParse(parsed);
+  if (!result.success) {
+    throw new Error(
+      `${env} is invalid: ${result.error.issues.map((issue) => issue.message).join("; ")}`,
+    );
+  }
+  return result.data;
+}
+
+/** Explicit provider pricing JSON wins; otherwise the built-in list price for the model. */
+export function resolveVoiceInputPricing(
+  raw: string | undefined,
+  model: string,
+): VoiceInputPricing | null {
+  return (
+    parseVoiceInputPricingJson(raw) ??
+    defaultVoiceInputPricing[canonicalVoiceInputModel(model)] ??
+    null
+  );
+}
+
+/** Non-throwing {@link resolveVoiceInputPricing} for registry resolution. */
+export function safeResolveVoiceInputPricing(
+  raw: string | undefined,
+  model: string,
+  env?: string,
+): { ok: true; pricing: VoiceInputPricing | null } | { ok: false; error: string } {
+  let explicit: VoiceInputPricing | null;
+  try {
+    explicit = parseVoiceInputPricingJson(raw, env);
+  } catch (error) {
+    return { ok: false, error: error instanceof Error ? error.message : String(error) };
+  }
+  return {
+    ok: true,
+    pricing: explicit ?? defaultVoiceInputPricing[canonicalVoiceInputModel(model)] ?? null,
+  };
+}
+
+/** Same predicate as model/credit limits: credit balance and debits are enforced. */
+export function voiceInputCreditBillingActive(
+  settings: Pick<Settings, "billingMode" | "usageLimitsMode">,
+): boolean {
+  return settings.billingMode === "stripe" || settings.usageLimitsMode === "managed";
+}
+
+/** Provider-reported transcription usage, normalized. Never client-reported. */
+export type VoiceInputUsage =
+  | {
+      kind: "tokens";
+      inputTokens: number;
+      audioInputTokens: number;
+      textInputTokens: number;
+      outputTokens: number;
+    }
+  | { kind: "duration"; seconds: number };
+
+export type VoiceInputCost = {
+  /** Upstream list cost before margin, rounded up to whole micros. */
+  providerCostMicros: number;
+  /** Opengeni credit price after margin, rounded up to whole micros. */
+  creditCostMicros: number;
+};
+
+/** True when token usage can be priced exactly. */
+export function voiceInputPricingHasTokenRates(pricing: VoiceInputPricing): boolean {
+  return (
+    pricing.inputMicrosPerMillionTokens !== undefined &&
+    pricing.outputMicrosPerMillionTokens !== undefined
+  );
+}
+
+/**
+ * Exact integer credit math. Token usage needs token rates; duration usage
+ * uses `microsPerMinute` at millisecond resolution. Both round up once, after
+ * summing, so a positive use never becomes a free debit.
+ */
+export function calculateVoiceInputCost(
+  pricing: VoiceInputPricing,
+  usage: VoiceInputUsage,
+): VoiceInputCost {
+  let numerator: bigint;
+  let denominator: bigint;
+  if (usage.kind === "tokens") {
+    if (
+      pricing.inputMicrosPerMillionTokens === undefined ||
+      pricing.outputMicrosPerMillionTokens === undefined
+    ) {
+      throw new Error("voice-input token usage requires token pricing");
+    }
+    for (const value of [
+      usage.inputTokens,
+      usage.audioInputTokens,
+      usage.textInputTokens,
+      usage.outputTokens,
+    ]) {
+      if (!Number.isSafeInteger(value) || value < 0) {
+        throw new Error("voice-input token usage must be non-negative integers");
+      }
+    }
+    const audioRate =
+      pricing.audioInputMicrosPerMillionTokens ?? pricing.inputMicrosPerMillionTokens;
+    // Input tokens the provider did not attribute are priced as audio (never cheaper).
+    const unattributed = Math.max(
+      0,
+      usage.inputTokens - usage.audioInputTokens - usage.textInputTokens,
+    );
+    numerator =
+      BigInt(usage.audioInputTokens + unattributed) * BigInt(audioRate) +
+      BigInt(usage.textInputTokens) * BigInt(pricing.inputMicrosPerMillionTokens) +
+      BigInt(usage.outputTokens) * BigInt(pricing.outputMicrosPerMillionTokens);
+    denominator = 1_000_000n;
+  } else {
+    if (!Number.isFinite(usage.seconds) || usage.seconds < 0) {
+      throw new Error("voice-input duration must be a non-negative number of seconds");
+    }
+    numerator = BigInt(Math.ceil(usage.seconds * 1_000)) * BigInt(pricing.microsPerMinute);
+    denominator = 60_000n;
+  }
+  const margin = BigInt(10_000 + (pricing.marginBps ?? 0));
+  const provider = (numerator + denominator - 1n) / denominator;
+  const scaled = denominator * 10_000n;
+  const credit = (numerator * margin + scaled - 1n) / scaled;
+  if (credit > BigInt(Number.MAX_SAFE_INTEGER)) {
+    throw new Error("voice-input cost exceeds the supported billing range");
+  }
+  return { providerCostMicros: Number(provider), creditCostMicros: Number(credit) };
+}
+
+/**
+ * Deployment-funded providers that have credentials but are withheld because
+ * credit billing is active and no price is known. The API logs these (and
+ * malformed pricing, see {@link voiceInputPricingIssues}) once at startup so
+ * an operator sees why voice input stayed unavailable.
+ */
+export function unpricedVoiceInputProviders(settings: Settings): VoiceInputProviderId[] {
+  return voiceInputPricingIssues(settings).flatMap((issue) =>
+    issue.reason === "unpriced" ? [issue.providerId] : [],
+  );
 }
 
 /** True when the deployment has at least one supported (non-experimental) provider. */
@@ -3614,6 +4010,20 @@ export function getSettings(source: NodeJS.ProcessEnv = process.env): Settings {
     voiceInputAzureApiVersion: optional("OPENGENI_VOICE_INPUT_AZURE_API_VERSION"),
     voiceInputAzureApiKey: optional("OPENGENI_VOICE_INPUT_AZURE_API_KEY"),
     voiceInputAzureAdToken: optional("OPENGENI_VOICE_INPUT_AZURE_AD_TOKEN"),
+    azureLiveEndpoint: optional("OPENGENI_AZURE_LIVE_ENDPOINT"),
+    azureLiveApiKey: optional("OPENGENI_AZURE_LIVE_API_KEY"),
+    azureLiveDeployment: optional("OPENGENI_AZURE_LIVE_DEPLOYMENT"),
+    azureLiveVoice: optional("OPENGENI_AZURE_LIVE_VOICE"),
+    azureLivePricingJson: optional("OPENGENI_AZURE_LIVE_PRICING_JSON"),
+    aiGatewayRealtimePricingJson: optional("OPENGENI_AI_GATEWAY_REALTIME_PRICING_JSON"),
+    voiceInputMaiEndpoint: optional("OPENGENI_VOICE_INPUT_MAI_ENDPOINT"),
+    voiceInputMaiApiKey: optional("OPENGENI_VOICE_INPUT_MAI_API_KEY"),
+    voiceInputMaiApiVersion: optional("OPENGENI_VOICE_INPUT_MAI_API_VERSION"),
+    voiceInputMaiPricingJson: optional("OPENGENI_VOICE_INPUT_MAI_PRICING_JSON"),
+    voiceInputMaiModel: optional("OPENGENI_VOICE_INPUT_MAI_MODEL"),
+    voiceInputAzureModel: optional("OPENGENI_VOICE_INPUT_AZURE_MODEL"),
+    voiceInputOpenaiPricingJson: optional("OPENGENI_VOICE_INPUT_OPENAI_PRICING_JSON"),
+    voiceInputAzurePricingJson: optional("OPENGENI_VOICE_INPUT_AZURE_PRICING_JSON"),
     voiceInputCodexExperimentalEnabled: optional("OPENGENI_VOICE_INPUT_CODEX_EXPERIMENTAL"),
     modelPricingJson: optional("OPENGENI_MODEL_PRICING_JSON"),
     modelCatalogSource,
@@ -8370,6 +8780,14 @@ function validateSettings(settings: Settings, source: NodeJS.ProcessEnv = proces
     );
   }
   parseExposedPorts(settings.dockerExposedPorts);
+  // Malformed voice-input pricing deliberately does not fail boot: every
+  // process shares this config, and a voice-only typo must not crash-loop
+  // workers. The provider is withheld and the API logs voiceInputPricingIssues.
+  parseRealtimeVoicePricingJson(settings.azureLivePricingJson, "OPENGENI_AZURE_LIVE_PRICING_JSON");
+  parseRealtimeVoicePricingTableJson(
+    settings.aiGatewayRealtimePricingJson,
+    "OPENGENI_AI_GATEWAY_REALTIME_PRICING_JSON",
+  );
   sandboxEnvironmentVariableNames(settings);
   sandboxLifecycleHookIds(settings);
   // Fail fast on a malformed warm-rate table (P2.1).

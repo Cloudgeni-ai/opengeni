@@ -32,7 +32,13 @@ const listScheduledTaskSlackChannels = mock(
 );
 
 const context = {
-  client: { listConnections, listScheduledTaskSlackChannels },
+  client: {
+    listAvailableOpenGeniSlackBots: async (workspaceId: string) => ({
+      connections: await listConnections(workspaceId),
+      organizationSharedConnectionIds: [],
+    }),
+    listScheduledTaskSlackChannels,
+  },
   accessContext: accessContext(["scheduled_tasks:manage", "connections:read", "connections:write"]),
 };
 
@@ -142,6 +148,21 @@ async function openChannelMenu(container: HTMLElement): Promise<HTMLButtonElemen
 }
 
 describe("ScheduleSlackPosting", () => {
+  test("a bot shared from another OpenGeni workspace is selectable in this schedule", async () => {
+    listConnections.mockImplementationOnce(async () => [
+      { ...botConnection(), workspaceId: "installation-home" },
+    ]);
+    const { container, onChange, root } = await render();
+    expect(container.textContent).toContain("Post to Slack");
+    expect(listScheduledTaskSlackChannels).toHaveBeenCalledWith(WORKSPACE_ID, BOT_ID, undefined);
+    await openChannelMenu(container);
+    await act(async () => {
+      document.querySelectorAll<HTMLElement>('[role="option"]')[1]!.click();
+      await flush();
+    });
+    expect(onChange).toHaveBeenCalledWith({ connectionId: BOT_ID, channelId: "C0SCHED01" });
+    await act(async () => root.unmount());
+  });
   test("a materialized chat without a bot cannot offer an impossible posting choice", async () => {
     const { container, onChange, root } = await render(
       "",

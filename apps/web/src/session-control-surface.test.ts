@@ -37,6 +37,18 @@ describe("session control surface architecture", () => {
     expect(route).not.toContain("newSessionDraft.conflict !== null ||");
   });
 
+  test("new-chat outage shows one calm notice instead of raw errors", async () => {
+    const route = await source("routes/sessions-index.tsx");
+    expect(route).toContain("{OPENGENI_UPDATING_NOTICE}");
+    expect(route).toContain("newSessionDraft.unavailable || connectionAccounts.unavailable");
+    expect(route).toContain(
+      "error: newSessionDraft.unavailable || newSessionDraft.conflict ? null : newSessionDraft.error",
+    );
+    expect(route).toContain("newSessionDraft.reportUnavailable(error)");
+    expect(route).toContain('"Couldn\'t send your message. Try again."');
+    expect(route).not.toContain("Couldn't check connected accounts. Retry to send your message.");
+  });
+
   test("new and existing composers use the same popover pattern", async () => {
     const newSession = await source("routes/sessions-index.tsx");
     const existingSession = await source("routes/session.tsx");
@@ -114,7 +126,9 @@ describe("session control surface architecture", () => {
       source("routes/sessions-index.tsx"),
       source("../../../packages/react/src/components/chat-composer.tsx"),
     ]);
-    const provider = sessionRoute.indexOf("createElement(\n    LightboxProvider,");
+    const providerPattern = /createElement\(\s+LightboxProvider,/g;
+    expect([...sessionRoute.matchAll(providerPattern)]).toHaveLength(1);
+    const provider = sessionRoute.search(providerPattern);
     const timeline = sessionRoute.indexOf("<MessageTimeline", provider);
     const composer = sessionRoute.indexOf("<ConsoleComposer", timeline);
     const providerEnd = sessionRoute.indexOf("</ChatViewportFileDropTarget>,", composer);
@@ -123,7 +137,7 @@ describe("session control surface architecture", () => {
     expect(timeline).toBeGreaterThan(provider);
     expect(composer).toBeGreaterThan(timeline);
     expect(providerEnd).toBeGreaterThan(composer);
-    expect(newSessionRoute).toContain("createElement(\n    LightboxProvider,");
+    expect([...newSessionRoute.matchAll(providerPattern)]).toHaveLength(1);
     expect(chatComposer).not.toContain("<LightboxProvider>");
   });
 

@@ -94,10 +94,10 @@ describe("developer setup skill", () => {
 
   test("bootstrap distinguishes full access from the separate limited setup tier", async () => {
     const markdown = await readFile(referencePath, "utf8");
-    expect(markdown).toContain("Select **Full access** with a 30-day expiry.");
-    expect(markdown).toContain("The full-access key uses the explicit 30-day expiry above.");
-    expect(markdown).toContain("the limited `developer_setup` tier stores exactly");
-    expect(markdown).toContain("with a 24-hour default expiry. The limited tier does");
+    expect(markdown).toContain("Create a **Full access** key with a 30-day expiry.");
+    expect(markdown).toContain('{"name":"Product setup","access":"full","expiresAt"');
+    expect(markdown).toContain("The limited `developer_setup` tier holds only");
+    expect(markdown).toContain("(24-hour default expiry); it");
   });
 
   test("cleanup distinguishes disabled automations from deleted resources", async () => {
@@ -106,9 +106,7 @@ describe("developer setup skill", () => {
       /\s+/g,
       " ",
     );
-    expect(cleanup).toContain(
-      "Cleanup **only disposable staging resources this ledger says this run created**.",
-    );
+    expect(cleanup).toContain("Clean up **only disposable staging resources this run created**.");
     expect(cleanup).toContain("Never delete reused resources.");
     expect(cleanup).toContain('status === "disabled"');
     expect(cleanup).toContain("`GET .../automations/triggers` / `listTriggers`");

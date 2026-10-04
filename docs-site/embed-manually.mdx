@@ -6,6 +6,8 @@ icon: "code"
 
 You add one backend route and one component. The browser talks to your backend; your backend holds the API key and tells Opengeni who the user is.
 
+Everything on this page works on [app.opengeni.ai](https://app.opengeni.ai) today, including attachments, tool output, and approvals.
+
 ```bash
 bun add @opengeni/sdk @opengeni/react
 ```
@@ -43,7 +45,9 @@ Keep all `@opengeni` packages on the same version.
         if (!me) return new Response("Unauthorized", { status: 401 });
         return { user: me.id, tenant: me.orgId }; // or { user: me.id } | { user: me.id, workspaceId }
       },
-      createSession: (input) => input,
+      // A lighter reasoning effort replies faster; omit it for the deployment
+      // default (often higher: deeper answers, slower replies).
+      createSession: (input) => ({ reasoningEffort: "medium", ...input }),
     });
     ```
 

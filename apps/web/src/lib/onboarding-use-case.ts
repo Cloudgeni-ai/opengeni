@@ -76,9 +76,9 @@ Then follow the build-with-opengeni skill and its opengeni-client guide: one ser
 My account is ready, so skip sign-in and key creation:
 - Opengeni API: ${facts.apiBaseUrl}
 - Organization: ${organizationLine(facts)}
-- My full-access setup API key (expires in 30 days) goes in this project's server-only .env as ${CODING_AGENT_KEY_VARIABLE}${baseUrl}. If it isn't there yet, ask me to add it myself; never ask me to paste it into this chat.
+- My full-access setup API key (expires in 30 days) goes in this project's server-only .env as ${CODING_AGENT_KEY_VARIABLE}${baseUrl}. If it isn't there yet, ask me for it.
 
-Keep the key server-side: read it only from ${CODING_AGENT_KEY_VARIABLE} in a git-ignored .env (file mode 0600). Never print, log or commit the key, and never put it in browser code. Before production, ask me to create a long-lived key in Opengeni under Organization settings > Developer.
+The key is used only by the server (never in browser code). Before production, ask me to create a long-lived key in Opengeni under Organization settings > Developer.
 
 Start by looking at this repository. Then ask me, in one short message, what I want AI agents to do for my users. If there's no product yet, suggest two or three simple ideas.`;
 }
@@ -91,17 +91,17 @@ export function developerSetupModelContext(
   facts: DeveloperSetupFacts & { keyInSandbox: boolean },
 ): string {
   const key = facts.keyInSandbox
-    ? `- A full-access organization API key was created for me at signup. It is in this chat's sandbox as the ${DEVELOPER_SETUP_KEY_VARIABLE} environment variable (variable set "${DEVELOPER_SETUP_VARIABLE_SET_NAME}"); use it as OPENGENI_API_KEY when you set up or test. Never print, echo or commit its value, and never write it into this chat. It expires in 30 days; you may use it to set up and test everything, including creating test users and a long-lived key for production.`
-    : "- No API key is attached to this chat. When one is needed, ask me to create it in Organization settings > Developer; never ask me to paste it into this chat.";
+    ? `- A full-access organization API key was created for me at signup. It is in this chat's sandbox as the ${DEVELOPER_SETUP_KEY_VARIABLE} environment variable (variable set "${DEVELOPER_SETUP_VARIABLE_SET_NAME}"); use it as OPENGENI_API_KEY when you set up or test. It expires in 30 days; you may use it to set up and test everything, including creating test users and a long-lived key for production.`
+    : "- No API key is attached to this chat. When one is needed, ask me to create it in Organization settings > Developer.";
   return `Signup onboarding choices:
 - Goal: add AI agents to my product (embed Opengeni). I chose to let Opengeni implement it.
 - Organization: ${organizationLine(facts)}. Opengeni API: ${facts.apiBaseUrl}. This chat is in the "${DEVELOPER_SETUP_WORKSPACE_NAME}" workspace, made for this.
 ${key}
 
 How to help me:
-1. Reply right away, before reading anything else. In one short message ask: the link to my product (or its repository), what I want AI agents to do for my users, and whether each chat should be private to the person who started it or shared with their team (recommend private). If I don't have a product yet, offer two or three simple ideas.
-2. In that same first response, show me the GitHub Connect card so I can pick a repository: find "GitHub App" (capability ID api:github-app) with capability_catalog_search, then call capability_authorization_request for it. Don't just tell me to look for it. If GitHub is already connected, the card still appears and lists my repositories.
-3. While I answer, read the bundled builtin:opengeni-client Skill with skill_read and follow it: one /api/opengeni server route plus the OpenGeniChat component. Don't ask again what I already answered.
+1. Reply right away: write this question as text before any tool call or reading anything else. In one short message ask: the link to my product (or its repository), what I want AI agents to do for my users, and whether each chat should be private to the person who started it or shared with their team (recommend private). If I don't have a product yet, offer two or three simple ideas.
+2. Only after that text, in the same turn, show me the GitHub Connect card so I can pick a repository: find "GitHub App" (capability ID api:github-app) with capability_catalog_search, then call capability_authorization_request for it. Don't just tell me to look for it. If GitHub is already connected, the card still appears and lists my repositories.
+3. While I answer, read the bundled builtin:opengeni-client Skill with skill_read and follow it (it matches this deployment and is the authority for Opengeni; don't use web search for Opengeni docs, search results can be outdated): one /api/opengeni server route plus the OpenGeniChat component. Don't ask again what I already answered.
    If I name a repository in a message instead of using the card, check right away with github_repositories_list that GitHub can reach it; if it can't, tell me in one line to grant the GitHub App access to it, before doing anything else.
 4. A repository gives this chat clone, push and pull request access only once it is attached to this chat. The GitHub card lists my repositories with a "Use" button: tell me to pick one there, then wait, and don't ask me again in a separate question. When my next message says to use a repository, it is attached: implement here. Only if no card appeared or I can't use it, call github_repositories_list, ask me which repository, then start a worker with session_create, passing that repository's returned resource object in resources and the full task (what to build, my answers so far, the API and organization above), plus the "${DEVELOPER_SETUP_VARIABLE_SET_NAME}" variable set (variableSetIds) when this chat has it. Whenever you start a worker, tell me in one short line what it is building and that you'll send the pull request link, then give me the worker's pull request link when it finishes.
 5. Work on a branch and open a pull request. Don't push to my default branch, merge or deploy without asking.`;

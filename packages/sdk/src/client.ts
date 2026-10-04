@@ -21,6 +21,7 @@ import type {
   ArtifactCatalogListResponse,
   ArtifactPinResponse,
 } from "./artifact-catalog";
+import type { ToolActionReview, ToolReviewDetailsPage } from "@opengeni/contracts";
 import type {
   SessionMessageSearchRequest,
   SessionMessageSearchResponse,
@@ -326,6 +327,9 @@ import type {
   BillingCheckoutStatus,
   CreateCheckoutResponse,
   OpenGeniSlackBotInstallRequest,
+  AvailableOpenGeniSlackBots,
+  OpenGeniSlackBotOrganizationAccess,
+  UpdateOpenGeniSlackBotOrganizationAccess,
   OpenGeniSlackBotInstallStart,
   SlackChannelRouteListResponse,
   SlackReactionChannelListResponse,
@@ -1414,6 +1418,34 @@ export class OpenGeniClient {
       path,
       (signal) => this.requestJson<Session>("GET", path, undefined, {}, { signal }),
       options,
+    );
+  }
+
+  async getToolActionReview(
+    workspaceId: string,
+    sessionId: string,
+    approvalId: string,
+  ): Promise<ToolActionReview> {
+    return await this.requestJson(
+      "GET",
+      `${sessionPath(workspaceId, sessionId)}/tool-reviews/${encodeURIComponent(approvalId)}`,
+    );
+  }
+
+  async getToolReviewDetails(
+    workspaceId: string,
+    sessionId: string,
+    approvalId: string,
+    options: { actionDigest: string; path?: string; offset?: number },
+  ): Promise<ToolReviewDetailsPage> {
+    const query = new URLSearchParams({
+      actionDigest: options.actionDigest,
+      path: options.path ?? "",
+      offset: String(options.offset ?? 0),
+    });
+    return await this.requestJson(
+      "GET",
+      `${sessionPath(workspaceId, sessionId)}/tool-reviews/${encodeURIComponent(approvalId)}/details?${query}`,
     );
   }
 
@@ -7526,14 +7558,27 @@ export class OpenGeniClient {
     );
   }
 
+  getConnectorToolPermissions(
+    workspaceId: string,
+    capabilityId: string,
+    options?: { signal?: AbortSignal },
+  ): Promise<ConnectorToolPermissionsResponse>;
+  getConnectorToolPermissions(
+    workspaceId: string,
+    capabilityId: string,
+    options?: { signal?: AbortSignal; connectionId?: string; instanceKey?: string },
+  ): Promise<ConnectorToolPermissionsResponse>;
   async getConnectorToolPermissions(
     workspaceId: string,
     capabilityId: string,
-    options: { signal?: AbortSignal } = {},
+    options: { signal?: AbortSignal; connectionId?: string; instanceKey?: string } = {},
   ): Promise<ConnectorToolPermissionsResponse> {
+    const query = new URLSearchParams();
+    if (options.connectionId) query.set("connectionId", options.connectionId);
+    if (options.instanceKey) query.set("instanceKey", options.instanceKey);
     return await this.requestJson(
       "GET",
-      `/v1/workspaces/${workspaceId}/capabilities/${encodeURIComponent(capabilityId)}/tool-permissions`,
+      `/v1/workspaces/${workspaceId}/capabilities/${encodeURIComponent(capabilityId)}/tool-permissions${query.size ? `?${query}` : ""}`,
       undefined,
       {},
       options,
@@ -8320,6 +8365,35 @@ export class OpenGeniClient {
     return await this.requestJson<FikenOAuthStartResponse>(
       "POST",
       `/v1/workspaces/${workspaceId}/connections/fiken/oauth/start`,
+      request,
+    );
+  }
+
+  /** List verified local and explicitly organization-shared bots, excluding personal accounts. */
+  async listAvailableOpenGeniSlackBots(workspaceId: string): Promise<AvailableOpenGeniSlackBots> {
+    return this.requestJson("GET", `/v1/workspaces/${workspaceId}/connections/slack-bot/available`);
+  }
+
+  /** Read configured sharing independently of installation credential health. */
+  async getOpenGeniSlackBotOrganizationAccess(
+    workspaceId: string,
+    connectionId: string,
+  ): Promise<OpenGeniSlackBotOrganizationAccess> {
+    return this.requestJson(
+      "GET",
+      `/v1/workspaces/${workspaceId}/connections/${connectionId}/slack-bot/organization-access`,
+    );
+  }
+
+  /** An organization administrator may share an installed bot with authorized workspaces. */
+  async setOpenGeniSlackBotOrganizationAccess(
+    workspaceId: string,
+    connectionId: string,
+    request: UpdateOpenGeniSlackBotOrganizationAccess,
+  ): Promise<OpenGeniSlackBotOrganizationAccess> {
+    return this.requestJson(
+      "PUT",
+      `/v1/workspaces/${workspaceId}/connections/${connectionId}/slack-bot/organization-access`,
       request,
     );
   }

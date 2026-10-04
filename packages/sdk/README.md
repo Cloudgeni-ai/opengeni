@@ -183,8 +183,12 @@ resolved user server-side, so each user sees only the chats they started;
 `sessionList: "visible"` lists every chat OpenGeni lets the user read in the
 workspace, and `false` disables listing. Archive and restore go through
 `updateSessionArchive` unless `archive: false`. A "New chat" in `OpenGeniChat`
-sends only `{ initialMessage, idempotencyKey }`, so it needs the
-`createSession` hook.
+sends `{ initialMessage, idempotencyKey }` plus any attached file `resources`
+and, unless `modelSelection: false`, the user's explicit model choices, so it
+needs the `createSession` hook. The hook sees them as input; the proxy adds the
+files and applies those choices to the request the hook returns. Voice input
+(`POST .../transcriptions`) is forwarded as the resolved user unless
+`voiceInput: false`.
 
 `listSessionPage` includes personal pinned details by default. A caller with a
 separate `pinsOnly: true` read can pass `includePinned: false` on ordinary pages
@@ -1605,3 +1609,20 @@ Hosts, test doubles, and same-origin proxies must import
 configuration or contract header. Do not copy its string value: the revision is
 an executable compatibility boundary, and `getClientConfig()` intentionally
 fails closed when server and SDK revisions differ.
+
+### Action review facts
+
+`getToolActionReview(workspaceId, sessionId, approvalId)` returns version 1 facts
+for an exact prepared connector action: title, selected account/count, material
+effects, optional provider-sourced examples, bounded fields, reason, status and
+available actions. Use `sendApprovalDecision` for the existing authenticated
+human decision. Facts never grant execution authority.
+
+`getToolReviewDetails(workspaceId, sessionId, approvalId, { actionDigest, path,
+offset })` pages through the saved selection/values (25 rows per page). The
+reference is tied to the original action digest and requires the same session
+visibility permission; it never re-runs a search. Secret/write-only fields stay
+hidden. A missing legacy snapshot may return 404; other authorization or transport
+failures must not be interpreted as permission to execute. Responses are private
+and non-cacheable. Review states distinguish waiting, execution, cancellation,
+failure and uncertain outcome. Exact stored arguments are never client-editable.

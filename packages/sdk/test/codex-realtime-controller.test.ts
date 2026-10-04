@@ -4,6 +4,7 @@ import {
   createCodexRealtimeController,
   projectSessionRealtimeLifecycle,
 } from "../src/codex-realtime-controller";
+import { createAzureLiveTransportStarter } from "../src/azure-live-transport";
 import { CODEX_REALTIME_V3_PENDING_MAX_BYTES } from "../src/codex-realtime-v3";
 import type { SessionRealtimeLifecycleProjection } from "../src/codex-realtime-lifecycle";
 import { OpenGeniApiError } from "../src/errors";
@@ -1699,6 +1700,109 @@ describe("Codex realtime browser controller", () => {
     );
   });
 
+  function refusalController(options: { heartbeatStop?: boolean; negotiateRefusal?: boolean }) {
+    const browser = rotatingBrowserFixture();
+    const timers = timerFixture();
+    let current = mode();
+    const ends: string[] = [];
+    let uuid = 500;
+    const controller = createCodexRealtimeController({
+      workspaceId: WORKSPACE_ID,
+      sessionId: SESSION_ID,
+      storage: storageFixture(),
+      remoteAudio: browser.remoteAudio,
+      randomUUID: () => `72000000-0000-4000-8000-${String(++uuid).padStart(12, "0")}`,
+      createPeerConnection: browser.createPeerConnection,
+      getUserMedia: browser.getUserMedia,
+      reconnectBackoffMs: [10],
+      ...timers,
+      client: {
+        beginSessionRealtime: async (_workspaceId, _sessionId, request) => {
+          current = mode({
+            ...current,
+            operationId: request.operationId,
+            browserInstanceId: request.browserInstanceId,
+          });
+          return { mode: current, replay: false };
+        },
+        negotiateCodexRealtimeWebrtc: async (_workspaceId, _sessionId, request) => {
+          if (options.negotiateRefusal) {
+            throw new OpenGeniApiError(
+              402,
+              JSON.stringify({
+                code: "insufficient_credits",
+                message: "Live voice needs Opengeni credits. Add credits to continue.",
+              }),
+            );
+          }
+          return {
+            sdp: ANSWER,
+            version: "v3",
+            model: "gpt-live-1-boulder-alpha",
+            connectionId: "73000000-0000-4000-8000-000000000001",
+            connectionEpoch: request.expectedConnectionEpoch,
+            startupFenceSequence: 0,
+            modeVersion: current.version,
+            replay: false,
+          };
+        },
+        activateCodexRealtimeConnection: async () => ({ mode: current, replay: false }),
+        heartbeatSessionRealtime: async () =>
+          options.heartbeatStop
+            ? {
+                mode: current,
+                replay: false,
+                stop: {
+                  code: "insufficient_credits",
+                  message: "Live voice needs Opengeni credits. Add credits to continue.",
+                },
+              }
+            : { mode: current, replay: false },
+        syncSessionRealtimeLedger: async () => ({ accepted: [], outbound: [] }),
+        endSessionRealtime: async (_workspaceId, _sessionId, _realtimeId, request) => {
+          ends.push(request.reason);
+          current = mode({
+            ...current,
+            state: "ended",
+            version: current.version + 1,
+            endedAt: "2026-07-29T07:01:00.000Z",
+            endReason: "user_stop",
+          });
+          return { mode: current, replay: false };
+        },
+      },
+    });
+    return { controller, browser, ends };
+  }
+
+  test("a heartbeat stop instruction ends the call gracefully with a credit refusal", async () => {
+    const { controller, browser, ends } = refusalController({ heartbeatStop: true });
+    await controller.start();
+    expect(controller.snapshot().status).toBe("active");
+    await controller.heartbeat();
+    expect(ends).toEqual(["user_stop"]);
+    expect(controller.snapshot()).toMatchObject({
+      status: "error",
+      mode: null,
+      error: "Live voice needs Opengeni credits. Add credits to continue.",
+      refusal: { code: "insufficient_credits" },
+      diagnostic: { kind: "terminal_stop", recoverable: false },
+    });
+    expect(browser.calls).toEqual(expect.arrayContaining(["peer.0.close", "track.0.stop"]));
+  });
+
+  test("a credit refusal at negotiation ends the owned mode instead of retrying", async () => {
+    const { controller, ends } = refusalController({ negotiateRefusal: true });
+    await controller.start();
+    expect(ends).toEqual(["user_stop"]);
+    expect(controller.snapshot()).toMatchObject({
+      status: "error",
+      mode: null,
+      refusal: { code: "insufficient_credits" },
+      error: "Live voice needs Opengeni credits. Add credits to continue.",
+    });
+  });
+
   test("stop during replacement negotiation fences a late answer and leaves no reconnect timers", async () => {
     const browser = rotatingBrowserFixture();
     const timers = timerFixture();
@@ -2310,4 +2414,113 @@ describe("Codex realtime browser controller", () => {
     expect(browser.calls).toEqual(expect.arrayContaining(["events.close", "peer.close"]));
     await controller.stop();
   });
+});
+
+test("Azure rotation persists final speech before the replacement reads startup context", async () => {
+  const browser = rotatingBrowserFixture();
+  const timers = timerFixture();
+  let current = mode({ model: "opengeni-azure/gpt-live-1" });
+  const persisted: string[] = [];
+  const startupSnapshots: string[][] = [];
+  const emit = (index: number, value: unknown) =>
+    browser.peers[index]!.events.dispatchEvent(
+      new MessageEvent("message", { data: JSON.stringify(value) }),
+    );
+  const controller = createCodexRealtimeController({
+    workspaceId: WORKSPACE_ID,
+    sessionId: SESSION_ID,
+    model: "opengeni-azure/gpt-live-1",
+    storage: storageFixture(),
+    getUserMedia: browser.getUserMedia,
+    startTransport: createAzureLiveTransportStarter({
+      createPeerConnection: browser.createPeerConnection,
+      remoteAudio: browser.remoteAudio,
+    }),
+    connectionRotationIntervalMs: 900,
+    reconnectBackoffMs: [10],
+    ...timers,
+    client: {
+      beginSessionRealtime: async (_w, _s, request) => {
+        current = mode({
+          ...current,
+          operationId: request.operationId,
+          browserInstanceId: request.browserInstanceId,
+        });
+        return { mode: current, replay: false };
+      },
+      negotiateCodexRealtimeWebrtc: async (_w, _s, request) => {
+        startupSnapshots.push([...persisted]);
+        return {
+          sdp: ANSWER,
+          version: "v3",
+          model: "opengeni-azure/gpt-live-1",
+          connectionId: crypto.randomUUID(),
+          connectionEpoch: current.connectionEpoch + (request.rotate ? 1 : 0),
+          startupFenceSequence: persisted.length,
+          modeVersion: current.version,
+          replay: false,
+        };
+      },
+      activateCodexRealtimeConnection: async (_w, _s, _r, _c, request) => {
+        current = mode({
+          ...current,
+          version: current.version + 1,
+          connectionEpoch: request.connectionEpoch,
+        });
+        return { mode: current, replay: false };
+      },
+      heartbeatSessionRealtime: async () => ({ mode: current, replay: false }),
+      syncSessionRealtimeLedger: async (_w, _s, _r, request) => {
+        for (const entry of request.entries ?? [])
+          if (
+            (entry.kind === "user_transcript" || entry.kind === "assistant_transcript") &&
+            entry.text
+          )
+            persisted.push(entry.text);
+        return { accepted: [], outbound: [] };
+      },
+      endSessionRealtime: async () => ({
+        mode: mode({ ...current, state: "ended" }),
+        replay: false,
+      }),
+    },
+  });
+  try {
+    await controller.start();
+    expect(startupSnapshots).toEqual([[]]);
+    timers.runTimeout(900);
+    timers.runTimeout(0);
+    await eventually(
+      () => browser.peers[0]!.sent.some((x) => JSON.parse(x).type === "session.close"),
+      "close not requested",
+    );
+    expect(startupSnapshots).toHaveLength(1);
+    emit(0, {
+      type: "session.input_transcript.delta",
+      delta: "Last user request",
+      start_ms: 1,
+      end_ms: 2,
+    });
+    emit(0, { type: "session.closed" });
+    await eventually(
+      () =>
+        controller.snapshot().status === "active" &&
+        controller.snapshot().connectionGeneration === 2,
+      "rotation not active",
+    );
+    expect(startupSnapshots[1]).toEqual(["Last user request"]);
+    const stop = controller.stop();
+    emit(1, {
+      type: "session.output_transcript.delta",
+      delta: "Final response",
+      start_ms: 3,
+      end_ms: 4,
+    });
+    emit(1, { type: "session.closed" });
+    await stop;
+    expect(persisted).toEqual(["Last user request", "Final response"]);
+    expect(controller.snapshot().status).toBe("idle");
+  } finally {
+    controller.close();
+  }
 });

@@ -120,7 +120,46 @@ export type CodexRealtimeControllerSnapshot = {
   reconnectAttempt: number;
   diagnostic: CodexRealtimeDiagnostic | null;
   error: string | null;
+  /**
+   * Set when Opengeni refused or ended deployment-funded voice for credits or
+   * availability. Codes match voice input: `insufficient_credits`,
+   * `allowance_exhausted`, `monthly_model_cost_limit`, plus
+   * `realtime_voice_unavailable`. Cleared on the next start.
+   */
+  refusal?: CodexRealtimeRefusal | null;
 };
+
+export type CodexRealtimeRefusal = { code: string; message: string };
+
+const REALTIME_REFUSAL_CODES = new Set([
+  "insufficient_credits",
+  "allowance_exhausted",
+  "monthly_model_cost_limit",
+  "realtime_voice_unavailable",
+]);
+
+/** A definitive credit/availability refusal from Opengeni, with its plain message. */
+export function codexRealtimeRefusal(error: unknown): CodexRealtimeRefusal | null {
+  if (!(error instanceof OpenGeniApiError) || !error.code) return null;
+  if (!REALTIME_REFUSAL_CODES.has(error.code)) return null;
+  let message: string | null = null;
+  try {
+    const body = JSON.parse(error.body) as Record<string, unknown>;
+    const nested =
+      body.error && typeof body.error === "object" ? (body.error as Record<string, unknown>) : body;
+    message = typeof nested.message === "string" && nested.message ? nested.message : null;
+  } catch {
+    message = null;
+  }
+  return {
+    code: error.code,
+    message:
+      message ??
+      (error.code === "insufficient_credits"
+        ? "Live voice needs Opengeni credits. Add credits to continue."
+        : "Live voice is unavailable right now."),
+  };
+}
 
 export type CodexRealtimeControllerClient = {
   beginSessionRealtime(
@@ -178,6 +217,7 @@ export type CodexRealtimeOwnerStorage = Pick<Storage, "getItem" | "setItem" | "r
 
 /** Canonical browser-owner storage namespace for a public realtime model. */
 export function sessionRealtimeOwnerStorageNamespace(model: SessionRealtimeModel): string {
+  if (model === "opengeni-azure/gpt-live-1") return "azure-live-owner";
   if (model === "gpt-live-1-boulder-alpha") return "codex-realtime-owner";
   if (model === "supergrok/grok-voice-think-fast-2.0") return "xai-realtime-owner";
   return "gateway-realtime-owner";
@@ -355,6 +395,7 @@ export function createCodexRealtimeController(
     reconnectAttempt: 0,
     diagnostic: null,
     error: null,
+    refusal: null,
   };
   let active: ConnectionRuntime | null = null;
   let pendingAbort: AbortController | null = null;
@@ -720,6 +761,11 @@ export function createCodexRealtimeController(
       transitionEnded("Realtime owner no longer exists");
       return;
     }
+    const refusal = codexRealtimeRefusal(error);
+    if (refusal) {
+      await endForRefusal(refusal);
+      return;
+    }
     if (error instanceof OpenGeniApiError && error.status === 409 && error.retryable && owner) {
       try {
         const reconciled = await begin(owner, true, false);
@@ -883,6 +929,15 @@ export function createCodexRealtimeController(
     });
     let connected: CodexRealtimeWebrtcSession;
     try {
+      // Persist a fragment provider's tail before the replacement broker reads
+      // its startup history, while the old connection still owns the ledger.
+      if (active?.transport.drain) {
+        await active.transport.drain();
+        await active.bridge.flush();
+      }
+      if (closed || stopping || abort.signal.aborted || pendingGeneration !== targetGeneration) {
+        throw abort.signal.reason ?? new DOMException("Aborted", "AbortError");
+      }
       const media = await ensureMicrophone(replaceMicrophone, abort.signal);
       const operationId = randomUUID();
       const commonTransportInput = {
@@ -1098,6 +1153,7 @@ export function createCodexRealtimeController(
   };
 
   const heartbeat = async (): Promise<void> => {
+    let stopInstruction: CodexRealtimeRefusal | null = null;
     await exclusive(async () => {
       const current = state.mode;
       if (!owner || !current || current.state !== "active") {
@@ -1121,6 +1177,37 @@ export function createCodexRealtimeController(
         return;
       }
       publish({ mode: result.mode, realtimeId: result.mode.id, error: null });
+      stopInstruction = result.stop ?? null;
+    });
+    // The server stopped extending the lease (for example, out of credits):
+    // drain and end gracefully inside the remaining lease.
+    const instruction = stopInstruction as CodexRealtimeRefusal | null;
+    stopInstruction = null;
+    if (instruction && !stopping && !closed) await endForRefusal(instruction);
+  };
+
+  /**
+   * End the call because Opengeni refused it, keep final speech, and leave a
+   * terminal, non-retrying state that explains why.
+   */
+  const endForRefusal = async (refusal: CodexRealtimeRefusal): Promise<void> => {
+    try {
+      await controller.stop();
+    } catch {
+      // The lease is no longer extended; a failed graceful end lapses on its own.
+      stopping = false;
+      closeBrowserResources();
+      clearOwner();
+    }
+    recoveryTerminal = false;
+    publish({
+      status: "error",
+      realtimeId: null,
+      mode: null,
+      bridge: null,
+      diagnostic: diagnostic("terminal_stop", refusal.message, false),
+      error: refusal.message,
+      refusal,
     });
   };
 
@@ -1186,11 +1273,12 @@ export function createCodexRealtimeController(
       };
       owner = record;
       storage?.setItem(storageKey, JSON.stringify(record));
-      publish({ status: "starting", error: null, diagnostic: null });
+      publish({ status: "starting", error: null, diagnostic: null, refusal: null });
       try {
         await begin(record, false);
       } catch (error) {
         closeBrowserResources(false);
+        const refusal = codexRealtimeRefusal(error);
         const failedMode = state.mode as SessionRealtimeMode | null;
         if (failedMode?.state === "active") {
           await handleConnectionFailure(error, "reconnect", false);
@@ -1200,9 +1288,13 @@ export function createCodexRealtimeController(
             status: "error",
             realtimeId: null,
             mode: null,
-            error: safeError(error),
+            error: refusal?.message ?? safeError(error),
+            ...(refusal
+              ? { refusal, diagnostic: diagnostic("terminal_stop", refusal.message, false) }
+              : {}),
           });
         }
+        if (refusal) return;
         throw error;
       }
     },
@@ -1337,6 +1429,7 @@ export function createCodexRealtimeController(
       connectionTask = null;
       void retiredTask?.catch(() => undefined);
       try {
+        await active?.transport.drain?.();
         await active?.bridge.sealAndFlush();
         closeBrowserResources();
         let current = state.mode;

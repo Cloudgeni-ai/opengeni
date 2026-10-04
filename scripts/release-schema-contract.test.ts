@@ -2389,10 +2389,19 @@ describe("release schema contract", () => {
       "0610_artifact_catalog_pins.sql",
       "0611_universal_session_tenancy_activation.sql",
       "0612_scheduled_model_unavailable_refusal.sql",
+
+      "0618_tool_approval_defaults.sql",
+      "0619_codemode_approval_continuation.sql",
+      "0620_tool_action_review_details.sql",
+      "0621_legacy_api_tool_preferences.sql",
       "0613_model_scoped_promotional_credits.sql",
       "0614_quiescence_command_containment.sql",
       "0615_credit_promotion_policy_validation.sql",
-      "0626_modal_native_live_origin.sql",
+      "0622_organization_slack_bot_delivery.sql",
+      "0623_voice_transcription_attribution.sql",
+      "0624_azure_live_realtime_model.sql",
+      "0625_transcription_billing_refusal_codes.sql",
+      "0632_modal_native_live_origin.sql",
     ].filter((path) =>
       unfilteredSourceContract.migrations.some((migration) => migration.path === path),
     );

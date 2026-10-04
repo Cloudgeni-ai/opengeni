@@ -16,6 +16,9 @@ export {
 export {
   attachSessionCapability,
   completeSessionCapabilityOAuth,
+  prepareSessionCapabilityAccess,
+  applySessionCapabilityAccess,
+  type SessionCapabilityAccessPlan,
 } from "./session-capability-policy";
 export { retainedImageId } from "./components/markdown";
 // oxlint-disable-next-line typescript/triple-slash-reference -- package consumers must load the ambient type for this optional untyped peer without emitting a runtime import.
@@ -328,6 +331,8 @@ export type {
 export { approvalsFromRequiresAction, projectPendingApprovals } from "./approvals";
 export type { PendingApproval } from "./approvals";
 export { ApprovalSurface, defaultApprovalSurfaceMessages } from "./components/approval-surface";
+export { ToolActionReviewCard, ToolActionReviewDetails } from "./components/tool-action-review";
+export type { ToolReviewDetailsLoader } from "./components/tool-action-review";
 export type { ApprovalSurfaceMessages, ApprovalSurfaceProps } from "./components/approval-surface";
 
 // Structured human input: event projection, authoritative hook, and styled form.
@@ -491,7 +496,11 @@ export { SessionConversation } from "./components/session-conversation";
 export { SessionList } from "./components/session-list";
 export type { SessionListLabels, SessionListProps } from "./components/session-list";
 export { OpenGeniChat } from "./components/open-geni-chat";
-export type { OpenGeniChatLabels, OpenGeniChatProps } from "./components/open-geni-chat";
+export type {
+  OpenGeniChatCreateOptions,
+  OpenGeniChatLabels,
+  OpenGeniChatProps,
+} from "./components/open-geni-chat";
 export type {
   SessionConversationLabels,
   SessionConversationProps,
@@ -714,3 +723,5 @@ export { ClaudeMark } from "./components/claude-mark";
 export { AnthropicMark } from "./components/anthropic-mark";
 export { OpenRouterMark } from "./components/openrouter-mark";
 export { GrokMark } from "./components/grok-mark";
+
+export { ToolReviewHistoryProvider } from "./components/tool-review-history";
