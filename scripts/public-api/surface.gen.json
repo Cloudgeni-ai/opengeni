@@ -10819,6 +10819,7 @@
         "$.executionLimits.toolOutputTruncationTokens": "integer! null",
         "$.id": "string!",
         "$.label": "string!",
+        "$.logoUrl": "string?",
         "$.pricing": "ref(ModelPricingScheduleV1)?",
         "$.provider": "string!",
         "$.providerLabel": "string!",
@@ -25060,6 +25061,7 @@
         "$.executionLimits.toolOutputTruncationTokens": "integer! null",
         "$.id": "string!",
         "$.label": "string!",
+        "$.logoUrl": "string?",
         "$.policyAllowed": "boolean?",
         "$.pricing": "ref(ModelPricingScheduleV1)?",
         "$.provider": "string!",
@@ -27797,6 +27799,7 @@
       "isRawModelLabel": "value",
       "ModelDisplayInput": "type",
       "modelDisplayName": "value",
+      "modelLogoUrl": "value",
       "modelSlug": "value",
       "modelVendor": "value",
       "ModelVendor": "type"
