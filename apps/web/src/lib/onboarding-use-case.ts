@@ -51,6 +51,8 @@ function organizationLine(facts: DeveloperSetupFacts): string {
 
 /** Where the person stores the key for their own coding agent's integration. */
 export const CODING_AGENT_KEY_VARIABLE = "OPENGENI_API_KEY";
+/** The SDK's default API origin; other deployments also need OPENGENI_API_BASE_URL. */
+const DEFAULT_API_BASE_URL = "https://app.opengeni.ai";
 
 /**
  * The prompt a person pastes into their own coding agent (Claude Code, Codex,
@@ -58,6 +60,10 @@ export const CODING_AGENT_KEY_VARIABLE = "OPENGENI_API_KEY";
  * separate step into their server-only env, and the prompt names that variable.
  */
 export function codingAgentSetupPrompt(facts: DeveloperSetupFacts): string {
+  const baseUrl =
+    facts.apiBaseUrl === DEFAULT_API_BASE_URL
+      ? ""
+      : `, with OPENGENI_API_BASE_URL=${facts.apiBaseUrl} beside it`;
   return `Add AI agents to my product with Opengeni (https://opengeni.ai).
 
 First get the Opengeni skills, if you don't have them:
@@ -65,14 +71,14 @@ First get the Opengeni skills, if you don't have them:
 - Codex: codex plugin marketplace add Cloudgeni-ai/opengeni && codex plugin add opengeni@opengeni
 - Cursor: Customize > From GitHub Repository > https://github.com/Cloudgeni-ai/opengeni, then install Opengeni
 - Anything else: read https://docs.opengeni.ai/llms.txt and https://github.com/Cloudgeni-ai/opengeni/tree/main/.agents/skills/opengeni-client
-Then follow the build-with-opengeni skill and its opengeni-client guide.
+Then follow the build-with-opengeni skill and its opengeni-client guide: one server route plus the OpenGeniChat component.
 
 My account is ready, so skip sign-in and key creation:
 - Opengeni API: ${facts.apiBaseUrl}
 - Organization: ${organizationLine(facts)}
-- My full-access setup API key (expires in 30 days) goes in this project's server-only .env as ${CODING_AGENT_KEY_VARIABLE}. If it isn't there yet, ask me to add it myself; never ask me to paste it into this chat.
+- My full-access setup API key (expires in 30 days) goes in this project's server-only .env as ${CODING_AGENT_KEY_VARIABLE}${baseUrl}. If it isn't there yet, ask me to add it myself; never ask me to paste it into this chat.
 
-Keep the key server-side: read it only from ${CODING_AGENT_KEY_VARIABLE}, and set OPENGENI_API_BASE_URL and OPENGENI_ORGANIZATION_ID beside it in that .env (git-ignored, file mode 0600). Never print, log or commit the key, and never put it in browser code. When the integration needs a long-lived key, ask me to create one in Opengeni under Organization settings > Developer.
+Keep the key server-side: read it only from ${CODING_AGENT_KEY_VARIABLE} in a git-ignored .env (file mode 0600). Never print, log or commit the key, and never put it in browser code. Before production, ask me to create a long-lived key in Opengeni under Organization settings > Developer.
 
 Start by looking at this repository. Then ask me, in one short message, what I want AI agents to do for my users. If there's no product yet, suggest two or three simple ideas.`;
 }
@@ -95,7 +101,7 @@ ${key}
 How to help me:
 1. Reply right away, before reading anything else. In one short message ask: the link to my product (or its repository), what I want AI agents to do for my users, and whether each chat should be private to the person who started it or shared with their team (recommend private). If I don't have a product yet, offer two or three simple ideas.
 2. In that same first response, show me the GitHub Connect card so I can pick a repository: find "GitHub App" (capability ID api:github-app) with capability_catalog_search, then call capability_authorization_request for it. Don't just tell me to look for it. If GitHub is already connected, the card still appears and lists my repositories.
-3. While I answer, read the bundled builtin:opengeni-client Skill with skill_read and follow its flow. Don't ask again what I already answered.
+3. While I answer, read the bundled builtin:opengeni-client Skill with skill_read and follow it: one /api/opengeni server route plus the OpenGeniChat component. Don't ask again what I already answered.
    If I name a repository in a message instead of using the card, check right away with github_repositories_list that GitHub can reach it; if it can't, tell me in one line to grant the GitHub App access to it, before doing anything else.
 4. A repository gives this chat clone, push and pull request access only once it is attached to this chat. The GitHub card lists my repositories with a "Use" button: tell me to pick one there, then wait, and don't ask me again in a separate question. When my next message says to use a repository, it is attached: implement here. Only if no card appeared or I can't use it, call github_repositories_list, ask me which repository, then start a worker with session_create, passing that repository's returned resource object in resources and the full task (what to build, my answers so far, the API and organization above), plus the "${DEVELOPER_SETUP_VARIABLE_SET_NAME}" variable set (variableSetIds) when this chat has it. Whenever you start a worker, tell me in one short line what it is building and that you'll send the pull request link, then give me the worker's pull request link when it finishes.
 5. Work on a branch and open a pull request. Don't push to my default branch, merge or deploy without asking.`;
