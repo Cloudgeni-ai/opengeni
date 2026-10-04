@@ -79,7 +79,7 @@ export const AGENT_STARTING_POINTS: readonly {
 export const SKILLS_OPTIONS: readonly { value: "off" | "read" | "manage"; label: string }[] = [
   { value: "off", label: "Off" },
   { value: "read", label: "Read" },
-  { value: "manage", label: "Read and manage" },
+  { value: "manage", label: "Read and write" },
 ];
 
 export function skillsOptionValue(value: AgentSkillsCapability): "off" | "read" | "manage" {

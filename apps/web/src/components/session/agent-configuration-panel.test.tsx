@@ -87,7 +87,7 @@ async function settle() {
   }
 }
 
-test("the Agent tab is one page: Identity, Capabilities and this chat's Agent learning", async () => {
+test("the Agent tab is one page: Identity, then Capabilities with Agent learning inside", async () => {
   getAgentLearningSettings.mockClear();
   const container = document.createElement("div");
   document.body.append(container);
@@ -100,7 +100,7 @@ test("the Agent tab is one page: Identity, Capabilities and this chat's Agent le
     const headings = [...container.querySelectorAll("[data-agent-section] > div > h3")].map(
       (heading) => heading.textContent,
     );
-    expect(headings).toEqual(["Identity", "Capabilities", "Agent learning"]);
+    expect(headings).toEqual(["Identity", "Capabilities"]);
     // Where each part comes from, with a way to the page that sets it.
     const identity = container.querySelector<HTMLElement>('[data-agent-section="Identity"]')!;
     expect(identity.textContent).toContain("Workspace default");
@@ -111,25 +111,19 @@ test("the Agent tab is one page: Identity, Capabilities and this chat's Agent le
       '[data-agent-section="Capabilities"]',
     )!;
     expect(capabilities.textContent).toContain("Workspace default");
-    // Each capability says what it lets the agent do; Knowledge and Skills point at learning.
-    const knowledge = capabilities.querySelector<HTMLElement>('[data-capability="knowledge"]')!;
-    expect(knowledge.textContent).toContain("Search and save workspace knowledge");
-    expect(knowledge.textContent).toContain("Whether its saves need your OK");
-    expect(capabilities.querySelector('[data-capability="skills"]')?.textContent).toContain(
-      "Agent learning",
-    );
-    expect(capabilities.querySelector('[data-capability="webSearch"]')?.textContent).not.toContain(
-      "Agent learning",
-    );
-    // This chat's own learning settings, over the workspace defaults.
-    const learning = container.querySelector<HTMLElement>('[data-agent-section="Agent learning"]')!;
+    // This chat's learning is read and shown inside Knowledge and Skills.
     expect(getAgentLearningSettings).toHaveBeenCalledWith(workspaceId, "workspace", {
       kind: "chat",
       id: sessionId,
     });
-    expect(learning.textContent).toContain("Default (Review first)");
-    expect(learning.querySelector("a[href*='/state?page=learning']")?.textContent).toBe(
-      "the workspace",
+    const knowledge = capabilities.querySelector<HTMLElement>('[data-capability="knowledge"]')!;
+    expect(knowledge.textContent).toContain("Read and write · Review first");
+    expect(knowledge.textContent).toContain("can save to them");
+    expect(capabilities.querySelector('[data-capability="skills"]')?.textContent).toContain(
+      "Read and write",
+    );
+    expect(capabilities.querySelector('[data-capability="webSearch"]')?.textContent).not.toContain(
+      "Read and write",
     );
   } finally {
     await act(async () => root.unmount());
@@ -137,7 +131,7 @@ test("the Agent tab is one page: Identity, Capabilities and this chat's Agent le
   }
 });
 
-test("a private chat's Agent learning follows your private defaults", async () => {
+test("a private chat's learning comes from your private chat settings", async () => {
   getAgentLearningSettings.mockClear();
   const container = document.createElement("div");
   document.body.append(container);
@@ -156,16 +150,13 @@ test("a private chat's Agent learning follows your private defaults", async () =
       kind: "chat",
       id: sessionId,
     });
-    expect(container.querySelector('[data-agent-section="Agent learning"]')?.textContent).toContain(
-      "your private chats",
-    );
   } finally {
     await act(async () => root.unmount());
     container.remove();
   }
 });
 
-test("Chat settings from the composer focuses Agent learning", async () => {
+test("Chat settings from the composer opens the editor on Capabilities", async () => {
   const container = document.createElement("div");
   document.body.append(container);
   const root = createRoot(container);
@@ -180,8 +171,14 @@ test("Chat settings from the composer focuses Agent learning", async () => {
       ),
     );
     await settle();
-    expect(document.activeElement?.textContent).toBe("Agent learning");
+    expect(container.textContent).toContain("Edit agent");
+    expect(document.activeElement?.textContent).toBe("Capabilities");
     expect(document.activeElement?.tagName).toBe("H3");
+    // Knowledge is one Off / Read / Read and write choice with its review mode beside it.
+    const knowledge = container.querySelector<HTMLElement>('[data-capability="knowledge"]')!;
+    expect(knowledge.textContent).toContain("Read and write");
+    expect(knowledge.textContent).toContain("Saved knowledge");
+    expect(knowledge.textContent).toContain("Edits to instructions");
   } finally {
     await act(async () => root.unmount());
     container.remove();
