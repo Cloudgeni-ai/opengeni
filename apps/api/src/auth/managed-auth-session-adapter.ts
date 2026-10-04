@@ -4,7 +4,11 @@ import type {
 } from "@opengeni/core/managed-auth-session-sets";
 import { sql } from "drizzle-orm";
 import type { Database } from "@opengeni/db";
-import { assertManagedUserAdmission, type ManagedAuth } from "@opengeni/core";
+import {
+  assertManagedUserAdmission,
+  withManagedAuthSessionLookup,
+  type ManagedAuth,
+} from "@opengeni/core";
 import { createHmac, timingSafeEqual } from "node:crypto";
 import { runManagedAuthAttempt } from "./managed-auth-attempt-context";
 
@@ -77,7 +81,9 @@ export function createBetterAuthSessionAdapter(
       const headers = new Headers({
         cookie: `${cookie.name}=${signedCookieValue(input.token, context.secret)}`,
       });
-      const resolved = await auth.api.getSession({ headers, returnHeaders: true });
+      const resolved = await withManagedAuthSessionLookup(() =>
+        auth.api.getSession({ headers, returnHeaders: true }),
+      );
       if (!resolved.response) return null;
       assertManagedUserAdmission(auth, resolved.response.user);
       // The provider may renew its durable expiry and emit token/cache cookies;

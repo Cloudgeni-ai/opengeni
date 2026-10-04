@@ -747,7 +747,14 @@ remain fail-closed; this path does not compose with historical digest migrations
 Credential identity is also not a conversation-history compatibility boundary.
 Changing the selected Codex or SuperGrok subscription does not rewrite canonical history or
 a saved approval `RunState`. Responses providers receive canonical structured
-items directly. Chat Completions receives one request-local transcript view for
+items directly. Image-capable Chat Completions models receive attached images
+and `view_image` results. Tool images are delivered in a labelled image envelope
+after their paired tool results because Chat tool messages accept text only.
+Assistant content omits response-only metadata on the Chat wire; canonical
+history and provider cache extensions stay unchanged. Claude adaptive thinking
+explicitly requests visible summaries.
+
+Chat Completions receives one request-local transcript view for
 canonical record types that its SDK converter cannot represent; that view is
 never persisted. Historical `tool_search` calls/outputs remain inert completed
 facts. A session frozen to `remote_v2` compaction admits only Codex models;

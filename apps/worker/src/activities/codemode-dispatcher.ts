@@ -197,7 +197,8 @@ export class CodemodeAttemptDispatcher {
     const operations = await listTurnCodemodeApprovals(this.db, this.scope);
     if (
       decisionOperationId &&
-      // SDK approval IDs share this event path but are not UUID operation handles.
+      // Model-tool approval IDs are opaque strings. Only programmatic UUIDs
+      // can address the Codemode operation journal.
       CodemodeOperation.shape.operationId.safeParse(decisionOperationId).success &&
       !operations.some((operation) => operation.operationId === decisionOperationId)
     ) {

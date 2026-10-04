@@ -8,9 +8,13 @@ const schedules = await Bun.file(
 
 test("new-session connector menu and notice distinguish denied access from a retryable failure", () => {
   expect(newSession).toContain("accessDenied: connectionAccounts.accessDenied,");
-  expect(newSession).toContain("connectionAccounts.error && !connectionAccounts.accessDenied ? (");
+  expect(newSession).toContain("accountsFailure && !connectionAccounts.accessDenied ? (");
+  // A transient outage shows the updating notice instead (see transient-retry).
+  expect(newSession).toContain(
+    "connectionAccounts.error !== null && !connectionAccounts.unavailable",
+  );
   expect(newSession).toMatch(
-    /connectionAccounts\.error\s*\? connectionAccounts\.accessDenied\s*\? connectionAccounts\.error\s*: "Couldn't check connected accounts\. Retry to send your message\."/,
+    /accountsFailure\s*\? connectionAccounts\.accessDenied\s*\? connectionAccounts\.error\s*: "Couldn't send your message\. Try again\."/,
   );
 });
 

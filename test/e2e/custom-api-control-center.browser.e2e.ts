@@ -6,7 +6,10 @@ import { chromium, type Browser, type Page } from "playwright";
 
 import { INTEGRATION_DEFINITION_PRESENTATIONS } from "@opengeni/capabilities";
 import { freePort, startProcess, type StartedProcess } from "@opengeni/testing";
-import { OPENGENI_API_CONTRACT_REVISION } from "@opengeni/sdk";
+import {
+  OPENGENI_API_CONTRACT_REVISION,
+  type ConnectorToolPermissionsResponse,
+} from "@opengeni/sdk";
 
 const repoRoot = new URL("../..", import.meta.url).pathname;
 const evidenceDir = new URL("../../.agent/evidence/capabilities-custom-api/", import.meta.url)
@@ -343,6 +346,11 @@ describe("custom API control center browser acceptance", () => {
   test("pass 6: per-account facets configure and pause without exposing provider state", async () => {
     const context = await browser.newContext({ viewport: { width: 1180, height: 960 } });
     const page = await context.newPage();
+    const pageErrors: string[] = [];
+    page.on("pageerror", (error) => pageErrors.push(error.message));
+    page.on("console", (message) => {
+      if (message.type() === "error") pageErrors.push(message.text());
+    });
     try {
       const state = readyState();
       await installApi(page, state);
@@ -372,6 +380,7 @@ describe("custom API control center browser acceptance", () => {
       await expectText(inbox, "Paused");
       await assertAccessibleAndBounded(page, "[data-capability-page]");
       await page.screenshot({ path: `${evidenceDir}pass-6-account-facets.png`, fullPage: true });
+      expect(pageErrors).toEqual([]);
     } finally {
       await context.close();
     }
@@ -469,6 +478,11 @@ describe("custom API control center browser acceptance", () => {
       reducedMotion: "reduce",
     });
     const page = await context.newPage();
+    const pageErrors: string[] = [];
+    page.on("pageerror", (error) => pageErrors.push(error.message));
+    page.on("console", (message) => {
+      if (message.type() === "error") pageErrors.push(message.text());
+    });
     try {
       await installApi(page, { ...readyState(), canManage: false });
       await openCapabilities(page);
@@ -506,6 +520,7 @@ describe("custom API control center browser acceptance", () => {
       await page.getByRole("button", { name: "Capabilities", exact: true }).click();
       await sheet.waitFor({ state: "hidden" });
       await expectVisible(row);
+      expect(pageErrors).toEqual([]);
     } finally {
       await context.close();
     }
@@ -647,6 +662,36 @@ async function installApi(page: Page, state: UiState): Promise<void> {
       });
     }
     if (url.pathname === "/v1/access/me") return json(access(state.canManage));
+    if (
+      url.pathname ===
+      `/v1/workspaces/${workspaceId}/capabilities/api%3Amicrosoft-outlook-mail/tool-permissions`
+    ) {
+      expect(request.method()).toBe("GET");
+      const selectedConnection = url.searchParams.get("connectionId");
+      if (selectedConnection !== null) expect(selectedConnection).toBe(outlookConnectionId);
+      const selectedInstance = url.searchParams.get("instanceKey");
+      if (selectedInstance !== null) expect(selectedInstance).toBe("account-finance");
+      return json({
+        connectionId: outlookConnectionId,
+        serverId: "api:microsoft-outlook-mail",
+        instanceKey: "account-finance",
+        accountLabel: "Outlook Mail — Finance",
+        defaultPermission: null,
+        tools: [],
+        discoveryError: null,
+        canManage: state.canManage,
+        appliesTo: "next_attempt",
+        revision: "fixture-permissions-1",
+        accounts: [
+          {
+            connectionId: outlookConnectionId,
+            instanceKey: "account-finance",
+            label: "Outlook Mail — Finance",
+            scope: "workspace",
+          },
+        ],
+      } satisfies ConnectorToolPermissionsResponse);
+    }
     if (url.pathname === `/v1/workspaces/${workspaceId}/connect/attempts`) {
       if (request.method() === "GET") return json([]);
       const input = request.postDataJSON();
