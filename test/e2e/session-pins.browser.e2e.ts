@@ -2005,6 +2005,9 @@ describe("session pins browser e2e (real API + non-superuser PostgreSQL)", () =>
     });
     const page = await context.newPage();
     try {
+      // Keep this search/cursor fixture in one Today bucket. Date is fixed,
+      // but real timers and polling still run; midnight is a different query.
+      await page.clock.setFixedTime(new Date());
       await page.goto(webBaseUrl);
       await workspaceFromPage(page, "Last activity");
       // Isolate browse pagination without relying on the retired inline filter.
