@@ -79,7 +79,7 @@ const RATE_LIMITED: KnownFailure = {
   kind: "rate_limited",
   message: "This model is throttled due to high demand. Try again in a few minutes.",
   chooseModelMessage:
-    "This model is throttled due to high demand. Select another model in the chat bar, or try again in a few minutes.",
+    "This model is throttled due to high demand. Select a different model, or try again in a few minutes.",
   retryUnhelpful: false,
   suggestModel: true,
 };
@@ -87,7 +87,7 @@ const PROVIDER_ERROR: KnownFailure = {
   kind: "provider_error",
   message: "This model is temporarily unavailable. Try again in a few minutes.",
   chooseModelMessage:
-    "This model is temporarily unavailable. Select another model in the chat bar, or try again in a few minutes.",
+    "This model is temporarily unavailable. Select a different model, or try again in a few minutes.",
   retryUnhelpful: false,
   suggestModel: true,
 };

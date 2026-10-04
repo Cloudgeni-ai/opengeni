@@ -2505,7 +2505,7 @@ function SessionChatPane(props: {
   const composerPolicyError =
     composerPolicy && !modelCatalog.loading && !composerPolicyValid && !noRunnableModel
       ? composerModelUnavailable
-        ? "This model is no longer available. Choose another model to continue."
+        ? "This model is no longer available. Select a different model to continue."
         : "Choose a model, reasoning level, and speed supported by this session."
       : null;
   composerPolicyValidRef.current = composerPolicyValid;
@@ -2561,8 +2561,6 @@ function SessionChatPane(props: {
       <UnavailableModelNotice
         modelName={unavailableModelName(sessionModelUnavailable ? props.session.model : model)}
         replacementLabel={composerModelUnavailable ? null : (selectedPolicyRow?.label ?? null)}
-        canChooseModel={canControlSession && !modelPickerDisabled}
-        onChooseModel={() => setModelPickerSession(props.session.id)}
       />
     ) : null;
 
