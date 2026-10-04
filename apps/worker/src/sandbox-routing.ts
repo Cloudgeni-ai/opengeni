@@ -44,7 +44,10 @@ import {
   type EnrollmentRecord,
   type SandboxWorkspaceMutationAdmission,
 } from "@opengeni/db";
-import { observeSessionBackgroundCommandCompletion } from "@opengeni/db/session-background-commands";
+import {
+  observeSessionBackgroundCommandCompletion,
+  recordConnectedCommandOutputConsumption,
+} from "@opengeni/db/session-background-commands";
 import { appendSessionCommandOutput } from "@opengeni/db/session-command-output";
 import type { OpStreamOutputFrame } from "@opengeni/runtime/sandbox";
 import type { EventBus } from "@opengeni/events";
@@ -1714,6 +1717,20 @@ export async function establishSelfhostedTurnSession(
         reason: command.reason,
         ...(command.failure ? { failure: command.failure } : {}),
       });
+      if (command.outputReceipt && command.outcome === "exited" && command.exitCode !== null) {
+        await recordConnectedCommandOutputConsumption(db, {
+          accountId: args.accountId,
+          workspaceId: args.workspaceId,
+          sessionId: args.sessionId,
+          commandId: command.commandId,
+          controlWorkspaceId: command.controlWorkspaceId,
+          enrollmentId: command.enrollmentId,
+          connectionInstanceId: command.connectionInstanceId,
+          opId: command.opId,
+          receipt: command.outputReceipt,
+          exitCode: command.exitCode,
+        });
+      }
       if (settlement && bus) {
         await bus
           .publish(args.workspaceId, args.sessionId, settlement.events)
