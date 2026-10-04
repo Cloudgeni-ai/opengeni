@@ -336,6 +336,8 @@ function TrailingAction(props: SessionComposerProps & { messages: ChatComposerMe
   const active = mode !== "idle";
   const busy = mode === "send" ? props.sending : mode === "idle" ? false : props.pauseBusy;
   const disabled = mode === "send" ? !props.canSend : !active;
+  // A disabled send (text typed, but the host cannot send yet) looks disabled too.
+  const lit = active && !disabled;
   const icon: NativeIconName = mode === "pause" ? "pause" : mode === "resume" ? "play" : "arrow-up";
   const label =
     mode === "pause"
@@ -343,7 +345,7 @@ function TrailingAction(props: SessionComposerProps & { messages: ChatComposerMe
       : mode === "resume"
         ? props.messages.resumeThisWorkstream
         : props.messages.sendMessageAriaLabel;
-  const fg = active ? c["accent-fg"] : c["fg-subtle"];
+  const fg = lit ? c["accent-fg"] : c["fg-subtle"];
   return (
     <Pressable
       accessibilityRole="button"
@@ -363,7 +365,7 @@ function TrailingAction(props: SessionComposerProps & { messages: ChatComposerMe
         borderRadius: 17,
         alignItems: "center",
         justifyContent: "center",
-        backgroundColor: active ? c.accent : withAlpha(c.fg, 0.08),
+        backgroundColor: lit ? c.accent : withAlpha(c.fg, 0.08),
         opacity: pressed ? 0.8 : 1,
         transform: [{ scale: pressed ? 0.94 : 1 }],
       })}
