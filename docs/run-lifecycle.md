@@ -3618,6 +3618,12 @@ the execution root and claim timer; its completed span is backdated beneath
 the root, not evidence that it ran after the claim. These observations add no
 database reads or event publications, do not join telemetry exports, and leave
 historical metric boundaries intact. Missing observations are not zero durations.
+`session_mcp_settings` is a bounded child within runtime preparation. With a
+configured credential key, its independent exact-attempt policy and fresh
+server-credential reads overlap on root-pool connections; both settle before
+settings or credential provenance are exposed, retaining policy-error priority.
+Transaction handles and the missing-key metadata path retain serial ordering.
+No read, approval fence, credential refresh or model/tool authority is omitted.
 After successful exact claim ownership, session reload and capability settings
 overlap as fresh reads in separate root-pool RLS transactions; neither uses the
 other's result. Both results still precede credential selection, accepted-policy
