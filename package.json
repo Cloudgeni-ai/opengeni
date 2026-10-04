@@ -129,7 +129,7 @@
     "artifact-runtime:build-target": "bun scripts/build-artifact-runtime-target.ts",
     "test:runtime-embedding-consumer": "bun scripts/test-runtime-embedding-consumer.ts",
     "test:ogtool-package": "bun scripts/test-ogtool-package.ts",
-    "changeset:version": "changeset version && bun scripts/build-artifact-kernel-wasm-packages.ts --refresh-package-identities",
+    "changeset:version": "changeset version && bun scripts/release/lockstep-version.ts && bun scripts/build-artifact-kernel-wasm-packages.ts --refresh-package-identities",
     "release:rewrite-deps": "bun scripts/rewrite-workspace-deps.ts",
     "release:rewrite-entry-points": "bun scripts/rewrite-entry-points.ts",
     "release:publish": "bash scripts/release-publish.sh",
@@ -236,6 +236,7 @@
     "@openai/agents-openai@0.14.3": "patches/@openai%2Fagents-openai@0.14.3.patch",
     "@openai/agents-core@0.14.3": "patches/@openai%2Fagents-core@0.14.3.patch",
     "@temporalio/worker@1.22.0": "patches/@temporalio%2Fworker@1.22.0.patch",
-    "postgres@3.4.9": "patches/postgres@3.4.9.patch"
+    "postgres@3.4.9": "patches/postgres@3.4.9.patch",
+    "bun-types@1.4.0": "patches/bun-types@1.4.0.patch"
   }
 }

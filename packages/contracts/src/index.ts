@@ -2602,8 +2602,7 @@ export const UpdateWorkspaceSettingsRequest = z
     slackReactionSummon: WorkspaceSlackReactionSummonSettings.optional(),
     slackOrchestrationNotices: WorkspaceSlackOrchestrationNoticeSettings.optional(),
     defaultSandboxImage: WorkspaceDefaultSandboxImage.nullable().optional(),
-    // Agent defaults for new sessions; null clears them. Requires the agent
-    // configuration admission switch.
+    // Agent defaults for new sessions; null clears them.
     sessionAgentDefaults: WorkspaceAgentDefaults.nullable().optional(),
   })
   .passthrough();
@@ -2812,7 +2811,7 @@ export const ServiceTurnInitiatorContext = TurnInitiatorContext.superRefine((val
       ctx.addIssue({
         code: z.ZodIssueCode.custom,
         path: [key],
-        message: `${key} is reserved OpenGeni initiator context`,
+        message: `${key} is reserved Opengeni initiator context`,
       });
     }
   }
@@ -3509,6 +3508,11 @@ export const ApiKey = z.object({
   workspaceScope: OrganizationWorkspaceScope.optional(),
   /** Legacy keys retain their historical workspace-admin wildcard. */
   permissionMode: z.enum(["legacy", "explicit"]).optional(),
+  /** Organization keys: the service account that holds the key. */
+  serviceAccount: z
+    .object({ id: z.string().uuid(), name: z.string(), role: z.enum(["admin", "member"]) })
+    .nullable()
+    .optional(),
   expiresAt: z.string().nullable(),
   revokedAt: z.string().nullable(),
   lastUsedAt: z.string().nullable(),
@@ -3542,6 +3546,8 @@ export const CreateOrganizationApiKeyRequest = z
     /** Optional creation alias for the developer_setup access tier. */
     preset: OrganizationApiKeyPreset.optional(),
     policy: OrganizationAccessPolicy.optional(),
+    /** The service account that holds the key; omitted creates one named after the key. */
+    serviceAccountId: z.string().uuid().optional(),
   })
   .strict()
   .refine((request) => request.preset !== "developer_setup" || request.access !== "read", {
@@ -3865,12 +3871,13 @@ export type InsightsSpendDriver = z.infer<typeof InsightsSpendDriver>;
 
 /**
  * Usage grouped by each root session's current project. `other` folds the
- * projects past the listed limit; `unavailable` holds trees whose root the
- * viewer cannot read. Rows sum to the window totals.
+ * projects past the listed limit; `unavailable` holds private trees whose root
+ * the viewer cannot read; `deleted` holds retained usage without a session.
+ * Rows sum to the window totals. Neither amounts-only bucket identifies chats.
  */
 export const InsightsProjectRow = z.object({
   id: z.string().min(1),
-  kind: z.enum(["project", "other", "unfiled", "unavailable"]),
+  kind: z.enum(["project", "other", "unfiled", "unavailable", "deleted"]),
   label: z.string().min(1),
   projects: z.number().int().nonnegative(),
   rootSessions: z.number().int().nonnegative(),
@@ -4039,6 +4046,8 @@ export const WorkspaceInsightsSnapshot = z.object({
   priorInputTokens: z.number().nonnegative(),
   priorTotalTokens: z.number().nonnegative(),
   priorCacheHitPct: z.number().int().min(0).max(100),
+  /** Prior input whose cache details are known. Omitted by older API replicas. */
+  priorCacheInputTokens: z.number().nonnegative().optional(),
   priorCalls: z.number().int().nonnegative(),
   /** Lifetime workspace topology (not scoped to the selected Insights range). */
   goalsActive: z.number().int().nonnegative(),
@@ -8889,6 +8898,8 @@ type RenderableSessionSystemUpdate = Pick<
  */
 export type SessionSystemUpdateBatchRenderOptions = {
   deliveredAt?: Date | string | null;
+  /** Server-derived configuration facts, model memory only. */
+  selectionNotes?: Readonly<Record<string, string>>;
 };
 
 function renderSessionSystemUpdateDeliveredAt(
@@ -8926,6 +8937,9 @@ export function renderSessionSystemUpdateBatch(
         summary: update.summary,
         payload: update.payload,
         lineage: update.lineage,
+        ...(options.selectionNotes?.[update.id]
+          ? { selectionNote: options.selectionNotes[update.id] }
+          : {}),
       })),
     }),
   ].join("\n");
@@ -10084,7 +10098,8 @@ export const ScheduledTaskAgentConfigInput = /* @__PURE__ */ z
       context.addIssue({
         code: "custom",
         path: ["sandboxBackend"],
-        message: "selfhosted scheduled tasks require machineTarget",
+        message:
+          "Omit sandboxBackend and select machineTarget for a separate agent; existing-chat schedules inherit the chat's machine",
       });
     }
     if (scheduledTaskJsonUtf8Bytes(value) > SCHEDULED_TASK_AGENT_CONFIG_MAX_BYTES) {
@@ -10712,11 +10727,56 @@ const CreateKnowledgeSourceSyncScheduledTaskRequest = /* @__PURE__ */ z
     connectionAccounts: [],
   }));
 
+/** Schedule a message in an existing chat, whose execution settings are inherited. */
+export const CreateSessionScheduledTaskRequest = /* @__PURE__ */ z
+  .object({
+    name: ScheduledTaskNameInput,
+    schedule: ScheduledTaskScheduleSpec,
+    prompt: ScheduledTaskAgentConfigInput.shape.prompt,
+    targetSessionId: z.string().uuid(),
+    connectionAccounts: McpConnectionAccountSelections.default([]),
+    runMode: z.literal("existing_session").default("existing_session"),
+    overlapPolicy: ScheduledTaskOverlapPolicy.default("buffer_one"),
+    status: ScheduledTaskStatus.default("active"),
+    metadata: ScheduledTaskMetadataInput.default({}),
+  })
+  .strict()
+  .superRefine((value, context) => {
+    const result = ScheduledTaskAgentConfigInput.safeParse({ prompt: value.prompt });
+    if (!result.success) for (const issue of result.error.issues) context.addIssue({ ...issue });
+  })
+  .transform(({ prompt, ...value }) => ({
+    ...value,
+    action: { kind: "agent_turn" as const },
+    agentConfig: {
+      prompt,
+      resources: [],
+      tools: [],
+      metadata: {},
+    } as ScheduledTaskAgentConfigInput,
+    variableSetId: undefined,
+    environmentId: undefined,
+    rigId: undefined,
+  }));
+
 export const CreateScheduledTaskRequest = /* @__PURE__ */ z.union([
   CreateKnowledgeSourceSyncScheduledTaskRequest,
   CreateAgentScheduledTaskRequest,
+  CreateSessionScheduledTaskRequest,
 ]);
 export type CreateScheduledTaskRequest = z.infer<typeof CreateScheduledTaskRequest>;
+
+/** Reviewable access consequences of moving a schedule to another chat. */
+export const ScheduledTaskTargetAccessChange = z
+  .object({
+    code: z.literal("scheduled_target_access_change"),
+    targetSessionId: z.uuid(),
+    removedVariableSetIds: z.array(z.uuid()).max(100),
+    removedVariableSetCount: z.number().int().min(0).max(100),
+    removedRigId: z.uuid().nullable(),
+    resolution: z.string().max(512),
+  })
+  .strict();
 
 export const UpdateScheduledTaskRequest =
   /* @__PURE__ */ withVariableSetIdAlias(
@@ -10740,17 +10800,25 @@ export const UpdateScheduledTaskRequest =
       connectionAuthorities: z.never().optional(),
       connectionAccounts: McpConnectionAccountSelections.optional(),
 
+      /** Compare against the reviewed execution digest; rejects concurrent edits. */
+      expectedExecutionDigest: z.string().min(1).max(128).optional(),
+      /** Accept a retarget's explicitly reported changes to attached access. */
+      adoptSessionSettings: z.literal(true).optional(),
+      /** Lossless instruction edit; all other saved fields are preserved. */
+      prompt: ScheduledTaskAgentConfigInput.shape.prompt.optional(),
+
       agentConfig: ScheduledTaskAgentConfigInput.optional(),
       // Narrow, lossless update: never reconstruct agentConfig from its
       // bounded MCP projection. Full agentConfig retains replacement semantics.
       agentConfigPatch: z
         .object({
+          prompt: ScheduledTaskAgentConfigInput.shape.prompt.optional(),
           model: scheduledTaskBoundedString(512, "scheduled task model").optional(),
           reasoningEffort: ReasoningEffort.optional(),
         })
         .strict()
-        .refine((patch) => patch.model !== undefined || patch.reasoningEffort !== undefined, {
-          message: "agentConfigPatch requires model or reasoningEffort",
+        .refine((patch) => Object.keys(patch).length > 0, {
+          message: "agentConfigPatch requires prompt, model or reasoningEffort",
         })
         .optional(),
       status: ScheduledTaskStatus.optional(),
@@ -10763,6 +10831,24 @@ export const UpdateScheduledTaskRequest =
     },
     { rejectKeys: ["selectedHostMcpDelegations"] },
   ).superRefine((value, context) => {
+    if (value.adoptSessionSettings && !value.expectedExecutionDigest) {
+      context.addIssue({
+        code: "custom",
+        path: ["expectedExecutionDigest"],
+        message:
+          "Review the current schedule and supply expectedExecutionDigest when accepting destination access changes",
+      });
+    }
+    if (
+      value.prompt !== undefined &&
+      (value.agentConfig || value.agentConfigPatch?.prompt !== undefined)
+    ) {
+      context.addIssue({
+        code: "custom",
+        path: ["prompt"],
+        message: "Supply prompt once, without agentConfig replacement or agentConfigPatch.prompt",
+      });
+    }
     if (value.agentConfig && value.agentConfigPatch) {
       context.addIssue({
         code: "custom",
@@ -16177,7 +16263,7 @@ export const CreateSessionRequest = /* @__PURE__ */ defineSkillContractSchema(()
       firstPartyMcpTools: z.array(FirstPartyMcpToolName).optional(),
       // One agent configuration: capabilities, identity, instructions alias and
       // renderer. Omission keeps today's behavior (or inherits a configured
-      // parent). Children may only narrow. Behind the admission switch.
+      // parent). Children may only narrow.
       agent: AgentConfigRequest.optional(),
       // Third-party MCP servers attached only to this session. For an agent-created
       // child, omission snapshots its trusted immediate parent's server definitions,
@@ -18286,8 +18372,8 @@ export const ClientConfig = /* @__PURE__ */ defineModelContractSchema(() =>
       maxSizeBytes: VOICE_INPUT_MAX_SIZE_BYTES,
       acceptedMimeTypes: [...VOICE_INPUT_ACCEPTED_MIME_TYPES],
     }),
-    // Agent configuration rollout: whether `agent` is admitted, whether new
-    // sessions default to a configuration, and per-capability availability.
+    // Agent configuration: per-capability availability. `enabled` and
+    // `defaultForNewSessions` are deprecated; current servers report `true`.
     agentConfig: ClientAgentConfig.default({
       enabled: false,
       defaultForNewSessions: false,
@@ -18479,3 +18565,4 @@ export * from "./mcp-catalog-limits";
 export * from "./slack-rest-mcp";
 export * from "./skill-catalog-context";
 export * from "./sandbox-recovery";
+export * from "./modal-native-proof-v2";

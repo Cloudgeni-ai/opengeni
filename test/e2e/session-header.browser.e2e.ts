@@ -541,6 +541,73 @@ describe("responsive production session header", () => {
     }
   }, 30_000);
 
+  test("phones keep one row and move find, rename, pin and archive into the more menu", async () => {
+    const created = await createSession(dbClient.db, {
+      accountId: fixture.accountId,
+      workspaceId: fixture.workspaceId,
+      initialMessage: "Compact phone header with a long session name that must truncate",
+      resources: [],
+      metadata: {},
+      model: "scripted-model",
+      reasoningEffort: "medium",
+      latencyMode: "standard",
+      sandboxBackend: "none",
+    });
+    const context = await configuredContext(browser, {
+      viewport: { width: 390, height: 844 },
+      isMobile: true,
+      hasTouch: true,
+      extraHTTPHeaders: ownerHeaders,
+    });
+    try {
+      const page = await context.newPage();
+      await page.goto(sessionUrl({ ...fixture, sessionId: created.id }));
+      const header = page.locator("header");
+      const title = header.locator("button[title$='click to rename']");
+      await title.waitFor();
+      // No dedicated Find row and no inline pin, rename pencil or find on phones.
+      expect(await page.getByRole("button", { name: "Find in conversation" }).isVisible()).toBe(
+        false,
+      );
+      expect(await header.getByRole("button", { name: "Pin session" }).isVisible()).toBe(false);
+      expect(await header.getByRole("button", { name: "Rename session" }).isVisible()).toBe(false);
+      const box = await header.boundingBox();
+      expect(box!.height).toBeLessThanOrEqual(64);
+      // The side panel stays one tap away.
+      expect(await header.getByRole("button", { name: "Open workspace" }).isVisible()).toBe(true);
+      await header.getByRole("button", { name: "More session actions" }).click();
+      const menu = page.getByRole("menu");
+      for (const name of ["Find", "Rename", "Pin", "Archive"]) {
+        expect(await menu.getByRole("menuitem", { name, exact: true }).isVisible()).toBe(true);
+      }
+      await page.screenshot({
+        path: `/tmp/session-header-${screenshotPhase}-phone-menu.png`,
+        animations: "disabled",
+      });
+      await menu.getByRole("menuitem", { name: "Find", exact: true }).click();
+      const find = page.getByRole("searchbox", { name: "Find in conversation" });
+      await find.waitFor();
+      await waitFor(async () => await find.evaluate((node) => node === document.activeElement), {
+        timeoutMs: 3_000,
+      });
+      await page.screenshot({
+        path: `/tmp/session-header-${screenshotPhase}-phone-find.png`,
+        animations: "disabled",
+      });
+      await page.keyboard.press("Escape");
+      await find.waitFor({ state: "detached" });
+      await header.getByRole("button", { name: "More session actions" }).click();
+      await page.getByRole("menuitem", { name: "Archive", exact: true }).click();
+      // The confirmed archive projection flips the action to Restore.
+      await page.getByText("Chat archived.").waitFor();
+      await header.getByRole("button", { name: "More session actions" }).click();
+      await page.getByRole("menuitem", { name: /^Restore/ }).waitFor();
+      expect(pageErrors.get(context)).toEqual([]);
+    } finally {
+      await context.close();
+    }
+  }, 60_000);
+
   test("an untouched provisional rename cannot overwrite a semantic title arriving mid-edit", async () => {
     const openingPrompt = "Inspect provisional session naming in the browser";
     const semanticTitle = "Automatic Session Naming";

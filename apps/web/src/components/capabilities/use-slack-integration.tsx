@@ -884,7 +884,7 @@ export function useSlackIntegration({
         label: "Publish important decisions to Slack",
         description: publication?.slackChannelName
           ? `Posts to ${publication.slackChannelName}. Major items publish automatically; lower-signal items wait for review or stay quiet.`
-          : "Posts bounded summaries of workspace Memory changes to one channel you choose.",
+          : "Posts short summaries of workspace Knowledge changes to one channel you choose.",
         checked: publication?.enabled ?? false,
         disabled: !isAdmin || !botActive || readOnly || !publicationLoaded,
         busy: publicationBusy,

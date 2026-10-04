@@ -5,7 +5,12 @@ import type {
   ClaudeSubscriptionSetupTokenRequest,
   SubscriptionPoolSettings,
 } from "@opengeni/contracts";
-import type { ArtifactCatalogListOptions, ArtifactCatalogListResponse } from "./artifact-catalog";
+import type {
+  ArtifactCatalogKind,
+  ArtifactCatalogListOptions,
+  ArtifactCatalogListResponse,
+  ArtifactPinResponse,
+} from "./artifact-catalog";
 import type {
   SessionMessageSearchRequest,
   SessionMessageSearchResponse,
@@ -291,9 +296,12 @@ import type {
   CreateApiKeyRequest,
   CreateApiKeyResponse,
   CreateOrganizationApiKeyRequest,
-  UpdateOrganizationApiKeyRequest,
   OrganizationMcpConnection,
   OrganizationMcpConnectionList,
+  OrganizationServiceAccount,
+  ListOrganizationServiceAccountsResponse,
+  CreateOrganizationServiceAccountRequest,
+  UpdateOrganizationServiceAccountRequest,
   UpdateOrganizationMcpConnectionRequest,
   McpConnectionRequest,
   McpConnectionDecision,
@@ -723,7 +731,7 @@ function hasSessionPageFilters(options: SessionListPageOptions): boolean {
 }
 
 function unsupportedSessionPage(feature: string): Error {
-  return new Error(`The connected OpenGeni API does not support ${feature}`);
+  return new Error(`The connected Opengeni API does not support ${feature}`);
 }
 
 function sessionPath(workspaceId: string, sessionId: string): string {
@@ -969,7 +977,7 @@ function createLazyToolsFacade(transport: OpenGeniToolTransport): OpenGeniToolsF
               target = (target as Record<string, unknown>)[segment];
             }
             if (typeof target !== "function")
-              throw new TypeError("OpenGeni tool path is not callable");
+              throw new TypeError("Opengeni tool path is not callable");
             return await Reflect.apply(target, undefined, args);
           }) as unknown as OpenGeniWorkspaceTools,
           {
@@ -7586,6 +7594,23 @@ export class OpenGeniClient {
     );
   }
 
+  /** Idempotently set a workspace-shared pin; refresh the catalog after completion. */
+  async updateArtifactPin(
+    workspaceId: string,
+    kind: ArtifactCatalogKind,
+    artifactId: string,
+    pinned: boolean,
+    options: { signal?: AbortSignal } = {},
+  ): Promise<ArtifactPinResponse> {
+    return this.requestJson<ArtifactPinResponse>(
+      "PUT",
+      `/v1/workspaces/${encodeURIComponent(workspaceId)}/artifact-catalog/${encodeURIComponent(kind)}/${encodeURIComponent(artifactId)}/pin`,
+      { pinned },
+      undefined,
+      options,
+    );
+  }
+
   async listWorkspaceArtifacts(
     workspaceId: string,
     options: WorkspaceArtifactListOptions & { signal?: AbortSignal } = {},
@@ -7691,7 +7716,7 @@ export class OpenGeniClient {
   ): Promise<import("@opengeni/contracts").PluginDiscoveryPage> {
     return this.requestJson(
       "GET",
-      "/v1/workspaces/" + workspaceId + "/capabilities/discovery/plugins",
+      `/v1/workspaces/${workspaceId}/capabilities/discovery/plugins`,
       undefined,
       {
         ...(options.id ? { id: options.id } : {}),
@@ -8127,11 +8152,17 @@ export class OpenGeniClient {
 
   // --- Connections -------------------------------------------------------------------------------
 
-  /** The authenticated user's active accounts across this organization. */
-  async listOwnConnectionAccounts(workspaceId: string): Promise<ConnectionMetadata[]> {
+  /** This authenticated user's accounts across the organization, plus current-workspace shared accounts.
+   * Inactive accounts are opt-in for settings display; execution pickers keep the active default. */
+  async listOwnConnectionAccounts(
+    workspaceId: string,
+    options: { includeInactive?: boolean } = {},
+  ): Promise<ConnectionMetadata[]> {
     const response = await this.requestJson<ListConnectionsResponse>(
       "GET",
       `/v1/workspaces/${workspaceId}/connections/accounts`,
+      undefined,
+      options.includeInactive === true ? { includeInactive: "true" } : {},
     );
     return response.connections;
   }
@@ -8566,14 +8597,6 @@ export class OpenGeniClient {
     return response.apiKeys;
   }
 
-  /** Read organization-key metadata and policy; never returns the secret token. */
-  async getOrganizationApiKey(organizationId: string, apiKeyId: string): Promise<ApiKey> {
-    return await this.requestJson<ApiKey>(
-      "GET",
-      `/v1/organizations/${organizationId}/api-keys/${apiKeyId}`,
-    );
-  }
-
   /** The returned `token` is shown once; only its prefix is stored. */
   async createOrganizationApiKey(
     organizationId: string,
@@ -8582,19 +8605,6 @@ export class OpenGeniClient {
     return await this.requestJson<CreateApiKeyResponse>(
       "POST",
       `/v1/organizations/${organizationId}/api-keys`,
-      request,
-    );
-  }
-
-  /** Update metadata or replace the policy. Policy narrowing applies on the next request. */
-  async updateOrganizationApiKey(
-    organizationId: string,
-    apiKeyId: string,
-    request: UpdateOrganizationApiKeyRequest,
-  ): Promise<ApiKey> {
-    return await this.requestJson<ApiKey>(
-      "PATCH",
-      `/v1/organizations/${organizationId}/api-keys/${apiKeyId}`,
       request,
     );
   }
@@ -8644,6 +8654,62 @@ export class OpenGeniClient {
     await this.requestVoid(
       "DELETE",
       `/v1/organizations/${organizationId}/mcp-connections/${connectionId}`,
+    );
+  }
+
+  /** Service accounts: organization identities with no person behind them. */
+  async listOrganizationServiceAccounts(
+    organizationId: string,
+  ): Promise<ListOrganizationServiceAccountsResponse> {
+    return await this.requestJson<ListOrganizationServiceAccountsResponse>(
+      "GET",
+      `/v1/organizations/${organizationId}/service-accounts`,
+    );
+  }
+
+  async getOrganizationServiceAccount(
+    organizationId: string,
+    serviceAccountId: string,
+  ): Promise<OrganizationServiceAccount> {
+    return await this.requestJson<OrganizationServiceAccount>(
+      "GET",
+      `/v1/organizations/${organizationId}/service-accounts/${serviceAccountId}`,
+    );
+  }
+
+  /** Create a service account; give it keys with `createOrganizationApiKey({ serviceAccountId })`. */
+  async createOrganizationServiceAccount(
+    organizationId: string,
+    request: CreateOrganizationServiceAccountRequest,
+  ): Promise<OrganizationServiceAccount> {
+    return await this.requestJson<OrganizationServiceAccount>(
+      "POST",
+      `/v1/organizations/${organizationId}/service-accounts`,
+      request,
+    );
+  }
+
+  /** Rename it or change its role; making it a member narrows its keys at once. */
+  async updateOrganizationServiceAccount(
+    organizationId: string,
+    serviceAccountId: string,
+    request: UpdateOrganizationServiceAccountRequest,
+  ): Promise<OrganizationServiceAccount> {
+    return await this.requestJson<OrganizationServiceAccount>(
+      "PATCH",
+      `/v1/organizations/${organizationId}/service-accounts/${serviceAccountId}`,
+      request,
+    );
+  }
+
+  /** Delete a service account; every key it holds is revoked at once. */
+  async deleteOrganizationServiceAccount(
+    organizationId: string,
+    serviceAccountId: string,
+  ): Promise<void> {
+    await this.requestVoid(
+      "DELETE",
+      `/v1/organizations/${organizationId}/service-accounts/${serviceAccountId}`,
     );
   }
 
@@ -9712,7 +9778,7 @@ async function assertJsonResponse(
     retryable: true,
     correlationId: response.headers.get(OPENGENI_CORRELATION_HEADER) ?? context.correlationId,
     outcomeUnknown: isMutationMethod(context.method),
-    displayMessage: "OpenGeni is temporarily unavailable — retry.",
+    displayMessage: "Opengeni is temporarily unavailable — retry.",
   });
 }
 
@@ -9749,7 +9815,7 @@ function mutationTransportError(correlationId: string): OpenGeniApiError {
     correlationId,
     outcomeUnknown: true,
     mutation: true,
-    displayMessage: "OpenGeni could not confirm the request — reconcile before retrying.",
+    displayMessage: "Opengeni could not confirm the request — reconcile before retrying.",
   });
 }
 

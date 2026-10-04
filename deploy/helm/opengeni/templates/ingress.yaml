@@ -184,7 +184,7 @@ spec:
       http:
         paths:
           - path: /.well-known/oauth-authorization-server
-            pathType: Exact
+            pathType: Prefix
             backend:
               service:
                 name: {{ include "opengeni.fullname" $ }}-api

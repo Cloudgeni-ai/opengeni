@@ -291,7 +291,7 @@ test("return link appears only while the find bar was opened from session search
     });
   try {
     await render(false);
-    expect(host.textContent).toContain("All saved user and completed assistant messages");
+    expect(host.querySelector("section")?.textContent).not.toContain("Showing matches for");
     expect(host.textContent).not.toContain("Back to session search");
     await render(true);
     const back = [...host.querySelectorAll("button")].find(

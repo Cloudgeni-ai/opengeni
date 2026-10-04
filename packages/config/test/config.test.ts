@@ -326,7 +326,7 @@ describe("browser analytics configuration", () => {
     ).toBe(false);
   });
 
-  test("configured host MCP refs are rejected even with the retired rollout flag", () => {
+  test("configured host MCP refs are rejected", () => {
     const mcpServers = JSON.stringify([
       {
         id: "host-tools",
@@ -341,15 +341,6 @@ describe("browser analytics configuration", () => {
     expect(() => withEnv({ OPENGENI_MCP_SERVERS: mcpServers }, () => getSettings())).toThrow(
       /host-owned connection refs are no longer supported/,
     );
-    expect(() =>
-      withEnv(
-        {
-          OPENGENI_MCP_SERVERS: mcpServers,
-          OPENGENI_HOST_MCP_AUTHORITY_SOURCE_ADMISSION_ENABLED: "true",
-        },
-        () => getSettings(),
-      ),
-    ).toThrow(/host-owned connection refs are no longer supported/);
   });
 
   test("Slack workspace routing defaults on and parses the rollout flag", () => {

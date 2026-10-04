@@ -19,6 +19,7 @@ import {
 } from "@opengeni/runtime";
 import { type Settings } from "@opengeni/config";
 import { maybeCompactContext, settleFailedContextCompactionLandmark } from "../context-compaction";
+import type { TurnExecutionPolicyV1 } from "@opengeni/contracts";
 import type { CompactionSummarizer, RemoteCompactionV2Requester } from "../context-compaction";
 import { TurnAttemptFencedError } from "../turn-attempt-fenced";
 import type {
@@ -241,12 +242,13 @@ export async function prepareCompaction(deps: CompactionPrepDeps): Promise<Compa
   const recordCompactionUsage = async (
     usage: ModelResponseUsage,
     reservation: Awaited<ReturnType<typeof reserveModelCallBudget>> | null,
+    latencyMode: TurnExecutionPolicyV1["latencyMode"],
   ) => {
     const result = await processCompactionModelUsageEvent({
       usage,
       state: compactionUsageState,
       dispatchId: modelUsageDispatchId,
-      settings,
+      settings: eventing.modelRunSettings,
       db,
       observability,
       publish: eventing.publish,
@@ -257,6 +259,7 @@ export async function prepareCompaction(deps: CompactionPrepDeps): Promise<Compa
       provider: resolvedModel?.provider.id ?? settings.openaiProvider,
       providerApi: resolvedModel?.provider.api ?? "responses",
       model: resolvedModel?.configured.id ?? turn.model,
+      latencyMode,
       externallyBilled: billingState.isExternallyBilledTurn,
       chargesOpenGeniCredits: billingState.chargesOpenGeniCredits,
       countsTowardTokenCap: billingState.countsTowardTokenCap,
@@ -273,7 +276,10 @@ export async function prepareCompaction(deps: CompactionPrepDeps): Promise<Compa
     if (reservation && result.usageReported)
       billingState.pendingUsageReservations.delete(reservation.callId);
   };
-  const compactionCallAccounting = (maxOutputTokens: number) => {
+  const compactionCallAccounting = (
+    maxOutputTokens: number,
+    latencyMode: TurnExecutionPolicyV1["latencyMode"] = "standard",
+  ) => {
     let reservation: Awaited<ReturnType<typeof reserveModelCallBudget>> | null = null;
     return {
       onModelCallAdmission: async () => {
@@ -291,7 +297,7 @@ export async function prepareCompaction(deps: CompactionPrepDeps): Promise<Compa
           chargesOpenGeniCredits: billingState.chargesOpenGeniCredits,
           countsTowardTokenCap: billingState.countsTowardTokenCap,
           initiatingHumanSubjectId: turn.initiatingHumanSubjectId,
-          latencyMode: turnExecutionPolicy.latencyMode,
+          latencyMode,
           maxOutputTokens,
         });
         if (reservation.held) {
@@ -302,7 +308,8 @@ export async function prepareCompaction(deps: CompactionPrepDeps): Promise<Compa
           budgetReserved: Boolean(reservation.held),
         };
       },
-      onUsage: (usage: ModelResponseUsage) => recordCompactionUsage(usage, reservation),
+      onUsage: (usage: ModelResponseUsage) =>
+        recordCompactionUsage(usage, reservation, latencyMode),
     };
   };
   const compactionSummarizerFor = (systemInstructions?: string): CompactionSummarizer => {
@@ -316,7 +323,10 @@ export async function prepareCompaction(deps: CompactionPrepDeps): Promise<Compa
               model: turnExecutionPolicy.upstreamModelId,
               maxOutputTokens: compactionSummaryOutputTokens(s.contextWindowTokens),
               ...(cancellationSignal ? { signal: cancellationSignal } : {}),
-              ...compactionCallAccounting(compactionSummaryOutputTokens(s.contextWindowTokens)),
+              ...compactionCallAccounting(
+                compactionSummaryOutputTokens(s.contextWindowTokens),
+                portableResponsesNeedsAgentPrefix ? turnExecutionPolicy.latencyMode : "standard",
+              ),
               ...(systemInstructions ? { systemInstructions } : {}),
               ...(promptCacheKey ? { promptCacheKey } : {}),
               ...(portableResponsesNeedsAgentPrefix
@@ -362,7 +372,7 @@ export async function prepareCompaction(deps: CompactionPrepDeps): Promise<Compa
               preparedRequest,
               captureAgent: remotePrefix.agent,
               signal: cancellationSignal,
-              ...compactionCallAccounting(s.contextWindowTokens),
+              ...compactionCallAccounting(s.contextWindowTokens, turnExecutionPolicy.latencyMode),
             });
           })
       : undefined;

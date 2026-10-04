@@ -150,6 +150,8 @@ export function safeDatabaseErrorCode(error: unknown): string {
 }
 
 export const OWNER_PAGE_SIZE = 20;
+export const LATENCY_TAIL_LIMIT = 10;
+export const DIAGNOSTIC_LIMIT = 10;
 
 function pageOffset(value: number): number {
   if (!Number.isSafeInteger(value) || value < 0 || value > 1000000)
@@ -218,10 +220,13 @@ export function databaseQueries(
         WHERE since<$1::timestamptz-interval '5 minutes' AND NOT paused ORDER BY workspace_id,session_id
         LIMIT ${OWNER_PAGE_SIZE} OFFSET ${recoveryOffset}) x),'[]')) facts FROM recoveries`,
     empty: `${CONTROL_CTE}, completed_turns AS MATERIALIZED (
-      SELECT id,workspace_id,session_id,source,finished_at FROM session_turns WHERE finished_at>=$1::timestamptz-($2::int*interval '1 minute')
+      SELECT id,workspace_id,session_id,source,trigger_event_id,created_at,finished_at FROM session_turns WHERE finished_at>=$1::timestamptz-($2::int*interval '1 minute')
         AND finished_at<=$1::timestamptz AND status='completed'
-    ), completions AS (
+    ), completions AS MATERIALIZED (
       SELECT t.session_id,t.workspace_id,t.id turn_id,coalesce(e.created_at,t.finished_at) created_at,
+        t.source,t.trigger_event_id,t.created_at accepted_at,t.finished_at,
+        e.id completion_event_id,e.turn_attempt_id completion_attempt_id,
+        c.valid control_valid,c.paused control_paused,s.status session_status,s.input_wait_until,
         coalesce(e.payload->>'emptyFinalReply','false')='true' explicit_empty,
         CASE WHEN e.id IS NULL OR jsonb_typeof(e.payload) IS DISTINCT FROM 'object' THEN 'missing_evidence'
           WHEN NOT c.valid THEN 'control_unknown' WHEN s.status IN ('cancelled','failed') THEN 'terminal'
@@ -243,6 +248,22 @@ export function databaseQueries(
       ) e ON true
       JOIN candidates s ON s.id=t.session_id AND s.workspace_id=t.workspace_id
       JOIN controls c ON c.id=s.id AND c.workspace_id=s.workspace_id
+    ), suspect_rows AS MATERIALIZED (
+      SELECT * FROM completions WHERE classification='suspect'
+      ORDER BY created_at DESC,workspace_id,session_id,turn_id LIMIT ${DIAGNOSTIC_LIMIT}
+    ), diagnostics AS MATERIALIZED (
+      SELECT t.turn_id,t.workspace_id,t.session_id,t.trigger_event_id,
+        CASE WHEN t.source ~ '^[A-Za-z][A-Za-z0-9._:-]{0,127}$' THEN t.source END source,
+        CASE WHEN trigger_event.type ~ '^[A-Za-z][A-Za-z0-9._:-]{0,127}$' THEN trigger_event.type END trigger_kind,
+        t.accepted_at,t.finished_at,t.created_at completed_at,t.completion_event_id,t.completion_attempt_id,
+        t.classification,t.explicit_empty,t.control_valid,t.control_paused,t.session_status,t.input_wait_until,
+        EXISTS (SELECT 1 FROM session_events tool WHERE tool.workspace_id=t.workspace_id AND tool.turn_id=t.turn_id
+          AND tool.type IN ('agent.toolCall.created','agent.toolCall.output')) has_tool_events
+      FROM suspect_rows t LEFT JOIN LATERAL (
+        SELECT e.type FROM session_events e WHERE e.id=t.trigger_event_id
+          AND e.workspace_id=t.workspace_id AND e.session_id=t.session_id
+          AND e.duplicate_of_event_id IS NULL LIMIT 1
+      ) trigger_event ON true
     ), repeated AS (
       SELECT session_id,workspace_id,count(DISTINCT turn_id) empty_turns,min(created_at) first_at,max(created_at) last_at
       FROM completions WHERE classification='suspect' GROUP BY session_id,workspace_id HAVING count(DISTINCT turn_id)>=2
@@ -250,16 +271,53 @@ export function databaseQueries(
       'missingCompletionEvidence',count(*) FILTER(WHERE classification='missing_evidence'),
       'repeatedSessions',(SELECT count(*) FROM repeated),'controlUnknown',count(*) FILTER(WHERE classification='control_unknown'),
       'classifications',coalesce((SELECT jsonb_object_agg(classification,n) FROM (SELECT classification,count(*) n FROM completions GROUP BY classification) x),'{}'),
+      'diagnosticTotal',count(*) FILTER(WHERE classification='suspect'),'diagnosticLimit',${DIAGNOSTIC_LIMIT},
+      'diagnosticReturned',(SELECT count(*) FROM diagnostics),
+      'diagnosticOverflow',greatest(count(*) FILTER(WHERE classification='suspect')-${DIAGNOSTIC_LIMIT},0),
+      'missingDiagnosticTriggerEvidence',(SELECT count(*) FROM diagnostics WHERE source IS NULL OR trigger_kind IS NULL),
+      'diagnostics',coalesce((SELECT jsonb_agg(d ORDER BY completed_at DESC,workspace_id,session_id,turn_id) FROM diagnostics d),'[]'),
       'sessions',coalesce((SELECT jsonb_agg(x) FROM (SELECT * FROM repeated ORDER BY empty_turns DESC LIMIT 100) x),'[]')) facts FROM completions`,
     latency: `WITH recent AS MATERIALIZED (
-      SELECT id,workspace_id,session_id,created_at FROM session_turns
+      SELECT id,workspace_id,session_id,source,trigger_event_id,active_attempt_id,created_at,started_at latest_started_at FROM session_turns
       WHERE started_at >= $1::timestamptz-($2::int*interval '1 minute') AND started_at<=$1::timestamptz
-    ), observations AS (
-      SELECT t.created_at,first.first_started_at FROM recent t LEFT JOIN LATERAL (
+    ), observations AS MATERIALIZED (
+      SELECT t.*,first.first_started_at FROM recent t LEFT JOIN LATERAL (
         SELECT min(e.created_at) first_started_at FROM session_events e
         WHERE e.workspace_id=t.workspace_id AND e.session_id=t.session_id AND e.turn_id=t.id
           AND e.type='turn.started' AND e.duplicate_of_event_id IS NULL
       ) first ON true
+    ), flagged AS MATERIALIZED (
+      SELECT * FROM observations WHERE first_started_at IS NULL OR first_started_at>$1::timestamptz
+      ORDER BY workspace_id,session_id,id LIMIT ${DIAGNOSTIC_LIMIT}
+    ), diagnostics AS MATERIALIZED (
+      SELECT t.id turn_id,t.workspace_id,t.session_id,t.trigger_event_id,t.active_attempt_id,
+        CASE WHEN t.source ~ '^[A-Za-z][A-Za-z0-9._:-]{0,127}$' THEN t.source END source,
+        CASE WHEN trigger_event.type ~ '^[A-Za-z][A-Za-z0-9._:-]{0,127}$' THEN trigger_event.type END trigger_kind,
+        t.created_at accepted_at,t.first_started_at,t.latest_started_at,$1::timestamptz observed_at,
+        t.first_started_at IS NULL missing_first_start,
+        coalesce(t.first_started_at>$1::timestamptz,false) future_first_start,
+        coalesce(t.first_started_at<t.created_at,false) invalid_negative_sample
+      FROM flagged t LEFT JOIN LATERAL (
+        SELECT e.type FROM session_events e WHERE e.id=t.trigger_event_id
+          AND e.workspace_id=t.workspace_id AND e.session_id=t.session_id
+          AND e.duplicate_of_event_id IS NULL LIMIT 1
+      ) trigger_event ON true
+    ), slowest AS MATERIALIZED (
+      SELECT * FROM observations WHERE first_started_at>=$1::timestamptz-($2::int*interval '1 minute')
+        AND first_started_at<=$1::timestamptz AND first_started_at>=created_at
+      ORDER BY first_started_at-created_at DESC,workspace_id,session_id,id LIMIT ${LATENCY_TAIL_LIMIT}
+    ), tail AS MATERIALIZED (
+      SELECT t.id turn_id,t.workspace_id,t.session_id,
+        CASE WHEN t.source ~ '^[A-Za-z][A-Za-z0-9._:-]{0,127}$' THEN t.source END source,
+        t.trigger_event_id,
+        CASE WHEN trigger_event.type ~ '^[A-Za-z][A-Za-z0-9._:-]{0,127}$' THEN trigger_event.type END trigger_kind,
+        t.created_at accepted_at,t.first_started_at,t.latest_started_at,
+        extract(epoch FROM t.first_started_at-t.created_at) latency_seconds
+      FROM slowest t LEFT JOIN LATERAL (
+        SELECT e.type FROM session_events e WHERE e.id=t.trigger_event_id
+          AND e.workspace_id=t.workspace_id AND e.session_id=t.session_id
+          AND e.duplicate_of_event_id IS NULL LIMIT 1
+      ) trigger_event ON true
     ) SELECT jsonb_build_object(
       'sample',count(*) FILTER(WHERE first_started_at >= $1::timestamptz-($2::int*interval '1 minute') AND first_started_at<=$1::timestamptz),
       'p50Seconds',percentile_cont(0.50) WITHIN GROUP (ORDER BY extract(epoch FROM first_started_at-created_at))
@@ -271,8 +329,122 @@ export function databaseQueries(
       'missingFirstStartEvents',count(*) FILTER(WHERE first_started_at IS NULL),
       'futureFirstStartEvents',count(*) FILTER(WHERE first_started_at>$1::timestamptz),
       'invalidNegativeSamples',count(*) FILTER(WHERE first_started_at<created_at),
+      'diagnosticTotal',count(*) FILTER(WHERE first_started_at IS NULL OR first_started_at>$1::timestamptz),
+      'diagnosticLimit',${DIAGNOSTIC_LIMIT},'diagnosticReturned',(SELECT count(*) FROM diagnostics),
+      'diagnosticOverflow',greatest(count(*) FILTER(WHERE first_started_at IS NULL OR first_started_at>$1::timestamptz)-${DIAGNOSTIC_LIMIT},0),
+      'missingDiagnosticTriggerEvidence',(SELECT count(*) FROM diagnostics WHERE source IS NULL OR trigger_kind IS NULL),
+      'diagnostics',coalesce((SELECT jsonb_agg(d ORDER BY workspace_id,session_id,turn_id) FROM diagnostics d),'[]'),
+      'validTailSamples',count(*) FILTER(WHERE first_started_at>=$1::timestamptz-($2::int*interval '1 minute')
+        AND first_started_at<=$1::timestamptz AND first_started_at>=created_at),
+      'tailLimit',${LATENCY_TAIL_LIMIT},'tailReturned',(SELECT count(*) FROM tail),
+      'missingTailTriggerEvidence',(SELECT count(*) FROM tail WHERE source IS NULL OR trigger_kind IS NULL),
+      'tail',coalesce((SELECT jsonb_agg(t ORDER BY latency_seconds DESC,workspace_id,session_id,turn_id) FROM tail t),'[]'),
+      'tailDefinition','slowest valid in-window logical first starts; trigger_kind is exact trigger event.type, not coalesced update member contents',
       'startTimestampSource','earliest_nonduplicate_turn.started_created_at') facts FROM observations`,
   };
+}
+
+/** Diagnostic caps do not cap aggregate counts or establish current ownership. */
+export function validDiagnostics(facts: any, kind: "empty" | "latency"): boolean {
+  const identifier = (value: unknown) =>
+    typeof value === "string" && /^[A-Za-z0-9._:-]{1,128}$/.test(value);
+  const timestamp = (value: unknown) =>
+    typeof value === "string" && Number.isFinite(Date.parse(value));
+  if (
+    !Array.isArray(facts?.diagnostics) ||
+    facts.diagnosticLimit !== DIAGNOSTIC_LIMIT ||
+    !Number.isSafeInteger(facts.diagnosticTotal) ||
+    facts.diagnosticTotal < 0 ||
+    facts.diagnosticReturned !== facts.diagnostics.length ||
+    facts.diagnostics.length !== Math.min(DIAGNOSTIC_LIMIT, facts.diagnosticTotal) ||
+    facts.diagnosticOverflow !== Math.max(0, facts.diagnosticTotal - DIAGNOSTIC_LIMIT) ||
+    facts.diagnosticTotal !==
+      (kind === "empty"
+        ? facts.suspectTurns
+        : facts.missingFirstStartEvents + facts.futureFirstStartEvents)
+  )
+    return false;
+  let missing = 0;
+  const ids = new Set<string>();
+  for (const row of facts.diagnostics) {
+    if (
+      !row ||
+      typeof row !== "object" ||
+      ![row.turn_id, row.session_id, row.workspace_id, row.trigger_event_id].every(identifier) ||
+      ![row.source, row.trigger_kind].every((value) => value === null || identifier(value)) ||
+      !timestamp(row.accepted_at)
+    )
+      return false;
+    const key = `${row.workspace_id}/${row.session_id}/${row.turn_id}`;
+    if (ids.has(key)) return false;
+    ids.add(key);
+    if (row.source === null || row.trigger_kind === null) missing++;
+    if (kind === "empty") {
+      if (
+        row.classification !== "suspect" ||
+        ![row.finished_at, row.completed_at].every(timestamp) ||
+        !identifier(row.completion_event_id) ||
+        !(row.completion_attempt_id === null || identifier(row.completion_attempt_id)) ||
+        !identifier(row.session_status) ||
+        !(row.input_wait_until === null || timestamp(row.input_wait_until)) ||
+        ![row.explicit_empty, row.control_valid, row.control_paused, row.has_tool_events].every(
+          (value) => typeof value === "boolean",
+        ) ||
+        !row.control_valid ||
+        row.control_paused
+      )
+        return false;
+    } else {
+      if (
+        ![row.latest_started_at, row.observed_at].every(timestamp) ||
+        !(row.active_attempt_id === null || identifier(row.active_attempt_id)) ||
+        !(row.first_started_at === null || timestamp(row.first_started_at)) ||
+        row.missing_first_start !== (row.first_started_at === null) ||
+        row.future_first_start !==
+          (row.first_started_at !== null &&
+            Date.parse(row.first_started_at) > Date.parse(row.observed_at)) ||
+        row.invalid_negative_sample !==
+          (row.first_started_at !== null &&
+            Date.parse(row.first_started_at) < Date.parse(row.accepted_at)) ||
+        (!row.missing_first_start && !row.future_first_start)
+      )
+        return false;
+    }
+  }
+  return facts.missingDiagnosticTriggerEvidence === missing;
+}
+
+export function validLatencyTail(facts: any): boolean {
+  if (
+    !Array.isArray(facts?.tail) ||
+    facts.tailLimit !== LATENCY_TAIL_LIMIT ||
+    !Number.isSafeInteger(facts.validTailSamples) ||
+    facts.validTailSamples < 0 ||
+    facts.validTailSamples > facts.sample ||
+    facts.tailReturned !== facts.tail.length ||
+    facts.tail.length !== Math.min(LATENCY_TAIL_LIMIT, facts.validTailSamples)
+  )
+    return false;
+  const identifier = (value: unknown) =>
+    typeof value === "string" && /^[A-Za-z0-9._:-]{1,128}$/.test(value);
+  let missing = 0;
+  for (const row of facts.tail) {
+    if (!row || typeof row !== "object") return false;
+    const accepted = Date.parse(row.accepted_at);
+    const first = Date.parse(row.first_started_at);
+    if (
+      ![row.turn_id, row.session_id, row.workspace_id, row.trigger_event_id].every(identifier) ||
+      ![accepted, first, Date.parse(row.latest_started_at)].every(Number.isFinite) ||
+      first < accepted ||
+      !Number.isFinite(row.latency_seconds) ||
+      row.latency_seconds < 0 ||
+      Math.abs((first - accepted) / 1000 - row.latency_seconds) > 0.002 ||
+      ![row.source, row.trigger_kind].every((value) => value === null || identifier(value))
+    )
+      return false;
+    if (row.source === null || row.trigger_kind === null) missing++;
+  }
+  return facts.missingTailTriggerEvidence === missing;
 }
 
 // Code and credential are sent via stdin, not process argv, files, or logs.
@@ -682,8 +854,8 @@ export async function sweep(
         "Separate global inventory of durable queued sessions without an accepted pending human/API turn or system-update timestamp. Historical internal rows are not timestamp authority. Independent 20-target canonical page with --inventory-offset continuation; runnable unknown age and omitted/failed observations are gaps. Independent read snapshot from known-aged source; source timeout never discards known-aged counts.",
       recovering:
         "Recovering sessions older than 300s since latest durable recovering status event; excludes effective pauses and canonical waits/pending owners. Independent 20-target page observed BEFORE queue/inventory; --recovery-offset continues larger cohorts. Missing transition, omitted page, or failed ownership evidence is a gap, not proof of physical quiescence.",
-      empty: `All completed turns in ${options.windowMinutes}m retain denominator coverage; missing usable turn.completed evidence is a gap. At least two distinct suspect turns flag repeated empty replies; explicit emptyFinalReply or no reply/tools, excluding effective pauses, waits, maintenance and unflagged tool-only continuations; not proof of failed work.`,
-      latency: `Logical acceptance created_at to FIRST nonduplicate durable turn.started event created_at, first starts during the preceding ${options.windowMinutes}m, all sources; latest-resume started_at is only a candidate filter, never the latency timestamp. Prior-window first starts are excluded; missing first-start events are a gap. Database exact percentiles, not TTFT.`,
+      empty: `All completed turns in ${options.windowMinutes}m retain denominator coverage; missing usable turn.completed evidence is a gap. At least two distinct suspect turns flag repeated empty replies; explicit emptyFinalReply or no reply/tools, excluding effective pauses, waits, maintenance and unflagged tool-only continuations; not proof of failed work. Ten newest suspect diagnostics reuse the same completion population; IDs/control/classifier fields are snapshot evidence, not current ownership. Diagnostic overflow or missing trigger evidence is a gap.`,
+      latency: `Logical acceptance created_at to FIRST nonduplicate durable turn.started event created_at, first starts during the preceding ${options.windowMinutes}m, all sources; latest-resume started_at is only a candidate filter, never the latency timestamp. Prior-window first starts are excluded; missing first-start or tail trigger evidence is a gap. Ten slowest valid samples include exact IDs, source, trigger event.type and accepted/first/latest boundaries, reusing one materialized observation population with bounded trigger-ID lookups. Ten missing/future-FIRST diagnostics reuse that population; flags may overlap other checks and are not a clock-skew or current-stuck claim. Diagnostic overflow or missing trigger evidence is a gap. Database exact percentiles, not TTFT.`,
     };
     let data: any;
     let url = process.env.OPENGENI_HEALTH_DATABASE_URL;
@@ -824,9 +996,15 @@ export async function sweep(
                     "invalidNegativeSamples",
                     "missingFirstStartEvents",
                     "futureFirstStartEvents",
+                    "validTailSamples",
+                    "tailReturned",
+                    "missingTailTriggerEvidence",
                   ];
       const invalid =
-        !facts || required.some((key) => !Number.isFinite(facts[key]) || facts[key] < 0);
+        !facts ||
+        required.some((key) => !Number.isFinite(facts[key]) || facts[key] < 0) ||
+        (name === "latency" && !validLatencyTail(facts)) ||
+        ((name === "empty" || name === "latency") && !validDiagnostics(facts, name));
       const gap =
         invalid ||
         facts.gap ||
@@ -837,6 +1015,9 @@ export async function sweep(
         facts.missingCompletionEvidence > 0 ||
         facts.missingStatusTimestamp > 0 ||
         facts.missingFirstStartEvents > 0 ||
+        facts.missingTailTriggerEvidence > 0 ||
+        facts.missingDiagnosticTriggerEvidence > 0 ||
+        facts.diagnosticOverflow > 0 ||
         facts.futureFirstStartEvents > 0 ||
         facts.invalidNegativeSamples > 0;
       checks.push({
@@ -943,6 +1124,9 @@ export function textResult(result: SweepResult): string {
                   "coverage",
                   "ownership",
                   "ownershipDefinition",
+                  "tail",
+                  "tailDefinition",
+                  "diagnostics",
                 ].includes(key),
             ),
           )

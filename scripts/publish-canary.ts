@@ -3,6 +3,7 @@ import { spawnSync } from "node:child_process";
 import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 
+import { lockstepCanaryBase, retiredVersionSet } from "./release/lockstep-version";
 import {
   publishableWorkspacePackages,
   repoRoot,
@@ -45,6 +46,22 @@ export function nextCanaryVersion(
     }
   }
   return `${prefix}${minimumSequence}`;
+}
+
+/**
+ * Canaries preview the NEXT lockstep release, so their base is the next free
+ * patch after the committed version (`1.0.0` -> `1.0.2-canary.N` while the
+ * retired `1.0.1` is skipped). They therefore sort after the committed
+ * version, even when it is already published, and never reuse a retired base.
+ */
+export function canaryBasePackages(
+  packages: readonly { name: string; version: string }[],
+): { name: string; version: string }[] {
+  const taken = retiredVersionSet(packages.map((pkg) => pkg.name));
+  return packages.map((pkg) => ({
+    name: pkg.name,
+    version: lockstepCanaryBase(pkg.version, taken),
+  }));
 }
 
 export function planCanaryVersions(
@@ -111,7 +128,7 @@ export function main(): void {
     fixed?: string[][];
   };
   const versions = planCanaryVersions(
-    packages,
+    canaryBasePackages(packages),
     new Map(packages.map((pkg) => [pkg.name, npmCanaryTag(pkg.name)])),
     config.fixed ?? [],
     // Registry tags can lag reserved/staged versions. Each workflow attempt

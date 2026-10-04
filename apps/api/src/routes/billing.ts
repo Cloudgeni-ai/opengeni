@@ -386,7 +386,7 @@ export function stripeCheckoutSessionCreateParams(input: {
             ? { product: input.creditsProductId }
             : {
                 product_data: {
-                  name: "OpenGeni credits",
+                  name: "Opengeni credits",
                   metadata: {
                     app: "opengeni",
                     billing_model: "prepaid_credits",
@@ -466,7 +466,7 @@ function checkoutReturnUrl(
   const allowedOrigins = new Set([new URL(publicBaseUrl).origin, base.origin]);
   if (!allowedOrigins.has(parsed.origin)) {
     throw new HTTPException(400, {
-      message: `${field} must use the OpenGeni public${allowedOrigins.size > 1 ? " or web" : ""} origin`,
+      message: `${field} must use the Opengeni public${allowedOrigins.size > 1 ? " or web" : ""} origin`,
     });
   }
   return parsed.toString();
@@ -922,7 +922,7 @@ function creditMetadata(
   const amountMicros = Number(metadata?.opengeni_credit_micros);
   const idempotencyKey = metadata?.opengeni_credit_idempotency_key;
   if (!accountId || !Number.isSafeInteger(amountMicros) || amountMicros <= 0 || !idempotencyKey) {
-    throw new Error(`${label} is missing OpenGeni credit metadata`);
+    throw new Error(`${label} is missing Opengeni credit metadata`);
   }
   return {
     accountId,
@@ -981,7 +981,7 @@ export function stripeCustomerProvider(
 /** Billing routes do not traverse the workspace actor middleware. Always bind
  * these reads explicitly; only a revalidated live attempt may supply a human
  * initiator. Neither query parameters nor serviceInitiator claims are proof. */
-async function withBillingUsageActor<T>(
+export async function withBillingUsageActor<T>(
   deps: ApiRouteDeps,
   context: AccessContext,
   accountId: string,
@@ -997,7 +997,7 @@ async function withBillingUsageActor<T>(
   return await withSessionRlsActorContext({ subjectId: context.subjectId }, read);
 }
 
-function requireSelectedAccount(
+export function requireSelectedAccount(
   context: AccessContext,
   requested: string | undefined,
   permission: Permission,

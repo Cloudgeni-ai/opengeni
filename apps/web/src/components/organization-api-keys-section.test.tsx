@@ -148,6 +148,67 @@ describe("organization API keys section", () => {
     },
   );
 
+  test("a key opened from a member service account is held by it and starts at Read only", async () => {
+    const createApiKey = mock(async () => ({ apiKey: key(), token: "og_held_once" }));
+    const container = document.createElement("div");
+    document.body.appendChild(container);
+    const root = createRoot(container);
+    await act(async () => {
+      root.render(
+        <OrganizationApiKeysSection
+          organizationId="22222222-2222-4222-8222-222222222222"
+          canManage
+          view="new-key"
+          onViewChange={() => undefined}
+          listApiKeys={async () => []}
+          createApiKey={createApiKey}
+          deleteApiKey={async () => key()}
+          listServiceAccounts={async () => [
+            { id: "44444444-4444-4444-8444-444444444444", name: "CI bot", role: "member" },
+          ]}
+          initialServiceAccountId="44444444-4444-4444-8444-444444444444"
+        />,
+      );
+    });
+    await flush();
+    expect(container.textContent).toContain("Service account");
+    expect(container.textContent).toContain("CI bot");
+    // A member's keys can't manage people, keys or billing: it starts at Read only,
+    // and choosing Full access is refused before anything is sent.
+    expect(container.textContent).toContain("Can't change anything or read secret values");
+    const accessTrigger = Array.from(
+      container.querySelectorAll<HTMLButtonElement>('button[role="combobox"]'),
+    ).find((candidate) => candidate.textContent?.includes("Read only"));
+    if (!accessTrigger) throw new Error("Missing access picker");
+    await act(async () => accessTrigger.click());
+    const full = Array.from(document.querySelectorAll<HTMLElement>('[role="option"]')).find(
+      (candidate) => candidate.textContent?.startsWith("Full access"),
+    );
+    await act(async () => full!.click());
+    await act(async () => container.querySelector("form")!.requestSubmit());
+    await flush();
+    expect(createApiKey).not.toHaveBeenCalled();
+    expect(container.textContent).toContain("CI bot is a member");
+    await act(async () => accessTrigger.click());
+    const readOnly = Array.from(document.querySelectorAll<HTMLElement>('[role="option"]')).find(
+      (candidate) => candidate.textContent?.startsWith("Read only"),
+    );
+    await act(async () => readOnly!.click());
+    await act(async () => container.querySelector("form")!.requestSubmit());
+    await flush();
+    expect(createApiKey).toHaveBeenCalledWith({
+      name: "Organization automation",
+      serviceAccountId: "44444444-4444-4444-8444-444444444444",
+      policy: {
+        preset: "read_only",
+        permissions: presetPermissions("read_only"),
+        workspaceScope: { kind: "all" },
+      },
+    });
+    await act(async () => root.unmount());
+    container.remove();
+  });
+
   test("explains the boundary and shows the one-time secret on the create page", async () => {
     const created = key({
       id: "33333333-3333-4333-8333-333333333333",

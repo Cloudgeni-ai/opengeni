@@ -85,6 +85,7 @@ test("stream component retains the completed compaction checkpoint before refusi
           isExternallyBilledTurn: false,
           chargesOpenGeniCredits: true,
           countsTowardTokenCap: true,
+          pendingUsageReservations: new Map(),
         },
         media: {},
         generatedImageHistoryProjector: async (items: unknown) => items,

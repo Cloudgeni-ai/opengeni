@@ -7,6 +7,7 @@ export type {
   ClaudeSubscriptionAccountsResponse,
 } from "@opengeni/contracts";
 export type {
+  ArtifactPinResponse,
   ArtifactCatalogKind,
   ArtifactCatalogItem,
   ArtifactCatalogListOptions,
@@ -835,6 +836,11 @@ export type {
   OrganizationMcpConnection,
   OrganizationMcpConnectionList,
   UpdateOrganizationMcpConnectionRequest,
+  OrganizationServiceAccount,
+  OrganizationServiceAccountRole,
+  ListOrganizationServiceAccountsResponse,
+  CreateOrganizationServiceAccountRequest,
+  UpdateOrganizationServiceAccountRequest,
   McpConnectionRequest,
   McpConnectionDecision,
   CreateCapabilityCatalogItemRequest,
@@ -868,6 +874,7 @@ export type {
   CreateKnowledgeDropRequest,
   CreateKnowledgeMemoryRequest,
   CreateScheduledTaskRequest,
+  CreateSessionScheduledTaskRequest,
   CreateSessionRequest,
   CreateVariableSetRequest,
   CreateWorkspaceEnvironmentRequest,

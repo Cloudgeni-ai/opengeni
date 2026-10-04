@@ -20,14 +20,20 @@ import {
   decryptEnvironmentValue,
   encryptEnvironmentValue,
   loadIntegrationOAuthPendingState,
-  loadClaudeSubscriptionUsageCredential,
-  readClaudeSubscriptionUsage,
-  recordClaudeSubscriptionUsage,
-  resolveClaudeSubscriptionCredential,
+  loadClaudeAccountCredential,
+  listClaudeAccountUsage,
+  recordClaudeAccountUsage,
+  resolveClaudeAccountCredential,
+  listClaudeSubscriptionAccountsMetadata,
+  listOrganizationClaudeSubscriptions,
+  createClaudeSubscriptionAccount,
+  upsertClaudeSubscriptionAccount,
+  setInitialActiveClaudeCredential,
+  refreshClaudeSubscriptionAccountSerialized,
+  refreshOrganizationClaudeSubscriptionAccountSerialized,
+  type ClaudeAccountUsageAuthority,
   storeIntegrationOAuthPendingState,
-  upsertWorkspaceProviderApiKeyConnection,
   type DbClient,
-  rotateWorkspaceProviderApiKeyConnection,
   synchronizeCanonicalHumanLoginBindings,
   ensureManagedAccessForUserWithOrganizationMemberships,
   loadWorkspaceProviderApiKey,
@@ -42,8 +48,9 @@ import {
 import { prepareClaudeSubscriptionCredential } from "../src/claude-workspace-connection";
 import { registerClaudeSubscriptionOAuthRoutes } from "../src/routes/claude-subscription-oauth";
 import { settingsWithOrganizationProviderCredentials } from "../../worker/src/activities/capabilities";
-import { parseModelProvidersJson } from "@opengeni/config";
-import { refreshClaudeSubscriptionUsage } from "../src/claude-subscription-usage";
+import { parseModelProvidersJson, withClaudeConnectionCredential } from "@opengeni/config";
+import { refreshClaudeAccountUsage } from "../src/claude-subscription-account-usage";
+import { httpStatusForError } from "../src/app";
 
 const key = Buffer.alloc(32, 11);
 const settings = testSettings({
@@ -73,6 +80,9 @@ async function fixture(organization = false): Promise<ClaudeOAuthScope> {
   const actorSubjectId = "user:" + randomUUID();
   if (organization)
     await shared.admin`insert into organization_memberships (account_id, subject_id, role, status, personal_workspace_id) values (${account!.id}, ${actorSubjectId}, 'owner', 'active', ${workspace!.id})`;
+  else
+    await shared.admin`insert into workspace_memberships (account_id, workspace_id, subject_id, role)
+      values (${account!.id}, ${workspace!.id}, ${actorSubjectId}, 'admin')`;
   return {
     accountId: account!.id,
     workspaceId: organization ? null : workspace!.id,
@@ -81,13 +91,114 @@ async function fixture(organization = false): Promise<ClaudeOAuthScope> {
   };
 }
 function usageScope(scope: ClaudeOAuthScope) {
+  return scope;
+}
+// Keep the observer-shaped assertions, but bind every read/write to an exact
+// canonical account and authority. These helpers never use the retired stores.
+async function accountAuthority(
+  scope: ClaudeOAuthScope,
+): Promise<ClaudeAccountUsageAuthority | null> {
+  const accounts = scope.workspaceId
+    ? (
+        await listClaudeSubscriptionAccountsMetadata(client.db, {
+          workspaceId: scope.workspaceId,
+          subjectId: scope.actorSubjectId,
+        })
+      ).filter((account) => account.scope === "workspace")
+    : (
+        await listOrganizationClaudeSubscriptions(client.db, {
+          organizationId: scope.accountId,
+          actorSubjectId: scope.actorSubjectId,
+        })
+      ).accounts;
+  expect(accounts.length).toBeLessThanOrEqual(1);
+  if (!accounts[0]) return null;
+  return scope.workspaceId
+    ? {
+        accountId: scope.accountId,
+        workspaceId: scope.workspaceId,
+        subjectId: scope.actorSubjectId,
+        credentialId: accounts[0].id,
+        authoritySnapshot: { version: 1, scope: "workspace" },
+      }
+    : {
+        accountId: scope.accountId,
+        workspaceId: null,
+        subjectId: scope.actorSubjectId,
+        credentialId: accounts[0].id,
+        authoritySnapshot: { version: 1, scope: "organization" },
+      };
+}
+async function loadClaudeSubscriptionUsageCredential(
+  db: DbClient["db"],
+  _settings: typeof settings,
+  scope: ClaudeOAuthScope,
+) {
+  const authority = await accountAuthority(scope);
+  if (!authority) return null;
+  const value = await loadClaudeAccountCredential(db, authority, key);
+  const [stored] =
+    await shared.admin`select credential_encrypted from claude_subscription_credentials where id = ${value.id}`;
   return {
-    ...scope,
-    scope: scope.workspaceId ? ("workspace" as const) : ("organization" as const),
+    connectionId: value.id,
+    credentialVersion: value.version,
+    token: value.secret.token,
+    serializedCredential: JSON.stringify(value.secret),
+    credentialEncrypted: stored!.credential_encrypted as string,
+    usage: value.usage,
   };
 }
-async function begin(scope: ClaudeOAuthScope) {
-  const start = await startClaudeSubscriptionOAuth(deps, scope);
+async function readClaudeSubscriptionUsage(db: DbClient["db"], scope: ClaudeOAuthScope) {
+  const authority = await accountAuthority(scope);
+  if (!authority) throw new Error("Canonical account required for usage proof");
+  const credential = await loadClaudeAccountCredential(db, authority, key);
+  return (
+    await listClaudeAccountUsage(db, authority, [
+      { id: credential.id, version: credential.version },
+    ])
+  ).get(credential.id)!;
+}
+async function resolveClaudeSubscriptionCredential(
+  db: DbClient["db"],
+  configured: typeof settings,
+  scope: ClaudeOAuthScope,
+  options: Parameters<typeof resolveClaudeAccountCredential>[3] = {},
+) {
+  const authority = await accountAuthority(scope);
+  if (!authority) throw new Error("Canonical account required for renewal proof");
+  const value = await resolveClaudeAccountCredential(db, configured, authority, options);
+  return {
+    ...value,
+    connectionId: value.id,
+    credentialVersion: value.version,
+    token: value.secret.token,
+  };
+}
+async function recordClaudeSubscriptionUsage(
+  db: DbClient["db"],
+  _settings: typeof settings,
+  scope: ClaudeOAuthScope,
+  input: {
+    token: string;
+    expectedConnectionId: string;
+    expectedCredentialVersion: number;
+    refresh: NonNullable<Parameters<typeof recordClaudeAccountUsage>[2]["refresh"]>;
+  },
+) {
+  const authority = await accountAuthority(scope);
+  if (!authority) throw new Error("Canonical account required for observation proof");
+  return recordClaudeAccountUsage(
+    db,
+    { ...authority, credentialId: input.expectedConnectionId },
+    { ...input, encryptionKey: key },
+  );
+}
+async function begin(scope: ClaudeOAuthScope, reconnectAccountId?: string) {
+  const start = await startClaudeSubscriptionOAuth(
+    deps,
+    scope,
+    reconnectAccountId ? { reconnectAccountId } : {},
+  );
   const state = new URL(start.authorizationUrl).searchParams.get("state")!;
   return { ...start, code: "fixture-code#" + state };
 }
@@ -133,6 +244,8 @@ function provider(
           resets_at: new Date(Date.now() + 86400_000).toISOString(),
         },
       });
+    if (request.url === "https://api.anthropic.com/api/oauth/profile")
+      return Response.json({ account: { uuid: "11111111-1111-4111-8111-111111111111" } });
     throw new Error("Unexpected request; inference forbidden in sign-in tests");
   }) as typeof fetch;
   return { fetchImpl, calls };
@@ -141,6 +254,9 @@ async function connect(scope: ClaudeOAuthScope) {
   const attempt = await begin(scope),
     mock = provider();
   await completeClaudeSubscriptionOAuth(deps, scope, attempt, async () => {}, mock.fetchImpl);
+  const authority = await accountAuthority(scope);
+  if (!authority) throw new Error("Connected canonical account required");
+  await refreshClaudeAccountUsage(client.db, settings, authority, mock.fetchImpl);
   return { attempt, mock };
 }
 async function expire(scope: ClaudeOAuthScope) {
@@ -150,16 +266,30 @@ async function expire(scope: ClaudeOAuthScope) {
     usageScope(scope),
   ))!;
   const bundle = ClaudeSubscriptionCredential.parse(JSON.parse(value.serializedCredential));
-  bundle.oauth!.expiresAt = new Date(Date.now() - 1000).toISOString();
-  const serialized = JSON.stringify(bundle);
-  const encrypted = encryptEnvironmentValue(
-    key,
-    scope.workspaceId ? JSON.stringify({ apiKey: serialized }) : serialized,
-  );
-  if (scope.workspaceId)
-    await shared.admin`update connections set credential_encrypted = ${encrypted} where id = ${value.connectionId}`;
+  const authority = (await accountAuthority(scope))!;
+  const expiresAt = new Date(Date.now() - 1000);
+  // Exercise the same authorized, generation-preserving writer as production.
+  // A raw admin UPDATE is not an organization token-refresh capability.
+  const input = {
+    ...authority,
+    encryptionKey: key,
+    observedAccessToken: value.token,
+    observedRefreshToken: bundle.oauth!.refreshToken,
+    refresh: async () => ({
+      secret: { ...bundle, oauth: { ...bundle.oauth!, expiresAt: expiresAt.toISOString() } },
+      expiresAt,
+    }),
+  };
+  if (authority.workspaceId)
+    await refreshClaudeSubscriptionAccountSerialized(client.db, {
+      ...input,
+      workspaceId: authority.workspaceId,
+    });
   else
-    await shared.admin`update organization_model_provider_connections set credential_encrypted = ${encrypted} where id = ${value.connectionId}`;
+    await refreshOrganizationClaudeSubscriptionAccountSerialized(client.db, {
+      ...input,
+      workspaceId: null,
+    });
   return value;
 }
 
@@ -191,8 +321,15 @@ for (const organization of [false, true]) {
       },
       mock.fetchImpl,
     );
-    expect(rechecks).toBe(1);
-    expect(result).toEqual({ connected: true, credentialVersion: 1 });
+    // The canonical flow checks authority both before spending the code and
+    // after provider exchange; its receipt freezes one exact account.
+    expect(rechecks).toBe(2);
+    expect(result).toEqual({
+      connected: true,
+      accountId: result.accountId,
+      scope: label,
+      credentialVersion: 1,
+    });
     expect(mock.calls[0]).toMatchObject({
       url: CLAUDE_OAUTH_TOKEN_URL,
       method: "POST",
@@ -206,6 +343,16 @@ for (const organization of [false, true]) {
       },
     });
     expect(mock.calls).toHaveLength(2);
+    expect(mock.calls[1]).toMatchObject({
+      url: "https://api.anthropic.com/api/oauth/profile",
+      method: "GET",
+    });
+    // OAuth connects an account without inference or implicit quota lookup.
+    // The canonical positive usage seam reads the exact newly connected ID.
+    const authority = await accountAuthority(scope);
+    expect(authority!.credentialId).toBe(result.accountId);
+    await refreshClaudeAccountUsage(client.db, settings, authority!, mock.fetchImpl);
+    expect(mock.calls).toHaveLength(3);
     const saved = (await loadClaudeSubscriptionUsageCredential(
       client.db,
       settings,
@@ -213,6 +360,7 @@ for (const organization of [false, true]) {
     ))!;
     expect(saved.credentialEncrypted).not.toContain("fixture-refresh-v1");
     expect(saved.credentialVersion).toBe(1);
+    expect(saved.connectionId).toBe(result.accountId);
     const bundle = ClaudeSubscriptionCredential.parse(JSON.parse(saved.serializedCredential));
     expect(bundle.oauth!.scopes).toEqual(["user:inference", "user:profile"]);
     expect(bundle.identity.accountUuid).toBe("11111111-1111-4111-8111-111111111111");
@@ -237,7 +385,7 @@ for (const organization of [false, true]) {
     expect(
       await completeClaudeSubscriptionOAuth(deps, scope, start, async () => {}, mock.fetchImpl),
     ).toEqual(result);
-    expect(mock.calls).toHaveLength(2);
+    expect(mock.calls).toHaveLength(3);
   });
 
   test(`${label} token renewal serializes replicas, retains generation, identity and quota cache`, async () => {
@@ -356,13 +504,14 @@ test("lost authority after exchange cannot store a credential", async () => {
   const scope = await fixture(),
     start = await begin(scope),
     mock = provider();
+  let rechecks = 0;
   await expect(
     completeClaudeSubscriptionOAuth(
       deps,
       scope,
       start,
       async () => {
-        throw new HTTPException(403, { message: "Access revoked" });
+        if (++rechecks === 2) throw new HTTPException(403, { message: "Access revoked" });
       },
       mock.fetchImpl,
     ),
@@ -370,11 +519,12 @@ test("lost authority after exchange cannot store a credential", async () => {
   expect(
     await loadClaudeSubscriptionUsageCredential(client.db, settings, usageScope(scope)),
   ).toBeNull();
-  expect(mock.calls).toHaveLength(1);
+  expect(rechecks).toBe(2);
+  expect(mock.calls).toHaveLength(2);
   await expect(
     completeClaudeSubscriptionOAuth(deps, scope, start, async () => {}, mock.fetchImpl),
   ).rejects.toThrow("already used");
-  expect(mock.calls).toHaveLength(1);
+  expect(mock.calls).toHaveLength(2);
 });
 
 test("concurrent completion spends a code once and then recovers its exact receipt", async () => {
@@ -390,7 +540,12 @@ test("concurrent completion spends a code once and then recovers its exact recei
   expect(mock.calls.filter((call) => call.url === CLAUDE_OAUTH_TOKEN_URL)).toHaveLength(1);
   expect(
     await completeClaudeSubscriptionOAuth(deps, scope, start, async () => {}, mock.fetchImpl),
-  ).toEqual({ connected: true, credentialVersion: 1 });
+  ).toEqual({
+    connected: true,
+    accountId: (await accountAuthority(scope))!.credentialId,
+    scope: "workspace",
+    credentialVersion: 1,
+  });
 });
 
 test("setup-token connections never attempt renewal or gain profile access", async () => {
@@ -400,13 +555,20 @@ test("setup-token connections never attempt renewal or gain profile access", asy
     "workspace:" + scope.workspaceId,
     "sk-ant-oat01-setup-fixture",
   );
-  await upsertWorkspaceProviderApiKeyConnection(client.db, "claude_subscription", {
-    ...scope,
+  const connected = await createClaudeSubscriptionAccount(client.db, {
+    accountId: scope.accountId,
+    subjectId: scope.actorSubjectId,
     workspaceId: scope.workspaceId!,
-    operationId: randomUUID(),
-    requestDigest: "a".repeat(64),
-    credentialEncrypted: encryptEnvironmentValue(key, JSON.stringify({ apiKey: serialized })),
-    updatedBySubjectId: scope.actorSubjectId,
+    encryptionKey: key,
+    secret: ClaudeSubscriptionCredential.parse(JSON.parse(serialized)),
+    providerAccountId: "setup-fixture",
+  });
+  await setInitialActiveClaudeCredential(client.db, {
+    accountId: scope.accountId,
+    workspaceId: scope.workspaceId!,
+    subjectId: scope.actorSubjectId,
+    credentialId: connected.account.id,
+    authoritySnapshot: connected.authoritySnapshot,
   });
   const mock = provider(),
     result = await resolveClaudeSubscriptionCredential(client.db, settings, usageScope(scope), {
@@ -433,13 +595,15 @@ test("invalid refresh grants persist reconnect truth; transient failures keep cr
   // retryable availability, rather than a generic internal 500 or token loss.
   let apiFailure: unknown;
   try {
-    await refreshClaudeSubscriptionUsage(client.db, settings, usageScope(scope), (async () =>
-      Response.json({ error: "unavailable" }, { status: 503 })) as typeof fetch);
+    await refreshClaudeAccountUsage(
+      client.db,
+      settings,
+      (await accountAuthority(scope))!,
+      (async () => Response.json({ error: "unavailable" }, { status: 503 })) as typeof fetch,
+    );
   } catch (error) {
     apiFailure = error;
   }
-  expect(apiFailure).toBeInstanceOf(HTTPException);
-  expect((apiFailure as HTTPException).status).toBe(503);
   expect(
     (await loadClaudeSubscriptionUsageCredential(client.db, settings, usageScope(scope)))!.token,
   ).toBe(original.token);
@@ -451,6 +615,9 @@ test("invalid refresh grants persist reconnect truth; transient failures keep cr
   expect((await readClaudeSubscriptionUsage(client.db, usageScope(scope))).refreshStatus).toBe(
     "reconnect",
   );
+  // Keep the API transport assertion after the independent credential/cache
+  // checks so a genuine adapter regression cannot hide the invalid-grant proof.
+  expect(httpStatusForError(apiFailure)).toBe(503);
 });
 
 test("organization pending attempts require an owner and cannot be read through shared runtime scope", async () => {
@@ -493,22 +660,25 @@ async function replace(scope: ClaudeOAuthScope) {
     "workspace:" + scope.workspaceId,
     "sk-ant-oat01-replacement-fixture",
   );
-  return rotateWorkspaceProviderApiKeyConnection(client.db, "claude_subscription", {
-    ...scope,
+  return upsertClaudeSubscriptionAccount(client.db, {
+    accountId: scope.accountId,
+    subjectId: scope.actorSubjectId,
     workspaceId: scope.workspaceId!,
-    connectionId: previous.connectionId,
-    expectedVersion: previous.credentialVersion,
-    operationId: randomUUID(),
-    requestDigest: "b".repeat(64),
-    updatedBySubjectId: scope.actorSubjectId,
-    credentialEncrypted: encryptEnvironmentValue(key, JSON.stringify({ apiKey: serialized })),
+    credentialId: previous.connectionId,
+    authoritySnapshot: { version: 1, scope: "workspace" },
+    expectedCredentialVersion: previous.credentialVersion,
+    providerAccountId: "11111111-1111-4111-8111-111111111111",
+    encryptionKey: key,
+    secret: ClaudeSubscriptionCredential.parse(JSON.parse(serialized)),
   });
 }
 
 test("replacement during sign-in rejects stale persistence and invalidates its replay receipt", async () => {
   const scope = await fixture();
   await connect(scope);
-  const start = await begin(scope),
+  // Reconnect explicitly freezes this exact account/generation; Add account
+  // is not an implicit replacement of whichever connection is current.
+  const start = await begin(scope, (await accountAuthority(scope))!.credentialId),
     mock = provider();
   const deferred = (async (input, init) => {
     if (String(input) === CLAUDE_OAUTH_TOKEN_URL) await replace(scope);
@@ -516,7 +686,7 @@ test("replacement during sign-in rejects stale persistence and invalidates its r
   }) as typeof fetch;
   await expect(
     completeClaudeSubscriptionOAuth(deps, scope, start, async () => {}, deferred),
-  ).rejects.toThrow("connection changed");
+  ).rejects.toThrow("account changed");
   expect(
     (await loadClaudeSubscriptionUsageCredential(client.db, settings, usageScope(scope)))!.token,
   ).toBe("sk-ant-oat01-replacement-fixture");
@@ -532,39 +702,98 @@ test("replacement during sign-in rejects stale persistence and invalidates its r
       async () => {},
       second.mock.fetchImpl,
     ),
-  ).rejects.toThrow("connection changed");
-  expect(second.mock.calls).toHaveLength(2);
+  ).rejects.toThrow("account changed");
+  expect(second.mock.calls).toHaveLength(3);
 });
 
-test("renewal and invalid-grant replies cannot overwrite or return a replaced generation", async () => {
+test("renewal serializes reconnect and stale requests cannot return a replaced generation", async () => {
   for (const invalid of [false, true]) {
     const scope = await fixture();
     await connect(scope);
     const original = await expire(scope);
+    const entered = Promise.withResolvers<void>();
+    const reply = Promise.withResolvers<Response>();
     const fetchImpl = (async () => {
-      await replace(scope);
-      return invalid
-        ? Response.json({ error: "invalid_grant" }, { status: 400 })
-        : Response.json({
-            access_token: "sk-ant-oat01-renewed-old-generation",
-            refresh_token: "renewed",
-            expires_in: 3600,
-            scope: "user:inference user:profile",
-          });
+      entered.resolve();
+      return reply.promise;
     }) as typeof fetch;
+    const renewal = resolveClaudeSubscriptionCredential(client.db, settings, usageScope(scope), {
+      fetchImpl,
+    });
+    // Observe the rejection immediately as well as success: never leave an
+    // invalid-grant race rejection unhandled while another writer is queued.
+    const settledRenewal = renewal.then(
+      (value) => ({ value }),
+      (error) => ({ error }),
+    );
+    await entered.promise;
+    const replacement = replace(scope);
+    try {
+      const deadline = Date.now() + 2_000;
+      let blocked = false;
+      do {
+        const [row] = await shared.admin<{ blocked: boolean }[]>`
+          select exists (
+            select 1 from pg_stat_activity activity
+            where activity.datname = current_database()
+              and activity.usename = 'opengeni_app'
+              and cardinality(pg_blocking_pids(activity.pid)) > 0
+          ) as blocked`;
+        blocked = row!.blocked;
+        if (!blocked) await Bun.sleep(10);
+      } while (!blocked && Date.now() < deadline);
+      expect(blocked).toBe(true);
+      const [before] =
+        await shared.admin`select version from claude_subscription_credentials where id = ${original.connectionId}`;
+      expect(before!.version).toBe(original.credentialVersion);
+    } finally {
+      // Reconnect cannot commit until the canonical renewal releases its row
+      // lock. Do not await that writer inside the provider callback (deadlock).
+      reply.resolve(
+        invalid
+          ? Response.json({ error: "invalid_grant" }, { status: 400 })
+          : Response.json({
+              access_token: "sk-ant-oat01-renewed-old-generation",
+              refresh_token: "renewed",
+              expires_in: 3600,
+              scope: "user:inference user:profile",
+            }),
+      );
+    }
+    const [outcome] = await Promise.all([settledRenewal, replacement]);
+    if ("error" in outcome) expect(outcome.error).toMatchObject({ status: 409 });
+    else expect(outcome.value.credentialVersion).toBe(original.credentialVersion);
+    let lateRequests = 0;
     await expect(
-      resolveClaudeSubscriptionCredential(client.db, settings, usageScope(scope), { fetchImpl }),
+      resolveClaudeSubscriptionCredential(client.db, settings, usageScope(scope), {
+        expectedCredentialVersion: original.credentialVersion,
+        fetchImpl: (async () => {
+          lateRequests++;
+          throw new Error("Stale generation must not dispatch");
+        }) as typeof fetch,
+      }),
     ).rejects.toThrow("connection changed");
+    expect(lateRequests).toBe(0);
     const actual = (await loadClaudeSubscriptionUsageCredential(
       client.db,
       settings,
       usageScope(scope),
     ))!;
-    expect(actual.connectionId).not.toBe(original.connectionId);
+    expect(actual.connectionId).toBe(original.connectionId);
+    expect(actual.credentialVersion).toBe(original.credentialVersion + 1);
     expect(actual.token).toBe("sk-ant-oat01-replacement-fixture");
     expect(actual.usage.refreshStatus).toBe("not_checked");
+    expect(
+      await recordClaudeSubscriptionUsage(client.db, settings, usageScope(scope), {
+        token: invalid ? original.token : "sk-ant-oat01-renewed-old-generation",
+        expectedConnectionId: original.connectionId,
+        expectedCredentialVersion: original.credentialVersion,
+        refresh: { status: "reconnect", checkedAt: new Date().toISOString() },
+      }),
+    ).toBeNull();
+    expect(await readClaudeSubscriptionUsage(client.db, usageScope(scope))).toEqual(actual.usage);
   }
-});
+}, 30_000);
 
 test("catalog loading remains offline with expired OAuth in both scopes and preserves exact bindings", async () => {
   const scope = await fixture(true);
@@ -573,6 +802,8 @@ test("catalog loading remains offline with expired OAuth in both scopes and pres
   const [row] = await shared.admin<
     { id: string }[]
   >`insert into workspaces (account_id, name) values (${scope.accountId}, 'Shared Claude catalog') returning id`;
+  await shared.admin`insert into workspace_memberships (account_id, workspace_id, subject_id, role)
+    values (${scope.accountId}, ${row!.id}, ${scope.actorSubjectId}, 'admin')`;
   const workspaceScope = { ...scope, workspaceId: row!.id };
   await connect(workspaceScope);
   await expire(workspaceScope);
@@ -587,10 +818,10 @@ test("catalog loading remains offline with expired OAuth in both scopes and pres
       workspaceId: row!.id,
       providerKind: "claude_subscription",
     }),
-  ).toContain("fixture-refresh-v1");
+  ).toBeNull();
   expect(
     await loadWorkspaceProviderApiKey(client.db, settings, row!.id, "claude_subscription"),
-  ).toContain("fixture-refresh-v1");
+  ).toBeNull();
   await createOrganizationModelProviderCustomModel(client.db, {
     organizationId: scope.accountId,
     actorSubjectId: scope.actorSubjectId,
@@ -605,7 +836,32 @@ test("catalog loading remains offline with expired OAuth in both scopes and pres
     settings,
     "gpt-5.6-sol",
   );
-  const catalogProvider = parseModelProvidersJson(catalogs.modelProvidersJson).find(
+  const catalogOnly = parseModelProvidersJson(catalogs.modelProvidersJson).find(
+    (candidate) => candidate.id === "organization-claude-subscription",
+  )!;
+  expect(catalogOnly.anthropic?.credentialBinding).toBeUndefined();
+  expect(catalogOnly.apiKey).toBeUndefined();
+  // Catalog reads are deliberately metadata-only after 0598. Bind only the
+  // selected exact account, using the same config seam as agent-turn/run.ts.
+  const selected = await loadClaudeAccountCredential(
+    client.db,
+    {
+      accountId: scope.accountId,
+      workspaceId: row!.id,
+      subjectId: scope.actorSubjectId,
+      credentialId: before!.connectionId,
+      authoritySnapshot: { version: 1, scope: "organization" },
+    },
+    key,
+  );
+  const bound = withClaudeConnectionCredential(
+    catalogs,
+    "claude_subscription",
+    JSON.stringify(selected.secret),
+    "organization",
+    { connectionId: selected.id, credentialVersion: selected.version },
+  );
+  const catalogProvider = parseModelProvidersJson(bound.modelProvidersJson).find(
     (candidate) => candidate.id === "organization-claude-subscription",
   )!;
   expect(catalogProvider.anthropic!.credentialBinding).toEqual({
@@ -665,7 +921,7 @@ async function browserRouteFixture(
   >`select id from workspaces where account_id = ${scope.accountId} limit 1`;
   await shared.admin`insert into auth_users (id, name, email, email_verified) values (${userId}, 'Claude owner', ${userId + "@example.com"}, true)`;
   await shared.admin`insert into auth_identities (id, user_id, provider_id, account_id) values (${randomUUID()}, ${userId}, 'credential', ${userId})`;
-  await shared.admin`insert into workspace_memberships (account_id, workspace_id, subject_id, role, permissions) values (${scope.accountId}, ${workspace!.id}, ${scope.actorSubjectId}, 'member', ${shared.admin.json(["workspace:read", "connections:write"])})`;
+  await shared.admin`insert into workspace_memberships (account_id, workspace_id, subject_id, role, permissions) values (${scope.accountId}, ${workspace!.id}, ${scope.actorSubjectId}, 'member', ${shared.admin.json(["workspace:read", "workspace:admin", "connections:write"])})`;
   if (!organization)
     await shared.admin`update organization_memberships set role = 'member' where account_id = ${scope.accountId}`;
   await ensureManagedAccessForUserWithOrganizationMemberships(client.db, {
@@ -766,8 +1022,12 @@ for (const organization of [false, true]) {
       body: JSON.stringify({ attemptId: start.attemptId, code }),
     });
     expect(complete.status).toBe(200);
-    expect(await complete.json()).toEqual({
+    const completed = await complete.json();
+    expect(completed.accountId).toBe((await accountAuthority(f.scope))!.credentialId);
+    expect(completed).toEqual({
       connected: true,
+      accountId: completed.accountId,
+      scope: organization ? "organization" : "workspace",
       credentialVersion: 1,
     });
     expect(f.mock.calls).toHaveLength(2);
@@ -808,5 +1068,8 @@ test("workspace browser permissions are freshly rechecked after spending a code"
   expect(
     await loadClaudeSubscriptionUsageCredential(client.db, settings, usageScope(f.scope)),
   ).toBeNull();
-  expect(f.mock.calls).toHaveLength(1);
+  expect(f.mock.calls.map(({ url, method }) => ({ url, method }))).toEqual([
+    { url: CLAUDE_OAUTH_TOKEN_URL, method: "POST" },
+    { url: "https://api.anthropic.com/api/oauth/profile", method: "GET" },
+  ]);
 });

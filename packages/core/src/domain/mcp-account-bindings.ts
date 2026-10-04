@@ -1,3 +1,4 @@
+import { connectionAccountIdentityLabel } from "@opengeni/contracts/connection-account-label";
 import { createHash } from "node:crypto";
 import type { McpServerConfig } from "@opengeni/config";
 import {
@@ -18,22 +19,12 @@ export function mcpAccountRouteId(serverId: string, connectionId: string): strin
 }
 
 function accountLabel(connection: ConnectionMetadata): string {
-  const metadata = connection.metadata;
-  const text = (value: unknown): string | undefined =>
-    typeof value === "string" && value.trim()
-      ? value
-          .replace(/[\u0000-\u001f\u007f]/gu, " ")
-          .trim()
-          .slice(0, 180)
-      : undefined;
-  const name = [metadata.email, metadata.displayName, metadata.accountName, metadata.name]
-    .map(text)
-    .find(Boolean);
-  const workspace = [metadata.slackTeamName, metadata.teamName, metadata.workspaceName]
-    .map(text)
-    .find(Boolean);
+  const identity = connectionAccountIdentityLabel(
+    connection.metadata,
+    `${connection.providerDomain} account ${connection.id.slice(0, 8)}`,
+  );
   const scope = connection.subjectId === null ? "This workspace" : "Only me";
-  return [...new Set([name, workspace, scope].filter(Boolean))].join(" · ");
+  return `${identity} · ${scope}`;
 }
 
 function canonicalResource(value: string): string {

@@ -361,13 +361,22 @@ test("captured complete streams retain their terminal observation without a prov
 
 test("incomplete or contradictory captured streams still require provider observation", async () => {
   const f = fixture();
-  let polls = 0;
+  const providerFailure = Object.assign(new Error("provider handle unavailable"), { code: 14 });
+  const polls: Array<{ taskId: string; execId: string }> = [];
+  let starts = 0;
+  let writes = 0;
   const router = {
     close: () => {},
+    start: async () => {
+      starts++;
+    },
+    write: async () => {
+      writes++;
+    },
     read: async () => ({ bytes: Buffer.alloc(0), eof: true }),
-    poll: async () => {
-      polls++;
-      throw new Error("provider handle unavailable");
+    poll: async (identity: { taskId: string; execId: string }) => {
+      polls.push({ taskId: identity.taskId, execId: identity.execId });
+      throw providerFailure;
     },
   } as unknown as ModalCommandRouterWire;
   f.cache.routers.set(
@@ -384,11 +393,31 @@ test("incomplete or contradictory captured streams still require provider observ
       stderr: { byteOffset: 0, utf8Remainder: "", eof: true, exitCode: 1 },
     },
   };
+  const capturedStates: ModalRouterProviderCommand[] = [
+    command,
+    {
+      ...command,
+      streams: {
+        ...command.streams,
+        stderr: { byteOffset: 0, utf8Remainder: "", eof: false, exitCode: null },
+      },
+    },
+  ];
   try {
-    await expect(f.control.read(command, 0)).rejects.toThrow("provider handle unavailable");
-    command.streams.stderr = { byteOffset: 0, utf8Remainder: "", eof: false, exitCode: null };
-    await expect(f.control.read(command, 0)).rejects.toThrow("provider handle unavailable");
-    expect(polls).toBe(2);
+    for (const captured of capturedStates) {
+      const pollsBefore = polls.length;
+      const failure = await f.control.read(captured, 1_000).catch((error: unknown) => error);
+      expect(failure).toBeInstanceOf(ProviderCommandObservationUnavailableError);
+      if (!(failure instanceof ProviderCommandObservationUnavailableError)) throw failure;
+      expect(failure.cause).toBe(providerFailure);
+      expect(failure.command).toEqual(captured);
+      expect(polls.length).toBeGreaterThan(pollsBefore);
+    }
+    expect(
+      polls.every(({ taskId, execId }) => taskId === command.taskId && execId === command.execId),
+    ).toBe(true);
+    expect(starts).toBe(0);
+    expect(writes).toBe(0);
   } finally {
     await f.control.close();
   }

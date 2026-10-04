@@ -411,7 +411,7 @@ export default function SecretValuesSection() {
 
       <UsageNotes
         use={[
-          "Any credential people give OpenGeni: variables, provider keys, API key creation",
+          "Any credential people give Opengeni: variables, provider keys, API key creation",
           "Replace value to change a secret; it takes effect from the next turn",
           "Showing a token once, inside the flow that created it",
         ]}

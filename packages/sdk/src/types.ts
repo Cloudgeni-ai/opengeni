@@ -3046,6 +3046,8 @@ export type ScheduledTaskAgentConfig = {
   /** Agent configuration for every generated session; omitted keeps legacy behavior. */
   agent?: AgentConfigRequest | undefined;
   connectionAccounts?: McpConnectionAccountSelection[] | undefined;
+  /** Read-only: the complete accepted account set, including an empty set. */
+  connectionAccountsFrozen?: true | undefined;
   knowledgeSource?: Extract<ScheduledTaskAction, { kind: "knowledge_source_sync" }> | undefined;
   bundledSkillIds?: BundledSkillId[] | undefined;
   prompt: string;
@@ -4257,6 +4259,12 @@ export type ClientConfig = {
   /** Session proxy sandbox-path download opt-in; absent on native deployments. */
   sandboxFiles?: boolean | undefined;
   /**
+   * Session proxy only: the workspace the proxy resolved for this user, so a
+   * browser pointed at the proxy (`<OpenGeniChat baseUrl=... />`) needs no
+   * workspace id. Absent on native deployments and older proxies.
+   */
+  workspaceId?: string | undefined;
+  /**
    * Session proxy capability for the embedded artifact viewer; absent on
    * native deployments. The live socket is ticket-authenticated and reached
    * directly; the cache partition identifies the proxied user.
@@ -5157,6 +5165,11 @@ export type ApiKey = {
   workspaceScope?: OrganizationWorkspaceScope | undefined;
   /** Legacy keys retain their historical workspace-admin wildcard. */
   permissionMode?: "legacy" | "explicit" | undefined;
+  /** Organization keys: the service account that holds the key. */
+  serviceAccount?:
+    | { id: string; name: string; role: OrganizationServiceAccountRole }
+    | null
+    | undefined;
   expiresAt: string | null;
   revokedAt: string | null;
   lastUsedAt: string | null;
@@ -5187,6 +5200,8 @@ export type CreateOrganizationApiKeyRequest = {
   preset?: "developer_setup" | undefined;
   /** Explicit grants and shared-workspace scope; do not combine with legacy access/preset. */
   policy?: OrganizationAccessPolicy | undefined;
+  /** The service account that holds the key; omitted creates one named after the key. */
+  serviceAccountId?: string | undefined;
 };
 
 /** The server requires at least one change. Omitted fields stay unchanged. */
@@ -5199,6 +5214,42 @@ export type UpdateOrganizationApiKeyRequest = {
 
 export type ListApiKeysResponse = {
   apiKeys: ApiKey[];
+};
+
+// --- Service accounts ----------------------------------------------------------------------------
+
+/** Up to admin, never owner. A member's keys never hold administrator permissions. */
+export type OrganizationServiceAccountRole = "admin" | "member";
+
+/** An organization identity with no person behind it; it holds organization API keys. */
+export type OrganizationServiceAccount = {
+  id: string;
+  organizationId: string;
+  name: string;
+  description: string | null;
+  role: OrganizationServiceAccountRole;
+  /** Keys that are not revoked, including expired ones. */
+  activeKeyCount: number;
+  createdAt: string;
+  updatedAt: string;
+};
+
+export type ListOrganizationServiceAccountsResponse = {
+  serviceAccounts: OrganizationServiceAccount[];
+};
+
+export type CreateOrganizationServiceAccountRequest = {
+  name: string;
+  description?: string | undefined;
+  /** Defaults to member. Only an organization administrator can choose admin. */
+  role?: OrganizationServiceAccountRole | undefined;
+};
+
+/** The server requires at least one change. Making it a member narrows its keys. */
+export type UpdateOrganizationServiceAccountRequest = {
+  name?: string | undefined;
+  description?: string | null | undefined;
+  role?: OrganizationServiceAccountRole | undefined;
 };
 
 // --- Connected agents (organization MCP server) ------------------------------------------------
@@ -5975,11 +6026,29 @@ export type CreateKnowledgeSourceSyncScheduledTaskRequest = {
   metadata?: Record<string, unknown> | undefined;
 };
 
+/** Send a scheduled message using the destination chat’s current execution settings. */
+export type CreateSessionScheduledTaskRequest = {
+  name: string;
+  schedule: ScheduledTaskScheduleSpec;
+  prompt: string;
+  targetSessionId: string;
+  runMode?: "existing_session" | undefined;
+  connectionAccounts?: McpConnectionAccountSelection[] | undefined;
+  overlapPolicy?: ScheduledTaskOverlapPolicy | undefined;
+  status?: ScheduledTaskStatus | undefined;
+  metadata?: Record<string, unknown> | undefined;
+};
+
 export type CreateScheduledTaskRequest =
+  | CreateSessionScheduledTaskRequest
   | CreateAgentScheduledTaskRequest
   | CreateKnowledgeSourceSyncScheduledTaskRequest;
 
 export type UpdateScheduledTaskRequest = {
+  expectedExecutionDigest?: string | undefined;
+  adoptSessionSettings?: true | undefined;
+  /** Lossless message edit. All omitted configuration is preserved. */
+  prompt?: string | undefined;
   name?: string | undefined;
   schedule?: ScheduledTaskScheduleSpec | undefined;
   runMode?: ScheduledTaskRunMode | undefined;
@@ -5991,7 +6060,11 @@ export type UpdateScheduledTaskRequest = {
   /** Lossless model defaults patch; cannot be combined with agentConfig replacement.
    * Existing target/reusable sessions retain their own model and reasoning. */
   agentConfigPatch?:
-    | { model?: string | undefined; reasoningEffort?: ReasoningEffort | undefined }
+    | {
+        prompt?: string | undefined;
+        model?: string | undefined;
+        reasoningEffort?: ReasoningEffort | undefined;
+      }
     | undefined;
   status?: ScheduledTaskStatus | undefined;
   variableSetId?: string | null | undefined;
@@ -8243,7 +8316,7 @@ export type InsightsSpendDriver = {
 
 export type InsightsProjectRow = {
   id: string;
-  kind: "project" | "other" | "unfiled" | "unavailable";
+  kind: "project" | "other" | "unfiled" | "unavailable" | "deleted";
   label: string;
   projects: number;
   rootSessions: number;
@@ -9032,7 +9105,9 @@ export type UpdateSessionAgentRequest = {
 };
 
 export type ClientAgentConfig = {
+  /** @deprecated Agent configuration is always on; current servers always report `true`. */
   enabled: boolean;
+  /** @deprecated Omitted `agent` always resolves `{ capabilities: "all" }`; always `true`. */
   defaultForNewSessions: boolean;
   capabilities: Array<{ id: AgentCapabilityId; available: boolean; reason?: string | undefined }>;
 };
@@ -9042,4 +9117,5 @@ export type AgentConfigErrorCode =
   | "agent_capability_unavailable"
   | "agent_config_conflict"
   | "agent_config_widening"
+  /** Returned only by older servers that predate always-on agent configuration. */
   | "agent_config_not_enabled";

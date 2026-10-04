@@ -129,7 +129,7 @@ function useEmbeddedClientRefinement<TClient extends object>(
   const workspaceId = override.workspaceId ?? context?.workspaceId;
   if (!candidate || !workspaceId) {
     throw new Error(
-      "@opengeni/react: no OpenGeni client/workspace available. Wrap the tree in <OpenGeniProvider> or pass { client, workspaceId } to the hook.",
+      "@opengeni/react: no Opengeni client/workspace available. Wrap the tree in <OpenGeniProvider> or pass { client, workspaceId } to the hook.",
     );
   }
   const methods = candidate as Record<string, unknown>;
@@ -164,7 +164,7 @@ export function useOpenGeni(override: ClientOverride = {}): OpenGeniContextValue
   const workspaceId = override.workspaceId ?? context?.workspaceId;
   if (!client || !workspaceId) {
     throw new Error(
-      "@opengeni/react: no OpenGeni client/workspace available. Wrap the tree in <OpenGeniProvider> or pass { client, workspaceId } to the hook.",
+      "@opengeni/react: no Opengeni client/workspace available. Wrap the tree in <OpenGeniProvider> or pass { client, workspaceId } to the hook.",
     );
   }
   return {
@@ -423,7 +423,7 @@ export function useOpenGeniClient(
   const client = override.client ?? context?.client;
   if (!client) {
     throw new Error(
-      "@opengeni/react: no OpenGeni client available. Wrap the tree in <OpenGeniProvider> or pass { client } to the hook.",
+      "@opengeni/react: no Opengeni client available. Wrap the tree in <OpenGeniProvider> or pass { client } to the hook.",
     );
   }
   return client;

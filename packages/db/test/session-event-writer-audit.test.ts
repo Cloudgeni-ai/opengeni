@@ -238,9 +238,9 @@ const expectedWriters: Record<string, ExpectedWriter> = {
     contract: "canonical",
     requiresControlRevalidation: true,
   },
-  "packages/db/src/index.ts#commitSessionAttemptQuiescence": {
+  "packages/db/src/index.ts#recordSessionAttemptQuiescenceInTransaction": {
     inserts: 1,
-    contract: "canonical",
+    contract: "owned_suffix",
   },
   "packages/db/src/index.ts#projectPausedRecovery": {
     inserts: 1,
@@ -274,7 +274,11 @@ const expectedWriters: Record<string, ExpectedWriter> = {
     inserts: 1,
     contract: "canonical",
   },
-  "packages/db/src/index.ts#recoverSessionDispatch": { inserts: 3, contract: "canonical" },
+  "packages/db/src/index.ts#recoverSessionOwner": {
+    inserts: 3,
+    contract: "canonical",
+    requiresControlRevalidation: true,
+  },
   "packages/db/src/index.ts#addSessionSystemUpdateWithSourceMutation": {
     // pending event, producer-side supersession event, consumed-on-arrival
     // cancellation, goal.resumed
@@ -389,6 +393,10 @@ const expectedOwnedSuffixCallers: Record<string, string[]> = {
   supersedeCodexCapacityWaitInTransaction: ["reconcileCodexCapacityWait"],
   supersedeXaiCapacityWaitInTransaction: ["reconcileXaiCapacityWait"],
   projectPausedRecovery: ["commitSessionAttemptQuiescence"],
+  recordSessionAttemptQuiescenceInTransaction: [
+    "commitSessionAttemptQuiescence",
+    "recoverSessionOwner",
+  ],
   supersedeSessionCurrentDirectionInTransaction: [
     "steerAgentSessionInTransaction",
     "steerQueuedTurnInTransaction",
@@ -405,7 +413,7 @@ const expectedOwnedSuffixCallers: Record<string, string[]> = {
     "settleCodexCredentialLeaseLoss",
     "settleCodexCredentialFailover",
     "requestSessionTurnRecovery",
-    "recoverSessionDispatch",
+    "recoverSessionOwner",
   ],
 };
 
@@ -438,7 +446,7 @@ const expectedFailedChildOutboxCallers = [
   // before atomically emitting a false-capacity-recovery terminal boundary.
   "armCodexCapacityWait",
   "failSessionWorkBeforeAttemptClaim",
-  "recoverSessionDispatch",
+  "recoverSessionOwner",
   "settleCodexCredentialFailover",
 ];
 const expectedSharedFailedChildOutboxCallers = [

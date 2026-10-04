@@ -22,8 +22,10 @@ import {
   resolveSessionToolPolicy,
   settingsWithEnabledCapabilityMcpServers,
   syncUpdatedScheduledTask,
+  syncCreatedScheduledTask,
   createValidatedScheduledTask,
   validatedScheduledTaskUpdate,
+  type SessionWorkflowClient,
 } from "@opengeni/core";
 import {
   appendSessionEvents,
@@ -2108,6 +2110,90 @@ describe("scheduled task personal MCP authority", () => {
     ).toEqual([{ serverId: "scheduled-common", connectionId: laterAccount }]);
   });
 
+  test.each(["prompt", "name", "status"] as const)(
+    "late Temporal sync failure preserves a newer %s edit",
+    async (field) => {
+      if (!available) return;
+      const workspace = await workspaceFixture();
+      const original = await createScheduledTask(client.db, {
+        ...workspace,
+        name: "Original schedule",
+        status: "paused",
+        schedule: { type: "manual" },
+        temporalScheduleId: `scheduled-task-${crypto.randomUUID()}`,
+        runMode: "new_session_per_run",
+        overlapPolicy: "skip",
+        agentConfig: { prompt: "Original message", resources: [], tools: [], metadata: {} },
+        createdBy: { kind: "subject", subjectId: workspace.subjectId },
+        metadata: {},
+      });
+      const changed = await updateScheduledTask(client.db, workspace.workspaceId, original.id, {
+        status: "active",
+        agentConfig: { ...original.agentConfig, prompt: "First edit" },
+      });
+      let newer = changed;
+      await expect(
+        syncUpdatedScheduledTask({
+          db: client.db,
+          previous: await captureScheduledTaskRestoreState(client.db, original),
+          task: changed,
+          workflowClient: {
+            syncScheduledTask: async ({
+              onFailure,
+            }: Parameters<SessionWorkflowClient["syncScheduledTask"]>[0]) => {
+              newer = await updateScheduledTask(client.db, workspace.workspaceId, original.id, {
+                ...(field === "prompt"
+                  ? { agentConfig: { ...changed.agentConfig, prompt: "Newer edit" } }
+                  : field === "name"
+                    ? { name: "Newer name" }
+                    : { status: "paused" }),
+              });
+              const error = new Error("Synthetic synchronization failure");
+              throw await client.db.transaction((tx) => onFailure!(tx, error));
+            },
+          } as never,
+        }),
+      ).rejects.toMatchObject({ persistenceRestored: false });
+      expect(await getScheduledTask(client.db, workspace.workspaceId, original.id)).toEqual(newer);
+    },
+  );
+
+  test("late creation sync failure never deletes a schedule edited meanwhile", async () => {
+    if (!available) return;
+    const workspace = await workspaceFixture();
+    const created = await createScheduledTask(client.db, {
+      ...workspace,
+      name: "New schedule",
+      status: "paused",
+      schedule: { type: "manual" },
+      temporalScheduleId: `scheduled-task-${crypto.randomUUID()}`,
+      runMode: "new_session_per_run",
+      overlapPolicy: "skip",
+      agentConfig: { prompt: "Review activity", resources: [], tools: [], metadata: {} },
+      createdBy: { kind: "subject", subjectId: workspace.subjectId },
+      metadata: {},
+    });
+    let newer = created;
+    await expect(
+      syncCreatedScheduledTask({
+        db: client.db,
+        task: created,
+        workflowClient: {
+          syncScheduledTask: async ({
+            onFailure,
+          }: Parameters<SessionWorkflowClient["syncScheduledTask"]>[0]) => {
+            newer = await updateScheduledTask(client.db, workspace.workspaceId, created.id, {
+              name: "Reviewed schedule",
+            });
+            const error = new Error("Synthetic synchronization failure");
+            throw await client.db.transaction((tx) => onFailure!(tx, error));
+          },
+        } as never,
+      }),
+    ).rejects.toMatchObject({ persistenceRestored: false });
+    expect(await getScheduledTask(client.db, workspace.workspaceId, created.id)).toEqual(newer);
+  });
+
   test("Temporal sync failure restores every execution-affecting task field", async () => {
     if (!available) return;
     const workspace = await workspaceFixture();
@@ -2188,8 +2274,11 @@ describe("scheduled task personal MCP authority", () => {
         previous: restoreState,
         task: changed,
         workflowClient: {
-          syncScheduledTask: async () => {
-            throw new Error("expected Temporal synchronization failure");
+          syncScheduledTask: async ({
+            onFailure,
+          }: Parameters<SessionWorkflowClient["syncScheduledTask"]>[0]) => {
+            const error = new Error("expected Temporal synchronization failure");
+            throw await client.db.transaction((tx) => onFailure!(tx, error));
           },
         } as never,
       }),

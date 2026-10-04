@@ -1,0 +1,63 @@
+name: Deprecate pre-1.0 packages
+
+# Operator-run once after the 1.0.0 lockstep release: makes sure latest points
+# at the lockstep version and deprecates every version published before it.
+on:
+  workflow_dispatch:
+    inputs:
+      execute:
+        description: "Apply (true) or print the plan only (false)."
+        required: true
+        type: boolean
+        default: false
+
+concurrency:
+  group: deprecate-pre-1-0
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  deprecate:
+    name: Deprecate pre-1.0 versions
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - name: Admit protected main
+        shell: bash
+        run: |
+          set -euo pipefail
+          [[ "$GITHUB_REPOSITORY" == "Cloudgeni-ai/opengeni" ]]
+          [[ "$GITHUB_REF" == "refs/heads/main" ]]
+
+      - name: Check out source
+        uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+
+      - name: Set up Bun
+        uses: oven-sh/setup-bun@v2
+        with:
+          bun-version-file: .bun-version
+
+      - name: Install dependencies
+        run: bun install --frozen-lockfile
+
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: 24
+          registry-url: https://registry.npmjs.org
+
+      - name: Deprecate
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+          EXECUTE: ${{ inputs.execute }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [ "$EXECUTE" = "true" ]; then
+            bun scripts/release/deprecate-pre-1.0.ts --execute
+          else
+            bun scripts/release/deprecate-pre-1.0.ts
+          fi

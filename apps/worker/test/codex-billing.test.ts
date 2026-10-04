@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, spyOn, test } from "bun:test";
-import { OPENGENI_GATEWAY_MODELS } from "@opengeni/config";
+import { calculateModelUsageCostBreakdown, OPENGENI_GATEWAY_MODELS } from "@opengeni/config";
 import * as opengeniDb from "@opengeni/db";
 import { testSettings } from "@opengeni/testing";
 import type { Database } from "@opengeni/db";
@@ -102,7 +102,7 @@ describe("worker ensureRunAllowed — codex bypass", () => {
     try {
       await expect(
         ensureRunAllowed(billedSettings(), db, ACCOUNT, WORKSPACE, /* isCodexTurn */ false),
-      ).rejects.toThrow("insufficient OpenGeni credits");
+      ).rejects.toThrow("insufficient Opengeni credits");
     } finally {
       restore();
     }
@@ -926,4 +926,43 @@ describe("durable provider admission regressions", () => {
     });
     expect(bound.costMicros).toBe(2860);
   });
+});
+
+test("reservation covers independently rounded mixed input classes", () => {
+  for (const rate of [125000, 600000, 1000001]) {
+    for (const marginBps of [0, 1000]) {
+      for (const latencyMode of ["standard", "fast"] as const) {
+        const settings = testSettings({
+          modelPricingJson: JSON.stringify({
+            "gpt-5.6-sol": {
+              inputMicrosPerMillionTokens: rate,
+              cachedInputMicrosPerMillionTokens: rate,
+              cacheWriteMicrosPerMillionTokens: rate,
+              outputMicrosPerMillionTokens: rate,
+              marginBps,
+            },
+          }),
+        });
+        const bound = modelCallReservationQuantities({
+          settings,
+          model: "gpt-5.6-sol",
+          promptTokens: 1,
+          contextWindowTokens: 1000,
+          maxOutputTokens: 1,
+          latencyMode,
+        });
+        const actual = calculateModelUsageCostBreakdown(
+          settings,
+          "gpt-5.6-sol",
+          {
+            inputTokens: 999,
+            outputTokens: 1,
+            inputTokensDetails: { cached_tokens: 1, cache_write_tokens: 1 },
+          },
+          { latencyMode },
+        );
+        expect(bound.costMicros).toBeGreaterThanOrEqual(actual.creditCostMicros);
+      }
+    }
+  }
 });

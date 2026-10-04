@@ -1,5 +1,113 @@
 # @opengeni/db
 
+## 1.0.2
+
+### Patch Changes
+
+- ee6b145: Prioritize release acknowledgements for durably captured command output before replaying older uncaptured results.
+- 6fccfa0: Release completed Connected Machine command output once its exact tool result is
+  durable, instead of retaining it until a long turn ends. Preserve parallel and
+  background output ownership, and allow failed final acknowledgements to retry.
+  Persist independent background output custody after verified PostgreSQL capture,
+  then reconcile release on its original connection even after worker loss.
+- e16aa17: Use the receiving chat's accepted execution context for ordinary same-user agent updates, so different sender account selections do not fragment batches or change the receiving chat's accounts. Preserve explicit authorization for other users and restricted sources, and add factual model-only notes for known tool selection differences.
+- cbe4357: Simple embedding path. An organization API key acting as a user (`asUser`) on a
+  shared workspace of its own organization now adds that user's missing membership
+  once, with conversation permissions, when the key holds `members:manage` plus
+  those permissions; existing memberships are never changed. The `@opengeni/sdk/chat`
+  `OpenGeni` facade derives `organizationId` from the key, maps `{ user, tenant }`,
+  `{ user }` (one workspace per user), or `{ user, workspaceId }` to a workspace
+  created on first use, and `og.workspaceId({ tenant } | { user } | { workspaceId })`
+  translates your ids. The session proxy reports its resolved workspace in client
+  config, so `<OpenGeniChat baseUrl="/api/opengeni" />` and
+  `<SessionConversation baseUrl="/api/opengeni" sessionId={id} />` need no provider
+  or workspace id. Explicit membership APIs and provider-based usage are unchanged.
+- 9925fe2: Reduce raw Insights query overhead and read the current and comparison windows in separate bounded statements so larger default views can finish within the database timeout.
+- Updated dependencies [4476ca7]
+- Updated dependencies [f9e33b5]
+- Updated dependencies [e16aa17]
+  - @opengeni/contracts@1.0.1
+  - @opengeni/observability@1.0.1
+  - @opengeni/codemode@1.0.1
+  - @opengeni/codex@1.0.1
+  - @opengeni/config@1.0.1
+  - @opengeni/network@1.0.1
+
+## 1.0.0
+
+### Major Changes
+
+- Reset package versioning: every published `@opengeni/*` package now releases together at one shared version, starting at 1.0.0. Install all `@opengeni` packages at the same version. Earlier versions are retired.
+
+## 6.7.2
+
+### Patch Changes
+
+- 6fee02a: Avoid recursive settlement projections for single leaf-session reads and reuse the same statement's complete root control node instead of recursively walking root ancestry. Child detection and direct summaries share one PostgreSQL statement snapshot; nonleaf summaries, nonroot ancestry and writer fences retain their existing recursive behavior.
+
+## 6.7.1
+
+### Patch Changes
+
+- @opengeni/codemode@0.7.2
+
+## 6.7.0
+
+### Minor Changes
+
+- 2f09c54: Add unified workspace/organization usage and visible-call readers over recorded
+  facts without changing debit or access semantics.
+  Distinguish deleted retained usage from private amounts and expose the prior
+  cache denominator and historical telemetry coverage.
+  Bound successful responses to a 60-second, authorization/visibility-fenced server
+  cache and return an actionable friendly error for statement timeouts.
+- 746464c: Add a launch-load safety switch that pauses new managed account sign-ups without affecting existing users. Rolling migration 0585 adds an append-only, operator-only runtime switch (`set_managed_auth_new_signups_enabled`, read by the API on every sign-up decision, so a flip applies to the next request with no restart), and `OPENGENI_MANAGED_AUTH_NEW_SIGNUPS_ENABLED=false` remains the deployment ceiling. While paused, email sign-up returns `403` with code `NEW_SIGNUPS_PAUSED` and Google/GitHub refuse unknown provider accounts with `error=signup_disabled`; sign-in, sessions, password reset, email verification, and invitation-bound account setup keep working. The managed-session client config gains an additive `newSignupsEnabled` field (absent means `true`), `@opengeni/contracts` exports `MANAGED_AUTH_NEW_SIGNUPS_PAUSED_CODE`, `@opengeni/db` exports `readManagedAuthNewSignupsSwitch`, and the control worker publishes `opengeni_managed_auth_new_signups_runtime_enabled`.
+
+### Patch Changes
+
+- a0f5728: Keep messages from the same caller attempt together with Agent Steer so older messages do not trigger a later inference. Preserve context-before-Steer ordering when persisting model history with a goal snapshot, while retaining isolation between different callers and access settings.
+- 3be5798: Prevent Bun PostgreSQL TLS upgrades from retaining encrypted traffic in the original TCP socket's unread queue. Preserve TLS negotiation, certificate policy, and lossless query results, with regression coverage for both driver entrypoints.
+- 6ca71f6: Restore content-free model connection lifecycle facts for canonical Claude subscription accounts without changing account authorization or export privacy boundaries.
+- 8ce490f: Support multiple Claude subscription accounts with shared workspace, organization and owning-user account controls, verified browser sign-in profiles, usage windows, exact credential leases and quota-aware rotation. Preserve accepted work during capacity waits and recovery. Upgrade existing encrypted subscription credentials through the documented maintenance migration before starting matching runtime binaries.
+- fe2aa8c: Batch ordinary agent messages with compatible pending results when their originating turns have the same human and frozen access settings. Preserve each update's lineage and separate different access, unresolved origins, and Steer commands. Clarify that a child session's final answer is automatically delivered to its parent.
+- 3395acc: Automatically reuse the existing send credential hook for approval/human-input responses, with atomic write-only MCP header updates and no integration changes.
+- 6fc73e3: Remember the selected new-session visibility for the same user and workspace after creating a session, including when returning from another browser.
+- 0fba21e: Schedule messages in existing chats without duplicating execution settings. Default conversational scheduling to the calling chat, add lossless message edits and guarded retargeting, and preserve captured account authority. Improve destination controls, exact prompt retrieval and filtered history paging; remove obsolete deployment guidance.
+- 14e95e9: Redeem a Stripe promotion code at checkout: `createBillingCheckout` accepts `promotionCode`, and a fixed-amount USD code sets the credits by itself, so a $100 code buys exactly $100 of credits. Add `getBillingCheckout` to read whether a checkout's credits reached the balance; it also settles a completed checkout whose webhook is late, under the same ledger idempotency key. Organization setup can store the signup answer to "How do you want to use Opengeni?" once per person and organization.
+- 8323e90: Run Slack account MCP tools through a reviewed Web API bridge while preserving OAuth, exact account authority, and tool approvals. Add scope-aware discovery and shared app/workspace request quotas for unlisted pilots. Preserve bot reaction and message tasks under throttled optional context, and remove unavailable generic Real-time Search.
+
+  Migration 0597 requires stopped application processes and matching role provisioning before starting this release.
+
+- 8f8629d: Remove an unused query import from the shared subscription-account repository so strict source-contract checks pass without changing account selection behavior.
+- Updated dependencies [aa41b15]
+- Updated dependencies [af57cf9]
+- Updated dependencies [8ce490f]
+- Updated dependencies [692a1f5]
+- Updated dependencies [a651f55]
+- Updated dependencies [e0d4bd4]
+- Updated dependencies [c7c09fd]
+- Updated dependencies [2f09c54]
+- Updated dependencies [303ed6c]
+- Updated dependencies [9ca494c]
+- Updated dependencies [3cc26b5]
+- Updated dependencies [3395acc]
+- Updated dependencies [18216d2]
+- Updated dependencies [81a5d9d]
+- Updated dependencies [746464c]
+- Updated dependencies [fa0a9ef]
+- Updated dependencies [6cdc0aa]
+- Updated dependencies [b32b5f6]
+- Updated dependencies [0fba21e]
+- Updated dependencies [97d4f07]
+- Updated dependencies [14e95e9]
+- Updated dependencies [8323e90]
+  - @opengeni/contracts@5.8.0
+  - @opengeni/config@3.4.0
+  - @opengeni/network@0.3.2
+  - @opengeni/observability@0.8.39
+  - @opengeni/codemode@0.7.1
+  - @opengeni/codex@0.2.33
+
 ## 6.6.0
 
 ### Minor Changes

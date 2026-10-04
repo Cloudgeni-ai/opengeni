@@ -208,12 +208,22 @@ retain their prior workspace ownership instead of guessing an owner.
 
 The **Knowledge** page (`/state`) has **Library**, **Instructions** and
 **Review** tabs; Review shows only while proposals wait. Entries, collections,
-the Learning settings and add/edit flows open as pages with a back link, each
+the Agent learning settings and add/edit flows open as pages with a back link, each
 addressed by URL. Files are a **Files** Type filter in the Library, and
 **Add → Upload files** saves originals that become File entries. Opening a file
 shows its preview, extracted text and a link to related Knowledge. Old
 `view=files` links open the Library filtered to files, and `view=skills` links
-open Capabilities → Skills. Old Memory and Documents links redirect to Knowledge.
+open Capabilities → Skills. Old Memory and Documents links redirect to Knowledge;
+a Documents `?authority=` link, and `?scope=` on `/state`, open the Library
+filtered to that scope (Organization identity > Organization documents uses it).
+
+**Agent learning** (Knowledge ⋯ → Agent learning) holds the workspace defaults
+for shared chats and your private-chat defaults, each row Off / Review first /
+Automatic. Organization owners also see an **Organization identity** row there,
+in the same words, for the separate company-profile agent policy. One chat's own
+override lives in the session dock's **Agent** tab, next to its identity and
+capabilities; the composer's **+ → Chat settings** opens it. A new chat still
+sets its draft choice in **+ → Chat settings**, and a schedule on its form.
 
 The workspace rail marks Knowledge with an indicator while accessible Knowledge
 proposals await review. That link opens the Review tab directly.

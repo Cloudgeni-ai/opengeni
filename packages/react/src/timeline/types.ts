@@ -586,6 +586,12 @@ export type TimelineGroup =
         responseStartedAt?: string;
         waiting?: { label: string; since: string };
         details: TimelineGroup[];
+        /**
+         * While the turn is live, its progress notes stay readable above the
+         * work row and are also listed in `details`. These are their item ids,
+         * so an expanded work disclosure can fold the outside copies away.
+         */
+        liveNoteIds?: string[];
       };
     }
   | {

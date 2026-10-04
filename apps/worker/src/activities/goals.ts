@@ -375,11 +375,11 @@ export async function goalRunBudgetBlocked(
   const denial = await agentRunAdmissionDenial(services, { ...input, requestedAgentRuns: 1 });
   if (denial === null) return null;
   if (denial === "allowance_exhausted") {
-    return { pausedReason: "allowance", message: "OpenGeni usage allowance exhausted" };
+    return { pausedReason: "allowance", message: "Opengeni usage allowance exhausted" };
   }
   const limits = configuredStaticUsageLimits(services.settings);
   const messages = {
-    insufficient_credits: "insufficient OpenGeni credits",
+    insufficient_credits: "insufficient Opengeni credits",
     monthly_model_cost_limit: `monthly model cost limit reached (${limits.maxMonthlyCostMicrosPerAccount} micros)`,
     monthly_agent_run_limit: `monthly agent run limit reached (${limits.maxMonthlyAgentRunsPerWorkspace})`,
   };

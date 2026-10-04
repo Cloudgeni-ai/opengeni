@@ -10,7 +10,6 @@ import {
 import { updateSessionAgent } from "../src/domain/sessions";
 
 const settings = testSettings({
-  agentConfigAdmissionEnabled: true,
   mcpServers: [
     { id: "opengeni", url: "https://opengeni.example/mcp", cacheToolsList: false },
     { id: "docs", url: "https://docs.example/mcp", cacheToolsList: false },
@@ -45,7 +44,7 @@ function config(enabled: boolean): ResolvedAgentConfig {
       },
     },
     workspace: { defaults: null, humanInputEnabled: true },
-    deployment: { unavailable: {}, admissionEnabled: true, defaultForNewSessions: false },
+    deployment: { unavailable: {} },
     goal: false,
   }).config!;
 }

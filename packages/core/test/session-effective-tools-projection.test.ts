@@ -23,7 +23,7 @@ function session(capabilities: AgentCapabilities = "all", overrides: Partial<Ses
   const agent = resolveAgentConfig({
     creator: "api",
     request: { capabilities },
-    deployment: { unavailable: {}, admissionEnabled: true, defaultForNewSessions: false },
+    deployment: { unavailable: {} },
     workspace: { defaults: null, humanInputEnabled: true },
     goal: false,
   }).config!;

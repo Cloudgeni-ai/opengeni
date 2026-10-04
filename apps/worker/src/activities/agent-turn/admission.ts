@@ -422,7 +422,7 @@ export function modelCallReservationQuantities(input: {
       { ...input.settings, modelPricingJson: JSON.stringify({ [pricedModel]: worst }) },
       pricedModel,
       { inputTokens: inputBound, outputTokens: reservedOutput, totalTokens: tokens },
-      { latencyMode: input.latencyMode ?? "standard" },
+      { latencyMode: input.latencyMode ?? "standard", reserveInputClassRounding: true },
     ).creditCostMicros;
   }
   return { tokens, costMicros };
@@ -548,7 +548,7 @@ export async function ensureRunAllowed(
       quantity: 1,
     });
     if (!decision.allowed) {
-      throw new UsageBudgetExceededError(decision.reason || "insufficient OpenGeni credits");
+      throw new UsageBudgetExceededError(decision.reason || "insufficient Opengeni credits");
     }
   } else if (
     chargesOpenGeniCredits &&
@@ -556,7 +556,7 @@ export async function ensureRunAllowed(
   ) {
     const balance = await getBillingBalance(db, accountId);
     if (balance.balanceMicros <= 0) {
-      throw new UsageBudgetExceededError("insufficient OpenGeni credits");
+      throw new UsageBudgetExceededError("insufficient Opengeni credits");
     }
   }
   if (chargesOpenGeniCredits) {

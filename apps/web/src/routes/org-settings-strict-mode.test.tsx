@@ -428,9 +428,10 @@ describe("organization billing StrictMode ownership", () => {
     container.remove();
   });
 
-  test("updates the organization-wide agent identity mode with CAS", async () => {
+  test("shows the identity agent policy as one Agent learning row that opens Agent learning", async () => {
     getCompanyProfileAgentPolicy.mockClear();
     updateCompanyProfileAgentPolicy.mockClear();
+    navigate.mockClear();
     const container = document.createElement("div");
     document.body.appendChild(container);
     const root = createRoot(container);
@@ -444,39 +445,63 @@ describe("organization billing StrictMode ownership", () => {
     });
     await flush();
 
-    expect(getCompanyProfileAgentPolicy.mock.calls.length).toBeGreaterThanOrEqual(2);
+    expect(getCompanyProfileAgentPolicy.mock.calls.length).toBeGreaterThanOrEqual(1);
     expect(
       Array.from(container.querySelectorAll("h2")).map((heading) => heading.textContent?.trim()),
     ).toEqual(expect.arrayContaining(["Identity and mission", "Agent changes", "Documents"]));
     expect(container.textContent).toContain("Organization documents");
     expect(container.textContent).not.toContain("Company");
-    expect(container.textContent).toContain("Require approval");
-    expect(container.textContent).not.toContain("Review first");
-    const automatic = container.querySelector<HTMLButtonElement>(
-      'button[role="radio"][value="automatic"]',
-    );
-    if (!automatic) throw new Error("Missing Automatic policy option");
+    // One vocabulary: `suggest` reads as Review first, never "Require approval".
+    expect(container.textContent).toContain("Review first");
+    expect(container.textContent).not.toContain("Require approval");
+    // No second control here: the mode changes on Agent learning.
+    expect(container.querySelector('button[role="radio"][value="automatic"]')).toBeNull();
+    const row = [
+      ...container.querySelectorAll<HTMLElement>("[data-slot=setting-nav-row] > *"),
+    ].find((element) => element.textContent?.includes("Agent learning"));
+    if (!row) throw new Error("Missing Agent learning row");
     await act(async () => {
-      automatic.click();
+      row.click();
       await Promise.resolve();
     });
-    await flush();
-
-    expect(updateCompanyProfileAgentPolicy).toHaveBeenCalledTimes(1);
-    expect(updateCompanyProfileAgentPolicy.mock.calls[0]?.[0]).toBe(workspaceId);
-    expect(updateCompanyProfileAgentPolicy.mock.calls[0]?.[1]).toMatchObject({
-      mode: "automatic",
-      expectedVersion: 0,
+    expect(navigate).toHaveBeenCalledWith({
+      to: "/workspaces/$workspaceId/state",
+      params: { workspaceId },
+      search: { page: "learning" },
     });
-    expect(updateCompanyProfileAgentPolicy.mock.calls[0]?.[1].operationId).toMatch(
-      /^[0-9a-f-]{36}$/,
-    );
-    expect(container.textContent).toContain(
-      "Agents can now apply identity changes an owner asks for.",
-    );
+    expect(updateCompanyProfileAgentPolicy).not.toHaveBeenCalled();
 
     await act(async () => root.unmount());
     container.remove();
+  });
+
+  test("Organization documents opens Knowledge filtered to the organization", async () => {
+    navigate.mockClear();
+    const container = document.createElement("div");
+    document.body.appendChild(container);
+    const root = createRoot(container);
+    try {
+      await act(async () => {
+        root.render(<OrgSettingsRoute workspaceId={workspaceId} section="identity" />);
+      });
+      await flush();
+      const row = [
+        ...container.querySelectorAll<HTMLElement>("[data-slot=setting-nav-row] > *"),
+      ].find((element) => element.textContent?.includes("Organization documents"));
+      if (!row) throw new Error("Missing Organization documents row");
+      await act(async () => {
+        row.click();
+        await Promise.resolve();
+      });
+      expect(navigate).toHaveBeenCalledWith({
+        to: "/workspaces/$workspaceId/state",
+        params: { workspaceId },
+        search: { scope: "organization" },
+      });
+    } finally {
+      await act(async () => root.unmount());
+      container.remove();
+    }
   });
 
   test("discards an old organization policy load after the route identity changes", async () => {
@@ -519,11 +544,11 @@ describe("organization billing StrictMode ownership", () => {
       });
       await flush();
 
-      const selectedMode = () =>
-        container
-          .querySelector<HTMLButtonElement>('button[role="radio"][data-state="checked"]')
-          ?.getAttribute("value");
-      expect(selectedMode()).toBe("automatic");
+      const shownMode = () =>
+        [...container.querySelectorAll<HTMLElement>("[data-slot=setting-nav-row]")]
+          .find((row) => row.textContent?.includes("Agent learning"))
+          ?.textContent?.match(/Automatic|Review first|Off/)?.[0];
+      expect(shownMode()).toBe("Automatic");
 
       await act(async () =>
         resolveOldPolicy({
@@ -534,19 +559,7 @@ describe("organization billing StrictMode ownership", () => {
         }),
       );
       await flush();
-      expect(selectedMode()).toBe("automatic");
-
-      const off = container.querySelector<HTMLButtonElement>('button[role="radio"][value="off"]');
-      if (!off) throw new Error("Missing Off policy option");
-      await act(async () => {
-        off.click();
-        await Promise.resolve();
-      });
-      await flush();
-      expect(updateCompanyProfileAgentPolicy).toHaveBeenCalledWith(
-        otherWorkspaceId,
-        expect.objectContaining({ mode: "off", expectedVersion: 7 }),
-      );
+      expect(shownMode()).toBe("Automatic");
     } finally {
       getCompanyProfileAgentPolicy.mockImplementation(defaultGetCompanyProfileAgentPolicy);
       workspace.id = workspaceId;
@@ -577,8 +590,10 @@ describe("organization billing StrictMode ownership", () => {
       await flush();
 
       expect(getCompanyProfileAgentPolicy).not.toHaveBeenCalled();
-      expect(container.textContent).not.toContain("Agent-managed organization identity mode");
-      expect(container.textContent).toContain("Agent-managed organization identity is owner-only");
+      expect(container.textContent).not.toContain("Agent learning");
+      expect(container.textContent).toContain(
+        "Only organization owners can change whether agents may update the identity",
+      );
     } finally {
       accountRole = "owner";
       await act(async () => root.unmount());

@@ -1,5 +1,56 @@
 # @opengeni/contracts
 
+## 1.0.2
+
+### Patch Changes
+
+- 4476ca7: Share connected-account identity labels across the web UI and agent MCP bindings. Save Slack username and workspace name from the existing verified authentication response without requesting additional scopes.
+
+  Allow settings to include inactive accounts in the owning user's organization-wide account inventory, while keeping execution account lists active-only by default.
+
+- e16aa17: Use the receiving chat's accepted execution context for ordinary same-user agent updates, so different sender account selections do not fragment batches or change the receiving chat's accounts. Preserve explicit authorization for other users and restricted sources, and add factual model-only notes for known tool selection differences.
+
+## 1.0.0
+
+### Major Changes
+
+- Reset package versioning: every published `@opengeni/*` package now releases together at one shared version, starting at 1.0.0. Install all `@opengeni` packages at the same version. Earlier versions are retired.
+
+## 5.8.0
+
+### Minor Changes
+
+- 692a1f5: Show models by their clean display name and maker logo outside model settings. Add `modelDisplayName`/`modelVendor` (`@opengeni/sdk/model-display`) and `ModelName`/`ModelMark` (`@opengeni/react`). Picker rows, triggers, queue rows and fleet tiles no longer show routing ids, and organization- and workspace-connected copies of one model share one "API keys" group and render identically.
+- e0d4bd4: Extend the dedicated Insights contracts with recorded source/plan and leaf-session dimensions, workspace grouping in both scopes, authorized person amount keys, and inclusive custom UTC calendar-day queries of at most 370 days. Custom dates and their resolved current/prior windows must stay within years 0001 through 9999. Preserve monetary totals, knownness, and ledger-only priors; missing source provenance is other and missing recorded plan snapshots are unknown.
+- 9ca494c: Add the shared Insights usage/calls schemas on a dedicated subpath, with scoped repeated/comma query validation, safe numeric/date bounds, and coherent payer and recorded list-cost coverage. Backend routes and SDK methods are shipped separately.
+- 18216d2: Add secret-free, fresh-only Modal native proof v2 descriptions and the complete fixed prebinding preparation recipe. These structural exports grant no host, provider, capture, Start, replay, or semantic continuation authority and do not activate a producer.
+- 746464c: Add a launch-load safety switch that pauses new managed account sign-ups without affecting existing users. Rolling migration 0585 adds an append-only, operator-only runtime switch (`set_managed_auth_new_signups_enabled`, read by the API on every sign-up decision, so a flip applies to the next request with no restart), and `OPENGENI_MANAGED_AUTH_NEW_SIGNUPS_ENABLED=false` remains the deployment ceiling. While paused, email sign-up returns `403` with code `NEW_SIGNUPS_PAUSED` and Google/GitHub refuse unknown provider accounts with `error=signup_disabled`; sign-in, sessions, password reset, email verification, and invitation-bound account setup keep working. The managed-session client config gains an additive `newSignupsEnabled` field (absent means `true`), `@opengeni/contracts` exports `MANAGED_AUTH_NEW_SIGNUPS_PAUSED_CODE`, `@opengeni/db` exports `readManagedAuthNewSignupsSwitch`, and the control worker publishes `opengeni_managed_auth_new_signups_runtime_enabled`.
+- 0fba21e: Schedule messages in existing chats without duplicating execution settings. Default conversational scheduling to the calling chat, add lossless message edits and guarded retargeting, and preserve captured account authority. Improve destination controls, exact prompt retrieval and filtered history paging; remove obsolete deployment guidance.
+- 14e95e9: Redeem a Stripe promotion code at checkout: `createBillingCheckout` accepts `promotionCode`, and a fixed-amount USD code sets the credits by itself, so a $100 code buys exactly $100 of credits. Add `getBillingCheckout` to read whether a checkout's credits reached the balance; it also settles a completed checkout whose webhook is late, under the same ledger idempotency key. Organization setup can store the signup answer to "How do you want to use Opengeni?" once per person and organization.
+
+### Patch Changes
+
+- aa41b15: Use hosted Atlassian MCP for Jira and Confluence agent access. Retire native API tools and Knowledge sync admission while preserving historical wire types, encrypted grants, imported Documents and cleanup paths. Existing native schedules no longer fetch provider content; pending authorization attempts settle without exchanging a native grant. Google Drive integration is unchanged.
+- af57cf9: Use canonical ComputerSession frames and actions for screen and window viewers. Preserve the painted frame fence, reflect authorized human input availability, and enforce human sandbox input policy on each action while retaining separate agent tool authority. Older controllers keep frame viewing behind an encrypted proxy without receiving RFB input grants.
+
+  App-only viewers require an explicit current input posture before enabling mutations. Refresh rechecks permission without starting a stream or native action, and physical machine screen-control consent remains separate from viewing.
+
+- 8ce490f: Support multiple Claude subscription accounts with shared workspace, organization and owning-user account controls, verified browser sign-in profiles, usage windows, exact credential leases and quota-aware rotation. Preserve accepted work during capacity waits and recovery. Upgrade existing encrypted subscription credentials through the documented maintenance migration before starting matching runtime binaries.
+- c7c09fd: Preserve recorded prior-window monetary totals when model-call facts are missing. Insights prior measures may contain charged or list micros with zero recorded calls and zero coverage; only truly empty priors must be null. UTC zero-length-window rules remain unchanged.
+- 2f09c54: Add unified workspace/organization usage and visible-call readers over recorded
+  facts without changing debit or access semantics.
+  Distinguish deleted retained usage from private amounts and expose the prior
+  cache denominator and historical telemetry coverage.
+  Bound successful responses to a 60-second, authorization/visibility-fenced server
+  cache and return an actionable friendly error for statement timeouts.
+- 303ed6c: Preserve an omitted Insights sources facet when parsing interim usage responses. An explicit sources array advertises implemented source/custom support; validation must not manufacture that capability for an older raw backend.
+- 3395acc: Automatically reuse the existing send credential hook for approval/human-input responses, with atomic write-only MCP header updates and no integration changes.
+- 6cdc0aa: Agent configuration is always on. The `OPENGENI_AGENT_CONFIG_ADMISSION_ENABLED` and `OPENGENI_AGENT_CONFIG_DEFAULT_FOR_NEW_SESSIONS` settings are removed: `agent` is admitted on every surface, and a top-level session that omits it resolves to the workspace default or `{ capabilities: "all" }`. The client config still reports `agentConfig.enabled` and `defaultForNewSessions` (deprecated, always `true`).
+- 97d4f07: Require an explicit server-enforced screen grant for managed ComputerSession RFB input. Preserve viewing with pixel-only grants, recheck controller and target authority before forwarding packets, and use canonical frames and actions with older controllers. Desktop viewers default old attachments to view only.
+- 8323e90: Run Slack account MCP tools through a reviewed Web API bridge while preserving OAuth, exact account authority, and tool approvals. Add scope-aware discovery and shared app/workspace request quotas for unlisted pilots. Preserve bot reaction and message tasks under throttled optional context, and remove unavailable generic Real-time Search.
+
+  Migration 0597 requires stopped application processes and matching role provisioning before starting this release.
+
 ## 5.7.0
 
 ### Minor Changes

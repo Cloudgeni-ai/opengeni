@@ -118,6 +118,7 @@ export const SECTION_KEYS = [
   "page-access",
   "page-api-keys",
   "page-connected-agents",
+  "page-service-accounts",
   "page-models",
   "page-variable-sets",
   "page-variable-set-detail",
@@ -849,6 +850,14 @@ export const SECTIONS: readonly SectionMeta[] = [
       "Outside agents working in the organization over MCP: whose they are, what they can do and where.",
     usedOn: "Organization settings > Developer, agent sign-in",
     load: () => import("./page-connected-agents"),
+  },
+  {
+    key: "page-service-accounts",
+    group: "Pages",
+    title: "Service accounts",
+    purpose: "Organization identities with no person behind them, and the API keys each holds.",
+    usedOn: "Organization settings > Developer",
+    load: () => import("./page-service-accounts"),
   },
   {
     key: "page-models",

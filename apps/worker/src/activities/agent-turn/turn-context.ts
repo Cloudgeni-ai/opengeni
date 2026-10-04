@@ -91,8 +91,9 @@ export type BillingState = {
    * matched to responses through the admission FIFO — a rejected call's
    * ordinal is retired, never released by a later call's response. Quantities
    * are the committed hold — admission is all-or-nothing, never clamped.
-   * Releases ride the atomic usage write or the terminal settlement/attempt
-   * close; a crash leaves the hold to age out by TTL.
+   * Releases ride an authoritative atomic usage write or proven pre-dispatch
+   * refusal. Uncertain dispatched calls retain their durable holds across
+   * attempt closure, recovery, and month changes; time alone never releases them.
    */
   pendingUsageReservations: Map<string, { tokens?: number; costMicros?: number }>;
 };

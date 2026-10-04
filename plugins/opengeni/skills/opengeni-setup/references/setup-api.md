@@ -1,7 +1,8 @@
 # Setup: exact REST and SDK calls
 
 Execute in this order. The coding agent uses ordinary HTTPS and its own
-computer; it does not call an OpenGeni MCP server. Requests below are checked
+computer, or the `opengeni` MCP tools when available (`opengeni_action_call`
+runs these same routes as the signed-in user). Requests below are checked
 against `apps/api/src/routes` and `packages/contracts` in this release.
 [setup-sdk.ts](setup-sdk.ts) provides corresponding SDK calls and verification.
 
@@ -73,8 +74,9 @@ testing without the person opening the UI. Save the one-time `token`
 without logging the response. A lost creation response needs inventory and
 administrator revocation/replacement, not a blind repeated POST.
 
-The stored scopes are exactly `workspace:create`, `workspace:admin` and
-`usage_allowances:manage`, with a 24-hour default expiry. The setup tier does
+The full-access key uses the explicit 30-day expiry above. In contrast,
+the limited `developer_setup` tier stores exactly `workspace:create`, `workspace:admin` and
+`usage_allowances:manage`, with a 24-hour default expiry. The limited tier does
 not permit key inventory, minting, revocation or credential-management
 delegation despite its workspace-admin scope. Budget writes additionally
 require the canonical same-organization key; do not perform them with an
@@ -300,8 +302,8 @@ the saved source id/name; creation has no idempotency key. Save the returned
 
 Keep `firstPartyMcpTools: []` and `firstPartyMcpPermissions: []` for this
 product-only automation. Automation templates also default omitted arrays to
-`[]`; neither form inherits OpenGeni permissions. Startup skips remote
-OpenGeni-delegated MCP preparation without minting a token or calling its
+`[]`; neither form inherits Opengeni permissions. Startup skips remote
+Opengeni-delegated MCP preparation without minting a token or calling its
 endpoint. Requested first-party tools or dedicated `files`/`docs` remain
 unavailable with an `insufficient_scope` advisory. Do not pad the grant with
 `sessions:read`. The installed product server keeps its separately authorized
@@ -439,7 +441,6 @@ by the authenticated administrator, without widening this setup key.
 | 403 | Read `/v1/access/me` and the exact denied permission; verify the organization and that the key is the full-access setup key. |
 | 404 | Recheck deployment feature availability and workspace ownership; never fall back to Personal or production. |
 | 409 | Read current version/digest/grant and compare intended change. Repreview schema drift. Don't reuse an operation id with changed inputs. |
-| 422 `agent_config_not_enabled` | Send no `agent`/`sessionAgentDefaults`; use the explicit legacy path and report agent defaults unconfigured. |
 | 422 `agent_capability_unavailable` | Read advertised capabilities, remove only an optional unsupported capability, otherwise report the missing feature. |
 | 429, 5xx, timeout | Retry reads with bounded backoff. Reconcile writes via mapping/id/operation receipts before any retry; non-idempotent POSTs can have succeeded. |
 | `requires_action` | Inspect approval/human-input events. Let the authenticated user resolve a real required decision, not a fabricated response. |

@@ -263,6 +263,10 @@ const SettingsSchema = z.object({
   // Absent on dev/source builds — consumers must treat it as optional.
   serverVersion: z.string().optional(),
   databaseUrl: z.string().default("postgres://opengeni:opengeni@127.0.0.1:5432/opengeni"),
+  // API application pool only. Managed auth owns its separate pool; readiness
+  // reuses the application handle. Keep the historical default for existing
+  // deployments and let operators budget this per process with replica counts.
+  apiDatabasePoolMax: z.coerce.number().int().positive().default(32),
   // Step I (§7.8 runtime half). Dedicated Postgres schema for the EMBEDDED
   // topology. Default "" → standalone: no search_path scoping, server default
   // (`public`). When set (e.g. "opengeni"), the db handle + the managed-auth
@@ -454,6 +458,10 @@ const SettingsSchema = z.object({
   integrationsOauthShortStateEnabled: EnvBoolean.default(false),
   integrationsAllowPrivateNetworkTargets: EnvBoolean.default(false),
   integrationsOauthClientsJson: z.string().default("{}"),
+  gmailWatchTopicName: z
+    .string()
+    .regex(/^projects\/[^/]+\/topics\/[^/]+$/u)
+    .optional(),
   slackClientId: z.string().optional(),
   slackClientSecret: z.string().optional(),
   slackSigningSecret: z.string().optional(),
@@ -851,17 +859,6 @@ const SettingsSchema = z.object({
   // merged with the MCP-server tools (getAllTools = [...mcpTools, ...tools])
   // and the sandbox capability tools, never replacing them.
   webSearchEnabled: EnvBoolean.default(true),
-  // Agent configuration rollout (packages/contracts/src/agent-config.ts).
-  // Admission: when false the API rejects every `agent` input (and the
-  // mid-session update) with 422 agent_config_not_enabled, and stored
-  // workspace agent defaults are ignored. Enable only after every worker
-  // understands sessions.agent_config (migration 0559). Workers always honor
-  // stored configurations regardless of this switch.
-  agentConfigAdmissionEnabled: EnvBoolean.default(false),
-  // When true, a new top-level session that omits `agent` (and has no
-  // legacy parent) resolves `{ capabilities: "all" }`. Old workers ignoring an
-  // "all" configuration still produce today's full tool set.
-  agentConfigDefaultForNewSessions: EnvBoolean.default(false),
   // Jev (TypeSafe's fast judge model) for worker-side agent tools. Without a
   // usable key every Jev-backed feature is off. The key stays on the server
   // (API and worker) and never reaches a sandbox or Connected Machine.
@@ -1720,26 +1717,17 @@ export function usableJevApiKey(settings: Pick<Settings, "jevApiKey">): string |
   return usableDeploymentSecret(settings.jevApiKey);
 }
 
-/** Deployment half of agent configuration: rollout switches plus hard capability limits. */
+/** Deployment half of agent configuration: hard capability limits. */
 export function agentConfigDeploymentPolicy(
   settings: Pick<
     Settings,
-    | "agentConfigAdmissionEnabled"
-    | "agentConfigDefaultForNewSessions"
-    | "webSearchEnabled"
-    | "defaultFirstPartyMcpTools"
-    | "allowedFirstPartyMcpTools"
+    "webSearchEnabled" | "defaultFirstPartyMcpTools" | "allowedFirstPartyMcpTools"
   >,
-): AgentConfigDeploymentLimits & { admissionEnabled: boolean; defaultForNewSessions: boolean } {
-  const limits = agentConfigDeploymentLimitsFromAllowlist(
+): AgentConfigDeploymentLimits {
+  return agentConfigDeploymentLimitsFromAllowlist(
     resolveFirstPartyMcpToolPolicy(settings).allowed,
     settings.webSearchEnabled ? {} : { webSearch: "web search is turned off on this server" },
   );
-  return {
-    ...limits,
-    admissionEnabled: settings.agentConfigAdmissionEnabled === true,
-    defaultForNewSessions: settings.agentConfigDefaultForNewSessions === true,
-  };
 }
 
 /**
@@ -3433,6 +3421,7 @@ export function getSettings(source: NodeJS.ProcessEnv = process.env): Settings {
       optional("GITHUB_SHA"),
     serverVersion: optional("OPENGENI_SERVER_VERSION"),
     databaseUrl: optional("OPENGENI_DATABASE_URL"),
+    apiDatabasePoolMax: optional("OPENGENI_API_DATABASE_POOL_MAX"),
     dbSchema: optional("OPENGENI_DB_SCHEMA"),
     rlsStrategy: optional("OPENGENI_RLS_STRATEGY"),
     runtimeDatabaseRole: optional("OPENGENI_RUNTIME_DATABASE_ROLE"),
@@ -3519,6 +3508,7 @@ export function getSettings(source: NodeJS.ProcessEnv = process.env): Settings {
       "OPENGENI_INTEGRATIONS_ALLOW_PRIVATE_NETWORK_TARGETS",
     ),
     integrationsOauthClientsJson: optional("OPENGENI_INTEGRATIONS_OAUTH_CLIENTS_JSON"),
+    gmailWatchTopicName: optional("OPENGENI_GMAIL_WATCH_TOPIC_NAME"),
     slackClientId: optional("OPENGENI_SLACK_CLIENT_ID"),
     slackClientSecret: optional("OPENGENI_SLACK_CLIENT_SECRET"),
     slackSigningSecret: optional("OPENGENI_SLACK_SIGNING_SECRET"),
@@ -3656,8 +3646,6 @@ export function getSettings(source: NodeJS.ProcessEnv = process.env): Settings {
     openaiReasoningEncryptedContent: optional("OPENGENI_OPENAI_REASONING_ENCRYPTED_CONTENT"),
     openaiMaxRetries: optional("OPENGENI_OPENAI_MAX_RETRIES"),
     webSearchEnabled: optional("OPENGENI_WEB_SEARCH_ENABLED"),
-    agentConfigAdmissionEnabled: optional("OPENGENI_AGENT_CONFIG_ADMISSION_ENABLED"),
-    agentConfigDefaultForNewSessions: optional("OPENGENI_AGENT_CONFIG_DEFAULT_FOR_NEW_SESSIONS"),
     jevApiKey: optional("OPENGENI_JEV_API_KEY"),
     jevBaseUrl: optional("OPENGENI_JEV_BASE_URL"),
     jevModel: optional("OPENGENI_JEV_MODEL"),
@@ -6535,7 +6523,7 @@ export function calculateModelUsageCostBreakdown(
   settings: Settings,
   model: string,
   usage: ModelUsageInput,
-  options?: { latencyMode?: LatencyMode },
+  options?: { latencyMode?: LatencyMode; reserveInputClassRounding?: boolean },
 ): ModelUsageCostBreakdown {
   const schedule = configuredModelPricingSchedules(settings)[model];
   return calculateUsageCostBreakdown(settings, model, usage, schedule, options);
@@ -6844,7 +6832,7 @@ function calculateUsageCostBreakdown(
   model: string,
   usage: ModelUsageInput,
   schedule: ModelPricingScheduleV1 | undefined,
-  options?: { latencyMode?: LatencyMode },
+  options?: { latencyMode?: LatencyMode; reserveInputClassRounding?: boolean },
 ): ModelUsageCostBreakdown {
   if (!schedule) {
     throw new Error(`Missing model pricing for ${model}`);
@@ -6856,9 +6844,17 @@ function calculateUsageCostBreakdown(
   const rawCostByPricing = new Map<ModelPricing, number>();
   for (const entry of entries) {
     const pricing = selectModelPricing(schedule, positiveInt(entry.inputTokens));
+    // Admission collapses three input classes to their worst rate. Separate
+    // ceil operations can add at most two micros before margin/tier multipliers.
+    const inputRoundingAllowance =
+      options?.reserveInputClassRounding && pricing.inputMicrosPerMillionTokens % 1_000_000 !== 0
+        ? Math.min(2, Math.max(0, positiveInt(entry.inputTokens) - 1))
+        : 0;
     rawCostByPricing.set(
       pricing,
-      (rawCostByPricing.get(pricing) ?? 0) + calculateEntryCostMicros(pricing, entry),
+      (rawCostByPricing.get(pricing) ?? 0) +
+        calculateEntryCostMicros(pricing, entry) +
+        inputRoundingAllowance,
     );
   }
   let providerCostMicros = 0;

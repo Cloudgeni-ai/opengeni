@@ -1169,6 +1169,30 @@ async function insertModelCallFactFromUsageEvent(
   const providerApi = typeof payload.providerApi === "string" ? payload.providerApi : null;
   const model = typeof payload.model === "string" ? payload.model : null;
   if (!sourceKey || !provider || !providerApi || !model) return false;
+  // Durable annotations are frozen observations, never recomputed prices.
+  const safeMicros = (value: unknown): number | null =>
+    typeof value === "number" && Number.isSafeInteger(value) && value >= 0 ? value : null;
+  const durableEstimate = safeMicros(payload.estimatedProviderCostMicros);
+  const durablePricingSource =
+    payload.pricingSource === "configured_list_price" ||
+    payload.pricingSource === "gateway_reported"
+      ? payload.pricingSource
+      : null;
+  const estimate = durablePricingSource === null ? null : durableEstimate;
+  const classPayload =
+    payload.listByClassMicros !== null &&
+    typeof payload.listByClassMicros === "object" &&
+    !Array.isArray(payload.listByClassMicros)
+      ? (payload.listByClassMicros as Record<string, unknown>)
+      : null;
+  const classValues = ["uncachedInput", "cacheRead", "cacheWrite", "output"].map((key) =>
+    safeMicros(classPayload?.[key]),
+  );
+  const capturedClasses =
+    estimate !== null &&
+    classValues.every((value) => value !== null) &&
+    classValues.reduce<bigint>((total, value) => total + BigInt(value ?? 0), 0n) ===
+      BigInt(estimate);
   const upstreamProvider =
     typeof payload.upstreamProvider === "string" &&
     /^[a-z0-9][a-z0-9-]{0,63}$/.test(payload.upstreamProvider)
@@ -1281,6 +1305,15 @@ async function insertModelCallFactFromUsageEvent(
           ? (numberOrNull(payload.inputTokens) ?? 0) + (numberOrNull(payload.outputTokens) ?? 0)
           : null,
       pricedCostMicros,
+      estimatedProviderCostMicros: estimate,
+      equivalentCreditCostMicros:
+        estimate === null ? null : safeMicros(payload.equivalentCreditCostMicros),
+      pricingSource: estimate === null ? null : durablePricingSource,
+      listUncachedInputCostMicros: capturedClasses ? classValues[0]! : null,
+      listCacheReadCostMicros: capturedClasses ? classValues[1]! : null,
+      listCacheWriteCostMicros: capturedClasses ? classValues[2]! : null,
+      listOutputCostMicros: capturedClasses ? classValues[3]! : null,
+      listCostIsApprox: capturedClasses ? payload.listByClassApprox === true : null,
       occurredAt: event.occurredAt,
     })
     .onConflictDoNothing({

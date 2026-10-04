@@ -57,12 +57,28 @@ export async function settingsWithSessionMcpServersForRun(
   },
 ): Promise<Settings> {
   const encryptionKey = environmentsEncryptionKeyBytes(settings);
-  const policies = await getSessionAttemptMcpApprovalPolicies(
-    db,
-    workspaceId,
-    sessionId,
-    attemptId,
-  );
+  let policies: Awaited<ReturnType<typeof getSessionAttemptMcpApprovalPolicies>>;
+  let resolvedServers: SessionMcpServerForRun[] | undefined;
+  if (encryptionKey && typeof (db as Database & { rollback?: unknown }).rollback !== "function") {
+    // Both readers independently fence this exact active attempt. The server
+    // read must remain fresh for credential renewal; it does not consume the
+    // policy read's result. Root-pool RLS transactions may overlap, whereas
+    // nested scopes on a transaction handle must retain serial savepoints.
+    const [policyResult, serverResult] = await Promise.allSettled([
+      (async () =>
+        await getSessionAttemptMcpApprovalPolicies(db, workspaceId, sessionId, attemptId))(),
+      (async () =>
+        await listSessionMcpServersForRun(db, workspaceId, sessionId, attemptId, encryptionKey))(),
+    ]);
+    // Observe both reads before returning or propagating an error. Preserve the
+    // previous policy-first diagnostic priority, including synchronous ports.
+    if (policyResult.status === "rejected") throw policyResult.reason;
+    if (serverResult.status === "rejected") throw serverResult.reason;
+    policies = policyResult.value;
+    resolvedServers = serverResult.value;
+  } else {
+    policies = await getSessionAttemptMcpApprovalPolicies(db, workspaceId, sessionId, attemptId);
+  }
   const policySettings = {
     ...settings,
     mcpServers: settings.mcpServers.map((server) =>
@@ -82,13 +98,15 @@ export async function settingsWithSessionMcpServersForRun(
       );
     }
   }
-  const servers = await listSessionMcpServersForRun(
-    db,
-    workspaceId,
-    sessionId,
-    attemptId,
-    encryptionKey ?? null,
-  );
+  const servers =
+    resolvedServers ??
+    (await listSessionMcpServersForRun(
+      db,
+      workspaceId,
+      sessionId,
+      attemptId,
+      encryptionKey ?? null,
+    ));
   // Keep credential provenance coupled to the exact decrypted rows that are
   // overlaid into settings. A session projection read earlier in the turn can
   // be stale after a concurrent mcpCredentialUpdates renewal.
