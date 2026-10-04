@@ -23,6 +23,7 @@ import {
   developerSetupKeyRequest,
   developerSetupModelContext,
 } from "@/lib/onboarding-use-case";
+import { clearPendingDeveloperSetup } from "@/lib/pending-developer-setup";
 
 /** Where onboarding sends the person when it finishes somewhere other than home. */
 export type OnboardingDestination = { workspaceId: string; sessionId: string };
@@ -113,6 +114,7 @@ export function DeveloperSetupStep({
     (via: "copied_prompt" | "skipped") => {
       if (opening) return;
       onboardingJourney().completed("developer_setup", via);
+      clearPendingDeveloperSetup();
       onComplete();
     },
     [onComplete, opening],
@@ -156,6 +158,7 @@ export function DeveloperSetupStep({
         idempotencyKey: sessionRequestKey.current,
       });
       onboardingJourney().completed("developer_setup", "implement_with_opengeni");
+      clearPendingDeveloperSetup();
       onComplete({ workspaceId, sessionId: session.id });
     } catch (error) {
       toast.error("Couldn't open your setup chat", { description: userErrorText(error) });
@@ -177,7 +180,7 @@ export function DeveloperSetupStep({
       setPromptCopied(true);
     } else {
       toast.error("Couldn't copy the prompt", {
-        description: "Open Preview the prompt and copy it by hand.",
+        description: "Expand “Preview the prompt” below and copy it from there.",
       });
     }
   }

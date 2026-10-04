@@ -386,7 +386,21 @@ authorized Resume or new Send/Steer requests recheck. Never repair missing
 membership/grants or invent a principal to make admission succeed. See
 `docs/run-lifecycle.md` for snapshot fencing and mixed-worker rollout limits.
 
+Ordinary same-human agent input uses the receiving session's last started
+user/API execution context. Advance its server-owned pointer only on the first
+durable `turn.started`, never queue/claim or recovery. Preserve exact receipt
+generations and live revocation; restricted/foreign inputs, schedules and Steer
+retain explicit authority. Migration 0608 requires drained writers and only
+context-aware images afterward. See `docs/durable-agent-inputs.md`.
+
 ## Pull-request delivery across moving `main`
+
+The workflow-wake reaper repairs authentic pending child terminal results for
+idle goalless parents behind fully acknowledged wake debt. Its bounded global
+identity selector is only discovery: scoped repair revalidates effective Pause,
+child-parent producer linkage, ownership and both writer gates before atomic
+queue/wake registration. Completed/paused goals remain settled; no child work
+or provider operation is replayed. See `docs/durable-agent-inputs.md`.
 
 Accepted model policies may tolerate additive latency modes and input modalities
 only by reconstructing the exact historical subset digest. Preserve the frozen
@@ -433,6 +447,13 @@ exact-current-tip ancestry requirement in prompts, goals, documentation, or
 operator procedure.
 
 ## Keeping these notes current
+
+Attached-browser recovery is per tab: debugger detachment invalidates cached
+controls; reads may attach a surviving tab with fresh authority. Explicit user
+cancellation or uncertain effects require reconnection. Partially dispatched
+input stays outcome unknown; never report it as a definite refusal. Never restart the user's
+Chrome or replay mutations to repair a disconnected debugger. See
+`docs/connected-machines.md`.
 
 Mac updates replace the complete verified signed bundle, retaining rollback.
 Pre-0.1.29 agents need the official installer: see `docs/connected-machines.md`.

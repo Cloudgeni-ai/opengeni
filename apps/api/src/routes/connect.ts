@@ -280,7 +280,7 @@ export function registerConnectRoutes(app: Hono, deps: ApiRouteDeps): void {
       }),
       ConnectProvider.parse({
         id: "github-lens",
-        label: "OpenGeni Lens PR review",
+        label: "Opengeni Lens PR review",
         family: "github-lens",
         readiness:
           !external ||

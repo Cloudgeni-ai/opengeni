@@ -3,5 +3,11 @@
   "compilerOptions": {
     "noEmit": true
   },
-  "include": ["../release-bom.ts", "../release-review.ts", "../verify-release-packages.ts"]
+  "include": [
+    "../release-bom.ts",
+    "../release-review.ts",
+    "../verify-release-packages.ts",
+    "lockstep-version.ts",
+    "deprecate-pre-1.0.ts"
+  ]
 }

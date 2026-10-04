@@ -1064,7 +1064,6 @@ function AgentScheduleForm({
               defaultModelSelection={modelCatalog.defaultSelection}
               modelsLoading={modelCatalog.loading}
               modelsError={modelCatalog.error}
-              canAttachOpenGeniTool={canAttachOpenGeniTool}
               existingChat={draft.runMode === "existing_session"}
               inheritsChatSettings={inheritsChatSettings}
             />
@@ -1145,7 +1144,7 @@ function AgentScheduleForm({
               suppressAutofill
             />
           </Field>
-          {context.clientConfig.agentConfig?.enabled && !inheritsChatSettings ? (
+          {!inheritsChatSettings ? (
             <ScheduleAgentCapabilities
               workspaceId={workspaceId}
               value={draft.agentCapabilities}

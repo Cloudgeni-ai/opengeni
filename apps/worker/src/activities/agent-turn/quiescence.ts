@@ -434,13 +434,14 @@ export async function runMandatoryHistoryPersistenceStep<T>(
 }
 
 export type OpStreamFinalizer = {
-  finalizeOpStreamOps(): Promise<void>;
+  finalizeOpStreamOps(toolCallIds?: readonly string[]): Promise<void>;
 };
 
-/** Release retained Connected Machine output only after the turn is durable. */
+/** Release only durably recorded tool results, or the complete durable turn. */
 export async function finalizeDurableTurnOpStreams(
   sessions: readonly unknown[],
   fallback: OpStreamFinalizer | null,
+  toolCallIds?: readonly string[],
 ): Promise<void> {
   const candidates = new Set<OpStreamFinalizer>();
   for (const session of sessions) {
@@ -454,7 +455,7 @@ export async function finalizeDurableTurnOpStreams(
   }
   for (const candidate of candidates) {
     try {
-      await candidate.finalizeOpStreamOps();
+      await candidate.finalizeOpStreamOps(toolCallIds);
     } catch {
       // The runner's retention TTL owns the fallback.
     }

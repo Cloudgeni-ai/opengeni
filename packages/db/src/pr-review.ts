@@ -442,7 +442,7 @@ export async function syncManagedGitHubPrReviewInstallation(
             authorityNonce: schema.prReviewManagedGithubAuthorityNonces.authorityNonce,
           });
         if (!nonceReceipt) {
-          throw new PrReviewDispatchAuthorityError("OpenGeni Lens authorization was already used");
+          throw new PrReviewDispatchAuthorityError("Opengeni Lens authorization was already used");
         }
         const [existingRegistration] = await tx
           .select()
@@ -458,7 +458,7 @@ export async function syncManagedGitHubPrReviewInstallation(
           .for("update");
 
         const registrationId = existingRegistration?.id ?? randomUUID();
-        const registrationName = `OpenGeni Lens · ${
+        const registrationName = `Opengeni Lens · ${
           input.providerAccountLogin ?? `installation ${installationId}`
         } (${installationId})`;
         let source: typeof schema.automationSources.$inferSelect;
@@ -492,7 +492,7 @@ export async function syncManagedGitHubPrReviewInstallation(
             .returning();
           if (!updatedSource) {
             throw new PrReviewDispatchAuthorityError(
-              "OpenGeni Lens automation source is unavailable",
+              "Opengeni Lens automation source is unavailable",
             );
           }
           source = updatedSource;
@@ -513,7 +513,7 @@ export async function syncManagedGitHubPrReviewInstallation(
             })
             .where(eq(schema.prReviewAppRegistrations.id, existingRegistration.id))
             .returning();
-          if (!updatedRegistration) throw new Error("Failed to update OpenGeni Lens registration");
+          if (!updatedRegistration) throw new Error("Failed to update Opengeni Lens registration");
           registration = updatedRegistration;
         } else {
           const [createdSource] = await tx
@@ -534,7 +534,7 @@ export async function syncManagedGitHubPrReviewInstallation(
               createdBySubjectId: input.createdBySubjectId,
             })
             .returning();
-          if (!createdSource) throw new Error("Failed to create OpenGeni Lens automation source");
+          if (!createdSource) throw new Error("Failed to create Opengeni Lens automation source");
           source = createdSource;
           const [createdRegistration] = await tx
             .insert(schema.prReviewAppRegistrations)
@@ -563,7 +563,7 @@ export async function syncManagedGitHubPrReviewInstallation(
               createdBySubjectId: input.createdBySubjectId,
             })
             .returning();
-          if (!createdRegistration) throw new Error("Failed to create OpenGeni Lens registration");
+          if (!createdRegistration) throw new Error("Failed to create Opengeni Lens registration");
           registration = createdRegistration;
         }
 
@@ -610,7 +610,7 @@ export async function syncManagedGitHubPrReviewInstallation(
         for (const repository of input.repositories) {
           if (repository.installationId !== input.installationId) {
             throw new PrReviewDispatchAuthorityError(
-              "OpenGeni Lens repository does not belong to the authorized installation",
+              "Opengeni Lens repository does not belong to the authorized installation",
             );
           }
           const providerRepositoryId = String(repository.id);
@@ -629,7 +629,7 @@ export async function syncManagedGitHubPrReviewInstallation(
                 createdBySubjectId: input.createdBySubjectId,
               })
               .returning();
-            if (!trigger) throw new Error("Failed to create OpenGeni Lens trigger");
+            if (!trigger) throw new Error("Failed to create Opengeni Lens trigger");
             const bindingShape = {
               registrationId,
               provider: "github" as const,
@@ -665,7 +665,7 @@ export async function syncManagedGitHubPrReviewInstallation(
                 createdBySubjectId: input.createdBySubjectId,
               })
               .returning();
-            if (!binding) throw new Error("Failed to create OpenGeni Lens repository binding");
+            if (!binding) throw new Error("Failed to create Opengeni Lens repository binding");
             await tx.insert(schema.prReviewManagedGithubRoutes).values({
               bindingId,
               accountId: input.accountId,
@@ -719,7 +719,7 @@ export async function syncManagedGitHubPrReviewInstallation(
             })
             .where(eq(schema.prReviewRepositoryBindings.id, current.binding.id))
             .returning();
-          if (!binding) throw new Error("Failed to update OpenGeni Lens repository binding");
+          if (!binding) throw new Error("Failed to update Opengeni Lens repository binding");
           await tx
             .insert(schema.prReviewManagedGithubRoutes)
             .values({

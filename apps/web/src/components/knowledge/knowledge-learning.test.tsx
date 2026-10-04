@@ -16,6 +16,24 @@ const saveAgentLearningSettings = mock(
     settings: request.settings,
   }),
 );
+const getCompanyProfileAgentPolicy = mock(async (_workspace: string) => ({
+  organizationId: "account-1",
+  mode: "suggest" as const,
+  version: 3,
+  updatedAt: "2026-10-01T00:00:00.000Z",
+}));
+const updateCompanyProfileAgentPolicy = mock(
+  async (
+    _workspace: string,
+    request: { mode: "off" | "suggest" | "automatic"; expectedVersion: number },
+  ) => ({
+    organizationId: "account-1",
+    mode: request.mode,
+    version: request.expectedVersion + 1,
+    updatedAt: "2026-10-01T00:00:00.000Z",
+    changed: true,
+  }),
+);
 const context = {
   client: {
     getAgentLearningSettings: mock(async (_workspace: string, scope: string) => ({
@@ -24,14 +42,21 @@ const context = {
       ...records[scope]!,
     })),
     saveAgentLearningSettings,
+    getCompanyProfileAgentPolicy,
+    updateCompanyProfileAgentPolicy,
   },
   captureWorkspaceInvocation: () => ({}),
   ownsWorkspaceInvocation: () => true,
 };
 mock.module("@/context", () => ({ useAppContext: () => context }));
 mock.module("sonner", () => ({ toast: Object.assign(() => 0, { error: () => 0 }) }));
-const { LearningPage, learningSummary, reviewEmptyLine, useLearningDefaults } =
-  await import("./knowledge-learning");
+const {
+  LearningPage,
+  learningSummary,
+  reviewEmptyLine,
+  useIdentityLearningPolicy,
+  useLearningDefaults,
+} = await import("./knowledge-learning");
 
 beforeAll(() => {
   GlobalRegistrator.register();
@@ -42,9 +67,16 @@ afterAll(() => {
   GlobalRegistrator.unregister();
 });
 
-function Harness({ canManageWorkspace }: { canManageWorkspace: boolean }) {
+function Harness({
+  canManageWorkspace,
+  ownsOrganization = false,
+}: {
+  canManageWorkspace: boolean;
+  ownsOrganization?: boolean;
+}) {
   const shared = useLearningDefaults(workspaceId, "workspace");
   const mine = useLearningDefaults(workspaceId, "personal");
+  const identity = useIdentityLearningPolicy(workspaceId, ownsOrganization);
   return (
     <LearningPage
       workspaceName="Design preview"
@@ -53,6 +85,7 @@ function Harness({ canManageWorkspace }: { canManageWorkspace: boolean }) {
       canManageWorkspace={canManageWorkspace}
       shared={shared}
       mine={mine}
+      identity={identity}
       onClose={() => undefined}
     />
   );
@@ -137,6 +170,83 @@ test("people who aren't workspace admins see the shared defaults but can't chang
     const radios = [...shared.querySelectorAll<HTMLButtonElement>("[role=radio]")];
     expect(radios.length).toBeGreaterThan(0);
     expect(radios.every((radio) => radio.disabled)).toBe(true);
+  } finally {
+    await act(async () => root.unmount());
+    container.remove();
+  }
+});
+
+test("the page is titled Agent learning and points per-chat changes at the chat's Agent tab", async () => {
+  const container = document.createElement("div");
+  document.body.append(container);
+  const root = createRoot(container);
+  try {
+    await act(async () => root.render(<Harness canManageWorkspace />));
+    await settle();
+    expect(container.querySelector("h1")?.textContent).toBe("Agent learning");
+    expect(container.textContent).toContain("Change them in the chat's Agent tab");
+  } finally {
+    await act(async () => root.unmount());
+    container.remove();
+  }
+});
+
+test("organization owners get an Organization identity row in the same words", async () => {
+  getCompanyProfileAgentPolicy.mockClear();
+  updateCompanyProfileAgentPolicy.mockClear();
+  const container = document.createElement("div");
+  document.body.append(container);
+  const root = createRoot(container);
+  try {
+    await act(async () => root.render(<Harness canManageWorkspace ownsOrganization />));
+    await settle();
+    expect(getCompanyProfileAgentPolicy).toHaveBeenCalledWith(workspaceId);
+    expect(container.textContent).toContain("All of Acme Robotics");
+    const identityRow = () =>
+      [...container.querySelectorAll<HTMLElement>("[data-slot=setting-row]")].find((row) =>
+        row.textContent?.startsWith("Organization identity"),
+      );
+    if (!identityRow()) throw new Error("Missing Organization identity row");
+    // `suggest` is Review first here: no "Require approval" anywhere.
+    const radios = () => [...identityRow()!.querySelectorAll<HTMLButtonElement>("[role=radio]")];
+    expect(radios().map((radio) => radio.textContent)).toEqual([
+      "Automatic",
+      "Review first",
+      "Off",
+    ]);
+    expect(
+      radios().find((radio) => radio.getAttribute("aria-checked") === "true")?.textContent,
+    ).toBe("Review first");
+    expect(container.textContent).not.toContain("Require approval");
+    expect(identityRow()!.textContent).toContain("that owner confirms them in the chat");
+    await act(async () =>
+      radios()
+        .find((radio) => radio.textContent === "Automatic")!
+        .click(),
+    );
+    await settle();
+    expect(updateCompanyProfileAgentPolicy).toHaveBeenCalledWith(
+      workspaceId,
+      expect.objectContaining({ mode: "automatic", expectedVersion: 3 }),
+    );
+    expect(identityRow()!.textContent).toContain("right away");
+  } finally {
+    await act(async () => root.unmount());
+    container.remove();
+  }
+});
+
+test("people who don't own the organization get no identity row and no policy read", async () => {
+  getCompanyProfileAgentPolicy.mockClear();
+  const container = document.createElement("div");
+  document.body.append(container);
+  const root = createRoot(container);
+  try {
+    await act(async () => root.render(<Harness canManageWorkspace />));
+    await settle();
+    expect(getCompanyProfileAgentPolicy).not.toHaveBeenCalled();
+    expect(container.textContent).not.toContain("Organization identity");
+    expect(container.textContent).not.toContain("All of Acme Robotics");
   } finally {
     await act(async () => root.unmount());
     container.remove();

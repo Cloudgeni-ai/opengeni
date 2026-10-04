@@ -90,14 +90,14 @@ function recordedFailureFacts(payload: Record<string, unknown>): {
 } {
   const text = (key: string): string | null => {
     const value = payload[key];
-    return typeof value === "string" && value.trim() ? value.trim() : null;
+    return typeof value === "string" && value.trim() ? value : null;
   };
-  const parts = [text("error") ?? text("message"), text("lastRetryableError") ?? text("detail")];
+  const parts = [text("error") ?? text("message"), text("lastRetryableError"), text("detail")];
   const recorded = parts.filter(
     (part, index): part is string => part !== null && parts.indexOf(part) === index,
   );
-  const code = text("code");
-  const quotaScope = text("quotaScope");
+  const code = text("code")?.trim();
+  const quotaScope = text("quotaScope")?.trim();
   return {
     ...(recorded.length > 0 ? { recordedDetail: recorded.join("\n") } : {}),
     ...(code ? { failureCode: code } : {}),

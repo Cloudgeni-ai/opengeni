@@ -80,7 +80,7 @@ export function machineUpdateBlockedReason(os: string, version: string | null): 
   const order = version ? compareAgentVersions(version, "0.1.29") : null;
   return order !== null && order >= 0
     ? null
-    : "Install OpenGeni Agent 0.1.29 or newer with the official Mac installer first. This older updater cannot preserve the signed application.";
+    : "Install Opengeni Agent 0.1.29 or newer with the official Mac installer first. This older updater cannot preserve the signed application.";
 }
 
 function runtimeFor(settings: Settings, enrollment: EnrollmentRecord): MachineView["runtime"] {

@@ -1165,7 +1165,7 @@ export async function provisionSandbox(
     return {
       kind: "selfhosted",
       instructions:
-        "Share one of these deployment-specific commands with a human operator. It installs the OpenGeni agent and starts `opengeni-agent connect` for this exact deployment and workspace; do not run a second bare `connect`. Complete the device-flow at the verification URL (the loud whole-machine + screen-control consent), and the machine then appears here as an attachable selfhosted sandbox. Existing connections to other OpenGeni workspaces or deployments are preserved.",
+        "Share one of these deployment-specific commands with a human operator. It installs the Opengeni agent and starts `opengeni-agent connect` for this exact deployment and workspace; do not run a second bare `connect`. Complete the device-flow at the verification URL (the loud whole-machine + screen-control consent), and the machine then appears here as an attachable selfhosted sandbox. Existing connections to other Opengeni workspaces or deployments are preserved.",
       // Install from THIS control plane's origin (not a hardcoded public CDN): the
       // served install script is rewritten to pull the per-SHA agent baked into
       // this exact deployment (see apps/api/src/routes/install.ts), so a deployed

@@ -29,7 +29,7 @@ const MAX_PAID_QUERY_MICROS_PER_MONTH = 1_000_000;
 export class KnowledgeVectorFundingError extends Error {
   readonly code = "knowledge_vector_funding_required";
   constructor() {
-    super("Knowledge vector search needs OpenGeni credits; keyword search remains available.");
+    super("Knowledge vector search needs Opengeni credits; keyword search remains available.");
     this.name = "KnowledgeVectorFundingError";
   }
 }

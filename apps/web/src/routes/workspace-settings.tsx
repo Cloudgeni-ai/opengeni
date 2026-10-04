@@ -433,23 +433,21 @@ function WorkspaceGeneralSettings({
         title="New session defaults"
         description="Applied when someone starts a new session in this workspace."
       >
-        {context.clientConfig.agentConfig?.enabled ? (
-          <SettingNavRow
-            label="Agent"
-            description="What agents can do and who they are."
-            value={workspaceAgentDefaultsSummary(
-              activeWorkspace.settings,
-              context.clientConfig.agentConfig,
-            )}
-            onOpen={() =>
-              void navigate({
-                to: "/workspaces/$workspaceId/settings",
-                params: { workspaceId },
-                search: { section: "general", view: "agent-defaults" },
-              })
-            }
-          />
-        ) : null}
+        <SettingNavRow
+          label="Agent"
+          description="What agents can do and who they are."
+          value={workspaceAgentDefaultsSummary(
+            activeWorkspace.settings,
+            context.clientConfig.agentConfig,
+          )}
+          onOpen={() =>
+            void navigate({
+              to: "/workspaces/$workspaceId/settings",
+              params: { workspaceId },
+              search: { section: "general", view: "agent-defaults" },
+            })
+          }
+        />
         <DefaultSandboxEnvironmentRow workspaceId={workspaceId} />
         <VoiceInputPreferenceRow workspaceId={workspaceId} canManage={canManageSettings} />
         <VideoGenerationPreferenceRow

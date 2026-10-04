@@ -85,17 +85,26 @@ runnable loopback host reference. Native route reuse and full visual acceptance
 are not implied by these optional package surfaces.
 ## Conversation UI
 
-`SessionConversation` is the default product integration for an existing
-session. Back it with `createSessionProxyHandler` from `@opengeni/sdk`, mounted
-on your server, and point an unmodified browser
-`new OpenGeniClient({ baseUrl: "/api/opengeni" })` at it:
+`OpenGeniChat` and `SessionConversation` are the default product integration.
+Back them with `createSessionProxyHandler` from `@opengeni/sdk`, mounted on your
+server, and pass its mount as `baseUrl`. No provider, client, or workspace id
+is needed: the component creates the browser client and uses the workspace the
+proxy resolved for the signed-in user (from the proxy's client config).
 
 ```tsx
 import "@opengeni/react/compiled.css";
 
-<OpenGeniProvider client={client} workspaceId={workspaceId}>
+<OpenGeniChat baseUrl="/api/opengeni" />;
+// or one conversation: <SessionConversation baseUrl="/api/opengeni" sessionId={sessionId} />
+```
+
+The provider form keeps working, for example for several components sharing one
+client or the headless hooks:
+
+```tsx
+<OpenGeniProvider client={new OpenGeniClient({ baseUrl: "/api/opengeni" })} workspaceId={workspaceId}>
   <SessionConversation sessionId={sessionId} />
-</OpenGeniProvider>;
+</OpenGeniProvider>
 ```
 
 Compose `MessageTimeline` and `ChatComposer` with the session hooks only when

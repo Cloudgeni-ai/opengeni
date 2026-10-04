@@ -44,6 +44,7 @@ import {
 } from "../generated-images";
 import { createTurnMediaArtifacts } from "./media-artifacts";
 import { retryWhileMissing } from "@opengeni/storage";
+import { measureTurnStartupPhase } from "../../observability-metrics";
 import { WorkspaceModelPolicyBlockedError } from "@opengeni/runtime";
 import {
   evaluateWorkspaceModelPolicy,
@@ -66,6 +67,7 @@ import type { EventingState, WorkspaceRefState } from "./turn-context";
 export type GovernanceModelDeps = {
   input: RunAgentTurnInput;
   db: ActivityServices["db"];
+  observability: ActivityServices["observability"];
   runtime: ActivityServices["runtime"];
   objectStorage: ActivityServices["objectStorage"];
   eventing: EventingState;
@@ -168,6 +170,7 @@ export async function prepareGovernanceAndModel(
   const {
     input,
     db,
+    observability,
     runtime,
     objectStorage,
     eventing,
@@ -328,12 +331,21 @@ export async function prepareGovernanceAndModel(
     openaiReasoningEffort: turn.reasoningEffort,
     sandboxBackend: turn.sandboxBackend,
   };
-  const runSettings = await settingsWithSessionMcpServersForRun(
-    db,
-    input.workspaceId,
-    input.sessionId,
-    input.attemptId,
-    baseRunSettings,
+  const runSettings = await measureTurnStartupPhase(
+    observability,
+    {
+      phase: "session_mcp_settings",
+      provider: turnExecutionPolicy.providerId,
+      backend: turn.sandboxBackend,
+    },
+    () =>
+      settingsWithSessionMcpServersForRun(
+        db,
+        input.workspaceId,
+        input.sessionId,
+        input.attemptId,
+        baseRunSettings,
+      ),
   );
 
   // Multi-provider per-turn routing → the provider gating (compaction mode,

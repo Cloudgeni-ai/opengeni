@@ -19,6 +19,7 @@ export default defineConfig({
     "src/canonical-human-identities.ts",
     "src/client-error-report.ts",
     "src/analytics-consent-report.ts",
+    "src/connection-account-label.ts",
     "src/connection-authority.ts",
     "src/connector-attachments.ts",
     "src/connector-destinations.ts",

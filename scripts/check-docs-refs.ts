@@ -39,8 +39,6 @@ const productIntegrationLinkConsumers = [
   ".agents/skills/opengeni/SKILL.md",
   ".agents/skills/opengeni/references/client-integration.md",
   ".agents/skills/opengeni-client/SKILL.md",
-  ".agents/skills/opengeni-client/references/product-integration-shapes.md",
-  ".agents/skills/opengeni-client/references/api-workflows.md",
 ] as const;
 const productIntegrationRequiredTokens = [
   "organization API key",

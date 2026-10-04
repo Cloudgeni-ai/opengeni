@@ -130,11 +130,11 @@ export async function goalRunBudgetBlocked(
         }
       : {
           pausedReason: "credits",
-          message: "Insufficient OpenGeni credits. Add credits before resuming.",
+          message: "Insufficient Opengeni credits. Add credits before resuming.",
         },
     allowance_exhausted: {
       pausedReason: "allowance",
-      message: "OpenGeni usage allowance exhausted. Resume when your allowance is available.",
+      message: "Opengeni usage allowance exhausted. Resume when your allowance is available.",
     },
     monthly_model_cost_limit: {
       pausedReason: "budget",

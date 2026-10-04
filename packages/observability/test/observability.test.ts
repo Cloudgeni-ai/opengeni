@@ -959,6 +959,54 @@ describe("observability", () => {
     expect(JSON.parse(observed[1]!)).not.toHaveProperty("correlationId");
   });
 
+  test("HTTP failure logs keep bounded request and cause context without error text or credentials", () => {
+    const sentinel = "HTTP_DIAGNOSTIC_SECRET_CANARY";
+    const observed: string[] = [];
+    const originalError = console.error;
+    console.error = (message?: unknown) => observed.push(String(message));
+    try {
+      const obs = createObservability(settings, { component: "api", now: () => 1 });
+      obs.error("HTTP request failed", {
+        errorClass: "HttpOperationError",
+        errorCode: "internal_error",
+        status: 500,
+        method: "GET",
+        route: "/v1/workspaces/:workspaceId/mcp",
+        reasonKind: "TypeError",
+        diagnosticId: "00000000-0000-4000-8000-000000000001",
+        correlationId: "request-1",
+        error: new Error(sentinel),
+        errorMessage: sentinel,
+        authorization: sentinel,
+        cookie: sentinel,
+        body: sentinel,
+        sessionId: sentinel,
+      });
+      obs.error("HTTP request failed", {
+        errorClass: "HttpOperationError",
+        errorCode: "internal_error",
+        status: 500,
+        method: sentinel,
+        route: `/v1/workspaces/workspace/mcp?token=${sentinel}`,
+        reasonKind: sentinel,
+        diagnosticId: sentinel,
+      });
+    } finally {
+      console.error = originalError;
+    }
+    expect(JSON.parse(observed[0]!)).toMatchObject({
+      method: "GET",
+      route: "/v1/workspaces/:workspaceId/mcp",
+      reasonKind: "TypeError",
+      diagnosticId: "00000000-0000-4000-8000-000000000001",
+      correlationId: "request-1",
+    });
+    for (const field of ["method", "route", "reasonKind", "diagnosticId"]) {
+      expect(JSON.parse(observed[1]!)).not.toHaveProperty(field);
+    }
+    expect(observed.join("\n")).not.toContain(sentinel);
+  });
+
   test("public fatal diagnostics retain only closed structural fields", () => {
     const sentinel = "PUBLIC_FATAL_DIAGNOSTIC_SENTINEL_1c3f91";
     const observed: string[] = [];

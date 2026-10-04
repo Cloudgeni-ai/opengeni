@@ -6065,6 +6065,18 @@ export function resolveModelProviderForTurn(
 }
 
 /**
+ * The requested model cannot start new work: it is retired from new selection
+ * or absent from the configured catalog. Callers that own a durable refusal
+ * (for example a scheduled occurrence) record it instead of failing blindly.
+ */
+export class TurnExecutionPolicyModelUnavailableError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "TurnExecutionPolicyModelUnavailableError";
+  }
+}
+
+/**
  * Build a trusted, secret-safe execution policy from the normalized catalog.
  * The Codex overlay here contains static product/provider identity only; it
  * neither proves readiness nor chooses, decrypts, leases, or exposes an account.
@@ -6076,11 +6088,15 @@ export function resolveTurnExecutionPolicyV1(
   const catalogSettings = settingsForTurnExecutionPolicy(settings, input.modelId);
   const productModelId = canonicalizeConfiguredModelId(catalogSettings, input.modelId);
   if (!isModelAvailableForNewSelection(catalogSettings, productModelId)) {
-    throw new Error("Turn execution policy model is retired from new selection");
+    throw new TurnExecutionPolicyModelUnavailableError(
+      "Turn execution policy model is retired from new selection",
+    );
   }
   const resolved = resolveModelProvider(catalogSettings, productModelId);
   if (!resolved) {
-    throw new Error("Turn execution policy model is not present in the configured catalog");
+    throw new TurnExecutionPolicyModelUnavailableError(
+      "Turn execution policy model is not present in the configured catalog",
+    );
   }
   if (
     input.requestedModelId !== null &&

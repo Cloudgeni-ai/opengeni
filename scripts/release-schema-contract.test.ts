@@ -2382,6 +2382,12 @@ describe("release schema contract", () => {
       "0603_organization_service_accounts.sql",
       "0604_insights_raw_usage_api.sql",
       "0605_insights_model_debit_period_index.sql",
+      "0606_pending_child_terminal_wake_repair.sql",
+      "0607_connected_command_output_release.sql",
+      "0608_receiver_execution_context.sql",
+      "0609_captured_command_output_priority.sql",
+      "0610_artifact_catalog_pins.sql",
+      "0612_scheduled_model_unavailable_refusal.sql",
     ].filter((path) =>
       unfilteredSourceContract.migrations.some((migration) => migration.path === path),
     );

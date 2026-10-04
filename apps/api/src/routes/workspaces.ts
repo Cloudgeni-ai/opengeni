@@ -943,7 +943,7 @@ export function registerWorkspaceRoutes(app: Hono, deps: ApiRouteDeps): void {
         description: model.description,
         ...availability(
           Boolean(deps.settings.vercelAiGatewayApiKey),
-          "OpenGeni Gateway voice is not configured",
+          "Opengeni Gateway voice is not configured",
         ),
         recommended: index === 0,
       })),

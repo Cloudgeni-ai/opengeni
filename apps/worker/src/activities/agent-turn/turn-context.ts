@@ -68,6 +68,10 @@ export type AttemptIdentityState = {
   triggerEventId: string | undefined;
   executionGeneration: number;
   providerRecoveryCount: number;
+  providerRecoveryObservation?:
+    | import("./provider-recovery-metrics").ProviderRecoveryObservation
+    | undefined;
+  modelMetricRoute?: { provider: string; model: string };
   claudeAuthRecovery?: { credentialId: string; credentialVersion: number } | undefined;
   modelRequestStarted: boolean;
   redispatchesAtDispatch: number;

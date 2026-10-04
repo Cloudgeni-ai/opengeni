@@ -100,6 +100,7 @@ import type {
 } from "./turn-context";
 import type { CodexCredentialPolicySnapshotV1 } from "@opengeni/contracts";
 import { armAndReconcileCodexCapacityWait } from "../codex-capacity";
+import { providerRecoveryCause, recordProviderRecoveryOutcome } from "./provider-recovery-metrics";
 
 export type TurnFailureDeps = {
   error: unknown;
@@ -215,7 +216,7 @@ export function codexCapacityWaitFailurePayload(input: {
     return {
       error:
         input.planEntitlement?.error ??
-        "The serving ChatGPT account's plan does not include this model. OpenGeni is waiting for another connected account to become available.",
+        "The serving ChatGPT account's plan does not include this model. Opengeni is waiting for another connected account to become available.",
       code: "codex_plan_entitlement",
       detail: input.detail,
       retryable: false,
@@ -1995,6 +1996,7 @@ async function settleTurnFailureInAttempt(deps: TurnFailureDeps): Promise<RunAge
       failureCode: failure.code,
       attemptNumber: nextProviderRecoveryCount,
       retryAfterMs: providerRetryAfterMs(error),
+      jitterSample: Math.random(),
     });
     const setupRecoveryExhausted =
       earlyCommandStartUnavailable &&
@@ -2064,9 +2066,29 @@ async function settleTurnFailureInAttempt(deps: TurnFailureDeps): Promise<RunAge
         control.turnMetricOutcome = "recovering";
         control.activityStatus = "recovering";
         control.activityError = error;
+        const recoveryCause = providerRecoveryCause(failure.code);
+        if (recoveryCause) {
+          recordProviderRecoveryOutcome(observability, {
+            route: attempt.modelMetricRoute,
+            cause: recoveryCause,
+            outcome: "scheduled",
+            delayMs: recoveryResult.continueDelayMs,
+          });
+        }
         return claimedResult(recoveryResult);
       }
       failure = providerRecoveryExhaustedFailure(failure, recoveryResult);
+      const recoveryCause = providerRecoveryCause(failure.code);
+      if (recoveryCause) {
+        recordProviderRecoveryOutcome(observability, {
+          route: attempt.modelMetricRoute,
+          cause: recoveryCause,
+          outcome: "exhausted",
+          ...(attempt.providerRecoveryObservation
+            ? { elapsedMs: Date.now() - attempt.providerRecoveryObservation.startedAt }
+            : {}),
+        });
+      }
       if (earlyRecoverableSetup) {
         // Setup has no eventing sink yet. Carry only the fixed, safe diagnostic
         // through Temporal into exact-attempt workflow failure settlement.

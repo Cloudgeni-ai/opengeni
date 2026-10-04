@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { lazy, Suspense, useState } from "react";
 import { createRoot } from "react-dom/client";
 import { ComposerMobilePlus } from "../src/components/composer-mobile-plus";
 import {
@@ -12,6 +12,12 @@ import type { GitHubRepository } from "../src/types";
 import type { SessionToolSelection } from "../src/components/pickers";
 import type { AgentLearningOverrides } from "@opengeni/sdk";
 import "../src/styles.css";
+
+const AgentLearningSettingsEditor = lazy(() =>
+  import("../src/components/knowledge/agent-learning-settings").then((module) => ({
+    default: module.AgentLearningSettingsEditor,
+  })),
+);
 
 const repositories: GitHubRepository[] = Array.from({ length: 20 }, (_, index) => ({
   id: index + 1,
@@ -47,6 +53,7 @@ function Fixture() {
   const [selected, setSelected] = useState(new Set([1]));
   const [refs, setRefs] = useState<Record<number, string>>({});
   const [settings, setSettings] = useState<AgentLearningOverrides>({});
+  const [agentTabOpen, setAgentTabOpen] = useState(false);
   const [refreshes, setRefreshes] = useState(0);
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [manualOpen, setManualOpen] = useState(false);
@@ -150,10 +157,30 @@ function Fixture() {
           }
           chatSettings={
             !isNew
-              ? { workspaceId: "fixture", sessionId: "chat", scope: "workspace", canEdit: true }
+              ? {
+                  workspaceId: "fixture",
+                  sessionId: "chat",
+                  scope: "workspace",
+                  canEdit: true,
+                  onOpen: () => setAgentTabOpen(true),
+                }
               : undefined
           }
         />
+        {agentTabOpen ? (
+          // Host navigation is the fixture boundary; settings use the real
+          // production editor rather than restoring an obsolete second popover.
+          <section aria-label="Agent tab">
+            <Suspense fallback={<p role="status">Loading chat settings</p>}>
+              <AgentLearningSettingsEditor
+                workspaceId="fixture"
+                scope="workspace"
+                source={{ kind: "chat", id: "chat" }}
+                canEdit
+              />
+            </Suspense>
+          </section>
+        ) : null}
         <div className="sr-only" data-testid="fixture-state">
           {JSON.stringify({
             selected: [...selected],

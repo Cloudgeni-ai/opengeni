@@ -188,11 +188,11 @@ const GOAL_PAUSED_REASON_EXPLANATION: Record<string, string> = {
   model_unavailable:
     "The selected model is unavailable. Choose an available model before resuming.",
   model_policy: "The selected model is blocked by policy. Choose an allowed model before resuming.",
-  credits: "Insufficient OpenGeni credits. Add credits before resuming.",
+  credits: "Insufficient Opengeni credits. Add credits before resuming.",
   budget: "Monthly model spending limit reached. Resume when the spending limit allows.",
   usage_limit: "Monthly agent run limit reached. Resume when the run limit allows.",
   usage_policy: "The application's usage policy blocks another run. Resume when it allows.",
-  allowance: "OpenGeni usage allowance exhausted. Resume when your allowance is available.",
+  allowance: "Opengeni usage allowance exhausted. Resume when your allowance is available.",
   user_pause:
     "Paused manually by a person or an API call. Resume to let the goal continue on its own.",
   api: "Paused manually by a person or an API call. Resume to let the goal continue on its own.",

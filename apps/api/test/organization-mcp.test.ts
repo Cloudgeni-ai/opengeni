@@ -19,6 +19,7 @@ import {
   buildOrganizationMcpServer,
   READ_ONLY_POST_ACTIONS,
   type OrganizationMcpCaller,
+  searchActions,
 } from "../src/organization-mcp";
 
 const organizationId = "11111111-1111-4111-8111-111111111111";
@@ -320,5 +321,15 @@ describe("organization MCP server", () => {
     });
     expect(refused.isError).toBe(true);
     expect(refused.value).toMatchObject({ status: 403, hint: expect.stringContaining("browser") });
+  });
+});
+
+describe("organization MCP action search", () => {
+  test("ranks name matches above path matches", () => {
+    const first = (query: string) => searchActions({ query, limit: 1, offset: 0 }).actions[0]?.id;
+    expect(first("list workspaces")).toBe("listWorkspaces");
+    expect(first("workspaces")).toBe("listWorkspaces");
+    expect(first("create session")).toBe("createSession");
+    expect(first("github repositories")).toBe("listGitHubRepositories");
   });
 });

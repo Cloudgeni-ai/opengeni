@@ -57,6 +57,23 @@ describe("session control surface architecture", () => {
     expect(plus).not.toContain("setSettingsOpen");
   });
 
+  test("an existing chat's Chat settings opens the dock's Agent tab at Agent learning", async () => {
+    const route = await source("routes/session.tsx");
+    // The composer hands the click to the route, which opens the dock...
+    expect(route).toContain("onOpen: props.onOpenAgentSettings,");
+    expect(route).toContain("onOpenAgentSettings={openAgentSettings}");
+    expect(route).toContain("openAgentSettingsRequest={");
+    // ...on its Agent tab (always present for a loaded chat), focused on Agent learning.
+    expect(route).toContain('tab: "agent",');
+    expect(route).toContain("openTabRequest={currentTabRequest}");
+    expect(route).toContain("learningFocusRequest={agentLearningFocus}");
+    expect(route).not.toContain("agentConfig?.enabled");
+    // There is no second copy of the per-chat editor in the composer.
+    const panel = await source("components/composer-mobile-plus-panel.tsx");
+    expect(panel).not.toContain("AgentLearningSettingsEditor");
+    expect(panel).toContain("props.chatSettings?.onOpen()");
+  });
+
   test("renders SessionChrome above the composer", async () => {
     const route = await source("routes/session.tsx");
     expect(route.match(/<SessionChrome\b/g)).toHaveLength(1);
@@ -69,6 +86,16 @@ describe("session control surface architecture", () => {
     // narrower than the composer at desktop widths.
     expect(route).not.toContain('className="mx-auto mb-2 w-full max-w-3xl shrink-0 px-4 sm:px-6"');
     expect(route).toContain('className="mb-2 w-full shrink-0 px-4 sm:px-6"');
+  });
+
+  test("current model pacing is shown above the composer, never on an older history page", async () => {
+    const route = await source("routes/session.tsx");
+    expect(route).toContain("const modelRecovery = props.hasNewer");
+    expect(route).toContain(
+      "currentModelRecovery({ ...props.session, effectiveControl: admissionControl }, props.events)",
+    );
+    expect(route.match(/<ModelRecoveryNotice\b/g)).toHaveLength(1);
+    expect(route.indexOf("<ModelRecoveryNotice")).toBeLessThan(route.indexOf("<ConsoleComposer"));
   });
 
   test("makes the full chat viewport a file drop target", async () => {

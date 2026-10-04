@@ -18,6 +18,7 @@ import {
   updateSessionTitleWithEvent,
 } from "@opengeni/db";
 import { publishDurableSessionEvents } from "@opengeni/events";
+import { recordProviderRecoveryOutcome } from "./provider-recovery-metrics";
 import {
   AssistantMessagePhaseTracker,
   normalizeModelCallUsage,
@@ -192,7 +193,7 @@ export type TurnStreamAttemptDeps = {
   toolResultSpill: ToolResultSpill;
   claimedResult: ClaimedResult;
   flushRuntimeBatcher: () => Promise<void>;
-  finalizeTurnOpStreamOps: () => Promise<void>;
+  finalizeTurnOpStreamOps: (toolCallIds?: readonly string[]) => Promise<void>;
   runWorkspaceMutationForSandbox: <T>(
     sandbox: ResumedTurnSandbox,
     operation: string,
@@ -1053,6 +1054,7 @@ export async function runTurnStreamAttempt(
         }
         await settleFallbackProviderFirstByte();
         let stableToolCallIdsToClear: string[] | null = null;
+        let newlyDurableToolCallId: string | null = null;
         let completedCurrentToolBatch = false;
         let retainedScreenshotMetadata: RetainedArtifactMetadata | null = null;
         let normalizedSdkEvents: ReturnType<typeof normalizeSdkEvent> | null = null;
@@ -1130,6 +1132,15 @@ export async function runTurnStreamAttempt(
               },
             ]);
             attempt.providerRecoveryCount = 0;
+          }
+          if (attempt.providerRecoveryObservation) {
+            recordProviderRecoveryOutcome(observability, {
+              route: attempt.modelMetricRoute,
+              cause: attempt.providerRecoveryObservation.cause,
+              outcome: "recovered",
+              elapsedMs: Date.now() - attempt.providerRecoveryObservation.startedAt,
+            });
+            attempt.providerRecoveryObservation = undefined;
           }
           const rawStreamHistory = (eventing.stream.state as { history?: unknown[] }).history;
           if (Array.isArray(rawStreamHistory)) {
@@ -1324,6 +1335,7 @@ export async function runTurnStreamAttempt(
               "turn attempt ended while recording a tool-call result",
             );
           }
+          if (recorded.recorded) newlyDurableToolCallId = completedToolCall.callId;
           const videoAcceptance = videoGenerationAcceptancesByCallId.get(completedToolCall.callId);
           if (videoAcceptance && startVideoGenerationWorkflow) {
             try {
@@ -1434,6 +1446,14 @@ export async function runTurnStreamAttempt(
             media.retainedSessionImageCallIds.delete(callId);
             media.retainedSessionImageKindsByCallId.delete(callId);
           }
+        }
+        if (newlyDurableToolCallId) {
+          // The exact call/result receipt and structural output event are now
+          // durable even when parallel SDK history is still non-monotonic.
+          // Release only this result owner's completed foreground ops. A
+          // missing/duplicate receipt cannot license new output collection;
+          // the complete-turn hook remains its later durability boundary.
+          await finalizeTurnOpStreamOps([newlyDurableToolCallId]);
         }
       }
     } catch (error) {

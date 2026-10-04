@@ -56,7 +56,11 @@ import {
   workspaceModelsRedirect,
   type ModelsView,
 } from "@/lib/models-route";
-import { parseKnowledgeSearch, type KnowledgeSearch } from "@/lib/knowledge-route";
+import {
+  documentsRedirectSearch,
+  parseKnowledgeSearch,
+  type KnowledgeSearch,
+} from "@/lib/knowledge-route";
 import { parseApiKeyParam } from "@/lib/api-keys-route";
 import {
   parseAgentParam,
@@ -943,12 +947,12 @@ function ScheduleEdit() {
 
 function Documents() {
   const { workspaceId } = workspaceDocumentsRoute.useParams();
-  const { memory } = workspaceDocumentsRoute.useSearch();
+  const { memory, authority } = workspaceDocumentsRoute.useSearch();
   return (
     <Navigate
       to="/workspaces/$workspaceId/state"
       params={{ workspaceId }}
-      search={memory ? parseKnowledgeSearch({ entry: memory }) : { view: "files" }}
+      search={documentsRedirectSearch({ memory, authority })}
       replace
     />
   );

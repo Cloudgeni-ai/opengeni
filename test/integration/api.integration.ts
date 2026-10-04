@@ -28,6 +28,7 @@ import {
   getBillingBalance,
   getSession,
   getScheduledTask,
+  getScheduledTaskIncludingDeleted,
   getSessionGoal,
   getVariableSetValuesForRun,
   listGitHubInstallationAccessForWorkspace,
@@ -63,9 +64,12 @@ import {
   type Permission,
   type SessionEvent,
   type SessionStatus,
+  type ScheduledTask,
 } from "@opengeni/contracts";
 import { createApp, type SessionWorkflowClient } from "../../apps/api/src/app";
 import { buildOpenGeniMcpServer } from "../../apps/api/src/mcp/server";
+import { createTemporalScheduleSynchronizer } from "../../apps/api/src/temporal-schedule-sync";
+import { drainTemporalScheduleCleanupOutbox } from "../../apps/api/src/temporal-schedule-cleanup";
 import {
   checkoutSessionEvent,
   foreignPaymentCheckoutSession,
@@ -2034,7 +2038,14 @@ describe("API component integration", () => {
       }),
     });
     expect(rejectedTurn.status).toBe(402);
-    expect(await rejectedTurn.text()).toContain("insufficient OpenGeni credits");
+    expect(await rejectedTurn.json()).toMatchObject({
+      error: {
+        status: 402,
+        code: "payment_required",
+        message: expect.stringMatching(/^insufficient \S+ credits$/),
+        retryable: false,
+      },
+    });
     const preserved = await app.request(
       workspacePath(ownerWorkspaceId, `/files/${upload.fileId}`),
       {
@@ -2214,7 +2225,14 @@ describe("API component integration", () => {
       },
     );
     expect(triggered.status).toBe(402);
-    expect(await triggered.text()).toContain("insufficient OpenGeni credits");
+    expect(await triggered.json()).toMatchObject({
+      error: {
+        status: 402,
+        code: "payment_required",
+        message: expect.stringMatching(/^insufficient \S+ credits$/),
+        retryable: false,
+      },
+    });
   });
 
   test("static usage limits enforce operator caps without Better Auth or Stripe", async () => {
@@ -4307,7 +4325,7 @@ describe("API component integration", () => {
   });
 
   test("keeps scheduled task persistence consistent when schedule sync fails", async () => {
-    workflow = new FakeWorkflowClient();
+    workflow = new FakeWorkflowClient(dbClient.db);
     const app = createApp({
       settings: testSettings({ databaseUrl: services.databaseUrl }),
       db: dbClient.db,
@@ -4332,6 +4350,8 @@ describe("API component integration", () => {
         (task) => task.name === failedCreateName,
       ),
     ).toBe(false);
+    expect(workflow.temporalSchedules.size).toBe(0);
+    expect(workflow.triggers).toHaveLength(0);
 
     workflow.syncError = null;
     const created = await app.request(workspacePath(workspaceId, "/scheduled-tasks"), {
@@ -4343,19 +4363,61 @@ describe("API component integration", () => {
       }),
       headers: { "content-type": "application/json" },
     });
+    expect(created.status).toBe(201);
     const task = (await created.json()) as { id: string };
+    const original = (await getScheduledTask(dbClient.db, workspaceId, task.id))!;
+    expect(workflow.temporalSchedules.get(original.temporalScheduleId)).toEqual(original);
 
     workflow.syncError = new Error("temporal unavailable");
+    const failedUpdate = await app.request(
+      workspacePath(workspaceId, `/scheduled-tasks/${task.id}`),
+      {
+        method: "PATCH",
+        body: JSON.stringify({
+          name: "must not persist",
+          schedule: { type: "interval", everySeconds: 7200 },
+          agentConfigPatch: { prompt: "must not persist" },
+        }),
+        headers: { "content-type": "application/json" },
+      },
+    );
+    expect(failedUpdate.status).toBe(500);
+    expect(await getScheduledTask(dbClient.db, workspaceId, task.id)).toMatchObject({
+      name: original.name,
+      schedule: original.schedule,
+      agentConfig: original.agentConfig,
+      status: "active",
+    });
     const failedPause = await app.request(
       workspacePath(workspaceId, `/scheduled-tasks/${task.id}/pause`),
       { method: "POST" },
     );
     expect(failedPause.status).toBe(500);
     expect((await getScheduledTask(dbClient.db, workspaceId, task.id))?.status).toBe("active");
+    expect(workflow.temporalSchedules.get(original.temporalScheduleId)).toEqual(original);
+
+    workflow.syncError = null;
+    expect(
+      (
+        await app.request(workspacePath(workspaceId, `/scheduled-tasks/${task.id}/pause`), {
+          method: "POST",
+        })
+      ).status,
+    ).toBe(200);
+    const paused = workflow.temporalSchedules.get(original.temporalScheduleId)!;
+    workflow.syncError = new Error("temporal unavailable");
+    const failedResume = await app.request(
+      workspacePath(workspaceId, `/scheduled-tasks/${task.id}/resume`),
+      { method: "POST" },
+    );
+    expect(failedResume.status).toBe(500);
+    expect((await getScheduledTask(dbClient.db, workspaceId, task.id))?.status).toBe("paused");
+    expect(workflow.temporalSchedules.get(original.temporalScheduleId)).toEqual(paused);
+    expect(workflow.triggers).toHaveLength(0);
   });
 
   test("keeps MCP scheduled task persistence consistent when schedule sync fails", async () => {
-    workflow = new FakeWorkflowClient();
+    workflow = new FakeWorkflowClient(dbClient.db);
     const settings = testSettings({ databaseUrl: services.databaseUrl });
     const grant = await bootstrapMcpGrant(dbClient.db);
     const mcp = buildOpenGeniMcpServer(
@@ -4400,6 +4462,8 @@ describe("API component integration", () => {
         (task) => task.name === failedCreateName,
       ),
     ).toBe(false);
+    expect(workflow.temporalSchedules.size).toBe(0);
+    expect(workflow.triggers).toHaveLength(0);
 
     workflow.syncError = null;
     const taskReceipt = await callMcpTool<McpMutationReceiptType>(mcp, "scheduled_tasks_create", {
@@ -4409,6 +4473,7 @@ describe("API component integration", () => {
       agentConfig: { prompt: "inspect" },
     });
     const taskId = taskReceipt.resource.id;
+    const original = (await getScheduledTask(dbClient.db, grant.workspaceId, taskId))!;
     expect(taskReceipt).toMatchObject({
       operation: "scheduled_tasks_create",
       outcome: "created",
@@ -4417,14 +4482,127 @@ describe("API component integration", () => {
     });
 
     workflow.syncError = new Error("temporal unavailable");
+    await expect(
+      callMcpTool(mcp, "scheduled_tasks_update", {
+        id: taskId,
+        name: "must not persist",
+        schedule: { type: "interval", everySeconds: 7200 },
+        agentConfigPatch: { prompt: "must not persist" },
+      }),
+    ).rejects.toThrow("temporal unavailable");
+    expect(await getScheduledTask(dbClient.db, grant.workspaceId, taskId)).toMatchObject({
+      name: original.name,
+      schedule: original.schedule,
+      agentConfig: original.agentConfig,
+      status: "active",
+    });
     await expect(callMcpTool(mcp, "scheduled_tasks_pause", { id: taskId })).rejects.toThrow(
       "temporal unavailable",
     );
     expect((await getScheduledTask(dbClient.db, grant.workspaceId, taskId))?.status).toBe("active");
+    expect(workflow.temporalSchedules.get(original.temporalScheduleId)).toEqual(original);
+    workflow.syncError = null;
+    await callMcpTool(mcp, "scheduled_tasks_pause", { id: taskId });
+    const paused = workflow.temporalSchedules.get(original.temporalScheduleId)!;
+    workflow.syncError = new Error("temporal unavailable");
+    await expect(callMcpTool(mcp, "scheduled_tasks_resume", { id: taskId })).rejects.toThrow(
+      "temporal unavailable",
+    );
+    expect((await getScheduledTask(dbClient.db, grant.workspaceId, taskId))?.status).toBe("paused");
+    expect(workflow.temporalSchedules.get(original.temporalScheduleId)).toEqual(paused);
+    expect(workflow.triggers).toHaveLength(0);
     await expect(
       callMcpTool(mcp, "scheduled_tasks_resume", { id: crypto.randomUUID() }),
     ).rejects.toThrow("Scheduled task not found");
   });
+
+  test.each(["REST", "MCP"] as const)(
+    "%s scheduled task deletion retains durable cleanup when Temporal removal fails",
+    async (surface) => {
+      const workflowClient = new FakeWorkflowClient(dbClient.db);
+      const settings = testSettings({ databaseUrl: services.databaseUrl });
+      const app = createApp({
+        settings,
+        db: dbClient.db,
+        bus: new MemoryEventBus(),
+        workflowClient,
+      });
+      const grant = await bootstrapMcpGrant(dbClient.db);
+      const mcp = buildOpenGeniMcpServer(
+        {
+          settings,
+          db: dbClient.db,
+          bus: new MemoryEventBus(),
+          workflowClient,
+          objectStorage: null,
+          githubStateSecret: "test-state-secret",
+          documentIndexer: { indexDocument: async () => undefined },
+          getDocumentServices: () => {
+            throw new Error("document services are not used by scheduled task deletion tests");
+          },
+          resumeBoxById: fakeResumeBoxById,
+        },
+        grant,
+      );
+      const workspaceId = surface === "REST" ? await defaultWorkspaceId(app) : grant.workspaceId;
+      const payload = {
+        name: `delete-sync-fail-${crypto.randomUUID()}`,
+        schedule: { type: "interval", everySeconds: 3600 },
+        runMode: "new_session_per_run",
+        agentConfig: { prompt: "inspect" },
+      };
+      let taskId: string;
+      if (surface === "REST") {
+        const response = await app.request(workspacePath(workspaceId, "/scheduled-tasks"), {
+          method: "POST",
+          body: JSON.stringify(payload),
+          headers: { "content-type": "application/json" },
+        });
+        expect(response.status).toBe(201);
+        taskId = ((await response.json()) as { id: string }).id;
+      } else {
+        taskId = (await callMcpTool<McpMutationReceiptType>(mcp, "scheduled_tasks_create", payload))
+          .resource.id;
+      }
+      const original = (await getScheduledTask(dbClient.db, workspaceId, taskId))!;
+      workflowClient.deleteError = new Error("temporal removal unavailable");
+      if (surface === "REST") {
+        const response = await app.request(
+          workspacePath(workspaceId, `/scheduled-tasks/${taskId}`),
+          { method: "DELETE" },
+        );
+        expect(response.status).toBe(200);
+        expect(await response.json()).toEqual({ ok: true });
+      } else {
+        expect(await callMcpTool(mcp, "scheduled_tasks_delete", { id: taskId })).toMatchObject({
+          outcome: "deleted",
+          resource: { state: "deleted" },
+        });
+      }
+      expect(await getScheduledTask(dbClient.db, workspaceId, taskId)).toBeNull();
+      expect(
+        await getScheduledTaskIncludingDeleted(dbClient.db, workspaceId, taskId),
+      ).toMatchObject({
+        id: taskId,
+        deletedAt: expect.any(String),
+      });
+      expect(workflowClient.temporalSchedules.get(original.temporalScheduleId)).toEqual(original);
+      expect(workflowClient.deletedSchedules).toContainEqual({
+        temporalScheduleId: original.temporalScheduleId,
+      });
+      workflowClient.deleteError = null;
+      await waitFor(async () => {
+        await drainTemporalScheduleCleanupOutbox({
+          db: dbClient.db,
+          deleteSchedule: async (temporalScheduleId) =>
+            await workflowClient.deleteScheduledTaskSchedule({ temporalScheduleId }),
+        });
+        return !workflowClient.temporalSchedules.has(original.temporalScheduleId);
+      });
+      expect(workflowClient.deletedSchedules.length).toBeGreaterThanOrEqual(2);
+      expect(workflowClient.triggers).toHaveLength(0);
+    },
+  );
 
   test("returns compact receipts across the MCP scheduled task lifecycle", async () => {
     const workflowClient = new FakeWorkflowClient();
@@ -9550,6 +9728,28 @@ class FakeWorkflowClient implements SessionWorkflowClient {
   syncError: Error | null = null;
   wakeError: Error | null = null;
   triggerError: Error | null = null;
+  deleteError: Error | null = null;
+  temporalSchedules = new Map<string, ScheduledTask>();
+  private readonly scheduleSync?: ReturnType<typeof createTemporalScheduleSynchronizer>;
+
+  constructor(db?: Database) {
+    if (db) {
+      // Inject errors at the external operation, not above the synchronizer:
+      // compensation must run and commit under the production writer lock.
+      this.scheduleSync = createTemporalScheduleSynchronizer({
+        db,
+        withDeadline: async (_deadline, work) => await work(),
+        upsert: async (task) => {
+          if (this.syncError) throw this.syncError;
+          this.temporalSchedules.set(task.temporalScheduleId, task);
+        },
+        remove: async (id) => {
+          if (this.deleteError) throw this.deleteError;
+          this.temporalSchedules.delete(id);
+        },
+      });
+    }
+  }
 
   async signalUserMessage(input: unknown): Promise<void> {
     this.userMessages.push(input);
@@ -9574,15 +9774,30 @@ class FakeWorkflowClient implements SessionWorkflowClient {
     this.interrupts.push(input);
   }
 
-  async syncScheduledTask(input: unknown): Promise<void> {
+  async syncScheduledTask(
+    input: Parameters<SessionWorkflowClient["syncScheduledTask"]>[0],
+  ): Promise<void> {
     this.synced.push(input);
+    if (this.scheduleSync) {
+      await this.scheduleSync.sync(input.task, input.onFailure);
+      return;
+    }
     if (this.syncError) {
-      throw this.syncError;
+      throw new Error("Schedule sync failure injection requires a database-backed fake");
     }
   }
 
-  async deleteScheduledTaskSchedule(input: unknown): Promise<void> {
+  async deleteScheduledTaskSchedule(
+    input: Parameters<SessionWorkflowClient["deleteScheduledTaskSchedule"]>[0],
+  ): Promise<void> {
     this.deletedSchedules.push(input);
+    if (this.scheduleSync) {
+      await this.scheduleSync.remove(input.temporalScheduleId);
+      return;
+    }
+    if (this.deleteError) {
+      throw new Error("Schedule deletion failure injection requires a database-backed fake");
+    }
   }
 
   async triggerScheduledTask(input: unknown): Promise<void> {

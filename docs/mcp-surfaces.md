@@ -17,6 +17,22 @@ page exists so you pick the right one in one read.
 | **Per-session MCP servers** (`mcpServers` on session create) | The embedding host, per session | One session; static headers rotatable on every user turn; host connection refs resolved per request | Authenticated-encrypted headers with metadata-only ordinary projections, or a non-secret opaque `connectionRef` resolved by the standalone/host broker. Dedicated plaintext reads are an approved release-held follow-up | An embedding host injects its own tool server or binds an existing provider connection without duplicating it |
 | **Codex Apps MCP** | Deployment enables the feature; a scoped human explicitly designates one workspace credential; session policy selects it | Available only while that exact designation remains authorized; workspace-default sessions receive it as optional, while explicit/fixed sessions see it only when selected | Only the designated Apps credential, independent of inference | A compatible model should use connected ChatGPT apps without tying their authority to inference routing or silently widening an exact tool allowlist |
 
+### Workspace Streamable HTTP
+
+The unified `/v1/workspaces/:id/mcp` endpoint uses a fresh stateless
+JSON-response transport per POST. It does not offer a server-to-client SSE
+stream: authorized GET requests return `405 Method Not Allowed` with
+`Allow: POST`, without preparing tools. OAuth, workspace and bound-session
+authorization still run first; unsupported protocol-version headers return 400.
+POST initialization, notifications, tool calls and client-abort handling are
+unchanged. No MCP session ID is issued or required by this stateless endpoint.
+
+Unexpected API 5xx responses emit a content-free error log with the method,
+route pattern and response correlation ID. Thrown failures also retain a closed
+cause kind and diagnostic ID; the existing opt-in protected diagnostics sink
+receives bounded cause locations, never exception messages, request bodies or
+credentials.
+
 ### Organization MCP server
 
 Connect any MCP client to `<public origin>/v1/mcp`. Sign-in opens the web
@@ -270,7 +286,7 @@ The retired Memory and reviewed-claim tools are not registered for new work.
 
 First-party OpenGeni MCP company-profile tools (separate organization policy):
 
-- `company_profile_propose` / `company_profile_confirm` - explicit organization-identity administration for an exact agent attempt whose live turn was initiated by the organization owner. The separate owner-managed organization policy defaults to Require approval: Off creates nothing, Require approval stages one inactive immutable identity/mission revision and returns the exact `request_human_input` payload for `confirm`, and Autonomous activates the proposal immediately through the existing compare-and-swap lifecycle and returns `status=activated`. Every mode retains exact live-owner admission and immutable receipts; this policy is independent of workspace Learning mode (see [`company-profile.md`](company-profile.md)).
+- `company_profile_propose` / `company_profile_confirm` - explicit organization-identity administration for an exact agent attempt whose live turn was initiated by the organization owner. The separate owner-managed organization policy (set on Knowledge > Agent learning) defaults to Review first (`suggest`): Off creates nothing, Review first stages one inactive immutable identity/mission revision and returns the exact `request_human_input` payload for `confirm`, and Automatic activates the proposal immediately through the existing compare-and-swap lifecycle and returns `status=activated`. Every mode retains exact live-owner admission and immutable receipts; this policy is independent of workspace Learning mode (see [`company-profile.md`](company-profile.md)).
 
 First-party OpenGeni MCP session monitoring tools (`sessions:read`):
 

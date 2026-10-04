@@ -82,9 +82,12 @@ import {
   type LeaseSnapshot,
 } from "@opengeni/db";
 import {
+  claimConnectedCommandOutputReleases,
   claimConnectedMachineSessionBackgroundCommands,
   deferConnectedMachineBackgroundCommandReconciliation,
   recordConnectedMachineBackgroundCommandProof,
+  recordConnectedCommandOutputConsumption,
+  settleConnectedCommandOutputReleaseClaim,
   type ConnectedMachineBackgroundCommandClaim,
   type ConnectedMachineBackgroundCommandProof,
 } from "@opengeni/db/session-background-commands";
@@ -763,6 +766,7 @@ export function createSandboxLeaseActivities(
       // immutable launch locators must reconcile even when managed ownership is
       // disabled, otherwise an exact runner exit/loss proof can remain stranded.
       await reconcileConnectedMachineBackgroundCommands(db, settings, observability, service.bus);
+      await reconcileConnectedCommandOutputReleases(db, settings, observability, service.bus);
 
       // Disabling new lease ownership cannot strand a previously dispatched
       // operation. This only attributes a positive receipt; normal draining
@@ -978,6 +982,9 @@ type ConnectedCommandReconciliationOutcome =
   | "proof_checkpoint_failed"
   | "settled_exited"
   | "settled_lost"
+  | "output_unavailable"
+  | "output_ack_published"
+  | "output_released"
   | "settlement_failed"
   | "defer_failed";
 
@@ -1178,6 +1185,7 @@ export async function reconcileConnectedMachineBackgroundCommands(
       );
     await forEachWithConcurrency(claims, SANDBOX_MAINTENANCE_ITEM_CONCURRENCY, async (claim) => {
       let proof = claim.proof;
+      let outputReplay: Awaited<ReturnType<OpStreamExecClient["readExisting"]>> | null = null;
       const connectionKey = JSON.stringify([
         claim.controlWorkspaceId,
         claim.enrollmentId,
@@ -1235,7 +1243,7 @@ export async function reconcileConnectedMachineBackgroundCommands(
               retryClock: defaultSelfhostedRetryClock,
               journal: { attachGeneration: () => String(Date.now()), persistSettled: () => {} },
             });
-            await replayConnectedCommandOutput(
+            outputReplay = await replayConnectedCommandOutput(
               client,
               claim.opId,
               Boolean(proof),
@@ -1297,6 +1305,18 @@ export async function reconcileConnectedMachineBackgroundCommands(
         if (!settlement.settled) {
           throw new Error("Connected command settlement lost its exact claim or proof");
         }
+        const receipt =
+          outputReplay?.outputReceipt ??
+          (outputReplay?.status === "running" ? outputReplay.terminal?.outputReceipt : undefined);
+        const terminal =
+          outputReplay?.status === "completed" ? outputReplay : outputReplay?.terminal;
+        if (proof.outcome === "exited" && receipt && terminal) {
+          await recordConnectedCommandOutputConsumption(db, {
+            ...claim,
+            receipt,
+            exitCode: terminal.outcome.response.exitCode,
+          });
+        }
         if (settlement.events.length > 0) {
           try {
             await bus.publish(claim.workspaceId, claim.sessionId, settlement.events);
@@ -1326,7 +1346,7 @@ export async function replayConnectedCommandOutput(
   opId: string,
   terminalKnown: boolean,
   capture: Parameters<OpStreamExecClient["readExisting"]>[2],
-): Promise<void> {
+): Promise<Awaited<ReturnType<OpStreamExecClient["readExisting"]>>> {
   // A completed operation can need several bounded reads to replay its retained
   // frames. Keep the reader's integrity checkpoint until the exit is verified;
   // replacing it after each partial read would restart forever at frame one.
@@ -1334,7 +1354,7 @@ export async function replayConnectedCommandOutput(
   while (true) {
     const before = capturedThrough;
     const replay = await client.readExisting(opId, terminalKnown ? 5_000 : 250, capture);
-    if (!terminalKnown || replay.status === "completed" || replay.terminal) return;
+    if (!terminalKnown || replay.status === "completed" || replay.terminal) return replay;
     // Quiet jobs can retain many heartbeat frames (or an incomplete UTF-8
     // chunk). These are real replay progress even when capture receives no
     // stdout/stderr. Use the reader's verified, contiguous protocol frontier.
@@ -1346,6 +1366,141 @@ export async function replayConnectedCommandOutput(
       throw new Error("Connected command terminal output replay has not reached its exit frontier");
     }
   }
+}
+
+/** Drain the durable terminal-output obligation independently of the launching
+ * attempt or model completion notice. Existing terminal rows receive no inferred
+ * receipt: they must replay and capture all retained bytes before any final ACK. */
+export async function reconcileConnectedCommandOutputReleases(
+  db: ActivityServices["db"],
+  settings: ActivityServices["settings"],
+  observability: ActivityServices["observability"],
+  bus: ActivityServices["bus"],
+  controlRpcOverride?: ControlRpc,
+): Promise<void> {
+  const dueBefore = new Date();
+  const deadline = Date.now() + settings.sandboxLeaseReaperPeriodMs;
+  const controlRpc =
+    controlRpcOverride ?? new NatsControlRpc(async () => bus.getRequestConnection());
+  do {
+    let claims: Awaited<ReturnType<typeof claimConnectedCommandOutputReleases>>;
+    try {
+      claims = await claimConnectedCommandOutputReleases(db, {
+        claimId: crypto.randomUUID(),
+        dueBefore,
+        limit: CONNECTED_COMMAND_RECONCILIATION_LIMIT,
+        claimTtlMs: CONNECTED_COMMAND_RECONCILIATION_CLAIM_TTL_MS,
+      });
+    } catch (error) {
+      recordConnectedCommandReconciliation(observability, "claim_failed");
+      observability.warn("sandbox reaper: connected-command output claim failed", {
+        error: error instanceof Error ? error.message : String(error),
+      });
+      return;
+    }
+    await forEachWithConcurrency(claims, SANDBOX_MAINTENANCE_ITEM_CONCURRENCY, async (claim) => {
+      try {
+        if (!bus.getOpStreamConnection)
+          throw new Error("Connected command output transport unavailable");
+        const rpcSubject = subjectFor(
+          claim.controlWorkspaceId,
+          claim.enrollmentId,
+          claim.connectionInstanceId,
+        );
+        const controlTimeoutMs = Math.min(
+          settings.sandboxSelfhostedControlTimeoutMs,
+          RETAINED_PROCESS_PROVIDER_PROBE_TIMEOUT_MS,
+        );
+        const client = new OpStreamExecClient({
+          workspaceId: claim.controlWorkspaceId,
+          agentId: claim.enrollmentId,
+          connectionInstanceId: claim.connectionInstanceId,
+          epoch: 0,
+          controlRpc,
+          rpcSubject,
+          transport: new NatsOpStreamTransport(async () => bus.getOpStreamConnection?.() ?? null),
+          controlTimeoutMs,
+          retryClock: defaultSelfhostedRetryClock,
+          journal: {
+            attachGeneration: () => String(Date.now()),
+            persistSettled: () => {
+              throw new Error("Background output release requires its database receipt");
+            },
+          },
+        });
+        let receipt = claim.receipt;
+        if (!receipt) {
+          const status = await querySelfhostedOp({
+            controlRpc,
+            rpcSubject,
+            opId: claim.opId,
+            controlTimeoutMs,
+          });
+          if (status.state === OpState.OP_STATE_LOST) {
+            if (
+              !(await settleConnectedCommandOutputReleaseClaim(db, {
+                claim,
+                outcome: "unavailable",
+                retryAfterMs: 0,
+              }))
+            )
+              throw new Error("Connected command output loss no longer owns its exact claim");
+            recordConnectedCommandReconciliation(observability, "output_unavailable");
+            return;
+          }
+          if (status.state !== OpState.OP_STATE_COMPLETE)
+            throw new Error("Terminal command output returned a live operation");
+          const replay = await replayConnectedCommandOutput(
+            client,
+            claim.opId,
+            true,
+            async (frames) =>
+              captureConnectedCommandOutput(db, claim, bus)(claim.commandId, frames),
+          );
+          const terminal = replay.status === "completed" ? replay : replay.terminal;
+          receipt =
+            replay.outputReceipt ??
+            (replay.status === "running" ? replay.terminal?.outputReceipt : undefined) ??
+            null;
+          if (!terminal || !receipt)
+            throw new Error("Connected command output replay has no complete custody receipt");
+          await recordConnectedCommandOutputConsumption(db, {
+            ...claim,
+            receipt,
+            exitCode: terminal.outcome.response.exitCode,
+          });
+        }
+        const outcome = await client.releaseCapturedOutput(claim.opId, receipt);
+        if (
+          !(await settleConnectedCommandOutputReleaseClaim(db, {
+            claim,
+            outcome,
+            retryAfterMs: outcome === "published" ? settings.sandboxLeaseReaperPeriodMs : 0,
+          }))
+        )
+          throw new Error("Connected command output release no longer owns its exact claim");
+        recordConnectedCommandReconciliation(
+          observability,
+          outcome === "published" ? "output_ack_published" : "output_released",
+        );
+      } catch (error) {
+        await settleConnectedCommandOutputReleaseClaim(db, {
+          claim,
+          outcome: "retry",
+          retryAfterMs: Math.min(
+            5 * 60_000,
+            Math.max(settings.sandboxLeaseReaperPeriodMs, 30_000) *
+              2 ** Math.min(4, claim.reconcileAttempts - 1),
+          ),
+        }).catch(() => false);
+        observability.warn("sandbox reaper: connected-command output release deferred", {
+          commandId: claim.commandId,
+          error: error instanceof Error ? error.message : String(error),
+        });
+      }
+    });
+    if (claims.length < CONNECTED_COMMAND_RECONCILIATION_LIMIT) break;
+  } while (Date.now() < deadline);
 }
 
 export async function probeConnectedMachineBackgroundCommand(
