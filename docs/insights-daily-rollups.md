@@ -1,7 +1,7 @@
 # Incremental Insights storage checkpoint
 
-Migrations `0606_insights_daily_rollups.sql` and
-`0607_insights_actual_model_debits.sql` add owner-only analytics storage after
+Migrations `0610_insights_daily_rollups.sql` and
+`0611_insights_actual_model_debits.sql` add owner-only analytics storage after
 `0604_insights_raw_usage_api.sql`. They change no billing writer, source policy,
 permission row, visibility rule or API contract. They are rolling migrations.
 
@@ -77,7 +77,7 @@ model, payer, schedule and UTC-bucket grain before JSON and live metadata joins;
 per-fact nullable-counter knownness and actual-negative-debit attribution remain
 unchanged.
 
-Rolling migration `0609_insights_daily_usage_reader.sql` switches only the two
+Rolling migration `0613_insights_daily_usage_reader.sql` switches only the two
 amount-input calls in the existing scoped usage reader to this seam. Definition
 guards require exactly the reviewed call sites and owner/posture; the function
 OID, grants, configuration and every other body byte remain unchanged. Current
@@ -101,7 +101,7 @@ and measures workspace/model and organization/workspace/person reads. The test
 oracle alone permits a longer timeout for diagnostic raw comparisons; production
 read budgets and authority are not extended.
 
-After migration 0609 commits, the existing unified workspace/org usage API selects
+After migration 0613 commits, the existing unified workspace/org usage API selects
 daily groups for full days across all six ranges and all eight supported
 groupings. The separately merged raw API does not activate this substitution by
 itself. Recent/cursor calls and hourly/partial-edge reads remain bounded raw reads.
@@ -251,7 +251,7 @@ dirty-charge scan cost remain explicit limits.
 
 ## Versioned historical list-class allocation
 
-Rolling migration `0608_insights_historical_list_allocations.sql` adds a private
+Rolling migration `0612_insights_historical_list_allocations.sql` adds a private
 immutable comparison-rate snapshot and nullable per-fact allocation provenance.
 It does not install rates or scan source history during deployment. After approval
 of the current comparison catalog, the migration owner calls

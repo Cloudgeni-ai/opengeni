@@ -50,10 +50,10 @@ const migrationName = "0604_insights_raw_usage_api.sql";
 // These data-only rollup migrations depend on the deliberately withheld raw
 // helper/class columns. Replay them after it in this historical owner fixture.
 const dailyMigrationTail = [
-  "0606_insights_daily_rollups.sql",
-  "0607_insights_actual_model_debits.sql",
-  "0608_insights_historical_list_allocations.sql",
-  "0609_insights_daily_usage_reader.sql",
+  "0610_insights_daily_rollups.sql",
+  "0611_insights_actual_model_debits.sql",
+  "0612_insights_historical_list_allocations.sql",
+  "0613_insights_daily_usage_reader.sql",
 ];
 const stagingRevision = "2a5ab6f512a05bf28afce38ac4259dea861d3669";
 const servingCompatibleRevision = "f893cb5a4f226b8568bcd3078b48c8c573e86b92";

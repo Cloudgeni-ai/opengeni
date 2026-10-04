@@ -34,10 +34,10 @@ import {
 
 setDefaultTimeout(180_000);
 const migrations = [
-  "0606_insights_daily_rollups.sql",
-  "0607_insights_actual_model_debits.sql",
-  "0608_insights_historical_list_allocations.sql",
-  "0609_insights_daily_usage_reader.sql",
+  "0610_insights_daily_rollups.sql",
+  "0611_insights_actual_model_debits.sql",
+  "0612_insights_historical_list_allocations.sql",
+  "0613_insights_daily_usage_reader.sql",
 ];
 let shared: OwnerMigratedTestDatabase | null = null;
 let client: DbClient;

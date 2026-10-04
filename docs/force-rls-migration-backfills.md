@@ -6,13 +6,13 @@ and reports success.
 
 ## Insights daily storage and actual-debit projection
 
-`0609_insights_daily_usage_reader.sql` performs no backfill and does not alter
+`0613_insights_daily_usage_reader.sql` performs no backfill and does not alter
 RLS/permission checks. It substitutes only two amount-input calls behind the
 existing owner-fenced live privacy projection; function identity, grants and
 all other definition bytes must remain unchanged. Full UTC days use the private
 daily tables, and partial edges/hourly reads remain bounded raw reads.
 
-The separate `0608_insights_historical_list_allocations.sql` migration installs
+The separate `0612_insights_historical_list_allocations.sql` migration installs
 comparison-only snapshot/provenance infrastructure without a history scan. Its
 owner-only resumable backfill opens NO FORCE only for a bounded batch of candidate
 model facts, serializes with source DDL/writes, and restores FORCE before commit.
@@ -20,7 +20,7 @@ Progress and trigger-maintained daily corrections roll back together on failure.
 The configured app cannot invoke the owner backfill or access private snapshots.
 See [versioned allocation](insights-daily-rollups.md#versioned-historical-list-class-allocation).
 
-`0606_insights_daily_rollups.sql` and `0607_insights_actual_model_debits.sql` use
+`0610_insights_daily_rollups.sql` and `0611_insights_actual_model_debits.sql` use
 the rolling, same-transaction owner-only bootstrap window: source tables are
 temporarily `NO FORCE`, triggers and history are installed under the source DDL
 locks, convergence is checked, and FORCE is restored before commit. The owner

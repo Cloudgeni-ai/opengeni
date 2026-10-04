@@ -2382,10 +2382,10 @@ describe("release schema contract", () => {
       "0603_organization_service_accounts.sql",
       "0604_insights_raw_usage_api.sql",
       "0605_insights_model_debit_period_index.sql",
-      "0606_insights_daily_rollups.sql",
-      "0607_insights_actual_model_debits.sql",
-      "0608_insights_historical_list_allocations.sql",
-      "0609_insights_daily_usage_reader.sql",
+      "0610_insights_daily_rollups.sql",
+      "0611_insights_actual_model_debits.sql",
+      "0612_insights_historical_list_allocations.sql",
+      "0613_insights_daily_usage_reader.sql",
     ].filter((path) =>
       unfilteredSourceContract.migrations.some((migration) => migration.path === path),
     );
