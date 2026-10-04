@@ -25,6 +25,7 @@ import {
   configuredAllowedReasoningEfforts,
   resolveFirstPartyMcpToolPolicy,
   UnsupportedLatencyModeError,
+  voiceInputPricingIssues,
   type Settings,
 } from "@opengeni/config";
 import {
@@ -491,12 +492,27 @@ export function createAppComposition(deps: AppDependencies): {
     }, MANAGED_AUTH_REAPER_INTERVAL_MS);
     (timer as ReturnType<typeof setInterval> & { unref?: () => void }).unref?.();
   }
+  if (deps.transcription === undefined) {
+    // Voice pricing problems never fail boot (workers share this config); the
+    // affected provider is withheld and the operator sees exactly why, once.
+    for (const issue of voiceInputPricingIssues(deps.settings)) {
+      observability.error(
+        `Voice input provider ${issue.providerId} is unavailable: ${issue.message}`,
+        {
+          providerId: issue.providerId,
+          env: issue.env,
+          reason: issue.reason,
+        },
+      );
+    }
+  }
   const transcription =
     deps.transcription === undefined
       ? createTranscriptionService({
           settings: deps.settings,
           db: deps.db,
           ...(deps.codexFetch ? { codexFetch: deps.codexFetch } : {}),
+          log: (message, attributes) => observability.error(message, attributes),
         })
       : deps.transcription;
   const transcriptionSegmenter =
@@ -1253,8 +1269,13 @@ export function createAppComposition(deps: AppDependencies): {
             fallbackEnabled: voicePreferences?.fallbackEnabled,
           };
           if (hasPermission(grant.permissions, "sessions:create") && transcription) {
+            // `providers` lists every ready provider (the workspace picker);
+            // `available` honours the workspace preference and fallback, so
+            // the composer never offers a mic every request would refuse.
             voiceInputProviders = (await transcription.availableProviderIds?.(voiceContext)) ?? [];
-            voiceInputAvailable = voiceInputProviders.length > 0;
+            voiceInputAvailable =
+              voiceInputProviders.length > 0 &&
+              (await Promise.resolve(transcription.available(voiceContext)).catch(() => false));
           }
 
           defaultSelection = await resolveDefaultSessionModelForSelections(deps.db, {

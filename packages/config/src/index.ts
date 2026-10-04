@@ -1817,6 +1817,58 @@ export function isUsableVoiceInputSecret(value: string | null | undefined): valu
  * whether at least one non-experimental (or probed experimental) provider exists.
  */
 export function resolveVoiceInputProviderRegistry(settings: Settings): VoiceInputProviderConfig[] {
+  return voiceInputProviderRegistryWithIssues(settings).providers;
+}
+
+/** Why a credentialed deployment-funded voice provider is withheld. */
+export type VoiceInputPricingIssue = {
+  providerId: "openai" | "azure-openai" | "azure-mai";
+  env: string;
+  reason: "malformed" | "unpriced";
+  message: string;
+};
+
+/**
+ * Pricing problems that withhold a credentialed deployment-funded provider.
+ * A malformed PRICING_JSON never fails boot (workers share this config and
+ * must not crash-loop over a voice-only setting); the API logs each issue
+ * once at startup and the provider stays unavailable.
+ */
+export function voiceInputPricingIssues(settings: Settings): VoiceInputPricingIssue[] {
+  return voiceInputProviderRegistryWithIssues(settings).issues;
+}
+
+function voiceInputProviderPricing(
+  settings: Settings,
+  issues: VoiceInputPricingIssue[],
+  providerId: VoiceInputPricingIssue["providerId"],
+  env: string,
+  raw: string | undefined,
+  model: string,
+): { usable: true; pricing: VoiceInputPricing | null } | { usable: false } {
+  const resolved = safeResolveVoiceInputPricing(raw, model, env);
+  if (!resolved.ok) {
+    issues.push({ providerId, env, reason: "malformed", message: resolved.error });
+    return { usable: false };
+  }
+  if (!resolved.pricing && voiceInputCreditBillingActive(settings)) {
+    // Never serve unpriced deployment-paid audio on a credit-billed deployment.
+    issues.push({
+      providerId,
+      env,
+      reason: "unpriced",
+      message: `${env} is required: credit billing is active and model "${model}" has no built-in voice price`,
+    });
+    return { usable: false };
+  }
+  return { usable: true, pricing: resolved.pricing };
+}
+
+function voiceInputProviderRegistryWithIssues(settings: Settings): {
+  providers: VoiceInputProviderConfig[];
+  issues: VoiceInputPricingIssue[];
+} {
+  const issues: VoiceInputPricingIssue[] = [];
   const order = settings.voiceInputProviderOrder
     .split(",")
     .map((part) => part.trim())
@@ -1839,15 +1891,19 @@ export function resolveVoiceInputProviderRegistry(settings: Settings): VoiceInpu
         !isUsableVoiceInputSecret(settings.voiceInputMaiApiKey)
       )
         continue;
-      const pricing = resolveVoiceInputPricing(
+      const priced = voiceInputProviderPricing(
+        settings,
+        issues,
+        "azure-mai",
+        "OPENGENI_VOICE_INPUT_MAI_PRICING_JSON",
         settings.voiceInputMaiPricingJson,
         settings.voiceInputMaiModel,
       );
-      if (!pricing && voiceInputCreditBillingActive(settings)) continue;
+      if (!priced.usable) continue;
       providers.push({
         id,
         kind: "azure-mai",
-        pricing,
+        pricing: priced.pricing,
         endpoint: settings.voiceInputMaiEndpoint.replace(/\/+$/, ""),
         apiKey: settings.voiceInputMaiApiKey,
         apiVersion: settings.voiceInputMaiApiVersion,
@@ -1868,16 +1924,19 @@ export function resolveVoiceInputProviderRegistry(settings: Settings): VoiceInpu
       ) {
         continue;
       }
-      const pricing = resolveVoiceInputPricing(
+      const priced = voiceInputProviderPricing(
+        settings,
+        issues,
+        "openai",
+        "OPENGENI_VOICE_INPUT_OPENAI_PRICING_JSON",
         settings.voiceInputOpenaiPricingJson,
         settings.voiceInputOpenaiModel,
       );
-      // Never serve unpriced deployment-paid audio on a credit-billed deployment.
-      if (!pricing && voiceInputCreditBillingActive(settings)) continue;
+      if (!priced.usable) continue;
       providers.push({
         id: "openai",
         kind: "openai",
-        pricing,
+        pricing: priced.pricing,
         apiKey,
         baseUrl: (
           settings.voiceInputOpenaiBaseUrl ??
@@ -1921,9 +1980,16 @@ export function resolveVoiceInputProviderRegistry(settings: Settings): VoiceInpu
         continue;
       }
       const model = settings.voiceInputAzureModel ?? deployment;
-      const pricing = resolveVoiceInputPricing(settings.voiceInputAzurePricingJson, model);
-      // Never serve unpriced deployment-paid audio on a credit-billed deployment.
-      if (!pricing && voiceInputCreditBillingActive(settings)) continue;
+      const priced = voiceInputProviderPricing(
+        settings,
+        issues,
+        "azure-openai",
+        "OPENGENI_VOICE_INPUT_AZURE_PRICING_JSON",
+        settings.voiceInputAzurePricingJson,
+        model,
+      );
+      if (!priced.usable) continue;
+      const pricing = priced.pricing;
       providers.push({
         id: "azure-openai",
         kind: "azure-openai",
@@ -1960,7 +2026,7 @@ export function resolveVoiceInputProviderRegistry(settings: Settings): VoiceInpu
       });
     }
   }
-  return providers;
+  return { providers, issues };
 }
 
 /**
@@ -2013,21 +2079,26 @@ const VoiceInputPricingSchema = z
  * PRICING_JSON when a deployment's contracted or regional price differs.
  */
 export const defaultVoiceInputPricing: Readonly<Record<string, VoiceInputPricing>> = {
+  // Audio tokens are listed separately from text tokens on the model pages;
+  // set explicitly so the audio rate never silently follows a text-rate edit.
   "gpt-4o-transcribe": {
     microsPerMinute: 6_000,
     inputMicrosPerMillionTokens: 2_500_000,
+    audioInputMicrosPerMillionTokens: 2_500_000,
     outputMicrosPerMillionTokens: 10_000_000,
     marginBps: 500,
   },
   "gpt-4o-transcribe-diarize": {
     microsPerMinute: 6_000,
     inputMicrosPerMillionTokens: 2_500_000,
+    audioInputMicrosPerMillionTokens: 2_500_000,
     outputMicrosPerMillionTokens: 10_000_000,
     marginBps: 500,
   },
   "gpt-4o-mini-transcribe": {
     microsPerMinute: 3_000,
     inputMicrosPerMillionTokens: 1_250_000,
+    audioInputMicrosPerMillionTokens: 1_250_000,
     outputMicrosPerMillionTokens: 5_000_000,
     marginBps: 500,
   },
@@ -2080,6 +2151,24 @@ export function resolveVoiceInputPricing(
     defaultVoiceInputPricing[canonicalVoiceInputModel(model)] ??
     null
   );
+}
+
+/** Non-throwing {@link resolveVoiceInputPricing} for registry resolution. */
+export function safeResolveVoiceInputPricing(
+  raw: string | undefined,
+  model: string,
+  env?: string,
+): { ok: true; pricing: VoiceInputPricing | null } | { ok: false; error: string } {
+  let explicit: VoiceInputPricing | null;
+  try {
+    explicit = parseVoiceInputPricingJson(raw, env);
+  } catch (error) {
+    return { ok: false, error: error instanceof Error ? error.message : String(error) };
+  }
+  return {
+    ok: true,
+    pricing: explicit ?? defaultVoiceInputPricing[canonicalVoiceInputModel(model)] ?? null,
+  };
 }
 
 /** Same predicate as model/credit limits: credit balance and debits are enforced. */
@@ -2174,22 +2263,13 @@ export function calculateVoiceInputCost(
 
 /**
  * Deployment-funded providers that have credentials but are withheld because
- * credit billing is active and no price is known. Boot logs these so an
- * operator sees why voice input stayed unavailable.
+ * credit billing is active and no price is known. The API logs these (and
+ * malformed pricing, see {@link voiceInputPricingIssues}) once at startup so
+ * an operator sees why voice input stayed unavailable.
  */
 export function unpricedVoiceInputProviders(settings: Settings): VoiceInputProviderId[] {
-  if (!voiceInputCreditBillingActive(settings)) return [];
-  return resolveVoiceInputProviderRegistry({
-    ...settings,
-    billingMode: "disabled",
-    usageLimitsMode: "none",
-  }).flatMap((provider) =>
-    (provider.kind === "openai" ||
-      provider.kind === "azure-openai" ||
-      provider.kind === "azure-mai") &&
-    provider.pricing === null
-      ? [provider.id]
-      : [],
+  return voiceInputPricingIssues(settings).flatMap((issue) =>
+    issue.reason === "unpriced" ? [issue.providerId] : [],
   );
 }
 
@@ -8700,19 +8780,9 @@ function validateSettings(settings: Settings, source: NodeJS.ProcessEnv = proces
     );
   }
   parseExposedPorts(settings.dockerExposedPorts);
-  // Fail fast on malformed voice-input credit pricing.
-  parseVoiceInputPricingJson(
-    settings.voiceInputMaiPricingJson,
-    "OPENGENI_VOICE_INPUT_MAI_PRICING_JSON",
-  );
-  parseVoiceInputPricingJson(
-    settings.voiceInputOpenaiPricingJson,
-    "OPENGENI_VOICE_INPUT_OPENAI_PRICING_JSON",
-  );
-  parseVoiceInputPricingJson(
-    settings.voiceInputAzurePricingJson,
-    "OPENGENI_VOICE_INPUT_AZURE_PRICING_JSON",
-  );
+  // Malformed voice-input pricing deliberately does not fail boot: every
+  // process shares this config, and a voice-only typo must not crash-loop
+  // workers. The provider is withheld and the API logs voiceInputPricingIssues.
   parseRealtimeVoicePricingJson(settings.azureLivePricingJson, "OPENGENI_AZURE_LIVE_PRICING_JSON");
   parseRealtimeVoicePricingTableJson(
     settings.aiGatewayRealtimePricingJson,

@@ -1,4 +1,5 @@
 export * from "./organization-slack-bots";
+export * from "./voice-transcription-settlement";
 import {
   connectionMetadataColumns,
   connectionSubjectVisibility,

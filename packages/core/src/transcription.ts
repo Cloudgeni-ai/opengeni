@@ -1,6 +1,6 @@
 import type { VoiceInputPricing, VoiceInputUsage } from "@opengeni/config";
 import type { TranscribeAudioResponse, VoiceInputErrorCode } from "@opengeni/contracts";
-import type { CreditDebitAttribution, Database } from "@opengeni/db";
+import type { CreditDebitAttribution } from "@opengeni/db";
 
 /**
  * Server-owned upstream budget for one provider attempt. Resumable recording
@@ -42,25 +42,31 @@ export type TranscriptionRequest = {
    * the service fails closed without it.
    */
   billing?: TranscriptionBillingContext | undefined;
-  /** Internal: settle with durable segment completion instead of before returning. */
+  /**
+   * Internal: return `settleBilling` instead of settling before returning, so
+   * a resumable segment's transcript commits before any billing write.
+   */
   deferBillingSettlement?: boolean;
 };
 
-/** Trusted, server-built settlement identity for one transcription unit. */
+/**
+ * Trusted, server-built settlement identity for one transcription unit. The
+ * usage receipt and debit idempotency keys derive from `workspaceId` +
+ * `sourceId` (see `voiceInputSettlementKeys`), so a retry or a later
+ * reconciliation settles the same unit exactly once.
+ */
 export type TranscriptionBillingContext = {
   /**
-   * Server-derived idempotency key. Never a client-chosen value: a reused key
-   * settles once, so a client-controlled key would make later calls free.
+   * Server-derived unit identity. Never a client-chosen value: a reused id
+   * settles once, so a client-controlled id would make later calls free.
    */
-  idempotencyKey: string;
-  /** Ledger/usage source type, e.g. `voice_transcription`. */
-  sourceType: string;
   sourceId: string;
   /** Trusted payer facts from the authenticated request boundary. */
   attribution: CreditDebitAttribution;
   /**
-   * Audio duration measured by the server from bytes it produced (resumable
-   * WAV segments). Used only when the provider reports no billable usage.
+   * Audio duration measured by the server from WAV bytes it produced (the
+   * resumable segment, or the normalized one-shot upload). Bills whenever the
+   * provider reports no usage this deployment has a price for.
    */
   trustedDurationSeconds?: number | undefined;
 };
@@ -72,8 +78,12 @@ export type TranscriptionResult = TranscribeAudioResponse & {
   latencyMs: number;
   /** Opengeni credits charged for this call (0 for subscription/free providers). */
   creditCostMicros?: number | undefined;
-  /** Server-only settlement callback; never serialized into a public response. */
-  settleBilling?: (transaction: Database) => Promise<void>;
+  /**
+   * Server-only settlement callback; never serialized into a public response.
+   * Never rejects: a settlement failure after provider success is logged and
+   * retried, and the transcript is still delivered.
+   */
+  settleBilling?: () => Promise<void>;
 };
 
 export type TranscriptionBillingRefusalCode =
@@ -114,19 +124,20 @@ export type TranscriptionBilling = {
     workspaceId: string;
     attribution: CreditDebitAttribution;
   }): Promise<void>;
-  /** Record usage and debit credits once per idempotency key, after use. */
-  settle(
-    input: {
-      accountId: string;
-      workspaceId: string;
-      providerId: string;
-      model: string;
-      pricing: VoiceInputPricing;
-      usage: VoiceInputUsage | null;
-      billing: TranscriptionBillingContext;
-    },
-    transaction?: Database,
-  ): Promise<{ creditCostMicros: number }>;
+  /**
+   * Record usage and debit credits once per unit, after use. The usage receipt
+   * commits before the debit, so a failed debit leaves a durable receipt that
+   * `admit` reconciles on the workspace's next voice request.
+   */
+  settle(input: {
+    accountId: string;
+    workspaceId: string;
+    providerId: string;
+    model: string;
+    pricing: VoiceInputPricing;
+    usage: VoiceInputUsage | null;
+    billing: TranscriptionBillingContext;
+  }): Promise<{ creditCostMicros: number }>;
 };
 
 export class TranscriptionServiceError extends Error {
@@ -262,6 +273,8 @@ export type TranscriptionSegmenter = {
     sourceMimeType: string;
     totalDurationMilliseconds: number;
     providerSegmentSeconds: number;
+    /** Hard decode ceiling (`ffmpeg -t`); audio past it is never decoded. */
+    maxDecodeSeconds?: number | undefined;
     chunks: AsyncIterable<Uint8Array>;
     signal?: AbortSignal | undefined;
   }): AsyncIterable<PreparedTranscriptionSegment>;

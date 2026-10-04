@@ -8,7 +8,6 @@ import {
   requireAccessGrant,
   TranscriptionBillingRefusedError,
   TranscriptionServiceError,
-  VOICE_INPUT_SOURCE_TYPE,
 } from "@opengeni/core";
 import { getWorkspace } from "@opengeni/db";
 import type { Hono } from "hono";
@@ -28,19 +27,24 @@ export function registerTranscriptionRoutes(app: Hono, deps: ApiRouteDeps): void
     }
     const preferences = WorkspaceVoiceInputSettings.safeParse(workspace.settings.voiceInput).data;
     const service = deps.transcription;
-    if (!service || !(await service.available({ workspaceId, subjectId: grant.subjectId }))) {
+    if (
+      !service ||
+      !(await service.available({
+        workspaceId,
+        subjectId: grant.subjectId,
+        preferredProvider: preferences?.preferredProvider,
+        fallbackEnabled: preferences?.fallbackEnabled,
+      }))
+    ) {
       return c.json({ code: "unavailable" }, 503);
     }
     try {
       const body = await audioRequest(c.req.raw, service.limits().maxSizeBytes);
       // Server-generated: the correlation id is client-chosen and a reused
       // settlement key would make every later call with it free.
-      const usageId = crypto.randomUUID();
       const result = await service.transcribe({
         billing: {
-          idempotencyKey: `voice_input:${workspaceId}:${usageId}`,
-          sourceType: VOICE_INPUT_SOURCE_TYPE,
-          sourceId: usageId,
+          sourceId: crypto.randomUUID(),
           attribution: creditDebitAttributionForGrant(grant),
         },
         preferredProvider: preferences?.preferredProvider,

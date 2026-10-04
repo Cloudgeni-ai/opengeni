@@ -4,6 +4,7 @@ import {
   type Settings,
 } from "@opengeni/config";
 import { VOICE_INPUT_ACCEPTED_MIME_TYPES } from "@opengeni/contracts";
+import { voiceTranscriptionSettlementKeys } from "@opengeni/db";
 import {
   createVoiceInputBilling,
   filenameForMimeType,
@@ -12,11 +13,13 @@ import {
   TRANSCRIPTION_PROVIDER_REQUEST_TIMEOUT_MILLISECONDS,
   type TranscriptionAvailabilityContext,
   type TranscriptionBilling,
+  type TranscriptionBillingContext,
   type TranscriptionProvider,
   type TranscriptionService,
   TranscriptionServiceError,
 } from "@opengeni/core";
 import type { Database } from "@opengeni/db";
+import { createFfmpegAudioNormalizer, type TranscriptionAudioNormalizer } from "./normalize";
 import { createMaiTranscriptionProvider } from "./providers/azure-mai";
 import { createAzureOpenAiTranscriptionProvider } from "./providers/azure-openai";
 import { createCodexSubscriptionTranscriptionProvider } from "./providers/codex-subscription";
@@ -35,6 +38,12 @@ export function createTranscriptionService(input: {
   now?: () => Date;
   /** Credit admission/settlement for deployment-funded providers. */
   billing?: TranscriptionBilling;
+  /** Test seam: trusted one-shot decode + duration (defaults to ffmpeg). */
+  normalizeAudio?: TranscriptionAudioNormalizer;
+  /** Loud operator log for settlement failures after provider success. */
+  log?: (message: string, attributes: Record<string, string | number | boolean>) => void;
+  /** In-process settlement retry pacing after an inline failure. */
+  settlementRetryDelaysMilliseconds?: readonly number[];
 }): TranscriptionService {
   const providers: TranscriptionProvider[] = resolveVoiceInputProviderRegistry(input.settings).map(
     (config) => {
@@ -81,8 +90,86 @@ export function createTranscriptionService(input: {
   const providerRequestTimeoutMilliseconds =
     input.providerRequestTimeoutMilliseconds ?? TRANSCRIPTION_PROVIDER_REQUEST_TIMEOUT_MILLISECONDS;
   const now = input.now ?? (() => new Date());
+  const log =
+    input.log ??
+    ((message: string, attributes: Record<string, string | number | boolean>) => {
+      console.error(message, attributes);
+    });
   const billing =
-    input.billing ?? createVoiceInputBilling({ db: input.db, settings: input.settings });
+    input.billing ??
+    createVoiceInputBilling({
+      db: input.db,
+      settings: input.settings,
+      onReconcileError: (error, scope) => {
+        log("Voice input charge reconciliation failed", {
+          ...scope,
+          errorClass: error instanceof Error ? error.name : "UnknownError",
+          error: boundedErrorMessage(error),
+        });
+      },
+    });
+  let normalizer: TranscriptionAudioNormalizer | undefined = input.normalizeAudio;
+  const normalizeAudio: TranscriptionAudioNormalizer = (request) => {
+    normalizer ??= createFfmpegAudioNormalizer({ ffmpegPath: input.settings.voiceInputFfmpegPath });
+    return normalizer(request);
+  };
+  const retryDelays = input.settlementRetryDelaysMilliseconds ?? [2_000, 15_000, 60_000];
+  type Settlement = Parameters<TranscriptionBilling["settle"]>[0];
+  /**
+   * Post-use settlement never fails the request: the provider already returned
+   * text the user is waiting for. A failure is logged with the exact
+   * idempotency keys and retried in-process; if the receipt committed but the
+   * debit did not, the next admission in the workspace reconciles it.
+   */
+  const settleWithoutFailing = async (settlement: Settlement): Promise<number> => {
+    try {
+      return (await billing.settle(settlement)).creditCostMicros;
+    } catch (error) {
+      reportUnsettled(settlement, error, 0, retryDelays.length > 0 && !deterministic(error));
+      if (!deterministic(error)) scheduleSettlementRetry(settlement, 0);
+      return 0;
+    }
+  };
+  const deterministic = (error: unknown) => error instanceof TranscriptionServiceError;
+  const scheduleSettlementRetry = (settlement: Settlement, attempt: number) => {
+    const delay = retryDelays[attempt];
+    if (delay === undefined) return;
+    const timer = setTimeout(() => {
+      void billing.settle(settlement).then(
+        () => {
+          log("Voice input charge settled on retry", {
+            ...settlementAttributes(settlement),
+            attempt: attempt + 1,
+          });
+        },
+        (error: unknown) => {
+          const more = attempt + 1 < retryDelays.length;
+          reportUnsettled(settlement, error, attempt + 1, more);
+          if (more) scheduleSettlementRetry(settlement, attempt + 1);
+        },
+      );
+    }, delay);
+    (timer as ReturnType<typeof setTimeout> & { unref?: () => void }).unref?.();
+  };
+  const reportUnsettled = (
+    settlement: Settlement,
+    error: unknown,
+    attempt: number,
+    willRetry: boolean,
+  ) => {
+    log(
+      willRetry
+        ? "Voice input charge is unsettled after provider success; retrying"
+        : "Voice input charge is UNSETTLED after provider success; manual reconciliation needed unless its usage receipt committed",
+      {
+        ...settlementAttributes(settlement),
+        attempt,
+        willRetry,
+        errorClass: error instanceof Error ? error.name : "UnknownError",
+        error: boundedErrorMessage(error),
+      },
+    );
+  };
   const creditBillingActive = voiceInputCreditBillingActive(input.settings);
   /** Deployment-funded calls are charged; the workspace's own subscriptions never are. */
   const chargeable = (provider: TranscriptionProvider) =>
@@ -95,10 +182,16 @@ export function createTranscriptionService(input: {
       );
     },
     async availableProviderIds(context) {
+      // Every ready provider, for the workspace provider picker. One failing
+      // probe means that provider is not ready; it never fails the caller.
       const available = await Promise.all(
-        providers.map(async (provider) =>
-          (await provider.available(context)) ? provider.id : null,
-        ),
+        providers.map(async (provider) => {
+          try {
+            return (await provider.available(context)) ? provider.id : null;
+          } catch {
+            return null;
+          }
+        }),
       );
       return available.filter((id): id is string => id !== null);
     },
@@ -169,6 +262,26 @@ export function createTranscriptionService(input: {
           attribution: request.billing.attribution,
         });
       }
+      let audio = request.audio;
+      let providerMimeType = mimeType;
+      let billingContext: TranscriptionBillingContext | undefined = request.billing;
+      let audioSeconds = request.durationSeconds ?? 0;
+      if (chargeable(provider) && billingContext?.trustedDurationSeconds === undefined) {
+        // A deployment-paid one-shot upload is decoded by the server first, so
+        // the call always carries a duration the server measured from bytes it
+        // produced. That bills any usage shape we cannot price, and bounds
+        // what is sent upstream to the configured maximum recording length.
+        const normalized = await normalizeAudio({
+          audio,
+          mimeType,
+          maxDurationSeconds: limits.maxDurationSeconds,
+          ...(request.signal ? { signal: request.signal } : {}),
+        });
+        audio = normalized.bytes;
+        providerMimeType = "audio/wav";
+        audioSeconds = normalized.durationSeconds;
+        billingContext = { ...billingContext!, trustedDurationSeconds: normalized.durationSeconds };
+      }
       const startedAt = performance.now();
       const remainingMilliseconds = request.providerDeadlineAt
         ? remainingTranscriptionProviderRequestMilliseconds(request.providerDeadlineAt, now())
@@ -187,9 +300,9 @@ export function createTranscriptionService(input: {
       let result: Awaited<ReturnType<TranscriptionProvider["transcribe"]>>;
       try {
         result = await provider.transcribe({
-          audio: request.audio,
-          mimeType,
-          filename: filenameForMimeType(mimeType),
+          audio,
+          mimeType: providerMimeType,
+          filename: filenameForMimeType(providerMimeType),
           workspaceId: request.workspaceId,
           accountId: request.accountId,
           subjectId: request.subjectId,
@@ -234,20 +347,17 @@ export function createTranscriptionService(input: {
       }
       const latencyMs = Math.round(performance.now() - startedAt);
       let creditCostMicros = 0;
-      const settle = async (transaction?: Database) => {
-        if (chargeable(provider) && provider.deploymentFunded?.pricing && request.billing) {
-          ({ creditCostMicros } = await billing.settle(
-            {
-              accountId: request.accountId,
-              workspaceId: request.workspaceId,
-              providerId: provider.id,
-              model: provider.deploymentFunded.model,
-              pricing: provider.deploymentFunded.pricing,
-              usage: result.usage ?? null,
-              billing: request.billing,
-            },
-            transaction,
-          ));
+      const settle = async () => {
+        if (chargeable(provider) && provider.deploymentFunded?.pricing && billingContext) {
+          creditCostMicros = await settleWithoutFailing({
+            accountId: request.accountId,
+            workspaceId: request.workspaceId,
+            providerId: provider.id,
+            model: provider.deploymentFunded.model,
+            pricing: provider.deploymentFunded.pricing,
+            usage: result.usage ?? null,
+            billing: billingContext,
+          });
         }
       };
       if (!request.deferBillingSettlement) await settle();
@@ -255,7 +365,7 @@ export function createTranscriptionService(input: {
         text: result.text,
         languages: result.languages,
         providerId: provider.id,
-        audioSeconds: request.durationSeconds ?? 0,
+        audioSeconds,
         latencyMs,
         creditCostMicros,
         ...(request.deferBillingSettlement ? { settleBilling: settle } : {}),
@@ -342,4 +452,28 @@ async function exactAvailable(
 ) {
   const provider = providers.find((candidate) => candidate.id === providerId);
   return provider && (await provider.available(context)) ? provider : null;
+}
+
+function settlementAttributes(settlement: {
+  accountId: string;
+  workspaceId: string;
+  providerId: string;
+  billing: TranscriptionBillingContext;
+}): Record<string, string> {
+  const keys = voiceTranscriptionSettlementKeys({
+    workspaceId: settlement.workspaceId,
+    sourceId: settlement.billing.sourceId,
+  });
+  return {
+    accountId: settlement.accountId,
+    workspaceId: settlement.workspaceId,
+    providerId: settlement.providerId,
+    sourceId: settlement.billing.sourceId,
+    usageIdempotencyKey: keys.usageIdempotencyKey,
+    debitIdempotencyKey: keys.debitIdempotencyKey,
+  };
+}
+
+function boundedErrorMessage(error: unknown): string {
+  return (error instanceof Error ? error.message : String(error)).slice(0, 500);
 }
