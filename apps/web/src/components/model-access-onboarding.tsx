@@ -19,7 +19,6 @@ import { CelebrationBurst } from "@/components/onboarding/celebration-burst";
 import { CreditsPrize } from "@/components/onboarding/credits-prize";
 import { SubscriptionDeviceCodePanel } from "@/components/subscription-device-code-panel";
 import { Button } from "@/components/ui/button";
-import { Disclosure } from "@/components/ui/disclosure";
 import { ListRow } from "@/components/ui/list-row";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
@@ -758,16 +757,9 @@ export function ModelAccessOnboardingPanel({
             {continueToNextStep ? "Continue" : "Start chatting"}
           </Button>
           {coupon ? <div className="mt-3 text-center">{coupon}</div> : null}
-          {selectionRetry === "credits" ? selectionRetryNotice : null}
-
-          <Disclosure
-            className="mt-6 border-t border-border pt-3"
-            title="Other ways to pay"
-            summary="Connect a subscription or API key."
-          >
-            <div className="pt-2">{connectOptions}</div>
-            {selectionRetry !== "credits" ? selectionRetryNotice : null}
-          </Disclosure>
+          {/* With credits there's no model to connect here; Models in
+              Organization settings connects one later. */}
+          {selectionRetryNotice}
         </div>
       </section>
     );
