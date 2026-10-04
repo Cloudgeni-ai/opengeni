@@ -54,13 +54,15 @@ diff --git a/src/connection.js b/src/connection.js
      socket.removeListener('data', data)
      socket.removeListener('connect', connected)
      idleTimer.cancel()
-@@ -451,6 +470,10 @@
+@@ -451,6 +470,12 @@
        return reconnect()
  
      !hadError && (query || sent.length) && error(Errors.connection('CONNECTION_CLOSED', options, socket))
 +    // The rejected query cannot receive ReadyForQuery from a dead backend.
 +    // Release its drain obligation without replaying any bytes.
-+    query = null
++    // Discard protocol state the dead backend cannot complete with ReadyForQuery.
++    query = results = errorResponse = null
++    result = new Result()
 +    ended && (ended(), ending = ended = null)
      closedTime = performance.now()
      hadError && options.shared.retries++
@@ -121,13 +123,15 @@ diff --git a/cjs/src/connection.js b/cjs/src/connection.js
      socket.removeListener('data', data)
      socket.removeListener('connect', connected)
      idleTimer.cancel()
-@@ -451,6 +470,10 @@
+@@ -451,6 +470,12 @@
        return reconnect()
  
      !hadError && (query || sent.length) && error(Errors.connection('CONNECTION_CLOSED', options, socket))
 +    // The rejected query cannot receive ReadyForQuery from a dead backend.
 +    // Release its drain obligation without replaying any bytes.
-+    query = null
++    // Discard protocol state the dead backend cannot complete with ReadyForQuery.
++    query = results = errorResponse = null
++    result = new Result()
 +    ended && (ended(), ending = ended = null)
      closedTime = performance.now()
      hadError && options.shared.retries++
