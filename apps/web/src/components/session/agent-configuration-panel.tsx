@@ -25,11 +25,14 @@ import {
   AgentCapabilitySummary,
 } from "@/components/agent/agent-capability-picker";
 import { InAppHelpLink } from "@/components/in-app-help-link";
-import { AgentLearningSettingsEditor } from "@/components/knowledge/agent-learning-settings";
+import {
+  learningModesEqual,
+  useLearningSettings,
+  type LearningModes,
+} from "@/components/agent/capability-learning";
 import { Button } from "@/components/ui/button";
 import { Disclosure } from "@/components/ui/disclosure";
 import { Field, TextArea } from "@/components/ui/field";
-import { HelpLink } from "@/components/ui/inline-help";
 import { Notice } from "@/components/ui/notice";
 import { RelativeTime } from "@/components/ui/relative-time";
 import { useAppContext } from "@/context";
@@ -45,7 +48,6 @@ import {
   toolOwnerLabel,
   workspaceAgentDefaultsDraft,
   type AgentCapabilityDraft,
-  type AgentCapabilityId,
 } from "@/lib/agent-capabilities";
 import { chatLearningScope } from "@/lib/chat-learning-scope";
 import { isPersonalWorkspace } from "@/lib/managed-self-context";
@@ -63,9 +65,6 @@ export function workspaceAgentDefaultsHref(workspaceId: string): string {
 export function agentLearningHref(workspaceId: string): string {
   return `/workspaces/${workspaceId}/state?page=learning`;
 }
-
-/** Capabilities whose writes Agent learning governs. */
-const LEARNING_GOVERNED: ReadonlySet<AgentCapabilityId> = new Set(["knowledge", "skills"]);
 
 export function AgentConfigurationPanel(props: {
   session: Session;
@@ -114,6 +113,17 @@ export function AgentConfigurationPanel(props: {
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const scrollRegion = useRef<HTMLDivElement>(null);
+  const learningScope = chatLearningScope(
+    session,
+    isPersonalWorkspace(workspace, context.managedSelfContext),
+  );
+  // This chat's Agent learning: shown inside Skills and Knowledge, saved with them.
+  const learning = useLearningSettings({
+    workspaceId: session.workspaceId,
+    scope: learningScope,
+    source: { kind: "chat", id: session.id },
+  });
+  const [learningDraft, setLearningDraft] = useState<LearningModes | null>(learning.modes);
 
   // Someone else's save (or a reload) while not editing shows the new truth.
   const configKey = JSON.stringify(config);
@@ -121,11 +131,22 @@ export function AgentConfigurationPanel(props: {
     if (editing) return;
     setDraft(current);
     setIdentity(config?.identity ?? "");
+    setLearningDraft(learning.modes);
     // oxlint-disable-next-line react-hooks/exhaustive-deps -- follow the frozen configuration
-  }, [configKey, editing]);
+  }, [configKey, editing, learning.modes ? JSON.stringify(learning.modes) : null]);
+
+  // Settings that arrive after the editor opened fill an empty draft.
+  useEffect(() => {
+    if (learning.modes) setLearningDraft((previous) => previous ?? learning.modes);
+  }, [learning.modes]);
 
   const identityChanged = identity.trim() !== (config?.identity ?? "").trim();
-  const dirty = !draftsEqual(draft, current) || identityChanged || !config;
+  const agentChanged = !draftsEqual(draft, current) || identityChanged || !config;
+  const learningChanged =
+    learning.modes !== null &&
+    learningDraft !== null &&
+    !learningModesEqual(learning.modes, learningDraft);
+  const dirty = agentChanged || learningChanged;
   const identityTooLong = identity.trim().length > AGENT_IDENTITY_MAX_CHARACTERS;
 
   async function save() {
@@ -133,13 +154,16 @@ export function AgentConfigurationPanel(props: {
     setSaving(true);
     setError(null);
     try {
-      await context.client.updateSessionAgent(session.workspaceId, session.id, {
-        agent: {
-          capabilities: requestFromDraft(draft, availability),
-          ...(identityChanged ? { identity: identity.trim() || null } : {}),
-        },
-        expectedVersion: session.toolPolicyVersion,
-      });
+      if (agentChanged) {
+        await context.client.updateSessionAgent(session.workspaceId, session.id, {
+          agent: {
+            capabilities: requestFromDraft(draft, availability),
+            ...(identityChanged ? { identity: identity.trim() || null } : {}),
+          },
+          expectedVersion: session.toolPolicyVersion,
+        });
+      }
+      if (learningChanged && learningDraft) await learning.save(learningDraft);
       await props.onReloadSession();
       setEditing(false);
       toast.success("Agent settings saved", { description: "They apply from the next turn." });
@@ -183,15 +207,11 @@ export function AgentConfigurationPanel(props: {
         : "Changed for this chat";
   const identitySource = config?.identity ? "Set for this chat" : "Workspace default";
   const defaultsHref = workspaceAgentDefaultsHref(session.workspaceId);
-  const learningScope = chatLearningScope(
-    session,
-    isPersonalWorkspace(workspace, context.managedSelfContext),
-  );
-
-  // Composer + > Chat settings: bring Agent learning into view and focus it.
+  // Composer + > Chat settings: open the editor on what the agent can do.
   const focusRequest = props.learningFocusRequest ?? 0;
   useEffect(() => {
     if (!focusRequest) return;
+    if (canEdit) setEditing(true);
     const frame = requestAnimationFrame(() => {
       const heading = learningHeading.current;
       if (!heading) return;
@@ -199,46 +219,7 @@ export function AgentConfigurationPanel(props: {
       heading.focus({ preventScroll: true });
     });
     return () => cancelAnimationFrame(frame);
-  }, [focusRequest]);
-
-  const scrollToLearning = () => {
-    learningHeading.current?.scrollIntoView({ block: "start", behavior: "smooth" });
-    learningHeading.current?.focus({ preventScroll: true });
-  };
-  const learningNote = (id: AgentCapabilityId) =>
-    LEARNING_GOVERNED.has(id) ? (
-      <>
-        Whether its saves need your OK:{" "}
-        <HelpLink onClick={scrollToLearning}>Agent learning</HelpLink>
-      </>
-    ) : null;
-  const learningSection = (
-    <PanelSection
-      id={`${sectionId}-learning`}
-      title="Agent learning"
-      headingRef={learningHeading}
-      source={
-        <>
-          Default from{" "}
-          <InAppHelpLink href={agentLearningHref(session.workspaceId)}>
-            {learningScope === "personal" ? "your private chats" : "the workspace"}
-          </InAppHelpLink>
-        </>
-      }
-    >
-      <p className="text-xs leading-4.5 text-fg-muted">
-        Whether this chat's agent changes to knowledge, instructions and skills apply right away or
-        wait for your OK in Knowledge › Review. Saves as you change it.
-      </p>
-      <AgentLearningSettingsEditor
-        compact
-        workspaceId={session.workspaceId}
-        scope={learningScope}
-        source={{ kind: "chat", id: session.id }}
-        canEdit={canEdit}
-      />
-    </PanelSection>
-  );
+  }, [focusRequest, canEdit]);
 
   return (
     <div
@@ -315,16 +296,21 @@ export function AgentConfigurationPanel(props: {
                   />
                 </Field>
               </PanelSection>
-              <PanelSection id={`${sectionId}-capabilities`} title="Capabilities">
+              <PanelSection
+                id={`${sectionId}-capabilities`}
+                title="Capabilities"
+                headingRef={learningHeading}
+              >
                 <AgentCapabilityPicker
                   draft={draft}
                   onChange={setDraft}
                   availability={availability}
                   disabled={saving}
-                  rowAside={learningNote}
+                  learning={
+                    learningDraft ? { modes: learningDraft, onChange: setLearningDraft } : undefined
+                  }
                 />
               </PanelSection>
-              {learningSection}
             </>
           ) : (
             <>
@@ -364,14 +350,14 @@ export function AgentConfigurationPanel(props: {
                 id={`${sectionId}-capabilities`}
                 title="Capabilities"
                 source={<SourceLine label={capabilitiesSource} href={defaultsHref} />}
+                headingRef={learningHeading}
               >
                 <AgentCapabilitySummary
                   values={current.values}
                   availability={availability}
-                  rowAside={learningNote}
+                  learningModes={learning.modes}
                 />
               </PanelSection>
-              {learningSection}
               <ConnectedApps session={session} />
               <TechnicalDetails session={session} />
             </>
