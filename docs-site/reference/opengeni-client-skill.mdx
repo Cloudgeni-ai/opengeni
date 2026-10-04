@@ -167,6 +167,11 @@ in `approvals.ask`. See [Tools and auth](references/tools-and-auth.md).
 5. A second user, and a user in another tenant, cannot see the first user's
    chats or data.
 
+To see which models a workspace can use, call
+`GET /v1/config/client?workspaceId=<id>` with the key. Without `workspaceId`, an
+organization key sees no models and an "unavailable" fallback; that is expected,
+not a blocked model. A real chat turn is the true test.
+
 Locally, Opengeni must reach the tool endpoint over public HTTPS: run
 `cloudflared tunnel --url http://localhost:3000`, set
 `OPENGENI_TOOL_SERVER_URL` to the tunnel's endpoint URL, and tell the user.
