@@ -11,6 +11,7 @@ import {
 } from "@openai/agents";
 import OpenAI, { APIError } from "openai";
 import { AnthropicMessagesModel } from "./anthropic-messages";
+import { projectChatToolImages } from "./chat-tool-images";
 import { instrumentedModelFetch } from "./model-provider-client";
 import { CODEX_MODEL_ID_PREFIX } from "@opengeni/codex";
 import { XAI_SUBSCRIPTION_MODEL_ID_PREFIX } from "@opengeni/xai-subscription";
@@ -53,7 +54,7 @@ function chatCompletionFinishReason(value: unknown): unknown {
  */
 export class OpenGeniChatCompletionsModel extends OpenAIChatCompletionsModel {
   override async getResponse(request: ModelRequest): Promise<ModelResponse> {
-    const response = await super.getResponse(request);
+    const response = await super.getResponse(projectChatToolImages(request));
     if (isUnknownFinishReason(chatCompletionFinishReason(response.providerData))) {
       throw new UnknownModelFinishReasonError();
     }
@@ -62,7 +63,7 @@ export class OpenGeniChatCompletionsModel extends OpenAIChatCompletionsModel {
 
   override async *getStreamedResponse(request: ModelRequest): AsyncIterable<ResponseStreamEvent> {
     let finishReason: unknown;
-    for await (const event of super.getStreamedResponse(request)) {
+    for await (const event of super.getStreamedResponse(projectChatToolImages(request))) {
       if (event.type === "model") {
         const observed = chatCompletionFinishReason(event.event);
         if (observed !== undefined && observed !== null) {

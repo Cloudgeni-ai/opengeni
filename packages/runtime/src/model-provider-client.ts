@@ -22,6 +22,7 @@ import {
 } from "./model-provider-errors";
 import {
   azureModelRequestPolicy,
+  chatModelRequestPolicy,
   modelRequestPolicyForProvider,
 } from "./model-provider-request-policy";
 import { isModelCallFetch, vercelGatewayRoutingFetch } from "./model-provider-transport";
@@ -98,18 +99,24 @@ export function buildOpenAIClientFromSettings(
           instrumentedModelFetch(providerId, globalThis.fetch),
         ),
       },
-      { modelRequestPolicy: azureModelRequestPolicy },
+      {
+        modelRequestPolicy: (request) =>
+          chatModelRequestPolicy(request) ?? azureModelRequestPolicy(request),
+      },
     );
   }
-  return new ReplayableJsonOpenAI({
-    apiKey: settings.openaiApiKey ?? process.env.OPENAI_API_KEY,
-    ...(settings.openaiBaseUrl ? { baseURL: settings.openaiBaseUrl } : {}),
-    maxRetries: settings.openaiMaxRetries,
-    fetch: sdkRetryingModelFetch(
-      settings.openaiMaxRetries,
-      instrumentedModelFetch(providerId, globalThis.fetch),
-    ),
-  });
+  return new ReplayableJsonOpenAI(
+    {
+      apiKey: settings.openaiApiKey ?? process.env.OPENAI_API_KEY,
+      ...(settings.openaiBaseUrl ? { baseURL: settings.openaiBaseUrl } : {}),
+      maxRetries: settings.openaiMaxRetries,
+      fetch: sdkRetryingModelFetch(
+        settings.openaiMaxRetries,
+        instrumentedModelFetch(providerId, globalThis.fetch),
+      ),
+    },
+    { modelRequestPolicy: chatModelRequestPolicy },
+  );
 }
 
 /**
