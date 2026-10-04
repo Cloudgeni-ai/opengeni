@@ -147,6 +147,7 @@ import {
   selectableSessionVariableSets,
 } from "@/lib/personal-resource-attachments";
 import { groupSessionsForRail, relativeTimeLabel } from "@/lib/sessions-group";
+import { signupStarterSet } from "@/lib/signup-starter-set";
 import {
   useWorkspaceModelCatalog,
   type WorkspaceModelCatalogState,
@@ -1936,6 +1937,8 @@ function SessionsIndexRouteContent({
 
         <RecentSessions workspaceId={workspaceId} />
         <NewSessionStarters
+          workspaceId={workspaceId}
+          set={signupStarterSet(context.authSession?.user.email, workspace?.accountId)}
           disabled={busy || newSessionDraft.loading}
           onSelect={(prompt) => {
             setMessage(prompt);
