@@ -13,6 +13,7 @@ import {
   getCapabilityInstallation,
   getConnectionMetadata,
   listEnabledMcpCapabilityServers,
+  listConnectorToolPermissionPolicies,
   upsertCapabilityCatalogItem,
   updateWorkspaceSettings,
   type Database,
@@ -34,6 +35,7 @@ import {
   prepareCapabilityEnable,
   executeConnectOperation,
   getConnectorToolPermissions,
+  updateConnectorToolPermissions,
   settingsWithMcpCapabilityServers,
   freezeConnectionAccounts,
   workspaceSessionToolPolicyContext,
@@ -97,6 +99,18 @@ async function freshWorkspace(): Promise<{ accountId: string; workspaceId: strin
   return { accountId: account!.id, workspaceId: workspace!.id };
 }
 
+async function addConnectionOwner(
+  workspace: { accountId: string; workspaceId: string },
+  subjectId: string,
+) {
+  const [personal] = await shared!
+    .admin`insert into workspaces (account_id, name) values (${workspace.accountId}, 'personal account fixture') returning id`;
+  await shared!
+    .admin`insert into organization_memberships (account_id, subject_id, status, personal_workspace_id) values (${workspace.accountId}, ${subjectId}, 'active', ${personal!.id})`;
+  await shared!
+    .admin`insert into workspace_memberships (account_id, workspace_id, subject_id) values (${workspace.accountId}, ${workspace.workspaceId}, ${subjectId})`;
+}
+
 function grant(
   workspace: { accountId: string; workspaceId: string },
   subjectId: string,
@@ -146,7 +160,7 @@ async function createMcpCapability(
 }
 
 describe("subject-owned capability connection references", () => {
-  test("tool permissions resolve one shared selector account without pinning or borrowing a personal account", async () => {
+  test("tool permissions enumerate eligible accounts and honor an explicit account choice", async () => {
     if (!available) throw new Error("Real PostgreSQL fixture required");
     const workspace = await freshWorkspace();
     const capabilityId = `mcp:selector-${crypto.randomUUID()}`;
@@ -188,14 +202,25 @@ describe("subject-owned capability connection references", () => {
       (await getCapabilityInstallation(db, workspace.workspaceId, capabilityId))?.config
         .connectionRef,
     ).toEqual(selector);
-    await createConnection(db, {
+    const second = await createConnection(db, {
       ...workspace,
       subjectId: null,
       providerDomain: "service.example.test",
       kind: "oauth2",
       credentialEncrypted: encryptedFixture(),
     });
-    await expect(getConnectorToolPermissions(input)).rejects.toThrow("Choose one account");
+    const accounts = await getConnectorToolPermissions(input);
+    expect(accounts.accounts.map((account) => account.connectionId).sort()).toEqual(
+      [selected.id, second.id].sort(),
+    );
+    for (const connection of [selected, second])
+      expect(
+        (await getConnectorToolPermissions({ ...input, connectionId: connection.id })).connectionId,
+      ).toBe(connection.id);
+    expect(
+      (await getCapabilityInstallation(db, workspace.workspaceId, capabilityId))?.config
+        .connectionRef,
+    ).toEqual(selector);
   });
 
   test("new Slack catalog selectors survive enable/storage/projection and admit workspace plus only the sender's accounts", async () => {
@@ -968,6 +993,7 @@ describe("subject-owned capability connection references", () => {
   test("Gmail enables only an exact personal-owned connection and preserves legacy shared rows", async () => {
     if (!available) return;
     const workspace = await freshWorkspace();
+    await addConnectionOwner(workspace, "subject-alice");
     const capabilityId = `mcp:gmail-personal-${crypto.randomUUID()}`;
     await createMcpCapability(workspace, capabilityId, {
       endpointUrl: "https://gmailmcp.googleapis.com/mcp/v1",
@@ -988,6 +1014,7 @@ describe("subject-owned capability connection references", () => {
       kind: "oauth2",
       credentialEncrypted: encryptedFixture(),
     });
+    expect(alice.authorityId).toBeTruthy();
 
     for (const credentials of [
       {
@@ -1092,8 +1119,45 @@ describe("subject-owned capability connection references", () => {
     });
     expect(permissions.discoveryError).toBeNull();
     expect(permissions.connectionId).toBe(alice.id);
+    expect(permissions.accounts.map((account) => account.connectionId)).toEqual([alice.id]);
     expect(permissions.tools.map((tool) => tool.name)).toContain("search_threads");
     expect(permissions.tools.map((tool) => tool.name)).toContain("send_message");
+    const permissionInput = {
+      db,
+      settings,
+      workspaceId: workspace.workspaceId,
+      grant: {
+        ...grant(workspace, "subject-alice"),
+        permissions: ["capabilities:manage"],
+      },
+      capabilityId,
+      personalOwnerVerified: true,
+    };
+    await expect(
+      getConnectorToolPermissions({ ...permissionInput, connectionId: sharedConnection.id }),
+    ).rejects.toThrow("Reconnect this connector");
+    await expect(
+      updateConnectorToolPermissions({
+        ...permissionInput,
+        payload: { connectionId: sharedConnection.id, target: "default", permission: "allow" },
+      }),
+    ).rejects.toThrow("Reconnect this connector");
+    expect(
+      await listConnectorToolPermissionPolicies(db, {
+        ...workspace,
+        connectionId: sharedConnection.id,
+      }),
+    ).toEqual([]);
+    await updateConnectorToolPermissions({
+      ...permissionInput,
+      payload: {
+        connectionId: alice.id,
+        target: "default",
+        permission: "block",
+        expectedRevision: permissions.revision,
+      },
+    });
+    expect((await getConnectorToolPermissions(permissionInput)).defaultPermission).toBe("block");
     await expect(
       getConnectorToolPermissions({
         db,
@@ -1125,6 +1189,8 @@ describe("subject-owned capability connection references", () => {
     async ({ scopes, canSearch, canSend }) => {
       if (!available) throw new Error("Real PostgreSQL fixture required");
       const workspace = await freshWorkspace();
+      await addConnectionOwner(workspace, "subject-alice");
+      await addConnectionOwner(workspace, "subject-bob");
       const capabilityId = `mcp:gmail-scopes-${crypto.randomUUID()}`;
       await createMcpCapability(workspace, capabilityId, {
         endpointUrl: "https://gmailmcp.googleapis.com/mcp/v1",
@@ -1146,6 +1212,8 @@ describe("subject-owned capability connection references", () => {
         grantedScopes: gmailGrantedScopes,
         credentialEncrypted: encryptedFixture(),
       });
+      expect(alice.authorityId).toBeTruthy();
+      expect(bob.authorityId).toBeTruthy();
       await createConnection(db, {
         ...workspace,
         subjectId: null,

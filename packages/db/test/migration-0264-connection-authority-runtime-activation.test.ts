@@ -43,15 +43,9 @@ const scheduledSessionTargetIndexMigrationName = "0408_scheduled_session_target_
 const scheduledProducerMaterializationMigrationName =
   "0414_scheduled_generated_producer_materialization.sql";
 const scheduledInheritedToolAdmissionMigrationName = "0416_scheduled_inherited_tool_admission.sql";
-// Reuse the shared dependency tail, extending only this fixture's replay.
-// 0598 clones the 0345 waiter fence and extends the 0275/0402 authority ledgers;
-// none may be treated as installed while those prerequisites are absent.
-// The shared tail withholds 0608's sender-owned capture patch. It also reads the
-// frozen Claude authority installed by 0598, so replay both in filename order.
-const cutoverMigrationTail = [
-  ...embeddingMigrationTail,
-  "0598_claude_subscription_account_pools.sql",
-].sort();
+// The shared tail includes every dependent authority cutover. Replay in ledger
+// order after restoring this fixture's withheld prerequisites.
+const cutoverMigrationTail = [...embeddingMigrationTail].sort();
 
 describe("migration 0264 connection authority runtime activation", () => {
   test("is a drained exact-attempt cutover with canonical snapshots and idempotent audit", async () => {
