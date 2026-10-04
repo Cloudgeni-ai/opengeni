@@ -30,7 +30,11 @@ export function toolMatchesLeaf(wireName: string, leaf: string): boolean {
  */
 export function toolDisplayName(name: string, display?: ToolDisplayMetadata): string {
   if (!display && /^[a-f0-9]{64}$/.test(name)) return "Tool call";
-  const phrase = (display?.toolName ?? mcpToolLeaf(name)).replace(/[_-]+/g, " ").trim();
+  // "batch modify messages" → "Modify messages": batching is transport, not the action.
+  const phrase = (display?.toolName ?? mcpToolLeaf(name))
+    .replace(/[_-]+/g, " ")
+    .trim()
+    .replace(/^batch\s+(?=\S)/i, "");
   const title =
     display?.title ?? (phrase ? phrase.charAt(0).toUpperCase() + phrase.slice(1) : name);
   return display?.accountLabel ? `${title} — ${display.accountLabel}` : title;

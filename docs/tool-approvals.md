@@ -60,6 +60,11 @@ require ordinary session access. Details are bound to the saved action digest,
 not a new provider query. The shared React components supply pending review,
 receipts and paginated details. Web owns navigation, not a separate renderer.
 
+A waiting action can always be declined. An older request whose saved
+arguments cannot be recovered offers Decline only: it cannot be approved, but
+declining resumes the turn so the session is never stuck. A Block reports its
+own reason, including a conflict between two equally specific settings.
+
 Primary fields are bounded summaries; the full selection remains accessible in
 pages of 25 (at most 50). Long text is split into 4,000-character parts. Unusually
 long object keys use compact indexed paths and expose their complete saved name

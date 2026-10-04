@@ -14,7 +14,17 @@ export function toolReviewFieldLabel(key: string): string {
   const label = key
     .replace(/([a-z0-9])([A-Z])/g, "$1 $2")
     .replace(/[_-]+/g, " ")
-    .replace(/\bids?\b/gi, (word) => (word.length === 3 ? "IDs" : "ID"));
+    .replace(/\bids?\b/gi, (word) => (word.length === 3 ? "IDs" : "ID"))
+    .replace(
+      /\b(api|url|uri|http|https|ip|sql|json|html)(s?)\b/gi,
+      (_word, name: string, plural: string) => `${name.toUpperCase()}${plural}`,
+    )
+    // Sentence case, keeping acronyms: "Working Directory" → "Working directory".
+    .replace(
+      /(?<=\S\s+)([A-Z])([a-z]+)\b/g,
+      (_word, first: string, rest: string) => `${first.toLowerCase()}${rest}`,
+    )
+    .trim();
   return label.charAt(0).toUpperCase() + label.slice(1);
 }
 export function decodeReviewArguments(value: unknown): Record<string, unknown> | null {
@@ -85,8 +95,35 @@ export function toolReviewFields(
           (field) =>
             field.path !== "/contentSha256" && field.path !== "/htmlBody" && field.preview !== "",
         )
-        .map((field) => ({ ...field, path: `/$email${field.path}` })),
-      ...original.fields,
+        .map((field) => ({
+          ...field,
+          label: field.path === "/textBody" ? "Message" : field.label,
+          path: `/$email${field.path}`,
+          ...(field.path === "/attachments"
+            ? {
+                preview: context
+                  .email!.attachments.map((attachment) => attachment.name)
+                  .join(", ")
+                  .slice(0, 240),
+              }
+            : {}),
+        })),
+      ...original.fields.filter(
+        (field) =>
+          ![
+            "/raw",
+            "/expectedContentSha256",
+            "/from",
+            "/to",
+            "/cc",
+            "/bcc",
+            "/subject",
+            "/body",
+            "/textBody",
+            "/htmlBody",
+            "/attachments",
+          ].includes(field.path),
+      ),
     ];
     return {
       fields: fields.slice(0, 16),
@@ -98,13 +135,26 @@ export function toolReviewFields(
     fields: entries.slice(0, 16).map(([key, value], index) => {
       const hidden = protectedReviewField(key, context?.protectedFields);
       const safe = hidden ? "[Protected value]" : value;
-      const count = Array.isArray(value) ? value.length : undefined;
+      const count = !hidden && Array.isArray(value) ? value.length : undefined;
+      const compactList =
+        !hidden &&
+        Array.isArray(value) &&
+        value.length > 0 &&
+        value.length <= 4 &&
+        value.every(
+          (entry) =>
+            typeof entry === "string" || typeof entry === "number" || typeof entry === "boolean",
+        )
+          ? value.map(valueText).join(", ")
+          : undefined;
       const text =
-        count !== undefined
-          ? `${count.toLocaleString("en-US")} item${count === 1 ? "" : "s"}`
-          : safe && typeof safe === "object"
-            ? `${Object.keys(safe).length} field${Object.keys(safe).length === 1 ? "" : "s"}`
-            : valueText(safe);
+        compactList !== undefined
+          ? compactList
+          : count !== undefined
+            ? `${count.toLocaleString("en-US")} item${count === 1 ? "" : "s"}`
+            : safe && typeof safe === "object"
+              ? `${Object.keys(safe).length} field${Object.keys(safe).length === 1 ? "" : "s"}`
+              : valueText(safe);
       return {
         path: fieldPointer(key, index),
         label: bound(
@@ -115,7 +165,10 @@ export function toolReviewFields(
         ),
         preview: bound(text, 240),
         ...(count !== undefined ? { count } : {}),
-        truncated: !hidden && (text.length > 240 || (typeof value === "object" && value !== null)),
+        truncated:
+          !hidden &&
+          (text.length > 240 ||
+            (compactList === undefined && typeof value === "object" && value !== null)),
         ...(hidden ? { protected: true } : {}),
       };
     }),
@@ -132,7 +185,14 @@ export function toolReviewAction(
   "title" | "approveLabel" | "effects" | "consequence" | "selectionCount" | "selectionKind"
 > {
   const fallback = {
-    title: context?.title ?? bound(toolReviewFieldLabel(toolName.replace(/^mcp_[^_]+__/, "")), 256),
+    title:
+      context?.title ??
+      bound(
+        toolReviewFieldLabel(
+          toolName.replace(/^mcp_[^_]+__/, "").replace(/^batch[_-](?=[a-z])/i, ""),
+        ),
+        256,
+      ),
     approveLabel: "Approve action",
     effects: [] as string[],
   };
@@ -152,8 +212,10 @@ export function toolReviewAction(
   const selectionCount = ids?.every((id) => typeof id === "string") ? new Set(ids).size : undefined;
   const noun =
     selectionCount === undefined
-      ? selectionKind
-      : `${selectionCount.toLocaleString("en-US")} ${thread ? "thread" : "message"}${selectionCount === 1 ? "" : "s"}`;
+      ? thread
+        ? "conversations"
+        : "messages"
+      : `${selectionCount.toLocaleString("en-US")} ${thread ? "conversation" : "message"}${selectionCount === 1 ? "" : "s"}`;
   const addValues = toolName.startsWith("label_") ? args.labelIds : args.addLabelIds;
   const adds = Array.isArray(addValues)
     ? addValues.filter((v): v is string => typeof v === "string")
@@ -200,7 +262,7 @@ export function toolReviewAction(
       ...(trash
         ? { consequence: "Messages stay recoverable in Trash until Gmail deletes them." }
         : thread
-          ? { consequence: "Applies to every message in the selected thread." }
+          ? { consequence: "Applies to every message in the conversation." }
           : {}),
     };
   }

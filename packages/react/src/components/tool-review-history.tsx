@@ -1,7 +1,6 @@
 import { createContext, useContext, useEffect, useMemo, useState, type ReactNode } from "react";
 import type { SessionEvent, ToolActionReview } from "@opengeni/sdk";
 import { approvalsFromRequiresAction } from "../approvals";
-import { ToolActionReviewCard } from "./tool-action-review";
 
 type HistoryContext = {
   approvalIds: ReadonlySet<string>;
@@ -55,59 +54,35 @@ export function useHasToolReview(approvalId: string | null): boolean {
   return Boolean(approvalId && history?.approvalIds.has(approvalId));
 }
 
-/** Recorded calls have details, never another decision button. */
-export function ToolReviewHistoryReceipt({ approvalId }: { approvalId: string }) {
+/**
+ * The saved review for one recorded call, or null while it loads or when it is
+ * unavailable (callers then keep their ordinary tool row).
+ */
+export function useRecordedToolReview(approvalId: string | null): {
+  review: ToolActionReview | null;
+  onViewDetails: ((path: string) => void) | undefined;
+} {
   const history = useContext(History);
   const [review, setReview] = useState<ToolActionReview | null>(null);
-  const [failed, setFailed] = useState(false);
-  const [retry, setRetry] = useState(0);
   const load = history?.load;
   const revision = history?.revision;
   useEffect(() => {
-    if (!load) return;
+    if (!load || !approvalId) return;
     let active = true;
-    setFailed(false);
     void load(approvalId).then(
       (value) => {
-        if (active) {
-          if (value.id === approvalId) setReview(value);
-          else setFailed(true);
-        }
+        if (active && value.id === approvalId) setReview(value);
       },
-      () => {
-        if (active) setFailed(true);
-      },
+      () => undefined,
     );
     return () => {
       active = false;
     };
-  }, [approvalId, load, revision, retry]);
-  if (!history) return null;
-  if (failed)
-    return (
-      <p className="text-og-sm text-og-fg-muted" role="alert">
-        Review details unavailable.{" "}
-        <button
-          type="button"
-          className="min-h-11 underline"
-          onClick={() => setRetry((value) => value + 1)}
-        >
-          Try again
-        </button>
-      </p>
-    );
-  if (!review)
-    return (
-      <p role="status" className="text-og-sm text-og-fg-muted">
-        Loading reviewed action…
-      </p>
-    );
-  return (
-    <div data-approval-id={approvalId} data-review-origin="history">
-      <ToolActionReviewCard
-        review={{ ...review, availableActions: [] }}
-        onViewDetails={(path) => history.onViewDetails(review, path)}
-      />
-    </div>
-  );
+  }, [approvalId, load, revision]);
+  const onViewDetails = history?.onViewDetails;
+  return {
+    review: review && review.id === approvalId ? review : null,
+    onViewDetails:
+      review && onViewDetails ? (path: string) => onViewDetails(review, path) : undefined,
+  };
 }

@@ -1,6 +1,6 @@
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import { AttemptToolCatalogIntegrityError, createAttemptToolEnvironment } from "@opengeni/codemode";
-import type { AttemptToolCall } from "@opengeni/contracts";
+import type { AttemptToolCall, McpConnectionAccountBinding } from "@opengeni/contracts";
 import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/testing";
 import {
   getSessionTurn,
@@ -38,6 +38,9 @@ import {
   markCodemodeOperationExecutionStarted,
   persistAttemptToolCatalog,
   submitCodemodeOperation,
+  appendSessionEventsForTurnAttempt,
+  createConnection,
+  encryptEnvironmentValue,
 } from "../src";
 
 let available = true;
@@ -60,7 +63,7 @@ afterAll(async () => {
 });
 
 const fixtureSubjects = new Map<string, string>();
-async function fixture() {
+async function fixture(providerDomain?: string) {
   const suffix = crypto.randomUUID();
   const access = await bootstrapWorkspace(client.db, {
     accountExternalSource: "test",
@@ -72,6 +75,37 @@ async function fixture() {
     subjectId: `catalog-subject-${suffix}`,
   });
   const grant = access.workspaceGrants[0]!;
+  let bindings: McpConnectionAccountBinding[] | undefined;
+  if (providerDomain) {
+    const connection = await createConnection(client.db, {
+      accountId: grant.accountId,
+      workspaceId: grant.workspaceId!,
+      providerDomain,
+      kind: "oauth2",
+      createdBySubjectId: grant.subjectId,
+      credentialEncrypted: encryptEnvironmentValue(Buffer.alloc(32, 17), "fixture-only"),
+    });
+    bindings = [
+      {
+        serverId: "mail",
+        canonicalServerId: "mail",
+        connectionId: connection.id,
+        originWorkspaceId: grant.workspaceId!,
+        subjectScope: "workspace",
+        ownerSubjectId: null,
+        accountLabel: "mail@example.test",
+        providerDomain,
+        kind: "oauth2",
+        connectionRef: {
+          connectionId: connection.id,
+          subjectScope: "workspace",
+          providerDomain,
+          kind: "oauth2",
+        },
+        connectionAuthorityGeneration: connection.connectionAuthorityGeneration ?? undefined,
+      },
+    ];
+  }
   const session = await createSession(client.db, {
     accountId: grant.accountId,
     workspaceId: grant.workspaceId!,
@@ -82,6 +116,9 @@ async function fixture() {
     reasoningEffort: "medium" as const,
     latencyMode: "standard" as const,
     sandboxBackend: "none",
+    ...(bindings
+      ? { mcpAccountBindings: bindings, tools: [{ kind: "mcp" as const, id: "mail" }] }
+      : {}),
   });
   const started = await initializeSessionStartAtomically(client.db, {
     accountId: grant.accountId,
@@ -466,6 +503,160 @@ describe("durable attempt tool catalogs", () => {
 });
 
 describe("durable programmatic review", () => {
+  for (const [provider, proof] of [
+    ["gmailmcp.googleapis.com", true],
+    ["mail.example.test", true],
+    [undefined, true],
+    ["gmailmcp.googleapis.com", false],
+  ] as const) {
+    test(`legacy reviews use immutable catalog/account proof: ${provider ?? "no binding"}${proof ? "" : ", no catalog"}`, async () => {
+      if (!available) throw new Error("Real database is required");
+      const scope = await fixture(provider);
+      const turn = (await getSessionTurn(client.db, scope.workspaceId, scope.turnId))!;
+      const approvalId = crypto.randomUUID();
+      const args = {
+        messageIds: ["synthetic-a", "synthetic-b"],
+        addLabelIds: ["TRASH"],
+        removeLabelIds: ["INBOX"],
+        privateNote: "hidden-by-schema",
+      };
+      const name = "opaque_wire_identity";
+      const pending = [{ rawItem: { callId: approvalId, name, arguments: JSON.stringify(args) } }];
+      const environment = createAttemptToolEnvironment({
+        scope,
+        generation: 1,
+        definitions: [
+          {
+            identity: { serverId: "mail", toolName: "batch_modify_messages" },
+            modelName: name,
+            inputSchema: {
+              type: "object",
+              properties: { privateNote: { type: "string", writeOnly: true } },
+            },
+            source: "mcp",
+            approval: "human",
+            execute: () => ({ content: [] }),
+          },
+        ],
+      });
+      if (proof) await persistAttemptToolCatalog(client.db, environment.catalog);
+      expect(
+        await saveRunState(client.db, {
+          ...scope,
+          expectedExecutionGeneration: scope.executionGeneration,
+          expectedAttemptId: scope.attemptId,
+          serializedRunState: "{}",
+          pendingApprovals: pending,
+        }),
+      ).toBe(true);
+      const events = await appendSessionEventsForTurnAttempt(
+        client.db,
+        scope.workspaceId,
+        scope.sessionId,
+        scope.turnId,
+        scope.executionGeneration,
+        scope.attemptId,
+        [
+          {
+            type: "agent.toolCall.created",
+            payload: {
+              id: approvalId,
+              name,
+              arguments: args,
+              display: {
+                toolName: "batch_modify_messages",
+                accountLabel: "Untrusted display label Gmail",
+              },
+            },
+          },
+        ],
+      );
+      expect(events.accepted).toBe(true);
+      await applySessionTurnSettlement(client.db, scope.workspaceId, {
+        sessionId: scope.sessionId,
+        turnId: scope.turnId,
+        attemptId: scope.attemptId,
+        triggerEventId: turn.triggerEventId,
+        turnStatus: "requires_action",
+        sessionStatus: "requires_action",
+        activeTurnId: scope.turnId,
+        events: [{ type: "session.requiresAction", payload: { approvals: pending } }],
+      });
+      const input = { ...scope, approvalId };
+      const review = await getToolActionReview(client.db, input);
+      if (!proof) {
+        // Without the catalog, schema-protected values cannot be identified: show
+        // no argument value, offer no details, and let the person only decline.
+        expect(review?.availableActions).toEqual(["reject"]);
+        expect(review?.fields).toEqual([]);
+        expect(review?.detailsAvailable).toBe(false);
+        expect(JSON.stringify(review)).not.toContain("hidden-by-schema");
+        expect(JSON.stringify(review)).not.toContain("synthetic-a");
+        expect(
+          await getToolReviewDetailsPage(client.db, {
+            ...input,
+            actionDigest: review!.actionDigest,
+            path: "",
+            offset: 0,
+          }),
+        ).toBeNull();
+        expect(
+          (
+            await acceptSessionApprovalDecision(client.db, {
+              accountId: scope.accountId,
+              workspaceId: scope.workspaceId,
+              sessionId: scope.sessionId,
+              subjectId: "human:fixture",
+              payload: { approvalId, decision: "reject" },
+              clientEventId: crypto.randomUUID(),
+            })
+          ).action,
+        ).toBe("accepted");
+        return;
+      }
+      expect(review?.availableActions).toEqual(["approve", "reject"]);
+      expect(review?.title).toBe(
+        provider === "gmailmcp.googleapis.com" ? "Move 2 messages to Trash" : "Modify messages",
+      );
+      expect(review?.selectionCount).toBe(provider === "gmailmcp.googleapis.com" ? 2 : undefined);
+      expect(JSON.stringify(review)).not.toContain("hidden-by-schema");
+      if (provider) expect(review?.accountLabel).toBe("mail@example.test");
+      const detail = await getToolReviewDetailsPage(client.db, {
+        ...input,
+        actionDigest: review!.actionDigest,
+        path: "/messageIds",
+        offset: 0,
+      });
+      expect(detail?.items.map((item) => item.value)).toEqual(["synthetic-a", "synthetic-b"]);
+      expect(
+        await getToolReviewDetailsPage(client.db, {
+          ...input,
+          actionDigest: "0".repeat(64),
+          path: "",
+          offset: 0,
+        }),
+      ).toBeNull();
+      expect(
+        await getToolActionReview(client.db, { ...input, accountId: crypto.randomUUID() }),
+      ).toBeNull();
+      expect(
+        await getToolActionReview(client.db, { ...input, approvalId: crypto.randomUUID() }),
+      ).toBeNull();
+      const outcome = await acceptSessionApprovalDecision(client.db, {
+        accountId: scope.accountId,
+        workspaceId: scope.workspaceId,
+        sessionId: scope.sessionId,
+        subjectId: "human:fixture",
+        payload: { approvalId, decision: "reject" },
+        clientEventId: crypto.randomUUID(),
+      });
+      expect(outcome.action).toBe("accepted");
+      expect(await getToolActionReview(client.db, input)).toMatchObject({
+        status: "rejected",
+        availableActions: [],
+      });
+    });
+  }
   test("review facts and paginated details are bound to saved arguments and tenant", async () => {
     if (!available) throw new Error("Real database is required");
     const scope = await fixture();
