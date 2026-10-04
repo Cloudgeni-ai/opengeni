@@ -84,9 +84,15 @@ export const embeddingMigrationTail = [
   "0585_session_attention_cursor.sql",
   // Uses the existing session inventory/capability routines withheld by these fixtures.
   "0604_insights_raw_usage_api.sql",
+  // Rewrites the accepted-authority capture installed by withheld 0478.
+  "0608_receiver_execution_context.sql",
   // Locks connection tables from withheld 0264 and rewrites the exact receipt
   // gates in routines from withheld 0306/0345/0478; replay after them.
   "0611_universal_session_tenancy_activation.sql",
+  // Policy immutability uses the trigger function from withheld 0521.
+  "0613_model_scoped_promotional_credits.sql",
   // Extends the containment reason installed by withheld 0547; replay after it.
   "0614_quiescence_command_containment.sql",
+  // Replaces the policy setter created by withheld 0613; replay after it.
+  "0615_credit_promotion_policy_validation.sql",
 ];
