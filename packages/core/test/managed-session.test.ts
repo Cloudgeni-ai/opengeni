@@ -8,12 +8,15 @@ import {
   getManagedSession,
   configureManagedUserAdmission,
   installManagedAuthActorLeaseRuntimeForTest,
+  recordManagedAuthLoggedFailure,
+  withManagedAuthSessionLookup,
   ManagedAuthActorLeaseOutcomeUnknownError,
   markManagedAuthRequestActorTransitionApplied,
   releaseManagedAuthRequestActorLease,
   validateManagedAuthRequestActorLease,
 } from "../src/managed-session";
 import { ManagedAuthActorChangeError, managedAuthSha256 } from "../src/managed-auth-session-sets";
+import { DatabaseUnavailableError, isDatabaseConnectionLoss } from "@opengeni/db";
 
 function validationDatabase(valid: boolean, onExecute?: () => void) {
   return {
@@ -526,4 +529,54 @@ describe("managed deployment admission", () => {
       expect((await app.request("/")).status).toBe(expected);
     });
   }
+});
+
+describe("managed auth session lookup failures", () => {
+  function betterAuthInternalError() {
+    return Object.assign(new Error("Failed to get session"), {
+      name: "APIError",
+      status: "INTERNAL_SERVER_ERROR",
+      statusCode: 500,
+    });
+  }
+
+  test("reports a lost database connection hidden behind Better Auth's generic 500 as unavailable", async () => {
+    const generic = betterAuthInternalError();
+    const failure = await withManagedAuthSessionLookup(async () => {
+      await Promise.resolve();
+      // Better Auth logs the driver error, then throws its own generic error.
+      recordManagedAuthLoggedFailure([new Error("Connection terminated unexpectedly")]);
+      throw generic;
+    }).catch((error: unknown) => error);
+
+    expect(failure).toBeInstanceOf(DatabaseUnavailableError);
+    expect(isDatabaseConnectionLoss(failure)).toBe(true);
+    expect((failure as Error).cause).toBe(generic);
+  });
+
+  test("keeps any other Better Auth failure unchanged", async () => {
+    const generic = betterAuthInternalError();
+    const unrelated = await withManagedAuthSessionLookup(async () => {
+      recordManagedAuthLoggedFailure([new TypeError("bug in a hook")]);
+      throw generic;
+    }).catch((error: unknown) => error);
+    expect(unrelated).toBe(generic);
+
+    const unauthorized = Object.assign(new Error("Unauthorized"), {
+      status: "UNAUTHORIZED",
+      statusCode: 401,
+    });
+    const passthrough = await withManagedAuthSessionLookup(async () => {
+      recordManagedAuthLoggedFailure([new Error("Connection terminated unexpectedly")]);
+      throw unauthorized;
+    }).catch((error: unknown) => error);
+    expect(passthrough).toBe(unauthorized);
+
+    // Logged failures outside a lookup are ignored and never leak into one.
+    recordManagedAuthLoggedFailure([new Error("Connection terminated unexpectedly")]);
+    const isolated = await withManagedAuthSessionLookup(async () => {
+      throw generic;
+    }).catch((error: unknown) => error);
+    expect(isolated).toBe(generic);
+  });
 });

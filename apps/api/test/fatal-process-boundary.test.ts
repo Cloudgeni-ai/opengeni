@@ -196,4 +196,81 @@ describe("API fatal process boundary", () => {
     expect(JSON.stringify(logs)).not.toContain("private failure");
     boundary.dispose();
   });
+
+  test("survives an unhandled rejection that only reports a lost database connection while running", async () => {
+    const runtime = fakeProcess();
+    const warnings: Array<{ message: string; attributes: Attributes }> = [];
+    const errors: string[] = [];
+    const counters: string[] = [];
+    const boundary = installApiFatalProcessBoundary({
+      process: runtime.process,
+      observability: {
+        error: (message) => {
+          errors.push(message);
+        },
+        warn: (message, attributes = {}) => {
+          warnings.push({ message, attributes });
+        },
+        incrementCounter: (input) => {
+          counters.push(input.name);
+        },
+        startSpan: () => ({ traceId: "0".repeat(32), spanId: "0".repeat(16), end: () => {} }),
+        flush: async () => undefined,
+      },
+    });
+    boundary.markRunning();
+    const terminated = Object.assign(new Error("Failed query: claim private sentinel"), {
+      name: "DrizzleQueryError",
+      cause: Object.assign(new Error("terminating connection due to administrator command"), {
+        name: "PostgresError",
+        code: "57P01",
+      }),
+    });
+
+    runtime.emit("unhandledRejection", terminated);
+    runtime.emit(
+      "unhandledRejection",
+      Object.assign(new Error("closed"), { code: "CONNECTION_CLOSED" }),
+    );
+    await Bun.sleep(20);
+
+    expect(runtime.exits).toEqual([]);
+    expect(errors).toEqual([]);
+    expect(warnings).toHaveLength(2);
+    expect(warnings[0]!.attributes).toMatchObject({
+      errorCode: "api_unhandled_database_connection_loss",
+      reasonKind: "error",
+    });
+    expect(JSON.stringify(warnings)).not.toContain("private sentinel");
+    expect(counters).toEqual([
+      "opengeni_api_recovered_rejections_total",
+      "opengeni_api_recovered_rejections_total",
+    ]);
+
+    // Any other unhandled rejection still terminates the process.
+    runtime.emit("unhandledRejection", new TypeError("unexpected"));
+    expect(await runtime.exit).toBe(1);
+    boundary.dispose();
+  });
+
+  test("still exits for a lost database connection during startup and for uncaught exceptions", async () => {
+    const startup = fakeProcess();
+    const startupBoundary = installApiFatalProcessBoundary({
+      process: startup.process,
+      fallbackLog: () => undefined,
+    });
+    startup.emit("unhandledRejection", Object.assign(new Error("x"), { code: "57P01" }));
+    expect(await startup.exit).toBe(1);
+    startupBoundary.dispose();
+
+    const running = fakeProcess();
+    const runningBoundary = installApiFatalProcessBoundary({
+      process: running.process,
+      fallbackLog: () => undefined,
+    });
+    runningBoundary.markRunning();
+    running.emit("uncaughtException", Object.assign(new Error("x"), { code: "57P01" }));
+    expect(await running.exit).toBe(1);
+    runningBoundary.dispose();
+  });
 });

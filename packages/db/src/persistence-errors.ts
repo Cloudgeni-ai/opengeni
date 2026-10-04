@@ -152,6 +152,87 @@ export function isRetryableDatabaseTransportFailure(error: unknown): boolean {
 }
 
 /**
+ * SQLSTATEs PostgreSQL sends when it ends or refuses the session itself:
+ * operator intervention (`pg_terminate_backend`, shutdown, crash recovery,
+ * "the database system is starting up") and the connection-exception class.
+ */
+const DATABASE_CONNECTION_LOSS_SQLSTATES = new Set([
+  "57P01", // admin_shutdown (pg_terminate_backend, smart/fast shutdown)
+  "57P02", // crash_shutdown
+  "57P03", // cannot_connect_now
+  "08000", // connection_exception
+  "08001", // sqlclient_unable_to_establish_sqlconnection
+  "08003", // connection_does_not_exist
+  "08004", // sqlserver_rejected_establishment_of_sqlconnection
+  "08006", // connection_failure
+]);
+
+/**
+ * node-postgres (Better Auth's pool) reports a lost socket as a plain Error with
+ * no code. Only these exact library sentences are recognized.
+ */
+const NODE_POSTGRES_CONNECTION_LOSS_MESSAGES = new Set([
+  "Connection terminated unexpectedly",
+  "Connection terminated",
+  "Connection terminated due to connection timeout",
+  "Client has encountered a connection error and is not queryable",
+  "Client was closed and is not queryable",
+]);
+
+/**
+ * Explicit marker for a dependency that hid its driver error behind its own
+ * generic failure but is known to have failed reading the database.
+ */
+export class DatabaseUnavailableError extends Error {
+  readonly code = "DATABASE_UNAVAILABLE";
+
+  constructor(message = "database unavailable", options?: { cause?: unknown }) {
+    super(message, options);
+    this.name = "DatabaseUnavailableError";
+  }
+}
+
+/**
+ * True when a failure means the database connection itself went away (an
+ * operator drain, failover, restart, or socket loss), not that a statement was
+ * rejected. Such a failure is transient: a fresh pooled connection succeeds once
+ * the server accepts connections again. It says nothing about whether a write
+ * in flight committed.
+ */
+export function isDatabaseConnectionLoss(error: unknown): boolean {
+  if (isRetryableDatabaseTransportFailure(error)) return true;
+  const queue: unknown[] = [error];
+  const seen = new Set<unknown>();
+  while (queue.length > 0 && seen.size < 64) {
+    const current = queue.shift();
+    if (!isRecord(current) || seen.has(current)) continue;
+    seen.add(current);
+    if (current instanceof DatabaseUnavailableError) return true;
+    for (const key of SQLSTATE_KEYS) {
+      const value = current[key];
+      if (
+        typeof value === "string" &&
+        DATABASE_CONNECTION_LOSS_SQLSTATES.has(value.toUpperCase())
+      ) {
+        return true;
+      }
+    }
+    if (
+      typeof current.message === "string" &&
+      NODE_POSTGRES_CONNECTION_LOSS_MESSAGES.has(current.message)
+    ) {
+      return true;
+    }
+    for (const key of NESTED_ERROR_KEYS) {
+      const nested = current[key];
+      if (Array.isArray(nested)) queue.push(...nested);
+      else if (nested !== undefined) queue.push(nested);
+    }
+  }
+  return false;
+}
+
+/**
  * Distinguish database/ORM failures from expected domain exceptions when a
  * driver omitted SQLSTATE. This checks shape only; callers retain the original
  * failure independently as canonical error evidence.
