@@ -28,9 +28,11 @@ and fact mutations, deleted facts and NULL-workspace residual money remain exact
 unmatched money has zero calls and no invented model or tokens. The nominal
 `priced_cost_micros` and `model.cost` event amounts are not actual debit authority.
 
-Sorted transaction-scoped source/group fences serialize concurrent deltas and
-opposing dimension moves. `ON CONFLICT DO NOTHING` source retries do not run an
-extra insertion delta. Transaction rollback also rolls back all projections.
+Sorted per-row source/group fences cover the tested single-row opposing moves.
+They do not establish a transaction-wide order across multiple source statements;
+the independent review found a multirow deadlock blocker described below.
+`ON CONFLICT DO NOTHING` source retries do not run an extra insertion delta.
+Transaction rollback also rolls back all projections.
 
 ## Read integration seam
 
@@ -71,13 +73,90 @@ and measures workspace/model and organization/workspace/person reads. The test
 oracle alone permits a longer timeout for diagnostic raw comparisons; production
 read budgets and authority are not extended.
 
-The merged unified workspace/org usage API selects daily groups for full days
-across all six ranges and all eight supported groupings. Recent/cursor calls and
-hourly/partial-edge reads remain bounded raw reads. Existing legacy bundles have
-separate private rollup seams but are not switched by this bounded follow-up.
+After migration 0609 commits, the existing unified workspace/org usage API selects
+daily groups for full days across all six ranges and all eight supported
+groupings. The separately merged raw API does not activate this substitution by
+itself. Recent/cursor calls and hourly/partial-edge reads remain bounded raw reads.
+Existing legacy bundles have separate private rollup seams but are not switched
+by this bounded follow-up.
 The additive source/custom grain is preserved on the source-extension branch,
 not installed here and not a blocker for basic daily reads. No historical list
 total is repriced by these migrations.
+
+### Frozen-head full-volume bootstrap measurement
+
+On October 4, 2026, a new isolated physical copy of the retained synthetic data
+was measured at head `78c96261d7c779fe1d7cd910ab17abdecc482d6f`. It contained
+838,000 model facts, 4,170,000 usage events (2,870,000 warm events), 276,568 ledger
+entries and 4,097 sessions. The original scale fixture and its prior cache-copy
+template were left unchanged. Only migrations 0606–0609 ran on the new copy,
+once; no comparison snapshot was installed and no historical allocation ran.
+
+| Migration | Total elapsed | Observed source AccessExclusiveLock hold |
+| --- | ---: | --- |
+| 0606 | 537.071 s | 536.614–537.071 s on model facts and usage events |
+| 0607 | 23.713 s | 23.375–23.713 s on model facts and credit ledger entries |
+| 0608 | 0.243 s | Below the 250 ms observer resolution; not a no-lock claim |
+| 0609 | 0.009 s | No source-table lock observed |
+
+The hold intervals are sampled lower bounds through phase-duration upper bounds,
+not exact lock-release timestamps. These locks conflict with ordinary source
+reads and writes. Four normal `opengeni_app` writer probes under an explicit
+transaction-local 10-second diagnostic timeout were cancelled with PostgreSQL
+`57014`: model/usage during 0606 and model/ledger during 0607. The normal pool's
+statement and lock timeouts remained zero; an unbounded writer may wait for the
+full fence instead of failing at ten seconds. All fourteen post-phase probes,
+including the old writer and the new writer after 0608, completed and deliberately
+rolled back. No probe committed facts, events or money.
+
+The migration transactions committed. Counts, checked nullable-counter knownness,
+token/list/debit amounts, source policies and FORCE posture matched afterward;
+current runtime posture had no violations before or after. The reader changed
+only its two reviewed amount-input calls, preserving OID, owner, ACL,
+configuration and other definition bytes. Resulting storage was 282,624 model
+daily rows and 847,872 usage daily rows: the 40,000-call fixture's compression
+ratio must not be extrapolated to this distribution.
+
+The local environment was PostgreSQL 17.11, a 16.125-CPU quota with affinity 0–16,
+128 MiB shared buffers and 4 MiB work memory. This was one instrumented synthetic
+bootstrap, not a dedicated four-vCPU run, real staging HTTP measurement or p95.
+The source-write fence is a material rollout risk requiring explicit owner
+disposition; rolling schema compatibility is not online/no-downtime readiness.
+The retained primary JSON and matching harness identify the exact migration
+hashes. A final diagnostic amount-query cast error was repaired by read-only
+attestation, without replaying any migration. If corrective changes alter the
+bootstrap or lock strategy, these figures remain historical measurements of
+this frozen head and must not be relabeled as the new candidate's results.
+
+### Independent review and the UUID correction checkpoint
+
+The measured candidate was not merge-ready. Its 0607 bootstrap/private lookup
+keys compare literal UUID text in places where the raw baseline casts valid UUID
+prefixes. A valid uppercase turn UUID can therefore lose debit attribution;
+correction must normalize only that prefix, preserving the case-sensitive source
+key and original ledger row. Independent raw-oracle regressions must cover
+historical bootstrap, ledger-first late facts, current corrections and deletion.
+
+The subsequent DB-only checkpoint `b6ccbbdfd45e031adb7481b368c1f6358ce9662c`
+corrects the valid UUID prefix in private link/fence keys and uses an independent
+UUID-cast bootstrap join. It does not lowercase the source-key suffix or rewrite
+the original ledger row. Its real PostgreSQL owner/app suite passes 120 tests and
+1,719 assertions, including mixed-case history, late attribution, corrections,
+deletion and raw-oracle parity. The integration retains those two DB file bodies
+unchanged. These checks are correctness evidence, not a repeat of the frozen-head
+volume measurement; the changed 0607 bootstrap has not been timed at that volume.
+
+The bounded DB worker also reported a real PostgreSQL reproduction in which
+opposing multirow transactions on disjoint source rows both commit before
+rollups, but a new analytics advisory-lock cycle aborts one afterward with
+`40P01`. This is a source-write availability blocker, not a demonstrated money
+corruption. A fail-fast error is not sufficient protection unless all affected
+old writers actually retry; removing advisory locks alone can leave shared daily
+row-lock cycles. The diagnostic regression deliberately asserts the unresolved
+`40P01`; a green test run does not make this checkpoint merge-ready. The
+corrective strategy and completed regression evidence remain separate from the
+frozen-head measurement. Neither finding reopens the already
+merged raw API, and no rollup merge or deployment is implied by these notes.
 
 ## Versioned historical list-class allocation
 
