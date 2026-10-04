@@ -63,7 +63,7 @@ export function codingAgentSetupPrompt(facts: DeveloperSetupFacts): string {
 First get the Opengeni skills, if you don't have them:
 - Claude Code: claude plugin marketplace add Cloudgeni-ai/opengeni && claude plugin install opengeni@opengeni --scope user
 - Codex: codex plugin marketplace add Cloudgeni-ai/opengeni && codex plugin add opengeni@opengeni
-- Cursor: Customize > From GitHub Repository > https://github.com/Cloudgeni-ai/opengeni, then install OpenGeni
+- Cursor: Customize > From GitHub Repository > https://github.com/Cloudgeni-ai/opengeni, then install Opengeni
 - Anything else: read https://docs.opengeni.ai/llms.txt and https://github.com/Cloudgeni-ai/opengeni/tree/main/.agents/skills/opengeni-client
 Then follow the build-with-opengeni skill and its opengeni-client guide.
 

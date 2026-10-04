@@ -112,7 +112,7 @@ describe("delegated service initiator claims", () => {
         },
         serviceInitiatorContext: { label: "smuggled identity label" },
       }),
-    ).rejects.toThrow("label is reserved OpenGeni initiator context");
+    ).rejects.toThrow("label is reserved Opengeni initiator context");
 
     await expect(
       signDelegatedAccessToken(SECRET, {
@@ -133,7 +133,7 @@ describe("delegated service initiator claims", () => {
         },
         serviceInitiatorContext: { via: [{ kind: "forged-agent" }] },
       }),
-    ).rejects.toThrow("via is reserved OpenGeni initiator context");
+    ).rejects.toThrow("via is reserved Opengeni initiator context");
 
     await expect(
       signDelegatedAccessToken(SECRET, {

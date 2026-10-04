@@ -356,7 +356,7 @@ test("preclaim presentation preserves existing authored database and structural 
       structuralSandboxFailure: true,
     }),
   ).toEqual({ reason: authored, unavailableModel: false });
-  const database = "OpenGeni encountered a database error.";
+  const database = "Opengeni encountered a database error.";
   expect(
     failedSessionCopy({
       ...summary,

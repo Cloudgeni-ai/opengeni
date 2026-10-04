@@ -2163,6 +2163,15 @@ function groupReadableTurns(items: TimelineItem[]): TimelineGroup[] {
         foldedProse.add(message);
         group.work!.details.push({ kind: "item", item: message });
       }
+    } else {
+      // Live progress stays primary above the work row, and is also listed in
+      // the work history so an expanded disclosure reads like the settled one.
+      // The timeline folds the outside copies only while that disclosure is open.
+      for (const message of prose) {
+        if (message.phase === "final_answer" || message.text.includes("![")) continue;
+        group.work!.details.push({ kind: "item", item: message });
+        (group.work!.liveNoteIds ??= []).push(message.id);
+      }
     }
     // Preserve event chronology, not completion timestamps or activity kinds.
     group.work!.details.sort((a, b) => {

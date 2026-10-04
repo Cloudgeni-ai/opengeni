@@ -74,7 +74,7 @@ export class OpenGeni {
   private pendingOrganizationId: Promise<string> | undefined;
 
   constructor(options: OpenGeniOptions) {
-    if (!options.apiKey) throw new TypeError("OpenGeni requires an apiKey.");
+    if (!options.apiKey) throw new TypeError("Opengeni requires an apiKey.");
     this.client = new OpenGeniClient({
       baseUrl: options.baseUrl ?? DEFAULT_OPENGENI_BASE_URL,
       apiKey: options.apiKey,

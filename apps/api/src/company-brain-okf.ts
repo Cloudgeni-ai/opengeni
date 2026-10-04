@@ -316,7 +316,7 @@ export function serializeCompanyBrainOkf(value: CompanyBrainOkfPackageType): str
   const parsed = CompanyBrainOkfPackage.parse(value);
   return [
     OKF_MARKER,
-    "# OpenGeni Company Brain",
+    "# Opengeni Company Brain",
     "",
     "This permission-filtered package is portable evidence. Postgres remains canonical.",
     "",

@@ -5662,7 +5662,7 @@ describe("transient provider error classifier", () => {
     expect(isTransientProviderError(observed)).toBe(true);
     expect(agentRunFailurePayload(observed)).toEqual({
       error:
-        "OpenGeni could not reach an upstream service. The same turn will retry after a short delay.",
+        "Opengeni could not reach an upstream service. The same turn will retry after a short delay.",
       code: "upstream_connectivity_unavailable",
       retryable: true,
     });

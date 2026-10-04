@@ -4,7 +4,7 @@ description: "Run agents on a schedule or from your product's events, and bring 
 icon: "clock"
 ---
 
-Agents do not need a user in the conversation. Start them on a schedule or when something happens in your product, let them work to completion, and bring the results back into your product.
+Start agents on a schedule or from your product's events, let them work to completion, and bring the results back.
 
 ## On a schedule
 
@@ -22,11 +22,7 @@ await og.createScheduledTask(workspaceId, {
 });
 ```
 
-`agent` is optional: without it each run uses the workspace's agent defaults. See [Configure the agent](/integrate/configure-the-agent).
-
-Always set an explicit schedule and time zone. `runMode` chooses a new session per run, one reusable session, or an existing session. For tasks that create chats, select tools from a workspace [OpenAPI Integration or MCP connection](/integrate/your-data#openapi-integration) by id. Existing chats supply their own tools.
-
-A reusable schedule's creation settings apply to its first chat. Once that chat exists, change its model, tools, or machine in the chat itself; the schedule editor links to it. You can still edit the schedule's timing and message.
+`agent` is optional; without it, runs use the workspace defaults ([Configure the agent](/integrate/configure-the-agent)). `runMode` picks a new session per run, one reusable session, or an existing session. Select tools by id from a workspace [OpenAPI Integration or MCP connection](/integrate/your-data#openapi-integration).
 
 Manage tasks with `listScheduledTasks`, `updateScheduledTask`, `pauseScheduledTask`, `resumeScheduledTask`, `triggerScheduledTask`, and `deleteScheduledTask`.
 
@@ -46,13 +42,11 @@ await og.updateScheduledTask(workspaceId, task.id, {
 });
 ```
 
-An existing-session schedule uses that chat's model, tools, machine, and attachments at each new run. It does not need a second agent configuration. The message enters as a scheduled user turn, under the schedule owner's authority; accepted runs retain their settings during retries. When an agent creates a schedule from a chat without choosing a run mode, that chat is the default destination. Creating a separate chat requires an explicit choice.
-
-Updates preserve fields you omit. Use `expectedExecutionDigest` from the latest task read to reject a conflicting edit. Changing `targetSessionId` moves future runs; if the destination would lose Variable Sets or a Sandbox Environment, the API returns a conflict describing the change. Review it, then repeat with the same digest and `adoptSessionSettings: true` to accept the destination's settings.
+Each run uses that chat's own model and tools and runs as the schedule owner. Updates keep fields you omit; `expectedExecutionDigest` rejects a conflicting edit. If moving `targetSessionId` would change the run's settings, the API returns a conflict; repeat with `adoptSessionSettings: true` to accept.
 
 ## From your product's events
 
-An inbound automation turns a signed HTTP event from your product into an agent session. Create a **source** (it has a public webhook endpoint and a signing secret) and a **trigger** (which events match and the session to start), with `OpenGeniAutomationsClient` from `@opengeni/sdk/automations`. Your product then posts JSON events:
+An automation turns a signed HTTP event into an agent session. With `OpenGeniAutomationsClient` from `@opengeni/sdk/automations`, create a **source** (a webhook endpoint and signing secret) and a **trigger** (which events start which session). Then post events:
 
 ```bash
 POST /v1/webhooks/automations/<endpoint id>
@@ -62,18 +56,11 @@ x-opengeni-delivery-id: <optional, for deduplication>
 { "type": "ticket.created", "id": "evt_123", "data": { "ticketId": "T-42" } }
 ```
 
-Redelivered events are deduplicated. Event data reaches the agent as untrusted input, never as instructions or permissions. See the [automations reference](https://github.com/Cloudgeni-ai/opengeni/blob/main/docs/automations.md).
-
-Automation templates default `firstPartyMcpTools` and `firstPartyMcpPermissions`
-to `[]`: no delegated OpenGeni tool authority. Keep them empty for product-only
-jobs; startup skips remote first-party MCP preparation without padding a grant.
-Product servers and independently authorized connections keep their own
-authority. Explicitly requested first-party tools remain unavailable with an
-`insufficient_scope` advisory.
+Redelivered events are deduplicated. The agent treats event data as untrusted input. See the [automations reference](https://github.com/Cloudgeni-ai/opengeni/blob/main/docs/automations.md).
 
 ## Work until done
 
-Give a background session a **goal** with success criteria, and it keeps working across turns until it completes the goal with evidence or pauses with a reason:
+Give a session a **goal** and it keeps working across turns until the goal is met or it pauses with a reason:
 
 ```ts
 agentConfig: {
@@ -89,12 +76,8 @@ See [Goals](/concepts/goals).
 
 ## Bring results back
 
-- **Write back through your tools.** The agent calls your API to update a ticket, post a comment, or store a report, with the same authorization as any other call. This is the most direct path.
-- **Webhooks.** OpenGeni can notify your product when a turn completes or fails, when a session's status changes, when an agent waits for an approval or a question, or when a usage allowance crosses a threshold, runs out, or resets. Set them up per workspace or once for the organization. Events are signed, delivered at least once, and may arrive out of order; treat each as a signal to read the session through the API. See [Webhooks and credentials](/guides/webhooks-and-credentials#webhooks).
-- **Read bounded original results.** `listEvents` defaults to a monitoring/summary projection, not guaranteed full history or complete long answers. Use `listEventPage` with `mode: "forensic"`, `payloadMode: "full"`, an explicit cursor and bounded limit; verify `forensicExact` and follow `nextAfter`/`hasMore`. Compact latest results can truncate text. Cache only the expected turn's canonical `turn.completed`/original `payload.output`, not a commentary message. Empty/wait-ended output is not a completed report.
-
-Preserve the newest candidate/event ID while following pages; do not remove a truncation marker and call the snippet a full answer. If original retrieval is unavailable, state that. Read only authorized result fields and keep raw forensic metadata out of the UI. The full [client Skill](/reference/opengeni-client-skill) contains tested exact-page and settled-text examples.
-
-If tools call the same host, prefer background jobs/nonblocking bounded status ticks and keep callback capacity. Concurrent blocking waits can starve a scarce synchronous worker pool; this depends on the deployment, not every integration. Bound requests and resume from saved cursors rather than holding all request workers until an agent finishes.
+- **Write back through your tools.** The agent calls your API to update a ticket, post a comment, or store a report. This is the most direct path.
+- **Webhooks.** Get notified when a turn completes or fails, a session's status changes, or the agent waits for approval or an answer. Deliveries are signed, at least once, and unordered; read the session through the API when one arrives. See [Webhooks and credentials](/guides/webhooks-and-credentials#webhooks).
+- **Read the full output.** `listEvents` returns a summary view that can truncate long answers. For the complete result, call `listEventPage` with `mode: "forensic"` and `payloadMode: "full"`, follow `nextAfter` while `hasMore`, and read `payload.output` from the turn's `turn.completed` event.
 
 <Tip>Using a coding agent? The [opengeni-client skill](/reference/for-ai-agents) covers this.</Tip>

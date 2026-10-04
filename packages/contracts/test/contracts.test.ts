@@ -355,7 +355,7 @@ describe("contracts", () => {
         error: {
           status: 503,
           code: "upstream_unavailable",
-          message: "OpenGeni is temporarily unavailable — retry.",
+          message: "Opengeni is temporarily unavailable — retry.",
           retryable: true,
           outcomeUnknown: true,
           requestId: "edge-503-safe",
@@ -365,7 +365,7 @@ describe("contracts", () => {
       error: {
         status: 503,
         code: "upstream_unavailable",
-        message: "OpenGeni is temporarily unavailable — retry.",
+        message: "Opengeni is temporarily unavailable — retry.",
         retryable: true,
         outcomeUnknown: true,
         requestId: "edge-503-safe",

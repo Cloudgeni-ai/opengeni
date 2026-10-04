@@ -195,7 +195,7 @@ function galleryGoalRecord(overrides: Partial<SessionGoal> = {}): SessionGoal {
     workspaceId: GALLERY_WORKSPACE_ID,
     sessionId: GALLERY_SESSION_ID,
     status: "active",
-    text: "Make Linear activation on the live OpenGeni deployment operational end-to-end",
+    text: "Make Linear activation on the live Opengeni deployment operational end-to-end",
     successCriteria: "Linear issues sync and activate from the live deployment",
     evidence: null,
     rationale: null,

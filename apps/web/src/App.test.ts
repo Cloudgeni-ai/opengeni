@@ -2087,7 +2087,7 @@ describe("capability catalog helpers", () => {
       capabilityErrorToast(
         Object.assign(
           new Error(
-            'OpenGeni API 422: MCP capability "4fetch" could not be enabled because OpenGeni could not initialize api.4fetch.com. Check the endpoint configuration or try again. Reference: req-probe.',
+            'OpenGeni API 422: MCP capability "4fetch" could not be enabled because Opengeni could not initialize api.4fetch.com. Check the endpoint configuration or try again. Reference: req-probe.',
           ),
           { status: 422 },
         ),

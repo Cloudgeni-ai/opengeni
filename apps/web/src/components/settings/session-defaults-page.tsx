@@ -230,7 +230,7 @@ export function SessionDefaultsPage({
             hint={
               saved?.identitySource === "legacy_agent_instructions" && !identityChanged
                 ? "From this workspace's earlier custom persona. Saving new text replaces it for new chats."
-                : "Replaces how OpenGeni introduces the agent. Workspace instructions still apply on top. Empty uses OpenGeni's default."
+                : "Replaces how Opengeni introduces the agent. Workspace instructions still apply on top. Empty uses Opengeni's default."
             }
           >
             <TextArea
@@ -260,7 +260,7 @@ export function SessionDefaultsPage({
                   );
                 }}
               >
-                Use OpenGeni's defaults
+                Use Opengeni's defaults
               </Button>
             </div>
           ) : null}
