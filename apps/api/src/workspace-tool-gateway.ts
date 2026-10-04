@@ -284,7 +284,7 @@ async function prepareWorkspaceToolGatewayForGrantInternal(
     settings,
     tools: allGatewayToolRefs(settings),
     source:
-      grant.principalKind === "service"
+      grant.principalKind === "service" || grant.principalKind === "api_key"
         ? { kind: "none" }
         : { kind: "subject", accountId: grant.accountId, subjectId: grant.subjectId },
   });
