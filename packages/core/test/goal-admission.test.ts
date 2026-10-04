@@ -32,10 +32,13 @@ function fixture(model: string, settings = testSettings()) {
     scoped,
     policy,
     admission,
-    resume: (human: string | null = null) =>
+    resume: (
+      human: string | null = null,
+      latencyMode: "standard" | "fast" | "priority" = "standard",
+    ) =>
       assertGoalResumeAllowed(
         { db: database, settings },
-        { accountId, workspaceId, model, codexCompactionMode: "portable" },
+        { accountId, workspaceId, model, latencyMode, codexCompactionMode: "portable" },
         human === null ? null : { initiatingHumanSubjectId: human },
       ),
   };
@@ -65,6 +68,12 @@ test("Resume uses scoped models and the original causal human for admission", as
   );
 });
 
+test("Resume rejects an unsupported latency mode before funding admission", async () => {
+  const value = fixture(testSettings().openaiModel);
+  await expect(value.resume(null, "fast")).rejects.toThrow("latency mode");
+  expect(value.admission).not.toHaveBeenCalled();
+});
+
 test("Resume rejects unavailable models before funding admission", async () => {
   const value = fixture("removed/fixture-model");
   await expect(value.resume()).rejects.toBeInstanceOf(GoalResumeBlockedError);
@@ -77,6 +86,29 @@ test("Resume preserves policy denials instead of choosing a fallback model", asy
   value.policy.mockResolvedValue({ allowedProviders: null, allowedModels: [] } as never);
   await expect(value.resume()).rejects.toThrow("Workspace policy blocks");
   expect(value.admission).not.toHaveBeenCalled();
+});
+
+test("a host funding denial is neutral about the host's private balance and policy", async () => {
+  const settings = testSettings();
+  const value = fixture(settings.openaiModel, settings);
+  value.admission.mockResolvedValue("insufficient_credits");
+  const entitlements = {
+    admitRun: async () => ({ allowed: false as const, reason: "fixture quota exhausted" }),
+  };
+  const services = { db: database, settings, entitlements };
+  expect(
+    await goalRunBudgetBlocked(services, { accountId, workspaceId, model: settings.openaiModel }),
+  ).toEqual({
+    pausedReason: "usage_policy",
+    message: "The application's usage policy blocks another run. Resume when it allows.",
+  });
+  await expect(
+    assertGoalResumeAllowed(
+      services,
+      { accountId, workspaceId, model: settings.openaiModel, codexCompactionMode: "portable" },
+      null,
+    ),
+  ).rejects.toThrow("usage policy blocks");
 });
 
 for (const [denial, pausedReason, message] of [

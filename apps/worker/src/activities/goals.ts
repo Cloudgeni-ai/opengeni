@@ -74,6 +74,7 @@ export function createGoalActivities(services: () => Promise<ControlActivityServ
       workspaceId: input.workspaceId,
       model: session.model,
       codexCompactionMode: session.codexCompactionMode,
+      latencyMode: session.latencyMode,
     });
     const settings = modelDecision.settings;
     const continuationModel = modelDecision.model;

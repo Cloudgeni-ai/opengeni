@@ -1177,6 +1177,7 @@ describe("SessionChrome goal pill reasons", () => {
       ["credits", "credits"],
       ["budget", "budget"],
       ["usage_limit", "usage limit"],
+      ["usage_policy", "limits"],
       ["allowance", "allowance"],
     ]) {
       expect(sessionChromeGoalPillLabel("paused", paused(reason!).goal)).toBe(`Paused · ${label}`);

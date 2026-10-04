@@ -910,6 +910,25 @@ describe("API component integration", () => {
       tx.execute(sql`
       update sessions set model = 'scripted-model' where id = ${session.id}`),
     );
+    await withWorkspaceSessionActivityRls(dbClient.db, workspaceId, (tx) =>
+      tx.execute(sql`update sessions set latency_mode = 'fast' where id = ${session.id}`),
+    );
+    const blockedLatencyResume = await app.request(
+      workspacePath(workspaceId, `/sessions/${session.id}/goal`),
+      {
+        method: "PATCH",
+        body: JSON.stringify({ status: "active" }),
+        headers: { "content-type": "application/json" },
+      },
+    );
+    expect(blockedLatencyResume.status).toBe(422);
+    expect(await blockedLatencyResume.text()).toContain("latency mode");
+    expect(await getSessionGoal(dbClient.db, workspaceId, session.id)).toEqual(pausedGoal);
+    expect(await listSessionEvents(dbClient.db, workspaceId, session.id)).toEqual(pausedEvents);
+    expect(workflow.wakeups.length).toBe(wakeupsBeforeResume);
+    await withWorkspaceSessionActivityRls(dbClient.db, workspaceId, (tx) =>
+      tx.execute(sql`update sessions set latency_mode = 'standard' where id = ${session.id}`),
+    );
     const resumed = await app.request(workspacePath(workspaceId, `/sessions/${session.id}/goal`), {
       method: "PATCH",
       body: JSON.stringify({ status: "active" }),

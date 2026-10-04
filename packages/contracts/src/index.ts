@@ -6717,6 +6717,7 @@ export type GoalAdmissionPausedReason =
   | "credits"
   | "budget"
   | "usage_limit"
+  | "usage_policy"
   | "allowance";
 
 export const SessionGoal = z.object({

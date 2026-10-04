@@ -408,6 +408,8 @@ replace) starts a fresh continuation epoch: counters and the
 previous-continuation pointers are cleared together. A worker can re-dispatch a
 recovering logical goal turn under a new fenced attempt after death; that is
 recovery of the same turn, not creation or charging of another continuation.
+An embedding host's funding refusal uses `usage_policy`: its private meter can
+deny for reasons other than credits, so OpenGeni does not invent a balance diagnosis.
 
 ## Pauses and failures
 
@@ -422,7 +424,8 @@ recovery of the same turn, not creation or charging of another continuation.
   (`max_auto_continuations`) is resumed by new input, because that pause is
   pacing rather than intent.
 - Terminal sessions skip catalog/model validation entirely. An eligible goal
-  whose inherited model is missing, retired, or disallowed pauses visibly with
+  whose inherited model is missing, retired, disallowed, or no longer supports
+  the selected latency mode pauses visibly with
   `model_unavailable` or `model_policy` and an actionable rationale. Goal admission
   uses the same scoped catalog as ordinary turns, including organization and
   workspace connections. Catalog membership never grants credential authority:
@@ -471,7 +474,8 @@ recovery of the same turn, not creation or charging of another continuation.
   (`sessions:control`). Pausing emits `goal.paused` (`actor: "api"`). Resuming
   is only valid from `paused`: model and funding admission are checked under
   the control/session/goal locks first, using the effective model and exact
-  latest-finished causal human. A rejected Resume returns an actionable 422
+  active causal human, or the latest-finished causal human when idle. A rejected
+  Resume returns an actionable 422
   and preserves the paused goal, counters, event sequence and wake revisions.
   The agent Resume tool uses the same validation. An admitted Resume resets
   the counters, emits `goal.resumed`

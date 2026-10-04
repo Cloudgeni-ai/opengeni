@@ -301,6 +301,32 @@ async function counts(ctx: GoalFixture) {
 }
 
 describe("durable active-goal wake", () => {
+  test("Resume during accepted work validates its frozen causal human", async () => {
+    const ctx = await runningGoalFixture();
+    await setSessionGoalStatusWithEvent(client.db, ctx.grant.workspaceId!, ctx.session.id, {
+      status: "paused",
+      pausedReason: "api",
+      event: { type: "goal.paused", actor: "api", reason: "api" },
+    });
+    const resumed = await setSessionGoalStatusWithEvent(
+      client.db,
+      ctx.grant.workspaceId!,
+      ctx.session.id,
+      {
+        status: "active",
+        beforeResume: async (_tx, _session, causalTurn) => {
+          expect(causalTurn).toEqual({
+            id: ctx.turn.id,
+            initiatingHumanSubjectId: ctx.grant.subjectId,
+          });
+        },
+        event: { type: "goal.resumed", actor: "api" },
+      },
+    );
+    expect(resumed.goal.status).toBe("active");
+    expect(resumed.workflowWakeRevision).toBeNull();
+  });
+
   test("Resume validates locked causal work before changing counters, events or wakes", async () => {
     const ctx = await runningGoalFixture();
     await settleIdle(ctx);
@@ -325,11 +351,12 @@ describe("durable active-goal wake", () => {
     let validations = 0;
     const validate = async (
       _tx: unknown,
-      session: { model: string },
+      session: { model: string; latencyMode: string },
       causalTurn: { id: string; initiatingHumanSubjectId: string | null } | null,
     ) => {
       validations += 1;
       expect(session.model).toBe("scripted-model");
+      expect(session.latencyMode).toBe("standard");
       expect(causalTurn).toEqual({
         id: ctx.turn.id,
         initiatingHumanSubjectId: ctx.grant.subjectId,

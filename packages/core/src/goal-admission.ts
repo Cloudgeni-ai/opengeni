@@ -2,6 +2,7 @@ import {
   isModelAvailableForNewSelection,
   policyProviderIdForModel,
   resolveModelProvider,
+  runnableLatencyModesForModel,
   withCodexCatalogProvider,
   withXaiSubscriptionCatalogProvider,
   type Settings,
@@ -24,6 +25,7 @@ export function goalContinuationModelDecision(input: {
   workspaceModelPolicy: Awaited<ReturnType<typeof getWorkspaceModelPolicy>>;
   inheritedModel: string;
   codexCompactionMode?: Session["codexCompactionMode"];
+  latencyMode?: Session["latencyMode"];
 }): { model: string; blocked: string | null; pausedReason?: GoalAdmissionPausedReason } {
   const catalogSettings = input.settings.supergrokSubscriptionEnabled
     ? withXaiSubscriptionCatalogProvider(
@@ -70,6 +72,16 @@ export function goalContinuationModelDecision(input: {
       pausedReason: "model_policy",
     };
   }
+  if (
+    !runnableLatencyModesForModel(catalogSettings, model).includes(input.latencyMode ?? "standard")
+  ) {
+    return {
+      model,
+      blocked:
+        "The selected model does not support this conversation's latency mode. Choose a supported mode or model before resuming.",
+      pausedReason: "model_policy",
+    };
+  }
   return { model, blocked: null };
 }
 
@@ -82,6 +94,7 @@ export async function resolveGoalModelAdmission(
     workspaceId: string;
     model: string;
     codexCompactionMode?: Session["codexCompactionMode"];
+    latencyMode?: Session["latencyMode"];
   },
 ) {
   const catalog = await resolveWorkspaceCatalogSettings(db, settings, {
@@ -97,6 +110,7 @@ export async function resolveGoalModelAdmission(
       workspaceModelPolicy,
       inheritedModel: input.model,
       ...(input.codexCompactionMode ? { codexCompactionMode: input.codexCompactionMode } : {}),
+      ...(input.latencyMode ? { latencyMode: input.latencyMode } : {}),
     }),
   };
 }
@@ -109,10 +123,15 @@ export async function goalRunBudgetBlocked(
   const denial = await agentRunAdmissionDenial(services, { ...input, requestedAgentRuns: 1 });
   if (denial === null) return null;
   const blocks: Record<NonNullable<typeof denial>, GoalAdmissionBlock> = {
-    insufficient_credits: {
-      pausedReason: "credits",
-      message: "Insufficient OpenGeni credits. Add credits before resuming.",
-    },
+    insufficient_credits: services.entitlements
+      ? {
+          pausedReason: "usage_policy",
+          message: "The application's usage policy blocks another run. Resume when it allows.",
+        }
+      : {
+          pausedReason: "credits",
+          message: "Insufficient OpenGeni credits. Add credits before resuming.",
+        },
     allowance_exhausted: {
       pausedReason: "allowance",
       message: "OpenGeni usage allowance exhausted. Resume when your allowance is available.",
@@ -142,7 +161,8 @@ export class GoalResumeBlockedError extends Error {
 /** Called under the goal transition's locks, before counters, events or wakes change. */
 export async function assertGoalResumeAllowed(
   services: Parameters<typeof agentRunAdmissionDenial>[0] & { catalogSourceSettings?: Settings },
-  session: Pick<Session, "accountId" | "workspaceId" | "model" | "codexCompactionMode">,
+  session: Pick<Session, "accountId" | "workspaceId" | "model" | "codexCompactionMode"> &
+    Partial<Pick<Session, "latencyMode">>,
   causalTurn: { initiatingHumanSubjectId: string | null } | null,
 ): Promise<void> {
   const decision = await resolveGoalModelAdmission(

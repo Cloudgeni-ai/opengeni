@@ -23,13 +23,18 @@ afterEach(() =>
     .forEach((restore) => restore()),
 );
 
-function fixture(model: string, status: string, settings = testSettings()) {
+function fixture(
+  model: string,
+  status: string,
+  settings = testSettings(),
+  latencyMode: "standard" | "fast" | "priority" = "standard",
+) {
   const goal = spyOn(db, "getSessionGoal").mockResolvedValue({ status: "active" } as never);
   const session = spyOn(db, "requireSession").mockResolvedValue({
     model,
     status,
     reasoningEffort: "xhigh",
-    latencyMode: "standard",
+    latencyMode,
     tools: [],
     firstPartyMcpTools: [],
     sandboxBackend: "none",
@@ -75,6 +80,21 @@ test("a workspace policy denial reaches a visible pause without choosing another
     expect(candidate.policy.model).toBe("codex/gpt-6.1-sol");
     expect(await candidate.admission!({} as db.Database, null)).toEqual({
       budgetBlocked: expect.stringContaining("Workspace policy blocks"),
+      budgetPausedReason: "model_policy",
+    });
+    return { action: "paused", events: [] } as never;
+  });
+  expect(await value.activities.maybeContinueGoal(input)).toEqual({ action: "paused" });
+});
+
+test("unsupported continuation latency pauses without retrying or silently changing the mode", async () => {
+  const settings = testSettings();
+  const value = fixture(settings.openaiModel, "completed", settings, "fast");
+  value.materialize.mockImplementation(async (_db, candidate) => {
+    expect(candidate.policy.turnExecutionPolicy).toBeUndefined();
+    expect(candidate.policy.latencyMode).toBe("fast");
+    expect(await candidate.admission!({} as db.Database, null)).toEqual({
+      budgetBlocked: expect.stringContaining("latency mode"),
       budgetPausedReason: "model_policy",
     });
     return { action: "paused", events: [] } as never;

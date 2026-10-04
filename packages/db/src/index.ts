@@ -68339,6 +68339,16 @@ export async function updateSessionTitleWithEvent(
   );
 }
 
+/** Read-only admission at a locked paused-to-active transition. */
+export type SessionGoalResumeValidation = (
+  tx: Database,
+  session: Pick<
+    Session,
+    "accountId" | "workspaceId" | "model" | "codexCompactionMode" | "latencyMode"
+  >,
+  causalTurn: { id: string; initiatingHumanSubjectId: string | null } | null,
+) => Promise<void>;
+
 /**
  * Status transition helper. Idempotent: requesting the current status returns
  * `changed: false` so callers can skip emitting a duplicate event. `completed`
@@ -68346,12 +68356,6 @@ export async function updateSessionTitleWithEvent(
  * completed goal. Resuming to `active` clears the pause fields and resets the
  * continuation counters.
  */
-export type SessionGoalResumeValidation = (
-  tx: Database,
-  session: Pick<Session, "accountId" | "workspaceId" | "model" | "codexCompactionMode">,
-  causalTurn: { id: string; initiatingHumanSubjectId: string | null } | null,
-) => Promise<void>;
-
 export async function setSessionGoalStatus(
   db: Database,
   workspaceId: string,
@@ -68417,6 +68421,14 @@ export async function setSessionGoalStatus(
     }
     if (input.status === "active" && input.beforeResume) {
       const [effectiveSession] = await withEffectiveSessionPolicy(scopedDb, workspaceId, [session]);
+      // An accepted running turn owns the work the goal will continue after it
+      // settles. An idle Resume uses the exact latest-finished causal row.
+      const causalTurnFilter = session.activeTurnId
+        ? or(
+            eq(schema.sessionTurns.id, session.activeTurnId),
+            sql`${schema.sessionTurns.finishedAt} is not null`,
+          )
+        : sql`${schema.sessionTurns.finishedAt} is not null`;
       const [causalTurn] = await scopedDb
         .select({
           id: schema.sessionTurns.id,
@@ -68427,10 +68439,13 @@ export async function setSessionGoalStatus(
           and(
             eq(schema.sessionTurns.workspaceId, workspaceId),
             eq(schema.sessionTurns.sessionId, sessionId),
-            sql`${schema.sessionTurns.finishedAt} is not null`,
+            causalTurnFilter,
           ),
         )
         .orderBy(
+          ...(session.activeTurnId
+            ? [desc(sql`${schema.sessionTurns.id} = ${session.activeTurnId}`)]
+            : []),
           desc(schema.sessionTurns.finishedAt),
           desc(schema.sessionTurns.position),
           desc(schema.sessionTurns.createdAt),
@@ -68443,6 +68458,7 @@ export async function setSessionGoalStatus(
           accountId: session.accountId,
           workspaceId,
           model: effectiveSession!.model,
+          latencyMode: effectiveSession!.latencyMode as Session["latencyMode"],
           codexCompactionMode: session.codexCompactionMode as Session["codexCompactionMode"],
         },
         causalTurn ?? null,
