@@ -359,9 +359,11 @@ describe("organization billing StrictMode ownership", () => {
 
     expect(getBilling.mock.calls.length).toBeGreaterThanOrEqual(2);
     expect(getBillingEntitlements.mock.calls.length).toBeGreaterThanOrEqual(2);
-    expect(container.textContent).toContain("$25.00 available");
+    const creditSection = container.querySelector('section[aria-label="Credits and payments"]');
+    expect(creditSection).not.toBeNull();
+    expect(creditSection?.textContent).toContain("$25.00");
+    expect(creditSection?.textContent).toContain("Total balance");
     expect(container.textContent).toContain("Seats");
-    expect(container.querySelector('section[aria-label="Credits and payments"]')).not.toBeNull();
     expect(container.querySelector('input[name="credit-amount"]')?.getAttribute("aria-label")).toBe(
       "Amount to add (USD)",
     );

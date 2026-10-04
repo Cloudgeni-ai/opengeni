@@ -55,24 +55,13 @@ const postureOptions = {
   rlsStrategy: "force" as const,
   targetSchema: "public",
 };
-type Provisioner = "current" | "old" | "restored";
-const readinessBaselines = new Map<
-  string,
-  {
-    frozen: Record<Provisioner, string[]>;
-    current: Record<Provisioner, string[]>;
-  }
->();
-// Only the two routines introduced by 0604 are absent from the before schema.
-const beforePostureOptions = {
-  ...postureOptions,
-  modelFactCapabilityRoutines: [
-    "complete_workspace_insights_usage_projection(uuid, timestamp with time zone, timestamp with time zone, text[])",
-    "workspace_insights_amount_fact_rows(uuid, timestamp with time zone, timestamp with time zone, text, text, uuid, uuid)",
-    "organization_model_usage_summary(uuid, timestamp with time zone, timestamp with time zone, uuid)",
-    "visible_workspace_insights_model_fact_rows(uuid, timestamp with time zone, timestamp with time zone, text, text, uuid, uuid)",
-  ],
-};
+type ProvisionerState = "current" | "old" | "restored";
+type PostureReadings = { frozen: string[]; current: string[] };
+const baselineViolations = new Map<string, Record<ProvisionerState, PostureReadings>>();
+const expectedPreMigrationProjectionGaps = [
+  "Insights unified usage projection is missing or unsafe",
+  "Insights unified visible calls projection is missing or unsafe",
+];
 async function frozenRuntime<T>(
   revision: string,
   run: (
@@ -192,50 +181,34 @@ beforeAll(async () => {
       (${accountId},null,'model_usage_debit',-7,'model_response',null,'account-orphan','2026-09-03T00:00:00Z'),
       (${accountId},${workspaceId},'model_usage_debit',-17,'model_response','prior-orphan','prior-orphan','2026-08-25T00:00:00Z')`;
   const before = await policies();
-  expect(
-    evaluateRuntimeDatabasePosture(
-      await inspectRuntimeDatabasePosture(client.db, postureOptions),
-      postureOptions,
-    ).filter((violation) => violation.startsWith("Insights unified")),
-  ).toEqual([
-    "Insights unified usage projection is missing or unsafe",
-    "Insights unified visible calls projection is missing or unsafe",
-  ]);
   for (const revision of [stagingRevision, servingCompatibleRevision, preMigrationRevision]) {
     await frozenRuntime(revision, async (runtime, oldProvision) => {
-      const inspect = async () => ({
-        frozen: runtime.evaluateRuntimeDatabasePosture(
+      const inspect = async (): Promise<PostureReadings> => {
+        const frozen = runtime.evaluateRuntimeDatabasePosture(
           await runtime.inspectRuntimeDatabasePosture(client.db, postureOptions),
           postureOptions,
-        ),
-        current: evaluateRuntimeDatabasePosture(
-          await inspectRuntimeDatabasePosture(client.db, beforePostureOptions),
-          beforePostureOptions,
-        ),
-      });
+        );
+        const current = evaluateRuntimeDatabasePosture(
+          await inspectRuntimeDatabasePosture(client.db, postureOptions),
+          postureOptions,
+        );
+        // 0604 supplies exactly these two missing projections. Preserve every
+        // other reader/provisioner diagnostic for the before/after comparison.
+        for (const gap of expectedPreMigrationProjectionGaps) expect(current).toContain(gap);
+        return {
+          frozen,
+          current: current.filter((gap) => !expectedPreMigrationProjectionGaps.includes(gap)),
+        };
+      };
+      const roles = { appPassword: fixture.appPassword, rlsStrategy: "force" as const };
       const current = await inspect();
-      await oldProvision.provisionRoles(fixture.adminUrl, {
-        appPassword: fixture.appPassword,
-        rlsStrategy: "force",
-      });
+      expect(current.current).toEqual([]);
+      await oldProvision.provisionRoles(fixture.adminUrl, roles);
       const old = await inspect();
-      await provisionRoles(fixture.adminUrl, {
-        appPassword: fixture.appPassword,
-        rlsStrategy: "force",
-      });
+      await provisionRoles(fixture.adminUrl, roles);
       const restored = await inspect();
-      readinessBaselines.set(revision, {
-        frozen: {
-          current: current.frozen,
-          old: old.frozen,
-          restored: restored.frozen,
-        },
-        current: {
-          current: current.current,
-          old: old.current,
-          restored: restored.current,
-        },
-      });
+      expect(restored.current).toEqual([]);
+      baselineViolations.set(revision, { current, old, restored });
     });
   }
   await fixture.admin`delete from schema_migrations where name=${migrationName}`;
@@ -298,36 +271,33 @@ test("rolling owner migration leaves FORCE, policies, old facts, and billing amo
   );
 });
 
-test("0604 preserves each reader and provisioner's exact inherited readiness blockers", async () => {
+test("0604 preserves each reader and provisioning version's exact full-catalog posture", async () => {
   for (const revision of [stagingRevision, servingCompatibleRevision, preMigrationRevision]) {
-    const roles = {
-      appPassword: fixture.appPassword,
-      rlsStrategy: "force" as const,
-    };
+    const roles = { appPassword: fixture.appPassword, rlsStrategy: "force" as const };
     await frozenRuntime(revision, async (old, oldProvision) => {
-      const baseline = readinessBaselines.get(revision)!;
       if (revision === stagingRevision) {
-        expect(baseline.frozen.current.length).toBeGreaterThan(0);
+        expect(baselineViolations.get(revision)!.current.frozen.length).toBeGreaterThan(0);
         for (const inherited of [
           "claude_subscription_credentials",
           "organization_api_key_workspaces",
           "slack_api_rate_limits",
         ])
-          expect(baseline.frozen.current.join("\n")).toContain(inherited);
+          expect(baselineViolations.get(revision)!.current.frozen.join("\n")).toContain(inherited);
       }
-      const verify = async (provisioner: Provisioner) => {
+      const verify = async (provisioner: ProvisionerState) => {
+        const before = baselineViolations.get(revision)![provisioner];
         expect(
           old.evaluateRuntimeDatabasePosture(
             await old.inspectRuntimeDatabasePosture(client.db, postureOptions),
             postureOptions,
           ),
-        ).toEqual(baseline.frozen[provisioner]);
-        expect(
-          evaluateRuntimeDatabasePosture(
-            await inspectRuntimeDatabasePosture(client.db, postureOptions),
-            postureOptions,
-          ),
-        ).toEqual(baseline.current[provisioner]);
+        ).toEqual(before.frozen);
+        const current = evaluateRuntimeDatabasePosture(
+          await inspectRuntimeDatabasePosture(client.db, postureOptions),
+          postureOptions,
+        );
+        expect(current).toEqual(before.current);
+        if (provisioner !== "old") expect(current).toEqual([]);
       };
       await verify("current");
       await oldProvision.provisionRoles(fixture.adminUrl, roles);

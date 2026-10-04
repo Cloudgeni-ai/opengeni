@@ -36,46 +36,29 @@ tools. Steps 5–6 run only when the product or request needs them.
 
 Inspect the product's auth, tenancy, existing Opengeni config, runtime, API
 (OpenAPI document or MCP server), environment-file conventions and deployment.
-Reuse its sharing boundaries and explicitly requested schedule/time zone, write
-policy and output destination. Derive the organization name from the product.
-Do not ask the user to navigate settings, copy keys, supply API schemas, or
-choose options already settled by the product/request. The only routine human
-step is authentication (including verification, MFA or payment authorization).
-Do not make a new external commitment when the product/request leaves it open.
-Record a skipped feature rather than fabricating a URL, schedule or credential.
+Reuse its sharing boundaries and derive the organization name from the product.
+Don't ask about things the product or request already settles.
 
-Default target: `https://app.opengeni.ai`. When testing, explicitly use
-`https://staging.app.opengeni.ai`; never silently fall back to production.
-Read unauthenticated `GET /v1/config/client`, then authenticated `/v1/access/me`.
-Do not use a Personal/default workspace as the product's workspace.
+Target: `https://app.opengeni.ai` (use `https://staging.app.opengeni.ai` only
+when asked to test against staging). Do not use a Personal workspace as the
+product's workspace.
 
-## 2. Authenticate and create the organization key once
+## 2. Sign in and create the organization key
 
-Use your browser to open the target app. Ask: **“Please authenticate in this
-browser; I’ll handle the organization and developer setup.”** Let the person
-complete sign-in/sign-up, email verification and MFA. Do not request their
-password in chat or automate a verification challenge.
+If the Opengeni MCP tools are connected, use them: the user already signed in
+when connecting. Otherwise ask the user to sign in or sign up at the target app
+(in your browser if you have one).
 
-After authentication, if onboarding first asks how to use Opengeni, choose
-**Run agents in the cloud**: the other path shows a key on screen, and this
-setup creates its key below instead. Complete the organization-name step using
-the product's name, or reuse the exact intended existing organization. A bound invitation
-takes precedence; do not create a second organization. Skip optional model or
-purchase onboarding when an authorized billing path already exists. A key does
-not buy credits or make an unavailable model usable.
+If onboarding asks how they'll use Opengeni, choose **Run agents in the
+cloud** and name the organization after the product, or reuse the intended
+existing organization (a pending invitation wins; don't create a second one).
 
-In **Organization settings → Developer → Create API key**, select
-**Full access** with a 30-day expiry, so setup and testing (including test users
-and a production key) need no further UI. Store the once-shown token directly in the product's server-only `.env`
-(or its existing secret manager), never in chat, a screenshot, a committed
-file, a browser bundle, or a `NEXT_PUBLIC_`/`VITE_` variable. Disable shell
-tracing; ignore `.env` and the local setup ledger; use file mode `0600`.
-
-If your browser cannot securely transfer a once-shown secret to the local
-environment, use the authenticated browser's API client to send the exact key
-request from the walkthrough and capture its response directly to a protected
-file. Never print the raw response. If that secure path is unavailable, stop
-at the credential-transfer blocker; do not ask for a key pasted into chat.
+Create a **full-access** organization API key with a 30-day expiry, so setup and
+testing need no further UI: with the MCP action `createOrganizationApiKey`, or
+in **Organization settings → Developer → Create API key** (the user can copy it
+to you). Put it in the product's server-only `.env` (or its secret manager) as
+`OPENGENI_API_KEY`. It is only used by the server; never ship it in browser code
+or commit it.
 
 Verify `/v1/access/me`: the credential must be a full-access organization API
 key for the intended organization. An empty `workspaceGrants` is normal for an
@@ -138,16 +121,15 @@ unrequested business mutation as a test.
 ## 5. Optional background work, callbacks and budget
 
 Only when requested. Schedules use an installed workspace server id, not an
-inline `mcpServers` entry; create them paused, reconcile the stable ledger
-metadata before POST, and verify prompt, tool ids, model, time zone and status
-before activating. For inbound product events, use an automation source and a
-paused trigger. For outbound notifications, create a workspace webhook, protect
-its once-returned signing secret, and verify metadata **and** a signed test
-delivery.
+inline `mcpServers` entry; create them paused, check prompt, tool ids, model,
+time zone and status, then activate. For inbound product events, use an
+automation source and a paused trigger. For outbound notifications, create a
+workspace webhook, keep its signing secret (returned once) in the product's
+config, and send a signed test delivery.
 
 If the product needs short-lived per-run credentials, PUT its workspace
-credential provider, store the first response's signing secret, and verify a
-signed test request. Do not rotate the secret on every rerun. The provider
+credential provider, keep the signing secret from the first response, and
+verify a signed test request. The provider
 must independently authorize the signed workspace/session and exact targets;
 informational user/service labels grant nothing.
 
@@ -155,14 +137,9 @@ A usage ceiling uses workspace allowance state and its exact lifecycle version.
 Amounts are integer USD micros; a ceiling is not a prepaid balance or credit
 purchase. Do not guess a spending amount or alter organization billing.
 
-Persist a non-secret local ledger (for example `.opengeni-setup/state.json`)
-for any of these: target, organization id, workspace id, operation ids,
-integration ids/revisions, schedule id, webhook id and provider metadata. Save
-identities **before** submitting writes.
-
 ## 6. Report and hand off
 
-Report non-secret ids, passed checks, skipped features and any remaining
+Report ids, passed checks, skipped features and any remaining
 blocker, and state plainly **whether product tools are wired** (which tools,
 which were verified with a real call, which writes ask for approval). Do not
 claim a callback or tool works after metadata-only verification. Follow the

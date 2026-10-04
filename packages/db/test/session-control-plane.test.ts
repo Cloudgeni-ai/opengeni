@@ -7882,7 +7882,7 @@ describe("clean session control plane", () => {
         approvalId: "header-allowed-preview",
         toolName: "header_allowed",
       }),
-    ).toMatchObject({ managed: true, decision: "ask" });
+    ).toMatchObject({ managed: true, decision: "allow" });
     expect(
       await prepareConnectorActionApproval(client.db, firstIdentity, headerBlockedCall),
     ).toMatchObject({ managed: true, decision: "block" });
@@ -7895,13 +7895,14 @@ describe("clean session control plane", () => {
         approvalId: "header-allowed",
         toolName: "header_allowed",
       }),
-    ).toMatchObject({ managed: true, decision: "ask" });
+    ).toMatchObject({ managed: true, decision: "allow" });
     const sensitiveFixture = `sensitive-fixture-${crypto.randomUUID()}`;
     const call = (approvalId: string, action: string, value = sensitiveFixture) => ({
       approvalId,
       connectionId,
       serverId,
       toolName,
+      actionName: action,
       arguments: { action, payload: value },
     });
 
@@ -8220,7 +8221,11 @@ describe("clean session control plane", () => {
     expect(connectorAuditActions).toContain("connector.action.blocked");
     expect(connectorAuditActions).toContain("connector.action.execution_started");
     expect(connectorAuditActions).toContain("connector.action.execution_completed");
-    expect(JSON.stringify(evidence)).not.toContain(sensitiveFixture);
+    // Exact review bytes are protected session data, never audit metadata.
+    expect(JSON.stringify(evidence.audits)).not.toContain(sensitiveFixture);
+    expect(requestsByApproval.get(askCall.approvalId)?.reviewArguments).toContain(sensitiveFixture);
+    expect(requestsByApproval.get(allowCall.approvalId)?.reviewArguments).toBeNull();
+    expect(requestsByApproval.get(blockCall.approvalId)?.reviewArguments).toBeNull();
     const wildcardAudits = evidence.audits.filter(
       (row) => row.metadata.requestId === wildcardRequest?.id,
     );
@@ -8345,10 +8350,10 @@ describe("clean session control plane", () => {
     );
     expect(request).toMatchObject({
       status: "uncertain",
-      policySource: "explicit",
+      policySource: "default",
       policyDecision: "ask",
       policyId: null,
-      actionName: "create_issue",
+      actionName: "perform_action",
       executionAttemptId: resumedAttemptId,
       outcome: "retry_after_execution_started",
     });

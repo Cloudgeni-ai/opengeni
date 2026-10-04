@@ -213,12 +213,23 @@ export function safeDatabaseErrorFacts(error: unknown): SafeDatabaseErrorFacts {
   return facts;
 }
 
-/**
- * Typed persistence classification that retains the exact original failure as
- * `cause` for internal diagnostics. The ordinary Error message is deliberately
- * stable and source-free so a generic presentation path can never disclose SQL,
- * parameters, or driver detail by rendering `.message`.
- */
+/** Own-driver transaction boundary; callback errors never establish provenance. */
+export class DatabaseTransactionError extends Error {
+  readonly name = "DatabaseTransactionError";
+
+  constructor(
+    readonly stage: "admission" | "settlement",
+    cause: unknown,
+    // A rollback failure must not erase a callback's no-replay/permanent
+    // evidence. The recovery classifier inspects both branches for vetoes.
+    readonly original?: unknown,
+  ) {
+    super(`Database transaction ${stage} failed`, { cause });
+  }
+}
+
+/** Typed persistence classification retaining the original cause internally.
+ * Its ordinary message is stable and contains no SQL or driver parameters. */
 export class SessionEventPersistenceError extends Error {
   readonly name = "SessionEventPersistenceError";
 

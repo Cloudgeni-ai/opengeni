@@ -86,13 +86,16 @@ export const GMAIL_EXTRA_TOOLS: Tool[] = [
   ),
   tool(
     "search_messages",
-    "Searches individual messages using Gmail query syntax. Only matching messages are returned, with pagination.",
+    "Searches individual messages using Gmail query syntax with pagination. Use IDS_ONLY for selection and bulk cleanup: one list request, no message reads. Freeze every page before changing search membership.",
     {
       ...page,
       query: string,
       labelIds: strings,
       includeSpamTrash: { type: "boolean" },
-      messageFormat: view,
+      messageFormat: {
+        type: "string",
+        enum: ["IDS_ONLY", "MINIMAL", "METADATA_ONLY", "FULL_CONTENT"],
+      },
     },
   ),
   tool(
@@ -139,7 +142,7 @@ export const GMAIL_EXTRA_TOOLS: Tool[] = [
   ),
   tool(
     "modify_message",
-    "Atomically adds and removes labels on one message. INBOX, UNREAD, STARRED and IMPORTANT support inbox organization; SPAM supports spam placement/removal. Use trash_message for Trash.",
+    "Atomically adds and removes labels on one message. INBOX, UNREAD, STARRED and IMPORTANT support inbox organization; SPAM supports spam placement/removal; TRASH moves messages to recoverable Trash.",
     { messageId: string, ...labels },
     ["messageId"],
   ),

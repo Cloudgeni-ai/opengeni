@@ -15,6 +15,7 @@ import { getManagedHumanSandboxRecovery, consentManagedHumanSandboxRecovery } fr
 import { SandboxRecoveryConflictError } from "@opengeni/db";
 import { codexAccountJson } from "./codex";
 import { getSessionCodexAccounts } from "@opengeni/db";
+import { getToolActionReview, getToolReviewDetailsPage } from "@opengeni/db";
 import {
   AcknowledgeStreamRequest,
   ApplySessionGoalRevisionRequest,
@@ -1070,6 +1071,48 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
       throw error;
     }
   });
+
+  app.get("/v1/workspaces/:workspaceId/sessions/:sessionId/tool-reviews/:approvalId", async (c) => {
+    const workspaceId = c.req.param("workspaceId");
+    const grant = await requireAccessGrant(c, deps, workspaceId, "sessions:read");
+    const input = {
+      accountId: grant.accountId,
+      workspaceId,
+      sessionId: c.req.param("sessionId"),
+      approvalId: c.req.param("approvalId"),
+    };
+    const review = await getToolActionReview(db, input);
+    if (!review) throw new HTTPException(404, { message: "Review not found" });
+    c.header("Cache-Control", "private, no-store");
+    return c.json(review);
+  });
+
+  app.get(
+    "/v1/workspaces/:workspaceId/sessions/:sessionId/tool-reviews/:approvalId/details",
+    async (c) => {
+      const workspaceId = c.req.param("workspaceId");
+      const grant = await requireAccessGrant(c, deps, workspaceId, "sessions:read");
+      const query = z
+        .object({
+          actionDigest: z.string().regex(/^[0-9a-f]{64}$/),
+          path: z.string().max(2048).default(""),
+          offset: z.coerce.number().int().min(0).max(4_194_304).default(0),
+        })
+        .safeParse(c.req.query());
+      if (!query.success) throw new HTTPException(400, { message: "Invalid review page" });
+      const input = {
+        accountId: grant.accountId,
+        workspaceId,
+        sessionId: c.req.param("sessionId"),
+        approvalId: c.req.param("approvalId"),
+        ...query.data,
+      };
+      const page = await getToolReviewDetailsPage(db, input);
+      if (!page) throw new HTTPException(404, { message: "Review details unavailable" });
+      c.header("Cache-Control", "private, no-store");
+      return c.json(page);
+    },
+  );
 
   app.get("/v1/workspaces/:workspaceId/sessions/:sessionId", async (c) => {
     const workspaceId = c.req.param("workspaceId");
@@ -2355,29 +2398,30 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
         throw new HTTPException(404, { message: "session not found" });
       case "not_root":
         throw new HTTPException(409, {
-          message: "delete the root session to remove the complete workstream",
+          message: "Delete the chat this one belongs to; sub-chats are removed with it.",
         });
       case "active_sessions":
         throw new HTTPException(409, {
-          message: "cancel the workstream and wait for active turns to finish before deleting it",
+          message:
+            "This chat is still running. Stop it, then delete it once its current turn has finished.",
         });
       case "active_video_generations":
         throw new HTTPException(409, {
-          message: "wait for active video generations to finish before deleting this workstream",
+          message: "Wait for this chat's video generations to finish before deleting it.",
         });
       case "active_background_commands":
         throw new HTTPException(409, {
-          message: "pause or cancel this workstream's background commands before deleting it",
+          message: "Stop this chat's background commands before deleting it.",
         });
       case "live_sandboxes":
         throw new HTTPException(409, {
           message:
-            "wait for the workstream's sandbox activity to finish draining before deleting it",
+            "This chat's computer is still shutting down. Try deleting it again in a moment.",
         });
       case "externally_referenced":
         throw new HTTPException(409, {
           message:
-            "this workstream has durable workspace outputs or independent forks; archive it instead",
+            "This chat has saved workspace outputs or forks that depend on it. Archive it instead.",
         });
     }
   });
@@ -5027,6 +5071,7 @@ export function sessionAuthorizationOperationForHttp(
   if (suffix === "/lineage" && verb === "GET") return "session.lineage.read";
   if (suffix === "/background-commands" && verb === "GET") return "session.read";
   if (suffix === "/model-context" && verb === "GET") return "session.read";
+  if (/^\/tool-reviews\/[^/]+(?:\/details)?$/.test(suffix) && verb === "GET") return "session.read";
   if (suffix === "/codex-accounts" && verb === "GET") return "session.read";
   if (/^\/background-commands\/[^/]+$/.test(suffix) && verb === "DELETE") {
     return "session.control";

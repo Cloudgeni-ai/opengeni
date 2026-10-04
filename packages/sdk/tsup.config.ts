@@ -68,5 +68,6 @@ export default defineConfig({
     "@opengeni/contracts/plugin-discovery",
     "@opengeni/contracts/workspace-integration-wire",
     "@opengeni/contracts/model-display",
+    "@opengeni/contracts/tool-review-presentation",
   ],
 });

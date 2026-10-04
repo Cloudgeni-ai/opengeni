@@ -3978,7 +3978,7 @@ for the feature limits and external-workspace release acceptance.
 
 ### Reservation balance projection cutover
 
-Migration `0619_usage_reservation_balance_projection.sql` requires maintenance.
+Migration `0625_usage_reservation_balance_projection.sql` requires maintenance.
 Drain API, control-worker, and turn-worker writers before applying it, and run
 role provisioning with the projection-aware release before resuming that release.
 Older binaries reject its owner-only internal routines during database posture

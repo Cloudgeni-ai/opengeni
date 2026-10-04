@@ -131,6 +131,8 @@ export function registerCapabilityRoutes(app: Hono, deps: ApiRouteDeps): void {
           grant: access.grant,
           capabilityId: decodeURIComponent(c.req.param("capabilityId")),
           personalOwnerVerified: isPersonalConnectionOwnerPrincipal(access),
+          ...(c.req.query("connectionId") ? { connectionId: c.req.query("connectionId")! } : {}),
+          ...(c.req.query("instanceKey") ? { instanceKey: c.req.query("instanceKey")! } : {}),
         }),
       ),
     );

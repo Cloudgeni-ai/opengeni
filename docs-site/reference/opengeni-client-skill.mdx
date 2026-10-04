@@ -181,8 +181,8 @@ Before production, and for the handoff, read the
 
 ## Rules
 
-- The API key stays on the server: never in browser code, logs, commits,
-  prompts, or chat.
+- The API key is used only by the server (the proxy); it never goes in browser
+  code.
 - Never replace the proxy with a raw passthrough to the Opengeni API.
 - Keep every `@opengeni/*` package at one version. The SDK is ESM-only; from
   CommonJS, use `await import("@opengeni/sdk")`.

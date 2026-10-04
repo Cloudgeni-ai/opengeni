@@ -276,12 +276,20 @@ export async function settleTurnFailure(deps: TurnFailureDeps): Promise<RunAgent
   try {
     return await settleTurnFailureInAttempt(deps);
   } catch (error) {
+    if (
+      deps.control.activityStatus === "recovering" &&
+      error instanceof ApplicationFailure &&
+      error.type === "OpenGeniPostClaimDatabaseRecovery"
+    )
+      throw error;
     // Connectivity can disappear while settling an unrelated run error too.
     // Do not overwrite a possibly committed settlement; the control lane
     // re-reads exact ownership and becomes a stale no-op if it already closed.
     if (deps.attempt.turnId && deps.attempt.triggerEventId) {
       const recovery = postClaimDatabaseRecoveryFailure({
-        error,
+        // A failed rollback/terminal write must not erase no-replay evidence
+        // from the failure we were settling (notably unknown tool effects).
+        error: new AggregateError([error, deps.error], "Turn failure settlement failed"),
         turnId: deps.attempt.turnId,
         triggerEventId: deps.attempt.triggerEventId,
         executionGeneration: deps.attempt.executionGeneration,

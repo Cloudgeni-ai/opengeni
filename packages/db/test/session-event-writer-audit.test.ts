@@ -1461,7 +1461,9 @@ describe("session_events writer inventory", () => {
 
     for (const path of productionTypeScriptFiles()) {
       const source = readFileSync(path, "utf8");
+      const file = relative(repoRoot, path).replaceAll("\\", "/");
       if (
+        file !== "packages/db/src/session-attempt-fence.ts" &&
         !source.includes("sessionEvents") &&
         !source.includes("session_events") &&
         !source.includes("sessionSystemUpdateOutbox") &&
@@ -1469,7 +1471,6 @@ describe("session_events writer inventory", () => {
       ) {
         continue;
       }
-      const file = relative(repoRoot, path).replaceAll("\\", "/");
       const sourceFile = parseSourceFile(path, source);
       const visit = (node: t.Node): void => {
         if (isNamedFunctionNode(node)) {

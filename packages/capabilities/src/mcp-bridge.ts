@@ -31,6 +31,11 @@ export type LocalMcpBridgeDescriptor = Readonly<{
 
 export interface LocalMcpBridgeServer extends MCPServer {
   readonly bridge: LocalMcpBridgeDescriptor;
+  /** Read-only provider facts for an exact pending action; never grants approval. */
+  reviewContext?: (
+    toolName: string,
+    args: Record<string, unknown>,
+  ) => Promise<Partial<import("@opengeni/contracts").ToolReviewContext>>;
 }
 
 export interface LocalMcpBridgeAdapter<TConfig, TContext> {
