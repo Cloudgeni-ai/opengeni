@@ -519,3 +519,59 @@ test("custody and release claims reject locator drift, divergent receipts and st
     }),
   ).toBe(true);
 });
+
+test("saved output is claimed before a full batch of older uncaptured results", async () => {
+  const fixture = await terminalOutputFixture();
+  const publish = fixture.connection.publish;
+  fixture.connection.publish = (subject, payload) => {
+    if (OpAck.decode(payload).final) throw new Error("synthetic publisher failure");
+    publish(subject, payload);
+  };
+  await releaseOutput(client.db, settings, observability, fixture.outputBus, fixture.rpc);
+  expect((await fixture.stored()).output_consumed_at).toBeInstanceOf(Date);
+  expect(fixture.runner.runs.get(fixture.identity.opId)!.finalAcked).toBe(false);
+
+  const olderSessionId = await seed(25);
+  const commands = await shared.admin`select * from session_background_commands
+    where session_id=${olderSessionId}`;
+  for (const command of commands) {
+    await settleConnectedMachineSessionBackgroundCommand(client.db, {
+      accountId: command.account_id,
+      workspaceId: command.workspace_id,
+      sessionId: olderSessionId,
+      commandId: command.id,
+      controlWorkspaceId: command.control_workspace_id,
+      enrollmentId: command.enrollment_id,
+      connectionInstanceId: command.connection_instance_id,
+      opId: command.op_id,
+      outcome: "exited",
+      exitCode: 0,
+      reason: "op_exit",
+    });
+  }
+  await shared.admin`update session_background_commands set
+    reconcile_after='2000-01-01T00:00:00Z' where session_id=${olderSessionId}`;
+  await shared.admin`update session_background_commands set
+    reconcile_after='2001-01-01T00:00:00Z',reconcile_claim_id=null,reconcile_claimed_at=null
+    where id=${fixture.identity.commandId}`;
+
+  const claims = await claimConnectedCommandOutputReleases(client.db, {
+    claimId: crypto.randomUUID(),
+    limit: 20,
+    claimTtlMs: 30000,
+  });
+  expect(claims).toHaveLength(20);
+  expect(claims[0]!.commandId).toBe(fixture.identity.commandId);
+  expect(claims[0]!.receipt?.exitSeq).toBe("2");
+  expect(claims[0]!.connectionInstanceId).toBe(fixture.identity.connectionInstanceId);
+  expect(claims.slice(1).every((claim) => claim.sessionId === olderSessionId)).toBe(true);
+  expect(claims.slice(1).every((claim) => claim.receipt === null)).toBe(true);
+  const [remaining] = await shared.admin`select count(*)::int n
+    from session_background_commands where session_id=${olderSessionId}
+    and reconcile_claim_id is null and output_consumed_at is null`;
+  expect(remaining!.n).toBe(6);
+  expect(fixture.transport.decodedAcks().some((ack) => ack.final)).toBe(false);
+  await shared.admin`update session_background_commands set
+    reconcile_after=now()+interval '1 day',reconcile_claim_id=null,reconcile_claimed_at=null
+    where session_id in (${olderSessionId},${fixture.identity.sessionId})`;
+});
