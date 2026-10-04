@@ -11,6 +11,7 @@ import {
   safeDatabaseErrorFacts,
   isRetryableDatabaseTransportFailure,
   isSessionEventPersistenceError,
+  DatabaseTransactionError,
   SandboxLeaseTransitionError,
 } from "@opengeni/db";
 import {
@@ -419,6 +420,12 @@ function retryableDatabaseFailureCode(
     const boundaries = new Set<object>();
     const ownDatabaseNodes = new Set<object>();
     const codes = new Set<PostClaimDatabaseRecoveryDetail["code"]>();
+    const ownChildren = (node: object): object[] =>
+      node instanceof DatabaseTransactionError
+        ? // Callback failures retained beside a failed rollback supply vetoes,
+          // never driver provenance for a provider's connection-looking error.
+          [...graph.get(node)!].filter((child) => child === node.cause)
+        : [...graph.get(node)!];
     // Ask the canonical transport predicate about ONLY this node's facts. Its
     // recursive search must not pair a DB sibling with an unrelated provider.
     for (const node of graph.keys()) {
@@ -441,7 +448,11 @@ function retryableDatabaseFailureCode(
           : isDatabaseConnectionSqlState(sqlState)
       )
         transports.add(node);
-      if (node instanceof DrizzleQueryError || isSessionEventPersistenceError(node)) {
+      if (
+        node instanceof DrizzleQueryError ||
+        node instanceof DatabaseTransactionError ||
+        isSessionEventPersistenceError(node)
+      ) {
         // Only actual errors raised at our ORM/typed persistence boundary own
         // their driver subtree. A PostgresError name, SDK wrapper or provider
         // socket by itself is never own-client provenance for a running turn.
@@ -449,7 +460,7 @@ function retryableDatabaseFailureCode(
         for (const source of queue) {
           if (ownDatabaseNodes.has(source)) continue;
           ownDatabaseNodes.add(source);
-          queue.push(...graph.get(source)!);
+          queue.push(...ownChildren(source));
         }
       }
     }
@@ -460,7 +471,7 @@ function retryableDatabaseFailureCode(
         if (seen.has(node)) continue;
         seen.add(node);
         if (transports.has(node)) return true;
-        queue.push(...graph.get(node)!);
+        queue.push(...ownChildren(node));
       }
       return false;
     };
@@ -469,7 +480,7 @@ function retryableDatabaseFailureCode(
     // order; a deeper transport/reset cannot override it either.
     for (const node of graph.keys()) {
       const record = node as Record<string, unknown>;
-      if (node instanceof DrizzleQueryError) {
+      if (node instanceof DrizzleQueryError || node instanceof DatabaseTransactionError) {
         boundaries.add(node);
         if (hasOwnTransport(node)) codes.add("db_failure");
       }
@@ -513,6 +524,12 @@ function retryableDatabaseFailureCode(
 }
 
 const RUNNING_TURN_DATABASE_TRANSPORT_CODES = new Set([
+  // postgres.js reports these for a physically lost connection, including
+  // transaction cleanup after its socket has already closed. Own-client
+  // provenance and the unknown-outcome veto remain mandatory above.
+  "CONNECTION_CLOSED",
+  "CONNECTION_DESTROYED",
+  "CONNECTION_ENDED",
   "ECONNREFUSED",
   "ECONNRESET",
   "CONNECT_TIMEOUT",

@@ -154,9 +154,14 @@ async function wakeRow(workspaceId: string, sessionId: string) {
 }
 
 describe("transactional session workflow wake outbox", () => {
-  test.each([false, true])(
-    "a restricted own-client server 57P01 recovers the same turn; authoritative Pause wins (%s)",
-    async (paused) => {
+  test.each([
+    { paused: false, outage: "server-sqlstate" },
+    { paused: true, outage: "server-sqlstate" },
+    { paused: false, outage: "physical-close" },
+    { paused: true, outage: "physical-close" },
+  ])(
+    "a restricted own-client outage recovers the same turn; authoritative Pause wins (%j)",
+    async ({ paused, outage }) => {
       const ctx = await fixture();
       const workspaceId = ctx.grant.workspaceId!;
       const sessionId = ctx.session.id;
@@ -203,9 +208,8 @@ describe("transactional session workflow wake outbox", () => {
       `;
       if (!beforeAuthority) throw new Error("Missing accepted authority");
 
-      // PostgreSQL, not a fabricated Error/message, supplies the allowed
-      // SQLSTATE through this dedicated restricted ORM client. This is a
-      // classification/control regression, not a live failover claim.
+      // PostgreSQL supplies the real failure through a dedicated restricted
+      // ORM client. Physical termination must not be renamed to a SQLSTATE.
       const applicationName = `outage-fixture-${crypto.randomUUID()}`;
       const isolated = postgres(shared.appUrl, {
         max: 1,
@@ -213,18 +217,46 @@ describe("transactional session workflow wake outbox", () => {
       });
       let error: unknown;
       try {
-        await drizzle(isolated)
-          .execute(sql`do $$ begin
+        if (outage === "physical-close") {
+          const [owner] = await isolated`select pg_backend_pid() as pid`;
+          if (!owner) throw new Error("Missing dedicated fixture connection");
+          const pending = drizzle(isolated)
+            .execute(sql`select pg_sleep(5)`)
+            .catch((cause) => {
+              error = cause;
+            });
+          await waitFor(
+            async () => {
+              const [active] = await shared.admin`
+              select state from pg_stat_activity where pid = ${owner.pid}
+                and application_name = ${applicationName} and datname = current_database()
+            `;
+              return active?.state === "active";
+            },
+            { timeoutMs: 1000, intervalMs: 5 },
+          );
+          const [terminated] = await shared.admin`
+            select pg_terminate_backend(pid) as terminated from pg_stat_activity
+            where pid = ${owner.pid} and application_name = ${applicationName}
+              and datname = current_database() and usename = ${new URL(shared.appUrl).username}
+          `;
+          expect(terminated?.terminated).toBe(true);
+          await pending;
+        } else
+          await drizzle(isolated)
+            .execute(sql`do $$ begin
             raise exception using errcode = '57P01', message = 'own-client outage fixture';
           end $$`)
-          .catch((cause) => {
-            error = cause;
-          });
+            .catch((cause) => {
+              error = cause;
+            });
       } finally {
         await isolated.end({ timeout: 1 });
       }
       expect(error).toBeInstanceOf(DrizzleQueryError);
-      expect((error as DrizzleQueryError).cause).toMatchObject({ code: "57P01" });
+      expect((error as DrizzleQueryError).cause).toMatchObject({
+        code: outage === "physical-close" ? "CONNECTION_CLOSED" : "57P01",
+      });
       const failure = postClaimDatabaseRecoveryFailure({
         error,
         turnId: claim.turn.id,
@@ -319,9 +351,9 @@ describe("transactional session workflow wake outbox", () => {
     30_000,
   );
 
-  test("a real restricted connection termination stays outside the running-turn closed allowlist", async () => {
+  test("a real restricted connection termination enters the running-turn recovery lane", async () => {
     // Kill only this exact dedicated fixture connection. postgres.js reports
-    // CONNECTION_CLOSED here; never rename it to an allowed code or infer a
+    // CONNECTION_CLOSED here; never rename it to another code or infer a
     // server SQLSTATE/exit proof that was not actually returned.
     const applicationName = `excluded-outage-fixture-${crypto.randomUUID()}`;
     const isolated = postgres(shared.appUrl, {
@@ -366,8 +398,8 @@ describe("transactional session workflow wake outbox", () => {
       executionGeneration: 1,
     };
     expect(
-      postClaimDatabaseRecoveryFailure({ ...identity, requireDatabaseProvenance: true }),
-    ).toBeNull();
+      postClaimDatabaseRecoveryFailure({ ...identity, requireDatabaseProvenance: true })?.type,
+    ).toBe("OpenGeniPostClaimDatabaseRecovery");
     expect(postClaimDatabaseRecoveryFailure(identity)?.type).toBe(
       "OpenGeniPostClaimDatabaseRecovery",
     );

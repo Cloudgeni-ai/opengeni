@@ -1,7 +1,7 @@
 import { expect, test } from "bun:test";
 import { DrizzleQueryError } from "drizzle-orm";
 import { ToolCallError } from "@openai/agents";
-import { SessionEventPersistenceError } from "@opengeni/db";
+import { DatabaseTransactionError, SessionEventPersistenceError } from "@opengeni/db";
 import { RoutingMutationOutcomeUnknownError } from "@opengeni/runtime";
 import { MandatoryHistoryPersistenceError } from "../src/activities/agent-turn/quiescence";
 import {
@@ -194,11 +194,36 @@ function runningDatabaseRecovery(error: unknown) {
   return postClaimDatabaseRecoveryFailure({ error, ...identity, requireDatabaseProvenance: true });
 }
 
+test("own transaction provenance includes only the driver branch; rollback retains no-replay vetoes", () => {
+  const closed = Object.assign(new Error("own connection closed"), { code: "CONNECTION_CLOSED" });
+  expect(runningDatabaseRecovery(new DatabaseTransactionError("admission", closed))).toMatchObject({
+    type: "OpenGeniPostClaimDatabaseRecovery",
+  });
+  expect(runningDatabaseRecovery(new DatabaseTransactionError("settlement", closed))).toMatchObject(
+    { type: "OpenGeniPostClaimDatabaseRecovery" },
+  );
+  expect(
+    runningDatabaseRecovery(
+      new DatabaseTransactionError(
+        "settlement",
+        new Error("unclassified driver failure"),
+        Object.assign(new Error("provider connection reset"), { code: "ECONNRESET" }),
+      ),
+    ),
+  ).toBeNull();
+  const unknown = new RoutingMutationOutcomeUnknownError("execCommand", "unknown");
+  expect(
+    runningDatabaseRecovery(new DatabaseTransactionError("settlement", closed, unknown)),
+  ).toBeNull();
+  expect(
+    runningDatabaseRecovery(
+      new DatabaseTransactionError("settlement", closed, rawDatabaseFailure("42501")),
+    ),
+  ).toBeNull();
+});
+
 test("running-turn DB transport recovery has a closed allowlist without changing the legacy lane", () => {
   for (const code of [
-    "CONNECTION_CLOSED",
-    "CONNECTION_DESTROYED",
-    "CONNECTION_ENDED",
     "EAI_AGAIN",
     "ECONNABORTED",
     "EHOSTDOWN",
@@ -237,7 +262,14 @@ test("running-turn DB transport recovery has a closed allowlist without changing
   }
   for (const code of ["57P00", "0800", "08001extra", "08garbage", "0800!"])
     expect(runningDatabaseRecovery(rawDatabaseFailure(code))).toBeNull();
-  for (const code of ["ECONNREFUSED", "ECONNRESET", "CONNECT_TIMEOUT"])
+  for (const code of [
+    "CONNECTION_CLOSED",
+    "CONNECTION_DESTROYED",
+    "CONNECTION_ENDED",
+    "ECONNREFUSED",
+    "ECONNRESET",
+    "CONNECT_TIMEOUT",
+  ])
     expect(
       runningDatabaseRecovery(
         new DrizzleQueryError("select 1", [], Object.assign(new Error("own DB"), { errno: code })),
