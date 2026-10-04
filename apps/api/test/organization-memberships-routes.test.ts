@@ -1021,8 +1021,9 @@ describe("organization membership routes", () => {
     expect(initial.status).toBe(200);
     expect(await initial.json()).toMatchObject({
       organizationId: accountId,
-      enabled: false,
-      // Universal session-tenancy activation (0611): no readiness receipt.
+      // Universal session-tenancy activation (0611): no readiness receipt and
+      // Only me defaults to enabled until an owner/admin turns it off.
+      enabled: true,
       available: true,
       version: 0,
     });
@@ -1039,19 +1040,19 @@ describe("organization membership routes", () => {
     });
     expect(memberShapedRequest.status).toBe(422);
 
-    const enabled = await app.request(endpoint, {
+    const disabled = await app.request(endpoint, {
       method: "PATCH",
       headers: { cookie: "session=present", "content-type": "application/json" },
       body: JSON.stringify({
-        enabled: true,
+        enabled: false,
         expectedVersion: 0,
         operationId: crypto.randomUUID(),
       }),
     });
-    expect(enabled.status).toBe(200);
-    expect(await enabled.json()).toMatchObject({
+    expect(disabled.status).toBe(200);
+    expect(await disabled.json()).toMatchObject({
       organizationId: accountId,
-      enabled: true,
+      enabled: false,
       available: true,
       version: 1,
       changed: true,

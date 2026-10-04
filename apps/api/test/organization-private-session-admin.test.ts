@@ -72,9 +72,10 @@ test("organization admin keys manage private-session settings without a human me
     });
   const initial = await app.request(endpoint, { headers });
   expect(initial.status).toBe(200);
-  // Every organization is session-tenancy activated (0611): no receipt is needed.
+  // Every organization is session-tenancy activated (0611): no receipt is
+  // needed and Only me defaults to enabled until an administrator disables it.
   expect(await initial.json()).toMatchObject({
-    enabled: false,
+    enabled: true,
     available: true,
     version: 0,
   });
@@ -83,15 +84,15 @@ test("organization admin keys manage private-session settings without a human me
       .status,
   ).toBe(403);
   const operation = {
-    enabled: true,
+    enabled: false,
     expectedVersion: 0,
     operationId: crypto.randomUUID(),
   };
-  const enabled = await patch(operation);
-  expect(enabled.status).toBe(200);
-  const result = await enabled.json();
+  const disabled = await patch(operation);
+  expect(disabled.status).toBe(200);
+  const result = await disabled.json();
   expect(result).toMatchObject({
-    enabled: true,
+    enabled: false,
     available: true,
     version: 1,
     changed: true,
@@ -99,7 +100,7 @@ test("organization admin keys manage private-session settings without a human me
   const replay = await patch(operation);
   expect(replay.status).toBe(200);
   expect(await replay.json()).toEqual(result);
-  expect((await patch({ ...operation, enabled: false })).status).toBe(409);
+  expect((await patch({ ...operation, enabled: true })).status).toBe(409);
   expect((await patch({ ...operation, operationId: crypto.randomUUID() })).status).toBe(409);
   const competing = await Promise.all([
     patch({ enabled: false, expectedVersion: 1, operationId: crypto.randomUUID() }),

@@ -12,7 +12,7 @@ import { join } from "node:path";
 // literals, and a `session.visibility.changed` event type. The surrounding
 // database authority (owner derivation on insert, the capability-fenced direct
 // write guard, and the restrictive `session_visibility_isolation` policies) is
-// ACTIVE for every organization: maintenance migration 0611 retired the
+// ACTIVE for every organization: rolling migration 0611 retired the
 // per-organization activation receipt prerequisite. The first public caller is
 // deliberately narrow: one core application service reached by the two HTTP
 // routes and the framework-neutral SDK, with the web control using only that
@@ -143,7 +143,7 @@ describe("session visibility and fork product activation stays on its exact publ
       join(repo, "packages/db/drizzle/0611_universal_session_tenancy_activation.sql"),
       "utf8",
     );
-    expect(migration.startsWith("-- deployment-mode: maintenance\n")).toBe(true);
+    expect(migration.startsWith("-- deployment-mode: rolling\n")).toBe(true);
     for (const routine of [
       "session_tenancy_product_activated(uuid,integer)",
       "session_tenancy_any_product_activation()",
@@ -151,6 +151,9 @@ describe("session visibility and fork product activation stays on its exact publ
       "issue_self_user_resource_grant(uuid,uuid,uuid,text,text,text,uuid,integer,boolean)",
       "revoke_self_user_resource_grant(uuid,uuid,uuid)",
       "accept_turn_personal_resource_attachment(uuid,uuid,uuid,uuid,text,integer,boolean,integer)",
+      "organization_private_sessions_enabled(uuid)",
+      "get_organization_private_session_settings(uuid,text)",
+      "update_organization_private_session_settings(uuid,text,boolean,bigint,uuid)",
     ]) {
       expect(migration).toContain(routine);
     }

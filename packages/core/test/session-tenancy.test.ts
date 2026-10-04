@@ -179,15 +179,15 @@ describe("managed-human session tenancy application service", () => {
       ),
     ).rejects.toMatchObject({ status: 403 });
 
+    // No activation receipt and no setting row (0611): Only me defaults on.
     await expect(
       getManagedHumanSessionCreateCapabilities({ db: client.db }, canonical, grant.workspaceId),
     ).resolves.toEqual({
-      activated: false,
-      canCreatePrivate: false,
-      reason: "not_activated",
+      activated: true,
+      canCreatePrivate: true,
+      reason: "available",
     });
-    // No activation receipt is involved (0611): only the shared-workspace
-    // owner/admin setting below changes the answer.
+    // An explicit owner/admin disable is the only thing that turns it off.
     const [membership] = await shared.admin<{ id: string }[]>`
       select id from organization_memberships
       where account_id = ${grant.accountId} and subject_id = ${subjectId}`;
@@ -195,7 +195,17 @@ describe("managed-human session tenancy application service", () => {
     await shared.admin`
       insert into organization_private_session_settings (
         account_id, enabled, version, updated_by_membership_id
-      ) values (${grant.accountId}, true, 1, ${membership.id})`;
+      ) values (${grant.accountId}, false, 1, ${membership.id})`;
+    await expect(
+      getManagedHumanSessionCreateCapabilities({ db: client.db }, canonical, grant.workspaceId),
+    ).resolves.toEqual({
+      activated: false,
+      canCreatePrivate: false,
+      reason: "not_activated",
+    });
+    await shared.admin`
+      update organization_private_session_settings set enabled = true, version = 2
+      where account_id = ${grant.accountId}`;
     await shared.admin`
       update organization_memberships set role = 'member' where id = ${membership.id}`;
     await expect(
