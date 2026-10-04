@@ -817,6 +817,234 @@ test("seven-day workspace and organization readers stay raw-equivalent before an
   }
 });
 
+test("one helper snapshot prevents frozen-reader mixed cache/raw results across concurrent moves, deletes and inserts", async () => {
+  const frozen = Bun.spawnSync([
+    "git",
+    "show",
+    "77dad806ace707f424d7ce41fdc687ef1d1e6fd0:packages/db/drizzle/0607_insights_actual_model_debits.sql",
+  ]);
+  expect(frozen.exitCode).toBe(0);
+  const frozenSource = new TextDecoder().decode(frozen.stdout);
+  const start = frozenSource.indexOf("DO $inputs$");
+  const finish = frozenSource.indexOf("$inputs$;", start);
+  expect(start).toBeGreaterThan(0);
+  expect(finish).toBeGreaterThan(start);
+  const frozenBlock = frozenSource.slice(start, finish + "$inputs$;".length);
+  const [current] = await shared!.admin`select pg_get_functiondef(oid) as definition,provolatile
+    from pg_proc where oid='opengeni_private.insights_rollup_amount_inputs(uuid,uuid,timestamptz,timestamptz,text)'::regprocedure`;
+  expect(current!.provolatile).toBe("s");
+  for (const mutation of ["move", "move-delete-insert"] as const) {
+    for (const old of [true, false]) {
+      const label = `snapshot-${mutation}-${old}`;
+      const turn = crypto.randomUUID();
+      const debit = crypto.randomUUID();
+      await scope(async (tx) => {
+        await tx`insert into model_call_facts(account_id,workspace_id,session_id,turn_id,source_key,provider,provider_api,
+          model,billing_path,input_tokens,cached_tokens,cache_write_tokens,output_tokens,reasoning_tokens,total_tokens,
+          estimated_provider_cost_micros,occurred_at,recorded_at)
+          values(${accountId},${workspaceId},${sessionId},${turn},'a','openai','responses',${label},'opengeni_credits',
+            100,20,10,30,0,130,37,'2026-08-20T04:00Z','2026-08-20T10:00Z'),
+          (${accountId},${workspaceId},${sessionId},${turn},'b','openai','responses',${label},'opengeni_credits',
+            null,null,null,0,null,null,13,'2026-08-21T04:00Z','2026-08-21T10:00Z')`;
+        await tx`insert into credit_ledger_entries(id,account_id,workspace_id,type,amount_micros,source_type,source_id,idempotency_key,occurred_at)
+          values(${debit},${accountId},${workspaceId},'model_usage_debit',-5,'model_response',${turn + ":a"},${debit},'2026-08-22T04:00Z')`;
+      });
+      await assertExact();
+      // A is clean/cached; B is already dirty/raw before the reader starts.
+      await scope(async (tx) => {
+        await tx`update model_call_facts set estimated_provider_cost_micros=17
+          where workspace_id=${workspaceId} and turn_id=${turn} and source_key='b'`;
+      });
+      const name = old ? "insights_snapshot_frozen" : "insights_snapshot_stable";
+      const barrier = old ? 61004301 : 61004302;
+      const marker = "FOR edge IN SELECT * FROM";
+      const definition = (old ? frozenBlock : (current!.definition as string)).replace(
+        "opengeni_private.insights_rollup_amount_inputs(",
+        `public.${name}(`,
+      );
+      expect(definition.split(marker)).toHaveLength(2);
+      await shared!.admin.unsafe(
+        definition.replace(marker, `PERFORM pg_advisory_xact_lock(${barrier});\n${marker}`),
+      );
+      await shared!.admin
+        .unsafe(`alter function public.${name}(uuid,uuid,timestamptz,timestamptz,text)
+        owner to "${shared!.ownerRole.replaceAll('"', '""')}"`);
+      await shared!.admin.unsafe(
+        `revoke all on function public.${name}(uuid,uuid,timestamptz,timestamptz,text) from PUBLIC`,
+      );
+      const reader = postgres(shared!.ownerUrl, {
+        max: 1,
+        connection: { application_name: LOSSLESS_CONTENT_WRITER_APPLICATION_NAME },
+      });
+      const gate = postgres(shared!.ownerUrl, {
+        max: 1,
+        connection: { application_name: LOSSLESS_CONTENT_WRITER_APPLICATION_NAME },
+      });
+      const collect = async (fn: string) =>
+        reader.begin(async (tx) => {
+          await tx`select set_config('opengeni.account_id',${accountId},true),set_config('opengeni.workspace_id',${workspaceId},true)`;
+          await tx`insert into opengeni_private.insights_fact_read_runtime_capabilities
+          (backend_pid,transaction_id,capability_kind,account_id,workspace_id)
+          values(pg_backend_pid(),pg_current_xact_id(),'model_call_facts',${accountId},${workspaceId})`;
+          const [result] = await tx.unsafe(
+            `select sum((m->>'calls')::bigint)::int as calls,
+          sum((m->>'uncachedInput')::bigint)::int as uncached,sum((m->>'tokenKnownCalls')::bigint)::int as known,
+          sum((m->>'listMicros')::bigint)::int as list,sum((m->>'chargedMicros')::bigint)::int as charged,
+          max(recorded_at)::text as recorded from ${fn}($1,$2,'2026-08-20Z','2026-08-23Z'${fn.endsWith("insights_raw_amount_inputs") ? "" : ",'day'"})
+          where model=$3`,
+            [accountId, workspaceId, label],
+          );
+          await tx`delete from opengeni_private.insights_fact_read_runtime_capabilities where backend_pid=pg_backend_pid()`;
+          return result;
+        });
+      try {
+        const before = await collect("opengeni_private.insights_raw_amount_inputs");
+        let observed: ReturnType<typeof collect> | undefined;
+        await gate.begin(async (tx) => {
+          await tx`select pg_advisory_xact_lock(${barrier})`;
+          observed = collect(`public.${name}`);
+          void observed.catch(() => undefined);
+          let waiting = false;
+          for (let n = 0; n < 500; n++) {
+            const [lock] = await shared!
+              .admin`select exists(select 1 from pg_locks where locktype='advisory'
+              and objid=${barrier} and not granted) as waiting`;
+            if (lock!.waiting) {
+              waiting = true;
+              break;
+            }
+            await Bun.sleep(10);
+          }
+          expect(waiting).toBe(true);
+          await scope(async (writer) => {
+            await writer`update model_call_facts set occurred_at='2026-08-21T05:00Z',recorded_at='2026-08-21T11:00Z',
+              estimated_provider_cost_micros=91 where workspace_id=${workspaceId} and turn_id=${turn} and source_key='a'`;
+            await writer`update credit_ledger_entries set amount_micros=-11 where id=${debit}`;
+            if (mutation === "move-delete-insert") {
+              await writer`delete from model_call_facts where workspace_id=${workspaceId} and turn_id=${turn} and source_key='b'`;
+              await writer`insert into model_call_facts(account_id,workspace_id,session_id,turn_id,source_key,provider,provider_api,
+                model,billing_path,estimated_provider_cost_micros,occurred_at,recorded_at)
+                values(${accountId},${workspaceId},${sessionId},${turn},'c','openai','responses',${label},'opengeni_credits',
+                  23,'2026-08-20T06:00Z','2026-08-20T12:00Z')`;
+            }
+          });
+        });
+        const actual = await observed!;
+        const after = await collect("opengeni_private.insights_raw_amount_inputs");
+        console.info("controlled reader snapshot", {
+          frozenHead: "77dad806a",
+          old,
+          mutation,
+          before,
+          actual,
+          after,
+        });
+        if (old) {
+          expect(actual).not.toEqual(before);
+          expect(actual).not.toEqual(after);
+          if (mutation === "move") expect(actual!.calls).toBe(3);
+        } else expect(actual).toEqual(before);
+      } finally {
+        await reader.end();
+        await gate.end();
+        await shared!.admin.unsafe(
+          `drop function public.${name}(uuid,uuid,timestamptz,timestamptz,text)`,
+        );
+      }
+    }
+  }
+  await assertExact();
+}, 180_000);
+
+test("native dirty input batching reduces rows without changing per-fact coverage, UTC buckets or wire output", async () => {
+  const turn = crypto.randomUUID();
+  await scope(async (tx) => {
+    await tx`insert into model_call_facts(account_id,workspace_id,session_id,turn_id,source_key,provider,provider_api,model,
+      billing_path,input_tokens,cached_tokens,cache_write_tokens,output_tokens,reasoning_tokens,total_tokens,
+      estimated_provider_cost_micros,occurred_at,recorded_at)
+      select ${accountId},${workspaceId},${sessionId},${turn},'batch-'||n,'openai','responses','native-input-batch','opengeni_credits',
+        100,case when n%2=0 then 20 end,case when n%3=0 then 10 end,30,0,case when n%5=0 then 130 end,37,
+        '2026-09-20T04:00Z'::timestamptz+n*interval '1 microsecond',
+        '2026-09-20T05:00Z'::timestamptz+n*interval '1 microsecond' from generate_series(1,96)n`;
+    await tx`insert into credit_ledger_entries(account_id,workspace_id,type,amount_micros,source_type,source_id,idempotency_key,occurred_at)
+      select ${accountId},${workspaceId},'model_usage_debit',-7,'model_response',${turn}::text||':batch-'||n,${turn}::text||':batch-'||n,
+        '2026-09-20T06:00Z'::timestamptz+n*interval '1 microsecond' from generate_series(1,96)n`;
+  });
+  const owner = postgres(shared!.ownerUrl, {
+    max: 1,
+    connection: { application_name: LOSSLESS_CONTENT_WRITER_APPLICATION_NAME },
+  });
+  try {
+    await owner.begin(async (tx) => {
+      await tx`select set_config('opengeni.account_id',${accountId},true),set_config('opengeni.workspace_id',${workspaceId},true)`;
+      await tx`insert into opengeni_private.insights_fact_read_runtime_capabilities
+        (backend_pid,transaction_id,capability_kind,account_id,workspace_id)
+        values(pg_backend_pid(),pg_current_xact_id(),'model_call_facts',${accountId},${workspaceId})`;
+      const counts = [];
+      for (const fast of [false, true]) {
+        const [row] = await tx.unsafe(
+          `select count(*)::int as rows,sum((m->>'calls')::bigint)::int as calls,
+          sum((m->>'uncachedInput')::bigint)::int as uncached,max(recorded_at) as recorded,
+          sum((m->>'chargedMicros')::bigint)::int as charged from opengeni_private.${fast ? "insights_rollup_amount_inputs" : "insights_raw_amount_inputs"}
+          ($1,$2,'2026-09-20T03:00Z','2026-09-20T07:00Z'${fast ? ",'day'" : ""}) where model='native-input-batch'`,
+          [accountId, workspaceId],
+        );
+        counts.push(row);
+      }
+      expect(counts[0]!.rows).toBe(192);
+      expect(counts[1]!.rows).toBe(2);
+      expect({ ...counts[0], rows: 0 }).toEqual({ ...counts[1], rows: 0 });
+      console.info("bounded native input batching", {
+        rawRows: counts[0]!.rows,
+        batchedRows: counts[1]!.rows,
+        note: "96-call synthetic fixture; NOT retained-volume HTTP target evidence",
+      });
+      await tx`delete from opengeni_private.insights_fact_read_runtime_capabilities where backend_pid=pg_backend_pid()`;
+    });
+  } finally {
+    await owner.end();
+  }
+  for (const phase of ["pending", "reconciled"]) {
+    if (phase === "reconciled") await assertExact();
+    for (const range of ["today", "week", "month", "30d", "90d", "ytd"] as const) {
+      for (const organization of [false, true]) {
+        for (const groupBy of [
+          "model",
+          "provider",
+          "payer",
+          "project",
+          "rootSession",
+          "person",
+          "schedule",
+          "workspace",
+        ]) {
+          if (!organization && groupBy === "workspace") continue;
+          for (const details of [false, true]) {
+            const input = {
+              accountId,
+              workspaceId: organization ? null : workspaceId,
+              now: new Date("2026-09-20T12:00Z"),
+              query: InsightsUsageQuery.parse({
+                range,
+                groupBy,
+                seriesGroups: true,
+                limit: 2,
+                model: ["openai/native-input-batch"],
+              }),
+              detailsWorkspaceIds: details ? [workspaceId] : [],
+            };
+            await withSessionRlsActorContext({ subjectId }, async () => {
+              expect(await readInsightsUsage(client.db, input)).toEqual(
+                await readInsightsUsage(rawOracleDatabase(client.db), input),
+              );
+            });
+          }
+        }
+      }
+    }
+  }
+}, 180_000);
+
 test("racing independent ledger/fact inserts converge without fabricated attribution", async () => {
   await Promise.all(
     Array.from({ length: 16 }, (_, n) => {

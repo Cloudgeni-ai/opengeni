@@ -852,8 +852,18 @@ describe("runtime database posture evaluator", () => {
         execute: true,
         publicExecute: false,
         securityDefiner: name.startsWith("maintain_") || name.startsWith("allocate_"),
+        volatility: name.startsWith("insights_rollup_amount_inputs(") ? "s" : "v",
         configuration: ["search_path=pg_catalog, public, opengeni_private, pg_temp"],
       });
+    expect(evaluateRuntimeDatabasePosture(posture, options)).toEqual([]);
+    const input = posture.privateRoutines.find((routine) =>
+      routine.name.startsWith("insights_rollup_amount_inputs("),
+    )!;
+    input.volatility = "v";
+    expect(evaluateRuntimeDatabasePosture(posture, options)).toContain(
+      "Insights rollup routine insights_rollup_amount_inputs(uuid, uuid, timestamp with time zone, timestamp with time zone, text) is missing or unsafe",
+    );
+    input.volatility = "s";
     expect(evaluateRuntimeDatabasePosture(posture, options)).toEqual([]);
     posture.privateTables.find((table) => table.name === "insights_model_daily")!.update = true;
     posture.privateRoutines.find((routine) =>

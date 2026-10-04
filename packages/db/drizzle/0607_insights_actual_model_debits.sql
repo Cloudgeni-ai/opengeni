@@ -229,7 +229,10 @@ BEGIN
     CREATE FUNCTION opengeni_private.insights_rollup_amount_inputs(a uuid,w uuid,lo timestamptz,hi timestamptz,granularity text)
     RETURNS TABLE(session_id uuid,provider text,model text,payer text,scheduled_task_id uuid,
       occurred_at timestamptz,recorded_at timestamptz,m jsonb,charge_row boolean)
-    LANGUAGE plpgsql VOLATILE SET search_path=pg_catalog,%1$I,opengeni_private,pg_temp AS $fn$
+    -- STABLE pins dirty selection, cached rows, every raw range and ledger
+    -- attribution to the calling SELECT snapshot. No source/cache/capability
+    -- writes occur here; the approved outer reader establishes authority first.
+    LANGUAGE plpgsql STABLE SET search_path=pg_catalog,%1$I,opengeni_private,pg_temp AS $fn$
     DECLARE first_day timestamptz;last_day timestamptz;edge record;model_granularity text;dirty_model_days date[];
     BEGIN
       IF current_user IS DISTINCT FROM pg_get_userbyid((SELECT relowner FROM pg_class WHERE oid='%1$I.model_call_facts'::regclass)) THEN
@@ -266,18 +269,47 @@ BEGIN
       FOR edge IN SELECT * FROM opengeni_private.insights_rollup_edge_ranges(lo,hi,model_granularity)
         UNION ALL SELECT day::timestamp AT TIME ZONE 'UTC',(day+1)::timestamp AT TIME ZONE 'UTC'
           FROM unnest(dirty_model_days) day WHERE model_granularity='day' LOOP
+        -- Privacy depends on live session/root metadata, not individual model
+        -- calls. Sum only the existing public grain within each UTC bucket,
+        -- BEFORE the unchanged projector materializes JSON and joins metadata.
+        -- Native sums avoid constructing two large JSON objects for every call.
+        -- Knownness and uncached input are still computed PER FACT; never infer
+        -- unknown counters by subtracting aggregates with unequal coverage.
         RETURN QUERY SELECT f.session_id,f.provider,f.model,
-          opengeni_private.insights_usage_payer(f.provider,f.billing_path),f.scheduled_task_id,f.occurred_at,f.recorded_at,
-          opengeni_private.insights_rollup_public_measures(opengeni_private.insights_fact_measures(to_jsonb(f))),false
+          opengeni_private.insights_usage_payer(f.provider,f.billing_path),f.scheduled_task_id,
+          min(f.occurred_at),max(f.recorded_at),jsonb_build_object(
+            'calls',count(*),'tokenKnownCalls',count(f.total_tokens),
+            'cacheKnownCalls',count(*) FILTER(WHERE f.input_tokens IS NOT NULL AND f.cached_tokens IS NOT NULL),
+            'cacheWriteKnownCalls',count(f.cache_write_tokens),'listClassKnownCalls',count(f.list_uncached_input_cost_micros),
+            'uncachedInput',coalesce(sum(CASE WHEN f.input_tokens IS NOT NULL AND f.cached_tokens IS NOT NULL
+              AND f.cache_write_tokens IS NOT NULL AND f.input_tokens>=0 AND f.cached_tokens>=0 AND f.cache_write_tokens>=0
+              AND f.cached_tokens::numeric+f.cache_write_tokens::numeric<=f.input_tokens::numeric
+              THEN f.input_tokens-f.cached_tokens-f.cache_write_tokens ELSE 0 END),0),
+            'cacheRead',coalesce(sum(f.cached_tokens),0),'cacheWrite',coalesce(sum(f.cache_write_tokens),0),
+            'output',coalesce(sum(f.output_tokens),0),'reasoning',coalesce(sum(f.reasoning_tokens),0),
+            'chargedMicros',0,'listMicros',coalesce(sum(f.estimated_provider_cost_micros),0),
+            'pricedCalls',count(f.estimated_provider_cost_micros),
+            'listApproxCalls',count(*) FILTER(WHERE f.list_cost_is_approx),
+            'listUncachedInput',coalesce(sum(f.list_uncached_input_cost_micros),0),
+            'listCacheRead',coalesce(sum(f.list_cache_read_cost_micros),0),
+            'listCacheWrite',coalesce(sum(f.list_cache_write_cost_micros),0),
+            'listOutput',coalesce(sum(f.list_output_cost_micros),0)),false
           FROM %1$I.model_call_facts f WHERE f.account_id=a AND f.workspace_id=w
-            AND f.occurred_at>=edge.since AND f.occurred_at<edge.until;
+            AND f.occurred_at>=edge.since AND f.occurred_at<edge.until
+          GROUP BY f.session_id,f.provider,f.model,opengeni_private.insights_usage_payer(f.provider,f.billing_path),
+            f.scheduled_task_id,date_trunc(granularity,f.occurred_at AT TIME ZONE 'UTC');
       END LOOP;
+      -- Ledger periods stay independent of fact periods. Collapse only equal
+      -- public dimensions and UTC buckets AFTER current fact attribution,
+      -- including orphan/restricted money with zero calls. Never reprice money.
       RETURN QUERY SELECT (c.dimensions->>'session_id')::uuid,c.dimensions->>'provider',c.dimensions->>'model',
-        'opengeni_credits',(c.dimensions->>'scheduled_task_id')::uuid,c.occurred_at,null::timestamptz,
+        'opengeni_credits',(c.dimensions->>'scheduled_task_id')::uuid,min(c.occurred_at),null::timestamptz,
         jsonb_build_object('calls',0,'tokenKnownCalls',0,'cacheKnownCalls',0,'cacheWriteKnownCalls',0,'listClassKnownCalls',0,
-          'uncachedInput',0,'cacheRead',0,'cacheWrite',0,'output',0,'reasoning',0,'chargedMicros',c.quantity,
+          'uncachedInput',0,'cacheRead',0,'cacheWrite',0,'output',0,'reasoning',0,'chargedMicros',sum(c.quantity),
           'listMicros',0,'pricedCalls',0,'listApproxCalls',0,'listUncachedInput',0,'listCacheRead',0,'listCacheWrite',0,'listOutput',0),true
-        FROM opengeni_private.insights_charge_window(a,w,lo,hi,granularity)c;
+        FROM opengeni_private.insights_charge_window(a,w,lo,hi,granularity)c
+        GROUP BY c.dimensions->>'session_id',c.dimensions->>'provider',c.dimensions->>'model',
+          c.dimensions->>'scheduled_task_id',date_trunc(granularity,c.occurred_at AT TIME ZONE 'UTC');
     END
     $fn$;
   $ddl$,current_schema());

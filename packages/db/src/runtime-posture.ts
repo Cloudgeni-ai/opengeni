@@ -1793,6 +1793,7 @@ export type RuntimeRoutinePosture = {
   execute: boolean;
   publicExecute?: boolean;
   securityDefiner: boolean;
+  volatility?: string;
   configuration?: string[] | null;
 };
 
@@ -2263,6 +2264,7 @@ export async function inspectRuntimeDatabasePosture(
         can_execute: boolean;
         public_execute: boolean;
         security_definer: boolean;
+        volatility: string;
         configuration: string[] | null;
       }>(
         await tx.execute(sql`
@@ -2276,6 +2278,7 @@ export async function inspectRuntimeDatabasePosture(
               where acl.grantee = 0 and acl.privilege_type = 'EXECUTE'
             ) as public_execute,
             p.prosecdef as security_definer,
+            p.provolatile::text as volatility,
             p.proconfig as configuration
           from pg_proc p
           join pg_namespace n on n.oid = p.pronamespace
@@ -2289,6 +2292,7 @@ export async function inspectRuntimeDatabasePosture(
         execute: row.can_execute,
         publicExecute: row.public_execute,
         securityDefiner: row.security_definer,
+        volatility: row.volatility,
         configuration: row.configuration,
       }));
 
@@ -4270,6 +4274,7 @@ export function evaluateRuntimeDatabasePosture(
         routine.owner !== modelCallFactsOwner ||
         routine.securityDefiner !==
           (name.startsWith("maintain_") || name.startsWith("allocate_")) ||
+        (name.startsWith("insights_rollup_amount_inputs(") && routine.volatility !== "s") ||
         !routine.configuration?.some((value) => paths.includes(value))
       ) {
         violations.push(`Insights rollup routine ${name} is missing or unsafe`);
