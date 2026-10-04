@@ -137,6 +137,23 @@ export class CodemodeOperationError extends Error {
   ) {
     super(operation.errorMessage ?? `Codemode operation ${operation.state}`);
     this.name = "CodemodeOperationError";
+    // Preserve the public operation property without dumping protected arguments into error logs.
+    Object.defineProperty(this, "operation", { value: operation, enumerable: false });
+  }
+}
+
+/** Compact receipt: payloads remain in the protected operation journal. */
+export class CodemodeApprovalPendingError extends Error {
+  readonly code = "codemode_approval_pending";
+  readonly state = "waiting_for_approval";
+  constructor(
+    readonly operationId: string,
+    readonly approvalRequestId: string | undefined,
+  ) {
+    super(
+      `Operation ${operationId} is waiting for approval. After review, read or resume this handle; do not submit its arguments again.`,
+    );
+    this.name = "CodemodeApprovalPendingError";
   }
 }
 
@@ -334,6 +351,9 @@ export class CodemodeClient {
       } else {
         operation = await this.read(operationId, options.signal);
       }
+      if (operation.state === "waiting_for_approval") {
+        throw new CodemodeApprovalPendingError(operation.operationId, operation.approvalRequestId);
+      }
       if (operation.state === "completed") {
         return { result: AttemptToolResult.parse(operation.result), entry };
       }
@@ -413,9 +433,49 @@ export class CodemodeClient {
         catalogDigest,
         identity,
         arguments: argumentsValue,
+        durableApproval: true,
       }),
     });
     return CodemodeCallSubmission.parse(await response.json()).operation;
+  }
+
+  /** Observe a durable handle using the current attempt, without resubmitting its payload. */
+  async status(operationId: string, signal?: AbortSignal) {
+    const operation = await this.read(operationId, signal);
+    return {
+      operationId: operation.operationId,
+      state: operation.state,
+      approvalRequestId: operation.approvalRequestId,
+      result: operation.result,
+      errorCode: operation.errorCode,
+      errorMessage: operation.errorMessage,
+    };
+  }
+
+  /** Observe continuation after review. Human approval wakes the worker; this never grants permission. */
+  async resume(
+    operationId: string,
+    options: Omit<CodemodeCallOptions, "operationId"> = {},
+  ): Promise<AttemptToolResultValue> {
+    const deadline =
+      Date.now() + boundedPositiveInteger(options.timeoutMs ?? this.timeoutMs, 1_000, 60 * 60_000);
+    while (true) {
+      throwIfAborted(options.signal);
+      const operation = await this.read(operationId, options.signal);
+      if (operation.state === "waiting_for_approval")
+        throw new CodemodeApprovalPendingError(operation.operationId, operation.approvalRequestId);
+      if (operation.state === "completed") return AttemptToolResult.parse(operation.result);
+      if (["failed", "outcome_unknown", "cancelled"].includes(operation.state))
+        throw new CodemodeOperationError(
+          operation,
+          operation.errorCode ?? `codemode_${operation.state}`,
+        );
+      if (Date.now() >= deadline)
+        throw new CodemodeTransportError(
+          `Codemode operation ${operationId} did not settle before the client deadline`,
+        );
+      await abortableDelay(this.pollIntervalMs, options.signal);
+    }
   }
 
   private async read(operationId: string, signal?: AbortSignal): Promise<CodemodeOperationValue> {
@@ -442,6 +502,7 @@ export class CodemodeClient {
       headers: {
         ...Object.fromEntries(new Headers(init.headers).entries()),
         authorization: `Bearer ${token}`,
+        "x-opengeni-codemode-capabilities": "durable-approval-v1",
       },
     });
     if (!response.ok && throwOnError) {
@@ -560,6 +621,10 @@ export class AttemptToolEnvironment {
   ): Promise<PreparedToolGatewayCall> {
     const call = AttemptToolCall.parse(input);
     return await this.gateway.prepareCall(call, context);
+  }
+
+  effectDigest(identity: AttemptToolIdentity): string {
+    return this.gateway.effectDigest(identity);
   }
 
   async callModel(input: ModelAttemptToolCall): Promise<AttemptToolResultValue> {
@@ -776,3 +841,5 @@ export * from "./artifacts";
 export * from "./structured";
 export * from "./declarations";
 export * from "./site";
+
+export * from "./pagination";

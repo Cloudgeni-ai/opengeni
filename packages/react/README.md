@@ -1383,3 +1383,26 @@ Copy and the timestamp for user messages and completed assistant messages.
 The host owns feedback, fork authorization, and mutations; streaming assistant
 messages omit this slot. Use the `group/copy` hover/focus state and preserve
 visible touch targets when styling actions.
+
+### Portable action reviews
+
+`ApprovalSurface` accepts `loadReview(approval)` and `onViewDetails(review, path)`;
+load the versioned facts with `client.getToolActionReview`. It shows one selected
+action, counts and bounded fields instead of raw argument JSON. Keep
+`selectedApprovalId` and `onSelectedApprovalChange` in the host if a full-page
+detail route unmounts the surface, so returning cannot silently select a different
+action. The native `onApprove` / `onReject` identity is unchanged and duplicate
+submission is fenced until authoritative events remove the request.
+
+Render `ToolActionReviewDetails` on the host's normal page with
+`client.getToolReviewDetails`, passing the review's `actionDigest`, path and offset.
+Details are immutable, authenticated, paginated, and redact protected values.
+Restore focus to the original `data-review-path` button on return. No web-app
+imports, iframe, second confirmation, or nested scrolling pane is required.
+The standalone fallback retains bounded details for older SDK approvals.
+
+Wrap `MessageTimeline` in `ToolReviewHistoryProvider` with its visible events,
+authenticated `load(approvalId)` callback and `onViewDetails` to keep recorded
+reviews readable inside the corresponding tool activity. Historical receipts
+never render decision buttons. The same semantic tokens support light/dark
+embeds; `demo/approval-review.html` is the synthetic state gallery.

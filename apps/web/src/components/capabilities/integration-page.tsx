@@ -9,6 +9,7 @@ import {
   TechnicalDetails,
 } from "@/components/capabilities/capability-page";
 import { integrationDisclosureElementId } from "@/components/capabilities/integration-sheet";
+import { ConnectorToolPermissions } from "./connector-tool-permissions";
 import {
   INTEGRATION_LOCKED_SENTENCE,
   type IntegrationAccess,
@@ -160,6 +161,14 @@ export function IntegrationPage({
       ) : null}
 
       {model.access ? <AccessSection access={model.access} /> : null}
+      {model.toolPermissions ? (
+        <DetailSection
+          title="Approvals"
+          description="Choose which actions run automatically and which need your review."
+        >
+          <ConnectorToolPermissions {...model.toolPermissions} bare />
+        </DetailSection>
+      ) : null}
 
       {model.options.length > 0 ? (
         <DetailSection title="Settings">

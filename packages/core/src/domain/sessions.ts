@@ -142,7 +142,7 @@ import {
   listDistinctRigVersionIdsInGroup,
   listInstalledPortableSkills,
   listEnabledMcpCapabilityServers,
-  requireApprovalWithFloor,
+  resolveMcpApprovalRecommendation,
   getSandbox,
   getSession,
   getInitializedSessionCreateReplay,
@@ -2819,7 +2819,7 @@ async function createSessionForRequestInFileScope(
         });
       }
       mcpApprovalPolicies[id] =
-        requireApprovalWithFloor(policy, inherited.approvalFloor, true) ?? false;
+        resolveMcpApprovalRecommendation(policy, inherited.approvalFloor) ?? false;
     }
   }
   const resources = normalizeResources(

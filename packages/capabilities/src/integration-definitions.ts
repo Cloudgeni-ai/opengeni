@@ -45,23 +45,20 @@ export interface IntegrationDefinition {
   }>;
   readonly facets: readonly IntegrationFacetDefinition[];
   /**
-   * Reviewed governance for `autoApprovedTools`. Absent means an installer
-   * with `capabilities:manage` may exempt any selected "ask" operation, exactly
-   * like a custom Integration. A definition lists operation keys (or "all")
-   * whose per-call human approval must never be removed.
+   * @deprecated Retained for source compatibility. Provider recommendations
+   * never prevent an authorized user from choosing Allow, Ask, or Block.
    */
   readonly autoApproval?: Readonly<{
     forbiddenOperationKeys: readonly string[] | "all";
   }>;
 }
 
-/** Operation keys of a curated definition whose approval cannot be exempted. */
+/** @deprecated Compatibility adapter. User choices are always overridable. */
 export function autoApprovalForbidden(
-  definition: IntegrationDefinition | undefined,
-  operationKey: string,
+  _definition: IntegrationDefinition | undefined,
+  _operationKey: string,
 ): boolean {
-  const forbidden = definition?.autoApproval?.forbiddenOperationKeys;
-  return forbidden === "all" || (forbidden?.includes(operationKey) ?? false);
+  return false;
 }
 
 export interface IntegrationFacetDefinition {

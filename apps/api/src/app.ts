@@ -58,6 +58,7 @@ import {
   CodemodeOperationConflictError,
   CodemodeOperationNotExecutableError,
   CodemodePayloadTooLargeError,
+  CodemodeOperationLimitError,
   CodemodeToolApprovalRequiredError,
   CodemodeToolNotInCatalogError,
   ConnectAttemptConflictError,
@@ -1752,7 +1753,9 @@ export function createAppComposition(deps: AppDependencies): {
       throw new HTTPException(403, { message: "Codemode access denied" });
     }
     try {
-      const operation = await readCodemodeOperation(routeDeps, grant, c.req.param("operationId"));
+      const operation = await readCodemodeOperation(routeDeps, grant, c.req.param("operationId"), {
+        durableApproval: c.req.header("x-opengeni-codemode-capabilities") === "durable-approval-v1",
+      });
       if (!operation)
         throw new HTTPException(404, {
           message: "Codemode operation not found",
@@ -2261,6 +2264,9 @@ function codemodeHttpError(error: unknown): HTTPException {
   }
   if (error instanceof CodemodePayloadTooLargeError) {
     return new HTTPException(413, { message: error.message, cause: error });
+  }
+  if (error instanceof CodemodeOperationLimitError) {
+    return new HTTPException(429, { message: error.message, cause: error });
   }
   return error instanceof HTTPException
     ? error

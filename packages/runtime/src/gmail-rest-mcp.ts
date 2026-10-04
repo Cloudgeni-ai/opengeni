@@ -40,7 +40,6 @@ const MUTATION_TOOLS = new Set([
   "unlabel_message",
   "unlabel_thread",
 ]);
-const SENSITIVE_ADD_LABELS = new Set(["TRASH", "SPAM"]);
 
 type ResolveCredentialResult =
   | {
@@ -211,7 +210,7 @@ export const GMAIL_REST_MCP_TOOLS: GmailTool[] = [
   {
     name: "send_message",
     description:
-      "Sends a new email immediately from the connected Gmail account. Requires human approval before it runs; there is no way to un-send.",
+      "Sends a new email immediately from the connected Gmail account. Uses the selected approval setting; sending cannot be undone.",
     inputSchema: {
       type: "object",
       required: ["to"],
@@ -243,7 +242,7 @@ export const GMAIL_REST_MCP_TOOLS: GmailTool[] = [
   {
     name: "send_draft",
     description:
-      "Sends an existing Gmail draft as-is. Requires human approval before it runs; there is no way to un-send. Use get_message on the draft's message ID to review its content first.",
+      "Sends an existing Gmail draft as-is. Uses the selected approval setting; sending cannot be undone. Use get_message on the draft's message ID to review its content first.",
     inputSchema: {
       type: "object",
       required: ["draftId"],
@@ -293,7 +292,8 @@ export const GMAIL_REST_MCP_TOOLS: GmailTool[] = [
   },
   {
     name: "search_threads",
-    description: "Searches Gmail threads using Gmail query syntax.",
+    description:
+      "Searches Gmail threads using Gmail query syntax. IDS_ONLY returns thread IDs with one request per page and no message reads.",
     inputSchema: {
       type: "object",
       required: [],
@@ -305,14 +305,19 @@ export const GMAIL_REST_MCP_TOOLS: GmailTool[] = [
         includeTrash: { type: "boolean" },
         view: {
           type: "string",
-          enum: ["THREAD_VIEW_UNSPECIFIED", "THREAD_VIEW_METADATA_ONLY", "THREAD_VIEW_MINIMAL"],
+          enum: [
+            "THREAD_VIEW_UNSPECIFIED",
+            "THREAD_VIEW_METADATA_ONLY",
+            "THREAD_VIEW_MINIMAL",
+            "IDS_ONLY",
+          ],
         },
       },
     },
   },
   {
     name: "label_thread",
-    description: "Adds non-sensitive labels to a Gmail thread.",
+    description: "Adds labels to a Gmail thread.",
     inputSchema: {
       type: "object",
       required: ["threadId", "labelIds"],
@@ -345,7 +350,7 @@ export const GMAIL_REST_MCP_TOOLS: GmailTool[] = [
   },
   {
     name: "label_message",
-    description: "Adds non-sensitive labels to a Gmail message.",
+    description: "Adds labels to a Gmail message.",
     inputSchema: {
       type: "object",
       required: ["messageId", "labelIds"],
@@ -393,7 +398,7 @@ for (const tool of GMAIL_REST_MCP_TOOLS) {
     };
     schema.required.push("expectedContentSha256");
     tool.description =
-      "Sends the exact reviewed draft bytes. Obtain contentSha256 from get_draft; changed draft content is rejected before submission. Requires human approval.";
+      "Sends the exact reviewed draft bytes. Obtain contentSha256 from get_draft; changed draft content is rejected before submission. Uses the selected approval setting.";
   }
   if (tool.name === "list_labels") {
     schema.properties.includeSystem = {
@@ -404,8 +409,30 @@ for (const tool of GMAIL_REST_MCP_TOOLS) {
   }
   tool.annotations = {
     readOnlyHint: !MUTATION_TOOLS.has(tool.name),
-    destructiveHint: MUTATION_TOOLS.has(tool.name),
-    idempotentHint: !MUTATION_TOOLS.has(tool.name),
+    // These are provider-effect hints, never permission decisions or replay authorization.
+    destructiveHint:
+      MUTATION_TOOLS.has(tool.name) &&
+      !["create_draft", "create_label", "import_message", "insert_message"].includes(tool.name),
+    idempotentHint:
+      !MUTATION_TOOLS.has(tool.name) ||
+      [
+        "update_draft",
+        "delete_draft",
+        "update_label",
+        "delete_label",
+        "modify_message",
+        "modify_thread",
+        "batch_modify_messages",
+        "trash_message",
+        "restore_message",
+        "trash_thread",
+        "restore_thread",
+        "label_message",
+        "label_thread",
+        "unlabel_message",
+        "unlabel_thread",
+        "stop_watch",
+      ].includes(tool.name),
     openWorldHint: true,
   };
 }
@@ -459,6 +486,104 @@ export class GmailRestMcpServer implements LocalMcpBridgeServer {
     return structuredClone(GMAIL_REST_MCP_TOOLS);
   }
 
+  async reviewContext(
+    toolName: string,
+    args: Record<string, unknown>,
+  ): Promise<Partial<import("@opengeni/contracts").ToolReviewContext>> {
+    if (["send_draft", "send_message", "create_draft", "update_draft"].includes(toolName)) {
+      const raw =
+        toolName === "send_draft"
+          ? await this.readDraftRaw(requiredId(args.draftId, "draftId"), toolName)
+          : await this.composeMime(args, await this.readReply(args, toolName), toolName);
+      if (toolName === "send_draft") assertContentHash(raw, args.expectedContentSha256);
+      const parsed = await PostalMime.parse(raw, {
+        maxHeadersSize: 128 * 1024,
+        maxNestingDepth: 128,
+      });
+      if (
+        (parsed.text?.length ?? 0) > MAX_BODY_CHARS ||
+        (parsed.html?.length ?? 0) > MAX_BODY_CHARS ||
+        parsed.attachments.length > 100
+      )
+        throw new GmailRestInputError("Email exceeds the review size limit");
+      const headers = headerMap(
+        parsed.headers.map((header) => ({ name: header.originalKey, value: header.value })),
+      );
+      const clean = (value: string) =>
+        value.replaceAll("\u0000", "").replace(/\p{Surrogate}/gu, "�");
+      return {
+        protectedFields: ["raw"],
+        email: {
+          from: clean(headers.from ?? ""),
+          to: clean(headers.to ?? ""),
+          cc: clean(headers.cc ?? ""),
+          bcc: clean(headers.bcc ?? ""),
+          subject: clean(parsed.subject ?? ""),
+          textBody: clean(parsed.text ?? ""),
+          htmlBody: clean(parsed.html ?? ""),
+          contentSha256: sha256(raw),
+          attachments: parsed.attachments.map((attachment) => ({
+            name: clean(attachment.filename ?? "(Unnamed attachment)"),
+            mediaType: attachment.mimeType,
+            bytes:
+              typeof attachment.content === "string"
+                ? Buffer.byteLength(attachment.content)
+                : attachment.content.byteLength,
+          })),
+        },
+      };
+    }
+    if (
+      !["batch_modify_messages", "modify_message", "trash_message", "restore_message"].includes(
+        toolName,
+      )
+    )
+      return {};
+    const ids = Array.isArray(args.messageIds)
+      ? args.messageIds
+      : args.messageId
+        ? [args.messageId]
+        : [];
+    const selected = [...new Set(ids.filter((id): id is string => typeof id === "string"))].slice(
+      0,
+      3,
+    );
+    const clean = (value: string) =>
+      value
+        .replaceAll("\u0000", "")
+        .replace(/\p{Surrogate}/gu, "�")
+        .slice(0, 256);
+    const samples = await Promise.all(
+      selected.map(async (id) => {
+        const url = new URL(
+          `${GMAIL_REST_API_BASE}/messages/${encodeURIComponent(requiredId(id, "messageId"))}`,
+        );
+        url.searchParams.set("format", "metadata");
+        url.searchParams.set("fields", "id,payload(headers)");
+        for (const name of ["Subject", "From"]) url.searchParams.append("metadataHeaders", name);
+        let message: GmailMessage;
+        try {
+          message = await this.request<GmailMessage>("get_message", url, {}, true);
+        } catch (error) {
+          if (error instanceof GmailRestProviderError && error.status === 404) return null;
+          throw error;
+        }
+        if (message.id !== id)
+          throw new GmailRestProviderError(
+            "Gmail review metadata did not match the selected message",
+          );
+        const headers = headerMap(message.payload?.headers);
+        return {
+          id,
+          title: clean(headers.subject ? decodeWords(headers.subject) : "(No subject)"),
+          ...(headers.from ? { subtitle: clean(headers.from) } : {}),
+          provenance: "provider_metadata" as const,
+        };
+      }),
+    );
+    return { samples: samples.filter((sample) => sample !== null) };
+  }
+
   async callTool(toolName: string, args: Record<string, unknown> | null): Promise<any> {
     return (await this.callToolResult(toolName, args)).content;
   }
@@ -494,7 +619,28 @@ export class GmailRestMcpServer implements LocalMcpBridgeServer {
       return {
         isError: true,
         content: [{ type: "text", text: safeErrorMessage(error) }],
-        structuredContent: { error: { connectorActionOutcome: "not_executed" } },
+        structuredContent: {
+          error: {
+            connectorActionOutcome: "not_executed",
+            outcomeUnknown: false,
+            ...(error instanceof GmailRestProviderError
+              ? {
+                  status: error.status ?? null,
+                  code: error.code,
+                  retryable: error.retryable,
+                  ...(error.retryAfterMs === undefined ? {} : { retryAfterMs: error.retryAfterMs }),
+                }
+              : {
+                  code:
+                    error instanceof GmailRestAuthError
+                      ? "authentication_required"
+                      : error instanceof GmailRestInputError
+                        ? "invalid_input"
+                        : "tool_failed",
+                  retryable: false,
+                }),
+          },
+        },
       };
     }
   }
@@ -618,7 +764,8 @@ export class GmailRestMcpServer implements LocalMcpBridgeServer {
 
   private async searchThreads(args: Record<string, unknown>): Promise<unknown> {
     const pageSize = boundedPageSize(args.pageSize);
-    const view = threadView(args.view);
+    const idsOnly = args.view === "IDS_ONLY";
+    const view = idsOnly ? "minimal" : threadView(args.view);
     const url = new URL(`${GMAIL_REST_API_BASE}/threads`);
     url.searchParams.set("maxResults", String(pageSize));
     const query = optionalString(args.query, "query", 4_096);
@@ -626,11 +773,21 @@ export class GmailRestMcpServer implements LocalMcpBridgeServer {
     const pageToken = optionalString(args.pageToken, "pageToken", 4_096);
     if (pageToken) url.searchParams.set("pageToken", pageToken);
     if (args.includeTrash === true) url.searchParams.set("includeSpamTrash", "true");
+    if (idsOnly) url.searchParams.set("fields", "threads(id),nextPageToken,resultSizeEstimate");
     const listed = await this.request<{
       threads?: Array<{ id?: string; snippet?: string; historyId?: string }>;
       nextPageToken?: string;
       resultSizeEstimate?: number;
     }>("search_threads", url, {}, true);
+    if (idsOnly)
+      return {
+        threads: (listed.threads ?? []).map((thread) => ({
+          id: requiredId(thread.id, "provider thread ID"),
+        })),
+        ...(listed.nextPageToken ? { nextPageToken: listed.nextPageToken } : {}),
+        resultCountEstimate:
+          listed.resultSizeEstimate === undefined ? null : String(listed.resultSizeEstimate),
+      };
     const threads = await boundedMap(listed.threads ?? [], 5, async (thread) => {
       if (!thread.id) return null;
       const detailUrl = new URL(`${GMAIL_REST_API_BASE}/threads/${encodeURIComponent(thread.id)}`);
@@ -816,9 +973,6 @@ export class GmailRestMcpServer implements LocalMcpBridgeServer {
     const idKey = thread ? "threadId" : "messageId";
     const id = requiredId(args[idKey], idKey);
     const labelIds = requiredStringArray(args.labelIds, "labelIds", 100, 256);
-    if (add && labelIds.some((label) => SENSITIVE_ADD_LABELS.has(label.toUpperCase()))) {
-      throw new GmailRestInputError("TRASH and SPAM cannot be added by this reviewed tool");
-    }
     const toolName = `${add ? "label" : "unlabel"}_${thread ? "thread" : "message"}`;
     const output = await this.request<GmailMessage>(
       toolName,
@@ -861,17 +1015,37 @@ export class GmailRestMcpServer implements LocalMcpBridgeServer {
         url.searchParams.append("labelIds", id);
       if (booleanArg(args.includeSpamTrash, "includeSpamTrash"))
         url.searchParams.set("includeSpamTrash", "true");
+      const idsOnly = args.messageFormat === "IDS_ONLY";
+      if (idsOnly)
+        url.searchParams.set("fields", "messages(id,threadId),nextPageToken,resultSizeEstimate");
       const listed = await this.request<{
         messages?: GmailMessage[];
         nextPageToken?: string;
         resultSizeEstimate?: number;
       }>(tool, url, { signal: signal ?? null }, true);
+      if (idsOnly)
+        return {
+          messages: (listed.messages ?? []).map((message) => ({
+            id: requiredId(message.id, "provider message ID"),
+            ...(message.threadId ? { threadId: message.threadId } : {}),
+          })),
+          ...(listed.nextPageToken ? { nextPageToken: listed.nextPageToken } : {}),
+          resultCountEstimate: listed.resultSizeEstimate ?? null,
+        };
       const view = args.messageFormat === undefined ? "minimal" : messageView(args.messageFormat);
       const messages = await boundedMap(listed.messages ?? [], 5, async (message) => {
         const detailUrl = urlFor(
           `messages/${encodeURIComponent(requiredId(message.id, "provider message ID"))}`,
         );
         detailUrl.searchParams.set("format", view === "full" ? "full" : "metadata");
+        if (view !== "full") {
+          for (const header of MESSAGE_HEADERS)
+            detailUrl.searchParams.append("metadataHeaders", header);
+          detailUrl.searchParams.set(
+            "fields",
+            "id,threadId,labelIds,snippet,internalDate,sizeEstimate,historyId,payload(headers)",
+          );
+        }
         const detail = await this.request<GmailMessage>(
           tool,
           detailUrl,
@@ -1005,7 +1179,7 @@ export class GmailRestMcpServer implements LocalMcpBridgeServer {
       const body: Record<string, unknown> = labelChanges(args);
       let path: string;
       if (tool === "batch_modify_messages") {
-        body.ids = requiredStringArray(args.messageIds, "messageIds", 1000, 256);
+        body.ids = [...new Set(requiredStringArray(args.messageIds, "messageIds", 1000, 256))];
         path = "messages/batchModify";
       } else {
         const thread = tool === "modify_thread";
@@ -1016,7 +1190,15 @@ export class GmailRestMcpServer implements LocalMcpBridgeServer {
         path = `${thread ? "threads" : "messages"}/${encodeURIComponent(id)}/modify`;
       }
       const result = await this.request(tool, urlFor(path), json(body), false);
-      return tool === "batch_modify_messages" ? { messageIds: body.ids, modified: true } : result;
+      return tool === "batch_modify_messages"
+        ? {
+            status: "acknowledged",
+            submittedCount: (body.ids as string[]).length,
+            reconciliation: "not_checked",
+            message:
+              "Gmail accepted changes for this batch. Individual message state has not been checked.",
+          }
+        : result;
     }
     if (/^(?:trash|restore)_(?:message|thread)$/u.test(tool)) {
       const thread = tool.endsWith("_thread");
@@ -1563,6 +1745,8 @@ export class GmailRestMcpServer implements LocalMcpBridgeServer {
       throw new GmailRestProviderError(
         gmailProviderError(response.status, payload),
         response.status,
+        gmailProviderReason(payload),
+        gmailRetryAfter(response.headers.get("retry-after")),
       );
     }
     return payload as T;
@@ -2059,8 +2243,8 @@ function labelChanges(args: Record<string, unknown>): {
     removeLabelIds = optionalStrings(args.removeLabelIds, "removeLabelIds");
   if (!addLabelIds.length && !removeLabelIds.length)
     throw new GmailRestInputError("Supply addLabelIds or removeLabelIds");
-  if ([...addLabelIds, ...removeLabelIds].includes("TRASH"))
-    throw new GmailRestInputError("Use the dedicated trash/restore tool for Trash");
+  // Google permits manually applying TRASH and SPAM. Approval is resolved by
+  // the shared policy, never a second provider-adapter permission layer.
   if (addLabelIds.some((id) => removeLabelIds.includes(id)))
     throw new GmailRestInputError("A label cannot be both added and removed");
   return { addLabelIds, removeLabelIds };
@@ -2137,18 +2321,58 @@ function headersRecord(value: HeadersInit | undefined): Record<string, string> {
   return out;
 }
 
+const GMAIL_PROVIDER_REASONS = new Set([
+  "rateLimitExceeded",
+  "userRateLimitExceeded",
+  "quotaExceeded",
+  "dailyLimitExceeded",
+  "backendError",
+  "internalError",
+  "insufficientPermissions",
+  "domainPolicy",
+  "authError",
+  "notFound",
+  "invalidArgument",
+  "failedPrecondition",
+]);
+function gmailProviderReason(payload: unknown): string | undefined {
+  if (!payload || typeof payload !== "object") return undefined;
+  const errors = (payload as { error?: { errors?: Array<{ reason?: unknown }> } }).error?.errors;
+  const reason = Array.isArray(errors)
+    ? errors.find(
+        (item) => typeof item?.reason === "string" && GMAIL_PROVIDER_REASONS.has(item.reason),
+      )?.reason
+    : undefined;
+  return typeof reason === "string" ? reason : undefined;
+}
+function gmailRetryAfter(value: string | null): number | undefined {
+  if (!value) return undefined;
+  const milliseconds = /^\d+$/.test(value) ? Number(value) * 1000 : Date.parse(value) - Date.now();
+  return Number.isFinite(milliseconds) && milliseconds >= 0
+    ? Math.min(milliseconds, 86_400_000)
+    : undefined;
+}
 function gmailProviderError(status: number, payload: unknown): string {
-  const message =
-    payload && typeof payload === "object" && !Array.isArray(payload)
-      ? (payload as { error?: { message?: unknown; status?: unknown } }).error
-      : undefined;
-  const safe =
-    typeof message?.status === "string"
-      ? message.status
-      : typeof message?.message === "string"
-        ? message.message.slice(0, 240)
-        : "provider request failed";
-  return `Gmail REST request failed (${status}): ${safe}`;
+  const reason = gmailProviderReason(payload);
+  const explanation =
+    reason === "insufficientPermissions"
+      ? "The current grant does not permit this operation."
+      : reason === "domainPolicy"
+        ? "The account's Google policy prevents this operation."
+        : (reason && /LimitExceeded|quotaExceeded/.test(reason)) || status === 429
+          ? "Gmail rate or quota limit reached. Retry after the indicated delay."
+          : status === 401
+            ? "Gmail authentication must be renewed."
+            : status === 403
+              ? "Gmail refused access. The response does not establish a missing scope."
+              : status === 404
+                ? "The selected resource is unavailable."
+                : status === 400
+                  ? "Gmail rejected the request. Check the supplied values."
+                  : status >= 500
+                    ? "Gmail is temporarily unavailable."
+                    : "Gmail rejected the operation.";
+  return `Gmail REST request failed (${status}): ${explanation}${reason ? ` (${reason})` : ""}`;
 }
 
 function safeErrorMessage(error: unknown): string {
@@ -2203,11 +2427,28 @@ class GmailRestOutcomeUnknownError extends Error {
   readonly retryable = false;
 }
 class GmailRestProviderError extends Error {
+  readonly code: string;
+  readonly retryable: boolean;
   constructor(
     message: string,
     readonly status?: number,
+    reason?: string,
+    readonly retryAfterMs?: number,
   ) {
     super(message);
+    this.code =
+      status === 401
+        ? "authentication_required"
+        : status === 429 || (reason && /LimitExceeded|quotaExceeded/.test(reason))
+          ? "rate_limited"
+          : status === 403
+            ? "access_denied"
+            : status === 404
+              ? "not_found"
+              : status === 400
+                ? "invalid_input"
+                : "provider_unavailable";
+    this.retryable = this.code === "rate_limited" || status === undefined || status >= 500;
   }
 }
 class GmailRestAuthError extends Error {}

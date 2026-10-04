@@ -7,6 +7,7 @@ import {
   getHumanInputResumeForEvent,
   getSessionHumanInputRequest,
   getWorkspace,
+  listTurnCodemodeApprovals,
   recordUsageEvent,
   registerPendingSessionToolCall,
   recordPendingSessionToolCallResult,
@@ -77,6 +78,7 @@ import {
   generatedImageFromSdkEvent,
   isCompletedGeneratedImageSdkEvent,
 } from "../generated-images";
+import { programmaticApproval, programmaticContinuationNote } from "../programmatic-approvals";
 import { ToolResultSpill } from "./tool-result-spill";
 import { ownedTurnSandboxForAgent } from "./turn-sandbox-access";
 import { createTurnCredentialLeases } from "./credential-leases";
@@ -445,6 +447,8 @@ export async function runTurnStreamAttempt(
     await parallelSessionTitle?.cancel();
   };
   let runInput: Awaited<ReturnType<typeof turnInput>>["input"] | null = null;
+  let codemodeContinuationNote: string | undefined;
+  let programmaticApprovalAcknowledged = false;
   const prepareRunAttemptInput = async () => {
     const historyPreparationStartedAt = performance.now();
     let historyPreparationOutcome: "completed" | "failed" = "completed";
@@ -457,6 +461,8 @@ export async function runTurnStreamAttempt(
           subjectId: fileAuthoritySubjectId,
         },
         recovering: turn.executionGeneration > 1,
+        programmaticApprovalAcknowledged,
+        ...(codemodeContinuationNote ? { codemodeContinuationNote } : {}),
         ...(unavailableSandboxFilesNote ? { unavailableSandboxFilesNote } : {}),
         ...(runCredentialsNote ? { runCredentialsNote } : {}),
         ...(mcpAvailabilityNote ? { mcpAvailabilityNote } : {}),
@@ -1651,10 +1657,21 @@ export async function runTurnStreamAttempt(
         });
       }
     }
-    if (eventing.stream.interruptions.length > 0) {
+    const programmaticPending = (
+      await listTurnCodemodeApprovals(db, {
+        accountId: input.accountId,
+        workspaceId: input.workspaceId,
+        sessionId: input.sessionId,
+        turnId: activeTurnId,
+      })
+    )
+      .filter((operation) => operation.state === "waiting_for_approval")
+      .map(programmaticApproval);
+    if (eventing.stream.interruptions.length > 0 || programmaticPending.length > 0) {
       await eventing.preparedTools?.inputWaitYield?.sealForSettlement(runtimeCancellationSignal);
       await historySink.reconcileConversationTruth({ requireDurable: true });
-      const approvals = runtime.serializeApprovals(eventing.stream.interruptions);
+      const sdkApprovals = runtime.serializeApprovals(eventing.stream.interruptions);
+      const approvals = [...sdkApprovals, ...programmaticPending];
       const humanInputInterruptions =
         runtime.serializeHumanInputRequests?.(eventing.stream.interruptions) ?? [];
       const interactionInterventionInterruptions =
@@ -1734,28 +1751,34 @@ export async function runTurnStreamAttempt(
       const interruptionCallIds = interruptionCallIdsFromPause({
         humanInputRequests,
         interactionInterventionRequests,
-        pendingApprovals,
+        pendingApprovals: [
+          ...sdkApprovals,
+          ...interactionInterventionInterruptions.map((interruption) => interruption.approval),
+        ],
       });
       assertOpenSuffixResumable(suffixMembers, interruptionCallIds);
       const suffixByCallId = new Map(suffixMembers.map((member) => [member.callId, member]));
-      const attached = await attachOpenSuffixToPendingToolCalls(db, {
-        accountId: input.accountId,
-        workspaceId: input.workspaceId,
-        sessionId: input.sessionId,
-        turnId: activeTurnId,
-        executionGeneration: attempt.executionGeneration,
-        attemptId: input.attemptId,
-        members: interruptionCallIds.map((callId) => {
-          const member = suffixByCallId.get(callId)!;
-          return {
-            callId,
-            interruptionKind: interruptionKindForCallItem(
-              member.callItem as Record<string, unknown>,
-            ),
-            reasoningItems: member.reasoningItems as Array<Record<string, unknown>>,
-          };
-        }),
-      });
+      const attached =
+        interruptionCallIds.length === 0
+          ? { accepted: true }
+          : await attachOpenSuffixToPendingToolCalls(db, {
+              accountId: input.accountId,
+              workspaceId: input.workspaceId,
+              sessionId: input.sessionId,
+              turnId: activeTurnId,
+              executionGeneration: attempt.executionGeneration,
+              attemptId: input.attemptId,
+              members: interruptionCallIds.map((callId) => {
+                const member = suffixByCallId.get(callId)!;
+                return {
+                  callId,
+                  interruptionKind: interruptionKindForCallItem(
+                    member.callItem as Record<string, unknown>,
+                  ),
+                  reasoningItems: member.reasoningItems as Array<Record<string, unknown>>,
+                };
+              }),
+            });
       if (!attached.accepted) {
         return claimedResult({ status: "cancelled" });
       }
@@ -1930,7 +1953,29 @@ export async function runTurnStreamAttempt(
     return claimedResult({ status: "idle" });
   };
 
+  // Recover committed waits/results before any model dispatch, including crash replacement.
+  // A new attempt uses its own signed caller; origin provenance never changes.
+  await eventing.toolPreparationReady;
+  const codemodeOperations =
+    (await eventing.codemodeDispatcher?.resumeApproved(
+      `sandbox:${input.attemptId}`,
+      trigger.type === "user.approvalDecision"
+        ? (trigger.payload as { approvalId: string }).approvalId
+        : undefined,
+    )) ?? [];
+  codemodeContinuationNote = programmaticContinuationNote(codemodeOperations);
+  programmaticApprovalAcknowledged =
+    trigger.type === "user.approvalDecision" &&
+    codemodeOperations.some(
+      (operation) =>
+        operation.operationId === (trigger.payload as { approvalId?: unknown }).approvalId,
+    );
+  const pendingProgrammaticApprovals = codemodeOperations
+    .filter((operation) => operation.state === "waiting_for_approval")
+    .map(programmaticApproval);
   const openSuffixResume = await settleOpenSuffixResumeIfNeeded({
+    additionalApprovals: pendingProgrammaticApprovals,
+    programmaticApprovalAcknowledged,
     db,
     agent,
     accountId: input.accountId,

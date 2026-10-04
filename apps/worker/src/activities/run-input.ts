@@ -81,6 +81,8 @@ export type TurnInputOptions = {
   unavailableSandboxFilesNote?: string;
   runCredentialsNote?: string;
   mcpAvailabilityNote?: string;
+  codemodeContinuationNote?: string;
+  programmaticApprovalAcknowledged?: boolean;
   knowledgeSourcePreparationNote?: string;
   providerApi: HistoryProviderApi;
   projectCanonicalHistory?: ModelHistoryAttachmentProjector;
@@ -513,6 +515,7 @@ export async function turnInput(
     options.unavailableSandboxFilesNote,
     options.runCredentialsNote,
     options.mcpAvailabilityNote,
+    options.codemodeContinuationNote,
     options.knowledgeSourcePreparationNote,
   );
   if (trigger.type === "user.message") {
@@ -606,7 +609,7 @@ async function openSuffixMessageInput(
     trigger.sessionId,
     options.turnId,
   );
-  if (suffixRows.length === 0) {
+  if (suffixRows.length === 0 && !options.programmaticApprovalAcknowledged) {
     throw new Error("Open suffix resume has no interruption rows");
   }
   if (suffixRows.some((row) => row.resultItem == null)) {
