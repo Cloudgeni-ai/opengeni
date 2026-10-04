@@ -10436,7 +10436,8 @@ export type KnowledgeSourceSyncRunSummary = z.infer<typeof KnowledgeSourceSyncRu
  * means every occurrence is refused until the task or a resource it names
  * changes. Known reasons: `scheduled_authority_unavailable`,
  * `machine_target_unavailable`, `machine_enrollment_inactive`,
- * `variable_set_unavailable`, `rig_version_unavailable` (terminal) and
+ * `variable_set_unavailable`, `rig_version_unavailable`, `scheduled_model_unavailable`
+ * (terminal) and
  * `insufficient_credits`, `allowance_exhausted`, `monthly_model_cost_limit`, `monthly_agent_run_limit`
  * (transient). Readers must tolerate new reasons.
  */

@@ -19030,6 +19030,7 @@ export type ScheduledTaskAdmissionRefusalReason =
   | "machine_enrollment_inactive"
   | "variable_set_unavailable"
   | "rig_version_unavailable"
+  | "scheduled_model_unavailable"
   | "insufficient_credits"
   | "allowance_exhausted"
   | "monthly_model_cost_limit"

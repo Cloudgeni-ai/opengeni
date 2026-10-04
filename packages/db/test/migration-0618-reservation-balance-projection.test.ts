@@ -25,7 +25,7 @@ let appUrl: string;
 const account = crypto.randomUUID();
 const workspace = crypto.randomUUID();
 const otherWorkspace = crypto.randomUUID();
-const migration = "0614_usage_reservation_balance_projection.sql";
+const migration = "0618_usage_reservation_balance_projection.sql";
 
 beforeAll(async () => {
   const acquired = await acquireOwnerMigratedTestDatabase("reservation-projection");
