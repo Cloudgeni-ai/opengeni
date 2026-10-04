@@ -79,6 +79,65 @@ export function chatReasoningDetailsText(details: JsonObject[] | undefined): str
     .join("");
 }
 
+/** Claude rejects plaintext thinking without a signature. OpenRouter can turn
+ * either Chat reasoning alias into such a block, including from older histories.
+ * Keep unsigned text as ordinary historical context on this request only.
+ */
+export function projectUnsignedClaudeChatReasoning(messages: JsonObject[]): JsonObject[] {
+  let changed = false;
+  const projected = messages.map((message) => {
+    if (message?.role !== "assistant") return message;
+    const details = chatReasoningDetails(message);
+    const isClaude = (detail: JsonObject) =>
+      detail.format == null || detail.format === "anthropic-claude-v1";
+    const unsigned = (details ?? []).filter(
+      (detail) =>
+        detail.type === "reasoning.text" &&
+        isClaude(detail) &&
+        !(typeof detail.signature === "string" && detail.signature.trim()),
+    );
+    const retained = details?.filter((detail) => !unsigned.includes(detail));
+    const hasNativeDetails = retained?.some(
+      (detail) =>
+        isClaude(detail) &&
+        (detail.type === "reasoning.text" ||
+          (detail.type === "reasoning.encrypted" &&
+            typeof detail.data === "string" &&
+            detail.data.length > 0)),
+    );
+    const reasoning = chatReasoning(message);
+    if (!unsigned.length && (hasNativeDetails || !reasoning)) return message;
+    const removedText = chatReasoningDetailsText(unsigned);
+    const aliasText = !hasNativeDetails ? reasoning?.text : undefined;
+    const text = [
+      ...(aliasText ? [aliasText] : []),
+      ...(removedText && !aliasText?.includes(removedText) ? [removedText] : []),
+    ].join("\n");
+    const result = { ...message };
+    // An aggregate alias can include stripped blocks; signed details remain the
+    // authoritative replay representation whenever any block was removed.
+    delete result.reasoning;
+    delete result.reasoning_content;
+    if (details) result.reasoning_details = retained;
+    if (text) {
+      const content = emptyContent(message.content)
+        ? []
+        : typeof message.content === "string"
+          ? [{ type: "text", text: message.content }]
+          : Array.isArray(message.content)
+            ? message.content
+            : [message.content];
+      result.content = [
+        { type: "text", text: `[Historical reasoning without a provider signature]\n${text}` },
+        ...content,
+      ];
+    }
+    changed = true;
+    return result;
+  });
+  return changed ? projected : messages;
+}
+
 /** Retain reasoning independently of answer text, with its native replay field. */
 export function withChatReasoning<T extends ModelResponse["output"][number]>(
   output: T[],

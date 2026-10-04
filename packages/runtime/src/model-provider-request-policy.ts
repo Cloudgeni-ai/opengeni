@@ -27,7 +27,12 @@ import {
   XaiSubscriptionUnavailableError,
 } from "./model-provider-errors";
 import type { ModelJsonRequestPolicy } from "./replayable-json-body";
-import { chatReasoning, chatReasoningDetails, joinChatReasoningMessages } from "./chat-reasoning";
+import {
+  chatReasoning,
+  chatReasoningDetails,
+  joinChatReasoningMessages,
+  projectUnsignedClaudeChatReasoning,
+} from "./chat-reasoning";
 
 /**
  * Gateway's Kimi Responses adapter rejects the standard grouped parallel-tool
@@ -198,6 +203,18 @@ export function modelRequestPolicyForProvider(
   gatewayPolicies?: GatewayRequestPolicyLookup,
 ): ModelJsonRequestPolicy {
   const providerPolicy: ModelJsonRequestPolicy = ({ path, body }) => {
+    if (
+      (provider.kind === "openrouter-managed" ||
+        provider.kind === "openrouter-workspace" ||
+        provider.kind === "openrouter-organization") &&
+      (path.split("?", 1)[0] ?? path).endsWith("/chat/completions") &&
+      typeof body.model === "string" &&
+      body.model.startsWith("anthropic/") &&
+      Array.isArray(body.messages)
+    ) {
+      const messages = projectUnsignedClaudeChatReasoning(body.messages);
+      return messages === body.messages ? undefined : { body: { ...body, messages } };
+    }
     if (provider.wireProfile === "azure-openai") {
       return azureModelRequestPolicy({ body });
     }
