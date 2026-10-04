@@ -401,6 +401,52 @@ describe("resolved default in the composer and after a credit purchase", () => {
 });
 
 describe("applyConnectedModelToNewSessionDraft", () => {
+  test("redemption saves the funded server default instead of the first uncovered model", async () => {
+    const saveNewSessionDraft = mock(async () => undefined);
+    const client = {
+      getWorkspaceModelCatalog: async () => ({
+        models: [
+          catalogModel({ id: "uncovered", creditFunding: "unavailable" }),
+          catalogModel({ id: "covered", creditFunding: "promotional" }),
+        ],
+        defaultSelection: { model: "covered", reasoningEffort: "high", source: "credits" },
+      }),
+      getNewSessionDraft: async () => ({
+        revision: 1,
+        text: "My draft",
+        resources: [],
+        tools: [],
+        options: {},
+      }),
+      saveNewSessionDraft,
+    };
+    expect(
+      await applyConnectedModelToNewSessionDraft(
+        client as never,
+        "workspace",
+        "credits",
+        "uncovered",
+      ),
+    ).toEqual({ id: "covered", label: "covered" });
+    expect(saveNewSessionDraft).toHaveBeenCalledWith(
+      "workspace",
+      expect.objectContaining({ model: "covered", reasoningEffort: "high", text: "My draft" }),
+    );
+  });
+
+  test("redemption does not save an unfunded model when no eligible model remains", async () => {
+    const getNewSessionDraft = mock();
+    const client = {
+      getWorkspaceModelCatalog: async () => ({
+        models: [catalogModel({ id: "uncovered", creditFunding: "unavailable" })],
+      }),
+      getNewSessionDraft,
+    };
+    expect(
+      await applyConnectedModelToNewSessionDraft(client as never, "workspace", "credits"),
+    ).toBeNull();
+    expect(getNewSessionDraft).not.toHaveBeenCalled();
+  });
   test("selects the connected model in the private draft while preserving existing content", async () => {
     const saveNewSessionDraft = mock(async () => undefined);
     const draft = {

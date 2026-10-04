@@ -788,11 +788,13 @@ export const RUNTIME_TARGET_SCHEMA_FORBIDDEN_ROUTINES = [
   SESSION_TENANCY_QUIESCENCE_ROUTINE,
   TENANCY_BACKFILL_ACTIVATION_EVIDENCE_ROUTINE,
   VERIFIED_SIGNUP_TRIAL_SWITCH_SETTER_ROUTINE,
+  "set_credit_promotion_policy(jsonb, text, text)",
   MANAGED_AUTH_NEW_SIGNUPS_SWITCH_SETTER_ROUTINE,
   ...DOCUMENT_MIGRATION_AUDIT_INTERNAL_ROUTINES,
 ] as const;
 
 export const RUNTIME_TARGET_SCHEMA_INVOKER_ROUTINES = [
+  "set_credit_promotion_policy(jsonb, text, text)",
   CLAUDE_SNAPSHOT_VALIDATOR_ROUTINE,
   "usage_allowance_period(jsonb, timestamp with time zone)",
   "validate_usage_allowance_config(jsonb)",
@@ -888,6 +890,7 @@ export const FORCE_RLS_TABLES = [
   "connections",
   "connector_action_policies",
   "connector_action_requests",
+  "credit_debit_allocations",
   "credit_ledger_entries",
   "device_enrollment_requests",
   "document_authority_reclassifications",
@@ -1470,6 +1473,7 @@ export const RUNTIME_READ_INSERT_TABLES = [
   "browser_revision_components",
   "browser_revisions",
   "company_profile_revisions",
+  "credit_debit_allocations",
   "editable_artifact_blob_refs",
   "editable_artifact_idempotency_receipts",
   "editable_artifact_live_outbox",
@@ -2176,6 +2180,7 @@ export async function inspectRuntimeDatabasePosture(
               'modal_inventory_read_capabilities',
               ${AUTOMATIC_SESSION_TITLE_FANOUT_OUTBOX_TABLE},
               ${VERIFIED_SIGNUP_TRIAL_SWITCH_TABLE},
+              'credit_promotion_policy_revisions',
               ${MANAGED_AUTH_NEW_SIGNUPS_SWITCH_TABLE}
             )
         `),
@@ -3756,6 +3761,23 @@ export function evaluateRuntimeDatabasePosture(
 
   // The trial-credit kill switch is operator state. Runtime roles may read it
   // for the gauge (SELECT is optional) but must never append or rewrite it.
+  const creditPolicyTable = posture.privateTables.find(
+    (table) => table.name === "credit_promotion_policy_revisions",
+  );
+  if (!creditPolicyTable) {
+    violations.push("credit promotion policy table is missing");
+  } else if (!creditPolicyTable.select) {
+    violations.push("runtime role cannot read the credit promotion policy");
+  }
+  if (
+    creditPolicyTable &&
+    (creditPolicyTable.owner === expectedRole ||
+      creditPolicyTable.insert ||
+      creditPolicyTable.update ||
+      creditPolicyTable.delete)
+  ) {
+    violations.push("runtime role has forbidden write authority on the credit promotion policy");
+  }
   const trialSwitchTable = posture.privateTables.find(
     (table) => table.name === VERIFIED_SIGNUP_TRIAL_SWITCH_TABLE,
   );

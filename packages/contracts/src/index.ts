@@ -5003,11 +5003,26 @@ export type GitHubAppApiPort = {
   }) => Promise<GitHubAppRepositoryBranchPage>;
 };
 
+export const PromotionalCreditScope = z.object({
+  label: z.string().trim().min(1).max(120),
+  eligibleModelIds: z.array(z.string().trim().min(1).max(200)).min(1).max(40),
+});
+export type PromotionalCreditScope = z.infer<typeof PromotionalCreditScope>;
+
+export const PromotionalCreditBalance = PromotionalCreditScope.extend({
+  grantId: z.string().uuid(),
+  remainingMicros: z.number().int().nonnegative(),
+});
+export type PromotionalCreditBalance = z.infer<typeof PromotionalCreditBalance>;
+
 export const BillingBalance = z.object({
   accountId: z.string().uuid(),
   balanceMicros: z.number().int(),
   currency: z.literal("usd"),
   updatedAt: z.string(),
+  /** General credits, including unrestricted legacy grants. May be negative after use. */
+  generalBalanceMicros: z.number().int().optional(),
+  promotionalCredits: z.array(PromotionalCreditBalance).optional(),
 });
 export type BillingBalance = z.infer<typeof BillingBalance>;
 
@@ -5038,6 +5053,7 @@ export const CreateCheckoutResponse = z.object({
   url: z.string().url(),
   /** The credits this checkout grants once it completes. */
   amountUsd: z.number().optional(),
+  promotionalScope: PromotionalCreditScope.optional(),
 });
 export type CreateCheckoutResponse = z.infer<typeof CreateCheckoutResponse>;
 
@@ -5055,6 +5071,7 @@ export const BillingCheckoutStatus = z.object({
     currency: z.literal("usd"),
     /** True when a coupon covered the whole checkout, so nothing was charged. */
     free: z.boolean(),
+    promotionalScope: PromotionalCreditScope.optional(),
   }),
   balance: BillingBalance.nullable(),
 });
@@ -18218,6 +18235,8 @@ export const WorkspaceModelCatalogModel =
   /* @__PURE__ */ defineModelContractSchema(() =>
     ClientModel.extend({
       credentialReadiness: ModelCredentialReadinessV1,
+      /** Current funding status, without exposing the organization's balance. */
+      creditFunding: z.enum(["promotional", "general", "unavailable"]).optional(),
       /** Exact workspace-policy verdict without exposing provider identity. */
       policyAllowed: z.boolean().optional(),
       availability: ModelAvailabilityV1,

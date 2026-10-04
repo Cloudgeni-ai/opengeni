@@ -37,6 +37,16 @@ function catalogModel(
 }
 
 describe("model-policy", () => {
+  test("shows promotional coverage and general credit requirements in model rows", () => {
+    const models = (["promotional", "general", "unavailable"] as const).map((creditFunding) =>
+      catalogModel({ id: creditFunding, label: creditFunding, cost: "credits", creditFunding }),
+    );
+    expect(projectPickerRows(models).map((row) => row.fundingHint)).toEqual([
+      "Free credits",
+      "General credits",
+      "Needs credits",
+    ]);
+  });
   test.each([
     {
       name: "free-only with blocked paid",

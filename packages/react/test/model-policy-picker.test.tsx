@@ -736,6 +736,54 @@ describe("ModelPolicyPicker", () => {
     expect(trigger?.className).not.toContain("rounded-full");
   });
 
+  test.each(["field", "pill"] as const)(
+    "keeps current funding visible on the %s trigger when coverage changes",
+    async (triggerStyle) => {
+      const render = (fundingHint: string) => (
+        <ModelPolicyPicker
+          rows={projectClientModelRows(MODELS).map((row) => ({
+            ...row,
+            fundingHint,
+            catalog: {
+              ...row.catalog,
+              credentialReadiness: {
+                status: "ready",
+                reason: null,
+                basis: "configuration",
+                checkedAt: null,
+              },
+              availability: {
+                status: "available",
+                selectable: true,
+                reason: null,
+                checkedAt: null,
+              },
+            },
+          }))}
+          model={MODELS[0]!.id}
+          effort="medium"
+          latencyMode="standard"
+          triggerStyle={triggerStyle}
+          onModelChange={() => {}}
+          onEffortChange={() => {}}
+          onLatencyModeChange={() => {}}
+        />
+      );
+      const container = await mount(render("Free credits"));
+      const trigger = container.querySelector<HTMLButtonElement>(
+        'button[aria-label="Model and effort"]',
+      )!;
+      expect(trigger.textContent).toContain("Free credits");
+      expect(trigger.getAttribute("aria-description")).toContain("Free credits");
+      expect(trigger.title).toContain("Medium");
+
+      await act(async () => mounted!.root.render(render("Needs credits")));
+      expect(trigger.textContent).toContain("Needs credits");
+      expect(trigger.textContent).not.toContain("Free credits");
+      expect(trigger.getAttribute("aria-description")).toContain("Needs credits");
+    },
+  );
+
   test("selects immediately and coerces unsupported effort and speed without closing", async () => {
     const calls: unknown[] = [];
     const container = await mount(

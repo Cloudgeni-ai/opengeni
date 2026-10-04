@@ -194,7 +194,14 @@ export async function checkForbiddenProviderImports(
   if (
     moduleSpecifiers.some((specifier) => specifier === "stripe" || specifier.startsWith("stripe/"))
   ) {
-    if (normalized !== "apps/api/src/routes/billing.ts") {
+    // Adapter tests exercise Stripe's real parameter and signature contracts.
+    if (
+      ![
+        "apps/api/src/routes/billing.ts",
+        "apps/api/test/scoped-credit-checkout.test.ts",
+        "apps/api/test/scoped-credits-postgres.test.ts",
+      ].includes(normalized)
+    ) {
       out.push({ file, message: "imports Stripe outside billing route/provider code" });
     }
   }

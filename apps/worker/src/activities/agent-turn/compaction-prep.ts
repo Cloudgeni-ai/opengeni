@@ -1,3 +1,4 @@
+import { ensureRunAllowedBetweenModelCalls } from "./admission";
 import { hasPendingSteerAfterContextCompaction, isSessionCompactionRequested } from "@opengeni/db";
 import { publishDurableSessionEvents } from "@opengeni/events";
 import {
@@ -66,6 +67,7 @@ export type CompactionPrepDeps = {
   input: RunAgentTurnInput;
   settings: Settings;
   db: ActivityServices["db"];
+  entitlements?: ActivityServices["entitlements"];
   bus: ActivityServices["bus"];
   observability: ActivityServices["observability"];
   cancellationSignal: AbortSignal | undefined;
@@ -236,9 +238,11 @@ export async function prepareCompaction(deps: CompactionPrepDeps): Promise<Compa
 
   const promptCacheKey = acceptsPromptCacheKeyForTurn(resolvedModel) ? input.sessionId : undefined;
   const compactionUsageState = createCompactionModelUsageEventState(claimedModelUsageSourceKeys);
+  let compactionCreditPolicyRevision: number | undefined;
   const recordCompactionUsage = async (usage: ModelResponseUsage) => {
     await processCompactionModelUsageEvent({
       usage,
+      creditPolicyRevision: compactionCreditPolicyRevision,
       state: compactionUsageState,
       dispatchId: modelUsageDispatchId,
       settings,
@@ -266,7 +270,7 @@ export async function prepareCompaction(deps: CompactionPrepDeps): Promise<Compa
     });
   };
   const compactionSummarizerFor = (systemInstructions?: string): CompactionSummarizer => {
-    const summarize: CompactionSummarizer = resolvedModel
+    const summarizeModel: CompactionSummarizer = resolvedModel
       ? (s: Settings, m: Array<Record<string, unknown>>) =>
           withProviderRequestContext(() =>
             summarizeContextForCompaction(s, m, {
@@ -293,6 +297,21 @@ export async function prepareCompaction(deps: CompactionPrepDeps): Promise<Compa
             ...(systemInstructions ? { systemInstructions } : {}),
             ...(promptCacheKey ? { promptCacheKey } : {}),
           });
+    const summarize: CompactionSummarizer = async (s, m) => {
+      compactionCreditPolicyRevision = await ensureRunAllowedBetweenModelCalls({
+        settings: s,
+        db,
+        accountId: input.accountId,
+        workspaceId: input.workspaceId,
+        modelId: resolvedModel?.configured.id ?? turn.model,
+        isExternallyBilledTurn: billingState.isExternallyBilledTurn,
+        chargesOpenGeniCredits: billingState.chargesOpenGeniCredits,
+        countsTowardTokenCap: billingState.countsTowardTokenCap,
+        initiatingHumanSubjectId: turn.initiatingHumanSubjectId,
+        entitlements: deps.entitlements,
+      });
+      return await summarizeModel(s, m);
+    };
     summarize.estimatePrefixTokens = () => {
       if (resolvedModel?.provider.api === "chat") {
         return estimateSerializedValueTokens(systemInstructions ?? "");

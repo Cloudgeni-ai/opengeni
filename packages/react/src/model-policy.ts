@@ -17,6 +17,7 @@ export type PickerModelRow<TCatalog extends ClientModel = WorkspaceModelCatalogM
   billingClassLabel: string;
   selectable: boolean;
   unavailableReason: string | null;
+  fundingHint?: string | undefined;
   provider: string;
   providerLabel: string;
   catalog: TCatalog;
@@ -274,6 +275,14 @@ export function projectPickerRows(models: WorkspaceModelCatalogModel[]): PickerM
         billingClass,
         billingClassLabel: billingClassLabel(billingClass),
         selectable: catalog.availability.selectable,
+        fundingHint:
+          catalog.creditFunding === "promotional"
+            ? "Free credits"
+            : catalog.creditFunding === "general"
+              ? "General credits"
+              : catalog.creditFunding === "unavailable"
+                ? "Needs credits"
+                : undefined,
         unavailableReason: catalog.availability.selectable
           ? null
           : availabilityReasonLabel(catalog.availability.reason),

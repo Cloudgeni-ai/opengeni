@@ -14,6 +14,12 @@ async function findingsFor(file: string, source: string): Promise<Finding[]> {
 }
 
 describe("workspace provider import guard", () => {
+  test.each([
+    "apps/api/test/scoped-credit-checkout.test.ts",
+    "apps/api/test/scoped-credits-postgres.test.ts",
+  ])("permits the billing adapter's Stripe contract fixture: %s", async (file) => {
+    expect(await findingsFor(file, 'import Stripe from "stripe";')).toEqual([]);
+  });
   test("confines the Stripe billing portal path to its API and SDK surfaces", () => {
     const portalPath = ["/v1/billing", "portal"].join("/");
     const allowed: Finding[] = [];

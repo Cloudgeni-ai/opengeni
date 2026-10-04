@@ -461,6 +461,11 @@ export function ModelPolicyPicker(props: ModelPolicyPickerProps) {
   );
   const { open, setOpen, rows } = useModelPolicyPickerState(props);
   const selected = findPickerRow(rows, props.model);
+  const fundingHint = selected?.fundingHint;
+  const triggerMeta = props.triggerMeta ?? fundingHint;
+  const selectedDescription = [selected?.label, fundingHint, labelReasoningEffort(props.effort)]
+    .filter(Boolean)
+    .join(" · ");
   const needsModel =
     !rows.some((row) => row.selectable) && (rows.length > 0 || Boolean(props.connectModelsHref));
 
@@ -491,8 +496,10 @@ export function ModelPolicyPicker(props: ModelPolicyPickerProps) {
           onClick={() => setOpen(!open)}
           disabled={props.disabled}
           aria-label={messages.label}
+          aria-description={selectedDescription}
+          title={selectedDescription}
           className={cn(
-            "og-root inline-flex h-8 min-w-[180px] max-w-full items-center gap-2 rounded-og-md border border-og-border bg-og-surface px-2.5 text-sm text-og-fg outline-hidden transition-colors hover:bg-og-surface-2 focus-visible:ring-2 focus-visible:ring-og-accent/40 disabled:cursor-not-allowed disabled:opacity-50",
+            "og-root inline-flex h-8 min-w-[180px] max-w-full items-center gap-2 rounded-og-md border border-og-border bg-og-surface px-2.5 text-sm text-og-fg outline-hidden transition-colors hover:bg-og-surface-2 focus-visible:ring-2 focus-visible:ring-og-accent/40 disabled:cursor-not-allowed disabled:opacity-50 pointer-coarse:h-11",
             props.className,
           )}
         >
@@ -504,10 +511,8 @@ export function ModelPolicyPicker(props: ModelPolicyPickerProps) {
           <span className="min-w-0 truncate font-medium">
             {needsModel ? messages.connectTitle : (selected?.label ?? fallbackName(props))}
           </span>
-          {props.triggerMeta && !needsModel ? (
-            <span className="min-w-0 shrink-[9999] truncate text-og-fg-muted">
-              {props.triggerMeta}
-            </span>
+          {triggerMeta && !needsModel ? (
+            <span className="min-w-0 shrink-[9999] truncate text-og-fg-muted">{triggerMeta}</span>
           ) : null}
           <ChevronDownIcon className="ml-auto size-3.5 shrink-0 text-og-fg-muted" />
         </button>
@@ -537,8 +542,14 @@ export function ModelPolicyPicker(props: ModelPolicyPickerProps) {
         onClick={() => setOpen(!open)}
         disabled={props.disabled}
         aria-label={messages.label}
+        aria-description={selectedDescription}
+        title={selectedDescription}
+        data-credit-funding={fundingHint ? "" : undefined}
         className={cn(
-          "og-root og-model-policy-trigger inline-flex h-[var(--og-model-picker-trigger-height)] min-w-0 max-w-64 items-center gap-1 rounded-full border px-2.5 text-og-control outline-hidden transition-colors focus-visible:ring-2 focus-visible:ring-og-accent/40 disabled:cursor-not-allowed disabled:opacity-50 max-sm:h-11 max-sm:max-w-[7.5rem] max-sm:px-2",
+          "og-root og-model-policy-trigger inline-flex h-[var(--og-model-picker-trigger-height)] min-w-0 max-w-64 items-center gap-1 rounded-full border px-2.5 text-og-control outline-hidden transition-colors focus-visible:ring-2 focus-visible:ring-og-accent/40 disabled:cursor-not-allowed disabled:opacity-50 max-sm:h-11 max-sm:px-2",
+          fundingHint
+            ? "max-sm:max-w-[12rem] @max-[20rem]/model-controls:h-11"
+            : "max-sm:max-w-[7.5rem]",
           // With no usable model the pill is the one thing that unblocks the
           // composer, so it takes the primary wash.
           needsModel
@@ -552,16 +563,31 @@ export function ModelPolicyPicker(props: ModelPolicyPickerProps) {
         ) : (
           <SelectedModelMark props={props} selected={selected} />
         )}
-        <span className="og-model-policy-label-full min-w-0 truncate font-medium text-og-fg max-sm:hidden @max-[20rem]/model-controls:hidden">
-          {needsModel ? messages.connectTitle : (selected?.label ?? fallbackName(props))}
-        </span>
-        <span className="og-model-policy-label-short min-w-0 truncate font-medium text-og-fg sm:hidden @max-[20rem]/model-controls:block">
-          {needsModel
-            ? messages.connectTitle
-            : (selected?.shortLabel ?? selected?.label ?? fallbackName(props))}
+        <span
+          className={cn(
+            "og-model-policy-summary min-w-0",
+            fundingHint
+              ? "flex items-center gap-1 max-sm:flex-col max-sm:items-start max-sm:gap-0 @max-[20rem]/model-controls:flex-col @max-[20rem]/model-controls:items-start @max-[20rem]/model-controls:gap-0"
+              : "contents",
+          )}
+        >
+          <span className="og-model-policy-label-full min-w-0 truncate font-medium text-og-fg max-sm:hidden @max-[20rem]/model-controls:hidden">
+            {needsModel ? messages.connectTitle : (selected?.label ?? fallbackName(props))}
+          </span>
+          <span className="og-model-policy-label-short min-w-0 max-w-full truncate font-medium text-og-fg sm:hidden @max-[20rem]/model-controls:block">
+            {needsModel
+              ? messages.connectTitle
+              : (selected?.shortLabel ?? selected?.label ?? fallbackName(props))}
+          </span>
+          {fundingHint && !needsModel ? (
+            <span className="og-model-policy-funding shrink-0 text-og-fg-muted before:mx-1 before:content-['·'] max-sm:before:hidden @max-[20rem]/model-controls:before:hidden">
+              {fundingHint}
+            </span>
+          ) : null}
         </span>
         {selected &&
         !needsModel &&
+        !fundingHint &&
         effortOptionsForModel(selected.catalog).length > 1 &&
         selected.catalog.capabilities?.reasoning.runnable !== false ? (
           <span

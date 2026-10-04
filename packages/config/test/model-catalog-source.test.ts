@@ -23,6 +23,20 @@ function withEnv<T>(env: NodeJS.ProcessEnv, fn: () => T): T {
 }
 
 describe("deployment model catalog source", () => {
+  test("validates promotional coverage after resolving a database catalog", () => {
+    for (const modelId of ["missing-model", "gpt-5.6-luna"]) {
+      const settings = applyModelCatalogDocument(
+        withEnv({ OPENGENI_MODEL_CATALOG_SOURCE: "database" }, () => getSettings()),
+        { schemaVersion: 1, builtInModels: ["gpt-5.6-luna"] },
+      );
+      settings.creditPromotionPolicy = { defaultModelIds: [modelId], offers: {} };
+      if (modelId === "gpt-5.6-luna")
+        settings.modelCostPolicyJson = JSON.stringify({ [modelId]: "free" });
+      expect(() => validateModelCatalogSettings(settings)).toThrow(
+        "must be a canonical credits-billed model",
+      );
+    }
+  });
   test("injects the validated managed OpenRouter starter only when its key exists", () => {
     const absent = withEnv({}, () => getSettings());
     expect(configuredModels(absent).some((model) => model.id === DEFAULT_OPENROUTER_MODEL_ID)).toBe(

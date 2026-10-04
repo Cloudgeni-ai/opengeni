@@ -57,6 +57,16 @@
   padding-inline: var(--_og-c-model-x);
 }
 
+[data-og-responsive-basis="container"] [data-credit-funding] .og-model-policy-summary {
+  flex-direction: row;
+  align-items: center;
+  gap: 0.25rem;
+}
+
+[data-og-responsive-basis="container"] .og-model-policy-funding::before {
+  display: inline;
+}
+
 [data-og-responsive-basis="container"] .og-model-policy-label-full {
   display: var(--og-model-policy-label-full-display);
 }
@@ -111,6 +121,22 @@
 }
 
 @container og-composer (max-width: 39.999rem) {
+  /* Keep funding below the name when the composer has little horizontal room. */
+  [data-og-responsive-basis="container"] .og-model-policy-trigger[data-credit-funding] {
+    height: 2.75rem;
+    max-width: 12rem;
+  }
+
+  [data-og-responsive-basis="container"] [data-credit-funding] .og-model-policy-summary {
+    flex-direction: column;
+    align-items: flex-start;
+    gap: 0;
+  }
+
+  [data-og-responsive-basis="container"] .og-model-policy-funding::before {
+    display: none;
+  }
+
   [data-og-responsive-basis="container"] :where(*) {
     --_og-c-gap: 0.25rem;
     --_og-c-footer-x: 0.5rem;

@@ -1,3 +1,10 @@
+export { readCreditPromotionPolicy } from "./credit-promotion-policy";
+import { getBillingBalance, getSpendableCreditBalance, planCreditDebit } from "./credit-balances";
+export {
+  getBillingBalance,
+  getSpendableCreditBalance,
+  spendableCreditMicros,
+} from "./credit-balances";
 import {
   agentSelectionNotes,
   loadInboxExecutionContext,
@@ -5701,6 +5708,7 @@ export async function applyCreditLedgerEntry(
     workspaceId?: string | null;
     type: string;
     amountMicros: number;
+    eligibleModelIds?: string[] | undefined;
     sourceType?: string | null;
     sourceId?: string | null;
     idempotencyKey: string;
@@ -5719,6 +5727,7 @@ export async function applyCreditLedgerEntry(
           workspaceId: input.workspaceId ?? null,
           type: input.type,
           amountMicros: input.amountMicros,
+          eligibleModelIds: input.eligibleModelIds ?? null,
           sourceType: input.sourceType ?? null,
           sourceId: input.sourceId ?? null,
           idempotencyKey: input.idempotencyKey,
@@ -5740,6 +5749,9 @@ export async function applyCreditDebitUpToBalance(
     workspaceId?: string | null;
     type: string;
     requestedAmountMicros: number;
+    /** Canonical, accepted model ID. Omitted for non-model usage. */
+    modelId?: string;
+    creditPolicyRevision?: number | undefined;
     sourceType?: string | null;
     sourceId?: string | null;
     idempotencyKey: string;
@@ -5758,35 +5770,42 @@ export async function applyCreditDebitUpToBalance(
     { accountId: input.accountId, workspaceId: input.workspaceId ?? null },
     async (scopedDb) => {
       await scopedDb.execute(sql`select pg_advisory_xact_lock(hashtext(${input.accountId}))`);
-      const before = await getBillingBalance(scopedDb, input.accountId);
-      const candidateDebitMicros = Math.min(
-        input.requestedAmountMicros,
-        Math.max(0, before.balanceMicros),
-      );
-      let debitedMicros = 0;
-      if (candidateDebitMicros > 0) {
-        const inserted = await scopedDb
-          .insert(schema.creditLedgerEntries)
-          .values({
+      const before = await getBillingBalance(scopedDb, input.accountId, input.creditPolicyRevision);
+      const plan = planCreditDebit(before, input.requestedAmountMicros, input.modelId);
+      const candidateDebitMicros = plan.debitedMicros;
+      // Keep a zero-cost receipt too: retrying after a top-up must not charge
+      // a response that was already settled while the eligible balance was empty.
+      const [inserted] = await scopedDb
+        .insert(schema.creditLedgerEntries)
+        .values({
+          accountId: input.accountId,
+          workspaceId: input.workspaceId ?? null,
+          type: input.type,
+          amountMicros: -candidateDebitMicros,
+          sourceType: input.sourceType ?? null,
+          sourceId: input.sourceId ?? null,
+          idempotencyKey: input.idempotencyKey,
+          metadata: {
+            ...input.metadata,
+            requestedAmountMicros: input.requestedAmountMicros,
+            debitedMicros: candidateDebitMicros,
+            creditPolicyRevision: before.creditPolicyRevision,
+          },
+          occurredAt: input.occurredAt ?? new Date(),
+        })
+        .onConflictDoNothing({
+          target: schema.creditLedgerEntries.idempotencyKey,
+        })
+        .returning({ id: schema.creditLedgerEntries.id });
+      const debitedMicros = inserted ? candidateDebitMicros : 0;
+      if (inserted && plan.allocations.length) {
+        await scopedDb.insert(schema.creditDebitAllocations).values(
+          plan.allocations.map((allocation) => ({
+            ...allocation,
             accountId: input.accountId,
-            workspaceId: input.workspaceId ?? null,
-            type: input.type,
-            amountMicros: -candidateDebitMicros,
-            sourceType: input.sourceType ?? null,
-            sourceId: input.sourceId ?? null,
-            idempotencyKey: input.idempotencyKey,
-            metadata: {
-              ...input.metadata,
-              requestedAmountMicros: input.requestedAmountMicros,
-              debitedMicros: candidateDebitMicros,
-            },
-            occurredAt: input.occurredAt ?? new Date(),
-          })
-          .onConflictDoNothing({
-            target: schema.creditLedgerEntries.idempotencyKey,
-          })
-          .returning({ id: schema.creditLedgerEntries.id });
-        debitedMicros = inserted.length === 1 ? candidateDebitMicros : 0;
+            debitEntryId: inserted.id,
+          })),
+        );
       }
       return {
         balance: await getBillingBalance(scopedDb, input.accountId),
@@ -6017,23 +6036,6 @@ export async function markStripeWebhookProcessed(db: Database, id: string): Prom
     .update(schema.stripeWebhookEvents)
     .set({ processedAt: new Date() })
     .where(eq(schema.stripeWebhookEvents.id, id));
-}
-
-export async function getBillingBalance(db: Database, accountId: string): Promise<BillingBalance> {
-  return await withAccountRls(db, accountId, async (scopedDb) => {
-    const [{ balance } = { balance: 0 }] = await scopedDb
-      .select({
-        balance: sql<number>`coalesce(sum(${schema.creditLedgerEntries.amountMicros}), 0)`,
-      })
-      .from(schema.creditLedgerEntries)
-      .where(eq(schema.creditLedgerEntries.accountId, accountId));
-    return {
-      accountId,
-      balanceMicros: Number(balance),
-      currency: "usd",
-      updatedAt: new Date().toISOString(),
-    };
-  });
 }
 
 /**
@@ -47845,7 +47847,7 @@ async function acquireLeaseOnce(
                 refusal,
               );
             }
-            const balance = await getBillingBalance(tx, accountId);
+            const balance = await getSpendableCreditBalance(tx, accountId);
             if (balance.balanceMicros <= 0) {
               throw new SandboxPaidComputeAdmissionError(workspaceId, sandboxGroupId);
             }
@@ -53939,7 +53941,7 @@ export async function heartbeatLeaseHolderStatus(
           (input.billingMode ?? snapshot?.mode) === "credits" &&
           snapshot?.mode === "credits" &&
           snapshot.rateMicrosPerSecond > 0 &&
-          (await getBillingBalance(tx, input.accountId)).balanceMicros <= 0
+          (await getSpendableCreditBalance(tx, input.accountId)).balanceMicros <= 0
         ) {
           // Touching the holder above is essential: the running writer remains
           // protected while it winds down. The provider/lease TTL is not renewed.
@@ -55336,7 +55338,7 @@ export async function reArmDrainingLease(
             ? snapshot.mode === "credits" && snapshot.rateMicrosPerSecond > 0
             : input.warmBilling?.rateMicrosPerSecond !== undefined &&
               input.warmBilling.rateMicrosPerSecond > 0) &&
-          (await getBillingBalance(tx, input.accountId)).balanceMicros <= 0
+          (await getSpendableCreditBalance(tx, input.accountId)).balanceMicros <= 0
         ) {
           throw new SandboxPaidComputeAdmissionError(input.workspaceId, input.sandboxGroupId);
         }

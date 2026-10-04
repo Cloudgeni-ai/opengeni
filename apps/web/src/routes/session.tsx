@@ -3301,7 +3301,10 @@ function SessionChatPane(props: {
                     (file) => file.status !== "failed" && file.contentType.startsWith("image/"),
                   )}
                   open={modelPickerSession === props.session.id && !pendingRetryInput}
-                  onOpenChange={(open) => setModelPickerSession(open ? props.session.id : null)}
+                  onOpenChange={(open) => {
+                    setModelPickerSession(open ? props.session.id : null);
+                    if (open) void modelCatalog.refresh();
+                  }}
                   rows={modelCatalog.rows}
                   model={model}
                   effort={reasoningEffort}

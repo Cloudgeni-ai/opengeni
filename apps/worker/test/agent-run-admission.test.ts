@@ -7,6 +7,8 @@ import { metadataWithTurnExecutionPolicyV1 } from "@opengeni/contracts";
 import { agentRunAdmissionDenial } from "../src/activities/agent-run-admission";
 import { createGoalActivities, goalRunBudgetBlocked } from "../src/activities/goals";
 import type { ControlActivityServices } from "../src/activities/types";
+import { checkLimit } from "@opengeni/core";
+import { ensureRunAllowedBetweenModelCalls } from "../src/activities/agent-turn/admission";
 
 const ACCOUNT = "00000000-0000-4000-8000-000000000001";
 const WORKSPACE = "00000000-0000-4000-8000-000000000002";
@@ -32,6 +34,58 @@ describe("worker agent-run admission funding", () => {
     allowance = spyOn(opengeniDb, "checkWorkspaceAllowance").mockResolvedValue(null);
   });
   afterEach(() => allowance.mockRestore());
+
+  test("API, run admission and between-call admission all respect eligible models", async () => {
+    const balance = spyOn(opengeniDb, "getBillingBalance").mockResolvedValue({
+      accountId: ACCOUNT,
+      balanceMicros: 100,
+      generalBalanceMicros: 0,
+      creditPolicyRevision: 7,
+      currency: "usd",
+      updatedAt: new Date().toISOString(),
+      promotionalCredits: [
+        {
+          grantId: crypto.randomUUID(),
+          label: "Welcome credits",
+          remainingMicros: 100,
+          eligibleModelIds: ["gpt-6-luna"],
+        },
+      ],
+    });
+    const codex = spyOn(opengeniDb, "isCodexBilledTurn").mockResolvedValue(false);
+    const services = {
+      db: {} as opengeniDb.Database,
+      settings: testSettings({ billingMode: "stripe" }),
+      entitlements: null,
+    };
+    try {
+      for (const model of ["gpt-6-luna", "gpt-6-sol"]) {
+        const allowed = model === "gpt-6-luna";
+        const input = { accountId: ACCOUNT, workspaceId: WORKSPACE, model, requestedAgentRuns: 1 };
+        expect((await checkLimit(services, { ...input, action: "agent_run:create" })).allowed).toBe(
+          allowed,
+        );
+        expect(await agentRunAdmissionDenial(services, input)).toBe(
+          allowed ? null : "insufficient_credits",
+        );
+        const check = ensureRunAllowedBetweenModelCalls({
+          ...services,
+          accountId: ACCOUNT,
+          workspaceId: WORKSPACE,
+          modelId: model,
+          isExternallyBilledTurn: false,
+          chargesOpenGeniCredits: true,
+          countsTowardTokenCap: true,
+          initiatingHumanSubjectId: null,
+        });
+        if (allowed) await expect(check).resolves.toBe(7);
+        else await expect(check).rejects.toThrow("insufficient Opengeni credits");
+      }
+    } finally {
+      balance.mockRestore();
+      codex.mockRestore();
+    }
+  });
 
   test("admits SuperGrok subscription runs with zero OpenGeni credits", async () => {
     const restoreBalance = mockZeroBalance();

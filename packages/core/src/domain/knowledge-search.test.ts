@@ -40,7 +40,7 @@ const usage = mock(
 );
 mock.module("@opengeni/db", () => ({
   listKnowledgeEntries: list,
-  getBillingBalance: async () => ({ balanceMicros: balance }),
+  getSpendableCreditBalance: async () => ({ balanceMicros: balance }),
   applyCreditDebitAfterUse: debits,
   checkWorkspaceAllowance: allowanceChecks,
   creditDebitAttributionForTurn: async (_db: unknown, input: { turnId: string }) => ({

@@ -1642,6 +1642,7 @@ function SessionsIndexRouteContent({
           <div className="mt-6">
             <Suspense fallback={null}>
               <EmptyCreditsNotice
+                creditFunding={selectedPolicyRow?.catalog.creditFunding}
                 workspaceId={workspaceId}
                 accountId={workspace?.accountId ?? null}
                 canBuyCredits={hasAccountPermission(
@@ -2147,6 +2148,9 @@ function SessionModelControl({
   return (
     <ModelPicker
       hasImageAttachments={hasImageAttachments}
+      onOpenChange={(open) => {
+        if (open) void modelCatalog.refresh();
+      }}
       rows={modelCatalog.rows}
       model={context.model}
       effort={context.reasoningEffort}

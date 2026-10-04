@@ -9418,6 +9418,9 @@
         "$.accountId": "string!",
         "$.balanceMicros": "integer!",
         "$.currency": "const!=[\"\\\"usd\\\"\"]",
+        "$.generalBalanceMicros": "integer?",
+        "$.promotionalCredits": "array?",
+        "$.promotionalCredits[]": "ref(PromotionalCreditBalance)",
         "$.updatedAt": "string!"
       }
     },
@@ -9433,6 +9436,7 @@
         "$.credit.amountMicros": "integer!",
         "$.credit.currency": "const!=[\"\\\"usd\\\"\"]",
         "$.credit.free": "boolean!",
+        "$.credit.promotionalScope": "ref(PromotionalCreditScope)?",
         "$.credit.state": "enum!=[\"\\\"granted\\\"\",\"\\\"pending\\\"\"]",
         "$.status": "enum!=[\"\\\"complete\\\"\",\"\\\"expired\\\"\",\"\\\"open\\\"\"]"
       }
@@ -12116,6 +12120,7 @@
         "$": "object",
         "$.amountUsd": "number?",
         "$.checkoutSessionId": "string!",
+        "$.promotionalScope": "ref(PromotionalCreditScope)?",
         "$.url": "string!"
       }
     },
@@ -18976,6 +18981,30 @@
         "$": "enum=[\"\\\"configured\\\"\",\"\\\"local\\\"\",\"\\\"managed\\\"\"]"
       }
     },
+    "PromotionalCreditBalance": {
+      "io": [
+        "output"
+      ],
+      "shape": {
+        "$": "object",
+        "$.eligibleModelIds": "array!",
+        "$.eligibleModelIds[]": "string",
+        "$.grantId": "string!",
+        "$.label": "string!",
+        "$.remainingMicros": "integer!"
+      }
+    },
+    "PromotionalCreditScope": {
+      "io": [
+        "output"
+      ],
+      "shape": {
+        "$": "object",
+        "$.eligibleModelIds": "array!",
+        "$.eligibleModelIds[]": "string",
+        "$.label": "string!"
+      }
+    },
     "ProposeRigChangeRequest": {
       "io": [
         "input"
@@ -25023,6 +25052,7 @@
         "$.cost": "ref(ModelCostClassV1)?",
         "$.credentialReadiness": "ref(ModelCredentialReadinessV1)!",
         "$.credentialSource": "ref(ModelCredentialSourceV1)?",
+        "$.creditFunding": "enum?=[\"\\\"general\\\"\",\"\\\"promotional\\\"\",\"\\\"unavailable\\\"\"]",
         "$.definitionVersion": "string?",
         "$.deployment": "object?",
         "$.deployment.upstreamModelId": "string!",
@@ -26520,6 +26550,8 @@
       "PreviewSkillImportRequest": "type",
       "ProductAccessMode": "type",
       "projectSessionRealtimeLifecycle": "value",
+      "PromotionalCreditBalance": "type",
+      "PromotionalCreditScope": "type",
       "ProposeRigChangeRequest": "type",
       "ProtectedAuthFillRequest": "type",
       "ProtectedAuthFillResponse": "type",
