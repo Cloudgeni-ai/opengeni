@@ -84248,7 +84248,9 @@ export async function addSessionSystemUpdateWithSourceMutation<
         // already-failed parent is settled authority and cannot be restarted
         // solely by a late child. An active session-level input wait is also an
         // explicit durable obligation, independent of whether the session has
-        // a goal, so an immediate child result may wake it.
+        // a goal, so an immediate child result may wake it. A parent with no
+        // goal at all (an ordinary chat that started a worker and promised its
+        // result) is woken by the child's terminal result.
         const waitingForInput =
           childLifecycleKind &&
           session.status !== "failed" &&
@@ -84256,7 +84258,10 @@ export async function addSessionSystemUpdateWithSourceMutation<
             .disposition === "held";
         const childNoticeMayWake =
           !childLifecycleKind ||
-          (session.status !== "failed" && (goalStatus === "active" || waitingForInput));
+          (session.status !== "failed" &&
+            (goalStatus === "active" ||
+              waitingForInput ||
+              (input.kind === "child_terminal_result" && goalStatus === null)));
         const shouldWake =
           !consumedByParentRead &&
           wakeClass === "immediate" &&
