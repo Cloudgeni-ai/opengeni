@@ -372,10 +372,8 @@ export async function prepareGovernanceAndModel(
       : null;
   const lazyToolTransport = lazyToolTransportForTurn(resolvedModel);
   const modelInputPolicy = modelAttachmentInputPolicyForTurn(resolvedModel);
-  // Use the proven wire capability, not the catalogue modality alone. Chat
-  // providers may advertise vision, but OpenGeni intentionally has no typed
-  // image transport for that wire yet; exposing view_image there would turn
-  // pixels into a multi-megabyte text/base64 function result.
+  // The shared input policy combines model modality with the supported wire
+  // transport, including typed image projection for vision-capable Chat models.
   const supportsImageInput = modelInputPolicy.supportsImageInput;
   media.modelCanReceiveRetainedSessionImages = supportsImageInput;
   const attachmentProjector = createModelHistoryAttachmentProjector(
