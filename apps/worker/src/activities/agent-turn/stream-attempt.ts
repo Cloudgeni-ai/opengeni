@@ -386,6 +386,7 @@ export async function runTurnStreamAttempt(
   );
   let parallelSessionTitle: ReturnType<typeof startParallelSessionTitleGeneration> | null = null;
   let parallelSessionTitleFinished = false;
+  let sessionTitleUsageReported = false;
   let sessionTitleGrant: Awaited<ReturnType<typeof reserveModelCallBudget>> | null = null;
   const settleSessionTitleUsage = async (
     usage: Parameters<typeof processSessionTitleModelUsageEvent>[0]["usage"],
@@ -418,6 +419,7 @@ export async function runTurnStreamAttempt(
       reservationReleases: sessionTitleGrant?.reservationReleases ?? [],
       leaseLostMessage: "Provider credential lease expired during session title generation",
     });
+    if (result.usageReported) sessionTitleUsageReported = true;
     if (result.usageReported && sessionTitleGrant) {
       billingState.pendingUsageReservations.delete(sessionTitleGrant.callId);
       sessionTitleGrant = null;
@@ -429,7 +431,11 @@ export async function runTurnStreamAttempt(
     const generated = await parallelSessionTitle?.finish();
     if (!generated) return;
 
-    if (generated.usage) await settleSessionTitleUsage(generated.usage);
+    // Production reports usage through onUsage before returning it. A runtime
+    // without that callback still needs the fallback; without a response ID,
+    // replaying an already reported result would mint a second debit identity.
+    if (generated.usage && !sessionTitleUsageReported)
+      await settleSessionTitleUsage(generated.usage);
     if (!generated.title) return;
 
     try {

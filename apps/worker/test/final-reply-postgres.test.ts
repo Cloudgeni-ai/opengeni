@@ -20,10 +20,11 @@ import {
   withWorkspaceRls,
 } from "@opengeni/db";
 import { and, eq } from "drizzle-orm";
+import { resolveAgentConfig } from "@opengeni/contracts";
 import * as schema from "@opengeni/db/schema";
 import { tool } from "@openai/agents";
 import { z } from "zod";
-import { createProductionAgentRuntime } from "@opengeni/runtime";
+import { createProductionAgentRuntime, generateSessionTitle } from "@opengeni/runtime";
 import {
   acquireSharedTestDatabase,
   assistantMessage,
@@ -55,6 +56,7 @@ describe("empty final reply production runtime with PostgreSQL", () => {
     completedGoal = true,
     unrelatedGoal = false,
     aggregateOnlyBilling = false,
+    titleUsageMode?: "callback-no-id" | "fallback-no-id" | "callback-with-id",
   ) {
     const suffix = crypto.randomUUID();
     const access = await bootstrapWorkspace(client.db, {
@@ -74,6 +76,17 @@ describe("empty final reply production runtime with PostgreSQL", () => {
       resources: [],
       tools: [],
       metadata: {},
+      ...(titleUsageMode
+        ? {
+            agentConfig: resolveAgentConfig({
+              creator: "api",
+              request: { capabilities: { from: "none" } },
+              deployment: { unavailable: {} },
+              workspace: { defaults: null, humanInputEnabled: true },
+              goal: false,
+            }).config!,
+          }
+        : {}),
       model: "scripted-model",
       reasoningEffort: "medium",
       latencyMode: "standard",
@@ -91,6 +104,16 @@ describe("empty final reply production runtime with PostgreSQL", () => {
     });
     const model = new ScriptedModel(steps);
     const production = createProductionAgentRuntime({ model });
+    const titleModel = new ScriptedModel([
+      { inputTokens: 100, outputText: "Budget accounting proof" },
+    ]);
+    if (titleUsageMode) {
+      const getTitleResponse = titleModel.getResponse.bind(titleModel);
+      titleModel.getResponse = async (request) => ({
+        ...(await getTitleResponse(request)),
+        responseId: titleUsageMode === "callback-with-id" ? "parallel-title-response" : undefined,
+      });
+    }
     if (aggregateOnlyBilling) {
       await applyCreditLedgerEntry(client.db, {
         accountId: grant.accountId,
@@ -105,6 +128,22 @@ describe("empty final reply production runtime with PostgreSQL", () => {
     let toolCalls = 0;
     const runtime = {
       ...production,
+      ...(titleUsageMode
+        ? {
+            generateSessionTitle: (
+              settings: Parameters<typeof generateSessionTitle>[0],
+              prompt: string,
+              options?: Parameters<typeof generateSessionTitle>[2],
+            ) =>
+              generateSessionTitle(settings, prompt, {
+                ...options,
+                client: undefined,
+                provider: undefined,
+                model: titleModel,
+                ...(titleUsageMode === "fallback-no-id" ? { onUsage: undefined } : {}),
+              }),
+          }
+        : {}),
       runStream: async (...args: Parameters<typeof production.runStream>) => {
         if (unrelatedGoal && model.calls === 0) {
           await createSessionGoal(client.db, {
@@ -218,6 +257,7 @@ describe("empty final reply production runtime with PostgreSQL", () => {
       result,
       model,
       toolCalls,
+      titleCalls: titleModel.calls,
       grant,
       session,
       activities,
@@ -247,6 +287,33 @@ describe("empty final reply production runtime with PostgreSQL", () => {
     ]);
     expect(actual.events.filter((e) => e.type === "turn.started")).toHaveLength(1);
   }, 60_000);
+  test.each(["callback-no-id", "fallback-no-id", "callback-with-id"] as const)(
+    "parallel title accounting debits one provider call once (%s)",
+    async (mode) => {
+      const answer = "Completed result.";
+      const actual = await run([{ inputTokens: 50, outputText: answer }], false, false, true, mode);
+      expect(actual.titleCalls).toBe(1);
+      expect(actual.turn?.status).toBe("completed");
+      const debits = await shared.admin<Array<{ amount_micros: string; idempotency_key: string }>>`
+        select amount_micros, idempotency_key from credit_ledger_entries
+        where account_id = ${actual.grant.accountId} and type = 'model_usage_debit'`;
+      expect(debits).toHaveLength(2);
+      const expectedCost = 50 + answer.length * 2 + 100 + "Budget accounting proof".length * 2;
+      expect(debits.reduce((sum, row) => sum + Number(row.amount_micros), 0)).toBe(-expectedCost);
+      expect(new Set(debits.map((row) => row.idempotency_key)).size).toBe(2);
+      expect(
+        await openUsageReservationQuantity(client.db, {
+          accountId: actual.grant.accountId,
+          workspaceId: actual.grant.workspaceId!,
+          eventType: "model.cost.reserved",
+          since: new Date(0),
+          holdSince: new Date(0),
+        }),
+      ).toBe(0);
+    },
+    60_000,
+  );
+
   test("aggregate-only usage bills both streams of a same-turn final-reply handoff", async () => {
     const answer = "Completed result: verified.";
     const actual = await run(
