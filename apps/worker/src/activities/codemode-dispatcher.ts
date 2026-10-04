@@ -20,7 +20,7 @@ import {
   CODEMODE_CLAIM_LEASE_MS,
   CODEMODE_CLAIM_HEARTBEAT_MS,
   CODEMODE_MAX_CONCURRENT_CALLS_PER_ATTEMPT,
-  type CodemodeOperation,
+  CodemodeOperation,
   type SessionEvent,
   type ToolDisplayMetadata,
   type ToolFamily,
@@ -197,6 +197,9 @@ export class CodemodeAttemptDispatcher {
     const operations = await listTurnCodemodeApprovals(this.db, this.scope);
     if (
       decisionOperationId &&
+      // Model-tool approval IDs are opaque strings. Only programmatic UUIDs
+      // can address the Codemode operation journal.
+      CodemodeOperation.shape.operationId.safeParse(decisionOperationId).success &&
       !operations.some((operation) => operation.operationId === decisionOperationId)
     ) {
       const decided = await readTurnCodemodeOperation(this.db, {
