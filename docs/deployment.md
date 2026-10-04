@@ -1438,25 +1438,14 @@ subsystem at a time. `docs/organization-tenancy.md` owns the boundary itself;
 this section owns the operator procedure. A pre-0264, pre-0275, or pre-0303
 image must never be started again.
 
-`0611_universal_session_tenancy_activation.sql` is the session-tenancy
-cutover and is `-- deployment-mode: maintenance`: stop every API, control
-worker, and turn worker and supply every runtime login through
-`OPENGENI_MIGRATION_APPLICATION_DATABASE_ROLES` (or
-`applicationDatabaseRoles`); a live listed identity aborts with SQLSTATE
-`55000`. Inside one transaction it write-locks the evidence sources, converges
-each organization that has no activation receipt with the reviewed
-deterministic connection-authority and session-ownership backfills, requires
-clean parity/inventory/classification evidence, records a receipt, and removes
-the receipt prerequisite from every runtime predicate. If any organization
-cannot be activated the migration fails with `universal session tenancy
-activation refused N organization(s): <id> [blockers]`; resolve those blockers
-with the backfill/repair procedures in
-[`organization-tenancy.md`](organization-tenancy.md#d-backfill) (never by
-inferring ownership) and rerun. Organizations that already hold a receipt are
-untouched, so the migration is correct whether or not the retired operator
-command ran first. No Only-me preference changes: shared-workspace Only me
-stays off until an owner or admin enables it. After commit, the previous
-post-0303 image remains restartable.
+`0611_universal_session_tenancy_activation.sql` makes session tenancy
+product-active for every organization and is `-- deployment-mode: rolling`: it
+only rewrites routine predicates (no table lock, backfill, or receipt write), so
+old and new images run side by side and an image rollback stays an ordinary
+deployment decision. Only-me chats default to enabled for every organization
+with no `organization_private_session_settings` row; owners and admins can
+still turn them off. Activation receipts keep only their legacy-lane meaning
+(see [`organization-tenancy.md`](organization-tenancy.md)).
 
 History: the `db:activate-session-tenancy` command (single and
 `--all-organizations`), the 0586 fleet marker procedure, and

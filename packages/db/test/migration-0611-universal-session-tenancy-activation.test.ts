@@ -311,5 +311,4 @@ describe("migration 0611 universal session tenancy activation", () => {
     });
     expect(await receiptCount(human.accountId)).toBe(0);
   }, 180_000);
-
 });

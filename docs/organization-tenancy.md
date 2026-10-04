@@ -753,7 +753,7 @@ consume that allowance, and exact retries still replay after it is full. Once
 the deployment has a session-tenancy activation witness (any receipt row), the
 same transaction validates the exact fresh graph and writes its receipt,
 enabled private-session setting, event, and immutable evidence. Since 0611 the
-receipt is evidence only; the enabled setting is the creator's Only-me default. The application role
+receipt is evidence only and Only me is on by default without it. The application role
 can execute only the public creation capability and has no direct DML on either
 receipt table or access to the owner-only activation helper.
 
@@ -1611,7 +1611,7 @@ and fresh-session configuration while narrowing the history spool.
 
 `0225_session_visibility_fork_activation.sql` shipped the first database
 surface; `0303_session_tenancy_product_activation.sql` replaces its unsafe
-mutation contract. Maintenance migration
+mutation contract. Rolling migration
 `0611_universal_session_tenancy_activation.sql` activated every organization:
 the per-organization version-1 `session_tenancy_activations` receipt is no
 longer a runtime prerequisite anywhere (history below).
@@ -1657,10 +1657,10 @@ organization-level gate on Only me. Its managed-session `GET`/`PATCH
 /v1/organizations/:organizationId/private-session-settings` API is backed by
 subject-bound SECURITY DEFINER functions with active-membership owner/admin
 role checks, optimistic versioning, and idempotent operation receipts; it never
-consults the organization members endpoint. Organizations that were
-operator-activated before 0323 were backfilled enabled; every other
-organization starts disabled until an owner or administrator enables Only-me
-chats (0611 changes no preference). Enablement does not grant access: any active
+consults the organization members endpoint. Since 0611 a missing row means
+enabled, so every organization has Only-me chats on by default; an owner or
+administrator disabling them writes an explicit disabled row (version 1 or
+later). Enablement does not grant access: any active
 member may use it only in a workspace where their ordinary grant carries
 `sessions:create`, and the private-create transaction rechecks their exact
 organization membership plus workspace membership. The setting is enforced by
@@ -1673,7 +1673,7 @@ Only-me create there needs no setting. Personal-workspace creates are not
 forced private by the server; the web still sends the ordinary workspace-default
 wire path for a Personal workspace.
 
-**Mutation-active only after an explicit per-organization cutover.**
+**Mutation-active for every organization.**
 `transition_session_visibility` and `fork_session_content` exist, are SECURITY
 DEFINER, are granted to the runtime role, are listed in
 `RUNTIME_TARGET_SCHEMA_CAPABILITY_ROUTINES`, and have a first-class adapter at
@@ -2088,17 +2088,16 @@ FORCE-RLS capability. It cannot inherit 0340's connection update capability or
 collide with a second OpenGeni schema in the same database.
 
 Migration 0340 also closes both ways this compatibility population could reopen.
-For an organization holding a `session_tenancy_activations` receipt - every
-organization that existed at 0611 plus every later self-service organization -
-`bind_connection_authority` refuses to mint a new personal connection without a
-live membership, surviving `legacy_user` rows are invisible to runtime reads,
-and the worker refuses a pre-snapshot workspace reference without an exact
-connection id before resolving any credential. Migration 0611 first converged
-deterministic `legacy_user` rows and refused to activate any organization with
-a residual. Since 0611 this receipt-keyed lane retirement
+For an organization holding a `session_tenancy_activations` receipt (written
+only by the retired operator command, or by the 0349/0399 greenfield helpers
+while a receipt witness existed), `bind_connection_authority` refuses to mint a
+new personal connection without a live membership, surviving `legacy_user` rows
+are invisible to runtime reads, and the worker refuses a pre-snapshot workspace
+reference without an exact connection id before resolving any credential. Since
+0611 this receipt-keyed lane retirement
 (`opengeni_private.session_tenancy_account_activated`) gates no product
-surface; other newly created organizations (for example a delegated embedding
-host whose users hold no organization membership) keep the compatibility lane.
+surface, and 0611 writes no receipts: every other organization keeps the
+compatibility lane exactly as before, so no stored authority becomes invisible.
 
 Both of those paths depend on one seam,
 `opengeni_private.bind_connection_owner_authority`, and it exists because
@@ -2608,20 +2607,13 @@ before canonical activation" is a per-subsystem statement:
     active organization member. An old writer must never be restarted after it
     either; see [`architecture.md`](architecture.md) and
     [`deployment.md`](deployment.md).
-  - `0611_universal_session_tenancy_activation.sql` activates session tenancy
-    for every organization. It rejects a live application role (SQLSTATE
-    `55000`), write-locks every evidence source, converges each receipt-less
-    organization with the reviewed deterministic connection-authority and
-    session-ownership backfills, and then requires the same evidence the
-    retired operator command did: zero parity gate violations, zero parity
-    lanes, and zero unresolved Variable Set / Sandbox Environment / Connected
-    Machine / connection classifications. Any failing organization aborts the
-    whole migration with its id and blockers; organizations that already hold
-    a receipt are untouched. It then removes the receipt prerequisite from
-    every product predicate (the receipt-keyed legacy-lane retirement
-    predicate is kept, see Connection authority convergence). Post-0303 images stay restartable afterwards (the
-    retired startup interlock answers false), but activation itself cannot be
-    undone.
+  - `0611_universal_session_tenancy_activation.sql` (rolling) activates
+    session tenancy for every organization by rewriting routine predicates
+    only: no product path consults a receipt, the retired startup interlock
+    answers false, and a missing Only-me setting row means enabled. It writes
+    no receipt and backfills nothing; the receipt-keyed legacy-lane retirement
+    predicate is kept (see Connection authority convergence). Old and new
+    images may run side by side.
 
 The remaining phase-F work named in [F. Activate](#f-activate) has therefore not
 crossed its boundary yet.
@@ -2655,24 +2647,23 @@ Once an activation migration commits for a subsystem:
 History: 0303-0586 activated session tenancy per organization through a
 drained `db:activate-session-tenancy` command, settled backfill receipts, and
 the `OPENGENI_ORGANIZATION_TENANCY_CANONICAL_ACTIVATION_ENABLED` switch with a
-startup interlock. Migration 0611 replaced all of it with one universal,
-evidence-checked activation; the variable is now accepted and ignored with a
-deprecation warning.
+startup interlock. Migration 0611 made activation universal; the variable is
+now accepted and ignored with a deprecation warning.
 
 The 0349 (self-service setup) and 0399 (additional organization) helpers still
-append an evidence receipt plus an enabled Only-me setting for a fresh
-organization when any receipt witness exists, so new self-service owners keep
-Only me on by default in shared workspaces. Without a witness (an empty
-deployment) the setting simply starts disabled. Their owner-only helpers and
-evidence tables keep the FORCE-RLS and no-runtime-access posture described in
-their migrations.
+append an evidence receipt plus an explicit enabled Only-me setting for a fresh
+organization when any receipt witness exists; without a witness they do
+nothing and the organization relies on the enabled default. Either way a new
+self-service owner has Only me on with no operator action. Their owner-only
+helpers and evidence tables keep the FORCE-RLS and no-runtime-access posture
+described in their migrations.
 
 ### What an operator must not do
 
 - Do not restart a pre-activation image after an activation migration has
   committed, and do not attempt a mixed-version rolling rollback across one.
-  This already applies to `0264`, `0275`, and pre-0303 images; `0611` keeps
-  post-0303 images restartable.
+  This already applies to `0264`, `0275`, and pre-0303 images; rolling `0611`
+  keeps post-0303 images restartable.
 - Do not run an activation migration with a live application. The
   `opengeni_app` session guard aborts with SQLSTATE `55000` and rolls its
   transaction back cleanly; treat that as the contract, not as a race to retry.
