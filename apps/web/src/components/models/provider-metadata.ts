@@ -33,9 +33,9 @@ export const ORGANIZATION_PROVIDER_META: Record<
     shortName: "Claude",
     provider: "claude_subscription",
     billedTo: "The connected Claude subscription",
-    summary: "Use your Claude plan in OpenGeni. Sign in to check usage and reset times.",
+    summary: "Use your Claude plan in Opengeni. Sign in to check usage and reset times.",
     keyHelp:
-      "Run claude setup-token in your terminal, then paste the token here. The token uses your subscription limits. Replace it when it expires or is revoked; OpenGeni does not refresh setup tokens.",
+      "Run claude setup-token in your terminal, then paste the token here. The token uses your subscription limits. Replace it when it expires or is revoked; Opengeni does not refresh setup tokens.",
     keyAriaLabel: "Claude subscription setup token",
     credentialLabelText: "Sign-in",
     customModelsHeading: "Claude models",

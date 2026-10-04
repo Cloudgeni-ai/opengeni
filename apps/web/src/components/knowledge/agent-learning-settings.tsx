@@ -11,6 +11,7 @@ import { Button } from "@/components/ui/button";
 import { ErrorMessage } from "@/components/ui/error-message";
 import { Select } from "@/components/ui/select";
 import { useAppContext } from "@/context";
+import { LEARNING_MODE_LABEL } from "@/lib/agent-learning-vocabulary";
 import {
   apiErrorAdvice,
   apiErrorDetails,
@@ -18,11 +19,7 @@ import {
   userErrorText,
 } from "@/lib/api-error";
 
-export const LEARNING_MODE_LABEL: Record<AgentLearningMode, string> = {
-  automatic: "Automatic",
-  review_first: "Review first",
-  off: "Off",
-};
+export { LEARNING_MODE_LABEL };
 const UPDATE_PERMISSION_HELP =
   "Automatic applies agent changes right away. Review first waits for your OK in Knowledge › Review. Off stops agent changes.";
 
@@ -101,8 +98,8 @@ export function AgentLearningSettingsEditor(props: AgentLearningSettingsEditorPr
   return <AgentLearningSettingsFields key={identity} {...props} />;
 }
 /**
- * The last settings read per caller and scope. Chat settings in the composer
- * opens straight onto them and refreshes in place, instead of loading.
+ * The last settings read per caller and scope. A chat's Agent tab opens
+ * straight onto them and refreshes in place, instead of loading.
  */
 const settingsCache = new WeakMap<
   object,
@@ -274,7 +271,7 @@ function AgentLearningSettingsFields(props: AgentLearningSettingsEditorProps) {
         aria-busy={refreshing || undefined}
         className="divide-y divide-border"
       >
-        <legend className="sr-only">{props.compact ? "Agent updates" : "Agent learning"}</legend>
+        <legend className="sr-only">Agent learning</legend>
         {CATEGORIES.map(({ key, label, description }) => (
           <div key={key} className="flex flex-wrap items-center justify-between gap-3 py-3">
             <div className="min-w-0 flex-1">
@@ -390,7 +387,7 @@ export function AgentLearningDraftEditor(props: {
   return (
     <fieldset disabled={props.disabled} className={props.compact ? "min-w-0" : "grid gap-3"}>
       <legend className={props.compact ? "sr-only" : "mb-2 text-sm font-medium"}>
-        {props.compact ? "Agent updates" : "Agent learning"}
+        Agent learning
       </legend>
       {!props.compact ? (
         <p className="text-xs text-fg-muted">

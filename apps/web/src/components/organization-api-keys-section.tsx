@@ -61,8 +61,6 @@ export type OrganizationApiKeysSectionProps = {
    */
   view?: "new-key" | undefined;
   onViewChange?: (view: "new-key" | undefined) => void;
-  /** This server accepts agent settings: the quick start shows `agent`. */
-  agentSettings?: boolean;
   /** Shared workspaces for "Only selected workspaces"; null while loading. */
   workspaces?: { id: string; name: string }[] | null;
   /** The organization's service accounts, for "Service account" on Create API key. */
@@ -353,10 +351,7 @@ export function OrganizationApiKeysSection(props: OrganizationApiKeysSectionProp
         >
           {body}
         </Section>
-        <IntegrationGuide
-          organizationId={props.organizationId}
-          agentSettings={props.agentSettings === true}
-        />
+        <IntegrationGuide organizationId={props.organizationId} />
         <DestructiveConfirm
           open={revokingKey !== null}
           onOpenChange={(open) => {
@@ -632,14 +627,8 @@ function CreateApiKeyPage({
 }
 
 /** How an external product uses the key: collapsed, for the people who need it. */
-function IntegrationGuide({
-  organizationId,
-  agentSettings,
-}: {
-  organizationId: string;
-  agentSettings: boolean;
-}) {
-  const quickStart = organizationQuickStart(organizationId, agentSettings);
+function IntegrationGuide({ organizationId }: { organizationId: string }) {
+  const quickStart = organizationQuickStart(organizationId);
   const [copied, setCopied] = useState(false);
   return (
     <div className="min-w-0">
@@ -698,9 +687,8 @@ function IntegrationGuide({
   );
 }
 
-function organizationQuickStart(organizationId: string, agentSettings: boolean): string {
-  if (agentSettings) {
-    return `import { OpenGeniClient } from "@opengeni/sdk";
+function organizationQuickStart(organizationId: string): string {
+  return `import { OpenGeniClient } from "@opengeni/sdk";
 
 const client = new OpenGeniClient({
   baseUrl: process.env.OPENGENI_API_BASE_URL!,
@@ -726,28 +714,4 @@ const session = await client.createSession(workspace.id, {
 });
 
 // session.agent and session.effectiveTools show what it can do.`;
-  }
-  return `import { OpenGeniClient } from "@opengeni/sdk";
-
-const client = new OpenGeniClient({
-  baseUrl: process.env.OPENGENI_API_BASE_URL!,
-  apiKey: process.env.OPENGENI_API_KEY!,
-});
-
-const { workspace } = await client.ensureWorkspace({
-  accountId: "${organizationId}",
-  externalSource: "your-product",
-  externalId: tenant.id,
-  name: tenant.name,
-});
-
-await client.updateWorkspaceSettings(workspace.id, {
-  agentHumanInputEnabled: true,
-});
-
-const session = await client.createSession(workspace.id, {
-  initialMessage: userMessage,
-  idempotencyKey: productRequest.id,
-  skills: selectedSkills,
-});`;
 }

@@ -465,6 +465,8 @@ try {
     "package/dist/github-repository-contracts.d.ts",
     "package/dist/session-titles.js",
     "package/dist/session-titles.d.ts",
+    "package/dist/connection-account-label.js",
+    "package/dist/connection-account-label.d.ts",
   ]) {
     if (!contractsTarballContents.split("\n").includes(artifact)) {
       throw new Error(`contracts tarball is missing ${artifact}`);
@@ -488,7 +490,11 @@ try {
   ) {
     throw new Error("contracts tarball has an invalid ./session-titles export");
   }
-  for (const subpath of ["github-repository", "github-repository-contracts"] as const) {
+  for (const subpath of [
+    "github-repository",
+    "github-repository-contracts",
+    "connection-account-label",
+  ] as const) {
     const entry = contracts.manifest.exports?.[`./${subpath}`];
     if (
       !entry ||
@@ -924,6 +930,19 @@ try {
       'import type { CreateSessionRequest, Session } from "@opengeni/sdk";\ntype Assert<T extends true> = T;\nexport type CreateSessionRequestExposesFirstPartyMcpTools = Assert<"firstPartyMcpTools" extends keyof CreateSessionRequest ? true : false>;\nexport type SessionExposesFirstPartyMcpTools = Assert<"firstPartyMcpTools" extends keyof Session ? true : false>;\n',
     ),
     writeFile(
+      join(consumerRoot, "connection-account-label-proof.ts"),
+      [
+        'import { connectionAccountIdentityLabel } from "@opengeni/contracts/connection-account-label";',
+        'const metadata = { providerEmail: "person@example.invalid", slackTeamName: "Host workspace" };',
+        "const before = JSON.stringify(metadata);",
+        'if (connectionAccountIdentityLabel(metadata, "Fallback") !== "person@example.invalid · Host workspace") throw new Error("packed contracts lost the account identity label");',
+        'if (connectionAccountIdentityLabel({ email: 42, teamName: {} }, "Fallback") !== "Fallback") throw new Error("packed contracts accepted invalid identity metadata");',
+        'if (JSON.stringify(metadata) !== before) throw new Error("packed account label mutated metadata");',
+        'console.log("CONNECTION_ACCOUNT_LABEL_PACKAGE_OK");',
+        "",
+      ].join("\n"),
+    ),
+    writeFile(
       join(consumerRoot, "session-title-proof.ts"),
       [
         'import { AUTOMATIC_SESSION_TITLE_FALLBACK, deriveSessionDisplayTitle } from "@opengeni/sdk";',
@@ -1251,6 +1270,7 @@ try {
   }
   await run(["bun", "run", "typecheck"], consumerRoot);
   await run(["bun", "run", "typecheck:nodenext"], consumerRoot);
+  await run(["bun", "connection-account-label-proof.ts"], consumerRoot);
   await run(["bun", "run", "build"], consumerRoot);
   await run(["bun", "run", "build:session"], consumerRoot);
   await run(["bun", "run", "build:worker-entry"], consumerRoot);

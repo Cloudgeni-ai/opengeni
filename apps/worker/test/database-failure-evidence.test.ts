@@ -33,7 +33,7 @@ test("unwrapped database failures retain SQLSTATE and identifiers without expand
     },
   );
   expect(agentRunFailurePayload(outer)).toEqual({
-    error: "OpenGeni encountered a database error.",
+    error: "Opengeni encountered a database error.",
     code: "db_failure",
     sqlState: "42501",
     database: {
@@ -79,7 +79,7 @@ test("five-character application codes do not become database diagnostics", () =
     routine: "exec_stmt_raise",
   });
   expect(agentRunFailurePayload(driver)).toEqual({
-    error: "OpenGeni encountered a database error.",
+    error: "Opengeni encountered a database error.",
     code: "db_failure",
     sqlState: "E1234",
     database: { severity: "ERROR", routine: "exec_stmt_raise" },
@@ -431,7 +431,7 @@ test("database history wrappers and ORM transport errors keep raw evidence out o
     Object.assign(new Error("fixture-value"), { code: "CONNECTION_CLOSED" }),
   );
   expect(agentRunFailurePayload(transport)).toEqual({
-    error: "OpenGeni encountered a database error.",
+    error: "Opengeni encountered a database error.",
     code: "db_failure",
     sqlState: null,
   });
@@ -441,7 +441,7 @@ test("raw database payloads never expose SQL or acquire provider replay authorit
   for (const sqlState of ["40P01", "40001", "40003", "42501"]) {
     const error = rawDatabaseFailure(sqlState, "rate limit 429 fixture-value");
     const payload = agentRunFailurePayload(error);
-    expect(payload).toMatchObject({ error: "OpenGeni encountered a database error.", sqlState });
+    expect(payload).toMatchObject({ error: "Opengeni encountered a database error.", sqlState });
     expect(payload.retryable).not.toBe(true);
     expect(payload.code).not.toBe("provider_rate_limited");
     expect(JSON.stringify(payload)).not.toContain("fixture-value");

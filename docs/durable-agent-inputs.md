@@ -40,6 +40,31 @@ The database links every delivered input to one
 Agent Steer is guaranteed admission to the bounded batch and is serialized last
 so an older goal or lifecycle notice cannot override the replacement direction.
 
+Execution ownership is selected before batching. Ordinary same-human agent
+messages and child results use the receiving chat's last started user/API request
+context, including its accepted accounts and provider choices. Sender snapshots
+remain immutable evidence; differences in selected tools/accounts do not split
+these informational inputs. A queued human request or a resumed turn uses its
+own exact context. Different humans, service-only and genuinely restricted
+origins retain their explicit lane, as do Steer and captured schedules. Goal and
+command inputs retain their causal receipt checks. The limits remain 100 members
+and 256 KiB of canonical input per batch; later arrivals remain pending.
+
+`sessions.execution_context_turn_id` advances on durable first `turn.started`,
+not claim or queue admission. Recovery and refused startup cannot replace it.
+A context-created turn stores its immutable source reference; SQL validates the
+complete delivery and copies existing personal receipts without refreshing
+connection or membership generations. Credential resolution still checks live
+revocation. Migration 0608 requires drained writers; after activation run only
+context-aware images. It backfills only started user/API turns proved by events
+and attempts within the current execution-authority epoch. Unprovable legacy
+sessions keep the explicit-source behavior until a new request actually starts.
+
+When known selections differ, durable model memory may include a factual note
+addressing the agent as “you.” It has no permission effect and is absent from the
+normal timeline. No content classification, file-read inference or receipt
+semantics are involved.
+
 Pending machine input also wakes a session-level `wait_for_input` declaration.
 The wait belongs to the session, not its goal: it persists the exact declaring
 turn, reason, set time, and absolute PostgreSQL deadline. An `immediate` update

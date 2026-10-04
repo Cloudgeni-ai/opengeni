@@ -2315,8 +2315,8 @@ function execRequiresOpStream(cause?: OpStreamUnavailableError): SelfhostedContr
   const runnerUpgrade = cause?.unavailableKind === "runner" || cause === undefined;
   return new SelfhostedControlError({
     message: runnerUpgrade
-      ? "This Connected Machine does not advertise the streaming command protocol required for exec. Update and reconnect the OpenGeni agent. The command was not started."
-      : "The Connected Machine streaming channel is temporarily unavailable. OpenGeni did not downgrade to an ambiguous request/reply command; the command was not started. Retry after the machine reconnects.",
+      ? "This Connected Machine does not advertise the streaming command protocol required for exec. Update and reconnect the Opengeni agent. The command was not started."
+      : "The Connected Machine streaming channel is temporarily unavailable. Opengeni did not downgrade to an ambiguous request/reply command; the command was not started. Retry after the machine reconnects.",
     code: runnerUpgrade ? ErrorCode.ERROR_CODE_UNSUPPORTED : ErrorCode.ERROR_CODE_STREAM,
     reason: runnerUpgrade ? null : "agent_reconnecting",
     retryable: !runnerUpgrade,

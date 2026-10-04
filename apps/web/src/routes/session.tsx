@@ -40,6 +40,7 @@ import {
 import { LightboxProvider, type WorkspaceTab } from "@opengeni/react";
 import { MACHINES_SESSION_POLL_MS } from "@opengeni/react/machines";
 import {
+  ApprovalSurface,
   MessageTimeline,
   SessionChrome,
   KnowledgeActivityProvider,
@@ -71,12 +72,10 @@ import { useNavigate } from "@tanstack/react-router";
 import {
   BotIcon,
   BugIcon,
-  CheckIcon,
   Loader2Icon,
   MenuIcon,
   MessagesSquareIcon,
   PanelsTopLeftIcon,
-  XIcon,
 } from "lucide-react";
 import {
   createElement,
@@ -118,7 +117,6 @@ import { SessionVariableSetPicker } from "@/components/session/session-variable-
 import { useSessionVariableSetPickerState } from "@/lib/use-session-variable-set-picker-state";
 import { Button } from "@/components/ui/button";
 import { EmptyState } from "@/components/ui/empty-state";
-import { Notice } from "@/components/ui/notice";
 import { useAppContext } from "@/context";
 import { useBrowserAccountBridgeBlocker } from "@/lib/browser-account-bridge";
 import type {
@@ -133,6 +131,7 @@ import {
 } from "@/lib/capabilities";
 import { startMcpOAuthWithTimeout } from "@/lib/mcp-oauth";
 import { hasAccountPermission, hasWorkspacePermission } from "@/lib/permissions";
+import { chatLearningScope } from "@/lib/chat-learning-scope";
 import { isPersonalWorkspace } from "@/lib/managed-self-context";
 import {
   isTerminalSessionStatus,
@@ -1097,6 +1096,16 @@ export function SessionRoute({
     setSandboxFileRequest(null);
   }, [sessionId]);
   const setInspectorOpen = context.setInspectorOpen;
+  // Composer + > Chat settings opens the dock's Agent tab at its Agent learning.
+  const agentSettingsRequestSeq = useRef(0);
+  const [agentSettingsRequest, setAgentSettingsRequest] = useState<{
+    sessionId: string;
+    requestId: number;
+  } | null>(null);
+  const openAgentSettings = useCallback(() => {
+    setAgentSettingsRequest({ sessionId, requestId: ++agentSettingsRequestSeq.current });
+    setInspectorOpen(true);
+  }, [sessionId, setInspectorOpen]);
   const openSandboxFile = useCallback(
     (path: string, line?: number) => {
       setSandboxFileRequest({
@@ -1218,6 +1227,7 @@ export function SessionRoute({
       resolveProviderLogo={resolveProviderLogo}
       onReloadSession={refreshSession}
       onOpenSandboxFile={openSandboxFile}
+      onOpenAgentSettings={openAgentSettings}
     />
   );
 
@@ -1255,6 +1265,9 @@ export function SessionRoute({
         dockCollapsed={!context.inspectorOpen}
         onDockCollapsedChange={(collapsed) => context.setInspectorOpen(!collapsed)}
         openFileRequest={sandboxFileRequest}
+        openAgentSettingsRequest={
+          agentSettingsRequest?.sessionId === sessionId ? agentSettingsRequest : null
+        }
         onOpenNavigation={() => {
           context.setInspectorOpen(false);
           rail.setDrawerOpen(true);
@@ -1310,8 +1323,30 @@ function SessionDock(props: {
     line?: number | null;
     requestId: number;
   } | null;
+  /** Open the Agent tab at its Agent learning section. A new requestId reopens it. */
+  openAgentSettingsRequest?: { requestId: number } | null;
 }) {
   const context = useAppContext();
+  // One request sequence for every tab the host opens (an artifact, the Agent
+  // tab): the dock ignores a requestId it has already handled.
+  const tabRequestSeq = useRef(0);
+  const [tabRequest, setTabRequest] = useState<{
+    sessionId: string;
+    tab: string;
+    requestId: number;
+  } | null>(null);
+  const agentSettingsRequestId = props.openAgentSettingsRequest?.requestId ?? null;
+  const [agentLearningFocus, setAgentLearningFocus] = useState(0);
+  useEffect(() => {
+    if (agentSettingsRequestId === null) return;
+    setTabRequest({
+      sessionId: props.sessionId,
+      tab: "agent",
+      requestId: ++tabRequestSeq.current,
+    });
+    setAgentLearningFocus((value) => value + 1);
+  }, [agentSettingsRequestId, props.sessionId]);
+  const currentTabRequest = tabRequest?.sessionId === props.sessionId ? tabRequest : null;
   const dockLayoutStorageId = sessionDockLayoutStorageId(
     context.accessContext.subjectId,
     props.sessionId,
@@ -1361,6 +1396,15 @@ function SessionDock(props: {
   } | null>(null);
   const currentArtifactRequest =
     artifactRequest?.sessionId === props.sessionId ? artifactRequest : null;
+  const artifactTabRequestId = currentArtifactRequest?.requestId ?? null;
+  useEffect(() => {
+    if (artifactTabRequestId === null) return;
+    setTabRequest({
+      sessionId: props.sessionId,
+      tab: "artifacts",
+      requestId: ++tabRequestSeq.current,
+    });
+  }, [artifactTabRequestId, props.sessionId]);
   const artifactSummaries = [...artifactState.artifacts];
   // A just-published artifact may be linked before discovery refresh completes, or
   // belong to another session in this workspace. The viewer still authorizes its read.
@@ -1416,7 +1460,7 @@ function SessionDock(props: {
       ),
     },
   ];
-  if (props.session && context.clientConfig.agentConfig?.enabled) {
+  if (props.session) {
     trailingTabs.push({
       id: "agent",
       label: "Agent",
@@ -1428,6 +1472,7 @@ function SessionDock(props: {
             session={props.session}
             lastChange={lastAgentChange(props.events)}
             onReloadSession={props.onReloadSession}
+            learningFocusRequest={agentLearningFocus}
           />
         </Suspense>
       ),
@@ -1494,7 +1539,7 @@ function SessionDock(props: {
           {props.primary}
         </ArtifactLinkBoundary>
       }
-      openTabRequest={currentArtifactRequest}
+      openTabRequest={currentTabRequest}
       trailingTabs={trailingTabs}
       collapsed={props.dockCollapsed}
       onCollapsedChange={props.onDockCollapsedChange}
@@ -1650,6 +1695,8 @@ function SessionChatPane(props: {
   resolveProviderLogo: (providerDomain: string) => string | null;
   onReloadSession: () => Promise<void>;
   onOpenSandboxFile: (path: string, line?: number) => void;
+  /** Composer + > Chat settings: open this chat's Agent tab. */
+  onOpenAgentSettings: () => void;
 }) {
   const context = useAppContext();
   const [findOpen, setFindOpen] = useState(!!props.searchTarget.find);
@@ -1870,14 +1917,14 @@ function SessionChatPane(props: {
         return;
       }
       setApprovalPending((current) => ({ ...current, [approvalId]: decision }));
+      // A failure propagates so the approval surface releases its fence and
+      // the buttons stay live for a retry.
       try {
         await (decision === "approve" ? props.onApprove(approvalId) : props.onReject(approvalId));
         setApprovalSettled((current) => ({
           ...current,
           [approvalId]: decision,
         }));
-      } catch {
-        // The route already surfaced a toast; leave the buttons live to retry.
       } finally {
         setApprovalPending((current) => {
           const next = { ...current };
@@ -3020,47 +3067,12 @@ function SessionChatPane(props: {
           actionable Approve/Reject buttons for an already-resumed turn. */}
       {props.approvals.length > 0 && props.session.status === "requires_action" ? (
         <div className="mx-auto w-full max-w-3xl shrink-0 px-4 sm:px-6">
-          <div className="grid max-h-64 gap-3 overflow-y-auto pb-2">
-            {props.approvals.map((approval) => {
-              const pending = approvalPending[approval.id];
-              const settled = approvalSettled[approval.id];
-              const busy = Boolean(pending) || Boolean(settled);
-              const payload = JSON.stringify(approval.arguments ?? approval.raw ?? {}, null, 2);
-              return (
-                <Notice key={approval.id} tone="waiting" title={approval.name}>
-                  <pre className="mt-2 max-h-40 overflow-auto whitespace-pre-wrap rounded-md border border-border bg-surface-2/60 p-2.5 font-mono text-xs leading-5 text-fg-muted">
-                    {payload}
-                  </pre>
-                  <div className="mt-3 flex justify-end gap-2">
-                    <Button
-                      size="sm"
-                      disabled={busy}
-                      onClick={() => void decideApproval(approval.id, "approve")}
-                    >
-                      {pending === "approve" ? (
-                        <Loader2Icon className="size-3.5 animate-spin" />
-                      ) : (
-                        <CheckIcon className="size-3.5" />
-                      )}
-                      {settled === "approve" ? "Approved" : "Approve"}
-                    </Button>
-                    <Button
-                      size="sm"
-                      variant="destructive"
-                      disabled={busy}
-                      onClick={() => void decideApproval(approval.id, "reject")}
-                    >
-                      {pending === "reject" ? (
-                        <Loader2Icon className="size-3.5 animate-spin" />
-                      ) : (
-                        <XIcon className="size-3.5" />
-                      )}
-                      {settled === "reject" ? "Rejected" : "Reject"}
-                    </Button>
-                  </div>
-                </Notice>
-              );
-            })}
+          <div className="max-h-80 overflow-y-auto pb-2">
+            <ApprovalSurface
+              approvals={props.approvals}
+              onApprove={(approval) => decideApproval(approval.id, "approve")}
+              onReject={(approval) => decideApproval(approval.id, "reject")}
+            />
           </div>
         </div>
       ) : null}
@@ -3171,13 +3183,12 @@ function SessionChatPane(props: {
                   chatSettings={{
                     workspaceId: props.session.workspaceId,
                     sessionId: props.session.id,
-                    scope:
-                      props.session.tenancy?.visibility === "private" ||
-                      props.session.memoryScope === "user" ||
-                      isPersonalWorkspace(workspace, context.managedSelfContext)
-                        ? "personal"
-                        : "workspace",
+                    scope: chatLearningScope(
+                      props.session,
+                      isPersonalWorkspace(workspace, context.managedSelfContext),
+                    ),
                     canEdit: workspacePermissions.includes("sessions:control"),
+                    onOpen: props.onOpenAgentSettings,
                   }}
                   workspaceId={props.session.workspaceId}
                   disabled={terminal || composer.sending}

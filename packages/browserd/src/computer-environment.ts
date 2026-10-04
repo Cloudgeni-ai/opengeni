@@ -208,7 +208,7 @@ export class LinuxVirtualComputerEnvironmentAllocator implements ComputerEnviron
           "-geometry",
           "112x34+28+28",
           "-title",
-          "OpenGeni Sandbox",
+          "Opengeni Sandbox",
           "-bg",
           "#101318",
           "-fg",

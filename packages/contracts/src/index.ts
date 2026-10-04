@@ -2602,8 +2602,7 @@ export const UpdateWorkspaceSettingsRequest = z
     slackReactionSummon: WorkspaceSlackReactionSummonSettings.optional(),
     slackOrchestrationNotices: WorkspaceSlackOrchestrationNoticeSettings.optional(),
     defaultSandboxImage: WorkspaceDefaultSandboxImage.nullable().optional(),
-    // Agent defaults for new sessions; null clears them. Requires the agent
-    // configuration admission switch.
+    // Agent defaults for new sessions; null clears them.
     sessionAgentDefaults: WorkspaceAgentDefaults.nullable().optional(),
   })
   .passthrough();
@@ -2812,7 +2811,7 @@ export const ServiceTurnInitiatorContext = TurnInitiatorContext.superRefine((val
       ctx.addIssue({
         code: z.ZodIssueCode.custom,
         path: [key],
-        message: `${key} is reserved OpenGeni initiator context`,
+        message: `${key} is reserved Opengeni initiator context`,
       });
     }
   }
@@ -8893,6 +8892,8 @@ type RenderableSessionSystemUpdate = Pick<
  */
 export type SessionSystemUpdateBatchRenderOptions = {
   deliveredAt?: Date | string | null;
+  /** Server-derived configuration facts, model memory only. */
+  selectionNotes?: Readonly<Record<string, string>>;
 };
 
 function renderSessionSystemUpdateDeliveredAt(
@@ -8930,6 +8931,9 @@ export function renderSessionSystemUpdateBatch(
         summary: update.summary,
         payload: update.payload,
         lineage: update.lineage,
+        ...(options.selectionNotes?.[update.id]
+          ? { selectionNote: options.selectionNotes[update.id] }
+          : {}),
       })),
     }),
   ].join("\n");
@@ -16253,7 +16257,7 @@ export const CreateSessionRequest = /* @__PURE__ */ defineSkillContractSchema(()
       firstPartyMcpTools: z.array(FirstPartyMcpToolName).optional(),
       // One agent configuration: capabilities, identity, instructions alias and
       // renderer. Omission keeps today's behavior (or inherits a configured
-      // parent). Children may only narrow. Behind the admission switch.
+      // parent). Children may only narrow.
       agent: AgentConfigRequest.optional(),
       // Third-party MCP servers attached only to this session. For an agent-created
       // child, omission snapshots its trusted immediate parent's server definitions,

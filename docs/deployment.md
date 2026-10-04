@@ -12,6 +12,19 @@ additions. The final `knowledge_index_claim` replacement pins
 `pg_catalog, <data schema>, pg_temp`, so temporary tables cannot shadow its
 accounting sources. Upgrade consumers before enabling producer writes.
 
+## Receiving chat execution context (0608)
+
+`0608_receiver_execution_context.sql` requires maintenance. Stop every API,
+control-worker and turn-worker database writer; supply their complete login list
+through `OPENGENI_MIGRATION_APPLICATION_DATABASE_ROLES`, migrate, and provision
+runtime roles. Start only images containing this migration's context-aware inbox
+code. After activation, recover forward; do not restart older writers.
+
+The backfill selects each chat's latest proved, started user/API request within
+its current execution-authority epoch. Queued or refused requests do not qualify.
+Chats without a qualifying request retain explicit-source inbox behavior until
+a new user/API request starts. Existing inbox rows and read receipts are unchanged.
+
 ## Scheduled Slack channel posts (0530)
 
 `0530_scheduled_slack_bot_messages.sql` is rolling. It adds the private

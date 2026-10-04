@@ -1,23 +1,23 @@
 ---
 name: build-with-opengeni
 description: >-
-  Integrate OpenGeni agents into the user's own product, backend, website, CLI,
+  Integrate Opengeni agents into the user's own product, backend, website, CLI,
   or automation with the @opengeni/sdk and @opengeni/react packages: server-side
   API keys, per-user isolation with asUser, the packaged session proxy, the
   embedded chat UI, and a minimal hello-world. Also spins up a small local demo
-  web app with an OpenGeni agent chat whose chats appear as sessions in an
-  OpenGeni workspace. Use when the user wants to add AI agents, an assistant, or
-  OpenGeni to an app they are building, or asks for a local OpenGeni chat app or
+  web app with an Opengeni agent chat whose chats appear as sessions in an
+  Opengeni workspace. Use when the user wants to add AI agents, an assistant, or
+  Opengeni to an app they are building, or asks for a local Opengeni chat app or
   demo. Not for offloading the current coding task (use offload-to-opengeni) or
-  for changing OpenGeni itself.
+  for changing Opengeni itself.
 ---
 
-# Build with OpenGeni
+# Build with Opengeni
 
-The user's product keeps its own users and UI. A separate OpenGeni deployment
-(OpenGeni Cloud at `https://app.opengeni.ai`, or self-hosted) runs agent
+The user's product keeps its own users and UI. A separate Opengeni deployment
+(Opengeni Cloud at `https://app.opengeni.ai`, or self-hosted) runs agent
 sessions, tools, and sandboxes. The browser talks only to the product's
-backend; the backend talks to OpenGeni with an organization API key that never
+backend; the backend talks to Opengeni with an organization API key that never
 leaves the server.
 
 This is a condensed entry point. The complete, canonical guide ships beside it
@@ -28,7 +28,7 @@ https://docs.opengeni.ai/llms.txt and the canonical guide at
 https://github.com/Cloudgeni-ai/opengeni/tree/main/.agents/skills/opengeni-client.
 
 When the `opengeni` MCP tools are available (this plugin connects them), use
-them to inspect and act on the user's OpenGeni organization while you build:
+them to inspect and act on the user's Opengeni organization while you build:
 find an action with `opengeni_actions_search`, read it with
 `opengeni_action_describe`, run it with `opengeni_action_call`, instead of
 hand-writing API calls. The first use opens a browser sign-in where the user
@@ -37,8 +37,8 @@ server-side API key.
 
 ## Quick local demo app
 
-If the user asks for a small, local, or demo web app with an OpenGeni agent
-chat (rather than adding OpenGeni to an existing product), follow
+If the user asks for a small, local, or demo web app with an Opengeni agent
+chat (rather than adding Opengeni to an existing product), follow
 [`local-demo-app.md`](local-demo-app.md) exactly. It is a tested recipe: a Vite +
 React page with `OpenGeniChat` and one Node server holding the API key, where
 every chat becomes a session in the given workspace. It needs
@@ -67,7 +67,7 @@ every chat becomes a session in the given workspace. It needs
   tenants. Store it in the product's secret manager as `OPENGENI_API_KEY`, with
   `OPENGENI_BASE_URL` (the deployment origin; the longer guide calls it
   `OPENGENI_API_BASE_URL`) and `OPENGENI_ORGANIZATION_ID`. The user creates it
-  in OpenGeni organization settings; never ask them to paste it into chat or
+  in Opengeni organization settings; never ask them to paste it into chat or
   commit it.
 - **Workspace API key** for an integration deliberately limited to one
   workspace.

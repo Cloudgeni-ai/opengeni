@@ -2384,6 +2384,8 @@ describe("release schema contract", () => {
       "0605_insights_model_debit_period_index.sql",
       "0606_pending_child_terminal_wake_repair.sql",
       "0607_connected_command_output_release.sql",
+      "0608_receiver_execution_context.sql",
+      "0609_captured_command_output_priority.sql",
       "0610_insights_daily_rollups.sql",
       "0611_insights_actual_model_debits.sql",
       "0612_insights_historical_list_allocations.sql",

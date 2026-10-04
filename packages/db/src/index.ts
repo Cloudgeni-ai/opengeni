@@ -1,15 +1,16 @@
+import {
+  agentSelectionNotes,
+  loadInboxExecutionContext,
+  turnHuman,
+  inboxOrigin,
+} from "./inbox-execution-context";
+import { parentOutboxAuthorityTx } from "./child-outbox-authority";
 export { SubscriptionAccountChangedError } from "./subscription-account-conflict";
 import {
   claudeSubscriptionAccountRepository,
   claudeSubscriptionTables,
 } from "./claude-subscription-accounts";
 import { subscriptionExecutionAuthorityFromTurn } from "./accepted-subscription-authority";
-const claudeProviderAccountAuthoritySnapshotForTurnInTransaction = (
-  db: Database,
-  workspaceId: string,
-  sessionId: string,
-  turnId: string,
-) => subscriptionAuthorityForTurnInTransaction(db, "claude", workspaceId, sessionId, turnId);
 export const getScheduledTaskClaudeProviderAccountAuthoritySnapshot = (
   db: Database,
   workspaceId: string,
@@ -32,7 +33,6 @@ import {
   getAcceptedSubscriptionTaskAuthority,
   getAcceptedSubscriptionTurnAuthority,
   getAcceptedSubscriptionParentAuthority,
-  subscriptionAuthorityForTurnInTransaction,
 } from "./accepted-subscription-authority";
 export { resolveClaudeAccountCredential } from "./claude-subscription-account-tokens";
 export * from "./claude-subscription-accounts";
@@ -11930,7 +11930,7 @@ export class SlackInstallationBindingConflictError extends Error {
         ? "Slack team has conflicting legacy installations and is quarantined"
         : reason === "stale_reinstall"
           ? "Slack installation changed during reinstall; start again"
-          : "Slack team is already bound to a different OpenGeni installation",
+          : "Slack team is already bound to a different Opengeni installation",
     );
     this.name = "SlackInstallationBindingConflictError";
   }
@@ -19478,6 +19478,23 @@ export async function markScheduledTaskRunAuthorityRejectedInTransaction(
   )`);
 }
 
+function scheduledRunPreclaimDenial(
+  run:
+    | Pick<
+        typeof schema.scheduledTaskRuns.$inferSelect,
+        "status" | "error" | "acceptedExecutionSnapshot"
+      >
+    | undefined,
+): string | null {
+  if (!run?.acceptedExecutionSnapshot) return "scheduled_authority_snapshot_missing";
+  if (run.status === "dispatched") return null;
+  return run.status === "skipped" &&
+    (run.error === "scheduled_task_paused_before_claim" ||
+      run.error === "scheduled_task_deleted_before_claim")
+    ? "scheduled_task_inactive_before_claim"
+    : "scheduled_run_terminal_before_claim";
+}
+
 async function validateScheduledTargetExecutionAtClaim(
   tx: Database,
   input: {
@@ -19504,14 +19521,8 @@ async function validateScheduledTargetExecutionAtClaim(
     )
     .limit(1)
     .for("update");
-  if (!run?.acceptedExecutionSnapshot) return "scheduled_authority_snapshot_missing";
-  if (run.status !== "dispatched") {
-    return run.status === "skipped" &&
-      (run.error === "scheduled_task_paused_before_claim" ||
-        run.error === "scheduled_task_deleted_before_claim")
-      ? "scheduled_task_inactive_before_claim"
-      : "scheduled_run_terminal_before_claim";
-  }
+  const preclaimDenial = scheduledRunPreclaimDenial(run);
+  if (preclaimDenial) return preclaimDenial;
   const [liveAuthority] = await rawRows<{ denial: string | null }>(
     tx,
     sql`select validate_scheduled_agent_run_live_authority(
@@ -19521,7 +19532,7 @@ async function validateScheduledTargetExecutionAtClaim(
     ) as denial`,
   );
   if (liveAuthority?.denial) return liveAuthority.denial;
-  const accepted = ScheduledTaskRunAcceptedExecution.parse(run.acceptedExecutionSnapshot);
+  const accepted = ScheduledTaskRunAcceptedExecution.parse(run!.acceptedExecutionSnapshot);
   const target = accepted.targetSessionExecution;
   if (!target) return null;
   const mcpServers = await tx
@@ -35661,15 +35672,6 @@ export async function getSessionParentMcpAccountBindings(
   });
 }
 
-async function xaiProviderAccountAuthoritySnapshotForTurnInTransaction(
-  db: Database,
-  workspaceId: string,
-  sessionId: string,
-  turnId: string,
-): Promise<XaiProviderAccountAuthoritySnapshotV1> {
-  return subscriptionAuthorityForTurnInTransaction(db, "xai", workspaceId, sessionId, turnId);
-}
-
 export async function getSessionTurnXaiProviderAccountAuthoritySnapshot(
   db: Database,
   workspaceId: string,
@@ -46679,7 +46681,7 @@ export class SandboxPaidComputeAdmissionError extends Error {
     public readonly workspaceId: string,
     public readonly sandboxGroupId: string,
   ) {
-    super("Insufficient OpenGeni credits to admit paid sandbox compute");
+    super("Insufficient Opengeni credits to admit paid sandbox compute");
   }
 }
 
@@ -70660,13 +70662,6 @@ const frozenClaudeExecutionAuthority = (
   update: Parameters<typeof frozenSubscriptionExecutionAuthority>[0],
 ) => frozenSubscriptionExecutionAuthority(update, "claude");
 
-function frozenXaiExecutionAuthorityKey(authority: FrozenXaiExecutionAuthority): string {
-  return stableJson({
-    snapshot: authority.snapshot,
-    subjectId: authority.subjectId,
-  });
-}
-
 function systemUpdateExecutionAuthorityKey(update: BoundedSystemUpdate): string {
   const personalConnectionDelegations = parsedPersonalConnectionDelegations(
     update.personalConnectionDelegations,
@@ -70901,6 +70896,126 @@ function selectBoundedSystemUpdateBatch<T extends BoundedSystemUpdate>(
     selectedBytes += updateBytes;
   }
   return selected;
+}
+
+function recognizedInboxPayload(
+  update: Pick<
+    typeof schema.sessionSystemUpdates.$inferSelect,
+    "kind" | "payload" | "payloadCodecVersion"
+  >,
+): SessionSystemUpdatePayload | null {
+  const parsed = SessionSystemUpdatePayload.safeParse(
+    fromPostgresLosslessJson(update.payload, update.payloadCodecVersion),
+  );
+  return SessionSystemUpdateKindSchema.safeParse(update.kind).success && parsed.success
+    ? parsed.data
+    : null;
+}
+
+/** Match claim's bounded read before validation, including goal supersession.
+ * Callers retain database ordering; Date would discard timestamp precision. */
+function pendingInboxReadWindow(
+  updates: Array<typeof schema.sessionSystemUpdates.$inferSelect>,
+  supersedeGoalContinuations: boolean,
+) {
+  const steer = updates.find((update) => update.kind === "agent_steer_instruction");
+  const ordinary = updates
+    .filter(
+      (update) =>
+        update.kind !== "agent_steer_instruction" &&
+        (!(steer || supersedeGoalContinuations) || update.kind !== "goal_continuation"),
+    )
+    .slice(0, MAX_INTERNAL_UPDATE_BATCH_MEMBERS + (steer ? 0 : 1));
+  return steer ? [steer, ...ordinary] : ordinary;
+}
+
+/** Select execution ownership before grouping canonical input; never rewrite producer receipts. */
+async function planInboxBatch(
+  tx: Database,
+  session: Pick<
+    typeof schema.sessions.$inferSelect,
+    "id" | "accountId" | "workspaceId" | "executionContextTurnId"
+  >,
+  updates: Array<typeof schema.sessionSystemUpdates.$inferSelect>,
+  receivingTurn?: typeof schema.sessionTurns.$inferSelect,
+) {
+  const loaded = await loadInboxExecutionContext(tx, {
+    accountId: session.accountId,
+    workspaceId: session.workspaceId,
+    sessionId: session.id,
+    contextTurnId: receivingTurn?.id ?? session.executionContextTurnId,
+    updates,
+  });
+  const compatible = (update: typeof schema.sessionSystemUpdates.$inferSelect) => {
+    if (loaded.eligibleIds.has(update.id)) return true;
+    const context = loaded.context;
+    if (
+      context &&
+      receivingTurn?.metadata.delivery === "steer" &&
+      update.kind === "agent_steer_instruction"
+    ) {
+      const actor = inboxOrigin(update, session.id);
+      const origin = actor ? loaded.origins.get(actor.turnId) : undefined;
+      return Boolean(
+        origin &&
+        origin.sessionId === actor?.sessionId &&
+        !origin.externalLink &&
+        turnHuman(origin) &&
+        turnHuman(origin) === turnHuman(context),
+      );
+    }
+    if (
+      !context ||
+      update.scheduledTaskRunId ||
+      update.kind === "agent_steer_instruction" ||
+      update.kind === "agent_message" ||
+      isChildLifecycleSystemUpdateKind(update.kind)
+    )
+      return false;
+    const human = turnHuman(context);
+    const contextReceipt = {
+      ...update,
+      personalConnectionDelegations: context.personalConnectionDelegations,
+      mcpAccountBindings: context.mcpAccountBindings,
+      xaiProviderAccountAuthoritySnapshot: context.xaiProviderAccountAuthoritySnapshot,
+      claudeProviderAccountAuthoritySnapshot: context.claudeProviderAccountAuthoritySnapshot,
+      lineage: {
+        connectionAuthoritySubjectId: human,
+        xaiAuthoritySubjectId: human,
+        claudeAuthoritySubjectId: human,
+      },
+    };
+    const causalKey = systemUpdateCausalExecutionKey(update, loaded.causalKeys, session.id);
+    const ownKey = loaded.causalKeys.get(`${session.id}:${context.id}`);
+    return (
+      systemUpdateExecutionAuthorityKey(update) ===
+        systemUpdateExecutionAuthorityKey(contextReceipt) &&
+      (causalKey === null || (ownKey !== null && causalKey === `target-human:${ownKey}`))
+    );
+  };
+  const receiverOwned = Boolean(
+    receivingTurn ||
+    (updates[0] &&
+      loaded.context &&
+      !loaded.context.externalLink &&
+      (loaded.eligibleIds.has(updates[0].id) ||
+        (updates[0].kind === "goal_continuation" && compatible(updates[0])))),
+  );
+  const candidates = receiverOwned && updates[0] && !compatible(updates[0]) ? [] : updates;
+  const selected = selectBoundedSystemUpdateBatch(
+    candidates,
+    (prior, candidate) =>
+      receiverOwned
+        ? compatible(candidate)
+        : systemUpdatesCanCoalesceForExecution(prior, candidate, loaded.causalKeys, session.id),
+    true,
+  );
+  const receiver = receiverOwned ? loaded.context : null;
+  return {
+    updates: selected,
+    receiverContext: receiver,
+    selectionNotes: receiver ? agentSelectionNotes(selected, receiver, loaded.origins) : {},
+  };
 }
 
 export type ClaimSessionWorkForAttemptInput = {
@@ -72129,15 +72244,16 @@ export async function claimSessionWorkForAttempt(
           nextSequence: number,
           occurredAt: Date,
           triggerEventId?: string,
-          expectedXaiAuthority?: FrozenXaiExecutionAuthority,
           options: {
             supersedeGoalContinuations?: boolean;
             deliverUpdates?: boolean;
             pendingEventSequenceBeforeOrAt?: number;
             commandOnlyMayRun?: boolean;
-            claudeAuthority?: FrozenXaiExecutionAuthority;
+            receivingTurn?: typeof schema.sessionTurns.$inferSelect;
           } = {},
         ): Promise<{
+          receiverContext: typeof schema.sessionTurns.$inferSelect | null;
+          selectionNotes: Record<string, string>;
           count: number;
           lastSequence: number;
           triggerEventId: string | null;
@@ -72253,9 +72369,14 @@ export async function claimSessionWorkForAttempt(
                   )
                   .limit(MAX_INTERNAL_UPDATE_BATCH_MEMBERS + (agentSteer ? 0 : 1))
                   .for("update");
-          const updates = agentSteer ? [agentSteer, ...ordinary] : ordinary;
+          const updates = pendingInboxReadWindow(
+            agentSteer ? [agentSteer, ...ordinary] : ordinary,
+            options.supersedeGoalContinuations === true,
+          );
           if (updates.length === 0 && supersededGoalUpdateIds.length === 0) {
             return {
+              receiverContext: null,
+              selectionNotes: {},
               count: 0,
               lastSequence: nextSequence - 1,
               triggerEventId: null,
@@ -72282,14 +72403,9 @@ export async function claimSessionWorkForAttempt(
             // condition, never an endless re-peek: mark that one row failed
             // and record `unrecognized_kind` on the timeline; the rest of the
             // batch is claimed normally.
-            const parsedPayload = SessionSystemUpdatePayload.safeParse(
-              fromPostgresLosslessJson(update.payload, update.payloadCodecVersion),
-            );
-            if (parsedPayload.success) parsedPayloadsById.set(update.id, parsedPayload.data);
-            if (
-              !SessionSystemUpdateKindSchema.safeParse(update.kind).success ||
-              !parsedPayload.success
-            ) {
+            const parsedPayload = recognizedInboxPayload(update);
+            if (parsedPayload) parsedPayloadsById.set(update.id, parsedPayload);
+            if (!parsedPayload) {
               await tx
                 .update(schema.sessionSystemUpdates)
                 .set({ state: "failed" })
@@ -72380,135 +72496,19 @@ export async function claimSessionWorkForAttempt(
             }
             validUpdates.push(update);
           }
-          const candidates = validUpdates.filter(
-            (update) =>
-              (!expectedXaiAuthority ||
-                frozenXaiExecutionAuthorityKey(frozenXaiExecutionAuthority(update)) ===
-                  frozenXaiExecutionAuthorityKey(expectedXaiAuthority)) &&
-              (!options.claudeAuthority ||
-                frozenXaiExecutionAuthorityKey(frozenClaudeExecutionAuthority(update)) ===
-                  frozenXaiExecutionAuthorityKey(options.claudeAuthority)),
-          );
           if (
             options.commandOnlyMayRun === false &&
-            candidates.every((update) => update.kind === "background_command_result")
+            validUpdates.every((update) => update.kind === "background_command_result")
           ) {
-            candidates.length = 0;
+            validUpdates.length = 0;
           }
-          const causalTurnIds = [
-            ...new Set(
-              candidates
-                .map(
-                  (update) =>
-                    systemUpdateCausalHumanTurnId(update) ??
-                    (update.kind === "agent_message"
-                      ? (agentCommandCausalActor(update)?.turnId ?? null)
-                      : null),
-                )
-                .filter((id): id is string => id !== null),
-            ),
-          ];
-          const causalTurns =
-            causalTurnIds.length === 0
-              ? []
-              : await tx
-                  .select({
-                    id: schema.sessionTurns.id,
-                    sessionId: schema.sessionTurns.sessionId,
-                    human: schema.sessionTurns.initiatingHumanSubjectId,
-                    initiatorKind: schema.sessionTurns.initiatorKind,
-                    initiatorSubjectId: schema.sessionTurns.initiatorSubjectId,
-                    // Inheritance copies these permissions from the first
-                    // causal turn. Equivalence must include all of them,
-                    // including revoked snapshots (never native fallback).
-                    externalLink: sql<unknown>`(select a.canonical_snapshot
-                      from external_link_turn_authorities a
-                      where a.account_id = ${accountId}::uuid
-                        and a.workspace_id = ${workspaceId}::uuid
-                        and a.session_id = ${schema.sessionTurns.sessionId}
-                        and a.turn_id = ${schema.sessionTurns.id})`,
-                  })
-                  .from(schema.sessionTurns)
-                  .where(
-                    and(
-                      eq(schema.sessionTurns.accountId, accountId),
-                      eq(schema.sessionTurns.workspaceId, workspaceId),
-                      inArray(schema.sessionTurns.id, causalTurnIds),
-                    ),
-                  );
-          // Host authority is owner-scoped. Resolve one batch per causal
-          // human, never mistake RLS-hidden selections for an empty grant set.
-          const turnsByHuman = new Map<string, string[]>();
-          for (const turn of causalTurns) {
-            const human =
-              turn.human ?? (turn.initiatorKind === "subject" ? turn.initiatorSubjectId : null);
-            if (!human) continue;
-            turnsByHuman.set(human, [...(turnsByHuman.get(human) ?? []), turn.id]);
-          }
-          const hostAuthorityByTurn = new Map<string, unknown[]>();
-          const incomingSubjectId = await rlsSubjectIdOrEmpty(tx);
-          try {
-            for (const [human, turnIds] of turnsByHuman) {
-              const authorities = await withWorkspaceSubjectRls(
-                tx,
-                workspaceId,
-                human,
-                async (subjectTx) =>
-                  subjectTx
-                    .select({
-                      turnId: schema.hostMcpTurnAuthorities.turnId,
-                      authority: sql<unknown>`${schema.hostMcpTurnAuthorities.canonicalSnapshot} - 'acceptedWork' - 'source'`,
-                    })
-                    .from(schema.hostMcpTurnAuthorities)
-                    .where(
-                      and(
-                        eq(schema.hostMcpTurnAuthorities.accountId, accountId),
-                        eq(schema.hostMcpTurnAuthorities.workspaceId, workspaceId),
-                        eq(schema.hostMcpTurnAuthorities.ownerSubjectId, human),
-                        inArray(schema.hostMcpTurnAuthorities.turnId, turnIds),
-                      ),
-                    )
-                    .orderBy(asc(schema.hostMcpTurnAuthorities.serverId)),
-              );
-              for (const row of authorities) {
-                hostAuthorityByTurn.set(row.turnId, [
-                  ...(hostAuthorityByTurn.get(row.turnId) ?? []),
-                  row.authority,
-                ]);
-              }
-            }
-          } finally {
-            await tx.execute(sql`select set_config(
-              'opengeni.subject_id', ${incomingSubjectId}, true
-            )`);
-          }
-          const causalExecutionKeys = new Map(
-            causalTurns.map((turn) => {
-              const human =
-                turn.human ?? (turn.initiatorKind === "subject" ? turn.initiatorSubjectId : null);
-              return [
-                `${turn.sessionId}:${turn.id}`,
-                human
-                  ? stableJson({
-                      human,
-                      externalLink: turn.externalLink,
-                      hostMcp: hostAuthorityByTurn.get(turn.id) ?? [],
-                    })
-                  : null,
-              ] as const;
-            }),
+          const planned = await planInboxBatch(
+            tx as unknown as Database,
+            session!,
+            validUpdates,
+            options.receivingTurn,
           );
-          const deliverable = selectBoundedSystemUpdateBatch(
-            candidates,
-            (selected, candidate) =>
-              systemUpdatesCanCoalesceForExecution(
-                selected,
-                candidate,
-                causalExecutionKeys,
-                sessionId,
-              ),
-            true,
-          );
+          const deliverable = planned.updates;
           if (deliverable.length === 0) {
             let sequence = nextSequence - 1;
             const cancellationEvents: SessionEventInsertWithPayload[] = [];
@@ -72610,6 +72610,8 @@ export async function claimSessionWorkForAttempt(
               });
             }
             return {
+              receiverContext: null,
+              selectionNotes: {},
               count: 0,
               lastSequence: sequence,
               triggerEventId: null,
@@ -72627,7 +72629,7 @@ export async function claimSessionWorkForAttempt(
           const historyItem = sessionSystemUpdateBatchHistoryItem(
             modelOrdered.map((update) => mapSessionSystemUpdate(update)),
             undefined,
-            { deliveredAt: occurredAt },
+            { deliveredAt: occurredAt, selectionNotes: planned.selectionNotes },
           ) as Record<string, unknown>;
           await tx
             .update(schema.sessionSystemUpdates)
@@ -72783,6 +72785,8 @@ export async function claimSessionWorkForAttempt(
           };
           events.push(event);
           return {
+            receiverContext: planned.receiverContext,
+            selectionNotes: planned.selectionNotes,
             count: deliverable.length,
             lastSequence: sequence,
             triggerEventId: eventId,
@@ -72837,7 +72841,10 @@ export async function claimSessionWorkForAttempt(
                             mapSessionSystemUpdate(update),
                           ),
                           goalSnapshot,
-                          { deliveredAt: delivered.deliveredAt },
+                          {
+                            deliveredAt: delivered.deliveredAt,
+                            selectionNotes: delivered.selectionNotes,
+                          },
                         )
                       : delivered.historyItem),
                 ),
@@ -73241,9 +73248,6 @@ export async function claimSessionWorkForAttempt(
                 }
                 pendingEventSequenceBeforeOrAt = legacyResumeTrigger.sequence;
               }
-              const xaiSnapshot = XaiProviderAccountAuthoritySnapshotV1.parse(
-                activeTurn.xaiProviderAccountAuthoritySnapshot,
-              );
               const delivered = await deliverPendingUpdates(
                 session.accountId,
                 activeTurn.id,
@@ -73252,18 +73256,8 @@ export async function claimSessionWorkForAttempt(
                 now,
                 undefined,
                 {
-                  snapshot: xaiSnapshot,
-                  subjectId:
-                    xaiSnapshot.scope === "user"
-                      ? (activeTurn.initiatingHumanSubjectId ??
-                        (activeTurn.initiatorKind === "subject"
-                          ? activeTurn.initiatorSubjectId
-                          : null))
-                      : null,
-                },
-                {
                   pendingEventSequenceBeforeOrAt,
-                  claudeAuthority: subscriptionExecutionAuthorityFromTurn(activeTurn, "claude"),
+                  receivingTurn: activeTurn,
                 },
               );
               await persistDeliveredUpdateBatch(delivered, session.accountId, activeTurn.id);
@@ -73830,7 +73824,6 @@ export async function claimSessionWorkForAttempt(
             session.lastSequence + 1,
             now,
             triggerEventId,
-            undefined,
             { commandOnlyMayRun: commandWait.disposition === "held" },
           );
           if (delivered.count === 0) {
@@ -73889,18 +73882,44 @@ export async function claimSessionWorkForAttempt(
             },
           });
           let internalInitiator: FrozenTurnInitiator;
+          const receiverContext = delivered.receiverContext;
           const authorityUpdate = delivered.updates[0];
           if (!authorityUpdate) throw new Error("Delivered update batch has no authority source");
           const internalPersonalConnectionDelegations = parsedPersonalConnectionDelegations(
-            authorityUpdate.personalConnectionDelegations,
+            receiverContext?.personalConnectionDelegations ??
+              authorityUpdate.personalConnectionDelegations,
             `session_system_updates:${workspaceId}:${sessionId}:${authorityUpdate.id}`,
           );
-          const internalXaiAuthority = frozenXaiExecutionAuthority(authorityUpdate);
-          const internalClaudeAuthority = frozenClaudeExecutionAuthority(authorityUpdate);
-          // Messages and Steer inherit the exact admitted sender turn, even
-          // with no personal connections. Other notices are context; they
-          // cannot replace the command's causal human.
-          if (agentCommandUpdate) {
+          const internalXaiAuthority = receiverContext
+            ? subscriptionExecutionAuthorityFromTurn(receiverContext, "xai")
+            : frozenXaiExecutionAuthority(authorityUpdate);
+          const internalClaudeAuthority = receiverContext
+            ? subscriptionExecutionAuthorityFromTurn(receiverContext, "claude")
+            : frozenClaudeExecutionAuthority(authorityUpdate);
+          // Informational input retains the receiving context. Explicit control
+          // and restricted/foreign requests retain their admitted source.
+          if (receiverContext) {
+            internalInitiator = {
+              initiator: {
+                kind: "service",
+                subjectId: "internal-update",
+                label: "OpenGeni internal update",
+              },
+              initiatingHumanSubjectId: turnHuman(receiverContext),
+              context: contextForCausalTurn(
+                {},
+                {
+                  initiator: initiatorFromStorage(
+                    receiverContext.initiatorKind,
+                    receiverContext.initiatorSubjectId,
+                    receiverContext.initiatorContext,
+                  ),
+                  context: receiverContext.initiatorContext,
+                },
+                { sessionId, turnId: receiverContext.id },
+              ),
+            };
+          } else if (agentCommandUpdate) {
             const actor = agentCommandCausalActor(agentCommandUpdate);
             if (!actor) {
               // Corrupt/hand-inserted historical rows must not wedge every
@@ -74013,7 +74032,7 @@ export async function claimSessionWorkForAttempt(
           );
           let tools = Array.isArray(goalPolicy?.tools)
             ? goalPolicy.tools
-            : (latestStarted?.tools ?? session.tools);
+            : (receiverContext?.tools ?? latestStarted?.tools ?? session.tools);
           let sandboxBackend =
             typeof goalPolicy?.sandboxBackend === "string"
               ? goalPolicy.sandboxBackend
@@ -74164,6 +74183,7 @@ export async function claimSessionWorkForAttempt(
               ? internalInitiator.initiator.subjectId
               : null);
           const connectionAuthoritySubjectValue =
+            !receiverContext &&
             authorityUpdate.lineage &&
             typeof authorityUpdate.lineage === "object" &&
             !Array.isArray(authorityUpdate.lineage)
@@ -74185,9 +74205,11 @@ export async function claimSessionWorkForAttempt(
             }
             initiatingHumanSubjectId = connectionAuthoritySubjectId;
           }
-          const causalHumanTurnId = delivered.updates
-            .map((update) => systemUpdateCausalHumanTurnId(update))
-            .find((causalTurnId): causalTurnId is string => causalTurnId !== null);
+          const causalHumanTurnId =
+            receiverContext?.id ??
+            delivered.updates
+              .map((update) => systemUpdateCausalHumanTurnId(update))
+              .find((causalTurnId): causalTurnId is string => causalTurnId !== null);
           if (causalHumanTurnId) {
             // Child lifecycle notices freeze the parent turn that spawned the
             // child. Resolve that exact row on the receiving parent session;
@@ -74295,10 +74317,15 @@ export async function claimSessionWorkForAttempt(
           // coalesced message, including a later restricted sender. A frozen
           // goal/schedule model policy cannot remove this inherited ceiling.
           const initialCredentialPolicy = readTurnExecutionPolicyV1(session.metadata);
+          const receivingCredentialPolicy = readTurnExecutionPolicyV1(receiverContext?.metadata);
           internalInitiator.context = contextWithFrozenCredentialRestrictions(
             internalInitiator.context,
             [
               ...delivered.updates.map((update) => update.lineage),
+              receivingCredentialPolicy.kind === "valid" &&
+              receivingCredentialPolicy.policy.credentialRestriction === "developer_setup"
+                ? { credentialRestriction: "developer_setup" }
+                : undefined,
               initialCredentialPolicy.kind === "valid" &&
               initialCredentialPolicy.policy.credentialRestriction === "developer_setup"
                 ? { credentialRestriction: "developer_setup" }
@@ -74367,9 +74394,12 @@ export async function claimSessionWorkForAttempt(
                   ),
                   ...initiatorColumns(internalInitiator),
                   initiatingHumanSubjectId,
+                  executionContextTurnId: receiverContext?.id ?? null,
                   personalConnectionDelegations: internalPersonalConnectionDelegations,
                   mcpAccountBindings: parseAcceptedMcpAccountBindings(
-                    authorityUpdate.mcpAccountBindings,
+                    receiverContext
+                      ? receiverContext.mcpAccountBindings
+                      : authorityUpdate.mcpAccountBindings,
                   ),
                   scheduledTaskRunId,
                   xaiProviderAccountAuthoritySnapshot: internalXaiAuthority.snapshot,
@@ -74401,6 +74431,7 @@ export async function claimSessionWorkForAttempt(
               contextualUpdates.length > 0
                 ? renderSessionSystemUpdateBatch(contextualUpdates, {
                     deliveredAt: delivered.deliveredAt,
+                    selectionNotes: delivered.selectionNotes,
                   })
                 : undefined,
               frozenGoalSnapshot,
@@ -74432,7 +74463,20 @@ export async function claimSessionWorkForAttempt(
               turnId: internalTurn.id,
               runId: scheduledTaskRunId,
             });
-          } else if (causalHumanTurnId && initiatingHumanSubjectId) {
+          } else if (
+            agentCommandUpdate &&
+            !receiverContext &&
+            agentCommandCausalActor(agentCommandUpdate)
+          ) {
+            await inheritExternalLinkTurnAuthority(tx as unknown as Database, {
+              accountId: session.accountId,
+              workspaceId,
+              sessionId,
+              turnId: internalTurn.id,
+              sourceTurnId: agentCommandCausalActor(agentCommandUpdate)!.turnId,
+              kind: "agent",
+            });
+          } else if (!receiverContext && causalHumanTurnId && initiatingHumanSubjectId) {
             await inheritExternalLinkTurnAuthority(tx as unknown as Database, {
               accountId: session.accountId,
               workspaceId,
@@ -74587,7 +74631,6 @@ export async function claimSessionWorkForAttempt(
               session.lastSequence + 1,
               now,
               undefined,
-              undefined,
               { supersedeGoalContinuations: true, deliverUpdates: false },
             )
           : await deliverPendingUpdates(
@@ -74598,20 +74641,8 @@ export async function claimSessionWorkForAttempt(
               now,
               undefined,
               {
-                snapshot: XaiProviderAccountAuthoritySnapshotV1.parse(
-                  row.xaiProviderAccountAuthoritySnapshot,
-                ),
-                subjectId:
-                  XaiProviderAccountAuthoritySnapshotV1.parse(
-                    row.xaiProviderAccountAuthoritySnapshot,
-                  ).scope === "user"
-                    ? (row.initiatingHumanSubjectId ??
-                      (row.initiatorKind === "subject" ? row.initiatorSubjectId : null))
-                    : null,
-              },
-              {
                 supersedeGoalContinuations: true,
-                claudeAuthority: subscriptionExecutionAuthorityFromTurn(row, "claude"),
+                receivingTurn: row,
               },
             );
         await persistDeliveredUpdateBatch(delivered, session.accountId, row.id);
@@ -82325,6 +82356,9 @@ export async function getSessionQueueSnapshot(
       )
       .orderBy(
         sql`case when ${schema.sessionSystemUpdates.kind} = 'agent_steer_instruction' then 0 else 1 end`,
+        sql`case when ${schema.sessionSystemUpdates.kind} = 'agent_steer_instruction' then ${schema.sessionSystemUpdates.createdAt} end desc`,
+        sql`case when ${schema.sessionSystemUpdates.kind} = 'agent_steer_instruction' then ${schema.sessionSystemUpdates.id} end desc`,
+        sql`case when ${schema.sessionSystemUpdates.kind} = 'background_command_result' then 1 else 0 end`,
         asc(schema.sessionSystemUpdates.createdAt),
         asc(schema.sessionSystemUpdates.id),
       );
@@ -82354,13 +82388,50 @@ export async function getSessionQueueSnapshot(
         sessionId,
         queuedSteerPredecessorIds,
       ));
-    const nextInputBatch = selectBoundedSystemUpdateBatch(pendingInputs);
+
     const hasPendingAgentSteer = pendingInputs.some(
       (update) => update.kind === "agent_steer_instruction",
     );
     const attachmentTurn = hasPendingAgentSteer
       ? physicalItems.find((turn) => turn.metadata.delivery === "steer")
       : physicalItems[0];
+    const attachmentRow = attachmentTurn
+      ? rows.find((row) => row.id === attachmentTurn.id)
+      : undefined;
+    let nextInputBatch: typeof pendingInputs = [];
+    if (attachmentRow && !isSessionRealtimeDelegationTurnMetadata(attachmentRow.metadata)) {
+      const window = pendingInboxReadWindow(pendingInputs, true);
+      const runIds = [...new Set(window.flatMap((update) => update.scheduledTaskRunId ?? []))];
+      const runs =
+        runIds.length === 0
+          ? []
+          : await scopedDb
+              .select({
+                id: schema.scheduledTaskRuns.id,
+                status: schema.scheduledTaskRuns.status,
+                error: schema.scheduledTaskRuns.error,
+                acceptedExecutionSnapshot: schema.scheduledTaskRuns.acceptedExecutionSnapshot,
+              })
+              .from(schema.scheduledTaskRuns)
+              .where(
+                and(
+                  eq(schema.scheduledTaskRuns.accountId, session.accountId),
+                  eq(schema.scheduledTaskRuns.workspaceId, workspaceId),
+                  eq(schema.scheduledTaskRuns.sessionId, sessionId),
+                  inArray(schema.scheduledTaskRuns.id, runIds),
+                ),
+              );
+      const runsById = new Map(runs.map((run) => [run.id, run]));
+      // Preview only reads durable rejection facts. Live authority and worker
+      // admission are revalidated under claim's locks and can still change.
+      const candidates = window.filter(
+        (update) =>
+          recognizedInboxPayload(update) &&
+          (!update.scheduledTaskRunId ||
+            scheduledRunPreclaimDenial(runsById.get(update.scheduledTaskRunId)) === null),
+      );
+      nextInputBatch = (await planInboxBatch(scopedDb, session, candidates, attachmentRow)).updates;
+    }
     return {
       version: session.queueVersion,
       effectiveControl: serializeEffectiveSessionControl(effectiveControl),
@@ -82368,15 +82439,19 @@ export async function getSessionQueueSnapshot(
       stoppingPreviousAttempt,
       items,
       pendingInputs: pendingInputs.map((update) => {
-        const canonical = mapSessionSystemUpdate(update);
+        // Queue labels do not expose the payload. A malformed payload remains
+        // visible here until claim records its failure, without breaking reads.
         return {
-          id: canonical.id,
-          sessionId: canonical.sessionId,
-          kind: canonical.kind,
-          classification: canonical.classification,
-          sourceId: boundedInternalUpdateEventText(canonical.sourceId, 256).text,
-          summary: boundedInternalUpdateEventText(canonical.summary, 512).text,
-          createdAt: canonical.createdAt,
+          id: update.id,
+          sessionId: update.sessionId,
+          kind: update.kind as SessionSystemUpdateKind,
+          classification: update.classification as SystemUpdateClassification,
+          sourceId: boundedInternalUpdateEventText(update.sourceId, 256).text,
+          summary: boundedInternalUpdateEventText(
+            fromPostgresLosslessText(update.summary, update.summaryCodecVersion),
+            512,
+          ).text,
+          createdAt: update.createdAt.toISOString(),
         };
       }),
       pendingInputAttachment:
@@ -82413,114 +82488,6 @@ type ChildOutboxSession = Pick<
   typeof schema.sessions.$inferSelect,
   "id" | "accountId" | "parentSessionId" | "parentTurnId"
 >;
-
-/**
- * The exact private authority a child lifecycle notice copies from its causal
- * parent turn: same-session-successor personal connection delegations, the
- * parent's xAI provider authority snapshot, and the bounded subject lineage the
- * parent's claim later revalidates. Every child -> parent outbox producer uses
- * this one resolution so the notice kinds cannot drift in authority.
- */
-async function parentOutboxAuthorityTx(
-  tx: Database,
-  workspaceId: string,
-  session: ChildOutboxSession & { parentSessionId: string },
-): Promise<{
-  personalConnectionDelegations: McpPersonalConnectionDelegation[];
-  mcpAccountBindings: McpConnectionAccountBinding[] | null;
-  xaiProviderAccountAuthoritySnapshot: XaiProviderAccountAuthoritySnapshotV1;
-  claudeProviderAccountAuthoritySnapshot: ClaudeProviderAccountAuthoritySnapshotV1;
-  lineage: Record<string, unknown>;
-}> {
-  const personalConnectionDelegations = session.parentTurnId
-    ? await personalConnectionDelegationsForTurnInTransaction(
-        tx,
-        workspaceId,
-        session.parentSessionId,
-        session.parentTurnId,
-      )
-    : [];
-  const mcpAccountBindings = session.parentTurnId
-    ? await mcpAccountBindingsForTurnInTransaction(
-        tx,
-        workspaceId,
-        session.parentSessionId,
-        session.parentTurnId,
-      )
-    : null;
-  const xaiProviderAccountAuthoritySnapshot = session.parentTurnId
-    ? await xaiProviderAccountAuthoritySnapshotForTurnInTransaction(
-        tx,
-        workspaceId,
-        session.parentSessionId,
-        session.parentTurnId,
-      )
-    : WORKSPACE_XAI_PROVIDER_ACCOUNT_AUTHORITY_SNAPSHOT_V1;
-  const claudeProviderAccountAuthoritySnapshot = session.parentTurnId
-    ? await claudeProviderAccountAuthoritySnapshotForTurnInTransaction(
-        tx,
-        workspaceId,
-        session.parentSessionId,
-        session.parentTurnId,
-      )
-    : WORKSPACE_CLAUDE_PROVIDER_ACCOUNT_AUTHORITY_SNAPSHOT_V1;
-  const [parentTurn] = session.parentTurnId
-    ? await tx
-        .select({
-          initiatingHumanSubjectId: schema.sessionTurns.initiatingHumanSubjectId,
-          initiatorKind: schema.sessionTurns.initiatorKind,
-          initiatorSubjectId: schema.sessionTurns.initiatorSubjectId,
-        })
-        .from(schema.sessionTurns)
-        .where(
-          and(
-            eq(schema.sessionTurns.workspaceId, workspaceId),
-            eq(schema.sessionTurns.sessionId, session.parentSessionId),
-            eq(schema.sessionTurns.id, session.parentTurnId),
-          ),
-        )
-        .limit(1)
-    : [];
-  const xaiAuthoritySubjectId =
-    xaiProviderAccountAuthoritySnapshot.scope === "user"
-      ? (parentTurn?.initiatingHumanSubjectId ??
-        (parentTurn?.initiatorKind === "subject" ? parentTurn.initiatorSubjectId : null))
-      : null;
-  const claudeAuthoritySubjectId =
-    claudeProviderAccountAuthoritySnapshot.scope === "user"
-      ? (parentTurn?.initiatingHumanSubjectId ??
-        (parentTurn?.initiatorKind === "subject" ? parentTurn.initiatorSubjectId : null))
-      : null;
-  if (xaiProviderAccountAuthoritySnapshot.scope === "user" && !xaiAuthoritySubjectId) {
-    throw new Error("Child lifecycle outbox lost its parent xAI authority subject");
-  }
-  if (claudeProviderAccountAuthoritySnapshot.scope === "user" && !claudeAuthoritySubjectId) {
-    throw new Error("Child lifecycle outbox lost its parent Claude authority subject");
-  }
-  const connectionAuthoritySubjectId =
-    parentTurn?.initiatingHumanSubjectId ??
-    (parentTurn?.initiatorKind === "subject" ? parentTurn.initiatorSubjectId : null);
-  const hasPersonalConnections = personalConnectionDelegations.length > 0;
-  if (hasPersonalConnections && !connectionAuthoritySubjectId) {
-    throw new Error("Child lifecycle outbox lost its parent connection authority subject");
-  }
-  return {
-    personalConnectionDelegations,
-    mcpAccountBindings,
-    xaiProviderAccountAuthoritySnapshot,
-    claudeProviderAccountAuthoritySnapshot,
-    lineage: {
-      childSessionId: session.id,
-      parentSessionId: session.parentSessionId,
-      ...(session.parentTurnId ? { parentTurnId: session.parentTurnId } : {}),
-      ...(connectionAuthoritySubjectId && hasPersonalConnections
-        ? { connectionAuthoritySubjectId }
-        : {}),
-      ...(xaiAuthoritySubjectId ? { xaiAuthoritySubjectId } : {}),
-      ...(claudeAuthoritySubjectId ? { claudeAuthoritySubjectId } : {}),
-    },
-  };
-}
 
 type ChildLifecycleOutboxPayload = Extract<
   SessionSystemUpdatePayload,

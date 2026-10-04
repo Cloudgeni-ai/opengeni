@@ -849,3 +849,46 @@ test("uncached input subtracts both cache classes per complete fact, never unequ
       });
   }
 });
+
+test("repeated facet metadata preserves every measure, daily group series, and the unfiltered ingestion watermark", async () => {
+  const before = await usage({ range: "month" });
+  const latest = new Date(Date.parse(before.dataThrough!) + 1_000);
+  for (let index = 0; index < 3; index++) {
+    await fixture.admin`insert into model_call_facts(account_id,workspace_id,session_id,turn_id,source_key,
+      provider,provider_api,model,billing_path,input_tokens,output_tokens,cached_tokens,cache_write_tokens,
+      reasoning_tokens,total_tokens,estimated_provider_cost_micros,occurred_at,recorded_at)
+      values(${accountId},${workspaceId},${sessionId},${crypto.randomUUID()},${`facet-repeat:${index}`},
+        'facet-repeat','responses','same','external',10,2,1,0,0,12,${3 + index * 2},
+        ${index === 0 ? "2026-09-07T00:00:00Z" : "2026-09-08T00:00:00Z"},
+        ${new Date(latest.getTime() - (2 - index) * 100).toISOString()})`;
+  }
+  const response = await usage({ range: "month", provider: "facet-repeat", seriesGroups: true });
+  expect(response.totals).toMatchObject({
+    calls: 3,
+    listMicros: 15,
+    pricedCalls: 3,
+    tokens: { uncachedInput: 27, cacheRead: 3, cacheWrite: 0, output: 6, reasoning: 0 },
+  });
+  expect(response.groups).toHaveLength(1);
+  expect(response.groups[0]).toMatchObject({
+    key: "item:facet-repeat/same",
+    provider: "facet-repeat",
+    model: "same",
+    measures: response.totals,
+  });
+  expect(
+    response.series
+      .filter((point) => point.measures.calls > 0)
+      .map((point) => [point.measures.calls, point.groups?.["item:facet-repeat/same"]?.calls]),
+  ).toEqual([
+    [1, 1],
+    [2, 2],
+  ]);
+  expect(response.facets.models.filter((model) => model.provider === "facet-repeat")).toEqual([
+    { provider: "facet-repeat", model: "same" },
+  ]);
+  expect(response.dataThrough).toBe(latest.toISOString());
+  const excluded = await usage({ range: "month", provider: "no-such-provider" });
+  expect(excluded.totals.calls).toBe(0);
+  expect(excluded.dataThrough).toBe(latest.toISOString());
+});

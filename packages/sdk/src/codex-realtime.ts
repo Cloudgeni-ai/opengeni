@@ -261,7 +261,7 @@ export async function startCodexRealtimeWebrtc(
     );
     throwIfAborted(options.signal);
     if (answer.version !== "v3" || answer.model !== "gpt-live-1-boulder-alpha" || !answer.sdp) {
-      throw new Error("OpenGeni returned an incompatible Codex realtime answer");
+      throw new Error("Opengeni returned an incompatible Codex realtime answer");
     }
     await peerConnection.setRemoteDescription({
       type: "answer",
