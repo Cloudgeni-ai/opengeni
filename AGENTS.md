@@ -441,6 +441,13 @@ operator procedure.
 
 ## Keeping these notes current
 
+Attached-browser recovery is per tab: debugger detachment invalidates cached
+controls; reads may attach a surviving tab with fresh authority. Explicit user
+cancellation or uncertain effects require reconnection. Partially dispatched
+input stays outcome unknown; never report it as a definite refusal. Never restart the user's
+Chrome or replay mutations to repair a disconnected debugger. See
+`docs/connected-machines.md`.
+
 Mac updates replace the complete verified signed bundle, retaining rollback.
 Pre-0.1.29 agents need the official installer: see `docs/connected-machines.md`.
 APFS transactional writes inspect ACLs through `opengeni-agent-files-ffi`;
