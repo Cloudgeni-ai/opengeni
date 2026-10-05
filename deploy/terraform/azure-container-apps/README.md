@@ -69,6 +69,14 @@ select a digest-pinned **desktop** image; do not substitute a headless sandbox
 image. Private Modal image pulls need an operator-created Modal registry secret;
 the ACA `AcrPull` identity cannot authorize Modal's pull.
 
+API and both workers set module-owned `OPENGENI_SANDBOX_OWNERSHIP_ENABLED=true`
+for durable remote sandbox leases and bounded `sandbox_file_publish` delivery.
+Use API/worker images from the same compatible modern release with its completed
+migration job. Publication must resume the exact owned Modal sandbox and
+write/verify bytes in Blob; verify actual publication/download in live conformance.
+Ownership cannot be overridden through `config_env` or `secret_env`. It does not
+enable Connected Machines, the artifact runtime, or native materializer/export.
+
 All serving roles require the stable base64-encoded 32-byte
 `OPENGENI_ENVIRONMENTS_ENCRYPTION_KEY`. Secrets are supplied in a sensitive map:
 
