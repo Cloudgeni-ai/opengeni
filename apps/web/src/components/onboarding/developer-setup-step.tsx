@@ -352,9 +352,9 @@ export function DeveloperSetupStep({
             {opening ? "Opening your setup chat…" : "Let Opengeni implement it"}
           </Button>
           <p className="text-xs leading-[18px] text-fg-muted">
-            Opens a new {DEVELOPER_SETUP_WORKSPACE_NAME} workspace that already has your key, with
-            your setup message ready to send. Send it and the agent asks about your product,
-            suggests connecting GitHub, and builds it with you.
+            {key.status === "existing"
+              ? `Opens a new ${DEVELOPER_SETUP_WORKSPACE_NAME} workspace with your setup message ready to send. It can't reuse a key that was already shown, so replace the key above first if the agent should test with it.`
+              : `Opens a new ${DEVELOPER_SETUP_WORKSPACE_NAME} workspace that already has your key, with your setup message ready to send. Send it and the agent asks about your product, suggests connecting GitHub, and builds it with you.`}
           </p>
         </div>
 
