@@ -64,9 +64,10 @@ describe("filesystem function tool schemas", () => {
         }),
       );
     }
+    // The trailing empty "+" line gives the created file Codex's final newline.
     expect(operations).toEqual([
-      { type: "create_file", path: "example.txt", diff: "+example\n" },
-      { type: "create_file", path: "example.txt", diff: "+example\n" },
+      { type: "create_file", path: "example.txt", diff: "+example\n+\n" },
+      { type: "create_file", path: "example.txt", diff: "+example\n+\n" },
     ]);
   });
 });
@@ -174,7 +175,9 @@ describe("malformed apply_patch arguments", () => {
     const agent = new Agent({ name: "patcher", model, tools });
     const result = await new Runner({ tracingDisabled: true }).run(agent, "create the file");
     expect(result.interruptions).toHaveLength(0);
-    expect(operations).toEqual([{ type: "create_file", path: "notes/soak.txt", diff: "+alpha\n" }]);
+    expect(operations).toEqual([
+      { type: "create_file", path: "notes/soak.txt", diff: "+alpha\n+\n" },
+    ]);
   });
 });
 

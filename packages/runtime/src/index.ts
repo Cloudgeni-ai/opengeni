@@ -384,6 +384,7 @@ import {
   type RetainableSessionImageOutputHook,
 } from "./retained-session-image";
 import type { ComputerToolMode } from "./legacy-computer-compat";
+import { withCodexAddFileApplyPatchInput, withCodexAddFileEditor } from "./apply-patch-add-file";
 import type { McpToolCallOutcome, RuntimeMetricsHooks } from "./metrics";
 import { mcpToolMetricLabel } from "./metrics";
 import {
@@ -4052,6 +4053,33 @@ function withModelFacingApplyPatchFunction(tools: Tool<unknown>[]): Tool<unknown
   });
 }
 
+/**
+ * Give the model-facing `apply_patch` tool (function fallback and hosted) Codex
+ * Add File semantics: created files end with a newline. See
+ * `apply-patch-add-file.ts`; the sandbox editors keep their exact-content
+ * `create_file` behavior for internal writers.
+ */
+function withCodexAddFileApplyPatch(tools: Tool<unknown>[]): Tool<unknown>[] {
+  return tools.map((capabilityTool) => {
+    if (capabilityTool.type === "function" && capabilityTool.name === "apply_patch") {
+      const invoke = capabilityTool.invoke;
+      return {
+        ...capabilityTool,
+        invoke: (runContext, input, details) =>
+          invoke(
+            runContext,
+            typeof input === "string" ? withCodexAddFileApplyPatchInput(input) : input,
+            details,
+          ),
+      };
+    }
+    if (capabilityTool.type === "apply_patch") {
+      return { ...capabilityTool, editor: withCodexAddFileEditor(capabilityTool.editor) };
+    }
+    return capabilityTool;
+  });
+}
+
 export function buildAgentCapabilities(
   settings: Settings,
   skillActivations: readonly RuntimeSkillActivation[] = [],
@@ -4112,7 +4140,7 @@ function buildAgentCapabilitiesFromComposition(
   // results below; text-only/unproven wires remove the image tool entirely.
   // Scoped to filesystem: shell() is always a function-tool transport.
   const configureFilesystemTools = (tools: Tool<unknown>[]): Tool<unknown>[] => {
-    const typedTools = withModelFacingApplyPatchFunction(tools);
+    const typedTools = withModelFacingApplyPatchFunction(withCodexAddFileApplyPatch(tools));
     const transportTools =
       options.structuredToolTransport === false
         ? withStructuredViewImageFunctionResults(typedTools)
