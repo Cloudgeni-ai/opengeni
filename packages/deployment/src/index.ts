@@ -1485,7 +1485,7 @@ export function preflightChecksFor(contract: DeploymentContract): PreflightCheck
       check(
         "container-registry",
         true,
-        "Verify API, web, worker, and migration images are immutable release digests. Default create_acr=false requires anonymously pullable images; managed-identity pull applies only to the optional ACR created by create_acr=true.",
+        "Verify API, web, worker, and migration images are immutable release digests. Default create_acr=false requires anonymously pullable images; managed-identity pull applies only to the optional ACR created by create_acr=true. Created ACR requires foundation, manual image import, and digest readback before bootstrap creates the job.",
       ),
     );
   }
@@ -1861,7 +1861,7 @@ export function stackPlanFor(
     terraformRoot,
     helmValuesFile,
     platformDependencies,
-    creates: createdResourceClasses(contract),
+    creates: createdResourceClasses(contract, env),
     externalDependencies: externalDependencies(contract),
     requiredSecretKeys,
     deployCommands: deployCommands(
@@ -1873,7 +1873,7 @@ export function stackPlanFor(
       env,
     ),
     verifyCommands: verifyCommands(contract, platformDependencies, productOverlay),
-    destroyCommands: destroyCommands(contract, terraformRoot, platformDependencies),
+    destroyCommands: destroyCommands(contract, terraformRoot, platformDependencies, env),
     notes: planNotes(contract, env),
     ...(contract.runtime.platform === "azure-container-apps"
       ? { prerequisites: containerAppsPrerequisites() }
@@ -1986,7 +1986,10 @@ function helmValuesFileFor(contract: DeploymentContract): string | null {
   return null;
 }
 
-function createdResourceClasses(contract: DeploymentContract): string[] {
+function createdResourceClasses(
+  contract: DeploymentContract,
+  env: Record<string, string | undefined>,
+): string[] {
   if (contract.runtime.platform === "azure-container-apps") {
     return [
       "Azure resource group",
@@ -2001,6 +2004,7 @@ function createdResourceClasses(contract: DeploymentContract): string[] {
       "Azure Key Vault and managed-identity secret references",
       "user-assigned managed identity and role assignments",
       "Azure Log Analytics workspace",
+      ...(containerAppsCreateAcr(env) ? ["task-owned Azure Container Registry"] : []),
     ];
   }
   const out = [
@@ -2231,6 +2235,17 @@ const CONTAINER_APPS_VARIABLE_ARGS =
 const CONTAINER_APPS_BACKEND_CONFIG_ARGS =
   '-backend-config="path=${OPENGENI_ACA_STATE_FILE:?set the absolute path to private local Terraform state}"';
 
+function containerAppsCreateAcr(env: Record<string, string | undefined>): boolean {
+  const value = env.OPENGENI_ACA_CREATE_ACR;
+  if (value === undefined || value === "false") return false;
+  if (value === "true") return true;
+  throw new Error("OPENGENI_ACA_CREATE_ACR must be exactly true or false");
+}
+
+function containerAppsVariableArgs(env: Record<string, string | undefined>): string {
+  return `${CONTAINER_APPS_VARIABLE_ARGS} -var=create_acr=${containerAppsCreateAcr(env)}`;
+}
+
 function containerAppsPrerequisites(): string[] {
   return [
     "Terraform version and provider versions satisfying this module's versions.tf; init -reconfigure configures its local backend with the external private state path. A remote backend requires a separately configured thin wrapper and matching backend initialization.",
@@ -2239,7 +2254,8 @@ function containerAppsPrerequisites(): string[] {
     "Bun at the repository-pinned version, Bash, jq, seq, and curl for operator verification; no local image build is needed.",
     "Set absolute private paths OPENGENI_ACA_TFVARS_FILE, OPENGENI_ACA_STATE_FILE, and OPENGENI_ACA_TF_DATA_DIR outside the repository. Keep the initialized backend and TF_DATA_DIR unchanged across every phase and output/destroy command.",
     "Private tfvars supply images.api/worker/web immutable release references, external_services Temporal/NATS settings, secret_env model/sandbox credentials, and config_env non-secret runtime settings. The module generates database credentials and Key Vault references; no operator PostgreSQL password is required.",
-    "Default create_acr=false requires anonymously pullable images and grants no access to an existing registry. Optional create_acr=true creates an empty ACR with managed-identity pull access scoped to that registry; import the exact release digests before running the migration job.",
+    "Default create_acr=false requires anonymously pullable images and grants no access to an existing registry. Select --create-acr or OPENGENI_ACA_CREATE_ACR=true when generating the plan to create an empty task-owned ACR in foundation; the selected mode is explicitly pinned in every phase and destroy command.",
+    "Created ACR mode requires operator permission for az acr repository show digest readback. Stop after foundation: manually import authorized immutable API/worker/web images into the actual acr.login_server output using private credentials, update private images tfvars, and set OPENGENI_ACA_ACR_IMPORTS_COMPLETED to that exact login server before resuming the import gate. No images are copied by this plan; never rerun foundation after bootstrap/apps.",
     "Run the ordered deployment commands in the same shell so the exact migration execution identity is retained; never blindly retry job start after an unknown outcome.",
     "A successful schema/env check or TCP probe is not live deployment proof. Complete real model, remote sandbox, file/storage, auth, replay, schedule, and telemetry conformance; exports remain unsupported.",
   ];
@@ -2254,9 +2270,14 @@ function containerAppsMigrationStatusCommand(): string {
   );
 }
 
-function containerAppsDeployCommands(terraformRoot: string): string[] {
-  const bootstrapArgs = `${CONTAINER_APPS_VARIABLE_ARGS} -var=deployment_phase=bootstrap`;
-  const applicationArgs = `${CONTAINER_APPS_VARIABLE_ARGS} -var=deployment_phase=apps -var="migration_completed_revision=\${OPENGENI_ACA_MIGRATION_IMAGE:?retain the exact migrated API image}"`;
+function containerAppsDeployCommands(
+  terraformRoot: string,
+  env: Record<string, string | undefined>,
+): string[] {
+  const variableArgs = containerAppsVariableArgs(env);
+  const foundationArgs = `${variableArgs} -var=deployment_phase=foundation`;
+  const bootstrapArgs = `${variableArgs} -var=deployment_phase=bootstrap`;
+  const applicationArgs = `${variableArgs} -var=deployment_phase=apps -var="migration_completed_revision=\${OPENGENI_ACA_MIGRATION_IMAGE:?retain the exact migrated API image}"`;
   const output = `terraform -chdir=${terraformRoot} output`;
   const statusCommand = containerAppsMigrationStatusCommand();
   return [
@@ -2265,6 +2286,17 @@ function containerAppsDeployCommands(terraformRoot: string): string[] {
     'mkdir -p "$TF_DATA_DIR"',
     `terraform -chdir=${terraformRoot} init -reconfigure ${CONTAINER_APPS_BACKEND_CONFIG_ARGS}`,
     `terraform -chdir=${terraformRoot} validate`,
+    ...(containerAppsCreateAcr(env)
+      ? [
+          `terraform -chdir=${terraformRoot} plan ${foundationArgs}`,
+          `terraform -chdir=${terraformRoot} apply ${foundationArgs}`,
+          `OPENGENI_ACA_ACR_OUTPUT="$(${output} -json acr)" && OPENGENI_ACA_ACR_NAME="$(printf '%s' "$OPENGENI_ACA_ACR_OUTPUT" | jq -er '.name | strings | select(length > 0)')" && OPENGENI_ACA_ACR_LOGIN_SERVER="$(printf '%s' "$OPENGENI_ACA_ACR_OUTPUT" | jq -er '.login_server | strings | select(length > 0)')" || exit 1`,
+          'printf "Foundation created ACR %s (%s) without a migration job or applications. Manually import authorized release digests using private credentials and update images.api/worker/web in private tfvars. Set OPENGENI_ACA_ACR_IMPORTS_COMPLETED to that exact login server, then resume at the import gate below; do not rerun foundation after bootstrap/apps.\\n" "$OPENGENI_ACA_ACR_NAME" "$OPENGENI_ACA_ACR_LOGIN_SERVER"',
+          'test "${OPENGENI_ACA_ACR_IMPORTS_COMPLETED:-}" = "${OPENGENI_ACA_ACR_LOGIN_SERVER:?run foundation first}" || { printf "Stop: complete the manual created-ACR imports before bootstrap.\\n" >&2; exit 1; }',
+          `OPENGENI_ACA_RELEASE_IMAGES="$(printf '%s\\n' 'jsonencode(var.images)' | terraform -chdir=${terraformRoot} console ${foundationArgs} | jq -er --arg host "$OPENGENI_ACA_ACR_LOGIN_SERVER" 'fromjson | [.api, .worker, .web] | if all(.[]; type == "string" and startswith($host + "/") and test("^[A-Za-z0-9._/-]+@sha256:[a-f0-9]{64}$")) then .[] else error("Release images must use the created ACR and immutable sha256 digests") end')"`,
+          'while IFS= read -r OPENGENI_ACA_IMAGE; do OPENGENI_ACA_ACR_IMAGE="${OPENGENI_ACA_IMAGE#*/}"; az acr repository show --name "${OPENGENI_ACA_ACR_NAME:?run foundation first}" --image "$OPENGENI_ACA_ACR_IMAGE" --output none --only-show-errors >/dev/null 2>&1 || { printf "Required release digest is not readable in the created ACR; resolve import/read access privately before bootstrap.\\n" >&2; exit 1; }; done <<< "$OPENGENI_ACA_RELEASE_IMAGES"',
+        ]
+      : []),
     `terraform -chdir=${terraformRoot} plan ${bootstrapArgs}`,
     `terraform -chdir=${terraformRoot} apply ${bootstrapArgs}`,
     `OPENGENI_ACA_RESOURCE_GROUP="$(${output} -raw resource_group_name)" && OPENGENI_ACA_MIGRATION_JOB="$(${output} -raw migration_job_name)" && OPENGENI_ACA_MIGRATION_IMAGE="$(${output} -json migration_job | jq -er .image)"`,
@@ -2305,7 +2337,7 @@ function deployCommands(
   env: Record<string, string | undefined>,
 ): string[] {
   if (contract.runtime.platform === "azure-container-apps") {
-    return containerAppsDeployCommands(CONTAINER_APPS_TERRAFORM_ROOT);
+    return containerAppsDeployCommands(CONTAINER_APPS_TERRAFORM_ROOT, env);
   }
   const maintenanceImageValuesArg = maintenanceImageDigestHelmArgs(contract, terraformRoot, env);
   const maintenanceFinalUpgradeArgs = maintenanceFinalUpgradeSafetyArgs(env);
@@ -2541,11 +2573,12 @@ function destroyCommands(
   contract: DeploymentContract,
   terraformRoot: string | null,
   platformDependencies: PlatformDependencyPlan[],
+  env: Record<string, string | undefined>,
 ): string[] {
   if (contract.runtime.platform === "azure-container-apps") {
     return [
-      `terraform -chdir=${terraformRoot} plan -destroy ${CONTAINER_APPS_VARIABLE_ARGS}`,
-      `terraform -chdir=${terraformRoot} destroy ${CONTAINER_APPS_VARIABLE_ARGS}`,
+      `terraform -chdir=${terraformRoot} plan -destroy ${containerAppsVariableArgs(env)}`,
+      `terraform -chdir=${terraformRoot} destroy ${containerAppsVariableArgs(env)}`,
     ];
   }
   if (contract.profile === "local-compose") {
@@ -2759,21 +2792,24 @@ function planNotes(
   if (contract.runtime.platform === "azure-container-apps") {
     return [
       "Keep generated credentials, Terraform state/plans, and filled tfvars in private operator-controlled storage outside the repository. Terraform state is sensitive even when credentials are delivered through Key Vault.",
-      "Ordered bootstrap: create substrate and manual migration job with applications disabled; start one exact job execution; require Succeeded before enabling applications; verify real conformance; use the destroy plan for teardown.",
+      containerAppsCreateAcr(env)
+        ? "Ordered created-ACR deployment: foundation creates substrate/ACR without a job or apps; stop for manual authorized image imports and updated private image references; acknowledge the exact registry and verify every required digest; bootstrap then creates the manual migration job; require its exact execution Succeeded before apps; verify real conformance; destroy."
+        : "Ordered bootstrap with anonymous release images: create substrate and manual migration job with applications disabled; start one exact job execution; require Succeeded before enabling applications; verify real conformance; use the destroy plan for teardown.",
       "API and web use native Container Apps ingress. Control and turn workers are separate always-on applications with at least one replica each, not event-triggered jobs.",
       "Require Azure template readback for both worker roles: minimum replicas at least 1 and termination grace at least 120 seconds. A rollout must checkpoint/drain real turns rather than silently terminating them.",
       "Temporal and NATS are external prerequisites; this profile does not install them. Temporary live-test dependency fixtures are not production defaults and have a separate lifecycle.",
       "Use existing release images pinned by full sha256 digest. Migrations use the same API image; this workflow does not build or publish replacement images.",
       "Do not change tfvars, image digests, runtime database roles, or secrets between bootstrap, migration execution, and application enablement. Retain the exact execution ID when an observation fails; do not start another migration blindly.",
       "Use managed identity for Key Vault secret delivery and pull access only to the optional created ACR; the current Blob adapter uses a connection string delivered as a secret, not an implied identity-native storage adapter.",
-      "create_acr=false uses existing anonymously pullable release images by default and assigns no roles on existing registries. Optional create_acr=true creates an empty registry: import the exact immutable images separately before bootstrap can run its migration job.",
+      "create_acr=false uses existing anonymously pullable release images by default and assigns no roles on existing registries. Select --create-acr or OPENGENI_ACA_CREATE_ACR=true for foundation -> manual import -> digest readback -> bootstrap: ACA validates pulls at job CREATE, so an empty created ACR cannot be populated after a whole bootstrap apply.",
+      "Created-ACR readback confirms configured digest membership using the operator's credentials, not workload identity pull permission or live runtime conformance. The plan never imports images automatically or grants access to foreign registries. Keep credentials private and preserve the selected registry mode through teardown.",
       "The native environment HTTP-route edge serves API and web on one HTTPS origin. Verify real SSE duration, reconnect/replay, rolling restart and NATS-loss recovery against that edge.",
       "The stock conformance stream is short and a selected sandbox backend is not proof of a sandbox invocation. Add actual remote commands and file materialization tests; test private production metrics/OTEL independently rather than counting a skipped public /metrics check as coverage.",
       "preflight --check-env inspects only the operator's current environment, not deployed Key Vault references. Check effective runtime values privately; do not use reference URLs as credential values or mistake a local env check for workload readiness.",
       "Standard ACA HTTP ingress documents a 240-second timeout; do not treat that as a measured stream lifetime or infer a 3600-second guarantee. Read back the native environment HTTP-route edge and verify long-lived SSE and reconnect/replay empirically.",
       "Artifact exports are compatibility-unverified and remain disabled (OPENGENI_ARTIFACT_MATERIALIZER_DEPLOYED=false). Do not enable materializer, outbox, or sandbox artifact runtimes or claim export parity before dedicated probes and supported infrastructure exist.",
       "deployment:runtime-artifacts does not support this profile; Terraform owns native runtime settings and secret references.",
-      "This is a fresh-deployment bootstrap plan, not a maintenance-upgrade procedure. Existing installations require a separately reviewed drain and migration sequence; disabling applications can destroy their resources.",
+      "This is a fresh-deployment plan, not a maintenance-upgrade procedure. Never rerun foundation after bootstrap/apps: it removes the job and serving applications. Existing installations require a separately reviewed drain and migration sequence; disabling applications can destroy their resources.",
       "Terraform destroy removes only this module's resources. External Temporal/NATS services and remote sandbox resources are operator-owned; reconcile any test-created remote sandboxes separately.",
       "After destroy, reconcile the module's resource_group_name and infrastructure_resource_group_name outputs against Azure; provider-created environment infrastructure must also be gone before teardown is declared complete.",
     ];

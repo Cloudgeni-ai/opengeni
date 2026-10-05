@@ -263,5 +263,39 @@ describe("Azure Container Apps deployment profile", () => {
     expect(plan.destroyCommands[1]).toContain("-var-file=");
     expect(plan.verifyCommands.join("\n")).toContain("terminationGracePeriodSeconds >= 120");
     expect(plan.verifyCommands.join("\n")).toContain("minReplicas >= 1");
+    expect(plan.deployCommands.join("\n")).not.toContain("-var=deployment_phase=foundation");
+    expect(plan.deployCommands.join("\n")).toContain("-var=create_acr=false");
+    expect(plan.destroyCommands.join("\n")).toContain("-var=create_acr=false");
+  });
+
+  test("requires explicit created-ACR mode and gates bootstrap after foundation and manual imports", () => {
+    const plan = stackPlanFor(profile, "none", { OPENGENI_ACA_CREATE_ACR: "true" });
+    const commands = plan.deployCommands.join("\n");
+    expect(plan.creates).toContain("task-owned Azure Container Registry");
+    expect(commands).toContain("-var=create_acr=true -var=deployment_phase=foundation");
+    expect(commands.indexOf("-var=deployment_phase=foundation")).toBeLessThan(
+      commands.indexOf("OPENGENI_ACA_ACR_IMPORTS_COMPLETED"),
+    );
+    expect(commands.indexOf("OPENGENI_ACA_ACR_IMPORTS_COMPLETED")).toBeLessThan(
+      commands.indexOf("az acr repository show"),
+    );
+    expect(commands.indexOf("az acr repository show")).toBeLessThan(
+      commands.indexOf("-var=deployment_phase=bootstrap"),
+    );
+    expect(commands).toContain("output -json acr");
+    expect(commands).toContain("jsonencode(var.images)");
+    expect(commands).toContain("fromjson | [.api, .worker, .web]");
+    expect(commands).not.toMatch(/\baz acr (?:import|login|build)\b/);
+    expect(plan.destroyCommands.join("\n")).toContain("-var=create_acr=true");
+    expect(plan.notes.join("\n")).toContain("Never rerun foundation after bootstrap/apps");
+    expect(JSON.stringify(plan)).not.toMatch(/\b(?:helm|kubectl|kubernetes|aks|chart)\b/i);
+    for (const value of ["", "TRUE", "1", "yes"]) {
+      expect(() => stackPlanFor(profile, "none", { OPENGENI_ACA_CREATE_ACR: value })).toThrow(
+        "OPENGENI_ACA_CREATE_ACR must be exactly true or false",
+      );
+    }
+    expect(
+      stackPlanFor(profile, "none", { OPENGENI_ACA_CREATE_ACR: "false" }).deployCommands,
+    ).toEqual(stackPlanFor(profile, "none", {}).deployCommands);
   });
 });
