@@ -31,6 +31,13 @@ export const DEFAULT_CHAT_SOURCE = "app";
 
 type SubmittedTurn = { after: number; turnId: string | null };
 
+const MISSING_API_KEY_MESSAGE =
+  "Opengeni requires an apiKey. Set OPENGENI_API_KEY in the server environment.";
+
+async function missingApiKeyFetch(): Promise<Response> {
+  throw new TypeError(MISSING_API_KEY_MESSAGE);
+}
+
 type BuildCreate = (text: string, send: ChatSendOptions) => CreateSessionRequest;
 type SubmitCreate = (request: CreateSessionRequest) => Promise<CreateSessionResponse>;
 
@@ -74,12 +81,16 @@ export class OpenGeni {
   private pendingOrganizationId: Promise<string> | undefined;
 
   constructor(options: OpenGeniOptions) {
-    if (!options.apiKey) throw new TypeError("Opengeni requires an apiKey.");
     this.client = new OpenGeniClient({
       // An empty value (a blank `OPENGENI_API_BASE_URL=` in .env) means the default.
       baseUrl: options.baseUrl?.trim() || DEFAULT_OPENGENI_BASE_URL,
-      apiKey: options.apiKey,
-      ...(options.fetch ? { fetch: options.fetch } : {}),
+      // A missing key fails each request, not construction: a module-scope
+      // `new OpenGeni({ apiKey: process.env.OPENGENI_API_KEY! })` must not
+      // break `next build` (or any import) where the secret only exists at
+      // runtime.
+      ...(options.apiKey
+        ? { apiKey: options.apiKey, ...(options.fetch ? { fetch: options.fetch } : {}) }
+        : { fetch: missingApiKeyFetch }),
     });
     this.organizationId = options.organizationId?.trim() ?? "";
     this.source = options.source ?? DEFAULT_CHAT_SOURCE;

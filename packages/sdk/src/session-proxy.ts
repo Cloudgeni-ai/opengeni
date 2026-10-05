@@ -1946,5 +1946,8 @@ function errorResponse(error: unknown): Response {
   if (error instanceof Error && error.name === "AbortError") {
     return errorJson(499, "aborted", "The request was aborted.");
   }
+  // The browser gets no details; the host's server log needs the cause
+  // (for example a missing OPENGENI_API_KEY).
+  console.error("[@opengeni/sdk] Session proxy request failed:", error);
   return errorJson(500, "proxy_error", "Request could not be completed.");
 }

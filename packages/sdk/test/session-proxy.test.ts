@@ -1,4 +1,5 @@
 import { describe, expect, spyOn, test } from "bun:test";
+import { OpenGeni } from "../src/chat";
 import { OpenGeniApiError } from "../src/errors";
 import {
   OpenGeniClient,
@@ -386,6 +387,28 @@ describe("createSessionProxyHandler", () => {
       expect(String(notices[0]![0])).toContain("eb32912d-1acd-44f5-9830-b0bf629f32a3");
     } finally {
       warn.mockRestore();
+    }
+  });
+
+  test("a missing API key fails requests, not module load, and names the env var in the server log", async () => {
+    // `new OpenGeni({ apiKey: process.env.OPENGENI_API_KEY! })` runs at module
+    // scope in a Next.js route; `next build` imports it without runtime secrets.
+    const og = new OpenGeni({ apiKey: undefined as unknown as string, organizationId: "org" });
+    const handler = createSessionProxyHandler(og, {
+      resolve: () => ({ workspaceId: WORKSPACE_ID, user: "u_42" }),
+    });
+    const logged = spyOn(console, "error").mockImplementation(() => undefined);
+    try {
+      const response = await handler(new Request(`${PRODUCT}/api/opengeni/v1/config/client`));
+      expect(response.status).toBe(500);
+      expect(((await response.json()) as { error: { code: string } }).error.code).toBe(
+        "proxy_error",
+      );
+      expect(logged.mock.calls.map((call) => String(call[1]))).toContain(
+        "TypeError: Opengeni requires an apiKey. Set OPENGENI_API_KEY in the server environment.",
+      );
+    } finally {
+      logged.mockRestore();
     }
   });
 
