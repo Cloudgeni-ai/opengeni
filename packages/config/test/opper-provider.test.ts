@@ -10,6 +10,7 @@ import {
   configuredProviders,
   getSettings,
   opperCredentialProblem,
+  opperMaxOutputTokens,
   OPENGENI_OPPER_MODELS,
   OPPER_BASE_URL,
   OPPER_PROVIDER_ID,
@@ -26,24 +27,44 @@ import {
   WORKSPACE_OPPER_PROVIDER_ID,
 } from "../src";
 
+const OPUS = "aws/claude-opus-5-5";
 const GEMINI = "vertexai/gemini-3.8-flash-eu";
-const SONNET = "aws/claude-sonnet-4-6-eu";
 
 function base(env: Record<string, string> = {}) {
   return getSettings({ OPENGENI_ENV: "test", ...env });
 }
 
 describe("deployment Opper rail", () => {
-  test("ships the reviewed EU starter routes", () => {
-    expect(OPENGENI_OPPER_MODELS.map((model) => model.upstreamModelId)).toEqual([GEMINI, SONNET]);
-    for (const model of OPENGENI_OPPER_MODELS) {
-      expect(model.capabilities.functionCalling).toEqual({ upstream: "supported", runnable: true });
-      expect(model.capabilities.transports.sse.runnable).toBe(true);
-      expect(model.capabilities.inputModalities).toEqual(["text"]);
-      // Opper advertises no reasoning parameter for either pinned route.
-      expect(model.capabilities.reasoning.runnable).toBe(false);
-      expect(model.pricing).toBeDefined();
-    }
+  test("ships Claude Opus 5.5 (EU) with reasoning, image input and a 128K output cap", () => {
+    expect(OPENGENI_OPPER_MODELS.map((model) => model.upstreamModelId)).toEqual([OPUS]);
+    const [opus] = OPENGENI_OPPER_MODELS;
+    expect(opus).toMatchObject({
+      label: "Claude Opus 5.5 (EU)",
+      shortLabel: "Opus 5.5",
+      contextWindowTokens: 1_000_000,
+      effectiveContextWindowTokens: 872_000,
+      autoCompactTokenLimit: 800_000,
+      maxOutputTokens: 128_000,
+    });
+    expect(opus!.capabilities.functionCalling).toEqual({ upstream: "supported", runnable: true });
+    expect(opus!.capabilities.transports.sse.runnable).toBe(true);
+    expect(opus!.capabilities.inputModalities).toEqual(["text", "image"]);
+    expect(opus!.capabilities.inputFileMediaTypes).toEqual(["application/pdf"]);
+    expect(opus!.capabilities.reasoning).toMatchObject({
+      upstream: "supported",
+      runnable: true,
+      efforts: ["low", "medium", "high", "xhigh", "max"],
+      defaultEffort: "medium",
+    });
+    expect(opus!.pricing).toBeDefined();
+  });
+
+  test("sends the configured output cap, a Claude-family floor, or nothing", () => {
+    const settings = base();
+    expect(opperMaxOutputTokens(settings, OPUS)).toBe(128_000);
+    expect(opperMaxOutputTokens(settings, "anthropic/claude-sonnet-4-6")).toBe(64_000);
+    expect(opperMaxOutputTokens(settings, "eu.anthropic.claude-haiku-4-5")).toBe(64_000);
+    expect(opperMaxOutputTokens(settings, GEMINI)).toBeUndefined();
   });
 
   test("is absent without OPENGENI_OPPER_API_KEY", () => {
@@ -61,25 +82,21 @@ describe("deployment Opper rail", () => {
       api: "chat",
       baseUrl: OPPER_BASE_URL,
       apiKey: "op-deployment",
+      // Hidden reasoning streams only keepalives; see OPPER_STREAM_PROGRESS_TIMEOUT_MS.
+      streamProgressTimeoutMs: 60 * 60_000,
       credentialSource: { kind: "deployment", mechanism: "api_key" },
       billing: { upstreamPayer: "deployment", metering: "opengeni_credits" },
     });
     const models = configuredModels(settings).filter((m) => m.providerId === OPPER_PROVIDER_ID);
-    expect(models.map((m) => m.id)).toEqual([`opper/${GEMINI}`, `opper/${SONNET}`]);
+    expect(models.map((m) => m.id)).toEqual([`opper/${OPUS}`]);
     for (const model of models) {
       expect(model.cost).toBe("credits");
       expect(model.deployment.wireApi).toBe("chat");
     }
     expect(models[0]).toMatchObject({
-      upstreamModelId: GEMINI,
-      contextWindowTokens: 1_048_576,
-      effectiveContextWindowTokens: 983_040,
-      autoCompactTokenLimit: 900_000,
-    });
-    expect(models[1]).toMatchObject({
-      upstreamModelId: SONNET,
+      upstreamModelId: OPUS,
       contextWindowTokens: 1_000_000,
-      effectiveContextWindowTokens: 936_000,
+      effectiveContextWindowTokens: 872_000,
       autoCompactTokenLimit: 800_000,
     });
   });
@@ -87,27 +104,21 @@ describe("deployment Opper rail", () => {
   test("debits the reviewed Opper list price plus the standard 5% margin", () => {
     const settings = base({ OPENGENI_OPPER_API_KEY: "op-deployment" });
     const schedules = configuredModelPricingSchedules(settings);
-    expect(schedules[`opper/${GEMINI}`]?.default).toEqual({
-      inputMicrosPerMillionTokens: 825_000,
-      cachedInputMicrosPerMillionTokens: 82_500,
-      outputMicrosPerMillionTokens: 4_125_000,
+    expect(schedules[`opper/${OPUS}`]?.default).toEqual({
+      inputMicrosPerMillionTokens: 4_400_000,
+      cachedInputMicrosPerMillionTokens: 220_000,
+      cacheWriteMicrosPerMillionTokens: 5_500_000,
+      outputMicrosPerMillionTokens: 22_000_000,
       marginBps: 500,
     });
-    expect(schedules[`opper/${SONNET}`]?.default).toEqual({
-      inputMicrosPerMillionTokens: 3_300_000,
-      cachedInputMicrosPerMillionTokens: 330_000,
-      cacheWriteMicrosPerMillionTokens: 4_125_000,
-      outputMicrosPerMillionTokens: 16_500_000,
-      marginBps: 500,
-    });
-    // 1M uncached input + 1M output on Sonnet: ($3.30 + $16.50) * 1.05.
+    // 1M uncached input + 1M output on Opus: ($4.40 + $22.00) * 1.05.
     expect(
-      calculateModelUsageCostMicros(settings, `opper/${SONNET}`, {
+      calculateModelUsageCostMicros(settings, `opper/${OPUS}`, {
         inputTokens: 1_000_000,
         outputTokens: 1_000_000,
         totalTokens: 2_000_000,
       }),
-    ).toBe(20_790_000);
+    ).toBe(27_720_000);
   });
 
   test("validates as a managed credits catalog without extra pricing JSON", () => {
@@ -159,8 +170,10 @@ describe("workspace Opper rail", () => {
   test("is visible without the deployment key and injects only its runtime key", () => {
     const settings = base();
     const custom = "mistral/mistral-large-eu";
+    const claude = "anthropic/claude-sonnet-4-6";
     const catalog = withWorkspaceOpperCatalogProvider(settings, [
       { upstreamModelId: custom, label: "Mistral Large (EU)" },
+      { upstreamModelId: claude },
     ]);
     const provider = configuredProviders(catalog).find(
       (p) => p.id === WORKSPACE_OPPER_PROVIDER_ID,
@@ -180,22 +193,38 @@ describe("workspace Opper rail", () => {
       (m) => m.providerId === WORKSPACE_OPPER_PROVIDER_ID,
     );
     expect(models.map((m) => m.id)).toEqual([
-      `${WORKSPACE_OPPER_MODEL_ID_PREFIX}${GEMINI}`,
-      `${WORKSPACE_OPPER_MODEL_ID_PREFIX}${SONNET}`,
+      `${WORKSPACE_OPPER_MODEL_ID_PREFIX}${OPUS}`,
       `${WORKSPACE_OPPER_MODEL_ID_PREFIX}${custom}`,
+      `${WORKSPACE_OPPER_MODEL_ID_PREFIX}${claude}`,
     ]);
     for (const model of models) expect(model.cost).toBe("workspace");
-    const customModel = models[2]!;
+    expect(models[0]!.capabilities.reasoning.efforts).toEqual([
+      "low",
+      "medium",
+      "high",
+      "xhigh",
+      "max",
+    ]);
+    const customModel = models[1]!;
+    // Custom ids get runnable reasoning (Opper ignores an effort a route does
+    // not support) and stay text-only outside the Claude/Gemini families.
     expect(customModel).toMatchObject({
       label: "Mistral Large (EU)",
       upstreamModelId: custom,
       capabilities: {
-        reasoning: { upstream: "unknown", runnable: false, efforts: [] },
+        reasoning: {
+          upstream: "unknown",
+          runnable: true,
+          efforts: ["low", "medium", "high"],
+          defaultEffort: "medium",
+        },
         functionCalling: { upstream: "supported", runnable: true },
         inputModalities: ["text"],
-        promptCaching: { upstream: "unsupported", runnable: false, mode: "none" },
+        inputFileMediaTypes: [],
       },
     });
+    expect(models[2]!.capabilities.inputModalities).toEqual(["text", "image"]);
+    expect(models[2]!.capabilities.reasoning.runnable).toBe(true);
     expect(customModel.contextWindowTokens).toBeUndefined();
     expect(policyProviderIdForModel(catalog, customModel.id)).toBe(WORKSPACE_OPPER_PROVIDER_ID);
 
@@ -210,26 +239,25 @@ describe("workspace Opper rail", () => {
 
   test("curated membership wins over a custom row with the same upstream id", () => {
     const catalog = withWorkspaceOpperCatalogProvider(base(), [
-      { upstreamModelId: GEMINI, label: "Shadow" },
+      { upstreamModelId: OPUS, label: "Shadow" },
     ]);
     const matches = configuredModels(catalog).filter(
-      (m) => m.providerId === WORKSPACE_OPPER_PROVIDER_ID && m.upstreamModelId === GEMINI,
+      (m) => m.providerId === WORKSPACE_OPPER_PROVIDER_ID && m.upstreamModelId === OPUS,
     );
     expect(matches).toHaveLength(1);
-    expect(matches[0]!.label).toBe("Gemini 3.8 Flash (EU)");
+    expect(matches[0]!.label).toBe("Claude Opus 5.5 (EU)");
     expect(configuredOpperWorkspaceProductModelIds(base())).toEqual([
-      `${WORKSPACE_OPPER_MODEL_ID_PREFIX}${GEMINI}`,
-      `${WORKSPACE_OPPER_MODEL_ID_PREFIX}${SONNET}`,
+      `${WORKSPACE_OPPER_MODEL_ID_PREFIX}${OPUS}`,
     ]);
   });
 
   test("an accepted workspace turn resolves its static catalog identity", () => {
     const resolved = resolveModelProviderForTurn(
       base(),
-      `${WORKSPACE_OPPER_MODEL_ID_PREFIX}${SONNET}`,
+      `${WORKSPACE_OPPER_MODEL_ID_PREFIX}${OPUS}`,
     );
     expect(resolved?.provider.id).toBe(WORKSPACE_OPPER_PROVIDER_ID);
-    expect(resolved?.model.upstreamModelId).toBe(SONNET);
+    expect(resolved?.model.upstreamModelId).toBe(OPUS);
   });
 });
 
@@ -257,6 +285,21 @@ describe("organization Opper rail", () => {
         .map((m) => [m.id, m.cost]),
     ).toEqual([["organization-opper/gemini-3.8-flash", "organization"]]);
   });
+
+  test("an organization custom id naming a configured route inherits its definition", () => {
+    const catalog = withOrganizationOpperCatalogProvider(base(), [{ upstreamModelId: OPUS }]);
+    const model = configuredModels(catalog).find(
+      (m) => m.providerId === ORGANIZATION_OPPER_PROVIDER_ID,
+    )!;
+    expect(model).toMatchObject({
+      id: `organization-opper/${OPUS}`,
+      label: "Claude Opus 5.5 (EU)",
+      contextWindowTokens: 1_000_000,
+      effectiveContextWindowTokens: 872_000,
+      autoCompactTokenLimit: 800_000,
+    });
+    expect(model.capabilities).toEqual(OPENGENI_OPPER_MODELS[0]!.capabilities);
+  });
 });
 
 describe("deployment catalog document", () => {
@@ -269,15 +312,13 @@ describe("deployment catalog document", () => {
 
   test("admits reviewed Opper membership and keeps price in the code snapshot", () => {
     const parsed = parseModelCatalogDocument(document);
-    expect(parsed.opperModels.map((model) => model.upstreamModelId)).toEqual([GEMINI, SONNET]);
+    expect(parsed.opperModels.map((model) => model.upstreamModelId)).toEqual([OPUS]);
     const settings = applyModelCatalogDocument(
       base({ OPENGENI_OPPER_API_KEY: "op-deployment", OPENGENI_MODEL_CATALOG_SOURCE: "database" }),
       document,
     );
-    expect(configuredOpperUpstreamModelIds(settings)).toEqual([GEMINI, SONNET]);
-    expect(configuredModelPricingSchedules(settings)[`opper/${GEMINI}`]?.default.marginBps).toBe(
-      500,
-    );
+    expect(configuredOpperUpstreamModelIds(settings)).toEqual([OPUS]);
+    expect(configuredModelPricingSchedules(settings)[`opper/${OPUS}`]?.default.marginBps).toBe(500);
   });
 
   test("rejects prices, duplicate product ids and malformed route ids", () => {

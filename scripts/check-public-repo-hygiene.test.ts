@@ -7,6 +7,54 @@ import {
 } from "./check-public-repo-hygiene";
 
 describe("public repository hygiene", () => {
+  test("bounds upstream random-label exemptions to exact paths and bytes", () => {
+    for (const file of [
+      "agent/vendor/async-nats/tests/configs/digests/digester_test_bytes_010000.txt",
+      "agent/vendor/async-nats/tests/configs/digests/digester_test_bytes_100000.txt",
+    ]) {
+      const source = readFileSync(new URL(`../${file}`, import.meta.url), "utf8");
+      expect(auditPublicText(file, source)).toEqual([]);
+      for (const [path, text] of [
+        ["fixture.txt", source],
+        [file, `${source} `],
+        [file, source.slice(1)],
+      ]) {
+        expect(
+          auditPublicText(path!, text!).some(
+            (finding) => finding.reason === "retired milestone label",
+          ),
+        ).toBe(true);
+      }
+      const personalMail = ["example-user@", "gmail.com"].join("");
+      const altered = auditPublicText(file, `${source}\n${personalMail}`);
+      expect(altered.map((finding) => finding.reason)).toContain("personal email address");
+      expect(altered.map((finding) => finding.reason)).toContain("retired milestone label");
+    }
+  });
+
+  test("only exempts the reviewed upstream Rust field primitive", () => {
+    const file = "agent/vendor/async-nats/src/lib.rs";
+    const source = readFileSync(new URL(`../${file}`, import.meta.url), "utf8");
+    const fieldType = ["i", "8"].join("");
+    const field = `pub proto: ${fieldType},`;
+    expect(source.slice(9_379 - 11, 9_379 + 3)).toBe(field);
+    expect(auditPublicText(file, source)).toEqual([]);
+    for (const text of [
+      source.replace(field, `pub proto: ${fieldType.toUpperCase()},`),
+      `${source}\n`,
+    ]) {
+      expect(
+        auditPublicText(file, text).some((finding) => finding.reason === "retired milestone label"),
+      ).toBe(true);
+    }
+    const label = ["i", "8"].join("");
+    expect(
+      auditPublicText(file, `let label = "${label}";\n// ${label}\n/* ${label} */`).map(
+        (finding) => finding.reason,
+      ),
+    ).toEqual(Array(3).fill("retired milestone label"));
+  });
+
   test("the committed catalog quarantines restricted clients and keeps counts consistent", () => {
     const snapshot = JSON.parse(
       readFileSync(new URL("../data/catalog/integrations-snapshot.json", import.meta.url), "utf8"),

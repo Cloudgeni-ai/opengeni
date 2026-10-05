@@ -272,8 +272,10 @@ test.each([false, true])(
     else completion.resolve();
     const results = await Promise.all([observation, poolClose, driverClose]);
     if (reject) {
-      expect(results).toEqual([failure, failure, failure]);
-      await expect(f.pool.close()).rejects.toThrow("termination failed");
+      expect(results[0]).toMatchObject({ name: "UnsettledCleanupError", errors: [failure] });
+      expect(results[1]).toBe(results[0]);
+      expect(results[2]).toBe(results[0]);
+      await expect(f.pool.close()).rejects.toBe(results[0]);
       expect(notifications).toBe(0);
     } else {
       expect(results[0]).toBeInstanceOf(CdpTransportError);

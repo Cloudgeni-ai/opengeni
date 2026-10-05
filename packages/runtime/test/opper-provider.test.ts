@@ -17,6 +17,7 @@ import {
 
 const GEMINI = "vertexai/gemini-3.8-flash-eu";
 const SONNET = "aws/claude-sonnet-4-6-eu";
+const OPUS = "aws/claude-opus-5-5";
 
 function opperProvider(
   kind: "opper-managed" | "opper-workspace" | "opper-organization",
@@ -121,6 +122,25 @@ describe("Opper request policy", () => {
     expect(String(toolMessage.content)).not.toContain('"$ref"');
   });
 
+  test("fills the route's output cap only when the request names none", () => {
+    const policy = modelRequestPolicyForProvider(
+      opperProvider("opper-managed"),
+      new Map([[OPUS, undefined]]),
+      new Map([[OPUS, 128_000]]),
+    );
+    const messages = [{ role: "user", content: "hi" }];
+    expect(policy({ path: "/chat/completions", body: { model: OPUS, messages } })?.body).toEqual({
+      model: OPUS,
+      messages,
+      max_tokens: 128_000,
+    });
+    for (const explicit of [{ max_tokens: 512 }, { max_completion_tokens: 512 }]) {
+      expect(
+        policy({ path: "/chat/completions", body: { model: OPUS, messages, ...explicit } }),
+      ).toBeUndefined();
+    }
+  });
+
   test("an Opper model outside the reviewed catalog fails before network I/O", () => {
     const policy = modelRequestPolicyForProvider(
       opperProvider("opper-managed"),
@@ -179,15 +199,19 @@ describe("Opper provider clients", () => {
       await expect(
         (async () =>
           await client.chat.completions.create({
-            model: SONNET,
+            model: OPUS,
             messages: [{ role: "user", content: "hello" }],
-          }))(),
+            reasoning_effort: "high",
+          } as never))(),
       ).rejects.toThrow(/503/u);
       // One request: a 503 is not blindly replayed.
       expect(calls).toHaveLength(1);
       expect(calls[0]!.url).toBe("https://api.opper.ai/v3/compat/chat/completions");
       expect(calls[0]!.headers.get("authorization")).toBe("Bearer op-deployment-fetch");
-      expect(calls[0]!.body.model).toBe(SONNET);
+      expect(calls[0]!.body.model).toBe(OPUS);
+      expect(calls[0]!.body.reasoning_effort).toBe("high");
+      // Opper's own 4,096-token default would truncate hidden reasoning.
+      expect(calls[0]!.body.max_tokens).toBe(128_000);
 
       await expect(
         (async () =>

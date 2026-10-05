@@ -123,7 +123,7 @@ provider form in `apps/web/src/components/direct-model-provider-connection.tsx`.
 | Workspace AI Gateway         | member connects a Gateway key in Settings     | Responses        | Same curated models plus optional workspace slugs, workspace-paid |
 | Deployment OpenRouter        | `OPENGENI_OPENROUTER_API_KEY`                 | Chat Completions | Curated `openrouter/…` (v1 ships one `:free` starter)             |
 | Workspace OpenRouter         | member connects an OpenRouter key in Settings | Chat Completions | `workspace-openrouter/…`, workspace-paid                          |
-| Deployment Opper             | `OPENGENI_OPPER_API_KEY`                      | Chat Completions | Curated EU `opper/…` routes, OpenGeni credits                     |
+| Deployment Opper             | `OPENGENI_OPPER_API_KEY`                      | Chat Completions | Curated EU `opper/…` routes (Claude Opus 5.5 EU), Opengeni credits |
 | Workspace Opper              | member connects an Opper key in Settings      | Chat Completions | `workspace-opper/…` (curated + custom ids), workspace-paid        |
 | Codex ChatGPT subscription   | `OPENGENI_CODEX_SUBSCRIPTION_ENABLED`         | Responses        | `codex/…` after the workspace connection is ready                 |
 | SuperGrok / xAI subscription | `OPENGENI_SUPERGROK_SUBSCRIPTION_ENABLED`     | Responses        | `supergrok/…` after the workspace connection is ready             |
@@ -210,6 +210,49 @@ workspace-facing cost are deliberately independent:
 - `OPENGENI_MODEL_PRICING_JSON` is separate again. A managed deployment that
   marks a model `credits` must provide a price when no reviewed built-in price
   exists, even if OpenGeni settles that provider through an external account.
+
+### Code-mode managed model lists
+
+The managed provider lists (Vercel AI Gateway, OpenRouter, Opper) ship as
+reviewed code tables. In `code` mode, `OPENGENI_MANAGED_MODELS_JSON` replaces any
+of them without a code deploy, in the same way `OPENGENI_MODEL_PROVIDERS_JSON` and
+`OPENGENI_MODEL_PRICING_JSON` swap registry models. The value is the
+managed-provider slice of a catalog document:
+
+```json
+{
+  "opperModels": [
+    {
+      "upstreamModelId": "aws/claude-opus-5-5",
+      "label": "Claude Opus 5.5 (EU)",
+      "shortLabel": "Opus 5.5",
+      "capabilities": { "...": "complete V1 capabilities" },
+      "contextWindowTokens": 1000000,
+      "effectiveContextWindowTokens": 872000,
+      "autoCompactTokenLimit": 800000,
+      "maxOutputTokens": 128000
+    }
+  ]
+}
+```
+
+- Each of `gatewayModels`, `openrouterModels`, and `opperModels` is optional and
+  uses exactly the database document's strict entry schema. A present array
+  replaces that provider's code table, `[]` removes its deployment membership,
+  and an omitted key keeps the code table. Unknown keys, `pricing`, credentials,
+  billing, and duplicate ids fail boot.
+- Prices never come from this value. Gateway and Opper debit their reported
+  per-response cost; the reviewed code price table, then
+  `OPENGENI_MODEL_PRICING_JSON`, supply the fallback and the boot validation
+  that every credits-billed product has a price.
+- Cost policy still applies. The default `OPENGENI_MODEL_COST_POLICY_JSON` names
+  the OpenRouter starter, so a replaced `openrouterModels` list must also set its
+  own policy (OpenRouter `:free` routes are normally `"free"`).
+- `database` mode ignores this variable (boot logs a warning) so it can never
+  bypass the singleton document. Move the same arrays into the document when
+  switching sources.
+- Workspace and organization rails reuse the configured lists for curated
+  products and for capability inheritance by matching custom ids.
 
 Database documents use schema version 1 and contain only reviewed membership
 and optional line-safe notes:
@@ -760,52 +803,50 @@ A request whose `model` is not in the provider's resolved catalog fails before
 network I/O. Membership is curated and production never mirrors
 `GET /v3/models`.
 
-### Reviewed starter routes
+### Reviewed starter route
 
-Reviewed 2026-10-05 against Opper's public catalogue
-(`GET https://api.opper.ai/v3/models?limit=50&offset=N`, 1,115 entries). Both
-starters pin an EU-resident route so Opper never pools them onto a non-EU
-provider:
+Reviewed 2026-10-05 against Opper's catalogue
+(`GET https://api.opper.ai/v3/compat/models`; each entry's `opper.reasoning`
+lists supported efforts and `opper.capabilities` its inputs) and probed live end
+to end. The starter pins an EU-resident route so Opper never pools it onto a
+non-EU provider:
 
-| Product                         | Upstream route (Opper id)      | Served by / inference                 | Context / max output | Opper list price (per 1M): input / cached input / cache write / output | OpenGeni debit |
-| ------------------------------- | ------------------------------ | ------------------------------------- | -------------------- | ------------------------------------------------------------------------ | -------------- |
-| Gemini 3.8 Flash (EU)           | `vertexai/gemini-3.8-flash-eu` | Vertex AI EU multi-region (`google/eu`), EU | 1,048,576 / 65,536 | $0.825 / $0.0825 / — / $4.125                                       | list +5%       |
-| Claude Sonnet 4.6 (EU)          | `aws/claude-sonnet-4-6-eu`     | AWS Bedrock `eu-north-1`, Sweden (no logging) | 1,000,000 / 64,000 | $3.30 / $0.33 / $4.125 / $16.50                                  | list +5%       |
+| Product              | Upstream route (Opper id) | Served by / inference                           | Context / max output | Opper list price (per 1M): input / cached input / cache write / output | Opengeni debit |
+| -------------------- | ------------------------- | ----------------------------------------------- | -------------------- | ---------------------------------------------------------------------- | -------------- |
+| Claude Opus 5.5 (EU) | `aws/claude-opus-5-5`     | AWS Bedrock `eu-north-1`, Sweden (no provider logging) | 1,000,000 / 128,000  | $4.40 / $0.22 / $5.50 / $22.00                                         | reported cost +5% |
 
-Product ids are `opper/vertexai/gemini-3.8-flash-eu` and
-`opper/aws/claude-sonnet-4-6-eu` (and the `workspace-opper/…` peers).
-Effective context is the raw window minus Opper's advertised max output
-(983,040 and 936,000); automatic compaction starts at 900,000 and 800,000.
+Product ids are `opper/aws/claude-opus-5-5` and `workspace-opper/aws/claude-opus-5-5`.
+Effective context is the raw window minus Opper's max output (872,000);
+automatic compaction starts at 800,000. Capabilities:
 
-Capabilities recorded from the catalogue: both routes advertise `text`,
-`tools`, `structured_output`, `vision`, and `pdf` (Gemini also `audio`/`video`).
-OpenGeni marks function calling, structured output, and SSE runnable and keeps
-runnable input text-only until image/file transport through Opper's Chat surface
-is verified end to end. Neither pinned route advertises a reasoning parameter
-(`params.reasoning` is absent; the Gemini route lists only `max_tokens`), so
-reasoning is `upstream: "unknown"`, not runnable, and OpenGeni sends no
-`reasoning_effort`; the models think with their provider default. Opper's
-catalogue does advertise `params.reasoning` (`low`/`medium`/`high`/`max`,
-adaptive, default `high`, no explicit wire) on the Azure-hosted
-`azure/claude-sonnet-4-6` and Anthropic-direct routes. Where an Opper route
-advertises `params.reasoning.wire: "reasoning_effort"`, the Chat adapter's
-standard `reasoning_effort` field is the matching wire; a reviewed entry may
-enable exactly the advertised vocabulary once a live probe confirms it.
+- **Reasoning** is runnable with `low`/`medium`/`high`/`xhigh`/`max` (the route's
+  `opper.reasoning.supported`), default `medium` like the native Claude Opus 5.5
+  profile. Opengeni's effort levels map 1:1 to Opper's `reasoning_effort`.
+  Thinking is hidden: Opper returns no reasoning text or signature for this
+  route, so there is no reasoning item to replay, and thinking tokens are billed
+  inside `completion_tokens` and the reported cost.
+- **Output cap.** Opper caps output at 4,096 tokens when a request names no
+  limit, and hidden thinking at `high`/`max` can consume all of it (live:
+  `finish_reason: length`, empty answer). Every Opper Chat request without its
+  own `max_tokens` therefore gets the route's configured `maxOutputTokens`
+  (128,000 here). Opper rejects (400), never clamps, a value above a route's
+  real limit, so `maxOutputTokens` must match Opper's `max_output_tokens`.
+- **Image input** is on (user attachments and tool-result images). The route
+  also accepts PDF `file` parts, so `inputFileMediaTypes` declares
+  `application/pdf`; Opengeni currently routes documents to the sandbox rather
+  than as typed model input on every provider.
+- **Structured output** stays `unknown`: this route does not list
+  `structured_output`.
 
-Every Opper response reports its exact USD cost (`usage.cost` and
-`usage.opper.cost.total`, including on the final streamed chunk). The Chat
-adapter carries `usage.opper.cost.total` to billing, and managed turns debit
-that exact cost plus the standard 5% margin, like AI Gateway's reported-cost
-path (`pricingSource: gateway_reported`, upstream provider `opper`). Workspace
-and organization rails record the same exact provider cost for Insights and
-never debit credits. The reviewed static rates above are only the fallback when
-cost metadata is absent; `pricing` lives only on the reviewed code entry, and
-database catalog documents may list Opper membership but never a price. Live
-2026-10-05 costs equalled these list rates exactly (for example 669 input +
-33 output Sonnet tokens = $0.0027522).
-Choosing the Bedrock EU Sonnet route over the cheaper Azure Sweden route trades
-10% price for no provider logging/retention and matches the "processed in the
-EU" intent; revisit together with reasoning once probed.
+Price: managed turns debit Opper's exact per-response cost
+(`usage.opper.cost.total`) plus the standard 5% margin. The reviewed list price
+above is the fallback when cost metadata is absent. Live 2026-10-05 costs equal
+the list rates exactly (706 input + 75 output tokens = $0.0047564, debited
+4,995 micros). The reviewed price table also keeps the earlier
+`vertexai/gemini-3.8-flash-eu` ($0.825 / $0.0825 / — / $4.125) and
+`aws/claude-sonnet-4-6-eu` ($3.30 / $0.33 / $4.125 / $16.50) list prices, so a
+host may re-add those routes without a pricing entry. Note that the Bedrock
+Sonnet 4.6 EU route lists `opper.reasoning: null` and does not think.
 
 ### Deployment rail
 
@@ -814,18 +855,30 @@ Set `OPENGENI_OPPER_API_KEY` (create it at
 catalog JSON. The deployment owns the Opper account; these turns are
 `upstreamPayer: deployment`, `metering: opengeni_credits`, and default to
 `credits` cost (`OPENGENI_MODEL_COST_POLICY_JSON` may still mark an exact
-product `free`). No `OPENGENI_MODEL_PRICING_JSON` entry is needed for the
-reviewed starters.
+product `free`). No `OPENGENI_MODEL_PRICING_JSON` entry is needed for a route in
+the reviewed price table.
 
-In `database` catalog mode the singleton's `opperModels` array replaces the
-reviewed membership (omission keeps the code starters; `[]` removes them).
-Entries use the same strict shape as the code table minus `pricing`
-(`upstreamModelId`, `label`, optional `shortLabel`/`logoUrl`/`aliases`, the
-complete V1 `capabilities`, and token limits). A route outside the reviewed code
-snapshot has no built-in price, so a credits-billed managed deployment must add
-an explicit `OPENGENI_MODEL_PRICING_JSON` entry for its exact product id before
-the catalog validates. Adding a paid route therefore requires the same review as
-AI Gateway: current tool probe, capability definition, cost policy, and price.
+The deployment Opper list is configuration, like the other managed lists:
+
+- **Code mode** (default): `OPENGENI_MANAGED_MODELS_JSON` with an `opperModels`
+  array replaces the code starter list without a code deploy (see
+  [Code-mode managed model lists](#code-mode-managed-model-lists)). Unset keeps
+  the reviewed starter (Claude Opus 5.5 EU).
+- **Database mode**: the singleton's `opperModels` array replaces the list
+  (omission keeps the code starter; `[]` removes it), and
+  `OPENGENI_MANAGED_MODELS_JSON` is ignored.
+
+Both use the same strict entry shape: `upstreamModelId`, `label`, optional
+`shortLabel`/`logoUrl`/`aliases`, the complete V1 `capabilities` (including
+`reasoning.efforts`/`defaultEffort` and image/file inputs), token limits
+(`contextWindowTokens`, `effectiveContextWindowTokens`, `autoCompactTokenLimit`,
+`toolOutputTruncationTokens`), and `maxOutputTokens` (Opper's
+`max_output_tokens`). `pricing` is rejected. A route outside the reviewed price
+table needs an explicit `OPENGENI_MODEL_PRICING_JSON` entry for its exact
+product id (`opper/<upstream>`, with `marginBps: 500`) before a credits-billed
+managed catalog validates. That price is the fallback; billing still uses
+Opper's reported cost +5%. Adding a paid route still needs review: a live
+tool/reasoning probe, the capability definition, cost policy, and price.
 
 ### Workspace rail
 
@@ -846,12 +899,29 @@ Opper membership is available through this rail even without
 Admins may add exact Opper ids in the same card (`/v1/workspaces/:id/opper-custom-models`,
 SDK `listWorkspaceOpperCustomModels` / `createWorkspaceOpperCustomModel` /
 `deleteWorkspaceOpperCustomModel`). An id may be a pool name or a pinned
-`provider/model` route. The API never calls Opper `GET /models`; custom ids get
-the reviewed conservative text/function-calling Chat envelope with no claimed
-reasoning vocabulary or context window, and the admin asserts the id supports
-that behavior. Curated collisions are scoped to the Opper provider. Removal is a
-retirement with the same retained-definition and admission fences as Gateway and
-OpenRouter custom slugs.
+`provider/model` route. Curated collisions are scoped to the Opper provider.
+Removal is a retirement with the same retained-definition and admission fences
+as Gateway and OpenRouter custom slugs.
+
+**Custom-id capabilities** (workspace and organization rails) are derived
+deterministically and offline. The API and worker must derive the same frozen
+model definition, so Opengeni never calls Opper `GET /models` at runtime:
+
+- An id that names a route in the configured deployment Opper list inherits
+  that reviewed definition (capabilities and limits). This gives an organization
+  rail, which has no curated list, Opus 5.5 EU with full reasoning and vision.
+- Any other id gets runnable reasoning with `low`/`medium`/`high` (default
+  `medium`). Live probes showed Opper accepts every `reasoning_effort` value on
+  every route, ignoring values a route does not support (`xhigh`/`max`/`none`
+  on `gpt-5-mini`, `max` on the non-reasoning Bedrock Sonnet 4.6 EU route).
+- Image input is on for ids in the Claude and Gemini families: every one of
+  Opper's 70 Claude and 98 Gemini routes lists `vision`. Other families stay
+  text-only, because Opper silently drops images for text-only routes. Typed
+  file input stays off.
+- Claude-family ids send `max_tokens: 64000`, the smallest `max_output_tokens`
+  across Opper's Claude routes. Other ids keep Opper's default output cap. To
+  give one a larger cap, add it to the deployment Opper list with its exact
+  `maxOutputTokens`.
 
 ### Organization rail
 
@@ -872,31 +942,50 @@ models and workspaces exactly as for OpenRouter.
 - **Gemini targets.** The request-local `$ref` → `_$ref` tool-output projection
   keys on any upstream id containing `gemini`, so `vertexai/gemini-3.8-flash-eu`
   and Opper Gemini pools are covered.
-- **Reasoning.** Sent only as the Chat adapter's `reasoning_effort` and only
-  when the reviewed capability makes it runnable.
+- **Reasoning.** Sent as the Chat adapter's standard `reasoning_effort` (the
+  session effort, clamped to the model's declared vocabulary). Opper returns no
+  reasoning text for Bedrock Claude, so multi-request tool loops replay only
+  assistant text and tool calls. Live probes confirm this works with thinking on
+  across tool calls and turns.
+- **Output cap.** Requests without `max_tokens` get the route's configured
+  `maxOutputTokens` (see above). Title (512) and compaction (20,000) requests
+  keep their own explicit caps.
+- **Stream progress bound.** While a route thinks with hidden reasoning, Opper
+  sends only an SSE comment keepalive every 20 seconds (live: `high` took 2
+  minutes, 10,809 tokens, with no delta before the answer). A `max`-effort
+  request exceeded the deployment's 10-minute keepalive-only progress bound
+  and was aborted. Opper providers therefore set `streamProgressTimeoutMs` to 60
+  minutes (`OPPER_STREAM_PROGRESS_TIMEOUT_MS`), enough for a full 128,000-token
+  hidden response. The 5-minute byte-silence bound still detects a dead
+  connection.
 
 ### Live probe notes
 
 Probed 2026-10-05 against `https://api.opper.ai/v3/compat/chat/completions`
-with a runtime key, and end to end through OpenGeni's runtime (real Agents SDK
-streamed run, tool call, tool result, final answer, reported-cost extraction):
+with a runtime key: raw HTTP, plus end to end through Opengeni's runtime
+(`MultiProviderModelProvider` -> `OpenGeniChatCompletionsModel` -> owned Opper
+client and request policy, streamed Agents SDK run).
 
-| Probe                                              | `vertexai/gemini-3.8-flash-eu`                                        | `aws/claude-sonnet-4-6-eu`                         |
-| -------------------------------------------------- | --------------------------------------------------------------------- | -------------------------------------------------- |
-| Forced function call (`tool_choice` names one)     | `finish_reason=tool_calls`, correct arguments                         | `finish_reason=tool_calls`, correct arguments      |
-| SSE streaming with tools                           | tool-call deltas, `tool_calls` finish, usage + cost on final chunk    | same                                               |
-| `reasoning_effort` `low` / `high`                  | accepted (200); reasoning tokens reported but not effort-dependent    | accepted (200); no reasoning tokens reported       |
-| Tool output containing a raw `$ref` key            | **400** "referenced name … does not match to a display_name"          | 200                                                |
-| Same output after OpenGeni's `_$ref` projection    | 200                                                                   | 200                                                |
-| Exact cost metadata                                | `usage.cost`, `usage.opper.cost.total`                                | same                                               |
-| Full OpenGeni agent loop (tool + `$ref` result)    | completes; per-call exact cost extracted                              | completes; per-call exact cost extracted           |
+`aws/claude-opus-5-5`:
 
-Gemini reasons by default (`completion_tokens_details.reasoning_tokens`, for
-example ~50 tokens before a forced tool call); those tokens are billed inside
-`completion_tokens` and the reported cost. Because neither route demonstrably
-honours `reasoning_effort`, reasoning stays non-runnable and OpenGeni sends no
-effort for these products. Image/file input was not probed and stays disabled.
-A management key returns 403 and an unknown key 401 on every inference route.
+| Probe | Result |
+| ----- | ------ |
+| Hard math prompt, `reasoning_effort` unset / `low` / `medium` (max_tokens 32,000) | 6,028 / 1,743 / 7,165 completion tokens: effort is honoured; thinking is hidden (no reasoning text or `reasoning_tokens` detail) |
+| Same prompt at `max` with no `max_tokens` | `finish_reason: length` at 4,096 tokens with an empty answer (Opper's default cap), hence the configured output cap |
+| Runtime streamed run at `high`: 4 sequential tool calls across 5 model requests (two `get_weather`, a `get_population` whose output contains a raw `$ref`, and a tool returning a PNG) | correct calls and final answer; the tool image reached the model (it read the badge text); every request carried `reasoning_effort: high` and `max_tokens: 128000` |
+| Follow-up turn replaying that full history plus a new tool call | completes; no thinking-signature error |
+| Runtime streamed run with a user image attachment | correct description of the image text and shape |
+| PDF `file` part (raw) | read the code word from the PDF |
+| Per-call reported cost | `usage.opper.cost.total` on every streamed final chunk; equals list price; debit = cost +5% |
+| Session title (`low`, max 512) and compaction (max 20,000) | title produced; compaction checkpoint produced (`finish_reason: stop`) |
+| Unsupported effort values (`none`, `minimal`) | accepted (200) |
+| Raw stream at `high`, hard prompt | first byte 1.2 s, then only `:` keepalive comments every 20 s until the answer at 120 s |
+| Runtime run at `max`, hard prompt, before the Opper progress bound | aborted by the 600 s keepalive-only progress timeout (fixed by the 60-minute Opper bound) |
+
+The Gemini `$ref` tool-output projection still applies to Opper Gemini ids
+(`vertexai/gemini-3.8-flash-eu` returned 400 on a raw `$ref` and 200 after
+projection). A management key returns 403, and an unknown key 401, on every
+inference route.
 
 ## `list_models` agent tool
 

@@ -15,6 +15,7 @@ use std::{
     time::Duration,
 };
 
+use crate::uploads::update_drain::{UpdateDrain, WorkReservation};
 use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine as _};
 use opengeni_agent_proto::v1;
 use rand::{rngs::OsRng, RngCore as _};
@@ -68,6 +69,9 @@ pub enum BrowserBridgeError {
     /// The extension did not settle a bounded command in time.
     #[error("attached browser command timed out")]
     Timeout,
+    /// The process has fenced new work for a verified self-update.
+    #[error("attached browser work is draining for update")]
+    Draining,
 }
 
 /// Chrome passes the allowed extension origin as argv[1]. Native Messaging
@@ -435,7 +439,24 @@ struct ControllerResponse<'a> {
 struct PendingCommand {
     device_id: String,
     connection_generation: String,
-    settle: oneshot::Sender<Result<ExtensionCommandResult, BrowserBridgeRequestFailure>>,
+    settle: Option<oneshot::Sender<Result<ExtensionCommandResult, BrowserBridgeRequestFailure>>>,
+    _reservation: Option<WorkReservation>,
+}
+
+struct ControllerReply {
+    bytes: Vec<u8>,
+    reservation: Option<WorkReservation>,
+    settled: bool,
+}
+
+impl Drop for ControllerReply {
+    fn drop(&mut self) {
+        if !self.settled {
+            if let Some(reservation) = &self.reservation {
+                reservation.mark_unsettled();
+            }
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -463,6 +484,7 @@ struct InventoryState {
 #[derive(Clone)]
 pub struct BrowserBridgeInventory {
     state: Arc<RwLock<InventoryState>>,
+    update_drain: Arc<UpdateDrain>,
 }
 
 impl BrowserBridgeInventory {
@@ -539,7 +561,8 @@ impl BrowserBridgeInventory {
                 PendingCommand {
                     device_id: device_id.to_string(),
                     connection_generation: expected_connection_generation.to_string(),
-                    settle,
+                    settle: Some(settle),
+                    _reservation: opengeni_agent_platform::current_work_reservation(),
                 },
             );
             (outbound, bytes, receiver)
@@ -560,7 +583,8 @@ impl BrowserBridgeInventory {
                 Err(BrowserBridgeError::Unavailable)
             }
             Err(_) => {
-                self.remove_pending(request_id, device_id, expected_connection_generation);
+                // Timeout ends only the caller's wait. The extension may still
+                // execute; a matching late result is the physical settlement.
                 Err(BrowserBridgeError::Timeout)
             }
         }
@@ -580,7 +604,12 @@ impl BrowserBridgeInventory {
                 "too many attached browser profiles".to_string(),
             ));
         }
-        let pending_to_fence = take_pending_for_profile(&mut state, &device.id, None);
+        notify_pending_for_profile(
+            &mut state,
+            &device.id,
+            None,
+            BrowserBridgeRequestFailure::Fenced,
+        );
         state.profiles.insert(
             device.id.clone(),
             ConnectedProfile {
@@ -591,7 +620,6 @@ impl BrowserBridgeInventory {
         );
         state.revision = state.revision.saturating_add(1);
         drop(state);
-        settle_pending(pending_to_fence, BrowserBridgeRequestFailure::Fenced);
         Ok(())
     }
 
@@ -633,10 +661,12 @@ impl BrowserBridgeInventory {
         {
             state.profiles.remove(device_id);
             state.revision = state.revision.saturating_add(1);
-            let pending =
-                take_pending_for_profile(&mut state, device_id, Some(connection_generation));
-            drop(state);
-            settle_pending(pending, BrowserBridgeRequestFailure::Unavailable);
+            notify_pending_for_profile(
+                &mut state,
+                device_id,
+                Some(connection_generation),
+                BrowserBridgeRequestFailure::Unavailable,
+            );
         }
     }
 
@@ -675,9 +705,9 @@ impl BrowserBridgeInventory {
             }
             state.pending.remove(request_id).expect("pending command")
         };
-        let _ = pending
-            .settle
-            .send(Ok(ExtensionCommandResult { payload, error }));
+        if let Some(settle) = pending.settle {
+            let _ = settle.send(Ok(ExtensionCommandResult { payload, error }));
+        }
         Ok(())
     }
 
@@ -701,43 +731,28 @@ impl BrowserBridgeInventory {
             }
         };
         if let Some(pending) = pending {
-            let _ = pending.settle.send(Err(reason));
-        }
-    }
-
-    fn remove_pending(&self, request_id: &str, device_id: &str, connection_generation: &str) {
-        let mut state = self.state.write().expect("browser bridge inventory lock");
-        if state.pending.get(request_id).is_some_and(|pending| {
-            pending.device_id == device_id && pending.connection_generation == connection_generation
-        }) {
-            state.pending.remove(request_id);
+            if let Some(settle) = pending.settle {
+                let _ = settle.send(Err(reason));
+            }
         }
     }
 }
 
-fn take_pending_for_profile(
+fn notify_pending_for_profile(
     state: &mut InventoryState,
     device_id: &str,
     connection_generation: Option<&str>,
-) -> Vec<PendingCommand> {
-    let ids = state
-        .pending
-        .iter()
-        .filter(|(_, pending)| {
-            pending.device_id == device_id
-                && connection_generation
-                    .is_none_or(|generation| pending.connection_generation == generation)
-        })
-        .map(|(request_id, _)| request_id.clone())
-        .collect::<Vec<_>>();
-    ids.into_iter()
-        .filter_map(|request_id| state.pending.remove(&request_id))
-        .collect()
-}
-
-fn settle_pending(pending: Vec<PendingCommand>, reason: BrowserBridgeRequestFailure) {
-    for command in pending {
-        let _ = command.settle.send(Err(reason));
+    reason: BrowserBridgeRequestFailure,
+) {
+    for command in state.pending.values_mut() {
+        if command.device_id == device_id
+            && connection_generation
+                .is_none_or(|generation| command.connection_generation == generation)
+        {
+            if let Some(settle) = command.settle.take() {
+                let _ = settle.send(Err(reason));
+            }
+        }
     }
 }
 
@@ -752,11 +767,21 @@ pub struct BrowserBridgeServer {
 impl BrowserBridgeServer {
     /// Bind loopback, persist owner-only authority, and start accepting native
     /// hosts. The authority file contains no workspace credential.
+    #[cfg(test)]
     pub async fn start(config_dir: &Path) -> Result<Self, BrowserBridgeError> {
+        Self::start_with_update_drain(config_dir, Arc::new(UpdateDrain::default())).await
+    }
+
+    /// Shares the same host-wide admission boundary as every workspace RPC.
+    pub async fn start_with_update_drain(
+        config_dir: &Path,
+        update_drain: Arc<UpdateDrain>,
+    ) -> Result<Self, BrowserBridgeError> {
         let listener = TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, 0)).await?;
         let port = listener.local_addr()?.port();
         let token = random_opaque(32);
         let inventory = BrowserBridgeInventory {
+            update_drain,
             state: Arc::new(RwLock::new(InventoryState {
                 bridge_generation: random_opaque(24),
                 revision: 0,
@@ -960,10 +985,12 @@ async fn serve_controller(
     mut writer: tokio::net::tcp::OwnedWriteHalf,
     inventory: BrowserBridgeInventory,
 ) -> Result<(), BrowserBridgeError> {
-    let (responses, mut response_rx) = mpsc::channel::<Vec<u8>>(128);
+    let (responses, mut response_rx) = mpsc::channel::<ControllerReply>(128);
     let writer_task = tokio::spawn(async move {
-        while let Some(response) = response_rx.recv().await {
-            write_native_frame_bounded(&mut writer, &response, MAX_RESPONSE_MESSAGE_BYTES).await?;
+        while let Some(mut response) = response_rx.recv().await {
+            write_native_frame_bounded(&mut writer, &response.bytes, MAX_RESPONSE_MESSAGE_BYTES)
+                .await?;
+            response.settled = true;
         }
         Ok::<(), BrowserBridgeError>(())
     });
@@ -986,24 +1013,47 @@ async fn serve_controller(
         }
         let request_inventory = inventory.clone();
         let request_responses = responses.clone();
-        requests.spawn(async move {
-            let result = request_inventory
-                .request(
+        // Reserve before spawn/first await. A controller peer's disappearing
+        // waiter cannot cancel an accepted extension command or its publisher.
+        let reservation = inventory.update_drain.reserve_work(None);
+        let accepted = reservation.is_some();
+        let reply_reservation = reservation.clone();
+        let actual = tokio::spawn(opengeni_agent_platform::with_work_reservation(
+            reservation,
+            async move {
+                let result = if accepted {
+                    request_inventory
+                        .request(
+                            &request_id,
+                            &device_id,
+                            &expected_connection_generation,
+                            payload,
+                        )
+                        .await
+                } else {
+                    Err(BrowserBridgeError::Draining)
+                };
+                let response = controller_response(
                     &request_id,
                     &device_id,
                     &expected_connection_generation,
-                    payload,
-                )
-                .await;
-            let response = controller_response(
-                &request_id,
-                &device_id,
-                &expected_connection_generation,
-                result,
-            );
-            if let Ok(bytes) = serde_json::to_vec(&response) {
-                let _ = request_responses.send(bytes).await;
-            }
+                    result,
+                );
+                if let Ok(bytes) = serde_json::to_vec(&response) {
+                    let _ = request_responses
+                        .send(ControllerReply {
+                            bytes,
+                            reservation: reply_reservation,
+                            settled: false,
+                        })
+                        .await;
+                } else if let Some(reservation) = reply_reservation {
+                    reservation.mark_unsettled();
+                }
+            },
+        ));
+        requests.spawn(async move {
+            let _ = actual.await;
         });
     }
     drop(responses);
@@ -1039,6 +1089,7 @@ fn bridge_wire_error(error: &BrowserBridgeError) -> BridgeWireError {
         BrowserBridgeError::Unavailable => ("resource_unavailable", true),
         BrowserBridgeError::Fenced => ("fenced", true),
         BrowserBridgeError::Timeout => ("timeout", true),
+        BrowserBridgeError::Draining => ("update_draining", true),
         BrowserBridgeError::Protocol(_) | BrowserBridgeError::Authority(_) => ("protocol", false),
         BrowserBridgeError::Io(_) | BrowserBridgeError::Task(_) => ("bridge_failed", true),
     };
@@ -1565,6 +1616,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[allow(clippy::too_many_lines)] // authenticated transport, cancellation, late result, and new-work refusal
     async fn routes_controller_commands_through_one_exact_extension_generation() {
         let directory = tempfile::tempdir().expect("tempdir");
         let server = BrowserBridgeServer::start(directory.path())
@@ -1658,6 +1710,65 @@ mod tests {
         assert_eq!(response["type"], "response");
         assert_eq!(response["ok"], true);
         assert_eq!(response["payload"]["pong"], true);
+
+        // The actual extension still owns a command after its caller stops
+        // waiting. New routed work is refused without erasing that obligation.
+        let inventory = server.inventory();
+        let drain = inventory.update_drain.clone();
+        let late_id = "33333333-3333-4333-8333-333333333333";
+        let reservation = drain.reserve_work(None).unwrap();
+        let waiter = tokio::spawn(opengeni_agent_platform::with_work_reservation(
+            Some(reservation),
+            async move {
+                inventory
+                    .request(late_id, device_id, generation, json!({"type":"ping"}))
+                    .await
+            },
+        ));
+        let late_command = read_json(&mut extension).await;
+        assert_eq!(late_command["requestId"], late_id);
+        waiter.abort();
+        assert!(waiter.await.unwrap_err().is_cancelled());
+        assert_eq!(drain.snapshot().unwrap().routed, 1);
+        assert_eq!(
+            drain.reserve_update("other-link-update"),
+            crate::uploads::update_drain::UpdateReservation::Started
+        );
+        assert!(!drain.seal_update("other-link-update"));
+        let refused_id = "44444444-4444-4444-8444-444444444444";
+        write_native_frame(
+            &mut controller,
+            &serde_json::to_vec(&json!({
+                "type":"request", "protocolVersion":1, "requestId":refused_id, "deviceId":device_id,
+                "expectedConnectionGeneration":generation, "payload":{"type":"ping"}
+            }))
+            .unwrap(),
+        )
+        .await
+        .unwrap();
+        let refused = read_json(&mut controller).await;
+        assert_eq!(refused["requestId"], refused_id);
+        assert_eq!(refused["error"]["code"], "update_draining");
+        assert_eq!(drain.snapshot().unwrap().routed, 1);
+        write_native_frame(
+            &mut extension,
+            &serde_json::to_vec(&json!({
+                "type":"command_result", "requestId":late_id, "deviceId":device_id,
+                "connectionGeneration":generation, "ok":true, "payload":{"pong":true}, "error":null
+            }))
+            .unwrap(),
+        )
+        .await
+        .unwrap();
+        tokio::time::timeout(Duration::from_secs(2), async {
+            while drain.snapshot().unwrap().routed != 0 {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+        assert!(drain.seal_update("other-link-update"));
+        drain.release_update("other-link-update");
 
         drop(controller);
         drop(extension);

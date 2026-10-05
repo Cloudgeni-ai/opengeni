@@ -212,6 +212,8 @@ export function isOpperClaudeUpstreamModel(model: unknown): boolean {
 export function modelRequestPolicyForProvider(
   provider: ResolvedModelProvider,
   gatewayPolicies?: GatewayRequestPolicyLookup,
+  /** Opper upstream id -> `max_tokens` sent when a request sets no output cap. */
+  opperOutputLimits?: ReadonlyMap<string, number>,
 ): ModelJsonRequestPolicy {
   const providerPolicy: ModelJsonRequestPolicy = ({ path, body }) => {
     if (
@@ -239,14 +241,27 @@ export function modelRequestPolicyForProvider(
       (provider.kind === "opper-managed" ||
         provider.kind === "opper-workspace" ||
         provider.kind === "opper-organization") &&
-      (path.split("?", 1)[0] ?? path).endsWith("/chat/completions") &&
-      isOpperClaudeUpstreamModel(body.model) &&
-      Array.isArray(body.messages)
+      (path.split("?", 1)[0] ?? path).endsWith("/chat/completions")
     ) {
-      // Opper routes Claude through Anthropic, Bedrock, Vertex and Azure; all
-      // reject unsigned plaintext thinking exactly like OpenRouter `anthropic/…`.
-      const messages = projectUnsignedClaudeChatReasoning(body.messages);
-      return messages === body.messages ? undefined : { body: { ...body, messages } };
+      let projected = body;
+      if (isOpperClaudeUpstreamModel(body.model) && Array.isArray(body.messages)) {
+        // Opper routes Claude through Anthropic, Bedrock, Vertex and Azure; all
+        // reject unsigned plaintext thinking exactly like OpenRouter `anthropic/…`.
+        const messages = projectUnsignedClaudeChatReasoning(body.messages);
+        if (messages !== body.messages) projected = { ...projected, messages };
+      }
+      // Opper caps output at 4,096 tokens when a request names no limit, which
+      // hidden reasoning can consume entirely (finish `length`, empty answer).
+      const outputLimit =
+        typeof body.model === "string" ? opperOutputLimits?.get(body.model) : undefined;
+      if (
+        outputLimit !== undefined &&
+        body.max_tokens === undefined &&
+        body.max_completion_tokens === undefined
+      ) {
+        projected = { ...projected, max_tokens: outputLimit };
+      }
+      return projected === body ? undefined : { body: projected };
     }
     if (provider.wireProfile === "azure-openai") {
       return azureModelRequestPolicy({ body });
