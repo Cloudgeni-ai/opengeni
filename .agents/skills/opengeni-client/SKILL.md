@@ -87,7 +87,12 @@ Other servers: build `const handler = createSessionProxyHandler(og, options)`
 from `@opengeni/sdk/session-proxy` with the same options, then mount
 `toNodeMiddleware(handler)` from `@opengeni/sdk/express` (before any body
 parser), `toHonoHandler(handler)` from `@opengeni/sdk/hono`, or call
-`handler(request)` on any web-standard server.
+`handler(request)` on any web-standard server. Next.js Pages Router: in
+`pages/api/opengeni/[...path].ts`, export
+`config = { api: { bodyParser: false, externalResolver: true } }` and a default
+`(req, res) => middleware(req, res)` where
+`middleware = toNodeMiddleware(handler)`; `resolve` reads the product session
+from `request.headers` (the cookie), since `next/headers` is App Router only.
 
 Browser:
 
