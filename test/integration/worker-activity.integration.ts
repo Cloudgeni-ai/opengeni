@@ -2352,7 +2352,7 @@ describe("worker activities integration", () => {
       nonRetryable: true,
       details: [{ disposition: "permanent", code: "claim_invariant" }],
     });
-    await Bun.sleep(0);
+    await observability.flush();
 
     // Startup phases export their own spans too; find the segment span by name.
     const spans = exported.flatMap(({ body }) =>
