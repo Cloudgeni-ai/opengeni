@@ -609,6 +609,8 @@ const PRIVATE_SESSION_CREATE_CAPABILITY_ROUTINES = [
   "close_private_session_create_capability(uuid)",
 ] as const;
 const SESSION_AUTHORITY_ROUTINES = new Set<string>([
+  "lock_live_native_original_origin_v2(jsonb)",
+  "modal_native_origin_member_read_active(uuid, text)",
   LEGACY_FORK_SESSION_CONTENT_ROUTINE,
   FORK_SESSION_CONTENT_ROUTINE,
   MESSAGE_FORK_SESSION_CONTENT_ROUTINE,
@@ -712,6 +714,8 @@ const UNIFIED_KNOWLEDGE_AUTHORITY_TABLES = [
   "documents",
 ] as const;
 export const RUNTIME_TARGET_SCHEMA_CAPABILITY_ROUTINES = [
+  "lock_live_native_original_origin_v2(jsonb)",
+  "modal_native_origin_member_read_active(uuid, text)",
   ...CLAUDE_SUBSCRIPTION_CAPABILITY_ROUTINES,
   "maintain_usage_allowances(integer, integer)",
   "usage_allowance_command(jsonb)",
@@ -2135,15 +2139,15 @@ export async function inspectRuntimeDatabasePosture(
             -- Column-only grants on capability tables are also unsafe; a pin
             -- table must remain EXECUTE-only even after column ACL drift.
             (has_table_privilege(current_user, c.oid, 'SELECT') or
-              ((c.relname in ('modal_inventory_read_capabilities','usage_allowance_capabilities','session_import_batches', ${ARTIFACT_PINS_TABLE}) or
+              ((c.relname in ('modal_native_origin_read_capabilities','modal_inventory_read_capabilities','usage_allowance_capabilities','session_import_batches', ${ARTIFACT_PINS_TABLE}) or
                 c.relname in (select jsonb_array_elements_text(${JSON.stringify(RUNTIME_ALLOWANCE_PRIVATE_TABLES)}::jsonb))) and
                 has_any_column_privilege(current_user, c.oid, 'SELECT'))) as can_select,
             (has_table_privilege(current_user, c.oid, 'INSERT') or
-              ((c.relname in ('modal_inventory_read_capabilities','usage_allowance_capabilities','session_import_batches', ${ARTIFACT_PINS_TABLE}) or
+              ((c.relname in ('modal_native_origin_read_capabilities','modal_inventory_read_capabilities','usage_allowance_capabilities','session_import_batches', ${ARTIFACT_PINS_TABLE}) or
                 c.relname in (select jsonb_array_elements_text(${JSON.stringify(RUNTIME_ALLOWANCE_PRIVATE_TABLES)}::jsonb))) and
                 has_any_column_privilege(current_user, c.oid, 'INSERT'))) as can_insert,
             (has_table_privilege(current_user, c.oid, 'UPDATE') or
-              ((c.relname in ('modal_inventory_read_capabilities','usage_allowance_capabilities','session_import_batches', ${ARTIFACT_PINS_TABLE}) or
+              ((c.relname in ('modal_native_origin_read_capabilities','modal_inventory_read_capabilities','usage_allowance_capabilities','session_import_batches', ${ARTIFACT_PINS_TABLE}) or
                 c.relname in (select jsonb_array_elements_text(${JSON.stringify(RUNTIME_ALLOWANCE_PRIVATE_TABLES)}::jsonb))) and
                 has_any_column_privilege(current_user, c.oid, 'UPDATE'))) as can_update,
             has_table_privilege(current_user, c.oid, 'DELETE') as can_delete,
@@ -2190,6 +2194,7 @@ export async function inspectRuntimeDatabasePosture(
               'session_file_read_capabilities',
               'session_import_batches',
               'modal_inventory_read_capabilities',
+              'modal_native_origin_read_capabilities',
               ${AUTOMATIC_SESSION_TITLE_FANOUT_OUTBOX_TABLE},
               ${VERIFIED_SIGNUP_TRIAL_SWITCH_TABLE},
               'credit_promotion_policy_revisions',
@@ -4235,6 +4240,30 @@ export function evaluateRuntimeDatabasePosture(
   ) {
     violations.push("usage allowance attribution receipts lack same-owner FORCE-RLS isolation");
   }
+  const nativeOriginCapability = posture.privateTables.find(
+    (table) => table.name === "modal_native_origin_read_capabilities",
+  );
+  const nativeOriginRoutineInstalled = posture.targetRoutines.some(
+    (routine) => routine.name === "lock_live_native_original_origin_v2(jsonb)",
+  );
+  if (
+    (nativeOriginRoutineInstalled || nativeOriginCapability) &&
+    (!nativeOriginCapability ||
+      nativeOriginCapability.owner === expectedRole ||
+      nativeOriginCapability.owner !== tableByName.get("sessions")?.owner ||
+      nativeOriginCapability.owner !== tableByName.get("organization_memberships")?.owner ||
+      !nativeOriginCapability.rlsEnabled ||
+      !nativeOriginCapability.rlsForced ||
+      !nativeOriginCapability.rlsActive ||
+      nativeOriginCapability.select ||
+      nativeOriginCapability.insert ||
+      nativeOriginCapability.update ||
+      nativeOriginCapability.delete ||
+      nativeOriginCapability.truncate ||
+      nativeOriginCapability.references ||
+      nativeOriginCapability.trigger)
+  )
+    violations.push("Native LIVE-origin read capability has unsafe owner, RLS or privileges");
   const modalInventoryCapability = posture.privateTables.find(
     (table) => table.name === "modal_inventory_read_capabilities",
   );

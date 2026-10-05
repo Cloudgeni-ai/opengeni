@@ -2401,6 +2401,7 @@ describe("release schema contract", () => {
       "0623_voice_transcription_attribution.sql",
       "0624_azure_live_realtime_model.sql",
       "0625_transcription_billing_refusal_codes.sql",
+      "0632_modal_native_live_origin.sql",
     ].filter((path) =>
       unfilteredSourceContract.migrations.some((migration) => migration.path === path),
     );
