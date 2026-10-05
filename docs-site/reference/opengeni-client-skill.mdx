@@ -510,8 +510,9 @@ is a runnable starting point.
 - Pin every `@opengeni/*` package to one version. If the repository enforces a
   minimum release age, pin an older shared version or ask the user; do not
   bypass the policy.
-- Private chats need the organization's private-session setting. Without it the
-  SDK throws `OpenGeniSetupError`, whose message says who can enable it.
+- Private chats need the organization's private-session setting. Organizations
+  created at signup have it on, so don't ask the user to check it. Without it
+  the SDK throws `OpenGeniSetupError`, whose message says who can enable it.
 - With cookie auth, pass the product's existing CSRF check as
   `authorizeMutation`. If it has none, keep the default (it refuses cross-site
   mutations by `Sec-Fetch-Site`); a hand-written Origin/Host check breaks
