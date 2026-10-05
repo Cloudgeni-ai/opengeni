@@ -183,6 +183,48 @@ async function waitForToolEventCount(
 }
 
 describe("CodemodeAttemptDispatcher", () => {
+  test("first-request recovery joins lazy tool preparation only when stored work must resume", async () => {
+    const { scope, environment } = await fixture(async () => "unused");
+    const caller = `sandbox:${scope.attemptId}`;
+    let preparedReads = 0;
+    // A lazy MCP server that never finishes connecting must not delay a turn
+    // with nothing unfinished in its journal.
+    const ordinary = await Promise.race([
+      CodemodeAttemptDispatcher.resumeApproved(client.db, scope, caller, undefined, () => {
+        preparedReads++;
+        return new Promise<never>(() => undefined);
+      }),
+      Bun.sleep(5_000).then(() => "timed_out" as const),
+    ]);
+    expect(ordinary).toEqual([]);
+    expect(preparedReads).toBe(0);
+
+    await submitCodemodeOperation(client.db, {
+      ...scope,
+      durableApproval: true,
+      call: {
+        operationId: crypto.randomUUID(),
+        catalogDigest: environment.catalog.digest,
+        identity: { serverId: "docs", toolName: "search" },
+        arguments: {},
+        caller: { kind: "codemode", subjectId: caller },
+      },
+    });
+    let ready!: (dispatcher: CodemodeAttemptDispatcher | null) => void;
+    const pending = CodemodeAttemptDispatcher.resumeApproved(
+      client.db,
+      scope,
+      caller,
+      undefined,
+      () => new Promise((resolve) => (ready = resolve)),
+    );
+    expect(await Promise.race([pending, Bun.sleep(200).then(() => "waiting" as const)])).toBe(
+      "waiting",
+    );
+    ready(null);
+    expect(await pending).toEqual([]);
+  });
+
   test("native OAuth credentials use the live canonical attempt during Codemode dispatch", async () => {
     if (!available) throw new Error("This execution test requires PostgreSQL");
     let resolveNative!: ReturnType<typeof connectionTokenResolverForTurn>;
