@@ -8,6 +8,9 @@ Use this reference to orient source discovery for OpenGeni deployment work. It i
 - Operator guide and commands: `docs/deployment.md`.
 - OpenGeni application chart: `deploy/helm/opengeni`.
 - Provider substrate examples: `deploy/terraform/azure`, `deploy/terraform/aws`, and `deploy/terraform/gcp`.
+- Non-Kubernetes Azure target: `deploy/terraform/azure-container-apps` and
+  `docs/azure-container-apps.md`. Its Terraform owns application workloads as
+  well as substrate; use the ACA operator plan, never the Helm artifact renderer.
 - Optional stack wrappers for upstream platform charts: `deploy/stacks`.
 - Validation scripts: `scripts/deployment-preflight.ts`, `scripts/deployment-stack.ts`, `scripts/deployment-runtime-artifacts.ts`, `scripts/deployment-temporal-values.ts`, and `scripts/deployment-conformance.ts`.
 - Connected Machine (`selfhosted` backend) surfaces: the stream relay edge `agent/crates/opengeni-relay`; the enrollment routes `apps/api/src/routes/enrollments.ts` over `apps/api/src/sandbox/enrollment.ts`; the agent install/binary routes `apps/api/src/routes/install.ts` plus the committed `agent/install`; the relay/NATS chart templates under `deploy/helm/opengeni/templates` (`relay-*.yaml`, `nats-*.yaml`) and the `relay`/`nats`/`selfhosted` blocks in `deploy/helm/opengeni/values.yaml`; the `@opengeni/react/machines` client subpath.
@@ -30,6 +33,11 @@ commands, verification commands, and destroy commands.
 OpenGeni should deploy as a provider-neutral application layer plus provider-specific substrate wiring:
 
 - The OpenGeni Helm chart owns API, web, worker, migrations, runtime config, app service accounts, app NetworkPolicies, and integration resources.
+- Azure Container Apps is a separate runtime platform. Its Terraform root owns
+  API, web, control/turn workers, the outbox dispatcher, and a manual migration
+  job. External Temporal/NATS, managed PostgreSQL/Blob, and a real remote sandbox
+  remain explicit requirements. Keep native artifact exports fail-closed unless
+  the unchanged production isolation launcher is verified on the target host.
 - Managed or existing platform services provide durable Postgres, object storage, secrets, ingress/TLS, and observability.
 - NATS and Temporal are outside the OpenGeni app chart in production. They can be existing endpoints, managed services where available, or official upstream Helm charts installed by stack-wrapper commands.
 - Built-in Postgres, Temporal, NATS, and MinIO chart templates are disposable fixtures for local development, CI, previews, and smoke/conformance use; do not present them as production substitutes.

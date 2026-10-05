@@ -18,7 +18,7 @@
     },
     {
       "path": ".github/workflows/ci.yml",
-      "sha256": "01a0dc3e954b2dc10f2c2e17ea899b7f08e833d8e1dae654e43aaa8627bb3eae"
+      "sha256": "c285aeb8a739cfb74330b0eaca4c6c9db4261623a9d692b36e9113e4e3cc2b40"
     },
     {
       "path": ".github/workflows/deprecate-pre-1.0.yml",
@@ -625,7 +625,7 @@
       "workflow": ".github/workflows/ci.yml",
       "job": "deployment",
       "step": "Validate deployment profiles",
-      "sha256": "64f9fffe0325d49903b424f4092bb3249adbdca73a493ea50a56f5ff9d8e6030"
+      "sha256": "4fb24b5b39ecad27a66124bc96dd85c60aefc14ab6cdd60109f9534837665ceb"
     },
     {
       "workflow": ".github/workflows/ci.yml",
@@ -637,7 +637,7 @@
       "workflow": ".github/workflows/ci.yml",
       "job": "deployment",
       "step": "Validate Terraform",
-      "sha256": "de947484bd04df5f1bee6ed285290f6ce3007c3cbc5ddc85197b63b40417d6e9"
+      "sha256": "d714adc603663b256d3db4957fe1b3554e7963339ec1b0bd91a24b0b5ef1dc78"
     },
     {
       "workflow": ".github/workflows/ci.yml",
