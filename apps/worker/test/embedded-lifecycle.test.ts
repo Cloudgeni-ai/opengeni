@@ -616,6 +616,20 @@ describe("embedded worker lifecycle contract", () => {
       ],
       [
         {
+          name: "modal_native_origin_read_capabilities",
+          owner: "opengeni_migrator",
+          rls_enabled: true,
+          rls_forced: true,
+          rls_active: true,
+          can_select: false,
+          can_insert: false,
+          can_update: false,
+          can_delete: false,
+          can_truncate: false,
+          can_references: false,
+          can_trigger: false,
+        },
+        {
           name: "credit_promotion_policy_revisions",
           owner: "opengeni_migrator",
           can_select: true,
