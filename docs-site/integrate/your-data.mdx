@@ -43,7 +43,7 @@ The session proxy attaches your MCP endpoint to every chat, mints a short-lived 
     import { ToolRequestError, verifyToolRequest } from "@opengeni/sdk/tool-auth";
     import { z } from "zod";
 
-    export async function mcp(request: Request): Promise<Response> {
+    async function mcp(request: Request): Promise<Response> {
       let user: string;
       try {
         ({ user } = await verifyToolRequest(request)); // checks aud = OPENGENI_TOOL_SERVER_URL; or pass { audience }
@@ -62,7 +62,7 @@ The session proxy attaches your MCP endpoint to every chat, mints a short-lived 
     }
     ```
 
-    Mount it next to the proxy: in Next.js, `export const POST = mcp; export const GET = mcp;` in `app/api/mcp/route.ts`; in Express, `app.all("/api/mcp", toNodeMiddleware(mcp))` from `@opengeni/sdk/express`; in Hono, `app.all("/api/mcp", toHonoHandler(mcp))` from `@opengeni/sdk/hono`.
+    Mount it next to the proxy: in Next.js, `export const POST = mcp; export const GET = mcp;` in `app/api/mcp/route.ts` (keep `mcp` itself unexported there: `next build` rejects route exports other than HTTP methods); in Express, `app.all("/api/mcp", toNodeMiddleware(mcp))` from `@opengeni/sdk/express`; in Hono, `app.all("/api/mcp", toHonoHandler(mcp))` from `@opengeni/sdk/hono`.
 
     Scope every query to the verified `user`. A record id from the model is only a lookup key: `rename_post` must refuse a post the user does not own.
 

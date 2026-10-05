@@ -607,7 +607,7 @@ import { WebStandardStreamableHTTPServerTransport } from "@modelcontextprotocol/
 import { ToolRequestError, verifyToolRequest } from "@opengeni/sdk/tool-auth";
 import { z } from "zod";
 
-export async function mcp(request: Request): Promise<Response> {
+async function mcp(request: Request): Promise<Response> {
   let user: string;
   try {
     ({ user } = await verifyToolRequest(request));
@@ -629,8 +629,10 @@ export async function mcp(request: Request): Promise<Response> {
 }
 ```
 
-Mount it at the `OPENGENI_TOOL_SERVER_URL` path for every method (Next.js:
-`export { mcp as GET, mcp as POST }`; Express: `toNodeMiddleware(mcp)`; Hono:
+Mount it at the `OPENGENI_TOOL_SERVER_URL` path for every method (Next.js, in
+that path's `route.ts`: `export { mcp as GET, mcp as POST }`, and keep `mcp`
+itself unexported, because `next build` rejects any route export other than
+HTTP methods and route config; Express: `toNodeMiddleware(mcp)`; Hono:
 `toHonoHandler(mcp)`).
 
 How it works: the proxy adds the endpoint to each chat it creates (tool names
