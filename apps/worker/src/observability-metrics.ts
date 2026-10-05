@@ -1497,7 +1497,7 @@ export function recordSandboxRotationBacklogGauges(
 }
 
 const RETAINED_PROCESS_OWNER_STATES = [
-  // Session-owned background commands (migration 0636). Running is live
+  // Session-owned background commands (migration 0637). Running is live
   // session work after its launch turn ended; stopping already has a stop
   // request, so it still counts as terminal-owner backlog.
   "background_running",
