@@ -530,9 +530,7 @@ describe("API helpers", () => {
       "X-OpenGeni-Site-Version",
     );
     // A conversation scopes media and Site reads to its session for proxies.
-    expect(external.headers.get("access-control-allow-headers")).toContain(
-      "X-OpenGeni-Session-Id",
-    );
+    expect(external.headers.get("access-control-allow-headers")).toContain("X-OpenGeni-Session-Id");
 
     const externalResponse = await app.request("http://localhost/v1/config/client", {
       headers: { origin: "https://product.example" },
