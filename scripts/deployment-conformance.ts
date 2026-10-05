@@ -4,6 +4,7 @@ interface Args {
   baseUrl: string;
   timeoutSeconds: number;
   agentMessage: string;
+  model: string | null;
   sandboxBackend: string | null;
   objectConnectTo: string | null;
   deploymentAccessKey: string | null;
@@ -49,6 +50,24 @@ await runCheck("access-boundary", async () => {
       );
     }
     return "client config is secret-free and protected API routes reject missing deployment access keys";
+  }
+  if (authMode === "configuredToken") {
+    if (!args.deploymentAccessKey && !args.productToken) {
+      throw new Error(
+        "configured-token auth requires --deployment-access-key or --product-token (OPENGENI_CONFORMANCE_DEPLOYMENT_ACCESS_KEY or OPENGENI_CONFORMANCE_PRODUCT_TOKEN)",
+      );
+    }
+    const response = await fetch(new URL("/v1/access/me", args.baseUrl));
+    if (response.status !== 401) {
+      throw new Error(
+        `/v1/access/me without conformance credentials returned HTTP ${response.status}, expected 401`,
+      );
+    }
+    // The advertised mode does not distinguish shared-key bootstrap from an
+    // explicit host signing root. Let the API authenticate the supplied key or
+    // bearer; never synthesize a token or fall back after credential rejection.
+    await getJson(new URL("/v1/access/me", args.baseUrl));
+    return "configured-token routes reject anonymous access and authenticate supplied credentials; workspace discovery is checked separately";
   }
   if (args.deploymentAccessKey) {
     throw new Error(`deployment access key was provided, but client auth mode is ${authMode}`);
@@ -106,6 +125,7 @@ if (args.skipAgent) {
     const payload: Record<string, unknown> = {
       initialMessage: args.agentMessage,
       metadata: { conformance: true },
+      ...(args.model ? { model: args.model } : {}),
     };
     if (args.sandboxBackend) {
       payload.sandboxBackend = args.sandboxBackend;
@@ -167,6 +187,7 @@ if (args.skipAgent) {
       initialMessage: args.agentMessage,
       tools: [{ kind: "mcp", id: "opengeni" }],
       metadata: { conformance: true, mcpToolSession: true },
+      ...(args.model ? { model: args.model } : {}),
     };
     if (args.sandboxBackend) {
       payload.sandboxBackend = args.sandboxBackend;
@@ -204,6 +225,7 @@ if (args.skipAgent) {
           resources: [],
           tools: [],
           metadata: { conformance: true },
+          ...(args.model ? { model: args.model } : {}),
           ...(args.sandboxBackend ? { sandboxBackend: args.sandboxBackend } : {}),
         },
         metadata: { conformance: true },
@@ -562,6 +584,7 @@ function parseArgs(values: string[]): Args {
     agentMessage:
       process.env.OPENGENI_CONFORMANCE_AGENT_MESSAGE ??
       "Reply with exactly: opengeni conformance ok",
+    model: process.env.OPENGENI_CONFORMANCE_MODEL?.trim() || null,
     sandboxBackend: process.env.OPENGENI_CONFORMANCE_SANDBOX_BACKEND ?? "none",
     objectConnectTo: process.env.OPENGENI_CONFORMANCE_OBJECT_CONNECT_TO ?? null,
     deploymentAccessKey:
@@ -580,7 +603,7 @@ function parseArgs(values: string[]): Args {
   };
 
   for (let index = 0; index < values.length; index += 1) {
-    const value = values[index];
+    const value = values[index]!;
     if (value === "--json") {
       out.json = true;
       continue;
@@ -613,6 +636,10 @@ function parseArgs(values: string[]): Args {
       out.agentMessage = requiredNext(values, ++index, value);
       continue;
     }
+    if (value === "--model") {
+      out.model = requiredNext(values, ++index, value);
+      continue;
+    }
     if (value === "--sandbox-backend") {
       const next = requiredNext(values, ++index, value);
       out.sandboxBackend = next === "default" ? null : next;
@@ -632,6 +659,10 @@ function parseArgs(values: string[]): Args {
     }
     if (value.startsWith("--base-url=")) {
       out.baseUrl = value.slice("--base-url=".length);
+      continue;
+    }
+    if (value.startsWith("--model=")) {
+      out.model = value.slice("--model=".length);
       continue;
     }
     if (value.startsWith("--object-connect-to=")) {
@@ -662,6 +693,12 @@ function parseArgs(values: string[]): Args {
   }
   if (!Number.isFinite(out.timeoutSeconds) || out.timeoutSeconds <= 0) {
     throw new Error("--timeout-seconds must be a positive number");
+  }
+  if (out.model !== null) {
+    out.model = out.model.trim();
+    if (!out.model) {
+      throw new Error("--model requires a non-empty value");
+    }
   }
   return out;
 }
