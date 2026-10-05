@@ -2877,6 +2877,16 @@ export function modalOrphanTerminationStillEligible(
   if (latest.some((lease) => lease.liveness === "warming" && lease.instanceId === null)) {
     return false;
   }
+  return modalOrphanCandidateStillUnowned(latest, candidate);
+}
+
+/** Whether no live lease owns the candidate box by exact instance or by its
+ * attribution tags. Unlike termination eligibility this ignores the pending
+ * create postponement: a postponed orphan is still running without a lease. */
+export function modalOrphanCandidateStillUnowned(
+  latest: Awaited<ReturnType<typeof listLiveModalSandboxLeaseAttributions>>,
+  candidate: ModalOrphanSweepTermination,
+): boolean {
   if (latest.some((lease) => lease.instanceId === candidate.sandboxId)) {
     return false;
   }
@@ -2928,9 +2938,27 @@ async function sweepModalOrphansForConfiguredBackend(
   });
   // Only a complete listing is an inventory; a pass cut short by the
   // termination budget leaves the previous projection to age out as stale.
+  // Re-read durable ownership after the listing so a lease that started or
+  // finished while the app was being listed is not reported as a leak.
   if (result.inventory.complete) {
-    recordModalSandboxInventoryGauges(observability, result.inventory);
-    recordSandboxInventoryProjectionSuccess(observability, "modal_provider");
+    try {
+      const latest = await listLiveModalSandboxLeaseAttributions(db);
+      recordModalSandboxInventoryGauges(observability, {
+        running: result.inventory.running,
+        unleased: result.inventory.unterminated.filter((candidate) =>
+          modalOrphanCandidateStillUnowned(latest, candidate),
+        ).length,
+        liveLeaseInstancesMissing: result.inventory.missingLiveLeaseInstanceIds.filter(
+          (instanceId) => latest.some((lease) => lease.instanceId === instanceId),
+        ).length,
+      });
+      recordSandboxInventoryProjectionSuccess(observability, "modal_provider");
+    } catch (error) {
+      recordSandboxInventoryProjectionFailure(observability, "modal_provider");
+      observability.warn("sandbox reaper: Modal inventory ownership re-read failed", {
+        error: error instanceof Error ? error.message : String(error),
+      });
+    }
   }
   for (const terminated of result.terminated) {
     observability.warn("sandbox reaper: terminated Modal orphan sandbox", {

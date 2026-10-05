@@ -94,7 +94,7 @@ describe("sweepModalOrphanSandboxes live-instance guard", () => {
       examined: 0,
       terminated: [],
       skipped: 0,
-      inventory: { complete: true, running: 0, unleased: 0, liveLeaseInstancesMissing: 0 },
+      inventory: { complete: true, running: 0, unterminated: [], missingLiveLeaseInstanceIds: [] },
     });
   });
 
@@ -297,7 +297,7 @@ describe("sweepModalOrphanSandboxes live-instance guard", () => {
     expect(result.skipped).toBe(1);
   });
 
-  test("reports the reconciled provider inventory, counting orphans before termination", async () => {
+  test("reports running boxes, unterminated orphans, and missing live-lease instances", async () => {
     const zombie: LiveModalSandboxLeaseAttribution = {
       leaseId: "lease-z",
       workspaceId: "ws-z",
@@ -332,8 +332,8 @@ describe("sweepModalOrphanSandboxes live-instance guard", () => {
     expect(result.inventory).toEqual({
       complete: true,
       running: 4,
-      unleased: 2,
-      liveLeaseInstancesMissing: 1,
+      unterminated: [{ sandboxId: "sb-survivor", reason: "unattributed", tags: {} }],
+      missingLiveLeaseInstanceIds: ["sb-gone"],
     });
   });
 
@@ -349,6 +349,6 @@ describe("sweepModalOrphanSandboxes live-instance guard", () => {
     );
     expect(result.terminated).toHaveLength(1);
     expect(result.inventory.complete).toBe(false);
-    expect(result.inventory.liveLeaseInstancesMissing).toBe(0);
+    expect(result.inventory.missingLiveLeaseInstanceIds).toEqual([]);
   });
 });
