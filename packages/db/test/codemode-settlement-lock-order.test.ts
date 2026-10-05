@@ -17,7 +17,7 @@ import {
   settleCodemodeOperationWithOutput,
   submitCodemodeOperation,
 } from "../src";
-import { withRlsContext, type Database } from "../src/database";
+import { withRlsContext } from "../src/database";
 import { lockTurnAttemptWriteFenceTx } from "../src/session-attempt-fence";
 
 // Production deadlock (SQLSTATE 40P01) on POST /codemode/calls: the worker's
@@ -111,7 +111,6 @@ async function runningOperation() {
     ],
   }).catalog;
   await persistAttemptToolCatalog(client.db, catalog);
-  const operations: Array<{ call: ReturnType<typeof codemodeCall>; claimId: string }> = [];
   const call = codemodeCall(catalog.digest);
   await submitCodemodeOperation(client.db, { ...scope, call });
   const claimId = crypto.randomUUID();
@@ -131,7 +130,6 @@ async function runningOperation() {
       claimId,
     }),
   ).toBe(true);
-  operations.push({ call, claimId });
   return { scope, catalog, call, claimId };
 }
 
@@ -257,12 +255,9 @@ async function waitForBlockedSettlement(operationId: string): Promise<void> {
     `)) as unknown as Array<Record<string, unknown>>;
     consecutive = rows.length > 0 ? consecutive + 1 : 0;
     if (consecutive >= 3) {
-      if (process.env.DEBUG_LOCKS) console.log(JSON.stringify(rows, null, 1));
       return;
     }
     await Bun.sleep(20);
   }
   throw new Error(`settlement for ${operationId} never blocked on the held prefix`);
 }
-
-export type { Database };

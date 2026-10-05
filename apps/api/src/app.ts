@@ -99,7 +99,9 @@ import {
   ApiHttpError,
   agentConfigHttpError,
   allowanceExhaustedHttpError,
+  DATABASE_CONTENTION_ERROR_DETAIL_CODE,
   DATABASE_UNAVAILABLE_ERROR_DETAIL_CODE,
+  databaseContentionHttpError,
   databaseUnavailableHttpError,
   modelUnavailableHttpError,
   scheduledTaskTargetAccessHttpError,
@@ -1962,6 +1964,7 @@ export function createAppComposition(deps: AppDependencies): {
           requestBodyValidationHttpError(rawError) ??
           invalidPathIdentifierHttpError(rawError, new URL(c.req.url).pathname) ??
           databaseUnavailableHttpError(rawError, c.req.method) ??
+          databaseContentionHttpError(rawError, c.req.method) ??
           rawError);
     const compactionLock = codexCompactionV2ProviderLockedError(error);
     const apiError = error instanceof ApiHttpError ? error : null;
@@ -1970,7 +1973,10 @@ export function createAppComposition(deps: AppDependencies): {
       ? compactionLock.code
       : (apiError?.code ?? errorCodeForStatus(status));
     if (status >= 500) logHttpFailure(c, status, code, rawError);
-    if (apiError?.details?.code === DATABASE_UNAVAILABLE_ERROR_DETAIL_CODE) {
+    if (
+      apiError?.details?.code === DATABASE_UNAVAILABLE_ERROR_DETAIL_CODE ||
+      apiError?.details?.code === DATABASE_CONTENTION_ERROR_DETAIL_CODE
+    ) {
       c.header("retry-after", "1");
     }
     const envelope = ErrorEnvelope.parse({
@@ -2278,6 +2284,12 @@ export function assertConfiguredCodemodeSessionProxyPath(
 }
 
 function codemodeHttpError(error: unknown): HTTPException {
+  // The journal admission is one idempotent transaction keyed by the
+  // caller-owned operation id and is already retried in-process; every other
+  // step is a read. An exhausted 40P01/40001 victim therefore committed
+  // nothing and the client may resubmit the same operation id.
+  const contention = databaseContentionHttpError(error, "POST", { outcomeUnknown: false });
+  if (contention) return contention;
   if (error instanceof SiteSessionPathError) {
     // The proxied Site/SDK surface is an explicit allowlist; a route outside
     // it (tool policy, visibility, forks, Steer, control, ...) does not exist

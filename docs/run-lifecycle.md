@@ -985,7 +985,14 @@ be reclaimed, and an expired post-execution claim settles outcome-unknown with
 its visible `agent.toolCall.output` in the same PostgreSQL commit as the
 terminal journal state.
 Concurrent first submissions serialize on the caller-owned operation id and
-converge to one creation plus one replay. Client abort is observer-only; server
+converge to one creation plus one replay. Every journal writer (submit, claim,
+execution start, and terminal settlement with its timeline output) takes the
+canonical session prefix before it locks or updates the journal row; a
+settlement that updated the row first deadlocked against the periodic
+re-notify of the same id. Submit and claim retry `40P01`/`40001` around their
+whole idempotent transaction; an exhausted victim is a typed retryable 503
+(`details.code: DATABASE_CONTENTION`, outcome known), which the client
+resubmits with the same id and bounded backoff. Client abort is observer-only; server
 cancellation remains owned by the attempt/turn lifecycle.
 Worker dispatch performs catalog, identity, approval, input-schema,
 authorization, and argument-sensitive connector-policy prepare before writing

@@ -596,6 +596,97 @@ describe("CodemodeClient", () => {
     ]);
   });
 
+  test("resubmits and re-reads the same operation after a known-outcome contention 503", async () => {
+    const catalog = createAttemptToolEnvironment({
+      scope,
+      generation: 1,
+      definitions: [definition],
+    }).catalog;
+    const contention = () =>
+      Response.json(
+        {
+          error: {
+            status: 503,
+            code: "upstream_unavailable",
+            message: "Opengeni hit transient database contention. Retry shortly.",
+            retryable: true,
+            outcomeUnknown: false,
+            details: { code: "DATABASE_CONTENTION", sqlState: "40P01" },
+          },
+        },
+        { status: 503 },
+      );
+    const postedIds: string[] = [];
+    let reads = 0;
+    const client = new CodemodeClient({
+      baseUrl: "https://api.example.test/codemode",
+      token: "token",
+      fetch: (async (input, init) => {
+        if (String(input).endsWith("/catalog")) return Response.json(catalog);
+        if (init?.method === "POST") {
+          const body = JSON.parse(String(init.body)) as { operationId: string };
+          postedIds.push(body.operationId);
+          if (postedIds.length === 1) return contention();
+          return Response.json({
+            operation: operation(body.operationId, catalog.digest, "queued"),
+            dispatch: "accepted",
+          });
+        }
+        reads += 1;
+        if (reads === 1) return contention();
+        return Response.json(operation(postedIds[0]!, catalog.digest, "completed"));
+      }) as typeof fetch,
+      pollIntervalMs: 1,
+    });
+
+    expect(await client.call(definition.identity, { query: "hello" })).toEqual({
+      content: [{ type: "text", text: "found" }],
+    });
+    expect(postedIds).toHaveLength(2);
+    expect(new Set(postedIds).size).toBe(1);
+    expect(reads).toBe(2);
+  });
+
+  test("does not blindly resubmit after an outcome-unknown 5xx", async () => {
+    const catalog = createAttemptToolEnvironment({
+      scope,
+      generation: 1,
+      definitions: [definition],
+    }).catalog;
+    let posts = 0;
+    const client = new CodemodeClient({
+      baseUrl: "https://api.example.test/codemode",
+      token: "token",
+      fetch: (async (input, init) => {
+        if (String(input).endsWith("/catalog")) return Response.json(catalog);
+        if (init?.method === "POST") {
+          posts += 1;
+          return Response.json(
+            {
+              error: {
+                status: 503,
+                code: "upstream_unavailable",
+                message: "Opengeni is temporarily unavailable. Retry shortly.",
+                retryable: true,
+                outcomeUnknown: true,
+              },
+            },
+            { status: 503 },
+          );
+        }
+        return Response.json(
+          { error: { status: 404, code: "not_found", message: "Codemode operation not found" } },
+          { status: 404 },
+        );
+      }) as typeof fetch,
+      pollIntervalMs: 1,
+    });
+    await expect(client.call(definition.identity, { query: "hello" })).rejects.toMatchObject({
+      remoteCode: "codemode_operation_recovery_unavailable",
+    });
+    expect(posts).toBe(1);
+  });
+
   test("exposes stable structured transport codes without changing error identity", async () => {
     const catalog = createAttemptToolEnvironment({
       scope,

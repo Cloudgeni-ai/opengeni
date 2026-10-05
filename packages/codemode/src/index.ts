@@ -424,19 +424,24 @@ export class CodemodeClient {
     argumentsValue: Record<string, unknown>,
     signal?: AbortSignal,
   ): Promise<CodemodeOperationValue> {
-    const response = await this.request("/calls", {
-      method: "POST",
-      ...(signal ? { signal } : {}),
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify({
-        operationId,
-        catalogDigest,
-        identity,
-        arguments: argumentsValue,
-        durableApproval: true,
-      }),
+    // Submission is idempotent by the caller-owned operation id: identical
+    // bytes replay the same journal row, so a known-outcome transient server
+    // failure (for example a database contention 503) is resubmitted as is.
+    return await retryTransientCodemodeRequest(signal, async () => {
+      const response = await this.request("/calls", {
+        method: "POST",
+        ...(signal ? { signal } : {}),
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          operationId,
+          catalogDigest,
+          identity,
+          arguments: argumentsValue,
+          durableApproval: true,
+        }),
+      });
+      return CodemodeCallSubmission.parse(await response.json()).operation;
     });
-    return CodemodeCallSubmission.parse(await response.json()).operation;
   }
 
   /** Observe a durable handle using the current attempt, without resubmitting its payload. */
@@ -479,11 +484,13 @@ export class CodemodeClient {
   }
 
   private async read(operationId: string, signal?: AbortSignal): Promise<CodemodeOperationValue> {
-    const response = await this.request(`/calls/${operationId}`, {
-      method: "GET",
-      ...(signal ? { signal } : {}),
+    return await retryTransientCodemodeRequest(signal, async () => {
+      const response = await this.request(`/calls/${operationId}`, {
+        method: "GET",
+        ...(signal ? { signal } : {}),
+      });
+      return CodemodeOperation.parse(await response.json());
     });
-    return CodemodeOperation.parse(await response.json());
   }
 
   /** Server-side Site preview forwarding. The attempt bearer never enters the
@@ -813,6 +820,37 @@ function parseCodemodeApiError(input: unknown): {
         ...(details ? { details } : {}),
       }
     : null;
+}
+
+const CODEMODE_TRANSIENT_RETRY_DELAYS_MS = [100, 250, 500, 1_000, 2_000] as const;
+
+/** A server-declared transient failure whose outcome is known: nothing was applied. */
+export function isTransientCodemodeTransportError(error: unknown): boolean {
+  return (
+    error instanceof CodemodeTransportError &&
+    error.status !== null &&
+    error.status >= 500 &&
+    error.retryable === true &&
+    error.outcomeUnknown !== true
+  );
+}
+
+/** Bounded retry for idempotent journal requests (submit by operation id, read). */
+async function retryTransientCodemodeRequest<T>(
+  signal: AbortSignal | undefined,
+  request: () => Promise<T>,
+): Promise<T> {
+  for (let attempt = 0; ; attempt += 1) {
+    try {
+      return await request();
+    } catch (error) {
+      const delayMs = CODEMODE_TRANSIENT_RETRY_DELAYS_MS[attempt];
+      if (delayMs === undefined || signal?.aborted || !isTransientCodemodeTransportError(error)) {
+        throw error;
+      }
+      await abortableDelay(delayMs + Math.floor(Math.random() * delayMs), signal);
+    }
+  }
 }
 
 async function abortableDelay(delayMs: number, signal?: AbortSignal): Promise<void> {
