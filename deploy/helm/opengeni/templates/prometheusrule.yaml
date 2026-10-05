@@ -857,8 +857,8 @@ spec:
           labels:
             severity: warning
           annotations:
-            summary: Live Opengeni sandbox leases point at Modal boxes that are no longer running
-            description: A warming/warm/draining lease has named an exact Modal instance that a complete app listing has not shown for 15m. The lease may keep metering warm time and its next turn or drain will hit provider loss. Check the lease's capture/drain progress and provider-missing recovery.
+            summary: Warm Opengeni sandbox leases point at Modal boxes that are no longer running
+            description: A warm lease names an exact Modal instance that complete app listings keep not showing (draining leases are excluded; they lose their box mid-drain). The lease may keep metering warm time and its next turn or drain will hit provider loss. Check the lease's capture/drain progress and provider-missing recovery.
         - alert: OpenGeniModalInventoryStale
           expr: |
             min(
