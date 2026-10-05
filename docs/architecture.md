@@ -448,7 +448,16 @@ Agent configuration: `packages/contracts/src/agent-config.ts`; null configs stay
 
 Connected Machines (`selfhosted`) run agents without sandboxes. [Updates](../agent/README.md#distribution)
 fence admission, require idle commands/uploads and owned browser/computer controllers,
-and defer without proof. Mac updates preserve signed bundles and
+and defer without proof. `opengeni-agent-engine::update_drain` owns one process-wide
+reservation boundary. Platform scopes pass existing guards to blocking actions,
+PTY child cleanup, job descendants and relay pumps; generation tasks own only
+waiters. Replies settle on their original transport, and unproved cleanup or
+publication keeps updates unavailable. The attached-browser bridge reserves
+before spawn and retains timed-out commands until matching physical results.
+The private controller update transaction fences new HTTP requests, including
+queued JSON, before the host atomically seals final admission. Operation-result
+retention and consumer-generation acknowledgments remain engine-owned.
+Mac updates preserve signed bundles and
 [ACLs](../agent/TRANSACTIONAL-WRITES.md).
 
 Machines own files, Git auth, environment and [credential renewal](connected-machines.md).

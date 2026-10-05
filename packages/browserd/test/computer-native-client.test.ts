@@ -27,7 +27,14 @@ describe("ComputerNativeClient", () => {
           "--malformed-click-continuation",
         ],
       }),
-    ).rejects.toThrow("pointerClickContinuation");
+    ).rejects.toMatchObject({
+      name: "UnsettledCleanupError",
+      errors: expect.arrayContaining([
+        expect.objectContaining({
+          message: expect.stringContaining("pointerClickContinuation"),
+        }),
+      ]),
+    });
   });
 
   test("correlates out-of-order responses, binary captures, and typed adapter errors", async () => {
@@ -70,7 +77,8 @@ describe("ComputerNativeClient", () => {
       await expect(client.observe("malformed")).rejects.toThrow("native observation");
       await expect(client.targets()).rejects.toThrow("native observation");
     } finally {
-      await client.close();
+      await expect(client.close()).rejects.toThrow("cleanup was not confirmed");
+      await expect(client.close()).rejects.toThrow("cleanup was not confirmed");
     }
   });
 
@@ -80,9 +88,22 @@ describe("ComputerNativeClient", () => {
       await expect(client.capture("stalled")).rejects.toThrow("capture timed out");
       await expect(client.targets()).rejects.toThrow("attachment timed out");
     } finally {
-      await client.close();
+      await expect(client.close()).rejects.toThrow("cleanup was not confirmed");
     }
   });
+
+  test.each(["--nonzero-eof", "--ignore-eof"])(
+    "retains unconfirmed native process cleanup on repeat close (%s)",
+    async (flag) => {
+      const client = await ComputerNativeClient.open({
+        binaryPath: process.execPath,
+        arguments: [resolve(import.meta.dir, "fixtures/computer-native-fixture.ts"), flag],
+      });
+      await expect(client.close()).rejects.toMatchObject({ name: "UnsettledCleanupError" });
+      await expect(client.close()).rejects.toMatchObject({ name: "UnsettledCleanupError" });
+    },
+    12_000,
+  );
 });
 
 async function openFixture(options: { captureTimeoutMs?: number } = {}) {

@@ -379,15 +379,16 @@ async fn run(args: RunArgs, api_url: &str) -> anyhow_lite::Result {
         platform = platform.with_oom_isolation(cgroups);
     }
     let config_dir = config::config_dir().ok();
+    let update_drain = Arc::new(uploads::update_drain::UpdateDrain::default());
     let (next_platform, browser_sidecars) =
-        attach_browser_controller(platform, config_dir.as_deref());
+        attach_browser_controller(platform, config_dir.as_deref(), update_drain.clone());
     platform = next_platform;
     // Clone connection platforms only after browser control is attached. Existing
     // links and links added by the watcher must expose the identical controller.
     let connection_instance_id = uuid::Uuid::new_v4().to_string();
     let links = supervisor_links(&connections, &platform, &connection_instance_id);
     let (updates_tx, updates_rx) = tokio::sync::watch::channel(links.clone());
-    let browser_bridge = start_browser_bridge(config_dir.as_deref()).await;
+    let browser_bridge = start_browser_bridge(config_dir.as_deref(), update_drain.clone()).await;
 
     // The engine's disk spool lives under the config dir — a real filesystem
     // (a tmpfs temp dir would spool "to disk" in RAM and defeat the budgets).
@@ -396,6 +397,7 @@ async fn run(args: RunArgs, api_url: &str) -> anyhow_lite::Result {
             .with_spool_root(dir.join("spool")),
         None => Supervisor::new_links(&links, env!("CARGO_PKG_VERSION")),
     };
+    supervisor = supervisor.with_update_drain(update_drain);
     if let Some(bridge) = &browser_bridge {
         supervisor = supervisor.with_browser_bridge(bridge.inventory());
     }
@@ -488,13 +490,14 @@ fn restart_after_verified_update() -> anyhow_lite::Result {
 fn attach_browser_controller(
     platform: NativePlatform,
     config_dir: Option<&Path>,
+    update_drain: Arc<uploads::update_drain::UpdateDrain>,
 ) -> (NativePlatform, Option<Arc<BrowserSidecarManager>>) {
     let Some(directory) = config_dir else {
         return (platform, None);
     };
     match BrowserSidecarManager::discover(directory) {
         Ok(manager) => {
-            let manager = Arc::new(manager);
+            let manager = Arc::new(manager.with_update_drain(update_drain));
             (
                 platform.with_browser_control(manager.clone()),
                 Some(manager),
@@ -507,9 +510,12 @@ fn attach_browser_controller(
     }
 }
 
-async fn start_browser_bridge(config_dir: Option<&Path>) -> Option<BrowserBridgeServer> {
+async fn start_browser_bridge(
+    config_dir: Option<&Path>,
+    update_drain: Arc<uploads::update_drain::UpdateDrain>,
+) -> Option<BrowserBridgeServer> {
     let directory = config_dir?;
-    match BrowserBridgeServer::start(directory).await {
+    match BrowserBridgeServer::start_with_update_drain(directory, update_drain).await {
         Ok(bridge) => Some(bridge),
         Err(error) => {
             warn!(%error, "attached browser bridge unavailable; continuing without it");

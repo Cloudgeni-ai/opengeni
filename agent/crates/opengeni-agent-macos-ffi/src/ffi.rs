@@ -75,7 +75,7 @@ use crate::{
 
 pub(crate) use ax::MacAxControllerImpl;
 use input_monitor::{input_activity_monitor, InputActivityMonitor};
-pub(crate) use stream::CaptureStream;
+pub(crate) use stream::{capture_cleanup_is_settled, CaptureStream};
 
 const MAX_CAPTURE_PIXELS: usize = 64 * 1024 * 1024;
 

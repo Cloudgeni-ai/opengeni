@@ -314,7 +314,7 @@ impl LinuxDesktop {
     /// Returns a typed platform failure when the display cannot be queried.
     pub async fn windows(&self) -> PlatformResult<Vec<LinuxWindow>> {
         let this = self.clone();
-        tokio::task::spawn_blocking(move || this.windows_blocking())
+        crate::spawn_blocking_reserved(move || this.windows_blocking())
             .await
             .map_err(|error| PlatformError::os(format!("X11 window-list task join: {error}")))?
     }
@@ -328,7 +328,7 @@ impl LinuxDesktop {
     /// unavailable, or the backing pixmap cannot be read.
     pub async fn capture_window(&self, window_id: u32) -> PlatformResult<CapturedFrame> {
         let this = self.clone();
-        tokio::task::spawn_blocking(move || this.capture_window_blocking(window_id))
+        crate::spawn_blocking_reserved(move || this.capture_window_blocking(window_id))
             .await
             .map_err(|error| PlatformError::os(format!("X11 window capture task join: {error}")))?
     }
@@ -342,7 +342,7 @@ impl LinuxDesktop {
     /// the X11 capture task cannot complete.
     pub async fn capture_rgba(&self) -> PlatformResult<LinuxRgbaFrame> {
         let this = self.clone();
-        tokio::task::spawn_blocking(move || this.capture_rgba_blocking())
+        crate::spawn_blocking_reserved(move || this.capture_rgba_blocking())
             .await
             .map_err(|error| PlatformError::os(format!("X11 RGBA capture task join: {error}")))?
     }
@@ -356,7 +356,7 @@ impl LinuxDesktop {
     /// capture fails, or the X11 capture task cannot complete.
     pub async fn capture_window_rgba(&self, window_id: u32) -> PlatformResult<LinuxRgbaFrame> {
         let this = self.clone();
-        tokio::task::spawn_blocking(move || this.capture_window_rgba_blocking(window_id))
+        crate::spawn_blocking_reserved(move || this.capture_window_rgba_blocking(window_id))
             .await
             .map_err(|error| {
                 PlatformError::os(format!("X11 window RGBA capture task join: {error}"))
@@ -377,7 +377,7 @@ impl LinuxDesktop {
         inputs: Vec<v1::DesktopInput>,
     ) -> PlatformResult<()> {
         let this = self.clone();
-        tokio::task::spawn_blocking(move || {
+        crate::spawn_blocking_reserved(move || {
             this.inject_window_blocking(window_id, expected_bounds, &inputs)
         })
         .await
@@ -399,9 +399,11 @@ impl LinuxDesktop {
         expected_bounds: LinuxWindowRect,
     ) -> PlatformResult<()> {
         let this = self.clone();
-        tokio::task::spawn_blocking(move || this.focus_window_blocking(window_id, expected_bounds))
-            .await
-            .map_err(|error| PlatformError::os(format!("X11 window focus task join: {error}")))?
+        crate::spawn_blocking_reserved(move || {
+            this.focus_window_blocking(window_id, expected_bounds)
+        })
+        .await
+        .map_err(|error| PlatformError::os(format!("X11 window focus task join: {error}")))?
     }
 
     /// Activates an exact observed client through its proven window manager,
@@ -416,7 +418,7 @@ impl LinuxDesktop {
         expected: LinuxWindow,
     ) -> Result<LinuxWindowActivation, LinuxWindowActivationError> {
         let this = self.clone();
-        tokio::task::spawn_blocking(move || this.activate_window_blocking(expected))
+        crate::spawn_blocking_reserved(move || this.activate_window_blocking(expected))
             .await
             .map_err(|error| {
                 LinuxWindowActivationError::after(PlatformError::os(format!(
@@ -435,7 +437,7 @@ impl LinuxDesktop {
         activation: LinuxWindowActivation,
     ) -> PlatformResult<()> {
         let this = self.clone();
-        tokio::task::spawn_blocking(move || {
+        crate::spawn_blocking_reserved(move || {
             if this.display_name != activation.display_name {
                 return Err(PlatformError::NotFound(
                     "window activation belongs to another display".into(),
@@ -460,7 +462,7 @@ impl LinuxDesktop {
         expected: LinuxWindow,
     ) -> PlatformResult<LinuxWindowActivation> {
         let this = self.clone();
-        tokio::task::spawn_blocking(move || {
+        crate::spawn_blocking_reserved(move || {
             let (conn, screen) = this.connect()?;
             let route = read_activation_route(&conn, &screen)?;
             verify_activation_state(&conn, &screen, &expected, route)?;
@@ -488,7 +490,7 @@ impl LinuxDesktop {
         inputs: Vec<v1::DesktopInput>,
     ) -> Result<(), LinuxWindowActivationError> {
         let this = self.clone();
-        tokio::task::spawn_blocking(move || {
+        crate::spawn_blocking_reserved(move || {
             if this.display_name != activation.display_name {
                 return Err(LinuxWindowActivationError::before(PlatformError::NotFound(
                     "window input belongs to another display".into(),
@@ -588,7 +590,7 @@ impl DesktopBackend for LinuxDesktop {
         // x11rb is blocking; run the capture on the blocking pool so the async
         // runtime is never stalled by a slow GetImage.
         let this = self.clone();
-        tokio::task::spawn_blocking(move || this.capture_blocking())
+        crate::spawn_blocking_reserved(move || this.capture_blocking())
             .await
             .map_err(|e| PlatformError::os(format!("capture task join: {e}")))?
     }
@@ -596,7 +598,7 @@ impl DesktopBackend for LinuxDesktop {
     async fn inject(&self, input: &v1::DesktopInput) -> PlatformResult<()> {
         let this = self.clone();
         let input = input.clone();
-        tokio::task::spawn_blocking(move || this.inject_blocking(std::slice::from_ref(&input)))
+        crate::spawn_blocking_reserved(move || this.inject_blocking(std::slice::from_ref(&input)))
             .await
             .map_err(|e| PlatformError::os(format!("inject task join: {e}")))?
     }

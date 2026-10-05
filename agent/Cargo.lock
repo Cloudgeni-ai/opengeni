@@ -2034,6 +2034,7 @@ version = "0.1.0"
 dependencies = [
  "tempfile",
  "thiserror 2.0.20",
+ "tokio",
 ]
 
 [[package]]
@@ -2097,6 +2098,7 @@ dependencies = [
  "command-group",
  "image",
  "nix 0.29.0",
+ "opengeni-agent-engine",
  "opengeni-agent-files-ffi",
  "opengeni-agent-linux-ffi",
  "opengeni-agent-macos-ffi",
