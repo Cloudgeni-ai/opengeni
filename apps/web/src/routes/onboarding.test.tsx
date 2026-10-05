@@ -1731,6 +1731,72 @@ describe("organization onboarding UI", () => {
     }
   });
 
+  test("returning to the setup step reuses a live setup key and replaces it only when asked", async () => {
+    const createOrganizationApiKey = mock(async (_organizationId: string, _request: unknown) => ({
+      apiKey: { id: "key-2", prefix: "ogk_new4567" },
+      token: "ogk_new4567_secret",
+    }));
+    const listOrganizationApiKeys = mock(async (_organizationId: string) => [
+      {
+        id: "key-1",
+        name: "Setup (full access)",
+        prefix: "ogk_old1234",
+        revokedAt: null,
+        expiresAt: new Date(Date.now() + 86_400_000).toISOString(),
+      },
+      { id: "key-x", name: "Production", prefix: "ogk_prod999", revokedAt: null, expiresAt: null },
+    ]);
+    const deleteOrganizationApiKey = mock(async (_organizationId: string, id: string) => ({ id }));
+    const container = document.createElement("div");
+    document.body.appendChild(container);
+    const root = createRoot(container);
+    try {
+      await act(async () =>
+        root.render(
+          <OrganizationOnboardingPanel
+            client={
+              {
+                ...setupClient,
+                createOrganizationApiKey,
+                listOrganizationApiKeys,
+                deleteOrganizationApiKey,
+                getNewSessionDraft: async () => emptyNewSessionDraft,
+              } as never
+            }
+            previewState="required"
+            includedModel={{ id: "free-model", label: "Free Model", free: true }}
+            initialUseCase="embed"
+            onComplete={() => undefined}
+          />,
+        ),
+      );
+      await enter(container.querySelector("#organization-onboarding-name")!, "Northwind");
+      await act(async () => container.querySelector<HTMLFormElement>("form")!.requestSubmit());
+      await flush();
+      await act(async () =>
+        Array.from(container.querySelectorAll("button"))
+          .find((button) => button.textContent?.trim() === "Continue")!
+          .click(),
+      );
+      await flush();
+      expect(listOrganizationApiKeys).toHaveBeenCalledTimes(1);
+      expect(createOrganizationApiKey).not.toHaveBeenCalled();
+      expect(container.textContent).toContain("You already created a setup key (ogk_old1234…)");
+      expect(container.querySelector("[data-slot=developer-setup-key]")).toBeNull();
+
+      await clickButton(container, "Replace it with a new key");
+      await flush();
+      expect(deleteOrganizationApiKey.mock.calls).toEqual([["preview-organization", "key-1"]]);
+      expect(createOrganizationApiKey).toHaveBeenCalledTimes(1);
+      expect(container.querySelector("[data-slot=developer-setup-key]")!.textContent).toBe(
+        "ogk_new4567_secret",
+      );
+    } finally {
+      await act(async () => root.unmount());
+      container.remove();
+    }
+  });
+
   test("a setup chat that couldn't be readied retries without a second workspace or key", async () => {
     const onComplete = mock((_destination?: unknown) => undefined);
     const createOrganizationApiKey = mock(async () => ({
