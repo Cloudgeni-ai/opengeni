@@ -16,6 +16,7 @@
 {{- $reaperPeriodMs := int (default "30000" (index .Values.config "OPENGENI_SANDBOX_LEASE_REAPER_PERIOD_MS")) }}
 {{- $fullName := include "opengeni.fullname" . }}
 {{- $opensandboxEnabled := eq (default "none" (index .Values.config "OPENGENI_SANDBOX_BACKEND")) "opensandbox" }}
+{{- $modalEnabled := eq (default "none" (index .Values.config "OPENGENI_SANDBOX_BACKEND")) "modal" }}
 {{- if le $inventoryFreshnessSeconds 0 }}
 {{- fail "observability.prometheusRule.inventoryFreshnessSeconds must be positive" }}
 {{- end }}
@@ -105,6 +106,17 @@ spec:
               and on (job, instance)
               (time() - opengeni_sandbox_inventory_refresh_timestamp_seconds{domain="expired_drains"} < {{ $inventoryFreshnessSeconds }})
             )
+        {{- if $modalEnabled }}
+        # Provider-side Modal inventory from the orphan sweep (running boxes,
+        # boxes without a live lease, live leases whose box is gone).
+        - record: opengeni:modal_sandbox_inventory:fresh_max
+          expr: |
+            max by (state) (
+              opengeni_modal_sandbox_inventory
+              and on (job, instance)
+              (time() - opengeni_sandbox_inventory_refresh_timestamp_seconds{domain="modal_provider"} < {{ $inventoryFreshnessSeconds }})
+            )
+        {{- end }}
         {{- if $opensandboxEnabled }}
         - record: opengeni:opensandbox_batchsandboxes:fresh_max
           expr: |
@@ -815,10 +827,40 @@ spec:
           annotations:
             summary: OpenGeni has a sandbox stuck in draining
             description: A refcount-zero sandbox has exceeded its drain deadline. Check archive capture, provider termination, checkpoint publication, and reaper errors.
+        {{- if $modalEnabled }}
+        - alert: OpenGeniModalSandboxesWithoutLease
+          expr: opengeni:modal_sandbox_inventory:fresh_max{state="unleased"} > 0
+          for: 15m
+          labels:
+            severity: warning
+          annotations:
+            summary: Modal sandboxes have been running without a live Opengeni lease for 15m
+            description: The orphan sweep keeps finding running Modal boxes that no warming/warm/draining lease owns, so it is either failing to terminate them or new orphans keep appearing. Check "sandbox reaper" orphan-sweep warnings, Modal API errors, and warming leases without an instance id (they postpone every orphan termination).
+        - alert: OpenGeniModalLeaseInstanceMissing
+          expr: opengeni:modal_sandbox_inventory:fresh_max{state="lease_missing_instance"} > 0
+          for: 15m
+          labels:
+            severity: warning
+          annotations:
+            summary: Live Opengeni sandbox leases point at Modal boxes that are no longer running
+            description: A warming/warm/draining lease has named an exact Modal instance that a complete app listing has not shown for 15m. The lease may keep metering warm time and its next turn or drain will hit provider loss. Check the lease's capture/drain progress and provider-missing recovery.
+        - alert: OpenGeniModalInventoryStale
+          expr: |
+            min(
+              time() - opengeni_sandbox_inventory_refresh_timestamp_seconds{domain="modal_provider"}
+            ) > {{ $inventoryFreshnessSeconds }}
+            or absent(opengeni_sandbox_inventory_refresh_timestamp_seconds{domain="modal_provider"})
+          for: 15m
+          labels:
+            severity: warning
+          annotations:
+            summary: The Modal orphan sweep has not completed a full provider listing recently
+            description: No control replica has listed the whole Modal app recently, so orphan termination and the Modal inventory alerts are blind. Check "Modal orphan sweep failed" reaper warnings and Modal API health.
+        {{- end }}
         - alert: OpenGeniSandboxInventoryProjectionStale
           expr: |
             min by (domain) (
-              time() - opengeni_sandbox_inventory_refresh_timestamp_seconds{domain!="opensandbox_kubernetes"}
+              time() - opengeni_sandbox_inventory_refresh_timestamp_seconds{domain!~"opensandbox_kubernetes|modal_provider"}
             ) > {{ $inventoryFreshnessSeconds }}
             or absent(opengeni_sandbox_inventory_refresh_timestamp_seconds{domain="leases"})
             or absent(opengeni_sandbox_inventory_refresh_timestamp_seconds{domain="checkpoint_artifacts"})
