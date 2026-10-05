@@ -2,10 +2,17 @@
 {{- $environment := default "production" (index .Values.config "OPENGENI_ENVIRONMENT") }}
 {{- $inventoryFreshnessSeconds := int (default 300 ((.Values.observability).prometheusRule).inventoryFreshnessSeconds) }}
 {{- $turnStartupQueueP95Seconds := int (default 5 ((.Values.observability).prometheusRule).turnStartupQueueP95Seconds) }}
-{{- $turnStartupProviderDispatchP95Seconds := int (default 60 ((.Values.observability).prometheusRule).turnStartupProviderDispatchP95Seconds) }}
+{{- $turnStartupProviderDispatchP95Seconds := int (default 20 ((.Values.observability).prometheusRule).turnStartupProviderDispatchP95Seconds) }}
 {{- $turnStartupFirstByteP95Seconds := int (default 120 ((.Values.observability).prometheusRule).turnStartupFirstByteP95Seconds) }}
 {{- $turnStartupFirstByteAvailabilityRatio := float64 ((.Values.observability).prometheusRule).turnStartupFirstByteAvailabilityRatio }}
 {{- $turnStartupMinSamples := int (default 5 ((.Values.observability).prometheusRule).turnStartupMinSamples) }}
+{{- $turnStartupProviderDispatchCriticalP95Seconds := int (default 60 ((.Values.observability).prometheusRule).turnStartupProviderDispatchCriticalP95Seconds) }}
+{{- $modelRequestPreDispatchP95Seconds := float64 (default 2 ((.Values.observability).prometheusRule).modelRequestPreDispatchP95Seconds) }}
+{{- $modelRequestMinSamples := int (default 20 ((.Values.observability).prometheusRule).modelRequestMinSamples) }}
+{{- $providerTtftRegressionRatio := float64 (default 2 ((.Values.observability).prometheusRule).providerTtftRegressionRatio) }}
+{{- $providerTtftRegressionFloorSeconds := float64 (default 5 ((.Values.observability).prometheusRule).providerTtftRegressionFloorSeconds) }}
+{{- $providerTtftRecentMinSamples := int (default 30 ((.Values.observability).prometheusRule).providerTtftRecentMinSamples) }}
+{{- $providerTtftBaselineMinSamples := int (default 200 ((.Values.observability).prometheusRule).providerTtftBaselineMinSamples) }}
 {{- $reaperPeriodMs := int (default "30000" (index .Values.config "OPENGENI_SANDBOX_LEASE_REAPER_PERIOD_MS")) }}
 {{- $fullName := include "opengeni.fullname" . }}
 {{- $opensandboxEnabled := eq (default "none" (index .Values.config "OPENGENI_SANDBOX_BACKEND")) "opensandbox" }}
@@ -14,6 +21,9 @@
 {{- end }}
 {{- if or (le $turnStartupQueueP95Seconds 0) (le $turnStartupProviderDispatchP95Seconds 0) (le $turnStartupFirstByteP95Seconds 0) (le $turnStartupFirstByteAvailabilityRatio 0.0) (gt $turnStartupFirstByteAvailabilityRatio 1.0) (le $turnStartupMinSamples 0) }}
 {{- fail "observability.prometheusRule turn-startup latency thresholds/minimum samples must be positive and first-byte availability ratio must be in (0, 1]" }}
+{{- end }}
+{{- if or (le $turnStartupProviderDispatchCriticalP95Seconds $turnStartupProviderDispatchP95Seconds) (le $modelRequestPreDispatchP95Seconds 0.0) (le $modelRequestMinSamples 0) (le $providerTtftRegressionRatio 1.0) (le $providerTtftRegressionFloorSeconds 0.0) (le $providerTtftRecentMinSamples 0) (le $providerTtftBaselineMinSamples 0) }}
+{{- fail "observability.prometheusRule latency alerts: the critical provider-dispatch p95 must exceed the warning p95, the pre-dispatch threshold, floor and minimum samples must be positive, and the provider TTFT regression ratio must exceed 1" }}
 {{- end }}
 {{- if lt (mul $inventoryFreshnessSeconds 1000) (mul $reaperPeriodMs 3) }}
 {{- fail "observability.prometheusRule.inventoryFreshnessSeconds must cover at least three sandbox reaper periods" }}
@@ -220,6 +230,9 @@ spec:
           annotations:
             summary: OpenGeni turn queue p95 exceeds {{ $turnStartupQueueP95Seconds }} seconds
             description: Durable turns are waiting too long before a worker starts them. Inspect Temporal eligible backlog, worker capacity, and admission saturation before attributing this to sandbox or model latency.
+        # OUR controllable latency, accepted turn -> first provider dispatch.
+        # Provider think time is excluded by construction; the warning yields
+        # to the critical tier so one incident never notifies twice.
         - alert: OpenGeniTurnStartupProviderDispatchP95High
           expr: |
             histogram_quantile(
@@ -228,12 +241,58 @@ spec:
             ) > {{ $turnStartupProviderDispatchP95Seconds }}
             and on()
             sum(increase(opengeni_turn_startup_milestone_duration_seconds_count{namespace={{ .Release.Namespace | quote }},release={{ .Release.Name | quote }},environment={{ $environment | quote }},milestone="provider_dispatch",outcome="completed"}[15m])) >= {{ $turnStartupMinSamples }}
+            unless on()
+            histogram_quantile(
+              0.95,
+              sum by (le) (rate(opengeni_turn_startup_milestone_duration_seconds_bucket{namespace={{ .Release.Namespace | quote }},release={{ .Release.Name | quote }},environment={{ $environment | quote }},milestone="provider_dispatch",outcome="completed"}[15m]))
+            ) > {{ $turnStartupProviderDispatchCriticalP95Seconds }}
           for: 15m
           labels:
             severity: warning
+            notification_policy: investigate
           annotations:
             summary: OpenGeni queue-to-provider-dispatch p95 exceeds {{ $turnStartupProviderDispatchP95Seconds }} seconds
-            description: The cumulative platform path is slow. Use the Turn Startup phase breakdown to distinguish sandbox, rig, file/repository, tool, history, and request-preparation latency.
+            description: The cumulative platform path from accepted turn to the first provider request is slow. This is OpenGeni latency (queue, claim, sandbox, tools, history, request preparation), never provider think time. The critical tier above {{ $turnStartupProviderDispatchCriticalP95Seconds }} seconds replaces this warning.
+            action: Open the Turn Startup phase breakdown; compare queue, claim_and_policy, worker preparation and sandbox_establish, then check Postgres append latency and worker admission before blaming a model provider.
+            runbook_url: https://github.com/Cloudgeni-ai/opengeni/blob/main/docs/launch-monitoring.md
+        - alert: OpenGeniTurnStartupProviderDispatchP95Critical
+          expr: |
+            histogram_quantile(
+              0.95,
+              sum by (le) (rate(opengeni_turn_startup_milestone_duration_seconds_bucket{namespace={{ .Release.Namespace | quote }},release={{ .Release.Name | quote }},environment={{ $environment | quote }},milestone="provider_dispatch",outcome="completed"}[15m]))
+            ) > {{ $turnStartupProviderDispatchCriticalP95Seconds }}
+            and on()
+            sum(increase(opengeni_turn_startup_milestone_duration_seconds_count{namespace={{ .Release.Namespace | quote }},release={{ .Release.Name | quote }},environment={{ $environment | quote }},milestone="provider_dispatch",outcome="completed"}[15m])) >= {{ $turnStartupMinSamples }}
+          for: 15m
+          labels:
+            severity: critical
+            notification_policy: page
+          annotations:
+            summary: OpenGeni queue-to-provider-dispatch p95 exceeds {{ $turnStartupProviderDispatchCriticalP95Seconds }} seconds
+            description: Users wait over {{ $turnStartupProviderDispatchCriticalP95Seconds }} seconds at p95 before any model provider sees their prompt. This is OpenGeni-owned latency (queue, claim, sandbox, tools, history, request preparation), not provider latency.
+            action: Open the Turn Startup phase breakdown and Launch capacity drilldowns; identify the dominant phase (claim/DB contention, queue age, sandbox establish) and follow the capacity owner's recovery path.
+            runbook_url: https://github.com/Cloudgeni-ai/opengeni/blob/main/docs/launch-monitoring.md
+        # Per model request (every tool-loop step, not only the first): SDK
+        # model entry -> literal provider dispatch. Admission, the durable
+        # history checkpoint, credit revalidation and the request audit are
+        # OpenGeni work and should stay well under a second.
+        - alert: OpenGeniModelRequestPreDispatchP95High
+          expr: |
+            histogram_quantile(
+              0.95,
+              sum by (le) (rate(opengeni_model_request_pre_dispatch_seconds_bucket{namespace={{ .Release.Namespace | quote }},release={{ .Release.Name | quote }},environment={{ $environment | quote }}}[15m]))
+            ) > {{ $modelRequestPreDispatchP95Seconds }}
+            and on()
+            sum(increase(opengeni_model_request_pre_dispatch_seconds_count{namespace={{ .Release.Namespace | quote }},release={{ .Release.Name | quote }},environment={{ $environment | quote }}}[15m])) >= {{ $modelRequestMinSamples }}
+          for: 10m
+          labels:
+            severity: warning
+            notification_policy: investigate
+          annotations:
+            summary: OpenGeni per-request pre-dispatch p95 exceeds {{ $modelRequestPreDispatchP95Seconds }} seconds
+            description: Between tool-loop steps OpenGeni itself is delaying every model request before it reaches the provider. This latency is entirely ours - admission, durable history/audit checkpoints, credit revalidation and request build - and adds directly to every user-visible time-to-first-token.
+            action: Compare session-event append latency, Postgres CPU/active sessions and turn-worker CPU; this is a database or worker saturation signal, not a provider regression.
+            runbook_url: https://github.com/Cloudgeni-ai/opengeni/blob/main/docs/launch-monitoring.md
         - alert: OpenGeniTurnStartupFirstByteP95High
           expr: |
             histogram_quantile(
@@ -922,14 +981,47 @@ spec:
         # SLIs from the token-streaming pipeline, split so an alert names the
         # layer: the model (TTFT), the durable write path (append), or delivery
         # (publish). Thresholds are starters — tune per deployment.
-        - alert: OpenGeniStreamingFirstTokenSlow
-          expr: histogram_quantile(0.99, sum by (le, provider) (rate(opengeni_stream_ttft_seconds_bucket{namespace={{ .Release.Namespace | quote }},release={{ .Release.Name | quote }},environment={{ $environment | quote }}}[10m]))) > 8
+        # Provider time-to-first-token (literal dispatch -> first streamed
+        # reasoning or answer delta) judged against each provider's OWN
+        # trailing baseline. A provider that is simply slower (reasoning
+        # models, subscription routes) never alerts; a real regression does.
+        # The absolute view stays on the Streaming Health dashboard.
+        - record: opengeni:model_provider_ttft_seconds:p90_30m
+          expr: |
+            histogram_quantile(0.9, sum by (le, provider) (rate(opengeni_model_provider_ttft_seconds_bucket{namespace={{ .Release.Namespace | quote }},release={{ .Release.Name | quote }},environment={{ $environment | quote }},content="any"}[30m])))
+        - record: opengeni:model_provider_ttft_seconds:p90_24h_baseline
+          expr: |
+            histogram_quantile(0.9, sum by (le, provider) (rate(opengeni_model_provider_ttft_seconds_bucket{namespace={{ .Release.Namespace | quote }},release={{ .Release.Name | quote }},environment={{ $environment | quote }},content="any"}[24h] offset 30m)))
+        - record: opengeni:model_provider_ttft_requests:30m
+          expr: |
+            sum by (provider) (increase(opengeni_model_provider_ttft_seconds_count{namespace={{ .Release.Namespace | quote }},release={{ .Release.Name | quote }},environment={{ $environment | quote }},content="any"}[30m]))
+        - record: opengeni:model_provider_ttft_requests:24h_baseline
+          expr: |
+            sum by (provider) (increase(opengeni_model_provider_ttft_seconds_count{namespace={{ .Release.Namespace | quote }},release={{ .Release.Name | quote }},environment={{ $environment | quote }},content="any"}[24h] offset 30m))
+        - alert: OpenGeniModelProviderTtftRegression
+          expr: |
+            opengeni:model_provider_ttft_seconds:p90_30m{namespace={{ .Release.Namespace | quote }},release={{ .Release.Name | quote }},environment={{ $environment | quote }}}
+              > {{ $providerTtftRegressionRatio }} * opengeni:model_provider_ttft_seconds:p90_24h_baseline{namespace={{ .Release.Namespace | quote }},release={{ .Release.Name | quote }},environment={{ $environment | quote }}}
+            and
+            opengeni:model_provider_ttft_seconds:p90_30m{namespace={{ .Release.Namespace | quote }},release={{ .Release.Name | quote }},environment={{ $environment | quote }}} > {{ $providerTtftRegressionFloorSeconds }}
+            and
+            opengeni:model_provider_ttft_requests:30m{namespace={{ .Release.Namespace | quote }},release={{ .Release.Name | quote }},environment={{ $environment | quote }}} >= {{ $providerTtftRecentMinSamples }}
+            and
+            opengeni:model_provider_ttft_requests:24h_baseline{namespace={{ .Release.Namespace | quote }},release={{ .Release.Name | quote }},environment={{ $environment | quote }}} >= {{ $providerTtftBaselineMinSamples }}
+            unless on()
+            histogram_quantile(
+              0.95,
+              sum by (le) (rate(opengeni_model_request_pre_dispatch_seconds_bucket{namespace={{ .Release.Namespace | quote }},release={{ .Release.Name | quote }},environment={{ $environment | quote }}}[15m]))
+            ) > {{ $modelRequestPreDispatchP95Seconds }}
           for: 15m
           labels:
             severity: warning
+            notification_policy: investigate
           annotations:
-            summary: OpenGeni p99 time-to-first-token exceeds 8s
-            description: The model is slow to START streaming (p99 TTFT by provider above 8s for 15m). Suspect the model provider before the write/delivery path.
+            summary: Provider {{ "{{ $labels.provider }}" }} time-to-first-token p90 is over {{ $providerTtftRegressionRatio }}x its trailing 24h baseline
+            description: Measured from the literal provider dispatch, so OpenGeni pre-dispatch work is excluded; a regression here is the provider (network, queueing, prefill or reasoning before the first streamed token). Suppressed while OpenGeni's own pre-dispatch latency alert condition holds, so platform saturation is attributed to us first. A provider without a {{ $providerTtftBaselineMinSamples }}-request baseline does not alert.
+            action: Compare the provider's p90 against its baseline on Streaming Health, check provider status and the request phase (headers/first byte) panels, and consider steering traffic to another route if the regression persists.
+            runbook_url: https://github.com/Cloudgeni-ai/opengeni/blob/main/docs/launch-monitoring.md
         - alert: OpenGeniEventAppendLatencyHigh
           expr: histogram_quantile(0.99, sum by (le) (rate(opengeni_session_event_append_seconds_bucket{namespace={{ .Release.Namespace | quote }},release={{ .Release.Name | quote }},environment={{ $environment | quote }}}[10m]))) > 1
           for: 10m
