@@ -399,6 +399,9 @@ const BrowserTabsInput = z.discriminatedUnion("operation", [
     })
     .strict(),
 ]);
+const BrowserTabsOutput = BrowserTargetListResponse.safeExtend({
+  mutationObservation: CompactBrowserObservation.optional(),
+});
 
 const BrowserObserveInput = z
   .object({
@@ -795,18 +798,21 @@ export function createInteractionAttemptToolDefinitions(
     codemodePath: ["interaction", "browser", "tabs"],
     title: "Manage browser tabs",
     description:
-      "List, open, logically select, or close tabs in one exact BrowserSession. Selection changes the BrowserSession's default target, not the visible desktop tab. New attached-Chrome tabs open in the background. Use browser_act activate only when foregrounding the owned tab is explicitly intended. Closing a tab does not release the browser process; use browser_lifecycle for session cleanup. Returns the authoritative complete tab list after the operation.",
+      "List, open, logically select, or close tabs in one exact BrowserSession. Selection changes the BrowserSession's default target, not the visible desktop tab. New attached-Chrome tabs open in the background. Use browser_act activate only when foregrounding the owned tab is explicitly intended. Closing a tab does not release the browser process; use browser_lifecycle for session cleanup. Returns the authoritative complete tab list after the operation. Open/select also return mutationObservation, the operation's compact page snapshot. Reuse its refs and generations for immediate actions; refresh after later page changes.",
     input: BrowserTabsInput,
-    output: BrowserTargetListResponse,
+    output: BrowserTabsOutput,
     readOnly: false,
     idempotent: false,
     execute: async (value) => {
+      let mutationObservation: z.infer<typeof BrowserObservation> | undefined;
       if (value.operation === "open") {
-        await input.transport.openBrowserTarget(input.workspaceId, value.browserSessionId, {
-          ...(value.url ? { url: value.url } : {}),
-        });
+        mutationObservation = await input.transport.openBrowserTarget(
+          input.workspaceId,
+          value.browserSessionId,
+          { ...(value.url ? { url: value.url } : {}) },
+        );
       } else if (value.operation === "select") {
-        await input.transport.selectBrowserTarget(
+        mutationObservation = await input.transport.selectBrowserTarget(
           input.workspaceId,
           value.browserSessionId,
           value.targetId,
@@ -818,7 +824,16 @@ export function createInteractionAttemptToolDefinitions(
           value.targetId,
         );
       }
-      return await input.transport.listBrowserTargets(input.workspaceId, value.browserSessionId);
+      const tabs = await input.transport.listBrowserTargets(
+        input.workspaceId,
+        value.browserSessionId,
+      );
+      return mutationObservation
+        ? {
+            ...tabs,
+            mutationObservation: projectBrowserObservation(mutationObservation, "compact"),
+          }
+        : tabs;
     },
   });
 
@@ -1919,6 +1934,14 @@ function selectAgentNodes(
   };
 }
 
+function projectBrowserObservation(
+  observation: z.infer<typeof BrowserObservation>,
+  view: "compact",
+): z.infer<typeof CompactBrowserObservation>;
+function projectBrowserObservation(
+  observation: z.infer<typeof BrowserObservation>,
+  view: "compact" | "full",
+): z.infer<typeof BrowserAgentObservation>;
 function projectBrowserObservation(
   observation: z.infer<typeof BrowserObservation>,
   view: "compact" | "full",
