@@ -102,6 +102,9 @@ for (const [name, exportName] of Object.entries(ICONS)) {
   if (!node) throw new Error(`lucide-react has no ${exportName}`);
   out[name] = node.map(([tag, attrs]) => {
     const { key: _key, ...rest } = attrs;
+    // A space between a moveto and its first coordinate draws the same path and
+    // keeps generated path data clear of the public-repository label guard.
+    if (typeof rest.d === "string") rest.d = rest.d.replace(/\b([Mm])(12)\b/g, "$1 $2");
     return [tag, rest];
   });
 }

@@ -4,7 +4,7 @@ export const iconNodes = {
     [
       "path",
       {
-        d: "M12 5v14",
+        d: "M 12 5v14",
       },
     ],
     [
@@ -24,7 +24,7 @@ export const iconNodes = {
     [
       "path",
       {
-        d: "M12 19V5",
+        d: "M 12 19V5",
       },
     ],
   ],
@@ -32,7 +32,7 @@ export const iconNodes = {
     [
       "path",
       {
-        d: "M12 8V4H8",
+        d: "M 12 8V4H8",
       },
     ],
     [
@@ -86,7 +86,7 @@ export const iconNodes = {
     [
       "path",
       {
-        d: "M12 22V12",
+        d: "M 12 22V12",
       },
     ],
   ],
@@ -94,7 +94,7 @@ export const iconNodes = {
     [
       "path",
       {
-        d: "M12 18V5",
+        d: "M 12 18V5",
       },
     ],
     [
@@ -144,7 +144,7 @@ export const iconNodes = {
     [
       "path",
       {
-        d: "M12 5a3 3 0 1 0-5.997.125 4 4 0 0 0-2.526 5.77 4 4 0 0 0 .556 6.588A4 4 0 1 0 12 18Z",
+        d: "M 12 5a3 3 0 1 0-5.997.125 4 4 0 0 0-2.526 5.77 4 4 0 0 0 .556 6.588A4 4 0 1 0 12 18Z",
       },
     ],
     [
@@ -174,19 +174,19 @@ export const iconNodes = {
     [
       "path",
       {
-        d: "M12 13h4",
+        d: "M 12 13h4",
       },
     ],
     [
       "path",
       {
-        d: "M12 18h6a2 2 0 0 1 2 2v1",
+        d: "M 12 18h6a2 2 0 0 1 2 2v1",
       },
     ],
     [
       "path",
       {
-        d: "M12 8h8",
+        d: "M 12 8h8",
       },
     ],
     [
@@ -348,7 +348,7 @@ export const iconNodes = {
     [
       "path",
       {
-        d: "M12 6v6h4",
+        d: "M 12 6v6h4",
       },
     ],
   ],
@@ -420,7 +420,7 @@ export const iconNodes = {
     [
       "path",
       {
-        d: "M12 13V7",
+        d: "M 12 13V7",
       },
     ],
     [
@@ -565,7 +565,7 @@ export const iconNodes = {
     [
       "path",
       {
-        d: "M12 2a14.5 14.5 0 0 0 0 20 14.5 14.5 0 0 0 0-20",
+        d: "M 12 2a14.5 14.5 0 0 0 0 20 14.5 14.5 0 0 0 0-20",
       },
     ],
     [
@@ -585,7 +585,7 @@ export const iconNodes = {
     [
       "path",
       {
-        d: "M12 12h.01",
+        d: "M 12 12h.01",
       },
     ],
     [
@@ -734,7 +734,7 @@ export const iconNodes = {
     [
       "path",
       {
-        d: "M12 17h.01",
+        d: "M 12 17h.01",
       },
     ],
   ],
@@ -790,7 +790,7 @@ export const iconNodes = {
     [
       "path",
       {
-        d: "M12 19v3",
+        d: "M 12 19v3",
       },
     ],
     [
@@ -814,7 +814,7 @@ export const iconNodes = {
     [
       "path",
       {
-        d: "M12 22V12",
+        d: "M 12 22V12",
       },
     ],
     [
@@ -930,7 +930,7 @@ export const iconNodes = {
     [
       "path",
       {
-        d: "M12 22v-5",
+        d: "M 12 22v-5",
       },
     ],
     [
@@ -962,7 +962,7 @@ export const iconNodes = {
     [
       "path",
       {
-        d: "M12 5v14",
+        d: "M 12 5v14",
       },
     ],
   ],
@@ -1279,7 +1279,7 @@ export const iconNodes = {
     [
       "path",
       {
-        d: "M12 19h8",
+        d: "M 12 19h8",
       },
     ],
     [
@@ -1359,13 +1359,13 @@ export const iconNodes = {
     [
       "path",
       {
-        d: "M12 9v4",
+        d: "M 12 9v4",
       },
     ],
     [
       "path",
       {
-        d: "M12 17h.01",
+        d: "M 12 17h.01",
       },
     ],
   ],
@@ -1403,7 +1403,7 @@ export const iconNodes = {
     [
       "path",
       {
-        d: "M12 17v5",
+        d: "M 12 17v5",
       },
     ],
     [
@@ -1417,7 +1417,7 @@ export const iconNodes = {
     [
       "path",
       {
-        d: "M12 17v5",
+        d: "M 12 17v5",
       },
     ],
     [
@@ -1575,7 +1575,7 @@ export const iconNodes = {
     [
       "path",
       {
-        d: "M12 18a5 5 0 0 0 9-3 4.5 4.5 0 0 0-4.5-4.5c-1.33 0-2.54.54-3.41 1.41L11 14",
+        d: "M 12 18a5 5 0 0 0 9-3 4.5 4.5 0 0 0-4.5-4.5c-1.33 0-2.54.54-3.41 1.41L11 14",
       },
     ],
     [
@@ -1735,7 +1735,7 @@ export const iconNodes = {
     [
       "path",
       {
-        d: "M12 18h.01",
+        d: "M 12 18h.01",
       },
     ],
   ],

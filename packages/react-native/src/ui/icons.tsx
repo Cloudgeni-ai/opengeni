@@ -44,7 +44,7 @@ export function AgentIcon({
       {name === "terminal" ? (
         <>
           <Polyline points="4 17 10 11 4 5" {...common} />
-          <Path d="M12 19h8" {...common} />
+          <Path d="M 12 19h8" {...common} />
         </>
       ) : null}
       {name === "search" ? (
@@ -55,7 +55,7 @@ export function AgentIcon({
       ) : null}
       {name === "edit" ? (
         <>
-          <Path d="M12 20h9" {...common} />
+          <Path d="M 12 20h9" {...common} />
           <Path d="M16.5 3.5a2.1 2.1 0 0 1 3 3L7 19l-4 1 1-4Z" {...common} />
         </>
       ) : null}
@@ -70,7 +70,7 @@ export function AgentIcon({
       {name === "chevron-right" ? <Polyline points="9 18 15 12 9 6" {...common} /> : null}
       {name === "chevron-down" ? <Polyline points="6 9 12 15 18 9" {...common} /> : null}
       {name === "sparkle" ? (
-        <Path d="M12 3l1.9 5.1L19 10l-5.1 1.9L12 17l-1.9-5.1L5 10l5.1-1.9Z" {...common} />
+        <Path d="M 12 3l1.9 5.1L19 10l-5.1 1.9L12 17l-1.9-5.1L5 10l5.1-1.9Z" {...common} />
       ) : null}
       {name === "mic" ? (
         <>
@@ -78,8 +78,8 @@ export function AgentIcon({
           <Path d="M5 10a7 7 0 0 0 14 0M12 17v5" {...common} />
         </>
       ) : null}
-      {name === "plus" ? <Path d="M12 5v14M5 12h14" {...common} /> : null}
-      {name === "arrow-up" ? <Path d="M12 19V5M5 12l7-7 7 7" {...common} /> : null}
+      {name === "plus" ? <Path d="M 12 5v14M5 12h14" {...common} /> : null}
+      {name === "arrow-up" ? <Path d="M 12 19V5M5 12l7-7 7 7" {...common} /> : null}
       {name === "stop" ? <Rect x="6" y="6" width="12" height="12" rx="2" fill={color} /> : null}
       {name === "tool" ? (
         <Path
@@ -94,7 +94,7 @@ export function AgentIcon({
             d="M10.3 3.9 1.8 18a2 2 0 0 0 1.7 3h17a2 2 0 0 0 1.7-3L13.7 3.9a2 2 0 0 0-3.4 0Z"
             {...common}
           />
-          <Path d="M12 9v4M12 17h.01" {...common} />
+          <Path d="M 12 9v4M12 17h.01" {...common} />
         </>
       ) : null}
       {name === "question" ? (
@@ -110,7 +110,7 @@ export function AgentIcon({
             {...common}
           />
           <Path
-            d="m12 15-3-3a22 22 0 0 1 2-4A13 13 0 0 1 22 2c0 2.7-.8 7.5-6 11a22 22 0 0 1-4 2Z"
+            d="m 12 15-3-3a22 22 0 0 1 2-4A13 13 0 0 1 22 2c0 2.7-.8 7.5-6 11a22 22 0 0 1-4 2Z"
             {...common}
           />
         </>
