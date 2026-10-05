@@ -39,18 +39,19 @@ import {
 import {
   listConnectionsMetadata,
   getDeploymentModelCatalog,
-  listWorkspaceProviderCustomModels,
+  listWorkspaceProviderCustomModelsByKind,
   getWorkspaceProviderCustomModelForExecution,
   lockActiveWorkspaceProviderCustomModelForAdmission,
   getWorkspaceGatewayCustomModelForExecution,
   getWorkspaceOpenRouterCustomModelForExecution,
   getOrganizationModelProviderCustomModelForExecution,
-  listWorkspaceGatewayCustomModels,
-  listWorkspaceOpenRouterCustomModels,
-  listOrganizationModelProviderCustomModelsForWorkspace,
+  getOrganizationModelProviderCatalogForWorkspace,
   lockActiveOrganizationModelProviderCustomModelForAdmission,
   type OrganizationClaudeModelAdmissionAuthority,
   type Database,
+  type WorkspaceCustomModelProviderKind,
+  type WorkspaceGatewayCustomModel,
+  type WorkspaceOpenRouterCustomModel,
 } from "@opengeni/db";
 
 export type ResolvedCatalogSettings = {
@@ -249,26 +250,34 @@ export async function resolveWorkspaceCatalogSettings(
         ? [productModelId.slice(ORGANIZATION_OPENROUTER_MODEL_ID_PREFIX.length)]
         : [],
   );
+  // One scoped read per catalog family instead of one scoped transaction per
+  // provider kind. The batched readers keep each provider's filters, bound and
+  // overflow error. The Claude subscription flag is env-only (the catalog
+  // document never changes it), so it decides the requested kinds up front.
+  const workspaceCustomModelKinds: WorkspaceCustomModelProviderKind[] = [
+    "vercel_gateway",
+    "openrouter",
+    ...(supportsOrganizationProviderReads
+      ? CLAUDE_CONNECTION_KINDS.filter(
+          (kind) => kind !== "claude_subscription" || envSettings.claudeSubscriptionEnabled,
+        )
+      : []),
+  ];
   const [
     resolved,
-    activeGatewayCustomModels,
-    activeOpenRouterCustomModels,
+    workspaceCustomModels,
     retainedGatewayCustomModels,
     retainedOpenRouterCustomModels,
-    organizationGatewayCustomModels,
-    organizationOpenRouterCustomModels,
+    organizationProviders,
     retainedOrganizationGatewayCustomModels,
     retainedOrganizationOpenRouterCustomModels,
     directConnections,
   ] = await Promise.all([
     resolveCatalogSettings(db, envSettings),
-    listWorkspaceGatewayCustomModels(db, {
+    listWorkspaceProviderCustomModelsByKind(db, {
       accountId: input.accountId,
       workspaceId: input.workspaceId,
-    }),
-    listWorkspaceOpenRouterCustomModels(db, {
-      accountId: input.accountId,
-      workspaceId: input.workspaceId,
+      providerKinds: workspaceCustomModelKinds,
     }),
     Promise.all(
       [...new Set(retainedGatewayUpstreamModelIds)].map(
@@ -291,19 +300,12 @@ export async function resolveWorkspaceCatalogSettings(
       ),
     ),
     supportsOrganizationProviderReads
-      ? listOrganizationModelProviderCustomModelsForWorkspace(db, {
+      ? getOrganizationModelProviderCatalogForWorkspace(db, {
           accountId: input.accountId,
           workspaceId: input.workspaceId,
-          providerKind: "vercel_gateway",
+          providerKinds: ["vercel_gateway", "openrouter", ...CLAUDE_CONNECTION_KINDS],
         })
-      : Promise.resolve([]),
-    supportsOrganizationProviderReads
-      ? listOrganizationModelProviderCustomModelsForWorkspace(db, {
-          accountId: input.accountId,
-          workspaceId: input.workspaceId,
-          providerKind: "openrouter",
-        })
-      : Promise.resolve([]),
+      : null,
     supportsOrganizationProviderReads
       ? Promise.all(
           [...new Set(retainedOrganizationGatewayUpstreamModelIds)].map(
@@ -352,29 +354,25 @@ export async function resolveWorkspaceCatalogSettings(
     return customModels;
   };
   const gatewayCustomModels = includeRetainedModels(
-    activeGatewayCustomModels,
+    workspaceCustomModels.vercel_gateway as WorkspaceGatewayCustomModel[],
     retainedGatewayCustomModels,
   );
   const openRouterCustomModels = includeRetainedModels(
-    activeOpenRouterCustomModels,
+    workspaceCustomModels.openrouter as WorkspaceOpenRouterCustomModel[],
     retainedOpenRouterCustomModels,
   );
   const organizationGatewayModels = includeRetainedModels(
-    organizationGatewayCustomModels,
+    organizationProviders?.vercel_gateway.models ?? [],
     retainedOrganizationGatewayCustomModels,
   );
   const organizationOpenRouterModels = includeRetainedModels(
-    organizationOpenRouterCustomModels,
+    organizationProviders?.openrouter.models ?? [],
     retainedOrganizationOpenRouterCustomModels,
   );
   const claudeConnections: ClaudeConnectionCatalog = {};
-  if (supportsOrganizationProviderReads)
+  if (organizationProviders)
     for (const kind of CLAUDE_CONNECTION_KINDS) {
-      const models = await listOrganizationModelProviderCustomModelsForWorkspace(db, {
-        accountId: input.accountId,
-        workspaceId: input.workspaceId,
-        providerKind: kind,
-      });
+      const models = [...organizationProviders[kind].models];
       const prefix = claudeProviderId(kind) + "/";
       for (const productId of retainedProductModelIds)
         if (productId?.startsWith(prefix)) {
@@ -392,11 +390,7 @@ export async function resolveWorkspaceCatalogSettings(
   if (supportsOrganizationProviderReads)
     for (const kind of CLAUDE_CONNECTION_KINDS) {
       if (kind === "claude_subscription" && !resolved.settings.claudeSubscriptionEnabled) continue;
-      const models = await listWorkspaceProviderCustomModels(db, {
-        accountId: input.accountId,
-        workspaceId: input.workspaceId,
-        providerKind: kind,
-      });
+      const models = [...workspaceCustomModels[kind]];
       const prefix = claudeProviderId(kind, "workspace") + "/";
       for (const productId of retainedProductModelIds) {
         if (!productId?.startsWith(prefix)) continue;

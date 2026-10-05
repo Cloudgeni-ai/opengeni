@@ -21,6 +21,19 @@ import {
 const accountId = "11111111-1111-4111-8111-111111111111";
 const workspaceId = "22222222-2222-4222-8222-222222222222";
 
+/** The workspace catalog reads every workspace-paid provider in one batch. */
+function spyWorkspaceCustomModels(
+  models: Partial<Record<opengeniDb.WorkspaceCustomModelProviderKind, unknown[]>>,
+) {
+  return spyOn(opengeniDb, "listWorkspaceProviderCustomModelsByKind").mockResolvedValue({
+    vercel_gateway: [],
+    openrouter: [],
+    anthropic: [],
+    claude_subscription: [],
+    ...models,
+  } as never);
+}
+
 describe("model catalog source resolution", () => {
   test("accepted retired execution never leaks into picker or child/new admission", () => {
     const base = testSettings({ modelCatalogSource: "database", codexSubscriptionEnabled: true });
@@ -194,23 +207,22 @@ describe("model catalog source resolution", () => {
   });
 
   test("adds only the workspace's durable custom Gateway rows to executable settings", async () => {
-    const listOpenRouter = spyOn(
-      opengeniDb,
-      "listWorkspaceOpenRouterCustomModels",
-    ).mockResolvedValue([]);
-    const listCustom = spyOn(opengeniDb, "listWorkspaceGatewayCustomModels").mockResolvedValue([
-      {
-        id: "33333333-3333-4333-8333-333333333333",
-        accountId,
-        workspaceId,
-        upstreamModelId: "anthropic/claude-sonnet-4.6",
-        label: null,
-        version: 1,
-        createdBySubjectId: "subject-a",
-        createdAt: new Date("2026-08-27T12:00:00.000Z"),
-        updatedAt: new Date("2026-08-27T12:00:00.000Z"),
-      },
-    ]);
+    const listCustom = spyWorkspaceCustomModels({
+      vercel_gateway: [
+        {
+          id: "33333333-3333-4333-8333-333333333333",
+          accountId,
+          workspaceId,
+          providerKind: "vercel_gateway",
+          upstreamModelId: "anthropic/claude-sonnet-4.6",
+          label: null,
+          version: 1,
+          createdBySubjectId: "subject-a",
+          createdAt: new Date("2026-08-27T12:00:00.000Z"),
+          updatedAt: new Date("2026-08-27T12:00:00.000Z"),
+        },
+      ],
+    });
     try {
       const resolved = await resolveWorkspaceCatalogSettings(
         {} as opengeniDb.Database,
@@ -227,7 +239,12 @@ describe("model catalog source resolution", () => {
         latencyModeSource: "explicit",
       });
 
-      expect(listCustom).toHaveBeenCalledWith(expect.anything(), { accountId, workspaceId });
+      expect(listCustom).toHaveBeenCalledTimes(1);
+      expect(listCustom).toHaveBeenCalledWith(expect.anything(), {
+        accountId,
+        workspaceId,
+        providerKinds: ["vercel_gateway", "openrouter"],
+      });
       expect(policy).toMatchObject({
         providerId: "workspace-gateway",
         upstreamModelId: "anthropic/claude-sonnet-4.6",
@@ -257,29 +274,27 @@ describe("model catalog source resolution", () => {
         canonicalConfiguredModel(resolved.settings, "workspace-gateway/unstored/model"),
       ).toThrow("model is not available");
     } finally {
-      listOpenRouter.mockRestore();
       listCustom.mockRestore();
     }
   });
 
   test("adds the workspace's durable custom OpenRouter rows on a separate workspace-paid rail", async () => {
-    const listGateway = spyOn(opengeniDb, "listWorkspaceGatewayCustomModels").mockResolvedValue([]);
-    const listOpenRouter = spyOn(
-      opengeniDb,
-      "listWorkspaceOpenRouterCustomModels",
-    ).mockResolvedValue([
-      {
-        id: "44444444-4444-4444-8444-444444444444",
-        accountId,
-        workspaceId,
-        upstreamModelId: "anthropic/claude-sonnet-4.6",
-        label: "Workspace Claude",
-        version: 1,
-        createdBySubjectId: "subject-a",
-        createdAt: new Date("2026-08-31T12:00:00.000Z"),
-        updatedAt: new Date("2026-08-31T12:00:00.000Z"),
-      },
-    ] as any);
+    const listCustom = spyWorkspaceCustomModels({
+      openrouter: [
+        {
+          id: "44444444-4444-4444-8444-444444444444",
+          accountId,
+          workspaceId,
+          providerKind: "openrouter",
+          upstreamModelId: "anthropic/claude-sonnet-4.6",
+          label: "Workspace Claude",
+          version: 1,
+          createdBySubjectId: "subject-a",
+          createdAt: new Date("2026-08-31T12:00:00.000Z"),
+          updatedAt: new Date("2026-08-31T12:00:00.000Z"),
+        },
+      ],
+    });
     try {
       const resolved = await resolveWorkspaceCatalogSettings(
         {} as opengeniDb.Database,
@@ -308,29 +323,27 @@ describe("model catalog source resolution", () => {
         canonicalConfiguredModel(resolved.settings, "workspace-openrouter/unstored/model"),
       ).toThrow("model is not available");
     } finally {
-      listOpenRouter.mockRestore();
-      listGateway.mockRestore();
+      listCustom.mockRestore();
     }
   });
 
   test("lets deployment Gateway membership shadow a colliding custom row", async () => {
-    const listOpenRouter = spyOn(
-      opengeniDb,
-      "listWorkspaceOpenRouterCustomModels",
-    ).mockResolvedValue([]);
-    const listCustom = spyOn(opengeniDb, "listWorkspaceGatewayCustomModels").mockResolvedValue([
-      {
-        id: "33333333-3333-4333-8333-333333333333",
-        accountId,
-        workspaceId,
-        upstreamModelId: "deepseek/deepseek-v4-flash-0731",
-        label: "Stale custom label",
-        version: 1,
-        createdBySubjectId: "subject-a",
-        createdAt: new Date("2026-08-27T12:00:00.000Z"),
-        updatedAt: new Date("2026-08-27T12:00:00.000Z"),
-      },
-    ]);
+    const listCustom = spyWorkspaceCustomModels({
+      vercel_gateway: [
+        {
+          id: "33333333-3333-4333-8333-333333333333",
+          accountId,
+          workspaceId,
+          providerKind: "vercel_gateway",
+          upstreamModelId: "deepseek/deepseek-v4-flash-0731",
+          label: "Stale custom label",
+          version: 1,
+          createdBySubjectId: "subject-a",
+          createdAt: new Date("2026-08-27T12:00:00.000Z"),
+          updatedAt: new Date("2026-08-27T12:00:00.000Z"),
+        },
+      ],
+    });
     try {
       const resolved = await resolveWorkspaceCatalogSettings(
         {} as opengeniDb.Database,
@@ -346,17 +359,12 @@ describe("model catalog source resolution", () => {
         label: expect.not.stringContaining("Stale custom label"),
       });
     } finally {
-      listOpenRouter.mockRestore();
       listCustom.mockRestore();
     }
   });
 
   test("retains every distinct retired custom model needed by an existing-session decision", async () => {
-    const listOpenRouter = spyOn(
-      opengeniDb,
-      "listWorkspaceOpenRouterCustomModels",
-    ).mockResolvedValue([]);
-    const listCustom = spyOn(opengeniDb, "listWorkspaceGatewayCustomModels").mockResolvedValue([]);
+    const listCustom = spyWorkspaceCustomModels({});
     const getRetained = spyOn(
       opengeniDb,
       "getWorkspaceGatewayCustomModelForExecution",
@@ -390,7 +398,6 @@ describe("model catalog source resolution", () => {
       expect(getRetained).toHaveBeenCalledTimes(2);
     } finally {
       getRetained.mockRestore();
-      listOpenRouter.mockRestore();
       listCustom.mockRestore();
     }
   });
