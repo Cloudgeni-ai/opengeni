@@ -1690,6 +1690,48 @@ describe("useGoal", () => {
     await hook.unmount();
   });
 
+  test("a goal-less session refetches only on goal events, never on turn traffic", async () => {
+    let reads = 0;
+    let hasGoal = false;
+    const client = fakeClient({
+      getGoal: async () => {
+        reads += 1;
+        if (!hasGoal) throw new OpenGeniApiError(404, "session goal not found");
+        return fakeGoal();
+      },
+    });
+    const hook = await renderHook(
+      (events: SessionEvent[]) =>
+        useGoal(SESSION_ID, { client, workspaceId: WORKSPACE_ID, events }),
+      [] as SessionEvent[],
+    );
+    await flush();
+    expect(reads).toBe(1);
+
+    const turnTraffic = [
+      makeEvent(1, "user.message"),
+      makeEvent(2, "turn.started"),
+      makeEvent(3, "session.status.changed"),
+      makeEvent(4, "turn.completed"),
+    ];
+    await hook.rerender(turnTraffic);
+    await flush(250);
+    expect(reads).toBe(1);
+    expect(hook.result.current.goal).toBeNull();
+
+    hasGoal = true;
+    await hook.rerender([...turnTraffic, makeEvent(5, "goal.set")]);
+    await flush(250);
+    expect(reads).toBe(2);
+    expect(hook.result.current.isActive).toBe(true);
+
+    // With a goal, turn traffic refreshes its continuation counters again.
+    await hook.rerender([...turnTraffic, makeEvent(5, "goal.set"), makeEvent(6, "turn.started")]);
+    await flush(250);
+    expect(reads).toBe(3);
+    await hook.unmount();
+  });
+
   test("shared-feed goal refreshes are discarded after the session changes", async () => {
     const initialSessionId: string = SESSION_ID;
     const otherSessionId = "33333333-3333-4333-8333-333333333333";
