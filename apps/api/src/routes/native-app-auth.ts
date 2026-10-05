@@ -6,6 +6,12 @@ import {
 } from "@opengeni/core";
 import { requireCanonicalHumanRequestIdentity } from "@opengeni/core/canonical-human-identities";
 import { getCanonicalHumanIdentityProjection } from "@opengeni/db/canonical-human-identities";
+import {
+  getNativePushDevice,
+  NATIVE_PUSH_RULES,
+  registerNativePushDevice,
+  unregisterNativePushDevice,
+} from "@opengeni/db";
 import { sql } from "drizzle-orm";
 import type { Hono } from "hono";
 import { HTTPException } from "hono/http-exception";
@@ -40,6 +46,14 @@ const TokenBody = z.object({
   code: z.string().regex(/^[A-Za-z0-9_-]{43}$/u),
   codeVerifier: z.string().regex(PKCE_VERIFIER),
   redirectUri: z.string().min(1).max(512),
+});
+
+const PushDeviceBody = z.object({
+  platform: z.enum(["ios", "android"]),
+  appId: z.string().regex(/^[A-Za-z0-9._-]{1,255}$/u),
+  environment: z.enum(["development", "production"]),
+  token: z.string().min(8).max(4096),
+  rules: z.array(z.enum(NATIVE_PUSH_RULES)).max(NATIVE_PUSH_RULES.length),
 });
 
 const StoredGrant = z.object({
@@ -193,5 +207,43 @@ export function registerNativeAppAuthRoutes(app: Hono, deps: ApiRouteDeps): void
       await deps.db.execute(sql`delete from auth_sessions where id = ${authSessionId}`);
     }
     return context.json({ signedOut: true });
+  });
+
+  // Push registration belongs to the app session that registered it: signing
+  // the app out, or revoking its session anywhere, removes it.
+  const appSessionId = async (authorization: string | undefined): Promise<string> => {
+    const auth = deps.managedAuth;
+    if (!auth) throw new HTTPException(404);
+    const credential = bearer(authorization);
+    if (!credential?.startsWith(NATIVE_APP_CREDENTIAL_PREFIX)) {
+      throw new HTTPException(401, { message: "Native app credential required" });
+    }
+    const session = await getNativeAppManagedSession(auth, credential, deps.db).catch(() => null);
+    const id = session?.session?.id;
+    if (typeof id !== "string") throw new HTTPException(401, { message: "Sign in again" });
+    return id;
+  };
+
+  app.get(`${base}/push-device`, async (context) => {
+    const id = await appSessionId(context.req.header("authorization"));
+    return context.json({ device: await getNativePushDevice(deps.db, id) });
+  });
+
+  app.put(`${base}/push-device`, async (context) => {
+    const id = await appSessionId(context.req.header("authorization"));
+    const parsed = PushDeviceBody.safeParse(await context.req.json().catch(() => null));
+    if (!parsed.success) throw new HTTPException(400, { message: "Invalid push registration" });
+    if (!deps.settings.nativeAppIds.includes(parsed.data.appId)) {
+      throw new HTTPException(400, { message: "Unregistered native app" });
+    }
+    return context.json({
+      device: await registerNativePushDevice(deps.db, { authSessionId: id, ...parsed.data }),
+    });
+  });
+
+  app.delete(`${base}/push-device`, async (context) => {
+    const id = await appSessionId(context.req.header("authorization"));
+    await unregisterNativePushDevice(deps.db, id);
+    return context.json({ device: null });
   });
 }

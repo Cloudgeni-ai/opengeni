@@ -5,6 +5,7 @@ import { ActivityIndicator, View } from "react-native";
 import { GestureHandlerRootView } from "react-native-gesture-handler";
 import { SafeAreaProvider } from "react-native-safe-area-context";
 import { AccountProvider, useAccount } from "@/account";
+import { NotificationRouting } from "@/notifications";
 
 function NativeEnvironment({ children }: { children: React.ReactNode }) {
   const { adapters } = useAccount();
@@ -30,10 +31,16 @@ export default function RootLayout() {
           <NativeEnvironment>
             {/* oxlint-disable-next-line react/style-prop-object -- expo-status-bar takes a string */}
             <StatusBar style="auto" />
+            <NotificationRouting />
             <Stack screenOptions={{ headerShown: true }}>
               <Stack.Screen name="index" options={{ title: "Opengeni" }} />
               <Stack.Screen name="sessions" options={{ title: "Sessions" }} />
               <Stack.Screen name="session/[id]" options={{ title: "" }} />
+              <Stack.Screen name="settings" options={{ title: "Settings" }} />
+              <Stack.Screen
+                name="add-account"
+                options={{ headerShown: false, presentation: "modal" }}
+              />
             </Stack>
           </NativeEnvironment>
         </AccountProvider>

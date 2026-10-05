@@ -155,6 +155,10 @@
       "types": "./src/timeline-model.ts",
       "default": "./src/timeline-model.ts"
     },
+    "./organization-model": {
+      "types": "./src/organization-model.ts",
+      "default": "./src/organization-model.ts"
+    },
     "./session-list-model": {
       "types": "./src/session-list-model.ts",
       "default": "./src/session-list-model.ts"

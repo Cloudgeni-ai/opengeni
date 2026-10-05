@@ -224,6 +224,7 @@ export function isDerivedAgentToolOwner(
  * `runtime` tools are mechanics every agent needs regardless of what it may do:
  * - `wait_for_input`: ends the turn and waits for the next input.
  * - `set_session_title`: session titling.
+ * - `notify_user`: a push to the person who started the session.
  *
  * `sandbox` tools are derived from attached compute and never toggled:
  * - `command_read` / `command_wait`: read/await the session's own background
@@ -232,6 +233,7 @@ export function isDerivedAgentToolOwner(
  */
 export const FIRST_PARTY_MCP_TOOL_CAPABILITIES = {
   set_session_title: "runtime",
+  notify_user: "runtime",
   wait_for_input: "runtime",
   command_wait: "sandbox",
   command_read: "sandbox",

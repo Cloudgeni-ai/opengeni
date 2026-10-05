@@ -63,6 +63,7 @@ import {
   type KnowledgeSearch,
 } from "@/lib/knowledge-route";
 import { parseApiKeyParam } from "@/lib/api-keys-route";
+import type { NativeSignInSearch } from "@/lib/native-sign-in-context";
 import {
   parseAgentParam,
   parseServiceAccountParam,
@@ -138,6 +139,10 @@ const LazyAccountAuthRoute = lazyRouteComponent(
 const LazyPersonalSecurityRoute = lazyRouteComponent(
   () => import("@/routes/personal-security"),
   "PersonalSecurityRoute",
+);
+const LazyNativeSignInRoute = lazyRouteComponent(
+  () => import("@/routes/native-sign-in"),
+  "NativeSignInRoute",
 );
 const LazyOnboardingPreviewRoute = lazyRouteComponent(
   () => import("@/routes/onboarding-preview"),
@@ -305,6 +310,26 @@ const personalSecurityRoute = createRoute({
   getParentRoute: () => rootRoute,
   path: "settings/security",
   component: LazyPersonalSecurityRoute,
+});
+// Where the Opengeni phone app's sign-in opens in the system auth browser:
+// sign in with any web method, then allow the device (code + PKCE).
+const nativeSignInRoute = createRoute({
+  getParentRoute: () => rootRoute,
+  path: "native-sign-in",
+  validateSearch: (search: Record<string, unknown>): NativeSignInSearch => {
+    const text = (key: string) =>
+      typeof search[key] === "string" && search[key] ? { [key]: search[key] } : {};
+    return {
+      ...text("redirect_uri"),
+      ...text("code_challenge"),
+      ...text("state"),
+      ...text("device_name"),
+      ...(search.platform === "ios" || search.platform === "android"
+        ? { platform: search.platform }
+        : {}),
+    };
+  },
+  component: NativeSignIn,
 });
 // DEV-only visual harness for the Session composer chrome stack (queue / goal /
 // agents / composer). Public so it needs no live auth or session; omitted from
@@ -732,6 +757,7 @@ const routeTree = rootRoute.addChildren([
   setupAccountRoute,
   accountAuthRoute,
   personalSecurityRoute,
+  nativeSignInRoute,
   ...(import.meta.env.DEV
     ? [composerChromeGalleryRoute, onboardingPreviewRoute, devSessionTimelineRoute]
     : []),
@@ -1173,6 +1199,11 @@ function ConnectAgent() {
 function Device() {
   const { user_code } = deviceRoute.useSearch();
   return <LazyDeviceRoute userCode={user_code} />;
+}
+
+function NativeSignIn() {
+  const search = nativeSignInRoute.useSearch();
+  return <LazyNativeSignInRoute search={search} />;
 }
 
 function ResetPassword() {

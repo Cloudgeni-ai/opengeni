@@ -12,6 +12,7 @@ import { RefreshControl, ScrollView, Text, TextInput, View } from "react-native"
 import { useSafeAreaInsets } from "react-native-safe-area-context";
 import { useAccount } from "@/account";
 import { AppThemeProvider } from "@/theme";
+import { WorkspaceSwitcherBlock } from "@/workspace-switcher";
 
 export default function SessionsScreen() {
   return (
@@ -27,7 +28,7 @@ function Sessions() {
   const theme = useNativeTimelineTheme();
   const c = theme.colors;
   const insets = useSafeAreaInsets();
-  const { client, models, workspaceId, workspaces } = useAccount();
+  const { client, models, workspaceId } = useAccount();
   const [sessions, setSessions] = useState<Session[]>([]);
   const [loading, setLoading] = useState(false);
   const [query, setQuery] = useState("");
@@ -55,14 +56,13 @@ function Sessions() {
       : sessions;
     return groupSessionsForRail(visible);
   }, [query, sessions]);
-  const workspaceName = workspaces.find((workspace) => workspace.id === workspaceId)?.name;
   const open = (sessionId: string) => router.push(`/session/${sessionId}`);
 
   return (
     <>
       <Stack.Screen
         options={{
-          title: workspaceName ?? "Sessions",
+          title: "Sessions",
           headerStyle: { backgroundColor: c.bg },
           headerTintColor: c.fg,
           headerShadowVisible: false,
@@ -75,6 +75,9 @@ function Sessions() {
         refreshControl={<RefreshControl refreshing={loading} onRefresh={() => void load()} />}
         contentContainerStyle={{ paddingHorizontal: 12, paddingBottom: insets.bottom + 24 }}
       >
+        <View style={{ marginTop: 4, marginHorizontal: -4 }}>
+          <WorkspaceSwitcherBlock />
+        </View>
         <View
           style={{
             flexDirection: "row",

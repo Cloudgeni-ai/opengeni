@@ -5390,6 +5390,62 @@ export type McpConnectionDecision =
   | { decision: "deny" }
   | { decision: "approve"; organizationId: string; access: OrganizationAccessPolicy };
 
+// --- Native app sign-in (authorization code + PKCE over the app's scheme) ----------------------
+
+export type NativeAppPlatform = "ios" | "android";
+
+export type NativeAppAuthorizeInput = {
+  /** Exactly `<registered scheme>://auth/callback`. */
+  redirectUri: string;
+  /** Base64url SHA-256 of the app's code verifier. */
+  codeChallenge: string;
+  codeChallengeMethod: "S256";
+  state?: string;
+  platform: NativeAppPlatform;
+  deviceName?: string;
+};
+
+export type NativeAppTokenInput = {
+  code: string;
+  codeVerifier: string;
+  redirectUri: string;
+};
+
+export type NativeAppToken = {
+  /** Sent as `Authorization: Bearer <accessToken>` (the client's `apiKey`). */
+  accessToken: string;
+  tokenType: "Bearer";
+  expiresAt: string;
+};
+
+/**
+ * What a signed-in app is pushed about, for sessions its person started:
+ * `needs_input` (a question or an approval), `reply_ready` (a turn finished),
+ * `failed` (a turn failed) and `agent` (the agent chose to notify).
+ */
+export type NativePushRule = "needs_input" | "reply_ready" | "failed" | "agent";
+
+export type RegisterNativePushDeviceInput = {
+  platform: NativeAppPlatform;
+  /** The app's bundle identifier (iOS) or package name (Android). */
+  appId: string;
+  /** APNs environment of the build; FCM ignores it. */
+  environment: "development" | "production";
+  /** The APNs device token (hex) or FCM registration token. */
+  token: string;
+  rules: NativePushRule[];
+};
+
+/** This app credential's push registration. */
+export type NativePushDevice = {
+  platform: NativeAppPlatform;
+  appId: string;
+  environment: "development" | "production";
+  token: string;
+  rules: NativePushRule[];
+  updatedAt: string;
+};
+
 // --- Organization-wide session list (org API key or organization owner) -----------------------
 
 export type ListOrganizationSessionsOptions = {

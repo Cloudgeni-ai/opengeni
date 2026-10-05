@@ -2,6 +2,7 @@ import { compactModelPill } from "@opengeni/react/model-policy";
 import { partitionPinnedSessions, recentSessionsForHome } from "@opengeni/react/session-list-model";
 import type { ReasoningEffort, Session } from "@opengeni/sdk";
 import {
+  Button,
   ComposerPill,
   fontStyle,
   ModelMark,
@@ -13,17 +14,52 @@ import {
 } from "@opengeni/react-native/timeline";
 import { Stack, router, useFocusEffect } from "expo-router";
 import { useCallback, useMemo, useState } from "react";
-import { Pressable, RefreshControl, ScrollView, Text, View } from "react-native";
+import { ActivityIndicator, Pressable, RefreshControl, ScrollView, Text, View } from "react-native";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
 import { useAccount } from "@/account";
+import { SignInScreen } from "@/sign-in-screen";
 import { AppThemeProvider } from "@/theme";
+import { AccountMenuButton } from "@/workspace-switcher";
+import { openOnWeb, webPaths } from "@/web-links";
 
 export default function HomeScreen() {
   return (
     <AppThemeProvider>
-      <Home />
+      <Gate />
     </AppThemeProvider>
   );
+}
+
+/* Signed out: the web sign-in. Signed in: the home canvas. */
+function Gate() {
+  const { status } = useAccount();
+  const theme = useNativeTimelineTheme();
+  if (status === "signedOut") {
+    return (
+      <>
+        <Stack.Screen options={{ headerShown: false }} />
+        <SignInScreen />
+      </>
+    );
+  }
+  if (status === "loading") {
+    return (
+      <>
+        <Stack.Screen options={{ headerShown: false }} />
+        <View
+          style={{
+            flex: 1,
+            alignItems: "center",
+            justifyContent: "center",
+            backgroundColor: theme.colors.bg,
+          }}
+        >
+          <ActivityIndicator />
+        </View>
+      </>
+    );
+  }
+  return <Home />;
 }
 
 /* The web home canvas at phone width: the question, the new-session composer
@@ -32,7 +68,8 @@ function Home() {
   const theme = useNativeTimelineTheme();
   const c = theme.colors;
   const insets = useSafeAreaInsets();
-  const { client, config, models, workspaceId, error, reload } = useAccount();
+  const { account, client, config, models, workspaceId, workspaces, accessContext, error, reload } =
+    useAccount();
   const [sessions, setSessions] = useState<Session[]>([]);
   const [loading, setLoading] = useState(false);
   const [draft, setDraft] = useState("");
@@ -97,6 +134,7 @@ function Home() {
           headerTitle: HeaderWordmark,
           headerTitleAlign: "left",
           headerLeft: HeaderMenuButton,
+          headerRight: HeaderAccountButton,
         }}
       />
       <ScrollView
@@ -146,6 +184,27 @@ function Home() {
             }
           />
         </View>
+        {accessContext && workspaces.length === 0 && account ? (
+          <View style={{ marginTop: 16, alignItems: "center", gap: 12 }}>
+            <Text
+              style={{
+                ...fontStyle(theme),
+                fontSize: 14,
+                lineHeight: 20,
+                color: c["fg-muted"],
+                textAlign: "center",
+              }}
+            >
+              You aren't in a workspace yet. Create an organization on the web, then pull to
+              refresh.
+            </Text>
+            <Button
+              label="Open Opengeni on the web"
+              icon="external-link"
+              onPress={() => openOnWeb(account.baseUrl, webPaths.home())}
+            />
+          </View>
+        ) : null}
         {problem ? (
           <Text
             style={{ ...fontStyle(theme), fontSize: 13, color: c["status-failed"], marginTop: 12 }}
@@ -183,6 +242,18 @@ function HeaderMenuButton() {
       <MenuButton />
     </AppThemeProvider>
   );
+}
+
+function HeaderAccountButton() {
+  return (
+    <AppThemeProvider>
+      <AccountButton />
+    </AppThemeProvider>
+  );
+}
+
+function AccountButton() {
+  return <AccountMenuButton />;
 }
 
 function MenuButton() {

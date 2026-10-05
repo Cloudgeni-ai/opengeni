@@ -84,6 +84,15 @@ const ICONS: Record<string, string> = {
   "grip-vertical": "GripVerticalIcon",
   "audio-lines": "AudioLinesIcon",
   "list-restart": "ListRestartIcon",
+  // Account chrome: accounts, organizations, workspaces, settings, notifications.
+  lock: "LockIcon",
+  "building-2": "Building2Icon",
+  "chevrons-up-down": "ChevronsUpDownIcon",
+  "log-out": "LogOutIcon",
+  "external-link": "ExternalLinkIcon",
+  bell: "BellIcon",
+  "user-round": "UserRoundIcon",
+  smartphone: "SmartphoneIcon",
 };
 
 const out: Record<string, Array<[string, Record<string, string | number>]>> = {};
