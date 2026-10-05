@@ -572,6 +572,65 @@ does not supply stable product IDs, capability evidence, context limits,
 pricing, billing ownership, or definition versions. An operator may use the
 endpoint to prepare an update, but the accepted registry remains canonical.
 
+### Opper
+
+[Opper](https://opper.ai) is an EU-hosted AI gateway with one OpenAI-compatible
+API and one key for 700+ models from 50+ providers. It needs no overlay: an
+ordinary `api-key` registry provider on Chat Completions is enough.
+
+```json
+[
+  {
+    "id": "opper",
+    "label": "Opper",
+    "api": "chat",
+    "baseUrl": "https://api.opper.ai/v3/compat",
+    "apiKeyEnv": "OPENGENI_OPPER_API_KEY",
+    "models": [
+      {
+        "id": "opper/claude-sonnet-4-6",
+        "upstreamModelId": "claude-sonnet-4-6",
+        "label": "Claude Sonnet 4.6 (Opper)",
+        "contextWindowTokens": 1000000,
+        "reasoningEffort": false,
+        "hostedWebSearch": false
+      },
+      {
+        "id": "opper/gemini-3.8-flash",
+        "upstreamModelId": "gemini-3.8-flash",
+        "label": "Gemini 3.8 Flash (Opper)",
+        "contextWindowTokens": 1048576,
+        "reasoningEffort": false,
+        "hostedWebSearch": false
+      }
+    ]
+  }
+]
+```
+
+Create the key at [platform.opper.ai](https://platform.opper.ai) and set
+`OPENGENI_OPPER_API_KEY`. As with any `api-key` registry provider, the
+deployment owns the Opper account and these turns are metered as OpenGeni
+credits.
+
+The registry entry only declares the transport. To make the models selectable,
+add the product IDs (`opper/claude-sonnet-4-6`, `opper/gemini-3.8-flash`) to the
+deployment model catalog when its source is `database` (see
+[Deployment catalog source and cost policy](#deployment-catalog-source-and-cost-policy)).
+These models are `credits` by default and have no reviewed built-in price, so a
+managed deployment must also add an `OPENGENI_MODEL_PRICING_JSON` entry for each
+product ID (Opper's catalogue lists per-model pricing), or mark them `free` in
+`OPENGENI_MODEL_COST_POLICY_JSON`.
+
+A bare upstream ID such as `claude-sonnet-4-6` is a pool: Opper picks the
+serving provider per request. A `provider/model` upstream ID such as
+`aws/claude-sonnet-4-6-eu` pins one provider and region, for deployments that
+need a model processed in the EU. Opper's public catalogue at
+`GET https://api.opper.ai/v3/models` lists pool names and context windows for
+preparing entries; the registry JSON above stays canonical. The example keeps
+reasoning and hosted web search off; enable a capability for a model only after
+verifying it end to end through OpenGeni.
+
 ## Curated AI Gateway models
 
 `OPENGENI_VERCEL_AI_GATEWAY_API_KEY` enables two reviewed OpenGeni-credit
