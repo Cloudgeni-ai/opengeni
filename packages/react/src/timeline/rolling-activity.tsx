@@ -40,10 +40,7 @@ export function RollingActivity({
     </span>
   );
   return (
-    <span
-      className="og-rolling-status"
-      data-running={selected.running ? "true" : undefined}
-    >
+    <span className="og-rolling-status" data-running={selected.running ? "true" : undefined}>
       <span className="sr-only">
         {item.kind === "tool-call"
           ? toolDisplayName(item.name, item.display)

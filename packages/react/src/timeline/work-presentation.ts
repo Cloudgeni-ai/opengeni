@@ -73,8 +73,7 @@ export function isPreparingWork(group: ActivityGroup, options: ReadableWorkOptio
     !group.work.waiting &&
     phases.length > 0 &&
     group.items.every(
-      (item) =>
-        item.kind === "startup-phase" || (item.kind === "reasoning" && !item.text.trim()),
+      (item) => item.kind === "startup-phase" || (item.kind === "reasoning" && !item.text.trim()),
     ) &&
     !phases.some((item) => item.status === "failed" || item.status === "cancelled")
   );
@@ -116,7 +115,9 @@ export function rollingActivityItem(
   previousItem?: ActivityItem,
   mounted = true,
 ): { item: ActivityItem; running: boolean; earlierCount: number } | null {
-  const work = items.filter((item) => item.kind !== "startup-phase" && item.kind !== "agent-message");
+  const work = items.filter(
+    (item) => item.kind !== "startup-phase" && item.kind !== "agent-message",
+  );
   const active = work.filter((item) =>
     item.kind === "reasoning" ? item.streaming : "status" in item && item.status === "running",
   );
