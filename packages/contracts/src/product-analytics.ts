@@ -80,6 +80,9 @@ export const ANALYTICS_MODEL_PROVIDERS = [
   "openrouter",
   "workspace-openrouter",
   "organization-openrouter",
+  "opper",
+  "workspace-opper",
+  "organization-opper",
   "registry",
 ] as const;
 export const AnalyticsModelProvider = z.enum(ANALYTICS_MODEL_PROVIDERS);

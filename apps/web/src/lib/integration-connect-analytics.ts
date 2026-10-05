@@ -56,6 +56,7 @@ export const MODEL_CONNECTION_CLASSES = [
   "openrouter",
   "anthropic",
   "claude_subscription",
+  "opper",
 ] as const satisfies readonly ModelClass[];
 
 export type IntegrationClass = ConnectionClass | ModelClass;
@@ -142,6 +143,7 @@ export function modelConnectionClass(provider: string): ModelClass | null {
     case "codex":
     case "supergrok":
     case "openrouter":
+    case "opper":
     case "anthropic":
     case "claude_subscription":
       return provider;

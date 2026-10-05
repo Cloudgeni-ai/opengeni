@@ -417,6 +417,15 @@ export const galleryModelRows: PickerModelRow[] = projectPickerRows([
     cost: "free",
     billing: { upstreamPayer: "deployment", metering: "external" },
   }),
+  catalogModel({
+    id: "opper/vertexai/gemini-3.8-flash-eu",
+    label: "Gemini 3.8 Flash (EU)",
+    shortLabel: "Gemini 3.8 Flash",
+    provider: "opper",
+    providerLabel: "Opper",
+    cost: "credits",
+    billing: { upstreamPayer: "deployment", metering: "opengeni_credits" },
+  }),
 ]);
 
 /** 52 first-party + 1 MCP = 53; leave two off → Tools · 51/53. */

@@ -424,6 +424,7 @@ export async function loadWorkspaceModelSelectionInput(
   const providerKinds: WorkspaceCustomModelProviderKind[] = [
     "vercel_gateway",
     "openrouter",
+    "opper",
     ...CLAUDE_CONNECTION_KINDS.filter(
       (kind) => kind !== "claude_subscription" || settings.claudeSubscriptionEnabled,
     ),
@@ -505,6 +506,10 @@ export async function loadWorkspaceModelSelectionInput(
     organizationOpenRouterConnectionActive: organizationProviders.openrouter.active,
     organizationGatewayCustomModels: organizationProviders.vercel_gateway.models,
     organizationOpenRouterCustomModels: organizationProviders.openrouter.models,
+    workspaceOpperConnectionActive: workspaceConnectionActive("opper"),
+    workspaceOpperCustomModels: workspaceCustomModels.opper ?? [],
+    organizationOpperConnectionActive: organizationProviders.opper?.active === true,
+    organizationOpperCustomModels: organizationProviders.opper?.models ?? [],
   };
 }
 

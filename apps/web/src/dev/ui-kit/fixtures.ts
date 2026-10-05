@@ -912,7 +912,7 @@ export const exhaustedUsageWindow: UsageWindow = {
 };
 
 export interface GatewayProvider {
-  id: "vercel" | "openrouter";
+  id: "vercel" | "openrouter" | "opper";
   name: string;
   description: string;
   connected: boolean;
@@ -935,6 +935,13 @@ export const gatewayProviders: GatewayProvider[] = [
     connected: true,
     keyHint: "•••• 4f2a",
     customModels: ["anthropic/claude-sonnet-4.5", "meta-llama/llama-4-maverick"],
+  },
+  {
+    id: "opper",
+    name: "Opper",
+    description: "Use EU-hosted models through Opper, billed to your Opper key.",
+    connected: false,
+    customModels: ["gemini-3.8-flash", "aws/claude-sonnet-4-6-eu"],
   },
 ];
 

@@ -12,7 +12,8 @@ export type OrganizationModelProviderKind =
   | "vercel_gateway"
   | "openrouter"
   | "anthropic"
-  | "claude_subscription";
+  | "claude_subscription"
+  | "opper";
 export type OrganizationModelProviderConnection = {
   providerKind: OrganizationModelProviderKind;
   status: "active" | "revoked";
@@ -403,6 +404,7 @@ export async function getOrganizationModelProviderCatalogForWorkspace(
     openrouter: { active: false, models: [] },
     anthropic: { active: false, models: [] },
     claude_subscription: { active: false, models: [] },
+    opper: { active: false, models: [] },
   };
   if (input.providerKinds.length === 0) return catalog;
   return await withRlsContext(db, input, async (scopedDb) => {

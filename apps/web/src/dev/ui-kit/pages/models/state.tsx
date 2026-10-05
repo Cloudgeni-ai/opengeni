@@ -29,7 +29,7 @@ export type Rotation = "spread" | "primary";
 export type Source = "organization" | "workspace";
 /** Today's four-option "Subscription source" select (question 13, answered no). */
 export type LegacySource = "automatic" | "organization" | "workspace" | "disabled";
-export type GatewayId = "vercel" | "openrouter";
+export type GatewayId = "vercel" | "openrouter" | "opper";
 
 /** The pending product questions for this page, with the alternative answer to preview. */
 export interface Questions {
@@ -133,6 +133,7 @@ function fromFixture(
 const GATEWAY_SUMMARY: Record<GatewayId, string> = {
   vercel: "Billed to your Vercel account.",
   openrouter: "Billed to your OpenRouter account.",
+  opper: "Billed to your Opper account.",
 };
 
 function gatewayFromFixture(id: GatewayId, connected?: boolean): GatewayState {
@@ -192,10 +193,12 @@ export function initialModelsData(): ModelsData {
       workspace: {
         vercel: gatewayFromFixture("vercel"),
         openrouter: gatewayFromFixture("openrouter"),
+        opper: gatewayFromFixture("opper"),
       },
       organization: {
         vercel: gatewayFromFixture("vercel", false),
         openrouter: gatewayFromFixture("openrouter", false),
+        opper: gatewayFromFixture("opper", false),
       },
     },
     defaultModelId: defaultModel.id,
@@ -285,6 +288,18 @@ export function modelChoices(
         label: slug,
         payer: "OpenRouter",
         group: "OpenRouter",
+        available: true,
+      });
+    }
+  }
+  const opper = data.gateways.workspace.opper;
+  if (opper.connected) {
+    for (const slug of opper.customModels) {
+      choices.push({
+        id: `opper:${slug}`,
+        label: slug,
+        payer: "Opper",
+        group: "Opper",
         available: true,
       });
     }

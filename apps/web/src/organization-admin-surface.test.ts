@@ -82,7 +82,7 @@ const tenancyDocs = await Bun.file(
 ).text();
 
 describe("organization administration surface", () => {
-  test("manages Gateway and OpenRouter as peer organization BYOK providers", () => {
+  test("manages Gateway, OpenRouter and Opper as peer organization BYOK providers", () => {
     // One Models page, in Organization settings: a workspace's old Models URL
     // redirects to that workspace's page there.
     expect(routeSource).toContain("<OrganizationModelsSectionWithName");
@@ -90,6 +90,7 @@ describe("organization administration surface", () => {
     expect(organizationModelsSource).toContain("useOrganizationProviderConnection(");
     expect(organizationModelsSource).toContain('vercel: "vercel_gateway"');
     expect(organizationModelsSource).toContain('openrouter: "openrouter"');
+    expect(organizationModelsSource).toContain('opper: "opper"');
     expect(organizationCodexModelsSource).toContain("export function OrgCodexAccountPage");
     for (const method of [
       "getOrganizationModelProviderConnection",

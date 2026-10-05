@@ -2310,6 +2310,7 @@ export function assertConfiguredCodemodeSessionProxyPath(
         "model-policy": "sessions_list",
         "gateway-custom-models": "sessions_list",
         "openrouter-custom-models": "sessions_list",
+        "opper-custom-models": "sessions_list",
         "new-session-draft": "session_create",
         "session-tenancy": "session_create",
         "session-message-search": "session_events",

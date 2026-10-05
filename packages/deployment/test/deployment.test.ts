@@ -952,6 +952,7 @@ describe("deployment contract", () => {
           '{"openrouter/nvidia/nemotron-3-super-120b-a12b:free":"Starter model."}',
         OPENGENI_OPENAI_API_KEY: "openai",
         OPENGENI_OPENROUTER_API_KEY: "openrouter",
+        OPENGENI_OPPER_API_KEY: "opper",
         OPENGENI_TEMPORAL_API_KEY: "temporal-api-key",
         OPENGENI_TEMPORAL_TLS_ROOT_CA_CERTIFICATE_BASE64: "cm9v\ndC1jYQ==",
       },
@@ -980,6 +981,7 @@ describe("deployment contract", () => {
       'OPENGENI_MODEL_NOTES_JSON={"openrouter/nvidia/nemotron-3-super-120b-a12b:free":"Starter model."}',
     );
     expect(artifacts.runtimeEnv).toContain("OPENGENI_OPENROUTER_API_KEY=openrouter");
+    expect(artifacts.runtimeEnv).toContain("OPENGENI_OPPER_API_KEY=opper");
     expect(artifacts.runtimeEnv).toContain("OPENGENI_TEMPORAL_TLS_ENABLED=false");
     expect(artifacts.runtimeEnv).toContain("OPENGENI_TEMPORAL_API_KEY=temporal-api-key");
     expect(artifacts.runtimeEnv).toContain(

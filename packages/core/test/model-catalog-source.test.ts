@@ -243,7 +243,7 @@ describe("model catalog source resolution", () => {
       expect(listCustom).toHaveBeenCalledWith(expect.anything(), {
         accountId,
         workspaceId,
-        providerKinds: ["vercel_gateway", "openrouter"],
+        providerKinds: ["vercel_gateway", "openrouter", "opper"],
       });
       expect(policy).toMatchObject({
         providerId: "workspace-gateway",

@@ -5,6 +5,7 @@ import {
   withXaiSubscriptionCatalogProvider,
   withOrganizationGatewayCatalogProvider,
   withOrganizationOpenRouterCatalogProvider,
+  withOrganizationOpperCatalogProvider,
 } from "@opengeni/config";
 import { ModelConnectionAccessPolicy, ModelConnectionAccessResponse } from "@opengeni/contracts";
 import {
@@ -43,6 +44,7 @@ const Kind = z.enum([
   "openrouter",
   "anthropic",
   "claude_subscription",
+  "opper",
 ]);
 function modelPrefix(target: ModelConnectionTarget) {
   if (target.kind === "anthropic" || target.kind === "claude_subscription")
@@ -51,7 +53,7 @@ function modelPrefix(target: ModelConnectionTarget) {
       "/"
     );
   if (target.kind === "codex" || target.kind === "supergrok") return `${target.kind}/`;
-  return `${target.workspaceId === null ? "organization" : "workspace"}-${target.kind === "vercel_gateway" ? "gateway" : "openrouter"}/`;
+  return `${target.workspaceId === null ? "organization" : "workspace"}-${target.kind === "vercel_gateway" ? "gateway" : target.kind === "opper" ? "opper" : "openrouter"}/`;
 }
 
 export function registerModelConnectionAccessRoutes(app: Hono, deps: ApiRouteDeps) {
@@ -109,7 +111,12 @@ export function registerModelConnectionAccessRoutes(app: Hono, deps: ApiRouteDep
           await requireSubscriptionScopeMutation(c, deps, scopeId, snapshot.scope, "Claude");
         }
       } else if (mutate) await requireAccessGrant(c, deps, scopeId, "workspace:admin");
-      if (kind === "vercel_gateway" || kind === "openrouter" || kind === "anthropic") {
+      if (
+        kind === "vercel_gateway" ||
+        kind === "openrouter" ||
+        kind === "anthropic" ||
+        kind === "opper"
+      ) {
         const metadata = await getWorkspaceProviderApiKeyConnectionMetadata(deps.db, scopeId, kind);
         if (!metadata || (connectionId !== "current" && metadata.connectionId !== connectionId))
           throw new HTTPException(404, { message: "Connection not found" });
@@ -157,7 +164,11 @@ export function registerModelConnectionAccessRoutes(app: Hono, deps: ApiRouteDep
             [connection.kind]: { models: customModels },
           });
         }
-        if (connection.kind === "vercel_gateway" || connection.kind === "openrouter") {
+        if (
+          connection.kind === "vercel_gateway" ||
+          connection.kind === "openrouter" ||
+          connection.kind === "opper"
+        ) {
           const models = await listOrganizationModelProviderCustomModels(deps.db, {
             ...actor,
             providerKind: connection.kind,
@@ -165,7 +176,9 @@ export function registerModelConnectionAccessRoutes(app: Hono, deps: ApiRouteDep
           settings =
             connection.kind === "vercel_gateway"
               ? withOrganizationGatewayCatalogProvider(settings, models)
-              : withOrganizationOpenRouterCatalogProvider(settings, models);
+              : connection.kind === "opper"
+                ? withOrganizationOpperCatalogProvider(settings, models)
+                : withOrganizationOpenRouterCatalogProvider(settings, models);
         }
       }
       return c.json(

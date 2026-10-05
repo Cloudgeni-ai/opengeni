@@ -11,6 +11,7 @@ describe("which workspaces can use a new organization account", () => {
   test("every workspace keeps the default policy, so nothing is saved after connecting", () => {
     expect(audiencePolicy(EVERYONE, "codex")).toBeNull();
     expect(audiencePolicy(EVERYONE, "openrouter")).toBeNull();
+    expect(audiencePolicy(EVERYONE, "opper")).toBeNull();
   });
 
   test("selected workspaces become the account's Available in", () => {

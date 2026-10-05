@@ -1517,6 +1517,7 @@ export function requiredRuntimeEnvVars(
     "OPENGENI_CREDITS_DEFAULT_MODEL",
     "OPENGENI_CREDITS_DEFAULT_REASONING_EFFORT",
     "OPENGENI_OPENROUTER_API_KEY",
+    "OPENGENI_OPPER_API_KEY",
   ] as const) {
     if (env[key]) vars.push(key);
   }
@@ -2850,6 +2851,9 @@ function runtimeEnvValues(
       : []),
     ...(env.OPENGENI_OPENROUTER_API_KEY
       ? [requiredEnv("OPENGENI_OPENROUTER_API_KEY", env.OPENGENI_OPENROUTER_API_KEY)]
+      : []),
+    ...(env.OPENGENI_OPPER_API_KEY
+      ? [requiredEnv("OPENGENI_OPPER_API_KEY", env.OPENGENI_OPPER_API_KEY)]
       : []),
   ];
 

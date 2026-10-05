@@ -566,6 +566,74 @@ describe("organization onboarding UI", () => {
     }
   });
 
+  test("Opper onboarding saves a workspace key and selects an Opper model", async () => {
+    const onComplete = mock(() => undefined);
+    const createConnection = mock(async () => undefined);
+    const saveNewSessionDraft = mock(async () => emptyNewSessionDraft);
+    const opperModel = {
+      id: "workspace-opper/aws/claude-sonnet-4-6-eu",
+      label: "Claude Sonnet 4.6 (EU)",
+      provider: "workspace-opper",
+      providerLabel: "Your Opper",
+      api: "chat",
+      cost: "workspace",
+      credentialSource: { kind: "workspace_connection", mechanism: "api_key" },
+      credentialReadiness: { status: "ready", reason: null, basis: "connection", checkedAt: null },
+      availability: { status: "available", selectable: true, reason: null, checkedAt: null },
+    };
+    const client = {
+      createConnection,
+      getWorkspaceModelCatalog: mock(async () => ({ models: [opperModel] })),
+      getNewSessionDraft: mock(async () => emptyNewSessionDraft),
+      saveNewSessionDraft,
+    };
+    const container = document.createElement("div");
+    document.body.appendChild(container);
+    const root = createRoot(container);
+    try {
+      await act(async () =>
+        root.render(
+          <ModelAccessOnboardingPanel
+            client={client as never}
+            organizationId="organization-a"
+            workspaceId="personal-workspace"
+            onComplete={onComplete}
+          />,
+        ),
+      );
+      await act(async () => providerRow(container, "Opper")!.click());
+      expect(container.textContent).toContain("Create one at platform.opper.ai under API keys.");
+      await enter(container.querySelector("#onboarding-provider-key")!, "opper-secret");
+      await act(async () =>
+        Array.from(container.querySelectorAll("button"))
+          .find((button) => button.textContent?.trim() === "Connect Opper")!
+          .click(),
+      );
+      await flush();
+      expect(createConnection).toHaveBeenCalledWith(
+        "personal-workspace",
+        expect.objectContaining({
+          providerDomain: "api.opper.ai",
+          kind: "api_key",
+          subjectId: null,
+          credential: { apiKey: "opper-secret" },
+          metadata: { credentialRole: "opper", credentialLabel: "Opper" },
+        }),
+      );
+      expect(saveNewSessionDraft).toHaveBeenCalledWith(
+        "personal-workspace",
+        expect.objectContaining({
+          model: "workspace-opper/aws/claude-sonnet-4-6-eu",
+          modelProvided: true,
+        }),
+      );
+      expect(onComplete).toHaveBeenCalledTimes(1);
+    } finally {
+      await act(async () => root.unmount());
+      container.remove();
+    }
+  });
+
   test("Azure onboarding saves a scoped customer key and deployment, clears the key, and waits for model selection", async () => {
     const onComplete = mock(() => undefined);
     const createConnection = mock(async (_workspace: string, request: Record<string, unknown>) => ({
