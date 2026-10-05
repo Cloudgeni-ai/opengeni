@@ -1,6 +1,7 @@
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/testing";
 import { sql } from "drizzle-orm";
+import postgres from "postgres";
 import {
   bootstrapWorkspace,
   claimSessionWorkForAttempt,
@@ -9,13 +10,13 @@ import {
   initializeSessionStartAtomically,
 } from "../src";
 
-// Production burst (40 concurrent first messages in one organization): the
-// turn claim held the organization-membership advisory lock EXCLUSIVELY for
-// its whole transaction, so every claim in the organization queued behind
-// every other one (claim_atomic p90 6.7 s, p99 23 s). The claim only reads
-// membership-fenced authority, so it takes the lock shared: other claims (and
-// other readers) proceed in parallel, while a membership mutator holding the
-// lock exclusively still fences new claims.
+// The turn claim takes no organization-membership fence at all. An exclusive
+// claim fence serialized every claim in an organization (production burst of
+// 40 first messages: claim_atomic p99 23 s); the shared fence that replaced it
+// still made every claim wait behind any membership mutator. The fence only
+// existed because the claim used to write host-MCP turn authorities whose
+// guard triggers take the key exclusively; those writers are retired. A
+// membership removal racing a claim is enforced at execution time instead.
 
 let available = true;
 let shared: SharedTestDatabase | null = null;
@@ -111,42 +112,62 @@ const settledWithin = async <T>(promise: Promise<T>, ms: number) =>
   ]);
 
 describe("turn claim organization-membership fence", () => {
-  test("a claim is not serialized behind another in-flight claim in the organization", async () => {
-    if (!available) return;
-    const target = await queuedSession();
-    // An in-flight claim (or any other membership reader) holds the key shared.
-    const reader = await holdMembershipLock(target.accountId, "shared");
-    try {
-      const claimed = claim(target);
-      expect(await settledWithin(claimed, 5_000)).toBe(true);
-      const result = await claimed;
-      expect(result.action).toBe("claimed");
-    } finally {
-      reader.release();
-      await reader.done;
-    }
-  }, 180_000);
-
-  test("concurrent claims of sessions in one organization all succeed", async () => {
-    if (!available) return;
-    const first = await queuedSession();
-    const results = await Promise.all([first, await queuedSession()].map((t) => claim(t)));
-    expect(results.map((result) => result.action)).toEqual(["claimed", "claimed"]);
-  }, 180_000);
-
-  test("a membership mutator holding the key exclusively still fences new claims", async () => {
+  test("a claim proceeds while a membership mutator holds the key exclusively", async () => {
     if (!available) return;
     const target = await queuedSession();
     const mutator = await holdMembershipLock(target.accountId, "exclusive");
-    let claimed: ReturnType<typeof claim> | undefined;
     try {
-      claimed = claim(target);
-      expect(await settledWithin(claimed, 750)).toBe(false);
+      const claimed = claim(target);
+      // Any membership lock request from the claim (shared or exclusive, or
+      // from a trigger it fires) would block here until the mutator releases.
+      expect(await settledWithin(claimed, 5_000)).toBe(true);
+      expect((await claimed).action).toBe("claimed");
     } finally {
       mutator.release();
       await mutator.done;
     }
-    const result = await claimed!;
-    expect(result.action).toBe("claimed");
+  }, 180_000);
+
+  test("concurrent claims in one organization proceed under an exclusive holder", async () => {
+    if (!available) return;
+    const first = await queuedSession();
+    const second = await queuedSession();
+    const mutators = await Promise.all([
+      holdMembershipLock(first.accountId, "exclusive"),
+      holdMembershipLock(second.accountId, "exclusive"),
+    ]);
+    try {
+      const claims = Promise.all([claim(first), claim(second)]);
+      expect(await settledWithin(claims, 5_000)).toBe(true);
+      expect((await claims).map((result) => result.action)).toEqual(["claimed", "claimed"]);
+    } finally {
+      for (const mutator of mutators) mutator.release();
+      await Promise.all(mutators.map((mutator) => mutator.done));
+    }
+  }, 180_000);
+
+  test("only the retired host-MCP authority tables carry triggers that take the key", async () => {
+    // The claim can stay fence-free only while no trigger it can fire takes
+    // the membership key. Pin the complete trigger set so a new one is a
+    // deliberate review of the claim's lock order, not a silent inversion.
+    if (!available) return;
+    const admin = postgres(shared!.adminUrl, { max: 1, onnotice: () => undefined });
+    try {
+      const rows = await admin<{ trigger: string }[]>`
+        select t.tgrelid::regclass::text || '.' || t.tgname as trigger
+        from pg_trigger t
+        join pg_proc p on p.oid = t.tgfoid
+        where not t.tgisinternal and p.prosrc like '%organization-membership:%'
+        order by 1`;
+      expect(rows.map((row) => row.trigger)).toEqual([
+        "host_mcp_task_authorities.host_mcp_task_authority_guard",
+        "host_mcp_turn_authorities.host_mcp_child_turn_authority_guard",
+        "host_mcp_turn_authorities.host_mcp_inherited_turn_authority_guard",
+        "host_mcp_turn_authorities.host_mcp_scheduled_turn_authority_guard",
+        "host_mcp_turn_authorities.host_mcp_turn_authority_guard",
+      ]);
+    } finally {
+      await admin.end();
+    }
   }, 180_000);
 });

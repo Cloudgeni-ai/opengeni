@@ -4325,8 +4325,9 @@ export type ClientConfig = {
   /**
    * `false` when a host's session proxy turns live voice off
    * (`createSessionProxyHandler({ realtimeVoice: false })`), so UIs hide the
-   * voice button. Otherwise absent: availability comes from the workspace's
-   * realtime model catalog.
+   * voice button; `true` when the host explicitly offers it to end users
+   * (embedded stock UIs then show the button). Otherwise absent: availability
+   * comes from the workspace's realtime model catalog.
    */
   realtimeVoice?: boolean | undefined;
   /**

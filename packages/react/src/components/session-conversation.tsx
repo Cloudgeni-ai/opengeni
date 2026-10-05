@@ -35,6 +35,7 @@ import {
   createWorkspaceRetainedVideoLoader,
 } from "../timeline/retained-loaders";
 import { useRealtimeVoiceModels } from "../hooks/use-realtime-voice-models";
+import { EMBEDDED_GENIE_LOADING, type GenieLoadingOptions } from "../timeline/genie-loading";
 import { projectPendingApprovals } from "../approvals";
 import { ApprovalSurface } from "./approval-surface";
 import { ChatComposer, type ChatComposerProps } from "./chat-composer";
@@ -42,6 +43,8 @@ import type { ComposerTranscriptionControlProps } from "./composer-transcription
 import { SessionChrome } from "./session-chrome";
 import { HumanInputSurface, type HumanInputSurfaceProps } from "./human-input-surface";
 import { MessageTimeline, type MessageTimelineProps } from "./message-timeline";
+import { ProviderRecoveryNotice } from "./provider-recovery-notice";
+import { currentProviderRecovery } from "../lib/provider-recovery";
 import {
   chainLinkResolvers,
   sessionLinkResolver,
@@ -119,6 +122,8 @@ export type SessionConversationProps = ClientOverride &
     /**
      * File attachments in the composer. Defaults to true; the attach control
      * appears only when the deployment's client config enables file uploads.
+     * A session proxy reports them off when `files` is false and for anonymous
+     * visitors (`visitor: true` from `resolve`) unless it sets `visitorUploads`.
      */
     attachments?: boolean | undefined;
     /**
@@ -128,11 +133,20 @@ export type SessionConversationProps = ClientOverride &
      */
     voiceInput?: boolean | undefined;
     /**
-     * Live speech-to-speech voice in the composer. Defaults to true; the voice
-     * button appears only when the workspace offers an available voice model
-     * and the proxy has not turned it off (`realtimeVoice: false`).
+     * Live speech-to-speech voice in the composer. Opt-in: a call spends the
+     * workspace's credits and asks for the microphone, so it is off unless this
+     * is `true` or the client config reports `realtimeVoice: true`
+     * (`createSessionProxyHandler({ realtimeVoice: true })`). The button then
+     * appears only when the workspace offers an available voice model and the
+     * proxy has not turned voice off (`realtimeVoice: false`).
      */
     realtimeVoice?: boolean | undefined;
+    /**
+     * Copy and visual for the "working" indicator before the first reply.
+     * Defaults to neutral copy ("Thinking…"); omitted fields keep those
+     * defaults. See `MessageTimeline`'s `genieLoading`.
+     */
+    genieLoading?: GenieLoadingOptions | undefined;
     /**
      * Show the model/reasoning picker. End users of an embedded product rarely
      * choose models, so it is hidden unless this is `true` or the client config
@@ -217,7 +231,8 @@ function Conversation({
   allowanceExhaustedLabels,
   attachments: attachmentsRequested = true,
   voiceInput: voiceInputRequested = true,
-  realtimeVoice: realtimeVoiceRequested = true,
+  realtimeVoice: realtimeVoiceProp,
+  genieLoading,
   modelPicker,
   modelPickerProps,
   userMessageDisclosureLabels,
@@ -327,6 +342,24 @@ function Conversation({
     if (feed.error) void feed.jumpToLatest();
   };
   const running = status === "running" || status === "recovering" || status === "waiting_capacity";
+  const realtimeVoiceRequested = realtimeVoiceProp ?? config.realtimeVoiceOffered;
+  const loadingOptions = useMemo(() => embeddedGenieLoading(genieLoading), [genieLoading]);
+  const providerRecovery = useMemo(
+    () =>
+      detail.session
+        ? currentProviderRecovery(
+            {
+              id: detail.session.id,
+              status,
+              activeTurnId: detail.session.activeTurnId,
+              effectiveControl:
+                queue.effectiveControl ?? detail.session.effectiveControl ?? undefined,
+            },
+            feed.events,
+          )
+        : null,
+    [detail.session, status, queue.effectiveControl, feed.events],
+  );
   const voiceModels = useRealtimeVoiceModels(
     context.client,
     context.workspaceId,
@@ -404,6 +437,7 @@ function Conversation({
               : (renderInteractiveBlock ?? defaultInteractiveBlock)
           }
           userMessageDisclosureLabels={userMessageDisclosureLabels}
+          genieLoading={loadingOptions}
           renderAllowanceExhausted={renderAllowanceExhausted}
           allowanceExhaustedLabels={allowanceExhaustedLabels}
           // Isolated and clipped: floating navigation stays inside the timeline.
@@ -457,6 +491,10 @@ function Conversation({
                 error={control.error}
               />
             ) : null}
+            <ProviderRecoveryNotice
+              className="mx-auto max-w-3xl px-1"
+              recovery={providerRecovery}
+            />
             <HumanInputSurface
               className="mx-auto max-w-3xl"
               loadSkillReview={loadSkillReview}
@@ -549,6 +587,17 @@ function Conversation({
       )}
     </div>
   );
+}
+
+/** Neutral embedded defaults under the host's overrides; an empty phrase list keeps them. */
+function embeddedGenieLoading(options: GenieLoadingOptions | undefined): GenieLoadingOptions {
+  if (!options) return EMBEDDED_GENIE_LOADING;
+  return {
+    ...EMBEDDED_GENIE_LOADING,
+    ...options,
+    phrases: options.phrases?.length ? options.phrases : EMBEDDED_GENIE_LOADING.phrases,
+    messages: { ...EMBEDDED_GENIE_LOADING.messages, ...options.messages },
+  };
 }
 
 type ConversationChromeProps = {

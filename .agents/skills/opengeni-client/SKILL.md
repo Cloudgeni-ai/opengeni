@@ -137,6 +137,9 @@ the product's team, organization, or customer: the group that shares data and
 tools. Derive `user` and `tenant` from the product's session, never from the
 request body or path. Anonymous visitors on a public site share one fixed
 `tenant`; `{ user }` alone would give every visitor a workspace of their own.
+Also return `visitor: true` for them: visitors get no file attachments unless
+the handler sets `visitorUploads: true`. Live voice is off in the stock chat
+unless the handler sets `realtimeVoice: true`.
 Server-side code gets the same workspace with
 `og.workspaceId({ tenant })` or `og.workspaceId({ user })`.
 

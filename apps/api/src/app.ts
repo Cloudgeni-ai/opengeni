@@ -17,6 +17,18 @@ import {
 } from "./routes/analytics-consent";
 import { codemodeSessionRequest } from "./codemode";
 import { SiteSessionPathError, OrganizationIntegrationDeniedError } from "@opengeni/contracts";
+import {
+  httpRejectionFactsFromEnvelope,
+  httpRejectionFactsFromError,
+  readRejectionEnvelope,
+  type HttpRejectionFacts,
+} from "./http/rejection-telemetry";
+import { observeInteractionRouteOutcome } from "./interaction-metrics";
+import {
+  isOAuthCallbackRoute,
+  observeConnectAttemptTransition,
+  observeOAuthCallback,
+} from "./integration-connect-metrics";
 import { registerModelConnectionAccessRoutes } from "./routes/model-connection-access";
 import {
   codeSearchDeploymentPolicy,
@@ -69,6 +81,7 @@ import {
   configureChildLifecycleNotices,
   configureCodeSearchDeploymentPolicy,
   configureWorkspaceControlRequestLockTimeoutMs,
+  setConnectAttemptTransitionObserver,
   dbSql,
   getManagedAuthSessionSetSnapshot,
   getWorkspace,
@@ -392,6 +405,11 @@ export function createAppComposition(deps: AppDependencies): {
   assertManagedEmailTransportMetadata(managedEmailTransport);
   const observability =
     deps.observability ?? createObservability(deps.settings, { component: "api" });
+  // Connect attempt state lives in the db layer; count its committed
+  // transitions with bounded provider/state labels (integration-connect-metrics).
+  setConnectAttemptTransitionObserver((transition) =>
+    observeConnectAttemptTransition(observability, transition),
+  );
   const managedAuthNewSignupsGate = createManagedAuthNewSignupsGate({
     db: deps.db,
     settings: deps.settings,
@@ -825,6 +843,36 @@ export function createAppComposition(deps: AppDependencies): {
             },
             ...(c.error ? { error: c.error } : {}),
           });
+          const rejection =
+            status >= 400
+              ? httpRejectionFactsFromEnvelope(
+                  await readRejectionEnvelope(c.res),
+                  errorCodeForStatus(status),
+                )
+              : null;
+          observeInteractionRouteOutcome(observability, {
+            method: c.req.method,
+            route,
+            status,
+            durationMs: durationSeconds * 1000,
+            rejectionReason: rejection?.reason,
+          });
+          if (isOAuthCallbackRoute(route)) {
+            observeOAuthCallback(observability, {
+              route,
+              status,
+              location: c.res.headers.get("location"),
+            });
+          }
+          if (rejection) {
+            observability.recordHttpRejection({
+              method: c.req.method,
+              route,
+              status,
+              code: rejection.code,
+              reason: rejection.reason,
+            });
+          }
           observability.info("HTTP request completed", {
             method: c.req.method,
             route,
@@ -833,6 +881,7 @@ export function createAppComposition(deps: AppDependencies): {
             traceId: span.traceId,
             spanId: span.spanId,
             correlationId,
+            ...(rejection ? rejectionLogAttributes(rejection) : {}),
           });
         } catch (error) {
           const status = httpStatusForError(error);
@@ -843,6 +892,21 @@ export function createAppComposition(deps: AppDependencies): {
             route,
             status,
             durationSeconds,
+          });
+          const rejection = httpRejectionFactsFromError(error, errorCode);
+          observeInteractionRouteOutcome(observability, {
+            method: c.req.method,
+            route,
+            status,
+            durationMs: durationSeconds * 1000,
+            rejectionReason: rejection.reason,
+          });
+          observability.recordHttpRejection({
+            method: c.req.method,
+            route,
+            status,
+            code: rejection.code,
+            reason: rejection.reason,
           });
           span.end({
             attributes: {
@@ -2000,6 +2064,14 @@ export function createAppComposition(deps: AppDependencies): {
   });
 
   return { app, routeDeps };
+}
+
+function rejectionLogAttributes(rejection: HttpRejectionFacts) {
+  return {
+    rejectionCode: rejection.code,
+    rejectionReason: rejection.reason,
+    ...(rejection.fingerprint ? { rejectionFingerprint: rejection.fingerprint } : {}),
+  };
 }
 
 function managedAuthOAuthCallbackProvider(pathname: string): "google" | "github" | null {

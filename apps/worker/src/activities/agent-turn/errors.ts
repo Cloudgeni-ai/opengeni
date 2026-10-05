@@ -94,6 +94,11 @@ import {
   MandatoryHistoryPersistenceError,
   type MandatoryHistoryPersistenceStage,
 } from "./quiescence";
+import {
+  MODEL_PROVIDER_RECOVERY_CODES,
+  providerRecoveryExhaustedMessage,
+  type ProviderCondition,
+} from "./provider-recovery-copy";
 
 // Retryable provider connectivity/5xx failures start quickly and back off to
 // this ceiling. Explicit rate limits retain the minute-granular fallback.
@@ -207,12 +212,47 @@ export function providerRecoveryExhaustedFailure<
 } {
   return {
     ...failure,
-    error: `Automatic same-turn recovery stopped after ${recovery.providerRecoveryCount} retries because the upstream dependency remained unavailable. Send a new message to retry after the dependency recovers.`,
+    error: providerRecoveryExhaustedMessage({
+      code: typeof failure.code === "string" ? failure.code : null,
+      providerCondition: isProviderCondition(failure.providerCondition)
+        ? failure.providerCondition
+        : null,
+      modelLabel: typeof failure.modelLabel === "string" ? failure.modelLabel : null,
+      providerLabel: typeof failure.providerLabel === "string" ? failure.providerLabel : null,
+      providerRecoveryCount: recovery.providerRecoveryCount,
+    }),
     retryable: false,
     recoveryExhausted: true,
     providerRecoveryCount: recovery.providerRecoveryCount,
     maxProviderRecoveryCount: recovery.maxProviderRecoveryCount,
     lastRetryableError: failure.error,
+  };
+}
+
+function isProviderCondition(value: unknown): value is ProviderCondition {
+  return (
+    value === "overloaded" ||
+    value === "unavailable" ||
+    value === "unresponsive" ||
+    value === "rate_limited"
+  );
+}
+
+/**
+ * Name the exact accepted model route on model-provider recovery evidence so a
+ * person learns which model is affected. Display labels only: the route's
+ * credentials, base URL and upstream ids never enter the event.
+ */
+export function withModelRoutePresentation<T extends { code?: string | undefined }>(
+  failure: T,
+  route: { model: string; modelLabel: string; providerLabel: string } | undefined,
+): T & { model?: string; modelLabel?: string; providerLabel?: string } {
+  if (!route || !failure.code || !MODEL_PROVIDER_RECOVERY_CODES.has(failure.code)) return failure;
+  return {
+    ...failure,
+    model: route.model,
+    modelLabel: route.modelLabel,
+    providerLabel: route.providerLabel,
   };
 }
 
@@ -1357,6 +1397,45 @@ export function agentRunFailurePayload(
   error: unknown,
   options: { isCodexTurn?: boolean } = {},
 ): ReturnType<typeof baseAgentRunFailurePayload> {
+  return withProviderCondition(error, classifyAgentRunFailurePayload(error, options));
+}
+
+/**
+ * Record the closed provider condition on a retryable model-provider failure so
+ * clients can say "overloaded" rather than a generic outage. Presentation
+ * evidence only: retry authority and pacing are decided by `code`.
+ */
+function withProviderCondition(
+  error: unknown,
+  failure: ReturnType<typeof baseAgentRunFailurePayload>,
+): ReturnType<typeof baseAgentRunFailurePayload> {
+  if (failure.code === "provider_rate_limited") {
+    return { ...failure, providerCondition: "rate_limited" };
+  }
+  if (failure.code !== "provider_unavailable") return failure;
+  if (failure.timeoutClass) return { ...failure, providerCondition: "unresponsive" };
+  return {
+    ...failure,
+    providerCondition: isProviderOverloadError(error, failure) ? "overloaded" : "unavailable",
+  };
+}
+
+/** HTTP 529, Anthropic `overloaded_error`, or explicit provider "overloaded" wording. */
+export function isProviderOverloadError(
+  error: unknown,
+  failure: { error?: string; detail?: string } = {},
+): boolean {
+  if (providerHttpStatus(error) === 529) return true;
+  const anthropic = anthropicRequestDiagnostic(error);
+  return [...collectErrorStrings(error), anthropic?.detail, failure.error, failure.detail].some(
+    (value) => typeof value === "string" && /\boverload(?:ed)?(?:_error)?\b/i.test(value),
+  );
+}
+
+function classifyAgentRunFailurePayload(
+  error: unknown,
+  options: { isCodexTurn?: boolean } = {},
+): ReturnType<typeof baseAgentRunFailurePayload> {
   const graph = structuredRecoveryCauseGraph(error);
   const nodes = graph ? [...graph.keys()] : [];
   const outputRejected = nodes.find(isRoutingMutationOutputRejectedError);
@@ -1436,8 +1515,14 @@ function baseAgentRunFailurePayload(
   quotaScope?: ProviderQuotaScope;
   /** Closed Codex plan key on `codex_plan_entitlement` / `codex_request_rejected`. */
   planType?: string | null;
-  /** Product model id a `codex_plan_entitlement` failure refers to. */
+  /** Product model id a `codex_plan_entitlement` or model-provider recovery failure refers to. */
   model?: string | null;
+  /** Display label of the turn's model on model-provider recovery evidence. */
+  modelLabel?: string;
+  /** Display label of the serving provider on model-provider recovery evidence. */
+  providerLabel?: string;
+  /** Closed transient provider condition on `provider_unavailable` / `provider_rate_limited`. */
+  providerCondition?: ProviderCondition;
 } {
   if (error instanceof SandboxMaterializationVerificationError) {
     return {

@@ -121,6 +121,7 @@ import {
   listExternalActorWorkspaces,
   addExternalWorkspaceMemberForRequest,
   requireAccessGrant,
+  requireWorkspaceMemberManagementAuthority,
   requireWorkspaceSettingsGrant,
   requireFreshAccessGrant,
   resolveWorkspaceCatalogSettings,
@@ -1353,14 +1354,19 @@ export function registerWorkspaceRoutes(app: Hono, deps: ApiRouteDeps): void {
 
   app.get("/v1/workspaces/:workspaceId/members", async (c) => {
     const workspaceId = c.req.param("workspaceId");
-    await requireAccessGrant(c, deps, workspaceId, "workspace:read");
+    await requireWorkspaceMemberManagementAuthority(c, deps, workspaceId, "workspace:read");
     const members = await listWorkspacePeople(deps, workspaceId);
     return c.json(workspaceMembersResponse(members));
   });
 
   app.get("/v1/workspaces/:workspaceId/member-candidates", async (c) => {
     const workspaceId = c.req.param("workspaceId");
-    const grant = await requireAccessGrant(c, deps, workspaceId, "members:manage");
+    const { grant } = await requireWorkspaceMemberManagementAuthority(
+      c,
+      deps,
+      workspaceId,
+      "members:manage",
+    );
     try {
       return c.json(
         ListWorkspaceMemberCandidatesResponse.parse({
@@ -1378,7 +1384,12 @@ export function registerWorkspaceRoutes(app: Hono, deps: ApiRouteDeps): void {
 
   app.post("/v1/workspaces/:workspaceId/members", async (c) => {
     const workspaceId = c.req.param("workspaceId");
-    const grant = await requireAccessGrant(c, deps, workspaceId, "members:manage");
+    const { grant } = await requireWorkspaceMemberManagementAuthority(
+      c,
+      deps,
+      workspaceId,
+      "members:manage",
+    );
     const payload = await parseRequestJson(c, AddWorkspaceMemberRequest);
     requireApiKeyDelegationContext(await requireAccessContext(c, deps), payload.permissions);
     requireExplicitPermissionDelegation(grant, payload.permissions);
@@ -1431,7 +1442,12 @@ export function registerWorkspaceRoutes(app: Hono, deps: ApiRouteDeps): void {
 
   app.patch("/v1/workspaces/:workspaceId/members/:subjectId", async (c) => {
     const workspaceId = c.req.param("workspaceId");
-    const grant = await requireAccessGrant(c, deps, workspaceId, "members:manage");
+    const { grant } = await requireWorkspaceMemberManagementAuthority(
+      c,
+      deps,
+      workspaceId,
+      "members:manage",
+    );
     const subjectId = decodeURIComponent(c.req.param("subjectId"));
     const payload = await parseRequestJson(c, UpdateWorkspaceMemberRequest);
     requireApiKeyDelegationContext(await requireAccessContext(c, deps), payload.permissions);
@@ -1471,7 +1487,12 @@ export function registerWorkspaceRoutes(app: Hono, deps: ApiRouteDeps): void {
 
   app.delete("/v1/workspaces/:workspaceId/members/:subjectId", async (c) => {
     const workspaceId = c.req.param("workspaceId");
-    const grant = await requireAccessGrant(c, deps, workspaceId, "members:manage");
+    const { grant, organizationAdministrator } = await requireWorkspaceMemberManagementAuthority(
+      c,
+      deps,
+      workspaceId,
+      "members:manage",
+    );
     const subjectId = decodeURIComponent(c.req.param("subjectId"));
     const members = await listWorkspaceMembers(deps.db, workspaceId);
     // Never remove yourself, and never remove the last administering member.
@@ -1486,6 +1507,11 @@ export function registerWorkspaceRoutes(app: Hono, deps: ApiRouteDeps): void {
       workspaceId,
       actorSubjectId: grant.subjectId,
       targetSubjectId: subjectId,
+      // An organization owner/admin acting without their own workspace grant
+      // proves that authority through the organization capability instead.
+      ...(organizationAdministrator
+        ? { requireOrganizationSharedWorkspaceAdministration: true }
+        : {}),
     });
     return c.body(null, 204);
   });

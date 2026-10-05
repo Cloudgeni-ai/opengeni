@@ -421,6 +421,11 @@ export async function claimTurnAttempt(deps: ClaimTurnDeps): Promise<ClaimTurnOu
     provider: turnExecutionPolicy.providerId,
     model: turnExecutionPolicy.productModelId,
   };
+  attempt.modelRoutePresentation = {
+    model: turnExecutionPolicy.productModelId,
+    modelLabel: verifiedExecutionPolicy.model.label,
+    providerLabel: verifiedExecutionPolicy.model.providerLabel,
+  };
   assertSessionAllowsProductModel(session, turnExecutionPolicy.productModelId);
   const billingIdentity = turnExecutionPolicyBillingIdentity(turnExecutionPolicy);
   billingState.isExternallyBilledTurn = billingIdentity.externallyBilled;

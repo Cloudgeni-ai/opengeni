@@ -2825,6 +2825,7 @@ export function registerBrowserSessionRoutes(app: Hono, deps: ApiRouteDeps): voi
         deviceId: expectedPlacement.deviceId,
       });
       if (device.state !== "connected") {
+        recordAttachedBrowserUnavailable(deps.observability, "disconnected");
         throw new BrowserSessionStateError("Attached browser is disconnected");
       }
       const enrollment = await getLiveEnrollmentConnection(
@@ -2833,9 +2834,11 @@ export function registerBrowserSessionRoutes(app: Hono, deps: ApiRouteDeps): voi
         device.enrollmentId,
       );
       if (!enrollment || enrollment.status !== "active" || !enrollment.connectionInstanceId) {
+        recordAttachedBrowserUnavailable(deps.observability, "machine_unavailable");
         throw new BrowserSessionStateError("Attached browser machine is unavailable");
       }
       if (!enrollment.workspaceRoot) {
+        recordAttachedBrowserUnavailable(deps.observability, "no_workspace_root");
         throw new BrowserSessionStateError(
           "Attached browser machine has not reported an absolute workspace root",
         );
@@ -5114,6 +5117,22 @@ async function recordBrowserDownloadFileUsage(
     sourceResourceId: file.id,
     idempotencyKey: `file.uploaded:${workspaceId}:${file.id}`,
   });
+}
+
+/** A user's own attached browser could not be reached for an operation. */
+function recordAttachedBrowserUnavailable(
+  observability: ApiRouteDeps["observability"],
+  reason: "disconnected" | "machine_unavailable" | "no_workspace_root",
+): void {
+  try {
+    observability?.incrementCounter({
+      name: "opengeni_attached_browser_unavailable_total",
+      help: "Browser operations refused because the user's attached browser (or its machine) was unreachable, by closed reason.",
+      labels: { reason },
+    });
+  } catch {
+    // Telemetry never changes the refusal.
+  }
 }
 
 function browserRouteError(error: unknown): HTTPException {

@@ -2402,6 +2402,9 @@ describe("release schema contract", () => {
       "0624_azure_live_realtime_model.sql",
       "0625_transcription_billing_refusal_codes.sql",
       "0632_modal_native_live_origin.sql",
+      "0633_session_recovery_overdue_age.sql",
+      "0634_organization_admin_self_workspace_removal.sql",
+      "0635_organization_admin_workspace_member_management.sql",
       "0633_opper_model_providers.sql",
     ].filter((path) =>
       unfilteredSourceContract.migrations.some((migration) => migration.path === path),

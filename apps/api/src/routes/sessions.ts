@@ -2696,6 +2696,12 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
     await assertSessionExists(db, workspaceId, sessionId);
     const goal = await getSessionGoalWithContinuation(db, workspaceId, sessionId);
     if (!goal) {
+      // `?absent=null` opts in to a successful `null` for a goal-less session,
+      // so a browser polling a fresh chat logs no failed request. Without it
+      // the original 404 contract is unchanged for existing clients.
+      if (c.req.query("absent") === "null") {
+        return c.json(null);
+      }
       throw new HTTPException(404, { message: "session goal not found" });
     }
     return c.json(goal);

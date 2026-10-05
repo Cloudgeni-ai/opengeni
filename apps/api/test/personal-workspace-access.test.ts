@@ -24,6 +24,7 @@ import { registerVideoGenerationRoutes } from "../src/routes/video-generation";
 import { registerKnowledgeRoutes } from "../src/routes/knowledge";
 import { registerWorkspaceLearningRoutes } from "../src/routes/workspace-learning";
 import { registerWorkspaceRoutes } from "../src/routes/workspaces";
+import { registerBrowserSessionRoutes } from "../src/routes/browser-sessions";
 
 let shared: SharedTestDatabase | null = null;
 let client: DbClient | null = null;
@@ -140,6 +141,7 @@ function createTestApp(overrides: Partial<Settings> = {}): Hono {
   registerWorkspaceLearningRoutes(registered, deps);
   registerKnowledgeRoutes(registered, deps);
   registerVideoGenerationRoutes(registered, deps);
+  registerBrowserSessionRoutes(registered, deps);
   return registered;
 }
 
@@ -212,6 +214,36 @@ describe("managed personal workspace access", () => {
       headers: { authorization: `Bearer ${accountAdminToken}` },
     });
     expect(denied.status).toBe(401);
+  });
+
+  test("Personal owners reach browser attachment validation while narrower delegations remain denied", async () => {
+    if (!shared || !client || !app) return;
+    const attachmentUrl = `https://example.test/v1/workspaces/${personalWorkspaceId}/browser-sessions/${crypto.randomUUID()}/attachments`;
+    // Invalid JSON exercises the real permission boundary before any controller
+    // lookup or frame-stream side effect can run.
+    const owner = await app.request(attachmentUrl, {
+      method: "POST",
+      headers: { cookie: "session=present", "content-type": "application/json" },
+      body: "{",
+    });
+    expect(owner.status).toBe(400);
+    expect(await owner.text()).toContain("invalid request body");
+
+    const token = await signDelegatedAccessToken(SETTINGS_SECRET, {
+      accountId,
+      workspaceId: personalWorkspaceId,
+      subjectId: `user:${userId}`,
+      principalKind: "human_session",
+      permissions: ["workspace:read", "sessions:read", "sessions:control"],
+      exp: Math.floor(Date.now() / 1000) + 3600,
+    });
+    const limited = await app.request(attachmentUrl, {
+      method: "POST",
+      headers: { authorization: `Bearer ${token}`, "content-type": "application/json" },
+      body: "{",
+    });
+    expect(limited.status).toBe(403);
+    expect(await limited.text()).toContain("missing permission: stream:view");
   });
 
   test("Personal owners save settings and learning policy without gaining access-management powers", async () => {

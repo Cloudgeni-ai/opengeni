@@ -66,6 +66,7 @@ import { useOrganizationNavigation, type OrganizationNavigation } from "./organi
 import {
   canResendInvitation,
   expiresLabel,
+  filterWorkspacesByName,
   firstName,
   initialsOf,
   invitationDeliveryOutcome,
@@ -79,6 +80,7 @@ import {
   withArticle,
   workspaceRoleLabel,
   workspaceRoleOptions,
+  WORKSPACE_SEARCH_THRESHOLD,
 } from "./organization-people-model";
 
 /* ----------------------------------------------------------------------------
@@ -646,6 +648,7 @@ function WorkspaceAccessRows({
 }) {
   const directory = useOrganizationDirectory();
   const [saving, setSaving] = useState<string | null>(null);
+  const [query, setQuery] = useState("");
   const overview = directory.overview.value;
   const roles = workspaceRoleOptions(overview);
   const name = memberName(member);
@@ -653,12 +656,16 @@ function WorkspaceAccessRows({
   if (overview.workspaces.length === 0) {
     return <p className="text-sm text-fg-muted">There are no shared workspaces yet.</p>;
   }
-  return (
+  const searchable = overview.workspaces.length > WORKSPACE_SEARCH_THRESHOLD;
+  const shown = searchable
+    ? filterWorkspacesByName(overview.workspaces, query)
+    : overview.workspaces;
+  const rows = (
     <ul
       aria-label={`Workspace access for ${name}`}
       className="-mx-3 flex min-w-0 flex-col [&>li+li]:border-t [&>li+li]:border-border"
     >
-      {overview.workspaces.map((workspace) => {
+      {shown.map((workspace) => {
         const grant =
           workspace.members.find((each) => each.organizationMembershipId === member.id) ?? null;
         return (
@@ -718,6 +725,25 @@ function WorkspaceAccessRows({
         );
       })}
     </ul>
+  );
+  if (!searchable) return rows;
+  return (
+    <div className="flex min-w-0 flex-col gap-3">
+      <Toolbar>
+        <ToolbarSearch
+          value={query}
+          onValueChange={setQuery}
+          placeholder="Search workspaces"
+          aria-label={`Search workspaces for ${name}`}
+        />
+      </Toolbar>
+      {query.trim() ? (
+        <ToolbarSummary>
+          {shown.length} of {overview.workspaces.length} workspaces
+        </ToolbarSummary>
+      ) : null}
+      {shown.length === 0 ? <p className="text-sm text-fg-muted">No workspaces match.</p> : rows}
+    </div>
   );
 }
 
