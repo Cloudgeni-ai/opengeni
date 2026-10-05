@@ -84,6 +84,9 @@ export function useGoal(
   const { run, mutating, mutationError, clearMutationError } = useMutationRunner();
   const generation = useRef(0);
   const targetKeyRef = useRef<string | null>(null);
+  // True after the server answered 404. Only a goal event can create a goal,
+  // so turn/session traffic must not refetch (and 404) while none exists.
+  const goalAbsentRef = useRef(false);
   const loadAbort = useRef<AbortController | null>(null);
 
   const retireLoads = useCallback(() => {
@@ -105,6 +108,7 @@ export function useGoal(
         signal: controller.signal,
       });
       if (ticket === generation.current) {
+        goalAbsentRef.current = false;
         setGoal(fetched);
         setError(null);
         setLoading(false);
@@ -115,6 +119,7 @@ export function useGoal(
       }
       if (cause instanceof OpenGeniApiError && cause.status === 404) {
         // No goal is a normal state, not an error.
+        goalAbsentRef.current = true;
         setGoal(null);
         setError(null);
       } else {
@@ -130,6 +135,7 @@ export function useGoal(
     const targetKey = `${workspaceId} ${sessionId ?? ""}`;
     if (targetKeyRef.current !== targetKey) {
       targetKeyRef.current = targetKey;
+      goalAbsentRef.current = false;
       setGoal(null);
       setError(null);
     }
@@ -181,7 +187,12 @@ export function useGoal(
   ]);
 
   const scheduleRefresh = useDebouncedCallback(() => void load());
-  useSessionEventTrigger(client, workspaceId, sessionId, isGoalRefreshEvent, scheduleRefresh, {
+  const isRefreshEvent = useCallback(
+    (event: SessionEvent) =>
+      goalAbsentRef.current ? isGoalEvent(event) : isGoalRefreshEvent(event),
+    [],
+  );
+  useSessionEventTrigger(client, workspaceId, sessionId, isRefreshEvent, scheduleRefresh, {
     enabled,
     ...(sharedEvents !== undefined ? { events: sharedEvents } : {}),
   });
