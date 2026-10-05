@@ -1,3 +1,4 @@
+import { createHmac } from "node:crypto";
 import { managedUserEmailAllowed } from "@opengeni/config";
 import type { Context } from "hono";
 import type { ManagedAuth } from "./managed-auth-type";
@@ -84,6 +85,49 @@ export async function getManagedSession(...args: Parameters<typeof resolveManage
   const session = await resolveManagedSession(...args);
   assertManagedUserAdmission(args[1], session?.user);
   return session;
+}
+
+/**
+ * Bearer prefix of a native app credential. The credential is a dedicated
+ * Better Auth session the person approved from a signed-in browser (see the
+ * native app sign-in route); the prefix only routes it to this resolver.
+ */
+export const NATIVE_APP_CREDENTIAL_PREFIX = "ogapp_";
+
+/**
+ * Resolve a native app credential exactly as the legacy managed cookie path
+ * resolves a browser session: Better Auth validates expiry and renews the
+ * durable session, then the canonical human session must still be valid. A
+ * native credential never reads or selects a browser session set; each app
+ * account holds its own independently revocable session.
+ */
+export async function getNativeAppManagedSession(
+  auth: ManagedAuth,
+  credential: string,
+  db: Database | undefined,
+) {
+  if (!credential.startsWith(NATIVE_APP_CREDENTIAL_PREFIX)) return null;
+  const token = credential.slice(NATIVE_APP_CREDENTIAL_PREFIX.length);
+  if (!/^[A-Za-z0-9]{16,128}$/u.test(token)) return null;
+  const context = await auth.$context;
+  const signed = encodeURIComponent(
+    `${token}.${createHmac("sha256", context.secret).update(token, "utf8").digest("base64")}`,
+  );
+  const session = await auth.api.getSession({
+    headers: new Headers({ cookie: `${context.authCookies.sessionToken.name}=${signed}` }),
+    // Never serve a cached cookie snapshot: the app's session row is authoritative.
+    query: { disableCookieCache: true },
+  });
+  if (!session?.user) return null;
+  assertManagedUserAdmission(auth, session.user);
+  if (!db) return session;
+  const authSessionId = session.session?.id;
+  if (typeof authSessionId !== "string") return null;
+  const valid = await validateCanonicalHumanSession(db, {
+    authSessionId,
+    authUserId: session.user.id,
+  });
+  return valid ? session : null;
 }
 
 export function assertManagedUserAdmission(

@@ -41,7 +41,11 @@ import type { Context } from "hono";
 import { HTTPException } from "hono/http-exception";
 import { z } from "zod";
 import type { ManagedAuth } from "../managed-auth-type";
-import { getManagedSession } from "../managed-session";
+import {
+  getManagedSession,
+  getNativeAppManagedSession,
+  NATIVE_APP_CREDENTIAL_PREFIX,
+} from "../managed-session";
 import type { ManagedAuthSessionAdapter } from "../managed-auth-session-sets";
 import type { UserPresenceRecorder } from "../user-presence";
 import { serviceInitiatorFromHeaders } from "./service-initiator";
@@ -1210,6 +1214,24 @@ async function resolveAccessContext(c: Context, deps: AccessDeps): Promise<Acces
 
   const bearer = bearerToken(c);
   if (bearer) {
+    if (bearer.startsWith(NATIVE_APP_CREDENTIAL_PREFIX)) {
+      // A native app account: the person approved this device from a signed-in
+      // browser, so it carries the same human authority as that browser.
+      if (!deps.managedAuth) return null;
+      const session = await getNativeAppManagedSession(deps.managedAuth, bearer, deps.db);
+      if (!session?.user) return null;
+      const context = await ensureManagedAccessForUser(deps.db, {
+        userId: session.user.id,
+        email: session.user.email,
+        name: session.user.name,
+        emailVerified: session.user.emailVerified,
+        provisionFallbackOrganization: false,
+        bindPendingInvitations: false,
+      });
+      canonicalManagedCookieContexts.add(context);
+      recordUserPresence(c, deps, context.subjectId);
+      return context;
+    }
     const delegated = await delegatedAccessContext(c, deps, "managed", bearer);
     if (delegated) {
       return delegated;

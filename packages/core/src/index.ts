@@ -51,6 +51,8 @@ export {
   getManagedAuthRequestActorEpoch,
   getManagedAuthRequestActorLeaseStamp,
   getManagedSession,
+  getNativeAppManagedSession,
+  NATIVE_APP_CREDENTIAL_PREFIX,
   configureManagedUserAdmission,
   assertManagedUserAdmission,
   ManagedAuthActorLeaseOutcomeUnknownError,

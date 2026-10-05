@@ -1436,6 +1436,13 @@ const SettingsSchema = z.object({
     .min(1)
     .optional(),
   managedAuthSessionSetMode: z.enum(["legacy", "dual", "broker"]).default("legacy"),
+  // URL schemes the native app may receive its sign-in code on
+  // (`<scheme>://auth/callback`). A host shipping its own build of the app
+  // adds its scheme here.
+  nativeAppSchemes: z
+    .array(z.string().regex(/^[a-z][a-z0-9+.-]{1,63}$/u))
+    .min(1)
+    .default(["opengeni"]),
   // Deployment ceiling for new managed accounts. When false, managed auth
   // refuses every new Better Auth account (email/password sign-up and implicit
   // Google/GitHub sign-up) while existing sign-in, sessions, password reset,
@@ -3861,6 +3868,12 @@ export function getSettings(source: NodeJS.ProcessEnv = process.env): Settings {
         ? undefined
         : source.OPENGENI_ALLOWED_USER_EMAILS.split(",").map((email) => email.trim()),
     managedAuthSessionSetMode: optional("OPENGENI_MANAGED_AUTH_SESSION_SET_MODE"),
+    nativeAppSchemes:
+      source.OPENGENI_NATIVE_APP_SCHEMES === undefined
+        ? undefined
+        : source.OPENGENI_NATIVE_APP_SCHEMES.split(",")
+            .map((scheme) => scheme.trim())
+            .filter(Boolean),
     managedAuthNewSignupsEnabled: optional("OPENGENI_MANAGED_AUTH_NEW_SIGNUPS_ENABLED"),
     organizationUserSetupEmailTokenTransport: optional(
       "OPENGENI_ORGANIZATION_USER_SETUP_EMAIL_TOKEN_TRANSPORT",
