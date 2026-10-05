@@ -43184,9 +43184,12 @@ export async function appendSessionHistoryItems(
   if (input.items.length === 0) {
     return true;
   }
-  return await withRlsContext(
+  // One idempotent transaction: a deadlock/serialization victim rolled back
+  // entirely, so it retries as a unit; it contains no external effect.
+  return await retryRlsPersistence(
     db,
     { accountId: input.accountId, workspaceId: input.workspaceId },
+    { stage: "session_history_append", correlationId: input.expectedAttemptId },
     async (scopedDb) => {
       return await scopedDb.transaction(async (tx) => {
         const allowed = await lockTurnAttemptWriteFenceTx(tx, {
@@ -43500,9 +43503,12 @@ export async function recordPendingSessionToolCallResult(
     };
   },
 ): Promise<{ accepted: boolean; recorded: boolean }> {
-  return await withRlsContext(
+  // One idempotent transaction: a deadlock/serialization victim rolled back
+  // entirely, so it retries as a unit; it contains no external effect.
+  return await retryRlsPersistence(
     db,
     { accountId: input.accountId, workspaceId: input.workspaceId },
+    { stage: "session_pending_tool_call_result", correlationId: input.callId },
     async (scopedDb) =>
       await scopedDb.transaction(async (tx) => {
         const fence = await lockTurnAttemptWriteFenceTx(tx, {

@@ -7,7 +7,11 @@ import {
   completeConnectorActionExecution,
   createDb,
   createSession,
+  appendSessionHistoryItems,
+  nextSessionHistoryPosition,
   prepareConnectorActionApproval,
+  recordPendingSessionToolCallResult,
+  registerPendingSessionToolCall,
   submitHumanPromptInTransaction,
   upsertConnectorActionPolicy,
   withWorkspaceSubjectSessionActivityRls,
@@ -116,7 +120,7 @@ async function claimedAttempt() {
 }
 
 describe("parallel connector-backed tool calls", () => {
-  test("ledger admission and settlement never deadlock against the attempt's event writers", async () => {
+  test("a parallel tool batch with its post-batch settlement never deadlocks against event writers", async () => {
     const { identity, connectionId, serverId } = await claimedAttempt();
     const appendFor = async (
       callId: string,
@@ -142,6 +146,28 @@ describe("parallel connector-backed tool calls", () => {
         arguments: { query: callId },
         defaultDecision: "allow" as const,
       };
+      const scope = {
+        accountId: identity.accountId,
+        workspaceId: identity.workspaceId,
+        sessionId: identity.sessionId,
+        turnId: identity.turnId,
+        executionGeneration: identity.executionGeneration,
+        attemptId: identity.attemptId,
+        callId,
+      };
+      const callItem = {
+        type: "function_call",
+        callId,
+        name: `${serverId}__${toolName}`,
+        arguments: JSON.stringify({ query: callId }),
+      };
+      expect(
+        await registerPendingSessionToolCall(client.db, {
+          ...scope,
+          callType: "function_call",
+          callItem,
+        }),
+      ).toEqual({ accepted: true, registered: true });
       await appendFor(callId, "agent.toolCall.created");
       expect(await prepareConnectorActionApproval(client.db, identity, call)).toMatchObject({
         managed: true,
@@ -149,7 +175,6 @@ describe("parallel connector-backed tool calls", () => {
       });
       const admission = await beginConnectorActionExecution(client.db, identity, call);
       if (!admission.allowed || !admission.managed) throw new Error("explicit Allow was denied");
-      await appendFor(callId, "agent.toolCall.output");
       await completeConnectorActionExecution(client.db, {
         accountId: identity.accountId,
         workspaceId: identity.workspaceId,
@@ -157,13 +182,55 @@ describe("parallel connector-backed tool calls", () => {
         attemptId: identity.attemptId,
         outcome: "completed",
       });
+      const resultItem = {
+        type: "function_call_result",
+        callId,
+        name: `${serverId}__${toolName}`,
+        output: { type: "text", text: `result for ${callId}` },
+      };
+      expect(
+        await recordPendingSessionToolCallResult(client.db, {
+          ...scope,
+          resultItem,
+          eventOutput: resultItem.output,
+        }),
+      ).toEqual({ accepted: true, recorded: true });
+      await appendFor(callId, "agent.toolCall.output");
+      return [callItem, resultItem];
     };
-    for (let round = 0; round < 12; round += 1) {
-      await Promise.all(
-        Array.from({ length: 9 }, (_, index) =>
-          toolCall(`call-${round}-${index}`, index % 2 === 0 ? "search_issues" : "query"),
-        ),
-      );
+    // Unrelated raw writers keep the session's event cursor hot throughout.
+    const streaming = new AbortController();
+    const deltas = (async () => {
+      while (!streaming.signal.aborted) await appendFor("stream", "agent.toolCall.created");
+    })();
+    try {
+      for (let round = 0; round < 12; round += 1) {
+        const pairs = await Promise.all(
+          Array.from({ length: 9 }, (_, index) =>
+            toolCall(`call-${round}-${index}`, index % 2 === 0 ? "search_issues" : "query"),
+          ),
+        );
+        // Post-batch settlement: the reconciled call/result pairs land in history.
+        const position = await nextSessionHistoryPosition(
+          client.db,
+          identity.workspaceId,
+          identity.sessionId,
+        );
+        expect(
+          await appendSessionHistoryItems(client.db, {
+            accountId: identity.accountId,
+            workspaceId: identity.workspaceId,
+            sessionId: identity.sessionId,
+            turnId: identity.turnId,
+            expectedExecutionGeneration: identity.executionGeneration,
+            expectedAttemptId: identity.attemptId,
+            items: pairs.flat().map((item, offset) => ({ position: position + offset, item })),
+          }),
+        ).toBe(true);
+      }
+    } finally {
+      streaming.abort();
+      await deltas;
     }
     const [row] = await shared.admin<Array<{ count: string }>>`
       select count(*)::text as count from connector_action_requests

@@ -500,15 +500,20 @@ function retryableDatabaseFailureCode(
       const connectionOutage = requireDatabaseProvenance
         ? isRunningTurnDatabaseConnectionSqlState(sqlState)
         : isDatabaseConnectionSqlState(sqlState);
+      // PostgreSQL aborts a deadlock or serialization victim's whole
+      // transaction: unlike a lost connection, that write certainly did not
+      // commit, so it is at least as safe for exact-attempt recovery.
+      const rolledBack = isRetryablePersistenceSqlState(sqlState);
       const code = typed
         ? retryablePersistenceFailureCode(sqlState)
-        : connectionOutage || isRetryablePersistenceSqlState(sqlState)
+        : connectionOutage || rolledBack
           ? databaseFailureCode(sqlState)
           : null;
       if (
         !code ||
         (requireDatabaseProvenance &&
           !connectionOutage &&
+          !rolledBack &&
           !(sqlState === null && hasOwnTransport(node)))
       )
         return null;
@@ -603,12 +608,7 @@ export function postClaimDatabaseRecoveryFailure(input: {
   };
 }): ApplicationFailure | null {
   const code = retryableDatabaseFailureCode(input.error, input.requireDatabaseProvenance);
-  if (
-    !code ||
-    input.executionGeneration < 1 ||
-    (input.requireDatabaseProvenance && code !== "db_failure")
-  )
-    return null;
+  if (!code || input.executionGeneration < 1) return null;
   if (
     (input.sandboxSetupOutcomeUnknown && input.sandboxSetupRecoveryExhausted) ||
     ((input.sandboxSetupOutcomeUnknown || input.sandboxSetupRecoveryExhausted) &&

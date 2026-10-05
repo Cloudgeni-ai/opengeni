@@ -644,6 +644,14 @@ Transport evidence belongs to its trusted DB source subtree, never an unrelated
 aggregate sibling. All permanent/uncertain DB and no-replay evidence vetoes
 regardless of sibling order. Duplicate references/cycles consume no extra node
 budget; an incomplete or overflowed cause graph grants no recovery authority.
+A deadlock or serialization victim (SQLSTATE `40P01`/`40001`) raised through
+the same own ORM/typed persistence boundary enters the same lane. PostgreSQL
+aborted that whole transaction, so unlike a lost connection nothing it wrote
+committed; an escaped rollback therefore no longer keeps a running turn
+terminal, and it is never a reason to replay a tool. Hot per-call writers
+(pending tool-call results and model-history appends) first retry their own
+exactly idempotent transaction on these SQLSTATEs; connector-ledger
+transactions take the canonical event-write prefix and retry the same way.
 
 Versioned control observers distinguish unavailable session reads from idle
 business state. Missing and RLS-hidden rows are indistinguishable; neither is
