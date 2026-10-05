@@ -2207,12 +2207,22 @@ mod tests {
         tokio::task::JoinHandle<()>,
     ) {
         use tokio::io::{AsyncBufReadExt as _, AsyncReadExt as _, AsyncWriteExt as _, BufReader};
-        let listener = tokio::net::TcpListener::bind(("127.0.0.1", 0))
-            .await
-            .unwrap();
+        let socket = tokio::net::TcpSocket::new_v4().unwrap();
+        // Bound the advertised receive window before accept. The host's
+        // default buffering can otherwise settle every queued write while
+        // this fixture's reader is paused, which is a legal flush completion.
+        socket.set_recv_buffer_size(64 * 1024).unwrap();
+        let receive_buffer = socket.recv_buffer_size().unwrap();
+        assert!(
+            receive_buffer <= 1024 * 1024,
+            "fixture receive buffer: {receive_buffer}"
+        );
+        socket.bind(([127, 0, 0, 1], 0).into()).unwrap();
+        let listener = socket.listen(1).unwrap();
         let port = listener.local_addr().unwrap().port();
         let (published, received) = tokio::sync::oneshot::channel();
         let (release, released) = tokio::sync::oneshot::channel();
+        let (paused, waiting) = tokio::sync::oneshot::channel();
         let server = tokio::spawn(async move {
             let (socket, _) = listener.accept().await.unwrap();
             let (read, mut write) = socket.into_split();
@@ -2222,6 +2232,7 @@ mod tests {
             ).as_bytes()).await.unwrap();
             let mut published = Some(published);
             let mut released = Some(released);
+            let mut paused = Some(paused);
             loop {
                 let mut line = String::new();
                 if read.read_line(&mut line).await.unwrap() == 0 {
@@ -2241,6 +2252,7 @@ mod tests {
                 } else if line == "PING\r\n" {
                     write.write_all(b"PONG\r\n").await.unwrap();
                     if let Some(gate) = released.take() {
+                        paused.take().unwrap().send(()).unwrap();
                         gate.await.unwrap();
                     }
                 }
@@ -2249,10 +2261,22 @@ mod tests {
         let client = async_nats::connect(format!("nats://127.0.0.1:{port}"))
             .await
             .unwrap();
+        tokio::time::timeout(Duration::from_secs(2), waiting)
+            .await
+            .unwrap()
+            .unwrap();
         client
             .publish("fixture.backpressure", vec![0; 32 * 1024 * 1024].into())
             .await
             .unwrap();
+        // Prove the actual writer is backpressured before testing ownership;
+        // entry into the admitted task is not transport-pending evidence.
+        assert!(
+            tokio::time::timeout(Duration::from_millis(100), client.flush())
+                .await
+                .is_err(),
+            "fixture writer settled before its reader was released"
+        );
         (client, received, release, server)
     }
 
