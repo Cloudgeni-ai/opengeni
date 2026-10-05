@@ -62,53 +62,100 @@ export async function getWorkspaceConnectionModelRestrictions(
   authoritySnapshot?: XaiProviderAccountAuthoritySnapshotV1,
   claudeAuthoritySnapshot?: ClaudeProviderAccountAuthoritySnapshotV1,
 ): Promise<ConnectionModelRestrictions> {
-  const [xai, xaiAuthority] = await Promise.all([
-    listXaiSubscriptionAccountsMetadata(db, { workspaceId, subjectId }),
-    authoritySnapshot ??
-      resolveXaiProviderAccountAuthoritySnapshotForAcceptance(db, {
-        workspaceId,
-        subjectId,
-      }),
-  ]);
-  const xaiRotation = await getXaiRotationSettings(db, {
-    workspaceId,
-    subjectId,
-    authoritySnapshot: xaiAuthority,
-  });
   const union = (rows: Array<{ allowedModelIds?: string[] | null }>) =>
     rows.some((row) => row.allowedModelIds == null)
       ? null
       : [...new Set(rows.flatMap((row) => row.allowedModelIds ?? []))];
-  const claudeAuthority =
-    claudeAuthoritySnapshot ??
-    (await resolveClaudeProviderAccountAuthoritySnapshotForAcceptance(db, {
+  // Four independent read-only families. Each keeps its own scoped
+  // transactions and internal order; only the families overlap.
+  const readXai = async () => {
+    const [xai, xaiAuthority] = await Promise.all([
+      listXaiSubscriptionAccountsMetadata(db, { workspaceId, subjectId }),
+      authoritySnapshot ??
+        resolveXaiProviderAccountAuthoritySnapshotForAcceptance(db, {
+          workspaceId,
+          subjectId,
+        }),
+    ]);
+    const xaiRotation = await getXaiRotationSettings(db, {
       workspaceId,
       subjectId,
-    }));
-  let claudeModels: string[] | null = [];
-  try {
-    const [claude, claudeRotation] = await Promise.all([
-      listClaudeSubscriptionAccountsMetadataForAuthority(db, {
+      authoritySnapshot: xaiAuthority,
+    });
+    return { xai, xaiAuthority, xaiRotation };
+  };
+  const readClaude = async () => {
+    const claudeAuthority =
+      claudeAuthoritySnapshot ??
+      (await resolveClaudeProviderAccountAuthoritySnapshotForAcceptance(db, {
         workspaceId,
         subjectId,
-        authoritySnapshot: claudeAuthority,
-      }),
-      getClaudeRotationSettings(db, { workspaceId, subjectId, authoritySnapshot: claudeAuthority }),
-    ]);
-    claudeModels = union(
-      claude.filter(
-        (row) =>
-          row.status === "active" &&
-          row.allocatorEnabled &&
-          (claudeRotation?.rotationEnabled || row.id === claudeRotation?.activeCredentialId),
+      }));
+    let claudeModels: string[] | null = [];
+    try {
+      const [claude, claudeRotation] = await Promise.all([
+        listClaudeSubscriptionAccountsMetadataForAuthority(db, {
+          workspaceId,
+          subjectId,
+          authoritySnapshot: claudeAuthority,
+        }),
+        getClaudeRotationSettings(db, {
+          workspaceId,
+          subjectId,
+          authoritySnapshot: claudeAuthority,
+        }),
+      ]);
+      claudeModels = union(
+        claude.filter(
+          (row) =>
+            row.status === "active" &&
+            row.allocatorEnabled &&
+            (claudeRotation?.rotationEnabled || row.id === claudeRotation?.activeCredentialId),
+        ),
+      );
+    } catch (error) {
+      // An accepted private pool cannot be replaced by the caller's current pool.
+      // Catalog readiness closes this rail; execution still rejects stale authority.
+      if (!claudeAuthoritySnapshot || !(error instanceof ClaudeAuthorityPoolInactiveError))
+        throw error;
+    }
+    return { claudeAuthority, claudeModels };
+  };
+  const readProviderConnections = async () =>
+    await withWorkspaceSubjectRls(db, workspaceId, subjectId, async (tx) =>
+      rawRows<{
+        prefix: string;
+        allowedModelIds: string[] | null;
+      }>(
+        tx,
+        sql`
+      SELECT CASE provider_kind WHEN 'vercel_gateway' THEN 'organization-gateway/' WHEN 'anthropic' THEN 'organization-anthropic/' WHEN 'claude_subscription' THEN 'organization-claude-subscription/' ELSE 'organization-openrouter/' END AS prefix,
+        allowed_model_ids AS "allowedModelIds" FROM organization_model_provider_connections WHERE status = 'active' AND provider_kind <> 'claude_subscription'
+      UNION ALL
+      SELECT CASE metadata->>'credentialRole' WHEN 'vercel_ai_gateway' THEN 'workspace-gateway/' WHEN 'anthropic' THEN 'workspace-anthropic/' WHEN 'claude_subscription' THEN 'workspace-claude-subscription/' ELSE 'workspace-openrouter/' END,
+        allowed_model_ids FROM (
+        SELECT DISTINCT ON (metadata->>'credentialRole') * FROM connections WHERE workspace_id = ${workspaceId}::uuid AND subject_id IS NULL
+        AND kind = 'api_key' AND status = 'active'
+        AND ((metadata->>'credentialRole' = 'vercel_ai_gateway' AND lower(provider_domain) = ${VERCEL_AI_GATEWAY_CONNECTION_DOMAIN})
+          OR (metadata->>'credentialRole' = 'openrouter' AND lower(provider_domain) = ${WORKSPACE_OPENROUTER_CONNECTION_DOMAIN})
+          OR (metadata->>'credentialRole' = 'anthropic' AND lower(provider_domain) = 'api.anthropic.com'))
+        ORDER BY metadata->>'credentialRole', created_at DESC, id DESC
+      ) selected`,
       ),
     );
-  } catch (error) {
-    // An accepted private pool cannot be replaced by the caller's current pool.
-    // Catalog readiness closes this rail; execution still rejects stale authority.
-    if (!claudeAuthoritySnapshot || !(error instanceof ClaudeAuthorityPoolInactiveError))
-      throw error;
-  }
+  const readDirectConnections = async () =>
+    await listDirectModelConnections(db, workspaceId, subjectId);
+  const [
+    { xai, xaiAuthority, xaiRotation },
+    { claudeAuthority, claudeModels },
+    providerConnectionRows,
+    directConnections,
+  ] = await readIndependentFamilies(db, [
+    readXai,
+    readClaude,
+    readProviderConnections,
+    readDirectConnections,
+  ] as const);
   const restrictions: ConnectionModelRestrictions = {
     "codex/": union(codex.filter((row) => row.status === "active" && row.allocatorEnabled)),
     "supergrok/": union(
@@ -130,33 +177,34 @@ export async function getWorkspaceConnectionModelRestrictions(
     "organization-claude-subscription/":
       claudeAuthority.scope === "organization" ? claudeModels : [],
   };
-  await withWorkspaceSubjectRls(db, workspaceId, subjectId, async (tx) => {
-    const rows = await rawRows<{
-      prefix: string;
-      allowedModelIds: string[] | null;
-    }>(
-      tx,
-      sql`
-      SELECT CASE provider_kind WHEN 'vercel_gateway' THEN 'organization-gateway/' WHEN 'anthropic' THEN 'organization-anthropic/' WHEN 'claude_subscription' THEN 'organization-claude-subscription/' ELSE 'organization-openrouter/' END AS prefix,
-        allowed_model_ids AS "allowedModelIds" FROM organization_model_provider_connections WHERE status = 'active' AND provider_kind <> 'claude_subscription'
-      UNION ALL
-      SELECT CASE metadata->>'credentialRole' WHEN 'vercel_ai_gateway' THEN 'workspace-gateway/' WHEN 'anthropic' THEN 'workspace-anthropic/' WHEN 'claude_subscription' THEN 'workspace-claude-subscription/' ELSE 'workspace-openrouter/' END,
-        allowed_model_ids FROM (
-        SELECT DISTINCT ON (metadata->>'credentialRole') * FROM connections WHERE workspace_id = ${workspaceId}::uuid AND subject_id IS NULL
-        AND kind = 'api_key' AND status = 'active'
-        AND ((metadata->>'credentialRole' = 'vercel_ai_gateway' AND lower(provider_domain) = ${VERCEL_AI_GATEWAY_CONNECTION_DOMAIN})
-          OR (metadata->>'credentialRole' = 'openrouter' AND lower(provider_domain) = ${WORKSPACE_OPENROUTER_CONNECTION_DOMAIN})
-          OR (metadata->>'credentialRole' = 'anthropic' AND lower(provider_domain) = 'api.anthropic.com'))
-        ORDER BY metadata->>'credentialRole', created_at DESC, id DESC
-      ) selected`,
-    );
-    for (const row of rows) restrictions[row.prefix] = row.allowedModelIds;
-  });
-  for (const connection of await listDirectModelConnections(db, workspaceId, subjectId)) {
+  for (const row of providerConnectionRows) restrictions[row.prefix] = row.allowedModelIds;
+  for (const connection of directConnections) {
     const spec = directModelConnectionSpec(connection);
     if (spec) restrictions[`${spec.providerId}/`] = [spec.modelId];
   }
   return restrictions;
+}
+
+/**
+ * Run independent read families concurrently on a pool handle. A transaction
+ * handle shares one backend and LOCAL GUC scope, so its families keep the
+ * original serial order instead of opening concurrent nested savepoints. Every
+ * family settles before returning, and a failure surfaces in declaration order
+ * exactly as the serial reads would have reported it.
+ */
+async function readIndependentFamilies<const Readers extends readonly (() => Promise<unknown>)[]>(
+  db: Database,
+  readers: Readers,
+): Promise<{ -readonly [K in keyof Readers]: Awaited<ReturnType<Readers[K]>> }> {
+  type Result = { -readonly [K in keyof Readers]: Awaited<ReturnType<Readers[K]>> };
+  if (typeof (db as Database & { rollback?: unknown }).rollback === "function") {
+    const values: unknown[] = [];
+    for (const read of readers) values.push(await read());
+    return values as Result;
+  }
+  const settled = await Promise.allSettled(readers.map((read) => read()));
+  for (const result of settled) if (result.status === "rejected") throw result.reason;
+  return settled.map((result) => (result as PromiseFulfilledResult<unknown>).value) as Result;
 }
 
 export function modelAllowedByConnections(
