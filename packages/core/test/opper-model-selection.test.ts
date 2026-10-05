@@ -52,10 +52,8 @@ describe("Opper workspace model selection", () => {
       });
     // An active OpenRouter connection never readies the Opper rail.
     expect(
-      find(
-        selection({ workspaceOpenRouterConnectionActive: true }),
-        `workspace-opper/${GEMINI}`,
-      )?.availability.selectable,
+      find(selection({ workspaceOpenRouterConnectionActive: true }), `workspace-opper/${GEMINI}`)
+        ?.availability.selectable,
     ).toBe(false);
   });
 

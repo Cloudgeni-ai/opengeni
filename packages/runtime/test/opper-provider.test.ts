@@ -114,7 +114,7 @@ describe("Opper request policy", () => {
         ],
       },
     });
-    const toolMessage = (result?.body.messages as Array<Record<string, unknown>>).at(-1)!;
+    const toolMessage = (result!.body.messages as Array<Record<string, unknown>>).at(-1)!;
     expect(String(toolMessage.content)).toContain('"_$ref"');
     expect(String(toolMessage.content)).not.toContain('"$ref"');
   });
