@@ -32,6 +32,7 @@ import {
   recordModelTransportStarted,
 } from "./model-preparation-diagnostics";
 import { captureProviderRequestBody } from "./model-request-capture";
+import { streamIdleTimeoutModelFetch } from "./model-stream-idle-timeout";
 import { withoutQuotaExhaustedRetries } from "./provider-quota";
 import {
   captureClaudeRequestToken,
@@ -96,7 +97,11 @@ export function buildOpenAIClientFromSettings(
             : undefined,
         fetch: sdkRetryingModelFetch(
           settings.openaiMaxRetries,
-          instrumentedModelFetch(providerId, globalThis.fetch),
+          streamIdleTimeoutModelFetch(
+            providerId,
+            modelStreamIdlePolicy(settings),
+            instrumentedModelFetch(providerId, globalThis.fetch),
+          ),
         ),
       },
       {
@@ -112,11 +117,29 @@ export function buildOpenAIClientFromSettings(
       maxRetries: settings.openaiMaxRetries,
       fetch: sdkRetryingModelFetch(
         settings.openaiMaxRetries,
-        instrumentedModelFetch(providerId, globalThis.fetch),
+        streamIdleTimeoutModelFetch(
+          providerId,
+          modelStreamIdlePolicy(settings),
+          instrumentedModelFetch(providerId, globalThis.fetch),
+        ),
       ),
     },
     { modelRequestPolicy: chatModelRequestPolicy },
   );
+}
+
+/**
+ * Effective generic stream stall bounds: a registry provider override wins
+ * over the deployment default. Codex/SuperGrok/Anthropic own their transports.
+ */
+export function modelStreamIdlePolicy(
+  settings: Pick<Settings, "modelStreamIdleTimeoutMs" | "modelStreamProgressTimeoutMs">,
+  provider?: Pick<ResolvedModelProvider, "streamIdleTimeoutMs" | "streamProgressTimeoutMs">,
+): { idleTimeoutMs: number; progressTimeoutMs: number } {
+  return {
+    idleTimeoutMs: provider?.streamIdleTimeoutMs ?? settings.modelStreamIdleTimeoutMs,
+    progressTimeoutMs: provider?.streamProgressTimeoutMs ?? settings.modelStreamProgressTimeoutMs,
+  };
 }
 
 /**
@@ -194,6 +217,7 @@ function providerClientCacheKey(
           ? [...gatewayPolicies.entries()].sort(([left], [right]) => left.localeCompare(right))
           : null,
         openaiMaxRetries: settings.openaiMaxRetries,
+        streamIdlePolicy: modelStreamIdlePolicy(settings, provider),
         builtin:
           provider.builtin && settings.openaiProvider === "azure"
             ? {
@@ -393,17 +417,21 @@ export function buildProviderClient(provider: ResolvedModelProvider, settings: S
               ...(provider.defaultHeaders ? { defaultHeaders: provider.defaultHeaders } : {}),
               fetch: sdkRetryingModelFetch(
                 registryMaxRetries,
-                anonymousProvider
-                  ? withoutAuthenticationHeaders(
-                      instrumentedModelFetch(provider.id, globalThis.fetch),
-                    )
-                  : gatewayProvider
-                    ? vercelGatewayRoutingFetch(
-                        provider.kind as "vercel-gateway-managed" | "vercel-gateway-workspace",
+                streamIdleTimeoutModelFetch(
+                  provider.id,
+                  modelStreamIdlePolicy(settings, provider),
+                  anonymousProvider
+                    ? withoutAuthenticationHeaders(
                         instrumentedModelFetch(provider.id, globalThis.fetch),
-                        gatewayPolicies,
                       )
-                    : instrumentedModelFetch(provider.id, globalThis.fetch),
+                    : gatewayProvider
+                      ? vercelGatewayRoutingFetch(
+                          provider.kind as "vercel-gateway-managed" | "vercel-gateway-workspace",
+                          instrumentedModelFetch(provider.id, globalThis.fetch),
+                          gatewayPolicies,
+                        )
+                      : instrumentedModelFetch(provider.id, globalThis.fetch),
+                ),
               ),
             },
             { modelRequestPolicy: modelRequestPolicyForProvider(provider, gatewayPolicies) },

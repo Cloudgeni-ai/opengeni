@@ -1,7 +1,11 @@
 import { expect, test } from "bun:test";
 import { createObservability } from "@opengeni/observability";
 import { testSettings } from "@opengeni/testing";
-import { buildOpenAIClientFromSettings, ResponsesStreamingTerminalError } from "@opengeni/runtime";
+import {
+  buildOpenAIClientFromSettings,
+  ModelStreamIdleTimeoutError,
+  ResponsesStreamingTerminalError,
+} from "@opengeni/runtime";
 import {
   agentRunFailurePayload,
   providerRecoveryResult,
@@ -156,4 +160,54 @@ test("stream failures and successful recovery emit structural model metrics", as
   expect(metrics).toMatch(/opengeni_model_recovery_delay_seconds_sum\{[^}]*\} 62/);
   expect(metrics).toMatch(/opengeni_model_recovery_duration_seconds_sum\{[^}]*\} 68/);
   expect(metrics).not.toMatch(/synthetic provider diagnostic|session_id|workspace_id|request_id/);
+});
+
+test("a stalled model stream is a finite retryable provider failure, never terminal", () => {
+  for (const kind of ["bytes", "progress"] as const) {
+    const stall = new ModelStreamIdleTimeoutError("azure-sol", kind, 300_000, 512);
+    // The Agents SDK and provider wrappers may nest the transport error.
+    const wrapped = new Error("Responses stream failed", { cause: stall });
+    for (const error of [stall, wrapped]) {
+      const payload = agentRunFailurePayload(error);
+      expect(payload).toMatchObject({
+        code: "provider_unavailable",
+        retryable: true,
+        timeoutClass: kind === "bytes" ? "idle_stream" : "progress_stream",
+        responseObserved: true,
+      });
+      expect(payload.error).toContain("300s");
+    }
+  }
+  // Same finite same-turn budget as every transient provider failure.
+  for (let attemptNumber = 1; attemptNumber <= 5; attemptNumber += 1) {
+    expect(
+      providerRecoveryResult({ failureCode: "provider_unavailable", attemptNumber }).status,
+    ).toBe("recovering");
+  }
+  expect(providerRecoveryResult({ failureCode: "provider_unavailable", attemptNumber: 6 })).toEqual(
+    { status: "exhausted", providerRecoveryCount: 5, maxProviderRecoveryCount: 5 },
+  );
+  expect(
+    providerRecoveryCause(
+      agentRunFailurePayload(new ModelStreamIdleTimeoutError("p", "bytes", 1, 0)).code,
+    ),
+  ).toBe("unavailable");
+});
+
+test("a fetch-layer TimeoutError recovers the same turn; explicit cancellation does not", () => {
+  // Bun's fetch raises this DOMException after five idle minutes mid-stream.
+  const timeout = new DOMException("The operation timed out.", "TimeoutError");
+  for (const error of [timeout, new Error("stream failed", { cause: timeout })]) {
+    expect(agentRunFailurePayload(error)).toMatchObject({
+      code: "provider_unavailable",
+      retryable: true,
+      timeoutClass: "transport",
+      detail: error.message,
+    });
+  }
+  const aborted = new DOMException("The operation was aborted.", "AbortError");
+  expect(agentRunFailurePayload(aborted).retryable).not.toBe(true);
+  // A real HTTP refusal stays authoritative even when its text mentions a timeout.
+  const refused = Object.assign(new Error("The operation timed out."), { status: 400 });
+  expect(agentRunFailurePayload(refused).retryable).not.toBe(true);
 });
