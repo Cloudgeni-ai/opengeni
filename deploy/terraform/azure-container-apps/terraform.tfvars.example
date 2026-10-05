@@ -4,7 +4,10 @@ name_prefix         = "opengeni-aca"
 resource_group_name = "rg-opengeni-aca"
 location            = "northeurope"
 
-# bootstrap creates substrate, identities, secrets, and a MANUAL job, not apps.
+# bootstrap (default) creates substrate, secrets, and a MANUAL job, not apps.
+# ACA validates job image pulls at CREATE. For a new create_acr=true registry,
+# first select "foundation" (no job/apps), import matching immutable images into
+# that created ACR, update images below, then select "bootstrap" and run the job.
 deployment_phase             = "bootstrap"
 migration_completed_revision = ""
 
@@ -74,8 +77,9 @@ log_analytics = {
 # False only for disposable validation. Destroy never auto-purges a vault.
 key_vault_purge_protection_enabled = true
 
-# Optional EMPTY registry; import images separately after bootstrap, update
-# image refs, and rerun the matching-image migration job before enabling apps.
+# Optional EMPTY registry: foundation -> import matching images -> bootstrap
+# (job CREATE validates pulls) -> manual Succeeded -> exact-image apps attestation.
+# No foreign-registry AcrPull grants are created to bypass that ordering.
 create_acr                 = false
 outbox_dispatcher_enabled = false
 migration_timeout_seconds = 3600

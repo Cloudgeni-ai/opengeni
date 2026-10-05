@@ -11,6 +11,12 @@ environment HTTP routing uses a pinned preview ARM API, and native Office-file
 export is disabled until ACA can safely support the materializer's isolation
 requirements. Do not describe this root as feature-complete Kubernetes parity.
 
+`bootstrap` remains the default. When images must first be imported into the
+optional created ACR, use `foundation` to create the substrate without any
+image-consuming job or app: **foundation → import matching digest images →
+bootstrap → manual job Succeeded → exact-image attestation → apps**. ACA
+validates migration image pulls when creating the job, not only at execution.
+
 ## Owned resources and defaults
 
 | Resource | Contract |
@@ -24,7 +30,7 @@ requirements. Do not describe this root as feature-complete Kubernetes parity.
 | Secret delivery | Created RBAC Key Vault; separate user-assigned workload identities; `Key Vault Secrets User` scoped to individual created secrets, not the whole vault |
 | Logs | Log Analytics, 30-day retention and 1 GB/day ingestion cap by default; cap is not a hard cost ceiling and may stop ingestion |
 | Registry | Public anonymous digest pulls by default; optional empty created ACR, admin login disabled, resource-scoped `AcrPull` |
-| Bootstrap job | Manual API-image migration/provision/posture/catalog job; parallelism/completion `1`, retries `0`, timeout `3600s` |
+| Phases / bootstrap job | `foundation`: no job/apps; default `bootstrap`: manual API-image migration/provision/posture/catalog job; parallelism/completion `1`, retries `0`, timeout `3600s` |
 | Serving | Distinct API, web, control worker, turn worker, optional outbox apps; `Single` revision mode; all minimum replicas at least `1` |
 | Browser edge | Native environment `httpRouteConfigs` routes one HTTPS origin to internal-ingress API/web only; workers are never route targets |
 
@@ -132,10 +138,13 @@ claim here.
    root only owns its VNet. For disposable live validation, separately owned
    fixtures are acceptable but are not production defaults.
 2. Use matching-release digest-pinned official API/worker/web images. With
-   `create_acr = false`, images must be anonymously pullable. With `true`, import
-   images into the created ACR separately, update the digests/registry host, and
-   rerun the matching API-image job before starting apps. No build/import occurs
-   in Terraform. No role is assigned to an existing external registry.
+   `create_acr = false`, images must be anonymously pullable and available before
+   applying `bootstrap`. For a new `create_acr = true` registry, start with
+   `foundation`, import the matching images separately, update the digests/registry
+   host, and then apply `bootstrap`. A job's create operation already validates
+   image pull; a private upstream reference without authorized pull credentials
+   cannot be used to postpone the import until bootstrap completes. No build/import
+   occurs in Terraform, and no role is assigned to an existing external registry.
 3. Ensure the applying principal can create the new resource group/resources
    and assign the documented roles on the created vault/secrets/optional ACR.
    An operator must pre-register `Microsoft.App`, `Microsoft.Network`,
@@ -146,9 +155,11 @@ claim here.
 4. Keep filled tfvars, backend metadata, state, plans, and credential-bearing
    logs outside the repository. Use an absolute private deployment directory
    with restrictive permissions. Copy/edit the example there and set
-   `deployment_phase = "bootstrap"`. Production operators should use a locked,
-   encrypted remote backend in a thin wrapper consuming this directory as a
-   module; the standalone root's local backend is for isolated operator use.
+   `deployment_phase = "foundation"` if the created ACR needs image import first,
+   otherwise leave the default `"bootstrap"` with already pullable images.
+   Production operators should use a locked, encrypted remote backend in a thin
+   wrapper consuming this directory as a module; the standalone root's local
+   backend is for isolated operator use.
 
 ```bash
 # Run from the repository root; use your own absolute private directory.
@@ -160,11 +171,28 @@ terraform -chdir="$TF_ROOT" init -reconfigure \
   -backend-config="path=$OPENGENI_DEPLOYMENT_DIR/terraform.tfstate"
 terraform -chdir="$TF_ROOT" plan \
   -var-file="$OPENGENI_DEPLOYMENT_DIR/terraform.tfvars" \
+  -out="$OPENGENI_DEPLOYMENT_DIR/initial.tfplan"
+terraform -chdir="$TF_ROOT" apply "$OPENGENI_DEPLOYMENT_DIR/initial.tfplan"
+```
+
+   If the initial phase is `foundation`, inspect `acr`, `environment`, and
+   `infrastructure_resource_group_name`. There is no migration job or serving
+   app; `migration_job` and `migration_job_name` are null (Terraform can omit
+   null outputs from CLI output). Import matching-release API/worker/web images,
+   plus outbox if enabled, into that **created** ACR using the operator's authorized
+   source access. Verify the imported digests and set `images` to their created
+   registry references; do not assume a tag or upstream private-registry access
+   proves ACA can pull them. Change the private tfvars to `deployment_phase =
+   "bootstrap"`, then plan/apply again:
+
+```bash
+terraform -chdir="$TF_ROOT" plan \
+  -var-file="$OPENGENI_DEPLOYMENT_DIR/terraform.tfvars" \
   -out="$OPENGENI_DEPLOYMENT_DIR/bootstrap.tfplan"
 terraform -chdir="$TF_ROOT" apply "$OPENGENI_DEPLOYMENT_DIR/bootstrap.tfplan"
 ```
 
-5. Inspect `environment`, `postgres`, `migration_job`, and `secret_references`
+5. Now inspect `environment`, `postgres`, `migration_job`, and `secret_references`
    outputs. Bootstrap creates the **job definition**, not an execution. Before
    a maintenance upgrade, drain every old/new API, control worker, turn worker,
    and outbox identity that can use the target DB. Supply every additional login
@@ -220,22 +248,26 @@ the serving apps and route**, not the database/storage/environment. Drain and
 verify physical processes have gone away, then run the new exact-image manual
 job and set a new successful-revision attestation. A boolean flag, workflow
 cancellation, or Terraform creating a job is not drain/completion proof.
+Changing a running deployment to `foundation` additionally removes the manual
+job; it is not a rolling-upgrade shortcut. The explicit moved block preserves
+the existing job's state address as `migration[0]` when adopting this counted
+resource in `bootstrap`/`apps`, without recreating it merely for the address change.
 
 ## Outputs consumed by operators/tooling
 
 | Output | Meaning |
 | --- | --- |
 | `resource_group_name`, `infrastructure_resource_group_name` | Both task-owned resource-group names relevant to cleanup |
-| `api_url`, `web_url` | Same public HTTPS edge origin, computable during bootstrap |
+| `api_url`, `web_url` | Same public HTTPS edge origin, computable during foundation/bootstrap |
 | `endpoints` | `api`, `web`, `api_internal`, public workspace-template `mcp` |
 | `environment` | `id`, `name`, `default_domain`, `vnet_id`, ACA `subnet_id` |
-| `migration_job_name`, `migration_job` | Manual job name and `id`, group, image, exact application login list, start command |
+| `migration_job_name`, `migration_job` | Null in foundation; otherwise manual job name and `id`, group, image, exact application login list, start command |
 | `postgres` | Server `id`, `fqdn`, database, app role, migration owner name; no password/URL |
 | `secret_references` | Created versionless Key Vault IDs keyed by supplied env name or `migration-db-url`, `application-db-url`, etc.; no values |
 | `runtime_nonsecret_env` | Shared non-secret runtime wiring; excludes supplied secret overrides |
 | `workload_identities` | Per-role identity/principal/client IDs |
 | `blob_storage`, `acr`, `log_analytics_workspace_id` | Storage/CORS metadata, optional registry metadata, logging resource ID |
-| `serving_app_ids`, `edge_route` | Created serving resources and route readback; empty/null in bootstrap |
+| `serving_app_ids`, `edge_route` | Created serving resources and route readback; empty/null in foundation/bootstrap |
 
 ## Static checks
 

@@ -1,6 +1,6 @@
 locals {
   # Only environment outputs feed these URLs, never app outputs. This lets
-  # bootstrap set CORS and job configuration before serving apps exist, and
+  # foundation/bootstrap set CORS and job configuration before serving apps exist, and
   # prevents API<->web resource dependency cycles.
   edge_name         = "${var.name_prefix}-edge"
   edge_fqdn         = "${local.edge_name}.${azurerm_container_app_environment.this.default_domain}"

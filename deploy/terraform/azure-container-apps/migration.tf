@@ -25,7 +25,16 @@ locals {
   } : {}, contains(nonsensitive(keys(var.secret_env)), "OPENGENI_ENVIRONMENTS_ENCRYPTION_KEY") ? { OPENGENI_ENVIRONMENTS_ENCRYPTION_KEY = "OPENGENI_ENVIRONMENTS_ENCRYPTION_KEY" } : {})
 }
 
+# Preserve existing bootstrap/app state when introducing the optional phase.
+moved {
+  from = azurerm_container_app_job.migration
+  to   = azurerm_container_app_job.migration[0]
+}
+
 resource "azurerm_container_app_job" "migration" {
+  # ACA validates image pull when creating a job, not only when executing it.
+  # An empty task-owned ACR must be populated between foundation and bootstrap.
+  count                        = var.deployment_phase == "foundation" ? 0 : 1
   name                         = "${var.name_prefix}-migrate"
   resource_group_name          = azurerm_resource_group.this.name
   location                     = var.location

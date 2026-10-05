@@ -119,11 +119,12 @@ run "bootstrap_is_non_serving_and_private" {
   }
   assert {
     condition = (
-      azurerm_container_app_job.migration.replica_retry_limit == 0 &&
-      azurerm_container_app_job.migration.manual_trigger_config[0].parallelism == 1 &&
-      azurerm_container_app_job.migration.replica_timeout_in_seconds == 3600 &&
-      length(azurerm_container_app_job.migration.event_trigger_config) == 0 &&
-      length(azurerm_container_app_job.migration.schedule_trigger_config) == 0
+      length(azurerm_container_app_job.migration) == 1 &&
+      azurerm_container_app_job.migration[0].replica_retry_limit == 0 &&
+      azurerm_container_app_job.migration[0].manual_trigger_config[0].parallelism == 1 &&
+      azurerm_container_app_job.migration[0].replica_timeout_in_seconds == 3600 &&
+      length(azurerm_container_app_job.migration[0].event_trigger_config) == 0 &&
+      length(azurerm_container_app_job.migration[0].schedule_trigger_config) == 0
     )
     error_message = "Migrations must run only by explicit manual execution, one replica, no automatic retries."
   }
@@ -132,8 +133,8 @@ run "bootstrap_is_non_serving_and_private" {
       length(setintersection(toset(keys(local.migration_secret_env)), toset(["OPENGENI_OPENAI_API_KEY", "OPENGENI_ACCESS_KEY", "OPENGENI_MODAL_TOKEN_SECRET"]))) == 0 &&
       local.migration_secret_env.OPENGENI_MIGRATIONS_DATABASE_URL == "migration-db-url" &&
       local.migration_secret_env.OPENGENI_DATABASE_URL == "application-db-url" &&
-      strcontains(azurerm_container_app_job.migration.template[0].container[0].args[0], "bun run db:assert-runtime-posture") &&
-      strcontains(azurerm_container_app_job.migration.template[0].container[0].args[0], "bun run catalog:import --snapshot /app/data/catalog/integrations-snapshot.json")
+      strcontains(azurerm_container_app_job.migration[0].template[0].container[0].args[0], "bun run db:assert-runtime-posture") &&
+      strcontains(azurerm_container_app_job.migration[0].template[0].container[0].args[0], "bun run catalog:import --snapshot /app/data/catalog/integrations-snapshot.json")
     )
     error_message = "Job must isolate owner/role-provision credentials from runtime auth/model/sandbox secrets and assert the restricted role before catalog import."
   }
@@ -382,4 +383,110 @@ run "plaintext_credentials_cannot_enter_config_env" {
   command = plan
   variables { config_env = { OPENGENI_OPENAI_API_KEY = "must-use-secret-env" } }
   expect_failures = [var.config_env]
+}
+
+run "foundation_creates_private_substrate_acr_without_image_pulls" {
+  command = apply
+  variables {
+    deployment_phase = "foundation"
+    create_acr       = true
+    secret_env       = {}
+    images = {
+      api    = "acatestacr.azurecr.io/opengeni-api@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+      worker = "acatestacr.azurecr.io/opengeni-worker@sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+      web    = "acatestacr.azurecr.io/opengeni-web@sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
+    }
+  }
+  assert {
+    condition = (
+      length(azurerm_container_app_job.migration) == 0 &&
+      length(azurerm_container_app.service) == 0 &&
+      length(azurerm_container_app.web) == 0 &&
+      length(azapi_resource.edge) == 0 &&
+      output.migration_job == null && output.migration_job_name == null
+    )
+    error_message = "foundation must have no migration job, image-consuming app or route, and absent job outputs must safely return null."
+  }
+  assert {
+    condition = (
+      length(azurerm_container_registry.this) == 1 &&
+      output.acr.login_server == "acatestacr.azurecr.io" &&
+      length(azurerm_user_assigned_identity.workload) == 5 &&
+      length(azurerm_role_assignment.acr_pull) == 5 &&
+      alltrue([for grant in azurerm_role_assignment.acr_pull : grant.scope == azurerm_container_registry.this[0].id]) &&
+      !azurerm_postgresql_flexible_server.this.public_network_access_enabled &&
+      azurerm_storage_container.files.container_access_type == "private" &&
+      output.infrastructure_resource_group_name == "rg-aca-test-aca-infra" &&
+      local.application_config_env.OPENGENI_ARTIFACT_MATERIALIZER_DEPLOYED == "false"
+    )
+    error_message = "foundation must retain private substrate, created-resource-only ACR pull identities, infrastructure RG tracking, and fail-closed exports."
+  }
+}
+
+run "foundation_cannot_bypass_exact_app_attestation" {
+  command = plan
+  variables {
+    deployment_phase = "apps"
+    create_acr       = true
+    images = {
+      api    = "acatestacr.azurecr.io/opengeni-api@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+      worker = "acatestacr.azurecr.io/opengeni-worker@sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+      web    = "acatestacr.azurecr.io/opengeni-web@sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
+    }
+  }
+  expect_failures = [terraform_data.application_gate]
+}
+
+run "bootstrap_after_foundation_creates_only_manual_private_acr_job" {
+  command = apply
+  variables {
+    deployment_phase = "bootstrap"
+    create_acr       = true
+    secret_env       = {}
+    images = {
+      api    = "acatestacr.azurecr.io/opengeni-api@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+      worker = "acatestacr.azurecr.io/opengeni-worker@sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+      web    = "acatestacr.azurecr.io/opengeni-web@sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
+    }
+  }
+  assert {
+    condition = (
+      length(azurerm_container_app_job.migration) == 1 &&
+      output.migration_job_name == "aca-test-migrate" &&
+      output.migration_job.image == var.images.api &&
+      azurerm_container_app_job.migration[0].registry[0].server == output.acr.login_server &&
+      azurerm_container_app_job.migration[0].registry[0].identity == azurerm_user_assigned_identity.workload["migration"].id &&
+      azurerm_container_app_job.migration[0].replica_retry_limit == 0 &&
+      azurerm_container_app_job.migration[0].manual_trigger_config[0].parallelism == 1 &&
+      length(azurerm_container_app.service) == 0 && length(azurerm_container_app.web) == 0 &&
+      output.environment.id == run.foundation_creates_private_substrate_acr_without_image_pulls.environment.id &&
+      output.postgres.id == run.foundation_creates_private_substrate_acr_without_image_pulls.postgres.id
+    )
+    error_message = "foundation -> bootstrap must retain substrate and create a single non-retrying manual job using only the created ACR pull identity, never serving apps."
+  }
+}
+
+run "private_acr_apps_follow_matching_bootstrap_job_attestation" {
+  command = apply
+  variables {
+    deployment_phase             = "apps"
+    create_acr                   = true
+    migration_completed_revision = "acatestacr.azurecr.io/opengeni-api@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+    images = {
+      api    = "acatestacr.azurecr.io/opengeni-api@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+      worker = "acatestacr.azurecr.io/opengeni-worker@sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+      web    = "acatestacr.azurecr.io/opengeni-web@sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
+    }
+  }
+  assert {
+    condition = (
+      output.migration_job.image == var.migration_completed_revision &&
+      length(azurerm_container_app_job.migration) == 1 &&
+      length(azurerm_container_app.service) == 3 && length(azurerm_container_app.web) == 1 &&
+      length(azapi_resource.edge) == 1 &&
+      local.application_config_env.OPENGENI_ARTIFACT_MATERIALIZER_DEPLOYED == "false" &&
+      output.infrastructure_resource_group_name == "rg-aca-test-aca-infra"
+    )
+    error_message = "apps must remain exact-image attestation gated after foundation/bootstrap, with exports disabled and both resource-group scopes tracked."
+  }
 }
