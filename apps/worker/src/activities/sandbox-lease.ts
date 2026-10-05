@@ -53,6 +53,7 @@ import {
   recordRecoveredModalProviderCreate,
   markWarmBillingStopCutoff,
   listMeterableWarmLeases,
+  countInteractionOnlyWarmLeasesByIdle,
   listSandboxViewerForceDrainWorkspaceIds,
   markSandboxCheckpointArtifactDeletePending,
   persistDrainSnapshot,
@@ -175,6 +176,7 @@ import {
   type SandboxInventoryProjectionDomain,
   recordSandboxLeaseGauges,
   recordModalSandboxInventoryGauges,
+  recordInteractionOnlyLeaseGauges,
   recordSandboxOrphansTerminated,
   recordSandboxCommandContainment,
   recordSandboxProviderMissingBeforeCapture,
@@ -2686,6 +2688,17 @@ async function refreshQueueLeaseAndCreditGauges(
         recordRetainedProcessInventoryGauges(
           observability,
           await countActiveRetainedProcessesByOwnerState(db),
+        );
+      },
+    ),
+    refreshSandboxInventoryGauge(
+      observability,
+      "interaction_idle",
+      "interaction-only-lease",
+      async () => {
+        recordInteractionOnlyLeaseGauges(
+          observability,
+          await countInteractionOnlyWarmLeasesByIdle(db, await listMeterableWarmLeases(db)),
         );
       },
     ),

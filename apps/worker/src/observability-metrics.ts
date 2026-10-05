@@ -1072,6 +1072,7 @@ export const SANDBOX_INVENTORY_PROJECTION_DOMAINS = [
   "expired_drains",
   "opensandbox_kubernetes",
   "modal_provider",
+  "interaction_idle",
 ] as const;
 
 export type SandboxInventoryProjectionDomain =
@@ -1250,6 +1251,23 @@ export function recordModalSandboxInventoryGauges(
       name: "opengeni_modal_sandbox_inventory",
       help: "Running Modal sandboxes reconciled against live sandbox leases by the orphan sweep.",
       labels: { state },
+      value: Math.max(0, value),
+    });
+  }
+}
+
+/** Warm leases held only by Browser/Computer interaction holders, by time since
+ * the newest interaction activity. Such boxes never drain on their own until the
+ * interaction session ends or the provider deadline. */
+export function recordInteractionOnlyLeaseGauges(
+  observability: Observability,
+  counts: Record<string, number>,
+): void {
+  for (const [idleBucket, value] of Object.entries(counts)) {
+    observability.setGauge({
+      name: "opengeni_sandbox_leases_interaction_only",
+      help: "Warm sandbox leases held only by Browser/Computer sessions, by time since last interaction activity.",
+      labels: { idle_bucket: idleBucket },
       value: Math.max(0, value),
     });
   }
