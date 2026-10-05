@@ -1,3 +1,7 @@
+import {
+  COMPOSER_VOICE_INPUT_START_EVENT,
+  composerVoiceEventScope,
+} from "../composer-voice-events";
 import { type EffectiveSessionControl, type SessionEvent, type SessionStatus } from "@opengeni/sdk";
 import {
   hasStoredSessionRealtimeOwnerProof,
@@ -912,6 +916,16 @@ export function RealtimeVoiceControl(props: {
   useEffect(() => {
     if (!startFailed) setFailureDismissed(false);
   }, [startFailed]);
+  const rootRef = useRef<HTMLDivElement>(null);
+  useEffect(() => {
+    if (!startFailed) return;
+    // Starting dictation in this composer supersedes a stale start failure.
+    const scope = composerVoiceEventScope(rootRef.current);
+    if (!scope) return;
+    const dismiss = () => setFailureDismissed(true);
+    scope.addEventListener(COMPOSER_VOICE_INPUT_START_EVENT, dismiss);
+    return () => scope.removeEventListener(COMPOSER_VOICE_INPUT_START_EVENT, dismiss);
+  }, [startFailed]);
 
   useEffect(() => {
     if (!pickerOpen) setPickerProvider(selectedModel.provider);
@@ -919,6 +933,7 @@ export function RealtimeVoiceControl(props: {
 
   return (
     <div
+      ref={rootRef}
       role="group"
       aria-label="Realtime voice"
       data-picker-side={props.menuSide ?? "top"}

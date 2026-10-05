@@ -970,6 +970,35 @@ describe("ordinary session Codex realtime control", () => {
     expect(reason()).toBeNull();
   });
 
+  test("starting dictation in the same composer retires a stale start failure", async () => {
+    await act(async () => {
+      root.render(
+        <div className="og-composer">
+          <RealtimeVoiceControl
+            snapshot={{ ...idle, status: "error", error: "Microphone access is blocked." }}
+            canStart={true}
+            modelAvailable={true}
+            audioRef={createRef<HTMLAudioElement>()}
+            onStart={async () => undefined}
+            onStop={async () => undefined}
+            onRetry={async () => undefined}
+            onRetryAudibleOutput={async () => undefined}
+            onSetInputMuted={() => undefined}
+            onSetOutputMuted={() => undefined}
+          />
+        </div>,
+      );
+    });
+    const reason = () => container.querySelector('[data-testid="realtime-failure-reason"]');
+    expect(reason()).not.toBeNull();
+    await act(async () => {
+      container
+        .querySelector(".og-composer")
+        ?.dispatchEvent(new Event("opengeni:composer-voice-input-start"));
+    });
+    expect(reason()).toBeNull();
+  });
+
   test("keeps an unavailable provider quiet and explains why start is disabled", async () => {
     await act(async () => {
       root.render(

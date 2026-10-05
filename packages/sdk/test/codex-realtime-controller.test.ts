@@ -2168,8 +2168,7 @@ describe("Codex realtime browser controller", () => {
     expect(controller.snapshot()).toMatchObject({
       status: "error",
       mode: null,
-      error:
-        "Microphone access is blocked. Allow it in site settings, then try again.",
+      error: "Microphone access is blocked. Allow it in site settings, then try again.",
     });
   });
 

@@ -1,3 +1,7 @@
+import {
+  COMPOSER_VOICE_INPUT_START_EVENT,
+  composerVoiceEventScope,
+} from "../composer-voice-events";
 import type {
   ClientVoiceInputConfig,
   OpenGeniClient,
@@ -218,6 +222,9 @@ export function ComposerTranscriptionControl({
       event.preventDefault();
       return;
     }
+    composerVoiceEventScope(event.currentTarget)?.dispatchEvent(
+      new Event(COMPOSER_VOICE_INPUT_START_EVENT),
+    );
     void transcription.start();
   }
 

@@ -1218,6 +1218,69 @@ describe("useVoiceInput", () => {
     expect(mounted.container.querySelector("[aria-label='Start voice input']")).toBeTruthy();
   });
 
+  test("a start error is dismissible and cleared when live voice takes the mic", async () => {
+    installMediaMocks({ deny: true });
+    const store = new MemoryVoiceRecordingStore();
+    let suppress: (value: boolean) => void = () => undefined;
+    const starts: string[] = [];
+
+    function Harness() {
+      const [value, setValue] = useState("");
+      const [suppressed, setSuppressed] = useState(false);
+      suppress = setSuppressed;
+      return (
+        <ChatComposer
+          composer={composerState(value, setValue, [])}
+          transcriptionSuppressed={suppressed}
+          transcription={{
+            client: { transcribeAudio: async () => ({ text: "", languages: [] }) } as never,
+            workspaceId: "ws-1",
+            capability,
+            workspaceEnabled: true,
+            createRecordingStore: () => store,
+            createOwnerId: () => "composer-error-owner",
+          }}
+        />
+      );
+    }
+
+    mounted = await renderComponent(<Harness />);
+    mounted.container
+      .querySelector(".og-composer")
+      ?.addEventListener("opengeni:composer-voice-input-start", () => starts.push("start"));
+    const blocked =
+      "[aria-label='Dismiss: Microphone access is blocked. Allow it in site settings, then try again.']";
+    const startOnce = async () =>
+      await act(async () => {
+        mounted?.container.querySelector<HTMLButtonElement>("[data-og-composer-dictate]")?.click();
+        await settle();
+      });
+
+    await startOnce();
+    expect(starts).toEqual(["start"]);
+    expect(mounted.container.querySelector(blocked)).toBeTruthy();
+    await act(async () => {
+      mounted?.container.querySelector<HTMLButtonElement>(blocked)?.click();
+      await settle();
+    });
+    expect(mounted.container.querySelector(blocked)).toBeNull();
+    expect(mounted.container.querySelector("[aria-label='Start voice input']")).toBeTruthy();
+
+    await startOnce();
+    expect(mounted.container.querySelector(blocked)).toBeTruthy();
+    // Live voice owning the mic retires the stale error instead of duplicating it.
+    await act(async () => {
+      suppress(true);
+      await settle();
+    });
+    await act(async () => {
+      suppress(false);
+      await settle();
+    });
+    expect(mounted.container.querySelector(blocked)).toBeNull();
+    expect(mounted.container.querySelector("[aria-label='Start voice input']")).toBeTruthy();
+  });
+
   test("uses short timeslices and stops before uploading audio above the one-shot byte ceiling", async () => {
     installMediaMocks();
     const store = new MemoryVoiceRecordingStore();
