@@ -32,6 +32,11 @@ describe("session control surface architecture", () => {
     expect(route).toContain("suspendAutosave: submitting");
     expect(route).toContain("disabled={newSessionDraft.loading || submitting}");
     expect(route).toContain("if (!outcomeUnknown) await preserveNewerLocalDraft()");
+    // Send saved the draft before each refused create: exhausting the retries
+    // must not leave "Draft not saved" up or autosave paused.
+    expect(route).toMatch(
+      /await preserveNewerLocalDraft\(\);\s*(?:\/\/[^\n]*\s*)*newSessionDraft\.clearError\(\);\s*toast\.error\("Couldn't send", \{\s*description: DRAFT_CHANGED_DURING_SEND_TEXT,/,
+    );
     expect(route).not.toContain("newSessionDraft.conflict ||");
     expect(route).not.toContain("!newSessionDraft.conflict &&");
     expect(route).not.toContain("newSessionDraft.conflict !== null ||");
