@@ -2145,6 +2145,19 @@ BEGIN
       REVOKE ALL ON TABLE opengeni_private.managed_auth_new_signups_switch_revisions FROM PUBLIC;
       EXECUTE format('GRANT SELECT ON TABLE opengeni_private.managed_auth_new_signups_switch_revisions TO %I', ${literal(role)});
     END IF;
+    IF to_regclass('opengeni_private.usage_reservation_balances') IS NOT NULL THEN
+      EXECUTE format('REVOKE ALL ON TABLE opengeni_private.usage_reservation_balances FROM %I', ${literal(role)});
+      EXECUTE format('REVOKE ALL (%s) ON TABLE opengeni_private.usage_reservation_balances FROM %I',
+        (SELECT string_agg(quote_ident(attname), ',') FROM pg_attribute
+          WHERE attrelid='opengeni_private.usage_reservation_balances'::regclass AND attnum>0 AND NOT attisdropped), ${literal(role)});
+      REVOKE ALL ON TABLE opengeni_private.usage_reservation_balances FROM PUBLIC;
+      REVOKE ALL ON FUNCTION opengeni_private.adjust_usage_reservation_balance(uuid,uuid,uuid,text,text,numeric) FROM PUBLIC;
+      REVOKE ALL ON FUNCTION opengeni_private.project_usage_reservation_balance() FROM PUBLIC;
+      EXECUTE format('REVOKE ALL ON FUNCTION opengeni_private.adjust_usage_reservation_balance(uuid,uuid,uuid,text,text,numeric) FROM %I', ${literal(role)});
+      EXECUTE format('REVOKE ALL ON FUNCTION opengeni_private.project_usage_reservation_balance() FROM %I', ${literal(role)});
+      REVOKE ALL ON FUNCTION opengeni_private.workspace_open_usage_reservations(uuid,uuid,text) FROM PUBLIC;
+      EXECUTE format('GRANT EXECUTE ON FUNCTION opengeni_private.workspace_open_usage_reservations(uuid,uuid,text) TO %I', ${literal(role)});
+    END IF;
     IF to_regclass('opengeni_private.organization_usage_read_capabilities') IS NOT NULL THEN
       EXECUTE format('REVOKE ALL ON TABLE opengeni_private.organization_usage_read_capabilities FROM %I', ${literal(role)});
       REVOKE ALL ON TABLE opengeni_private.organization_usage_read_capabilities FROM PUBLIC;

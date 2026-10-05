@@ -18,7 +18,9 @@ test.each(["delayed", "fresh-large"] as const)(
       contextAutoCompactThresholdTokens: 10_000,
     });
     const observability = createObservability(settings, { component: "worker" });
-    const usageSpy = spyOn(db, "recordUsageEvent").mockImplementation(async () => undefined);
+    const usageSpy = spyOn(db, "recordUsageEventsAndApplyCreditDebit").mockImplementation(
+      async () => ({ events: [], debit: null }) as never,
+    );
     const factSpy = spyOn(db, "recordModelCallFact").mockImplementation(async () => undefined);
     try {
       const state = createModelResponseEventState();

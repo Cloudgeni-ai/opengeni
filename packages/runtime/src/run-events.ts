@@ -276,6 +276,7 @@ export type ModelResponseUsage = {
     inferenceCostUsd: string;
   };
   usage: {
+    providerUsageReported?: boolean;
     inputTokens?: number;
     outputTokens?: number;
     totalTokens?: number;
@@ -826,7 +827,16 @@ function usageFromResponse(response: unknown): ModelResponseUsage["usage"] | nul
     return null;
   }
   const record = raw as Record<string, unknown>;
+  const responseRecord = response as {
+    providerUsageReported?: boolean;
+    providerData?: { providerUsageReported?: boolean };
+  };
+  const providerUsageReported =
+    record.providerUsageReported ??
+    responseRecord.providerUsageReported ??
+    responseRecord.providerData?.providerUsageReported;
   const usage = {
+    ...(typeof providerUsageReported === "boolean" ? { providerUsageReported } : {}),
     ...numberProp(
       record,
       "inputTokens",

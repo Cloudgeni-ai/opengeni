@@ -1023,6 +1023,26 @@ export function sessionAuthoritySnapshotsEqual(
 }
 
 /**
+ * The account-scoped usage-budget reservation lock. Lock order in the
+ * reservation protocol is always ADVISORY-THEN-ROW on both sides: the
+ * usage_events execution-context trigger takes FOR KEY SHARE on the
+ * session/turn/attempt rows, so a transaction that inserts usage facts or
+ * closes an attempt must acquire this advisory BEFORE its first
+ * session/turn/attempt row lock — otherwise a close holding a row lock
+ * deadlocks against an admission holding the advisory and waiting on that
+ * row. Reentrant for the same key inside one transaction, and held through
+ * commit.
+ */
+export async function acquireUsageBudgetReservationLock(
+  db: Database,
+  accountId: string,
+): Promise<void> {
+  await db.execute(
+    sql`select pg_advisory_xact_lock(hashtextextended(${`usage-budget-reserve:${accountId}`}, 0))`,
+  );
+}
+
+/**
  * Close the exact first-class owner while the caller still holds the owning
  * session/turn locks. Every path that clears `session_turns.active_attempt_id`
  * must call this in the same transaction; otherwise a later claim would either
@@ -1041,6 +1061,16 @@ export async function closeSessionTurnAttemptInTransaction(
     closedAt?: Date;
   },
 ): Promise<{ action: "closed" | "already_closed" }> {
+  // Fence hold creation against this close: tryReserveUsageBudget checks
+  // attempt liveness under the same account advisory lock, so a hold can
+  // never be committed for an attempt after this close commits, and a hold
+  // committed before closure retains its hold until authoritative reconciliation. The advisory is taken BEFORE the attempt row lock —
+  // advisory-then-row, the same order admissions and reconcile writers use —
+  // or this close (row lock held, waiting on the advisory) deadlocks against
+  // an admission (advisory held, waiting on this row through the usage
+  // trigger's FOR KEY SHARE). Held through commit; callers that already
+  // acquired it see a reentrant no-op.
+  await acquireUsageBudgetReservationLock(db, input.accountId);
   const [attempt] = await db
     .select()
     .from(schema.sessionTurnAttempts)
@@ -1099,6 +1129,8 @@ export async function closeSessionTurnAttemptInTransaction(
   if (!closed) {
     throw new SessionControlInvariantError(`Attempt ${input.id} changed while locked`);
   }
+  // An in-flight request can remain billable after logical closure. Its hold
+  // survives until authoritative usage reconciliation.
   return { action: "closed" };
 }
 

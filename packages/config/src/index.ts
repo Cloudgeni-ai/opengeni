@@ -7087,6 +7087,84 @@ export function calculateModelUsageCostBreakdown(
   return calculateUsageCostBreakdown(settings, model, usage, schedule, options);
 }
 
+/** Cost upper bound for any entry/class partition within one admitted token budget. */
+export function calculateModelUsageReservationCostBreakdown(
+  settings: Settings,
+  model: string,
+  budget: { inputTokens: number; outputTokens: number },
+  options?: { latencyMode?: LatencyMode },
+): ModelUsageCostBreakdown | null {
+  const schedule = configuredModelPricingSchedules(settings)[model];
+  if (!schedule) throw new Error(`Missing model pricing for ${model}`);
+  const prices = [
+    schedule.default,
+    ...(schedule.inputTokenTiers ?? []).map((tier) => tier.pricing),
+  ];
+  // Each nonzero token may occupy its own independently rounded entry/class.
+  // ceil(n * rate) <= n * ceil(rate) for every integer token count n.
+  const inputUnit = Math.ceil(
+    Math.max(
+      ...prices.flatMap((price) => [
+        price.inputMicrosPerMillionTokens,
+        price.cachedInputMicrosPerMillionTokens ?? price.inputMicrosPerMillionTokens,
+        price.cacheWriteMicrosPerMillionTokens ?? price.inputMicrosPerMillionTokens,
+      ]),
+    ) / 1_000_000,
+  );
+  const outputUnit = Math.ceil(
+    Math.max(...prices.map((price) => price.outputMicrosPerMillionTokens)) / 1_000_000,
+  );
+  const inputTokens = positiveInt(budget.inputTokens);
+  const outputTokens = positiveInt(budget.outputTokens);
+  // Settlement uses Number multiplication before division. A mathematically
+  // exact upper bound cannot cover its rounding artifacts when those products
+  // exceed integer precision; refuse a cost bound instead of under-reserving.
+  const inputRate = Math.max(
+    ...prices.flatMap((price) => [
+      price.inputMicrosPerMillionTokens,
+      price.cachedInputMicrosPerMillionTokens ?? price.inputMicrosPerMillionTokens,
+      price.cacheWriteMicrosPerMillionTokens ?? price.inputMicrosPerMillionTokens,
+    ]),
+  );
+  const outputRate = Math.max(...prices.map((price) => price.outputMicrosPerMillionTokens));
+  if (
+    !Number.isSafeInteger(inputTokens * inputRate) ||
+    !Number.isSafeInteger(outputTokens * outputRate)
+  )
+    return null;
+  const providerCostMicros = inputTokens * inputUnit + outputTokens * outputUnit;
+  const marginBps = Math.max(...prices.map((price) => price.marginBps ?? 0));
+  // Actual pricing groups entries by selected schedule, then rounds each
+  // group's margin. Sum of ceilings exceeds one ceiling by at most groups-1.
+  const groups = Math.min(prices.length, inputTokens + outputTokens);
+  const marginRounding = providerCostMicros > 0 && marginBps > 0 ? Math.max(0, groups - 1) : 0;
+  if (
+    !Number.isSafeInteger(providerCostMicros) ||
+    !Number.isSafeInteger(providerCostMicros * (10_000 + marginBps))
+  )
+    return null;
+  const creditCostMicros =
+    Math.ceil((providerCostMicros * (10_000 + marginBps)) / 10_000) + marginRounding;
+  const multiplier = modelUsageLatencyMultiplier(
+    settings,
+    model,
+    options?.latencyMode ?? "standard",
+  );
+  if (
+    !Number.isSafeInteger(creditCostMicros) ||
+    (multiplier !== undefined &&
+      (!Number.isSafeInteger(providerCostMicros * multiplier) ||
+        !Number.isSafeInteger(creditCostMicros * multiplier)))
+  )
+    return null;
+  return applyModelUsageLatency(
+    settings,
+    model,
+    { providerCostMicros, creditCostMicros },
+    options?.latencyMode ?? "standard",
+  );
+}
+
 /** Provider-list/equivalent-credit comparison only; never debit authority. */
 export function calculateModelListUsageCostBreakdown(
   settings: Settings,
@@ -7414,20 +7492,42 @@ function calculateUsageCostBreakdown(
     providerCostMicros += rawCost;
     creditCostMicros += Math.ceil((rawCost * (10_000 + marginBps)) / 10_000);
   }
-  const latencyMode = options?.latencyMode ?? "standard";
-  if (latencyMode !== "standard") {
-    const catalogSettings = settingsForTurnExecutionPolicy(settings, model);
-    const resolved = resolveModelProvider(
-      catalogSettings,
-      canonicalizeConfiguredModelId(catalogSettings, model),
-    );
-    const multiplierBps = resolved?.model.capabilities.latencyModes.find(
-      (mode) => mode.id === latencyMode && mode.runnable,
-    )?.billingMultiplierBps;
-    if (multiplierBps && multiplierBps > 0) {
-      providerCostMicros = Math.ceil((providerCostMicros * multiplierBps) / 10_000);
-      creditCostMicros = Math.ceil((creditCostMicros * multiplierBps) / 10_000);
-    }
+  return applyModelUsageLatency(
+    settings,
+    model,
+    { providerCostMicros, creditCostMicros },
+    options?.latencyMode ?? "standard",
+  );
+}
+
+function modelUsageLatencyMultiplier(
+  settings: Settings,
+  model: string,
+  latencyMode: LatencyMode,
+): number | undefined {
+  if (latencyMode === "standard") return undefined;
+  const catalogSettings = settingsForTurnExecutionPolicy(settings, model);
+  const resolved = resolveModelProvider(
+    catalogSettings,
+    canonicalizeConfiguredModelId(catalogSettings, model),
+  );
+  const multiplier = resolved?.model.capabilities.latencyModes.find(
+    (mode) => mode.id === latencyMode && mode.runnable,
+  )?.billingMultiplierBps;
+  return multiplier && multiplier > 0 ? multiplier : undefined;
+}
+
+function applyModelUsageLatency(
+  settings: Settings,
+  model: string,
+  cost: ModelUsageCostBreakdown,
+  latencyMode: LatencyMode,
+): ModelUsageCostBreakdown {
+  let { providerCostMicros, creditCostMicros } = cost;
+  const multiplierBps = modelUsageLatencyMultiplier(settings, model, latencyMode);
+  if (multiplierBps !== undefined) {
+    providerCostMicros = Math.ceil((providerCostMicros * multiplierBps) / 10_000);
+    creditCostMicros = Math.ceil((creditCostMicros * multiplierBps) / 10_000);
   }
   return { providerCostMicros, creditCostMicros };
 }

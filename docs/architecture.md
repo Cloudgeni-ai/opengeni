@@ -1089,6 +1089,45 @@ Canonical: [`knowledge.md`](knowledge.md),
 
 ### 5.7 Usage, limits, and billing
 
+Configured monthly token and account-cost caps reserve a complete provider-call
+bound under an account advisory lock before ordinary inference, summaries, and
+remote compaction dispatch. The worker waits for the previous response's usage
+settlement, gives each call a fresh UUID, and preserves the accepted human,
+allowance, entitlement, and billing authority. Input reservations cover the
+selected model's complete context window; output is separately limited on the
+wire. Cost bounds include pricing tiers, cache writes, margin, and latency.
+Missing cost pricing refuses cost-capped dispatch. Reservation-backed requests
+cannot use hidden SDK retries.
+
+SDK-normalized zeros do not prove that a provider reported usage. Preserve raw
+counter-presence evidence before SDK defaults and retain it through SDK schema
+parsing; missing or partial usage keeps
+its hold, while explicitly reported zero usage can settle. A terminal response's
+SDK aggregate cannot replace missing telemetry. Cost reservations bound each
+token at its worst rounded unit price across all input classes and price tiers,
+including independently rounded usage entries and pricing-group margins. Normalized terminals and raw
+mirrors retain one response-to-call binding and cannot consume the next hold.
+Owned transports assign a unique local identity per dispatch when the provider
+omits an ID, including Chat SDK placeholder IDs. Overflow recovery retires
+the failed call from response ordering while preserving its unresolved hold.
+Gateway-reported monetary charges have no token-price bound, so credit-funded
+Gateway calls under a monthly cost cap fail admission until an enforceable
+provider charge bound is available. Token-only, external, and uncapped calls
+retain their existing behavior.
+
+Usage facts, credit debits, allowance counters, and the matching reservation
+release commit atomically. Unresolved calls remain reserved across cancellation,
+worker retries, logical attempt closure, and month changes: none proves the
+provider charged zero. Missing usage retains the conservative hold until
+reconciliation. An owned preparation failure proved before transport refunds only
+its exact grant, even if cancellation has already closed the attempt. A private
+transactional projection tracks per-source outstanding balances, so admission
+reads unresolved sources instead of regrouping settled history. Account reads
+include every workspace; workspace reads preserve session visibility before
+netting releases. The usage ledger remains authoritative. Reserved rows stay internal and are excluded from user-facing
+usage lists, exports, and Insights. These monthly deployment caps are separate
+from the administrator allowance counters described in section3.12.
+
 Model-scoped promotions retain offer identity and initial eligibility on each grant.
 Audited `credit_promotion_policy_revisions` can update coverage for existing and
 new scoped grants without a restart. Each paid call retains its admitted revision
@@ -1145,7 +1184,6 @@ policy; recovery preserves that policy while current health governs capacity.
 [Migration 0492 rollout](codex-subscription-rotation.md) requires drained processes and matching binaries.
 
 Canonical: `packages/core/src/billing/`, `packages/runtime/src/usage-telemetry.ts`,
-[`credit-boundaries-rollout.md`](credit-boundaries-rollout.md),
 [`model-providers.md`](model-providers.md),
 [`codex-subscription-rotation.md`](codex-subscription-rotation.md), and
 [`supergrok-subscription.md`](supergrok-subscription.md).

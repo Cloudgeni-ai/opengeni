@@ -2,6 +2,7 @@ import { expect, test } from "bun:test";
 import { getOrCreateTrace } from "@openai/agents-core";
 import { projectChatToolImages } from "../src/chat-tool-images";
 import { OpenGeniChatCompletionsModel } from "../src/model-provider-routing";
+import { withModelCallOutputBound } from "../src/model-request-capture";
 import { ReplayableJsonOpenAI, requestBodyText } from "../src/replayable-json-body";
 
 test("delivers parallel tool images as pixels after every paired result without mutating history", async () => {
@@ -146,3 +147,63 @@ test("ordinary tool text, image errors, and user images keep the original reques
   } as never;
   expect(projectChatToolImages(request)).toBe(request);
 });
+
+for (const streamed of [false, true]) {
+  for (const invalidImage of [false, true]) {
+    test(`Chat images streamed=${streamed} preserve exact refund evidence for invalid=${invalidImage}`, async () => {
+      let fetches = 0;
+      let refunds = 0;
+      const client = new ReplayableJsonOpenAI({
+        apiKey: "fixture",
+        maxRetries: 0,
+        fetch: async () => {
+          fetches += 1;
+          throw new Error("ambiguous image transport");
+        },
+      });
+      const model = new OpenGeniChatCompletionsModel(client, "fixture");
+      const request = {
+        input: [
+          { type: "function_call", callId: "image-call", name: "view_image", arguments: "{}" },
+          {
+            type: "function_call_result",
+            callId: "image-call",
+            name: "view_image",
+            output: {
+              type: "image",
+              image: invalidImage
+                ? { fileId: "file-fixture" }
+                : { url: "https://example.com/image.png" },
+            },
+          },
+        ],
+        modelSettings: {},
+        tools: [],
+        handoffs: [],
+        outputType: "text",
+        tracing: false,
+      } as never;
+      await expect(
+        withModelCallOutputBound(
+          {
+            maxOutputTokens: 10,
+            budgetReserved: true,
+            onRequestNotDispatched: async () => {
+              refunds += 1;
+            },
+          },
+          () =>
+            getOrCreateTrace(async () => {
+              if (streamed) {
+                for await (const _event of model.getStreamedResponse(request)) {
+                  /* Drain. */
+                }
+              } else await model.getResponse(request);
+            }),
+        ),
+      ).rejects.toThrow(invalidImage ? "require a URL or inline image bytes" : "Connection error");
+      expect(fetches).toBe(invalidImage ? 0 : 1);
+      expect(refunds).toBe(invalidImage ? 1 : 0);
+    });
+  }
+}

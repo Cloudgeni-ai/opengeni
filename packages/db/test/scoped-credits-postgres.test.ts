@@ -19,6 +19,8 @@ import {
   getBillingBalance,
   getSpendableCreditBalance,
   readCreditPromotionPolicy,
+  recordUsageEvent,
+  recordUsageEventsAndApplyCreditDebit,
   type DbClient,
   withRlsContext,
 } from "../src";
@@ -338,4 +340,87 @@ test("operator command validates catalog IDs, applies policy and reads it back",
   } finally {
     await rm(directory, { recursive: true, force: true });
   }
+}, 180_000);
+
+test("atomic usage and reservation release preserve admitted promotion coverage and replay allocations", async () => {
+  if (!client || !shared) return;
+  await shared.admin`select set_credit_promotion_policy(${shared.admin.json({ defaultModelIds: ["model-a"] })}::jsonb, 'test operator', 'Admit atomic model call')`;
+  const userId = crypto.randomUUID();
+  const access = await ensureManagedAccessForUser(client.db, {
+    userId,
+    email: `${userId}@example.test`,
+    name: "Atomic scoped credits",
+  });
+  const workspace = access.workspaceGrants[0]!;
+  const accountId = workspace.accountId;
+  const workspaceId = workspace.workspaceId;
+  await grant(accountId, 100, ["model-a"]);
+  const admitted = await getSpendableCreditBalance(client.db, accountId, "model-a");
+  const sourceResourceId = crypto.randomUUID();
+  await recordUsageEvent(client.db, {
+    accountId,
+    workspaceId,
+    eventType: "model.cost.reserved",
+    quantity: 40,
+    unit: "usd_micros",
+    sourceResourceId,
+    idempotencyKey: `${sourceResourceId}:hold`,
+  });
+  await shared.admin`select set_credit_promotion_policy(${shared.admin.json({ defaultModelIds: ["model-b"] })}::jsonb, 'test operator', 'Change policy while model call is in flight')`;
+  const batch = {
+    accountId,
+    workspaceId,
+    usageEvents: [
+      {
+        eventType: "model.cost.reserved",
+        quantity: -40,
+        unit: "usd_micros",
+        sourceResourceId,
+        idempotencyKey: `${sourceResourceId}:release`,
+      },
+      {
+        eventType: "model.cost",
+        quantity: 40,
+        unit: "usd_micros",
+        sourceResourceId,
+        idempotencyKey: `${sourceResourceId}:cost`,
+      },
+    ],
+    creditDebit: {
+      type: "test_model_debit",
+      modelId: "model-a",
+      requestedAmountMicros: 40,
+      creditPolicyRevision: admitted.creditPolicyRevision,
+      idempotencyKey: `${sourceResourceId}:debit`,
+    },
+  };
+  const settled = await recordUsageEventsAndApplyCreditDebit(client.db, batch);
+  expect(settled.debit?.debitedMicros).toBe(40);
+  expect((await getSpendableCreditBalance(client.db, accountId, "model-b")).balanceMicros).toBe(60);
+  expect((await recordUsageEventsAndApplyCreditDebit(client.db, batch)).debit?.debitedMicros).toBe(
+    0,
+  );
+  const [facts] =
+    await shared.admin`select sum(quantity)::int as net from usage_events where account_id=${accountId}::uuid and event_type='model.cost.reserved'`;
+  const [allocations] =
+    await shared.admin`select sum(amount_micros)::int as spent from credit_debit_allocations where account_id=${accountId}::uuid`;
+  expect(facts?.net).toBe(0);
+  expect(allocations?.spent).toBe(40);
+  await expect(
+    withRlsContext(client.db, { accountId, workspaceId }, async (tx) => {
+      await recordUsageEventsAndApplyCreditDebit(tx, {
+        ...batch,
+        usageEvents: batch.usageEvents.map((e) => ({
+          ...e,
+          idempotencyKey: `${e.idempotencyKey}:rollback`,
+        })),
+        creditDebit: { ...batch.creditDebit, idempotencyKey: `${sourceResourceId}:rollback-debit` },
+      });
+      throw new Error("rollback complete scoped settlement");
+    }),
+  ).rejects.toThrow("rollback complete scoped settlement");
+  expect((await getSpendableCreditBalance(client.db, accountId, "model-b")).balanceMicros).toBe(60);
+  const [after] =
+    await shared.admin`select count(*)::int as count from usage_events where account_id=${accountId}::uuid and idempotency_key like '%:rollback'`;
+  expect(after?.count).toBe(0);
 }, 180_000);

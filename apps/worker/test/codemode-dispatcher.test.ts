@@ -183,6 +183,36 @@ async function waitForToolEventCount(
 }
 
 describe("CodemodeAttemptDispatcher", () => {
+  test("SDK approval IDs do not enter the UUID Codemode continuation lookup", async () => {
+    if (!available) throw new Error("This execution test requires PostgreSQL");
+    let effects = 0;
+    const { scope, environment } = await fixture(async () => {
+      effects += 1;
+      return "unused";
+    });
+    const dispatcher = new CodemodeAttemptDispatcher(
+      client.db,
+      new MemoryEventBus(),
+      environment,
+      scope,
+    );
+    dispatcher.start();
+    try {
+      for (const approvalId of [
+        "call-sdk-approval-1",
+        "provider_tool_call_123",
+        crypto.randomUUID(),
+      ]) {
+        expect(await dispatcher.resumeApproved(`sandbox:${scope.attemptId}`, approvalId)).toEqual(
+          [],
+        );
+      }
+      expect(effects).toBe(0);
+    } finally {
+      await dispatcher.close();
+    }
+  });
+
   test("first-request recovery joins lazy tool preparation only when stored work must resume", async () => {
     const { scope, environment } = await fixture(async () => "unused");
     const caller = `sandbox:${scope.attemptId}`;
@@ -1274,7 +1304,7 @@ test("waiting releases the claim and approved continuation executes stored argum
   );
   resumed.start();
   try {
-    expect(await resumed.resumeApproved(`sandbox:${attemptId}`)).toMatchObject([
+    expect(await resumed.resumeApproved(`sandbox:${attemptId}`, operationId)).toMatchObject([
       { operationId, state: "completed", attemptId: scope.attemptId },
     ]);
     await resumed.resumeApproved(`sandbox:${attemptId}`);

@@ -49,15 +49,27 @@ export function appendChatReasoningDetails(accumulated: JsonObject[], deltas: Js
         : delta.type === "reasoning.summary"
           ? "summary"
           : undefined;
-    if (field && previous && previous.type === delta.type) {
+    const identityFields = ["id", "index", "signature", "format"];
+    const sameIdentity =
+      previous &&
+      identityFields.every(
+        (key) =>
+          previous[key] == null ||
+          previous[key] === "" ||
+          delta[key] == null ||
+          delta[key] === "" ||
+          previous[key] === delta[key],
+      );
+    if (field && previous && previous.type === delta.type && sameIdentity) {
       const text =
         (typeof previous[field] === "string" ? previous[field] : "") +
         (typeof delta[field] === "string" ? delta[field] : "");
       // Keep first-block identity and extensions, accepting late metadata such
       // as a signature-only delta after answer text has already started.
       const merged = { ...structuredClone(delta), ...previous, [field]: text };
-      for (const key of ["signature", "format"]) {
-        if (!previous[key] && delta[key] !== undefined) merged[key] = structuredClone(delta[key]);
+      for (const key of identityFields) {
+        if ((previous[key] == null || previous[key] === "") && delta[key] !== undefined)
+          merged[key] = structuredClone(delta[key]);
       }
       accumulated[accumulated.length - 1] = merged;
     } else accumulated.push(structuredClone(delta));

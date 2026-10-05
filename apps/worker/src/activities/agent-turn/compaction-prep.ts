@@ -20,6 +20,7 @@ import {
 } from "@opengeni/runtime";
 import { type Settings } from "@opengeni/config";
 import { maybeCompactContext, settleFailedContextCompactionLandmark } from "../context-compaction";
+import type { TurnExecutionPolicyV1 } from "@opengeni/contracts";
 import type { CompactionSummarizer, RemoteCompactionV2Requester } from "../context-compaction";
 import { TurnAttemptFencedError } from "../turn-attempt-fenced";
 import type {
@@ -47,6 +48,7 @@ import {
   processCompactionModelUsageEvent,
 } from "./model-usage";
 import { waitForTurnOperation } from "./sandbox-provision";
+import { reserveModelCallBudget, undispatchedModelCallRefund } from "./admission";
 import { recordProviderRecoveryOutcome } from "./provider-recovery-metrics";
 
 import type { ClaimTurnOk } from "./claim";
@@ -240,13 +242,19 @@ export async function prepareCompaction(deps: CompactionPrepDeps): Promise<Compa
   const promptCacheKey = acceptsPromptCacheKeyForTurn(resolvedModel) ? input.sessionId : undefined;
   const compactionUsageState = createCompactionModelUsageEventState(claimedModelUsageSourceKeys);
   let compactionCreditPolicyRevision: number | undefined;
-  const recordCompactionUsage = async (usage: ModelResponseUsage) => {
-    await processCompactionModelUsageEvent({
+  const recordCompactionUsage = async (
+    usage: ModelResponseUsage,
+    reservation: Awaited<ReturnType<typeof reserveModelCallBudget>> | null,
+    latencyMode: TurnExecutionPolicyV1["latencyMode"],
+  ) => {
+    const result = await processCompactionModelUsageEvent({
       usage,
-      creditPolicyRevision: compactionCreditPolicyRevision,
+      creditPolicyRevision: reservation
+        ? reservation.creditPolicyRevision
+        : compactionCreditPolicyRevision,
       state: compactionUsageState,
       dispatchId: modelUsageDispatchId,
-      settings,
+      settings: eventing.modelRunSettings,
       db,
       observability,
       publish: eventing.publish,
@@ -257,6 +265,7 @@ export async function prepareCompaction(deps: CompactionPrepDeps): Promise<Compa
       provider: resolvedModel?.provider.id ?? settings.openaiProvider,
       providerApi: resolvedModel?.provider.api ?? "responses",
       model: resolvedModel?.configured.id ?? turn.model,
+      latencyMode,
       externallyBilled: billingState.isExternallyBilledTurn,
       chargesOpenGeniCredits: billingState.chargesOpenGeniCredits,
       countsTowardTokenCap: billingState.countsTowardTokenCap,
@@ -268,7 +277,54 @@ export async function prepareCompaction(deps: CompactionPrepDeps): Promise<Compa
       leaseLost: leases.servingLost,
       leaseLostMessage: "Provider credential lease expired during context compaction",
       contextContributions: eventing.companyBrainContextContributions,
+      ...(reservation ? { reservationReleases: reservation.reservationReleases } : {}),
     });
+    if (reservation && result.usageReported)
+      billingState.pendingUsageReservations.delete(reservation.callId);
+  };
+  const compactionCallAccounting = (
+    maxOutputTokens: number,
+    latencyMode: TurnExecutionPolicyV1["latencyMode"] = "standard",
+  ) => {
+    let reservation: Awaited<ReturnType<typeof reserveModelCallBudget>> | null = null;
+    return {
+      onModelCallAdmission: async () => {
+        reservation = await reserveModelCallBudget({
+          settings: eventing.modelRunSettings,
+          db,
+          accountId: input.accountId,
+          workspaceId: input.workspaceId,
+          sessionId: input.sessionId,
+          turnId: turn.id,
+          turnAttemptId: input.attemptId,
+          model: resolvedModel?.configured.id ?? turn.model,
+          providerId: resolvedModel?.provider.id ?? turnExecutionPolicy.providerId,
+          isExternallyBilledTurn: billingState.isExternallyBilledTurn,
+          ...(deps.entitlements ? { entitlements: deps.entitlements } : {}),
+          chargesOpenGeniCredits: billingState.chargesOpenGeniCredits,
+          countsTowardTokenCap: billingState.countsTowardTokenCap,
+          initiatingHumanSubjectId: turn.initiatingHumanSubjectId,
+          latencyMode,
+          maxOutputTokens,
+        });
+        if (reservation.held) {
+          billingState.pendingUsageReservations.set(reservation.callId, reservation.held);
+        }
+        return {
+          maxOutputTokens: reservation.maxOutputTokens,
+          budgetReserved: Boolean(reservation.held),
+          onRequestNotDispatched: undispatchedModelCallRefund({
+            db,
+            accountId: input.accountId,
+            workspaceId: input.workspaceId,
+            grant: reservation,
+            pending: billingState.pendingUsageReservations,
+          }),
+        };
+      },
+      onUsage: (usage: ModelResponseUsage) =>
+        recordCompactionUsage(usage, reservation, latencyMode),
+    };
   };
   const compactionSummarizerFor = (systemInstructions?: string): CompactionSummarizer => {
     const summarizeModel: CompactionSummarizer = resolvedModel
@@ -281,7 +337,10 @@ export async function prepareCompaction(deps: CompactionPrepDeps): Promise<Compa
               model: turnExecutionPolicy.upstreamModelId,
               maxOutputTokens: compactionSummaryOutputTokens(s.contextWindowTokens),
               ...(cancellationSignal ? { signal: cancellationSignal } : {}),
-              onUsage: recordCompactionUsage,
+              ...compactionCallAccounting(
+                compactionSummaryOutputTokens(s.contextWindowTokens),
+                portableResponsesNeedsAgentPrefix ? turnExecutionPolicy.latencyMode : "standard",
+              ),
               ...(systemInstructions ? { systemInstructions } : {}),
               ...(promptCacheKey ? { promptCacheKey } : {}),
               ...(portableResponsesNeedsAgentPrefix
@@ -294,7 +353,7 @@ export async function prepareCompaction(deps: CompactionPrepDeps): Promise<Compa
             model: turnExecutionPolicy.upstreamModelId,
             maxOutputTokens: compactionSummaryOutputTokens(s.contextWindowTokens),
             ...(cancellationSignal ? { signal: cancellationSignal } : {}),
-            onUsage: recordCompactionUsage,
+            ...compactionCallAccounting(compactionSummaryOutputTokens(s.contextWindowTokens)),
             ...(systemInstructions ? { systemInstructions } : {}),
             ...(promptCacheKey ? { promptCacheKey } : {}),
           });
@@ -342,7 +401,7 @@ export async function prepareCompaction(deps: CompactionPrepDeps): Promise<Compa
               preparedRequest,
               captureAgent: remotePrefix.agent,
               signal: cancellationSignal,
-              onUsage: recordCompactionUsage,
+              ...compactionCallAccounting(s.contextWindowTokens, turnExecutionPolicy.latencyMode),
             });
           })
       : undefined;
@@ -538,6 +597,16 @@ export async function prepareCompaction(deps: CompactionPrepDeps): Promise<Compa
         turnStatus: "completed",
         sessionStatus: "idle",
         activeTurnId: null,
+        usageEvents: [
+          {
+            eventType: "agent_run.completed",
+            quantity: 1,
+            unit: "run",
+            sourceResourceType: "session_turn",
+            sourceResourceId: turn.id,
+            idempotencyKey: `usage:agent_run.completed:${turn.id}`,
+          },
+        ],
       }))
     ) {
       return { exit: claimedResult({ status: "cancelled" }) };
@@ -719,6 +788,16 @@ export async function runPostAgentCompaction(
         turnStatus: "completed",
         sessionStatus: "idle",
         activeTurnId: null,
+        usageEvents: [
+          {
+            eventType: "agent_run.completed",
+            quantity: 1,
+            unit: "run",
+            sourceResourceType: "session_turn",
+            sourceResourceId: turn.id,
+            idempotencyKey: `usage:agent_run.completed:${turn.id}`,
+          },
+        ],
       }))
     ) {
       return { exit: claimedResult({ status: "cancelled" }) };

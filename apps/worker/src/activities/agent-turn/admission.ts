@@ -1,5 +1,24 @@
-import { checkWorkspaceAllowance, getSpendableCreditBalance, sumUsageQuantity } from "@opengeni/db";
 import {
+  recordUsageEventsAndApplyCreditDebit,
+  checkWorkspaceAllowance,
+  getSpendableCreditBalance,
+  openUsageReservationQuantity,
+  sumUsageQuantity,
+  tryReserveUsageBudget,
+  type UsageEventWriteInput,
+} from "@opengeni/db";
+import {
+  estimateAgentToolSchemaTokens,
+  estimateSerializedValueTokens,
+  estimateTokensBreakdown,
+  type CompactionItem,
+} from "@opengeni/runtime";
+import {
+  calculateModelUsageReservationCostBreakdown,
+  canonicalizeConfiguredModelId,
+  OPENGENI_GATEWAY_PROVIDER_ID,
+  WORKSPACE_GATEWAY_PROVIDER_ID,
+  configuredModelPricingSchedules,
   configuredStaticUsageLimits,
   resolveTurnExecutionPolicyV1,
   type Settings,
@@ -8,6 +27,7 @@ import { selectCodexCredentialId } from "@opengeni/codex";
 import { directPersonalConnectionSubjectId } from "@opengeni/core";
 import type { TurnActivityServices as ActivityServices } from "../types";
 import {
+  type LatencyMode,
   type AllowanceExhaustedRefusal,
   type SessionEvent,
   type SessionTurn,
@@ -15,7 +35,7 @@ import {
   type TurnExecutionPolicyV1,
   type XaiProviderAccountAuthoritySnapshotV1,
 } from "@opengeni/contracts";
-import { createHash } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { startOfUtcMonth } from "./model-usage";
 
 export class WorkspaceHumanInputDisabledError extends Error {
@@ -251,6 +271,173 @@ export class BudgetExhaustedError extends Error {
   }
 }
 
+/**
+ * The provider-call admission gate throws BudgetExhaustedError inside the
+ * SDK's per-call input filter, where the runner may wrap it before the error
+ * reaches the stream consumer. Walk the cause chain like
+ * findCompactionNeededError so the budget valve still recognizes it.
+ */
+export function findBudgetExhaustedError(
+  error: unknown,
+  seen = new WeakSet<object>(),
+): BudgetExhaustedError | null {
+  if (error instanceof BudgetExhaustedError) {
+    return error;
+  }
+  if (!error || typeof error !== "object" || seen.has(error)) {
+    return null;
+  }
+  seen.add(error);
+  const record = error as Record<string, unknown>;
+  return (
+    findBudgetExhaustedError(record.cause, seen) ?? findBudgetExhaustedError(record.error, seen)
+  );
+}
+
+export function usageReservationSourceId(
+  turnId: string,
+  turnAttemptId: string,
+  ordinal: string | number,
+): string {
+  return `model_call_reservation:${turnId}:${turnAttemptId}:${ordinal}`;
+}
+
+export function usageReservationIdempotencyKey(
+  reservedEventType: string,
+  turnId: string,
+  turnAttemptId: string,
+  ordinal: string | number,
+): string {
+  return `usage:${reservedEventType}:${turnId}:${turnAttemptId}:${ordinal}`;
+}
+
+/**
+ * Negative-quantity usage writes that release admitted holds. Idempotency-
+ * keyed per call identity so authoritative usage reconciliation can retry
+ * the same release safely; only the first lands.
+ */
+export function usageReservationReleaseEvents(input: {
+  reservations: Iterable<readonly [string | number, { tokens?: number; costMicros?: number }]>;
+  sessionId: string;
+  turnId: string;
+  turnAttemptId: string;
+}): UsageEventWriteInput[] {
+  const context = {
+    sessionId: input.sessionId,
+    turnId: input.turnId,
+    turnAttemptId: input.turnAttemptId,
+  };
+  const events: UsageEventWriteInput[] = [];
+  for (const [ordinal, held] of input.reservations) {
+    if (held.tokens && held.tokens > 0) {
+      events.push({
+        eventType: "model.tokens.reserved",
+        quantity: -held.tokens,
+        unit: "tokens",
+        sourceResourceType: "model_call_reservation",
+        sourceResourceId: usageReservationSourceId(input.turnId, input.turnAttemptId, ordinal),
+        ...context,
+        idempotencyKey: `${usageReservationIdempotencyKey(
+          "model.tokens.reserved",
+          input.turnId,
+          input.turnAttemptId,
+          ordinal,
+        )}:release`,
+      });
+    }
+    if (held.costMicros && held.costMicros > 0) {
+      events.push({
+        eventType: "model.cost.reserved",
+        quantity: -held.costMicros,
+        unit: "usd_micros",
+        sourceResourceType: "model_call_reservation",
+        sourceResourceId: usageReservationSourceId(input.turnId, input.turnAttemptId, ordinal),
+        ...context,
+        idempotencyKey: `${usageReservationIdempotencyKey(
+          "model.cost.reserved",
+          input.turnId,
+          input.turnAttemptId,
+          ordinal,
+        )}:release`,
+      });
+    }
+  }
+  return events;
+}
+
+/**
+ * Actual prompt size of the exact payload the provider is about to see: input
+ * items + instructions + tool schemas, the same footprint the context
+ * robustness filter measures. Called only at the producer-side admission
+ * gate, where `modelData` is the final per-call payload.
+ */
+export function estimateModelCallPromptTokens(call: {
+  modelData: { input: readonly unknown[]; instructions?: string | null };
+  agent: unknown;
+}): number {
+  return (
+    estimateTokensBreakdown(call.modelData.input as CompactionItem[]).totalTokens +
+    estimateSerializedValueTokens(call.modelData.instructions ?? "") +
+    estimateAgentToolSchemaTokens(call.agent as Parameters<typeof estimateAgentToolSchemaTokens>[0])
+  );
+}
+
+/** A normalized terminal and its raw mirror must consume the same call hold. */
+export function takeAdmittedModelCall(input: {
+  responseId?: string;
+  admittedCalls: string[];
+  responseCalls: Map<string, string>;
+  settledResponses: Set<string>;
+}): string | undefined {
+  if (input.responseId) {
+    const existing = input.responseCalls.get(input.responseId);
+    if (existing) return existing;
+    if (input.settledResponses.has(input.responseId)) return undefined;
+  }
+  const callId = input.admittedCalls.shift();
+  if (callId && input.responseId) input.responseCalls.set(input.responseId, callId);
+  return callId;
+}
+
+/** Conservative input/context and output bounds, priced across all token classes and tiers. */
+export function modelCallReservationQuantities(input: {
+  settings: Settings;
+  model: string;
+  providerId?: string;
+  promptTokens: number;
+  contextWindowTokens: number;
+  latencyMode?: LatencyMode;
+  maxOutputTokens?: number;
+}): { tokens: number; costMicros: number | null } {
+  const reservedOutput = input.maxOutputTokens ?? input.settings.contextReservedOutputTokens;
+  // Prompt heuristics are unsuitable as financial bounds. Reserve the selected
+  // provider's entire input window and clamp the dispatched output separately.
+  const inputBound = Math.max(1, Math.floor(input.contextWindowTokens));
+  const tokens = inputBound + reservedOutput;
+  const schedules = configuredModelPricingSchedules(input.settings);
+  const pricedModel = schedules[input.model]
+    ? input.model
+    : input.model.startsWith("codex/") && schedules[input.model.slice("codex/".length)]
+      ? input.model.slice("codex/".length)
+      : null;
+  let costMicros: number | null = null;
+  // Gateway settlement uses its reported charge, which token list prices cannot bound.
+  if (
+    pricedModel &&
+    input.providerId !== OPENGENI_GATEWAY_PROVIDER_ID &&
+    input.providerId !== WORKSPACE_GATEWAY_PROVIDER_ID
+  ) {
+    costMicros =
+      calculateModelUsageReservationCostBreakdown(
+        input.settings,
+        pricedModel,
+        { inputTokens: inputBound, outputTokens: reservedOutput },
+        { latencyMode: input.latencyMode ?? "standard" },
+      )?.creditCostMicros ?? null;
+  }
+  return { tokens, costMicros };
+}
+
 export type AllowanceRefusal = AllowanceExhaustedRefusal;
 
 /** Account allowance exhaustion is recoverable state, never a provider failure. */
@@ -276,21 +463,31 @@ export async function ensureRunAllowedBetweenModelCalls(input: {
   initiatingHumanSubjectId: string | null;
   modelId?: string;
   serializedRunState?: () => string | null;
+  monthlyBudgetReserved?: boolean;
 }): Promise<number | undefined> {
   try {
-    return await ensureRunAllowed(
-      input.settings,
-      input.db,
-      input.accountId,
-      input.workspaceId,
-      input.isExternallyBilledTurn,
-      input.entitlements,
-      input.chargesOpenGeniCredits,
-      input.countsTowardTokenCap,
-      input.initiatingHumanSubjectId,
-      input.modelId,
-    );
+    return (
+      await ensureRunAllowed(
+        input.settings,
+        input.db,
+        input.accountId,
+        input.workspaceId,
+        input.isExternallyBilledTurn,
+        input.entitlements,
+        input.chargesOpenGeniCredits,
+        input.countsTowardTokenCap,
+        input.initiatingHumanSubjectId,
+        null,
+        input.monthlyBudgetReserved,
+        input.modelId,
+      )
+    )?.creditPolicyRevision;
   } catch (limitError) {
+    if (
+      !(limitError instanceof UsageBudgetExceededError) &&
+      !(limitError instanceof AllowanceExhaustedError)
+    )
+      throw limitError;
     let serializedRunState: string | null = null;
     try {
       serializedRunState = input.serializedRunState?.() ?? null;
@@ -309,6 +506,14 @@ export async function ensureRunAllowedBetweenModelCalls(input: {
 // part of the activity surface. Takes the accepted policy's billing attribution and
 // the optional §7.5 P3 host `entitlements` port (when bound, its `admitRun` REPLACES
 // the local credit read for an OpenGeni-metered turn; unset → local ledger).
+//
+// When `reservation` is supplied the monthly caps are enforced with a bounded,
+// atomic hold written BEFORE the provider call: the returned quantities are the
+// committed hold (the complete requested bound) that the caller must later
+// release through usageReservationReleaseEvents. Concurrent turns serialize on
+// the account reservation lock, so they cannot spend the same remaining
+// balance; without `reservation` the same caps are enforced read-only,
+// including other turns' open holds.
 export async function ensureRunAllowed(
   settings: Settings,
   db: ActivityServices["db"],
@@ -319,8 +524,17 @@ export async function ensureRunAllowed(
   chargesOpenGeniCredits = !isExternallyBilledTurn,
   countsTowardTokenCap = !isExternallyBilledTurn,
   initiatingHumanSubjectId: string | null = null,
+  reservation?: {
+    sessionId: string;
+    turnId: string;
+    turnAttemptId: string;
+    ordinal: string | number;
+    tokens?: number | null;
+    costMicros?: number | null;
+  } | null,
+  monthlyBudgetReserved = false,
   modelId?: string,
-): Promise<number | undefined> {
+): Promise<{ tokens?: number; costMicros?: number; creditPolicyRevision?: number } | null> {
   let creditPolicyRevision: number | undefined;
   // Upstream settlement and workspace-facing cost are independent. External
   // metering skips the token cap; free/subscription/workspace cost skips the
@@ -350,7 +564,7 @@ export async function ensureRunAllowed(
       quantity: 1,
     });
     if (!decision.allowed) {
-      throw new Error(decision.reason || "insufficient Opengeni credits");
+      throw new UsageBudgetExceededError(decision.reason || "insufficient Opengeni credits");
     }
   } else if (
     chargesOpenGeniCredits &&
@@ -359,7 +573,7 @@ export async function ensureRunAllowed(
     const balance = await getSpendableCreditBalance(db, accountId, modelId);
     creditPolicyRevision = balance.creditPolicyRevision;
     if (balance.balanceMicros <= 0) {
-      throw new Error("insufficient Opengeni credits");
+      throw new UsageBudgetExceededError("insufficient Opengeni credits");
     }
   }
   if (chargesOpenGeniCredits) {
@@ -372,31 +586,277 @@ export async function ensureRunAllowed(
   }
   if (settings.usageLimitsMode === "static" || settings.usageLimitsMode === "managed") {
     const limits = configuredStaticUsageLimits(settings);
+    const monthStart = startOfUtcMonth();
     if (limits.maxMonthlyAgentRunsPerWorkspace) {
       const used = await sumUsageQuantity(db, {
         workspaceId,
         eventType: "agent_run.created",
-        since: startOfUtcMonth(),
+        since: monthStart,
       });
       // Agent turns are admitted and recorded before this worker activity starts.
       // Equality means this accepted turn is exactly at the cap; greater-than is
       // the race/backstop case where another admission already exceeded the cap.
       if (used > limits.maxMonthlyAgentRunsPerWorkspace) {
-        throw new Error(
+        throw new UsageBudgetExceededError(
           `monthly agent run limit reached (${limits.maxMonthlyAgentRunsPerWorkspace})`,
         );
       }
     }
-    if (countsTowardTokenCap && limits.maxMonthlyTokensPerWorkspace) {
-      const used = await sumUsageQuantity(db, {
-        workspaceId,
-        eventType: "model.tokens",
-        since: startOfUtcMonth(),
-      });
-      if (used >= limits.maxMonthlyTokensPerWorkspace) {
-        throw new Error(`monthly token limit reached (${limits.maxMonthlyTokensPerWorkspace})`);
+    // Mid-stream caps: other turns' open holds count against the remaining
+    // budget so a parallel turn cannot spend the same headroom, and an
+    // already-committed call-in-flight reserves its bounded share before the
+    // next provider request is admitted.
+    const enforceTokenCap =
+      !monthlyBudgetReserved && countsTowardTokenCap && limits.maxMonthlyTokensPerWorkspace;
+    const enforceCostCap =
+      !monthlyBudgetReserved && chargesOpenGeniCredits && limits.maxMonthlyCostMicrosPerAccount;
+    if (enforceTokenCap || enforceCostCap) {
+      const openReservationSince = new Date(0);
+      const capCheck = async (
+        eventType: string,
+        reservedEventType: string,
+        scope: { accountId: string } | { workspaceId: string },
+        cap: number,
+      ): Promise<void> => {
+        const [used, openReserved] = await Promise.all([
+          sumUsageQuantity(db, { ...scope, eventType, since: monthStart }),
+          // Net each hold with its own releases across all accounting windows.
+          openUsageReservationQuantity(db, {
+            accountId,
+            ...scope,
+            eventType: reservedEventType,
+            since: monthStart,
+            holdSince: openReservationSince,
+          }),
+        ]);
+        if (used + openReserved >= cap) {
+          throw new UsageBudgetExceededError(
+            `${eventType === "model.tokens" ? "monthly token" : "monthly cost"} limit reached (${cap})`,
+          );
+        }
+      };
+      if (reservation && enforceCostCap && reservation.costMicros == null) {
+        throw new Error("Cannot bound model cost: configured model pricing is required");
       }
+      const requests: NonNullable<Parameters<typeof tryReserveUsageBudget>[1]["reservations"]> = [];
+      if (enforceTokenCap && reservation?.tokens != null) {
+        requests.push({
+          eventType: "model.tokens",
+          reservedEventType: "model.tokens.reserved",
+          scope: "workspace" as const,
+          cap: limits.maxMonthlyTokensPerWorkspace!,
+          quantity: reservation.tokens,
+          unit: "tokens",
+          idempotencyKey: usageReservationIdempotencyKey(
+            "model.tokens.reserved",
+            reservation.turnId,
+            reservation.turnAttemptId,
+            reservation.ordinal,
+          ),
+          sourceResourceId: usageReservationSourceId(
+            reservation.turnId,
+            reservation.turnAttemptId,
+            reservation.ordinal,
+          ),
+        });
+      }
+      if (enforceCostCap && reservation?.costMicros != null) {
+        requests.push({
+          eventType: "model.cost",
+          reservedEventType: "model.cost.reserved",
+          scope: "account" as const,
+          cap: limits.maxMonthlyCostMicrosPerAccount!,
+          quantity: reservation.costMicros,
+          unit: "usd_micros",
+          idempotencyKey: usageReservationIdempotencyKey(
+            "model.cost.reserved",
+            reservation.turnId,
+            reservation.turnAttemptId,
+            reservation.ordinal,
+          ),
+          sourceResourceId: usageReservationSourceId(
+            reservation.turnId,
+            reservation.turnAttemptId,
+            reservation.ordinal,
+          ),
+        });
+      }
+      let held: { tokens?: number; costMicros?: number } | null = null;
+      if (reservation && requests.length > 0) {
+        const result = await tryReserveUsageBudget(db, {
+          accountId,
+          workspaceId,
+          sessionId: reservation.sessionId,
+          turnId: reservation.turnId,
+          turnAttemptId: reservation.turnAttemptId,
+          since: monthStart,
+          openReservationSince,
+          reservations: requests,
+        });
+        if (!result.allowed) {
+          if ("attemptClosed" in result) {
+            // The attempt closed while this call awaited admission — not a
+            // budget verdict. Surface it as an ordinary failure so the
+            // budget valve does not mislabel the turn's terminal settle.
+            throw new Error("turn attempt closed before provider dispatch; reservation refused");
+          }
+          throw new UsageBudgetExceededError(
+            `${result.eventType === "model.tokens" ? "monthly token" : "monthly cost"} limit reached (${result.cap})`,
+          );
+        }
+        held = {};
+        for (const request of requests) {
+          const hold = result.holds.find((h) => h.idempotencyKey === request.idempotencyKey);
+          if (request.reservedEventType === "model.tokens.reserved") {
+            held.tokens = hold?.quantity ?? 0;
+          } else {
+            held.costMicros = hold?.quantity ?? 0;
+          }
+        }
+      }
+      // Kinds a caller could not price (or a check-only admission) still get
+      // the mid-stream cap read; open holds count toward the spend.
+      if (enforceTokenCap && reservation?.tokens == null) {
+        await capCheck(
+          "model.tokens",
+          "model.tokens.reserved",
+          { workspaceId },
+          limits.maxMonthlyTokensPerWorkspace!,
+        );
+      }
+      if (enforceCostCap && reservation?.costMicros == null) {
+        await capCheck(
+          "model.cost",
+          "model.cost.reserved",
+          { accountId },
+          limits.maxMonthlyCostMicrosPerAccount!,
+        );
+      }
+      return creditPolicyRevision === undefined ? held : { ...held, creditPolicyRevision };
     }
   }
-  return creditPolicyRevision;
+  return creditPolicyRevision === undefined ? null : { creditPolicyRevision };
+}
+
+export class UsageBudgetExceededError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "UsageBudgetExceededError";
+  }
+}
+
+/** One fresh durable grant per dispatched call, including standalone compaction. */
+export async function reserveModelCallBudget(input: {
+  settings: Settings;
+  db: ActivityServices["db"];
+  accountId: string;
+  workspaceId: string;
+  sessionId: string;
+  turnId: string;
+  turnAttemptId: string;
+  model: string;
+  providerId?: string;
+  isExternallyBilledTurn: boolean;
+  entitlements?: ActivityServices["entitlements"];
+  chargesOpenGeniCredits: boolean;
+  countsTowardTokenCap: boolean;
+  initiatingHumanSubjectId: string | null;
+  latencyMode?: LatencyMode;
+  maxOutputTokens?: number;
+}): Promise<{
+  callId: string;
+  creditPolicyRevision?: number | undefined;
+  held: { tokens?: number; costMicros?: number } | null;
+  maxOutputTokens: number;
+  reservationReleases: UsageEventWriteInput[];
+}> {
+  const callId = randomUUID();
+  const maxOutputTokens = Math.max(
+    1,
+    Math.floor(input.maxOutputTokens ?? input.settings.contextReservedOutputTokens),
+  );
+  const quantities = modelCallReservationQuantities({
+    settings: input.settings,
+    model: input.model,
+    ...(input.providerId === undefined ? {} : { providerId: input.providerId }),
+    promptTokens: 0,
+    contextWindowTokens: input.settings.contextWindowTokens,
+    latencyMode: input.latencyMode ?? "standard",
+    maxOutputTokens,
+  });
+  let admission: Awaited<ReturnType<typeof ensureRunAllowed>>;
+  try {
+    admission = await ensureRunAllowed(
+      input.settings,
+      input.db,
+      input.accountId,
+      input.workspaceId,
+      input.isExternallyBilledTurn,
+      input.entitlements,
+      input.chargesOpenGeniCredits,
+      input.countsTowardTokenCap,
+      input.initiatingHumanSubjectId,
+      {
+        sessionId: input.sessionId,
+        turnId: input.turnId,
+        turnAttemptId: input.turnAttemptId,
+        ordinal: callId,
+        ...quantities,
+      },
+      false,
+      canonicalizeConfiguredModelId(input.settings, input.model),
+    );
+  } catch (error) {
+    if (!(error instanceof UsageBudgetExceededError) && !(error instanceof AllowanceExhaustedError))
+      throw error;
+    throw new BudgetExhaustedError(
+      error.message,
+      null,
+      error instanceof AllowanceExhaustedError ? error.refusal : null,
+    );
+  }
+  const held =
+    admission && (admission.tokens !== undefined || admission.costMicros !== undefined)
+      ? {
+          ...(admission.tokens === undefined ? {} : { tokens: admission.tokens }),
+          ...(admission.costMicros === undefined ? {} : { costMicros: admission.costMicros }),
+        }
+      : null;
+  return {
+    callId,
+    creditPolicyRevision: admission?.creditPolicyRevision,
+    held,
+    maxOutputTokens,
+    reservationReleases: held
+      ? usageReservationReleaseEvents({
+          reservations: [[callId, held]],
+          sessionId: input.sessionId,
+          turnId: input.turnId,
+          turnAttemptId: input.turnAttemptId,
+        })
+      : [],
+  };
+}
+
+/** Callback bound to exactly one grant; owned local preparation may refund it. */
+export function undispatchedModelCallRefund(input: {
+  db: ActivityServices["db"];
+  accountId: string;
+  workspaceId: string;
+  grant: Awaited<ReturnType<typeof reserveModelCallBudget>>;
+  pending: Map<string, { tokens?: number; costMicros?: number }>;
+  onRefunded?: () => void;
+}): () => Promise<void> {
+  let refund: Promise<void> | undefined;
+  return () =>
+    (refund ??= (async () => {
+      if (!input.grant.held) return;
+      await recordUsageEventsAndApplyCreditDebit(input.db, {
+        accountId: input.accountId,
+        workspaceId: input.workspaceId,
+        usageEvents: input.grant.reservationReleases,
+      });
+      input.pending.delete(input.grant.callId);
+      input.onRefunded?.();
+    })());
 }

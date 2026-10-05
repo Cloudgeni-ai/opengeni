@@ -249,4 +249,37 @@ describe("0473 organization usage analytical capability", () => {
       and polname in ('session_visibility_insert_isolation','session_visibility_update_isolation','session_visibility_delete_isolation')`;
     expect(policies!.count).toBe(3);
   }, 180_000);
+
+  test("excludes .reserved budget-reservation rows from every summary bucket", async () => {
+    if (!owned || !client) return;
+    const userId = `org-reserved-${crypto.randomUUID()}`;
+    const access = await ensureManagedAccessForUser(client.db, {
+      userId,
+      email: `${userId}@example.test`,
+      name: "Org reserved exclusion",
+    });
+    const grant = access.workspaceGrants[0]!;
+    // A real cost fact plus an internal reservation hold and its negated
+    // release: the hold would surface as a reserved bucket and the release as
+    // a negative one if the aggregate did not filter the .reserved suffix.
+    await owned.admin`insert into usage_events (account_id, workspace_id, event_type, quantity, unit, source_resource_type, source_resource_id, idempotency_key, occurred_at)
+      values
+        (${grant.accountId}::uuid, ${grant.workspaceId}::uuid, 'model.cost', 300, 'usd_micros', 'model_response', 'r1', ${`cost:${crypto.randomUUID()}`}, '2026-09-02'::timestamptz),
+        (${grant.accountId}::uuid, ${grant.workspaceId}::uuid, 'model.cost.reserved', 500, 'usd_micros', 'model_call_reservation', 'res1', ${`hold:${crypto.randomUUID()}`}, '2026-09-02'::timestamptz),
+        (${grant.accountId}::uuid, ${grant.workspaceId}::uuid, 'model.cost.reserved', -500, 'usd_micros', 'model_call_reservation', 'res1', ${`rel:${crypto.randomUUID()}`}, '2026-09-02'::timestamptz)`;
+    const summary = await getOrganizationUsageSummary(
+      client.db,
+      { accountId: grant.accountId, period: "month" },
+      new Date("2026-09-14T00:00:00Z"),
+    );
+    for (const total of summary.totals) {
+      expect(total.eventType.endsWith(".reserved")).toBe(false);
+    }
+    expect(summary.totals).toContainEqual({
+      eventType: "model.cost",
+      unit: "usd_micros",
+      quantity: "300",
+      eventCount: "1",
+    });
+  }, 180_000);
 });

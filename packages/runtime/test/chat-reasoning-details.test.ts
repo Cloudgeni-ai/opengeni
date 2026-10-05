@@ -42,7 +42,14 @@ const encrypted = {
 };
 
 for (const stream of [false, true])
-  for (const mode of ["alias", "details-only", "summary", "encrypted-only", "empty"] as const) {
+  for (const mode of [
+    "alias",
+    "details-only",
+    "distinct",
+    "summary",
+    "encrypted-only",
+    "empty",
+  ] as const) {
     test(`Chat structured reasoning: stream=${stream}, ${mode}, parallel image tools and resumed history`, async () => {
       const summary = {
         type: "reasoning.summary",
@@ -50,20 +57,32 @@ for (const stream of [false, true])
         index: 0,
         format: "openai-responses-v1",
       };
+      const distinct = [
+        { ...readable[0], text: "Compare ", id: "reason-first", signature: "signature-first" },
+        { ...readable[0], text: "the images.", id: "reason-second", signature: "signature-second" },
+      ];
       const details =
         mode === "empty"
           ? []
           : mode === "encrypted-only"
             ? [encrypted]
-            : mode === "summary"
-              ? [summary, encrypted]
-              : [...readable, encrypted];
+            : mode === "distinct"
+              ? [...distinct, encrypted]
+              : mode === "summary"
+                ? [summary, encrypted]
+                : [...readable, encrypted];
       const detailDeltas =
-        mode === "summary"
-          ? [{ ...summary, summary: "Compare " }, { ...summary, summary: "the images." }, encrypted]
-          : mode === "encrypted-only" || mode === "empty"
-            ? details
-            : [...readableDeltas, encrypted];
+        mode === "distinct"
+          ? [...distinct, encrypted]
+          : mode === "summary"
+            ? [
+                { ...summary, summary: "Compare " },
+                { ...summary, summary: "the images." },
+                encrypted,
+              ]
+            : mode === "encrypted-only" || mode === "empty"
+              ? details
+              : [...readableDeltas, encrypted];
       const hasReadable = mode !== "encrypted-only" && mode !== "empty";
       const requests: Record<string, any>[] = [];
       const events: ReturnType<typeof normalizeSdkEvent> = [];
@@ -287,3 +306,18 @@ test("legacy structured details are lifted immutably; separate reasoning boundar
     ]),
   ).toBe("");
 });
+
+for (const type of ["reasoning.text", "reasoning.summary"]) {
+  for (const key of ["id", "index", "signature", "format"]) {
+    test(`streamed ${type} preserves distinct ${key} identities`, () => {
+      const field = type === "reasoning.text" ? "text" : "summary";
+      const first = { type, [field]: "First.", [key]: key === "index" ? 0 : "first" };
+      const second = { type, [field]: "Second.", [key]: key === "index" ? 1 : "second" };
+      const before = JSON.stringify([first, second]);
+      const accumulated: Record<string, unknown>[] = [];
+      appendChatReasoningDetails(accumulated, [first, second]);
+      expect(accumulated).toEqual([first, second]);
+      expect(JSON.stringify([first, second])).toBe(before);
+    });
+  }
+}
