@@ -138,9 +138,8 @@ export function oauthClientRequirementsByMcpUrl(
   return new Map(requirements.entries.map((entry) => [entry.mcpUrl, entry]));
 }
 
-export const oauthClientRequirementsEntriesByMcpUrl = oauthClientRequirementsByMcpUrl(
-  OAUTH_CLIENT_REQUIREMENTS,
-);
+export const oauthClientRequirementsEntriesByMcpUrl =
+  oauthClientRequirementsByMcpUrl(OAUTH_CLIENT_REQUIREMENTS);
 
 /**
  * Canonical import-fingerprint input: only the facts the importer writes

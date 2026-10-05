@@ -95,7 +95,7 @@ function ScopedDiscovery({
                 Boolean(item.mcpUrl ?? item.endpointUrl) &&
                 // The provider refuses self-registration and this deployment
                 // has no operator client for it: Connect cannot succeed.
-                (item.enabled || item.runtime.operatorOAuthClient?.configured !== false),
+                (item.enabled || item.runtime?.operatorOAuthClient?.configured !== false),
             ),
           );
         }

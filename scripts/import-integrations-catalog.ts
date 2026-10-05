@@ -692,9 +692,7 @@ export function catalogRowToDbInput(
         ? { defaultConnectionOwnership: row.defaultConnectionOwnership }
         : {}),
       ...(row.oauthProfile ? { oauthProfile: row.oauthProfile } : {}),
-      ...(row.oauthClientRequirement
-        ? { oauthClientRequirement: row.oauthClientRequirement }
-        : {}),
+      ...(row.oauthClientRequirement ? { oauthClientRequirement: row.oauthClientRequirement } : {}),
       ...(row.presentation ? { presentation: row.presentation } : {}),
       ...(row.documentationUrl ? { documentationUrl: row.documentationUrl } : {}),
       ...(row.registryName

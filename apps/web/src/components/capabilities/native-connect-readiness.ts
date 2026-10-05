@@ -84,7 +84,7 @@ function restrictedStockFigma(item: CapabilityCatalogItem): boolean {
 export function operatorOAuthClientMissing(
   item: Pick<CapabilityCatalogItem, "runtime" | "enabled">,
 ): boolean {
-  return item.runtime.operatorOAuthClient?.configured === false && !item.enabled;
+  return item.runtime?.operatorOAuthClient?.configured === false && !item.enabled;
 }
 
 export type NativeConnectionFacts = {
