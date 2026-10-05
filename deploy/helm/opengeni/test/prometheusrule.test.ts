@@ -298,7 +298,7 @@ describe("turn-capacity Prometheus alerts", () => {
           'status=~"401|403|409|422"',
           "sum by (method, route, status)",
           "[1d] offset 30m",
-          'route="/v1/mcp"',
+          'route=~"/v1/[m]cp"',
         ],
       ],
       [

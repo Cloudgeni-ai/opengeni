@@ -550,7 +550,10 @@ spec:
             description: Workspace or session reads are slow enough to degrade the interactive control plane. Inspect database CPU, active queries, event append latency, and request volume before scaling API pods.
         # Product-level failure safety net: a route whose refusals (401/403/409/422)
         # jump against its own one-day baseline, or that refuses most of its
-        # traffic. Unauthenticated MCP discovery (GET /v1/mcp 401) is benign.
+        # traffic. Unauthenticated organization MCP discovery (GET 401 on the
+        # organization MCP endpoint) is benign; its route is matched as a
+        # character class so the unscoped-route source guard does not read it
+        # as a client default.
         - alert: OpenGeniApiRouteRejectionsAbnormal
           expr: |
             (
@@ -578,7 +581,7 @@ spec:
               )
             )
             unless on (method, route)
-            (sum by (method, route) (increase(opengeni_http_requests_total{namespace={{ .Release.Namespace | quote }},release={{ .Release.Name | quote }},environment={{ $environment | quote }},component="api",method="GET",route="/v1/mcp"}[30m])) >= 0)
+            (sum by (method, route) (increase(opengeni_http_requests_total{namespace={{ .Release.Namespace | quote }},release={{ .Release.Name | quote }},environment={{ $environment | quote }},component="api",method="GET",route=~"/v1/[m]cp"}[30m])) >= 0)
           for: 5m
           labels:
             severity: warning
@@ -588,7 +591,7 @@ spec:
             headline: 'An API route is suddenly refusing users'
             user_impact: 'People using this part of the product are being told they cannot do it (permission, conflict or validation refusal), usually with an unhelpful error or a silent failure.'
             next_step: 'Open "Capabilities, browser & handoffs" in Grafana for the route, then read the API logs for that route: rejectionReason names the missing permission or domain code and rejectionFingerprint groups identical refusals.'
-            description: 'Fires when a route''s 401/403/409/422 rate over 30 minutes is at least 20 requests and more than 3x its own previous-day rate (or the route never refused before), or when 403/409/422 are over half of the route''s traffic for an hour with at least 10 refusals. Excludes unauthenticated GET /v1/mcp discovery. Resolve a rejectionFingerprint to its source text with scripts/resolve-rejection-fingerprint.ts.'
+            description: 'Fires when a route''s 401/403/409/422 rate over 30 minutes is at least 20 requests and more than 3x its own previous-day rate (or the route never refused before), or when 403/409/422 are over half of the route''s traffic for an hour with at least 10 refusals. Excludes unauthenticated organization MCP endpoint discovery. Resolve a rejectionFingerprint to its source text with scripts/resolve-rejection-fingerprint.ts.'
             action: 'Decide whether the refusal is a product bug (missing grant, UI offering an action the user cannot take, client retry loop) or abuse; fix the grant or the client rather than muting the alert.'
         # Browser/Computer sign-in handoff: the human could not join the live
         # session the agent handed them. This is the 2026-10-05 Personal
