@@ -40,6 +40,7 @@ import {
   readActiveSandbox,
   resolvePersonalMachineConnectionForAttempt,
   SandboxRetainedProcessPromotionFencedError,
+  SandboxRetainedProcessTerminalError,
   SandboxWorkspaceMutationOutputRejectedError,
   type Database,
   type EnrollmentRecord,
@@ -700,6 +701,17 @@ function afterRetainedProcessMutation(
           outcome,
         })
       ) {
+        if (error.retainedProcessTerminal) {
+          // Another authority (the reaper's exact-proof reconciliation) settled
+          // this retained process terminal between admission and settlement.
+          // The admission is physically settled and its output stays rejected;
+          // surface the durable terminal truth so routing reports completion
+          // instead of failing the turn. Nothing is replayed.
+          throw new SandboxRetainedProcessTerminalError(
+            error.retainedProcessTerminal.state,
+            error.retainedProcessTerminal.exitCode,
+          );
+        }
         throw new RoutingMutationOutputRejectedError(op, error.code, { cause: error });
       }
       throw error;

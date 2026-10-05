@@ -55801,23 +55801,42 @@ export type SandboxWorkspaceMutationPhysicalSettlement = Readonly<{
   outcome: "resolved";
 }>;
 
+/** Durable terminal truth of the retained process whose concurrent settlement
+ * fenced a physically settled mutation's output. */
+export type SandboxRetainedProcessTerminalState = Readonly<{
+  state: "exited" | "lost";
+  exitCode: number | null;
+}>;
+
 /** The exact provider outcome committed before its output failed an acceptance
  * fence. A generic admission fence or failed transaction carries no receipt.
  * This error never authorizes accepting output or replaying provider work. */
 export class SandboxWorkspaceMutationOutputRejectedError extends SandboxWorkspaceMutationFencedError {
   readonly name = "SandboxWorkspaceMutationOutputRejectedError";
   readonly physicalSettlement: SandboxWorkspaceMutationPhysicalSettlement;
+  /** Non-null only when the fence was the retained process itself having
+   * already reached a durable terminal state (for example the reaper settled
+   * the exit between admission and settlement). The output stays rejected;
+   * callers may report this stored terminal truth instead of failing. */
+  readonly retainedProcessTerminal: SandboxRetainedProcessTerminalState | null;
 
   constructor(
     code: SandboxWorkspaceMutationFencedError["code"],
     message: string,
     physicalSettlement: SandboxWorkspaceMutationPhysicalSettlement,
+    retainedProcessTerminal: SandboxRetainedProcessTerminalState | null = null,
   ) {
     super(code, message);
     this.physicalSettlement = Object.freeze({
       ...physicalSettlement,
       admission: Object.freeze({ ...physicalSettlement.admission }),
     });
+    this.retainedProcessTerminal = retainedProcessTerminal
+      ? Object.freeze({
+          state: retainedProcessTerminal.state,
+          exitCode: retainedProcessTerminal.exitCode,
+        })
+      : null;
   }
 
   matchesPhysicalSettlement(input: {
@@ -56010,6 +56029,7 @@ type SandboxWorkspaceMutationSettlementResult =
         | "authority_revoked";
       detail: string;
       physicallySettled?: true;
+      retainedProcessTerminal?: SandboxRetainedProcessTerminalState;
     };
 
 type TurnWorkspaceMutationAuthority = {
@@ -57287,6 +57307,13 @@ function workspaceMutationAuthorityFailure(
   ) {
     return null;
   }
+  if (error instanceof SandboxRetainedProcessTerminalError) {
+    return {
+      failure: error.code,
+      detail: error.message,
+      retainedProcessTerminal: { state: error.state, exitCode: error.exitCode },
+    };
+  }
   return { failure: error.code, detail: error.message };
 }
 
@@ -57505,13 +57532,18 @@ async function verifyWorkspaceMutationSettlementForAuthority(
       // This branch is reached only after the transaction committed a matching
       // terminal admission. A failed commit or contradictory receipt never
       // reaches it, even when the provider returned successfully.
-      throw new SandboxWorkspaceMutationOutputRejectedError(settlement.failure, settlement.detail, {
-        accountId: authorityInput.accountId,
-        workspaceId: authorityInput.workspaceId,
-        admission: admissionSnapshot,
-        operation,
-        outcome: "resolved",
-      });
+      throw new SandboxWorkspaceMutationOutputRejectedError(
+        settlement.failure,
+        settlement.detail,
+        {
+          accountId: authorityInput.accountId,
+          workspaceId: authorityInput.workspaceId,
+          admission: admissionSnapshot,
+          operation,
+          outcome: "resolved",
+        },
+        settlement.retainedProcessTerminal ?? null,
+      );
     }
     throw new SandboxWorkspaceMutationFencedError(settlement.failure, settlement.detail);
   }
