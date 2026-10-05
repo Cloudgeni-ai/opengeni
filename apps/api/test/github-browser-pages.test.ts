@@ -85,4 +85,21 @@ describe("API GitHub browser pages", () => {
     expect(html).toContain("GITHUB_SECRET=&lt;script&gt;&quot;&amp;&lt;/script&gt;");
     expect(html).toContain("navigator.clipboard.writeText");
   });
+
+  test("pages stay self-contained and follow the system color scheme", () => {
+    for (const html of [
+      githubInstallationChooserHtml(
+        [candidate],
+        "state",
+        "workspace-id",
+        "https://api.opengeni.test",
+      ),
+      githubSetupSuccessHtml("owner", "https://opengeni.test/"),
+      githubSetupPendingHtml(),
+    ]) {
+      expect(html).toContain("prefers-color-scheme:light");
+      expect(html).toContain('class="wordmark">Opengeni<');
+      expect(html).not.toMatch(/<link\b|\bsrc="|@import|url\(/);
+    }
+  });
 });
