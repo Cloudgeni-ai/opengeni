@@ -45,6 +45,10 @@ describe("onboarding use case text", () => {
     // there; a repository-attached worker is only the fallback.
     expect(withKey).toContain('"Use" button');
     expect(withKey).toContain("don't ask me again in a separate question");
+    // A person's reply does not supersede an agent wait, so waiting for the
+    // repository choice with wait_for_input left a days-long wait behind.
+    expect(withKey).toContain("Don't call wait_for_input for my answer");
+    expect(withKey).not.toContain("then wait,");
     expect(withKey).toContain("call github_repositories_list");
     expect(withKey).toContain("session_create, passing that repository's returned resource");
     expect(withKey).toContain("give me the worker's pull request link");
