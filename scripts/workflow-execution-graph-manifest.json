@@ -6,7 +6,7 @@
   "workflows": [
     {
       "path": ".github/workflows/agent-ci.yml",
-      "sha256": "f01d343b11b1c02cf9f212459fbf396599032ae0c27afc0230894e4d8bdb78a4"
+      "sha256": "5ee8e3e7c6df0c0a4948903856ffc80e1e4832ea582008f2448204f0ee71b98e"
     },
     {
       "path": ".github/workflows/agent-release.yml",
@@ -18,7 +18,7 @@
     },
     {
       "path": ".github/workflows/ci.yml",
-      "sha256": "90e2b690a5a01d4f048066f5692d4e8a7daf067c77e2e56f6f76ad942c8dd928"
+      "sha256": "01a0dc3e954b2dc10f2c2e17ea899b7f08e833d8e1dae654e43aaa8627bb3eae"
     },
     {
       "path": ".github/workflows/deprecate-pre-1.0.yml",
@@ -30,7 +30,7 @@
     },
     {
       "path": ".github/workflows/local-startup.yml",
-      "sha256": "32c9092f1a6262dfe73e6a53ea5a1f8c8a11657e55c1a318ab5b59b058a44dce"
+      "sha256": "67ea5d4835dd967cb25663e114fc56aa257bf8cc3fa33878c6a64b608d49c66c"
     },
     {
       "path": ".github/workflows/open-version-pr.yml",
