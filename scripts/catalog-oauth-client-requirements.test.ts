@@ -48,7 +48,7 @@ describe("OAuth client requirements", () => {
     ).not.toHaveProperty("oauthClientRequirement");
   });
 
-  test("featured connectors verified as unable to self-register are listed (OPE-580)", () => {
+  test("featured connectors verified as unable to self-register are listed", () => {
     const listed = new Set(OAUTH_CLIENT_REQUIREMENTS.entries.map((row) => row.mcpUrl));
     for (const mcpUrl of [
       "https://mcp.asana.com/v2/mcp",
