@@ -1454,6 +1454,20 @@ recreates this deadlock. Serialize on the advisory key instead. CAS on
 idempotency, and every fail-closed authorization check are unchanged by 0299 -
 only lock strength and lock class moved.
 
+**The turn claim is not on this key.** `claimSessionWorkForAttempt` takes
+neither the exclusive nor the shared `organization-membership:<organization
+id>` advisory lock, and nothing it reaches takes it: the host-MCP authority
+guard triggers (migrations 0445-0448) that once took it exclusively from inside
+the claim sit on tables with no remaining writer. A claim therefore holds only
+the shared tenancy fence and the canonical control/workspace/session/turn/
+attempt prefix, so it cannot invert the order above, and claims in one
+organization never serialize each other. A membership removal that commits
+while a claim is in flight is enforced at execution time instead: workspace
+writer admission refuses a revoked grant with `authority_revoked`, and
+connection and MCP authority revalidate live membership on every use. Do not
+add a membership lock, or a write whose trigger takes one, to the claim.
+`packages/db/test/claim-organization-membership-fence.test.ts` pins this.
+
 `packages/db/test/migration-0299-organization-membership-lock-order.test.ts`
 holds the regression evidence: a deterministic cycle probe, a parallel-load
 probe that asserts PostgreSQL's own `pg_stat_database.deadlocks` counter does

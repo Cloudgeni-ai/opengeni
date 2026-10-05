@@ -72441,10 +72441,12 @@ export async function claimSessionWorkForAttempt(
       stage: "session_attempts.claim",
       eventTypes: ["session.turn.attempt_claimed"],
       maxAttempts: 3,
-      // Claim reads membership-fenced authority; it never mutates membership.
-      // Shared keeps membership mutators fenced while concurrent claims in
-      // one organization stay parallel (exclusive serialized every claim).
-      organizationMembershipFence: "shared",
+      // No organization-membership fence, not even shared: the claim never
+      // takes that key (no trigger or function it reaches does since the
+      // host-MCP authority writers were retired), so it cannot invert the
+      // membership -> tenancy -> control -> session prefix. A membership
+      // removal racing a claim is caught at execution time: workspace-writer
+      // admission, connection and MCP authority revalidate live membership.
     },
     async (scopedDb) =>
       await withSessionActivitySavepoint(scopedDb, async (tx) => {

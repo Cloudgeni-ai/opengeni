@@ -136,8 +136,11 @@ UUIDs; substituting SDK IDs into the UUID contract would break existing callers.
 Apply the additive ledger migration and exact runtime-role privileges before
 enabling configured producers. Publish a coherent runtime/worker/config/database
 set. Upgrade all claim-capable workers before enabling recovery mappings: older
-claimers may acquire membership and session locks in the opposite order from
-the recovery ledger. Do not enable this feature in a mixed old/new claimer pool.
+claimers that still wrote host-MCP turn authorities acquired the membership
+lock after session locks, the opposite order from the recovery ledger. Do not
+enable this feature in a mixed old/new claimer pool. Current claimers take no
+organization-membership lock at all, so the ledger's membership -> session
+order cannot invert against a claim.
 Provider support must be implemented and verified separately before enabling
 its mapping; installing the OpenGeni code cannot make an unsupported provider
 observation-only. Historical calls lacking a captured binding are not backfilled
