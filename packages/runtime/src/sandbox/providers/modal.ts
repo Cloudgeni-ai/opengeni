@@ -75,18 +75,20 @@ export type ModalOrphanSweepResult = {
   terminated: ModalOrphanSweepTermination[];
   skipped: number;
   /**
-   * Provider/lease reconciliation observed by this pass. `unleased` counts every
-   * running box the sweep judged orphaned (before any termination attempt), so a
-   * box that survives termination or revalidation stays visible.
-   * `liveLeaseInstancesMissing` counts live leases whose exact provider instance
-   * is not running. Both are only meaningful when the whole app listing was
-   * read; `complete` is false when the termination budget cut the pass short.
+   * Provider/lease reconciliation observed by this pass, judged against the
+   * live-lease snapshot passed in (read before the listing). `unterminated`
+   * holds orphan candidates still running after the pass (termination skipped,
+   * postponed, or failed); `missingLiveLeaseInstanceIds` names live-lease
+   * instances absent from the listing. Both can include a lease transition that
+   * raced the listing, so a caller re-reads durable ownership before reporting
+   * them. Only meaningful when `complete` (the whole app listing was read; the
+   * termination budget can cut a pass short).
    */
   inventory: {
     complete: boolean;
     running: number;
-    unleased: number;
-    liveLeaseInstancesMissing: number;
+    unterminated: ModalOrphanSweepTermination[];
+    missingLiveLeaseInstanceIds: string[];
   };
 };
 
@@ -1479,7 +1481,7 @@ export async function sweepModalOrphanSandboxes(
 
     let examined = 0;
     let skipped = 0;
-    let unleased = 0;
+    const unterminated: ModalOrphanSweepTermination[] = [];
     let complete = false;
     const seenInstanceIds = new Set<string>();
     const terminated: ModalOrphanSweepTermination[] = [];
@@ -1554,25 +1556,27 @@ export async function sweepModalOrphanSandboxes(
           skipped += 1;
           continue;
         }
-        unleased += 1;
         const candidate = { sandboxId: info.id, reason, tags };
         let sandbox: Awaited<ReturnType<typeof modal.sandboxes.fromId>>;
         try {
           sandbox = await modal.sandboxes.fromId(info.id);
         } catch {
           skipped += 1;
+          unterminated.push(candidate);
           continue;
         }
         if (options.revalidateTermination) {
           try {
             if (!(await options.revalidateTermination(candidate))) {
               skipped += 1;
+              unterminated.push(candidate);
               continue;
             }
           } catch {
             // Destructive provider cleanup fails closed when the fresh durable
             // ownership read is unavailable or otherwise inconclusive.
             skipped += 1;
+            unterminated.push(candidate);
             continue;
           }
         }
@@ -1581,6 +1585,7 @@ export async function sweepModalOrphanSandboxes(
           terminated.push(candidate);
         } catch {
           skipped += 1;
+          unterminated.push(candidate);
         }
         if (terminated.length >= maxTerminations) {
           break;
@@ -1599,14 +1604,15 @@ export async function sweepModalOrphanSandboxes(
       inventory: {
         complete,
         running: examined,
-        unleased,
+        unterminated,
         // The live-lease snapshot was read before the listing began, so an
         // instance id it names already existed and a complete listing of
         // running boxes contains it unless that box has stopped.
-        liveLeaseInstancesMissing: complete
-          ? liveLeases.filter((lease) => lease.instanceId && !seenInstanceIds.has(lease.instanceId))
-              .length
-          : 0,
+        missingLiveLeaseInstanceIds: complete
+          ? liveLeases.flatMap((lease) =>
+              lease.instanceId && !seenInstanceIds.has(lease.instanceId) ? [lease.instanceId] : [],
+            )
+          : [],
       },
     };
   } finally {
@@ -1624,8 +1630,10 @@ function emptyModalOrphanSweepResult(
     inventory: {
       complete: true,
       running: 0,
-      unleased: 0,
-      liveLeaseInstancesMissing: liveLeases.filter((lease) => lease.instanceId).length,
+      unterminated: [],
+      missingLiveLeaseInstanceIds: liveLeases.flatMap((lease) =>
+        lease.instanceId ? [lease.instanceId] : [],
+      ),
     },
   };
 }

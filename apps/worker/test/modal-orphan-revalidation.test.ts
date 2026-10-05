@@ -1,6 +1,9 @@
 import { describe, expect, test } from "bun:test";
 import type { LiveModalSandboxLeaseAttribution } from "@opengeni/db";
-import { modalOrphanTerminationStillEligible } from "../src/activities/sandbox-lease";
+import {
+  modalOrphanCandidateStillUnowned,
+  modalOrphanTerminationStillEligible,
+} from "../src/activities/sandbox-lease";
 
 const lease: LiveModalSandboxLeaseAttribution = {
   leaseId: "lease-1",
@@ -41,5 +44,18 @@ describe("Modal orphan pre-termination lease revalidation", () => {
       false,
     );
     expect(modalOrphanTerminationStillEligible([lease], untagged)).toBe(true);
+  });
+
+  test("inventory ownership ignores the pending-create postponement", () => {
+    const pending = { ...lease, leaseId: "lease-2", instanceId: null };
+    const untagged = { sandboxId: "sb-orphan", reason: "unattributed" as const, tags: {} };
+    // Termination waits for the unreturned create, but the box is still unleased.
+    expect(modalOrphanTerminationStillEligible([pending], untagged)).toBe(false);
+    expect(modalOrphanCandidateStillUnowned([pending], untagged)).toBe(true);
+    // Ownership established after the listing (exact instance or attribution) is not a leak.
+    expect(modalOrphanCandidateStillUnowned([lease], candidate("sb-live"))).toBe(false);
+    expect(
+      modalOrphanCandidateStillUnowned([{ ...lease, instanceId: null }], candidate("sb-new")),
+    ).toBe(false);
   });
 });
