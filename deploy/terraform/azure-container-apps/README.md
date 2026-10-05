@@ -351,6 +351,13 @@ purge protection retains the tombstone for seven days; disposable tests may set
 `key_vault_purge_protection_enabled = false` before creation and explicitly purge
 **only the exact test vault** during final cleanup. Storage soft-delete retention
 and PostgreSQL backups similarly need an explicit retention/cleanup assessment.
+Log Analytics can remain recoverable after group deletion. Permanent test cleanup
+requires recovering the exact soft-deleted workspace first, then deleting the
+active workspace with `az monitor log-analytics workspace delete --force true`.
+Recreate its original empty test group only if recovery needs it, verify the
+original workspace ID/customer ID, and delete that temporary group afterward.
+Verify the workspace is absent from both active and soft-deleted inventories;
+force-deleting an already soft-deleted resource alone is not sufficient.
 Keep state/credentials protected and only remove private task artifacts after
 cleanup has been verified and required evidence retained without secrets.
 
@@ -363,3 +370,4 @@ cleanup has been verified and required evidence retained without secrets.
 - [Azure Blob SAS adapter](../../../packages/storage/src/index.ts)
 - [Microsoft native environment routing](https://learn.microsoft.com/azure/container-apps/rule-based-routing)
 - [Microsoft VNet requirements](https://learn.microsoft.com/azure/container-apps/custom-virtual-networks)
+- [Microsoft Log Analytics deletion and recovery](https://learn.microsoft.com/azure/azure-monitor/logs/delete-workspace)

@@ -107,7 +107,10 @@ Select a real remote sandbox explicitly; the generic conformance script defaults
 to `none`. Keep deployment shared-key or product tokens in environment variables,
 not command arguments or retained logs.
 
-Generated preflight preserves the accepted product/access modes and public URL.
+Generated preflight preserves the accepted sandbox backend, product/access modes,
+and public URL. For a direct check of a non-default remote backend, supply
+`--sandbox-backend daytona` (or your selected supported backend); compatibility
+checks still reject a conflicting `OPENGENI_SANDBOX_BACKEND` environment value.
 For a direct managed-mode environment check, supply the paired selectors
 `--product-access-mode managed --access-mode externalGateway` and
 `--public-base-url "$OPENGENI_PUBLIC_BASE_URL"`; omit them for the default
@@ -188,6 +191,16 @@ resource group. Follow Azure's retained-secret policy for soft-deleted Key Vault
 without touching unrelated vaults or resources. Purge protection is enabled by
 default; temporary tests may explicitly disable it before creation and purge
 only their own soft-deleted vault after destruction.
+
+Deleting a group can leave its Log Analytics workspace recoverable. For permanent
+disposable-test cleanup, inspect `az monitor log-analytics workspace
+list-deleted-workspaces` and verify the exact original workspace ID. Recover a
+soft-deleted workspace into its original group before force-deleting it; if that
+group was deleted, recreate only that empty test group, recover and verify the
+original workspace identity, then delete it with `--force true`. Remove the
+temporary recovery group and verify both active and soft-deleted inventories are
+empty. Permanent deletion removes the test logs irreversibly; do not use this
+procedure for retained production logs or unrelated workspaces.
 
 For temporary validation, keep an explicit resource manifest and finish by
 confirming that every created Azure resource and public endpoint is absent.
