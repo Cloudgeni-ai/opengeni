@@ -2685,10 +2685,16 @@ The runtime secret must provide values such as:
 - optional `OPENGENI_OPENROUTER_API_KEY` for the deployment-managed reviewed
   OpenRouter rail; keep it in the runtime Secret, never catalog JSON
 - optional `OPENGENI_OPPER_API_KEY` for the deployment-managed reviewed Opper
-  rail (EU-pinned `opper/…` routes billed in OpenGeni credits); keep it in the
-  runtime Secret, never catalog JSON
+  rail (EU-pinned `opper/…` routes billed in Opengeni credits at Opper's
+  reported cost +5%; default Claude Opus 5.5 EU); keep it in the runtime Secret,
+  never catalog JSON
 - optional `OPENGENI_MODEL_CATALOG_SOURCE=code|database` (default `code`),
   `OPENGENI_MODEL_COST_POLICY_JSON`, and `OPENGENI_MODEL_NOTES_JSON`
+- optional `OPENGENI_MANAGED_MODELS_JSON` (code mode only; ignored in database
+  mode): replaces the managed Gateway/OpenRouter/Opper model lists without a
+  code deploy, using the catalog document's `gatewayModels`/`openrouterModels`/
+  `opperModels` entry schemas; see "Code-mode managed model lists" in
+  [`model-providers.md`](model-providers.md)
 - `OPENGENI_OBJECT_STORAGE_BACKEND=s3-compatible` plus endpoint/access-key settings for local/self-contained modes
 - `OPENGENI_OBJECT_STORAGE_BACKEND=azure-blob` plus Azure Blob connection string/account-key settings
 - `OPENGENI_OBJECT_STORAGE_BACKEND=aws-s3` plus `OPENGENI_OBJECT_STORAGE_REGION`; prefer IRSA/EKS Pod Identity over static keys

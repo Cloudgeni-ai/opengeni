@@ -7,7 +7,7 @@ import { testSettings } from "@opengeni/testing";
 import { recordModelUsageAndDebitCredits } from "../src/activities/agent-turn";
 
 const db = {} as Database;
-const SONNET = "aws/claude-sonnet-4-6-eu";
+const OPUS = "aws/claude-opus-5-5";
 
 function spies() {
   const recorded: Array<{ eventType: string; quantity: number }> = [];
@@ -39,7 +39,7 @@ function spies() {
   };
 }
 
-const usage = { inputTokens: 669, outputTokens: 33, totalTokens: 702 };
+const usage = { inputTokens: 706, outputTokens: 75, totalTokens: 781 };
 
 describe("Opper reported-cost billing", () => {
   test("deployment Opper debits the exact Opper-reported cost plus 5%", async () => {
@@ -54,21 +54,21 @@ describe("Opper reported-cost billing", () => {
           sessionId: "sess",
           turnId: "turn-opper",
           turnAttemptId: "attempt",
-          model: `opper/${SONNET}`,
+          model: `opper/${OPUS}`,
           externallyBilled: false,
-          // Live Opper response: usage.opper.cost.total = 0.0027522 USD.
-          gatewayBilling: { finalProvider: "opper", inferenceCostUsd: "0.0027522" },
+          // Live Opper response: usage.opper.cost.total = 0.0047564 USD.
+          gatewayBilling: { finalProvider: "opper", inferenceCostUsd: "0.0047564" },
           usage,
           sourceKey: "response-opper",
         },
       );
-      // 2,752.2 micros -> 2,753 provider micros; x1.05 -> 2,889.81 -> 2,890.
-      expect(s.recorded).toContainEqual({ eventType: "model.cost", quantity: 2_890 });
-      expect(s.debits[0]).toMatchObject({ requestedAmountMicros: 2_890 });
+      // 4,756.4 micros -> 4,757 provider micros; x1.05 -> 4,994.85 -> 4,995.
+      expect(s.recorded).toContainEqual({ eventType: "model.cost", quantity: 4_995 });
+      expect(s.debits[0]).toMatchObject({ requestedAmountMicros: 4_995 });
       expect(billing).toMatchObject({
         billingPath: "opengeni_credits",
-        pricedCostMicros: 2_890,
-        estimatedProviderCostMicros: 2_753,
+        pricedCostMicros: 4_995,
+        estimatedProviderCostMicros: 4_757,
         pricingSource: "gateway_reported",
         upstreamProvider: "opper",
       });
@@ -89,16 +89,16 @@ describe("Opper reported-cost billing", () => {
           sessionId: "sess",
           turnId: "turn-opper-static",
           turnAttemptId: "attempt",
-          model: `opper/${SONNET}`,
+          model: `opper/${OPUS}`,
           externallyBilled: false,
           usage,
           sourceKey: "response-opper-static",
         },
       );
-      // (669 * $3.30 + 33 * $16.50) / 1M = $0.0027522, x1.05; the static path
-      // rounds each token class up, so it lands one micro above the exact cost.
+      // (706 * $4.40 + 75 * $22.00) / 1M = $0.0047564 (the live reported
+      // cost exactly), x1.05 = the same 4,995 micros.
       expect(billing).toMatchObject({
-        pricedCostMicros: 2_891,
+        pricedCostMicros: 4_995,
         pricingSource: "configured_list_price",
       });
     } finally {
@@ -119,9 +119,9 @@ describe("Opper reported-cost billing", () => {
         sessionId: "sess",
         turnId: "turn-workspace-opper",
         turnAttemptId: "attempt",
-        model: `workspace-opper/${SONNET}`,
+        model: `workspace-opper/${OPUS}`,
         externallyBilled: true,
-        gatewayBilling: { finalProvider: "opper", inferenceCostUsd: "0.0027522" },
+        gatewayBilling: { finalProvider: "opper", inferenceCostUsd: "0.0047564" },
         usage,
         sourceKey: "response-workspace-opper",
       });
@@ -129,7 +129,7 @@ describe("Opper reported-cost billing", () => {
       expect(billing).toMatchObject({
         billingPath: "external",
         pricedCostMicros: 0,
-        estimatedProviderCostMicros: 2_753,
+        estimatedProviderCostMicros: 4_757,
       });
     } finally {
       s.restore();

@@ -418,9 +418,9 @@ export const galleryModelRows: PickerModelRow[] = projectPickerRows([
     billing: { upstreamPayer: "deployment", metering: "external" },
   }),
   catalogModel({
-    id: "opper/vertexai/gemini-3.8-flash-eu",
-    label: "Gemini 3.8 Flash (EU)",
-    shortLabel: "Gemini 3.8 Flash",
+    id: "opper/aws/claude-opus-5-5",
+    label: "Claude Opus 5.5 (EU)",
+    shortLabel: "Opus 5.5",
     provider: "opper",
     providerLabel: "Opper",
     cost: "credits",
