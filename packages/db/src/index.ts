@@ -88448,6 +88448,7 @@ export * from "./codemode-approvals";
 export * from "./tool-action-reviews";
 export * from "./browser-sessions";
 export * from "./browser-deadline-checkpoints";
+export * from "./sandbox-interaction-idle";
 export * from "./computer-sessions";
 export * from "./browser-identities";
 export * from "./browser-state-artifacts";

@@ -99,6 +99,13 @@ spec:
               and on (job, instance)
               (time() - opengeni_sandbox_inventory_refresh_timestamp_seconds{domain="retained_processes"} < {{ $inventoryFreshnessSeconds }})
             )
+        - record: opengeni:sandbox_leases_interaction_only:fresh_max
+          expr: |
+            max by (idle_bucket) (
+              opengeni_sandbox_leases_interaction_only
+              and on (job, instance)
+              (time() - opengeni_sandbox_inventory_refresh_timestamp_seconds{domain="interaction_idle"} < {{ $inventoryFreshnessSeconds }})
+            )
         - record: opengeni:sandbox_leases_expired_draining:fresh_max
           expr: |
             max by (backend, age_bucket) (
@@ -819,6 +826,14 @@ spec:
           annotations:
             summary: OpenGeni has retained sandbox processes whose logical owners are terminal
             description: A completed/failed/cancelled owner still has a physical sandbox process after 15m. Inspect provider-binding, probe, and settlement outcomes; age alone is never exit proof.
+        - alert: OpenGeniSandboxesHeldByIdleInteractions
+          expr: sum(opengeni:sandbox_leases_interaction_only:fresh_max{idle_bucket=~"2h_6h|gte_6h"}) > 5
+          for: 30m
+          labels:
+            severity: warning
+          annotations:
+            summary: Several sandboxes are kept warm only by Browser/Computer sessions idle for 2h+
+            description: Interaction holders never expire by timestamp, so a box whose only holders are Browser/Computer sessions stays warm (and billed by the provider) until the session is ended or the provider deadline rotates it. Check opengeni:sandbox_leases_interaction_only:fresh_max by idle_bucket and whether sessions are being left open.
         - alert: OpenGeniSandboxDrainExpired
           expr: sum(opengeni:sandbox_leases_expired_draining:fresh_max{age_bucket=~"5m_1h|1h_1d|gte_1d"}) > 0
           for: 10m
@@ -860,7 +875,7 @@ spec:
         - alert: OpenGeniSandboxInventoryProjectionStale
           expr: |
             min by (domain) (
-              time() - opengeni_sandbox_inventory_refresh_timestamp_seconds{domain!~"opensandbox_kubernetes|modal_provider"}
+              time() - opengeni_sandbox_inventory_refresh_timestamp_seconds{domain!~"opensandbox_kubernetes|modal_provider|interaction_idle"}
             ) > {{ $inventoryFreshnessSeconds }}
             or absent(opengeni_sandbox_inventory_refresh_timestamp_seconds{domain="leases"})
             or absent(opengeni_sandbox_inventory_refresh_timestamp_seconds{domain="checkpoint_artifacts"})
