@@ -72441,7 +72441,10 @@ export async function claimSessionWorkForAttempt(
       stage: "session_attempts.claim",
       eventTypes: ["session.turn.attempt_claimed"],
       maxAttempts: 3,
-      organizationMembershipFence: true,
+      // Claim reads membership-fenced authority; it never mutates membership.
+      // Shared keeps membership mutators fenced while concurrent claims in
+      // one organization stay parallel (exclusive serialized every claim).
+      organizationMembershipFence: "shared",
     },
     async (scopedDb) =>
       await withSessionActivitySavepoint(scopedDb, async (tx) => {

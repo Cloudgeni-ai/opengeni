@@ -864,17 +864,33 @@ export async function withSessionActivityRlsContext<T>(
   fn: (db: SessionActivityDatabase) => Promise<T>,
   transactionConfig?: PgTransactionConfig,
   fenceMode: "shared" | "none" = "shared",
-  organizationMembershipFence = false,
+  organizationMembershipFence: OrganizationMembershipFenceMode = false,
 ): Promise<T> {
   await assertSessionActivityGateEntry(db);
   return await withRlsContext(
     db,
     context,
     async (scopedDb) => {
-      if (organizationMembershipFence) {
-        // Claim can inherit membership-fenced authority after locking sessions.
-        // Acquire membership before even a shared tenancy fence: an exclusive
-        // tenancy/control waiter can otherwise complete the same lock cycle.
+      if (organizationMembershipFence === "shared") {
+        // A pure reader of membership truth (the turn claim) only needs to
+        // exclude membership/tenancy mutators, which hold this key
+        // exclusively. Readers must not serialize each other: an exclusive
+        // claim fence made every turn claim in one organization queue behind
+        // every other one. Same position as the exclusive mode below, so the
+        // membership -> tenancy -> control prefix order is unchanged. A
+        // caller using this mode must never request the exclusive lock on the
+        // same key later in the transaction (no in-place escalation).
+        await scopedDb.execute(sql`select pg_advisory_xact_lock_shared(
+          hashtextextended(${`organization-membership:${context.accountId}`}, 0))`);
+        if (fenceMode === "shared") {
+          await scopedDb.execute(sql`select pg_advisory_xact_lock_shared(
+            hashtextextended(${`session-tenancy:${context.workspaceId}`}, 0))`);
+        }
+      } else if (organizationMembershipFence) {
+        // Callers that reauthorize or mutate under the membership lifecycle
+        // lock take it exclusively. Acquire membership before even a shared
+        // tenancy fence: an exclusive tenancy/control waiter can otherwise
+        // complete the same lock cycle.
         await scopedDb.execute(sql`select pg_advisory_xact_lock(
           hashtextextended(${`organization-membership:${context.accountId}`}, 0))`);
         if (fenceMode === "shared") {
@@ -894,9 +910,16 @@ export async function withSessionActivityRlsContext<T>(
       return value;
     },
     transactionConfig,
-    organizationMembershipFence ? "none" : fenceMode,
+    organizationMembershipFence !== false ? "none" : fenceMode,
   );
 }
+
+/**
+ * `true`/`"exclusive"`: the callback reauthorizes or mutates under the
+ * organization-membership lifecycle lock. `"shared"`: the callback only reads
+ * membership-fenced authority and must never escalate to exclusive.
+ */
+export type OrganizationMembershipFenceMode = boolean | "exclusive" | "shared";
 
 /**
  * `organizationMembershipFence` is required when the callback takes the
@@ -981,14 +1004,21 @@ export async function retrySessionActivityRls<T>(
     /** Claim can inherit membership-fenced causal authority after locking the
      * session. Acquire that fence before tenancy/control/session instead. An
      * enclosing transaction must preserve this same lock prefix. */
-    organizationMembershipFence?: boolean;
+    organizationMembershipFence?: OrganizationMembershipFenceMode;
   },
   fn: (db: SessionActivityDatabase) => Promise<T>,
 ): Promise<T> {
   return await runIdempotentPersistenceTransaction(options, async () => {
     if (options.organizationMembershipFence) {
       const context = { ...(await rlsContextForWorkspace(db, workspaceId)), workspaceId };
-      return await withSessionActivityRlsContext(db, context, fn, undefined, "shared", true);
+      return await withSessionActivityRlsContext(
+        db,
+        context,
+        fn,
+        undefined,
+        "shared",
+        options.organizationMembershipFence,
+      );
     }
     return await withWorkspaceSessionActivityRls(db, workspaceId, fn);
   });
