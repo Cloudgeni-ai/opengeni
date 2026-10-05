@@ -1607,7 +1607,8 @@
       "method": "POST",
       "path": "/v1/workspaces/:workspaceId/artifacts/:artifactId/playback-source",
       "sdk": [
-        "OpenGeniClient.createVideoArtifactPlaybackSource"
+        "OpenGeniClient.createVideoArtifactPlaybackSource",
+        "createSessionProxyHandler"
       ],
       "request": [],
       "response": [
@@ -28785,9 +28786,12 @@
       "createEmbeddedSessionClient": "value",
       "CreateEmbeddedSessionClientOptions": "type",
       "createOlderHistoryLoadReceipt": "value",
+      "createSessionRetainedScreenshotLoader": "value",
       "createToolRegistry": "value",
       "CreateToolRegistryOptions": "type",
       "createVoiceRecordingManifest": "value",
+      "createWorkspaceRetainedArtifactLoader": "value",
+      "createWorkspaceRetainedVideoLoader": "value",
       "CREDIT_EXHAUSTION_MESSAGE": "value",
       "creditExhaustedFromEvents": "value",
       "DEFAULT_ARTIFACT_LABELS": "value",
@@ -29032,8 +29036,11 @@
       "RenderAllowanceExhausted": "type",
       "ResponsiveBasis": "type",
       "RetainedArtifactLoader": "type",
+      "RetainedArtifactLoaderClient": "type",
       "retainedImageId": "value",
       "RetainedScreenshotLoader": "type",
+      "RetainedScreenshotLoaderClient": "type",
+      "RetainedVideoLoaderClient": "type",
       "runnableLatencyModesForModel": "value",
       "sandboxCommandExitCode": "value",
       "SandboxFileLocation": "type",

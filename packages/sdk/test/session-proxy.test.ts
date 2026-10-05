@@ -9,12 +9,17 @@ import {
   type SessionProxyMessageInput,
 } from "../src/index";
 import { parseSseStream } from "../src/sse";
-import { OPENGENI_API_CONTRACT_REVISION } from "../src/types";
+import { OPENGENI_API_CONTRACT_REVISION, type ClientConfig } from "../src/types";
 import {
   SESSION_PROXY_SITE_HTML_MAX_BYTES,
   SessionProxySiteHtmlTooLargeError,
 } from "../src/session-proxy";
 import { hangingBytesStream, makeEvent, SESSION_ID, sseBlock, WORKSPACE_ID } from "./helpers";
+
+/** The artifact-viewer capability, or undefined when the proxy reports none. */
+function viewer(config: { artifacts?: ClientConfig["artifacts"] }) {
+  return config.artifacts || undefined;
+}
 
 const OTHER_WORKSPACE_ID = "99999999-9999-4999-8999-999999999999";
 const EDITABLE_ID = "0123456789abcdef0123456789abcdef";
@@ -233,7 +238,7 @@ describe("createSessionProxyHandler", () => {
       });
       const response = await handler(new Request(`${PRODUCT}/api/opengeni/v1/config/client`));
       expect(response.status).toBe(200);
-      expect((await response.json()).artifacts).toBeUndefined();
+      expect((await response.json()).artifacts).toBe(false);
     }
   });
 
@@ -266,7 +271,7 @@ describe("createSessionProxyHandler", () => {
       fetch: (input, init) => handler(new Request(input, init)),
     });
     const config = await browser.getClientConfig();
-    expect(config.artifacts).toBeUndefined();
+    expect(config.artifacts).toBe(false);
     expect(config.apiContractRevision).toBe(OPENGENI_API_CONTRACT_REVISION);
     expect((await browser.getSession(WORKSPACE_ID, SESSION_ID)).id).toBe(SESSION_ID);
     const artifact = await handler(
@@ -283,9 +288,7 @@ describe("createSessionProxyHandler", () => {
     ).toBe(false);
     // A deployment upgrade is discovered without a sticky negative cache.
     supported = true;
-    expect((await browser.getClientConfig()).artifacts?.cachePartition.principalId).toBe(
-      "subject-u42",
-    );
+    expect(viewer(await browser.getClientConfig())?.cachePartition.principalId).toBe("subject-u42");
   });
 
   test("viewer negotiation does not turn permission or transient errors into missing capability", async () => {
@@ -527,6 +530,10 @@ describe("createSessionProxyHandler", () => {
         .status,
     ).toBe(404);
     expect(upstream.requests).toHaveLength(0);
+    // Reported so stock UIs hide "New chat" instead of failing on send.
+    expect((await browser.getClientConfig()).sessionCreation).toBe(false);
+    const hooked = setup({ createSession: (input) => input });
+    expect((await hooked.browser.getClientConfig()).sessionCreation).toBe(true);
   });
 
   test("messages cannot rotate MCP credentials or attach non-file resources", async () => {
@@ -1087,6 +1094,140 @@ describe("createSessionProxyHandler", () => {
         )
       ).status,
     ).toBe(404);
+    // Reported so stock UIs hide "Archive" instead of failing on click.
+    expect((await browser.getClientConfig()).archive).toBe(true);
+    expect((await off.browser.getClientConfig()).archive).toBe(false);
+  });
+
+  test("retained media a session produced is served under files, scoped and association-checked", async () => {
+    const RETAINED = "44444444-4444-4444-8444-444444444444";
+    const OTHER_SESSION = "55555555-5555-4555-8555-555555555555";
+    const workspace = `/v1/workspaces/${WORKSPACE_ID}`;
+    const sessionPath = `${workspace}/sessions/${SESSION_ID}`;
+    const page = (range: string | null) =>
+      new Response(new Uint8Array([2, 3]), {
+        status: 206,
+        headers: {
+          "Content-Type": "image/png",
+          "Content-Length": "2",
+          "Content-Range": "bytes 1-2/4",
+          "Accept-Ranges": "bytes",
+          "X-Range": range ?? "",
+        },
+      });
+    const build = (overrides: Partial<SessionProxyHandlerOptions> = {}) => {
+      const base = upstreamServer();
+      const seen: string[] = [];
+      const fetch = async (input: string | URL | Request, init?: RequestInit) => {
+        const request = new Request(input, init);
+        const url = new URL(request.url);
+        const path = url.pathname;
+        seen.push(`${request.method} ${path}${url.search}`);
+        if (path.endsWith(`/artifact-associations/${RETAINED}`)) {
+          return path.startsWith(`${sessionPath}/`) && url.searchParams.get("kind") === "retained"
+            ? Response.json({ sessionId: SESSION_ID, artifactId: RETAINED, kind: "retained" })
+            : Response.json({ error: { code: "not_found" } }, { status: 404 });
+        }
+        if (path === `${workspace}/artifacts/${RETAINED}/content`) {
+          return page(request.headers.get("range"));
+        }
+        if (path === `${workspace}/artifacts/${RETAINED}/playback-source`) {
+          return Response.json({ artifactId: RETAINED, url: "https://objects.example/v.mp4" });
+        }
+        if (path === `${sessionPath}/artifacts/${RETAINED}`) {
+          return Response.json({ artifactId: RETAINED, available: true });
+        }
+        if (path === `${sessionPath}/artifacts/${RETAINED}/content`) {
+          return page(request.headers.get("range"));
+        }
+        return await base.fetch(request);
+      };
+      const service = new OpenGeniClient({ baseUrl: API, apiKey: "og_org_key", fetch });
+      const handler = createSessionProxyHandler(service, {
+        resolve: () => ({ workspaceId: WORKSPACE_ID, user: "u_42", source: "northwind" }),
+        ...overrides,
+      });
+      return { handler, seen };
+    };
+    const at = (path: string) => `${PRODUCT}/api/opengeni${path}`;
+    const scoped = (sessionId = SESSION_ID) => ({
+      "x-opengeni-session-id": sessionId,
+      range: "bytes=1-2",
+    });
+    const content = at(`${workspace}/artifacts/${RETAINED}/content`);
+    const playback = at(`${workspace}/artifacts/${RETAINED}/playback-source`);
+
+    const on = build();
+    const read = await on.handler(new Request(content, { headers: scoped() }));
+    expect(read.status).toBe(206);
+    expect([...new Uint8Array(await read.arrayBuffer())]).toEqual([2, 3]);
+    expect(read.headers.get("content-range")).toBe("bytes 1-2/4");
+    expect(read.headers.get("accept-ranges")).toBe("bytes");
+    expect(read.headers.get("content-security-policy")).toBe("sandbox");
+    expect(on.seen).toEqual([
+      `GET ${sessionPath}/artifact-associations/${RETAINED}?kind=retained`,
+      `GET ${workspace}/artifacts/${RETAINED}/content`,
+    ]);
+    const minted = await on.handler(
+      new Request(playback, {
+        method: "POST",
+        headers: { ...scoped(), "Content-Type": "application/json" },
+      }),
+    );
+    expect(minted.status).toBe(200);
+    expect(on.seen.at(-1)).toBe(`POST ${workspace}/artifacts/${RETAINED}/playback-source`);
+
+    // The session must be named, readable by the product, and the producer.
+    on.seen.length = 0;
+    expect((await on.handler(new Request(content))).status).toBe(400);
+    expect(
+      (await on.handler(new Request(content, { headers: scoped(OTHER_SESSION) }))).status,
+    ).toBe(404);
+    expect(on.seen.some((line) => line.includes("/content"))).toBe(false);
+    const refused = build({ authorizeSession: () => false });
+    expect((await refused.handler(new Request(content, { headers: scoped() }))).status).toBe(404);
+    expect(refused.seen).toEqual([]);
+    // Only content reads and playback minting; never metadata or other verbs.
+    for (const [url, method] of [
+      [at(`${workspace}/artifacts/${RETAINED}`), "GET"],
+      [content, "POST"],
+      [playback, "GET"],
+    ] as const) {
+      const response = await on.handler(
+        new Request(url, {
+          method,
+          headers: { ...scoped(), "Content-Type": "application/json" },
+          ...(method === "POST" ? { body: "{}" } : {}),
+        }),
+      );
+      expect(response.status).toBe(404);
+    }
+    expect(
+      (await on.handler(new Request(content, { headers: { ...scoped(), range: "bytes=\u0001" } })))
+        .status,
+    ).toBe(400);
+
+    // Screenshots are read through the session the browser can already read.
+    on.seen.length = 0;
+    const metadata = await on.handler(
+      new Request(at(`${sessionPath}/artifacts/${RETAINED}`), { headers: scoped() }),
+    );
+    expect(metadata.status).toBe(200);
+    const shot = await on.handler(
+      new Request(at(`${sessionPath}/artifacts/${RETAINED}/content`), { headers: scoped() }),
+    );
+    expect(shot.status).toBe(206);
+    expect(on.seen.filter((line) => line.includes("/artifacts/"))).toEqual([
+      `GET ${sessionPath}/artifacts/${RETAINED}`,
+      `GET ${sessionPath}/artifacts/${RETAINED}/content`,
+    ]);
+
+    // files: false closes every retained-media route.
+    const off = build({ files: false });
+    for (const url of [content, at(`${sessionPath}/artifacts/${RETAINED}/content`)]) {
+      expect((await off.handler(new Request(url, { headers: scoped() }))).status).toBe(404);
+    }
+    expect(off.seen.some((line) => line.includes("/artifacts/"))).toBe(false);
   });
 
   test("sandbox link downloads forward only the file read, unless disabled", async () => {
@@ -1183,19 +1324,19 @@ describe("createSessionProxyHandler", () => {
     const scoped = { "x-opengeni-session-id": SESSION_ID };
     const off = setup();
     expect((await off.handler(new Request(item, { headers: scoped }))).status).toBe(404);
-    expect((await off.browser.getClientConfig()).artifacts).toBeUndefined();
+    expect((await off.browser.getClientConfig()).artifacts).toBe(false);
     expect(off.upstream.requests.some((r) => r.url.pathname.includes("artifacts/"))).toBe(false);
 
     const on = setup({ artifacts: true });
     const config = await on.browser.getClientConfig();
-    expect(config.artifacts?.editableLiveUrl).toBe(
+    expect(viewer(config)?.editableLiveUrl).toBe(
       "wss://api.example.test/v1/editable-artifacts/live",
     );
-    expect(config.artifacts?.cachePartition).toMatchObject({
+    expect(viewer(config)?.cachePartition).toMatchObject({
       accountId: "acct-1",
       principalId: "subject-u42",
     });
-    expect(config.artifacts?.cachePartition.authorizationEpoch).toMatch(/^sha256:[0-9a-f]{64}$/);
+    expect(viewer(config)?.cachePartition.authorizationEpoch).toMatch(/^sha256:[0-9a-f]{64}$/);
 
     // The session must be named, and a product check can refuse it.
     expect((await on.handler(new Request(item))).status).toBe(400);
@@ -1486,7 +1627,7 @@ describe("createSessionProxyHandler", () => {
       source: "northwind",
     });
     const proxied = await setup({ artifacts: true }).browser.getClientConfig();
-    expect(capability).toEqual(proxied.artifacts!);
+    expect(capability).toEqual(viewer(proxied)!);
     await expect(
       artifactViewerCapability({
         client: service.asUser("u_42"),

@@ -663,6 +663,8 @@ export function createAppComposition(deps: AppDependencies): {
       "X-OpenGeni-Actor-Epoch",
       "X-OpenGeni-Correlation-Id",
       "X-OpenGeni-Session-Csrf",
+      // Session scope for a session proxy; the API itself ignores it.
+      "X-OpenGeni-Session-Id",
       "X-OpenGeni-Site-Id",
       "X-OpenGeni-Site-Version",
       "X-OpenGeni-Subject",

@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import type { RetainedArtifactReference } from "@opengeni/sdk";
-import { createWorkspaceRetainedArtifactLoader } from "./retained-artifact-loader";
+import { createWorkspaceRetainedArtifactLoader } from "../src/timeline/retained-loaders";
 
 const artifact: RetainedArtifactReference = {
   available: true,

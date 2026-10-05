@@ -81,10 +81,21 @@ the panel bottom. Do not add a second timeline scroller or fixed/sticky composer
 
 Agent replies link files, sandbox paths, editable artifacts, and Sites with
 `artifact:`, `sandbox:`, and OpenGeni console paths that do not exist on the
-host origin. `SessionConversation` downloads retained files by default;
-sandbox paths require explicit proxy `sandboxFiles: true` and stay within the
+host origin. `SessionConversation` downloads retained files by default and
+displays generated images and video, published files, and screenshots through
+the same session scope (`createWorkspaceRetainedArtifactLoader`,
+`createSessionRetainedScreenshotLoader`, and
+`createWorkspaceRetainedVideoLoader` are its defaults and the web app's
+loaders); behind the proxy these need `files` (on by default) and an exact
+session association the API proves for every workspace-level artifact read.
+Sandbox paths require explicit proxy `sandboxFiles: true` and stay within the
 session working directory without following symlinks.
-`opengeni-site` fences render the console's inline Site preview, and
+The proxy's client config reports `sessionCreation`, `archive`, and
+`artifacts` (`false` when off), so the stock chat hides actions the proxy
+cannot serve; the composer microphone follows `voiceInput.available`
+(`voiceInput={false}` opts a conversation out).
+`opengeni-site` fences render the console's inline Site preview (a static
+"Site preview unavailable" card when the proxy reports `artifacts: false`), and
 `onOpenArtifact` plus `SessionArtifactViewer` (`@opengeni/react/artifacts`)
 open editable artifacts and Sites in a host container through the proxy's
 opt-in `artifacts: true`. The proxy checks exact session associations on every
