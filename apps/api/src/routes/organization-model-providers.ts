@@ -49,7 +49,7 @@ function providerKind(value: string) {
 }
 
 function connectionJson(connection: {
-  providerKind: "vercel_gateway" | "openrouter" | "anthropic" | "claude_subscription";
+  providerKind: "vercel_gateway" | "openrouter" | "anthropic" | "claude_subscription" | "opper";
   status: "active" | "revoked";
   version: number;
   createdAt: Date;

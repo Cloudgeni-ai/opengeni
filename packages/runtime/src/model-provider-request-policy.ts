@@ -195,6 +195,16 @@ export function azureModelRequestPolicy({
 }
 
 /**
+ * Opper ids name Claude as a pool (`claude-sonnet-4-6`), a pinned route
+ * (`aws/claude-sonnet-4-6-eu`, `anthropic/claude-…`, `vertexai/claude-…`) or a
+ * provider-native alias (`eu.anthropic.claude-…`). Match the model family, not
+ * one route prefix.
+ */
+export function isOpperClaudeUpstreamModel(model: unknown): boolean {
+  return typeof model === "string" && /(?:^|[/.])claude-/iu.test(model);
+}
+
+/**
  * One object-stage request policy for both Responses and Chat Completions.
  * Transport wrappers only authenticate, route, observe, and translate errors;
  * they never need to parse and re-stringify an owned model request.
@@ -213,6 +223,28 @@ export function modelRequestPolicyForProvider(
       body.model.startsWith("anthropic/") &&
       Array.isArray(body.messages)
     ) {
+      const messages = projectUnsignedClaudeChatReasoning(body.messages);
+      return messages === body.messages ? undefined : { body: { ...body, messages } };
+    }
+    if (
+      (provider.kind === "opper-managed" ||
+        provider.kind === "opper-workspace" ||
+        provider.kind === "opper-organization") &&
+      gatewayPolicies &&
+      !gatewayPolicies.has(typeof body.model === "string" ? body.model : "")
+    ) {
+      throw new Error(`Opper model ${String(body.model)} is not in the reviewed catalog`);
+    }
+    if (
+      (provider.kind === "opper-managed" ||
+        provider.kind === "opper-workspace" ||
+        provider.kind === "opper-organization") &&
+      (path.split("?", 1)[0] ?? path).endsWith("/chat/completions") &&
+      isOpperClaudeUpstreamModel(body.model) &&
+      Array.isArray(body.messages)
+    ) {
+      // Opper routes Claude through Anthropic, Bedrock, Vertex and Azure; all
+      // reject unsigned plaintext thinking exactly like OpenRouter `anthropic/…`.
       const messages = projectUnsignedClaudeChatReasoning(body.messages);
       return messages === body.messages ? undefined : { body: { ...body, messages } };
     }

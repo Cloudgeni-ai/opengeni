@@ -2715,11 +2715,12 @@ export type DeleteWorkspaceOpperCustomModelRequest = z.infer<
   typeof DeleteWorkspaceOpperCustomModelRequest
 >;
 
-export const WorkspaceOpperCustomModel = WorkspaceGatewayCustomModel;
-export type WorkspaceOpperCustomModel = z.infer<typeof WorkspaceOpperCustomModel>;
+// Same row shape as the Gateway/OpenRouter custom model; no separate schema
+// so the public surface keeps one canonical name for it.
+export type WorkspaceOpperCustomModel = WorkspaceGatewayCustomModel;
 
 export const WorkspaceOpperCustomModelsResponse = z.object({
-  models: z.array(WorkspaceOpperCustomModel),
+  models: z.array(WorkspaceGatewayCustomModel),
 });
 export type WorkspaceOpperCustomModelsResponse = z.infer<typeof WorkspaceOpperCustomModelsResponse>;
 

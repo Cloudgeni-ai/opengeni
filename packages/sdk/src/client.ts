@@ -220,6 +220,7 @@ import type {
   CodexConnectStart,
   CodexUsage,
   CodexUsageMap,
+  ModelConnectionAccessKind,
   ModelConnectionAccessPolicy,
   ModelConnectionAccessResponse,
   SuperGrokAccount,
@@ -9415,8 +9416,19 @@ export class OpenGeniClient {
       | "vercel_gateway"
       | "openrouter"
       | "anthropic"
-      | "claude_subscription"
-      | "opper";
+      | "claude_subscription";
+    connectionId: string;
+  }): Promise<ModelConnectionAccessResponse>;
+  async getModelConnectionAccess(target: {
+    scope: "organizations" | "workspaces";
+    scopeId: string;
+    kind: ModelConnectionAccessKind;
+    connectionId: string;
+  }): Promise<ModelConnectionAccessResponse>;
+  async getModelConnectionAccess(target: {
+    scope: "organizations" | "workspaces";
+    scopeId: string;
+    kind: ModelConnectionAccessKind;
     connectionId: string;
   }): Promise<ModelConnectionAccessResponse> {
     return await this.requestJson(
@@ -9435,8 +9447,25 @@ export class OpenGeniClient {
         | "vercel_gateway"
         | "openrouter"
         | "anthropic"
-        | "claude_subscription"
-        | "opper";
+        | "claude_subscription";
+      connectionId: string;
+    },
+    policy: ModelConnectionAccessPolicy,
+  ): Promise<ModelConnectionAccessPolicy>;
+  async updateModelConnectionAccess(
+    target: {
+      scope: "organizations" | "workspaces";
+      scopeId: string;
+      kind: ModelConnectionAccessKind;
+      connectionId: string;
+    },
+    policy: ModelConnectionAccessPolicy,
+  ): Promise<ModelConnectionAccessPolicy>;
+  async updateModelConnectionAccess(
+    target: {
+      scope: "organizations" | "workspaces";
+      scopeId: string;
+      kind: ModelConnectionAccessKind;
       connectionId: string;
     },
     policy: ModelConnectionAccessPolicy,

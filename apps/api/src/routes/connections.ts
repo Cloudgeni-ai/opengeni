@@ -28,6 +28,8 @@ import {
 import {
   WORKSPACE_OPENROUTER_CONNECTION_DOMAIN,
   WORKSPACE_OPENROUTER_CONNECTION_ROLE,
+  WORKSPACE_OPPER_CONNECTION_DOMAIN,
+  WORKSPACE_OPPER_CONNECTION_ROLE,
   VERCEL_AI_GATEWAY_CONNECTION_DOMAIN,
   VERCEL_AI_GATEWAY_CONNECTION_ROLE,
 } from "@opengeni/config";
@@ -53,6 +55,8 @@ import {
   ListConnectionsResponse,
   OPENROUTER_CREDENTIAL_OPERATION_DIGEST_METADATA_KEY,
   OPENROUTER_CREDENTIAL_OPERATION_ID_METADATA_KEY,
+  OPPER_CREDENTIAL_OPERATION_DIGEST_METADATA_KEY,
+  OPPER_CREDENTIAL_OPERATION_ID_METADATA_KEY,
   OpenGeniSlackBotInstallRequest,
   OAuthStartRequest,
   OAuthStartResponse,
@@ -1139,7 +1143,9 @@ export function registerConnectionRoutes(app: Hono, deps: ApiRouteDeps): void {
                 message:
                   targetWorkspaceProviderKind === "vercel_gateway"
                     ? "use the Vercel AI Gateway connect flow to create this connection"
-                    : "use the OpenRouter connect flow to create this connection",
+                    : targetWorkspaceProviderKind === "opper"
+                      ? "use the Opper connect flow to create this connection"
+                      : "use the OpenRouter connect flow to create this connection",
               });
             }
             assertNotDirectPersonalSlackOAuth(providerDomain, kind);
@@ -1905,6 +1911,12 @@ function workspaceProviderApiKeyConnectionKind(input: {
   ) {
     return "openrouter";
   }
+  if (
+    providerDomain === WORKSPACE_OPPER_CONNECTION_DOMAIN &&
+    input.metadata?.credentialRole === WORKSPACE_OPPER_CONNECTION_ROLE
+  ) {
+    return "opper";
+  }
   return null;
 }
 
@@ -1990,6 +2002,8 @@ function workspaceProviderCredentialMetadata(
     [OPENROUTER_CREDENTIAL_OPERATION_DIGEST_METADATA_KEY]: _openRouterOperationDigest,
     [VERCEL_AI_GATEWAY_CREDENTIAL_OPERATION_ID_METADATA_KEY]: _operationId,
     [VERCEL_AI_GATEWAY_CREDENTIAL_OPERATION_DIGEST_METADATA_KEY]: _operationDigest,
+    [OPPER_CREDENTIAL_OPERATION_ID_METADATA_KEY]: _opperOperationId,
+    [OPPER_CREDENTIAL_OPERATION_DIGEST_METADATA_KEY]: _opperOperationDigest,
     ...effectiveMetadata
   } = metadata ?? {};
   for (const role of ["anthropic", "claude_subscription"]) {

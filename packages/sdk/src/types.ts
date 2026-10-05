@@ -3777,6 +3777,16 @@ export type CreateWorkspaceOpperCustomModelRequest = CreateWorkspaceGatewayCusto
 
 export type DeleteWorkspaceOpperCustomModelRequest = DeleteWorkspaceGatewayCustomModelRequest;
 
+/** Model connection kinds that carry a per-connection access policy. */
+export type ModelConnectionAccessKind =
+  | "codex"
+  | "supergrok"
+  | "vercel_gateway"
+  | "openrouter"
+  | "anthropic"
+  | "claude_subscription"
+  | "opper";
+
 export type OrganizationModelProviderKind =
   | "vercel_gateway"
   | "openrouter"
