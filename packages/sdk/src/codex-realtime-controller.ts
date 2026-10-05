@@ -1340,7 +1340,10 @@ export function createCodexRealtimeController(
       if (lifecycle.state === "ended") {
         const record = readOwnerRecord(storage, storageKey, options);
         if (record && record.operationId !== lifecycle.operationId) {
-          if (connectionTask || state.status === "active") return;
+          // An earlier call's end is not news while this browser is starting
+          // its own call (for example, waiting on the microphone prompt):
+          // re-beginning would advance the lease and fail the pending start.
+          if (connectionTask || state.status === "active" || state.status === "starting") return;
           closed = false;
           stopping = false;
           owner = record;
