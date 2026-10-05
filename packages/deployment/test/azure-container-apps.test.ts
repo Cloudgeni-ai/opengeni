@@ -336,6 +336,8 @@ describe("Azure Container Apps deployment profile", () => {
     expect(plan.helmValuesFile).toBeNull();
     expect(plan.platformDependencies).toEqual([]);
     expect(plan.prerequisites?.join("\n")).toContain("OPENGENI_ACA_TFVARS_FILE");
+    expect(plan.prerequisites?.join("\n")).toContain("Linux/WSL2");
+    expect(plan.prerequisites?.join("\n")).toContain("util-linux script with -q -e -c support");
     const allValues = [
       ...plan.creates,
       ...plan.externalDependencies,

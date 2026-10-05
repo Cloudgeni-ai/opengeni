@@ -1,4 +1,6 @@
 import { spawnSync } from "node:child_process";
+import { stripVTControlCharacters } from "node:util";
+import { deflateSync } from "node:zlib";
 import { z } from "zod";
 
 const roles = ["api", "control", "turn"] as const;
@@ -43,8 +45,9 @@ const Evidence = z.strictObject({
   ),
 });
 
-/** The Azure exec transport splits --command on spaces. Never surround the
- * code argument with quotes or inject operator credentials into it. */
+/** Keep the remote Bun argument quote-free through Azure exec tokenization,
+ * and the encoded command below the exec proxy's query-size limit. Operator
+ * credentials are read only inside the workload, never injected here. */
 export function privateProbeCommand(
   role: Role,
   nonce: string,
@@ -75,12 +78,17 @@ export function privateProbeCommand(
     "})().catch(()=>{process.exitCode=1;});",
   ].join("");
   if (/\s/u.test(code)) throw new Error("Private probe code must be one whitespace-free argument");
-  return `bun -e ${code}`;
+  const compressed = deflateSync(code).toString("base64url");
+  const loader = `await(eval(require(/node:zlib/.source).inflateSync(Buffer.from(/${compressed}/.source,/base64url/.source)).toString()));process.exit(process.exitCode??0)`;
+  const execCommand = `bun -e ${loader}`;
+  if (/[\s'"]/u.test(loader) || encodeURIComponent(execCommand).length >= 2048) {
+    throw new Error("Private probe command exceeds the quote-free exec transport bounds");
+  }
+  return execCommand;
 }
 
 export function privateProbeEvidence(output: string, role: Role, nonce: string) {
-  const matches = output
-    .replace(/\u001b\[[0-9;]*[A-Za-z]/g, "")
+  const matches = stripVTControlCharacters(output)
     .split(/\r?\n/)
     .flatMap((line) => {
       try {
@@ -133,7 +141,55 @@ function command(program: string, args: string[]): string {
   return result.stdout;
 }
 
+class PrivatePtyPrerequisiteError extends Error {
+  constructor() {
+    super(
+      "Private ACA observability requires Linux/WSL2 and util-linux script with -q -e -c support",
+    );
+  }
+}
+
+function requirePrivatePty() {
+  if (process.platform !== "linux") throw new PrivatePtyPrerequisiteError();
+  const version = spawnSync("script", ["--version"], {
+    encoding: "utf8",
+    stdio: ["ignore", "pipe", "pipe"],
+    timeout: 5_000,
+    killSignal: "SIGKILL",
+    maxBuffer: 16 * 1024,
+  });
+  if (
+    version.error ||
+    version.status !== 0 ||
+    !/^script from util-linux [0-9]/u.test(version.stdout)
+  ) {
+    throw new PrivatePtyPrerequisiteError();
+  }
+}
+
+/** Azure CLI's exec implementation needs terminal stdin even when its output
+ * is captured. Quote each local argv element for the known POSIX shell, not
+ * the remote Bun code. Never retain a terminal transcript. */
+export function privatePtyObservation(program: string, args: string[], timeoutMs = 80_000): string {
+  z.number().int().min(1).max(80_000).parse(timeoutMs);
+  requirePrivatePty();
+  const invocation = [program, ...args].map((arg) => `'${arg.replaceAll("'", "'\\''")}'`).join(" ");
+  const result = spawnSync("script", ["-q", "-e", "-c", invocation, "/dev/null"], {
+    encoding: "utf8",
+    stdio: ["ignore", "pipe", "pipe"],
+    env: { ...process.env, SHELL: "/bin/sh" },
+    timeout: timeoutMs,
+    killSignal: "SIGKILL",
+    maxBuffer: 512 * 1024,
+  });
+  if (result.error || result.status !== 0) {
+    throw new Error("Private ACA exec transport failed; inspect the result privately");
+  }
+  return result.stdout;
+}
+
 export function inspectPrivateObservability(terraformRoot: string) {
+  requirePrivatePty();
   const resourceGroup = z
     .string()
     .regex(/^[A-Za-z0-9_.()-]+$/)
@@ -180,7 +236,7 @@ export function inspectPrivateObservability(terraformRoot: string) {
         ),
       );
     const nonce = crypto.randomUUID();
-    const output = command("az", [
+    const output = privatePtyObservation("az", [
       "containerapp",
       "exec",
       "--name",
@@ -224,12 +280,14 @@ if (import.meta.main) {
       throw new Error("Use --terraform-root with the initialized native ACA root");
     }
     console.log(JSON.stringify(inspectPrivateObservability(args[1]), null, 2));
-  } catch {
+  } catch (error) {
     console.log(
       JSON.stringify({
         ok: false,
         detail:
-          "Private ACA observability could not be verified; inspect workload/CLI access privately",
+          error instanceof PrivatePtyPrerequisiteError
+            ? error.message
+            : "Private ACA observability could not be verified; inspect workload/CLI access privately",
       }),
     );
     process.exitCode = 1;
