@@ -397,9 +397,7 @@ describe("turn-capacity Prometheus alerts", () => {
         expect(selector).toContain(DEPLOYMENT_SCOPE);
       }
     }
-    expect(template).toContain(
-      "{{- $turnStartupProviderDispatchP95Seconds := int (default 20 ",
-    );
+    expect(template).toContain("{{- $turnStartupProviderDispatchP95Seconds := int (default 20 ");
     expect(template).toContain(
       "(le $turnStartupProviderDispatchCriticalP95Seconds $turnStartupProviderDispatchP95Seconds)",
     );
