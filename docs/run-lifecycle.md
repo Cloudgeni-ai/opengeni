@@ -1453,12 +1453,16 @@ not paid for twice. Prose, differing JSON, annotated text, non-text blocks, and
 text carrying integers beyond the safe range stay; the durable event keeps the
 exact result, and stored history rows are never rewritten. The physical
 invocation boundary also records
-`opengeni_mcp_tool_calls_total{outcome}` and
-`opengeni_mcp_tool_call_duration_seconds{outcome}` with one closed structural
+`opengeni_mcp_tool_calls_total{outcome,tool}` and
+`opengeni_mcp_tool_call_duration_seconds{outcome,tool}` with one closed structural
 outcome: `success`, `provider_declared_error`, `auth_needed`,
 `outcome_uncertain`, `timeout`, `cancelled`, `thrown_transport_error`, or
-`thrown_protocol_error`. Server, tool, tenant, request, error, and content values
-are deliberately absent from labels.
+`thrown_protocol_error`. `tool` is bounded (`mcpToolMetricLabel` in
+`packages/runtime/src/metrics.ts`): it is the tool name only for a verified
+first-party server calling a name in the fixed first-party catalog, and the
+single value `external` for every connector, API-integration, Codex Apps, and
+custom tool. Server, raw tool, tenant, request, error, and content values are
+deliberately absent from labels.
 
 First-party `session_create` and `session_send_message` failures return an MCP
 `isError` result with a bounded structured `{ error: { code, message } }`
