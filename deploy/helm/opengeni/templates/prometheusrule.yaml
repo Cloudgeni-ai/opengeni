@@ -1370,8 +1370,10 @@ spec:
               increase(opengeni_codex_pool_low_total{namespace={{ .Release.Namespace | quote }},release={{ .Release.Name | quote }},environment={{ $environment | quote }},depth="one"}[15m])
             ) > 0
           for: 5m
+          # Informational: any workspace that connects exactly one ChatGPT subscription (the normal
+          # personal case) matches, so this must not notify. The dashboard still shows it.
           labels:
-            severity: warning
+            severity: info
           annotations:
             summary: 'A workspace has only one usable Codex subscription account (workspace key {{ "{{ $labels.workspace_key }}" }}).'
             headline: 'Codex: only one subscription account left'
@@ -1684,10 +1686,12 @@ spec:
           # no codex calls yet the ratio series has never been created, so a bare
           # `_count` rate is an EMPTY vector — the fallback forces a real 0 so the
           # conjunction is well-formed and the alert simply stays quiet on no traffic.
+          # Needs at least 50 calls in 30m: a new chat's first request can never hit the cache, so at
+          # low volume the median is dominated by fresh chats and means nothing.
           expr: |
             histogram_quantile(0.5, sum by (le) (rate(opengeni_model_cache_hit_ratio_bucket{provider="codex-subscription"}[30m]))) < 0.4
             and on()
-            (sum(rate(opengeni_model_cache_hit_ratio_count{provider="codex-subscription"}[30m])) or vector(0)) > 0
+            (sum(increase(opengeni_model_cache_hit_ratio_count{provider="codex-subscription"}[30m])) or vector(0)) >= 50
           for: 30m
           labels:
             severity: warning
@@ -1703,11 +1707,13 @@ spec:
           # that semantics and detect active calls with no usage observations.
           # HTTP success is recorded at response headers, before streamed usage
           # is committed; counter skew does not prove a missing cached-token field.
+          # Absent usage needs at least 20 completed calls in 30m: after a worker restart the first
+          # increment of a new counter is invisible to rate(), so a handful of calls looks missing.
           expr: |
             (sum(rate(opengeni_model_cache_read_telemetry_total{provider="codex-subscription",status="missing"}[30m])) or vector(0)) > 0
             or
             (
-              sum(rate(opengeni_model_calls_total{provider="codex-subscription",outcome="completed"}[30m])) > 0
+              sum(increase(opengeni_model_calls_total{provider="codex-subscription",outcome="completed"}[30m])) >= 20
               and on()
               (sum(rate(opengeni_model_cache_read_telemetry_total{provider="codex-subscription"}[30m])) or vector(0)) == 0
             )

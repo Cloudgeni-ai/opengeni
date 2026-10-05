@@ -57,6 +57,9 @@ type ModelPreparationObservation = {
   repositorySkillDiscoveryEndedAt?: number;
   firstSandboxOperationStartedAt?: number;
   firstSandboxOperationEndedAt?: number;
+  /** When the first model request entered transport. A lazily prepared MCP catalog can be
+   * snapshotted after that, and the runner gap would then include model time, not preparation. */
+  firstModelTransportAt?: number;
   runnerGapRecorded: boolean;
   postMcpGapRecorded: boolean;
   postRepositorySkillDiscoveryGapRecorded: boolean;
@@ -142,7 +145,20 @@ export function withModelTransportStartedObserver<T>(
     : callback();
 }
 
+/** Mark the first model request of the current preparation scope (see firstModelTransportAt). */
+export function markModelPreparationTransportStarted(): void {
+  try {
+    const observation = modelPreparationObserver.getStore();
+    if (observation && observation.firstModelTransportAt === undefined) {
+      observation.firstModelTransportAt = performance.now();
+    }
+  } catch {
+    // Diagnostics must never affect model dispatch.
+  }
+}
+
 export async function recordModelTransportStarted(): Promise<void> {
+  markModelPreparationTransportStarted();
   try {
     await beforeModelRequest();
     await modelTransportStartedObserver.getStore()?.started?.();
@@ -238,11 +254,18 @@ export function recordModelPreparationMeasurement(measurement: ModelPreparationM
     if (measurement.phase === "mcp_tools_snapshot") {
       if (!observation.runnerGapRecorded) {
         observation.runnerGapRecorded = true;
-        observation.observer({
-          phase: "runner_before_mcp_tools",
-          outcome: measurement.outcome,
-          durationSeconds: Math.max(0, startedAt - observation.startedAt) / 1_000,
-        });
+        // Only a snapshot taken before the first model request is pre-first-token preparation;
+        // a later (lazy) snapshot would charge the model's own time to this gap.
+        if (
+          observation.firstModelTransportAt === undefined ||
+          observation.firstModelTransportAt >= startedAt
+        ) {
+          observation.observer({
+            phase: "runner_before_mcp_tools",
+            outcome: measurement.outcome,
+            durationSeconds: Math.max(0, startedAt - observation.startedAt) / 1_000,
+          });
+        }
       }
       if (
         !observation.sdkAfterSandboxRecorded &&

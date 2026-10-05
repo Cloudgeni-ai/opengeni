@@ -30,6 +30,7 @@ import {
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
 import { cn } from "@/lib/utils";
+import { sessionControlPaused } from "@/lib/session-rail";
 
 /** Children (depth 0) plus one level of grandchildren (depth 1) — the tree goes
     exactly one level deeper, so a depth-1 row never draws its own expander. */
@@ -129,7 +130,7 @@ function SubagentRow({
 }) {
   const [open, setOpen] = useState(false);
   const title = sessionDisplayTitle(node.session);
-  const paused = node.session.effectiveControl.state === "paused";
+  const paused = sessionControlPaused(node.session);
   const tone = paused ? "waiting" : sessionStatusTone(node.session.status);
   const live = !paused && isLiveStatus(node.session.status);
   const canExpand = depth < MAX_DEPTH && node.children.length > 0;

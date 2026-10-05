@@ -1,6 +1,14 @@
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
-import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/testing";
+import {
+  acquireOwnerMigratedTestDatabase,
+  acquireSharedTestDatabase,
+  type OwnerMigratedTestDatabase,
+  type SharedTestDatabase,
+} from "@opengeni/testing";
 import { readFileSync } from "node:fs";
+import postgres from "postgres";
+import { splitStatements } from "../../../scripts/migration-rls-backfills";
+import { migrate } from "../src/migrate";
 
 import {
   assertWorkspaceMemberManagementCandidate,
@@ -24,7 +32,15 @@ import {
 
 const requireRealDatabase = process.env.OPENGENI_REQUIRE_REAL_DB === "1";
 let shared: SharedTestDatabase | null = null;
+let owned: OwnerMigratedTestDatabase | null = null;
 let client: DbClient | null = null;
+let migrationOwner: postgres.Sql | null = null;
+
+const migrationSource = () =>
+  readFileSync(
+    new URL("../drizzle/0635_organization_admin_workspace_member_management.sql", import.meta.url),
+    "utf8",
+  );
 
 async function sqlState(action: () => Promise<unknown>): Promise<string | null> {
   try {
@@ -110,26 +126,107 @@ beforeAll(async () => {
     return;
   }
   client = createDb(shared.appUrl);
+  owned = await acquireOwnerMigratedTestDatabase("migration-0635-catalog-owner");
+  if (!owned) throw new Error("migration 0635 owner fixture is unavailable");
+  await migrate(owned.ownerUrl);
+  migrationOwner = postgres(owned.ownerUrl, { max: 1, onnotice: () => undefined });
 }, 180_000);
 
 afterAll(async () => {
   await client?.close().catch(() => undefined);
+  await migrationOwner?.end({ timeout: 5 });
   await shared?.release();
+  await owned?.release();
 }, 60_000);
 
 describe("migration 0635 organization administrator workspace member management", () => {
   test("is a rolling patch of the two workspace member management checks", () => {
-    const source = readFileSync(
-      new URL(
-        "../drizzle/0635_organization_admin_workspace_member_management.sql",
-        import.meta.url,
-      ),
-      "utf8",
-    );
+    const source = migrationSource();
     expect(source.startsWith("-- deployment-mode: rolling\n")).toBe(true);
     expect(source).toContain("assert_workspace_member_management_candidate");
     expect(source).toContain("list_workspace_member_management_candidates");
   });
+
+  test("catalog-only patch preserves exact routine text, security, and FORCE-RLS as a restricted owner", async () => {
+    if (!owned || !migrationOwner) return;
+    const [identity] = await migrationOwner`
+      select rolsuper, rolbypassrls from pg_roles where rolname = current_user`;
+    expect(identity).toEqual({ rolsuper: false, rolbypassrls: false });
+    const [posture] = await migrationOwner`
+      select relrowsecurity, relforcerowsecurity, pg_get_userbyid(relowner) as owner
+      from pg_class where oid = 'organization_memberships'::regclass`;
+    expect(posture).toEqual({
+      relrowsecurity: true,
+      relforcerowsecurity: true,
+      owner: owned.ownerRole,
+    });
+
+    // Restore only the original routine bodies, preserving identity and ACLs.
+    for (const file of [
+      "0370_workspace_member_management_scope.sql",
+      "0371_workspace_member_candidate_inventory.sql",
+    ]) {
+      const statement = splitStatements(
+        readFileSync(new URL(`../drizzle/${file}`, import.meta.url), "utf8"),
+      ).find((candidate) => candidate.startsWith("CREATE FUNCTION"));
+      expect(statement).toBeDefined();
+      await migrationOwner.unsafe(
+        statement!.replace(/^CREATE FUNCTION/u, "CREATE OR REPLACE FUNCTION"),
+      );
+    }
+
+    const definitions = () => migrationOwner!`
+      select oid, pg_get_functiondef(oid) as definition, proowner, proacl, prosecdef, proconfig
+      from pg_proc where oid in (
+        'assert_workspace_member_management_candidate(uuid,uuid,text,text)'::regprocedure,
+        'list_workspace_member_management_candidates(uuid,uuid,text)'::regprocedure
+      ) order by proname`;
+    const before = await definitions();
+    const anchor =
+      "  IF NOT EXISTS (\n" +
+      "    SELECT 1\n" +
+      "    FROM organization_memberships organization_membership\n" +
+      "    JOIN workspace_memberships workspace_membership\n";
+    const replacement =
+      "  IF NOT EXISTS (\n" +
+      "    SELECT 1 FROM organization_memberships organization_administrator\n" +
+      "    WHERE organization_administrator.account_id = p_account_id\n" +
+      "      AND organization_administrator.subject_id = p_actor_subject_id\n" +
+      "      AND organization_administrator.subject_id LIKE 'user:%'\n" +
+      "      AND organization_administrator.status = 'active'\n" +
+      "      AND organization_administrator.role IN ('owner', 'admin')\n" +
+      "  ) AND NOT EXISTS (\n" +
+      "    SELECT 1\n" +
+      "    FROM organization_memberships organization_membership\n" +
+      "    JOIN workspace_memberships workspace_membership\n";
+    for (const routine of before) expect(routine.definition.split(anchor)).toHaveLength(2);
+    await migrationOwner.begin(async (transaction) => {
+      await transaction.unsafe(migrationSource());
+    });
+    const after = await definitions();
+    expect(Array.from(after)).toEqual(
+      Array.from(before, (routine) => ({
+        ...routine,
+        definition: routine.definition.replace(anchor, replacement),
+      })),
+    );
+
+    // The unchanged one-match assertion still rejects drift and rolls back.
+    expect(
+      await sqlState(() =>
+        migrationOwner!.begin((transaction) => transaction.unsafe(migrationSource())),
+      ),
+    ).toBe("55000");
+    expect(Array.from(await definitions())).toEqual(Array.from(after));
+    const [forced] = await migrationOwner`
+      select relforcerowsecurity from pg_class where oid = 'organization_memberships'::regclass`;
+    expect(forced?.relforcerowsecurity).toBe(true);
+    const [app] = await migrationOwner`
+      select rolsuper, rolbypassrls,
+        has_table_privilege('opengeni_app', 'organization_memberships', 'INSERT,UPDATE,DELETE') as dml
+      from pg_roles where rolname = 'opengeni_app'`;
+    expect(app).toEqual({ rolsuper: false, rolbypassrls: false, dml: false });
+  }, 180_000);
 
   test("an owner without a workspace row lists, adds, changes, and removes members", async () => {
     if (!shared || !client) return;

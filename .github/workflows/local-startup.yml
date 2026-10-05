@@ -34,6 +34,8 @@ concurrency:
 
 jobs:
   platform-preflight:
+    # Skip the main -> production promotion PR: its head already ran as a main push.
+    if: ${{ !(github.event_name == 'pull_request' && github.head_ref == 'main' && github.base_ref == 'production') }}
     name: Setup prerequisites (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
     timeout-minutes: 5
@@ -53,6 +55,8 @@ jobs:
         run: bun test scripts/check-development-prerequisites.test.ts
 
   docker:
+    # Skip the main -> production promotion PR: its head already ran as a main push.
+    if: ${{ !(github.event_name == 'pull_request' && github.head_ref == 'main' && github.base_ref == 'production') }}
     name: Fresh Docker startup and restart
     runs-on: ubuntu-latest
     timeout-minutes: 90
