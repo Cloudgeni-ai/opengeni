@@ -66,6 +66,8 @@ import { createTurnHistorySink } from "./history-sink";
 import { BudgetExhaustedError } from "./admission";
 import {
   providerRecoveryExhaustedFailure,
+  withModelRoutePresentation,
+  MAX_AUTOMATIC_PROVIDER_RECOVERIES,
   postClaimDatabaseRecoveryFailure,
   providerRecoveryResult,
   providerRetryAfterMs,
@@ -1986,14 +1988,15 @@ async function settleTurnFailureInAttempt(deps: TurnFailureDeps): Promise<RunAge
     !!attempt.triggerEventId &&
     attempt.executionGeneration > 0;
   const earlyRecoverableSetup = earlyDefinitionMismatch || earlyCommandStartUnavailable;
-  let failure = (
-    earlyDefinitionMismatch
+  let failure = withModelRoutePresentation(
+    (earlyDefinitionMismatch
       ? { error: error.message, code: error.code, retryable: true }
       : (codexTerminalFailure ??
         agentRunFailurePayload(error, {
           isCodexTurn: billingState.isCodexTurn,
-        }))
-  ) as ReturnType<typeof agentRunFailurePayload>;
+        }))) as ReturnType<typeof agentRunFailurePayload>,
+    attempt.modelRoutePresentation,
+  );
   if (
     attempt.turnId &&
     (earlyRecoverableSetup ||
@@ -2061,6 +2064,7 @@ async function settleTurnFailureInAttempt(deps: TurnFailureDeps): Promise<RunAge
             ...agentRunRecoveryFailurePayload(error, failure),
             continueDelayMs: recoveryResult.continueDelayMs,
             providerRecoveryCount: nextProviderRecoveryCount,
+            maxProviderRecoveryCount: MAX_AUTOMATIC_PROVIDER_RECOVERIES,
           },
         });
         if (recovery.action === "stale") {
