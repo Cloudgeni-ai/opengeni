@@ -84,6 +84,57 @@ describe("Azure Container Apps deployment profile", () => {
     expect(() => parseDeploymentContract(deploymentProfiles["local-compose"])).not.toThrow();
   });
 
+  test("accepts only the module-supported ACA product and deployment access pairings", () => {
+    expect(() =>
+      parseDeploymentContract({
+        ...profile,
+        access: { ...profile.access, mode: "externalGateway" },
+      }),
+    ).toThrow("configured/sharedKey or managed/externalGateway");
+    expect(() =>
+      parseDeploymentContract({
+        ...profile,
+        product: {
+          ...profile.product,
+          accessMode: "managed",
+          publicBaseUrl: "https://managed.example.test",
+        },
+      }),
+    ).toThrow("configured/sharedKey or managed/externalGateway");
+    expect(requiredRuntimeEnvVars(profile, {})).toContain("OPENGENI_ACCESS_KEY");
+    const managed = parseDeploymentContract({
+      ...profile,
+      access: { ...profile.access, mode: "externalGateway" },
+      product: {
+        ...profile.product,
+        accessMode: "managed",
+        publicBaseUrl: "https://managed.example.test",
+      },
+    });
+    expect(requiredRuntimeEnvVars(managed, {})).toContain("OPENGENI_DELEGATION_SECRET");
+    expect(requiredRuntimeEnvVars(managed, {})).not.toContain("OPENGENI_ACCESS_KEY");
+    expect(stackPlanFor(managed, "none", {}).verifyCommands.join("\n")).toContain(
+      'OPENGENI_CONFORMANCE_PRODUCT_TOKEN="$OPENGENI_TEST_WORKSPACE_API_KEY"',
+    );
+    const generic = deploymentProfiles["azure-managed"];
+    for (const [accessMode, mode] of [
+      ["configured", "externalGateway"],
+      ["managed", "sharedKey"],
+    ] as const) {
+      expect(() =>
+        parseDeploymentContract({
+          ...generic,
+          access: { ...generic.access, mode },
+          product: {
+            ...generic.product,
+            accessMode,
+            publicBaseUrl: "https://generic.example.test",
+          },
+        }),
+      ).not.toThrow();
+    }
+  });
+
   test("refuses fixture dependencies and non-native secret delivery", () => {
     for (const field of ["database", "objectStorage", "temporal", "nats"] as const) {
       expect(() =>
@@ -256,10 +307,12 @@ describe("Azure Container Apps deployment profile", () => {
     );
   });
 
-  test("still requires a delegation secret for configured access without a shared key", () => {
+  test("preserves non-ACA configured access without a shared key and its required secret", () => {
+    const generic = deploymentProfiles["azure-managed"];
     const contract = parseDeploymentContract({
-      ...profile,
-      access: { ...profile.access, mode: "externalGateway" },
+      ...generic,
+      product: { ...generic.product, accessMode: "configured" },
+      access: { ...generic.access, mode: "externalGateway" },
     });
     expect(requiredRuntimeEnvVars(contract, {})).toContain("OPENGENI_DELEGATION_SECRET");
     expect(missingRuntimeEnvVars(contract, {})).toContain("OPENGENI_DELEGATION_SECRET");

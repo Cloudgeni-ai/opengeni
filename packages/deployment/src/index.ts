@@ -521,6 +521,17 @@ export const DeploymentContract = z
           message: "Azure Container Apps serving requires an authenticated access boundary",
         });
       }
+      if (
+        (contract.product.accessMode === "configured" && contract.access.mode !== "sharedKey") ||
+        (contract.product.accessMode === "managed" && contract.access.mode !== "externalGateway")
+      ) {
+        ctx.addIssue({
+          code: "custom",
+          path: ["access", "mode"],
+          message:
+            "Azure Container Apps supports only configured/sharedKey or managed/externalGateway serving",
+        });
+      }
       if (!contract.ingress.enabled) {
         ctx.addIssue({
           code: "custom",
@@ -2841,7 +2852,7 @@ function planNotes(
       "Created-ACR readback confirms configured digest membership using the operator's credentials, not workload identity pull permission or live runtime conformance. The plan never imports images automatically or grants access to foreign registries. Keep credentials private and preserve the selected registry mode through teardown.",
       "The native environment HTTP-route edge serves API and web on one HTTPS origin. Verify real SSE duration, reconnect/replay, rolling restart and NATS-loss recovery against that edge.",
       "The stock conformance stream is short and a selected sandbox backend is not proof of a sandbox invocation. Add actual remote commands and file materialization tests; test private production metrics/OTEL independently rather than counting a skipped public /metrics check as coverage.",
-      "The generated private observability helper checks API/control/turn loopback metrics and worker health/readiness using exact Terraform app IDs. Stock conformance explicitly skips its unrouted public /metrics probe; neither that skip nor private scrape evidence proves collector delivery of logs, metrics, or traces. Verify collector/ingestion independently before claiming full observability.",
+      "The generated private observability helper checks API/control/turn loopback metrics and worker health/readiness using exact Terraform app IDs and strict workload OPENGENI_AUTH_REQUIRED: configured API metrics require the shared key; managed API metrics allow anonymous private scrapes. Stock conformance explicitly skips its unrouted public /metrics probe; neither that skip nor private scrape evidence proves collector delivery of logs, metrics, or traces. Verify collector/ingestion independently before claiming full observability.",
       "Browser-upload CORS conformance uses the actual HTTPS edge origin and separately requires a foreign origin to be denied. Do not broaden the Blob CORS allowlist to satisfy an unrelated random-origin upload probe.",
       "preflight --check-env inspects only the operator's current environment, not deployed Key Vault references. Check effective runtime values privately; do not use reference URLs as credential values or mistake a local env check for workload readiness.",
       "Configured shared-key access reuses OPENGENI_ACCESS_KEY when OPENGENI_DELEGATION_SECRET is unset. Preserve an explicitly supplied delegation secret: it takes precedence, so prove authenticated /v1/access/me and workspace access with the matching shared key or host-signed product bearer rather than assuming advertised auth mode guarantees key acceptance.",
