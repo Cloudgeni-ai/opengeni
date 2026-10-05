@@ -8103,6 +8103,28 @@ export function parseIntegrationsOauthClientsJson(
   return out;
 }
 
+/**
+ * The operator-registered client for one authorization server, matched by
+ * exact issuer/URL key first and then trailing-slash-insensitively. The OAuth
+ * start flow and the connector catalog's connectability projection share this
+ * so a catalog row is offered exactly when a start would find a client.
+ */
+export function findIntegrationsOauthClient(
+  configured: Readonly<Record<string, IntegrationOAuthClientConfig>>,
+  candidates: readonly string[],
+): IntegrationOAuthClientConfig | null {
+  const normalize = (value: string) => value.replace(/\/+$/, "");
+  for (const key of new Set(candidates.flatMap((candidate) => [candidate, normalize(candidate)]))) {
+    const entry = configured[key];
+    if (entry) return entry;
+  }
+  const normalizedCandidates = new Set(candidates.map(normalize));
+  for (const [key, entry] of Object.entries(configured)) {
+    if (normalizedCandidates.has(normalize(key))) return entry;
+  }
+  return null;
+}
+
 export const SocialOAuthClientConfigSchema = z.object({
   clientId: z.string().min(1),
   clientSecret: z.string().min(1).optional(),

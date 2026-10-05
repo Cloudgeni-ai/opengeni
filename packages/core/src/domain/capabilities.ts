@@ -3,7 +3,12 @@ import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/
 import type { Transport } from "@modelcontextprotocol/sdk/shared/transport.js";
 import { isDeepStrictEqual } from "node:util";
 import { withLockedCapabilityInstallation } from "@opengeni/db/capability-reconciliation";
-import { environmentsEncryptionKeyBytes, type Settings } from "@opengeni/config";
+import {
+  environmentsEncryptionKeyBytes,
+  findIntegrationsOauthClient,
+  parseIntegrationsOauthClientsJson,
+  type Settings,
+} from "@opengeni/config";
 import { pinnedFetch } from "@opengeni/network";
 import {
   CapabilityCatalogItem,
@@ -102,6 +107,7 @@ export async function buildCapabilityCatalog(input: {
     listEnabledMcpCapabilityServers(input.db, input.workspaceId),
   ]);
   const runnableCapabilityIds = new Set(runnableMcpServers.map((server) => server.capabilityId));
+  const operatorOAuthClientConfigured = operatorOAuthClientResolver(input.settings);
   const catalogInstallations = capabilityInstallations.filter(
     (installation) => installation.kind === "mcp",
   );
@@ -164,12 +170,48 @@ export async function buildCapabilityCatalog(input: {
               },
             }
           : projected;
-      return applyCapabilityLifecycle(runtimeProjected);
+      return applyCapabilityLifecycle(
+        applyOperatorOAuthClientRequirement(runtimeProjected, operatorOAuthClientConfigured),
+      );
     })
     .sort(compareCatalogItems);
   return {
     items,
     installations: catalogInstallations,
+  };
+}
+
+/**
+ * `metadata.oauthClientRequirement` is stamped by the catalog import from
+ * `data/catalog/oauth-client-requirements.json` for providers that refuse
+ * OAuth self-registration. Whether the row can connect here is a deployment
+ * fact, so the catalog projects it rather than every surface guessing. The
+ * matcher is the one the OAuth start uses to find an operator client.
+ */
+function operatorOAuthClientResolver(settings: Settings): (issuer: string) => boolean {
+  let configured: ReturnType<typeof parseIntegrationsOauthClientsJson> = {};
+  try {
+    configured = parseIntegrationsOauthClientsJson(settings.integrationsOauthClientsJson);
+  } catch {
+    // Startup validates this setting; a malformed value can configure nothing.
+  }
+  return (issuer) => findIntegrationsOauthClient(configured, [issuer]) !== null;
+}
+
+export function applyOperatorOAuthClientRequirement(
+  item: CapabilityCatalogItem,
+  configured: (issuer: string) => boolean,
+): CapabilityCatalogItem {
+  if (item.kind !== "mcp") return item;
+  const requirement = item.metadata.oauthClientRequirement;
+  const issuer =
+    requirement && typeof requirement === "object" && !Array.isArray(requirement)
+      ? (requirement as Record<string, unknown>).issuer
+      : undefined;
+  if (typeof issuer !== "string" || !issuer) return item;
+  return {
+    ...item,
+    runtime: { ...item.runtime, operatorOAuthClient: { configured: configured(issuer) } },
   };
 }
 

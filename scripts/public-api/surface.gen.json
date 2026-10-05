@@ -10485,6 +10485,8 @@
         "$.runtime.catalogTrust.state": "enum!=[\"\\\"legacy_active\\\"\",\"\\\"trusted\\\"\",\"\\\"unverified\\\"\"]",
         "$.runtime.mcpServerId": "string?",
         "$.runtime.notes": "string! null",
+        "$.runtime.operatorOAuthClient": "object?",
+        "$.runtime.operatorOAuthClient.configured": "boolean!",
         "$.runtime.transport": "string?",
         "$.source": "ref(CapabilitySource)!",
         "$.stale": "boolean!",
