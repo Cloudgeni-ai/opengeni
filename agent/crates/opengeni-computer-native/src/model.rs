@@ -20,6 +20,9 @@ pub struct NativeCapabilities {
     pub semantic_actions: bool,
     /// Pointer input is available.
     pub pointer_input: bool,
+    /// Count-2 clicks emit one continuation pair, not a complete double click.
+    #[serde(default)]
+    pub pointer_click_continuation: bool,
     /// Keyboard input is available.
     pub keyboard_input: bool,
     /// The graphical seat's native text clipboard is available.
@@ -439,6 +442,12 @@ pub enum NativeAction {
         delta_y: Option<f64>,
         /// Button.
         button: Option<NativePointerButton>,
+        /// One physical pair with this click state; valid only for `click`.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        click_count: Option<u8>,
+        /// Exact confirmed first operation, required only for a count-2 click.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        continuation_of_operation_id: Option<String>,
     },
     /// Seat keyboard fallback.
     Keyboard {
@@ -470,6 +479,9 @@ pub enum NativeAction {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct NativeActionCommand {
+    /// Controller journal identity, absent only for older ordinary commands.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub operation_id: Option<String>,
     /// Target id.
     pub target_id: String,
     /// Exact current target generation.
@@ -480,6 +492,76 @@ pub struct NativeActionCommand {
     pub expected_frame_id: Option<String>,
     /// Operation.
     pub action: NativeAction,
+}
+
+impl NativeAction {
+    pub(crate) fn pointer_click_count(&self) -> Result<u8, &'static str> {
+        match self {
+            Self::Pointer {
+                action: NativePointerAction::Click,
+                click_count,
+                continuation_of_operation_id,
+                ..
+            } => match click_count.unwrap_or(1) {
+                2 if continuation_of_operation_id
+                    .as_deref()
+                    .is_none_or(|id| uuid::Uuid::parse_str(id).is_err()) =>
+                {
+                    Err("pointer clickCount 2 requires a first operation identity")
+                }
+                1 if continuation_of_operation_id.is_some() => {
+                    Err("pointer continuation identity requires clickCount 2")
+                }
+                count @ (1 | 2) => Ok(count),
+                _ => Err("pointer clickCount must be 1 or 2"),
+            },
+            Self::Pointer {
+                click_count: Some(_),
+                ..
+            } => Err("pointer clickCount requires click"),
+            Self::Pointer {
+                continuation_of_operation_id: Some(_),
+                ..
+            } => Err("pointer continuation identity requires clickCount 2"),
+            _ => Ok(1),
+        }
+    }
+}
+
+impl NativeActionCommand {
+    pub(crate) fn validate_click_identity(&self) -> Result<u8, &'static str> {
+        let count = self.action.pointer_click_count()?;
+        if let NativeAction::Pointer {
+            continuation_of_operation_id: Some(first),
+            ..
+        } = &self.action
+        {
+            if self
+                .operation_id
+                .as_deref()
+                .is_none_or(|id| uuid::Uuid::parse_str(id).is_err())
+                || self.operation_id.as_ref() == Some(first)
+            {
+                return Err("click continuation requires a distinct current operation identity");
+            }
+        }
+        Ok(count)
+    }
+
+    pub(crate) fn retained_click_frame(&self) -> Option<(&str, &str)> {
+        match &self.action {
+            NativeAction::Pointer {
+                action: NativePointerAction::Click,
+                frame_id,
+                ..
+            } if self.action.pointer_click_count().is_ok()
+                && self.expected_frame_id.as_deref() == Some(frame_id) =>
+            {
+                Some((&self.target_id, frame_id))
+            }
+            _ => None,
+        }
+    }
 }
 
 #[cfg(test)]
@@ -496,6 +578,26 @@ mod tests {
             "expectedFrameId": null,
             "action": action,
         })
+    }
+
+    #[test]
+    fn click_count_wire_is_explicit_click_only_and_keeps_legacy_actions_valid() {
+        for count in [None, Some(1), Some(2)] {
+            let action: NativeAction = serde_json::from_value(json!({"type":"pointer", "frameId":"painted-a", "action":"click", "x":40.0, "y":60.0, "clickCount":count, "continuationOfOperationId": if count == Some(2) { Some("11111111-1111-4111-8111-111111111111") } else { None }})).unwrap();
+            assert_eq!(action.pointer_click_count().unwrap(), count.unwrap_or(1));
+        }
+        for (action, count) in [
+            ("click", 0),
+            ("click", 3),
+            ("double_click", 2),
+            ("move", 1),
+            ("drag", 2),
+        ] {
+            let action: NativeAction = serde_json::from_value(json!({"type":"pointer", "frameId":"painted-a", "action":action, "x":40.0, "y":60.0, "clickCount":count})).unwrap();
+            assert!(action.pointer_click_count().is_err());
+        }
+        let double: NativeAction = serde_json::from_value(json!({"type":"pointer", "frameId":"painted-a", "action":"double_click", "x":40.0, "y":60.0})).unwrap();
+        assert!(double.pointer_click_count().is_ok());
     }
 
     #[test]

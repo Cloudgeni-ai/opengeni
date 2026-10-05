@@ -29,6 +29,8 @@ export type ComputerBackendObservation = {
 };
 
 export type ComputerBackendActionCommand = {
+  /** Durable controller operation identity. Older ordinary commands may omit it. */
+  operationId?: string;
   targetId: string;
   expectedTargetGeneration: string;
   expectedObservationId: string | null;

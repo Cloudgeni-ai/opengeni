@@ -1114,6 +1114,8 @@ export type ComputerSessionCapabilities = {
   screenCapture: boolean;
   semanticActions: boolean;
   pointerInput: boolean;
+  /** Causal count-2 input requires its exact confirmed first operation. Absent means unsupported. */
+  pointerClickContinuation?: boolean | undefined;
   keyboardInput: boolean;
   clipboard: boolean;
   backgroundActions: boolean;
@@ -1217,6 +1219,9 @@ export type ComputerAction =
       deltaX?: number | undefined;
       deltaY?: number | undefined;
       button?: "left" | "right" | "middle" | undefined;
+      /** Click only; 2 delivers one second click pair after a completed first click. */
+      clickCount?: 1 | 2 | undefined;
+      continuationOfOperationId?: string | undefined;
     }
   | { type: "keyboard"; action: "type" | "press"; value: string }
   | {

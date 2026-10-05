@@ -461,6 +461,8 @@ pub enum PointerAction {
     Up,
     /// Press then release once.
     Click,
+    /// One second press/release pair with native click state 2.
+    ClickContinuation,
     /// Press/release twice.
     DoubleClick,
 }

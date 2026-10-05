@@ -24,7 +24,9 @@ use sha2::{Digest as _, Sha256};
 use tokio::sync::{Mutex, RwLock};
 use uuid::Uuid;
 
-use crate::captured_frames::CapturedFrames;
+use crate::captured_frames::{
+    dispatch_with_frame_invalidation, dispatch_with_mutation_invalidation, CapturedFrames,
+};
 use crate::clipboard::NativeClipboardController;
 use crate::tree::semantic_roots_equivalent;
 use crate::{
@@ -92,12 +94,30 @@ impl WindowFrameFence {
     }
 }
 
+#[derive(Clone)]
 enum FrameFence {
     Window(WindowFrameFence),
     Screen(ScreenFrameFence),
 }
 
 impl FrameFence {
+    fn same_geometry(&self, other: &Self) -> bool {
+        match (self, other) {
+            (Self::Window(left), Self::Window(right)) => {
+                left.target_generation == right.target_generation
+                    && left.window_id == right.window_id
+                    && left.bounds == right.bounds
+                    && left.width == right.width
+                    && left.height == right.height
+            }
+            (Self::Screen(left), Self::Screen(right)) => {
+                left.target_generation == right.target_generation
+                    && left.width == right.width
+                    && left.height == right.height
+            }
+            _ => false,
+        }
+    }
     fn window(&self) -> Option<&WindowFrameFence> {
         match self {
             Self::Window(frame) => Some(frame),
@@ -604,7 +624,12 @@ impl AxComputerAdapter {
             } => {
                 let frames = self.captured_frames.read().await;
                 let frame = frames
-                    .get(&command.target_id, frame_id)
+                    .get_for_action(
+                        &command.target_id,
+                        frame_id,
+                        &command.action,
+                        FrameFence::same_geometry,
+                    )
                     .and_then(FrameFence::screen)
                     .ok_or_else(|| stale_frame("macOS screen"))?;
                 if command.expected_frame_id.as_deref() != Some(frame_id)
@@ -655,9 +680,11 @@ impl AxComputerAdapter {
             .captured_frames
             .read()
             .await
-            .get(
+            .get_for_action(
                 &command.target_id,
                 command.expected_frame_id.as_deref().unwrap_or(""),
+                &command.action,
+                FrameFence::same_geometry,
             )
             .and_then(FrameFence::window)
             .cloned()
@@ -693,23 +720,30 @@ impl AxComputerAdapter {
         let _seat = self.input_seat.lock().await;
         let (record, frame) = self.validate_window_pointer(command).await?;
         let inputs = pointer_inputs(&command.action)?;
-        self.invalidate_frames().await;
-        tokio::task::spawn_blocking(move || {
-            focus_and_inject_window(
-                &record.native,
-                frame.bounds,
-                frame.width,
-                frame.height,
-                &inputs,
-            )
-        })
-        .await
-        .map_err(|error| {
-            NativeAdapterError::outcome_unknown(format!(
-                "macOS window input task failed after dispatch: {error}"
-            ))
-        })?
-        .map_err(map_ffi_mutation)?;
+        dispatch_with_frame_invalidation(
+            &self.captured_frames,
+            Some(command),
+            FrameFence::same_geometry,
+            async {
+                tokio::task::spawn_blocking(move || {
+                    focus_and_inject_window(
+                        &record.native,
+                        frame.bounds,
+                        frame.width,
+                        frame.height,
+                        &inputs,
+                    )
+                })
+                .await
+                .map_err(|error| {
+                    NativeAdapterError::outcome_unknown(format!(
+                        "macOS window input task failed after dispatch: {error}"
+                    ))
+                })?
+                .map_err(map_ffi_mutation)
+            },
+        )
+        .await?;
         // Raw input already completed atomically against the exact captured
         // window. Rebuilding a large AX tree only to decorate this receipt can
         // add a full second and does not strengthen the dispatch proof; callers
@@ -1185,6 +1219,7 @@ impl ComputerAdapter for AxComputerAdapter {
     }
 
     async fn validate(&self, command: &NativeActionCommand) -> NativeAdapterResult<()> {
+        command.validate_click_identity().map_err(invalid)?;
         Self::ensure_unlocked()?;
         if let Some(screen) = Self::load_screen(&command.target_id)? {
             return self.validate_screen(command, &screen).await;
@@ -1226,6 +1261,31 @@ impl ComputerAdapter for AxComputerAdapter {
         &self,
         command: &NativeActionCommand,
     ) -> NativeAdapterResult<Option<NativeObservation>> {
+        let is_pointer = matches!(command.action, NativeAction::Pointer { .. });
+        let result = if is_pointer {
+            self.dispatch_on_seat(command).await
+        } else {
+            dispatch_with_mutation_invalidation(
+                &self.captured_frames,
+                command.operation_id.as_deref(),
+                self.dispatch_on_seat(command),
+            )
+            .await
+        };
+        if is_pointer && result.is_err() {
+            self.captured_frames.write().await.clear();
+        }
+        result
+    }
+}
+
+impl AxComputerAdapter {
+    #[allow(clippy::too_many_lines)]
+    async fn dispatch_on_seat(
+        &self,
+        command: &NativeActionCommand,
+    ) -> NativeAdapterResult<Option<NativeObservation>> {
+        command.validate_click_identity().map_err(invalid)?;
         Self::ensure_unlocked()?;
         if let Some(result) = self.dispatch_clipboard_storage(command).await {
             return result;
@@ -1239,44 +1299,58 @@ impl ComputerAdapter for AxComputerAdapter {
                 self.captured_frames
                     .read()
                     .await
-                    .get(
+                    .get_for_action(
                         &command.target_id,
                         command.expected_frame_id.as_deref().unwrap_or(""),
+                        &command.action,
+                        FrameFence::same_geometry,
                     )
                     .and_then(FrameFence::screen)
                     .cloned()
             } else {
                 None
             };
-            self.invalidate_frames().await;
-            match &command.action {
-                NativeAction::Pointer { .. } => {
-                    let frame = frame.ok_or_else(|| stale_frame("macOS screen"))?;
-                    inject_display_batch(
-                        &screen.display,
-                        frame.width,
-                        frame.height,
-                        &pointer_inputs(&command.action)?,
-                    )
-                    .map_err(map_ffi_mutation)?;
-                }
-                NativeAction::Keyboard { .. } | NativeAction::Clipboard { .. } => {
-                    inject_batch(&[keyboard_or_clipboard_input(&command.action)?])
-                        .map_err(map_ffi_mutation)?;
-                }
-                NativeAction::Launch { application_id } => {
-                    let application_id = application_id.clone();
-                    tokio::task::spawn_blocking(move || launch_application(&application_id))
-                        .await
-                        .map_err(|error| {
-                            NativeAdapterError::outcome_unknown(format!(
-                                "macOS launch task failed after dispatch: {error}"
-                            ))
-                        })?
-                        .map_err(map_ffi_mutation)?;
-                }
-                NativeAction::Semantic { .. } | NativeAction::Focus { .. } => unreachable!(),
-            }
+            dispatch_with_frame_invalidation(
+                &self.captured_frames,
+                Some(command),
+                FrameFence::same_geometry,
+                async {
+                    match &command.action {
+                        NativeAction::Pointer { .. } => {
+                            let frame = frame.ok_or_else(|| stale_frame("macOS screen"))?;
+                            inject_display_batch(
+                                &screen.display,
+                                frame.width,
+                                frame.height,
+                                &pointer_inputs(&command.action)?,
+                            )
+                            .map_err(map_ffi_mutation)?;
+                        }
+                        NativeAction::Keyboard { .. } | NativeAction::Clipboard { .. } => {
+                            inject_batch(&[keyboard_or_clipboard_input(&command.action)?])
+                                .map_err(map_ffi_mutation)?;
+                        }
+                        NativeAction::Launch { application_id } => {
+                            let application_id = application_id.clone();
+                            tokio::task::spawn_blocking(move || {
+                                launch_application(&application_id)
+                            })
+                            .await
+                            .map_err(|error| {
+                                NativeAdapterError::outcome_unknown(format!(
+                                    "macOS launch task failed after dispatch: {error}"
+                                ))
+                            })?
+                            .map_err(map_ffi_mutation)?;
+                        }
+                        NativeAction::Semantic { .. } | NativeAction::Focus { .. } => {
+                            unreachable!()
+                        }
+                    }
+                    Ok::<(), NativeAdapterError>(())
+                },
+            )
+            .await?;
             return Ok(Some(self.screen_observation(screen.target).await));
         }
         match &command.action {
@@ -1316,6 +1390,7 @@ fn capabilities_for_grants(grants: MacCapabilityGrants) -> NativeCapabilities {
         screen_capture: capture,
         semantic_actions: semantic,
         pointer_input: input,
+        pointer_click_continuation: input,
         keyboard_input: input,
         clipboard: grants.unlocked && grants.clipboard,
         background_actions: semantic,
@@ -1450,6 +1525,7 @@ fn mac_ax_action(
 }
 
 fn pointer_inputs(action: &NativeAction) -> NativeAdapterResult<Vec<InputEvent>> {
+    let click_count = action.pointer_click_count().map_err(invalid)?;
     let NativeAction::Pointer {
         action,
         x,
@@ -1475,7 +1551,11 @@ fn pointer_inputs(action: &NativeAction) -> NativeAdapterResult<Vec<InputEvent>>
             x,
             y,
             button,
-            action: PointerAction::Click,
+            action: if click_count == 2 {
+                PointerAction::ClickContinuation
+            } else {
+                PointerAction::Click
+            },
         }],
         NativePointerAction::DoubleClick => vec![InputEvent::Pointer {
             x,
@@ -1873,6 +1953,40 @@ mod capability_tests {
     }
 
     #[test]
+    fn continuation_retention_requires_exact_capture_geometry_and_identity() {
+        let record = target_record(window_target(Some(77), "Fixture", 10.0));
+        let frame = WindowFrameFence {
+            frame_id: "painted-a".into(),
+            target_generation: record.target.target_generation,
+            window_id: 77,
+            bounds: record.native.bounds.unwrap(),
+            width: 400,
+            height: 300,
+        };
+        let left = FrameFence::Window(frame.clone());
+        let mut right = frame.clone();
+        right.frame_id = "painted-b".into();
+        assert!(left.same_geometry(&FrameFence::Window(right.clone())));
+        right.bounds.x += 1.0;
+        assert!(!left.same_geometry(&FrameFence::Window(right)));
+        let mut resized = frame.clone();
+        resized.width = 800;
+        assert!(!left.same_geometry(&FrameFence::Window(resized)));
+        let mut replaced = frame.clone();
+        replaced.window_id = 88;
+        assert!(!left.same_geometry(&FrameFence::Window(replaced)));
+        let mut generation = frame;
+        generation.target_generation = "another-generation".into();
+        assert!(!left.same_geometry(&FrameFence::Window(generation)));
+        assert!(!left.same_geometry(&FrameFence::Screen(ScreenFrameFence {
+            frame_id: "screen-frame".into(),
+            target_generation: "screen-generation".into(),
+            width: 400,
+            height: 300,
+        })));
+    }
+
+    #[test]
     fn projects_each_live_tcc_and_lock_boundary_independently() {
         let complete_grants = MacCapabilityGrants {
             unlocked: true,
@@ -1885,6 +1999,7 @@ mod capability_tests {
         assert!(
             complete.semantic_actions
                 && complete.pointer_input
+                && complete.pointer_click_continuation
                 && complete.window_capture
                 && complete.clipboard
         );
@@ -1896,6 +2011,7 @@ mod capability_tests {
         assert!(!accessibility_revoked.semantic_observation);
         assert!(!accessibility_revoked.semantic_actions);
         assert!(!accessibility_revoked.pointer_input);
+        assert!(!accessibility_revoked.pointer_click_continuation);
         assert!(accessibility_revoked.window_capture);
 
         let monitoring_revoked = capabilities_for_grants(MacCapabilityGrants {
@@ -1904,6 +2020,7 @@ mod capability_tests {
         });
         assert!(monitoring_revoked.semantic_actions);
         assert!(!monitoring_revoked.pointer_input && !monitoring_revoked.keyboard_input);
+        assert!(!monitoring_revoked.pointer_click_continuation);
         assert!(monitoring_revoked.window_capture);
 
         let capture_revoked = capabilities_for_grants(MacCapabilityGrants {
@@ -1911,6 +2028,7 @@ mod capability_tests {
             ..complete_grants
         });
         assert!(capture_revoked.semantic_actions && capture_revoked.pointer_input);
+        assert!(capture_revoked.pointer_click_continuation);
         assert!(!capture_revoked.window_capture && !capture_revoked.screen_capture);
 
         let locked = capabilities_for_grants(MacCapabilityGrants {
@@ -1921,6 +2039,7 @@ mod capability_tests {
         assert!(
             !locked.semantic_actions
                 && !locked.pointer_input
+                && !locked.pointer_click_continuation
                 && !locked.window_capture
                 && !locked.clipboard
         );

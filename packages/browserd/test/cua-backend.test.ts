@@ -153,6 +153,40 @@ function command(observation: ComputerBackendObservation): ComputerBackendAction
 }
 
 describe("CUA desktop boundary", () => {
+  test("rejects one-pair continuation before any CUA discovery or input delivery", async () => {
+    const fixture = new Fixture();
+    const backend = await CuaComputerBackend.open(fixture, "macos");
+    try {
+      expect(backend.initialCapabilities.pointerClickContinuation === true).toBe(false);
+      const before = fixture.calls.length;
+      const continuation: ComputerBackendActionCommand = {
+        targetId: "synthetic-window",
+        expectedTargetGeneration: "generation-1",
+        expectedObservationId: null,
+        expectedFrameId: "painted-1",
+        action: {
+          type: "pointer",
+          action: "click",
+          clickCount: 2,
+          frameId: "painted-1",
+          x: 20,
+          y: 10,
+        },
+      };
+      await expect(backend.validate(continuation)).rejects.toMatchObject({
+        code: "unsupported",
+        dispatched: false,
+      });
+      await expect(backend.dispatch(continuation)).rejects.toMatchObject({
+        code: "unsupported",
+        dispatched: false,
+      });
+      expect(fixture.calls).toHaveLength(before);
+    } finally {
+      await backend.close();
+    }
+  });
+
   test("Windows Edit values and value-label fallbacks stay redacted without password metadata", async () => {
     const fixture = new WindowsFixture();
     const original = fixture.callTool.bind(fixture);

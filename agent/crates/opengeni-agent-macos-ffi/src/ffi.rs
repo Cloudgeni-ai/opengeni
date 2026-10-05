@@ -1050,6 +1050,10 @@ fn prepare_pointer(
             prepared.push(prepare_mouse(src, down_type, point, cg_button, 1)?);
             prepared.push(prepare_mouse(src, up_type, point, cg_button, 1)?);
         }
+        PointerAction::ClickContinuation => {
+            prepared.push(prepare_mouse(src, down_type, point, cg_button, 2)?);
+            prepared.push(prepare_mouse(src, up_type, point, cg_button, 2)?);
+        }
         PointerAction::DoubleClick => {
             prepared.push(prepare_mouse(src, down_type, point, cg_button, 1)?);
             prepared.push(prepare_mouse(src, up_type, point, cg_button, 1)?);
@@ -1430,6 +1434,55 @@ fn post_prepared(prepared: &PreparedInput) -> Result<(), MacFfiError> {
 #[cfg(test)]
 mod input_tests {
     use super::*;
+
+    #[test]
+    fn click_continuation_prepares_exactly_one_second_pair_without_posting() {
+        let point = CGPoint::new(40.0, 60.0);
+        let mut prepared = Vec::new();
+        for action in [PointerAction::Click, PointerAction::ClickContinuation] {
+            prepare_pointer(None, point, PointerButton::Left, action, &mut prepared).unwrap();
+        }
+        let pairs: Vec<_> = prepared
+            .iter()
+            .filter_map(|event| {
+                let kind = CGEvent::r#type(Some(event));
+                (kind != CGEventType::MouseMoved).then(|| {
+                    (
+                        kind,
+                        CGEvent::integer_value_field(
+                            Some(event),
+                            CGEventField::MouseEventClickState,
+                        ),
+                    )
+                })
+            })
+            .collect();
+        assert_eq!(
+            pairs,
+            [
+                (CGEventType::LeftMouseDown, 1),
+                (CGEventType::LeftMouseUp, 1),
+                (CGEventType::LeftMouseDown, 2),
+                (CGEventType::LeftMouseUp, 2),
+            ]
+        );
+        let mut explicit_double = Vec::new();
+        prepare_pointer(
+            None,
+            point,
+            PointerButton::Left,
+            PointerAction::DoubleClick,
+            &mut explicit_double,
+        )
+        .unwrap();
+        assert_eq!(
+            explicit_double
+                .iter()
+                .filter(|event| CGEvent::r#type(Some(event)) != CGEventType::MouseMoved)
+                .count(),
+            4
+        );
+    }
 
     #[test]
     fn typed_text_posts_each_character_in_order_for_key_driven_apps() {
