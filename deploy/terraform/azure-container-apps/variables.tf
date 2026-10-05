@@ -26,13 +26,13 @@ variable "tags" {
 }
 
 variable "deployment_phase" {
-  description = "bootstrap creates substrate/secrets/manual job only; apps additionally creates serving workloads."
+  description = "foundation creates substrate/secrets/optional ACR without image pulls or jobs; bootstrap also creates the manual migration job; apps additionally creates serving workloads."
   type        = string
   default     = "bootstrap"
 
   validation {
-    condition     = contains(["bootstrap", "apps"], var.deployment_phase)
-    error_message = "deployment_phase must be bootstrap or apps."
+    condition     = contains(["foundation", "bootstrap", "apps"], var.deployment_phase)
+    error_message = "deployment_phase must be foundation, bootstrap or apps."
   }
 }
 

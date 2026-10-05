@@ -3,7 +3,7 @@ output "resource_group_name" {
 }
 
 output "api_url" {
-  description = "Public same-origin native ACA route; available as a planned URL during bootstrap."
+  description = "Public same-origin native ACA route; available as a planned URL during foundation/bootstrap."
   value       = local.api_url
 }
 
@@ -12,7 +12,8 @@ output "web_url" {
 }
 
 output "migration_job_name" {
-  value = azurerm_container_app_job.migration.name
+  description = "Manual job name; null in foundation, where no job exists."
+  value       = try(azurerm_container_app_job.migration[0].name, null)
 }
 
 output "infrastructure_resource_group_name" {
@@ -31,7 +32,7 @@ output "environment" {
 }
 
 output "endpoints" {
-  description = "Planned stable origins, available during bootstrap. They are not evidence that apps are running."
+  description = "Planned stable origins, available during foundation/bootstrap. They are not evidence that apps are running."
   value = {
     api          = local.api_url
     api_internal = local.api_internal_url
@@ -41,14 +42,14 @@ output "endpoints" {
 }
 
 output "migration_job" {
-  description = "A manual job definition, never executed by Terraform. Confirm execution Succeeded before setting migration_completed_revision."
-  value = {
-    id                  = azurerm_container_app_job.migration.id
-    name                = azurerm_container_app_job.migration.name
+  description = "Null in foundation; otherwise a manual job definition, never executed by Terraform. Confirm execution Succeeded before setting migration_completed_revision."
+  value = var.deployment_phase == "foundation" ? null : {
+    id                  = azurerm_container_app_job.migration[0].id
+    name                = azurerm_container_app_job.migration[0].name
     resource_group_name = azurerm_resource_group.this.name
     image               = var.images.api
     application_roles   = local.migration_database_roles
-    start_command       = "az containerapp job start --resource-group ${azurerm_resource_group.this.name} --name ${azurerm_container_app_job.migration.name}"
+    start_command       = "az containerapp job start --resource-group ${azurerm_resource_group.this.name} --name ${azurerm_container_app_job.migration[0].name}"
   }
 }
 
