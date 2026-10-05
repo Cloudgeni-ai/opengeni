@@ -1,4 +1,12 @@
-import { measureMcpPhase, withMcpCallIdentity } from "@opengeni/observability";
+import {
+  agentToolCallOutcome,
+  agentToolMetricFamily,
+  interactionInterventionMetricObserver,
+  measureMcpPhase,
+  recordAgentToolCall,
+  withMcpCallIdentity,
+  type AgentToolMetricFamily,
+} from "@opengeni/observability";
 import {
   appendSessionHistoryItems,
   sessionTurnFinalReplyFacts,
@@ -646,6 +654,11 @@ export async function runTurnStreamAttempt(
     // calls. Durable recovery remains call/result based and needs no batch
     // schema or compatibility state.
     let currentToolBatchCallIds = new Set<string>();
+    // Content-free per-call family + start time for opengeni_agent_tool_calls_total.
+    const toolCallMetricStarts = new Map<
+      string,
+      { family: AgentToolMetricFamily; startedAtMs: number }
+    >();
     let currentToolBatchCompletedCallIds = new Set<string>();
     let streamSawPerResponseUsage = false;
     // Deltas learn the phase a provider declares when it announces a message;
@@ -1415,6 +1428,35 @@ export async function runTurnStreamAttempt(
               runSettings.mcpServers,
               withMcpToolDisplayMetadata(preparedServers, event.payload),
             );
+            const created = event.payload as {
+              id?: unknown;
+              name?: unknown;
+              toolName?: unknown;
+              toolFamily?: unknown;
+            };
+            if (typeof created.id === "string") {
+              toolCallMetricStarts.set(created.id, {
+                family: agentToolMetricFamily(
+                  typeof created.toolFamily === "string" ? created.toolFamily : null,
+                  typeof created.name === "string"
+                    ? created.name
+                    : typeof created.toolName === "string"
+                      ? created.toolName
+                      : null,
+                ),
+                startedAtMs: performance.now(),
+              });
+            }
+          }
+          if (event.type === "agent.toolCall.output") {
+            const id = (event.payload as { id?: unknown }).id;
+            const started = typeof id === "string" ? toolCallMetricStarts.get(id) : undefined;
+            if (typeof id === "string") toolCallMetricStarts.delete(id);
+            recordAgentToolCall(observability, {
+              family: started?.family ?? "other",
+              outcome: agentToolCallOutcome(event.payload),
+              ...(started ? { durationMs: performance.now() - started.startedAtMs } : {}),
+            });
           }
           streamTiming.onEvent(event.type);
           if (event.type === "agent.toolCall.output") {
@@ -1835,6 +1877,13 @@ export async function runTurnStreamAttempt(
         }))
       ) {
         return claimedResult({ status: "cancelled" });
+      }
+      // Agent-requested human handoffs open here, in the worker, never through
+      // the API intervention route, so they are counted at their durable boundary.
+      const observeIntervention = interactionInterventionMetricObserver(observability);
+      for (const interruption of interactionInterventionInterruptions) {
+        if (interruption.input.operation !== "request") continue;
+        observeIntervention({ kind: interruption.input.kind, outcome: "opened" });
       }
       // The interruption and its preceding tool results are now durable.
       await finalizeTurnOpStreamOps();

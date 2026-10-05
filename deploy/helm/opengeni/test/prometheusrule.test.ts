@@ -285,6 +285,79 @@ describe("turn-capacity Prometheus alerts", () => {
     }
   });
 
+  test("alerts on product-level failures users hit, with plain-language copy", async () => {
+    const template = await readFile(
+      new URL("../templates/prometheusrule.yaml", import.meta.url),
+      "utf8",
+    );
+    const expected = new Map([
+      [
+        "OpenGeniApiRouteRejectionsAbnormal",
+        [
+          "opengeni_http_requests_total",
+          'status=~"401|403|409|422"',
+          "sum by (method, route, status)",
+          "[1d] offset 30m",
+          'route="/v1/mcp"',
+        ],
+      ],
+      [
+        "OpenGeniHandoffAttachRefused",
+        [
+          "opengeni_http_requests_total",
+          '(browser|computer)-sessions/:[A-Za-z]+/attachments"',
+          'status=~"4.."',
+        ],
+      ],
+      [
+        "OpenGeniInteractionOperationFailureRatio",
+        ["opengeni_interaction_operations_total", 'outcome=~"failed|denied|outcome_unknown"'],
+      ],
+      [
+        "OpenGeniHandoffsExpiringUnanswered",
+        ["opengeni_interaction_interventions_total", 'outcome="expired"'],
+      ],
+      [
+        "OpenGeniConnectFailureRatio",
+        ["opengeni_connect_attempts_total", 'state=~"failed|uncertain"'],
+      ],
+      [
+        "OpenGeniIntegrationOAuthCallbackFailures",
+        ["opengeni_integration_oauth_callbacks_total", 'outcome="failure"'],
+      ],
+      ["OpenGeniAgentToolErrorRatio", ["opengeni_agent_tool_calls_total", 'outcome="error"']],
+      ["OpenGeniMachineConnectRejected", ["opengeni_machine_connect_total", 'outcome="denied"']],
+      ["OpenGeniAttachedBrowserUnavailable", ["opengeni_attached_browser_unavailable_total"]],
+      [
+        "OpenGeniApiMissingPermissionSpike",
+        ["opengeni_http_request_rejections_total", 'reason=~"permission:.+"'],
+      ],
+    ]);
+    for (const [alert, signals] of expected) {
+      const expression = alertExpression(template, alert);
+      for (const signal of signals)
+        expect(expression, `${alert} missing ${signal}`).toContain(signal);
+      for (const selector of metricSelectors(expression))
+        expect(selector, `${alert} selector is not deployment-scoped`).toContain(DEPLOYMENT_SCOPE);
+      // Group only by bounded labels; route templates may name `:workspaceId`.
+      for (const grouping of expression.matchAll(/(?:by|on) \(([^)]*)\)/g))
+        expect(grouping[1]).not.toMatch(/workspace|account|subject|session|user|tool_name/i);
+      const block = ruleBlock(template, "alert", alert);
+      expect(block).toContain("severity: warning");
+      for (const annotation of [
+        "summary:",
+        "headline:",
+        "user_impact:",
+        "next_step:",
+        "description:",
+      ])
+        expect(block, `${alert} missing ${annotation}`).toContain(`            ${annotation}`);
+      expect(block, `${alert} misspells the brand`).not.toMatch(
+        /^ {12}(summary|headline|user_impact|next_step|description|action|value):.*\bOpenGeni\b/m,
+      );
+    }
+  });
+
   test("alerts on release-owned turn-worker restarts and crash loops", async () => {
     const template = await readFile(
       new URL("../templates/prometheusrule.yaml", import.meta.url),
