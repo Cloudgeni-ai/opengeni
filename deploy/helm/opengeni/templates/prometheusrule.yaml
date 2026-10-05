@@ -659,6 +659,227 @@ spec:
             user_impact: 'Opening workspaces and session lists feels slow in the app.'
             next_step: 'Check database CPU and slow queries before adding API pods.'
             description: Workspace or session reads are slow enough to degrade the interactive control plane. Inspect database CPU, active queries, event append latency, and request volume before scaling API pods.
+        # Product-level failure safety net: a route whose refusals (401/403/409/422)
+        # jump against its own one-day baseline, or that refuses most of its
+        # traffic. Unauthenticated organization MCP discovery (GET 401 on the
+        # organization MCP endpoint) is benign; its route is matched as a
+        # character class so the unscoped-route source guard does not read it
+        # as a client default.
+        - alert: OpenGeniApiRouteRejectionsAbnormal
+          expr: |
+            (
+              (sum by (method, route, status) (increase(opengeni_http_requests_total{namespace={{ .Release.Namespace | quote }},release={{ .Release.Name | quote }},environment={{ $environment | quote }},component="api",status=~"401|403|409|422"}[30m])) >= 20)
+              and on (method, route, status)
+              (
+                sum by (method, route, status) (rate(opengeni_http_requests_total{namespace={{ .Release.Namespace | quote }},release={{ .Release.Name | quote }},environment={{ $environment | quote }},component="api",status=~"401|403|409|422"}[30m]))
+                > 3 * sum by (method, route, status) (rate(opengeni_http_requests_total{namespace={{ .Release.Namespace | quote }},release={{ .Release.Name | quote }},environment={{ $environment | quote }},component="api",status=~"401|403|409|422"}[1d] offset 30m))
+                or on (method, route, status)
+                (
+                  sum by (method, route, status) (rate(opengeni_http_requests_total{namespace={{ .Release.Namespace | quote }},release={{ .Release.Name | quote }},environment={{ $environment | quote }},component="api",status=~"401|403|409|422"}[30m]))
+                  unless on (method, route, status)
+                  (sum by (method, route, status) (rate(opengeni_http_requests_total{namespace={{ .Release.Namespace | quote }},release={{ .Release.Name | quote }},environment={{ $environment | quote }},component="api",status=~"401|403|409|422"}[1d] offset 30m)) > 0)
+                )
+              )
+              or on (method, route, status)
+              (
+                (
+                  sum by (method, route, status) (increase(opengeni_http_requests_total{namespace={{ .Release.Namespace | quote }},release={{ .Release.Name | quote }},environment={{ $environment | quote }},component="api",status=~"403|409|422"}[1h]))
+                  / on (method, route) group_left
+                  clamp_min(sum by (method, route) (increase(opengeni_http_requests_total{namespace={{ .Release.Namespace | quote }},release={{ .Release.Name | quote }},environment={{ $environment | quote }},component="api"}[1h])), 1)
+                ) > 0.5
+                and on (method, route, status)
+                sum by (method, route, status) (increase(opengeni_http_requests_total{namespace={{ .Release.Namespace | quote }},release={{ .Release.Name | quote }},environment={{ $environment | quote }},component="api",status=~"403|409|422"}[1h])) >= 10
+              )
+            )
+            unless on (method, route)
+            (sum by (method, route) (increase(opengeni_http_requests_total{namespace={{ .Release.Namespace | quote }},release={{ .Release.Name | quote }},environment={{ $environment | quote }},component="api",method="GET",route=~"/v1/[m]cp"}[30m])) >= 0)
+          for: 5m
+          labels:
+            severity: warning
+            notification_policy: investigate
+          annotations:
+            summary: 'Requests to {{ "{{ $labels.method }} {{ $labels.route }}" }} are being refused with HTTP {{ "{{ $labels.status }}" }} far more than usual.'
+            headline: 'An API route is suddenly refusing users'
+            user_impact: 'People using this part of the product are being told they cannot do it (permission, conflict or validation refusal), usually with an unhelpful error or a silent failure.'
+            next_step: 'Open "Capabilities, browser & handoffs" in Grafana for the route, then read the API logs for that route: rejectionReason names the missing permission or domain code and rejectionFingerprint groups identical refusals.'
+            description: 'Fires when a route''s 401/403/409/422 rate over 30 minutes is at least 20 requests and more than 3x its own previous-day rate (or the route never refused before), or when 403/409/422 are over half of the route''s traffic for an hour with at least 10 refusals. Excludes unauthenticated organization MCP endpoint discovery. Resolve a rejectionFingerprint to its source text with scripts/resolve-rejection-fingerprint.ts.'
+            action: 'Decide whether the refusal is a product bug (missing grant, UI offering an action the user cannot take, client retry loop) or abuse; fix the grant or the client rather than muting the alert.'
+        # Browser/Computer sign-in handoff: the human could not join the live
+        # session the agent handed them. This is the 2026-10-05 Personal
+        # workspace stream:view incident class.
+        - alert: OpenGeniHandoffAttachRefused
+          expr: |
+            (
+              sum by (route) (increase(opengeni_http_requests_total{namespace={{ .Release.Namespace | quote }},release={{ .Release.Name | quote }},environment={{ $environment | quote }},component="api",route=~"/v1/workspaces/:workspaceId/(browser|computer)-sessions/:[A-Za-z]+/attachments",status=~"4.."}[30m]))
+              /
+              clamp_min(sum by (route) (increase(opengeni_http_requests_total{namespace={{ .Release.Namespace | quote }},release={{ .Release.Name | quote }},environment={{ $environment | quote }},component="api",route=~"/v1/workspaces/:workspaceId/(browser|computer)-sessions/:[A-Za-z]+/attachments"}[30m])), 1)
+            ) > 0.25
+            and on (route)
+            sum by (route) (increase(opengeni_http_requests_total{namespace={{ .Release.Namespace | quote }},release={{ .Release.Name | quote }},environment={{ $environment | quote }},component="api",route=~"/v1/workspaces/:workspaceId/(browser|computer)-sessions/:[A-Za-z]+/attachments",status=~"4.."}[30m])) >= 3
+          for: 5m
+          labels:
+            severity: warning
+            notification_policy: investigate
+          annotations:
+            summary: 'People cannot open the live browser or computer view the agent handed them ({{ "{{ $labels.route }}" }}).'
+            headline: 'Browser/computer handoff: people cannot join'
+            value: '{{ "{{ $value | humanizePercentage }}" }} of join attempts refused (30 min)'
+            user_impact: 'When the agent asks a person to sign in or confirm something in its browser or computer, the person cannot open the live view, so the handoff expires and the agent reports that the human interaction was dismissed or expired.'
+            next_step: 'Check the API logs for this route: rejectionReason permission:stream:view means the viewer''s grant lacks stream:view; other reasons point at Connected Machine consent or a stale session. Fix the grant before users retry.'
+            description: 'More than 25% of POST .../attachments requests on the browser or computer session route failed with a 4xx over 30 minutes, with at least 3 failures.'
+        - alert: OpenGeniInteractionOperationFailureRatio
+          expr: |
+            (
+              sum by (resource, operation) (increase(opengeni_interaction_operations_total{namespace={{ .Release.Namespace | quote }},release={{ .Release.Name | quote }},environment={{ $environment | quote }},outcome=~"failed|denied|outcome_unknown"}[15m]))
+              /
+              clamp_min(sum by (resource, operation) (increase(opengeni_interaction_operations_total{namespace={{ .Release.Namespace | quote }},release={{ .Release.Name | quote }},environment={{ $environment | quote }}}[15m])), 1)
+            ) > 0.25
+            and on (resource, operation)
+            sum by (resource, operation) (increase(opengeni_interaction_operations_total{namespace={{ .Release.Namespace | quote }},release={{ .Release.Name | quote }},environment={{ $environment | quote }},outcome=~"failed|denied|outcome_unknown"}[15m])) >= 5
+          for: 10m
+          labels:
+            severity: warning
+            notification_policy: investigate
+          annotations:
+            summary: 'More than a quarter of {{ "{{ $labels.resource }}" }} {{ "{{ $labels.operation }}" }} operations failed or were refused over 15 minutes.'
+            headline: '{{ "{{ $labels.resource }}" }} {{ "{{ $labels.operation }}" }} operations failing'
+            value: '{{ "{{ $value | humanizePercentage }}" }} failed or refused (15 min)'
+            user_impact: 'The agent (or a person) cannot drive the browser or computer: pages do not open, observations fail, or actions are refused, so tasks that need a browser stall.'
+            next_step: 'Split opengeni_interaction_operations_total by reason in Grafana: permission_denied/access_denied is an authorization bug, control_* is a Connected Machine problem, stale is usually benign churn.'
+            description: 'Counts every Browser/Computer control route (including observe, tab, and attach routes) plus receipt outcomes; denied means a 401/403 refusal.'
+        - alert: OpenGeniHandoffsExpiringUnanswered
+          expr: |
+            (
+              sum by (kind) (increase(opengeni_interaction_interventions_total{namespace={{ .Release.Namespace | quote }},release={{ .Release.Name | quote }},environment={{ $environment | quote }},outcome="expired"}[2h]))
+              /
+              clamp_min(sum by (kind) (increase(opengeni_interaction_interventions_total{namespace={{ .Release.Namespace | quote }},release={{ .Release.Name | quote }},environment={{ $environment | quote }},outcome=~"completed|dismissed|expired|cancelled"}[2h])), 1)
+            ) > 0.5
+            and on (kind)
+            sum by (kind) (increase(opengeni_interaction_interventions_total{namespace={{ .Release.Namespace | quote }},release={{ .Release.Name | quote }},environment={{ $environment | quote }},outcome="expired"}[2h])) >= 3
+          for: 15m
+          labels:
+            severity: warning
+            notification_policy: investigate
+          annotations:
+            summary: 'More than half of {{ "{{ $labels.kind }}" }} handoffs to a person expired unanswered over two hours.'
+            headline: 'Handoffs to people are expiring unanswered'
+            value: '{{ "{{ $value | humanizePercentage }}" }} of settled handoffs expired (2 h)'
+            user_impact: 'When the agent needs a person to sign in, approve or act, nobody completes it in time, so the agent''s task stops. Usually the person never saw the request or could not open it.'
+            next_step: 'Check OpenGeniHandoffAttachRefused and the attachments route refusals first; if people can join, check that handoff notifications reach them.'
+            description: 'Agent-opened handoffs are counted when the worker settles them; expiry is counted by the worker timer. Lazily expired legacy auth-run handoffs are not yet counted.'
+        - alert: OpenGeniConnectFailureRatio
+          expr: |
+            (
+              sum by (provider) (increase(opengeni_connect_attempts_total{namespace={{ .Release.Namespace | quote }},release={{ .Release.Name | quote }},environment={{ $environment | quote }},state=~"failed|uncertain"}[1h]))
+              /
+              clamp_min(sum by (provider) (increase(opengeni_connect_attempts_total{namespace={{ .Release.Namespace | quote }},release={{ .Release.Name | quote }},environment={{ $environment | quote }},state=~"complete|failed|uncertain|connected_but_incomplete"}[1h])), 1)
+            ) > 0.3
+            and on (provider)
+            sum by (provider) (increase(opengeni_connect_attempts_total{namespace={{ .Release.Namespace | quote }},release={{ .Release.Name | quote }},environment={{ $environment | quote }},state=~"failed|uncertain"}[1h])) >= 3
+          for: 10m
+          labels:
+            severity: warning
+            notification_policy: investigate
+          annotations:
+            summary: 'Connecting {{ "{{ $labels.provider }}" }} fails for more than 30% of people who finish the flow.'
+            headline: 'People cannot connect {{ "{{ $labels.provider }}" }}'
+            value: '{{ "{{ $value | humanizePercentage }}" }} of finished attempts failed (1 h)'
+            user_impact: 'People trying to add this capability or integration end up with a failed setup and the agent cannot use it.'
+            next_step: 'Split opengeni_connect_attempts_total by error for this provider and check the provider''s OAuth app, credentials and the matching callback failures in opengeni_integration_oauth_callbacks_total.'
+            description: 'Counts committed Connect attempt transitions; provider=other is any provider outside the reviewed catalog. Cancelled and expired attempts are excluded from the failure ratio.'
+        - alert: OpenGeniIntegrationOAuthCallbackFailures
+          expr: |
+            (
+              sum by (flow, provider) (increase(opengeni_integration_oauth_callbacks_total{namespace={{ .Release.Namespace | quote }},release={{ .Release.Name | quote }},environment={{ $environment | quote }},outcome="failure"}[1h]))
+              /
+              clamp_min(sum by (flow, provider) (increase(opengeni_integration_oauth_callbacks_total{namespace={{ .Release.Namespace | quote }},release={{ .Release.Name | quote }},environment={{ $environment | quote }},outcome=~"success|failure"}[1h])), 1)
+            ) > 0.3
+            and on (flow, provider)
+            sum by (flow, provider) (increase(opengeni_integration_oauth_callbacks_total{namespace={{ .Release.Namespace | quote }},release={{ .Release.Name | quote }},environment={{ $environment | quote }},outcome="failure"}[1h])) >= 3
+          for: 10m
+          labels:
+            severity: warning
+            notification_policy: investigate
+          annotations:
+            summary: 'The {{ "{{ $labels.provider }}" }} sign-in callback ({{ "{{ $labels.flow }}" }}) is failing for more than 30% of returns.'
+            headline: '{{ "{{ $labels.provider }}" }} connection sign-in failing'
+            value: '{{ "{{ $value | humanizePercentage }}" }} of callbacks failed (1 h)'
+            user_impact: 'People approve access at the provider but land back in Opengeni with a connection error, so the integration is never connected.'
+            next_step: 'Split opengeni_integration_oauth_callbacks_total by stage and reason: token_exchange points at client credentials or redirect URIs, state_invalid at expired or replayed links.'
+            description: 'Classified from the callback redirect marker (?<flow>=error&reason=) and HTTP status only. Popup Connect callbacks are counted as handoff here and judged by OpenGeniConnectFailureRatio.'
+        - alert: OpenGeniAgentToolErrorRatio
+          expr: |
+            (
+              sum by (family) (increase(opengeni_agent_tool_calls_total{namespace={{ .Release.Namespace | quote }},release={{ .Release.Name | quote }},environment={{ $environment | quote }},outcome="error"}[15m]))
+              /
+              clamp_min(sum by (family) (increase(opengeni_agent_tool_calls_total{namespace={{ .Release.Namespace | quote }},release={{ .Release.Name | quote }},environment={{ $environment | quote }}}[15m])), 1)
+            ) > 0.5
+            and on (family)
+            sum by (family) (increase(opengeni_agent_tool_calls_total{namespace={{ .Release.Namespace | quote }},release={{ .Release.Name | quote }},environment={{ $environment | quote }},outcome="error"}[15m])) >= 10
+          for: 10m
+          labels:
+            severity: warning
+            notification_policy: investigate
+          annotations:
+            summary: 'More than half of agent {{ "{{ $labels.family }}" }} tool calls returned an error over 15 minutes.'
+            headline: 'Agent {{ "{{ $labels.family }}" }} tools mostly failing'
+            value: '{{ "{{ $value | humanizePercentage }}" }} of calls errored (15 min)'
+            user_impact: 'Agents keep trying a tool that does not work, so tasks needing it stall or finish with a worse result.'
+            next_step: 'Compare with the provider and MCP alerts, then open a recent session using that tool family to read the actual tool error.'
+            description: 'Counts every completed model-dispatched tool call by closed tool family; an error is a structural tool error output, not a non-zero shell exit code.'
+        - alert: OpenGeniMachineConnectRejected
+          expr: |
+            sum by (reason) (increase(opengeni_machine_connect_total{namespace={{ .Release.Namespace | quote }},release={{ .Release.Name | quote }},environment={{ $environment | quote }},outcome="denied",reason=~"plane_disabled|identity_mismatch|generation_mismatch|invalid_instance|undecodable"}[15m])) >= 5
+          for: 10m
+          labels:
+            severity: warning
+            notification_policy: investigate
+          annotations:
+            summary: 'Connected Machines are being refused at connect ({{ "{{ $labels.reason }}" }}).'
+            headline: 'Connected Machines cannot connect'
+            value: '{{ "{{ printf `%.0f` $value }}" }} refused connects (15 min)'
+            user_impact: 'People''s own machines show as offline, so sessions targeting them cannot run commands or open their browser.'
+            next_step: 'plane_disabled means the enrollment signing secret is missing; generation or identity mismatches mean credentials were rotated or a machine needs re-enrollment. Check the API auth-callout logs.'
+            description: 'Excludes the expected denials of revoked or stale machines (invalid_bearer, inactive_enrollment) and of a second runner for one enrollment (duplicate_runner).'
+        - alert: OpenGeniAttachedBrowserUnavailable
+          expr: |
+            sum by (reason) (increase(opengeni_attached_browser_unavailable_total{namespace={{ .Release.Namespace | quote }},release={{ .Release.Name | quote }},environment={{ $environment | quote }}}[30m])) >= 5
+          for: 10m
+          labels:
+            severity: warning
+            notification_policy: investigate
+          annotations:
+            summary: 'Agents cannot reach people''s attached browsers ({{ "{{ $labels.reason }}" }}).'
+            headline: 'Attached browsers unreachable'
+            value: '{{ "{{ printf `%.0f` $value }}" }} refused operations (30 min)'
+            user_impact: 'People who attached their own browser see the agent fail to use it, so browser tasks on their accounts stop.'
+            next_step: 'disconnected usually means the extension or native host stopped; machine_unavailable means the Connected Machine is offline. Check opengeni_machine_connect_total and recent agent releases.'
+            description: 'Counts browser operations refused because the attached browser device was disconnected, its Connected Machine was not live, or the machine had not reported a workspace root.'
+        - alert: OpenGeniApiMissingPermissionSpike
+          expr: |
+            (sum by (route, reason) (increase(opengeni_http_request_rejections_total{namespace={{ .Release.Namespace | quote }},release={{ .Release.Name | quote }},environment={{ $environment | quote }},component="api",reason=~"permission:.+"}[30m])) >= 10)
+            and on (route, reason)
+            (
+              sum by (route, reason) (rate(opengeni_http_request_rejections_total{namespace={{ .Release.Namespace | quote }},release={{ .Release.Name | quote }},environment={{ $environment | quote }},component="api",reason=~"permission:.+"}[30m]))
+              > 3 * sum by (route, reason) (rate(opengeni_http_request_rejections_total{namespace={{ .Release.Namespace | quote }},release={{ .Release.Name | quote }},environment={{ $environment | quote }},component="api",reason=~"permission:.+"}[1d] offset 30m))
+              or on (route, reason)
+              (
+                sum by (route, reason) (rate(opengeni_http_request_rejections_total{namespace={{ .Release.Namespace | quote }},release={{ .Release.Name | quote }},environment={{ $environment | quote }},component="api",reason=~"permission:.+"}[30m]))
+                unless on (route, reason)
+                (sum by (route, reason) (rate(opengeni_http_request_rejections_total{namespace={{ .Release.Namespace | quote }},release={{ .Release.Name | quote }},environment={{ $environment | quote }},component="api",reason=~"permission:.+"}[1d] offset 30m)) > 0)
+              )
+            )
+          for: 5m
+          labels:
+            severity: warning
+            notification_policy: investigate
+          annotations:
+            summary: 'Many requests to {{ "{{ $labels.route }}" }} are refused for {{ "{{ $labels.reason }}" }}, far more than usual.'
+            headline: 'Users missing {{ "{{ $labels.reason }}" }}'
+            value: '{{ "{{ printf `%.0f` $value }}" }} refusals (30 min)'
+            user_impact: 'People are blocked from an action because their access grant lacks this permission, often in a surface the product itself offered them.'
+            next_step: 'Decide whether the grant (for example the Personal workspace owner set) should include this permission, or whether the UI should hide the action for people without it.'
+            description: 'Uses the bounded rejection reason recorded for every refused API request; only permission names from the closed permission catalog appear.'
         - alert: OpenGeniSandboxCreateFailureRatio
           expr: |
             (

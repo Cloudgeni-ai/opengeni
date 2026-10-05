@@ -85780,6 +85780,8 @@ export async function acceptSessionApprovalDecision(
 export type ExpireSessionInteractionInterventionResult = {
   action: "expired" | "stale" | "not_found";
   events: SessionEvent[];
+  /** Content-free facts for telemetry on the expired transition only. */
+  intervention?: { kind: string; createdAt: Date };
 };
 
 /**
@@ -85996,6 +85998,8 @@ export async function expireSessionInteractionIntervention(
       const [row] = await scopedDb
         .select({
           id: schema.interactionInterventions.id,
+          kind: schema.interactionInterventions.kind,
+          createdAt: schema.interactionInterventions.createdAt,
           status: schema.interactionInterventions.status,
           version: schema.interactionInterventions.version,
           expiresAt: schema.interactionInterventions.expiresAt,
@@ -86044,7 +86048,11 @@ export async function expireSessionInteractionIntervention(
     },
   });
   return result.action === "accepted"
-    ? { action: "expired", events: result.events }
+    ? {
+        action: "expired",
+        events: result.events,
+        intervention: { kind: intervention.kind, createdAt: intervention.createdAt },
+      }
     : { action: "stale", events: [] };
 }
 
