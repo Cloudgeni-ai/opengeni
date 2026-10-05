@@ -215,7 +215,7 @@ export function SessionList({
                   {formatRelativeTime(session.updatedAt)}
                 </span>
               </button>
-              <span className="absolute right-1 top-1.5 hidden gap-0.5 group-focus-within:flex group-hover:flex">
+              <span className="absolute right-1 top-1.5 hidden gap-0.5 group-focus-within:flex group-hover:flex pointer-coarse:flex">
                 {rename ? (
                   <button
                     type="button"

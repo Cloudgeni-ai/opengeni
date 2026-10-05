@@ -6305,6 +6305,11 @@
       margin-inline: calc(19px * -1);
     }
   }
+:where(.og-root).pointer-coarse\:flex,:where(.og-root) .pointer-coarse\:flex {
+    @media (pointer: coarse) {
+      display: flex;
+    }
+  }
 :where(.og-root).pointer-coarse\:size-6,:where(.og-root) .pointer-coarse\:size-6 {
     @media (pointer: coarse) {
       width: calc(var(--spacing) * 6);
