@@ -5,6 +5,7 @@ import {
   type PreflightCheckId,
   contractForProfile,
   missingRuntimeEnvVars,
+  parseDeploymentContract,
   preflightChecksFor,
   requiredRuntimeEnvVars,
 } from "@opengeni/deployment";
@@ -20,6 +21,9 @@ import {
 interface Args {
   profile: string;
   productOverlay: string;
+  productAccessMode: string | null;
+  accessMode: string | null;
+  publicBaseUrl: string | null;
   json: boolean;
   list: boolean;
   checkEnv: boolean;
@@ -43,7 +47,35 @@ if (args.list) {
 
 const profileId = DeploymentProfileId.parse(args.profile);
 const overlay = ProductOverlayId.parse(args.productOverlay);
-const contract = contractForProfile(profileId, overlay);
+const hasAccessSelection =
+  args.productAccessMode !== null || args.accessMode !== null || args.publicBaseUrl !== null;
+if (hasAccessSelection && profileId !== "azure-container-apps") {
+  throw new Error(
+    "Preflight access selectors are supported only for the azure-container-apps profile",
+  );
+}
+if (hasAccessSelection && (args.productAccessMode === null || args.accessMode === null)) {
+  throw new Error("--product-access-mode and --access-mode must be supplied together");
+}
+const baseContract = contractForProfile(profileId, overlay);
+const contract = hasAccessSelection
+  ? parseDeploymentContract({
+      ...baseContract,
+      access: { ...baseContract.access, mode: args.accessMode },
+      product: {
+        ...baseContract.product,
+        accessMode: args.productAccessMode,
+        ...(args.publicBaseUrl !== null || args.productAccessMode === "managed"
+          ? {
+              publicBaseUrl:
+                args.publicBaseUrl ??
+                process.env.OPENGENI_PUBLIC_BASE_URL ??
+                baseContract.product.publicBaseUrl,
+            }
+          : {}),
+      },
+    })
+  : baseContract;
 const checks = preflightChecksFor(contract);
 const requiredEnvVars = requiredRuntimeEnvVars(contract);
 const missingEnvVars = args.checkEnv ? missingRuntimeEnvVars(contract) : [];
@@ -165,6 +197,9 @@ function parseArgs(values: string[]): Args {
   const out: Args = {
     profile: "local-compose",
     productOverlay: "none",
+    productAccessMode: null,
+    accessMode: null,
+    publicBaseUrl: null,
     json: false,
     list: false,
     checkEnv: false,
@@ -213,6 +248,30 @@ function parseArgs(values: string[]): Args {
     }
     if (value.startsWith("--product-overlay=")) {
       out.productOverlay = value.slice("--product-overlay=".length);
+      continue;
+    }
+    if (
+      value === "--product-access-mode" ||
+      value === "--access-mode" ||
+      value === "--public-base-url"
+    ) {
+      const next = values[++index];
+      if (!next) throw new Error(`${value} requires a value`);
+      if (value === "--product-access-mode") out.productAccessMode = next;
+      else if (value === "--access-mode") out.accessMode = next;
+      else out.publicBaseUrl = next;
+      continue;
+    }
+    if (value.startsWith("--product-access-mode=")) {
+      out.productAccessMode = value.slice("--product-access-mode=".length);
+      continue;
+    }
+    if (value.startsWith("--access-mode=")) {
+      out.accessMode = value.slice("--access-mode=".length);
+      continue;
+    }
+    if (value.startsWith("--public-base-url=")) {
+      out.publicBaseUrl = value.slice("--public-base-url=".length);
       continue;
     }
     throw new Error(`Unknown argument: ${value}`);

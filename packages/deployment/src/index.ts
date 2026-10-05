@@ -2357,6 +2357,9 @@ function containerAppsVerifyCommands(
   productOverlay: ProductOverlayId,
 ): string[] {
   const overlayArg = productOverlay === "none" ? "" : ` --product-overlay ${productOverlay}`;
+  const publicBaseUrlArg = contract.product.publicBaseUrl
+    ? ` --public-base-url '${contract.product.publicBaseUrl.replaceAll("'", "'\\''")}'`
+    : "";
   const conformance =
     'bun run deployment:conformance -- --base-url "$OPENGENI_API_BASE_URL"' +
     ` --sandbox-backend ${contract.sandbox.backend}` +
@@ -2366,7 +2369,7 @@ function containerAppsVerifyCommands(
     'az containerapp list --resource-group "${OPENGENI_ACA_RESOURCE_GROUP:?run bootstrap first}" --output json --only-show-errors | jq -e \'def role: [.properties.template.containers[].env[]? | select(.name == "OPENGENI_WORKER_ROLE") | .value][0]; [.[] | select(role == "control" or role == "turn")] as $workers | ([$workers[] | role] | sort) == ["control", "turn"] and all($workers[]; .properties.template.scale.minReplicas >= 1 and .properties.template.terminationGracePeriodSeconds >= 120)\'',
     'curl --fail --silent --show-error "${OPENGENI_API_BASE_URL:?apply applications first}/healthz"',
     `bun scripts/deployment-aca-observability.ts --terraform-root ${CONTAINER_APPS_TERRAFORM_ROOT}`,
-    `bun run deployment:preflight -- --profile ${contract.profile}${overlayArg} --check-env`,
+    `bun run deployment:preflight -- --profile ${contract.profile}${overlayArg}${publicBaseUrlArg} --product-access-mode ${contract.product.accessMode} --access-mode ${contract.access.mode} --check-env`,
     contract.access.mode === "sharedKey"
       ? `OPENGENI_CONFORMANCE_DEPLOYMENT_ACCESS_KEY="$OPENGENI_ACCESS_KEY" ${conformance}`
       : contract.product.accessMode === "managed"
