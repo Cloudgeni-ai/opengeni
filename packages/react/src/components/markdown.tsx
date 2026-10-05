@@ -28,6 +28,7 @@ import { MOTION_INSPECT_SCALE } from "../lib/motion-inspect";
 import { CopyButton } from "./copy-button";
 import { PreviewLoading } from "./preview-loading";
 import type { observeMarkdownTableLayout } from "./markdown-table-layout";
+import { remarkSoftLineBreaks } from "./remark-soft-line-breaks";
 import { softenStreamingMarkdown } from "./soften-streaming-markdown";
 import { createStreamReveal, rehypeStreamReveal, type StreamReveal } from "./stream-reveal";
 import { TooltipProvider } from "./tooltip";
@@ -81,6 +82,14 @@ export type MarkdownProps = {
   renderInteractiveBlock?: ((block: MarkdownInteractiveBlock) => ReactNode) | undefined;
   children: string;
   className?: string | undefined;
+  /**
+   * Render a single newline inside prose as a line break (`<br>`), the way chat
+   * apps show messages; CommonMark otherwise folds it into a space. Chat message
+   * bodies enable this. Leave it off for documents and other authored Markdown.
+   * Code (fenced and inline), lists, tables, and blank-line paragraphs are
+   * unaffected either way.
+   */
+  softLineBreaks?: boolean | undefined;
   /**
    * While true, newly arrived source fades in through tip ink (`.og-stream-ink`):
    * an age window over each append batch — fast streams keep a large soft band,
@@ -630,10 +639,19 @@ function MarkdownTable({ children, className, ...props }: ComponentPropsWithoutR
   );
 }
 
+type RemarkPlugins = NonNullable<Parameters<typeof ReactMarkdown>[0]["remarkPlugins"]>;
+const REMARK_PLUGINS: RemarkPlugins = [remarkGfm];
+// Structural plugin types (see remark-soft-line-breaks.ts) need one cast at the seam.
+const SOFT_LINE_BREAK_REMARK_PLUGINS = [
+  remarkGfm,
+  remarkSoftLineBreaks,
+] as unknown as RemarkPlugins;
+
 function MarkdownImpl({
   children,
   artifactHref,
   className,
+  softLineBreaks = false,
   streaming = false,
   onSandboxFile,
   renderInteractiveBlock,
@@ -760,7 +778,7 @@ function MarkdownImpl({
             )}
           >
             <ReactMarkdown
-              remarkPlugins={[remarkGfm]}
+              remarkPlugins={softLineBreaks ? SOFT_LINE_BREAK_REMARK_PLUGINS : REMARK_PLUGINS}
               rehypePlugins={rehypePlugins}
               components={markdownComponents}
               urlTransform={markdownUrlTransform}

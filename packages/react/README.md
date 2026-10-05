@@ -980,7 +980,10 @@ intentional changes should regenerate those snapshots and review the diff.
 - `MessageTimeline` — the session timeline with stick-to-bottom scrolling, a
   "jump to latest" affordance, streaming caret, collapsible activity clusters,
   and worker cards (wire `onOpenSession` to drill into a worker). Pass
-  `renderMessageText` to plug a markdown renderer. Pass
+  `renderMessageText` to plug a markdown renderer. The default renderer shows a
+  single newline in a message as a line break, like other chat apps; a custom
+  renderer gets the same result with `<Markdown softLineBreaks>{text}</Markdown>`
+  (off by default for non-chat Markdown). Pass
   `loadRetainedArtifact` to render permanent generated-image receipts; a loader
   may return verified bytes or a short-lived signed URL. The stock web app uses
   the URL path to avoid copying multi-megabyte images into JavaScript memory.
