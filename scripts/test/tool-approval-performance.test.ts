@@ -2,7 +2,7 @@ import { expect, test } from "bun:test";
 import { toolReviewAction, toolReviewFields, toolReviewDetails } from "@opengeni/contracts";
 import { collectIdPages, planIdBatches } from "@opengeni/codemode";
 
-for (const count of [1, 600, 1001, 10_000]) {
+for (const count of [1, 4, 5, 600, 1001, 10_000]) {
   test(`${count} selected IDs have a compact review and complete bounded detail pages`, async () => {
     const ids = Array.from({ length: count }, (_, index) => `synthetic-message-${index}`);
     let reads = 0;
@@ -27,7 +27,17 @@ for (const count of [1, 600, 1001, 10_000]) {
     };
     expect(primary.selectionCount).toBe(count);
     expect(Buffer.byteLength(JSON.stringify(primary))).toBeLessThan(32 * 1024);
-    expect(JSON.stringify(primary)).not.toContain("synthetic-message-");
+    const selection = primary.fields.find((field) => field.path === "/messageIds");
+    if (count <= 4) {
+      expect(selection).toMatchObject({ preview: ids.join(", "), count, truncated: false });
+    } else {
+      expect(selection).toMatchObject({
+        preview: `${count.toLocaleString("en-US")} items`,
+        count,
+        truncated: true,
+      });
+      expect(JSON.stringify(primary)).not.toContain("synthetic-message-");
+    }
     const restored: string[] = [];
     let offset: number | null = 0;
     while (offset !== null) {
