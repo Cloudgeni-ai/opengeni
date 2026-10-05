@@ -6473,6 +6473,12 @@
       color: var(--og-color-fg-muted);
     }
   }
+:where(.og-root).\[\&_tr\:last-child\>td\]\:border-b-0,:where(.og-root) .\[\&_tr\:last-child\>td\]\:border-b-0 {
+    & tr:last-child>td {
+      border-bottom-style: var(--tw-border-style);
+      border-bottom-width: 0px;
+    }
+  }
 :where(.og-root).\[\&\+section\]\:mt-1\.5,:where(.og-root) .\[\&\+section\]\:mt-1\.5 {
     &+section {
       margin-top: calc(var(--spacing) * 1.5);
@@ -6613,12 +6619,6 @@
 :where(.og-root).\[\@media\(pointer\:coarse\)\]\:min-w-11,:where(.og-root) .\[\@media\(pointer\:coarse\)\]\:min-w-11 {
     @media (pointer:coarse) {
       min-width: calc(var(--spacing) * 11);
-    }
-  }
-:where(.og-root).\[tr\:last-child\>\&\]\:border-b-0,:where(.og-root) .\[tr\:last-child\>\&\]\:border-b-0 {
-    tr:last-child>& {
-      border-bottom-style: var(--tw-border-style);
-      border-bottom-width: 0px;
     }
   }
 :where(.og-root).og-composer[data-og-responsive-basis="container"],:where(.og-root) .og-composer[data-og-responsive-basis="container"] {
