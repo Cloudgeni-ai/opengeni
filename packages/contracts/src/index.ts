@@ -2705,6 +2705,24 @@ export type WorkspaceOpenRouterCustomModelsResponse = z.infer<
   typeof WorkspaceOpenRouterCustomModelsResponse
 >;
 
+export const CreateWorkspaceOpperCustomModelRequest = CreateWorkspaceGatewayCustomModelRequest;
+export type CreateWorkspaceOpperCustomModelRequest = z.infer<
+  typeof CreateWorkspaceOpperCustomModelRequest
+>;
+
+export const DeleteWorkspaceOpperCustomModelRequest = DeleteWorkspaceGatewayCustomModelRequest;
+export type DeleteWorkspaceOpperCustomModelRequest = z.infer<
+  typeof DeleteWorkspaceOpperCustomModelRequest
+>;
+
+export const WorkspaceOpperCustomModel = WorkspaceGatewayCustomModel;
+export type WorkspaceOpperCustomModel = z.infer<typeof WorkspaceOpperCustomModel>;
+
+export const WorkspaceOpperCustomModelsResponse = z.object({
+  models: z.array(WorkspaceOpperCustomModel),
+});
+export type WorkspaceOpperCustomModelsResponse = z.infer<typeof WorkspaceOpperCustomModelsResponse>;
+
 export const CreateOrganizationProviderCustomModelRequest =
   CreateWorkspaceGatewayCustomModelRequest;
 export type CreateOrganizationProviderCustomModelRequest = z.infer<
@@ -2729,6 +2747,7 @@ export const OrganizationModelProviderKind = z.enum([
   "openrouter",
   "anthropic",
   "claude_subscription",
+  "opper",
 ]);
 export type OrganizationModelProviderKind = z.infer<typeof OrganizationModelProviderKind>;
 export const OrganizationModelProviderConnectionResponse = z.object({
@@ -11905,6 +11924,9 @@ export const OPENROUTER_CREDENTIAL_OPERATION_ID_METADATA_KEY =
   "openRouterCredentialOperationId" as const;
 export const OPENROUTER_CREDENTIAL_OPERATION_DIGEST_METADATA_KEY =
   "openRouterCredentialOperationDigest" as const;
+export const OPPER_CREDENTIAL_OPERATION_ID_METADATA_KEY = "opperCredentialOperationId" as const;
+export const OPPER_CREDENTIAL_OPERATION_DIGEST_METADATA_KEY =
+  "opperCredentialOperationDigest" as const;
 
 export const CreateConnectionRequest = z.object({
   providerDomain: z.string().min(1),

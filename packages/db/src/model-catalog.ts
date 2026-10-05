@@ -14,7 +14,8 @@ export type WorkspaceCustomModelProviderKind =
   | "vercel_gateway"
   | "openrouter"
   | "anthropic"
-  | "claude_subscription";
+  | "claude_subscription"
+  | "opper";
 
 export type WorkspaceProviderCustomModel = {
   id: string;
@@ -36,6 +37,10 @@ export type WorkspaceGatewayCustomModel = WorkspaceProviderCustomModel & {
 
 export type WorkspaceOpenRouterCustomModel = WorkspaceProviderCustomModel & {
   providerKind: "openrouter";
+};
+
+export type WorkspaceOpperCustomModel = WorkspaceProviderCustomModel & {
+  providerKind: "opper";
 };
 
 export const MAX_WORKSPACE_GATEWAY_CUSTOM_MODELS = 100;
@@ -78,9 +83,26 @@ export class WorkspaceOpenRouterCustomModelHistoryLimitError extends Error {
   }
 }
 
+export class WorkspaceOpperCustomModelLimitError extends Error {
+  constructor() {
+    super(`workspace Opper custom model limit reached (${MAX_WORKSPACE_GATEWAY_CUSTOM_MODELS})`);
+    this.name = "WorkspaceOpperCustomModelLimitError";
+  }
+}
+
+export class WorkspaceOpperCustomModelHistoryLimitError extends Error {
+  constructor() {
+    super(
+      `workspace Opper custom model history limit reached (${MAX_WORKSPACE_GATEWAY_CUSTOM_MODEL_RECORDS})`,
+    );
+    this.name = "WorkspaceOpperCustomModelHistoryLimitError";
+  }
+}
+
 function customModelLimitError(providerKind: WorkspaceCustomModelProviderKind): Error {
   if (providerKind === "anthropic" || providerKind === "claude_subscription")
     return new WorkspaceClaudeCustomModelLimitError(false);
+  if (providerKind === "opper") return new WorkspaceOpperCustomModelLimitError();
   return providerKind === "vercel_gateway"
     ? new WorkspaceGatewayCustomModelLimitError()
     : new WorkspaceOpenRouterCustomModelLimitError();
@@ -89,6 +111,7 @@ function customModelLimitError(providerKind: WorkspaceCustomModelProviderKind): 
 function customModelHistoryLimitError(providerKind: WorkspaceCustomModelProviderKind): Error {
   if (providerKind === "anthropic" || providerKind === "claude_subscription")
     return new WorkspaceClaudeCustomModelLimitError(true);
+  if (providerKind === "opper") return new WorkspaceOpperCustomModelHistoryLimitError();
   return providerKind === "vercel_gateway"
     ? new WorkspaceGatewayCustomModelHistoryLimitError()
     : new WorkspaceOpenRouterCustomModelHistoryLimitError();
@@ -278,6 +301,7 @@ export async function listWorkspaceProviderCustomModelsByKind(
     openrouter: [],
     anthropic: [],
     claude_subscription: [],
+    opper: [],
   };
   const providerKinds = [...new Set(input.providerKinds)];
   if (providerKinds.length === 0) return models;

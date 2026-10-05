@@ -585,6 +585,8 @@ import {
   CodexCredentialPolicySnapshotV1,
   OPENROUTER_CREDENTIAL_OPERATION_DIGEST_METADATA_KEY,
   OPENROUTER_CREDENTIAL_OPERATION_ID_METADATA_KEY,
+  OPPER_CREDENTIAL_OPERATION_DIGEST_METADATA_KEY,
+  OPPER_CREDENTIAL_OPERATION_ID_METADATA_KEY,
   VERCEL_AI_GATEWAY_CREDENTIAL_OPERATION_DIGEST_METADATA_KEY,
   VERCEL_AI_GATEWAY_CREDENTIAL_OPERATION_ID_METADATA_KEY,
 } from "@opengeni/contracts";
@@ -595,6 +597,8 @@ import {
   SANDBOX_DEADLINE_COMMAND_STOP_GRACE_MS,
   WORKSPACE_OPENROUTER_CONNECTION_DOMAIN,
   WORKSPACE_OPENROUTER_CONNECTION_ROLE,
+  WORKSPACE_OPPER_CONNECTION_DOMAIN,
+  WORKSPACE_OPPER_CONNECTION_ROLE,
   VERCEL_AI_GATEWAY_CONNECTION_DOMAIN,
   VERCEL_AI_GATEWAY_CONNECTION_ROLE,
   type Settings,
@@ -10890,7 +10894,8 @@ export type WorkspaceProviderApiKeyConnectionKind =
   | "vercel_gateway"
   | "openrouter"
   | "anthropic"
-  | "claude_subscription";
+  | "claude_subscription"
+  | "opper";
 
 type WorkspaceProviderApiKeyConnectionSpec = {
   providerDomain: string;
@@ -10910,6 +10915,15 @@ export function workspaceProviderApiKeyConnectionSpec(
       operationIdMetadataKey: `${providerKind}CredentialOperationId`,
       operationDigestMetadataKey: `${providerKind}CredentialOperationDigest`,
       label: providerKind === "anthropic" ? "Anthropic API" : "Claude subscription",
+    };
+  }
+  if (providerKind === "opper") {
+    return {
+      providerDomain: WORKSPACE_OPPER_CONNECTION_DOMAIN,
+      credentialRole: WORKSPACE_OPPER_CONNECTION_ROLE,
+      operationIdMetadataKey: OPPER_CREDENTIAL_OPERATION_ID_METADATA_KEY,
+      operationDigestMetadataKey: OPPER_CREDENTIAL_OPERATION_DIGEST_METADATA_KEY,
+      label: "Opper",
     };
   }
   return providerKind === "vercel_gateway"
@@ -15372,6 +15386,20 @@ export async function getWorkspaceOpenRouterConnectionMetadata(
   return await getWorkspaceProviderApiKeyConnectionMetadata(db, workspaceId, "openrouter");
 }
 
+export async function getWorkspaceOpperConnectionMetadata(
+  db: Database,
+  workspaceId: string,
+): Promise<{ connectionId: string; version: number } | null> {
+  return await getWorkspaceProviderApiKeyConnectionMetadata(db, workspaceId, "opper");
+}
+
+export async function workspaceOpperConnectionActive(
+  db: Database,
+  workspaceId: string,
+): Promise<boolean> {
+  return (await getWorkspaceOpperConnectionMetadata(db, workspaceId)) !== null;
+}
+
 export async function workspaceVercelAiGatewayConnectionActive(
   db: Database,
   workspaceId: string,
@@ -15461,6 +15489,22 @@ export async function loadWorkspaceOpenRouterApiKey(
     workspaceId,
     "openrouter",
     turnModelId?.startsWith("workspace-openrouter/") ? turnModelId : null,
+  );
+}
+
+/** Resolve only the reviewed workspace-shared Opper credential shape. */
+export async function loadWorkspaceOpperApiKey(
+  db: Database,
+  settings: Settings,
+  workspaceId: string,
+  turnModelId?: string | null,
+): Promise<string | null> {
+  return await loadWorkspaceProviderApiKey(
+    db,
+    settings,
+    workspaceId,
+    "opper",
+    turnModelId?.startsWith("workspace-opper/") ? turnModelId : null,
   );
 }
 
