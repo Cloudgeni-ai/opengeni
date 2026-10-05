@@ -105,7 +105,11 @@ export async function getSpendableCreditBalance(
 }
 
 /** Covering grants pay first, oldest first; the rest is general credit. */
-function allocateToCoveringGrants(balance: BillingBalance, amountMicros: number, usage: CreditUsage) {
+function allocateToCoveringGrants(
+  balance: BillingBalance,
+  amountMicros: number,
+  usage: CreditUsage,
+) {
   let remaining = amountMicros;
   const allocations: { grantEntryId: string; amountMicros: number }[] = [];
   for (const grant of balance.promotionalCredits ?? []) {

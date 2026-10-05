@@ -19392,6 +19392,7 @@
       ],
       "shape": {
         "$": "object",
+        "$.coversVoice": "boolean?",
         "$.eligibleModelIds": "array!",
         "$.eligibleModelIds[]": "string",
         "$.grantId": "string!",

@@ -115,7 +115,10 @@ test("signup credits are spendable for voice; other scoped grants are not", () =
   expect(spendableCreditMicros(balance, "gpt-chat-only")).toBe(7_000);
   expect(spendableCreditMicros(balance)).toBe(0);
   expect(
-    voiceCreditStanding({ ...balance, balanceMicros: spendableCreditMicros(balance, VOICE_CREDIT_USAGE) }),
+    voiceCreditStanding({
+      ...balance,
+      balanceMicros: spendableCreditMicros(balance, VOICE_CREDIT_USAGE),
+    }),
   ).toBe("spendable");
   const couponOnly = { ...balance, promotionalCredits: [grant(4_000, false)] };
   expect(

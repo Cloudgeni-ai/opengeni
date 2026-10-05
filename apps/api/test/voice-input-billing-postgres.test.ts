@@ -168,7 +168,9 @@ test("signup trial credits pay for dictation like general credits; chat-scoped c
   ]);
   const after = await getBillingBalance(client!.db, accountId);
   // 1,050 used: the trial's 1,000 first, then 50 from general credit.
-  expect(after.promotionalCredits!.find((grant) => grant.grantId === trial.grantId)).toBeUndefined();
+  expect(
+    after.promotionalCredits!.find((grant) => grant.grantId === trial.grantId),
+  ).toBeUndefined();
   expect(after.generalBalanceMicros).toBe(-50);
   expect(after.balanceMicros).toBe(before.balanceMicros - 1050);
   expect(
