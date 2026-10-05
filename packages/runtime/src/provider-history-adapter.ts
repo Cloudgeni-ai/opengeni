@@ -226,6 +226,54 @@ export function projectHistoryForProvider(
   items: Array<Record<string, unknown>>,
   providerApi: HistoryProviderApi,
 ): Array<Record<string, unknown>> {
+  return projectWireHistory(withWireValidFunctionCallArguments(items), providerApi);
+}
+
+/** Bound on the raw text carried by a request-local invalid-arguments wrapper. */
+export const INVALID_FUNCTION_CALL_ARGUMENTS_MAX_CHARS = 4_000;
+
+function isJsonObjectText(text: string): boolean {
+  try {
+    const parsed: unknown = JSON.parse(text);
+    return parsed !== null && typeof parsed === "object" && !Array.isArray(parsed);
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * A model can emit a function call whose `arguments` are not a JSON object
+ * (truncated output, a leaked provider control token). The SDK answers that
+ * call with a model-visible parse error, and canonical history keeps the exact
+ * text. Replaying it verbatim makes Chat Completions providers reject the whole
+ * request ("function.arguments must be valid JSON") and the Claude converter
+ * throw, poisoning every later turn. Request-locally, wrap such text in a
+ * deterministic JSON object so the transcript stays honest and prompt-cache
+ * stable while canonical history is never rewritten.
+ */
+export function withWireValidFunctionCallArguments(
+  items: Array<Record<string, unknown>>,
+): Array<Record<string, unknown>> {
+  let changed = false;
+  const projected = items.map((item) => {
+    if (item.type !== "function_call" || typeof item.arguments !== "string") return item;
+    const raw = item.arguments;
+    if (isJsonObjectText(raw)) return item;
+    changed = true;
+    if (raw.trim().length === 0) return { ...item, arguments: "{}" };
+    const bounded =
+      raw.length <= INVALID_FUNCTION_CALL_ARGUMENTS_MAX_CHARS
+        ? raw
+        : `${raw.slice(0, INVALID_FUNCTION_CALL_ARGUMENTS_MAX_CHARS)}…[truncated ${raw.length - INVALID_FUNCTION_CALL_ARGUMENTS_MAX_CHARS} chars]`;
+    return { ...item, arguments: JSON.stringify({ _invalid_arguments: bounded }) };
+  });
+  return changed ? projected : items;
+}
+
+function projectWireHistory(
+  items: Array<Record<string, unknown>>,
+  providerApi: HistoryProviderApi,
+): Array<Record<string, unknown>> {
   if (providerApi === "responses") {
     // agents-js 0.14's message converter supports system/user/assistant only.
     // The Responses API itself supports developer; use the SDK's raw-item adapter.
