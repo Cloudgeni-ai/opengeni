@@ -13,7 +13,10 @@
   bypass the policy.
 - Private chats need the organization's private-session setting. Without it the
   SDK throws `OpenGeniSetupError`, whose message says who can enable it.
-- With cookie auth, pass the product's CSRF check as `authorizeMutation`.
+- With cookie auth, pass the product's existing CSRF check as
+  `authorizeMutation`. If it has none, keep the default (it refuses cross-site
+  mutations by `Sec-Fetch-Site`); a hand-written Origin/Host check breaks
+  behind proxies, tunnels, and preview URLs.
 
 ## Tests to keep
 
