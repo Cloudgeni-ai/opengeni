@@ -316,9 +316,7 @@ describe("deployment catalog document", () => {
       document,
     );
     expect(configuredOpperUpstreamModelIds(settings)).toEqual([OPUS]);
-    expect(configuredModelPricingSchedules(settings)[`opper/${OPUS}`]?.default.marginBps).toBe(
-      500,
-    );
+    expect(configuredModelPricingSchedules(settings)[`opper/${OPUS}`]?.default.marginBps).toBe(500);
   });
 
   test("rejects prices, duplicate product ids and malformed route ids", () => {

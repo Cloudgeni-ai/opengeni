@@ -5683,8 +5683,11 @@ function opperRegistryProvider(
         upstreamModelId: custom.upstreamModelId,
         aliases: [],
         label: custom.label?.trim() || reviewed?.label || custom.upstreamModelId,
-        ...(reviewed?.shortLabel && !custom.label?.trim() ? { shortLabel: reviewed.shortLabel } : {}),
-        capabilities: reviewed?.capabilities ?? opperCustomModelCapabilities(custom.upstreamModelId),
+        ...(reviewed?.shortLabel && !custom.label?.trim()
+          ? { shortLabel: reviewed.shortLabel }
+          : {}),
+        capabilities:
+          reviewed?.capabilities ?? opperCustomModelCapabilities(custom.upstreamModelId),
         ...(reviewed?.contextWindowTokens === undefined
           ? {}
           : { contextWindowTokens: reviewed.contextWindowTokens }),

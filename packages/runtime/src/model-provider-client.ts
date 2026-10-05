@@ -414,7 +414,13 @@ export function buildProviderClient(provider: ResolvedModelProvider, settings: S
             timeout: CODEX_RESPONSE_SDK_OUTER_TIMEOUT_MS,
             fetch: codexSubscriptionFetch(instrumentedModelFetch(provider.id, globalThis.fetch)),
           },
-          { modelRequestPolicy: modelRequestPolicyForProvider(provider, gatewayPolicies, opperOutputLimits) },
+          {
+            modelRequestPolicy: modelRequestPolicyForProvider(
+              provider,
+              gatewayPolicies,
+              opperOutputLimits,
+            ),
+          },
         )
       : provider.kind === "xai-subscription"
         ? // SuperGrok subscription uses one workspace-scoped request context.
@@ -432,7 +438,13 @@ export function buildProviderClient(provider: ResolvedModelProvider, settings: S
               timeout: XAI_RESPONSE_SDK_OUTER_TIMEOUT_MS,
               fetch: xaiSubscriptionFetch(instrumentedModelFetch(provider.id, globalThis.fetch)),
             },
-            { modelRequestPolicy: modelRequestPolicyForProvider(provider, gatewayPolicies, opperOutputLimits) },
+            {
+              modelRequestPolicy: modelRequestPolicyForProvider(
+                provider,
+                gatewayPolicies,
+                opperOutputLimits,
+              ),
+            },
           )
         : // ResolvedModelProvider.apiKey is already the resolved key (configuredProviders
           // ran resolveProviderApiKey at config time, collapsing apiKey/apiKeyEnv), so it
@@ -474,7 +486,13 @@ export function buildProviderClient(provider: ResolvedModelProvider, settings: S
                 ),
               ),
             },
-            { modelRequestPolicy: modelRequestPolicyForProvider(provider, gatewayPolicies, opperOutputLimits) },
+            {
+              modelRequestPolicy: modelRequestPolicyForProvider(
+                provider,
+                gatewayPolicies,
+                opperOutputLimits,
+              ),
+            },
           );
   if (!scopedCredentialProvider) {
     cacheProviderClient(cacheKey, provider.id, client);
