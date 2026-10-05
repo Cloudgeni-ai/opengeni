@@ -34,6 +34,8 @@ export type OnboardingDestination = { workspaceId: string; sessionId?: string };
 type DeveloperSetupClient = Pick<
   OpenGeniBrowserClient,
   | "createOrganizationApiKey"
+  | "listOrganizationApiKeys"
+  | "deleteOrganizationApiKey"
   | "createWorkspace"
   | "createVariableSet"
   | "getNewSessionDraft"
@@ -43,7 +45,33 @@ type DeveloperSetupClient = Pick<
 type KeyState =
   | { status: "creating" }
   | { status: "ready"; token: string; prefix: string }
+  /** A live setup key from an earlier visit (a reload): its token can't be shown again. */
+  | { status: "existing"; prefix: string; ids: string[] }
   | { status: "failed"; error: unknown };
+
+type KeyOutcome =
+  | { created: { token: string; apiKey: { prefix: string } } }
+  | { existing: { prefix: string; ids: string[] } };
+
+/**
+ * Live keys this step created earlier. A failed listing returns none, so the
+ * step still creates a key (the pre-reload behavior) rather than blocking.
+ */
+async function liveSetupKeys(
+  client: DeveloperSetupClient,
+  organizationId: string,
+): Promise<{ id: string; prefix: string }[]> {
+  try {
+    const name = developerSetupKeyRequest().name;
+    const now = Date.now();
+    return (await client.listOrganizationApiKeys(organizationId)).filter(
+      (key) =>
+        key.name === name && !key.revokedAt && (!key.expiresAt || Date.parse(key.expiresAt) > now),
+    );
+  } catch {
+    return [];
+  }
+}
 
 /**
  * "Add AI agents to my product", after the organization and model steps. The
@@ -74,9 +102,9 @@ export function DeveloperSetupStep({
   const [opening, setOpening] = useState(false);
   const [promptCopied, setPromptCopied] = useState(false);
   // One key per attempt, even when React runs the effect twice.
-  const keyRequests = useRef(
-    new Map<number, ReturnType<DeveloperSetupClient["createOrganizationApiKey"]>>(),
-  );
+  const keyRequests = useRef(new Map<number, Promise<KeyOutcome>>());
+  // Earlier setup keys to revoke before the next attempt creates a new one.
+  const replaceKeyIds = useRef<string[]>([]);
   // What "Let Opengeni implement it" already created, so a retry resumes.
   const implementProgress = useRef<{ workspaceId?: string; variableSetId?: string | null }>({});
   const promptCopy = useCopyToClipboard();
@@ -100,13 +128,41 @@ export function DeveloperSetupStep({
     setKey({ status: "creating" });
     let request = keyRequests.current.get(attempt);
     if (!request) {
-      request = client.createOrganizationApiKey(organizationId, developerSetupKeyRequest());
+      const replacing = replaceKeyIds.current;
+      replaceKeyIds.current = [];
+      request = (async (): Promise<KeyOutcome> => {
+        if (replacing.length > 0) {
+          await Promise.all(
+            replacing.map((id) => client.deleteOrganizationApiKey(organizationId, id)),
+          );
+        } else {
+          // A reload must not mint another full-access key.
+          const live = await liveSetupKeys(client, organizationId);
+          if (live.length > 0) {
+            return {
+              existing: { prefix: live[0]!.prefix, ids: live.map((item) => item.id) },
+            };
+          }
+        }
+        return {
+          created: await client.createOrganizationApiKey(
+            organizationId,
+            developerSetupKeyRequest(),
+          ),
+        };
+      })();
       keyRequests.current.set(attempt, request);
     }
     request.then(
-      (created) => {
-        if (active)
-          setKey({ status: "ready", token: created.token, prefix: created.apiKey.prefix });
+      (outcome) => {
+        if (!active) return;
+        if ("existing" in outcome) setKey({ status: "existing", ...outcome.existing });
+        else
+          setKey({
+            status: "ready",
+            token: outcome.created.token,
+            prefix: outcome.created.apiKey.prefix,
+          });
       },
       (error: unknown) => {
         if (active) setKey({ status: "failed", error });
@@ -219,13 +275,41 @@ export function DeveloperSetupStep({
         <p className="mt-2 text-sm leading-relaxed text-fg-muted">
           {ready
             ? "Your API key is ready. Choose who builds the integration."
-            : "Getting your API key ready. Then choose who builds the integration."}
+            : key.status === "existing"
+              ? "Choose who builds the integration."
+              : "Getting your API key ready. Then choose who builds the integration."}
         </p>
 
         {key.status === "creating" ? (
           <div role="status" className="mt-6">
             <Skeleton className="h-10 w-full rounded-[10px]" />
             <span className="sr-only">Creating your API key</span>
+          </div>
+        ) : key.status === "existing" ? (
+          <div className="mt-6 grid gap-2 rounded-[10px] border border-border bg-surface-2 p-3">
+            <p className="text-sm text-fg">
+              You already created a setup key (
+              <code translate="no" className="font-mono">
+                {key.prefix}…
+              </code>
+              ). It's shown only once, so it can't be shown again.
+            </p>
+            <Button
+              type="button"
+              variant="outline"
+              size="sm"
+              className="justify-self-start"
+              disabled={!client || opening}
+              onClick={() => {
+                replaceKeyIds.current = key.ids;
+                setAttempt((value) => value + 1);
+              }}
+            >
+              Replace it with a new key
+            </Button>
+            <p className="text-xs leading-[18px] text-fg-muted">
+              The old key stops working. Keep it if you already saved it.
+            </p>
           </div>
         ) : key.status === "failed" ? (
           <div className="mt-6">
