@@ -998,7 +998,7 @@ export function registerWorkspaceRoutes(app: Hono, deps: ApiRouteDeps): void {
               available: false,
               unavailableReason:
                 creditStanding === "promotional_only"
-                  ? "Free credits don't cover live voice. Add credits to use it."
+                  ? "Promotional credits don't cover live voice. Add credits to use it."
                   : "Add Opengeni credits to use live voice",
               unavailableCode: "insufficient_credits",
             }),

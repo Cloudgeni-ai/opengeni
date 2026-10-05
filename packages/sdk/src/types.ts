@@ -8252,6 +8252,8 @@ export type PromotionalCreditScope = {
 export type PromotionalCreditBalance = PromotionalCreditScope & {
   grantId: string;
   remainingMicros: number;
+  /** Also pays for dictation and live voice, like general credits (signup credits). */
+  coversVoice?: boolean | undefined;
 };
 
 export type BillingBalance = {

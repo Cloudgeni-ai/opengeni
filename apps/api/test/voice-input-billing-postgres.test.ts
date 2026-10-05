@@ -99,6 +99,87 @@ test("one segment replay settles once; unfunded admission refuses under applicat
   expect(usage.find((row) => row.eventType === "model.cost")?.quantity).toBe(525);
 }, 30000);
 
+test("signup trial credits pay for dictation like general credits; chat-scoped credits and zero credits refuse", async () => {
+  const id = crypto.randomUUID();
+  const access = await ensureManagedAccessForUser(client!.db, {
+    userId: id,
+    email: `${id}@example.test`,
+    name: "Trial voice fixture",
+  });
+  const { accountId, workspaceId, subjectId } = access.workspaceGrants[0]!;
+  if (!workspaceId) throw Error("fixture workspace missing");
+  const attribution = { kind: "human" as const, initiatingHumanSubjectId: subjectId };
+  const billing = createVoiceInputBilling({
+    db: client!.db,
+    settings: testSettings({ billingMode: "stripe" }),
+  });
+  // Zero credits: the honest out-of-credits path.
+  await expect(billing.admit({ accountId, workspaceId, attribution })).rejects.toMatchObject({
+    code: "insufficient_credits",
+    message: "Voice input needs Opengeni credits. Add credits to continue.",
+  });
+  // A chat-model-scoped coupon does not pay for voice.
+  await applyCreditLedgerEntry(client!.db, {
+    accountId,
+    amountMicros: 5000,
+    type: "grant",
+    eligibleModelIds: ["gpt-chat-only"],
+    sourceType: "coupon",
+    idempotencyKey: `coupon:${id}`,
+    metadata: { creditOfferLabel: "Coupon credits" },
+  });
+  await expect(billing.admit({ accountId, workspaceId, attribution })).rejects.toMatchObject({
+    code: "insufficient_credits",
+    message: "Promotional credits don't cover voice input. Add credits to use it.",
+  });
+  // Signup credits keep their chat-model scope yet also pay for voice.
+  await applyCreditLedgerEntry(client!.db, {
+    accountId,
+    amountMicros: 1000,
+    type: "grant",
+    eligibleModelIds: ["gpt-chat-only"],
+    sourceType: "verified_signup_trial",
+    sourceId: id,
+    idempotencyKey: `verified-signup-trial:v1:${id}`,
+    metadata: { campaign: "verified_signup_trial_v1", creditOfferLabel: "Signup credits" },
+  });
+  const before = await getBillingBalance(client!.db, accountId);
+  const trial = before.promotionalCredits!.find((grant) => grant.label === "Signup credits")!;
+  expect(trial).toMatchObject({ remainingMicros: 1000, coversVoice: true });
+  expect(
+    before.promotionalCredits!.find((grant) => grant.label === "Coupon credits"),
+  ).toMatchObject({ coversVoice: false });
+  await billing.admit({ accountId, workspaceId, attribution });
+  const settle = (index: number) =>
+    billing.settle({
+      accountId,
+      workspaceId,
+      providerId: "azure-mai",
+      model: "MAI-Transcribe-2",
+      pricing: { microsPerMinute: 6000, marginBps: 500 },
+      usage: { kind: "duration", seconds: 5 },
+      billing: { sourceId: `${id}:${index}`, attribution },
+    });
+  // Concurrent charges never allocate the same trial remainder twice.
+  expect(await Promise.all([settle(0), settle(0), settle(1)])).toEqual([
+    { creditCostMicros: 525 },
+    { creditCostMicros: 525 },
+    { creditCostMicros: 525 },
+  ]);
+  const after = await getBillingBalance(client!.db, accountId);
+  // 1,050 used: the trial's 1,000 first, then 50 from general credit.
+  expect(after.promotionalCredits!.find((grant) => grant.grantId === trial.grantId)).toBeUndefined();
+  expect(after.generalBalanceMicros).toBe(-50);
+  expect(after.balanceMicros).toBe(before.balanceMicros - 1050);
+  expect(
+    after.promotionalCredits!.find((grant) => grant.label === "Coupon credits")?.remainingMicros,
+  ).toBe(5000);
+  // Trial exhausted and general negative: voice refuses again.
+  await expect(billing.admit({ accountId, workspaceId, attribution })).rejects.toMatchObject({
+    code: "insufficient_credits",
+  });
+}, 30000);
+
 test("transcript commits on its own; a receipt whose debit failed is reconciled once at the next admission", async () => {
   const id = crypto.randomUUID();
   const access = await ensureManagedAccessForUser(client!.db, {

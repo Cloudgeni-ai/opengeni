@@ -18,6 +18,7 @@ import {
   VOICE_TRANSCRIPTION_DEBIT_TYPE,
   VOICE_TRANSCRIPTION_SOURCE_TYPE,
   voiceTranscriptionSettlementKeys,
+  VOICE_CREDIT_USAGE,
   type CreditDebitAttribution,
   type Database,
 } from "@opengeni/db";
@@ -87,8 +88,9 @@ function startOfUtcMonth(): Date {
 }
 
 /**
- * Same admission shape as knowledge-search and session admission: general
- * (not model-promotional) credits must be positive, the workspace/member
+ * Same admission shape as knowledge-search and session admission:
+ * voice-spendable credits (general plus signup, not model-scoped promotional
+ * credits) must be positive, the workspace/member
  * allowance must not be exhausted, and a static monthly cost cap applies.
  * Admission is a read, not a reservation; settlement is post-use and may take
  * an account below zero by at most the concurrent in-flight calls.
@@ -133,7 +135,7 @@ export function createVoiceInputBilling(deps: {
           },
         );
       }
-      const balance = await getSpendableCreditBalance(deps.db, accountId);
+      const balance = await getSpendableCreditBalance(deps.db, accountId, VOICE_CREDIT_USAGE);
       if (balance.balanceMicros <= 0) {
         throw new TranscriptionBillingRefusedError({
           code: "insufficient_credits",
@@ -251,6 +253,7 @@ export async function settleVoiceInputUsage(
       sourceType: VOICE_TRANSCRIPTION_SOURCE_TYPE,
       sourceId: input.billing.sourceId,
       idempotencyKey: keys.debitIdempotencyKey,
+      usage: VOICE_CREDIT_USAGE,
       metadata: {
         providerId: input.providerId,
         model: input.model,
@@ -299,6 +302,7 @@ export async function reconcileUnsettledVoiceInputCharges(
         workspaceId: input.workspaceId,
         sourceId: charge.sourceId,
       }).debitIdempotencyKey,
+      usage: VOICE_CREDIT_USAGE,
       metadata: {
         basis: "reconciled_receipt" satisfies VoiceInputBillingBasis,
         ...(charge.attribution.kind === "unknown"

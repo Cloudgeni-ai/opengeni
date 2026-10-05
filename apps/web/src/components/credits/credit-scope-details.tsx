@@ -1,4 +1,4 @@
-import { ChevronDownIcon } from "lucide-react";
+import { ChevronDownIcon, MicIcon } from "lucide-react";
 import { modelDisplayName } from "@opengeni/sdk/model-display";
 import { ModelMark } from "@opengeni/react";
 import { Collapsible, CollapsibleContent, CollapsibleTrigger } from "@/components/ui/collapsible";
@@ -9,10 +9,13 @@ export function CreditScopeDetails({
   label,
   amount,
   eligibleModelIds,
+  coversVoice = false,
 }: {
   label: string;
   amount: string;
   eligibleModelIds: readonly string[];
+  /** Also pays for dictation and live voice. */
+  coversVoice?: boolean | undefined;
 }) {
   return (
     <Collapsible className="group/credit min-w-0">
@@ -43,6 +46,12 @@ export function CreditScopeDetails({
               {modelDisplayName(id)}
             </li>
           ))}
+          {coversVoice ? (
+            <li className="flex items-center gap-2">
+              <MicIcon aria-hidden="true" className="size-4" />
+              Dictation and live voice
+            </li>
+          ) : null}
         </ul>
       </CollapsibleContent>
     </Collapsible>

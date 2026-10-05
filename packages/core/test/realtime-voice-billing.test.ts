@@ -5,6 +5,7 @@ import {
   realtimeVoiceMinuteCreditMicros,
   realtimeVoiceStartedMinutes,
 } from "@opengeni/config";
+import { spendableCreditMicros, VOICE_CREDIT_USAGE } from "@opengeni/db";
 import { testSettings } from "@opengeni/testing";
 import {
   deploymentRealtimeVoice,
@@ -77,7 +78,7 @@ test("only deployment-funded voice is gated; enabled without pricing is unavaila
   expect(realtimeVoiceOfferProblem(settings, malformed)?.code).toBe("pricing_unconfigured");
 });
 
-test("free chat-only credits are named, not reported as no credits", () => {
+test("promotional chat-only credits are named, not reported as no credits", () => {
   expect(voiceCreditStanding({ balanceMicros: 1 })).toBe("spendable");
   expect(voiceCreditStanding({ balanceMicros: 0, promotionalCredits: [] })).toBe("none");
   expect(
@@ -87,9 +88,40 @@ test("free chat-only credits are named, not reported as no credits", () => {
     }),
   ).toBe("promotional_only");
   expect(voiceInsufficientCreditsMessage("Live voice", "promotional_only")).toBe(
-    "Free credits don't cover live voice. Add credits to use it.",
+    "Promotional credits don't cover live voice. Add credits to use it.",
   );
   expect(voiceInsufficientCreditsMessage("Voice input", "none")).toBe(
     "Voice input needs Opengeni credits. Add credits to continue.",
   );
+});
+
+test("signup credits are spendable for voice; other scoped grants are not", () => {
+  const grant = (remainingMicros: number, coversVoice: boolean) => ({
+    grantId: crypto.randomUUID(),
+    label: coversVoice ? "Signup credits" : "Coupon credits",
+    eligibleModelIds: ["gpt-chat-only"],
+    remainingMicros,
+    coversVoice,
+  });
+  const balance = {
+    accountId: crypto.randomUUID(),
+    balanceMicros: 7_000,
+    generalBalanceMicros: 0,
+    promotionalCredits: [grant(4_000, false), grant(3_000, true)],
+    currency: "usd" as const,
+    updatedAt: new Date(0).toISOString(),
+  };
+  expect(spendableCreditMicros(balance, VOICE_CREDIT_USAGE)).toBe(3_000);
+  expect(spendableCreditMicros(balance, "gpt-chat-only")).toBe(7_000);
+  expect(spendableCreditMicros(balance)).toBe(0);
+  expect(
+    voiceCreditStanding({ ...balance, balanceMicros: spendableCreditMicros(balance, VOICE_CREDIT_USAGE) }),
+  ).toBe("spendable");
+  const couponOnly = { ...balance, promotionalCredits: [grant(4_000, false)] };
+  expect(
+    voiceCreditStanding({
+      ...couponOnly,
+      balanceMicros: spendableCreditMicros(couponOnly, VOICE_CREDIT_USAGE),
+    }),
+  ).toBe("promotional_only");
 });
