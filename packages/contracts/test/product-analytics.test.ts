@@ -80,7 +80,13 @@ describe("product analytics dimensions", () => {
       `${repoRoot}packages/db/drizzle/0533_turn_surface_analytics.sql`,
       "utf8",
     );
+    // 0633 is the current definition of the model-provider families.
+    const providers = readFileSync(
+      `${repoRoot}packages/db/drizzle/0633_opper_model_providers.sql`,
+      "utf8",
+    );
     for (const surface of SESSION_TURN_SURFACES) expect(sql).toContain(`'${surface}'`);
-    for (const provider of ANALYTICS_MODEL_PROVIDERS) expect(sql).toContain(`'${provider}'`);
+    for (const provider of ANALYTICS_MODEL_PROVIDERS)
+      expect(providers).toContain(`'${provider}'`);
   });
 });
