@@ -1,4 +1,4 @@
-import { describe, expect, test } from "bun:test";
+import { describe, expect, spyOn, test } from "bun:test";
 import { OpenGeniApiError } from "../src/errors";
 import {
   OpenGeniClient,
@@ -349,6 +349,44 @@ describe("createSessionProxyHandler", () => {
     const error = await rejection(browser.getSession(WORKSPACE_ID, SESSION_ID));
     expect(error.status).toBe(401);
     expect(upstream.requests).toHaveLength(0);
+  });
+
+  test("an upstream 401 keeps its status and tells the developer once to replace the key", async () => {
+    const rejected = async () =>
+      Response.json(
+        {
+          error: {
+            status: 401,
+            code: "unauthenticated",
+            message: "authentication required",
+            retryable: false,
+            requestId: "eb32912d-1acd-44f5-9830-b0bf629f32a3",
+          },
+        },
+        { status: 401 },
+      );
+    const service = new OpenGeniClient({ baseUrl: API, apiKey: "og_expired", fetch: rejected });
+    const handler = createSessionProxyHandler(service, {
+      resolve: () => ({ workspaceId: WORKSPACE_ID, user: "u_42" }),
+    });
+    const warn = spyOn(console, "warn").mockImplementation(() => undefined);
+    try {
+      for (let attempt = 0; attempt < 2; attempt++) {
+        const response = await handler(new Request(`${PRODUCT}/api/opengeni/v1/config/client`));
+        expect(response.status).toBe(401);
+        expect(((await response.json()) as { error: { code: string } }).error.code).toBe(
+          "unauthenticated",
+        );
+      }
+      const notices = warn.mock.calls.filter((call) =>
+        String(call[0]).includes("rejected the session proxy's API key"),
+      );
+      expect(notices).toHaveLength(1);
+      expect(String(notices[0]![0])).toContain("Organization settings > Developer");
+      expect(String(notices[0]![0])).toContain("eb32912d-1acd-44f5-9830-b0bf629f32a3");
+    } finally {
+      warn.mockRestore();
+    }
   });
 
   test("a resolution without a user is rejected instead of using service authority", async () => {
