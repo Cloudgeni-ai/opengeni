@@ -1,6 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import type { SQL } from "drizzle-orm";
-import { setRlsContext, type Database } from "../src/index";
+import { PgDialect } from "drizzle-orm/pg-core";
+import { setRlsContext, withSessionRlsActorContext, type Database } from "../src/index";
 
 // Pure (no docker): the RLS-context hardening fails LOUD on a missing account id
 // instead of letting a blank GUC silently scope every read to zero rows — the
@@ -35,6 +36,52 @@ describe("setRlsContext input guard", () => {
 });
 
 describe("setRlsContext query budget", () => {
+  test("batches tenant and actor writes but independently verifies the subject", async () => {
+    const queries: SQL[] = [];
+    const subjectId = "user:rls-budget";
+    const db = {
+      execute: async (query: SQL) => {
+        queries.push(query);
+        return queries.length === 2 ? [{ subject_id: subjectId }] : [];
+      },
+    } as unknown as Database;
+    await withSessionRlsActorContext(
+      {
+        subjectId,
+        initiatingHumanSubjectId: "user:initiator",
+        privateFileOwnerSubjectId: "user:owner",
+      },
+      () => setRlsContext(db, { accountId: "account", workspaceId: "workspace" }),
+    );
+    expect(queries).toHaveLength(2);
+    const dialect = new PgDialect();
+    const write = dialect.sqlToQuery(queries[0]!);
+    expect(write.sql).toContain("set_config('opengeni.account_id'");
+    expect(write.sql).toContain("set_config('opengeni.subject_id'");
+    expect(write.sql).toContain("set_config('opengeni.private_file_owner'");
+    expect(write.sql).toContain("set_config('opengeni.initiating_human_subject_id'");
+    expect(write.sql).not.toContain("pg_advisory");
+    expect(write.params).toEqual([
+      "account",
+      "workspace",
+      subjectId,
+      "user:owner",
+      "user:initiator",
+    ]);
+    const readBack = dialect.sqlToQuery(queries[1]!).sql;
+    expect(readBack).toContain("current_setting('opengeni.subject_id'");
+    expect(readBack).not.toContain("set_config");
+  });
+
+  test("still rejects a lost actor scope after the batched write", async () => {
+    const db = { execute: async () => [] } as unknown as Database;
+    await expect(
+      withSessionRlsActorContext({ subjectId: "user:expected" }, () =>
+        setRlsContext(db, { accountId: "account" }),
+      ),
+    ).rejects.toThrow("Authenticated subject RLS context was not applied on the active backend");
+  });
+
   test("applies the base tenant and protocol context in one database round trip", async () => {
     let executeCalls = 0;
     let executedQuery: SQL | undefined;
