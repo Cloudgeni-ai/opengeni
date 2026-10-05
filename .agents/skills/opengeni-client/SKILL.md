@@ -41,6 +41,8 @@ model is specified in
    - React frontend: the default below.
    - An existing chat UI to keep, an assistant bound to one record, or a
      custom layout: [Existing chat UI](references/existing-chat-ui.md).
+   - A plain HTML/JS site, or a widget for anonymous visitors:
+     [Website widget](references/website-widget.md).
    - A non-JavaScript backend: keep the React UI and implement the
      [proxy contract](https://docs.opengeni.ai/integrate/proxy-from-any-backend).
    - Scheduled work, or chats created by the server:
@@ -128,7 +130,9 @@ resolving them. Chats are private to the user who started them;
 `chats: "shared"` on the handler shares them with the workspace. A tenant is
 the product's team, organization, or customer: the group that shares data and
 tools. Derive `user` and `tenant` from the product's session, never from the
-request body or path. Server-side code gets the same workspace with
+request body or path. Anonymous visitors on a public site share one fixed
+`tenant`; `{ user }` alone would give every visitor a workspace of their own.
+Server-side code gets the same workspace with
 `og.workspaceId({ tenant })` or `og.workspaceId({ user })`.
 
 ### The agent
