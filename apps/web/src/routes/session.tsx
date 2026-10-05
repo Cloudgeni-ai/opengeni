@@ -101,7 +101,8 @@ import {
 } from "react";
 import { toast } from "sonner";
 
-import { isApiErrorStatus } from "@/api";
+import { checkVoiceDeployment, isApiErrorStatus, showVoiceUpdatePrompt } from "@/api";
+import { voiceRelaunchUrl, withVoiceDeploymentGuard } from "@/lib/voice-deployment-guard";
 import { userErrorText } from "@/lib/api-error";
 import { ConsoleComposer } from "@/components/Composer";
 import { CONSOLE_TIMELINE_ALLOWANCE_LABELS } from "@/lib/allowance-labels";
@@ -1746,6 +1747,17 @@ function SessionChatPane(props: {
   onOpenAgentSettings: () => void;
 }) {
   const context = useAppContext();
+  // Live voice starts only from the current build: a tab opened before a
+  // deploy reloads onto it once and resumes voice via `?realtime=`.
+  const realtimeClient = useMemo(
+    () =>
+      withVoiceDeploymentGuard(context.client, {
+        decide: checkVoiceDeployment,
+        relaunch: (model) => window.location.assign(voiceRelaunchUrl(window.location.href, model)),
+        prompt: showVoiceUpdatePrompt,
+      }),
+    [context.client],
+  );
   const [findOpen, setFindOpen] = useState(!!props.searchTarget.find);
   const [findMounted, setFindMounted] = useState(!!props.searchTarget.find);
   const [findFocusRevision, setFindFocusRevision] = useState(0);
@@ -3412,7 +3424,7 @@ function SessionChatPane(props: {
                   !terminal ? (
                     <Suspense fallback={null}>
                       <LazyCodexRealtimeControl
-                        client={context.client}
+                        client={realtimeClient}
                         workspaceId={props.session.workspaceId}
                         sessionId={props.session.id}
                         sessionStatus={props.session.status}
