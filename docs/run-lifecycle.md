@@ -2511,6 +2511,21 @@ before its output is accepted. Only a turn admission can use authoritative
 `session_turn_attempts.quiesced_at` for its exact attempt; direct and process
 authority remain capture blockers until settled.
 
+A resolved exact admission whose transaction committed before output acceptance
+failed raises `SandboxWorkspaceMutationOutputRejectedError` with its immutable
+physical receipt. Worker and direct routing preserve this distinction as
+`sandbox_mutation_output_rejected`, reject the output, and never replay provider
+work. Missing or contradictory receipts and failed commits remain unknown;
+savepoint release inside a caller-owned transaction cannot mint committed proof.
+A partially applied batch still forbids complete-batch replay even when its
+admission settles. SDK capability invocations retain the actual typed rejection
+through error-rendering fallbacks in an invocation-local async fence: nested
+calls retain it, later batch dispatch stops, and concurrent invocations remain
+independent. A caught uncertain item or partial provider batch stays in the typed
+failure graph and vetoes complete-invocation certainty; unknown-only tool results
+keep their existing inspection advice. This classification grants no recovery or public Retry authority,
+and does not rewrite existing events or conversation history.
+
 A yielded managed process first promotes its parent admission to retained state
 and creates the non-TTL process holder before the internal provider locator can
 leave the routing layer. The holder preserves exact cleanup authority while the

@@ -55698,6 +55698,46 @@ export type SandboxWorkspaceMutationAdmission = {
 
 export type SandboxWorkspaceMutationProviderOutcome = "resolved" | "rejected";
 
+/** Evidence from a committed exact admission settlement. It establishes the
+ * physical provider outcome only; mutable output authority remains rejected. */
+export type SandboxWorkspaceMutationPhysicalSettlement = Readonly<{
+  accountId: string;
+  workspaceId: string;
+  admission: Readonly<SandboxWorkspaceMutationAdmission>;
+  operation: string;
+  outcome: "resolved";
+}>;
+
+/** The exact provider outcome committed before its output failed an acceptance
+ * fence. A generic admission fence or failed transaction carries no receipt.
+ * This error never authorizes accepting output or replaying provider work. */
+export class SandboxWorkspaceMutationOutputRejectedError extends SandboxWorkspaceMutationFencedError {
+  readonly name = "SandboxWorkspaceMutationOutputRejectedError";
+  readonly physicalSettlement: SandboxWorkspaceMutationPhysicalSettlement;
+
+  constructor(
+    code: SandboxWorkspaceMutationFencedError["code"],
+    message: string,
+    physicalSettlement: SandboxWorkspaceMutationPhysicalSettlement,
+  ) {
+    super(code, message);
+    this.physicalSettlement = Object.freeze({
+      ...physicalSettlement,
+      admission: Object.freeze({ ...physicalSettlement.admission }),
+    });
+  }
+
+  matchesPhysicalSettlement(input: {
+    accountId: string;
+    workspaceId: string;
+    admission: SandboxWorkspaceMutationAdmission;
+    operation: string;
+    outcome: SandboxWorkspaceMutationProviderOutcome;
+  }): boolean {
+    return isDeepStrictEqual(this.physicalSettlement, input);
+  }
+}
+
 export type SandboxRetainedProcessState = "active" | "exited" | "lost";
 
 export type SandboxRetainedProcess = {
@@ -55876,6 +55916,7 @@ type SandboxWorkspaceMutationSettlementResult =
         | "authority_unattributed"
         | "authority_revoked";
       detail: string;
+      physicallySettled?: true;
     };
 
 type TurnWorkspaceMutationAuthority = {
@@ -57231,6 +57272,10 @@ async function verifyWorkspaceMutationSettlementForAuthority(
   },
 ): Promise<void> {
   const operation = normalizeWorkspaceMutationOperation(input.operation);
+  const admissionSnapshot = { ...input.admission };
+  const outcome = input.outcome;
+  // Savepoint release cannot prove an outer caller-owned transaction committed.
+  const ownsCommit = typeof (db as Database & { rollback?: unknown }).rollback !== "function";
   const settleOnce = async (): Promise<SandboxWorkspaceMutationSettlementResult> =>
     await withRlsContext(
       db,
@@ -57272,19 +57317,20 @@ async function verifyWorkspaceMutationSettlementForAuthority(
           const admission = await selectExactAdmissionForUpdate(tx, {
             accountId: authorityInput.accountId,
             workspaceId: authorityInput.workspaceId,
-            admissionId: input.admission.id,
+            admissionId: admissionSnapshot.id,
             actorKind,
             actorId,
             sessionId: authorityInput.sessionId,
-            admittedWorkspaceGeneration: input.admission.workspaceGeneration,
+            admittedWorkspaceGeneration: admissionSnapshot.workspaceGeneration,
             operation,
           });
           if (
             !admission ||
-            !admissionMatchesSnapshot(admission, input.admission) ||
-            !admissionSnapshotMatchesAuthorityInput(input.admission, authorityInput) ||
+            !admissionMatchesSnapshot(admission, admissionSnapshot) ||
+            !admissionMatchesAuthorityInput(admission, authorityInput) ||
             admission.provider_outcome === "retained" ||
-            (admission.provider_outcome && admission.provider_outcome !== input.outcome)
+            (admission.provider_outcome && admission.provider_outcome !== outcome) ||
+            (admission.settled_at && admission.provider_outcome !== outcome)
           ) {
             return {
               failure: "admission_fenced" as const,
@@ -57297,11 +57343,21 @@ async function verifyWorkspaceMutationSettlementForAuthority(
               authorityInput.workspaceId,
               authorityInput.sessionId,
             );
-            await tx.execute(sql`
+            const [physical] = await tx.execute<{
+              provider_outcome: string;
+              settled_at: Date;
+            }>(sql`
               update sandbox_workspace_mutation_admissions set
-                provider_outcome = ${input.outcome}, settled_at = now()
-              where id = ${input.admission.id} and settled_at is null
+                provider_outcome = ${outcome}, settled_at = now()
+              where id = ${admissionSnapshot.id} and settled_at is null
+              returning provider_outcome, settled_at
             `);
+            if (physical?.provider_outcome !== outcome || !physical.settled_at) {
+              return {
+                failure: "admission_fenced" as const,
+                detail: "Workspace mutation settlement did not commit its exact provider outcome",
+              };
+            }
             if (
               pendingAttempt ||
               (authorityInput.kind !== "direct" &&
@@ -57333,12 +57389,15 @@ async function verifyWorkspaceMutationSettlementForAuthority(
               });
             }
           }
-          if (input.outcome === "rejected") return { failure: null };
-          if (authorityFailure) return authorityFailure;
+          if (outcome === "rejected") return { failure: null };
+          if (authorityFailure) return { ...authorityFailure, physicallySettled: true };
           if (!authority) {
             throw new Error("Workspace mutation settlement lost its locked authority");
           }
-          return await verifyResolvedAdmissionAuthority(tx, authority, admission);
+          const acceptance = await verifyResolvedAdmissionAuthority(tx, authority, admission);
+          return acceptance.failure === null
+            ? acceptance
+            : { ...acceptance, physicallySettled: true };
         }),
     );
   const settlement = await runIdempotentPersistenceTransaction(
@@ -57349,6 +57408,18 @@ async function verifyWorkspaceMutationSettlementForAuthority(
     settleOnce,
   );
   if (settlement.failure !== null) {
+    if (settlement.physicallySettled && ownsCommit) {
+      // This branch is reached only after the transaction committed a matching
+      // terminal admission. A failed commit or contradictory receipt never
+      // reaches it, even when the provider returned successfully.
+      throw new SandboxWorkspaceMutationOutputRejectedError(settlement.failure, settlement.detail, {
+        accountId: authorityInput.accountId,
+        workspaceId: authorityInput.workspaceId,
+        admission: admissionSnapshot,
+        operation,
+        outcome: "resolved",
+      });
+    }
     throw new SandboxWorkspaceMutationFencedError(settlement.failure, settlement.detail);
   }
 }
