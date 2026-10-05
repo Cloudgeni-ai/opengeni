@@ -134,15 +134,10 @@ function Settings() {
       <Stack.Screen
         options={{
           title: "Settings",
-          headerLargeTitle: Platform.OS === "ios",
           headerTintColor: c.fg,
           headerShadowVisible: false,
           // The native grouped list owns the page color; the bar matches it.
           headerStyle: {
-            backgroundColor:
-              Platform.OS === "ios" ? PlatformColor("systemGroupedBackground") : c.bg,
-          },
-          headerLargeStyle: {
             backgroundColor:
               Platform.OS === "ios" ? PlatformColor("systemGroupedBackground") : c.bg,
           },

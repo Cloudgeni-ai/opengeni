@@ -1,9 +1,10 @@
 import { compactModelPill } from "@opengeni/react/model-policy";
 import { partitionPinnedSessions, recentSessionsForHome } from "@opengeni/react/session-list-model";
-import type { ReasoningEffort, Session } from "@opengeni/sdk";
+import type { LatencyMode, ReasoningEffort, Session } from "@opengeni/sdk";
 import {
   Button,
   ComposerPill,
+  ModelPickerSheet,
   fontStyle,
   ModelMark,
   Icon,
@@ -16,7 +17,10 @@ import { Stack, router, useFocusEffect } from "expo-router";
 import { useCallback, useMemo, useState } from "react";
 import { ActivityIndicator, Pressable, RefreshControl, ScrollView, Text, View } from "react-native";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
+import * as Haptics from "expo-haptics";
 import { useAccount } from "@/account";
+import { BrandMark } from "@/brand-mark";
+import { useWorkspaceModelCatalog } from "@/model-catalog";
 import { SignInScreen } from "@/sign-in-screen";
 import { AppThemeProvider } from "@/theme";
 import { AccountMenuButton } from "@/workspace-switcher";
@@ -95,10 +99,32 @@ function Home() {
     }, [load]),
   );
 
-  const model = process.env.EXPO_PUBLIC_OPENGENI_DEFAULT_MODEL ?? config?.defaultModel ?? null;
-  const effort = (process.env.EXPO_PUBLIC_OPENGENI_DEFAULT_REASONING ??
-    config?.defaultReasoningEffort ??
-    null) as ReasoningEffort | null;
+  // The new session's model: the person's pick in this workspace, else the
+  // deployment default when this workspace can use it, else its first usable one.
+  const catalog = useWorkspaceModelCatalog(workspaceId);
+  const [picked, setPicked] = useState<{
+    workspaceId: string | null;
+    model: string | null;
+    effort: ReasoningEffort | null;
+    latencyMode: LatencyMode;
+  }>({ workspaceId: null, model: null, effort: null, latencyMode: "standard" });
+  const [pickerOpen, setPickerOpen] = useState(false);
+  const selectable = catalog.rows.filter((row) => row.selectable);
+  const preset = catalog.defaultSelection;
+  const fallbackModel =
+    selectable.find((row) => row.id === preset?.model)?.id ??
+    selectable.find((row) => row.id === config?.defaultModel)?.id ??
+    selectable[0]?.id ??
+    null;
+  const ownPick = picked.workspaceId === workspaceId ? picked : null;
+  const model = ownPick?.model ?? fallbackModel;
+  const effort =
+    ownPick?.effort ??
+    (preset && preset.model === model ? preset.reasoningEffort : null) ??
+    ((config?.defaultReasoningEffort ?? null) as ReasoningEffort | null);
+  const latencyMode = ownPick?.latencyMode ?? "standard";
+  const pick = (patch: Partial<Omit<typeof picked, "workspaceId">>) =>
+    setPicked({ workspaceId, model, effort, latencyMode, ...patch });
   const pill = model ? compactModelPill(models, model, effort) : null;
   const recent = useMemo(() => {
     const { pinned } = partitionPinnedSessions(sessions);
@@ -114,6 +140,7 @@ function Home() {
         initialMessage: text,
         ...(model ? { model } : {}),
         ...(effort ? { reasoningEffort: effort } : {}),
+        ...(latencyMode !== "standard" ? { latencyMode } : {}),
       });
       setDraft("");
       router.push(`/session/${created.id}`);
@@ -179,6 +206,10 @@ function Home() {
                 <ComposerPill
                   label={pill.effort ? `${pill.name} · ${pill.effort}` : pill.name}
                   leading={<ModelMark model={model ?? ""} size={14} color={c.fg} />}
+                  onPress={() => {
+                    catalog.refresh();
+                    setPickerOpen(true);
+                  }}
                 />
               ) : null
             }
@@ -223,6 +254,26 @@ function Home() {
           </View>
         ) : null}
       </ScrollView>
+      <ModelPickerSheet
+        open={pickerOpen}
+        onClose={() => setPickerOpen(false)}
+        rows={catalog.rows}
+        loading={catalog.loading && catalog.rows.length === 0}
+        error={catalog.error}
+        model={model ?? ""}
+        effort={effort ?? "medium"}
+        latencyMode={latencyMode}
+        groupPresentation={{
+          opengeni_credits: {
+            label: "Opengeni",
+            icon: <BrandMark width={15} color={c["fg-subtle"]} />,
+          },
+        }}
+        onModelChange={(next) => pick({ model: next })}
+        onEffortChange={(next) => pick({ effort: next })}
+        onLatencyModeChange={(next) => pick({ latencyMode: next })}
+        onSelectionFeedback={() => void Haptics.selectionAsync()}
+      />
     </>
   );
 }

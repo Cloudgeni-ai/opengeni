@@ -3,6 +3,7 @@ import { workspacesInOrg } from "@opengeni/react/organization-model";
 import { fontStyle, Icon, useNativeTimelineTheme } from "@opengeni/react-native/timeline";
 import * as Haptics from "expo-haptics";
 import { router } from "expo-router";
+import { useState } from "react";
 import { Text, View, useColorScheme } from "react-native";
 import { useAccount } from "@/account";
 import { serverLabel } from "@/account-store";
@@ -26,6 +27,7 @@ export function WorkspaceSwitcherBlock() {
   const inOrg = activeOrgId ? workspacesInOrg(workspaces, activeOrgId) : [];
   const others = organizations.filter((each) => each.accountId !== activeOrgId);
   const personal = workspace?.kind === "personal";
+  const [width, setWidth] = useState(0);
 
   const actions: MenuAction[] = [
     {
@@ -43,7 +45,7 @@ export function WorkspaceSwitcherBlock() {
       ? [
           {
             id: "organizations",
-            title: "Switch organization",
+            title: "Organizations",
             image: "building.2" as const,
             subactions: others.map((each) => ({
               id: `organization:${each.accountId}`,
@@ -56,7 +58,7 @@ export function WorkspaceSwitcherBlock() {
       ? [
           {
             id: "organization-settings",
-            title: "Organization settings",
+            title: "Org settings",
             image: "gearshape" as const,
           },
         ]
@@ -64,65 +66,68 @@ export function WorkspaceSwitcherBlock() {
   ];
 
   return (
-    <MenuView
-      title={account ? `${account.email} · ${serverLabel(account.baseUrl)}` : undefined}
-      actions={actions}
-      colorScheme={scheme}
-      onPressAction={({ nativeEvent }) => {
-        const [kind, id] = nativeEvent.event.split(/:(.*)/su);
-        void Haptics.selectionAsync().catch(() => undefined);
-        if (kind === "workspace" && id) setWorkspaceId(id);
-        else if (kind === "organization" && id) selectOrganization(id);
-        else if (nativeEvent.event === "organization-settings" && account && workspace) {
-          openOnWeb(account.baseUrl, webPaths.organizationSettings(workspace.id));
-        }
-      }}
-    >
-      <View
-        accessible
-        accessibilityRole="button"
-        accessibilityLabel={`${workspace?.name ?? "Select workspace"}${org ? `, ${org.label}` : ""}. Switch workspace`}
-        style={{
-          flexDirection: "row",
-          alignItems: "center",
-          gap: 10,
-          paddingHorizontal: 8,
-          paddingVertical: 8,
-          borderRadius: theme.radius.md,
+    // A SwiftUI menu sizes to its trigger: measure the row so it spans it.
+    <View onLayout={(event) => setWidth(Math.round(event.nativeEvent.layout.width))}>
+      <MenuView
+        actions={actions}
+        colorScheme={scheme}
+        onPressAction={({ nativeEvent }) => {
+          const [kind, id] = nativeEvent.event.split(/:(.*)/su);
+          void Haptics.selectionAsync().catch(() => undefined);
+          if (kind === "workspace" && id) setWorkspaceId(id);
+          else if (kind === "organization" && id) selectOrganization(id);
+          else if (nativeEvent.event === "organization-settings" && account && workspace) {
+            openOnWeb(account.baseUrl, webPaths.organizationSettings(workspace.id));
+          }
         }}
       >
-        <InitialTile
-          size={32}
-          {...(personal ? { icon: "lock" as const } : { label: workspace?.name ?? "W" })}
-        />
-        <View style={{ flex: 1, minWidth: 0 }}>
-          <Text
-            numberOfLines={1}
-            style={{ ...fontStyle(theme, 600), fontSize: 15, lineHeight: 20, color: c.fg }}
-          >
-            {workspace?.name ?? "Select workspace"}
-          </Text>
-          {org ? (
-            <View style={{ flexDirection: "row", alignItems: "center", gap: 4 }}>
-              <Icon name="building-2" size={11} color={c["fg-subtle"]} />
-              <Text
-                numberOfLines={1}
-                style={{
-                  ...fontStyle(theme, 500),
-                  fontSize: 12,
-                  lineHeight: 16,
-                  color: c["fg-subtle"],
-                  flexShrink: 1,
-                }}
-              >
-                {org.label}
-              </Text>
-            </View>
-          ) : null}
+        <View
+          accessible
+          accessibilityRole="button"
+          accessibilityLabel={`${workspace?.name ?? "Select workspace"}${org ? `, ${org.label}` : ""}. Switch workspace`}
+          style={{
+            ...(width ? { width } : {}),
+            flexDirection: "row",
+            alignItems: "center",
+            gap: 10,
+            paddingHorizontal: 8,
+            paddingVertical: 8,
+            borderRadius: theme.radius.md,
+          }}
+        >
+          <InitialTile
+            size={32}
+            {...(personal ? { icon: "lock" as const } : { label: workspace?.name ?? "W" })}
+          />
+          <View style={{ flex: 1, minWidth: 0 }}>
+            <Text
+              numberOfLines={1}
+              style={{ ...fontStyle(theme, 600), fontSize: 15, lineHeight: 20, color: c.fg }}
+            >
+              {workspace?.name ?? "Select workspace"}
+            </Text>
+            {org ? (
+              <View style={{ flexDirection: "row", alignItems: "center", gap: 4 }}>
+                <Icon name="building-2" size={11} color={c["fg-subtle"]} />
+                <Text
+                  numberOfLines={1}
+                  style={{
+                    ...fontStyle(theme, 500),
+                    fontSize: 12,
+                    lineHeight: 16,
+                    color: c["fg-subtle"],
+                    flexShrink: 1,
+                  }}
+                >
+                  {org.label}
+                </Text>
+              </View>
+            ) : null}
+          </View>
+          <Icon name="chevrons-up-down" size={16} color={c["fg-subtle"]} />
         </View>
-        <Icon name="chevrons-up-down" size={16} color={c["fg-subtle"]} />
-      </View>
-    </MenuView>
+      </MenuView>
+    </View>
   );
 }
 
