@@ -22,28 +22,57 @@ function event(sequence = 1, payload: unknown = {}): SessionEvent {
   };
 }
 
-test("current typed provider recovery exposes only its recovery kind", () => {
-  expect(currentModelRecovery(session, [event()])).toEqual({
-    kind: "rate_limited",
+test("current typed provider recovery exposes its cause, model and attempt", () => {
+  expect(currentModelRecovery(session, [event()])).toMatchObject({
+    code: "provider_rate_limited",
+    condition: "rate_limited",
+    modelLabel: null,
+    attempt: null,
   });
-  expect(currentModelRecovery(session, [event(1, { reason: "provider_unavailable" })])?.kind).toBe(
-    "unavailable",
-  );
+  expect(
+    currentModelRecovery(session, [
+      event(1, {
+        reason: "provider_unavailable",
+        code: "provider_unavailable",
+        retryable: true,
+        providerCondition: "overloaded",
+        modelLabel: "Claude Opus 5.5",
+        providerLabel: "Amazon Bedrock",
+        providerRecoveryCount: 2,
+        maxProviderRecoveryCount: 5,
+      }),
+    ]),
+  ).toEqual({
+    code: "provider_unavailable",
+    condition: "overloaded",
+    modelLabel: "Claude Opus 5.5",
+    providerLabel: "Amazon Bedrock",
+    attempt: 2,
+    maxAttempts: 5,
+    modelRoute: true,
+  });
 });
 
-test("does not call other recovery causes or raw diagnostics model demand", () => {
+test("names non-model dependencies truthfully and ignores non-retry recovery causes", () => {
+  expect(
+    currentModelRecovery(session, [
+      event(1, { reason: "mcp_transport_timeout", error: "429 model overloaded" }),
+    ]),
+  ).toMatchObject({ code: "mcp_transport_timeout", condition: null, modelRoute: false });
   for (const reason of [
-    "sandbox_command_start_unavailable",
-    "mcp_transport_timeout",
     "codex_usage_limit_reached",
     "provider_quota_exhausted",
     "human_retry",
+    "sandbox_command_start_recovery_exhausted",
     "unknown",
   ]) {
     expect(
       currentModelRecovery(session, [event(1, { reason, error: "429 model overloaded" })]),
     ).toBeNull();
   }
+  expect(
+    currentModelRecovery(session, [event(1, { reason: "provider_unavailable", retryable: false })]),
+  ).toBeNull();
   expect(currentModelRecovery(session, [{ ...event(), payload: null }])).toBeNull();
 });
 
@@ -80,21 +109,21 @@ test("newer boundaries clear stale recovery, regardless of page order", () => {
     expect(currentModelRecovery(session, [boundary, event()])).toBeNull();
   }
   expect(
-    currentModelRecovery(session, [event(2, { reason: "mcp_transport_timeout" }), event()]),
-  ).toBeNull();
-  expect(currentModelRecovery(session, [event(2), { ...event(), type: "turn.started" }])).toEqual({
-    kind: "rate_limited",
-  });
+    currentModelRecovery(session, [event(2, { reason: "mcp_transport_timeout" }), event()])?.code,
+  ).toBe("mcp_transport_timeout");
+  expect(
+    currentModelRecovery(session, [event(2), { ...event(), type: "turn.started" }])?.code,
+  ).toBe("provider_rate_limited");
 });
 
 test("provider delay and event timestamps never become an ETA or reset promise", () => {
   for (const continueDelayMs of [undefined, null, "60000", -1, 0, NaN, Infinity, 900_001])
-    expect(currentModelRecovery(session, [event(1, { continueDelayMs })])).toEqual({
-      kind: "rate_limited",
-    });
-  expect(currentModelRecovery(session, [{ ...event(), occurredAt: "invalid" }])).toEqual({
-    kind: "rate_limited",
-  });
+    expect(currentModelRecovery(session, [event(1, { continueDelayMs })])?.code).toBe(
+      "provider_rate_limited",
+    );
+  expect(currentModelRecovery(session, [{ ...event(), occurredAt: "invalid" }])?.code).toBe(
+    "provider_rate_limited",
+  );
 });
 
 test("a confirmed Pause suppresses retry copy before detail and queue reads catch up", () => {

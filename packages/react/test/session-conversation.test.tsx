@@ -643,7 +643,7 @@ test("the complete conversation forwards only picker appearance without replacin
   }
 });
 
-test("the composer offers live voice only when an available voice model exists", async () => {
+test("live voice is opt-in and needs an available voice model", async () => {
   const base = fakeClient({});
   const voiceModel = {
     id: "opengeni-azure/gpt-live-1",
@@ -707,17 +707,21 @@ test("the composer offers live voice only when an available voice model exists",
       "[data-og-conversation-composer] [data-testid='realtime-primary-action']",
     );
   for (const [label, input, prop, shown, read] of [
-    ["available model", {}, undefined, true, true],
+    // Opt-in: a call spends credits and prompts for the microphone.
+    ["off by default", {}, undefined, false, false],
+    ["host prop on", {}, true, true, true],
+    ["proxy offers voice", { realtimeVoice: true }, undefined, true, true],
     ["proxy turned voice off", { realtimeVoice: false }, undefined, false, false],
-    ["host prop off", {}, false, false, false],
+    ["proxy off beats host prop", { realtimeVoice: false }, true, false, false],
+    ["host prop off beats proxy offer", { realtimeVoice: true }, false, false, false],
     [
       "only unavailable models",
       { models: [{ ...voiceModel, available: false, unavailableReason: "Add credits" }] },
-      undefined,
+      true,
       false,
       true,
     ],
-    ["client without voice", { models: null }, undefined, false, false],
+    ["client without voice", { models: null }, true, false, false],
   ] as const) {
     const { client, reads } = scenario(input as never);
     const view = await renderComponent(
@@ -739,6 +743,56 @@ test("the composer offers live voice only when an available voice model exists",
         expect(voiceButton(view.container)).toBeNull();
       }
       expect(reads() > 0).toBe(read);
+    } finally {
+      await view.unmount();
+    }
+  }
+});
+
+test("the embedded working indicator uses neutral copy unless the host overrides it", async () => {
+  const turnId = "44444444-4444-4444-8444-444444444444";
+  const startedAt = new Date().toISOString();
+  const event = (sequence: number, type: string, payload: Record<string, unknown> = {}) => ({
+    id: `55555555-5555-4555-8555-${String(sequence).padStart(12, "0")}`,
+    workspaceId: WORKSPACE_ID,
+    sessionId: SESSION_ID,
+    sequence,
+    type,
+    turnId,
+    occurredAt: startedAt,
+    payload,
+  });
+  const client = fakeClient({
+    getSession: async () => ({ id: SESSION_ID, status: "running" }) as never,
+    getQueue: async () => ({ items: [], pendingInputs: [] }) as never,
+    listHumanInputRequests: async () => [],
+    streamEvents: async function* () {},
+    listEvents: async () =>
+      [
+        event(1, "user.message", { text: "Hi" }),
+        event(2, "turn.queued", { turnId }),
+        event(3, "turn.started"),
+      ] as never,
+  });
+  const phrase = (container: HTMLElement) =>
+    container.querySelector(".og-genie-phrase")?.textContent ?? null;
+  for (const [genieLoading, expected] of [
+    [undefined, "Thinking…"],
+    [{ phrases: [] }, "Thinking…"],
+    [{ phrases: ["Un instant…"] }, "Un instant…"],
+  ] as const) {
+    const view = await renderComponent(
+      <SessionConversation
+        sessionId={SESSION_ID}
+        client={client}
+        workspaceId={WORKSPACE_ID}
+        modelPicker={false}
+        {...(genieLoading ? { genieLoading } : {})}
+      />,
+    );
+    try {
+      await waitFor(() => phrase(view.container) !== null, "working indicator");
+      expect(phrase(view.container)).toBe(expected);
     } finally {
       await view.unmount();
     }

@@ -9,6 +9,8 @@ export const SESSION_ID = "22222222-2222-4222-8222-222222222222";
  * Structural fake for `SessionClientLike`: implement only the methods the
  * hook under test calls; everything else throws with a clear message.
  */
+const OPTIONAL_METHODS = new Set(["findGoal"]);
+
 export function fakeClient(partial: Partial<SessionClientLike>): SessionClientLike {
   const emptyDraft: ComposerDraft = {
     revision: 0,
@@ -105,6 +107,8 @@ export function fakeClient(partial: Partial<SessionClientLike>): SessionClientLi
     get(clientTarget, property) {
       const value = (clientTarget as Record<PropertyKey, unknown>)[property];
       if (value === undefined && typeof property === "string") {
+        // Optional client capabilities stay absent so hooks take their fallback.
+        if (OPTIONAL_METHODS.has(property)) return undefined;
         return () => {
           throw new Error(`fake client: ${property} is not implemented in this test`);
         };

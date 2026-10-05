@@ -63,6 +63,7 @@ import {
 import { Buffer } from "node:buffer";
 import { createHash, randomBytes, randomUUID } from "node:crypto";
 import { HTTPException } from "hono/http-exception";
+import { observeOAuthStart } from "../integration-connect-metrics";
 import {
   assertConnectionOwnershipAllowedForPrincipal,
   personalOwnerStateAccepted,
@@ -472,13 +473,21 @@ export async function startMcpOAuth(
   );
   const deadline = new OAuthStartDeadline(deps.oauthStartDeadlineMs ?? OAUTH_START_DEADLINE_MS);
   try {
-    return await startMcpOAuthWithinDeadline(deps, context, deadline);
+    const started = await startMcpOAuthWithinDeadline(deps, context, deadline);
+    observeOAuthStart(deps.observability, { flow: "mcp_oauth", outcome: "success" });
+    return started;
   } catch (error) {
     const staged =
       error instanceof OAuthStartStageError
         ? error
         : new OAuthStartStageError("connection_lookup", oauthStartFailureReason(error), error);
     logOAuthStartFailure(deps.observability, staged);
+    observeOAuthStart(deps.observability, {
+      flow: "mcp_oauth",
+      outcome: "failure",
+      stage: staged.stage,
+      reason: staged.reason,
+    });
     throw oauthStartApiError(staged);
   } finally {
     deadline.dispose();

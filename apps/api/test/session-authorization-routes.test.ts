@@ -835,6 +835,43 @@ describe("embedding host session authorization routes", () => {
     });
   });
 
+  test("GET goal answers 200 null for a goal-less session only when the client opts in", async () => {
+    if (!available || !shared) return;
+    const value = await fixture();
+    const goalPath = `/v1/workspaces/${value.grant.workspaceId}/sessions/${value.child.id}/goal`;
+    const headers = { authorization: value.authorization };
+
+    // Existing clients keep the original 404 contract.
+    const legacy = await appWith().request(goalPath, { headers });
+    expect(legacy.status).toBe(404);
+
+    const optedIn = await appWith().request(`${goalPath}?absent=null`, { headers });
+    expect(optedIn.status).toBe(200);
+    expect(await optedIn.json()).toBeNull();
+
+    // Only the exact opt-in value changes the answer.
+    const otherValue = await appWith().request(`${goalPath}?absent=empty`, { headers });
+    expect(otherValue.status).toBe(404);
+
+    // A missing session is still a 404, opt-in or not.
+    const missingSession = await appWith().request(
+      `/v1/workspaces/${value.grant.workspaceId}/sessions/${crypto.randomUUID()}/goal?absent=null`,
+      { headers },
+    );
+    expect(missingSession.status).toBe(404);
+
+    // A session with a goal returns it either way.
+    await shared.admin`
+      insert into session_goals (account_id, workspace_id, session_id, text)
+      values (
+        ${value.grant.accountId}, ${value.grant.workspaceId}, ${value.child.id},
+        'API absent opt-in goal'
+      )`;
+    const withGoal = await appWith().request(`${goalPath}?absent=null`, { headers });
+    expect(withGoal.status).toBe(200);
+    expect(((await withGoal.json()) as { text?: string }).text).toBe("API absent opt-in goal");
+  });
+
   test("updates MCP approval policy with session-control authority and one durable event", async () => {
     if (!available) return;
     const value = await fixture();

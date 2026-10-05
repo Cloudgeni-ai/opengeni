@@ -5214,6 +5214,7 @@ describe("transient provider error classifier", () => {
       error: "SECRET worker server provider detail",
       code: "provider_unavailable",
       retryable: true,
+      providerCondition: "unavailable",
     });
     expect(JSON.stringify({ error: observed.error, payload })).toContain(
       "SECRET worker server provider detail",
@@ -5266,6 +5267,7 @@ describe("transient provider error classifier", () => {
       code: "provider_rate_limited",
       retryable: true,
       detail: "SECRET worker rate provider detail",
+      providerCondition: "rate_limited",
     });
 
     const usage = await actualCodexStreamingFailure({
@@ -5856,6 +5858,7 @@ describe("transient provider error classifier", () => {
       error: "Our servers are currently overloaded. Please try again later.",
       code: "provider_unavailable",
       retryable: true,
+      providerCondition: "overloaded",
     });
 
     const generic500 = Object.assign(

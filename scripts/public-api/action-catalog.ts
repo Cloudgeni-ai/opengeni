@@ -129,6 +129,12 @@ const GENERIC_SDK_NAMES = new Set([
   "forWorkspace",
 ]);
 
+/**
+ * SDK methods that read a route through an opt-in query variant. The route's
+ * plain method names the action: `findGoal` is `getGoal` with `?absent=null`.
+ */
+const QUERY_VARIANT_SDK_NAMES = new Set(["findGoal"]);
+
 type ManifestRoute = {
   method: string;
   path: string;
@@ -159,7 +165,11 @@ export function buildActionCatalog(
     .filter((route) => !isActionCatalogExempt(route.path));
   const preferred = included.map((route) => {
     const names = route.sdk.map((name) => name.split(".").pop()!);
-    return names.find((name) => !GENERIC_SDK_NAMES.has(name)) ?? names[0] ?? null;
+    return (
+      names.find((name) => !GENERIC_SDK_NAMES.has(name) && !QUERY_VARIANT_SDK_NAMES.has(name)) ??
+      names[0] ??
+      null
+    );
   });
   const counts = new Map<string, number>();
   for (const name of preferred) if (name) counts.set(name, (counts.get(name) ?? 0) + 1);

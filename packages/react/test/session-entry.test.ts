@@ -114,7 +114,9 @@ describe("session-only entry", () => {
     // its invocation; production browser tests verify its on-click chunk load.
     expect(reactSources.some((id) => id.endsWith("/src/hooks/latest-question.ts"))).toBe(true);
     expect(reactSources.some((id) => id.endsWith("/src/lib/error-message.ts"))).toBe(true);
-    expect(reactSources.length).toBe(24);
+    // Pure provider-recovery copy used by failure presentation; no React graph.
+    expect(reactSources.some((id) => id.endsWith("/src/lib/provider-recovery.ts"))).toBe(true);
+    expect(reactSources.length).toBe(25);
 
     const chunks = result.output.filter((item) => item.type === "chunk");
     expect(chunks).toHaveLength(1);

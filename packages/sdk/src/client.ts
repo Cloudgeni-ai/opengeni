@@ -3142,6 +3142,27 @@ export class OpenGeniClient {
     );
   }
 
+  /**
+   * The session's goal, or `null` when the session has none. Unlike
+   * {@link getGoal}, a goal-less session is a successful read (`?absent=null`
+   * answers 200 `null`), so browsers log no failed request. Servers that
+   * predate the opt-in ignore it and still answer 404; a missing session is
+   * always a 404.
+   */
+  async findGoal(
+    workspaceId: string,
+    sessionId: string,
+    options: SharedSessionReadOptions = {},
+  ): Promise<SessionGoal | null> {
+    const path = `${sessionPath(workspaceId, sessionId)}/goal`;
+    const query = { absent: "null" };
+    return await this.sharedRead(
+      `${path}?absent=null`,
+      (signal) => this.requestJson<SessionGoal | null>("GET", path, undefined, query, { signal }),
+      options,
+    );
+  }
+
   async updateGoal(
     workspaceId: string,
     sessionId: string,

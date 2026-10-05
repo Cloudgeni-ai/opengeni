@@ -47,7 +47,11 @@ import {
   completeWorkspaceDeletionFollowUp,
   deleteOrganizationWorkspaceWithReconciliation,
 } from "@/lib/workspace-deletion";
-import { canManageWorkspaceSettings, hasWorkspacePermission } from "@/lib/permissions";
+import {
+  canManageWorkspaceMembers,
+  canManageWorkspaceSettings,
+  hasWorkspacePermission,
+} from "@/lib/permissions";
 import { WorkspaceApiKeysPage } from "./workspace-api-keys";
 import type { DeveloperLocation } from "@/lib/developer-route";
 import { hasAccountPermission } from "@/lib/permissions";
@@ -149,10 +153,10 @@ function OperationalWorkspaceSettingsRoute({
     activeWorkspace,
     context.managedSelfContext,
   );
-  const canManageMembers = hasWorkspacePermission(
+  const canManageMembers = canManageWorkspaceMembers(
     context.accessContext,
-    workspaceId,
-    "members:manage",
+    activeWorkspace,
+    context.clientConfig.auth.mode === "managedSession",
   );
   const canAdministerWorkspace = hasWorkspacePermission(
     context.accessContext,

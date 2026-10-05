@@ -206,23 +206,38 @@ spec:
           labels:
             severity: critical
           annotations:
-            summary: OpenGeni has a worker turn attempt without durable progress for more than 15 minutes
+            summary: 'An agent turn has made no durable progress for over 15 minutes.'
+            headline: 'Agent turn frozen with no progress'
+            value: 'no progress for {{ "{{ $value | humanizeDuration }}" }}'
+            user_impact: 'At least one user''s agent has saved no new output for over 15 minutes, so their session looks hung (unless one long tool command is legitimately still running).'
+            next_step: 'Find the attempt in the turn-worker logs and check whether a long tool command or model request is still running before intervening; it does not clear on its own if truly wedged.'
             description: This worker-local signal tracks physical runAgentTurn attempts. Inspect the exact attempt and recovery state; an overlapping replacement is counted independently.
+            runbook_url: https://github.com/Cloudgeni-ai/opengeni/blob/main/docs/launch-monitoring.md#alert--first-action
         - alert: OpenGeniSessionRecoveryBacklogStale
+          # One session past its recovery due time, not the backlog size: a
+          # session sleeping in the provider Retry-After or connectivity backoff
+          # its recovery request recorded is scheduled, not overdue, so
+          # sustained 429s that keep some session in backoff stay silent.
+          # Overdue > 5m held for 5m means a single session is >= 10m past due.
           expr: |
-            max(
-              opengeni_session_recovery_backlog{namespace={{ .Release.Namespace | quote }},release={{ .Release.Name | quote }},environment={{ $environment | quote }},component="worker-control"} > 0
+            max by (state) (
+              opengeni_session_recovery_oldest_overdue_seconds{namespace={{ .Release.Namespace | quote }},release={{ .Release.Name | quote }},environment={{ $environment | quote }},component="worker-control"}
               and on(namespace, release, environment, component, instance)
               opengeni_session_recovery_monitor_fresh{namespace={{ .Release.Namespace | quote }},release={{ .Release.Name | quote }},environment={{ $environment | quote }},component="worker-control"} == 1
               and on(namespace, release, environment, component, instance)
               time() - opengeni_session_recovery_monitor_last_success_timestamp_seconds{namespace={{ .Release.Namespace | quote }},release={{ .Release.Name | quote }},environment={{ $environment | quote }},component="worker-control"} < 240
-            ) > 0
-          for: 10m
+            ) > 300
+          for: 5m
           labels:
             severity: critical
           annotations:
-            summary: OpenGeni has a durable recovering session with no active attempt for more than 10 minutes
-            description: Inspect the bounded state label. quiescence_missing requires exact Temporal activity-loss and writer-settlement proof; projection_stale is safe to replay through the exact idempotent quiescence receipt transaction. A session paused by its own, an ancestor, or its workspace control is not counted as projection_stale until it is resumed.
+            summary: 'A session has been stuck in recovery with nothing running for more than 10 minutes past its recovery due time.'
+            description: A recovery is due at its closed attempt plus the backoff its turn.recovery.requested event recorded (provider Retry-After or connectivity pacing); opengeni_session_recovery_scheduled counts sessions still legitimately inside that backoff and never fires this alert. Inspect the bounded state label. quiescence_missing (due at the attempt close) requires exact Temporal activity-loss and writer-settlement proof; projection_stale is safe to replay through the exact idempotent quiescence receipt transaction. A session paused by its own, an ancestor, or its workspace control is not counted as projection_stale until it is resumed.
+            headline: 'A session stuck in recovery with nothing running'
+            value: '{{ "{{ $value | humanizeDuration }}" }} past its recovery due time'
+            user_impact: 'The affected user sees a session that stays in a recovering state and never continues; their work is saved but stalled.'
+            next_step: 'Escalate to an engineer: check the recovery state in Grafana (projection_stale can be replayed safely; quiescence_missing needs Temporal activity-loss proof first).'
+            runbook_url: https://github.com/Cloudgeni-ai/opengeni/blob/main/docs/launch-monitoring.md#alert--first-action
         - alert: OpenGeniSessionRecoveryMonitorStale
           expr: |
             absent(opengeni_session_recovery_monitor_fresh{namespace={{ .Release.Namespace | quote }},release={{ .Release.Name | quote }},environment={{ $environment | quote }},component="worker-control"}) == 1
@@ -234,7 +249,10 @@ spec:
           labels:
             severity: warning
           annotations:
-            summary: OpenGeni durable session-recovery monitoring is stale
+            summary: 'The monitor that watches for stuck session recovery has stopped reporting.'
+            headline: 'Session-recovery monitor not reporting'
+            user_impact: 'No user-visible impact by itself; we just cannot see stuck sessions until it recovers.'
+            next_step: 'Check that the worker-control pods are running and being scraped; restore the monitor before trusting session-recovery alerts.'
         - alert: OpenGeniTurnStartupQueueP95High
           expr: |
             histogram_quantile(
@@ -247,8 +265,13 @@ spec:
           labels:
             severity: warning
           annotations:
-            summary: OpenGeni turn queue p95 exceeds {{ $turnStartupQueueP95Seconds }} seconds
+            summary: 'New agent turns wait more than {{ $turnStartupQueueP95Seconds }} seconds (p95) before a worker picks them up.'
+            headline: 'Agent turns waiting too long to start'
+            value: 'p95 wait {{ "{{ $value | humanizeDuration }}" }}'
+            user_impact: 'Users wait longer than usual after sending a message before the agent starts working.'
+            next_step: 'Check worker capacity and the eligible backlog in Grafana Launch; it usually clears once autoscaling adds workers.'
             description: Durable turns are waiting too long before a worker starts them. Inspect Temporal eligible backlog, worker capacity, and admission saturation before attributing this to sandbox or model latency.
+            runbook_url: https://github.com/Cloudgeni-ai/opengeni/blob/main/docs/launch-monitoring.md#alert--first-action
         # OUR controllable latency, accepted turn -> first provider dispatch.
         # Provider think time is excluded by construction; the warning yields
         # to the critical tier so one incident never notifies twice.
@@ -270,10 +293,14 @@ spec:
             severity: warning
             notification_policy: investigate
           annotations:
-            summary: OpenGeni queue-to-provider-dispatch p95 exceeds {{ $turnStartupProviderDispatchP95Seconds }} seconds
-            description: The cumulative platform path from accepted turn to the first provider request is slow. This is OpenGeni latency (queue, claim, sandbox, tools, history, request preparation), never provider think time. The critical tier above {{ $turnStartupProviderDispatchCriticalP95Seconds }} seconds replaces this warning.
+            summary: 'Prompts take more than {{ $turnStartupProviderDispatchP95Seconds }} seconds (p95) to reach the model after a user sends them.'
+            headline: 'Agent turns slow to reach the model'
+            value: 'p95 {{ "{{ $value | humanizeDuration }}" }} to reach the model'
+            user_impact: 'Users wait longer before the agent starts responding; the delay is on our side, not the model provider''s.'
+            next_step: 'Open the Turn Startup breakdown to find the slow phase (queue, database or sandbox); this is our latency, not the provider''s.'
+            description: The cumulative platform path from accepted turn to the first provider request is slow. This is Opengeni latency (queue, claim, sandbox, tools, history, request preparation), never provider think time. The critical tier above {{ $turnStartupProviderDispatchCriticalP95Seconds }} seconds replaces this warning.
             action: Open the Turn Startup phase breakdown; compare queue, claim_and_policy, worker preparation and sandbox_establish, then check Postgres append latency and worker admission before blaming a model provider.
-            runbook_url: https://github.com/Cloudgeni-ai/opengeni/blob/main/docs/launch-monitoring.md
+            runbook_url: https://github.com/Cloudgeni-ai/opengeni/blob/main/docs/launch-monitoring.md#alert--first-action
         - alert: OpenGeniTurnStartupProviderDispatchP95Critical
           expr: |
             histogram_quantile(
@@ -287,10 +314,14 @@ spec:
             severity: critical
             notification_policy: page
           annotations:
-            summary: OpenGeni queue-to-provider-dispatch p95 exceeds {{ $turnStartupProviderDispatchCriticalP95Seconds }} seconds
-            description: Users wait over {{ $turnStartupProviderDispatchCriticalP95Seconds }} seconds at p95 before any model provider sees their prompt. This is OpenGeni-owned latency (queue, claim, sandbox, tools, history, request preparation), not provider latency.
+            summary: 'Prompts take more than {{ $turnStartupProviderDispatchCriticalP95Seconds }} seconds (p95) to reach the model after a user sends them.'
+            headline: 'Agent turns very slow to reach the model'
+            value: 'p95 {{ "{{ $value | humanizeDuration }}" }} to reach the model'
+            user_impact: 'Users wait over {{ $turnStartupProviderDispatchCriticalP95Seconds }} seconds before the agent even starts thinking; many will assume it is broken.'
+            next_step: 'Open Turn Startup and Launch capacity in Grafana now and find the dominant slow phase (database, queue or sandbox start); this rarely clears on its own under load.'
+            description: Users wait over {{ $turnStartupProviderDispatchCriticalP95Seconds }} seconds at p95 before any model provider sees their prompt. This is Opengeni-owned latency (queue, claim, sandbox, tools, history, request preparation), not provider latency.
             action: Open the Turn Startup phase breakdown and Launch capacity drilldowns; identify the dominant phase (claim/DB contention, queue age, sandbox establish) and follow the capacity owner's recovery path.
-            runbook_url: https://github.com/Cloudgeni-ai/opengeni/blob/main/docs/launch-monitoring.md
+            runbook_url: https://github.com/Cloudgeni-ai/opengeni/blob/main/docs/launch-monitoring.md#alert--first-action
         # Per model request (every tool-loop step, not only the first): SDK
         # model entry -> literal provider dispatch. Admission, the durable
         # history checkpoint, credit revalidation and the request audit are
@@ -308,10 +339,14 @@ spec:
             severity: warning
             notification_policy: investigate
           annotations:
-            summary: OpenGeni per-request pre-dispatch p95 exceeds {{ $modelRequestPreDispatchP95Seconds }} seconds
-            description: Between tool-loop steps OpenGeni itself is delaying every model request before it reaches the provider. This latency is entirely ours - admission, durable history/audit checkpoints, credit revalidation and request build - and adds directly to every user-visible time-to-first-token.
+            summary: 'Opengeni adds more than {{ $modelRequestPreDispatchP95Seconds }} seconds (p95) of its own overhead before each model request.'
+            headline: 'Our overhead slowing every model request'
+            value: 'p95 {{ "{{ $value | humanizeDuration }}" }} per request'
+            user_impact: 'Every agent step feels slower: replies and tool steps start later than they should.'
+            next_step: 'Check Postgres CPU, event-append latency and turn-worker CPU; this points at database or worker saturation, not a provider problem.'
+            description: Between tool-loop steps Opengeni itself is delaying every model request before it reaches the provider. This latency is entirely ours - admission, durable history/audit checkpoints, credit revalidation and request build - and adds directly to every user-visible time-to-first-token.
             action: Compare session-event append latency, Postgres CPU/active sessions and turn-worker CPU; this is a database or worker saturation signal, not a provider regression.
-            runbook_url: https://github.com/Cloudgeni-ai/opengeni/blob/main/docs/launch-monitoring.md
+            runbook_url: https://github.com/Cloudgeni-ai/opengeni/blob/main/docs/launch-monitoring.md#alert--first-action
         - alert: OpenGeniTurnStartupFirstByteP95High
           expr: |
             histogram_quantile(
@@ -324,7 +359,11 @@ spec:
           labels:
             severity: warning
           annotations:
-            summary: OpenGeni queue-to-first-byte p95 exceeds {{ $turnStartupFirstByteP95Seconds }} seconds
+            summary: 'The first part of an agent reply takes more than {{ $turnStartupFirstByteP95Seconds }} seconds (p95) to appear.'
+            headline: 'Agents slow to start replying'
+            value: 'p95 {{ "{{ $value | humanizeDuration }}" }} to first reply'
+            user_impact: 'Users wait longer than usual to see the first words of a reply.'
+            next_step: 'Compare provider-dispatch latency with provider time-to-first-token in Grafana to see whether we or the provider are slow; provider slowness usually recovers on its own.'
             description: End-to-end first response latency is above target. Compare the cumulative provider-dispatch milestone with provider first-byte duration to separate platform delay from provider think time.
         - alert: OpenGeniTurnStartupFirstByteAvailabilityLow
           expr: |
@@ -345,8 +384,13 @@ spec:
           labels:
             severity: warning
           annotations:
-            summary: OpenGeni first-byte availability is below {{ $turnStartupFirstByteAvailabilityRatio }} for {{ "{{ $labels.provider }}" }}
+            summary: 'Too many turns on {{ "{{ $labels.provider }}" }} fail before producing any reply (success below {{ $turnStartupFirstByteAvailabilityRatio }}).'
+            headline: '{{ "{{ $labels.provider }}" }}: turns failing before any reply'
+            value: 'only {{ "{{ $value | humanizePercentage }}" }} got a reply (15 min)'
+            user_impact: 'Some users on this model get an error instead of any response to their message.'
+            next_step: 'Check the provider''s status page and the Runtime Failures dashboard; usually recovers with the provider; if it lasts over 30 min, switch the default model.'
             description: Canonical durable logical turns terminated failed after provider dispatch without producing a first byte in any attempt. Successful first-byte latency remains a separate SLO; inspect provider transport diagnostics rather than treating missing bytes as fast latency samples.
+            runbook_url: https://github.com/Cloudgeni-ai/opengeni/blob/main/docs/launch-monitoring.md#alert--first-action
         - alert: OpenGeniSuperGrokResponseStreamIdleTimeout
           expr: |
             sum(increase(opengeni_model_request_phases_total{provider="supergrok-subscription",phase="terminal",outcome="timed_out"}[15m])) > 0
@@ -354,7 +398,11 @@ spec:
           labels:
             severity: warning
           annotations:
-            summary: A SuperGrok response stream stopped producing valid SSE events
+            summary: 'A SuperGrok reply stopped streaming partway and was cancelled.'
+            headline: 'SuperGrok: replies stalling mid-stream'
+            value: '{{ "{{ printf `%.0f` $value }}" }} stalled streams (15 min)'
+            user_impact: 'Affected SuperGrok replies stopped partway and were cancelled; those users may see an error and need to retry.'
+            next_step: 'Usually a provider-side hiccup that clears on its own; if it keeps firing, check xAI status and consider moving users to another model.'
             description: The accepted stream was cancelled after its configured valid-event silence interval and was not replayed. Correlate the durable agent.model.request terminal checkpoint with provider request metadata.
         - alert: OpenGeniTurnFailureRatioHigh
           expr: |
@@ -369,8 +417,13 @@ spec:
           labels:
             severity: warning
           annotations:
-            summary: OpenGeni turn failures exceed 20%
+            summary: 'More than 20% of agent turns ended in failure over the last 10 minutes.'
+            headline: 'Many agent turns failing'
+            value: '{{ "{{ $value | humanizePercentage }}" }} of turns failed (10 min)'
+            user_impact: 'More than 1 in 5 agent responses end in an error; users see failed messages.'
+            next_step: 'Open Runtime Failures and split failures by provider, tools and sandbox to find the common cause; if one model provider dominates, switch away from it.'
             description: Durable logical turns are terminalizing failed. Compare MCP lifecycle/tool outcomes, sandbox provision categories, provider terminals, and startup phases before changing retry policy.
+            runbook_url: https://github.com/Cloudgeni-ai/opengeni/blob/main/docs/launch-monitoring.md#alert--first-action
         - alert: OpenGeniTurnRecoveryRatioHigh
           expr: |
             (
@@ -384,8 +437,13 @@ spec:
           labels:
             severity: warning
           annotations:
-            summary: OpenGeni same-turn recovery pressure exceeds 20%
+            summary: 'More than 20% of agent turns needed an automatic retry over the last 10 minutes.'
+            headline: 'Many agent turns needing automatic retries'
+            value: '{{ "{{ $value | humanizePercentage }}" }} of turns retried (10 min)'
+            user_impact: 'Replies are slower and may pause briefly while turns retry automatically; no work is lost.'
+            next_step: 'Usually self-heals once the underlying provider, tool or worker issue clears; if it lasts over 30 min, find the dominant retry cause in Runtime Failures.'
             description: Recovery is preserving logical turns but consuming capacity and adding latency. Inspect typed MCP transport, sandbox, provider, and worker-shutdown evidence for the dominant retryable boundary.
+            runbook_url: https://github.com/Cloudgeni-ai/opengeni/blob/main/docs/launch-monitoring.md#alert--first-action
         - alert: OpenGeniTurnWorkerRestarted
           expr: |
             sum(
@@ -399,7 +457,11 @@ spec:
           labels:
             severity: warning
           annotations:
-            summary: An OpenGeni turn worker restarted
+            summary: 'A turn worker restarted unexpectedly in the last 10 minutes.'
+            headline: 'Turn worker restarted'
+            value: '{{ "{{ printf `%.0f` $value }}" }} restart(s) in 10 min'
+            user_impact: 'Turns on that worker paused and resumed automatically; affected users may have seen a short delay.'
+            next_step: 'No action if it happens once; if it repeats, check the pod''s termination reason (for example OOMKilled) and logs.'
             description: A turn-worker process exited unexpectedly within the last 10 minutes. Correlate the affected Pod logs with same-turn recovery outcomes before assuming the active turn completed normally.
         - alert: OpenGeniTurnWorkerCrashLoop
           expr: |
@@ -414,8 +476,13 @@ spec:
           labels:
             severity: critical
           annotations:
-            summary: OpenGeni turn workers are repeatedly restarting
+            summary: 'Turn workers restarted more than once in 10 minutes, which looks like a crash loop.'
+            headline: 'Turn worker crash-looping'
+            value: '{{ "{{ printf `%.0f` $value }}" }} restarts in 10 min'
+            user_impact: 'Agent turns keep getting interrupted; replies stall and some sessions will fail after repeated retries.'
+            next_step: 'Check the worker pod''s last termination reason and logs now (OOM, bad config, recent deploy); roll back if it started right after a deploy.'
             description: More than one turn-worker container restart occurred within 10 minutes. Treat this as an active crash loop because repeated worker loss can exhaust bounded same-turn recovery and fail a session.
+            runbook_url: https://github.com/Cloudgeni-ai/opengeni/blob/main/docs/launch-monitoring.md#alert--first-action
         - alert: OpenGeniTurnWorkerDeathRecovered
           expr: |
             sum(increase(opengeni_turn_worker_death_recoveries_total{namespace={{ .Release.Namespace | quote }},release={{ .Release.Name | quote }},environment={{ $environment | quote }},outcome="recovering"}[10m])) > 0
@@ -423,7 +490,11 @@ spec:
           labels:
             severity: warning
           annotations:
-            summary: OpenGeni recovered a turn after worker death
+            summary: 'A turn was resumed automatically after the worker running it died.'
+            headline: 'Agent turn resumed after a worker died'
+            value: '{{ "{{ printf `%.0f` $value }}" }} turn(s) recovered (10 min)'
+            user_impact: 'No lasting impact: the turn resumed automatically, though its user saw a delay.'
+            next_step: 'No action if isolated; if it repeats, check worker restarts and their termination reason.'
             description: Durable same-turn recovery prevented immediate session failure, but an in-flight worker was lost. Inspect worker restarts, heartbeat health, the container termination reason, and the last worker log entry.
         - alert: OpenGeniTurnWorkerDeathRecoveryExhausted
           expr: |
@@ -432,8 +503,13 @@ spec:
           labels:
             severity: critical
           annotations:
-            summary: OpenGeni exhausted same-turn worker-death recovery
+            summary: 'An agent turn failed because the workers running it kept dying and automatic recovery ran out.'
+            headline: 'Agent turn failed after repeated worker crashes'
+            value: '{{ "{{ printf `%.0f` $value }}" }} turn(s) failed (15 min)'
+            user_impact: 'At least one user''s agent turn ended in an error because every worker that ran it died.'
+            next_step: 'Find the turn.failed event with code worker_death_redispatch_exhausted and the worker crash cause; fix the crash before it hits more users.'
             description: One logical turn lost four workers and was durably failed after three re-dispatches. Inspect the turn-worker fatal boundary and the correlated turn.failed event with code worker_death_redispatch_exhausted.
+            runbook_url: https://github.com/Cloudgeni-ai/opengeni/blob/main/docs/launch-monitoring.md#alert--first-action
         - alert: OpenGeniModelCallFailureRatioHigh
           expr: |
             (
@@ -447,8 +523,13 @@ spec:
           labels:
             severity: warning
           annotations:
-            summary: OpenGeni model-call failures exceed 20% for {{ "{{ $labels.provider }}" }}
+            summary: 'More than 20% of model calls to {{ "{{ $labels.provider }}" }} failed over the last 10 minutes.'
+            headline: '{{ "{{ $labels.provider }}" }}: model calls failing'
+            value: '{{ "{{ $value | humanizePercentage }}" }} of calls failed (10 min)'
+            user_impact: 'Users on this model see slow or failed replies; turns retry automatically, but some will end in an error.'
+            next_step: 'Check the provider''s status page; usually self-heals when the provider recovers; if it lasts over 30 min, switch the default model or contact the provider.'
             description: The provider request boundary is failing independently of sandbox and tool preparation. Correlate provider terminal phases and first-byte availability before retrying or rerouting work.
+            runbook_url: https://github.com/Cloudgeni-ai/opengeni/blob/main/docs/launch-monitoring.md#alert--first-action
         - alert: OpenGeniMcpStrictConnectFailed
           expr: |
             sum(increase(opengeni_mcp_lifecycle_operations_total{namespace={{ .Release.Namespace | quote }},release={{ .Release.Name | quote }},environment={{ $environment | quote }},phase="connect",policy="strict",outcome="failed"}[5m])) > 0
@@ -456,8 +537,13 @@ spec:
           labels:
             severity: critical
           annotations:
-            summary: A required OpenGeni MCP server failed to connect
+            summary: 'A required tool (MCP) server could not be reached, so a turn could not start.'
+            headline: 'Required tool server failed to connect'
+            value: '{{ "{{ printf `%.0f` $value }}" }} failed connection(s) (5 min)'
+            user_impact: 'Affected turns cannot reach the model because a required tool server is unreachable; they retry automatically and fail if it stays down.'
+            next_step: 'Check Runtime Failures for which MCP server failed; if it is Opengeni''s own MCP service, check that its pods are up.'
             description: A strict MCP dependency prevented a turn from reaching the model. Inspect the bounded McpLifecycleError code/status/origin log and the Runtime Failures dashboard; never copy transport bodies or credentials into incident evidence.
+            runbook_url: https://github.com/Cloudgeni-ai/opengeni/blob/main/docs/launch-monitoring.md#alert--first-action
         - alert: OpenGeniMcpCloseFailed
           expr: |
             sum by (policy) (increase(opengeni_mcp_lifecycle_operations_total{namespace={{ .Release.Namespace | quote }},release={{ .Release.Name | quote }},environment={{ $environment | quote }},phase="close",outcome="failed"}[5m])) > 0
@@ -465,7 +551,11 @@ spec:
           labels:
             severity: warning
           annotations:
-            summary: OpenGeni MCP cleanup failed for {{ "{{ $labels.policy }}" }} connections
+            summary: 'A tool (MCP) connection with policy {{ "{{ $labels.policy }}" }} did not close cleanly.'
+            headline: 'Tool connection did not close cleanly'
+            value: '{{ "{{ printf `%.0f` $value }}" }} failed close(s) (5 min)'
+            user_impact: 'No user-visible impact; a leaked connection may hold resources.'
+            next_step: 'No action if occasional; if it keeps firing, check worker memory and the MCP lifecycle logs.'
             description: A transport did not close cleanly and may retain resources. Inspect the bounded MCP lifecycle diagnostic and worker health; do not obscure the turn's original outcome with cleanup retries.
         - alert: OpenGeniMcpBestEffortConnectFailureRatio
           expr: |
@@ -480,7 +570,11 @@ spec:
           labels:
             severity: warning
           annotations:
-            summary: Optional or connector-backed MCP connection failures exceed 20%
+            summary: 'More than 20% of optional or connector-backed tool (MCP) connections failed over 10 minutes.'
+            headline: 'Optional tool connections failing'
+            value: '{{ "{{ $value | humanizePercentage }}" }} of connections failed (10 min)'
+            user_impact: 'Agents keep working but without some connected tools (for example a user''s integrations), so answers may be less capable.'
+            next_step: 'Check which connector is failing in the MCP lifecycle logs; usually an expired login or an outage on the connector''s side.'
             description: Turns may continue with missing tools, but users are losing capabilities. Check connector authentication, endpoint health, and bounded MCP lifecycle logs.
         - alert: OpenGeniMcpToolFailureRatio
           expr: |
@@ -495,7 +589,11 @@ spec:
           labels:
             severity: warning
           annotations:
-            summary: OpenGeni MCP tool-call failures exceed 20%
+            summary: 'More than 20% of agent tool (MCP) calls failed over the last 10 minutes.'
+            headline: 'Many tool calls failing'
+            value: '{{ "{{ $value | humanizePercentage }}" }} of tool calls failed (10 min)'
+            user_impact: 'Agents hit errors when using tools, so tasks take longer or fail.'
+            next_step: 'Split by outcome in Grafana: auth_needed means users must reconnect; timeouts or transport errors point at a tool server outage.'
             description: Includes provider-declared, authentication, timeout, uncertain, transport, and protocol outcomes. User cancellation remains visible in Grafana but does not page operators.
         - alert: OpenGeniMcpToolOutcomeUncertain
           expr: |
@@ -503,8 +601,13 @@ spec:
           labels:
             severity: critical
           annotations:
-            summary: An MCP mutation ended with an uncertain outcome
+            summary: 'A tool call that may change an external system ended without confirmation of whether it happened.'
+            headline: 'Tool action may or may not have happened'
+            value: '{{ "{{ printf `%.0f` $value }}" }} uncertain call(s) (5 min)'
+            user_impact: 'An agent action on an external system ended unconfirmed; the user may need to check whether it took effect.'
+            next_step: 'Do not retry it automatically; confirm through the target system or the tool''s receipt whether the action happened.'
             description: Do not replay the operation automatically. Reconcile through the tool's durable provider receipt or idempotency boundary before retrying.
+            runbook_url: https://github.com/Cloudgeni-ai/opengeni/blob/main/docs/mcp-operation-recovery.md
         - alert: OpenGeniMcpToolLatencyHigh
           expr: |
             histogram_quantile(
@@ -517,7 +620,11 @@ spec:
           labels:
             severity: warning
           annotations:
-            summary: OpenGeni MCP tool-call p95 exceeds 15 seconds
+            summary: 'Agent tool (MCP) calls take more than 15 seconds at p95.'
+            headline: 'Tool calls are slow'
+            value: 'p95 {{ "{{ $value | humanizeDuration }}" }}'
+            user_impact: 'Agent tasks take noticeably longer while waiting on tools.'
+            next_step: 'Check which tool or connector is slow in Grafana; usually a slow external service rather than Opengeni.'
             description: Tool latency is materially delaying turns. Split by structural outcome and compare MCP connect time before attributing this to model inference.
         - alert: OpenGeniHttp5xxRatioHigh
           expr: |
@@ -532,8 +639,13 @@ spec:
           labels:
             severity: warning
           annotations:
-            summary: OpenGeni API 5xx responses exceed 5%
+            summary: 'More than 5% of API requests returned server errors over the last 5 minutes.'
+            headline: 'API returning server errors'
+            value: '{{ "{{ $value | humanizePercentage }}" }} of requests failed (5 min)'
+            user_impact: 'Users see errors or failed page loads in the app, and API clients get 5xx responses.'
+            next_step: 'Find the failing route in Grafana and check API logs, API memory and database health; roll back if it started right after a deploy.'
             description: Group the bounded route/status series in Grafana, then correlate the affected route with Postgres append latency and application logs.
+            runbook_url: https://github.com/Cloudgeni-ai/opengeni/blob/main/docs/launch-monitoring.md#alert--first-action
         - alert: OpenGeniCoreReadLatencyHigh
           expr: |
             histogram_quantile(
@@ -546,8 +658,233 @@ spec:
           labels:
             severity: warning
           annotations:
-            summary: OpenGeni core read p95 exceeds 2 seconds on {{ "{{ $labels.route }}" }}
+            summary: 'Loading workspaces or sessions takes more than 2 seconds (p95) on {{ "{{ $labels.route }}" }}.'
+            headline: 'Workspace and session pages loading slowly'
+            value: 'p95 {{ "{{ $value | humanizeDuration }}" }}'
+            user_impact: 'Opening workspaces and session lists feels slow in the app.'
+            next_step: 'Check database CPU and slow queries before adding API pods.'
             description: Workspace or session reads are slow enough to degrade the interactive control plane. Inspect database CPU, active queries, event append latency, and request volume before scaling API pods.
+        # Product-level failure safety net: a route whose refusals (401/403/409/422)
+        # jump against its own one-day baseline, or that refuses most of its
+        # traffic. Unauthenticated organization MCP discovery (GET 401 on the
+        # organization MCP endpoint) is benign; its route is matched as a
+        # character class so the unscoped-route source guard does not read it
+        # as a client default.
+        - alert: OpenGeniApiRouteRejectionsAbnormal
+          expr: |
+            (
+              (sum by (method, route, status) (increase(opengeni_http_requests_total{namespace={{ .Release.Namespace | quote }},release={{ .Release.Name | quote }},environment={{ $environment | quote }},component="api",status=~"401|403|409|422"}[30m])) >= 20)
+              and on (method, route, status)
+              (
+                sum by (method, route, status) (rate(opengeni_http_requests_total{namespace={{ .Release.Namespace | quote }},release={{ .Release.Name | quote }},environment={{ $environment | quote }},component="api",status=~"401|403|409|422"}[30m]))
+                > 3 * sum by (method, route, status) (rate(opengeni_http_requests_total{namespace={{ .Release.Namespace | quote }},release={{ .Release.Name | quote }},environment={{ $environment | quote }},component="api",status=~"401|403|409|422"}[1d] offset 30m))
+                or on (method, route, status)
+                (
+                  sum by (method, route, status) (rate(opengeni_http_requests_total{namespace={{ .Release.Namespace | quote }},release={{ .Release.Name | quote }},environment={{ $environment | quote }},component="api",status=~"401|403|409|422"}[30m]))
+                  unless on (method, route, status)
+                  (sum by (method, route, status) (rate(opengeni_http_requests_total{namespace={{ .Release.Namespace | quote }},release={{ .Release.Name | quote }},environment={{ $environment | quote }},component="api",status=~"401|403|409|422"}[1d] offset 30m)) > 0)
+                )
+              )
+              or on (method, route, status)
+              (
+                (
+                  sum by (method, route, status) (increase(opengeni_http_requests_total{namespace={{ .Release.Namespace | quote }},release={{ .Release.Name | quote }},environment={{ $environment | quote }},component="api",status=~"403|409|422"}[1h]))
+                  / on (method, route) group_left
+                  clamp_min(sum by (method, route) (increase(opengeni_http_requests_total{namespace={{ .Release.Namespace | quote }},release={{ .Release.Name | quote }},environment={{ $environment | quote }},component="api"}[1h])), 1)
+                ) > 0.5
+                and on (method, route, status)
+                sum by (method, route, status) (increase(opengeni_http_requests_total{namespace={{ .Release.Namespace | quote }},release={{ .Release.Name | quote }},environment={{ $environment | quote }},component="api",status=~"403|409|422"}[1h])) >= 10
+              )
+            )
+            unless on (method, route)
+            (sum by (method, route) (increase(opengeni_http_requests_total{namespace={{ .Release.Namespace | quote }},release={{ .Release.Name | quote }},environment={{ $environment | quote }},component="api",method="GET",route=~"/v1/[m]cp"}[30m])) >= 0)
+          for: 5m
+          labels:
+            severity: warning
+            notification_policy: investigate
+          annotations:
+            summary: 'Requests to {{ "{{ $labels.method }} {{ $labels.route }}" }} are being refused with HTTP {{ "{{ $labels.status }}" }} far more than usual.'
+            headline: 'An API route is suddenly refusing users'
+            user_impact: 'People using this part of the product are being told they cannot do it (permission, conflict or validation refusal), usually with an unhelpful error or a silent failure.'
+            next_step: 'Open "Capabilities, browser & handoffs" in Grafana for the route, then read the API logs for that route: rejectionReason names the missing permission or domain code and rejectionFingerprint groups identical refusals.'
+            description: 'Fires when a route''s 401/403/409/422 rate over 30 minutes is at least 20 requests and more than 3x its own previous-day rate (or the route never refused before), or when 403/409/422 are over half of the route''s traffic for an hour with at least 10 refusals. Excludes unauthenticated organization MCP endpoint discovery. Resolve a rejectionFingerprint to its source text with scripts/resolve-rejection-fingerprint.ts.'
+            action: 'Decide whether the refusal is a product bug (missing grant, UI offering an action the user cannot take, client retry loop) or abuse; fix the grant or the client rather than muting the alert.'
+        # Browser/Computer sign-in handoff: the human could not join the live
+        # session the agent handed them. This is the 2026-10-05 Personal
+        # workspace stream:view incident class.
+        - alert: OpenGeniHandoffAttachRefused
+          expr: |
+            (
+              sum by (route) (increase(opengeni_http_requests_total{namespace={{ .Release.Namespace | quote }},release={{ .Release.Name | quote }},environment={{ $environment | quote }},component="api",route=~"/v1/workspaces/:workspaceId/(browser|computer)-sessions/:[A-Za-z]+/attachments",status=~"4.."}[30m]))
+              /
+              clamp_min(sum by (route) (increase(opengeni_http_requests_total{namespace={{ .Release.Namespace | quote }},release={{ .Release.Name | quote }},environment={{ $environment | quote }},component="api",route=~"/v1/workspaces/:workspaceId/(browser|computer)-sessions/:[A-Za-z]+/attachments"}[30m])), 1)
+            ) > 0.25
+            and on (route)
+            sum by (route) (increase(opengeni_http_requests_total{namespace={{ .Release.Namespace | quote }},release={{ .Release.Name | quote }},environment={{ $environment | quote }},component="api",route=~"/v1/workspaces/:workspaceId/(browser|computer)-sessions/:[A-Za-z]+/attachments",status=~"4.."}[30m])) >= 3
+          for: 5m
+          labels:
+            severity: warning
+            notification_policy: investigate
+          annotations:
+            summary: 'People cannot open the live browser or computer view the agent handed them ({{ "{{ $labels.route }}" }}).'
+            headline: 'Browser/computer handoff: people cannot join'
+            value: '{{ "{{ $value | humanizePercentage }}" }} of join attempts refused (30 min)'
+            user_impact: 'When the agent asks a person to sign in or confirm something in its browser or computer, the person cannot open the live view, so the handoff expires and the agent reports that the human interaction was dismissed or expired.'
+            next_step: 'Check the API logs for this route: rejectionReason permission:stream:view means the viewer''s grant lacks stream:view; other reasons point at Connected Machine consent or a stale session. Fix the grant before users retry.'
+            description: 'More than 25% of POST .../attachments requests on the browser or computer session route failed with a 4xx over 30 minutes, with at least 3 failures.'
+        - alert: OpenGeniInteractionOperationFailureRatio
+          expr: |
+            (
+              sum by (resource, operation) (increase(opengeni_interaction_operations_total{namespace={{ .Release.Namespace | quote }},release={{ .Release.Name | quote }},environment={{ $environment | quote }},outcome=~"failed|denied|outcome_unknown"}[15m]))
+              /
+              clamp_min(sum by (resource, operation) (increase(opengeni_interaction_operations_total{namespace={{ .Release.Namespace | quote }},release={{ .Release.Name | quote }},environment={{ $environment | quote }}}[15m])), 1)
+            ) > 0.25
+            and on (resource, operation)
+            sum by (resource, operation) (increase(opengeni_interaction_operations_total{namespace={{ .Release.Namespace | quote }},release={{ .Release.Name | quote }},environment={{ $environment | quote }},outcome=~"failed|denied|outcome_unknown"}[15m])) >= 5
+          for: 10m
+          labels:
+            severity: warning
+            notification_policy: investigate
+          annotations:
+            summary: 'More than a quarter of {{ "{{ $labels.resource }}" }} {{ "{{ $labels.operation }}" }} operations failed or were refused over 15 minutes.'
+            headline: '{{ "{{ $labels.resource }}" }} {{ "{{ $labels.operation }}" }} operations failing'
+            value: '{{ "{{ $value | humanizePercentage }}" }} failed or refused (15 min)'
+            user_impact: 'The agent (or a person) cannot drive the browser or computer: pages do not open, observations fail, or actions are refused, so tasks that need a browser stall.'
+            next_step: 'Split opengeni_interaction_operations_total by reason in Grafana: permission_denied/access_denied is an authorization bug, control_* is a Connected Machine problem, stale is usually benign churn.'
+            description: 'Counts every Browser/Computer control route (including observe, tab, and attach routes) plus receipt outcomes; denied means a 401/403 refusal.'
+        - alert: OpenGeniHandoffsExpiringUnanswered
+          expr: |
+            (
+              sum by (kind) (increase(opengeni_interaction_interventions_total{namespace={{ .Release.Namespace | quote }},release={{ .Release.Name | quote }},environment={{ $environment | quote }},outcome="expired"}[2h]))
+              /
+              clamp_min(sum by (kind) (increase(opengeni_interaction_interventions_total{namespace={{ .Release.Namespace | quote }},release={{ .Release.Name | quote }},environment={{ $environment | quote }},outcome=~"completed|dismissed|expired|cancelled"}[2h])), 1)
+            ) > 0.5
+            and on (kind)
+            sum by (kind) (increase(opengeni_interaction_interventions_total{namespace={{ .Release.Namespace | quote }},release={{ .Release.Name | quote }},environment={{ $environment | quote }},outcome="expired"}[2h])) >= 3
+          for: 15m
+          labels:
+            severity: warning
+            notification_policy: investigate
+          annotations:
+            summary: 'More than half of {{ "{{ $labels.kind }}" }} handoffs to a person expired unanswered over two hours.'
+            headline: 'Handoffs to people are expiring unanswered'
+            value: '{{ "{{ $value | humanizePercentage }}" }} of settled handoffs expired (2 h)'
+            user_impact: 'When the agent needs a person to sign in, approve or act, nobody completes it in time, so the agent''s task stops. Usually the person never saw the request or could not open it.'
+            next_step: 'Check OpenGeniHandoffAttachRefused and the attachments route refusals first; if people can join, check that handoff notifications reach them.'
+            description: 'Agent-opened handoffs are counted when the worker settles them; expiry is counted by the worker timer. Lazily expired legacy auth-run handoffs are not yet counted.'
+        - alert: OpenGeniConnectFailureRatio
+          expr: |
+            (
+              sum by (provider) (increase(opengeni_connect_attempts_total{namespace={{ .Release.Namespace | quote }},release={{ .Release.Name | quote }},environment={{ $environment | quote }},state=~"failed|uncertain"}[1h]))
+              /
+              clamp_min(sum by (provider) (increase(opengeni_connect_attempts_total{namespace={{ .Release.Namespace | quote }},release={{ .Release.Name | quote }},environment={{ $environment | quote }},state=~"complete|failed|uncertain|connected_but_incomplete"}[1h])), 1)
+            ) > 0.3
+            and on (provider)
+            sum by (provider) (increase(opengeni_connect_attempts_total{namespace={{ .Release.Namespace | quote }},release={{ .Release.Name | quote }},environment={{ $environment | quote }},state=~"failed|uncertain"}[1h])) >= 3
+          for: 10m
+          labels:
+            severity: warning
+            notification_policy: investigate
+          annotations:
+            summary: 'Connecting {{ "{{ $labels.provider }}" }} fails for more than 30% of people who finish the flow.'
+            headline: 'People cannot connect {{ "{{ $labels.provider }}" }}'
+            value: '{{ "{{ $value | humanizePercentage }}" }} of finished attempts failed (1 h)'
+            user_impact: 'People trying to add this capability or integration end up with a failed setup and the agent cannot use it.'
+            next_step: 'Split opengeni_connect_attempts_total by error for this provider and check the provider''s OAuth app, credentials and the matching callback failures in opengeni_integration_oauth_callbacks_total.'
+            description: 'Counts committed Connect attempt transitions; provider=other is any provider outside the reviewed catalog. Cancelled and expired attempts are excluded from the failure ratio.'
+        - alert: OpenGeniIntegrationOAuthCallbackFailures
+          expr: |
+            (
+              sum by (flow, provider) (increase(opengeni_integration_oauth_callbacks_total{namespace={{ .Release.Namespace | quote }},release={{ .Release.Name | quote }},environment={{ $environment | quote }},outcome="failure"}[1h]))
+              /
+              clamp_min(sum by (flow, provider) (increase(opengeni_integration_oauth_callbacks_total{namespace={{ .Release.Namespace | quote }},release={{ .Release.Name | quote }},environment={{ $environment | quote }},outcome=~"success|failure"}[1h])), 1)
+            ) > 0.3
+            and on (flow, provider)
+            sum by (flow, provider) (increase(opengeni_integration_oauth_callbacks_total{namespace={{ .Release.Namespace | quote }},release={{ .Release.Name | quote }},environment={{ $environment | quote }},outcome="failure"}[1h])) >= 3
+          for: 10m
+          labels:
+            severity: warning
+            notification_policy: investigate
+          annotations:
+            summary: 'The {{ "{{ $labels.provider }}" }} sign-in callback ({{ "{{ $labels.flow }}" }}) is failing for more than 30% of returns.'
+            headline: '{{ "{{ $labels.provider }}" }} connection sign-in failing'
+            value: '{{ "{{ $value | humanizePercentage }}" }} of callbacks failed (1 h)'
+            user_impact: 'People approve access at the provider but land back in Opengeni with a connection error, so the integration is never connected.'
+            next_step: 'Split opengeni_integration_oauth_callbacks_total by stage and reason: token_exchange points at client credentials or redirect URIs, state_invalid at expired or replayed links.'
+            description: 'Classified from the callback redirect marker (?<flow>=error&reason=) and HTTP status only. Popup Connect callbacks are counted as handoff here and judged by OpenGeniConnectFailureRatio.'
+        - alert: OpenGeniAgentToolErrorRatio
+          expr: |
+            (
+              sum by (family) (increase(opengeni_agent_tool_calls_total{namespace={{ .Release.Namespace | quote }},release={{ .Release.Name | quote }},environment={{ $environment | quote }},outcome="error"}[15m]))
+              /
+              clamp_min(sum by (family) (increase(opengeni_agent_tool_calls_total{namespace={{ .Release.Namespace | quote }},release={{ .Release.Name | quote }},environment={{ $environment | quote }}}[15m])), 1)
+            ) > 0.5
+            and on (family)
+            sum by (family) (increase(opengeni_agent_tool_calls_total{namespace={{ .Release.Namespace | quote }},release={{ .Release.Name | quote }},environment={{ $environment | quote }},outcome="error"}[15m])) >= 10
+          for: 10m
+          labels:
+            severity: warning
+            notification_policy: investigate
+          annotations:
+            summary: 'More than half of agent {{ "{{ $labels.family }}" }} tool calls returned an error over 15 minutes.'
+            headline: 'Agent {{ "{{ $labels.family }}" }} tools mostly failing'
+            value: '{{ "{{ $value | humanizePercentage }}" }} of calls errored (15 min)'
+            user_impact: 'Agents keep trying a tool that does not work, so tasks needing it stall or finish with a worse result.'
+            next_step: 'Compare with the provider and MCP alerts, then open a recent session using that tool family to read the actual tool error.'
+            description: 'Counts every completed model-dispatched tool call by closed tool family; an error is a structural tool error output, not a non-zero shell exit code.'
+        - alert: OpenGeniMachineConnectRejected
+          expr: |
+            sum by (reason) (increase(opengeni_machine_connect_total{namespace={{ .Release.Namespace | quote }},release={{ .Release.Name | quote }},environment={{ $environment | quote }},outcome="denied",reason=~"plane_disabled|identity_mismatch|generation_mismatch|invalid_instance|undecodable"}[15m])) >= 5
+          for: 10m
+          labels:
+            severity: warning
+            notification_policy: investigate
+          annotations:
+            summary: 'Connected Machines are being refused at connect ({{ "{{ $labels.reason }}" }}).'
+            headline: 'Connected Machines cannot connect'
+            value: '{{ "{{ printf `%.0f` $value }}" }} refused connects (15 min)'
+            user_impact: 'People''s own machines show as offline, so sessions targeting them cannot run commands or open their browser.'
+            next_step: 'plane_disabled means the enrollment signing secret is missing; generation or identity mismatches mean credentials were rotated or a machine needs re-enrollment. Check the API auth-callout logs.'
+            description: 'Excludes the expected denials of revoked or stale machines (invalid_bearer, inactive_enrollment) and of a second runner for one enrollment (duplicate_runner).'
+        - alert: OpenGeniAttachedBrowserUnavailable
+          expr: |
+            sum by (reason) (increase(opengeni_attached_browser_unavailable_total{namespace={{ .Release.Namespace | quote }},release={{ .Release.Name | quote }},environment={{ $environment | quote }}}[30m])) >= 5
+          for: 10m
+          labels:
+            severity: warning
+            notification_policy: investigate
+          annotations:
+            summary: 'Agents cannot reach people''s attached browsers ({{ "{{ $labels.reason }}" }}).'
+            headline: 'Attached browsers unreachable'
+            value: '{{ "{{ printf `%.0f` $value }}" }} refused operations (30 min)'
+            user_impact: 'People who attached their own browser see the agent fail to use it, so browser tasks on their accounts stop.'
+            next_step: 'disconnected usually means the extension or native host stopped; machine_unavailable means the Connected Machine is offline. Check opengeni_machine_connect_total and recent agent releases.'
+            description: 'Counts browser operations refused because the attached browser device was disconnected, its Connected Machine was not live, or the machine had not reported a workspace root.'
+        - alert: OpenGeniApiMissingPermissionSpike
+          expr: |
+            (sum by (route, reason) (increase(opengeni_http_request_rejections_total{namespace={{ .Release.Namespace | quote }},release={{ .Release.Name | quote }},environment={{ $environment | quote }},component="api",reason=~"permission:.+"}[30m])) >= 10)
+            and on (route, reason)
+            (
+              sum by (route, reason) (rate(opengeni_http_request_rejections_total{namespace={{ .Release.Namespace | quote }},release={{ .Release.Name | quote }},environment={{ $environment | quote }},component="api",reason=~"permission:.+"}[30m]))
+              > 3 * sum by (route, reason) (rate(opengeni_http_request_rejections_total{namespace={{ .Release.Namespace | quote }},release={{ .Release.Name | quote }},environment={{ $environment | quote }},component="api",reason=~"permission:.+"}[1d] offset 30m))
+              or on (route, reason)
+              (
+                sum by (route, reason) (rate(opengeni_http_request_rejections_total{namespace={{ .Release.Namespace | quote }},release={{ .Release.Name | quote }},environment={{ $environment | quote }},component="api",reason=~"permission:.+"}[30m]))
+                unless on (route, reason)
+                (sum by (route, reason) (rate(opengeni_http_request_rejections_total{namespace={{ .Release.Namespace | quote }},release={{ .Release.Name | quote }},environment={{ $environment | quote }},component="api",reason=~"permission:.+"}[1d] offset 30m)) > 0)
+              )
+            )
+          for: 5m
+          labels:
+            severity: warning
+            notification_policy: investigate
+          annotations:
+            summary: 'Many requests to {{ "{{ $labels.route }}" }} are refused for {{ "{{ $labels.reason }}" }}, far more than usual.'
+            headline: 'Users missing {{ "{{ $labels.reason }}" }}'
+            value: '{{ "{{ printf `%.0f` $value }}" }} refusals (30 min)'
+            user_impact: 'People are blocked from an action because their access grant lacks this permission, often in a surface the product itself offered them.'
+            next_step: 'Decide whether the grant (for example the Personal workspace owner set) should include this permission, or whether the UI should hide the action for people without it.'
+            description: 'Uses the bounded rejection reason recorded for every refused API request; only permission names from the closed permission catalog appear.'
         - alert: OpenGeniSandboxCreateFailureRatio
           expr: |
             (
@@ -561,7 +898,11 @@ spec:
           labels:
             severity: warning
           annotations:
-            summary: OpenGeni sandbox create failures exceed 20%
+            summary: 'More than 20% of sandbox creations failed over the last 10 minutes.'
+            headline: 'Sandbox creation failing'
+            value: '{{ "{{ $value | humanizePercentage }}" }} of creates failed (10 min)'
+            user_impact: 'Agents that need a sandbox to run code start slowly or fail to start.'
+            next_step: 'Check the sandbox provider''s status and the failure category in Grafana; usually provider-side.'
         - alert: OpenGeniSandboxLogicalProvisionFailureRatio
           expr: |
             (
@@ -575,7 +916,11 @@ spec:
           labels:
             severity: warning
           annotations:
-            summary: OpenGeni logical sandbox provision failures exceed 20%
+            summary: 'More than 20% of sandbox starts on {{ "{{ $labels.backend }}" }} failed over the last 10 minutes.'
+            headline: '{{ "{{ $labels.backend }}" }}: sandboxes failing to start'
+            value: '{{ "{{ $value | humanizePercentage }}" }} of starts failed (10 min)'
+            user_impact: 'Agents that need a sandbox to run code start slowly or fail to start.'
+            next_step: 'Check the failure category and stage in Grafana and the provider''s status page before changing retries.'
             description: Expected lease and lifecycle transitions are excluded. Inspect failure category/stage and internal attempt metrics before changing retry policy.
         - alert: OpenGeniSandboxUnknownProvisionFailureRatio
           expr: |
@@ -590,14 +935,22 @@ spec:
           labels:
             severity: warning
           annotations:
-            summary: OpenGeni unknown logical sandbox provision failures are at least 1%
+            summary: 'At least 1% of sandbox start failures on {{ "{{ $labels.backend }}" }} have no known cause.'
+            headline: 'Sandbox failures with an unknown cause'
+            value: '{{ "{{ $value | humanizePercentage }}" }} of failures unclassified'
+            user_impact: 'No extra user impact beyond the failures themselves; we just cannot tell why some sandboxes fail.'
+            next_step: 'Not urgent: an engineer should classify the new failure type in code.'
             description: Extend the structural taxonomy at the owning typed boundary; do not classify failures from raw message text or add ambiguous provider retries.
         - alert: OpenGeniSandboxWarmingTimeout
           expr: sum(increase(opengeni_sandbox_warming_timeouts_total[15m])) > 0
           labels:
             severity: warning
           annotations:
-            summary: OpenGeni observed a sandbox warming timeout
+            summary: 'A sandbox did not become ready in time.'
+            headline: 'Sandbox took too long to start'
+            value: '{{ "{{ printf `%.0f` $value }}" }} timeout(s) (15 min)'
+            user_impact: 'Some users'' agent turns waited and then failed because their sandbox did not become ready in time.'
+            next_step: 'Check the sandbox provider''s capacity and status; occasional timeouts usually clear on their own.'
         {{- if $opensandboxEnabled }}
         - alert: OpenGeniOpenSandboxApiThrottled
           expr: |
@@ -608,16 +961,25 @@ spec:
           labels:
             severity: warning
           annotations:
-            summary: OpenSandbox API requests are being throttled
-            description: OpenGeni received an HTTP 429 while creating or renewing an OpenSandbox sandbox. Inspect server and Kubernetes API capacity before retry pressure grows.
+            summary: 'OpenSandbox API requests are being rate-limited (HTTP 429).'
+            headline: 'OpenSandbox API rate-limiting us'
+            value: '{{ "{{ printf `%.0f` $value }}" }} throttled request(s) (10 min)'
+            user_impact: 'Sandbox starts may be slower while requests are throttled.'
+            next_step: 'Check OpenSandbox server and Kubernetes API capacity before load increases.'
+            description: Opengeni received an HTTP 429 while creating or renewing an OpenSandbox sandbox. Inspect server and Kubernetes API capacity before retry pressure grows.
         - alert: OpenGeniOpenSandboxTtlRenewalFailed
           expr: sum(increase(opengeni_sandbox_ttl_renewals_total{backend="opensandbox",outcome="failed"}[10m])) > 0
           for: 1m
           labels:
             severity: critical
           annotations:
-            summary: OpenSandbox TTL renewal failed
+            summary: 'A running OpenSandbox sandbox could not extend its lifetime.'
+            headline: 'OpenSandbox sandbox lifetime renewal failed'
+            value: '{{ "{{ printf `%.0f` $value }}" }} failed renewal(s) (10 min)'
+            user_impact: 'A running sandbox may be shut down early by the provider, interrupting that user''s work.'
+            next_step: 'Find the sandbox in the worker logs and check OpenSandbox health before its expiry passes.'
             description: An exact live OpenSandbox instance could not refresh its provider expiry. Correlate the worker log by workspace, sandbox group, lease epoch, attempt, and opaque sandbox ID before the provider TTL elapses.
+            runbook_url: https://github.com/Cloudgeni-ai/opengeni/blob/main/docs/deployment.md#observability
         - alert: OpenGeniOpenSandboxPoolDepleted
           expr: |
             (
@@ -634,7 +996,11 @@ spec:
           labels:
             severity: warning
           annotations:
-            summary: An OpenSandbox Pool has depleted its available capacity
+            summary: 'An OpenSandbox pool has no spare warm sandboxes left.'
+            headline: 'OpenSandbox warm pool empty'
+            value: '{{ "{{ printf `%.0f` $value }}" }} warm sandbox(es) available'
+            user_impact: 'New sandboxes start slower because no pre-warmed ones are ready.'
+            next_step: 'Check node capacity and the pool''s limits; raise the pool size if the demand is real.'
             description: Available Pool Pods are below the configured warm buffer or the Pool is fully allocated at PoolMax.
         - alert: OpenGeniOpenSandboxInventoryStale
           expr: |
@@ -646,15 +1012,23 @@ spec:
           labels:
             severity: critical
           annotations:
-            summary: OpenSandbox workload inventory telemetry is stale or absent
+            summary: 'OpenSandbox workload inventory has stopped updating.'
+            headline: 'OpenSandbox inventory not updating'
+            user_impact: 'No direct user impact, but OpenSandbox health alerts are blind until it recovers.'
+            next_step: 'Check worker-control health and its access to the Kubernetes API.'
             description: No control replica has completed a fresh bounded Kubernetes projection. Workload threshold alerts intentionally fail closed until the list-only inventory refresh recovers.
+            runbook_url: https://github.com/Cloudgeni-ai/opengeni/blob/main/docs/deployment.md#observability
         - alert: OpenGeniOpenSandboxPodPending
           expr: opengeni:opensandbox_workload_pods:fresh_max{condition="pending"} > 0
           for: 10m
           labels:
             severity: warning
           annotations:
-            summary: An OpenSandbox workload Pod has remained Pending
+            summary: 'An OpenSandbox sandbox pod has been waiting to be scheduled for 10 minutes.'
+            headline: 'OpenSandbox sandbox stuck waiting to start'
+            value: '{{ "{{ printf `%.0f` $value }}" }} pod(s) pending'
+            user_impact: 'Some users'' sandboxes are not starting, so their agents wait.'
+            next_step: 'Check the pod''s scheduling events, node capacity and image pulls.'
             description: Inspect the matching BatchSandbox, scheduler reason, image state, node-pool capacity, Pod/IP limits, and resource requests.
         - alert: OpenGeniOpenSandboxImagePullFailed
           expr: opengeni:opensandbox_workload_pods:fresh_max{condition="image_pull"} > 0
@@ -662,7 +1036,11 @@ spec:
           labels:
             severity: warning
           annotations:
-            summary: An OpenSandbox workload cannot pull its immutable image
+            summary: 'An OpenSandbox sandbox cannot download its container image.'
+            headline: 'OpenSandbox cannot download its sandbox image'
+            value: '{{ "{{ printf `%.0f` $value }}" }} pod(s) failing to pull'
+            user_impact: 'New sandboxes fail to start.'
+            next_step: 'Check registry access, that the pinned image digest exists, and pull credentials.'
             description: Inspect registry reachability, digest existence, pull credentials, and node cache state without logging credential material.
         - alert: OpenGeniOpenSandboxControllerError
           expr: |
@@ -677,32 +1055,51 @@ spec:
           labels:
             severity: critical
           annotations:
-            summary: The OpenSandbox controller is unavailable or repeatedly failing
+            summary: 'The OpenSandbox controller is unavailable or repeatedly failing.'
+            headline: 'OpenSandbox controller failing'
+            user_impact: 'Sandboxes may not be created or cleaned up.'
+            next_step: 'Check the controller pod''s readiness, restarts and logs in opensandbox-system.'
             description: The pinned controller metrics endpoint reports reconcile errors; Kubernetes readiness and restart truth remain independent backstops.
+            runbook_url: https://github.com/Cloudgeni-ai/opengeni/blob/main/docs/deployment.md#observability
         - alert: OpenGeniOpenSandboxCapacityExhausted
           expr: opengeni:opensandbox_workload_pods:fresh_max{condition="unschedulable"} > 0
           for: 5m
           labels:
             severity: critical
           annotations:
-            summary: OpenSandbox workloads are unschedulable from cluster capacity exhaustion
+            summary: 'OpenSandbox sandboxes cannot be scheduled because the cluster is out of capacity.'
+            headline: 'Cluster out of room for sandboxes'
+            value: '{{ "{{ printf `%.0f` $value }}" }} pod(s) unschedulable'
+            user_impact: 'New sandboxes cannot start, so agents that need one are stuck.'
+            next_step: 'Add node capacity or check quotas, taints and node-pool maximums.'
             description: Inspect node-pool maximums, Pod/IP ceilings, quota, CPU, memory, ephemeral storage, taints, and selectors before increasing create concurrency.
+            runbook_url: https://github.com/Cloudgeni-ai/opengeni/blob/main/docs/deployment.md#observability
         - alert: OpenGeniOpenSandboxCleanupStuck
           expr: opengeni:opensandbox_cleanup_stuck:fresh_max > 0
           for: 5m
           labels:
             severity: critical
           annotations:
-            summary: OpenSandbox cleanup is blocked by a BatchSandbox finalizer
+            summary: 'An OpenSandbox sandbox is stuck deleting.'
+            headline: 'OpenSandbox sandbox stuck deleting'
+            value: '{{ "{{ printf `%.0f` $value }}" }} stuck'
+            user_impact: 'No user impact; leftover resources keep costing money.'
+            next_step: 'Identify the exact resource in Kubernetes before touching any finalizer.'
             description: At least one BatchSandbox has remained deleting with finalizers past the cleanup threshold. Use Kubernetes inventory to identify the exact resource before any manual finalizer action.
+            runbook_url: https://github.com/Cloudgeni-ai/opengeni/blob/main/docs/deployment.md#observability
         - alert: OpenGeniOpenSandboxExpirationOverdue
           expr: opengeni:opensandbox_expiration_overdue:fresh_max > 0
           for: 5m
           labels:
             severity: critical
           annotations:
-            summary: An OpenSandbox BatchSandbox survived beyond its provider expiry
+            summary: 'An OpenSandbox sandbox is still present after its provider expiry.'
+            headline: 'OpenSandbox sandbox outlived its expiry'
+            value: '{{ "{{ printf `%.0f` $value }}" }} overdue'
+            user_impact: 'No user impact; it keeps consuming capacity and money.'
+            next_step: 'Check controller health and the resource''s finalizers and owner.'
             description: The bounded inventory reports at least one BatchSandbox beyond the 180-second provider TTL cleanup bound. Verify controller health, finalizers, and exact resource ownership in Kubernetes.
+            runbook_url: https://github.com/Cloudgeni-ai/opengeni/blob/main/docs/deployment.md#observability
         {{- end }}
         - alert: OpenGeniSandboxOperationFailureRatio
           expr: |
@@ -717,28 +1114,45 @@ spec:
           labels:
             severity: warning
           annotations:
-            summary: OpenGeni routed sandbox operation failures exceed 20%
+            summary: 'More than 20% of {{ "{{ $labels.op }}" }} operations on {{ "{{ $labels.backend }}" }} sandboxes failed over 10 minutes.'
+            headline: '{{ "{{ $labels.backend }}" }}: sandbox {{ "{{ $labels.op }}" }} operations failing'
+            value: '{{ "{{ $value | humanizePercentage }}" }} failed (10 min)'
+            user_impact: 'Agent commands or file operations in sandboxes fail, so tasks error or stall.'
+            next_step: 'Check the provider''s status and the operation''s errors in the worker logs.'
         - alert: OpenGeniSandboxOrphansTerminatedGrowing
           expr: sum(increase(opengeni_sandbox_orphans_terminated_total[30m])) > 0
           labels:
             severity: warning
           annotations:
-            summary: OpenGeni reaper terminated provider-side orphan sandboxes
+            summary: 'The reaper cleaned up abandoned sandboxes at the provider.'
+            headline: 'Abandoned sandboxes cleaned up'
+            value: '{{ "{{ printf `%.0f` $value }}" }} terminated (30 min)'
+            user_impact: 'No user impact; sandboxes were leaking and have been cleaned up.'
+            next_step: 'No action if rare; if it keeps firing, investigate why sandboxes lose their lease.'
         - alert: OpenGeniSandboxRotationOverdue
           expr: opengeni:sandbox_rotation_backlog:fresh_max{kind="overdue"} > 0
           for: 10m
           labels:
             severity: critical
           annotations:
-            summary: OpenGeni has a sandbox past its provider deadline
+            summary: 'A sandbox has stayed past its provider shutdown deadline for 10 minutes.'
+            headline: 'Sandbox past its provider shutdown deadline'
+            value: '{{ "{{ printf `%.0f` $value }}" }} sandbox(es) overdue'
+            user_impact: 'The provider may kill this sandbox soon; its user could lose workspace changes made since the last checkpoint.'
+            next_step: 'Check what is blocking rotation (running turn, command or checkpoint capture) and reaper or Modal errors now.'
             description: A finite-lifetime sandbox has remained past its precomputed provider deadline for 10m. Check turn, direct-operation, and retained-process blockers, checkpoint capture, reaper health, and Modal API errors before the provider kills it.
+            runbook_url: https://github.com/Cloudgeni-ai/opengeni/blob/main/docs/deployment.md#observability
         - alert: OpenGeniSandboxDeadlineProcessBlocked
           expr: opengeni:sandbox_rotation_backlog:fresh_max{kind="process_blocked"} > 0
           for: 10m
           labels:
             severity: warning
           annotations:
-            summary: A retained command is delaying sandbox deadline rotation
+            summary: 'A running background command has been blocking a sandbox''s deadline rotation for 10 minutes.'
+            headline: 'Running command blocking sandbox rotation'
+            value: '{{ "{{ printf `%.0f` $value }}" }} sandbox(es) blocked'
+            user_impact: 'No impact yet; if unresolved, the sandbox may be killed together with the command.'
+            next_step: 'Inspect the blocking process and its owner; let it finish or settle before the deadline.'
             description: A provider-deadline rotation has been process-blocked for 10m. Inspect the current process, owner settlement, deadline cancellation and checkpoint capture while the provider is still available.
         - alert: OpenGeniModalProviderMissingBeforeCapture
           # A newly created counter may have only one sample after its first
@@ -762,8 +1176,13 @@ spec:
           labels:
             severity: critical
           annotations:
-            summary: A Modal sandbox disappeared before its workspace could be captured
+            summary: 'A Modal sandbox disappeared before its workspace files could be saved.'
+            headline: 'Modal sandbox lost before saving its files'
+            value: '{{ "{{ printf `%.0f` $value }}" }} sandbox(es) lost (30 min)'
+            user_impact: 'A user''s sandbox vanished before its latest files were saved; they may lose recent work unless an earlier checkpoint is restored.'
+            next_step: 'Check the session''s sandbox.box.terminated event and whether an earlier checkpoint can be restored.'
             description: The exact draining-to-cold commit recorded providerMissingBeforeCapture. Inspect the sandbox.box.terminated event and the current archive/recovery state; a prior checkpoint may still be restorable. This is observed loss, independent of overdue rotation backlog.
+            runbook_url: https://github.com/Cloudgeni-ai/opengeni/blob/main/docs/run-lifecycle.md#automatic-continuity-after-a-missing-managed-provider
         - alert: OpenGeniModalCheckpointFallbackSelected
           # A newly created counter may have only one scrape sample. The offset
           # arm retains that first positive observation for the alert window.
@@ -785,8 +1204,13 @@ spec:
           labels:
             severity: warning
           annotations:
-            summary: Modal workspace recovery selected a fallback checkpoint
+            summary: 'A lost Modal sandbox was restored from an older checkpoint.'
+            headline: 'Workspace restored from an older checkpoint'
+            value: '{{ "{{ printf `%.0f` $value }}" }} restore(s) (30 min)'
+            user_impact: 'Affected users continued from an older save, so their latest file changes may be missing.'
+            next_step: 'Check archive selection and restore state for the session; tell the user if recent changes were lost.'
             description: A prior checkpoint was selected after a durable authorization receipt, for one session or for every session sharing the sandbox (outcome selected_shared). This is an operator signal even if the session later continues successfully; inspect archive selection and restore state. Selection does not prove restoration succeeded.
+            runbook_url: https://github.com/Cloudgeni-ai/opengeni/blob/main/docs/run-lifecycle.md#automatic-continuity-after-a-missing-managed-provider
         - alert: OpenGeniModalFreshWorkspaceContinuity
           # Same first-sample arm as the checkpoint fallback: the durable ledger
           # keeps the signal if the deciding worker exits before a scrape.
@@ -808,15 +1232,24 @@ spec:
           labels:
             severity: warning
           annotations:
-            summary: A lost Modal sandbox group continued on an empty workspace
+            summary: 'A lost Modal sandbox had no usable checkpoint, so its sessions continued on an empty workspace.'
+            headline: 'Session continued on an empty workspace'
+            value: '{{ "{{ printf `%.0f` $value }}" }} occurrence(s) (30 min)'
+            user_impact: 'Affected users lost their sandbox files and continued with an empty workspace (they were warned in the session).'
+            next_step: 'Find out why no restorable checkpoint existed (capture cadence, deadline rotation, restore failures).'
             description: A definitively lost managed sandbox had no usable checkpoint, so its sessions continued on a new empty workspace after a durable decision that warned every group member. Files from before the loss are gone from the running sandbox; the previous archive and checkpoint references remain on the lease for review. Inspect why no restorable checkpoint existed (capture cadence, deadline rotation, restore failures).
+            runbook_url: https://github.com/Cloudgeni-ai/opengeni/blob/main/docs/run-lifecycle.md#empty-workspace-continuity-when-no-checkpoint-survives
         - alert: OpenGeniSandboxCheckpointDeletionFailed
           expr: opengeni:sandbox_checkpoint_artifacts:fresh_max{state="delete_failed"} > 0
           for: 15m
           labels:
             severity: warning
           annotations:
-            summary: OpenGeni cannot garbage-collect a provider checkpoint
+            summary: 'An old sandbox checkpoint has failed to delete for 15 minutes.'
+            headline: 'Old sandbox checkpoint cannot be deleted'
+            value: '{{ "{{ printf `%.0f` $value }}" }} checkpoint(s) stuck'
+            user_impact: 'No user impact; leftover checkpoints cost storage.'
+            next_step: 'Often expected after credential rotation; check the artifact binding and deletion error, and never delete it with other credentials.'
             description: A provider-bound checkpoint deletion has failed for 15m. Credential/workspace rotation is a common intentional fence; inspect the artifact binding and deletion error instead of deleting under ambient credentials.
         - alert: OpenGeniRetainedProcessTerminalOwnerBacklog
           expr: sum(opengeni:retained_processes_terminal_owner_backlog:fresh_max) > 0
@@ -824,7 +1257,11 @@ spec:
           labels:
             severity: warning
           annotations:
-            summary: OpenGeni has retained sandbox processes whose logical owners are terminal
+            summary: 'Background sandbox processes are still running 15 minutes after the work that started them ended.'
+            headline: 'Background processes left running after work ended'
+            value: '{{ "{{ printf `%.0f` $value }}" }} process(es)'
+            user_impact: 'No user impact; they keep sandboxes alive and cost money.'
+            next_step: 'Inspect provider-binding and settlement outcomes; never assume a process exited just because it is old.'
             description: A completed/failed/cancelled owner still has a physical sandbox process after 15m. Inspect provider-binding, probe, and settlement outcomes; age alone is never exit proof.
         - alert: OpenGeniSandboxesHeldByIdleInteractions
           expr: sum(opengeni:sandbox_leases_interaction_only:fresh_max{idle_bucket=~"2h_6h|gte_6h"}) > 5
@@ -832,7 +1269,11 @@ spec:
           labels:
             severity: warning
           annotations:
-            summary: Several sandboxes are kept warm only by Browser/Computer sessions idle for 2h+
+            summary: 'Several sandboxes are kept running only by Browser/Computer sessions idle for 2+ hours.'
+            headline: 'Idle browser sessions keeping sandboxes running'
+            value: '{{ "{{ printf `%.0f` $value }}" }} sandboxes idle 2h+'
+            user_impact: 'No user impact; idle Browser/Computer sessions keep paid sandboxes warm.'
+            next_step: 'Check whether users are leaving Browser/Computer sessions open; end abandoned ones if cost matters.'
             description: Interaction holders never expire by timestamp, so a box whose only holders are Browser/Computer sessions stays warm (and billed by the provider) until the session is ended or the provider deadline rotates it. Check opengeni:sandbox_leases_interaction_only:fresh_max by idle_bucket and whether sessions are being left open.
         - alert: OpenGeniSandboxDrainExpired
           expr: sum(opengeni:sandbox_leases_expired_draining:fresh_max{age_bucket=~"5m_1h|1h_1d|gte_1d"}) > 0
@@ -840,7 +1281,11 @@ spec:
           labels:
             severity: warning
           annotations:
-            summary: OpenGeni has a sandbox stuck in draining
+            summary: 'A sandbox is stuck shutting down past its drain deadline.'
+            headline: 'Sandbox stuck shutting down'
+            value: '{{ "{{ printf `%.0f` $value }}" }} sandbox(es) stuck'
+            user_impact: 'No direct user impact; the sandbox is stuck releasing and still costs money.'
+            next_step: 'Check archive capture, provider termination, checkpoint publication and reaper errors.'
             description: A refcount-zero sandbox has exceeded its drain deadline. Check archive capture, provider termination, checkpoint publication, and reaper errors.
         {{- if $modalEnabled }}
         - alert: OpenGeniModalSandboxesWithoutLease
@@ -849,7 +1294,11 @@ spec:
           labels:
             severity: warning
           annotations:
-            summary: Modal sandboxes have been running without a live Opengeni lease for 15m
+            summary: 'Modal sandboxes have been running without a live Opengeni lease for 15 minutes.'
+            headline: 'Modal sandboxes running with no owner'
+            value: '{{ "{{ printf `%.0f` $value }}" }} untracked sandbox(es)'
+            user_impact: 'No user impact; untracked sandboxes cost money.'
+            next_step: 'Check the reaper''s orphan-sweep warnings and Modal API errors.'
             description: The orphan sweep keeps finding running Modal boxes that no warming/warm/draining lease owns, so it is either failing to terminate them or new orphans keep appearing. Check "sandbox reaper" orphan-sweep warnings, Modal API errors, and warming leases without an instance id (they postpone every orphan termination).
         - alert: OpenGeniModalLeaseInstanceMissing
           expr: opengeni:modal_sandbox_inventory:fresh_max{state="lease_missing_instance"} > 0
@@ -857,7 +1306,11 @@ spec:
           labels:
             severity: warning
           annotations:
-            summary: Warm Opengeni sandbox leases point at Modal boxes that are no longer running
+            summary: 'Warm sandbox records point at Modal sandboxes that are no longer running.'
+            headline: 'Sandbox records point at vanished Modal sandboxes'
+            value: '{{ "{{ printf `%.0f` $value }}" }} lease(s) affected'
+            user_impact: 'Affected users'' next turn may hit a lost sandbox and continue from a checkpoint.'
+            next_step: 'Check the lease''s capture and drain progress and provider-missing recovery.'
             description: A warm lease names an exact Modal instance that complete app listings keep not showing (draining leases are excluded; they lose their box mid-drain). The lease may keep metering warm time and its next turn or drain will hit provider loss. Check the lease's capture/drain progress and provider-missing recovery.
         - alert: OpenGeniModalInventoryStale
           expr: |
@@ -869,7 +1322,10 @@ spec:
           labels:
             severity: warning
           annotations:
-            summary: The Modal orphan sweep has not completed a full provider listing recently
+            summary: 'The Modal orphan sweep has not completed a full provider listing recently.'
+            headline: 'Modal sandbox inventory not updating'
+            user_impact: 'No user impact; orphan cleanup and Modal inventory alerts are blind until it recovers.'
+            next_step: 'Check the reaper''s ''Modal orphan sweep failed'' warnings and Modal API health.'
             description: No control replica has listed the whole Modal app recently, so orphan termination and the Modal inventory alerts are blind. Check "Modal orphan sweep failed" reaper warnings and Modal API health.
         {{- end }}
         - alert: OpenGeniSandboxInventoryProjectionStale
@@ -886,8 +1342,12 @@ spec:
           labels:
             severity: critical
           annotations:
-            summary: OpenGeni sandbox inventory telemetry is stale or absent
+            summary: 'Sandbox inventory monitoring is stale or missing for at least one inventory type.'
+            headline: 'Sandbox inventory monitoring stale'
+            user_impact: 'No direct user impact, but sandbox health alerts are blind until it recovers.'
+            next_step: 'Check that worker-control pods are running and can reach the database; it recovers once the reaper''s inventory refresh succeeds again.'
             description: No control replica has completed a fresh database projection for at least one sandbox inventory domain. Threshold alerts for that domain intentionally fail closed until projection health returns.
+            runbook_url: https://github.com/Cloudgeni-ai/opengeni/blob/main/docs/deployment.md#observability
         - alert: OpenGeniCodexCredentialPoolEmpty
           expr: |
             sum by (namespace, release, environment, component, workspace_key) (
@@ -897,26 +1357,42 @@ spec:
           labels:
             severity: critical
           annotations:
-            summary: A Codex workspace observed no eligible subscription credentials
+            summary: 'A workspace has no usable Codex subscription account left (workspace key {{ "{{ $labels.workspace_key }}" }}).'
+            headline: 'Codex: no usable subscription accounts'
+            value: 'hit {{ "{{ printf `%.0f` $value }}" }} time(s) in 5 min'
+            user_impact: 'Codex-model turns in this workspace pause and wait for capacity until an account resets or is reconnected; users see their agent waiting.'
+            next_step: 'Check whether every account is rate-limited until its reset or disconnected; reconnect or add a Codex subscription for that workspace.'
             description: Workspace pool {{ "{{ $labels.workspace_key }}" }} observed zero eligible subscription credentials. Restore or reconnect an allocator-enabled credential before new Codex turns require capacity.
+            runbook_url: https://github.com/Cloudgeni-ai/opengeni/blob/main/docs/codex-subscription-rotation.md#same-turn-capacity-recovery
         - alert: OpenGeniCodexCredentialPoolSingle
           expr: |
             sum by (namespace, release, environment, component, workspace_key) (
               increase(opengeni_codex_pool_low_total{namespace={{ .Release.Namespace | quote }},release={{ .Release.Name | quote }},environment={{ $environment | quote }},depth="one"}[15m])
             ) > 0
           for: 5m
+          # Informational: any workspace that connects exactly one ChatGPT subscription (the normal
+          # personal case) matches, so this must not notify. The dashboard still shows it.
           labels:
-            severity: warning
+            severity: info
           annotations:
-            summary: A Codex workspace is operating with only one eligible subscription credential
+            summary: 'A workspace has only one usable Codex subscription account (workspace key {{ "{{ $labels.workspace_key }}" }}).'
+            headline: 'Codex: only one subscription account left'
+            value: 'hit {{ "{{ printf `%.0f` $value }}" }} time(s) in 15 min'
+            user_impact: 'No user impact yet; if that account hits its limit, Codex turns in this workspace will pause.'
+            next_step: 'Connect or re-enable a second Codex subscription account for that workspace.'
             description: Workspace pool {{ "{{ $labels.workspace_key }}" }} observed exactly one eligible subscription credential. Add or restore a second allocator-enabled credential to remove the single-account failure domain.
+            runbook_url: https://github.com/Cloudgeni-ai/opengeni/blob/main/docs/codex-subscription-rotation.md#same-turn-capacity-recovery
         - alert: OpenGeniServiceDown
           expr: up{job=~".*opengeni.*"} == 0
           for: 5m
           labels:
             severity: critical
           annotations:
-            summary: An OpenGeni service target is down
+            summary: 'Monitoring cannot reach the {{ "{{ $labels.job }}" }} service ({{ "{{ $labels.instance }}" }}) for 5 minutes.'
+            headline: '{{ "{{ $labels.job }}" }}: service down'
+            user_impact: 'If this is the API or web service, users may be unable to use the app; if it is a worker, agent turns may stall.'
+            next_step: 'Check the {{ "{{ $labels.job }}" }} pods (crash, OOM, failed deploy) and their health endpoint; roll back if it followed a deploy.'
+            runbook_url: https://github.com/Cloudgeni-ai/opengeni/blob/main/docs/launch-monitoring.md#alert--first-action
         # ── Worker memory headroom ───────────────────────────────────────────
         - alert: OpenGeniTurnWorkerMemoryHeadroomLow
           expr: |
@@ -927,7 +1403,11 @@ spec:
           labels:
             severity: warning
           annotations:
-            summary: A resource-based turn worker reached its admission target
+            summary: 'A turn worker reached its memory target and stopped taking new work.'
+            headline: 'Turn worker full on memory, pausing new work'
+            value: 'memory {{ "{{ $value | humanizePercentage }}" }} used'
+            user_impact: 'New agent turns may wait slightly longer while other workers pick them up.'
+            next_step: 'Usually self-heals as autoscaling adds workers; if it persists, look for a memory-heavy turn or add capacity.'
             description: Temporal should stop admitting more work while HPA or queued capacity absorbs load. This is backpressure, not a restart condition.
         - alert: OpenGeniTurnWorkerMemoryEmergency
           expr: |
@@ -938,8 +1418,13 @@ spec:
           labels:
             severity: critical
           annotations:
-            summary: A turn worker crossed its emergency memory threshold
+            summary: 'A turn worker crossed its emergency memory threshold.'
+            headline: 'Turn worker in memory emergency'
+            value: 'memory {{ "{{ $value | humanizePercentage }}" }} used'
+            user_impact: 'The worker may soon drain and hand its turns to others, pausing those users'' sessions briefly.'
+            next_step: 'Check which turns use the most memory on that worker and whether the node itself is short on memory.'
             description: Admission already stopped, but in-flight work retained enough memory to enter the last-resort graceful drain window.
+            runbook_url: https://github.com/Cloudgeni-ai/opengeni/blob/main/docs/launch-monitoring.md#alert--first-action
         - alert: OpenGeniTurnWorkerMemoryConsumesReserve
           expr: |
             max by (instance, scope) (opengeni_turn_worker_memory_guard_process_rss_ratio)
@@ -952,14 +1437,22 @@ spec:
           labels:
             severity: warning
           annotations:
-            summary: One turn worker RSS consumes more than the configured memory reserve
+            summary: 'One turn worker process is using more memory than the reserved headroom.'
+            headline: 'Turn worker eating into its memory reserve'
+            value: 'process uses {{ "{{ $value | humanizePercentage }}" }} of memory'
+            user_impact: 'No user impact yet; the worker is closer to an emergency drain.'
+            next_step: 'Look for a memory-heavy turn on that worker; an engineer may need to reduce per-turn memory.'
             description: The worker process alone is larger than the headroom reserved above ordinary admission. Reduce per-turn retention or isolate the worker before pressure reaches the emergency threshold.
         - alert: OpenGeniTurnWorkerMemoryGuardDraining
           expr: sum(increase(opengeni_turn_worker_memory_guard_drains_total[10m])) > 0
           labels:
             severity: warning
           annotations:
-            summary: A turn worker requested a memory-pressure safety drain
+            summary: 'A turn worker drained itself because of sustained memory pressure.'
+            headline: 'Turn worker drained due to memory pressure'
+            value: '{{ "{{ printf `%.0f` $value }}" }} drain(s) (10 min)'
+            user_impact: 'Turns on that worker paused briefly and resumed on another worker.'
+            next_step: 'Check for long-running memory-heavy turns; if it repeats, add memory or worker capacity.'
             description: Sustained host or finite-cgroup memory pressure triggered the normal graceful worker shutdown/checkpoint path. Inspect long-running turns and retained external memory before replacement capacity repeats the event.
         - alert: OpenGeniTurnWorkerMemoryGuardFailure
           expr: |
@@ -970,8 +1463,13 @@ spec:
           labels:
             severity: critical
           annotations:
-            summary: The turn-worker memory guard could not sample pressure or request a drain
+            summary: 'The turn-worker memory guard could not read memory pressure or request a drain.'
+            headline: 'Worker memory protection not working'
+            value: '{{ "{{ printf `%.0f` $value }}" }} failure(s) (10 min)'
+            user_impact: 'No user impact yet, but a memory spike could now crash a worker mid-turn.'
+            next_step: 'Check worker logs for memory-guard errors and that host/cgroup memory files are readable.'
             description: The hard headroom protection is degraded. Restore readable host/cgroup memory signals and the graceful worker lifecycle before admitting sustained turn load.
+            runbook_url: https://github.com/Cloudgeni-ai/opengeni/blob/main/docs/launch-monitoring.md#alert--first-action
         # ── OpenGeni-hosting node pressure ───────────────────────────────────
         - alert: OpenGeniNodeMemoryPressureStalled
           expr: |
@@ -982,8 +1480,13 @@ spec:
           labels:
             severity: critical
           annotations:
-            summary: An OpenGeni node is losing more than 10% of execution time to memory stalls
+            summary: 'Server {{ "{{ $labels.node }}" }} is losing more than 10% of its time waiting on memory.'
+            headline: 'Server {{ "{{ $labels.node }}" }}: starved of memory'
+            value: '{{ "{{ $value | humanizePercentage }}" }} of time stalled'
+            user_impact: 'Everything on this server slows down; agents, the API and background services may stall.'
+            next_step: 'Find the biggest memory users on the node and move or restart them, or add a node.'
             description: Sustained memory PSI indicates reclaim or swap contention across the node, even when no pod has a finite memory limit.
+            runbook_url: https://github.com/Cloudgeni-ai/opengeni/blob/main/docs/launch-monitoring.md#alert--first-action
         - alert: OpenGeniNodeIoPressureStalled
           expr: |
             opengeni:node_io_psi_stall_ratio{namespace={{ .Release.Namespace | quote }},release={{ .Release.Name | quote }},environment={{ $environment | quote }}} > 0.1
@@ -993,8 +1496,13 @@ spec:
           labels:
             severity: critical
           annotations:
-            summary: An OpenGeni node is losing more than 10% of execution time to I/O stalls
+            summary: 'Server {{ "{{ $labels.node }}" }} is losing more than 10% of its time waiting on disk.'
+            headline: 'Server {{ "{{ $labels.node }}" }}: stalled on disk'
+            value: '{{ "{{ $value | humanizePercentage }}" }} of time stalled'
+            user_impact: 'Everything on this server slows down; agents, the API and background services may stall.'
+            next_step: 'Find what is hammering the disk on the node (logs, images, databases) and move it, or replace the node.'
             description: Sustained I/O PSI can stall the container runtime, DNS, NATS, Temporal, and every worker together on a single node.
+            runbook_url: https://github.com/Cloudgeni-ai/opengeni/blob/main/docs/launch-monitoring.md#alert--first-action
         - alert: OpenGeniNodeSwapThrashing
           expr: |
             opengeni:node_swap_out_pages_per_second{namespace={{ .Release.Namespace | quote }},release={{ .Release.Name | quote }},environment={{ $environment | quote }}} > 0
@@ -1005,8 +1513,13 @@ spec:
           labels:
             severity: critical
           annotations:
-            summary: An OpenGeni node is swapping while processes are stalled on memory
+            summary: 'Server {{ "{{ $labels.node }}" }} is swapping while processes are stalled on memory.'
+            headline: 'Server {{ "{{ $labels.node }}" }}: swapping heavily'
+            value: '{{ "{{ $value | humanize }}" }} pages swapped out/s'
+            user_impact: 'Services on this server may freeze or become extremely slow.'
+            next_step: 'Free memory on the node now (move heavy pods) or replace the node; this rarely clears on its own.'
             description: Active swap-out combined with memory PSI is a host-wide collapse signal, not an isolated provider or network error.
+            runbook_url: https://github.com/Cloudgeni-ai/opengeni/blob/main/docs/launch-monitoring.md#alert--first-action
         - alert: OpenGeniNodeContainerRuntimeErrors
           expr: |
             sum by (node, operation_type) (
@@ -1019,8 +1532,13 @@ spec:
           labels:
             severity: critical
           annotations:
-            summary: Kubelet container-runtime operations are failing on an OpenGeni node
+            summary: 'Container runtime operations ({{ "{{ $labels.operation_type }}" }}) are failing on server {{ "{{ $labels.node }}" }}.'
+            headline: 'Server {{ "{{ $labels.node }}" }}: container runtime errors'
+            value: '{{ "{{ printf `%.0f` $value }}" }} error(s) (5 min)'
+            user_impact: 'Pods on this server may fail to start or restart, making services look down.'
+            next_step: 'Check kubelet and container runtime health on the node; cordon and replace it if errors continue.'
             description: Runtime errors during node pressure can make unrelated services appear unavailable and can prevent clean replacement capacity from starting.
+            runbook_url: https://github.com/Cloudgeni-ai/opengeni/blob/main/docs/launch-monitoring.md#alert--first-action
         - alert: OpenGeniNodeNotReady
           expr: |
             max by (node) (
@@ -1032,8 +1550,12 @@ spec:
           labels:
             severity: critical
           annotations:
-            summary: A node hosting OpenGeni is NotReady
+            summary: 'Server {{ "{{ $labels.node }}" }}, which runs Opengeni workloads, is NotReady.'
+            headline: 'Server {{ "{{ $labels.node }}" }}: down (NotReady)'
+            user_impact: 'Services on this server are unavailable or moving; users may see errors until they reschedule.'
+            next_step: 'Check the node in the cloud console; Kubernetes reschedules pods automatically, so replace the node if it does not recover.'
             description: Treat simultaneous service, DNS, transport, and provider failures as a node incident until readiness and pressure signals recover.
+            runbook_url: https://github.com/Cloudgeni-ai/opengeni/blob/main/docs/launch-monitoring.md#alert--first-action
         # ── Streaming health ─────────────────────────────────────────────────
         # SLIs from the token-streaming pipeline, split so an alert names the
         # layer: the model (TTFT), the durable write path (append), or delivery
@@ -1075,17 +1597,25 @@ spec:
             severity: warning
             notification_policy: investigate
           annotations:
-            summary: Provider {{ "{{ $labels.provider }}" }} time-to-first-token p90 is over {{ $providerTtftRegressionRatio }}x its trailing 24h baseline
-            description: Measured from the literal provider dispatch, so OpenGeni pre-dispatch work is excluded; a regression here is the provider (network, queueing, prefill or reasoning before the first streamed token). Suppressed while OpenGeni's own pre-dispatch latency alert condition holds, so platform saturation is attributed to us first. A provider without a {{ $providerTtftBaselineMinSamples }}-request baseline does not alert.
+            summary: '{{ "{{ $labels.provider }}" }} takes more than {{ $providerTtftRegressionRatio }}x its usual time to start streaming replies.'
+            headline: '{{ "{{ $labels.provider }}" }}: slower than usual to reply'
+            value: 'p90 first token {{ "{{ $value | humanizeDuration }}" }}'
+            user_impact: 'Users on this model wait noticeably longer before replies start.'
+            next_step: 'Check the provider''s status; usually recovers on its own; if it persists, steer users to another model.'
+            description: Measured from the literal provider dispatch, so Opengeni pre-dispatch work is excluded; a regression here is the provider (network, queueing, prefill or reasoning before the first streamed token). Suppressed while Opengeni's own pre-dispatch latency alert condition holds, so platform saturation is attributed to us first. A provider without a {{ $providerTtftBaselineMinSamples }}-request baseline does not alert.
             action: Compare the provider's p90 against its baseline on Streaming Health, check provider status and the request phase (headers/first byte) panels, and consider steering traffic to another route if the regression persists.
-            runbook_url: https://github.com/Cloudgeni-ai/opengeni/blob/main/docs/launch-monitoring.md
+            runbook_url: https://github.com/Cloudgeni-ai/opengeni/blob/main/docs/launch-monitoring.md#alert--first-action
         - alert: OpenGeniEventAppendLatencyHigh
           expr: histogram_quantile(0.99, sum by (le) (rate(opengeni_session_event_append_seconds_bucket{namespace={{ .Release.Namespace | quote }},release={{ .Release.Name | quote }},environment={{ $environment | quote }}}[10m]))) > 1
           for: 10m
           labels:
             severity: warning
           annotations:
-            summary: OpenGeni session-event append p99 exceeds 1s (durable write path)
+            summary: 'Saving session updates to the database takes more than 1 second (p99).'
+            headline: 'Database slow to save session updates'
+            value: 'p99 {{ "{{ $value | humanizeDuration }}" }}'
+            user_impact: 'Agent output appears in the app with a delay and everything feels sluggish.'
+            next_step: 'Check Postgres CPU, connections and slow queries.'
             description: appendSessionEvents p99 is above 1s for 10m — Postgres is the streaming bottleneck, not the model or NATS.
         - alert: OpenGeniEventAppendLatencyCritical
           expr: histogram_quantile(0.99, sum by (le) (rate(opengeni_session_event_append_seconds_bucket{namespace={{ .Release.Namespace | quote }},release={{ .Release.Name | quote }},environment={{ $environment | quote }}}[5m]))) > 2
@@ -1093,15 +1623,24 @@ spec:
           labels:
             severity: critical
           annotations:
-            summary: OpenGeni session-event append p99 exceeds 2s
+            summary: 'Saving session updates to the database takes more than 2 seconds (p99).'
+            headline: 'Database critically slow saving session updates'
+            value: 'p99 {{ "{{ $value | humanizeDuration }}" }}'
+            user_impact: 'Agent replies stream slowly or stall, and the app may time out.'
+            next_step: 'Check Postgres CPU, active sessions and hot queries now; adding API or worker pods will not help.'
             description: The durable Postgres write path is critically saturated. Inspect database CPU, active sessions, hot statements, and application request pressure before scaling stateless pods.
+            runbook_url: https://github.com/Cloudgeni-ai/opengeni/blob/main/docs/launch-monitoring.md#alert--first-action
         - alert: OpenGeniEventPublishLatencyHigh
           expr: histogram_quantile(0.99, sum by (le) (rate(opengeni_session_event_publish_seconds_bucket{namespace={{ .Release.Namespace | quote }},release={{ .Release.Name | quote }},environment={{ $environment | quote }}}[10m]))) > 0.5
           for: 10m
           labels:
             severity: warning
           annotations:
-            summary: OpenGeni live-publish p99 exceeds 500ms (delivery path)
+            summary: 'Live delivery of session updates to the app takes more than 500 ms (p99).'
+            headline: 'Live updates to the app are delayed'
+            value: 'p99 {{ "{{ $value | humanizeDuration }}" }}'
+            user_impact: 'Streaming output appears late or in bursts; nothing is lost and it catches up.'
+            next_step: 'Check NATS health and load; usually clears on its own.'
             description: The best-effort NATS live fan-out p99 is above 500ms for 10m — live delivery is degraded (events stay durable and reconcile on stream replay).
         - alert: OpenGeniNatsSubscriptionTerminated
           expr: |
@@ -1110,7 +1649,11 @@ spec:
           labels:
             severity: warning
           annotations:
-            summary: An OpenGeni NATS {{ "{{ $labels.kind }}" }} subscription ended while still held
+            summary: 'A live-messaging (NATS) {{ "{{ $labels.kind }}" }} subscription was ended by the broker.'
+            headline: 'Live-messaging subscription dropped ({{ "{{ $labels.kind }}" }})'
+            value: '{{ "{{ printf `%.0f` $value }}" }} drop(s) (10 min)'
+            user_impact: 'Usually none, because it reconnects automatically; for auth_callout, Connected Machines cannot connect until it recovers.'
+            next_step: 'No action if it stops; if the count keeps rising, check NATS permissions for that account and the api/worker warnings.'
             description: The broker ended a live subscription, for example with a permissions violation. SSE consumers fail retryably and replay from Postgres; the auth-callout, Codemode request, and agent-event responders resubscribe with bounded backoff (at most about 31s apart). A counter that keeps rising means resubscribes keep failing; for kind auth_callout every Connected Machine connect is denied until it recovers. Inspect the api/worker "NATS subscription ended" warnings and the NATS server permissions for that account.
         # ── Context / compaction ─────────────────────────────────────────────
         - alert: OpenGeniCompactionNotFiring
@@ -1128,7 +1671,11 @@ spec:
           labels:
             severity: warning
           annotations:
-            summary: OpenGeni automatic compaction started but did not complete
+            summary: 'An automatic conversation compaction started but has not finished for over 15 minutes.'
+            headline: 'Conversation compaction stuck'
+            value: 'pending for {{ "{{ $value | humanizeDuration }}" }}'
+            user_impact: 'An agent with a long conversation is stuck summarizing its history and not continuing.'
+            next_step: 'Find the owning turn attempt and check its provider call and worker logs.'
             description: An exact active attempt has retained a durable automatic context-compaction start without a compacted/skipped settlement for more than 15 minutes. Inspect the owning attempt, provider call, and worker recovery.
         - alert: OpenGeniCodexPromptCacheHitRatioLow
           # The codex-subscription prompt cache is doing little work: median per-call
@@ -1139,26 +1686,34 @@ spec:
           # no codex calls yet the ratio series has never been created, so a bare
           # `_count` rate is an EMPTY vector — the fallback forces a real 0 so the
           # conjunction is well-formed and the alert simply stays quiet on no traffic.
+          # Needs at least 50 calls in 30m: a new chat's first request can never hit the cache, so at
+          # low volume the median is dominated by fresh chats and means nothing.
           expr: |
             histogram_quantile(0.5, sum by (le) (rate(opengeni_model_cache_hit_ratio_bucket{provider="codex-subscription"}[30m]))) < 0.4
             and on()
-            (sum(rate(opengeni_model_cache_hit_ratio_count{provider="codex-subscription"}[30m])) or vector(0)) > 0
+            (sum(increase(opengeni_model_cache_hit_ratio_count{provider="codex-subscription"}[30m])) or vector(0)) >= 50
           for: 30m
           labels:
             severity: warning
           annotations:
-            summary: OpenGeni codex prompt-cache hit ratio p50 below 40% over 30m
+            summary: 'The median Codex prompt-cache hit rate has been below 40% for 30 minutes.'
+            headline: 'Codex prompt cache barely working'
+            value: 'median cache hit {{ "{{ $value | humanizePercentage }}" }}'
+            user_impact: 'Replies on Codex models are slower and use more of the subscription quota.'
+            next_step: 'Check for frequent account rotation in the Codex usage logs; usually settles once rotation stops.'
             description: The codex-subscription prompt cache is serving under 40% of prompt tokens from cache (median call) for 30m. Suspect prompt-cache thrash — an account rotation cold-starts the provider's per-account cache. Cross-check the per-call usage logs' accountChangedFromPrevCall against cachedTokens.
         - alert: OpenGeniCodexPromptCacheTelemetryMissing
           # A missing cached-token field is unknown, not a truthful 0% hit. Keep
           # that semantics and detect active calls with no usage observations.
           # HTTP success is recorded at response headers, before streamed usage
           # is committed; counter skew does not prove a missing cached-token field.
+          # Absent usage needs at least 20 completed calls in 30m: after a worker restart the first
+          # increment of a new counter is invisible to rate(), so a handful of calls looks missing.
           expr: |
             (sum(rate(opengeni_model_cache_read_telemetry_total{provider="codex-subscription",status="missing"}[30m])) or vector(0)) > 0
             or
             (
-              sum(rate(opengeni_model_calls_total{provider="codex-subscription",outcome="completed"}[30m])) > 0
+              sum(increase(opengeni_model_calls_total{provider="codex-subscription",outcome="completed"}[30m])) >= 20
               and on()
               (sum(rate(opengeni_model_cache_read_telemetry_total{provider="codex-subscription"}[30m])) or vector(0)) == 0
             )
@@ -1166,7 +1721,10 @@ spec:
           labels:
             severity: warning
           annotations:
-            summary: OpenGeni Codex prompt-cache telemetry is missing on active calls
+            summary: 'Codex calls are running but their cache usage data is missing.'
+            headline: 'Codex cache metrics missing'
+            user_impact: 'No user impact; we cannot measure Codex cache efficiency.'
+            next_step: 'Not urgent: an engineer should check whether the Codex usage format changed.'
             description: For 15m, Codex-subscription usage has explicitly omitted cached-token fields, or active HTTP-success traffic has produced no cache-usage observations. Cache-hit ratio remains unknown rather than being fabricated as zero; inspect provider usage payload compatibility, stream failures and worker usage persistence.
         # ── Connected Machines (op-outcome plane) ────────────────────────────
         - alert: OpenGeniMachineOpInfraFailuresHigh
@@ -1182,7 +1740,11 @@ spec:
           labels:
             severity: warning
           annotations:
-            summary: OpenGeni Connected Machine op infra-failure ratio exceeds 10%
+            summary: 'More than 10% of operations on Connected Machines failed over 10 minutes.'
+            headline: 'Connected Machines: operations failing'
+            value: '{{ "{{ $value | humanizePercentage }}" }} of operations failed (10 min)'
+            user_impact: 'Agents running on users'' own machines hit errors running commands or file operations.'
+            next_step: 'Check NATS and relay health and the typed fault codes in Grafana.'
         - alert: OpenGeniMachineOpHealedFaultsSpiking
           # Healed faults are the LEADING indicator of the next unhealed one — a
           # blip/backpressure the transport absorbed. A rising rate precedes real
@@ -1192,7 +1754,11 @@ spec:
           labels:
             severity: info
           annotations:
-            summary: OpenGeni Connected Machine healed-fault rate is elevated (leading indicator)
+            summary: 'Connected Machine operations need retries more often than usual (early warning).'
+            headline: 'Connected Machines: more retries than usual'
+            value: '{{ "{{ $value | humanize }}" }} retried ops/s'
+            user_impact: 'No user impact yet; this is an early warning of connection trouble.'
+            next_step: 'Watch for real failures; check NATS and relay health if it persists.'
         # ── Worker fleet ─────────────────────────────────────────────────────
         # Google Drive scheduled knowledge sync. Every rule is fenced to the
         # exact namespace, Helm release, configured environment, and provider.
@@ -1209,7 +1775,11 @@ spec:
           labels:
             severity: warning
           annotations:
-            summary: Google Drive knowledge-sync failures exceed 20%
+            summary: 'More than 20% of Google Drive knowledge syncs failed over 15 minutes.'
+            headline: 'Google Drive knowledge sync failing'
+            value: '{{ "{{ $value | humanizePercentage }}" }} of syncs failed (15 min)'
+            user_impact: 'Workspace knowledge from Google Drive may be out of date in agent answers.'
+            next_step: 'Check the failure reasons; reconnect-required means a user must reconnect Google Drive.'
             description: Inspect bounded failure reasons, provider retry, reconnect-required, and explicit limit-hit series before changing retry or source budgets.
         - alert: OpenGeniGoogleDriveReconnectRequired
           expr: |
@@ -1217,7 +1787,11 @@ spec:
           labels:
             severity: warning
           annotations:
-            summary: A Google Drive source requires connector reconnection
+            summary: 'A Google Drive knowledge source needs its connection reconnected.'
+            headline: 'Google Drive connection needs reconnecting'
+            value: '{{ "{{ printf `%.0f` $value }}" }} sync(s) blocked (15 min)'
+            user_impact: 'That Drive source stops updating until its owner reconnects it.'
+            next_step: 'Ask the connection owner to reconnect Google Drive in Opengeni; no platform fix is needed.'
             description: Reconnect through the normal user-owned connection lifecycle; never copy tokens or provider responses into operator evidence.
         - alert: OpenGeniGoogleDriveSyncLimitReached
           expr: |
@@ -1225,7 +1799,11 @@ spec:
           labels:
             severity: info
           annotations:
-            summary: A Google Drive sync reached an explicit resource limit
+            summary: 'A Google Drive sync reached its {{ "{{ $labels.limit }}" }} limit.'
+            headline: 'Google Drive sync hit a size limit'
+            value: '{{ "{{ printf `%.0f` $value }}" }} time(s) (30 min)'
+            user_impact: 'Some Drive files are not being indexed for agents.'
+            next_step: 'Check the source size against the limit before raising it.'
             description: Inspect the limit label and source size before approving any configuration increase.
         # This is telemetry completeness, NOT an autoscaling demand record.
         # `up` lacks environment/component: join only its actual scrape identity.
@@ -1304,10 +1882,14 @@ spec:
             severity: warning
             notification_policy: investigate
           annotations:
-            summary: Runnable OpenGeni turn-queue activities have waited over 30 seconds
+            summary: 'Agent turns ready to run have waited more than 30 seconds for a free worker.'
+            headline: 'Agent turns waiting in queue'
+            value: 'oldest waiting {{ "{{ $value | humanizeDuration }}" }}'
+            user_impact: 'Some users wait 30 seconds to 2 minutes after sending a message before the agent starts.'
+            next_step: 'Usually clears as autoscaling adds workers; if not within a few minutes, check Launch capacity in Grafana.'
             description: A complete fresh turn-worker projection has positive queue depth and age between 30 and 120 seconds for one minute. Inspect queue activity classes, worker slots, admission memory and Pending Pods; exclude paused human prompts and do not treat legacy video/retry activities as customer-only demand. The critical age tier replaces this warning above 120 seconds. Rule hold excludes scrape, evaluation and notification grouping delay; inspect the loaded Alertmanager policy before claiming delivery latency.
             action: Open Launch capacity drilldowns; compare fresh MAX queue depth/age against physical inflight, available slots, worker replicas and node capacity before changing scaling.
-            runbook_url: https://github.com/Cloudgeni-ai/opengeni/blob/main/docs/launch-monitoring.md
+            runbook_url: https://github.com/Cloudgeni-ai/opengeni/blob/main/docs/launch-monitoring.md#alert--first-action
         - alert: OpenGeniTurnEligibleBacklogCritical
           expr: |
             opengeni:turn_eligible_backlog_oldest_age_seconds:fresh_max{namespace={{ .Release.Namespace | quote }},release={{ .Release.Name | quote }},environment={{ $environment | quote }}} > 120
@@ -1318,10 +1900,14 @@ spec:
             severity: critical
             notification_policy: page
           annotations:
-            summary: Fresh runnable turn-queue activity age is over two minutes
+            summary: 'Agent turns ready to run have waited more than 2 minutes for a free worker.'
+            headline: 'Agent turns stuck in queue over 2 minutes'
+            value: 'oldest waiting {{ "{{ $value | humanizeDuration }}" }}'
+            user_impact: 'Users wait over 2 minutes for their agent to start; many will assume it is broken.'
+            next_step: 'Check worker slots, pending pods and database load in Grafana Launch capacity now; do not just raise concurrency.'
             description: Positive global queue depth and age over 120 seconds persist through a 30-second hold with complete fresh ready-worker telemetry. Inspect the exact queue classes and admission bottleneck; the shared queue may include legacy video/retry activities until its source isolation is deployed. This is not a pure external-customer backlog or proof of Temporal transport capacity. Notification arrival additionally depends on scrape, evaluation, grouping and a working receiver.
             action: Investigate worker admission and node/DB budget immediately; verify available slots and Pending/HPA signals, then follow the reliability/capacity owner's recovery path rather than blindly raising concurrency.
-            runbook_url: https://github.com/Cloudgeni-ai/opengeni/blob/main/docs/launch-monitoring.md
+            runbook_url: https://github.com/Cloudgeni-ai/opengeni/blob/main/docs/launch-monitoring.md#alert--first-action
         - alert: OpenGeniTurnSlotsSaturated
           expr: |
             max(
@@ -1349,10 +1935,14 @@ spec:
             severity: warning
             notification_policy: investigate
           annotations:
-            summary: A turn worker is above 90% of memory-safe slots while eligible work waits
+            summary: 'A turn worker is using over 90% of its safe turn slots while work is waiting.'
+            headline: 'Turn workers nearly full'
+            value: '{{ "{{ $value | humanizePercentage }}" }} of slots in use'
+            user_impact: 'No delay yet, but new turns will start queueing if load keeps rising.'
+            next_step: 'Usually self-heals through autoscaling; check worker replicas and node capacity if it persists.'
             description: Complete fresh queue telemetry shows over 90% slot use with positive queue depth for one minute. The age tier above 30 seconds or an observed HPA ceiling with a growing queue replaces this admission warning, avoiding duplicate capacity incidents. The memory-safe denominator is not the hard 32-turn ceiling and missing slot gauges are unknown.
             action: Compare memory-safe slot contraction with worker/HPA replicas and node/DB budget; scale only through the capacity owner's approved path.
-            runbook_url: https://github.com/Cloudgeni-ai/opengeni/blob/main/docs/launch-monitoring.md
+            runbook_url: https://github.com/Cloudgeni-ai/opengeni/blob/main/docs/launch-monitoring.md#alert--first-action
         - alert: OpenGeniTurnCapacityMonitorStale
           expr: |
             absent(opengeni:turn_capacity_monitor:fresh{namespace={{ .Release.Namespace | quote }},release={{ .Release.Name | quote }},environment={{ $environment | quote }}})
@@ -1361,10 +1951,13 @@ spec:
             severity: warning
             notification_policy: investigate
           annotations:
-            summary: OpenGeni turn-capacity telemetry is stale, incomplete or missing
+            summary: 'Turn-capacity monitoring is stale, incomplete or missing.'
+            headline: 'Turn-capacity monitoring is blind'
+            user_impact: 'No direct user impact, but queue backlog alerts cannot fire until this recovers.'
+            next_step: 'Check worker-turns pods and their metrics scrape, and their connection to Temporal.'
             description: No complete healthy ready-worker projection is available for 30 seconds; at least one scrape is down/absent, a monitor value/timestamp is missing, a successful queue sample is at least 60 seconds old, or deployment availability cannot be verified. Queue threshold alerts fail closed to unknown until all required observations recover; absence is not zero backlog or zero load.
             action: Check worker-turns ServiceMonitor targets, ready deployment replicas, monitor errors and Temporal DescribeTaskQueue connectivity; restore evidence before acting on queue values.
-            runbook_url: https://github.com/Cloudgeni-ai/opengeni/blob/main/docs/launch-monitoring.md
+            runbook_url: https://github.com/Cloudgeni-ai/opengeni/blob/main/docs/launch-monitoring.md#alert--first-action
         - alert: OpenGeniTurnWorkerPodPending
           expr: |
             max by (namespace, pod) (kube_pod_status_phase{namespace={{ .Release.Namespace | quote }},phase="Pending"} == 1)
@@ -1376,10 +1969,13 @@ spec:
             severity: warning
             notification_policy: investigate
           annotations:
-            summary: A turn-worker Pod has remained Pending for two minutes
+            summary: 'A new turn-worker pod has been waiting to start for two minutes.'
+            headline: 'Turn worker pod stuck waiting to start'
+            user_impact: 'No impact unless load is high; then turns queue because extra capacity cannot come online.'
+            next_step: 'Check the pod''s events for why it cannot be scheduled (node capacity, resources, image pull).'
             description: The exact release's turn-worker Pod is continuously Pending, not a transient rollout sample. If kube-state-metrics phase/label series are absent this signal is unknown; it is not evidence that scheduling succeeded.
             action: Inspect the Pod scheduling condition/events, node pool headroom, requests, taints, affinity, image pull state and volume constraints; coordinate capacity recovery instead of increasing turn concurrency.
-            runbook_url: https://github.com/Cloudgeni-ai/opengeni/blob/main/docs/launch-monitoring.md
+            runbook_url: https://github.com/Cloudgeni-ai/opengeni/blob/main/docs/launch-monitoring.md#alert--first-action
         - alert: OpenGeniTurnWorkersAtScalingCeiling
           expr: |
             max(kube_horizontalpodautoscaler_status_current_replicas{namespace={{ .Release.Namespace | quote }},horizontalpodautoscaler="{{ $fullName }}-worker-turns"})
@@ -1395,10 +1991,14 @@ spec:
             severity: warning
             notification_policy: investigate
           annotations:
-            summary: Turn-worker HPA is at its ceiling while the fresh queue grows
+            summary: 'Turn workers are at their maximum replica count while the queue keeps growing.'
+            headline: 'Turn workers at max scale and queue growing'
+            value: 'at {{ "{{ printf `%.0f` $value }}" }} workers (the max)'
+            user_impact: 'Turns will start waiting longer as the queue grows; no more workers can be added automatically.'
+            next_step: 'Confirm node and database headroom with the capacity owner before raising the worker cap.'
             description: Current replicas have reached the observed HPA maximum and the fresh global queue has a positive two-minute trend and positive depth for one minute. An absent HPA or queue is unknown, not spare capacity. Older queue-age alerts replace this early warning; a flat or draining queue does not trigger it.
             action: Check worker/HPA status and node/DB budget with the capacity owner; do not raise the replica cap without confirming the cluster and PostgreSQL connection budget.
-            runbook_url: https://github.com/Cloudgeni-ai/opengeni/blob/main/docs/launch-monitoring.md
+            runbook_url: https://github.com/Cloudgeni-ai/opengeni/blob/main/docs/launch-monitoring.md#alert--first-action
         # The remaining rules read cluster-infra series (cAdvisor and
         # kube-state-metrics); without those exporters they remain absent.
         # Additional environment-specific alerts may be appended with
@@ -1416,8 +2016,13 @@ spec:
           labels:
             severity: warning
           annotations:
-            summary: An OpenGeni container is above 90% of its memory limit (pre-OOM)
+            summary: 'The {{ "{{ $labels.container }}" }} container in {{ "{{ $labels.pod }}" }} is above 90% of its memory limit.'
+            headline: '{{ "{{ $labels.container }}" }} container near its memory limit'
+            value: '{{ "{{ $value | humanizePercentage }}" }} of memory limit'
+            user_impact: 'No impact yet; if it hits the limit it is killed mid-work and its turns or requests are retried.'
+            next_step: 'Check the pod''s memory trend; restarting is not a fix, so find what holds the memory or raise the limit.'
             description: The worker holds the full in-turn history in memory; sustained >90% of the limit precedes an OOM kill mid-turn.
+            runbook_url: https://github.com/Cloudgeni-ai/opengeni/blob/main/docs/launch-monitoring.md#alert--first-action
         - alert: OpenGeniHpaAtMaxReplicas
           expr: |
             kube_horizontalpodautoscaler_status_current_replicas{horizontalpodautoscaler=~".*opengeni.*"}
@@ -1426,8 +2031,13 @@ spec:
           labels:
             severity: warning
           annotations:
-            summary: An OpenGeni HPA has been pinned at maxReplicas (capacity saturation)
+            summary: 'Autoscaler {{ "{{ $labels.horizontalpodautoscaler }}" }} has been at its maximum replicas for 15 minutes.'
+            headline: '{{ "{{ $labels.horizontalpodautoscaler }}" }} at maximum scale'
+            value: '{{ "{{ printf `%.0f` $value }}" }} replicas (the max)'
+            user_impact: 'If load keeps rising, requests or turns slow down because no more pods can be added.'
+            next_step: 'Check whether the load is expected; raise maxReplicas only if node and database budget allow.'
             description: The autoscaler cannot add more pods; sustained saturation means turns queue. Raise maxReplicas or investigate the load source.
+            runbook_url: https://github.com/Cloudgeni-ai/opengeni/blob/main/docs/launch-monitoring.md#alert--first-action
         {{- with ((.Values.observability).prometheusRule).rules }}
         {{- toYaml . | nindent 8 }}
         {{- end }}

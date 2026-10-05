@@ -3,6 +3,7 @@ import { execFileSync, spawnSync } from "node:child_process";
 import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
+import { expandAlertAnnotations } from "./prometheus-alert-template";
 
 type Scope = { namespace: string; release: string; environment: string; node: string };
 type Rule = {
@@ -36,6 +37,16 @@ const nodeAlerts = [
   "OpenGeniNodeContainerRuntimeErrors",
   "OpenGeniNodeNotReady",
 ];
+// The value each node alert renders into its notification annotations at the
+// 5m evaluation below: stall ratios, swap-out pages/s and the runtime-error
+// increase (NotReady renders no value).
+const nodeAlertValues: Record<string, number> = {
+  OpenGeniNodeMemoryPressureStalled: 0.2,
+  OpenGeniNodeIoPressureStalled: 0.3,
+  OpenGeniNodeSwapThrashing: 1,
+  OpenGeniNodeContainerRuntimeErrors: 5,
+  OpenGeniNodeNotReady: 0,
+};
 
 function render(scope: Scope): Manifest {
   const helm = Bun.which("helm");
@@ -240,9 +251,15 @@ test.skipIf(!promtool)(
                             ? { operation_type: "create_container" }
                             : {}),
                         },
-                        exp_annotations: groups[deployments.indexOf(scope)]!.rules.find(
-                          (rule) => rule.alert === alertname,
-                        )!.annotations,
+                        exp_annotations: expandAlertAnnotations(
+                          groups[deployments.indexOf(scope)]!.rules.find(
+                            (rule) => rule.alert === alertname,
+                          )!.annotations!,
+                          {
+                            value: nodeAlertValues[alertname]!,
+                            labels: { node: scope.node, operation_type: "create_container" },
+                          },
+                        ),
                       })),
             })),
           ),

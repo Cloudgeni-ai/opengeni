@@ -218,11 +218,13 @@ api:
   extraVolumeMounts: []
   enabled: true
   replicaCount: 2
+  # Surge a replacement before removing a serving pod so capacity never drops during a
+  # rollout, and drain each terminating pod (preStop) before the server stops.
   strategy:
     type: RollingUpdate
     rollingUpdate:
-      maxSurge: 0
-      maxUnavailable: 1
+      maxSurge: 1
+      maxUnavailable: 0
   image:
     repository: opengeni-api
     # Empty tag resolves to the chart appVersion via the opengeni.image helper.
@@ -256,6 +258,9 @@ api:
   podAnnotations: {}
   priorityClassName: ""
   terminationGracePeriodSeconds: 30
+  # Seconds a terminating pod keeps serving in-flight requests after it leaves the Service
+  # endpoints and before SIGTERM. 0 omits the hook (clusters older than k8s 1.30).
+  preStopDrainSeconds: 10
   topologySpreadConstraints:
     enabled: true
     maxSkew: 1
@@ -597,11 +602,13 @@ web:
   # entries. It is mounted read-only; do not reuse the full runtime Secret.
   demoApiCredentialsSecret: ""
   replicaCount: 2
+  # Surge a replacement before removing a serving pod so capacity never drops during a
+  # rollout, and drain each terminating pod (preStop) before the server stops.
   strategy:
     type: RollingUpdate
     rollingUpdate:
-      maxSurge: 0
-      maxUnavailable: 1
+      maxSurge: 1
+      maxUnavailable: 0
   image:
     repository: opengeni-web
     # Empty tag resolves to the chart appVersion via the opengeni.image helper.
@@ -629,6 +636,9 @@ web:
   podAnnotations: {}
   priorityClassName: ""
   terminationGracePeriodSeconds: 30
+  # Seconds a terminating pod keeps serving in-flight requests after it leaves the Service
+  # endpoints and before SIGTERM. 0 omits the hook (clusters older than k8s 1.30).
+  preStopDrainSeconds: 10
   topologySpreadConstraints:
     enabled: true
     maxSkew: 1

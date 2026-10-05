@@ -47,9 +47,17 @@ export type TurnTaskQueueStats = {
   tasksAddRate: number;
   tasksDispatchRate: number;
 };
+export type SessionRecoveryBacklogStateSummary = {
+  /** Every durable recovering session in this state with no active attempt. */
+  count: number;
+  /** Of those, sessions still inside the backoff their recovery request recorded. */
+  scheduled: number;
+  /** Seconds the single oldest candidate has been past its recovery due time; 0 when none is. */
+  oldestOverdueSeconds: number;
+};
 export type SessionRecoveryBacklog = {
-  quiescence_missing: number;
-  projection_stale: number;
+  quiescence_missing: SessionRecoveryBacklogStateSummary;
+  projection_stale: SessionRecoveryBacklogStateSummary;
 };
 export type ContextCompactionPendingSummary = {
   pendingCount: number;
@@ -847,14 +855,27 @@ export function startTurnCapacityMonitor(input: {
 
 export function recordSessionRecoveryBacklogGauges(
   observability: Observability,
-  counts: SessionRecoveryBacklog,
+  backlog: SessionRecoveryBacklog,
 ): void {
   for (const state of ["quiescence_missing", "projection_stale"] as const) {
+    const summary = backlog[state];
     observability.setGauge({
       name: "opengeni_session_recovery_backlog",
-      help: "Current durable recovering-session obligations with no active attempt, by bounded reconciliation state.",
+      help: "Current durable recovering-session obligations with no active attempt, by bounded reconciliation state. Includes sessions legitimately sleeping in their recorded recovery backoff.",
       labels: { state },
-      value: nonnegativeFinite(counts[state]),
+      value: nonnegativeFinite(summary.count),
+    });
+    observability.setGauge({
+      name: "opengeni_session_recovery_scheduled",
+      help: "Durable recovering sessions still inside the recovery backoff (provider Retry-After or connectivity pacing) their recovery request recorded, by bounded reconciliation state.",
+      labels: { state },
+      value: nonnegativeFinite(summary.scheduled),
+    });
+    observability.setGauge({
+      name: "opengeni_session_recovery_oldest_overdue_seconds",
+      help: "Seconds the single oldest durable recovering session with no active attempt has been past its recovery due time, by bounded reconciliation state; 0 when none is overdue.",
+      labels: { state },
+      value: nonnegativeFinite(summary.oldestOverdueSeconds),
     });
   }
 }
@@ -898,8 +919,8 @@ export function startSessionRecoveryMonitor(input: {
     if (stopped || running) return;
     running = input
       .read()
-      .then((counts) => {
-        recordSessionRecoveryBacklogGauges(input.observability, counts);
+      .then((backlog) => {
+        recordSessionRecoveryBacklogGauges(input.observability, backlog);
         lastSuccessAt = now();
         lastReadSucceeded = true;
         recordStatus();
@@ -1153,7 +1174,9 @@ export function recordActiveUserGauges(
 /**
  * Positive credit grants observed by the ledger trigger since migration 0565,
  * by closed class. These are cumulative database totals published as gauges by
- * every control worker: aggregate with `max()` across pods, then `increase()`.
+ * every control worker: aggregate with `max()` across pods, then subtract the
+ * same expression `offset` by the window. A per-pod `increase()` sees only one
+ * pod's lifetime and undercounts across control-worker restarts.
  * Counting in the database covers the grants no application process writes:
  * the verified-signup trial grant (a setup trigger) and operator grants.
  */
@@ -1613,6 +1636,138 @@ export function recordCreditMicros(
     labels: { kind },
     amount: amountMicros,
   });
+}
+
+// ── Per-model usage and money ───────────────────────────────────────────────
+// `model` is the deployment catalog product id (resolved by the caller), or
+// `custom` for a workspace-owned model. The recorder bounds it again: a value
+// outside a conservative id shape becomes `custom`, and after
+// MAX_MODEL_METRIC_LABELS distinct values per process every new value becomes
+// `other`, so a catalog change or a bug can never grow the series count without
+// bound. Account, workspace, user and session ids are never labels here.
+
+/** Who pays the upstream provider for the call. */
+export type ModelUsagePayer = "deployment" | "external";
+
+const MODEL_METRIC_LABEL_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._:/@+-]{0,127}$/;
+const MAX_MODEL_METRIC_LABELS = 64;
+const modelMetricLabels = new WeakMap<Observability, Set<string>>();
+
+export function boundedModelMetricLabel(observability: Observability, model: string): string {
+  if (model === "custom" || model === "other") return model;
+  if (!MODEL_METRIC_LABEL_PATTERN.test(model)) return "custom";
+  let seen = modelMetricLabels.get(observability);
+  if (!seen) {
+    seen = new Set<string>();
+    modelMetricLabels.set(observability, seen);
+  }
+  if (seen.has(model)) return model;
+  if (seen.size >= MAX_MODEL_METRIC_LABELS) return "other";
+  seen.add(model);
+  return model;
+}
+
+function nonnegativeSafeInteger(value: unknown): number {
+  return typeof value === "number" && Number.isSafeInteger(value) && value > 0 ? value : 0;
+}
+
+/**
+ * One authoritative model response, by provider and catalog model. Recorded
+ * behind the same durable usage-event fence as the provider-only cache metrics,
+ * so a duplicate or late response is not counted twice.
+ *   - `opengeni_model_responses_total{provider,model,priced}` — responses with
+ *     reported usage; `priced="false"` means no provider cost estimate exists.
+ *   - `opengeni_model_tokens_total{provider,model,type}` — `input` (all prompt
+ *     tokens, including cached and cache-write), `cached_input` and
+ *     `cache_write` (subsets of `input`), `output`, and `reasoning` (a subset
+ *     of `output`).
+ *   - `opengeni_model_provider_cost_micros_total{provider,model,payer,pricing_source}`
+ *     — estimated upstream cost in USD micros: configured list price, or the
+ *     gateway-reported cost. `payer="external"` is a customer-paid subscription
+ *     or key, so that cost is a list-price equivalent Opengeni does not pay.
+ */
+export function recordModelResponseUsage(
+  observability: Observability,
+  input: {
+    provider: string;
+    model: string;
+    payer: ModelUsagePayer;
+    tokens: {
+      inputTokens: number | null;
+      cachedTokens: number | null;
+      cacheWriteTokens: number | null;
+      outputTokens: number | null;
+      reasoningTokens: number | null;
+    };
+    estimatedProviderCostMicros: number | null;
+    pricingSource: "configured_list_price" | "gateway_reported" | null;
+  },
+): void {
+  const model = boundedModelMetricLabel(observability, input.model);
+  const base = { provider: input.provider, model };
+  const priced = input.pricingSource !== null && input.estimatedProviderCostMicros !== null;
+  observability.incrementCounter({
+    name: "opengeni_model_responses_total",
+    help: "Authoritative model responses with reported usage, by provider, catalog model and whether a cost estimate exists.",
+    labels: { ...base, priced: priced ? "true" : "false" },
+  });
+  const tokenTypes = [
+    ["input", input.tokens.inputTokens],
+    ["cached_input", input.tokens.cachedTokens],
+    ["cache_write", input.tokens.cacheWriteTokens],
+    ["output", input.tokens.outputTokens],
+    ["reasoning", input.tokens.reasoningTokens],
+  ] as const;
+  for (const [type, value] of tokenTypes) {
+    const amount = modelUsageTokenCountOrNull(value);
+    if (amount === null || amount === 0) continue;
+    incrementBoundedModelCacheCounter(observability, {
+      name: "opengeni_model_tokens_total",
+      help: "Tokens of authoritative model responses by provider, catalog model and token type (cached_input and cache_write are subsets of input; reasoning is a subset of output).",
+      provider: input.provider,
+      labels: { ...base, type },
+      amount,
+    });
+  }
+  const cost = nonnegativeSafeInteger(input.estimatedProviderCostMicros);
+  if (priced && input.pricingSource !== null && cost > 0) {
+    observability.incrementCounter({
+      name: "opengeni_model_provider_cost_micros_total",
+      help: "Estimated upstream provider cost in USD micros by provider, catalog model, payer and pricing source.",
+      labels: { ...base, payer: input.payer, pricing_source: input.pricingSource },
+      amount: cost,
+    });
+  }
+}
+
+/**
+ * Credits actually debited for one model response, recorded once when the
+ * ledger row is inserted (an idempotent replay debits 0 and records nothing).
+ * `funding="promotional"` is the part paid by scoped promotional grants
+ * (verified-signup trial, scoped coupon offers); `funding="general"` is the
+ * rest, paid from general credit: purchased credits plus any unscoped grant.
+ */
+export function recordModelCreditsCharged(
+  observability: Observability | undefined,
+  input: { provider: string; model: string; debitedMicros: number; grantDebitedMicros: number },
+): void {
+  if (!observability) return;
+  const debited = nonnegativeSafeInteger(input.debitedMicros);
+  if (debited === 0) return;
+  const promotional = Math.min(debited, nonnegativeSafeInteger(input.grantDebitedMicros));
+  const model = boundedModelMetricLabel(observability, input.model);
+  for (const [funding, amount] of [
+    ["promotional", promotional],
+    ["general", debited - promotional],
+  ] as const) {
+    if (amount === 0) continue;
+    observability.incrementCounter({
+      name: "opengeni_model_credits_charged_micros_total",
+      help: "Credit micros debited for model usage by provider, catalog model and funding (promotional grant or general credit).",
+      labels: { provider: input.provider, model, funding },
+      amount,
+    });
+  }
 }
 
 const MODEL_REQUEST_PHASE_BUCKETS = [

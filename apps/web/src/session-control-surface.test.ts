@@ -609,7 +609,7 @@ describe("session control surface architecture", () => {
     expect(list).toContain("archiveStatus: browseStatus");
     expect(list).toContain("sortBy: browseSortBy");
     expect(list).toContain("onClick={openSearchDialog}");
-    expect(list).toContain("() => requestSessionSearch(rail.workspaceId)");
+    expect(list).toContain("requestSessionSearch(rail.workspaceId, event.currentTarget)");
     expect(list).not.toContain('"Selected"');
     expect(list).toContain("{ creatorLabels }");
     expect(list).toContain("sessionBrowseResultCount(browseSessions, hierarchyMode)");
@@ -620,12 +620,12 @@ describe("session control surface architecture", () => {
     expect(rail).toContain('lazy(() => import("@/components/session/session-search-dialog"))');
     expect(rail).toContain("window.addEventListener(OPEN_SESSION_SEARCH_EVENT, open)");
     expect(rail).toContain("window.removeEventListener(OPEN_SESSION_SEARCH_EVENT, open)");
-    expect(rail).toContain(".detail?.workspaceId !== workspaceId");
+    expect(rail).toContain("detail?.workspaceId !== workspaceId");
     expect(rail.match(/<SessionSearchDialog\b/g)).toHaveLength(1);
     expect(rail).toContain("key={`${appContext.accessContext.subjectId}:${workspaceId}`}");
     expect(rail).toContain("workspaceId={workspaceId}");
     expect(rail).toContain("open={searchOpen}");
-    expect(rail).toContain("onOpenChange={setSearchOpen}");
+    expect(rail).toContain("onOpenChange={changeSearchOpen}");
   });
 
   test("the established-session Variable Set editor stays behind its lazy panel", async () => {

@@ -227,6 +227,8 @@ export function OrganizationManagedWorkspaceAccess({
       initials: initialsOf(name),
       kind: member.principalKind === "service" ? "service" : "person",
       isYou: member.subjectId === selfSubjectId,
+      // An organization owner or admin sets their own access here too.
+      managesOwnAccess: true,
       tag: member.organizationRole === "owner" ? "Organization owner" : undefined,
       role: member.role,
       roleLockedReason: editable ? undefined : "Service accounts keep the role they were given.",
