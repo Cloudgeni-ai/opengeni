@@ -649,6 +649,57 @@ describe("ordinary session Codex realtime control", () => {
     ).toBe("supergrok/grok-voice-think-fast-2.0");
   });
 
+  test("defaults to the first available voice model, else the one the user can act on, never an unrelated Connect Codex", async () => {
+    const codex = {
+      id: "gpt-live-1-boulder-alpha" as const,
+      label: "Codex Live",
+      provider: "Connected Codex" as const,
+      description: "Deep session integration",
+      available: false,
+      unavailableReason: "Connect Codex to use this voice model",
+      recommended: false,
+    };
+    const gptLive = (available: boolean) => ({
+      id: "opengeni-azure/gpt-live-1" as const,
+      label: "GPT Live 1",
+      provider: "OpenGeni" as const,
+      description: "Realtime voice with session delegation",
+      available,
+      unavailableReason: available
+        ? null
+        : "Free credits don't cover live voice. Add credits to use it.",
+      unavailableCode: available ? null : "insufficient_credits",
+      recommended: true,
+    });
+    const cases = [
+      { workspaceId: "88888888-8888-4888-8888-888888888881", models: [codex, gptLive(true)] },
+      { workspaceId: "88888888-8888-4888-8888-888888888882", models: [codex, gptLive(false)] },
+    ];
+    for (const { workspaceId, models } of cases) {
+      const client = {
+        getWorkspaceRealtimeModelCatalog: async () => ({ models }),
+      } as unknown as OpenGeniClient;
+      function Selection() {
+        const selection = useRealtimeModelSelection({ client, workspaceId, codexConnected: false });
+        return (
+          <output>
+            {selection.selectedModel.id}|{String(selection.selectedModel.available)}|
+            {selection.models.length}
+          </output>
+        );
+      }
+      await act(async () => root.render(<Selection key={workspaceId} />));
+      await act(async () => await new Promise((resolve) => setTimeout(resolve, 0)));
+      const [id, available, count] = (container.querySelector("output")?.textContent ?? "").split(
+        "|",
+      );
+      expect(id).toBe("opengeni-azure/gpt-live-1");
+      expect(available).toBe(String(models[1]!.available));
+      // Unavailable models stay listed with their reason.
+      expect(count).toBe("2");
+    }
+  });
+
   test("deduplicates catalog loads and reuses the settled catalog across remounts", async () => {
     const workspaceId = "66666666-6666-4666-8666-666666666666";
     let requests = 0;
