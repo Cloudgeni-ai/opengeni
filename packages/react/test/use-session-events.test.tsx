@@ -20,7 +20,11 @@ import {
 import { buildTimeline, type TimelineItem } from "../src/timeline";
 import { timelineQuestionPlacement } from "../src/timeline/projection";
 import { TIMELINE_TURN_ANCHOR_EVENT_TYPES } from "../src/hooks/latest-question";
-import { SESSION_EVENT_TYPES } from "@opengeni/sdk";
+import {
+  SESSION_EVENT_TYPES,
+  streamSessionEvents,
+  type SessionEventStreamTransport,
+} from "@opengeni/sdk";
 import {
   invokeOlderHistoryLoaderWithReceiptCapture,
   type OlderHistoryLoadReceipt,
@@ -71,18 +75,25 @@ type ListOptions = {
   mode?: "forensic" | "monitoring";
 };
 
-function listPage(store: SessionEvent[], options: ListOptions = {}): SessionEvent[] {
+function listPage(
+  store: SessionEvent[],
+  options: ListOptions = {},
+): SessionEvent[] {
   const after = options.after ?? 0;
   const limit = options.limit ?? 500;
   let candidates = store.filter((item) => item.sequence > after);
   if (options.includeTypes)
-    candidates = candidates.filter((item) => options.includeTypes!.includes(item.type));
+    candidates = candidates.filter((item) =>
+      options.includeTypes!.includes(item.type),
+    );
   if (options.before !== undefined) {
     const before = options.before;
     candidates = candidates.filter((item) => item.sequence < before);
     return candidates.slice(-limit);
   }
-  return options.direction === "before" ? candidates.slice(-limit) : candidates.slice(0, limit);
+  return options.direction === "before"
+    ? candidates.slice(-limit)
+    : candidates.slice(0, limit);
 }
 
 function scriptedClient(input: {
@@ -94,10 +105,14 @@ function scriptedClient(input: {
   const listCalls: ListOptions[] = [];
   const streamCalls: number[] = [];
   const client = fakeClient({
-    getQueue: input.getQueue ?? (async () => ({ items: [] }) as unknown as SessionQueueSnapshot),
+    getQueue:
+      input.getQueue ??
+      (async () => ({ items: [] }) as unknown as SessionQueueSnapshot),
     listEvents: async (_workspaceId, _sessionId, options = {}) => {
       listCalls.push(options);
-      return input.listEvents ? await input.listEvents(options) : listPage(input.store, options);
+      return input.listEvents
+        ? await input.listEvents(options)
+        : listPage(input.store, options);
     },
     streamEvents: (_workspaceId, _sessionId, options = {}) => {
       const after = options.after ?? 0;
@@ -123,7 +138,8 @@ describe("useSessionEvents", () => {
         store: Array.from({ length: 2000 }, (_, index) => event(index + 1)),
       });
       const hook = await renderHook(
-        () => useSessionEvents(SESSION_ID, { client, workspaceId: WORKSPACE_ID }),
+        () =>
+          useSessionEvents(SESSION_ID, { client, workspaceId: WORKSPACE_ID }),
         undefined,
       );
       try {
@@ -131,7 +147,9 @@ describe("useSessionEvents", () => {
         expect(listCalls.some((call) => call.includeTypes)).toBe(false);
         const onQueuedQuestion = jest.fn();
         await actRun(async () => {
-          const lookup = hook.result.current.jumpToLatestQuestion({ onQueuedQuestion });
+          const lookup = hook.result.current.jumpToLatestQuestion({
+            onQueuedQuestion,
+          });
           // No await: supersede while even a cached dynamic import is pending.
           const navigation =
             target === "sequence"
@@ -157,7 +175,10 @@ describe("useSessionEvents", () => {
   test("navigation evidence includes every registry type accepted by canonical queued-turn projection", () => {
     const question = event(1, "user.message", { text: "queued" });
     const queued = {
-      ...event(2, "turn.queued", { triggerEventId: question.id, turnId: "turn" }),
+      ...event(2, "turn.queued", {
+        triggerEventId: question.id,
+        turnId: "turn",
+      }),
       turnId: "turn",
     };
     const expected = SESSION_EVENT_TYPES.filter((type) => {
@@ -169,7 +190,9 @@ describe("useSessionEvents", () => {
     });
     expect(expected).toContain("agent.toolCall.created");
     expect(expected).toContain("turn.capacity_waiting");
-    expect(expected.every((type) => TIMELINE_TURN_ANCHOR_EVENT_TYPES.includes(type))).toBe(true);
+    expect(
+      expected.every((type) => TIMELINE_TURN_ANCHOR_EVENT_TYPES.includes(type)),
+    ).toBe(true);
     expect(TIMELINE_TURN_ANCHOR_EVENT_TYPES.length).toBeLessThanOrEqual(100);
   });
 
@@ -188,7 +211,13 @@ describe("useSessionEvents", () => {
     test(`Latest question uses canonical ${executionType} fallback without turn.started`, async () => {
       const store = [
         event(1, "user.message", { text: "Legacy queued prompt" }),
-        { ...event(2, "turn.queued", { triggerEventId: "evt-1", turnId: "turn" }), turnId: "turn" },
+        {
+          ...event(2, "turn.queued", {
+            triggerEventId: "evt-1",
+            turnId: "turn",
+          }),
+          turnId: "turn",
+        },
         {
           ...event(3, executionType, {
             id: "tool",
@@ -201,23 +230,31 @@ describe("useSessionEvents", () => {
         },
       ];
       expect(
-        buildTimeline(store).some((item) => item.kind === "user-message" && item.id === "evt-1"),
+        buildTimeline(store).some(
+          (item) => item.kind === "user-message" && item.id === "evt-1",
+        ),
       ).toBe(true);
       const { client, listCalls } = scriptedClient({ store });
       const hook = await renderHook(
-        () => useSessionEvents(SESSION_ID, { client, workspaceId: WORKSPACE_ID }),
+        () =>
+          useSessionEvents(SESSION_ID, { client, workspaceId: WORKSPACE_ID }),
         undefined,
       );
       try {
         await flush(20);
-        await actRun(async () => expect(await hook.result.current.jumpToLatestQuestion()).toBe(1));
+        await actRun(async () =>
+          expect(await hook.result.current.jumpToLatestQuestion()).toBe(1),
+        );
         expect(
           hook.result.current.timeline.some(
             (item) => item.kind === "user-message" && item.id === "evt-1",
           ),
         ).toBe(true);
         expect(
-          listCalls.some((call) => call.compact && call.includeTypes?.includes(executionType)),
+          listCalls.some(
+            (call) =>
+              call.compact && call.includeTypes?.includes(executionType),
+          ),
         ).toBe(true);
       } finally {
         await hook.unmount();
@@ -234,10 +271,12 @@ describe("useSessionEvents", () => {
       });
       const { client } = scriptedClient({
         store: [event(1), event(2)],
-        getQueue: async () => ({ items: [turn] }) as unknown as SessionQueueSnapshot,
+        getQueue: async () =>
+          ({ items: [turn] }) as unknown as SessionQueueSnapshot,
       });
       const hook = await renderHook(
-        () => useSessionEvents(SESSION_ID, { client, workspaceId: WORKSPACE_ID }),
+        () =>
+          useSessionEvents(SESSION_ID, { client, workspaceId: WORKSPACE_ID }),
         undefined,
       );
       try {
@@ -254,7 +293,8 @@ describe("useSessionEvents", () => {
         await flush(20);
         expect(navigation?.isCurrent()).toBe(true);
         await actRun(async () => {
-          if (target === "sequence") await hook.result.current.jumpToSequence(1);
+          if (target === "sequence")
+            await hook.result.current.jumpToSequence(1);
           else await hook.result.current.jumpToLatest();
         });
         expect(navigation?.isCurrent()).toBe(false);
@@ -271,9 +311,15 @@ describe("useSessionEvents", () => {
   test("canonical evidence paging advances through compact delta coverage", async () => {
     const store = [
       event(1, "user.message", { text: "queued" }),
-      { ...event(2, "turn.queued", { triggerEventId: "evt-1", turnId: "turn" }), turnId: "turn" },
       {
-        ...event(3, "agent.reasoning.delta", { text: "Other turn", coalescedUntil: 9000 }),
+        ...event(2, "turn.queued", { triggerEventId: "evt-1", turnId: "turn" }),
+        turnId: "turn",
+      },
+      {
+        ...event(3, "agent.reasoning.delta", {
+          text: "Other turn",
+          coalescedUntil: 9000,
+        }),
         turnId: "other",
       },
       {
@@ -298,7 +344,9 @@ describe("useSessionEvents", () => {
     );
     try {
       await flush(20);
-      await actRun(async () => expect(await hook.result.current.jumpToLatestQuestion()).toBe(1));
+      await actRun(async () =>
+        expect(await hook.result.current.jumpToLatestQuestion()).toBe(1),
+      );
       expect(
         listCalls
           .filter((call) => call.includeTypes?.includes("turn.queued"))
@@ -326,12 +374,18 @@ describe("useSessionEvents", () => {
     );
     try {
       await flush(30);
-      expect(hook.result.current.events.some((item) => item.sequence === 9000)).toBe(false);
-      await actRun(async () => expect(await hook.result.current.jumpToSequence(3000)).toBe(true));
+      expect(
+        hook.result.current.events.some((item) => item.sequence === 9000),
+      ).toBe(false);
+      await actRun(async () =>
+        expect(await hook.result.current.jumpToSequence(3000)).toBe(true),
+      );
       await flush(20);
       expect(hook.result.current.hasNewer).toBe(true);
       const reads = listCalls.length;
-      await actRun(async () => expect(await hook.result.current.jumpToLatestQuestion()).toBe(9000));
+      await actRun(async () =>
+        expect(await hook.result.current.jumpToLatestQuestion()).toBe(9000),
+      );
       await flush(20);
       expect(listCalls.slice(reads)).toEqual([
         {
@@ -342,9 +396,17 @@ describe("useSessionEvents", () => {
           mode: "forensic",
         },
         { before: 9001, limit: 128, compact: true, payloadMode: "full" },
-        { after: 9000, limit: 128, compact: true, direction: "after", payloadMode: "full" },
+        {
+          after: 9000,
+          limit: 128,
+          compact: true,
+          direction: "after",
+          payloadMode: "full",
+        },
       ]);
-      expect(hook.result.current.events.some((item) => item.sequence === 9000)).toBe(true);
+      expect(
+        hook.result.current.events.some((item) => item.sequence === 9000),
+      ).toBe(true);
       expect(hook.result.current.events.length).toBeLessThanOrEqual(256);
     } finally {
       await hook.unmount();
@@ -352,7 +414,9 @@ describe("useSessionEvents", () => {
   });
 
   test("Latest question already loaded needs only one lookup; empty sessions have no target", async () => {
-    const { client, listCalls } = scriptedClient({ store: [event(1), event(2)] });
+    const { client, listCalls } = scriptedClient({
+      store: [event(1), event(2)],
+    });
     const hook = await renderHook(
       () => useSessionEvents(SESSION_ID, { client, workspaceId: WORKSPACE_ID }),
       undefined,
@@ -360,20 +424,28 @@ describe("useSessionEvents", () => {
     try {
       await flush(20);
       const reads = listCalls.length;
-      await actRun(async () => expect(await hook.result.current.jumpToLatestQuestion()).toBe(2));
+      await actRun(async () =>
+        expect(await hook.result.current.jumpToLatestQuestion()).toBe(2),
+      );
       expect(listCalls.length - reads).toBe(1);
     } finally {
       await hook.unmount();
     }
     const empty = scriptedClient({ store: [] });
     const emptyHook = await renderHook(
-      () => useSessionEvents(SESSION_ID, { client: empty.client, workspaceId: WORKSPACE_ID }),
+      () =>
+        useSessionEvents(SESSION_ID, {
+          client: empty.client,
+          workspaceId: WORKSPACE_ID,
+        }),
       undefined,
     );
     try {
       await flush(20);
       await actRun(async () =>
-        expect(await emptyHook.result.current.jumpToLatestQuestion()).toBeNull(),
+        expect(
+          await emptyHook.result.current.jumpToLatestQuestion(),
+        ).toBeNull(),
       );
     } finally {
       await emptyHook.unmount();
@@ -386,7 +458,11 @@ describe("useSessionEvents", () => {
         text: "Worker finished",
         childCompletion: { childSessionId: SECOND_SESSION_ID, status: "idle" },
       });
-    const store = [event(1), event(2), ...Array.from({ length: 130 }, (_, i) => worker(i + 3))];
+    const store = [
+      event(1),
+      event(2),
+      ...Array.from({ length: 130 }, (_, i) => worker(i + 3)),
+    ];
     const { client, listCalls } = scriptedClient({ store });
     const hook = await renderHook(
       () => useSessionEvents(SESSION_ID, { client, workspaceId: WORKSPACE_ID }),
@@ -395,8 +471,12 @@ describe("useSessionEvents", () => {
     try {
       await flush(20);
       const reads = listCalls.length;
-      await actRun(async () => expect(await hook.result.current.jumpToLatestQuestion()).toBe(2));
-      expect(listCalls.slice(reads).map(({ before, limit }) => ({ before, limit }))).toEqual([
+      await actRun(async () =>
+        expect(await hook.result.current.jumpToLatestQuestion()).toBe(2),
+      );
+      expect(
+        listCalls.slice(reads).map(({ before, limit }) => ({ before, limit })),
+      ).toEqual([
         { before: undefined, limit: 1 },
         { before: 132, limit: 64 },
         { before: 68, limit: 64 },
@@ -405,7 +485,11 @@ describe("useSessionEvents", () => {
       expect(
         listCalls
           .slice(reads)
-          .every((call) => call.mode === "forensic" && call.includeTypes?.[0] === "user.message"),
+          .every(
+            (call) =>
+              call.mode === "forensic" &&
+              call.includeTypes?.[0] === "user.message",
+          ),
       ).toBe(true);
     } finally {
       await hook.unmount();
@@ -428,7 +512,9 @@ describe("useSessionEvents", () => {
     );
     try {
       await flush(20);
-      await actRun(async () => expect(await hook.result.current.jumpToLatestQuestion()).toBe(2));
+      await actRun(async () =>
+        expect(await hook.result.current.jumpToLatestQuestion()).toBe(2),
+      );
     } finally {
       await hook.unmount();
     }
@@ -437,7 +523,8 @@ describe("useSessionEvents", () => {
   test("Latest question directs pending human input to the queue, not an invisible sequence", async () => {
     const turn = fakeTurn({ triggerEventId: "evt-2" });
     const { client } = scriptedClient({
-      getQueue: async () => ({ items: [turn] }) as unknown as SessionQueueSnapshot,
+      getQueue: async () =>
+        ({ items: [turn] }) as unknown as SessionQueueSnapshot,
       store: [
         event(1),
         event(2, "user.message", {
@@ -453,10 +540,14 @@ describe("useSessionEvents", () => {
     try {
       await flush(20);
       expect(
-        hook.result.current.timeline.filter((item) => item.kind === "user-message"),
+        hook.result.current.timeline.filter(
+          (item) => item.kind === "user-message",
+        ),
       ).toHaveLength(1);
       await actRun(async () => {
-        await expect(hook.result.current.jumpToLatestQuestion()).rejects.toMatchObject({
+        await expect(
+          hook.result.current.jumpToLatestQuestion(),
+        ).rejects.toMatchObject({
           name: "LatestQuestionQueuedError",
         });
       });
@@ -481,15 +572,22 @@ describe("useSessionEvents", () => {
     let pending = true;
     const store = [
       event(1),
-      event(2, "user.message", { text: "Claimed during focus", routing: "queued_for_execution" }),
+      event(2, "user.message", {
+        text: "Claimed during focus",
+        routing: "queued_for_execution",
+      }),
       {
-        ...event(3, "turn.queued", { triggerEventId: turn.triggerEventId, turnId: turn.id }),
+        ...event(3, "turn.queued", {
+          triggerEventId: turn.triggerEventId,
+          turnId: turn.id,
+        }),
         turnId: turn.id,
       },
     ];
     const { client } = scriptedClient({
       store,
-      getQueue: async () => ({ items: pending ? [turn] : [] }) as unknown as SessionQueueSnapshot,
+      getQueue: async () =>
+        ({ items: pending ? [turn] : [] }) as unknown as SessionQueueSnapshot,
     });
     const hook = await renderHook(
       () => useSessionEvents(SESSION_ID, { client, workspaceId: WORKSPACE_ID }),
@@ -503,7 +601,9 @@ describe("useSessionEvents", () => {
             onQueuedQuestion: () => {
               pending = false;
               store.push({
-                ...event(4, "turn.started", { triggerEventId: turn.triggerEventId }),
+                ...event(4, "turn.started", {
+                  triggerEventId: turn.triggerEventId,
+                }),
                 turnId: turn.id,
               });
             },
@@ -525,7 +625,10 @@ describe("useSessionEvents", () => {
     const { client } = scriptedClient({
       store: [
         event(1),
-        event(2, "user.message", { text: "Admission in flight", routing: "queued_for_execution" }),
+        event(2, "user.message", {
+          text: "Admission in flight",
+          routing: "queued_for_execution",
+        }),
       ],
     });
     const hook = await renderHook(
@@ -535,9 +638,9 @@ describe("useSessionEvents", () => {
     try {
       await flush(20);
       await actRun(async () => {
-        await expect(hook.result.current.jumpToLatestQuestion()).rejects.toThrow(
-          "changing queue state",
-        );
+        await expect(
+          hook.result.current.jumpToLatestQuestion(),
+        ).rejects.toThrow("changing queue state");
       });
       expect(
         hook.result.current.timeline
@@ -559,19 +662,32 @@ describe("useSessionEvents", () => {
       const store = [
         event(1),
         question,
-        { ...event(3, "turn.queued", { triggerEventId: question.id, turnId }), turnId },
-        ...Array.from({ length: 1197 }, (_, index) =>
-          event(index + 4, "agent.reasoning.delta", { text: "unrelated", itemId: "old" }),
-        ),
-        { ...event(1201, "turn.started", { triggerEventId: question.id }), turnId },
         {
-          ...event(1202, "agent.message.completed", { text: "Response", messageId: "answer" }),
+          ...event(3, "turn.queued", { triggerEventId: question.id, turnId }),
+          turnId,
+        },
+        ...Array.from({ length: 1197 }, (_, index) =>
+          event(index + 4, "agent.reasoning.delta", {
+            text: "unrelated",
+            itemId: "old",
+          }),
+        ),
+        {
+          ...event(1201, "turn.started", { triggerEventId: question.id }),
+          turnId,
+        },
+        {
+          ...event(1202, "agent.message.completed", {
+            text: "Response",
+            messageId: "answer",
+          }),
           turnId,
         },
       ];
       const { client, listCalls } = scriptedClient({ store });
       const hook = await renderHook(
-        () => useSessionEvents(SESSION_ID, { client, workspaceId: WORKSPACE_ID }),
+        () =>
+          useSessionEvents(SESSION_ID, { client, workspaceId: WORKSPACE_ID }),
         undefined,
       );
       try {
@@ -579,17 +695,27 @@ describe("useSessionEvents", () => {
         await actRun(async () => {
           await hook.result.current.jumpToSequence(1);
         });
-        await actRun(async () => expect(await hook.result.current.jumpToLatestQuestion()).toBe(2));
+        await actRun(async () =>
+          expect(await hook.result.current.jumpToLatestQuestion()).toBe(2),
+        );
         await flush(20);
-        expect(hook.result.current.events.some((item) => item.id === question.id)).toBe(false);
-        expect(hook.result.current.events.some((item) => item.sequence === 1201)).toBe(true);
+        expect(
+          hook.result.current.events.some((item) => item.id === question.id),
+        ).toBe(false);
+        expect(
+          hook.result.current.events.some((item) => item.sequence === 1201),
+        ).toBe(true);
         expect(hook.result.current.events.length).toBeLessThanOrEqual(256);
         const projected = hook.result.current.timeline.find(
           (item) => item.kind === "user-message" && item.id === question.id,
         );
         expect(projected).toBeDefined();
-        expect(projected?.sourceEvents?.some((source) => source.sequence === 2)).toBe(true);
-        expect(listCalls.some((call) => call.includeTypes?.includes("turn.started"))).toBe(true);
+        expect(
+          projected?.sourceEvents?.some((source) => source.sequence === 2),
+        ).toBe(true);
+        expect(
+          listCalls.some((call) => call.includeTypes?.includes("turn.started")),
+        ).toBe(true);
       } finally {
         await hook.unmount();
       }
@@ -602,28 +728,48 @@ describe("useSessionEvents", () => {
       const store = [
         event(1),
         event(2),
-        event(3, "user.message", { text: "Withdrawn", routing: "queued_for_execution" }),
-        { ...event(4, "turn.queued", { triggerEventId: "evt-3", turnId }), turnId },
+        event(3, "user.message", {
+          text: "Withdrawn",
+          routing: "queued_for_execution",
+        }),
         {
-          ...event(5, withdrawal === "cancel" ? "turn.cancelled" : "session.queue.changed", {
-            operation: withdrawal,
-            turnId,
-          }),
+          ...event(4, "turn.queued", { triggerEventId: "evt-3", turnId }),
+          turnId,
+        },
+        {
+          ...event(
+            5,
+            withdrawal === "cancel"
+              ? "turn.cancelled"
+              : "session.queue.changed",
+            {
+              operation: withdrawal,
+              turnId,
+            },
+          ),
           turnId,
         },
         ...Array.from({ length: 2000 }, (_, index) =>
-          event(index + 6, "agent.reasoning.delta", { text: "thinking", itemId: "old" }),
+          event(index + 6, "agent.reasoning.delta", {
+            text: "thinking",
+            itemId: "old",
+          }),
         ),
       ];
       const { client } = scriptedClient({ store });
       const hook = await renderHook(
-        () => useSessionEvents(SESSION_ID, { client, workspaceId: WORKSPACE_ID }),
+        () =>
+          useSessionEvents(SESSION_ID, { client, workspaceId: WORKSPACE_ID }),
         undefined,
       );
       try {
         await flush(20);
-        expect(hook.result.current.events.some((item) => item.sequence === 2)).toBe(false);
-        await actRun(async () => expect(await hook.result.current.jumpToLatestQuestion()).toBe(2));
+        expect(
+          hook.result.current.events.some((item) => item.sequence === 2),
+        ).toBe(false);
+        await actRun(async () =>
+          expect(await hook.result.current.jumpToLatestQuestion()).toBe(2),
+        );
         await flush(20);
         expect(
           hook.result.current.timeline.some(
@@ -646,7 +792,10 @@ describe("useSessionEvents", () => {
     const pending = new Promise<SessionQueueSnapshot>((resolve) => {
       release = resolve;
     });
-    const { client } = scriptedClient({ store: [event(1), event(2)], getQueue: () => pending });
+    const { client } = scriptedClient({
+      store: [event(1), event(2)],
+      getQueue: () => pending,
+    });
     const hook = await renderHook(
       () => useSessionEvents(SESSION_ID, { client, workspaceId: WORKSPACE_ID }),
       undefined,
@@ -663,7 +812,9 @@ describe("useSessionEvents", () => {
       await actRun(async () => {
         await hook.result.current.jumpToSequence(1);
       });
-      release({ items: [fakeTurn({ triggerEventId: "evt-2" })] } as SessionQueueSnapshot);
+      release({
+        items: [fakeTurn({ triggerEventId: "evt-2" })],
+      } as SessionQueueSnapshot);
       await actRun(async () => expect(await lookup).toBeNull());
       expect(focused).toBe(false);
     } finally {
@@ -680,7 +831,9 @@ describe("useSessionEvents", () => {
     const { client } = scriptedClient({
       store,
       listEvents: (options) =>
-        options.includeTypes ? pending : Promise.resolve(listPage(store, options)),
+        options.includeTypes
+          ? pending
+          : Promise.resolve(listPage(store, options)),
     });
     const hook = await renderHook(
       () => useSessionEvents(SESSION_ID, { client, workspaceId: WORKSPACE_ID }),
@@ -690,11 +843,17 @@ describe("useSessionEvents", () => {
       await flush(20);
       const lookup = hook.result.current.jumpToLatestQuestion();
       await flush(20);
-      await actRun(async () => expect(await hook.result.current.jumpToSequence(100)).toBe(true));
+      await actRun(async () =>
+        expect(await hook.result.current.jumpToSequence(100)).toBe(true),
+      );
       release([event(2000)]);
       await actRun(async () => expect(await lookup).toBeNull());
-      expect(hook.result.current.events.some((item) => item.sequence === 100)).toBe(true);
-      expect(hook.result.current.events.some((item) => item.sequence === 2000)).toBe(false);
+      expect(
+        hook.result.current.events.some((item) => item.sequence === 100),
+      ).toBe(true);
+      expect(
+        hook.result.current.events.some((item) => item.sequence === 2000),
+      ).toBe(false);
     } finally {
       await hook.unmount();
     }
@@ -719,10 +878,14 @@ describe("useSessionEvents", () => {
     );
     expect(hook.result.current.initialLoading).toBe(true);
     expect(hook.result.current.initialHistoryReady).toBe(false);
-    await actRun(async () => expect(await hook.result.current.jumpToSequence(50)).toBe(true));
+    await actRun(async () =>
+      expect(await hook.result.current.jumpToSequence(50)).toBe(true),
+    );
     release();
     await flush(30);
-    expect(hook.result.current.events.some((item) => item.sequence === 50)).toBe(true);
+    expect(
+      hook.result.current.events.some((item) => item.sequence === 50),
+    ).toBe(true);
     expect(hook.result.current.events.at(-1)?.sequence).toBeLessThan(3000);
     expect(hook.result.current.initialLoading).toBe(false);
     expect(hook.result.current.initialHistoryReady).toBe(true);
@@ -742,11 +905,16 @@ describe("useSessionEvents", () => {
       const secondEvent = { ...event(2), sessionId: SECOND_SESSION_ID };
       const client = fakeClient({
         listEvents: async (_workspace, sessionId, options) =>
-          options?.includeTypes ? pending : sessionId === SESSION_ID ? [event(1)] : [secondEvent],
+          options?.includeTypes
+            ? pending
+            : sessionId === SESSION_ID
+              ? [event(1)]
+              : [secondEvent],
         streamEvents: async function* () {},
       });
       const hook = await renderHook(
-        ({ sessionId }) => useSessionEvents(sessionId, { client, workspaceId: WORKSPACE_ID }),
+        ({ sessionId }) =>
+          useSessionEvents(sessionId, { client, workspaceId: WORKSPACE_ID }),
         { sessionId: SESSION_ID },
       );
       try {
@@ -785,10 +953,14 @@ describe("useSessionEvents", () => {
     try {
       await flush(20);
       await actRun(async () =>
-        expect(hook.result.current.jumpToLatestQuestion()).rejects.toBe(failure),
+        expect(hook.result.current.jumpToLatestQuestion()).rejects.toBe(
+          failure,
+        ),
       );
       fail = false;
-      await actRun(async () => expect(await hook.result.current.jumpToLatestQuestion()).toBe(1));
+      await actRun(async () =>
+        expect(await hook.result.current.jumpToLatestQuestion()).toBe(1),
+      );
       expect(hook.result.current.events).toEqual([event(1)]);
     } finally {
       await hook.unmount();
@@ -798,7 +970,8 @@ describe("useSessionEvents", () => {
   test("Latest question returns null when its resolved event is missing from exact context", async () => {
     const { client } = scriptedClient({
       store: [event(1)],
-      listEvents: async (options) => (options.includeTypes ? [event(9000)] : [event(1)]),
+      listEvents: async (options) =>
+        options.includeTypes ? [event(9000)] : [event(1)],
     });
     const hook = await renderHook(
       () => useSessionEvents(SESSION_ID, { client, workspaceId: WORKSPACE_ID }),
@@ -806,7 +979,9 @@ describe("useSessionEvents", () => {
     );
     try {
       await flush(20);
-      await actRun(async () => expect(await hook.result.current.jumpToLatestQuestion()).toBeNull());
+      await actRun(async () =>
+        expect(await hook.result.current.jumpToLatestQuestion()).toBeNull(),
+      );
       expect(hook.result.current.events).toEqual([event(1)]);
     } finally {
       await hook.unmount();
@@ -821,11 +996,13 @@ describe("useSessionEvents", () => {
     const store = [event(1000)];
     const first = scriptedClient({
       store,
-      listEvents: (options) => (options.limit === 128 ? gate : Promise.resolve(store)),
+      listEvents: (options) =>
+        options.limit === 128 ? gate : Promise.resolve(store),
     });
     const second = scriptedClient({ store });
     const hook = await renderHook(
-      ({ client }) => useSessionEvents(SESSION_ID, { client, workspaceId: WORKSPACE_ID }),
+      ({ client }) =>
+        useSessionEvents(SESSION_ID, { client, workspaceId: WORKSPACE_ID }),
       { client: first.client },
     );
     await flush(20);
@@ -852,13 +1029,23 @@ describe("useSessionEvents", () => {
     await flush(20);
     const reads = listCalls.length;
     const streams = streamCalls.length;
-    await actRun(async () => expect(await hook.result.current.jumpToSequence(1000)).toBe(true));
+    await actRun(async () =>
+      expect(await hook.result.current.jumpToSequence(1000)).toBe(true),
+    );
     await flush(20);
     expect(listCalls.slice(reads)).toEqual([
       { before: 1001, limit: 128, compact: true, payloadMode: "full" },
-      { after: 1000, limit: 128, compact: true, direction: "after", payloadMode: "full" },
+      {
+        after: 1000,
+        limit: 128,
+        compact: true,
+        direction: "after",
+        payloadMode: "full",
+      },
     ]);
-    expect(hook.result.current.events.some((item) => item.sequence === 1000)).toBe(true);
+    expect(
+      hook.result.current.events.some((item) => item.sequence === 1000),
+    ).toBe(true);
     expect(hook.result.current.events.length).toBeLessThanOrEqual(256);
     expect(hook.result.current.lastSequence).toBe(12_000);
     expect(hook.result.current.hasOlder).toBe(true);
@@ -896,10 +1083,14 @@ describe("useSessionEvents", () => {
       stale = hook.result.current.jumpToSequence(100);
     });
     expect(hook.result.current.loadingTarget).toBe(true);
-    await actRun(async () => expect(await hook.result.current.jumpToSequence(800)).toBe(true));
+    await actRun(async () =>
+      expect(await hook.result.current.jumpToSequence(800)).toBe(true),
+    );
     release();
     await actRun(async () => expect(await stale).toBe(false));
-    expect(hook.result.current.events.some((item) => item.sequence === 800)).toBe(true);
+    expect(
+      hook.result.current.events.some((item) => item.sequence === 800),
+    ).toBe(true);
     expect(hook.result.current.loadingTarget).toBe(false);
     await actRun(async () => {
       stale = hook.result.current.jumpToSequence(100);
@@ -957,7 +1148,9 @@ describe("useSessionEvents", () => {
     const controller = new AbortController();
     let pending!: Promise<boolean>;
     await actRun(async () => {
-      pending = hook.result.current.jumpToSequence(100, { signal: controller.signal });
+      pending = hook.result.current.jumpToSequence(100, {
+        signal: controller.signal,
+      });
     });
     expect(hook.result.current.loadingTarget).toBe(true);
     // Find closes while the bounded reads are still in flight.
@@ -966,7 +1159,9 @@ describe("useSessionEvents", () => {
     await actRun(async () => expect(await pending).toBe(false));
     await flush(20);
     // The fetched window was never published; the live tip is restored.
-    expect(hook.result.current.events.some((item) => item.sequence === 100)).toBe(false);
+    expect(
+      hook.result.current.events.some((item) => item.sequence === 100),
+    ).toBe(false);
     expect(hook.result.current.loadingTarget).toBe(false);
     expect(hook.result.current.events.at(-1)?.sequence).toBe(3000);
     await hook.unmount();
@@ -993,16 +1188,24 @@ describe("useSessionEvents", () => {
     const controller = new AbortController();
     let stale!: Promise<boolean>;
     await actRun(async () => {
-      stale = hook.result.current.jumpToSequence(100, { signal: controller.signal });
+      stale = hook.result.current.jumpToSequence(100, {
+        signal: controller.signal,
+      });
     });
     // A newer target supersedes the aborted one; only the newer window applies.
-    await actRun(async () => expect(await hook.result.current.jumpToSequence(800)).toBe(true));
+    await actRun(async () =>
+      expect(await hook.result.current.jumpToSequence(800)).toBe(true),
+    );
     controller.abort();
     releaseFirst();
     await actRun(async () => expect(await stale).toBe(false));
     await flush(20);
-    expect(hook.result.current.events.some((item) => item.sequence === 800)).toBe(true);
-    expect(hook.result.current.events.some((item) => item.sequence === 100)).toBe(false);
+    expect(
+      hook.result.current.events.some((item) => item.sequence === 800),
+    ).toBe(true);
+    expect(
+      hook.result.current.events.some((item) => item.sequence === 100),
+    ).toBe(false);
     expect(hook.result.current.loadingTarget).toBe(false);
     await hook.unmount();
   });
@@ -1022,7 +1225,8 @@ describe("useSessionEvents", () => {
     });
     const second = scriptedClient({ store: [event(9000)] });
     const hook = await renderHook(
-      ({ client, sessionId }) => useSessionEvents(sessionId, { client, workspaceId: WORKSPACE_ID }),
+      ({ client, sessionId }) =>
+        useSessionEvents(sessionId, { client, workspaceId: WORKSPACE_ID }),
       { client: first.client, sessionId: SESSION_ID },
     );
     await flush(20);
@@ -1033,11 +1237,16 @@ describe("useSessionEvents", () => {
     await actRun(async () => {
       stale = hook.result.current.jumpToSequence(10);
     });
-    await hook.rerender({ client: second.client, sessionId: SECOND_SESSION_ID });
+    await hook.rerender({
+      client: second.client,
+      sessionId: SECOND_SESSION_ID,
+    });
     release();
     await actRun(async () => expect(await stale).toBe(false));
     await flush(20);
-    expect(hook.result.current.events.map((item) => item.sequence)).toEqual([9000]);
+    expect(hook.result.current.events.map((item) => item.sequence)).toEqual([
+      9000,
+    ]);
     expect(hook.result.current.loadingTarget).toBe(false);
     await hook.unmount();
   });
@@ -1053,10 +1262,14 @@ describe("useSessionEvents", () => {
       undefined,
     );
     await flush(20);
-    await actRun(async () => expect(await hook.result.current.jumpToSequence(3)).toBe(true));
+    await actRun(async () =>
+      expect(await hook.result.current.jumpToSequence(3)).toBe(true),
+    );
     expect(hook.result.current.events).toEqual([huge]);
     expect(hook.result.current.hasNewer).toBe(true);
-    await actRun(async () => expect(await hook.result.current.jumpToSequence(2)).toBe(false));
+    await actRun(async () =>
+      expect(await hook.result.current.jumpToSequence(2)).toBe(false),
+    );
     expect(hook.result.current.events).toEqual([huge]);
     await hook.unmount();
   });
@@ -1077,7 +1290,10 @@ describe("useSessionEvents", () => {
     const client = fakeClient({
       listEvents: async (_workspaceId, _sessionId, options = {}) => {
         const page = listPage(store, options);
-        if (options.before !== undefined && options.before !== Number.MAX_SAFE_INTEGER) {
+        if (
+          options.before !== undefined &&
+          options.before !== Number.MAX_SAFE_INTEGER
+        ) {
           await new Promise<void>((resolve) => {
             releaseOlder = resolve;
           });
@@ -1150,8 +1366,120 @@ describe("useSessionEvents", () => {
     }
     expect(streamCalls).toEqual([4_000]);
     expect(streamSignals[0]!.aborted).toBe(false);
-    expect(states.slice(statesAfterOpen).every((state) => state === "live")).toBe(true);
+    expect(
+      states.slice(statesAfterOpen).every((state) => state === "live"),
+    ).toBe(true);
     expect(hook.result.current.hasNewer).toBe(false);
+    await hook.unmount();
+  });
+
+  test("a real SSE reconnect resumes from the last sequence without clearing, duplicating, or skipping rows", async () => {
+    const store = Array.from({ length: 1_500 }, (_, i) => event(i + 1));
+    const encoder = new TextEncoder();
+    const sse = (items: SessionEvent[]) =>
+      items
+        .map(
+          (item) =>
+            `id: ${item.sequence}\nevent: ${item.type}\ndata: ${JSON.stringify(item)}\n\n`,
+        )
+        .join("");
+    const opened: number[] = [];
+    let pushLive: ((items: SessionEvent[]) => void) | null = null;
+    const transport: SessionEventStreamTransport = {
+      openStream: async (after, signal) => {
+        opened.push(after);
+        if (opened.length === 1) {
+          // The first connection delivers two rows, then the server drops it.
+          const rows = [event(1_501), event(1_502)];
+          store.push(...rows);
+          let sent = false;
+          return new ReadableStream<Uint8Array>({
+            pull: (controller) => {
+              if (sent) {
+                controller.close();
+                return;
+              }
+              sent = true;
+              controller.enqueue(encoder.encode(sse(rows)));
+            },
+          });
+        }
+        // The replacement replays an overlap (already-seen rows) before new
+        // rows, then stays open for live delivery.
+        let controllerRef!: ReadableStreamDefaultController<Uint8Array>;
+        return new ReadableStream<Uint8Array>({
+          start: (controller) => {
+            controllerRef = controller;
+            controller.enqueue(
+              encoder.encode(
+                sse(store.filter((item) => item.sequence > 1_500)),
+              ),
+            );
+            pushLive = (items) => {
+              store.push(...items);
+              controllerRef.enqueue(encoder.encode(sse(items)));
+            };
+            signal?.addEventListener(
+              "abort",
+              () =>
+                controllerRef.error(new DOMException("aborted", "AbortError")),
+              {
+                once: true,
+              },
+            );
+          },
+        });
+      },
+      listEvents: async (after, limit) =>
+        store.filter((item) => item.sequence > after).slice(0, limit),
+    };
+    const client = fakeClient({
+      listEvents: async (_workspaceId, _sessionId, options = {}) =>
+        listPage(store, options),
+      streamEvents: (_workspaceId, _sessionId, options = {}) =>
+        streamSessionEvents(transport, {
+          ...options,
+          reconnectDelayMs: 1,
+          maxReconnectDelayMs: 2,
+          reconnectJitterRatio: 0,
+        }),
+    });
+    const states: string[] = [];
+    const renderedCounts: number[] = [];
+    const hook = await renderHook(() => {
+      const result = useSessionEvents(SESSION_ID, {
+        client,
+        workspaceId: WORKSPACE_ID,
+      });
+      states.push(result.connectionState);
+      if (!result.initialLoading) renderedCounts.push(result.events.length);
+      return result;
+    }, undefined);
+    await flush(40);
+    expect(opened).toEqual([1_500, 1_502]);
+    expect(hook.result.current.connectionState).toBe("live");
+
+    await actRun(async () => pushLive?.([event(1_503), event(1_504)]));
+    await flush(20);
+
+    const sequences = hook.result.current.events.map((item) => item.sequence);
+    expect(sequences.at(-1)).toBe(1_504);
+    for (let index = 1; index < sequences.length; index += 1) {
+      expect(sequences[index]).toBe(sequences[index - 1]! + 1);
+    }
+    expect(hook.result.current.lastSequence).toBe(1_504);
+    // Rendered content never shrinks (no clear/flash back to an empty or
+    // shorter timeline) across the reconnect.
+    for (let index = 1; index < renderedCounts.length; index += 1) {
+      expect(renderedCounts[index]!).toBeGreaterThanOrEqual(
+        renderedCounts[index - 1]!,
+      );
+    }
+    expect(renderedCounts.every((count) => count > 0)).toBe(true);
+    // The reconnect (opened twice above) never reports a fresh connect or idle.
+    const firstLive = states.indexOf("live");
+    expect(states.slice(firstLive)).not.toContain("connecting");
+    expect(states.slice(firstLive)).not.toContain("idle");
     await hook.unmount();
   });
 
@@ -1189,7 +1517,9 @@ describe("useSessionEvents", () => {
     await actRun(() => second);
     await flush(20);
     expect(second.committed).toBe(true);
-    expect(hook.result.current.events[0]!.sequence).toBeLessThan(previousOldest);
+    expect(hook.result.current.events[0]!.sequence).toBeLessThan(
+      previousOldest,
+    );
     await hook.unmount();
   });
 
@@ -1199,11 +1529,15 @@ describe("useSessionEvents", () => {
       resume = resolve;
     });
     const client = fakeClient({
-      listEvents: async () => [event(1, "session.status.changed", { status: "running" })],
+      listEvents: async () => [
+        event(1, "session.status.changed", { status: "running" }),
+      ],
       streamEvents: (_workspaceId, _sessionId, options = {}) =>
         (async function* () {
           options.onOpen?.();
-          yield event(2, "session.status.changed", { status: "waiting_capacity" });
+          yield event(2, "session.status.changed", {
+            status: "waiting_capacity",
+          });
           await resumeGate;
           yield event(3, "session.status.changed", { status: "recovering" });
         })(),
@@ -1333,7 +1667,8 @@ describe("useSessionEvents", () => {
         streamEvents: async function* () {},
       });
       const hook = await renderHook(
-        () => useSessionEvents(SESSION_ID, { client, workspaceId: WORKSPACE_ID }),
+        () =>
+          useSessionEvents(SESSION_ID, { client, workspaceId: WORKSPACE_ID }),
         undefined,
       );
       try {
@@ -1366,7 +1701,10 @@ describe("useSessionEvents", () => {
     const seen: Array<{ sessionId: string; ready: boolean }> = [];
     const hook = await renderHook(
       ({ sessionId }) => {
-        const result = useSessionEvents(sessionId, { client, workspaceId: WORKSPACE_ID });
+        const result = useSessionEvents(sessionId, {
+          client,
+          workspaceId: WORKSPACE_ID,
+        });
         seen.push({ sessionId, ready: result.initialHistoryReady });
         return result;
       },
@@ -1379,7 +1717,9 @@ describe("useSessionEvents", () => {
       await hook.rerender({ sessionId: SECOND_SESSION_ID });
       await flush(20);
       expect(
-        seen.filter((row) => row.sessionId === SECOND_SESSION_ID).every((row) => !row.ready),
+        seen
+          .filter((row) => row.sessionId === SECOND_SESSION_ID)
+          .every((row) => !row.ready),
       ).toBe(true);
       const readCount = calls.length;
       await actRun(() => staleRetry());
@@ -1394,7 +1734,12 @@ describe("useSessionEvents", () => {
   test("full replay does not claim a history snapshot completed merely because SSE yielded", async () => {
     const { client } = scriptedClient({ store: [], streamEvents: [event(1)] });
     const hook = await renderHook(
-      () => useSessionEvents(SESSION_ID, { client, workspaceId: WORKSPACE_ID, replay: "full" }),
+      () =>
+        useSessionEvents(SESSION_ID, {
+          client,
+          workspaceId: WORKSPACE_ID,
+          replay: "full",
+        }),
       undefined,
     );
     try {
@@ -1432,14 +1777,19 @@ describe("useSessionEvents", () => {
     expect(hook.result.current.events[0]?.sequence).toBe(201);
     expect(hook.result.current.hasOlder).toBe(true);
     expect(streamCalls).toEqual([1200]);
-    expect(lengths.filter((length) => length === SESSION_HISTORY_PAGE_SIZE)).toHaveLength(1);
+    expect(
+      lengths.filter((length) => length === SESSION_HISTORY_PAGE_SIZE),
+    ).toHaveLength(1);
 
     await hook.unmount();
   });
 
   test("foreground resume replays tiny gaps, compacts small message sets, and reloads only complex backlogs", async () => {
     let visibility: DocumentVisibilityState = "visible";
-    const visibilityDescriptor = Object.getOwnPropertyDescriptor(document, "visibilityState");
+    const visibilityDescriptor = Object.getOwnPropertyDescriptor(
+      document,
+      "visibilityState",
+    );
     Object.defineProperty(document, "visibilityState", {
       configurable: true,
       get: () => visibility,
@@ -1484,7 +1834,10 @@ describe("useSessionEvents", () => {
           options.onOpen?.();
           for (const item of store) {
             if (options.signal?.aborted) return;
-            if (item.sequence > (options.after ?? 0) && item.sequence <= durableHead) {
+            if (
+              item.sequence > (options.after ?? 0) &&
+              item.sequence <= durableHead
+            ) {
               yield item;
             }
           }
@@ -1493,7 +1846,9 @@ describe("useSessionEvents", () => {
               resolve();
               return;
             }
-            options.signal?.addEventListener("abort", () => resolve(), { once: true });
+            options.signal?.addEventListener("abort", () => resolve(), {
+              once: true,
+            });
           });
           yield* [] as SessionEvent[];
         })();
@@ -1507,12 +1862,16 @@ describe("useSessionEvents", () => {
     try {
       const suspendAndResume = async () => {
         visibility = "hidden";
-        await actRun(() => document.dispatchEvent(new Event("visibilitychange")));
+        await actRun(() =>
+          document.dispatchEvent(new Event("visibilitychange")),
+        );
         await actRun(() => jest.advanceTimersByTime(2_000));
         expect(hook.result.current.connectionState).toBe("idle");
 
         visibility = "visible";
-        await actRun(() => document.dispatchEvent(new Event("visibilitychange")));
+        await actRun(() =>
+          document.dispatchEvent(new Event("visibilitychange")),
+        );
         await actRun(async () => {
           await Promise.resolve();
           await Promise.resolve();
@@ -1524,7 +1883,9 @@ describe("useSessionEvents", () => {
       };
 
       await flush(20);
-      expect(hook.result.current.events.map((item) => item.sequence)).toEqual([1, 2]);
+      expect(hook.result.current.events.map((item) => item.sequence)).toEqual([
+        1, 2,
+      ]);
       expect(streamCalls).toEqual([2]);
 
       jest.useFakeTimers();
@@ -1542,7 +1903,9 @@ describe("useSessionEvents", () => {
         },
       ]);
       expect(streamCalls).toEqual([2, 2]);
-      expect(hook.result.current.events.map((item) => item.sequence)).toEqual([1, 2, 3, 4]);
+      expect(hook.result.current.events.map((item) => item.sequence)).toEqual([
+        1, 2, 3, 4,
+      ]);
 
       // A raw gap of 196 rows could still be one visible streaming answer. The
       // compact probe proves that here, appends it once, and resumes at 200.
@@ -1591,7 +1954,9 @@ describe("useSessionEvents", () => {
         },
       ]);
       expect(streamCalls).toEqual([2, 2, 200, 1_400]);
-      expect(hook.result.current.events).toHaveLength(SESSION_HISTORY_PAGE_SIZE);
+      expect(hook.result.current.events).toHaveLength(
+        SESSION_HISTORY_PAGE_SIZE,
+      );
       expect(hook.result.current.events[0]?.sequence).toBe(401);
       expect(hook.result.current.events.at(-1)?.sequence).toBe(1_400);
 
@@ -1633,7 +1998,9 @@ describe("useSessionEvents", () => {
       });
       expect(listCalls.some((call) => call.after === 400)).toBe(false);
       expect(streamCalls).toEqual([2, 2, 200, 1_400, 6_000]);
-      expect(hook.result.current.events).toHaveLength(SESSION_HISTORY_PAGE_SIZE);
+      expect(hook.result.current.events).toHaveLength(
+        SESSION_HISTORY_PAGE_SIZE,
+      );
       expect(hook.result.current.events[0]?.sequence).toBe(5_001);
       expect(hook.result.current.events.at(-1)?.sequence).toBe(6_000);
 
@@ -1671,7 +2038,11 @@ describe("useSessionEvents", () => {
       await hook.unmount();
       jest.useRealTimers();
       if (visibilityDescriptor) {
-        Object.defineProperty(document, "visibilityState", visibilityDescriptor);
+        Object.defineProperty(
+          document,
+          "visibilityState",
+          visibilityDescriptor,
+        );
       }
     }
   });
@@ -1695,7 +2066,8 @@ describe("useSessionEvents", () => {
           // Keep the stream contract without yielding additional events.
         })(),
     });
-    const observed: Array<{ sessionId: string; eventSessionIds: string[] }> = [];
+    const observed: Array<{ sessionId: string; eventSessionIds: string[] }> =
+      [];
     const hook = await renderHook(
       (props: { sessionId: string }) => {
         const result = useSessionEvents(props.sessionId, {
@@ -1711,7 +2083,9 @@ describe("useSessionEvents", () => {
       { sessionId: SESSION_ID },
     );
     await flush(20);
-    expect(hook.result.current.events.map((item) => item.sessionId)).toEqual([SESSION_ID]);
+    expect(hook.result.current.events.map((item) => item.sessionId)).toEqual([
+      SESSION_ID,
+    ]);
 
     observed.length = 0;
     await hook.rerender({ sessionId: SECOND_SESSION_ID });
@@ -1725,7 +2099,9 @@ describe("useSessionEvents", () => {
 
     resolveSecond([secondEvent]);
     await flush(20);
-    expect(hook.result.current.events.map((item) => item.sessionId)).toEqual([SECOND_SESSION_ID]);
+    expect(hook.result.current.events.map((item) => item.sessionId)).toEqual([
+      SECOND_SESSION_ID,
+    ]);
     await hook.unmount();
   });
 
@@ -1764,12 +2140,18 @@ describe("useSessionEvents", () => {
 
     await hook.rerender({ sessionId: SECOND_SESSION_ID });
     await flush(20);
-    expect(hook.result.current.events.map((item) => item.id)).toEqual(["evt-new-stream"]);
+    expect(hook.result.current.events.map((item) => item.id)).toEqual([
+      "evt-new-stream",
+    ]);
 
     releaseOld();
     await flush(20);
-    expect(hook.result.current.events.map((item) => item.id)).toEqual(["evt-new-stream"]);
-    expect(hook.result.current.events.map((item) => item.sessionId)).toEqual([SECOND_SESSION_ID]);
+    expect(hook.result.current.events.map((item) => item.id)).toEqual([
+      "evt-new-stream",
+    ]);
+    expect(hook.result.current.events.map((item) => item.sessionId)).toEqual([
+      SECOND_SESSION_ID,
+    ]);
 
     await hook.unmount();
   });
@@ -1799,7 +2181,10 @@ describe("useSessionEvents", () => {
     });
     const hook = await renderHook(
       (props: { sessionId: string }) =>
-        useSessionEvents(props.sessionId, { client, workspaceId: WORKSPACE_ID }),
+        useSessionEvents(props.sessionId, {
+          client,
+          workspaceId: WORKSPACE_ID,
+        }),
       { sessionId: SESSION_ID },
     );
     await flush(20);
@@ -1815,7 +2200,9 @@ describe("useSessionEvents", () => {
     await hook.rerender({ sessionId: SECOND_SESSION_ID });
     await flush(20);
     expect(hook.result.current.loadingOlder).toBeFalse();
-    expect(hook.result.current.events.map((item) => item.id)).toEqual(["evt-second-session"]);
+    expect(hook.result.current.events.map((item) => item.id)).toEqual([
+      "evt-second-session",
+    ]);
 
     releaseOlder([
       event(1, "session.created", {}),
@@ -1825,8 +2212,12 @@ describe("useSessionEvents", () => {
     expect(oldLoad.committed).toBeFalse();
     await flush(20);
     expect(hook.result.current.loadingOlder).toBeFalse();
-    expect(hook.result.current.events.map((item) => item.id)).toEqual(["evt-second-session"]);
-    expect(hook.result.current.events.map((item) => item.sessionId)).toEqual([SECOND_SESSION_ID]);
+    expect(hook.result.current.events.map((item) => item.id)).toEqual([
+      "evt-second-session",
+    ]);
+    expect(hook.result.current.events.map((item) => item.sessionId)).toEqual([
+      SECOND_SESSION_ID,
+    ]);
 
     await hook.unmount();
   });
@@ -1925,7 +2316,9 @@ describe("useSessionEvents", () => {
       second = hook.result.current.loadOlder();
     });
     await flush();
-    expect(listCalls.filter((call) => call.before === initialOldest)).toHaveLength(1);
+    expect(
+      listCalls.filter((call) => call.before === initialOldest),
+    ).toHaveLength(1);
     expect(receipt.committed).toBeFalse();
     const [firstResult, secondResult] = await actRun(async () => {
       releaseOlder();
@@ -1938,9 +2331,9 @@ describe("useSessionEvents", () => {
     expect(hook.result.current.events.map((item) => item.sequence)).toEqual(
       store.slice(initialOldest - 33).map((item) => item.sequence),
     );
-    expect(new Set(hook.result.current.events.map((item) => item.sequence)).size).toBe(
-      SESSION_HISTORY_PAGE_SIZE + 32,
-    );
+    expect(
+      new Set(hook.result.current.events.map((item) => item.sequence)).size,
+    ).toBe(SESSION_HISTORY_PAGE_SIZE + 32);
     expect(hook.result.current.events[0]?.sequence).toBe(initialOldest - 32);
     expect(hook.result.current.hasOlder).toBe(true);
     expect(receipt.committed).toBeTrue();
@@ -1965,7 +2358,9 @@ describe("useSessionEvents", () => {
     await flush(20);
     expect(full.listCalls).toHaveLength(0);
     expect(full.streamCalls).toEqual([0]);
-    expect(fullHook.result.current.events.map((item) => item.sequence)).toEqual([1, 2]);
+    expect(fullHook.result.current.events.map((item) => item.sequence)).toEqual(
+      [1, 2],
+    );
     expect(fullHook.result.current.hasOlder).toBe(false);
     await fullHook.unmount();
 
@@ -1982,7 +2377,9 @@ describe("useSessionEvents", () => {
     await flush(20);
     expect(resumed.listCalls).toHaveLength(0);
     expect(resumed.streamCalls).toEqual([5]);
-    expect(resumedHook.result.current.events.map((item) => item.sequence)).toEqual([6]);
+    expect(
+      resumedHook.result.current.events.map((item) => item.sequence),
+    ).toEqual([6]);
     expect(resumedHook.result.current.hasOlder).toBe(false);
     await resumedHook.unmount();
   });
@@ -1990,7 +2387,10 @@ describe("useSessionEvents", () => {
   test("stream resume ignores producer-controlled coalescedUntil without trusted coverage", async () => {
     const spoofed = event(1, "turn.completed", { coalescedUntil: 1000 });
     delete spoofed.coveredThrough;
-    const scripted = scriptedClient({ store: [], streamEvents: [spoofed, event(2)] });
+    const scripted = scriptedClient({
+      store: [],
+      streamEvents: [spoofed, event(2)],
+    });
     const hook = await renderHook(
       () =>
         useSessionEvents(SESSION_ID, {
@@ -2002,7 +2402,9 @@ describe("useSessionEvents", () => {
     );
     await flush(20);
 
-    expect(hook.result.current.events.map((item) => item.sequence)).toEqual([1, 2]);
+    expect(hook.result.current.events.map((item) => item.sequence)).toEqual([
+      1, 2,
+    ]);
     expect(hook.result.current.lastSequence).toBe(2);
     await hook.unmount();
   });
@@ -2020,7 +2422,9 @@ describe("useSessionEvents", () => {
 
     // This synthetic log has no turn boundary in either page, so the initial
     // read stops after one bounded boundary probe and remains explicitly older.
-    expect(hook.result.current.events).toHaveLength(SESSION_HISTORY_PAGE_SIZE * 2);
+    expect(hook.result.current.events).toHaveLength(
+      SESSION_HISTORY_PAGE_SIZE * 2,
+    );
     expect(hook.result.current.events[0]?.sequence).toBe(38_001);
     expect(hook.result.current.hasOlder).toBe(true);
     expect(listCalls).toEqual([
@@ -2067,7 +2471,9 @@ describe("useSessionEvents", () => {
         payloadMode: "full",
       },
     ]);
-    expect(hook.result.current.events.map((item) => item.sequence)).toEqual([1, 10]);
+    expect(hook.result.current.events.map((item) => item.sequence)).toEqual([
+      1, 10,
+    ]);
     expect(streamCalls).toEqual([99]);
 
     await hook.unmount();
@@ -2080,13 +2486,19 @@ describe("useSessionEvents", () => {
       listEvents: async (options) => {
         calls.push(options);
         if (options.before === Number.MAX_SAFE_INTEGER) {
-          return [event(8, "agent.message.delta", { text: "ghi", coalescedUntil: 9 })];
+          return [
+            event(8, "agent.message.delta", { text: "ghi", coalescedUntil: 9 }),
+          ];
         }
         if (options.before === 8) {
-          return [event(6, "agent.message.delta", { text: "ef", coalescedUntil: 7 })];
+          return [
+            event(6, "agent.message.delta", { text: "ef", coalescedUntil: 7 }),
+          ];
         }
         if (options.before === 6) {
-          return [event(4, "agent.message.delta", { text: "cd", coalescedUntil: 5 })];
+          return [
+            event(4, "agent.message.delta", { text: "cd", coalescedUntil: 5 }),
+          ];
         }
         if (options.before === 4) {
           return [
@@ -2103,14 +2515,18 @@ describe("useSessionEvents", () => {
     );
     await flush(20);
 
-    expect(hook.result.current.events.map((item) => item.sequence)).toEqual([6, 8]);
+    expect(hook.result.current.events.map((item) => item.sequence)).toEqual([
+      6, 8,
+    ]);
     expect(hook.result.current.hasOlder).toBe(true);
     expect(hook.result.current.lastSequence).toBe(9);
 
     const first = await actRun(() => hook.result.current.loadOlder());
     await flush(20);
     expect(first).toBe(false);
-    expect(hook.result.current.events.map((item) => item.sequence)).toEqual([1, 2, 4, 6, 8]);
+    expect(hook.result.current.events.map((item) => item.sequence)).toEqual([
+      1, 2, 4, 6, 8,
+    ]);
     expect(calls).toEqual([
       {
         before: Number.MAX_SAFE_INTEGER,
@@ -2118,9 +2534,24 @@ describe("useSessionEvents", () => {
         compact: true,
         payloadMode: "full",
       },
-      { before: 8, limit: SESSION_HISTORY_PAGE_SIZE, compact: true, payloadMode: "full" },
-      { before: 6, limit: SESSION_HISTORY_PAGE_SIZE, compact: true, payloadMode: "full" },
-      { before: 4, limit: SESSION_HISTORY_PAGE_SIZE, compact: true, payloadMode: "full" },
+      {
+        before: 8,
+        limit: SESSION_HISTORY_PAGE_SIZE,
+        compact: true,
+        payloadMode: "full",
+      },
+      {
+        before: 6,
+        limit: SESSION_HISTORY_PAGE_SIZE,
+        compact: true,
+        payloadMode: "full",
+      },
+      {
+        before: 4,
+        limit: SESSION_HISTORY_PAGE_SIZE,
+        compact: true,
+        payloadMode: "full",
+      },
     ]);
     const agentText = hook.result.current.timeline
       .filter(
@@ -2175,8 +2606,10 @@ describe("useSessionEvents", () => {
   test("keeps a bounded live suffix, advances resume, and preserves status after its event is evicted", async () => {
     const streamed = [
       event(1, "session.status.changed", { status: "running" }),
-      ...Array.from({ length: SESSION_EVENT_BROWSER_MAX_COUNT + 50 }, (_, index) =>
-        event(index + 2, "machine.op.recovered", { attempt: index + 1 }),
+      ...Array.from(
+        { length: SESSION_EVENT_BROWSER_MAX_COUNT + 50 },
+        (_, index) =>
+          event(index + 2, "machine.op.recovered", { attempt: index + 1 }),
       ),
     ];
     const { client, listCalls, streamCalls } = scriptedClient({
@@ -2194,12 +2627,16 @@ describe("useSessionEvents", () => {
     );
     await flush(80);
 
-    expect(hook.result.current.events).toHaveLength(SESSION_EVENT_BROWSER_MAX_COUNT);
+    expect(hook.result.current.events).toHaveLength(
+      SESSION_EVENT_BROWSER_MAX_COUNT,
+    );
     expect(hook.result.current.events[0]?.sequence).toBe(52);
     expect(hook.result.current.events.at(-1)?.sequence).toBe(streamed.length);
     expect(hook.result.current.lastSequence).toBe(streamed.length);
     expect(hook.result.current.windowTruncated).toBeTrue();
-    expect(hook.result.current.windowBytes).toBeLessThanOrEqual(SESSION_EVENT_BROWSER_MAX_BYTES);
+    expect(hook.result.current.windowBytes).toBeLessThanOrEqual(
+      SESSION_EVENT_BROWSER_MAX_BYTES,
+    );
     expect(hook.result.current.hasOlder).toBeTrue();
     expect(hook.result.current.sessionStatus).toBe("running");
 
@@ -2219,15 +2656,20 @@ describe("useSessionEvents", () => {
     // immediately newest-bound it and evict the history the reader requested.
     expect(streamCalls).toEqual([0]);
     expect(hook.result.current.events[0]?.sequence).toBe(1);
-    expect(hook.result.current.events.at(-1)?.sequence).toBe(SESSION_EVENT_BROWSER_MAX_COUNT);
+    expect(hook.result.current.events.at(-1)?.sequence).toBe(
+      SESSION_EVENT_BROWSER_MAX_COUNT,
+    );
     expect(hook.result.current.lastSequence).toBe(streamed.length);
     expect(hook.result.current.hasOlder).toBeFalse();
     expect(hook.result.current.hasNewer).toBeTrue();
     expect(hook.result.current.sessionStatus).toBe("running");
-    const recoveredSequences = hook.result.current.events.map((item) => item.sequence);
+    const recoveredSequences = hook.result.current.events.map(
+      (item) => item.sequence,
+    );
     expect(
       recoveredSequences.every(
-        (sequence, index) => index === 0 || sequence === recoveredSequences[index - 1]! + 1,
+        (sequence, index) =>
+          index === 0 || sequence === recoveredSequences[index - 1]! + 1,
       ),
     ).toBeTrue();
 
@@ -2243,7 +2685,11 @@ describe("useSessionEvents", () => {
     const originalSetTimeout = globalThis.setTimeout;
     const originalClearTimeout = globalThis.clearTimeout;
     let nextTimer = 1_000_000;
-    globalThis.setTimeout = ((callback: TimerHandler, delay?: number, ...args: unknown[]) => {
+    globalThis.setTimeout = ((
+      callback: TimerHandler,
+      delay?: number,
+      ...args: unknown[]
+    ) => {
       if (delay === 16 && typeof callback === "function") {
         const timer = nextTimer++;
         heldTimers.set(timer, () => callback(...args));
@@ -2256,14 +2702,21 @@ describe("useSessionEvents", () => {
       originalClearTimeout(timer);
     }) as typeof clearTimeout;
 
-    let hook: Awaited<ReturnType<typeof renderHook<UseSessionEventsResult, undefined>>> | null =
-      null;
+    let hook: Awaited<
+      ReturnType<typeof renderHook<UseSessionEventsResult, undefined>>
+    > | null = null;
     try {
       const client = fakeClient({
         streamEvents: () =>
           (async function* () {
-            for (let index = 0; index < SESSION_EVENT_BROWSER_PENDING_MAX_COUNT + 1; index += 1) {
-              yield event(index + 1, "machine.op.recovered", { attempt: index + 1 });
+            for (
+              let index = 0;
+              index < SESSION_EVENT_BROWSER_PENDING_MAX_COUNT + 1;
+              index += 1
+            ) {
+              yield event(index + 1, "machine.op.recovered", {
+                attempt: index + 1,
+              });
             }
             await blocked;
           })(),
@@ -2280,12 +2733,18 @@ describe("useSessionEvents", () => {
       await flush(1);
 
       expect(heldTimers.size).toBeGreaterThan(0);
-      expect(hook.result.current.events).toHaveLength(SESSION_EVENT_BROWSER_PENDING_MAX_COUNT);
-      expect(hook.result.current.lastSequence).toBe(SESSION_EVENT_BROWSER_PENDING_MAX_COUNT);
+      expect(hook.result.current.events).toHaveLength(
+        SESSION_EVENT_BROWSER_PENDING_MAX_COUNT,
+      );
+      expect(hook.result.current.lastSequence).toBe(
+        SESSION_EVENT_BROWSER_PENDING_MAX_COUNT,
+      );
 
       releaseStream();
       await flush(1);
-      expect(hook.result.current.events).toHaveLength(SESSION_EVENT_BROWSER_PENDING_MAX_COUNT + 1);
+      expect(hook.result.current.events).toHaveLength(
+        SESSION_EVENT_BROWSER_PENDING_MAX_COUNT + 1,
+      );
     } finally {
       releaseStream();
       if (hook) await hook.unmount();
@@ -2304,7 +2763,11 @@ describe("useSessionEvents", () => {
     const originalClearTimeout = globalThis.clearTimeout;
     let nextTimer = 1_500_000;
     let maxHeldTimers = 0;
-    globalThis.setTimeout = ((callback: TimerHandler, delay?: number, ...args: unknown[]) => {
+    globalThis.setTimeout = ((
+      callback: TimerHandler,
+      delay?: number,
+      ...args: unknown[]
+    ) => {
       if (delay === 16 && typeof callback === "function") {
         const timer = nextTimer++;
         heldTimers.set(timer, () => callback(...args));
@@ -2319,14 +2782,17 @@ describe("useSessionEvents", () => {
     }) as typeof clearTimeout;
 
     const streamedCount = SESSION_EVENT_BROWSER_PENDING_MAX_COUNT * 20;
-    let hook: Awaited<ReturnType<typeof renderHook<UseSessionEventsResult, undefined>>> | null =
-      null;
+    let hook: Awaited<
+      ReturnType<typeof renderHook<UseSessionEventsResult, undefined>>
+    > | null = null;
     try {
       const client = fakeClient({
         streamEvents: () =>
           (async function* () {
             for (let index = 0; index < streamedCount; index += 1) {
-              yield event(index + 1, "machine.op.recovered", { attempt: index + 1 });
+              yield event(index + 1, "machine.op.recovered", {
+                attempt: index + 1,
+              });
             }
             await blocked;
           })(),
@@ -2348,7 +2814,9 @@ describe("useSessionEvents", () => {
       expect(hook.result.current.events.length).toBeLessThanOrEqual(
         SESSION_EVENT_BROWSER_MAX_COUNT,
       );
-      expect(hook.result.current.windowBytes).toBeLessThanOrEqual(SESSION_EVENT_BROWSER_MAX_BYTES);
+      expect(hook.result.current.windowBytes).toBeLessThanOrEqual(
+        SESSION_EVENT_BROWSER_MAX_BYTES,
+      );
 
       releaseStream();
       await flush(1);
@@ -2372,7 +2840,11 @@ describe("useSessionEvents", () => {
     const originalSetTimeout = globalThis.setTimeout;
     const originalClearTimeout = globalThis.clearTimeout;
     let nextTimer = 2_000_000;
-    globalThis.setTimeout = ((callback: TimerHandler, delay?: number, ...args: unknown[]) => {
+    globalThis.setTimeout = ((
+      callback: TimerHandler,
+      delay?: number,
+      ...args: unknown[]
+    ) => {
       if (delay === 16 && typeof callback === "function") {
         const timer = nextTimer++;
         heldTimers.set(timer, () => callback(...args));
@@ -2385,8 +2857,9 @@ describe("useSessionEvents", () => {
       originalClearTimeout(timer);
     }) as typeof clearTimeout;
 
-    let hook: Awaited<ReturnType<typeof renderHook<UseSessionEventsResult, undefined>>> | null =
-      null;
+    let hook: Awaited<
+      ReturnType<typeof renderHook<UseSessionEventsResult, undefined>>
+    > | null = null;
     try {
       const streamed = [
         event(1, "agent.toolCall.output", {
@@ -2394,7 +2867,9 @@ describe("useSessionEvents", () => {
           output: `HEAD-${"界".repeat(1024 * 1024)}-TAIL`,
         }),
         ...Array.from({ length: 20 }, (_, index) =>
-          event(index + 2, "agent.message.completed", { text: "x".repeat(80 * 1024) }),
+          event(index + 2, "agent.message.completed", {
+            text: "x".repeat(80 * 1024),
+          }),
         ),
       ];
       const client = fakeClient({
@@ -2424,13 +2899,20 @@ describe("useSessionEvents", () => {
       expect(hook.result.current.windowBytes).toBeGreaterThan(
         SESSION_EVENT_BROWSER_PENDING_MAX_BYTES,
       );
-      const firstPayload = hook.result.current.events[0]!.payload as Record<string, unknown>;
-      expect(firstPayload).toBe(streamed[0]!.payload as Record<string, unknown>);
+      const firstPayload = hook.result.current.events[0]!.payload as Record<
+        string,
+        unknown
+      >;
+      expect(firstPayload).toBe(
+        streamed[0]!.payload as Record<string, unknown>,
+      );
 
       releaseStream();
       await flush(1);
       expect(hook.result.current.lastSequence).toBe(streamed.length);
-      expect(hook.result.current.windowBytes).toBeLessThanOrEqual(SESSION_EVENT_BROWSER_MAX_BYTES);
+      expect(hook.result.current.windowBytes).toBeLessThanOrEqual(
+        SESSION_EVENT_BROWSER_MAX_BYTES,
+      );
     } finally {
       releaseStream();
       if (hook) await hook.unmount();
@@ -2440,10 +2922,14 @@ describe("useSessionEvents", () => {
   });
 
   test("backward paging keeps the loaded history when a full window evicts the live tail", async () => {
-    const historical = Array.from({ length: SESSION_EVENT_BROWSER_MAX_COUNT + 51 }, (_, index) =>
-      event(index + 1),
+    const historical = Array.from(
+      { length: SESSION_EVENT_BROWSER_MAX_COUNT + 51 },
+      (_, index) => event(index + 1),
     );
-    const throughLive = [...historical, event(SESSION_EVENT_BROWSER_MAX_COUNT + 52)];
+    const throughLive = [
+      ...historical,
+      event(SESSION_EVENT_BROWSER_MAX_COUNT + 52),
+    ];
     const listCalls: ListOptions[] = [];
     const streamCalls: number[] = [];
     const streamSignals: AbortSignal[] = [];
@@ -2469,7 +2955,9 @@ describe("useSessionEvents", () => {
               resolve();
               return;
             }
-            options.signal?.addEventListener("abort", () => resolve(), { once: true });
+            options.signal?.addEventListener("abort", () => resolve(), {
+              once: true,
+            });
           });
         })();
       },
@@ -2486,8 +2974,12 @@ describe("useSessionEvents", () => {
     await flush(100);
 
     expect(hook.result.current.events[0]?.sequence).toBe(52);
-    expect(hook.result.current.events.at(-1)?.sequence).toBe(SESSION_EVENT_BROWSER_MAX_COUNT + 51);
-    expect(hook.result.current.lastSequence).toBe(SESSION_EVENT_BROWSER_MAX_COUNT + 51);
+    expect(hook.result.current.events.at(-1)?.sequence).toBe(
+      SESSION_EVENT_BROWSER_MAX_COUNT + 51,
+    );
+    expect(hook.result.current.lastSequence).toBe(
+      SESSION_EVENT_BROWSER_MAX_COUNT + 51,
+    );
 
     let automatic!: OlderHistoryLoadReceipt;
     await actRun(async () => {
@@ -2506,7 +2998,9 @@ describe("useSessionEvents", () => {
     expect(automatic.committed).toBe(false);
     expect(automatic.tailPreserved).toBe(true);
     expect(hook.result.current.events[0]?.sequence).toBe(52);
-    expect(hook.result.current.events.at(-1)?.sequence).toBe(SESSION_EVENT_BROWSER_MAX_COUNT + 51);
+    expect(hook.result.current.events.at(-1)?.sequence).toBe(
+      SESSION_EVENT_BROWSER_MAX_COUNT + 51,
+    );
     expect(hook.result.current.hasNewer).toBe(false);
     expect(streamCalls).toEqual([0]);
     listCalls.length = 0;
@@ -2530,13 +3024,20 @@ describe("useSessionEvents", () => {
     expect(streamSignals[0]!.aborted).toBe(true);
     expect(hook.result.current.connectionState).toBe("idle");
     expect(hook.result.current.events[0]?.sequence).toBe(20);
-    expect(hook.result.current.events.at(-1)?.sequence).toBe(SESSION_EVENT_BROWSER_MAX_COUNT + 19);
-    expect(hook.result.current.lastSequence).toBe(SESSION_EVENT_BROWSER_MAX_COUNT + 51);
+    expect(hook.result.current.events.at(-1)?.sequence).toBe(
+      SESSION_EVENT_BROWSER_MAX_COUNT + 19,
+    );
+    expect(hook.result.current.lastSequence).toBe(
+      SESSION_EVENT_BROWSER_MAX_COUNT + 51,
+    );
     expect(hook.result.current.hasOlder).toBe(true);
     expect(hook.result.current.hasNewer).toBe(true);
     const sequences = hook.result.current.events.map((item) => item.sequence);
     expect(
-      sequences.every((sequence, index) => index === 0 || sequence === sequences[index - 1]! + 1),
+      sequences.every(
+        (sequence, index) =>
+          index === 0 || sequence === sequences[index - 1]! + 1,
+      ),
     ).toBeTrue();
     expect(sequences).toContain(20);
     expect(sequences).not.toContain(1);
@@ -2631,8 +3132,9 @@ describe("useSessionEvents", () => {
   });
 
   test("older rows do not resolve a newer failure, but explicit start/latest navigation clears it", async () => {
-    const store = Array.from({ length: SESSION_EVENT_BROWSER_MAX_COUNT + 51 }, (_, index) =>
-      event(index + 1),
+    const store = Array.from(
+      { length: SESSION_EVENT_BROWSER_MAX_COUNT + 51 },
+      (_, index) => event(index + 1),
     );
     const failure = new Error("Later history unavailable");
     let rejectNext = false;
@@ -2648,7 +3150,12 @@ describe("useSessionEvents", () => {
       },
     });
     const hook = await renderHook(
-      () => useSessionEvents(SESSION_ID, { client, workspaceId: WORKSPACE_ID, replay: "full" }),
+      () =>
+        useSessionEvents(SESSION_ID, {
+          client,
+          workspaceId: WORKSPACE_ID,
+          replay: "full",
+        }),
       undefined,
     );
     await flush(100);
@@ -2685,15 +3192,18 @@ describe("useSessionEvents", () => {
       listEvents: async (options) => {
         if (holdNext) {
           holdNext = false;
-          return await new Promise<SessionEvent[]>((_resolve, rejectPromise) => {
-            reject = rejectPromise;
-          });
+          return await new Promise<SessionEvent[]>(
+            (_resolve, rejectPromise) => {
+              reject = rejectPromise;
+            },
+          );
         }
         return listPage(store, options);
       },
     });
     const hook = await renderHook<UseSessionEventsResult, string>(
-      (id: string) => useSessionEvents(id, { client, workspaceId: WORKSPACE_ID }),
+      (id: string) =>
+        useSessionEvents(id, { client, workspaceId: WORKSPACE_ID }),
       SESSION_ID,
     );
     await flush(20);
@@ -2717,7 +3227,9 @@ describe("useSessionEvents", () => {
   });
 
   test("loadNewer pages forward; jumpToLatest reloads the live tip", async () => {
-    const store = Array.from({ length: 12_000 }, (_, index) => event(index + 1));
+    const store = Array.from({ length: 12_000 }, (_, index) =>
+      event(index + 1),
+    );
     const { client, listCalls, streamCalls } = scriptedClient({ store });
     const hook = await renderHook(
       () => useSessionEvents(SESSION_ID, { client, workspaceId: WORKSPACE_ID }),
@@ -2733,11 +3245,16 @@ describe("useSessionEvents", () => {
     const more = await actRun(() => hook.result.current.loadNewer());
     await flush(20);
     expect(more).toBe(true);
-    expect(hook.result.current.events.at(-1)!.sequence).toBeGreaterThan(afterOldest);
+    expect(hook.result.current.events.at(-1)!.sequence).toBeGreaterThan(
+      afterOldest,
+    );
     expect(hook.result.current.hasNewer).toBe(true);
     expect(
       listCalls.some(
-        (call) => call.after === afterOldest && call.direction === "after" && call.compact === true,
+        (call) =>
+          call.after === afterOldest &&
+          call.direction === "after" &&
+          call.compact === true,
       ),
     ).toBe(true);
 
@@ -2766,10 +3283,20 @@ describe("useSessionEvents", () => {
           ];
         }
         if (options.after === 10) {
-          return [event(11, "agent.message.delta", { text: "cd", coalescedUntil: 20 })];
+          return [
+            event(11, "agent.message.delta", {
+              text: "cd",
+              coalescedUntil: 20,
+            }),
+          ];
         }
         if (options.after === 20) {
-          return [event(21, "agent.message.delta", { text: "ef", coalescedUntil: 30 })];
+          return [
+            event(21, "agent.message.delta", {
+              text: "ef",
+              coalescedUntil: 30,
+            }),
+          ];
         }
         return [];
       },
@@ -2791,11 +3318,17 @@ describe("useSessionEvents", () => {
 
     expect(newer).toBe(true);
     expect(
-      listCalls.filter((call) => call.direction === "after").map((call) => call.after),
+      listCalls
+        .filter((call) => call.direction === "after")
+        .map((call) => call.after),
     ).toEqual([0, 10]);
-    expect(hook.result.current.events.map((item) => item.sequence)).toEqual([1, 2, 11]);
+    expect(hook.result.current.events.map((item) => item.sequence)).toEqual([
+      1, 2, 11,
+    ]);
     expect(buildTimeline(hook.result.current.events)).toEqual(
-      expect.arrayContaining([expect.objectContaining({ kind: "agent-message", text: "abcd" })]),
+      expect.arrayContaining([
+        expect.objectContaining({ kind: "agent-message", text: "abcd" }),
+      ]),
     );
     expect(hook.result.current.hasNewer).toBe(true);
 
@@ -2804,10 +3337,14 @@ describe("useSessionEvents", () => {
 
     expect(caughtUp).toBe(false);
     expect(
-      listCalls.filter((call) => call.direction === "after").map((call) => call.after),
+      listCalls
+        .filter((call) => call.direction === "after")
+        .map((call) => call.after),
     ).toEqual([0, 10, 20, 30]);
     expect(buildTimeline(hook.result.current.events)).toEqual(
-      expect.arrayContaining([expect.objectContaining({ kind: "agent-message", text: "abcdef" })]),
+      expect.arrayContaining([
+        expect.objectContaining({ kind: "agent-message", text: "abcdef" }),
+      ]),
     );
     expect(hook.result.current.hasNewer).toBe(false);
     expect(hook.result.current.lastSequence).toBe(30);
@@ -2831,8 +3368,15 @@ describe("appendBrowserSessionEventWindow", () => {
           let current = boundBrowserSessionEventWindow([], options);
           for (let index = 0; index < events.length; index += batchSize) {
             const batch = events.slice(index, index + batchSize);
-            const expected = boundBrowserSessionEventWindow([...current.events, ...batch], options);
-            const next = appendBrowserSessionEventWindow(current, batch, options);
+            const expected = boundBrowserSessionEventWindow(
+              [...current.events, ...batch],
+              options,
+            );
+            const next = appendBrowserSessionEventWindow(
+              current,
+              batch,
+              options,
+            );
             expect(next).toEqual({
               ...expected,
               truncated: current.truncated || expected.truncated,
@@ -2857,7 +3401,9 @@ describe("appendBrowserSessionEventWindow", () => {
     const next = appendBrowserSessionEventWindow(current, [event(2)]);
     expect(reads).toBe(0);
     expect(next.events[0]).toBe(retained);
-    expect(next.bytes).toBe(new TextEncoder().encode(JSON.stringify(next.events)).byteLength);
+    expect(next.bytes).toBe(
+      new TextEncoder().encode(JSON.stringify(next.events)).byteLength,
+    );
     expect(current.events).toHaveLength(1);
   });
 });
@@ -2888,7 +3434,9 @@ describe("boundBrowserSessionEventWindow", () => {
     expect(window.events[1]).toBe(events[1]);
     expect(window.truncated).toBeFalse();
     expect(buildTimeline(window.events)).toEqual(
-      expect.arrayContaining([expect.objectContaining({ kind: "agent-message", text })]),
+      expect.arrayContaining([
+        expect.objectContaining({ kind: "agent-message", text }),
+      ]),
     );
   });
 
@@ -2897,7 +3445,8 @@ describe("boundBrowserSessionEventWindow", () => {
       text: `START-${"x".repeat(SESSION_EVENT_BROWSER_MAX_BYTES + 1)}-END`,
     });
     for (const direction of ["newest", "oldest"] as const) {
-      const events = direction === "newest" ? [event(1), huge] : [huge, event(3)];
+      const events =
+        direction === "newest" ? [event(1), huge] : [huge, event(3)];
       const window = boundBrowserSessionEventWindow(events, { direction });
       expect(window.events).toEqual([huge]);
       expect(window.events[0]).toBe(huge);
@@ -2958,7 +3507,10 @@ describe("boundBrowserSessionEventWindow", () => {
     expect(window.truncated).toBeTrue();
     expect(window.events).toHaveLength(3);
     expect(window.events.at(-1)).toBe(bounded);
-    const latestPayload = window.events.at(-1)!.payload as Record<string, unknown>;
+    const latestPayload = window.events.at(-1)!.payload as Record<
+      string,
+      unknown
+    >;
     expect(
       (
         latestPayload.truncation as {
@@ -2973,14 +3525,18 @@ describe("boundBrowserSessionEventWindow", () => {
     const events = Array.from({ length: 3_000 }, (_, index) =>
       event(index + 1, "agent.message.completed", { text: "x".repeat(4_000) }),
     );
-    const window = boundBrowserSessionEventWindow(events, { maxBytes: 8 * 1024 * 1024 });
+    const window = boundBrowserSessionEventWindow(events, {
+      maxBytes: 8 * 1024 * 1024,
+    });
 
     expect(window.truncated).toBeTrue();
     expect(window.events.length).toBeLessThan(events.length);
     expect(window.events.at(-1)?.sequence).toBe(3_000);
     expect(window.events[0]!.sequence).toBe(3_001 - window.events.length);
     expect(window.bytes).toBeLessThanOrEqual(8 * 1024 * 1024);
-    expect(new TextEncoder().encode(JSON.stringify(window.events)).byteLength).toBe(window.bytes);
+    expect(
+      new TextEncoder().encode(JSON.stringify(window.events)).byteLength,
+    ).toBe(window.bytes);
   });
 
   test("retains the oldest exact byte-bounded prefix for backward paging", () => {
