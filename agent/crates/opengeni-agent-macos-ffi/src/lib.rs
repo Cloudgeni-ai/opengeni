@@ -140,10 +140,32 @@ impl MacFrameStream {
         }
     }
 
-    /// Stops the native producer. Idempotent.
-    pub fn stop(&self) {
+    /// Stops and joins the native producer, retaining the same result on retry.
+    ///
+    /// # Errors
+    /// Returns an error when native stop completion cannot be confirmed.
+    pub fn stop(&self) -> Result<(), MacFfiError> {
         #[cfg(target_os = "macos")]
-        self.inner.stop();
+        {
+            self.inner.stop()
+        }
+        #[cfg(not(target_os = "macos"))]
+        {
+            Ok(())
+        }
+    }
+}
+
+/// Whether every retired capture producer has confirmed its cleanup.
+#[must_use]
+pub fn capture_cleanup_is_settled() -> bool {
+    #[cfg(target_os = "macos")]
+    {
+        ffi::capture_cleanup_is_settled()
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        true
     }
 }
 

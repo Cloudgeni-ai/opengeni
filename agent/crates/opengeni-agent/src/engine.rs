@@ -606,7 +606,7 @@ impl Engine {
             engine: self.clone(),
             op_id: op_id.clone(),
         };
-        tokio::spawn(async move {
+        opengeni_agent_platform::spawn_reserved(async move {
             // Owned here so a PANIC in the pump still removes the route. The
             // RetentionLog drop separately releases actual spool bytes.
             let cleanup = cleanup;

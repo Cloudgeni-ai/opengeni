@@ -381,7 +381,7 @@ fn spawn_stdin_writer(stdin: Option<tokio::process::ChildStdin>, bytes: Vec<u8>)
         drop(stdin);
         return;
     }
-    tokio::spawn(async move {
+    opengeni_agent_platform::spawn_reserved(async move {
         // A dead child (EPIPE) is the child's business; the pump sees its exit.
         let _ = stdin.write_all(&bytes).await;
         let _ = stdin.shutdown().await;

@@ -33,6 +33,117 @@ const rotatedControlToken = `control.${"d".repeat(48)}`;
 const rotatedViewToken = `view.${"w".repeat(48)}`;
 
 describe("Computer routes on the placement interaction server", () => {
+  test("closed RFB work remains busy until its queued native validation settles", async () => {
+    await withRfbServer(async ({ server, reference, driver, received }) => {
+      const grant = rfbGrantBody(reference, true);
+      expect(
+        (
+          await request(
+            server,
+            `/v1/computer-sessions/${reference.computerSessionId}/view-grants`,
+            {
+              method: "POST",
+              token: adminToken,
+              body: grant,
+            },
+          )
+        ).status,
+      ).toBe(201);
+      const socket = await openRfb(server, reference.computerSessionId, grant.token);
+      socket.send(rfbHandshake());
+      await waitUntil(() => received.length === rfbHandshake().length);
+      const entered = Promise.withResolvers<void>();
+      const blocked = Promise.withResolvers<void>();
+      driver.beforeTarget = async () => {
+        entered.resolve();
+        await blocked.promise;
+      };
+      const closed = websocketClosed(socket);
+      socket.send(Uint8Array.of(4, 1, 0, 0));
+      await entered.promise;
+      try {
+        expect(
+          (
+            await request(server, `/v1/computer-sessions/${reference.computerSessionId}/end`, {
+              method: "POST",
+              token: adminToken,
+              body: { controllerGeneration: reference.controllerGeneration, removeState: false },
+            })
+          ).status,
+        ).toBe(200);
+        expect((await closed).code).toBe(1001);
+        expect(
+          (await json(await request(server, "/v1/runtime", { token: adminToken }))).data.idle,
+        ).toBe(false);
+        expect(
+          (
+            await json(
+              await request(server, "/v1/runtime/update", {
+                method: "POST",
+                token: adminToken,
+                body: { operationId: randomUUID() },
+              }),
+            )
+          ).data.idle,
+        ).toBe(false);
+      } finally {
+        blocked.resolve();
+      }
+      let idle = false;
+      for (let attempt = 0; attempt < 20 && !idle; attempt += 1)
+        idle = (await json(await request(server, "/v1/runtime", { token: adminToken }))).data.idle;
+      expect(idle).toBe(true);
+      expect(received).toEqual([...rfbHandshake()]);
+    });
+  });
+
+  test("controller shutdown joins a non-lifecycle HTTP request after closing its session", async () => {
+    await withServer(async ({ server, reference, getDriver }) => {
+      expect(
+        (
+          await request(server, "/v1/computer-sessions", {
+            method: "POST",
+            token: adminToken,
+            body: createBody(reference),
+          })
+        ).status,
+      ).toBe(201);
+      const driver = getDriver();
+      const entered = Promise.withResolvers<void>();
+      const blocked = Promise.withResolvers<void>();
+      const retired = Promise.withResolvers<void>();
+      driver.beforeTarget = async () => {
+        entered.resolve();
+        await blocked.promise;
+      };
+      driver.close = async () => {
+        retired.resolve();
+      };
+      const reading = request(
+        server,
+        `/v1/computer-sessions/${reference.computerSessionId}/targets/window-1/observation`,
+        {
+          token: viewToken,
+        },
+      ).catch(() => undefined);
+      await entered.promise;
+      let stopped = false;
+      const stopping = server.stop().then(() => {
+        stopped = true;
+      });
+      try {
+        await retired.promise;
+        await Bun.sleep(0);
+        expect(stopped).toBe(false);
+      } finally {
+        blocked.resolve();
+      }
+      await reading;
+      await stopping;
+      expect(stopped).toBe(true);
+    });
+  });
+
   test("includes an open computer controller in the private update idle proof", async () => {
     await withServer(async ({ server, reference }) => {
       const idle = async () =>

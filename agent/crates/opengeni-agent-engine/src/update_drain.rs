@@ -5,39 +5,74 @@ use std::collections::HashSet;
 use std::sync::{Arc, Mutex};
 
 #[derive(Default)]
-pub(crate) struct UpdateDrain {
+/// One host-wide admission boundary shared by every ingress connection.
+pub struct UpdateDrain {
     state: Mutex<State>,
 }
 
+impl std::fmt::Debug for UpdateDrain {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("UpdateDrain").finish_non_exhaustive()
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
-pub(crate) struct UploadIdentity {
+/// Exact accepted upload transaction allowed to continue during update drain.
+pub struct UploadIdentity {
+    /// Owning enrollment connection.
     pub connection: String,
+    /// Transaction operation identifier.
     pub operation: String,
+    /// Fenced route epoch.
     pub epoch: u32,
 }
 
 #[derive(Default)]
 struct State {
     operation: Option<String>,
+    sealed: bool,
+    unsettled: bool,
     routed: usize,
     uploads: HashSet<UploadIdentity>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum UpdateReservation {
+/// Result of claiming the sole host updater.
+pub enum UpdateReservation {
+    /// This operation became the updater.
     Started,
+    /// A retry of the already accepted operation.
     AlreadyAccepted,
+    /// Another updater owns the fence.
     Busy,
+    /// Authoritative settlement cannot be established.
     Unavailable,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) struct Snapshot {
+/// Retained accepted producers across all connections and transport generations.
+pub struct Snapshot {
+    /// Request/pump/physical/reply ownership, counted once per admitted request.
     pub routed: usize,
+    /// Upload lifetimes independently retained between transaction requests.
     pub uploads: usize,
 }
 
 impl UpdateDrain {
+    /// Ordinary controller recovery must not release a live updater's fence.
+    pub fn is_draining(&self) -> bool {
+        self.state
+            .lock()
+            .map_or(true, |state| state.operation.is_some())
+    }
+
+    /// Preserve lost physical settlement even after its controller is retired.
+    pub fn mark_unsettled(&self) {
+        if let Ok(mut state) = self.state.lock() {
+            state.unsettled = true;
+        }
+    }
+    /// Claim the updater and fence new work before any asynchronous proof.
     pub fn reserve_update(&self, operation: &str) -> UpdateReservation {
         let Ok(mut state) = self.state.lock() else {
             return UpdateReservation::Unavailable;
@@ -46,20 +81,26 @@ impl UpdateDrain {
             Some(current) if current == operation => UpdateReservation::AlreadyAccepted,
             Some(_) => UpdateReservation::Busy,
             None => {
+                if state.unsettled {
+                    return UpdateReservation::Unavailable;
+                }
                 state.operation = Some(operation.to_owned());
                 UpdateReservation::Started
             }
         }
     }
 
+    /// Release only this updater's fence; never clear unsettled physical work.
     pub fn release_update(&self, operation: &str) {
         if let Ok(mut state) = self.state.lock() {
             if state.operation.as_deref() == Some(operation) {
                 state.operation = None;
+                state.sealed = false;
             }
         }
     }
 
+    /// Admit synchronously before spawning a worker, or an exact upload continuation.
     pub fn reserve_work(
         self: &Arc<Self>,
         identity: Option<UploadIdentity>,
@@ -80,20 +121,71 @@ impl UpdateDrain {
         })))
     }
 
+    /// Return no idle evidence after a lost physical/transport settlement.
     pub fn snapshot(&self) -> Option<Snapshot> {
-        self.state.lock().ok().map(|state| Snapshot {
-            routed: state.routed,
-            uploads: state.uploads.len(),
-        })
+        self.state
+            .lock()
+            .ok()
+            .filter(|state| !state.unsettled)
+            .map(|state| Snapshot {
+                routed: state.routed,
+                uploads: state.uploads.len(),
+            })
+    }
+
+    /// Existing operation controls remain usable while draining, until the
+    /// final idle check atomically seals admission for binary replacement.
+    pub fn reserve_control(self: &Arc<Self>) -> Option<WorkReservation> {
+        let mut state = self.state.lock().ok()?;
+        if state.sealed {
+            return None;
+        }
+        state.routed += 1;
+        Some(WorkReservation(Arc::new(Reservation {
+            drain: self.clone(),
+            upload: false,
+            identity: None,
+        })))
+    }
+
+    /// Called only after engine and controller idle proofs. Controls admitted
+    /// during either proof invalidate this final check rather than racing apply.
+    pub fn seal_update(&self, operation: &str) -> bool {
+        let Ok(mut state) = self.state.lock() else {
+            return false;
+        };
+        if state.operation.as_deref() != Some(operation)
+            || state.unsettled
+            || state.routed != 0
+            || !state.uploads.is_empty()
+        {
+            return false;
+        }
+        state.sealed = true;
+        true
     }
 }
 
 /// Cloning retains one reservation; it does not mint new accepted work.
 #[derive(Clone)]
-pub(crate) struct WorkReservation(Arc<Reservation>);
+pub struct WorkReservation(Arc<Reservation>);
+
+impl std::fmt::Debug for WorkReservation {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("WorkReservation").finish_non_exhaustive()
+    }
+}
 
 impl WorkReservation {
+    /// A lost transport/cleanup receipt is not proof that physical work ended.
+    /// Keep updates unavailable for this process; ordinary work can continue.
+    pub fn mark_unsettled(&self) {
+        self.0.drain.mark_unsettled();
+    }
     /// The begin RPC remains reserved while an accepted upload takes ownership.
+    /// # Panics
+    /// Panics if called without an admitted, registered upload identity.
+    #[must_use]
     pub fn retain_upload(&self) -> Self {
         let identity = self.0.identity.clone().expect("upload route identity");
         assert!(
@@ -136,6 +228,32 @@ impl Drop for Reservation {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn controls_invalidate_the_final_seal_and_remain_usable_while_draining() {
+        let drain = Arc::new(UpdateDrain::default());
+        assert_eq!(drain.reserve_update("one"), UpdateReservation::Started);
+        let control = drain.reserve_control().unwrap();
+        assert!(!drain.seal_update("one"));
+        drop(control);
+        assert!(drain.seal_update("one"));
+        assert!(drain.reserve_control().is_none());
+        drain.release_update("another");
+        assert!(drain.reserve_control().is_none());
+        drain.release_update("one");
+        assert!(drain.reserve_control().is_some());
+    }
+
+    #[test]
+    fn lost_settlement_prevents_update_without_disabling_ordinary_work() {
+        let drain = Arc::new(UpdateDrain::default());
+        let work = drain.reserve_work(None).unwrap();
+        work.mark_unsettled();
+        drop(work);
+        assert_eq!(drain.snapshot(), None);
+        assert_eq!(drain.reserve_update("one"), UpdateReservation::Unavailable);
+        assert!(drain.reserve_work(None).is_some());
+    }
 
     #[test]
     fn pending_unpolled_work_is_reserved_before_update() {

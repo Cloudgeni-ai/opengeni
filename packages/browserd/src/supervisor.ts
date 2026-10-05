@@ -1,4 +1,5 @@
 import { EphemeralChromiumContextPool } from "./chromium-context-pool";
+import { UnsettledCleanupError } from "./cleanup-error";
 import { restoredTabUrl } from "./restored-tab-url";
 import { selectManagedChromiumExecutable, type VerifiedHeadlessShell } from "./headless-shell";
 import type { HeadlessSessionCookies } from "./headless-session-cookies";
@@ -352,6 +353,8 @@ export class BrowserSupervisor {
   private readonly ending = new Map<string, Promise<void>>();
   private readonly stateTransferTails = new Map<string, Promise<void>>();
   private closed = false;
+  private closePromise: Promise<void> | null = null;
+  private cleanupUncertain = false;
 
   private constructor(options: BrowserSupervisorOptions) {
     this.rootDirectory = resolve(options.rootDirectory);
@@ -411,6 +414,9 @@ export class BrowserSupervisor {
       .digest("hex");
     let pool = this.contextPools.get(key);
     if (!pool || pool.isTerminal()) {
+      // A failed terminal pool still owns the only cleanup proof. Do not
+      // replace it until its retained shutdown has positively completed.
+      if (pool) await pool.close();
       const poolDirectory = join(this.rootDirectory, "sessions", randomUUID());
       const poolSocketDirectory = join(this.socketRootDirectory, shortDigest(poolDirectory));
       pool = new EphemeralChromiumContextPool({
@@ -548,7 +554,12 @@ export class BrowserSupervisor {
     try {
       const runtime = await creation;
       if (this.closed) {
-        await this.disposeRuntime(runtime, false);
+        try {
+          await this.disposeRuntime(runtime, false);
+        } catch (error) {
+          this.cleanupUncertain = true;
+          throw error;
+        }
         throw new InteractionControllerError(
           "resource_unavailable",
           "browser supervisor is closed",
@@ -571,6 +582,7 @@ export class BrowserSupervisor {
   /** Update safety includes work hidden from the public active-session list. */
   isIdle(): boolean {
     return (
+      !this.cleanupUncertain &&
       this.creationRequests.size === 0 &&
       this.sessions.size === 0 &&
       this.creating.size === 0 &&
@@ -914,16 +926,32 @@ export class BrowserSupervisor {
   }
 
   async close(): Promise<void> {
-    if (this.closed) return;
+    if (this.closePromise) return await this.closePromise;
     this.closed = true;
+    this.closePromise = this.performClose();
+    return await this.closePromise;
+  }
+
+  private async performClose(): Promise<void> {
     await Promise.allSettled([...this.creationRequests]);
     await Promise.allSettled([...this.creating.values()]);
     const active = [...this.sessions.values()];
-    await Promise.allSettled(
+    const results = await Promise.allSettled(
       active.map(async (runtime) => await this.endSession(binding(runtime))),
     );
-    await Promise.all([...this.contextPools.values()].map((pool) => pool.close()));
+    const poolResults = await Promise.allSettled(
+      [...this.contextPools.values()].map((pool) => pool.close()),
+    );
     this.contextPools.clear();
+    const failures = [...results, ...poolResults].flatMap((result) =>
+      result.status === "rejected" ? [result.reason] : [],
+    );
+    if (this.cleanupUncertain)
+      failures.push(new Error("previous browser cleanup remains unsettled"));
+    if (failures.length > 0) {
+      this.cleanupUncertain = true;
+      throw new AggregateError(failures, "browser supervisor shutdown failed");
+    }
   }
 
   private async buildRuntime(options: ValidatedBrowserSupervisorSessionOptions): Promise<Runtime> {
@@ -1236,6 +1264,7 @@ export class BrowserSupervisor {
       }
       return runtime;
     } catch (error) {
+      if (error instanceof UnsettledCleanupError) this.cleanupUncertain = true;
       const failures: unknown[] = [error];
       let driverClosed = driver === null;
       try {
@@ -1278,6 +1307,7 @@ export class BrowserSupervisor {
         failures.push(cleanupError);
       }
       if (failures.length > 1) {
+        this.cleanupUncertain = true;
         throw aggregateFailure(failures, "browser session creation did not clean up safely", error);
       }
       throw error;
@@ -1458,7 +1488,15 @@ export class BrowserSupervisor {
         );
       }
     } catch (error) {
-      await driver.close().catch(() => undefined);
+      try {
+        await driver.close();
+      } catch (cleanupError) {
+        this.cleanupUncertain = true;
+        throw new UnsettledCleanupError(
+          [error, cleanupError],
+          "replacement browser cleanup failed",
+        );
+      }
       throw error;
     }
   }

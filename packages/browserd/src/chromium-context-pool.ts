@@ -6,6 +6,7 @@ import {
   type BrowserCommandRunner,
 } from "./cdp-driver";
 import { CdpConnection, CdpTransportError } from "./cdp";
+import { UnsettledCleanupError } from "./cleanup-error";
 
 export type EphemeralChromiumPoolOptions = {
   /** Trusted owner/egress/configuration partition. Never derive from an agent argument. */
@@ -213,12 +214,16 @@ export class EphemeralChromiumContextPool {
     if (this.shutdownPromise) return this.shutdownPromise;
     this.terminal = true;
     this.shutdownPromise = Promise.resolve().then(async () => {
-      for (const connections of this.leases.values())
-        for (const connection of connections) connection.close();
-      this.leases.clear();
-      this.control?.close();
-      await this.runner?.terminate?.();
-      this.options.onTerminal?.();
+      try {
+        for (const connections of this.leases.values())
+          for (const connection of connections) connection.close();
+        this.leases.clear();
+        this.control?.close();
+        await this.runner?.terminate?.();
+        this.options.onTerminal?.();
+      } catch (error) {
+        throw new UnsettledCleanupError([error], "ephemeral browser pool cleanup failed");
+      }
     });
     return this.shutdownPromise;
   }
