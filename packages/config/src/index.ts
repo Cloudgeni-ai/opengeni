@@ -3477,7 +3477,10 @@ export const OPENGENI_OPENROUTER_MODELS: readonly OpenRouterCatalogModel[] = [
 ];
 
 function opperCuratedCapabilities(input: {
-  reasoning: Pick<ModelCapabilitiesV1["reasoning"], "upstream" | "runnable" | "efforts" | "defaultEffort">;
+  reasoning: Pick<
+    ModelCapabilitiesV1["reasoning"],
+    "upstream" | "runnable" | "efforts" | "defaultEffort"
+  >;
 }): ModelCapabilitiesV1 {
   return ModelCapabilitiesV1Schema.parse({
     reasoning: { ...input.reasoning, required: false },
@@ -3660,7 +3663,9 @@ export function configuredOpperUpstreamModelIds(settings: Settings): string[] {
 
 function workspaceOpperProductId(modelId: string): string {
   return `${WORKSPACE_OPPER_MODEL_ID_PREFIX}${
-    modelId.startsWith(OPPER_MODEL_ID_PREFIX) ? modelId.slice(OPPER_MODEL_ID_PREFIX.length) : modelId
+    modelId.startsWith(OPPER_MODEL_ID_PREFIX)
+      ? modelId.slice(OPPER_MODEL_ID_PREFIX.length)
+      : modelId
   }`;
 }
 
@@ -5440,6 +5445,12 @@ function opperRegistryProvider(
         : { autoCompactTokenLimit: model.autoCompactTokenLimit }),
       toolOutputTruncationTokens:
         model.toolOutputTruncationTokens ?? settings.modelToolOutputTruncationTokens,
+      // Price authority is the reviewed code snapshot (or a code-defined
+      // entry's own reviewed rate), never a database catalog document.
+      ...(() => {
+        const pricing = model.pricing ?? reviewedOpperModelPricing(model.upstreamModelId);
+        return pricing === undefined ? {} : { pricing };
+      })(),
     };
   });
   if (scoped) {

@@ -837,6 +837,184 @@ describe("workspace Gateway custom model API", () => {
     expect(removedGateway.status).toBe(204);
   });
 
+  test("Opper workspace rail: connect, curate custom ids, admit sessions and retire", async () => {
+    if (!app || !publicApp || !grant || !client) throw new Error("Real database fixture required");
+    const curatedProductId = "workspace-opper/vertexai/gemini-3.8-flash-eu";
+    const curatedCollision = await request("/opper-custom-models", {
+      method: "POST",
+      body: { operationId: crypto.randomUUID(), upstreamModelId: "vertexai/gemini-3.8-flash-eu" },
+    });
+    expect(curatedCollision.status).toBe(422);
+    expect(
+      (
+        await request("/opper-custom-models", {
+          method: "POST",
+          permissions: ["workspace:read"],
+          body: { operationId: crypto.randomUUID(), upstreamModelId: "gemini-3.8-flash" },
+        })
+      ).status,
+    ).toBe(403);
+
+    // Custom ids may be prepared while disconnected; they wait for the key.
+    const upstreamModelId = `mistral/mistral-large-eu-${crypto.randomUUID()}`;
+    const productId = `workspace-opper/${upstreamModelId}`;
+    const createBody = { operationId: crypto.randomUUID(), upstreamModelId, label: "Mistral EU" };
+    const created = await request("/opper-custom-models", { method: "POST", body: createBody });
+    expect(created.status).toBe(201);
+    const model = (await created.json()) as { id: string; version: number };
+    const replayed = await request("/opper-custom-models", { method: "POST", body: createBody });
+    expect((await replayed.json()).id).toBe(model.id);
+    const waiting = (await (await request("/model-catalog", {}, publicApp)).json()) as {
+      models: Array<Record<string, any>>;
+    };
+    expect(waiting.models.find((row) => row.id === productId)).toMatchObject({
+      provider: "workspace-opper",
+      providerLabel: "Your Opper",
+      availability: { selectable: false, reason: "needs_reauth" },
+    });
+
+    const permissions: Permission[] = ["connections:read", "connections:write"];
+    const connected = await request(
+      "/connections",
+      {
+        method: "POST",
+        permissions,
+        body: {
+          providerDomain: "api.opper.ai",
+          kind: "api_key",
+          subjectId: null,
+          credential: { apiKey: "op-workspace-local-fixture" },
+          grantedScopes: [],
+          metadata: { credentialRole: "opper", credentialLabel: "Opper" },
+          operationId: crypto.randomUUID(),
+        },
+      },
+      publicApp,
+    );
+    expect(connected.status).toBe(201);
+    const connectedBody = await connected.json();
+    expect(JSON.stringify(connectedBody)).not.toContain("op-workspace-local-fixture");
+    expect(JSON.stringify(connectedBody)).not.toContain("CredentialOperation");
+    try {
+      expect(
+        await loadWorkspaceProviderApiKey(client.db, settings, grant.workspaceId, "opper"),
+      ).toBe("op-workspace-local-fixture");
+      const catalog = (await (await request("/model-catalog", {}, publicApp)).json()) as {
+        models: Array<Record<string, any>>;
+      };
+      for (const id of [curatedProductId, productId])
+        expect(catalog.models.find((row) => row.id === id)).toMatchObject({
+          provider: "workspace-opper",
+          cost: "workspace",
+          billing: { upstreamPayer: "workspace", metering: "external" },
+          credentialReadiness: { status: "ready", basis: "connection" },
+          availability: { selectable: true },
+        });
+      const access = await request("/model-connections/opper/current/access", {}, publicApp);
+      expect(access.status).toBe(200);
+      const accessModels = ((await access.json()).models as Array<{ id: string }>).map(
+        (row) => row.id,
+      );
+      expect(accessModels).toContain(curatedProductId);
+      expect(accessModels).toContain(productId);
+      expect(accessModels.every((id) => id.startsWith("workspace-opper/"))).toBe(true);
+
+      const session = await request(
+        "/sessions",
+        {
+          method: "POST",
+          permissions: ["sessions:create"],
+          body: {
+            initialMessage: "Opper admission regression; no inference",
+            model: productId,
+            sandboxBackend: "none",
+            idempotencyKey: crypto.randomUUID(),
+          },
+        },
+        publicApp,
+      );
+      expect(session.status).toBe(202);
+      expect((await session.json()).model).toBe(productId);
+
+      const removal = { operationId: crypto.randomUUID(), expectedVersion: model.version };
+      expect(
+        (await request(`/opper-custom-models/${model.id}`, { method: "DELETE", body: removal }))
+          .status,
+      ).toBe(204);
+      expect(await (await request("/opper-custom-models")).json()).toEqual({ models: [] });
+      const retired = await request(
+        "/sessions",
+        {
+          method: "POST",
+          permissions: ["sessions:create"],
+          body: {
+            initialMessage: "Cannot admit a retired Opper model",
+            model: productId,
+            sandboxBackend: "none",
+            idempotencyKey: crypto.randomUUID(),
+          },
+        },
+        publicApp,
+      );
+      expect(retired.status).toBe(422);
+    } finally {
+      const live = await getWorkspaceProviderApiKeyConnectionMetadata(
+        client.db,
+        grant.workspaceId,
+        "opper",
+      );
+      if (live)
+        expect(
+          (
+            await request(
+              `/connections/${live.connectionId}?expectedVersion=${live.version}`,
+              { method: "DELETE", permissions },
+              publicApp,
+            )
+          ).status,
+        ).toBe(200);
+    }
+  });
+
+  test("admits an organization Opper model through the public session boundary", async () => {
+    if (!client || !grant || !publicApp) throw new Error("Real database fixture required");
+    await upsertOrganizationModelProviderConnection(client.db, {
+      organizationId: grant.accountId,
+      actorSubjectId: grant.subjectId,
+      providerKind: "opper",
+      credentialEncrypted: "metadata-only-test-credential",
+      credentialDigest: "metadata-only-test-digest",
+      operationId: crypto.randomUUID(),
+    });
+    await createOrganizationModelProviderCustomModel(client.db, {
+      organizationId: grant.accountId,
+      actorSubjectId: grant.subjectId,
+      providerKind: "opper",
+      upstreamModelId: "aws/claude-sonnet-4-6-eu",
+      operationId: crypto.randomUUID(),
+    });
+    const model = "organization-opper/aws/claude-sonnet-4-6-eu";
+    const response = await request(
+      "/sessions",
+      {
+        method: "POST",
+        permissions: ["sessions:create"],
+        body: {
+          initialMessage: "Local admission regression; no inference",
+          model,
+          sandboxBackend: "none",
+          idempotencyKey: crypto.randomUUID(),
+        },
+      },
+      publicApp,
+    );
+    const body = await response.json();
+    expect({ status: response.status, ...(response.status === 202 ? {} : { body }) }).toEqual({
+      status: 202,
+    });
+    expect(body.model).toBe(model);
+  });
+
   test("creates one exact slug, exposes it only to the workspace catalog, and deletes it", async () => {
     if (!app || !publicApp || !grant) return;
     const upstreamModelId = "anthropic/claude-sonnet-4.6";
