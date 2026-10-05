@@ -2365,6 +2365,11 @@ for (const theme of ["light", "dark"] as const) {
         await scan("[data-og-review-details]");
         await details.getByRole("button", { name: "Back to review" }).click();
         await surface.waitFor();
+        await page.waitForFunction(
+          (element) => element === document.activeElement,
+          await open.elementHandle(),
+          { timeout: 5_000 },
+        );
         assert.equal(await open.evaluate((element) => element === document.activeElement), true);
         if (width === 768) {
           await page.evaluate(() => {
