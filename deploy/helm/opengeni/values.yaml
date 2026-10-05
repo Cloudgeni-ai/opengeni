@@ -1264,7 +1264,11 @@ observability:
     # Cumulative p95 startup SLOs, measured from the durable turn queue time.
     # Keep these aligned with the canonical Turn Startup dashboard annotations.
     turnStartupQueueP95Seconds: 5
-    turnStartupProviderDispatchP95Seconds: 60
+    # Accepted turn -> first provider dispatch is OpenGeni-owned latency, so it
+    # gets tight tiers: a warning (investigate) and a paging critical tier that
+    # replaces it. Normal p95 is a few seconds.
+    turnStartupProviderDispatchP95Seconds: 20
+    turnStartupProviderDispatchCriticalP95Seconds: 60
     turnStartupFirstByteP95Seconds: 120
     # Exclusive logical-turn first-byte completions divided by completed plus
     # terminal failed-without-byte milestones over the alert window. A failed
@@ -1272,6 +1276,19 @@ observability:
     # latency quantiles; later tool-loop failures cannot downgrade a success.
     turnStartupFirstByteAvailabilityRatio: 0.95
     turnStartupMinSamples: 5
+    # Per model request: SDK model entry -> literal provider dispatch (admission,
+    # durable history/audit checkpoints, credit revalidation). Ours; sub-second
+    # when healthy.
+    modelRequestPreDispatchP95Seconds: 2
+    modelRequestMinSamples: 20
+    # Provider time-to-first-token (dispatch -> first streamed delta) alerts only
+    # relative to that provider's own trailing 24h p90, never on an absolute
+    # number: the 30m p90 must exceed ratio x baseline AND the floor, with
+    # enough recent and baseline requests.
+    providerTtftRegressionRatio: 2
+    providerTtftRegressionFloorSeconds: 5
+    providerTtftRecentMinSamples: 30
+    providerTtftBaselineMinSamples: 200
     labels: {}
     annotations: {}
     rules: []

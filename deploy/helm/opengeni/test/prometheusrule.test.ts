@@ -312,7 +312,8 @@ describe("turn-capacity Prometheus alerts", () => {
       "utf8",
     );
     for (const alert of [
-      "OpenGeniStreamingFirstTokenSlow",
+      "OpenGeniModelRequestPreDispatchP95High",
+      "OpenGeniModelProviderTtftRegression",
       "OpenGeniEventAppendLatencyHigh",
       "OpenGeniEventPublishLatencyHigh",
     ]) {
@@ -320,6 +321,88 @@ describe("turn-capacity Prometheus alerts", () => {
         expect(selector).toContain(DEPLOYMENT_SCOPE);
       }
     }
+  });
+
+  test("never alerts on absolute provider TTFT; judges each provider against its own baseline", async () => {
+    const template = await readFile(
+      new URL("../templates/prometheusrule.yaml", import.meta.url),
+      "utf8",
+    );
+    expect(template).not.toContain("OpenGeniStreamingFirstTokenSlow");
+    expect(template).not.toMatch(/- alert:[^\n]*\n\s+expr:[^\n]*opengeni_stream_ttft_seconds/);
+
+    const recent = recordExpression(template, "opengeni:model_provider_ttft_seconds:p90_30m");
+    const baseline = recordExpression(
+      template,
+      "opengeni:model_provider_ttft_seconds:p90_24h_baseline",
+    );
+    for (const expression of [recent, baseline]) {
+      expect(expression).toContain("histogram_quantile(0.9, sum by (le, provider)");
+      expect(expression).toContain("opengeni_model_provider_ttft_seconds_bucket");
+      expect(expression).toContain('content="any"');
+      for (const selector of metricSelectors(expression)) {
+        expect(selector).toContain(DEPLOYMENT_SCOPE);
+      }
+    }
+    expect(recent).toContain("[30m]");
+    // The baseline excludes the window being judged.
+    expect(baseline).toContain("[24h] offset 30m");
+    expect(
+      recordExpression(template, "opengeni:model_provider_ttft_requests:24h_baseline"),
+    ).toContain("[24h] offset 30m");
+
+    const regression = ruleBlock(template, "alert", "OpenGeniModelProviderTtftRegression");
+    expect(regression).toContain(
+      "> {{ $providerTtftRegressionRatio }} * opengeni:model_provider_ttft_seconds:p90_24h_baseline",
+    );
+    expect(regression).toContain("> {{ $providerTtftRegressionFloorSeconds }}");
+    expect(regression).toContain(">= {{ $providerTtftRecentMinSamples }}");
+    expect(regression).toContain(">= {{ $providerTtftBaselineMinSamples }}");
+    // Our own saturation is attributed to us first.
+    expect(regression).toContain("unless on()");
+    expect(regression).toContain("opengeni_model_request_pre_dispatch_seconds_bucket");
+    expect(regression).toContain("severity: warning");
+    expect(regression).toContain("notification_policy: investigate");
+    expect(regression).toContain(
+      "runbook_url: https://github.com/Cloudgeni-ai/opengeni/blob/main/docs/launch-monitoring.md",
+    );
+  });
+
+  test("tiers OpenGeni-owned dispatch latency tightly and without duplicate incidents", async () => {
+    const template = await readFile(
+      new URL("../templates/prometheusrule.yaml", import.meta.url),
+      "utf8",
+    );
+    const warning = ruleBlock(template, "alert", "OpenGeniTurnStartupProviderDispatchP95High");
+    const critical = ruleBlock(template, "alert", "OpenGeniTurnStartupProviderDispatchP95Critical");
+    const preDispatch = ruleBlock(template, "alert", "OpenGeniModelRequestPreDispatchP95High");
+
+    expect(warning).toContain("> {{ $turnStartupProviderDispatchP95Seconds }}");
+    expect(warning).toContain("unless on()");
+    expect(warning).toContain("> {{ $turnStartupProviderDispatchCriticalP95Seconds }}");
+    expect(warning).toContain("notification_policy: investigate");
+    expect(critical).toContain("> {{ $turnStartupProviderDispatchCriticalP95Seconds }}");
+    expect(critical).toContain("severity: critical");
+    expect(critical).toContain("notification_policy: page");
+    expect(critical).toContain('milestone="provider_dispatch"');
+    expect(preDispatch).toContain("opengeni_model_request_pre_dispatch_seconds_bucket");
+    expect(preDispatch).toContain("> {{ $modelRequestPreDispatchP95Seconds }}");
+    expect(preDispatch).toContain(">= {{ $modelRequestMinSamples }}");
+    for (const block of [warning, critical, preDispatch]) {
+      expect(block).toContain("action:");
+      expect(block).toContain(
+        "runbook_url: https://github.com/Cloudgeni-ai/opengeni/blob/main/docs/launch-monitoring.md",
+      );
+      for (const selector of metricSelectors(block)) {
+        expect(selector).toContain(DEPLOYMENT_SCOPE);
+      }
+    }
+    expect(template).toContain(
+      "{{- $turnStartupProviderDispatchP95Seconds := int (default 20 ",
+    );
+    expect(template).toContain(
+      "(le $turnStartupProviderDispatchCriticalP95Seconds $turnStartupProviderDispatchP95Seconds)",
+    );
   });
 
   test("alerts from durable model-aware compaction lifecycle instead of a static token guess", async () => {
