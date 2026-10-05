@@ -1,6 +1,6 @@
 import { createContext, useContext, useMemo, type ReactNode } from "react";
 import { Platform, type TextStyle } from "react-native";
-import { webColorsDark, webColorsLight, webLengths } from "../ui/web-tokens.generated";
+import { webColorsDark, webColorsLight, webLengths } from "../ui/web-tokens.gen";
 
 /* ----------------------------------------------------------------------------
    Native timeline theme

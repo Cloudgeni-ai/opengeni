@@ -44,7 +44,11 @@ export function ActionButton(props: {
     >
       <Text
         style={{
-          color: primary ? theme.colors.onAccent : variant === "danger" ? theme.colors.danger : theme.colors.text,
+          color: primary
+            ? theme.colors.onAccent
+            : variant === "danger"
+              ? theme.colors.danger
+              : theme.colors.text,
           fontSize: theme.type.body - 1,
           fontWeight: theme.type.weightStrong,
         }}
@@ -55,7 +59,13 @@ export function ActionButton(props: {
   );
 }
 
-function CardShell(props: { theme: AgentTheme; icon: "alert" | "question"; eyebrow: string; title: string; children: React.ReactNode }) {
+function CardShell(props: {
+  theme: AgentTheme;
+  icon: "alert" | "question";
+  eyebrow: string;
+  title: string;
+  children: React.ReactNode;
+}) {
   const { theme } = props;
   return (
     <View
@@ -75,11 +85,25 @@ function CardShell(props: { theme: AgentTheme; icon: "alert" | "question"; eyebr
     >
       <View style={{ flexDirection: "row", alignItems: "center", gap: 8 }}>
         <AgentIcon color={theme.colors.attention} name={props.icon} size={16} />
-        <Text style={{ color: theme.colors.attention, fontSize: theme.type.small, fontWeight: "600", letterSpacing: 0.2 }}>
+        <Text
+          style={{
+            color: theme.colors.attention,
+            fontSize: theme.type.small,
+            fontWeight: "600",
+            letterSpacing: 0.2,
+          }}
+        >
           {props.eyebrow}
         </Text>
       </View>
-      <Text style={{ color: theme.colors.text, fontSize: theme.type.body + 1, lineHeight: theme.type.bodyLine + 1, fontWeight: theme.type.weightStrong }}>
+      <Text
+        style={{
+          color: theme.colors.text,
+          fontSize: theme.type.body + 1,
+          lineHeight: theme.type.bodyLine + 1,
+          fontWeight: theme.type.weightStrong,
+        }}
+      >
         {props.title}
       </Text>
       {props.children}
@@ -87,17 +111,49 @@ function CardShell(props: { theme: AgentTheme; icon: "alert" | "question"; eyebr
   );
 }
 
-export function ApprovalCard(props: { approval: PendingApproval; theme: AgentTheme; onDecision(decision: "approve" | "reject"): void }) {
+export function ApprovalCard(props: {
+  approval: PendingApproval;
+  theme: AgentTheme;
+  onDecision(decision: "approve" | "reject"): void;
+}) {
   const { approval, theme } = props;
   const rows = argumentRows(approval.arguments);
   return (
-    <CardShell eyebrow="Needs your approval" icon="alert" theme={theme} title={toolDisplayName(approval.name, approval.display)}>
+    <CardShell
+      eyebrow="Needs your approval"
+      icon="alert"
+      theme={theme}
+      title={toolDisplayName(approval.name, approval.display)}
+    >
       {rows.length ? (
-        <View style={{ borderRadius: theme.radius.control, backgroundColor: theme.colors.codeBackground, padding: 10, gap: 4 }}>
+        <View
+          style={{
+            borderRadius: theme.radius.control,
+            backgroundColor: theme.colors.codeBackground,
+            padding: 10,
+            gap: 4,
+          }}
+        >
           {rows.map(([key, value]) => (
             <View key={key} style={{ flexDirection: "row", gap: 8 }}>
-              <Text style={{ color: theme.colors.textFaint, fontSize: theme.type.small, fontFamily: theme.type.mono }}>{key}</Text>
-              <Text numberOfLines={2} style={{ flex: 1, color: theme.colors.text, fontSize: theme.type.small, fontFamily: theme.type.mono }}>
+              <Text
+                style={{
+                  color: theme.colors.textFaint,
+                  fontSize: theme.type.small,
+                  fontFamily: theme.type.mono,
+                }}
+              >
+                {key}
+              </Text>
+              <Text
+                numberOfLines={2}
+                style={{
+                  flex: 1,
+                  color: theme.colors.text,
+                  fontSize: theme.type.small,
+                  fontFamily: theme.type.mono,
+                }}
+              >
                 {value}
               </Text>
             </View>
@@ -105,8 +161,20 @@ export function ApprovalCard(props: { approval: PendingApproval; theme: AgentThe
         </View>
       ) : null}
       <View style={{ flexDirection: "row", gap: 10 }}>
-        <ActionButton flex label="Deny" onPress={() => props.onDecision("reject")} theme={theme} variant="secondary" />
-        <ActionButton flex label="Approve" onPress={() => props.onDecision("approve")} theme={theme} variant="primary" />
+        <ActionButton
+          flex
+          label="Deny"
+          onPress={() => props.onDecision("reject")}
+          theme={theme}
+          variant="secondary"
+        />
+        <ActionButton
+          flex
+          label="Approve"
+          onPress={() => props.onDecision("approve")}
+          theme={theme}
+          variant="primary"
+        />
       </View>
     </CardShell>
   );
@@ -123,7 +191,13 @@ export function QuestionCard(props: {
   if (!question) return null;
   const multi = question.kind === "multi_select";
   const toggle = (id: string) =>
-    setSelected((current) => (multi ? (current.includes(id) ? current.filter((value) => value !== id) : [...current, id]) : [id]));
+    setSelected((current) =>
+      multi
+        ? current.includes(id)
+          ? current.filter((value) => value !== id)
+          : [...current, id]
+        : [id],
+    );
   return (
     <CardShell eyebrow="Question for you" icon="question" theme={theme} title={question.prompt}>
       <View style={{ gap: 8 }}>
@@ -145,16 +219,40 @@ export function QuestionCard(props: {
                 justifyContent: "center",
               }}
             >
-              <Text style={{ color: theme.colors.text, fontSize: theme.type.body - 1, fontWeight: "500" }}>{option.label}</Text>
+              <Text
+                style={{
+                  color: theme.colors.text,
+                  fontSize: theme.type.body - 1,
+                  fontWeight: "500",
+                }}
+              >
+                {option.label}
+              </Text>
               {option.description ? (
-                <Text style={{ color: theme.colors.textMuted, fontSize: theme.type.small, marginTop: 2 }}>{option.description}</Text>
+                <Text
+                  style={{
+                    color: theme.colors.textMuted,
+                    fontSize: theme.type.small,
+                    marginTop: 2,
+                  }}
+                >
+                  {option.description}
+                </Text>
               ) : null}
             </Pressable>
           );
         })}
       </View>
       <View style={{ flexDirection: "row", gap: 10 }}>
-        {request.allowSkip ? <ActionButton flex label="Skip" onPress={() => props.onAnswer(null)} theme={theme} variant="secondary" /> : null}
+        {request.allowSkip ? (
+          <ActionButton
+            flex
+            label="Skip"
+            onPress={() => props.onAnswer(null)}
+            theme={theme}
+            variant="secondary"
+          />
+        ) : null}
         <ActionButton
           disabled={selected.length === 0}
           flex

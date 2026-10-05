@@ -3,7 +3,15 @@ import {
   type AgentMessageItem,
   type UserMessageItem,
 } from "@opengeni/react/session";
-import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
+import {
+  useCallback,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+  type ComponentRef,
+  type ReactNode,
+} from "react";
 import { ActivityIndicator, Pressable, Text, View, type TextInput } from "react-native";
 import {
   defaultChatComposerMessages,
@@ -81,7 +89,7 @@ export function NativeSessionScreen({
 }: NativeSessionScreenProps) {
   const theme = useNativeTimelineTheme();
   const { composer, queue, humanInput, approvals, control, attachments } = controller;
-  const composerInput = useRef<TextInput>(null);
+  const composerInput = useRef<ComponentRef<typeof TextInput>>(null);
   // The composer floats over the conversation; its occupied height insets the timeline.
   const [composerHeight, setComposerHeight] = useState(120);
   const items = useMemo(

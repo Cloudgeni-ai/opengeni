@@ -19,12 +19,25 @@ export function toolDetail(item: ToolCallItem): string | null {
   if (typeof args === "string") return args.split("\n")[0] ?? null;
   if (!args || typeof args !== "object") return null;
   const record = args as Record<string, unknown>;
-  const known = firstString(record, ["cmd", "command", "query", "q", "path", "url", "title", "id", "name"]);
+  const known = firstString(record, [
+    "cmd",
+    "command",
+    "query",
+    "q",
+    "path",
+    "url",
+    "title",
+    "id",
+    "name",
+  ]);
   if (known) return known;
   const pairs = Object.entries(record)
     .filter(([, value]) => value !== null && value !== undefined && value !== "")
     .slice(0, 3)
-    .map(([key, value]) => `${key.replace(/[_-]+/g, " ")}: ${typeof value === "string" ? value : JSON.stringify(value)}`);
+    .map(
+      ([key, value]) =>
+        `${key.replace(/[_-]+/g, " ")}: ${typeof value === "string" ? value : JSON.stringify(value)}`,
+    );
   if (pairs.length === 0) return null;
   const text = pairs.join(" · ");
   return text.length > 110 ? `${text.slice(0, 109)}…` : text;
@@ -36,7 +49,9 @@ export function toolOutputPreview(item: ToolCallItem, lines = 2): string | null 
   const text =
     typeof output === "string"
       ? output
-      : output && typeof output === "object" && typeof (output as { text?: unknown }).text === "string"
+      : output &&
+          typeof output === "object" &&
+          typeof (output as { text?: unknown }).text === "string"
         ? String((output as { text: string }).text)
         : output == null
           ? null

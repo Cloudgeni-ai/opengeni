@@ -5,7 +5,7 @@ import {
   sessionDisplayTitle,
   sessionRenameSeed,
 } from "@opengeni/react/session-list-model";
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useRef, useState, type ComponentRef } from "react";
 import { Pressable, Text, TextInput, View } from "react-native";
 import { Button } from "./controls";
 import { Icon, type NativeIconName } from "./icon";
@@ -257,7 +257,7 @@ function RenameForm(props: {
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const inFlight = useRef(false);
-  const inputRef = useRef<TextInput>(null);
+  const inputRef = useRef<ComponentRef<typeof TextInput>>(null);
   const save = async () => {
     if (inFlight.current) return;
     const next = resolveRenameSubmission(draft, sessionDisplayTitle(props.session), seed);

@@ -26,7 +26,7 @@ import {
   timelineGroupContainsPresentedImage,
   type TurnSummaryFacetConfiguration,
 } from "@opengeni/react/timeline-model";
-import { useCallback, useMemo, useRef, useState, type ReactNode } from "react";
+import { useCallback, useMemo, useRef, useState, type ComponentRef, type ReactNode } from "react";
 import {
   Pressable,
   ScrollView,
@@ -96,7 +96,7 @@ export function MessageTimeline(props: NativeMessageTimelineProps) {
   );
   const groups = useMemo(() => groupTimeline(items, { readableTurns: true }), [items]);
   const foldMemory = useRef(new Map<string, "open" | "closed">()).current;
-  const scrollRef = useRef<ScrollView>(null);
+  const scrollRef = useRef<ComponentRef<typeof ScrollView>>(null);
   const following = useRef(true);
   // Only reader gestures change follow intent; layout-driven scroll events
   // (content growing before the first scroll-to-end) must not unstick it.

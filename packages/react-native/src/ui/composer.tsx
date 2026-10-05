@@ -9,17 +9,24 @@ export interface AgentComposerProps {
   value: string;
   onChangeText(text: string): void;
   onSend(): void;
-  onStop?(): void;
-  onAttach?(): void;
-  onVoice?(): void;
+  onStop?: (() => void) | undefined;
+  onAttach?: (() => void) | undefined;
+  onVoice?: (() => void) | undefined;
   running: boolean;
   placeholder: string;
   /** Chips shown in the bar composer (model, permissions…). */
-  accessories?: ReactNode;
+  accessories?: ReactNode | undefined;
   bottomInset: number;
 }
 
-function RoundButton(props: { label: string; onPress?(): void; size: number; background: string; children: ReactNode; disabled?: boolean }) {
+function RoundButton(props: {
+  label: string;
+  onPress?: (() => void) | undefined;
+  size: number;
+  background: string;
+  children: ReactNode;
+  disabled?: boolean | undefined;
+}) {
   return (
     <Pressable
       accessibilityLabel={props.label}
@@ -53,14 +60,30 @@ function SendOrStop(props: AgentComposerProps & { size: number }) {
   const { theme, running, value } = props;
   if (running && !value.trim()) {
     return (
-      <RoundButton background={theme.colors.accent} label="Stop" onPress={props.onStop} size={props.size}>
+      <RoundButton
+        background={theme.colors.accent}
+        label="Stop"
+        onPress={props.onStop}
+        size={props.size}
+      >
         <AgentIcon color={theme.colors.onAccent} name="stop" size={props.size * 0.4} />
       </RoundButton>
     );
   }
   return (
-    <RoundButton background={theme.colors.accent} disabled={!value.trim()} label="Send" onPress={props.onSend} size={props.size}>
-      <AgentIcon color={theme.colors.onAccent} name="arrow-up" size={props.size * 0.5} strokeWidth={2.4} />
+    <RoundButton
+      background={theme.colors.accent}
+      disabled={!value.trim()}
+      label="Send"
+      onPress={props.onSend}
+      size={props.size}
+    >
+      <AgentIcon
+        color={theme.colors.onAccent}
+        name="arrow-up"
+        size={props.size * 0.5}
+        strokeWidth={2.4}
+      />
     </RoundButton>
   );
 }
@@ -92,8 +115,21 @@ function PillComposer(props: AgentComposerProps) {
   const { theme } = props;
   const glass = Platform.OS === "ios" && isLiquidGlassAvailable();
   const inner = (
-    <View style={{ flexDirection: "row", alignItems: "flex-end", gap: 6, paddingHorizontal: 6, paddingVertical: 6 }}>
-      <RoundButton background="transparent" label="Add attachment" onPress={props.onAttach} size={36}>
+    <View
+      style={{
+        flexDirection: "row",
+        alignItems: "flex-end",
+        gap: 6,
+        paddingHorizontal: 6,
+        paddingVertical: 6,
+      }}
+    >
+      <RoundButton
+        background="transparent"
+        label="Add attachment"
+        onPress={props.onAttach}
+        size={36}
+      >
         <AgentIcon color={theme.colors.text} name="plus" size={20} />
       </RoundButton>
       <Input {...props} fontSize={theme.type.body} />
@@ -118,7 +154,13 @@ function PillComposer(props: AgentComposerProps) {
     shadowOffset: { width: 0, height: 6 },
   };
   return (
-    <View style={{ paddingHorizontal: 12, paddingTop: 6, paddingBottom: Math.max(props.bottomInset, 10) }}>
+    <View
+      style={{
+        paddingHorizontal: 12,
+        paddingTop: 6,
+        paddingBottom: Math.max(props.bottomInset, 10),
+      }}
+    >
       {glass ? (
         <GlassView glassEffectStyle="regular" isInteractive style={shell}>
           {inner}
@@ -157,10 +199,20 @@ function BarComposer(props: AgentComposerProps) {
         <Input {...props} fontSize={theme.type.body} />
       </View>
       <View style={{ flexDirection: "row", alignItems: "center", gap: 8 }}>
-        <RoundButton background={theme.colors.surface} label="Add attachment" onPress={props.onAttach} size={34}>
+        <RoundButton
+          background={theme.colors.surface}
+          label="Add attachment"
+          onPress={props.onAttach}
+          size={34}
+        >
           <AgentIcon color={theme.colors.text} name="plus" size={18} />
         </RoundButton>
-        <RoundButton background={theme.colors.surface} label="Dictate" onPress={props.onVoice} size={34}>
+        <RoundButton
+          background={theme.colors.surface}
+          label="Dictate"
+          onPress={props.onVoice}
+          size={34}
+        >
           <AgentIcon color={theme.colors.text} name="mic" size={17} />
         </RoundButton>
         <View style={{ flex: 1, flexDirection: "row", gap: 6 }}>{props.accessories}</View>
@@ -175,7 +227,16 @@ function VoiceComposer(props: AgentComposerProps) {
   const { theme } = props;
   const hasText = props.value.trim().length > 0;
   return (
-    <View style={{ flexDirection: "row", alignItems: "flex-end", gap: 10, paddingHorizontal: 14, paddingTop: 8, paddingBottom: Math.max(props.bottomInset, 12) }}>
+    <View
+      style={{
+        flexDirection: "row",
+        alignItems: "flex-end",
+        gap: 10,
+        paddingHorizontal: 14,
+        paddingTop: 8,
+        paddingBottom: Math.max(props.bottomInset, 12),
+      }}
+    >
       <View
         style={{
           flex: 1,
@@ -190,7 +251,12 @@ function VoiceComposer(props: AgentComposerProps) {
           paddingRight: 14,
         }}
       >
-        <RoundButton background="transparent" label="Add photo or file" onPress={props.onAttach} size={44}>
+        <RoundButton
+          background="transparent"
+          label="Add photo or file"
+          onPress={props.onAttach}
+          size={44}
+        >
           <AgentIcon color={theme.colors.text} name="plus" size={24} />
         </RoundButton>
         <Input {...props} fontSize={theme.type.body} />
@@ -198,7 +264,12 @@ function VoiceComposer(props: AgentComposerProps) {
       {hasText || props.running ? (
         <SendOrStop {...props} size={56} />
       ) : (
-        <RoundButton background={theme.colors.accent} label="Talk" onPress={props.onVoice} size={56}>
+        <RoundButton
+          background={theme.colors.accent}
+          label="Talk"
+          onPress={props.onVoice}
+          size={56}
+        >
           <AgentIcon color={theme.colors.onAccent} name="mic" size={26} />
         </RoundButton>
       )}
@@ -208,8 +279,18 @@ function VoiceComposer(props: AgentComposerProps) {
 
 export function ComposerChip({ theme, label }: { theme: AgentTheme; label: string }) {
   return (
-    <View style={{ height: 28, paddingHorizontal: 10, borderRadius: 14, backgroundColor: theme.colors.surface, justifyContent: "center" }}>
-      <Text style={{ color: theme.colors.textMuted, fontSize: 12, fontWeight: "500" }}>{label}</Text>
+    <View
+      style={{
+        height: 28,
+        paddingHorizontal: 10,
+        borderRadius: 14,
+        backgroundColor: theme.colors.surface,
+        justifyContent: "center",
+      }}
+    >
+      <Text style={{ color: theme.colors.textMuted, fontSize: 12, fontWeight: "500" }}>
+        {label}
+      </Text>
     </View>
   );
 }

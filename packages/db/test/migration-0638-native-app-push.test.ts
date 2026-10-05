@@ -222,7 +222,7 @@ describe("0638 native app push", () => {
       body: "Which branch?",
     });
     // Someone else's devices never receive this session's events.
-    expect(await pendingFor(other.authSessionId)).toEqual([]);
+    expect(await pendingFor(other.authSessionId)).toHaveLength(0);
   });
 
   test("claims, settles, and forgets a device the provider no longer knows", async () => {
@@ -265,7 +265,7 @@ describe("0638 native app push", () => {
       deliveryId: claimed[0]!.deliveryId,
       outcome: "delivered",
     });
-    expect(await pendingFor(person.authSessionId)).toEqual([]);
+    expect(await pendingFor(person.authSessionId)).toHaveLength(0);
 
     await enqueueNativePush(db(), {
       ...person.scope,

@@ -62,4 +62,4 @@ export {
   StatusDot,
 } from "./session-list";
 export type { SessionRowProps } from "./session-list";
-export { webColorsDark, webColorsLight } from "../ui/web-tokens.generated";
+export { webColorsDark, webColorsLight } from "../ui/web-tokens.gen";

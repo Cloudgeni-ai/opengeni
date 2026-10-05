@@ -294,8 +294,8 @@ export function AccountProvider({ children }: { children: ReactNode }) {
         // Revoke on the server first; the device forgets the account either way.
         await newClient(target.baseUrl, stored)
           .signOutNativeApp()
-          .catch((error: unknown) => {
-            if (__DEV__) console.warn("Native sign-out was not confirmed by the server", error);
+          .catch((caught: unknown) => {
+            if (__DEV__) console.warn("Native sign-out was not confirmed by the server", caught);
           });
       } else if (__DEV__) {
         console.warn("Native sign-out: no stored credential for the account");

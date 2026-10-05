@@ -3,7 +3,7 @@ import {
   type ChatComposerMessages,
 } from "@opengeni/react/composer-messages";
 import { GlassView, isLiquidGlassAvailable } from "expo-glass-effect";
-import { useEffect, useState, type ReactNode, type Ref } from "react";
+import { useEffect, useState, type ComponentRef, type ReactNode, type Ref } from "react";
 import {
   AccessibilityInfo,
   ActivityIndicator,
@@ -70,7 +70,7 @@ export interface SessionComposerProps {
   /** Rendered inside the surface under the header (draft conflict, notices). */
   below?: ReactNode;
   /** The message field, for hosts that focus it (queue Edit, replies). */
-  inputRef?: Ref<TextInput> | undefined;
+  inputRef?: Ref<ComponentRef<typeof TextInput>> | undefined;
   /** The shared composer catalog; hosts translate by overriding entries. */
   messages?: Partial<ChatComposerMessages> | undefined;
   /** Called when the trailing action fires (host haptics). */

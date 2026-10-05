@@ -8,5 +8,11 @@ export { ApprovalCard, QuestionCard, ActionButton } from "./cards";
 export { AgentIcon, toolIconName } from "./icons";
 export type { AgentIconName } from "./icons";
 export { agentDirections, agentTheme } from "./theme";
-export type { AgentDirection, AgentDirectionId, AgentTheme, ActivityStyle, ComposerStyle } from "./theme";
+export type {
+  AgentDirection,
+  AgentDirectionId,
+  AgentTheme,
+  ActivityStyle,
+  ComposerStyle,
+} from "./theme";
 export { formatDuration, toolDetail, toolOutputPreview, toolTitle } from "./format";

@@ -82,12 +82,18 @@ export function AgentIcon({
       {name === "arrow-up" ? <Path d="M12 19V5M5 12l7-7 7 7" {...common} /> : null}
       {name === "stop" ? <Rect x="6" y="6" width="12" height="12" rx="2" fill={color} /> : null}
       {name === "tool" ? (
-        <Path d="M14.7 6.3a4 4 0 0 0-5.4 5.4L3 18l3 3 6.3-6.3a4 4 0 0 0 5.4-5.4l-2.6 2.6-2.4-.6-.6-2.4Z" {...common} />
+        <Path
+          d="M14.7 6.3a4 4 0 0 0-5.4 5.4L3 18l3 3 6.3-6.3a4 4 0 0 0 5.4-5.4l-2.6 2.6-2.4-.6-.6-2.4Z"
+          {...common}
+        />
       ) : null}
       {name === "send" ? <Path d="m22 2-7 20-4-9-9-4Z M22 2 11 13" {...common} /> : null}
       {name === "alert" ? (
         <>
-          <Path d="M10.3 3.9 1.8 18a2 2 0 0 0 1.7 3h17a2 2 0 0 0 1.7-3L13.7 3.9a2 2 0 0 0-3.4 0Z" {...common} />
+          <Path
+            d="M10.3 3.9 1.8 18a2 2 0 0 0 1.7 3h17a2 2 0 0 0 1.7-3L13.7 3.9a2 2 0 0 0-3.4 0Z"
+            {...common}
+          />
           <Path d="M12 9v4M12 17h.01" {...common} />
         </>
       ) : null}
@@ -99,8 +105,14 @@ export function AgentIcon({
       ) : null}
       {name === "rocket" ? (
         <>
-          <Path d="M4.5 16.5c-1.5 1.3-2 5-2 5s3.7-.5 5-2c.7-.8.7-2.1-.1-2.9a2.2 2.2 0 0 0-2.9-.1Z" {...common} />
-          <Path d="m12 15-3-3a22 22 0 0 1 2-4A13 13 0 0 1 22 2c0 2.7-.8 7.5-6 11a22 22 0 0 1-4 2Z" {...common} />
+          <Path
+            d="M4.5 16.5c-1.5 1.3-2 5-2 5s3.7-.5 5-2c.7-.8.7-2.1-.1-2.9a2.2 2.2 0 0 0-2.9-.1Z"
+            {...common}
+          />
+          <Path
+            d="m12 15-3-3a22 22 0 0 1 2-4A13 13 0 0 1 22 2c0 2.7-.8 7.5-6 11a22 22 0 0 1-4 2Z"
+            {...common}
+          />
         </>
       ) : null}
     </Svg>

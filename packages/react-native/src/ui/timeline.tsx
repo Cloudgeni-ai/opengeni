@@ -38,24 +38,24 @@ export interface AgentTimelineProps {
   groups: readonly TimelineGroup[];
   theme: AgentTheme;
   running: boolean;
-  approvals?: readonly PendingApproval[];
-  humanInput?: readonly PendingHumanInputRequest[];
-  onApproval?(approvalId: string, decision: "approve" | "reject"): void;
-  onAnswer?(requestId: string, answers: HumanInputAnswer[] | null): void;
+  approvals?: readonly PendingApproval[] | undefined;
+  humanInput?: readonly PendingHumanInputRequest[] | undefined;
+  onApproval?: ((approvalId: string, decision: "approve" | "reject") => void) | undefined;
+  onAnswer?: ((requestId: string, answers: HumanInputAnswer[] | null) => void) | undefined;
   /**
    * Where pending approvals and questions render. `tray`: the host renders
    * `AgentAttentionTray` above its composer and the timeline only marks the wait.
    */
   attentionPlacement?: "inline" | "tray";
   /** Open a full step view (e.g. `AgentStepsSheet`) instead of expanding work in place. */
-  onOpenSteps?(steps: ActivityItem[], title: string): void;
-  renderMarkdown?: MarkdownRenderer;
+  onOpenSteps?: ((steps: ActivityItem[], title: string) => void) | undefined;
+  renderMarkdown?: MarkdownRenderer | undefined;
   /** Host display name for the agent. */
-  agentName?: string;
-  agentMark?: ReactNode;
-  contentInsetTop?: number;
-  contentInsetBottom?: number;
-  emptyState?: ReactNode;
+  agentName?: string | undefined;
+  agentMark?: ReactNode | undefined;
+  contentInsetTop?: number | undefined;
+  contentInsetBottom?: number | undefined;
+  emptyState?: ReactNode | undefined;
 }
 
 type Row =
@@ -65,13 +65,18 @@ type Row =
   | { key: string; kind: "question"; request: PendingHumanInputRequest };
 
 const plainMarkdown: MarkdownRenderer = (text, theme) => (
-  <Text style={{ color: theme.colors.text, fontSize: theme.type.body, lineHeight: theme.type.bodyLine }}>
+  <Text
+    style={{ color: theme.colors.text, fontSize: theme.type.body, lineHeight: theme.type.bodyLine }}
+  >
     {text}
   </Text>
 );
 
 function groupTurnId(group: TimelineGroup): string | null {
-  if (group.kind === "item") return "turnId" in group.item ? ((group.item as { turnId?: string | null }).turnId ?? null) : null;
+  if (group.kind === "item")
+    return "turnId" in group.item
+      ? ((group.item as { turnId?: string | null }).turnId ?? null)
+      : null;
   const first = activityItemsOf(group)[0] as { turnId?: string | null } | undefined;
   return first?.turnId ?? null;
 }
@@ -90,7 +95,12 @@ export function orderWorkBeforeProse(groups: readonly TimelineGroup[]): Timeline
     let start = index;
     while (start > 0) {
       const previous = out[start - 1]!;
-      if (previous.kind !== "item" || previous.item.kind !== "agent-message" || groupTurnId(previous) !== turnId) break;
+      if (
+        previous.kind !== "item" ||
+        previous.item.kind !== "agent-message" ||
+        groupTurnId(previous) !== turnId
+      )
+        break;
       start -= 1;
     }
     if (start < index) {
@@ -107,11 +117,16 @@ export function AgentTimeline(props: AgentTimelineProps) {
   const rows = useMemo<Row[]>(() => {
     // The live turn is the newest turn in the log; its work block stays live while running.
     let liveTurnId: string | null = null;
-    for (let index = groups.length - 1; index >= 0 && !liveTurnId; index -= 1) liveTurnId = groupTurnId(groups[index]!);
-    const isLive = (group: TimelineGroup) => running && group.kind !== "item" && groupTurnId(group) === liveTurnId;
+    for (let index = groups.length - 1; index >= 0 && !liveTurnId; index -= 1)
+      liveTurnId = groupTurnId(groups[index]!);
+    const isLive = (group: TimelineGroup) =>
+      running && group.kind !== "item" && groupTurnId(group) === liveTurnId;
     const failedTurns = new Set(
       groups.flatMap((group) =>
-        group.kind === "item" && group.item.kind === "turn-end" && group.item.outcome === "failed" && group.item.turnId
+        group.kind === "item" &&
+        group.item.kind === "turn-end" &&
+        group.item.outcome === "failed" &&
+        group.item.turnId
           ? [group.item.turnId]
           : [],
       ),
@@ -121,13 +136,17 @@ export function AgentTimeline(props: AgentTimelineProps) {
       kind: "group",
       group,
       live: isLive(group),
-      failed: group.kind !== "item" && (group.outcome === "failed" || failedTurns.has(groupTurnId(group) ?? "")),
+      failed:
+        group.kind !== "item" &&
+        (group.outcome === "failed" || failedTurns.has(groupTurnId(group) ?? "")),
     }));
     const needsYou = (props.approvals?.length ?? 0) > 0 || (props.humanInput?.length ?? 0) > 0;
     if (running && !needsYou && !groups.some(isLive)) out.push({ key: "working", kind: "working" });
     if (props.attentionPlacement !== "tray") {
-      for (const approval of props.approvals ?? []) out.push({ key: `approval:${approval.id}`, kind: "approval", approval });
-      for (const request of props.humanInput ?? []) out.push({ key: `question:${request.id}`, kind: "question", request });
+      for (const approval of props.approvals ?? [])
+        out.push({ key: `approval:${approval.id}`, kind: "approval", approval });
+      for (const request of props.humanInput ?? [])
+        out.push({ key: `question:${request.id}`, kind: "question", request });
     }
     return out;
   }, [groups, running, props.approvals, props.humanInput, props.attentionPlacement]);
@@ -144,7 +163,7 @@ export function AgentTimeline(props: AgentTimelineProps) {
       keyboardDismissMode="interactive"
       keyboardShouldPersistTaps="handled"
       keyExtractor={(row) => row.key}
-      ListEmptyComponent={props.emptyState ? <>{props.emptyState}</> : null}
+      ListEmptyComponent={props.emptyState ? <>{props.emptyState}</> : undefined}
       renderItem={({ item: row }) => (
         <Animated.View entering={FadeInDown.duration(220)} layout={LinearTransition.duration(180)}>
           <TimelineRow {...props} groups={groups} row={row} />
@@ -167,15 +186,35 @@ function TimelineRow(props: AgentTimelineProps & { row: Row }) {
   const { row, theme } = props;
   if (row.kind === "working") return <WorkingLine theme={theme} label="Thinking" />;
   if (row.kind === "approval") {
-    return <ApprovalCard approval={row.approval} theme={theme} onDecision={(decision) => props.onApproval?.(row.approval.id, decision)} />;
+    return (
+      <ApprovalCard
+        approval={row.approval}
+        theme={theme}
+        onDecision={(decision) => props.onApproval?.(row.approval.id, decision)}
+      />
+    );
   }
   if (row.kind === "question") {
-    return <QuestionCard request={row.request} theme={theme} onAnswer={(answers) => props.onAnswer?.(row.request.id, answers)} />;
+    return (
+      <QuestionCard
+        request={row.request}
+        theme={theme}
+        onAnswer={(answers) => props.onAnswer?.(row.request.id, answers)}
+      />
+    );
   }
   const group = row.group;
   if (group.kind === "item") return <ItemRow item={group.item} {...props} />;
   const waiting = (props.approvals?.length ?? 0) > 0 || (props.humanInput?.length ?? 0) > 0;
-  return <WorkBlock failed={row.failed} group={group} live={row.live} waiting={row.live && waiting} {...props} />;
+  return (
+    <WorkBlock
+      failed={row.failed}
+      group={group}
+      live={row.live}
+      waiting={row.live && waiting}
+      {...props}
+    />
+  );
 }
 
 function ItemRow(props: AgentTimelineProps & { item: TimelineItem }) {
@@ -197,7 +236,9 @@ function ItemRow(props: AgentTimelineProps & { item: TimelineItem }) {
 
 export function UserMessage({ text, theme }: { text: string; theme: AgentTheme }) {
   return (
-    <View style={{ alignItems: "flex-end", marginTop: theme.space.turn, marginBottom: theme.space.row }}>
+    <View
+      style={{ alignItems: "flex-end", marginTop: theme.space.turn, marginBottom: theme.space.row }}
+    >
       <View
         style={{
           maxWidth: "86%",
@@ -207,7 +248,14 @@ export function UserMessage({ text, theme }: { text: string; theme: AgentTheme }
           paddingVertical: theme.type.body * 0.6,
         }}
       >
-        <Text selectable style={{ color: theme.colors.onUserBubble, fontSize: theme.type.body, lineHeight: theme.type.bodyLine }}>
+        <Text
+          selectable
+          style={{
+            color: theme.colors.onUserBubble,
+            fontSize: theme.type.body,
+            lineHeight: theme.type.bodyLine,
+          }}
+        >
           {text}
         </Text>
       </View>
@@ -215,15 +263,33 @@ export function UserMessage({ text, theme }: { text: string; theme: AgentTheme }
   );
 }
 
-function AssistantMessage({ item, render, theme }: { item: AgentMessageItem; render: MarkdownRenderer; theme: AgentTheme }) {
+function AssistantMessage({
+  item,
+  render,
+  theme,
+}: {
+  item: AgentMessageItem;
+  render: MarkdownRenderer;
+  theme: AgentTheme;
+}) {
   if (!item.text.trim()) return null;
   const commentary = item.phase === "commentary";
   return (
-    <View style={{ marginVertical: theme.space.row, opacity: commentary ? 0.82 : 1 }}>{render(item.text, theme)}</View>
+    <View style={{ marginVertical: theme.space.row, opacity: commentary ? 0.82 : 1 }}>
+      {render(item.text, theme)}
+    </View>
   );
 }
 
-function Notice({ theme, tone, text }: { theme: AgentTheme; tone: "danger" | "muted"; text: string }) {
+function Notice({
+  theme,
+  tone,
+  text,
+}: {
+  theme: AgentTheme;
+  tone: "danger" | "muted";
+  text: string;
+}) {
   const danger = tone === "danger";
   return (
     <View
@@ -237,8 +303,19 @@ function Notice({ theme, tone, text }: { theme: AgentTheme; tone: "danger" | "mu
         backgroundColor: danger ? theme.colors.dangerSurface : theme.colors.surface,
       }}
     >
-      <AgentIcon color={danger ? theme.colors.danger : theme.colors.textMuted} name="alert" size={18} />
-      <Text style={{ flex: 1, color: danger ? theme.colors.danger : theme.colors.textMuted, fontSize: theme.type.small, lineHeight: theme.type.smallLine }}>
+      <AgentIcon
+        color={danger ? theme.colors.danger : theme.colors.textMuted}
+        name="alert"
+        size={18}
+      />
+      <Text
+        style={{
+          flex: 1,
+          color: danger ? theme.colors.danger : theme.colors.textMuted,
+          fontSize: theme.type.small,
+          lineHeight: theme.type.smallLine,
+        }}
+      >
         {text}
       </Text>
     </View>
@@ -250,29 +327,63 @@ function Notice({ theme, tone, text }: { theme: AgentTheme; tone: "danger" | "mu
 /* ------------------------------------------------------------------------------------------ */
 
 function WorkBlock(
-  props: AgentTimelineProps & { group: Exclude<TimelineGroup, { kind: "item" }>; live: boolean; waiting: boolean; failed: boolean },
+  props: AgentTimelineProps & {
+    group: Exclude<TimelineGroup, { kind: "item" }>;
+    live: boolean;
+    waiting: boolean;
+    failed: boolean;
+  },
 ) {
   const { group, theme, live, waiting, failed } = props;
   const items = activityItemsOf(group);
-  const prose = group.kind === "activity" ? group.items.filter((item): item is AgentMessageItem => item.kind === "agent-message") : [];
-  const steps = items.filter((item) => item.kind === "tool-call" || item.kind === "reasoning" || item.kind === "worker");
+  const prose =
+    group.kind === "activity"
+      ? group.items.filter((item): item is AgentMessageItem => item.kind === "agent-message")
+      : [];
+  const steps = items.filter(
+    (item) => item.kind === "tool-call" || item.kind === "reasoning" || item.kind === "worker",
+  );
   const tools = toolCallsOf(items);
   const outcome = group.outcome;
   const failureText = group.failureText;
   const started = group.kind === "turn" ? Date.parse(group.startedAt) : itemTime(items[0] ?? {});
-  const ended = group.kind === "turn" ? Date.parse(group.endedAt) : itemTime(items[items.length - 1] ?? {});
+  const ended =
+    group.kind === "turn" ? Date.parse(group.endedAt) : itemTime(items[items.length - 1] ?? {});
   const duration = formatDuration(ended - started);
   const running = live && !outcome;
-  const current = running && !waiting ? [...tools].reverse().find((tool) => tool.status === "running") : undefined;
+  const current =
+    running && !waiting
+      ? [...tools].reverse().find((tool) => tool.status === "running")
+      : undefined;
   const render = props.renderMarkdown ?? plainMarkdown;
 
   const work =
     steps.length === 0 ? null : theme.layout.activity === "rail" ? (
       <RailSteps items={steps} theme={theme} waiting={waiting} />
     ) : theme.layout.activity === "cards" ? (
-      <CardSteps current={current} duration={duration} failed={failed} items={steps} onOpen={props.onOpenSteps} running={running} theme={theme} toolCount={tools.length} waiting={waiting} />
+      <CardSteps
+        current={current}
+        duration={duration}
+        failed={failed}
+        items={steps}
+        onOpen={props.onOpenSteps}
+        running={running}
+        theme={theme}
+        toolCount={tools.length}
+        waiting={waiting}
+      />
     ) : (
-      <FoldSteps current={current} duration={duration} failed={failed} items={steps} onOpen={props.onOpenSteps} running={running} theme={theme} toolCount={tools.length} waiting={waiting} />
+      <FoldSteps
+        current={current}
+        duration={duration}
+        failed={failed}
+        items={steps}
+        onOpen={props.onOpenSteps}
+        running={running}
+        theme={theme}
+        toolCount={tools.length}
+        waiting={waiting}
+      />
     );
 
   return (
@@ -283,7 +394,9 @@ function WorkBlock(
           {render(item.text, theme)}
         </View>
       ))}
-      {outcome === "failed" && failureText ? <Notice text={failureText} theme={theme} tone="danger" /> : null}
+      {outcome === "failed" && failureText ? (
+        <Notice text={failureText} theme={theme} tone="danger" />
+      ) : null}
     </View>
   );
 }
@@ -311,7 +424,17 @@ function liveLabel(tool: ToolCallItem): string {
   return detail ? `${verb} ${detail}` : verb;
 }
 
-function StatusDot({ item, theme, size = 8, waiting }: { item: ActivityItem; theme: AgentTheme; size?: number; waiting?: boolean }) {
+function StatusDot({
+  item,
+  theme,
+  size = 8,
+  waiting,
+}: {
+  item: ActivityItem;
+  theme: AgentTheme;
+  size?: number;
+  waiting?: boolean;
+}) {
   const status = item.kind === "tool-call" ? item.status : "complete";
   const color =
     status === "failed"
@@ -321,7 +444,9 @@ function StatusDot({ item, theme, size = 8, waiting }: { item: ActivityItem; the
           ? theme.colors.attention
           : theme.colors.accent
         : theme.colors.textFaint;
-  return <View style={{ width: size, height: size, borderRadius: size / 2, backgroundColor: color }} />;
+  return (
+    <View style={{ width: size, height: size, borderRadius: size / 2, backgroundColor: color }} />
+  );
 }
 
 /** Calm: one quiet line; tap to reveal the steps. */
@@ -333,47 +458,71 @@ type StepSummaryProps = {
   failed: boolean;
   duration: string;
   toolCount: number;
-  current?: ToolCallItem;
-  onOpen?(steps: ActivityItem[], title: string): void;
+  current?: ToolCallItem | undefined;
+  onOpen?: ((steps: ActivityItem[], title: string) => void) | undefined;
 };
 
 function FoldSteps(props: StepSummaryProps) {
   const { theme, running } = props;
   const [open, setOpen] = useState(false);
-  const steps = props.toolCount ? `${props.toolCount} ${props.toolCount === 1 ? "step" : "steps"}` : "";
+  const steps = props.toolCount
+    ? `${props.toolCount} ${props.toolCount === 1 ? "step" : "steps"}`
+    : "";
   const label = props.waiting
     ? "Waiting for you"
     : running
       ? props.current
-      ? liveLabel(props.current)
-      : "Working"
+        ? liveLabel(props.current)
+        : "Working"
       : props.failed
         ? `Stopped${steps ? ` after ${steps}` : ""}`
-        : [props.duration ? `Worked for ${props.duration}` : "Worked", steps].filter(Boolean).join(" · ");
+        : [props.duration ? `Worked for ${props.duration}` : "Worked", steps]
+            .filter(Boolean)
+            .join(" · ");
   return (
     <View>
       <Pressable
         accessibilityRole="button"
         accessibilityState={{ expanded: open }}
         hitSlop={8}
-        onPress={() => (props.onOpen ? props.onOpen(props.items, label) : setOpen((value) => !value))}
+        onPress={() =>
+          props.onOpen ? props.onOpen(props.items, label) : setOpen((value) => !value)
+        }
         style={{ flexDirection: "row", alignItems: "center", gap: 6, minHeight: 32 }}
       >
         {props.waiting ? (
-          <View style={{ width: 8, height: 8, borderRadius: 4, backgroundColor: theme.colors.attention }} />
+          <View
+            style={{
+              width: 8,
+              height: 8,
+              borderRadius: 4,
+              backgroundColor: theme.colors.attention,
+            }}
+          />
         ) : running ? (
           <Pulse theme={theme} />
         ) : null}
         <Text
           numberOfLines={1}
-          style={{ flexShrink: 1, color: props.waiting ? theme.colors.attention : theme.colors.textMuted, fontSize: theme.type.small + 1 }}
+          style={{
+            flexShrink: 1,
+            color: props.waiting ? theme.colors.attention : theme.colors.textMuted,
+            fontSize: theme.type.small + 1,
+          }}
         >
           {label}
         </Text>
-        <AgentIcon color={theme.colors.textFaint} name={open ? "chevron-down" : "chevron-right"} size={14} />
+        <AgentIcon
+          color={theme.colors.textFaint}
+          name={open ? "chevron-down" : "chevron-right"}
+          size={14}
+        />
       </Pressable>
       {open ? (
-        <Animated.View entering={FadeIn.duration(160)} style={{ marginTop: 4, marginLeft: 2, gap: 10, paddingVertical: 4 }}>
+        <Animated.View
+          entering={FadeIn.duration(160)}
+          style={{ marginTop: 4, marginLeft: 2, gap: 10, paddingVertical: 4 }}
+        >
           {props.items.map((item) => (
             <CompactStep item={item} key={item.id} theme={theme} />
           ))}
@@ -384,16 +533,36 @@ function FoldSteps(props: StepSummaryProps) {
 }
 
 function CompactStep({ item, theme }: { item: ActivityItem; theme: AgentTheme }) {
-  const detail = item.kind === "tool-call" ? toolDetail(item) : item.kind === "reasoning" ? item.text : null;
+  const detail =
+    item.kind === "tool-call" ? toolDetail(item) : item.kind === "reasoning" ? item.text : null;
   return (
     <View style={{ flexDirection: "row", gap: 10 }}>
       <View style={{ paddingTop: 2 }}>
-        <AgentIcon color={theme.colors.textFaint} name={item.kind === "tool-call" ? toolIconName(item.name) : "sparkle"} size={15} />
+        <AgentIcon
+          color={theme.colors.textFaint}
+          name={item.kind === "tool-call" ? toolIconName(item.name) : "sparkle"}
+          size={15}
+        />
       </View>
       <View style={{ flex: 1 }}>
-        <Text style={{ color: theme.colors.text, fontSize: theme.type.small, lineHeight: theme.type.smallLine }}>{stepLabel(item)}</Text>
+        <Text
+          style={{
+            color: theme.colors.text,
+            fontSize: theme.type.small,
+            lineHeight: theme.type.smallLine,
+          }}
+        >
+          {stepLabel(item)}
+        </Text>
         {detail ? (
-          <Text numberOfLines={2} style={{ color: theme.colors.textMuted, fontSize: theme.type.small, lineHeight: theme.type.smallLine }}>
+          <Text
+            numberOfLines={2}
+            style={{
+              color: theme.colors.textMuted,
+              fontSize: theme.type.small,
+              lineHeight: theme.type.smallLine,
+            }}
+          >
             {detail}
           </Text>
         ) : null}
@@ -403,16 +572,29 @@ function CompactStep({ item, theme }: { item: ActivityItem; theme: AgentTheme })
 }
 
 /** Workbench: always-visible rail with status dots, monospace input and output preview. */
-export function AgentStepList(props: { items: readonly ActivityItem[]; theme: AgentTheme; waiting?: boolean }) {
+export function AgentStepList(props: {
+  items: readonly ActivityItem[];
+  theme: AgentTheme;
+  waiting?: boolean;
+}) {
   return <RailSteps items={props.items} theme={props.theme} waiting={props.waiting ?? false} />;
 }
 
-function RailSteps({ items, theme, waiting }: { items: readonly ActivityItem[]; theme: AgentTheme; waiting: boolean }) {
+function RailSteps({
+  items,
+  theme,
+  waiting,
+}: {
+  items: readonly ActivityItem[];
+  theme: AgentTheme;
+  waiting: boolean;
+}) {
   return (
     <View style={{ paddingLeft: 4 }}>
       {items.map((item, index) => {
         const detail = item.kind === "tool-call" ? toolDetail(item) : null;
-        const output = item.kind === "tool-call" && item.status !== "running" ? toolOutputPreview(item) : null;
+        const output =
+          item.kind === "tool-call" && item.status !== "running" ? toolOutputPreview(item) : null;
         const reasoning = item.kind === "reasoning" ? item.text : null;
         const last = index === items.length - 1;
         return (
@@ -420,33 +602,94 @@ function RailSteps({ items, theme, waiting }: { items: readonly ActivityItem[]; 
             <View style={{ alignItems: "center", width: 10 }}>
               <View style={{ height: 6 }} />
               <StatusDot item={item} theme={theme} waiting={waiting} />
-              {last ? null : <View style={{ flex: 1, width: StyleSheet.hairlineWidth * 2, backgroundColor: theme.colors.rail, marginTop: 4 }} />}
+              {last ? null : (
+                <View
+                  style={{
+                    flex: 1,
+                    width: StyleSheet.hairlineWidth * 2,
+                    backgroundColor: theme.colors.rail,
+                    marginTop: 4,
+                  }}
+                />
+              )}
             </View>
             <View style={{ flex: 1, paddingBottom: last ? 0 : 14 }}>
               <View style={{ flexDirection: "row", alignItems: "center", gap: 6 }}>
-                <AgentIcon color={theme.colors.textMuted} name={item.kind === "tool-call" ? toolIconName(item.name) : "sparkle"} size={14} />
-                <Text style={{ color: theme.colors.text, fontSize: theme.type.small + 1, fontWeight: "500" }}>{stepLabel(item)}</Text>
+                <AgentIcon
+                  color={theme.colors.textMuted}
+                  name={item.kind === "tool-call" ? toolIconName(item.name) : "sparkle"}
+                  size={14}
+                />
+                <Text
+                  style={{
+                    color: theme.colors.text,
+                    fontSize: theme.type.small + 1,
+                    fontWeight: "500",
+                  }}
+                >
+                  {stepLabel(item)}
+                </Text>
                 {item.kind === "tool-call" && item.status === "running" ? (
                   waiting ? (
-                    <Text style={{ color: theme.colors.attention, fontSize: theme.type.small, fontWeight: "600" }}>Waiting for you</Text>
+                    <Text
+                      style={{
+                        color: theme.colors.attention,
+                        fontSize: theme.type.small,
+                        fontWeight: "600",
+                      }}
+                    >
+                      Waiting for you
+                    </Text>
                   ) : (
                     <Pulse theme={theme} />
                   )
                 ) : null}
               </View>
               {detail ? (
-                <Text numberOfLines={1} style={{ marginTop: 3, color: theme.colors.textMuted, fontFamily: theme.type.mono, fontSize: theme.type.small - 0.5 }}>
+                <Text
+                  numberOfLines={1}
+                  style={{
+                    marginTop: 3,
+                    color: theme.colors.textMuted,
+                    fontFamily: theme.type.mono,
+                    fontSize: theme.type.small - 0.5,
+                  }}
+                >
                   {detail}
                 </Text>
               ) : null}
               {reasoning ? (
-                <Text numberOfLines={3} style={{ marginTop: 3, color: theme.colors.textMuted, fontSize: theme.type.small, lineHeight: theme.type.smallLine, fontStyle: "italic" }}>
+                <Text
+                  numberOfLines={3}
+                  style={{
+                    marginTop: 3,
+                    color: theme.colors.textMuted,
+                    fontSize: theme.type.small,
+                    lineHeight: theme.type.smallLine,
+                    fontStyle: "italic",
+                  }}
+                >
                   {reasoning}
                 </Text>
               ) : null}
               {output ? (
-                <View style={{ marginTop: 6, padding: 8, borderRadius: theme.radius.control, backgroundColor: theme.colors.codeBackground }}>
-                  <Text numberOfLines={3} style={{ color: theme.colors.textMuted, fontFamily: theme.type.mono, fontSize: theme.type.small - 1, lineHeight: theme.type.smallLine - 1 }}>
+                <View
+                  style={{
+                    marginTop: 6,
+                    padding: 8,
+                    borderRadius: theme.radius.control,
+                    backgroundColor: theme.colors.codeBackground,
+                  }}
+                >
+                  <Text
+                    numberOfLines={3}
+                    style={{
+                      color: theme.colors.textMuted,
+                      fontFamily: theme.type.mono,
+                      fontSize: theme.type.small - 1,
+                      lineHeight: theme.type.smallLine - 1,
+                    }}
+                  >
                     {output}
                   </Text>
                 </View>
@@ -466,12 +709,12 @@ function CardSteps(props: StepSummaryProps) {
   const headline = props.waiting
     ? "Waiting for you"
     : running
-    ? props.current
-      ? (LIVE_VERBS[toolIconName(props.current.name)] ?? toolTitle(props.current))
-      : "Working on it"
-    : props.failed
-      ? "Couldn't finish"
-      : `Done · ${props.toolCount} ${props.toolCount === 1 ? "step" : "steps"}`;
+      ? props.current
+        ? (LIVE_VERBS[toolIconName(props.current.name)] ?? toolTitle(props.current))
+        : "Working on it"
+      : props.failed
+        ? "Couldn't finish"
+        : `Done · ${props.toolCount} ${props.toolCount === 1 ? "step" : "steps"}`;
   const sub = props.waiting
     ? "Answer below to continue"
     : running
@@ -485,7 +728,9 @@ function CardSteps(props: StepSummaryProps) {
     <Pressable
       accessibilityRole="button"
       accessibilityState={{ expanded: open }}
-      onPress={() => (props.onOpen ? props.onOpen(props.items, headline) : setOpen((value) => !value))}
+      onPress={() =>
+        props.onOpen ? props.onOpen(props.items, headline) : setOpen((value) => !value)
+      }
       style={{
         borderRadius: theme.radius.card,
         backgroundColor: theme.colors.surface,
@@ -523,14 +768,29 @@ function CardSteps(props: StepSummaryProps) {
           )}
         </View>
         <View style={{ flex: 1 }}>
-          <Text style={{ color: theme.colors.text, fontSize: theme.type.body, fontWeight: theme.type.weightStrong }}>{headline}</Text>
+          <Text
+            style={{
+              color: theme.colors.text,
+              fontSize: theme.type.body,
+              fontWeight: theme.type.weightStrong,
+            }}
+          >
+            {headline}
+          </Text>
           {sub ? (
-            <Text numberOfLines={1} style={{ color: theme.colors.textMuted, fontSize: theme.type.small, marginTop: 2 }}>
+            <Text
+              numberOfLines={1}
+              style={{ color: theme.colors.textMuted, fontSize: theme.type.small, marginTop: 2 }}
+            >
               {sub}
             </Text>
           ) : null}
         </View>
-        <AgentIcon color={theme.colors.textFaint} name={open ? "chevron-down" : "chevron-right"} size={20} />
+        <AgentIcon
+          color={theme.colors.textFaint}
+          name={open ? "chevron-down" : "chevron-right"}
+          size={20}
+        />
       </View>
       {open ? (
         <Animated.View entering={FadeIn.duration(160)} style={{ marginTop: 14, gap: 12 }}>
@@ -545,7 +805,15 @@ function CardSteps(props: StepSummaryProps) {
 
 export function WorkingLine({ theme, label }: { theme: AgentTheme; label: string }) {
   return (
-    <View style={{ flexDirection: "row", alignItems: "center", gap: 8, marginVertical: theme.space.row, minHeight: 32 }}>
+    <View
+      style={{
+        flexDirection: "row",
+        alignItems: "center",
+        gap: 8,
+        marginVertical: theme.space.row,
+        minHeight: 32,
+      }}
+    >
       <Pulse theme={theme} />
       <Text style={{ color: theme.colors.textMuted, fontSize: theme.type.small + 1 }}>{label}</Text>
     </View>
@@ -558,5 +826,12 @@ function Pulse({ theme, color }: { theme: AgentTheme; color?: string }) {
     opacity.value = withRepeat(withTiming(1, { duration: 700 }), -1, true);
   }, [opacity]);
   const style = useAnimatedStyle(() => ({ opacity: opacity.value }));
-  return <Animated.View style={[{ width: 8, height: 8, borderRadius: 4, backgroundColor: color ?? theme.colors.accent }, style]} />;
+  return (
+    <Animated.View
+      style={[
+        { width: 8, height: 8, borderRadius: 4, backgroundColor: color ?? theme.colors.accent },
+        style,
+      ]}
+    />
+  );
 }

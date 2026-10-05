@@ -1,4 +1,4 @@
-import { type ReactNode, useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import { type ReactNode, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   ActivityIndicator,
   FlatList,
@@ -15,27 +15,27 @@ import {
   type NativeSyntheticEvent,
   type StyleProp,
   type ViewStyle,
-} from 'react-native'
+} from "react-native";
 import type {
   HumanInputAnswer,
   HumanInputQuestion,
   SessionHumanInputRequest,
   SessionTurn,
-} from '@opengeni/sdk'
+} from "@opengeni/sdk";
 import type {
   ActivityItem,
   TimelineGroup,
   TimelineItem,
   ToolCallItem,
-} from '@opengeni/react/session'
-import type { OpenGeniNativeSessionController } from './use-native-session'
-import type { NativeFileAttachmentsResult } from './attachments'
+} from "@opengeni/react/session";
+import type { OpenGeniNativeSessionController } from "./use-native-session";
+import type { NativeFileAttachmentsResult } from "./attachments";
 import {
   DEFAULT_OPENGENI_NATIVE_LABELS,
   DEFAULT_OPENGENI_NATIVE_THEME,
   type OpenGeniNativeLabels,
   type OpenGeniNativeTheme,
-} from './presentation'
+} from "./presentation";
 import {
   boundedJson,
   emptyHumanInputDraft,
@@ -53,91 +53,91 @@ import {
   timelineAccessibilityLabel,
   validateHumanInputAnswers,
   type NativeHumanInputDraft,
-} from './view-model'
+} from "./view-model";
 
-const NO_COMPOSER_INSETS = { bottom: 0, left: 0, right: 0 } as const
-const NO_RESTORED_RESOURCES: readonly unknown[] = []
+const NO_COMPOSER_INSETS = { bottom: 0, left: 0, right: 0 } as const;
+const NO_RESTORED_RESOURCES: readonly unknown[] = [];
 
 export type NativeToolRenderer = (
   item: ToolCallItem,
-  context: { theme: OpenGeniNativeTheme; labels: OpenGeniNativeLabels; compact: boolean }
-) => ReactNode
+  context: { theme: OpenGeniNativeTheme; labels: OpenGeniNativeLabels; compact: boolean },
+) => ReactNode;
 
 export type NativeMessageRenderer = (
   text: string,
-  role: 'user' | 'assistant' | 'reasoning',
-  context: { theme: OpenGeniNativeTheme }
-) => ReactNode
+  role: "user" | "assistant" | "reasoning",
+  context: { theme: OpenGeniNativeTheme },
+) => ReactNode;
 
 export interface NativeTurnSummaryContext {
-  items: readonly ActivityItem[]
-  toolCalls: readonly ToolCallItem[]
-  outcome: Extract<TimelineGroup, { kind: 'turn' }>['outcome']
-  failureText: string | undefined
-  durationMs: number | undefined
-  settled: boolean
-  contextCompactionCount: number
+  items: readonly ActivityItem[];
+  toolCalls: readonly ToolCallItem[];
+  outcome: Extract<TimelineGroup, { kind: "turn" }>["outcome"];
+  failureText: string | undefined;
+  durationMs: number | undefined;
+  settled: boolean;
+  contextCompactionCount: number;
 }
 
 export interface NativeTurnSummaryResult {
-  content: string
-  accessibilityLabel?: string
-  duration?: string | null
+  content: string;
+  accessibilityLabel?: string | undefined;
+  duration?: string | null;
 }
 
 export type NativeTurnSummaryRenderer = (
-  context: NativeTurnSummaryContext
-) => NativeTurnSummaryResult | null
+  context: NativeTurnSummaryContext,
+) => NativeTurnSummaryResult | null;
 
 export interface NativeComposerActionContext {
-  accessory?: ReactNode
-  labels: OpenGeniNativeLabels
-  theme: OpenGeniNativeTheme
-  busy: boolean
-  paused: boolean
-  runActive: boolean
-  canSubmit: boolean
-  draftSaving: boolean
-  submitLabel: string
-  onAttachDocument(): void
-  onAttachImage(): void
-  onTogglePause(): void
-  onSubmit(): void
+  accessory?: ReactNode | undefined;
+  labels: OpenGeniNativeLabels;
+  theme: OpenGeniNativeTheme;
+  busy: boolean;
+  paused: boolean;
+  runActive: boolean;
+  canSubmit: boolean;
+  draftSaving: boolean;
+  submitLabel: string;
+  onAttachDocument(): void;
+  onAttachImage(): void;
+  onTogglePause(): void;
+  onSubmit(): void;
 }
 
-export type NativeComposerActionRenderer = (context: NativeComposerActionContext) => ReactNode
+export type NativeComposerActionRenderer = (context: NativeComposerActionContext) => ReactNode;
 
 export interface NativeComposerRenderContext extends NativeComposerActionContext {
-  value: string
-  onChangeText: (text: string) => void
-  placeholder: string
+  value: string;
+  onChangeText: (text: string) => void;
+  placeholder: string;
 }
 
-export type NativeComposerRenderer = (context: NativeComposerRenderContext) => ReactNode
+export type NativeComposerRenderer = (context: NativeComposerRenderContext) => ReactNode;
 
 export interface NativeComposerSurfaceContext {
-  children: ReactNode
-  style: StyleProp<ViewStyle>
+  children: ReactNode;
+  style: StyleProp<ViewStyle>;
 }
 
-export type NativeComposerSurfaceRenderer = (context: NativeComposerSurfaceContext) => ReactNode
+export type NativeComposerSurfaceRenderer = (context: NativeComposerSurfaceContext) => ReactNode;
 
 export interface OpenGeniNativeSessionViewProps {
-  controller: OpenGeniNativeSessionController
-  theme?: OpenGeniNativeTheme
-  labels?: Partial<OpenGeniNativeLabels>
-  header?: ReactNode
-  composerAccessory?: ReactNode
-  composerSafeAreaInsets?: { bottom: number; left: number; right: number }
-  renderComposer?: NativeComposerRenderer
-  renderComposerActions?: NativeComposerActionRenderer
-  renderComposerSurface?: NativeComposerSurfaceRenderer
-  renderTool?: NativeToolRenderer
-  renderMessage?: NativeMessageRenderer
-  summarizeTurn?: NativeTurnSummaryRenderer
-  formatError?: (error: Error) => string
-  keyboardVerticalOffset?: number
-  testID?: string
+  controller: OpenGeniNativeSessionController;
+  theme?: OpenGeniNativeTheme | undefined;
+  labels?: Partial<OpenGeniNativeLabels> | undefined;
+  header?: ReactNode | undefined;
+  composerAccessory?: ReactNode | undefined;
+  composerSafeAreaInsets?: { bottom: number; left: number; right: number };
+  renderComposer?: NativeComposerRenderer | undefined;
+  renderComposerActions?: NativeComposerActionRenderer | undefined;
+  renderComposerSurface?: NativeComposerSurfaceRenderer | undefined;
+  renderTool?: NativeToolRenderer | undefined;
+  renderMessage?: NativeMessageRenderer | undefined;
+  summarizeTurn?: NativeTurnSummaryRenderer | undefined;
+  formatError?: ((error: Error) => string) | undefined;
+  keyboardVerticalOffset?: number | undefined;
+  testID?: string | undefined;
 }
 
 export function OpenGeniNativeSessionView({
@@ -159,31 +159,31 @@ export function OpenGeniNativeSessionView({
 }: OpenGeniNativeSessionViewProps) {
   const labels = useMemo(
     () => ({ ...DEFAULT_OPENGENI_NATIVE_LABELS, ...labelOverrides }),
-    [labelOverrides]
-  )
-  const listRef = useRef<FlatList<TimelineGroup>>(null)
-  const followTail = useRef(true)
-  const humanInputRequests = controller.humanInput.requests
-  const humanInputRequestKey = humanInputRequests.map((request) => request.id).join('|')
-  const [humanInputOpen, setHumanInputOpen] = useState(true)
-  const humanInputExpanded = humanInputRequests.length > 0 && humanInputOpen
+    [labelOverrides],
+  );
+  const listRef = useRef<FlatList<TimelineGroup>>(null);
+  const followTail = useRef(true);
+  const humanInputRequests = controller.humanInput.requests;
+  const humanInputRequestKey = humanInputRequests.map((request) => request.id).join("|");
+  const [humanInputOpen, setHumanInputOpen] = useState(true);
+  const humanInputExpanded = humanInputRequests.length > 0 && humanInputOpen;
   const auxiliarySurfacesVisible =
     controller.queue.queue.length > 0 ||
-    (controller.queue.effectiveControl?.state === 'paused' &&
-      controller.queue.effectiveControl.resumeOptions.length > 1)
+    (controller.queue.effectiveControl?.state === "paused" &&
+      controller.queue.effectiveControl.resumeOptions.length > 1);
 
   useEffect(() => {
-    if (humanInputRequestKey) setHumanInputOpen(true)
-  }, [humanInputRequestKey])
+    if (humanInputRequestKey) setHumanInputOpen(true);
+  }, [humanInputRequestKey]);
 
   const onScroll = useCallback((event: NativeSyntheticEvent<NativeScrollEvent>) => {
-    const { contentOffset, contentSize, layoutMeasurement } = event.nativeEvent
-    followTail.current = contentSize.height - (contentOffset.y + layoutMeasurement.height) < 96
-  }, [])
+    const { contentOffset, contentSize, layoutMeasurement } = event.nativeEvent;
+    followTail.current = contentSize.height - (contentOffset.y + layoutMeasurement.height) < 96;
+  }, []);
 
   return (
     <KeyboardAvoidingView
-      behavior={Platform.OS === 'ios' ? 'padding' : undefined}
+      behavior={Platform.OS === "ios" ? "padding" : undefined}
       keyboardVerticalOffset={keyboardVerticalOffset}
       style={[styles.root, { backgroundColor: theme.colors.background }]}
       testID={testID}
@@ -218,7 +218,7 @@ export function OpenGeniNativeSessionView({
                       disabled={controller.loadingOlder}
                       variant="quiet"
                     />
-                  ) : null
+                  ) : undefined
                 }
                 ListEmptyComponent={
                   controller.initialLoading ? (
@@ -237,7 +237,7 @@ export function OpenGeniNativeSessionView({
                   )
                 }
                 onContentSizeChange={() => {
-                  if (followTail.current) listRef.current?.scrollToEnd({ animated: true })
+                  if (followTail.current) listRef.current?.scrollToEnd({ animated: true });
                 }}
                 onScroll={onScroll}
                 ref={listRef}
@@ -316,11 +316,11 @@ export function OpenGeniNativeSessionView({
         </View>
       </View>
     </KeyboardAvoidingView>
-  )
+  );
 }
 
 function timelineGroupKey(group: TimelineGroup): string {
-  return group.kind === 'item' ? `item-${group.item.id}` : group.id
+  return group.kind === "item" ? `item-${group.item.id}` : group.id;
 }
 
 function TimelineGroupRow({
@@ -331,15 +331,15 @@ function TimelineGroupRow({
   summarizeTurn,
   theme,
 }: {
-  group: TimelineGroup
-  labels: OpenGeniNativeLabels
-  renderMessage?: NativeMessageRenderer
-  renderTool?: NativeToolRenderer
-  summarizeTurn?: NativeTurnSummaryRenderer
-  theme: OpenGeniNativeTheme
+  group: TimelineGroup;
+  labels: OpenGeniNativeLabels;
+  renderMessage?: NativeMessageRenderer | undefined;
+  renderTool?: NativeToolRenderer | undefined;
+  summarizeTurn?: NativeTurnSummaryRenderer | undefined;
+  theme: OpenGeniNativeTheme;
 }) {
   switch (group.kind) {
-    case 'item':
+    case "item":
       return (
         <TimelineRow
           item={group.item}
@@ -348,8 +348,8 @@ function TimelineGroupRow({
           renderTool={renderTool}
           theme={theme}
         />
-      )
-    case 'activity':
+      );
+    case "activity":
       return (
         <ActivityRail
           items={group.items}
@@ -358,8 +358,8 @@ function TimelineGroupRow({
           renderTool={renderTool}
           theme={theme}
         />
-      )
-    case 'turn':
+      );
+    case "turn":
       return (
         <SettledTurn
           group={group}
@@ -369,7 +369,7 @@ function TimelineGroupRow({
           summarizeTurn={summarizeTurn}
           theme={theme}
         />
-      )
+      );
   }
 }
 
@@ -381,19 +381,19 @@ function SettledTurn({
   summarizeTurn,
   theme,
 }: {
-  group: Extract<TimelineGroup, { kind: 'turn' }>
-  labels: OpenGeniNativeLabels
-  renderMessage?: NativeMessageRenderer
-  renderTool?: NativeToolRenderer
-  summarizeTurn?: NativeTurnSummaryRenderer
-  theme: OpenGeniNativeTheme
+  group: Extract<TimelineGroup, { kind: "turn" }>;
+  labels: OpenGeniNativeLabels;
+  renderMessage?: NativeMessageRenderer | undefined;
+  renderTool?: NativeToolRenderer | undefined;
+  summarizeTurn?: NativeTurnSummaryRenderer | undefined;
+  theme: OpenGeniNativeTheme;
 }) {
-  const [open, setOpen] = useState(group.outcome === 'failed')
-  const items = useMemo(() => collectTurnActivityItems(group.groups), [group.groups])
-  const durationMs = turnDurationMs(group.startedAt, group.endedAt)
+  const [open, setOpen] = useState(group.outcome === "failed");
+  const items = useMemo(() => collectTurnActivityItems(group.groups), [group.groups]);
+  const durationMs = turnDurationMs(group.startedAt, group.endedAt);
   const summary = summarizeTurn?.({
     items,
-    toolCalls: items.filter((item): item is ToolCallItem => item.kind === 'tool-call'),
+    toolCalls: items.filter((item): item is ToolCallItem => item.kind === "tool-call"),
     outcome: group.outcome,
     failureText: group.failureText,
     durationMs,
@@ -402,7 +402,7 @@ function SettledTurn({
   }) ?? {
     content: `${labels.activity} · ${items.length}`,
     accessibilityLabel: `${labels.activity}, ${items.length}`,
-  }
+  };
   return (
     <View style={styles.turnGroup}>
       <Pressable
@@ -414,14 +414,14 @@ function SettledTurn({
           styles.turnSummary,
           {
             backgroundColor:
-              group.outcome === 'failed' ? theme.colors.dangerSurface : theme.colors.elevated,
-            borderColor: group.outcome === 'failed' ? theme.colors.danger : theme.colors.border,
+              group.outcome === "failed" ? theme.colors.dangerSurface : theme.colors.elevated,
+            borderColor: group.outcome === "failed" ? theme.colors.danger : theme.colors.border,
             opacity: pressed ? 0.72 : 1,
           },
         ]}
       >
         <Text style={[styles.turnChevron, { color: theme.colors.mutedText }]}>
-          {open ? '⌄' : '›'}
+          {open ? "⌄" : "›"}
         </Text>
         <Text
           accessibilityElementsHidden
@@ -430,22 +430,22 @@ function SettledTurn({
             styles.turnOutcome,
             {
               color:
-                group.outcome === 'failed'
+                group.outcome === "failed"
                   ? theme.colors.danger
-                  : group.outcome === 'complete'
+                  : group.outcome === "complete"
                     ? theme.colors.success
                     : theme.colors.mutedText,
             },
           ]}
         >
-          {group.outcome === 'complete' ? '✓' : group.outcome === 'failed' ? '!' : '–'}
+          {group.outcome === "complete" ? "✓" : group.outcome === "failed" ? "!" : "–"}
         </Text>
         <Text
           numberOfLines={1}
           style={[
             styles.turnSummaryText,
             {
-              color: group.outcome === 'failed' ? theme.colors.danger : theme.colors.secondaryText,
+              color: group.outcome === "failed" ? theme.colors.danger : theme.colors.secondaryText,
             },
           ]}
         >
@@ -478,46 +478,46 @@ function SettledTurn({
         </View>
       ) : null}
     </View>
-  )
+  );
 }
 
 function collectTurnActivityItems(groups: readonly TimelineGroup[]): ActivityItem[] {
   return groups.flatMap((group): ActivityItem[] => {
     switch (group.kind) {
-      case 'activity':
-        return group.items
-      case 'turn':
-        return collectTurnActivityItems(group.groups)
-      case 'item':
-        return isActivityItem(group.item) ? [group.item] : []
+      case "activity":
+        return group.items;
+      case "turn":
+        return collectTurnActivityItems(group.groups);
+      case "item":
+        return isActivityItem(group.item) ? [group.item] : [];
     }
-  })
+  });
 }
 
 function isActivityItem(item: TimelineItem): item is ActivityItem {
   return (
-    (item.kind === 'agent-message' && item.phase === 'commentary') ||
-    item.kind === 'reasoning' ||
-    item.kind === 'tool-call' ||
-    item.kind === 'worker' ||
-    item.kind === 'sandbox' ||
-    item.kind === 'memory' ||
-    item.kind === 'fleet-decision'
-  )
+    (item.kind === "agent-message" && item.phase === "commentary") ||
+    item.kind === "reasoning" ||
+    item.kind === "tool-call" ||
+    item.kind === "worker" ||
+    item.kind === "sandbox" ||
+    item.kind === "memory" ||
+    item.kind === "fleet-decision"
+  );
 }
 
 function activityItemRunning(item: ActivityItem): boolean {
   return (
-    ((item.kind === 'reasoning' || item.kind === 'agent-message') && item.streaming) ||
-    ((item.kind === 'tool-call' || item.kind === 'worker' || item.kind === 'sandbox') &&
-      item.status === 'running')
-  )
+    ((item.kind === "reasoning" || item.kind === "agent-message") && item.streaming) ||
+    ((item.kind === "tool-call" || item.kind === "worker" || item.kind === "sandbox") &&
+      item.status === "running")
+  );
 }
 
 function turnDurationMs(startedAt: string, endedAt: string): number | undefined {
-  const start = Date.parse(startedAt)
-  const end = Date.parse(endedAt)
-  return Number.isFinite(start) && Number.isFinite(end) && end >= start ? end - start : undefined
+  const start = Date.parse(startedAt);
+  const end = Date.parse(endedAt);
+  return Number.isFinite(start) && Number.isFinite(end) && end >= start ? end - start : undefined;
 }
 
 function ActivityRail({
@@ -527,11 +527,11 @@ function ActivityRail({
   renderTool,
   theme,
 }: {
-  items: ActivityItem[]
-  labels: OpenGeniNativeLabels
-  renderMessage?: NativeMessageRenderer
-  renderTool?: NativeToolRenderer
-  theme: OpenGeniNativeTheme
+  items: ActivityItem[];
+  labels: OpenGeniNativeLabels;
+  renderMessage?: NativeMessageRenderer | undefined;
+  renderTool?: NativeToolRenderer | undefined;
+  theme: OpenGeniNativeTheme;
 }) {
   return (
     <View style={[styles.activityRail, { borderLeftColor: theme.colors.border }]}>
@@ -547,7 +547,7 @@ function ActivityRail({
         />
       ))}
     </View>
-  )
+  );
 }
 
 function ConnectionBanner({
@@ -556,21 +556,21 @@ function ConnectionBanner({
   labels,
   theme,
 }: {
-  controller: OpenGeniNativeSessionController
-  formatError?: (error: Error) => string
-  labels: OpenGeniNativeLabels
-  theme: OpenGeniNativeTheme
+  controller: OpenGeniNativeSessionController;
+  formatError?: ((error: Error) => string) | undefined;
+  labels: OpenGeniNativeLabels;
+  theme: OpenGeniNativeTheme;
 }) {
   const message = !controller.active
     ? labels.offlinePaused
-    : controller.connectionState === 'reconnecting'
+    : controller.connectionState === "reconnecting"
       ? labels.reconnecting
-      : controller.connectionState === 'connecting'
+      : controller.connectionState === "connecting"
         ? labels.connecting
-        : null
-  const error = controller.error
-  if (!message && !error) return null
-  const displayMessage = error ? (formatError?.(error) ?? labels.error) : message
+        : null;
+  const error = controller.error;
+  if (!message && !error) return null;
+  const displayMessage = error ? (formatError?.(error) ?? labels.error) : message;
 
   return (
     <View
@@ -600,7 +600,7 @@ function ConnectionBanner({
         />
       ) : null}
     </View>
-  )
+  );
 }
 
 function TimelineRow({
@@ -611,21 +611,21 @@ function TimelineRow({
   renderTool,
   theme,
 }: {
-  compactActivity?: boolean
-  item: TimelineItem
-  labels: OpenGeniNativeLabels
-  renderMessage?: NativeMessageRenderer
-  renderTool?: NativeToolRenderer
-  theme: OpenGeniNativeTheme
+  compactActivity?: boolean | undefined;
+  item: TimelineItem;
+  labels: OpenGeniNativeLabels;
+  renderMessage?: NativeMessageRenderer | undefined;
+  renderTool?: NativeToolRenderer | undefined;
+  theme: OpenGeniNativeTheme;
 }) {
-  if (item.kind === 'tool-call' && renderTool) {
-    const rendered = renderTool(item, { compact: compactActivity, labels, theme })
-    if (rendered !== null && rendered !== undefined) return <>{rendered}</>
+  if (item.kind === "tool-call" && renderTool) {
+    const rendered = renderTool(item, { compact: compactActivity, labels, theme });
+    if (rendered !== null && rendered !== undefined) return <>{rendered}</>;
   }
 
-  if (item.kind === 'user-message' || item.kind === 'agent-message') {
-    const user = item.kind === 'user-message'
-    const role = user ? 'user' : 'assistant'
+  if (item.kind === "user-message" || item.kind === "agent-message") {
+    const user = item.kind === "user-message";
+    const role = user ? "user" : "assistant";
     return (
       <View
         accessible
@@ -637,8 +637,8 @@ function TimelineRow({
             styles.messageBubble,
             user ? styles.userMessageBubble : styles.agentMessage,
             {
-              backgroundColor: user ? theme.colors.userBubble : 'transparent',
-              borderColor: user ? theme.colors.border : 'transparent',
+              backgroundColor: user ? theme.colors.userBubble : "transparent",
+              borderColor: user ? theme.colors.border : "transparent",
             },
           ]}
         >
@@ -655,15 +655,15 @@ function TimelineRow({
               {item.text}
             </Text>
           )}
-          {item.kind === 'agent-message' && item.streaming ? (
+          {item.kind === "agent-message" && item.streaming ? (
             <ActivityIndicator color={theme.colors.accent} size="small" />
           ) : null}
         </View>
       </View>
-    )
+    );
   }
 
-  if (item.kind === 'reasoning') {
+  if (item.kind === "reasoning") {
     if (compactActivity) {
       return (
         <ReasoningDisclosure
@@ -672,30 +672,30 @@ function TimelineRow({
           renderMessage={renderMessage}
           theme={theme}
         />
-      )
+      );
     }
     return (
       <TimelineCard item={item} labels={labels} theme={theme} title={labels.reasoning}>
         {renderMessage ? (
-          renderMessage(item.text, 'reasoning', { theme })
+          renderMessage(item.text, "reasoning", { theme })
         ) : (
           <Text selectable style={[styles.secondaryText, { color: theme.colors.secondaryText }]}>
             {item.text}
           </Text>
         )}
       </TimelineCard>
-    )
+    );
   }
 
-  if (item.kind === 'notice') {
-    return <NoticeRow item={item} labels={labels} theme={theme} />
+  if (item.kind === "notice") {
+    return <NoticeRow item={item} labels={labels} theme={theme} />;
   }
 
-  if (item.kind === 'session-status') {
-    return <SessionStatusRow item={item} labels={labels} theme={theme} />
+  if (item.kind === "session-status") {
+    return <SessionStatusRow item={item} labels={labels} theme={theme} />;
   }
 
-  if (item.kind === 'tool-call') {
+  if (item.kind === "tool-call") {
     return (
       <NativeActivityDisclosure
         compact={compactActivity}
@@ -703,7 +703,7 @@ function TimelineRow({
         labels={labels}
         theme={theme}
       />
-    )
+    );
   }
 
   if (isActivityItem(item)) {
@@ -714,11 +714,11 @@ function TimelineRow({
         labels={labels}
         theme={theme}
       />
-    )
+    );
   }
 
-  const title = timelineTitle(item, labels)
-  const detail = timelineSummary(item, labels)
+  const title = timelineTitle(item, labels);
+  const detail = timelineSummary(item, labels);
   if (compactActivity) {
     return (
       <View
@@ -733,7 +733,7 @@ function TimelineRow({
           </Text>
         ) : null}
       </View>
-    )
+    );
   }
   return (
     <TimelineCard item={item} labels={labels} theme={theme} title={title}>
@@ -743,7 +743,7 @@ function TimelineRow({
         </Text>
       ) : null}
     </TimelineCard>
-  )
+  );
 }
 
 function NativeActivityDisclosure({
@@ -752,21 +752,21 @@ function NativeActivityDisclosure({
   labels,
   theme,
 }: {
-  compact: boolean
-  item: Exclude<ActivityItem, { kind: 'reasoning' }>
-  labels: OpenGeniNativeLabels
-  theme: OpenGeniNativeTheme
+  compact: boolean;
+  item: Exclude<ActivityItem, { kind: "reasoning" }>;
+  labels: OpenGeniNativeLabels;
+  theme: OpenGeniNativeTheme;
 }) {
-  const presentation = nativeActivityPresentation(item, labels)
-  const [open, setOpen] = useState(presentation.expandedByDefault)
-  const expandable = Boolean(presentation.detail)
+  const presentation = nativeActivityPresentation(item, labels);
+  const [open, setOpen] = useState(presentation.expandedByDefault);
+  const expandable = Boolean(presentation.detail);
   const foreground =
-    presentation.tone === 'failed'
+    presentation.tone === "failed"
       ? theme.colors.danger
-      : presentation.tone === 'running'
+      : presentation.tone === "running"
         ? theme.colors.accent
-        : theme.colors.mutedText
-  const technical = item.kind === 'tool-call' || item.kind === 'sandbox'
+        : theme.colors.mutedText;
+  const technical = item.kind === "tool-call" || item.kind === "sandbox";
 
   return (
     <View
@@ -775,14 +775,14 @@ function NativeActivityDisclosure({
         !compact && styles.activityDisclosureCard,
         !compact && {
           backgroundColor: theme.colors.surface,
-          borderColor: presentation.tone === 'failed' ? theme.colors.danger : theme.colors.border,
+          borderColor: presentation.tone === "failed" ? theme.colors.danger : theme.colors.border,
         },
       ]}
     >
       <Pressable
         accessible
         accessibilityLabel={timelineAccessibilityLabel(item, labels)}
-        accessibilityRole={expandable ? 'button' : undefined}
+        accessibilityRole={expandable ? "button" : undefined}
         accessibilityState={expandable ? { expanded: open } : undefined}
         disabled={!expandable}
         onPress={() => setOpen((current) => !current)}
@@ -792,14 +792,14 @@ function NativeActivityDisclosure({
         ]}
       >
         <Text style={[styles.activityDisclosureChevron, { color: theme.colors.mutedText }]}>
-          {expandable ? (open ? '⌄' : '›') : '·'}
+          {expandable ? (open ? "⌄" : "›") : "·"}
         </Text>
         <View style={[styles.activityStatusDot, { backgroundColor: foreground }]} />
         <Text
           numberOfLines={1}
           style={[
             styles.activityDisclosureTitle,
-            { color: presentation.tone === 'failed' ? theme.colors.danger : theme.colors.text },
+            { color: presentation.tone === "failed" ? theme.colors.danger : theme.colors.text },
           ]}
         >
           {presentation.title}
@@ -832,44 +832,44 @@ function NativeActivityDisclosure({
         </View>
       ) : null}
     </View>
-  )
+  );
 }
 
 function timelineTitle(
   item: Exclude<
     TimelineItem,
-    { kind: 'user-message' | 'agent-message' | 'reasoning' | 'tool-call' }
+    { kind: "user-message" | "agent-message" | "reasoning" | "tool-call" }
   >,
-  labels: OpenGeniNativeLabels
+  labels: OpenGeniNativeLabels,
 ): string {
   switch (item.kind) {
-    case 'worker':
-    case 'worker-completion':
-      return labels.worker
-    case 'sandbox':
-      return item.name
-    case 'startup-phase':
-      return labels.activity
-    case 'session-status':
-      return nativeSessionStatusLabel(item.status, labels)
-    case 'human-input':
-      return labels.humanInputAsked
-    case 'goal':
-      return nativeGoalActionLabel(item.action, labels)
-    case 'context-compaction':
-      return nativeContextCompactionPhaseLabel(item.phase, labels)
-    case 'memory':
-      return nativeMemoryActionLabel(item, labels)
-    case 'knowledge':
-      return nativeKnowledgeOutcomeLabel(item, labels)
-    case 'fleet-decision':
-      return labels.fleetDecision
-    case 'turn-end':
-      return labels.turn
-    case 'notice':
-    case 'machine-input-batch':
-    case 'auth-needed':
-      return labels.activity
+    case "worker":
+    case "worker-completion":
+      return labels.worker;
+    case "sandbox":
+      return item.name;
+    case "startup-phase":
+      return labels.activity;
+    case "session-status":
+      return nativeSessionStatusLabel(item.status, labels);
+    case "human-input":
+      return labels.humanInputAsked;
+    case "goal":
+      return nativeGoalActionLabel(item.action, labels);
+    case "context-compaction":
+      return nativeContextCompactionPhaseLabel(item.phase, labels);
+    case "memory":
+      return nativeMemoryActionLabel(item, labels);
+    case "knowledge":
+      return nativeKnowledgeOutcomeLabel(item, labels);
+    case "fleet-decision":
+      return labels.fleetDecision;
+    case "turn-end":
+      return labels.turn;
+    case "notice":
+    case "machine-input-batch":
+    case "auth-needed":
+      return labels.activity;
   }
 }
 
@@ -879,14 +879,14 @@ function ReasoningDisclosure({
   renderMessage,
   theme,
 }: {
-  item: Extract<TimelineItem, { kind: 'reasoning' }>
-  labels: OpenGeniNativeLabels
-  renderMessage?: NativeMessageRenderer
-  theme: OpenGeniNativeTheme
+  item: Extract<TimelineItem, { kind: "reasoning" }>;
+  labels: OpenGeniNativeLabels;
+  renderMessage?: NativeMessageRenderer | undefined;
+  theme: OpenGeniNativeTheme;
 }) {
-  const [open, setOpen] = useState(false)
-  const presentation = nativeActivityPresentation(item, labels)
-  const { preview, title } = presentation
+  const [open, setOpen] = useState(false);
+  const presentation = nativeActivityPresentation(item, labels);
+  const { preview, title } = presentation;
 
   return (
     <View style={styles.disclosure}>
@@ -897,11 +897,11 @@ function ReasoningDisclosure({
         onPress={() => setOpen((current) => !current)}
         style={({ pressed }) => [
           styles.disclosureHeader,
-          { backgroundColor: pressed ? theme.colors.elevated : 'transparent' },
+          { backgroundColor: pressed ? theme.colors.elevated : "transparent" },
         ]}
       >
         <Text style={[styles.disclosureChevron, { color: theme.colors.mutedText }]}>
-          {open ? '⌄' : '›'}
+          {open ? "⌄" : "›"}
         </Text>
         <Text style={[styles.disclosureIcon, { color: theme.colors.mutedText }]}>◌</Text>
         <Text
@@ -910,8 +910,8 @@ function ReasoningDisclosure({
             styles.disclosureTitle,
             {
               color: theme.colors.mutedText,
-              fontStyle: item.streaming ? 'normal' : 'italic',
-              fontWeight: item.streaming ? '600' : '400',
+              fontStyle: item.streaming ? "normal" : "italic",
+              fontWeight: item.streaming ? "600" : "400",
             },
           ]}
         >
@@ -929,7 +929,7 @@ function ReasoningDisclosure({
       {open ? (
         <View style={styles.disclosureBody}>
           {renderMessage ? (
-            renderMessage(item.text, 'reasoning', { theme })
+            renderMessage(item.text, "reasoning", { theme })
           ) : (
             <Text selectable style={[styles.secondaryText, { color: theme.colors.secondaryText }]}>
               {presentation.detail}
@@ -938,7 +938,7 @@ function ReasoningDisclosure({
         </View>
       ) : null}
     </View>
-  )
+  );
 }
 
 function NoticeRow({
@@ -946,24 +946,24 @@ function NoticeRow({
   labels,
   theme,
 }: {
-  item: Extract<TimelineItem, { kind: 'notice' }>
-  labels: OpenGeniNativeLabels
-  theme: OpenGeniNativeTheme
+  item: Extract<TimelineItem, { kind: "notice" }>;
+  labels: OpenGeniNativeLabels;
+  theme: OpenGeniNativeTheme;
 }) {
-  const [detailsOpen, setDetailsOpen] = useState(false)
-  const action = item.action
-  const failed = item.tone === 'failed'
-  const waiting = item.tone === 'waiting' || item.tone === 'input'
+  const [detailsOpen, setDetailsOpen] = useState(false);
+  const action = item.action;
+  const failed = item.tone === "failed";
+  const waiting = item.tone === "waiting" || item.tone === "input";
   const foreground = failed
     ? theme.colors.danger
     : waiting
       ? theme.colors.warning
-      : theme.colors.secondaryText
+      : theme.colors.secondaryText;
   const background = failed
     ? theme.colors.dangerSurface
     : waiting
       ? theme.colors.warningSurface
-      : theme.colors.elevated
+      : theme.colors.elevated;
 
   return (
     <View
@@ -985,7 +985,7 @@ function NoticeRow({
               onPress={() => setDetailsOpen((current) => !current)}
             >
               <Text style={[styles.noticeAction, { color: foreground }]}>
-                {detailsOpen ? '⌄' : '›'} {item.details.label}
+                {detailsOpen ? "⌄" : "›"} {item.details.label}
               </Text>
             </Pressable>
             {detailsOpen ? (
@@ -1006,7 +1006,7 @@ function NoticeRow({
         </Pressable>
       ) : null}
     </View>
-  )
+  );
 }
 
 function SessionStatusRow({
@@ -1014,19 +1014,19 @@ function SessionStatusRow({
   labels,
   theme,
 }: {
-  item: Extract<TimelineItem, { kind: 'session-status' }>
-  labels: OpenGeniNativeLabels
-  theme: OpenGeniNativeTheme
+  item: Extract<TimelineItem, { kind: "session-status" }>;
+  labels: OpenGeniNativeLabels;
+  theme: OpenGeniNativeTheme;
 }) {
-  const label = nativeSessionStatusLabel(item.status, labels).toLocaleLowerCase()
-  const dotColor = sessionStatusColor(item.status, theme)
-  const relativeTime = formatNativeRelativeTime(item.occurredAt, labels)
+  const label = nativeSessionStatusLabel(item.status, labels).toLocaleLowerCase();
+  const dotColor = sessionStatusColor(item.status, theme);
+  const relativeTime = formatNativeRelativeTime(item.occurredAt, labels);
 
   return (
     <View
       accessibilityRole="text"
       accessible
-      accessibilityLabel={`${label}${relativeTime ? `, ${relativeTime}` : ''}`}
+      accessibilityLabel={`${label}${relativeTime ? `, ${relativeTime}` : ""}`}
       style={styles.sessionStatus}
     >
       <View style={[styles.sessionStatusRule, { backgroundColor: theme.colors.border }]} />
@@ -1034,31 +1034,31 @@ function SessionStatusRow({
         <View style={[styles.sessionStatusDot, { backgroundColor: dotColor }]} />
         <Text style={[styles.sessionStatusText, { color: theme.colors.mutedText }]}>
           {label}
-          {relativeTime ? ` · ${relativeTime}` : ''}
+          {relativeTime ? ` · ${relativeTime}` : ""}
         </Text>
       </View>
       <View style={[styles.sessionStatusRule, { backgroundColor: theme.colors.border }]} />
     </View>
-  )
+  );
 }
 
 function sessionStatusColor(
-  status: Extract<TimelineItem, { kind: 'session-status' }>['status'],
-  theme: OpenGeniNativeTheme
+  status: Extract<TimelineItem, { kind: "session-status" }>["status"],
+  theme: OpenGeniNativeTheme,
 ): string {
   switch (status) {
-    case 'failed':
-      return theme.colors.danger
-    case 'requires_action':
-    case 'waiting_capacity':
-      return theme.colors.warning
-    case 'idle':
-      return theme.colors.success
-    case 'running':
-    case 'recovering':
-      return theme.colors.accent
+    case "failed":
+      return theme.colors.danger;
+    case "requires_action":
+    case "waiting_capacity":
+      return theme.colors.warning;
+    case "idle":
+      return theme.colors.success;
+    case "running":
+    case "recovering":
+      return theme.colors.accent;
     default:
-      return theme.colors.mutedText
+      return theme.colors.mutedText;
   }
 }
 
@@ -1069,11 +1069,11 @@ function TimelineCard({
   theme,
   title,
 }: {
-  children: ReactNode
-  item: TimelineItem
-  labels: OpenGeniNativeLabels
-  theme: OpenGeniNativeTheme
-  title: string
+  children: ReactNode;
+  item: TimelineItem;
+  labels: OpenGeniNativeLabels;
+  theme: OpenGeniNativeTheme;
+  title: string;
 }) {
   return (
     <View
@@ -1087,47 +1087,47 @@ function TimelineCard({
       <Text style={[styles.cardTitle, { color: theme.colors.text }]}>{title}</Text>
       {children}
     </View>
-  )
+  );
 }
 
 function timelineSummary(
   item: Exclude<
     TimelineItem,
-    { kind: 'user-message' | 'agent-message' | 'reasoning' | 'tool-call' }
+    { kind: "user-message" | "agent-message" | "reasoning" | "tool-call" }
   >,
-  labels: OpenGeniNativeLabels
+  labels: OpenGeniNativeLabels,
 ): string {
   switch (item.kind) {
-    case 'worker':
-      return item.prompt ?? nativeTimelineStatusLabel(item.status, labels)
-    case 'worker-completion':
-      return item.text
-    case 'sandbox':
-      return item.output || item.command || nativeTimelineStatusLabel(item.status, labels)
-    case 'startup-phase':
-      return nativeTimelineStatusLabel(item.status, labels)
-    case 'session-status':
-      return nativeSessionStatusLabel(item.status, labels)
-    case 'human-input':
-      return nativeHumanInputSummary(item, labels)
-    case 'goal':
-      return item.text ?? ''
-    case 'notice':
-      return item.text
-    case 'context-compaction':
-      return ''
-    case 'machine-input-batch':
-      return item.members.map((member) => member.summary).join('\n')
-    case 'auth-needed':
-      return item.providerDomain
-    case 'memory':
-      return item.replacementPreview ?? item.preview
-    case 'knowledge':
-      return item.filename ?? ''
-    case 'fleet-decision':
-      return nativeFleetDecisionSummary(item, labels)
-    case 'turn-end':
-      return item.failureText ?? nativeTimelineStatusLabel(item.outcome, labels)
+    case "worker":
+      return item.prompt ?? nativeTimelineStatusLabel(item.status, labels);
+    case "worker-completion":
+      return item.text;
+    case "sandbox":
+      return item.output || item.command || nativeTimelineStatusLabel(item.status, labels);
+    case "startup-phase":
+      return nativeTimelineStatusLabel(item.status, labels);
+    case "session-status":
+      return nativeSessionStatusLabel(item.status, labels);
+    case "human-input":
+      return nativeHumanInputSummary(item, labels);
+    case "goal":
+      return item.text ?? "";
+    case "notice":
+      return item.text;
+    case "context-compaction":
+      return "";
+    case "machine-input-batch":
+      return item.members.map((member) => member.summary).join("\n");
+    case "auth-needed":
+      return item.providerDomain;
+    case "memory":
+      return item.replacementPreview ?? item.preview;
+    case "knowledge":
+      return item.filename ?? "";
+    case "fleet-decision":
+      return nativeFleetDecisionSummary(item, labels);
+    case "turn-end":
+      return item.failureText ?? nativeTimelineStatusLabel(item.outcome, labels);
   }
 }
 
@@ -1136,9 +1136,9 @@ function ApprovalSurface({
   labels,
   theme,
 }: {
-  controller: OpenGeniNativeSessionController
-  labels: OpenGeniNativeLabels
-  theme: OpenGeniNativeTheme
+  controller: OpenGeniNativeSessionController;
+  labels: OpenGeniNativeLabels;
+  theme: OpenGeniNativeTheme;
 }) {
   return (
     <View
@@ -1179,7 +1179,7 @@ function ApprovalSurface({
         </View>
       ))}
     </View>
-  )
+  );
 }
 
 function SessionSurfaces({
@@ -1187,21 +1187,21 @@ function SessionSurfaces({
   labels,
   theme,
 }: {
-  controller: OpenGeniNativeSessionController
-  labels: OpenGeniNativeLabels
-  theme: OpenGeniNativeTheme
+  controller: OpenGeniNativeSessionController;
+  labels: OpenGeniNativeLabels;
+  theme: OpenGeniNativeTheme;
 }) {
   return (
     <View style={styles.actionSurfaces}>
-      {controller.queue.effectiveControl?.state === 'paused' &&
+      {controller.queue.effectiveControl?.state === "paused" &&
       controller.queue.effectiveControl.resumeOptions.length > 1 ? (
         <View style={styles.actionGroup}>
           <Text style={[styles.actionTitle, { color: theme.colors.text }]}>{labels.resume}</Text>
           {controller.queue.effectiveControl.resumeOptions
-            .filter((option) => option.scope !== 'selected')
+            .filter((option) => option.scope !== "selected")
             .map((option) => (
               <View
-                key={`${option.scope}:${option.targetId ?? 'current'}`}
+                key={`${option.scope}:${option.targetId ?? "current"}`}
                 style={[
                   styles.actionCard,
                   {
@@ -1227,7 +1227,7 @@ function SessionSurfaces({
         <QueueSurface controller={controller} labels={labels} theme={theme} />
       ) : null}
     </View>
-  )
+  );
 }
 
 function QueueSurface({
@@ -1235,28 +1235,28 @@ function QueueSurface({
   labels,
   theme,
 }: {
-  controller: OpenGeniNativeSessionController
-  labels: OpenGeniNativeLabels
-  theme: OpenGeniNativeTheme
+  controller: OpenGeniNativeSessionController;
+  labels: OpenGeniNativeLabels;
+  theme: OpenGeniNativeTheme;
 }) {
-  const [open, setOpen] = useState(false)
+  const [open, setOpen] = useState(false);
   const edit = async (turn: SessionTurn) => {
-    if (controller.composer.hasDraftContent()) return
+    if (controller.composer.hasDraftContent()) return;
     const draft = await controller.queue.editTurn(turn.id, {
       expectedDraftRevision: controller.composer.draftRevision,
       replaceDraft: true,
-    })
-    if (draft) controller.composer.applyDraft(draft)
-  }
+    });
+    if (draft) controller.composer.applyDraft(draft);
+  };
   const move = (index: number, direction: -1 | 1) => {
-    const turn = controller.queue.queue[index]
-    if (!turn) return
+    const turn = controller.queue.queue[index];
+    if (!turn) return;
     const beforeTurnId =
       direction < 0
         ? (controller.queue.queue[index - 1]?.id ?? null)
-        : (controller.queue.queue[index + 2]?.id ?? null)
-    void controller.queue.moveTurn(turn.id, beforeTurnId)
-  }
+        : (controller.queue.queue[index + 2]?.id ?? null);
+    void controller.queue.moveTurn(turn.id, beforeTurnId);
+  };
 
   return (
     <View
@@ -1273,7 +1273,7 @@ function QueueSurface({
         style={({ pressed }) => [styles.queueDisclosure, { opacity: pressed ? 0.72 : 1 }]}
       >
         <Text style={[styles.queueChevron, { color: theme.colors.mutedText }]}>
-          {open ? '⌄' : '›'}
+          {open ? "⌄" : "›"}
         </Text>
         <Text numberOfLines={1} style={[styles.queueTitle, { color: theme.colors.text }]}>
           {controller.queue.queue.length} {labels.queueTitle}
@@ -1340,7 +1340,7 @@ function QueueSurface({
           ))
         : null}
     </View>
-  )
+  );
 }
 
 function HumanInputWorkspace({
@@ -1352,19 +1352,19 @@ function HumanInputWorkspace({
   respondingRequestId,
   theme,
 }: {
-  expanded: boolean
-  labels: OpenGeniNativeLabels
+  expanded: boolean;
+  labels: OpenGeniNativeLabels;
   onRespond: (
     requestId: string,
-    response: { outcome: 'answered'; answers: HumanInputAnswer[] } | { outcome: 'skipped' }
-  ) => void
-  onToggle: () => void
-  requests: readonly SessionHumanInputRequest[]
-  respondingRequestId: string | null
-  theme: OpenGeniNativeTheme
+    response: { outcome: "answered"; answers: HumanInputAnswer[] } | { outcome: "skipped" },
+  ) => void;
+  onToggle: () => void;
+  requests: readonly SessionHumanInputRequest[];
+  respondingRequestId: string | null;
+  theme: OpenGeniNativeTheme;
 }) {
-  const preview = nativeHumanInputRequestPreview(requests)
-  const identityLabel = preview ? `${labels.questionsTitle}: ${preview}` : labels.questionsTitle
+  const preview = nativeHumanInputRequestPreview(requests);
+  const identityLabel = preview ? `${labels.questionsTitle}: ${preview}` : labels.questionsTitle;
 
   return (
     <View
@@ -1378,11 +1378,11 @@ function HumanInputWorkspace({
         onPress={onToggle}
         style={({ pressed }) => [
           styles.humanInputDisclosure,
-          { backgroundColor: pressed ? theme.colors.elevated : 'transparent' },
+          { backgroundColor: pressed ? theme.colors.elevated : "transparent" },
         ]}
       >
         <Text style={[styles.disclosureChevron, { color: theme.colors.mutedText }]}>
-          {expanded ? '⌄' : '›'}
+          {expanded ? "⌄" : "›"}
         </Text>
         <Text
           numberOfLines={1}
@@ -1418,7 +1418,7 @@ function HumanInputWorkspace({
         </ScrollView>
       ) : null}
     </View>
-  )
+  );
 }
 
 function HumanInputCard({
@@ -1428,26 +1428,26 @@ function HumanInputCard({
   responding,
   theme,
 }: {
-  labels: OpenGeniNativeLabels
+  labels: OpenGeniNativeLabels;
   onRespond: (
-    response: { outcome: 'answered'; answers: HumanInputAnswer[] } | { outcome: 'skipped' }
-  ) => void
-  request: SessionHumanInputRequest
-  responding: boolean
-  theme: OpenGeniNativeTheme
+    response: { outcome: "answered"; answers: HumanInputAnswer[] } | { outcome: "skipped" },
+  ) => void;
+  request: SessionHumanInputRequest;
+  responding: boolean;
+  theme: OpenGeniNativeTheme;
 }) {
-  const [drafts, setDrafts] = useState<Record<string, NativeHumanInputDraft>>({})
-  const projection = validateHumanInputAnswers(request.questions, drafts)
+  const [drafts, setDrafts] = useState<Record<string, NativeHumanInputDraft>>({});
+  const projection = validateHumanInputAnswers(request.questions, drafts);
 
   const update = (
     questionId: string,
-    updater: (current: NativeHumanInputDraft) => NativeHumanInputDraft
+    updater: (current: NativeHumanInputDraft) => NativeHumanInputDraft,
   ) => {
     setDrafts((current) => ({
       ...current,
       [questionId]: updater(current[questionId] ?? emptyHumanInputDraft()),
-    }))
-  }
+    }));
+  };
 
   return (
     <View style={styles.actionGroup}>
@@ -1471,7 +1471,7 @@ function HumanInputCard({
           {request.allowSkip ? (
             <ActionButton
               label={labels.skip}
-              onPress={() => onRespond({ outcome: 'skipped' })}
+              onPress={() => onRespond({ outcome: "skipped" })}
               theme={theme}
               variant="quiet"
               disabled={responding}
@@ -1479,14 +1479,14 @@ function HumanInputCard({
           ) : null}
           <ActionButton
             label={labels.submitAnswers}
-            onPress={() => onRespond({ outcome: 'answered', answers: projection.answers })}
+            onPress={() => onRespond({ outcome: "answered", answers: projection.answers })}
             theme={theme}
             disabled={!projection.valid || responding}
           />
         </View>
       </View>
     </View>
-  )
+  );
 }
 
 function QuestionField({
@@ -1496,33 +1496,33 @@ function QuestionField({
   question,
   theme,
 }: {
-  draft: NativeHumanInputDraft | undefined
-  labels: OpenGeniNativeLabels
-  onChange: (draft: NativeHumanInputDraft) => void
-  question: HumanInputQuestion
-  theme: OpenGeniNativeTheme
+  draft: NativeHumanInputDraft | undefined;
+  labels: OpenGeniNativeLabels;
+  onChange: (draft: NativeHumanInputDraft) => void;
+  question: HumanInputQuestion;
+  theme: OpenGeniNativeTheme;
 }) {
-  const current = draft ?? emptyHumanInputDraft()
-  const values = current.values
+  const current = draft ?? emptyHumanInputDraft();
+  const values = current.values;
   const toggle = (id: string) => {
     const next =
-      question.kind === 'single_select'
+      question.kind === "single_select"
         ? [id]
         : values.includes(id)
           ? values.filter((value) => value !== id)
-          : [...values, id]
+          : [...values, id];
     onChange({
       ...current,
       values: next,
-      ...(question.kind === 'single_select' ? { otherSelected: false } : {}),
-    })
-  }
+      ...(question.kind === "single_select" ? { otherSelected: false } : {}),
+    });
+  };
 
   return (
     <View style={styles.question}>
       <Text style={[styles.cardTitle, { color: theme.colors.text }]}>
         {question.label ?? question.prompt}
-        {question.required ? ` · ${labels.required}` : ''}
+        {question.required ? ` · ${labels.required}` : ""}
       </Text>
       {question.label ? (
         <Text style={[styles.secondaryText, { color: theme.colors.secondaryText }]}>
@@ -1534,7 +1534,7 @@ function QuestionField({
           {question.helpText}
         </Text>
       ) : null}
-      {question.kind === 'text' ? (
+      {question.kind === "text" ? (
         <TextInput
           accessibilityLabel={question.label ?? question.prompt}
           multiline
@@ -1547,15 +1547,15 @@ function QuestionField({
               color: theme.colors.text,
             },
           ]}
-          value={values[0] ?? ''}
+          value={values[0] ?? ""}
         />
       ) : (
         <View style={styles.optionList}>
           {question.options.map((option) => {
-            const selected = values.includes(option.id)
+            const selected = values.includes(option.id);
             return (
               <Pressable
-                accessibilityRole={question.kind === 'single_select' ? 'radio' : 'checkbox'}
+                accessibilityRole={question.kind === "single_select" ? "radio" : "checkbox"}
                 accessibilityState={{ checked: selected }}
                 key={option.id}
                 onPress={() => toggle(option.id)}
@@ -1576,11 +1576,11 @@ function QuestionField({
                   </Text>
                 ) : null}
               </Pressable>
-            )
+            );
           })}
         </View>
       )}
-      {question.kind !== 'text' && question.allowOther ? (
+      {question.kind !== "text" && question.allowOther ? (
         <View
           style={[
             styles.option,
@@ -1593,13 +1593,13 @@ function QuestionField({
           ]}
         >
           <Pressable
-            accessibilityRole={question.kind === 'single_select' ? 'radio' : 'checkbox'}
+            accessibilityRole={question.kind === "single_select" ? "radio" : "checkbox"}
             accessibilityState={{ checked: current.otherSelected }}
             onPress={() =>
               onChange({
                 ...current,
                 otherSelected: !current.otherSelected,
-                ...(question.kind === 'single_select' && !current.otherSelected
+                ...(question.kind === "single_select" && !current.otherSelected
                   ? { values: [] }
                   : {}),
               })
@@ -1628,7 +1628,7 @@ function QuestionField({
         </View>
       ) : null}
     </View>
-  )
+  );
 }
 
 export function OpenGeniNativeAttachmentStrip({
@@ -1638,14 +1638,14 @@ export function OpenGeniNativeAttachmentStrip({
   restoredResources = NO_RESTORED_RESOURCES,
   theme,
 }: {
-  attachments: NativeFileAttachmentsResult
-  labels: OpenGeniNativeLabels
-  onRemoveRestoredResource?: (index: number) => void
-  restoredResources?: readonly unknown[]
-  theme: OpenGeniNativeTheme
+  attachments: NativeFileAttachmentsResult;
+  labels: OpenGeniNativeLabels;
+  onRemoveRestoredResource?: ((index: number) => void) | undefined;
+  restoredResources?: readonly unknown[] | undefined;
+  theme: OpenGeniNativeTheme;
 }) {
-  const error = attachments.error
-  if (attachments.attachments.length === 0 && restoredResources.length === 0 && !error) return null
+  const error = attachments.error;
+  if (attachments.attachments.length === 0 && restoredResources.length === 0 && !error) return null;
 
   return (
     <ScrollView
@@ -1688,20 +1688,20 @@ export function OpenGeniNativeAttachmentStrip({
               styles.helpText,
               {
                 color:
-                  attachment.status === 'failed' ? theme.colors.danger : theme.colors.mutedText,
+                  attachment.status === "failed" ? theme.colors.danger : theme.colors.mutedText,
               },
             ]}
           >
-            {attachment.status === 'preparing'
+            {attachment.status === "preparing"
               ? labels.preparingAttachment
-              : attachment.status === 'uploading'
+              : attachment.status === "uploading"
                 ? labels.uploading
-                : attachment.status === 'failed'
+                : attachment.status === "failed"
                   ? labels.uploadFailed
                   : formatBytes(attachment.sizeBytes)}
           </Text>
           <View style={styles.buttonRow}>
-            {attachment.status === 'failed' ? (
+            {attachment.status === "failed" ? (
               <ActionButton
                 label={labels.retryUpload}
                 onPress={() => void attachments.retry(attachment.id)}
@@ -1740,7 +1740,7 @@ export function OpenGeniNativeAttachmentStrip({
         </View>
       ))}
     </ScrollView>
-  )
+  );
 }
 
 function Composer({
@@ -1752,17 +1752,17 @@ function Composer({
   renderSurface,
   theme,
 }: {
-  accessory?: ReactNode
-  controller: OpenGeniNativeSessionController
-  labels: OpenGeniNativeLabels
-  renderActions?: NativeComposerActionRenderer
-  renderComposer?: NativeComposerRenderer
-  renderSurface?: NativeComposerSurfaceRenderer
-  theme: OpenGeniNativeTheme
+  accessory?: ReactNode | undefined;
+  controller: OpenGeniNativeSessionController;
+  labels: OpenGeniNativeLabels;
+  renderActions?: NativeComposerActionRenderer | undefined;
+  renderComposer?: NativeComposerRenderer | undefined;
+  renderSurface?: NativeComposerSurfaceRenderer | undefined;
+  theme: OpenGeniNativeTheme;
 }) {
-  const paused = controller.queue.effectiveControl?.state === 'paused'
+  const paused = controller.queue.effectiveControl?.state === "paused";
   const busy =
-    controller.composer.sending || controller.composer.pausing || controller.composer.resuming
+    controller.composer.sending || controller.composer.pausing || controller.composer.resuming;
   const actionContext: NativeComposerActionContext = {
     accessory,
     labels,
@@ -1777,13 +1777,13 @@ function Composer({
     onAttachImage: () => void controller.attachments.pickImages(),
     onTogglePause: () => void (paused ? controller.composer.resume() : controller.composer.pause()),
     onSubmit: () => void controller.composer.send(),
-  }
+  };
   const composerContext: NativeComposerRenderContext = {
     ...actionContext,
     value: controller.composer.value,
     onChangeText: controller.composer.setValue,
     placeholder: labels.composerPlaceholder,
-  }
+  };
 
   const content = (
     <>
@@ -1795,13 +1795,13 @@ function Composer({
           <View style={styles.buttonRow}>
             <ActionButton
               label={labels.useRemote}
-              onPress={() => void controller.composer.resolveDraftConflict('use_remote')}
+              onPress={() => void controller.composer.resolveDraftConflict("use_remote")}
               theme={theme}
               variant="quiet"
             />
             <ActionButton
               label={labels.keepMine}
-              onPress={() => void controller.composer.resolveDraftConflict('keep_mine')}
+              onPress={() => void controller.composer.resolveDraftConflict("keep_mine")}
               theme={theme}
               variant="quiet"
             />
@@ -1830,14 +1830,14 @@ function Composer({
         </View>
       )}
     </>
-  )
+  );
 
   if (renderComposer) {
-    return <>{content}</>
+    return <>{content}</>;
   }
 
   if (renderSurface) {
-    return renderSurface({ children: content, style: styles.composerContainer })
+    return renderSurface({ children: content, style: styles.composerContainer });
   }
 
   return (
@@ -1849,7 +1849,7 @@ function Composer({
     >
       {content}
     </View>
-  )
+  );
 }
 
 function DefaultComposerActions(context: NativeComposerActionContext) {
@@ -1890,7 +1890,7 @@ function DefaultComposerActions(context: NativeComposerActionContext) {
         />
       </View>
     </View>
-  )
+  );
 }
 
 function ActionButton({
@@ -1900,34 +1900,34 @@ function ActionButton({
   label,
   onPress,
   theme,
-  variant = 'primary',
+  variant = "primary",
 }: {
-  accessibilityLabel?: string
-  compact?: boolean
-  disabled?: boolean
-  label: string
-  onPress: () => void
-  theme: OpenGeniNativeTheme
-  variant?: 'primary' | 'quiet' | 'danger'
+  accessibilityLabel?: string | undefined;
+  compact?: boolean | undefined;
+  disabled?: boolean | undefined;
+  label: string;
+  onPress: () => void;
+  theme: OpenGeniNativeTheme;
+  variant?: "primary" | "quiet" | "danger";
 }) {
   const colors =
-    variant === 'primary'
+    variant === "primary"
       ? {
           background: theme.colors.accent,
           foreground: theme.colors.accentForeground,
           border: theme.colors.accent,
         }
-      : variant === 'danger'
+      : variant === "danger"
         ? {
-            background: 'transparent',
+            background: "transparent",
             foreground: theme.colors.danger,
             border: theme.colors.danger,
           }
         : {
-            background: 'transparent',
+            background: "transparent",
             foreground: theme.colors.secondaryText,
             border: theme.colors.border,
-          }
+          };
   return (
     <Pressable
       accessibilityLabel={accessibilityLabel ?? label}
@@ -1955,14 +1955,14 @@ function ActionButton({
         {label}
       </Text>
     </Pressable>
-  )
+  );
 }
 
 function formatBytes(value: number | null): string {
-  if (value === null) return ''
-  if (value < 1024) return `${value} B`
-  if (value < 1024 * 1024) return `${Math.round(value / 1024)} KB`
-  return `${(value / (1024 * 1024)).toFixed(1)} MB`
+  if (value === null) return "";
+  if (value < 1024) return `${value} B`;
+  if (value < 1024 * 1024) return `${Math.round(value / 1024)} KB`;
+  return `${(value / (1024 * 1024)).toFixed(1)} MB`;
 }
 
 const styles = StyleSheet.create({
@@ -1971,11 +1971,11 @@ const styles = StyleSheet.create({
   timelineColumn: { flex: 1, minWidth: 0 },
   timelineStage: { flex: 1, minHeight: 0 },
   timeline: { flex: 1 },
-  timelineHidden: { flex: 0, height: 0, overflow: 'hidden', opacity: 0 },
+  timelineHidden: { flex: 0, height: 0, overflow: "hidden", opacity: 0 },
   timelineContent: {
-    width: '100%',
+    width: "100%",
     maxWidth: 820,
-    alignSelf: 'center',
+    alignSelf: "center",
     gap: 12,
     padding: 16,
     paddingBottom: 132,
@@ -1983,34 +1983,34 @@ const styles = StyleSheet.create({
   timelineContentNativeComposer: {
     paddingBottom: 16,
   },
-  emptyTimeline: { flexGrow: 1, justifyContent: 'center' },
-  emptyState: { alignItems: 'center', gap: 8, paddingHorizontal: 32 },
-  emptyTitle: { fontSize: 22, fontWeight: '700', textAlign: 'center' },
-  emptyDescription: { fontSize: 15, lineHeight: 22, textAlign: 'center' },
+  emptyTimeline: { flexGrow: 1, justifyContent: "center" },
+  emptyState: { alignItems: "center", gap: 8, paddingHorizontal: 32 },
+  emptyTitle: { fontSize: 22, fontWeight: "700", textAlign: "center" },
+  emptyDescription: { fontSize: 15, lineHeight: 22, textAlign: "center" },
   banner: {
     minHeight: 44,
     paddingHorizontal: 16,
     paddingVertical: 10,
-    flexDirection: 'row',
-    alignItems: 'center',
+    flexDirection: "row",
+    alignItems: "center",
     gap: 12,
   },
   bannerText: { flex: 1, fontSize: 13, lineHeight: 18 },
-  messageRow: { width: '100%' },
-  userMessageRow: { alignItems: 'flex-end' },
-  agentMessageRow: { alignItems: 'flex-start' },
+  messageRow: { width: "100%" },
+  userMessageRow: { alignItems: "flex-end" },
+  agentMessageRow: { alignItems: "flex-start" },
   messageBubble: {
     gap: 8,
   },
   userMessageBubble: {
-    maxWidth: '84%',
+    maxWidth: "84%",
     borderRadius: 16,
     borderWidth: StyleSheet.hairlineWidth,
     paddingHorizontal: 14,
     paddingVertical: 11,
   },
   agentMessage: {
-    width: '100%',
+    width: "100%",
     paddingHorizontal: 4,
     paddingVertical: 5,
   },
@@ -2018,19 +2018,19 @@ const styles = StyleSheet.create({
   timelineCard: { borderRadius: 14, borderWidth: StyleSheet.hairlineWidth, padding: 12, gap: 7 },
   activityRail: { borderLeftWidth: 2, gap: 12, paddingLeft: 12 },
   step: { gap: 4 },
-  stepLabel: { fontSize: 12, fontWeight: '600', lineHeight: 16 },
+  stepLabel: { fontSize: 12, fontWeight: "600", lineHeight: 16 },
   disclosure: { gap: 4 },
   disclosureHeader: {
     minHeight: 44,
     borderRadius: 8,
-    flexDirection: 'row',
-    alignItems: 'center',
+    flexDirection: "row",
+    alignItems: "center",
     gap: 7,
     paddingHorizontal: 6,
     paddingVertical: 7,
   },
-  disclosureChevron: { width: 14, fontSize: 18, lineHeight: 20, textAlign: 'center' },
-  disclosureIcon: { width: 15, fontSize: 16, lineHeight: 18, textAlign: 'center' },
+  disclosureChevron: { width: 14, fontSize: 18, lineHeight: 20, textAlign: "center" },
+  disclosureIcon: { width: 15, fontSize: 16, lineHeight: 18, textAlign: "center" },
   disclosureTitle: { flexShrink: 0, fontSize: 14, lineHeight: 19 },
   disclosurePreview: { minWidth: 0, flex: 1, fontSize: 13, lineHeight: 18 },
   disclosureBody: { marginLeft: 42, paddingBottom: 6 },
@@ -2043,34 +2043,34 @@ const styles = StyleSheet.create({
   },
   activityDisclosureHeader: {
     minHeight: 44,
-    flexDirection: 'row',
-    alignItems: 'center',
+    flexDirection: "row",
+    alignItems: "center",
     gap: 7,
     paddingVertical: 6,
   },
-  activityDisclosureChevron: { width: 14, fontSize: 18, lineHeight: 20, textAlign: 'center' },
+  activityDisclosureChevron: { width: 14, fontSize: 18, lineHeight: 20, textAlign: "center" },
   activityStatusDot: { width: 6, height: 6, borderRadius: 999 },
-  activityDisclosureTitle: { minWidth: 0, flexShrink: 1, fontSize: 13, fontWeight: '600' },
+  activityDisclosureTitle: { minWidth: 0, flexShrink: 1, fontSize: 13, fontWeight: "600" },
   activityDisclosurePreview: { minWidth: 0, flex: 1, fontSize: 13, lineHeight: 18 },
-  activityDisclosureStatus: { flexShrink: 0, fontSize: 11, fontWeight: '600', lineHeight: 15 },
+  activityDisclosureStatus: { flexShrink: 0, fontSize: 11, fontWeight: "600", lineHeight: 15 },
   activityDisclosureBody: { marginLeft: 27, paddingBottom: 7, paddingRight: 6 },
   notice: {
     borderRadius: 10,
     borderWidth: StyleSheet.hairlineWidth,
-    flexDirection: 'row',
-    alignItems: 'flex-start',
+    flexDirection: "row",
+    alignItems: "flex-start",
     gap: 10,
     paddingHorizontal: 13,
     paddingVertical: 11,
   },
-  noticeIcon: { width: 16, fontSize: 17, fontWeight: '800', lineHeight: 20, textAlign: 'center' },
+  noticeIcon: { width: 16, fontSize: 17, fontWeight: "800", lineHeight: 20, textAlign: "center" },
   noticeContent: { minWidth: 0, flex: 1, gap: 7 },
   noticeDetails: { gap: 6 },
-  noticeAction: { fontSize: 12, fontWeight: '700', lineHeight: 17 },
-  noticeLink: { minHeight: 44, justifyContent: 'center', paddingHorizontal: 2 },
-  sessionStatus: { flexDirection: 'row', alignItems: 'center', gap: 10 },
+  noticeAction: { fontSize: 12, fontWeight: "700", lineHeight: 17 },
+  noticeLink: { minHeight: 44, justifyContent: "center", paddingHorizontal: 2 },
+  sessionStatus: { flexDirection: "row", alignItems: "center", gap: 10 },
   sessionStatusRule: { height: StyleSheet.hairlineWidth, flex: 1 },
-  sessionStatusLabel: { flexDirection: 'row', alignItems: 'center', gap: 6 },
+  sessionStatusLabel: { flexDirection: "row", alignItems: "center", gap: 6 },
   sessionStatusDot: { width: 5, height: 5, borderRadius: 999 },
   sessionStatusText: { fontSize: 11, lineHeight: 15 },
   turnGroup: { gap: 8 },
@@ -2078,41 +2078,41 @@ const styles = StyleSheet.create({
     minHeight: 48,
     borderRadius: 999,
     borderWidth: StyleSheet.hairlineWidth,
-    flexDirection: 'row',
-    alignItems: 'center',
+    flexDirection: "row",
+    alignItems: "center",
     gap: 7,
     paddingHorizontal: 12,
   },
-  turnSummaryText: { flex: 1, fontSize: 13, fontWeight: '600' },
-  turnChevron: { width: 13, fontSize: 19, fontWeight: '500', textAlign: 'center' },
-  turnOutcome: { width: 14, fontSize: 13, fontWeight: '800', textAlign: 'center' },
-  turnDuration: { fontSize: 12, fontVariant: ['tabular-nums'] },
+  turnSummaryText: { flex: 1, fontSize: 13, fontWeight: "600" },
+  turnChevron: { width: 13, fontSize: 19, fontWeight: "500", textAlign: "center" },
+  turnOutcome: { width: 14, fontSize: 13, fontWeight: "800", textAlign: "center" },
+  turnDuration: { fontSize: 12, fontVariant: ["tabular-nums"] },
   turnRail: { borderLeftWidth: 2, gap: 12, marginLeft: 8, paddingLeft: 12 },
-  cardTitle: { fontSize: 14, fontWeight: '700', lineHeight: 19 },
+  cardTitle: { fontSize: 14, fontWeight: "700", lineHeight: 19 },
   secondaryText: { fontSize: 14, lineHeight: 20 },
   helpText: { fontSize: 12, lineHeight: 17 },
   codeText: {
-    fontFamily: Platform.select({ ios: 'Menlo', android: 'monospace' }),
+    fontFamily: Platform.select({ ios: "Menlo", android: "monospace" }),
     fontSize: 12,
     lineHeight: 17,
   },
   approvalOverlay: {
-    position: 'absolute',
+    position: "absolute",
     left: 0,
     right: 0,
     bottom: 12,
-    alignItems: 'center',
+    alignItems: "center",
     paddingHorizontal: 16,
   },
   approvalSurface: {
-    width: '100%',
+    width: "100%",
     maxWidth: 760,
     borderRadius: 16,
     borderWidth: 1,
     padding: 12,
     gap: 10,
     elevation: 8,
-    shadowColor: '#000000',
+    shadowColor: "#000000",
     shadowOffset: { width: 0, height: 10 },
     shadowOpacity: 0.16,
     shadowRadius: 18,
@@ -2124,51 +2124,51 @@ const styles = StyleSheet.create({
   humanInputWorkspaceExpanded: { flex: 1, minHeight: 0 },
   humanInputDisclosure: {
     minHeight: 44,
-    flexDirection: 'row',
-    alignItems: 'center',
+    flexDirection: "row",
+    alignItems: "center",
     gap: 7,
     paddingHorizontal: 12,
     paddingVertical: 7,
   },
-  humanInputDisclosureTitle: { flexShrink: 0, fontSize: 14, fontWeight: '600', lineHeight: 19 },
+  humanInputDisclosureTitle: { flexShrink: 0, fontSize: 14, fontWeight: "600", lineHeight: 19 },
   humanInputWorkspaceScroll: { flex: 1, minHeight: 0 },
   humanInputWorkspaceBody: { gap: 14, paddingHorizontal: 12, paddingBottom: 16 },
   actionSurfaces: { gap: 14, paddingHorizontal: 12, paddingVertical: 8 },
   actionGroup: { gap: 8 },
-  actionTitle: { fontSize: 15, fontWeight: '700' },
+  actionTitle: { fontSize: 15, fontWeight: "700" },
   actionCard: { borderRadius: 14, borderWidth: 1, padding: 12, gap: 10 },
   queueSurface: {
-    overflow: 'hidden',
+    overflow: "hidden",
     borderRadius: 12,
     borderWidth: StyleSheet.hairlineWidth,
   },
   queueDisclosure: {
     minHeight: 44,
-    flexDirection: 'row',
-    alignItems: 'center',
+    flexDirection: "row",
+    alignItems: "center",
     gap: 8,
     paddingHorizontal: 12,
     paddingVertical: 8,
   },
-  queueChevron: { width: 12, fontSize: 18, lineHeight: 20, textAlign: 'center' },
-  queueTitle: { flexShrink: 0, fontSize: 13, fontWeight: '600' },
+  queueChevron: { width: 12, fontSize: 18, lineHeight: 20, textAlign: "center" },
+  queueTitle: { flexShrink: 0, fontSize: 13, fontWeight: "600" },
   queuePreview: { minWidth: 0, flex: 1, fontSize: 13 },
   queueRow: { borderTopWidth: StyleSheet.hairlineWidth, padding: 12, gap: 9 },
   queuePrompt: { fontSize: 14, lineHeight: 19 },
-  queueActions: { flexDirection: 'row', alignItems: 'center', flexWrap: 'wrap', gap: 6 },
-  buttonRow: { flexDirection: 'row', alignItems: 'center', justifyContent: 'flex-end', gap: 8 },
-  buttonWrap: { flexDirection: 'row', alignItems: 'center', flexWrap: 'wrap', gap: 6 },
+  queueActions: { flexDirection: "row", alignItems: "center", flexWrap: "wrap", gap: 6 },
+  buttonRow: { flexDirection: "row", alignItems: "center", justifyContent: "flex-end", gap: 8 },
+  buttonWrap: { flexDirection: "row", alignItems: "center", flexWrap: "wrap", gap: 6 },
   button: {
     minHeight: 48,
     minWidth: 48,
     borderRadius: 11,
     borderWidth: 1,
-    alignItems: 'center',
-    justifyContent: 'center',
+    alignItems: "center",
+    justifyContent: "center",
     paddingHorizontal: 12,
     paddingVertical: 8,
   },
-  buttonText: { fontSize: 13, fontWeight: '700' },
+  buttonText: { fontSize: 13, fontWeight: "700" },
   compactButton: {
     minHeight: 36,
     minWidth: 0,
@@ -2186,19 +2186,19 @@ const styles = StyleSheet.create({
     paddingHorizontal: 12,
     paddingVertical: 10,
     fontSize: 15,
-    textAlignVertical: 'top',
+    textAlignVertical: "top",
   },
   optionList: { gap: 7 },
   option: {
     minHeight: 48,
     borderWidth: 1,
     borderRadius: 11,
-    justifyContent: 'center',
+    justifyContent: "center",
     paddingHorizontal: 12,
     paddingVertical: 9,
   },
-  optionLabel: { fontSize: 14, fontWeight: '600' },
-  otherOptionToggle: { minHeight: 48, justifyContent: 'center' },
+  optionLabel: { fontSize: 14, fontWeight: "600" },
+  otherOptionToggle: { minHeight: 48, justifyContent: "center" },
   otherInput: {
     minHeight: 48,
     borderWidth: 1,
@@ -2217,18 +2217,18 @@ const styles = StyleSheet.create({
     padding: 9,
     gap: 4,
   },
-  attachmentName: { fontSize: 13, fontWeight: '600' },
+  attachmentName: { fontSize: 13, fontWeight: "600" },
   composerDock: { paddingHorizontal: 12, paddingTop: 5, paddingBottom: 8, gap: 5 },
   composerContainer: {
-    width: '100%',
+    width: "100%",
     maxWidth: 820,
-    alignSelf: 'center',
+    alignSelf: "center",
     borderRadius: 28,
     borderWidth: 1,
     padding: 5,
     gap: 4,
   },
-  composerRow: { minHeight: 40, flexDirection: 'row', alignItems: 'flex-end' },
+  composerRow: { minHeight: 40, flexDirection: "row", alignItems: "flex-end" },
   composerStack: { gap: 8 },
   composerInput: {
     minWidth: 0,
@@ -2239,13 +2239,13 @@ const styles = StyleSheet.create({
     paddingVertical: 9,
     fontSize: 16,
     lineHeight: 22,
-    textAlignVertical: 'top',
+    textAlignVertical: "top",
   },
   composerToolbar: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    justifyContent: 'space-between',
+    flexDirection: "row",
+    alignItems: "center",
+    justifyContent: "space-between",
     gap: 8,
   },
   draftConflict: { borderRadius: 10, padding: 8, gap: 6 },
-})
+});

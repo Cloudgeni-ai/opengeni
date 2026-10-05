@@ -14,7 +14,18 @@ type Attention =
   | { kind: "question"; request: PendingHumanInputRequest };
 
 function approvalSummary(approval: PendingApproval): string | null {
-  return toolDetail({ kind: "tool-call", id: approval.id, turnId: null, callId: null, name: approval.name, arguments: approval.arguments, output: null, raw: null, status: "running", occurredAt: "" });
+  return toolDetail({
+    kind: "tool-call",
+    id: approval.id,
+    turnId: null,
+    callId: null,
+    name: approval.name,
+    arguments: approval.arguments,
+    output: null,
+    raw: null,
+    status: "running",
+    occurredAt: "",
+  });
 }
 
 /**
@@ -62,33 +73,87 @@ export function AgentAttentionTray(props: {
       }}
     >
       <View style={{ flexDirection: "row", alignItems: "center", gap: 8 }}>
-        <AgentIcon color={theme.colors.attention} name={current.kind === "approval" ? "alert" : "question"} size={15} />
-        <Text style={{ flex: 1, color: theme.colors.attention, fontSize: theme.type.small, fontWeight: "600" }}>
+        <AgentIcon
+          color={theme.colors.attention}
+          name={current.kind === "approval" ? "alert" : "question"}
+          size={15}
+        />
+        <Text
+          style={{
+            flex: 1,
+            color: theme.colors.attention,
+            fontSize: theme.type.small,
+            fontWeight: "600",
+          }}
+        >
           {current.kind === "approval" ? "Approve to continue" : "Answer to continue"}
         </Text>
-        {items.length > 1 ? <Text style={{ color: theme.colors.textFaint, fontSize: theme.type.small }}>1 of {items.length}</Text> : null}
+        {items.length > 1 ? (
+          <Text style={{ color: theme.colors.textFaint, fontSize: theme.type.small }}>
+            1 of {items.length}
+          </Text>
+        ) : null}
       </View>
       {current.kind === "approval" ? (
         <>
           <View>
-            <Text style={{ color: theme.colors.text, fontSize: theme.type.body, fontWeight: theme.type.weightStrong }}>
+            <Text
+              style={{
+                color: theme.colors.text,
+                fontSize: theme.type.body,
+                fontWeight: theme.type.weightStrong,
+              }}
+            >
               {toolDisplayName(current.approval.name, current.approval.display)}
             </Text>
             {approvalSummary(current.approval) ? (
-              <Text numberOfLines={2} style={{ marginTop: 2, color: theme.colors.textMuted, fontSize: theme.type.small, lineHeight: theme.type.smallLine }}>
+              <Text
+                numberOfLines={2}
+                style={{
+                  marginTop: 2,
+                  color: theme.colors.textMuted,
+                  fontSize: theme.type.small,
+                  lineHeight: theme.type.smallLine,
+                }}
+              >
                 {approvalSummary(current.approval)}
               </Text>
             ) : null}
           </View>
           <View style={{ flexDirection: "row", gap: 10 }}>
-            <ActionButton flex label="Deny" onPress={() => props.onApproval(current.approval.id, "reject")} theme={theme} variant="secondary" />
-            <ActionButton flex label="Approve" onPress={() => props.onApproval(current.approval.id, "approve")} theme={theme} variant="primary" />
+            <ActionButton
+              flex
+              label="Deny"
+              onPress={() => props.onApproval(current.approval.id, "reject")}
+              theme={theme}
+              variant="secondary"
+            />
+            <ActionButton
+              flex
+              label="Approve"
+              onPress={() => props.onApproval(current.approval.id, "approve")}
+              theme={theme}
+              variant="primary"
+            />
           </View>
         </>
       ) : question ? (
         <>
-          <Text style={{ color: theme.colors.text, fontSize: theme.type.body, fontWeight: theme.type.weightStrong }}>{question.prompt}</Text>
-          <ScrollView contentContainerStyle={{ gap: 8 }} horizontal keyboardShouldPersistTaps="handled" showsHorizontalScrollIndicator={false}>
+          <Text
+            style={{
+              color: theme.colors.text,
+              fontSize: theme.type.body,
+              fontWeight: theme.type.weightStrong,
+            }}
+          >
+            {question.prompt}
+          </Text>
+          <ScrollView
+            contentContainerStyle={{ gap: 8 }}
+            horizontal
+            keyboardShouldPersistTaps="handled"
+            showsHorizontalScrollIndicator={false}
+          >
             {question.options.map((option) => {
               const active = selected.includes(option.id);
               return (
@@ -98,7 +163,11 @@ export function AgentAttentionTray(props: {
                   key={option.id}
                   onPress={() =>
                     setSelected((values) =>
-                      multi ? (values.includes(option.id) ? values.filter((value) => value !== option.id) : [...values, option.id]) : [option.id],
+                      multi
+                        ? values.includes(option.id)
+                          ? values.filter((value) => value !== option.id)
+                          : [...values, option.id]
+                        : [option.id],
                     )
                   }
                   style={{
@@ -109,14 +178,28 @@ export function AgentAttentionTray(props: {
                     backgroundColor: active ? theme.colors.accent : theme.colors.surface,
                   }}
                 >
-                  <Text style={{ color: active ? theme.colors.onAccent : theme.colors.text, fontSize: theme.type.body - 1, fontWeight: "600" }}>{option.label}</Text>
+                  <Text
+                    style={{
+                      color: active ? theme.colors.onAccent : theme.colors.text,
+                      fontSize: theme.type.body - 1,
+                      fontWeight: "600",
+                    }}
+                  >
+                    {option.label}
+                  </Text>
                 </Pressable>
               );
             })}
           </ScrollView>
           <View style={{ flexDirection: "row", gap: 10 }}>
             {current.request.allowSkip ? (
-              <ActionButton flex label="Skip" onPress={() => props.onAnswer(current.request.id, null)} theme={theme} variant="secondary" />
+              <ActionButton
+                flex
+                label="Skip"
+                onPress={() => props.onAnswer(current.request.id, null)}
+                theme={theme}
+                variant="secondary"
+              />
             ) : null}
             <ActionButton
               disabled={selected.length === 0}
