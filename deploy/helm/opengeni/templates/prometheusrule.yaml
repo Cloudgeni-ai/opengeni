@@ -1262,7 +1262,7 @@ spec:
             value: '{{ "{{ printf `%.0f` $value }}" }} process(es)'
             user_impact: 'No user impact; they keep sandboxes alive and cost money.'
             next_step: 'Inspect provider-binding and settlement outcomes; never assume a process exited just because it is old.'
-            description: A completed/failed/cancelled owner still has a physical sandbox process after 15m. Inspect provider-binding, probe, and settlement outcomes; age alone is never exit proof.
+            description: A completed/failed/cancelled owner (or a background command already asked to stop) still has a physical sandbox process after 15m. Running session background commands are session-owned and excluded. Inspect provider-binding, probe, and settlement outcomes; age alone is never exit proof.
         - alert: OpenGeniSandboxesHeldByIdleInteractions
           expr: sum(opengeni:sandbox_leases_interaction_only:fresh_max{idle_bucket=~"2h_6h|gte_6h"}) > 5
           for: 30m
