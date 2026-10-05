@@ -164,6 +164,7 @@ secret:
   # an ExternalSecret. Never commit real secrets in values.
   # OPENGENI_OPENROUTER_API_KEY enables the deployment-managed reviewed
   # OpenRouter catalog. It belongs here, never in config or catalog JSON.
+  # OPENGENI_OPPER_API_KEY likewise enables the reviewed Opper catalog.
   # Google Drive release-readiness configuration is demonstrated in
   # values.google-drive-readiness.example.yaml. When enabled, this Secret must
   # provide OPENGENI_INTEGRATIONS_STATE_SECRET,
