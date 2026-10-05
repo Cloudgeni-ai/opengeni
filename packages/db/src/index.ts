@@ -55206,6 +55206,51 @@ export async function countSessionRecoveryBacklog(
   return counts;
 }
 
+export type SessionRecoveryBacklogStateSummary = {
+  /** Every candidate in this state (the same set countSessionRecoveryBacklog counts). */
+  count: number;
+  /** Candidates still inside the backoff their recovery request recorded. */
+  scheduled: number;
+  /** How long the single oldest candidate has been past its due time; 0 when none is. */
+  oldestOverdueSeconds: number;
+};
+
+/**
+ * Content-free cross-workspace recovery summary (migration 0633). A recovery
+ * is due at its exact attempt's close plus the continueDelayMs recorded on that
+ * attempt's turn.recovery.requested event, so a session sleeping in provider
+ * Retry-After or connectivity backoff is `scheduled`, not overdue.
+ */
+export async function summarizeSessionRecoveryBacklog(
+  db: Database,
+): Promise<Record<SessionRecoveryBacklogState, SessionRecoveryBacklogStateSummary>> {
+  const summary: Record<SessionRecoveryBacklogState, SessionRecoveryBacklogStateSummary> = {
+    quiescence_missing: { count: 0, scheduled: 0, oldestOverdueSeconds: 0 },
+    projection_stale: { count: 0, scheduled: 0, oldestOverdueSeconds: 0 },
+  };
+  const rows = await rawRows<{
+    state: SessionRecoveryBacklogState;
+    count: number | string;
+    scheduled: number | string;
+    oldest_overdue_seconds: number | string;
+  }>(
+    db,
+    sql`
+      select state, count, scheduled, oldest_overdue_seconds
+      from opengeni_private.summarize_session_recovery_backlog()
+    `,
+  );
+  for (const row of rows) {
+    if (!(row.state in summary)) continue;
+    summary[row.state] = {
+      count: Number(row.count),
+      scheduled: Number(row.scheduled),
+      oldestOverdueSeconds: Number(row.oldest_overdue_seconds),
+    };
+  }
+  return summary;
+}
+
 export type ContextCompactionPendingSummary = {
   pendingCount: number;
   oldestStartedAt: Date | null;

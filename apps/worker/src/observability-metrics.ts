@@ -47,9 +47,17 @@ export type TurnTaskQueueStats = {
   tasksAddRate: number;
   tasksDispatchRate: number;
 };
+export type SessionRecoveryBacklogStateSummary = {
+  /** Every durable recovering session in this state with no active attempt. */
+  count: number;
+  /** Of those, sessions still inside the backoff their recovery request recorded. */
+  scheduled: number;
+  /** Seconds the single oldest candidate has been past its recovery due time; 0 when none is. */
+  oldestOverdueSeconds: number;
+};
 export type SessionRecoveryBacklog = {
-  quiescence_missing: number;
-  projection_stale: number;
+  quiescence_missing: SessionRecoveryBacklogStateSummary;
+  projection_stale: SessionRecoveryBacklogStateSummary;
 };
 export type ContextCompactionPendingSummary = {
   pendingCount: number;
@@ -847,14 +855,27 @@ export function startTurnCapacityMonitor(input: {
 
 export function recordSessionRecoveryBacklogGauges(
   observability: Observability,
-  counts: SessionRecoveryBacklog,
+  backlog: SessionRecoveryBacklog,
 ): void {
   for (const state of ["quiescence_missing", "projection_stale"] as const) {
+    const summary = backlog[state];
     observability.setGauge({
       name: "opengeni_session_recovery_backlog",
-      help: "Current durable recovering-session obligations with no active attempt, by bounded reconciliation state.",
+      help: "Current durable recovering-session obligations with no active attempt, by bounded reconciliation state. Includes sessions legitimately sleeping in their recorded recovery backoff.",
       labels: { state },
-      value: nonnegativeFinite(counts[state]),
+      value: nonnegativeFinite(summary.count),
+    });
+    observability.setGauge({
+      name: "opengeni_session_recovery_scheduled",
+      help: "Durable recovering sessions still inside the recovery backoff (provider Retry-After or connectivity pacing) their recovery request recorded, by bounded reconciliation state.",
+      labels: { state },
+      value: nonnegativeFinite(summary.scheduled),
+    });
+    observability.setGauge({
+      name: "opengeni_session_recovery_oldest_overdue_seconds",
+      help: "Seconds the single oldest durable recovering session with no active attempt has been past its recovery due time, by bounded reconciliation state; 0 when none is overdue.",
+      labels: { state },
+      value: nonnegativeFinite(summary.oldestOverdueSeconds),
     });
   }
 }
@@ -898,8 +919,8 @@ export function startSessionRecoveryMonitor(input: {
     if (stopped || running) return;
     running = input
       .read()
-      .then((counts) => {
-        recordSessionRecoveryBacklogGauges(input.observability, counts);
+      .then((backlog) => {
+        recordSessionRecoveryBacklogGauges(input.observability, backlog);
         lastSuccessAt = now();
         lastReadSucceeded = true;
         recordStatus();

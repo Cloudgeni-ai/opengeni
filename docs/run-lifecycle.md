@@ -1098,6 +1098,28 @@ banner displays `providerRecoveryCount` only as the final consecutive automatic
 retry streak, never as the total number of recoveries or failed turns. Missing
 historical counts remain unknown. Two indexed latest-event reads select this
 projection; detail polling never aggregates the session's lifetime event log.
+
+**Durable recovery observability.** The control worker reads one content-free,
+cross-workspace aggregate per minute,
+`opengeni_private.summarize_session_recovery_backlog()` (migration 0633; the
+older `count_session_recovery_backlog()` projects it), over sessions whose
+active turn is `recovering` with no active attempt and whose latest attempt
+closed `interrupted_recoverable`. It exports three gauges per bounded `state`
+(`quiescence_missing`, `projection_stale`): `opengeni_session_recovery_backlog`
+counts every such session, including ones legitimately sleeping in backoff;
+`opengeni_session_recovery_scheduled` counts those still inside the backoff
+their recovery request recorded; and
+`opengeni_session_recovery_oldest_overdue_seconds` is how long the single
+oldest one has been past its due time. A recovery is due at its exact attempt's
+close plus the `continueDelayMs` recorded on that attempt's
+`turn.recovery.requested` event (provider Retry-After floor, connectivity
+pacing, or zero for worker shutdown/loss); `quiescence_missing` is due at the
+close because the closing activity owes its receipt immediately. An effectively
+paused, already quiesced session is excluded until Resume. The critical
+`OpenGeniSessionRecoveryBacklogStale` alert fires only when one session stays
+more than 10 minutes past due (overdue > 5 min held for 5 min), so sustained
+429s that always keep some session in backoff do not page. Never alert on the
+backlog count alone.
 The initial session status and replay cursor come from one SQL statement
 snapshot, so a concurrent revival cannot pair an old failed status with a cursor
 that skips the revival event. Diagnostic text is decoded through the lossless

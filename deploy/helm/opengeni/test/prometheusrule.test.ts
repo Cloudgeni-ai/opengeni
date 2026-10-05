@@ -546,18 +546,27 @@ describe("turn-capacity Prometheus alerts", () => {
     expect(block).toContain("for: 2m");
   });
 
-  test("alerts on durable recovery backlog only while its global projection is fresh", async () => {
+  test("alerts on one overdue durable recovery only while its global projection is fresh", async () => {
     const template = await readFile(
       new URL("../templates/prometheusrule.yaml", import.meta.url),
       "utf8",
     );
     const backlog = alertExpression(template, "OpenGeniSessionRecoveryBacklogStale");
     const stale = alertExpression(template, "OpenGeniSessionRecoveryMonitorStale");
+    const block = ruleBlock(template, "alert", "OpenGeniSessionRecoveryBacklogStale");
 
-    expect(backlog).toContain("opengeni_session_recovery_backlog");
+    // The age of the single oldest session past its recorded backoff, never
+    // the backlog size: sessions sleeping in Retry-After/connectivity backoff
+    // are scheduled, and sustained 429s must not page.
+    expect(backlog).toContain("opengeni_session_recovery_oldest_overdue_seconds");
+    expect(backlog).not.toContain("opengeni_session_recovery_backlog");
+    expect(backlog).not.toContain("opengeni_session_recovery_scheduled");
+    expect(backlog.trimEnd()).toEndWith(") > 300");
+    expect(block).toContain("for: 5m");
+    expect(block).toContain("more than 10 minutes past its recovery due time");
     expect(backlog).toContain("opengeni_session_recovery_monitor_fresh");
     expect(backlog.split(SCRAPE_IDENTITY)).toHaveLength(3);
-    expect(backlog.trimStart()).toStartWith("max(");
+    expect(backlog.trimStart()).toStartWith("max by (state) (");
     expect(backlog).not.toContain("and on()");
     expect(backlog).toContain('component="worker-control"');
     expect(backlog).not.toMatch(/session_id|workspace_id|attempt_id/);
