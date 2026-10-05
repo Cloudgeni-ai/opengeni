@@ -619,7 +619,9 @@ describe("stock OpenGeniChat behind the default session proxy", () => {
     // Live voice appears once the workspace offers an available voice model.
     expect(chat.browser).toContain(`200 GET /v1/workspaces/${WS}/realtime-model-catalog`);
     expect(
-      chat.container.querySelector("[data-og-conversation-composer] [data-testid='realtime-primary-action']"),
+      chat.container.querySelector(
+        "[data-og-conversation-composer] [data-testid='realtime-primary-action']",
+      ),
     ).not.toBeNull();
 
     // 4. A proxy with a createSession hook and archive on offers both.
