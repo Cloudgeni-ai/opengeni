@@ -227,7 +227,11 @@ disabled tools or grant execution outside the current catalog.
   workspace prefix (migration 0299): every ordinary workspace writer
   holds its `workspaces` row and then reaches `managed_accounts` through the
   account FK check of a row it inserts, so an organization-row `FOR UPDATE` held
-  across workspace acquisition is a deadlock. See
+  across workspace acquisition is a deadlock. The turn claim is a reader of
+  membership truth and takes that key with `pg_advisory_xact_lock_shared`, so
+  claims in one organization never serialize each other while every mutator
+  (exclusive) still fences them; a shared holder must never escalate to
+  exclusive in place. See
   `docs/organization-tenancy.md`.
 - Domain/access/billing helpers now live in `@opengeni/core` under `packages/core/src`; `apps/api` routes are HTTP adapters over them.
 - Organization-key policy authority is defined in `packages/contracts/src/organization-access.ts`. Migration `0600_organization_api_key_access_policy.sql` is a drained maintenance cutover: stop all API/workers, migrate with the complete runtime-login list, provision roles, and start only policy-aware binaries. Legacy keys retain their stored permissions and wildcard; explicit policies use literal permissions and live all/selected shared-workspace scope. Personal workspaces remain excluded from organization service authority.
