@@ -10,7 +10,7 @@ expect(parsed.errors).toEqual([]);
 const addedPhases = {
   workspace_read: "requireWorkspace",
   model_catalog_initial: "resolveWorkspaceModelBoundarySettings",
-  default_model: "resolveDefaultSessionModel",
+  default_model: "resolveDefaultSessionModelWithSelectionInput",
   model_catalog_effective: "resolveWorkspaceModelBoundarySettings",
   capability_settings: "settingsWithEnabledCapabilityMcpServers",
   initiator_freeze: "withWorkspaceSessionActivityRls",
@@ -51,7 +51,7 @@ function exactCall(node: any, values: object) {
       parentSession, inheritedModel, inheritedPersonalConnectionDelegations,
       creationInitiator, frozenCreationInitiator, model, sessionMetadata,
       frozenCreatedByContext, beforeCreateCommit, requireWorkspace,
-      resolveWorkspaceModelBoundarySettings, resolveDefaultSessionModel,
+      resolveWorkspaceModelBoundarySettings, resolveDefaultSessionModelWithSelectionInput,
       settingsWithEnabledCapabilityMcpServers, withWorkspaceSessionActivityRls,
       frozenInitiatorForCommandActor, initiatingHumanForAllowance, requireLimit,
       createSessionWithIdempotencyKeyResult, createSession } = values;

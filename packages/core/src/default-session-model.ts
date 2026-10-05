@@ -555,18 +555,48 @@ export async function resolveDefaultSessionModel(
   settings: Settings,
   context: WorkspaceModelSelectionContext & { workspaceSettings?: unknown },
 ): Promise<DefaultModelSelection> {
+  return (await resolveDefaultSessionModelWithSelectionInput(db, settings, context)).selection;
+}
+
+/**
+ * `resolveDefaultSessionModel` plus the exact selection input it read, so a
+ * caller that must also admit the resolved default for the SAME subject,
+ * settings and (absent) frozen authorities can reuse that read through
+ * `freshAdmissionSelectionsFromInput` instead of loading the catalog again.
+ */
+export async function resolveDefaultSessionModelWithSelectionInput(
+  db: Database,
+  settings: Settings,
+  context: WorkspaceModelSelectionContext & { workspaceSettings?: unknown },
+): Promise<{ selection: DefaultModelSelection; input: WorkspaceModelSelectionInput }> {
   const [selectionInput, workspaceSettings] = await Promise.all([
     loadWorkspaceModelSelectionInput(db, settings, context),
     context.workspaceSettings !== undefined
       ? Promise.resolve(context.workspaceSettings)
       : getWorkspace(db, context.workspaceId).then((workspace) => workspace?.settings ?? {}),
   ]);
-  return await resolveDefaultSessionModelForSelections(db, {
-    settings,
-    accountId: context.accountId,
-    workspaceSettings,
-    selections: resolveWorkspaceModelSelection(selectionInput),
-  });
+  return {
+    selection: await resolveDefaultSessionModelForSelections(db, {
+      settings,
+      accountId: context.accountId,
+      workspaceSettings,
+      selections: resolveWorkspaceModelSelection(selectionInput),
+    }),
+    input: selectionInput,
+  };
+}
+
+/**
+ * The selections `resolveCallerWorkspaceModelSelections` computes for fresh
+ * admission, derived from an input already loaded for the same caller context.
+ * Admission never consumes live availability observations (a health hint must
+ * not change the billing rail), so they are dropped exactly as
+ * `observeAvailability: false` would have omitted them.
+ */
+export function freshAdmissionSelectionsFromInput(
+  input: WorkspaceModelSelectionInput,
+): WorkspaceModelSelection[] {
+  return resolveWorkspaceModelSelection({ ...input, observations: {} });
 }
 
 /**

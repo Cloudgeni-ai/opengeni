@@ -6,9 +6,11 @@ import { requireLimit } from "../src/billing/limits";
 import * as codexAvailability from "../src/codex-model-availability";
 import {
   admissibleWorkspaceModel,
+  freshAdmissionSelectionsFromInput,
   loadWorkspaceModelSelectionInput,
   resolveCallerWorkspaceModelSelections,
   resolveDefaultSessionModel,
+  resolveDefaultSessionModelWithSelectionInput,
   selectDefaultSessionModel,
 } from "../src/default-session-model";
 
@@ -144,6 +146,37 @@ describe("fresh model admission versus live discovery", () => {
     expect(
       await resolveDefaultSessionModel(db, settings, { ...context, workspaceSettings: {} }),
     ).toMatchObject({ model: "codex/gpt-6-sol", source: "subscription" });
+    expect(availability).toHaveBeenCalledTimes(2);
+  });
+
+  test("a resolved default's input yields exactly the stable admission selections", async () => {
+    // Live observations steer the default but must never reach admission.
+    availability.mockResolvedValue(
+      Object.fromEntries(
+        configuredModels(withCodexCatalogProvider(settings))
+          .filter((model) => model.id.startsWith("codex/"))
+          .map((model) => [
+            model.definitionVersion,
+            {
+              status: "unavailable",
+              reason: "not_entitled",
+              checkedAt: "2026-10-01T00:00:00.000Z",
+            },
+          ]),
+      ),
+    );
+    const resolved = await resolveDefaultSessionModelWithSelectionInput(db, settings, {
+      ...context,
+      workspaceSettings: {},
+    });
+    expect(resolved.selection).toEqual(
+      await resolveDefaultSessionModel(db, settings, { ...context, workspaceSettings: {} }),
+    );
+    const reused = freshAdmissionSelectionsFromInput(resolved.input);
+    const independent = await resolveCallerWorkspaceModelSelections(db, settings, context);
+    expect(reused).toEqual(independent);
+    expect(admissibleWorkspaceModel(reused, "codex/gpt-6-sol")?.model.id).toBe("codex/gpt-6-sol");
+    // The reused input was read once, with observations, by the default only.
     expect(availability).toHaveBeenCalledTimes(2);
   });
 

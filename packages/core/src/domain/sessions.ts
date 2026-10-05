@@ -226,8 +226,9 @@ import {
   workspaceCustomModelReference,
 } from "../model-catalog";
 import {
-  resolveDefaultSessionModel,
+  resolveDefaultSessionModelWithSelectionInput,
   resolveCallerWorkspaceModelSelections,
+  freshAdmissionSelectionsFromInput,
   admissibleWorkspaceModel,
 } from "../default-session-model";
 import { settingsWithEnabledCapabilityMcpServers } from "./capabilities";
@@ -2702,19 +2703,31 @@ async function createSessionForRequestInFileScope(
   // default). Children still inherit their calling turn, never this default.
   // A keyed retry of a still-uninitialized shell keeps the default that shell
   // already persisted instead of resolving again.
-  const resolvedDefault =
+  const resolvedDefaultRead =
     parentSession || payload.model !== undefined
       ? null
       : retainedKeyedShellModel !== null && retainedKeyedShellReasoningEffort !== null
-        ? { model: retainedKeyedShellModel, reasoningEffort: retainedKeyedShellReasoningEffort }
+        ? null
         : await measureSessionStartPhase(unresolvedDeps.observability, "default_model", () =>
-            resolveDefaultSessionModel(db, settings, {
+            resolveDefaultSessionModelWithSelectionInput(db, settings, {
               accountId: grant.accountId,
               workspaceId,
               subjectId: grant.subjectId,
               workspaceSettings: workspace.settings,
             }),
           );
+  const resolvedDefault =
+    parentSession || payload.model !== undefined
+      ? null
+      : retainedKeyedShellModel !== null && retainedKeyedShellReasoningEffort !== null
+        ? { model: retainedKeyedShellModel, reasoningEffort: retainedKeyedShellReasoningEffort }
+        : resolvedDefaultRead!.selection;
+  // The selection input that fresh default was chosen from, kept only so
+  // admission below can reuse that exact read when its caller context is
+  // provably identical (same settings object and subject, no frozen authority).
+  const defaultSelectionRead = resolvedDefaultRead
+    ? { settings, subjectId: grant.subjectId, input: resolvedDefaultRead.input }
+    : null;
   const inheritedModel =
     parentCallingTurn?.model ??
     parentSession?.model ??
@@ -3117,17 +3130,29 @@ async function createSessionForRequestInFileScope(
     // Direct creation is a fresh model selection. Child inheritance and keyed
     // repair preserve the existing accepted-model/authority rules.
     if (retainedKeyedShellModel === null && !parentSession) {
-      const selections = await resolveCallerWorkspaceModelSelections(db, settings, {
-        accountId: grant.accountId,
-        workspaceId,
-        subjectId: personalResourceSubjectId ?? grant.subjectId,
-        ...(xaiProviderAccountAuthoritySnapshot
-          ? { xaiAuthoritySnapshot: xaiProviderAccountAuthoritySnapshot }
-          : {}),
-        ...(claudeProviderAccountAuthoritySnapshot
-          ? { claudeAuthoritySnapshot: claudeProviderAccountAuthoritySnapshot }
-          : {}),
-      });
+      const admissionSubjectId = personalResourceSubjectId ?? grant.subjectId;
+      // A default resolved moments ago for this exact caller context already
+      // read the same admission input; re-reading it only repeated the catalog
+      // load. Any difference in settings, subject, or frozen authority keeps
+      // the independent fresh read.
+      const selections =
+        defaultSelectionRead !== null &&
+        defaultSelectionRead.settings === settings &&
+        defaultSelectionRead.subjectId === admissionSubjectId &&
+        !xaiProviderAccountAuthoritySnapshot &&
+        !claudeProviderAccountAuthoritySnapshot
+          ? freshAdmissionSelectionsFromInput(defaultSelectionRead.input)
+          : await resolveCallerWorkspaceModelSelections(db, settings, {
+              accountId: grant.accountId,
+              workspaceId,
+              subjectId: admissionSubjectId,
+              ...(xaiProviderAccountAuthoritySnapshot
+                ? { xaiAuthoritySnapshot: xaiProviderAccountAuthoritySnapshot }
+                : {}),
+              ...(claudeProviderAccountAuthoritySnapshot
+                ? { claudeAuthoritySnapshot: claudeProviderAccountAuthoritySnapshot }
+                : {}),
+            });
       if (!admissibleWorkspaceModel(selections, model)) {
         throw new HTTPException(422, { message: `model is not selectable: ${model}` });
       }
