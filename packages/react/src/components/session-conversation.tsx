@@ -13,6 +13,7 @@ import {
   useMemo,
   useRef,
   useState,
+  type ComponentProps,
   type CSSProperties,
 } from "react";
 import type { SiteSnapshotClient } from "./artifacts/chat-interactive-block";
@@ -26,6 +27,7 @@ import { useComposer } from "../hooks/use-composer";
 import { useHumanInputRequests } from "../hooks/use-human-input";
 import { useFileAttachments } from "../hooks/use-file-attachments";
 import { useSessionControl } from "../hooks/use-session-control";
+import { useGoal, type UseGoalOptions } from "../hooks/use-goal";
 import { useClientConfigFlags } from "../hooks/use-client-config-flags";
 import {
   createSessionRetainedScreenshotLoader,
@@ -91,6 +93,12 @@ export type SessionConversationProps = ClientOverride &
      * after `resolveLink`.
      */
     onOpenArtifact?: ((target: OpenGeniViewerTarget) => void) | undefined;
+    /**
+     * Open another session the conversation points at: a sub-agent's chat from
+     * its worker card or a child update. `OpenGeniChat` opens it in place;
+     * without it those entries are not links.
+     */
+    onOpenSession?: ((sessionId: string) => void) | undefined;
     /**
      * Inline previews for assistant `opengeni-site` / `opengeni-html` fences.
      * Defaults to the OpenGeni preview. Behind a session proxy without its
@@ -195,6 +203,7 @@ function Conversation({
   renderMessageText,
   resolveLink,
   onOpenArtifact,
+  onOpenSession,
   renderInteractiveBlock,
   toolRegistry,
   renderAllowanceExhausted,
@@ -369,6 +378,7 @@ function Conversation({
           className="isolate min-h-0 flex-1 overflow-hidden"
           {...(toolRegistry ? { toolRegistry } : {})}
           {...retainedLoaders}
+          {...(onOpenSession ? { onOpenSession } : {})}
           events={feed.events}
           items={conversationTimeline(feed.timeline, queue, composer)}
           turnSummary={{ rolling: true }}
@@ -427,18 +437,24 @@ function Conversation({
               autoFocus={false}
               decisionButtons
             />
-            {terminal ? (
-              <SessionChrome queue={queue} sessionStatus={status} readOnly />
-            ) : (
-              <SessionChrome
-                queue={queue}
-                composer={composer}
-                sessionStatus={status}
-                onComposerFocus={() =>
-                  region.current?.querySelector<HTMLTextAreaElement>("textarea")?.focus()
-                }
-              />
-            )}
+            <ConversationChrome
+              sessionId={sessionId}
+              client={context.client}
+              workspaceId={context.workspaceId}
+              events={feed.events}
+              chrome={
+                terminal
+                  ? { queue, sessionStatus: status, readOnly: true, onOpenSession }
+                  : {
+                      queue,
+                      composer,
+                      sessionStatus: status,
+                      onOpenSession,
+                      onComposerFocus: () =>
+                        region.current?.querySelector<HTMLTextAreaElement>("textarea")?.focus(),
+                    }
+              }
+            />
           </div>
           <div
             className="relative z-20 mx-auto w-full max-w-3xl shrink-0"
@@ -490,6 +506,33 @@ function Conversation({
       )}
     </div>
   );
+}
+
+type ConversationChromeProps = {
+  sessionId: string;
+  client: unknown;
+  workspaceId: string;
+  events: UseGoalOptions["events"];
+  chrome: Omit<ComponentProps<typeof SessionChrome>, "goal">;
+};
+
+/** Session chrome with the goal pill and its Pause/Resume/Clear when the client can reach goals. */
+function ConversationChrome(props: ConversationChromeProps) {
+  const goals = props.client as Partial<Record<"getGoal" | "updateGoal" | "deleteGoal", unknown>>;
+  const canReachGoals =
+    typeof goals.getGoal === "function" &&
+    typeof goals.updateGoal === "function" &&
+    typeof goals.deleteGoal === "function";
+  return canReachGoals ? <GoalChrome {...props} /> : <SessionChrome {...props.chrome} />;
+}
+
+function GoalChrome({ sessionId, client, workspaceId, events, chrome }: ConversationChromeProps) {
+  const goal = useGoal(sessionId, {
+    client: client as UseGoalOptions["client"],
+    workspaceId,
+    events,
+  });
+  return <SessionChrome {...chrome} goal={goal} />;
 }
 
 const LazyChatInteractiveBlock = lazy(() =>

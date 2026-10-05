@@ -387,10 +387,11 @@ export function createSessionProxyHandler(
   return async (request) => {
     try {
       const method = request.method;
-      if (!["GET", "POST", "PUT", "PATCH"].includes(method)) {
+      // DELETE serves exactly one route, clearing a session goal.
+      if (!["GET", "POST", "PUT", "PATCH", "DELETE"].includes(method)) {
         return new Response(null, {
           status: 405,
-          headers: { Allow: "GET, POST, PUT, PATCH" },
+          headers: { Allow: "GET, POST, PUT, PATCH, DELETE" },
         });
       }
       const resolved = await options.resolve(request);
@@ -960,6 +961,24 @@ export function createSessionProxyHandler(
         }
         case "GET human-input-requests":
           return await read(`${session}/human-input-requests`);
+        case "GET goal":
+          return await read(`${session}/goal`);
+        case "PATCH goal": {
+          // Pause and resume only: the objective, limits and completion stay
+          // with the agent and the product's own server. A browser rationale is
+          // dropped, so end-user text never reaches the goal record.
+          const status = body?.status;
+          if (
+            (status !== "paused" && status !== "active") ||
+            Object.keys(body ?? {}).some((key) => key !== "status" && key !== "rationale")
+          ) {
+            reject(403, "goal_update_not_allowed", "Only { status: paused | active } is available.");
+          }
+          return json(await client.requestJson("PATCH", `${session}/goal`, { status }));
+        }
+        case "DELETE goal":
+          await client.deleteGoal(workspaceId, sessionId);
+          return new Response(null, { status: 204 });
         case "POST fs/read":
         case "POST fs/read-workspace": {
           if (!sandboxFilesEnabled) return errorJson(404, "route_not_allowed", "Not found.");
