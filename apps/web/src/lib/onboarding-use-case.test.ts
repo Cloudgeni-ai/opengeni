@@ -60,6 +60,8 @@ describe("onboarding use case text", () => {
     expect(withKey).toContain("upload a zip of my project");
     expect(withKey).toContain("my own Git credentials for the repository");
     expect(withKey).toContain("use my own coding agent instead");
+    // An attached project zip is the code: never send the person back to GitHub.
+    expect(withKey).toContain("that is my code: work from them right away");
     expect(withKey).not.toMatch(/ogk_/);
     const withoutKey = developerSetupModelContext({ ...facts, keyInSandbox: false });
     expect(withoutKey).toContain("No API key is attached to this chat.");
