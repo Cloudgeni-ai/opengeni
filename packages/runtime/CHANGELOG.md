@@ -1,5 +1,31 @@
 # @opengeni/runtime
 
+## 1.4.1
+
+### Patch Changes
+
+- 82cd591: Gemini upstream models (any OpenAI-compatible route, e.g. Vercel AI Gateway to Vertex) no longer fail a turn with `400 The referenced name ... in function_response.response does not match to a display_name` when a JSON tool result contains a `$ref` key, such as the parameter schemas returned by `tool_search`. The request-local provider view renames those object keys to `_$ref`; durable history is unchanged.
+- d14de0c: The Modal orphan sweep now reports what it reconciled: running Modal boxes, boxes running without a live lease, and live leases whose box is gone. The worker publishes these as `opengeni_modal_sandbox_inventory{state}`, and Modal deployments alert when unleased boxes or lease-less instances persist for 15 minutes, or when the sweep stops completing a full listing.
+- 55bddfe: A `write_stdin` poll that races the reaper's settlement of an exited background command now returns the durable exit result instead of failing the turn with `sandbox_mutation_output_rejected`. The provider call is still made once and never replayed, and its output stays rejected.
+- Updated dependencies [fe1f64d]
+- Updated dependencies [9145bad]
+- Updated dependencies [be95071]
+- Updated dependencies [1f112d5]
+- Updated dependencies [784e862]
+- Updated dependencies [f290348]
+- Updated dependencies [e852eb7]
+  - @opengeni/codemode@1.4.1
+  - @opengeni/contracts@1.4.1
+  - @opengeni/sdk@1.4.1
+  - @opengeni/config@1.4.1
+  - @opengeni/capabilities@1.4.1
+  - @opengeni/codex@1.4.1
+  - @opengeni/observability@1.4.1
+  - @opengeni/tool-gateway@1.4.1
+  - @opengeni/agent-proto@1.4.1
+  - @opengeni/network@1.4.1
+  - @opengeni/xai-subscription@1.4.1
+
 ## 1.4.0
 
 ### Minor Changes

@@ -1,5 +1,34 @@
 # @opengeni/core
 
+## 1.4.1
+
+### Patch Changes
+
+- eeb73ee: Model admission and workspace catalog resolution read workspace connection metadata, workspace custom models, and organization provider readiness and models with one scoped read per family instead of one per provider. Session creation issues about 20% fewer database statements and transactions.
+- 0674635: Add an unused private native declaration request/data join that owns verified bytes and rechecks current expiry and configuration after the live-origin SQL lock wait. It issues no grant, native context or provider permission.
+- 0674635: Add unused private explicit native configuration sampling and protected equality groundwork; no custody grant, caller or recovery activation.
+- c06d45a: Session responses hydrate the workspace once for the effective tool policy, and the session detail route reads its activity, schedules, and policy context concurrently. Session creation gains named trace spans for replay, resource validation, sandbox environment binding, model admission, and connection freezing.
+- f290348: Signup credits now pay for dictation and live voice like general credits. Admission counts their remainder, each voice charge is allocated to them first, and balances report `coversVoice` on those grants. Other model-scoped promotional credits still do not cover voice.
+- Updated dependencies [fe1f64d]
+- Updated dependencies [9145bad]
+- Updated dependencies [82cd591]
+- Updated dependencies [e6d35b9]
+- Updated dependencies [d14de0c]
+- Updated dependencies [55bddfe]
+- Updated dependencies [f290348]
+- Updated dependencies [aedc3b9]
+  - @opengeni/db@1.4.1
+  - @opengeni/contracts@1.4.1
+  - @opengeni/config@1.4.1
+  - @opengeni/runtime@1.4.1
+  - @opengeni/documents@1.4.1
+  - @opengeni/events@1.4.1
+  - @opengeni/capabilities@1.4.1
+  - @opengeni/codex@1.4.1
+  - @opengeni/observability@1.4.1
+  - @opengeni/storage@1.4.1
+  - @opengeni/network@1.4.1
+
 ## 1.4.0
 
 ### Minor Changes
