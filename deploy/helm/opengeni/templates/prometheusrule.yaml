@@ -214,24 +214,29 @@ spec:
             description: This worker-local signal tracks physical runAgentTurn attempts. Inspect the exact attempt and recovery state; an overlapping replacement is counted independently.
             runbook_url: https://github.com/Cloudgeni-ai/opengeni/blob/main/docs/launch-monitoring.md#alert--first-action
         - alert: OpenGeniSessionRecoveryBacklogStale
+          # One session past its recovery due time, not the backlog size: a
+          # session sleeping in the provider Retry-After or connectivity backoff
+          # its recovery request recorded is scheduled, not overdue, so
+          # sustained 429s that keep some session in backoff stay silent.
+          # Overdue > 5m held for 5m means a single session is >= 10m past due.
           expr: |
-            max(
-              opengeni_session_recovery_backlog{namespace={{ .Release.Namespace | quote }},release={{ .Release.Name | quote }},environment={{ $environment | quote }},component="worker-control"} > 0
+            max by (state) (
+              opengeni_session_recovery_oldest_overdue_seconds{namespace={{ .Release.Namespace | quote }},release={{ .Release.Name | quote }},environment={{ $environment | quote }},component="worker-control"}
               and on(namespace, release, environment, component, instance)
               opengeni_session_recovery_monitor_fresh{namespace={{ .Release.Namespace | quote }},release={{ .Release.Name | quote }},environment={{ $environment | quote }},component="worker-control"} == 1
               and on(namespace, release, environment, component, instance)
               time() - opengeni_session_recovery_monitor_last_success_timestamp_seconds{namespace={{ .Release.Namespace | quote }},release={{ .Release.Name | quote }},environment={{ $environment | quote }},component="worker-control"} < 240
-            ) > 0
-          for: 10m
+            ) > 300
+          for: 5m
           labels:
             severity: critical
           annotations:
-            summary: 'At least one session has been stuck in recovery with no running attempt for more than 10 minutes.'
-            headline: 'Sessions stuck in recovery with nothing running'
-            value: '{{ "{{ printf `%.0f` $value }}" }} sessions stuck'
-            user_impact: 'Affected users see sessions that stay in a recovering state and never continue; their work is saved but stalled.'
-            next_step: 'Escalate to an engineer: check the recovery state in Grafana (projection_stale can be replayed safely; quiescence_missing needs Temporal activity-loss proof first); this does not self-heal.'
-            description: Inspect the bounded state label. quiescence_missing requires exact Temporal activity-loss and writer-settlement proof; projection_stale is safe to replay through the exact idempotent quiescence receipt transaction. A session paused by its own, an ancestor, or its workspace control is not counted as projection_stale until it is resumed.
+            summary: OpenGeni has a durable recovering session with no active attempt more than 10 minutes past its recovery due time
+            description: A recovery is due at its closed attempt plus the backoff its turn.recovery.requested event recorded (provider Retry-After or connectivity pacing); opengeni_session_recovery_scheduled counts sessions still legitimately inside that backoff and never fires this alert. Inspect the bounded state label. quiescence_missing (due at the attempt close) requires exact Temporal activity-loss and writer-settlement proof; projection_stale is safe to replay through the exact idempotent quiescence receipt transaction. A session paused by its own, an ancestor, or its workspace control is not counted as projection_stale until it is resumed.
+            headline: 'A session stuck in recovery with nothing running'
+            value: '{{ "{{ humanizeDuration $value }}" }} past its recovery due time'
+            user_impact: 'The affected user sees a session that stays in a recovering state and never continues; their work is saved but stalled.'
+            next_step: 'Escalate to an engineer: check the recovery state in Grafana (projection_stale can be replayed safely; quiescence_missing needs Temporal activity-loss proof first).'
             runbook_url: https://github.com/Cloudgeni-ai/opengeni/blob/main/docs/launch-monitoring.md#alert--first-action
         - alert: OpenGeniSessionRecoveryMonitorStale
           expr: |
