@@ -231,10 +231,10 @@ spec:
           labels:
             severity: critical
           annotations:
-            summary: OpenGeni has a durable recovering session with no active attempt more than 10 minutes past its recovery due time
+            summary: 'A session has been stuck in recovery with nothing running for more than 10 minutes past its recovery due time.'
             description: A recovery is due at its closed attempt plus the backoff its turn.recovery.requested event recorded (provider Retry-After or connectivity pacing); opengeni_session_recovery_scheduled counts sessions still legitimately inside that backoff and never fires this alert. Inspect the bounded state label. quiescence_missing (due at the attempt close) requires exact Temporal activity-loss and writer-settlement proof; projection_stale is safe to replay through the exact idempotent quiescence receipt transaction. A session paused by its own, an ancestor, or its workspace control is not counted as projection_stale until it is resumed.
             headline: 'A session stuck in recovery with nothing running'
-            value: '{{ "{{ humanizeDuration $value }}" }} past its recovery due time'
+            value: '{{ "{{ $value | humanizeDuration }}" }} past its recovery due time'
             user_impact: 'The affected user sees a session that stays in a recovering state and never continues; their work is saved but stalled.'
             next_step: 'Escalate to an engineer: check the recovery state in Grafana (projection_stale can be replayed safely; quiescence_missing needs Temporal activity-loss proof first).'
             runbook_url: https://github.com/Cloudgeni-ai/opengeni/blob/main/docs/launch-monitoring.md#alert--first-action
