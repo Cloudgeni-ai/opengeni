@@ -1043,6 +1043,9 @@ describe("deployment contract", () => {
 
     expect(contract.access.mode).toBe("externalGateway");
     expect(vars).not.toContain("OPENGENI_ACCESS_KEY");
+    expect(vars).toContain("OPENGENI_DELEGATION_SECRET");
+    expect(missingRuntimeEnvVars(contract, {})).toContain("OPENGENI_DELEGATION_SECRET");
+    expect(plan.requiredSecretKeys).toContain("OPENGENI_DELEGATION_SECRET");
     expect(vars).toContain("OPENGENI_BETTER_AUTH_SECRET");
     expect(vars).toContain("OPENGENI_STRIPE_WEBHOOK_SECRET");
     expect(vars).toContain("OPENGENI_STRIPE_CREDITS_PRODUCT_ID");

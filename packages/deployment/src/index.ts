@@ -1724,7 +1724,10 @@ export function requiredRuntimeEnvVars(
     vars.push("OPENGENI_API_HOST", "OPENGENI_API_PORT");
   }
   if (contract.runtime.platform === "azure-container-apps") {
-    vars.push("OPENGENI_ENVIRONMENTS_ENCRYPTION_KEY", "OPENGENI_DELEGATION_SECRET");
+    vars.push("OPENGENI_ENVIRONMENTS_ENCRYPTION_KEY");
+    if (env.OPENGENI_DELEGATION_SECRET) {
+      vars.push("OPENGENI_DELEGATION_SECRET");
+    }
   }
   if (contract.access.mode === "sharedKey") {
     vars.push("OPENGENI_AUTH_REQUIRED", "OPENGENI_ACCESS_KEY");
@@ -2806,6 +2809,7 @@ function planNotes(
       "The native environment HTTP-route edge serves API and web on one HTTPS origin. Verify real SSE duration, reconnect/replay, rolling restart and NATS-loss recovery against that edge.",
       "The stock conformance stream is short and a selected sandbox backend is not proof of a sandbox invocation. Add actual remote commands and file materialization tests; test private production metrics/OTEL independently rather than counting a skipped public /metrics check as coverage.",
       "preflight --check-env inspects only the operator's current environment, not deployed Key Vault references. Check effective runtime values privately; do not use reference URLs as credential values or mistake a local env check for workload readiness.",
+      "Configured shared-key access reuses OPENGENI_ACCESS_KEY when OPENGENI_DELEGATION_SECRET is unset. Preserve an explicitly supplied delegation secret: it takes precedence, so prove authenticated /v1/access/me and workspace access with the matching shared key or host-signed product bearer rather than assuming advertised auth mode guarantees key acceptance.",
       "Standard ACA HTTP ingress documents a 240-second timeout; do not treat that as a measured stream lifetime or infer a 3600-second guarantee. Read back the native environment HTTP-route edge and verify long-lived SSE and reconnect/replay empirically.",
       "Artifact exports are compatibility-unverified and remain disabled (OPENGENI_ARTIFACT_MATERIALIZER_DEPLOYED=false). Do not enable materializer, outbox, or sandbox artifact runtimes or claim export parity before dedicated probes and supported infrastructure exist.",
       "deployment:runtime-artifacts does not support this profile; Terraform owns native runtime settings and secret references.",
@@ -2993,7 +2997,7 @@ function runtimeEnvValues(
             "OPENGENI_ENVIRONMENTS_ENCRYPTION_KEY",
             env.OPENGENI_ENVIRONMENTS_ENCRYPTION_KEY,
           ),
-          requiredEnv("OPENGENI_DELEGATION_SECRET", env.OPENGENI_DELEGATION_SECRET),
+          valueEnv("OPENGENI_DELEGATION_SECRET", env.OPENGENI_DELEGATION_SECRET),
         ]
       : []),
     valueEnv("OPENGENI_AUTH_REQUIRED", String(contract.access.mode === "sharedKey")),
