@@ -107,6 +107,13 @@ Select a real remote sandbox explicitly; the generic conformance script defaults
 to `none`. Keep deployment shared-key or product tokens in environment variables,
 not command arguments or retained logs.
 
+Generated preflight preserves the accepted product/access modes and public URL.
+For a direct managed-mode environment check, supply the paired selectors
+`--product-access-mode managed --access-mode externalGateway` and
+`--public-base-url "$OPENGENI_PUBLIC_BASE_URL"`; omit them for the default
+configured/shared-key profile. This checks the contract's environment requirements,
+not real managed login or gateway authorization.
+
 The generic script's random browser origin is unsuitable for this root's exact
 Blob CORS policy. Use the actual edge origin and opt into foreign-origin denial;
 select a funded model explicitly when the default model is not configured:
