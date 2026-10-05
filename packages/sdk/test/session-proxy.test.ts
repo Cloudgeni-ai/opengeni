@@ -820,6 +820,58 @@ describe("createSessionProxyHandler", () => {
     expect(open.upstream.requests).toHaveLength(0);
   });
 
+  test("only an explicit realtimeVoice: true offers voice to stock UIs", async () => {
+    expect((await setup().browser.getClientConfig()).realtimeVoice).toBeUndefined();
+    expect((await setup({ realtimeVoice: true }).browser.getClientConfig()).realtimeVoice).toBe(
+      true,
+    );
+  });
+
+  test("anonymous visitors cannot upload unless visitorUploads is set", async () => {
+    const visitor = {
+      resolve: () => ({ workspaceId: WORKSPACE_ID, user: "visitor:abc", visitor: true }),
+    };
+    const upload = (handler: (request: Request) => Promise<Response>, path: string) =>
+      handler(
+        new Request(`${PRODUCT}/api/opengeni/v1/workspaces/${WORKSPACE_ID}/files/${path}`, {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({
+            scope: "session",
+            filename: "a.txt",
+            contentType: "text/plain",
+            sizeBytes: 1,
+          }),
+        }),
+      );
+    const refused = setup(visitor);
+    expect((await refused.browser.getClientConfig()).fileUploads?.enabled).toBe(false);
+    expect((await upload(refused.handler, "uploads")).status).toBe(404);
+    expect((await upload(refused.handler, "uploads/up_1/complete")).status).toBe(404);
+    expect(refused.upstream.requests.some((r) => r.url.pathname.includes("/files/uploads"))).toBe(
+      false,
+    );
+    // Agent-produced files still download.
+    await refused.browser.createFileDownloadUrl(
+      WORKSPACE_ID,
+      "33333333-3333-4333-8333-333333333333",
+    );
+    expect(refused.upstream.requests.at(-1)!.url.pathname).toContain("/download-url");
+
+    const allowed = setup({ ...visitor, visitorUploads: true });
+    expect((await allowed.browser.getClientConfig()).fileUploads?.enabled).not.toBe(false);
+    await upload(allowed.handler, "uploads");
+    expect(allowed.upstream.requests.at(-1)!.url.pathname).toBe(
+      `/v1/workspaces/${WORKSPACE_ID}/files/uploads`,
+    );
+
+    // Signed-in users follow `files`; `files: false` now also reports uploads off.
+    expect((await setup().browser.getClientConfig()).fileUploads?.enabled).not.toBe(false);
+    expect((await setup({ files: false }).browser.getClientConfig()).fileUploads?.enabled).toBe(
+      false,
+    );
+  });
+
   test("realtimeVoice: false reports voice off and refuses every voice route", async () => {
     const { upstream, browser } = setup({ realtimeVoice: false });
     expect((await browser.getClientConfig()).realtimeVoice).toBe(false);

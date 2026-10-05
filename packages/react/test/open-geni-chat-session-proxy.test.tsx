@@ -260,6 +260,12 @@ afterEach(async () => {
   cleanup = null;
 });
 
+/** Unmount the current chat before mounting another in the same test. */
+async function unmountChat(): Promise<void> {
+  await cleanup?.();
+  cleanup = null;
+}
+
 async function mountStockChat(
   proxy: Partial<SessionProxyHandlerOptions> = {},
   props: Partial<OpenGeniChatProps> = {},
@@ -616,13 +622,13 @@ describe("stock OpenGeniChat behind the default session proxy", () => {
 
     // 3. The composer microphone appears when the deployment can transcribe.
     expect(chat.container.querySelector("[data-og-composer-dictate]")).not.toBeNull();
-    // Live voice appears once the workspace offers an available voice model.
-    expect(chat.browser).toContain(`200 GET /v1/workspaces/${WS}/realtime-model-catalog`);
+    // Live voice is opt-in for an embedder: no button and no catalog read.
+    expect(chat.browser.some((line) => line.includes("realtime-model-catalog"))).toBe(false);
     expect(
       chat.container.querySelector(
         "[data-og-conversation-composer] [data-testid='realtime-primary-action']",
       ),
-    ).not.toBeNull();
+    ).toBeNull();
 
     // 4. A proxy with a createSession hook and archive on offers both.
     expect(chat.buttons()).toContain("New chat");
@@ -666,6 +672,48 @@ describe("stock OpenGeniChat behind the default session proxy", () => {
     expect(chat.upstream.slice(before)).toEqual([
       `GET /v1/workspaces/${WS}/sessions/${OTHER}/artifact-associations/${PUB}?kind=retained`,
     ]);
+  });
+
+  test("live voice appears when the proxy or the conversation opts in", async () => {
+    const voiceButton = (container: HTMLElement) =>
+      container.querySelector(
+        "[data-og-conversation-composer] [data-testid='realtime-primary-action']",
+      );
+    for (const [proxy, props] of [
+      [{ realtimeVoice: true }, {}],
+      [{}, { conversationProps: { realtimeVoice: true } }],
+    ] as const) {
+      const chat = await mountStockChat(proxy, props);
+      expect(chat.browser).toContain(`200 GET /v1/workspaces/${WS}/realtime-model-catalog`);
+      expect(voiceButton(chat.container)).not.toBeNull();
+      await unmountChat();
+    }
+    const refused = await mountStockChat(
+      { realtimeVoice: false },
+      { conversationProps: { realtimeVoice: true } },
+    );
+    expect(voiceButton(refused.container)).toBeNull();
+  });
+
+  test("an anonymous visitor gets no attach control unless the proxy allows visitor uploads", async () => {
+    const attach = (container: HTMLElement) =>
+      container.querySelector("[data-og-conversation-composer] [aria-label='Attach files']");
+    const member = await mountStockChat();
+    expect(attach(member.container)).not.toBeNull();
+    await unmountChat();
+    const visitor = await mountStockChat({
+      resolve: () => ({ workspaceId: WS, user: "visitor:abc", visitor: true }),
+    });
+    expect(visitor.container.querySelector("textarea")).not.toBeNull();
+    expect(attach(visitor.container)).toBeNull();
+    // Agent-produced media still loads for the visitor.
+    expect(visitor.browser).toContain(`200 POST /v1/workspaces/${WS}/files/${IMG}/download-url`);
+    await unmountChat();
+    const allowed = await mountStockChat({
+      resolve: () => ({ workspaceId: WS, user: "visitor:abc", visitor: true }),
+      visitorUploads: true,
+    });
+    expect(attach(allowed.container)).not.toBeNull();
   });
 
   test("voice input opts out per conversation and per proxy", async () => {

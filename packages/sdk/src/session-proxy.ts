@@ -68,6 +68,13 @@ export type SessionProxyResolution = (
   user: string;
   /** External identity source. Defaults to the facade's `source`, else `"default"`. */
   source?: string | undefined;
+  /**
+   * The user is an anonymous visitor your product has not signed in, for
+   * example a website visitor keyed by a cookie. Visitors cannot upload
+   * composer file attachments unless the handler sets `visitorUploads: true`;
+   * everything else is unchanged.
+   */
+  visitor?: boolean | undefined;
 };
 
 /** Host auth hook: return the resolution, or a `Response` (for example 401) to reject. */
@@ -238,6 +245,14 @@ export type SessionProxyHandlerOptions = {
    */
   files?: boolean | undefined;
   /**
+   * Let anonymous visitors (`resolve` returned `visitor: true`) upload composer
+   * file attachments. Defaults to false: for a visitor the client config reports
+   * file uploads off, so stock UIs hide the attach button, and the upload routes
+   * are refused. Agent-produced media stays readable under `files`. Signed-in
+   * users follow `files` alone.
+   */
+  visitorUploads?: boolean | undefined;
+  /**
    * Forward composer voice input (`POST .../transcriptions`, one recording per
    * request) as the resolved user; OpenGeni still requires that user's
    * `sessions:create` permission and the workspace's voice-input setting.
@@ -251,10 +266,12 @@ export type SessionProxyHandlerOptions = {
    * `.../sessions/{id}/realtime`. Opengeni still requires that user's
    * `sessions:control` permission, binds the call to that user and browser,
    * runs spoken requests as ordinary steers of the chat, and meters
-   * deployment-funded voice against the organization's credits. The stock
-   * composer shows the voice button only when a voice model is available.
-   * `false` reports `realtimeVoice: false` in the client config so stock UIs
-   * hide it, and refuses the routes. Defaults to true.
+   * deployment-funded voice against the organization's credits. Defaults to
+   * true. The stock conversation's voice button is opt-in: explicit `true`
+   * reports `realtimeVoice: true` in the client config so `SessionConversation`
+   * and `OpenGeniChat` show it (when a voice model is available), as does their
+   * own `realtimeVoice` prop. `false` reports `realtimeVoice: false` so stock
+   * UIs hide it, and refuses the routes.
    */
   realtimeVoice?: boolean | undefined;
   /**
@@ -486,6 +503,9 @@ export function createSessionProxyHandler(
           "resolve must return a workspaceId (or a tenant or a user alone when given the Opengeni facade).",
         );
       }
+      // Visitors upload only when the host opts them in; reads stay under `files`.
+      const uploadsEnabled =
+        filesEnabled && (resolved.visitor !== true || options.visitorUploads === true);
       const client = service.asUser(resolved.user, { source });
       const context: SessionProxyContext = {
         request,
@@ -670,6 +690,14 @@ export function createSessionProxyHandler(
               ? voice
               : { ...voice, available: false };
           }
+          const upstreamUploads = config.fileUploads;
+          if (!uploadsEnabled) {
+            // The browser cannot upload through this proxy: stock UIs hide the attach control.
+            conversationConfig.fileUploads = {
+              ...(upstreamUploads && typeof upstreamUploads === "object" ? upstreamUploads : {}),
+              enabled: false,
+            };
+          }
           return json({
             ...conversationConfig,
             apiContractRevision: OPENGENI_API_CONTRACT_REVISION,
@@ -683,7 +711,13 @@ export function createSessionProxyHandler(
             // Whether the stock "New chat" and "Archive" actions can succeed.
             sessionCreation: options.createSession !== undefined,
             archive: archiveEnabled,
-            ...(realtimeVoiceEnabled ? {} : { realtimeVoice: false }),
+            // Explicit true also tells stock UIs to show the voice button, which
+            // is otherwise opt-in on the embedded conversation.
+            ...(realtimeVoiceEnabled
+              ? options.realtimeVoice === true
+                ? { realtimeVoice: true }
+                : {}
+              : { realtimeVoice: false }),
             // Explicit true also tells stock UIs to offer end users the model picker.
             ...(modelSelection
               ? options.modelSelection === true
@@ -736,6 +770,9 @@ export function createSessionProxyHandler(
       }
 
       if (area === "files" && filesEnabled && method === "POST") {
+        if (tail[0] === "uploads" && !uploadsEnabled) {
+          return errorJson(404, "route_not_allowed", "Not found.");
+        }
         if (tail.length === 1 && tail[0] === "uploads") {
           const body = await readJsonBody(request, maxBodyBytes);
           return json(
