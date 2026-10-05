@@ -7,7 +7,7 @@ import { listSessionEventSlices } from "@opengeni/db/session-event-slices";
 import * as sessionPreviewSchema from "@opengeni/db/schema";
 import { and, eq, sql } from "drizzle-orm";
 import { SessionMessageSearchRequest } from "@opengeni/contracts";
-import { scheduledSessionIds } from "@opengeni/db";
+import { requireWorkspace, scheduledSessionIds } from "@opengeni/db";
 import { isVerifiedDelegatedHumanAuthorization, withSiteSessionOrigin } from "@opengeni/core";
 import { freezeSessionRealtimeConnectionAccounts } from "@opengeni/core";
 import {
@@ -1192,22 +1192,34 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
     if (!session) {
       throw new HTTPException(404, { message: "session not found" });
     }
-    const activity = await backgroundCommandActivityForSessions(db, {
-      accountId: grant.accountId,
-      workspaceId,
-      sessionIds: [sessionId],
-    });
-    const scheduleTargets =
+    // Independent reads of the already-authorized session: the effective
+    // policy context depends only on the session row, not on the activity or
+    // schedule annotations, so all three are read concurrently.
+    const [activity, scheduleTargets, policy] = await Promise.all([
+      backgroundCommandActivityForSessions(db, {
+        accountId: grant.accountId,
+        workspaceId,
+        sessionIds: [sessionId],
+      }),
       hasPermission(grant.permissions, "scheduled_tasks:run") &&
       hasPermission(grant.permissions, "sessions:control")
-        ? await scheduledSessionIds(db, workspaceId, [sessionId])
-        : new Set<string>();
+        ? scheduledSessionIds(db, workspaceId, [sessionId])
+        : Promise.resolve(new Set<string>()),
+      loadEffectivePolicyContext(deps, workspaceId, grant.subjectId, [session]),
+    ]);
     return c.json(
-      await withEffectivePolicy(deps, workspaceId, grant.subjectId, {
-        ...session,
-        hasSchedules: scheduleTargets.has(sessionId),
-        ...(activity.get(sessionId) ? { backgroundCommandActivity: activity.get(sessionId) } : {}),
-      }),
+      sessionWithEffectiveToolPolicy(
+        {
+          ...session,
+          hasSchedules: scheduleTargets.has(sessionId),
+          ...(activity.get(sessionId)
+            ? { backgroundCommandActivity: activity.get(sessionId) }
+            : {}),
+        },
+        policy.workspaceServerIds,
+        policy.workspaceDefaultServerIds,
+        policy.effectiveToolsContext,
+      ),
     );
   });
 
@@ -6221,9 +6233,18 @@ async function loadEffectivePolicyContext(
   subjectId: string,
   sessions: readonly Session[],
 ): Promise<EffectivePolicyContext> {
+  // Both projections read the same workspace row; hydrate it once.
+  const workspaceRead = requireWorkspace(deps.db, workspaceId);
+  void workspaceRead.catch(() => undefined);
   const [policy, effectiveToolsContext] = await Promise.all([
-    workspaceSessionToolPolicyContext(deps.db, workspaceId, deps.settings, subjectId),
-    workspaceSessionEffectiveToolsContext(deps, workspaceId, subjectId, sessions),
+    workspaceSessionToolPolicyContext(
+      deps.db,
+      workspaceId,
+      deps.settings,
+      subjectId,
+      workspaceRead,
+    ),
+    workspaceSessionEffectiveToolsContext(deps, workspaceId, subjectId, sessions, workspaceRead),
   ]);
   return { ...policy, effectiveToolsContext };
 }
