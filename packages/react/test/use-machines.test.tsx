@@ -409,6 +409,103 @@ describe("useMachines", () => {
     await hook.unmount();
   });
 
+  for (const status of [401, 403, 404]) {
+    test(`a ${status} refusal stops polling until the read is re-enabled`, async () => {
+      let lists = 0;
+      let refuse = true;
+      const machinesClient: MachinesClientLike = {
+        listMachines: async () => {
+          lists += 1;
+          if (refuse) {
+            throw Object.assign(new Error(`OpenGeni API ${status}`), { status });
+          }
+          return response;
+        },
+      };
+      const hook = await renderHook(
+        (props: { enabled: boolean }) =>
+          useMachines({
+            client,
+            workspaceId: WORKSPACE_ID,
+            sessionId: `refusal-${status}`,
+            machinesClient,
+            pollIntervalMs: 5,
+            enabled: props.enabled,
+          }),
+        { enabled: true },
+      );
+      await flush();
+      expect(lists).toBe(1);
+      expect(hook.result.current.error?.message).toBe(`OpenGeni API ${status}`);
+      // Many poll intervals later: no repeated refused read.
+      await actRun(() => new Promise((resolve) => setTimeout(resolve, 40)));
+      expect(lists).toBe(1);
+      // A permission/workspace change (the host disables then re-enables the
+      // read) forgets the refusal and reads again immediately.
+      refuse = false;
+      await hook.rerender({ enabled: false });
+      await flush();
+      expect(hook.result.current.error).toBeNull();
+      await hook.rerender({ enabled: true });
+      await flush();
+      expect(lists).toBe(2);
+      expect(hook.result.current.machines.length).toBe(2);
+      await hook.unmount();
+    });
+  }
+
+  test("a transient failure keeps polling", async () => {
+    let lists = 0;
+    const machinesClient: MachinesClientLike = {
+      listMachines: async () => {
+        lists += 1;
+        throw Object.assign(new Error("OpenGeni API 503"), { status: 503 });
+      },
+    };
+    const hook = await renderHook(
+      () =>
+        useMachines({
+          client,
+          workspaceId: WORKSPACE_ID,
+          sessionId: "transient",
+          machinesClient,
+          pollIntervalMs: 5,
+        }),
+      undefined,
+    );
+    await flush();
+    await actRun(() => new Promise((resolve) => setTimeout(resolve, 40)));
+    expect(lists).toBeGreaterThan(1);
+    await hook.unmount();
+  });
+
+  test("an explicit refresh retries a refused read once", async () => {
+    let lists = 0;
+    const machinesClient: MachinesClientLike = {
+      listMachines: async () => {
+        lists += 1;
+        throw Object.assign(new Error("OpenGeni API 403"), { status: 403 });
+      },
+    };
+    const hook = await renderHook(
+      () =>
+        useMachines({
+          client,
+          workspaceId: WORKSPACE_ID,
+          sessionId: "refresh-after-refusal",
+          machinesClient,
+          pollIntervalMs: 5,
+        }),
+      undefined,
+    );
+    await flush();
+    expect(lists).toBe(1);
+    await actRun(() => hook.result.current.refresh());
+    await actRun(() => new Promise((resolve) => setTimeout(resolve, 40)));
+    expect(lists).toBe(2);
+    await hook.unmount();
+  });
+
   test("a session switch aborts the old list and renders zero frames of its fleet", async () => {
     let oldSignal: AbortSignal | undefined;
     let oldCalls = 0;

@@ -181,6 +181,32 @@ export interface AddCandidate {
   searchText: string;
 }
 
+/**
+ * Candidate lists the server refused, per client identity. A refusal is stable
+ * for that access generation, so remounting the Add people page (a route or
+ * app remount) shows the same notice without asking again. A new client (any
+ * access revalidation) starts clean, and an explicit retry clears the entry.
+ */
+const refusedCandidateLists = new WeakMap<object, Map<string, Error>>();
+
+export function refusedMemberCandidates(client: object, workspaceId: string): Error | null {
+  return refusedCandidateLists.get(client)?.get(workspaceId) ?? null;
+}
+
+export function rememberMemberCandidatesOutcome(
+  client: object,
+  workspaceId: string,
+  error: Error | null,
+): void {
+  let refused = refusedCandidateLists.get(client);
+  if (error && isPermissionDenied(error)) {
+    if (!refused) refusedCandidateLists.set(client, (refused = new Map()));
+    refused.set(workspaceId, error);
+  } else {
+    refused?.delete(workspaceId);
+  }
+}
+
 /** Show a search field once the list is long enough to need one. */
 const SEARCH_THRESHOLD = 6;
 
@@ -669,20 +695,32 @@ function MembersSectionContent({
     };
   }, [refresh]);
 
-  const loadMemberCandidates = useCallback(async () => {
-    const generation = ++candidateRefreshGenerationRef.current;
-    setMemberCandidates(null);
-    setMemberCandidatesError(null);
-    try {
-      const candidates = await client.listWorkspaceMemberCandidates(workspaceId);
-      if (candidateRefreshGenerationRef.current !== generation) return;
-      setMemberCandidates(candidates);
-    } catch (caught) {
-      if (candidateRefreshGenerationRef.current !== generation) return;
-      setMemberCandidates([]);
-      setMemberCandidatesError(caught instanceof Error ? caught : new Error(String(caught)));
-    }
-  }, [client, workspaceId]);
+  const loadMemberCandidates = useCallback(
+    async (options?: { retry?: boolean }) => {
+      const generation = ++candidateRefreshGenerationRef.current;
+      const refused = options?.retry ? null : refusedMemberCandidates(client, workspaceId);
+      if (refused) {
+        setMemberCandidates([]);
+        setMemberCandidatesError(refused);
+        return;
+      }
+      setMemberCandidates(null);
+      setMemberCandidatesError(null);
+      try {
+        const candidates = await client.listWorkspaceMemberCandidates(workspaceId);
+        rememberMemberCandidatesOutcome(client, workspaceId, null);
+        if (candidateRefreshGenerationRef.current !== generation) return;
+        setMemberCandidates(candidates);
+      } catch (caught) {
+        const error = caught instanceof Error ? caught : new Error(String(caught));
+        rememberMemberCandidatesOutcome(client, workspaceId, error);
+        if (candidateRefreshGenerationRef.current !== generation) return;
+        setMemberCandidates([]);
+        setMemberCandidatesError(error);
+      }
+    },
+    [client, workspaceId],
+  );
 
   useEffect(
     () => () => {
@@ -875,7 +913,7 @@ function MembersSectionContent({
           }) ?? null
         }
         loadError={memberCandidatesError}
-        onRetry={() => void loadMemberCandidates()}
+        onRetry={() => void loadMemberCandidates({ retry: true })}
         roles={ASSIGNABLE_WORKSPACE_ROLES as RoleOption<WorkspaceAccessLevel>[]}
         inviteLink={organizationPeopleLink("Invite people")}
         onSubmit={addMembers}
