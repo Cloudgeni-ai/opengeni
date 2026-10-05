@@ -8,6 +8,7 @@ import {
   rawRows,
   withRlsContext,
   withSessionRlsActorContext,
+  withWorkspaceRls,
   withWorkspaceSubjectRls,
   type Database,
 } from "../src/database";
@@ -397,5 +398,47 @@ describe("batched RLS setup on PostgreSQL", () => {
         statement.includes("set_config('opengeni.subject_id'"),
       ),
     ).toHaveLength(1);
+  });
+
+  test("a workspace scope resolves its account inside the setup write, without a separate lookup", async () => {
+    const suffix = crypto.randomUUID();
+    const access = await bootstrapWorkspace(client.db, {
+      accountExternalSource: "batched-rls-test",
+      accountExternalId: suffix,
+      accountName: "Batched RLS",
+      workspaceExternalSource: "batched-rls-test",
+      workspaceExternalId: suffix,
+      workspaceName: "Batched RLS",
+      subjectId: `user:${suffix}`,
+    });
+    const grant = access.workspaceGrants[0]!;
+    const capture = captureStatements();
+    let seen: Scope | undefined;
+    let callbackStart = 0;
+    try {
+      await withWorkspaceRls(client.db, grant.workspaceId, async (scoped) => {
+        callbackStart = capture.statements.length;
+        seen = await readScope(scoped);
+      });
+    } finally {
+      capture.stop();
+    }
+    expect(seen).toMatchObject({ accountId: grant.accountId, workspaceId: grant.workspaceId });
+    const setup = capture.statements.slice(0, callbackStart);
+    expect(setup).toHaveLength(3);
+    expect(setup[0]?.toLowerCase()).toStartWith("begin");
+    expect(setup[1]).toContain("set_config('opengeni.account_id', workspace.account_id::text");
+    expect(setup[1]).toContain("pg_advisory_xact_lock_shared");
+  });
+
+  test("an unknown workspace still fails as not found before any scoped work", async () => {
+    const missing = crypto.randomUUID();
+    let entered = false;
+    await expect(
+      withWorkspaceRls(client.db, missing, async () => {
+        entered = true;
+      }),
+    ).rejects.toThrow(`Workspace not found: ${missing}`);
+    expect(entered).toBe(false);
   });
 });

@@ -1206,8 +1206,13 @@ describe("session_events writer inventory", () => {
     expect([...discovered].sort()).toEqual([...Object.values(tenancyQuiescenceTables)].sort());
     expect(writers.size).toBeGreaterThanOrEqual(61);
     const database = readFileSync(join(repoRoot, "packages/db/src/database.ts"), "utf8");
+    // RLS entry writes the tenant context and takes the shared tenancy fence in
+    // one setup statement, verifies it, and only then runs the scoped callback.
     expect(database).toMatch(
-      /withRlsContext[\s\S]*?setRlsContext[\s\S]*?pg_advisory_xact_lock_shared[\s\S]*?const value = await fn/u,
+      /function rlsContextWriteSql[\s\S]*?sessionTenancyFenceWorkspaceId[\s\S]*?pg_advisory_xact_lock_shared/u,
+    );
+    expect(database).toMatch(
+      /async function withScopedRlsContext[\s\S]*?rlsContextWriteSql\([\s\S]*?sessionTenancyFenceWorkspaceId[\s\S]*?assertRlsContextApplied[\s\S]*?value = await fn\(scoped/u,
     );
     const migration = readFileSync(
       join(repoRoot, "packages/db/drizzle/0345_tenant_scoped_session_tenancy_fence.sql"),

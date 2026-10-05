@@ -437,7 +437,7 @@ export async function setRlsContext(db: Database, context: RlsContext): Promise<
  * must still verify the result with a SEPARATE read-back statement.
  */
 function rlsContextWriteSql(
-  context: RlsContext,
+  scope: RlsScope,
   sessionActor: SessionRlsActorContext | undefined,
   options: { subjectId?: string; sessionTenancyFenceWorkspaceId?: string },
 ): SQL {
@@ -445,7 +445,10 @@ function rlsContextWriteSql(
   // that matches no tenant row, silently returning zero rows from every scoped
   // read (a phantom "not found" / "no active subscription"). An RLS context with
   // no account is always a bug at the call site, never a valid query scope.
-  if (typeof context.accountId !== "string" || context.accountId.trim() === "") {
+  if (
+    !("resolveAccountFromWorkspace" in scope) &&
+    (typeof scope.accountId !== "string" || scope.accountId.trim() === "")
+  ) {
     throw new Error("setRlsContext: a non-empty accountId is required to establish an RLS context");
   }
   // An explicit scope subject replaces the ambient actor subject exactly as a
@@ -470,14 +473,33 @@ function rlsContextWriteSql(
   // database handles whose connection-level application_name is host-owned.
   // Standalone createDb connections also carry version receipts in their exact
   // application_name, while old OpenGeni binaries set neither current receipt.
-  return sql`select
-    set_config('opengeni.account_id', ${context.accountId}, true),
-    set_config('opengeni.workspace_id', ${context.workspaceId ?? ""}, true),
+  const settings = (accountId: SQL, workspaceId: string) => sql`
+    set_config('opengeni.account_id', ${accountId}, true),
+    set_config('opengeni.workspace_id', ${workspaceId}, true),
     set_config('opengeni.lossless_content_writer', '1', true),
     set_config('opengeni.sandbox_recovery_protocol_v2', '1', true),
     set_config('opengeni.pending_tool_event_output_v1', '1', true),
     set_config('opengeni.session_variable_set_attachments_v1', '1', true)${subjectSetting}${actorSettings}${tenancyFence}`;
+  if ("resolveAccountFromWorkspace" in scope) {
+    // The owning account comes from the workspace row in the same statement,
+    // replacing a separate pre-transaction lookup. No row means no GUC write
+    // and no fence; the caller turns the empty result into "Workspace not found".
+    return sql`select workspace.account_id::text as account_id,${settings(
+      sql`workspace.account_id::text`,
+      scope.workspaceId,
+    )}
+    from ${schema.workspaces} workspace
+    where workspace.id = ${scope.workspaceId}`;
+  }
+  return sql`select${settings(sql`${scope.accountId}`, scope.workspaceId ?? "")}`;
 }
+
+/**
+ * Either a known tenant context, or a workspace whose owning account is read
+ * from the `workspaces` row by the setup statement itself (the
+ * `rlsContextForWorkspace` lookup without its extra round trip).
+ */
+type RlsScope = RlsContext | { workspaceId: string; resolveAccountFromWorkspace: true };
 
 async function readRlsContextSettings(db: Database): Promise<RlsContextSettings> {
   const [settings] = await rawRows<{
@@ -617,8 +639,8 @@ export async function withRlsContext<T>(
  */
 async function withScopedRlsContext<T>(
   db: Database,
-  context: RlsContext,
-  fn: (db: Database) => Promise<T>,
+  scope: RlsScope,
+  fn: (db: Database, context: RlsContext) => Promise<T>,
   transactionConfig: PgTransactionConfig | undefined,
   sessionTenancyFence: "shared" | "none",
   subjectId?: string,
@@ -637,20 +659,29 @@ async function withScopedRlsContext<T>(
         const setup = startDatabaseTiming("rls_setup");
         const scoped = tx as unknown as Database;
         let parentScope: RlsContextSettings | null;
+        let context: RlsContext;
         try {
           parentScope = restoreParentScope ? await readRlsContextSettings(scoped) : null;
           const sessionActor = sessionRlsActorContext.getStore();
           // Tenant/protocol/actor GUCs and the shared session-tenancy fence go
           // in one statement: the writes are independent of the lock, and the
           // lock is still taken before any scoped query runs.
-          await scoped.execute(
-            rlsContextWriteSql(context, sessionActor, {
-              ...(subjectId !== undefined ? { subjectId } : {}),
-              ...(context.workspaceId && sessionTenancyFence === "shared"
-                ? { sessionTenancyFenceWorkspaceId: context.workspaceId }
-                : {}),
-            }),
-          );
+          const write = rlsContextWriteSql(scope, sessionActor, {
+            ...(subjectId !== undefined ? { subjectId } : {}),
+            ...(scope.workspaceId && sessionTenancyFence === "shared"
+              ? { sessionTenancyFenceWorkspaceId: scope.workspaceId }
+              : {}),
+          });
+          if ("resolveAccountFromWorkspace" in scope) {
+            const [resolved] = await rawRows<{ account_id: string | null }>(scoped, write);
+            if (!resolved?.account_id) {
+              throw new Error(`Workspace not found: ${scope.workspaceId}`);
+            }
+            context = { accountId: resolved.account_id, workspaceId: scope.workspaceId };
+          } else {
+            await scoped.execute(write);
+            context = scope;
+          }
           // Defense-in-depth: read the LOCAL GUC back on THIS backend BEFORE running
           // the scoped query. The set_config and this read share one db.transaction,
           // which a transaction pooler pins to a single backend — so a mismatch here
@@ -671,7 +702,7 @@ async function withScopedRlsContext<T>(
         const callback = startDatabaseTiming("scoped_callback");
         let value: T;
         try {
-          value = await fn(scoped);
+          value = await fn(scoped, context);
           callback("completed");
         } catch (error) {
           callback("failed");
@@ -738,11 +769,12 @@ export async function withWorkspaceRls<T>(
   fn: (db: Database) => Promise<T>,
   transactionConfig?: PgTransactionConfig,
 ): Promise<T> {
-  return await withRlsContext(
+  return await withScopedRlsContext(
     db,
-    await rlsContextForWorkspace(db, workspaceId),
+    { workspaceId, resolveAccountFromWorkspace: true },
     fn,
     transactionConfig,
+    "shared",
   );
 }
 
@@ -935,7 +967,9 @@ export async function withSessionActivityRlsContext<T>(
 
 async function withSessionActivityScopedRlsContext<T>(
   db: Database,
-  context: RlsContext & { workspaceId: string },
+  scope:
+    | (RlsContext & { workspaceId: string })
+    | { workspaceId: string; resolveAccountFromWorkspace: true },
   fn: (db: SessionActivityDatabase) => Promise<T>,
   transactionConfig: PgTransactionConfig | undefined,
   fenceMode: "shared" | "none",
@@ -945,8 +979,8 @@ async function withSessionActivityScopedRlsContext<T>(
   await assertSessionActivityGateEntry(db);
   return await withScopedRlsContext(
     db,
-    context,
-    async (scopedDb) => {
+    scope,
+    async (scopedDb, context) => {
       if (organizationMembershipFence) {
         // Only callers that reauthorize or mutate under the membership
         // lifecycle lock take it, always exclusively. Acquire membership
@@ -957,17 +991,17 @@ async function withSessionActivityScopedRlsContext<T>(
           hashtextextended(${`organization-membership:${context.accountId}`}, 0))`);
         if (fenceMode === "shared") {
           await scopedDb.execute(sql`select pg_advisory_xact_lock_shared(
-            hashtextextended(${`session-tenancy:${context.workspaceId}`}, 0))`);
+            hashtextextended(${`session-tenancy:${scope.workspaceId}`}, 0))`);
         }
       }
-      const gate = await beginSessionActivityGate(scopedDb, context.workspaceId);
+      const gate = await beginSessionActivityGate(scopedDb, scope.workspaceId);
       const value = await fn(gate.db);
       // The finalizer must never trust tenant GUCs that arbitrary callback code
       // could have changed. Nested RLS helpers restore their parent scope; this
       // assertion is the fail-closed commit-boundary proof for every other path.
       await assertRlsContextApplied(gate.db, context);
       if (gate.owner) {
-        await finalizeSessionActivityGate(gate.db, context.workspaceId);
+        await finalizeSessionActivityGate(gate.db, scope.workspaceId);
       }
       return value;
     },
@@ -990,9 +1024,9 @@ export async function withWorkspaceSessionActivityRls<T>(
   transactionConfig?: PgTransactionConfig,
   organizationMembershipFence = false,
 ): Promise<T> {
-  return await withSessionActivityRlsContext(
+  return await withSessionActivityScopedRlsContext(
     db,
-    { ...(await rlsContextForWorkspace(db, workspaceId)), workspaceId },
+    { workspaceId, resolveAccountFromWorkspace: true },
     fn,
     transactionConfig,
     "shared",
@@ -1102,10 +1136,9 @@ export async function withWorkspaceSubjectRls<T>(
   if (!subjectId.trim()) {
     throw new Error("withWorkspaceSubjectRls: a non-empty subjectId is required");
   }
-  const context = await rlsContextForWorkspace(db, workspaceId);
   return await withScopedRlsContext(
     db,
-    context,
+    { workspaceId, resolveAccountFromWorkspace: true },
     fn,
     transactionConfig,
     sessionTenancyFence,
@@ -1125,10 +1158,9 @@ export async function withWorkspaceSubjectSessionActivityRls<T>(
   if (!subjectId.trim()) {
     throw new Error("withWorkspaceSubjectSessionActivityRls: a non-empty subjectId is required");
   }
-  const context = await rlsContextForWorkspace(db, workspaceId);
   return await withSessionActivityScopedRlsContext(
     db,
-    { ...context, workspaceId },
+    { workspaceId, resolveAccountFromWorkspace: true },
     fn,
     transactionConfig,
     fenceMode,
@@ -1160,8 +1192,7 @@ export async function withWorkspaceUsageLock<T>(
   workspaceId: string,
   fn: (db: Database) => Promise<T>,
 ): Promise<T> {
-  const context = await rlsContextForWorkspace(db, workspaceId);
-  return await withRlsContext(db, context, async (scopedDb) => {
+  return await withWorkspaceRls(db, workspaceId, async (scopedDb) => {
     await scopedDb.execute(sql`select pg_advisory_xact_lock(hashtext(${`usage:${workspaceId}`}))`);
     return await fn(scopedDb);
   });

@@ -99,13 +99,7 @@ describe("setRlsContext query budget", () => {
     });
 
     expect(executeCalls).toBe(1);
-    const queryText = executedQuery?.queryChunks
-      .flatMap((chunk) =>
-        typeof chunk === "object" && chunk !== null && "value" in chunk
-          ? (chunk.value as readonly string[])
-          : [],
-      )
-      .join("");
+    const queryText = new PgDialect().sqlToQuery(executedQuery!).sql;
     expect(queryText).toContain("set_config('opengeni.account_id'");
     expect(queryText).toContain("set_config('opengeni.workspace_id'");
     expect(queryText).toContain("set_config('opengeni.lossless_content_writer'");
