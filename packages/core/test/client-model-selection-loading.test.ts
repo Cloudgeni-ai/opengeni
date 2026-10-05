@@ -72,18 +72,19 @@ describe("fresh model admission versus live discovery", () => {
       allowance,
       spyOn(opengeniDb, "workspaceCodexSubscriptionActive").mockImplementation(async () => active),
       spyOn(opengeniDb, "workspaceXaiSubscriptionActive").mockResolvedValue(false),
-      spyOn(opengeniDb, "workspaceVercelAiGatewayConnectionActive").mockResolvedValue(false),
-      spyOn(opengeniDb, "workspaceOpenRouterConnectionActive").mockResolvedValue(false),
-      spyOn(opengeniDb, "organizationModelProviderConnectionActiveForWorkspace").mockResolvedValue(
-        false,
-      ),
-      spyOn(opengeniDb, "listWorkspaceGatewayCustomModels").mockResolvedValue([]),
-      spyOn(opengeniDb, "listWorkspaceOpenRouterCustomModels").mockResolvedValue([]),
-      spyOn(opengeniDb, "listOrganizationModelProviderCustomModelsForWorkspace").mockResolvedValue(
-        [],
-      ),
-      spyOn(opengeniDb, "getWorkspaceProviderApiKeyConnectionMetadata").mockResolvedValue(null),
-      spyOn(opengeniDb, "listWorkspaceProviderCustomModels").mockResolvedValue([]),
+      spyOn(opengeniDb, "listConnectionsMetadata").mockResolvedValue([]),
+      spyOn(opengeniDb, "listWorkspaceProviderCustomModelsByKind").mockResolvedValue({
+        vercel_gateway: [],
+        openrouter: [],
+        anthropic: [],
+        claude_subscription: [],
+      }),
+      spyOn(opengeniDb, "getOrganizationModelProviderCatalogForWorkspace").mockResolvedValue({
+        vercel_gateway: { active: false, models: [] },
+        openrouter: { active: false, models: [] },
+        anthropic: { active: false, models: [] },
+        claude_subscription: { active: false, models: [] },
+      }),
       spyOn(opengeniDb, "isCodexBilledTurn").mockImplementation(async () => active),
     ];
   });
@@ -172,7 +173,7 @@ describe("fresh model admission versus live discovery", () => {
         opengeniDb,
         "workspaceClaudeSubscriptionActiveForAuthority",
       ).mockResolvedValue(true);
-      const legacy = spyOn(opengeniDb, "getWorkspaceProviderApiKeyConnectionMetadata");
+      const legacy = spyOn(opengeniDb, "workspaceProviderApiKeyConnectionMetadataFromConnections");
       mocks.push(current, pool, legacy);
       const loaded = await loadWorkspaceModelSelectionInput(
         db,
@@ -185,7 +186,7 @@ describe("fresh model admission versus live discovery", () => {
       );
       expect(loaded.claudeConnections?.claude_subscription?.active).toBe(scope === "organization");
       expect(pool.mock.calls[0]?.[2].authoritySnapshot).toEqual(snapshot);
-      expect(legacy.mock.calls.some((call) => call[2] === "claude_subscription")).toBe(false);
+      expect(legacy.mock.calls.some((call) => call[1] === "claude_subscription")).toBe(false);
       expect(availability).not.toHaveBeenCalled();
     },
   );

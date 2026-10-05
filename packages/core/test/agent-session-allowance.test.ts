@@ -52,10 +52,16 @@ function fixture(action: "send" | "steer", replay = false) {
   );
   const allowance = track(spyOn(db, "checkWorkspaceAllowance").mockResolvedValue(null));
   const codex = track(spyOn(db, "isCodexBilledTurn").mockResolvedValue(false));
-  const gatewayModels = track(spyOn(db, "listWorkspaceGatewayCustomModels").mockResolvedValue([]));
-  const openRouterModels = track(
-    spyOn(db, "listWorkspaceOpenRouterCustomModels").mockResolvedValue([]),
+  // One batched read supplies both workspace-paid catalogs.
+  const gatewayModels = track(
+    spyOn(db, "listWorkspaceProviderCustomModelsByKind").mockResolvedValue({
+      vercel_gateway: [],
+      openrouter: [],
+      anthropic: [],
+      claude_subscription: [],
+    }),
   );
+  const openRouterModels = gatewayModels;
   const retainedGateway = track(
     spyOn(db, "getWorkspaceGatewayCustomModelForExecution").mockResolvedValue(null),
   );
