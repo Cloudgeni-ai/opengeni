@@ -148,6 +148,10 @@ import {
   type RuntimeMetricsHooks,
 } from "../src/index";
 import { MCP_MAX_TOOL_RESULT_BYTES } from "../src/mcp-network";
+import {
+  spilledModelToolResult,
+  type SpillOversizedModelToolResult,
+} from "../src/tool-result-spill";
 import { baseModelInputFilterForSettings } from "../src/model-input";
 import { OPENGENI_OPERATIONAL_INSTRUCTIONS } from "../src/operational-instructions";
 import { McpResultCustomDataBridge } from "../src/mcp-result-custom-data";
@@ -2548,8 +2552,13 @@ describe("runtime event normalization", () => {
       begin?: ConnectorActionPolicyHooks["begin"];
       complete?: ConnectorActionPolicyHooks["complete"];
       sandboxBackend?: "none" | "modal";
+      toolResultBytes?: number;
+      spillOversizedModelToolResult?: SpillOversizedModelToolResult;
     }) {
-      const mcp = startTestMcpServer({ toolResultIsError: input.toolResultIsError });
+      const mcp = startTestMcpServer({
+        toolResultIsError: input.toolResultIsError,
+        ...(input.toolResultBytes ? { toolResultBytes: input.toolResultBytes } : {}),
+      });
       const baseConfig = {
         id: input.serverId ?? (input.withoutConnection ? "remote" : "docs"),
         name: "Document Search",
@@ -2629,6 +2638,9 @@ describe("runtime event normalization", () => {
           headers: { authorization: "Bearer connector-token" },
         }),
         connectorActionPolicy: hooks,
+        ...(input.spillOversizedModelToolResult
+          ? { spillOversizedModelToolResult: input.spillOversizedModelToolResult }
+          : {}),
       });
       const agent = buildOpenGeniAgent(settings, [], {
         lazyToolTransport: input.lazyToolTransport,
@@ -2859,7 +2871,57 @@ describe("runtime event normalization", () => {
     });
 
     test.each(["model", "codemode"] as const)(
-      "connector provider-declared errors settle uncertain through %s",
+      "an approved connector read above 1 MiB reaches the %s caller and settles completed",
+      async (caller) => {
+        const spills: number[] = [];
+        const fixture = await connectorPolicyFixture({
+          connectorDecision: "ask",
+          alreadyApproved: true,
+          toolResultBytes: MCP_MAX_TOOL_RESULT_BYTES + 256 * 1024,
+          spillOversizedModelToolResult: async ({ operationId, serializedBytes }) => {
+            spills.push(serializedBytes);
+            return spilledModelToolResult({
+              type: "tool_result_spilled",
+              fileId: "66666666-6666-4666-8666-666666666666",
+              sandboxPath: `/workspace/tool-results/${operationId}.json`,
+              byteSize: serializedBytes,
+              mediaType: "application/json",
+            });
+          },
+        });
+        try {
+          const environment = fixture.prepared.attemptToolEnvironment!;
+          const result = await environment.call({
+            catalogDigest: environment.catalog.digest,
+            operationId: crypto.randomUUID(),
+            identity: { serverId: "docs", toolName: "search_documents" },
+            arguments: { query: "wiki" },
+            caller: { kind: caller, subjectId: "worker:test" },
+          });
+          expect(result.isError).not.toBe(true);
+          if (caller === "model") {
+            // The model gets the bounded spill receipt instead of a size failure.
+            expect(spills).toHaveLength(1);
+            expect(spills[0]!).toBeGreaterThan(MCP_MAX_TOOL_RESULT_BYTES);
+            expect(result.structuredContent).toMatchObject({ type: "tool_result_spilled" });
+          } else {
+            expect(spills).toHaveLength(0);
+            expect((result.content[0] as { text: string }).text).toHaveLength(
+              MCP_MAX_TOOL_RESULT_BYTES + 256 * 1024,
+            );
+          }
+          expect(fixture.calls.filter((entry) => entry.startsWith("complete:"))).toEqual([
+            "complete:request-1:completed",
+          ]);
+        } finally {
+          await fixture.prepared.close();
+          fixture.mcp.close();
+        }
+      },
+    );
+
+    test.each(["model", "codemode"] as const)(
+      "connector provider-declared errors keep their text and settle the ledger uncertain through %s",
       async (transport) => {
         const fixture = await connectorPolicyFixture({
           connectorDecision: transport === "model" ? "allow" : "ask",
@@ -2878,18 +2940,23 @@ describe("runtime event normalization", () => {
               { toolCall: { callId: "call-provider-error" } } as any,
             );
             expect(result).toMatchObject({ isError: true });
-            expect(JSON.stringify(result)).toContain("uncertain");
+            // The model receives the provider's exact error, never a replacement.
+            expect(JSON.stringify(result)).toContain("found document for needle");
+            expect(JSON.stringify(result)).not.toContain("outcome is uncertain");
+            expect(JSON.stringify(result)).not.toContain("Please try again");
           } else {
             const environment = fixture.prepared.attemptToolEnvironment!;
-            await expect(
-              environment.call({
-                catalogDigest: environment.catalog.digest,
-                operationId: crypto.randomUUID(),
-                identity: { serverId: "docs", toolName: "search_documents" },
-                arguments: { query: "needle" },
-                caller: { kind: "codemode", subjectId: "worker:test" },
-              }),
-            ).rejects.toMatchObject({ connectorActionOutcome: "uncertain" });
+            const result = await environment.call({
+              catalogDigest: environment.catalog.digest,
+              operationId: crypto.randomUUID(),
+              identity: { serverId: "docs", toolName: "search_documents" },
+              arguments: { query: "needle" },
+              caller: { kind: "codemode", subjectId: "worker:test" },
+            });
+            expect(result).toMatchObject({
+              isError: true,
+              content: [{ type: "text", text: "found document for needle" }],
+            });
           }
           expect(fixture.mcp.calls).toEqual([
             { tool: "search_documents", args: { query: "needle" } },
@@ -3387,7 +3454,9 @@ describe("runtime event normalization", () => {
               toolCall: { callId: "call-not-executed" },
             } as any,
           ),
-        ).toMatchObject({ isError: true });
+          // The provider's own not-executed result reaches the model unchanged;
+          // only the connector ledger records the not_executed outcome.
+        ).toMatchObject({ text: "provider was not called" });
         expect(completed).toEqual(["not_executed"]);
       } finally {
         await prepared.close();

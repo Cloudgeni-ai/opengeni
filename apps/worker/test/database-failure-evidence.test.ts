@@ -166,7 +166,7 @@ test("running-turn recovery rejects permanent errors, provider sockets and messa
     uncertain,
     new ToolCallError("Failed to run function tools", uncertain),
     new AggregateError([rawDatabaseFailure("57P01"), uncertain], "parallel tool failure"),
-    ...["23505", "42501", "42601", "40003", "40P01", "40001"].map(
+    ...["23505", "42501", "42601", "40003"].map(
       (code) => new ToolCallError("Failed to run function tools", rawDatabaseFailure(code)),
     ),
     new ToolCallError("Failed query select account_id from workspaces CONNECT_TIMEOUT", "57P01"),
@@ -193,6 +193,36 @@ test("running-turn recovery rejects permanent errors, provider sockets and messa
 function runningDatabaseRecovery(error: unknown) {
   return postClaimDatabaseRecoveryFailure({ error, ...identity, requireDatabaseProvenance: true });
 }
+
+test("a running turn's own deadlock or serialization rollback enters exact-attempt recovery", () => {
+  // The victim transaction certainly did not commit, so it is at least as safe
+  // as an own-client outage. A tool wrapper does not grant or remove authority.
+  for (const [sqlState, code] of [
+    ["40P01", "db_deadlock"],
+    ["40001", "db_serialization_failure"],
+  ] as const) {
+    for (const error of [
+      rawDatabaseFailure(sqlState),
+      new ToolCallError("Failed to run function tools", rawDatabaseFailure(sqlState)),
+    ]) {
+      expect(runningDatabaseRecovery(error)).toMatchObject({
+        type: "OpenGeniPostClaimDatabaseRecovery",
+        details: [{ ...identity, code }],
+      });
+    }
+    // An uncertain or no-replay sibling still vetoes recovery.
+    const uncertain = new RoutingMutationOutcomeUnknownError("execCommand", "outcome unknown");
+    expect(
+      runningDatabaseRecovery(new AggregateError([rawDatabaseFailure(sqlState), uncertain])),
+    ).toBeNull();
+    // A driver-shaped error outside our own ORM/persistence boundary is not provenance.
+    expect(
+      runningDatabaseRecovery(
+        Object.assign(new Error("transaction aborted"), { name: "PostgresError", code: sqlState }),
+      ),
+    ).toBeNull();
+  }
+});
 
 test("own transaction provenance includes only the driver branch; rollback retains no-replay vetoes", () => {
   const closed = Object.assign(new Error("own connection closed"), { code: "CONNECTION_CLOSED" });
@@ -394,7 +424,9 @@ test("unreadable graph edges or structured facts cannot manufacture recovery aut
   }
 });
 
-test("positive DB sibling classification is stable, and late rollback siblings stay terminal", () => {
+test("positive DB sibling classification is stable before and after the model starts", () => {
+  // A rolled-back deadlock sibling is a definite non-commit, so it no longer
+  // keeps a running turn terminal; the outage sibling still names the class.
   for (const errors of [
     [rawDatabaseFailure("57P01"), rawDatabaseFailure("40P01")],
     [rawDatabaseFailure("40P01"), rawDatabaseFailure("57P01")],
@@ -402,7 +434,9 @@ test("positive DB sibling classification is stable, and late rollback siblings s
     expect(
       postClaimDatabaseRecoveryFailure({ error: new AggregateError(errors), ...identity }),
     ).toMatchObject({ details: [{ ...identity, code: "db_failure" }] });
-    expect(runningDatabaseRecovery(new AggregateError(errors))).toBeNull();
+    expect(runningDatabaseRecovery(new AggregateError(errors))).toMatchObject({
+      details: [{ ...identity, code: "db_failure" }],
+    });
   }
 });
 

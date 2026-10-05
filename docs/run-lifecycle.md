@@ -644,6 +644,14 @@ Transport evidence belongs to its trusted DB source subtree, never an unrelated
 aggregate sibling. All permanent/uncertain DB and no-replay evidence vetoes
 regardless of sibling order. Duplicate references/cycles consume no extra node
 budget; an incomplete or overflowed cause graph grants no recovery authority.
+A deadlock or serialization victim (SQLSTATE `40P01`/`40001`) raised through
+the same own ORM/typed persistence boundary enters the same lane. PostgreSQL
+aborted that whole transaction, so unlike a lost connection nothing it wrote
+committed; an escaped rollback therefore no longer keeps a running turn
+terminal, and it is never a reason to replay a tool. Hot per-call writers
+(pending tool-call results and model-history appends) first retry their own
+exactly idempotent transaction on these SQLSTATEs; connector-ledger
+transactions take the canonical event-write prefix and retry the same way.
 
 Versioned control observers distinguish unavailable session reads from idle
 business state. Missing and RLS-hidden rows are indistinguishable; neither is
@@ -3383,7 +3391,11 @@ recovery replays the stored bytes. The instructions never contain a clock.
    failure is a bounded `result_too_large` error and never puts the huge payload
    in history.
    Codemode callers skip the 1 MiB cap; the existing 16 MiB journal cap on
-   `session_attempt_codemode_calls` is unchanged. See
+   `session_attempt_codemode_calls` is unchanged. An attempt-gateway MCP result
+   is bounded only by the 8 MiB MCP transport cap before this seam, so a large
+   MCP read spills (or reaches Codemode exactly) instead of failing after the
+   provider already returned it; a direct non-gateway SDK MCP call keeps the
+   1 MiB exact-result bound. See
    `packages/runtime/src/tool-result-spill.ts` and
    `apps/worker/src/activities/agent-turn/tool-result-spill.ts`.
    The same per-caller seam applies model-only projections:
