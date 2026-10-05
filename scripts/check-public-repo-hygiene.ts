@@ -1,5 +1,6 @@
 import { dirname, extname, isAbsolute, relative, resolve, sep } from "node:path";
 import { lstat, readlink } from "node:fs/promises";
+import { createHash } from "node:crypto";
 import {
   catalogMcpUrlRejection,
   normalizeCatalogSnapshot,
@@ -59,6 +60,31 @@ const RETIRED_MILESTONE_LABEL = new RegExp(
   ["\\b(?:P4", "a|M", "12|F", "18|I", "8)\\b"].join(""),
   "gi",
 );
+// Published upstream random digest inputs must retain their expected hashes.
+// These exact bytes contain coincidental labels, not internal work references.
+// Only this rule is suppressed; every other public-text check still runs.
+const REVIEWED_UPSTREAM_LABEL_MATCHES: Record<
+  string,
+  { bytes: number; sha256: string; offsets: "all" | readonly number[] }
+> = {
+  "agent/vendor/async-nats/tests/configs/digests/digester_test_bytes_010000.txt": {
+    bytes: 10_000,
+    sha256: "460689f95489b6336f81772e8c2288bda85e897ffa19109c7dd4589c0715cb7f",
+    offsets: "all",
+  },
+  "agent/vendor/async-nats/tests/configs/digests/digester_test_bytes_100000.txt": {
+    bytes: 100_000,
+    sha256: "c9a9fba700559c2d72391aaa8017ddeb8fea030eaaf5f340eb4fca46230ca281",
+    offsets: "all",
+  },
+  "agent/vendor/async-nats/src/lib.rs": {
+    bytes: 61_798,
+    sha256: "d87f015a7be4c3abffa9df0366e59e2b6dfd64c89bee26d2437f50f280f296fe",
+    // Only the signed-byte field primitive, not a string or comment.
+    offsets: [9_379],
+  },
+};
+const RUST_SIGNED_BYTE_TYPE = ["i", "8"].join("");
 const PRIVATE_PROJECT_CODENAME = new RegExp(["\\bpelo", "ton\\b"].join(""), "gi");
 const RETIRED_DESIGN_RECORD_TERM = new RegExp(["\\bdos", "sier\\b"].join(""), "gi");
 const RETIRED_DESIGN_RECORD_PATH = new RegExp(
@@ -106,7 +132,17 @@ export function auditPublicText(file: string, source: string): Finding[] {
   collectMatches(file, source, PRIVATE_WORKTREE_PATH, "private worktree path", findings);
   collectMatches(file, source, PRIVATE_ISSUE_REFERENCE, "private issue reference", findings);
   collectMatches(file, source, INTERNAL_WORK_LABEL, "internal work label", findings);
-  collectMatches(file, source, RETIRED_MILESTONE_LABEL, "retired milestone label", findings);
+  const reviewedLabels = reviewedUpstreamLabelOffsets(file, source);
+  collectMatches(
+    file,
+    source,
+    RETIRED_MILESTONE_LABEL,
+    "retired milestone label",
+    findings,
+    (match) =>
+      reviewedLabels === "all" ||
+      (match[0] === RUST_SIGNED_BYTE_TYPE && reviewedLabels?.includes(match.index ?? -1) === true),
+  );
   collectMatches(file, source, MACHINE_NIX_STORE_PATH, "machine-specific Nix store path", findings);
   collectMatches(file, source, PERSONAL_NAME, "personal name", findings);
   if (!LEGACY_MIGRATION_REFERENCE_ALLOWLIST.has(file)) {
@@ -424,11 +460,25 @@ function collectMatches(
   pattern: RegExp,
   reason: string,
   findings: Finding[],
+  ignore?: (match: RegExpMatchArray) => boolean,
 ): void {
   pattern.lastIndex = 0;
   for (const match of source.matchAll(pattern)) {
+    if (ignore?.(match)) continue;
     findings.push({ file, line: lineAt(source, match.index ?? 0), reason });
   }
+}
+
+function reviewedUpstreamLabelOffsets(
+  file: string,
+  source: string,
+): "all" | readonly number[] | undefined {
+  const reviewed = REVIEWED_UPSTREAM_LABEL_MATCHES[file];
+  if (!reviewed || Buffer.byteLength(source, "utf8") !== reviewed.bytes) return undefined;
+  if (createHash("sha256").update(source, "utf8").digest("hex") !== reviewed.sha256) {
+    return undefined;
+  }
+  return reviewed.offsets;
 }
 
 function lineAt(source: string, index: number): number {

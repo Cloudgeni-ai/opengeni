@@ -8,6 +8,10 @@ Its source copyright headers remain intact. `LICENSE` contains the Apache 2.0
 license from that exact upstream revision. The declared Rust 1.79 requirement
 remains compatible with the agent workspace's Rust 1.82 minimum.
 
+The upstream generated `cargotree` and `lcov.info` diagnostics are omitted.
+Neither is a source or test input. Random digest fixtures remain byte-identical
+so their upstream object-store integrity expectations are preserved.
+
 The local changes are confined to three source files and synthetic tests:
 
 - `connection.rs` treats every nonempty internal write buffer as pending work,
