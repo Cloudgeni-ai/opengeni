@@ -2066,6 +2066,23 @@ than rapidly creating sibling boxes. `opengeni_sandbox_readiness_replacements_to
 still counted by `opengeni_sandbox_warming_timeouts_total`. Any later
 display/setup failure follows the same owned cleanup path.
 
+A cancelled creator (Pause, Steer, or a worker shutdown during a rolling
+deploy) owns its own cleanup. Before publication it terminates its unpublished
+box and rolls the exact warming epoch back to cold; after publication it never
+terminates the box and only drops its holder, so the replacement attempt resumes
+the same box by exact provider id. Because a provider establish has no portable
+abort, the turn finalizer joins every still-running physical establish (bounded
+at 60 seconds and independent of the finalizer cancellation signal) before the
+activity returns, so a shutting-down worker cannot exit mid-cleanup and strand a
+warming lease naming a terminated box. A cancelled sibling waiter stops polling
+immediately. If a creator dies hard anyway, the warming-death reaper drains the
+attributed instance; when that never-published instance (provider recovery
+still `creating`) is then missing, the cold commit keeps the pre-warming restore
+truth (pending archive restore, or nothing to restore) and records provider
+`not_created`/`replacement_failed`, never `unrecoverable`, and emits no
+provider-missing audit, operator event, or metric. Only a published box's loss
+before capture is a lost-workspace verdict.
+
 After a managed lease is warm, immutable Sandbox Environment setup has a second, setup-specific
 single-flight boundary. One worker claims the exact `(lease epoch, provider
 instance, setup spec hash)` receipt and runs the existing marker-guarded script;
