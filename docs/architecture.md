@@ -359,7 +359,9 @@ revalidated at use. An embedding host may narrow access through an explicit
 port; it cannot grant access that OpenGeni denied.
 
 The managed personal-workspace owner receives a closed permission projection
-that includes `capabilities:manage`, so they can configure their own Plugins,
+that includes live viewing and handoff (`stream:view`, `stream:control`,
+`stream:acknowledge`, `terminal:attach`, and `files:write`) within their own
+workspace, and `capabilities:manage`, so they can configure their own Plugins,
 Integrations, and Codex subscription without receiving the `workspace:admin`
 wildcard, member management, or API-key delegation.
 `requireWorkspaceSettingsGrant` in the access resolver separately admits the
