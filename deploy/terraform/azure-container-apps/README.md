@@ -64,8 +64,12 @@ and contain at least 32 characters after trimming; an API-only key is rejected.
 Serving defaults to a real **Modal** sandbox. `none`, `local`, `docker`, and
 Connected Machine `selfhosted` are not supported serving choices in this root.
 Supply Modal token ID/secret and a real model credential before enabling apps.
-The default model credential requirement is `OPENGENI_OPENAI_API_KEY`; for Azure
-OpenAI or another deployment provider, change `required_model_secret_env`
+The default model credential requirement is `OPENGENI_OPENAI_API_KEY`. The runtime
+also accepts `OPENAI_API_KEY`, with a nonblank canonical value taking precedence.
+For alias-only use, supply `secret_env.OPENAI_API_KEY` and set
+`required_model_secret_env = ["OPENAI_API_KEY"]`; native preflight preserves that
+selection rather than demanding the unused canonical name. For Azure OpenAI or
+another deployment provider, change `required_model_secret_env`
 together with the shipped provider's non-secret configuration. Other listed
 remote backends require their actual credentials/endpoints, and their live
 behavior remains separately unverified. For Modal Computer/Browser, explicitly

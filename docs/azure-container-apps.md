@@ -66,6 +66,13 @@ inline model-provider `apiKey` fields. Prefer `apiKeyEnv` for model JSON. Put an
 other credential-bearing JSON in `secret_env` explicitly: these checks are not
 a general-purpose secret detector. Never commit the private variable file.
 
+The default OpenAI credential can use `OPENGENI_OPENAI_API_KEY` or the runtime's
+`OPENAI_API_KEY` alias. A nonblank canonical value takes precedence when both
+are present. For alias-only delivery, put `OPENAI_API_KEY` in `secret_env` and
+set `required_model_secret_env = ["OPENAI_API_KEY"]` so Terraform checks the same
+credential name that preflight and the runtime use. Missing both names is still
+an error; an accepted credential name does not prove model access or funding.
+
 ## Bootstrap and activation
 
 1. Choose the resource group, region, names, external service endpoints, matching
