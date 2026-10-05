@@ -1796,6 +1796,13 @@ export const managedPersonalWorkspacePermissions: Permission[] = [
   "sessions:create",
   "sessions:read",
   "sessions:control",
+  // Live viewing and handoff of the owner's own sessions (browser/computer sign-in handoff, desktop,
+  // terminal, file edits). Without these the owner was refused (403) when joining their own handoff.
+  "stream:view",
+  "stream:control",
+  "stream:acknowledge",
+  "terminal:attach",
+  "files:write",
   "files:upload",
   "files:read",
   "documents:manage",
