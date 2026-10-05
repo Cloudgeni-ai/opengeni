@@ -37,6 +37,9 @@ reference to an empty registry does not populate it.
   custom domains.
 - Use a remote sandbox such as Modal. ACA neither exposes a Docker host socket
   nor makes its application replica a durable user workspace.
+  The API and workers fix `OPENGENI_SANDBOX_OWNERSHIP_ENABLED=true` so sandbox
+  execution and file publication use the holder-fenced ownership path. This
+  setting cannot be overridden through the generic environment maps.
 
 The API/web images must be compatible with one another and with the migration,
 worker, and outbox images. Prefer one release BOM with immutable image digests.
@@ -55,6 +58,13 @@ not a product identity in that posture. The client advertises `configuredToken`
 in either case, so verify actual authenticated access rather than guessing the
 posture from that label. `managed` access has additional identity, email, and
 signing prerequisites and is not implied by the default profile.
+
+An explicit delegation secret must reach API, control, and turn roles and meet
+this module's trimmed 32-character minimum. Place OTLP authorization headers in
+`secret_env`, not `config_env`; the latter rejects known header settings and
+inline model-provider `apiKey` fields. Prefer `apiKeyEnv` for model JSON. Put any
+other credential-bearing JSON in `secret_env` explicitly: these checks are not
+a general-purpose secret detector. Never commit the private variable file.
 
 ## Bootstrap and activation
 
@@ -97,6 +107,29 @@ Select a real remote sandbox explicitly; the generic conformance script defaults
 to `none`. Keep deployment shared-key or product tokens in environment variables,
 not command arguments or retained logs.
 
+The generic script's random browser origin is unsuitable for this root's exact
+Blob CORS policy. Use the actual edge origin and opt into foreign-origin denial;
+select a funded model explicitly when the default model is not configured:
+
+```bash
+bun run deployment:conformance -- --base-url "$OPENGENI_CONFORMANCE_BASE_URL" \
+  --sandbox-backend modal --model "$OPENGENI_CONFORMANCE_MODEL" \
+  --browser-origin "$OPENGENI_CONFORMANCE_BASE_URL" \
+  --deny-foreign-browser-origin --skip-observability --json
+bun scripts/deployment-aca-observability.ts \
+  --terraform-root deploy/terraform/azure-container-apps
+```
+
+Run the private helper with the initialized backend, its `TF_DATA_DIR`, and the
+authenticated Azure CLI environment used for deployment. It reads API request
+metrics on the authenticated private listener and control/turn metrics plus
+health/readiness through Azure exec. It requires nonce-bound evidence and does
+not interpret CLI exit code zero alone as success. Public metrics are deliberately
+skipped in the generic runner; the private check is separate and required.
+Log Analytics retains application logs. Delivery to an external OTLP collector
+and downstream ingestion of metrics or traces require their own acceptance
+checks; this helper does not prove them.
+
 Static Terraform tests prove configuration properties, not an operational
 deployment. Live acceptance must cover:
 
@@ -124,7 +157,8 @@ unchanged Linux launcher to prove network-namespace denial, read-only mounts,
 scratch isolation, and process resource limits using `bwrap` and `prlimit`.
 Never enable unsandboxed development materialization on an ACA replica.
 
-This root fixes `OPENGENI_ARTIFACT_MATERIALIZER_DEPLOYED=false`; there is no
+This root fixes `OPENGENI_ARTIFACT_MATERIALIZER_DEPLOYED=false` and
+`OPENGENI_SANDBOX_ARTIFACT_RUNTIME_ENABLED=false`; there is no
 operator assertion or activation input. A live probe on the tested ACA
 Consumption environment failed because unprivileged namespace creation was
 denied. Native document, spreadsheet, and presentation exports are therefore

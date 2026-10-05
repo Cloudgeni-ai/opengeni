@@ -1920,7 +1920,12 @@ They are not production defaults.
 
 The `azure-container-apps` profile is a separate runtime platform, not an AKS
 variant. Its Terraform root owns both substrate and ACA application workloads;
-it does not render Helm values or install Kubernetes platform charts. See
+it does not render Helm values or install Kubernetes platform charts. Native
+environment routing keeps API/web internal behind one public origin and workers
+unrouted. Remote sandbox ownership is enabled for durable execution/file delivery;
+the sandbox artifact runtime and native exports remain disabled. The ACA private
+observability helper verifies metrics and worker readiness, not downstream OTLP
+collector ingestion. See
 [`azure-container-apps.md`](azure-container-apps.md) for activation and limits.
 
 Procedures, provider requirements, activation and recovery: [`deployment.md`](deployment.md).

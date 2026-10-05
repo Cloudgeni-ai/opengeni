@@ -12,7 +12,7 @@ Use this reference to orient source discovery for OpenGeni deployment work. It i
   `docs/azure-container-apps.md`. Its Terraform owns application workloads as
   well as substrate; use the ACA operator plan, never the Helm artifact renderer.
 - Optional stack wrappers for upstream platform charts: `deploy/stacks`.
-- Validation scripts: `scripts/deployment-preflight.ts`, `scripts/deployment-stack.ts`, `scripts/deployment-runtime-artifacts.ts`, `scripts/deployment-temporal-values.ts`, and `scripts/deployment-conformance.ts`.
+- Validation scripts: `scripts/deployment-preflight.ts`, `scripts/deployment-stack.ts`, `scripts/deployment-runtime-artifacts.ts`, `scripts/deployment-temporal-values.ts`, and `scripts/deployment-conformance.ts`. ACA additionally uses `scripts/deployment-aca-observability.ts` for private API/control/turn metrics and readiness; public `/metrics` and downstream collector ingestion are not its acceptance evidence.
 - Connected Machine (`selfhosted` backend) surfaces: the stream relay edge `agent/crates/opengeni-relay`; the enrollment routes `apps/api/src/routes/enrollments.ts` over `apps/api/src/sandbox/enrollment.ts`; the agent install/binary routes `apps/api/src/routes/install.ts` plus the committed `agent/install`; the relay/NATS chart templates under `deploy/helm/opengeni/templates` (`relay-*.yaml`, `nats-*.yaml`) and the `relay`/`nats`/`selfhosted` blocks in `deploy/helm/opengeni/values.yaml`; the `@opengeni/react/machines` client subpath.
 
 If paths move, rediscover by searching for deployment profile names, `DeploymentContract`, `stackPlanFor`, `deployment:preflight`, `deployment:stack`, Helm values files, and Terraform roots.
