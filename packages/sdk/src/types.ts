@@ -4302,6 +4302,13 @@ export type ClientConfig = {
   /** Session proxy sandbox-path download opt-in; absent on native deployments. */
   sandboxFiles?: boolean | undefined;
   /**
+   * `false` when a host's session proxy turns live voice off
+   * (`createSessionProxyHandler({ realtimeVoice: false })`), so UIs hide the
+   * voice button. Otherwise absent: availability comes from the workspace's
+   * realtime model catalog.
+   */
+  realtimeVoice?: boolean | undefined;
+  /**
    * Session proxy only: the workspace the proxy resolved for this user, so a
    * browser pointed at the proxy (`<OpenGeniChat baseUrl=... />`) needs no
    * workspace id. Absent on native deployments and older proxies.

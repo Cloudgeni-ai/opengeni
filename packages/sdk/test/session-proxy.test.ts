@@ -25,6 +25,19 @@ const OTHER_WORKSPACE_ID = "99999999-9999-4999-8999-999999999999";
 const EDITABLE_ID = "0123456789abcdef0123456789abcdef";
 const SITE_ID = "22222222-2222-4222-8222-222222222222";
 const PRODUCT = "https://product.example.test";
+const REALTIME_ID = "44444444-4444-4444-8444-444444444444";
+const CONNECTION_ID = "55555555-5555-4555-8555-555555555555";
+const OPERATION_ID = "66666666-6666-4666-8666-666666666666";
+const OWNER = { browserInstanceId: "browser-1", ownerKey: "k".repeat(32) };
+const VOICE_MODEL = {
+  id: "opengeni-azure/gpt-live-1",
+  label: "GPT Live 1",
+  provider: "OpenGeni",
+  description: "Realtime voice with session delegation",
+  available: true,
+  unavailableReason: null,
+  recommended: true,
+};
 const API = "https://api.example.test";
 const RESPONSE_EVENTS = [
   {
@@ -70,6 +83,20 @@ function upstreamServer() {
       body: multipart ? await request.formData() : text ? JSON.parse(text) : undefined,
     });
     const path = url.pathname;
+    if (path === `/v1/workspaces/${WORKSPACE_ID}/realtime-model-catalog`) {
+      return Response.json({ models: [VOICE_MODEL] });
+    }
+    if (path.endsWith("/mcp-credentials/rotate")) {
+      return Response.json({
+        operationKey: "k",
+        sessionId: SESSION_ID,
+        servers: [],
+        appliedAt: "",
+      });
+    }
+    if (path.includes(`/sessions/${SESSION_ID}/realtime`)) {
+      return Response.json({ mode: { id: REALTIME_ID, state: "active" }, replay: false });
+    }
     if (path === `/v1/workspaces/${WORKSPACE_ID}/transcriptions`) {
       return Response.json({ text: "transcribed words", languages: ["en"] });
     }
@@ -573,6 +600,318 @@ describe("createSessionProxyHandler", () => {
     expect(
       upstream.requests.some((request) => request.url.pathname.endsWith("/transcriptions")),
     ).toBe(false);
+  });
+
+  test("live voice routes are forwarded unchanged as the resolved user", async () => {
+    const checked: string[] = [];
+    const { upstream, browser } = setup({
+      authorizeSession: (sessionId) => {
+        checked.push(sessionId);
+        return true;
+      },
+    });
+    expect((await browser.getClientConfig()).realtimeVoice).toBeUndefined();
+    const catalog = await browser.getWorkspaceRealtimeModelCatalog(WORKSPACE_ID);
+    expect(catalog.models.map((model) => model.id)).toEqual(["opengeni-azure/gpt-live-1"]);
+    const connect = {
+      ...OWNER,
+      realtimeId: REALTIME_ID,
+      operationId: OPERATION_ID,
+      expectedVersion: 1,
+      expectedConnectionEpoch: 1,
+      rotate: false,
+    };
+    const begin = { ...OWNER, operationId: OPERATION_ID, model: "opengeni-azure/gpt-live-1" };
+    const webrtc = { ...connect, sdp: "v=0", version: "v3", browserActivation: "required" };
+    const activate = {
+      ...OWNER,
+      operationId: OPERATION_ID,
+      connectionEpoch: 2,
+      expectedVersion: 1,
+      expectedConnectionEpoch: 1,
+    };
+    const heartbeat = { ...OWNER, expectedVersion: 2 };
+    const sync = {
+      ...OWNER,
+      expectedVersion: 2,
+      connectionId: CONNECTION_ID,
+      connectionEpoch: 2,
+      entries: [
+        {
+          operationId: OPERATION_ID,
+          kind: "delegation_call",
+          text: "Invoices",
+          modelContext: "Row 7",
+        },
+      ],
+      clientAckThroughSequence: 3,
+    };
+    const end = { ...OWNER, expectedVersion: 2, reason: "user_stop" };
+    const calls: Array<[string, string, unknown, () => Promise<unknown>]> = [
+      [
+        "POST",
+        "realtime",
+        begin,
+        () => browser.beginSessionRealtime(WORKSPACE_ID, SESSION_ID, begin as never),
+      ],
+      [
+        "POST",
+        "realtime/webrtc",
+        webrtc,
+        () => browser.negotiateCodexRealtimeWebrtc(WORKSPACE_ID, SESSION_ID, webrtc as never),
+      ],
+      [
+        "POST",
+        "realtime/gateway",
+        connect,
+        () => browser.negotiateGatewayRealtime(WORKSPACE_ID, SESSION_ID, connect),
+      ],
+      [
+        "POST",
+        "realtime/supergrok",
+        connect,
+        () => browser.negotiateXaiSubscriptionRealtime(WORKSPACE_ID, SESSION_ID, connect),
+      ],
+      [
+        "POST",
+        `realtime/${REALTIME_ID}/connections/${CONNECTION_ID}/activate`,
+        activate,
+        () =>
+          browser.activateCodexRealtimeConnection(
+            WORKSPACE_ID,
+            SESSION_ID,
+            REALTIME_ID,
+            CONNECTION_ID,
+            activate,
+          ),
+      ],
+      [
+        "PATCH",
+        `realtime/${REALTIME_ID}/heartbeat`,
+        heartbeat,
+        () => browser.heartbeatSessionRealtime(WORKSPACE_ID, SESSION_ID, REALTIME_ID, heartbeat),
+      ],
+      [
+        "POST",
+        `realtime/${REALTIME_ID}/sync`,
+        sync,
+        () =>
+          browser.syncSessionRealtimeLedger(WORKSPACE_ID, SESSION_ID, REALTIME_ID, sync as never),
+      ],
+      [
+        "DELETE",
+        `realtime/${REALTIME_ID}`,
+        end,
+        () => browser.endSessionRealtime(WORKSPACE_ID, SESSION_ID, REALTIME_ID, end as never),
+      ],
+    ];
+    for (const [method, path, body, call] of calls) {
+      const before = upstream.requests.length;
+      await call();
+      const forwarded = upstream.requests.slice(before);
+      expect(forwarded).toHaveLength(1);
+      expect(forwarded[0]!.method).toBe(method);
+      expect(forwarded[0]!.url.pathname).toBe(
+        `/v1/workspaces/${WORKSPACE_ID}/sessions/${SESSION_ID}/${path}`,
+      );
+      expect(forwarded[0]!.body).toEqual(body);
+      expect(
+        JSON.parse(decodeURIComponent(forwarded[0]!.headers.get("x-opengeni-external-actor")!)),
+      ).toEqual({ mode: "external", identity: { externalId: "u_42", source: "northwind" } });
+    }
+    expect(checked).toEqual(calls.map(() => SESSION_ID));
+  });
+
+  test("live voice routes are exact and keep the session check", async () => {
+    const session = `${PRODUCT}/api/opengeni/v1/workspaces/${WORKSPACE_ID}/sessions/${SESSION_ID}`;
+    const send = (
+      handler: (request: Request) => Promise<Response>,
+      method: string,
+      path: string,
+      body?: unknown,
+    ) =>
+      handler(
+        new Request(`${session}/${path}`, {
+          method,
+          headers: { "content-type": "application/json" },
+          ...(body === undefined ? {} : { body: JSON.stringify(body) }),
+        }),
+      );
+    const denied = setup({ authorizeSession: () => false });
+    const refused = await send(denied.handler, "POST", "realtime", OWNER);
+    expect(refused.status).toBe(404);
+    expect((await refused.json()).error.code).toBe("session_not_found");
+    const open = setup();
+    for (const [method, path] of [
+      ["GET", "realtime"],
+      ["DELETE", "realtime"],
+      ["POST", `realtime/${REALTIME_ID}`],
+      ["POST", "realtime/codex"],
+      ["POST", `realtime/${REALTIME_ID}/heartbeat`],
+      ["PATCH", `realtime/${REALTIME_ID}/sync`],
+      ["POST", `realtime/${REALTIME_ID}/connections/${CONNECTION_ID}`],
+      ["POST", `realtime/${REALTIME_ID}/ledger`],
+    ] as const) {
+      expect((await send(open.handler, method, path, OWNER)).status).toBe(404);
+    }
+    expect((await send(open.handler, "POST", "realtime")).status).toBe(400);
+    expect(denied.upstream.requests).toHaveLength(0);
+    expect(open.upstream.requests).toHaveLength(0);
+  });
+
+  test("realtimeVoice: false reports voice off and refuses every voice route", async () => {
+    const { upstream, browser } = setup({ realtimeVoice: false });
+    expect((await browser.getClientConfig()).realtimeVoice).toBe(false);
+    const catalog = await rejection(browser.getWorkspaceRealtimeModelCatalog(WORKSPACE_ID));
+    expect(catalog.status).toBe(404);
+    const begin = await rejection(
+      browser.beginSessionRealtime(WORKSPACE_ID, SESSION_ID, {
+        ...OWNER,
+        operationId: OPERATION_ID,
+        model: "opengeni-azure/gpt-live-1",
+      }),
+    );
+    expect(begin.status).toBe(404);
+    const end = await rejection(
+      browser.endSessionRealtime(WORKSPACE_ID, SESSION_ID, REALTIME_ID, {
+        ...OWNER,
+        expectedVersion: 1,
+        reason: "user_stop",
+      }),
+    );
+    expect(end.status).toBe(404);
+    expect(upstream.requests.some((request) => request.url.pathname.includes("realtime"))).toBe(
+      false,
+    );
+  });
+
+  test("beforeForwardMessage gates voice start and adds context to spoken messages", async () => {
+    const inputs: unknown[] = [];
+    let refuse = false;
+    const { upstream, browser } = setup({
+      beforeForwardMessage: (input) => {
+        inputs.push(input);
+        if (refuse) return new Response("Plan required", { status: 402 });
+        return { modelContext: "Page: /billing" };
+      },
+    });
+    const begin = () =>
+      browser.beginSessionRealtime(WORKSPACE_ID, SESSION_ID, {
+        ...OWNER,
+        operationId: OPERATION_ID,
+        model: "opengeni-azure/gpt-live-1",
+      });
+    const sync = (entries: unknown[]) =>
+      browser.syncSessionRealtimeLedger(WORKSPACE_ID, SESSION_ID, REALTIME_ID, {
+        ...OWNER,
+        expectedVersion: 2,
+        connectionId: CONNECTION_ID,
+        connectionEpoch: 2,
+        entries: entries as never,
+      });
+    await begin();
+    // Acks and interruptions carry no message, so the hook is not consulted.
+    await sync([]);
+    await sync([{ operationId: OPERATION_ID, kind: "interruption" }]);
+    expect(inputs).toEqual([{ sessionId: SESSION_ID, delivery: "realtime" }]);
+    await sync([
+      { operationId: OPERATION_ID, kind: "delegation_call", text: "a", modelContext: "Row 7" },
+      { operationId: OPERATION_ID, kind: "user_transcript", role: "user", text: "b" },
+      { operationId: OPERATION_ID, kind: "interruption" },
+    ]);
+    expect((upstream.requests.at(-1)!.body as { entries: unknown[] }).entries).toEqual([
+      {
+        operationId: OPERATION_ID,
+        kind: "delegation_call",
+        text: "a",
+        modelContext: "Page: /billing\n\nRow 7",
+      },
+      {
+        operationId: OPERATION_ID,
+        kind: "user_transcript",
+        role: "user",
+        text: "b",
+        modelContext: "Page: /billing",
+      },
+      { operationId: OPERATION_ID, kind: "interruption" },
+    ]);
+    refuse = true;
+    const count = upstream.requests.length;
+    expect((await rejection(begin())).status).toBe(402);
+    const spoken = sync([{ operationId: OPERATION_ID, kind: "delegation_call", text: "a" }]);
+    expect((await rejection(spoken)).status).toBe(402);
+    expect(upstream.requests).toHaveLength(count);
+  });
+
+  test("voice start refreshes the session's MCP credentials best-effort", async () => {
+    const rotations: unknown[] = [];
+    let rotateStatus = 200;
+    const upstream = upstreamServer();
+    const service = new OpenGeniClient({
+      baseUrl: API,
+      apiKey: "og_org_key",
+      fetch: async (input, init) => {
+        const request = new Request(input, init);
+        const path = new URL(request.url).pathname;
+        if (path.endsWith("/mcp-credentials/rotate")) {
+          rotations.push(await request.clone().json());
+          if (rotateStatus !== 200) {
+            return Response.json(
+              { error: { code: "SESSION_MCP_CREDENTIALS_BUSY", message: "busy" } },
+              { status: rotateStatus },
+            );
+          }
+        }
+        if (path === `/v1/workspaces/${WORKSPACE_ID}/sessions/${SESSION_ID}`) {
+          return Response.json({
+            id: SESSION_ID,
+            workspaceId: WORKSPACE_ID,
+            status: "idle",
+            mcpServers: [{ id: "crm", url: "https://crm.example.test/mcp", credentialVersion: 3 }],
+          });
+        }
+        return upstream.fetch(request);
+      },
+    });
+    const handler = createSessionProxyHandler(service, {
+      resolve: () => ({ workspaceId: WORKSPACE_ID, user: "u_42" }),
+      beforeForwardMessage: () => ({
+        mcpCredentialUpdates: [
+          { id: "crm", headers: { Authorization: "Bearer fresh" } },
+          { id: "not-attached", headers: { Authorization: "Bearer other" } },
+        ],
+      }),
+    });
+    const browser = new OpenGeniClient({
+      baseUrl: `${PRODUCT}/api/opengeni`,
+      fetch: async (input, init) => await handler(new Request(input, init)),
+    });
+    const begin = () =>
+      browser.beginSessionRealtime(WORKSPACE_ID, SESSION_ID, {
+        ...OWNER,
+        operationId: OPERATION_ID,
+        model: "opengeni-azure/gpt-live-1",
+      });
+    await begin();
+    expect(rotations).toEqual([
+      {
+        operationKey: expect.any(String),
+        updates: [
+          {
+            id: "crm",
+            expectedCredentialVersion: 3,
+            expectedServerUrl: "https://crm.example.test/mcp",
+            headers: { Authorization: "Bearer fresh" },
+          },
+        ],
+      },
+    ]);
+    // A running turn refuses rotation; the call still starts.
+    rotateStatus = 409;
+    await begin();
+    expect(rotations).toHaveLength(2);
+    const begun = upstream.requests.filter((request) => request.url.pathname.endsWith("/realtime"));
+    expect(begun).toHaveLength(2);
   });
 
   test("creation is unavailable unless the server supplies a createSession hook", async () => {

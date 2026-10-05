@@ -116,6 +116,10 @@ const REALTIME_PROVIDER_META: Record<
   },
   "Your Gateway": { billingClass: "byok", hint: "Billed to your AI Gateway" },
 };
+/** Display name; the catalog's `provider` value stays the wire identifier. */
+function realtimeProviderLabel(provider: RealtimeModelProvider): string {
+  return provider === "OpenGeni" ? "Opengeni" : provider;
+}
 const REALTIME_MODEL_STORAGE_PREFIX = "opengeni:realtime-model";
 const REALTIME_MODEL_CATALOG_CACHE_TTL_MS = 60_000;
 const REALTIME_MODEL_CATALOG_CACHE_MAX_WORKSPACES = 64;
@@ -1220,7 +1224,7 @@ export function RealtimeModelPickerMenu(props: {
   const body = props.provider ? (
     <div data-testid="realtime-model-picker-models">
       <PickerBackHeader
-        label={props.provider}
+        label={realtimeProviderLabel(props.provider)}
         icon={
           <BillingClassMark
             billingClass={REALTIME_PROVIDER_META[props.provider].billingClass}
@@ -1263,7 +1267,7 @@ export function RealtimeModelPickerMenu(props: {
         return (
           <PickerNavRow
             key={provider}
-            label={provider}
+            label={realtimeProviderLabel(provider)}
             hint={meta.hint}
             icon={<BillingClassMark billingClass={meta.billingClass} aria-label="" />}
             active={props.selectedModel.provider === provider}

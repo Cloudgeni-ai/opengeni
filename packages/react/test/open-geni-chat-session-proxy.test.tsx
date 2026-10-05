@@ -438,6 +438,21 @@ async function mountStockChat(
     }
     if (path === `${ss}/archive`) return json(sessionRecord());
     if (path === `${ws}/model-catalog`) return json({ models: [], defaultModel: "m" });
+    if (path === `${ws}/realtime-model-catalog`) {
+      return json({
+        models: [
+          {
+            id: "opengeni-azure/gpt-live-1",
+            label: "GPT Live 1",
+            provider: "OpenGeni",
+            description: "Hosted live voice",
+            available: true,
+            unavailableReason: null,
+            recommended: true,
+          },
+        ],
+      });
+    }
     if (path.startsWith(`${ws}/files/`) && path.endsWith("/download-url")) {
       return json({
         url: "https://objects.test/generated.png?sig=1",
@@ -601,6 +616,13 @@ describe("stock OpenGeniChat behind the default session proxy", () => {
 
     // 3. The composer microphone appears when the deployment can transcribe.
     expect(chat.container.querySelector("[data-og-composer-dictate]")).not.toBeNull();
+    // Live voice appears once the workspace offers an available voice model.
+    expect(chat.browser).toContain(`200 GET /v1/workspaces/${WS}/realtime-model-catalog`);
+    expect(
+      chat.container.querySelector(
+        "[data-og-conversation-composer] [data-testid='realtime-primary-action']",
+      ),
+    ).not.toBeNull();
 
     // 4. A proxy with a createSession hook and archive on offers both.
     expect(chat.buttons()).toContain("New chat");

@@ -12,6 +12,7 @@ export type ClientConfigFlagsSource = {
     sessionCreation?: boolean | undefined;
     archive?: boolean | undefined;
     voiceInput?: ClientVoiceInputConfig | undefined;
+    realtimeVoice?: boolean | undefined;
   }>;
 };
 
@@ -33,6 +34,11 @@ export type ClientConfigFlags = {
   archive: boolean;
   /** Native voice input when the deployment can transcribe, else null. */
   voiceInput: ClientVoiceInputConfig | null;
+  /**
+   * Live voice. `false` until the config loads and when a session proxy turns
+   * it off; availability otherwise comes from the realtime model catalog.
+   */
+  realtimeVoice: boolean;
 };
 
 const INITIAL_FLAGS: ClientConfigFlags = {
@@ -45,6 +51,7 @@ const INITIAL_FLAGS: ClientConfigFlags = {
   sessionCreation: true,
   archive: true,
   voiceInput: null,
+  realtimeVoice: false,
 };
 
 type ClientConfigFlagsInput = Awaited<ReturnType<ClientConfigFlagsSource["getClientConfig"]>>;
@@ -89,6 +96,7 @@ export function useClientConfigFlags(
             sessionCreation: config.sessionCreation !== false,
             archive: config.archive !== false,
             voiceInput: config.voiceInput?.available === true ? config.voiceInput : null,
+            realtimeVoice: config.realtimeVoice !== false,
           });
         }
       },

@@ -642,3 +642,105 @@ test("the complete conversation forwards only picker appearance without replacin
     }
   }
 });
+
+test("the composer offers live voice only when an available voice model exists", async () => {
+  const base = fakeClient({});
+  const voiceModel = {
+    id: "opengeni-azure/gpt-live-1",
+    label: "GPT Live 1",
+    provider: "OpenGeni",
+    description: "Realtime voice with session delegation",
+    available: true,
+    unavailableReason: null,
+    recommended: true,
+  } as const;
+  const effectiveControl = {
+    state: "active",
+    controlVersion: 0,
+    controlEtag: "active-0",
+    directState: "active",
+    primaryBlocker: null,
+    additionalBlockerCount: 0,
+    blockers: [],
+    resumeOptions: [],
+    override: null,
+    settlement: null,
+  };
+  const scenario = (input: {
+    realtimeVoice?: boolean;
+    models?: Array<typeof voiceModel | Record<string, unknown>> | null;
+  }) => {
+    let catalogReads = 0;
+    const client = fakeClient({
+      getClientConfig: async () =>
+        ({
+          ...(await base.getClientConfig()),
+          ...(input.realtimeVoice === undefined ? {} : { realtimeVoice: input.realtimeVoice }),
+        }) as never,
+      getSession: async () => ({ id: SESSION_ID, status: "idle", effectiveControl }) as never,
+      getQueue: async () =>
+        ({ version: 1, effectiveControl, items: [], pendingInputs: [] }) as never,
+      listHumanInputRequests: async () => [],
+      streamEvents: async function* (
+        _workspace: string,
+        _session: string,
+        options?: { signal?: AbortSignal },
+      ) {
+        await new Promise<void>((resolve) =>
+          options?.signal?.addEventListener("abort", () => resolve(), { once: true }),
+        );
+        yield* [];
+      },
+      ...(input.models === null
+        ? {}
+        : {
+            getWorkspaceRealtimeModelCatalog: async () => {
+              catalogReads++;
+              return { models: input.models ?? [voiceModel] } as never;
+            },
+          }),
+    } as never);
+    return { client, reads: () => catalogReads };
+  };
+  const voiceButton = (container: HTMLElement) =>
+    container.querySelector(
+      "[data-og-conversation-composer] [data-testid='realtime-primary-action']",
+    );
+  for (const [label, input, prop, shown, read] of [
+    ["available model", {}, undefined, true, true],
+    ["proxy turned voice off", { realtimeVoice: false }, undefined, false, false],
+    ["host prop off", {}, false, false, false],
+    [
+      "only unavailable models",
+      { models: [{ ...voiceModel, available: false, unavailableReason: "Add credits" }] },
+      undefined,
+      false,
+      true,
+    ],
+    ["client without voice", { models: null }, undefined, false, false],
+  ] as const) {
+    const { client, reads } = scenario(input as never);
+    const view = await renderComponent(
+      <SessionConversation
+        sessionId={SESSION_ID}
+        client={client}
+        workspaceId={WORKSPACE_ID}
+        {...(prop === undefined ? {} : { realtimeVoice: prop })}
+      />,
+    );
+    try {
+      if (shown) {
+        await waitFor(() => voiceButton(view.container) !== null, `${label}: voice button`);
+        expect(voiceButton(view.container)!.getAttribute("aria-label")).toBe(
+          "Start voice with GPT Live 1",
+        );
+      } else {
+        await flush(200);
+        expect(voiceButton(view.container)).toBeNull();
+      }
+      expect(reads() > 0).toBe(read);
+    } finally {
+      await view.unmount();
+    }
+  }
+});

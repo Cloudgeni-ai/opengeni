@@ -110,7 +110,12 @@ export type SessionProxyCreateInput = {
 export type SessionProxyMessageInput = {
   /** Absent for `create`. */
   sessionId?: string | undefined;
-  delivery: "create" | "send" | "steer" | "submit";
+  /**
+   * `realtime` is live voice: once when a call starts (refuse it, or rotate
+   * MCP credentials), and before each batch of finalized transcripts and spoken
+   * requests is saved (refuse it, or add `modelContext`).
+   */
+  delivery: "create" | "send" | "steer" | "submit" | "realtime";
 };
 
 /** Server-side additions the host attaches to one forwarded user message or response. */
@@ -118,7 +123,9 @@ export type SessionProxyMessageExtras = {
   /**
    * Model-visible context for this message (current page, time zone, today's
    * date). Placed before any context the browser sent. Not secret. Ignored for
-   * approval decisions and human-input responses, which are not new messages.
+   * approval decisions and human-input responses, which are not new messages,
+   * and when a live voice call starts. Keep it stable for the same message:
+   * a retried voice entry must carry the same context to be accepted.
    */
   modelContext?: string | undefined;
   /**
@@ -193,9 +200,10 @@ export type SessionProxyHandlerOptions = {
     | undefined;
   /**
    * Called before every forwarded user message (send, steer, composer submit,
-   * and browser-started create), approval decision, and human-input response.
-   * Return server-owned `modelContext` (messages only) and MCP credential
-   * rotations, or a `Response` to reject the action.
+   * and browser-started create), approval decision, human-input response, and
+   * live voice start and transcript save (`delivery: "realtime"`).
+   * Return server-owned `modelContext` (messages and voice transcripts only)
+   * and MCP credential rotations, or a `Response` to reject the action.
    */
   beforeForwardMessage?:
     | ((
@@ -237,6 +245,18 @@ export type SessionProxyHandlerOptions = {
    * hide the microphone. Defaults to true.
    */
   voiceInput?: boolean | undefined;
+  /**
+   * Forward live speech-to-speech voice for existing chats as the resolved
+   * user: the voice model catalog and the call lifecycle routes under
+   * `.../sessions/{id}/realtime`. Opengeni still requires that user's
+   * `sessions:control` permission, binds the call to that user and browser,
+   * runs spoken requests as ordinary steers of the chat, and meters
+   * deployment-funded voice against the organization's credits. The stock
+   * composer shows the voice button only when a voice model is available.
+   * `false` reports `realtimeVoice: false` in the client config so stock UIs
+   * hide it, and refuses the routes. Defaults to true.
+   */
+  realtimeVoice?: boolean | undefined;
   /**
    * Let the browser read a file from the session's sandbox (`POST .../fs/read`)
    * so `sandbox:` links in agent replies can be downloaded. Only `path`,
@@ -354,6 +374,7 @@ export function createSessionProxyHandler(
   const maxBodyBytes = options.maxBodyBytes ?? DEFAULT_MAX_BODY_BYTES;
   const filesEnabled = options.files ?? true;
   const voiceInputEnabled = options.voiceInput ?? true;
+  const realtimeVoiceEnabled = options.realtimeVoice ?? true;
   const sandboxFilesEnabled = options.sandboxFiles === true;
   const artifactsEnabled = options.artifacts !== undefined && options.artifacts !== false;
   const editableLiveUrl = artifactsEnabled
@@ -520,6 +541,39 @@ export function createSessionProxyHandler(
           ],
         };
       };
+      /**
+       * Best-effort standalone rotation before a voice call. Opengeni refuses
+       * it while a turn is running; that turn's message already refreshed them.
+       */
+      const refreshRealtimeCredentials = async (
+        sessionId: string,
+        updates: SessionMcpCredentialUpdateInput[],
+      ): Promise<void> => {
+        if (updates.length === 0) return;
+        try {
+          const servers = (await client.getSession(workspaceId, sessionId, call)).mcpServers ?? [];
+          const rotations = updates.flatMap((update) => {
+            const server = servers.find((candidate) => candidate.id === update.id);
+            return server
+              ? [
+                  {
+                    id: update.id,
+                    expectedCredentialVersion: server.credentialVersion,
+                    expectedServerUrl: server.url,
+                    headers: update.headers,
+                  },
+                ]
+              : [];
+          });
+          if (rotations.length === 0) return;
+          await client.rotateSessionMcpCredentials(workspaceId, sessionId, {
+            operationKey: crypto.randomUUID(),
+            updates: rotations,
+          });
+        } catch (error) {
+          if (!(error instanceof OpenGeniApiError)) throw error;
+        }
+      };
       /** Browser input sanitized, then server-owned extras merged in. */
       const forwardMessage = async (
         value: unknown,
@@ -617,6 +671,7 @@ export function createSessionProxyHandler(
             // Whether the stock "New chat" and "Archive" actions can succeed.
             sessionCreation: options.createSession !== undefined,
             archive: archiveEnabled,
+            ...(realtimeVoiceEnabled ? {} : { realtimeVoice: false }),
             // Explicit true also tells stock UIs to offer end users the model picker.
             ...(modelSelection
               ? options.modelSelection === true
@@ -649,6 +704,10 @@ export function createSessionProxyHandler(
       if (area === undefined && method === "GET") return await read(base);
       if (area === "model-catalog" && tail.length === 0 && method === "GET") {
         return await read(`${base}/model-catalog`);
+      }
+      if (area === "realtime-model-catalog" && tail.length === 0 && method === "GET") {
+        if (!realtimeVoiceEnabled) return errorJson(404, "route_not_allowed", "Not found.");
+        return await read(`${base}/realtime-model-catalog`);
       }
       if (area === "live-events" && tail.length === 1 && tail[0] === "stream" && method === "GET") {
         // Surface authorization failures as HTTP status before streaming.
@@ -879,6 +938,34 @@ export function createSessionProxyHandler(
           ? payload
           : json(await client.requestJson("POST", path, payload));
 
+      if (op[0] === "realtime") {
+        if (!realtimeVoiceEnabled) return errorJson(404, "route_not_allowed", "Not found.");
+        const realtime = realtimeRoute(method, op.slice(1));
+        if (!realtime) return errorJson(404, "route_not_allowed", "Not found.");
+        if (!body) reject(400, "invalid_body", "A JSON object body is required.");
+        const path = `${session}/${op.join("/")}`;
+        if (realtime === "begin") {
+          // The host may refuse a call; MCP credentials (including the tool
+          // server's per-user token) are refreshed before voice can delegate.
+          const extras = await messageExtras({
+            sessionId,
+            delivery: "realtime",
+          });
+          if (extras instanceof Response) return extras;
+          await refreshRealtimeCredentials(sessionId, extras?.mcpCredentialUpdates ?? []);
+        }
+        let payload: Record<string, unknown> = body;
+        if (realtime === "sync" && options.beforeForwardMessage && hasRealtimeMessages(body)) {
+          const extras = await options.beforeForwardMessage(
+            { sessionId, delivery: "realtime" },
+            context,
+          );
+          if (extras instanceof Response) return extras;
+          payload = withRealtimeContext(body, extras?.modelContext);
+        }
+        return json(await client.requestJson(method, path, payload));
+      }
+
       switch (route) {
         case "GET ":
           return await read(session);
@@ -1032,6 +1119,67 @@ export function createSessionProxyHandler(
 const PROXY_METHODS: readonly string[] = ["GET", "POST", "PUT", "PATCH", "DELETE"];
 
 const UPLOAD_FIELDS = ["scope", "filename", "contentType", "sizeBytes", "sha256"] as const;
+
+type RealtimeRoute = "begin" | "connect" | "heartbeat" | "end" | "activate" | "sync";
+const REALTIME_CONNECT_ROUTES: ReadonlySet<string> = new Set(["webrtc", "gateway", "supergrok"]);
+/** Ledger entries that become (or join) messages and so accept `modelContext`. */
+const REALTIME_MESSAGE_KINDS: ReadonlySet<string> = new Set([
+  "delegation_call",
+  "user_transcript",
+  "assistant_transcript",
+]);
+
+/**
+ * The live voice routes a browser call uses, after `realtime/`: begin, provider
+ * connect, heartbeat, end, connection activation, and transcript sync. Bodies
+ * pass to Opengeni, which validates them and binds the call to the acting user.
+ */
+function realtimeRoute(method: string, rest: string[]): RealtimeRoute | null {
+  if (rest.length === 0) return method === "POST" ? "begin" : null;
+  if (rest.length === 1) {
+    if (REALTIME_CONNECT_ROUTES.has(rest[0]!)) return method === "POST" ? "connect" : null;
+    return method === "DELETE" ? "end" : null;
+  }
+  if (rest.length === 2 && rest[1] === "heartbeat") return method === "PATCH" ? "heartbeat" : null;
+  if (rest.length === 2 && rest[1] === "sync") return method === "POST" ? "sync" : null;
+  if (rest.length === 4 && rest[1] === "connections" && rest[3] === "activate") {
+    return method === "POST" ? "activate" : null;
+  }
+  return null;
+}
+
+function hasRealtimeMessages(body: Record<string, unknown>): boolean {
+  return (
+    Array.isArray(body.entries) &&
+    body.entries.some(
+      (entry) =>
+        entry !== null &&
+        typeof entry === "object" &&
+        REALTIME_MESSAGE_KINDS.has((entry as { kind?: unknown }).kind as string),
+    )
+  );
+}
+
+/** Server context goes before the browser's on each message-bearing entry. */
+function withRealtimeContext(
+  body: Record<string, unknown>,
+  serverContext: string | undefined,
+): Record<string, unknown> {
+  if (!serverContext?.trim() || !Array.isArray(body.entries)) return body;
+  return {
+    ...body,
+    entries: body.entries.map((entry: unknown) => {
+      if (entry === null || typeof entry !== "object") return entry;
+      const record = entry as Record<string, unknown>;
+      if (!REALTIME_MESSAGE_KINDS.has(record.kind as string)) return entry;
+      const modelContext = joinContext(
+        serverContext,
+        typeof record.modelContext === "string" ? record.modelContext : undefined,
+      );
+      return modelContext ? { ...record, modelContext } : entry;
+    }),
+  };
+}
 
 type NormalizedToolServer = SessionProxyToolServer & {
   url: string;
