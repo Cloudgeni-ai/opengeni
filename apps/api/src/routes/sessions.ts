@@ -2577,31 +2577,55 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
       case "not_found":
         throw new HTTPException(404, { message: "session not found" });
       case "not_root":
-        throw new HTTPException(409, {
+        throw new ApiHttpError(409, {
+          code: "conflict",
           message: "Delete the chat this one belongs to; sub-chats are removed with it.",
+          retryable: false,
+          outcomeUnknown: false,
+          details: { code: "session_delete_not_root" },
         });
       case "active_sessions":
-        throw new HTTPException(409, {
+        throw new ApiHttpError(409, {
+          code: "conflict",
           message:
             "This chat is still running. Stop it, then delete it once its current turn has finished.",
+          retryable: true,
+          outcomeUnknown: false,
+          details: { code: "session_delete_active_sessions" },
         });
       case "active_video_generations":
-        throw new HTTPException(409, {
+        throw new ApiHttpError(409, {
+          code: "conflict",
           message: "Wait for this chat's video generations to finish before deleting it.",
+          retryable: false,
+          outcomeUnknown: false,
+          details: { code: "session_delete_active_video_generations" },
         });
       case "active_background_commands":
-        throw new HTTPException(409, {
+        throw new ApiHttpError(409, {
+          code: "conflict",
           message: "Stop this chat's background commands before deleting it.",
+          retryable: false,
+          outcomeUnknown: false,
+          details: { code: "session_delete_active_background_commands" },
         });
       case "live_sandboxes":
-        throw new HTTPException(409, {
+        throw new ApiHttpError(409, {
+          code: "conflict",
           message:
             "This chat's computer is still shutting down. Try deleting it again in a moment.",
+          retryable: true,
+          outcomeUnknown: false,
+          details: { code: "session_delete_live_sandboxes" },
         });
       case "externally_referenced":
-        throw new HTTPException(409, {
+        throw new ApiHttpError(409, {
+          code: "conflict",
           message:
             "This chat has saved workspace outputs or forks that depend on it. Archive it instead.",
+          retryable: false,
+          outcomeUnknown: false,
+          details: { code: "session_delete_externally_referenced" },
         });
     }
   });
