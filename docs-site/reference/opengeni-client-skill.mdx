@@ -656,6 +656,10 @@ Authorize every call:
 - Accept this token only on the tool endpoint, and never accept the product's
   login token there.
 
+Shape tools around what users ask. "Show my open orders" needs a list tool,
+or a search whose query is optional, with filters such as status. A search
+that requires a text query leaves the model guessing at keywords and failing.
+
 Tool endpoint in another language: run `await deriveToolTokenKey()` (from
 `@opengeni/sdk/tool-auth`) once, store the hex key as its own secret, and verify
 the JWT with any library: HS256, `iss` `"opengeni-session-proxy"`, `aud` the
