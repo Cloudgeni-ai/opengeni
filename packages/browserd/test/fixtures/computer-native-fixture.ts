@@ -27,6 +27,20 @@ async function handle(request: {
   method: string;
   targetId?: string;
 }): Promise<void> {
+  if (request.method === "handshake" && process.argv.includes("--handshake-error")) {
+    write({
+      protocolVersion: 3,
+      requestId: request.requestId,
+      status: "error",
+      error: {
+        code: "driver_failed",
+        message: "fixture handshake rejected",
+        retryable: false,
+        dispatched: false,
+      },
+    });
+    return;
+  }
   if (request.method === "targets") await new Promise((resolve) => setTimeout(resolve, 20));
   if (request.method === "observe" && request.targetId === "missing") {
     write({
