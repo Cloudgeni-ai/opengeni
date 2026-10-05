@@ -3943,30 +3943,97 @@ function withoutImageInputTools(tools: Tool<unknown>[]): Tool<unknown>[] {
   );
 }
 
-/** The SDK's function fallback accepts a string tuple but omits its item schema. */
-function withTypedApplyPatchCommand(tools: Tool<unknown>[]): Tool<unknown>[] {
+/**
+ * The SDK filesystem fallback's never-approve policy is a plain closure the SDK
+ * does not register as a static policy, so its runner treats `apply_patch` as
+ * a DYNAMIC approval tool. For a dynamic tool whose arguments are not valid
+ * JSON, the SDK fails safe by forcing a human approval interruption instead of
+ * returning the parse error to the model: a malformed patch from a weak model
+ * became a confusing approval card and stalled the session in
+ * `requires_action`. `apply_patch` never needs approval, so give it the SDK's
+ * own registered static `false` policy (minted by `tool({ needsApproval: false })`);
+ * malformed arguments then take the SDK's ordinary model-visible parse error.
+ * Genuine approval tools keep their own policies untouched.
+ */
+const STATIC_NEVER_APPROVAL: Extract<Tool<unknown>, { type: "function" }>["needsApproval"] =
+  agentTool({
+    name: "opengeni_static_never_approval",
+    description: "Policy source only; never exposed to a model.",
+    parameters: { type: "object", properties: {}, required: [], additionalProperties: false },
+    strict: true,
+    needsApproval: false,
+    execute: () => "",
+  }).needsApproval;
+
+const APPLY_PATCH_EXAMPLE =
+  "*** Begin Patch\n*** Add File: notes/example.txt\n+first line\n+second line\n*** End Patch";
+
+const APPLY_PATCH_DESCRIPTION = [
+  "Create, update, move, or delete files in the sandbox workspace.",
+  'Pass exactly one argument, `patch`: a single string in apply_patch format that starts with "*** Begin Patch" and ends with "*** End Patch".',
+  'File sections: "*** Add File: <path>" followed by lines each prefixed with "+"; "*** Delete File: <path>"; "*** Update File: <path>" (optionally followed by "*** Move to: <path>") with "@@" hunks whose lines start with " " (context), "-" (remove), or "+" (add).',
+  `Example arguments: ${JSON.stringify({ patch: APPLY_PATCH_EXAMPLE })}`,
+].join(" ");
+
+const APPLY_PATCH_PARAMETERS = {
+  type: "object",
+  properties: {
+    patch: {
+      type: "string",
+      description: `The whole patch as one string, from "*** Begin Patch" to "*** End Patch". Example: ${JSON.stringify(APPLY_PATCH_EXAMPLE)}`,
+    },
+  },
+  required: ["patch"],
+  // The SDK parser still accepts its legacy structured/tuple forms at runtime.
+  additionalProperties: true,
+} as const;
+
+/** Reject a JSON object the SDK parser cannot recognize with a corrective error. */
+function unrecognizedApplyPatchArgumentsError(input: string): string | null {
+  if (input.trimStart().startsWith("*** Begin Patch")) return null;
+  let payload: unknown;
+  try {
+    payload = JSON.parse(input);
+  } catch {
+    return null;
+  }
+  if (!payload || typeof payload !== "object" || Array.isArray(payload)) return null;
+  const record = payload as Record<string, unknown>;
+  if (
+    typeof record.patch === "string" ||
+    Array.isArray(record.command) ||
+    Array.isArray(record.operations) ||
+    record.operation !== undefined ||
+    typeof record.type === "string"
+  ) {
+    return null;
+  }
+  const keys = Object.keys(record);
+  return `Invalid apply_patch arguments: expected ${JSON.stringify({ patch: APPLY_PATCH_EXAMPLE })} (one string field named "patch"); got ${keys.length ? `keys ${keys.join(", ")}` : "no keys"}. Retry apply_patch with the whole patch in "patch".`;
+}
+
+/**
+ * Present the SDK's function `apply_patch` fallback (Chat Completions and
+ * Codex function transports) as one unambiguous string field, give it a static
+ * never-approval policy, and answer unrecognized argument objects with a
+ * corrective tool error the model can retry from.
+ */
+function withModelFacingApplyPatchFunction(tools: Tool<unknown>[]): Tool<unknown>[] {
   return tools.map((capabilityTool) => {
     if (capabilityTool.type !== "function" || capabilityTool.name !== "apply_patch") {
       return capabilityTool;
     }
-    const parameters = capabilityTool.parameters;
-    const command = parameters.properties?.command;
-    if (
-      !command ||
-      typeof command !== "object" ||
-      command.type !== "array" ||
-      command.items !== undefined
-    ) {
-      return capabilityTool;
-    }
+    const invoke = capabilityTool.invoke;
     return {
       ...capabilityTool,
-      parameters: {
-        ...parameters,
-        properties: {
-          ...parameters.properties,
-          command: { ...command, items: { type: "string" } },
-        },
+      description: APPLY_PATCH_DESCRIPTION,
+      parameters: APPLY_PATCH_PARAMETERS as unknown as typeof capabilityTool.parameters,
+      strict: false,
+      needsApproval: STATIC_NEVER_APPROVAL,
+      invoke: async (runContext, input, details) => {
+        const error =
+          typeof input === "string" ? unrecognizedApplyPatchArgumentsError(input) : null;
+        return error ?? invoke(runContext, input, details);
       },
     };
   });
@@ -4032,7 +4099,7 @@ function buildAgentCapabilitiesFromComposition(
   // results below; text-only/unproven wires remove the image tool entirely.
   // Scoped to filesystem: shell() is always a function-tool transport.
   const configureFilesystemTools = (tools: Tool<unknown>[]): Tool<unknown>[] => {
-    const typedTools = withTypedApplyPatchCommand(tools);
+    const typedTools = withModelFacingApplyPatchFunction(tools);
     const transportTools =
       options.structuredToolTransport === false
         ? withStructuredViewImageFunctionResults(typedTools)
