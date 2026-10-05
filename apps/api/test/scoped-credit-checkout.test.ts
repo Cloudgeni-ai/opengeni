@@ -15,7 +15,7 @@ let app: Hono;
 let settings: ReturnType<typeof testSettings>;
 let session: Stripe.Checkout.Session;
 let created: Stripe.Checkout.SessionCreateParams | null;
-let grants: Parameters<typeof db.applyCreditLedgerEntry>[1][];
+let grants: Parameters<typeof db.applyCreditLedgerEntryOnce>[1][];
 
 beforeEach(() => {
   restores.push(spyOn(db, "readCreditPromotionPolicy").mockResolvedValue(null));
@@ -57,9 +57,9 @@ beforeEach(() => {
     ),
   );
   restores.push(
-    spyOn(db, "applyCreditLedgerEntry").mockImplementation(async (_db, grant) => {
+    spyOn(db, "applyCreditLedgerEntryOnce").mockImplementation(async (_db, grant) => {
       grants.push(grant);
-      return {} as never;
+      return { balance: {} as never, inserted: true };
     }),
   );
   restores.push(

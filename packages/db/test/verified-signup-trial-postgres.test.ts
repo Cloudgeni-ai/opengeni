@@ -7,7 +7,9 @@ import { readFileSync } from "node:fs";
 
 import {
   applyCreditDebitAfterUse,
+  applyCreditDebitUpToBalance,
   applyCreditLedgerEntry,
+  applyCreditLedgerEntryOnce,
   completeSelfServiceOrganizationSetup,
   createManagedOrganization,
   createDb,
@@ -80,6 +82,46 @@ describe("verified signup trial and post-use credit settlement", () => {
     expect(after.promotionalCredits).toEqual(before.promotionalCredits);
     expect(after.balanceMicros).toBe(10_000_000);
   }, 180_000);
+  test("model debits report the trial-funded share and ledger inserts report replays", async () => {
+    if (!owned || !client) return;
+    const { result } = await setup(true, ["model-a"]);
+    const accountId = result.organizationId;
+    const topup = {
+      accountId,
+      type: "credit_topup",
+      amountMicros: 5_000_000,
+      idempotencyKey: `test-topup:${crypto.randomUUID()}`,
+    };
+    expect((await applyCreditLedgerEntryOnce(client.db, topup)).inserted).toBe(true);
+    const replayedTopup = await applyCreditLedgerEntryOnce(client.db, topup);
+    expect(replayedTopup.inserted).toBe(false);
+    expect(replayedTopup.balance.balanceMicros).toBe(15_000_000);
+
+    const debit = {
+      accountId,
+      type: "model_usage_debit",
+      requestedAmountMicros: 12_000_000,
+      modelId: "model-a",
+      sourceType: "model_response",
+      sourceId: "turn:response-1",
+      idempotencyKey: `credit:model_usage_debit:${crypto.randomUUID()}`,
+    };
+    const first = await applyCreditDebitUpToBalance(client.db, debit);
+    expect(first.debitedMicros).toBe(12_000_000);
+    expect(first.grantDebitedMicros).toBe(10_000_000);
+    const replay = await applyCreditDebitUpToBalance(client.db, debit);
+    expect(replay).toMatchObject({ debitedMicros: 0, grantDebitedMicros: 0 });
+
+    // A model the trial does not cover is paid from general credit only.
+    const general = await applyCreditDebitUpToBalance(client.db, {
+      ...debit,
+      modelId: "model-b",
+      requestedAmountMicros: 1_000_000,
+      idempotencyKey: `credit:model_usage_debit:${crypto.randomUUID()}`,
+    });
+    expect(general).toMatchObject({ debitedMicros: 1_000_000, grantDebitedMicros: 0 });
+  }, 180_000);
+
   test("launch flag and one-shot receipt trigger are the only grant authority", () => {
     const migration = readFileSync(
       new URL("../drizzle/0509_verified_signup_trial_credits.sql", import.meta.url),

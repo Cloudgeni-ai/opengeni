@@ -5760,26 +5760,40 @@ export async function sumUsageQuantity(
   });
 }
 
+type CreditLedgerEntryInput = {
+  accountId: string;
+  workspaceId?: string | null;
+  type: string;
+  amountMicros: number;
+  eligibleModelIds?: string[] | undefined;
+  sourceType?: string | null;
+  sourceId?: string | null;
+  idempotencyKey: string;
+  metadata?: Record<string, unknown>;
+  occurredAt?: Date;
+};
+
 export async function applyCreditLedgerEntry(
   db: Database,
-  input: {
-    accountId: string;
-    workspaceId?: string | null;
-    type: string;
-    amountMicros: number;
-    eligibleModelIds?: string[] | undefined;
-    sourceType?: string | null;
-    sourceId?: string | null;
-    idempotencyKey: string;
-    metadata?: Record<string, unknown>;
-    occurredAt?: Date;
-  },
+  input: CreditLedgerEntryInput,
 ): Promise<BillingBalance> {
+  return (await applyCreditLedgerEntryOnce(db, input)).balance;
+}
+
+/**
+ * {@link applyCreditLedgerEntry} that also reports whether this call inserted
+ * the row. `inserted` is false when the idempotency key already existed, so a
+ * caller can count a purchase exactly once even when two deliveries race.
+ */
+export async function applyCreditLedgerEntryOnce(
+  db: Database,
+  input: CreditLedgerEntryInput,
+): Promise<{ balance: BillingBalance; inserted: boolean }> {
   return await withRlsContext(
     db,
     { accountId: input.accountId, workspaceId: input.workspaceId ?? null },
     async (scopedDb) => {
-      await scopedDb
+      const inserted = await scopedDb
         .insert(schema.creditLedgerEntries)
         .values({
           accountId: input.accountId,
@@ -5795,8 +5809,12 @@ export async function applyCreditLedgerEntry(
         })
         .onConflictDoNothing({
           target: schema.creditLedgerEntries.idempotencyKey,
-        });
-      return await getBillingBalance(scopedDb, input.accountId);
+        })
+        .returning({ id: schema.creditLedgerEntries.id });
+      return {
+        balance: await getBillingBalance(scopedDb, input.accountId),
+        inserted: inserted.length > 0,
+      };
     },
   );
 }
@@ -5817,11 +5835,21 @@ export async function applyCreditDebitUpToBalance(
     metadata?: Record<string, unknown>;
     occurredAt?: Date;
   },
-): Promise<{ balance: BillingBalance; debitedMicros: number }> {
+): Promise<{
+  balance: BillingBalance;
+  debitedMicros: number;
+  /**
+   * The part of `debitedMicros` paid by scoped promotional grants (signup
+   * trial, scoped coupon offers). The rest came from general credit. Zero on
+   * an idempotent replay, like `debitedMicros`.
+   */
+  grantDebitedMicros: number;
+}> {
   if (input.requestedAmountMicros <= 0) {
     return {
       balance: await getBillingBalance(db, input.accountId),
       debitedMicros: 0,
+      grantDebitedMicros: 0,
     };
   }
   return await withRlsContext(
@@ -5869,6 +5897,9 @@ export async function applyCreditDebitUpToBalance(
       return {
         balance: await getBillingBalance(scopedDb, input.accountId),
         debitedMicros,
+        grantDebitedMicros: inserted
+          ? plan.allocations.reduce((sum, allocation) => sum + allocation.amountMicros, 0)
+          : 0,
       };
     },
   );

@@ -138,6 +138,7 @@ import {
   emitModelCallUsage,
   recordModelUsageAndDebitCredits,
   recordAuthoritativeModelCallFact,
+  recordAuthoritativeModelUsageMetrics,
 } from "./model-usage";
 import {
   sessionTitleGenerationOptions,
@@ -1617,6 +1618,7 @@ export async function runTurnStreamAttempt(
               sourceKey: aggregateSourceKey,
               latencyMode: turnExecutionPolicy.latencyMode,
               observability,
+              metricProvider: resolvedModel?.provider.id ?? settings.openaiProvider,
             });
             const aggregateProvider = resolvedModel?.provider.id ?? settings.openaiProvider;
             const aggregateProviderApi = resolvedModel?.provider.api ?? "responses";
@@ -1654,6 +1656,14 @@ export async function runTurnStreamAttempt(
                 model: turn.model,
                 billing,
                 contextContributions: eventing.companyBrainContextContributions,
+              });
+              recordAuthoritativeModelUsageMetrics({
+                observability,
+                settings,
+                provider: aggregateProvider,
+                model: turn.model,
+                externallyBilled: billingState.isExternallyBilledTurn,
+                billing,
               });
             }
             if (aggregateAuthoritative && aggregateInput !== null && aggregateInput > 0) {
