@@ -1,5 +1,8 @@
 import { describe, expect, test } from "bun:test";
+import { createObservability } from "@opengeni/observability";
+import { testSettings } from "@opengeni/testing";
 import {
+  recordCreditPurchaseMetrics,
   stripeCheckoutCreditDecision,
   stripeCheckoutSessionCreateParams,
 } from "../src/routes/billing";
@@ -129,4 +132,49 @@ test("a completed full-discount checkout grants the package face value", () => {
   expect(() => decide({ ...session, amount_subtotal: 500 })).toThrow(
     "invalid credit package totals",
   );
+});
+
+describe("credit purchase metrics", () => {
+  test("counts a paid purchase, its credits and the USD paid, labelled by mode only", async () => {
+    const observability = createObservability(testSettings(), { component: "api" });
+    recordCreditPurchaseMetrics(observability, {
+      livemode: true,
+      creditMicros: 25_000_000,
+      currency: "usd",
+      amountTotal: 2_000,
+    });
+    recordCreditPurchaseMetrics(observability, {
+      livemode: false,
+      creditMicros: 10_000_000,
+      currency: "eur",
+      amountTotal: 1_000,
+    });
+    const metrics = await observability.prometheusMetrics();
+    expect(metrics).toMatch(/opengeni_credit_purchases_total\{(?=[^}]*mode="live")[^}]*\} 1\n/);
+    expect(metrics).toMatch(
+      /opengeni_credit_purchased_micros_total\{(?=[^}]*mode="live")[^}]*\} 25000000\n/,
+    );
+    expect(metrics).toMatch(
+      /opengeni_credit_purchase_paid_usd_micros_total\{(?=[^}]*mode="live")[^}]*\} 20000000\n/,
+    );
+    expect(metrics).toMatch(/opengeni_credit_purchases_total\{(?=[^}]*mode="test")[^}]*\} 1\n/);
+    // A non-USD amount is not converted.
+    expect(metrics).not.toMatch(/opengeni_credit_purchase_paid_usd_micros_total\{[^}]*mode="test"/);
+    expect(metrics).not.toContain(accountId);
+    await observability.flush();
+  });
+
+  test("ignores an invalid credit amount", async () => {
+    const observability = createObservability(testSettings(), { component: "api" });
+    recordCreditPurchaseMetrics(observability, {
+      livemode: true,
+      creditMicros: 0,
+      currency: "usd",
+      amountTotal: 100,
+    });
+    expect(await observability.prometheusMetrics()).not.toMatch(
+      /opengeni_credit_purchases_total\{/,
+    );
+    await observability.flush();
+  });
 });
