@@ -665,6 +665,16 @@ export async function runTurnStreamAttempt(
     const providerPublishesNativeRequestEvents =
       resolvedModel?.provider.kind === "codex-subscription" ||
       resolvedModel?.provider.kind === "xai-subscription";
+    // Bounded provider label for the streaming SLIs — the resolved registry
+    // provider id (or the built-in OpenAI/Azure provider), never a raw
+    // user-supplied model string. Created before the stream starts so the
+    // first request's model entry and provider dispatch are observed.
+    const streamTiming = new StreamTimingMetrics(observability, {
+      provider: streamProvider,
+    });
+    // Native Codex/SuperGrok transports report their literal dispatch through
+    // the shared turn context; generic transports use the wire-dispatch clock.
+    eventing.providerDispatchObserver = () => streamTiming.onProviderDispatch();
     let fallbackProviderRequestStartedAt: number | null = null;
     let fallbackProviderRequestLifecycleStartedAt: number | null = null;
     const recordFallbackProviderDispatchAtWire = async (): Promise<void> => {
@@ -857,7 +867,10 @@ export async function runTurnStreamAttempt(
         }
         attempt.modelRequestStarted = true;
         return await runtime.runStream(agent, runInput!, eventing.modelRunSettings, {
-          beforeModelRequest: modelCallAdmission.beforeModelRequest,
+          beforeModelRequest: () => {
+            streamTiming.onModelRequestEntry();
+            return modelCallAdmission.beforeModelRequest();
+          },
           onModelResponse: (event) => {
             responseCreditPolicyRevisions.add(creditPolicyRevision);
             return modelCallAdmission.onModelResponse(event);
@@ -969,6 +982,7 @@ export async function runTurnStreamAttempt(
             ? {
                 onModelTransportStarted: recordFallbackProviderDispatchAtWire,
                 onModelTransportDispatched: (clock) => {
+                  streamTiming.onProviderDispatch();
                   eventing.initialModelWireDispatch.record(
                     { provider: streamProvider, dispatchId },
                     clock,
@@ -1010,12 +1024,6 @@ export async function runTurnStreamAttempt(
       modelCallAdmission.close();
       throw error;
     }
-    // Bounded provider label for the streaming SLIs — the resolved registry
-    // provider id (or the built-in OpenAI/Azure provider), never a raw
-    // user-supplied model string.
-    const streamTiming = new StreamTimingMetrics(observability, {
-      provider: streamProvider,
-    });
     eventing.batcher = createRuntimeBatcher(
       async (events) => {
         await eventing.publish!(events);

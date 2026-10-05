@@ -2104,34 +2104,61 @@ function contentDeltaClass(type: SessionEventType): StreamDeltaClass | null {
   return null;
 }
 
-// TTFT and inter-delta live on a human-perceptible scale (tens of ms to a few
-// seconds), so they get their own SHORT buckets — the default duration buckets
-// (which run to 3600s) would collapse every real streaming value into one bucket.
-const STREAM_TTFT_BUCKETS = [0.02, 0.05, 0.1, 0.2, 0.35, 0.5, 0.75, 1, 1.5, 2, 3, 5, 10];
+// TTFT lives on a human-perceptible scale, but reasoning models legitimately
+// think for tens of seconds before their first streamed token. The finite
+// buckets therefore run well past 10s: a top bucket at 10s made every slower
+// first token land in +Inf, so p50/p99 saturated at exactly "10" and hid how
+// slow the tail really was.
+const STREAM_TTFT_BUCKETS = [
+  0.02, 0.05, 0.1, 0.2, 0.35, 0.5, 0.75, 1, 1.5, 2, 3, 5, 10, 15, 20, 30, 45, 60, 90, 120, 180, 300,
+];
 const STREAM_INTER_DELTA_BUCKETS = [0.005, 0.01, 0.025, 0.05, 0.1, 0.2, 0.35, 0.5, 1, 2, 5];
+// OpenGeni's own per-request work before the provider sees bytes: admission,
+// durable history/audit checkpoints, request build. Normally milliseconds to a
+// second; tens of seconds means our database or consumer is the bottleneck.
+const MODEL_REQUEST_PRE_DISPATCH_BUCKETS = [
+  0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1, 2, 5, 10, 30, 60, 120,
+];
+
+/** First streamed content of a provider response. `any` is the first reasoning
+ *  or answer delta; `text` is the first answer-text delta. They overlap — never
+ *  sum across `content`. */
+export type ProviderFirstContent = "any" | "text";
 
 /**
- * Per-turn stream-timing tracker fed every normalized runtime event in push order.
- * It emits two model-responsiveness SLIs from the worker's seat on the stream:
+ * Per-stream timing tracker fed every normalized runtime event in push order,
+ * plus two producer-side hooks. It separates OUR latency from the PROVIDER's:
  *
- *   - `opengeni_stream_ttft_seconds{provider}` — time from a model (re)start to its
- *     first streamed content delta. The anchor starts at construction (≈ runStream
- *     start, so the first observation is "how long until text appears") and re-arms
- *     on every non-content event (a tool call, a completed message, a usage frame),
- *     so a post-tool response measures the model's restart latency, NOT our own
- *     tool-execution time.
+ *   - `opengeni_stream_ttft_seconds{provider}` — user-perceived (re)start latency:
+ *     time from a stream start / structural boundary (tool call, tool result,
+ *     completed message, usage frame) to the first streamed content delta. It
+ *     mixes our between-call work with provider time; keep it for the absolute
+ *     dashboard view, not for provider alerting.
+ *   - `opengeni_model_request_pre_dispatch_seconds{provider}` — OUR per-request
+ *     latency: SDK model entry (the first admission check) to the literal
+ *     provider dispatch. Covers admission, the durable history checkpoint,
+ *     credit revalidation, the durable request audit and request build.
+ *   - `opengeni_model_provider_ttft_seconds{provider,content}` — the PROVIDER's
+ *     latency: literal dispatch to the first streamed `any` (reasoning or text)
+ *     delta and to the first answer `text` delta. Includes network, provider
+ *     queueing, prompt prefill and reasoning before the first streamed token.
  *   - `opengeni_stream_inter_delta_gap_seconds{provider,class}` — gap between
- *     consecutive content deltas of the SAME class. The run resets on any
- *     non-content event so a gap never spans a tool call or a model boundary — it
- *     measures only the choppiness of a live token stream.
+ *     consecutive content deltas of the SAME class, reset at every structural
+ *     event so a gap never spans a tool call or a model boundary.
  *
- * Purely observational and clock-injectable; it never touches the events it sees.
+ * Dispatch timing deliberately survives structural events: the consumer may
+ * still be persisting the previous response's tool results when the producer
+ * dispatches the next request, but the next request's first delta always
+ * follows its own dispatch. Purely observational and clock-injectable.
  */
 export class StreamTimingMetrics {
   private readonly now: () => number;
   private ttftAnchor: number;
   private ttftArmed = true;
   private readonly lastDeltaAt = new Map<StreamDeltaClass, number>();
+  private modelEntryAt: number | null = null;
+  private dispatchedAt: number | null = null;
+  private readonly providerFirstRecorded = new Set<ProviderFirstContent>();
 
   constructor(
     private readonly observability: Observability,
@@ -2139,6 +2166,31 @@ export class StreamTimingMetrics {
   ) {
     this.now = options.now ?? (() => performance.now());
     this.ttftAnchor = this.now();
+  }
+
+  /** Producer side: the SDK entered a model request (first admission check).
+   *  Admission can be re-entered for the same request; keep the earliest. */
+  onModelRequestEntry(): void {
+    if (this.modelEntryAt === null) this.modelEntryAt = this.now();
+  }
+
+  /** Producer side: request bytes are about to leave this process. */
+  onProviderDispatch(): void {
+    const at = this.now();
+    if (this.modelEntryAt !== null) {
+      this.observability.observeHistogram({
+        name: "opengeni_model_request_pre_dispatch_seconds",
+        help: "Seconds of OpenGeni work from SDK model-request entry to literal provider dispatch.",
+        buckets: MODEL_REQUEST_PRE_DISPATCH_BUCKETS,
+        labels: { provider: this.options.provider },
+        value: Math.max(0, (at - this.modelEntryAt) / 1000),
+      });
+      this.modelEntryAt = null;
+    }
+    // A transport retry re-dispatches the same request; the first delta then
+    // belongs to the latest dispatch.
+    this.dispatchedAt = at;
+    this.providerFirstRecorded.clear();
   }
 
   onEvent(type: SessionEventType): void {
@@ -2156,12 +2208,16 @@ export class StreamTimingMetrics {
     if (this.ttftArmed) {
       this.observability.observeHistogram({
         name: "opengeni_stream_ttft_seconds",
-        help: "Seconds from a model (re)start to its first streamed content delta.",
+        help: "Seconds from a stream start or structural boundary to the next streamed content delta (user-perceived; includes OpenGeni between-call work).",
         buckets: STREAM_TTFT_BUCKETS,
         labels: { provider: this.options.provider },
         value: Math.max(0, (at - this.ttftAnchor) / 1000),
       });
       this.ttftArmed = false;
+    }
+    if (this.dispatchedAt !== null) {
+      this.observeProviderFirst("any", at);
+      if (deltaClass === "message") this.observeProviderFirst("text", at);
     }
     const last = this.lastDeltaAt.get(deltaClass);
     if (last !== undefined) {
@@ -2174,6 +2230,18 @@ export class StreamTimingMetrics {
       });
     }
     this.lastDeltaAt.set(deltaClass, at);
+  }
+
+  private observeProviderFirst(content: ProviderFirstContent, at: number): void {
+    if (this.dispatchedAt === null || this.providerFirstRecorded.has(content)) return;
+    this.providerFirstRecorded.add(content);
+    this.observability.observeHistogram({
+      name: "opengeni_model_provider_ttft_seconds",
+      help: "Seconds from literal provider dispatch to the first streamed content delta (any = reasoning or text, text = answer text).",
+      buckets: STREAM_TTFT_BUCKETS,
+      labels: { provider: this.options.provider, content },
+      value: Math.max(0, (at - this.dispatchedAt) / 1000),
+    });
   }
 }
 
