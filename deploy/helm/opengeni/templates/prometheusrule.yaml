@@ -609,23 +609,25 @@ spec:
             description: Do not replay the operation automatically. Reconcile through the tool's durable provider receipt or idempotency boundary before retrying.
             runbook_url: https://github.com/Cloudgeni-ai/opengeni/blob/main/docs/mcp-operation-recovery.md
         - alert: OpenGeniMcpToolLatencyHigh
+          # `tool` is bounded: a first-party Opengeni tool name, or `external` for
+          # every connector, API-integration, and custom MCP tool.
           expr: |
             histogram_quantile(
               0.95,
-              sum by (le) (rate(opengeni_mcp_tool_call_duration_seconds_bucket{namespace={{ .Release.Namespace | quote }},release={{ .Release.Name | quote }},environment={{ $environment | quote }}}[10m]))
+              sum by (le, tool) (rate(opengeni_mcp_tool_call_duration_seconds_bucket{namespace={{ .Release.Namespace | quote }},release={{ .Release.Name | quote }},environment={{ $environment | quote }}}[10m]))
             ) > 15
-            and on()
-            sum(increase(opengeni_mcp_tool_call_duration_seconds_count{namespace={{ .Release.Namespace | quote }},release={{ .Release.Name | quote }},environment={{ $environment | quote }}}[10m])) >= 5
+            and on(tool)
+            sum by (tool) (increase(opengeni_mcp_tool_call_duration_seconds_count{namespace={{ .Release.Namespace | quote }},release={{ .Release.Name | quote }},environment={{ $environment | quote }}}[10m])) >= 5
           for: 10m
           labels:
             severity: warning
           annotations:
-            summary: 'Agent tool (MCP) calls take more than 15 seconds at p95.'
-            headline: 'Tool calls are slow'
+            summary: 'Calls to the {{ "{{ $labels.tool }}" }} tool take more than 15 seconds at p95. "external" means a connector or custom tool rather than an Opengeni tool.'
+            headline: 'Slow tool calls: {{ "{{ $labels.tool }}" }}'
             value: 'p95 {{ "{{ $value | humanizeDuration }}" }}'
-            user_impact: 'Agent tasks take noticeably longer while waiting on tools.'
-            next_step: 'Check which tool or connector is slow in Grafana; usually a slow external service rather than Opengeni.'
-            description: Tool latency is materially delaying turns. Split by structural outcome and compare MCP connect time before attributing this to model inference.
+            user_impact: 'Agent tasks take noticeably longer while waiting on this tool.'
+            next_step: 'For an Opengeni tool, check the Opengeni API and database for that tool. For "external", find the slow connector in Grafana; it is usually the outside service.'
+            description: Tool latency is materially delaying turns. The tool label names the first-party Opengeni tool, or "external" for every connector and custom tool. Split by structural outcome and compare MCP connect time before attributing this to model inference.
         - alert: OpenGeniHttp5xxRatioHigh
           expr: |
             (

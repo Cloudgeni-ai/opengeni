@@ -385,6 +385,7 @@ import {
 } from "./retained-session-image";
 import type { ComputerToolMode } from "./legacy-computer-compat";
 import type { McpToolCallOutcome, RuntimeMetricsHooks } from "./metrics";
+import { mcpToolMetricLabel } from "./metrics";
 import {
   MultiProviderModelProvider,
   OpenGeniResponsesModel,
@@ -510,7 +511,10 @@ export {
   MCP_LIFECYCLE_PHASES,
   MCP_LIFECYCLE_POLICIES,
   MCP_TOOL_CALL_OUTCOMES,
+  MCP_TOOL_METRIC_EXTERNAL_LABEL,
   SANDBOX_READINESS_REPLACEMENT_OUTCOMES,
+  isMcpToolMetricLabel,
+  mcpToolMetricLabel,
   type McpLifecycleOutcome,
   type McpLifecyclePhase,
   type McpLifecyclePolicy,
@@ -4958,6 +4962,8 @@ export async function prepareAgentTools(
               : undefined,
             options.mcpAccountLabels?.get(config.id),
             options.runMcpCredentials,
+            undefined,
+            firstParty,
           ),
           config,
           options,
@@ -7827,6 +7833,11 @@ export class PrefixedMcpServer implements MCPServer {
     private readonly accountLabel?: string,
     private readonly runMcpCredentials?: RunMcpCredentials,
     private readonly effectAuthority?: LocalMcpServerRegistration["effectAuthority"],
+    /**
+     * Verified first-party Opengeni server (deployment URL + reserved id). Only
+     * then may a catalog tool name become a metric label.
+     */
+    private readonly firstPartyCatalog = false,
   ) {
     this.registryId = registryId;
     // The SDK uses `name` for cache keys, traces, and lifecycle diagnostics.
@@ -8166,7 +8177,11 @@ export class PrefixedMcpServer implements MCPServer {
     const recordOutcome = (outcome: McpToolCallOutcome): void => {
       if (!recordsPhysicalCall || metricRecorded) return;
       metricRecorded = true;
-      recordRuntimeMcpToolCallMetric(outcome, startedAt);
+      recordRuntimeMcpToolCallMetric(
+        outcome,
+        mcpToolMetricLabel({ firstParty: this.firstPartyCatalog, toolName: unprefixed }),
+        startedAt,
+      );
     };
     const operationId =
       meta && typeof meta.opengeniOperationId === "string" ? meta.opengeniOperationId : undefined;

@@ -260,7 +260,15 @@ describe("turn-capacity Prometheus alerts", () => {
         "OpenGeniNatsSubscriptionTerminated",
         ["opengeni_nats_subscription_terminations_total", "sum by (kind, recovery)"],
       ],
-      ["OpenGeniMcpToolLatencyHigh", ["opengeni_mcp_tool_call_duration_seconds_bucket"]],
+      [
+        "OpenGeniMcpToolLatencyHigh",
+        [
+          "opengeni_mcp_tool_call_duration_seconds_bucket",
+          "sum by (le, tool)",
+          "and on(tool)",
+          "sum by (tool) (increase(opengeni_mcp_tool_call_duration_seconds_count",
+        ],
+      ],
       ["OpenGeniHttp5xxRatioHigh", ["opengeni_http_requests_total", 'status=~"5.."']],
       [
         "OpenGeniCoreReadLatencyHigh",

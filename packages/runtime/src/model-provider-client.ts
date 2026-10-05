@@ -49,11 +49,12 @@ export function configureRuntimeMetricsHooks(hooks: RuntimeMetricsHooks | null |
 
 export function recordRuntimeMcpToolCallMetric(
   outcome: McpToolCallOutcome,
+  tool: string,
   startedAt: number,
 ): void {
   const durationSeconds = Math.max(0, (performance.now() - startedAt) / 1_000);
   try {
-    runtimeMetricsHooks?.onMcpToolCall?.({ outcome, durationSeconds });
+    runtimeMetricsHooks?.onMcpToolCall?.({ outcome, tool, durationSeconds });
   } catch {
     // Metrics emission must never affect an MCP call or rewrite its result.
   }
