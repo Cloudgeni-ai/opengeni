@@ -99,7 +99,17 @@ release, quarantine, and settlement all carry the non-reused holder identity.
 Heartbeat renewal is fail-closed: a response that returns after the prior
 worker-confirmed deadline is discarded rather than extending ownership, and
 expiry-sensitive lease SQL uses the execution-time database clock after its
-relevant locks are acquired.
+relevant locks are acquired. Runtime-event and model-usage checkpoints reuse an
+unexpired confirmed lease between renewals, rather than renewing for every
+stream event. The shared Codex, SuperGrok, and Claude lifecycle renews when
+60 seconds have elapsed from the last confirmed acquisition/renewal request
+start, with its independent 60-second timer still active. An event renewal just
+before a timer tick can defer the next quiet renewal to the following tick,
+within 120 seconds of the previous request start. Every checkpoint
+checks the prior deadline before coalescing; a failed renewal retains that
+deadline and can retry at the next checkpoint. This does not change the
+five-minute TTL, exact holder/turn/generation fences, or physical dispatch
+checks.
 
 6. On the first allocator decision, write the bounded accepted allocator policy
    snapshot to the locked turn row in the same transaction, even when the
