@@ -3524,15 +3524,18 @@ async function terminateDrainableBox(
   // with draining->cold. Until this succeeds, arrivals remain fenced by that
   // exact claim; a timestamp or a failed provider call can never reopen a box
   // while termination may still be in flight.
-  const { wentCold, backgroundCommandEvents } = await confirmDrainCold(db, {
-    accountId,
-    workspaceId: row.workspaceId,
-    sandboxGroupId: row.sandboxGroupId,
-    expectedEpoch: row.leaseEpoch,
-    ...(captureClaim ? { expectedCaptureId: captureClaim.id } : {}),
-    providerMissingBeforeCapture: providerMissing,
-    idleCommandContainmentMs: settings.sandboxIdleCommandContainmentMs,
-  });
+  const { wentCold, unpublishedProviderLost, backgroundCommandEvents } = await confirmDrainCold(
+    db,
+    {
+      accountId,
+      workspaceId: row.workspaceId,
+      sandboxGroupId: row.sandboxGroupId,
+      expectedEpoch: row.leaseEpoch,
+      ...(captureClaim ? { expectedCaptureId: captureClaim.id } : {}),
+      providerMissingBeforeCapture: providerMissing,
+      idleCommandContainmentMs: settings.sandboxIdleCommandContainmentMs,
+    },
+  );
   // The command terminal events and agent inputs are already durable in the
   // cold commit; this is only best-effort live fanout.
   await publishDurableSessionEvents(bus, row.workspaceId, backgroundCommandEvents, (error) => {
@@ -3545,7 +3548,9 @@ async function terminateDrainableBox(
     // Only the exact successful cold commit counts provider loss. A missing
     // probe, a stale capture, a failed commit, or a retried child is not another
     // observed loss. Keep this outside the best-effort session event writer.
-    if (providerMissing) {
+    // An unpublished warming replacement (its creator died before warm
+    // publication) held no workspace; its absence is not a capture loss.
+    if (providerMissing && !unpublishedProviderLost) {
       recordSandboxProviderMissingBeforeCapture(observability, backend);
     }
     if (lease.unobservableCommandDrainIds?.length) {

@@ -55405,7 +55405,13 @@ export async function confirmDrainCold(
     /** The idle window named in contained commands' agent notice. */
     idleCommandContainmentMs?: number | undefined;
   },
-): Promise<{ wentCold: boolean; backgroundCommandEvents?: SessionEvent[] }> {
+): Promise<{
+  wentCold: boolean;
+  /** The missing provider was an unpublished warming replacement: its loss
+   *  recorded no lost workspace (see `unpublishedWarmingLoss`). */
+  unpublishedProviderLost?: boolean;
+  backgroundCommandEvents?: SessionEvent[];
+}> {
   const backgroundCommandEvents: SessionEvent[] = [];
   // Settling a command appends its terminal session event and agent input, so
   // the cold commit runs inside the session activity gate.
@@ -55528,8 +55534,23 @@ export async function confirmDrainCold(
         const hasArchive = current.archive.status !== "none";
         const archiveComplete = hasCompleteWorkspaceArchive(row);
         const now = new Date().toISOString();
+        // A warming replacement whose creator died (worker shutdown/crash)
+        // before commitWarmingToWarm was never published: no holder attached
+        // to it and no workspace mutation can be admitted on a non-warm lease.
+        // The reaper's warming-death drain (c2) is the only way such a box
+        // reaches here. Its disappearance therefore loses nothing beyond what
+        // the pre-warming cold row already recorded; mirror failWarmingToCold
+        // instead of minting a lost-workspace verdict that would block every
+        // later turn of the session. A published box keeps the loss contract.
+        const unpublishedWarmingLoss =
+          input.providerMissingBeforeCapture === true &&
+          current.provider.status === "creating" &&
+          current.provider.instanceId !== null &&
+          current.provider.instanceId === row.instance_id;
+        const workspaceLost =
+          input.providerMissingBeforeCapture === true && !unpublishedWarmingLoss;
         const lateArchiveCapture =
-          input.providerMissingBeforeCapture &&
+          workspaceLost &&
           row.archive_capture_id !== null &&
           row.archive_capture_provider_request_id !== null &&
           row.archive_capture_generation !== null &&
@@ -55554,18 +55575,27 @@ export async function confirmDrainCold(
             ? "pending"
             : hasArchive
               ? "degraded"
-              : input.providerMissingBeforeCapture || freshPending
+              : workspaceLost || freshPending
                 ? "unrecoverable"
                 : "not_required";
         const recovery: SandboxRecoveryState = {
-          provider: {
-            status: input.providerMissingBeforeCapture ? "missing" : "not_created",
-            instanceId: input.providerMissingBeforeCapture ? row.instance_id : null,
-            observedAt: now,
-            ...(input.providerMissingBeforeCapture
-              ? { diagnostic: "provider_not_found_before_workspace_capture" }
-              : {}),
-          },
+          provider: unpublishedWarmingLoss
+            ? {
+                // Same shape failWarmingToCold records for a failed replacement:
+                // proves nothing about the workspace, never a loss record.
+                status: "not_created",
+                instanceId: row.instance_id,
+                observedAt: now,
+                diagnostic: REPLACEMENT_FAILED_DIAGNOSTIC,
+              }
+            : {
+                status: workspaceLost ? "missing" : "not_created",
+                instanceId: workspaceLost ? row.instance_id : null,
+                observedAt: now,
+                ...(workspaceLost
+                  ? { diagnostic: "provider_not_found_before_workspace_capture" }
+                  : {}),
+              },
           archive: current.archive,
           restore: {
             status: restoreStatus,
@@ -55605,9 +55635,7 @@ export async function confirmDrainCold(
               archiveOnlyResumeState(
                 row,
                 recovery,
-                input.providerMissingBeforeCapture
-                  ? providerLossRecordForLostRow(row, "drain_probe", now)
-                  : undefined,
+                workspaceLost ? providerLossRecordForLostRow(row, "drain_probe", now) : undefined,
               ),
             )
           : null;
@@ -55656,7 +55684,7 @@ export async function confirmDrainCold(
           and archive_capture_id is not distinct from ${input.expectedCaptureId ?? null}::uuid
         returning id
       `);
-        if (rows.length > 0 && input.providerMissingBeforeCapture) {
+        if (rows.length > 0 && workspaceLost) {
           const eventId = crypto.randomUUID();
           await tx.insert(schema.auditEvents).values(
             withLosslessContentWriteVersion(
@@ -55686,7 +55714,10 @@ export async function confirmDrainCold(
         if (rows.length > 0 && row.rotation_requested_at !== null) {
           await wakeSandboxLifecycleWaitersTx(tx, input);
         }
-        return { wentCold: rows.length > 0 };
+        return {
+          wentCold: rows.length > 0,
+          ...(rows.length > 0 && unpublishedWarmingLoss ? { unpublishedProviderLost: true } : {}),
+        };
       },
     );
   });

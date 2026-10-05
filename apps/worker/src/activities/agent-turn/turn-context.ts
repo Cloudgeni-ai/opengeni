@@ -103,6 +103,9 @@ export type SandboxRuntimeState = {
   }>;
   turnSandboxProvisioner: TurnSandboxProvisioner<ResumedTurnSandbox> | null;
   resumeManagedGroupBox: (() => Promise<ResumedTurnSandbox>) | null;
+  /** Physical resumeBoxForTurn promises still running for this attempt; the
+   * finalizer joins them so a cancelled establish completes its own cleanup. */
+  inFlightSandboxResumes: Set<Promise<unknown>>;
   prefetchedManagedBox: Promise<ResumedTurnSandbox> | null;
   prefetchedManagedBoxResult: ResumedTurnSandbox | null;
   setupBoxSession: unknown;
@@ -262,6 +265,7 @@ export function createTurnContext(input: {
       firstModelPreparationNestedSandboxPhases: [],
       turnSandboxProvisioner: null,
       resumeManagedGroupBox: null,
+      inFlightSandboxResumes: new Set(),
       prefetchedManagedBox: null,
       prefetchedManagedBoxResult: null,
       setupBoxSession: null,
