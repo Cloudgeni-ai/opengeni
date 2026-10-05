@@ -164,7 +164,9 @@ opts out), the microphone appears when it reports voice input available
 (`voiceInput={false}` opts out), generated images, video, published files and
 screenshots display through the conversation's session scope, actions a
 session proxy reports unavailable (`sessionCreation`, `archive`, `artifacts`)
-are hidden, pending tool approvals render Approve/Reject, a yes/no question
+are hidden, the session goal shows with Pause/Resume/Clear, sub-agent cards
+open the child through `onOpenSession` (`OpenGeniChat` opens it in place),
+pending tool approvals render Approve/Reject, a yes/no question
 renders as two buttons, a failed load offers Try again, and `toolRegistry`
 customizes tool rendering.
 

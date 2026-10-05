@@ -277,7 +277,7 @@ async function mountStockChat(
   const browser: string[] = [];
   const upstream: string[] = [];
   let goal: { status: "active" | "paused"; version: number } | null = withGoal
-    ? {
+    ? ({
         id: "ffffffff-0000-4000-8000-0000000000a1",
         accountId: "acc",
         workspaceId: WS,
@@ -300,7 +300,7 @@ async function mountStockChat(
         rootConstraints: [],
         createdAt: now,
         updatedAt: now,
-      } as never
+      } as never)
     : null;
   const ws = `/v1/workspaces/${WS}`;
   const ss = `${ws}/sessions/${S}`;
@@ -556,8 +556,9 @@ async function mountStockChat(
   return { container: view.container, browser, upstream, click, buttons };
 }
 
+/** Failed browser requests, except the API's ordinary "this session has no goal". */
 function failures(log: readonly string[]): string[] {
-  return log.filter((line) => /^[45]\d\d /.test(line));
+  return log.filter((line) => /^[45]\d\d /.test(line) && !/\/goal goal_not_found$/.test(line));
 }
 
 describe("stock OpenGeniChat behind the default session proxy", () => {

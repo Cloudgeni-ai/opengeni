@@ -391,15 +391,16 @@ describe("createSessionProxyHandler", () => {
       { objective: "Something else" },
       { status: "active", maxAutoContinuations: 99 },
     ]) {
-      const refused = await rejection(
-        browser.updateGoal(WORKSPACE_ID, SESSION_ID, body as never),
-      );
+      const refused = await rejection(browser.updateGoal(WORKSPACE_ID, SESSION_ID, body as never));
       expect(refused.status).toBe(403);
       expect(refused.code).toBe("goal_update_not_allowed");
     }
     // Goal revisions stay out of the browser boundary, and DELETE only clears.
     expect((await rejection(browser.listGoalRevisions(WORKSPACE_ID, SESSION_ID))).status).toBe(404);
-    for (const path of [`${goal}/revisions`, `/v1/workspaces/${WORKSPACE_ID}/sessions/${SESSION_ID}/queue`]) {
+    for (const path of [
+      `${goal}/revisions`,
+      `/v1/workspaces/${WORKSPACE_ID}/sessions/${SESSION_ID}/queue`,
+    ]) {
       const response = await handler(
         new Request(`${PRODUCT}/api/opengeni${path}`, { method: "DELETE" }),
       );

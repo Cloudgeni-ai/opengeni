@@ -387,11 +387,10 @@ export function createSessionProxyHandler(
   return async (request) => {
     try {
       const method = request.method;
-      // DELETE serves exactly one route, clearing a session goal.
-      if (!["GET", "POST", "PUT", "PATCH", "DELETE"].includes(method)) {
+      if (!PROXY_METHODS.includes(method)) {
         return new Response(null, {
           status: 405,
-          headers: { Allow: "GET, POST, PUT, PATCH, DELETE" },
+          headers: { Allow: PROXY_METHODS.join(", ") },
         });
       }
       const resolved = await options.resolve(request);
@@ -972,7 +971,11 @@ export function createSessionProxyHandler(
             (status !== "paused" && status !== "active") ||
             Object.keys(body ?? {}).some((key) => key !== "status" && key !== "rationale")
           ) {
-            reject(403, "goal_update_not_allowed", "Only { status: paused | active } is available.");
+            reject(
+              403,
+              "goal_update_not_allowed",
+              "Only { status: paused | active } is available.",
+            );
           }
           return json(await client.requestJson("PATCH", `${session}/goal`, { status }));
         }
@@ -1021,6 +1024,12 @@ export function createSessionProxyHandler(
     }
   };
 }
+
+/**
+ * Methods any forwarded route uses. Module-level so the public API inventory
+ * attributes a verb only to the routes that actually forward it.
+ */
+const PROXY_METHODS: readonly string[] = ["GET", "POST", "PUT", "PATCH", "DELETE"];
 
 const UPLOAD_FIELDS = ["scope", "filename", "contentType", "sizeBytes", "sha256"] as const;
 
