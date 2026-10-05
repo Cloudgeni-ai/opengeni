@@ -57,6 +57,10 @@ through `config_env`/`secret_env` as appropriate. Organization API keys still us
 `Authorization: Bearer`; they are not the deployment shared key. Neither serving
 mode permits `local` access.
 
+Configured mode may omit `OPENGENI_DELEGATION_SECRET` and use the shared access-key
+fallback. If supplied, it must be the same secret projected to API/control/turn
+and contain at least 32 characters after trimming; an API-only key is rejected.
+
 Serving defaults to a real **Modal** sandbox. `none`, `local`, `docker`, and
 Connected Machine `selfhosted` are not supported serving choices in this root.
 Supply Modal token ID/secret and a real model credential before enabling apps.
@@ -76,6 +80,8 @@ migration job. Publication must resume the exact owned Modal sandbox and
 write/verify bytes in Blob; verify actual publication/download in live conformance.
 Ownership cannot be overridden through `config_env` or `secret_env`. It does not
 enable Connected Machines, the artifact runtime, or native materializer/export.
+`OPENGENI_SANDBOX_ARTIFACT_RUNTIME_ENABLED=false` is also fixed and reserved;
+ownership does not permit a per-role or `config_env` export workaround.
 
 All serving roles require the stable base64-encoded 32-byte
 `OPENGENI_ENVIRONMENTS_ENCRYPTION_KEY`. Secrets are supplied in a sensitive map:
@@ -97,6 +103,16 @@ receives only its dedicated database URL and optional NATS authentication
 material. The migration job receives only owner/app URLs, exact role-provision
 passwords, Blob key, and optional encryption key for historical maintenance
 conversions; it never inherits the complete application secret map.
+
+Collector auth-header variables belong in `secret_env`, including both common
+OTLP aliases and the standard traces/metrics/logs header names; `config_env`
+rejects them. The frozen runtime uses the common aliases for trace export, not a
+claimed per-signal metrics/log exporter. Non-secret `OPENGENI_MODEL_PROVIDERS_JSON`
+is structurally checked for inline provider `apiKey` fields: use `apiKeyEnv` plus
+`secret_env` instead. Put any other credential-bearing provider headers/query
+configuration wholly in `secret_env`; the module does not heuristically sanitize
+arbitrary JSON strings. Secret-backed settings are omitted from
+`runtime_nonsecret_env`, but their values still reside in Terraform state.
 
 The shipped Azure Blob adapter signs SAS URLs using an account key; it does not
 implement managed-identity/user-delegation-key signing. This root stores the

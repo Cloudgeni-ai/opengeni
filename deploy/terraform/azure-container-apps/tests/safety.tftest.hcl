@@ -101,6 +101,92 @@ variables {
   }
 }
 
+run "credential_projection_and_nonsecret_registry_reference_are_safe" {
+  command = apply
+  variables {
+    deployment_phase             = "apps"
+    migration_completed_revision = "example.invalid/opengeni-api@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+    config_env = {
+      OTEL_EXPORTER_OTLP_ENDPOINT = "https://collector.example.invalid"
+      OPENGENI_MODEL_PROVIDERS_JSON = jsonencode([
+        {
+          id        = "mockprovider"
+          baseUrl   = "https://mockprovider.example.invalid/v1"
+          apiKeyEnv = "OPENGENI_MOCK_PROVIDER_API_KEY"
+          models    = [{ id = "mockmodel" }]
+        },
+        {
+          id      = "fixture-anonymous"
+          kind    = "anonymous"
+          baseUrl = "https://fixture.example.invalid/v1"
+          label   = "apiKey text is only a public label"
+          models  = [{ id = "fixture-model" }]
+        }
+      ])
+    }
+    secret_env = {
+      OPENGENI_OPENAI_API_KEY              = { value = "mock-openai-key" }
+      OPENGENI_MODAL_TOKEN_ID              = { value = "mock-modal-id" }
+      OPENGENI_MODAL_TOKEN_SECRET          = { value = "mock-modal-secret" }
+      OPENGENI_ACCESS_KEY                  = { value = "mock-only-long-access-key-value-123456789" }
+      OPENGENI_ENVIRONMENTS_ENCRYPTION_KEY = { value = "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=" }
+      OPENGENI_MOCK_PROVIDER_API_KEY       = { value = "mock-only-provider-key" }
+      OPENGENI_OTEL_EXPORTER_OTLP_HEADERS  = { value = "authorization=Bearer mock-only-otlp-credential" }
+      OTEL_EXPORTER_OTLP_HEADERS           = { value = "authorization=Bearer mock-only-otlp-credential" }
+      OTEL_EXPORTER_OTLP_TRACES_HEADERS    = { value = "authorization=Bearer mock-only-otlp-credential" }
+      OTEL_EXPORTER_OTLP_METRICS_HEADERS   = { value = "authorization=Bearer mock-only-otlp-credential" }
+      OTEL_EXPORTER_OTLP_LOGS_HEADERS      = { value = "authorization=Bearer mock-only-otlp-credential" }
+    }
+  }
+  assert {
+    condition = (
+      output.runtime_nonsecret_env.OTEL_EXPORTER_OTLP_ENDPOINT == "https://collector.example.invalid" &&
+      jsondecode(output.runtime_nonsecret_env.OPENGENI_MODEL_PROVIDERS_JSON)[0].apiKeyEnv == "OPENGENI_MOCK_PROVIDER_API_KEY" &&
+      jsondecode(output.runtime_nonsecret_env.OPENGENI_MODEL_PROVIDERS_JSON)[1].label == "apiKey text is only a public label" &&
+      alltrue([for name in local.credential_env_names : !contains(keys(output.runtime_nonsecret_env), name)]) &&
+      !strcontains(jsonencode(output.runtime_nonsecret_env), "mock-only-otlp-credential") &&
+      !strcontains(jsonencode(output.runtime_nonsecret_env), "mock-only-provider-key")
+    )
+    error_message = "Credential values must not reach non-secret outputs, while structured apiKeyEnv references and benign labels remain intact."
+  }
+  assert {
+    condition = alltrue([for role in ["api", "control", "turn"] :
+      alltrue([for name in setunion(local.credential_env_names, toset(["OPENGENI_MOCK_PROVIDER_API_KEY"])) :
+        one([for env in azurerm_container_app.service[role].template[0].container[0].env : env.secret_name if env.name == name]) == local.secret_names[name]
+      ])
+    ])
+    error_message = "OTLP credentials and apiKeyEnv keys must be delivered through per-role Key Vault secret references, not plaintext config."
+  }
+}
+
+run "configured_explicit_delegation_is_one_shared_signing_secret" {
+  command = apply
+  variables {
+    deployment_phase             = "apps"
+    migration_completed_revision = "example.invalid/opengeni-api@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+    secret_env = {
+      OPENGENI_OPENAI_API_KEY              = { value = "mock-openai-key" }
+      OPENGENI_MODAL_TOKEN_ID              = { value = "mock-modal-id" }
+      OPENGENI_MODAL_TOKEN_SECRET          = { value = "mock-modal-secret" }
+      OPENGENI_ACCESS_KEY                  = { value = "mock-only-long-access-key-value-123456789" }
+      OPENGENI_ENVIRONMENTS_ENCRYPTION_KEY = { value = "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=" }
+      OPENGENI_DELEGATION_SECRET           = { value = "  mock-only-long-delegation-key-value-123456789  " }
+    }
+  }
+  assert {
+    condition = (
+      contains(local.signing_secret_env, "OPENGENI_DELEGATION_SECRET") &&
+      local.application_config_env.OPENGENI_AUTH_REQUIRED == "true" &&
+      alltrue([for role in ["api", "control", "turn"] :
+        one([for env in azurerm_container_app.service[role].template[0].container[0].env :
+          env.secret_name if env.name == "OPENGENI_DELEGATION_SECRET"
+        ]) == local.secret_names["OPENGENI_DELEGATION_SECRET"]
+      ])
+    )
+    error_message = "An explicit configured delegation key must use the same secret across API/control/turn without weakening shared-key auth."
+  }
+}
+
 run "bootstrap_is_non_serving_and_private" {
   command = apply
 
@@ -209,6 +295,18 @@ run "configured_serving_roles_are_isolated" {
     )
     error_message = "Serving defaults must enforce shared-key auth, fail-closed native exports, remote sandbox, unrouted metrics, and no automatic secret injection into sandboxes."
   }
+  assert {
+    condition = (
+      local.signing_secret_env == toset(["OPENGENI_ACCESS_KEY"]) &&
+      !contains(local.role_secret_keys["api"], "OPENGENI_DELEGATION_SECRET") &&
+      alltrue([for role in ["api", "control", "turn"] :
+        one([for env in azurerm_container_app.service[role].template[0].container[0].env :
+          env.secret_name if env.name == "OPENGENI_ACCESS_KEY"
+        ]) == local.secret_names["OPENGENI_ACCESS_KEY"]
+      ])
+    )
+    error_message = "Configured mode without explicit delegation must retain the same shared access-key fallback on API/control/turn."
+  }
 }
 
 run "remote_modal_publication_has_owned_sandbox_baseline" {
@@ -225,11 +323,14 @@ run "remote_modal_publication_has_owned_sandbox_baseline" {
       local.application_config_env.OPENGENI_SANDBOX_BACKEND == "modal" &&
       local.application_config_env.OPENGENI_SANDBOX_SELFHOSTED_ENABLED == "false" &&
       local.application_config_env.OPENGENI_ARTIFACT_MATERIALIZER_DEPLOYED == "false" &&
-      !contains(keys(local.application_config_env), "OPENGENI_SANDBOX_ARTIFACT_RUNTIME_ENABLED") &&
+      local.application_config_env.OPENGENI_SANDBOX_ARTIFACT_RUNTIME_ENABLED == "false" &&
       alltrue([for role in ["api", "control", "turn"] :
         one([for env in azurerm_container_app.service[role].template[0].container[0].env :
           env.value if env.name == "OPENGENI_SANDBOX_OWNERSHIP_ENABLED"
-        ]) == "true"
+        ]) == "true" &&
+        one([for env in azurerm_container_app.service[role].template[0].container[0].env :
+          env.value if env.name == "OPENGENI_SANDBOX_ARTIFACT_RUNTIME_ENABLED"
+        ]) == "false"
       ])
     )
     error_message = "API/control/turn must share owned remote Modal leases for file publication without enabling Connected Machines, artifact runtime, or native exports."
@@ -328,6 +429,161 @@ run "module_owned_sandbox_ownership_cannot_be_overridden_by_secrets" {
   command = plan
   variables { secret_env = { OPENGENI_SANDBOX_OWNERSHIP_ENABLED = { value = "false" } } }
   expect_failures = [var.secret_env]
+}
+
+run "namespaced_otlp_auth_headers_require_secret_env" {
+  command = plan
+  variables { config_env = { OPENGENI_OTEL_EXPORTER_OTLP_HEADERS = "authorization=Bearer mock-only" } }
+  expect_failures = [var.config_env]
+}
+
+run "common_otlp_auth_headers_require_secret_env" {
+  command = plan
+  variables { config_env = { OTEL_EXPORTER_OTLP_HEADERS = "authorization=Bearer mock-only" } }
+  expect_failures = [var.config_env]
+}
+
+run "trace_otlp_auth_headers_require_secret_env" {
+  command = plan
+  variables { config_env = { OTEL_EXPORTER_OTLP_TRACES_HEADERS = "authorization=Bearer mock-only" } }
+  expect_failures = [var.config_env]
+}
+
+run "metric_otlp_auth_headers_require_secret_env" {
+  command = plan
+  variables { config_env = { OTEL_EXPORTER_OTLP_METRICS_HEADERS = "authorization=Bearer mock-only" } }
+  expect_failures = [var.config_env]
+}
+
+run "log_otlp_auth_headers_require_secret_env" {
+  command = plan
+  variables { config_env = { OTEL_EXPORTER_OTLP_LOGS_HEADERS = "authorization=Bearer mock-only" } }
+  expect_failures = [var.config_env]
+}
+
+run "configured_api_only_delegation_is_rejected" {
+  command = plan
+  variables {
+    deployment_phase             = "apps"
+    migration_completed_revision = "example.invalid/opengeni-api@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+    secret_env = {
+      OPENGENI_OPENAI_API_KEY              = { value = "mock-openai-key" }
+      OPENGENI_MODAL_TOKEN_ID              = { value = "mock-modal-id" }
+      OPENGENI_MODAL_TOKEN_SECRET          = { value = "mock-modal-secret" }
+      OPENGENI_ACCESS_KEY                  = { value = "mock-only-long-access-key-value-123456789" }
+      OPENGENI_ENVIRONMENTS_ENCRYPTION_KEY = { value = "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=" }
+      OPENGENI_DELEGATION_SECRET           = { value = "mock-only-long-delegation-key-value-123456789", roles = ["api"] }
+    }
+  }
+  expect_failures = [terraform_data.application_gate]
+}
+
+run "configured_short_delegation_is_rejected" {
+  command = plan
+  variables {
+    deployment_phase             = "apps"
+    migration_completed_revision = "example.invalid/opengeni-api@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+    secret_env = {
+      OPENGENI_OPENAI_API_KEY              = { value = "mock-openai-key" }
+      OPENGENI_MODAL_TOKEN_ID              = { value = "mock-modal-id" }
+      OPENGENI_MODAL_TOKEN_SECRET          = { value = "mock-modal-secret" }
+      OPENGENI_ACCESS_KEY                  = { value = "mock-only-long-access-key-value-123456789" }
+      OPENGENI_ENVIRONMENTS_ENCRYPTION_KEY = { value = "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=" }
+      OPENGENI_DELEGATION_SECRET           = { value = "short" }
+    }
+  }
+  expect_failures = [terraform_data.application_gate]
+}
+
+run "configured_delegation_padding_does_not_meet_signing_minimum" {
+  command = plan
+  variables {
+    deployment_phase             = "apps"
+    migration_completed_revision = "example.invalid/opengeni-api@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+    secret_env = {
+      OPENGENI_OPENAI_API_KEY              = { value = "mock-openai-key" }
+      OPENGENI_MODAL_TOKEN_ID              = { value = "mock-modal-id" }
+      OPENGENI_MODAL_TOKEN_SECRET          = { value = "mock-modal-secret" }
+      OPENGENI_ACCESS_KEY                  = { value = "mock-only-long-access-key-value-123456789" }
+      OPENGENI_ENVIRONMENTS_ENCRYPTION_KEY = { value = "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=" }
+      OPENGENI_DELEGATION_SECRET           = { value = "                    short                    " }
+    }
+  }
+  expect_failures = [terraform_data.application_gate]
+}
+
+run "sandbox_artifact_runtime_cannot_be_enabled_in_config" {
+  command = plan
+  variables { config_env = { OPENGENI_SANDBOX_ARTIFACT_RUNTIME_ENABLED = "true" } }
+  expect_failures = [var.config_env]
+}
+
+run "sandbox_artifact_runtime_cannot_be_enabled_by_secret_override" {
+  command = plan
+  variables { secret_env = { OPENGENI_SANDBOX_ARTIFACT_RUNTIME_ENABLED = { value = "true" } } }
+  expect_failures = [var.secret_env]
+}
+
+run "inline_model_api_key_cannot_enter_nonsecret_config" {
+  command = plan
+  variables {
+    config_env = {
+      OPENGENI_MODEL_PROVIDERS_JSON = jsonencode([{
+        id      = "mockprovider"
+        baseUrl = "https://mockprovider.example.invalid/v1"
+        apiKey  = "mock-only-inline-provider-credential"
+        models  = [{ id = "mockmodel" }]
+      }])
+    }
+  }
+  expect_failures = [var.config_env]
+}
+
+run "malformed_model_provider_json_is_rejected" {
+  command = plan
+  variables { config_env = { OPENGENI_MODEL_PROVIDERS_JSON = "{not-json" } }
+  expect_failures = [var.config_env]
+}
+
+run "nonarray_model_provider_json_is_rejected" {
+  command = plan
+  variables { config_env = { OPENGENI_MODEL_PROVIDERS_JSON = "{}" } }
+  expect_failures = [var.config_env]
+}
+
+run "credential_bearing_whole_model_registry_stays_secret_backed" {
+  command = apply
+  variables {
+    deployment_phase             = "apps"
+    migration_completed_revision = "example.invalid/opengeni-api@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+    secret_env = {
+      OPENGENI_OPENAI_API_KEY              = { value = "mock-openai-key" }
+      OPENGENI_MODAL_TOKEN_ID              = { value = "mock-modal-id" }
+      OPENGENI_MODAL_TOKEN_SECRET          = { value = "mock-modal-secret" }
+      OPENGENI_ACCESS_KEY                  = { value = "mock-only-long-access-key-value-123456789" }
+      OPENGENI_ENVIRONMENTS_ENCRYPTION_KEY = { value = "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=" }
+      OPENGENI_MODEL_PROVIDERS_JSON = { value = jsonencode([{
+        id             = "mockprovider"
+        baseUrl        = "https://mockprovider.example.invalid/v1"
+        apiKey         = "mock-only-inline-secret-provider-key"
+        defaultHeaders = { authorization = "Bearer mock-only-private-provider-header" }
+        models         = [{ id = "mockmodel" }]
+      }]) }
+    }
+  }
+  assert {
+    condition = (
+      !contains(keys(output.runtime_nonsecret_env), "OPENGENI_MODEL_PROVIDERS_JSON") &&
+      !strcontains(jsonencode(output.runtime_nonsecret_env), "mock-only-inline-secret-provider-key") &&
+      !strcontains(jsonencode(output.runtime_nonsecret_env), "mock-only-private-provider-header") &&
+      alltrue([for role in ["api", "control", "turn"] :
+        one([for env in azurerm_container_app.service[role].template[0].container[0].env :
+          env.secret_name if env.name == "OPENGENI_MODEL_PROVIDERS_JSON"
+        ]) == local.secret_names["OPENGENI_MODEL_PROVIDERS_JSON"]
+      ])
+    )
+    error_message = "Credential-bearing whole model registry config must remain a Key Vault secret and never a non-secret output."
+  }
 }
 
 run "mutable_images_are_forbidden" {

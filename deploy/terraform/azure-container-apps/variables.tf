@@ -88,9 +88,18 @@ variable "config_env" {
   validation {
     condition = (
       length(setintersection(toset(keys(var.config_env)), local.reserved_env_names)) == 0 &&
+      length(setintersection(toset(keys(var.config_env)), local.credential_env_names)) == 0 &&
       alltrue([for name in keys(var.config_env) : can(regex("^(OPENGENI_|OTEL_|MIMALLOC_)[A-Z0-9_]+$", name)) && !can(regex("(PASSWORD|SECRET|API_KEY|ACCOUNT_KEY|TOKEN|CREDENTIALS)", name))])
     )
-    error_message = "config_env accepts non-secret environment names only; module-owned safety, network, database, and role settings are reserved. Use secret_env for credentials."
+    error_message = "config_env accepts non-secret environment names only; module-owned safety, network, database, and role settings are reserved. Use secret_env for credentials, including OTLP auth headers."
+  }
+
+  validation {
+    condition = try(alltrue([
+      for provider in concat(jsondecode(lookup(var.config_env, "OPENGENI_MODEL_PROVIDERS_JSON", "[]")), []) :
+      !contains(keys(provider), "apiKey")
+    ]), false)
+    error_message = "Non-secret OPENGENI_MODEL_PROVIDERS_JSON must be a JSON array of objects without inline apiKey fields. Use apiKeyEnv with secret_env, or put credential-bearing provider configuration wholly in secret_env."
   }
 }
 

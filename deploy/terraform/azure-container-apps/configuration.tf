@@ -31,7 +31,7 @@ locals {
     "OPENGENI_MCP_URL", "OPENGENI_MCP_INTERNAL_URL", "OPENGENI_CORS_ALLOW_ORIGIN_REGEX",
     "OPENGENI_PRODUCT_ACCESS_MODE", "OPENGENI_AUTH_REQUIRED", "OPENGENI_AUTH_ALLOW_HEALTH",
     "OPENGENI_AUTH_ALLOW_METRICS", "OPENGENI_SANDBOX_BACKEND", "OPENGENI_SANDBOX_SELFHOSTED_ENABLED",
-    "OPENGENI_SANDBOX_OWNERSHIP_ENABLED",
+    "OPENGENI_SANDBOX_OWNERSHIP_ENABLED", "OPENGENI_SANDBOX_ARTIFACT_RUNTIME_ENABLED",
     "OPENGENI_SANDBOX_PREPARATION_PROFILES", "OPENGENI_SANDBOX_ENV_ALLOWLIST",
     "OPENGENI_OBJECT_STORAGE_BACKEND", "OPENGENI_OBJECT_STORAGE_BUCKET", "OPENGENI_OBJECT_STORAGE_ENDPOINT",
     "OPENGENI_OBJECT_STORAGE_INTERNAL_ENDPOINT", "OPENGENI_OBJECT_STORAGE_SANDBOX_ENDPOINT",
@@ -40,6 +40,14 @@ locals {
     "OPENGENI_OBJECT_STORAGE_ACCESS_KEY_ID", "OPENGENI_OBJECT_STORAGE_SECRET_ACCESS_KEY",
     "OPENGENI_ORGANIZATION_USER_SETUP_EMAIL_TOKEN_TRANSPORT",
     "OPENGENI_ORGANIZATION_USER_SETUP_QUERY_EDGE_SANITIZATION_CONFIRMED",
+  ])
+
+  # Runtime common aliases and standard per-signal OTLP header variables may
+  # contain collector credentials. They belong in secret_env, never outputs.
+  credential_env_names = toset([
+    "OPENGENI_OTEL_EXPORTER_OTLP_HEADERS", "OTEL_EXPORTER_OTLP_HEADERS",
+    "OTEL_EXPORTER_OTLP_TRACES_HEADERS", "OTEL_EXPORTER_OTLP_METRICS_HEADERS",
+    "OTEL_EXPORTER_OTLP_LOGS_HEADERS",
   ])
 
   sandbox_secret_requirements = {
@@ -62,13 +70,18 @@ locals {
     vercel      = toset(["OPENGENI_VERCEL_PROJECT_ID"])
     opensandbox = toset(["OPENGENI_OPENSANDBOX_BASE_URL", "OPENGENI_OPENSANDBOX_IMAGE"])
   }
+  signing_secret_env = setunion(
+    var.access_mode == "configured" ? toset(["OPENGENI_ACCESS_KEY"]) : toset([
+      "OPENGENI_BETTER_AUTH_SECRET", "OPENGENI_DELEGATION_SECRET"
+    ]),
+    contains(nonsensitive(keys(var.secret_env)), "OPENGENI_DELEGATION_SECRET") ? toset(["OPENGENI_DELEGATION_SECRET"]) : toset([])
+  )
   required_application_secret_env = setunion(
     var.required_model_secret_env,
     lookup(local.sandbox_secret_requirements, var.sandbox_backend, toset([])),
     toset(["OPENGENI_ENVIRONMENTS_ENCRYPTION_KEY"]),
-    var.access_mode == "configured" ? toset(["OPENGENI_ACCESS_KEY"]) : toset([
-      "OPENGENI_BETTER_AUTH_SECRET", "OPENGENI_DELEGATION_SECRET", "OPENGENI_RESEND_API_KEY"
-    ]),
+    local.signing_secret_env,
+    var.access_mode == "managed" ? toset(["OPENGENI_RESEND_API_KEY"]) : toset([]),
     contains(["true", "1", "yes", "y", "on"], lower(trimspace(lookup(var.config_env, "OPENGENI_INTEGRATIONS_ENABLED", "false")))) ? toset(["OPENGENI_INTEGRATIONS_STATE_SECRET"]) : toset([])
   )
 
@@ -125,6 +138,7 @@ locals {
     OPENGENI_AUTH_ALLOW_METRICS                                        = "false"
     OPENGENI_SANDBOX_BACKEND                                           = var.sandbox_backend
     OPENGENI_SANDBOX_OWNERSHIP_ENABLED                                 = "true"
+    OPENGENI_SANDBOX_ARTIFACT_RUNTIME_ENABLED                          = "false"
     OPENGENI_SANDBOX_PREPARATION_PROFILES                              = "none"
     OPENGENI_SANDBOX_ENV_ALLOWLIST                                     = ""
     OPENGENI_SANDBOX_SELFHOSTED_ENABLED                                = "false"
@@ -163,11 +177,11 @@ resource "terraform_data" "application_gate" {
     precondition {
       condition = var.deployment_phase != "apps" || (
         try(can(regex("^[A-Za-z0-9+/]{43}=$", var.secret_env["OPENGENI_ENVIRONMENTS_ENCRYPTION_KEY"].value)), false) &&
-        alltrue([for name in var.access_mode == "configured" ? toset(["OPENGENI_ACCESS_KEY"]) : toset(["OPENGENI_BETTER_AUTH_SECRET", "OPENGENI_DELEGATION_SECRET"]) :
-          try(length(var.secret_env[name].value) >= 32, false)
+        alltrue([for name in local.signing_secret_env :
+          try(length(trimspace(var.secret_env[name].value)) >= 32, false)
         ])
       )
-      error_message = "Serving auth signing/shared keys must be at least 32 characters; ENVIRONMENTS_ENCRYPTION_KEY must be base64-encoded 32 bytes."
+      error_message = "Serving auth signing/shared keys must be at least 32 characters after trimming; ENVIRONMENTS_ENCRYPTION_KEY must be base64-encoded 32 bytes."
     }
     precondition {
       condition = !var.outbox_dispatcher_enabled || (
