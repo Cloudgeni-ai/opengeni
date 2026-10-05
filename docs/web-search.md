@@ -169,6 +169,20 @@ OPENGENI_WEB_FETCH_PROVIDER=jina
 SearXNG must have the JSON format enabled (`search.formats: [html, json]` in
 `settings.yml`).
 
+## Metrics
+
+The worker counts every provider call that reaches the provider or is refused
+by billing:
+
+- `opengeni_web_search_calls_total{operation, provider, outcome}`, where
+  `operation` is `search` or `fetch` and `outcome` is `ok`, `provider_error`,
+  `provider_retryable` (timeouts, 429, 5xx), `billing_refused`, or `error`
+  (an unexpected exception);
+- `opengeni_web_search_call_duration_seconds{operation, provider}`.
+
+Labels never include the query, URL or session. A provider failure also logs
+`web search provider call failed` with the provider, HTTP status and message.
+
 ## Billing
 
 Credit billing is active when `OPENGENI_BILLING_MODE=stripe` or
