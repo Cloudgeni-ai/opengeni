@@ -195,7 +195,7 @@ function Chat({
       } catch (error) {
         // A proxy without a createSession hook refuses the route itself.
         if (error instanceof OpenGeniApiError && error.code === "route_not_allowed") {
-          throw new Error(labels.newChatUnavailable);
+          throw new Error(labels.newChatUnavailable, { cause: error });
         }
         throw error;
       }

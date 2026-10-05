@@ -359,7 +359,9 @@ function EditableBody({
   );
 }
 
-function artifactCapabilityKey(config: Exclude<NonNullable<ClientConfig["artifacts"]>, false>): string {
+function artifactCapabilityKey(
+  config: Exclude<NonNullable<ClientConfig["artifacts"]>, false>,
+): string {
   return JSON.stringify([
     config.editableLiveUrl,
     config.cachePartition.accountId,

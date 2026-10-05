@@ -16,7 +16,6 @@ import {
 } from "../src/session-proxy";
 import { hangingBytesStream, makeEvent, SESSION_ID, sseBlock, WORKSPACE_ID } from "./helpers";
 
-
 /** The artifact-viewer capability, or undefined when the proxy reports none. */
 function viewer(config: { artifacts?: ClientConfig["artifacts"] }) {
   return config.artifacts || undefined;
@@ -289,9 +288,7 @@ describe("createSessionProxyHandler", () => {
     ).toBe(false);
     // A deployment upgrade is discovered without a sticky negative cache.
     supported = true;
-    expect(viewer(await browser.getClientConfig())?.cachePartition.principalId).toBe(
-      "subject-u42",
-    );
+    expect(viewer(await browser.getClientConfig())?.cachePartition.principalId).toBe("subject-u42");
   });
 
   test("viewer negotiation does not turn permission or transient errors into missing capability", async () => {
@@ -1188,9 +1185,7 @@ describe("createSessionProxyHandler", () => {
     ).toBe(404);
     expect(on.seen.some((line) => line.includes("/content"))).toBe(false);
     const refused = build({ authorizeSession: () => false });
-    expect((await refused.handler(new Request(content, { headers: scoped() }))).status).toBe(
-      404,
-    );
+    expect((await refused.handler(new Request(content, { headers: scoped() }))).status).toBe(404);
     expect(refused.seen).toEqual([]);
     // Only content reads and playback minting; never metadata or other verbs.
     for (const [url, method] of [
@@ -1208,11 +1203,8 @@ describe("createSessionProxyHandler", () => {
       expect(response.status).toBe(404);
     }
     expect(
-      (
-        await on.handler(
-          new Request(content, { headers: { ...scoped(), range: "bytes=\u0001" } }),
-        )
-      ).status,
+      (await on.handler(new Request(content, { headers: { ...scoped(), range: "bytes=\u0001" } })))
+        .status,
     ).toBe(400);
 
     // Screenshots are read through the session the browser can already read.

@@ -79,7 +79,12 @@ export function registerSessionArtifactAssociationRoutes(app: Hono, deps: ApiRou
                     sessionId,
                     artifactId.toLowerCase(),
                   )
-                : await hasWorkspaceArtifactSessionLink(deps.db, workspaceId, sessionId, artifactId);
+                : await hasWorkspaceArtifactSessionLink(
+                    deps.db,
+                    workspaceId,
+                    sessionId,
+                    artifactId,
+                  );
           if (!linked) throw new HTTPException(404, { message: "Artifact association not found" });
           if (kind === "editable") {
             const decision = await withRlsContext(deps.db, scope, (tx) =>
