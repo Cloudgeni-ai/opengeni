@@ -15,11 +15,19 @@ export {
   type ConnectionMetadataWithVerification,
 } from "./connection-metadata";
 export { readCreditPromotionPolicy } from "./credit-promotion-policy";
-import { getBillingBalance, getSpendableCreditBalance, planCreditDebit } from "./credit-balances";
+import {
+  getBillingBalance,
+  getSpendableCreditBalance,
+  planCreditDebit,
+  planPostUseCreditAllocations,
+  type CreditUsage,
+} from "./credit-balances";
 export {
   getBillingBalance,
   getSpendableCreditBalance,
   spendableCreditMicros,
+  VOICE_CREDIT_USAGE,
+  type CreditUsage,
 } from "./credit-balances";
 import {
   lockTurnAttemptWriteFenceTx,
@@ -5884,6 +5892,11 @@ export async function applyCreditDebitAfterUse(
     idempotencyKey: string;
     metadata?: Record<string, unknown>;
     occurredAt?: Date;
+    /**
+     * What the charge paid for. When set, grants covering it pay first (oldest
+     * first) and general credit takes the rest. Omitted: general credit only.
+     */
+    usage?: CreditUsage;
   },
 ): Promise<{ balance: BillingBalance; debitedMicros: number }> {
   if (!Number.isSafeInteger(input.amountMicros) || input.amountMicros <= 0) {
@@ -5893,6 +5906,17 @@ export async function applyCreditDebitAfterUse(
     db,
     { accountId: input.accountId, workspaceId: input.workspaceId ?? null },
     async (scopedDb) => {
+      let allocations: { grantEntryId: string; amountMicros: number }[] = [];
+      if (input.usage) {
+        // Same account lock as the model debit, so grant remainders are not
+        // allocated twice by concurrent charges.
+        await scopedDb.execute(sql`select pg_advisory_xact_lock(hashtext(${input.accountId}))`);
+        allocations = planPostUseCreditAllocations(
+          await getBillingBalance(scopedDb, input.accountId),
+          input.amountMicros,
+          input.usage,
+        );
+      }
       const inserted = await scopedDb
         .insert(schema.creditLedgerEntries)
         .values({
@@ -5933,6 +5957,14 @@ export async function applyCreditDebitAfterUse(
             "post-use credit debit idempotency key conflicts with a different charge",
           );
         }
+      } else if (allocations.length) {
+        await scopedDb.insert(schema.creditDebitAllocations).values(
+          allocations.map((allocation) => ({
+            ...allocation,
+            accountId: input.accountId,
+            debitEntryId: inserted[0]!.id,
+          })),
+        );
       }
       return {
         balance: await getBillingBalance(scopedDb, input.accountId),

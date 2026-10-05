@@ -20,6 +20,7 @@ import {
   loadSessionRealtimeBillingFacts,
   recordUsageEvent,
   sumUsageQuantity,
+  VOICE_CREDIT_USAGE,
   withRlsContext,
   type CreditDebitAttribution,
   type Database,
@@ -136,9 +137,13 @@ export function realtimeVoiceOfferProblem(
 export const REALTIME_VOICE_INSUFFICIENT_CREDITS_MESSAGE =
   "Live voice needs Opengeni credits. Add credits to continue.";
 
-/** Spendable general credits, only model-scoped free credits, or neither. */
+/**
+ * Credits voice can spend (general and signup credits), only model-scoped
+ * promotional credits, or neither.
+ */
 export type VoiceCreditStanding = "spendable" | "promotional_only" | "none";
 
+/** `balance` must be the voice-spendable balance (see {@link VOICE_CREDIT_USAGE}). */
 export function voiceCreditStanding(balance: {
   balanceMicros: number;
   promotionalCredits?: readonly { remainingMicros: number }[] | undefined;
@@ -150,15 +155,16 @@ export function voiceCreditStanding(balance: {
 }
 
 /**
- * Insufficient-credit copy for voice. Free credits are scoped to chat models,
- * so an account holding only those must not be told it has nothing.
+ * Insufficient-credit copy for voice. Signup credits pay for voice like
+ * general credits; other promotional credits are scoped to chat models, so an
+ * account holding only those must not be told it has nothing.
  */
 export function voiceInsufficientCreditsMessage(
   feature: "Live voice" | "Voice input",
   standing: VoiceCreditStanding,
 ): string {
   return standing === "promotional_only"
-    ? `Free credits don't cover ${feature.toLowerCase()}. Add credits to use it.`
+    ? `Promotional credits don't cover ${feature.toLowerCase()}. Add credits to use it.`
     : `${feature} needs Opengeni credits. Add credits to continue.`;
 }
 
@@ -183,7 +189,7 @@ export type RealtimeVoiceSettlement = {
  * Credit admission and time metering for deployment-funded live voice.
  *
  * Admission mirrors voice-input admission (same refusal codes and HTTP
- * shape): spendable general credits must be positive, the workspace/member
+ * shape): voice-spendable credits (general plus signup) must be positive, the workspace/member
  * allowance must not be exhausted, and the static monthly cost cap applies.
  * Metering bills every started minute of each issued provider connection,
  * measured only from server-observed facts (connection claim time, owner
@@ -199,7 +205,7 @@ export function createRealtimeVoiceBilling(deps: { db: Database; settings: Setti
     attribution: CreditDebitAttribution;
     now: Date;
   }): Promise<TranscriptionBillingRefusedError | null> {
-    const balance = await getSpendableCreditBalance(deps.db, input.accountId);
+    const balance = await getSpendableCreditBalance(deps.db, input.accountId, VOICE_CREDIT_USAGE);
     if (balance.balanceMicros <= 0) {
       return new TranscriptionBillingRefusedError({
         code: "insufficient_credits",
@@ -271,7 +277,9 @@ export function createRealtimeVoiceBilling(deps: { db: Database; settings: Setti
     /** Credit standing for live voice ("spendable" when credits are not enforced). */
     async creditStanding(accountId: string): Promise<VoiceCreditStanding> {
       if (!billingActive()) return "spendable";
-      return voiceCreditStanding(await getSpendableCreditBalance(deps.db, accountId));
+      return voiceCreditStanding(
+        await getSpendableCreditBalance(deps.db, accountId, VOICE_CREDIT_USAGE),
+      );
     },
 
     /**
@@ -357,6 +365,7 @@ export function createRealtimeVoiceBilling(deps: { db: Database; settings: Setti
               sourceId,
               idempotencyKey: `credit:${REALTIME_VOICE_DEBIT_TYPE}:${sourceId}`,
               occurredAt: minute.startsAt,
+              usage: VOICE_CREDIT_USAGE,
               metadata: {
                 provider: voice.provider,
                 model: facts.model,

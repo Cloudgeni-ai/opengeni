@@ -343,9 +343,14 @@ with the same refusal codes; see the realtime section of
 [`run-lifecycle.md`](run-lifecycle.md). Backend delegated model work retains
 normal model billing.
 
-Voice is credit-gated on general credits only. Model-scoped free (promotional)
-credits do not cover dictation or live voice; an account holding only those is
-told so ("Free credits don't cover live voice") instead of "out of credits".
+Voice is credit-gated on general credits plus verified-signup trial credits.
+Signup credits pay for dictation and live voice exactly like general credits:
+admission counts their remainder, and each voice debit is allocated to them
+first (oldest grant first) before general credit takes the rest. The rule is
+decided at usage time from the grant's source (`verified_signup_trial`), so
+already-issued signup grants are covered. Other model-scoped promotional
+credits do not cover voice; an account holding only those is told so
+("Promotional credits don't cover live voice") instead of "out of credits".
 
 Live voice runs long-lived browser protocol code, so the stock web app checks
 the deployment before every voice begin (`apps/web/src/lib/voice-deployment-guard.ts`).

@@ -667,7 +667,7 @@ describe("ordinary session Codex realtime control", () => {
       available,
       unavailableReason: available
         ? null
-        : "Free credits don't cover live voice. Add credits to use it.",
+        : "Promotional credits don't cover live voice. Add credits to use it.",
       unavailableCode: available ? null : "insufficient_credits",
       recommended: true,
     });

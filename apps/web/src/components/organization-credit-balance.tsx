@@ -49,6 +49,7 @@ export function OrganizationCreditBalance({
               label={grant.label}
               amount={formatMoneyMicros(grant.remainingMicros, balance.currency)}
               eligibleModelIds={grant.eligibleModelIds}
+              coversVoice={grant.coversVoice}
             />
           ))}
           <div className="flex min-h-16 items-center justify-between gap-4 py-3 pl-2 pr-8">

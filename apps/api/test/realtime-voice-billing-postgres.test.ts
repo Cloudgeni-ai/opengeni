@@ -212,7 +212,7 @@ describe("deployment-funded realtime voice credits (real PostgreSQL)", () => {
     });
   });
 
-  test("free chat-only credits are named instead of reported as no credits", async () => {
+  test("promotional chat-only credits are named instead of reported as no credits", async () => {
     const app = appFor(pricedSettings);
     const value = await fixture(0);
     await applyCreditLedgerEntry(client.db, {
@@ -226,7 +226,7 @@ describe("deployment-funded realtime voice credits (real PostgreSQL)", () => {
     expect(refused.response.status).toBe(402);
     expect(await refused.response.json()).toMatchObject({
       code: "insufficient_credits",
-      message: "Free credits don't cover live voice. Add credits to use it.",
+      message: "Promotional credits don't cover live voice. Add credits to use it.",
     });
     const catalog = await app.request(
       `http://x/v1/workspaces/${value.workspaceId}/realtime-model-catalog`,
@@ -236,8 +236,68 @@ describe("deployment-funded realtime voice credits (real PostgreSQL)", () => {
     expect(models.find((model) => model.provider === "OpenGeni")).toMatchObject({
       available: false,
       unavailableCode: "insufficient_credits",
-      unavailableReason: "Free credits don't cover live voice. Add credits to use it.",
+      unavailableReason: "Promotional credits don't cover live voice. Add credits to use it.",
     });
+  });
+
+  test("signup trial credits make live voice available and pay for its minutes", async () => {
+    const app = appFor(pricedSettings);
+    const value = await fixture(0);
+    // Signup credits stay scoped to chat models for model usage, yet pay for voice.
+    await applyCreditLedgerEntry(client.db, {
+      accountId: value.accountId,
+      amountMicros: 2 * MINUTE,
+      type: "grant",
+      eligibleModelIds: ["gpt-chat-only"],
+      sourceType: "verified_signup_trial",
+      sourceId: value.subjectId,
+      idempotencyKey: `verified-signup-trial:v1:${value.accountId}`,
+      metadata: { campaign: "verified_signup_trial_v1", creditOfferLabel: "Signup credits" },
+    });
+    const catalog = await app.request(
+      `http://x/v1/workspaces/${value.workspaceId}/realtime-model-catalog`,
+      { headers: value.headers },
+    );
+    const models = ((await catalog.json()) as { models: Array<Record<string, unknown>> }).models;
+    expect(models.find((model) => model.provider === "OpenGeni")).toMatchObject({
+      id: AZURE_MODEL,
+      available: true,
+      unavailableReason: null,
+      unavailableCode: null,
+      recommended: true,
+    });
+
+    const started = await begin(app, value, AZURE_MODEL);
+    expect(started.response.status).toBe(201);
+    const mode = (
+      (await started.response.json()) as {
+        mode: { id: string; version: number; connectionEpoch: number };
+      }
+    ).mode;
+    const negotiated = await app.request(`${value.base}/webrtc`, {
+      method: "POST",
+      headers: value.headers,
+      body: JSON.stringify({
+        realtimeId: mode.id,
+        operationId: crypto.randomUUID(),
+        browserInstanceId: started.proof.browserInstanceId,
+        ownerKey: started.proof.ownerKey,
+        expectedVersion: mode.version,
+        expectedConnectionEpoch: mode.connectionEpoch,
+        rotate: false,
+        sdp: "v=0\r\na=offer:fixture\r\n",
+        version: "v3",
+      }),
+    });
+    expect(negotiated.status).toBe(200);
+    // The first started minute is charged to the signup grant, not general credit.
+    const balance = await getBillingBalance(client.db, value.accountId);
+    expect(balance.balanceMicros).toBe(MINUTE);
+    expect(balance.generalBalanceMicros).toBe(0);
+    expect(balance.promotionalCredits).toEqual([
+      expect.objectContaining({ remainingMicros: MINUTE, coversVoice: true }),
+    ]);
+    expect(await costEvents(value)).toHaveLength(1);
   });
 
   test("an enabled provider without pricing is neither offered nor startable", async () => {
