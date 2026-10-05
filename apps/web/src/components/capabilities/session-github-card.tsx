@@ -15,6 +15,11 @@ import { hasWorkspacePermission } from "@/lib/permissions";
 import { repositoryDisplayName } from "@/lib/session-tools";
 import { cn } from "@/lib/utils";
 import { isPersonalWorkspace } from "@/lib/managed-self-context";
+import {
+  clearGitHubInstallRequest,
+  readGitHubInstallRequest,
+  subscribeGitHubInstallRequests,
+} from "@/lib/github-install-request";
 import type { GitHubAppInfo, GitHubRepository, ResourceRef } from "@/types";
 import { capabilityLogoSource } from "./capability-logo-source";
 import { SessionCapabilityFrame } from "./session-capability-frame";
@@ -95,6 +100,7 @@ export function SessionGitHubCapabilityCard({
   }, []);
 
   const bound = status?.status === "bound";
+  const ownerApprovalPending = useGitHubInstallRequest(workspaceId, bound);
   const accessKnown = context.accessContext !== null && context.accessContext !== undefined;
   const can = (permission: string) =>
     !accessKnown || hasWorkspacePermission(context.accessContext, workspaceId, permission);
@@ -241,7 +247,11 @@ export function SessionGitHubCapabilityCard({
       subtitle={catalogItem ? (catalogItem.providerDomain ?? "") : item.providerDomain}
       logo={logo}
       typeLabel="API"
-      description={catalogItem?.description || recommendation.rationale}
+      description={
+        ownerApprovalPending && !unavailable
+          ? "Waiting for your GitHub organization owner to approve. After they do, an owner of the organization connects it here, and this card updates on its own."
+          : catalogItem?.description || recommendation.rationale
+      }
       skill={false}
       expanded={expanded}
       complete={bound}
@@ -254,7 +264,9 @@ export function SessionGitHubCapabilityCard({
       opensDialog={false}
       note={
         unavailableNote ??
-        "Choose which account and repositories this workspace can access on GitHub."
+        (ownerApprovalPending
+          ? "Nothing is connected yet. Meanwhile, you can attach a zip of your project to a message instead."
+          : "Choose which account and repositories this workspace can access on GitHub. For an organization you don't own, GitHub lets you ask its owners to approve.")
       }
       onOpen={() => void connect()}
       onClose={() => setExpanded(false)}
@@ -289,6 +301,25 @@ export function SessionGitHubCapabilityCard({
       </div>
     </SessionCapabilityFrame>
   );
+}
+
+/**
+ * True while this browser has an unanswered GitHub install request for the
+ * workspace. Cleared as soon as the workspace's GitHub connection exists, which
+ * the card already notices through its normal status refresh.
+ */
+function useGitHubInstallRequest(workspaceId: string, bound: boolean): boolean {
+  const [requestedAt, setRequestedAt] = useState(() => readGitHubInstallRequest(workspaceId));
+  useEffect(() => {
+    setRequestedAt(readGitHubInstallRequest(workspaceId));
+    return subscribeGitHubInstallRequests(() =>
+      setRequestedAt(readGitHubInstallRequest(workspaceId)),
+    );
+  }, [workspaceId]);
+  useEffect(() => {
+    if (bound) clearGitHubInstallRequest(workspaceId);
+  }, [bound, workspaceId]);
+  return !bound && requestedAt !== null;
 }
 
 type RepositoryRow = {

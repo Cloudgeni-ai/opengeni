@@ -14,6 +14,12 @@ async function findingsFor(file: string, source: string): Promise<Finding[]> {
 }
 
 describe("workspace provider import guard", () => {
+  test.each([
+    "apps/api/test/scoped-credit-checkout.test.ts",
+    "apps/api/test/scoped-credits-postgres.test.ts",
+  ])("permits the billing adapter's Stripe contract fixture: %s", async (file) => {
+    expect(await findingsFor(file, 'import Stripe from "stripe";')).toEqual([]);
+  });
   test("confines the Stripe billing portal path to its API and SDK surfaces", () => {
     const portalPath = ["/v1/billing", "portal"].join("/");
     const allowed: Finding[] = [];
@@ -191,6 +197,18 @@ describe("workspace and organization MCP route guard", () => {
     expect(
       routeFindings(file, `app.get("${organizationMcpPath}-connections/requests/:request");`),
     ).toEqual([]);
+  });
+
+  test("does not mistake authorization discovery for an MCP gateway default", () => {
+    const file = "apps/web/src/server.test.ts";
+    const discoveryPath = ["/.well-known/oauth-authorization-server", "v1", "mcp"].join("/");
+    expect(routeFindings(file, `const discovery = "${discoveryPath}";`)).toEqual([]);
+    expect(
+      routeFindings(
+        file,
+        `const discovery = "${discoveryPath}"; const gateway = "${organizationMcpPath}";`,
+      ),
+    ).toHaveLength(2);
   });
 
   test("preserves scoped workspace MCP and third-party absolute URL handling", () => {

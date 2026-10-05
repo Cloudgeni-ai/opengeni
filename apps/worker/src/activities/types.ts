@@ -500,6 +500,7 @@ export type DispatchScheduledTaskRunResult =
         | "machine_enrollment_inactive"
         | "variable_set_unavailable"
         | "rig_version_unavailable"
+        | "scheduled_model_unavailable"
         | "knowledge_source_paused"
         | "legacy_source_schedule_requires_migration"
         | "atlassian_native_retired"

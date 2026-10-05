@@ -64,3 +64,37 @@ describe("sign-in callback notice", () => {
     expect(panel).toContain("Sign-in was cancelled");
   });
 });
+
+describe("stale sign-in request callbacks", () => {
+  async function renderSignedIn(search: string, userId: string | null) {
+    window.history.replaceState(null, "", `/${search}`);
+    const container = document.createElement("div");
+    document.body.appendChild(container);
+    const root = createRoot(container);
+    try {
+      await act(async () => root.render(<SignInCallbackNotice userId={userId} />));
+      return { text: container.textContent ?? "", search: window.location.search };
+    } finally {
+      await act(async () => root.unmount());
+      container.remove();
+      window.history.replaceState(null, "", "/");
+    }
+  }
+
+  test("a valid session hides a stale-request code and strips it from the URL", async () => {
+    const seen = await renderSignedIn("?error=state_mismatch&workspace=w1", "user-1");
+    expect(seen.text).toBe("");
+    expect(seen.search).toBe("?workspace=w1");
+  });
+
+  test("without a session the stale-request code is still reported", async () => {
+    const seen = await renderSignedIn("?error=session_expired", null);
+    expect(seen.text).toContain("expired or no longer matches this browser");
+    expect(seen.search).toBe("?error=session_expired");
+  });
+
+  test("a real failure stays visible even with a session", async () => {
+    const seen = await renderSignedIn("?error=access_denied", "user-1");
+    expect(seen.text).toContain("Sign-in was cancelled");
+  });
+});

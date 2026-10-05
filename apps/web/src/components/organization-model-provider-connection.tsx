@@ -20,7 +20,7 @@ import type { ProviderConnectionView } from "@/components/ai-gateway-connection"
 import { useClaudeUsage } from "@/components/models/claude-usage";
 import { userErrorText } from "@/lib/api-error";
 
-// Organization API-key providers (Vercel AI Gateway, OpenRouter) shared with
+// Organization API-key providers (Vercel AI Gateway, OpenRouter, Opper) shared with
 // the organization's workspaces. Returns the same view as the workspace hook,
 // so Organization settings > Models reuses the row and the provider's page.
 

@@ -397,3 +397,70 @@ test("a failed compensation savepoint rolls back its edits and reports unrestore
   ).rejects.toMatchObject({ persistenceRestored: false, cause: failure });
   expect(await getScheduledTask(client.db, workspace.workspaceId, original.id)).toEqual(changed);
 });
+
+test.each(["create", "update"] as const)(
+  "failed %s synchronization cannot compensate over a concurrent name-only edit",
+  async (operation) => {
+    if (!available) return;
+    const original = await task();
+    const changed =
+      operation === "create"
+        ? original
+        : await updateScheduledTask(client.db, workspace.workspaceId, original.id, {
+            schedule: { type: "interval", everySeconds: 7_200 },
+          });
+    const entered = deferred();
+    const release = deferred();
+    const failure = new Error("Synthetic sync rejection");
+    let external: ScheduledTask | null = original;
+    const failing = createTemporalScheduleSynchronizer({
+      db: client.db,
+      withDeadline,
+      upsert: async () => {
+        entered.resolve();
+        await release.promise;
+        throw failure;
+      },
+      remove: async () => {
+        throw new Error("Unexpected removal");
+      },
+    });
+    const workflowClient = {
+      syncScheduledTask: async ({ task: saved, onFailure }) => failing.sync(saved, onFailure),
+    } as SessionWorkflowClient;
+    const input = { db: client.db, workflowClient, task: changed };
+    const running = (
+      operation === "create"
+        ? syncCreatedScheduledTask(input)
+        : syncUpdatedScheduledTask({ ...input, previous: { task: original } })
+    ).catch((error: unknown) => error);
+    await entered.promise;
+    let latest: ScheduledTask;
+    let result: unknown;
+    try {
+      latest = await updateScheduledTask(client.db, workspace.workspaceId, original.id, {
+        name: "Concurrent edit must survive",
+      });
+      // Names are outside the execution digest; compensation must fence the
+      // complete saved row, not only the execution configuration.
+      expect(latest.executionDigest).toBe(changed.executionDigest);
+    } finally {
+      release.resolve();
+      result = await running;
+    }
+    expect(result).toBeInstanceOf(ScheduledTaskSyncError);
+    expect(result).toMatchObject({ persistenceRestored: false, cause: failure });
+    expect(await getScheduledTask(client.db, workspace.workspaceId, original.id)).toEqual(latest!);
+    await createTemporalScheduleSynchronizer({
+      db: client.db,
+      withDeadline,
+      upsert: async (saved) => {
+        external = saved;
+      },
+      remove: async () => {
+        external = null;
+      },
+    }).sync(changed);
+    expect(external).toEqual(latest!);
+  },
+);

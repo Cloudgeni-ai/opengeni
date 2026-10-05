@@ -33,6 +33,8 @@ import {
   type BrowserContextOptions,
   type Page,
   type Response as PlaywrightResponse,
+  type Request as PlaywrightRequest,
+  type Frame as PlaywrightFrame,
   type Route,
 } from "playwright";
 import postgres from "postgres";
@@ -3504,17 +3506,14 @@ describe("session pins browser e2e (real API + non-superuser PostgreSQL)", () =>
     await page.goto(`${webBaseUrl}/workspaces/${workspaceId}/sessions/${target.id}`);
     // Wait for the session shell before sampling React commits — a cold goto can
     // read the probe at 0 before the first paint registers.
-    await page
-      .locator("header")
-      .getByRole("button", { name: "Pin session", exact: true })
-      .waitFor();
+    // Phones pin from the header's "…" menu.
+    const more = page.locator("header").getByRole("button", { name: "More session actions" });
+    await more.waitFor();
     const initialCommits = await reactCommitCount(page);
     expect(initialCommits).toBeGreaterThan(0);
-    await page.locator("header").getByRole("button", { name: "Pin session", exact: true }).click();
-    await page
-      .locator("header")
-      .getByRole("button", { name: "Unpin session", exact: true })
-      .waitFor();
+    await more.click();
+    await page.getByRole("menuitem", { name: "Pin", exact: true }).click();
+    await page.getByText("Session pinned.").waitFor({ state: "attached" });
     expect((await reactCommitCount(page)) - initialCommits).toBeLessThanOrEqual(64);
 
     // Stress the compact pinned section with many long rows through the normal
@@ -3533,20 +3532,18 @@ describe("session pins browser e2e (real API + non-superuser PostgreSQL)", () =>
     // the responsive assertion from a fresh server projection instead of
     // racing the rail's 15-second background reconciliation interval.
     await page.reload();
-    await page
-      .locator("header")
-      .getByRole("button", { name: "Unpin session", exact: true })
-      .waitFor();
+    await more.click();
+    await page.getByRole("menuitem", { name: "Unpin", exact: true }).waitFor();
+    await page.keyboard.press("Escape");
 
     for (const viewport of mobileViewports) {
       await page.setViewportSize(viewport);
       for (const theme of ["light", "dark"] as const) {
         await setTheme(page, theme);
         await expectNoPageOverflow(page);
-        const pin = page.locator("header").getByRole("button", { name: /^(Pin|Unpin) session$/ });
         const inspector = page.getByRole("button", { name: /^(Open|Hide) workspace$/ });
         const hamburger = page.getByRole("button", { name: "Open navigation" });
-        for (const control of [pin, inspector, hamburger]) {
+        for (const control of [more, inspector, hamburger]) {
           const box = await control.boundingBox();
           expect(box?.width ?? 0).toBeGreaterThanOrEqual(44);
           expect(box?.height ?? 0).toBeGreaterThanOrEqual(44);
@@ -3996,23 +3993,37 @@ async function navigateWithProjectPages(
   // Workspace rows can paint before independent folder reads finish. Wait for
   // every first page and its loading state before dragging or snapshotting rows.
   const firstPages = new Map<string, Promise<unknown>>();
+  const newDocumentRequests = new Set<PlaywrightRequest>();
+  let navigationCommitted = false;
+  const observeNavigation = (frame: PlaywrightFrame) => {
+    if (frame === page.mainFrame()) navigationCommitted = true;
+  };
+  const observeRequest = (request: PlaywrightRequest) => {
+    if (navigationCommitted) newDocumentRequests.add(request);
+  };
   const observePage = (response: PlaywrightResponse) => {
+    if (!newDocumentRequests.has(response.request())) return;
     if (!successfulSessionPageResponse(response, workspaceId, { cursor: null })) return;
     const channelId = new URL(response.url()).searchParams.get("channelId");
     if (channelId !== null) firstPages.set(channelId, response.json());
   };
+  // Ignore refreshes from the document being replaced by this navigation.
+  page.on("framenavigated", observeNavigation);
+  page.on("request", observeRequest);
   page.on("response", observePage);
   try {
-    const [channelsResponse] = await Promise.all([
-      page.waitForResponse(
-        (response) =>
-          response.ok() &&
-          response.request().method() === "GET" &&
-          new URL(response.url()).pathname === `/v1/workspaces/${workspaceId}/channels`,
-      ),
+    const [channels] = await Promise.all([
+      page
+        .waitForResponse(
+          (response) =>
+            newDocumentRequests.has(response.request()) &&
+            response.ok() &&
+            response.request().method() === "GET" &&
+            new URL(response.url()).pathname === `/v1/workspaces/${workspaceId}/channels`,
+        )
+        .then((response) => response.json() as Promise<BrowserChannel[]>),
       navigate(),
     ]);
-    const channels = (await channelsResponse.json()) as BrowserChannel[];
     const channelIds = ["null", ...channels.map((channel) => channel.id)];
     await waitFor(() => channelIds.every((channelId) => firstPages.has(channelId)), {
       timeoutMs: 30_000,
@@ -4025,6 +4036,8 @@ async function navigateWithProjectPages(
       { timeoutMs: 30_000 },
     );
   } finally {
+    page.off("framenavigated", observeNavigation);
+    page.off("request", observeRequest);
     page.off("response", observePage);
   }
 }

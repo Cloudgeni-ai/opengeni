@@ -77,9 +77,10 @@ the default agent permission set:
   `social_posts`.
 
 Sync requires write authority because it mutates OpenGeni's durable analysis
-store, even though it does not publish to the provider. Pair either reply tool
-with a `requireApproval` policy when a human should sign off on every outbound
-post.
+store, even though it does not publish to the provider. When a human should
+sign off on every outbound post, set both reply tools to Ask first. A
+`requireApproval` policy is only a recommendation; a workspace Allow overrides
+it.
 
 Aggregate analysis tools remain provider-neutral: `social_connections_list`,
 `social_posts_recent`, and `social_daily_analysis_context` compose X and Reddit

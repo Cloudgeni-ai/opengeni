@@ -1,4 +1,4 @@
-import { blocks, sentences, type AgentPromptModule } from "../types";
+import { blocks, hasSandbox, sentences, type AgentPromptModule } from "../types";
 
 /** Session tools: reading history, managing sessions, delegating to children, and joining them. */
 export const subagentsModule: AgentPromptModule = {
@@ -37,7 +37,10 @@ export const subagentsModule: AgentPromptModule = {
         "Do not present delegated work as incorporated until you have consumed the completed result.",
         "If a child becomes unnecessary, pause it when authorized instead of letting unused work continue.",
       ),
-      'For a short wait on a child or peer session inside the current turn, call `session_wait` with its session id and your last seen sequence instead of sleeping and polling; use `command_wait` for one short provider-neutral wait on a background command. Both time out after at most 50 seconds. Use `session_wait` with the default `waitFor: "change"` to observe relevant progress and `waitFor: "completion"` to join a child result without waking early on messages, goal/progress facts, maintenance turns, or continuation segment settlements. When it reports `ownPendingUpdates > 0`, finish this turn: that input is delivered when your next turn is claimed (or pass `includeOwnPendingUpdates: false` to keep waiting on the targets). Do not immediately repeat a timed-out short wait without new evidence; an unchanged `session_get` snapshot between waits is not new evidence. Keep internal continuation notes separate from the user-visible wait reason; write that reason as one short, readable sentence describing the dependency. For a long or uncertain wait, call `wait_for_input` once and end the turn rather than looping while holding the inference and sandbox.',
+      (hasSandbox(context)
+        ? "For a short wait on a child or peer session inside the current turn, call `session_wait` with its session id and your last seen sequence instead of sleeping and polling; use `command_wait` for one short provider-neutral wait on a background command. Both time out after at most 50 seconds. "
+        : "For a short wait on a child or peer session inside the current turn, call `session_wait` with its session id and your last seen sequence instead of sleeping and polling. It times out after at most 50 seconds. ") +
+        'Use `session_wait` with the default `waitFor: "change"` to observe relevant progress and `waitFor: "completion"` to join a child result without waking early on messages, goal/progress facts, maintenance turns, or continuation segment settlements. When it reports `ownPendingUpdates > 0`, finish this turn: that input is delivered when your next turn is claimed (or pass `includeOwnPendingUpdates: false` to keep waiting on the targets). Do not immediately repeat a timed-out short wait without new evidence; an unchanged `session_get` snapshot between waits is not new evidence. Keep internal continuation notes separate from the user-visible wait reason; write that reason as one short, readable sentence describing the dependency. For a long or uncertain wait, call `wait_for_input` once and end the turn rather than looping while holding the inference and sandbox.',
     );
   },
 };

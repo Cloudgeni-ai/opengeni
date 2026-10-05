@@ -326,11 +326,11 @@ test("actual-auth response cache hits, isolates keys/scopes/queries, expires, re
       );
       expect(timeout.status).toBe(408);
       const text = await timeout.text();
-      expect(text).toContain("Range too large, try 7 days.");
+      expect(text).toContain("This range has too much data right now. Try a shorter range.");
       expect(text).not.toContain("private SQL");
       expect(JSON.parse(text).error).toMatchObject({
         status: 408,
-        message: "Range too large, try 7 days.",
+        message: "This range has too much data right now. Try a shorter range.",
       });
     }
     expect(usageRead.mock.calls.length - before).toBe(2);
@@ -466,6 +466,17 @@ test("canonical selected-workspace organization keys never inherit Shared-all de
     // Account billing authority still includes unattributed amounts; detail ceiling is independent.
     expect(body.totals).toMatchObject({ calls: 2, listMicros: 26 });
     expect(body.facets.workspaces.map((item) => item.id).sort()).toEqual([...expectedIds].sort());
+    // A visible session needs its real workspace for organization-level navigation.
+    const visibleGroups = body.groups.filter((group) => group.kind === "item");
+    expect(visibleGroups.map((group) => group.workspaceId).sort()).toEqual([...expectedIds].sort());
+    for (const group of visibleGroups) {
+      const session = sessions.find((candidate) => group.key === `item:${candidate.id}`);
+      expect(session).toBeDefined();
+      expect(group.workspaceId).toBe(session!.workspaceId);
+    }
+    for (const group of body.groups.filter((entry) => entry.kind !== "item")) {
+      expect(group.workspaceId).toBeUndefined();
+    }
     const calls = await app.request(path(scope, true, "calls"), { headers: { authorization } });
     expect(calls.status, await calls.clone().text()).toBe(200);
     expect(

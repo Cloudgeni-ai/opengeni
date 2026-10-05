@@ -92,7 +92,10 @@ function ScopedDiscovery({
               (item) =>
                 item.kind === "mcp" &&
                 item.authKind === "oauth2" &&
-                Boolean(item.mcpUrl ?? item.endpointUrl),
+                Boolean(item.mcpUrl ?? item.endpointUrl) &&
+                // The provider refuses self-registration and this deployment
+                // has no operator client for it: Connect cannot succeed.
+                (item.enabled || item.runtime?.operatorOAuthClient?.configured !== false),
             ),
           );
         }

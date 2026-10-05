@@ -31,9 +31,21 @@ type Share = {
   inFlight: Promise<void> | null;
   trailing: Promise<void> | null;
   generation: number;
+  /** The last read was refused (401/403/404). Polling stays stopped until the
+   *  read is disabled (a permission/workspace change) or explicitly refreshed. */
+  halted: boolean;
 };
 
 const shares = new Map<string, Share>();
+
+/** A refusal that repeating the identical read cannot fix: the caller lacks
+ *  `enrollments:read` (403), is signed out (401), or the workspace/feature is
+ *  gone (404). Structural so host adapters with their own error types work. */
+export function isMachinesAccessRefusal(cause: unknown): boolean {
+  if (!cause || typeof cause !== "object" || !("status" in cause)) return false;
+  const status = (cause as { status: unknown }).status;
+  return status === 401 || status === 403 || status === 404;
+}
 
 function emit(share: Share): void {
   for (const subscriber of share.subscribers) {
@@ -81,6 +93,7 @@ function cancelDispose(share: Share): void {
 
 function arm(share: Share): void {
   stopTimer(share);
+  if (share.halted) return;
   const { enabled, pollIntervalMs } = effective(share);
   if (!enabled || pollIntervalMs === undefined) return;
   share.timer = setTimeout(() => {
@@ -98,10 +111,15 @@ async function runFresh(share: Share): Promise<void> {
   try {
     const data = await load(abort.signal);
     if (ticket !== share.generation || abort.signal.aborted) return;
+    share.halted = false;
     share.snapshot = { data, loading: false, error: null };
     emit(share);
   } catch (cause) {
     if (ticket !== share.generation || abort.signal.aborted) return;
+    if (isMachinesAccessRefusal(cause)) {
+      share.halted = true;
+      stopTimer(share);
+    }
     share.snapshot = {
       data: share.snapshot.data,
       loading: false,
@@ -120,7 +138,7 @@ function run(share: Share, force = false): Promise<void> {
     let trailing!: Promise<void>;
     trailing = share.inFlight
       .then(async () => {
-        if (!effective(share).enabled) return;
+        if (!effective(share).enabled || share.halted) return;
         await run(share);
       })
       .finally(() => {
@@ -145,12 +163,21 @@ function reconcile(share: Share): void {
     share.abort = null;
     share.inFlight = null;
     stopTimer(share);
+    if (share.halted) {
+      // Disabling is the host's permission/workspace signal. Forget the
+      // refusal so a later re-enable reads once immediately.
+      share.halted = false;
+      share.snapshot = { data: share.snapshot.data, loading: false, error: null };
+      emit(share);
+      return;
+    }
     if (share.snapshot.loading) {
       share.snapshot = { ...share.snapshot, loading: false };
       emit(share);
     }
     return;
   }
+  if (share.halted) return;
   if (share.snapshot.data !== null || share.snapshot.error) {
     arm(share);
     return;
@@ -175,6 +202,7 @@ function getOrCreate(shareKey: string): Share {
     inFlight: null,
     trailing: null,
     generation: 0,
+    halted: false,
   };
   shares.set(shareKey, created);
   return created;
@@ -183,7 +211,12 @@ function getOrCreate(shareKey: string): Share {
 export async function refreshSharedMachinesList(shareKey: string): Promise<void> {
   const share = shares.get(shareKey);
   if (!share) return;
+  // An explicit refresh (user action, post-mutation reconcile) may retry once;
+  // a repeated refusal halts polling again.
+  const wasHalted = share.halted;
+  share.halted = false;
   await run(share, true);
+  if (wasHalted) arm(share);
 }
 
 export function useSharedMachinesList(

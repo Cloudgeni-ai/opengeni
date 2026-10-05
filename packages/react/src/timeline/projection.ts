@@ -905,7 +905,7 @@ export function buildTimeline(
           null,
           0,
           queuedAt,
-          `${event.id}-queue`,
+          `${turnId}-queue`,
         );
         break;
       }
@@ -1946,10 +1946,14 @@ function groupReadableTurns(items: TimelineItem[]): TimelineGroup[] {
       let group = turns.get(key);
       const firstMessage = messages.get(key)?.[0];
       const messageStart = firstMessage?.startedAt ?? firstMessage?.occurredAt;
-      const startedAt =
-        messageStart && Date.parse(messageStart) < Date.parse(item.occurredAt)
-          ? messageStart
+      const activityStart =
+        item.kind === "startup-phase"
+          ? (item.loadingStartedAt ?? item.occurredAt)
           : item.occurredAt;
+      const startedAt =
+        messageStart && Date.parse(messageStart) < Date.parse(activityStart)
+          ? messageStart
+          : activityStart;
       if (!group) {
         const settlement = settlements.get(key);
         group = {
@@ -2162,6 +2166,15 @@ function groupReadableTurns(items: TimelineItem[]): TimelineGroup[] {
         if (message === response || message.text.includes("![")) continue;
         foldedProse.add(message);
         group.work!.details.push({ kind: "item", item: message });
+      }
+    } else {
+      // Live progress stays primary above the work row, and is also listed in
+      // the work history so an expanded disclosure reads like the settled one.
+      // The timeline folds the outside copies only while that disclosure is open.
+      for (const message of prose) {
+        if (message.phase === "final_answer" || message.text.includes("![")) continue;
+        group.work!.details.push({ kind: "item", item: message });
+        (group.work!.liveNoteIds ??= []).push(message.id);
       }
     }
     // Preserve event chronology, not completion timestamps or activity kinds.

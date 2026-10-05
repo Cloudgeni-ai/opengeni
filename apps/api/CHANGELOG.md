@@ -1,5 +1,326 @@
 # @opengeni/api-router
 
+## 1.4.4
+
+### Patch Changes
+
+- Updated dependencies [db21f93]
+- Updated dependencies [62e718d]
+- Updated dependencies [6384dbd]
+- Updated dependencies [2edfa4c]
+  - @opengeni/db@1.4.4
+  - @opengeni/runtime@1.4.4
+  - @opengeni/contracts@1.4.4
+  - @opengeni/interaction@1.4.4
+  - @opengeni/observability@1.4.4
+  - @opengeni/core@1.4.4
+  - @opengeni/documents@1.4.4
+  - @opengeni/events@1.4.4
+  - @opengeni/artifact-tool@1.4.4
+  - @opengeni/capabilities@1.4.4
+  - @opengeni/codemode@1.4.4
+  - @opengeni/codex@1.4.4
+  - @opengeni/config@1.4.4
+  - @opengeni/github@1.4.4
+  - @opengeni/storage@1.4.4
+  - @opengeni/tool-gateway@1.4.4
+  - @opengeni/agent-proto@1.4.4
+  - @opengeni/network@1.4.4
+  - @opengeni/xai-subscription@1.4.4
+
+## 1.4.3
+
+### Patch Changes
+
+- Updated dependencies [19a16ef]
+- Updated dependencies [63c7473]
+- Updated dependencies [1a05862]
+  - @opengeni/runtime@1.4.3
+  - @opengeni/config@1.4.3
+  - @opengeni/core@1.4.3
+  - @opengeni/db@1.4.3
+  - @opengeni/documents@1.4.3
+  - @opengeni/github@1.4.3
+  - @opengeni/storage@1.4.3
+  - @opengeni/codemode@1.4.3
+  - @opengeni/events@1.4.3
+  - @opengeni/agent-proto@1.4.3
+  - @opengeni/artifact-tool@1.4.3
+  - @opengeni/capabilities@1.4.3
+  - @opengeni/codex@1.4.3
+  - @opengeni/contracts@1.4.3
+  - @opengeni/interaction@1.4.3
+  - @opengeni/network@1.4.3
+  - @opengeni/observability@1.4.3
+  - @opengeni/tool-gateway@1.4.3
+  - @opengeni/xai-subscription@1.4.3
+
+## 1.4.2
+
+### Patch Changes
+
+- @opengeni/agent-proto@1.4.2
+- @opengeni/artifact-tool@1.4.2
+- @opengeni/capabilities@1.4.2
+- @opengeni/codemode@1.4.2
+- @opengeni/codex@1.4.2
+- @opengeni/config@1.4.2
+- @opengeni/contracts@1.4.2
+- @opengeni/core@1.4.2
+- @opengeni/db@1.4.2
+- @opengeni/documents@1.4.2
+- @opengeni/events@1.4.2
+- @opengeni/github@1.4.2
+- @opengeni/interaction@1.4.2
+- @opengeni/network@1.4.2
+- @opengeni/observability@1.4.2
+- @opengeni/runtime@1.4.2
+- @opengeni/storage@1.4.2
+- @opengeni/tool-gateway@1.4.2
+- @opengeni/xai-subscription@1.4.2
+
+## 1.4.1
+
+### Patch Changes
+
+- f290348: Signup credits now pay for dictation and live voice like general credits. Admission counts their remainder, each voice charge is allocated to them first, and balances report `coversVoice` on those grants. Other model-scoped promotional credits still do not cover voice.
+- Updated dependencies [eeb73ee]
+- Updated dependencies [fe1f64d]
+- Updated dependencies [9145bad]
+- Updated dependencies [82cd591]
+- Updated dependencies [e6d35b9]
+- Updated dependencies [0674635]
+- Updated dependencies [0674635]
+- Updated dependencies [d14de0c]
+- Updated dependencies [55bddfe]
+- Updated dependencies [c06d45a]
+- Updated dependencies [f290348]
+- Updated dependencies [aedc3b9]
+  - @opengeni/core@1.4.1
+  - @opengeni/db@1.4.1
+  - @opengeni/codemode@1.4.1
+  - @opengeni/contracts@1.4.1
+  - @opengeni/config@1.4.1
+  - @opengeni/runtime@1.4.1
+  - @opengeni/documents@1.4.1
+  - @opengeni/events@1.4.1
+  - @opengeni/artifact-tool@1.4.1
+  - @opengeni/capabilities@1.4.1
+  - @opengeni/codex@1.4.1
+  - @opengeni/github@1.4.1
+  - @opengeni/interaction@1.4.1
+  - @opengeni/observability@1.4.1
+  - @opengeni/storage@1.4.1
+  - @opengeni/tool-gateway@1.4.1
+  - @opengeni/agent-proto@1.4.1
+  - @opengeni/network@1.4.1
+  - @opengeni/xai-subscription@1.4.1
+
+## 1.4.0
+
+### Patch Changes
+
+- 5451b38: Distinguish an exact committed sandbox mutation receipt from rejection of its output after authority changes. Preserve the non-retryable typed failure through SDK tools and stop later dispatches in the same invocation without hiding uncertain batch items. Missing, mismatched, rolled-back, and caller-owned transaction receipts remain unknown; existing history and recovery authority are unchanged.
+- Updated dependencies [bd9521c]
+- Updated dependencies [664eabf]
+- Updated dependencies [48c5eec]
+- Updated dependencies [08ce841]
+- Updated dependencies [ee1c07e]
+- Updated dependencies [92a5024]
+- Updated dependencies [ee1c07e]
+- Updated dependencies [673bb53]
+- Updated dependencies [5451b38]
+- Updated dependencies [36ff885]
+- Updated dependencies [2a65d6e]
+  - @opengeni/contracts@1.4.0
+  - @opengeni/db@1.4.0
+  - @opengeni/config@1.4.0
+  - @opengeni/core@1.4.0
+  - @opengeni/runtime@1.4.0
+  - @opengeni/artifact-tool@1.4.0
+  - @opengeni/capabilities@1.4.0
+  - @opengeni/codemode@1.4.0
+  - @opengeni/codex@1.4.0
+  - @opengeni/documents@1.4.0
+  - @opengeni/events@1.4.0
+  - @opengeni/github@1.4.0
+  - @opengeni/interaction@1.4.0
+  - @opengeni/observability@1.4.0
+  - @opengeni/storage@1.4.0
+  - @opengeni/tool-gateway@1.4.0
+  - @opengeni/agent-proto@1.4.0
+  - @opengeni/network@1.4.0
+  - @opengeni/xai-subscription@1.4.0
+
+## 1.3.0
+
+### Patch Changes
+
+- 1670f64: Keep the API process alive and answer a retryable 503 (`upstream_unavailable`, `details.code: DATABASE_UNAVAILABLE`) when the database terminates its connections during a deploy drain, failover, or restart, instead of crashing on an unhandled Slack interaction claim rejection or answering an opaque 500.
+- 178b5ae: Unify connector Allow, Ask first and Block decisions across tool transports and settings. Add durable programmatic approval handles, exact stored-operation continuation, and shared review facts with portable React presentation and paginated protected details.
+
+  Add lightweight Gmail message selection and bounded pagination/chunk helpers. Preserve exact access checks, uncertain outcomes and existing client compatibility. Deploy matching API, worker and native runtime artifacts through the documented maintenance migration.
+
+- Updated dependencies [1670f64]
+- Updated dependencies [62006f1]
+- Updated dependencies [fd4346c]
+- Updated dependencies [178b5ae]
+- Updated dependencies [757a7e4]
+- Updated dependencies [414d416]
+  - @opengeni/core@1.3.0
+  - @opengeni/db@1.3.0
+  - @opengeni/runtime@1.3.0
+  - @opengeni/contracts@1.3.0
+  - @opengeni/capabilities@1.3.0
+  - @opengeni/codemode@1.3.0
+  - @opengeni/observability@1.3.0
+  - @opengeni/tool-gateway@1.3.0
+  - @opengeni/documents@1.3.0
+  - @opengeni/events@1.3.0
+  - @opengeni/artifact-tool@1.3.0
+  - @opengeni/codex@1.3.0
+  - @opengeni/config@1.3.0
+  - @opengeni/github@1.3.0
+  - @opengeni/interaction@1.3.0
+  - @opengeni/storage@1.3.0
+  - @opengeni/agent-proto@1.3.0
+  - @opengeni/network@1.3.0
+  - @opengeni/xai-subscription@1.3.0
+
+## 1.2.0
+
+### Minor Changes
+
+- d870f32: Support model-scoped signup and coupon credits with a shared operator default and
+  per-offer overrides. Update coverage at runtime, spend eligible promotions before
+  general credits, and preserve allocation and retry accounting. Keep scoped coupon
+  redemption separate from paid top-ups. Show credit funding in model selection and
+  current coverage on demand in billing. Legacy unrestricted grants stay unrestricted.
+
+### Patch Changes
+
+- e70ddfe: Restore disputed credits correctly when Stripe delivers the resolution before
+  the hold. Record the matching hold and release atomically and idempotently so
+  late or repeated webhooks cannot withhold restored credits.
+- Updated dependencies [7424e7c]
+- Updated dependencies [1033595]
+- Updated dependencies [21c8904]
+- Updated dependencies [d870f32]
+  - @opengeni/db@1.2.0
+  - @opengeni/config@1.2.0
+  - @opengeni/contracts@1.2.0
+  - @opengeni/runtime@1.2.0
+  - @opengeni/core@1.2.0
+  - @opengeni/documents@1.2.0
+  - @opengeni/events@1.2.0
+  - @opengeni/codemode@1.2.0
+  - @opengeni/github@1.2.0
+  - @opengeni/storage@1.2.0
+  - @opengeni/artifact-tool@1.2.0
+  - @opengeni/codex@1.2.0
+  - @opengeni/interaction@1.2.0
+  - @opengeni/observability@1.2.0
+  - @opengeni/tool-gateway@1.2.0
+  - @opengeni/agent-proto@1.2.0
+  - @opengeni/capabilities@1.2.0
+  - @opengeni/network@1.2.0
+  - @opengeni/xai-subscription@1.2.0
+
+## 1.1.0
+
+### Patch Changes
+
+- c600e3a: Use the full scoped model catalog for goal continuation and validate goal Resume before changing state. Preserve specific admission pause reasons and show the actionable rationale in the existing goal controls.
+- Updated dependencies [5fd6c55]
+- Updated dependencies [c600e3a]
+- Updated dependencies [f895d19]
+- Updated dependencies [411b3b5]
+- Updated dependencies [208dec1]
+- Updated dependencies [4cd01cd]
+  - @opengeni/contracts@1.1.0
+  - @opengeni/core@1.1.0
+  - @opengeni/runtime@1.1.0
+  - @opengeni/db@1.1.0
+  - @opengeni/config@1.1.0
+  - @opengeni/artifact-tool@1.1.0
+  - @opengeni/codemode@1.1.0
+  - @opengeni/codex@1.1.0
+  - @opengeni/documents@1.1.0
+  - @opengeni/events@1.1.0
+  - @opengeni/github@1.1.0
+  - @opengeni/interaction@1.1.0
+  - @opengeni/observability@1.1.0
+  - @opengeni/storage@1.1.0
+  - @opengeni/tool-gateway@1.1.0
+  - @opengeni/agent-proto@1.1.0
+  - @opengeni/capabilities@1.1.0
+  - @opengeni/network@1.1.0
+  - @opengeni/xai-subscription@1.1.0
+
+## 1.0.2
+
+### Patch Changes
+
+- e64a5a9: Allow signed machine credential renewal without a browser API contract header.
+- 4476ca7: Share connected-account identity labels across the web UI and agent MCP bindings. Save Slack username and workspace name from the existing verified authentication response without requesting additional scopes.
+
+  Allow settings to include inactive accounts in the owning user's organization-wide account inventory, while keeping execution account lists active-only by default.
+
+- Updated dependencies [ee6b145]
+- Updated dependencies [6fccfa0]
+- Updated dependencies [4476ca7]
+- Updated dependencies [f9e33b5]
+- Updated dependencies [e16aa17]
+- Updated dependencies [cbe4357]
+- Updated dependencies [9925fe2]
+  - @opengeni/db@1.0.1
+  - @opengeni/runtime@1.0.1
+  - @opengeni/contracts@1.0.1
+  - @opengeni/core@1.0.1
+  - @opengeni/observability@1.0.1
+  - @opengeni/codemode@1.0.1
+  - @opengeni/documents@1.0.1
+  - @opengeni/events@1.0.1
+  - @opengeni/artifact-tool@1.0.1
+  - @opengeni/codex@1.0.1
+  - @opengeni/config@1.0.1
+  - @opengeni/github@1.0.1
+  - @opengeni/interaction@1.0.1
+  - @opengeni/storage@1.0.1
+  - @opengeni/tool-gateway@1.0.1
+  - @opengeni/agent-proto@1.0.1
+  - @opengeni/capabilities@1.0.1
+  - @opengeni/network@1.0.1
+  - @opengeni/xai-subscription@1.0.1
+
+## 1.0.0
+
+### Major Changes
+
+- Reset package versioning: every published `@opengeni/*` package now releases together at one shared version, starting at 1.0.0. Install all `@opengeni` packages at the same version. Earlier versions are retired.
+
+## 5.6.2
+
+### Patch Changes
+
+- Updated dependencies [6fee02a]
+  - @opengeni/db@6.7.2
+  - @opengeni/core@5.3.2
+  - @opengeni/documents@0.8.44
+  - @opengeni/events@0.4.42
+
+## 5.6.1
+
+### Patch Changes
+
+- Updated dependencies [627ff68]
+  - @opengeni/core@5.3.1
+  - @opengeni/codemode@0.7.2
+  - @opengeni/runtime@4.8.1
+  - @opengeni/db@6.7.1
+  - @opengeni/documents@0.8.43
+  - @opengeni/events@0.4.41
+
 ## 5.6.0
 
 ### Minor Changes

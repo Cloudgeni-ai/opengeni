@@ -89,6 +89,10 @@ export function ManagedAuthPanel(props: {
   );
   const emailOnlyMode = resetMode || linkResendMode;
   const signupsPausedView = mode === "signup" && !emailOnlyMode && !newSignupsEnabled;
+  // Focus the first field only with a mouse/trackpad: on a phone, autofocus
+  // opens the keyboard and scrolls the page past the heading on arrival.
+  const autoFocusFirstField =
+    typeof window !== "undefined" && window.matchMedia?.("(pointer: fine)").matches === true;
   // When the page query brought the link error, this panel owns it from here.
   const [ownsLocationLinkError] = useState(
     () => linkResendMode && !props.verificationLinkError && props.search !== undefined,
@@ -320,7 +324,9 @@ export function ManagedAuthPanel(props: {
                       ? mode === "signup"
                         ? `Create an account for ${invitation.targetEmail} to continue joining ${invitation.organizationName}.`
                         : `Sign in as ${invitation.targetEmail} to continue joining ${invitation.organizationName}.`
-                      : "Use your preferred account to access the managed console."}
+                      : mode === "signup"
+                        ? "Start free. Set up agents in your product in minutes."
+                        : "Welcome back."}
             </p>
           </div>
         </div>
@@ -391,6 +397,7 @@ export function ManagedAuthPanel(props: {
               onChange={(event) => updateField("name", event.target.value)}
               autoComplete="name"
               className="mt-2"
+              autoFocus={autoFocusFirstField}
               aria-invalid={Boolean(fieldErrors.name)}
               aria-describedby={fieldErrors.name ? "managed-auth-name-error" : undefined}
             />
@@ -417,7 +424,7 @@ export function ManagedAuthPanel(props: {
               onChange={(event) => updateField("email", event.target.value)}
               autoComplete="email"
               className="mt-2"
-              autoFocus
+              autoFocus={autoFocusFirstField && mode !== "signup"}
               aria-invalid={Boolean(fieldErrors.email)}
               aria-describedby={fieldErrors.email ? "managed-auth-email-error" : undefined}
             />

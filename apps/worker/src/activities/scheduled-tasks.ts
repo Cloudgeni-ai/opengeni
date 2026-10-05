@@ -98,6 +98,7 @@ import {
   allowedFirstPartyMcpToolsForSession,
   resolveFirstPartyMcpToolPolicy,
   resolveTurnExecutionPolicyV1,
+  TurnExecutionPolicyModelUnavailableError,
 } from "@opengeni/config";
 import { Context } from "@temporalio/activity";
 import { createHash } from "node:crypto";
@@ -960,7 +961,7 @@ export function createScheduledTaskActivities(services: () => Promise<ControlAct
         ? openGeniSlackBotMetadata(slackBotConnection.metadata)
         : null;
       if (slackBotConnection && !slackBotMetadata) {
-        throw new Error("OpenGeni Slack bot connection metadata is invalid");
+        throw new Error("Opengeni Slack bot connection metadata is invalid");
       }
       const xaiAuthoritySubjectId =
         taskXaiProviderAccountAuthoritySnapshot.scope === "user" &&
@@ -1082,8 +1083,9 @@ export function createScheduledTaskActivities(services: () => Promise<ControlAct
             }
           }
         : undefined;
-      const turnExecutionPolicy = scheduledTaskRunExecutionPolicy(
-        resolveTurnExecutionPolicyV1(settings, {
+      let acceptedTurnExecutionPolicy: ReturnType<typeof resolveTurnExecutionPolicyV1>;
+      try {
+        acceptedTurnExecutionPolicy = resolveTurnExecutionPolicyV1(settings, {
           modelId: acceptedModel,
           requestedModelId:
             generatedTarget && task.agentConfig.model ? task.agentConfig.model : null,
@@ -1100,7 +1102,20 @@ export function createScheduledTaskActivities(services: () => Promise<ControlAct
             : "session",
           latencyMode: acceptedLatencyMode,
           latencyModeSource: generatedTarget ? "deployment" : "session",
-        }),
+        });
+      } catch (error) {
+        // A retired or removed model refuses every occurrence until the task
+        // (or its target session) names an available model: record that as a
+        // visible terminal run instead of exhausting activity retries.
+        if (!(error instanceof TurnExecutionPolicyModelUnavailableError)) throw error;
+        return await refuseAdmission(
+          "scheduled_model_unavailable",
+          false,
+          `${error.message}: ${acceptedModel}`,
+        );
+      }
+      const turnExecutionPolicy = scheduledTaskRunExecutionPolicy(
+        acceptedTurnExecutionPolicy,
         input,
         creatorPolicy?.credentialRestriction,
       );
@@ -1499,7 +1514,7 @@ export function createScheduledTaskActivities(services: () => Promise<ControlAct
                 (task.agentConfig.slackBotConnectionId ?? null)
               ) {
                 throw new Error(
-                  "scheduled alert occurrence OpenGeni Slack bot binding does not match its canonical session",
+                  "scheduled alert occurrence Opengeni Slack bot binding does not match its canonical session",
                 );
               }
             }
@@ -2043,7 +2058,7 @@ function assertReusableSessionBindingMatches(
   ) {
     throw new ScheduledRunTerminalAuthorityError(
       "scheduled_reusable_binding_changed",
-      "scheduled task OpenGeni Slack bot binding does not match its reusable session",
+      "scheduled task Opengeni Slack bot binding does not match its reusable session",
     );
   }
 }

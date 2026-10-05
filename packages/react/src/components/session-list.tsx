@@ -1,6 +1,7 @@
 import { deriveSessionDisplayTitle, type OpenGeniClient, type Session } from "@opengeni/sdk";
 import { ArchiveIcon, PencilIcon, PlusIcon } from "lucide-react";
 import { useEffect, useRef, useState, type FormEvent } from "react";
+import { useClientConfigFlags } from "../hooks/use-client-config-flags";
 import { useWorkspaceSessions } from "../hooks/use-workspace-sessions";
 import { cn } from "../lib/cn";
 import { formatRelativeTime } from "../lib/format";
@@ -38,7 +39,10 @@ export type SessionListProps = ClientOverride & {
   onNewChat?: (() => void) | undefined;
   /** Allow inline rename (`updateSession`). Defaults to true. */
   rename?: boolean | undefined;
-  /** Allow archiving (`updateSessionArchive`). Defaults to true. */
+  /**
+   * Allow archiving (`updateSessionArchive`). Defaults to true; hidden when the
+   * session proxy reports archive disabled (`archive: false`).
+   */
   archive?: boolean | undefined;
   /** Called after the selected chat was archived, so the host can move on. */
   onArchived?: ((sessionId: string) => void) | undefined;
@@ -94,7 +98,10 @@ export function SessionList({
   const [error, setError] = useState<{ cause: unknown } | null>(null);
   const formatError = useErrorMessage();
   const archiveClient = context.client as unknown as ArchiveClient;
-  const canArchive = archive && typeof archiveClient.updateSessionArchive === "function";
+  // A session proxy with `archive: false` reports it; hide what would fail.
+  const config = useClientConfigFlags(context.client as never);
+  const canArchive =
+    archive && config.archive && typeof archiveClient.updateSessionArchive === "function";
 
   const run = async (id: string, action: () => Promise<unknown>) => {
     setBusy(id);
@@ -208,7 +215,7 @@ export function SessionList({
                   {formatRelativeTime(session.updatedAt)}
                 </span>
               </button>
-              <span className="absolute right-1 top-1.5 hidden gap-0.5 group-focus-within:flex group-hover:flex">
+              <span className="absolute right-1 top-1.5 hidden gap-0.5 group-focus-within:flex group-hover:flex pointer-coarse:flex">
                 {rename ? (
                   <button
                     type="button"

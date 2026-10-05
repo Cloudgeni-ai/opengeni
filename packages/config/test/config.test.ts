@@ -1037,48 +1037,17 @@ describe("rig verification lease ownership rollout", () => {
   });
 });
 
-describe("canonical organization-tenancy activation opt-out", () => {
-  test("defaults to the reversible pre-activation posture", () => {
-    expect(withEnv({}, () => getSettings()).organizationTenancyCanonicalActivationEnabled).toBe(
-      false,
-    );
-  });
-
-  test("parses an explicit decline and an explicit acceptance without truthy-string coercion", () => {
-    // The whole point of the switch is that an operator can write it out to say
-    // "no". A z.coerce.boolean() field would read "false" as TRUE and activate
-    // the one-way boundary for exactly the operator who tried to decline it.
-    for (const declined of ["false", "0", "no", "off", "FALSE"]) {
-      expect(
-        withEnv({ OPENGENI_ORGANIZATION_TENANCY_CANONICAL_ACTIVATION_ENABLED: declined }, () =>
-          getSettings(),
-        ).organizationTenancyCanonicalActivationEnabled,
-      ).toBe(false);
+describe("retired organization-tenancy activation switch", () => {
+  test("is accepted and ignored for any value so existing deployments keep booting", () => {
+    for (const value of [undefined, "false", "true", "0", "1", "not-a-boolean"]) {
+      const settings = withEnv(
+        value === undefined
+          ? {}
+          : { OPENGENI_ORGANIZATION_TENANCY_CANONICAL_ACTIVATION_ENABLED: value },
+        () => getSettings(),
+      );
+      expect(settings).not.toHaveProperty("organizationTenancyCanonicalActivationEnabled");
     }
-    for (const accepted of ["true", "1", "yes", "on", "TRUE"]) {
-      expect(
-        withEnv({ OPENGENI_ORGANIZATION_TENANCY_CANONICAL_ACTIVATION_ENABLED: accepted }, () =>
-          getSettings(),
-        ).organizationTenancyCanonicalActivationEnabled,
-      ).toBe(true);
-    }
-  });
-
-  test("is independent of every other tenancy-adjacent posture", () => {
-    // Activation must never be inferred from managed product access or the
-    // delegation posture: it is one explicit operator statement.
-    const settings = withEnv(
-      {
-        OPENGENI_ENVIRONMENT: "test",
-        OPENGENI_PRODUCT_ACCESS_MODE: "managed",
-        OPENGENI_PUBLIC_BASE_URL: "https://opengeni.example.com",
-        OPENGENI_BETTER_AUTH_SECRET: "better-auth-secret-value",
-        OPENGENI_DELEGATION_SECRET: "delegation-secret-value",
-      },
-      () => getSettings(),
-    );
-    expect(settings.productAccessMode).toBe("managed");
-    expect(settings.organizationTenancyCanonicalActivationEnabled).toBe(false);
   });
 });
 
@@ -1854,6 +1823,37 @@ describe("sandbox preparation profiles", () => {
       default: ["session_get", "goal_update"],
       allowed: ["session_get", "goal_update", "goal_pause"],
     });
+  });
+
+  test("offers editable-artifact export only when the materializer is deployed", async () => {
+    const { resolveFirstPartyMcpToolPolicy, allowedFirstPartyMcpToolsForSession } =
+      await import("../src/index");
+    const exportTools = ["editable_artifact_export", "editable_artifact_export_status"];
+    const absent = withEnv({}, () => getSettings());
+    expect(absent.artifactMaterializerDeployed).toBe(false);
+    const absentPolicy = resolveFirstPartyMcpToolPolicy(absent);
+    for (const tool of exportTools) {
+      expect(absentPolicy.allowed).not.toContain(tool);
+      expect(absentPolicy.default).not.toContain(tool);
+    }
+    // Collaborative editing stays available.
+    expect(absentPolicy.default).toContain("editable_artifact_apply");
+    // A stored selection naming export loses it at execution.
+    expect(
+      allowedFirstPartyMcpToolsForSession(absent, [
+        "editable_artifact_get",
+        "editable_artifact_export",
+      ]),
+    ).toEqual(["editable_artifact_get"]);
+
+    const deployed = withEnv({ OPENGENI_ARTIFACT_MATERIALIZER_DEPLOYED: "true" }, () =>
+      getSettings(),
+    );
+    const deployedPolicy = resolveFirstPartyMcpToolPolicy(deployed);
+    for (const tool of exportTools) {
+      expect(deployedPolicy.allowed).toContain(tool);
+      expect(deployedPolicy.default).toContain(tool);
+    }
   });
 
   test("rejects defaults outside the deployment first-party tool ceiling", () => {

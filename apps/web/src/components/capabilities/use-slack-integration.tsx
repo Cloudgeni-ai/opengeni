@@ -349,6 +349,48 @@ export function useSlackIntegration({
   // Invited channels and the publication configuration are loaded only while the
   // admin sheet is open; both are cheap reads but not needed for the row.
   const botConnectionId = botConnection?.id ?? null;
+  const sharingScope = `${workspaceId}:${botConnectionId ?? ""}`;
+  const [botSharing, setBotSharing] = useState<{ scope: string; enabled: boolean } | null>(null);
+  const [botSharingError, setBotSharingError] = useState<string | null>(null);
+  const [botSharingBusy, setBotSharingBusy] = useState(false);
+  const botSharingPending = useRef(false);
+  useEffect(() => {
+    setBotSharingError(null);
+    if (!sheetOpen || !botConnectionId || readOnly) return;
+    let current = true;
+    void client
+      .getOpenGeniSlackBotOrganizationAccess(workspaceId, botConnectionId)
+      .then((result) => {
+        if (current) setBotSharing({ scope: sharingScope, enabled: result.enabled });
+      })
+      .catch((error: unknown) => {
+        if (current) setBotSharingError(userErrorText(error));
+      });
+    return () => {
+      current = false;
+    };
+  }, [client, sheetOpen, workspaceId, botConnectionId, readOnly, sharingScope]);
+  async function toggleBotSharing(enabled: boolean) {
+    if (!botConnectionId || !canManageOrganizationDestination || botSharingPending.current) return;
+    if (enabled && !botHealthy) return;
+    botSharingPending.current = true;
+    setBotSharingBusy(true);
+    try {
+      const result = await client.setOpenGeniSlackBotOrganizationAccess(
+        workspaceId,
+        botConnectionId,
+        { enabled },
+      );
+      setBotSharing({ scope: sharingScope, enabled: result.enabled });
+      setBotSharingError(null);
+      await onRuntimeChanged();
+    } catch (error) {
+      toast.error("Couldn't update bot access", { description: userErrorText(error) });
+    } finally {
+      botSharingPending.current = false;
+      setBotSharingBusy(false);
+    }
+  }
   // A reconnect or reinstall may point at a different connection row; drop the
   // cached publication configuration so the sheet refetches it.
   useEffect(() => {
@@ -808,6 +850,22 @@ export function useSlackIntegration({
     if (botConnection && botMetadata) {
       options.push({
         kind: "toggle",
+        id: "slack-organization-bot",
+        label: "Use the bot across the organization",
+        description:
+          botSharingError ??
+          "Let authorized chats and scheduled tasks in this organization post as this bot. Personal Slack accounts stay separate.",
+        checked: botSharing?.scope === sharingScope && botSharing.enabled,
+        disabled:
+          !canManageOrganizationDestination ||
+          (!botHealthy && !botSharing?.enabled) ||
+          readOnly ||
+          botSharing?.scope !== sharingScope,
+        busy: botSharingBusy,
+        onChange: toggleBotSharing,
+      });
+      options.push({
+        kind: "toggle",
         id: "slack-reaction",
         label: "Start work with a reaction",
         description: scopeReady
@@ -884,7 +942,7 @@ export function useSlackIntegration({
         label: "Publish important decisions to Slack",
         description: publication?.slackChannelName
           ? `Posts to ${publication.slackChannelName}. Major items publish automatically; lower-signal items wait for review or stay quiet.`
-          : "Posts bounded summaries of workspace Memory changes to one channel you choose.",
+          : "Posts short summaries of workspace Knowledge changes to one channel you choose.",
         checked: publication?.enabled ?? false,
         disabled: !isAdmin || !botActive || readOnly || !publicationLoaded,
         busy: publicationBusy,

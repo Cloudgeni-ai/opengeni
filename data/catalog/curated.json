@@ -104,7 +104,7 @@
           },
           {
             "title": "Draft and send messages",
-            "description": "Prepare drafts, or send a new message or an existing draft. Every send needs your approval first."
+            "description": "Prepare drafts, or send a new message or an existing draft. You choose which actions need approval."
           },
           {
             "title": "Organize the mailbox",
@@ -119,7 +119,7 @@
             "description": "Read mailbox changes, account settings and configuration. Optional notifications use an operator-configured Pub/Sub topic."
           }
         ],
-        "permissionSummary": "Google asks for read, compose, and organize access to the mailbox you approve. OpenGeni exposes only the reviewed tools listed for this connector, and every send requires your approval before it goes out.",
+        "permissionSummary": "Google asks for read, compose, and organize access to the mailbox you approve. Choose Allow, Ask first, or Block for the available tools in Approvals.",
         "scopeLabels": {
           "https://www.googleapis.com/auth/gmail.readonly": {
             "label": "Read your mail",
@@ -127,7 +127,7 @@
           },
           "https://www.googleapis.com/auth/gmail.compose": {
             "label": "Draft and send messages",
-            "description": "Create drafts and send mail; every send requires your approval first."
+            "description": "Create drafts and send mail using your selected approval settings."
           },
           "https://www.googleapis.com/auth/gmail.modify": {
             "label": "Organize your mailbox",
@@ -141,7 +141,7 @@
       "documentationUrl": "https://developers.google.com/workspace/gmail/api/reference/rest",
       "notes": [
         "scopesHint keeps consent to the reviewed Gmail REST tools. OAuth discovery uses pinned Google metadata and verifies the consenting mailbox with Gmail users/me/profile, without depending on the Developer Preview MCP server. Gmail connections are personal-only; every member connects their own mailbox.",
-        "allowedTools freezes the reviewed tool surface. Every tool call executes through OpenGeni's first-party Gmail REST bridge (packages/runtime/src/gmail-rest-mcp.ts), never Google's Developer Preview MCP endpoint directly; this connection's mcpUrl identity is unchanged so existing consents and reconnect flows keep working. send_message and send_draft are OpenGeni additions the Developer Preview server does not offer; both require durable human approval, non-optional and not workspace-configurable.",
+        "allowedTools freezes the reviewed tool surface. Every tool call executes through OpenGeni's first-party Gmail REST bridge (packages/runtime/src/gmail-rest-mcp.ts), never Google's Developer Preview MCP endpoint directly; this connection's mcpUrl identity is unchanged so existing consents and reconnect flows keep working. send_message and send_draft use the selected account's approval choices; requireApproval supplies the recommendation when no choice is saved.",
         "logoSourceUrl is null because Google has not published a reusable Gmail MCP logo asset. Keep the self-hosted monogram rather than hotlinking a brand asset."
       ]
     },

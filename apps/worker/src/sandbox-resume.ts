@@ -166,6 +166,9 @@ export type SandboxResumeServices = {
    * replacement. Production uses {@link freshSandboxReadinessReplacementDelayMs}.
    * It may be async so a test can observe the rolled-back lease in between. */
   freshSandboxReadinessReplacementDelayMs?: () => number | Promise<number>;
+  /** Test seam: runs immediately after the elected spawner published its box
+   * warm, before the final cancellation check. */
+  onSpawnedSandboxPublished?: () => void | Promise<void>;
   /**
    * The turn attempt's fresh-box readiness replacement budget. The lazy
    * provisioner may call resumeBoxForTurn again after a typed lease
@@ -437,10 +440,6 @@ export class SandboxLeaseInstanceLostError extends SandboxLeaseSupersededError {
 // Bounded poll while a sibling spawner is mid cold-restore. The wait budget is
 // user-facing and separate from the lease TTL heartbeat/reaper horizon.
 const WARMING_POLL_INTERVAL_MS = 250;
-
-async function sleep(ms: number): Promise<void> {
-  await new Promise<void>((resolve) => setTimeout(resolve, ms));
-}
 
 /**
  * A remote provider may return a sandbox handle before its command router
@@ -1576,6 +1575,12 @@ async function resumeBoxForTurnOnce(
   if (acquired.role === "spawner") {
     const expectedEpoch = acquired.lease.leaseEpoch;
     let createdEstablished: EstablishedSandboxSession | null = null;
+    // Set once commitWarmingToWarm publishes this box. From then on the box is
+    // the group's shared, attachable workspace: a later cancellation (Pause,
+    // Steer, worker shutdown) only drops this attempt's holder. Terminating it
+    // here would hand the next attempt a warm lease naming a dead box, whose
+    // exact-id resume then records a lost workspace that never lost anything.
+    let published = false;
     let providerCreateOperationId: string | undefined;
     let providerCreateBindingKey: string | undefined;
     let rematerialization: {
@@ -2021,13 +2026,21 @@ async function resumeBoxForTurnOnce(
         await release();
         throw new SandboxLeaseSupersededError(ids.sandboxGroupId, expectedEpoch);
       }
+      published = true;
       holderLeaseHeartbeat = {
         expectedEpoch: committed.lease.leaseEpoch,
         leaseTtlMs,
       };
+      await services.onSpawnedSandboxPublished?.();
       throwIfReleasedOrCancelled();
       return { established, leaseEpoch: committed.lease.leaseEpoch, release };
     } catch (error) {
+      if (published) {
+        // The published warm box stays for the replacement attempt to resume
+        // by exact provider id; ordinary idle drain owns its capture/teardown.
+        await release();
+        throw error;
+      }
       if (error instanceof SandboxLeaseSupersededError) {
         await terminateEstablishedSandbox(createdEstablished);
         await release();
@@ -2203,7 +2216,13 @@ async function waitForWarm(
   const deadline = Date.now() + settings.sandboxWarmingTimeoutMs;
   let instanceId: string | null = null;
   while (Date.now() < deadline) {
-    await sleep(WARMING_POLL_INTERVAL_MS);
+    // A cancelled waiter owns no box and must not keep polling for up to the
+    // warming budget: its activity finalizer joins this exact promise.
+    if (!(await sleepUnlessCancelled(WARMING_POLL_INTERVAL_MS, services.cancellationSignal))) {
+      throw services.cancellationSignal?.reason instanceof Error
+        ? services.cancellationSignal.reason
+        : new Error("Sandbox warming wait was cancelled with its owning turn attempt");
+    }
     const lease = await readLease(db, ids.workspaceId, ids.sandboxGroupId);
     if (!lease) {
       // Lease vanished (cold-reaped). Re-dispatch from scratch.

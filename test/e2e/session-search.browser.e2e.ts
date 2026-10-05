@@ -143,7 +143,7 @@ describe("session search browser e2e (real API + non-superuser PostgreSQL)", () 
     await shared?.release();
   }, 60_000);
 
-  test("desktop expanded header keeps icon-only search inline and opens its dialog by mouse and keyboard", async () => {
+  test("desktop expanded header keeps icon-only search inline and opens its dialog by mouse", async () => {
     const context = await configuredContext(browser, {
       viewport: { width: 1280, height: 800 },
       extraHTTPHeaders: ownerHeaders,
@@ -184,14 +184,6 @@ describe("session search browser e2e (real API + non-superuser PostgreSQL)", () 
       const dialog = await openSearchDialog(page);
       await page.keyboard.press("Escape");
       await dialog.waitFor({ state: "hidden" });
-      for (const key of ["Enter", "Space"]) {
-        await search.press(key);
-        await dialog
-          .getByRole("searchbox", { name: "Search session titles and messages", exact: true })
-          .waitFor();
-        await page.keyboard.press("Escape");
-        await dialog.waitFor({ state: "hidden" });
-      }
 
       await filter.click();
       await page.getByRole("menuitem", { name: "Status Active" }).click();
@@ -216,6 +208,138 @@ describe("session search browser e2e (real API + non-superuser PostgreSQL)", () 
       await context.close();
     }
   }, 60_000);
+
+  for (const collapsed of [false, true]) {
+    for (const key of ["Enter", "Space"]) {
+      test(`closing ${collapsed ? "collapsed" : "expanded"} search restores its trigger and ${key} reopens it from real keyboard focus`, async () => {
+        const context = await configuredContext(browser, {
+          viewport: { width: 1280, height: 800 },
+          extraHTTPHeaders: ownerHeaders,
+        });
+        const page = await context.newPage();
+        try {
+          await page.goto(webBaseUrl);
+          await workspaceFromPage(page);
+          if (collapsed) {
+            await page.getByRole("button", { name: "Collapse sidebar", exact: true }).click();
+          }
+          const search = page.getByRole("button", { name: "Search sessions", exact: true });
+          const dialog = await openSearchDialog(page);
+          for (let attempt = 0; attempt < 2; attempt++) {
+            await page.keyboard.press("Escape");
+            await dialog.waitFor({ state: "hidden" });
+            // Visibility can settle before Radix retires its focus scope. Prove
+            // focus restoration instead of implicitly focusing with Locator.press.
+            await page.waitForFunction(() => {
+              const trigger = document.querySelector('[aria-label="Search sessions"]');
+              return (
+                trigger === document.activeElement &&
+                !document.querySelector('[aria-describedby="session-search-description"]')
+              );
+            });
+            expect(await search.evaluate((element) => element === document.activeElement)).toBe(
+              true,
+            );
+            await page.keyboard.press(key);
+            const input = dialog.getByRole("searchbox", {
+              name: "Search session titles and messages",
+              exact: true,
+            });
+            await input.waitFor();
+            expect(await input.evaluate((element) => element === document.activeElement)).toBe(
+              true,
+            );
+          }
+        } finally {
+          await context.close();
+        }
+      }, 90_000);
+    }
+  }
+
+  test("mobile search dismissal restores persistent navigation focus after its drawer retires", async () => {
+    const context = await configuredContext(browser, {
+      viewport: { width: 390, height: 844 },
+      extraHTTPHeaders: ownerHeaders,
+    });
+    const page = await context.newPage();
+    try {
+      await page.goto(webBaseUrl);
+      await workspaceFromPage(page);
+      const navigation = page.getByRole("button", { name: "Open navigation", exact: true });
+      for (let attempt = 0; attempt < 2; attempt++) {
+        if (attempt === 0) await navigation.click();
+        else await page.keyboard.press("Space");
+        const dialog = await openSearchDialog(page);
+        const input = dialog.getByRole("searchbox", {
+          name: "Search session titles and messages",
+          exact: true,
+        });
+        // The closing drawer owns a different focus scope. Wait for its
+        // actual removal before checking that search still owns keyboard input.
+        await page
+          .locator('[role="dialog"][aria-label="Session navigation"]')
+          .waitFor({ state: "detached" });
+        await expectFocused(input);
+        await page.keyboard.press("Escape");
+        await dialog.waitFor({ state: "hidden" });
+        await expectFocused(navigation);
+        expect(await navigation.evaluate((element) => element === document.activeElement)).toBe(
+          true,
+        );
+      }
+    } finally {
+      await context.close();
+    }
+  }, 90_000);
+
+  test("mobile result navigation keeps Find focus after the closing drawer retires", async () => {
+    const context = await configuredContext(browser, {
+      viewport: { width: 390, height: 844 },
+      extraHTTPHeaders: ownerHeaders,
+    });
+    const page = await context.newPage();
+    try {
+      await page.goto(webBaseUrl);
+      const workspaceId = await workspaceFromPage(page);
+      const accountId = await accountIdForWorkspace(workspaceId);
+      const session = await seedSession(workspaceId, accountId, "Drawer navigation focus");
+      await seedConversation(workspaceId, session.id, [
+        { user: "Please find cedartrace saved passage." },
+        { assistant: "The cedartrace answer is ready." },
+      ]);
+      // Keep the real retiring Sheet alive long enough to cover navigation
+      // before its close-focus callback. No focus or callback is simulated.
+      await page.addStyleTag({
+        content: `@keyframes retained-drawer-close { from { opacity: 1; } to { opacity: 0.99; } }
+          [data-slot="sheet-content"][data-state="open"] { animation: none !important; }
+          [data-slot="sheet-content"][data-state="closed"] { animation: retained-drawer-close 5s linear !important; }`,
+      });
+      await page.getByRole("button", { name: "Open navigation", exact: true }).click();
+      const dialog = await openSearchDialog(page);
+      await dialog
+        .getByRole("searchbox", { name: "Search session titles and messages", exact: true })
+        .fill("cedartrace");
+      const result = dialog
+        .locator("[data-search-result]")
+        .filter({ hasText: "Drawer navigation focus" });
+      await result.waitFor();
+      await result.click();
+      const drawer = page.locator('[role="dialog"][aria-label="Session navigation"]');
+      expect(await drawer.count()).toBe(1);
+      await dialog.getByRole("button", { name: "Open here", exact: true }).click();
+      const input = conversationFind(page).getByRole("searchbox", {
+        name: "Find in conversation",
+        exact: true,
+      });
+      await expectFocused(input);
+      await drawer.waitFor({ state: "detached" });
+      await expectFocused(input);
+      expect(await input.evaluate((element) => element === document.activeElement)).toBe(true);
+    } finally {
+      await context.close();
+    }
+  }, 90_000);
 
   test("finds titles, user messages, and completed assistant messages, then opens the exact occurrence", async () => {
     const context = await configuredContext(browser, {
@@ -608,7 +732,9 @@ describe("session search browser e2e (real API + non-superuser PostgreSQL)", () 
       await find.waitFor();
       const findInput = find.getByRole("searchbox", { name: "Find in conversation" });
       await expectFocused(findInput);
-      await expectContainsText(find, "All saved user and completed assistant messages");
+      expect(await find.getByText("All saved user and completed assistant messages").count()).toBe(
+        0,
+      );
 
       await findInput.fill("lumen");
       const counter = find.locator('span[role="status"]');
@@ -890,7 +1016,9 @@ describe("session search browser e2e (real API + non-superuser PostgreSQL)", () 
       expect(
         Math.abs((await scroller.evaluate((node) => node.scrollTop)) - beforeClose),
       ).toBeLessThanOrEqual(2);
-      await page.getByRole("button", { name: "Find in conversation", exact: true }).click();
+      // Phones open Find from the header's "…" menu.
+      await page.getByRole("button", { name: "More session actions", exact: true }).click();
+      await page.getByRole("menuitem", { name: "Find", exact: true }).click();
       await find.waitFor();
       expect(await find.getByRole("button", { name: "Back to session search" }).count()).toBe(0);
       await page.getByRole("button", { name: "Open navigation", exact: true }).click();

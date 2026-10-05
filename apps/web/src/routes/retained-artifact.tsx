@@ -1,6 +1,7 @@
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import type { RetainedArtifactReference } from "@opengeni/sdk";
-import { LightboxProvider } from "@opengeni/react";
+import { LightboxProvider, createWorkspaceRetainedArtifactLoader } from "@opengeni/react";
+import { PatchApplyCommand, isPatchFilename } from "@opengeni/react/artifacts";
 import { DownloadIcon, RefreshCwIcon } from "lucide-react";
 import { useAppContext } from "@/context";
 import { ArtifactSessionPage } from "@/components/session/artifact-session-page";
@@ -115,6 +116,10 @@ function RetainedArtifactDetail({
   const artifact = loaded?.artifact;
   const filename =
     loaded?.filename || (artifact?.contentType.startsWith("image/") ? "Image" : "Artifact");
+  const patchLoader = useMemo(
+    () => createWorkspaceRetainedArtifactLoader(client, workspaceId),
+    [client, workspaceId],
+  );
   const download = async () => {
     if (!artifact || downloading) return;
     setDownloading(true);
@@ -202,6 +207,15 @@ function RetainedArtifactDetail({
               >
                 {downloadError}
               </Notice>
+            ) : null}
+            {artifact.kind === "file" && loaded?.filename && isPatchFilename(loaded.filename) ? (
+              <div className="mt-6">
+                <PatchApplyCommand
+                  artifact={artifact}
+                  filename={loaded.filename}
+                  load={patchLoader}
+                />
+              </div>
             ) : null}
             <div className="mt-6 min-h-48 min-w-0 rounded-[14px] bg-surface-2 p-4 max-sm:p-2">
               <RetainedFilePreview

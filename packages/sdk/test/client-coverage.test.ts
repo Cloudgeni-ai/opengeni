@@ -326,6 +326,40 @@ describe("OpenGeniClient goals", () => {
     );
   });
 
+  test("findGoal opts in to a successful null for a goal-less session", async () => {
+    const { client, requests } = makeClient(() => jsonResponse(null));
+    expect(await client.findGoal(WORKSPACE_ID, SESSION_ID)).toBeNull();
+    expect(requests[0]!.method).toBe("GET");
+    expect(requests[0]!.url).toBe(
+      `https://api.example.test/v1/workspaces/${WORKSPACE_ID}/sessions/${SESSION_ID}/goal?absent=null`,
+    );
+  });
+
+  test("findGoal returns an existing goal and keeps 404s (older servers) as errors", async () => {
+    const goalClient = makeClient(() => jsonResponse({ id: "goal-1", status: "active" }));
+    expect((await goalClient.client.findGoal(WORKSPACE_ID, SESSION_ID))?.status).toBe("active");
+
+    const legacy = makeClient(() => jsonResponse({ message: "session goal not found" }, 404));
+    const error = await legacy.client.findGoal(WORKSPACE_ID, SESSION_ID).then(
+      () => null,
+      (caught: unknown) => caught,
+    );
+    expect(error).toBeInstanceOf(OpenGeniApiError);
+    expect((error as OpenGeniApiError).status).toBe(404);
+  });
+
+  test("findGoal and getGoal never share one in-flight read", async () => {
+    const { client, requests } = makeClient(() => jsonResponse({ id: "goal-1", status: "active" }));
+    await Promise.all([
+      client.getGoal(WORKSPACE_ID, SESSION_ID),
+      client.findGoal(WORKSPACE_ID, SESSION_ID),
+    ]);
+    expect(requests.map((request) => new URL(request.url).search).sort()).toEqual([
+      "",
+      "?absent=null",
+    ]);
+  });
+
   test("pauseGoal and resumeGoal PATCH the documented status transitions", async () => {
     const { client, requests } = makeClient(() => jsonResponse({ id: "goal-1", status: "paused" }));
     await client.pauseGoal(WORKSPACE_ID, SESSION_ID, {
@@ -1182,7 +1216,7 @@ describe("OpenGeniClient files", () => {
         reason: "insecure_context",
         retryable: false,
       });
-      expect((error as Error).message).toContain("OpenGeni is open over HTTP");
+      expect((error as Error).message).toContain("Opengeni is open over HTTP");
       expect(requests).toHaveLength(0);
     } finally {
       if (windowDescriptor) {
@@ -1561,7 +1595,7 @@ describe("OpenGeniClient files", () => {
       correlationId,
       outcomeUnknown: true,
       body: "",
-      message: `OpenGeni is temporarily unavailable — retry. Reference: ${correlationId}.`,
+      message: `Opengeni is temporarily unavailable — retry. Reference: ${correlationId}.`,
     });
     expect(requests).toHaveLength(2);
     expect(requests.some((request) => request.url.includes("/complete"))).toBe(false);

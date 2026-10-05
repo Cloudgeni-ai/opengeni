@@ -46,7 +46,7 @@ export function SignInMethodsPreview() {
         recentAuthRequired={recentAuthRequired}
         error={
           params.get("state") === "error"
-            ? "This provider account is already connected to another OpenGeni account. Accounts are not merged."
+            ? "This provider account is already connected to another Opengeni account. Accounts are not merged."
             : null
         }
         success={success}

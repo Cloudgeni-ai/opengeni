@@ -110,6 +110,10 @@ function capabilities() {
     screenCapture: true,
     semanticActions: true,
     pointerInput: true,
+    ...(process.argv.includes("--click-continuation") ? { pointerClickContinuation: true } : {}),
+    ...(process.argv.includes("--malformed-click-continuation")
+      ? { pointerClickContinuation: "true" }
+      : {}),
     keyboardInput: true,
     clipboard: true,
     backgroundActions: true,

@@ -127,8 +127,12 @@ describe("allowance admission lifecycle boundaries", () => {
     expect(source.slice(materialize, source.indexOf("policy:", materialize))).toContain(
       "budgetPausedReason:",
     );
-    expect(source).toContain('return { pausedReason: "allowance",');
-    expect(source).toContain(
+    const sharedAdmission = await Bun.file(
+      new URL("../../../packages/core/src/goal-admission.ts", import.meta.url),
+    ).text();
+    expect(source.slice(check)).toContain("await goalRunBudgetBlocked(");
+    expect(sharedAdmission).toContain('pausedReason: "allowance"');
+    expect(sharedAdmission).toContain(
       "agentRunAdmissionDenial(services, { ...input, requestedAgentRuns: 1 })",
     );
     expect(source).toContain(

@@ -6,6 +6,7 @@ import { withSiteSessionOrigin } from "@opengeni/core";
 import { resolveSiteSessionOrigin } from "./site-session-origin";
 import { Server } from "@modelcontextprotocol/sdk/server/index.js";
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
+import { recordToolApproval } from "@opengeni/observability";
 import {
   CallToolRequestSchema,
   ListToolsRequestSchema,
@@ -21,13 +22,17 @@ import {
   ToolGatewayApprovalRequest,
   ToolGatewayApprovalResponse,
   ToolGatewayDeclarationsResponse,
+  toolPolicyActionName,
   type AccessGrant,
   type ToolGatewayCatalog,
   type ToolGatewayIdentity,
   type ToolRef,
 } from "@opengeni/contracts";
 import {
+  availableMcpAccountBindings,
   buildApiIntegrationMcpServers,
+  expandApiIntegrationAccountRoutes,
+  expandMcpAccountRoutes,
   hasPermission,
   externalActorContinuationForAuthorization,
   isVerifiedOrganizationServiceAuthorization,
@@ -53,6 +58,10 @@ import {
   ToolGatewayApprovalOperationStartedError,
   ToolGatewayApprovalRateLimitError,
   WorkspaceArtifactNotFoundError,
+  listConnectorToolPermissionPolicies,
+  projectConnectorToolPermission,
+  resolveConnectorActionPolicy,
+  connectorActionPolicyDecision,
   type ApiIntegrationRuntime,
 } from "@opengeni/db";
 import {
@@ -64,6 +73,7 @@ import {
 } from "@opengeni/runtime/workspace-tool-gateway";
 import {
   ToolGatewayApprovalRequiredError,
+  ToolGatewayBlockedError,
   ToolGatewayCatalogStaleError,
   ToolGatewayInputValidationError,
   ToolGatewayToolNotFoundError,
@@ -272,7 +282,31 @@ async function prepareWorkspaceToolGatewayForGrantInternal(
       },
     },
   );
-  const gatewaySettings = workspaceToolGatewaySettingsForGrant(settings, grant, allowedIdentities);
+  // Transport admission has already verified the current caller. A service
+  // receives workspace accounts only; human transports use their exact subject.
+  const accountBindings = await availableMcpAccountBindings({
+    db: routeDeps.db,
+    accountId: grant.accountId,
+    workspaceId: grant.workspaceId,
+    settings,
+    tools: allGatewayToolRefs(settings),
+    source:
+      grant.principalKind === "service" || grant.principalKind === "api_key"
+        ? { kind: "none" }
+        : { kind: "subject", accountId: grant.accountId, subjectId: grant.subjectId },
+  });
+  const accountRoutes = expandMcpAccountRoutes({
+    settings,
+    tools: allGatewayToolRefs(settings),
+    bindings: accountBindings,
+  });
+  // OAuth/Site identities are account-qualified. Intersect only after expansion;
+  // canonical connector IDs are never aliases for an account's execution route.
+  const gatewaySettings = workspaceToolGatewaySettingsForGrant(
+    accountRoutes.settings,
+    grant,
+    allowedIdentities,
+  );
   const gatewayServerIds = new Set(gatewaySettings.mcpServers.map((server) => server.id));
   const deps = { ...routeDeps, catalogSourceSettings, settings: gatewaySettings };
   const resolveConnection = withWorkspaceConnectionAuthorization(
@@ -313,7 +347,11 @@ async function prepareWorkspaceToolGatewayForGrantInternal(
   ]);
   const apiIntegrationServers = buildApiIntegrationMcpServers({
     settings: gatewaySettings,
-    integrations: integrations.filter((integration) => gatewayServerIds.has(integration.serverId)),
+    integrations: expandApiIntegrationAccountRoutes({
+      integrations,
+      bindings: accountBindings,
+      tools: allGatewayToolRefs(gatewaySettings),
+    }),
     authority: {
       accountId: grant.accountId,
       workspaceId: grant.workspaceId,
@@ -356,6 +394,36 @@ async function prepareWorkspaceToolGatewayForGrantInternal(
       })()
     : undefined;
   const localMcpServers = [...firstPartyServers, ...apiIntegrationServers];
+  const policyTargets = new Map(
+    gatewaySettings.mcpServers.map((config) => {
+      const binding = accountBindings.find((candidate) => candidate.serverId === config.id);
+      return [
+        config.id,
+        {
+          connectionId:
+            binding?.connectionId ??
+            config.connectionRef?.connectionId ??
+            `session-mcp:${config.id}:${createHash("sha256").update(config.url, "utf8").digest("hex")}`,
+          serverId: binding?.canonicalServerId ?? config.id,
+        },
+      ] as const;
+    }),
+  );
+  const policiesByServer = new Map(
+    await Promise.all(
+      [...policyTargets].map(
+        async ([id, target]) =>
+          [
+            id,
+            await listConnectorToolPermissionPolicies(routeDeps.db, {
+              ...grant,
+              connectionId: target.connectionId,
+            }),
+          ] as const,
+      ),
+    ),
+  );
+  const recommendations = new Map<string, "allow" | "ask">();
   const prepared = await prepareWorkspaceToolGatewayTools(
     gatewaySettings,
     allGatewayToolRefs(gatewaySettings),
@@ -364,13 +432,55 @@ async function prepareWorkspaceToolGatewayForGrantInternal(
       workspaceId: grant.workspaceId,
       subjectId: grant.subjectId,
       credentialSubjectId: grant.subjectId,
+      mcpAccountLabels: accountRoutes.accountLabels,
       resolveCredential,
       slackRateLimit: buildSlackApiRateLimiter(routeDeps.db, gatewaySettings),
       localMcpServers,
       ...(codexAppsAuth ? { codexAppsAuth } : {}),
       workspaceToolGateway: {
-        requireApproval: (entry, _caller, context) =>
-          entry.approval === "human" && context.transportMeta?.approvalConfirmed !== true,
+        mapDefinition: (definition) => {
+          const recommendation = definition.approval === "human" ? "ask" : "allow";
+          recommendations.set(workspaceToolGatewayIdentityKey(definition.identity), recommendation);
+          const target = policyTargets.get(definition.identity.serverId);
+          if (!target) return definition;
+          const permission = projectConnectorToolPermission(
+            policiesByServer.get(definition.identity.serverId) ?? [],
+            {
+              ...target,
+              toolName: definition.identity.toolName,
+              defaultDecision: recommendation,
+            },
+          );
+          // A transport without a verified approval round trip omits any tool
+          // which could ask. Its execution still resolves the exact arguments.
+          return { ...definition, approval: permission.approvalRequired ? "human" : "policy" };
+        },
+        resolveApproval: async ({ call, entry }) => {
+          const defaultDecision =
+            recommendations.get(workspaceToolGatewayIdentityKey(entry.identity)) ??
+            (entry.approval === "human" ? "ask" : "allow");
+          const target = policyTargets.get(entry.identity.serverId);
+          if (!target) return defaultDecision;
+          const policies = await listConnectorToolPermissionPolicies(routeDeps.db, {
+            ...grant,
+            connectionId: target.connectionId,
+          });
+          const resolved = resolveConnectorActionPolicy(policies, {
+            ...target,
+            toolName: entry.identity.toolName,
+            defaultDecision,
+            actionName: toolPolicyActionName(
+              entry.identity.toolName,
+              entry.inputSchema,
+              call.arguments,
+            ),
+          });
+          const decision = !resolved.managed
+            ? defaultDecision
+            : connectorActionPolicyDecision(resolved);
+          recordToolApproval(decision, resolved.managed ? resolved.source : "default");
+          return decision;
+        },
         filterDefinition: workspaceToolGatewayDefinitionFilter(gatewaySettings, allowedIdentities),
       },
     },
@@ -555,7 +665,9 @@ export async function callWorkspaceToolGateway(
     );
     await prepared.reauthorize?.();
     let approvalConfirmed = false;
-    const approvalRequired = preparedCall.entry.approval === "human";
+    const approvalRequired =
+      preparedCall.approvalDecision === "ask" ||
+      (preparedCall.approvalDecision === undefined && preparedCall.entry.approval === "human");
     if (approvalRequired && request.approvalToken && db) {
       approvalConfirmed = await consumeApproval(db, {
         tokenHash: hashOpaqueValue(request.approvalToken),
@@ -623,7 +735,10 @@ export async function approveWorkspaceToolGatewayCall(
   } catch (error) {
     throwWorkspaceToolGatewayHttpError(error);
   }
-  if (preparedCall.entry.approval !== "human") {
+  if (
+    preparedCall.approvalDecision !== "ask" &&
+    !(preparedCall.approvalDecision === undefined && preparedCall.entry.approval === "human")
+  ) {
     throw new HTTPException(422, { message: "tool_does_not_require_human_approval" });
   }
   const observation = startWorkspaceToolGatewayObservation(observability, {
@@ -711,6 +826,9 @@ function throwWorkspaceToolGatewayHttpError(error: unknown): never {
   }
   if (error instanceof ToolGatewayApprovalRequiredError) {
     throw new HTTPException(409, { message: error.code, cause: error });
+  }
+  if (error instanceof ToolGatewayBlockedError) {
+    throw new HTTPException(403, { message: error.code, cause: error });
   }
   if (error instanceof IntegrationInvocationError && error.outcome === "unknown") {
     throw new ApiHttpError(502, {

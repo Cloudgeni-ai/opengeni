@@ -144,7 +144,9 @@ export class ComputerDriver implements ComputerInteractionDriver {
   async validate(command: ComputerActionCommand): Promise<void> {
     this.assertOpen();
     try {
-      await (await this.activeClient()).validate(nativeCommand(command));
+      const client = await this.activeClient();
+      this.assertClickContinuation(command, client);
+      await client.validate(nativeCommand(command));
     } catch (error) {
       throw predispatchError(error);
     }
@@ -153,7 +155,9 @@ export class ComputerDriver implements ComputerInteractionDriver {
   async dispatch(command: ComputerActionCommand): Promise<ComputerObservationValue | null> {
     this.assertOpen();
     try {
-      const observation = await (await this.activeClient()).dispatch(nativeCommand(command));
+      const client = await this.activeClient();
+      this.assertClickContinuation(command, client);
+      const observation = await client.dispatch(nativeCommand(command));
       return observation === null ? null : this.projectObservation(observation);
     } catch (error) {
       if (error instanceof ComputerBackendError) {
@@ -313,6 +317,21 @@ export class ComputerDriver implements ComputerInteractionDriver {
       computerSessionId: this.computerSessionId,
       controllerGeneration: this.controllerGeneration,
     });
+  }
+
+  private assertClickContinuation(command: ComputerActionCommand, client: ComputerBackend): void {
+    if (
+      command.action.type === "pointer" &&
+      command.action.clickCount === 2 &&
+      client.initialCapabilities.pointerClickContinuation !== true
+    ) {
+      throw new ComputerBackendError(
+        "unsupported",
+        "computer click continuation is unavailable",
+        false,
+        false,
+      );
+    }
   }
 
   private projectObservation(observation: ComputerBackendObservation): ComputerObservationValue {
@@ -567,6 +586,7 @@ function recoverableNativeFailure(error: unknown): boolean {
 
 function nativeCommand(command: ComputerActionCommand): ComputerBackendActionCommand {
   return {
+    operationId: command.operationId,
     targetId: command.targetId,
     expectedTargetGeneration: command.expectedTargetGeneration,
     expectedObservationId: command.expectedObservationId,

@@ -1,0 +1,208 @@
+{
+  "version": 1,
+  "readme": [
+    "Catalog connectors that cannot connect through OAuth self-registration from a hosted Opengeni deployment.",
+    "Keyed by exact canonical MCP URL, like curated.json, but listing a row here neither curates nor promotes it.",
+    "",
+    "Each entry names the OAuth authorization-server issuer whose operator-registered client the deployment needs.",
+    "The catalog offers the connector (Featured, Browse and embedded discovery) only when",
+    "OPENGENI_INTEGRATIONS_OAUTH_CLIENTS_JSON has a client for that issuer. Rows not listed here are assumed to",
+    "self-register (dynamic client registration or a Client ID Metadata Document), which is the OAuth start default.",
+    "",
+    "reason: no_self_registration = metadata advertises neither DCR nor CIMD; registration_refused = the",
+    "registration endpoint refuses unknown clients; redirect_uri_not_allowed = registration or authorization rejects",
+    "a deployment callback that the provider has not allowlisted.",
+    "",
+    "To re-offer a connector: register an OAuth client with the provider (redirect URI",
+    "<OPENGENI_PUBLIC_BASE_URL>/v1/integrations/oauth/callback) and add it to OPENGENI_INTEGRATIONS_OAUTH_CLIENTS_JSON",
+    "under the issuer below. Remove an entry only when the provider's own metadata or registration behavior changes;",
+    "`bun scripts/catalog-oauth-client-requirements-probe.ts` reports the metadata-detectable cases.",
+    "Gmail and the hosted Slack MCP are omitted: their native Connect readiness already gates them."
+  ],
+  "entries": [
+    {
+      "mcpUrl": "https://api.harvey.ai/hosted_mcp/mcp",
+      "name": "Harvey",
+      "issuer": "https://api.harvey.ai",
+      "reason": "no_self_registration",
+      "evidence": "The authorization server metadata advertises neither a dynamic client registration endpoint nor Client ID Metadata Document support.",
+      "checkedAt": "2026-10-05"
+    },
+    {
+      "mcpUrl": "https://api.x.com/mcp",
+      "name": "x.com",
+      "issuer": "https://api.x.com",
+      "reason": "no_self_registration",
+      "evidence": "The authorization server metadata advertises neither a dynamic client registration endpoint nor Client ID Metadata Document support.",
+      "checkedAt": "2026-10-05"
+    },
+    {
+      "mcpUrl": "https://masbasbas.com/api/ucp/mcp",
+      "name": "masbasbas.com",
+      "issuer": "https://shopify.com/authentication/54880174122",
+      "reason": "no_self_registration",
+      "evidence": "The authorization server metadata advertises neither a dynamic client registration endpoint nor Client ID Metadata Document support.",
+      "checkedAt": "2026-10-05"
+    },
+    {
+      "mcpUrl": "https://mcp-gateway-external-pilot.spotify.net/mcp",
+      "name": "Spotify",
+      "issuer": "https://accounts.spotify.com",
+      "reason": "no_self_registration",
+      "evidence": "The authorization server metadata advertises neither a dynamic client registration endpoint nor Client ID Metadata Document support.",
+      "checkedAt": "2026-10-05"
+    },
+    {
+      "mcpUrl": "https://mcp.api.clutch.ca/mcp",
+      "name": "Clutch",
+      "issuer": "https://mcp.api.clutch.ca",
+      "reason": "no_self_registration",
+      "evidence": "The authorization server metadata advertises neither a dynamic client registration endpoint nor Client ID Metadata Document support.",
+      "checkedAt": "2026-10-05"
+    },
+    {
+      "mcpUrl": "https://mcp.asana.com/v2/mcp",
+      "name": "Asana",
+      "issuer": "https://app.asana.com",
+      "reason": "no_self_registration",
+      "evidence": "The authorization server metadata advertises neither a dynamic client registration endpoint nor Client ID Metadata Document support.",
+      "checkedAt": "2026-10-05"
+    },
+    {
+      "mcpUrl": "https://mcp.box.com/",
+      "name": "Box",
+      "issuer": "https://api.box.com",
+      "reason": "no_self_registration",
+      "evidence": "The authorization server metadata advertises neither a dynamic client registration endpoint nor Client ID Metadata Document support.",
+      "checkedAt": "2026-10-05"
+    },
+    {
+      "mcpUrl": "https://mcp.canva.com/mcp",
+      "name": "Canva",
+      "issuer": "https://mcp.canva.com",
+      "reason": "redirect_uri_not_allowed",
+      "evidence": "Dynamic client registration succeeds, but the authorize endpoint rejects a deployment callback with HTTP 400 'Invalid redirect URI'; Canva only accepts recognized client redirects.",
+      "checkedAt": "2026-10-05"
+    },
+    {
+      "mcpUrl": "https://mcp.dropbox.com/chatgpt_app_mcp",
+      "name": "Dropbox",
+      "issuer": "https://www.dropbox.com",
+      "reason": "registration_refused",
+      "evidence": "Dynamic client registration returns HTTP 403 registration_not_supported: only pre-registered MCP trusted partners are allowed.",
+      "checkedAt": "2026-10-05"
+    },
+    {
+      "mcpUrl": "https://mcp.frontapp.com/mcp",
+      "name": "Front",
+      "issuer": "https://app.frontapp.com",
+      "reason": "no_self_registration",
+      "evidence": "The authorization server metadata advertises neither a dynamic client registration endpoint nor Client ID Metadata Document support.",
+      "checkedAt": "2026-10-05"
+    },
+    {
+      "mcpUrl": "https://mcp.g2.com/mcp",
+      "name": "G2",
+      "issuer": "https://g2.com",
+      "reason": "no_self_registration",
+      "evidence": "The authorization server metadata advertises neither a dynamic client registration endpoint nor Client ID Metadata Document support.",
+      "checkedAt": "2026-10-05"
+    },
+    {
+      "mcpUrl": "https://mcp.hubspot.com/anthropic",
+      "name": "HubSpot",
+      "issuer": "https://mcp.hubspot.com",
+      "reason": "no_self_registration",
+      "evidence": "The authorization server metadata advertises neither a dynamic client registration endpoint nor Client ID Metadata Document support.",
+      "checkedAt": "2026-10-05"
+    },
+    {
+      "mcpUrl": "https://mcp.intercom.com/mcp",
+      "name": "Intercom",
+      "issuer": "https://mcp.intercom.com",
+      "reason": "redirect_uri_not_allowed",
+      "evidence": "Dynamic client registration returns HTTP 400 invalid_redirect_uri: the redirect URI is not in Intercom's allowlist.",
+      "checkedAt": "2026-10-05"
+    },
+    {
+      "mcpUrl": "https://mcp.monday.com/mcp",
+      "name": "monday.com",
+      "issuer": "https://auth.monday.com/mcp",
+      "reason": "redirect_uri_not_allowed",
+      "evidence": "Dynamic client registration returns HTTP 400: redirect URIs must be added to monday.com's allowlist by monday.",
+      "checkedAt": "2026-10-05"
+    },
+    {
+      "mcpUrl": "https://mcp.pagerduty.com/mcp",
+      "name": "PagerDuty",
+      "issuer": "https://mcp.pagerduty.com/",
+      "reason": "no_self_registration",
+      "evidence": "The authorization server metadata advertises neither a dynamic client registration endpoint nor Client ID Metadata Document support.",
+      "checkedAt": "2026-10-05"
+    },
+    {
+      "mcpUrl": "https://mcp.parqet.com/mcp",
+      "name": "Parqet",
+      "issuer": "https://connect.parqet.com",
+      "reason": "no_self_registration",
+      "evidence": "The authorization server metadata advertises neither a dynamic client registration endpoint nor Client ID Metadata Document support.",
+      "checkedAt": "2026-10-05"
+    },
+    {
+      "mcpUrl": "https://mcp.process.st/",
+      "name": "Process Street",
+      "issuer": "https://auth.process.st",
+      "reason": "no_self_registration",
+      "evidence": "The authorization server metadata advertises neither a dynamic client registration endpoint nor Client ID Metadata Document support.",
+      "checkedAt": "2026-10-05"
+    },
+    {
+      "mcpUrl": "https://mcp.vercel.com/",
+      "name": "Vercel",
+      "issuer": "https://vercel.com",
+      "reason": "redirect_uri_not_allowed",
+      "evidence": "Dynamic client registration returns HTTP 400 invalid_redirect_uri: the redirect URI is not approved for this authorization server.",
+      "checkedAt": "2026-10-05"
+    },
+    {
+      "mcpUrl": "https://mcp.webexapis.com/mcp/vidcast",
+      "name": "webex.com",
+      "issuer": "https://webexapis.com",
+      "reason": "no_self_registration",
+      "evidence": "The authorization server metadata advertises neither a dynamic client registration endpoint nor Client ID Metadata Document support.",
+      "checkedAt": "2026-10-05"
+    },
+    {
+      "mcpUrl": "https://mcp.zoom.us/mcp/zoom/streamable",
+      "name": "Zoom for Claude",
+      "issuer": "https://zoom.us",
+      "reason": "no_self_registration",
+      "evidence": "The authorization server metadata advertises neither a dynamic client registration endpoint nor Client ID Metadata Document support.",
+      "checkedAt": "2026-10-05"
+    },
+    {
+      "mcpUrl": "https://pcm.property24.com/",
+      "name": "Property24.com",
+      "issuer": "https://pcm.property24.com",
+      "reason": "no_self_registration",
+      "evidence": "The authorization server metadata advertises neither a dynamic client registration endpoint nor Client ID Metadata Document support.",
+      "checkedAt": "2026-10-05"
+    },
+    {
+      "mcpUrl": "https://people.googleapis.com/mcp/v1",
+      "name": "people.googleapis.com",
+      "issuer": "https://accounts.google.com",
+      "reason": "no_self_registration",
+      "evidence": "The authorization server metadata advertises neither a dynamic client registration endpoint nor Client ID Metadata Document support.",
+      "checkedAt": "2026-10-05"
+    },
+    {
+      "mcpUrl": "https://www.tredict.com/api/mcp/v2",
+      "name": "Tredict",
+      "issuer": "https://www.tredict.com/user/oauth/v2",
+      "reason": "no_self_registration",
+      "evidence": "The authorization server metadata advertises neither a dynamic client registration endpoint nor Client ID Metadata Document support.",
+      "checkedAt": "2026-10-05"
+    }
+  ]
+}

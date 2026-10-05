@@ -1,3 +1,6 @@
+import { useHasToolReview, useRecordedToolReview } from "../components/tool-review-history";
+import { ToolActionReviewCard } from "../components/tool-action-review";
+import type { ToolReviewStatus } from "@opengeni/sdk";
 import { KnowledgeReceiptRow } from "./knowledge-receipt";
 import { defaultUrlTransform } from "react-markdown";
 import { isRetainedImageContentType, useRetainedImageObjectUrl } from "./retained-image";
@@ -61,12 +64,14 @@ import {
   Thumbnail,
   ActivityDisclosure,
   CompactActivityContext,
+  type DisclosureChip,
 } from "./shared";
 import { RawPatch, ToolDiff } from "./tool-diff";
 import {
   applyPatchPresentation,
   askPresentation,
   execPresentation,
+  genericToolIconKind,
   genericToolPresentation,
   parseDisclosedTools,
   parseSearchHits,
@@ -84,6 +89,7 @@ import {
   type ToolRowPresentation,
   type WebSearchResult,
 } from "./tool-presentation";
+import { isPatchFilename, PatchApplyCommand } from "./patch-apply-command";
 import { mcpToolLeaf, toolDisplayName } from "./tool-display-name";
 import { useOpenGeniLinkResolver } from "../components/open-geni-links";
 
@@ -228,6 +234,7 @@ function PresentedBody({ body }: { body: ToolBody }) {
     case "payloads":
       return (
         <>
+          {body.note ? <p className="m-0 py-1 text-og-sm text-og-fg-muted">{body.note}</p> : null}
           {body.blocks.map((block) =>
             block.failed ? (
               <PayloadBlock key={block.label} label={block.label} value={block.value} failed />
@@ -343,7 +350,7 @@ function RunOnRenderer({ item }: ToolRendererProps) {
  * status preview (Running… / Done / error snippet). No argument-field sniffing —
  * JSON stays in the expandable body only.
  */
-function GenericRenderer({ item }: ToolRendererProps) {
+function UnreviewedGenericRenderer({ item }: ToolRendererProps) {
   return <PresentedToolRow presentation={genericToolPresentation(item)} />;
 }
 
@@ -981,6 +988,13 @@ function SandboxFilePublishRenderer({ item, loadRetainedArtifact }: ToolRenderer
     >
       {downloadButton}
       {openLink}
+      {isPatchFilename(receipt.filename) ? (
+        <PatchApplyCommand
+          artifact={receipt.artifact}
+          filename={receipt.filename}
+          load={loadRetainedArtifact}
+        />
+      ) : null}
     </ActivityDisclosure>
   );
 }
@@ -1700,6 +1714,77 @@ function MemoryProposeRenderer({ item }: ToolRendererProps) {
 /* ---- run_on ---------------------------------------------------------------- */
 
 /* ---- generic fallback (first-party MCP, external MCP, unknown) ------------- */
+
+/**
+ * Baseline craft for unmatched tools: family icon + title-cased leaf + honest
+ * status preview (Running… / Done / error snippet). No argument-field sniffing —
+ * JSON stays in the expandable body only.
+ */
+function GenericRenderer({ item }: ToolRendererProps) {
+  const reviewed = useHasToolReview(item.callId);
+  if (reviewed && item.callId) return <ReviewedGenericRenderer item={item} />;
+  return <UnreviewedGenericRenderer item={item} />;
+}
+
+/** Settled review states earn one quiet gutter word; success and waiting stay chip-free. */
+const REVIEW_CHIP: Partial<Record<ToolReviewStatus, DisclosureChip>> = {
+  rejected: { tone: "interrupted", text: "declined" },
+  cancelled: { tone: "interrupted", text: "not run" },
+  expired: { tone: "interrupted", text: "expired" },
+  stale: { tone: "interrupted", text: "not run" },
+  revoked: { tone: "interrupted", text: "not run" },
+  blocked: { tone: "interrupted", text: "blocked" },
+  unknown: { tone: "bad", text: "outcome unknown" },
+  partial: { tone: "bad", text: "partly done" },
+  failed: { tone: "bad", text: "failed" },
+};
+
+/**
+ * A call that went through approval keeps the ordinary row shape, titled with
+ * what was approved. The expanded body is the saved review plus the result.
+ */
+function ReviewedGenericRenderer({ item }: ToolRendererProps) {
+  const { review, onViewDetails } = useRecordedToolReview(item.callId);
+  if (!review) return <UnreviewedGenericRenderer item={item} />;
+  const ReviewIcon = TOOL_ICONS[genericToolIconKind(item.name)];
+  const icon = <ReviewIcon className={ICON_SIZE} />;
+  const waiting = review.status === "pending";
+  const running =
+    !waiting &&
+    (review.status === "executing" || review.status === "approved") &&
+    item.status === "running";
+  const { text: outText, isError } = unwrapMcpOutput(item.output);
+  const chip =
+    REVIEW_CHIP[review.status] ??
+    (isError && !running && !waiting ? ({ tone: "bad", text: "error" } as const) : undefined);
+  return (
+    <ActivityDisclosure
+      icon={icon}
+      iconTone={chip?.tone === "bad" ? "failed" : waiting ? "accent" : "muted"}
+      title={review.title}
+      running={running}
+      chip={chip}
+      preview={
+        waiting ? (
+          "Waiting for your approval"
+        ) : running ? (
+          <RunningPreview>Running…</RunningPreview>
+        ) : (
+          (review.accountLabel ?? undefined)
+        )
+      }
+    >
+      <div className="py-1" data-approval-id={item.callId} data-review-origin="history">
+        <ToolActionReviewCard
+          bare
+          review={{ ...review, availableActions: [] }}
+          onViewDetails={onViewDetails}
+        />
+      </div>
+      {outText ? <PayloadBlock label="Result" value={outText} failed={isError} /> : null}
+    </ActivityDisclosure>
+  );
+}
 
 /* ---- the default registry -------------------------------------------------- */
 

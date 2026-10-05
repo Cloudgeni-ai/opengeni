@@ -9,7 +9,7 @@ import {
 import { act, useEffect, useState, type ReactNode } from "react";
 import { createRoot } from "react-dom/client";
 import type { ArtifactCatalogItem, RetainedArtifactReference } from "@opengeni/sdk";
-import { createWorkspaceRetainedArtifactLoader } from "@/lib/retained-artifact-loader";
+import { createWorkspaceRetainedArtifactLoader } from "@opengeni/react";
 import { defaultArtifactFilters, filterArtifactCatalog } from "@/lib/artifact-catalog";
 let ArtifactLibrary: typeof import("./artifact-library").ArtifactLibrary;
 let ArtifactThumbnail: typeof import("./artifact-library").ArtifactThumbnail;
@@ -254,6 +254,36 @@ test("shared library lists the type as a word and never executes Sites", async (
   } finally {
     await act(async () => root.unmount());
     container.remove();
+  }
+});
+
+test("pinned markers remain visible in both gallery and list without adding an action for read-only viewers", async () => {
+  localStorage.removeItem("opengeni:artifact-library:view:v1");
+  const container = document.createElement("div");
+  document.body.append(container);
+  const root = createRoot(container);
+  try {
+    await renderInRouter(root, () => (
+      <ArtifactLibrary
+        workspaceId="workspace"
+        items={[{ ...items[1]!, pinned: true }, items[0]!]}
+        filters={defaultArtifactFilters}
+        onFiltersChange={() => {}}
+        loading={false}
+        onRetry={() => {}}
+      />
+    ));
+    expect(container.querySelectorAll('[title="Pinned"]')).toHaveLength(1);
+    expect(container.querySelector('[title="Pinned"]')?.textContent).toBe("Pinned");
+    await act(async () =>
+      container.querySelector<HTMLButtonElement>('[role="radio"][aria-label="List"]')!.click(),
+    );
+    expect(container.querySelectorAll('[title="Pinned"]')).toHaveLength(1);
+    expect(container.querySelectorAll('[data-slot="list-row"]')).toHaveLength(2);
+  } finally {
+    await act(async () => root.unmount());
+    container.remove();
+    localStorage.removeItem("opengeni:artifact-library:view:v1");
   }
 });
 

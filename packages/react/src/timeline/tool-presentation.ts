@@ -97,6 +97,8 @@ export type ToolBody =
   | { kind: "note"; text: string; tone?: "error" | undefined }
   | {
       kind: "payloads";
+      /** A short explanation above the payloads. */
+      note?: string | undefined;
       blocks: Array<{ label: string; value: unknown; failed?: boolean }>;
     }
   | {
@@ -827,6 +829,44 @@ export function runOnPresentation(item: ToolCallItem): ToolRowPresentation {
  */
 export function genericToolPresentation(item: ToolCallItem): ToolRowPresentation {
   const goalPreview = goalToolPreview(item.name, parseToolArgs(item.arguments));
+  if (item.status !== "running") {
+    const { text: outText, isError } = unwrapMcpOutput(item.output);
+    const base = {
+      tool: "generic" as const,
+      icon: genericToolIconKind(item.name),
+      title: toolDisplayName(item.name, item.display),
+    };
+    const args = parseToolArgs(item.arguments);
+    // A permission Block is a decision, not a tool failure: say so plainly instead
+    // of the generic "error occurred, please try again" wrapper.
+    if (isError && BLOCKED_OUTPUT.test(outText)) {
+      return {
+        ...base,
+        iconTone: "muted",
+        chip: { tone: "interrupted", text: "blocked" },
+        preview: textPreview("Blocked by your permission settings"),
+        body: {
+          kind: "payloads",
+          note: "Your permission settings block this action, so it did not run. You can change this in the integration's tool permissions.",
+          blocks: [{ label: "Arguments", value: args }],
+        },
+      };
+    }
+    // An interrupted approved action may have run. Never invite a blind retry.
+    if (isError && UNCERTAIN_OUTPUT.test(outText)) {
+      return {
+        ...base,
+        iconTone: "failed",
+        chip: { tone: "bad", text: "outcome unknown" },
+        preview: textPreview("It may have run"),
+        body: {
+          kind: "payloads",
+          note: "This action may have run. Check the result in the connected app before trying again.",
+          blocks: [{ label: "Arguments", value: args }],
+        },
+      };
+    }
+  }
   return mcpRowPresentation(item, {
     tool: "generic",
     icon: genericToolIconKind(item.name),
@@ -838,6 +878,11 @@ export function genericToolPresentation(item: ToolCallItem): ToolRowPresentation
     plainRunningPreview: true,
   });
 }
+
+/** The runtime's exact refusal for a tool whose effective permission is Block. */
+const BLOCKED_OUTPUT = /Connector action was not executed: blocked\b/;
+/** The runtime's refusal to guess whether an approved action ran. */
+const UNCERTAIN_OUTPUT = /Connector action outcome is uncertain\b/;
 
 /* ---- tool_search (progressive MCP disclosure) ------------------------------ */
 

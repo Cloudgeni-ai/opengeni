@@ -103,6 +103,7 @@ import {
 } from "@/components/ui/dropdown-menu";
 import { Label } from "@/components/ui/label";
 import { Notice } from "@/components/ui/notice";
+import { isTransientServiceFailure, OPENGENI_UPDATING_NOTICE } from "@/lib/transient-retry";
 import { Select } from "@/components/ui/select";
 import { useConnectionAccounts } from "@/components/capabilities/use-connection-accounts";
 import { StatusDot } from "@/components/ui/status-dot";
@@ -151,6 +152,7 @@ import {
   relativeTimeLabel,
   sessionRepoLabel,
 } from "@opengeni/react/session-list-model";
+import { signupStarterSet } from "@/lib/signup-starter-set";
 import {
   useWorkspaceModelCatalog,
   type WorkspaceModelCatalogState,
@@ -315,7 +317,6 @@ function SessionsIndexRouteContent({
     { panel: "capabilities"; nonce: number } | undefined
   >(undefined);
   // "+" > Capabilities: the workspace's defaults, or this chat's own choice.
-  const agentConfigEnabled = context.clientConfig.agentConfig?.enabled === true;
   const agentAvailability = useMemo(
     () => capabilityAvailability(context.clientConfig.agentConfig),
     [context.clientConfig.agentConfig],
@@ -328,32 +329,30 @@ function SessionsIndexRouteContent({
       }),
     [workspace?.settings],
   );
-  const composerAgentCapabilities = agentConfigEnabled
-    ? {
-        customized: draft.agentCapabilities !== undefined,
-        draft:
-          draft.agentCapabilities !== undefined
-            ? draftFromRequest(draft.agentCapabilities)
-            : workspaceAgentDraft,
-        availability: agentAvailability,
-        onCustomizedChange: (customized: boolean) =>
-          setDraft((current) => {
-            if (!customized) {
-              const { agentCapabilities: _dropped, ...rest } = current;
-              return rest;
-            }
-            return {
-              ...current,
-              agentCapabilities: requestFromDraft(workspaceAgentDraft, agentAvailability),
-            };
-          }),
-        onChange: (next: AgentCapabilityDraft) =>
-          setDraft((current) => ({
-            ...current,
-            agentCapabilities: requestFromDraft(next, agentAvailability),
-          })),
-      }
-    : undefined;
+  const composerAgentCapabilities = {
+    customized: draft.agentCapabilities !== undefined,
+    draft:
+      draft.agentCapabilities !== undefined
+        ? draftFromRequest(draft.agentCapabilities)
+        : workspaceAgentDraft,
+    availability: agentAvailability,
+    onCustomizedChange: (customized: boolean) =>
+      setDraft((current) => {
+        if (!customized) {
+          const { agentCapabilities: _dropped, ...rest } = current;
+          return rest;
+        }
+        return {
+          ...current,
+          agentCapabilities: requestFromDraft(workspaceAgentDraft, agentAvailability),
+        };
+      }),
+    onChange: (next: AgentCapabilityDraft) =>
+      setDraft((current) => ({
+        ...current,
+        agentCapabilities: requestFromDraft(next, agentAvailability),
+      })),
+  };
   const attachments = useDraftAttachments(
     workspaceId,
     personalWorkspace || draft.visibility === "private" ? "personal" : "workspace",
@@ -1240,9 +1239,7 @@ function SessionsIndexRouteContent({
                 // newer unsent message merely to start a realtime session.
                 const flushed = await newSessionDraft.flush();
                 if (!flushed) {
-                  toast.error("Couldn't save the draft", {
-                    description: draftSaveFailureText(newSessionDraft),
-                  });
+                  reportDraftSaveFailure(newSessionDraft);
                   return null;
                 }
                 const submission = submissionFromSessionDraft(
@@ -1284,7 +1281,8 @@ function SessionsIndexRouteContent({
                       draftConflict = newSessionDraft.captureConflict(error);
                       outcomeUnknown = uncertain;
                       recoverPersonalResourceAttachment(error, request);
-                      return draftConflict;
+                      // A brief outage shows the updating notice, not a toast.
+                      return draftConflict || newSessionDraft.reportUnavailable(error);
                     },
                   },
                 );
@@ -1299,7 +1297,8 @@ function SessionsIndexRouteContent({
                 };
               }
               await preserveNewerLocalDraft();
-              toast.error("Couldn't start voice", { description: "Try again." });
+              newSessionDraft.clearError();
+              toast.error("Couldn't start voice", { description: DRAFT_CHANGED_DURING_SEND_TEXT });
               return null;
             }
 
@@ -1307,9 +1306,7 @@ function SessionsIndexRouteContent({
             for (let attempt = 0; attempt < 3; attempt += 1) {
               const flushed = await newSessionDraft.flushForSend(submittedSnapshot);
               if (!flushed) {
-                toast.error("Couldn't save the draft", {
-                  description: draftSaveFailureText(newSessionDraft),
-                });
+                reportDraftSaveFailure(newSessionDraft);
                 return null;
               }
               const submission = submissionFromSessionDraft(
@@ -1351,7 +1348,10 @@ function SessionsIndexRouteContent({
                     draftConflict = newSessionDraft.captureConflict(error);
                     outcomeUnknown = uncertain;
                     recoverPersonalResourceAttachment(error, request);
-                    return draftConflict;
+                    // A brief outage shows the updating notice, not a toast.
+                    // An unconfirmed create keeps its idempotency key, so the
+                    // person's next Send cannot start a second session.
+                    return draftConflict || newSessionDraft.reportUnavailable(error);
                   },
                 },
               );
@@ -1397,8 +1397,11 @@ function SessionsIndexRouteContent({
               };
             }
             await preserveNewerLocalDraft();
+            // Each attempt saved the draft before the create refused it, so the
+            // draft is not unsaved: clear that notice and resume autosave.
+            newSessionDraft.clearError();
             toast.error("Couldn't send", {
-              description: "Your message is still here. Try again.",
+              description: DRAFT_CHANGED_DURING_SEND_TEXT,
             });
             return null;
           },
@@ -1559,7 +1562,9 @@ function SessionsIndexRouteContent({
     resolveDraftConflict: newSessionDraft.resolveConflict,
     restoredResources: [],
     removeRestoredResource: () => {},
-    error: newSessionDraft.conflict ? null : newSessionDraft.error,
+    // A brief outage is explained once by the updating notice below the
+    // composer, never as a red error with a request reference.
+    error: newSessionDraft.unavailable || newSessionDraft.conflict ? null : newSessionDraft.error,
     clearError: newSessionDraft.clearError,
     send: async () => await submitNewSession(null),
     steer: async () => {
@@ -1594,6 +1599,9 @@ function SessionsIndexRouteContent({
         }
       : null;
   });
+
+  // A transient outage is covered by the updating notice instead.
+  const accountsFailure = connectionAccounts.error !== null && !connectionAccounts.unavailable;
 
   return createElement(
     LightboxProvider,
@@ -1649,6 +1657,7 @@ function SessionsIndexRouteContent({
           <div className="mt-6">
             <Suspense fallback={null}>
               <EmptyCreditsNotice
+                creditFunding={selectedPolicyRow?.catalog.creditFunding}
                 workspaceId={workspaceId}
                 accountId={workspace?.accountId ?? null}
                 canBuyCredits={hasAccountPermission(
@@ -1688,14 +1697,10 @@ function SessionsIndexRouteContent({
                     },
                   }}
                   menuSide="bottom"
-                  {...(composerAgentCapabilities
-                    ? {
-                        agentCapabilities: {
-                          ...composerAgentCapabilities,
-                          disabled: busy || newSessionDraft.loading,
-                        },
-                      }
-                    : {})}
+                  agentCapabilities={{
+                    ...composerAgentCapabilities,
+                    disabled: busy || newSessionDraft.loading,
+                  }}
                   draftChatSettings={{
                     workspaceId,
                     scope:
@@ -1810,7 +1815,7 @@ function SessionsIndexRouteContent({
                       }
                     : {})}
                 />
-                {composerAgentCapabilities?.customized ? (
+                {composerAgentCapabilities.customized ? (
                   <ComposerCapabilitiesChip
                     summary={capabilitySummary(
                       composerAgentCapabilities.draft.values,
@@ -1891,14 +1896,24 @@ function SessionsIndexRouteContent({
           {personalWorkspace ? <PrivateWorkspaceNote /> : null}
           {newSessionDraft.conflict ? <NewSessionDraftSyncNotice /> : null}
 
+          {/* A deploy or restart makes Opengeni unreachable for a few seconds.
+              Reads retry quietly first; if it lasts longer, this one calm line
+              replaces every error, the message stays in the composer, and the
+              hooks reconnect on their own so Send works again. */}
+          {newSessionDraft.unavailable || connectionAccounts.unavailable ? (
+            <div role="status" className="mt-3">
+              <Notice tone="info">{OPENGENI_UPDATING_NOTICE}</Notice>
+            </div>
+          ) : null}
+
           {/* Accounts load quietly with the composer: only a problem shows here,
               never a loading line behind an open menu. */}
-          {connectionAccounts.error || connectionAccounts.accountChoiceMessage ? (
+          {accountsFailure || connectionAccounts.accountChoiceMessage ? (
             <div role="alert" className="mt-3">
               <Notice
                 tone="waiting"
                 action={
-                  connectionAccounts.error && !connectionAccounts.accessDenied ? (
+                  accountsFailure && !connectionAccounts.accessDenied ? (
                     <Button
                       variant="outline"
                       size="sm"
@@ -1909,10 +1924,10 @@ function SessionsIndexRouteContent({
                   ) : undefined
                 }
               >
-                {connectionAccounts.error
+                {accountsFailure
                   ? connectionAccounts.accessDenied
                     ? connectionAccounts.error
-                    : "Couldn't check connected accounts. Retry to send your message."
+                    : "Couldn't send your message. Try again."
                   : connectionAccounts.accountChoiceMessage}
               </Notice>
             </div>
@@ -1946,6 +1961,8 @@ function SessionsIndexRouteContent({
 
         <RecentSessions workspaceId={workspaceId} />
         <NewSessionStarters
+          workspaceId={workspaceId}
+          set={signupStarterSet(context.authSession?.user.email, workspace?.accountId)}
           disabled={busy || newSessionDraft.loading}
           onSelect={(prompt) => {
             setMessage(prompt);
@@ -1968,10 +1985,26 @@ function SessionsIndexRouteContent({
   );
 }
 
+/** Send kept losing to a newer draft saved elsewhere (another tab or window). */
+const DRAFT_CHANGED_DURING_SEND_TEXT =
+  "Your message is saved, but this draft kept changing in another tab or window. Check it and send again.";
+
 /** A draft that didn't save: the message is kept, then what to do. */
 function draftSaveFailureText(draft: { conflict: Error | null; error: Error | null }): string {
   if (draft.conflict || !draft.error) return "Your message is still here. Try again.";
   return `Your message is still here. ${userErrorText(draft.error)}`;
+}
+
+/** A failed pre-send draft save: a brief outage shows the updating notice instead of a toast. */
+function reportDraftSaveFailure(draft: {
+  conflict: Error | null;
+  currentError: () => Error | null;
+}): void {
+  const error = draft.currentError();
+  if (isTransientServiceFailure(error)) return;
+  toast.error("Couldn't save the draft", {
+    description: draftSaveFailureText({ conflict: draft.conflict, error }),
+  });
 }
 
 // ── Recent sessions — the quiet main-canvas browser the rail can't be (D4.2) ──
@@ -2040,7 +2073,7 @@ function RecentSessionRow({
           {metaBits.length > 0 ? (
             <span className="mt-0.5 flex min-w-0 items-center gap-1.5 text-2xs text-fg-subtle">
               <ModelMark
-                model={session.model}
+                model={{ id: session.model, logoUrl: model.logoUrl }}
                 className="size-3 text-fg-muted"
                 fallback={
                   <BillingClassMark
@@ -2112,6 +2145,9 @@ function SessionModelControl({
   return (
     <ModelPicker
       hasImageAttachments={hasImageAttachments}
+      onOpenChange={(open) => {
+        if (open) void modelCatalog.refresh();
+      }}
       rows={modelCatalog.rows}
       model={context.model}
       effort={context.reasoningEffort}

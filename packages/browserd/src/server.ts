@@ -21,7 +21,12 @@ import {
   type InteractionError,
 } from "@opengeni/contracts";
 import { InteractionControllerError, InteractionDefiniteDriverError } from "@opengeni/interaction";
-import { CdpCommandTimeoutError, CdpTransportError } from "./cdp";
+import {
+  CdpCommandTimeoutError,
+  CdpProtocolError,
+  CdpSessionDetachedError,
+  CdpTransportError,
+} from "./cdp";
 import { BrowserWorkingRuntimeUnavailableError } from "./working-runtime-journal";
 import type { ComputerFrameSubscription, ComputerFrameStreamOptions } from "./computer-media";
 import {
@@ -1826,7 +1831,12 @@ async function browserReadResponse(
   try {
     return success(await read());
   } catch (error) {
-    if (!(error instanceof CdpTransportError)) throw error;
+    if (
+      !(error instanceof CdpTransportError) &&
+      !(error instanceof CdpSessionDetachedError) &&
+      !(error instanceof CdpProtocolError && error.code === -32_000)
+    )
+      throw error;
     const timeout = error instanceof CdpCommandTimeoutError;
     return failure(
       timeout ? "timeout" : "resource_unavailable",

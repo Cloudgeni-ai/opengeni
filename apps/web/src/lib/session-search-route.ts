@@ -31,6 +31,10 @@ function searchInteger(value: unknown): number | null {
 /** Scoped event: the mounted rail owns dialog state across conversation navigation. */
 export const OPEN_SESSION_SEARCH_EVENT = "opengeni:open-session-search";
 
-export function requestSessionSearch(workspaceId: string): void {
-  window.dispatchEvent(new CustomEvent(OPEN_SESSION_SEARCH_EVENT, { detail: { workspaceId } }));
+export function requestSessionSearch(workspaceId: string, returnFocus?: HTMLElement): void {
+  window.dispatchEvent(
+    new CustomEvent(OPEN_SESSION_SEARCH_EVENT, {
+      detail: { workspaceId, ...(returnFocus ? { returnFocus } : {}) },
+    }),
+  );
 }

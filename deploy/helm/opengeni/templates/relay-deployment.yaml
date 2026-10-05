@@ -11,7 +11,7 @@ metadata:
     {{- include "opengeni.labels" . | nindent 4 }}
     app.kubernetes.io/component: relay
 spec:
-  replicas: {{ .Values.relay.replicaCount }}
+  {{- include "opengeni.replicas" (dict "root" . "name" (printf "%s-relay" (include "opengeni.fullname" .)) "replicaCount" .Values.relay.replicaCount "autoscaling" .Values.relay.autoscaling) | indent 2 }}
   {{- with .Values.relay.strategy }}
   strategy:
     {{- toYaml . | nindent 4 }}

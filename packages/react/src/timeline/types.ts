@@ -5,6 +5,7 @@ import type {
   MediaGenerationResult,
   ResourceRef,
   SessionStatus,
+  Session,
   TimelineAnnotation,
   TimelineAnnotationSource,
   ToolAuthNeededPayload,
@@ -223,6 +224,10 @@ export type StartupPhaseItem = {
   id: string;
   turnId: string | null;
   phase: StartupPhase;
+  /** Live presentation only: accepted work waiting for its first worker claim. */
+  dispatchWait?: Session["dispatchWait"];
+  /** Renderer-only elapsed anchor when acceptance preceded recorded startup spans. */
+  loadingStartedAt?: string | undefined;
   status: "running" | "complete" | "failed" | "cancelled";
   startedAt: string;
   completedAt: string | null;
@@ -586,6 +591,12 @@ export type TimelineGroup =
         responseStartedAt?: string;
         waiting?: { label: string; since: string };
         details: TimelineGroup[];
+        /**
+         * While the turn is live, its progress notes stay readable above the
+         * work row and are also listed in `details`. These are their item ids,
+         * so an expanded work disclosure can fold the outside copies away.
+         */
+        liveNoteIds?: string[];
       };
     }
   | {

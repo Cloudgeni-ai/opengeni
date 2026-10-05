@@ -17,11 +17,14 @@ import type {
 import {
   OrganizationGatewayUnavailableError,
   OrganizationOpenRouterUnavailableError,
+  OrganizationOpperUnavailableError,
   WorkspaceGatewayUnavailableError,
   WorkspaceOpenRouterUnavailableError,
+  WorkspaceOpperUnavailableError,
 } from "./model-provider-errors";
 import {
   azureModelRequestPolicy,
+  chatModelRequestPolicy,
   modelRequestPolicyForProvider,
 } from "./model-provider-request-policy";
 import { isModelCallFetch, vercelGatewayRoutingFetch } from "./model-provider-transport";
@@ -31,6 +34,7 @@ import {
   recordModelTransportStarted,
 } from "./model-preparation-diagnostics";
 import { captureProviderRequestBody } from "./model-request-capture";
+import { streamIdleTimeoutModelFetch } from "./model-stream-idle-timeout";
 import { withoutQuotaExhaustedRetries } from "./provider-quota";
 import {
   captureClaudeRequestToken,
@@ -45,11 +49,12 @@ export function configureRuntimeMetricsHooks(hooks: RuntimeMetricsHooks | null |
 
 export function recordRuntimeMcpToolCallMetric(
   outcome: McpToolCallOutcome,
+  tool: string,
   startedAt: number,
 ): void {
   const durationSeconds = Math.max(0, (performance.now() - startedAt) / 1_000);
   try {
-    runtimeMetricsHooks?.onMcpToolCall?.({ outcome, durationSeconds });
+    runtimeMetricsHooks?.onMcpToolCall?.({ outcome, tool, durationSeconds });
   } catch {
     // Metrics emission must never affect an MCP call or rewrite its result.
   }
@@ -95,21 +100,49 @@ export function buildOpenAIClientFromSettings(
             : undefined,
         fetch: sdkRetryingModelFetch(
           settings.openaiMaxRetries,
-          instrumentedModelFetch(providerId, globalThis.fetch),
+          streamIdleTimeoutModelFetch(
+            providerId,
+            modelStreamIdlePolicy(settings),
+            instrumentedModelFetch(providerId, globalThis.fetch),
+          ),
         ),
       },
-      { modelRequestPolicy: azureModelRequestPolicy },
+      {
+        modelRequestPolicy: (request) =>
+          chatModelRequestPolicy(request) ?? azureModelRequestPolicy(request),
+      },
     );
   }
-  return new ReplayableJsonOpenAI({
-    apiKey: settings.openaiApiKey ?? process.env.OPENAI_API_KEY,
-    ...(settings.openaiBaseUrl ? { baseURL: settings.openaiBaseUrl } : {}),
-    maxRetries: settings.openaiMaxRetries,
-    fetch: sdkRetryingModelFetch(
-      settings.openaiMaxRetries,
-      instrumentedModelFetch(providerId, globalThis.fetch),
-    ),
-  });
+  return new ReplayableJsonOpenAI(
+    {
+      apiKey: settings.openaiApiKey ?? process.env.OPENAI_API_KEY,
+      ...(settings.openaiBaseUrl ? { baseURL: settings.openaiBaseUrl } : {}),
+      maxRetries: settings.openaiMaxRetries,
+      fetch: sdkRetryingModelFetch(
+        settings.openaiMaxRetries,
+        streamIdleTimeoutModelFetch(
+          providerId,
+          modelStreamIdlePolicy(settings),
+          instrumentedModelFetch(providerId, globalThis.fetch),
+        ),
+      ),
+    },
+    { modelRequestPolicy: chatModelRequestPolicy },
+  );
+}
+
+/**
+ * Effective generic stream stall bounds: a registry provider override wins
+ * over the deployment default. Codex/SuperGrok/Anthropic own their transports.
+ */
+export function modelStreamIdlePolicy(
+  settings: Pick<Settings, "modelStreamIdleTimeoutMs" | "modelStreamProgressTimeoutMs">,
+  provider?: Pick<ResolvedModelProvider, "streamIdleTimeoutMs" | "streamProgressTimeoutMs">,
+): { idleTimeoutMs: number; progressTimeoutMs: number } {
+  return {
+    idleTimeoutMs: provider?.streamIdleTimeoutMs ?? settings.modelStreamIdleTimeoutMs,
+    progressTimeoutMs: provider?.streamProgressTimeoutMs ?? settings.modelStreamProgressTimeoutMs,
+  };
 }
 
 /**
@@ -187,6 +220,7 @@ function providerClientCacheKey(
           ? [...gatewayPolicies.entries()].sort(([left], [right]) => left.localeCompare(right))
           : null,
         openaiMaxRetries: settings.openaiMaxRetries,
+        streamIdlePolicy: modelStreamIdlePolicy(settings, provider),
         builtin:
           provider.builtin && settings.openaiProvider === "azure"
             ? {
@@ -287,13 +321,20 @@ export function buildProviderClient(provider: ResolvedModelProvider, settings: S
     provider.kind === "openrouter-managed" ||
     provider.kind === "openrouter-workspace" ||
     provider.kind === "openrouter-organization";
-  const gatewayPolicies = gatewayProvider
-    ? new Map(
-        configuredModels(settings)
-          .filter((model) => model.providerId === provider.id)
-          .map((model) => [model.upstreamModelId, model.requestPolicy] as const),
-      )
-    : undefined;
+  const opperProvider =
+    provider.kind === "opper-managed" ||
+    provider.kind === "opper-workspace" ||
+    provider.kind === "opper-organization";
+  // Opper reuses the exact-upstream lookup so an unknown slug fails before
+  // network I/O; its entries carry no Gateway route policy.
+  const gatewayPolicies =
+    gatewayProvider || opperProvider
+      ? new Map(
+          configuredModels(settings)
+            .filter((model) => model.providerId === provider.id)
+            .map((model) => [model.upstreamModelId, model.requestPolicy] as const),
+        )
+      : undefined;
   const cacheKey = providerClientCacheKey(provider, settings, gatewayPolicies);
   const cached = scopedCredentialProvider ? undefined : providerClientCache.get(cacheKey);
   if (cached) {
@@ -313,14 +354,21 @@ export function buildProviderClient(provider: ResolvedModelProvider, settings: S
     if (provider.kind === "openrouter-workspace") {
       throw new WorkspaceOpenRouterUnavailableError();
     }
+    if (provider.kind === "opper-organization") {
+      throw new OrganizationOpperUnavailableError();
+    }
+    if (provider.kind === "opper-workspace") {
+      throw new WorkspaceOpperUnavailableError();
+    }
     throw new WorkspaceGatewayUnavailableError();
   }
   const anonymousProvider = provider.kind === "anonymous";
-  // Gateway and OpenRouter requests can incur upstream work or charges
-  // before a retryable response failure reaches this process. Neither
-  // transport has a provider idempotency key tied to our durable call,
+  // Gateway, OpenRouter and Opper requests can incur upstream work or charges
+  // before a retryable response failure reaches this process. None of these
+  // transports has a provider idempotency key tied to our durable call,
   // so never let the SDK replay them blindly.
-  const registryMaxRetries = gatewayProvider || openRouterProvider ? 0 : settings.openaiMaxRetries;
+  const registryMaxRetries =
+    gatewayProvider || openRouterProvider || opperProvider ? 0 : settings.openaiMaxRetries;
   const client = provider.builtin
     ? buildOpenAIClientFromSettings(settings, provider.id)
     : provider.kind === "codex-subscription"
@@ -386,17 +434,21 @@ export function buildProviderClient(provider: ResolvedModelProvider, settings: S
               ...(provider.defaultHeaders ? { defaultHeaders: provider.defaultHeaders } : {}),
               fetch: sdkRetryingModelFetch(
                 registryMaxRetries,
-                anonymousProvider
-                  ? withoutAuthenticationHeaders(
-                      instrumentedModelFetch(provider.id, globalThis.fetch),
-                    )
-                  : gatewayProvider
-                    ? vercelGatewayRoutingFetch(
-                        provider.kind as "vercel-gateway-managed" | "vercel-gateway-workspace",
+                streamIdleTimeoutModelFetch(
+                  provider.id,
+                  modelStreamIdlePolicy(settings, provider),
+                  anonymousProvider
+                    ? withoutAuthenticationHeaders(
                         instrumentedModelFetch(provider.id, globalThis.fetch),
-                        gatewayPolicies,
                       )
-                    : instrumentedModelFetch(provider.id, globalThis.fetch),
+                    : gatewayProvider
+                      ? vercelGatewayRoutingFetch(
+                          provider.kind as "vercel-gateway-managed" | "vercel-gateway-workspace",
+                          instrumentedModelFetch(provider.id, globalThis.fetch),
+                          gatewayPolicies,
+                        )
+                      : instrumentedModelFetch(provider.id, globalThis.fetch),
+                ),
               ),
             },
             { modelRequestPolicy: modelRequestPolicyForProvider(provider, gatewayPolicies) },

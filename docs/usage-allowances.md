@@ -272,7 +272,8 @@ const allowance = await og.setWorkspaceAllowance(workspaceId, {
 Five eligible members initially get equal ceilings against the $100 pool.
 If paid seats and the OpenGeni roster differ, the split follows the roster,
 not the paid-seat count. Decide which users are admitted before applying the
-recipe; `asUser` and the proxy never create membership.
+recipe; an `asUser` request through a key with `members:manage` adds a missing
+member on first use (see [product integration](product-integration.md)).
 On a seat-plan change, update the included amount with the saved version.
 Do not treat a mid-period config update as a fresh usage period.
 

@@ -1,5 +1,117 @@
 # @opengeni/config
 
+## 1.4.4
+
+### Patch Changes
+
+- Updated dependencies [6384dbd]
+  - @opengeni/contracts@1.4.4
+  - @opengeni/codex@1.4.4
+  - @opengeni/xai-subscription@1.4.4
+
+## 1.4.3
+
+### Patch Changes
+
+- 1a05862: A model stream that stalls mid-response no longer leaves a turn `running` indefinitely. Generic OpenAI-compatible streams (built-in OpenAI/Azure and registry chat/responses providers) now fail after 5 minutes without a response byte, or 10 minutes of keepalive-only traffic without model progress, measured only while the consumer is waiting. Both reset on activity and are configurable (`OPENGENI_MODEL_STREAM_IDLE_TIMEOUT_MS`, `OPENGENI_MODEL_STREAM_PROGRESS_TIMEOUT_MS`, or per registry provider `streamIdleTimeoutMs` / `streamProgressTimeoutMs`). The stall, and a fetch-layer "The operation timed out." error, now classify as retryable provider failures, so the same turn recovers within the existing finite five-attempt budget instead of failing terminally.
+  - @opengeni/codex@1.4.3
+  - @opengeni/contracts@1.4.3
+  - @opengeni/xai-subscription@1.4.3
+
+## 1.4.2
+
+### Patch Changes
+
+- @opengeni/codex@1.4.2
+- @opengeni/contracts@1.4.2
+- @opengeni/xai-subscription@1.4.2
+
+## 1.4.1
+
+### Patch Changes
+
+- 9145bad: Connector catalogs no longer offer connectors that cannot connect on the current deployment. Some providers refuse OAuth self-registration (Asana, HubSpot, Front, Box, Dropbox, Canva, Vercel, and others). When the deployment has no operator-registered OAuth client for such a provider, the catalog reports `runtime.operatorOAuthClient.configured: false` and connector discovery hides the row. Rows that are already connected stay visible.
+- Updated dependencies [9145bad]
+- Updated dependencies [f290348]
+  - @opengeni/contracts@1.4.1
+  - @opengeni/codex@1.4.1
+  - @opengeni/xai-subscription@1.4.1
+
+## 1.4.0
+
+### Minor Changes
+
+- 664eabf: Stop offering features whose backend this deployment does not run. The new `OPENGENI_ARTIFACT_MATERIALIZER_DEPLOYED` setting (default `false`; Helm sets it from `artifactMaterializer.enabled`) removes `editable_artifact_export` and `editable_artifact_export_status` from the first-party tool ceiling when no materializer drains export jobs, and an explicit session request for them is dropped rather than rejected. The Gmail bridge offers `watch_mailbox` only when `OPENGENI_GMAIL_WATCH_TOPIC_NAME` is set.
+- 673bb53: Add provider-agnostic web search. When a deployment names a search provider (TinyFish, Exa, Tavily, Firecrawl, Brave, Jina, or self-hosted SearXNG), models without hosted search receive `web_search` and `web_fetch` tools; hosted search stays the default where it exists, and `replace` mode can swap it. Priced calls are credit-billed at provider cost plus 5%. Off until configured.
+
+### Patch Changes
+
+- 2a65d6e: Turning on hosted web search for an existing model no longer fails turns accepted under the old definition. An accepted turn whose digest matches the current model with `capabilities.hostedTools.webSearch` set back to `{ upstream: "unknown", runnable: false }` still verifies, and it keeps running without the tool; the next accepted turn gets web search. New export: `configuredModelForAcceptedTurnExecutionPolicy`. Turning web search off and every other definition change still fail closed.
+- Updated dependencies [bd9521c]
+- Updated dependencies [08ce841]
+- Updated dependencies [673bb53]
+  - @opengeni/contracts@1.4.0
+  - @opengeni/codex@1.4.0
+  - @opengeni/xai-subscription@1.4.0
+
+## 1.3.0
+
+### Patch Changes
+
+- Updated dependencies [178b5ae]
+- Updated dependencies [414d416]
+  - @opengeni/contracts@1.3.0
+  - @opengeni/codex@1.3.0
+  - @opengeni/xai-subscription@1.3.0
+
+## 1.2.0
+
+### Minor Changes
+
+- d870f32: Support model-scoped signup and coupon credits with a shared operator default and
+  per-offer overrides. Update coverage at runtime, spend eligible promotions before
+  general credits, and preserve allocation and retry accounting. Keep scoped coupon
+  redemption separate from paid top-ups. Show credit funding in model selection and
+  current coverage on demand in billing. Legacy unrestricted grants stay unrestricted.
+
+### Patch Changes
+
+- 21c8904: Support optional HTTPS model catalog logos with safe image fallbacks, and declare the item type of the SDK filesystem function tool's command tuple.
+- Updated dependencies [21c8904]
+- Updated dependencies [d870f32]
+  - @opengeni/contracts@1.2.0
+  - @opengeni/codex@1.2.0
+  - @opengeni/xai-subscription@1.2.0
+
+## 1.1.0
+
+### Patch Changes
+
+- 4cd01cd: Every organization is now session-tenancy activated (rolling migration 0611): private ("Only me") sessions, visibility changes, forks, and personal-resource grants no longer require a per-organization activation receipt, and the owner/admin Only-me setting defaults to enabled when an organization has never changed it (owners and admins can still turn it off). `OPENGENI_ORGANIZATION_TENANCY_CANONICAL_ACTIVATION_ENABLED` and `Settings.organizationTenancyCanonicalActivationEnabled` are retired (the variable is accepted and ignored with a warning), the runtime posture no longer has an activation startup interlock, and the `db:activate-session-tenancy` operator command is removed.
+- Updated dependencies [5fd6c55]
+- Updated dependencies [c600e3a]
+- Updated dependencies [411b3b5]
+- Updated dependencies [208dec1]
+  - @opengeni/contracts@1.1.0
+  - @opengeni/codex@1.1.0
+  - @opengeni/xai-subscription@1.1.0
+
+## 1.0.2
+
+### Patch Changes
+
+- Updated dependencies [4476ca7]
+- Updated dependencies [e16aa17]
+  - @opengeni/contracts@1.0.1
+  - @opengeni/codex@1.0.1
+  - @opengeni/xai-subscription@1.0.1
+
+## 1.0.0
+
+### Major Changes
+
+- Reset package versioning: every published `@opengeni/*` package now releases together at one shared version, starting at 1.0.0. Install all `@opengeni` packages at the same version. Earlier versions are retired.
+
 ## 3.4.0
 
 ### Minor Changes

@@ -41,7 +41,9 @@ export function createFfmpegTranscriptionSegmenter(input: {
         !Number.isSafeInteger(request.providerSegmentSeconds) ||
         request.providerSegmentSeconds <= 0 ||
         !Number.isSafeInteger(request.totalDurationMilliseconds) ||
-        request.totalDurationMilliseconds <= 0
+        request.totalDurationMilliseconds <= 0 ||
+        (request.maxDecodeSeconds !== undefined &&
+          (!Number.isSafeInteger(request.maxDecodeSeconds) || request.maxDecodeSeconds <= 0))
       ) {
         throw new TranscriptionSegmenterError(
           "Audio segmentation bounds are invalid",
@@ -77,6 +79,10 @@ export function createFfmpegTranscriptionSegmenter(input: {
             "-y",
             "-i",
             inputPath,
+            // Output-side ceiling: audio past it is never decoded or written.
+            ...(request.maxDecodeSeconds !== undefined
+              ? ["-t", String(request.maxDecodeSeconds)]
+              : []),
             "-map",
             "0:a:0",
             "-vn",

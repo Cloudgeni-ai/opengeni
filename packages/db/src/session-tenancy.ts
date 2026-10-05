@@ -8,12 +8,13 @@ import {
   rawRows,
   type Database,
   rlsContextForWorkspace,
-  withWorkspaceRls,
   withWorkspaceSubjectRls,
   withWorkspaceSubjectSessionActivityRls,
 } from "./database";
 import { nestedPostgresSqlState } from "./persistence-errors";
 
+// Frozen SQL protocol argument: every organization is activated at version 1
+// since migration 0611, but the lifecycle routines still require it explicitly.
 const SESSION_TENANCY_ACTIVATION_VERSION = 1;
 
 export class SessionTenancyConflictError extends Error {
@@ -34,10 +35,16 @@ export class SessionTenancyConflictError extends Error {
   }
 }
 
+/**
+ * The organization's owner/admin Only-me setting does not permit a new private
+ * session (or private transition) in this shared workspace. Activation itself is
+ * universal since migration 0611; the name and the SESSION_TENANCY_NOT_ACTIVATED
+ * wire code are kept for client compatibility.
+ */
 export class SessionTenancyNotActivatedError extends Error {
   readonly name = "SessionTenancyNotActivatedError";
   constructor(options?: ErrorOptions) {
-    super("Session tenancy product surface is not activated for this organization", options);
+    super("Only-me chats are not enabled for this organization", options);
   }
 }
 
@@ -150,23 +157,6 @@ export type ForkSessionContentResult = {
   runtimeEventId: string | null;
   runtimeEventSequence: number | null;
 };
-
-export async function sessionTenancyProductActivated(
-  db: Database,
-  workspaceId: string,
-): Promise<boolean> {
-  const { accountId } = await rlsContextForWorkspace(db, workspaceId);
-  return await withWorkspaceRls(db, workspaceId, async (scopedDb) => {
-    const rows = await rawRows<{ activated: boolean }>(
-      scopedDb,
-      sql`select session_tenancy_product_activated(
-        ${accountId}::uuid,
-        ${SESSION_TENANCY_ACTIVATION_VERSION}
-      ) as activated`,
-    );
-    return rows[0]?.activated === true;
-  });
-}
 
 export async function getPrivateSessionCreatePolicy(
   db: Database,
@@ -284,15 +274,6 @@ export async function closePrivateSessionCreateCapability(
   capabilityId: string,
 ): Promise<void> {
   await db.execute(sql`select close_private_session_create_capability(${capabilityId}::uuid)`);
-}
-
-async function assertSessionTenancyProductActivated(
-  db: Database,
-  workspaceId: string,
-): Promise<void> {
-  if (!(await sessionTenancyProductActivated(db, workspaceId))) {
-    throw new SessionTenancyNotActivatedError();
-  }
 }
 
 function mapSessionTenancyPersistenceError(
@@ -420,7 +401,6 @@ export async function transitionSessionVisibility(
   if (!input.operationKey.trim()) throw new Error("operationKey must not be empty");
   const requestHash = canonicalSessionVisibilityTransitionHash(input);
   const { accountId } = await rlsContextForWorkspace(db, input.workspaceId);
-  await assertSessionTenancyProductActivated(db, input.workspaceId);
   try {
     return await withWorkspaceSubjectSessionActivityRls(
       db,
@@ -505,7 +485,6 @@ export async function forkSessionContent(
     throw new Error("Resolved session fork runtime configuration does not match its request");
   }
   const { accountId } = await rlsContextForWorkspace(db, input.sourceWorkspaceId);
-  await assertSessionTenancyProductActivated(db, input.sourceWorkspaceId);
   const requestHash = canonicalSessionForkHash(input);
   try {
     return await withWorkspaceSubjectRls(
@@ -616,7 +595,6 @@ export async function replayAppliedSessionFork(
     throw new Error("The first session fork contract is same-workspace only");
   }
   const { accountId } = await rlsContextForWorkspace(db, input.sourceWorkspaceId);
-  await assertSessionTenancyProductActivated(db, input.sourceWorkspaceId);
   const requestHash = canonicalSessionForkHash(input);
   try {
     return await withWorkspaceSubjectRls(

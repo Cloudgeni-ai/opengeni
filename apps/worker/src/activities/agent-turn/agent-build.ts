@@ -57,7 +57,6 @@ import { VideoGenerationRejectedResult, resolveAgentToolFamilies } from "@openge
 
 import {
   structuredToolTransportForTurn,
-  hostedWebSearchForTurn,
   connectedSubscriptionImageGenerationAuthority,
   textVerbosityForTurn,
   reasoningSummaryForTurn,
@@ -80,6 +79,7 @@ import type {
 import { SESSION_TITLE_MODEL_TOOL_NAME } from "./session-title";
 import { resolveTurnSandboxAccess } from "./turn-sandbox-access";
 import { resolveVideoReferenceSandboxAccess } from "./video-reference-sandbox";
+import { turnWebSearchPlan } from "./web-search";
 
 export type BuildTurnAgentDeps = {
   skillCatalog: NonNullable<BuildAgentOptions["skillCatalog"]>;
@@ -246,7 +246,9 @@ export async function buildTurnAgent(deps: BuildTurnAgentDeps) {
           },
         }
       : {};
-  const hostedWebSearch = hostedWebSearchForTurn(resolvedModel, runSettings.webSearchEnabled);
+  // Fallback mode (the default) keeps hosted search exactly as resolved; the
+  // operator's `replace` mode withholds it in favour of provider tools.
+  const hostedWebSearch = turnWebSearchPlan(resolvedModel, runSettings).hostedWebSearch;
   const resolveImageReferences = async (
     references: Parameters<typeof resolveImageGenerationReferencesForTool>[0]["references"],
   ) =>
@@ -757,8 +759,8 @@ export async function buildTurnAgent(deps: BuildTurnAgentDeps) {
               // tool. Gateway Responses routes likewise expose ordinary function
               // tools, not OpenAI-hosted sandbox tools. Tell buildAgent to use
               // function apply_patch and wrap successful view_image results as
-              // typed input_image content. Chat wires have no proven typed image
-              // result transport and therefore receive no view_image tool.
+              // typed input_image content. The Chat adapter projects tool images
+              // into a labelled image envelope after the paired tool results.
               structuredToolTransport: structuredToolTransportForTurn(resolvedModel),
               ...(promptCacheKey ? { promptCacheKey } : {}),
             }

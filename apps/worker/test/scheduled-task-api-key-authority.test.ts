@@ -222,6 +222,40 @@ describe("organization API key scheduled tasks", () => {
     expect(runs[0]).toMatchObject({ status: "failed", error: "machine_target_unavailable" });
   }, 180_000);
 
+  test("a task naming a model the catalog no longer offers is a visible terminal run", async () => {
+    if (!available) return;
+    const workspace = await workspaceFixture();
+    const key = organizationKey(workspace);
+    const task = await createWithKey(workspace, key, { type: "manual" });
+    // The model was retired after the task was saved.
+    await admin`update scheduled_tasks
+      set agent_config = agent_config || ${admin.json({ model: "openai/retired-scheduled-model" })}
+      where id = ${task.id}`;
+    const input = {
+      workspaceId: workspace.workspaceId,
+      taskId: task.id,
+      triggerType: "manual" as const,
+      producerKey: `retired-model:${crypto.randomUUID()}`,
+      initiator: { kind: "subject" as const, subjectId: key.subjectId },
+    };
+    const expected = {
+      action: "blocked",
+      reason: "scheduled_model_unavailable",
+      runId: expect.any(String),
+      refusal: { version: 1, reason: "scheduled_model_unavailable", retryable: false },
+    };
+    expect(await scheduler().dispatchScheduledTaskRun(input)).toEqual(expected);
+    // Redelivery replays the refusal instead of throwing into activity retries.
+    expect(await scheduler().dispatchScheduledTaskRun(input)).toEqual(expected);
+    const runs = await listScheduledTaskRuns(client.db, workspace.workspaceId, task.id, 10);
+    expect(runs).toHaveLength(1);
+    expect(runs[0]).toMatchObject({
+      status: "failed",
+      error: "scheduled_model_unavailable",
+      sessionId: null,
+    });
+  }, 180_000);
+
   test("an occurrence whose frozen owner authority cannot be proven is a visible failed run", async () => {
     if (!available) return;
     const workspace = await workspaceFixture();

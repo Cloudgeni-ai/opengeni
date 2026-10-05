@@ -4828,6 +4828,9 @@ export const sessions = pgTable(
     nestedAgentDepthPolicySessionId: uuid("nested_agent_depth_policy_session_id"),
     temporalWorkflowId: text("temporal_workflow_id"),
     activeTurnId: uuid("active_turn_id"),
+    // Server-owned accepted request governing informational agent input.
+    // Advances when a new user/API turn starts, never when it queues.
+    executionContextTurnId: uuid("execution_context_turn_id"),
     // Session-scoped out-of-turn wait (`wait_for_input`). The exact declaring
     // turn and absolute deadline are durable PostgreSQL authority; workflow
     // signals and timers only nudge reevaluation. A newer finished turn or a
@@ -5290,6 +5293,7 @@ export const sessionRealtimeModes = pgTable(
     modelValid: check(
       "session_realtime_modes_model_check",
       sql`${table.model} in (
+        'opengeni-azure/gpt-live-1',
         'gpt-live-1-boulder-alpha',
         'supergrok/grok-voice-think-fast-2.0',
         'opengeni-gateway/openai/gpt-realtime-2.1',
@@ -5864,6 +5868,23 @@ export const sandboxFilePublications = opengeniPrivateSchema.table(
       table.publishedAt,
       table.fileId,
     ),
+  }),
+);
+
+/** Shared discovery pins; no content or access authority. SQL owns target validation. */
+export const artifactCatalogPins = opengeniPrivateSchema.table(
+  "artifact_catalog_pins",
+  {
+    accountId: uuid("account_id").notNull(),
+    workspaceId: uuid("workspace_id")
+      .notNull()
+      .references(() => workspaces.id, { onDelete: "cascade" }),
+    kind: text("kind").notNull(),
+    artifactId: text("artifact_id").notNull(),
+    pinnedAt: timestamp("pinned_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (table) => ({
+    pk: primaryKey({ columns: [table.accountId, table.workspaceId, table.kind, table.artifactId] }),
   }),
 );
 
@@ -7106,6 +7127,9 @@ export const sessionTurns = pgTable(
     // service initiator. It never authorizes by itself. Null means pure service
     // work has no human-bound authority.
     initiatingHumanSubjectId: text("initiating_human_subject_id"),
+    // Exact receiving-session authority copied by an informational inbox turn.
+    // Immutable and checked against the session pointer by the database.
+    executionContextTurnId: uuid("execution_context_turn_id"),
     // Exact goal authority frozen when the logical turn is accepted. The
     // migration trigger fills this for old and rolling writers; claim only
     // reconstructs legacy nulls from events as-of created_at.
@@ -7931,12 +7955,26 @@ export const sessionAttemptCodemodeCalls = pgTable(
     executionGeneration: integer("execution_generation").notNull(),
     catalogDigest: text("catalog_digest").notNull(),
     requestDigest: text("request_digest").notNull(),
+    durableApproval: boolean("durable_approval").notNull().default(false),
+    approvalRequestId: uuid("approval_request_id").references(() => connectorActionRequests.id),
+    effectDigest: text("effect_digest"),
+    executionAttemptId: uuid("execution_attempt_id"),
+    executionAttemptGeneration: integer("execution_attempt_generation"),
+    executionCatalogDigest: text("execution_catalog_digest"),
     serverId: text("server_id").notNull(),
     toolName: text("tool_name").notNull(),
     arguments: jsonb("arguments").$type<Record<string, unknown>>().notNull(),
     callerSubjectId: text("caller_subject_id").notNull(),
     state: text("state", {
-      enum: ["queued", "running", "completed", "failed", "outcome_unknown", "cancelled"],
+      enum: [
+        "queued",
+        "waiting_for_approval",
+        "running",
+        "completed",
+        "failed",
+        "outcome_unknown",
+        "cancelled",
+      ],
     })
       .notNull()
       .default("queued"),
@@ -7975,6 +8013,34 @@ export const sessionAttemptCodemodeCalls = pgTable(
         sessionAttemptToolCatalogs.digest,
       ],
     }).onDelete("cascade"),
+    executionCatalog: foreignKey({
+      name: "session_codemode_execution_catalog_fk",
+      columns: [
+        table.accountId,
+        table.workspaceId,
+        table.sessionId,
+        table.turnId,
+        table.executionAttemptId,
+        table.executionAttemptGeneration,
+        table.executionCatalogDigest,
+      ],
+      foreignColumns: [
+        sessionAttemptToolCatalogs.accountId,
+        sessionAttemptToolCatalogs.workspaceId,
+        sessionAttemptToolCatalogs.sessionId,
+        sessionAttemptToolCatalogs.turnId,
+        sessionAttemptToolCatalogs.attemptId,
+        sessionAttemptToolCatalogs.executionGeneration,
+        sessionAttemptToolCatalogs.digest,
+      ],
+    }).onDelete("cascade"),
+    continuationValid: check(
+      "session_codemode_continuation_check",
+      sql`(
+      (${table.executionAttemptId} is null and ${table.executionAttemptGeneration} is null and ${table.executionCatalogDigest} is null)
+      or (${table.executionAttemptId} is not null and ${table.executionAttemptGeneration} is not null and ${table.executionAttemptGeneration} > 0 and ${table.executionCatalogDigest} is not null and ${table.executionCatalogDigest} ~ '^[0-9a-f]{64}$')
+    ) and (${table.approvalRequestId} is null or (${table.durableApproval} and ${table.effectDigest} is not null and ${table.effectDigest} ~ '^[0-9a-f]{64}$'))`,
+    ),
     sessionTurn: index("session_attempt_codemode_calls_session_turn_idx").on(
       table.workspaceId,
       table.sessionId,
@@ -8013,7 +8079,8 @@ export const sessionAttemptCodemodeCalls = pgTable(
     lifecycleValid: check(
       "session_attempt_codemode_calls_lifecycle_check",
       sql`(
-        ${table.state} = 'queued'
+        ${table.state} in ('queued', 'waiting_for_approval')
+        and (${table.state} <> 'waiting_for_approval' or ${table.approvalRequestId} is not null)
         and ${table.claimId} is null
         and ${table.claimedAt} is null
         and ${table.executionStartedAt} is null
@@ -8102,9 +8169,11 @@ export const connectorActionRequests = pgTable(
     // Attempt-frozen provenance intentionally survives policy deletion.
     policyId: uuid("policy_id"),
     policyVersion: integer("policy_version"),
-    policySource: text("policy_source").$type<"explicit" | "ambiguous">().notNull(),
+    policySource: text("policy_source").$type<"explicit" | "default" | "ambiguous">().notNull(),
     policyDecision: text("policy_decision").$type<ConnectorActionPolicyDecision>().notNull(),
     actionFingerprint: text("action_fingerprint").notNull(),
+    reviewArguments: text("review_arguments"),
+    reviewContext: jsonb("review_context").$type<import("@opengeni/contracts").ToolReviewContext>(),
     status: text("status")
       .$type<
         | "pending"
@@ -8186,6 +8255,14 @@ export const connectorActionRequests = pgTable(
     policyDecisionValid: check(
       "connector_action_requests_policy_decision_chk",
       sql`${table.policyDecision} in ('allow', 'ask', 'block')`,
+    ),
+    reviewArgumentsBound: check(
+      "connector_review_arguments_bound",
+      sql`${table.reviewArguments} is null or octet_length(${table.reviewArguments}) <= 4194304`,
+    ),
+    reviewContextBound: check(
+      "connector_review_context_bound",
+      sql`${table.reviewContext} is null or octet_length(${table.reviewContext}::text) <= 4194304`,
     ),
     statusValid: check(
       "connector_action_requests_status_chk",
@@ -8586,6 +8663,9 @@ export const sessionSystemUpdates = pgTable(
     pendingKindSource: index("session_system_updates_pending_kind_source_idx")
       .on(table.workspaceId, table.sessionId, table.kind, table.sourceId)
       .where(sql`${table.state} = 'pending'`),
+    pendingTerminalRepair: index("session_system_updates_pending_terminal_repair_idx")
+      .on(table.workspaceId, table.sessionId, table.sourceId, table.dedupeKey)
+      .where(sql`${table.state} = 'pending' and ${table.kind} = 'child_terminal_result'`),
     onePendingSteer: uniqueIndex("session_system_updates_one_pending_steer_idx")
       .on(table.workspaceId, table.sessionId)
       .where(sql`${table.kind} = 'agent_steer_instruction' and ${table.state} = 'pending'`),
@@ -9654,7 +9734,7 @@ export const sandboxLeases = pgTable(
     // Why an enrolled drain contains its commands (0547); cleared with the
     // enrollment. Null for a pre-0547 enrollment: settle with neutral wording.
     commandContainmentReason: text("command_containment_reason", {
-      enum: ["idle_containment", "provider_deadline_containment"],
+      enum: ["idle_containment", "provider_deadline_containment", "quiescence_containment"],
     }),
     liveness: text("liveness", { enum: sandboxLeaseLivenessValues }).notNull().default("cold"),
     refcount: integer("refcount").notNull().default(0),
@@ -10586,6 +10666,13 @@ export const sessionBackgroundCommands = pgTable(
     reconcileProofObservedAt: timestamp("reconcile_proof_observed_at", {
       withTimezone: true,
     }),
+    // Independent output custody. Neither terminal state nor model observation
+    // licenses native output collection. Pending releases survive worker loss.
+    outputExitSeq: text("output_exit_seq"),
+    outputAttachGeneration: text("output_attach_generation"),
+    outputConsumedAt: timestamp("output_consumed_at", { withTimezone: true }),
+    outputReleaseObservedAt: timestamp("output_release_observed_at", { withTimezone: true }),
+    outputUnavailableAt: timestamp("output_unavailable_at", { withTimezone: true }),
     updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
   },
   (table) => ({
@@ -10629,6 +10716,29 @@ export const sessionBackgroundCommands = pgTable(
     connectedOp: uniqueIndex("session_background_commands_connected_op_uq")
       .on(table.controlWorkspaceId, table.enrollmentId, table.connectionInstanceId, table.opId)
       .where(sql`${table.provider} = 'connected_machine'`),
+    outputReleasePending: index("session_background_commands_output_release_idx").on(
+      table.reconcileAfter,
+      table.startedAt,
+      table.id,
+    ).where(sql`${table.provider} = 'connected_machine' and ${table.state} = 'exited'
+        and ${table.outputReleaseObservedAt} is null and ${table.outputUnavailableAt} is null`),
+    outputCustodyValid: check(
+      "session_background_commands_output_custody_check",
+      sql`(
+        ${table.outputExitSeq} is null and ${table.outputAttachGeneration} is null
+        and ${table.outputConsumedAt} is null and ${table.outputReleaseObservedAt} is null
+        and (${table.outputUnavailableAt} is null or
+          (${table.provider} = 'connected_machine' and ${table.state} = 'exited'))
+      ) or (
+        ${table.provider} = 'connected_machine' and ${table.state} = 'exited'
+        and ${table.outputExitSeq} is not null and ${table.outputAttachGeneration} is not null
+        and ${table.outputConsumedAt} is not null and ${table.outputUnavailableAt} is null
+        and ${table.outputExitSeq} ~ '^[1-9][0-9]{0,19}$'
+        and ${table.outputAttachGeneration} ~ '^[1-9][0-9]{0,19}$'
+        and ${table.outputExitSeq}::numeric <= 18446744073709551615
+        and ${table.outputAttachGeneration}::numeric <= 18446744073709551615
+      )`,
+    ),
     activeSession: index("session_background_commands_active_session_idx")
       .on(table.workspaceId, table.sessionId, table.state, table.startedAt, table.id)
       .where(sql`${table.state} in ('running', 'stopping')`),
@@ -12454,7 +12564,8 @@ export const hostExportOutbox = pgTable(
       and (${table.modelProvider} is null or ${table.modelProvider} in (
         'openai', 'azure', 'codex-subscription', 'supergrok-subscription',
         'opengeni-gateway', 'workspace-gateway', 'organization-gateway',
-        'openrouter', 'workspace-openrouter', 'organization-openrouter', 'registry'
+        'openrouter', 'workspace-openrouter', 'organization-openrouter',
+        'opper', 'workspace-opper', 'organization-opper', 'registry'
       ))
       and (${table.toolFamily} is null or ${table.toolFamily} ~
         '^(custom|integration:[a-z0-9]([a-z0-9.-]{0,150}[a-z0-9])?|[a-z][a-z0-9_]{0,63})$')`,
@@ -12572,6 +12683,8 @@ export const creditLedgerEntries = pgTable(
     }),
     type: text("type").notNull(),
     amountMicros: bigint("amount_micros", { mode: "number" }).notNull(),
+    /** Null preserves the unrestricted terms of legacy credits. */
+    eligibleModelIds: text("eligible_model_ids").array(),
     currency: text("currency").notNull().default("usd"),
     sourceType: text("source_type"),
     sourceId: text("source_id"),
@@ -12582,6 +12695,19 @@ export const creditLedgerEntries = pgTable(
   },
   (table) => ({
     idempotency: uniqueIndex("credit_ledger_entries_idempotency_idx").on(table.idempotencyKey),
+    idAccount: uniqueIndex("credit_ledger_entries_id_account_idx").on(table.id, table.accountId),
+    scopedGrants: index("credit_ledger_scoped_grants_idx")
+      .on(table.accountId, table.createdAt, table.id)
+      .where(sql`${table.eligibleModelIds} is not null`),
+    scopeValid: check(
+      "credit_ledger_scope_valid",
+      sql`${table.eligibleModelIds} is null or (
+      ${table.type} = 'grant' and ${table.amountMicros} > 0
+      and cardinality(${table.eligibleModelIds}) between 1 and 40
+      and array_position(${table.eligibleModelIds}, null) is null
+      and array_position(${table.eligibleModelIds}, '') is null
+    )`,
+    ),
     modelDebitPeriod: index("credit_ledger_entries_model_debit_period_idx")
       .on(table.accountId, table.occurredAt, table.workspaceId)
       .where(
@@ -12591,6 +12717,30 @@ export const creditLedgerEntries = pgTable(
       table.accountId,
       table.createdAt,
     ),
+  }),
+);
+
+/** One debit can consume several grants; the remainder is paid by general credits. */
+export const creditDebitAllocations = pgTable(
+  "credit_debit_allocations",
+  {
+    accountId: uuid("account_id").notNull(),
+    debitEntryId: uuid("debit_entry_id").notNull(),
+    grantEntryId: uuid("grant_entry_id").notNull(),
+    amountMicros: bigint("amount_micros", { mode: "number" }).notNull(),
+  },
+  (table) => ({
+    pk: primaryKey({ columns: [table.debitEntryId, table.grantEntryId] }),
+    debit: foreignKey({
+      columns: [table.debitEntryId, table.accountId],
+      foreignColumns: [creditLedgerEntries.id, creditLedgerEntries.accountId],
+    }).onDelete("cascade"),
+    grant: foreignKey({
+      columns: [table.grantEntryId, table.accountId],
+      foreignColumns: [creditLedgerEntries.id, creditLedgerEntries.accountId],
+    }).onDelete("cascade"),
+    grantIndex: index("credit_debit_allocations_grant_idx").on(table.accountId, table.grantEntryId),
+    positive: check("credit_debit_allocations_positive", sql`${table.amountMicros} > 0`),
   }),
 );
 
@@ -14138,7 +14288,7 @@ export const workspaceGatewayCustomModels = pgTable(
       .notNull()
       .references(() => workspaces.id, { onDelete: "cascade" }),
     providerKind: text("provider_kind")
-      .$type<"vercel_gateway" | "openrouter" | "anthropic" | "claude_subscription">()
+      .$type<"vercel_gateway" | "openrouter" | "anthropic" | "claude_subscription" | "opper">()
       .notNull(),
     upstreamModelId: text("upstream_model_id").notNull(),
     label: text("label"),
@@ -14171,7 +14321,7 @@ export const workspaceGatewayCustomModels = pgTable(
       .where(sql`${table.deleteOperationId} is not null`),
     providerKindCheck: check(
       "workspace_gateway_custom_models_provider_kind_chk",
-      sql`${table.providerKind} in ('vercel_gateway', 'openrouter', 'anthropic', 'claude_subscription')`,
+      sql`${table.providerKind} in ('vercel_gateway', 'openrouter', 'anthropic', 'claude_subscription', 'opper')`,
     ),
     upstreamCheck: check(
       "workspace_gateway_custom_models_upstream_chk",
@@ -14211,7 +14361,7 @@ export const organizationModelProviderConnections = pgTable(
       .notNull()
       .references(() => managedAccounts.id, { onDelete: "cascade" }),
     providerKind: text("provider_kind")
-      .$type<"vercel_gateway" | "openrouter" | "anthropic" | "claude_subscription">()
+      .$type<"vercel_gateway" | "openrouter" | "anthropic" | "claude_subscription" | "opper">()
       .notNull(),
     status: text("status").$type<"active" | "revoked">().notNull().default("active"),
     credentialEncrypted: text("credential_encrypted").notNull(),
@@ -14236,7 +14386,7 @@ export const organizationModelProviderConnections = pgTable(
     ),
     providerKindCheck: check(
       "organization_model_provider_connections_provider_kind_chk",
-      sql`${table.providerKind} in ('vercel_gateway', 'openrouter', 'anthropic', 'claude_subscription')`,
+      sql`${table.providerKind} in ('vercel_gateway', 'openrouter', 'anthropic', 'claude_subscription', 'opper')`,
     ),
     statusCheck: check(
       "organization_model_provider_connections_status_chk",
@@ -14265,7 +14415,7 @@ export const organizationModelProviderConnectionOperations = pgTable(
       .notNull()
       .references(() => managedAccounts.id, { onDelete: "cascade" }),
     providerKind: text("provider_kind")
-      .$type<"vercel_gateway" | "openrouter" | "anthropic" | "claude_subscription">()
+      .$type<"vercel_gateway" | "openrouter" | "anthropic" | "claude_subscription" | "opper">()
       .notNull(),
     operationId: uuid("operation_id").notNull(),
     requestHash: text("request_hash").notNull(),
@@ -14287,7 +14437,7 @@ export const organizationModelProviderConnectionOperations = pgTable(
     ),
     providerKindCheck: check(
       "organization_model_provider_connection_operations_provider_kind_chk",
-      sql`${table.providerKind} in ('vercel_gateway', 'openrouter', 'anthropic', 'claude_subscription')`,
+      sql`${table.providerKind} in ('vercel_gateway', 'openrouter', 'anthropic', 'claude_subscription', 'opper')`,
     ),
     resultStatusCheck: check(
       "organization_model_provider_connection_operations_result_status_chk",
@@ -14312,7 +14462,7 @@ export const organizationModelProviderCustomModels = pgTable(
       .notNull()
       .references(() => managedAccounts.id, { onDelete: "cascade" }),
     providerKind: text("provider_kind")
-      .$type<"vercel_gateway" | "openrouter" | "anthropic" | "claude_subscription">()
+      .$type<"vercel_gateway" | "openrouter" | "anthropic" | "claude_subscription" | "opper">()
       .notNull(),
     upstreamModelId: text("upstream_model_id").notNull(),
     label: text("label"),
@@ -14338,7 +14488,7 @@ export const organizationModelProviderCustomModels = pgTable(
       .where(sql`${table.deleteOperationId} is not null`),
     providerKindCheck: check(
       "organization_model_provider_custom_models_provider_kind_chk",
-      sql`${table.providerKind} in ('vercel_gateway', 'openrouter', 'anthropic', 'claude_subscription')`,
+      sql`${table.providerKind} in ('vercel_gateway', 'openrouter', 'anthropic', 'claude_subscription', 'opper')`,
     ),
     upstreamCheck: check(
       "organization_model_provider_custom_models_upstream_chk",

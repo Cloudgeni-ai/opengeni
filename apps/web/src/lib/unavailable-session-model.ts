@@ -15,7 +15,7 @@ import {
 
 /**
  * Connection- and subscription-owned product ids: workspace/organization
- * Gateway, OpenRouter, Claude and direct-provider models, Codex and SuperGrok.
+ * Gateway, OpenRouter, Opper, Claude and direct-provider models, Codex and SuperGrok.
  * An existing session may keep running a retained definition the catalog no
  * longer lists, so only the API's refusal can say these are unavailable.
  */

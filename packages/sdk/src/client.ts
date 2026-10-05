@@ -5,7 +5,23 @@ import type {
   ClaudeSubscriptionSetupTokenRequest,
   SubscriptionPoolSettings,
 } from "@opengeni/contracts";
-import type { ArtifactCatalogListOptions, ArtifactCatalogListResponse } from "./artifact-catalog";
+import {
+  insightsUsageQueryString,
+  type WorkspaceInsightsUsageOptions,
+  type OrganizationInsightsUsageOptions,
+  type WorkspaceInsightsCallsOptions,
+  type OrganizationInsightsCallsOptions,
+  type InsightsCallsScope,
+  type InsightsUsageResponse,
+  type InsightsCallsResponse,
+} from "./insights-usage";
+import type {
+  ArtifactCatalogKind,
+  ArtifactCatalogListOptions,
+  ArtifactCatalogListResponse,
+  ArtifactPinResponse,
+} from "./artifact-catalog";
+import type { ToolActionReview, ToolReviewDetailsPage } from "@opengeni/contracts";
 import type {
   SessionMessageSearchRequest,
   SessionMessageSearchResponse,
@@ -204,6 +220,7 @@ import type {
   CodexConnectStart,
   CodexUsage,
   CodexUsageMap,
+  ModelConnectionAccessKind,
   ModelConnectionAccessPolicy,
   ModelConnectionAccessResponse,
   SuperGrokAccount,
@@ -261,6 +278,10 @@ import type {
   WorkspaceOpenRouterCustomModelsResponse,
   CreateWorkspaceOpenRouterCustomModelRequest,
   DeleteWorkspaceOpenRouterCustomModelRequest,
+  WorkspaceOpperCustomModel,
+  WorkspaceOpperCustomModelsResponse,
+  CreateWorkspaceOpperCustomModelRequest,
+  DeleteWorkspaceOpperCustomModelRequest,
   OrganizationModelProviderKind,
   ClaudeSubscriptionUsage,
   ClaudeSubscriptionOAuthStartResponse,
@@ -311,6 +332,9 @@ import type {
   BillingCheckoutStatus,
   CreateCheckoutResponse,
   OpenGeniSlackBotInstallRequest,
+  AvailableOpenGeniSlackBots,
+  OpenGeniSlackBotOrganizationAccess,
+  UpdateOpenGeniSlackBotOrganizationAccess,
   OpenGeniSlackBotInstallStart,
   SlackChannelRouteListResponse,
   SlackReactionChannelListResponse,
@@ -726,7 +750,7 @@ function hasSessionPageFilters(options: SessionListPageOptions): boolean {
 }
 
 function unsupportedSessionPage(feature: string): Error {
-  return new Error(`The connected OpenGeni API does not support ${feature}`);
+  return new Error(`The connected Opengeni API does not support ${feature}`);
 }
 
 function sessionPath(workspaceId: string, sessionId: string): string {
@@ -972,7 +996,7 @@ function createLazyToolsFacade(transport: OpenGeniToolTransport): OpenGeniToolsF
               target = (target as Record<string, unknown>)[segment];
             }
             if (typeof target !== "function")
-              throw new TypeError("OpenGeni tool path is not callable");
+              throw new TypeError("Opengeni tool path is not callable");
             return await Reflect.apply(target, undefined, args);
           }) as unknown as OpenGeniWorkspaceTools,
           {
@@ -1399,6 +1423,34 @@ export class OpenGeniClient {
       path,
       (signal) => this.requestJson<Session>("GET", path, undefined, {}, { signal }),
       options,
+    );
+  }
+
+  async getToolActionReview(
+    workspaceId: string,
+    sessionId: string,
+    approvalId: string,
+  ): Promise<ToolActionReview> {
+    return await this.requestJson(
+      "GET",
+      `${sessionPath(workspaceId, sessionId)}/tool-reviews/${encodeURIComponent(approvalId)}`,
+    );
+  }
+
+  async getToolReviewDetails(
+    workspaceId: string,
+    sessionId: string,
+    approvalId: string,
+    options: { actionDigest: string; path?: string; offset?: number },
+  ): Promise<ToolReviewDetailsPage> {
+    const query = new URLSearchParams({
+      actionDigest: options.actionDigest,
+      path: options.path ?? "",
+      offset: String(options.offset ?? 0),
+    });
+    return await this.requestJson(
+      "GET",
+      `${sessionPath(workspaceId, sessionId)}/tool-reviews/${encodeURIComponent(approvalId)}/details?${query}`,
     );
   }
 
@@ -3091,6 +3143,27 @@ export class OpenGeniClient {
     return await this.sharedRead(
       path,
       (signal) => this.requestJson<SessionGoal>("GET", path, undefined, {}, { signal }),
+      options,
+    );
+  }
+
+  /**
+   * The session's goal, or `null` when the session has none. Unlike
+   * {@link getGoal}, a goal-less session is a successful read (`?absent=null`
+   * answers 200 `null`), so browsers log no failed request. Servers that
+   * predate the opt-in ignore it and still answer 404; a missing session is
+   * always a 404.
+   */
+  async findGoal(
+    workspaceId: string,
+    sessionId: string,
+    options: SharedSessionReadOptions = {},
+  ): Promise<SessionGoal | null> {
+    const path = `${sessionPath(workspaceId, sessionId)}/goal`;
+    const query = { absent: "null" };
+    return await this.sharedRead(
+      `${path}?absent=null`,
+      (signal) => this.requestJson<SessionGoal | null>("GET", path, undefined, query, { signal }),
       options,
     );
   }
@@ -4824,6 +4897,48 @@ export class OpenGeniClient {
     await this.requestVoid(
       "DELETE",
       `/v1/workspaces/${workspaceId}/openrouter-custom-models/${encodeURIComponent(customModelId)}`,
+      request,
+    );
+  }
+
+  /** List workspace-owned exact Opper model ids (pools or provider/model routes). */
+  async listWorkspaceOpperCustomModels(
+    workspaceId: string,
+  ): Promise<WorkspaceOpperCustomModelsResponse> {
+    return await this.requestJson<WorkspaceOpperCustomModelsResponse>(
+      "GET",
+      `/v1/workspaces/${workspaceId}/opper-custom-models`,
+    );
+  }
+
+  /** Add one exact upstream Opper model id. */
+  async createWorkspaceOpperCustomModel(
+    workspaceId: string,
+    request: CreateWorkspaceOpperCustomModelRequest,
+  ): Promise<WorkspaceOpperCustomModel> {
+    return await this.requestJson<WorkspaceOpperCustomModel>(
+      "POST",
+      `/v1/workspaces/${workspaceId}/opper-custom-models`,
+      request,
+    );
+  }
+
+  /** Remove one workspace custom Opper model by its stable row id. */
+  async deleteWorkspaceOpperCustomModel(
+    workspaceId: string,
+    customModelId: string,
+    request: DeleteWorkspaceOpperCustomModelRequest,
+  ): Promise<void> {
+    if (
+      !/^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/iu.test(
+        customModelId,
+      )
+    ) {
+      throw new TypeError("customModelId must be a UUID");
+    }
+    await this.requestVoid(
+      "DELETE",
+      `/v1/workspaces/${workspaceId}/opper-custom-models/${encodeURIComponent(customModelId)}`,
       request,
     );
   }
@@ -7511,14 +7626,27 @@ export class OpenGeniClient {
     );
   }
 
+  getConnectorToolPermissions(
+    workspaceId: string,
+    capabilityId: string,
+    options?: { signal?: AbortSignal },
+  ): Promise<ConnectorToolPermissionsResponse>;
+  getConnectorToolPermissions(
+    workspaceId: string,
+    capabilityId: string,
+    options?: { signal?: AbortSignal; connectionId?: string; instanceKey?: string },
+  ): Promise<ConnectorToolPermissionsResponse>;
   async getConnectorToolPermissions(
     workspaceId: string,
     capabilityId: string,
-    options: { signal?: AbortSignal } = {},
+    options: { signal?: AbortSignal; connectionId?: string; instanceKey?: string } = {},
   ): Promise<ConnectorToolPermissionsResponse> {
+    const query = new URLSearchParams();
+    if (options.connectionId) query.set("connectionId", options.connectionId);
+    if (options.instanceKey) query.set("instanceKey", options.instanceKey);
     return await this.requestJson(
       "GET",
-      `/v1/workspaces/${workspaceId}/capabilities/${encodeURIComponent(capabilityId)}/tool-permissions`,
+      `/v1/workspaces/${workspaceId}/capabilities/${encodeURIComponent(capabilityId)}/tool-permissions${query.size ? `?${query}` : ""}`,
       undefined,
       {},
       options,
@@ -7584,6 +7712,23 @@ export class OpenGeniClient {
       "GET",
       `/v1/workspaces/${encodeURIComponent(workspaceId)}/artifact-catalog${suffix}`,
       undefined,
+      undefined,
+      options,
+    );
+  }
+
+  /** Idempotently set a workspace-shared pin; refresh the catalog after completion. */
+  async updateArtifactPin(
+    workspaceId: string,
+    kind: ArtifactCatalogKind,
+    artifactId: string,
+    pinned: boolean,
+    options: { signal?: AbortSignal } = {},
+  ): Promise<ArtifactPinResponse> {
+    return this.requestJson<ArtifactPinResponse>(
+      "PUT",
+      `/v1/workspaces/${encodeURIComponent(workspaceId)}/artifact-catalog/${encodeURIComponent(kind)}/${encodeURIComponent(artifactId)}/pin`,
+      { pinned },
       undefined,
       options,
     );
@@ -8130,11 +8275,17 @@ export class OpenGeniClient {
 
   // --- Connections -------------------------------------------------------------------------------
 
-  /** The authenticated user's active accounts across this organization. */
-  async listOwnConnectionAccounts(workspaceId: string): Promise<ConnectionMetadata[]> {
+  /** This authenticated user's accounts across the organization, plus current-workspace shared accounts.
+   * Inactive accounts are opt-in for settings display; execution pickers keep the active default. */
+  async listOwnConnectionAccounts(
+    workspaceId: string,
+    options: { includeInactive?: boolean } = {},
+  ): Promise<ConnectionMetadata[]> {
     const response = await this.requestJson<ListConnectionsResponse>(
       "GET",
       `/v1/workspaces/${workspaceId}/connections/accounts`,
+      undefined,
+      options.includeInactive === true ? { includeInactive: "true" } : {},
     );
     return response.connections;
   }
@@ -8282,6 +8433,35 @@ export class OpenGeniClient {
     return await this.requestJson<FikenOAuthStartResponse>(
       "POST",
       `/v1/workspaces/${workspaceId}/connections/fiken/oauth/start`,
+      request,
+    );
+  }
+
+  /** List verified local and explicitly organization-shared bots, excluding personal accounts. */
+  async listAvailableOpenGeniSlackBots(workspaceId: string): Promise<AvailableOpenGeniSlackBots> {
+    return this.requestJson("GET", `/v1/workspaces/${workspaceId}/connections/slack-bot/available`);
+  }
+
+  /** Read configured sharing independently of installation credential health. */
+  async getOpenGeniSlackBotOrganizationAccess(
+    workspaceId: string,
+    connectionId: string,
+  ): Promise<OpenGeniSlackBotOrganizationAccess> {
+    return this.requestJson(
+      "GET",
+      `/v1/workspaces/${workspaceId}/connections/${connectionId}/slack-bot/organization-access`,
+    );
+  }
+
+  /** An organization administrator may share an installed bot with authorized workspaces. */
+  async setOpenGeniSlackBotOrganizationAccess(
+    workspaceId: string,
+    connectionId: string,
+    request: UpdateOpenGeniSlackBotOrganizationAccess,
+  ): Promise<OpenGeniSlackBotOrganizationAccess> {
+    return this.requestJson(
+      "PUT",
+      `/v1/workspaces/${workspaceId}/connections/${connectionId}/slack-bot/organization-access`,
       request,
     );
   }
@@ -8861,6 +9041,65 @@ export class OpenGeniClient {
     );
   }
 
+  /** Shared usage under the existing workspace access gate. */
+  async getWorkspaceInsightsUsage(
+    workspaceId: string,
+    options: WorkspaceInsightsUsageOptions = {},
+    requestOptions: OpenGeniRequestOptions = {},
+  ): Promise<InsightsUsageResponse> {
+    return await this.requestJson(
+      "GET",
+      `/v1/workspaces/${encodeURIComponent(workspaceId)}/insights/usage${insightsUsageQueryString(options)}`,
+      undefined,
+      {},
+      requestOptions,
+    );
+  }
+
+  /** Shared usage under the existing organization access gate. */
+  async getOrganizationInsightsUsage(
+    accountId: string,
+    options: OrganizationInsightsUsageOptions = {},
+    requestOptions: OpenGeniRequestOptions = {},
+  ): Promise<InsightsUsageResponse> {
+    return await this.requestJson(
+      "GET",
+      `/v1/organizations/${encodeURIComponent(accountId)}/insights/usage${insightsUsageQueryString(options)}`,
+      undefined,
+      {},
+      requestOptions,
+    );
+  }
+
+  /** Visible calls only; a filter never grants access to hidden call facts. */
+  async listInsightsCalls(
+    scope: Extract<InsightsCallsScope, { kind: "workspace" }>,
+    options?: WorkspaceInsightsCallsOptions,
+    requestOptions?: OpenGeniRequestOptions,
+  ): Promise<InsightsCallsResponse>;
+  async listInsightsCalls(
+    scope: Extract<InsightsCallsScope, { kind: "organization" }>,
+    options?: OrganizationInsightsCallsOptions,
+    requestOptions?: OpenGeniRequestOptions,
+  ): Promise<InsightsCallsResponse>;
+  async listInsightsCalls(
+    scope: InsightsCallsScope,
+    options: OrganizationInsightsCallsOptions = {},
+    requestOptions: OpenGeniRequestOptions = {},
+  ): Promise<InsightsCallsResponse> {
+    const path =
+      scope.kind === "workspace"
+        ? `/v1/workspaces/${encodeURIComponent(scope.workspaceId)}/insights/calls`
+        : `/v1/organizations/${encodeURIComponent(scope.accountId)}/insights/calls`;
+    return await this.requestJson(
+      "GET",
+      `${path}${insightsUsageQueryString(options)}`,
+      undefined,
+      {},
+      requestOptions,
+    );
+  }
+
   async getBillingEntitlements(
     options: { accountId?: string } = {},
   ): Promise<BillingEntitlementsResponse> {
@@ -9200,6 +9439,18 @@ export class OpenGeniClient {
       | "anthropic"
       | "claude_subscription";
     connectionId: string;
+  }): Promise<ModelConnectionAccessResponse>;
+  async getModelConnectionAccess(target: {
+    scope: "organizations" | "workspaces";
+    scopeId: string;
+    kind: ModelConnectionAccessKind;
+    connectionId: string;
+  }): Promise<ModelConnectionAccessResponse>;
+  async getModelConnectionAccess(target: {
+    scope: "organizations" | "workspaces";
+    scopeId: string;
+    kind: ModelConnectionAccessKind;
+    connectionId: string;
   }): Promise<ModelConnectionAccessResponse> {
     return await this.requestJson(
       "GET",
@@ -9218,6 +9469,24 @@ export class OpenGeniClient {
         | "openrouter"
         | "anthropic"
         | "claude_subscription";
+      connectionId: string;
+    },
+    policy: ModelConnectionAccessPolicy,
+  ): Promise<ModelConnectionAccessPolicy>;
+  async updateModelConnectionAccess(
+    target: {
+      scope: "organizations" | "workspaces";
+      scopeId: string;
+      kind: ModelConnectionAccessKind;
+      connectionId: string;
+    },
+    policy: ModelConnectionAccessPolicy,
+  ): Promise<ModelConnectionAccessPolicy>;
+  async updateModelConnectionAccess(
+    target: {
+      scope: "organizations" | "workspaces";
+      scopeId: string;
+      kind: ModelConnectionAccessKind;
       connectionId: string;
     },
     policy: ModelConnectionAccessPolicy,
@@ -9750,7 +10019,7 @@ async function assertJsonResponse(
     retryable: true,
     correlationId: response.headers.get(OPENGENI_CORRELATION_HEADER) ?? context.correlationId,
     outcomeUnknown: isMutationMethod(context.method),
-    displayMessage: "OpenGeni is temporarily unavailable — retry.",
+    displayMessage: "Opengeni is temporarily unavailable — retry.",
   });
 }
 
@@ -9787,7 +10056,7 @@ function mutationTransportError(correlationId: string): OpenGeniApiError {
     correlationId,
     outcomeUnknown: true,
     mutation: true,
-    displayMessage: "OpenGeni could not confirm the request — reconcile before retrying.",
+    displayMessage: "Opengeni could not confirm the request — reconcile before retrying.",
   });
 }
 

@@ -134,6 +134,11 @@ ogtool call docs.search '{"query":"durable catalogs"}'
 "$OPENGENI_CODEMODE_NATIVE_CLIENT" codemode call docs.search '{"query":"durable catalogs"}'
 ```
 
+`call` prints the tool result once: a plain text block that only repeats
+`structuredContent` as JSON is omitted (the same rule as the model-facing MCP
+projection, `omitStructuredContentTextDuplicates` in `@opengeni/contracts`, and
+mirrored by the native client). `call --full` prints the exact stored result.
+
 Discovery is compact by default: `list` prints callable paths plus descriptions
 bounded to 160 Unicode code points. `--query` matches literal case-sensitive substrings
 in paths or full whitespace-normalized descriptions. Default text and `--json` return

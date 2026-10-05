@@ -49,9 +49,9 @@ export function ModelPolicyPickerMenu(props: ModelPolicyPickerProps) {
         )
       }
       label={row.label}
-      hint={row.unavailableReason ?? undefined}
+      hint={row.unavailableReason ?? row.fundingHint}
       disabled={props.disabled || !row.selectable}
-      title={[row.label, row.unavailableReason].filter(Boolean).join(" · ")}
+      title={[row.label, row.unavailableReason ?? row.fundingHint].filter(Boolean).join(" · ")}
       active={row.selectable && row.id === props.model}
       showChevron={false}
       trailing={

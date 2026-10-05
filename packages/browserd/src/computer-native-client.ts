@@ -478,6 +478,12 @@ function parseCapabilities(value: unknown): ComputerSessionCapabilities {
     if (typeof input[key] !== "boolean") throw new Error(`native capability ${key} is invalid`);
     output[key] = input[key];
   }
+  if (input.pointerClickContinuation !== undefined) {
+    if (typeof input.pointerClickContinuation !== "boolean") {
+      throw new Error("native capability pointerClickContinuation is invalid");
+    }
+    output.pointerClickContinuation = input.pointerClickContinuation;
+  }
   return output;
 }
 

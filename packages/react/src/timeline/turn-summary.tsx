@@ -4,6 +4,7 @@ import {
   createContext,
   useContext,
   useEffect,
+  useLayoutEffect,
   useMemo,
   useRef,
   useState,
@@ -66,6 +67,8 @@ export function useTurnSettleOpen(): boolean {
 }
 
 export type TurnSummaryProps = {
+  /** Reports the disclosure's actual open state on mount and on every change. */
+  onOpenStateChange?: ((open: boolean) => void) | undefined;
   /** The activity items in the turn (used only to compute the facet counts). */
   items: ActivityItem[];
   /**
@@ -148,6 +151,7 @@ export function TurnSummary({
   copyText,
   contextCompactionCount,
   status,
+  onOpenStateChange,
   children,
 }: TurnSummaryProps) {
   // An explicit `defaultOpen` always wins; otherwise an ancestor may seed it
@@ -169,6 +173,12 @@ export function TurnSummary({
   const initialSettle = Boolean(settleFold) && !restingOpen && remembered === undefined;
   const [settling, setSettling] = useState(initialSettle);
   const [open, setOpen] = useState(initialSettle ? true : restingOpen);
+  const reportOpen = useRef(onOpenStateChange);
+  reportOpen.current = onOpenStateChange;
+  // Before paint: a listener may need to start motion in the same frame.
+  useLayoutEffect(() => {
+    reportOpen.current?.(open);
+  }, [open]);
   const readerOwnsOpen = useRef(remembered !== undefined);
   useEffect(() => {
     // Readable work can produce primary media or fail after mounting. Reveal

@@ -40,11 +40,16 @@ import {
   readActiveSandbox,
   resolvePersonalMachineConnectionForAttempt,
   SandboxRetainedProcessPromotionFencedError,
+  SandboxRetainedProcessTerminalError,
+  SandboxWorkspaceMutationOutputRejectedError,
   type Database,
   type EnrollmentRecord,
   type SandboxWorkspaceMutationAdmission,
 } from "@opengeni/db";
-import { observeSessionBackgroundCommandCompletion } from "@opengeni/db/session-background-commands";
+import {
+  observeSessionBackgroundCommandCompletion,
+  recordConnectedCommandOutputConsumption,
+} from "@opengeni/db/session-background-commands";
 import { appendSessionCommandOutput } from "@opengeni/db/session-command-output";
 import type { OpStreamOutputFrame } from "@opengeni/runtime/sandbox";
 import type { EventBus } from "@opengeni/events";
@@ -60,6 +65,7 @@ import {
   NatsOpStreamTransport,
   RoutingBackendRecoveryRequiredError,
   RoutingSandboxSession,
+  RoutingMutationOutputRejectedError,
   resolveModalCheckpointProviderBindingForSession,
   resolveConnectedMachineWorkspaceRoot,
   sandboxProviderInstanceIdFromEnvelope,
@@ -591,21 +597,37 @@ function afterPersistableHomeMutation(
     }
     if (outcome === "outcome_unknown")
       throw new Error("Outcome-unknown command settlement requires its exact retained invocation");
-    await verifyWorkspaceMutationSettlement(services.db, {
-      accountId: fence.accountId,
-      workspaceId: ids.workspaceId,
-      sessionId: ids.sessionId,
-      turnId: fence.turnId,
-      executionGeneration: fence.executionGeneration,
-      attemptId: fence.attemptId,
-      holderId: sandboxLeaseHolderIdForAttempt(fence.attemptId),
-      sandboxGroupId: home.sandboxGroupId,
-      expectedEpoch: backend.leaseEpoch,
-      expectedInstanceId: backend.providerInstanceId,
-      admission: exactAdmission,
-      operation: op,
-      outcome,
-    });
+    try {
+      await verifyWorkspaceMutationSettlement(services.db, {
+        accountId: fence.accountId,
+        workspaceId: ids.workspaceId,
+        sessionId: ids.sessionId,
+        turnId: fence.turnId,
+        executionGeneration: fence.executionGeneration,
+        attemptId: fence.attemptId,
+        holderId: sandboxLeaseHolderIdForAttempt(fence.attemptId),
+        sandboxGroupId: home.sandboxGroupId,
+        expectedEpoch: backend.leaseEpoch,
+        expectedInstanceId: backend.providerInstanceId,
+        admission: exactAdmission,
+        operation: op,
+        outcome,
+      });
+    } catch (error) {
+      if (
+        error instanceof SandboxWorkspaceMutationOutputRejectedError &&
+        error.matchesPhysicalSettlement({
+          accountId: fence.accountId,
+          workspaceId: ids.workspaceId,
+          admission: exactAdmission,
+          operation: op,
+          outcome,
+        })
+      ) {
+        throw new RoutingMutationOutputRejectedError(op, error.code, { cause: error });
+      }
+      throw error;
+    }
   };
 }
 
@@ -658,15 +680,42 @@ function afterRetainedProcessMutation(
     ) {
       throw new Error("Retained-process mutation settlement lacked its exact admission");
     }
-    await verifyRetainedProcessMutationSettlement(services.db, {
-      accountId: fence.accountId,
-      workspaceId: ids.workspaceId,
-      sessionId: ids.sessionId,
-      processId: process.id,
-      admission: admission as SandboxWorkspaceMutationAdmission,
-      operation: op,
-      outcome,
-    });
+    try {
+      await verifyRetainedProcessMutationSettlement(services.db, {
+        accountId: fence.accountId,
+        workspaceId: ids.workspaceId,
+        sessionId: ids.sessionId,
+        processId: process.id,
+        admission: admission as SandboxWorkspaceMutationAdmission,
+        operation: op,
+        outcome,
+      });
+    } catch (error) {
+      if (
+        error instanceof SandboxWorkspaceMutationOutputRejectedError &&
+        error.matchesPhysicalSettlement({
+          accountId: fence.accountId,
+          workspaceId: ids.workspaceId,
+          admission: admission as SandboxWorkspaceMutationAdmission,
+          operation: op,
+          outcome,
+        })
+      ) {
+        if (error.retainedProcessTerminal) {
+          // Another authority (the reaper's exact-proof reconciliation) settled
+          // this retained process terminal between admission and settlement.
+          // The admission is physically settled and its output stays rejected;
+          // surface the durable terminal truth so routing reports completion
+          // instead of failing the turn. Nothing is replayed.
+          throw new SandboxRetainedProcessTerminalError(
+            error.retainedProcessTerminal.state,
+            error.retainedProcessTerminal.exitCode,
+          );
+        }
+        throw new RoutingMutationOutputRejectedError(op, error.code, { cause: error });
+      }
+      throw error;
+    }
   };
 }
 
@@ -1714,6 +1763,20 @@ export async function establishSelfhostedTurnSession(
         reason: command.reason,
         ...(command.failure ? { failure: command.failure } : {}),
       });
+      if (command.outputReceipt && command.outcome === "exited" && command.exitCode !== null) {
+        await recordConnectedCommandOutputConsumption(db, {
+          accountId: args.accountId,
+          workspaceId: args.workspaceId,
+          sessionId: args.sessionId,
+          commandId: command.commandId,
+          controlWorkspaceId: command.controlWorkspaceId,
+          enrollmentId: command.enrollmentId,
+          connectionInstanceId: command.connectionInstanceId,
+          opId: command.opId,
+          receipt: command.outputReceipt,
+          exitCode: command.exitCode,
+        });
+      }
       if (settlement && bus) {
         await bus
           .publish(args.workspaceId, args.sessionId, settlement.events)

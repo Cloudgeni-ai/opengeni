@@ -195,7 +195,7 @@ function galleryGoalRecord(overrides: Partial<SessionGoal> = {}): SessionGoal {
     workspaceId: GALLERY_WORKSPACE_ID,
     sessionId: GALLERY_SESSION_ID,
     status: "active",
-    text: "Make Linear activation on the live OpenGeni deployment operational end-to-end",
+    text: "Make Linear activation on the live Opengeni deployment operational end-to-end",
     successCriteria: "Linear issues sync and activate from the live deployment",
     evidence: null,
     rationale: null,
@@ -416,6 +416,15 @@ export const galleryModelRows: PickerModelRow[] = projectPickerRows([
     providerLabel: "OpenRouter",
     cost: "free",
     billing: { upstreamPayer: "deployment", metering: "external" },
+  }),
+  catalogModel({
+    id: "opper/vertexai/gemini-3.8-flash-eu",
+    label: "Gemini 3.8 Flash (EU)",
+    shortLabel: "Gemini 3.8 Flash",
+    provider: "opper",
+    providerLabel: "Opper",
+    cost: "credits",
+    billing: { upstreamPayer: "deployment", metering: "opengeni_credits" },
   }),
 ]);
 

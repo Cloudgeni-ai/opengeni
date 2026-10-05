@@ -3,6 +3,33 @@ import { resolve } from "node:path";
 import { ComputerNativeClient, ComputerBackendError } from "../src";
 
 describe("ComputerNativeClient", () => {
+  test("negotiates click continuation explicitly and keeps older helpers unsupported", async () => {
+    for (const supported of [false, true]) {
+      const client = await ComputerNativeClient.open({
+        binaryPath: process.execPath,
+        arguments: [
+          resolve(import.meta.dir, "fixtures/computer-native-fixture.ts"),
+          ...(supported ? ["--click-continuation"] : []),
+        ],
+      });
+      try {
+        expect(client.initialCapabilities.pointerClickContinuation === true).toBe(supported);
+        expect((await client.capabilities()).pointerClickContinuation === true).toBe(supported);
+      } finally {
+        await client.close();
+      }
+    }
+    await expect(
+      ComputerNativeClient.open({
+        binaryPath: process.execPath,
+        arguments: [
+          resolve(import.meta.dir, "fixtures/computer-native-fixture.ts"),
+          "--malformed-click-continuation",
+        ],
+      }),
+    ).rejects.toThrow("pointerClickContinuation");
+  });
+
   test("correlates out-of-order responses, binary captures, and typed adapter errors", async () => {
     const client = await ComputerNativeClient.open({
       binaryPath: process.execPath,

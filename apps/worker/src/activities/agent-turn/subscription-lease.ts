@@ -1,6 +1,8 @@
 export type LeaseRenewReason = "timer" | "runtime_event" | "model_usage";
 export type LeaseLossReason = "deadline" | "not_found";
 
+const HEARTBEAT_INTERVAL_MS = 60_000;
+
 type LeaseIdentity = { turnId: string; holderId: string; generation: number };
 export type SubscriptionLeaseDeps = {
   ttlMs: number;
@@ -24,11 +26,13 @@ export class SubscriptionTurnLease {
   private heartbeatInFlight = false;
   private heartbeatTimer: ReturnType<typeof setInterval> | undefined;
   private readonly now: () => number;
+  private readonly renewalIntervalMs: number;
 
   constructor(private readonly leaseDeps: SubscriptionLeaseDeps) {
     if (!Number.isFinite(leaseDeps.ttlMs) || leaseDeps.ttlMs <= 0)
       throw new Error("Subscription lease TTL must be positive");
     this.now = leaseDeps.now ?? (() => performance.now());
+    this.renewalIntervalMs = Math.min(HEARTBEAT_INTERVAL_MS, leaseDeps.ttlMs / 5);
   }
 
   private expired = (deadline: number | null): boolean =>
@@ -62,6 +66,11 @@ export class SubscriptionTurnLease {
       return;
     }
     if (this.heartbeatInFlight) return;
+    // Acquisition and successful renewal confirm ownership from request start.
+    // Reuse that proof between heartbeats; a failed renewal leaves it unchanged
+    // so the next checkpoint can retry immediately. Expiry is checked first.
+    const renewAt = this.confirmedUntilMs! - this.leaseDeps.ttlMs + this.renewalIntervalMs;
+    if (this.now() < renewAt) return;
     this.heartbeatInFlight = true;
     const priorDeadline = this.confirmedUntilMs;
     const startedAt = this.now();
@@ -103,7 +112,7 @@ export class SubscriptionTurnLease {
 
   startHeartbeat = (): void => {
     if (!this.leaseDeps.getTurnId() || this.heartbeatTimer) return;
-    this.heartbeatTimer = setInterval(() => void this.renew("timer"), 60_000);
+    this.heartbeatTimer = setInterval(() => void this.renew("timer"), HEARTBEAT_INTERVAL_MS);
     this.heartbeatTimer.unref?.();
   };
 

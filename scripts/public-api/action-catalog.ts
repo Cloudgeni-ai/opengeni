@@ -46,6 +46,37 @@ export function isActionCatalogExempt(path: string): boolean {
   return ACTION_CATALOG_EXEMPTIONS.some((exemption) => exemption.pattern.test(path));
 }
 
+/**
+ * Registered actions no MCP caller can ever complete: they need the person's
+ * own Opengeni browser session, which neither a connected agent (MCP OAuth)
+ * nor an organization API key has. They stay in the catalog, so every route is
+ * accounted for, but the MCP server hides them from search and describe and a
+ * direct call answers with this reason instead of a bare 401. Matched against
+ * "METHOD /path".
+ */
+export const ACTION_CATALOG_BROWSER_ONLY: ReadonlyArray<{ pattern: RegExp; reason: string }> = [
+  {
+    pattern:
+      /^(POST \/v1\/organizations(\/additional)?|GET \/v1\/organization-(memberships|invitations)|POST \/v1\/organization-invitations\/:invitationId\/accept)$/,
+    reason:
+      "it acts on the person's own account across organizations (creating an organization, listing their memberships or invitations, accepting an invitation), and a connection is limited to one organization",
+  },
+  {
+    pattern: /^\w+ \/v1\/organizations\/:organizationId\/recovery(\/|$)/,
+    reason: "organization recovery is a ceremony in the person's own browser session",
+  },
+  {
+    pattern: /^\w+ \/v1\/workspaces\/:workspaceId\/identity-links(\/|$)/,
+    reason:
+      "linking a product user to an Opengeni account is confirmed by that person signed in to Opengeni, or started by the embedding product as its user",
+  },
+];
+
+export function actionCatalogBrowserOnlyReason(method: string, path: string): string | undefined {
+  const key = `${method} ${path}`;
+  return ACTION_CATALOG_BROWSER_ONLY.find((rule) => rule.pattern.test(key))?.reason;
+}
+
 export type RegisteredRoute = { method: string; path: string };
 
 /**
@@ -98,6 +129,12 @@ const GENERIC_SDK_NAMES = new Set([
   "forWorkspace",
 ]);
 
+/**
+ * SDK methods that read a route through an opt-in query variant. The route's
+ * plain method names the action: `findGoal` is `getGoal` with `?absent=null`.
+ */
+const QUERY_VARIANT_SDK_NAMES = new Set(["findGoal"]);
+
 type ManifestRoute = {
   method: string;
   path: string;
@@ -128,19 +165,25 @@ export function buildActionCatalog(
     .filter((route) => !isActionCatalogExempt(route.path));
   const preferred = included.map((route) => {
     const names = route.sdk.map((name) => name.split(".").pop()!);
-    return names.find((name) => !GENERIC_SDK_NAMES.has(name)) ?? names[0] ?? null;
+    return (
+      names.find((name) => !GENERIC_SDK_NAMES.has(name) && !QUERY_VARIANT_SDK_NAMES.has(name)) ??
+      names[0] ??
+      null
+    );
   });
   const counts = new Map<string, number>();
   for (const name of preferred) if (name) counts.set(name, (counts.get(name) ?? 0) + 1);
   return included
     .map((route, index) => {
       const name = preferred[index];
+      const browserOnly = actionCatalogBrowserOnlyReason(route.method, route.path);
       return {
         id: name && counts.get(name) === 1 ? name : `${route.method} ${route.path}`,
         method: route.method,
         path: route.path,
         request: [...route.request],
         response: [...route.response],
+        ...(browserOnly ? { browserOnly } : {}),
       };
     })
     .sort((left, right) => left.id.localeCompare(right.id));

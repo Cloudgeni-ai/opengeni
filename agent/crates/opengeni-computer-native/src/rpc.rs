@@ -527,6 +527,7 @@ mod tests {
                 screen_capture: false,
                 semantic_actions: true,
                 pointer_input: false,
+                pointer_click_continuation: false,
                 keyboard_input: false,
                 clipboard: true,
                 background_actions: true,

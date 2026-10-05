@@ -153,7 +153,8 @@ authority. Migration bytes are frozen, so this needs its own reviewed repair
 migration - it is listed here rather than fixed in passing.
 
 **Known unrepaired global aggregate.** `opengeni_private.count_session_recovery_backlog()`
-(0375, restated by 0519) reads `sessions`, `session_turns`,
+(0375, restated by 0519; 0633 moved its body into
+`opengeni_private.summarize_session_recovery_backlog()` unchanged in shape) reads `sessions`, `session_turns`,
 `session_turn_attempts`, `session_attempt_interruptions`, `session_events`, and
 `workspace_inference_controls` with no tenant GUC and no capability window.
 Every permissive policy those tables offer its owner needs one, so on the

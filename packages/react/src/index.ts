@@ -16,6 +16,9 @@ export {
 export {
   attachSessionCapability,
   completeSessionCapabilityOAuth,
+  prepareSessionCapabilityAccess,
+  applySessionCapabilityAccess,
+  type SessionCapabilityAccessPlan,
 } from "./session-capability-policy";
 export { retainedImageId } from "./components/markdown";
 // oxlint-disable-next-line typescript/triple-slash-reference -- package consumers must load the ambient type for this optional untyped peer without emitting a runtime import.
@@ -328,6 +331,8 @@ export type {
 export { approvalsFromRequiresAction, projectPendingApprovals } from "./approvals";
 export type { PendingApproval } from "./approvals";
 export { ApprovalSurface, defaultApprovalSurfaceMessages } from "./components/approval-surface";
+export { ToolActionReviewCard, ToolActionReviewDetails } from "./components/tool-action-review";
+export type { ToolReviewDetailsLoader } from "./components/tool-action-review";
 export type { ApprovalSurfaceMessages, ApprovalSurfaceProps } from "./components/approval-surface";
 
 // Structured human input: event projection, authoritative hook, and styled form.
@@ -386,14 +391,21 @@ export type {
 // Tool-renderer registry + the per-tool renderers (the timeline's extension API)
 export {
   createDefaultToolRegistry,
+  createSessionRetainedScreenshotLoader,
   createToolRegistry,
+  createWorkspaceRetainedArtifactLoader,
+  createWorkspaceRetainedVideoLoader,
   defaultToolRegistry,
   rawTypeOf,
 } from "./timeline";
 export type {
   CreateToolRegistryOptions,
   RetainedArtifactLoader,
+  RetainedArtifactLoadOptions,
+  RetainedArtifactLoaderClient,
   RetainedScreenshotLoader,
+  RetainedScreenshotLoaderClient,
+  RetainedVideoLoaderClient,
   VideoArtifactPlaybackLoader,
   ToolRegistry,
   ToolRegistryEntry,
@@ -491,7 +503,11 @@ export { SessionConversation } from "./components/session-conversation";
 export { SessionList } from "./components/session-list";
 export type { SessionListLabels, SessionListProps } from "./components/session-list";
 export { OpenGeniChat } from "./components/open-geni-chat";
-export type { OpenGeniChatLabels, OpenGeniChatProps } from "./components/open-geni-chat";
+export type {
+  OpenGeniChatCreateOptions,
+  OpenGeniChatLabels,
+  OpenGeniChatProps,
+} from "./components/open-geni-chat";
 export type {
   SessionConversationLabels,
   SessionConversationProps,
@@ -701,6 +717,20 @@ export {
   truncate,
   tryParseJson,
 } from "./lib/format";
+export {
+  currentProviderRecovery,
+  parseProviderRecovery,
+  providerRecoveryExhaustedText,
+  providerRecoveryRetryingText,
+  providerRecoverySubject,
+  type ProviderRecoveryCondition,
+  type ProviderRecoveryFacts,
+} from "./lib/provider-recovery";
+export {
+  ProviderRecoveryNotice,
+  PROVIDER_RECOVERY_NOTICE_DETAIL,
+  type ProviderRecoveryNoticeProps,
+} from "./components/provider-recovery-notice";
 export { SessionCommandsPanel } from "./components/session-commands-panel";
 export { SessionCommands } from "./components/session-commands";
 
@@ -713,4 +743,7 @@ export { setStartupDetails, useStartupDetails } from "./timeline/startup-prefere
 export { ClaudeMark } from "./components/claude-mark";
 export { AnthropicMark } from "./components/anthropic-mark";
 export { OpenRouterMark } from "./components/openrouter-mark";
+export { OpperMark } from "./components/opper-mark";
 export { GrokMark } from "./components/grok-mark";
+
+export { ToolReviewHistoryProvider } from "./components/tool-review-history";

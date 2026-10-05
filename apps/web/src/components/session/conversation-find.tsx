@@ -198,13 +198,15 @@ export default function ConversationFind(props: {
   const counter =
     search.loading || seeking
       ? "Searching…"
-      : matches.length
-        ? `${ordinal} / ${total}${search.page?.countIsExact ? "" : "+"}`
-        : search.error
-          ? "Unavailable"
-          : committedQuery.trim()
-            ? "No matches"
-            : "";
+      : navigating
+        ? "Loading…"
+        : matches.length
+          ? `${ordinal} / ${total}${search.page?.countIsExact ? "" : "+"}`
+          : search.error
+            ? "Unavailable"
+            : committedQuery.trim()
+              ? "No matches"
+              : "";
   return (
     <section
       aria-label="Find in conversation"
@@ -234,8 +236,14 @@ export default function ConversationFind(props: {
             }
           }}
         />
-        <span className="min-w-12 whitespace-nowrap text-right text-xs text-fg-muted" role="status">
+        <span
+          className="min-w-12 whitespace-nowrap text-right text-xs text-fg-muted empty:min-w-0"
+          role="status"
+        >
           {counter}
+          {query !== committedQuery && committedQuery ? (
+            <span className="sr-only"> Showing matches for “{committedQuery}”</span>
+          ) : null}
         </span>
         <Button
           variant="ghost"
@@ -271,15 +279,10 @@ export default function ConversationFind(props: {
           <XIcon className="size-4" />
         </Button>
       </div>
-      <div className="mt-1 flex flex-wrap items-center justify-between gap-2 text-xs text-fg-subtle">
-        <span>
-          {query !== committedQuery
-            ? `Showing matches for “${committedQuery}”`
-            : navigating
-              ? "Loading passage…"
-              : "All saved user and completed assistant messages"}
-        </span>
-        {props.showBackToSessionSearch ? (
+      {/* One row while open, so the conversation never shifts under it. The
+          back link is the only second line, and it lasts the bar's lifetime. */}
+      {props.showBackToSessionSearch ? (
+        <div className="mt-1 flex justify-end text-xs">
           <button
             type="button"
             onClick={() => requestSessionSearch(props.workspaceId)}
@@ -287,8 +290,8 @@ export default function ConversationFind(props: {
           >
             Back to session search
           </button>
-        ) : null}
-      </div>
+        </div>
+      ) : null}
       {search.error ? (
         <div className="mt-2 flex items-center gap-2 text-sm" role="alert">
           {search.error}

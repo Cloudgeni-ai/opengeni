@@ -2,6 +2,7 @@ import { KnowledgeReceiptRow } from "./knowledge-receipt";
 import { workerRowTitle } from "./platform-activity-presentation";
 import { AnimatePresence, motion, useReducedMotion } from "motion/react";
 import { GenieLoading } from "./genie-loading";
+import { StartupDispatchDetails } from "./startup-dispatch-details";
 import { useStartupDetails } from "./startup-preference";
 import { ArrowRightIcon, BotIcon, BrainCircuitIcon, MessageSquareTextIcon } from "lucide-react";
 import {
@@ -95,6 +96,7 @@ export function ActivityRail({
   const reducedMotion = useReducedMotion();
   const [detailsOpen, setDetailsOpen] = useState(false);
   const phases = items.filter((item) => item.kind === "startup-phase");
+  const dispatch = phases.find((item) => item.dispatchWait !== undefined);
   // Empty reasoning envelopes can arrive before any visible model output.
   const hasWork = items.some(
     (item) =>
@@ -119,10 +121,10 @@ export function ActivityRail({
             ? item.status === "failed" || item.status === "cancelled"
             : item.kind !== "reasoning" || item.text.trim().length > 0,
         );
-  const startedAt = phases.reduce(
-    (first, item) => (item.startedAt < first ? item.startedAt : first),
-    phases[0]?.startedAt ?? "",
-  );
+  const startedAt = phases.reduce((first, item) => {
+    const start = item.loadingStartedAt ?? item.startedAt;
+    return start < first ? start : first;
+  }, phases[0]?.startedAt ?? "");
   const enterMounted = useEntranceAnimation();
   // Live gate: rails born during bulk capture enter=false forever; with a
   // seen-id map we still want later live appends to fade (ids gate remounts).
@@ -184,6 +186,11 @@ export function ActivityRail({
           >
             <GenieLoading
               startedAt={startedAt}
+              notice={
+                dispatch?.dispatchWait?.lastError
+                  ? "Unable to start yet. Your messages are saved."
+                  : undefined
+              }
               phase={responsePending ? "waiting" : "preparing"}
               detailsOpen={detailsOpen}
               onShowDetails={() => setDetailsOpen((open) => !open)}
@@ -199,6 +206,9 @@ export function ActivityRail({
         >
           Hide startup details
         </button>
+      ) : null}
+      {dispatch && (detailsOpen || debug) ? (
+        <StartupDispatchDetails wait={dispatch.dispatchWait ?? null} />
       ) : null}
       {visibleItems.map((item, index) => {
         const newFamily = index > 0 && familyOf(item) !== familyOf(visibleItems[index - 1]!);
@@ -255,7 +265,9 @@ function ActivityNoteRow({ item }: { item: AgentMessageItem }) {
         {renderText ? (
           renderText(item.text, item)
         ) : (
-          <Markdown streaming={item.streaming}>{item.text}</Markdown>
+          <Markdown softLineBreaks streaming={item.streaming}>
+            {item.text}
+          </Markdown>
         )}
       </div>
     </div>

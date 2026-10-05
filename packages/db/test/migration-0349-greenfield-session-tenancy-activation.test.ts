@@ -283,9 +283,11 @@ describe("migration 0349 greenfield session-tenancy activation", () => {
         ${witnessAccountId}, 1, ${"0".repeat(64)}, ${"1".repeat(64)},
         'test:committed-operator-witness', array[]::uuid[]
       )`;
+    // The value-free startup-interlock witness is retired by 0611 (always
+    // false); the greenfield helper reads the committed receipt row itself.
     const [deploymentActivated] = await app<Array<{ active: boolean }>>`
       select session_tenancy_any_product_activation() as active`;
-    expect(deploymentActivated?.active).toBe(true);
+    expect(deploymentActivated?.active).toBe(false);
     const [stillBefore] = await admin<Array<{ count: number }>>`
       select count(*)::int as count from session_tenancy_activations
       where account_id = ${before.organizationId}`;

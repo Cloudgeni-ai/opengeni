@@ -28,6 +28,17 @@ animation. Override the tokens to rebrand everything.
 
 ## Embedded connections and Sites
 
+For a child chat's capability selection, `prepareSessionCapabilityAccess` reads
+an ancestor-to-child access plan without writing. Show the parent chats whose
+`request` is non-null and obtain an explicit confirmation before calling
+`applySessionCapabilityAccess`. The plan preserves existing choices, applies
+version-fenced updates root first, and grants no authority: each ordinary API
+request still authorizes its caller. Invalidate the review on actor/workspace
+changes. A partial failure may leave approved parent changes saved; prepare a
+new plan for retry instead of rolling them back. Existing
+`attachSessionCapability` remains a single-chat operation and never changes
+parents implicitly.
+
 Optional `@opengeni/react/connect` exports `useConnect`, `ConnectChooser`,
 `ConnectSetup`, `ConnectAccounts`, and the composed `ConnectPanel`. Inject one
 `@opengeni/connect` controller per authenticated actor/workspace and dispose it
@@ -85,17 +96,34 @@ runnable loopback host reference. Native route reuse and full visual acceptance
 are not implied by these optional package surfaces.
 ## Conversation UI
 
-`SessionConversation` is the default product integration for an existing
-session. Back it with `createSessionProxyHandler` from `@opengeni/sdk`, mounted
-on your server, and point an unmodified browser
-`new OpenGeniClient({ baseUrl: "/api/opengeni" })` at it:
+`OpenGeniChat` and `SessionConversation` are the default product integration.
+Back them with `createSessionProxyHandler` from `@opengeni/sdk`, mounted on your
+server, and pass its mount as `baseUrl`. No provider, client, or workspace id
+is needed: the component creates the browser client and uses the workspace the
+proxy resolved for the signed-in user (from the proxy's client config).
 
 ```tsx
 import "@opengeni/react/compiled.css";
 
-<OpenGeniProvider client={client} workspaceId={workspaceId}>
+<OpenGeniChat baseUrl="/api/opengeni" />;
+// or one conversation: <SessionConversation baseUrl="/api/opengeni" sessionId={sessionId} />
+```
+
+Bearer-token apps pass `headers` (a function runs per request) or a custom
+`fetch`; a `client` passed with `baseUrl` replaces the one the component
+creates:
+
+```tsx
+<OpenGeniChat baseUrl="/api/opengeni" headers={() => ({ Authorization: `Bearer ${getToken()}` })} />
+```
+
+The provider form keeps working, for example for several components sharing one
+client or the headless hooks:
+
+```tsx
+<OpenGeniProvider client={new OpenGeniClient({ baseUrl: "/api/opengeni" })} workspaceId={workspaceId}>
   <SessionConversation sessionId={sessionId} />
-</OpenGeniProvider>;
+</OpenGeniProvider>
 ```
 
 Compose `MessageTimeline` and `ChatComposer` with the session hooks only when
@@ -110,6 +138,22 @@ composed from `SessionList` and `SessionConversation`, which you can also mount
 separately. Pass `conversationProps` for message rendering and tool renderers,
 `createSession` to create chats through your own endpoint, or `sessionId` /
 `onSessionChange` to control the selection (for example from the URL).
+
+Live voice is opt-in, because a call spends your credits and asks the browser
+for the microphone. Turn it on with `realtimeVoice={true}` (via `OpenGeniChat`'s
+`conversationProps` too) or `createSessionProxyHandler({ realtimeVoice: true })`.
+The composer then shows a voice button when the workspace offers an available
+voice model (for example hosted GPT Live with credits): the user talks, the
+voice model answers and hands work to the agent in the same chat, and the
+transcript lands in the timeline. It stays hidden when no model is available,
+when the proxy sets `realtimeVoice: false`, or when you pass
+`realtimeVoice={false}`. The voice code loads lazily on first display.
+
+The working indicator before the first reply says "Thinking…". Pass
+`genieLoading` (`phrases`, `messages`, `orb`, or a whole `render`) to use your
+own copy or visual. File attachments follow the proxy: it reports them off when
+`files: false`, and for anonymous visitors (`visitor: true` from `resolve`)
+unless it sets `visitorUploads: true`.
 
 `SessionConversation` and `OpenGeniChat` are built to look native inside
 someone else's product with zero styling:
@@ -132,7 +176,13 @@ someone else's product with zero styling:
   also fixes the policy server-side.
 
 Attachments appear when the deployment enables uploads (`attachments={false}`
-opts out), pending tool approvals render Approve/Reject, a yes/no question
+opts out), the microphone appears when it reports voice input available
+(`voiceInput={false}` opts out), generated images, video, published files and
+screenshots display through the conversation's session scope, actions a
+session proxy reports unavailable (`sessionCreation`, `archive`, `artifacts`)
+are hidden, the session goal shows with Pause/Resume/Clear, sub-agent cards
+open the child through `onOpenSession` (`OpenGeniChat` opens it in place),
+pending tool approvals render Approve/Reject, a yes/no question
 renders as two buttons, a failed load offers Try again, and `toolRegistry`
 customizes tool rendering.
 
@@ -938,10 +988,16 @@ intentional changes should regenerate those snapshots and review the diff.
 - `MessageTimeline` — the session timeline with stick-to-bottom scrolling, a
   "jump to latest" affordance, streaming caret, collapsible activity clusters,
   and worker cards (wire `onOpenSession` to drill into a worker). Pass
-  `renderMessageText` to plug a markdown renderer. Pass
+  `renderMessageText` to plug a markdown renderer. The default renderer shows a
+  single newline in a message as a line break, like other chat apps; a custom
+  renderer gets the same result with `<Markdown softLineBreaks>{text}</Markdown>`
+  (off by default for non-chat Markdown). Pass
   `loadRetainedArtifact` to render permanent generated-image receipts; a loader
   may return verified bytes or a short-lived signed URL. The stock web app uses
   the URL path to avoid copying multi-megabyte images into JavaScript memory.
+  `createWorkspaceRetainedArtifactLoader`, `createSessionRetainedScreenshotLoader`,
+  and `createWorkspaceRetainedVideoLoader` bind the SDK reads to a workspace
+  (and session); `SessionConversation` uses them by default.
 - `UserMessageBody` — the shared lossless rendered-height disclosure for
   already-sent user text. Use it inside a custom `renderMessageText` user branch
   so attachments and voice identity remain outside the clipped Markdown region.
@@ -1374,3 +1430,26 @@ Copy and the timestamp for user messages and completed assistant messages.
 The host owns feedback, fork authorization, and mutations; streaming assistant
 messages omit this slot. Use the `group/copy` hover/focus state and preserve
 visible touch targets when styling actions.
+
+### Portable action reviews
+
+`ApprovalSurface` accepts `loadReview(approval)` and `onViewDetails(review, path)`;
+load the versioned facts with `client.getToolActionReview`. It shows one selected
+action, counts and bounded fields instead of raw argument JSON. Keep
+`selectedApprovalId` and `onSelectedApprovalChange` in the host if a full-page
+detail route unmounts the surface, so returning cannot silently select a different
+action. The native `onApprove` / `onReject` identity is unchanged and duplicate
+submission is fenced until authoritative events remove the request.
+
+Render `ToolActionReviewDetails` on the host's normal page with
+`client.getToolReviewDetails`, passing the review's `actionDigest`, path and offset.
+Details are immutable, authenticated, paginated, and redact protected values.
+Restore focus to the original `data-review-path` button on return. No web-app
+imports, iframe, second confirmation, or nested scrolling pane is required.
+The standalone fallback retains bounded details for older SDK approvals.
+
+Wrap `MessageTimeline` in `ToolReviewHistoryProvider` with its visible events,
+authenticated `load(approvalId)` callback and `onViewDetails` to keep recorded
+reviews readable inside the corresponding tool activity. Historical receipts
+never render decision buttons. The same semantic tokens support light/dark
+embeds; `demo/approval-review.html` is the synthetic state gallery.

@@ -2,8 +2,11 @@ import {
   desktopCapableBackend,
   type ComputerToolMode,
   type LazyToolTransport,
+  type OpenGeniRuntime,
 } from "@opengeni/runtime";
+import type { TurnExecutionPolicyV1 } from "@opengeni/contracts";
 import {
+  configuredModelForAcceptedTurnExecutionPolicy,
   isDirectOpenAiApiBaseUrl,
   type ModelProviderApi,
   type ResolvedModelProvider,
@@ -209,6 +212,28 @@ export function shouldDeferNonEagerToolPreparation(args: {
 }
 
 /**
+ * Resolve the provider routing/gating shape for an accepted turn. The current
+ * definition is projected back onto the verified frozen policy: a turn
+ * accepted before hosted web search was enabled keeps its frozen tool set on
+ * every recovery attempt (stable tool prefix, exact accepted definition); the
+ * next accepted logical turn resolves the newly enabled tool.
+ */
+export function resolveAcceptedTurnModel(
+  runtime: Pick<OpenGeniRuntime, "resolveTurnModel">,
+  settings: Settings,
+  policy: TurnExecutionPolicyV1,
+): ReturnType<OpenGeniRuntime["resolveTurnModel"]> {
+  const current = runtime.resolveTurnModel(settings, policy.productModelId);
+  if (!current) return null;
+  const configured = configuredModelForAcceptedTurnExecutionPolicy(
+    current.configured,
+    current.provider,
+    policy,
+  );
+  return configured === current.configured ? current : { ...current, configured };
+}
+
+/**
  * Native web search is a runtime capability, not part of the session's MCP
  * allow-list. Attach it whenever the resolved provider advertises runnable
  * support. The null model is the legacy built-in Responses path, whose
@@ -294,12 +319,8 @@ export function modelAttachmentInputPolicyForTurn(
     };
   } | null,
 ): ModelAttachmentInputPolicy {
-  const typedTransport =
-    resolvedModel === null ||
-    resolvedModel.provider.api === "responses" ||
-    resolvedModel.provider.api === "anthropic-messages";
   return {
-    supportsImageInput: typedTransport && modelSupportsImageInputForTurn(resolvedModel),
+    supportsImageInput: modelSupportsImageInputForTurn(resolvedModel),
     inputFileMediaTypes: [],
   };
 }

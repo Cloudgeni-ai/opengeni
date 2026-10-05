@@ -5,6 +5,7 @@ import {
   readLease,
   accrueWarmSeconds,
   SandboxWorkspaceMutationFencedError,
+  SandboxWorkspaceMutationOutputRejectedError,
   retainWorkspaceMutationProcess,
   retainedProviderCommandPersistence,
   SandboxRetainedProcessPromotionFencedError,
@@ -12,6 +13,7 @@ import {
 import { createProviderCommandRetainer } from "@opengeni/db/retained-provider-commands";
 import {
   RoutingMutationOutcomeUnknownError,
+  RoutingMutationOutputRejectedError,
   ProviderCommandStartOutcomeUnknownError,
   ProviderCommandObservationUnavailableError,
   isModalCommandStartOutcomeUnknownError,
@@ -289,10 +291,11 @@ export function createSandboxTurnRuntime(deps: SandboxTurnRuntimeDeps) {
   // Platform setup (beforeAgentStart hooks + file materialization) execs against
   // THIS handle so a mid-turn sandbox_swap can never re-route those execs onto a
   // connected machine (the user's real computer).
-  const finalizeTurnOpStreamOps = async (): Promise<void> => {
+  const finalizeTurnOpStreamOps = async (toolCallIds?: readonly string[]): Promise<void> => {
     await finalizeDurableTurnOpStreams(
       [sandboxState.lazyOwnedSandbox?.session, sandboxState.resolvedSandbox?.established.session],
       sandboxState.machinePrimarySession,
+      toolCallIds,
     );
   };
   // A same-target API repair can replace the home provider while this turn is
@@ -621,6 +624,20 @@ export function createSandboxTurnRuntime(deps: SandboxTurnRuntimeDeps) {
     try {
       await settleMutation("resolved");
     } catch (settlementError) {
+      if (
+        settlementError instanceof SandboxWorkspaceMutationOutputRejectedError &&
+        settlementError.matchesPhysicalSettlement({
+          accountId: identity.accountId,
+          workspaceId: identity.workspaceId,
+          admission,
+          operation,
+          outcome: "resolved",
+        })
+      ) {
+        throw new RoutingMutationOutputRejectedError(operation, settlementError.code, {
+          cause: settlementError,
+        });
+      }
       throw new RoutingMutationOutcomeUnknownError(
         operation,
         `Platform workspace mutation "${operation}" returned from the provider but lost its durable settlement fence; its outcome is unknown and it was not replayed`,
@@ -823,7 +840,7 @@ export function createSandboxTurnRuntime(deps: SandboxTurnRuntimeDeps) {
           if (status.fence === "funding") {
             stopLeaseHeartbeat();
             sandboxRotationController.abort(
-              new Error("Insufficient OpenGeni credits to extend paid sandbox compute"),
+              new Error("Insufficient Opengeni credits to extend paid sandbox compute"),
             );
             return;
           }

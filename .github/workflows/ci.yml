@@ -5,10 +5,9 @@ on:
     branches:
       - main
       - production
-  # Launch window (until 2026-10-04 22:00 Oslo): pull requests into main skip
-  # CI; agents merge on targeted local checks. Restore after the launch window.
   pull_request:
     branches:
+      - main
       - production
   schedule:
     # Weekly full-mode drift coverage complements impact-selected pull-request
@@ -38,6 +37,10 @@ on:
         type: string
 
 concurrency:
+  # The main -> production promotion PR is not gated by this workflow (the production ruleset
+  # requires only the admission checks) and its head SHA already runs here as a main push, so
+  # its pull_request run skips `plan` and the aggregate instead of rebuilding the full matrix
+  # on every main push and starving the main build of runners.
   # A Version PR has one authoritative latest head. When a newer main push
   # actually regenerates that head, continuing to build the superseded head can
   # only waste capacity. Movement on main alone does not invalidate an admitted
@@ -46,7 +49,9 @@ concurrency:
   # merged. Main pushes share one queue without cancelling: the running build
   # finishes (its images stay usable), and only the newest waiting push runs
   # next, so rapid merges cannot pile up dozens of queued runs.
-  group: ${{ github.event_name == 'workflow_dispatch' && format('ci-automation-{0}', inputs.automation_pr_number) || github.event_name == 'pull_request' && format('ci-pr-{0}', github.event.pull_request.number) || github.ref == 'refs/heads/main' && 'ci-main-push' || format('ci-{0}', github.run_id) }}
+  # Version-PR merge commits keep their own run: stable releases require a
+  # successful CI run for that exact SHA.
+  group: ${{ github.event_name == 'workflow_dispatch' && format('ci-automation-{0}', inputs.automation_pr_number) || github.event_name == 'pull_request' && format('ci-pr-{0}', github.event.pull_request.number) || github.ref == 'refs/heads/main' && contains(github.event.head_commit.message, 'version packages') == false && 'ci-main-push' || format('ci-{0}', github.run_id) }}
   cancel-in-progress: ${{ github.event_name == 'workflow_dispatch' || github.event_name == 'pull_request' }}
 
 permissions:
@@ -122,6 +127,7 @@ jobs:
           (
             cd "$expected"
             bun "$GITHUB_WORKSPACE/node_modules/@changesets/cli/bin.js" version
+            bun scripts/release/lockstep-version.ts
             bun scripts/build-artifact-kernel-wasm-packages.ts --refresh-package-identities
             git add -A
             git diff --cached --check
@@ -146,7 +152,7 @@ jobs:
   plan:
     name: Explain change impact
     needs: automation-admission
-    if: ${{ !cancelled() && (github.event_name != 'workflow_dispatch' || needs.automation-admission.result == 'success') }}
+    if: ${{ !cancelled() && !(github.event_name == 'pull_request' && github.head_ref == 'main' && github.base_ref == 'production') && (github.event_name != 'workflow_dispatch' || needs.automation-admission.result == 'success') }}
     runs-on: ubuntu-latest
     timeout-minutes: 15
     outputs:
@@ -351,6 +357,7 @@ jobs:
             (
               cd "$expected"
               bun "$GITHUB_WORKSPACE/node_modules/@changesets/cli/bin.js" version
+              bun scripts/release/lockstep-version.ts
               bun scripts/build-artifact-kernel-wasm-packages.ts --refresh-package-identities
               git add -A
               git diff --cached --check
@@ -670,9 +677,10 @@ jobs:
       - name: Recovery integration regressions
         timeout-minutes: 5
         run: |
+          bun test scripts/ci/recovery-selection.test.ts
           bun test --timeout 30000 \
             --test-name-pattern \
-            'an MCP stream timeout after a successful tool output checkpoints once and recovers the same turn' \
+            'a mcp failure after successful tool output checkpoints once and recovers the same turn' \
             ./test/integration/worker-activity.integration.ts
           bun test --timeout 180000 \
             --test-name-pattern \
@@ -805,7 +813,7 @@ jobs:
           OPENGENI_SESSION_SEARCH_ARTIFACT_DIR: /tmp/session-search-header-evidence
         run: >-
           bun test --max-concurrency=1 --timeout 300000
-          --test-name-pattern 'desktop expanded header keeps icon-only search inline'
+          --test-name-pattern 'desktop expanded header keeps icon-only search inline|restores.*focus|mobile result navigation'
           ./test/e2e/session-search.browser.e2e.ts
 
       - name: Queue surface browser acceptance
@@ -1262,7 +1270,7 @@ jobs:
   test:
     name: Typecheck and unit tests
     needs: [plan, source-contracts, unit-shards, integration-shards, e2e-shards, test-suite, browser-acceptance, browserd-real-e2e, package-contracts, deployment, artifact-runtime, images]
-    if: ${{ always() }}
+    if: ${{ always() && !(github.event_name == 'pull_request' && github.head_ref == 'main' && github.base_ref == 'production') }}
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:

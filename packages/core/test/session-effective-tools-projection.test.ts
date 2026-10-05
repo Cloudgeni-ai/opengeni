@@ -296,13 +296,27 @@ describe("server effectiveTools environment projection", () => {
 
   test("explicit empty bundles differ from the worker's omitted bundled defaults", () => {
     const absent = sessionEffectiveToolProjectionInput(
-      session("none", { bundledSkillIds: undefined }),
+      session("all", { bundledSkillIds: undefined }),
       [],
       context(),
     );
-    const empty = sessionEffectiveToolProjectionInput(session("none"), [], context());
+    const empty = sessionEffectiveToolProjectionInput(session("all"), [], context());
     expect(absent.environment.hasSkills).toBe(true);
     expect(empty.environment.hasSkills).toBe(false);
+  });
+
+  test('"none" without an explicit bundle list has no bundled guides', () => {
+    const omitted = projected(session("none", { bundledSkillIds: undefined }));
+    expect(omitted.effectiveTools!.tools.map((tool) => tool.name)).not.toContain("skill_read");
+    expect(
+      sessionEffectiveToolProjectionInput(
+        session("none", { bundledSkillIds: undefined }),
+        [],
+        context(),
+      ).environment.hasSkills,
+    ).toBe(false);
+    const listed = projected(session("none", { bundledSkillIds: ["builtin:opengeni-help"] }));
+    expect(listed.effectiveTools!.tools.map((tool) => tool.name)).toContain("skill_read");
   });
 
   test("model flags and workspace human-input switch narrow the all config", () => {
@@ -467,12 +481,39 @@ describe("server effectiveTools environment projection", () => {
   });
 
   test("configured recovery tools exist even with no first-party selection", () => {
-    const row = session("none", { firstPartyMcpTools: [] });
+    const row = session("none", { firstPartyMcpTools: [], sandboxBackend: "local" });
     const names = projected(row).effectiveTools!.tools.map((tool) => tool.name);
     expect(names).toContain("opengeni__wait_for_input");
     expect(names).toContain("opengeni__command_read");
     expect(names).toContain("opengeni__command_wait");
     expect(names).not.toContain("opengeni__set_session_title");
+  });
+
+  test("background-command tools need a sandbox or Connected Machine", () => {
+    for (const capabilities of ["none", "all"] as const) {
+      const detached = projected(session(capabilities, { sandboxBackend: "none" }));
+      const detachedNames = detached.effectiveTools!.tools.map((tool) => tool.name);
+      expect(detachedNames).toContain("opengeni__wait_for_input");
+      expect(detachedNames).not.toContain("opengeni__command_read");
+      expect(detachedNames).not.toContain("opengeni__command_wait");
+
+      const managed = projected(session(capabilities, { sandboxBackend: "local" }));
+      expect(managed.effectiveTools!.tools).toContainEqual(
+        expect.objectContaining({ name: "opengeni__command_read", capability: "sandbox" }),
+      );
+      expect(managed.effectiveTools!.tools.map((tool) => tool.name)).toContain(
+        "opengeni__command_wait",
+      );
+
+      const sandboxId = "44444444-4444-4444-8444-444444444444";
+      const machine = projected(
+        session(capabilities, { sandboxBackend: "none", activeSandboxId: sandboxId }),
+        context({ activeSandboxBackends: new Map([[sandboxId, "selfhosted"]]) }),
+      );
+      const machineNames = machine.effectiveTools!.tools.map((tool) => tool.name);
+      expect(machineNames).toContain("opengeni__command_read");
+      expect(machineNames).toContain("opengeni__command_wait");
+    }
   });
 
   test("code search follows frozen session, deployment key, workspace off and sandbox", () => {
@@ -509,5 +550,79 @@ describe("server effectiveTools environment projection", () => {
         settings: { ...env.settings, webSearchEnabled: false },
       }).hostedToolNames,
     ).toEqual([]);
+  });
+});
+
+describe("provider web search projection", () => {
+  const providerSettings = (overrides: Partial<typeof settings> = {}) => {
+    const current = configuredModels(settings)[0]!.capabilities;
+    return testSettings({
+      ...settings,
+      webSearchProvider: "tinyfish",
+      webSearchApiKey: "tinyfish-key",
+      modelProvidersJson: JSON.stringify([
+        {
+          id: "acme",
+          api: "chat",
+          baseUrl: "https://acme.example/v1",
+          apiKey: "fake-test-key",
+          models: [
+            {
+              id: "acme/no-search",
+              upstreamModelId: "no-search",
+              capabilities: {
+                ...current,
+                hostedTools: {
+                  ...current.hostedTools,
+                  webSearch: { upstream: "unknown", runnable: false },
+                },
+              },
+            },
+          ],
+        },
+      ]),
+      ...overrides,
+    });
+  };
+  const names = (row: ReturnType<typeof session>, env: SessionEffectiveToolsContext) =>
+    projected(row, env)
+      .effectiveTools!.tools.filter((tool) => tool.capability === "webSearch")
+      .map((tool) => [tool.name, tool.source, tool.visibility]);
+
+  test("a model without hosted search reports the provider tools upfront", () => {
+    const env = context({ settings: providerSettings() });
+    expect(names(session("all", { model: "acme/no-search" }), env)).toEqual([
+      ["web_search", "runtime", "upfront"],
+      ["web_fetch", "runtime", "upfront"],
+    ]);
+    const result = projected(session("all", { model: "acme/no-search" }), env).effectiveTools!;
+    expect(result.capabilities.webSearch).toBe(true);
+    expect(result.unavailable).not.toContain("webSearch");
+  });
+
+  test("hosted search is kept in fallback mode and replaced in replace mode", () => {
+    expect(names(session(), context({ settings: providerSettings() }))).toEqual([
+      ["web_search", "hosted", "upfront"],
+    ]);
+    expect(
+      names(
+        session(),
+        context({ settings: providerSettings({ webSearchProviderMode: "replace" }) }),
+      ),
+    ).toEqual([
+      ["web_search", "runtime", "upfront"],
+      ["web_fetch", "runtime", "upfront"],
+    ]);
+  });
+
+  test("unconfigured deployments and disabled web search offer nothing new", () => {
+    const row = session("all", { model: "acme/no-search" });
+    expect(
+      names(row, context({ settings: providerSettings({ webSearchProvider: undefined }) })),
+    ).toEqual([]);
+    const disabled = session({ webSearch: false } as AgentCapabilities, {
+      model: "acme/no-search",
+    });
+    expect(names(disabled, context({ settings: providerSettings() }))).toEqual([]);
   });
 });

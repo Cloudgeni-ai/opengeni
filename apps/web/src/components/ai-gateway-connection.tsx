@@ -64,7 +64,7 @@ import { StatusBadge } from "@/components/ui/status-badge";
 import type { AnalyticsAction } from "@/lib/analytics-actions";
 import { apiErrorAdvice, apiErrorDetails, userErrorText } from "@/lib/api-error";
 
-// Workspace API-key providers (Vercel AI Gateway, OpenRouter) for Settings >
+// Workspace API-key providers (Vercel AI Gateway, OpenRouter, Opper) for Settings >
 // Models: the connection and custom models (useProviderConnection), the list
 // row, the provider's own page, the Replace credential prompt and the Connect page.
 
@@ -82,13 +82,13 @@ type CustomModelDeleteRequest = {
 };
 
 type ProviderConnectionConfig = {
-  id: "vercel-ai-gateway" | "openrouter" | "anthropic" | "claude_subscription";
+  id: "vercel-ai-gateway" | "openrouter" | "opper" | "anthropic" | "claude_subscription";
   providerDomain: string;
   credentialRole: string;
   credentialLabel: string;
   readinessProvider: string;
   title: string;
-  provider: "vercel" | "openrouter" | "anthropic" | "claude_subscription";
+  provider: "vercel" | "openrouter" | "opper" | "anthropic" | "claude_subscription";
   billedTo: string;
   analyticsAction?: AnalyticsAction;
   /** One sentence under the name, for the not-connected row and the Connect page. */
@@ -132,6 +132,8 @@ const GATEWAY_DOMAIN = "ai-gateway.vercel.sh";
 const GATEWAY_ROLE = "vercel_ai_gateway";
 const OPENROUTER_DOMAIN = "openrouter.ai";
 const OPENROUTER_ROLE = "openrouter";
+const OPPER_DOMAIN = "api.opper.ai";
+const OPPER_ROLE = "opper";
 
 const VERCEL_AI_GATEWAY_CONFIG: ProviderConnectionConfig = {
   id: "vercel-ai-gateway",
@@ -213,6 +215,45 @@ const OPENROUTER_CONFIG: ProviderConnectionConfig = {
     client.deleteWorkspaceOpenRouterCustomModel(workspaceId, customModelId, request),
 };
 
+const OPPER_CONFIG: ProviderConnectionConfig = {
+  id: "opper",
+  providerDomain: OPPER_DOMAIN,
+  credentialRole: OPPER_ROLE,
+  credentialLabel: "Opper",
+  readinessProvider: "workspace-opper",
+  title: "Opper",
+  provider: "opper",
+  billedTo: "Your Opper account",
+  analyticsAction: "connect_opper",
+  summary: "Use models through your Opper account, billed to Opper.",
+  keyHelp: "Create one at platform.opper.ai under API keys.",
+  billingDescription:
+    "Use models through this workspace's Opper account. The workspace's Opper account is billed directly. This is separate from any Opper models this deployment provides.",
+  connectionManagerDescription:
+    "Members with connection-management access manage this workspace Opper connection.",
+  keyAriaLabel: "Opper API key",
+  keyPlaceholder: (connected) => (connected ? "Replace Opper API key" : "Opper API key"),
+  customModelsHeading: "Custom models",
+  customModelsDescription:
+    "Add an exact Opper model id for this workspace account: a pool such as gemini-3.8-flash or a pinned EU route such as aws/claude-sonnet-4-6-eu. Deployment-provided Opper models remain separate.",
+  customModelInputAriaLabel: "Opper model id",
+  customModelPlaceholder: "aws/claude-sonnet-4-6-eu",
+  customModelConnectedHelp: "The model becomes selectable when workspace policy allows it.",
+  customModelDisconnectedHelp:
+    "You can configure models now; they become selectable after you connect Opper.",
+  emptyCustomModelsDescription:
+    "No custom model ids yet. Deployment-provided Opper models remain available separately.",
+  readyModelDescription: "Ready through workspace Opper",
+  waitingModelDescription: "Waiting for an Opper connection",
+  unavailableModelDescription: "Opper connection status unavailable",
+  modelToastName: "Opper model",
+  listCustomModels: (client, workspaceId) => client.listWorkspaceOpperCustomModels(workspaceId),
+  createCustomModel: (client, workspaceId, request) =>
+    client.createWorkspaceOpperCustomModel(workspaceId, request),
+  deleteCustomModel: (client, workspaceId, customModelId, request) =>
+    client.deleteWorkspaceOpperCustomModel(workspaceId, customModelId, request),
+};
+
 function claudeWorkspaceConfig(
   kind: "anthropic" | "claude_subscription",
 ): ProviderConnectionConfig {
@@ -277,6 +318,7 @@ export type ProviderConnectionProps = {
 export const PROVIDER_CONNECTION_CONFIGS = {
   vercel: VERCEL_AI_GATEWAY_CONFIG,
   openrouter: OPENROUTER_CONFIG,
+  opper: OPPER_CONFIG,
   anthropic: claudeWorkspaceConfig("anthropic"),
   claude_subscription: claudeWorkspaceConfig("claude_subscription"),
 } as const;
@@ -559,9 +601,9 @@ export function useProviderConnection(
       return false;
     const value = token;
     const recordOutcome =
-      config.id === "openrouter" || config.id === "vercel-ai-gateway"
+      config.id === "openrouter" || config.id === "opper" || config.id === "vercel-ai-gateway"
         ? trackModelConnection(
-            config.id === "openrouter" ? "openrouter" : "ai-gateway",
+            config.id === "vercel-ai-gateway" ? "ai-gateway" : config.id,
             props.workspaceId,
           )
         : beginModelConnectJourney(config.id, "api_key");
@@ -1304,8 +1346,8 @@ export function ProviderDisconnectDialog({
           : `Models billed to ${config.title} stop working for new work.`,
         "Work already running finishes first.",
         config.provider === "claude_subscription"
-          ? "The saved token is removed from OpenGeni. Your Claude subscription stays active."
-          : "The saved API key is removed from OpenGeni. You can reconnect with a valid key.",
+          ? "The saved token is removed from Opengeni. Your Claude subscription stays active."
+          : "The saved API key is removed from Opengeni. You can reconnect with a valid key.",
       ]}
       confirmLabel="Disconnect"
       pendingLabel="Disconnecting…"
@@ -1628,6 +1670,18 @@ export function OpenRouterConnectionCardWithClient(
   props: ProviderConnectionProps & { client: OpenGeniBrowserClient },
 ) {
   return <StandaloneProviderConnection {...props} config={OPENROUTER_CONFIG} />;
+}
+
+export function OpperConnectionCard(props: ProviderConnectionProps) {
+  const client = useAppContext().client;
+  return <OpperConnectionCardWithClient key={props.workspaceId} {...props} client={client} />;
+}
+
+/** Isolated product fixture seam; production uses useProviderConnection on the Models page. */
+export function OpperConnectionCardWithClient(
+  props: ProviderConnectionProps & { client: OpenGeniBrowserClient },
+) {
+  return <StandaloneProviderConnection {...props} config={OPPER_CONFIG} />;
 }
 
 function StandaloneProviderConnection(

@@ -119,10 +119,12 @@ export function billingClassForMissingSelection(modelId: string): PickerBillingC
   if (modelId.startsWith("organization-anthropic/")) return "organization_byok";
   if (modelId.startsWith("workspace-gateway/")) return "byok";
   if (modelId.startsWith("workspace-openrouter/")) return "byok";
-  // A deployment OpenRouter ID does not encode its workspace-facing cost.
+  if (modelId.startsWith("workspace-opper/")) return "byok";
+  // A deployment OpenRouter or Opper ID does not encode its workspace-facing cost.
   // Missing rows therefore use the credits-safe rail instead of falsely
   // claiming that an unknown former selection was externally funded.
   if (modelId.startsWith("openrouter/")) return "opengeni_credits";
+  if (modelId.startsWith("opper/")) return "opengeni_credits";
   if (modelId.startsWith("codex/")) return "codex_subscription";
   if (modelId.startsWith("supergrok/")) return "supergrok_subscription";
   return "opengeni_credits";

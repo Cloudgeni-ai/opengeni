@@ -14,7 +14,7 @@ import type {
   ComputerSessionMutationResponse,
   ComputerTarget,
 } from "@opengeni/sdk/interaction";
-import { act } from "react";
+import { act, useLayoutEffect } from "react";
 import { computerKey, ComputerViewer } from "../src/components/computer-viewer";
 import type {
   ComputerFrameWebSocket,
@@ -477,7 +477,7 @@ describe("ComputerSession React resources", () => {
       computerSessionId: COMPUTER_SESSION_ID,
       controllerGeneration: "controller-1",
       targetId: screenTarget.id,
-      targetGeneration: "screen-frame-generation",
+      targetGeneration: screenTarget.targetGeneration,
       sequence: 7,
       mediaType: "image/png",
       width: 1,
@@ -486,6 +486,18 @@ describe("ComputerSession React resources", () => {
       sha256: PNG_SHA256,
       data: new Uint8Array([1]),
     };
+    for (const stale of [
+      { targetGeneration: "earlier-generation" },
+      { controllerGeneration: "controller-2" },
+    ]) {
+      await expect(
+        hook.result.current.actFromFrame(
+          { type: "pointer", frameId: frame.frameId, action: "click", x: 0, y: 0 },
+          { ...frame, ...stale },
+        ),
+      ).rejects.toThrow("earlier target generation");
+    }
+    expect(requests).toHaveLength(1);
     await actRun(async () => {
       await hook.result.current.actFromFrame(
         {
@@ -500,7 +512,7 @@ describe("ComputerSession React resources", () => {
     });
     expect(requests[1]).toMatchObject({
       targetId: "screen-1",
-      expectedTargetGeneration: "screen-frame-generation",
+      expectedTargetGeneration: screenTarget.targetGeneration,
       expectedObservationId: null,
       expectedFrameId: "visible-frame",
       action: { frameId: "visible-frame" },
@@ -576,6 +588,1385 @@ describe("ComputerSession React resources", () => {
         expect(requests).toHaveLength(1);
       } finally {
         await hook.unmount();
+      }
+    },
+  );
+});
+
+describe("ComputerSession receipt selection", () => {
+  async function fixture(kind: "screen" | "window" = "screen", cloneTargetRecords = true) {
+    const first = target(`${kind}-1`, kind);
+    const second = target(`${kind}-2`, kind);
+    let targets = [first, second];
+    const requests: ComputerActionRequest[] = [];
+    let finishFirst!: (value: ComputerActionReceipt) => void;
+    let observationSequence = 0;
+    const makeClient = (name: string) =>
+      fakeClient({
+        getComputerSession: async (_workspaceId, computerSessionId) =>
+          computerSession(computerSessionId, SESSION_ID, name),
+        listComputerTargets: async (_workspaceId, computerSessionId) => ({
+          computerSessionId,
+          controllerGeneration: targets[0]!.controllerGeneration,
+          targets: cloneTargetRecords
+            ? targets.map((candidate) => ({ ...candidate, computerSessionId }))
+            : targets,
+        }),
+        observeComputerTarget: async (workspaceId, computerSessionId, targetId) => {
+          const current = targets.find((candidate) => candidate.id === targetId)!;
+          return {
+            ...observation({ ...current, computerSessionId }),
+            observationId: `${name}-${workspaceId}-${++observationSequence}`,
+          };
+        },
+        actInComputer: async (_workspaceId, computerSessionId, request) => {
+          requests.push(request);
+          if (requests.length === 1) {
+            return await new Promise<ComputerActionReceipt>((resolve) => {
+              finishFirst = resolve;
+            });
+          }
+          const current = targets.find((candidate) => candidate.id === request.targetId)!;
+          return receipt(observation({ ...current, computerSessionId }), request.operationId);
+        },
+      });
+    const options = {
+      client: makeClient("first-source"),
+      workspaceId: WORKSPACE_ID,
+      computerSessionId: COMPUTER_SESSION_ID,
+      enabled: true,
+      pollIntervalMs: 60_000,
+    };
+    const hook = await renderHook((props: typeof options) => useComputerSession(props), options);
+    await flush(20);
+    const initialObservation = hook.result.current.observation!;
+    const paintedFrame = (current: ComputerTarget, frameId: string): ComputerFrame => ({
+      computerSessionId: current.computerSessionId,
+      controllerGeneration: current.controllerGeneration,
+      targetId: current.id,
+      targetGeneration: current.targetGeneration,
+      frameId,
+      sequence: 1,
+      mediaType: "image/png",
+      width: 400,
+      height: 300,
+      capturedAt: NOW,
+      sha256: PNG_SHA256,
+      data: new Uint8Array([1]),
+    });
+    return {
+      hook,
+      options,
+      first,
+      second,
+      requests,
+      initialObservation,
+      makeClient,
+      paintedFrame,
+      setTargets: (next: ComputerTarget[]) => {
+        targets = next;
+      },
+      finishFirst: (value: ComputerActionReceipt) => finishFirst(value),
+      start: async () => {
+        const frame = paintedFrame(first, "painted-first");
+        let pending!: Promise<ComputerActionReceipt>;
+        await actRun(() => {
+          pending = hook.result.current.actFromFrame(
+            { type: "pointer", action: "click", frameId: frame.frameId, x: 40, y: 60 },
+            frame,
+          );
+        });
+        await flush();
+        return { pending };
+      },
+    };
+  }
+
+  test.each(["completed", "failed", "outcome_unknown"] as const)(
+    "keeps the newly selected screen after a non-null %s receipt for the previous screen",
+    async (state) => {
+      const current = await fixture();
+      try {
+        const { pending } = await current.start();
+        await actRun(async () => {
+          await current.hook.result.current.selectTarget(current.second.id);
+        });
+        const selectedObservation = current.hook.result.current.observation!;
+        const result = {
+          ...receipt(current.initialObservation, current.requests[0]!.operationId),
+          state,
+          error:
+            state === "completed"
+              ? null
+              : {
+                  code: "resource_unavailable" as const,
+                  message: "Synthetic delivery failure",
+                  retryable: false,
+                },
+        };
+        await actRun(async () => {
+          current.finishFirst(result);
+          expect(await pending).toEqual(result);
+        });
+        expect(current.hook.result.current.selectedTarget?.id).toBe(current.second.id);
+        expect(current.hook.result.current.observation).toEqual(selectedObservation);
+        await actRun(async () => {
+          await current.hook.result.current.act({
+            type: "keyboard",
+            action: "type",
+            value: "sample",
+          });
+        });
+        expect(current.requests).toHaveLength(2);
+        expect(current.requests[1]).toMatchObject({
+          targetId: current.second.id,
+          expectedTargetGeneration: current.second.targetGeneration,
+          expectedObservationId: selectedObservation.observationId,
+        });
+      } finally {
+        await current.hook.unmount();
+      }
+    },
+  );
+
+  test("keeps the new observation when a person switches away and back to the same window", async () => {
+    const current = await fixture("window");
+    try {
+      const { pending } = await current.start();
+      await actRun(async () => {
+        await current.hook.result.current.selectTarget(current.second.id);
+        await current.hook.result.current.selectTarget(current.first.id);
+      });
+      const selectedObservation = current.hook.result.current.observation!;
+      expect(selectedObservation.observationId).not.toBe(current.initialObservation.observationId);
+      await actRun(async () => {
+        current.finishFirst(receipt(current.initialObservation, current.requests[0]!.operationId));
+        await pending;
+        await current.hook.result.current.act({
+          type: "semantic",
+          action: "invoke",
+          locator: { kind: "ref", ref: "e1" },
+        });
+      });
+      expect(current.requests[1]?.expectedObservationId).toBe(selectedObservation.observationId);
+    } finally {
+      await current.hook.unmount();
+    }
+  });
+
+  test.each(["targetGeneration", "controllerGeneration"] as const)(
+    "keeps the freshly discovered %s after an older receipt",
+    async (generation) => {
+      const current = await fixture();
+      try {
+        const { pending } = await current.start();
+        const next = { ...current.first, [generation]: "generation-2" };
+        current.setTargets([next, current.second]);
+        await actRun(async () => {
+          await current.hook.result.current.refresh();
+        });
+        const selectedObservation = current.hook.result.current.observation!;
+        await actRun(async () => {
+          current.finishFirst(
+            receipt(current.initialObservation, current.requests[0]!.operationId),
+          );
+          await pending;
+        });
+        expect(current.hook.result.current.selectedTarget).toEqual(next);
+        expect(current.hook.result.current.observation).toEqual(selectedObservation);
+        await actRun(async () => {
+          await current.hook.result.current.act({
+            type: "keyboard",
+            action: "press",
+            value: "Enter",
+          });
+        });
+        expect(current.requests[1]).toMatchObject({
+          targetId: next.id,
+          expectedTargetGeneration: next.targetGeneration,
+          expectedObservationId: selectedObservation.observationId,
+        });
+      } finally {
+        await current.hook.unmount();
+      }
+    },
+  );
+
+  test.each(["client", "workspace", "computer", "disabled", "source round trip"] as const)(
+    "does not project a receipt after the %s changes",
+    async (boundary) => {
+      const current = await fixture();
+      try {
+        const { pending } = await current.start();
+        const staleAction = current.hook.result.current.act;
+        const next = {
+          ...current.options,
+          ...(boundary === "client" || boundary === "source round trip"
+            ? { client: current.makeClient("second-source") }
+            : {}),
+          ...(boundary === "workspace"
+            ? { workspaceId: "12345678-1234-4123-8123-123456789abc" }
+            : {}),
+          ...(boundary === "computer" ? { computerSessionId: PEER_COMPUTER_SESSION_ID } : {}),
+          ...(boundary === "disabled" ? { enabled: false } : {}),
+        };
+        await current.hook.rerender(next);
+        await flush(20);
+        if (boundary === "source round trip") {
+          await current.hook.rerender(current.options);
+          await flush(20);
+        }
+        const selectedObservation = current.hook.result.current.observation;
+        const selected = current.hook.result.current.selectedTarget;
+        const retainedAction = current.hook.result.current.act;
+        await expect(
+          staleAction({ type: "keyboard", action: "press", value: "Enter" }),
+        ).rejects.toThrow("source is no longer selected");
+        expect(current.requests).toHaveLength(1);
+        await actRun(async () => {
+          current.finishFirst(
+            receipt(current.initialObservation, current.requests[0]!.operationId),
+          );
+          await pending;
+        });
+        expect(current.hook.result.current.selectedTarget).toEqual(selected);
+        expect(current.hook.result.current.observation).toEqual(selectedObservation);
+        expect(current.hook.result.current.mutating).toBe(false);
+        if (boundary !== "disabled") {
+          await actRun(async () => {
+            await retainedAction({ type: "keyboard", action: "press", value: "Enter" });
+          });
+          expect(current.requests[1]?.expectedObservationId).toBe(
+            selectedObservation?.observationId,
+          );
+        }
+      } finally {
+        await current.hook.unmount();
+      }
+    },
+  );
+
+  test.each(["targetGeneration", "controllerGeneration"] as const)(
+    "captures immutable %s when the client reuses target records",
+    async (generation) => {
+      const current = await fixture("screen", false);
+      try {
+        const { pending } = await current.start();
+        current.first[generation] = "shared-record-generation-2";
+        await actRun(async () => {
+          await current.hook.result.current.refresh();
+        });
+        const selectedObservation = current.hook.result.current.observation!;
+        await actRun(async () => {
+          current.finishFirst(
+            receipt(current.initialObservation, current.requests[0]!.operationId),
+          );
+          await pending;
+        });
+        expect(current.hook.result.current.selectedTarget?.[generation]).toBe(
+          "shared-record-generation-2",
+        );
+        expect(current.hook.result.current.observation).toEqual(selectedObservation);
+        await actRun(async () => {
+          await current.hook.result.current.act({
+            type: "keyboard",
+            action: "press",
+            value: "Enter",
+          });
+        });
+        expect(current.requests[1]).toMatchObject({
+          expectedTargetGeneration: current.first.targetGeneration,
+          expectedObservationId: selectedObservation.observationId,
+        });
+      } finally {
+        await current.hook.unmount();
+      }
+    },
+  );
+
+  test("keeps the new source's control failure after the previous source completes", async () => {
+    const current = await fixture();
+    try {
+      const { pending } = await current.start();
+      const unavailable = new OpenGeniApiError(503, "Synthetic source unavailable");
+      await current.hook.rerender({
+        ...current.options,
+        client: fakeClient({
+          getComputerSession: async () => {
+            throw unavailable;
+          },
+          listComputerTargets: async () => ({
+            computerSessionId: COMPUTER_SESSION_ID,
+            controllerGeneration: "controller-1",
+            targets: [current.first, current.second],
+          }),
+        }),
+      });
+      await flush(20);
+      expect(current.hook.result.current.controlError).toBe(unavailable);
+      await actRun(async () => {
+        current.finishFirst(receipt(current.initialObservation, current.requests[0]!.operationId));
+        await pending;
+      });
+      expect(current.hook.result.current.controlError).toBe(unavailable);
+      expect(current.hook.result.current.error).toBe(unavailable);
+      expect(current.hook.result.current.mutating).toBe(false);
+    } finally {
+      await current.hook.unmount();
+    }
+  });
+
+  test.each([false, true])(
+    "projects an explicit focus receipt only without a newer human selection (%s)",
+    async (reselected) => {
+      const current = await fixture("window");
+      try {
+        let pending!: Promise<ComputerActionReceipt>;
+        await actRun(() => {
+          pending = current.hook.result.current.act({ type: "focus", targetId: current.second.id });
+        });
+        await flush();
+        if (reselected) {
+          await actRun(async () => {
+            await current.hook.result.current.selectTarget(current.first.id);
+          });
+        }
+        const selectedObservation = current.hook.result.current.observation!;
+        await actRun(async () => {
+          current.finishFirst(
+            receipt(observation(current.second), current.requests[0]!.operationId),
+          );
+          await pending;
+        });
+        expect(current.hook.result.current.selectedTarget?.id).toBe(
+          reselected ? current.first.id : current.second.id,
+        );
+        if (reselected)
+          expect(current.hook.result.current.observation).toEqual(selectedObservation);
+        await actRun(async () => {
+          await current.hook.result.current.act({
+            type: "keyboard",
+            action: "press",
+            value: "Enter",
+          });
+        });
+        expect(current.requests[1]?.targetId).toBe(
+          reselected ? current.first.id : current.second.id,
+        );
+      } finally {
+        await current.hook.unmount();
+      }
+    },
+  );
+
+  test("uses a fresh same-view receipt for immediate semantic and painted-frame actions before rendering", async () => {
+    const current = await fixture("window");
+    try {
+      const { pending } = await current.start();
+      const next = { ...current.first, targetGeneration: "next-window-generation" };
+      current.setTargets([next, current.second]);
+      const freshObservation = observation(next);
+      const frame = current.paintedFrame(next, "painted-next");
+      await actRun(async () => {
+        current.finishFirst(receipt(freshObservation, current.requests[0]!.operationId));
+        await pending;
+        await current.hook.result.current.act({
+          type: "semantic",
+          action: "invoke",
+          locator: { kind: "ref", ref: "e1" },
+        });
+        await current.hook.result.current.actFromFrame(
+          { type: "pointer", action: "click", frameId: frame.frameId, x: 40, y: 60 },
+          frame,
+        );
+      });
+      expect(current.requests).toHaveLength(3);
+      expect(current.requests[1]).toMatchObject({
+        targetId: next.id,
+        expectedTargetGeneration: next.targetGeneration,
+        expectedObservationId: freshObservation.observationId,
+      });
+      expect(current.requests[2]).toMatchObject({
+        targetId: next.id,
+        expectedTargetGeneration: next.targetGeneration,
+        expectedObservationId: null,
+        expectedFrameId: frame.frameId,
+      });
+    } finally {
+      await current.hook.unmount();
+    }
+  });
+});
+
+describe("ComputerSession source admission", () => {
+  const otherWorkspaceId = "22222222-2222-4222-8222-222222222222";
+  const semanticInput = {
+    type: "semantic",
+    locator: { kind: "ref", ref: "e1" },
+    action: "invoke",
+  } as const;
+
+  test.each(["client", "workspace", "computer", "disabled"] as const)(
+    "clears visible Desktop state and rejects current input at %s replacement layout",
+    async (boundary) => {
+      const currentTarget = target("window-1");
+      const previousObservation = observation(currentTarget);
+      const requests: ComputerActionRequest[] = [];
+      const makeClient = (name: string) => {
+        const changed = (workspaceId: string, computerSessionId: string) =>
+          name === "new-source" ||
+          workspaceId === otherWorkspaceId ||
+          computerSessionId !== COMPUTER_SESSION_ID;
+        return fakeClient({
+          getComputerSession: async (workspaceId, computerSessionId) =>
+            changed(workspaceId, computerSessionId)
+              ? await new Promise<ComputerSession>(() => {})
+              : computerSession(),
+          listComputerTargets: async (workspaceId, computerSessionId) =>
+            changed(workspaceId, computerSessionId)
+              ? await new Promise<{
+                  computerSessionId: string;
+                  controllerGeneration: string;
+                  targets: ComputerTarget[];
+                }>(() => {})
+              : {
+                  computerSessionId,
+                  controllerGeneration: "controller-1",
+                  targets: [currentTarget],
+                },
+          observeComputerTarget: async () => previousObservation,
+          actInComputer: async (_workspaceId, _computerSessionId, request) => {
+            requests.push(request);
+            return receipt(previousObservation, request.operationId);
+          },
+        });
+      };
+      const client = makeClient("old-source");
+      const options = {
+        client,
+        workspaceId: WORKSPACE_ID,
+        computerSessionId: COMPUTER_SESSION_ID,
+        enabled: true,
+        pollIntervalMs: 60_000,
+        phase: "old",
+      };
+      let layoutSnapshot: unknown;
+      let layoutActions!: Promise<(Error | null)[]>;
+      let staleAction!: ReturnType<typeof useComputerSession>["act"];
+      let staleResult!: Promise<Error | null>;
+      let attempted = false;
+      const painted: ComputerFrame = {
+        computerSessionId: COMPUTER_SESSION_ID,
+        controllerGeneration: "controller-1",
+        targetId: currentTarget.id,
+        targetGeneration: currentTarget.targetGeneration,
+        frameId: previousObservation.frameId!,
+        sequence: 1,
+        mediaType: "image/png",
+        width: 400,
+        height: 300,
+        capturedAt: NOW,
+        sha256: PNG_SHA256,
+        data: new Uint8Array([1]),
+      };
+      const rendered = await renderHook((props: typeof options) => {
+        const result = useComputerSession(props);
+        useLayoutEffect(() => {
+          if (props.phase !== "new" || attempted) return;
+          attempted = true;
+          layoutSnapshot = {
+            session: result.session,
+            targets: result.targets,
+            selectedTarget: result.selectedTarget,
+            observation: result.observation,
+            loading: result.loading,
+            mutating: result.mutating,
+            error: result.error,
+            controlError: result.controlError,
+          };
+          layoutActions = Promise.all(
+            [
+              result.act(semanticInput),
+              result.act({ type: "keyboard", action: "press", value: "Enter" }),
+              result.act({ type: "focus", targetId: currentTarget.id }),
+              result.actFromFrame(
+                { type: "pointer", action: "click", frameId: painted.frameId, x: 40, y: 60 },
+                painted,
+              ),
+            ].map((pending) =>
+              pending.then(
+                () => null,
+                (error: Error) => error,
+              ),
+            ),
+          );
+          staleResult = staleAction(semanticInput).then(
+            () => null,
+            (error: Error) => error,
+          );
+        });
+        return result;
+      }, options);
+      try {
+        await flush(20);
+        expect(rendered.result.current.observation).toEqual(previousObservation);
+        staleAction = rendered.result.current.act;
+        await rendered.rerenderThroughLayout({
+          ...options,
+          ...(boundary === "client" ? { client: makeClient("new-source") } : {}),
+          ...(boundary === "workspace" ? { workspaceId: otherWorkspaceId } : {}),
+          ...(boundary === "computer" ? { computerSessionId: PEER_COMPUTER_SESSION_ID } : {}),
+          ...(boundary === "disabled" ? { enabled: false } : {}),
+          phase: "new",
+        });
+        expect(layoutSnapshot).toEqual({
+          session: null,
+          targets: [],
+          selectedTarget: null,
+          observation: null,
+          loading: boundary !== "disabled",
+          mutating: false,
+          error: null,
+          controlError: null,
+        });
+        expect((await layoutActions).every((error) => error instanceof Error)).toBe(true);
+        expect((await staleResult)?.message).toContain("source is no longer selected");
+        expect(requests).toHaveLength(0);
+      } finally {
+        await rendered.unmount();
+      }
+    },
+  );
+
+  test.each(["client", "workspace"] as const)(
+    "does not retain a previous %s observation when new discovery has identical target generations",
+    async (boundary) => {
+      const currentTarget = target("window-1");
+      const initialObservation = {
+        ...observation(currentTarget),
+        observationId: "old-source-observation",
+      };
+      const freshObservation = {
+        ...observation(currentTarget),
+        observationId: "new-source-observation",
+      };
+      const requests: ComputerActionRequest[] = [];
+      let resolveObservation!: (value: ComputerObservation) => void;
+      const makeClient = (name: string) =>
+        fakeClient({
+          getComputerSession: async () => computerSession(),
+          listComputerTargets: async () => ({
+            computerSessionId: COMPUTER_SESSION_ID,
+            controllerGeneration: "controller-1",
+            targets: [{ ...currentTarget }],
+          }),
+          observeComputerTarget: async (workspaceId) => {
+            if (name === "new-source" || workspaceId === otherWorkspaceId) {
+              return await new Promise<ComputerObservation>((resolve) => {
+                resolveObservation = resolve;
+              });
+            }
+            return initialObservation;
+          },
+          actInComputer: async (_workspaceId, _computerSessionId, request) => {
+            requests.push(request);
+            return receipt(freshObservation, request.operationId);
+          },
+        });
+      const options = {
+        client: makeClient("old-source"),
+        workspaceId: WORKSPACE_ID,
+        computerSessionId: COMPUTER_SESSION_ID,
+        pollIntervalMs: 60_000,
+      };
+      const rendered = await renderHook(useComputerSession, options);
+      try {
+        await flush(20);
+        expect(rendered.result.current.observation).toEqual(initialObservation);
+        await rendered.rerender({
+          ...options,
+          ...(boundary === "client" ? { client: makeClient("new-source") } : {}),
+          ...(boundary === "workspace" ? { workspaceId: otherWorkspaceId } : {}),
+        });
+        await flush(20);
+        expect(rendered.result.current.selectedTarget).toEqual(currentTarget);
+        expect(rendered.result.current.observation).toBeNull();
+        await expect(rendered.result.current.act(semanticInput)).rejects.toThrow(
+          "not ready for input",
+        );
+        expect(requests).toHaveLength(0);
+        await actRun(() => resolveObservation(freshObservation));
+        await actRun(async () => {
+          await rendered.result.current.act(semanticInput);
+        });
+        expect(requests[0]).toMatchObject({
+          targetId: currentTarget.id,
+          expectedTargetGeneration: currentTarget.targetGeneration,
+          expectedObservationId: freshObservation.observationId,
+        });
+      } finally {
+        await rendered.unmount();
+      }
+    },
+  );
+
+  test("retains exact observation authority during a same-source refresh with pending inspection", async () => {
+    const first = target("window-1");
+    const second = target("window-2");
+    const requests: ComputerActionRequest[] = [];
+    let observations = 0;
+    let resolveRefresh!: (value: ComputerObservation) => void;
+    const freshReceiptObservation = { ...observation(second), observationId: "action-observation" };
+    const client = fakeClient({
+      getComputerSession: async () => computerSession(),
+      listComputerTargets: async () => ({
+        computerSessionId: COMPUTER_SESSION_ID,
+        controllerGeneration: "controller-1",
+        targets: [{ ...first }, { ...second }],
+      }),
+      observeComputerTarget: async (_workspaceId, _computerSessionId, targetId) => {
+        observations++;
+        if (observations === 3) {
+          return await new Promise<ComputerObservation>((resolve) => {
+            resolveRefresh = resolve;
+          });
+        }
+        return {
+          ...observation(targetId === first.id ? first : second),
+          observationId: `selected-observation-${observations}`,
+        };
+      },
+      actInComputer: async (_workspaceId, _computerSessionId, request) => {
+        requests.push(request);
+        return receipt(freshReceiptObservation, request.operationId);
+      },
+    });
+    const rendered = await renderHook(useComputerSession, {
+      client,
+      workspaceId: WORKSPACE_ID,
+      computerSessionId: COMPUTER_SESSION_ID,
+      pollIntervalMs: 60_000,
+    });
+    try {
+      await flush(20);
+      await actRun(async () => {
+        await rendered.result.current.selectTarget(second.id);
+      });
+      const selected = rendered.result.current.observation!;
+      let refreshing!: Promise<void>;
+      await actRun(() => {
+        refreshing = rendered.result.current.refresh();
+      });
+      expect(rendered.result.current.selectedTarget?.id).toBe(second.id);
+      expect(rendered.result.current.observation).toEqual(selected);
+      await actRun(async () => {
+        await rendered.result.current.act(semanticInput);
+      });
+      expect(requests[0]).toMatchObject({
+        targetId: second.id,
+        expectedTargetGeneration: second.targetGeneration,
+        expectedObservationId: selected.observationId,
+      });
+      await actRun(async () => {
+        resolveRefresh(observation(first));
+        await refreshing;
+      });
+      expect(rendered.result.current.selectedTarget?.id).toBe(second.id);
+      expect(rendered.result.current.observation).toEqual(freshReceiptObservation);
+    } finally {
+      await rendered.unmount();
+    }
+  });
+});
+
+describe("ComputerSession selection and refresh read ordering", () => {
+  async function fixture() {
+    const selectedTarget = target("window-a");
+    const view = (sequence: number): ComputerObservation => ({
+      ...observation(selectedTarget),
+      observationId: "read-observation-" + sequence,
+      frameId: "read-frame-" + sequence,
+    });
+    const choices: Array<{
+      resolve: (value: ComputerObservation) => void;
+      reject: (cause: unknown) => void;
+    }> = [];
+    const reads: Array<{ resolve: (value: ComputerObservation) => void }> = [];
+    const actions: Array<{ resolve: (value: ComputerActionReceipt) => void }> = [];
+    const requests: ComputerActionRequest[] = [];
+    let sequence = 0;
+    let holdSelection = false;
+    let holdObservation = false;
+    let holdAction = false;
+    let nullAction = false;
+    let actionError: Error | null = null;
+    let inventoryReads = 0;
+    let selectionCalls = 0;
+    const choose = async (): Promise<ComputerObservation> => {
+      selectionCalls++;
+      if (!holdSelection) return view(sequence);
+      holdSelection = false;
+      return await new Promise<ComputerObservation>((resolve, reject) => {
+        choices.push({ resolve, reject });
+      });
+    };
+    const read = async (): Promise<ComputerObservation> => {
+      if (!holdObservation) return view(sequence);
+      return await new Promise<ComputerObservation>((resolve) => {
+        reads.push({ resolve });
+      });
+    };
+    const client = fakeClient({
+      getComputerSession: async () => computerSession(),
+      listComputerTargets: async () => {
+        inventoryReads++;
+        return {
+          computerSessionId: COMPUTER_SESSION_ID,
+          controllerGeneration: "controller-1",
+          targets: [selectedTarget],
+        };
+      },
+      observeComputerTarget: async (_workspace, _computer, _target, options) =>
+        options?.signal ? await read() : await choose(),
+
+      actInComputer: async (_workspace, _session, request) => {
+        requests.push(request);
+        if (holdAction)
+          return await new Promise<ComputerActionReceipt>((resolve) => {
+            actions.push({ resolve });
+          });
+        if (actionError) throw actionError;
+        return {
+          ...receipt(view(sequence), request.operationId),
+          observation: nullAction ? null : view(sequence),
+        };
+      },
+    });
+    const hook = await renderHook(
+      () =>
+        useComputerSession({
+          client,
+          workspaceId: WORKSPACE_ID,
+          computerSessionId: COMPUTER_SESSION_ID,
+          pollIntervalMs: 60_000,
+        }),
+      undefined,
+    );
+    await flush();
+    return {
+      hook,
+      selectedTarget,
+      view,
+      choices,
+      reads,
+      actions,
+      requests,
+      sequence: (value: number) => {
+        sequence = value;
+      },
+      holdSelection: () => {
+        holdSelection = true;
+      },
+      holdObservation: () => {
+        holdObservation = true;
+      },
+      holdAction: () => {
+        holdAction = true;
+      },
+      nullAction: () => {
+        nullAction = true;
+      },
+      actionError: (value: Error) => {
+        actionError = value;
+      },
+      inventoryReads: () => inventoryReads,
+      selectionCalls: () => selectionCalls,
+    };
+  }
+  const input = {
+    type: "semantic",
+    action: "invoke",
+    locator: { kind: "ref", ref: "e1" },
+  } as const;
+
+  test.each(["observation", "error"] as const)(
+    "an older selection %s cannot overwrite a newer same-view refresh or next input fence",
+    async (delivery) => {
+      const current = await fixture();
+      try {
+        current.holdSelection();
+        let selected!: Promise<ComputerTarget>;
+        await actRun(() => {
+          selected = current.hook.result.current.selectTarget(current.selectedTarget.id);
+        });
+        const failure = new OpenGeniApiError(503, "Synthetic obsolete selection failure");
+        const outcome = selected.catch((cause: unknown) => cause);
+        current.sequence(2);
+        await actRun(() => current.hook.result.current.refresh());
+        expect(current.hook.result.current.observation?.observationId).toBe("read-observation-2");
+        await actRun(async () => {
+          if (delivery === "error") {
+            current.choices[0]!.reject(failure);
+            expect(await outcome).toBe(failure);
+          } else {
+            current.choices[0]!.resolve(current.view(1));
+            await outcome;
+          }
+        });
+        expect(current.hook.result.current.observation?.observationId).toBe("read-observation-2");
+        expect(current.hook.result.current.error).toBeNull();
+        expect(current.hook.result.current.controlError).toBeNull();
+        await actRun(() => current.hook.result.current.act(input));
+        expect(current.requests[0]?.expectedObservationId).toBe("read-observation-2");
+      } finally {
+        await current.hook.unmount();
+      }
+    },
+  );
+
+  test("a newer selection keeps its observation after an older refresh read resolves", async () => {
+    const current = await fixture();
+    try {
+      current.holdObservation();
+      let refreshing!: Promise<void>;
+      await actRun(() => {
+        refreshing = current.hook.result.current.refresh();
+      });
+      await flush();
+      expect(current.reads).toHaveLength(1);
+      current.sequence(2);
+      await actRun(() => current.hook.result.current.selectTarget(current.selectedTarget.id));
+      await actRun(async () => {
+        current.reads[0]!.resolve(current.view(1));
+        await refreshing;
+      });
+      expect(current.hook.result.current.observation?.observationId).toBe("read-observation-2");
+      await actRun(() => current.hook.result.current.act(input));
+      expect(current.requests[0]?.expectedObservationId).toBe("read-observation-2");
+    } finally {
+      await current.hook.unmount();
+    }
+  });
+
+  test.each(["null observation", "error"] as const)(
+    "an admitted selection remains coherent after immediate input returns %s before rendering",
+    async (delivery) => {
+      const current = await fixture();
+      try {
+        current.holdSelection();
+        let selected!: Promise<ComputerTarget>;
+        await actRun(() => {
+          selected = current.hook.result.current.selectTarget(current.selectedTarget.id);
+        });
+        const failure = new OpenGeniApiError(503, "Synthetic current action failure");
+        current.sequence(2);
+        if (delivery === "error") current.actionError(failure);
+        else {
+          current.nullAction();
+          current.holdObservation();
+        }
+        await actRun(async () => {
+          current.choices[0]!.resolve(current.view(2));
+          await selected;
+          const outcome = current.hook.result.current.act(input).catch((cause: unknown) => cause);
+          if (delivery === "error") expect(await outcome).toBe(failure);
+          else expect(((await outcome) as ComputerActionReceipt).state).toBe("completed");
+        });
+        expect(current.requests).toHaveLength(1);
+        expect(current.requests[0]?.expectedObservationId).toBe("read-observation-2");
+        expect(current.hook.result.current.observation?.observationId).toBe("read-observation-2");
+        expect(current.hook.result.current.error).toBe(delivery === "error" ? failure : null);
+      } finally {
+        await current.hook.unmount();
+      }
+    },
+  );
+
+  test.each(["completed", "outcome_unknown"] as const)(
+    "a same-view refresh cannot discard a pending physical %s action outcome",
+    async (state) => {
+      const current = await fixture();
+      try {
+        current.holdAction();
+        let pending!: Promise<ComputerActionReceipt>;
+        await actRun(() => {
+          pending = current.hook.result.current.act({
+            type: "keyboard",
+            action: "press",
+            value: "Enter",
+          });
+        });
+        current.sequence(2);
+        await actRun(() => current.hook.result.current.refresh());
+        expect(current.hook.result.current.observation?.observationId).toBe("read-observation-2");
+        const result: ComputerActionReceipt = {
+          ...receipt(current.view(3), current.requests[0]!.operationId),
+          state,
+          error:
+            state === "outcome_unknown"
+              ? {
+                  code: "resource_unavailable",
+                  message: "Synthetic uncertain delivery",
+                  retryable: false,
+                }
+              : null,
+        };
+        await actRun(async () => {
+          current.actions[0]!.resolve(result);
+          expect(await pending).toEqual(result);
+        });
+        expect(current.hook.result.current.observation?.observationId).toBe("read-observation-3");
+        expect(current.requests).toHaveLength(1);
+      } finally {
+        await current.hook.unmount();
+      }
+    },
+  );
+});
+
+describe("ComputerSession selection invocation ordering", () => {
+  async function fixture() {
+    const firstTarget = target("window-a");
+    const secondTarget = target("window-b");
+    const view = (current: ComputerTarget, sequence: number): ComputerObservation => ({
+      ...observation(current),
+      observationId: "selection-observation-" + sequence,
+      frameId: "selection-frame-" + sequence,
+    });
+    const choices: Array<{
+      resolve: (value: ComputerObservation) => void;
+      reject: (cause: unknown) => void;
+    }> = [];
+    const selected: string[] = [];
+    const requests: ComputerActionRequest[] = [];
+    let choosing = false;
+    const client = fakeClient({
+      getComputerSession: async () => computerSession(),
+      listComputerTargets: async () => ({
+        computerSessionId: COMPUTER_SESSION_ID,
+        controllerGeneration: "controller-1",
+        targets: [firstTarget, secondTarget],
+      }),
+      observeComputerTarget: async (_workspace, _computer, targetId) => {
+        if (!choosing) return view(firstTarget, 0);
+        selected.push(targetId);
+        return await new Promise<ComputerObservation>((resolve, reject) => {
+          choices.push({ resolve, reject });
+        });
+      },
+      actInComputer: async (_workspace, _computer, request) => {
+        requests.push(request);
+        return receipt(view(firstTarget, 3), request.operationId);
+      },
+    });
+    const hook = await renderHook(
+      () =>
+        useComputerSession({
+          client,
+          workspaceId: WORKSPACE_ID,
+          computerSessionId: COMPUTER_SESSION_ID,
+          pollIntervalMs: 60_000,
+        }),
+      undefined,
+    );
+    await flush();
+    choosing = true;
+    let first!: Promise<ComputerTarget>;
+    let second!: Promise<ComputerTarget>;
+    let third!: Promise<ComputerTarget>;
+    await actRun(() => {
+      first = hook.result.current.selectTarget(firstTarget.id);
+    });
+    await actRun(() => {
+      second = hook.result.current.selectTarget(secondTarget.id);
+    });
+    await actRun(() => {
+      third = hook.result.current.selectTarget(firstTarget.id);
+    });
+    return {
+      hook,
+      firstTarget,
+      secondTarget,
+      view,
+      choices,
+      selected,
+      requests,
+      first,
+      second,
+      third,
+    };
+  }
+
+  const input = {
+    type: "semantic",
+    action: "invoke",
+    locator: { kind: "ref", ref: "e1" },
+  } as const;
+
+  test("late A and B selections cannot replace a newer A observation or immediate semantic fence", async () => {
+    const current = await fixture();
+    try {
+      expect(current.selected).toEqual([
+        current.firstTarget.id,
+        current.secondTarget.id,
+        current.firstTarget.id,
+      ]);
+      await actRun(async () => {
+        current.choices[2]!.resolve(current.view(current.firstTarget, 3));
+        await current.third;
+        await current.hook.result.current.act(input);
+      });
+      expect(current.requests[0]?.expectedObservationId).toBe("selection-observation-3");
+      await actRun(async () => {
+        current.choices[1]!.resolve(current.view(current.secondTarget, 2));
+        expect(await current.second).toEqual(current.secondTarget);
+      });
+      expect(current.hook.result.current.selectedTarget?.id).toBe(current.firstTarget.id);
+      await actRun(async () => {
+        current.choices[0]!.resolve(current.view(current.firstTarget, 1));
+        expect(await current.first).toEqual(current.firstTarget);
+      });
+      expect(current.hook.result.current.observation?.observationId).toBe(
+        "selection-observation-3",
+      );
+      await actRun(() => current.hook.result.current.act(input));
+      expect(current.requests[1]?.expectedObservationId).toBe("selection-observation-3");
+    } finally {
+      await current.hook.unmount();
+    }
+  });
+
+  test.each([0, 1])(
+    "an obsolete selection error %s cannot replace the current successful posture",
+    async (index) => {
+      const current = await fixture();
+      const failure = new OpenGeniApiError(503, "Synthetic obsolete selection failure");
+      const pending = [current.first, current.second];
+      const failed = pending[index]!.catch((cause: unknown) => cause);
+      try {
+        await actRun(async () => {
+          current.choices[2]!.resolve(current.view(current.firstTarget, 3));
+          await current.third;
+          current.choices[index]!.reject(failure);
+          expect(await failed).toBe(failure);
+          const other = 1 - index;
+          current.choices[other]!.resolve(
+            current.view(other === 0 ? current.firstTarget : current.secondTarget, 1),
+          );
+          await pending[other];
+        });
+        expect(current.hook.result.current.error).toBeNull();
+        expect(current.hook.result.current.controlError).toBeNull();
+        expect(current.hook.result.current.observation?.observationId).toBe(
+          "selection-observation-3",
+        );
+        await actRun(() => current.hook.result.current.act(input));
+        expect(current.requests[0]?.expectedObservationId).toBe("selection-observation-3");
+      } finally {
+        await current.hook.unmount();
+      }
+    },
+  );
+
+  test("older observations cannot clear the newest selection failure", async () => {
+    const current = await fixture();
+    const failure = new OpenGeniApiError(503, "Synthetic current selection failure");
+    const failed = current.third.catch((cause: unknown) => cause);
+    try {
+      await actRun(async () => {
+        current.choices[2]!.reject(failure);
+        expect(await failed).toBe(failure);
+      });
+      const currentControlError = current.hook.result.current.controlError;
+      await actRun(async () => {
+        current.choices[1]!.resolve(current.view(current.secondTarget, 2));
+        await current.second;
+        current.choices[0]!.resolve(current.view(current.firstTarget, 1));
+        await current.first;
+      });
+      expect(current.hook.result.current.error).toBe(failure);
+      expect(current.hook.result.current.controlError).toBe(currentControlError);
+      expect(current.hook.result.current.observation).toBeNull();
+    } finally {
+      await current.hook.unmount();
+    }
+  });
+
+  test("an older same-ID observation cannot enter while the latest selection is pending", async () => {
+    const current = await fixture();
+    try {
+      await actRun(async () => {
+        current.choices[0]!.resolve(current.view(current.firstTarget, 1));
+        await current.first;
+      });
+      expect(current.hook.result.current.observation).toBeNull();
+      expect(current.hook.result.current.loading).toBe(true);
+      await expect(current.hook.result.current.act(input)).rejects.toThrow(/not ready/);
+      expect(current.requests).toHaveLength(0);
+      await actRun(async () => {
+        current.choices[2]!.resolve(current.view(current.firstTarget, 3));
+        await current.third;
+        current.choices[1]!.resolve(current.view(current.secondTarget, 2));
+        await current.second;
+      });
+      expect(current.hook.result.current.observation?.observationId).toBe(
+        "selection-observation-3",
+      );
+    } finally {
+      await current.hook.unmount();
+    }
+  });
+});
+
+describe("ComputerSession action result ordering", () => {
+  async function fixture() {
+    const windowTarget = target("window-1");
+    const view = (sequence: number): ComputerObservation => ({
+      ...observation({ ...windowTarget }),
+      observationId: `ordered-observation-${sequence}`,
+      frameId: `ordered-frame-${sequence}`,
+    });
+    const requests: ComputerActionRequest[] = [];
+    const deliveries: Array<{
+      resolve: (value: ComputerActionReceipt) => void;
+      reject: (cause: unknown) => void;
+    }> = [];
+    let reads = 0;
+    let holdRead = false;
+    let readSignal: AbortSignal | undefined;
+    let finishRead!: (value: ComputerObservation) => void;
+    const client = fakeClient({
+      getComputerSession: async () => computerSession(),
+      listComputerTargets: async () => ({
+        computerSessionId: COMPUTER_SESSION_ID,
+        controllerGeneration: "controller-1",
+        targets: [{ ...windowTarget }],
+      }),
+      observeComputerTarget: async (_workspace, _computer, _target, options) => {
+        reads++;
+        if (holdRead) {
+          readSignal = options?.signal;
+          return await new Promise<ComputerObservation>((resolve) => {
+            finishRead = resolve;
+          });
+        }
+        return view(0);
+      },
+      actInComputer: async (_workspace, _computer, request) => {
+        requests.push(request);
+        if (requests.length <= 2) {
+          return await new Promise<ComputerActionReceipt>((resolve, reject) => {
+            deliveries.push({ resolve, reject });
+          });
+        }
+        return receipt(view(requests.length), request.operationId);
+      },
+    });
+    const hook = await renderHook(
+      () =>
+        useComputerSession({
+          client,
+          workspaceId: WORKSPACE_ID,
+          computerSessionId: COMPUTER_SESSION_ID,
+          pollIntervalMs: 60_000,
+        }),
+      undefined,
+    );
+    await flush();
+    let first!: Promise<ComputerActionReceipt>;
+    let second!: Promise<ComputerActionReceipt>;
+    await actRun(() => {
+      first = hook.result.current.act({ type: "keyboard", action: "press", value: "ArrowRight" });
+      second = hook.result.current.act({ type: "keyboard", action: "press", value: "ArrowRight" });
+    });
+    const result = (
+      index: number,
+      sequence: number,
+      state: ComputerActionReceipt["state"] = "completed",
+      withObservation = true,
+    ): ComputerActionReceipt => ({
+      ...receipt(view(sequence), requests[index]!.operationId),
+      state,
+      observation: withObservation ? view(sequence) : null,
+      dispatchedAt: state === "prepared" ? null : NOW,
+      settledAt: state === "prepared" || state === "dispatched" ? null : NOW,
+      error:
+        state === "failed" || state === "outcome_unknown"
+          ? { code: "resource_unavailable", message: "Synthetic action failure", retryable: false }
+          : null,
+    });
+    return {
+      hook,
+      requests,
+      deliveries,
+      first,
+      second,
+      result,
+      reads: () => reads,
+      holdRead: () => {
+        holdRead = true;
+      },
+      readSignal: () => readSignal,
+      finishRead: (sequence: number) => finishRead(view(sequence)),
+    };
+  }
+
+  test.each(["completed", "failed", "outcome_unknown"] as const)(
+    "a late first %s receipt cannot regress the second settled observation or semantic fence",
+    async (state) => {
+      const current = await fixture();
+      try {
+        await actRun(async () => {
+          current.deliveries[1]!.resolve(current.result(1, 2));
+          await current.second;
+        });
+        const old = current.result(0, 1, state);
+        await actRun(async () => {
+          current.deliveries[0]!.resolve(old);
+          expect(await current.first).toEqual(old);
+          await current.hook.result.current.act({
+            type: "semantic",
+            action: "invoke",
+            locator: { kind: "ref", ref: "e1" },
+          });
+        });
+        expect(current.requests).toHaveLength(3);
+        expect(current.requests[2]?.expectedObservationId).toBe("ordered-observation-2");
+        expect(current.hook.result.current.observation?.observationId).toBe(
+          "ordered-observation-3",
+        );
+        expect(current.hook.result.current.controlError).toBeNull();
+      } finally {
+        await current.hook.unmount();
+      }
+    },
+  );
+
+  test.each(["before", "after"] as const)(
+    "an earlier transport failure delivered %s newer success cannot replace its cleared posture",
+    async (delivery) => {
+      const current = await fixture();
+      const failure = new OpenGeniApiError(503, "Synthetic earlier delivery failure");
+      const firstOutcome = current.first.catch((cause: unknown) => cause);
+      try {
+        await actRun(async () => {
+          if (delivery === "before") {
+            current.deliveries[0]!.reject(failure);
+            expect(await firstOutcome).toBe(failure);
+          }
+          current.deliveries[1]!.resolve(current.result(1, 2));
+          await current.second;
+          if (delivery === "after") {
+            current.deliveries[0]!.reject(failure);
+            expect(await firstOutcome).toBe(failure);
+          }
+        });
+        expect(current.hook.result.current.error).toBeNull();
+        expect(current.hook.result.current.controlError).toBeNull();
+        expect(current.hook.result.current.observation?.observationId).toBe(
+          "ordered-observation-2",
+        );
+      } finally {
+        await current.hook.unmount();
+      }
+    },
+  );
+
+  test.each([false, true])(
+    "a late first receipt cannot clear a newer unavailable-control error (observation %s)",
+    async (withObservation) => {
+      const current = await fixture();
+      const failure = new OpenGeniApiError(503, "Synthetic current control unavailable");
+      const secondOutcome = current.second.catch((cause: unknown) => cause);
+      try {
+        await actRun(async () => {
+          current.deliveries[1]!.reject(failure);
+          expect(await secondOutcome).toBe(failure);
+          current.deliveries[0]!.resolve(current.result(0, 1, "completed", withObservation));
+          await current.first;
+        });
+        expect(current.hook.result.current.error).toBe(failure);
+        expect(current.hook.result.current.controlError).toBe(failure);
+        expect(current.hook.result.current.observation?.observationId).toBe(
+          "ordered-observation-0",
+        );
+        expect(current.reads()).toBe(1);
+      } finally {
+        await current.hook.unmount();
+      }
+    },
+  );
+
+  test("a first receipt supplies sequential semantic input while a later action is still pending", async () => {
+    const current = await fixture();
+    try {
+      await actRun(async () => {
+        current.deliveries[0]!.resolve(current.result(0, 1));
+        await current.first;
+        await current.hook.result.current.act({
+          type: "semantic",
+          action: "invoke",
+          locator: { kind: "ref", ref: "e1" },
+        });
+        current.deliveries[1]!.resolve(current.result(1, 2));
+        await current.second;
+      });
+      expect(current.requests[2]?.expectedObservationId).toBe("ordered-observation-1");
+      expect(current.hook.result.current.observation?.observationId).toBe("ordered-observation-3");
+    } finally {
+      await current.hook.unmount();
+    }
+  });
+
+  test("a refresh started by the first null receipt cannot regress a later action observation", async () => {
+    const current = await fixture();
+    try {
+      current.holdRead();
+      await actRun(async () => {
+        current.deliveries[0]!.resolve(current.result(0, 1, "completed", false));
+        await current.first;
+      });
+      await flush();
+      expect(current.reads()).toBe(2);
+      expect(current.readSignal()?.aborted).toBe(false);
+      await actRun(async () => {
+        current.deliveries[1]!.resolve(current.result(1, 2));
+        await current.second;
+      });
+      expect(current.readSignal()?.aborted).toBe(true);
+      await actRun(() => current.finishRead(1));
+      await flush();
+      expect(current.hook.result.current.observation?.observationId).toBe("ordered-observation-2");
+      await actRun(() =>
+        current.hook.result.current.act({
+          type: "semantic",
+          action: "invoke",
+          locator: { kind: "ref", ref: "e1" },
+        }),
+      );
+      expect(current.requests[2]?.expectedObservationId).toBe("ordered-observation-2");
+    } finally {
+      await current.hook.unmount();
+    }
+  });
+
+  test.each(["prepared", "dispatched"] as const)(
+    "an unfinished second %s receipt does not suppress or refresh over the first completion",
+    async (state) => {
+      const current = await fixture();
+      try {
+        await actRun(async () => {
+          current.deliveries[1]!.resolve(current.result(1, 2, state, false));
+          expect((await current.second).state).toBe(state);
+          current.deliveries[0]!.resolve(current.result(0, 1));
+          await current.first;
+        });
+        expect(current.hook.result.current.observation?.observationId).toBe(
+          "ordered-observation-1",
+        );
+        expect(current.reads()).toBe(1);
+      } finally {
+        await current.hook.unmount();
       }
     },
   );
@@ -2162,6 +3553,446 @@ describe("ComputerViewer input reliability", () => {
     },
   );
 
+  test.each(["same paint", "pending decode", "new paint"] as const)(
+    "dispatches an immediate first click and one continuation against each actual %s",
+    async (paint) => {
+      const canvasMock = mockComputerCanvas(true);
+      let finishFirst!: (receipt: ComputerActionReceipt) => void;
+      const fixture = await renderComputerInputFixture(
+        async (request) =>
+          fixture.actions.length === 1
+            ? await new Promise<ComputerActionReceipt>((resolve) => {
+                finishFirst = resolve;
+              })
+            : { ...receipt(observation(), request.operationId), observation: null },
+        undefined,
+        { pointerClickContinuation: true },
+      );
+      try {
+        await fixture.frame(1, { width: 400, height: 300 });
+        await canvasMock.finishDecode(0);
+        await computerGesture(fixture.canvas, [25, 25]);
+        await flush();
+        expect(fixture.actions.map(({ action }) => action)).toEqual([
+          { type: "pointer", action: "click", clickCount: 1, frameId: "frame-1", x: 100, y: 75 },
+        ]);
+        if (paint !== "same paint") {
+          await fixture.frame(2, { width: 400, height: 300 });
+          if (paint === "new paint") await canvasMock.finishDecode(1);
+        }
+        await computerGesture(fixture.canvas, [25, 25]);
+        await flush();
+        expect(fixture.actions).toHaveLength(2);
+        await actRun(() =>
+          finishFirst({
+            ...receipt(observation(), fixture.actions[0]!.operationId),
+            observation: null,
+          }),
+        );
+        await flush();
+        const frameId = paint === "new paint" ? "frame-2" : "frame-1";
+        expect(fixture.actions.map(({ action }) => action)).toEqual([
+          { type: "pointer", action: "click", clickCount: 1, frameId: "frame-1", x: 100, y: 75 },
+          {
+            type: "pointer",
+            action: "click",
+            clickCount: 2,
+            frameId,
+            x: 100,
+            y: 75,
+            continuationOfOperationId: fixture.actions[0]!.operationId,
+          },
+        ]);
+        expect(fixture.actions.map(({ expectedFrameId }) => expectedFrameId)).toEqual([
+          "frame-1",
+          frameId,
+        ]);
+        expect(
+          fixture.actions.every(
+            ({ expectedTargetGeneration }) => expectedTargetGeneration === "window-1-generation",
+          ),
+        ).toBe(true);
+        if (paint === "pending decode") await canvasMock.finishDecode(1);
+      } finally {
+        await fixture.rendered.unmount();
+        canvasMock.restore();
+      }
+    },
+  );
+
+  test.each(["drag", "key", "right click", "wheel"] as const)(
+    "does not resend an immediate click before a following %s",
+    async (next) => {
+      const canvasMock = mockComputerCanvas();
+      const fixture = await renderComputerInputFixture(undefined, undefined, {
+        pointerClickContinuation: true,
+      });
+      try {
+        await fixture.frame(1, { width: 400, height: 300 });
+        await canvasMock.finishDecode(0);
+        await computerGesture(fixture.canvas, [25, 25]);
+        await flush();
+        if (next === "drag") await computerGesture(fixture.canvas, [25, 25], [50, 50]);
+        else
+          await actRun(() => {
+            if (next === "key")
+              fixture.keyboard.dispatchEvent(
+                new KeyboardEvent("keydown", { bubbles: true, key: "Enter" }),
+              );
+            if (next === "right click")
+              fixture.canvas.dispatchEvent(
+                new MouseEvent("contextmenu", {
+                  bubbles: true,
+                  cancelable: true,
+                  clientX: 25,
+                  clientY: 25,
+                }),
+              );
+            if (next === "wheel") fixture.canvas.dispatchEvent(computerWheel(100));
+          });
+        await flush(50);
+        expect(fixture.actions).toHaveLength(2);
+        expect(fixture.actions[0]!.action).toMatchObject({
+          type: "pointer",
+          action: "click",
+          clickCount: 1,
+        });
+        expect(fixture.actions[1]!.action).toMatchObject(
+          next === "drag"
+            ? {
+                type: "pointer",
+                action: "drag",
+                frameId: "frame-1",
+                x: 100,
+                y: 75,
+                endX: 200,
+                endY: 150,
+              }
+            : next === "key"
+              ? { type: "keyboard", action: "press", value: "Enter" }
+              : next === "right click"
+                ? { type: "pointer", action: "click", button: "right" }
+                : { type: "pointer", action: "scroll", deltaY: 100 },
+        );
+      } finally {
+        await fixture.rendered.unmount();
+        canvasMock.restore();
+      }
+    },
+  );
+
+  test.each([
+    "failed",
+    "outcome_unknown",
+    "target switch",
+    "generation change",
+    "controller change",
+  ] as const)(
+    "clears first-click continuation before a later gesture after %s",
+    async (boundary) => {
+      const canvasMock = mockComputerCanvas();
+      let finishFirst!: (receipt: ComputerActionReceipt) => void;
+      const fixture = await renderComputerInputFixture(
+        async (request) =>
+          fixture.actions.length === 1
+            ? await new Promise<ComputerActionReceipt>((resolve) => {
+                finishFirst = resolve;
+              })
+            : { ...receipt(observation(), request.operationId), observation: null },
+        undefined,
+        { pointerClickContinuation: true },
+      );
+      try {
+        await fixture.frame(1, { width: 400, height: 300 });
+        await canvasMock.finishDecode(0);
+        await computerGesture(fixture.canvas, [25, 25]);
+        await flush();
+        expect(fixture.actions).toHaveLength(1);
+        if (boundary === "target switch") await fixture.switchTarget();
+        await actRun(() =>
+          finishFirst({
+            ...receipt(observation(), fixture.actions[0]!.operationId),
+            observation:
+              boundary === "generation change"
+                ? observation({ ...target(), targetGeneration: "generation-2" })
+                : boundary === "controller change"
+                  ? observation({ ...target(), controllerGeneration: "controller-2" })
+                  : null,
+            ...(boundary === "failed" || boundary === "outcome_unknown"
+              ? {
+                  state: boundary,
+                  error: {
+                    code: "resource_unavailable",
+                    message: "Synthetic delivery failure",
+                    retryable: false,
+                  },
+                }
+              : {}),
+          }),
+        );
+        await flush();
+        expect(fixture.actions).toHaveLength(1);
+        if (boundary === "failed" || boundary === "outcome_unknown") {
+          await computerGesture(fixture.canvas, [25, 25]);
+          await flush();
+          expect(fixture.actions).toHaveLength(2);
+          expect(fixture.actions[1]!.action).toMatchObject({ action: "click", clickCount: 1 });
+        }
+      } finally {
+        await fixture.rendered.unmount();
+        canvasMock.restore();
+      }
+    },
+  );
+
+  test("sends the real second click while the first receipt waits and fences later keys behind both", async () => {
+    const canvasMock = mockComputerCanvas();
+    const finishes: Array<(value: ComputerActionReceipt) => void> = [];
+    const fixture = await renderComputerInputFixture(
+      async (request) =>
+        fixture.actions.length <= 2
+          ? await new Promise<ComputerActionReceipt>((resolve) => finishes.push(resolve))
+          : { ...receipt(observation(), request.operationId), observation: null },
+      undefined,
+      { pointerClickContinuation: true },
+    );
+    try {
+      await fixture.frame(1, { width: 400, height: 300 });
+      await canvasMock.finishDecode(0);
+      await computerGesture(fixture.canvas, [25, 25]);
+      await computerGesture(fixture.canvas, [25, 25]);
+      await flush();
+      expect(fixture.actions).toHaveLength(2);
+      expect(fixture.actions[1]!.action).toMatchObject({
+        clickCount: 2,
+        continuationOfOperationId: fixture.actions[0]!.operationId,
+      });
+      await actRun(() =>
+        fixture.rendered.container
+          .querySelector<HTMLTextAreaElement>("textarea")!
+          .dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", bubbles: true })),
+      );
+      await actRun(() =>
+        finishes[1]!({
+          ...receipt(observation(), fixture.actions[1]!.operationId),
+          observation: null,
+        }),
+      );
+      await flush();
+      expect(fixture.actions).toHaveLength(2);
+      await actRun(() =>
+        finishes[0]!({
+          ...receipt(observation(), fixture.actions[0]!.operationId),
+          observation: null,
+        }),
+      );
+      await flush();
+      expect(fixture.actions).toHaveLength(3);
+      expect(fixture.actions[2]!.action).toEqual({
+        type: "keyboard",
+        action: "press",
+        value: "Enter",
+      });
+    } finally {
+      await fixture.rendered.unmount();
+      canvasMock.restore();
+    }
+  });
+
+  test.each(["transport rejection", "failed receipt", "unknown receipt"] as const)(
+    "a late first %s cannot cancel a key queued after the second click completes",
+    async (result) => {
+      const canvasMock = mockComputerCanvas();
+      const pending: Array<{
+        resolve: (value: ComputerActionReceipt) => void;
+        reject: (cause: Error) => void;
+      }> = [];
+      const fixture = await renderComputerInputFixture(
+        async (request) =>
+          fixture.actions.length <= 2
+            ? await new Promise<ComputerActionReceipt>((resolve, reject) => {
+                pending.push({ resolve, reject });
+              })
+            : { ...receipt(observation(), request.operationId), observation: null },
+        undefined,
+        { pointerClickContinuation: true },
+      );
+      try {
+        await fixture.frame(1, { width: 400, height: 300 });
+        await canvasMock.finishDecode(0);
+        await computerGesture(fixture.canvas, [25, 25]);
+        await computerGesture(fixture.canvas, [25, 25]);
+        await flush();
+        expect(fixture.actions).toHaveLength(2);
+        await actRun(() => {
+          fixture.keyboard.dispatchEvent(
+            new KeyboardEvent("keydown", { key: "Enter", bubbles: true }),
+          );
+          pending[1]!.resolve({
+            ...receipt(observation(), fixture.actions[1]!.operationId),
+            observation: null,
+          });
+        });
+        await flush();
+        expect(fixture.actions).toHaveLength(2);
+        await actRun(() => {
+          if (result === "transport rejection")
+            pending[0]!.reject(new Error("Earlier transport failed"));
+          else
+            pending[0]!.resolve({
+              ...receipt(observation(), fixture.actions[0]!.operationId),
+              observation: null,
+              state: result === "failed receipt" ? "failed" : "outcome_unknown",
+              error: {
+                code: "driver_failed",
+                message: "Earlier delivery failed",
+                retryable: false,
+              },
+            });
+        });
+        await flush();
+        expect(fixture.actions).toHaveLength(3);
+        expect(fixture.actions[2]!.action).toEqual({
+          type: "keyboard",
+          action: "press",
+          value: "Enter",
+        });
+        expect(fixture.notifications).toEqual([]);
+      } finally {
+        await fixture.rendered.unmount();
+        canvasMock.restore();
+      }
+    },
+  );
+
+  test("an older failure preserves the latest failed click and only notifies that latest failure", async () => {
+    const canvasMock = mockComputerCanvas();
+    const pending: Array<(value: ComputerActionReceipt) => void> = [];
+    const fixture = await renderComputerInputFixture(
+      async () => await new Promise<ComputerActionReceipt>((resolve) => pending.push(resolve)),
+      undefined,
+      { pointerClickContinuation: true },
+    );
+    try {
+      await fixture.frame(1, { width: 400, height: 300 });
+      await canvasMock.finishDecode(0);
+      await computerGesture(fixture.canvas, [25, 25]);
+      await computerGesture(fixture.canvas, [25, 25]);
+      await flush();
+      await actRun(() => {
+        fixture.keyboard.dispatchEvent(
+          new KeyboardEvent("keydown", { key: "Enter", bubbles: true }),
+        );
+        pending[1]!({
+          ...receipt(observation(), fixture.actions[1]!.operationId),
+          observation: null,
+          state: "failed",
+          error: { code: "driver_failed", message: "Latest click failed", retryable: false },
+        });
+      });
+      await flush();
+      await actRun(() =>
+        pending[0]!({
+          ...receipt(observation(), fixture.actions[0]!.operationId),
+          observation: null,
+          state: "failed",
+          error: { code: "driver_failed", message: "Earlier click failed", retryable: false },
+        }),
+      );
+      await flush();
+      expect(fixture.actions).toHaveLength(2);
+      expect(fixture.notifications).toEqual(["Latest click failed"]);
+    } finally {
+      await fixture.rendered.unmount();
+      canvasMock.restore();
+    }
+  });
+
+  test.each(["prepared", "dispatched"] as const)(
+    "a current %s receipt does not report completed input or advance queued keys",
+    async (state) => {
+      const canvasMock = mockComputerCanvas();
+      const fixture = await renderComputerInputFixture(async (request) => ({
+        ...receipt(observation(), request.operationId),
+        observation: null,
+        state,
+      }));
+      try {
+        await fixture.frame(1, { width: 400, height: 300 });
+        await canvasMock.finishDecode(0);
+        await actRun(() => {
+          fixture.canvas.dispatchEvent(
+            new MouseEvent("pointerdown", { bubbles: true, clientX: 25, clientY: 25, button: 0 }),
+          );
+          fixture.canvas.dispatchEvent(
+            new MouseEvent("pointerup", { bubbles: true, clientX: 25, clientY: 25, button: 0 }),
+          );
+          fixture.keyboard.dispatchEvent(
+            new KeyboardEvent("keydown", { key: "Enter", bubbles: true }),
+          );
+        });
+        await flush();
+        expect(fixture.actions).toHaveLength(1);
+        expect(fixture.notifications).toEqual(["Desktop input did not complete."]);
+      } finally {
+        await fixture.rendered.unmount();
+        canvasMock.restore();
+      }
+    },
+  );
+
+  test("starts a new click after painted dimensions change without substituting frame metadata", async () => {
+    const canvasMock = mockComputerCanvas();
+    const fixture = await renderComputerInputFixture(undefined, undefined, {
+      pointerClickContinuation: true,
+    });
+    try {
+      await fixture.frame(1, { width: 400, height: 300 });
+      await canvasMock.finishDecode(0);
+      await computerGesture(fixture.canvas, [25, 25]);
+      await fixture.frame(2, { width: 800, height: 600 });
+      await canvasMock.finishDecode(1);
+      await computerGesture(fixture.canvas, [25, 25]);
+      await flush();
+      expect(fixture.actions.map(({ action }) => action)).toEqual([
+        { type: "pointer", action: "click", clickCount: 1, frameId: "frame-1", x: 100, y: 75 },
+        { type: "pointer", action: "click", clickCount: 1, frameId: "frame-2", x: 200, y: 150 },
+      ]);
+    } finally {
+      await fixture.rendered.unmount();
+      canvasMock.restore();
+    }
+  });
+
+  test.each([
+    { change: "resize", rect: { left: 0, top: 0, width: 200, height: 100 }, x: 100, y: 150 },
+    { change: "relocation", rect: { left: 25, top: 10, width: 100, height: 100 }, x: 100, y: 120 },
+  ])(
+    "starts a new click when canvas $change maps the same client point elsewhere",
+    async ({ rect, x, y }) => {
+      const canvasMock = mockComputerCanvas();
+      const fixture = await renderComputerInputFixture(undefined, undefined, {
+        pointerClickContinuation: true,
+      });
+      try {
+        await fixture.frame(1, { width: 400, height: 300 });
+        await canvasMock.finishDecode(0);
+        const canvas = fixture.canvas;
+        await computerGesture(canvas, [50, 50]);
+        canvas.getBoundingClientRect = () => rect as DOMRect;
+        await computerGesture(canvas, [50, 50]);
+        await flush();
+        expect(fixture.actions.map(({ action }) => action)).toEqual([
+          { type: "pointer", action: "click", clickCount: 1, frameId: "frame-1", x: 200, y: 150 },
+          { type: "pointer", action: "click", clickCount: 1, frameId: "frame-1", x, y },
+        ]);
+      } finally {
+        await fixture.rendered.unmount();
+        canvasMock.restore();
+      }
+    },
+  );
+
   test("keeps an RFB desktop view-only when native input is unavailable", async () => {
     const priorWebSocket = globalThis.WebSocket;
     // noVNC owns its socket; keep this component check on a disconnected fixture.
@@ -3061,19 +4892,46 @@ function computerWheel(deltaY: number): WheelEvent {
   return event;
 }
 
+async function computerGesture(canvas: HTMLCanvasElement, from: [number, number], to = from) {
+  await actRun(() => {
+    for (const [type, point] of [
+      ["pointerdown", from],
+      ["pointerup", to],
+    ] as const) {
+      canvas.dispatchEvent(
+        new MouseEvent(type, {
+          bubbles: true,
+          cancelable: true,
+          button: 0,
+          clientX: point[0],
+          clientY: point[1],
+        }),
+      );
+    }
+  });
+}
+
 async function renderComputerInputFixture(
   actInComputer?: (request: ComputerActionRequest) => Promise<ComputerActionReceipt>,
   readComputerClipboard?: () => Promise<ComputerClipboard>,
-  options: { currentTarget?: ComputerTarget; backgroundInput?: boolean } = {},
+  options: {
+    currentTarget?: ComputerTarget;
+    backgroundInput?: boolean;
+    pointerClickContinuation?: boolean;
+  } = {},
 ) {
   const currentTarget = options.currentTarget ?? target();
   const currentSession = computerSession();
   if (options.backgroundInput !== undefined) {
     currentSession.capabilities!.backgroundInput = options.backgroundInput;
   }
+  if (options.pointerClickContinuation !== undefined) {
+    currentSession.capabilities!.pointerClickContinuation = options.pointerClickContinuation;
+  }
   const secondTarget = { ...target("window-2"), title: "Second desktop", focused: false };
   const actions: ComputerActionRequest[] = [];
   const sockets: FakeComputerSocket[] = [];
+  const notifications: string[] = [];
   const client = fakeClient({
     listComputerSessions: async () => ({ revision: 1, sessions: [currentSession] }),
     getComputerSession: async () => currentSession,
@@ -3107,6 +4965,7 @@ async function renderComputerInputFixture(
         sockets.push(socket);
         return socket as unknown as ComputerFrameWebSocket;
       }}
+      onNotify={(notification) => notifications.push(notification.message)}
     />,
   );
   await flush(40);
@@ -3116,6 +4975,7 @@ async function renderComputerInputFixture(
     rendered,
     actions,
     sockets,
+    notifications,
     get canvas() {
       const canvas = rendered.container.querySelector<HTMLCanvasElement>("canvas")!;
       canvas.getBoundingClientRect = () =>

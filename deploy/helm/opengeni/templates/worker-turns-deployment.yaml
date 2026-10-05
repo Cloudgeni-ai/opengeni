@@ -9,7 +9,7 @@ metadata:
     {{- include "opengeni.labels" . | nindent 4 }}
     app.kubernetes.io/component: worker-turns
 spec:
-  replicas: {{ .Values.worker.turns.replicaCount }}
+  {{- include "opengeni.replicas" (dict "root" . "name" (printf "%s-worker-turns" (include "opengeni.fullname" .)) "replicaCount" .Values.worker.turns.replicaCount "autoscaling" .Values.worker.turns.autoscaling) | indent 2 }}
   {{- with .Values.worker.turns.strategy }}
   strategy:
     {{- toYaml . | nindent 4 }}

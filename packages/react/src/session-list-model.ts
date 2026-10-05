@@ -293,10 +293,15 @@ export function sessionRepoLabel(session: Pick<Session, "resources">): string | 
 export function recentSessionModelPresentation<TCatalog extends ClientModel>(
   modelId: string,
   catalogRows: readonly PickerModelRow<TCatalog>[],
-): { label: string; billingClass: PickerModelRow["billingClass"] } {
+): {
+  label: string;
+  billingClass: PickerModelRow["billingClass"];
+  logoUrl?: string | undefined;
+} {
   const row = findPickerRow([...catalogRows], modelId);
   return {
     label: row?.label ?? modelDisplayName(modelId),
+    logoUrl: row?.catalog.logoUrl,
     billingClass:
       row?.billingClass ??
       (isCodexProductModel(modelId) ? "codex_subscription" : "opengeni_credits"),

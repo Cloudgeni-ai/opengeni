@@ -5,6 +5,10 @@ import type { AuthNeededItem } from "@opengeni/react";
 import { SessionCapabilityCard } from "../../../src/components/capabilities/session-capability-card";
 import "../../../src/styles.css";
 import { scenario, useSessionResources } from "./context";
+import {
+  clearGitHubInstallRequest,
+  recordGitHubInstallRequest,
+} from "../../../src/lib/github-install-request";
 
 const params = new URLSearchParams(window.location.search);
 document.documentElement.dataset.ogTheme = params.get("theme") === "light" ? "light" : "dark";
@@ -13,6 +17,10 @@ for (const element of [document.documentElement, document.body]) {
   element.style.overflow = "auto";
   element.style.height = "auto";
 }
+
+// A non-owner already asked their GitHub organization owners to approve.
+if (scenario === "requested") recordGitHubInstallRequest("sample");
+else clearGitHubInstallRequest("sample");
 
 const item = {
   id: "sample-github-request",

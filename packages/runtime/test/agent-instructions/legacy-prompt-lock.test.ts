@@ -7,8 +7,8 @@ import { LEGACY_PROMPT_CASES } from "./legacy-cases";
 /**
  * D19/AC1: a session without an agent configuration keeps byte-identical
  * system instructions. These digests track the reviewed upstream legacy
- * composition, including goal-completion and child-answer delivery guidance.
- * Removing the shared child-answer addition reproduces the previous locks.
+ * composition, including goal-completion, child-answer delivery and durable
+ * Codemode approval guidance. Reviewed instruction changes update their locks;
  * Modular composition must never change legacy bytes as a side effect.
  */
 const LOCKED: Record<string, { chars: number; sha256: string; layers: string }> = {
@@ -33,14 +33,14 @@ const LOCKED: Record<string, { chars: number; sha256: string; layers: string }> 
     layers: "operational_contract,persona_and_core",
   },
   extras_without_governance: {
-    chars: 40100,
-    sha256: "accffd83f2b49b78706259fec6650d4c3d9b768ad22a64229ecc2934c6fe6cc7",
+    chars: 40347,
+    sha256: "4f54a66fc26f3cb5d8d274524122d243c6d6e240fbadf871421689e7f6b9ae2d",
     layers:
       "operational_contract,persona_and_core,codemode,code_search,git_bindings,workspace_memory,skill_catalog,session_instructions",
   },
   extras_with_governance: {
-    chars: 39199,
-    sha256: "1c1e71a5ebd10d06d0959fda60b7fc48b0bb1f4477be23c0900e7467d01e6bfe",
+    chars: 39446,
+    sha256: "2d37048a573bd8d946a3758f0f3df2e5d6b8eea54a4de01a94aff5dbe5a91dfc",
     layers:
       "operational_contract,persona_and_core,workspace_governance,session_instructions,codemode,code_search,workspace_memory",
   },

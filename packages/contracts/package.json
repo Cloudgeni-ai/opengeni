@@ -1,6 +1,6 @@
 {
   "name": "@opengeni/contracts",
-  "version": "5.8.0",
+  "version": "1.4.4",
   "description": "Shared zod schemas and wire-contract types for the OpenGeni API.",
   "license": "Apache-2.0",
   "repository": {
@@ -18,6 +18,10 @@
   "module": "./src/index.ts",
   "types": "./src/index.ts",
   "exports": {
+    "./connection-account-label": {
+      "types": "./src/connection-account-label.ts",
+      "default": "./src/connection-account-label.ts"
+    },
     "./modal-native-proof-v2": {
       "types": "./src/modal-native-proof-v2.ts",
       "default": "./src/modal-native-proof-v2.ts"
@@ -169,6 +173,10 @@
     "./model-display": {
       "types": "./src/model-display.ts",
       "default": "./src/model-display.ts"
+    },
+    "./tool-review-presentation": {
+      "types": "./src/tool-review-presentation.ts",
+      "default": "./src/tool-review-presentation.ts"
     },
     "./workspace-integration-wire": {
       "types": "./src/workspace-integration-wire.ts",

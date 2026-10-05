@@ -10,6 +10,7 @@ import { ModalCommandStartPreDispatchUnavailableError } from "../../../packages/
 import {
   CompactionProviderResponseError,
   ProviderCommandObservationUnavailableError,
+  RoutingMutationOutcomeUnknownError,
   compactionProviderFailureDiagnostics,
 } from "@opengeni/runtime";
 import * as parentWake from "../src/activities/parent-wake";
@@ -389,47 +390,46 @@ describe("raw database rollback settlement", () => {
     }
   });
 
-  test("a model that already started cannot acquire database startup replay authority", async () => {
-    const settle = mock(async () => true);
-    const error = rawFailure("40P01");
-    const { deps } = codexFailureDeps({ error, settle });
-    deps.billingState.isCodexTurn = false;
-    expect(await settleTurnFailure(deps as any)).toMatchObject({ status: "failed" });
-    expect(settle).toHaveBeenCalledWith(
-      expect.objectContaining({
-        events: expect.arrayContaining([
-          {
-            type: "turn.failed",
-            payload: expect.objectContaining({
-              error: "OpenGeni encountered a database error.",
-              code: "db_deadlock",
-              sqlState: "40P01",
-            }),
-          },
-        ]),
-        turnStatus: "failed",
-        sessionStatus: "failed",
-        activeTurnId: null,
-      }),
-    );
-    expect(JSON.stringify(settle.mock.calls)).not.toContain("fixture-value");
-    expect(deps.control.activityError).toBe(error);
+  test("a running turn's rolled-back deadlock victim recovers the exact attempt without turn.failed", async () => {
+    // PostgreSQL aborted the victim transaction, so nothing it wrote committed.
+    // Like an outage, it enters exact-attempt DB-only recovery; recovery never
+    // replays a tool and no logical failure is settled.
+    for (const [sqlState, code] of [
+      ["40P01", "db_deadlock"],
+      ["40001", "db_serialization_failure"],
+    ] as const) {
+      const settle = mock(async () => true);
+      const error = rawFailure(sqlState);
+      const { deps } = codexFailureDeps({ error, settle });
+      deps.billingState.isCodexTurn = false;
+      await expect(settleTurnFailure(deps as any)).rejects.toMatchObject({
+        type: "OpenGeniPostClaimDatabaseRecovery",
+        details: [{ turnId: "turn-1", triggerEventId: "trigger-1", executionGeneration: 1, code }],
+      });
+      expect(settle).not.toHaveBeenCalled();
+      expect(deps.control.activityStatus).toBe("recovering");
+      expect(deps.control.activityError).toBe(error);
+    }
   });
 });
 
 describe("executing-turn database outage handoff", () => {
-  function outage() {
+  function outage(code = "CONNECT_TIMEOUT") {
     return new DrizzleQueryError(
       "select account_id from workspaces",
       ["private-fixture"],
-      Object.assign(new Error("private connection detail"), { code: "CONNECT_TIMEOUT" }),
+      Object.assign(new Error("private connection detail"), { code }),
     );
   }
 
-  test.each(["delta", "function-tool", "history"])(
-    "%s outage stops without logical failure, ledger replay or invented writer proof",
-    async (stage) => {
-      const cause = outage();
+  test.each(
+    ["CONNECT_TIMEOUT", "CONNECTION_CLOSED", "CONNECTION_DESTROYED", "CONNECTION_ENDED"].flatMap(
+      (code) => ["delta", "function-tool", "history"].map((stage) => ({ code, stage })),
+    ),
+  )(
+    "%j outage stops without logical failure, ledger replay or invented writer proof",
+    async ({ code, stage }) => {
+      const cause = outage(code);
       const error =
         stage === "function-tool"
           ? new ToolCallError("Failed to run function tools", cause)
@@ -473,20 +473,24 @@ describe("executing-turn database outage handoff", () => {
     },
   );
 
-  test.each(["flush", "history", "settlement"])(
-    "DB outage during %s of an unrelated error also exports exact recovery",
-    async (stage) => {
+  test.each(
+    ["CONNECT_TIMEOUT", "CONNECTION_CLOSED", "CONNECTION_DESTROYED", "CONNECTION_ENDED"].flatMap(
+      (code) => ["flush", "history", "settlement"].map((stage) => ({ code, stage })),
+    ),
+  )(
+    "DB outage during %j of an unrelated error also exports exact recovery",
+    async ({ code, stage }) => {
       const terminal = mock(async () => {
-        if (stage === "settlement") throw outage();
+        if (stage === "settlement") throw outage(code);
         return true;
       });
       const { deps } = codexFailureDeps({ error: new Error("ordinary failure"), settle: terminal });
       deps.billingState.isCodexTurn = false;
       deps.flushRuntimeBatcher = mock(async () => {
-        if (stage === "flush") throw outage();
+        if (stage === "flush") throw outage(code);
       });
       deps.historySink.reconcileConversationTruth = mock(async () => {
-        if (stage === "history") throw outage();
+        if (stage === "history") throw outage(code);
       });
       await expect(settleTurnFailure(deps as any)).rejects.toMatchObject({
         type: "OpenGeniPostClaimDatabaseRecovery",
@@ -498,6 +502,20 @@ describe("executing-turn database outage handoff", () => {
       expect(terminal).toHaveBeenCalledTimes(stage === "settlement" ? 1 : 0);
     },
   );
+
+  test("a settlement outage cannot erase the original unknown tool outcome", async () => {
+    const database = outage("CONNECTION_CLOSED");
+    const terminal = mock(async () => {
+      throw database;
+    });
+    const { deps } = codexFailureDeps({
+      error: new RoutingMutationOutcomeUnknownError("execCommand", "unknown effect"),
+      settle: terminal,
+    });
+    deps.billingState.isCodexTurn = false;
+    await expect(settleTurnFailure(deps as any)).rejects.toBe(database);
+    expect(deps.control.activityStatus).not.toBe("recovering");
+  });
 });
 
 describe("early accepted-definition mismatch", () => {

@@ -1,5 +1,128 @@
 # @opengeni/codemode
 
+## 1.4.4
+
+### Patch Changes
+
+- Updated dependencies [6384dbd]
+  - @opengeni/contracts@1.4.4
+  - @opengeni/sdk@1.4.4
+  - @opengeni/tool-gateway@1.4.4
+
+## 1.4.3
+
+### Patch Changes
+
+- Updated dependencies [c0c0f74]
+  - @opengeni/sdk@1.4.3
+  - @opengeni/contracts@1.4.3
+  - @opengeni/tool-gateway@1.4.3
+
+## 1.4.2
+
+### Patch Changes
+
+- @opengeni/contracts@1.4.2
+- @opengeni/sdk@1.4.2
+- @opengeni/tool-gateway@1.4.2
+
+## 1.4.1
+
+### Patch Changes
+
+- fe1f64d: Codemode terminal settlement takes the session lock prefix before updating its journal row, so it no longer deadlocks against the client's re-notify of the same operation (`POST /codemode/calls` 500s with SQLSTATE 40P01). Submit and claim retry deadlock/serialization victims, an exhausted victim returns a typed retryable 503, and the Codemode client resubmits and re-reads the same operation id after a known-outcome transient 5xx.
+- Updated dependencies [9145bad]
+- Updated dependencies [be95071]
+- Updated dependencies [1f112d5]
+- Updated dependencies [784e862]
+- Updated dependencies [f290348]
+- Updated dependencies [e852eb7]
+  - @opengeni/contracts@1.4.1
+  - @opengeni/sdk@1.4.1
+  - @opengeni/tool-gateway@1.4.1
+
+## 1.4.0
+
+### Patch Changes
+
+- Updated dependencies [bd9521c]
+- Updated dependencies [5a0c6f3]
+- Updated dependencies [e0ccba8]
+- Updated dependencies [8e11301]
+- Updated dependencies [ef0f1c8]
+- Updated dependencies [08ce841]
+- Updated dependencies [673bb53]
+- Updated dependencies [e01662a]
+  - @opengeni/contracts@1.4.0
+  - @opengeni/sdk@1.4.0
+  - @opengeni/tool-gateway@1.4.0
+
+## 1.3.0
+
+### Minor Changes
+
+- 178b5ae: Unify connector Allow, Ask first and Block decisions across tool transports and settings. Add durable programmatic approval handles, exact stored-operation continuation, and shared review facts with portable React presentation and paginated protected details.
+
+  Add lightweight Gmail message selection and bounded pagination/chunk helpers. Preserve exact access checks, uncertain outcomes and existing client compatibility. Deploy matching API, worker and native runtime artifacts through the documented maintenance migration.
+
+### Patch Changes
+
+- Updated dependencies [178b5ae]
+- Updated dependencies [2aed1a1]
+- Updated dependencies [414d416]
+  - @opengeni/contracts@1.3.0
+  - @opengeni/sdk@1.3.0
+  - @opengeni/tool-gateway@1.3.0
+
+## 1.2.0
+
+### Patch Changes
+
+- Updated dependencies [11c4d3c]
+- Updated dependencies [21c8904]
+- Updated dependencies [d870f32]
+  - @opengeni/sdk@1.2.0
+  - @opengeni/contracts@1.2.0
+  - @opengeni/tool-gateway@1.2.0
+
+## 1.1.0
+
+### Patch Changes
+
+- Updated dependencies [5fd6c55]
+- Updated dependencies [c600e3a]
+- Updated dependencies [411b3b5]
+- Updated dependencies [4d5053f]
+- Updated dependencies [208dec1]
+  - @opengeni/contracts@1.1.0
+  - @opengeni/sdk@1.1.0
+  - @opengeni/tool-gateway@1.1.0
+
+## 1.0.2
+
+### Patch Changes
+
+- Updated dependencies [43da85e]
+- Updated dependencies [4476ca7]
+- Updated dependencies [e16aa17]
+- Updated dependencies [cbe4357]
+  - @opengeni/sdk@1.0.1
+  - @opengeni/contracts@1.0.1
+  - @opengeni/tool-gateway@1.0.1
+
+## 1.0.0
+
+### Major Changes
+
+- Reset package versioning: every published `@opengeni/*` package now releases together at one shared version, starting at 1.0.0. Install all `@opengeni` packages at the same version. Earlier versions are retired.
+
+## 0.7.2
+
+### Patch Changes
+
+- Updated dependencies [627ff68]
+  - @opengeni/sdk@7.8.1
+
 ## 0.7.1
 
 ### Patch Changes

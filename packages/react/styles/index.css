@@ -601,6 +601,55 @@
   .og-composer-footer:has([data-transcription-capturing]) .og-composer-actions {
     display: none;
   }
+
+  /* A saved recording or voice error needs its explanation to be readable:
+     give it the controls row (Send stays) instead of an ellipsis. */
+  .og-composer-footer:has([data-transcription-attention])
+    .og-composer-controls
+    > :not([data-transcription-attention]) {
+    display: none;
+  }
+
+  /* Host extras (live voice, custom actions) step aside too; Pause/Stop/Send stay. */
+  .og-composer-footer:has([data-transcription-attention])
+    .og-composer-actions
+    > :not(:is([data-analytics-action], :has([data-analytics-action]))) {
+    display: none;
+  }
+
+  .og-composer-footer
+    [data-transcription-attention]
+    :is(.og-transcription-recovered-label, .og-transcription-error-label) {
+    max-width: min(15rem, 52vw);
+    white-space: normal;
+    display: -webkit-box;
+    -webkit-box-orient: vertical;
+    -webkit-line-clamp: 3;
+    line-height: 1.2;
+  }
+
+  /* A failed live-voice start explains itself in the row until dismissed. */
+  .og-composer-footer:has([data-realtime-attention]) .og-composer-controls {
+    display: none;
+  }
+
+  .og-composer-footer:has([data-realtime-attention]) .og-composer-actions,
+  .og-composer-footer .og-realtime-control:has([data-realtime-attention]),
+  .og-composer-footer [data-realtime-attention] {
+    flex: 1 1 auto;
+    min-width: 0;
+  }
+
+  .og-composer-footer:has([data-realtime-attention])
+    .og-composer-actions
+    > :not(:has([data-realtime-attention])) {
+    flex-shrink: 0;
+  }
+
+  .og-composer-footer [data-realtime-attention] .og-realtime-failure-label {
+    max-width: none;
+    -webkit-line-clamp: 3;
+  }
 }
 
 @media (forced-colors: active) {

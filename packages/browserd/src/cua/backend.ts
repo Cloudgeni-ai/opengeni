@@ -367,6 +367,9 @@ export class CuaComputerBackend implements ComputerBackend {
   }
 
   private async operations(command: ComputerBackendActionCommand): Promise<Operation[]> {
+    if (command.action.type === "pointer" && command.action.clickCount === 2) {
+      throw unsupported("CUA click continuation is unavailable");
+    }
     const target = await this.target(command.targetId);
     if (target.native.targetGeneration !== command.expectedTargetGeneration)
       throw new ComputerBackendError("target_stale", "CUA target generation changed", false, false);

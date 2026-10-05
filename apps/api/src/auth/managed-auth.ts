@@ -2,6 +2,7 @@ import { canonicalPublicOrigin, managedUserEmailAllowed, type Settings } from "@
 import { MANAGED_AUTH_NEW_SIGNUPS_PAUSED_CODE } from "@opengeni/contracts";
 import {
   configureManagedUserAdmission,
+  recordManagedAuthLoggedFailure,
   type ManagedAuth,
   type ManagedEmailMessage,
   type ManagedEmailTransport,
@@ -142,6 +143,23 @@ export async function verifyManagedAuthPassword(password: string, hash: string):
 type ManagedAuthPoolObservability = Pick<Observability, "warn" | "incrementCounter">;
 
 /**
+ * Better Auth's default console output, plus handing logged failures to the
+ * session-lookup boundary so a lost database connection behind its generic
+ * INTERNAL_SERVER_ERROR stays recognizable (see `withManagedAuthSessionLookup`).
+ */
+function logBetterAuthMessage(
+  level: "debug" | "info" | "warn" | "error",
+  message: string,
+  ...args: unknown[]
+): void {
+  if (level === "error") recordManagedAuthLoggedFailure(args);
+  const line = `${new Date().toISOString()} ${level.toUpperCase()} [Better Auth]: ${message}`;
+  if (level === "error") console.error(line, ...args);
+  else if (level === "warn") console.warn(line, ...args);
+  else console.log(line, ...args);
+}
+
+/**
  * Bounded pool settings for Better Auth's dedicated `pg` pool. A connection
  * attempt fails after 10 s instead of queueing requests indefinitely while the
  * database is unreachable, and connections recycle like the main postgres-js
@@ -237,12 +255,13 @@ export function createManagedAuth(
     options.newSignupsGate ??
     createManagedAuthNewSignupsGate({ db, settings, observability: options.observability });
   const auth = betterAuth({
-    appName: "OpenGeni",
+    appName: "Opengeni",
     baseURL: betterAuthBaseUrl(settings),
     basePath: "/v1/auth",
     secret: settings.betterAuthSecret,
     database: pool,
     trustedOrigins: betterAuthTrustedOrigins(settings),
+    logger: { log: logBetterAuthMessage },
     hooks: {
       before: createManagedAuthEmailThrottleHook(
         db,
@@ -425,9 +444,9 @@ export function createManagedAuth(
         await sendManagedAuthEmail(managedEmailTransport, {
           kind: "password_reset",
           to: user.email,
-          subject: "Reset your OpenGeni password",
-          text: `Reset your OpenGeni password: ${url}`,
-          html: `<p>Reset your OpenGeni password:</p><p><a href="${escapeHtml(url)}">Reset password</a></p>`,
+          subject: "Reset your Opengeni password",
+          text: `Reset your Opengeni password: ${url}`,
+          html: `<p>Reset your Opengeni password:</p><p><a href="${escapeHtml(url)}">Reset password</a></p>`,
         });
       },
     },
@@ -772,13 +791,13 @@ export async function sendManagedAuthEmail(
 // Verification can sign the clicker in (autoSignInAfterVerification), so an
 // unsolicited verification email must say plainly that it can be ignored.
 function emailVerificationMessage(to: string, url: string): Omit<ManagedEmailMessage, "from"> {
-  const ignore = "If you did not create an OpenGeni account, ignore this email.";
+  const ignore = "If you did not create an Opengeni account, ignore this email.";
   return {
     kind: "email_verification",
     to,
-    subject: "Verify your OpenGeni email",
-    text: `Verify your OpenGeni email: ${url}\n\n${ignore}`,
-    html: `<p>Verify your OpenGeni email:</p><p><a href="${escapeHtml(url)}">Verify email</a></p><p>${ignore}</p>`,
+    subject: "Verify your Opengeni email",
+    text: `Verify your Opengeni email: ${url}\n\n${ignore}`,
+    html: `<p>Verify your Opengeni email:</p><p><a href="${escapeHtml(url)}">Verify email</a></p><p>${ignore}</p>`,
   };
 }
 

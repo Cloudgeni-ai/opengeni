@@ -15,6 +15,7 @@ import {
 import {
   allowedFirstPartyMcpToolsForSession,
   resolveFirstPartyMcpToolPolicy,
+  type FirstPartyMcpToolPolicySettings,
   type Settings,
 } from "@opengeni/config";
 import {
@@ -232,7 +233,7 @@ export function scheduledConnectionSurfaceEligibility(
   settings: Settings,
   target: Pick<Session, "firstPartyMcpTools" | "firstPartyMcpPermissions"> | null,
 ): { googleDrivePublicationEnabled: boolean; atlassianEnabled: boolean } {
-  const tools = target?.firstPartyMcpTools ?? resolveFirstPartyMcpToolPolicy(settings).default;
+  const tools = allowedFirstPartyMcpToolsForSession(settings, target?.firstPartyMcpTools);
   const permissions = target?.firstPartyMcpPermissions ?? DEFAULT_FIRST_PARTY_MCP_PERMISSIONS;
   return {
     googleDrivePublicationEnabled:
@@ -1637,7 +1638,7 @@ export async function validatedScheduledTaskUpdate(input: {
     ) {
       throw new HTTPException(409, {
         message:
-          "cannot change the OpenGeni Slack bot connection of a task with a live reusable session; recreate the task",
+          "cannot change the Opengeni Slack bot connection of a task with a live reusable session; recreate the task",
       });
     }
     // Update text is exact, even when a full form submission reuses the saved
@@ -2502,7 +2503,7 @@ async function validateScheduledTaskAgentConfig(input: {
  * Mutable rig/variable-set metadata is revalidated again at dispatch.
  */
 export function validateIncidentTelemetryPreflightSelection(
-  settings: Pick<Settings, "allowedFirstPartyMcpTools" | "defaultFirstPartyMcpTools">,
+  settings: FirstPartyMcpToolPolicySettings,
   agentConfig: ScheduledTaskAgentConfig,
 ): void {
   const executionClass = agentConfig.executionClass;

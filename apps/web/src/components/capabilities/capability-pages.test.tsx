@@ -184,6 +184,20 @@ describe("CatalogItemPage", () => {
     onBack: () => {},
   };
 
+  test("MCP detail pages display their authorized connected-account inventory", async () => {
+    const view = await render(
+      <CatalogItemPage
+        {...common}
+        item={item()}
+        onAction={() => {}}
+        connectionAccounts={{ connections: [] }}
+      />,
+    );
+    expect(visibleText(view.container)).toContain("Connected accounts");
+    expect(visibleText(view.container)).toContain("No accounts connected to this connector");
+    await view.unmount();
+  });
+
   test("an unavailable native deep link has no connect action and offers retry after a failed check", async () => {
     const connect = mock(() => {});
     const retry = mock(() => {});

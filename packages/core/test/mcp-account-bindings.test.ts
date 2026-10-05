@@ -46,6 +46,20 @@ function connection(subjectId: string | null = "alice"): ConnectionMetadata {
 }
 const input = { accountId, workspaceId, subjectId: "alice", servers: [server] };
 
+test("agent account labels use verified provider identity without changing exact routing", () => {
+  const selected = {
+    ...connection(),
+    metadata: { providerEmail: "alice@example.test", slackTeamName: "Community" },
+  };
+  const [binding] = mcpAccountBindingsFromVisibleConnections({ ...input, connections: [selected] });
+  expect(binding?.accountLabel).toBe("alice@example.test · Community · Only me");
+  expect(binding?.connectionId).toBe(selected.id);
+  const legacy = { ...connection(), metadata: { slackUserId: "U_ONE", slackTeamId: "T_ONE" } };
+  expect(
+    mcpAccountBindingsFromVisibleConnections({ ...input, connections: [legacy] })[0]?.accountLabel,
+  ).toBe("U_ONE · T_ONE · Only me");
+});
+
 test("rejected frozen accounts retain safe structured identity and eligibility reason", () => {
   const selected = connection();
   for (const [servers, connections, reason] of [

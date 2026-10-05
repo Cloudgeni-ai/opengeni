@@ -3,6 +3,7 @@ import {
   CallToolRequestSchema,
   ListToolsRequestSchema,
   type CallToolResult,
+  type Icon,
 } from "@modelcontextprotocol/sdk/types.js";
 import * as contracts from "@opengeni/contracts";
 import {
@@ -112,15 +113,62 @@ const TOOLS = [
   },
 ] as const;
 
+/** The brand mark from `apps/web/public/favicon.svg`. */
+const BRAND_MARK_PATH =
+  "M251 83.5966L207 109L163 83.5966L119 109L75 83.5966L141 45.4915A44 44 0 0 1 185 45.4915ZM185.25 172.3642A44.5 44.5 0 0 1 140.75 172.3642L75 134.4034L119 109L163 134.4034L207 109L251 134.4034Z";
+
+function brandMarkSvgDataUri(fill: string): string {
+  const svg = `<svg xmlns="http://www.w3.org/2000/svg" viewBox="71 17 184 184" width="184" height="184"><path fill="${fill}" d="${BRAND_MARK_PATH}"/></svg>`;
+  return `data:image/svg+xml;base64,${Buffer.from(svg).toString("base64")}`;
+}
+
+/**
+ * MCP `serverInfo.icons` (spec 2025-11-25). Self-contained data URIs work for
+ * every deployment; the web app's PNG is added when its public origin is known.
+ */
+export function organizationMcpIcons(publicOrigin: string | null): Icon[] {
+  const icons: Icon[] = [
+    {
+      src: brandMarkSvgDataUri("#111111"),
+      mimeType: "image/svg+xml",
+      sizes: ["any"],
+      theme: "light",
+    },
+    {
+      src: brandMarkSvgDataUri("#FFFFFF"),
+      mimeType: "image/svg+xml",
+      sizes: ["any"],
+      theme: "dark",
+    },
+  ];
+  if (publicOrigin) {
+    icons.push({
+      src: new URL("/icon-512.png", publicOrigin).href,
+      mimeType: "image/png",
+      sizes: ["512x512"],
+      theme: "light",
+    });
+  }
+  return icons;
+}
+
 export function buildOrganizationMcpServer(input: {
   caller: OrganizationMcpCaller;
   /** This API's own origin; the call never leaves the process. */
   origin: string;
+  /** The web app's public origin, when configured; serves the PNG icon. */
+  publicOrigin?: string | null;
   dispatch: (request: Request) => Promise<Response>;
   signal?: AbortSignal;
 }): Server {
   const server = new Server(
-    { name: "opengeni", version: "1.0.0" },
+    {
+      name: "opengeni",
+      title: "Opengeni",
+      version: "1.0.0",
+      websiteUrl: "https://opengeni.ai",
+      icons: organizationMcpIcons(input.publicOrigin ?? null),
+    },
     {
       capabilities: { tools: {} },
       instructions:
@@ -143,6 +191,7 @@ export function buildOrganizationMcpServer(input: {
         if (!parsed.success) return invalid(parsed.error);
         const entry = findAction(parsed.data.id);
         if (!entry) return failure(`No action "${parsed.data.id}". Search for it first.`);
+        if (entry.browserOnly) return browserOnly(entry);
         return json(describeAction(entry));
       }
       case "opengeni_action_call": {
@@ -172,26 +221,47 @@ function words(value: string): string[] {
     .filter(Boolean);
 }
 
+/** Actions an MCP caller can complete: browser-only ones are left out. */
+const CALLABLE_ACTIONS = ACTION_CATALOG.filter((entry) => !entry.browserOnly);
+
 export function searchActions(input: { query: string; limit: number; offset: number }) {
-  const wanted = words(input.query);
-  const scored = ACTION_CATALOG.map((entry) => {
-    const haystack = [
-      ...words(entry.id),
-      ...words(entry.path.replace(/:\w+/g, "")),
-      entry.method.toLowerCase(),
-    ];
+  // Singular and plural match ("workspace" finds listWorkspaces).
+  const stem = (word: string) =>
+    word.endsWith("ies") ? `${word.slice(0, -3)}y` : word.replace(/(?<!s)s$/u, "");
+  const wanted = words(input.query).map(stem);
+  // "workspaces" asks for a list; prefer list actions on a plural query.
+  const plural = words(input.query).some((word) => /[^s]s$/u.test(word));
+  const scored = CALLABLE_ACTIONS.map((entry) => {
+    // A word in the action's name matters far more than one in its path:
+    // nearly every path contains "workspaces".
+    const name = words(entry.id).map(stem);
+    const path = [...words(entry.path.replace(/:\w+/g, "")), entry.method.toLowerCase()].map(stem);
     const score = wanted.reduce(
       (total, word) =>
         total +
-        (haystack.includes(word) ? 2 : haystack.some((token) => token.startsWith(word)) ? 1 : 0),
+        (name.includes(word)
+          ? 4
+          : name.some((token) => token.startsWith(word))
+            ? 3
+            : path.includes(word)
+              ? 1
+              : path.some((token) => token.startsWith(word))
+                ? 0.5
+                : 0),
       0,
     );
-    return { entry, score, size: words(entry.id).length };
+    return {
+      entry,
+      score: score + (plural && score > 0 && name[0] === "list" ? 0.5 : 0),
+      size: name.length,
+    };
   }).filter((candidate) => wanted.length === 0 || candidate.score > 0);
   scored.sort(
     (left, right) =>
       right.score - left.score ||
       left.size - right.size ||
+      // On a tie, reads come before writes.
+      Number(left.entry.method !== "GET") - Number(right.entry.method !== "GET") ||
       left.entry.id.localeCompare(right.entry.id),
   );
   return {
@@ -241,6 +311,7 @@ async function callAction(
 ): Promise<CallToolResult> {
   const entry = findAction(input.id);
   if (!entry) return failure(`No action "${input.id}". Search for it first.`);
+  if (entry.browserOnly) return browserOnly(entry);
   const reads = entry.method === "GET" || entry.method === "HEAD";
   if (
     context.caller.kind === "person" &&
@@ -329,7 +400,7 @@ async function toolResult(response: Response): Promise<CallToolResult> {
       result.truncated = { returnedBytes: MAX_RESPONSE_BYTES, totalBytes: bytes.byteLength };
   }
   if (
-    status === 403 &&
+    (status === 401 || status === 403) &&
     /human|browser|cookie|same-origin/i.test(JSON.stringify(result.body ?? ""))
   ) {
     result.hint = "This action has to be done by the person in the Opengeni app in a browser.";
@@ -368,6 +439,13 @@ async function readStream(response: Response): Promise<string> {
 
 function json(value: unknown): CallToolResult {
   return { content: [{ type: "text", text: JSON.stringify(value) }] };
+}
+
+/** A browser-only action: say why, and that the person has to do it. */
+function browserOnly(entry: ActionCatalogEntry): CallToolResult {
+  return failure(
+    `${entry.id} isn't available to connected agents or API keys: ${entry.browserOnly}. The person has to do it in the Opengeni app in a browser.`,
+  );
 }
 
 function failure(message: string): CallToolResult {

@@ -510,17 +510,29 @@ async function requireRedemptionHuman(
       message: "reset redemption requires managed product mode",
     });
   }
-  // Normal managed auth prefers a bearer over a cookie. This irreversible route
-  // rejects the header before grant resolution so an API key/delegated/agent
-  // token can never borrow a browser cookie that happens to ride along. Exact
-  // JSON content type plus Origin and Fetch Metadata fail closed before auth.
-  if (c.req.header("authorization")) {
-    throw new HTTPException(403, {
-      message: "authorization bearer is not allowed for redemption",
-    });
+  // An agent the person signed in (organization MCP) acts as that person and
+  // may redeem, within the same exact-person grant check below. Its
+  // confirmation binds to a stable per-person agent hash, which can never equal
+  // a browser session hash.
+  const agent = isAgentActingAsPerson(c) ? agentActingAsPersonBeforeGrantCheck(c) : null;
+  if (!agent) {
+    // Normal managed auth prefers a bearer over a cookie. This irreversible
+    // route rejects the header before grant resolution so an API key or
+    // delegated token can never borrow a browser cookie that happens to ride
+    // along. Exact JSON content type plus Origin and Fetch Metadata fail closed.
+    if (c.req.header("authorization")) {
+      throw new HTTPException(403, {
+        message: "authorization bearer is not allowed for redemption",
+      });
+    }
+    requireSameOriginBrowserMutation(c, deps);
   }
-  requireSameOriginBrowserMutation(c, deps);
-  const human = await managedHumanOrAgent(c, deps);
+  const human: ManagedCookieHuman | null = agent
+    ? {
+        subjectId: agent.subjectId,
+        browserSessionHash: await hashCodexBrowserSession(`agent:${agent.subjectId}`),
+      }
+    : await managedCookieHuman(c, deps);
   if (!human) {
     throw new HTTPException(401, {
       message: "managed browser session required",
@@ -2050,8 +2062,9 @@ export function registerCodexRoutes(app: Hono, deps: ApiRouteDeps): void {
     },
   );
 
-  // The only OpenGeni reset-credit mutation route. There is intentionally no
-  // SDK/MCP/worker/scheduled/background equivalent.
+  // The only OpenGeni reset-credit mutation route: the person in the web app,
+  // or an agent they signed in acting as them. Nothing redeems automatically
+  // (no worker, scheduled, allocator or rotation path).
   app.post(
     "/v1/workspaces/:workspaceId/codex/accounts/:accountId/reset-credits/redeem",
     async (c) => {

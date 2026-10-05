@@ -1,12 +1,13 @@
 import { CHATGPT_MARK_PATH } from "../model-mark-paths";
 import {
   modelDisplayName,
+  modelLogoUrl,
   modelVendor,
   type ModelDisplayInput,
   type ModelVendor,
 } from "@opengeni/sdk/model-display";
 import { SparklesIcon } from "lucide-react";
-import type { ReactNode, SVGProps } from "react";
+import { useState, type ReactNode, type SVGProps } from "react";
 import { cn } from "../lib/cn";
 import { ClaudeMark } from "./claude-mark";
 import { GrokMark } from "./grok-mark";
@@ -25,12 +26,12 @@ const MARKED_VENDORS: ReadonlySet<ModelVendor> = new Set(["openai", "anthropic",
 /** True when `ModelMark` has a real maker logo for this model (not the neutral fallback). */
 export function modelHasMark(model: ModelDisplayInput): boolean {
   const vendor = modelVendor(model);
-  return vendor !== null && MARKED_VENDORS.has(vendor);
+  return modelLogoUrl(model) !== null || (vendor !== null && MARKED_VENDORS.has(vendor));
 }
 
 /**
- * The model maker's logo (OpenAI, Claude, Grok), never the connection that
- * serves it. Makers without a bundled logo get a neutral mark, so an org- and
+ * The catalog's maker logo, with bundled maker logos and a neutral fallback.
+ * Makers without a configured or bundled logo get a neutral mark, so an org- and
  * a workspace-connected copy of one model always look the same.
  */
 export function ModelMark(props: {
@@ -40,12 +41,22 @@ export function ModelMark(props: {
   fallback?: ReactNode;
   "aria-label"?: string | undefined;
 }) {
+  const logoUrl = modelLogoUrl(props.model);
+  const [failedUrl, setFailedUrl] = useState<string | null>(null);
   const vendor = modelVendor(props.model);
   const className = cn("size-3.5 shrink-0", props.className);
   const label = props["aria-label"];
   const a11y = label ? { role: "img" as const, "aria-label": label } : { "aria-hidden": true };
   const mark =
-    vendor === "openai" ? (
+    logoUrl && logoUrl !== failedUrl ? (
+      <img
+        src={logoUrl}
+        alt=""
+        className="size-full object-contain"
+        referrerPolicy="no-referrer"
+        onError={() => setFailedUrl(logoUrl)}
+      />
+    ) : vendor === "openai" ? (
       <ChatGptMark className="size-full" />
     ) : vendor === "anthropic" ? (
       <ClaudeMark className="size-full" />

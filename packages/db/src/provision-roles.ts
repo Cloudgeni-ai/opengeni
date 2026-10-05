@@ -578,6 +578,8 @@ async function grantAppRoleIfSchemaExists(
     "prepare_organization_membership_protocol_settlements(jsonb)",
     "assert_active_managed_human_organization_membership(uuid,text)",
     "resolve_workspace_writer_grant_identity(uuid,text)",
+    "lock_live_native_original_origin_v2(jsonb)",
+    "modal_native_origin_member_read_active(uuid,text)",
     "prepare_workspace_membership_removal_settlements(jsonb)",
     "workspace_membership_removal_command(jsonb)",
     "get_organization_retention_policy(uuid,text)",
@@ -1629,6 +1631,10 @@ BEGIN
     END IF;
     -- The trial-credit kill switch setter is operator-only (migration owner).
     -- Reprovisioning repairs any accidental runtime or PUBLIC grant.
+    IF to_regprocedure(format('%I.set_credit_promotion_policy(jsonb,text,text)', ${literal(schema)})) IS NOT NULL THEN
+      EXECUTE format('REVOKE ALL ON FUNCTION %I.set_credit_promotion_policy(jsonb,text,text) FROM PUBLIC', ${literal(schema)});
+      EXECUTE format('REVOKE ALL ON FUNCTION %I.set_credit_promotion_policy(jsonb,text,text) FROM %I', ${literal(schema)}, ${literal(role)});
+    END IF;
     IF to_regprocedure(
       format('%I.set_verified_signup_trial_credits_enabled(boolean,text,text)', ${literal(schema)})
     ) IS NOT NULL THEN
@@ -2071,6 +2077,16 @@ BEGIN
     EXECUTE format('GRANT USAGE ON SCHEMA opengeni_private TO %I', ${literal(role)});
     EXECUTE format('REVOKE CREATE ON SCHEMA opengeni_private FROM %I', ${literal(role)});
     EXECUTE format('GRANT EXECUTE ON ALL FUNCTIONS IN SCHEMA opengeni_private TO %I', ${literal(role)});
+    -- This exact content-free repair inventory shares the existing global
+    -- wake dispatcher's authority. Converge custom-role and migrate-then-
+    -- provision installs without opening a generic owner/posture exception.
+    IF to_regprocedure('opengeni_private.list_pending_child_terminal_wake_repairs_v1(integer,uuid,uuid)') IS NOT NULL THEN
+      EXECUTE format('ALTER FUNCTION opengeni_private.list_pending_child_terminal_wake_repairs_v1(integer,uuid,uuid) OWNER TO %I',
+        (SELECT pg_get_userbyid(proowner) FROM pg_proc
+          WHERE oid = 'opengeni_private.claim_session_workflow_wakes(integer)'::regprocedure));
+      REVOKE ALL ON FUNCTION opengeni_private.list_pending_child_terminal_wake_repairs_v1(integer,uuid,uuid) FROM PUBLIC;
+      EXECUTE format('GRANT EXECUTE ON FUNCTION opengeni_private.list_pending_child_terminal_wake_repairs_v1(integer,uuid,uuid) TO %I', ${literal(role)});
+    END IF;
     IF to_regclass('opengeni_private.session_import_batches') IS NOT NULL THEN
       EXECUTE format('REVOKE ALL ON TABLE opengeni_private.session_import_batches FROM %I', ${literal(role)});
       EXECUTE format('REVOKE ALL (%s) ON TABLE opengeni_private.session_import_batches FROM %I',
@@ -2091,6 +2107,16 @@ BEGIN
         REVOKE ALL ON FUNCTION opengeni_private.list_pending_modal_provider_creates() FROM PUBLIC;
       END IF;
     END IF;
+    IF to_regclass('opengeni_private.modal_native_origin_read_capabilities') IS NOT NULL THEN
+      EXECUTE format('REVOKE ALL ON TABLE opengeni_private.modal_native_origin_read_capabilities FROM %I', ${literal(role)});
+      EXECUTE format('REVOKE ALL (%s) ON TABLE opengeni_private.modal_native_origin_read_capabilities FROM %I',
+        (SELECT string_agg(quote_ident(attname), ',') FROM pg_attribute
+          WHERE attrelid='opengeni_private.modal_native_origin_read_capabilities'::regclass AND attnum>0 AND NOT attisdropped), ${literal(role)});
+      REVOKE ALL ON TABLE opengeni_private.modal_native_origin_read_capabilities FROM PUBLIC;
+      EXECUTE format('REVOKE ALL (%s) ON TABLE opengeni_private.modal_native_origin_read_capabilities FROM PUBLIC',
+        (SELECT string_agg(quote_ident(attname), ',') FROM pg_attribute
+          WHERE attrelid='opengeni_private.modal_native_origin_read_capabilities'::regclass AND attnum>0 AND NOT attisdropped));
+    END IF;
     IF to_regclass('opengeni_private.sandbox_recovery_rollout') IS NOT NULL THEN
       -- Migration may precede this role's creation. Converge only read access;
       -- runtime identities and PUBLIC never receive recovery activation writes.
@@ -2099,6 +2125,11 @@ BEGIN
       REVOKE ALL ON TABLE opengeni_private.sandbox_recovery_rollout FROM PUBLIC;
       REVOKE ALL (singleton, consent_enabled, release_evidence) ON TABLE opengeni_private.sandbox_recovery_rollout FROM PUBLIC;
       EXECUTE format('GRANT SELECT ON TABLE opengeni_private.sandbox_recovery_rollout TO %I', ${literal(role)});
+    END IF;
+    IF to_regclass('opengeni_private.credit_promotion_policy_revisions') IS NOT NULL THEN
+      EXECUTE format('REVOKE ALL ON TABLE opengeni_private.credit_promotion_policy_revisions FROM %I', ${literal(role)});
+      REVOKE ALL ON TABLE opengeni_private.credit_promotion_policy_revisions FROM PUBLIC;
+      EXECUTE format('GRANT SELECT ON TABLE opengeni_private.credit_promotion_policy_revisions TO %I', ${literal(role)});
     END IF;
     IF to_regclass('opengeni_private.verified_signup_trial_switch_revisions') IS NOT NULL THEN
       -- Read-only for the operator gauge. Only the owner-only audited setter
@@ -2153,6 +2184,22 @@ BEGIN
       REVOKE ALL ON FUNCTION opengeni_private.record_sandbox_file_publication(uuid,uuid,uuid,uuid) FROM PUBLIC;
       REVOKE ALL ON FUNCTION opengeni_private.list_sandbox_file_publications(uuid,uuid,jsonb) FROM PUBLIC;
     END IF;
+    IF to_regclass('opengeni_private.artifact_catalog_pins') IS NOT NULL THEN
+      EXECUTE format('REVOKE ALL ON TABLE opengeni_private.artifact_catalog_pins FROM %I', ${literal(role)});
+      -- Table revocation does not remove column ACLs. Reconcile every current
+      -- column for both the runtime and PUBLIC, including future additions.
+      EXECUTE format('REVOKE ALL (%s) ON TABLE opengeni_private.artifact_catalog_pins FROM %I',
+        (SELECT string_agg(quote_ident(attname),',' ORDER BY attnum) FROM pg_attribute
+          WHERE attrelid='opengeni_private.artifact_catalog_pins'::regclass AND attnum>0 AND NOT attisdropped),
+        ${literal(role)});
+      REVOKE ALL ON TABLE opengeni_private.artifact_catalog_pins FROM PUBLIC;
+      EXECUTE format('REVOKE ALL (%s) ON TABLE opengeni_private.artifact_catalog_pins FROM PUBLIC',
+        (SELECT string_agg(quote_ident(attname),',' ORDER BY attnum) FROM pg_attribute
+          WHERE attrelid='opengeni_private.artifact_catalog_pins'::regclass AND attnum>0 AND NOT attisdropped));
+      REVOKE ALL ON FUNCTION opengeni_private.update_artifact_pin(uuid,uuid,text,text,boolean),
+        opengeni_private.list_artifact_pins(uuid,uuid),
+        opengeni_private.list_sandbox_file_publications_pinned(uuid,uuid,jsonb) FROM PUBLIC;
+    END IF;
     IF to_regclass('opengeni_private.slack_file_upload_operations') IS NOT NULL THEN
       -- Ordinary RLS repositories own the upload CAS, not owner capabilities.
       -- Never allow deletion/truncation to erase its durable completion fence.
@@ -2176,6 +2223,16 @@ BEGIN
       EXECUTE format('REVOKE ALL ON TABLE opengeni_private.organization_signup_use_cases FROM %I', ${literal(role)});
       REVOKE ALL ON TABLE opengeni_private.organization_signup_use_cases FROM PUBLIC;
       REVOKE ALL ON FUNCTION opengeni_private.record_organization_signup_use_case(uuid,text,text) FROM PUBLIC;
+    END IF;
+    IF to_regclass('opengeni_private.organization_slack_bot_access') IS NOT NULL THEN
+      EXECUTE format('REVOKE ALL ON TABLE opengeni_private.organization_slack_bot_access FROM %I', ${literal(role)});
+      REVOKE ALL ON TABLE opengeni_private.organization_slack_bot_access FROM PUBLIC;
+      REVOKE ALL ON FUNCTION
+        opengeni_private.set_organization_slack_bot_access(uuid,uuid,uuid,text,boolean),
+        opengeni_private.read_organization_slack_bot_access(uuid,uuid,uuid),
+        opengeni_private.list_organization_slack_bots(uuid,uuid),
+        opengeni_private.prepare_organization_slack_bot_message(uuid,uuid,uuid,uuid,uuid,integer,uuid,bigint,text,text,text),
+        opengeni_private.read_organization_slack_bot_message(uuid,uuid,uuid,uuid) FROM PUBLIC;
     END IF;
     FOREACH routine_signature IN ARRAY ARRAY[
       'read_sender_connection(uuid,uuid,uuid,text)',

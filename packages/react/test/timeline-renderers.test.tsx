@@ -795,6 +795,73 @@ describe("published file presentation", () => {
     };
   }
 
+  test("a published patch stays visible and copies one command to apply it", async () => {
+    resetTimelineEvents();
+    const requests: Array<string | undefined> = [];
+    const copied: string[] = [];
+    const clipboardItem = (globalThis as { ClipboardItem?: unknown }).ClipboardItem;
+    const clipboard = Object.getOwnPropertyDescriptor(navigator, "clipboard");
+    (globalThis as { ClipboardItem?: unknown }).ClipboardItem = undefined;
+    Object.defineProperty(navigator, "clipboard", {
+      configurable: true,
+      value: { writeText: async (text: string) => void copied.push(text) },
+    });
+    const r = await renderComponent(
+      <MessageTimeline
+        events={[
+          timelineEvent("user.message", { text: "Implement it from my zip" }),
+          timelineEvent("turn.started", { triggerEventId: "timeline-evt-1" }),
+          timelineEvent("agent.toolCall.created", {
+            id: "published-patch",
+            name: "opengeni__sandbox_file_publish",
+            arguments: { path: "/workspace/changes.patch" },
+          }),
+          timelineEvent("agent.toolCall.output", {
+            id: "published-patch",
+            output: {
+              content: [
+                {
+                  type: "text",
+                  text: JSON.stringify(receipt("application/octet-stream", "changes.patch")),
+                },
+              ],
+            },
+          }),
+          timelineEvent("agent.message.completed", { text: "Here is your patch." }),
+          timelineEvent("turn.completed", {}),
+        ]}
+        loadRetainedArtifact={async (_artifact, _signal, options) => {
+          requests.push(options?.prefer);
+          return {
+            url: "https://objects.example/changes.patch?sig=a'b",
+            expiresAt: new Date(Date.now() + 5 * 60_000).toISOString(),
+          };
+        }}
+      />,
+    );
+    try {
+      await flush();
+      expect(turnSummaryTrigger(r.container)?.getAttribute("aria-expanded")).toBe("true");
+      expect(r.container.textContent).toContain("Published changes.patch");
+      const button = [...r.container.querySelectorAll("button")].find(
+        (candidate) => candidate.textContent === "Copy command to apply these changes",
+      );
+      expect(button).toBeDefined();
+      await act(async () => button!.click());
+      await flush();
+      expect(requests).toEqual(["url"]);
+      expect(copied).toEqual([
+        "curl -fsSL 'https://objects.example/changes.patch?sig=a'\\''b' | git apply",
+      ]);
+      expect(r.container.textContent).toContain("The link in it expires in 5 minutes.");
+    } finally {
+      await r.unmount();
+      (globalThis as { ClipboardItem?: unknown }).ClipboardItem = clipboardItem;
+      if (clipboard) Object.defineProperty(navigator, "clipboard", clipboard);
+      else delete (navigator as { clipboard?: unknown }).clipboard;
+    }
+  });
+
   test("published images are visible after a settled turn without filesystem access", async () => {
     resetTimelineEvents();
     const loads: string[] = [];
@@ -3824,6 +3891,59 @@ describe("ask / run_on / exec collapsed previews", () => {
     expect(text).toContain("$ pwd");
     expect(text).toContain("on studio-mac");
     expect(text).toContain("/workspace");
+    await r.unmount();
+  });
+});
+
+describe("GenericRenderer — permission Block", () => {
+  test("a blocked connector call reads as a permission decision, not a tool error", async () => {
+    const item = toolItem({
+      name: "mcp_example__read_wiki_structure",
+      arguments: JSON.stringify({ repoName: "example/repo" }),
+      output: {
+        content: [
+          {
+            type: "text",
+            text: "An error occurred while running the tool. Please try again. Error: Connector action was not executed: blocked",
+          },
+        ],
+        isError: true,
+      },
+      status: "complete",
+    });
+    const Renderer = defaultToolRegistry.resolve(item);
+    const r = await renderComponent(<Renderer item={item} />);
+    await flush();
+    const text = r.container.textContent ?? "";
+    expect(text).toContain("Blocked by your permission settings");
+    expect(text).not.toContain("Please try again");
+    expect(text).not.toContain("error");
+    await r.unmount();
+  });
+});
+
+describe("GenericRenderer — uncertain outcome", () => {
+  test("an uncertain connector outcome never invites a blind retry", async () => {
+    const item = toolItem({
+      name: "mcp_example__read_wiki_contents",
+      arguments: JSON.stringify({ repoName: "example/repo" }),
+      output: {
+        content: [
+          {
+            type: "text",
+            text: "An error occurred while running the tool. Please try again. Error: Connector action outcome is uncertain; inspect provider state before retrying",
+          },
+        ],
+        isError: true,
+      },
+      status: "complete",
+    });
+    const Renderer = defaultToolRegistry.resolve(item);
+    const r = await renderComponent(<Renderer item={item} />);
+    await flush();
+    const text = r.container.textContent ?? "";
+    expect(text).toContain("outcome unknown");
+    expect(text).not.toContain("Please try again");
     await r.unmount();
   });
 });

@@ -8,10 +8,12 @@ import {
   useContext,
   useEffect,
   useMemo,
+  useRef,
   useState,
   lazy,
   Suspense,
   type ReactNode,
+  type RefObject,
 } from "react";
 
 import { useAppContext } from "@/context";
@@ -52,6 +54,10 @@ export type RailContextValue = {
   /** Mobile overlay-drawer open state. */
   drawerOpen: boolean;
   setDrawerOpen: (open: boolean) => void;
+  /** Persistent opener outside the mobile drawer, also used after search. */
+  drawerTriggerRef: RefObject<HTMLButtonElement | null>;
+  /** Retiring drawers must not take focus from an open search dialog. */
+  restoreDrawerFocus: () => void;
   /** Navigate to a workspace's sessions index (used by the switchers). */
   openWorkspace: (workspaceId: string) => void;
   /** Switch organization: navigate to the first workspace in the target org. */
@@ -107,24 +113,60 @@ export function RailProvider({
   const appContext = useAppContext();
   const [searchOpen, setSearchOpen] = useState(false);
   const [searchMounted, setSearchMounted] = useState(false);
+  const searchReturnFocus = useRef<HTMLElement | null>(null);
+  const searchOpenRef = useRef(searchOpen);
+  searchOpenRef.current = searchOpen;
+  const drawerTriggerRef = useRef<HTMLButtonElement | null>(null);
+  const suppressDrawerRestore = useRef(false);
+  const [drawerOpen, setDrawerOpenState] = useState(false);
+  const setDrawerOpen = useCallback((next: boolean) => {
+    if (next) suppressDrawerRestore.current = false;
+    setDrawerOpenState(next);
+  }, []);
+  const [isMobile, setIsMobile] = useState<boolean>(() =>
+    typeof window !== "undefined" ? window.innerWidth < RAIL_DRAWER_BREAKPOINT : false,
+  );
+  const restoreDrawerFocus = useCallback(() => {
+    // Search owns this close even if a result navigates before the drawer's
+    // exit animation finishes. Do not let that retiring scope reclaim focus.
+    if (suppressDrawerRestore.current) {
+      suppressDrawerRestore.current = false;
+      return;
+    }
+    if (!searchOpenRef.current) drawerTriggerRef.current?.focus({ preventScroll: true });
+  }, []);
+  const changeSearchOpen = useCallback((next: boolean) => {
+    searchOpenRef.current = next;
+    setSearchOpen(next);
+  }, []);
   useEffect(() => {
     const open = (event: Event) => {
-      if ((event as CustomEvent<{ workspaceId?: string }>).detail?.workspaceId !== workspaceId)
-        return;
+      const detail = (event as CustomEvent<{ workspaceId?: string; returnFocus?: HTMLElement }>)
+        .detail;
+      if (detail?.workspaceId !== workspaceId) return;
+      if (!searchOpenRef.current) {
+        searchReturnFocus.current = isMobile
+          ? drawerTriggerRef.current
+          : detail.returnFocus instanceof HTMLElement
+            ? detail.returnFocus
+            : document.activeElement instanceof HTMLElement
+              ? document.activeElement
+              : null;
+      }
+      if (drawerOpen) suppressDrawerRestore.current = true;
       setSearchMounted(true);
-      setSearchOpen(true);
+      changeSearchOpen(true);
       setDrawerOpen(false);
     };
     window.addEventListener(OPEN_SESSION_SEARCH_EVENT, open);
     return () => window.removeEventListener(OPEN_SESSION_SEARCH_EVENT, open);
-  }, [workspaceId]);
-  useEffect(() => setSearchOpen(false), [workspaceId, appContext.accessContext.subjectId]);
+  }, [workspaceId, isMobile, drawerOpen, changeSearchOpen, setDrawerOpen]);
+  useEffect(() => {
+    searchReturnFocus.current = null;
+    changeSearchOpen(false);
+  }, [workspaceId, appContext.accessContext.subjectId, changeSearchOpen]);
   const [collapsed, setCollapsedState] = useState<boolean>(() => readStoredCollapsed());
   const [width, setWidthState] = useState<number>(() => readStoredWidth());
-  const [drawerOpen, setDrawerOpen] = useState(false);
-  const [isMobile, setIsMobile] = useState<boolean>(() =>
-    typeof window !== "undefined" ? window.innerWidth < RAIL_DRAWER_BREAKPOINT : false,
-  );
 
   useEffect(() => {
     if (typeof window === "undefined") {
@@ -194,7 +236,7 @@ export function RailProvider({
         params: { workspaceId: nextWorkspaceId },
       });
     },
-    [appContext, navigate, router, workspaceId],
+    [appContext, navigate, router, workspaceId, setDrawerOpen],
   );
 
   const openOrg = useCallback(
@@ -210,7 +252,7 @@ export function RailProvider({
         params: { workspaceId: target.id },
       });
     },
-    [appContext, navigate],
+    [appContext, navigate, setDrawerOpen],
   );
 
   const openSession = useCallback(
@@ -221,7 +263,7 @@ export function RailProvider({
         params: { workspaceId, sessionId },
       });
     },
-    [navigate, workspaceId],
+    [navigate, workspaceId, setDrawerOpen],
   );
 
   const startNewSession = useCallback(() => {
@@ -231,7 +273,7 @@ export function RailProvider({
       // Same-route: create composer stays mounted, so autoFocus will not re-run.
       requestCreateComposerFocus();
     });
-  }, [appContext, navigate, workspaceId]);
+  }, [appContext, navigate, workspaceId, setDrawerOpen]);
 
   const value = useMemo<RailContextValue>(
     () => ({
@@ -246,6 +288,8 @@ export function RailProvider({
       isMobile,
       drawerOpen,
       setDrawerOpen,
+      drawerTriggerRef,
+      restoreDrawerFocus,
       openWorkspace,
       openOrg,
       openSession,
@@ -258,6 +302,8 @@ export function RailProvider({
       setWidth,
       isMobile,
       drawerOpen,
+      setDrawerOpen,
+      restoreDrawerFocus,
       setCollapsed,
       toggleCollapsed,
       openWorkspace,
@@ -276,7 +322,8 @@ export function RailProvider({
             key={`${appContext.accessContext.subjectId}:${workspaceId}`}
             workspaceId={workspaceId}
             open={searchOpen}
-            onOpenChange={setSearchOpen}
+            onOpenChange={changeSearchOpen}
+            returnFocus={searchReturnFocus}
           />
         </Suspense>
       ) : null}

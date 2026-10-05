@@ -38,6 +38,16 @@ function catalogModel(
 }
 
 describe("model-policy", () => {
+  test("shows promotional coverage and general credit requirements in model rows", () => {
+    const models = (["promotional", "general", "unavailable"] as const).map((creditFunding) =>
+      catalogModel({ id: creditFunding, label: creditFunding, cost: "credits", creditFunding }),
+    );
+    expect(projectPickerRows(models).map((row) => row.fundingHint)).toEqual([
+      "Free credits",
+      "Uses credits",
+      "Needs credits",
+    ]);
+  });
   test.each([
     {
       name: "free-only with blocked paid",
@@ -259,6 +269,47 @@ describe("model-policy", () => {
     expect(advancedSourceSummary(workspaceModel)).toBe("Workspace OpenRouter connection");
     expect(billingClassForModel(deploymentModel)).toBe("opengeni_credits");
     expect(payerSummaryForModel(deploymentModel)).toBe("Free in this deployment");
+  });
+
+  test("keeps workspace and organization Opper billing separate from deployment Opper", () => {
+    const workspaceModel = catalogModel({
+      id: "workspace-opper/aws/claude-sonnet-4-6-eu",
+      label: "Claude Sonnet 4.6 (EU)",
+      provider: "workspace-opper",
+      providerLabel: "Your Opper",
+      cost: "workspace",
+      credentialSource: { kind: "workspace_connection", mechanism: "api_key" },
+    });
+    const organizationModel = catalogModel({
+      id: "organization-opper/aws/claude-sonnet-4-6-eu",
+      label: "Claude Sonnet 4.6 (EU)",
+      provider: "organization-opper",
+      providerLabel: "Organization Opper",
+      credentialSource: { kind: "organization_connection", mechanism: "api_key" },
+      billing: { upstreamPayer: "organization", metering: "external" },
+      cost: "organization",
+    });
+    const deploymentModel = catalogModel({
+      id: "opper/vertexai/gemini-3.8-flash-eu",
+      label: "Gemini 3.8 Flash (EU)",
+      provider: "opper",
+      providerLabel: "Opper",
+      cost: "credits",
+      billing: { upstreamPayer: "deployment", metering: "opengeni_credits" },
+    });
+
+    expect(billingClassForModel(workspaceModel)).toBe("byok");
+    expect(payerSummaryForModel(workspaceModel)).toBe("Billed to the workspace Opper account");
+    expect(advancedSourceSummary(workspaceModel)).toBe("Workspace Opper connection");
+    expect(billingClassForModel({ ...workspaceModel, cost: undefined })).toBe("byok");
+    expect(billingClassForModel(organizationModel)).toBe("organization_byok");
+    expect(billingClassForModel({ ...organizationModel, cost: undefined })).toBe(
+      "organization_byok",
+    );
+    expect(payerSummaryForModel(organizationModel)).toBe(
+      "Billed to the organization Opper account",
+    );
+    expect(billingClassForModel(deploymentModel)).toBe("opengeni_credits");
   });
 
   test("groups an anonymous deployment route under OpenGeni without assuming free access", () => {

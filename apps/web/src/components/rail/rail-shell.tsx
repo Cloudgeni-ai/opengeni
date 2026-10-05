@@ -21,6 +21,7 @@ import {
   type ReactNode,
   type RefObject,
 } from "react";
+import { toast } from "sonner";
 
 import { RailHeader } from "@/components/rail/rail-header";
 import { RailFooter } from "@/components/rail/rail-footer";
@@ -51,6 +52,8 @@ import { PrivateSessionIndicator } from "@/components/session/private-session-in
 import { isPersonalWorkspace } from "@/lib/managed-self-context";
 import { isCodexProductModel } from "@/lib/session-model";
 import { isIntelligenceEffort } from "@/lib/session-tools";
+import { applySessionArchiveProjection } from "@/lib/session-pagination";
+import { notifySessionListChanged } from "@/lib/session-list-invalidation";
 import type { Session } from "@/types";
 import { cn } from "@/lib/utils";
 
@@ -235,7 +238,7 @@ export function RailShell({ children }: { children: ReactNode }) {
   // Focus returns here when the mobile drawer closes (D9.1): the drawer is a
   // controlled Sheet with no in-tree trigger, so radix can't restore focus on
   // its own — we point it back at the hamburger that opened it.
-  const hamburgerRef = useRef<HTMLButtonElement>(null);
+  const hamburgerRef = rail.drawerTriggerRef;
 
   // Live width while the reader drags the resize handle. Held locally (not in
   // context) so we don't write localStorage on every pointer move — the chosen
@@ -338,7 +341,7 @@ export function RailShell({ children }: { children: ReactNode }) {
               className="w-screen max-w-none gap-0 p-0 sm:w-[380px] sm:max-w-[90vw]"
               onCloseAutoFocus={(event) => {
                 event.preventDefault();
-                hamburgerRef.current?.focus();
+                rail.restoreDrawerFocus();
               }}
             >
               <SheetTitle className="sr-only">Session navigation</SheetTitle>
@@ -488,6 +491,41 @@ function SessionRouteHeader({
   const catalog = useWorkspaceModelCatalog(session.workspaceId);
   const selectedRow = findPickerRow(catalog.rows, displayModelId);
   const policyLoading = lastStarted.loading || catalog.loading;
+  const archiveInFlight = useRef(false);
+  const onArchive = useCallback(
+    async (target: Session, archived: boolean) => {
+      if (archiveInFlight.current) return;
+      const accepted = context.captureWorkspaceInvocation(target.workspaceId);
+      if (!accepted) return;
+      archiveInFlight.current = true;
+      try {
+        const updated = await context.client.updateSessionArchive(target.workspaceId, target.id, {
+          archived,
+          expectedVersion: target.archiveVersion ?? 0,
+        });
+        if (!context.ownsWorkspaceInvocation(target.workspaceId, accepted)) return;
+        context.setSession((current) =>
+          current?.id === updated.id && current.workspaceId === updated.workspaceId
+            ? applySessionArchiveProjection(current, updated)
+            : current,
+        );
+        notifySessionListChanged({
+          workspaceId: target.workspaceId,
+          sessionId: target.id,
+          archived: updated.archived,
+        });
+        toast.success(updated.archived ? "Chat archived." : "Chat restored.");
+      } catch (error) {
+        if (!context.ownsWorkspaceInvocation(target.workspaceId, accepted)) return;
+        toast.error(archived ? "Couldn't archive the chat." : "Couldn't restore the chat.", {
+          description: error instanceof Error ? error.message : String(error),
+        });
+      } finally {
+        archiveInFlight.current = false;
+      }
+    },
+    [context],
+  );
 
   return (
     <SessionHeader
@@ -518,12 +556,14 @@ function SessionRouteHeader({
       onPin={(target, pinned) =>
         context.updateSessionPin(target.workspaceId, target.id, pinned, target.pinVersion ?? 0)
       }
+      onArchive={onArchive}
       leading={hamburger}
       lastStartedModel={lastStartedModel}
       lastStartedReasoningEffort={lastStartedReasoningEffort}
       lastStartedLatencyMode={lastStartedLatencyMode}
       billingClass={selectedRow?.billingClass}
       modelLabel={selectedRow?.label}
+      modelLogoUrl={selectedRow?.catalog.logoUrl}
       policyLoading={policyLoading}
       accessSlot={
         session.tenancy ? (

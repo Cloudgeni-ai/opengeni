@@ -32,9 +32,26 @@ describe("session control surface architecture", () => {
     expect(route).toContain("suspendAutosave: submitting");
     expect(route).toContain("disabled={newSessionDraft.loading || submitting}");
     expect(route).toContain("if (!outcomeUnknown) await preserveNewerLocalDraft()");
+    // Send saved the draft before each refused create: exhausting the retries
+    // must not leave "Draft not saved" up or autosave paused.
+    expect(route).toMatch(
+      /await preserveNewerLocalDraft\(\);\s*(?:\/\/[^\n]*\s*)*newSessionDraft\.clearError\(\);\s*toast\.error\("Couldn't send", \{\s*description: DRAFT_CHANGED_DURING_SEND_TEXT,/,
+    );
     expect(route).not.toContain("newSessionDraft.conflict ||");
     expect(route).not.toContain("!newSessionDraft.conflict &&");
     expect(route).not.toContain("newSessionDraft.conflict !== null ||");
+  });
+
+  test("new-chat outage shows one calm notice instead of raw errors", async () => {
+    const route = await source("routes/sessions-index.tsx");
+    expect(route).toContain("{OPENGENI_UPDATING_NOTICE}");
+    expect(route).toContain("newSessionDraft.unavailable || connectionAccounts.unavailable");
+    expect(route).toContain(
+      "error: newSessionDraft.unavailable || newSessionDraft.conflict ? null : newSessionDraft.error",
+    );
+    expect(route).toContain("newSessionDraft.reportUnavailable(error)");
+    expect(route).toContain('"Couldn\'t send your message. Try again."');
+    expect(route).not.toContain("Couldn't check connected accounts. Retry to send your message.");
   });
 
   test("new and existing composers use the same popover pattern", async () => {
@@ -57,6 +74,23 @@ describe("session control surface architecture", () => {
     expect(plus).not.toContain("setSettingsOpen");
   });
 
+  test("an existing chat's Chat settings opens the dock's Agent tab at Agent learning", async () => {
+    const route = await source("routes/session.tsx");
+    // The composer hands the click to the route, which opens the dock...
+    expect(route).toContain("onOpen: props.onOpenAgentSettings,");
+    expect(route).toContain("onOpenAgentSettings={openAgentSettings}");
+    expect(route).toContain("openAgentSettingsRequest={");
+    // ...on its Agent tab (always present for a loaded chat), focused on Agent learning.
+    expect(route).toContain('tab: "agent",');
+    expect(route).toContain("openTabRequest={currentTabRequest}");
+    expect(route).toContain("learningFocusRequest={agentLearningFocus}");
+    expect(route).not.toContain("agentConfig?.enabled");
+    // There is no second copy of the per-chat editor in the composer.
+    const panel = await source("components/composer-mobile-plus-panel.tsx");
+    expect(panel).not.toContain("AgentLearningSettingsEditor");
+    expect(panel).toContain("props.chatSettings?.onOpen()");
+  });
+
   test("renders SessionChrome above the composer", async () => {
     const route = await source("routes/session.tsx");
     expect(route.match(/<SessionChrome\b/g)).toHaveLength(1);
@@ -69,6 +103,16 @@ describe("session control surface architecture", () => {
     // narrower than the composer at desktop widths.
     expect(route).not.toContain('className="mx-auto mb-2 w-full max-w-3xl shrink-0 px-4 sm:px-6"');
     expect(route).toContain('className="mb-2 w-full shrink-0 px-4 sm:px-6"');
+  });
+
+  test("current model pacing is shown above the composer, never on an older history page", async () => {
+    const route = await source("routes/session.tsx");
+    expect(route).toContain("const modelRecovery = props.hasNewer");
+    expect(route).toContain(
+      "currentModelRecovery({ ...props.session, effectiveControl: admissionControl }, props.events)",
+    );
+    expect(route.match(/<ModelRecoveryNotice\b/g)).toHaveLength(1);
+    expect(route.indexOf("<ModelRecoveryNotice")).toBeLessThan(route.indexOf("<ConsoleComposer"));
   });
 
   test("makes the full chat viewport a file drop target", async () => {
@@ -87,7 +131,9 @@ describe("session control surface architecture", () => {
       source("routes/sessions-index.tsx"),
       source("../../../packages/react/src/components/chat-composer.tsx"),
     ]);
-    const provider = sessionRoute.indexOf("createElement(\n    LightboxProvider,");
+    const providerPattern = /createElement\(\s+LightboxProvider,/g;
+    expect([...sessionRoute.matchAll(providerPattern)]).toHaveLength(1);
+    const provider = sessionRoute.search(providerPattern);
     const timeline = sessionRoute.indexOf("<MessageTimeline", provider);
     const composer = sessionRoute.indexOf("<ConsoleComposer", timeline);
     const providerEnd = sessionRoute.indexOf("</ChatViewportFileDropTarget>,", composer);
@@ -96,7 +142,7 @@ describe("session control surface architecture", () => {
     expect(timeline).toBeGreaterThan(provider);
     expect(composer).toBeGreaterThan(timeline);
     expect(providerEnd).toBeGreaterThan(composer);
-    expect(newSessionRoute).toContain("createElement(\n    LightboxProvider,");
+    expect([...newSessionRoute.matchAll(providerPattern)]).toHaveLength(1);
     expect(chatComposer).not.toContain("<LightboxProvider>");
   });
 
@@ -563,7 +609,7 @@ describe("session control surface architecture", () => {
     expect(list).toContain("archiveStatus: browseStatus");
     expect(list).toContain("sortBy: browseSortBy");
     expect(list).toContain("onClick={openSearchDialog}");
-    expect(list).toContain("() => requestSessionSearch(rail.workspaceId)");
+    expect(list).toContain("requestSessionSearch(rail.workspaceId, event.currentTarget)");
     expect(list).not.toContain('"Selected"');
     expect(list).toContain("{ creatorLabels }");
     expect(list).toContain("sessionBrowseResultCount(browseSessions, hierarchyMode)");
@@ -574,12 +620,12 @@ describe("session control surface architecture", () => {
     expect(rail).toContain('lazy(() => import("@/components/session/session-search-dialog"))');
     expect(rail).toContain("window.addEventListener(OPEN_SESSION_SEARCH_EVENT, open)");
     expect(rail).toContain("window.removeEventListener(OPEN_SESSION_SEARCH_EVENT, open)");
-    expect(rail).toContain(".detail?.workspaceId !== workspaceId");
+    expect(rail).toContain("detail?.workspaceId !== workspaceId");
     expect(rail.match(/<SessionSearchDialog\b/g)).toHaveLength(1);
     expect(rail).toContain("key={`${appContext.accessContext.subjectId}:${workspaceId}`}");
     expect(rail).toContain("workspaceId={workspaceId}");
     expect(rail).toContain("open={searchOpen}");
-    expect(rail).toContain("onOpenChange={setSearchOpen}");
+    expect(rail).toContain("onOpenChange={changeSearchOpen}");
   });
 
   test("the established-session Variable Set editor stays behind its lazy panel", async () => {

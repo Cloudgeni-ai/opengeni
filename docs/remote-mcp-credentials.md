@@ -113,6 +113,14 @@ Google Drive publication, retain their existing specialized selection contracts;
 they accept at most one account per specialized surface. Generic MCP account
 attachment does not broaden those permissions.
 
+The current-human HTTP/SDK and public MCP gateways project these same stable
+account-qualified routes from the viewer's live eligible connections. A Site's
+retained identities intersect this projection exactly; canonical connector IDs
+never substitute for a requested account. Service gateways expose workspace
+accounts only. Generated API adapters retain each route's exact connection and
+live authority generation. Gateway requests rebuild the projection, and provider
+requests still revalidate the bound connection.
+
 The former host-specific credential callback is removed from API and worker
 startup and from the core package. The direct workspace tool gateway also uses
 the native connection engine. Host-provenance references are rejected; their

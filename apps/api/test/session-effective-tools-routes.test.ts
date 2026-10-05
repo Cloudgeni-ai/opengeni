@@ -1,5 +1,6 @@
-import { afterAll, beforeAll, describe, expect, setDefaultTimeout, test } from "bun:test";
+import { afterAll, beforeAll, describe, expect, setDefaultTimeout, spyOn, test } from "bun:test";
 import { signDelegatedAccessToken, type Session } from "@opengeni/contracts";
+import * as opengeniDb from "@opengeni/db";
 import { bootstrapWorkspace, createDb, createSession, type DbClient } from "@opengeni/db";
 import {
   acquireSharedTestDatabase,
@@ -74,14 +75,17 @@ describe("effectiveTools on session responses (PostgreSQL)", () => {
       },
     } as Parameters<typeof createApp>[0]);
     const path = `/v1/workspaces/${grant.workspaceId}/sessions`;
-    const create = async (agent?: { capabilities: "all" | "none" }): Promise<Session> => {
+    const create = async (
+      agent?: { capabilities: "all" | "none" },
+      bundledSkillIds: string[] | "omit" = [],
+    ): Promise<Session> => {
       const response = await app.request(path, {
         method: "POST",
         headers: { authorization, "content-type": "application/json" },
         body: JSON.stringify({
           initialMessage: "hello",
           resources: [],
-          bundledSkillIds: [],
+          ...(bundledSkillIds !== "omit" ? { bundledSkillIds } : {}),
           ...(agent ? { agent } : {}),
         }),
       });
@@ -129,6 +133,49 @@ describe("effectiveTools on session responses (PostgreSQL)", () => {
       expect(rows.find((row) => row.id === created.id)?.effectiveTools).toEqual(
         created.effectiveTools,
       );
+    }
+
+    // "none" freezes no bundled guides unless the request lists them; "all"
+    // keeps the omitted bundled defaults.
+    const noneOmitted = await create({ capabilities: "none" }, "omit");
+    expect(noneOmitted.bundledSkillIds).toEqual([]);
+    expect(noneOmitted.effectiveTools!.tools.map((tool) => tool.name)).not.toContain("skill_read");
+    const noneExplicit = await create({ capabilities: "none" }, ["builtin:opengeni-help"]);
+    expect(noneExplicit.bundledSkillIds).toEqual(["builtin:opengeni-help"]);
+    expect(noneExplicit.effectiveTools!.tools.map((tool) => tool.name)).toContain("skill_read");
+    const allOmitted = await create({ capabilities: "all" }, "omit");
+    expect(allOmitted.bundledSkillIds).toBeUndefined();
+    expect(allOmitted.effectiveTools!.tools.map((tool) => tool.name)).toContain("skill_read");
+    const noneDetail = await app.request(`${path}/${noneOmitted.id}`, {
+      headers: { authorization },
+    });
+    expect(((await noneDetail.json()) as Session).bundledSkillIds).toEqual([]);
+
+    // No sandbox or Connected Machine: background-command tools are withheld.
+    for (const created of [all, none, noneOmitted]) {
+      const names = created.effectiveTools!.tools.map((tool) => tool.name);
+      expect(names).not.toContain("opengeni__command_read");
+      expect(names).not.toContain("opengeni__command_wait");
+    }
+
+    // The response projection hydrates the workspace once, shared by the tool
+    // policy and effective-tools contexts, on detail and on create.
+    const workspaceReads = spyOn(opengeniDb, "requireWorkspace");
+    try {
+      const reads = () =>
+        workspaceReads.mock.calls.filter(([, workspaceId]) => workspaceId === grant.workspaceId)
+          .length;
+      const detail = await app.request(`${path}/${all.id}`, { headers: { authorization } });
+      expect(detail.status).toBe(200);
+      expect(((await detail.json()) as Session).effectiveTools).toEqual(all.effectiveTools);
+      expect(reads()).toBe(1);
+      workspaceReads.mockClear();
+      const created = await create({ capabilities: "all" });
+      expect(created.effectiveTools).toEqual(all.effectiveTools);
+      // One read inside creation itself, one for the response projection.
+      expect(reads()).toBe(2);
+    } finally {
+      workspaceReads.mockRestore();
     }
   });
 });

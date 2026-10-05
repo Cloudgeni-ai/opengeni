@@ -115,6 +115,10 @@ export function createWebHandler(
     if (
       pathname.startsWith("/assets/") ||
       pathname.startsWith("/react-demo/") ||
+      // Discovery documents (OAuth, OpenID, security.txt...) are machine-read:
+      // the SPA shell with 200 makes MCP clients such as Claude give up on
+      // OAuth discovery instead of trying the next well-known path.
+      pathname.startsWith("/.well-known/") ||
       (ROOT_STATIC_FILE_PATTERN.test(pathname) && extname(pathname) !== ".html")
     ) {
       return new Response("Not Found", { status: 404 });

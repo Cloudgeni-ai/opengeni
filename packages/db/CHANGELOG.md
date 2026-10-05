@@ -1,5 +1,196 @@
 # @opengeni/db
 
+## 1.4.4
+
+### Patch Changes
+
+- db21f93: Start first turns promptly under concurrent load in one organization. The turn claim now takes the organization-membership fence in shared mode, so claims no longer serialize each other, while membership mutators still fence them.
+- Updated dependencies [6384dbd]
+- Updated dependencies [2edfa4c]
+  - @opengeni/contracts@1.4.4
+  - @opengeni/observability@1.4.4
+  - @opengeni/codemode@1.4.4
+  - @opengeni/codex@1.4.4
+  - @opengeni/config@1.4.4
+  - @opengeni/network@1.4.4
+
+## 1.4.3
+
+### Patch Changes
+
+- Updated dependencies [1a05862]
+  - @opengeni/config@1.4.3
+  - @opengeni/codemode@1.4.3
+  - @opengeni/codex@1.4.3
+  - @opengeni/contracts@1.4.3
+  - @opengeni/network@1.4.3
+  - @opengeni/observability@1.4.3
+
+## 1.4.2
+
+### Patch Changes
+
+- @opengeni/codemode@1.4.2
+- @opengeni/codex@1.4.2
+- @opengeni/config@1.4.2
+- @opengeni/contracts@1.4.2
+- @opengeni/network@1.4.2
+- @opengeni/observability@1.4.2
+
+## 1.4.1
+
+### Patch Changes
+
+- fe1f64d: Codemode terminal settlement takes the session lock prefix before updating its journal row, so it no longer deadlocks against the client's re-notify of the same operation (`POST /codemode/calls` 500s with SQLSTATE 40P01). Submit and claim retry deadlock/serialization victims, an exhausted victim returns a typed retryable 503, and the Codemode client resubmits and re-reads the same operation id after a known-outcome transient 5xx.
+- e6d35b9: Sandboxes kept warm only by Browser or Computer sessions are now visible: the reaper publishes `opengeni_sandbox_leases_interaction_only{idle_bucket}` by time since the sessions were last used, and an alert fires when more than five such boxes have been idle for over two hours.
+- 55bddfe: A `write_stdin` poll that races the reaper's settlement of an exited background command now returns the durable exit result instead of failing the turn with `sandbox_mutation_output_rejected`. The provider call is still made once and never replayed, and its output stays rejected.
+- f290348: Signup credits now pay for dictation and live voice like general credits. Admission counts their remainder, each voice charge is allocated to them first, and balances report `coversVoice` on those grants. Other model-scoped promotional credits still do not cover voice.
+- aedc3b9: A worker shutdown during sandbox provisioning no longer makes the session's sandbox unrecoverable or fails the turn. The dying attempt now finishes its own provisioning cleanup before exiting and never terminates a box it already published, so the replacement attempt resumes that same box. If an unpublished box disappears anyway, the session is no longer marked as having lost its workspace.
+- Updated dependencies [fe1f64d]
+- Updated dependencies [9145bad]
+- Updated dependencies [f290348]
+  - @opengeni/codemode@1.4.1
+  - @opengeni/contracts@1.4.1
+  - @opengeni/config@1.4.1
+  - @opengeni/codex@1.4.1
+  - @opengeni/observability@1.4.1
+  - @opengeni/network@1.4.1
+
+## 1.4.0
+
+### Patch Changes
+
+- bd9521c: Approval reviews read as one action: multi-item work no longer shows "batch" in titles, a Block reports its own reason and a `blocked` status, and an older request whose saved arguments cannot be recovered still offers Decline so the session never stays stuck.
+- 5451b38: Distinguish an exact committed sandbox mutation receipt from rejection of its output after authority changes. Preserve the non-retryable typed failure through SDK tools and stop later dispatches in the same invocation without hiding uncertain batch items. Missing, mismatched, rolled-back, and caller-owned transaction receipts remain unknown; existing history and recovery authority are unchanged.
+- 36ff885: Keep organization Slack bot metadata reads independent of the database root barrel while preserving the existing connection metadata API and subject-scoped access checks.
+- Updated dependencies [bd9521c]
+- Updated dependencies [664eabf]
+- Updated dependencies [08ce841]
+- Updated dependencies [673bb53]
+- Updated dependencies [2a65d6e]
+  - @opengeni/contracts@1.4.0
+  - @opengeni/config@1.4.0
+  - @opengeni/codemode@1.4.0
+  - @opengeni/codex@1.4.0
+  - @opengeni/observability@1.4.0
+  - @opengeni/network@1.4.0
+
+## 1.3.0
+
+### Minor Changes
+
+- 414d416: Support explicit organization sharing of installed Slack bots and durable bot posting from ordinary chats. Add bot inventory and organization-access SDK methods, preserve person-chosen scheduled destinations, and keep personal Slack identities separate.
+
+### Patch Changes
+
+- 1670f64: Keep the API process alive and answer a retryable 503 (`upstream_unavailable`, `details.code: DATABASE_UNAVAILABLE`) when the database terminates its connections during a deploy drain, failover, or restart, instead of crashing on an unhandled Slack interaction claim rejection or answering an opaque 500.
+- 178b5ae: Unify connector Allow, Ask first and Block decisions across tool transports and settings. Add durable programmatic approval handles, exact stored-operation continuation, and shared review facts with portable React presentation and paginated protected details.
+
+  Add lightweight Gmail message selection and bounded pagination/chunk helpers. Preserve exact access checks, uncertain outcomes and existing client compatibility. Deploy matching API, worker and native runtime artifacts through the documented maintenance migration.
+
+- Updated dependencies [178b5ae]
+- Updated dependencies [414d416]
+  - @opengeni/contracts@1.3.0
+  - @opengeni/codemode@1.3.0
+  - @opengeni/observability@1.3.0
+  - @opengeni/codex@1.3.0
+  - @opengeni/config@1.3.0
+  - @opengeni/network@1.3.0
+
+## 1.2.0
+
+### Minor Changes
+
+- d870f32: Support model-scoped signup and coupon credits with a shared operator default and
+  per-offer overrides. Update coverage at runtime, spend eligible promotions before
+  general credits, and preserve allocation and retry accounting. Keep scoped coupon
+  redemption separate from paid top-ups. Show credit funding in model selection and
+  current coverage on demand in billing. Legacy unrestricted grants stay unrestricted.
+
+### Patch Changes
+
+- 7424e7c: Reject empty coupon IDs and invalid text boundaries in SQL credit policy updates,
+  preserving the active policy when an update cannot be read by the application.
+- 1033595: Preserve own-client provenance for database transaction admission and settlement failures so running sessions can recover their exact accepted turn after connection loss.
+- Updated dependencies [21c8904]
+- Updated dependencies [d870f32]
+  - @opengeni/config@1.2.0
+  - @opengeni/contracts@1.2.0
+  - @opengeni/codemode@1.2.0
+  - @opengeni/codex@1.2.0
+  - @opengeni/observability@1.2.0
+  - @opengeni/network@1.2.0
+
+## 1.1.0
+
+### Patch Changes
+
+- c600e3a: Use the full scoped model catalog for goal continuation and validate goal Resume before changing state. Preserve specific admission pause reasons and show the actionable rationale in the existing goal controls.
+- f895d19: Give durable worker recovery sole ownership of provider retries, add bounded backoff jitter, preserve nested HTTP error classification, and observe recovery outcomes across response and compaction attempts.
+- 4cd01cd: Every organization is now session-tenancy activated (rolling migration 0611): private ("Only me") sessions, visibility changes, forks, and personal-resource grants no longer require a per-organization activation receipt, and the owner/admin Only-me setting defaults to enabled when an organization has never changed it (owners and admins can still turn it off). `OPENGENI_ORGANIZATION_TENANCY_CANONICAL_ACTIVATION_ENABLED` and `Settings.organizationTenancyCanonicalActivationEnabled` are retired (the variable is accepted and ignored with a warning), the runtime posture no longer has an activation startup interlock, and the `db:activate-session-tenancy` operator command is removed.
+- Updated dependencies [5fd6c55]
+- Updated dependencies [c600e3a]
+- Updated dependencies [411b3b5]
+- Updated dependencies [208dec1]
+- Updated dependencies [4cd01cd]
+  - @opengeni/contracts@1.1.0
+  - @opengeni/config@1.1.0
+  - @opengeni/codemode@1.1.0
+  - @opengeni/codex@1.1.0
+  - @opengeni/observability@1.1.0
+  - @opengeni/network@1.1.0
+
+## 1.0.2
+
+### Patch Changes
+
+- ee6b145: Prioritize release acknowledgements for durably captured command output before replaying older uncaptured results.
+- 6fccfa0: Release completed Connected Machine command output once its exact tool result is
+  durable, instead of retaining it until a long turn ends. Preserve parallel and
+  background output ownership, and allow failed final acknowledgements to retry.
+  Persist independent background output custody after verified PostgreSQL capture,
+  then reconcile release on its original connection even after worker loss.
+- e16aa17: Use the receiving chat's accepted execution context for ordinary same-user agent updates, so different sender account selections do not fragment batches or change the receiving chat's accounts. Preserve explicit authorization for other users and restricted sources, and add factual model-only notes for known tool selection differences.
+- cbe4357: Simple embedding path. An organization API key acting as a user (`asUser`) on a
+  shared workspace of its own organization now adds that user's missing membership
+  once, with conversation permissions, when the key holds `members:manage` plus
+  those permissions; existing memberships are never changed. The `@opengeni/sdk/chat`
+  `OpenGeni` facade derives `organizationId` from the key, maps `{ user, tenant }`,
+  `{ user }` (one workspace per user), or `{ user, workspaceId }` to a workspace
+  created on first use, and `og.workspaceId({ tenant } | { user } | { workspaceId })`
+  translates your ids. The session proxy reports its resolved workspace in client
+  config, so `<OpenGeniChat baseUrl="/api/opengeni" />` and
+  `<SessionConversation baseUrl="/api/opengeni" sessionId={id} />` need no provider
+  or workspace id. Explicit membership APIs and provider-based usage are unchanged.
+- 9925fe2: Reduce raw Insights query overhead and read the current and comparison windows in separate bounded statements so larger default views can finish within the database timeout.
+- Updated dependencies [4476ca7]
+- Updated dependencies [f9e33b5]
+- Updated dependencies [e16aa17]
+  - @opengeni/contracts@1.0.1
+  - @opengeni/observability@1.0.1
+  - @opengeni/codemode@1.0.1
+  - @opengeni/codex@1.0.1
+  - @opengeni/config@1.0.1
+  - @opengeni/network@1.0.1
+
+## 1.0.0
+
+### Major Changes
+
+- Reset package versioning: every published `@opengeni/*` package now releases together at one shared version, starting at 1.0.0. Install all `@opengeni` packages at the same version. Earlier versions are retired.
+
+## 6.7.2
+
+### Patch Changes
+
+- 6fee02a: Avoid recursive settlement projections for single leaf-session reads and reuse the same statement's complete root control node instead of recursively walking root ancestry. Child detection and direct summaries share one PostgreSQL statement snapshot; nonleaf summaries, nonroot ancestry and writer fences retain their existing recursive behavior.
+
+## 6.7.1
+
+### Patch Changes
+
+- @opengeni/codemode@0.7.2
+
 ## 6.7.0
 
 ### Minor Changes

@@ -32,9 +32,6 @@ import {
 } from "@/components/ui/composer-menu";
 import { MENU_BACK_BUTTON_CLASS, MENU_CHEVRON_CLASS } from "@/components/ui/menu-styles";
 const loadAgentLearning = () => import("@/components/knowledge/agent-learning-settings");
-const AgentLearningSettingsEditor = lazyComposerPanel(() =>
-  loadAgentLearning().then((module) => module.AgentLearningSettingsEditor),
-);
 const AgentLearningDraftEditor = lazyComposerPanel(() =>
   loadAgentLearning().then((module) => module.AgentLearningDraftEditor),
 );
@@ -98,11 +95,16 @@ export type ComposerPlusProps = {
     value: import("@opengeni/sdk").AgentLearningOverrides;
     onChange: (value: import("@opengeni/sdk").AgentLearningOverrides) => void;
   };
+  /**
+   * An existing chat: "Chat settings" opens the chat's Agent tab, the one
+   * place for its identity, capabilities and Agent learning.
+   */
   chatSettings?: {
     workspaceId: string;
     sessionId: string;
     scope: "workspace" | "personal";
     canEdit: boolean;
+    onOpen: () => void;
   };
   /**
    * Agent settings are on for this server: "+" shows Capabilities (with the
@@ -166,8 +168,9 @@ export function ComposerMobilePlusPanel(
     });
     return () => cancelAnimationFrame(frame);
   }, [panel]);
-  // Chat settings opens without a load: fetch its editor while the menu is open.
-  // A composer rendered outside the app (a preview harness) has no client.
+  // Chat settings opens without a load: fetch the editor (and, for an existing
+  // chat, its settings for the Agent tab) while the menu is open. A composer
+  // rendered outside the app (a preview harness) has no client.
   const client = useOptionalAppContext()?.client ?? null;
   const chatSettings = props.chatSettings;
   const draftChatSettings = Boolean(props.draftChatSettings);
@@ -351,7 +354,21 @@ export function ComposerMobilePlusPanel(
               <ChevronRightIcon className={MENU_CHEVRON_CLASS} />
             </DropdownMenuItem>
           ) : null}
-          {props.chatSettings || props.draftChatSettings ? (
+          {props.chatSettings ? (
+            // One place per chat: its Agent tab, not a second copy here.
+            <DropdownMenuItem
+              data-composer-panel="settings"
+              className="cursor-pointer"
+              onSelect={() => {
+                setOpen(false);
+                props.chatSettings?.onOpen();
+              }}
+            >
+              <SettingsIcon className="size-4" />
+              Chat settings
+              <DropdownMenuMeta>Agent tab</DropdownMenuMeta>
+            </DropdownMenuItem>
+          ) : props.draftChatSettings ? (
             <DropdownMenuItem
               data-composer-panel="settings"
               className="cursor-pointer"
@@ -409,32 +426,22 @@ export function ComposerMobilePlusPanel(
         })
       ) : panel === "voice" && voiceModel ? (
         withLeading(voiceModel.panel, backButton)
-      ) : panel === "settings" ? (
+      ) : panel === "settings" && props.draftChatSettings ? (
         <>
           <ComposerMenuHeader title="Chat settings" leading={backButton} />
           <div className="min-h-0 overflow-y-auto overscroll-contain px-2.5 pb-1.5">
             <p className="mb-3 text-xs text-fg-muted">
-              Choose what agents can add or update in this chat.
+              Agent learning for this chat: whether agents' changes to knowledge, instructions and
+              skills apply right away or wait for your OK.
             </p>
             <Suspense
               fallback={<ComposerMenuRowsSkeleton rows={3} size="tile" label="Loading settings" />}
             >
-              {props.chatSettings ? (
-                <AgentLearningSettingsEditor
-                  compact
-                  key={props.chatSettings.sessionId}
-                  workspaceId={props.chatSettings.workspaceId}
-                  scope={props.chatSettings.scope}
-                  source={{ kind: "chat", id: props.chatSettings.sessionId }}
-                  canEdit={props.chatSettings.canEdit}
-                />
-              ) : props.draftChatSettings ? (
-                <AgentLearningDraftEditor
-                  compact
-                  {...props.draftChatSettings}
-                  disabled={props.disabled}
-                />
-              ) : null}
+              <AgentLearningDraftEditor
+                compact
+                {...props.draftChatSettings}
+                disabled={props.disabled}
+              />
             </Suspense>
           </div>
         </>

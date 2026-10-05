@@ -1291,7 +1291,7 @@ describe("workflow fail-closed contracts", () => {
     expect(step).toContain("matrix.lane == 'interaction'");
     expect(step).toContain('OPENGENI_REQUIRE_REAL_DB: "1"');
     expect(step).toContain(
-      "--test-name-pattern 'desktop expanded header keeps icon-only search inline'",
+      "--test-name-pattern 'desktop expanded header keeps icon-only search inline|restores.*focus|mobile result navigation'",
     );
     expect(step).toContain("./test/e2e/session-search.browser.e2e.ts");
     expect(ci).toContain("name: session-search-header-evidence");

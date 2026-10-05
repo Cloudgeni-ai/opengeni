@@ -497,6 +497,22 @@ async function lockCurrentNewSessionDraft(
   return current;
 }
 
+/**
+ * Whether creating from this draft pins an explicit tool list. The composer
+ * saves "Customize on, following workspace connectors minus exclusions" as an
+ * explicit empty `tools` array plus `excludedMcpServerIds`, while its create
+ * request omits `tools` (workspace defaults) and sends only the exclusions:
+ * the create boundary rejects exclusions next to explicit tools. Both forms
+ * are the same policy, so the exact-draft fence compares them as one.
+ */
+function newSessionDraftCreateToolsProvided(
+  row: NewSessionDraftRow,
+  options: NewSessionDraftOptionsValue,
+): boolean {
+  if (!newSessionDraftToolsProvided(row)) return false;
+  return !(options.excludedMcpServerIds !== undefined && row.tools.length === 0);
+}
+
 async function lockExactNewSessionDraft(
   db: Database,
   input: {
@@ -510,16 +526,18 @@ async function lockExactNewSessionDraft(
   if (!current || current.revision !== input.expectedRevision) {
     throw new NewSessionDraftConflictError(current?.revision ?? 0);
   }
+  const options = publicNewSessionDraftOptions(current);
+  const toolsProvided = newSessionDraftCreateToolsProvided(current, options);
   if (
     stableJson({
       text: current.text,
       resources: current.resources,
-      tools: newSessionDraftToolsProvided(current) ? current.tools : [],
-      toolsProvided: newSessionDraftToolsProvided(current),
+      tools: toolsProvided ? current.tools : [],
+      toolsProvided,
       model: current.model,
       reasoningEffort: current.reasoningEffort,
       latencyMode: current.latencyMode,
-      options: publicNewSessionDraftOptions(current),
+      options,
     }) !== stableJson(input.expectedSnapshot)
   ) {
     throw new NewSessionDraftConflictError(current.revision);
