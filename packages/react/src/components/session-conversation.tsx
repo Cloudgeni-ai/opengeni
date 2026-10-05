@@ -43,6 +43,8 @@ import type { ComposerTranscriptionControlProps } from "./composer-transcription
 import { SessionChrome } from "./session-chrome";
 import { HumanInputSurface, type HumanInputSurfaceProps } from "./human-input-surface";
 import { MessageTimeline, type MessageTimelineProps } from "./message-timeline";
+import { ProviderRecoveryNotice } from "./provider-recovery-notice";
+import { currentProviderRecovery } from "../lib/provider-recovery";
 import {
   chainLinkResolvers,
   sessionLinkResolver,
@@ -342,6 +344,22 @@ function Conversation({
   const running = status === "running" || status === "recovering" || status === "waiting_capacity";
   const realtimeVoiceRequested = realtimeVoiceProp ?? config.realtimeVoiceOffered;
   const loadingOptions = useMemo(() => embeddedGenieLoading(genieLoading), [genieLoading]);
+  const providerRecovery = useMemo(
+    () =>
+      detail.session
+        ? currentProviderRecovery(
+            {
+              id: detail.session.id,
+              status,
+              activeTurnId: detail.session.activeTurnId,
+              effectiveControl:
+                queue.effectiveControl ?? detail.session.effectiveControl ?? undefined,
+            },
+            feed.events,
+          )
+        : null,
+    [detail.session, status, queue.effectiveControl, feed.events],
+  );
   const voiceModels = useRealtimeVoiceModels(
     context.client,
     context.workspaceId,
@@ -473,6 +491,10 @@ function Conversation({
                 error={control.error}
               />
             ) : null}
+            <ProviderRecoveryNotice
+              className="mx-auto max-w-3xl px-1"
+              recovery={providerRecovery}
+            />
             <HumanInputSurface
               className="mx-auto max-w-3xl"
               loadSkillReview={loadSkillReview}

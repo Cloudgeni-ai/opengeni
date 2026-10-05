@@ -1,4 +1,5 @@
 import { formatErrorMessage, OpenGeniApiError } from "@opengeni/sdk";
+import { parseProviderRecovery, providerRecoveryExhaustedText } from "./provider-recovery";
 
 const clockTimeFormatter = new Intl.DateTimeFormat(undefined, {
   month: "short",
@@ -311,6 +312,12 @@ export function presentFailure(payload: Record<string, unknown>): {
       reason: `The model provider blocked this request.${detail || message ? ` ${detail ?? message}` : ""}`,
       safetyRefusal: true,
     };
+  }
+  // Spent automatic retries: name the model and the remedy instead of the
+  // recorded wrapper plus raw provider text (still in the stored event).
+  const recovery = parseProviderRecovery(payload);
+  if (recovery && payload.recoveryExhausted === true) {
+    return { reason: providerRecoveryExhaustedText(recovery), safetyRefusal: false };
   }
   return {
     reason:

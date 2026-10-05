@@ -264,6 +264,29 @@ describe("workspace access settings convergence", () => {
     }
   });
 
+  test("a refused candidate list is not requested again when the page remounts", async () => {
+    const { OpenGeniApiError } = await import("@opengeni/sdk");
+    listWorkspaceMemberCandidates.mockImplementation(async () => {
+      throw new OpenGeniApiError(403, '{"error":"workspace member management is not allowed"}');
+    });
+    try {
+      for (let mount = 0; mount < 3; mount += 1) {
+        const rendered = await renderMembers(true, workspaceB, { kind: "add" });
+        try {
+          await act(async () => {
+            await new Promise((resolve) => setTimeout(resolve, 10));
+          });
+          expect(document.body.textContent).toContain("You can't add people");
+        } finally {
+          await rendered.unmount();
+        }
+      }
+      expect(listWorkspaceMemberCandidates).toHaveBeenCalledTimes(1);
+    } finally {
+      listWorkspaceMemberCandidates.mockImplementation(async () => [candidateMember]);
+    }
+  });
+
   test("shows manager-only Slack access requests above the people", async () => {
     const rendered = await renderMembers(true);
     try {

@@ -72,6 +72,8 @@ export type AttemptIdentityState = {
     | import("./provider-recovery-metrics").ProviderRecoveryObservation
     | undefined;
   modelMetricRoute?: { provider: string; model: string };
+  /** Public display labels of the accepted model route, for recovery copy only. */
+  modelRoutePresentation?: { model: string; modelLabel: string; providerLabel: string };
   claudeAuthRecovery?: { credentialId: string; credentialVersion: number } | undefined;
   modelRequestStarted: boolean;
   redispatchesAtDispatch: number;

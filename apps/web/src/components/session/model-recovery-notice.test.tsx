@@ -18,37 +18,54 @@ afterEach(async () => {
   document.body.replaceChildren();
 });
 
-test("live status explains saved work without promising timing or creating another retry", async () => {
+const overloaded = {
+  code: "provider_unavailable",
+  condition: "overloaded",
+  modelLabel: "Claude Opus 5.5",
+  providerLabel: "Amazon Bedrock",
+  attempt: 2,
+  maxAttempts: 5,
+  modelRoute: true,
+} as const;
+
+test("live status names the model, provider condition and attempt without promising timing", async () => {
   const container = document.createElement("div");
   document.body.append(container);
   root = createRoot(container);
-  await act(async () => root!.render(<ModelRecoveryNotice recovery={{ kind: "rate_limited" }} />));
+  await act(async () => root!.render(<ModelRecoveryNotice recovery={overloaded} />));
   expect(container.querySelector('[role="status"]')?.textContent).toContain(
-    "High demand right now",
+    "Claude Opus 5.5 is overloaded at the provider (Amazon Bedrock) — retrying (attempt 2 of 5)…",
   );
   expect(container.textContent).toContain(
-    "Some models are being throttled. Your message is saved and we’ll keep retrying for a few minutes.",
+    "Your message is saved. Opengeni keeps retrying automatically for a few minutes.",
   );
   expect(container.textContent).not.toMatch(/next retry at|reset|\b\d{1,2}:\d{2}\b/i);
   expect(container.querySelector("button")).toBeNull();
   expect(container.querySelector("details")).toBeNull();
-  await act(async () => root!.render(<ModelRecoveryNotice recovery={{ kind: "unavailable" }} />));
-  expect(container.textContent).toContain("This model is temporarily unavailable");
-  expect(container.textContent).toContain(
-    "Your message is saved and we’ll keep retrying for a few minutes.",
+  await act(async () =>
+    root!.render(
+      <ModelRecoveryNotice
+        recovery={{
+          ...overloaded,
+          code: "provider_rate_limited",
+          condition: "rate_limited",
+          modelLabel: null,
+          providerLabel: null,
+          attempt: null,
+        }}
+      />,
+    ),
   );
-  expect(container.textContent).not.toContain("throttled");
-  expect(container.textContent).not.toMatch(/choose another model/i);
-  expect(container.querySelector("button")).toBeNull();
-  expect(container.textContent).not.toMatch(/next retry at|reset|\b\d{1,2}:\d{2}\b/i);
-  expect(container.textContent).not.toContain("Waiting for the next retry.");
+  expect(container.textContent).toContain(
+    "The model is rate limited at the provider — retrying automatically…",
+  );
 });
 
 test("recovery does not offer draft-only model changes as a way to unblock the accepted turn", async () => {
   const container = document.createElement("div");
   document.body.append(container);
   root = createRoot(container);
-  await act(async () => root!.render(<ModelRecoveryNotice recovery={{ kind: "rate_limited" }} />));
+  await act(async () => root!.render(<ModelRecoveryNotice recovery={overloaded} />));
   expect(container.querySelector("button")).toBeNull();
-  expect(container.textContent).not.toContain("choose another model");
+  expect(container.textContent).not.toMatch(/another model/i);
 });

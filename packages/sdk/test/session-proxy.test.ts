@@ -84,6 +84,10 @@ function upstreamServer() {
       body: multipart ? await request.formData() : text ? JSON.parse(text) : undefined,
     });
     const path = url.pathname;
+    if (path.endsWith("/goal") && request.method === "GET" && url.searchParams.has("absent")) {
+      // A goal-less session read through the `absent=null` opt-in.
+      return Response.json(null);
+    }
     if (path === `/v1/workspaces/${WORKSPACE_ID}/realtime-model-catalog`) {
       return Response.json({ models: [VOICE_MODEL] });
     }
@@ -501,6 +505,17 @@ describe("createSessionProxyHandler", () => {
       404,
     );
     expect(guarded.upstream.requests).toHaveLength(0);
+  });
+
+  test("goal read forwards the absent=null opt-in so a goal-less session is a 200 null", async () => {
+    const { upstream, browser } = setup();
+    expect(await browser.findGoal(WORKSPACE_ID, SESSION_ID)).toBeNull();
+    const [request] = upstream.requests;
+    expect(request!.method).toBe("GET");
+    expect(request!.url.pathname).toBe(
+      `/v1/workspaces/${WORKSPACE_ID}/sessions/${SESSION_ID}/goal`,
+    );
+    expect(request!.url.searchParams.get("absent")).toBe("null");
   });
 
   test("acts as the resolved external user through asUser", async () => {

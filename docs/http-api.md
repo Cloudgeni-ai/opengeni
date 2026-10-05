@@ -38,7 +38,9 @@ workspaces, external users) in [`product-integration.md`](product-integration.md
 - `POST /v1/workspaces/:workspaceId/sessions/:sessionId/events`
 
 Session goals support `GET`, `PATCH`, and idempotent `DELETE` on
-`/v1/workspaces/:workspaceId/sessions/:id/goal`; see [`goals.md`](goals.md).
+`/v1/workspaces/:workspaceId/sessions/:id/goal`; `GET` 404s for a goal-less
+session unless the client opts in with `?absent=null` (200 `null`). See
+[`goals.md`](goals.md).
 
 Scheduled tasks add `GET /v1/workspaces/:workspaceId/scheduled-tasks/attention`
 (failed runs and schedules blocked by an unusable account) and the owner-only
