@@ -66,6 +66,8 @@ jobs:
     name: Rust 1.82 compatibility
     runs-on: ubuntu-latest
     timeout-minutes: 30
+    env:
+      RUSTUP_TOOLCHAIN: 1.82.0
     steps:
       - name: Check out repository
         uses: actions/checkout@v6
@@ -155,6 +157,9 @@ jobs:
 
       - name: cargo test --workspace
         run: cargo test --workspace --all-features
+
+      - name: Verify publication receipts across blocked writes and reconnects
+        run: cargo test --manifest-path vendor/async-nats/Cargo.toml --locked --lib --no-default-features --features ring,websockets flush_custody
 
       - name: Prove embedded helper selection with synthetic payloads
         if: runner.os == 'Linux'

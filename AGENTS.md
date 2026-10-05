@@ -477,6 +477,8 @@ PTY child cleanup, relay pumps and same-client reply settlement; cancelling a
 waiter never proves idle. Controller update admission atomically fences new
 HTTP work before final host sealing. Missing physical/transport settlement
 keeps updates unavailable without replaying work or inventing acknowledgments.
+Counted replies use atomic publication receipts from the pinned transport in
+`agent/vendor/async-nats`; a reconnect cannot settle an old connection's receipt.
 Pre-0.1.29 agents need the official installer: see `docs/connected-machines.md`.
 APFS transactional writes inspect ACLs through `opengeni-agent-files-ffi`;
 see `agent/TRANSACTIONAL-WRITES.md` for metadata preservation and refusal.

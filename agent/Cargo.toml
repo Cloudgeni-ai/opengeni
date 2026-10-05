@@ -1,5 +1,6 @@
 [workspace]
 resolver = "2"
+exclude = ["vendor/async-nats"]
 members = [
     "crates/opengeni-agent",
     "crates/opengeni-agent-engine",
@@ -51,7 +52,7 @@ command-group = { version = "5.0.1", features = ["with-tokio"] }
 # claims and subscribes to `agent.<ws>.<id>.connection.<instance>.rpc`, then
 # answers ControlRequests. 0.47+ requires
 # Rust 1.88, so keep the newest lineage compatible with our declared 1.82 floor.
-async-nats = "=0.46.0"
+async-nats = { version = "=0.46.0", path = "vendor/async-nats" }
 
 # Structured logging; never log secret values.
 tracing = "0.1"

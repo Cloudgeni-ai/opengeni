@@ -726,6 +726,10 @@ PTY child/IO cleanup, blocking native actions, attached-browser commands and
 their original reply transport retain the opening reservation after a waiter or
 connection generation ends. A timeout or disconnected profile does not prove a
 physical command stopped, and the updater never fabricates a consumer ACK.
+Each counted reply carries its transport receipt in the same publication
+command. Success requires empty internal buffers and a flush of that stream;
+losing the stream fails its attached receipt before reconnect. A replacement
+socket cannot prove that the previous reply was sent.
 Controller admission is fenced atomically during its idle proof; failed or
 deferred updates release only their own fence. Missing settlement makes updates
 unavailable for the running process while ordinary work remains usable. Older

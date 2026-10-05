@@ -2061,23 +2061,16 @@ async fn publish_response(
         encoded
     };
 
-    if let Err(publish_error) = client.publish(reply, payload.into()).await {
-        if let Some(reservation) = &reservation {
-            reservation.mark_unsettled();
-        }
-        warn!(
-            error = %publish_error,
-            op = label,
-            "failed to publish control rpc reply"
-        );
-    } else if let Some(reservation) = reservation {
-        // publish only queues bytes. Settle this exact connection before its
-        // accepted guard drops; another connection's update flush is unrelated.
-        // This is transport completion, never a fabricated consumer ACK.
-        if let Err(flush_error) = client.flush().await {
+    if let Some(reservation) = reservation {
+        // Attach the reply's receipt to its actual publication command. A
+        // reconnect must fail that receipt rather than redeem it on a socket
+        // that never wrote the old reply. This is not a consumer storage ACK.
+        if let Err(flush_error) = client.publish_with_flush(reply, payload.into()).await {
             reservation.mark_unsettled();
             warn!(error = %flush_error, op = label, "control rpc reply transport did not settle");
         }
+    } else if let Err(publish_error) = client.publish(reply, payload.into()).await {
+        warn!(error = %publish_error, op = label, "failed to publish control rpc reply");
     }
 }
 
@@ -2265,17 +2258,28 @@ mod tests {
             .await
             .unwrap()
             .unwrap();
-        client
-            .publish("fixture.backpressure", vec![0; 32 * 1024 * 1024].into())
-            .await
-            .unwrap();
         // Prove the actual writer is backpressured before testing ownership;
-        // entry into the admitted task is not transport-pending evidence.
+        // entry into the admitted task is not transport-pending evidence. Host
+        // send buffering varies, so fill it within an explicit 256 MiB bound.
+        let mut backpressured = false;
+        for _ in 0..8 {
+            match tokio::time::timeout(
+                Duration::from_millis(100),
+                client.publish_with_flush("fixture.backpressure", vec![0; 32 * 1024 * 1024].into()),
+            )
+            .await
+            {
+                Err(_) => {
+                    backpressured = true;
+                    break;
+                }
+                Ok(Ok(())) => {}
+                Ok(Err(error)) => panic!("fixture publication did not settle: {error}"),
+            }
+        }
         assert!(
-            tokio::time::timeout(Duration::from_millis(100), client.flush())
-                .await
-                .is_err(),
-            "fixture writer settled before its reader was released"
+            backpressured,
+            "fixture writer never blocked before its reader was released"
         );
         (client, received, release, server)
     }

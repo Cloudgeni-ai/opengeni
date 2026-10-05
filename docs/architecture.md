@@ -451,7 +451,9 @@ fence admission, require idle commands/uploads and owned browser/computer contro
 and defer without proof. `opengeni-agent-engine::update_drain` owns one process-wide
 reservation boundary. Platform scopes pass existing guards to blocking actions,
 PTY child cleanup, job descendants and relay pumps; generation tasks own only
-waiters. Replies settle on their original transport, and unproved cleanup or
+waiters. Reply bytes and their receipt enter the transport as one command;
+blocked writes retain the receipt, and losing that connection fails it before
+reconnect. Replies settle on their original transport, and unproved cleanup or
 publication keeps updates unavailable. The attached-browser bridge reserves
 before spawn and retains timed-out commands until matching physical results.
 The private controller update transaction fences new HTTP requests, including
@@ -1255,6 +1257,11 @@ behind a generic 500, so its session lookups run through
 `agent/` is the Cargo workspace for Connected Machine execution and the relay
 edge. `agent/proto/opengeni_agent.proto` is the single wire source, generated to
 Rust and `@opengeni/agent-proto` TypeScript types.
+
+[`agent/vendor/async-nats`](../agent/vendor/async-nats/OPENGENI-PATCH.md) preserves
+the pinned upstream transport with an atomic publication-receipt repair. It is
+a path dependency outside the workspace member set; native CI runs its focused
+transport tests on every supported host.
 
 One agent independently connects multiple deployments/workspaces within shared
 host containment. The relay carries terminal/desktop bytes, never durable session
