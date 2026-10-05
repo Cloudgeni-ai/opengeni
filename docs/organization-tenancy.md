@@ -1136,7 +1136,19 @@ page is the scoped editor for that workspace: a holder of `members:manage` may
 choose from a bounded list of active same-organization humans who do not already
 have access, add the selected organization membership, change that member's
 workspace role or fine-grained permissions, and revoke that exact workspace
-grant. It cannot invite people into the organization, change organization
+grant. Since migration `0635_organization_admin_workspace_member_management.sql`
+(rolling) an active organization owner or administrator may do the same on any
+shared workspace in their organization from that page, with or without their
+own workspace grant (or with one lacking `members:manage`): the API's
+`requireWorkspaceMemberManagementAuthority` admits only a canonical managed-cookie
+session whose organization role is owner/admin for a shared workspace, the two
+SECURITY DEFINER checks (`list_workspace_member_management_candidates`,
+`assert_workspace_member_management_candidate`) re-derive that active
+owner/admin `user:` membership, and removal opens the organization
+administration capability. The page keeps its own self and
+last-administering-member guards for every actor; ordinary members still need
+`members:manage` or `workspace:admin` on their own row, and API keys, delegated
+bearers, agents, and services keep the original refusal. It cannot invite people into the organization, change organization
 roles, enumerate unrelated workspace access, or administer Personal
 workspaces. The separate Slack access-request queue keeps its existing
 workspace-admin lifecycle.
