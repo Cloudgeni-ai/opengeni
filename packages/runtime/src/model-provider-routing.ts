@@ -65,6 +65,39 @@ function chatRequest(request: ModelRequest): ModelRequest {
   );
 }
 
+/**
+ * Opper returns the exact USD cost of each response as `usage.opper.cost.total`
+ * (a JSON number). Convert it to the bounded decimal string the reported-cost
+ * billing path accepts; anything else is ignored.
+ */
+export function opperReportedCostUsd(usage: unknown): string | undefined {
+  if (!usage || typeof usage !== "object") return undefined;
+  const opper = (usage as { opper?: unknown }).opper;
+  const cost = opper && typeof opper === "object" ? (opper as { cost?: unknown }).cost : undefined;
+  const total = cost && typeof cost === "object" ? (cost as { total?: unknown }).total : undefined;
+  if (typeof total !== "number" || !Number.isFinite(total) || total < 0 || total >= 1_000_000) {
+    return undefined;
+  }
+  // 12 fraction digits keep sub-micro precision without float noise.
+  const fixed = total.toFixed(12).replace(/0+$/u, "").replace(/\.$/u, "");
+  return fixed === "" ? "0" : fixed;
+}
+
+function withOpperReportedCost<T extends { providerData?: Record<string, any> | undefined }>(
+  response: T,
+  costUsd: string | undefined,
+): T {
+  if (costUsd === undefined) return response;
+  const providerData = response.providerData ?? {};
+  return {
+    ...response,
+    providerData: {
+      ...providerData,
+      provider_metadata: { ...providerData.provider_metadata, opper: { costUsd } },
+    },
+  };
+}
+
 /** Reject ambiguous completion before the SDK can commit output or execute tools. */
 export class OpenGeniChatCompletionsModel extends OpenAIChatCompletionsModel {
   override async getResponse(request: ModelRequest): Promise<ModelResponse> {
@@ -72,22 +105,29 @@ export class OpenGeniChatCompletionsModel extends OpenAIChatCompletionsModel {
     if (isUnknownFinishReason(chatCompletionFinishReason(response.providerData))) {
       throw new UnknownModelFinishReasonError();
     }
-    return {
-      ...response,
-      output: withChatReasoning(
-        response.output,
-        chatReasoning(primaryChatChoice(response.providerData)?.message),
-        chatReasoningDetails(primaryChatChoice(response.providerData)?.message),
-      ),
-    };
+    return withOpperReportedCost(
+      {
+        ...response,
+        output: withChatReasoning(
+          response.output,
+          chatReasoning(primaryChatChoice(response.providerData)?.message),
+          chatReasoningDetails(primaryChatChoice(response.providerData)?.message),
+        ),
+      },
+      opperReportedCostUsd(response.providerData?.usage),
+    );
   }
 
   override async *getStreamedResponse(request: ModelRequest): AsyncIterable<ResponseStreamEvent> {
     let finishReason: unknown;
     let reasoning: ChatReasoning | undefined;
     let reasoningDetails: Record<string, unknown>[] | undefined;
+    let reportedCostUsd: string | undefined;
     for await (const event of super.getStreamedResponse(chatRequest(request))) {
       if (event.type === "model") {
+        reportedCostUsd =
+          opperReportedCostUsd((event.event as { usage?: unknown } | undefined)?.usage) ??
+          reportedCostUsd;
         const observed = chatCompletionFinishReason(event.event);
         if (observed !== undefined && observed !== null) {
           finishReason = observed;
@@ -107,10 +147,13 @@ export class OpenGeniChatCompletionsModel extends OpenAIChatCompletionsModel {
       yield event.type === "response_done"
         ? {
             ...event,
-            response: {
-              ...event.response,
-              output: withChatReasoning(event.response.output, reasoning, reasoningDetails),
-            },
+            response: withOpperReportedCost<typeof event.response>(
+              {
+                ...event.response,
+                output: withChatReasoning(event.response.output, reasoning, reasoningDetails),
+              },
+              reportedCostUsd,
+            ),
           }
         : event;
     }

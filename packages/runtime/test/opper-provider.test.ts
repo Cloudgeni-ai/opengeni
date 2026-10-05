@@ -7,7 +7,9 @@ import {
   OrganizationOpperUnavailableError,
   WorkspaceOpperUnavailableError,
 } from "../src/model-provider";
-import { requestBodyText } from "../src/replayable-json-body";
+import { requestBodyText, ReplayableJsonOpenAI } from "../src/replayable-json-body";
+import { OpenGeniChatCompletionsModel, opperReportedCostUsd } from "../src/model-provider-routing";
+import { modelResponseUsageFromResponse } from "../src/run-events";
 import {
   isOpperClaudeUpstreamModel,
   modelRequestPolicyForProvider,
@@ -198,5 +200,64 @@ describe("Opper provider clients", () => {
     } finally {
       globalThis.fetch = originalFetch;
     }
+  });
+});
+
+describe("Opper reported cost", () => {
+  test("normalizes Opper's float cost to a bounded decimal string", () => {
+    expect(opperReportedCostUsd({ opper: { cost: { total: 0.00030112499999999996 } } })).toBe(
+      "0.000301125",
+    );
+    expect(opperReportedCostUsd({ opper: { cost: { total: 0 } } })).toBe("0");
+    expect(opperReportedCostUsd({ cost: 0.1 })).toBeUndefined();
+    expect(opperReportedCostUsd({ opper: { cost: { total: -1 } } })).toBeUndefined();
+    expect(opperReportedCostUsd({ opper: { cost: { total: "0.1" } } })).toBeUndefined();
+  });
+
+  test("a streamed Opper response carries the exact cost into usage billing", async () => {
+    const usage = {
+      prompt_tokens: 669,
+      completion_tokens: 33,
+      total_tokens: 702,
+      cost: 0.0027522,
+      opper: { cost: { tokens: 0.0027522, total: 0.0027522 } },
+    };
+    const client = new ReplayableJsonOpenAI({
+      apiKey: "fixture",
+      baseURL: "https://api.opper.ai/v3/compat",
+      maxRetries: 0,
+      fetch: async () => {
+        const common = {
+          id: "chatcmpl-opper",
+          model: SONNET,
+          created: 1,
+          object: "chat.completion.chunk",
+        };
+        const chunks = [
+          { ...common, choices: [{ index: 0, delta: { content: "OK" }, finish_reason: null }] },
+          { ...common, choices: [{ index: 0, delta: {}, finish_reason: "stop" }] },
+          { ...common, choices: [], usage },
+        ];
+        return new Response(
+          chunks.map((chunk) => `data: ${JSON.stringify(chunk)}\n\n`).join("") + "data: [DONE]\n\n",
+          { headers: { "content-type": "text/event-stream" } },
+        );
+      },
+    });
+    const model = new OpenGeniChatCompletionsModel(client, SONNET);
+    let done: any;
+    for await (const event of model.getStreamedResponse({
+      input: "hi",
+      modelSettings: {},
+      tools: [],
+      outputType: "text",
+      handoffs: [],
+      tracing: false,
+    } as never))
+      if (event.type === "response_done") done = event.response;
+    expect(modelResponseUsageFromResponse(done)?.gatewayBilling).toEqual({
+      finalProvider: "opper",
+      inferenceCostUsd: "0.0027522",
+    });
   });
 });

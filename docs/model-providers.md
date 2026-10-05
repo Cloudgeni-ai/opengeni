@@ -792,12 +792,17 @@ advertises `params.reasoning.wire: "reasoning_effort"`, the Chat adapter's
 standard `reasoning_effort` field is the matching wire; a reviewed entry may
 enable exactly the advertised vocabulary once a live probe confirms it.
 
-Prices are a dated snapshot, not a live feed. `pricing` lives only on the
-reviewed code entry; database catalog documents may list Opper membership but
-never a price. Managed debits use these static rates plus the standard 5%
-margin (`marginBps: 500`). Opper's compat response cost metadata is not yet
-consumed: if a probe shows Opper returns an exact per-request cost, debit it
-plus 5% like AI Gateway and keep these rates as the conservative fallback.
+Every Opper response reports its exact USD cost (`usage.cost` and
+`usage.opper.cost.total`, including on the final streamed chunk). The Chat
+adapter carries `usage.opper.cost.total` to billing, and managed turns debit
+that exact cost plus the standard 5% margin, like AI Gateway's reported-cost
+path (`pricingSource: gateway_reported`, upstream provider `opper`). Workspace
+and organization rails record the same exact provider cost for Insights and
+never debit credits. The reviewed static rates above are only the fallback when
+cost metadata is absent; `pricing` lives only on the reviewed code entry, and
+database catalog documents may list Opper membership but never a price. Live
+2026-10-05 costs equalled these list rates exactly (for example 669 input +
+33 output Sonnet tokens = $0.0027522).
 Choosing the Bedrock EU Sonnet route over the cheaper Azure Sweden route trades
 10% price for no provider logging/retention and matches the "processed in the
 EU" intent; revisit together with reasoning once probed.
@@ -828,7 +833,12 @@ A workspace admin connects **Opper** in workspace Settings → Models. The key i
 stored in the encrypted workspace connection table (`providerDomain:
 api.opper.ai`, `credentialRole: opper`), returned as metadata only, and
 resolved only in the worker for that workspace's turn. Readiness is the active
-connection; revocation fails the rail closed with an actionable error. Curated
+connection; revocation fails the rail closed with an actionable error. Opper
+issues separate management keys (`op-mak-…`) that its inference routes refuse
+with 403 ("management API keys cannot be used on inference routes"); the
+workspace connection, organization connection, and `OPENGENI_OPPER_API_KEY` boot
+validation all reject them with an explanation instead of storing a key that
+can never run a turn. Curated
 Opper membership is available through this rail even without
 `OPENGENI_OPPER_API_KEY`; turns are `upstreamPayer: workspace`,
 `metering: external`, and spend no OpenGeni credits.
@@ -867,14 +877,26 @@ models and workspaces exactly as for OpenRouter.
 
 ### Live probe notes
 
-Probes require an Opper key and are pending: no key was available when the
-starters were reviewed on 2026-10-05. Before relying on a starter in
-production, verify through `POST /v3/compat/chat/completions` on each curated
-route: a forced function call (`tool_choice` naming one function) completes
-with `finish_reason=tool_calls`; SSE streaming with tools; whether
-`reasoning_effort` is accepted or rejected; whether usage reports cached tokens
-and an exact cost; and, for Gemini, a tool result containing a `$ref` key
-completes after the projection. Record results here.
+Probed 2026-10-05 against `https://api.opper.ai/v3/compat/chat/completions`
+with a runtime key, and end to end through OpenGeni's runtime (real Agents SDK
+streamed run, tool call, tool result, final answer, reported-cost extraction):
+
+| Probe                                              | `vertexai/gemini-3.8-flash-eu`                                        | `aws/claude-sonnet-4-6-eu`                         |
+| -------------------------------------------------- | --------------------------------------------------------------------- | -------------------------------------------------- |
+| Forced function call (`tool_choice` names one)     | `finish_reason=tool_calls`, correct arguments                         | `finish_reason=tool_calls`, correct arguments      |
+| SSE streaming with tools                           | tool-call deltas, `tool_calls` finish, usage + cost on final chunk    | same                                               |
+| `reasoning_effort` `low` / `high`                  | accepted (200); reasoning tokens reported but not effort-dependent    | accepted (200); no reasoning tokens reported       |
+| Tool output containing a raw `$ref` key            | **400** "referenced name … does not match to a display_name"          | 200                                                |
+| Same output after OpenGeni's `_$ref` projection    | 200                                                                   | 200                                                |
+| Exact cost metadata                                | `usage.cost`, `usage.opper.cost.total`                                | same                                               |
+| Full OpenGeni agent loop (tool + `$ref` result)    | completes; per-call exact cost extracted                              | completes; per-call exact cost extracted           |
+
+Gemini reasons by default (`completion_tokens_details.reasoning_tokens`, for
+example ~50 tokens before a forced tool call); those tokens are billed inside
+`completion_tokens` and the reported cost. Because neither route demonstrably
+honours `reasoning_effort`, reasoning stays non-runnable and OpenGeni sends no
+effort for these products. Image/file input was not probed and stays disabled.
+A management key returns 403 and an unknown key 401 on every inference route.
 
 ## `list_models` agent tool
 

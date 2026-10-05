@@ -3369,6 +3369,21 @@ export const WORKSPACE_OPENROUTER_CONNECTION_ROLE = "openrouter" as const;
 export const WORKSPACE_OPPER_CONNECTION_DOMAIN = "api.opper.ai" as const;
 export const WORKSPACE_OPPER_CONNECTION_ROLE = "opper" as const;
 
+/**
+ * Opper issues separate management keys (`op-mak-…`) that its inference routes
+ * refuse with 403 ("management API keys cannot be used on inference routes").
+ * Reject them before they are stored so a connection never looks ready while
+ * every turn fails. Returns a user-facing explanation, or null when usable.
+ */
+export function opperCredentialProblem(apiKey: string): string | null {
+  const key = apiKey.trim();
+  if (!key) return "Enter an Opper API key.";
+  if (/^op-mak-/iu.test(key)) {
+    return "This is an Opper management key, which Opper does not accept for model requests. Create an API key (not a management key) at platform.opper.ai and connect that instead.";
+  }
+  return null;
+}
+
 export const CODEX_REALTIME_MODEL_ID = "gpt-live-1-boulder-alpha" as const;
 export const SUPERGROK_REALTIME_MODEL_ID = "supergrok/grok-voice-think-fast-2.0" as const;
 export const OPENGENI_REALTIME_MODEL_ID_PREFIX = "opengeni-gateway/" as const;
@@ -9632,6 +9647,11 @@ export function validateModelCatalogSettings(
   const notes = parseModelNotesJson(settings.modelNotesJson);
   const registryProviders = parseModelProvidersJson(settings.modelProvidersJson);
   const builtinId = builtinProviderId(settings);
+  const opperKeyProblem =
+    settings.opperApiKey === undefined ? null : opperCredentialProblem(settings.opperApiKey);
+  if (opperKeyProblem) {
+    throw new Error(`OPENGENI_OPPER_API_KEY: ${opperKeyProblem}`);
+  }
   const providerIds = new Set<string>();
   for (const provider of registryProviders) {
     if (

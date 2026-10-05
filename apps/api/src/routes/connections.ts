@@ -30,6 +30,7 @@ import {
   WORKSPACE_OPENROUTER_CONNECTION_ROLE,
   WORKSPACE_OPPER_CONNECTION_DOMAIN,
   WORKSPACE_OPPER_CONNECTION_ROLE,
+  opperCredentialProblem,
   VERCEL_AI_GATEWAY_CONNECTION_DOMAIN,
   VERCEL_AI_GATEWAY_CONNECTION_ROLE,
 } from "@opengeni/config";
@@ -343,6 +344,7 @@ export function registerConnectionRoutes(app: Hono, deps: ApiRouteDeps): void {
       // integration credentials still require an explicit broker destination.
       if (!workspaceProviderKind && !directModelKey)
         assertBrokeredApiKeyCredential(payload.kind, payload.credential);
+      if (workspaceProviderKind === "opper") assertOpperCredential(payload.credential);
       const connection = workspaceProviderKind
         ? await (async () => {
             const provider = workspaceProviderApiKeyConnectionSpec(workspaceProviderKind);
@@ -1228,6 +1230,8 @@ export function registerConnectionRoutes(app: Hono, deps: ApiRouteDeps): void {
               metadata: existing.metadata,
               credential: payload.credential,
             });
+            if (existingWorkspaceProviderKind === "opper")
+              assertOpperCredential(payload.credential);
             const key = requireEnvironmentEncryption(settings);
             const grantedScopes = payload.grantedScopes ?? existing.grantedScopes;
             const expiresAt =
@@ -1918,6 +1922,13 @@ function workspaceProviderApiKeyConnectionKind(input: {
     return "opper";
   }
   return null;
+}
+
+/** Opper management keys are refused by inference routes; never store one as a model key. */
+function assertOpperCredential(credential: Record<string, unknown>): void {
+  const apiKey = typeof credential.apiKey === "string" ? credential.apiKey : "";
+  const problem = opperCredentialProblem(apiKey);
+  if (problem) throw new HTTPException(422, { message: problem });
 }
 
 /**

@@ -9,6 +9,7 @@ import {
   configuredOpperWorkspaceProductModelIds,
   configuredProviders,
   getSettings,
+  opperCredentialProblem,
   OPENGENI_OPPER_MODELS,
   OPPER_BASE_URL,
   OPPER_PROVIDER_ID,
@@ -306,5 +307,14 @@ describe("deployment catalog document", () => {
       { ...document, opperModels: [] },
     );
     expect(configuredProviders(settings).some((p) => p.id === OPPER_PROVIDER_ID)).toBe(false);
+  });
+});
+
+describe("Opper credentials", () => {
+  test("management keys are explained and refused; runtime keys pass", () => {
+    expect(opperCredentialProblem("op-mak-abc")).toMatch(/management key/u);
+    expect(opperCredentialProblem("  ")).toMatch(/Enter an Opper API key/u);
+    expect(opperCredentialProblem("op-runtime-abc")).toBeNull();
+    expect(() => base({ OPENGENI_OPPER_API_KEY: "op-mak-abc" })).toThrow(/management key/u);
   });
 });

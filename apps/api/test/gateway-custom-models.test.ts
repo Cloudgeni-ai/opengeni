@@ -874,6 +874,23 @@ describe("workspace Gateway custom model API", () => {
     });
 
     const permissions: Permission[] = ["connections:read", "connections:write"];
+    const connectBody = (apiKey: string) => ({
+      providerDomain: "api.opper.ai",
+      kind: "api_key",
+      subjectId: null,
+      credential: { apiKey },
+      grantedScopes: [],
+      metadata: { credentialRole: "opper", credentialLabel: "Opper" },
+      operationId: crypto.randomUUID(),
+    });
+    // Opper refuses management keys on inference routes; never store one.
+    const management = await request(
+      "/connections",
+      { method: "POST", permissions, body: connectBody("op-mak-local-fixture") },
+      publicApp,
+    );
+    expect(management.status).toBe(422);
+    expect(JSON.stringify(await management.json())).toContain("management key");
     const connected = await request(
       "/connections",
       {
