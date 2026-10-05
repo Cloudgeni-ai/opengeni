@@ -1832,6 +1832,9 @@ describe("deployment contract", () => {
       "OPENGENI_JEV_MODEL",
       "OPENGENI_JEV_REQUEST_TIMEOUT_MS",
       "OPENGENI_CODE_SEARCH_MODE",
+      "OPENGENI_CODE_SEARCH_FUNDING",
+      "OPENGENI_CODE_SEARCH_JUDGE_PROVIDER",
+      "OPENGENI_CODE_SEARCH_JUDGE_MODEL",
     ]);
     const configured = generateRuntimeArtifacts(
       withSandboxBackend("docker"),
@@ -1841,10 +1844,15 @@ describe("deployment contract", () => {
         object_storage_azure_connection_string: { value: "x", sensitive: true },
         helm_set_values: { value: {} },
       },
-      { OPENGENI_JEV_API_KEY: "jev-key", OPENGENI_CODE_SEARCH_MODE: "opt_in" },
+      {
+        OPENGENI_JEV_API_KEY: "jev-key",
+        OPENGENI_CODE_SEARCH_MODE: "opt_in",
+        OPENGENI_CODE_SEARCH_FUNDING: "credits_only",
+      },
     );
     expect(configured.runtimeEnv).toContain("OPENGENI_JEV_API_KEY=jev-key");
     expect(configured.runtimeEnv).toContain("OPENGENI_CODE_SEARCH_MODE=opt_in");
+    expect(configured.runtimeEnv).toContain("OPENGENI_CODE_SEARCH_FUNDING=credits_only");
     const absent = generateRuntimeArtifacts(
       withSandboxBackend("docker"),
       {

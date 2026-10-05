@@ -27,7 +27,11 @@ import {
 } from "@opengeni/config";
 import { projectReasoningConfigurations, supportsReasoningConfiguration } from "@opengeni/codex";
 import { settingsWithSessionMcpServersForRun } from "../capabilities";
-import { resolveRigProviderImageForRun, settingsWithWorkspaceSandboxImage } from "@opengeni/core";
+import {
+  resolveCodeSearchJudgeRouteForTurn,
+  resolveRigProviderImageForRun,
+  settingsWithWorkspaceSandboxImage,
+} from "@opengeni/core";
 import { createModelHistoryAttachmentProjector } from "../run-input";
 import type {
   TurnActivityServices as ActivityServices,
@@ -52,7 +56,10 @@ import {
   resolveWorkspaceDefaultAgentIdentity,
   type MediaGenerationResult,
 } from "@opengeni/contracts";
-import { codeSearchEnabledForTurn } from "@opengeni/contracts/code-search";
+import {
+  codeSearchEnabledForTurn,
+  type CodeSearchJudgeRoute,
+} from "@opengeni/contracts/code-search";
 
 import { assertWorkspaceHumanInputAllowed } from "./admission";
 import {
@@ -80,6 +87,8 @@ export type GovernanceModelDeps = {
   fileAuthoritySubjectId: ClaimTurnOk["fileAuthoritySubjectId"];
   humanInputResume: ClaimTurnOk["humanInputResume"];
   turnExecutionPolicy: ClaimTurnOk["turnExecutionPolicy"];
+  /** The accepted turn's model is paid with OpenGeni credits (set by the claim). */
+  turnPaidWithOpenGeniCredits: boolean;
   requiredGeneratedVideoFiles: Array<{
     operationId: string;
     artifactId: string;
@@ -98,8 +107,12 @@ export type GovernanceModelOk = {
     | null;
   rigName: string | null;
   agentHumanInputEnabled: boolean;
-  /** Deployment and workspace allow the Jev-backed code_search tool. */
-  codeSearchEnabled: boolean;
+  /**
+   * Who pays this turn's code_search judge, with which key; null when the turn
+   * does not get the tool (session frozen off, deployment or workspace Off, or
+   * nobody may pay for it under `credits_only` funding).
+   */
+  codeSearchRoute: CodeSearchJudgeRoute | null;
   workspaceAgentInstructions: string | null | undefined;
   /**
    * Modular composer identity tier: the explicit workspace default identity,
@@ -183,6 +196,7 @@ export async function prepareGovernanceAndModel(
     fileAuthoritySubjectId,
     humanInputResume,
     turnExecutionPolicy,
+    turnPaidWithOpenGeniCredits,
     requiredGeneratedVideoFiles,
   } = deps;
 
@@ -250,12 +264,23 @@ export async function prepareGovernanceAndModel(
   const agentHumanInputEnabled = resolveWorkspaceAgentHumanInputEnabled(workspace.settings);
   // The session's decision was frozen when it was created, so only a
   // deliberate switch-off (deployment or workspace Off), or undoing one,
-  // changes its tool list.
-  const codeSearchEnabled = codeSearchEnabledForTurn(
+  // changes its tool list. The route then decides who pays the judge from
+  // durable facts only: the accepted turn's frozen billing and the active
+  // provider connections. Under `credits_only` a turn not paid with credits
+  // needs the customer's own OpenRouter or Gateway connection. The billing
+  // changes only with the turn's model or provider, which already starts a new
+  // upstream prompt cache; a connection change is a deliberate admin switch.
+  const codeSearchRoute = codeSearchEnabledForTurn(
     session.codeSearchEnabled,
     workspace.settings,
     codeSearchDeploymentPolicy(capabilitySettings),
-  );
+  )
+    ? await resolveCodeSearchJudgeRouteForTurn(db, capabilitySettings, {
+        accountId: input.accountId,
+        workspaceId: input.workspaceId,
+        turnPaidWithOpenGeniCredits,
+      })
+    : null;
   const contextSelection = await resolveCompanyBrainContextSelection(db, governanceClaims);
   const workspaceAgentInstructions = contextSelection.legacyWorkspaceInstructions;
   const workspaceAgentIdentity = resolveWorkspaceDefaultAgentIdentity(
@@ -503,7 +528,7 @@ export async function prepareGovernanceAndModel(
       rigVersion,
       rigName,
       agentHumanInputEnabled,
-      codeSearchEnabled,
+      codeSearchRoute,
       workspaceAgentInstructions,
       workspaceAgentIdentity,
       workspaceGovernance,

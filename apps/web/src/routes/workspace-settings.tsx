@@ -623,7 +623,11 @@ function CodeSearchPreferenceRow({
   return (
     <SettingRow
       label="Fast code search"
-      description={`Agents find code in one step. ${defaultPhrase}; Off also pauses it in running sessions.`}
+      description={`Agents find code in one step. ${defaultPhrase}; Off also pauses it in running sessions.${
+        capability.funding === "credits_only"
+          ? " Works on turns paid with OpenGeni credits, or with this workspace's own OpenRouter or Vercel AI Gateway connection."
+          : ""
+      }`}
       controlWidth="auto"
       control={
         <SegmentedControl

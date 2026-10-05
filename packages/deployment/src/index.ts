@@ -246,6 +246,9 @@ export const JEV_CODE_SEARCH_PASSTHROUGH_ENV: readonly string[] = [
   "OPENGENI_JEV_MODEL",
   "OPENGENI_JEV_REQUEST_TIMEOUT_MS",
   "OPENGENI_CODE_SEARCH_MODE",
+  "OPENGENI_CODE_SEARCH_FUNDING",
+  "OPENGENI_CODE_SEARCH_JUDGE_PROVIDER",
+  "OPENGENI_CODE_SEARCH_JUDGE_MODEL",
 ];
 
 /** Provider-agnostic web search (`web_search` / `web_fetch` agent tools).

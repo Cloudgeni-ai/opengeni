@@ -10848,6 +10848,7 @@
         "$.claudeSubscriptionEnabled": "boolean?",
         "$.codeSearch": "object!",
         "$.codeSearch.available": "boolean!",
+        "$.codeSearch.funding": "enum?=[\"\\\"all\\\"\",\"\\\"credits_only\\\"\"]",
         "$.codeSearch.workspaceDefault": "enum!=[\"\\\"off\\\"\",\"\\\"on\\\"\",\"\\\"split\\\"\"]",
         "$.defaultModel": "string!",
         "$.defaultReasoningEffort": "ref(ReasoningEffort)!",

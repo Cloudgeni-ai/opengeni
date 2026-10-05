@@ -536,6 +536,41 @@ describe("server effectiveTools environment projection", () => {
     }
   });
 
+  test("credits_only offers code search on credits turns or a customer's own connection", () => {
+    const base = context({
+      settings: {
+        ...settings,
+        codeSearchMode: "opt_in",
+        codeSearchFunding: "credits_only",
+        jevApiKey: "test-code-search",
+        supergrokSubscriptionEnabled: true,
+      },
+    });
+    const env = { ...base, settings: withXaiSubscriptionCatalogProvider(base.settings) };
+    const credits = configuredModels(env.settings).find((model) => model.cost === "credits")!;
+    const subscription = configuredModels(env.settings).find(
+      (model) => model.cost === "subscription",
+    )!;
+    const names = (model: string, current = env) =>
+      sessionEffectiveToolProjectionInput(
+        session("none", { sandboxBackend: "local", codeSearchEnabled: true, model }),
+        [],
+        current,
+      ).sandboxToolNames;
+    expect(names(credits.id)).toContain("code_search");
+    expect(names(subscription.id)).not.toContain("code_search");
+    expect(
+      names(subscription.id, {
+        ...env,
+        codeSearchCustomerJudgeConnections: { workspace: [], organization: ["openrouter"] },
+      }),
+    ).toContain("code_search");
+    // `all` keeps today's behaviour: every turn runs on the deployment's judge.
+    expect(
+      names(subscription.id, { ...env, settings: { ...env.settings, codeSearchFunding: "all" } }),
+    ).toContain("code_search");
+  });
+
   test("SuperGrok hosted web and X search follow deployment flags", () => {
     const env = context({ settings: { ...settings, supergrokSubscriptionEnabled: true } });
     const model = configuredModels(withXaiSubscriptionCatalogProvider(env.settings)).find(

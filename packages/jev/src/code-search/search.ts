@@ -11,7 +11,7 @@
  * search (JevUnavailableError / JevRequestError propagate); only a failed final status check keeps the
  * fully Jev-scored pack and reports the status as unknown.
  */
-import { JevRequestError, JevUnavailableError, type JevClient } from "../client";
+import { JevRequestError, JevUnavailableError, type CodeSearchJudgeClient } from "../client";
 import { DEFAULT_CODE_SEARCH_CONFIG, type CodeSearchConfig } from "./config";
 import {
   JevJudge,
@@ -96,7 +96,8 @@ export interface CodeSearchInput {
   /** Workspace-relative path prefixes to search; default the whole workspace. */
   paths?: string[] | undefined;
   workspace: CodeSearchWorkspace;
-  jev: JevClient;
+  /** The judge: Jev on any System One provider (TypeSafe, OpenRouter, Vercel AI Gateway). */
+  jev: CodeSearchJudgeClient;
   signal?: AbortSignal | undefined;
   /** Max pack size in tokens (default 12000). */
   budgetTokens?: number | undefined;
@@ -126,7 +127,14 @@ export interface CodeSearchStats {
   workspaceCalls: number;
   /** A ripgrep call returned partial output (byte cap or time limit); the pack header says so. */
   ripgrepTruncated: boolean;
-  jev: { requests: number; inputTokens: number; costUsd: number; model: string | null };
+  jev: {
+    requests: number;
+    inputTokens: number;
+    costUsd: number;
+    model: string | null;
+    /** `provider_reported` when every judge request reported its own cost; else list price. A search with no requests reports `list_price`. */
+    costSource: "provider_reported" | "list_price";
+  };
 }
 
 export interface CodeSearchResult {
@@ -1559,7 +1567,11 @@ async function pipeline(o: CodeSearchInput, signal: AbortSignal): Promise<CodeSe
     packTokensEst: estTokens(text.length, cpt),
     workspaceCalls: session.calls,
     ripgrepTruncated: session.partial,
-    jev: { ...jevTotals, model: judge.model() },
+    jev: {
+      ...jevTotals,
+      model: judge.model(),
+      costSource: jevTotals.requests > 0 ? judge.costSource() : "list_price",
+    },
   };
   emit("summary", { wallMs, stageMs, stats, status, jevByStage: judge.stats() });
   const result: CodeSearchResult = { version: CODE_SEARCH_ENGINE_VERSION, text, status, stats };

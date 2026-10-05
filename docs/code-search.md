@@ -9,7 +9,9 @@ which would otherwise cost a model request.
 
 Ranking uses Jev, TypeSafe's fast judge model. Jev answers many yes/no
 questions in parallel in about 0.4 s per request at $0.042 per million input
-tokens. It never writes text, so the agent still writes the answer.
+tokens. It never writes text, so the agent still writes the answer. The same
+System One API serves Jev on TypeSafe, OpenRouter and Vercel AI Gateway; see
+[Judge providers and who pays](#judge-providers-and-who-pays).
 
 ## Measured effect
 
@@ -149,14 +151,61 @@ credentials into its answer.
 
 | Level | Setting | Effect |
 | --- | --- | --- |
-| Deployment | `OPENGENI_JEV_API_KEY` | Required. Without a usable key, every Jev feature is off. |
+| Deployment | Judge key | Required. The key of the configured judge provider: `OPENGENI_JEV_API_KEY` (TypeSafe, the default), `OPENGENI_OPENROUTER_API_KEY` or `OPENGENI_VERCEL_AI_GATEWAY_API_KEY`. Without it the tool is never offered. |
+| Deployment | `OPENGENI_CODE_SEARCH_JUDGE_PROVIDER`, `OPENGENI_CODE_SEARCH_JUDGE_MODEL` | The deployment's judge: `typesafe` (default), `openrouter` or `vercel_gateway`, and an optional model id (default: that provider's Jev id). |
+| Deployment | `OPENGENI_CODE_SEARCH_FUNDING` | `all` (default) runs every turn's searches on the deployment's key. `credits_only` does that only for turns paid with OpenGeni credits; other turns need the workspace's own OpenRouter or Vercel AI Gateway connection, or do not get the tool. |
 | Deployment | `OPENGENI_CODE_SEARCH_MODE` | `off` (default) never offers the tool. `opt_in` offers it where the workspace turns it on. `default_on` gives it to every workspace that has not turned it off. `experiment` gives it to a fixed half of sessions in workspaces without their own setting. |
 | Workspace | `settings.codeSearchEnabled` | Settings → General → New session defaults → **Fast code search**: Default, On or Off. `true` or `false` overrides the deployment default for new sessions; `null` or absent follows it. `false` also switches the tool off in running sessions. The row is hidden when the deployment does not offer the tool. |
 | Worker process | Circuit breaker | Three consecutive Jev outages make `code_search` calls on that worker fail at once for 5 minutes, or 30 minutes after an auth or billing error (401/402/403). After the cooldown one trial call runs at a time; others are refused until it ends or has run for 10 minutes. A search that never needed Jev neither closes nor reopens it. The breaker never hides the tool. |
 
 `OPENGENI_JEV_BASE_URL`, `OPENGENI_JEV_MODEL` and
 `OPENGENI_JEV_REQUEST_TIMEOUT_MS` default to the native TypeSafe API,
-`jev-latest` and 10 s.
+`jev-latest` and 10 s. The timeout applies to every judge provider.
+
+### Judge providers and who pays
+
+The judge speaks TypeSafe's System One protocol (`POST {base}/v1/systemone`
+with `{state, model, questions}`, answered with yes/no probabilities). Three
+hosts serve Jev over it:
+
+| Provider | Base URL | Default model | Cost recorded |
+| --- | --- | --- | --- |
+| `typesafe` | `https://api.typesafe.ai` (or `OPENGENI_JEV_BASE_URL`) | `jev-latest` (or `OPENGENI_JEV_MODEL`) | Input tokens at $0.042 per million |
+| `openrouter` | `https://openrouter.ai/api` | `~typesafe/jev-latest` | The response's `usage.cost` |
+| `vercel_gateway` | `https://ai-gateway.vercel.sh/typesafe` | `typesafe-ai/jev` | The response's `provider_metadata.gateway.cost` |
+
+A routing provider that omits its cost falls back to Jev's list price. The
+engine's thresholds are calibrated on Jev's probabilities, so another model
+must be evaluated before it replaces Jev.
+
+Each turn that may use the tool gets one route, decided from durable facts
+(the accepted turn's frozen billing and the active provider connections),
+never from provider health:
+
+1. **Turn paid with OpenGeni credits:** the deployment's judge and key
+   (`funding: credits`).
+2. **`OPENGENI_CODE_SEARCH_FUNDING=all`:** every other turn also uses the
+   deployment's judge (`funding: deployment`; OpenGeni absorbs the cost).
+3. **`credits_only`:** otherwise the workspace's own shared Vercel AI Gateway
+   or OpenRouter connection, then an organization connection shared into the
+   workspace (Gateway first), with that customer's key and the provider's Jev
+   model (`funding: external`). OpenGeni charges nothing; the customer pays the
+   provider. Organization reach follows the same row-level assignment as
+   inherited models.
+4. Otherwise the turn does not get the tool.
+
+The judge is not part of the model's prompt, so the route can change between
+turns without touching the prompt cache. Only whether the tool is offered is
+part of it. That changes with the turn's billing, which changes only with its
+model or provider (already a new upstream prompt cache), or when an
+administrator connects or disconnects a provider connection, a deliberate
+switch that costs running sessions on that path one cache miss.
+
+A customer's key is read when a search runs. If it can no longer be read,
+the call fails with a message to search with `exec_command`, and the tool stays
+offered. Each deployment provider has one circuit breaker per worker; a
+customer's connection has its own, so a revoked customer key never pauses
+searches for anyone else.
 
 ### The decision is frozen per session
 
@@ -212,6 +261,9 @@ The tool reports problems to the agent instead of degrading silently:
   with the same advice.
 - **Only the final status check fails.** The tool still returns the Jev-scored
   pack with `evidence rating unknown (check failed)`. An outage there counts toward the breaker.
+- **The customer's connection key cannot be read** (revoked or undecryptable
+  between turns). The tool returns an error telling the agent to search with
+  `exec_command` instead; the next turn's route no longer uses that connection.
 - **ripgrep is missing** (possible on a Connected Machine). The tool returns an
   error saying so.
 - **Partial search.** A cut or timed-out search is marked partial in the pack
@@ -219,18 +271,27 @@ The tool reports problems to the agent instead of degrading silently:
 
 ## Cost
 
-Jev runs on the deployment's TypeSafe key, so the tool works whatever the
-workspace uses for its chat model: OpenGeni credits, its own subscription or
-its own API keys. It costs about $0.006 per call. Every completed call records
-two usage events against its workspace, session, turn and attempt:
-`code_search.jev_input_tokens` (tokens) and `code_search.jev_cost`
-(`usd_micros`). Nothing is debited from credits.
+A call costs about $0.006-0.009 of Jev. Every completed call records two usage
+events against its workspace, session, turn and attempt, attributed to the
+turn's initiating human:
+
+- On the deployment's key: `code_search.jev_input_tokens` (tokens) and
+  `code_search.jev_cost` (`usd_micros`, what OpenGeni pays).
+- On a customer's connection: `code_search.customer_jev_input_tokens` and
+  `code_search.customer_jev_cost` (`customer_usd_micros`, what the customer
+  paid), so it never sums into OpenGeni's own cost.
+
+Nothing is debited from credits.
 
 ## Observability
 
-- `opengeni_code_search_calls_total{outcome}`
+- `opengeni_code_search_calls_total{outcome, funding, provider}`
 - `opengeni_code_search_duration_seconds{outcome}`
-- `opengeni_code_search_jev_requests_total`
-- `opengeni_code_search_jev_cost_micro_usd_total`
+- `opengeni_code_search_jev_requests_total{funding, provider}`
+- `opengeni_code_search_jev_cost_micro_usd_total{funding, provider}`
+
+`funding` is `credits`, `deployment` or `external` (paid by the customer);
+`provider` is the judge's host. Under `credits_only`, `deployment` stays at
+zero.
 
 Tool calls and results also appear in the session timeline like any other tool.

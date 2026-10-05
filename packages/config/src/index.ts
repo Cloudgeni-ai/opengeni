@@ -949,6 +949,17 @@ const SettingsSchema = z.object({
   // a fixed half of sessions in workspaces without their own setting, for
   // comparison. It also needs jevApiKey.
   codeSearchMode: z.enum(["off", "opt_in", "default_on", "experiment"]).default("off"),
+  // Who pays for the `code_search` judge. `all` (default) runs every turn on
+  // this deployment's key. `credits_only` does that only for turns paid with
+  // OpenGeni credits; other turns use the workspace's or organization's own
+  // OpenRouter or Vercel AI Gateway connection, or do not get the tool.
+  codeSearchFunding: z.enum(["all", "credits_only"]).default("all"),
+  // The deployment's judge for `code_search`: Jev over the System One protocol
+  // on TypeSafe (jevApiKey), OpenRouter (openrouterApiKey) or Vercel AI
+  // Gateway (vercelAiGatewayApiKey). The model defaults to the provider's Jev
+  // id (jevModel on TypeSafe, ~typesafe/jev-latest, typesafe-ai/jev).
+  codeSearchJudgeProvider: z.enum(["typesafe", "openrouter", "vercel_gateway"]).default("typesafe"),
+  codeSearchJudgeModel: z.string().trim().min(1).max(128).optional(),
   // Deployment-default agent persona template (the white-label surface). The
   // runtime resolves the effective template per turn as
   // per-session-override > per-workspace override > this default, substitutes
@@ -1820,16 +1831,68 @@ export function agentConfigDeploymentPolicy(
   );
 }
 
+export type CodeSearchJudgeSettings = Pick<
+  Settings,
+  | "codeSearchJudgeProvider"
+  | "codeSearchJudgeModel"
+  | "jevApiKey"
+  | "jevBaseUrl"
+  | "jevModel"
+  | "openrouterApiKey"
+  | "vercelAiGatewayApiKey"
+>;
+
+/**
+ * The deployment's own `code_search` judge: its System One provider, the key
+ * this deployment pays with, and the model. Undefined when the configured
+ * provider has no usable key. Base URL and model are omitted where the
+ * provider's defaults apply.
+ */
+export function codeSearchDeploymentJudge(settings: CodeSearchJudgeSettings):
+  | {
+      provider: Settings["codeSearchJudgeProvider"];
+      apiKey: string;
+      baseUrl?: string;
+      model?: string;
+    }
+  | undefined {
+  const model = settings.codeSearchJudgeModel;
+  switch (settings.codeSearchJudgeProvider) {
+    case "typesafe": {
+      const apiKey = usableJevApiKey(settings);
+      return apiKey
+        ? {
+            provider: "typesafe",
+            apiKey,
+            baseUrl: settings.jevBaseUrl,
+            model: model ?? settings.jevModel,
+          }
+        : undefined;
+    }
+    case "openrouter": {
+      const apiKey = usableDeploymentSecret(settings.openrouterApiKey);
+      return apiKey ? { provider: "openrouter", apiKey, ...(model ? { model } : {}) } : undefined;
+    }
+    case "vercel_gateway": {
+      const apiKey = usableDeploymentSecret(settings.vercelAiGatewayApiKey);
+      return apiKey
+        ? { provider: "vercel_gateway", apiKey, ...(model ? { model } : {}) }
+        : undefined;
+    }
+  }
+}
+
 /**
  * Deployment half of the `code_search` decision. `available` is false when
- * the mode is off or no usable Jev key is configured; workspaces then cannot
- * turn it on. `workspaceDefault` applies to workspaces without their own
- * setting.
+ * the mode is off or the configured judge provider has no usable key;
+ * workspaces then cannot turn it on. `workspaceDefault` applies to workspaces
+ * without their own setting.
  */
 export function codeSearchDeploymentPolicy(
-  settings: Pick<Settings, "codeSearchMode" | "jevApiKey">,
+  settings: Pick<Settings, "codeSearchMode"> & CodeSearchJudgeSettings,
 ): CodeSearchDeploymentPolicy {
-  const available = settings.codeSearchMode !== "off" && usableJevApiKey(settings) !== undefined;
+  const available =
+    settings.codeSearchMode !== "off" && codeSearchDeploymentJudge(settings) !== undefined;
   if (!available) return { available: false, workspaceDefault: "off" };
   const workspaceDefault =
     settings.codeSearchMode === "default_on"
@@ -4141,6 +4204,9 @@ export function getSettings(source: NodeJS.ProcessEnv = process.env): Settings {
     jevModel: optional("OPENGENI_JEV_MODEL"),
     jevRequestTimeoutMs: optional("OPENGENI_JEV_REQUEST_TIMEOUT_MS"),
     codeSearchMode: optional("OPENGENI_CODE_SEARCH_MODE"),
+    codeSearchFunding: optional("OPENGENI_CODE_SEARCH_FUNDING"),
+    codeSearchJudgeProvider: optional("OPENGENI_CODE_SEARCH_JUDGE_PROVIDER"),
+    codeSearchJudgeModel: optional("OPENGENI_CODE_SEARCH_JUDGE_MODEL"),
     agentInstructionsTemplate: optional("OPENGENI_AGENT_INSTRUCTIONS_TEMPLATE"),
     azureOpenaiBaseUrl: optional("OPENGENI_AZURE_OPENAI_BASE_URL"),
     azureOpenaiEndpoint: optional("OPENGENI_AZURE_OPENAI_ENDPOINT"),

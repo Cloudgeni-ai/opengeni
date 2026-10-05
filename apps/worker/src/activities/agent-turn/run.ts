@@ -599,6 +599,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
             fileAuthoritySubjectId,
             humanInputResume,
             turnExecutionPolicy,
+            turnPaidWithOpenGeniCredits: billingState.chargesOpenGeniCredits,
             requiredGeneratedVideoFiles,
           });
           if ("exit" in governance) return governance.exit;
@@ -616,7 +617,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
             rigVersion,
             rigName,
             agentHumanInputEnabled,
-            codeSearchEnabled,
+            codeSearchRoute,
             workspaceAgentInstructions,
             workspaceAgentIdentity,
             workspaceGovernance,
@@ -1489,7 +1490,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
             credentialSubjectId,
             interactionInterventionResume,
             runWorkspaceMutationForSandbox,
-            codeSearchEnabled,
+            codeSearchRoute,
             retainsOptionalRepository,
             throwIfWorkerShuttingDown,
             throwIfTurnCancelled,

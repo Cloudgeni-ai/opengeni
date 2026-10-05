@@ -15,6 +15,43 @@ export const JEV_DEFAULT_MODEL = "jev-latest";
 /** USD per 1M input tokens; output tokens are free. */
 export const JEV_PRICE_PER_MILLION_INPUT_TOKENS_USD = 0.042;
 
+/**
+ * Hosts that serve the System One protocol (`POST {baseUrl}/v1/systemone` with
+ * `{state, model, questions}`). TypeSafe is the native API; OpenRouter and
+ * Vercel AI Gateway route the same requests and answers and report what each
+ * request cost. Only the base URL, the model id and where the cost is reported
+ * differ.
+ */
+export type SystemOneProvider = "typesafe" | "openrouter" | "vercel_gateway";
+
+export const SYSTEM_ONE_PROVIDERS: Readonly<
+  Record<
+    SystemOneProvider,
+    {
+      baseUrl: string;
+      defaultModel: string;
+      /** `GET {baseUrl}/healthz` is free and opens keep-alive connections. */
+      warmUp: boolean;
+    }
+  >
+> = Object.freeze({
+  typesafe: { baseUrl: JEV_DEFAULT_BASE_URL, defaultModel: JEV_DEFAULT_MODEL, warmUp: true },
+  openrouter: {
+    baseUrl: "https://openrouter.ai/api",
+    defaultModel: "~typesafe/jev-latest",
+    warmUp: false,
+  },
+  vercel_gateway: {
+    baseUrl: "https://ai-gateway.vercel.sh/typesafe",
+    defaultModel: "typesafe-ai/jev",
+    warmUp: false,
+  },
+});
+
+export function isSystemOneProvider(value: unknown): value is SystemOneProvider {
+  return value === "typesafe" || value === "openrouter" || value === "vercel_gateway";
+}
+
 // ---------------------------------------------------------------------------
 // Questions and answers
 // ---------------------------------------------------------------------------
@@ -82,6 +119,26 @@ export interface JevAskResult<Q extends Record<string, JevQuestion>> {
   /** HTTP requests (chunks) that made up this ask. */
   requests: number;
   costUsd: number;
+  /**
+   * `provider_reported` when every request reported its own cost (OpenRouter
+   * and Vercel AI Gateway do); otherwise the input tokens at Jev's list price.
+   */
+  costSource: "provider_reported" | "list_price";
+}
+
+/**
+ * What the code search engine needs from a judge: batched yes/no questions
+ * against one state, answered with probabilities. `JevClient` implements it
+ * for every System One provider.
+ */
+export interface CodeSearchJudgeClient {
+  ask<Q extends Record<string, JevQuestion>>(
+    state: unknown,
+    questions: Q,
+    options?: JevAskOptions,
+  ): Promise<JevAskResult<Q>>;
+  /** Optional connection warm-up before a burst of requests; never throws. */
+  warmUp(connections: number): void;
 }
 
 export interface JevAskOptions {
@@ -257,6 +314,8 @@ export type JevFetch = (url: string, init: RequestInit) => Promise<Response>;
 
 export interface JevClientOptions {
   apiKey: string;
+  /** System One host; sets the default base URL, model and cost reading. Default `typesafe`. */
+  provider?: SystemOneProvider | undefined;
   baseUrl?: string | undefined;
   model?: string | undefined;
   /** Per-attempt timeout. */
@@ -279,7 +338,8 @@ const WARM_WINDOW_MS = 4_000;
 const WARM_TIMEOUT_MS = 3_000;
 const MAX_DETAIL_CHARS = 200;
 
-export class JevClient {
+export class JevClient implements CodeSearchJudgeClient {
+  readonly provider: SystemOneProvider;
   readonly baseUrl: string;
   readonly model: string;
   private readonly apiKey: string;
@@ -294,8 +354,10 @@ export class JevClient {
   constructor(options: JevClientOptions) {
     if (!options.apiKey) throw new JevUnavailableError("Jev API key is not configured");
     this.apiKey = options.apiKey;
-    this.baseUrl = (options.baseUrl ?? JEV_DEFAULT_BASE_URL).replace(/\/+$/, "");
-    this.model = options.model ?? JEV_DEFAULT_MODEL;
+    this.provider = options.provider ?? "typesafe";
+    const preset = SYSTEM_ONE_PROVIDERS[this.provider];
+    this.baseUrl = (options.baseUrl ?? preset.baseUrl).replace(/\/+$/, "");
+    this.model = options.model ?? preset.defaultModel;
     this.timeoutMs = options.timeoutMs ?? 10_000;
     this.maxRetries = Math.max(0, options.maxRetries ?? 2);
     this.maxRetryAfterMs = Math.max(0, options.maxRetryAfterMs ?? 2_000);
@@ -342,6 +404,8 @@ export class JevClient {
     );
     const answers: Record<string, JevAnswer> = {};
     let inputTokens = 0;
+    let reportedCostUsd = 0;
+    let everyRequestReportedCost = true;
     let model = "";
     results.forEach((json, i) => {
       const got = isRecord(json.answers) ? json.answers : {};
@@ -353,14 +417,19 @@ export class JevClient {
       }
       const usage = isRecord(json.usage) ? json.usage : {};
       inputTokens += Number(usage.input_tokens ?? 0) || 0;
+      const reported = reportedCost(json);
+      if (reported === null) everyRequestReportedCost = false;
+      else reportedCostUsd += reported;
       if (typeof json.model === "string" && json.model) model = json.model;
     });
+    const providerReported = this.provider !== "typesafe" && everyRequestReportedCost;
     return {
       answers: answers as JevAskResult<Q>["answers"],
       model,
       usage: { inputTokens },
       requests: results.length,
-      costUsd: jevCostUsd(inputTokens),
+      costUsd: providerReported ? reportedCostUsd : jevCostUsd(inputTokens),
+      costSource: providerReported ? "provider_reported" : "list_price",
     };
   }
 
@@ -370,6 +439,7 @@ export class JevClient {
    */
   warmUp(connections: number): void {
     const now = Date.now();
+    if (!SYSTEM_ONE_PROVIDERS[this.provider].warmUp) return;
     if (connections <= 0 || now - this.lastActivityAt < WARM_WINDOW_MS) return;
     this.lastActivityAt = now;
     for (let i = 0; i < connections; i++) {
@@ -469,6 +539,23 @@ function parseJson(text: string): unknown {
   } catch {
     return null;
   }
+}
+
+/**
+ * The USD cost a routing provider reported for one request: OpenRouter's
+ * `usage.cost` (a number) or Vercel AI Gateway's
+ * `provider_metadata.gateway.cost` (a decimal string). Null when absent or not
+ * a finite, nonnegative number.
+ */
+function reportedCost(json: Record<string, unknown>): number | null {
+  const usage = isRecord(json.usage) ? json.usage : {};
+  const metadata = isRecord(json.provider_metadata) ? json.provider_metadata : {};
+  const gateway = isRecord(metadata.gateway) ? metadata.gateway : {};
+  for (const value of [usage.cost, gateway.cost]) {
+    const cost = typeof value === "string" && value.trim() !== "" ? Number(value) : value;
+    if (typeof cost === "number" && Number.isFinite(cost) && cost >= 0) return cost;
+  }
+  return null;
 }
 
 function normalizeAnswer(raw: unknown): JevAnswer | null {

@@ -2650,10 +2650,19 @@ export type CodeSearchCallOutcome =
   | "workspace_unavailable"
   | "invalid_arguments"
   | "breaker_open"
+  | "judge_key_unavailable"
   | "cancelled"
   | "failed";
 
-/** One `code_search` tool call: outcome, wall time and the Jev work it used. */
+/**
+ * Who paid a call's judge: `credits` (deployment key, a turn paid with
+ * OpenGeni credits), `deployment` (deployment key, absorbed) or `external`
+ * (the customer's own OpenRouter or Gateway connection).
+ */
+export type CodeSearchCallFunding = "credits" | "deployment" | "external";
+export type CodeSearchCallProvider = "typesafe" | "openrouter" | "vercel_gateway";
+
+/** One `code_search` tool call: outcome, wall time and the judge work it used. */
 export function recordCodeSearchCall(
   observability: Observability,
   input: {
@@ -2661,12 +2670,15 @@ export function recordCodeSearchCall(
     durationSeconds: number;
     jevRequests: number;
     jevCostUsd: number;
+    funding: CodeSearchCallFunding;
+    provider: CodeSearchCallProvider;
   },
 ): void {
+  const route = { funding: input.funding, provider: input.provider };
   observability.incrementCounter({
     name: "opengeni_code_search_calls_total",
-    help: "Jev-backed code_search tool calls by outcome.",
-    labels: { outcome: input.outcome },
+    help: "Code_search tool calls by outcome, judge funding and judge provider.",
+    labels: { outcome: input.outcome, ...route },
   });
   observability.observeHistogram({
     name: "opengeni_code_search_duration_seconds",
@@ -2678,14 +2690,16 @@ export function recordCodeSearchCall(
   if (input.jevRequests > 0) {
     observability.incrementCounter({
       name: "opengeni_code_search_jev_requests_total",
-      help: "Jev requests made by code_search.",
+      help: "Judge requests made by code_search, by funding and provider.",
+      labels: route,
       amount: input.jevRequests,
     });
   }
   if (input.jevCostUsd > 0) {
     observability.incrementCounter({
       name: "opengeni_code_search_jev_cost_micro_usd_total",
-      help: "Estimated Jev list-price cost of code_search, in micro-USD.",
+      help: "Judge cost of code_search in micro-USD (provider-reported, else Jev list price), by funding and provider. `external` is paid by the customer.",
+      labels: route,
       amount: Math.round(input.jevCostUsd * 1_000_000),
     });
   }

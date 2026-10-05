@@ -29,6 +29,88 @@ export type CodeSearchDeploymentPolicy = {
 };
 
 /**
+ * Which turns may use `code_search`, by who pays its judge. `all` (the default,
+ * for self-hosted deployments) runs every turn's searches on the deployment's
+ * judge key. `credits_only` runs a turn on the deployment's key only when the
+ * turn's model is paid with OpenGeni credits; any other turn (a connected
+ * subscription, a customer's own model key or a free model) uses the
+ * workspace's or organization's own OpenRouter or Vercel AI Gateway
+ * connection, or does not get the tool.
+ */
+export type CodeSearchFunding = "all" | "credits_only";
+
+/** Hosts that serve the judge over the System One protocol. */
+export type CodeSearchJudgeProvider = "typesafe" | "openrouter" | "vercel_gateway";
+
+/** Customer connections that can run the judge on the customer's own key. */
+export type CodeSearchCustomerJudgeProvider = "vercel_gateway" | "openrouter";
+
+/** Fixed order in which a customer's connections are tried. */
+export const CODE_SEARCH_CUSTOMER_JUDGE_PROVIDERS: readonly CodeSearchCustomerJudgeProvider[] = [
+  "vercel_gateway",
+  "openrouter",
+];
+
+/**
+ * Who pays one turn's `code_search` judge, and with which key.
+ * - `credits`: the deployment's key, for a turn paid with OpenGeni credits.
+ * - `deployment`: the deployment's key, absorbed (funding `all` only).
+ * - `external`: the workspace's or organization's own connection; the customer
+ *   pays the provider and OpenGeni charges nothing.
+ */
+export type CodeSearchJudgeRoute =
+  | {
+      funding: "credits" | "deployment";
+      keySource: "deployment";
+      provider: CodeSearchJudgeProvider;
+    }
+  | {
+      funding: "external";
+      keySource: "workspace_connection" | "organization_connection";
+      provider: CodeSearchCustomerJudgeProvider;
+    };
+
+/**
+ * The judge route for one turn, or null when nobody may pay for it and the
+ * turn must not get the tool. Every input is durable (the accepted turn's
+ * frozen billing and the active connection rows), so every worker decides the
+ * same way and transient provider health never changes the tool list. The tool
+ * list changes only with the turn's billing, which changes only with its model
+ * or provider (already a new upstream prompt cache), or when an administrator
+ * connects or disconnects a provider connection, a deliberate switch like a
+ * workspace Off.
+ */
+export function resolveCodeSearchJudgeRoute(input: {
+  funding: CodeSearchFunding;
+  /** The deployment judge's provider; the deployment policy already requires its key. */
+  deploymentProvider: CodeSearchJudgeProvider;
+  turnPaidWithOpenGeniCredits: boolean;
+  /** Active connections that can pay for the judge. Read only for `credits_only` turns without credits. */
+  customerConnections: () => {
+    workspace: readonly CodeSearchCustomerJudgeProvider[];
+    organization: readonly CodeSearchCustomerJudgeProvider[];
+  };
+}): CodeSearchJudgeRoute | null {
+  if (input.turnPaidWithOpenGeniCredits) {
+    return { funding: "credits", keySource: "deployment", provider: input.deploymentProvider };
+  }
+  if (input.funding === "all") {
+    return { funding: "deployment", keySource: "deployment", provider: input.deploymentProvider };
+  }
+  const connections = input.customerConnections();
+  for (const [keySource, providers] of [
+    ["workspace_connection", connections.workspace],
+    ["organization_connection", connections.organization],
+  ] as const) {
+    const provider = CODE_SEARCH_CUSTOMER_JUDGE_PROVIDERS.find((candidate) =>
+      providers.includes(candidate),
+    );
+    if (provider) return { funding: "external", keySource, provider };
+  }
+  return null;
+}
+
+/**
  * What a workspace gets: the deployment decides first, so nothing enables the
  * tool where the deployment does not offer it. Otherwise an explicit workspace
  * choice wins, and an absent, null or malformed setting follows the deployment

@@ -30,7 +30,14 @@ import {
   type SessionToolPolicy,
   type ToolRef,
 } from "@opengeni/contracts";
-import { codeSearchEnabledForTurn } from "@opengeni/contracts/code-search";
+import {
+  codeSearchEnabledForTurn,
+  resolveCodeSearchJudgeRoute,
+} from "@opengeni/contracts/code-search";
+import {
+  loadCodeSearchCustomerJudgeConnections,
+  type CodeSearchCustomerJudgeConnections,
+} from "./code-search-judge";
 import {
   getSandbox,
   listSkillDescriptors,
@@ -317,6 +324,8 @@ export type SessionEffectiveToolsContext = {
   mediaAttachments?: ReadonlyMap<string, AgentMediaAttachment>;
   routerInHistory?: boolean;
   routerHistorySessionIds?: ReadonlySet<string>;
+  /** Read only when `credits_only` funding could send a session's turns to them. */
+  codeSearchCustomerJudgeConnections?: CodeSearchCustomerJudgeConnections;
 };
 
 /**
@@ -339,51 +348,63 @@ export async function workspaceSessionEffectiveToolsContext(
     objectStorageAvailable: Boolean(deps.objectStorage),
   };
   if (configured.length === 0) return baseline;
-  const [workspace, catalog, descriptors, sandboxes, routerHistory] = await Promise.all([
-    workspaceRead ?? requireWorkspace(deps.db, workspaceId),
-    resolveWorkspaceCatalogSettings(deps.db, deps.settings, {
-      accountId: configured[0]!.accountId,
-      workspaceId,
-      retainedProductModelIds: configured.map((session) => session.model),
-    }),
-    configured.some((session) => session.agent?.capabilities.skills === "read")
-      ? listSkillDescriptors(deps.db, {
-          accountId: configured[0]!.accountId,
-          workspaceId,
-          subjectId,
-        })
-      : Promise.resolve([]),
-    deps.settings.sandboxSelfhostedEnabled
-      ? Promise.all(
-          sortedIds(configured.flatMap((session) => session.activeSandboxId ?? [])).map(
-            async (id) =>
-              [
-                id,
-                await getSandbox(
-                  deps.db,
-                  { accountId: configured[0]!.accountId, workspaceId, subjectId },
+  const readsCodeSearchConnections =
+    deps.settings.codeSearchFunding === "credits_only" &&
+    codeSearchDeploymentPolicy(deps.settings).available &&
+    configured.some((session) => session.codeSearchEnabled === true);
+  const [workspace, catalog, descriptors, sandboxes, routerHistory, codeSearchConnections] =
+    await Promise.all([
+      workspaceRead ?? requireWorkspace(deps.db, workspaceId),
+      resolveWorkspaceCatalogSettings(deps.db, deps.settings, {
+        accountId: configured[0]!.accountId,
+        workspaceId,
+        retainedProductModelIds: configured.map((session) => session.model),
+      }),
+      configured.some((session) => session.agent?.capabilities.skills === "read")
+        ? listSkillDescriptors(deps.db, {
+            accountId: configured[0]!.accountId,
+            workspaceId,
+            subjectId,
+          })
+        : Promise.resolve([]),
+      deps.settings.sandboxSelfhostedEnabled
+        ? Promise.all(
+            sortedIds(configured.flatMap((session) => session.activeSandboxId ?? [])).map(
+              async (id) =>
+                [
                   id,
-                ),
-              ] as const,
-          ),
-        )
-      : Promise.resolve([]),
-    Promise.all(
-      [...new Map(configured.map((session) => [session.id, session])).values()].map(
-        async (session) =>
-          [
-            session.id,
-            await sessionHasToolRouterHistory(deps.db, {
-              accountId: session.accountId,
-              workspaceId,
-              sessionId: session.id,
-            }),
-          ] as const,
+                  await getSandbox(
+                    deps.db,
+                    { accountId: configured[0]!.accountId, workspaceId, subjectId },
+                    id,
+                  ),
+                ] as const,
+            ),
+          )
+        : Promise.resolve([]),
+      Promise.all(
+        [...new Map(configured.map((session) => [session.id, session])).values()].map(
+          async (session) =>
+            [
+              session.id,
+              await sessionHasToolRouterHistory(deps.db, {
+                accountId: session.accountId,
+                workspaceId,
+                sessionId: session.id,
+              }),
+            ] as const,
+        ),
       ),
-    ),
-  ]);
+      readsCodeSearchConnections
+        ? loadCodeSearchCustomerJudgeConnections(deps.db, {
+            accountId: configured[0]!.accountId,
+            workspaceId,
+          })
+        : Promise.resolve(undefined),
+    ]);
   return {
     ...baseline,
+    ...(codeSearchConnections ? { codeSearchCustomerJudgeConnections: codeSearchConnections } : {}),
     settings: catalog.settings,
     workspaceSettings: workspace.settings,
     humanInputEnabled: resolveWorkspaceAgentHumanInputEnabled(workspace.settings),
@@ -490,7 +511,17 @@ export function sessionEffectiveToolProjectionInput(
           session.codeSearchEnabled,
           context?.workspaceSettings,
           codeSearchDeploymentPolicy(context!.settings),
-        ) && session.sandboxOs !== "windows"
+        ) &&
+        session.sandboxOs !== "windows" &&
+        // The worker decides from the accepted turn's billing; the projection
+        // uses the session's current model, as the next turn would.
+        resolveCodeSearchJudgeRoute({
+          funding: context!.settings.codeSearchFunding,
+          deploymentProvider: context!.settings.codeSearchJudgeProvider,
+          turnPaidWithOpenGeniCredits: model?.model.cost === "credits",
+          customerConnections: () =>
+            context!.codeSearchCustomerJudgeConnections ?? { workspace: [], organization: [] },
+        }) !== null
           ? ["code_search" as const]
           : []),
       ]

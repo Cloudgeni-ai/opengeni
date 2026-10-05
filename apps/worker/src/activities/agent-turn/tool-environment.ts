@@ -12,6 +12,10 @@ import {
   persistAttemptToolCatalog,
   prepareConnectorActionApproval,
   recordUsageEvent,
+  creditDebitAttributionForTurn,
+  loadOrganizationModelProviderApiKey,
+  loadWorkspaceOpenRouterApiKey,
+  loadWorkspaceVercelAiGatewayApiKey,
   previewConnectorActionApproval,
   namedSubjectHasLiveWorkspaceAuthority,
   updateSessionTitleWithEvent,
@@ -190,8 +194,8 @@ export type PrepareTurnToolRuntimeDeps = {
   credentialSubjectId: ClaimTurnOk["credentialSubjectId"];
   interactionInterventionResume: ClaimTurnOk["interactionInterventionResume"];
   runWorkspaceMutationForSandbox: SandboxTurnRuntime["runWorkspaceMutationForSandbox"];
-  /** Deployment and workspace allow the Jev-backed code_search tool. */
-  codeSearchEnabled: boolean;
+  /** Who pays this turn's code_search judge; null when the turn does not get the tool. */
+  codeSearchRoute: GovernanceModelOk["codeSearchRoute"];
   /**
    * False for an optional repository that sits this turn out after losing
    * access (dropUnavailableOptionalRepositories), so no tool surface offers it.
@@ -417,7 +421,7 @@ export async function prepareTurnToolRuntime(deps: PrepareTurnToolRuntimeDeps) {
     credentialSubjectId,
     interactionInterventionResume,
     runWorkspaceMutationForSandbox,
-    codeSearchEnabled,
+    codeSearchRoute,
     retainsOptionalRepository,
     throwIfWorkerShuttingDown,
     throwIfTurnCancelled,
@@ -831,15 +835,43 @@ export async function prepareTurnToolRuntime(deps: PrepareTurnToolRuntimeDeps) {
       return ((await prepared.ready) ?? prepared).attemptToolEnvironment;
     },
   });
+  // Every judge call is recorded against its turn and the turn's initiating
+  // human, whoever pays: the deployment's cost (`code_search.jev_*`, usd_micros)
+  // or, on a customer's own connection, what the customer paid
+  // (`code_search.customer_jev_*`, customer_usd_micros), which never sums into
+  // OpenGeni's own cost.
+  let codeSearchAttribution: ReturnType<typeof creditDebitAttributionForTurn> | null = null;
   const codeSearchTools = codeSearchToolDefinitions({
-    enabled: codeSearchEnabled,
+    route: codeSearchRoute,
     settings: runSettings,
     backend: activeSandboxBackend ?? groupBoxBackend,
     machineWorkspaceRoot: sandboxState.machinePrimarySession?.workspaceRoot ?? null,
     observability,
-    // OpenGeni's Jev key pays for these calls whatever model billing the
-    // workspace uses; record them per workspace so the cost stays visible.
+    loadCustomerKey: async (route) => {
+      if (route.funding !== "external") return null;
+      if (route.keySource === "organization_connection") {
+        return await loadOrganizationModelProviderApiKey(db, runSettings, {
+          accountId: input.accountId,
+          workspaceId: input.workspaceId,
+          providerKind: route.provider,
+        });
+      }
+      return route.provider === "vercel_gateway"
+        ? await loadWorkspaceVercelAiGatewayApiKey(db, runSettings, input.workspaceId)
+        : await loadWorkspaceOpenRouterApiKey(db, runSettings, input.workspaceId);
+    },
     recordUsage: async (usage) => {
+      codeSearchAttribution ??= creditDebitAttributionForTurn(db, {
+        accountId: input.accountId,
+        workspaceId: input.workspaceId,
+        turnId: turn.id,
+      });
+      const attribution = await codeSearchAttribution.catch((error: unknown) => {
+        codeSearchAttribution = null;
+        throw error;
+      });
+      const customerPaid = usage.route.funding === "external";
+      const prefix = customerPaid ? "code_search.customer_jev" : "code_search.jev";
       const shared = {
         accountId: input.accountId,
         workspaceId: input.workspaceId,
@@ -848,20 +880,22 @@ export async function prepareTurnToolRuntime(deps: PrepareTurnToolRuntimeDeps) {
         sessionId: input.sessionId,
         turnId: turn.id,
         turnAttemptId: input.attemptId,
+        initiator: { kind: "service" as const, subjectId: "worker:code-search" },
+        initiatorContext: { creditDebitAttribution: attribution },
       };
       await recordUsageEvent(db, {
         ...shared,
-        eventType: "code_search.jev_input_tokens",
+        eventType: `${prefix}_input_tokens`,
         quantity: usage.jevInputTokens,
         unit: "tokens",
-        idempotencyKey: `usage:code_search.jev_input_tokens:${input.attemptId}:${usage.operationId}`,
+        idempotencyKey: `usage:${prefix}_input_tokens:${input.attemptId}:${usage.operationId}`,
       });
       await recordUsageEvent(db, {
         ...shared,
-        eventType: "code_search.jev_cost",
+        eventType: `${prefix}_cost`,
         quantity: Math.round(usage.jevCostUsd * 1_000_000),
-        unit: "usd_micros",
-        idempotencyKey: `usage:code_search.jev_cost:${input.attemptId}:${usage.operationId}`,
+        unit: customerPaid ? "customer_usd_micros" : "usd_micros",
+        idempotencyKey: `usage:${prefix}_cost:${input.attemptId}:${usage.operationId}`,
       });
     },
     workspace: async () => {
