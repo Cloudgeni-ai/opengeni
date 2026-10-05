@@ -456,7 +456,10 @@ deny for reasons other than credits, so OpenGeni does not invent a balance diagn
   `session.created`.
 - `GET /v1/workspaces/:id/sessions/:sessionId/goal` returns the goal plus a
   `continuation` projection from one repeatable-read Postgres snapshot
-  (`sessions:read`; 404 when the session has no goal). The projection reports
+  (`sessions:read`; 404 when the session has no goal, or 200 `null` when the
+  client opts in with `?absent=null` - the SDK's `findGoal`, which
+  `useGoal` prefers so a goal-less chat logs no failed browser request; a
+  missing session is always 404). The projection reports
   `inactive`, `scheduled`, `running`, `blocked`, or `invariant_broken`, with a
   typed reason, wake/observed revisions, optional next-attempt time, the
   latest workflow-wake error, and (for `held_for_input`) the agent's stated
