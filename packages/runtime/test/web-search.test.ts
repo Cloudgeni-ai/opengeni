@@ -66,7 +66,13 @@ describe("search adapters normalize each provider", () => {
   test("TinyFish", async () => {
     const { result, call } = await search("tinyfish", {
       results: [
-        { position: 1, title: "Bun 2", url: "https://bun.sh/blog", snippet: "Bun <b>2</b> is out" },
+        {
+          position: 1,
+          title: "Bun 2",
+          url: "https://bun.sh/blog",
+          snippet: "Bun <b>2</b> is out",
+          date: "2026-09-30",
+        },
         { title: "dup", url: "https://bun.sh/blog", snippet: "duplicate" },
         { title: "bad", url: "javascript:alert(1)", snippet: "dropped" },
       ],
@@ -74,7 +80,12 @@ describe("search adapters normalize each provider", () => {
     expect(call.url).toBe("https://api.search.tinyfish.ai/?query=bun+release");
     expect(call.headers["x-api-key"]).toBe("secret-key");
     expect(result.results).toEqual([
-      { title: "Bun 2", url: "https://bun.sh/blog", snippet: "Bun 2 is out" },
+      {
+        title: "Bun 2",
+        url: "https://bun.sh/blog",
+        snippet: "Bun 2 is out",
+        publishedAt: "2026-09-30",
+      },
     ]);
   });
 

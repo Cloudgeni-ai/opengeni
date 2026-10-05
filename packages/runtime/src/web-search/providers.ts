@@ -145,7 +145,12 @@ function tinyfishSearch(input: AdapterInput): WebSearchProvider {
       return {
         results: results(
           body.results,
-          (item) => ({ title: item.title, url: item.url, snippet: item.snippet }),
+          (item) => ({
+            title: item.title,
+            url: item.url,
+            snippet: item.snippet,
+            publishedAt: item.date,
+          }),
           request.maxResults,
         ),
       };
