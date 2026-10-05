@@ -19,6 +19,7 @@ import {
   parseDeploymentContract,
   stackPlanFor,
 } from "@opengeni/deployment";
+import { getSettings } from "@opengeni/config";
 
 const repoRoot = fileURLToPath(new URL("../", import.meta.url));
 const cleanEnv = { PATH: process.env.PATH ?? "/usr/bin:/bin" };
@@ -155,6 +156,64 @@ describe("ACA deployment operator CLI", () => {
         const missingSandbox = execute({ ...env, [requiredSandboxSecret]: undefined });
         expect(missingSandbox.status).toBe(2);
         expect(JSON.parse(missingSandbox.stdout).missingEnvVars).toEqual([requiredSandboxSecret]);
+
+        for (const [canonical, alias, selectedKey] of [
+          ["fixture-model-key", undefined, "OPENGENI_OPENAI_API_KEY"],
+          [undefined, "fixture-alias-model-key", "OPENAI_API_KEY"],
+          ["fixture-model-key", "fixture-alias-model-key", "OPENGENI_OPENAI_API_KEY"],
+          ["", "fixture-alias-model-key", "OPENAI_API_KEY"],
+          [" \t\n ", "fixture-alias-model-key", "OPENAI_API_KEY"],
+          [" fixture-model-key ", "fixture-alias-model-key", "OPENGENI_OPENAI_API_KEY"],
+          ["fixture-model-key", "", "OPENGENI_OPENAI_API_KEY"],
+          ["fixture-model-key", " \t\n ", "OPENGENI_OPENAI_API_KEY"],
+          [undefined, undefined, null],
+          ["", "", null],
+          [" \t\n ", " \t\n ", null],
+        ] as const) {
+          const selectedEnv = Object.freeze({
+            ...env,
+            OPENGENI_OPENAI_API_KEY: canonical,
+            OPENAI_API_KEY: alias,
+          });
+          const keyResult = execute(selectedEnv);
+          expect(keyResult.error).toBeUndefined();
+          expect(keyResult.status).toBe(selectedKey === null ? 2 : 0);
+          const keyOutput = JSON.parse(keyResult.stdout);
+          const expectedName = selectedKey ?? "OPENGENI_OPENAI_API_KEY";
+          const missingNames = selectedKey === null ? [expectedName] : [];
+          expect(keyOutput.envOk).toBe(selectedKey !== null);
+          expect(keyOutput.missingEnvVars).toEqual(missingNames);
+          expect(missingRuntimeEnvVars(contract, selectedEnv)).toEqual(missingNames);
+          expect(
+            keyOutput.requiredEnvVars.filter((name: string) =>
+              ["OPENGENI_OPENAI_API_KEY", "OPENAI_API_KEY"].includes(name),
+            ),
+          ).toEqual([expectedName]);
+          expect(
+            stackPlanFor(contract, "none", selectedEnv).requiredSecretKeys.filter((name) =>
+              ["OPENGENI_OPENAI_API_KEY", "OPENAI_API_KEY"].includes(name),
+            ),
+          ).toEqual([expectedName]);
+          // Use the production settings parser as the alias/blank-value oracle,
+          // with an explicit fixture source rather than mutating process.env.
+          expect(
+            getSettings({ OPENGENI_OPENAI_API_KEY: canonical, OPENAI_API_KEY: alias }).openaiApiKey,
+          ).toBe(selectedKey === null ? undefined : selectedEnv[selectedKey]);
+          expect(keyResult.stdout + keyResult.stderr).not.toContain("fixture-model-key");
+          expect(keyResult.stdout + keyResult.stderr).not.toContain("fixture-alias-model-key");
+          expect(selectedEnv.OPENGENI_OPENAI_API_KEY).toBe(canonical);
+          expect(selectedEnv.OPENAI_API_KEY).toBe(alias);
+        }
+        const aliasEnv = {
+          ...env,
+          OPENGENI_OPENAI_API_KEY: undefined,
+          OPENAI_API_KEY: "fixture-alias-model-key",
+        };
+        for (const missingName of [requiredSecret, requiredSandboxSecret]) {
+          const missingWithAlias = execute({ ...aliasEnv, [missingName]: undefined });
+          expect(missingWithAlias.status).toBe(2);
+          expect(JSON.parse(missingWithAlias.stdout).missingEnvVars).toEqual([missingName]);
+        }
       } finally {
         rmSync(dir, { recursive: true, force: true });
       }

@@ -1721,7 +1721,7 @@ export function requiredRuntimeEnvVars(
       vars.push("OPENGENI_AZURE_OPENAI_API_VERSION");
     }
   } else {
-    vars.push("OPENGENI_OPENAI_API_KEY");
+    vars.push(openAiApiKeyRuntimeEnv(contract, env).key);
   }
   if (env.OPENGENI_VERCEL_AI_GATEWAY_API_KEY) {
     vars.push("OPENGENI_VERCEL_AI_GATEWAY_API_KEY");
@@ -3323,7 +3323,7 @@ function runtimeEnvValues(
             : []),
           requiredEnv("OPENGENI_AZURE_OPENAI_API_KEY", env.OPENGENI_AZURE_OPENAI_API_KEY),
         ]
-      : [requiredEnv("OPENGENI_OPENAI_API_KEY", env.OPENGENI_OPENAI_API_KEY)]),
+      : [openAiApiKeyRuntimeEnv(contract, env)]),
     ...(env.OPENGENI_VERCEL_AI_GATEWAY_API_KEY
       ? [requiredEnv("OPENGENI_VERCEL_AI_GATEWAY_API_KEY", env.OPENGENI_VERCEL_AI_GATEWAY_API_KEY)]
       : []),
@@ -3547,6 +3547,23 @@ function platformRuntimeEnv(contract: DeploymentContract, key: string): string |
     if (value) return value;
   }
   return undefined;
+}
+
+function openAiApiKeyRuntimeEnv(
+  contract: DeploymentContract,
+  env: Record<string, string | undefined>,
+): RuntimeEnvEntry {
+  if (contract.runtime.platform !== "azure-container-apps") {
+    return requiredEnv("OPENGENI_OPENAI_API_KEY", env.OPENGENI_OPENAI_API_KEY);
+  }
+  const key =
+    !nonEmpty(env.OPENGENI_OPENAI_API_KEY) && nonEmpty(env.OPENAI_API_KEY)
+      ? "OPENAI_API_KEY"
+      : "OPENGENI_OPENAI_API_KEY";
+  const value = env[key];
+  // Match getSettings' optionalEnvironmentValue: blank is absent, but a
+  // nonblank credential is preserved unchanged and the canonical name wins.
+  return { key, value: nonEmpty(value) === undefined ? undefined : value, required: true };
 }
 
 function requiredEnv(key: string, value: string | undefined): RuntimeEnvEntry {
