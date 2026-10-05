@@ -743,7 +743,7 @@ describe("Codex pool Prometheus alerts", () => {
     // absent usage must alert on active traffic but never on an idle provider.
     expect(expression.replace(/\s+/g, " ").trim()).toBe(
       '(sum(rate(opengeni_model_cache_read_telemetry_total{provider="codex-subscription",status="missing"}[30m])) or vector(0)) > 0 ' +
-        'or ( sum(rate(opengeni_model_calls_total{provider="codex-subscription",outcome="completed"}[30m])) > 0 ' +
+        'or ( sum(increase(opengeni_model_calls_total{provider="codex-subscription",outcome="completed"}[30m])) >= 20 ' +
         'and on() (sum(rate(opengeni_model_cache_read_telemetry_total{provider="codex-subscription"}[30m])) or vector(0)) == 0 )',
     );
   });
