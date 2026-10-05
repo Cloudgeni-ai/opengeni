@@ -1,6 +1,14 @@
 import { describe, expect, test } from "bun:test";
 import { spawnSync } from "node:child_process";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import {
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  rmSync,
+  statSync,
+  writeFileSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -174,11 +182,27 @@ describe("ACA ordered workflow with fake operator CLIs", () => {
         writeFileSync(
           join(bin, "terraform"),
           `#!/bin/sh
+set -eu
 printf '%s\\n' "terraform $*" >> "$ACA_TEST_COMMAND_LOG"
+test "$TF_DATA_DIR" = "$OPENGENI_ACA_TF_DATA_DIR"
+for arg do case "$arg" in -state|-state=*) exit 19 ;; esac; done
+test "$1" = '-chdir=deploy/terraform/azure-container-apps'
+shift
+if [ "$1" = init ]; then
+  test "$#" -eq 3
+  test "$2" = -reconfigure
+  test "$3" = "-backend-config=path=$OPENGENI_ACA_STATE_FILE"
+  printf '%s\\n' "$OPENGENI_ACA_STATE_FILE" > "$TF_DATA_DIR/backend-path"
+  printf 'private-test-state\\n' > "$OPENGENI_ACA_STATE_FILE"
+else
+  test "$(head -n 1 "$TF_DATA_DIR/backend-path")" = "$OPENGENI_ACA_STATE_FILE"
+  test -f "$OPENGENI_ACA_STATE_FILE"
+fi
 case "$*" in
   *' -raw resource_group_name'*) printf 'test-resource-group\\n' ;;
   *' -raw migration_job_name'*) printf 'test-migrations\\n' ;;
   *' -json migration_job'*) printf '{"image":"test-registry.example.test/api@sha256:${"1".repeat(64)}"}\\n' ;;
+  *' -raw api_url'*) printf 'https://test.example.test\\n' ;;
 esac
 `,
           { mode: 0o755 },
@@ -205,7 +229,11 @@ esac
           { mode: 0o755 },
         );
         const plan = stackPlanFor(deploymentProfiles["azure-container-apps"], "none", {});
-        const result = spawnSync("bash", ["-e", "-c", plan.deployCommands.join("\n")], {
+        const workflow = [
+          ...plan.deployCommands,
+          ...(status === "Succeeded" ? [plan.verifyCommands[0]!, ...plan.destroyCommands] : []),
+        ];
+        const result = spawnSync("bash", ["-e", "-c", workflow.join("\n")], {
           cwd: repoRoot,
           encoding: "utf8",
           timeout: 10_000,
@@ -221,6 +249,19 @@ esac
         });
         expect(result.error).toBeUndefined();
         const commands = readFileSync(join(dir, "commands.log"), "utf8");
+        expect(commands).toContain(
+          `init -reconfigure -backend-config=path=${join(dir, "private state.tfstate")}`,
+        );
+        expect(commands).not.toContain("-state=");
+        expect(readFileSync(join(dir, "private terraform data", "backend-path"), "utf8")).toBe(
+          `${join(dir, "private state.tfstate")}\n`,
+        );
+        expect(readFileSync(join(dir, "private state.tfstate"), "utf8")).toBe(
+          "private-test-state\n",
+        );
+        expect(statSync(join(dir, "private state.tfstate")).mode & 0o777).toBe(0o600);
+        expect(statSync(join(dir, "private terraform data")).mode & 0o777).toBe(0o700);
+        expect(result.stdout + result.stderr).not.toContain("private-test-state");
         expect(commands.match(/az containerapp job start/g)).toHaveLength(1);
         expect(commands).toContain("deployment_phase=bootstrap");
         if (status === "Succeeded") {
@@ -232,6 +273,9 @@ esac
           expect(commands.indexOf("job execution show")).toBeLessThan(
             commands.indexOf("deployment_phase=apps"),
           );
+          expect(commands).toContain("output -raw api_url");
+          expect(commands).toContain("plan -destroy -var-file=");
+          expect(commands).toContain("destroy -var-file=");
         } else {
           expect(result.status).not.toBe(0);
           expect(commands).not.toContain("deployment_phase=apps");
@@ -241,6 +285,30 @@ esac
       }
     });
   }
+
+  test("rejects a relative state path before initializing the backend", () => {
+    const dir = mkdtempSync(join(tmpdir(), "opengeni-aca-relative-state-"));
+    try {
+      const plan = stackPlanFor(deploymentProfiles["azure-container-apps"], "none", {});
+      const result = spawnSync("bash", ["-e", "-c", plan.deployCommands.join("\n")], {
+        cwd: dir,
+        encoding: "utf8",
+        timeout: 5_000,
+        env: {
+          ...cleanEnv,
+          OPENGENI_ACA_TFVARS_FILE: join(dir, "private.tfvars"),
+          OPENGENI_ACA_STATE_FILE: "repository.tfstate",
+          OPENGENI_ACA_TF_DATA_DIR: join(dir, "private terraform data"),
+        },
+      });
+      expect(result.status).not.toBe(0);
+      expect(result.stderr).toContain("ACA operator paths must be absolute");
+      expect(existsSync(join(dir, "private terraform data"))).toBe(false);
+      expect(existsSync(join(dir, "repository.tfstate"))).toBe(false);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
 
   test("worker template readback requires both roles, always-on replicas, and drain grace", () => {
     const dir = mkdtempSync(join(tmpdir(), "opengeni-aca-worker-readback-"));

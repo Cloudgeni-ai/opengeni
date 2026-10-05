@@ -107,6 +107,12 @@ describe("Azure Container Apps deployment profile", () => {
     const ids = checks.map((check) => check.id);
     expect(ids).toContain("azure-container-apps-context");
     expect(ids).toContain("container-registry");
+    expect(checks.find((check) => check.id === "container-registry")?.description).toContain(
+      "Default create_acr=false requires anonymously pullable images",
+    );
+    expect(checks.find((check) => check.id === "container-registry")?.description).toContain(
+      "managed-identity pull applies only to the optional ACR created by create_acr=true",
+    );
     expect(ids).not.toContain("kubernetes-context");
     expect(checks.find((check) => check.id === "postgres-migrations")?.description).toContain(
       "manual migration/provision job",
@@ -242,7 +248,18 @@ describe("Azure Container Apps deployment profile", () => {
     expect(plan.verifyCommands.join("\n")).toContain("--sandbox-backend modal");
     expect(plan.verifyCommands.join("\n")).not.toContain("--sandbox-backend none");
     expect(plan.destroyCommands[0]).toContain("plan -destroy");
-    expect(plan.destroyCommands[1]).toContain("destroy -state=");
+    expect(plan.deployCommands.join("\n")).toContain(
+      'init -reconfigure -backend-config="path=${OPENGENI_ACA_STATE_FILE:',
+    );
+    expect(plan.prerequisites?.join("\n")).toContain("outside the repository");
+    expect(plan.prerequisites?.join("\n")).toContain(
+      "Default create_acr=false requires anonymously pullable images and grants no access to an existing registry",
+    );
+    expect(plan.notes.join("\n")).toContain("assigns no roles on existing registries");
+    expect(
+      [...plan.deployCommands, ...plan.verifyCommands, ...plan.destroyCommands].join("\n"),
+    ).not.toContain("-state=");
+    expect(plan.destroyCommands[1]).toContain("destroy -var-file=");
     expect(plan.destroyCommands[1]).toContain("-var-file=");
     expect(plan.verifyCommands.join("\n")).toContain("terminationGracePeriodSeconds >= 120");
     expect(plan.verifyCommands.join("\n")).toContain("minReplicas >= 1");
