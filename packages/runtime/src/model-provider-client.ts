@@ -1,4 +1,9 @@
-import { configuredModels, type ResolvedModelProvider, type Settings } from "@opengeni/config";
+import {
+  configuredModels,
+  opperMaxOutputTokens,
+  type ResolvedModelProvider,
+  type Settings,
+} from "@opengeni/config";
 import OpenAI from "openai";
 import { createHash } from "node:crypto";
 import { CODEX_RESPONSE_SDK_OUTER_TIMEOUT_MS, codexSubscriptionFetch } from "@opengeni/codex";
@@ -190,6 +195,7 @@ function providerClientCacheKey(
   provider: ResolvedModelProvider,
   settings: Settings,
   gatewayPolicies: ReadonlyMap<string, unknown> | undefined,
+  opperOutputLimits?: ReadonlyMap<string, number>,
 ): string {
   const sortedRecord = (value: Record<string, string> | undefined) =>
     value
@@ -219,6 +225,13 @@ function providerClientCacheKey(
         gatewayPolicies: gatewayPolicies
           ? [...gatewayPolicies.entries()].sort(([left], [right]) => left.localeCompare(right))
           : null,
+        ...(opperOutputLimits
+          ? {
+              opperOutputLimits: [...opperOutputLimits.entries()].sort(([left], [right]) =>
+                left.localeCompare(right),
+              ),
+            }
+          : {}),
         openaiMaxRetries: settings.openaiMaxRetries,
         streamIdlePolicy: modelStreamIdlePolicy(settings, provider),
         builtin:
@@ -335,7 +348,17 @@ export function buildProviderClient(provider: ResolvedModelProvider, settings: S
             .map((model) => [model.upstreamModelId, model.requestPolicy] as const),
         )
       : undefined;
-  const cacheKey = providerClientCacheKey(provider, settings, gatewayPolicies);
+  const opperOutputLimits = opperProvider
+    ? new Map(
+        configuredModels(settings)
+          .filter((model) => model.providerId === provider.id)
+          .flatMap((model) => {
+            const limit = opperMaxOutputTokens(settings, model.upstreamModelId);
+            return limit === undefined ? [] : [[model.upstreamModelId, limit] as const];
+          }),
+      )
+    : undefined;
+  const cacheKey = providerClientCacheKey(provider, settings, gatewayPolicies, opperOutputLimits);
   const cached = scopedCredentialProvider ? undefined : providerClientCache.get(cacheKey);
   if (cached) {
     return cached;
@@ -391,7 +414,7 @@ export function buildProviderClient(provider: ResolvedModelProvider, settings: S
             timeout: CODEX_RESPONSE_SDK_OUTER_TIMEOUT_MS,
             fetch: codexSubscriptionFetch(instrumentedModelFetch(provider.id, globalThis.fetch)),
           },
-          { modelRequestPolicy: modelRequestPolicyForProvider(provider, gatewayPolicies) },
+          { modelRequestPolicy: modelRequestPolicyForProvider(provider, gatewayPolicies, opperOutputLimits) },
         )
       : provider.kind === "xai-subscription"
         ? // SuperGrok subscription uses one workspace-scoped request context.
@@ -409,7 +432,7 @@ export function buildProviderClient(provider: ResolvedModelProvider, settings: S
               timeout: XAI_RESPONSE_SDK_OUTER_TIMEOUT_MS,
               fetch: xaiSubscriptionFetch(instrumentedModelFetch(provider.id, globalThis.fetch)),
             },
-            { modelRequestPolicy: modelRequestPolicyForProvider(provider, gatewayPolicies) },
+            { modelRequestPolicy: modelRequestPolicyForProvider(provider, gatewayPolicies, opperOutputLimits) },
           )
         : // ResolvedModelProvider.apiKey is already the resolved key (configuredProviders
           // ran resolveProviderApiKey at config time, collapsing apiKey/apiKeyEnv), so it
@@ -451,7 +474,7 @@ export function buildProviderClient(provider: ResolvedModelProvider, settings: S
                 ),
               ),
             },
-            { modelRequestPolicy: modelRequestPolicyForProvider(provider, gatewayPolicies) },
+            { modelRequestPolicy: modelRequestPolicyForProvider(provider, gatewayPolicies, opperOutputLimits) },
           );
   if (!scopedCredentialProvider) {
     cacheProviderClient(cacheKey, provider.id, client);

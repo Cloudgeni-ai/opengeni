@@ -801,6 +801,14 @@ const SettingsSchema = z.object({
   // Managed Opper credential. Like OpenRouter, the reviewed Opper model table
   // is injected by code/catalog-document resolution, never host provider JSON.
   opperApiKey: z.string().optional(),
+  // Code-mode host override for the managed provider model lists
+  // (OPENGENI_MANAGED_MODELS_JSON): a partial catalog document carrying any of
+  // `gatewayModels`, `openrouterModels`, `opperModels`, each validated by the
+  // exact database catalog document entry schema. A present key replaces that
+  // provider's reviewed code table; an omitted key keeps it. Read only when
+  // modelCatalogSource is "code": database mode ignores it so the singleton
+  // document stays the sole membership authority.
+  managedModelsJson: z.string().optional(),
   // Internal, secret-free catalog overlays populated only by
   // applyModelCatalogDocument. They intentionally have no OPENGENI_* env
   // binding so database mode cannot be bypassed with a second source.
@@ -2963,6 +2971,12 @@ export const OpperCatalogModel = z
     effectiveContextWindowTokens: z.number().int().positive().optional(),
     autoCompactTokenLimit: z.number().int().positive().optional(),
     toolOutputTruncationTokens: z.number().int().positive().optional(),
+    /** Opper's advertised `max_output_tokens` for this route. Sent as
+     * `max_tokens` on every Chat request that does not set its own, because
+     * Opper otherwise caps output at 4,096 tokens, which hidden reasoning can
+     * exhaust before any answer. Must not exceed the route's real limit:
+     * Opper rejects (400), it does not clamp. */
+    maxOutputTokens: z.number().int().positive().optional(),
     pricing: z.union([ModelPricingSchema, ModelPricingScheduleSchema]).optional(),
     credentialSource: z.never().optional(),
     billing: z.never().optional(),
@@ -3056,8 +3070,9 @@ export const ModelCatalogDocument = z
     codexModels: z.array(CodexCatalogModelSchema).optional(),
     gatewayModels: z.array(DeploymentGatewayCatalogModelSchema).default([]),
     openrouterModels: z.array(OpenRouterCatalogModel).default([]),
-    /** Reviewed paid Opper routes. Membership only: price comes from the
-     * reviewed code snapshot (or OPENGENI_MODEL_PRICING_JSON), never here. */
+    /** Reviewed paid Opper routes. Membership only: price comes from Opper's
+     * per-response reported cost, with the reviewed code snapshot (or
+     * OPENGENI_MODEL_PRICING_JSON) as fallback/validation, never here. */
     opperModels: z.array(DeploymentOpperCatalogModelSchema).default([]),
     modelNotes: z.record(z.string().min(1), ModelNote).default({}),
     billing: z.never().optional(),
@@ -3237,6 +3252,88 @@ function deploymentRegistryProvidersWithHostCredentials(
 }
 
 /** Pure secret-free database catalog overlay. getSettings remains env-only. */
+/**
+ * OPENGENI_MANAGED_MODELS_JSON: the managed-provider slice of a catalog
+ * document for code catalog mode. Each present array uses the database
+ * document's exact strict entry schema (so no entry may carry `pricing`,
+ * credentials, or billing) and replaces that provider's reviewed code table;
+ * an omitted array keeps it. Price authority stays with provider-reported
+ * cost (Gateway/Opper), the reviewed code snapshot, and
+ * OPENGENI_MODEL_PRICING_JSON, which boot validation requires for every
+ * credits-billed product without a reviewed price.
+ */
+export const ManagedModelsOverride = z
+  .object({
+    gatewayModels: z.array(DeploymentGatewayCatalogModelSchema).optional(),
+    openrouterModels: z.array(OpenRouterCatalogModel).optional(),
+    opperModels: z.array(DeploymentOpperCatalogModelSchema).optional(),
+  })
+  .strict()
+  .superRefine((override, context) => {
+    const unique = (
+      key: "gatewayModels" | "openrouterModels" | "opperModels",
+      ids: (model: { upstreamModelId: string }) => string[],
+    ) => {
+      const seen = new Set<string>();
+      (override[key] ?? []).forEach((model, index) => {
+        for (const id of ids(model)) {
+          if (seen.has(id)) {
+            context.addIssue({
+              code: "custom",
+              path: [key, index, "upstreamModelId"],
+              message: `duplicate ${key} model id ${id}`,
+            });
+          }
+          seen.add(id);
+        }
+      });
+    };
+    unique("gatewayModels", (model) => {
+      const gateway = model as GatewayCatalogModel;
+      return [gateway.upstreamModelId, gateway.productId, gateway.workspaceProductId];
+    });
+    unique("openrouterModels", (model) => [
+      model.upstreamModelId,
+      ...(model as OpenRouterCatalogModel).aliases,
+    ]);
+    unique("opperModels", (model) => [
+      model.upstreamModelId,
+      ...(model as OpperCatalogModel).aliases,
+    ]);
+  });
+export type ManagedModelsOverride = z.infer<typeof ManagedModelsOverride>;
+
+const parsedManagedModelsJson = new Map<string, ManagedModelsOverride>();
+
+/** Parse and validate OPENGENI_MANAGED_MODELS_JSON (memoized per raw value). */
+export function parseManagedModelsJson(raw: string): ManagedModelsOverride {
+  const cached = parsedManagedModelsJson.get(raw);
+  if (cached) return cached;
+  let json: unknown;
+  try {
+    json = JSON.parse(raw);
+  } catch (error) {
+    throw new Error("OPENGENI_MANAGED_MODELS_JSON must be valid JSON", { cause: error });
+  }
+  const result = ManagedModelsOverride.safeParse(json);
+  if (!result.success) {
+    throw new Error(
+      `OPENGENI_MANAGED_MODELS_JSON is invalid: ${result.error.issues
+        .map((issue) => `${issue.path.join(".") || "(root)"}: ${issue.message}`)
+        .join("; ")}`,
+    );
+  }
+  if (parsedManagedModelsJson.size > 16) parsedManagedModelsJson.clear();
+  parsedManagedModelsJson.set(raw, result.data);
+  return result.data;
+}
+
+/** The code-mode managed model override; always empty in database mode. */
+function codeModeManagedModels(settings: Settings): ManagedModelsOverride {
+  if (settings.modelCatalogSource !== "code" || !settings.managedModelsJson?.trim()) return {};
+  return parseManagedModelsJson(settings.managedModelsJson);
+}
+
 export function applyModelCatalogDocument(settings: Settings, rawDocument: unknown): Settings {
   const document = parseModelCatalogDocument(rawDocument);
   const defaultModel = document.defaultModel ?? document.builtInModels[0]!;
@@ -3491,29 +3588,35 @@ export const OPENGENI_OPENROUTER_MODELS: readonly OpenRouterCatalogModel[] = [
   }),
 ];
 
-function opperCuratedCapabilities(input: {
+/** Shared Opper Chat capability envelope. Opper accepts every
+ * `reasoning_effort` value on every probed route (it ignores values a route
+ * does not support rather than failing), so the declared vocabulary is a
+ * product choice, never a request-validity guarantee. */
+function opperCapabilities(input: {
   reasoning: Pick<
     ModelCapabilitiesV1["reasoning"],
     "upstream" | "runnable" | "efforts" | "defaultEffort"
   >;
+  structuredOutput: CapabilitySupportV1;
+  image: boolean;
+  inputFileMediaTypes: string[];
 }): ModelCapabilitiesV1 {
   return ModelCapabilitiesV1Schema.parse({
     reasoning: { ...input.reasoning, required: false },
-    // Opper's catalogue advertises tools + structured_output for both routes;
     // OpenGeni sends ordinary OpenAI-compatible Chat function tools.
     functionCalling: { upstream: "supported", runnable: true },
-    structuredOutput: { upstream: "supported", runnable: true },
+    structuredOutput: {
+      upstream: input.structuredOutput,
+      runnable: input.structuredOutput === "supported",
+    },
     hostedTools: {
       webSearch: { upstream: "unknown", runnable: false },
       xSearch: { upstream: "unknown", runnable: false },
       codeExecution: { upstream: "unknown", runnable: false },
       imageGeneration: { upstream: "unknown", runnable: false },
     },
-    // Both routes advertise vision/PDF upstream. OpenGeni keeps runnable input
-    // text-only until image/file transport through Opper's Chat surface is
-    // verified end to end (the OpenCode Zen / OpenRouter conservative default).
-    inputModalities: ["text"],
-    inputFileMediaTypes: [],
+    inputModalities: input.image ? ["text", "image"] : ["text"],
+    inputFileMediaTypes: input.inputFileMediaTypes,
     outputModalities: ["text"],
     transports: {
       sse: { upstream: "supported", runnable: true },
@@ -3526,61 +3629,141 @@ function opperCuratedCapabilities(input: {
 }
 
 /**
- * Reviewed Opper starter routes. Snapshot of Opper's public catalogue
- * (`GET https://api.opper.ai/v3/models`) reviewed 2026-10-05. Both routes are
- * EU-resident and provider-pinned (`provider/model`), so Opper never pools
- * them onto a non-EU provider. `pricing` is Opper's listed supplier rate
- * (USD per 1M tokens) and debits with the standard +5% margin.
+ * Reviewed Opper starter route. Snapshot of Opper's catalogue
+ * (`GET https://api.opper.ai/v3/compat/models`) reviewed 2026-10-05 and probed
+ * live end to end. The route is provider-pinned (`provider/model`) to AWS
+ * Bedrock eu-north-1 (Stockholm) with no provider logging, so Opper never
+ * pools it onto a non-EU provider. `pricing` is Opper's listed supplier rate
+ * (USD per 1M tokens); turns debit Opper's exact reported cost +5% and use
+ * this rate only when cost metadata is absent. Hosts replace this list with
+ * OPENGENI_OPPER_MODELS_JSON (code mode) or the catalog document's
+ * `opperModels` (database mode).
  */
 export const OPENGENI_OPPER_MODELS: readonly OpperCatalogModel[] = [
   OpperCatalogModel.parse({
-    // Vertex AI EU multi-region endpoint (route google/eu), inference in the EU.
-    upstreamModelId: "vertexai/gemini-3.8-flash-eu",
-    label: "Gemini 3.8 Flash (EU)",
-    shortLabel: "Gemini 3.8 Flash",
+    upstreamModelId: "aws/claude-opus-5-5",
+    label: "Claude Opus 5.5 (EU)",
+    shortLabel: "Opus 5.5",
     aliases: [],
-    capabilities: opperCuratedCapabilities({
-      // Opper advertises no reasoning parameter for this route (`params` has
-      // only max_tokens); the model thinks with its provider default.
-      reasoning: { upstream: "unknown", runnable: false, efforts: [], defaultEffort: null },
-    }),
-    contextWindowTokens: 1_048_576,
-    // 1,048,576 minus Opper's 65,536 max output tokens.
-    effectiveContextWindowTokens: 983_040,
-    autoCompactTokenLimit: 900_000,
-    pricing: {
-      // Opper list: $0.825 input / $0.0825 cached input / $4.125 output per 1M.
-      inputMicrosPerMillionTokens: 825_000,
-      cachedInputMicrosPerMillionTokens: 82_500,
-      outputMicrosPerMillionTokens: 4_125_000,
-      marginBps: 500,
-    },
-  }),
-  OpperCatalogModel.parse({
-    // AWS Bedrock eu-north-1 (Stockholm); Opper lists no logging/retention.
-    upstreamModelId: "aws/claude-sonnet-4-6-eu",
-    label: "Claude Sonnet 4.6 (EU)",
-    shortLabel: "Sonnet 4.6",
-    aliases: [],
-    capabilities: opperCuratedCapabilities({
-      // Opper advertises no reasoning parameter for this Bedrock route.
-      reasoning: { upstream: "unknown", runnable: false, efforts: [], defaultEffort: null },
+    capabilities: opperCapabilities({
+      // Opper lists `reasoning.supported` low..max with no default for this
+      // route; `reasoning_effort` measurably changes hidden thinking length.
+      // Default medium matches the native Claude Opus 5.5 profile.
+      reasoning: {
+        upstream: "supported",
+        runnable: true,
+        efforts: ["low", "medium", "high", "xhigh", "max"],
+        defaultEffort: "medium",
+      },
+      // The route lists text/vision/tools/pdf/reasoning, not structured_output.
+      structuredOutput: "unknown",
+      image: true,
+      inputFileMediaTypes: ["application/pdf"],
     }),
     contextWindowTokens: 1_000_000,
-    // 1,000,000 minus Opper's 64,000 max output tokens.
-    effectiveContextWindowTokens: 936_000,
+    // 1,000,000 minus Opper's 128,000 max output tokens.
+    effectiveContextWindowTokens: 872_000,
     autoCompactTokenLimit: 800_000,
+    maxOutputTokens: 128_000,
     pricing: {
-      // Opper list: $3.30 input / $0.33 cached input / $4.125 5-minute cache
-      // write / $16.50 output per 1M (Bedrock EU regional +10%).
-      inputMicrosPerMillionTokens: 3_300_000,
-      cachedInputMicrosPerMillionTokens: 330_000,
-      cacheWriteMicrosPerMillionTokens: 4_125_000,
-      outputMicrosPerMillionTokens: 16_500_000,
+      // Opper list: $4.40 input / $0.22 cached input / $5.50 5-minute cache
+      // write / $22.00 output per 1M (Bedrock EU regional rate).
+      inputMicrosPerMillionTokens: 4_400_000,
+      cachedInputMicrosPerMillionTokens: 220_000,
+      cacheWriteMicrosPerMillionTokens: 5_500_000,
+      outputMicrosPerMillionTokens: 22_000_000,
       marginBps: 500,
     },
   }),
 ];
+
+/**
+ * Reviewed Opper list prices for routes a host may add through
+ * OPENGENI_OPPER_MODELS_JSON or the catalog document without its own
+ * OPENGENI_MODEL_PRICING_JSON entry. Price only: membership, labels,
+ * capabilities and limits always come from configuration.
+ */
+const REVIEWED_OPPER_MODEL_PRICING: Readonly<
+  Record<string, ModelPricing | ModelPricingScheduleV1>
+> = {
+  ...Object.fromEntries(
+    OPENGENI_OPPER_MODELS.flatMap((model) =>
+      model.pricing ? [[model.upstreamModelId, model.pricing] as const] : [],
+    ),
+  ),
+  // Reviewed 2026-10-05: $0.825 input / $0.0825 cached input / $4.125 output.
+  "vertexai/gemini-3.8-flash-eu": {
+    inputMicrosPerMillionTokens: 825_000,
+    cachedInputMicrosPerMillionTokens: 82_500,
+    outputMicrosPerMillionTokens: 4_125_000,
+    marginBps: 500,
+  },
+  // Reviewed 2026-10-05: $3.30 input / $0.33 cached / $4.125 cache write / $16.50 output.
+  "aws/claude-sonnet-4-6-eu": {
+    inputMicrosPerMillionTokens: 3_300_000,
+    cachedInputMicrosPerMillionTokens: 330_000,
+    cacheWriteMicrosPerMillionTokens: 4_125_000,
+    outputMicrosPerMillionTokens: 16_500_000,
+    marginBps: 500,
+  },
+};
+
+/** Opper's smallest advertised `max_output_tokens` across every Claude route
+ * in its 2026-10-05 catalogue (all 70 routes are 64,000 or more). */
+const OPPER_CLAUDE_FAMILY_MAX_OUTPUT_TOKENS = 64_000;
+
+function isOpperClaudeFamilyModel(upstreamModelId: string): boolean {
+  return /(?:^|[/.])claude-/iu.test(upstreamModelId);
+}
+
+function isOpperGeminiFamilyModel(upstreamModelId: string): boolean {
+  return /(?:^|[/.])gemini-/iu.test(upstreamModelId);
+}
+
+/**
+ * Capability envelope for a workspace/organization custom Opper id that is not
+ * in the configured deployment list. Deterministic and offline (the API and
+ * worker must derive the same frozen definition, so no live `GET /models`):
+ * - reasoning is runnable with low/medium/high, because Opper accepts any
+ *   effort on every probed route and ignores one a route does not support;
+ * - image input is on for the Claude and Gemini families, where every route
+ *   in Opper's catalogue lists vision; other families stay text-only;
+ * - typed file input stays off (OpenGeni sends documents to the sandbox).
+ */
+function opperCustomModelCapabilities(upstreamModelId: string): ModelCapabilitiesV1 {
+  return opperCapabilities({
+    reasoning: {
+      upstream: "unknown",
+      runnable: true,
+      efforts: ["low", "medium", "high"],
+      defaultEffort: "medium",
+    },
+    structuredOutput: "unknown",
+    image: isOpperClaudeFamilyModel(upstreamModelId) || isOpperGeminiFamilyModel(upstreamModelId),
+    inputFileMediaTypes: [],
+  });
+}
+
+/**
+ * `max_tokens` the Opper Chat adapter sends when a request sets none. Opper's
+ * own default is 4,096 output tokens, which hidden reasoning can exhaust before
+ * any answer, and Opper rejects (does not clamp) a value above the route's
+ * limit. A configured entry's `maxOutputTokens` wins; a Claude-family custom id
+ * gets the smallest Claude limit in Opper's catalogue; other ids keep Opper's
+ * default.
+ */
+export function opperMaxOutputTokens(
+  settings: Settings,
+  upstreamModelId: string,
+): number | undefined {
+  const configured = configuredOpperCatalogModels(settings).find(
+    (model) => model.upstreamModelId === upstreamModelId,
+  );
+  if (configured?.maxOutputTokens !== undefined) return configured.maxOutputTokens;
+  return isOpperClaudeFamilyModel(upstreamModelId)
+    ? OPPER_CLAUDE_FAMILY_MAX_OUTPUT_TOKENS
+    : undefined;
+}
 
 function defaultGatewayCatalogModels(): GatewayCatalogModel[] {
   return [
@@ -3604,10 +3787,12 @@ function defaultGatewayCatalogModels(): GatewayCatalogModel[] {
 }
 
 function configuredGatewayCatalogModels(settings: Settings): GatewayCatalogModel[] {
-  if (settings.resolvedGatewayModelsJson === undefined) {
-    return defaultGatewayCatalogModels();
+  if (settings.resolvedGatewayModelsJson !== undefined) {
+    return z.array(GatewayCatalogModel).parse(JSON.parse(settings.resolvedGatewayModelsJson));
   }
-  return z.array(GatewayCatalogModel).parse(JSON.parse(settings.resolvedGatewayModelsJson));
+  const override = codeModeManagedModels(settings).gatewayModels;
+  if (override) return override.map((model) => GatewayCatalogModel.parse(model));
+  return defaultGatewayCatalogModels();
 }
 
 export function configuredGatewayUpstreamModelIds(settings: Settings): string[] {
@@ -3628,10 +3813,12 @@ export function configuredModelInputIdentities(settings: Settings): string[] {
 }
 
 function configuredOpenRouterCatalogModels(settings: Settings): OpenRouterCatalogModel[] {
-  if (settings.resolvedOpenRouterModelsJson === undefined) {
-    return [...OPENGENI_OPENROUTER_MODELS];
+  if (settings.resolvedOpenRouterModelsJson !== undefined) {
+    return z.array(OpenRouterCatalogModel).parse(JSON.parse(settings.resolvedOpenRouterModelsJson));
   }
-  return z.array(OpenRouterCatalogModel).parse(JSON.parse(settings.resolvedOpenRouterModelsJson));
+  const override = codeModeManagedModels(settings).openrouterModels;
+  if (override) return override.map((model) => OpenRouterCatalogModel.parse(model));
+  return [...OPENGENI_OPENROUTER_MODELS];
 }
 
 export function configuredOpenRouterUpstreamModelIds(settings: Settings): string[] {
@@ -3657,18 +3844,26 @@ export function configuredOpenRouterOrganizationProductModelIds(settings: Settin
   return [];
 }
 
+/**
+ * Deployment Opper membership. A resolved database catalog document is the
+ * sole authority in database mode; OPENGENI_MANAGED_MODELS_JSON `opperModels`
+ * is read only in code mode, so it can never bypass the database document;
+ * otherwise the reviewed code starter table applies.
+ */
 function configuredOpperCatalogModels(settings: Settings): OpperCatalogModel[] {
-  if (settings.resolvedOpperModelsJson === undefined) {
-    return [...OPENGENI_OPPER_MODELS];
+  if (settings.resolvedOpperModelsJson !== undefined) {
+    return z.array(OpperCatalogModel).parse(JSON.parse(settings.resolvedOpperModelsJson));
   }
-  return z.array(OpperCatalogModel).parse(JSON.parse(settings.resolvedOpperModelsJson));
+  const override = codeModeManagedModels(settings).opperModels;
+  if (override) return override.map((model) => OpperCatalogModel.parse(model));
+  return [...OPENGENI_OPPER_MODELS];
 }
 
-/** Reviewed code price for one curated Opper upstream id, if any. */
+/** Reviewed code price for one Opper upstream id, if any. */
 function reviewedOpperModelPricing(upstreamModelId: string): ModelPricingScheduleV1 | undefined {
-  const pricing = OPENGENI_OPPER_MODELS.find(
-    (model) => model.upstreamModelId === upstreamModelId,
-  )?.pricing;
+  const pricing = Object.hasOwn(REVIEWED_OPPER_MODEL_PRICING, upstreamModelId)
+    ? REVIEWED_OPPER_MODEL_PRICING[upstreamModelId]
+    : undefined;
   return pricing === undefined ? undefined : normalizeModelPricingSchedule(pricing);
 }
 
@@ -4310,6 +4505,7 @@ export function getSettings(source: NodeJS.ProcessEnv = process.env): Settings {
     modelNotesJson: optional("OPENGENI_MODEL_NOTES_JSON"),
     openrouterApiKey: optional("OPENGENI_OPENROUTER_API_KEY"),
     opperApiKey: optional("OPENGENI_OPPER_API_KEY"),
+    managedModelsJson: optional("OPENGENI_MANAGED_MODELS_JSON"),
     modelProvidersJson: optional("OPENGENI_MODEL_PROVIDERS_JSON"),
     codexSubscriptionEnabled: optional("OPENGENI_CODEX_SUBSCRIPTION_ENABLED"),
     supergrokSubscriptionEnabled: optional("OPENGENI_SUPERGROK_SUBSCRIPTION_ENABLED"),
@@ -5469,20 +5665,37 @@ function opperRegistryProvider(
     };
   });
   if (scoped) {
+    // An organization custom id that names a configured deployment route
+    // inherits that reviewed definition (capabilities and limits); the
+    // workspace rail already lists those routes as curated products.
+    const configuredByUpstream = new Map(
+      configuredOpperCatalogModels(settings).map((model) => [model.upstreamModelId, model]),
+    );
     for (const custom of input.customModels ?? []) {
       const productId = `${workspace ? WORKSPACE_OPPER_MODEL_ID_PREFIX : ORGANIZATION_OPPER_MODEL_ID_PREFIX}${custom.upstreamModelId}`;
       // Deployment membership wins over a workspace row with the same identity.
       if (upstreamIds.has(custom.upstreamModelId) || productIds.has(productId)) continue;
       upstreamIds.add(custom.upstreamModelId);
       productIds.add(productId);
+      const reviewed = configuredByUpstream.get(custom.upstreamModelId);
       models.push({
         id: productId,
         upstreamModelId: custom.upstreamModelId,
         aliases: [],
-        label: custom.label?.trim() || custom.upstreamModelId,
-        // Same reviewed conservative text/function Chat envelope as OpenRouter.
-        capabilities: openRouterCustomModelCapabilities(settings),
-        toolOutputTruncationTokens: settings.modelToolOutputTruncationTokens,
+        label: custom.label?.trim() || reviewed?.label || custom.upstreamModelId,
+        ...(reviewed?.shortLabel && !custom.label?.trim() ? { shortLabel: reviewed.shortLabel } : {}),
+        capabilities: reviewed?.capabilities ?? opperCustomModelCapabilities(custom.upstreamModelId),
+        ...(reviewed?.contextWindowTokens === undefined
+          ? {}
+          : { contextWindowTokens: reviewed.contextWindowTokens }),
+        ...(reviewed?.effectiveContextWindowTokens === undefined
+          ? {}
+          : { effectiveContextWindowTokens: reviewed.effectiveContextWindowTokens }),
+        ...(reviewed?.autoCompactTokenLimit === undefined
+          ? {}
+          : { autoCompactTokenLimit: reviewed.autoCompactTokenLimit }),
+        toolOutputTruncationTokens:
+          reviewed?.toolOutputTruncationTokens ?? settings.modelToolOutputTruncationTokens,
       });
     }
   }
@@ -9635,6 +9848,12 @@ function validateSettings(settings: Settings, source: NodeJS.ProcessEnv = proces
     // deployment funding JSON is parsed here; env catalog and note inputs are
     // intentionally ignored until resolveCatalogSettings applies the singleton.
     parseModelCostPolicyJson(settings.modelCostPolicyJson);
+    if (settings.managedModelsJson?.trim()) {
+      console.warn(
+        "[opengeni] OPENGENI_MANAGED_MODELS_JSON is ignored because OPENGENI_MODEL_CATALOG_SOURCE=database; " +
+          "set gatewayModels/openrouterModels/opperModels in the deployment catalog document instead.",
+      );
+    }
   }
 }
 
