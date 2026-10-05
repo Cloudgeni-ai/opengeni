@@ -1485,7 +1485,7 @@ export function preflightChecksFor(contract: DeploymentContract): PreflightCheck
       check(
         "container-registry",
         true,
-        "Verify API, web, worker, and migration images are existing immutable release digests and can be pulled by the managed identity.",
+        "Verify API, web, worker, and migration images are immutable release digests. Default create_acr=false requires anonymously pullable images; managed-identity pull applies only to the optional ACR created by create_acr=true.",
       ),
     );
   }
@@ -2059,7 +2059,7 @@ function externalDependencies(contract: DeploymentContract): string[] {
     return [
       "External Temporal endpoint, namespace, and TLS/auth credentials reachable from API and workers",
       "External NATS endpoint and authentication reachable from API and workers",
-      "Existing release registry API, worker, and web images pinned by sha256 digest; migration uses the API image",
+      "Existing anonymously pullable API, worker, and web release images pinned by sha256 digest, or images imported into the optional created ACR; migration uses the API image",
       "Real model-provider credentials and selected remote sandbox credentials (Modal by default)",
       ...(contract.access.mode === "externalGateway"
         ? ["Gateway-managed authentication and authorization"]
@@ -2228,17 +2228,18 @@ function helmApplicationDrainCommands(input: {
 const CONTAINER_APPS_TERRAFORM_ROOT = "deploy/terraform/azure-container-apps";
 const CONTAINER_APPS_VARIABLE_ARGS =
   '-var-file="${OPENGENI_ACA_TFVARS_FILE:?set the absolute path to private ACA tfvars}"';
-const CONTAINER_APPS_STATE_ARGS =
-  '-state="${OPENGENI_ACA_STATE_FILE:?set the absolute path to private local Terraform state}"';
+const CONTAINER_APPS_BACKEND_CONFIG_ARGS =
+  '-backend-config="path=${OPENGENI_ACA_STATE_FILE:?set the absolute path to private local Terraform state}"';
 
 function containerAppsPrerequisites(): string[] {
   return [
-    "Terraform version and provider versions satisfying this module's versions.tf; these commands use external local state. A remote backend requires a separately configured thin wrapper without the local -state flags.",
+    "Terraform version and provider versions satisfying this module's versions.tf; init -reconfigure configures its local backend with the external private state path. A remote backend requires a separately configured thin wrapper and matching backend initialization.",
     "Azure CLI with containerapp job start/execution show commands; sign in and select the intended subscription with az login and az account set before running any resource commands.",
     "Register Microsoft.App, Microsoft.Network, Microsoft.OperationalInsights, Microsoft.DBforPostgreSQL, Microsoft.Storage, Microsoft.KeyVault, and Microsoft.ManagedIdentity resource providers; hold resource-create, role-assignment, Key Vault, and destroy permissions for the intended scope. Register Microsoft.ContainerRegistry if create_acr=true.",
     "Bun at the repository-pinned version, Bash, jq, seq, and curl for operator verification; no local image build is needed.",
-    "Set absolute private paths OPENGENI_ACA_TFVARS_FILE, OPENGENI_ACA_STATE_FILE, and OPENGENI_ACA_TF_DATA_DIR outside the repository. TF_DATA_DIR and state must be the same across every phase and output/destroy command.",
+    "Set absolute private paths OPENGENI_ACA_TFVARS_FILE, OPENGENI_ACA_STATE_FILE, and OPENGENI_ACA_TF_DATA_DIR outside the repository. Keep the initialized backend and TF_DATA_DIR unchanged across every phase and output/destroy command.",
     "Private tfvars supply images.api/worker/web immutable release references, external_services Temporal/NATS settings, secret_env model/sandbox credentials, and config_env non-secret runtime settings. The module generates database credentials and Key Vault references; no operator PostgreSQL password is required.",
+    "Default create_acr=false requires anonymously pullable images and grants no access to an existing registry. Optional create_acr=true creates an empty ACR with managed-identity pull access scoped to that registry; import the exact release digests before running the migration job.",
     "Run the ordered deployment commands in the same shell so the exact migration execution identity is retained; never blindly retry job start after an unknown outcome.",
     "A successful schema/env check or TCP probe is not live deployment proof. Complete real model, remote sandbox, file/storage, auth, replay, schedule, and telemetry conformance; exports remain unsupported.",
   ];
@@ -2254,15 +2255,15 @@ function containerAppsMigrationStatusCommand(): string {
 }
 
 function containerAppsDeployCommands(terraformRoot: string): string[] {
-  const bootstrapArgs = `${CONTAINER_APPS_STATE_ARGS} ${CONTAINER_APPS_VARIABLE_ARGS} -var=deployment_phase=bootstrap`;
-  const applicationArgs = `${CONTAINER_APPS_STATE_ARGS} ${CONTAINER_APPS_VARIABLE_ARGS} -var=deployment_phase=apps -var="migration_completed_revision=\${OPENGENI_ACA_MIGRATION_IMAGE:?retain the exact migrated API image}"`;
-  const output = `terraform -chdir=${terraformRoot} output ${CONTAINER_APPS_STATE_ARGS}`;
+  const bootstrapArgs = `${CONTAINER_APPS_VARIABLE_ARGS} -var=deployment_phase=bootstrap`;
+  const applicationArgs = `${CONTAINER_APPS_VARIABLE_ARGS} -var=deployment_phase=apps -var="migration_completed_revision=\${OPENGENI_ACA_MIGRATION_IMAGE:?retain the exact migrated API image}"`;
+  const output = `terraform -chdir=${terraformRoot} output`;
   const statusCommand = containerAppsMigrationStatusCommand();
   return [
     'set -euo pipefail && umask 077 && export TF_DATA_DIR="${OPENGENI_ACA_TF_DATA_DIR:?set the absolute path to private Terraform data}"',
     'for OPENGENI_ACA_PRIVATE_PATH in "$TF_DATA_DIR" "${OPENGENI_ACA_STATE_FILE:?set private state path}" "${OPENGENI_ACA_TFVARS_FILE:?set private tfvars path}"; do case "$OPENGENI_ACA_PRIVATE_PATH" in /*) ;; *) printf "ACA operator paths must be absolute\\n" >&2; exit 1 ;; esac; done',
     'mkdir -p "$TF_DATA_DIR"',
-    `terraform -chdir=${terraformRoot} init`,
+    `terraform -chdir=${terraformRoot} init -reconfigure ${CONTAINER_APPS_BACKEND_CONFIG_ARGS}`,
     `terraform -chdir=${terraformRoot} validate`,
     `terraform -chdir=${terraformRoot} plan ${bootstrapArgs}`,
     `terraform -chdir=${terraformRoot} apply ${bootstrapArgs}`,
@@ -2283,7 +2284,7 @@ function containerAppsVerifyCommands(
     'bun run deployment:conformance -- --base-url "$OPENGENI_API_BASE_URL"' +
     ` --sandbox-backend ${contract.sandbox.backend}`;
   return [
-    `OPENGENI_API_BASE_URL="$(terraform -chdir=${CONTAINER_APPS_TERRAFORM_ROOT} output ${CONTAINER_APPS_STATE_ARGS} -raw api_url)" && export OPENGENI_API_BASE_URL`,
+    `OPENGENI_API_BASE_URL="$(terraform -chdir=${CONTAINER_APPS_TERRAFORM_ROOT} output -raw api_url)" && export OPENGENI_API_BASE_URL`,
     'az containerapp list --resource-group "${OPENGENI_ACA_RESOURCE_GROUP:?run bootstrap first}" --output json --only-show-errors | jq -e \'def role: [.properties.template.containers[].env[]? | select(.name == "OPENGENI_WORKER_ROLE") | .value][0]; [.[] | select(role == "control" or role == "turn")] as $workers | ([$workers[] | role] | sort) == ["control", "turn"] and all($workers[]; .properties.template.scale.minReplicas >= 1 and .properties.template.terminationGracePeriodSeconds >= 120)\'',
     'curl --fail --silent --show-error "${OPENGENI_API_BASE_URL:?apply applications first}/healthz"',
     `bun run deployment:preflight -- --profile ${contract.profile}${overlayArg} --check-env`,
@@ -2543,8 +2544,8 @@ function destroyCommands(
 ): string[] {
   if (contract.runtime.platform === "azure-container-apps") {
     return [
-      `terraform -chdir=${terraformRoot} plan -destroy ${CONTAINER_APPS_STATE_ARGS} ${CONTAINER_APPS_VARIABLE_ARGS}`,
-      `terraform -chdir=${terraformRoot} destroy ${CONTAINER_APPS_STATE_ARGS} ${CONTAINER_APPS_VARIABLE_ARGS}`,
+      `terraform -chdir=${terraformRoot} plan -destroy ${CONTAINER_APPS_VARIABLE_ARGS}`,
+      `terraform -chdir=${terraformRoot} destroy ${CONTAINER_APPS_VARIABLE_ARGS}`,
     ];
   }
   if (contract.profile === "local-compose") {
@@ -2764,8 +2765,8 @@ function planNotes(
       "Temporal and NATS are external prerequisites; this profile does not install them. Temporary live-test dependency fixtures are not production defaults and have a separate lifecycle.",
       "Use existing release images pinned by full sha256 digest. Migrations use the same API image; this workflow does not build or publish replacement images.",
       "Do not change tfvars, image digests, runtime database roles, or secrets between bootstrap, migration execution, and application enablement. Retain the exact execution ID when an observation fails; do not start another migration blindly.",
-      "Use managed identity for Key Vault secret delivery and registry access; the current Blob adapter uses a connection string delivered as a secret, not an implied identity-native storage adapter.",
-      "create_acr=false uses existing release images by default. Optional create_acr=true creates an empty registry: import the exact immutable images separately before bootstrap can run its migration job.",
+      "Use managed identity for Key Vault secret delivery and pull access only to the optional created ACR; the current Blob adapter uses a connection string delivered as a secret, not an implied identity-native storage adapter.",
+      "create_acr=false uses existing anonymously pullable release images by default and assigns no roles on existing registries. Optional create_acr=true creates an empty registry: import the exact immutable images separately before bootstrap can run its migration job.",
       "The native environment HTTP-route edge serves API and web on one HTTPS origin. Verify real SSE duration, reconnect/replay, rolling restart and NATS-loss recovery against that edge.",
       "The stock conformance stream is short and a selected sandbox backend is not proof of a sandbox invocation. Add actual remote commands and file materialization tests; test private production metrics/OTEL independently rather than counting a skipped public /metrics check as coverage.",
       "preflight --check-env inspects only the operator's current environment, not deployed Key Vault references. Check effective runtime values privately; do not use reference URLs as credential values or mistake a local env check for workload readiness.",
