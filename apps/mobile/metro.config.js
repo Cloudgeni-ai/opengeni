@@ -14,7 +14,8 @@ const nativeKitOrigin = path.join(nativeKitRoot, "package.json");
 const nativeKitExports = require(nativeKitOrigin).exports;
 const appOrigin = path.join(appRoot, "package.json");
 // React and every native-module package (React Native, Expo) belong to the app build.
-const singletons = /^(react|react-dom|scheduler|react-native|react-native-[\w-]+|@react-native[\w-]*\/[\w-]+|expo|expo-[\w-]+|@expo\/[\w-]+|@expo-google-fonts\/[\w-]+)(\/.*)?$/;
+const singletons =
+  /^(react|react-dom|scheduler|react-native|react-native-[\w-]+|@react-native[\w-]*\/[\w-]+|expo|expo-[\w-]+|@expo\/[\w-]+|@expo-google-fonts\/[\w-]+)(\/.*)?$/;
 const nativeKit = /^@opengeni\/react-native(?:\/(.+))?$/;
 
 const config = getDefaultConfig(appRoot);
@@ -27,7 +28,11 @@ config.resolver.resolveRequest = (context, moduleName, platform) => {
   // tsconfig `paths` are type-only here (Metro's tsconfig-paths support is disabled in
   // app.json); the app alias is resolved explicitly.
   if (moduleName.startsWith("@/")) {
-    return context.resolveRequest(context, path.join(appRoot, "src", moduleName.slice(2)), platform);
+    return context.resolveRequest(
+      context,
+      path.join(appRoot, "src", moduleName.slice(2)),
+      platform,
+    );
   }
   const kit = nativeKit.exec(moduleName);
   if (kit) {
@@ -36,17 +41,29 @@ config.resolver.resolveRequest = (context, moduleName, platform) => {
     return { type: "sourceFile", filePath: path.join(nativeKitRoot, entry.default) };
   }
   if (moduleName.startsWith("@opengeni/")) {
-    return context.resolveRequest({ ...context, originModulePath: nativeKitOrigin }, moduleName, platform);
+    return context.resolveRequest(
+      { ...context, originModulePath: nativeKitOrigin },
+      moduleName,
+      platform,
+    );
   }
   if (singletons.test(moduleName) && !context.originModulePath.startsWith(appRoot)) {
-    return context.resolveRequest({ ...context, originModulePath: appOrigin }, moduleName, platform);
+    return context.resolveRequest(
+      { ...context, originModulePath: appOrigin },
+      moduleName,
+      platform,
+    );
   }
   try {
     return context.resolveRequest(context, moduleName, platform);
   } catch (error) {
     // Native/Expo modules used by workspace packages are installed by this app.
     if (context.originModulePath.startsWith(appRoot)) throw error;
-    return context.resolveRequest({ ...context, originModulePath: appOrigin }, moduleName, platform);
+    return context.resolveRequest(
+      { ...context, originModulePath: appOrigin },
+      moduleName,
+      platform,
+    );
   }
 };
 
