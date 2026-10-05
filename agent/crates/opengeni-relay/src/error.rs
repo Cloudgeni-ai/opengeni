@@ -20,8 +20,8 @@ pub enum RelayError {
     #[error("token rejected: {0}")]
     Token(#[from] TokenError),
 
-    /// The token authenticated but its claims did not match the channel key
-    /// (cross-workspace / cross-agent / wrong port / stale epoch).
+    /// The token authenticated but its claims did not match the channel key or
+    /// requested input mode (cross-workspace / cross-agent / wrong channel / stale epoch).
     #[error("token scope mismatch: {0}")]
     Scope(String),
 

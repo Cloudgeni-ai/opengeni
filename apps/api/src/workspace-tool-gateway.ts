@@ -155,6 +155,20 @@ export function requireWorkspaceToolGatewayAuthorization(
   return grant;
 }
 
+function requireHumanToolApprovalAuthority(authorization: AccessGrantAuthorization): void {
+  // Native OAuth dispatch resolves the owning person's live access and binds
+  // proof to the exact authorization object. Service/header claims cannot mint it.
+  if (
+    !authorization.canonicalManagedHumanSession &&
+    !authorization.canonicalLocalHumanSession &&
+    !isVerifiedDelegatedHumanAuthorization(authorization)
+  ) {
+    throw new HTTPException(403, {
+      message: "canonical human session required for tool approval",
+    });
+  }
+}
+
 export async function prepareWorkspaceToolGateway(
   routeDeps: ApiRouteDeps,
   authorization: AccessGrantAuthorization,
@@ -616,7 +630,7 @@ export function buildWorkspaceToolGatewayMcpServer(
 
 export async function callWorkspaceToolGateway(
   prepared: PreparedWorkspaceToolGateway,
-  grant: AccessGrant,
+  authorization: AccessGrantAuthorization,
   input: unknown,
   db?: ApiRouteDeps["db"],
   consumeApproval: typeof consumeToolGatewayApproval = consumeToolGatewayApproval,
@@ -624,6 +638,10 @@ export async function callWorkspaceToolGateway(
   authorizeSiteTool: AuthorizeWorkspaceSiteTool = requireWorkspaceSiteToolAuthorization,
   resolveOrigin: typeof resolveSiteSessionOrigin = resolveSiteSessionOrigin,
 ) {
+  const grant = requireResolvedAccessGrantAuthorization(
+    authorization,
+    authorization.grant.workspaceId,
+  );
   const request = ToolGatewayCallRequest.parse(input);
   const operationId = request.operationId ?? crypto.randomUUID();
   const entry = prepared.toolGatewayCatalog.entries.find(
@@ -661,13 +679,14 @@ export async function callWorkspaceToolGateway(
         arguments: request.arguments,
         caller: { kind: "http", subjectId: grant.subjectId },
       },
-      { transportMeta },
+      { transportMeta, authorizeApproval: () => requireHumanToolApprovalAuthority(authorization) },
     );
     await prepared.reauthorize?.();
     let approvalConfirmed = false;
     const approvalRequired =
       preparedCall.approvalDecision === "ask" ||
       (preparedCall.approvalDecision === undefined && preparedCall.entry.approval === "human");
+    if (approvalRequired) requireHumanToolApprovalAuthority(authorization);
     if (approvalRequired && request.approvalToken && db) {
       approvalConfirmed = await consumeApproval(db, {
         tokenHash: hashOpaqueValue(request.approvalToken),
@@ -712,12 +731,16 @@ export async function callWorkspaceToolGateway(
 
 export async function approveWorkspaceToolGatewayCall(
   prepared: PreparedWorkspaceToolGateway,
-  grant: AccessGrant,
+  authorization: AccessGrantAuthorization,
   db: ApiRouteDeps["db"],
   input: unknown,
   issueApproval: typeof issueToolGatewayApproval = issueToolGatewayApproval,
   observability?: Observability,
 ) {
+  const grant = requireResolvedAccessGrantAuthorization(
+    authorization,
+    authorization.grant.workspaceId,
+  );
   const request = ToolGatewayApprovalRequest.parse(input);
   let preparedCall: PreparedToolGatewayCall;
   try {
@@ -730,7 +753,10 @@ export async function approveWorkspaceToolGatewayCall(
         arguments: request.arguments,
         caller: { kind: "http", subjectId: grant.subjectId },
       },
-      { transportMeta: { approvalConfirmed: true } },
+      {
+        transportMeta: { approvalConfirmed: true },
+        authorizeApproval: () => requireHumanToolApprovalAuthority(authorization),
+      },
     );
   } catch (error) {
     throwWorkspaceToolGatewayHttpError(error);
@@ -741,6 +767,7 @@ export async function approveWorkspaceToolGatewayCall(
   ) {
     throw new HTTPException(422, { message: "tool_does_not_require_human_approval" });
   }
+  requireHumanToolApprovalAuthority(authorization);
   const observation = startWorkspaceToolGatewayObservation(observability, {
     adapter: "http",
     operation: "approval",

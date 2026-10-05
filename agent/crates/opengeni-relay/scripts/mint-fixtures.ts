@@ -27,6 +27,7 @@ const viewerId = "33333333-3333-4333-8333-333333333333";
 const agentId = "44444444-4444-4444-8444-444444444444";
 const leaseEpoch = 7;
 const port = 7681;
+const channelId = "cross-stack-channel";
 
 const ogs = await signStreamToken(secret, {
   workspaceId,
@@ -35,6 +36,8 @@ const ogs = await signStreamToken(secret, {
   leaseEpoch,
   mode: "view",
   port,
+  agentId,
+  channelId,
   exp,
 });
 const ogr = await signRelayToken(secret, { workspaceId, agentId, exp });
@@ -56,6 +59,7 @@ const body = [
   `agentId=${agentId}`,
   `leaseEpoch=${leaseEpoch}`,
   `port=${port}`,
+  `channelId=${channelId}`,
   `ogs=${ogs}`,
   `ogr=${ogr}`,
   "",

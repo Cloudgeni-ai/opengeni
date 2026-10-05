@@ -258,7 +258,7 @@ describe("managed organization onboarding", () => {
       { settings, db: client.db, managedAuth: {} } as never,
       {
         accountSetupLimiter: new PublicSetupRateLimiter({
-          globalCapacity: 1,
+          globalCapacity: 10,
           globalRefillPerSecond: 0,
           clientCapacity: 1,
           clientRefillPerSecond: 0,
@@ -280,7 +280,11 @@ describe("managed organization onboarding", () => {
       (
         await limitedApp.request("/v1/auth/organization-setup", {
           method: "POST",
-          headers: { "content-type": "application/json" },
+          headers: {
+            "content-type": "application/json",
+            "x-forwarded-for": "203.0.113.7",
+            "x-real-ip": "198.51.100.8",
+          },
           body: limitedBody,
         })
       ).status,
@@ -289,7 +293,11 @@ describe("managed organization onboarding", () => {
       (
         await limitedApp.request("/v1/auth/organization-setup", {
           method: "POST",
-          headers: { "content-type": "application/json" },
+          headers: {
+            "content-type": "application/json",
+            "x-forwarded-for": "192.0.2.99",
+            "x-real-ip": "192.0.2.100",
+          },
           body: limitedBody,
         })
       ).status,

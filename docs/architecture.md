@@ -1250,9 +1250,16 @@ behind a generic 500, so its session lookups run through
 edge. `agent/proto/opengeni_agent.proto` is the single wire source, generated to
 Rust and `@opengeni/agent-proto` TypeScript types.
 
-One agent independently connects multiple deployments/workspaces within shared
-host containment. The relay carries terminal/desktop bytes, never durable session
-or lease state. Install `latest` may serve baked binaries; pinned versions resolve
+One agent connects independently to multiple deployments and workspaces within
+shared host containment. The relay carries terminal/desktop bytes, not durable
+session or lease state. Viewer tokens bind the workspace, agent, channel, and port.
+Desktop input requires API/relay flags, `stream:control`, owner consent, and port
+6080; PTY typing and PTY Close require a control token minted by
+`terminal:attach`, independently of desktop-control flags. View tokens cannot
+terminate a PTY. Capture-channel view clients retain Close for capture cleanup.
+Forwarding and Close are fenced to the current connection generation; a replaced
+socket cannot send input, add replay frames, or terminate its replacement.
+Install `latest` may serve baked binaries; version pins resolve
 binaries/signatures from the immutable release archive.
 
 Canonical: [`../agent/README.md`](../agent/README.md) and

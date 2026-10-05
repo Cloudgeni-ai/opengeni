@@ -53,7 +53,10 @@ export type ToolGatewayExecutionContext = {
 export type ToolGatewayCallContext = Pick<
   ToolGatewayExecutionContext,
   "sourceCallId" | "transportMeta" | "signal"
->;
+> & {
+  /** Trusted adapter authority for a resolved Ask, checked before provider preparation. */
+  authorizeApproval?: () => Promise<void> | void;
+};
 
 export type ToolGatewayDefinition = Omit<ToolGatewayCatalogEntryValue, "codemodePath"> & {
   /** Optional human-readable path. Unsafe/colliding segments are normalized. */
@@ -304,6 +307,7 @@ export class ToolGateway {
       throw new ToolGatewayApprovalRequiredError();
     }
     if (approvalDecision === "ask") {
+      await context.authorizeApproval?.();
       await measureMcpPhase("preflight", () =>
         definition.preflightCall?.({
           call,

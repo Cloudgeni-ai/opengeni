@@ -1,9 +1,18 @@
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
-import { describe, expect, test } from "bun:test";
+import { describe, expect, spyOn, test } from "bun:test";
 import type { MCPServer } from "@openai/agents";
 import { IntegrationInvocationError } from "@opengeni/capabilities";
-import type { AccessGrant } from "@opengeni/contracts";
+import type { AccessContext, AccessGrant } from "@opengeni/contracts";
+import {
+  accessGrantAuthorizationFromContext,
+  requireAccessGrantAuthorization,
+  stampDelegatedHumanAuthorization,
+  isVerifiedDelegatedHumanAuthorization,
+  type AccessGrantAuthorization,
+} from "@opengeni/core";
+import * as opengeniDb from "@opengeni/db";
+import { Hono } from "hono";
 import type { Settings } from "@opengeni/config";
 import {
   ToolGatewayApprovalOperationStartedError,
@@ -84,11 +93,32 @@ function grant(overrides: Partial<AccessGrant> = {}): AccessGrant {
   };
 }
 
+function resolvedAuthorization(
+  access: AccessGrant = grant(),
+  canonicalHumanSession = false,
+): AccessGrantAuthorization {
+  const context: AccessContext = {
+    mode: "managed",
+    subjectId: access.subjectId,
+    accountGrants: [{ accountId: access.accountId, subjectId: access.subjectId, permissions: [] }],
+    workspaceGrants: [access],
+    defaultAccountId: access.accountId,
+    defaultWorkspaceId: access.workspaceId,
+  };
+  const authorization = accessGrantAuthorizationFromContext(context, access);
+  // The cookie/local-session provenance set is private to @opengeni/core. Set
+  // its output bit here to exercise the gateway's trusted resolver boundary.
+  if (canonicalHumanSession) authorization.canonicalManagedHumanSession = true;
+  return authorization;
+}
+
 function preparedGateway(
   calls: Array<{ kind: string; argumentsValue: Record<string, unknown> }>,
   approval: "human" | "none" = "none",
   options: {
     authorize?: ToolGatewayAuthorization;
+    resolveApproval?: () => "allow" | "ask" | "block";
+    onLifecycle?: () => void;
     onPreflight?: () => void;
     onExecute?: (context: { transportMeta?: Record<string, unknown> | null }) => void;
     executeError?: unknown;
@@ -126,6 +156,15 @@ function preparedGateway(
               },
             }
           : {}),
+        ...(options.onLifecycle
+          ? {
+              lifecycle: {
+                prepare: () => {
+                  options.onLifecycle?.();
+                },
+              },
+            }
+          : {}),
         execute: async (argumentsValue, context) => {
           options.onExecute?.(context);
           calls.push({ kind: context.caller.kind, argumentsValue });
@@ -140,6 +179,7 @@ function preparedGateway(
     requireApproval: (entry, _caller, context) =>
       entry.approval === "human" && context.transportMeta?.approvalConfirmed !== true,
     ...(options.authorize ? { authorize: options.authorize } : {}),
+    ...(options.resolveApproval ? { resolveApproval: options.resolveApproval } : {}),
   });
   return {
     toolGateway: gateway,
@@ -255,14 +295,14 @@ describe("workspace tool gateway adapters", () => {
         client.callTool({ name: "opengeni__session_create", arguments: {} }),
       ).rejects.toThrow("Tool is not present in the active gateway catalog");
 
-      await callWorkspaceToolGateway(prepared, access, {
+      await callWorkspaceToolGateway(prepared, resolvedAuthorization(access), {
         operationId: "33333333-3333-4333-8333-333333333333",
         catalogDigest: prepared.toolGatewayCatalog.digest,
         identity: { serverId: "files", toolName: "files_get_download_url" },
         arguments: {},
       });
       await expect(
-        callWorkspaceToolGateway(prepared, access, {
+        callWorkspaceToolGateway(prepared, resolvedAuthorization(access), {
           operationId: "44444444-4444-4444-8444-444444444444",
           catalogDigest: prepared.toolGatewayCatalog.digest,
           identity: { serverId: "opengeni", toolName: "session_create" },
@@ -290,7 +330,7 @@ describe("workspace tool gateway adapters", () => {
       if (revoked) throw new HTTPException(403, { message: "authority revoked" });
     };
     await expect(
-      callWorkspaceToolGateway(prepared, grant(), {
+      callWorkspaceToolGateway(prepared, resolvedAuthorization(grant(), true), {
         operationId: "33333333-3333-4333-8333-333333333333",
         catalogDigest: prepared.toolGatewayCatalog.digest,
         identity: { serverId: "inventory", toolName: "lookup" },
@@ -336,7 +376,7 @@ describe("workspace tool gateway adapters", () => {
       });
       expect(mcpResponse).toMatchObject({ structuredContent: { count: 7 } });
 
-      const response = await callWorkspaceToolGateway(prepared, access, {
+      const response = await callWorkspaceToolGateway(prepared, resolvedAuthorization(access), {
         operationId: "33333333-3333-4333-8333-333333333333",
         catalogDigest: prepared.toolGatewayCatalog.digest,
         identity: { serverId: "inventory", toolName: "lookup" },
@@ -375,13 +415,13 @@ describe("workspace tool gateway adapters", () => {
       outcomeUnknown: true,
       details: { code: "tool_outcome_unknown", providerCode: "request_timeout" },
     };
-    await expect(callWorkspaceToolGateway(prepared, grant(), request)).rejects.toMatchObject(
-      expected,
-    );
+    await expect(
+      callWorkspaceToolGateway(prepared, resolvedAuthorization(grant()), request),
+    ).rejects.toMatchObject(expected);
     await expect(
       callWorkspaceToolGateway(
         prepared,
-        grant(),
+        resolvedAuthorization(grant()),
         {
           ...request,
           siteArtifactId: "44444444-4444-4444-8444-444444444444",
@@ -428,7 +468,7 @@ describe("workspace tool gateway adapters", () => {
       arguments: { sku: "SKU-1" },
     };
     await expect(
-      callWorkspaceToolGateway(prepared, access, {
+      callWorkspaceToolGateway(prepared, resolvedAuthorization(access), {
         ...base,
         catalogDigest: "a".repeat(64),
       }),
@@ -439,7 +479,7 @@ describe("workspace tool gateway adapters", () => {
       details: { code: "catalog_stale" },
     });
     await expect(
-      callWorkspaceToolGateway(prepared, access, {
+      callWorkspaceToolGateway(prepared, resolvedAuthorization(access), {
         ...base,
         identity: { serverId: "inventory", toolName: "missing" },
       }),
@@ -448,7 +488,7 @@ describe("workspace tool gateway adapters", () => {
     await expect(
       callWorkspaceToolGateway(
         prepared,
-        access,
+        resolvedAuthorization(access),
         {
           ...base,
           operationId: "33333333-3333-4333-8333-333333333333",
@@ -474,7 +514,7 @@ describe("workspace tool gateway adapters", () => {
       },
     });
     expect(consumedInvalidApproval).toBe(false);
-    const mistyped = await callWorkspaceToolGateway(prepared, access, {
+    const mistyped = await callWorkspaceToolGateway(prepared, resolvedAuthorization(access), {
       ...base,
       operationId: "44444444-4444-4444-8444-444444444444",
       arguments: { sku: 12345, note: "synthetic-note-value" },
@@ -491,6 +531,102 @@ describe("workspace tool gateway adapters", () => {
     expect(JSON.stringify(mistyped?.details)).not.toContain("12345");
   });
 
+  test("verified native OAuth humans retain single-use tool approvals; cloned proof is rejected", async () => {
+    const access = grant();
+    const context: AccessContext = {
+      mode: "managed",
+      subjectId,
+      accountGrants: [{ accountId, subjectId, permissions: ["account:read"] }],
+      workspaceGrants: [access],
+      defaultAccountId: accountId,
+      defaultWorkspaceId: workspaceId,
+    };
+    const profiles = spyOn(opengeniDb, "getManagedUserProfilesByIds").mockResolvedValue([
+      { id: "workspace-tool-gateway-test", name: "Native person", email: "human@example.test" },
+    ]);
+    const native = spyOn(opengeniDb, "ensureManagedAccessForUser").mockImplementation(async () =>
+      structuredClone(context),
+    );
+    let authorization: AccessGrantAuthorization | undefined;
+    try {
+      const app = new Hono();
+      app.get("/", async (c) => {
+        authorization = await requireAccessGrantAuthorization(
+          c,
+          {
+            db: {} as never,
+            settings: testSettings({ productAccessMode: "managed" }),
+          },
+          workspaceId,
+          "workspace:read",
+        );
+        return c.text("resolved");
+      });
+      const request = new Request("http://test/");
+      stampDelegatedHumanAuthorization(request, {
+        organizationId: accountId,
+        subjectId,
+        permissions: ["workspace:read"],
+        workspaceScope: { kind: "selected", workspaceIds: [workspaceId] },
+      });
+      expect((await app.fetch(request)).status).toBe(200);
+      if (!authorization) throw new Error("Native authorization missing");
+      expect(isVerifiedDelegatedHumanAuthorization(authorization, request)).toBe(true);
+      expect(authorization.canonicalManagedHumanSession).toBe(false);
+      const calls: Array<{ kind: string; argumentsValue: Record<string, unknown> }> = [];
+      const prepared = preparedGateway(calls, "human", { onPreflight: () => {} });
+      const operation = {
+        operationId: crypto.randomUUID(),
+        catalogDigest: prepared.toolGatewayCatalog.digest,
+        identity: { serverId: "inventory", toolName: "lookup" },
+        arguments: { sku: "OAUTH-HUMAN" },
+      };
+      let issued = false;
+      const approved = await approveWorkspaceToolGatewayCall(
+        prepared,
+        authorization,
+        {} as never,
+        operation,
+        async () => {
+          issued = true;
+        },
+      );
+      expect(issued).toBe(true);
+      await expect(
+        approveWorkspaceToolGatewayCall(
+          prepared,
+          { ...authorization },
+          {} as never,
+          operation,
+          async () => {
+            throw new Error("cloned proof must not issue");
+          },
+        ),
+      ).rejects.toMatchObject({ status: 403 });
+      let consumed = false;
+      const execute = () =>
+        callWorkspaceToolGateway(
+          prepared,
+          authorization!,
+          { ...operation, approvalToken: approved.approvalToken },
+          {} as never,
+          async () => {
+            if (consumed) return false;
+            consumed = true;
+            return true;
+          },
+        );
+      await expect(execute()).resolves.toMatchObject({
+        result: { structuredContent: { count: 7 } },
+      });
+      await expect(execute()).rejects.toMatchObject({ status: 409 });
+      expect(calls).toHaveLength(1);
+    } finally {
+      profiles.mockRestore();
+      native.mockRestore();
+    }
+  });
+
   test("issues an opaque approval capability bound to the exact operation", async () => {
     const order: string[] = [];
     const prepared = preparedGateway([], "human", {
@@ -505,7 +641,7 @@ describe("workspace tool gateway adapters", () => {
     const issued: unknown[] = [];
     const response = await approveWorkspaceToolGatewayCall(
       prepared,
-      access,
+      resolvedAuthorization(access, true),
       {} as never,
       {
         operationId: "33333333-3333-4333-8333-333333333333",
@@ -538,7 +674,7 @@ describe("workspace tool gateway adapters", () => {
     await expect(
       approveWorkspaceToolGatewayCall(
         prepared,
-        grant(),
+        resolvedAuthorization(grant(), true),
         {} as never,
         {
           operationId: "33333333-3333-4333-8333-333333333333",
@@ -564,7 +700,7 @@ describe("workspace tool gateway adapters", () => {
     await expect(
       approveWorkspaceToolGatewayCall(
         prepared,
-        grant(),
+        resolvedAuthorization(grant(), true),
         {} as never,
         {
           operationId: "33333333-3333-4333-8333-333333333333",
@@ -587,7 +723,7 @@ describe("workspace tool gateway adapters", () => {
     await expect(
       approveWorkspaceToolGatewayCall(
         prepared,
-        grant(),
+        resolvedAuthorization(grant(), true),
         {} as never,
         {
           operationId,
@@ -638,14 +774,16 @@ describe("workspace tool gateway adapters", () => {
       arguments: { sku: "HUMAN-1" },
     };
 
-    await expect(callWorkspaceToolGateway(prepared, access, request)).rejects.toMatchObject({
+    await expect(
+      callWorkspaceToolGateway(prepared, resolvedAuthorization(access, true), request),
+    ).rejects.toMatchObject({
       status: 409,
     });
 
     const consumed: unknown[] = [];
     const response = await callWorkspaceToolGateway(
       prepared,
-      access,
+      resolvedAuthorization(access, true),
       { ...request, approvalToken: `ogta_${"a".repeat(43)}` },
       {} as never,
       async (_db, input) => {
@@ -687,7 +825,7 @@ describe("workspace tool gateway adapters", () => {
     await expect(
       callWorkspaceToolGateway(
         prepared,
-        grant(),
+        resolvedAuthorization(grant()),
         { ...request, approvalToken: `ogta_${"a".repeat(43)}` },
         {} as never,
         async () => {
@@ -700,9 +838,15 @@ describe("workspace tool gateway adapters", () => {
 
     let issueCalls = 0;
     await expect(
-      approveWorkspaceToolGatewayCall(prepared, grant(), {} as never, request, async () => {
-        issueCalls += 1;
-      }),
+      approveWorkspaceToolGatewayCall(
+        prepared,
+        resolvedAuthorization(grant()),
+        {} as never,
+        request,
+        async () => {
+          issueCalls += 1;
+        },
+      ),
     ).rejects.toMatchObject({ status: 403 });
     expect(issueCalls).toBe(0);
   });
@@ -725,7 +869,7 @@ describe("workspace tool gateway adapters", () => {
     await expect(
       callWorkspaceToolGateway(
         prepared,
-        grant(),
+        resolvedAuthorization(grant()),
         { ...request, approvalToken: `ogta_${"a".repeat(43)}` },
         {} as never,
         async () => {
@@ -738,17 +882,180 @@ describe("workspace tool gateway adapters", () => {
 
     let issueCalls = 0;
     await expect(
-      approveWorkspaceToolGatewayCall(prepared, grant(), {} as never, request, async () => {
-        issueCalls += 1;
-      }),
+      approveWorkspaceToolGatewayCall(
+        prepared,
+        resolvedAuthorization(grant()),
+        {} as never,
+        request,
+        async () => {
+          issueCalls += 1;
+        },
+      ),
     ).rejects.toMatchObject({ status: 403 });
     expect(issueCalls).toBe(0);
+  });
+
+  test("denies organization service API keys from issuing human approvals", async () => {
+    let preflightCalls = 0;
+    const prepared = preparedGateway([], "human", {
+      onPreflight: () => {
+        preflightCalls += 1;
+      },
+    });
+    const serviceAuthorization = resolvedAuthorization(
+      grant({ subjectId: "api_key:org-service", principalKind: "api_key" }),
+    );
+    let issueCalls = 0;
+
+    await expect(
+      approveWorkspaceToolGatewayCall(
+        prepared,
+        serviceAuthorization,
+        {} as never,
+        {
+          operationId: "33333333-3333-4333-8333-333333333333",
+          catalogDigest: prepared.toolGatewayCatalog.digest,
+          identity: { serverId: "inventory", toolName: "lookup" },
+          arguments: { sku: "SERVICE-ISSUE-1" },
+        },
+        async () => {
+          issueCalls += 1;
+        },
+      ),
+    ).rejects.toMatchObject({ status: 403 });
+
+    expect(issueCalls).toBe(0);
+    expect(preflightCalls).toBe(0);
+  });
+
+  test("denies organization service API keys from consuming human approvals", async () => {
+    const calls: Array<{ kind: string; argumentsValue: Record<string, unknown> }> = [];
+    let preflightCalls = 0;
+    const prepared = preparedGateway(calls, "human", {
+      onPreflight: () => {
+        preflightCalls += 1;
+      },
+    });
+    const serviceAuthorization = resolvedAuthorization(
+      grant({ subjectId: "api_key:org-service", principalKind: "api_key" }),
+    );
+    let consumeCalls = 0;
+
+    await expect(
+      callWorkspaceToolGateway(
+        prepared,
+        serviceAuthorization,
+        {
+          operationId: "33333333-3333-4333-8333-333333333333",
+          catalogDigest: prepared.toolGatewayCatalog.digest,
+          identity: { serverId: "inventory", toolName: "lookup" },
+          arguments: { sku: "SERVICE-CONSUME-1" },
+          approvalToken: `ogta_${"a".repeat(43)}`,
+        },
+        {} as never,
+        async () => {
+          consumeCalls += 1;
+          return true;
+        },
+      ),
+    ).rejects.toMatchObject({ status: 403 });
+
+    expect(consumeCalls).toBe(0);
+    expect(calls).toEqual([]);
+    expect(preflightCalls).toBe(0);
+  });
+
+  test("allows explicit policy Allow for a service caller despite a human recommendation", async () => {
+    const calls: Array<{ kind: string; argumentsValue: Record<string, unknown> }> = [];
+    const prepared = preparedGateway(calls, "human", { resolveApproval: () => "allow" });
+    const authorization = resolvedAuthorization(
+      grant({ subjectId: "api_key:org-service", principalKind: "api_key" }),
+    );
+    const result = await callWorkspaceToolGateway(prepared, authorization, {
+      operationId: "33333333-3333-4333-8333-333333333333",
+      catalogDigest: prepared.toolGatewayCatalog.digest,
+      identity: { serverId: "inventory", toolName: "lookup" },
+      arguments: { sku: "EXPLICIT-ALLOW" },
+    });
+    expect(result.result).toMatchObject({ structuredContent: { count: 7 } });
+    expect(calls).toHaveLength(1);
+  });
+
+  for (const operation of ["call", "approve"] as const) {
+    test(`denies resolved Ask before preflight and lifecycle for service ${operation}`, async () => {
+      const calls: Array<{ kind: string; argumentsValue: Record<string, unknown> }> = [];
+      let preflightCalls = 0;
+      let lifecycleCalls = 0;
+      let capabilityCalls = 0;
+      const prepared = preparedGateway(calls, "none", {
+        resolveApproval: () => "ask",
+        onPreflight: () => {
+          preflightCalls += 1;
+        },
+        onLifecycle: () => {
+          lifecycleCalls += 1;
+        },
+      });
+      const authorization = resolvedAuthorization(
+        grant({ subjectId: "api_key:org-service", principalKind: "api_key" }),
+      );
+      const request = {
+        operationId: "33333333-3333-4333-8333-333333333333",
+        catalogDigest: prepared.toolGatewayCatalog.digest,
+        identity: { serverId: "inventory", toolName: "lookup" },
+        arguments: { sku: "RESOLVED-ASK" },
+      };
+      const pending =
+        operation === "call"
+          ? callWorkspaceToolGateway(
+              prepared,
+              authorization,
+              { ...request, approvalToken: `ogta_${"a".repeat(43)}` },
+              {} as never,
+              async () => {
+                capabilityCalls += 1;
+                return true;
+              },
+            )
+          : approveWorkspaceToolGatewayCall(
+              prepared,
+              authorization,
+              {} as never,
+              request,
+              async () => {
+                capabilityCalls += 1;
+              },
+            );
+      await expect(pending).rejects.toMatchObject({ status: 403 });
+      expect(preflightCalls).toBe(0);
+      expect(lifecycleCalls).toBe(0);
+      expect(capabilityCalls).toBe(0);
+      expect(calls).toHaveLength(0);
+    });
+  }
+
+  test("allows an authorized organization service API key to call a non-approval tool", async () => {
+    const calls: Array<{ kind: string; argumentsValue: Record<string, unknown> }> = [];
+    const prepared = preparedGateway(calls);
+    const serviceAuthorization = resolvedAuthorization(
+      grant({ subjectId: "api_key:org-service", principalKind: "api_key" }),
+    );
+
+    const response = await callWorkspaceToolGateway(prepared, serviceAuthorization, {
+      operationId: "33333333-3333-4333-8333-333333333333",
+      catalogDigest: prepared.toolGatewayCatalog.digest,
+      identity: { serverId: "inventory", toolName: "lookup" },
+      arguments: { sku: "SERVICE-CALL-1" },
+    });
+
+    expect(response.result).toMatchObject({ structuredContent: { count: 7 } });
+    expect(calls).toEqual([{ kind: "http", argumentsValue: { sku: "SERVICE-CALL-1" } }]);
   });
 
   test("returns a typed retryable conflict when approval uses a stale catalog", async () => {
     const prepared = preparedGateway([], "human");
     await expect(
-      approveWorkspaceToolGatewayCall(prepared, grant(), {} as never, {
+      approveWorkspaceToolGatewayCall(prepared, resolvedAuthorization(grant()), {} as never, {
         operationId: "33333333-3333-4333-8333-333333333333",
         catalogDigest: "a".repeat(64),
         identity: { serverId: "inventory", toolName: "lookup" },
@@ -799,7 +1106,7 @@ describe("workspace tool gateway adapters", () => {
     await expect(
       callWorkspaceToolGateway(
         prepared,
-        access,
+        resolvedAuthorization(access, true),
         request,
         {} as never,
         async () => false,

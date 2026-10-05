@@ -210,6 +210,9 @@ export async function beginManagedAuthLoginTransaction(
   },
 ): Promise<ManagedAuthLoginTransactionType> {
   try {
+    // The database owns the ten-minute lease ceiling. A slightly faster API
+    // clock must not turn an otherwise valid issuance into an invalid request;
+    // the routine returns the exact clamped expiry that it persisted.
     const value = (await oneJson(
       db,
       sql`select managed_auth_session_set_begin_transaction(
@@ -219,7 +222,10 @@ export async function beginManagedAuthLoginTransaction(
           ${input.transactionId}::uuid, ${input.expectedActorEpoch}::bigint,
           ${input.transactionSecretHash}, ${input.kind},
           ${input.targetSlotId}::uuid, ${input.returnIntentId}::uuid,
-          ${input.returnPath}, ${input.expiresAt.toISOString()}::timestamptz
+          ${input.returnPath}, least(
+            ${input.expiresAt.toISOString()}::timestamptz,
+            pg_catalog.clock_timestamp() + interval '10 minutes'
+          )
         ) as result`,
     )) as { expiresAt?: unknown } | null;
     return ManagedAuthLoginTransaction.parse({

@@ -190,6 +190,66 @@ describe("exposeStreamPort — coherent {url,token,expiresAt} + the token verifi
     expect(claims?.exp).toBe(nowSeconds + 120);
   });
 
+  test("binds self-hosted relay tokens to their exact channel and granted input mode", async () => {
+    const nowSeconds = 1_700_000_000;
+    const result = await exposeStreamPort(
+      fakeSession({
+        host: "relay.example",
+        port: 443,
+        tls: true,
+        path: "/stream",
+        query: `ws=${baseInput.workspaceId}&agent=agent-7&port=6080&channel=ch-123-4`,
+      }),
+      { ...baseInput, mode: "control", nowSeconds },
+    );
+
+    const claims = await verifyStreamToken(SECRET, result.token, nowSeconds);
+    expect(claims?.mode).toBe("control");
+    expect(claims?.agentId).toBe("agent-7");
+    expect(claims?.channelId).toBe("ch-123-4");
+  });
+
+  test("rejects incomplete, duplicate, or mismatched relay channel keys", async () => {
+    await expect(
+      exposeStreamPort(
+        fakeSession({
+          host: "relay.example",
+          port: 443,
+          tls: true,
+          path: "/stream",
+          query: `ws=${baseInput.workspaceId}&agent=agent-7&port=6080`,
+        }),
+        baseInput,
+      ),
+    ).rejects.toBeInstanceOf(StreamPortUnavailableError);
+
+    await expect(
+      exposeStreamPort(
+        fakeSession({
+          host: "relay.example",
+          port: 443,
+          tls: true,
+          path: "/stream",
+          query: `ws=${baseInput.workspaceId}&agent=agent-7&port=6080&channel=a&channel=b`,
+        }),
+        baseInput,
+      ),
+    ).rejects.toBeInstanceOf(StreamPortUnavailableError);
+
+    await expect(
+      exposeStreamPort(
+        fakeSession({
+          host: "relay.example",
+          port: 443,
+          tls: true,
+          path: "/stream",
+          query: "ws=99999999-9999-4999-8999-999999999999&agent=agent-7&port=6080&channel=ch-123-4",
+        }),
+        baseInput,
+      ),
+    ).rejects.toBeInstanceOf(StreamPortUnavailableError);
+  });
+
   test("the minted token is fenced to the epoch (a different epoch token does not share claims)", async () => {
     const a = await exposeStreamPort(fakeSession({ host: "h", port: 443, tls: true }), {
       ...baseInput,

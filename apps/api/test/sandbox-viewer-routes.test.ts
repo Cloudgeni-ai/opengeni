@@ -94,6 +94,30 @@ describe("P1.4 viewer/stream-capabilities route discipline", () => {
     expect(gate.slice(0, 400)).toContain("HTTPException(404");
     expect(gate.slice(0, 400)).toContain("sandboxOwnershipEnabled");
   });
+
+  test("terminal control derives from terminal:attach while desktop stays on stream:control", () => {
+    // PTY frames ARE keystrokes: the relay drops a view-mode token's input, so
+    // the API must mint mode:"control" whenever the interactive grant
+    // (terminal:attach, already required for the terminal plane) was held.
+    const body = handlerBody(
+      sessionsRoute,
+      "post",
+      "/v1/workspaces/:workspaceId/sessions/:sessionId/viewers",
+    );
+    const desktopGate = body.indexOf("const desktopCanControl");
+    const terminalGate = body.indexOf("const terminalCanControl");
+    expect(desktopGate).toBeGreaterThanOrEqual(0);
+    expect(terminalGate).toBeGreaterThan(desktopGate);
+    expect(body.slice(desktopGate, terminalGate)).toContain(
+      "accessIncludesControl: accessIncludesStreamControl",
+    );
+    expect(body.slice(terminalGate)).toContain('"terminal:attach"');
+    expect(body.slice(terminalGate)).toContain("canControl: terminalCanControl");
+    // The terminal grant must not be folded into the desktop rollout flag:
+    // an authorized terminal:attach user keeps PTY typing when the flag is off.
+    expect(body.slice(terminalGate)).not.toContain("streamControlEnabled");
+    expect(body.slice(terminalGate)).not.toContain("shouldGrantStreamControl");
+  });
 });
 
 describe("P1.4 capability negotiation read returns a coherent SessionCapabilities", () => {

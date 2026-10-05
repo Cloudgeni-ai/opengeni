@@ -47,6 +47,9 @@ export interface MockAgentResponderOptions {
   exec?: MockExecHandler;
   /** The hostname the mock reports (so PTY `$HOSTNAME`-style asserts work). */
   hostname?: string;
+  /** Model a pre-M8b agent: `desktopEnsure`/`ptyOpen` return no channel
+   *  descriptor, so the session must refuse to fabricate a routing key. */
+  omitStreamChannel?: boolean;
 }
 
 /**
@@ -59,6 +62,7 @@ export class MockAgentResponder implements ControlRpc {
   private online: boolean;
   private readonly consented: boolean;
   private readonly draining: boolean;
+  private readonly omitStreamChannel: boolean;
   private readonly files = new Map<string, Uint8Array>();
   private readonly execHandler: MockExecHandler;
   readonly hostname: string;
@@ -70,6 +74,7 @@ export class MockAgentResponder implements ControlRpc {
     this.online = opts.online ?? true;
     this.consented = opts.consented ?? true;
     this.draining = opts.draining ?? false;
+    this.omitStreamChannel = opts.omitStreamChannel ?? false;
     this.hostname = opts.hostname ?? "mock-machine";
     this.execHandler = opts.exec ?? ((req) => defaultEcho(req, this.hostname));
     for (const [path, content] of Object.entries(opts.files ?? {})) {
@@ -212,13 +217,15 @@ export class MockAgentResponder implements ControlRpc {
         return ok(req.requestId, {
           $case: "desktopEnsure",
           desktopEnsure: {
-            channel: {
-              channelId: "mock-desktop",
-              workspaceId,
-              agentId,
-              kind: 1,
-              port: 6080,
-            },
+            channel: this.omitStreamChannel
+              ? undefined
+              : {
+                  channelId: "mock-desktop",
+                  workspaceId,
+                  agentId,
+                  kind: 1,
+                  port: 6080,
+                },
             display: { id: ":99", width: 1024, height: 768, virtual: true },
           },
         });
@@ -231,7 +238,9 @@ export class MockAgentResponder implements ControlRpc {
           $case: "ptyOpen",
           ptyOpen: {
             ptyId: "mock-pty",
-            channel: { channelId: "mock-pty", workspaceId, agentId, kind: 1, port: 7681 },
+            channel: this.omitStreamChannel
+              ? undefined
+              : { channelId: "mock-pty", workspaceId, agentId, kind: 1, port: 7681 },
           },
         });
       }
