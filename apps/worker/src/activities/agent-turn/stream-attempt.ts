@@ -78,11 +78,8 @@ import {
   generatedImageFromSdkEvent,
   isCompletedGeneratedImageSdkEvent,
 } from "../generated-images";
-import {
-  programmaticApproval,
-  programmaticContinuationNote,
-  recoverProgrammaticOperationsBeforeFirstRequest,
-} from "../programmatic-approvals";
+import { programmaticApproval, programmaticContinuationNote } from "../programmatic-approvals";
+import { CodemodeAttemptDispatcher } from "../codemode-dispatcher";
 import { ToolResultSpill } from "./tool-result-spill";
 import { ownedTurnSandboxForAgent } from "./turn-sandbox-access";
 import { createTurnCredentialLeases } from "./credential-leases";
@@ -1964,44 +1961,26 @@ export async function runTurnStreamAttempt(
 
   // Recover committed waits/results before any model dispatch, including crash replacement.
   // A new attempt uses its own signed caller; origin provenance never changes.
-  // Lazy MCP preparation is never awaited unless stored work must resume.
-  // Measured as its own startup phase so a first-request barrier cannot hide.
-  const programmaticRecoveryStartedAt = performance.now();
-  let programmaticRecoveryOutcome: "completed" | "failed" = "failed";
-  const codemodeOperations = await recoverProgrammaticOperationsBeforeFirstRequest({
-    approvalDecisionId:
-      trigger.type === "user.approvalDecision"
-        ? (trigger.payload as { approvalId: string }).approvalId
-        : undefined,
-    hasUnfinishedOperations: async () =>
-      (
-        await listTurnCodemodeApprovals(db, {
-          accountId: input.accountId,
-          workspaceId: input.workspaceId,
-          sessionId: input.sessionId,
-          turnId: activeTurnId,
-        })
-      ).length > 0,
-    toolPreparationReady: eventing.toolPreparationReady,
-    resumeApproved: (decisionOperationId) =>
-      eventing.codemodeDispatcher?.resumeApproved(
-        `sandbox:${input.attemptId}`,
-        decisionOperationId,
-      ),
-  })
-    .then((operations) => {
-      programmaticRecoveryOutcome = "completed";
-      return operations;
-    })
-    .finally(() => {
-      recordTurnStartupPhase(observability, {
-        phase: "programmatic_operation_recovery",
-        provider: turnExecutionPolicy.providerId,
-        backend: activeSandboxBackend ?? groupBoxBackend,
-        outcome: programmaticRecoveryOutcome,
-        durationSeconds: (performance.now() - programmaticRecoveryStartedAt) / 1_000,
-      });
-    });
+  // Join-on-use: lazy MCP preparation is awaited only when stored work must resume.
+  const codemodeOperations = await CodemodeAttemptDispatcher.resumeApproved(
+    db,
+    {
+      accountId: input.accountId,
+      workspaceId: input.workspaceId,
+      sessionId: input.sessionId,
+      turnId: activeTurnId,
+      attemptId: input.attemptId,
+      executionGeneration: attempt.executionGeneration,
+    },
+    `sandbox:${input.attemptId}`,
+    trigger.type === "user.approvalDecision"
+      ? (trigger.payload as { approvalId: string }).approvalId
+      : undefined,
+    async () => {
+      await eventing.toolPreparationReady;
+      return eventing.codemodeDispatcher;
+    },
+  );
   codemodeContinuationNote = programmaticContinuationNote(codemodeOperations);
   programmaticApprovalAcknowledged =
     trigger.type === "user.approvalDecision" &&
