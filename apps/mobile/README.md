@@ -12,6 +12,10 @@ workspaces, settings and notifications.
 | --- | --- | --- | --- |
 | ![Sessions](docs/screenshots/ios-5-sessions.jpg) | ![Question](docs/screenshots/ios-6-question.jpg) | ![Settings](docs/screenshots/ios-7-settings.jpg) | ![Android settings](docs/screenshots/android-6-settings.jpg) |
 
+| A push from the agent | Tapping it opens the session |
+| --- | --- |
+| ![Notification](docs/screenshots/ios-8-notification.jpg) | ![Opened from the push](docs/screenshots/ios-9-opened-from-push.jpg) |
+
 ## Accounts
 
 - **Sign in through the web.** The app opens `<server>/native-sign-in` in the
