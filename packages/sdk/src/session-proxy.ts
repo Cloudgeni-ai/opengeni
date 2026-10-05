@@ -1882,6 +1882,24 @@ function workspaceLiveStream(
   });
 }
 
+let warnedRejectedApiKey = false;
+
+/**
+ * The proxy always calls Opengeni with the server's own key, so an upstream
+ * 401 means that key is wrong, expired or revoked, never that the end user is
+ * signed out. Tell the developer once, in the server log, what to fix.
+ */
+function warnRejectedApiKey(error: OpenGeniApiError): void {
+  if (warnedRejectedApiKey) return;
+  warnedRejectedApiKey = true;
+  console.warn(
+    `[@opengeni/sdk] Opengeni rejected the session proxy's API key (401${
+      error.correlationId ? `, reference ${error.correlationId}` : ""
+    }). It may be expired, revoked or mistyped: create a new key in Opengeni under ` +
+      "Organization settings > Developer and update OPENGENI_API_KEY on the server.",
+  );
+}
+
 /** Preserve OpenGeni's error envelope so the browser SDK keeps codes, retryability, and outcome facts. */
 function errorResponse(error: unknown): Response {
   if (error instanceof ProxyRejection) return errorJson(error.status, error.code, error.message);
@@ -1899,6 +1917,7 @@ function errorResponse(error: unknown): Response {
     );
   }
   if (error instanceof OpenGeniApiError) {
+    if (error.status === 401) warnRejectedApiKey(error);
     const status = error.status >= 400 && error.status <= 599 ? error.status : 502;
     // A decoded upstream envelope is forwarded verbatim; the SDK only retains decodable bodies.
     if (error.body) {

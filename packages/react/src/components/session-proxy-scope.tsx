@@ -1,4 +1,9 @@
-import { OpenGeniBrowserClient, type FetchLike } from "@opengeni/sdk/browser";
+import {
+  formatErrorMessage,
+  OpenGeniApiError,
+  OpenGeniBrowserClient,
+  type FetchLike,
+} from "@opengeni/sdk/browser";
 import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import type { SessionClientLike } from "../client";
 import { OpenGeniProvider } from "../provider";
@@ -25,6 +30,25 @@ export type SessionProxyBaseUrl = {
   /** `baseUrl` mode: custom fetch for every proxy request (async auth, retries). */
   fetch?: FetchLike | undefined;
 };
+
+/**
+ * End-user copy for a failed first load. The proxy calls Opengeni with the
+ * server's key, so Opengeni's own `unauthenticated` refusal means that key was
+ * rejected (the server logs what to fix), not that this person must sign in.
+ * A host's own 401 from `resolve` carries no Opengeni code and still reads as
+ * "Sign in to continue."
+ */
+function proxyLoadErrorMessage(error: unknown): string {
+  if (
+    error instanceof OpenGeniApiError &&
+    error.status === 401 &&
+    error.code === "unauthenticated"
+  ) {
+    const message = "Chat is unavailable right now. Ask an administrator for help.";
+    return error.correlationId ? `${message} Reference: ${error.correlationId}.` : message;
+  }
+  return formatErrorMessage(error, "Could not load the conversation.");
+}
 
 type ScopeState =
   | { status: "loading" }
@@ -103,10 +127,7 @@ export function SessionProxyScope({
       },
       (error: unknown) => {
         if (!active) return;
-        setState({
-          status: "error",
-          message: error instanceof Error ? error.message : "Could not load the conversation.",
-        });
+        setState({ status: "error", message: proxyLoadErrorMessage(error) });
       },
     );
     return () => {

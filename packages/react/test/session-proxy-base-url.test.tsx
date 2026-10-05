@@ -28,6 +28,7 @@ function sessionRecord() {
 
 let requests: string[] = [];
 let reportWorkspace = true;
+let configFailure: Response | null = null;
 let previousFetch: typeof globalThis.fetch;
 
 /** A fake same-origin session proxy mounted at /api/opengeni. */
@@ -45,6 +46,7 @@ async function fakeProxy(input: RequestInfo | URL, init?: RequestInit): Promise<
     });
   const base = "/api/opengeni/v1";
   if (url.pathname === `${base}/config/client`) {
+    if (configFailure) return configFailure.clone();
     return json({
       deploymentRevision: "test",
       apiContractRevision: "proxy-revision",
@@ -75,6 +77,7 @@ async function fakeProxy(input: RequestInfo | URL, init?: RequestInit): Promise<
 beforeEach(() => {
   requests = [];
   reportWorkspace = true;
+  configFailure = null;
   previousFetch = globalThis.fetch;
   globalThis.fetch = fakeProxy as typeof globalThis.fetch;
 });
@@ -189,6 +192,45 @@ describe("session proxy baseUrl", () => {
       expect(used.some((url) => url.endsWith("/v1/config/client"))).toBe(true);
       expect(used.length).toBe(requests.length);
       expect(view.container.textContent).toContain("Quarterly report");
+    } finally {
+      await view.unmount();
+    }
+  });
+
+  test("a rejected server API key reads as unavailable, not as a sign-in prompt", async () => {
+    // The proxy forwards Opengeni's envelope verbatim when the server's key is expired.
+    configFailure = new Response(
+      JSON.stringify({
+        error: {
+          status: 401,
+          code: "unauthenticated",
+          message: "authentication required",
+          retryable: false,
+          requestId: "eb32912d-1acd-44f5-9830-b0bf629f32a3",
+        },
+      }),
+      { status: 401, headers: { "Content-Type": "application/json" } },
+    );
+    const view = await renderComponent(<OpenGeniChat baseUrl="/api/opengeni" />);
+    try {
+      await flush(100);
+      const alert = view.container.querySelector("[data-og-proxy-error]");
+      expect(alert?.textContent).toBe(
+        "Chat is unavailable right now. Ask an administrator for help. " +
+          "Reference: eb32912d-1acd-44f5-9830-b0bf629f32a3.",
+      );
+    } finally {
+      await view.unmount();
+    }
+  });
+
+  test("the host's own 401 from resolve asks the person to sign in", async () => {
+    configFailure = new Response("Unauthorized", { status: 401 });
+    const view = await renderComponent(<OpenGeniChat baseUrl="/api/opengeni" />);
+    try {
+      await flush(100);
+      const alert = view.container.querySelector("[data-og-proxy-error]");
+      expect(alert?.textContent).toStartWith("Sign in to continue.");
     } finally {
       await view.unmount();
     }
