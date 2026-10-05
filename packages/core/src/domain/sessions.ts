@@ -2052,6 +2052,11 @@ export async function postUserMessageTurn(
                 : {}),
               controlLockTimeoutMs: workspaceControlRequestLockTimeoutMs(),
             }),
+          undefined,
+          "shared",
+          // Linked-actor capture reauthorizes under the organization-membership
+          // lock; take it before the tenancy fence and the canonical prefix.
+          Boolean(input.captureTurnAuthority),
         ),
     );
   } catch (error) {

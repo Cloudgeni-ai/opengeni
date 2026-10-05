@@ -2057,29 +2057,37 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
         });
       }
       try {
-        const result = await withWorkspaceSessionActivityRls(db, workspaceId, async (scopedDb) => {
-          // Acquire origin authority before inference/session locks. A deferred
-          // realtime session has no initial worker turn; capture its exact
-          // linked actor when the ledger actually admits ordinary agent work.
-          await beforeCommit?.(scopedDb as unknown as Database);
-          return syncSessionRealtimeLedgerInTransaction(
-            scopedDb,
-            {
-              workspaceId,
-              sessionId,
-              realtimeId,
-              ownerSubjectId: grant.subjectId,
-              ...parsed.data,
-              controlLockTimeoutMs: workspaceControlRequestLockTimeoutMs(),
-            },
-            captureLinked
-              ? {
-                  afterDelegationAdmission: async ({ turnId }) =>
-                    captureLinked(scopedDb as unknown as Database, sessionId, turnId),
-                }
-              : {},
-          );
-        });
+        const result = await withWorkspaceSessionActivityRls(
+          db,
+          workspaceId,
+          async (scopedDb) => {
+            // Acquire origin authority before inference/session locks. A deferred
+            // realtime session has no initial worker turn; capture its exact
+            // linked actor when the ledger actually admits ordinary agent work.
+            await beforeCommit?.(scopedDb as unknown as Database);
+            return syncSessionRealtimeLedgerInTransaction(
+              scopedDb,
+              {
+                workspaceId,
+                sessionId,
+                realtimeId,
+                ownerSubjectId: grant.subjectId,
+                ...parsed.data,
+                controlLockTimeoutMs: workspaceControlRequestLockTimeoutMs(),
+              },
+              captureLinked
+                ? {
+                    afterDelegationAdmission: async ({ turnId }) =>
+                      captureLinked(scopedDb as unknown as Database, sessionId, turnId),
+                  }
+                : {},
+            );
+          },
+          undefined,
+          // External reauthorization takes the organization-membership lock,
+          // which precedes the tenancy fence and the canonical session prefix.
+          Boolean(beforeCommit),
+        );
         await publishRealtimeMutation(grant.accountId, workspaceId, sessionId, result);
         c.header("cache-control", "private, no-store");
         return c.json({ accepted: result.accepted, outbound: result.outbound });
