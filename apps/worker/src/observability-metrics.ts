@@ -1505,6 +1505,11 @@ export function recordSandboxRotationBacklogGauges(
 }
 
 const RETAINED_PROCESS_OWNER_STATES = [
+  // Session-owned background commands (migration 0637). Running is live
+  // session work after its launch turn ended; stopping already has a stop
+  // request, so it still counts as terminal-owner backlog.
+  "background_running",
+  "background_stopping",
   "direct",
   "queued",
   "running",
@@ -1552,7 +1557,7 @@ export function recordRetainedProcessInventoryGauges(
     });
     observability.setGauge({
       name: "opengeni_retained_processes_terminal_owner_backlog",
-      help: "Current active retained processes whose exact owner attempt is terminal.",
+      help: "Current active retained processes whose owner is gone: a closed launch attempt or released direct request, or a background command already asked to stop. A running session background command is never counted.",
       labels: { owner_state: ownerState },
       value: count.terminal,
     });
