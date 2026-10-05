@@ -25,7 +25,13 @@ import {
 import { clientRevision, clientRoutePattern } from "./client-route-pattern";
 
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
-const MODEL_PROVIDER_SEGMENTS = new Set(["codex", "supergrok", "ai-gateway", "openrouter"]);
+const MODEL_PROVIDER_SEGMENTS = new Set([
+  "codex",
+  "supergrok",
+  "ai-gateway",
+  "openrouter",
+  "opper",
+]);
 const MODEL_CONNECT_LEAVES = new Set(["connect", "start", "credentials", "accounts", "import"]);
 
 /**

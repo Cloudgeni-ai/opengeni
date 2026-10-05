@@ -4,6 +4,8 @@ import {
   type ConnectionStatus,
   OPENROUTER_CREDENTIAL_OPERATION_DIGEST_METADATA_KEY,
   OPENROUTER_CREDENTIAL_OPERATION_ID_METADATA_KEY,
+  OPPER_CREDENTIAL_OPERATION_DIGEST_METADATA_KEY,
+  OPPER_CREDENTIAL_OPERATION_ID_METADATA_KEY,
   VERCEL_AI_GATEWAY_CREDENTIAL_OPERATION_DIGEST_METADATA_KEY,
   VERCEL_AI_GATEWAY_CREDENTIAL_OPERATION_ID_METADATA_KEY,
 } from "@opengeni/contracts";
@@ -137,6 +139,8 @@ export function mapConnectionMetadata(row: {
     anthropicCredentialOperationDigest: _anthropicOperationDigest,
     claude_subscriptionCredentialOperationId: _claudeOperationId,
     claude_subscriptionCredentialOperationDigest: _claudeOperationDigest,
+    [OPPER_CREDENTIAL_OPERATION_ID_METADATA_KEY]: _opperOperationId,
+    [OPPER_CREDENTIAL_OPERATION_DIGEST_METADATA_KEY]: _opperOperationDigest,
     ...publicMetadata
   } = row.metadata;
   return {

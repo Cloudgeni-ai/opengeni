@@ -40,6 +40,9 @@ import {
   WorkspaceGatewayCustomModelsResponse,
   WorkspaceOpenRouterCustomModel,
   WorkspaceOpenRouterCustomModelsResponse,
+  WorkspaceOpperCustomModelsResponse,
+  CreateWorkspaceOpperCustomModelRequest,
+  DeleteWorkspaceOpperCustomModelRequest,
   WorkspaceRealtimeModelCatalogResponse,
   WorkspaceInferenceControlRequest,
   Workspace,
@@ -95,6 +98,12 @@ import {
   WorkspaceExternalIdentityConflictError,
   WorkspaceGatewayCustomModelLimitError,
   WorkspaceOpenRouterCustomModelLimitError,
+  WorkspaceOpperCustomModelLimitError,
+  WorkspaceOpperCustomModelHistoryLimitError,
+  listWorkspaceProviderCustomModels,
+  createWorkspaceProviderCustomModel,
+  deleteWorkspaceProviderCustomModel,
+  replayWorkspaceProviderCustomModelCreate,
   WorkspaceLimitExceededError,
 } from "@opengeni/db";
 import { boundWorkspaceControlHttpPage } from "@opengeni/events";
@@ -145,6 +154,9 @@ import {
   configuredModelInputIdentities,
   configuredOpenRouterUpstreamModelIds,
   configuredOpenRouterWorkspaceProductModelIds,
+  configuredOpperUpstreamModelIds,
+  configuredOpperWorkspaceProductModelIds,
+  WORKSPACE_OPPER_MODEL_ID_PREFIX,
   WORKSPACE_GATEWAY_MODEL_ID_PREFIX,
   WORKSPACE_OPENROUTER_MODEL_ID_PREFIX,
   sandboxImageAllowlist,
@@ -545,6 +557,7 @@ export function registerWorkspaceRoutes(app: Hono, deps: ApiRouteDeps): void {
     const providerKinds: WorkspaceCustomModelProviderKind[] = [
       "vercel_gateway",
       "openrouter",
+      "opper",
       ...CLAUDE_CONNECTION_KINDS.filter(
         (kind) =>
           kind !== "claude_subscription" || resolvedCatalog.settings.claudeSubscriptionEnabled,
@@ -626,6 +639,10 @@ export function registerWorkspaceRoutes(app: Hono, deps: ApiRouteDeps): void {
       organizationOpenRouterConnectionActive: organizationProviders.openrouter.active,
       organizationGatewayCustomModels: organizationProviders.vercel_gateway.models,
       organizationOpenRouterCustomModels: organizationProviders.openrouter.models,
+      workspaceOpperConnectionActive: workspaceConnectionActive("opper"),
+      workspaceOpperCustomModels: workspaceCustomModels.opper,
+      organizationOpperConnectionActive: organizationProviders.opper.active,
+      organizationOpperCustomModels: organizationProviders.opper.models,
     });
     // The same precedence the server applies when a new chat, API create, or
     // scheduled occurrence names no model; published so pickers show it.
@@ -935,6 +952,147 @@ export function registerWorkspaceRoutes(app: Hono, deps: ApiRouteDeps): void {
     if (removed.outcome === "conflict") {
       throw new HTTPException(409, {
         message: "OpenRouter custom model changed; reload and retry",
+      });
+    }
+    return c.body(null, 204);
+  });
+
+  app.get("/v1/workspaces/:workspaceId/opper-custom-models", async (c) => {
+    const workspaceId = c.req.param("workspaceId");
+    const grant = await requireAccessGrant(c, deps, workspaceId, "workspace:read");
+    const models = await listWorkspaceProviderCustomModels(deps.db, {
+      accountId: grant.accountId,
+      workspaceId,
+      providerKind: "opper",
+    });
+    c.header("cache-control", "private, no-store");
+    return c.json(
+      WorkspaceOpperCustomModelsResponse.parse({
+        models: models.map(projectWorkspaceOpenRouterCustomModel),
+      }),
+    );
+  });
+
+  app.post("/v1/workspaces/:workspaceId/opper-custom-models", async (c) => {
+    const workspaceId = c.req.param("workspaceId");
+    const grant = await requireWorkspaceSettingsGrant(c, deps, workspaceId);
+    const parsed = CreateWorkspaceOpperCustomModelRequest.safeParse(
+      await c.req.json().catch(() => null),
+    );
+    if (!parsed.success) {
+      throw new HTTPException(422, { message: "invalid Opper custom model" });
+    }
+    const requestHash = workspaceCustomModelRequestHash({
+      action: "create",
+      upstreamModelId: parsed.data.upstreamModelId,
+      label: parsed.data.label ?? null,
+    });
+    const replay = await replayWorkspaceProviderCustomModelCreate(deps.db, {
+      accountId: grant.accountId,
+      workspaceId,
+      providerKind: "opper",
+      operationId: parsed.data.operationId,
+      requestHash,
+    });
+    if (replay.outcome === "conflict") {
+      throw new HTTPException(409, {
+        message: "Opper custom model operation conflicts with current state",
+      });
+    }
+    if (replay.outcome === "success") {
+      return c.json(projectWorkspaceOpenRouterCustomModel(replay.model), 201);
+    }
+    const catalog = await deps.resolveCatalogSettings();
+    if (configuredOpperUpstreamModelIds(catalog.settings).includes(parsed.data.upstreamModelId)) {
+      throw new HTTPException(422, {
+        message: "Opper model is already included in the deployment catalog",
+      });
+    }
+    const customProductId = `${WORKSPACE_OPPER_MODEL_ID_PREFIX}${parsed.data.upstreamModelId}`;
+    const deploymentProductIds = new Set([
+      ...configuredModelInputIdentities(catalog.settings),
+      ...configuredOpperWorkspaceProductModelIds(catalog.settings),
+    ]);
+    if (deploymentProductIds.has(customProductId)) {
+      throw new HTTPException(422, {
+        message: "Opper model product id conflicts with the deployment catalog",
+      });
+    }
+    try {
+      const model = await createWorkspaceProviderCustomModel(deps.db, {
+        accountId: grant.accountId,
+        workspaceId,
+        providerKind: "opper",
+        upstreamModelId: parsed.data.upstreamModelId,
+        label: parsed.data.label ?? null,
+        operationId: parsed.data.operationId,
+        requestHash,
+        createdBySubjectId: grant.subjectId,
+      });
+      if (!model || model.retiredAt) {
+        throw new HTTPException(409, {
+          message: "Opper custom model operation conflicts with current state",
+        });
+      }
+      return c.json(projectWorkspaceOpenRouterCustomModel(model), 201);
+    } catch (error) {
+      if (
+        error instanceof WorkspaceOpperCustomModelLimitError ||
+        error instanceof WorkspaceOpperCustomModelHistoryLimitError
+      ) {
+        throw new HTTPException(422, { message: error.message });
+      }
+      if (nestedPostgresSqlState(error) === "23505") {
+        throw new HTTPException(422, {
+          message: "Opper custom model already exists",
+        });
+      }
+      throw error;
+    }
+  });
+
+  app.delete("/v1/workspaces/:workspaceId/opper-custom-models/:customModelId", async (c) => {
+    const workspaceId = c.req.param("workspaceId");
+    const grant = await requireWorkspaceSettingsGrant(c, deps, workspaceId);
+    const customModelId = c.req.param("customModelId");
+    if (
+      !/^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/iu.test(
+        customModelId,
+      )
+    ) {
+      throw new HTTPException(422, {
+        message: "invalid Opper custom model id",
+      });
+    }
+    const parsed = DeleteWorkspaceOpperCustomModelRequest.safeParse(
+      await c.req.json().catch(() => null),
+    );
+    if (!parsed.success) {
+      throw new HTTPException(422, {
+        message: "invalid Opper custom model deletion",
+      });
+    }
+    const removed = await deleteWorkspaceProviderCustomModel(deps.db, {
+      accountId: grant.accountId,
+      workspaceId,
+      providerKind: "opper",
+      customModelId,
+      expectedVersion: parsed.data.expectedVersion,
+      operationId: parsed.data.operationId,
+      requestHash: workspaceCustomModelRequestHash({
+        action: "delete",
+        customModelId,
+        expectedVersion: parsed.data.expectedVersion,
+      }),
+    });
+    if (removed.outcome === "not_found") {
+      throw new HTTPException(404, {
+        message: "Opper custom model not found",
+      });
+    }
+    if (removed.outcome === "conflict") {
+      throw new HTTPException(409, {
+        message: "Opper custom model changed; reload and retry",
       });
     }
     return c.body(null, 204);

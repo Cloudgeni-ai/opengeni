@@ -89,6 +89,9 @@ describe("modelDisplayName", () => {
     expect(humanizeModelSlug("gemini-2.5-pro")).toBe("Gemini 2.5 Pro");
     expect(humanizeModelSlug("deepseek-v4-flash")).toBe("DeepSeek V4 Flash");
     expect(humanizeModelSlug("kimi-k3")).toBe("Kimi K3");
+    expect(humanizeModelSlug("workspace-opper/aws/claude-sonnet-4-6-eu")).toBe(
+      "Claude Sonnet 4.6 EU",
+    );
     expect(humanizeModelSlug("grok-code-fast-1")).toBe("Grok Code Fast 1");
   });
 
@@ -113,6 +116,8 @@ describe("modelVendor", () => {
   test("names the model maker independent of the connection", () => {
     expect(modelVendor("codex/gpt-6.1-sol")).toBe("openai");
     expect(modelVendor("gpt-6-luna")).toBe("openai");
+    expect(modelVendor("opper/vertexai/gemini-3.8-flash-eu")).toBe("google");
+    expect(modelVendor("workspace-opper/aws/claude-sonnet-4-6-eu")).toBe("anthropic");
     expect(modelVendor("organization-claude-subscription/claude-opus-5-5")).toBe("anthropic");
     expect(modelVendor("workspace-anthropic/claude-opus-5-5")).toBe("anthropic");
     expect(modelVendor("workspace-openrouter/anthropic/claude-sonnet-4.6")).toBe("anthropic");

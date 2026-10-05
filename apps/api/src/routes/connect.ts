@@ -85,6 +85,7 @@ import { OFFICIAL_GMAIL_MCP_URL } from "../integrations/oauth-profiles";
 import { z } from "zod";
 import {
   WORKSPACE_OPENROUTER_CONNECTION_DOMAIN,
+  WORKSPACE_OPPER_CONNECTION_DOMAIN,
   VERCEL_AI_GATEWAY_CONNECTION_DOMAIN,
 } from "@opengeni/config";
 import { parseRequestJson } from "../http/request-body";
@@ -903,9 +904,11 @@ export function registerConnectRoutes(app: Hono, deps: ApiRouteDeps): void {
       }
       const destination = new URL(values.mcpUrl);
       if (
-        [WORKSPACE_OPENROUTER_CONNECTION_DOMAIN, VERCEL_AI_GATEWAY_CONNECTION_DOMAIN].some(
-          (domain) => domain === destination.hostname,
-        )
+        [
+          WORKSPACE_OPENROUTER_CONNECTION_DOMAIN,
+          VERCEL_AI_GATEWAY_CONNECTION_DOMAIN,
+          WORKSPACE_OPPER_CONNECTION_DOMAIN,
+        ].some((domain) => domain === destination.hostname)
       )
         throw new HTTPException(422, {
           message: "Use the dedicated workspace provider credential flow",

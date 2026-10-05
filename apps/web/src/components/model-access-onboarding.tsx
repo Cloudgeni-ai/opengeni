@@ -41,7 +41,7 @@ import {
   pollSuperGrokDeviceLogin,
 } from "@/components/supergrok-device-poll";
 
-type ProviderKey = "vercel" | "openrouter";
+type ProviderKey = "vercel" | "openrouter" | "opper";
 
 const PROVIDER_KEYS: Record<
   ProviderKey,
@@ -52,7 +52,7 @@ const PROVIDER_KEYS: Record<
     placeholder: string;
     help: string;
     family: ConnectedModelFamily;
-    analytics: "connect_ai_gateway" | "connect_openrouter";
+    analytics: "connect_ai_gateway" | "connect_openrouter" | "connect_opper";
   }
 > = {
   vercel: {
@@ -73,6 +73,15 @@ const PROVIDER_KEYS: Record<
     family: "openrouter",
     analytics: "connect_openrouter",
   },
+  opper: {
+    domain: "api.opper.ai",
+    role: "opper",
+    label: "Opper",
+    placeholder: "Opper API key",
+    help: "Create one at platform.opper.ai under API keys.",
+    family: "opper",
+    analytics: "connect_opper",
+  },
 };
 
 /** Names the service in the selection toast; model labels repeat across services. */
@@ -81,6 +90,7 @@ const FAMILY_LABELS: Record<ConnectedModelFamily, string> = {
   supergrok: "SuperGrok",
   vercel_gateway: "Vercel AI Gateway",
   openrouter: "OpenRouter",
+  opper: "Opper",
   credits: "Opengeni credits",
   openai: "OpenAI",
   azure_openai: "Azure OpenAI",
@@ -159,7 +169,8 @@ export function ModelAccessOnboardingPanel({
   const [open, setOpen] = useState<ModelProviderId | "credits" | null>(
     !startingCredits && !includedModel && billingMode === "stripe" ? "credits" : null,
   );
-  const keyProvider: ProviderKey | null = open === "vercel" || open === "openrouter" ? open : null;
+  const keyProvider: ProviderKey | null =
+    open === "vercel" || open === "openrouter" || open === "opper" ? open : null;
   const connectedModelId = useRef<string | undefined>(undefined);
   const [apiKey, setApiKey] = useState("");
   const [topupAmount, setTopupAmount] = useState("25.00");
@@ -511,6 +522,7 @@ export function ModelAccessOnboardingPanel({
         ["openai", "OpenAI"],
         ["azure_openai", "Azure OpenAI"],
         ["openrouter", "OpenRouter"],
+        ["opper", "Opper"],
         ["vercel", "Vercel AI Gateway"],
       ] as const
     ).map(([id, title]) => ({
@@ -633,7 +645,9 @@ export function ModelAccessOnboardingPanel({
         />
       );
     }
-    return choice.id === "vercel" || choice.id === "openrouter" ? keyPanel(choice.id) : null;
+    return choice.id === "vercel" || choice.id === "openrouter" || choice.id === "opper"
+      ? keyPanel(choice.id)
+      : null;
   }
 
   const creditsPanel =

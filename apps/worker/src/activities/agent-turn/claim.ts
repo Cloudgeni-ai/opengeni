@@ -30,6 +30,7 @@ import {
   settingsWithEnabledCapabilityMcpServers,
   settingsWithWorkspaceGatewayCredential,
   settingsWithWorkspaceOpenRouterCredential,
+  settingsWithWorkspaceOpperCredential,
   settingsWithOrganizationProviderCredentials,
   withXaiSubscriptionProvider,
 } from "../capabilities";
@@ -329,11 +330,18 @@ export async function claimTurnAttempt(deps: ClaimTurnDeps): Promise<ClaimTurnOu
     xaiSettings,
     claimedPolicy.kind === "valid" ? claimedPolicy.policy.productModelId : turn.model,
   );
-  const workspaceProviderSettings = await settingsWithWorkspaceOpenRouterCredential(
+  const openRouterSettings = await settingsWithWorkspaceOpenRouterCredential(
     db,
     input.accountId,
     input.workspaceId,
     gatewaySettings,
+    claimedPolicy.kind === "valid" ? claimedPolicy.policy.productModelId : turn.model,
+  );
+  const workspaceProviderSettings = await settingsWithWorkspaceOpperCredential(
+    db,
+    input.accountId,
+    input.workspaceId,
+    openRouterSettings,
     claimedPolicy.kind === "valid" ? claimedPolicy.policy.productModelId : turn.model,
   );
   let capabilitySettings = await settingsWithOrganizationProviderCredentials(

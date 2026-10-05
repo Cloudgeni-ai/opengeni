@@ -25,7 +25,10 @@ import {
   resolveModelProvider,
   responseSatisfiesLatencyMode,
   OPENGENI_GATEWAY_PROVIDER_ID,
+  OPPER_PROVIDER_ID,
+  ORGANIZATION_OPPER_PROVIDER_ID,
   WORKSPACE_GATEWAY_PROVIDER_ID,
+  WORKSPACE_OPPER_PROVIDER_ID,
   WORKSPACE_GATEWAY_MODEL_ID_PREFIX,
   type ModelUsageInput,
   type ModelProviderApi,
@@ -733,15 +736,25 @@ export async function recordModelUsageAndDebitCredits(
     ? resolveModelProvider(settings, input.model)
     : undefined;
   const gatewayProviderId = resolvedGatewayModel?.provider.id;
+  // Opper reports the exact USD cost of every response (`usage.opper.cost`);
+  // the Chat adapter surfaces it with `finalProvider: "opper"`.
+  const opperReported =
+    (gatewayProviderId === OPPER_PROVIDER_ID ||
+      gatewayProviderId === WORKSPACE_OPPER_PROVIDER_ID ||
+      gatewayProviderId === ORGANIZATION_OPPER_PROVIDER_ID) &&
+    input.gatewayBilling?.finalProvider === "opper";
   const gatewayBilling =
     gatewayProviderId === OPENGENI_GATEWAY_PROVIDER_ID ||
-    gatewayProviderId === WORKSPACE_GATEWAY_PROVIDER_ID
+    gatewayProviderId === WORKSPACE_GATEWAY_PROVIDER_ID ||
+    opperReported
       ? input.gatewayBilling
       : undefined;
   const allowedProviders = resolvedGatewayModel?.model.requestPolicy?.gateway.only;
+  // Scoped Opper rails settle externally; record the exact provider cost only.
   const unpinnedWorkspaceGatewayModel =
-    gatewayProviderId === WORKSPACE_GATEWAY_PROVIDER_ID && allowedProviders === undefined;
-  if (gatewayBilling) {
+    (gatewayProviderId === WORKSPACE_GATEWAY_PROVIDER_ID && allowedProviders === undefined) ||
+    (opperReported && gatewayProviderId !== OPPER_PROVIDER_ID);
+  if (gatewayBilling && !opperReported) {
     if (
       !unpinnedWorkspaceGatewayModel &&
       (!allowedProviders ||

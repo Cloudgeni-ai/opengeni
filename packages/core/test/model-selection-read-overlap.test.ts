@@ -196,6 +196,10 @@ for (const first of ["inputs", "catalog"] as const) {
         organizationOpenRouterConnectionActive: false,
         organizationGatewayCustomModels: ["org-gateway"],
         organizationOpenRouterCustomModels: ["org-openrouter"],
+        workspaceOpperConnectionActive: false,
+        workspaceOpperCustomModels: [],
+        organizationOpperConnectionActive: false,
+        organizationOpperCustomModels: [],
         claudeConnections: {
           anthropic: { active: true, models: ["org-anthropic"] },
           claude_subscription: { active: false, models: ["org-subscription"] },
@@ -237,6 +241,7 @@ test("disabled subscription skips only its catalog; every read keeps its exact s
       const providerKinds = [
         "vercel_gateway",
         "openrouter",
+        "opper",
         "anthropic",
         ...(subscription ? ["claude_subscription"] : []),
       ];

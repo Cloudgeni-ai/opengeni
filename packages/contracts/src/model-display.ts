@@ -63,6 +63,8 @@ const WORDS: Readonly<Record<string, string>> = {
   magistral: "Magistral",
   nemotron: "Nemotron",
   oss: "OSS",
+  // Region-pinned gateway routes (Opper `aws/claude-sonnet-4-6-eu`).
+  eu: "EU",
 };
 
 /** The upstream model slug without routing prefixes or `:variant` suffixes. */

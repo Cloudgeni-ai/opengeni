@@ -1174,6 +1174,15 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     ]
   },
   {
+    "id": "createWorkspaceOpperCustomModel",
+    "method": "POST",
+    "path": "/v1/workspaces/:workspaceId/opper-custom-models",
+    "request": [
+      "CreateWorkspaceOpperCustomModelRequest"
+    ],
+    "response": []
+  },
+  {
     "id": "createWorkspaceWebhook",
     "method": "POST",
     "path": "/v1/workspaces/:workspaceId/webhooks",
@@ -1420,6 +1429,15 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     "path": "/v1/workspaces/:workspaceId/openrouter-custom-models/:customModelId",
     "request": [
       "DeleteWorkspaceOpenRouterCustomModelRequest"
+    ],
+    "response": []
+  },
+  {
+    "id": "deleteWorkspaceOpperCustomModel",
+    "method": "DELETE",
+    "path": "/v1/workspaces/:workspaceId/opper-custom-models/:customModelId",
+    "request": [
+      "DeleteWorkspaceOpperCustomModelRequest"
     ],
     "response": []
   },
@@ -4208,6 +4226,15 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     "request": [],
     "response": [
       "WorkspaceOpenRouterCustomModelsResponse"
+    ]
+  },
+  {
+    "id": "listWorkspaceOpperCustomModels",
+    "method": "GET",
+    "path": "/v1/workspaces/:workspaceId/opper-custom-models",
+    "request": [],
+    "response": [
+      "WorkspaceOpperCustomModelsResponse"
     ]
   },
   {

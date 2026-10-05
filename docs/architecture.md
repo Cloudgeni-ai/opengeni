@@ -402,10 +402,11 @@ membership uses `code` or an operator-owned database singleton; workspace policy
 connection readiness/permissions, organization assignments, and provider health
 determine selectability; `/v1/config/client` and session create share one
 resolver. Deployment cost policy sets `free`/`credits` independently
-of upstream settlement. Workspace Gateway, OpenRouter, Anthropic API, and Claude
-subscription rows are provider-qualified overlays, separate from deployment
-catalog/billing. `openrouter/*` and `workspace-openrouter/*` retain distinct
-provider/billing identities for identical slugs. Claude setup:
+of upstream settlement. Workspace Gateway, OpenRouter, Opper, Anthropic API, and
+Claude subscription rows are provider-qualified overlays, separate from deployment
+catalog/billing. `openrouter/*` and `workspace-openrouter/*` (likewise `opper/*`,
+`workspace-opper/*`, `organization-opper/*`) retain distinct provider/billing
+identities for identical slugs. Claude setup:
 `apps/api/src/routes/workspace-model-providers.ts`; transport:
 `packages/runtime/src/anthropic-messages.ts`.
 The shared `claudeNativeModelProfile` in `packages/config/src/index.ts` owns
@@ -985,7 +986,7 @@ selections, and keeps plugin/built-in defaults independent.
 `packages/db/src/workspace-tool-defaults.ts` owns persistence. Deployment
 ceilings apply; defaults never rewrite sessions or accepted attempts.
 
-Fresh provider-qualified Gateway/OpenRouter selections recheck the exact active
+Fresh provider-qualified Gateway/OpenRouter/Opper selections recheck the exact active
 slug under the catalog's shared transaction lock before committing a session,
 turn, task, trigger, binding, or occurrence. This covers fresh sessions,
 explicit switches, new/materially reaccepted schedules, automation triggers,
@@ -1131,7 +1132,7 @@ deployment answers it.
 
 Codex/SuperGrok pools preserve logical turns. Shared/Personal workspaces inherit
 same-organization pools as separate allocator boundaries, not access grants.
-SuperGrok freezes scope on acceptance. Vercel AI Gateway/OpenRouter BYOK keys
+SuperGrok freezes scope on acceptance. Vercel AI Gateway/OpenRouter/Opper BYOK keys
 belong to workspaces or organizations; organization keys use encrypted FORCE-RLS,
 inherit into same-organization shared workspaces, retain payer identity, and
 never fall back across rails.
