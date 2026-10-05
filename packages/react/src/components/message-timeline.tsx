@@ -2496,6 +2496,16 @@ export function MessageTimeline({
     }
     releasePinAfterScrollSettled(node);
   };
+  // React 18 has no `onScrollEnd` prop: it warns and never calls it, while
+  // `supportsScrollEndEvent()` still makes the camera wait for scrollend. A
+  // native listener (re-bound each commit, so it always sees this render's
+  // handler and scroller) works on every supported React version.
+  useEffect(() => {
+    const node = scrollRef.current;
+    if (!node) return;
+    node.addEventListener("scrollend", onScrollEnd);
+    return () => node.removeEventListener("scrollend", onScrollEnd);
+  });
 
   const timeline = (
     <AllowancePresentationProvider
@@ -2538,7 +2548,6 @@ export function MessageTimeline({
                           }
                           tabIndex={-1}
                           onScroll={onScroll}
-                          onScrollEnd={onScrollEnd}
                           onWheel={onWheel}
                           onTouchStart={(event) => {
                             stopSettlement();
