@@ -121,8 +121,11 @@ bun scripts/deployment-aca-observability.ts \
 ```
 
 Run the private helper with the initialized backend, its `TF_DATA_DIR`, and the
-authenticated Azure CLI environment used for deployment. It reads API request
-metrics on the authenticated private listener and control/turn metrics plus
+authenticated Azure CLI environment used for deployment. The helper requires
+Linux/WSL2 and util-linux `script` for bounded terminal-backed Azure exec; a BSD
+or macOS `script` implementation is not interchangeable. It reads API request
+metrics on the private listener and verifies the module's actual metrics-auth
+posture, then reads control/turn metrics plus
 health/readiness through Azure exec. It requires nonce-bound evidence and does
 not interpret CLI exit code zero alone as success. Public metrics are deliberately
 skipped in the generic runner; the private check is separate and required.
