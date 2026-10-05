@@ -4,6 +4,7 @@
     "noEmit": true
   },
   "include": [
+    "bench-session-latency.ts",
     "credit-promotion-policy.ts",
     "connected-machine-load-profile.ts",
     "connected-machine-load-profile.test.ts",
