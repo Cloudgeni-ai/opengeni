@@ -2882,6 +2882,7 @@ function SessionChatPane(props: {
             artifactHref={(id) => `/workspaces/${props.session.workspaceId}/artifacts/files/${id}`}
             text={text}
             searchTarget={renderContext.searchTarget}
+            softLineBreaks
             streaming={item.kind === "agent-message" && item.streaming}
             onSandboxFile={props.onOpenSandboxFile}
             renderInteractiveBlock={renderInteractiveBlock}
