@@ -1,5 +1,10 @@
 import { describe, expect, test } from "bun:test";
-import { signDelegatedAccessToken, verifyDelegatedAccessToken } from "@opengeni/contracts";
+import {
+  OPENGENI_API_CONTRACT_HEADER,
+  OPENGENI_API_CONTRACT_REVISION,
+  signDelegatedAccessToken,
+  verifyDelegatedAccessToken,
+} from "@opengeni/contracts";
 import { fileURLToPath } from "node:url";
 
 const repoRoot = fileURLToPath(new URL("../", import.meta.url));
@@ -16,6 +21,11 @@ interface FixtureOptions {
   defaultWorkspace?: boolean;
   workspaceListStatus?: number;
   storageCors?: "restricted" | "wildcard" | "echo-foreign" | "deny-allowed" | "foreign-5xx";
+  configRevision?: string | null;
+  responseRevision?: string;
+  mutationResponseRevision?: string;
+  forceMutationContractRefusal?: boolean;
+  sessionCreateStatus?: number;
 }
 
 interface Fixture {
@@ -27,6 +37,7 @@ interface Fixture {
     deploymentKey: string | null;
     bearer: string | null;
     origin: string | null;
+    contractRevision: string | null;
   }[];
   sessions: Record<string, unknown>[];
   tasks: Record<string, unknown>[];
@@ -64,12 +75,14 @@ async function withApi(
       const key = request.headers.get("x-opengeni-access-key");
       const bearer = request.headers.get("authorization");
       const origin = request.headers.get("origin");
+      const contractRevision = request.headers.get(OPENGENI_API_CONTRACT_HEADER);
       requests.push({
         path: url.pathname,
         method: request.method,
         deploymentKey: key,
         bearer,
         origin,
+        contractRevision,
       });
       if (url.pathname === "/fixture-object") {
         if (request.method === "OPTIONS") {
@@ -101,7 +114,27 @@ async function withApi(
         return new Response(objectContent);
       }
       if (url.pathname === "/healthz") return Response.json({ ok: true, service: "fixture" });
-      if (url.pathname === "/v1/config/client") return Response.json({ auth: { mode: authMode } });
+      const apiJson = (data: unknown, init: ResponseInit = {}) => {
+        const headers = new Headers(init.headers);
+        headers.set(
+          OPENGENI_API_CONTRACT_HEADER,
+          request.method === "POST" && url.pathname.endsWith("/sessions")
+            ? (options.mutationResponseRevision ??
+                options.responseRevision ??
+                OPENGENI_API_CONTRACT_REVISION)
+            : (options.responseRevision ?? OPENGENI_API_CONTRACT_REVISION),
+        );
+        return Response.json(data, { ...init, headers });
+      };
+      if (url.pathname === "/v1/config/client")
+        return apiJson({
+          auth: { mode: authMode },
+          ...(options.configRevision === null
+            ? {}
+            : {
+                apiContractRevision: options.configRevision ?? OPENGENI_API_CONTRACT_REVISION,
+              }),
+        });
       const tokenPayload = bearer?.startsWith("Bearer ")
         ? await verifyDelegatedAccessToken(hostSecret, bearer.slice("Bearer ".length))
         : null;
@@ -110,22 +143,46 @@ async function withApi(
         (credential === "deploymentKey" && key === deploymentKey) ||
         (credential === "productToken" && tokenPayload?.workspaceId === workspaceId);
       if (!authenticated) {
-        return Response.json(
+        return apiJson(
           { error: "unauthorized" },
           { status: !key && !bearer ? (options.anonymousStatus ?? 401) : 401 },
         );
       }
+      // Match production's shared-key mutation fence. Bearer integrations have
+      // separate admission semantics; every conformance API request still
+      // claims the canonical release revision, never a mutable advertised one.
+      if (
+        url.pathname.startsWith("/v1/") &&
+        ["POST", "PUT", "PATCH", "DELETE"].includes(request.method) &&
+        contractRevision !== OPENGENI_API_CONTRACT_REVISION &&
+        !bearer?.startsWith("Bearer ")
+      ) {
+        return apiJson(
+          { code: "API_CONTRACT_CHANGED", apiContractRevision: OPENGENI_API_CONTRACT_REVISION },
+          { status: 409 },
+        );
+      }
+      if (
+        options.forceMutationContractRefusal &&
+        request.method === "POST" &&
+        url.pathname.endsWith("/sessions")
+      ) {
+        return apiJson(
+          { code: "API_CONTRACT_CHANGED", apiContractRevision: "fixture-advertised-revision" },
+          { status: 409 },
+        );
+      }
       if (url.pathname === "/v1/access/me") {
-        return Response.json({
+        return apiJson({
           ...(options.defaultWorkspace === false ? {} : { defaultWorkspaceId: workspaceId }),
         });
       }
       if (url.pathname === "/v1/workspaces") {
-        return Response.json([{ id: workspaceId }], { status: options.workspaceListStatus ?? 200 });
+        return apiJson([{ id: workspaceId }], { status: options.workspaceListStatus ?? 200 });
       }
       const prefix = `/v1/workspaces/${workspaceId}`;
       if (url.pathname === `${prefix}/files/uploads` && request.method === "POST") {
-        return Response.json({
+        return apiJson({
           putUrl: new URL("/fixture-object", server.url).href,
           uploadId: "fixture-upload",
           fileId: "fixture-file",
@@ -133,25 +190,34 @@ async function withApi(
         });
       }
       if (url.pathname === `${prefix}/files/uploads/fixture-upload/complete`) {
-        return Response.json({ ok: true });
+        return apiJson({ ok: true });
       }
       if (url.pathname === `${prefix}/files/fixture-file/download-url`) {
-        return Response.json({ url: new URL("/fixture-object", server.url).href });
+        return apiJson({ url: new URL("/fixture-object", server.url).href });
       }
       if (url.pathname === `${prefix}/sessions` && request.method === "POST") {
+        if (options.sessionCreateStatus)
+          return apiJson(
+            { error: "fixture session creation failed" },
+            { status: options.sessionCreateStatus },
+          );
         sessions.push((await request.json()) as Record<string, unknown>);
-        return Response.json({ id: crypto.randomUUID(), status: "running" });
+        return apiJson({ id: crypto.randomUUID(), status: "running" });
       }
       if (url.pathname.endsWith("/events/stream")) {
         return new Response(
           "event: session.created\ndata: {}\n\nevent: turn.completed\ndata: {}\n\n",
           {
-            headers: { "content-type": "text/event-stream" },
+            headers: {
+              "content-type": "text/event-stream",
+              [OPENGENI_API_CONTRACT_HEADER]:
+                options.responseRevision ?? OPENGENI_API_CONTRACT_REVISION,
+            },
           },
         );
       }
       if (url.pathname.endsWith("/events")) {
-        return Response.json(
+        return apiJson(
           ["session.created", "turn.started", "agent.message.completed", "turn.completed"].map(
             (type) => ({ type }),
           ),
@@ -159,20 +225,20 @@ async function withApi(
       }
       if (url.pathname === `${prefix}/scheduled-tasks` && request.method === "POST") {
         tasks.push((await request.json()) as Record<string, unknown>);
-        return Response.json({ id: "33333333-3333-4333-8333-333333333333" });
+        return apiJson({ id: "33333333-3333-4333-8333-333333333333" });
       }
       if (url.pathname.endsWith("/trigger") || request.method === "DELETE") {
-        return Response.json({ ok: true });
+        return apiJson({ ok: true });
       }
       if (url.pathname.endsWith("/runs")) {
-        return Response.json([
+        return apiJson([
           { status: "dispatched", sessionId: "44444444-4444-4444-8444-444444444444" },
         ]);
       }
       if (url.pathname.startsWith(`${prefix}/sessions/`)) {
-        return Response.json({ id: url.pathname.split("/").at(-1), status: "idle" });
+        return apiJson({ id: url.pathname.split("/").at(-1), status: "idle" });
       }
-      return Response.json({ error: "unexpected fixture route" }, { status: 404 });
+      return apiJson({ error: "unexpected fixture route" }, { status: 404 });
     },
   });
   try {
@@ -231,6 +297,122 @@ function check(output: string, id: string): { status: string; detail: string } {
   expect(result).toBeDefined();
   return result!;
 }
+
+describe("deployment conformance API contract admission", () => {
+  test("speaks the shared canonical revision to a production-style mutation fence", async () => {
+    await withApi({ storageCors: "wildcard" }, async (fixture) => {
+      for (const revision of [undefined, "fixture-stale-revision"]) {
+        const response = await fetch(
+          new URL(`/v1/workspaces/${workspaceId}/sessions`, fixture.baseUrl),
+          {
+            method: "POST",
+            headers: {
+              "x-opengeni-access-key": deploymentKey,
+              "content-type": "application/json",
+              ...(revision ? { [OPENGENI_API_CONTRACT_HEADER]: revision } : {}),
+            },
+            body: JSON.stringify({ initialMessage: "rejected fixture mutation" }),
+          },
+        );
+        expect(response.status).toBe(409);
+        expect(((await response.json()) as { code: string }).code).toBe("API_CONTRACT_CHANGED");
+      }
+      const start = fixture.requests.length;
+      const result = await fixture.run(["--deployment-access-key", deploymentKey], {}, true, true);
+      expect(result.exitCode).toBe(0);
+      expect(check(result.stdout, "api-contract").status).toBe("passed");
+      const requests = fixture.requests.slice(start);
+      expect(
+        requests
+          .filter((request) => request.path.startsWith("/v1/"))
+          .every((request) => request.contractRevision === OPENGENI_API_CONTRACT_REVISION),
+      ).toBe(true);
+      expect(requests.some((request) => request.method === "DELETE")).toBe(true);
+      expect(requests.some((request) => request.path.endsWith("/events/stream"))).toBe(true);
+      expect(
+        requests
+          .filter((request) => request.path === "/fixture-object")
+          .every((request) => request.contractRevision === null),
+      ).toBe(true);
+      expect(fixture.sessions).toHaveLength(2);
+      expect(fixture.tasks).toHaveLength(1);
+    });
+  });
+
+  for (const [name, options] of [
+    ["different client-config revision", { configRevision: "fixture-advertised-revision" }],
+    ["missing client-config revision", { configRevision: null }],
+    ["different read-response revision", { responseRevision: "fixture-advertised-revision" }],
+  ] as const) {
+    test(`blocks mutations when the handshake is not canonical (${name})`, async () => {
+      await withApi(options, async (fixture) => {
+        const result = await fixture.run(
+          ["--deployment-access-key", deploymentKey],
+          {},
+          true,
+          true,
+        );
+        expect(result.exitCode).toBe(1);
+        expect(check(result.stdout, "api-contract").status).toBe("failed");
+        expect(fixture.requests.filter((request) => request.method !== "GET")).toHaveLength(0);
+        expect(fixture.sessions).toHaveLength(0);
+        expect(fixture.tasks).toHaveLength(0);
+        expect(fixture.requests.some((request) => request.path.includes("/sessions/null"))).toBe(
+          false,
+        );
+      });
+    });
+  }
+
+  for (const [name, options] of [
+    ["changed mutation response", { mutationResponseRevision: "fixture-advertised-revision" }],
+    ["409 contract refusal", { forceMutationContractRefusal: true }],
+  ] as const) {
+    test(`never retries writes or adopts an advertised revision (${name})`, async () => {
+      await withApi(options, async (fixture) => {
+        const result = await fixture.run(
+          ["--deployment-access-key", deploymentKey],
+          {},
+          true,
+          true,
+        );
+        expect(result.exitCode).toBe(1);
+        const mutations = fixture.requests.filter((request) => request.method !== "GET");
+        expect(mutations).toHaveLength(1);
+        expect(mutations[0]?.contractRevision).toBe(OPENGENI_API_CONTRACT_REVISION);
+        expect(check(result.stdout, "session-run").status).toBe("failed");
+        expect(check(result.stdout, "event-replay").status).toBe("skipped");
+        expect(check(result.stdout, "sse-replay").status).toBe("skipped");
+        expect(fixture.requests.some((request) => request.path.includes("/sessions/null"))).toBe(
+          false,
+        );
+        expect(result.stdout).not.toContain("fixture-advertised-revision");
+      });
+    });
+  }
+
+  test("skips dependent replay probes when session creation returns no id", async () => {
+    await withApi({ sessionCreateStatus: 502 }, async (fixture) => {
+      const result = await fixture.run(
+        ["--deployment-access-key", deploymentKey, "--skip-scheduled-tasks"],
+        {},
+        true,
+      );
+      expect(result.exitCode).toBe(1);
+      expect(check(result.stdout, "session-run").status).toBe("failed");
+      expect(check(result.stdout, "event-replay").status).toBe("skipped");
+      expect(check(result.stdout, "sse-replay").status).toBe("skipped");
+      expect(fixture.requests.some((request) => request.path.includes("/sessions/null"))).toBe(
+        false,
+      );
+      expect(
+        fixture.requests.some(
+          (request) => request.path.endsWith("/events") || request.path.endsWith("/events/stream"),
+        ),
+      ).toBe(false);
+    });
+  });
+});
 
 describe("deployment conformance restricted browser CORS", () => {
   for (const selector of ["flag", "equals-flag", "environment"]) {
