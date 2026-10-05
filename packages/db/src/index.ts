@@ -55547,7 +55547,8 @@ export async function confirmDrainCold(
           current.provider.status === "creating" &&
           current.provider.instanceId !== null &&
           current.provider.instanceId === row.instance_id;
-        const workspaceLost = input.providerMissingBeforeCapture === true && !unpublishedWarmingLoss;
+        const workspaceLost =
+          input.providerMissingBeforeCapture === true && !unpublishedWarmingLoss;
         const lateArchiveCapture =
           workspaceLost &&
           row.archive_capture_id !== null &&
@@ -55591,7 +55592,9 @@ export async function confirmDrainCold(
                 status: workspaceLost ? "missing" : "not_created",
                 instanceId: workspaceLost ? row.instance_id : null,
                 observedAt: now,
-                ...(workspaceLost ? { diagnostic: "provider_not_found_before_workspace_capture" } : {}),
+                ...(workspaceLost
+                  ? { diagnostic: "provider_not_found_before_workspace_capture" }
+                  : {}),
               },
           archive: current.archive,
           restore: {

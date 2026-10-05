@@ -3524,15 +3524,18 @@ async function terminateDrainableBox(
   // with draining->cold. Until this succeeds, arrivals remain fenced by that
   // exact claim; a timestamp or a failed provider call can never reopen a box
   // while termination may still be in flight.
-  const { wentCold, unpublishedProviderLost, backgroundCommandEvents } = await confirmDrainCold(db, {
-    accountId,
-    workspaceId: row.workspaceId,
-    sandboxGroupId: row.sandboxGroupId,
-    expectedEpoch: row.leaseEpoch,
-    ...(captureClaim ? { expectedCaptureId: captureClaim.id } : {}),
-    providerMissingBeforeCapture: providerMissing,
-    idleCommandContainmentMs: settings.sandboxIdleCommandContainmentMs,
-  });
+  const { wentCold, unpublishedProviderLost, backgroundCommandEvents } = await confirmDrainCold(
+    db,
+    {
+      accountId,
+      workspaceId: row.workspaceId,
+      sandboxGroupId: row.sandboxGroupId,
+      expectedEpoch: row.leaseEpoch,
+      ...(captureClaim ? { expectedCaptureId: captureClaim.id } : {}),
+      providerMissingBeforeCapture: providerMissing,
+      idleCommandContainmentMs: settings.sandboxIdleCommandContainmentMs,
+    },
+  );
   // The command terminal events and agent inputs are already durable in the
   // cold commit; this is only best-effort live fanout.
   await publishDurableSessionEvents(bus, row.workspaceId, backgroundCommandEvents, (error) => {
