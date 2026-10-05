@@ -1,5 +1,14 @@
 # @opengeni/tool-gateway
 
+## 1.4.4
+
+### Patch Changes
+
+- Updated dependencies [6384dbd]
+- Updated dependencies [2edfa4c]
+  - @opengeni/contracts@1.4.4
+  - @opengeni/observability@1.4.4
+
 ## 1.4.3
 
 ### Patch Changes

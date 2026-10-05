@@ -1,5 +1,24 @@
 # @opengeni/runtime
 
+## 1.4.4
+
+### Patch Changes
+
+- 62e718d: A yielded shell command whose last step is a bare interactive shell (for example `bash --noprofile --norc`) now stays turn-scoped and is stopped when the turn ends. It is no longer adopted as a session background command that keeps the sandbox busy indefinitely.
+- Updated dependencies [6384dbd]
+- Updated dependencies [2edfa4c]
+  - @opengeni/contracts@1.4.4
+  - @opengeni/sdk@1.4.4
+  - @opengeni/observability@1.4.4
+  - @opengeni/capabilities@1.4.4
+  - @opengeni/codemode@1.4.4
+  - @opengeni/codex@1.4.4
+  - @opengeni/config@1.4.4
+  - @opengeni/tool-gateway@1.4.4
+  - @opengeni/agent-proto@1.4.4
+  - @opengeni/network@1.4.4
+  - @opengeni/xai-subscription@1.4.4
+
 ## 1.4.3
 
 ### Patch Changes

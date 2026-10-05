@@ -1,5 +1,19 @@
 # @opengeni/db
 
+## 1.4.4
+
+### Patch Changes
+
+- db21f93: Start first turns promptly under concurrent load in one organization. The turn claim now takes the organization-membership fence in shared mode, so claims no longer serialize each other, while membership mutators still fence them.
+- Updated dependencies [6384dbd]
+- Updated dependencies [2edfa4c]
+  - @opengeni/contracts@1.4.4
+  - @opengeni/observability@1.4.4
+  - @opengeni/codemode@1.4.4
+  - @opengeni/codex@1.4.4
+  - @opengeni/config@1.4.4
+  - @opengeni/network@1.4.4
+
 ## 1.4.3
 
 ### Patch Changes
