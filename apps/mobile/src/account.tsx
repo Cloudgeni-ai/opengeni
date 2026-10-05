@@ -27,6 +27,7 @@ import {
   useRef,
   useState,
 } from "react";
+import { AppState } from "react-native";
 import {
   forgetAccountToken,
   loadAccounts,
@@ -148,6 +149,8 @@ export function AccountProvider({ children }: { children: ReactNode }) {
   const [workspaces, setWorkspaces] = useState<Workspace[]>([]);
   const [config, setConfig] = useState<ClientConfig | null>(null);
   const [error, setError] = useState<Error | null>(null);
+  const retries = useRef(0);
+  const retryTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const models = useMemo(() => config?.models ?? [], [config]);
 
   const reload = useCallback(async () => {
@@ -174,19 +177,43 @@ export function AccountProvider({ children }: { children: ReactNode }) {
       if (current && (landing !== current.workspaceId || current.signedOut)) {
         updateAccount(accountId, { workspaceId: landing, signedOut: false });
       }
+      retries.current = 0;
     } catch (caught) {
-      if (unauthorized(caught)) updateAccount(accountId, { signedOut: true });
+      if (unauthorized(caught)) {
+        updateAccount(accountId, { signedOut: true });
+      } else {
+        // A deployment that is briefly unreachable comes back on its own:
+        // retry with backoff instead of leaving the account empty.
+        const delay = Math.min(30_000, 2_000 * 2 ** retries.current);
+        retries.current += 1;
+        if (retryTimer.current) clearTimeout(retryTimer.current);
+        retryTimer.current = setTimeout(() => void reloadRef.current(), delay);
+      }
       setError(caught instanceof Error ? caught : new Error(String(caught)));
     }
   }, [accountId, activeToken, client, updateAccount]);
+  const reloadRef = useRef(reload);
+  reloadRef.current = reload;
 
   useEffect(() => {
     setAccessContext(null);
     setWorkspaces([]);
     setConfig(null);
     setError(null);
+    retries.current = 0;
     void reload();
+    return () => {
+      if (retryTimer.current) clearTimeout(retryTimer.current);
+    };
   }, [reload]);
+
+  // Coming back to the app refreshes the account (new workspaces, access).
+  useEffect(() => {
+    const subscription = AppState.addEventListener("change", (state) => {
+      if (state === "active") void reloadRef.current();
+    });
+    return () => subscription.remove();
+  }, []);
 
   const workspaceId = account?.workspaceId ?? null;
   const setWorkspaceId = useCallback(
