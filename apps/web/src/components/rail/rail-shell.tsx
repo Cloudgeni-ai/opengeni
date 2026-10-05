@@ -238,7 +238,7 @@ export function RailShell({ children }: { children: ReactNode }) {
   // Focus returns here when the mobile drawer closes (D9.1): the drawer is a
   // controlled Sheet with no in-tree trigger, so radix can't restore focus on
   // its own — we point it back at the hamburger that opened it.
-  const hamburgerRef = useRef<HTMLButtonElement>(null);
+  const hamburgerRef = rail.drawerTriggerRef;
 
   // Live width while the reader drags the resize handle. Held locally (not in
   // context) so we don't write localStorage on every pointer move — the chosen
@@ -341,7 +341,7 @@ export function RailShell({ children }: { children: ReactNode }) {
               className="w-screen max-w-none gap-0 p-0 sm:w-[380px] sm:max-w-[90vw]"
               onCloseAutoFocus={(event) => {
                 event.preventDefault();
-                hamburgerRef.current?.focus();
+                rail.restoreDrawerFocus();
               }}
             >
               <SheetTitle className="sr-only">Session navigation</SheetTitle>

@@ -20,11 +20,13 @@ import {
   calculateModelListUsageCostSnapshot,
   calculateModelUsageCostBreakdown,
   configuredModelListPricingSchedules,
+  configuredModels,
   configuredModelPricingSchedules,
   resolveModelProvider,
   responseSatisfiesLatencyMode,
   OPENGENI_GATEWAY_PROVIDER_ID,
   WORKSPACE_GATEWAY_PROVIDER_ID,
+  WORKSPACE_GATEWAY_MODEL_ID_PREFIX,
   type ModelUsageInput,
   type ModelProviderApi,
   type Settings,
@@ -35,7 +37,9 @@ import {
   modelCallAccountContext,
   recordCreditMicros,
   recordModelCacheTokens,
+  recordModelCreditsCharged,
   recordModelInputTokens,
+  recordModelResponseUsage,
 } from "../../observability-metrics";
 import {
   type LatencyMode,
@@ -314,6 +318,7 @@ export async function processModelResponseTerminalEvent(input: {
         sourceKey,
         ...(input.latencyMode ? { latencyMode: input.latencyMode } : {}),
         observability: input.observability,
+        metricProvider: input.provider,
       });
       authoritative = await emitModelCallUsage({
         observability: input.observability,
@@ -352,6 +357,14 @@ export async function processModelResponseTerminalEvent(input: {
           ...(input.contextContributions !== undefined
             ? { contextContributions: input.contextContributions }
             : {}),
+        });
+        recordAuthoritativeModelUsageMetrics({
+          observability: input.observability,
+          settings: input.settings,
+          provider: input.provider,
+          model: input.model,
+          externallyBilled: input.externallyBilled,
+          billing,
         });
       }
       const observedInput = normalizedUsage.telemetry.inputTokens;
@@ -463,6 +476,7 @@ export async function processCompactionModelUsageEvent(input: {
         gatewayBilling: input.usage.gatewayBilling,
         sourceKey,
         observability: input.observability,
+        metricProvider: input.provider,
       });
       authoritative = await emitModelCallUsage({
         observability: input.observability,
@@ -501,6 +515,14 @@ export async function processCompactionModelUsageEvent(input: {
           ...(input.contextContributions !== undefined
             ? { contextContributions: input.contextContributions }
             : {}),
+        });
+        recordAuthoritativeModelUsageMetrics({
+          observability: input.observability,
+          settings: input.settings,
+          provider: input.provider,
+          model: input.model,
+          externallyBilled: input.externallyBilled,
+          billing,
         });
       }
     },
@@ -693,6 +715,8 @@ export async function recordModelUsageAndDebitCredits(
     sourceKey: string;
     latencyMode?: LatencyMode;
     observability?: ActivityServices["observability"];
+    /** Configured provider id for metric labels; never billing authority. */
+    metricProvider?: string;
   },
 ): Promise<ModelUsageBillingRecord | null> {
   if (!input.usage) {
@@ -900,6 +924,16 @@ export async function recordModelUsageAndDebitCredits(
       },
     });
     recordCreditMicros(input.observability, "usage", result.debitedMicros);
+    try {
+      recordModelCreditsCharged(input.observability, {
+        provider: input.metricProvider ?? "unknown",
+        model: modelMetricProductId(settings, input.metricProvider, input.model),
+        debitedMicros: result.debitedMicros,
+        grantDebitedMicros: result.grantDebitedMicros,
+      });
+    } catch {
+      // The debit is committed; metrics are best-effort only.
+    }
   }
   return {
     billingPath: "opengeni_credits",
@@ -911,6 +945,70 @@ export async function recordModelUsageAndDebitCredits(
     normalizedUsage,
     ...(gatewayBilling ? { upstreamProvider: gatewayBilling.finalProvider } : {}),
   };
+}
+
+const modelMetricProductIds = new WeakMap<Settings, Map<string, string>>();
+
+/**
+ * The bounded `model` metric label: the deployment catalog product id for a
+ * catalog model, or `custom` for a workspace-owned model (workspace gateway or
+ * a customer-key provider) and for anything the deployment catalog does not
+ * list. Metrics only; never billing or routing authority.
+ */
+export function modelMetricProductId(
+  settings: Settings,
+  provider: string | undefined,
+  model: string,
+): string {
+  if (provider?.startsWith("workspace-") || model.startsWith(WORKSPACE_GATEWAY_MODEL_ID_PREFIX)) {
+    return "custom";
+  }
+  let cache = modelMetricProductIds.get(settings);
+  if (!cache) {
+    cache = new Map();
+    modelMetricProductIds.set(settings, cache);
+  }
+  const cached = cache.get(model);
+  if (cached !== undefined) return cached;
+  let label = "custom";
+  try {
+    const canonical = canonicalizeConfiguredModelId(settings, model);
+    if (configuredModels(settings).some((candidate) => candidate.id === canonical)) {
+      label = canonical;
+    }
+  } catch {
+    // An unreadable catalog leaves the call labelled `custom`.
+  }
+  if (cache.size < 256) cache.set(model, label);
+  return label;
+}
+
+/**
+ * Per-model usage and estimated provider cost for one authoritative response.
+ * Call only after the durable usage event was accepted as current (the same
+ * fence as the Insights fact). Best-effort: never throws.
+ */
+export function recordAuthoritativeModelUsageMetrics(input: {
+  observability: ActivityServices["observability"];
+  settings: Settings;
+  provider: string;
+  model: string;
+  externallyBilled: boolean;
+  billing: ModelUsageBillingRecord;
+}): void {
+  try {
+    const telemetry = input.billing.normalizedUsage.telemetry;
+    recordModelResponseUsage(input.observability, {
+      provider: input.provider,
+      model: modelMetricProductId(input.settings, input.provider, input.model),
+      payer: input.externallyBilled ? "external" : "deployment",
+      tokens: telemetry,
+      estimatedProviderCostMicros: input.billing.estimatedProviderCostMicros,
+      pricingSource: input.billing.pricingSource,
+    });
+  } catch {
+    // Durable event + billing already committed; metrics are best-effort only.
+  }
 }
 
 /** Soft-fail Insights fact write — never throws into the billing/emit path. */

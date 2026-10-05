@@ -27,7 +27,11 @@ icon: "palette"
 
 The new-chat composer is the same as the follow-up one: attachments, your `conversationProps.composerProps`, and the model picker when offered. Files attached to the first message are added to the new chat.
 
-Once a chat exists, its composer shows a live voice button when your workspace has a voice model available (for example hosted GPT Live, paid from your Opengeni credits per minute). The user talks, the voice model answers, hands work to the agent in the same chat, and the transcript appears in the timeline. The button is hidden when no voice model is available. To turn voice off, pass `realtimeVoice: false` to `createSessionProxyHandler`, or `conversationProps={{ realtimeVoice: false }}`.
+Live voice is off unless you turn it on, because each call is paid from your Opengeni credits per minute and asks the browser for the microphone. Pass `realtimeVoice: true` to `createSessionProxyHandler`, or `conversationProps={{ realtimeVoice: true }}`. Once a chat exists, its composer then shows a voice button when your workspace has a voice model available (for example hosted GPT Live). The user talks, the voice model answers, hands work to the agent in the same chat, and the transcript appears in the timeline. `realtimeVoice: false` on the proxy refuses voice even when the component asks for it.
+
+The indicator shown while the agent starts says "Thinking…". Use `conversationProps={{ genieLoading: { phrases: ["One moment…"] } }}` for your own copy, or `genieLoading.render` for your own visual.
+
+For anonymous visitors on a public site, return `visitor: true` from the proxy's `resolve`. Visitors get no attach button (the proxy also refuses their uploads) unless you set `visitorUploads: true`.
 
 If your app authenticates with a bearer token instead of cookies, pass it on every request and read it in the proxy's `resolve`:
 

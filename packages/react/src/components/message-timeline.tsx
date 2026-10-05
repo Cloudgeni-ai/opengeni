@@ -633,6 +633,7 @@ export function MessageTimeline({
             const body = (
               <Markdown
                 searchTarget={searchItem?.id === item.id ? searchTarget : null}
+                softLineBreaks
                 streaming={item.kind === "agent-message" && item.streaming}
                 renderInteractiveBlock={
                   item.kind === "agent-message" ? renderInteractiveBlock : undefined
@@ -4235,7 +4236,7 @@ function UserMessageRow({
                   renderMessageText(item.text, item)
                 ) : (
                   <UserMessageBody messageId={item.id} text={item.text}>
-                    <Markdown>{item.text}</Markdown>
+                    <Markdown softLineBreaks>{item.text}</Markdown>
                   </UserMessageBody>
                 )}
               </div>
@@ -4445,7 +4446,9 @@ function AgentMessageRow({
   const body = renderMessageText ? (
     renderMessageText(item.text, item)
   ) : (
-    <Markdown streaming={item.streaming}>{item.text}</Markdown>
+    <Markdown softLineBreaks streaming={item.streaming}>
+      {item.text}
+    </Markdown>
   );
   // While streaming, copy is still useful (current text) but keep chrome calm —
   // stamp only after the message finishes (occurredAt tracks completion).

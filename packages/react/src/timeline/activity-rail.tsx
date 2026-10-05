@@ -264,7 +264,9 @@ function ActivityNoteRow({ item }: { item: AgentMessageItem }) {
         {renderText ? (
           renderText(item.text, item)
         ) : (
-          <Markdown streaming={item.streaming}>{item.text}</Markdown>
+          <Markdown softLineBreaks streaming={item.streaming}>
+            {item.text}
+          </Markdown>
         )}
       </div>
     </div>

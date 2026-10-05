@@ -669,6 +669,89 @@ describe("Workspace page", () => {
   });
 });
 
+describe("organization with many tenant workspaces", () => {
+  // An embedding product provisions one shared workspace per tenant with its
+  // organization key; none of them has a human member yet.
+  function manyTenants(): OrganizationAdministrationOverview {
+    const base = overview();
+    const tenants = Array.from({ length: 12 }, (_, index) => ({
+      id: `ws-tenant-${index}`,
+      name: `Tenant ${String(index).padStart(2, "0")}`,
+      slug: null,
+      createdAt: timestamp,
+      updatedAt: timestamp,
+      members: [],
+    }));
+    return { ...base, workspaces: [...base.workspaces, ...tenants] };
+  }
+
+  async function search(container: HTMLElement, label: string, value: string) {
+    const input = container.querySelector<HTMLInputElement>(`input[aria-label="${label}"]`);
+    if (!input) throw new Error(`Missing search: ${label}`);
+    await act(async () => {
+      Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, "value")!.set!.call(input, value);
+      const key = Object.keys(input).find((property) => property.startsWith("__reactProps$"))!;
+      (
+        input as unknown as Record<
+          string,
+          { onChange: (event: { target: HTMLInputElement }) => void }
+        >
+      )[key]!.onChange({ target: input });
+    });
+    await flush();
+  }
+
+  test("the Workspaces list searches by name and offers Join on a key-created workspace", async () => {
+    const client = makeClient({
+      getOrganizationAdministrationOverview: mock(async () => manyTenants()),
+    });
+    const view = mount(null);
+    await view.render(
+      <Provider client={client}>
+        <OrganizationWorkspacesPage workspaceId="workspace-a" />
+      </Provider>,
+    );
+    await flush();
+    expect(view.container.textContent).toContain("Tenant 11");
+    await search(view.container, "Search workspaces", "tenant 07");
+    expect(view.container.textContent).toContain("Tenant 07");
+    expect(view.container.textContent).not.toContain("Tenant 11");
+    expect(view.container.textContent).not.toContain("Platform engineering");
+    expect(view.container.textContent).toContain("1 of 13 workspaces");
+
+    // The key-created tenant has no human member, so its owner is offered Join.
+    expect(
+      view.container.querySelectorAll('button[aria-label="Join Tenant 07"]').length,
+    ).toBeGreaterThan(0);
+
+    await search(view.container, "Search workspaces", "nothing like this");
+    expect(view.container.textContent).toContain("No workspaces match");
+    await view.unmount();
+  });
+
+  test("a person's Workspace access lists every shared workspace with a search", async () => {
+    const client = makeClient({
+      getOrganizationAdministrationOverview: mock(async () => manyTenants()),
+    });
+    const view = mount(null);
+    await view.render(
+      <Provider client={client}>
+        <OrganizationPeoplePage workspaceId="workspace-a" person="owner" />
+      </Provider>,
+    );
+    await flush();
+    const rows = () =>
+      view.container.querySelectorAll('[aria-label="Workspace access for Olivia Owner"] > li');
+    expect(rows()).toHaveLength(13);
+    await search(view.container, "Search workspaces for Olivia Owner", "Tenant 0");
+    expect(rows()).toHaveLength(10);
+    expect(view.container.textContent).toContain("10 of 13 workspaces");
+    await search(view.container, "Search workspaces for Olivia Owner", "zzz");
+    expect(view.container.textContent).toContain("No workspaces match.");
+    await view.unmount();
+  });
+});
+
 describe("New workspace page", () => {
   async function createNamed(container: HTMLElement, name: string) {
     const input = container.querySelector<HTMLInputElement>("input")!;

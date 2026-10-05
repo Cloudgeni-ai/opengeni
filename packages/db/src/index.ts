@@ -1796,6 +1796,13 @@ export const managedPersonalWorkspacePermissions: Permission[] = [
   "sessions:create",
   "sessions:read",
   "sessions:control",
+  // Live viewing and handoff of the owner's own sessions (browser/computer sign-in handoff, desktop,
+  // terminal, file edits). Without these the owner was refused (403) when joining their own handoff.
+  "stream:view",
+  "stream:control",
+  "stream:acknowledge",
+  "terminal:attach",
+  "files:write",
   "files:upload",
   "files:read",
   "documents:manage",
@@ -5760,26 +5767,40 @@ export async function sumUsageQuantity(
   });
 }
 
+type CreditLedgerEntryInput = {
+  accountId: string;
+  workspaceId?: string | null;
+  type: string;
+  amountMicros: number;
+  eligibleModelIds?: string[] | undefined;
+  sourceType?: string | null;
+  sourceId?: string | null;
+  idempotencyKey: string;
+  metadata?: Record<string, unknown>;
+  occurredAt?: Date;
+};
+
 export async function applyCreditLedgerEntry(
   db: Database,
-  input: {
-    accountId: string;
-    workspaceId?: string | null;
-    type: string;
-    amountMicros: number;
-    eligibleModelIds?: string[] | undefined;
-    sourceType?: string | null;
-    sourceId?: string | null;
-    idempotencyKey: string;
-    metadata?: Record<string, unknown>;
-    occurredAt?: Date;
-  },
+  input: CreditLedgerEntryInput,
 ): Promise<BillingBalance> {
+  return (await applyCreditLedgerEntryOnce(db, input)).balance;
+}
+
+/**
+ * {@link applyCreditLedgerEntry} that also reports whether this call inserted
+ * the row. `inserted` is false when the idempotency key already existed, so a
+ * caller can count a purchase exactly once even when two deliveries race.
+ */
+export async function applyCreditLedgerEntryOnce(
+  db: Database,
+  input: CreditLedgerEntryInput,
+): Promise<{ balance: BillingBalance; inserted: boolean }> {
   return await withRlsContext(
     db,
     { accountId: input.accountId, workspaceId: input.workspaceId ?? null },
     async (scopedDb) => {
-      await scopedDb
+      const inserted = await scopedDb
         .insert(schema.creditLedgerEntries)
         .values({
           accountId: input.accountId,
@@ -5795,8 +5816,12 @@ export async function applyCreditLedgerEntry(
         })
         .onConflictDoNothing({
           target: schema.creditLedgerEntries.idempotencyKey,
-        });
-      return await getBillingBalance(scopedDb, input.accountId);
+        })
+        .returning({ id: schema.creditLedgerEntries.id });
+      return {
+        balance: await getBillingBalance(scopedDb, input.accountId),
+        inserted: inserted.length > 0,
+      };
     },
   );
 }
@@ -5817,11 +5842,21 @@ export async function applyCreditDebitUpToBalance(
     metadata?: Record<string, unknown>;
     occurredAt?: Date;
   },
-): Promise<{ balance: BillingBalance; debitedMicros: number }> {
+): Promise<{
+  balance: BillingBalance;
+  debitedMicros: number;
+  /**
+   * The part of `debitedMicros` paid by scoped promotional grants (signup
+   * trial, scoped coupon offers). The rest came from general credit. Zero on
+   * an idempotent replay, like `debitedMicros`.
+   */
+  grantDebitedMicros: number;
+}> {
   if (input.requestedAmountMicros <= 0) {
     return {
       balance: await getBillingBalance(db, input.accountId),
       debitedMicros: 0,
+      grantDebitedMicros: 0,
     };
   }
   return await withRlsContext(
@@ -5869,6 +5904,9 @@ export async function applyCreditDebitUpToBalance(
       return {
         balance: await getBillingBalance(scopedDb, input.accountId),
         debitedMicros,
+        grantDebitedMicros: inserted
+          ? plan.allocations.reduce((sum, allocation) => sum + allocation.amountMicros, 0)
+          : 0,
       };
     },
   );
@@ -72486,10 +72524,12 @@ export async function claimSessionWorkForAttempt(
       stage: "session_attempts.claim",
       eventTypes: ["session.turn.attempt_claimed"],
       maxAttempts: 3,
-      // Claim reads membership-fenced authority; it never mutates membership.
-      // Shared keeps membership mutators fenced while concurrent claims in
-      // one organization stay parallel (exclusive serialized every claim).
-      organizationMembershipFence: "shared",
+      // No organization-membership fence, not even shared: the claim never
+      // takes that key (no trigger or function it reaches does since the
+      // host-MCP authority writers were retired), so it cannot invert the
+      // membership -> tenancy -> control -> session prefix. A membership
+      // removal racing a claim is caught at execution time: workspace-writer
+      // admission, connection and MCP authority revalidate live membership.
     },
     async (scopedDb) =>
       await withSessionActivitySavepoint(scopedDb, async (tx) => {
@@ -85785,6 +85825,8 @@ export async function acceptSessionApprovalDecision(
 export type ExpireSessionInteractionInterventionResult = {
   action: "expired" | "stale" | "not_found";
   events: SessionEvent[];
+  /** Content-free facts for telemetry on the expired transition only. */
+  intervention?: { kind: string; createdAt: Date };
 };
 
 /**
@@ -86001,6 +86043,8 @@ export async function expireSessionInteractionIntervention(
       const [row] = await scopedDb
         .select({
           id: schema.interactionInterventions.id,
+          kind: schema.interactionInterventions.kind,
+          createdAt: schema.interactionInterventions.createdAt,
           status: schema.interactionInterventions.status,
           version: schema.interactionInterventions.version,
           expiresAt: schema.interactionInterventions.expiresAt,
@@ -86049,7 +86093,11 @@ export async function expireSessionInteractionIntervention(
     },
   });
   return result.action === "accepted"
-    ? { action: "expired", events: result.events }
+    ? {
+        action: "expired",
+        events: result.events,
+        intervention: { kind: intervention.kind, createdAt: intervention.createdAt },
+      }
     : { action: "stale", events: [] };
 }
 

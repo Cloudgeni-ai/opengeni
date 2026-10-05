@@ -58,6 +58,16 @@ const PHRASES = [
 ];
 const WAITING_PHRASES = ["Waiting for a response…"];
 
+/**
+ * Neutral defaults for conversations embedded in another product
+ * (`SessionConversation`, `OpenGeniChat`), which should not carry Opengeni's
+ * own playful copy. The Opengeni app keeps the defaults above.
+ */
+export const EMBEDDED_GENIE_LOADING = {
+  phrases: ["Thinking…"],
+  messages: { showDetails: "Show details" },
+} as const satisfies GenieLoadingOptions;
+
 /** Decorative copy never substitutes for a failure or claims measurable progress. */
 export function GenieLoading({
   startedAt,

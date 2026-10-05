@@ -194,8 +194,16 @@ files and applies those choices to the request the hook returns. Voice input
 "Archive" when they are off, shows Site previews as unavailable without a
 request, and shows the composer microphone only when `voiceInput.available`.
 
+Composer uploads are refused for anonymous visitors: return `visitor: true`
+from `resolve` for a user your product has not signed in (for example a
+website visitor keyed by a cookie), and the proxy reports file uploads off and
+refuses the upload routes unless `visitorUploads: true`. Agent-produced media
+still loads under `files`.
+
 Live voice (speech-to-speech) is forwarded the same way unless
-`realtimeVoice: false`: the workspace's voice model catalog and the call routes
+`realtimeVoice: false`. The stock conversation shows its voice button only when
+you opt in, with `realtimeVoice: true` here (reported in the client config) or
+the component's `realtimeVoice` prop. The proxy forwards the workspace's voice model catalog and the call routes
 under `.../sessions/{id}/realtime` (start, provider connect, heartbeat,
 activate, transcript sync, end). Opengeni still checks the user's
 `sessions:control` permission, binds the call to that user and browser, runs
@@ -1436,6 +1444,7 @@ it is not public web search.
 
 ```ts
 const goal = await client.getGoal(workspaceId, sessionId); // counters: autoContinuations, noProgressStreak
+const maybeGoal = await client.findGoal(workspaceId, sessionId); // null for a goal-less session (no 404)
 await client.pauseGoal(workspaceId, sessionId, { rationale: "manual review" });
 await client.resumeGoal(workspaceId, sessionId); // resets counters, re-arms continuations
 
@@ -1533,7 +1542,7 @@ Every public endpoint group has typed methods:
 | Sessions + events | `createSession`, `listSessions`, `listSessionPage`, `listAgentTopology`, `getSession`, `getSessionLineage`, `updateSession`, `listEvents`, `sendEvent`, `sendMessage`, `steerMessage`, `pauseSession`, `resumeSession`, `cancelSession`, `sendApprovalDecision`, `streamEvents`, `openEventStream` |
 | Machines (bring-your-own-compute) | `listMachines`, `machineMetricsSeries`, `swapActiveSandbox`, `mintEnrollToken`, `lookupDeviceEnrollment`, `approveDeviceEnrollment`, `denyDeviceEnrollment` |
 | Turn queue | `getQueue`, `moveQueueItem`, `editQueueItem`, `steerQueueItem`, `deleteQueueItem` |
-| Goal | `getGoal`, `updateGoal`, `pauseGoal`, `resumeGoal`, `listGoalRevisions`, `listGoalRevisionPage`, `applyGoalRevision`, `rejectGoalRevision`, `rollbackGoalRevision` |
+| Goal | `getGoal`, `findGoal`, `updateGoal`, `pauseGoal`, `resumeGoal`, `listGoalRevisions`, `listGoalRevisionPage`, `applyGoalRevision`, `rejectGoalRevision`, `rollbackGoalRevision` |
 | Scheduled tasks | `createScheduledTask`, `listScheduledTasks`, `getScheduledTask`, `updateScheduledTask`, `pauseScheduledTask`, `resumeScheduledTask`, `triggerScheduledTask`, `deleteScheduledTask`, `listScheduledTaskRuns`, `refreshScheduledTaskAccess`, `listScheduledTaskAccessAttention` |
 | Variable sets | `listVariableSets`, `createVariableSet`, `getVariableSet`, `updateVariableSet`, `deleteVariableSet`, `setVariableSetVariable`, `deleteVariableSetVariable`; generic reads are metadata-only, while dedicated permissioned exact-value reads are part of the held client train |
 | Files | `uploadFile`, `beginFileUpload`, `completeFileUpload`, `getFile`, `createFileDownloadUrl` |

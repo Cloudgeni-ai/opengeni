@@ -1093,6 +1093,28 @@ members, cross-organization membership ids, and every Personal workspace fail
 closed. Organization membership role changes keep the 0263 sole-owner
 invariant; workspace roles do not alter organization roles.
 
+That authority covers every shared workspace in the organization and every
+active member, the acting owner or administrator included. A workspace an
+organization key provisions (an embedding product's per-tenant
+`ensureWorkspace`/`og.workspaceId({ tenant })`) is an ordinary shared workspace
+in this inventory even though no human is a member of it, so an owner who
+cannot open a tenant's sessions grants themself (or anyone else) a role on it
+from Organization → Workspaces (**Join**) or Organization → People → the person →
+**Workspace access**, both of which call the same
+`PUT /v1/organizations/:organizationId/workspaces/:workspaceId/members/:membershipId`
+lifecycle. Lists longer than eight shared workspaces offer a name search.
+Migration `0634_organization_admin_self_workspace_removal.sql` (rolling)
+completes the self case: the removal-actor guard's "a member cannot remove
+their own workspace membership" rule is waived only for the transaction-local
+organization-administration capability that the organization revoke route
+opens, exactly like the last-administering-member guard; a workspace admin
+still cannot remove themself through the workspace's own Members route.
+Grants and revocations of one's own access write the same receipts and
+`organization_workspace_lifecycle_events` rows as any other. Organization keys
+still never manage human workspace membership: these routes require a managed
+human session (or an agent acting as that person), and the key keeps only its
+existing external-member administration. Personal workspaces stay owner-only.
+
 Create, rename, grant, and revoke are operation-id idempotent. Renames and
 access replacement/removal are exact-timestamp CAS fenced. Immutable FORCE-RLS
 receipt and event tables record the actor membership, shared workspace, target
@@ -1114,7 +1136,19 @@ page is the scoped editor for that workspace: a holder of `members:manage` may
 choose from a bounded list of active same-organization humans who do not already
 have access, add the selected organization membership, change that member's
 workspace role or fine-grained permissions, and revoke that exact workspace
-grant. It cannot invite people into the organization, change organization
+grant. Since migration `0635_organization_admin_workspace_member_management.sql`
+(rolling) an active organization owner or administrator may do the same on any
+shared workspace in their organization from that page, with or without their
+own workspace grant (or with one lacking `members:manage`): the API's
+`requireWorkspaceMemberManagementAuthority` admits only a canonical managed-cookie
+session whose organization role is owner/admin for a shared workspace, the two
+SECURITY DEFINER checks (`list_workspace_member_management_candidates`,
+`assert_workspace_member_management_candidate`) re-derive that active
+owner/admin `user:` membership, and removal opens the organization
+administration capability. The page keeps its own self and
+last-administering-member guards for every actor; ordinary members still need
+`members:manage` or `workspace:admin` on their own row, and API keys, delegated
+bearers, agents, and services keep the original refusal. It cannot invite people into the organization, change organization
 roles, enumerate unrelated workspace access, or administer Personal
 workspaces. The separate Slack access-request queue keeps its existing
 workspace-admin lifecycle.
@@ -1453,6 +1487,20 @@ recreates this deadlock. Serialize on the advisory key instead. CAS on
 `organization_memberships.authorization_revision`, the operation-receipt
 idempotency, and every fail-closed authorization check are unchanged by 0299 -
 only lock strength and lock class moved.
+
+**The turn claim is not on this key.** `claimSessionWorkForAttempt` takes
+neither the exclusive nor the shared `organization-membership:<organization
+id>` advisory lock, and nothing it reaches takes it: the host-MCP authority
+guard triggers (migrations 0445-0448) that once took it exclusively from inside
+the claim sit on tables with no remaining writer. A claim therefore holds only
+the shared tenancy fence and the canonical control/workspace/session/turn/
+attempt prefix, so it cannot invert the order above, and claims in one
+organization never serialize each other. A membership removal that commits
+while a claim is in flight is enforced at execution time instead: workspace
+writer admission refuses a revoked grant with `authority_revoked`, and
+connection and MCP authority revalidate live membership on every use. Do not
+add a membership lock, or a write whose trigger takes one, to the claim.
+`packages/db/test/claim-organization-membership-fence.test.ts` pins this.
 
 `packages/db/test/migration-0299-organization-membership-lock-order.test.ts`
 holds the regression evidence: a deterministic cycle probe, a parallel-load

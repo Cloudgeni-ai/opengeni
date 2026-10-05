@@ -14,6 +14,15 @@ import {
 import { ExportQueue } from "./export-queue";
 import { failureDiagnostic, type FailureDiagnosticInput } from "./failure-diagnostic";
 export type { FailureDiagnosticInput } from "./failure-diagnostic";
+export {
+  AGENT_TOOL_CALL_OUTCOMES,
+  AGENT_TOOL_METRIC_FAMILIES,
+  agentToolCallOutcome,
+  agentToolMetricFamily,
+  recordAgentToolCall,
+  type AgentToolCallOutcome,
+  type AgentToolMetricFamily,
+} from "./agent-tool-metrics";
 export { failureDiagnostic } from "./failure-diagnostic";
 export { createLogThrottle, type LogThrottle } from "./log-throttle";
 export {
@@ -236,9 +245,57 @@ const INTERACTION_OUTCOMES = new Set([
   "dispatched",
   "completed",
   "failed",
+  "denied",
   "outcome_unknown",
   "stale",
   "cancelled",
+]);
+/** Receipt error codes (InteractionError.code) plus HTTP-derived refusals. */
+const INTERACTION_OPERATION_REASONS = new Set([
+  "none",
+  "resource_not_found",
+  "resource_unavailable",
+  "controller_stale",
+  "target_not_found",
+  "target_stale",
+  "observation_stale",
+  "document_stale",
+  "frame_stale",
+  "locator_not_found",
+  "locator_ambiguous",
+  "unsupported",
+  "permission_denied",
+  "machine_locked",
+  "attempt_stale",
+  "operation_conflict",
+  "outcome_unknown",
+  "invalid_action",
+  "timeout",
+  "controller_lost",
+  "driver_failed",
+  "action_failed",
+  "stale",
+  "unauthenticated",
+  "access_denied",
+  "not_found",
+  "conflict",
+  "invalid_request",
+  "rate_limited",
+  "unavailable",
+  "internal",
+  "rejected",
+  "control_unsupported",
+  "control_os",
+  "control_not_found",
+  "control_consent_required",
+  "control_timeout",
+  "control_draining",
+  "control_protocol",
+  "control_stream",
+  "control_agent_offline",
+  "control_fenced",
+  "control_payload_too_large",
+  "control_unknown",
 ]);
 const INTERACTION_MODES = new Set([
   "semantic",
@@ -345,10 +402,20 @@ const PUBLIC_TELEMETRY_ATTRIBUTE_KEYS = new Set([
 /** Opaque correlation fields require both a reviewed name and a closed value
  * grammar. Merely adding one to the ordinary allow-list would let an unrelated
  * caller accidentally publish a raw identifier under that name. */
+const HTTP_REJECTION_CODE_PATTERN = /^[a-z][a-z0-9_]{0,63}$/;
+const HTTP_REJECTION_REASON_PATTERN =
+  /^(?:permission:[a-z][a-z0-9-]*:[a-z][a-z0-9-]*|control:[a-z][a-z0-9_]{0,31}|[A-Za-z][A-Za-z0-9_.-]{0,63})$/;
+
 const PUBLIC_TELEMETRY_OPAQUE_ATTRIBUTE_PATTERNS = new Map<string, RegExp>([
   ["mcpCallKey", /^mcp_[0-9a-f]{32}$/],
   ["sandboxLeaseKey", /^slk_[0-9a-f]{32}$/],
   ["correlationId", /^[A-Za-z0-9._:-]{1,128}$/],
+  // Rejected-request classification (apps/api/src/http/rejection-telemetry.ts):
+  // the public ErrorEnvelope code enum, a catalog permission or typed detail
+  // code, and a one-way message hash. Never message text or identifiers.
+  ["rejectionCode", HTTP_REJECTION_CODE_PATTERN],
+  ["rejectionReason", HTTP_REJECTION_REASON_PATTERN],
+  ["rejectionFingerprint", /^m_[0-9a-f]{10}$/],
   // Web error beacon: a route PATTERN of lowercase literal and `$param`
   // segments (never a concrete path or id) and the bundle revision token, in
   // the exact wire grammar the API route admits.
@@ -852,6 +919,33 @@ export class Observability {
     });
   }
 
+  /**
+   * Count a rejected API request by route, status, public error code, and a
+   * bounded reason (`permission:<name>`, a typed detail code, or
+   * `unclassified`). Values outside the closed grammars collapse to `other` so
+   * a malformed caller can never mint a free-form series.
+   */
+  recordHttpRejection(input: {
+    method: string;
+    route: string;
+    status: number;
+    code: string;
+    reason: string;
+  }): void {
+    this.incrementCounter({
+      name: "opengeni_http_request_rejections_total",
+      help: "Rejected HTTP requests (status >= 400) by route, status, public error code, and bounded reason.",
+      labels: {
+        method: input.method,
+        route: input.route,
+        status: String(input.status),
+        code: HTTP_REJECTION_CODE_PATTERN.test(input.code) ? input.code : "other",
+        reason: HTTP_REJECTION_REASON_PATTERN.test(input.reason) ? input.reason : "other",
+        component: this.options.component,
+      },
+    });
+  }
+
   recordWorkerActivity(input: { activity: string; status: string; durationSeconds: number }): void {
     this.incrementCounter({
       name: "opengeni_worker_activity_runs_total",
@@ -1257,6 +1351,8 @@ export type InteractionOperationMetricObservation = {
   operation: string;
   outcome: string;
   mode: string;
+  /** Bounded failure reason; `none` for successful or non-failed outcomes. */
+  reason?: string | undefined;
   durationMs: number;
   replayed?: boolean | undefined;
 };
@@ -1274,11 +1370,12 @@ export function interactionOperationMetricObserver(
     const operation = boundedMetricEnum(INTERACTION_OPERATIONS, observation.operation);
     const outcome = boundedMetricEnum(INTERACTION_OUTCOMES, observation.outcome);
     const mode = boundedMetricEnum(INTERACTION_MODES, observation.mode);
+    const reason = boundedMetricEnum(INTERACTION_OPERATION_REASONS, observation.reason ?? "none");
     try {
       observability.incrementCounter({
         name: "opengeni_interaction_operations_total",
-        help: "Browser and Computer operations by bounded resource, operation, mode, and outcome.",
-        labels: { resource, operation, mode, outcome },
+        help: "Browser and Computer operations by bounded resource, operation, mode, outcome, and failure reason.",
+        labels: { resource, operation, mode, outcome, reason },
       });
       observability.observeHistogram({
         name: "opengeni_interaction_operation_duration_seconds",

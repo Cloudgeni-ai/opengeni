@@ -15,6 +15,7 @@ import { configuredEntitlements, promotionalCreditScope } from "@opengeni/config
 import { creditScopeMetadata, creditScopeFromMetadata } from "../credit-promotion-snapshot";
 import {
   applyCreditLedgerEntry,
+  applyCreditLedgerEntryOnce,
   getBillingBalance,
   readCreditPromotionPolicy,
   getBillingCustomer,
@@ -666,7 +667,7 @@ async function grantCheckoutSessionCredits(
   if (await hasCreditLedgerEntry(deps.db, credit.accountId, credit.idempotencyKey)) {
     return;
   }
-  await applyCreditLedgerEntry(deps.db, {
+  const { inserted } = await applyCreditLedgerEntryOnce(deps.db, {
     accountId: credit.accountId,
     type: freeCouponCheckout ? "grant" : "credit_topup",
     amountMicros: credit.amountMicros,
@@ -692,7 +693,66 @@ async function grantCheckoutSessionCredits(
         : {}),
     },
   });
+  // Two deliveries (webhook and the late-webhook status read) may race past
+  // the existence check; only the call that inserted the row counts.
+  if (!inserted) return;
   recordCreditMicrosMetric(deps, freeCouponCheckout ? "grant" : "topup", credit.amountMicros);
+  if (!freeCouponCheckout) {
+    recordCreditPurchaseMetrics(deps.observability, {
+      livemode: source.livemode,
+      creditMicros: credit.amountMicros,
+      currency: session.currency,
+      amountTotal: session.amount_total,
+    });
+  }
+}
+
+/**
+ * One paid credit purchase (a `credit_topup` ledger row from a Stripe
+ * checkout). Fully discounted coupon checkouts are grants, not purchases, and
+ * are counted by `opengeni_credit_granted_micros_total{grant_class="coupon"}`.
+ * Labels are the closed `mode` (live | test) only; never an account or
+ * customer identifier.
+ */
+export function recordCreditPurchaseMetrics(
+  observability: ApiRouteDeps["observability"],
+  input: {
+    livemode: boolean;
+    creditMicros: number;
+    currency: string | null | undefined;
+    amountTotal: number | null | undefined;
+  },
+): void {
+  if (!observability || !Number.isSafeInteger(input.creditMicros) || input.creditMicros <= 0) {
+    return;
+  }
+  const labels = { mode: input.livemode ? "live" : "test" };
+  observability.incrementCounter({
+    name: "opengeni_credit_purchases_total",
+    help: "Paid credit purchases (Stripe checkout credit top-ups) by mode.",
+    labels,
+  });
+  observability.incrementCounter({
+    name: "opengeni_credit_purchased_micros_total",
+    help: "Credit micros added by paid credit purchases, by mode.",
+    labels,
+    amount: input.creditMicros,
+  });
+  // Stripe amounts are in the currency's minor unit; credit checkouts are USD,
+  // where one cent is 10,000 micros. Other currencies are not converted.
+  if (
+    input.currency === "usd" &&
+    typeof input.amountTotal === "number" &&
+    Number.isSafeInteger(input.amountTotal) &&
+    input.amountTotal > 0
+  ) {
+    observability.incrementCounter({
+      name: "opengeni_credit_purchase_paid_usd_micros_total",
+      help: "USD micros customers paid for credit purchases (after discounts), by mode.",
+      labels,
+      amount: input.amountTotal * 10_000,
+    });
+  }
 }
 
 /**

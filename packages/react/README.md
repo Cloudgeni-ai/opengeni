@@ -139,13 +139,21 @@ separately. Pass `conversationProps` for message rendering and tool renderers,
 `createSession` to create chats through your own endpoint, or `sessionId` /
 `onSessionChange` to control the selection (for example from the URL).
 
-The composer shows a live voice button when the workspace offers an available
+Live voice is opt-in, because a call spends your credits and asks the browser
+for the microphone. Turn it on with `realtimeVoice={true}` (via `OpenGeniChat`'s
+`conversationProps` too) or `createSessionProxyHandler({ realtimeVoice: true })`.
+The composer then shows a voice button when the workspace offers an available
 voice model (for example hosted GPT Live with credits): the user talks, the
 voice model answers and hands work to the agent in the same chat, and the
-transcript lands in the timeline. It is hidden when no model is available, when
-the proxy sets `realtimeVoice: false`, or when you pass `realtimeVoice={false}`
-(also via `OpenGeniChat`'s `conversationProps`). The voice code loads lazily on
-first display.
+transcript lands in the timeline. It stays hidden when no model is available,
+when the proxy sets `realtimeVoice: false`, or when you pass
+`realtimeVoice={false}`. The voice code loads lazily on first display.
+
+The working indicator before the first reply says "Thinking…". Pass
+`genieLoading` (`phrases`, `messages`, `orb`, or a whole `render`) to use your
+own copy or visual. File attachments follow the proxy: it reports them off when
+`files: false`, and for anonymous visitors (`visitor: true` from `resolve`)
+unless it sets `visitorUploads: true`.
 
 `SessionConversation` and `OpenGeniChat` are built to look native inside
 someone else's product with zero styling:
@@ -980,7 +988,10 @@ intentional changes should regenerate those snapshots and review the diff.
 - `MessageTimeline` — the session timeline with stick-to-bottom scrolling, a
   "jump to latest" affordance, streaming caret, collapsible activity clusters,
   and worker cards (wire `onOpenSession` to drill into a worker). Pass
-  `renderMessageText` to plug a markdown renderer. Pass
+  `renderMessageText` to plug a markdown renderer. The default renderer shows a
+  single newline in a message as a line break, like other chat apps; a custom
+  renderer gets the same result with `<Markdown softLineBreaks>{text}</Markdown>`
+  (off by default for non-chat Markdown). Pass
   `loadRetainedArtifact` to render permanent generated-image receipts; a loader
   may return verified bytes or a short-lived signed URL. The stock web app uses
   the URL path to avoid copying multi-megabyte images into JavaScript memory.

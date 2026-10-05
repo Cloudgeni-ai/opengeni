@@ -84,6 +84,10 @@ function upstreamServer() {
       body: multipart ? await request.formData() : text ? JSON.parse(text) : undefined,
     });
     const path = url.pathname;
+    if (path.endsWith("/goal") && request.method === "GET" && url.searchParams.has("absent")) {
+      // A goal-less session read through the `absent=null` opt-in.
+      return Response.json(null);
+    }
     if (path === `/v1/workspaces/${WORKSPACE_ID}/realtime-model-catalog`) {
       return Response.json({ models: [VOICE_MODEL] });
     }
@@ -503,6 +507,17 @@ describe("createSessionProxyHandler", () => {
     expect(guarded.upstream.requests).toHaveLength(0);
   });
 
+  test("goal read forwards the absent=null opt-in so a goal-less session is a 200 null", async () => {
+    const { upstream, browser } = setup();
+    expect(await browser.findGoal(WORKSPACE_ID, SESSION_ID)).toBeNull();
+    const [request] = upstream.requests;
+    expect(request!.method).toBe("GET");
+    expect(request!.url.pathname).toBe(
+      `/v1/workspaces/${WORKSPACE_ID}/sessions/${SESSION_ID}/goal`,
+    );
+    expect(request!.url.searchParams.get("absent")).toBe("null");
+  });
+
   test("acts as the resolved external user through asUser", async () => {
     const { upstream, browser } = setup();
     const session = await browser.getSession(WORKSPACE_ID, SESSION_ID);
@@ -818,6 +833,58 @@ describe("createSessionProxyHandler", () => {
     expect((await send(open.handler, "POST", "realtime")).status).toBe(400);
     expect(denied.upstream.requests).toHaveLength(0);
     expect(open.upstream.requests).toHaveLength(0);
+  });
+
+  test("only an explicit realtimeVoice: true offers voice to stock UIs", async () => {
+    expect((await setup().browser.getClientConfig()).realtimeVoice).toBeUndefined();
+    expect((await setup({ realtimeVoice: true }).browser.getClientConfig()).realtimeVoice).toBe(
+      true,
+    );
+  });
+
+  test("anonymous visitors cannot upload unless visitorUploads is set", async () => {
+    const visitor = {
+      resolve: () => ({ workspaceId: WORKSPACE_ID, user: "visitor:abc", visitor: true }),
+    };
+    const upload = (handler: (request: Request) => Promise<Response>, path: string) =>
+      handler(
+        new Request(`${PRODUCT}/api/opengeni/v1/workspaces/${WORKSPACE_ID}/files/${path}`, {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({
+            scope: "session",
+            filename: "a.txt",
+            contentType: "text/plain",
+            sizeBytes: 1,
+          }),
+        }),
+      );
+    const refused = setup(visitor);
+    expect((await refused.browser.getClientConfig()).fileUploads?.enabled).toBe(false);
+    expect((await upload(refused.handler, "uploads")).status).toBe(404);
+    expect((await upload(refused.handler, "uploads/up_1/complete")).status).toBe(404);
+    expect(refused.upstream.requests.some((r) => r.url.pathname.includes("/files/uploads"))).toBe(
+      false,
+    );
+    // Agent-produced files still download.
+    await refused.browser.createFileDownloadUrl(
+      WORKSPACE_ID,
+      "33333333-3333-4333-8333-333333333333",
+    );
+    expect(refused.upstream.requests.at(-1)!.url.pathname).toContain("/download-url");
+
+    const allowed = setup({ ...visitor, visitorUploads: true });
+    expect((await allowed.browser.getClientConfig()).fileUploads?.enabled).not.toBe(false);
+    await upload(allowed.handler, "uploads");
+    expect(allowed.upstream.requests.at(-1)!.url.pathname).toBe(
+      `/v1/workspaces/${WORKSPACE_ID}/files/uploads`,
+    );
+
+    // Signed-in users follow `files`; `files: false` now also reports uploads off.
+    expect((await setup().browser.getClientConfig()).fileUploads?.enabled).not.toBe(false);
+    expect((await setup({ files: false }).browser.getClientConfig()).fileUploads?.enabled).toBe(
+      false,
+    );
   });
 
   test("realtimeVoice: false reports voice off and refuses every voice route", async () => {
