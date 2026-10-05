@@ -18436,7 +18436,13 @@ export const ClientConfig = /* @__PURE__ */ defineModelContractSchema(() =>
           .strict(),
       })
       .strict()
+      // A session proxy that does not serve artifacts reports `false`.
+      .or(z.literal(false))
       .optional(),
+    /** Session proxy capability: browser chat creation; absent on native deployments. */
+    sessionCreation: z.boolean().optional(),
+    /** Session proxy capability: chat archive/restore; absent on native deployments. */
+    archive: z.boolean().optional(),
     // Native voice-input capability. Provider/model/credentials stay server-private;
     // clients only learn whether a deployment can transcribe and the hard ceilings.
     voiceInput: ClientVoiceInputConfig.default({

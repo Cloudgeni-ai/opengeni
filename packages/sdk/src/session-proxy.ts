@@ -10,6 +10,7 @@ import type {
   FileResourceRef,
   LatencyMode,
   ReasoningEffort,
+  RetainedArtifactContent,
   SessionMcpCredentialUpdateInput,
 } from "./types";
 import { mintToolToken, resolveToolTokenSecret } from "./tool-auth";
@@ -218,7 +219,15 @@ export type SessionProxyHandlerOptions = {
   basePath?: string | undefined;
   /** Maximum JSON request body. Defaults to 1 MiB. */
   maxBodyBytes?: number | undefined;
-  /** Expose composer file attachments (upload begin/complete, download URL). Defaults to true. */
+  /**
+   * Expose composer file attachments (upload begin/complete, download URL) and
+   * the media agents produce in a session: generated images, browser and
+   * computer screenshots, published sandbox files, and generated video
+   * playback. Workspace-level artifact reads must name their session in the
+   * `x-opengeni-session-id` header (`SessionConversation` does this); the proxy
+   * runs `authorizeSession` and only forwards an artifact OpenGeni proves that
+   * session produced. Defaults to true.
+   */
   files?: boolean | undefined;
   /**
    * Forward composer voice input (`POST .../transcriptions`, one recording per
@@ -602,7 +611,12 @@ export function createSessionProxyHandler(
             // reads it here instead of knowing any Opengeni id.
             workspaceId,
             sandboxFiles: sandboxFilesEnabled,
-            ...(artifacts ? { artifacts } : {}),
+            // Stock UIs show Site previews and the artifact viewer only when
+            // this proxy serves them; `false` keeps them from failing on click.
+            artifacts: artifacts ?? false,
+            // Whether the stock "New chat" and "Archive" actions can succeed.
+            sessionCreation: options.createSession !== undefined,
+            archive: archiveEnabled,
             // Explicit true also tells stock UIs to offer end users the model picker.
             ...(modelSelection
               ? options.modelSelection === true
@@ -674,6 +688,53 @@ export function createSessionProxyHandler(
           );
         }
         return errorJson(404, "route_not_allowed", "Not found.");
+      }
+
+      if (area === "artifacts") {
+        // Retained media a session produced: only an artifact OpenGeni proves
+        // that session produced, never an arbitrary workspace artifact.
+        const [artifactId, ...artifactOp] = tail as [string | undefined, ...string[]];
+        const route = `${method} ${artifactOp.join("/")}`;
+        if (
+          !filesEnabled ||
+          !artifactId ||
+          !SEGMENT.test(artifactId) ||
+          (route !== "GET content" && route !== "POST playback-source")
+        ) {
+          return errorJson(404, "route_not_allowed", "Not found.");
+        }
+        const sessionId = request.headers.get(SESSION_SCOPE_HEADER)?.trim() ?? "";
+        if (!SEGMENT.test(sessionId)) {
+          reject(400, "session_scope_required", "Artifact reads must name their session.");
+        }
+        if (options.authorizeSession && !(await options.authorizeSession(sessionId, context))) {
+          return errorJson(404, "session_not_found", "Session not found.");
+        }
+        await getSessionProxyArtifactAssociation(
+          client,
+          workspaceId,
+          sessionId,
+          "retained",
+          artifactId,
+          call,
+        );
+        if (route === "POST playback-source") {
+          return json(
+            await client.requestJson(
+              "POST",
+              `${base}/artifacts/${artifactId}/playback-source`,
+              undefined,
+              {},
+              call,
+            ),
+          );
+        }
+        return retainedContent(
+          await client.getRetainedArtifactContent(workspaceId, artifactId, {
+            ...retainedRange(request),
+            signal: request.signal,
+          }),
+        );
       }
 
       if (area === "transcriptions" && tail.length === 0 && method === "POST") {
@@ -908,6 +969,21 @@ export function createSessionProxyHandler(
             await client.requestJson("POST", `${session}/fs/read-workspace`, sandboxRead(body)),
           );
         }
+      }
+      if (op[0] === "artifacts" && (op.length === 2 || op[2] === "content") && method === "GET") {
+        // Retained screenshots: the API matches the artifact to this session;
+        // the proxy first proves the user can read the session itself.
+        if (!filesEnabled || op.length > 3) {
+          return errorJson(404, "route_not_allowed", "Not found.");
+        }
+        await client.getSession(workspaceId, sessionId, call);
+        if (op.length === 2) return await read(`${session}/artifacts/${op[1]}`);
+        return retainedContent(
+          await client.getSessionRetainedArtifactContent(workspaceId, sessionId, op[1]!, {
+            ...retainedRange(request),
+            signal: request.signal,
+          }),
+        );
       }
       if (op.length === 2 && op[0] === "human-input-requests" && method === "GET") {
         return await read(`${session}/human-input-requests/${op[1]}`);
@@ -1186,6 +1262,35 @@ async function legacyViewerGrant(
   const grant = access.workspaceGrants.find((candidate) => candidate.workspaceId === workspaceId);
   if (!grant) reject(403, "workspace_not_allowed", "This workspace is not available.");
   return grant;
+}
+
+/** The browser's byte range, passed through unchanged when well formed. */
+function retainedRange(request: Request): { range?: string } {
+  const range = request.headers.get("range");
+  if (range === null) return {};
+  if (range.length > 128 || /[^\x20-\x7e]/.test(range)) {
+    reject(400, "invalid_range", "Range must be at most 128 printable ASCII bytes.");
+  }
+  return { range };
+}
+
+/** One bounded retained-artifact page, with the range facts the browser SDK verifies. */
+function retainedContent(content: RetainedArtifactContent): Response {
+  return new Response(content.bytes as Uint8Array<ArrayBuffer>, {
+    status: content.status,
+    headers: {
+      "Content-Type": content.contentType,
+      "Content-Length": String(content.contentLength),
+      ...(content.contentRange ? { "Content-Range": content.contentRange } : {}),
+      "Accept-Ranges": "bytes",
+      "Cache-Control": "private, no-store",
+      // Bytes for the conversation's own reader; never rendered on this origin.
+      "Content-Security-Policy": "sandbox",
+      "Content-Disposition": "attachment",
+      "Cross-Origin-Resource-Policy": "same-origin",
+      "X-Content-Type-Options": "nosniff",
+    },
+  });
 }
 
 /** Sandbox link download: one path, no route/target override. */

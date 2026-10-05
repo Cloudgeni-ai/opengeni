@@ -1,4 +1,10 @@
-import type { FileResourceRef, LatencyMode, OpenGeniClient, ReasoningEffort } from "@opengeni/sdk";
+import {
+  OpenGeniApiError,
+  type FileResourceRef,
+  type LatencyMode,
+  type OpenGeniClient,
+  type ReasoningEffort,
+} from "@opengeni/sdk";
 import { MenuIcon, XIcon } from "lucide-react";
 import { useCallback, useRef, useState, type CSSProperties, type FormEvent } from "react";
 import { useWorkspaceModelCatalog } from "../hooks/use-available-models";
@@ -14,9 +20,10 @@ import {
 import { useOpenGeni, type ClientOverride } from "../session-context";
 import { ChatComposer } from "./chat-composer";
 import { ModelPolicyPicker } from "./model-policy-picker";
+import { useClientConfigFlags } from "../hooks/use-client-config-flags";
 import {
   SessionConversation,
-  useClientConfigFlags,
+  useComposerTranscription,
   type SessionConversationProps,
 } from "./session-conversation";
 import { SessionList, type SessionListLabels, type SessionListProps } from "./session-list";
@@ -71,7 +78,11 @@ export type OpenGeniChatProps = ClientOverride &
           options: OpenGeniChatCreateOptions,
         ) => Promise<string>)
       | undefined;
-    /** Hide the "New chat" entry point. */
+    /**
+     * Hide the "New chat" entry point. It is also hidden when the session proxy
+     * reports chat creation unavailable (no `createSession` hook) and no
+     * `createSession` prop is given.
+     */
     newChat?: boolean | undefined;
     /**
      * Forwarded to the conversation (message rendering, tool renderers,
@@ -152,6 +163,9 @@ function Chat({
   const [listRevision, setListRevision] = useState(0);
   const root = useRef<HTMLDivElement>(null);
   const hostTheme = useHostTheme(root, { theme, surface });
+  const config = useClientConfigFlags(context.client);
+  // A host creator replaces the proxy route; otherwise trust the proxy's report.
+  const canCreate = createSession !== undefined || config.sessionCreation;
 
   const select = useCallback(
     (next: string | null) => {
@@ -171,12 +185,20 @@ function Chat({
       if (createSession) return await createSession(initialMessage, idempotencyKey, options);
       const creator = (context.client as unknown as CreateClient).createSession;
       if (typeof creator !== "function") throw new Error(labels.newChatUnavailable);
-      const created = await creator.call(context.client, context.workspaceId, {
-        initialMessage,
-        idempotencyKey,
-        ...options,
-      } as Parameters<NonNullable<CreateClient["createSession"]>>[1]);
-      return created.id;
+      try {
+        const created = await creator.call(context.client, context.workspaceId, {
+          initialMessage,
+          idempotencyKey,
+          ...options,
+        } as Parameters<NonNullable<CreateClient["createSession"]>>[1]);
+        return created.id;
+      } catch (error) {
+        // A proxy without a createSession hook refuses the route itself.
+        if (error instanceof OpenGeniApiError && error.code === "route_not_allowed") {
+          throw new Error(labels.newChatUnavailable);
+        }
+        throw error;
+      }
     },
     [context.client, context.workspaceId, createSession, labels.newChatUnavailable],
   );
@@ -188,7 +210,7 @@ function Chat({
       labels={labels}
       selectedSessionId={selected}
       onSelect={select}
-      onNewChat={newChat ? () => select(null) : undefined}
+      onNewChat={newChat && canCreate ? () => select(null) : undefined}
       onArchived={(archivedId) => {
         if (archivedId === selected) select(null);
       }}
@@ -266,6 +288,7 @@ function Chat({
               labels={labels}
               placeholderOverride={labelOverrides?.newChatPlaceholder}
               conversationProps={conversationProps}
+              available={canCreate}
               create={create}
               onCreated={(id) => {
                 setListRevision((revision) => revision + 1);
@@ -291,6 +314,7 @@ function NewChat({
   labels,
   placeholderOverride,
   conversationProps,
+  available,
   create,
   onCreated,
 }: {
@@ -298,6 +322,8 @@ function NewChat({
   labels: OpenGeniChatLabels;
   placeholderOverride: string | undefined;
   conversationProps: OpenGeniChatProps["conversationProps"];
+  /** False when this product cannot start chats; the composer is disabled and says so. */
+  available: boolean;
   create: (
     initialMessage: string,
     idempotencyKey: string,
@@ -317,6 +343,11 @@ function NewChat({
   });
   const files = useFileAttachments(scope);
   const uploadsEnabled = (conversationProps?.attachments ?? true) && config.uploads;
+  const transcription = useComposerTranscription(
+    context.client,
+    context.workspaceId,
+    (conversationProps?.voiceInput ?? true) && available ? config.voiceInput : null,
+  );
   const [text, setText] = useState("");
   const [sending, setSending] = useState(false);
   const [error, setError] = useState<{ cause: unknown } | null>(null);
@@ -333,7 +364,7 @@ function NewChat({
 
   const submit = async (): Promise<boolean> => {
     const initialMessage = text.trim() || (resources.length > 0 ? FILE_ONLY_MESSAGE_TEXT : "");
-    if (!initialMessage || sending || pendingFiles) return false;
+    if (!initialMessage || sending || pendingFiles || !available) return false;
     const options: OpenGeniChatCreateOptions = {
       ...(resources.length > 0 ? { resources } : {}),
       ...(showModelPicker ? choice : {}),
@@ -377,7 +408,8 @@ function NewChat({
     send: submit,
     steer: submit,
     sending,
-    canSend: (text.trim().length > 0 || resources.length > 0) && !sending && !pendingFiles,
+    canSend:
+      available && (text.trim().length > 0 || resources.length > 0) && !sending && !pendingFiles,
     pause: NOOP_ASYNC,
     pausing: false,
     resume: NOOP_ASYNC,
@@ -420,8 +452,10 @@ function NewChat({
       ) : null}
       <ChatComposer
         {...composerProps}
+        {...(transcription && composerProps?.transcription === undefined ? { transcription } : {})}
         composer={composer}
         attachments={uploadsEnabled ? files : undefined}
+        disabled={!available || composerProps?.disabled}
         runControl="none"
         running={false}
         placeholder={placeholderOverride ?? composerProps?.placeholder ?? labels.newChatPlaceholder}
@@ -455,7 +489,11 @@ function NewChat({
         }
         responsiveBasis={composerProps?.responsiveBasis ?? "container"}
       />
-      {error ? (
+      {!available ? (
+        <p className="text-center text-og-sm text-og-fg-muted" data-og-new-chat-unavailable="">
+          {labels.newChatUnavailable}
+        </p>
+      ) : error ? (
         <p role="alert" className="text-center text-og-sm text-og-status-failed">
           {formatError(
             error.cause,

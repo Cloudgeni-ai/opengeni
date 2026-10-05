@@ -9,7 +9,7 @@ import {
 import { act, useEffect, useState, type ReactNode } from "react";
 import { createRoot } from "react-dom/client";
 import type { ArtifactCatalogItem, RetainedArtifactReference } from "@opengeni/sdk";
-import { createWorkspaceRetainedArtifactLoader } from "@/lib/retained-artifact-loader";
+import { createWorkspaceRetainedArtifactLoader } from "@opengeni/react";
 import { defaultArtifactFilters, filterArtifactCatalog } from "@/lib/artifact-catalog";
 let ArtifactLibrary: typeof import("./artifact-library").ArtifactLibrary;
 let ArtifactThumbnail: typeof import("./artifact-library").ArtifactThumbnail;

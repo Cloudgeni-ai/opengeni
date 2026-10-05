@@ -4308,16 +4308,30 @@ export type ClientConfig = {
    */
   workspaceId?: string | undefined;
   /**
-   * Session proxy capability for the embedded artifact viewer; absent on
-   * native deployments. The live socket is ticket-authenticated and reached
-   * directly; the cache partition identifies the proxied user.
+   * Session proxy capability for the embedded artifact viewer and inline Site
+   * previews; absent on native deployments. The live socket is
+   * ticket-authenticated and reached directly; the cache partition identifies
+   * the proxied user. `false` when the proxy does not serve artifacts, so
+   * stock UIs show Site previews as unavailable instead of failing on click.
    */
   artifacts?:
     | {
         editableLiveUrl: string;
         cachePartition: { accountId: string; principalId: string; authorizationEpoch: string };
       }
+    | false
     | undefined;
+  /**
+   * Session proxy only: whether the browser may start a chat (the proxy has a
+   * `createSession` hook). Stock UIs hide "New chat" when `false`; absent on
+   * native deployments and older proxies.
+   */
+  sessionCreation?: boolean | undefined;
+  /**
+   * Session proxy only: whether users may archive or restore their chats.
+   * Stock UIs hide "Archive" when `false`; absent on native deployments.
+   */
+  archive?: boolean | undefined;
   /** Native browser microphone capture + server-side transcription capability. */
   voiceInput?: ClientVoiceInputConfig | undefined;
   /**

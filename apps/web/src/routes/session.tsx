@@ -3,7 +3,13 @@ import { enablePierreDiffs } from "@opengeni/react/diffs";
 import { enableSandboxTerminal } from "@opengeni/react/terminal";
 import { enableCodeEditor } from "@opengeni/react/editor";
 import { enableDesktopViewer } from "@opengeni/react/desktop";
-import { isModelUnavailableSubmissionError, retainedImageId } from "@opengeni/react";
+import {
+  createSessionRetainedScreenshotLoader,
+  createWorkspaceRetainedArtifactLoader,
+  createWorkspaceRetainedVideoLoader,
+  isModelUnavailableSubmissionError,
+  retainedImageId,
+} from "@opengeni/react";
 import { useConnectionAccounts } from "@/components/capabilities/use-connection-accounts";
 import { sessionAuthRecommendation } from "@/components/capabilities/session-auth-recommendation";
 import {
@@ -184,9 +190,6 @@ import {
   mergeSessionContextProjection,
   mergeSessionDetailReadProjection,
 } from "@/lib/session-pins";
-import { createWorkspaceRetainedArtifactLoader } from "@/lib/retained-artifact-loader";
-import { createSessionRetainedScreenshotLoader } from "@/lib/retained-screenshot-loader";
-import { createWorkspaceRetainedVideoLoader } from "@/lib/retained-video-loader";
 import {
   readSessionDockNavigation,
   sessionDockLayoutStorageId,
