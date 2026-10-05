@@ -67,6 +67,24 @@ import { createHash } from "node:crypto";
 import { isIP } from "node:net";
 import { z } from "zod";
 
+/**
+ * Default maximum provider silence on a generic OpenAI-compatible model stream
+ * while the worker is waiting for the next chunk. Matches the Codex transport
+ * and SuperGrok idle defaults (5 minutes): long enough for a reasoning model's
+ * silent thinking gaps, short enough that a wedged stream recovers the same
+ * turn instead of hanging until a worker roll.
+ */
+export const DEFAULT_MODEL_STREAM_IDLE_TIMEOUT_MS = 300_000;
+/**
+ * Default maximum wait across keepalive-only traffic (SSE comments, `ping` /
+ * `keepalive` events, repeated `response.in_progress`) for the next
+ * model-progress event on a generic model stream. A provider can keep a
+ * connection alive while its generation is wedged; this bounds that case.
+ * Ten minutes leaves room for a reasoning model's longest silent thinking
+ * window (reasoning summaries stream as progress).
+ */
+export const DEFAULT_MODEL_STREAM_PROGRESS_TIMEOUT_MS = 600_000;
+
 const envName = /^[A-Za-z_][A-Za-z0-9_]*$/;
 const registryId = /^[A-Za-z0-9_-]+$/;
 export const DEFAULT_OPENROUTER_MODEL_ID =
@@ -809,6 +827,29 @@ const SettingsSchema = z.object({
     .positive()
     .max(24 * 60 * 60_000)
     .default(XAI_RESPONSE_STREAM_IDLE_TIMEOUT_MS),
+  // Maximum silence between response bytes on a generic OpenAI-compatible
+  // model stream (built-in OpenAI/Azure and registry chat/responses providers).
+  // Not a request/run duration cap: every received byte resets the timer, and
+  // it measures only time spent waiting on the provider for the next chunk. A
+  // stalled stream fails as a retryable provider failure so finite same-turn
+  // recovery replaces it. A registry provider may override it with
+  // `streamIdleTimeoutMs`. Codex, SuperGrok, and Anthropic Messages own their
+  // transport-specific idle timers.
+  modelStreamIdleTimeoutMs: z.coerce
+    .number()
+    .int()
+    .positive()
+    .max(24 * 60 * 60_000)
+    .default(DEFAULT_MODEL_STREAM_IDLE_TIMEOUT_MS),
+  // Maximum wait across keepalive-only stream traffic for the next
+  // model-progress event (registry override: `streamProgressTimeoutMs`).
+  // Never shorter than modelStreamIdleTimeoutMs.
+  modelStreamProgressTimeoutMs: z.coerce
+    .number()
+    .int()
+    .positive()
+    .max(24 * 60 * 60_000)
+    .default(DEFAULT_MODEL_STREAM_PROGRESS_TIMEOUT_MS),
   // Expose the connected apps attached to a Codex subscription through the
   // synthetic codex_apps MCP server. Independent from subscription routing so
   // operators can use Codex models without exposing ChatGPT connectors.
@@ -2682,6 +2723,20 @@ const RegistryProviderSchema = z
     label: z.string().min(1).optional(),
     api: ModelProviderApi.default("chat"),
     anthropic: AnthropicProviderOptions.optional(),
+    // Generic OpenAI-compatible stream silence bound; overrides the deployment
+    // `modelStreamIdleTimeoutMs` for this provider only.
+    streamIdleTimeoutMs: z
+      .number()
+      .int()
+      .positive()
+      .max(24 * 60 * 60_000)
+      .optional(),
+    streamProgressTimeoutMs: z
+      .number()
+      .int()
+      .positive()
+      .max(24 * 60 * 60_000)
+      .optional(),
     wireProfile: ModelProviderWireProfile.default("openai"),
     baseUrl: z.string().url(),
     apiKey: z.string().optional(), // inline key (pragmatic) ...
@@ -3174,6 +3229,10 @@ export interface ResolvedModelProvider {
   defaultHeaders?: Record<string, string> | undefined;
   publicDefaultQueryNames?: string[] | undefined;
   publicDefaultHeaderNames?: string[] | undefined;
+  /** Generic OpenAI-compatible stream silence bound override (ms). */
+  streamIdleTimeoutMs?: number | undefined;
+  /** Generic OpenAI-compatible keepalive-only progress bound override (ms). */
+  streamProgressTimeoutMs?: number | undefined;
   credentialSource: CredentialSourceV1;
   billing: BillingAttributionV1;
 }
@@ -4049,6 +4108,8 @@ export function getSettings(source: NodeJS.ProcessEnv = process.env): Settings {
     supergrokResponseStreamIdleTimeoutMs: optional(
       "OPENGENI_SUPERGROK_RESPONSE_STREAM_IDLE_TIMEOUT_MS",
     ),
+    modelStreamIdleTimeoutMs: optional("OPENGENI_MODEL_STREAM_IDLE_TIMEOUT_MS"),
+    modelStreamProgressTimeoutMs: optional("OPENGENI_MODEL_STREAM_PROGRESS_TIMEOUT_MS"),
     codexConnectedAppsEnabled: optional("OPENGENI_CODEX_CONNECTED_APPS_ENABLED"),
     codexToolSearchEnabled: optional("OPENGENI_CODEX_TOOL_SEARCH_ENABLED"),
     lazyToolSearchEnabled: optional("OPENGENI_LAZY_TOOL_SEARCH_ENABLED"),
@@ -6006,6 +6067,12 @@ export function configuredProviders(
       defaultHeaders: provider.defaultHeaders,
       publicDefaultQueryNames: provider.publicDefaultQueryNames,
       publicDefaultHeaderNames: provider.publicDefaultHeaderNames,
+      ...(provider.streamIdleTimeoutMs !== undefined
+        ? { streamIdleTimeoutMs: provider.streamIdleTimeoutMs }
+        : {}),
+      ...(provider.streamProgressTimeoutMs !== undefined
+        ? { streamProgressTimeoutMs: provider.streamProgressTimeoutMs }
+        : {}),
       credentialSource: registryCredentialSource(provider),
       billing: registryBilling(provider),
     }),

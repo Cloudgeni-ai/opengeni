@@ -440,6 +440,13 @@ import {
 } from "./model-request-capture";
 import { decodeValidatedViewImageDataUrl } from "./view-image-validation";
 export { beforeModelRequest as awaitModelCallAdmission } from "./model-request-capture";
+export {
+  classifyModelStreamIdleTimeoutError,
+  MODEL_STREAM_IDLE_TIMEOUT_ERROR_CODE,
+  ModelStreamIdleTimeoutError,
+  streamIdleTimeoutModelFetch,
+  type ModelStreamIdleTimeoutInfo,
+} from "./model-stream-idle-timeout";
 import {
   baseModelInputFilterForSettings,
   boundModelToolOutputsFilterForSettings,

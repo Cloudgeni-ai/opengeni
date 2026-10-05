@@ -34,6 +34,7 @@ import {
   RoutingWorkspaceRootChangedError,
   RoutingBackendRecoveryRequiredError,
   ResponsesStreamingTerminalError,
+  classifyModelStreamIdleTimeoutError,
   SandboxMaterializationVerificationError,
   materializationVerificationDiagnostic,
   type MaterializationVerificationDiagnostic,
@@ -1178,6 +1179,26 @@ function providerHttpStatus(error: unknown): number | undefined {
   return undefined;
 }
 
+/**
+ * A fetch-layer timeout: the runtime's DOMException `TimeoutError` (message
+ * "The operation timed out."), possibly wrapped by SDK/runner `cause` chains.
+ * Explicit cancellation (`AbortError`) is deliberately not matched.
+ */
+export function isTransportTimeoutError(error: unknown): boolean {
+  let current: unknown = error;
+  const seen = new Set<unknown>();
+  for (let depth = 0; depth < 8 && current && typeof current === "object"; depth += 1) {
+    if (seen.has(current)) break;
+    seen.add(current);
+    const value = current as { name?: unknown; message?: unknown; cause?: unknown };
+    if (value.name === "TimeoutError" || value.message === "The operation timed out.") {
+      return true;
+    }
+    current = value.cause;
+  }
+  return false;
+}
+
 export function isTransientProviderError(error: unknown): boolean {
   if (error instanceof ResponsesStreamingTerminalError) {
     return error.category === "unavailable";
@@ -1713,6 +1734,39 @@ function baseAgentRunFailurePayload(
       retryable: true,
       detail: message,
       ...(mcpTransportDiagnostic ? { mcpTransportDiagnostic } : {}),
+    };
+  }
+  // A generic model stream that went silent mid-response (typed idle bound) or
+  // a transport timeout ("The operation timed out." DOMException TimeoutError
+  // from the fetch layer) is a dead upstream connection, not a request fault:
+  // checkpoint durable truth and recover the same turn within the finite
+  // provider recovery budget. Codex/SuperGrok typed timeouts are classified
+  // above under their own transport policy.
+  const streamIdle = classifyModelStreamIdleTimeoutError(error);
+  if (streamIdle) {
+    const seconds =
+      streamIdle.idleTimeoutMs !== null ? Math.round(streamIdle.idleTimeoutMs / 1_000) : null;
+    const window = seconds !== null ? ` for ${seconds}s` : "";
+    return {
+      error:
+        streamIdle.kind === "progress"
+          ? `The model provider stream stalled: only keepalive traffic and no response progress${window}. The same turn will retry after a short delay.`
+          : `The model provider stopped sending response data${window}. The same turn will retry after a short delay.`,
+      code: "provider_unavailable",
+      retryable: true,
+      timeoutClass: streamIdle.kind === "progress" ? "progress_stream" : "idle_stream",
+      responseObserved: true,
+      detail: streamIdle.message,
+    };
+  }
+  if (status === undefined && isTransportTimeoutError(error)) {
+    return {
+      error:
+        "The model provider connection timed out. The same turn will retry after a short delay.",
+      code: "provider_unavailable",
+      retryable: true,
+      timeoutClass: "transport",
+      detail: message,
     };
   }
   if (code === UNKNOWN_MODEL_FINISH_REASON_CODE) {

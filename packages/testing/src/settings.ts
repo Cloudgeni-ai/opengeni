@@ -211,6 +211,8 @@ export function testSettings(overrides: Partial<Settings> = {}): Settings {
     supergrokSubscriptionEnabled: false,
     claudeSubscriptionEnabled: false,
     supergrokResponseStreamIdleTimeoutMs: 300_000,
+    modelStreamIdleTimeoutMs: 300_000,
+    modelStreamProgressTimeoutMs: 600_000,
     codexConnectedAppsEnabled: false,
     codexToolSearchEnabled: false,
     lazyToolSearchEnabled: false,

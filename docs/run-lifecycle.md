@@ -1111,6 +1111,23 @@ oversized event is delivered alone. Explicit continuation determines completion;
 a short page never substitutes for that durable read result.
 The downstream one-frame queue cannot substitute for this upstream read bound.
 
+Generic OpenAI-compatible model streams (the built-in OpenAI/Azure client and
+registry chat/responses providers) carry two stall bounds in
+`packages/runtime/src/model-stream-idle-timeout.ts`, measured only while the
+consumer is waiting for the next chunk: no response byte for
+`OPENGENI_MODEL_STREAM_IDLE_TIMEOUT_MS` (default 5 min), or no model-progress
+SSE event across keepalive-only traffic (comments, `ping`/`keepalive`, repeated
+`response.in_progress`) for `OPENGENI_MODEL_STREAM_PROGRESS_TIMEOUT_MS`
+(default 10 min, never below the byte bound). Registry providers may override
+either with `streamIdleTimeoutMs` / `streamProgressTimeoutMs`. Every byte or
+progress event resets its window, so neither is a model-call or run-length cap;
+they bound a wedged stream that would otherwise hold the turn `running` with no
+output. A stall raises a typed `ModelStreamIdleTimeoutError`; it and a
+fetch-layer `TimeoutError` ("The operation timed out.", raised by the runtime's
+own socket idle timeout) classify as retryable `provider_unavailable` and use
+the recovery below. Codex, SuperGrok, and Anthropic Messages keep their own
+transport timers and classification.
+
 Automatic same-turn provider/MCP recovery is finite: five
 consecutive replacement attempts may be scheduled, and a sixth retryable failure settles the
 same logical turn as failed with the original typed cause plus explicit recovery-
