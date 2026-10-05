@@ -888,7 +888,7 @@
 }
 :where(.og-root).og-session-capability-setup label,:where(.og-root) .og-session-capability-setup label {
   display: flex;
-  align-items: start;
+  align-items: flex-start;
   gap: 8px;
   line-height: 1.6;
 }
