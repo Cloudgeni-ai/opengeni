@@ -78,6 +78,15 @@ function restrictedStockFigma(item: CapabilityCatalogItem): boolean {
   );
 }
 
+/** The provider refuses OAuth self-registration and this deployment has no
+ * operator-registered client for it, so Connect would fail on the first click.
+ * Server-projected from `data/catalog/oauth-client-requirements.json`. */
+export function operatorOAuthClientMissing(
+  item: Pick<CapabilityCatalogItem, "runtime" | "enabled">,
+): boolean {
+  return item.runtime.operatorOAuthClient?.configured === false && !item.enabled;
+}
+
 export type NativeConnectionFacts = {
   connections: ConnectionMetadata[] | null;
   socialConnections: SocialConnection[];
@@ -138,9 +147,14 @@ export function nativeCatalogItemVisible(
 ): boolean {
   if (hasCatalogAccount(item, facts)) return true;
   // An unavailable metadata read cannot prove that a previous account vanished.
-  if (facts?.connections === null && (nativeCatalogProviderId(item) || restrictedStockFigma(item)))
+  if (
+    facts?.connections === null &&
+    (nativeCatalogProviderId(item) ||
+      restrictedStockFigma(item) ||
+      operatorOAuthClientMissing(item))
+  )
     return true;
-  if (restrictedStockFigma(item)) return false;
+  if (restrictedStockFigma(item) || operatorOAuthClientMissing(item)) return false;
   const providerId = nativeCatalogProviderId(item);
   return (
     !providerId ||

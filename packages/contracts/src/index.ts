@@ -12106,6 +12106,11 @@ export const CapabilityRuntime = z.object({
       ]),
     })
     .optional(),
+  // Server-derived connectability: present when the connector's OAuth
+  // authorization server refuses self-registration, so connecting needs an
+  // operator-registered client. `configured` is whether this deployment has
+  // one; connector surfaces offer the row only when it is true.
+  operatorOAuthClient: z.object({ configured: z.boolean() }).optional(),
 });
 export type CapabilityRuntime = z.infer<typeof CapabilityRuntime>;
 

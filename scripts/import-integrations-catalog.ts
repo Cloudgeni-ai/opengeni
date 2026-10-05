@@ -22,6 +22,13 @@ import {
   type CuratedCatalog,
 } from "./catalog-curation";
 import {
+  OAUTH_CLIENT_REQUIREMENTS,
+  oauthClientRequirementsEntriesByMcpUrl,
+  oauthClientRequirementsFingerprintInput,
+  type OAuthClientRequirementReason,
+  type OAuthClientRequirements,
+} from "./catalog-oauth-client-requirements";
+import {
   VENDORED_LOGO_DIRECTORY,
   VENDORED_LOGO_MANIFEST,
   catalogLogoObjectKey,
@@ -115,6 +122,8 @@ export type CatalogIntegrationRow = {
   requireApproval?: boolean | string[];
   defaultConnectionOwnership?: "personal" | "workspace";
   oauthProfile?: Record<string, unknown>;
+  /** Operator-registered OAuth client needed to connect (oauth-client-requirements.json). */
+  oauthClientRequirement?: { issuer: string; reason: OAuthClientRequirementReason };
   presentation?: Record<string, unknown>;
   credentialFacts: Array<Record<string, unknown>>;
   tier: CatalogTier;
@@ -150,6 +159,8 @@ export type NormalizedCatalogSnapshot = {
    * is reported like a skip rather than dropped.
    */
   unmatchedCurated: string[];
+  /** Requirement entries whose mcpUrl matches no importable row (reported, not fatal). */
+  unmatchedOAuthClientRequirements: string[];
   cleaning: {
     inputRows: number;
     outputRows: number;
@@ -330,6 +341,7 @@ export function normalizeCatalogSnapshot(
       }
     }
     const official = curatedCatalogEntriesByMcpUrl.get(mcpUrl);
+    const oauthClientRequirement = oauthClientRequirementsEntriesByMcpUrl.get(mcpUrl);
     const authKind = official?.authKind ?? normalizeAuthKind(candidate.authKind);
     if (authKind === "unknown") {
       skipped.push({ domain, mcpUrl: null, reason: "auth_unknown" });
@@ -378,6 +390,14 @@ export function normalizeCatalogSnapshot(
         : {}),
       ...(official?.presentation
         ? { presentation: official.presentation as Record<string, unknown> }
+        : {}),
+      ...(oauthClientRequirement && authKind === "oauth2"
+        ? {
+            oauthClientRequirement: {
+              issuer: oauthClientRequirement.issuer,
+              reason: oauthClientRequirement.reason,
+            },
+          }
         : {}),
       credentialFacts: recordArray(candidate.credentialFacts),
       tier: official?.tier ?? (provenance === "detected" ? "verified" : "community"),
@@ -494,11 +514,15 @@ export function normalizeCatalogSnapshot(
   const unmatchedCurated = [...curatedCatalogEntriesByMcpUrl.keys()]
     .filter((mcpUrl) => !matchedCurated.has(mcpUrl))
     .sort();
+  const unmatchedOAuthClientRequirements = [...oauthClientRequirementsEntriesByMcpUrl.keys()]
+    .filter((mcpUrl) => !matchedCurated.has(mcpUrl))
+    .sort();
 
   return {
     generatedAt,
     rows,
     unmatchedCurated,
+    unmatchedOAuthClientRequirements,
     skipped,
     quarantined,
     cleaning: {
@@ -668,6 +692,9 @@ export function catalogRowToDbInput(
         ? { defaultConnectionOwnership: row.defaultConnectionOwnership }
         : {}),
       ...(row.oauthProfile ? { oauthProfile: row.oauthProfile } : {}),
+      ...(row.oauthClientRequirement
+        ? { oauthClientRequirement: row.oauthClientRequirement }
+        : {}),
       ...(row.presentation ? { presentation: row.presentation } : {}),
       ...(row.documentationUrl ? { documentationUrl: row.documentationUrl } : {}),
       ...(row.registryName
@@ -1305,6 +1332,8 @@ export async function catalogImportFingerprint(input: {
   curatedCatalog?: CuratedCatalog;
   /** Test seam. Production always fingerprints the committed vendored manifest. */
   vendoredLogos?: VendoredLogoManifest;
+  /** Test seam. Production always fingerprints the committed requirements file. */
+  oauthClientRequirements?: OAuthClientRequirements;
 }): Promise<string> {
   const semanticVersion = input.semanticVersion ?? CATALOG_IMPORT_SEMANTIC_VERSION;
   if (!Number.isSafeInteger(semanticVersion) || semanticVersion < 1 || semanticVersion > 9999) {
@@ -1324,6 +1353,14 @@ export async function catalogImportFingerprint(input: {
   const vendoredLogosSha256 = createHash("sha256")
     .update(vendoredLogoManifestFingerprintInput(input.vendoredLogos ?? VENDORED_LOGO_MANIFEST))
     .digest("hex");
+  // Requirement facts are stamped onto row metadata exactly like the overlay.
+  const oauthClientRequirementsSha256 = createHash("sha256")
+    .update(
+      oauthClientRequirementsFingerprintInput(
+        input.oauthClientRequirements ?? OAUTH_CLIENT_REQUIREMENTS,
+      ),
+    )
+    .digest("hex");
   const digest = createHash("sha256")
     .update(
       JSON.stringify({
@@ -1333,6 +1370,7 @@ export async function catalogImportFingerprint(input: {
         snapshotSha256,
         curatedSha256,
         vendoredLogosSha256,
+        oauthClientRequirementsSha256,
       }),
     )
     .digest("hex");
@@ -1392,6 +1430,7 @@ if (import.meta.main) {
           before: normalized.cleaning.inputRows,
           after: normalized.cleaning.outputRows,
           importable: normalized.rows.length,
+          unmatchedOAuthClientRequirements: normalized.unmatchedOAuthClientRequirements,
           skipped: normalized.skipped.length,
           quarantined: normalized.quarantined.length,
           cleaning: normalized.cleaning,

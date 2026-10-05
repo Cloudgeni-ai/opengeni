@@ -7435,6 +7435,12 @@ export type CapabilityRuntime = {
           | "missing_verification";
       }
     | undefined;
+  /**
+   * Present when connecting needs an operator-registered OAuth client because
+   * the provider refuses self-registration; `configured` is whether this
+   * deployment has one. Connector surfaces offer the row only when true.
+   */
+  operatorOAuthClient?: { configured: boolean } | undefined;
 };
 
 export type CapabilityCatalogItem = {
