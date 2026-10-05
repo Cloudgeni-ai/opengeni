@@ -4,7 +4,13 @@ import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
-import { privateProbeCommand, privateProbeEvidence } from "./deployment-aca-observability";
+import { stripVTControlCharacters } from "node:util";
+import { inflateSync } from "node:zlib";
+import {
+  privateProbeCommand,
+  privateProbeEvidence,
+  privatePtyObservation,
+} from "./deployment-aca-observability";
 
 const repoRoot = fileURLToPath(new URL("../", import.meta.url));
 const kind = "opengeni-aca-private-observability-v1";
@@ -12,6 +18,31 @@ const nonce = "22222222-2222-4222-8222-222222222222";
 const fixtureKey = "fixture-private-metrics-access-key";
 const privateMarker = "private-cli-and-metric-body-marker";
 const subscription = "11111111-1111-4111-8111-111111111111";
+
+function remoteArgv(command: string): string[] {
+  // Exercise shell-word lexing, including quote removal, rather than pretending
+  // the remote command is parsed by a whitespace-only split.
+  const result = spawnSync(
+    "python3",
+    ["-c", "import json, shlex, sys; print(json.dumps(shlex.split(sys.stdin.read())))"],
+    { input: command, encoding: "utf8", timeout: 5_000 },
+  );
+  expect(result.error).toBeUndefined();
+  expect(result.status).toBe(0);
+  const args: string[] = JSON.parse(result.stdout);
+  expect(args).toHaveLength(3);
+  expect(args.slice(0, 2)).toEqual(["bun", "-e"]);
+  expect(args[2]).not.toMatch(/[\s'"]/);
+  expect(encodeURIComponent(command).length).toBeLessThan(2048);
+  const payload = args[2]!.match(
+    /Buffer\.from\(\/([A-Za-z0-9_-]+)\/\.source,\/base64url\/\.source\)/,
+  );
+  expect(payload).not.toBeNull();
+  const source = inflateSync(Buffer.from(payload![1]!, "base64url")).toString();
+  expect(source).toContain("console.log(JSON.stringify(");
+  expect(source).not.toContain(fixtureKey);
+  return args;
+}
 
 function evidence(role: "api" | "control" | "turn") {
   return {
@@ -38,6 +69,9 @@ describe("ACA private observability evidence", () => {
     test(`requires exact fresh status and metric-family evidence for ${role}`, () => {
       const proof = evidence(role);
       expect(privateProbeEvidence(JSON.stringify(proof), role, nonce).role).toBe(role);
+      expect(
+        privateProbeEvidence(`\u001b[32m${JSON.stringify(proof)}\u001b[0m\r\n`, role, nonce).role,
+      ).toBe(role);
       for (const invalid of [
         { ...proof, nonce: crypto.randomUUID() },
         { ...proof, role: "foreign" },
@@ -66,7 +100,7 @@ describe("ACA private observability evidence", () => {
       ).toThrow();
     });
 
-    test(`runs whitespace-free Bun code against actual loopback HTTP fixtures (${role})`, async () => {
+    test(`runs the compressed quote-free argument after shell lexing against loopback HTTP (${role})`, async () => {
       const headers: (string | null)[] = [];
       const server = Bun.serve({
         hostname: "127.0.0.1",
@@ -96,10 +130,7 @@ describe("ACA private observability evidence", () => {
           metrics: server.port!,
           health: server.port!,
         });
-        const pieces = command.split(" ");
-        expect(pieces).toHaveLength(3);
-        expect(pieces.slice(0, 2)).toEqual(["bun", "-e"]);
-        expect(pieces[2]).not.toMatch(/\s/);
+        const pieces = remoteArgv(command);
         expect(command).not.toContain(fixtureKey);
         const child = Bun.spawn([process.execPath, "--no-env-file", "-e", pieces[2]!], {
           env: { OPENGENI_ACCESS_KEY: fixtureKey, OPENGENI_WORKER_ROLE: role },
@@ -130,6 +161,64 @@ describe("ACA private observability evidence", () => {
   }
 });
 
+describe("ACA private observability PTY transport", () => {
+  test("provides real terminal stdin and preserves argv through the POSIX shell", () => {
+    const args = [
+      "space value",
+      "single'quote",
+      'double"quote',
+      "$(printf should-not-run)",
+      "; exit 19; #",
+      "backslash\\value",
+      "line\nbreak",
+      "",
+    ];
+    const output = privatePtyObservation(
+      process.execPath,
+      [
+        "--no-env-file",
+        "-e",
+        "console.log(JSON.stringify({tty:Boolean(process.stdin.isTTY),args:process.argv.slice(1)}))",
+        "--",
+        ...args,
+      ],
+      5_000,
+    );
+    expect(JSON.parse(stripVTControlCharacters(output).trim())).toEqual({ tty: true, args });
+  });
+
+  test("propagates terminal-child failure without exposing its arbitrary output", () => {
+    let failure: unknown;
+    try {
+      privatePtyObservation(
+        process.execPath,
+        ["--no-env-file", "-e", `console.error(${JSON.stringify(privateMarker)});process.exit(19)`],
+        5_000,
+      );
+    } catch (error) {
+      failure = error;
+    }
+    expect(failure).toBeInstanceOf(Error);
+    expect(String(failure)).toContain("Private ACA exec transport failed");
+    expect(String(failure)).not.toContain(privateMarker);
+  });
+
+  test("bounds a hung terminal child and refuses unbounded caller timeouts", () => {
+    const start = performance.now();
+    expect(() =>
+      privatePtyObservation(
+        process.execPath,
+        ["--no-env-file", "-e", "setInterval(()=>{},1000)"],
+        200,
+      ),
+    ).toThrow("Private ACA exec transport failed");
+    expect(performance.now() - start).toBeLessThan(5_000);
+    for (const timeout of [0, -1, Infinity, 80_001]) {
+      expect(() => privatePtyObservation(process.execPath, [], timeout)).toThrow();
+    }
+  });
+});
+
 describe("ACA private observability CLI", () => {
   for (const scenario of [
     "ready",
@@ -139,6 +228,10 @@ describe("ACA private observability CLI", () => {
     "missing-family",
     "terraform-failure",
     "wrong-app-group",
+    "exec-nonzero",
+    "missing-script",
+    "unsupported-script",
+    "script-prerequisite-failure",
   ] as const) {
     test(`uses native Terraform identities and never treats exit zero alone as proof (${scenario})`, () => {
       const dir = mkdtempSync(join(tmpdir(), "opengeni-aca-observability-"));
@@ -166,21 +259,34 @@ await Bun.write(process.env.ACA_TEST_LOG,(await Bun.file(process.env.ACA_TEST_LO
 if(args[1]==="show"){console.log(JSON.stringify(["native-container"]));process.exit(0);}
 if(args[1]!=="exec")process.exit(19);
 const command=args[args.indexOf("--command")+1];
-const pieces=command.split(" ");
-if(pieces.length!==3||pieces[0]!=="bun"||pieces[1]!=="-e"||/\\s/.test(pieces[2]))process.exit(19);
-const source=pieces[2];
+if(!process.stdin.isTTY||encodeURIComponent(command).length>=2048)process.exit(19);
+const parsed=Bun.spawnSync(["python3","-c","import json, shlex, sys; print(json.dumps(shlex.split(sys.stdin.read())))"],{stdin:Buffer.from(command),stdout:"pipe",stderr:"pipe"});
+if(parsed.exitCode!==0)process.exit(19);
+const pieces=JSON.parse(Buffer.from(parsed.stdout).toString());
+if(pieces.length!==3||pieces[0]!=="bun"||pieces[1]!=="-e"||/[\\s'"]/.test(pieces[2]))process.exit(19);
+const payload=pieces[2].match(/Buffer\\.from\\(\\/([A-Za-z0-9_-]+)\\/\\.source,\\/base64url\\/\\.source\\)/);
+if(!payload)process.exit(19);
+const source=require("node:zlib").inflateSync(Buffer.from(payload[1],"base64url")).toString();
 const config=JSON.parse(source.slice(source.indexOf("let[s]=[")+8,source.indexOf("];let[base]")));
 let proof={kind:config.kind,nonce:config.nonce,role:config.role,metricsStatus:200,anonymousMetricsStatus:config.role==="api"?401:null,healthStatus:config.role==="api"?null:200,readyStatus:config.role==="api"?null:200,familyCount:3,requiredFamilies:config.required.map(f=>({name:f.name,type:f.type,samples:1}))};
 const scenario=process.env.ACA_TEST_SCENARIO;
 console.error("${privateMarker}");
+if(scenario==="exec-nonzero")process.exit(19);
 if(scenario==="cluster-exec-failure"){console.log("ClusterExecFailure: ${privateMarker}");process.exit(0);}
 if(scenario==="wrong-nonce")proof.nonce="33333333-3333-4333-8333-333333333333";
 if(scenario==="worker-not-ready"&&config.role==="turn")proof.readyStatus=503;
 if(scenario==="missing-family")proof.requiredFamilies=[];
-console.log(JSON.stringify(proof));
+console.log("\\u001b[32m"+JSON.stringify(proof)+"\\u001b[0m");
 `,
           { mode: 0o755 },
         );
+        if (scenario === "unsupported-script" || scenario === "script-prerequisite-failure") {
+          writeFileSync(
+            join(dir, "script"),
+            `#!/bin/sh\nprintf '${privateMarker}\\n' >&2\nprintf 'script BSD fixture\\n'\nexit ${scenario === "unsupported-script" ? 0 : 19}\n`,
+            { mode: 0o755 },
+          );
+        }
         const ids = Object.fromEntries(
           ["api", "control", "turn"].map((role) => [
             role,
@@ -200,7 +306,10 @@ console.log(JSON.stringify(proof));
             encoding: "utf8",
             timeout: 15_000,
             env: {
-              PATH: `${dir}:${process.env.PATH ?? "/usr/bin:/bin"}`,
+              PATH:
+                scenario === "missing-script"
+                  ? dir
+                  : `${dir}:${process.env.PATH ?? "/usr/bin:/bin"}`,
               ACA_TEST_LOG: log,
               ACA_TEST_SCENARIO: scenario,
               ACA_TEST_IDS: JSON.stringify(ids),
@@ -214,6 +323,13 @@ console.log(JSON.stringify(proof));
         const output = JSON.parse(result.stdout);
         expect(result.status).toBe(scenario === "ready" ? 0 : 1);
         expect(output.ok).toBe(scenario === "ready");
+        if (
+          scenario === "missing-script" ||
+          scenario === "unsupported-script" ||
+          scenario === "script-prerequisite-failure"
+        ) {
+          expect(output.detail).toContain("Linux/WSL2 and util-linux script with -q -e -c support");
+        }
         if (scenario === "ready") {
           expect(output.results.map((entry: { role: string }) => entry.role)).toEqual([
             "api",
