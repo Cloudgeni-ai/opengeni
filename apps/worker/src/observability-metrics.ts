@@ -1234,8 +1234,8 @@ export function recordVerifiedSignupTrialDeploymentFlagGauge(
  * Provider-side Modal inventory reconciled against live leases by the orphan
  * sweep: `running` = every running box in the app, `unleased` = running boxes
  * no live lease protects (orphans, counted before termination), and
- * `lease_missing_instance` = live (warming/warm/draining) leases whose exact
- * provider instance is no longer running (zombies).
+ * `lease_missing_instance` = warm leases whose exact provider instance is no
+ * longer running (zombies).
  */
 export function recordModalSandboxInventoryGauges(
   observability: Observability,

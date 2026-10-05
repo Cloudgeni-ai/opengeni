@@ -2893,6 +2893,19 @@ export function modalOrphanTerminationStillEligible(
   return modalOrphanCandidateStillUnowned(latest, candidate);
 }
 
+/** Live leases still WARM on an instance the complete listing did not show.
+ * A draining lease legitimately loses its box mid-drain (capture, terminate,
+ * then cold), and warming has not published a box yet, so only a warm lease
+ * whose exact box is gone is a zombie. */
+export function countWarmModalLeasesMissingInstance(
+  latest: Awaited<ReturnType<typeof listLiveModalSandboxLeaseAttributions>>,
+  missingInstanceIds: string[],
+): number {
+  return missingInstanceIds.filter((instanceId) =>
+    latest.some((lease) => lease.liveness === "warm" && lease.instanceId === instanceId),
+  ).length;
+}
+
 /** Whether no live lease owns the candidate box by exact instance or by its
  * attribution tags. Unlike termination eligibility this ignores the pending
  * create postponement: a postponed orphan is still running without a lease. */
@@ -2961,9 +2974,10 @@ async function sweepModalOrphansForConfiguredBackend(
         unleased: result.inventory.unterminated.filter((candidate) =>
           modalOrphanCandidateStillUnowned(latest, candidate),
         ).length,
-        liveLeaseInstancesMissing: result.inventory.missingLiveLeaseInstanceIds.filter(
-          (instanceId) => latest.some((lease) => lease.instanceId === instanceId),
-        ).length,
+        liveLeaseInstancesMissing: countWarmModalLeasesMissingInstance(
+          latest,
+          result.inventory.missingLiveLeaseInstanceIds,
+        ),
       });
       recordSandboxInventoryProjectionSuccess(observability, "modal_provider");
     } catch (error) {

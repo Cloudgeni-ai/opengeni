@@ -1,6 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import type { LiveModalSandboxLeaseAttribution } from "@opengeni/db";
 import {
+  countWarmModalLeasesMissingInstance,
   modalOrphanCandidateStillUnowned,
   modalOrphanTerminationStillEligible,
 } from "../src/activities/sandbox-lease";
@@ -57,5 +58,23 @@ describe("Modal orphan pre-termination lease revalidation", () => {
     expect(
       modalOrphanCandidateStillUnowned([{ ...lease, instanceId: null }], candidate("sb-new")),
     ).toBe(false);
+  });
+
+  test("only a still-warm lease whose box is gone counts as a zombie", () => {
+    const warm = { ...lease, liveness: "warm" };
+    const draining = {
+      ...lease,
+      leaseId: "lease-d",
+      instanceId: "sb-draining",
+      liveness: "draining",
+    };
+    const rotated = { ...lease, leaseId: "lease-r", instanceId: "sb-new", liveness: "warm" };
+    expect(
+      countWarmModalLeasesMissingInstance(
+        [warm, draining, rotated],
+        // sb-live: warm zombie; sb-draining: mid-drain; sb-old: lease moved on.
+        ["sb-live", "sb-draining", "sb-old"],
+      ),
+    ).toBe(1);
   });
 });
