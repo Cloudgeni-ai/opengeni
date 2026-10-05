@@ -13,15 +13,15 @@ import {
   type DbClient,
 } from "../src";
 
-const migrationUrl = new URL("../drizzle/0633_opper_model_providers.sql", import.meta.url);
+const migrationUrl = new URL("../drizzle/0636_opper_model_providers.sql", import.meta.url);
 const requireRealDatabase = process.env.OPENGENI_REQUIRE_REAL_DB === "1";
 let shared: SharedTestDatabase | null = null;
 let client: DbClient | null = null;
 
 beforeAll(async () => {
   if (!requireRealDatabase) return;
-  shared = await acquireSharedTestDatabase("migration-0633-opper-model-providers");
-  if (!shared) throw new Error("migration 0633 requires real PostgreSQL");
+  shared = await acquireSharedTestDatabase("migration-0636-opper-model-providers");
+  if (!shared) throw new Error("migration 0636 requires real PostgreSQL");
   client = createDb(shared.appUrl, { max: 4 });
 }, 180_000);
 
@@ -30,7 +30,7 @@ afterAll(async () => {
   await shared?.release();
 }, 180_000);
 
-describe("migration 0633 Opper model providers", () => {
+describe("migration 0636 Opper model providers", () => {
   test("is a rolling allow-list widening with no row rewrite or RLS window", async () => {
     const migration = await readFile(migrationUrl, "utf8");
     expect(migration.startsWith("-- deployment-mode: rolling\n")).toBe(true);
