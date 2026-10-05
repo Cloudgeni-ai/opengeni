@@ -451,7 +451,7 @@ describe("observability", () => {
       sourceKey: "source-1",
     });
     span.end({ attributes: { status: "idle", account_id: "account-1" } });
-    await Bun.sleep(0);
+    await obs.flush(); // spans batch on a short timer
 
     expect(exported).toHaveLength(1);
     expect(exported[0]!.url).toBe("http://collector:4318/v1/traces");
@@ -514,7 +514,7 @@ describe("observability", () => {
 
     const span = obs.startSpan("HTTP POST /v1/sessions", {});
     span.end({ error, attributes: { "custom.large": "x".repeat(2_000) } });
-    await Bun.sleep(0);
+    await obs.flush(); // spans batch on a short timer
 
     expect(exported).toHaveLength(1);
     const body = exported[0]!.body;
@@ -559,7 +559,7 @@ describe("observability", () => {
 
     const span = obs.startSpan("worker.hostile_status", {});
     expect(() => span.end({ error: hostile })).not.toThrow();
-    await Bun.sleep(0);
+    await obs.flush(); // spans batch on a short timer
 
     expect(exported).toHaveLength(1);
     const rendered = JSON.stringify(exported[0]!.body);

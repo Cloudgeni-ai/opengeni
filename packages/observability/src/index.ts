@@ -1120,14 +1120,18 @@ export class Observability {
       ],
     };
     this.spanBatch.push(body.resourceSpans[0]);
+    // Coalesce spans for a short window: a per-microtask flush sent nearly every
+    // span as its own request through the single serial export lane, which
+    // overflowed the bounded queue under concurrent turns and dropped spans.
     if (!this.spanBatchScheduled) {
       this.spanBatchScheduled = true;
-      queueMicrotask(() => {
+      const timer = setTimeout(() => {
         this.spanBatchScheduled = false;
         this.submitSpanBatch();
-      });
+      }, SPAN_BATCH_WINDOW_MS);
+      (timer as { unref?: () => void }).unref?.();
     }
-    if (this.spanBatch.length >= 32) this.submitSpanBatch();
+    if (this.spanBatch.length >= SPAN_BATCH_MAX_SPANS) this.submitSpanBatch();
   }
 
   private submitSpanBatch(): void {
@@ -1144,6 +1148,11 @@ export class Observability {
     );
   }
 }
+
+/** Spans buffered before one OTLP request; bounded well under the collector's request body cap. */
+const SPAN_BATCH_MAX_SPANS = 256;
+/** Longest a span waits in the batch before export. */
+const SPAN_BATCH_WINDOW_MS = 250;
 
 /**
  * Convert routed sandbox-provider observations into one bounded Prometheus
