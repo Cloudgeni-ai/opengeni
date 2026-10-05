@@ -67,6 +67,7 @@ import type {
 import { serializeManifestRecord } from "@openai/agents-core/sandbox/internal";
 import { isProviderApiThrottleError, PROVIDER_REGISTRY } from "./providers";
 import { ensureModalRegistryImage } from "./providers/modal";
+import { ModalExecReadinessProbeLostError } from "./providers/modal-command-control";
 import type { ModalCreateIntent } from "./providers/modal-create-boundary";
 import type { ProviderRegistration } from "./providers/types";
 import { sandboxBackendForSdkBackendId } from "./select";
@@ -1268,10 +1269,18 @@ export class SandboxExecReadinessError extends Error {
 
   constructor(
     public readonly backend: string,
-    public readonly code: "exec_probe_unavailable" | "exec_probe_timeout" | "exec_probe_failed",
+    /** `exec_probe_lost`: the provider no longer tracks the exact readiness
+     * probe exec (Modal router FAILED_PRECONDITION "exec not found"). The box
+     * has not proved command readiness; it is not probe replay authority. */
+    public readonly code:
+      | "exec_probe_unavailable"
+      | "exec_probe_timeout"
+      | "exec_probe_failed"
+      | "exec_probe_lost",
     public readonly timeoutMs: number,
     public readonly exitCode: number | null = null,
     public readonly instanceId: string | null = null,
+    options?: { cause?: unknown },
   ) {
     const target = instanceId ? `${backend} sandbox ${instanceId}` : `${backend} sandbox`;
     super(
@@ -1279,11 +1288,21 @@ export class SandboxExecReadinessError extends Error {
         ? `${target} timed out waiting for command readiness after ${timeoutMs}ms`
         : code === "exec_probe_unavailable"
           ? `${target} session does not expose an exec readiness probe`
-          : exitCode === null
-            ? `${target} exec readiness probe did not return a command exit code`
-            : `${target} exec readiness probe failed with exit code ${exitCode}`,
+          : code === "exec_probe_lost"
+            ? `${target} lost its command-readiness probe: the provider no longer tracks the probe command`
+            : exitCode === null
+              ? `${target} exec readiness probe did not return a command exit code`
+              : `${target} exec readiness probe failed with exit code ${exitCode}`,
+      options && "cause" in options ? { cause: options.cause } : undefined,
     );
   }
+}
+
+/** A fresh-box readiness probe whose exact exec the provider lost. */
+export function isSandboxExecReadinessProbeLostError(
+  error: unknown,
+): error is SandboxExecReadinessError & { code: "exec_probe_lost" } {
+  return error instanceof SandboxExecReadinessError && error.code === "exec_probe_lost";
 }
 
 /** A remote provider may return a sandbox handle before its command router
@@ -1379,9 +1398,20 @@ export async function verifySandboxExecReadiness(
     signal?.addEventListener("abort", abort, { once: true });
     if (signal?.aborted) abort();
     try {
-      const exitCode = await withinDeadline(() =>
-        nativeModalProbe.call(session, cancellation.signal),
-      );
+      let exitCode: number;
+      try {
+        exitCode = await withinDeadline(() => nativeModalProbe.call(session, cancellation.signal));
+      } catch (error) {
+        if (!(error instanceof ModalExecReadinessProbeLostError)) throw error;
+        throw new SandboxExecReadinessError(
+          established.backendId,
+          "exec_probe_lost",
+          timeoutMs,
+          null,
+          established.instanceId,
+          { cause: error },
+        );
+      }
       if (exitCode !== 0)
         throw new SandboxExecReadinessError(
           established.backendId,
