@@ -7,6 +7,8 @@ interface Args {
   model: string | null;
   sandboxBackend: string | null;
   objectConnectTo: string | null;
+  browserOrigin: string | null;
+  denyForeignBrowserOrigin: boolean;
   deploymentAccessKey: string | null;
   productToken: string | null;
   skipAgent: boolean;
@@ -286,11 +288,15 @@ if (args.skipStorage) {
     const uploadId = stringField(upload, "uploadId");
     const fileId = stringField(upload, "fileId");
     const headers = recordField(upload, "requiredHeaders");
-    // The browser SDK is embeddable in arbitrary products. Use an unpredictable
-    // unrelated origin so a deployment cannot pass by allowlisting a fixed
-    // conformance hostname; the signed URL remains the authorization boundary.
-    const browserOrigin = `https://${crypto.randomUUID()}.sdk-conformance.invalid`;
+    // Preserve the generic embeddable-SDK probe by default. Restricted-origin
+    // deployments must explicitly select their real browser origin instead.
+    const browserOrigin =
+      args.browserOrigin ?? `https://${crypto.randomUUID()}.sdk-conformance.invalid`;
     await preflightObjectPut(putUrl, browserOrigin, Object.keys(headers), args.objectConnectTo);
+    if (args.denyForeignBrowserOrigin) {
+      const foreignOrigin = `https://${crypto.randomUUID()}.foreign-conformance.invalid`;
+      await denyForeignObjectPut(putUrl, foreignOrigin, Object.keys(headers), args.objectConnectTo);
+    }
     await putObject(putUrl, content, headers, args.objectConnectTo);
     await postJson(workspaceUrl(`/files/uploads/${uploadId}/complete`), {});
     const download = await postJson(workspaceUrl(`/files/${fileId}/download-url`), {});
@@ -308,7 +314,7 @@ if (args.skipStorage) {
         `cross-workspace file read returned HTTP ${foreignRead.status}, expected 403 or 404`,
       );
     }
-    return `file ${fileId} uploaded/downloaded and cross-workspace read denied`;
+    return `file ${fileId} uploaded/downloaded and cross-workspace read denied${args.denyForeignBrowserOrigin ? "; foreign browser origin denied" : ""}`;
   });
 }
 
@@ -427,6 +433,47 @@ async function preflightObjectPut(
   requiredHeaderNames: string[],
   connectTo: string | null,
 ): Promise<void> {
+  const response = await objectPutPreflight(url, origin, requiredHeaderNames, connectTo);
+  if (response.status < 200 || response.status >= 300) {
+    throw new Error(`browser upload CORS preflight returned HTTP ${response.status}`);
+  }
+  const allowedOrigin = response.headers.get("access-control-allow-origin");
+  // Some object stores preserve the literal wildcard while others echo the
+  // requesting origin after matching a wildcard rule. Restricted deployments
+  // additionally prove that a foreign origin is denied.
+  if (allowedOrigin !== "*" && allowedOrigin !== origin) {
+    throw new Error("browser upload CORS preflight did not allow the selected browser origin");
+  }
+  const allowedMethods = (response.headers.get("access-control-allow-methods") ?? "")
+    .toLowerCase()
+    .split(/\s*,\s*/);
+  if (!allowedMethods.includes("put")) {
+    throw new Error("browser upload CORS preflight did not allow PUT");
+  }
+}
+
+async function denyForeignObjectPut(
+  url: string,
+  origin: string,
+  requiredHeaderNames: string[],
+  connectTo: string | null,
+): Promise<void> {
+  const response = await objectPutPreflight(url, origin, requiredHeaderNames, connectTo);
+  if (response.status === 0 || response.status >= 500) {
+    throw new Error("foreign-origin CORS denial was not observable");
+  }
+  const allowedOrigin = response.headers.get("access-control-allow-origin");
+  if (allowedOrigin === "*" || allowedOrigin === origin) {
+    throw new Error("browser upload CORS preflight allowed a foreign browser origin");
+  }
+}
+
+async function objectPutPreflight(
+  url: string,
+  origin: string,
+  requiredHeaderNames: string[],
+  connectTo: string | null,
+): Promise<{ status: number; headers: Headers; body: string }> {
   const accessControlHeaders = [
     ...new Set(requiredHeaderNames.map((header) => header.toLowerCase())),
   ]
@@ -437,31 +484,9 @@ async function preflightObjectPut(
     "access-control-request-method": "PUT",
     ...(accessControlHeaders ? { "access-control-request-headers": accessControlHeaders } : {}),
   };
-  const response = connectTo
+  return connectTo
     ? curlPreflight(url, preflightHeaders, connectTo)
     : await fetchPreflight(url, preflightHeaders);
-  if (response.status < 200 || response.status >= 300) {
-    throw new Error(
-      `browser upload CORS preflight returned HTTP ${response.status}: ${response.body.trim()}`,
-    );
-  }
-  const allowedOrigin = response.headers.get("access-control-allow-origin");
-  // Some object stores preserve the literal wildcard while others echo the
-  // requesting origin after matching a wildcard rule. Both are valid browser
-  // CORS responses; deployment automation separately verifies provider config.
-  if (allowedOrigin !== "*" && allowedOrigin !== origin) {
-    throw new Error(
-      `browser upload CORS preflight allowed origin ${allowedOrigin ?? "<missing>"}, expected ${origin} or * for the embeddable SDK`,
-    );
-  }
-  const allowedMethods = (response.headers.get("access-control-allow-methods") ?? "")
-    .toLowerCase()
-    .split(/\s*,\s*/);
-  if (!allowedMethods.includes("put")) {
-    throw new Error(
-      `browser upload CORS preflight did not allow PUT: ${allowedMethods.join(",") || "<missing>"}`,
-    );
-  }
 }
 
 async function fetchPreflight(
@@ -587,6 +612,8 @@ function parseArgs(values: string[]): Args {
     model: process.env.OPENGENI_CONFORMANCE_MODEL?.trim() || null,
     sandboxBackend: process.env.OPENGENI_CONFORMANCE_SANDBOX_BACKEND ?? "none",
     objectConnectTo: process.env.OPENGENI_CONFORMANCE_OBJECT_CONNECT_TO ?? null,
+    browserOrigin: process.env.OPENGENI_CONFORMANCE_BROWSER_ORIGIN ?? null,
+    denyForeignBrowserOrigin: false,
     deploymentAccessKey:
       process.env.OPENGENI_CONFORMANCE_DEPLOYMENT_ACCESS_KEY ??
       process.env.OPENGENI_CONFORMANCE_ACCESS_KEY ??
@@ -620,6 +647,10 @@ function parseArgs(values: string[]): Args {
       out.skipObservability = true;
       continue;
     }
+    if (value === "--deny-foreign-browser-origin") {
+      out.denyForeignBrowserOrigin = true;
+      continue;
+    }
     if (value === "--skip-scheduled-tasks") {
       out.skipScheduledTasks = true;
       continue;
@@ -649,6 +680,10 @@ function parseArgs(values: string[]): Args {
       out.objectConnectTo = requiredNext(values, ++index, value);
       continue;
     }
+    if (value === "--browser-origin") {
+      out.browserOrigin = requiredNext(values, ++index, value);
+      continue;
+    }
     if (value === "--deployment-access-key" || value === "--access-key") {
       out.deploymentAccessKey = requiredNext(values, ++index, value);
       continue;
@@ -667,6 +702,10 @@ function parseArgs(values: string[]): Args {
     }
     if (value.startsWith("--object-connect-to=")) {
       out.objectConnectTo = value.slice("--object-connect-to=".length);
+      continue;
+    }
+    if (value.startsWith("--browser-origin=")) {
+      out.browserOrigin = value.slice("--browser-origin=".length);
       continue;
     }
     if (value.startsWith("--deployment-access-key=")) {
@@ -699,6 +738,28 @@ function parseArgs(values: string[]): Args {
     if (!out.model) {
       throw new Error("--model requires a non-empty value");
     }
+  }
+  if (out.browserOrigin !== null) {
+    let origin: URL;
+    try {
+      origin = new URL(out.browserOrigin);
+    } catch {
+      throw new Error("--browser-origin must be an HTTP(S) origin without credentials or a path");
+    }
+    if (
+      !["http:", "https:"].includes(origin.protocol) ||
+      origin.username ||
+      origin.password ||
+      origin.search ||
+      origin.hash ||
+      origin.pathname !== "/"
+    ) {
+      throw new Error("--browser-origin must be an HTTP(S) origin without credentials or a path");
+    }
+    out.browserOrigin = origin.origin;
+  }
+  if (out.denyForeignBrowserOrigin && !out.browserOrigin) {
+    throw new Error("--deny-foreign-browser-origin requires an explicit --browser-origin");
   }
   return out;
 }

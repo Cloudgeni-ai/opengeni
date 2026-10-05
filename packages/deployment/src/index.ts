@@ -507,6 +507,27 @@ export const DeploymentContract = z
       });
     }
     if (contract.runtime.platform === "azure-container-apps") {
+      if (contract.product.accessMode === "local") {
+        ctx.addIssue({
+          code: "custom",
+          path: ["product", "accessMode"],
+          message: "Azure Container Apps serving requires configured or managed product access",
+        });
+      }
+      if (contract.access.mode === "disabled") {
+        ctx.addIssue({
+          code: "custom",
+          path: ["access", "mode"],
+          message: "Azure Container Apps serving requires an authenticated access boundary",
+        });
+      }
+      if (!contract.ingress.enabled) {
+        ctx.addIssue({
+          code: "custom",
+          path: ["ingress", "enabled"],
+          message: "Azure Container Apps serving requires the native HTTPS ingress",
+        });
+      }
       if (contract.runtime.namespace !== undefined) {
         ctx.addIssue({
           code: "custom",
@@ -1715,7 +1736,17 @@ export function requiredRuntimeEnvVars(
     } else if (contract.objectStorage.api === "aws-s3") {
       vars.push("OPENGENI_OBJECT_STORAGE_REGION");
     } else if (contract.objectStorage.api === "azure-blob") {
-      vars.push("OPENGENI_OBJECT_STORAGE_AZURE_CONNECTION_STRING");
+      if (azureBlobSharedKeySelected(env)) {
+        vars.push(
+          "OPENGENI_OBJECT_STORAGE_AZURE_ACCOUNT_NAME",
+          "OPENGENI_OBJECT_STORAGE_AZURE_ACCOUNT_KEY",
+        );
+      } else {
+        vars.push("OPENGENI_OBJECT_STORAGE_AZURE_CONNECTION_STRING");
+      }
+      if (env.OPENGENI_OBJECT_STORAGE_AZURE_ENDPOINT) {
+        vars.push("OPENGENI_OBJECT_STORAGE_AZURE_ENDPOINT");
+      }
     } else {
       vars.push("OPENGENI_OBJECT_STORAGE_GCS_PROJECT_ID");
     }
@@ -2252,13 +2283,13 @@ function containerAppsVariableArgs(env: Record<string, string | undefined>): str
 function containerAppsPrerequisites(): string[] {
   return [
     "Terraform version and provider versions satisfying this module's versions.tf; init -reconfigure configures its local backend with the external private state path. A remote backend requires a separately configured thin wrapper and matching backend initialization.",
-    "Azure CLI with containerapp job start/execution show commands; sign in and select the intended subscription with az login and az account set before running any resource commands.",
+    "Azure CLI with containerapp job start/execution show and application show/exec commands; hold read/exec permissions for private observability checks. Sign in and select the intended subscription with az login and az account set before running any resource commands.",
     "Register Microsoft.App, Microsoft.Network, Microsoft.OperationalInsights, Microsoft.DBforPostgreSQL, Microsoft.Storage, Microsoft.KeyVault, and Microsoft.ManagedIdentity resource providers; hold resource-create, role-assignment, Key Vault, and destroy permissions for the intended scope. Register Microsoft.ContainerRegistry if create_acr=true.",
     "Bun at the repository-pinned version, Bash, jq, seq, and curl for operator verification; no local image build is needed.",
     "Set absolute private paths OPENGENI_ACA_TFVARS_FILE, OPENGENI_ACA_STATE_FILE, and OPENGENI_ACA_TF_DATA_DIR outside the repository. Keep the initialized backend and TF_DATA_DIR unchanged across every phase and output/destroy command.",
     "Private tfvars supply images.api/worker/web immutable release references, external_services Temporal/NATS settings, secret_env model/sandbox credentials, and config_env non-secret runtime settings. The module generates database credentials and Key Vault references; no operator PostgreSQL password is required.",
     "Default create_acr=false requires anonymously pullable images and grants no access to an existing registry. Select --create-acr or OPENGENI_ACA_CREATE_ACR=true when generating the plan to create an empty task-owned ACR in foundation; the selected mode is explicitly pinned in every phase and destroy command.",
-    "Created ACR mode requires operator permission for az acr repository show digest readback. Stop after foundation: manually import authorized immutable API/worker/web images into the actual acr.login_server output using private credentials, update private images tfvars, and set OPENGENI_ACA_ACR_IMPORTS_COMPLETED to that exact login server before resuming the import gate. No images are copied by this plan; never rerun foundation after bootstrap/apps.",
+    "Created ACR mode requires operator permission for az acr repository show digest readback. Stop after foundation: manually import authorized immutable API/worker/web images and images.outbox_dispatcher when supplied into the actual acr.login_server output using private credentials, update private images tfvars, and set OPENGENI_ACA_ACR_IMPORTS_COMPLETED to that exact login server before resuming the import gate. No images are copied by this plan; never rerun foundation after bootstrap/apps.",
     "Run the ordered deployment commands in the same shell so the exact migration execution identity is retained; never blindly retry job start after an unknown outcome.",
     "A successful schema/env check or TCP probe is not live deployment proof. Complete real model, remote sandbox, file/storage, auth, replay, schedule, and telemetry conformance; exports remain unsupported.",
   ];
@@ -2294,9 +2325,9 @@ function containerAppsDeployCommands(
           `terraform -chdir=${terraformRoot} plan ${foundationArgs}`,
           `terraform -chdir=${terraformRoot} apply ${foundationArgs}`,
           `OPENGENI_ACA_ACR_OUTPUT="$(${output} -json acr)" && OPENGENI_ACA_ACR_NAME="$(printf '%s' "$OPENGENI_ACA_ACR_OUTPUT" | jq -er '.name | strings | select(length > 0)')" && OPENGENI_ACA_ACR_LOGIN_SERVER="$(printf '%s' "$OPENGENI_ACA_ACR_OUTPUT" | jq -er '.login_server | strings | select(length > 0)')" || exit 1`,
-          'printf "Foundation created ACR %s (%s) without a migration job or applications. Manually import authorized release digests using private credentials and update images.api/worker/web in private tfvars. Set OPENGENI_ACA_ACR_IMPORTS_COMPLETED to that exact login server, then resume at the import gate below; do not rerun foundation after bootstrap/apps.\\n" "$OPENGENI_ACA_ACR_NAME" "$OPENGENI_ACA_ACR_LOGIN_SERVER"',
+          'printf "Foundation created ACR %s (%s) without a migration job or applications. Manually import authorized release digests using private credentials and update images.api/worker/web and optional images.outbox_dispatcher in private tfvars. Set OPENGENI_ACA_ACR_IMPORTS_COMPLETED to that exact login server, then resume at the import gate below; do not rerun foundation after bootstrap/apps.\\n" "$OPENGENI_ACA_ACR_NAME" "$OPENGENI_ACA_ACR_LOGIN_SERVER"',
           'test "${OPENGENI_ACA_ACR_IMPORTS_COMPLETED:-}" = "${OPENGENI_ACA_ACR_LOGIN_SERVER:?run foundation first}" || { printf "Stop: complete the manual created-ACR imports before bootstrap.\\n" >&2; exit 1; }',
-          `OPENGENI_ACA_RELEASE_IMAGES="$(printf '%s\\n' 'jsonencode(var.images)' | terraform -chdir=${terraformRoot} console ${foundationArgs} | jq -er --arg host "$OPENGENI_ACA_ACR_LOGIN_SERVER" 'fromjson | [.api, .worker, .web] | if all(.[]; type == "string" and startswith($host + "/") and test("^[A-Za-z0-9._/-]+@sha256:[a-f0-9]{64}$")) then .[] else error("Release images must use the created ACR and immutable sha256 digests") end')"`,
+          `OPENGENI_ACA_RELEASE_IMAGES="$(printf '%s\\n' 'jsonencode(var.images)' | terraform -chdir=${terraformRoot} console ${foundationArgs} | jq -er --arg host "$OPENGENI_ACA_ACR_LOGIN_SERVER" 'fromjson | [.api, .worker, .web] + (if .outbox_dispatcher == null then [] else [.outbox_dispatcher] end) | if all(.[]; type == "string" and startswith($host + "/") and test("^[A-Za-z0-9._/-]+@sha256:[a-f0-9]{64}$")) then .[] else error("Release images must use the created ACR and immutable sha256 digests") end')"`,
           'while IFS= read -r OPENGENI_ACA_IMAGE; do OPENGENI_ACA_ACR_IMAGE="${OPENGENI_ACA_IMAGE#*/}"; az acr repository show --name "${OPENGENI_ACA_ACR_NAME:?run foundation first}" --image "$OPENGENI_ACA_ACR_IMAGE" --output none --only-show-errors >/dev/null 2>&1 || { printf "Required release digest is not readable in the created ACR; resolve import/read access privately before bootstrap.\\n" >&2; exit 1; }; done <<< "$OPENGENI_ACA_RELEASE_IMAGES"',
         ]
       : []),
@@ -2317,11 +2348,13 @@ function containerAppsVerifyCommands(
   const overlayArg = productOverlay === "none" ? "" : ` --product-overlay ${productOverlay}`;
   const conformance =
     'bun run deployment:conformance -- --base-url "$OPENGENI_API_BASE_URL"' +
-    ` --sandbox-backend ${contract.sandbox.backend}`;
+    ` --sandbox-backend ${contract.sandbox.backend}` +
+    ' --browser-origin "$OPENGENI_API_BASE_URL" --deny-foreign-browser-origin --skip-observability';
   return [
     `OPENGENI_API_BASE_URL="$(terraform -chdir=${CONTAINER_APPS_TERRAFORM_ROOT} output -raw api_url)" && export OPENGENI_API_BASE_URL`,
     'az containerapp list --resource-group "${OPENGENI_ACA_RESOURCE_GROUP:?run bootstrap first}" --output json --only-show-errors | jq -e \'def role: [.properties.template.containers[].env[]? | select(.name == "OPENGENI_WORKER_ROLE") | .value][0]; [.[] | select(role == "control" or role == "turn")] as $workers | ([$workers[] | role] | sort) == ["control", "turn"] and all($workers[]; .properties.template.scale.minReplicas >= 1 and .properties.template.terminationGracePeriodSeconds >= 120)\'',
     'curl --fail --silent --show-error "${OPENGENI_API_BASE_URL:?apply applications first}/healthz"',
+    `bun scripts/deployment-aca-observability.ts --terraform-root ${CONTAINER_APPS_TERRAFORM_ROOT}`,
     `bun run deployment:preflight -- --profile ${contract.profile}${overlayArg} --check-env`,
     contract.access.mode === "sharedKey"
       ? `OPENGENI_CONFORMANCE_DEPLOYMENT_ACCESS_KEY="$OPENGENI_ACCESS_KEY" ${conformance}`
@@ -2803,11 +2836,13 @@ function planNotes(
       "Temporal and NATS are external prerequisites; this profile does not install them. Temporary live-test dependency fixtures are not production defaults and have a separate lifecycle.",
       "Use existing release images pinned by full sha256 digest. Migrations use the same API image; this workflow does not build or publish replacement images.",
       "Do not change tfvars, image digests, runtime database roles, or secrets between bootstrap, migration execution, and application enablement. Retain the exact execution ID when an observation fails; do not start another migration blindly.",
-      "Use managed identity for Key Vault secret delivery and pull access only to the optional created ACR; the current Blob adapter uses a connection string delivered as a secret, not an implied identity-native storage adapter.",
+      "Use managed identity for Key Vault secret delivery and pull access only to the optional created ACR; the current Blob adapter requires an account-name/key pair or connection string delivered as secrets, not an implied identity-native storage adapter.",
       "create_acr=false uses existing anonymously pullable release images by default and assigns no roles on existing registries. Select --create-acr or OPENGENI_ACA_CREATE_ACR=true for foundation -> manual import -> digest readback -> bootstrap: ACA validates pulls at job CREATE, so an empty created ACR cannot be populated after a whole bootstrap apply.",
       "Created-ACR readback confirms configured digest membership using the operator's credentials, not workload identity pull permission or live runtime conformance. The plan never imports images automatically or grants access to foreign registries. Keep credentials private and preserve the selected registry mode through teardown.",
       "The native environment HTTP-route edge serves API and web on one HTTPS origin. Verify real SSE duration, reconnect/replay, rolling restart and NATS-loss recovery against that edge.",
       "The stock conformance stream is short and a selected sandbox backend is not proof of a sandbox invocation. Add actual remote commands and file materialization tests; test private production metrics/OTEL independently rather than counting a skipped public /metrics check as coverage.",
+      "The generated private observability helper checks API/control/turn loopback metrics and worker health/readiness using exact Terraform app IDs. Stock conformance explicitly skips its unrouted public /metrics probe; neither that skip nor private scrape evidence proves collector delivery of logs, metrics, or traces. Verify collector/ingestion independently before claiming full observability.",
+      "Browser-upload CORS conformance uses the actual HTTPS edge origin and separately requires a foreign origin to be denied. Do not broaden the Blob CORS allowlist to satisfy an unrelated random-origin upload probe.",
       "preflight --check-env inspects only the operator's current environment, not deployed Key Vault references. Check effective runtime values privately; do not use reference URLs as credential values or mistake a local env check for workload readiness.",
       "Configured shared-key access reuses OPENGENI_ACCESS_KEY when OPENGENI_DELEGATION_SECRET is unset. Preserve an explicitly supplied delegation secret: it takes precedence, so prove authenticated /v1/access/me and workspace access with the matching shared key or host-signed product bearer rather than assuming advertised auth mode guarantees key acceptance.",
       "Standard ACA HTTP ingress documents a 240-second timeout; do not treat that as a measured stream lifetime or infer a 3600-second guarantee. Read back the native environment HTTP-route edge and verify long-lived SSE and reconnect/replay empirically.",
@@ -3278,7 +3313,7 @@ function runtimeEnvValues(
       value:
         env.OPENGENI_OBJECT_STORAGE_AZURE_CONNECTION_STRING ??
         terraformOutputString(terraformOutputs, "object_storage_azure_connection_string"),
-      required: true,
+      required: !azureBlobSharedKeySelected(env),
     };
     if (output?.sensitive) {
       connectionStringEntry.fromSensitiveTerraformOutput = "object_storage_azure_connection_string";
@@ -3290,7 +3325,22 @@ function runtimeEnvValues(
         terraformOutputString(terraformOutputs, "object_storage_bucket") ??
           contract.objectStorage.bucket,
       ),
-      connectionStringEntry,
+      ...(azureBlobSharedKeySelected(env)
+        ? [
+            requiredEnv(
+              "OPENGENI_OBJECT_STORAGE_AZURE_ACCOUNT_NAME",
+              env.OPENGENI_OBJECT_STORAGE_AZURE_ACCOUNT_NAME,
+            ),
+            requiredEnv(
+              "OPENGENI_OBJECT_STORAGE_AZURE_ACCOUNT_KEY",
+              env.OPENGENI_OBJECT_STORAGE_AZURE_ACCOUNT_KEY,
+            ),
+          ]
+        : [connectionStringEntry]),
+      valueEnv(
+        "OPENGENI_OBJECT_STORAGE_AZURE_ENDPOINT",
+        env.OPENGENI_OBJECT_STORAGE_AZURE_ENDPOINT,
+      ),
     );
   } else if (contract.objectStorage.api === "aws-s3") {
     entries.push(
@@ -3431,6 +3481,16 @@ function runtimeEnvValues(
   }
 
   return dedupeRuntimeEnv(entries);
+}
+
+function azureBlobSharedKeySelected(env: Record<string, string | undefined>): boolean {
+  return (
+    !nonEmpty(env.OPENGENI_OBJECT_STORAGE_AZURE_CONNECTION_STRING) &&
+    Boolean(
+      nonEmpty(env.OPENGENI_OBJECT_STORAGE_AZURE_ACCOUNT_NAME) ||
+      nonEmpty(env.OPENGENI_OBJECT_STORAGE_AZURE_ACCOUNT_KEY),
+    )
+  );
 }
 
 function inferredOpenAiProvider(env: Record<string, string | undefined>): "openai" | "azure" {

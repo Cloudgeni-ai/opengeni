@@ -331,6 +331,11 @@ esac
     "acr-output-error",
     "console-unknown",
     "job-failed",
+    "outbox-ready",
+    "outbox-missing-digest",
+    "outbox-wrong-registry",
+    "outbox-mutable-image",
+    "outbox-empty-image",
   ]) {
     test(`created ACR requires foundation, manual import, digest readback, then exact migration (${scenario})`, () => {
       const dir = mkdtempSync(join(tmpdir(), "opengeni-aca-created-acr-"));
@@ -338,11 +343,21 @@ esac
         const bin = join(dir, "bin");
         mkdirSync(bin);
         const host = "task-created-acr.example.test";
-        const images = {
+        const images: { api: string; worker: string; web: string; outbox_dispatcher?: string } = {
           api: `${host}/opengeni/api@sha256:${"1".repeat(64)}`,
           worker: `${host}/opengeni/worker@sha256:${"2".repeat(64)}`,
           web: `${host}/opengeni/web@sha256:${"3".repeat(64)}`,
         };
+        if (scenario.startsWith("outbox-")) {
+          images.outbox_dispatcher = `${host}/opengeni/outbox@sha256:${"4".repeat(64)}`;
+          if (scenario === "outbox-wrong-registry") {
+            images.outbox_dispatcher = `foreign-registry.example.test/outbox@sha256:${"4".repeat(64)}`;
+          } else if (scenario === "outbox-mutable-image") {
+            images.outbox_dispatcher = `${host}/opengeni/outbox:latest`;
+          } else if (scenario === "outbox-empty-image") {
+            images.outbox_dispatcher = "";
+          }
+        }
         if (scenario === "wrong-registry") {
           images.worker = `foreign-registry.example.test/worker@sha256:${"2".repeat(64)}`;
         } else if (scenario === "mutable-image") {
@@ -389,7 +404,7 @@ case "$*" in
     fi ;;
   *'deployment_phase=bootstrap'*)
     test -f "$TF_DATA_DIR/foundation-applied"
-    test "$(grep -c 'az acr repository show' "$ACA_TEST_COMMAND_LOG")" -eq 3
+    test "$(grep -c 'az acr repository show' "$ACA_TEST_COMMAND_LOG")" -eq ${images.outbox_dispatcher ? 4 : 3}
     if [ "$1" = apply ]; then printf 'applied\\n' > "$TF_DATA_DIR/bootstrap-applied"; fi ;;
 esac
 `,
@@ -408,6 +423,9 @@ case "$*" in
     case "$*" in *'--output none --only-show-errors') ;; *) exit 19 ;; esac
     if [ "$ACA_TEST_SCENARIO" = missing-digest ]; then
       case "$*" in *'--image opengeni/worker@'*) printf '${privateMarker}\\n' >&2; exit 17 ;; esac
+    fi
+    if [ "$ACA_TEST_SCENARIO" = outbox-missing-digest ]; then
+      case "$*" in *'--image opengeni/outbox@'*) printf '${privateMarker}\\n' >&2; exit 17 ;; esac
     fi ;;
   *'job start'*) test -f "$TF_DATA_DIR/bootstrap-applied"; printf 'test-migrations-exact-execution\\n' ;;
   *'job execution show'*)
@@ -450,11 +468,16 @@ esac
         expect(commands).toContain("deployment_phase=foundation");
         expect(commands).not.toContain("-state=");
         expect(commands).not.toMatch(/\baz acr (?:import|login|build)\b/);
-        if (scenario === "ready" || scenario === "job-failed") {
-          expect(commands.match(/az acr repository show/g)).toHaveLength(3);
+        if (scenario === "ready" || scenario === "job-failed" || scenario === "outbox-ready") {
+          expect(commands.match(/az acr repository show/g)).toHaveLength(
+            scenario === "outbox-ready" ? 4 : 3,
+          );
           expect(commands).toContain(`--image opengeni/api@sha256:${"1".repeat(64)}`);
           expect(commands).toContain(`--image opengeni/worker@sha256:${"2".repeat(64)}`);
           expect(commands).toContain(`--image opengeni/web@sha256:${"3".repeat(64)}`);
+          if (scenario === "outbox-ready") {
+            expect(commands).toContain(`--image opengeni/outbox@sha256:${"4".repeat(64)}`);
+          }
           expect(commands.indexOf("output -json acr")).toBeLessThan(
             commands.indexOf("az acr repository show"),
           );
@@ -471,7 +494,7 @@ esac
           expect(commands).not.toContain("az containerapp job start");
           expect(commands).not.toContain("deployment_phase=apps");
         }
-        if (scenario === "ready") {
+        if (scenario === "ready" || scenario === "outbox-ready") {
           expect(result.status).toBe(0);
           expect(commands).toContain("deployment_phase=apps");
           expect(commands).toContain(`migration_completed_revision=${images.api}`);
