@@ -67,6 +67,7 @@ import {
   scheduledTurnMcpServerIds,
   hasPermission,
   requireExplicitPermissionDelegation,
+  createWebSearchBilling,
 } from "@opengeni/core";
 import { loadWorkspaceEnvironmentForRunWithCredentials } from "../environment";
 import { withFirstPartyTools } from "../goals";
@@ -116,6 +117,7 @@ import { resolveTurnSandboxAccess } from "./turn-sandbox-access";
 import { createListModelsAttemptToolDefinition } from "./list-models";
 import { createRefreshCredentialsAttemptToolDefinition } from "./refresh-credentials";
 import { codeSearchToolDefinitions, codeSearchWorkspaceFromChannel } from "./code-search";
+import { turnWebSearchPlan, webSearchToolDefinitions } from "./web-search";
 import { createWorkspaceSkillTools } from "./skill-tools";
 import { loadConfiguredBundledSkills } from "./skill-selection";
 import { guardSkillFilesystem } from "./skill-transfer";
@@ -886,6 +888,22 @@ export async function prepareTurnToolRuntime(deps: PrepareTurnToolRuntimeDeps) {
   const attemptToolFamilies = resolveAgentToolFamilies(session.agent, {
     hasSkills: skillCatalog.length > 0,
   });
+  // Provider web search: only where the turn has no hosted search (or the
+  // operator chose `replace`), only when a provider is configured, and only
+  // when the session's agent configuration allows web search (filtered below).
+  const webSearchTools = webSearchToolDefinitions({
+    settings: runSettings,
+    tools: turnWebSearchPlan(resolvedModel, runSettings).providerTools,
+    scope: {
+      accountId: input.accountId,
+      workspaceId: input.workspaceId,
+      sessionId: input.sessionId,
+      turnId: turn.id,
+      attemptId: input.attemptId,
+    },
+    billing: createWebSearchBilling({ db, settings: runSettings }),
+    observability,
+  });
   const attemptToolDefinitions = [
     ...(operationReadStore
       ? [
@@ -976,6 +994,7 @@ export async function prepareTurnToolRuntime(deps: PrepareTurnToolRuntimeDeps) {
       ? [googleDrivePublicationTool]
       : []),
     ...codeSearchTools,
+    ...webSearchTools,
   ].filter((tool) => attemptToolFamilies.allowsFunctionTool(tool.modelName));
   recordTurnStartupPhase(observability, {
     phase: "tool_context_preparation",

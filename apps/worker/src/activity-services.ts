@@ -1,5 +1,6 @@
 import {
   codeSearchDeploymentPolicy,
+  resolveWebSearchProvider,
   dbSearchPath,
   getSettings,
   resolveNatsControlPlaneAuth,
@@ -52,6 +53,13 @@ export function createSharedActivityServices(
       // Child, scheduled and automation sessions created here freeze their
       // code_search decision from the same deployment policy as the API.
       configureCodeSearchDeploymentPolicy(codeSearchDeploymentPolicy(settings));
+      // A named but unusable web search provider withholds the tools; say why.
+      const webSearchProvider = resolveWebSearchProvider(settings);
+      if (webSearchProvider.status === "invalid") {
+        observability.warn("web search provider is misconfigured; web_search stays off", {
+          reason: webSearchProvider.reason,
+        });
+      }
       return {
         settings: resolvedSettings,
         catalogSourceSettings: settings,

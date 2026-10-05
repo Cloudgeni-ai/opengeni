@@ -3130,6 +3130,27 @@ Sandbox file mount support is also backend-specific:
 | Docker/local in-container sandboxes | rclone mount           | rclone mount                    | signed download materialization | signed download materialization |
 | Modal                               | SDK cloud bucket mount | signed download materialization | signed download materialization | signed download materialization |
 
+## Provider web search
+
+Models without hosted web search (Claude, Gemini, DeepSeek, GLM and other
+registry models) get `web_search` / `web_fetch` agent tools only when the
+deployment names a search provider. It is off by default and needs no
+migration. The worker calls the provider; keys never reach a sandbox.
+
+```bash
+OPENGENI_WEB_SEARCH_PROVIDER=tinyfish        # tinyfish | exa | tavily | firecrawl | brave | jina | searxng | none
+OPENGENI_WEB_SEARCH_API_KEY=...              # not needed for searxng
+# Optional: OPENGENI_WEB_SEARCH_BASE_URL (required for searxng),
+# OPENGENI_WEB_FETCH_PROVIDER / _API_KEY / _BASE_URL (a separate page reader),
+# OPENGENI_WEB_SEARCH_PROVIDER_MODE=fallback|replace,
+# OPENGENI_WEB_SEARCH_PRICING_JSON, OPENGENI_WEB_SEARCH_REQUEST_TIMEOUT_MS.
+```
+
+Set them on both the API and the worker (the API projects the effective tool
+list; the worker runs the tools). With credit billing active, priced calls are
+billed at provider cost + 5%. [Web search](web-search.md) owns the provider
+table, modes, URL rules, prices and the evaluation script.
+
 ## Terraform Registry MCP Docs
 
 The Helm chart can deploy an optional, cluster-internal HashiCorp Terraform MCP

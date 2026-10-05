@@ -4,6 +4,7 @@ import {
   parseRealtimeVoicePricingTableJson,
 } from "./realtime-voice-pricing";
 export * from "./realtime-voice-pricing";
+export * from "./web-search";
 import { EnvCreditPromotionPolicy } from "./credit-promotions";
 export {
   CreditPromotionPolicy,
@@ -886,6 +887,18 @@ const SettingsSchema = z.object({
   // merged with the MCP-server tools (getAllTools = [...mcpTools, ...tools])
   // and the sandbox capability tools, never replacing them.
   webSearchEnabled: EnvBoolean.default(true),
+  // Provider-agnostic web search (`web_search` / `web_fetch` agent tools,
+  // see ./web-search.ts). Inert until a provider is named; validated lazily so
+  // a misconfiguration withholds the tools instead of failing boot.
+  webSearchProvider: z.string().optional(),
+  webSearchApiKey: z.string().optional(),
+  webSearchBaseUrl: z.string().optional(),
+  webFetchProvider: z.string().optional(),
+  webFetchApiKey: z.string().optional(),
+  webFetchBaseUrl: z.string().optional(),
+  webSearchProviderMode: z.string().optional(),
+  webSearchPricingJson: z.string().optional(),
+  webSearchRequestTimeoutMs: z.coerce.number().int().positive().max(120_000).default(20_000),
   // Jev (TypeSafe's fast judge model) for worker-side agent tools. Without a
   // usable key every Jev-backed feature is off. The key stays on the server
   // (API and worker) and never reaches a sandbox or Connected Machine.
@@ -4057,6 +4070,15 @@ export function getSettings(source: NodeJS.ProcessEnv = process.env): Settings {
     openaiReasoningEncryptedContent: optional("OPENGENI_OPENAI_REASONING_ENCRYPTED_CONTENT"),
     openaiMaxRetries: optional("OPENGENI_OPENAI_MAX_RETRIES"),
     webSearchEnabled: optional("OPENGENI_WEB_SEARCH_ENABLED"),
+    webSearchProvider: optional("OPENGENI_WEB_SEARCH_PROVIDER"),
+    webSearchApiKey: optional("OPENGENI_WEB_SEARCH_API_KEY"),
+    webSearchBaseUrl: optional("OPENGENI_WEB_SEARCH_BASE_URL"),
+    webFetchProvider: optional("OPENGENI_WEB_FETCH_PROVIDER"),
+    webFetchApiKey: optional("OPENGENI_WEB_FETCH_API_KEY"),
+    webFetchBaseUrl: optional("OPENGENI_WEB_FETCH_BASE_URL"),
+    webSearchProviderMode: optional("OPENGENI_WEB_SEARCH_PROVIDER_MODE"),
+    webSearchPricingJson: optional("OPENGENI_WEB_SEARCH_PRICING_JSON"),
+    webSearchRequestTimeoutMs: optional("OPENGENI_WEB_SEARCH_REQUEST_TIMEOUT_MS"),
     jevApiKey: optional("OPENGENI_JEV_API_KEY"),
     jevBaseUrl: optional("OPENGENI_JEV_BASE_URL"),
     jevModel: optional("OPENGENI_JEV_MODEL"),
