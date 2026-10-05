@@ -381,6 +381,8 @@ export function createSessionProxyHandler(
 ): (request: Request) => Promise<Response> {
   const service = isFacade(target) ? target.client : target;
   const defaultSource = isFacade(target) ? target.source : "default";
+  // One rejected-key notice per handler (each handler holds one server key).
+  const rejectedKeyNotice = { sent: false };
   const maxBodyBytes = options.maxBodyBytes ?? DEFAULT_MAX_BODY_BYTES;
   const filesEnabled = options.files ?? true;
   const voiceInputEnabled = options.voiceInput ?? true;
@@ -1117,7 +1119,7 @@ export function createSessionProxyHandler(
       }
       return errorJson(404, "route_not_allowed", "Not found.");
     } catch (error) {
-      return errorResponse(error);
+      return errorResponse(error, rejectedKeyNotice);
     }
   };
 }
@@ -1882,16 +1884,14 @@ function workspaceLiveStream(
   });
 }
 
-let warnedRejectedApiKey = false;
-
 /**
  * The proxy always calls Opengeni with the server's own key, so an upstream
  * 401 means that key is wrong, expired or revoked, never that the end user is
  * signed out. Tell the developer once, in the server log, what to fix.
  */
-function warnRejectedApiKey(error: OpenGeniApiError): void {
-  if (warnedRejectedApiKey) return;
-  warnedRejectedApiKey = true;
+function warnRejectedApiKey(error: OpenGeniApiError, notice: { sent: boolean }): void {
+  if (notice.sent) return;
+  notice.sent = true;
   console.warn(
     `[@opengeni/sdk] Opengeni rejected the session proxy's API key (401${
       error.correlationId ? `, reference ${error.correlationId}` : ""
@@ -1901,7 +1901,7 @@ function warnRejectedApiKey(error: OpenGeniApiError): void {
 }
 
 /** Preserve OpenGeni's error envelope so the browser SDK keeps codes, retryability, and outcome facts. */
-function errorResponse(error: unknown): Response {
+function errorResponse(error: unknown, rejectedKeyNotice: { sent: boolean }): Response {
   if (error instanceof ProxyRejection) return errorJson(error.status, error.code, error.message);
   if (error instanceof OpenGeniSetupError) {
     return json(
@@ -1917,7 +1917,7 @@ function errorResponse(error: unknown): Response {
     );
   }
   if (error instanceof OpenGeniApiError) {
-    if (error.status === 401) warnRejectedApiKey(error);
+    if (error.status === 401) warnRejectedApiKey(error, rejectedKeyNotice);
     const status = error.status >= 400 && error.status <= 599 ? error.status : 502;
     // A decoded upstream envelope is forwarded verbatim; the SDK only retains decodable bodies.
     if (error.body) {
