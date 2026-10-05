@@ -237,6 +237,10 @@ On 2026-10-05, a local SearXNG with keyless Jina fetch produced these results:
 - Fetch latency was about 1–10 s per page.
 - Rendered results were about 1.1–1.7 KB, roughly 300–450 tokens.
 
-The model arms (hosted against provider search, graded by a judge) need a
-Responses deployment that supports hosted `web_search`, plus a provider key for
-the provider arm. They have not been run yet.
+The model arms (hosted against provider search, graded by a judge) have not
+been run yet. They need two things:
+
+- a live Responses deployment with hosted `web_search`, such as
+  `gpt-5.6-sol` on Azure (`OPENGENI_AZURE_OPENAI_BASE_URL` and
+  `OPENGENI_AZURE_OPENAI_API_KEY`) or `OPENAI_API_KEY`;
+- a provider key for the provider arm. A free TinyFish key works.
