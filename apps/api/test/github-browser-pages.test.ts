@@ -86,7 +86,7 @@ describe("API GitHub browser pages", () => {
     expect(html).toContain("navigator.clipboard.writeText");
   });
 
-  test("pages stay self-contained and follow the system color scheme", () => {
+  test("pages stay self-contained, inline the app fonts and follow the system color scheme", () => {
     for (const html of [
       githubInstallationChooserHtml(
         [candidate],
@@ -99,7 +99,9 @@ describe("API GitHub browser pages", () => {
     ]) {
       expect(html).toContain("prefers-color-scheme:light");
       expect(html).toContain('class="wordmark">Opengeni<');
-      expect(html).not.toMatch(/<link\b|\bsrc="|@import|url\(/);
+      expect(html).not.toMatch(/<link\b|\bsrc="|@import|url\((?!data:font\/woff2;base64,)/);
+      expect(html).toContain('@font-face{font-family:"Inter Variable"');
+      expect(html).toContain('@font-face{font-family:"DM Sans Variable"');
     }
   });
 });
