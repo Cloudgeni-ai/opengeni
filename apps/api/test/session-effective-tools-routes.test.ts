@@ -1,5 +1,6 @@
-import { afterAll, beforeAll, describe, expect, setDefaultTimeout, test } from "bun:test";
+import { afterAll, beforeAll, describe, expect, setDefaultTimeout, spyOn, test } from "bun:test";
 import { signDelegatedAccessToken, type Session } from "@opengeni/contracts";
+import * as opengeniDb from "@opengeni/db";
 import { bootstrapWorkspace, createDb, createSession, type DbClient } from "@opengeni/db";
 import {
   acquireSharedTestDatabase,
@@ -155,6 +156,26 @@ describe("effectiveTools on session responses (PostgreSQL)", () => {
       const names = created.effectiveTools!.tools.map((tool) => tool.name);
       expect(names).not.toContain("opengeni__command_read");
       expect(names).not.toContain("opengeni__command_wait");
+    }
+
+    // The response projection hydrates the workspace once, shared by the tool
+    // policy and effective-tools contexts, on detail and on create.
+    const workspaceReads = spyOn(opengeniDb, "requireWorkspace");
+    try {
+      const reads = () =>
+        workspaceReads.mock.calls.filter(([, workspaceId]) => workspaceId === grant.workspaceId)
+          .length;
+      const detail = await app.request(`${path}/${all.id}`, { headers: { authorization } });
+      expect(detail.status).toBe(200);
+      expect(((await detail.json()) as Session).effectiveTools).toEqual(all.effectiveTools);
+      expect(reads()).toBe(1);
+      workspaceReads.mockClear();
+      const created = await create({ capabilities: "all" });
+      expect(created.effectiveTools).toEqual(all.effectiveTools);
+      // One read inside creation itself, one for the response projection.
+      expect(reads()).toBe(2);
+    } finally {
+      workspaceReads.mockRestore();
     }
   });
 });

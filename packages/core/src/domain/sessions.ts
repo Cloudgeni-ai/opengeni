@@ -2595,27 +2595,35 @@ async function createSessionForRequestInFileScope(
     payload.idempotencyKey &&
     (effectiveVisibility !== "user_private" || replayManagedHumanSubjectId !== null)
   ) {
+    const createIdempotencyKey = payload.idempotencyKey;
     try {
-      const initializedReplay = await getInitializedSessionCreateReplay(db, {
-        bundledSkillIds,
-        accountId: grant.accountId,
-        workspaceId,
-        subjectId: replayManagedHumanSubjectId ?? grant.subjectId,
-        ...(replayManagedHumanSubjectId
-          ? { activeManagedHumanSubjectId: replayManagedHumanSubjectId }
-          : {}),
-        createIdempotencyKey: payload.idempotencyKey,
-        selectedInstalledSkillIds: payload.installedSkillIds ?? [],
-        initialAgentLearning: payload.agentLearning,
-        ...sessionScope,
+      const initializedReplay = await measureSessionStartPhase(
+        unresolvedDeps.observability,
+        "idempotent_replay",
+        () =>
+          getInitializedSessionCreateReplay(db, {
+            bundledSkillIds,
+            accountId: grant.accountId,
+            workspaceId,
+            subjectId: replayManagedHumanSubjectId ?? grant.subjectId,
+            ...(replayManagedHumanSubjectId
+              ? { activeManagedHumanSubjectId: replayManagedHumanSubjectId }
+              : {}),
+            createIdempotencyKey,
+            selectedInstalledSkillIds: payload.installedSkillIds ?? [],
+            initialAgentLearning: payload.agentLearning,
+            ...sessionScope,
 
-        ...(payload.requestedSessionId ? { requestedSessionId: payload.requestedSessionId } : {}),
-        visibility: effectiveVisibility,
-        variableSetIds: payload.variableSetIds ?? [],
-        initialPersonalResourceAttachmentIntent: payload.personalResourceAttachment ?? null,
-        deferInitialTurn: payload.startMode === "realtime",
-        agentConfig,
-      });
+            ...(payload.requestedSessionId
+              ? { requestedSessionId: payload.requestedSessionId }
+              : {}),
+            visibility: effectiveVisibility,
+            variableSetIds: payload.variableSetIds ?? [],
+            initialPersonalResourceAttachmentIntent: payload.personalResourceAttachment ?? null,
+            deferInitialTurn: payload.startMode === "realtime",
+            agentConfig,
+          }),
+      );
       if (initializedReplay) {
         if (initializedReplay.outcome === "denied") {
           throw new SessionSpawnDeniedError(SessionSpawnDenial.parse(initializedReplay.denial));
@@ -2993,36 +3001,43 @@ async function createSessionForRequestInFileScope(
   const tools = withFirstPartyTools(selectedTools, runtimeSettings);
 
   const captureLinkedAuthority = prepareExternalLinkTurnAdmission(authorization);
-  await validateGitHubRepositorySelection(db, workspaceId, resources);
-  if (resources.some((resource) => resource.kind === "file") && !objectStorage) {
-    throw new HTTPException(503, {
-      message: "object storage is not configured",
-    });
-  }
-  const attachmentOwnerContext = authorization
-    ? await fileOwnerContextForAccess({ db }, authorization, "sessions:create")
-    : grant.principalKind === "agent_attempt"
-      ? await fileOwnerContextForAgent({ db }, grant, "sessions:create")
-      : undefined;
+  const { attachmentOwnerContext, variableSets } = await measureSessionStartPhase(
+    unresolvedDeps.observability,
+    "resource_validation",
+    async () => {
+      await validateGitHubRepositorySelection(db, workspaceId, resources);
+      if (resources.some((resource) => resource.kind === "file") && !objectStorage) {
+        throw new HTTPException(503, {
+          message: "object storage is not configured",
+        });
+      }
+      const ownerContext = authorization
+        ? await fileOwnerContextForAccess({ db }, authorization, "sessions:create")
+        : grant.principalKind === "agent_attempt"
+          ? await fileOwnerContextForAgent({ db }, grant, "sessions:create")
+          : undefined;
+      await validateFileResources(
+        db,
+        grant.accountId,
+        workspaceId,
+        personalResourceSubjectId ?? grant.subjectId,
+        resources,
+        ownerContext,
+      );
+      // Every selected Variable Set is independently authorized. Scope does not
+      // affect precedence: explicit order is low-to-high and later sets win name
+      // collisions.
+      const validatedVariableSets: VariableSet[] = [];
+      for (const variableSetId of payload.variableSetIds ?? []) {
+        validatedVariableSets.push(
+          await validateVariableSetAttachment({ settings, db }, grant, workspaceId, variableSetId),
+        );
+      }
+      return { attachmentOwnerContext: ownerContext, variableSets: validatedVariableSets };
+    },
+  );
   const attachmentOwner =
     attachmentOwnerContext?.privateFileOwnerSubjectId === grant.subjectId ? grant.subjectId : null;
-  await validateFileResources(
-    db,
-    grant.accountId,
-    workspaceId,
-    personalResourceSubjectId ?? grant.subjectId,
-    resources,
-    attachmentOwnerContext,
-  );
-  // Every selected Variable Set is independently authorized. Scope does not
-  // affect precedence: explicit order is low-to-high and later sets win name
-  // collisions.
-  const variableSets: VariableSet[] = [];
-  for (const variableSetId of payload.variableSetIds ?? []) {
-    variableSets.push(
-      await validateVariableSetAttachment({ settings, db }, grant, workspaceId, variableSetId),
-    );
-  }
   // RIG BINDING (M3). Resolve the rig this session rides — a UUID binds that
   // rig, null explicitly opts out, and omission inherits the workspace default
   // (workspaces.default_rig_id) — then FREEZE both the rig id and its currently-
@@ -3034,22 +3049,27 @@ async function createSessionForRequestInFileScope(
   //   - A stale workspace-default rig (deleted → FK-nulled, or somehow with no
   //     active version) degrades SILENTLY to rig-less: an operator-side default
   //     must never brick every create in the workspace.
-  const requestedRigId =
-    payload.rigId === undefined ? await getWorkspaceDefaultRigId(db, workspaceId) : payload.rigId;
-  let frozenRigId: string | null = null;
-  let frozenRigVersionId: string | null = null;
-  if (requestedRigId) {
-    const rig = await getRig(db, grant, requestedRigId);
-    if (!rig || !rig.activeVersion) {
-      if (payload.rigId) {
-        throw new HTTPException(422, {
-          message: rig
-            ? `sandbox environment ${payload.rigId} has no active version to bind`
-            : `unknown rigId: ${payload.rigId}`,
-        });
+  const { frozenRigId, frozenRigVersionId } = await measureSessionStartPhase(
+    unresolvedDeps.observability,
+    "rig_binding",
+    async () => {
+      const requestedRigId =
+        payload.rigId === undefined
+          ? await getWorkspaceDefaultRigId(db, workspaceId)
+          : payload.rigId;
+      if (!requestedRigId) return { frozenRigId: null, frozenRigVersionId: null };
+      const rig = await getRig(db, grant, requestedRigId);
+      if (!rig || !rig.activeVersion) {
+        if (payload.rigId) {
+          throw new HTTPException(422, {
+            message: rig
+              ? `sandbox environment ${payload.rigId} has no active version to bind`
+              : `unknown rigId: ${payload.rigId}`,
+          });
+        }
+        // else: workspace-default fallback that no longer resolves → rig-less.
+        return { frozenRigId: null, frozenRigVersionId: null };
       }
-      // else: workspace-default fallback that no longer resolves → rig-less.
-    } else {
       for (const defaultVariableSetId of new Set(rig.activeVersion.defaultVariableSetIds)) {
         await validateVariableSetAttachment(
           { settings, db },
@@ -3058,10 +3078,12 @@ async function createSessionForRequestInFileScope(
           defaultVariableSetId,
         );
       }
-      frozenRigId = rig.id;
-      frozenRigVersionId = rig.activeVersion.id;
-    }
-  }
+      return {
+        frozenRigId: rig.id as string | null,
+        frozenRigVersionId: rig.activeVersion.id as string | null,
+      };
+    },
+  );
   // CHANNEL FILING. Pure rail organization: a UUID files the session into that
   // workspace channel, omission/null leaves it unfiled (inbox). Resolved
   // workspace-scoped so a foreign channel id can never attach; an explicit
@@ -3090,25 +3112,27 @@ async function createSessionForRequestInFileScope(
   // inherited calling-turn model, or deployment default — so the policy must
   // vet that effective value, not just explicit ones (a restricted workspace's
   // inherited/default-model session would otherwise be born blocked).
-  await assertWorkspaceModelPolicyAllows(db, settings, workspaceId, model);
-  // Direct creation is a fresh model selection. Child inheritance and keyed
-  // repair preserve the existing accepted-model/authority rules.
-  if (retainedKeyedShellModel === null && !parentSession) {
-    const selections = await resolveCallerWorkspaceModelSelections(db, settings, {
-      accountId: grant.accountId,
-      workspaceId,
-      subjectId: personalResourceSubjectId ?? grant.subjectId,
-      ...(xaiProviderAccountAuthoritySnapshot
-        ? { xaiAuthoritySnapshot: xaiProviderAccountAuthoritySnapshot }
-        : {}),
-      ...(claudeProviderAccountAuthoritySnapshot
-        ? { claudeAuthoritySnapshot: claudeProviderAccountAuthoritySnapshot }
-        : {}),
-    });
-    if (!admissibleWorkspaceModel(selections, model)) {
-      throw new HTTPException(422, { message: `model is not selectable: ${model}` });
+  await measureSessionStartPhase(unresolvedDeps.observability, "model_admission", async () => {
+    await assertWorkspaceModelPolicyAllows(db, settings, workspaceId, model);
+    // Direct creation is a fresh model selection. Child inheritance and keyed
+    // repair preserve the existing accepted-model/authority rules.
+    if (retainedKeyedShellModel === null && !parentSession) {
+      const selections = await resolveCallerWorkspaceModelSelections(db, settings, {
+        accountId: grant.accountId,
+        workspaceId,
+        subjectId: personalResourceSubjectId ?? grant.subjectId,
+        ...(xaiProviderAccountAuthoritySnapshot
+          ? { xaiAuthoritySnapshot: xaiProviderAccountAuthoritySnapshot }
+          : {}),
+        ...(claudeProviderAccountAuthoritySnapshot
+          ? { claudeAuthoritySnapshot: claudeProviderAccountAuthoritySnapshot }
+          : {}),
+      });
+      if (!admissibleWorkspaceModel(selections, model)) {
+        throw new HTTPException(422, { message: `model is not selectable: ${model}` });
+      }
     }
-  }
+  });
   const inheritedReasoningEffort =
     parentCallingTurn?.reasoningEffort ??
     parentSession?.reasoningEffort ??
@@ -3312,18 +3336,23 @@ async function createSessionForRequestInFileScope(
       workspace.settings,
     ),
   });
-  const { personalConnectionDelegations, mcpAccountBindings } = await freezeConnectionAccounts({
-    db,
-    accountId: grant.accountId,
-    workspaceId,
-    settings: runtimeSettings,
-    tools: connectionAccountTools,
-    resources,
-    source: connectionDelegationSource,
-    authoritySelections: payload.connectionAccounts,
-    googleDrivePublicationEnabled,
-    atlassianEnabled,
-  });
+  const { personalConnectionDelegations, mcpAccountBindings } = await measureSessionStartPhase(
+    unresolvedDeps.observability,
+    "connection_freeze",
+    () =>
+      freezeConnectionAccounts({
+        db,
+        accountId: grant.accountId,
+        workspaceId,
+        settings: runtimeSettings,
+        tools: connectionAccountTools,
+        resources,
+        source: connectionDelegationSource,
+        authoritySelections: payload.connectionAccounts,
+        googleDrivePublicationEnabled,
+        atlassianEnabled,
+      }),
+  );
   if (effectiveGoal) {
     const missingGoalTools = ["goal_update", "goal_progress", "goal_complete", "goal_pause"].filter(
       (name) => !firstPartyMcpTools.includes(name as FirstPartyMcpToolName),

@@ -235,12 +235,14 @@ export async function workspaceSessionToolPolicyContext(
   workspaceId: string,
   settings: Settings,
   subjectId?: string,
+  /** An in-flight read of this exact workspace a caller already started. */
+  workspaceRead?: ReturnType<typeof requireWorkspace>,
 ): Promise<{ workspaceServerIds: string[]; workspaceDefaultServerIds: string[] }> {
   const [runtimeSettings, workspace] = await Promise.all([
     settingsWithEnabledCapabilityMcpServers(db, workspaceId, settings, {
       ...(subjectId ? { subjectId } : {}),
     }),
-    requireWorkspace(db, workspaceId),
+    workspaceRead ?? requireWorkspace(db, workspaceId),
   ]);
   return {
     workspaceServerIds: sortedIds(runtimeSettings.mcpServers.map((server) => server.id)),
@@ -326,6 +328,8 @@ export async function workspaceSessionEffectiveToolsContext(
   workspaceId: string,
   subjectId: string,
   sessions: readonly Session[],
+  /** An in-flight read of this exact workspace a caller already started. */
+  workspaceRead?: ReturnType<typeof requireWorkspace>,
 ): Promise<SessionEffectiveToolsContext> {
   const configured = sessions.filter((session) => session.agent != null);
   const baseline: SessionEffectiveToolsContext = {
@@ -336,7 +340,7 @@ export async function workspaceSessionEffectiveToolsContext(
   };
   if (configured.length === 0) return baseline;
   const [workspace, catalog, descriptors, sandboxes, routerHistory] = await Promise.all([
-    requireWorkspace(deps.db, workspaceId),
+    workspaceRead ?? requireWorkspace(deps.db, workspaceId),
     resolveWorkspaceCatalogSettings(deps.db, deps.settings, {
       accountId: configured[0]!.accountId,
       workspaceId,
