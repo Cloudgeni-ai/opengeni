@@ -75,6 +75,10 @@ export function withVoiceDeploymentGuard<C extends RealtimeBeginClient>(
     prompt: () => void;
   },
 ): C {
+  // Only a call's first begin is checked. Later begins for the same operation
+  // reconcile a call already running here (including End), which a reload
+  // must never turn into a resumed call.
+  const admitted = new Set<string>();
   return new Proxy(client, {
     get(target, property, receiver) {
       const value = Reflect.get(target, property, receiver) as unknown;
@@ -82,13 +86,20 @@ export function withVoiceDeploymentGuard<C extends RealtimeBeginClient>(
         return typeof value === "function" ? value.bind(target) : value;
       }
       return async (...args: Parameters<C["beginSessionRealtime"]>) => {
+        const request = args[2] as { model?: string; operationId?: string } | undefined;
+        const operationId = request?.operationId;
+        if (operationId && admitted.has(operationId)) {
+          return await (value as C["beginSessionRealtime"]).apply(target, args);
+        }
         const decision = await deps.decide().catch((): VoiceDeploymentDecision => "current");
         if (decision === "reload") {
-          deps.relaunch((args[2] as { model?: string } | undefined)?.model);
+          deps.relaunch(request?.model);
           throw new Error(VOICE_RELOADING_MESSAGE);
         }
         if (decision === "prompt") deps.prompt();
-        return await (value as C["beginSessionRealtime"]).apply(target, args);
+        const response = await (value as C["beginSessionRealtime"]).apply(target, args);
+        if (operationId) admitted.add(operationId);
+        return response;
       };
     },
   });

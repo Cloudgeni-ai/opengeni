@@ -100,6 +100,39 @@ describe("live voice deployment guard", () => {
     expect(guarded.other()).toBe("client");
   });
 
+  test("a later begin for a call already running here is never reloaded (for example End)", async () => {
+    let decisions = 0;
+    const relaunched: Array<string | undefined> = [];
+    const guarded = withVoiceDeploymentGuard(
+      {
+        async beginSessionRealtime(
+          _w: string,
+          _s: string,
+          _r: { model: string; operationId: string },
+        ) {
+          return { ok: true };
+        },
+      },
+      {
+        decide: async () => {
+          decisions += 1;
+          return decisions === 1 ? "current" : "reload";
+        },
+        relaunch: (model) => relaunched.push(model),
+        prompt: () => undefined,
+      },
+    );
+    await guarded.beginSessionRealtime("w", "s", { model: "voice", operationId: "op-1" });
+    // The deployment changes mid-call; reconciling the same operation passes through.
+    await guarded.beginSessionRealtime("w", "s", { model: "voice", operationId: "op-1" });
+    expect(decisions).toBe(1);
+    expect(relaunched).toEqual([]);
+    // A new call is checked again.
+    await expect(
+      guarded.beginSessionRealtime("w", "s", { model: "voice", operationId: "op-2" }),
+    ).rejects.toThrow(VOICE_RELOADING_MESSAGE);
+  });
+
   test("a failed deployment check never blocks voice", async () => {
     let begun = false;
     const guarded = withVoiceDeploymentGuard(
