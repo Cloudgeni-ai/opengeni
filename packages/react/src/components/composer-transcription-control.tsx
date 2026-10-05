@@ -84,7 +84,7 @@ const defaultMessages: ComposerTranscriptionMessages = {
   discardRecovered: "Discard saved recording",
   unavailableDisabled: "Voice input is unavailable while the composer is disabled.",
   unavailable: "Voice input is unavailable for this workspace.",
-  errorPermissionDenied: "Microphone access is blocked. Allow it in site settings, then retry.",
+  errorPermissionDenied: "Microphone access is blocked. Allow it in site settings, then try again.",
   errorNotSupported: "Voice input is not supported on this device.",
   errorUnavailable: "Voice input is not configured.",
   errorInsufficientCredits: "Out of credits. Recording saved; retry after adding credits.",
@@ -158,12 +158,18 @@ export function ComposerTranscriptionControl({
   const capturing = status === "requesting-permission" || status === "recording";
 
   const cancelTranscription = transcription.cancel;
+  const discardTranscription = transcription.discard;
+  const hasRecoverableRecording = transcription.hasRecoverableRecording;
   useEffect(() => {
     if (!suppressed) return;
     if (status === "recording" || status === "requesting-permission") {
       cancelTranscription();
+    } else if (status === "error" && !hasRecoverableRecording) {
+      // Live voice took over: a stale start error (nothing saved) would only
+      // duplicate whatever live voice reports next to it.
+      void discardTranscription();
     }
-  }, [cancelTranscription, status, suppressed]);
+  }, [cancelTranscription, discardTranscription, hasRecoverableRecording, status, suppressed]);
   const active = capturing || status === "saving" || status === "transcribing";
   const recoverable =
     transcription.hasRecoverableRecording &&
@@ -425,15 +431,22 @@ export function ComposerTranscriptionControl({
               )}
             </AnimatePresence>
             {status === "error" && errorMessage && !recoverable ? (
-              <Tip tip={errorMessage}>
-                <span
-                  aria-hidden="true"
-                  title={errorMessage}
-                  className="og-transcription-error-label max-w-56 line-clamp-2 text-og-xs leading-tight text-og-status-failed max-sm:max-w-32"
-                >
+              // Nothing is saved in this state, so dismissing loses no speech.
+              <button
+                type="button"
+                title={errorMessage}
+                aria-label={`Dismiss: ${errorMessage}`}
+                onClick={() => void transcription.discard()}
+                className={cn(
+                  "inline-flex min-w-0 items-center gap-1 rounded-og-sm text-left outline-hidden",
+                  "text-og-status-failed focus-visible:ring-2 focus-visible:ring-og-accent/45",
+                )}
+              >
+                <span className="og-transcription-error-label max-w-56 line-clamp-2 text-og-xs leading-tight max-sm:max-w-32">
                   {errorMessage}
                 </span>
-              </Tip>
+                <XIcon className="size-3 shrink-0 opacity-70" aria-hidden />
+              </button>
             ) : null}
             <span
               className="sr-only"

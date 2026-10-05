@@ -342,7 +342,7 @@ describe("native composer voice-input browser acceptance", () => {
     await denied.getByRole("button", { name: "Start voice input" }).click();
     await denied
       .getByRole("alert")
-      .filter({ hasText: "Microphone access is blocked. Allow it in site settings, then retry." })
+      .filter({ hasText: "Microphone access is blocked. Allow it in site settings, then try again." })
       .waitFor();
     expect(await denied.getByRole("textbox", { name: "Message the agent" }).inputValue()).toBe(
       "Existing editable draft",
