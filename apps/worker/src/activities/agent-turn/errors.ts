@@ -29,6 +29,7 @@ import {
   isProviderCommandObservationUnavailableError,
   isRoutingMutationOutcomeUnknownError,
   RoutingWorkspaceRootChangedError,
+  RoutingBackendRecoveryRequiredError,
   ResponsesStreamingTerminalError,
   SandboxMaterializationVerificationError,
   materializationVerificationDiagnostic,
@@ -380,7 +381,7 @@ export function preClaimAdmissionFailure(error: unknown): ApplicationFailure {
  * objects (including array containers), not queue positions/duplicate refs.
  * The separate link ceiling bounds huge duplicate arrays without truncating
  * them into permission. Cycles are harmless; overflow/unreadable edges hold. */
-function databaseRecoveryCauseGraph(error: unknown): Map<object, Set<object>> | null {
+function structuredRecoveryCauseGraph(error: unknown): Map<object, Set<object>> | null {
   const graph = new Map<object, Set<object>>();
   const queue: object[] = [];
   let links = 0;
@@ -414,7 +415,7 @@ function retryableDatabaseFailureCode(
   requireDatabaseProvenance = false,
 ): PostClaimDatabaseRecoveryDetail["code"] | null {
   try {
-    const graph = databaseRecoveryCauseGraph(error);
+    const graph = structuredRecoveryCauseGraph(error);
     if (!graph) return null;
     const transports = new Set<object>();
     const boundaries = new Set<object>();
@@ -742,13 +743,54 @@ export function modelPreparationFailureEventPayload(error: unknown, durationMs: 
  * only those structural error links with a strict bound; never classify from
  * message text, which could originate in model or tool content.
  */
+/**
+ * Only the home resolver's positive pre-dispatch signal permits a fresh attempt.
+ * The same error class can also escape AFTER a provider mutation, so neither its
+ * retryable property nor message alone establishes replay safety. Inspect the
+ * complete bounded SDK cause graph and let uncertain peer outcomes veto this
+ * narrow recovery; unreadable or overflowing graphs fail closed.
+ */
+function isPreDispatchHomeBackendRecoveryRequired(error: unknown): boolean {
+  const graph = structuredRecoveryCauseGraph(error);
+  if (!graph) return false;
+  let found = false;
+  try {
+    for (const node of graph.keys()) {
+      if (
+        isRoutingMutationOutcomeUnknownError(node) ||
+        isModalCommandStartOutcomeUnknownError(node) ||
+        isProviderCommandObservationUnavailableError(node)
+      )
+        return false;
+      if (node instanceof RoutingBackendRecoveryRequiredError) {
+        if (
+          node.op !== "resolve_home_backend" ||
+          !Number.isSafeInteger(node.leaseEpoch) ||
+          node.leaseEpoch < 0 ||
+          !node.retryable ||
+          (node.recovery !== "pending" && node.recovery !== "superseded")
+        )
+          return false;
+        found = true;
+      }
+    }
+  } catch {
+    return false;
+  }
+  return found;
+}
+
 export function sandboxRouteTransitionCode(
   error: unknown,
 ):
   | "home_unavailable_this_turn"
   | "workspace_root_changed_this_turn"
   | "native_capabilities_changed_this_attempt"
+  | "home_backend_recovery_pending"
   | null {
+  if (isPreDispatchHomeBackendRecoveryRequired(error)) {
+    return "home_backend_recovery_pending";
+  }
   const pending: unknown[] = [error];
   const seen = new WeakSet<object>();
   let inspected = 0;
