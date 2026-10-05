@@ -9,7 +9,7 @@ metadata:
     {{- include "opengeni.labels" . | nindent 4 }}
     app.kubernetes.io/component: api
 spec:
-  replicas: {{ .Values.api.replicaCount }}
+  {{- include "opengeni.replicas" (dict "root" . "name" (printf "%s-api" (include "opengeni.fullname" .)) "replicaCount" .Values.api.replicaCount "autoscaling" .Values.api.autoscaling) | indent 2 }}
   {{- with .Values.api.strategy }}
   strategy:
     {{- toYaml . | nindent 4 }}

@@ -8,7 +8,7 @@ metadata:
     {{- include "opengeni.labels" . | nindent 4 }}
     app.kubernetes.io/component: web
 spec:
-  replicas: {{ .Values.web.replicaCount }}
+  {{- include "opengeni.replicas" (dict "root" . "name" (printf "%s-web" (include "opengeni.fullname" .)) "replicaCount" .Values.web.replicaCount "autoscaling" .Values.web.autoscaling) | indent 2 }}
   {{- with .Values.web.strategy }}
   strategy:
     {{- toYaml . | nindent 4 }}
