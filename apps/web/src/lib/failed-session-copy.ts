@@ -1,3 +1,4 @@
+import { providerRecoverySubject } from "@opengeni/react";
 import type { SessionFailureSummary } from "./events";
 
 /**
@@ -225,6 +226,29 @@ export function failedSessionCopy(
       reason: recorded,
       unavailableModel: false,
       ...(detail && detail !== recorded ? { detail } : {}),
+    };
+  }
+  // Spent automatic recovery on a recorded model route: name the model and the
+  // provider condition. Legacy events without the route keep the classified
+  // copy below; the exact recorded text stays behind Details either way.
+  const recovery = failure.providerRecovery;
+  if (
+    recovery?.modelRoute &&
+    recovery.modelLabel &&
+    !creditExhausted &&
+    !failure.safetyRefusal &&
+    !failure.quotaScope
+  ) {
+    const subject = providerRecoverySubject(recovery);
+    return {
+      reason: modelChanged
+        ? `${subject}. Retry to continue with the selected model.`
+        : canChooseModel
+          ? `${subject}. Select a different model, or try again in a few minutes.`
+          : `${subject}. Try again in a few minutes.`,
+      unavailableModel: false,
+      retryUnhelpful: false,
+      ...(diagnostic ? { detail: diagnostic } : {}),
     };
   }
   // Require an explicit claim about the model itself, not e.g. its connection
