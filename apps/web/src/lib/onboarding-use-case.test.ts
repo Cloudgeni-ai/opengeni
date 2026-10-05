@@ -50,6 +50,16 @@ describe("onboarding use case text", () => {
     expect(withKey).toContain("give me the worker's pull request link");
     expect(withKey).toContain("the card still appears and lists my repositories");
     expect(withKey).toContain("tell me in one short line what it is building");
+    // Text written before tool calls folds into the step list, so the final
+    // message must carry the setup question.
+    expect(withKey).toContain(
+      "End the turn with one short final message that repeats the question",
+    );
+    // No GitHub App access must never dead-end the setup.
+    expect(withKey).toContain("If I can't connect GitHub");
+    expect(withKey).toContain("upload a zip of my project");
+    expect(withKey).toContain("my own Git credentials for the repository");
+    expect(withKey).toContain("use my own coding agent instead");
     expect(withKey).not.toMatch(/ogk_/);
     const withoutKey = developerSetupModelContext({ ...facts, keyInSandbox: false });
     expect(withoutKey).toContain("No API key is attached to this chat.");
