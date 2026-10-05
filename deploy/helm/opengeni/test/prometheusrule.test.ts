@@ -16,7 +16,7 @@ describe("turn-capacity Prometheus alerts", () => {
     expect(start).toBeGreaterThanOrEqual(0);
     const alert = template.slice(start, end);
     expect(alert).toContain("opengeni_turn_oldest_no_progress_age_seconds > 900");
-    expect(alert).toContain("worker turn attempt without durable progress");
+    expect(alert).toContain("made no durable progress for over 15 minutes");
     expect(alert).toContain("tracks physical runAgentTurn attempts");
   });
 
