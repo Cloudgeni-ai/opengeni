@@ -174,6 +174,7 @@ import {
   type RetainedProcessReconciliationOutcome,
   type SandboxInventoryProjectionDomain,
   recordSandboxLeaseGauges,
+  recordModalSandboxInventoryGauges,
   recordSandboxOrphansTerminated,
   recordSandboxCommandContainment,
   recordSandboxProviderMissingBeforeCapture,
@@ -2925,6 +2926,12 @@ async function sweepModalOrphansForConfiguredBackend(
       return modalOrphanTerminationStillEligible(latest, candidate);
     },
   });
+  // Only a complete listing is an inventory; a pass cut short by the
+  // termination budget leaves the previous projection to age out as stale.
+  if (result.inventory.complete) {
+    recordModalSandboxInventoryGauges(observability, result.inventory);
+    recordSandboxInventoryProjectionSuccess(observability, "modal_provider");
+  }
   for (const terminated of result.terminated) {
     observability.warn("sandbox reaper: terminated Modal orphan sandbox", {
       sandboxId: terminated.sandboxId,

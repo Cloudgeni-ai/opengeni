@@ -1071,6 +1071,7 @@ export const SANDBOX_INVENTORY_PROJECTION_DOMAINS = [
   "retained_processes",
   "expired_drains",
   "opensandbox_kubernetes",
+  "modal_provider",
 ] as const;
 
 export type SandboxInventoryProjectionDomain =
@@ -1226,6 +1227,32 @@ export function recordVerifiedSignupTrialDeploymentFlagGauge(
     help: "Whether the OPENGENI_VERIFIED_SIGNUP_TRIAL_CREDITS_ENABLED master opt-in is on (1) or off (0) in this deployment's configuration.",
     value: enabled ? 1 : 0,
   });
+}
+
+/**
+ * Provider-side Modal inventory reconciled against live leases by the orphan
+ * sweep: `running` = every running box in the app, `unleased` = running boxes
+ * no live lease protects (orphans, counted before termination), and
+ * `lease_missing_instance` = live (warming/warm/draining) leases whose exact
+ * provider instance is no longer running (zombies).
+ */
+export function recordModalSandboxInventoryGauges(
+  observability: Observability,
+  inventory: { running: number; unleased: number; liveLeaseInstancesMissing: number },
+): void {
+  const states = {
+    running: inventory.running,
+    unleased: inventory.unleased,
+    lease_missing_instance: inventory.liveLeaseInstancesMissing,
+  };
+  for (const [state, value] of Object.entries(states)) {
+    observability.setGauge({
+      name: "opengeni_modal_sandbox_inventory",
+      help: "Running Modal sandboxes reconciled against live sandbox leases by the orphan sweep.",
+      labels: { state },
+      value: Math.max(0, value),
+    });
+  }
 }
 
 export function recordSandboxOrphansTerminated(observability: Observability, count: number): void {

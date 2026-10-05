@@ -300,6 +300,11 @@ describe("sandbox observability contract", () => {
         "expired_drains",
       ],
       [
+        "opengeni:modal_sandbox_inventory:fresh_max",
+        "opengeni_modal_sandbox_inventory",
+        "modal_provider",
+      ],
+      [
         "opengeni:opensandbox_batchsandboxes:fresh_max",
         "opengeni_opensandbox_batchsandboxes",
         "opensandbox_kubernetes",
@@ -364,7 +369,7 @@ describe("sandbox observability contract", () => {
       'absent(opengeni_sandbox_inventory_refresh_timestamp_seconds{domain="opensandbox_kubernetes"})',
     );
     expect(source).toContain(
-      'opengeni_sandbox_inventory_refresh_timestamp_seconds{domain!="opensandbox_kubernetes"}',
+      'opengeni_sandbox_inventory_refresh_timestamp_seconds{domain!~"opensandbox_kubernetes|modal_provider"}',
     );
   });
 
