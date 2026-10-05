@@ -57,6 +57,33 @@ describe("Azure Container Apps deployment profile", () => {
     ).toThrow("explicit runtime platform");
   });
 
+  test("refuses unsupported local, unauthenticated, or ingress-disabled ACA serving", () => {
+    expect(() =>
+      parseDeploymentContract({
+        ...profile,
+        product: { ...profile.product, accessMode: "local" },
+      }),
+    ).toThrow("configured or managed product access");
+    expect(() =>
+      parseDeploymentContract({ ...profile, access: { ...profile.access, mode: "disabled" } }),
+    ).toThrow("authenticated access boundary");
+    expect(() =>
+      parseDeploymentContract({ ...profile, ingress: { ...profile.ingress, enabled: false } }),
+    ).toThrow("native HTTPS ingress");
+    expect(() =>
+      parseDeploymentContract({
+        ...profile,
+        access: { ...profile.access, mode: "externalGateway" },
+        product: {
+          ...profile.product,
+          accessMode: "managed",
+          publicBaseUrl: "https://managed.example.test",
+        },
+      }),
+    ).not.toThrow();
+    expect(() => parseDeploymentContract(deploymentProfiles["local-compose"])).not.toThrow();
+  });
+
   test("refuses fixture dependencies and non-native secret delivery", () => {
     for (const field of ["database", "objectStorage", "temporal", "nats"] as const) {
       expect(() =>
@@ -191,6 +218,44 @@ describe("Azure Container Apps deployment profile", () => {
     expect(JSON.stringify(plan)).not.toContain(env.OPENGENI_DELEGATION_SECRET);
   });
 
+  test("accepts Blob account credentials without requiring a connection string", () => {
+    const env = {
+      OPENGENI_OBJECT_STORAGE_AZURE_ACCOUNT_NAME: "fixtureaccount",
+      OPENGENI_OBJECT_STORAGE_AZURE_ACCOUNT_KEY: "fixture-account-key",
+      OPENGENI_OBJECT_STORAGE_AZURE_ENDPOINT: "https://fixtureaccount.blob.example.test",
+    };
+    const required = requiredRuntimeEnvVars(profile, env);
+    expect(required).toContain("OPENGENI_OBJECT_STORAGE_AZURE_ACCOUNT_NAME");
+    expect(required).toContain("OPENGENI_OBJECT_STORAGE_AZURE_ACCOUNT_KEY");
+    expect(required).toContain("OPENGENI_OBJECT_STORAGE_AZURE_ENDPOINT");
+    expect(required).not.toContain("OPENGENI_OBJECT_STORAGE_AZURE_CONNECTION_STRING");
+    const missing = missingRuntimeEnvVars(profile, env);
+    expect(missing).not.toContain("OPENGENI_OBJECT_STORAGE_AZURE_CONNECTION_STRING");
+    expect(missing).not.toContain("OPENGENI_OBJECT_STORAGE_AZURE_ACCOUNT_KEY");
+    expect(
+      missingRuntimeEnvVars(profile, {
+        ...env,
+        OPENGENI_OBJECT_STORAGE_AZURE_ACCOUNT_KEY: undefined,
+      }),
+    ).toContain("OPENGENI_OBJECT_STORAGE_AZURE_ACCOUNT_KEY");
+    expect(
+      missingRuntimeEnvVars(profile, {
+        ...env,
+        OPENGENI_OBJECT_STORAGE_AZURE_ACCOUNT_NAME: undefined,
+      }),
+    ).toContain("OPENGENI_OBJECT_STORAGE_AZURE_ACCOUNT_NAME");
+    const connectionString = {
+      ...env,
+      OPENGENI_OBJECT_STORAGE_AZURE_CONNECTION_STRING: "fixture-connection-string",
+    };
+    expect(requiredRuntimeEnvVars(profile, connectionString)).toContain(
+      "OPENGENI_OBJECT_STORAGE_AZURE_CONNECTION_STRING",
+    );
+    expect(requiredRuntimeEnvVars(profile, connectionString)).not.toContain(
+      "OPENGENI_OBJECT_STORAGE_AZURE_ACCOUNT_KEY",
+    );
+  });
+
   test("still requires a delegation secret for configured access without a shared key", () => {
     const contract = parseDeploymentContract({
       ...profile,
@@ -282,7 +347,7 @@ describe("Azure Container Apps deployment profile", () => {
     ].join("\n");
     expect(allValues).not.toMatch(/\b(?:helm|kubectl|kubernetes|aks|chart)\b|svc\.cluster\.local/i);
     expect(allValues).not.toContain("docker build");
-    expect(allValues).not.toContain("--skip-");
+    expect(allValues.match(/--skip-[a-z-]+/g)).toEqual(["--skip-observability"]);
     expect(plan.creates).toContain("separate always-on control and turn worker applications");
     expect(plan.externalDependencies.join("\n")).toContain("External Temporal");
     expect(plan.externalDependencies.join("\n")).toContain("External NATS");
@@ -306,6 +371,11 @@ describe("Azure Container Apps deployment profile", () => {
     expect(deploy.filter((command) => command.includes("job start"))).toHaveLength(1);
     expect(plan.verifyCommands.join("\n")).toContain("--sandbox-backend modal");
     expect(plan.verifyCommands.join("\n")).not.toContain("--sandbox-backend none");
+    expect(plan.verifyCommands.join("\n")).toContain("scripts/deployment-aca-observability.ts");
+    expect(plan.verifyCommands.join("\n")).toContain(
+      '--browser-origin "$OPENGENI_API_BASE_URL" --deny-foreign-browser-origin',
+    );
+    expect(plan.notes.join("\n")).toContain("neither that skip nor private scrape evidence proves");
     expect(plan.destroyCommands[0]).toContain("plan -destroy");
     expect(plan.deployCommands.join("\n")).toContain(
       'init -reconfigure -backend-config="path=${OPENGENI_ACA_STATE_FILE:',

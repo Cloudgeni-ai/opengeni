@@ -15,17 +15,26 @@ interface FixtureOptions {
   anonymousStatus?: number;
   defaultWorkspace?: boolean;
   workspaceListStatus?: number;
+  storageCors?: "restricted" | "wildcard" | "echo-foreign" | "deny-allowed" | "foreign-5xx";
 }
 
 interface Fixture {
   token: string;
-  requests: { path: string; method: string; deploymentKey: string | null; bearer: string | null }[];
+  baseUrl: string;
+  requests: {
+    path: string;
+    method: string;
+    deploymentKey: string | null;
+    bearer: string | null;
+    origin: string | null;
+  }[];
   sessions: Record<string, unknown>[];
   tasks: Record<string, unknown>[];
   run: (
     flags?: string[],
     env?: Record<string, string>,
     runAgent?: boolean,
+    runStorage?: boolean,
   ) => Promise<{ exitCode: number; stdout: string; stderr: string }>;
 }
 
@@ -46,14 +55,51 @@ async function withApi(
   const tasks: Fixture["tasks"] = [];
   const authMode = options.authMode ?? "configuredToken";
   const credential = options.credential ?? "deploymentKey";
+  let objectContent = "";
   const server = Bun.serve({
     hostname: "127.0.0.1",
     port: 0,
-    async fetch(request) {
+    async fetch(request): Promise<Response> {
       const url = new URL(request.url);
       const key = request.headers.get("x-opengeni-access-key");
       const bearer = request.headers.get("authorization");
-      requests.push({ path: url.pathname, method: request.method, deploymentKey: key, bearer });
+      const origin = request.headers.get("origin");
+      requests.push({
+        path: url.pathname,
+        method: request.method,
+        deploymentKey: key,
+        bearer,
+        origin,
+      });
+      if (url.pathname === "/fixture-object") {
+        if (request.method === "OPTIONS") {
+          const allowed = origin === server.url.origin;
+          if (options.storageCors === "foreign-5xx" && !allowed) {
+            return new Response("private-cors-error-body", { status: 500 });
+          }
+          const allowedOrigin =
+            options.storageCors === "wildcard"
+              ? "*"
+              : options.storageCors === "echo-foreign" ||
+                  (allowed && options.storageCors !== "deny-allowed")
+                ? origin
+                : null;
+          return new Response(null, {
+            status: allowedOrigin ? 204 : 403,
+            headers: allowedOrigin
+              ? {
+                  "access-control-allow-origin": allowedOrigin,
+                  "access-control-allow-methods": "PUT",
+                }
+              : {},
+          });
+        }
+        if (request.method === "PUT") {
+          objectContent = await request.text();
+          return new Response(null, { status: 201 });
+        }
+        return new Response(objectContent);
+      }
       if (url.pathname === "/healthz") return Response.json({ ok: true, service: "fixture" });
       if (url.pathname === "/v1/config/client") return Response.json({ auth: { mode: authMode } });
       const tokenPayload = bearer?.startsWith("Bearer ")
@@ -78,6 +124,20 @@ async function withApi(
         return Response.json([{ id: workspaceId }], { status: options.workspaceListStatus ?? 200 });
       }
       const prefix = `/v1/workspaces/${workspaceId}`;
+      if (url.pathname === `${prefix}/files/uploads` && request.method === "POST") {
+        return Response.json({
+          putUrl: new URL("/fixture-object", server.url).href,
+          uploadId: "fixture-upload",
+          fileId: "fixture-file",
+          requiredHeaders: { "content-type": "text/plain" },
+        });
+      }
+      if (url.pathname === `${prefix}/files/uploads/fixture-upload/complete`) {
+        return Response.json({ ok: true });
+      }
+      if (url.pathname === `${prefix}/files/fixture-file/download-url`) {
+        return Response.json({ url: new URL("/fixture-object", server.url).href });
+      }
       if (url.pathname === `${prefix}/sessions` && request.method === "POST") {
         sessions.push((await request.json()) as Record<string, unknown>);
         return Response.json({ id: crypto.randomUUID(), status: "running" });
@@ -118,10 +178,11 @@ async function withApi(
   try {
     await verify({
       token,
+      baseUrl: String(server.url),
       requests,
       sessions,
       tasks,
-      async run(flags = [], env = {}, runAgent = false) {
+      async run(flags = [], env = {}, runAgent = false, runStorage = false) {
         const child = Bun.spawn(
           [
             process.execPath,
@@ -130,7 +191,7 @@ async function withApi(
             "--base-url",
             String(server.url),
             "--json",
-            "--skip-storage",
+            ...(runStorage ? [] : ["--skip-storage"]),
             "--skip-observability",
             "--timeout-seconds",
             "2",
@@ -170,6 +231,82 @@ function check(output: string, id: string): { status: string; detail: string } {
   expect(result).toBeDefined();
   return result!;
 }
+
+describe("deployment conformance restricted browser CORS", () => {
+  for (const selector of ["flag", "equals-flag", "environment"]) {
+    test(`allows the selected edge origin and denies a foreign origin (${selector})`, async () => {
+      await withApi({ storageCors: "restricted" }, async (fixture) => {
+        const flags = ["--deployment-access-key", deploymentKey, "--deny-foreign-browser-origin"];
+        const env: Record<string, string> = {};
+        if (selector === "flag") flags.push("--browser-origin", fixture.baseUrl);
+        else if (selector === "equals-flag") flags.push(`--browser-origin=${fixture.baseUrl}`);
+        else env.OPENGENI_CONFORMANCE_BROWSER_ORIGIN = fixture.baseUrl;
+        const result = await fixture.run(flags, env, false, true);
+        expect(result.exitCode).toBe(0);
+        expect(check(result.stdout, "object-storage").status).toBe("passed");
+        expect(check(result.stdout, "object-storage").detail).toContain(
+          "foreign browser origin denied",
+        );
+        const preflights = fixture.requests.filter((request) => request.method === "OPTIONS");
+        expect(preflights).toHaveLength(2);
+        expect(preflights[0]?.origin).toBe(new URL(fixture.baseUrl).origin);
+        expect(preflights[1]?.origin).toMatch(/^https:\/\/.+\.foreign-conformance\.invalid$/);
+        expect(fixture.requests.filter((request) => request.method === "PUT")).toHaveLength(1);
+        expect(preflights.every((request) => !request.deploymentKey && !request.bearer)).toBe(true);
+      });
+    });
+  }
+
+  for (const storageCors of ["wildcard", "echo-foreign", "foreign-5xx", "deny-allowed"] as const) {
+    test(`does not count a broken restricted CORS boundary as conformance (${storageCors})`, async () => {
+      await withApi({ storageCors }, async (fixture) => {
+        const result = await fixture.run(
+          [
+            "--deployment-access-key",
+            deploymentKey,
+            "--browser-origin",
+            fixture.baseUrl,
+            "--deny-foreign-browser-origin",
+          ],
+          {},
+          false,
+          true,
+        );
+        expect(result.exitCode).toBe(1);
+        expect(check(result.stdout, "object-storage").status).toBe("failed");
+        expect(fixture.requests.filter((request) => request.method === "PUT")).toHaveLength(0);
+        expect(result.stdout + result.stderr).not.toContain("private-cors-error-body");
+      });
+    });
+  }
+
+  test("preserves the generic random-origin upload probe when no origin is selected", async () => {
+    await withApi({ storageCors: "wildcard" }, async (fixture) => {
+      const result = await fixture.run(["--deployment-access-key", deploymentKey], {}, false, true);
+      expect(result.exitCode).toBe(0);
+      const preflights = fixture.requests.filter((request) => request.method === "OPTIONS");
+      expect(preflights).toHaveLength(1);
+      expect(preflights[0]?.origin).toMatch(/^https:\/\/.+\.sdk-conformance\.invalid$/);
+    });
+  });
+
+  test("requires a real explicit origin before opting into foreign-origin denial", async () => {
+    await withApi({}, async (fixture) => {
+      for (const flags of [
+        ["--deny-foreign-browser-origin"],
+        ["--browser-origin", "https://edge.example.test/path"],
+        ["--browser-origin", "https://user:private@edge.example.test"],
+        ["--browser-origin", "https://edge.example.test?private=1"],
+        ["--browser-origin", "not-an-origin"],
+      ]) {
+        const result = await fixture.run(flags);
+        expect(result.exitCode).not.toBe(0);
+        expect(result.stderr).toContain("--browser-origin");
+      }
+      expect(fixture.requests).toHaveLength(0);
+    });
+  });
+});
 
 describe("deployment conformance configured authentication", () => {
   test("proves shared-key configured access and discovers an authenticated workspace", async () => {
