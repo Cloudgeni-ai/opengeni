@@ -35,7 +35,17 @@ export type RetainedScreenshotLoader = (
 export type RetainedArtifactLoader = (
   artifact: RetainedArtifactReference,
   signal: AbortSignal,
-) => Promise<Uint8Array | { url: string } | null>;
+  options?: RetainedArtifactLoadOptions,
+) => Promise<Uint8Array | { url: string; expiresAt?: string | undefined } | null>;
+
+export type RetainedArtifactLoadOptions = {
+  /**
+   * Ask for a short-lived download URL instead of bytes, for example to build a
+   * copyable `curl … | git apply` command. A loader that cannot mint one may
+   * still return bytes; callers must handle that.
+   */
+  prefer?: "url" | undefined;
+};
 
 /** Mint an expiring source for native browser playback without loading video bytes in JS. */
 export type VideoArtifactPlaybackLoader = (

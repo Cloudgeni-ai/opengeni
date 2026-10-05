@@ -338,6 +338,8 @@ export function integrationConnectReturnOutcome(
   value: IntegrationConnectReturn,
 ): IntegrationConnectOutcome {
   if (["success", "connected", "complete"].includes(value.status)) return "connected";
+  // A GitHub install request waits on an organization owner; nothing failed yet.
+  if (value.parameter === "github" && value.status === "requested") return "outcome_unknown";
   const reason = value.reason ?? "";
   if (/denied/i.test(reason)) return "denied";
   if (/cancel/i.test(reason)) return "cancelled";

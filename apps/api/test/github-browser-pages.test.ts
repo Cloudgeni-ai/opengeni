@@ -2,6 +2,7 @@ import { describe, expect, test } from "bun:test";
 import {
   githubInstallationChooserHtml,
   githubSetupPendingHtml,
+  githubOwnerApprovedHtml,
   githubSetupSuccessHtml,
   githubSuccessHtml,
 } from "../src/routes/github-browser-pages";
@@ -42,6 +43,9 @@ describe("API GitHub browser pages", () => {
     expect(html).toContain('aria-label="Available GitHub accounts"');
     expect(html).toContain(":focus-visible");
     expect(html).toContain("prefers-reduced-motion:reduce");
+    // A non-owner learns how to ask their organization owners before GitHub.
+    expect(html).toContain("Not an owner of your GitHub organization?");
+    expect(html).toContain("send its owners a request to approve");
   });
 
   test("escapes owner display names, signed state, and form action attributes", () => {
@@ -72,10 +76,18 @@ describe("API GitHub browser pages", () => {
       'href="https://opengeni.test/?return=&quot;bad&quot;&amp;github=connected"',
     );
     expect(success).not.toContain('<script>alert("bad")</script>');
-    const pending = githubSetupPendingHtml();
-    expect(pending).toContain("Waiting for an organization owner");
-    expect(pending).toContain("has not created a workspace binding");
+    const pending = githubSetupPendingHtml('https://opengeni.test/?return="bad"&github=requested');
+    expect(pending).toContain("Request sent to your organization owners");
+    expect(pending).toContain("Nothing is connected until an owner finishes");
+    expect(pending).toContain(
+      'href="https://opengeni.test/?return=&quot;bad&quot;&amp;github=requested"',
+    );
     expect(pending).not.toContain("GitHub connected");
+    expect(githubSetupPendingHtml()).not.toContain("Back to Opengeni");
+    const approved = githubOwnerApprovedHtml('https://opengeni.test/?x="bad"');
+    expect(approved).toContain("Opengeni is installed on GitHub");
+    expect(approved).toContain('href="https://opengeni.test/?x=&quot;bad&quot;"');
+    expect(approved).toContain("doesn't give any Opengeni workspace access");
   });
 
   test("operator setup still provides copyable, escaped environment values", () => {
@@ -95,7 +107,8 @@ describe("API GitHub browser pages", () => {
         "https://api.opengeni.test",
       ),
       githubSetupSuccessHtml("owner", "https://opengeni.test/"),
-      githubSetupPendingHtml(),
+      githubSetupPendingHtml("https://opengeni.test/"),
+      githubOwnerApprovedHtml("https://opengeni.test/"),
     ]) {
       expect(html).toContain("prefers-color-scheme:light");
       expect(html).toContain('class="wordmark">Opengeni<');

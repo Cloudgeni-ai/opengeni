@@ -74,6 +74,7 @@ export type {
 export type {
   CreateToolRegistryOptions,
   RetainedArtifactLoader,
+  RetainedArtifactLoadOptions,
   RetainedScreenshotLoader,
   VideoArtifactPlaybackLoader,
   ToolRegistry,

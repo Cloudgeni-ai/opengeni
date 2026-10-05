@@ -48,6 +48,8 @@ const pageStyle = `
   .secondary{border-color:var(--border);background:var(--surface);color:var(--fg)}
   .secondary:hover{background:var(--surface-2)}
   :is(button,a):focus-visible{outline:2px solid var(--ring);outline-offset:2px}
+  .steps{margin:0 0 4px;padding-left:20px;display:grid;gap:8px;color:var(--muted);font-size:14px;line-height:20px}
+  .steps strong{color:var(--fg);font-weight:600}
   .note{margin-top:24px;padding-top:16px;border-top:1px solid var(--border);font-size:12px;line-height:16px;color:var(--subtle)}
   .env-header{display:flex;justify-content:space-between;align-items:center;gap:14px;margin-top:24px;margin-bottom:10px}
   h2{margin:0;font-size:14px;font-weight:600}
@@ -82,7 +84,7 @@ export function githubInstallationChooserHtml(
     .join("");
   return page(
     "Choose a GitHub account",
-    `<h1>Choose a GitHub account</h1><p class="intro">Connect an account where the Opengeni GitHub App is already installed, or install it on another account.</p><form id="existing-account" method="get" action="${escapeHtml(action)}"><input type="hidden" name="state" value="${escapeHtml(state)}"><fieldset class="options" aria-label="Available GitHub accounts">${options}</fieldset></form><div class="actions"><button class="button" type="submit" form="existing-account">Connect selected account</button><form method="get" action="${escapeHtml(action)}"><input type="hidden" name="state" value="${escapeHtml(state)}"><input type="hidden" name="installation_id" value="new"><button class="button secondary" type="submit">Install on another account</button></form></div><p class="note">Only accounts GitHub has confirmed you own or manage appear here.</p>`,
+    `<h1>Choose a GitHub account</h1><p class="intro">Connect an account where the Opengeni GitHub App is already installed, or install it on another account.</p><form id="existing-account" method="get" action="${escapeHtml(action)}"><input type="hidden" name="state" value="${escapeHtml(state)}"><fieldset class="options" aria-label="Available GitHub accounts">${options}</fieldset></form><div class="actions"><button class="button" type="submit" form="existing-account">Connect selected account</button><form method="get" action="${escapeHtml(action)}"><input type="hidden" name="state" value="${escapeHtml(state)}"><input type="hidden" name="installation_id" value="new"><button class="button secondary" type="submit">Install on another account</button></form></div><p class="note">Only accounts GitHub has confirmed you own or manage appear here. Not an owner of your GitHub organization? Choose <strong>Install on another account</strong> and pick the organization: GitHub lets you send its owners a request to approve.</p>`,
   );
 }
 
@@ -93,10 +95,31 @@ export function githubSetupSuccessHtml(account: string, returnUrl: string): stri
   );
 }
 
-export function githubSetupPendingHtml(): string {
+/**
+ * GitHub sends a non-owner here after they ask their organization owners to
+ * approve the app (`setup_action=request`). Nothing is connected yet: an owner
+ * approves on GitHub, then an owner connects the organization in Opengeni.
+ */
+export function githubSetupPendingHtml(returnUrl?: string | null): string {
+  const back = returnUrl
+    ? `<div class="actions"><a class="button" href="${escapeHtml(returnUrl)}">Back to Opengeni</a></div>`
+    : "";
   return page(
-    "GitHub approval pending",
-    `<h1>Waiting for an organization owner</h1><p>An owner needs to approve your GitHub App request before you can connect. Opengeni has not created a workspace binding.</p>`,
+    "Request sent",
+    `<h1>Request sent to your organization owners</h1><p class="intro">GitHub has asked the owners of your GitHub organization to approve Opengeni. There's nothing more to do on GitHub.</p><ol class="steps"><li>An organization owner approves the request on GitHub.</li><li>An owner then connects the organization in Opengeni by selecting <strong>Connect GitHub</strong>. If they don't use Opengeni yet, invite them to your Opengeni workspace first.</li><li>Your repositories show up in Opengeni as soon as it's connected.</li></ol>${back}<p class="note">Nothing is connected until an owner finishes. Meanwhile you can still attach a zip of your project in a chat and get the changes back as a patch.</p>`,
+  );
+}
+
+/**
+ * Where GitHub sends an organization owner after they approve a member's
+ * request (or install the app straight from GitHub). The redirect carries no
+ * Opengeni state, so it cannot name a workspace and must not connect one: an
+ * owner chooses the workspace explicitly from inside Opengeni.
+ */
+export function githubOwnerApprovedHtml(homeUrl: string): string {
+  return page(
+    "Opengeni installed on GitHub",
+    `<h1>Opengeni is installed on GitHub</h1><p class="intro">Thanks for approving. One more step: GitHub can't tell Opengeni which workspace this is for, so an owner of the GitHub organization connects it from Opengeni.</p><ol class="steps"><li>Sign in to Opengeni. If a teammate asked you, ask them to invite you to their workspace first.</li><li>Select <strong>Connect GitHub</strong> and choose this organization.</li></ol><div class="actions"><a class="button" href="${escapeHtml(homeUrl)}">Open Opengeni</a></div><p class="note">Approving on GitHub doesn't give any Opengeni workspace access to your repositories by itself.</p>`,
   );
 }
 

@@ -6,6 +6,7 @@ import { ConnectSetup } from "../src/connect";
 async function render(
   nextAction: ConnectAttempt["nextAction"],
   state: ConnectAttempt["state"] = "requires_user_action",
+  overrides: Partial<ConnectAttempt> = {},
 ) {
   const attempt: ConnectAttempt = {
     id: "attempt",
@@ -19,6 +20,7 @@ async function render(
     integrationInstalled: false,
     completionRequirement: "connection",
     expiresAt: "2030-01-01T00:00:00Z",
+    ...overrides,
   };
   const transport: ConnectTransport = {
     catalog: async () => [],
@@ -139,4 +141,48 @@ test("OAuth presents one primary action without an empty credential form heading
   expect(html).toContain('class="og-connect-setup-secondary"');
   expect(html).toContain("Check status");
   expect(html).toContain("Cancel setup");
+});
+
+test("a GitHub owner-approval request reads as a calm waiting state, not an error", async () => {
+  const html = await render({ type: "none" }, "connected_but_incomplete", {
+    providerId: "github-app",
+    ownership: "workspace",
+    error: {
+      code: "owner_approval_pending",
+      message: "Request sent.",
+      retryable: true,
+    },
+  });
+  expect(html).toContain("Waiting for an organization owner");
+  expect(html).toContain("GitHub asked the owners of your organization to approve");
+  expect(html).toContain("invite them to this workspace first");
+  expect(html).not.toContain('role="alert"');
+  expect(html).not.toContain("Choose tools");
+  expect(html).not.toContain("Choose which tools to add");
+});
+
+test("GitHub account selection explains how a non-owner requests an organization install", async () => {
+  const accounts = [
+    {
+      id: "42",
+      providerId: "github-app",
+      label: "me",
+      ownership: "workspace" as const,
+      status: "connected" as const,
+    },
+    {
+      id: "new",
+      providerId: "github-app",
+      label: "Install on another GitHub account",
+      ownership: "workspace" as const,
+      status: "connected" as const,
+    },
+  ];
+  const github = await render({ type: "select_account", accounts }, "account_selection", {
+    providerId: "github-app",
+  });
+  expect(github).toContain("Only its owners can connect it");
+  expect(github).toContain("send its owners");
+  const other = await render({ type: "select_account", accounts }, "account_selection");
+  expect(other).not.toContain("Only its owners can connect it");
 });

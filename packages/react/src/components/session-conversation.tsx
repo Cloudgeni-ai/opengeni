@@ -717,11 +717,11 @@ function useRetainedLoaders(
       ...(typeof base.downloadRetainedArtifact === "function" &&
       typeof base.createRetainedArtifactDownloadUrl === "function"
         ? {
-            loadRetainedArtifact: (artifact, signal) =>
+            loadRetainedArtifact: (artifact, signal, options) =>
               createWorkspaceRetainedArtifactLoader(
                 get() as Required<RetainedLoaderClient>,
                 workspaceId,
-              )(artifact, signal),
+              )(artifact, signal, options),
           }
         : {}),
       ...(typeof base.downloadRetainedScreenshot === "function"
