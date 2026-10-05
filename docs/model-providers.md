@@ -613,6 +613,15 @@ Create the key at [platform.opper.ai](https://platform.opper.ai) and set
 deployment owns the Opper account and these turns are metered as OpenGeni
 credits.
 
+The registry entry only declares the transport. To make the models selectable,
+add the product IDs (`opper/claude-sonnet-4-6`, `opper/gemini-3.8-flash`) to the
+deployment model catalog when its source is `database` (see
+[Deployment catalog source and cost policy](#deployment-catalog-source-and-cost-policy)).
+These models are `credits` by default and have no reviewed built-in price, so a
+managed deployment must also add an `OPENGENI_MODEL_PRICING_JSON` entry for each
+product ID (Opper's catalogue lists per-model pricing), or mark them `free` in
+`OPENGENI_MODEL_COST_POLICY_JSON`.
+
 A bare upstream ID such as `claude-sonnet-4-6` is a pool: Opper picks the
 serving provider per request. A `provider/model` upstream ID such as
 `aws/claude-sonnet-4-6-eu` pins one provider and region, for deployments that
