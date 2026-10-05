@@ -20,14 +20,10 @@ const dependencies = [
   "getWorkspaceModelPolicy",
   "workspaceCodexSubscriptionActive",
   "loadWorkspaceCodexModelAvailability",
-  "workspaceVercelAiGatewayConnectionActive",
-  "listWorkspaceGatewayCustomModels",
-  "workspaceOpenRouterConnectionActive",
-  "listWorkspaceOpenRouterCustomModels",
-  "organizationModelProviderConnectionActiveForWorkspace",
-  "listOrganizationModelProviderCustomModelsForWorkspace",
-  "getWorkspaceProviderApiKeyConnectionMetadata",
-  "listWorkspaceProviderCustomModels",
+  "getOrganizationModelProviderCatalogForWorkspace",
+  "listWorkspaceProviderCustomModelsByKind",
+  "listConnectionsMetadata",
+  "workspaceProviderApiKeyConnectionMetadataFromConnections",
 ];
 // Execute the complete current production declaration, not a copied parallel
 // recipe. The real helpers are replaced only at their existing read boundaries.
@@ -77,20 +73,20 @@ function fixture(
     policy: { allowedProviders: ["anthropic"], allowedModels: null },
     codex: true,
     observations: { marker: "availability" },
-    gateway: true,
-    gatewayModels: ["gateway-model"],
-    openrouter: false,
-    openrouterModels: ["openrouter-model"],
-    "org-active:vercel_gateway": true,
-    "org-active:openrouter": false,
-    "org-models:vercel_gateway": ["org-gateway"],
-    "org-models:openrouter": ["org-openrouter"],
-    "org-active:anthropic": true,
-    "org-models:anthropic": ["org-anthropic"],
-    "org-models:claude_subscription": ["org-subscription"],
-    "metadata:anthropic": { connectionId: "metadata-only", version: 4 },
-    "workspace-models:anthropic": ["workspace-anthropic"],
-    "workspace-models:claude_subscription": ["workspace-subscription"],
+    organizationCatalog: {
+      vercel_gateway: { active: true, models: ["org-gateway"] },
+      openrouter: { active: false, models: ["org-openrouter"] },
+      anthropic: { active: true, models: ["org-anthropic"] },
+      // This flag must NOT make a canonical Claude pool ready.
+      claude_subscription: { active: true, models: ["org-subscription"] },
+    },
+    workspaceModels: {
+      vercel_gateway: ["gateway-model"],
+      openrouter: ["openrouter-model"],
+      anthropic: ["workspace-anthropic"],
+      claude_subscription: ["workspace-subscription"],
+    },
+    connections: ["vercel_gateway", "anthropic", "claude_subscription"],
   };
   const holds = Object.fromEntries(Object.keys(values).map((name) => [name, deferred()]));
   const calls: { name: string; args: unknown[] }[] = [];
@@ -107,21 +103,17 @@ function fixture(
     getWorkspaceModelPolicy: (...args: unknown[]) => read("policy", args),
     workspaceCodexSubscriptionActive: (...args: unknown[]) => read("codex", args),
     loadWorkspaceCodexModelAvailability: (...args: unknown[]) => read("observations", args),
-    workspaceVercelAiGatewayConnectionActive: (...args: unknown[]) => read("gateway", args),
-    listWorkspaceGatewayCustomModels: (...args: unknown[]) => read("gatewayModels", args),
-    workspaceOpenRouterConnectionActive: (...args: unknown[]) => read("openrouter", args),
-    listWorkspaceOpenRouterCustomModels: (...args: unknown[]) => read("openrouterModels", args),
-    organizationModelProviderConnectionActiveForWorkspace: (database: unknown, scope: any) =>
-      read(`org-active:${scope.providerKind}`, [database, scope]),
-    listOrganizationModelProviderCustomModelsForWorkspace: (database: unknown, scope: any) =>
-      read(`org-models:${scope.providerKind}`, [database, scope]),
-    getWorkspaceProviderApiKeyConnectionMetadata: (
-      database: unknown,
-      workspaceId: string,
+    getOrganizationModelProviderCatalogForWorkspace: (...args: unknown[]) =>
+      read("organizationCatalog", args),
+    listWorkspaceProviderCustomModelsByKind: (...args: unknown[]) => read("workspaceModels", args),
+    listConnectionsMetadata: (...args: unknown[]) => read("connections", args),
+    workspaceProviderApiKeyConnectionMetadataFromConnections: (
+      connections: string[],
       kind: string,
-    ) => read(`metadata:${kind}`, [database, workspaceId, kind]),
-    listWorkspaceProviderCustomModels: (database: unknown, scope: any) =>
-      read(`workspace-models:${scope.providerKind}`, [database, scope]),
+    ) => {
+      if (kind === "claude_subscription") throw new Error("Claude readiness must use its pool");
+      return connections.includes(kind) ? { connectionId: "metadata-only", version: 4 } : null;
+    },
   };
   const running = productionLoader(ports)(
     db,
@@ -160,14 +152,7 @@ function fixture(
   };
 }
 
-const catalogReads = [
-  "org-active:anthropic",
-  "org-models:anthropic",
-  "metadata:anthropic",
-  "workspace-models:anthropic",
-  "org-models:claude_subscription",
-  "workspace-models:claude_subscription",
-];
+const catalogReads = ["organizationCatalog", "workspaceModels", "connections"];
 
 test("all independent catalog reads start while the policy/readiness batch is held", async () => {
   const f = fixture();
@@ -203,13 +188,13 @@ for (const first of ["inputs", "catalog"] as const) {
         codexSubscriptionActive: true,
         observations: {},
         workspaceGatewayConnectionActive: true,
-        workspaceGatewayCustomModels: f.values.gatewayModels,
+        workspaceGatewayCustomModels: ["gateway-model"],
         workspaceOpenRouterConnectionActive: false,
-        workspaceOpenRouterCustomModels: f.values.openrouterModels,
+        workspaceOpenRouterCustomModels: ["openrouter-model"],
         organizationGatewayConnectionActive: true,
         organizationOpenRouterConnectionActive: false,
-        organizationGatewayCustomModels: f.values["org-models:vercel_gateway"],
-        organizationOpenRouterCustomModels: f.values["org-models:openrouter"],
+        organizationGatewayCustomModels: ["org-gateway"],
+        organizationOpenRouterCustomModels: ["org-openrouter"],
         claudeConnections: {
           anthropic: { active: true, models: ["org-anthropic"] },
           claude_subscription: { active: false, models: ["org-subscription"] },
@@ -243,33 +228,24 @@ test("subscription activation waits for the same exact fresh/frozen-subject read
   }
 });
 
-test("disabled subscription skips only its catalog; every existing read keeps its exact scope and call count", async () => {
+test("disabled subscription is excluded from both provider batches; every read keeps its exact scope and bounded call count", async () => {
   const f = fixture({ subscription: false });
   try {
     await flush();
-    expect(f.names()).not.toContain("org-models:claude_subscription");
-    expect(f.names()).not.toContain("workspace-models:claude_subscription");
-    expect(f.names()).not.toContain("org-active:claude_subscription");
-    expect(f.names()).not.toContain("metadata:claude_subscription");
     expect(new Set(f.names()).size).toBe(f.names().length);
+    expect(f.names()).toHaveLength(7);
     for (const { name, args } of f.calls) {
       expect(args[0]).toBe(f.db);
-      if (name.startsWith("org-") || name.startsWith("workspace-models:"))
+      if (name === "organizationCatalog" || name === "workspaceModels")
         expect(args[1]).toEqual({
           accountId: f.context.accountId,
           workspaceId: f.context.workspaceId,
-          providerKind: name.split(":")[1],
+          providerKinds: ["vercel_gateway", "openrouter", "anthropic"],
         });
-      else if (name === "metadata:anthropic")
-        expect(args.slice(1)).toEqual([f.context.workspaceId, "anthropic"]);
+      else if (name === "connections") expect(args.slice(1)).toEqual([f.context.workspaceId, null]);
       else if (name === "restrictions" || name === "claude")
         expect(args.slice(1)).toEqual([f.settings, f.context]);
       else if (name === "codex") expect(args.slice(1)).toEqual([f.settings, f.context.workspaceId]);
-      else if (name.endsWith("Models"))
-        expect(args[1]).toEqual({
-          accountId: f.context.accountId,
-          workspaceId: f.context.workspaceId,
-        });
       else expect(args.slice(1)).toEqual([f.context.workspaceId]);
     }
     f.release(Object.keys(f.values));
@@ -335,7 +311,12 @@ test("a refused transaction input batch never starts catalog reads", async () =>
   }
 });
 
-for (const failure of ["policy", "org-models:anthropic"] as const) {
+for (const failure of [
+  "policy",
+  "organizationCatalog",
+  "workspaceModels",
+  "connections",
+] as const) {
   test(`${failure} failure waits for the other read wave and prevents downstream admission`, async () => {
     const f = fixture();
     const error = new Error(failure);
@@ -360,16 +341,16 @@ for (const failure of ["policy", "org-models:anthropic"] as const) {
   });
 }
 
-for (const first of ["policy", "org-models:anthropic"] as const) {
+for (const first of ["policy", "organizationCatalog"] as const) {
   test(`dual failure retains original input-wave priority when ${first} rejects first`, async () => {
     const f = fixture();
-    const errors = { policy: new Error("policy"), "org-models:anthropic": new Error("catalog") };
+    const errors = { policy: new Error("policy"), organizationCatalog: new Error("catalog") };
     try {
       await flush();
       f.holds[first]!.reject(errors[first]);
       await flush();
       expect(f.settled()).toBe(false);
-      const second = first === "policy" ? "org-models:anthropic" : "policy";
+      const second = first === "policy" ? "organizationCatalog" : "policy";
       f.holds[second]!.reject(errors[second]);
       await expect(f.running).rejects.toBe(errors.policy);
     } finally {
@@ -378,7 +359,7 @@ for (const first of ["policy", "org-models:anthropic"] as const) {
   });
 }
 
-for (const failure of ["policy", "org-models:anthropic"] as const) {
+for (const failure of ["policy", "organizationCatalog"] as const) {
   test(`synchronous ${failure} refusal cannot escape the other wave join`, async () => {
     const f = fixture({ syncFailure: failure });
     try {

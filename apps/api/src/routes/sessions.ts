@@ -8,6 +8,8 @@ import * as sessionPreviewSchema from "@opengeni/db/schema";
 import { and, eq, sql } from "drizzle-orm";
 import { SessionMessageSearchRequest } from "@opengeni/contracts";
 import { scheduledSessionIds } from "@opengeni/db";
+import { requireWorkspace } from "@opengeni/db";
+import { withTraceContext, type Observability, type Span } from "@opengeni/observability";
 import { isVerifiedDelegatedHumanAuthorization, withSiteSessionOrigin } from "@opengeni/core";
 import { freezeSessionRealtimeConnectionAccounts } from "@opengeni/core";
 import {
@@ -1177,38 +1179,62 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
 
   app.get("/v1/workspaces/:workspaceId/sessions/:sessionId", async (c) => {
     const workspaceId = c.req.param("workspaceId");
-    const grant = await requireAccessGrant(c, deps, workspaceId, "sessions:read");
+    const grant = await measureSessionGetPhase(deps.observability, "authorization", () =>
+      requireAccessGrant(c, deps, workspaceId, "sessions:read"),
+    );
     const sessionId = c.req.param("sessionId");
     if (!z.string().uuid().safeParse(sessionId).success) {
       throw new HTTPException(404, { message: "session not found" });
     }
-    const session = await getSessionForSubject(
-      db,
-      workspaceId,
-      sessionId,
-      grant.subjectId,
-      relatedSessionAccessFor(c),
+    const session = await measureSessionGetPhase(deps.observability, "session_read", () =>
+      getSessionForSubject(db, workspaceId, sessionId, grant.subjectId, relatedSessionAccessFor(c)),
     );
     if (!session) {
       throw new HTTPException(404, { message: "session not found" });
     }
-    const activity = await backgroundCommandActivityForSessions(db, {
-      accountId: grant.accountId,
-      workspaceId,
-      sessionIds: [sessionId],
+    // These metadata reads are independent, but start only after the authorized
+    // session read. Join every result before returning and preserve the former
+    // activity -> schedules -> projection error precedence.
+    const reads = [
+      () =>
+        measureSessionGetPhase(deps.observability, "background_commands", () =>
+          backgroundCommandActivityForSessions(db, {
+            accountId: grant.accountId,
+            workspaceId,
+            sessionIds: [sessionId],
+          }),
+        ),
+      () =>
+        measureSessionGetPhase(deps.observability, "schedules", async () =>
+          hasPermission(grant.permissions, "scheduled_tasks:run") &&
+          hasPermission(grant.permissions, "sessions:control")
+            ? await scheduledSessionIds(db, workspaceId, [sessionId])
+            : new Set<string>(),
+        ),
+      () =>
+        measureSessionGetPhase(deps.observability, "response_projection", () =>
+          withEffectivePolicy(deps, workspaceId, grant.subjectId, session),
+        ),
+    ] as const;
+    // An injected transaction shares one backend and LOCAL scope. Keep its
+    // original serial ordering rather than overlap nested scoped savepoints.
+    const [activityResult, scheduleResult, projectionResult] =
+      typeof (db as Database & { rollback?: unknown }).rollback === "function"
+        ? [
+            { status: "fulfilled" as const, value: await reads[0]() },
+            { status: "fulfilled" as const, value: await reads[1]() },
+            { status: "fulfilled" as const, value: await reads[2]() },
+          ]
+        : await Promise.allSettled([reads[0](), reads[1](), reads[2]()]);
+    if (activityResult.status === "rejected") throw activityResult.reason;
+    if (scheduleResult.status === "rejected") throw scheduleResult.reason;
+    if (projectionResult.status === "rejected") throw projectionResult.reason;
+    const activity = activityResult.value.get(sessionId);
+    return c.json({
+      ...projectionResult.value,
+      hasSchedules: scheduleResult.value.has(sessionId),
+      ...(activity ? { backgroundCommandActivity: activity } : {}),
     });
-    const scheduleTargets =
-      hasPermission(grant.permissions, "scheduled_tasks:run") &&
-      hasPermission(grant.permissions, "sessions:control")
-        ? await scheduledSessionIds(db, workspaceId, [sessionId])
-        : new Set<string>();
-    return c.json(
-      await withEffectivePolicy(deps, workspaceId, grant.subjectId, {
-        ...session,
-        hasSchedules: scheduleTargets.has(sessionId),
-        ...(activity.get(sessionId) ? { backgroundCommandActivity: activity.get(sessionId) } : {}),
-      }),
-    );
   });
 
   app.get("/v1/workspaces/:workspaceId/sessions/:sessionId/model-context", async (c) => {
@@ -6215,17 +6241,76 @@ type EffectivePolicyContext = {
   effectiveToolsContext: Awaited<ReturnType<typeof workspaceSessionEffectiveToolsContext>>;
 };
 
+/** Content-free detail-read boundaries; diagnostics never change the result. */
+async function measureSessionGetPhase<T>(
+  observability: Pick<Observability, "startSpan"> | null | undefined,
+  phase:
+    | "authorization"
+    | "session_read"
+    | "background_commands"
+    | "schedules"
+    | "response_projection",
+  work: () => Promise<T>,
+): Promise<T> {
+  let span: Span | undefined;
+  try {
+    span = observability?.startSpan(`api.session_get.${phase}`);
+  } catch {
+    // Diagnostics cannot replace authenticated request authority.
+  }
+  const end = (outcome: "completed" | "failed") => {
+    try {
+      void Promise.resolve(span?.end({ attributes: { outcome } })).catch(() => undefined);
+    } catch {
+      // Do not export errors, request content, or credentials.
+    }
+  };
+  try {
+    const result = span ? withTraceContext(span, work) : work();
+    if (!span) return result;
+    return result.then(
+      (value) => {
+        end("completed");
+        return value;
+      },
+      (error) => {
+        end("failed");
+        throw error;
+      },
+    );
+  } catch (error) {
+    end("failed");
+    throw error;
+  }
+}
+
 async function loadEffectivePolicyContext(
   deps: ApiRouteDeps,
   workspaceId: string,
   subjectId: string,
   sessions: readonly Session[],
 ): Promise<EffectivePolicyContext> {
-  const [policy, effectiveToolsContext] = await Promise.all([
-    workspaceSessionToolPolicyContext(deps.db, workspaceId, deps.settings, subjectId),
-    workspaceSessionEffectiveToolsContext(deps, workspaceId, subjectId, sessions),
-  ]);
-  return { ...policy, effectiveToolsContext };
+  // Response-local metadata only, never an access-grant or mutation cache.
+  const workspaceRead = requireWorkspace(deps.db, workspaceId);
+  const reads = [
+    workspaceSessionToolPolicyContext(
+      deps.db,
+      workspaceId,
+      deps.settings,
+      subjectId,
+      workspaceRead,
+    ),
+    workspaceSessionEffectiveToolsContext(deps, workspaceId, subjectId, sessions, workspaceRead),
+  ] as const;
+  try {
+    const [policy, effectiveToolsContext] = await Promise.all(reads);
+    return { ...policy, effectiveToolsContext };
+  } catch (error) {
+    // Keep the original first-rejection identity, but observe both branches
+    // before the response ends rather than leave pending response work behind.
+    await Promise.allSettled(reads);
+    throw error;
+  }
 }
 
 async function withEffectivePolicy(

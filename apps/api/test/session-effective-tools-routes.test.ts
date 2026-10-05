@@ -1,4 +1,5 @@
-import { afterAll, beforeAll, describe, expect, setDefaultTimeout, test } from "bun:test";
+import { afterAll, beforeAll, describe, expect, setDefaultTimeout, spyOn, test } from "bun:test";
+import * as database from "@opengeni/db";
 import { signDelegatedAccessToken, type Session } from "@opengeni/contracts";
 import { bootstrapWorkspace, createDb, createSession, type DbClient } from "@opengeni/db";
 import {
@@ -119,9 +120,15 @@ describe("effectiveTools on session responses (PostgreSQL)", () => {
       expect(created.effectiveTools!.tools.every((tool) => tool.visibility !== undefined)).toBe(
         true,
       );
-      const detail = await app.request(`${path}/${created.id}`, { headers: { authorization } });
-      expect(detail.status).toBe(200);
-      expect(((await detail.json()) as Session).effectiveTools).toEqual(created.effectiveTools);
+      const workspaceRead = spyOn(database, "requireWorkspace");
+      try {
+        const detail = await app.request(`${path}/${created.id}`, { headers: { authorization } });
+        expect(detail.status).toBe(200);
+        expect(((await detail.json()) as Session).effectiveTools).toEqual(created.effectiveTools);
+        expect(workspaceRead).toHaveBeenCalledTimes(1);
+      } finally {
+        workspaceRead.mockRestore();
+      }
     }
     expect(none.effectiveTools!.tools.map((tool) => tool.name)).not.toContain("skill_read");
     const list = await app.request(path, { headers: { authorization } });

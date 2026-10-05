@@ -39,6 +39,31 @@ function phaseCalls() {
 
 const calls = phaseCalls();
 
+test("resource and fresh-admission reads have content-free phase names", () => {
+  const expected = new Map([
+    ["repository_selection", "validateGitHubRepositorySelection"],
+    ["file_resources", "validateFileResources"],
+    ["rig_default", "getWorkspaceDefaultRigId"],
+    ["model_policy", "assertWorkspaceModelPolicyAllows"],
+    ["model_selection", "resolveCallerWorkspaceModelSelections"],
+  ]);
+  const found = new Map<string, string>();
+  const visit = (node: any) => {
+    if (!node || typeof node !== "object") return;
+    if (node.type === "CallExpression" && node.callee?.name === "measureSessionStartPhase"
+      && expected.has(node.arguments[1]?.value)) {
+      expect(node.arguments[2].async).toBe(false);
+      found.set(node.arguments[1].value, node.arguments[2].body.callee.name);
+    }
+    for (const value of Object.values(node)) {
+      if (Array.isArray(value)) value.forEach(visit);
+      else if (value && typeof value === "object") visit(value);
+    }
+  };
+  visit(parsed.program);
+  expect(found).toEqual(expected);
+});
+
 function exactCall(node: any, values: object) {
   const code = new Bun.Transpiler({ loader: "ts" }).transformSync(
     `const result = ${source.slice(node.start, node.end)};`,

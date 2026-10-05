@@ -36,6 +36,13 @@ describe("fresh model admission versus live discovery", () => {
   let policy: ReturnType<typeof spyOn<typeof opengeniDb, "getWorkspaceModelPolicy">>;
   let balance: ReturnType<typeof spyOn<typeof opengeniDb, "getBillingBalance">>;
   let allowance: ReturnType<typeof spyOn<typeof opengeniDb, "checkWorkspaceAllowance">>;
+  let organizationCatalog: ReturnType<
+    typeof spyOn<typeof opengeniDb, "getOrganizationModelProviderCatalogForWorkspace">
+  >;
+  let workspaceModels: ReturnType<
+    typeof spyOn<typeof opengeniDb, "listWorkspaceProviderCustomModelsByKind">
+  >;
+  let connections: ReturnType<typeof spyOn<typeof opengeniDb, "listConnectionsMetadata">>;
 
   beforeEach(() => {
     active = true;
@@ -59,6 +66,25 @@ describe("fresh model admission versus live discovery", () => {
       resetsAt: "2026-11-01T00:00:00.000Z",
       message: "The workspace usage allowance is exhausted.",
     });
+    organizationCatalog = spyOn(
+      opengeniDb,
+      "getOrganizationModelProviderCatalogForWorkspace",
+    ).mockResolvedValue({
+      vercel_gateway: { active: false, models: [] },
+      openrouter: { active: false, models: [] },
+      anthropic: { active: false, models: [] },
+      claude_subscription: { active: false, models: [] },
+    });
+    workspaceModels = spyOn(
+      opengeniDb,
+      "listWorkspaceProviderCustomModelsByKind",
+    ).mockResolvedValue({
+      vercel_gateway: [],
+      openrouter: [],
+      anthropic: [],
+      claude_subscription: [],
+    });
+    connections = spyOn(opengeniDb, "listConnectionsMetadata").mockResolvedValue([]);
     mocks = [
       spyOn(
         opengeniDb,
@@ -70,26 +96,68 @@ describe("fresh model admission versus live discovery", () => {
       availability,
       balance,
       allowance,
+      organizationCatalog,
+      workspaceModels,
+      connections,
       spyOn(opengeniDb, "workspaceCodexSubscriptionActive").mockImplementation(async () => active),
       spyOn(opengeniDb, "workspaceXaiSubscriptionActive").mockResolvedValue(false),
-      spyOn(opengeniDb, "workspaceVercelAiGatewayConnectionActive").mockResolvedValue(false),
-      spyOn(opengeniDb, "workspaceOpenRouterConnectionActive").mockResolvedValue(false),
-      spyOn(opengeniDb, "organizationModelProviderConnectionActiveForWorkspace").mockResolvedValue(
-        false,
-      ),
-      spyOn(opengeniDb, "listWorkspaceGatewayCustomModels").mockResolvedValue([]),
-      spyOn(opengeniDb, "listWorkspaceOpenRouterCustomModels").mockResolvedValue([]),
-      spyOn(opengeniDb, "listOrganizationModelProviderCustomModelsForWorkspace").mockResolvedValue(
-        [],
-      ),
-      spyOn(opengeniDb, "getWorkspaceProviderApiKeyConnectionMetadata").mockResolvedValue(null),
-      spyOn(opengeniDb, "listWorkspaceProviderCustomModels").mockResolvedValue([]),
       spyOn(opengeniDb, "isCodexBilledTurn").mockImplementation(async () => active),
     ];
   });
 
   afterEach(() => {
     for (const mock of mocks) mock.mockRestore();
+  });
+
+  test("each selection load batches metadata once and later admission reloads mutable readiness", async () => {
+    const metadata = {
+      id: "00000000-0000-4000-8000-000000000003",
+      accountId: context.accountId,
+      workspaceId: context.workspaceId,
+      subjectId: null,
+      providerDomain: "api.anthropic.com",
+      kind: "api_key" as const,
+      status: "active" as const,
+      version: 1,
+      metadata: { credentialRole: "anthropic" },
+      grantedScopes: [],
+      expiresAt: null,
+      lastRefreshAt: null,
+      lastUsedAt: null,
+      lastError: null,
+      createdBySubjectId: context.subjectId,
+      updatedBySubjectId: context.subjectId,
+      createdAt: "2026-10-01T00:00:00.000Z",
+      updatedAt: "2026-10-01T00:00:00.000Z",
+    };
+    connections.mockResolvedValue([metadata]);
+    const first = await loadWorkspaceModelSelectionInput(db, settings, context, {
+      observeAvailability: false,
+    });
+    expect(first.workspaceClaudeConnections?.anthropic?.active).toBe(true);
+    const kinds = ["vercel_gateway", "openrouter", "anthropic"];
+    expect(organizationCatalog.mock.calls).toEqual([
+      [
+        db,
+        { accountId: context.accountId, workspaceId: context.workspaceId, providerKinds: kinds },
+      ],
+    ]);
+    expect(workspaceModels.mock.calls).toEqual(organizationCatalog.mock.calls);
+    expect(connections.mock.calls).toEqual([[db, context.workspaceId, null]]);
+
+    connections.mockResolvedValue([{ ...metadata, status: "revoked", version: 2 }]);
+    active = false;
+    restrictions.mockResolvedValue({ "codex/": [] });
+    const second = await loadWorkspaceModelSelectionInput(db, settings, context, {
+      observeAvailability: false,
+    });
+    expect(second.workspaceClaudeConnections?.anthropic?.active).toBe(false);
+    expect(second.codexSubscriptionActive).toBe(false);
+    expect(second.connectionModelRestrictions).toEqual({ "codex/": [] });
+    expect(organizationCatalog).toHaveBeenCalledTimes(2);
+    expect(workspaceModels).toHaveBeenCalledTimes(2);
+    expect(connections).toHaveBeenCalledTimes(2);
+    expect(availability).not.toHaveBeenCalled();
   });
 
   test("stable admission cannot refresh a subscription onto the zero-credit billing rail", async () => {

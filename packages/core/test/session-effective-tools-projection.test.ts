@@ -9,11 +9,13 @@ import {
 } from "@opengeni/contracts";
 import * as db from "@opengeni/db";
 import * as catalog from "../src/model-catalog";
+import * as capabilityPorts from "../src/domain/capabilities";
 import { testSettings } from "@opengeni/testing";
 import {
   sessionEffectiveToolProjectionInput,
   sessionWithEffectiveToolPolicy,
   workspaceSessionEffectiveToolsContext,
+  workspaceSessionToolPolicyContext,
   type SessionEffectiveToolsContext,
 } from "../src/domain/session-tool-policy";
 
@@ -257,6 +259,56 @@ describe("server effectiveTools environment projection", () => {
       history.mockRestore();
       sandbox.mockRestore();
       skills.mockRestore();
+      models.mockRestore();
+      workspace.mockRestore();
+    }
+  });
+
+  test("response-local workspace metadata supplies both contexts without another hydration", async () => {
+    const row = session("none");
+    const workspaceSettings = { agentHumanInputEnabled: false };
+    const workspaceRead = Promise.resolve({ settings: workspaceSettings });
+    const workspace = spyOn(db, "requireWorkspace");
+    const models = spyOn(catalog, "resolveWorkspaceCatalogSettings").mockResolvedValue({
+      settings,
+      source: "code",
+      version: null,
+      modelNotes: {},
+    });
+    const runtime = spyOn(
+      capabilityPorts,
+      "settingsWithEnabledCapabilityMcpServers",
+    ).mockResolvedValue(settings);
+    const skills = spyOn(db, "listSkillDescriptors").mockResolvedValue([]);
+    const history = spyOn(db, "sessionHasToolRouterHistory").mockResolvedValue(false);
+    try {
+      const [policy, effectiveContext] = await Promise.all([
+        workspaceSessionToolPolicyContext(
+          {} as db.Database,
+          row.workspaceId,
+          settings,
+          "human",
+          workspaceRead,
+        ),
+        workspaceSessionEffectiveToolsContext(
+          { db: {} as db.Database, settings },
+          row.workspaceId,
+          "human",
+          [row],
+          workspaceRead,
+        ),
+      ]);
+      expect(workspace).not.toHaveBeenCalled();
+      expect(policy.workspaceServerIds).toEqual(
+        settings.mcpServers.map((server) => server.id).sort(),
+      );
+      expect(effectiveContext.workspaceSettings).toBe(workspaceSettings);
+      expect(effectiveContext.humanInputEnabled).toBe(false);
+      expect(runtime.mock.calls[0]?.[3]).toEqual({ subjectId: "human" });
+    } finally {
+      history.mockRestore();
+      skills.mockRestore();
+      runtime.mockRestore();
       models.mockRestore();
       workspace.mockRestore();
     }

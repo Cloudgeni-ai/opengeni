@@ -22,15 +22,11 @@ import {
   getWorkspace,
   getWorkspaceConnectionModelRestrictions,
   getWorkspaceModelPolicy,
-  getWorkspaceProviderApiKeyConnectionMetadata,
-  listWorkspaceProviderCustomModels,
-  listOrganizationModelProviderCustomModelsForWorkspace,
-  listWorkspaceGatewayCustomModels,
-  listWorkspaceOpenRouterCustomModels,
-  organizationModelProviderConnectionActiveForWorkspace,
+  getOrganizationModelProviderCatalogForWorkspace,
+  listConnectionsMetadata,
+  listWorkspaceProviderCustomModelsByKind,
+  workspaceProviderApiKeyConnectionMetadataFromConnections,
   workspaceCodexSubscriptionActive,
-  workspaceOpenRouterConnectionActive,
-  workspaceVercelAiGatewayConnectionActive,
   getBillingBalance,
   spendableCreditMicros,
   workspaceXaiSubscriptionActive,
@@ -422,6 +418,10 @@ export async function loadWorkspaceModelSelectionInput(
   options: { observeAvailability?: boolean } = {},
 ): Promise<WorkspaceModelSelectionInput> {
   const { accountId, workspaceId } = context;
+  const claudeKinds = CLAUDE_CONNECTION_KINDS.filter(
+    (kind) => kind !== "claude_subscription" || settings.claudeSubscriptionEnabled,
+  );
+  const providerKinds = ["vercel_gateway", "openrouter", ...claudeKinds] as const;
   const restrictionsRead = (async () =>
     connectionRestrictionsAndXaiReadiness(db, settings, context))();
   const claudePoolRead = (async () =>
@@ -435,89 +435,52 @@ export async function loadWorkspaceModelSelectionInput(
       options.observeAvailability === false
         ? Promise.resolve({})
         : loadWorkspaceCodexModelAvailability(db, settings, workspaceId),
-      workspaceVercelAiGatewayConnectionActive(db, workspaceId),
-      listWorkspaceGatewayCustomModels(db, { accountId, workspaceId }),
-      workspaceOpenRouterConnectionActive(db, workspaceId),
-      listWorkspaceOpenRouterCustomModels(db, { accountId, workspaceId }),
-      organizationModelProviderConnectionActiveForWorkspace(db, {
-        accountId,
-        workspaceId,
-        providerKind: "vercel_gateway",
-      }),
-      organizationModelProviderConnectionActiveForWorkspace(db, {
-        accountId,
-        workspaceId,
-        providerKind: "openrouter",
-      }),
-      listOrganizationModelProviderCustomModelsForWorkspace(db, {
-        accountId,
-        workspaceId,
-        providerKind: "vercel_gateway",
-      }),
-      listOrganizationModelProviderCustomModelsForWorkspace(db, {
-        accountId,
-        workspaceId,
-        providerKind: "openrouter",
-      }),
     ]))();
-  const claudeConnections: ClaudeConnectionCatalog = {};
-  const workspaceClaudeConnections: ClaudeConnectionCatalog = {};
   // Transaction handles share one backend and LOCAL scope. Preserve the old
   // batch ordering there rather than introduce concurrent nested savepoints.
   if (typeof (db as Database & { rollback?: unknown }).rollback === "function") await inputRead;
-  // Catalog metadata does not depend on the other providers' policy/readiness
-  // batch. Only subscription activation joins its exact existing pool read.
-  // These helpers keep their separate root-pool RLS scopes; no shared transaction.
+  // Batch only this invocation's catalog reads. Mutable readiness and authority
+  // are not retained for a later fresh admission. Each helper keeps its own RLS
+  // scope; Claude subscription activation still uses the canonical pool read.
   const catalogRead = (async () =>
-    Promise.all(
-      CLAUDE_CONNECTION_KINDS.map(async (kind) => {
-        if (kind === "claude_subscription" && !settings.claudeSubscriptionEnabled) return;
-        const [active, models, metadata, workspaceModels] = await Promise.all([
-          kind === "claude_subscription"
-            ? claudePoolRead.then((pool) => pool.organization)
-            : organizationModelProviderConnectionActiveForWorkspace(db, {
-                accountId,
-                workspaceId,
-                providerKind: kind,
-              }),
-          listOrganizationModelProviderCustomModelsForWorkspace(db, {
-            accountId,
-            workspaceId,
-            providerKind: kind,
-          }),
-          kind === "claude_subscription"
-            ? Promise.resolve(null)
-            : getWorkspaceProviderApiKeyConnectionMetadata(db, workspaceId, kind),
-          listWorkspaceProviderCustomModels(db, { accountId, workspaceId, providerKind: kind }),
-        ]);
-        claudeConnections[kind] = { active, models };
-        workspaceClaudeConnections[kind] = {
-          active:
-            kind === "claude_subscription" ? (await claudePoolRead).workspace : metadata !== null,
-          models: workspaceModels,
-        };
+    Promise.all([
+      getOrganizationModelProviderCatalogForWorkspace(db, {
+        accountId,
+        workspaceId,
+        providerKinds,
       }),
-    ))();
-  // Observe both batches before admission resumes or fails. Retain the previous
-  // input-batch error precedence even if the independent catalog fails first.
+      listWorkspaceProviderCustomModelsByKind(db, { accountId, workspaceId, providerKinds }),
+      listConnectionsMetadata(db, workspaceId, null),
+    ]))();
+  // Observe both batches before admission resumes or fails. Policy/readiness
+  // failures keep priority even if the independent catalog fails first.
   const [inputResult, catalogResult] = await Promise.allSettled([inputRead, catalogRead]);
   if (inputResult.status === "rejected") throw inputResult.reason;
   if (catalogResult.status === "rejected") throw catalogResult.reason;
   const [
     { restrictions: connectionModelRestrictions, xaiSubscriptionActive },
-    _claudePool,
+    claudePool,
     policy,
     codexSubscriptionActive,
     observations,
-    workspaceGatewayConnectionActive,
-    workspaceGatewayCustomModels,
-    openRouterConnectionActive,
-    workspaceOpenRouterCustomModels,
-    organizationGatewayConnectionActive,
-    organizationOpenRouterConnectionActive,
-    organizationGatewayCustomModels,
-    organizationOpenRouterCustomModels,
   ] = inputResult.value;
+  const [organizationCatalog, workspaceModels, connections] = catalogResult.value;
+  const workspaceProviderActive = (
+    kind: Exclude<(typeof providerKinds)[number], "claude_subscription">,
+  ) => workspaceProviderApiKeyConnectionMetadataFromConnections(connections, kind) !== null;
+  const claudeConnections: ClaudeConnectionCatalog = {};
+  const workspaceClaudeConnections: ClaudeConnectionCatalog = {};
+  for (const kind of claudeKinds) {
+    claudeConnections[kind] = {
+      active:
+        kind === "claude_subscription" ? claudePool.organization : organizationCatalog[kind].active,
+      models: organizationCatalog[kind].models,
+    };
+    workspaceClaudeConnections[kind] = {
+      active: kind === "claude_subscription" ? claudePool.workspace : workspaceProviderActive(kind),
+      models: workspaceModels[kind],
+    };
+  }
   return {
     claudeConnections,
     workspaceClaudeConnections,
@@ -527,14 +490,14 @@ export async function loadWorkspaceModelSelectionInput(
     codexSubscriptionActive,
     observations,
     xaiSubscriptionActive,
-    workspaceGatewayConnectionActive,
-    workspaceGatewayCustomModels,
-    workspaceOpenRouterConnectionActive: openRouterConnectionActive,
-    workspaceOpenRouterCustomModels,
-    organizationGatewayConnectionActive,
-    organizationOpenRouterConnectionActive,
-    organizationGatewayCustomModels,
-    organizationOpenRouterCustomModels,
+    workspaceGatewayConnectionActive: workspaceProviderActive("vercel_gateway"),
+    workspaceGatewayCustomModels: workspaceModels.vercel_gateway,
+    workspaceOpenRouterConnectionActive: workspaceProviderActive("openrouter"),
+    workspaceOpenRouterCustomModels: workspaceModels.openrouter,
+    organizationGatewayConnectionActive: organizationCatalog.vercel_gateway.active,
+    organizationOpenRouterConnectionActive: organizationCatalog.openrouter.active,
+    organizationGatewayCustomModels: organizationCatalog.vercel_gateway.models,
+    organizationOpenRouterCustomModels: organizationCatalog.openrouter.models,
   };
 }
 

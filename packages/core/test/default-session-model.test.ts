@@ -11,6 +11,7 @@ import type { AccessGrant, WorkspaceModelPolicyContract } from "@opengeni/contra
 import {
   applyCreditDebitAfterUse,
   applyCreditLedgerEntry,
+  createConnection,
   createClaudeSubscriptionAccount,
   createDb,
   createXaiSubscriptionCredential,
@@ -19,10 +20,16 @@ import {
   encryptEnvironmentValue,
   ensureCodexRotationSettings,
   ensureXaiRotationSettings,
+  getWorkspaceProviderApiKeyConnectionMetadata,
+  listOrganizationModelProviderCustomModelsForWorkspace,
+  listWorkspaceProviderCustomModels,
+  MAX_WORKSPACE_GATEWAY_CUSTOM_MODELS,
+  organizationModelProviderConnectionActiveForWorkspace,
   setInitialActiveClaudeCredential,
   setInitialActiveXaiCredential,
   saveNewSessionDraftInTransaction,
   workspaceXaiSubscriptionActiveForAuthority,
+  workspaceProviderApiKeyConnectionSpec,
   XaiAuthorityPoolInactiveError,
   updateCodexRotationSettings,
   upsertCodexSubscriptionCredential,
@@ -47,6 +54,7 @@ import {
   clampReasoningEffortForConfiguredModel,
   creditsDefaultSessionModel,
   loadWorkspaceClaudeSubscriptionReadiness,
+  loadWorkspaceModelSelectionInput,
   resolveDefaultSessionModel,
   selectDefaultSessionModel,
 } from "../src/default-session-model";
@@ -678,6 +686,126 @@ describe("canonical Claude pool readiness", () => {
       ).toEqual({ workspace: false, organization: false });
     }
   });
+});
+
+describe("bounded selection catalog loading", () => {
+  test("batched loader retains provider readiness, model ordering and retirement under the application role", async () => {
+    if (!available) return;
+    const settings = hostedSettings({ claudeSubscriptionEnabled: true });
+    const grant = await workspaceFixture();
+    await organizationMember(grant.accountId, grant.subjectId);
+    await connectClaudePool(settings, grant, "workspace");
+    const providerKinds = [
+      "vercel_gateway",
+      "openrouter",
+      "anthropic",
+      "claude_subscription",
+    ] as const;
+    const hash = "a".repeat(64);
+    for (const providerKind of providerKinds) {
+      if (providerKind !== "claude_subscription") {
+        const spec = workspaceProviderApiKeyConnectionSpec(providerKind);
+        await createConnection(db, {
+          accountId: grant.accountId,
+          workspaceId: grant.workspaceId,
+          subjectId: null,
+          providerDomain: spec.providerDomain.toUpperCase(),
+          kind: "api_key",
+          credentialEncrypted: "metadata-only-fixture",
+          metadata: { credentialRole: spec.credentialRole },
+          createdBySubjectId: grant.subjectId,
+        });
+        await shared!.admin`
+          insert into organization_model_provider_connections
+            (account_id, provider_kind, credential_encrypted, operation_id, request_hash,
+             updated_by_subject_id)
+          values (${grant.accountId}, ${providerKind}, 'metadata-only-fixture',
+            ${crypto.randomUUID()}, ${hash}, ${grant.subjectId})`;
+      }
+      for (const [upstream, retired] of [
+        ["b-fixture", false],
+        ["a-fixture", false],
+        ["retired-fixture", true],
+      ] as const) {
+        await shared!.admin`
+          insert into workspace_gateway_custom_models
+            (account_id, workspace_id, provider_kind, upstream_model_id, create_operation_id,
+             create_request_hash, created_by_subject_id, created_at, retired_at)
+          values (${grant.accountId}, ${grant.workspaceId}, ${providerKind}, ${upstream},
+            ${crypto.randomUUID()}, ${hash}, ${grant.subjectId}, '2026-01-01', ${retired ? new Date() : null})`;
+        await shared!.admin`
+          insert into organization_model_provider_custom_models
+            (account_id, provider_kind, upstream_model_id, create_operation_id,
+             create_request_hash, created_by_subject_id, retired_at)
+          values (${grant.accountId}, ${providerKind}, ${upstream}, ${crypto.randomUUID()},
+            ${hash}, ${grant.subjectId}, ${retired ? new Date() : null})`;
+      }
+    }
+    const loaded = await loadWorkspaceModelSelectionInput(db, settings, grant, {
+      observeAvailability: false,
+    });
+    for (const providerKind of providerKinds) {
+      const scope = { accountId: grant.accountId, workspaceId: grant.workspaceId, providerKind };
+      const workspaceModels = await listWorkspaceProviderCustomModels(db, scope);
+      const organizationModels = await listOrganizationModelProviderCustomModelsForWorkspace(
+        db,
+        scope,
+      );
+      const workspaceActive =
+        providerKind === "claude_subscription" ||
+        (await getWorkspaceProviderApiKeyConnectionMetadata(
+          db,
+          grant.workspaceId,
+          providerKind,
+        )) !== null;
+      const organizationActive =
+        providerKind !== "claude_subscription" &&
+        (await organizationModelProviderConnectionActiveForWorkspace(db, scope));
+      if (providerKind === "vercel_gateway") {
+        expect(loaded.workspaceGatewayCustomModels).toEqual(workspaceModels);
+        expect(loaded.organizationGatewayCustomModels).toEqual(organizationModels);
+        expect(loaded.workspaceGatewayConnectionActive).toBe(workspaceActive);
+        expect(loaded.organizationGatewayConnectionActive).toBe(organizationActive);
+      } else if (providerKind === "openrouter") {
+        expect(loaded.workspaceOpenRouterCustomModels).toEqual(workspaceModels);
+        expect(loaded.organizationOpenRouterCustomModels).toEqual(organizationModels);
+        expect(loaded.workspaceOpenRouterConnectionActive).toBe(workspaceActive);
+        expect(loaded.organizationOpenRouterConnectionActive).toBe(organizationActive);
+      } else {
+        expect(loaded.workspaceClaudeConnections?.[providerKind]).toEqual({
+          active: workspaceActive,
+          models: workspaceModels,
+        });
+        expect(loaded.claudeConnections?.[providerKind]).toEqual({
+          active: organizationActive,
+          models: organizationModels,
+        });
+      }
+      expect(workspaceModels).toHaveLength(2);
+      expect(organizationModels).toHaveLength(2);
+    }
+  }, 180_000);
+
+  test("another provider's full catalog cannot hide a per-provider overflow", async () => {
+    if (!available) return;
+    const settings = hostedSettings({ claudeSubscriptionEnabled: false });
+    const grant = await workspaceFixture();
+    for (const [providerKind, count] of [
+      ["vercel_gateway", MAX_WORKSPACE_GATEWAY_CUSTOM_MODELS],
+      ["anthropic", MAX_WORKSPACE_GATEWAY_CUSTOM_MODELS + 1],
+    ] as const) {
+      await shared!.admin`
+        insert into workspace_gateway_custom_models
+          (account_id, workspace_id, provider_kind, upstream_model_id, create_operation_id,
+           create_request_hash, created_by_subject_id)
+        select ${grant.accountId}, ${grant.workspaceId}, ${providerKind}, 'overflow-' || n,
+          gen_random_uuid(), ${"a".repeat(64)}, ${grant.subjectId}
+        from generate_series(1, ${count}) as n`;
+    }
+    await expect(
+      loadWorkspaceModelSelectionInput(db, settings, grant, { observeAvailability: false }),
+    ).rejects.toThrow("custom model limit reached");
+  }, 180_000);
 });
 
 describe("server-side default model resolution", () => {

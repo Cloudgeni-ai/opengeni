@@ -29,6 +29,7 @@ import {
   type SessionEffectiveToolPolicy,
   type SessionToolPolicy,
   type ToolRef,
+  type Workspace,
 } from "@opengeni/contracts";
 import { codeSearchEnabledForTurn } from "@opengeni/contracts/code-search";
 import {
@@ -229,18 +230,20 @@ export function resolveTurnToolPolicy(
   });
 }
 
-/** Resolve availability and defaults from the same subject-scoped registry read. */
+/** Resolve availability and defaults from the same subject-scoped registry read.
+ * `workspaceRead` shares metadata within one response, never authorization. */
 export async function workspaceSessionToolPolicyContext(
   db: Database,
   workspaceId: string,
   settings: Settings,
   subjectId?: string,
+  workspaceRead?: Promise<Pick<Workspace, "settings">>,
 ): Promise<{ workspaceServerIds: string[]; workspaceDefaultServerIds: string[] }> {
   const [runtimeSettings, workspace] = await Promise.all([
     settingsWithEnabledCapabilityMcpServers(db, workspaceId, settings, {
       ...(subjectId ? { subjectId } : {}),
     }),
-    requireWorkspace(db, workspaceId),
+    workspaceRead ?? requireWorkspace(db, workspaceId),
   ]);
   return {
     workspaceServerIds: sortedIds(runtimeSettings.mcpServers.map((server) => server.id)),
@@ -320,12 +323,14 @@ export type SessionEffectiveToolsContext = {
 /**
  * Resolve one context for a response page, not one catalog per session. Legacy
  * rows require no additional reads and never acquire an effectiveTools field.
+ * A supplied workspace read belongs only to this response's metadata scope.
  */
 export async function workspaceSessionEffectiveToolsContext(
   deps: { db: Database; settings: Settings; objectStorage?: unknown },
   workspaceId: string,
   subjectId: string,
   sessions: readonly Session[],
+  workspaceRead?: Promise<Pick<Workspace, "settings">>,
 ): Promise<SessionEffectiveToolsContext> {
   const configured = sessions.filter((session) => session.agent != null);
   const baseline: SessionEffectiveToolsContext = {
@@ -336,7 +341,7 @@ export async function workspaceSessionEffectiveToolsContext(
   };
   if (configured.length === 0) return baseline;
   const [workspace, catalog, descriptors, sandboxes, routerHistory] = await Promise.all([
-    requireWorkspace(deps.db, workspaceId),
+    workspaceRead ?? requireWorkspace(deps.db, workspaceId),
     resolveWorkspaceCatalogSettings(deps.db, deps.settings, {
       accountId: configured[0]!.accountId,
       workspaceId,
