@@ -729,6 +729,14 @@ function gatewayBillingFromResponse(
   ) {
     return null;
   }
+  const opper = (metadataCandidate as Record<string, unknown>).opper;
+  if (opper && typeof opper === "object" && !Array.isArray(opper)) {
+    // Attached only by the Chat adapter from Opper's `usage.opper.cost.total`.
+    const costUsd = (opper as Record<string, unknown>).costUsd;
+    return typeof costUsd === "string" && /^(0|[1-9]\d*)(?:\.\d{1,18})?$/.test(costUsd)
+      ? { finalProvider: "opper", inferenceCostUsd: costUsd }
+      : null;
+  }
   const gateway = (metadataCandidate as Record<string, unknown>).gateway;
   if (!gateway || typeof gateway !== "object" || Array.isArray(gateway)) {
     return null;

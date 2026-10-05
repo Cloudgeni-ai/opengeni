@@ -27,7 +27,9 @@ import {
   type OpenSandboxKubernetesInventory,
 } from "./opensandbox-kubernetes-inventory";
 import {
+  MCP_TOOL_METRIC_EXTERNAL_LABEL,
   SELFHOSTED_INFRASTRUCTURE_FAULT_CLASSES,
+  isMcpToolMetricLabel,
   modelUsageTokenCountOrNull,
   type RuntimeMetricsHooks,
   type SelfhostedOpObservation,
@@ -239,17 +241,23 @@ export function runtimeMetricsHooksForObservability(
         labels: { outcome, backend },
       });
     },
-    onMcpToolCall: ({ outcome, durationSeconds }) => {
-      completedOperationSpan(observability, "worker.mcp.tool_call", durationSeconds, { outcome });
+    onMcpToolCall: ({ outcome, tool, durationSeconds }) => {
+      // Re-check the closed label set at the export boundary so a caller can
+      // never turn a raw user-defined tool name into a metric series.
+      const safeTool = isMcpToolMetricLabel(tool) ? tool : MCP_TOOL_METRIC_EXTERNAL_LABEL;
+      completedOperationSpan(observability, "worker.mcp.tool_call", durationSeconds, {
+        outcome,
+        tool: safeTool,
+      });
       observability.incrementCounter({
         name: "opengeni_mcp_tool_calls_total",
-        help: "Total physical MCP tool calls by bounded structural outcome.",
-        labels: { outcome },
+        help: "Total physical MCP tool calls by bounded structural outcome and first-party tool (other tools are 'external').",
+        labels: { outcome, tool: safeTool },
       });
       observability.observeHistogram({
         name: "opengeni_mcp_tool_call_duration_seconds",
-        help: "MCP tool-call duration in seconds by bounded structural outcome.",
-        labels: { outcome },
+        help: "MCP tool-call duration in seconds by bounded structural outcome and first-party tool (other tools are 'external').",
+        labels: { outcome, tool: safeTool },
         value: durationSeconds,
       });
     },
@@ -1497,6 +1505,11 @@ export function recordSandboxRotationBacklogGauges(
 }
 
 const RETAINED_PROCESS_OWNER_STATES = [
+  // Session-owned background commands (migration 0637). Running is live
+  // session work after its launch turn ended; stopping already has a stop
+  // request, so it still counts as terminal-owner backlog.
+  "background_running",
+  "background_stopping",
   "direct",
   "queued",
   "running",
@@ -1544,7 +1557,7 @@ export function recordRetainedProcessInventoryGauges(
     });
     observability.setGauge({
       name: "opengeni_retained_processes_terminal_owner_backlog",
-      help: "Current active retained processes whose exact owner attempt is terminal.",
+      help: "Current active retained processes whose owner is gone: a closed launch attempt or released direct request, or a background command already asked to stop. A running session background command is never counted.",
       labels: { owner_state: ownerState },
       value: count.terminal,
     });
@@ -2067,6 +2080,7 @@ function completedOperationSpan(
     outcome: string;
     provider?: string;
     backend?: string;
+    tool?: string;
     correlationId?: string | undefined;
   },
 ): void {

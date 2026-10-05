@@ -417,6 +417,15 @@ export const galleryModelRows: PickerModelRow[] = projectPickerRows([
     cost: "free",
     billing: { upstreamPayer: "deployment", metering: "external" },
   }),
+  catalogModel({
+    id: "opper/aws/claude-opus-5-5",
+    label: "Claude Opus 5.5 (EU)",
+    shortLabel: "Opus 5.5",
+    provider: "opper",
+    providerLabel: "Opper",
+    cost: "credits",
+    billing: { upstreamPayer: "deployment", metering: "opengeni_credits" },
+  }),
 ]);
 
 /** 52 first-party + 1 MCP = 53; leave two off → Tools · 51/53. */

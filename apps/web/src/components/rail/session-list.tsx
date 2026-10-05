@@ -4670,7 +4670,9 @@ function SessionListSkeleton() {
 /**
  * Delete a chat, stopping it first when it is still running. The API refuses
  * to delete a chat with an active turn (409), so the person's "Delete" stops
- * the chat (terminal cancel) and retries until its turn has wound down.
+ * the chat (terminal cancel) and retries until its turn has wound down. Every
+ * other 409 (saved outputs or forks depend on it, background commands, a
+ * sub-chat) is permanent: surface it as-is and never cancel the chat for it.
  */
 async function deleteStoppingIfRunning(
   client: {
@@ -4687,7 +4689,7 @@ async function deleteStoppingIfRunning(
   try {
     return await client.deleteSession(workspaceId, sessionId);
   } catch (error) {
-    if (!(error instanceof OpenGeniApiError) || error.status !== 409) throw error;
+    if (!isStillRunningDeleteRefusal(error)) throw error;
   }
   await client.cancelSession(workspaceId, sessionId, { reason: "Deleted by user" });
   const deadline = Date.now() + 30_000;
@@ -4696,8 +4698,18 @@ async function deleteStoppingIfRunning(
     try {
       return await client.deleteSession(workspaceId, sessionId);
     } catch (error) {
-      if (!(error instanceof OpenGeniApiError) || error.status !== 409 || Date.now() > deadline)
-        throw error;
+      if (!isStillRunningDeleteRefusal(error) || Date.now() > deadline) throw error;
     }
   }
+}
+
+/** Only "still running" (or a box still shutting down) is worth stopping the chat and retrying for. */
+export function isStillRunningDeleteRefusal(error: unknown): boolean {
+  if (!(error instanceof OpenGeniApiError) || error.status !== 409) return false;
+  const code = error.details?.code;
+  if (typeof code === "string") {
+    return code === "session_delete_active_sessions" || code === "session_delete_live_sandboxes";
+  }
+  // Servers before structured refusal codes: keep the old behaviour only for the running case.
+  return /still running|still shutting down/i.test(error.message);
 }

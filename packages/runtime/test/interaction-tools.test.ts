@@ -351,6 +351,167 @@ describe("interaction attempt tools", () => {
     });
   });
 
+  test("tab open/select observations support a fenced next action without another page read", async () => {
+    for (const operation of ["open", "select"] as const) {
+      const target = browserTarget();
+      const observation = browserObservation(target);
+      observation.focusedRef = "button-ref";
+      observation.semantic = {
+        kind: "snapshot",
+        nodeCount: 76,
+        roots: Array.from({ length: 76 }, (_, index) => ({
+          ref: index === 0 ? "button-ref" : `text-${index}`,
+          role: index === 0 ? "button" : "text",
+          name: index === 0 ? "Continue" : "Example content ".repeat(30),
+          states: index === 0 ? ["focused"] : [],
+          actions: index === 0 ? ["click"] : [],
+          children: [],
+        })),
+      };
+      // The authoritative inventory can advance independently of this snapshot.
+      const otherTarget = { ...target, id: "tab-2", title: "Other", selected: true };
+      const tabs = {
+        browserSessionId,
+        controllerGeneration: target.controllerGeneration,
+        targets: [{ ...target, selected: false }, otherTarget],
+      };
+      const calls: string[] = [];
+      let actionRequest: BrowserActionRequest | null = null;
+      const unexpectedRead = async () => {
+        throw new Error("The mutation observation already provides the page fences");
+      };
+      const definitions = createInteractionAttemptToolDefinitions({
+        transport: partialTransport({
+          openBrowserTarget: async () => {
+            calls.push("open");
+            return observation;
+          },
+          selectBrowserTarget: async () => {
+            calls.push("select");
+            return observation;
+          },
+          listBrowserTargets: async () => {
+            calls.push("list");
+            return tabs;
+          },
+          observeBrowserTarget: unexpectedRead,
+          getBrowserTargetState: unexpectedRead,
+          actInBrowser: async (_workspace, _browser, request) => {
+            calls.push("act");
+            actionRequest = request;
+            return { ...browserReceipt(request.operationId, observation), observation: null };
+          },
+        }),
+        workspaceId,
+        sessionId,
+        selectedTools: ["browser_tabs", "browser_act"],
+        permissions: ["sessions:control"],
+      });
+      const context = {
+        operationId: randomUUID(),
+        caller: { kind: "model" as const, subjectId: "model:test" },
+      };
+      const result = await definitions
+        .find((definition) => definition.modelName === "interaction__browser_tabs")!
+        .execute(
+          operation === "open"
+            ? { operation, browserSessionId, url: "https://example.test/" }
+            : { operation, browserSessionId, targetId: target.id },
+          context,
+        );
+      expect(result.isError).not.toBe(true);
+      const output = result.structuredContent as {
+        mutationObservation: BrowserObservation & {
+          agentView: { nodes: Array<{ ref: string }>; omittedNodeCount: number };
+        };
+      };
+      const snapshot = output.mutationObservation;
+      expect(result.structuredContent).toMatchObject(tabs);
+      expect(snapshot).toMatchObject({
+        observationId: observation.observationId,
+        browserSessionId,
+        target,
+        frameId: observation.frameId,
+        focusedRef: observation.focusedRef,
+        observedAt: observation.observedAt,
+        semantic: null,
+        agentView: { kind: "compact", sourceNodeCount: 76 },
+      });
+      expect(snapshot.agentView.nodes).toContainEqual(
+        expect.objectContaining({ ref: "button-ref", role: "button", name: "Continue" }),
+      );
+      expect(snapshot.agentView.nodes.length).toBeLessThanOrEqual(60);
+      expect(snapshot.agentView.omittedNodeCount).toBeGreaterThan(0);
+      expect(Buffer.byteLength(JSON.stringify(snapshot.agentView.nodes))).toBeLessThan(12_100);
+      expect(observation.semantic.kind).toBe("snapshot");
+      const actionOperationId = randomUUID();
+      const action = await definitions
+        .find((definition) => definition.modelName === "interaction__browser_act")!
+        .execute(
+          {
+            browserSessionId: snapshot.browserSessionId,
+            targetId: snapshot.target.id,
+            expectedTargetGeneration: snapshot.target.targetGeneration,
+            expectedDocumentGeneration: snapshot.target.documentGeneration,
+            expectedFrameId: snapshot.frameId,
+            view: "none",
+            action: { type: "scroll", deltaX: 0, deltaY: 100 },
+          },
+          { ...context, operationId: actionOperationId },
+        );
+      expect(action.isError).not.toBe(true);
+      expect(actionRequest).toMatchObject({
+        operationId: actionOperationId,
+        targetId: target.id,
+        expectedTargetGeneration: target.targetGeneration,
+        expectedDocumentGeneration: target.documentGeneration,
+        expectedFrameId: observation.frameId,
+        observationMode: "none",
+      });
+      expect(action.structuredContent).toEqual({
+        ...browserReceipt(actionOperationId, observation),
+        observation: null,
+      });
+      expect(calls).toEqual([operation, "list", "act"]);
+    }
+  });
+
+  test("tab list/close preserve their existing output without observing a page", async () => {
+    for (const operation of ["list", "close"] as const) {
+      const target = browserTarget();
+      const tabs = {
+        browserSessionId,
+        controllerGeneration: target.controllerGeneration,
+        targets: [target],
+      };
+      const calls: string[] = [];
+      const definitions = createInteractionAttemptToolDefinitions({
+        transport: partialTransport({
+          listBrowserTargets: async () => {
+            calls.push("list");
+            return tabs;
+          },
+          closeBrowserTarget: async () => {
+            calls.push("close");
+            return tabs;
+          },
+        }),
+        workspaceId,
+        sessionId,
+        selectedTools: ["browser_tabs"],
+        permissions: ["sessions:control"],
+      });
+      const result = await definitions[0]!.execute(
+        operation === "list"
+          ? { operation, browserSessionId }
+          : { operation, browserSessionId, targetId: target.id },
+        { operationId: randomUUID(), caller: { kind: "model", subjectId: "model:test" } },
+      );
+      expect(result.structuredContent).toEqual(tabs);
+      expect(calls).toEqual([operation]);
+    }
+  });
+
   test("keeps model and Codemode Browser actions on the same durable operation and fences", async () => {
     const target = browserTarget();
     const observation = browserObservation(target);

@@ -109,6 +109,8 @@ type PendingFiniteRead = {
 type BrowserProblems = {
   capabilityDiagnostics: ReturnType<typeof createCapabilityDiagnostics>;
   crossTabReloadStartedAt?: number;
+  /** Receipt times of top-level document commits (Playwright `framenavigated`). */
+  mainFrameCommits: number[];
   acceptedRequestTerminals: Array<{
     observedAt: number;
     origin?: string | undefined;
@@ -877,6 +879,7 @@ async function authSessionCount(email: string): Promise<number> {
 function observeBrowser(page: Page): BrowserProblems {
   const problems: BrowserProblems = {
     capabilityDiagnostics: createCapabilityDiagnostics(),
+    mainFrameCommits: [],
     acceptedRequestTerminals: [],
     activeStreams: new Map(),
     boundedHttp1StreamDispatches: 0,
@@ -1078,6 +1081,9 @@ function observeBrowser(page: Page): BrowserProblems {
         problems.capabilityDiagnostics.console(problems.phase, source, message.text());
       }
     }
+  });
+  page.on("framenavigated", (frame) => {
+    if (frame === page.mainFrame()) problems.mainFrameCommits.push(performance.now());
   });
   page.on("pageerror", (error) => {
     const message = `[${problems.phase}] ${error.message}`;
@@ -1979,8 +1985,14 @@ function minimumCostTerminalAssignment(
   return { cost, terminalIndexes };
 }
 
+// The SDK live stream never reopens sooner than its minimum jittered reconnect
+// delay (500 ms base, 20% jitter). Two outgoing-document refusals closer than
+// that cannot both be the single stream's sequential reconnect attempts.
+const WEBKIT_OUTGOING_DOCUMENT_RECONNECT_MIN_SPACING_MS = 400;
+
 function webKitLiveEventsPageErrorsForValidatedRace(
-  problems: Pick<BrowserProblems, "acceptedRequestTerminals" | "pageErrorEvidence">,
+  problems: Pick<BrowserProblems, "acceptedRequestTerminals" | "pageErrorEvidence"> &
+    Partial<Pick<BrowserProblems, "crossTabReloadStartedAt" | "mainFrameCommits">>,
   engine: EngineName,
   input: { acceptedAt: number; origin: string; pathname: string; settledAt: number },
 ): string[] {
@@ -1992,11 +2004,40 @@ function webKitLiveEventsPageErrorsForValidatedRace(
   ) {
     return [];
   }
+  // The explicit reload starts a navigation, and WebKit cancels the outgoing
+  // alpha document's in-flight loads at that point but keeps the document
+  // running until the replacement commits. The SDK live stream treats that
+  // cancellation (or its ordinary finite-batch close) as a reason to reopen
+  // after its backoff. When the reopen lands before the commit, WebKit refuses
+  // the load locally: the request never reaches the network, Playwright emits
+  // no request or terminal for it, and the console reports it as an
+  // access-control error, which Playwright surfaces as a pageerror. Accept only
+  // that exact shape: the old workspace's exact bounded live-events URL,
+  // observed after this page's reload started and no later than this page's
+  // first subsequent top-level commit, which itself precedes settlement, with
+  // sequential-reconnect spacing. Such errors consume no request terminal.
+  const reloadStartedAt = problems.crossTabReloadStartedAt;
+  const outgoingDocumentCommitAt =
+    reloadStartedAt === undefined
+      ? undefined
+      : problems.mainFrameCommits?.find((commitAt) => commitAt >= reloadStartedAt);
+  const outgoingDocumentWindow =
+    reloadStartedAt !== undefined &&
+    outgoingDocumentCommitAt !== undefined &&
+    Number.isFinite(reloadStartedAt) &&
+    Number.isFinite(outgoingDocumentCommitAt) &&
+    reloadStartedAt >= input.acceptedAt &&
+    outgoingDocumentCommitAt <= input.settledAt
+      ? { startedAt: reloadStartedAt, committedAt: outgoingDocumentCommitAt }
+      : null;
+  const outgoingDocumentRefusals: string[] = [];
+  let previousOutgoingDocumentRefusalAt = Number.NEGATIVE_INFINITY;
   // WebKit may additionally report an accepted old-document cancellation as
   // an access-control pageerror. Never infer cancellation from that text: the direct-race
-  // gate has already validated the actor transition, and every callback must
-  // consume a distinct, exact-URL failed terminal accepted by the strict
-  // request-failure ledger within that race's acceptance/settlement window.
+  // gate has already validated the actor transition, and every remaining
+  // callback must consume a distinct, exact-URL failed terminal accepted by
+  // the strict request-failure ledger within that race's acceptance/settlement
+  // window.
   const candidates: Array<{
     pageError: BrowserProblems["pageErrorEvidence"][number];
     matches: Array<{ distance: number; index: number }>;
@@ -2018,6 +2059,21 @@ function webKitLiveEventsPageErrorsForValidatedRace(
       pageError.observedAt < input.acceptedAt
     ) {
       return [];
+    }
+    if (
+      outgoingDocumentWindow !== null &&
+      pageError.observedAt >= outgoingDocumentWindow.startedAt &&
+      pageError.observedAt <= outgoingDocumentWindow.committedAt
+    ) {
+      if (
+        pageError.observedAt - previousOutgoingDocumentRefusalAt <
+        WEBKIT_OUTGOING_DOCUMENT_RECONNECT_MIN_SPACING_MS
+      ) {
+        return [];
+      }
+      previousOutgoingDocumentRefusalAt = pageError.observedAt;
+      outgoingDocumentRefusals.push(pageError.message);
+      continue;
     }
     const matches = problems.acceptedRequestTerminals
       .flatMap((terminal, index) => {
@@ -2068,7 +2124,7 @@ function webKitLiveEventsPageErrorsForValidatedRace(
   for (const index of [...best.terminalIndexes].sort((a, b) => b - a)) {
     problems.acceptedRequestTerminals.splice(index, 1);
   }
-  return candidates.map(({ pageError }) => pageError.message);
+  return [...outgoingDocumentRefusals, ...candidates.map(({ pageError }) => pageError.message)];
 }
 
 async function expectNoAxeViolations(page: Page, include?: string): Promise<void> {
@@ -2397,12 +2453,42 @@ async function closeResponsiveAccountMenu(page: Page, width: number): Promise<vo
 }
 
 async function expectActiveAccountAnnouncement(page: Page, account: AccountFixture): Promise<void> {
-  await page
-    .locator('span[aria-live="polite"][aria-atomic="true"]')
-    .filter({
-      hasText: `Active account: ${account.displayName}, ${account.email}`,
-    })
-    .waitFor();
+  const liveRegions = page.locator('span[aria-live="polite"][aria-atomic="true"]');
+  try {
+    await liveRegions
+      .filter({
+        hasText: `Active account: ${account.displayName}, ${account.email}`,
+      })
+      .waitFor();
+  } catch (error) {
+    // The announcement is driven by the account provider's `ready` phase, while
+    // the trigger label can fall back to the host auth session. Record which
+    // account surface is actually rendered so a timeout distinguishes a
+    // provider stuck in loading/error from a stale or missing selection.
+    const evidence = await page
+      .evaluate(() => ({
+        url: location.pathname,
+        liveRegions: [
+          ...document.querySelectorAll('span[aria-live="polite"][aria-atomic="true"]'),
+        ].map((element) => element.textContent ?? ""),
+        accountTriggers: [...document.querySelectorAll('button[aria-label^="Account menu"]')].map(
+          (element) => ({
+            label: element.getAttribute("aria-label"),
+            // The trigger renders a spinner while the provider is loading or committing.
+            busy: element.querySelector(".animate-spin") !== null,
+          }),
+        ),
+        headings: [...document.querySelectorAll("h1, h2, [role=alert]")]
+          .map((element) => element.textContent?.trim() ?? "")
+          .filter(Boolean)
+          .slice(0, 8),
+      }))
+      .catch((evidenceError: unknown) => ({ unavailable: String(evidenceError) }));
+    throw new Error(
+      `active account announcement for ${account.displayName} did not appear: ${JSON.stringify(evidence)}`,
+      { cause: error },
+    );
+  }
 }
 
 async function expectAccountMenuEvidenceVisible(page: Page, displayName: string): Promise<void> {
@@ -4719,6 +4805,106 @@ describe("provider-neutral browser account acceptance", () => {
       ),
     ).toEqual([]);
     expect(ambiguousFallback).toEqual(ambiguousOriginal);
+  });
+
+  test("the strict browser ledger accepts WebKit's local refusal of an outgoing document's live-events reopen only before its commit", () => {
+    const pathname = "/v1/workspaces/00000000-0000-0000-0000-000000000001/live-events/stream";
+    const pathnameAndSearch = `${pathname}?controlAfter=0&interactionAfter=0&transport=http1-bounded`;
+    const message = `[cross-tab-select-race] /127.0.0.1:23212${pathnameAndSearch} due to access control checks.`;
+    const input = { acceptedAt: 100, origin: "http://127.0.0.1:23212", pathname, settledAt: 3_000 };
+    const navigation = { crossTabReloadStartedAt: 110, mainFrameCommits: [50, 900] };
+    const match = (
+      errors: BrowserProblems["pageErrorEvidence"],
+      overrides: Partial<
+        Pick<BrowserProblems, "crossTabReloadStartedAt" | "mainFrameCommits">
+      > = {},
+      terminals: BrowserProblems["acceptedRequestTerminals"] = [],
+      engine: EngineName = "webkit",
+      scope = input,
+    ) =>
+      webKitLiveEventsPageErrorsForValidatedRace(
+        {
+          acceptedRequestTerminals: terminals,
+          pageErrorEvidence: errors,
+          ...navigation,
+          ...overrides,
+        },
+        engine,
+        scope,
+      );
+    // The never-dispatched reopen has no request terminal of its own and must
+    // not consume an unrelated one.
+    const unrelatedTerminal = {
+      observedAt: 120,
+      origin: input.origin,
+      pathnameAndSearch,
+      responsePhase: "cross-tab-select-race",
+      terminal: "failed" as const,
+    };
+    const preserved = [unrelatedTerminal];
+    expect(match([{ message, observedAt: 600 }], {}, preserved)).toEqual([message]);
+    expect(preserved).toEqual([unrelatedTerminal]);
+    expect(match([{ message, observedAt: 110 }])).toEqual([message]);
+    expect(match([{ message, observedAt: 900 }])).toEqual([message]);
+    // Sequential reconnect attempts are spaced by the SDK's minimum backoff.
+    expect(
+      match([
+        { message, observedAt: 300 },
+        { message, observedAt: 300 + WEBKIT_OUTGOING_DOCUMENT_RECONNECT_MIN_SPACING_MS },
+      ]),
+    ).toEqual([message, message]);
+    expect(
+      match([
+        { message, observedAt: 300 },
+        { message, observedAt: 300 + WEBKIT_OUTGOING_DOCUMENT_RECONNECT_MIN_SPACING_MS - 1 },
+      ]),
+    ).toEqual([]);
+    // Before the reload, after the commit, without an observed commit, with a
+    // commit after settlement, or with a reload preceding acceptance, the
+    // error is not this outgoing-document shape and still needs a terminal.
+    expect(match([{ message, observedAt: 109 }])).toEqual([]);
+    expect(match([{ message, observedAt: 901 }])).toEqual([]);
+    expect(match([{ message, observedAt: 600 }], { mainFrameCommits: [] })).toEqual([]);
+    expect(match([{ message, observedAt: 600 }], { mainFrameCommits: [50] })).toEqual([]);
+    expect(match([{ message, observedAt: 600 }], { crossTabReloadStartedAt: undefined })).toEqual(
+      [],
+    );
+    expect(match([{ message, observedAt: 600 }], { crossTabReloadStartedAt: Number.NaN })).toEqual(
+      [],
+    );
+    expect(match([{ message, observedAt: 600 }], { crossTabReloadStartedAt: 99 })).toEqual([]);
+    expect(
+      match([{ message, observedAt: 600 }], {}, [], "webkit", { ...input, settledAt: 899 }),
+    ).toEqual([]);
+    expect(match([{ message, observedAt: 600 }], {}, [], "chromium")).toEqual([]);
+    expect(match([{ message, observedAt: 600 }], {}, [], "firefox")).toEqual([]);
+    // URL, phase, origin, and cursor exactness are unchanged.
+    for (const changed of [
+      message.replace("cross-tab-select-race", "logout-one"),
+      message.replace(":23212", ":23213"),
+      message.replace("000000000001", "000000000002"),
+      message.replace("http1-bounded", "http1"),
+      message.replace("controlAfter=0", "controlAfter=00"),
+      message.replace("live-events/stream", "sessions"),
+      message.replace("access control checks.", "access control checks. unexpected"),
+    ]) {
+      expect(match([{ message: changed, observedAt: 600 }])).toEqual([]);
+    }
+    // An error outside the window still requires its own exact terminal, and
+    // both shapes may settle together without sharing evidence.
+    const lateTerminal = { ...unrelatedTerminal, observedAt: 950 };
+    const mixed = [lateTerminal];
+    expect(
+      match(
+        [
+          { message, observedAt: 600 },
+          { message, observedAt: 960 },
+        ],
+        {},
+        mixed,
+      ),
+    ).toEqual([message, message]);
+    expect(mixed).toEqual([]);
   });
 
   test("the strict browser ledger bounds native HTTP/1 stream seams by URL, cause, and time", () => {

@@ -20,6 +20,12 @@ import {
   withOrganizationOpenRouterCredential,
   ORGANIZATION_GATEWAY_MODEL_ID_PREFIX,
   ORGANIZATION_OPENROUTER_MODEL_ID_PREFIX,
+  ORGANIZATION_OPPER_MODEL_ID_PREFIX,
+  WORKSPACE_OPPER_MODEL_ID_PREFIX,
+  withOrganizationOpperCatalogProvider,
+  withOrganizationOpperCredential,
+  withWorkspaceOpperCatalogProvider,
+  withWorkspaceOpperCredential,
   withXaiSubscriptionCatalogProvider,
 } from "@opengeni/config";
 import { settingsWithEnabledCapabilityMcpServers } from "@opengeni/core";
@@ -34,6 +40,7 @@ import {
   workspaceCodexSubscriptionActive,
   loadWorkspaceVercelAiGatewayApiKey,
   loadWorkspaceOpenRouterApiKey,
+  loadWorkspaceOpperApiKey,
   listOrganizationModelProviderCustomModelsForWorkspace,
   getOrganizationModelProviderCustomModelForExecution,
   loadOrganizationModelProviderApiKey,
@@ -268,6 +275,46 @@ export async function settingsWithWorkspaceOpenRouterCredential(
     : catalogSettings;
 }
 
+/** Worker-only: overlay the workspace Opper catalog and, when active, its decrypted key. */
+export async function settingsWithWorkspaceOpperCredential(
+  db: Database,
+  accountId: string,
+  workspaceId: string,
+  settings: Settings,
+  retainedProductModelId?: string | null,
+): Promise<Settings> {
+  const activeCustomModels = await listWorkspaceProviderCustomModels(db, {
+    accountId,
+    workspaceId,
+    providerKind: "opper",
+  });
+  const retainedUpstreamModelId = retainedProductModelId?.startsWith(
+    WORKSPACE_OPPER_MODEL_ID_PREFIX,
+  )
+    ? retainedProductModelId.slice(WORKSPACE_OPPER_MODEL_ID_PREFIX.length)
+    : null;
+  const retainedCustomModel = retainedUpstreamModelId
+    ? await getWorkspaceProviderCustomModelForExecution(db, {
+        accountId,
+        workspaceId,
+        providerKind: "opper",
+        upstreamModelId: retainedUpstreamModelId,
+      })
+    : null;
+  const customModels =
+    retainedCustomModel &&
+    !activeCustomModels.some(
+      (model) => model.upstreamModelId === retainedCustomModel.upstreamModelId,
+    )
+      ? [...activeCustomModels, retainedCustomModel]
+      : activeCustomModels;
+  const catalogSettings = withWorkspaceOpperCatalogProvider(settings, customModels);
+  const apiKey = await loadWorkspaceOpperApiKey(db, settings, workspaceId, retainedProductModelId);
+  return apiKey
+    ? withWorkspaceOpperCredential(catalogSettings, apiKey, customModels)
+    : catalogSettings;
+}
+
 export async function settingsWithOrganizationProviderCredentials(
   db: Database,
   accountId: string,
@@ -276,7 +323,7 @@ export async function settingsWithOrganizationProviderCredentials(
   retainedProductModelId?: string | null,
 ): Promise<Settings> {
   const buildModels = async (
-    providerKind: "vercel_gateway" | "openrouter" | "anthropic" | "claude_subscription",
+    providerKind: "vercel_gateway" | "openrouter" | "anthropic" | "claude_subscription" | "opper",
     prefix: string,
   ) => {
     const active = await listOrganizationModelProviderCustomModelsForWorkspace(db, {
@@ -314,9 +361,18 @@ export async function settingsWithOrganizationProviderCredentials(
     workspaceId,
     providerKind: "openrouter",
   });
-  let result = openRouterKey
+  const openRouterSettings = openRouterKey
     ? withOrganizationOpenRouterCredential(gatewaySettings, openRouterKey, openRouterModels)
     : withOrganizationOpenRouterCatalogProvider(gatewaySettings, openRouterModels);
+  const opperModels = await buildModels("opper", ORGANIZATION_OPPER_MODEL_ID_PREFIX);
+  const opperKey = await loadOrganizationModelProviderApiKey(db, settings, {
+    accountId,
+    workspaceId,
+    providerKind: "opper",
+  });
+  let result = opperKey
+    ? withOrganizationOpperCredential(openRouterSettings, opperKey, opperModels)
+    : withOrganizationOpperCatalogProvider(openRouterSettings, opperModels);
   for (const kind of CLAUDE_CONNECTION_KINDS) {
     if (kind === "claude_subscription" && !settings.claudeSubscriptionEnabled) continue;
     const models = await buildModels(kind, claudeProviderId(kind) + "/");

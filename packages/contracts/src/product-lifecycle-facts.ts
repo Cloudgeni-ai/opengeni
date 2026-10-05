@@ -60,6 +60,7 @@ export const PRODUCT_LIFECYCLE_FACT_ATTRIBUTES = {
     "openrouter",
     "anthropic",
     "claude_subscription",
+    "opper",
   ],
   /** A credit top-up payment was granted. */
   "credits.purchased": [],

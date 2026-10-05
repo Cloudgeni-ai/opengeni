@@ -517,7 +517,7 @@ function milestoneFinisher({
 
 /** Bind asynchronous provider results to the initiating identity and consent. */
 export function trackModelConnection(
-  provider: "codex" | "supergrok" | "ai-gateway" | "openrouter",
+  provider: "codex" | "supergrok" | "ai-gateway" | "openrouter" | "opper",
   workspaceId: string,
 ): (outcome: "connected" | "expired" | "denied" | "outcome_unknown") => void {
   const generation = identityGeneration;

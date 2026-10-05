@@ -24,6 +24,7 @@ export const ANALYTICS_ACTIONS = [
   "connect_supergrok",
   "connect_ai_gateway",
   "connect_openrouter",
+  "connect_opper",
 ] as const;
 
 export type AnalyticsAction = (typeof ANALYTICS_ACTIONS)[number];

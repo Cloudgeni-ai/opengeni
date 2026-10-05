@@ -85,7 +85,7 @@ as `action` only when it is one of the closed values in `analytics-actions.ts`:
 | `invite_member` | Send invitation in organization People |
 | `buy_credits` | Buy or add credits buttons and links |
 | `connect_model` | Connect a model links |
-| `connect_codex`, `connect_supergrok`, `connect_ai_gateway`, `connect_openrouter` | Provider connect controls in settings and onboarding |
+| `connect_codex`, `connect_supergrok`, `connect_ai_gateway`, `connect_openrouter`, `connect_opper` | Provider connect controls in settings and onboarding |
 
 Clicks are the only signal: pressing Enter to send or Cmd/Ctrl+Enter to steer
 is not a click. Use `session_command_attempted` for message volume.
@@ -120,7 +120,7 @@ vocabulary and UUIDs.
   `bitbucket`, `google`, `microsoft`, `linear`, `atlassian`, `notion`,
   `supabase`, `datadog`, `posthog`, `openai`, `x`, `other`, and the model classes
   `codex`, `supergrok`, `vercel_gateway`, `openrouter`, `anthropic`,
-  `claude_subscription`. Domains and MCP hosts map like the server function
+  `claude_subscription`, `opper`. Domains and MCP hosts map like the server function
   (`mcp.linear.app` is `linear`); custom MCP servers, custom APIs, Fiken and
   Reddit are `other`.
 - `method`: `oauth`, `api_key`, `device_code`, `app_install`, `custom`.
@@ -135,7 +135,7 @@ catalog OAuth, API-key, X/Reddit and Fiken actions (`performCapabilityAction`,
 used by the Plugins page and the in-chat capability card), the Plugins page MCP
 OAuth dialog, custom MCP servers and custom APIs, in-chat reconnect redirects,
 personal GitHub sign-in, Codex and SuperGrok (workspace and organization),
-Vercel AI Gateway, OpenRouter, Anthropic and Claude-subscription keys, Claude
+Vercel AI Gateway, OpenRouter, Opper, Anthropic and Claude-subscription keys, Claude
 subscription sign-in, organization model providers, and the onboarding model
 step. The inline OAuth card in a session (`SessionMcpCapabilityCard`) is not
 covered because it lives in `@opengeni/react`.

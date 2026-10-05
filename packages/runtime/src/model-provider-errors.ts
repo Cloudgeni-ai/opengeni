@@ -34,6 +34,24 @@ export class OrganizationOpenRouterUnavailableError extends Error {
   }
 }
 
+export class WorkspaceOpperUnavailableError extends Error {
+  constructor() {
+    super(
+      "Your Opper model is unavailable: connect or reconnect the workspace Opper key in Settings, then retry.",
+    );
+    this.name = "WorkspaceOpperUnavailableError";
+  }
+}
+
+export class OrganizationOpperUnavailableError extends Error {
+  constructor() {
+    super(
+      "This organization Opper model is unavailable: ask an organization admin to connect or reconnect Opper in Organization settings, then retry.",
+    );
+    this.name = "OrganizationOpperUnavailableError";
+  }
+}
+
 export const UNKNOWN_MODEL_FINISH_REASON_CODE = "provider_unknown_finish_reason";
 
 /**

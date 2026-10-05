@@ -737,7 +737,7 @@ function CodexFooter({
 }
 
 /* ----------------------------------------------------------------------------
-   API-key providers (OpenRouter, Vercel AI Gateway).
+   API-key providers (OpenRouter, Opper, Vercel AI Gateway).
    -------------------------------------------------------------------------- */
 
 export function GatewayDetail({

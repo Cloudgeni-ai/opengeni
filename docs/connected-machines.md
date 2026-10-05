@@ -721,6 +721,33 @@ installations may require their service manager to start the verified canonical
 executable path after the old process exits.
 `opengeni-agent run` is the explicit foreground alternative.
 
+Self-update requires settled accepted work across every connection. Relay pumps,
+PTY child/IO cleanup, blocking native actions, attached-browser commands and
+their original reply transport retain the opening reservation after a waiter or
+connection generation ends. A timeout or disconnected profile does not prove a
+physical command stopped, and the updater never fabricates a consumer ACK.
+Each counted reply carries its transport receipt in the same publication
+command. Success requires empty internal buffers and a flush of that stream;
+losing the stream fails its attached receipt before reconnect. A replacement
+socket cannot prove that the previous reply was sent.
+Controller admission is fenced atomically during its idle proof; failed or
+deferred updates release only their own fence. Missing settlement makes updates
+unavailable for the running process while ordinary work remains usable. Older
+controller builds without the update-admission transaction cannot authorize
+replacement from an unfenced idle snapshot. A lost fence-release reply retains
+its exact operation owner; ordinary scoped recovery retries only that release
+after host update admission has reopened. Failed helper/factory cleanup and
+forced or nonzero helper termination remain unsettled even after the original
+owner leaves active inventory. Helper EOF joins persistent capture producers;
+missing ScreenCaptureKit stop completion cannot become a successful shutdown.
+The current Windows command-group dependency cannot prove full-job
+exit; commands keep their ordinary results, but accepting a command fences
+subsequent self-update for that process. A positive same-job exit proof is
+required before normal Windows update eligibility can be restored. Unexpected
+controller exit and forced controller termination likewise preserve uncertainty
+after the old controller is removed from the active inventory. They cannot be
+made update-eligible by reconnecting or replacing the controller.
+
 Enrollment approval lasts until it is revoked; it is not a monthly login.
 The command and relay transport credentials last 30 days. The agent renews them
 with seven days remaining, using its existing install key and current enrollment

@@ -14,6 +14,78 @@ const computerSessionId = "11111111-1111-4111-8111-111111111111";
 const controllerGeneration = "controller-1";
 
 describe("ComputerDriver", () => {
+  test("does not start helper recovery after a pending read is closed", async () => {
+    const transport = new FixtureNativeTransport();
+    let rejectRead!: (error: Error) => void;
+    let readStarted!: () => void;
+    const started = new Promise<void>((resolve) => {
+      readStarted = resolve;
+    });
+    transport.targets = async () =>
+      await new Promise<ReturnType<typeof target>[]>((_, reject) => {
+        rejectRead = reject;
+        readStarted();
+      });
+    let replacements = 0;
+    const driver = new ComputerDriver({
+      computerSessionId,
+      controllerGeneration,
+      client: transport,
+      clientFactory: async () => {
+        replacements += 1;
+        return new FixtureNativeTransport();
+      },
+    });
+    const outcome = driver.listTargets().then(
+      () => null,
+      (error: unknown) => error,
+    );
+    await started;
+    await driver.close();
+    rejectRead(new Error("native computer helper pipe closed"));
+    expect(await outcome).toMatchObject({ code: "controller_lost" });
+    expect(replacements).toBe(0);
+  });
+
+  test("joins retirement and refuses recovery startup when closing during cleanup", async () => {
+    const transport = new FixtureNativeTransport();
+    transport.targetsError = new Error("native computer helper pipe closed");
+    let releaseRetirement!: () => void;
+    let retired!: () => void;
+    const retirementStarted = new Promise<void>((resolve) => {
+      retired = resolve;
+    });
+    const retirement = new Promise<void>((resolve) => {
+      releaseRetirement = resolve;
+    });
+    transport.close = async () => {
+      retired();
+      await retirement;
+      transport.closed = true;
+    };
+    let replacements = 0;
+    const driver = new ComputerDriver({
+      computerSessionId,
+      controllerGeneration,
+      client: transport,
+      clientFactory: async () => {
+        replacements += 1;
+        return new FixtureNativeTransport();
+      },
+    });
+    const outcome = driver.listTargets().then(
+      () => null,
+      (error: unknown) => error,
+    );
+    await retirementStarted;
+    const closing = driver.close();
+    releaseRetirement();
+    await closing;
+    expect(await outcome).toMatchObject({ code: "controller_lost" });
+    expect(transport.closed).toBe(true);
+    expect(replacements).toBe(0);
+  });
+
   test("rejects continuation before native delivery unless the active helper advertised support", async () => {
     for (const supported of [false, true]) {
       const transport = new FixtureNativeTransport();
@@ -409,6 +481,30 @@ describe("ComputerDriver", () => {
     } finally {
       await driver.close();
     }
+  });
+
+  test("retains failed retired-helper cleanup and does not create a replacement", async () => {
+    const poisoned = new FixtureNativeTransport();
+    poisoned.targetsError = new Error("fixture transport failed");
+    poisoned.close = async () => {
+      throw new Error("fixture helper did not stop");
+    };
+    let factories = 0;
+    const driver = new ComputerDriver({
+      computerSessionId,
+      controllerGeneration,
+      client: poisoned,
+      clientFactory: async () => {
+        factories++;
+        return new FixtureNativeTransport();
+      },
+    });
+    await expect(driver.listTargets()).rejects.toThrow(
+      "retired native computer helper cleanup failed",
+    );
+    expect(factories).toBe(0);
+    await expect(driver.close()).rejects.toThrow("computer driver cleanup failed");
+    await expect(driver.close()).rejects.toThrow("computer driver cleanup failed");
   });
 
   test("fans one native source out to independent concurrent frame profiles", async () => {

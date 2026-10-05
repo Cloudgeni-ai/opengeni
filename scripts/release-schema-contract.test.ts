@@ -2405,6 +2405,8 @@ describe("release schema contract", () => {
       "0633_session_recovery_overdue_age.sql",
       "0634_organization_admin_self_workspace_removal.sql",
       "0635_organization_admin_workspace_member_management.sql",
+      "0636_opper_model_providers.sql",
+      "0637_retained_process_background_owner_inventory.sql",
     ].filter((path) =>
       unfilteredSourceContract.migrations.some((migration) => migration.path === path),
     );

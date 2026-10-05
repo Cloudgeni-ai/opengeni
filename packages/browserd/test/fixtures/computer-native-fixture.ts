@@ -2,6 +2,11 @@ import { createHash } from "node:crypto";
 
 let buffer = Buffer.alloc(0);
 
+process.stdin.on("end", () => {
+  if (process.argv.includes("--ignore-eof")) setInterval(() => {}, 1_000);
+  else if (process.argv.includes("--nonzero-eof")) process.exit(23);
+});
+
 process.stdin.on("data", (chunk: Buffer) => {
   buffer = Buffer.concat([buffer, chunk]);
   while (buffer.byteLength >= 4) {
@@ -22,6 +27,20 @@ async function handle(request: {
   method: string;
   targetId?: string;
 }): Promise<void> {
+  if (request.method === "handshake" && process.argv.includes("--handshake-error")) {
+    write({
+      protocolVersion: 3,
+      requestId: request.requestId,
+      status: "error",
+      error: {
+        code: "driver_failed",
+        message: "fixture handshake rejected",
+        retryable: false,
+        dispatched: false,
+      },
+    });
+    return;
+  }
   if (request.method === "targets") await new Promise((resolve) => setTimeout(resolve, 20));
   if (request.method === "observe" && request.targetId === "missing") {
     write({

@@ -402,10 +402,11 @@ membership uses `code` or an operator-owned database singleton; workspace policy
 connection readiness/permissions, organization assignments, and provider health
 determine selectability; `/v1/config/client` and session create share one
 resolver. Deployment cost policy sets `free`/`credits` independently
-of upstream settlement. Workspace Gateway, OpenRouter, Anthropic API, and Claude
-subscription rows are provider-qualified overlays, separate from deployment
-catalog/billing. `openrouter/*` and `workspace-openrouter/*` retain distinct
-provider/billing identities for identical slugs. Claude setup:
+of upstream settlement. Workspace Gateway, OpenRouter, Opper, Anthropic API, and
+Claude subscription rows are provider-qualified overlays, separate from deployment
+catalog/billing. `openrouter/*` and `workspace-openrouter/*` (likewise `opper/*`,
+`workspace-opper/*`, `organization-opper/*`) retain distinct provider/billing
+identities for identical slugs. Claude setup:
 `apps/api/src/routes/workspace-model-providers.ts`; transport:
 `packages/runtime/src/anthropic-messages.ts`.
 The shared `claudeNativeModelProfile` in `packages/config/src/index.ts` owns
@@ -450,7 +451,18 @@ Agent configuration: `packages/contracts/src/agent-config.ts`; null configs stay
 
 Connected Machines (`selfhosted`) run agents without sandboxes. [Updates](../agent/README.md#distribution)
 fence admission, require idle commands/uploads and owned browser/computer controllers,
-and defer without proof. Mac updates preserve signed bundles and
+and defer without proof. `opengeni-agent-engine::update_drain` owns one process-wide
+reservation boundary. Platform scopes pass existing guards to blocking actions,
+PTY child cleanup, job descendants and relay pumps; generation tasks own only
+waiters. Reply bytes and their receipt enter the transport as one command;
+blocked writes retain the receipt, and losing that connection fails it before
+reconnect. Replies settle on their original transport, and unproved cleanup or
+publication keeps updates unavailable. The attached-browser bridge reserves
+before spawn and retains timed-out commands until matching physical results.
+The private controller update transaction fences new HTTP requests, including
+queued JSON, before the host atomically seals final admission. Operation-result
+retention and consumer-generation acknowledgments remain engine-owned.
+Mac updates preserve signed bundles and
 [ACLs](../agent/TRANSACTIONAL-WRITES.md).
 
 Machines own files, Git auth, environment and [credential renewal](connected-machines.md).
@@ -985,7 +997,7 @@ selections, and keeps plugin/built-in defaults independent.
 `packages/db/src/workspace-tool-defaults.ts` owns persistence. Deployment
 ceilings apply; defaults never rewrite sessions or accepted attempts.
 
-Fresh provider-qualified Gateway/OpenRouter selections recheck the exact active
+Fresh provider-qualified Gateway/OpenRouter/Opper selections recheck the exact active
 slug under the catalog's shared transaction lock before committing a session,
 turn, task, trigger, binding, or occurrence. This covers fresh sessions,
 explicit switches, new/materially reaccepted schedules, automation triggers,
@@ -1131,7 +1143,7 @@ deployment answers it.
 
 Codex/SuperGrok pools preserve logical turns. Shared/Personal workspaces inherit
 same-organization pools as separate allocator boundaries, not access grants.
-SuperGrok freezes scope on acceptance. Vercel AI Gateway/OpenRouter BYOK keys
+SuperGrok freezes scope on acceptance. Vercel AI Gateway/OpenRouter/Opper BYOK keys
 belong to workspaces or organizations; organization keys use encrypted FORCE-RLS,
 inherit into same-organization shared workspaces, retain payer identity, and
 never fall back across rails.
@@ -1248,6 +1260,11 @@ behind a generic 500, so its session lookups run through
 `agent/` is the Cargo workspace for Connected Machine execution and the relay
 edge. `agent/proto/opengeni_agent.proto` is the single wire source, generated to
 Rust and `@opengeni/agent-proto` TypeScript types.
+
+[`agent/vendor/async-nats`](../agent/vendor/async-nats/OPENGENI-PATCH.md) preserves
+the pinned upstream transport with an atomic publication-receipt repair. It is
+a path dependency outside the workspace member set; native CI runs its focused
+transport tests on every supported host.
 
 One agent independently connects multiple deployments/workspaces within shared
 host containment. The relay carries terminal/desktop bytes, never durable session

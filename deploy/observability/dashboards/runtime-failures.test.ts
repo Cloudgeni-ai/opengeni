@@ -19,7 +19,7 @@ describe("runtime failures dashboard", () => {
       "Turn failure and recovery ratios",
       "MCP lifecycle operations",
       "MCP tool calls by outcome",
-      "MCP tool-call p95 by outcome",
+      "MCP tool-call p95 by outcome and tool",
       "Failed startup phases",
       "Logical sandbox provision failures",
       "Sandbox visibility-check failures",

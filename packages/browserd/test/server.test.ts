@@ -39,6 +39,95 @@ const grantedViewToken = `grant.${"g".repeat(48)}`;
 const allowedOrigin = "https://app.opengeni.test";
 
 describe("BrowserControlServer", () => {
+  test("fences new controller work atomically and releases only the owning update", async () => {
+    await withServer(async ({ server, reference }) => {
+      const operationId = randomUUID();
+      const update = async (method: string, id = operationId, token = adminToken) =>
+        await request(server, "/v1/runtime/update", { method, token, body: { operationId: id } });
+      for (const token of [controlToken, viewToken])
+        expect((await update("POST", operationId, token)).status).toBe(401);
+      const proof = await json(await update("POST"));
+      expect(proof.data).toEqual({ idle: true, operationId });
+      const create = async () =>
+        await request(server, "/v1/browser-sessions", {
+          method: "POST",
+          token: adminToken,
+          body: createBody(reference),
+        });
+      expect((await create()).status).toBe(503);
+      expect((await json(await update("POST", randomUUID()))).data.idle).toBe(false);
+      expect((await update("DELETE", randomUUID())).status).toBe(409);
+      expect((await create()).status).toBe(503);
+      expect((await json(await update("DELETE"))).data).toMatchObject({
+        operationId,
+        released: true,
+      });
+      expect((await create()).status).toBe(201);
+      expect((await json(await update("POST"))).data.idle).toBe(false);
+      // A failed idle proof must not prevent accepted work from closing normally.
+      expect(
+        (
+          await request(server, `/v1/browser-sessions/${reference.browserSessionId}/end`, {
+            method: "POST",
+            token: adminToken,
+            body: { controllerGeneration: reference.controllerGeneration, removeState: false },
+          })
+        ).status,
+      ).toBe(200);
+      expect((await json(await update("POST"))).data.idle).toBe(true);
+      await update("DELETE");
+    });
+  });
+
+  test("a create still reading JSON blocks controller update admission", async () => {
+    await withServer(async ({ server, reference }) => {
+      let finishBody: (() => void) | undefined;
+      let beginBody: (() => void) | undefined;
+      const started = new Promise<void>((resolve) => {
+        beginBody = resolve;
+      });
+      const body = JSON.stringify(createBody(reference));
+      const stream = new ReadableStream<Uint8Array>({
+        start(controller) {
+          controller.enqueue(new TextEncoder().encode(body.slice(0, 10)));
+          finishBody = () => {
+            controller.enqueue(new TextEncoder().encode(body.slice(10)));
+            controller.close();
+          };
+          beginBody!();
+        },
+      });
+      const create = fetch(`${server.url}/v1/browser-sessions`, {
+        method: "POST",
+        headers: { authorization: `Bearer ${adminToken}`, "content-type": "application/json" },
+        body: stream,
+      });
+      try {
+        await started;
+        let queued = false;
+        for (let attempt = 0; attempt < 20 && !queued; attempt += 1) {
+          queued = !(await json(await request(server, "/v1/runtime", { token: adminToken }))).data
+            .idle;
+        }
+        expect(queued).toBe(true);
+        // The query shares the same real HTTP server: native in-flight requests
+        // include bodies queued before the supervisor starts constructing a runtime.
+        const operationId = randomUUID();
+        const proof = await json(
+          await request(server, "/v1/runtime/update", {
+            method: "POST",
+            token: adminToken,
+            body: { operationId },
+          }),
+        );
+        expect(proof.data.idle).toBe(false);
+      } finally {
+        finishBody!();
+      }
+      expect((await create).status).toBe(201);
+    });
+  });
+
   test("keeps update idle proof private and includes open browser lifetimes", async () => {
     await withServer(async ({ server, reference }) => {
       for (const token of [undefined, viewToken, controlToken]) {

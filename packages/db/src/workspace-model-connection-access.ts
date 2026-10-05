@@ -9,6 +9,7 @@ import { directModelConnectionSpec, isDirectModelId } from "@opengeni/contracts"
 import {
   VERCEL_AI_GATEWAY_CONNECTION_DOMAIN,
   WORKSPACE_OPENROUTER_CONNECTION_DOMAIN,
+  WORKSPACE_OPPER_CONNECTION_DOMAIN,
 } from "@opengeni/config";
 import type { XaiProviderAccountAuthoritySnapshotV1 } from "@opengeni/contracts";
 import { and, eq, isNull, sql } from "drizzle-orm";
@@ -129,15 +130,16 @@ export async function getWorkspaceConnectionModelRestrictions(
       }>(
         tx,
         sql`
-      SELECT CASE provider_kind WHEN 'vercel_gateway' THEN 'organization-gateway/' WHEN 'anthropic' THEN 'organization-anthropic/' WHEN 'claude_subscription' THEN 'organization-claude-subscription/' ELSE 'organization-openrouter/' END AS prefix,
+      SELECT CASE provider_kind WHEN 'vercel_gateway' THEN 'organization-gateway/' WHEN 'anthropic' THEN 'organization-anthropic/' WHEN 'claude_subscription' THEN 'organization-claude-subscription/' WHEN 'opper' THEN 'organization-opper/' ELSE 'organization-openrouter/' END AS prefix,
         allowed_model_ids AS "allowedModelIds" FROM organization_model_provider_connections WHERE status = 'active' AND provider_kind <> 'claude_subscription'
       UNION ALL
-      SELECT CASE metadata->>'credentialRole' WHEN 'vercel_ai_gateway' THEN 'workspace-gateway/' WHEN 'anthropic' THEN 'workspace-anthropic/' WHEN 'claude_subscription' THEN 'workspace-claude-subscription/' ELSE 'workspace-openrouter/' END,
+      SELECT CASE metadata->>'credentialRole' WHEN 'vercel_ai_gateway' THEN 'workspace-gateway/' WHEN 'anthropic' THEN 'workspace-anthropic/' WHEN 'claude_subscription' THEN 'workspace-claude-subscription/' WHEN 'opper' THEN 'workspace-opper/' ELSE 'workspace-openrouter/' END,
         allowed_model_ids FROM (
         SELECT DISTINCT ON (metadata->>'credentialRole') * FROM connections WHERE workspace_id = ${workspaceId}::uuid AND subject_id IS NULL
         AND kind = 'api_key' AND status = 'active'
         AND ((metadata->>'credentialRole' = 'vercel_ai_gateway' AND lower(provider_domain) = ${VERCEL_AI_GATEWAY_CONNECTION_DOMAIN})
           OR (metadata->>'credentialRole' = 'openrouter' AND lower(provider_domain) = ${WORKSPACE_OPENROUTER_CONNECTION_DOMAIN})
+          OR (metadata->>'credentialRole' = 'opper' AND lower(provider_domain) = ${WORKSPACE_OPPER_CONNECTION_DOMAIN})
           OR (metadata->>'credentialRole' = 'anthropic' AND lower(provider_domain) = 'api.anthropic.com'))
         ORDER BY metadata->>'credentialRole', created_at DESC, id DESC
       ) selected`,
@@ -169,10 +171,12 @@ export async function getWorkspaceConnectionModelRestrictions(
     ),
     "workspace-gateway/": [],
     "workspace-openrouter/": [],
+    "workspace-opper/": [],
     "workspace-anthropic/": [],
     "workspace-claude-subscription/": claudeAuthority.scope === "organization" ? [] : claudeModels,
     "organization-gateway/": [],
     "organization-openrouter/": [],
+    "organization-opper/": [],
     "organization-anthropic/": [],
     "organization-claude-subscription/":
       claudeAuthority.scope === "organization" ? claudeModels : [],
@@ -269,13 +273,15 @@ export async function assertModelConnectionAllowsTurn(
   } else if (
     model.startsWith("organization-gateway/") ||
     model.startsWith("organization-openrouter/") ||
+    model.startsWith("organization-opper/") ||
     model.startsWith("organization-anthropic/")
   ) {
     query = sql`SELECT allowed_model_ids AS models FROM organization_model_provider_connections
-      WHERE provider_kind = ${model.startsWith("organization-gateway/") ? "vercel_gateway" : model.startsWith("organization-anthropic/") ? "anthropic" : model.startsWith("organization-claude-subscription/") ? "claude_subscription" : "openrouter"} AND status = 'active'`;
+      WHERE provider_kind = ${model.startsWith("organization-gateway/") ? "vercel_gateway" : model.startsWith("organization-anthropic/") ? "anthropic" : model.startsWith("organization-claude-subscription/") ? "claude_subscription" : model.startsWith("organization-opper/") ? "opper" : "openrouter"} AND status = 'active'`;
   } else if (
     model.startsWith("workspace-gateway/") ||
     model.startsWith("workspace-openrouter/") ||
+    model.startsWith("workspace-opper/") ||
     model.startsWith("workspace-anthropic/")
   ) {
     const claude =
@@ -283,8 +289,8 @@ export async function assertModelConnectionAllowsTurn(
       model.startsWith("workspace-claude-subscription/");
     query = sql`SELECT allowed_model_ids AS models FROM connections WHERE workspace_id = ${input.workspaceId}::uuid
       AND subject_id IS NULL AND kind = 'api_key' AND status = 'active'
-      AND metadata->>'credentialRole' = ${model.startsWith("workspace-gateway/") ? "vercel_ai_gateway" : model.startsWith("workspace-anthropic/") ? "anthropic" : model.startsWith("workspace-claude-subscription/") ? "claude_subscription" : "openrouter"}
-      AND lower(provider_domain) = ${claude ? "api.anthropic.com" : model.startsWith("workspace-gateway/") ? VERCEL_AI_GATEWAY_CONNECTION_DOMAIN : WORKSPACE_OPENROUTER_CONNECTION_DOMAIN}
+      AND metadata->>'credentialRole' = ${model.startsWith("workspace-gateway/") ? "vercel_ai_gateway" : model.startsWith("workspace-anthropic/") ? "anthropic" : model.startsWith("workspace-claude-subscription/") ? "claude_subscription" : model.startsWith("workspace-opper/") ? "opper" : "openrouter"}
+      AND lower(provider_domain) = ${claude ? "api.anthropic.com" : model.startsWith("workspace-gateway/") ? VERCEL_AI_GATEWAY_CONNECTION_DOMAIN : model.startsWith("workspace-opper/") ? WORKSPACE_OPPER_CONNECTION_DOMAIN : WORKSPACE_OPENROUTER_CONNECTION_DOMAIN}
       ${input.workspaceProviderConnectionId ? sql`AND id = ${input.workspaceProviderConnectionId}::uuid` : sql``}
       ORDER BY created_at DESC, id DESC LIMIT 1`;
   } else return;

@@ -278,6 +278,10 @@
 .og-connect-setup .og-connect-setup-primary:hover:not(:disabled) { background:var(--og-color-primary-hover); }
 .og-connect-setup .og-connect-setup-secondary { display:flex; flex-wrap:wrap; justify-content:space-between; gap:8px; }
 .og-connect-setup .og-connect-setup-secondary button { border:0; min-height:36px; padding:6px 8px; color:var(--og-color-fg-muted,inherit); font-size:12px; }
+.og-connect-setup .og-connect-setup-pending { display:grid; gap:10px; padding:14px 16px; border:1px solid var(--og-color-border,#888); border-radius:10px; background:var(--og-color-surface-1,transparent); color:var(--og-color-fg-muted,inherit); font-size:13px; line-height:1.55; }
+.og-connect-setup .og-connect-setup-pending p { margin:0; }
+.og-connect-setup .og-connect-setup-pending ol { margin:0; padding-left:20px; display:grid; gap:6px; }
+.og-connect-setup .og-connect-setup-hint { margin:0; color:var(--og-color-fg-muted,inherit); font-size:12px; line-height:1.55; }
 
 .og-catalog-more, .og-skill-discovery .og-catalog-more { margin-top:12px; min-height:36px; padding:8px 12px; border:1px solid var(--og-color-border,#888); border-radius:8px; background:var(--og-color-surface-1,transparent); color:inherit; font:inherit; font-size:13px; cursor:pointer; }
 .og-catalog-more:focus-visible { outline:2px solid var(--og-color-accent,currentColor); outline-offset:2px; }

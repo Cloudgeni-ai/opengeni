@@ -207,6 +207,10 @@ import { useFollowUpRepositories } from "@/lib/use-follow-up-repositories";
 import type { ChatSendContext } from "@/components/capabilities/session-github-repositories";
 import { githubAppConnectRequest } from "@/lib/github-app-connect";
 import {
+  clearGitHubInstallRequest,
+  recordGitHubInstallRequest,
+} from "@/lib/github-install-request";
+import {
   useFixedResourceScopes,
   usePersonalResourceAttachment,
 } from "@/lib/use-personal-resource-attachment";
@@ -918,13 +922,24 @@ export function SessionRoute({
   useEffect(() => {
     if (githubReturnHandled.current) return;
     const params = new URLSearchParams(window.location.search);
-    if (params.get("github") !== "connected") return;
+    const outcome = params.get("github");
+    if (outcome !== "connected" && outcome !== "requested") return;
     githubReturnHandled.current = true;
     window.history.replaceState(null, "", window.location.pathname);
+    if (outcome === "requested") {
+      // A non-owner asked their GitHub organization owners to approve the app.
+      recordGitHubInstallRequest(workspaceId);
+      toast.success("Request sent to your GitHub organization owners", {
+        description:
+          "After an owner approves, an owner of the organization connects it here. Your GitHub card updates on its own.",
+      });
+      return;
+    }
+    clearGitHubInstallRequest(workspaceId);
     toast.success("GitHub connected", {
       description: "Repository access is now available to new tool calls in this session.",
     });
-  }, []);
+  }, [workspaceId]);
 
   // Start the recovery flow for a lapsed connection surfaced inline in the
   // timeline. OAuth connections reconnect in place (reuse the connectionId) and

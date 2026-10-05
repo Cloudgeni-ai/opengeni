@@ -175,6 +175,15 @@ const OPENROUTER = catalogModel({
   billing: { upstreamPayer: "workspace", metering: "external" },
 });
 
+const OPPER = catalogModel({
+  id: "workspace-opper/aws/claude-sonnet-4-6-eu",
+  provider: "workspace-opper",
+  providerLabel: "Your Opper",
+  source: undefined,
+  cost: "workspace",
+  billing: { upstreamPayer: "workspace", metering: "external" },
+});
+
 describe("preferredConnectedModelId after a specific connect", () => {
   const catalog = [
     FREE_DEFAULT,
@@ -184,6 +193,7 @@ describe("preferredConnectedModelId after a specific connect", () => {
     SUPERGROK,
     GATEWAY,
     OPENROUTER,
+    OPPER,
   ];
 
   test("the generic order puts any connected service ahead of the free default", () => {
@@ -207,6 +217,9 @@ describe("preferredConnectedModelId after a specific connect", () => {
     expect(preferredConnectedModelId(catalog, "supergrok")).toBe("supergrok/model");
     expect(preferredConnectedModelId(catalog, "vercel_gateway")).toBe("gateway/model");
     expect(preferredConnectedModelId(catalog, "openrouter")).toBe("openrouter-byok/model");
+    expect(preferredConnectedModelId(catalog, "opper")).toBe(
+      "workspace-opper/aws/claude-sonnet-4-6-eu",
+    );
   });
 
   test("a credit purchase prefers the first operator-ordered credits model", () => {

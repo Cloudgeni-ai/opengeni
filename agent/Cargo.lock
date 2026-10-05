@@ -192,8 +192,6 @@ dependencies = [
 [[package]]
 name = "async-nats"
 version = "0.46.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "df5af9ebfb0a14481d3eaf6101e6391261e4f30d25b26a7635ade8a39482ded0"
 dependencies = [
  "base64 0.22.1",
  "bytes",
@@ -1996,7 +1994,7 @@ checksum = "384b8ab6d37215f3c5301a95a4accb5d64aa607f1fcb26a11b5303878451b4fe"
 
 [[package]]
 name = "opengeni-agent"
-version = "0.1.48"
+version = "0.1.49"
 dependencies = [
  "async-nats",
  "async-trait",
@@ -2034,11 +2032,12 @@ version = "0.1.0"
 dependencies = [
  "tempfile",
  "thiserror 2.0.20",
+ "tokio",
 ]
 
 [[package]]
 name = "opengeni-agent-files-ffi"
-version = "0.1.48"
+version = "0.1.49"
 
 [[package]]
 name = "opengeni-agent-harness"
@@ -2063,7 +2062,7 @@ dependencies = [
 
 [[package]]
 name = "opengeni-agent-linux-ffi"
-version = "0.1.48"
+version = "0.1.49"
 dependencies = [
  "libc",
  "tokio",
@@ -2071,7 +2070,7 @@ dependencies = [
 
 [[package]]
 name = "opengeni-agent-macos-ffi"
-version = "0.1.48"
+version = "0.1.49"
 dependencies = [
  "accessibility-sys",
  "block2",
@@ -2090,13 +2089,14 @@ dependencies = [
 
 [[package]]
 name = "opengeni-agent-platform"
-version = "0.1.48"
+version = "0.1.49"
 dependencies = [
  "async-trait",
  "blake3",
  "command-group",
  "image",
  "nix 0.29.0",
+ "opengeni-agent-engine",
  "opengeni-agent-files-ffi",
  "opengeni-agent-linux-ffi",
  "opengeni-agent-macos-ffi",
@@ -2115,7 +2115,7 @@ dependencies = [
 
 [[package]]
 name = "opengeni-agent-proto"
-version = "0.1.48"
+version = "0.1.49"
 dependencies = [
  "prost",
  "prost-build",
@@ -2124,7 +2124,7 @@ dependencies = [
 
 [[package]]
 name = "opengeni-agent-stream"
-version = "0.1.48"
+version = "0.1.49"
 dependencies = [
  "async-trait",
  "bytes",
@@ -2141,7 +2141,7 @@ dependencies = [
 
 [[package]]
 name = "opengeni-agent-update"
-version = "0.1.48"
+version = "0.1.49"
 dependencies = [
  "blake3",
  "hex",
@@ -2161,7 +2161,7 @@ dependencies = [
 
 [[package]]
 name = "opengeni-computer-native"
-version = "0.1.48"
+version = "0.1.49"
 dependencies = [
  "arboard",
  "async-lock",
@@ -2192,7 +2192,7 @@ dependencies = [
 
 [[package]]
 name = "opengeni-relay"
-version = "0.1.48"
+version = "0.1.49"
 dependencies = [
  "async-trait",
  "axum",

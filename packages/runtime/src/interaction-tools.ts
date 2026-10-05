@@ -399,6 +399,9 @@ const BrowserTabsInput = z.discriminatedUnion("operation", [
     })
     .strict(),
 ]);
+const BrowserTabsOutput = BrowserTargetListResponse.safeExtend({
+  mutationObservation: CompactBrowserObservation.optional(),
+});
 
 const BrowserObserveInput = z
   .object({
@@ -795,18 +798,21 @@ export function createInteractionAttemptToolDefinitions(
     codemodePath: ["interaction", "browser", "tabs"],
     title: "Manage browser tabs",
     description:
-      "List, open, logically select, or close tabs in one exact BrowserSession. Selection changes the BrowserSession's default target, not the visible desktop tab. New attached-Chrome tabs open in the background. Use browser_act activate only when foregrounding the owned tab is explicitly intended. Closing a tab does not release the browser process; use browser_lifecycle for session cleanup. Returns the authoritative complete tab list after the operation.",
+      "List, open, logically select, or close tabs in one exact BrowserSession. Selection changes the BrowserSession's default target, not the visible desktop tab. New attached-Chrome tabs open in the background. Use browser_act activate only when foregrounding the owned tab is explicitly intended. Closing a tab does not release the browser process; use browser_lifecycle for session cleanup. Returns the authoritative complete tab list after the operation. Open/select also return mutationObservation, the operation's compact page snapshot. Reuse its refs and generations for immediate actions; refresh after later page changes.",
     input: BrowserTabsInput,
-    output: BrowserTargetListResponse,
+    output: BrowserTabsOutput,
     readOnly: false,
     idempotent: false,
     execute: async (value) => {
+      let mutationObservation: z.infer<typeof BrowserObservation> | undefined;
       if (value.operation === "open") {
-        await input.transport.openBrowserTarget(input.workspaceId, value.browserSessionId, {
-          ...(value.url ? { url: value.url } : {}),
-        });
+        mutationObservation = await input.transport.openBrowserTarget(
+          input.workspaceId,
+          value.browserSessionId,
+          { ...(value.url ? { url: value.url } : {}) },
+        );
       } else if (value.operation === "select") {
-        await input.transport.selectBrowserTarget(
+        mutationObservation = await input.transport.selectBrowserTarget(
           input.workspaceId,
           value.browserSessionId,
           value.targetId,
@@ -818,7 +824,16 @@ export function createInteractionAttemptToolDefinitions(
           value.targetId,
         );
       }
-      return await input.transport.listBrowserTargets(input.workspaceId, value.browserSessionId);
+      const tabs = await input.transport.listBrowserTargets(
+        input.workspaceId,
+        value.browserSessionId,
+      );
+      return mutationObservation
+        ? {
+            ...tabs,
+            mutationObservation: projectBrowserObservation(mutationObservation, "compact"),
+          }
+        : tabs;
     },
   });
 
@@ -989,7 +1004,7 @@ export function createInteractionAttemptToolDefinitions(
     codemodePath: ["interaction", "browser", "act"],
     title: "Act in browser tab",
     description:
-      "Perform one semantic-first browser action or bounded batch. Use viewport to set page width, height, desktop/mobile layout and touch emulation, then check the measured viewport in the returned observation; emulation does not prove physical mobile-browser behavior. Use history back/forward for tab navigation; keypress shortcuts are page input and may not navigate browser history. The explicit activate action foregrounds the target in the user's desktop browser; use only when that is intended. Permission actions set a managed browser's web permission for this tab's exact current top-level origin. Omit generation fences to fetch fresh generation metadata without scanning accessibility; supplying all three fences skips that state read while preserving controller validation. The default receipt includes a compact accessibility view with explicit omissions; set view=full for the complete observation, or view=none when no post-action tree is needed.",
+      "Perform one semantic-first browser action or bounded batch. Prefer action={type:'batch',actions:[...],fenceEachAction:true} for predictable edits in the same observed document, such as filling known form fields before one authorized submit. Pause for new page state, a dialog, or a decision instead of batching steps that depend on an unseen result. Reuse a page observation, when present, from tab open/select or a prior action; browser_open returns only session/tab metadata, so observe when page content is needed. Observe again after page changes or when needed content was omitted. If an action reports outcome_unknown, inspect the outcome and do not replay the batch. Use viewport to set page width, height, desktop/mobile layout and touch emulation, then check the measured viewport in the returned observation; emulation does not prove physical mobile-browser behavior. Use history back/forward for tab navigation; keypress shortcuts are page input and may not navigate browser history. The explicit activate action foregrounds the target in the user's desktop browser; use only when that is intended. Permission actions set a managed browser's web permission for this tab's exact current top-level origin. Omit generation fences to fetch fresh generation metadata without scanning accessibility; supplying all three fences skips that state read while preserving controller validation. The default receipt includes a compact accessibility view with explicit omissions; set view=full for the complete observation, or view=none when no post-action tree is needed.",
     input: BrowserActInput,
     output: BrowserAgentActionReceipt,
     readOnly: false,
@@ -1919,6 +1934,14 @@ function selectAgentNodes(
   };
 }
 
+function projectBrowserObservation(
+  observation: z.infer<typeof BrowserObservation>,
+  view: "compact",
+): z.infer<typeof CompactBrowserObservation>;
+function projectBrowserObservation(
+  observation: z.infer<typeof BrowserObservation>,
+  view: "compact" | "full",
+): z.infer<typeof BrowserAgentObservation>;
 function projectBrowserObservation(
   observation: z.infer<typeof BrowserObservation>,
   view: "compact" | "full",

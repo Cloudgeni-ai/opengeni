@@ -1,4 +1,9 @@
-import { configuredModels, type ResolvedModelProvider, type Settings } from "@opengeni/config";
+import {
+  configuredModels,
+  opperMaxOutputTokens,
+  type ResolvedModelProvider,
+  type Settings,
+} from "@opengeni/config";
 import OpenAI from "openai";
 import { createHash } from "node:crypto";
 import { CODEX_RESPONSE_SDK_OUTER_TIMEOUT_MS, codexSubscriptionFetch } from "@opengeni/codex";
@@ -17,8 +22,10 @@ import type {
 import {
   OrganizationGatewayUnavailableError,
   OrganizationOpenRouterUnavailableError,
+  OrganizationOpperUnavailableError,
   WorkspaceGatewayUnavailableError,
   WorkspaceOpenRouterUnavailableError,
+  WorkspaceOpperUnavailableError,
 } from "./model-provider-errors";
 import {
   azureModelRequestPolicy,
@@ -47,11 +54,12 @@ export function configureRuntimeMetricsHooks(hooks: RuntimeMetricsHooks | null |
 
 export function recordRuntimeMcpToolCallMetric(
   outcome: McpToolCallOutcome,
+  tool: string,
   startedAt: number,
 ): void {
   const durationSeconds = Math.max(0, (performance.now() - startedAt) / 1_000);
   try {
-    runtimeMetricsHooks?.onMcpToolCall?.({ outcome, durationSeconds });
+    runtimeMetricsHooks?.onMcpToolCall?.({ outcome, tool, durationSeconds });
   } catch {
     // Metrics emission must never affect an MCP call or rewrite its result.
   }
@@ -187,6 +195,7 @@ function providerClientCacheKey(
   provider: ResolvedModelProvider,
   settings: Settings,
   gatewayPolicies: ReadonlyMap<string, unknown> | undefined,
+  opperOutputLimits?: ReadonlyMap<string, number>,
 ): string {
   const sortedRecord = (value: Record<string, string> | undefined) =>
     value
@@ -216,6 +225,13 @@ function providerClientCacheKey(
         gatewayPolicies: gatewayPolicies
           ? [...gatewayPolicies.entries()].sort(([left], [right]) => left.localeCompare(right))
           : null,
+        ...(opperOutputLimits
+          ? {
+              opperOutputLimits: [...opperOutputLimits.entries()].sort(([left], [right]) =>
+                left.localeCompare(right),
+              ),
+            }
+          : {}),
         openaiMaxRetries: settings.openaiMaxRetries,
         streamIdlePolicy: modelStreamIdlePolicy(settings, provider),
         builtin:
@@ -318,14 +334,31 @@ export function buildProviderClient(provider: ResolvedModelProvider, settings: S
     provider.kind === "openrouter-managed" ||
     provider.kind === "openrouter-workspace" ||
     provider.kind === "openrouter-organization";
-  const gatewayPolicies = gatewayProvider
+  const opperProvider =
+    provider.kind === "opper-managed" ||
+    provider.kind === "opper-workspace" ||
+    provider.kind === "opper-organization";
+  // Opper reuses the exact-upstream lookup so an unknown slug fails before
+  // network I/O; its entries carry no Gateway route policy.
+  const gatewayPolicies =
+    gatewayProvider || opperProvider
+      ? new Map(
+          configuredModels(settings)
+            .filter((model) => model.providerId === provider.id)
+            .map((model) => [model.upstreamModelId, model.requestPolicy] as const),
+        )
+      : undefined;
+  const opperOutputLimits = opperProvider
     ? new Map(
         configuredModels(settings)
           .filter((model) => model.providerId === provider.id)
-          .map((model) => [model.upstreamModelId, model.requestPolicy] as const),
+          .flatMap((model) => {
+            const limit = opperMaxOutputTokens(settings, model.upstreamModelId);
+            return limit === undefined ? [] : [[model.upstreamModelId, limit] as const];
+          }),
       )
     : undefined;
-  const cacheKey = providerClientCacheKey(provider, settings, gatewayPolicies);
+  const cacheKey = providerClientCacheKey(provider, settings, gatewayPolicies, opperOutputLimits);
   const cached = scopedCredentialProvider ? undefined : providerClientCache.get(cacheKey);
   if (cached) {
     return cached;
@@ -344,14 +377,21 @@ export function buildProviderClient(provider: ResolvedModelProvider, settings: S
     if (provider.kind === "openrouter-workspace") {
       throw new WorkspaceOpenRouterUnavailableError();
     }
+    if (provider.kind === "opper-organization") {
+      throw new OrganizationOpperUnavailableError();
+    }
+    if (provider.kind === "opper-workspace") {
+      throw new WorkspaceOpperUnavailableError();
+    }
     throw new WorkspaceGatewayUnavailableError();
   }
   const anonymousProvider = provider.kind === "anonymous";
-  // Gateway and OpenRouter requests can incur upstream work or charges
-  // before a retryable response failure reaches this process. Neither
-  // transport has a provider idempotency key tied to our durable call,
+  // Gateway, OpenRouter and Opper requests can incur upstream work or charges
+  // before a retryable response failure reaches this process. None of these
+  // transports has a provider idempotency key tied to our durable call,
   // so never let the SDK replay them blindly.
-  const registryMaxRetries = gatewayProvider || openRouterProvider ? 0 : settings.openaiMaxRetries;
+  const registryMaxRetries =
+    gatewayProvider || openRouterProvider || opperProvider ? 0 : settings.openaiMaxRetries;
   const client = provider.builtin
     ? buildOpenAIClientFromSettings(settings, provider.id)
     : provider.kind === "codex-subscription"
@@ -374,7 +414,13 @@ export function buildProviderClient(provider: ResolvedModelProvider, settings: S
             timeout: CODEX_RESPONSE_SDK_OUTER_TIMEOUT_MS,
             fetch: codexSubscriptionFetch(instrumentedModelFetch(provider.id, globalThis.fetch)),
           },
-          { modelRequestPolicy: modelRequestPolicyForProvider(provider, gatewayPolicies) },
+          {
+            modelRequestPolicy: modelRequestPolicyForProvider(
+              provider,
+              gatewayPolicies,
+              opperOutputLimits,
+            ),
+          },
         )
       : provider.kind === "xai-subscription"
         ? // SuperGrok subscription uses one workspace-scoped request context.
@@ -392,7 +438,13 @@ export function buildProviderClient(provider: ResolvedModelProvider, settings: S
               timeout: XAI_RESPONSE_SDK_OUTER_TIMEOUT_MS,
               fetch: xaiSubscriptionFetch(instrumentedModelFetch(provider.id, globalThis.fetch)),
             },
-            { modelRequestPolicy: modelRequestPolicyForProvider(provider, gatewayPolicies) },
+            {
+              modelRequestPolicy: modelRequestPolicyForProvider(
+                provider,
+                gatewayPolicies,
+                opperOutputLimits,
+              ),
+            },
           )
         : // ResolvedModelProvider.apiKey is already the resolved key (configuredProviders
           // ran resolveProviderApiKey at config time, collapsing apiKey/apiKeyEnv), so it
@@ -434,7 +486,13 @@ export function buildProviderClient(provider: ResolvedModelProvider, settings: S
                 ),
               ),
             },
-            { modelRequestPolicy: modelRequestPolicyForProvider(provider, gatewayPolicies) },
+            {
+              modelRequestPolicy: modelRequestPolicyForProvider(
+                provider,
+                gatewayPolicies,
+                opperOutputLimits,
+              ),
+            },
           );
   if (!scopedCredentialProvider) {
     cacheProviderClient(cacheKey, provider.id, client);
