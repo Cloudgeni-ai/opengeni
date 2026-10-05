@@ -141,6 +141,7 @@ import {
 export { renderSessionGoalContext } from "@opengeni/contracts";
 import {
   MCP_MAX_CONCURRENT_SERVER_OPERATIONS,
+  MCP_MAX_RESPONSE_BYTES,
   MCP_MAX_TOOL_RESULT_BYTES,
   McpAggregateToolListBudget,
   assertMcpPayloadWithinBytes,
@@ -5794,6 +5795,7 @@ async function prepareToolGatewayDefinitionsFromServers(
                 attemptToolCallMeta(server.registryId, context, serverIdentity),
                 {
                   ...(context.signal ? { signal: context.signal } : {}),
+                  maxResultBytes: MCP_MAX_RESPONSE_BYTES,
                 },
               );
             const recovery = configuredMcpOperationRecovery(server, toolName);
@@ -8062,7 +8064,17 @@ export class PrefixedMcpServer implements MCPServer {
     unprefixed: string,
     args: Record<string, unknown>,
     meta?: Record<string, unknown> | null,
-    options?: { signal?: AbortSignal },
+    options?: {
+      signal?: AbortSignal;
+      /**
+       * Exact-result bound for a successful provider result. A direct SDK call
+       * hands the result straight to the model, so it keeps the 1 MiB model cap.
+       * The attempt gateway passes the transport cap instead: its per-caller seam
+       * spills an oversized model result to a file, and Codemode receives the
+       * exact result, so a large read must never fail before that seam.
+       */
+      maxResultBytes?: number;
+    },
   ): Promise<AttemptToolResultValue> {
     if (!this.isAllowed(unprefixed)) {
       throw new Error(`MCP tool ${unprefixed} is not allowed for server ${this.registryId}`);
@@ -8133,7 +8145,11 @@ export class PrefixedMcpServer implements MCPServer {
         },
       });
       const result = AttemptToolResult.parse(output);
-      boundedMcpToolResult(result);
+      assertMcpPayloadWithinBytes(
+        result,
+        options?.maxResultBytes ?? MCP_MAX_TOOL_RESULT_BYTES,
+        "MCP tool result",
+      );
       recordOutcome(result.isError === true ? "provider_declared_error" : "success");
       if (unprefixed === "wait_for_input" && result.isError !== true) {
         completeWait?.(true);

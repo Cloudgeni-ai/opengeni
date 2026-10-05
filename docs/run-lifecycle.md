@@ -3383,7 +3383,11 @@ recovery replays the stored bytes. The instructions never contain a clock.
    failure is a bounded `result_too_large` error and never puts the huge payload
    in history.
    Codemode callers skip the 1 MiB cap; the existing 16 MiB journal cap on
-   `session_attempt_codemode_calls` is unchanged. See
+   `session_attempt_codemode_calls` is unchanged. An attempt-gateway MCP result
+   is bounded only by the 8 MiB MCP transport cap before this seam, so a large
+   MCP read spills (or reaches Codemode exactly) instead of failing after the
+   provider already returned it; a direct non-gateway SDK MCP call keeps the
+   1 MiB exact-result bound. See
    `packages/runtime/src/tool-result-spill.ts` and
    `apps/worker/src/activities/agent-turn/tool-result-spill.ts`.
    The same per-caller seam applies model-only projections:
