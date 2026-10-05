@@ -3827,3 +3827,56 @@ describe("ask / run_on / exec collapsed previews", () => {
     await r.unmount();
   });
 });
+
+describe("GenericRenderer — permission Block", () => {
+  test("a blocked connector call reads as a permission decision, not a tool error", async () => {
+    const item = toolItem({
+      name: "mcp_example__read_wiki_structure",
+      arguments: JSON.stringify({ repoName: "example/repo" }),
+      output: {
+        content: [
+          {
+            type: "text",
+            text: "An error occurred while running the tool. Please try again. Error: Connector action was not executed: blocked",
+          },
+        ],
+        isError: true,
+      },
+      status: "complete",
+    });
+    const Renderer = defaultToolRegistry.resolve(item);
+    const r = await renderComponent(<Renderer item={item} />);
+    await flush();
+    const text = r.container.textContent ?? "";
+    expect(text).toContain("Blocked by your permission settings");
+    expect(text).not.toContain("Please try again");
+    expect(text).not.toContain("error");
+    await r.unmount();
+  });
+});
+
+describe("GenericRenderer — uncertain outcome", () => {
+  test("an uncertain connector outcome never invites a blind retry", async () => {
+    const item = toolItem({
+      name: "mcp_example__read_wiki_contents",
+      arguments: JSON.stringify({ repoName: "example/repo" }),
+      output: {
+        content: [
+          {
+            type: "text",
+            text: "An error occurred while running the tool. Please try again. Error: Connector action outcome is uncertain; inspect provider state before retrying",
+          },
+        ],
+        isError: true,
+      },
+      status: "complete",
+    });
+    const Renderer = defaultToolRegistry.resolve(item);
+    const r = await renderComponent(<Renderer item={item} />);
+    await flush();
+    const text = r.container.textContent ?? "";
+    expect(text).toContain("outcome unknown");
+    expect(text).not.toContain("Please try again");
+    await r.unmount();
+  });
+});

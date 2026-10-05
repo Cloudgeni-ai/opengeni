@@ -61,6 +61,12 @@ export type CodemodeDispatcherTimings = {
   claimHeartbeatMs?: number;
 };
 
+const RESUMABLE_STATES: readonly CodemodeOperation["state"][] = [
+  "waiting_for_approval",
+  "queued",
+  "running",
+];
+
 /**
  * Owns the only Codemode execution edge for one exact attempt. NATS carries a
  * wake-up only; the durable row is claimed before any side effect and the call
@@ -190,11 +196,20 @@ export class CodemodeAttemptDispatcher {
     );
   }
 
-  async resumeApproved(
+  /**
+   * Join-on-use recovery before the first model request. The journal read needs
+   * no tool environment, so a turn with nothing unfinished returns at once and
+   * never waits on lazy MCP preparation. Only a stored waiting/queued/running
+   * operation awaits the prepared dispatcher to adopt and execute it.
+   */
+  static async resumeApproved(
+    db: Database,
+    scope: CodemodeDispatcherScope,
     callerSubjectId: string,
-    decisionOperationId?: string,
+    decisionOperationId: string | undefined,
+    prepared: () => Promise<CodemodeAttemptDispatcher | null>,
   ): Promise<CodemodeOperation[]> {
-    const operations = await listTurnCodemodeApprovals(this.db, this.scope);
+    const operations = await listTurnCodemodeApprovals(db, scope);
     if (
       decisionOperationId &&
       // Model-tool approval IDs are opaque strings. Only programmatic UUIDs
@@ -202,15 +217,38 @@ export class CodemodeAttemptDispatcher {
       CodemodeOperation.shape.operationId.safeParse(decisionOperationId).success &&
       !operations.some((operation) => operation.operationId === decisionOperationId)
     ) {
-      const decided = await readTurnCodemodeOperation(this.db, {
-        ...this.scope,
+      const decided = await readTurnCodemodeOperation(db, {
+        ...scope,
         callerSubjectId,
         operationId: decisionOperationId,
       });
       if (decided) operations.push(decided);
     }
+    if (!operations.some((operation) => RESUMABLE_STATES.includes(operation.state))) {
+      return operations;
+    }
+    return (await (await prepared())?.resumeOperations(operations, callerSubjectId)) ?? [];
+  }
+
+  async resumeApproved(
+    callerSubjectId: string,
+    decisionOperationId?: string,
+  ): Promise<CodemodeOperation[]> {
+    return await CodemodeAttemptDispatcher.resumeApproved(
+      this.db,
+      this.scope,
+      callerSubjectId,
+      decisionOperationId,
+      async () => this,
+    );
+  }
+
+  private async resumeOperations(
+    operations: CodemodeOperation[],
+    callerSubjectId: string,
+  ): Promise<CodemodeOperation[]> {
     for (const operation of operations) {
-      if (!["waiting_for_approval", "queued", "running"].includes(operation.state)) continue;
+      if (!RESUMABLE_STATES.includes(operation.state)) continue;
       let effectDigest: string | null = null;
       try {
         effectDigest = this.environment.effectDigest(operation.identity);
@@ -380,7 +418,17 @@ export class CodemodeAttemptDispatcher {
     try {
       if (operation.durableApproval) {
         if (!this.approvalWait) throw new Error("Durable approval yield is unavailable");
-        releaseWait = this.approvalWait.beginWait();
+        // The wait gate is sealed while a model request is in flight or the
+        // stream is settling. A call arriving then cannot durably wait, but it
+        // must not fail outright: prepare it like a non-waiting client, so an
+        // allowed call still executes and an Ask settles approval_required.
+        try {
+          releaseWait = this.approvalWait.beginWait();
+        } catch {
+          releaseWait = undefined;
+        }
+      }
+      if (releaseWait) {
         if (
           !(await bindCodemodePreparation(this.db, {
             ...this.scope,
@@ -407,10 +455,11 @@ export class CodemodeAttemptDispatcher {
         },
         {
           signal,
-          ...(operation.durableApproval ? { transportMeta: { durableApproval: true } } : {}),
+          ...(releaseWait ? { transportMeta: { durableApproval: true } } : {}),
         },
       );
       if (preparedCall.waitingForApproval) {
+        if (!releaseWait) throw new AttemptToolApprovalRequiredError();
         const waiting = await waitForCodemodeApproval(this.db, {
           ...this.scope,
           operationId: operation.operationId,

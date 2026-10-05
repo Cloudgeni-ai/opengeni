@@ -74,9 +74,14 @@ workspace, or selected ones). The connection then acts as that person:
   The person's own role still expands as usual, so Full access reaches
   everything the person can do.
 - Third-party provider sign-in (Codex, SuperGrok and Claude device or OAuth
-  steps, and integration OAuth starts) and actions outside the connected
-  organization (creating another organization, accepting an invitation) stay
-  with the person in the browser; calls return a hint to finish there.
+  steps, and integration OAuth starts) stays with the person in the browser;
+  calls return a hint to finish there. Actions no MCP caller can ever complete
+  because they need the person's own browser session (creating an
+  organization, listing their organization memberships and invitations,
+  accepting an invitation, organization recovery, and confirming an identity
+  link) are marked `browserOnly` in the catalog (`ACTION_CATALOG_BROWSER_ONLY`
+  in `scripts/public-api/action-catalog.ts`): search never returns them, and
+  describe or call answers with the reason without running anything.
   Organization API keys may call the same server and act as the organization.
 - `initialize` advertises `serverInfo` title `Opengeni` and the brand mark as
   MCP `icons` (light and dark SVG data URIs, plus `/icon-512.png` on the public

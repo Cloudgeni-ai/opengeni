@@ -617,7 +617,7 @@ DeepSeek V4 Flash 0731 and Kimi K3 use OpenGeni's provider-neutral lazy-tool
 dispatcher on the Responses wire. Their initial tool block contains the stable
 ordinary `tool_search` and `tool_invoke` schemas, the always-visible base
 runtime tools (`exec_command`, `write_stdin`, `apply_patch`, `view_image`,
-`skill_read`, `request_human_input`, `list_models`, and `code_search` when enabled),
+`skill_read`, `request_human_input`, `list_models`, and `code_search` / provider `web_search` / `web_fetch` when enabled),
 and exact session MCP refs marked
 `eager: true`, never the deferred MCP catalogue or Browser/Computer/`generate_image`/
 `generate_video`/`get_video_generation_capabilities` schemas. A search result carries only bounded
@@ -656,6 +656,13 @@ Completions dispatcher, public `X-Title` / optional `HTTP-Referer` metadata, and
 deployment-owned credentials. Its provider ID is `openrouter`, and product IDs
 use `openrouter/<upstream>`. This deployment rail is independent of any
 workspace-owned OpenRouter connection.
+
+For explicit `anthropic/…` Chat targets on any OpenRouter rail, the request
+adapter moves unsigned historical reasoning into labeled assistant text instead
+of sending it as native thinking. It preserves signed text and encrypted
+reasoning details and leaves stored history unchanged. This also handles older
+non-streamed replies whose reasoning was nested inside text metadata. Other
+Chat targets retain their native reasoning fields.
 
 The reviewed code catalog currently ships one v1 starter:
 
@@ -744,6 +751,16 @@ rewrites the accepted policy or request tier. Removed modes/modalities, changed
 mode support or billing multipliers, and all other executable-definition drift
 remain fail-closed; this path does not compose with historical digest migrations.
 
+Enabling hosted web search on an existing model is tolerated the same way, as a
+separate exception: an accepted policy whose digest reproduces the current
+definition with `capabilities.hostedTools.webSearch` set back to exactly
+`{ upstream: "unknown", runnable: false }` still verifies. That turn keeps its
+frozen tool set on every recovery attempt (no `web_search` is added mid-turn,
+so the tool prefix and the accepted definition stay exact); the next accepted
+logical turn resolves the newly enabled tool. Turning web search off, starting
+from any other web-search declaration, or combining the enablement with any
+other drift (including the latency/input-modality subsets) still fails closed.
+
 Credential identity is also not a conversation-history compatibility boundary.
 Changing the selected Codex or SuperGrok subscription does not rewrite canonical history or
 a saved approval `RunState`. Responses providers receive canonical structured
@@ -753,6 +770,34 @@ after their paired tool results because Chat tool messages accept text only.
 Assistant content omits response-only metadata on the Chat wire; canonical
 history and provider cache extensions stay unchanged. Claude adaptive thinking
 explicitly requests visible summaries.
+
+The shared Chat adapter retains both `reasoning` and `reasoning_content` replies
+as canonical reasoning items and forwards streamed text to the existing thinking
+timeline. Request-local projection restores the original field at assistant-message
+scope, alongside its answer and tool calls. Older replies with reasoning nested
+inside text metadata are recovered at that boundary; output-only `tools` metadata
+is omitted. Structured `reasoning_details` retain their full ordered sequence,
+including signatures/encrypted blocks, through streaming, persistence and Chat
+tool continuation. Only text/summary details enter the thinking timeline;
+consecutive streamed text/summary fragments are assembled into logical blocks,
+while opaque blocks remain separate. Explicit empty detail arrays are preserved.
+Parallel plaintext aliases do not emit a duplicate delta. This behavior is
+shared by configured providers and Chat BYOK routes. See the
+[structured reasoning contract](https://openrouter.ai/docs/guides/best-practices/reasoning-tokens).
+When switching to Responses or native Claude, plaintext Chat reasoning becomes
+labelled historical assistant text; it is not sent as an empty foreign reasoning
+artifact. Responses also omits Chat reply-message metadata from text/refusal
+blocks and nested Chat function envelopes from tool calls. Both adapters apply
+this projection at their request boundary, including SDK-driven continuations.
+Canonical history stays unchanged, so switching back
+to Chat restores its original reasoning field. Native encrypted Responses and
+signed Claude reasoning retain their exact artifacts on their own API. When
+switching API families, their readable summaries become labelled historical
+assistant text; an opaque-only item becomes an unavailable marker. Signatures
+and ciphertext never enter another API's request. Chat also applies the shared
+projection at its adapter boundary, covering SDK-driven continuations.
+Older replies with reasoning only in nested Chat metadata retain that text too;
+newer replies with a separate reasoning item do not duplicate it.
 
 Chat Completions receives one request-local transcript view for
 canonical record types that its SDK converter cannot represent; that view is
@@ -857,6 +902,12 @@ the session uses workspace defaults or an explicit/inherited MCP policy.
 Changing a session's connected or OpenGeni tools therefore cannot silently
 disable web search.
 
+Models without hosted search (Claude, Gemini, DeepSeek, GLM and other
+registry models) can instead receive Opengeni's provider-agnostic `web_search`
+and `web_fetch` function tools when the deployment configures a search
+provider. Hosted search stays the default wherever it exists. See
+[web search](web-search.md).
+
 `tool_search` is a different capability: it searches bounded lazy tool
 schemas (deferred MCP plus every non-MCP function tool outside the
 always-visible base set) so the model can discover them without preloading
@@ -880,7 +931,7 @@ Progressive disclosure is selected explicitly per resolved provider:
 Classification is origin, not transport. The same first-request set is eager on
 every path: the closed non-MCP allowlist (`exec_command`, `write_stdin`,
 `apply_patch`, `view_image`, `skill_read`, `request_human_input`, `list_models`,
-and `code_search` when enabled) plus MCP
+and `code_search` / provider `web_search` / `web_fetch` when enabled) plus MCP
 tools whose session `ToolRef.eager` is true. Every other function tool —
 deferred MCP, Browser/Computer, `generate_image`, `generate_video`,
 `get_video_generation_capabilities`, and later first-party additions — is

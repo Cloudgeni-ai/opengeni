@@ -116,6 +116,25 @@ describe("new chat with its own capabilities", () => {
     });
   });
 
+  test("a draft's own instructions survive restore and save, and are sent with the chat", () => {
+    const restored = sessionDraftFromNewSessionDraftOptions({
+      agent: { instructions: "Ask about the product first." },
+    });
+    expect(restored.agentInstructions).toBe("Ask about the product first.");
+    expect(restored.agentCapabilities).toBeUndefined();
+    expect(newSessionDraftOptionsFromSessionDraft(restored).agent).toEqual({
+      instructions: "Ask about the product first.",
+    });
+    expect(submissionFromSessionDraft(restored).extras.agent).toEqual({
+      instructions: "Ask about the product first.",
+    });
+    const both = { ...restored, agentCapabilities: { from: "none", knowledge: true } as const };
+    expect(submissionFromSessionDraft(both).extras.agent).toEqual({
+      capabilities: { from: "none", knowledge: true },
+      instructions: "Ask about the product first.",
+    });
+  });
+
   test("never names a built-in tool of a capability that is off", () => {
     const draft = {
       ...emptySessionDraft(["goal_set", "knowledge_search", "set_session_title"]),

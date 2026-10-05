@@ -254,3 +254,91 @@ available independently when a provider is ready.
 
 Deprecated host-adapter types remain exported from
 `packages/sdk/src/transcription.ts` for one compatibility release.
+
+## Deployment transcription and credit billing
+
+`OPENGENI_VOICE_INPUT_PROVIDER_ORDER` selects the default before audio is sent.
+For example, `codex-subscription,supergrok-subscription,azure-mai,azure-openai`
+uses a workspace subscription when available, otherwise MAI. Swap the last two
+entries to make GPT Transcribe the deployment default. A recording already
+pinned to a provider keeps that provider. Workspace preferences still apply.
+
+- `azure-openai` uses the versioned Azure OpenAI audio transcription API.
+  Configure `OPENGENI_VOICE_INPUT_AZURE_ENDPOINT`, `DEPLOYMENT`, `API_VERSION`,
+  and `API_KEY` (or `AD_TOKEN`), all with the same prefix. `MODEL` identifies
+  the underlying model for pricing when the deployment has a custom name.
+- `azure-mai` uses Azure Speech's file transcription API. Configure
+  `OPENGENI_VOICE_INPUT_MAI_ENDPOINT` and `API_KEY`; `MODEL` defaults to
+  `MAI-Transcribe-2`, and `API_VERSION` to `2025-10-15`. Browser recordings
+  are decoded with the existing ffmpeg segmenter (bounded to 600 s) when needed. This is file
+  dictation, separate from realtime voice.
+- `OPENGENI_VOICE_INPUT_{OPENAI,AZURE,MAI}_PRICING_JSON` accepts
+  `microsPerMinute`, optional paired `inputMicrosPerMillionTokens` /
+  `outputMicrosPerMillionTokens`, optional `audioInputMicrosPerMillionTokens`,
+  and `marginBps`. Rates are integer USD micros; 500 basis points means 5%.
+  MAI requires an explicit price because offers vary; MAI-Transcribe-2 lists at
+  $0.10 per audio hour, so `{"microsPerMinute":1667,"marginBps":500}` (the
+  same 5% margin as models). OpenAI/Azure have built-in prices for recognized
+  transcription models; override contracted rates.
+
+When Stripe billing or managed usage limits are enabled, deployment-funded
+providers require general credits. Connected subscriptions are never debited.
+Malformed pricing never fails boot (API and workers share this config): the
+affected provider is withheld and the API logs one error per issue at startup
+(`voiceInputPricingIssues`), as it does for a provider with no known price.
+Other configured providers keep serving. Admission checks credits,
+workspace/member allowances and the monthly cost cap before sending audio.
+
+Every deployment-funded call carries a duration the server measured from WAV
+bytes it produced: the resumable segment, or the one-shot upload, which is
+decoded through ffmpeg first with a hard `-t` ceiling one second past
+`OPENGENI_VOICE_INPUT_MAX_DURATION_SECONDS` (longer audio is refused as
+`too_large` before any provider call, never truncated). Provider usage bills
+when the deployment can price it (tokens with token rates, or a reported
+duration); otherwise that server duration bills. Client timing and maximum
+recording limits are never billing quantities. Concurrent admitted calls may
+finish after a balance is exhausted; settlement charges their actual usage.
+
+Once the provider has returned text, the user always receives it. Settlement
+runs after the transcript (a resumable segment's text commits first, on its
+own) and never turns into an error response. It commits a `model.cost` usage
+receipt, then the credit debit, both keyed by workspace + unit id. If the
+debit fails, the receipt is the durable record: the next voice admission in
+that workspace applies the same debit (same idempotency key) before reading the
+balance. Any settlement failure is logged with both idempotency keys and
+retried in-process (2 s, 15 s, 60 s); a failure before the receipt commits is
+recoverable only from that log.
+
+Credit/allowance refusals preserve the recording for manual retry, persist the
+exact refusal code on it, and show a specific message. They do not trigger
+automatic retries. A caller whose payer cannot be attributed is refused with
+`policy_blocked`. Client availability honours the workspace's preferred
+provider and fallback setting; `providers` lists every ready provider for the
+settings picker. Both are scoped to the authorized workspace; unscoped
+bootstrap cannot advertise a connected subscription belonging to another
+workspace.
+
+
+## Hosted realtime voice
+
+Dictation configuration is independent of live voice. Configure
+`OPENGENI_AZURE_LIVE_ENDPOINT`, `OPENGENI_AZURE_LIVE_API_KEY`,
+`OPENGENI_AZURE_LIVE_DEPLOYMENT` (default `gpt-live-1`) and
+`OPENGENI_AZURE_LIVE_VOICE` (default `marin`) to offer GPT Live as the hosted
+voice choice. Existing connected subscriptions and workspace Gateway choices
+remain available. Credentials stay in the API; the browser negotiates WebRTC
+using the ordinary session owner proof.
+
+Azure's timed transcript fragments are grouped into application segments,
+explicitly marked as such in ledger metadata; they are not reported as
+provider-finalized turns. Delegation flushes the preceding transcript before
+starting backend work. Stop and connection rotation drain output before sealing
+or retiring the old ledger connection. Progress uses quiet context; final results
+use speakable context on the current provider delegation ID. Results from a
+previous provider connection become general context after rotation.
+
+The transcription debit rules above apply to dictation only. Hosted live voice
+is credit-gated and billed per started minute of server-observed connection time
+with the same refusal codes; see the realtime section of
+[`run-lifecycle.md`](run-lifecycle.md). Backend delegated model work retains
+normal model billing.

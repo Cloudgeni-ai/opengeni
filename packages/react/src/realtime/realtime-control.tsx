@@ -63,8 +63,25 @@ export type RealtimeModelOption = {
   description: string;
   available: boolean;
   unavailableReason: string | null;
+  /** Machine-readable reason, e.g. `insufficient_credits` (same codes as voice input). */
+  unavailableCode?: string | null | undefined;
   recommended: boolean;
 };
+
+/** Short status label for a credit/availability refusal (shared with the model menu). */
+function realtimeRefusalLabel(code: string | null | undefined): string | null {
+  switch (code) {
+    case "insufficient_credits":
+      return "Out of credits";
+    case "allowance_exhausted":
+    case "monthly_model_cost_limit":
+      return "Usage limit reached";
+    case "realtime_voice_unavailable":
+      return "Voice unavailable";
+    default:
+      return null;
+  }
+}
 
 const CODEX_LIVE_MODEL: RealtimeModelOption = {
   id: "gpt-live-1-boulder-alpha",
@@ -99,6 +116,10 @@ const REALTIME_PROVIDER_META: Record<
   },
   "Your Gateway": { billingClass: "byok", hint: "Billed to your AI Gateway" },
 };
+/** Display name; the catalog's `provider` value stays the wire identifier. */
+function realtimeProviderLabel(provider: RealtimeModelProvider): string {
+  return provider === "OpenGeni" ? "Opengeni" : provider;
+}
 const REALTIME_MODEL_STORAGE_PREFIX = "opengeni:realtime-model";
 const REALTIME_MODEL_CATALOG_CACHE_TTL_MS = 60_000;
 const REALTIME_MODEL_CATALOG_CACHE_MAX_WORKSPACES = 64;
@@ -822,6 +843,7 @@ export function RealtimeVoiceControl(props: {
     props.canStart,
     props.admissionBlocker ?? null,
     selectedModel.label,
+    selectedModel.unavailableCode ?? null,
   );
   const modeOwned = props.snapshot.mode?.state === "active";
   const retryConnection =
@@ -1202,7 +1224,7 @@ export function RealtimeModelPickerMenu(props: {
   const body = props.provider ? (
     <div data-testid="realtime-model-picker-models">
       <PickerBackHeader
-        label={props.provider}
+        label={realtimeProviderLabel(props.provider)}
         icon={
           <BillingClassMark
             billingClass={REALTIME_PROVIDER_META[props.provider].billingClass}
@@ -1245,7 +1267,7 @@ export function RealtimeModelPickerMenu(props: {
         return (
           <PickerNavRow
             key={provider}
-            label={provider}
+            label={realtimeProviderLabel(provider)}
             hint={meta.hint}
             icon={<BillingClassMark billingClass={meta.billingClass} aria-label="" />}
             active={props.selectedModel.provider === provider}
@@ -1333,6 +1355,7 @@ function statusContent(
   canStart: boolean,
   admissionBlocker: string | null,
   modelLabel: string,
+  unavailableCode: string | null = null,
 ): { phase: RealtimeVisualPhase; label: string; detail: string } {
   if (snapshot.audibleOutput === "blocked" && !snapshot.outputMuted) {
     return {
@@ -1379,6 +1402,13 @@ function statusContent(
         detail: "Return to the browser that started it, or wait for that connection to expire.",
       };
     case "error":
+      if (snapshot.refusal) {
+        return {
+          phase: "unavailable",
+          label: realtimeRefusalLabel(snapshot.refusal.code) ?? "Voice unavailable",
+          detail: snapshot.refusal.message,
+        };
+      }
       return {
         phase: "error",
         label: "Voice unavailable",
@@ -1388,7 +1418,7 @@ function statusContent(
       if (!modelAvailable) {
         return {
           phase: "unavailable",
-          label: "Voice model unavailable",
+          label: realtimeRefusalLabel(unavailableCode) ?? "Voice model unavailable",
           detail: admissionBlocker ?? "Choose another voice model.",
         };
       }
@@ -1580,6 +1610,7 @@ function writeRealtimeModelPreference(workspaceId: string, model: SessionRealtim
 
 function isRealtimeModel(value: string | null): value is SessionRealtimeModel {
   return (
+    value === "opengeni-azure/gpt-live-1" ||
     value === "gpt-live-1-boulder-alpha" ||
     value === "opengeni-gateway/openai/gpt-realtime-2.1" ||
     value === "opengeni-gateway/openai/gpt-realtime-mini" ||

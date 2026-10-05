@@ -109,6 +109,7 @@ createSession: ({ initialMessage, idempotencyKey }) => ({
   skills: productSkills,
   tools: [{ kind: "mcp", id: "acme" }],
   sandboxBackend: "none", // pure chat/tool agent: no sandbox to start
+  reasoningEffort: "medium", // faster replies; omit for the deployment default (slower, deeper)
 }),
 ```
 

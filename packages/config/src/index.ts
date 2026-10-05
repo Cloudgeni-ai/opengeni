@@ -1,4 +1,10 @@
 export { managedUserEmailAllowed } from "./managed-user-admission";
+import {
+  parseRealtimeVoicePricingJson,
+  parseRealtimeVoicePricingTableJson,
+} from "./realtime-voice-pricing";
+export * from "./realtime-voice-pricing";
+export * from "./web-search";
 import { EnvCreditPromotionPolicy } from "./credit-promotions";
 export {
   CreditPromotionPolicy,
@@ -408,6 +414,11 @@ const SettingsSchema = z.object({
   delegationSecret: z.string().optional(),
   defaultFirstPartyMcpTools: EnvFirstPartyMcpTools,
   allowedFirstPartyMcpTools: EnvFirstPartyMcpTools,
+  // Deployment fact: the isolated artifact materializer workload runs and
+  // drains export jobs. Without it an export is queued forever, so the export
+  // tools leave the first-party ceiling. Helm sets this from
+  // artifactMaterializer.enabled.
+  artifactMaterializerDeployed: EnvBoolean.default(false),
   // sandbox workspace scoped stream-token HMAC secret (sandbox contract §C.3 / stream-token availability contract).
   // When unset, the API falls back to `delegationSecret` (the same HMAC envelope
   // family, `ogs_` vs `ogd_` prefix). REQUIRED-WHEN-DESKTOP, but the absence of
@@ -725,6 +736,35 @@ const SettingsSchema = z.object({
   voiceInputAzureApiVersion: z.string().optional(),
   voiceInputAzureApiKey: z.string().optional(),
   voiceInputAzureAdToken: z.string().optional(),
+  // Hosted realtime voice is configured independently of dictation.
+  azureLiveEndpoint: z.string().url().optional(),
+  azureLiveApiKey: z.string().optional(),
+  azureLiveDeployment: z.string().default("gpt-live-1"),
+  azureLiveVoice: z.string().default("marin"),
+  // Credit price of deployment-funded live voice (RealtimeVoicePricing JSON).
+  // Required while credit billing is active, otherwise the model is withheld.
+  azureLivePricingJson: z.string().optional(),
+  // Managed AI Gateway live voice prices keyed by upstream model id.
+  aiGatewayRealtimePricingJson: z.string().optional(),
+  // Azure Speech credentials are explicit: a different resource can host MAI.
+  voiceInputMaiEndpoint: z.string().url().optional(),
+  voiceInputMaiApiKey: z.string().optional(),
+  voiceInputMaiApiVersion: z.string().default("2025-10-15"),
+  voiceInputMaiPricingJson: z.string().optional(),
+  voiceInputMaiModel: z.string().default("MAI-Transcribe-2"),
+  // Underlying model of the Azure deployment (for example gpt-4o-transcribe or
+  // whisper). Azure routes by deployment name, so this only selects built-in
+  // pricing and the provider-reported usage shape (Whisper requests
+  // verbose_json so Azure reports the billed audio duration). Defaults to the
+  // deployment name.
+  voiceInputAzureModel: z.string().trim().min(1).max(256).optional(),
+  // Opengeni credit pricing for deployment-funded voice input (`openai`,
+  // `azure-openai`). JSON VoiceInputPricing; overrides the built-in list price
+  // for the configured model. Validated at boot. When credit billing is active
+  // (OPENGENI_BILLING_MODE=stripe or OPENGENI_USAGE_LIMITS_MODE=managed) a
+  // deployment-funded provider without any pricing is not offered at all.
+  voiceInputOpenaiPricingJson: z.string().optional(),
+  voiceInputAzurePricingJson: z.string().optional(),
   // Legacy opt-in for undocumented ChatGPT /backend-api/transcribe. When
   // OPENGENI_CODEX_SUBSCRIPTION_ENABLED is true, Codex STT is included without
   // this flag. Set false and omit codex-subscription from PROVIDER_ORDER to
@@ -847,6 +887,18 @@ const SettingsSchema = z.object({
   // merged with the MCP-server tools (getAllTools = [...mcpTools, ...tools])
   // and the sandbox capability tools, never replacing them.
   webSearchEnabled: EnvBoolean.default(true),
+  // Provider-agnostic web search (`web_search` / `web_fetch` agent tools,
+  // see ./web-search.ts). Inert until a provider is named; validated lazily so
+  // a misconfiguration withholds the tools instead of failing boot.
+  webSearchProvider: z.string().optional(),
+  webSearchApiKey: z.string().optional(),
+  webSearchBaseUrl: z.string().optional(),
+  webFetchProvider: z.string().optional(),
+  webFetchApiKey: z.string().optional(),
+  webFetchBaseUrl: z.string().optional(),
+  webSearchProviderMode: z.string().optional(),
+  webSearchPricingJson: z.string().optional(),
+  webSearchRequestTimeoutMs: z.coerce.number().int().positive().max(120_000).default(20_000),
   // Jev (TypeSafe's fast judge model) for worker-side agent tools. Without a
   // usable key every Jev-backed feature is off. The key stays on the server
   // (API and worker) and never reaches a sandbox or Connected Machine.
@@ -1665,16 +1717,28 @@ export function personalGitHubOAuthCallbackUrl(publicBaseUrl: string | undefined
 export type VoiceInputProviderId =
   | "openai"
   | "azure-openai"
+  | "azure-mai"
   | "codex-subscription"
   | "supergrok-subscription";
 
 export type VoiceInputProviderConfig =
+  | {
+      id: "azure-mai";
+      kind: "azure-mai";
+      pricing: VoiceInputPricing | null;
+      endpoint: string;
+      apiKey: string;
+      apiVersion: string;
+      model: string;
+    }
   | {
       id: "openai";
       kind: "openai";
       apiKey: string;
       baseUrl: string;
       model: string;
+      /** Deployment-funded: Opengeni pays upstream and charges credits. */
+      pricing: VoiceInputPricing | null;
     }
   | {
       id: "azure-openai";
@@ -1684,6 +1748,10 @@ export type VoiceInputProviderConfig =
       apiVersion: string;
       apiKey: string | null;
       adToken: string | null;
+      /** Underlying model (pricing + response shape); defaults to the deployment name. */
+      model: string;
+      /** Deployment-funded: Opengeni pays upstream and charges credits. */
+      pricing: VoiceInputPricing | null;
     }
   | {
       id: "codex-subscription";
@@ -1707,10 +1775,7 @@ export function usableJevApiKey(settings: Pick<Settings, "jevApiKey">): string |
 
 /** Deployment half of agent configuration: hard capability limits. */
 export function agentConfigDeploymentPolicy(
-  settings: Pick<
-    Settings,
-    "webSearchEnabled" | "defaultFirstPartyMcpTools" | "allowedFirstPartyMcpTools"
-  >,
+  settings: FirstPartyMcpToolPolicySettings & Pick<Settings, "webSearchEnabled">,
 ): AgentConfigDeploymentLimits {
   return agentConfigDeploymentLimitsFromAllowlist(
     resolveFirstPartyMcpToolPolicy(settings).allowed,
@@ -1767,6 +1832,58 @@ export function isUsableVoiceInputSecret(value: string | null | undefined): valu
  * whether at least one non-experimental (or probed experimental) provider exists.
  */
 export function resolveVoiceInputProviderRegistry(settings: Settings): VoiceInputProviderConfig[] {
+  return voiceInputProviderRegistryWithIssues(settings).providers;
+}
+
+/** Why a credentialed deployment-funded voice provider is withheld. */
+export type VoiceInputPricingIssue = {
+  providerId: "openai" | "azure-openai" | "azure-mai";
+  env: string;
+  reason: "malformed" | "unpriced";
+  message: string;
+};
+
+/**
+ * Pricing problems that withhold a credentialed deployment-funded provider.
+ * A malformed PRICING_JSON never fails boot (workers share this config and
+ * must not crash-loop over a voice-only setting); the API logs each issue
+ * once at startup and the provider stays unavailable.
+ */
+export function voiceInputPricingIssues(settings: Settings): VoiceInputPricingIssue[] {
+  return voiceInputProviderRegistryWithIssues(settings).issues;
+}
+
+function voiceInputProviderPricing(
+  settings: Settings,
+  issues: VoiceInputPricingIssue[],
+  providerId: VoiceInputPricingIssue["providerId"],
+  env: string,
+  raw: string | undefined,
+  model: string,
+): { usable: true; pricing: VoiceInputPricing | null } | { usable: false } {
+  const resolved = safeResolveVoiceInputPricing(raw, model, env);
+  if (!resolved.ok) {
+    issues.push({ providerId, env, reason: "malformed", message: resolved.error });
+    return { usable: false };
+  }
+  if (!resolved.pricing && voiceInputCreditBillingActive(settings)) {
+    // Never serve unpriced deployment-paid audio on a credit-billed deployment.
+    issues.push({
+      providerId,
+      env,
+      reason: "unpriced",
+      message: `${env} is required: credit billing is active and model "${model}" has no built-in voice price`,
+    });
+    return { usable: false };
+  }
+  return { usable: true, pricing: resolved.pricing };
+}
+
+function voiceInputProviderRegistryWithIssues(settings: Settings): {
+  providers: VoiceInputProviderConfig[];
+  issues: VoiceInputPricingIssue[];
+} {
+  const issues: VoiceInputPricingIssue[] = [];
   const order = settings.voiceInputProviderOrder
     .split(",")
     .map((part) => part.trim())
@@ -1774,6 +1891,7 @@ export function resolveVoiceInputProviderRegistry(settings: Settings): VoiceInpu
       (part): part is VoiceInputProviderId =>
         part === "openai" ||
         part === "azure-openai" ||
+        part === "azure-mai" ||
         part === "codex-subscription" ||
         part === "supergrok-subscription",
     );
@@ -1782,6 +1900,32 @@ export function resolveVoiceInputProviderRegistry(settings: Settings): VoiceInpu
   for (const id of order) {
     if (seen.has(id)) continue;
     seen.add(id);
+    if (id === "azure-mai") {
+      if (
+        !settings.voiceInputMaiEndpoint ||
+        !isUsableVoiceInputSecret(settings.voiceInputMaiApiKey)
+      )
+        continue;
+      const priced = voiceInputProviderPricing(
+        settings,
+        issues,
+        "azure-mai",
+        "OPENGENI_VOICE_INPUT_MAI_PRICING_JSON",
+        settings.voiceInputMaiPricingJson,
+        settings.voiceInputMaiModel,
+      );
+      if (!priced.usable) continue;
+      providers.push({
+        id,
+        kind: "azure-mai",
+        pricing: priced.pricing,
+        endpoint: settings.voiceInputMaiEndpoint.replace(/\/+$/, ""),
+        apiKey: settings.voiceInputMaiApiKey,
+        apiVersion: settings.voiceInputMaiApiVersion,
+        model: settings.voiceInputMaiModel,
+      });
+      continue;
+    }
     if (id === "openai") {
       if (!settings.voiceInputOpenaiEnabled) continue;
       const apiKey = settings.voiceInputOpenaiApiKey ?? settings.openaiApiKey;
@@ -1795,9 +1939,19 @@ export function resolveVoiceInputProviderRegistry(settings: Settings): VoiceInpu
       ) {
         continue;
       }
+      const priced = voiceInputProviderPricing(
+        settings,
+        issues,
+        "openai",
+        "OPENGENI_VOICE_INPUT_OPENAI_PRICING_JSON",
+        settings.voiceInputOpenaiPricingJson,
+        settings.voiceInputOpenaiModel,
+      );
+      if (!priced.usable) continue;
       providers.push({
         id: "openai",
         kind: "openai",
+        pricing: priced.pricing,
         apiKey,
         baseUrl: (
           settings.voiceInputOpenaiBaseUrl ??
@@ -1840,6 +1994,17 @@ export function resolveVoiceInputProviderRegistry(settings: Settings): VoiceInpu
       ) {
         continue;
       }
+      const model = settings.voiceInputAzureModel ?? deployment;
+      const priced = voiceInputProviderPricing(
+        settings,
+        issues,
+        "azure-openai",
+        "OPENGENI_VOICE_INPUT_AZURE_PRICING_JSON",
+        settings.voiceInputAzurePricingJson,
+        model,
+      );
+      if (!priced.usable) continue;
+      const pricing = priced.pricing;
       providers.push({
         id: "azure-openai",
         kind: "azure-openai",
@@ -1848,6 +2013,8 @@ export function resolveVoiceInputProviderRegistry(settings: Settings): VoiceInpu
         apiVersion,
         apiKey: isUsableVoiceInputSecret(apiKey) ? apiKey : null,
         adToken: isUsableVoiceInputSecret(adToken) ? adToken : null,
+        model,
+        pricing,
       });
       continue;
     }
@@ -1874,7 +2041,251 @@ export function resolveVoiceInputProviderRegistry(settings: Settings): VoiceInpu
       });
     }
   }
-  return providers;
+  return { providers, issues };
+}
+
+/**
+ * Opengeni credit price for one deployment-funded transcription provider.
+ * Rates are upstream list prices in integer USD micros; `marginBps` (500 =
+ * +5%) is added on top, exactly like model pricing. `microsPerMinute` prices
+ * provider-reported audio duration (Whisper, `usage.type: "duration"`) and is
+ * a server-measured WAV duration when provider usage is absent. Token
+ * rates price `usage.type: "tokens"` (gpt-4o-transcribe family); `input`
+ * covers text input tokens and, unless `audioInput` is set, audio tokens.
+ */
+export type VoiceInputPricing = {
+  microsPerMinute: number;
+  inputMicrosPerMillionTokens?: number | undefined;
+  audioInputMicrosPerMillionTokens?: number | undefined;
+  outputMicrosPerMillionTokens?: number | undefined;
+  marginBps?: number | undefined;
+};
+
+const VoiceInputPricingSchema = z
+  .object({
+    microsPerMinute: z.number().int().positive().max(100_000_000),
+    inputMicrosPerMillionTokens: z.number().int().nonnegative().max(1_000_000_000).optional(),
+    audioInputMicrosPerMillionTokens: z.number().int().nonnegative().max(1_000_000_000).optional(),
+    outputMicrosPerMillionTokens: z.number().int().nonnegative().max(1_000_000_000).optional(),
+    marginBps: z.number().int().min(0).max(100_000).optional(),
+  })
+  .strict()
+  .superRefine((pricing, ctx) => {
+    const input = pricing.inputMicrosPerMillionTokens !== undefined;
+    const output = pricing.outputMicrosPerMillionTokens !== undefined;
+    if (input !== output) {
+      ctx.addIssue({
+        code: "custom",
+        message: "inputMicrosPerMillionTokens and outputMicrosPerMillionTokens are set together",
+      });
+    }
+    if (pricing.audioInputMicrosPerMillionTokens !== undefined && !input) {
+      ctx.addIssue({
+        code: "custom",
+        message: "audioInputMicrosPerMillionTokens requires the token input/output rates",
+      });
+    }
+  });
+
+/**
+ * Built-in list prices (OpenAI API pricing, "Transcription models" table)
+ * plus the default 5% Opengeni margin used for model pricing. Azure Global
+ * Standard deployments use the same list prices; set the provider
+ * PRICING_JSON when a deployment's contracted or regional price differs.
+ */
+export const defaultVoiceInputPricing: Readonly<Record<string, VoiceInputPricing>> = {
+  // Audio tokens are listed separately from text tokens on the model pages;
+  // set explicitly so the audio rate never silently follows a text-rate edit.
+  "gpt-4o-transcribe": {
+    microsPerMinute: 6_000,
+    inputMicrosPerMillionTokens: 2_500_000,
+    audioInputMicrosPerMillionTokens: 2_500_000,
+    outputMicrosPerMillionTokens: 10_000_000,
+    marginBps: 500,
+  },
+  "gpt-4o-transcribe-diarize": {
+    microsPerMinute: 6_000,
+    inputMicrosPerMillionTokens: 2_500_000,
+    audioInputMicrosPerMillionTokens: 2_500_000,
+    outputMicrosPerMillionTokens: 10_000_000,
+    marginBps: 500,
+  },
+  "gpt-4o-mini-transcribe": {
+    microsPerMinute: 3_000,
+    inputMicrosPerMillionTokens: 1_250_000,
+    audioInputMicrosPerMillionTokens: 1_250_000,
+    outputMicrosPerMillionTokens: 5_000_000,
+    marginBps: 500,
+  },
+  "gpt-transcribe": { microsPerMinute: 4_500, marginBps: 500 },
+  whisper: { microsPerMinute: 6_000, marginBps: 500 },
+  "whisper-1": { microsPerMinute: 6_000, marginBps: 500 },
+};
+
+/** Lowercased model with a dated snapshot suffix (`-2025-03-20`) removed. */
+export function canonicalVoiceInputModel(model: string): string {
+  return model
+    .trim()
+    .toLowerCase()
+    .replace(/-\d{4}-\d{2}-\d{2}$/, "");
+}
+
+/** Whisper reports its billed audio duration only in `verbose_json`. */
+export function voiceInputModelReportsDurationOnly(model: string): boolean {
+  return canonicalVoiceInputModel(model).startsWith("whisper");
+}
+
+/** Parse one provider pricing JSON. Throws a configuration error when malformed. */
+export function parseVoiceInputPricingJson(
+  raw: string | undefined,
+  env = "voice-input pricing JSON",
+): VoiceInputPricing | null {
+  if (raw === undefined || raw.trim() === "") return null;
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(raw);
+  } catch {
+    throw new Error(`${env} must be valid JSON`);
+  }
+  const result = VoiceInputPricingSchema.safeParse(parsed);
+  if (!result.success) {
+    throw new Error(
+      `${env} is invalid: ${result.error.issues.map((issue) => issue.message).join("; ")}`,
+    );
+  }
+  return result.data;
+}
+
+/** Explicit provider pricing JSON wins; otherwise the built-in list price for the model. */
+export function resolveVoiceInputPricing(
+  raw: string | undefined,
+  model: string,
+): VoiceInputPricing | null {
+  return (
+    parseVoiceInputPricingJson(raw) ??
+    defaultVoiceInputPricing[canonicalVoiceInputModel(model)] ??
+    null
+  );
+}
+
+/** Non-throwing {@link resolveVoiceInputPricing} for registry resolution. */
+export function safeResolveVoiceInputPricing(
+  raw: string | undefined,
+  model: string,
+  env?: string,
+): { ok: true; pricing: VoiceInputPricing | null } | { ok: false; error: string } {
+  let explicit: VoiceInputPricing | null;
+  try {
+    explicit = parseVoiceInputPricingJson(raw, env);
+  } catch (error) {
+    return { ok: false, error: error instanceof Error ? error.message : String(error) };
+  }
+  return {
+    ok: true,
+    pricing: explicit ?? defaultVoiceInputPricing[canonicalVoiceInputModel(model)] ?? null,
+  };
+}
+
+/** Same predicate as model/credit limits: credit balance and debits are enforced. */
+export function voiceInputCreditBillingActive(
+  settings: Pick<Settings, "billingMode" | "usageLimitsMode">,
+): boolean {
+  return settings.billingMode === "stripe" || settings.usageLimitsMode === "managed";
+}
+
+/** Provider-reported transcription usage, normalized. Never client-reported. */
+export type VoiceInputUsage =
+  | {
+      kind: "tokens";
+      inputTokens: number;
+      audioInputTokens: number;
+      textInputTokens: number;
+      outputTokens: number;
+    }
+  | { kind: "duration"; seconds: number };
+
+export type VoiceInputCost = {
+  /** Upstream list cost before margin, rounded up to whole micros. */
+  providerCostMicros: number;
+  /** Opengeni credit price after margin, rounded up to whole micros. */
+  creditCostMicros: number;
+};
+
+/** True when token usage can be priced exactly. */
+export function voiceInputPricingHasTokenRates(pricing: VoiceInputPricing): boolean {
+  return (
+    pricing.inputMicrosPerMillionTokens !== undefined &&
+    pricing.outputMicrosPerMillionTokens !== undefined
+  );
+}
+
+/**
+ * Exact integer credit math. Token usage needs token rates; duration usage
+ * uses `microsPerMinute` at millisecond resolution. Both round up once, after
+ * summing, so a positive use never becomes a free debit.
+ */
+export function calculateVoiceInputCost(
+  pricing: VoiceInputPricing,
+  usage: VoiceInputUsage,
+): VoiceInputCost {
+  let numerator: bigint;
+  let denominator: bigint;
+  if (usage.kind === "tokens") {
+    if (
+      pricing.inputMicrosPerMillionTokens === undefined ||
+      pricing.outputMicrosPerMillionTokens === undefined
+    ) {
+      throw new Error("voice-input token usage requires token pricing");
+    }
+    for (const value of [
+      usage.inputTokens,
+      usage.audioInputTokens,
+      usage.textInputTokens,
+      usage.outputTokens,
+    ]) {
+      if (!Number.isSafeInteger(value) || value < 0) {
+        throw new Error("voice-input token usage must be non-negative integers");
+      }
+    }
+    const audioRate =
+      pricing.audioInputMicrosPerMillionTokens ?? pricing.inputMicrosPerMillionTokens;
+    // Input tokens the provider did not attribute are priced as audio (never cheaper).
+    const unattributed = Math.max(
+      0,
+      usage.inputTokens - usage.audioInputTokens - usage.textInputTokens,
+    );
+    numerator =
+      BigInt(usage.audioInputTokens + unattributed) * BigInt(audioRate) +
+      BigInt(usage.textInputTokens) * BigInt(pricing.inputMicrosPerMillionTokens) +
+      BigInt(usage.outputTokens) * BigInt(pricing.outputMicrosPerMillionTokens);
+    denominator = 1_000_000n;
+  } else {
+    if (!Number.isFinite(usage.seconds) || usage.seconds < 0) {
+      throw new Error("voice-input duration must be a non-negative number of seconds");
+    }
+    numerator = BigInt(Math.ceil(usage.seconds * 1_000)) * BigInt(pricing.microsPerMinute);
+    denominator = 60_000n;
+  }
+  const margin = BigInt(10_000 + (pricing.marginBps ?? 0));
+  const provider = (numerator + denominator - 1n) / denominator;
+  const scaled = denominator * 10_000n;
+  const credit = (numerator * margin + scaled - 1n) / scaled;
+  if (credit > BigInt(Number.MAX_SAFE_INTEGER)) {
+    throw new Error("voice-input cost exceeds the supported billing range");
+  }
+  return { providerCostMicros: Number(provider), creditCostMicros: Number(credit) };
+}
+
+/**
+ * Deployment-funded providers that have credentials but are withheld because
+ * credit billing is active and no price is known. The API logs these (and
+ * malformed pricing, see {@link voiceInputPricingIssues}) once at startup so
+ * an operator sees why voice input stayed unavailable.
+ */
+export function unpricedVoiceInputProviders(settings: Settings): VoiceInputProviderId[] {
+  return voiceInputPricingIssues(settings).flatMap((issue) =>
+    issue.reason === "unpriced" ? [issue.providerId] : [],
+  );
 }
 
 /** True when the deployment has at least one supported (non-experimental) provider. */
@@ -3487,6 +3898,7 @@ export function getSettings(source: NodeJS.ProcessEnv = process.env): Settings {
     delegationSecret: optional("OPENGENI_DELEGATION_SECRET"),
     defaultFirstPartyMcpTools: optional("OPENGENI_DEFAULT_FIRST_PARTY_MCP_TOOLS"),
     allowedFirstPartyMcpTools: optional("OPENGENI_ALLOWED_FIRST_PARTY_MCP_TOOLS"),
+    artifactMaterializerDeployed: optional("OPENGENI_ARTIFACT_MATERIALIZER_DEPLOYED"),
     streamTokenSecret: optional("OPENGENI_STREAM_TOKEN_SECRET"),
     streamControlEnabled: optional("OPENGENI_STREAM_CONTROL_ENABLED"),
     workDiscoveryEnabled: optional("OPENGENI_WORK_DISCOVERY_ENABLED"),
@@ -3614,6 +4026,20 @@ export function getSettings(source: NodeJS.ProcessEnv = process.env): Settings {
     voiceInputAzureApiVersion: optional("OPENGENI_VOICE_INPUT_AZURE_API_VERSION"),
     voiceInputAzureApiKey: optional("OPENGENI_VOICE_INPUT_AZURE_API_KEY"),
     voiceInputAzureAdToken: optional("OPENGENI_VOICE_INPUT_AZURE_AD_TOKEN"),
+    azureLiveEndpoint: optional("OPENGENI_AZURE_LIVE_ENDPOINT"),
+    azureLiveApiKey: optional("OPENGENI_AZURE_LIVE_API_KEY"),
+    azureLiveDeployment: optional("OPENGENI_AZURE_LIVE_DEPLOYMENT"),
+    azureLiveVoice: optional("OPENGENI_AZURE_LIVE_VOICE"),
+    azureLivePricingJson: optional("OPENGENI_AZURE_LIVE_PRICING_JSON"),
+    aiGatewayRealtimePricingJson: optional("OPENGENI_AI_GATEWAY_REALTIME_PRICING_JSON"),
+    voiceInputMaiEndpoint: optional("OPENGENI_VOICE_INPUT_MAI_ENDPOINT"),
+    voiceInputMaiApiKey: optional("OPENGENI_VOICE_INPUT_MAI_API_KEY"),
+    voiceInputMaiApiVersion: optional("OPENGENI_VOICE_INPUT_MAI_API_VERSION"),
+    voiceInputMaiPricingJson: optional("OPENGENI_VOICE_INPUT_MAI_PRICING_JSON"),
+    voiceInputMaiModel: optional("OPENGENI_VOICE_INPUT_MAI_MODEL"),
+    voiceInputAzureModel: optional("OPENGENI_VOICE_INPUT_AZURE_MODEL"),
+    voiceInputOpenaiPricingJson: optional("OPENGENI_VOICE_INPUT_OPENAI_PRICING_JSON"),
+    voiceInputAzurePricingJson: optional("OPENGENI_VOICE_INPUT_AZURE_PRICING_JSON"),
     voiceInputCodexExperimentalEnabled: optional("OPENGENI_VOICE_INPUT_CODEX_EXPERIMENTAL"),
     modelPricingJson: optional("OPENGENI_MODEL_PRICING_JSON"),
     modelCatalogSource,
@@ -3644,6 +4070,15 @@ export function getSettings(source: NodeJS.ProcessEnv = process.env): Settings {
     openaiReasoningEncryptedContent: optional("OPENGENI_OPENAI_REASONING_ENCRYPTED_CONTENT"),
     openaiMaxRetries: optional("OPENGENI_OPENAI_MAX_RETRIES"),
     webSearchEnabled: optional("OPENGENI_WEB_SEARCH_ENABLED"),
+    webSearchProvider: optional("OPENGENI_WEB_SEARCH_PROVIDER"),
+    webSearchApiKey: optional("OPENGENI_WEB_SEARCH_API_KEY"),
+    webSearchBaseUrl: optional("OPENGENI_WEB_SEARCH_BASE_URL"),
+    webFetchProvider: optional("OPENGENI_WEB_FETCH_PROVIDER"),
+    webFetchApiKey: optional("OPENGENI_WEB_FETCH_API_KEY"),
+    webFetchBaseUrl: optional("OPENGENI_WEB_FETCH_BASE_URL"),
+    webSearchProviderMode: optional("OPENGENI_WEB_SEARCH_PROVIDER_MODE"),
+    webSearchPricingJson: optional("OPENGENI_WEB_SEARCH_PRICING_JSON"),
+    webSearchRequestTimeoutMs: optional("OPENGENI_WEB_SEARCH_REQUEST_TIMEOUT_MS"),
     jevApiKey: optional("OPENGENI_JEV_API_KEY"),
     jevBaseUrl: optional("OPENGENI_JEV_BASE_URL"),
     jevModel: optional("OPENGENI_JEV_MODEL"),
@@ -3983,13 +4418,35 @@ export type FirstPartyMcpToolPolicy = {
   allowed: FirstPartyMcpToolNameType[];
 };
 
+export type FirstPartyMcpToolPolicySettings = Pick<
+  Settings,
+  "defaultFirstPartyMcpTools" | "allowedFirstPartyMcpTools" | "artifactMaterializerDeployed"
+>;
+
+const EDITABLE_ARTIFACT_EXPORT_TOOLS: readonly FirstPartyMcpToolNameType[] = [
+  "editable_artifact_export",
+  "editable_artifact_export_status",
+];
+
+/**
+ * First-party tools whose backing workload this deployment does not run. They
+ * are absent from the ceiling (never offered) and an explicit request for one
+ * is dropped rather than rejected: it is a deployment fact, not a caller error.
+ */
+export function deploymentUnavailableFirstPartyMcpTools(
+  settings: Pick<Settings, "artifactMaterializerDeployed">,
+): ReadonlySet<FirstPartyMcpToolNameType> {
+  return new Set(settings.artifactMaterializerDeployed ? [] : EDITABLE_ARTIFACT_EXPORT_TOOLS);
+}
+
 /** Resolve the deployment's session-tool defaults and hard execution ceiling. */
 export function resolveFirstPartyMcpToolPolicy(
-  settings: Pick<Settings, "defaultFirstPartyMcpTools" | "allowedFirstPartyMcpTools">,
+  settings: FirstPartyMcpToolPolicySettings,
 ): FirstPartyMcpToolPolicy {
+  const unavailable = deploymentUnavailableFirstPartyMcpTools(settings);
   const allowed = currentAgentLearningToolSelection(
     settings.allowedFirstPartyMcpTools ?? [...FIRST_PARTY_MCP_TOOL_NAMES],
-  ).filter((tool) => !isRetiredNativeAtlassianTool(tool));
+  ).filter((tool) => !isRetiredNativeAtlassianTool(tool) && !unavailable.has(tool));
   const allowedSet = new Set(allowed);
   const defaults = currentAgentLearningToolSelection(
     settings.defaultFirstPartyMcpTools ?? [...DEFAULT_FIRST_PARTY_MCP_TOOLS],
@@ -4002,7 +4459,7 @@ export function resolveFirstPartyMcpToolPolicy(
 
 /** Apply the deployment ceiling to an existing durable session selection. */
 export function allowedFirstPartyMcpToolsForSession(
-  settings: Pick<Settings, "defaultFirstPartyMcpTools" | "allowedFirstPartyMcpTools">,
+  settings: FirstPartyMcpToolPolicySettings,
   selected: readonly FirstPartyMcpToolNameType[] | null | undefined,
 ): FirstPartyMcpToolNameType[] {
   const policy = resolveFirstPartyMcpToolPolicy(settings);
@@ -5424,6 +5881,71 @@ function matchesAdditiveCapabilityDefinitionVersion(
   return false;
 }
 
+/** The one pre-enablement hosted web-search declaration an operator may upgrade from. */
+function webSearchPreEnablementState(): CapabilityStateV1 {
+  return { upstream: "unknown", runnable: false };
+}
+
+function matchesWebSearchEnablementDefinitionVersion(
+  model: ConfiguredModel,
+  provider: ResolvedModelProvider,
+  policy: TurnExecutionPolicyV1,
+): boolean {
+  // An operator turning on hosted web search for an existing model changes
+  // only capabilities.hostedTools.webSearch from the exact unknown/off
+  // declaration to a runnable one. Reconstruct that single historical
+  // declaration and require every other current field to reproduce the frozen
+  // digest; never ignore the digest. Turning web search off, or changing any
+  // other capability, still fails closed. Do not compose this with the
+  // latency/input-modality subsets or the wire-profile, implicit-caching, or
+  // Claude-accounting migration exceptions.
+  if (!model.capabilities.hostedTools.webSearch.runnable) return false;
+  const { definitionVersion: _definitionVersion, ...modelWithoutVersion } = model;
+  const capabilities = {
+    ...model.capabilities,
+    hostedTools: { ...model.capabilities.hostedTools, webSearch: webSearchPreEnablementState() },
+  };
+  return (
+    policy.definitionVersion ===
+    definitionVersionFor({ ...modelWithoutVersion, capabilities }, provider)
+  );
+}
+
+/**
+ * The executable model an accepted turn runs: the current definition, except
+ * that a turn frozen before hosted web search was enabled keeps its frozen
+ * tool set (no web_search) on every recovery attempt. Only the next accepted
+ * logical turn resolves the newly enabled tool. Call only with a policy that
+ * already passed assertTurnExecutionPolicyMatchesConfigV1.
+ */
+export function configuredModelForAcceptedTurnExecutionPolicy(
+  model: ConfiguredModel,
+  provider: ResolvedModelProvider,
+  policy: TurnExecutionPolicyV1,
+): ConfiguredModel {
+  if (
+    policy.definitionVersion === model.definitionVersion ||
+    // Runtime test doubles may resolve a partial shape; a model without a
+    // runnable web-search declaration has nothing to withhold.
+    model.capabilities?.hostedTools?.webSearch?.runnable !== true ||
+    !matchesWebSearchEnablementDefinitionVersion(model, provider, policy)
+  ) {
+    return model;
+  }
+  return {
+    ...model,
+    capabilities: {
+      ...model.capabilities,
+      hostedTools: {
+        ...model.capabilities.hostedTools,
+        webSearch: webSearchPreEnablementState(),
+      },
+    },
+    hostedWebSearch: false,
+    definitionVersion: policy.definitionVersion,
+  };
+}
+
 /**
  * The built-in provider's stable id: "openai" on the OpenAI platform, "azure"
  * on Azure. Exported because the workspace model-policy gate must attribute
@@ -6243,7 +6765,8 @@ export function assertTurnExecutionPolicyMatchesConfigV1(
     parsed.definitionVersion === legacyImplicitOpenAiDefinitionVersion ||
     parsed.definitionVersion ===
       legacyCodexAstraImplicitCachingDefinitionVersionFor(resolved.model, resolved.provider) ||
-    matchesAdditiveCapabilityDefinitionVersion(resolved.model, resolved.provider, parsed);
+    matchesAdditiveCapabilityDefinitionVersion(resolved.model, resolved.provider, parsed) ||
+    matchesWebSearchEnablementDefinitionVersion(resolved.model, resolved.provider, parsed);
   const identityMismatched =
     parsed.providerId !== resolved.provider.id ||
     parsed.upstreamModelId !== resolved.model.upstreamModelId ||
@@ -6258,7 +6781,11 @@ export function assertTurnExecutionPolicyMatchesConfigV1(
   if (!definitionVersionMatches && !legacyClaudeAccountingMatches) {
     throw new TurnExecutionPolicyDefinitionMismatchError();
   }
-  return { policy: parsed, provider: resolved.provider, model: resolved.model };
+  return {
+    policy: parsed,
+    provider: resolved.provider,
+    model: configuredModelForAcceptedTurnExecutionPolicy(resolved.model, resolved.provider, parsed),
+  };
 }
 
 /**
@@ -7576,6 +8103,28 @@ export function parseIntegrationsOauthClientsJson(
   return out;
 }
 
+/**
+ * The operator-registered client for one authorization server, matched by
+ * exact issuer/URL key first and then trailing-slash-insensitively. The OAuth
+ * start flow and the connector catalog's connectability projection share this
+ * so a catalog row is offered exactly when a start would find a client.
+ */
+export function findIntegrationsOauthClient(
+  configured: Readonly<Record<string, IntegrationOAuthClientConfig>>,
+  candidates: readonly string[],
+): IntegrationOAuthClientConfig | null {
+  const normalize = (value: string) => value.replace(/\/+$/, "");
+  for (const key of new Set(candidates.flatMap((candidate) => [candidate, normalize(candidate)]))) {
+    const entry = configured[key];
+    if (entry) return entry;
+  }
+  const normalizedCandidates = new Set(candidates.map(normalize));
+  for (const [key, entry] of Object.entries(configured)) {
+    if (normalizedCandidates.has(normalize(key))) return entry;
+  }
+  return null;
+}
+
 export const SocialOAuthClientConfigSchema = z.object({
   clientId: z.string().min(1),
   clientSecret: z.string().min(1).optional(),
@@ -8370,6 +8919,14 @@ function validateSettings(settings: Settings, source: NodeJS.ProcessEnv = proces
     );
   }
   parseExposedPorts(settings.dockerExposedPorts);
+  // Malformed voice-input pricing deliberately does not fail boot: every
+  // process shares this config, and a voice-only typo must not crash-loop
+  // workers. The provider is withheld and the API logs voiceInputPricingIssues.
+  parseRealtimeVoicePricingJson(settings.azureLivePricingJson, "OPENGENI_AZURE_LIVE_PRICING_JSON");
+  parseRealtimeVoicePricingTableJson(
+    settings.aiGatewayRealtimePricingJson,
+    "OPENGENI_AI_GATEWAY_REALTIME_PRICING_JSON",
+  );
   sandboxEnvironmentVariableNames(settings);
   sandboxLifecycleHookIds(settings);
   // Fail fast on a malformed warm-rate table (P2.1).

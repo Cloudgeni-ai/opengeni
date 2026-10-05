@@ -7,7 +7,11 @@ import {
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
 import type { Transport } from "@modelcontextprotocol/sdk/shared/transport.js";
-import { parseIntegrationsOauthClientsJson, type Settings } from "@opengeni/config";
+import {
+  findIntegrationsOauthClient,
+  parseIntegrationsOauthClientsJson,
+  type Settings,
+} from "@opengeni/config";
 import {
   OAuthStartResponse,
   selectCanonicalPersonalSlackConnection,
@@ -1799,7 +1803,6 @@ function operatorClientEntryFor(
   settings: Settings,
   candidates: string[],
 ): ReturnType<typeof parseIntegrationsOauthClientsJson>[string] | null {
-  const normalizedCandidates = new Set(candidates.map(normalizedIssuerKey));
   const candidateOrigins = candidates.flatMap((candidate) => {
     try {
       return [new URL(candidate).origin];
@@ -1816,22 +1819,10 @@ function operatorClientEntryFor(
       return resolved;
     }
   }
-  const configured = parseIntegrationsOauthClientsJson(settings.integrationsOauthClientsJson);
-  const exactKeys = uniqueStrings(
-    candidates.flatMap((candidate) => [candidate, normalizedIssuerKey(candidate)]),
+  return findIntegrationsOauthClient(
+    parseIntegrationsOauthClientsJson(settings.integrationsOauthClientsJson),
+    candidates,
   );
-  for (const key of exactKeys) {
-    const entry = configured[key];
-    if (entry) {
-      return entry;
-    }
-  }
-  for (const [key, entry] of Object.entries(configured)) {
-    if (normalizedCandidates.has(normalizedIssuerKey(key))) {
-      return entry;
-    }
-  }
-  return null;
 }
 
 /** Secret-free readiness for the exact registered client used by Gmail setup. */
@@ -2708,6 +2699,7 @@ async function verifyMcpToolsListNonFatal(
       providerIdentity = local.validateIdentity(payload);
       const verifiedTools = local.toolsForScopes(
         grantedScopes(token.scopeText, state.authorizeScopes, profile),
+        settings,
       );
       if (local.required && verifiedTools.length === 0)
         throw new Error("Connector verification did not report an authorized tool scope");

@@ -5293,6 +5293,7 @@ export const sessionRealtimeModes = pgTable(
     modelValid: check(
       "session_realtime_modes_model_check",
       sql`${table.model} in (
+        'opengeni-azure/gpt-live-1',
         'gpt-live-1-boulder-alpha',
         'supergrok/grok-voice-think-fast-2.0',
         'opengeni-gateway/openai/gpt-realtime-2.1',

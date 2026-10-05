@@ -1,5 +1,5 @@
 import type { AccessGrant } from "@opengeni/contracts";
-import type { Settings } from "@opengeni/config";
+import { allowedFirstPartyMcpToolsForSession, type Settings } from "@opengeni/config";
 import { requireSession, requireWorkspace, type Database } from "@opengeni/db";
 import { settingsWithEnabledCapabilityMcpServers } from "./capabilities";
 import {
@@ -44,6 +44,10 @@ export async function freezeSessionRealtimeConnectionAccounts(input: {
       (await requireWorkspace(db, workspaceId)).settings,
     ),
   });
+  const effectiveFirstPartyTools = allowedFirstPartyMcpToolsForSession(
+    settings,
+    session.firstPartyMcpTools,
+  );
   return await freezeConnectionAccounts({
     db,
     settings: runtimeSettings,
@@ -54,8 +58,8 @@ export async function freezeSessionRealtimeConnectionAccounts(input: {
     source: personalConnectionDelegationSourceForGrant(grant),
     targetSessionId: sessionId,
     googleDrivePublicationEnabled:
-      session.firstPartyMcpTools.includes("editable_artifact_export") &&
-      session.firstPartyMcpTools.includes("editable_artifact_export_status") &&
+      effectiveFirstPartyTools.includes("editable_artifact_export") &&
+      effectiveFirstPartyTools.includes("editable_artifact_export_status") &&
       (!session.firstPartyMcpPermissions?.length ||
         (session.firstPartyMcpPermissions.includes("artifacts:read") &&
           session.firstPartyMcpPermissions.includes("artifacts:publish"))),

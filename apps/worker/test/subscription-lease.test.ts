@@ -1,4 +1,4 @@
-import { expect, test } from "bun:test";
+import { expect, spyOn, test } from "bun:test";
 import type { TurnCredentialLeaseDeps } from "../src/activities/agent-turn/credential-leases";
 import {
   SubscriptionTurnLease,
@@ -157,7 +157,6 @@ test.each(["released", "lost", "different_turn"] as const)(
 );
 
 test("Claude participates in the shared serving lease with its exact scoped holder fence", async () => {
-  const { spyOn } = await import("bun:test");
   const db = await import("@opengeni/db");
   const { createTurnCredentialLeases } =
     await import("../src/activities/agent-turn/credential-leases");
@@ -198,6 +197,7 @@ test("Claude participates in the shared serving lease with its exact scoped hold
     expect(xai).not.toHaveBeenCalled();
     expect(leases.servingLost()).toBe(false);
     heartbeat.mockResolvedValue(null);
+    leases.claude.confirmedUntilMs = performance.now() + 10_000;
     await leases.renewServing("runtime_event");
     expect(leases.servingLost()).toBe(true);
     expect(() => leases.claude.assertUsable()).toThrow(
@@ -206,5 +206,155 @@ test("Claude participates in the shared serving lease with its exact scoped hold
   } finally {
     heartbeat.mockRestore();
     xai.mockRestore();
+  }
+});
+
+test("a runtime-event and model-usage burst reuses its fresh lease confirmation", async () => {
+  let calls = 0;
+  const f = fixture(async () => {
+    calls++;
+    return new Date();
+  });
+  await f.lease.renew("runtime_event");
+  const deadline = f.lease.confirmedUntilMs;
+  for (let event = 0; event < 100; event++) {
+    await f.lease.renew(event % 2 === 0 ? "runtime_event" : "model_usage");
+    f.lease.assertUsable();
+  }
+  expect(calls).toBe(1);
+  expect(f.lease.confirmedUntilMs).toBe(deadline);
+  expect(f.renewed).toEqual(["runtime_event"]);
+});
+
+test("acquisition confirms a lease until the renewal cadence is due", async () => {
+  let calls = 0;
+  const f = fixture(async () => {
+    calls++;
+    return new Date();
+  });
+  f.lease.confirmedUntilMs = 200;
+  await f.lease.renew("runtime_event");
+  f.time(119);
+  await f.lease.renew("model_usage");
+  expect(calls).toBe(0);
+  expect(f.lease.confirmedUntilMs).toBe(200);
+  f.time(120);
+  await f.lease.renew("runtime_event");
+  expect(calls).toBe(1);
+  expect(f.lease.confirmedUntilMs).toBe(220);
+});
+
+test("failed renewal retries at the next checkpoint without moving its confirmation", async () => {
+  const error = new Error("fixture outage");
+  let calls = 0;
+  const f = fixture(async () => {
+    calls++;
+    if (calls === 2) throw error;
+    return new Date();
+  });
+  await f.lease.renew("runtime_event");
+  f.time(120);
+  await f.lease.renew("timer");
+  expect(f.errors).toEqual([error]);
+  expect(f.lease.confirmedUntilMs).toBe(200);
+  await f.lease.renew("model_usage");
+  expect(calls).toBe(3);
+  expect(f.lease.confirmedUntilMs).toBe(220);
+  expect(f.renewed).toEqual(["runtime_event", "model_usage"]);
+});
+
+test("expiry is checked before coalescing or joining an in-flight renewal", async () => {
+  let finish!: (value: Date) => void;
+  const f = fixture(
+    () =>
+      new Promise((resolve) => {
+        finish = resolve;
+      }),
+  );
+  const pending = f.lease.renew("timer");
+  f.time(150);
+  await f.lease.renew("runtime_event");
+  expect(f.lost).toEqual(["deadline"]);
+  finish(new Date());
+  await pending;
+  expect(f.renewed).toEqual([]);
+  expect(f.lease.confirmedUntilMs).toBe(150);
+});
+
+test("a replacement holder uses its own acquisition deadline and identity", async () => {
+  const identities: unknown[] = [];
+  const f = fixture(async (identity) => {
+    identities.push(identity);
+    return new Date();
+  });
+  await f.lease.renew("runtime_event");
+  Object.assign(f.lease, { holderId: "replacement", generation: 3, confirmedUntilMs: 210 });
+  f.turn("replacement-turn");
+  f.time(120);
+  await f.lease.renew("model_usage");
+  expect(identities).toHaveLength(1);
+  f.time(130);
+  await f.lease.renew("model_usage");
+  expect(identities[1]).toEqual({
+    turnId: "replacement-turn",
+    holderId: "replacement",
+    generation: 3,
+  });
+});
+
+test("the independent 60-second timer renews a quiet production-TTL lease", async () => {
+  const timer = { unref() {} };
+  const interval = spyOn(globalThis, "setInterval").mockReturnValue(
+    timer as unknown as ReturnType<typeof setInterval>,
+  );
+  const clear = spyOn(globalThis, "clearInterval").mockImplementation(() => {});
+  let clock = 0;
+  let calls = 0;
+  const lease = new SubscriptionTurnLease({
+    ttlMs: 300_000,
+    getTurnId: () => "quiet-turn",
+    now: () => clock,
+    heartbeat: async () => {
+      calls++;
+      return new Date();
+    },
+    onLost: () => {
+      throw new Error("unexpected lease loss");
+    },
+    onError: (error) => {
+      throw error;
+    },
+    lostError: (reason) => new Error(reason),
+  });
+  Object.assign(lease, {
+    held: true,
+    holderId: "quiet-holder",
+    generation: 1,
+    confirmedUntilMs: 300_000,
+  });
+  try {
+    lease.startHeartbeat();
+    lease.startHeartbeat();
+    expect(interval).toHaveBeenCalledTimes(1);
+    expect(interval.mock.calls[0]?.[1]).toBe(60_000);
+    const tick = interval.mock.calls[0]?.[0] as () => void;
+    clock = 60_000;
+    tick();
+    await Promise.resolve();
+    expect(calls).toBe(1);
+    expect(lease.confirmedUntilMs).toBe(360_000);
+    clock = 120_000;
+    tick();
+    await Promise.resolve();
+    expect(calls).toBe(2);
+    expect(lease.confirmedUntilMs).toBe(420_000);
+    lease.stopHeartbeat();
+    lease.stopHeartbeat();
+    expect(clear).toHaveBeenCalledTimes(1);
+    expect(clear).toHaveBeenCalledWith(timer);
+  } finally {
+    lease.stopHeartbeat();
+    interval.mockRestore();
+    clear.mockRestore();
   }
 });

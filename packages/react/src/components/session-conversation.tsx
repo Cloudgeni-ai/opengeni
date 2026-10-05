@@ -1,4 +1,10 @@
-import { SESSION_SCOPE_HEADER, type SendMessageInput } from "@opengeni/sdk";
+import {
+  resolveWorkspaceVoiceInputEnabled,
+  SESSION_SCOPE_HEADER,
+  type ClientVoiceInputConfig,
+  type OpenGeniClient,
+  type SendMessageInput,
+} from "@opengeni/sdk";
 import {
   lazy,
   Suspense,
@@ -7,6 +13,7 @@ import {
   useMemo,
   useRef,
   useState,
+  type ComponentProps,
   type CSSProperties,
 } from "react";
 import type { SiteSnapshotClient } from "./artifacts/chat-interactive-block";
@@ -20,9 +27,18 @@ import { useComposer } from "../hooks/use-composer";
 import { useHumanInputRequests } from "../hooks/use-human-input";
 import { useFileAttachments } from "../hooks/use-file-attachments";
 import { useSessionControl } from "../hooks/use-session-control";
+import { useGoal, type UseGoalOptions } from "../hooks/use-goal";
+import { useClientConfigFlags } from "../hooks/use-client-config-flags";
+import {
+  createSessionRetainedScreenshotLoader,
+  createWorkspaceRetainedArtifactLoader,
+  createWorkspaceRetainedVideoLoader,
+} from "../timeline/retained-loaders";
+import { useRealtimeVoiceModels } from "../hooks/use-realtime-voice-models";
 import { projectPendingApprovals } from "../approvals";
 import { ApprovalSurface } from "./approval-surface";
 import { ChatComposer, type ChatComposerProps } from "./chat-composer";
+import type { ComposerTranscriptionControlProps } from "./composer-transcription-control";
 import { SessionChrome } from "./session-chrome";
 import { HumanInputSurface, type HumanInputSurfaceProps } from "./human-input-surface";
 import { MessageTimeline, type MessageTimelineProps } from "./message-timeline";
@@ -50,11 +66,14 @@ export type SessionConversationLabels = {
   retry: string;
   /** Action when the conversation could not load at all. */
   tryAgain: string;
+  /** Shown in place of a Site preview when the session proxy does not serve Sites. */
+  sitePreviewUnavailable: string;
 };
 
 const DEFAULT_CONVERSATION_LABELS: SessionConversationLabels = {
   retry: "Retry",
   tryAgain: "Try again",
+  sitePreviewUnavailable: "Site preview unavailable",
 };
 
 export type SessionConversationProps = ClientOverride &
@@ -76,9 +95,16 @@ export type SessionConversationProps = ClientOverride &
      */
     onOpenArtifact?: ((target: OpenGeniViewerTarget) => void) | undefined;
     /**
+     * Open another session the conversation points at: a sub-agent's chat from
+     * its worker card or a child update. `OpenGeniChat` opens it in place;
+     * without it those entries are not links.
+     */
+    onOpenSession?: ((sessionId: string) => void) | undefined;
+    /**
      * Inline previews for assistant `opengeni-site` / `opengeni-html` fences.
-     * Defaults to the OpenGeni preview (Site reads need the proxy's
-     * `artifacts` option); `false` shows the fence as code.
+     * Defaults to the OpenGeni preview. Behind a session proxy without its
+     * `artifacts` option, Sites show as unavailable without a request; `false`
+     * shows the fence as code.
      */
     renderInteractiveBlock?: MessageTimelineProps["renderInteractiveBlock"] | false;
     /** Product-specific tool-call renderers; defaults to the built-in registry. */
@@ -95,6 +121,18 @@ export type SessionConversationProps = ClientOverride &
      * appears only when the deployment's client config enables file uploads.
      */
     attachments?: boolean | undefined;
+    /**
+     * Composer microphone (dictation into the draft). Defaults to true; it
+     * appears only when the client config reports voice input available
+     * (`createSessionProxyHandler({ voiceInput: false })` turns it off).
+     */
+    voiceInput?: boolean | undefined;
+    /**
+     * Live speech-to-speech voice in the composer. Defaults to true; the voice
+     * button appears only when the workspace offers an available voice model
+     * and the proxy has not turned it off (`realtimeVoice: false`).
+     */
+    realtimeVoice?: boolean | undefined;
     /**
      * Show the model/reasoning picker. End users of an embedded product rarely
      * choose models, so it is hidden unless this is `true` or the client config
@@ -134,11 +172,22 @@ export type SessionConversationProps = ClientOverride &
  * (including Site clients), one shared event feed, and authoritative queue state.
  * `<SessionConversation baseUrl="/api/opengeni" sessionId={id} />` needs no
  * provider: it talks to your session proxy and its resolved workspace. */
-export function SessionConversation({ baseUrl, ...props }: SessionConversationProps) {
+export function SessionConversation({
+  baseUrl,
+  headers,
+  fetch,
+  ...props
+}: SessionConversationProps) {
   if (baseUrl === undefined) return <RetryingConversation {...props} />;
-  const { client: _client, workspaceId, ...rest } = props;
+  const { client, workspaceId, ...rest } = props;
   return (
-    <SessionProxyScope baseUrl={baseUrl} workspaceId={workspaceId}>
+    <SessionProxyScope
+      baseUrl={baseUrl}
+      workspaceId={workspaceId}
+      client={client}
+      headers={headers}
+      fetch={fetch}
+    >
       <RetryingConversation {...rest} />
     </SessionProxyScope>
   );
@@ -161,11 +210,14 @@ function Conversation({
   renderMessageText,
   resolveLink,
   onOpenArtifact,
+  onOpenSession,
   renderInteractiveBlock,
   toolRegistry,
   renderAllowanceExhausted,
   allowanceExhaustedLabels,
   attachments: attachmentsRequested = true,
+  voiceInput: voiceInputRequested = true,
+  realtimeVoice: realtimeVoiceRequested = true,
   modelPicker,
   modelPickerProps,
   userMessageDisclosureLabels,
@@ -227,6 +279,14 @@ function Conversation({
     context.client,
     context.workspaceId,
     sessionId,
+    config.artifacts,
+    labelOverrides?.sitePreviewUnavailable ?? DEFAULT_CONVERSATION_LABELS.sitePreviewUnavailable,
+  );
+  const retainedLoaders = useRetainedLoaders(context.client, context.workspaceId, sessionId);
+  const transcription = useComposerTranscription(
+    context.client,
+    context.workspaceId,
+    voiceInputRequested && !importedArchive ? config.voiceInput : null,
   );
   const inheritedLinks = useOpenGeniLinkResolver();
   const defaultLinks = useMemo(
@@ -267,6 +327,30 @@ function Conversation({
     if (feed.error) void feed.jumpToLatest();
   };
   const running = status === "running" || status === "recovering" || status === "waiting_capacity";
+  const voiceModels = useRealtimeVoiceModels(
+    context.client,
+    context.workspaceId,
+    realtimeVoiceRequested && config.realtimeVoice && !importedArchive,
+  );
+  const [voiceActive, setVoiceActive] = useState(false);
+  const voiceControl =
+    composer.effectiveControl ?? queue.effectiveControl ?? detail.session?.effectiveControl;
+  const voice =
+    voiceModels.length > 0 && status && !terminal && voiceControl ? (
+      <Suspense fallback={null}>
+        <LazyEmbeddedRealtimeVoice
+          client={context.client}
+          workspaceId={context.workspaceId}
+          models={voiceModels}
+          sessionId={sessionId}
+          sessionStatus={status}
+          effectiveControl={voiceControl}
+          events={feed.events}
+          eventsReady={!feed.initialLoading}
+          onVoiceActiveChange={setVoiceActive}
+        />
+      </Suspense>
+    ) : null;
   return (
     <div
       className={cn(
@@ -325,6 +409,8 @@ function Conversation({
           // Isolated and clipped: floating navigation stays inside the timeline.
           className="isolate min-h-0 flex-1 overflow-hidden"
           {...(toolRegistry ? { toolRegistry } : {})}
+          {...retainedLoaders}
+          {...(onOpenSession ? { onOpenSession } : {})}
           events={feed.events}
           items={conversationTimeline(feed.timeline, queue, composer)}
           turnSummary={{ rolling: true }}
@@ -383,18 +469,24 @@ function Conversation({
               autoFocus={false}
               decisionButtons
             />
-            {terminal ? (
-              <SessionChrome queue={queue} sessionStatus={status} readOnly />
-            ) : (
-              <SessionChrome
-                queue={queue}
-                composer={composer}
-                sessionStatus={status}
-                onComposerFocus={() =>
-                  region.current?.querySelector<HTMLTextAreaElement>("textarea")?.focus()
-                }
-              />
-            )}
+            <ConversationChrome
+              sessionId={sessionId}
+              client={context.client}
+              workspaceId={context.workspaceId}
+              events={feed.events}
+              chrome={
+                terminal
+                  ? { queue, sessionStatus: status, readOnly: true, onOpenSession }
+                  : {
+                      queue,
+                      composer,
+                      sessionStatus: status,
+                      onOpenSession,
+                      onComposerFocus: () =>
+                        region.current?.querySelector<HTMLTextAreaElement>("textarea")?.focus(),
+                    }
+              }
+            />
           </div>
           <div
             className="relative z-20 mx-auto w-full max-w-3xl shrink-0"
@@ -404,6 +496,20 @@ function Conversation({
               runControl="stop"
               running={running}
               {...composerProps}
+              {...(transcription && composerProps?.transcription === undefined
+                ? { transcription }
+                : {})}
+              actionsStart={
+                voice ? (
+                  <>
+                    {composerProps?.actionsStart}
+                    {voice}
+                  </>
+                ) : (
+                  composerProps?.actionsStart
+                )
+              }
+              transcriptionSuppressed={composerProps?.transcriptionSuppressed ?? voiceActive}
               composer={composer}
               attachments={uploadsEnabled ? files : undefined}
               disabled={terminal || composerProps?.disabled}
@@ -445,34 +551,61 @@ function Conversation({
   );
 }
 
+type ConversationChromeProps = {
+  sessionId: string;
+  client: unknown;
+  workspaceId: string;
+  events: UseGoalOptions["events"];
+  chrome: Omit<ComponentProps<typeof SessionChrome>, "goal">;
+};
+
+/** Session chrome with the goal pill and its Pause/Resume/Clear when the client can reach goals. */
+function ConversationChrome(props: ConversationChromeProps) {
+  const goals = props.client as Partial<Record<"getGoal" | "updateGoal" | "deleteGoal", unknown>>;
+  const canReachGoals =
+    typeof goals.getGoal === "function" &&
+    typeof goals.updateGoal === "function" &&
+    typeof goals.deleteGoal === "function";
+  return canReachGoals ? <GoalChrome {...props} /> : <SessionChrome {...props.chrome} />;
+}
+
+function GoalChrome({ sessionId, client, workspaceId, events, chrome }: ConversationChromeProps) {
+  const goal = useGoal(sessionId, {
+    client: client as UseGoalOptions["client"],
+    workspaceId,
+    events,
+  });
+  return <SessionChrome {...chrome} goal={goal} />;
+}
+const LazyEmbeddedRealtimeVoice = lazy(() => import("../realtime/embedded-voice"));
+
 const LazyChatInteractiveBlock = lazy(() =>
   import("./artifacts/chat-interactive-block").then((module) => ({
     default: module.ChatInteractiveBlock,
   })),
 );
 
-type ScopableClient = SiteSnapshotClient & {
-  withHeaders?: (headers: Readonly<Record<string, string>>) => SiteSnapshotClient;
-};
+/** This client with the conversation's session scope header, when it can add headers. */
+function sessionScoped<T>(client: T, sessionId: string): T {
+  const candidate = client as { withHeaders?: (headers: Readonly<Record<string, string>>) => T };
+  return typeof candidate.withHeaders === "function"
+    ? candidate.withHeaders({ [SESSION_SCOPE_HEADER]: sessionId })
+    : client;
+}
 
 /** Inline Site/HTML preview reading through this conversation's session scope. */
 function useDefaultInteractiveBlock(
   client: unknown,
   workspaceId: string,
   sessionId: string,
+  sitesAvailable: boolean,
+  sitePreviewUnavailable: string,
 ): NonNullable<MessageTimelineProps["renderInteractiveBlock"]> {
   // Scope lazily: only a rendered preview reads, and some clients (a Site's
   // own client) cannot add headers.
   const scoped = useMemo((): SiteSnapshotClient => {
     let resolved: SiteSnapshotClient | null = null;
-    const get = () => {
-      const candidate = client as ScopableClient;
-      resolved ??=
-        typeof candidate.withHeaders === "function"
-          ? candidate.withHeaders({ [SESSION_SCOPE_HEADER]: sessionId })
-          : candidate;
-      return resolved;
-    };
+    const get = () => (resolved ??= sessionScoped(client as SiteSnapshotClient, sessionId));
     return {
       getWorkspaceArtifact: (...args) => get().getWorkspaceArtifact(...args),
       getWorkspaceArtifactHtml: (...args) => get().getWorkspaceArtifactHtml(...args),
@@ -484,46 +617,142 @@ function useDefaultInteractiveBlock(
     };
   }, [client, sessionId]);
   return useCallback(
-    (block) => (
-      <Suspense fallback={<span role="status">Loading preview…</span>}>
-        <LazyChatInteractiveBlock workspaceId={workspaceId} client={scoped} {...block} />
-      </Suspense>
-    ),
-    [scoped, workspaceId],
+    (block) =>
+      block.kind === "site" && !sitesAvailable ? (
+        // The proxy does not serve Sites: say so instead of offering a load
+        // that can only fail.
+        <div
+          className="rounded-og-md border border-og-border bg-og-surface-1 px-3 py-2 text-og-sm text-og-fg-muted"
+          data-og-site-preview-unavailable=""
+        >
+          {sitePreviewUnavailable}
+        </div>
+      ) : (
+        <Suspense fallback={<span role="status">Loading preview…</span>}>
+          <LazyChatInteractiveBlock workspaceId={workspaceId} client={scoped} {...block} />
+        </Suspense>
+      ),
+    [scoped, workspaceId, sitesAvailable, sitePreviewUnavailable],
   );
 }
 
-/** Deployment/proxy flags from the client config: uploads, and whether model choice is open. */
-function useClientConfigFlags(client: {
-  getClientConfig: () => Promise<{
-    fileUploads?: { enabled?: boolean };
-    modelSelection?: boolean | undefined;
-    sandboxFiles?: boolean | undefined;
-  }>;
-}): { uploads: boolean; modelSelection: boolean; sandboxFiles: boolean } {
-  const [flags, setFlags] = useState({
-    uploads: false,
-    modelSelection: false,
-    sandboxFiles: false,
-  });
+type RetainedLoaderClient = Partial<
+  Pick<
+    OpenGeniClient,
+    | "createRetainedArtifactDownloadUrl"
+    | "downloadRetainedArtifact"
+    | "downloadRetainedScreenshot"
+    | "createVideoArtifactPlaybackSource"
+  >
+>;
+
+/**
+ * Generated images, published files, screenshots and generated video, read
+ * through this conversation's session scope (a session proxy only serves
+ * media that session produced). Clients without the SDK reads get none.
+ */
+function useRetainedLoaders(
+  client: unknown,
+  workspaceId: string,
+  sessionId: string,
+): Pick<
+  MessageTimelineProps,
+  "loadRetainedArtifact" | "loadRetainedScreenshot" | "loadVideoArtifactPlayback"
+> {
+  return useMemo(() => {
+    const base = client as RetainedLoaderClient;
+    // Scope lazily: only a rendered receipt reads.
+    let scoped: RetainedLoaderClient | null = null;
+    const get = () => (scoped ??= sessionScoped(base, sessionId));
+    return {
+      ...(typeof base.downloadRetainedArtifact === "function" &&
+      typeof base.createRetainedArtifactDownloadUrl === "function"
+        ? {
+            loadRetainedArtifact: (artifact, signal) =>
+              createWorkspaceRetainedArtifactLoader(
+                get() as Required<RetainedLoaderClient>,
+                workspaceId,
+              )(artifact, signal),
+          }
+        : {}),
+      ...(typeof base.downloadRetainedScreenshot === "function"
+        ? {
+            loadRetainedScreenshot: (artifact, signal) =>
+              createSessionRetainedScreenshotLoader(
+                get() as Required<RetainedLoaderClient>,
+                workspaceId,
+                sessionId,
+              )(artifact, signal),
+          }
+        : {}),
+      ...(typeof base.createVideoArtifactPlaybackSource === "function"
+        ? {
+            loadVideoArtifactPlayback: (artifactId, signal) =>
+              createWorkspaceRetainedVideoLoader(
+                get() as Required<RetainedLoaderClient>,
+                workspaceId,
+              )(artifactId, signal),
+          }
+        : {}),
+    } satisfies Pick<
+      MessageTimelineProps,
+      "loadRetainedArtifact" | "loadRetainedScreenshot" | "loadVideoArtifactPlayback"
+    >;
+  }, [client, workspaceId, sessionId]);
+}
+
+/**
+ * The composer microphone: shown when the deployment can transcribe, enabled
+ * once the workspace's voice-input setting allows it.
+ */
+export function useComposerTranscription(
+  client: unknown,
+  workspaceId: string,
+  capability: ClientVoiceInputConfig | null,
+): ComposerTranscriptionControlProps | null {
+  const [workspaceEnabled, setWorkspaceEnabled] = useState<{
+    key: string;
+    enabled: boolean;
+  } | null>(null);
+  const reader = client as Partial<Pick<OpenGeniClient, "getWorkspace" | "transcribeAudio">>;
+  const supported = capability !== null && typeof reader.transcribeAudio === "function";
   useEffect(() => {
+    if (!supported) return;
     let live = true;
-    client.getClientConfig().then(
-      (config) => {
+    const key = workspaceId;
+    if (typeof reader.getWorkspace !== "function") {
+      setWorkspaceEnabled({ key, enabled: true });
+      return;
+    }
+    reader.getWorkspace(workspaceId).then(
+      (workspace) => {
         if (live) {
-          setFlags({
-            uploads: config.fileUploads?.enabled === true,
-            // Only an explicit offer shows end users the picker.
-            modelSelection: config.modelSelection === true,
-            sandboxFiles: config.sandboxFiles !== false,
+          setWorkspaceEnabled({
+            key,
+            enabled: resolveWorkspaceVoiceInputEnabled(workspace.settings) ?? true,
           });
         }
       },
-      () => undefined,
+      // The transcription request still enforces the setting.
+      () => live && setWorkspaceEnabled({ key, enabled: true }),
     );
     return () => {
       live = false;
     };
-  }, [client]);
-  return flags;
+  }, [reader, workspaceId, supported]);
+  return useMemo(
+    () =>
+      supported
+        ? {
+            client: reader as Pick<OpenGeniClient, "transcribeAudio">,
+            workspaceId,
+            capability,
+            workspaceEnabled:
+              workspaceEnabled?.key === workspaceId ? workspaceEnabled.enabled : false,
+          }
+        : null,
+    [supported, reader, workspaceId, capability, workspaceEnabled],
+  );
 }
+
+export { useClientConfigFlags } from "../hooks/use-client-config-flags";

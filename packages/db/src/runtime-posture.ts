@@ -89,8 +89,14 @@ const ARTIFACT_PINS_TABLE = "artifact_catalog_pins";
 export const SCHEDULED_SLACK_BOT_MESSAGE_RUNTIME_ROUTINES = [
   "prepare_scheduled_slack_bot_message(uuid, uuid, uuid, uuid, uuid, integer, text, text, text)",
   "read_scheduled_slack_bot_message(uuid, uuid, uuid, uuid)",
+  "set_organization_slack_bot_access(uuid, uuid, uuid, text, boolean)",
+  "read_organization_slack_bot_access(uuid, uuid, uuid)",
+  "list_organization_slack_bots(uuid, uuid)",
+  "prepare_organization_slack_bot_message(uuid, uuid, uuid, uuid, uuid, integer, uuid, bigint, text, text, text)",
+  "read_organization_slack_bot_message(uuid, uuid, uuid, uuid)",
 ] as const;
 const SCHEDULED_SLACK_BOT_MESSAGES_TABLE = "scheduled_slack_bot_messages";
+const ORGANIZATION_SLACK_BOT_ACCESS_TABLE = "organization_slack_bot_access";
 export const ORGANIZATION_SIGNUP_USE_CASE_RUNTIME_ROUTINES = [
   "record_organization_signup_use_case(uuid, text, text)",
 ] as const;
@@ -603,6 +609,8 @@ const PRIVATE_SESSION_CREATE_CAPABILITY_ROUTINES = [
   "close_private_session_create_capability(uuid)",
 ] as const;
 const SESSION_AUTHORITY_ROUTINES = new Set<string>([
+  "lock_live_native_original_origin_v2(jsonb)",
+  "modal_native_origin_member_read_active(uuid, text)",
   LEGACY_FORK_SESSION_CONTENT_ROUTINE,
   FORK_SESSION_CONTENT_ROUTINE,
   MESSAGE_FORK_SESSION_CONTENT_ROUTINE,
@@ -706,6 +714,8 @@ const UNIFIED_KNOWLEDGE_AUTHORITY_TABLES = [
   "documents",
 ] as const;
 export const RUNTIME_TARGET_SCHEMA_CAPABILITY_ROUTINES = [
+  "lock_live_native_original_origin_v2(jsonb)",
+  "modal_native_origin_member_read_active(uuid, text)",
   ...CLAUDE_SUBSCRIPTION_CAPABILITY_ROUTINES,
   "maintain_usage_allowances(integer, integer)",
   "usage_allowance_command(jsonb)",
@@ -2129,15 +2139,15 @@ export async function inspectRuntimeDatabasePosture(
             -- Column-only grants on capability tables are also unsafe; a pin
             -- table must remain EXECUTE-only even after column ACL drift.
             (has_table_privilege(current_user, c.oid, 'SELECT') or
-              ((c.relname in ('modal_inventory_read_capabilities','usage_allowance_capabilities','session_import_batches', ${ARTIFACT_PINS_TABLE}) or
+              ((c.relname in ('modal_native_origin_read_capabilities','modal_inventory_read_capabilities','usage_allowance_capabilities','session_import_batches', ${ARTIFACT_PINS_TABLE}) or
                 c.relname in (select jsonb_array_elements_text(${JSON.stringify(RUNTIME_ALLOWANCE_PRIVATE_TABLES)}::jsonb))) and
                 has_any_column_privilege(current_user, c.oid, 'SELECT'))) as can_select,
             (has_table_privilege(current_user, c.oid, 'INSERT') or
-              ((c.relname in ('modal_inventory_read_capabilities','usage_allowance_capabilities','session_import_batches', ${ARTIFACT_PINS_TABLE}) or
+              ((c.relname in ('modal_native_origin_read_capabilities','modal_inventory_read_capabilities','usage_allowance_capabilities','session_import_batches', ${ARTIFACT_PINS_TABLE}) or
                 c.relname in (select jsonb_array_elements_text(${JSON.stringify(RUNTIME_ALLOWANCE_PRIVATE_TABLES)}::jsonb))) and
                 has_any_column_privilege(current_user, c.oid, 'INSERT'))) as can_insert,
             (has_table_privilege(current_user, c.oid, 'UPDATE') or
-              ((c.relname in ('modal_inventory_read_capabilities','usage_allowance_capabilities','session_import_batches', ${ARTIFACT_PINS_TABLE}) or
+              ((c.relname in ('modal_native_origin_read_capabilities','modal_inventory_read_capabilities','usage_allowance_capabilities','session_import_batches', ${ARTIFACT_PINS_TABLE}) or
                 c.relname in (select jsonb_array_elements_text(${JSON.stringify(RUNTIME_ALLOWANCE_PRIVATE_TABLES)}::jsonb))) and
                 has_any_column_privilege(current_user, c.oid, 'UPDATE'))) as can_update,
             has_table_privilege(current_user, c.oid, 'DELETE') as can_delete,
@@ -2166,6 +2176,7 @@ export async function inspectRuntimeDatabasePosture(
               ${SANDBOX_FILE_PUBLICATIONS_TABLE},
               ${ARTIFACT_PINS_TABLE},
               ${SCHEDULED_SLACK_BOT_MESSAGES_TABLE},
+              ${ORGANIZATION_SLACK_BOT_ACCESS_TABLE},
               ${ORGANIZATION_SIGNUP_USE_CASES_TABLE},
               ${SLACK_FILE_UPLOAD_OPERATIONS_TABLE},
               'organization_usage_read_capabilities',
@@ -2183,6 +2194,7 @@ export async function inspectRuntimeDatabasePosture(
               'session_file_read_capabilities',
               'session_import_batches',
               'modal_inventory_read_capabilities',
+              'modal_native_origin_read_capabilities',
               ${AUTOMATIC_SESSION_TITLE_FANOUT_OUTBOX_TABLE},
               ${VERIFIED_SIGNUP_TRIAL_SWITCH_TABLE},
               'credit_promotion_policy_revisions',
@@ -4013,6 +4025,31 @@ export function evaluateRuntimeDatabasePosture(
     }
   }
 
+  const botAccessTables = posture.privateTables.filter(
+    (table) => table.name === ORGANIZATION_SLACK_BOT_ACCESS_TABLE,
+  );
+  if (botAccessTables.length !== 1) {
+    if (!options.protectedTables)
+      violations.push("organization Slack bot access relation is missing or ambiguous");
+  } else {
+    const table = botAccessTables[0]!;
+    if (!table.rlsEnabled || !table.rlsForced || !table.rlsActive || (table.policyCount ?? 0) < 1)
+      violations.push("organization Slack bot access lacks active FORCE-RLS isolation");
+    if (
+      table.select ||
+      table.insert ||
+      table.update ||
+      table.delete ||
+      table.truncate ||
+      table.references ||
+      table.trigger ||
+      table.owner === expectedRole
+    )
+      violations.push("runtime role has forbidden direct organization Slack bot access authority");
+    if (table.owner !== scheduledSlackMessageTables[0]?.owner)
+      violations.push("organization Slack bot access owner does not match Slack post authority");
+  }
+
   const signupUseCaseTables = posture.privateTables.filter(
     (table) => table.name === ORGANIZATION_SIGNUP_USE_CASES_TABLE,
   );
@@ -4203,6 +4240,30 @@ export function evaluateRuntimeDatabasePosture(
   ) {
     violations.push("usage allowance attribution receipts lack same-owner FORCE-RLS isolation");
   }
+  const nativeOriginCapability = posture.privateTables.find(
+    (table) => table.name === "modal_native_origin_read_capabilities",
+  );
+  const nativeOriginRoutineInstalled = posture.targetRoutines.some(
+    (routine) => routine.name === "lock_live_native_original_origin_v2(jsonb)",
+  );
+  if (
+    (nativeOriginRoutineInstalled || nativeOriginCapability) &&
+    (!nativeOriginCapability ||
+      nativeOriginCapability.owner === expectedRole ||
+      nativeOriginCapability.owner !== tableByName.get("sessions")?.owner ||
+      nativeOriginCapability.owner !== tableByName.get("organization_memberships")?.owner ||
+      !nativeOriginCapability.rlsEnabled ||
+      !nativeOriginCapability.rlsForced ||
+      !nativeOriginCapability.rlsActive ||
+      nativeOriginCapability.select ||
+      nativeOriginCapability.insert ||
+      nativeOriginCapability.update ||
+      nativeOriginCapability.delete ||
+      nativeOriginCapability.truncate ||
+      nativeOriginCapability.references ||
+      nativeOriginCapability.trigger)
+  )
+    violations.push("Native LIVE-origin read capability has unsafe owner, RLS or privileges");
   const modalInventoryCapability = posture.privateTables.find(
     (table) => table.name === "modal_inventory_read_capabilities",
   );

@@ -143,6 +143,10 @@ Pause/Resume, prompt admission or synthetic input.
 Active-run writes require exact attempt/generation; stale workers cannot write
 or settle replacements. Temporal cancellation is intent, not quiescence;
 unresolved writers fence capture, rotation and physical settlement.
+Exact committed workspace-mutation settlement carries a physical receipt when
+mutable authority rejects output. This remains non-replayable; missing or
+contradictory admissions, failed commits, caller-owned savepoints, and partial
+batches retain the uncertainty fence. See [run-lifecycle.md](run-lifecycle.md).
 Legacy Modal exec observations on lease-lost attempts allow same-machine
 inference only under exact actor/turn/generation checks; agents inspect before
 replay. Finalization stages carry heartbeat/metric evidence
@@ -291,6 +295,21 @@ correlation, not a resolved workspace grant, initiating-human authorization,
 native response, current custody claim, physical settlement or effect permit.
 No host entry, provider caller or durable recovery is activated by this helper.
 See [Modal recovery assurance](design/modal-recovery-assurance-2026-10-02.md).
+
+`modal-native-original-configuration.ts` is likewise unused private groundwork.
+It samples explicit deployment settings once, pins the direct read/TLS policy,
+and derives a separately domain-bound private equality commitment. Its draft
+and opaque sample are configuration data, not host/grant/capture authority.
+Tokens and keys never enter the draft; keyed equality must remain protected.
+
+`modal-native-live-declaration-join.ts` is an unused private request/data join,
+not the canonical claimed-worker issuer or a native context. It owns the exact
+bytes before MAC verification/parsing, joins the accepted LIVE origin, frozen
+human, Temporal tuple and unchanged recovery count, then rechecks current
+transport expiry and deployment configuration after blocking DB locks. Its
+immutable output must remain request-local and be consumed in that transaction.
+Protected cold/config/grant insertion and actual worker provenance are still
+required; this helper creates no permission to observe, dispatch or publish.
 
 Organization/workspace membership, API keys, delegated grants, private-session
 ownership and personal-resource grants remain distinct. Organization keys with
@@ -494,6 +513,16 @@ provider. Issued helpers retain independent physical joins after original retain
 registration. See [run lifecycle](run-lifecycle.md).
 Global Modal inventory uses an owner-only SELECT capability under FORCE RLS (0497).
 
+`packages/db/src/modal-native-live-origin.ts` is an inert, trusted-server-only
+LIVE-origin projection (0632), not a host authenticator or custody grant. Its
+transaction joins the exact accepted attempt, immutable initiating human,
+current membership/Personal pointer, control, route and execution-authority
+floor before any lease acquisition. Function-lifetime owner-only read
+capabilities preserve private-session isolation without changing the caller's
+subject. Host request authentication and cold reservation remain separate;
+there is no provider call, closed-origin maintenance authority, budget reset or
+native producer activation in this seam.
+
 Stock Modal non-PTY/no-`runAs` commands support native subreaper supervision.
 Exact-instance capability verification precedes admission; durable invocation
 retention precedes dispatch. The supervisor starts idle. Only original launch
@@ -655,7 +684,7 @@ flowchart LR
   Machine["Connected Machine"]
   NATS(["NATS\nlive fanout + machine transport"])
   Relay(["Relay\nConnected Machine pixels + terminal"])
-  Realtime(["Realtime provider\nCodex WebRTC / Gateway WebSocket"])
+  Realtime(["Realtime provider\nCodex + Azure Live WebRTC / Gateway WebSocket"])
   Objects[("Object storage\nfiles and retained bytes")]
 
   Client --> API
@@ -719,7 +748,7 @@ Large or high-frequency bytes take separate paths:
 - files, generated media, recordings, and retained evidence use object storage;
 - terminal and desktop streams use the sandbox/provider transport or the
   dedicated relay edge for Connected Machines;
-- realtime voice uses Codex WebRTC or the AI Gateway WebSocket while durable
+- realtime voice uses Codex or Azure Live WebRTC, or the AI Gateway WebSocket while durable
   ownership, ledger, delegation, context, and recovery remain in OpenGeni;
   the voice lease freezes connector accounts at authenticated admission and
   supplies that exact authority to delegations and transcript handoff;
@@ -728,7 +757,8 @@ Large or high-frequency bytes take separate paths:
   than treating Office files or rendered output as mutable truth.
 
 Realtime: [`run-lifecycle.md`](run-lifecycle.md); public transport:
-[`../packages/sdk/README.md`](../packages/sdk/README.md).
+[`../packages/sdk/README.md`](../packages/sdk/README.md). Azure Live adaptation:
+`packages/sdk/src/azure-live-transport.ts` and `apps/api/src/azure-live.ts`.
 
 ### 4.3 Dependency direction
 
@@ -978,8 +1008,16 @@ approvals across backends/loading paths.
 
 Always-visible first-request local tools (closed set): `exec_command`,
 `write_stdin`, `apply_patch`, `view_image`, `skill_read`, `repository_skill_read`,
-`request_human_input`, `list_models` (lists, never switches models), and optional
-[`code_search`](code-search.md). Other non-MCP functions/non-eager MCP schemas require search.
+`request_human_input`, `list_models` (lists, never switches models), optional
+[`code_search`](code-search.md), and optional provider
+[`web_search`/`web_fetch`](web-search.md). Other non-MCP functions/non-eager MCP schemas require search.
+
+Web search is hosted by the model provider where the catalog declares it, or
+worker-run through one deployment-configured search API (`web_search` /
+`web_fetch`) where it does not. One shared plan (`webSearchToolPlan`) decides
+both the worker's tools and the API's effective-tools projection; provider
+calls are credit-billed per call when billing is active. See
+[web search](web-search.md).
 
 Configured-router visibility never joins pending non-eager MCP preparation;
 execution joins the exact catalog. Exposed routers remain in the prefix after
@@ -1876,7 +1914,7 @@ organization-workspace lifecycle authority; see [external membership operation r
 
 | Change area | Canonical source | Read first |
 | --- | --- | --- |
-| Model registry, routing, pricing, provider identity, OpenAI-compatible or Claude inference | `packages/config/src/index.ts`, `packages/runtime/src/model-provider*.ts`, `packages/runtime/src/anthropic-messages.ts` | [`model-providers.md`](model-providers.md) (start at Configuring inference) |
+| Model registry, routing, pricing, provider identity, OpenAI-compatible or Claude inference | `packages/config/src/index.ts`, `packages/runtime/src/model-provider*.ts`, `packages/runtime/src/chat-reasoning.ts`, `packages/runtime/src/anthropic-messages.ts` | [`model-providers.md`](model-providers.md) (start at Configuring inference) |
 | Claude sign-in, renewal or quota | apps/api/src/routes/claude-subscription-accounts.ts, packages/db/src/claude-subscription-account-tokens.ts | [model-providers.md](model-providers.md#claude-subscription-usage) |
 | Codex subscription authority or capacity | `packages/codex/`, `apps/worker/src/activities/codex-rotation.ts` | [`codex-subscription-rotation.md`](codex-subscription-rotation.md) |
 | SuperGrok/xAI subscription authority or capacity | `packages/xai-subscription/`, `packages/db/src/xai-subscription.ts`, `packages/db/src/subscription-account-repository.ts`, `packages/db/src/subscription-pool-schema.ts`, `packages/db/src/organization-xai-subscriptions.ts` | [`supergrok-subscription.md`](supergrok-subscription.md) |
@@ -1884,6 +1922,7 @@ organization-workspace lifecycle authority; see [external membership operation r
 | Compact MCP session discovery and child management | `packages/contracts/src/session-mcp-projections.ts`, `apps/api/src/mcp/session-view.ts`, `apps/api/src/mcp/server.ts`, `packages/db/src/index.ts` | [`session-monitoring-mcp.md`](session-monitoring-mcp.md) |
 | Per-session MCP or action approval | `packages/core/src/domain/sessions.ts`, `apps/worker/src/activities/agent-turn/tool-environment.ts` | [`session-mcp-servers.md`](session-mcp-servers.md) |
 | Standalone inline MCP credential rotation | `packages/core/src/application/session-mcp-credential-rotation.ts`, `packages/db/src/session-mcp-credential-rotation.ts` | [`session-mcp-servers.md`](session-mcp-servers.md#standalone-inline-credential-rotation) |
+| Web search (hosted vs provider), search adapters, or their billing | `packages/config/src/web-search.ts`, `packages/runtime/src/web-search/`, `apps/worker/src/activities/agent-turn/web-search.ts`, `packages/core/src/domain/web-search-billing.ts` | [`web-search.md`](web-search.md) |
 | Capabilities or integration definitions | `packages/capabilities/`, `packages/core/src/domain/capabilities.ts` | [`capabilities.md`](capabilities.md) |
 | Sandbox backend or provider registry | `packages/runtime/src/sandbox/providers/`, `packages/contracts/src/index.ts` | §3.9 and [`../AGENTS.md`](../AGENTS.md) Sandbox Notes |
 | Lease, snapshot, reaper, or active target | `apps/worker/src/activities/sandbox-lease.ts`, `packages/runtime/src/sandbox/routing/` | §8 and [`connected-machines.md`](connected-machines.md) |
@@ -1902,6 +1941,7 @@ organization-workspace lifecycle authority; see [external membership operation r
 | Composer draft submission or native embedding host seam | `packages/core/src/application/composer-submit.ts`, `apps/api/src/routes/sessions.ts`, `packages/react/src/embedded-session-client.ts` | [`embedding.md`](embedding.md), package READMEs, and §7.1 |
 | Providers and social connectors | `apps/api/src/integrations/`, `apps/api/src/mcp/server.ts`, `packages/core/src/application/new-session-drafts.ts`, `packages/network/src/mcp-oauth-discovery.ts`, `packages/github/` | [`integrations-design.md`](integrations-design.md), [`github-app.md`](github-app.md), [`google-drive.md`](google-drive.md), [`slack-bot.md`](slack-bot.md), [`social-connectors.md`](social-connectors.md), [`fiken.md`](fiken.md) |
 | Slack user-token MCP tools and shared provider quota | `packages/runtime/src/slack-rest-mcp.ts`, `packages/contracts/src/slack-rest-mcp.ts`, `packages/db/src/slack-api-rate-limits.ts` | [`design/first-party-mcp-bridges.md`](design/first-party-mcp-bridges.md), [`slack-bot.md`](slack-bot.md) |
+| Organization Slack bot sharing and prepared delivery | `packages/db/src/organization-slack-bots.ts`, `apps/api/src/routes/slack-bot-access.ts`, `apps/api/src/integrations/slack-bot.ts` | [`slack-bot.md`](slack-bot.md) |
 | Slack task files | `apps/api/src/integrations/slack-task-file-upload.ts`, `apps/api/src/integrations/slack-file-upload-flow.ts`, `packages/db/src/slack-file-uploads.ts` | [`slack-bot.md`](slack-bot.md#explicit-file-delivery-in-the-task-thread) |
 | OpenGeni Review Bot and pull-request automation | `packages/core/src/domain/pr-review.ts`, `apps/api/src/routes/pr-review.ts`, `apps/api/src/routes/pr-review-github.ts` | [`automations.md`](automations.md), [`pr-review.md`](pr-review.md) |
 | HTTP routes or SSE | `apps/api/src/app.ts`, `apps/api/src/http/sse.ts` | §4, [`../packages/sdk/README.md`](../packages/sdk/README.md), and [`design/api-compatibility-policy.md`](design/api-compatibility-policy.md) for public routes |
@@ -1937,7 +1977,11 @@ Workspace timers: [implementation and rollout](workspace-pause-timers.md).
 ### In-conversation connection setup
 
 `SessionCapabilityCard` shares native Connection APIs; hosts retain authorization.
-OAuth never replays tools. Skills retain workspace scope/reviewed hashes.
+OAuth never replays tools. The web connection card reviews missing parent tool
+selections before an explicit human click applies root-to-child updates through
+the ordinary version-fenced API; child ceilings and accepted turn snapshots stay
+unchanged. `packages/react/src/session-capability-policy.ts` owns that client
+review/apply plan. Skills retain workspace scope/reviewed hashes.
 Messages authorize sender accounts; queues, retries and children retain that
 identity. Personal schedules have immutable owners. Personal/Workspace setup
 uses provider defaults unless explicitly chosen; reconnect preserves ownership.

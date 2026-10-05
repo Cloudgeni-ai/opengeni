@@ -28,6 +28,17 @@ animation. Override the tokens to rebrand everything.
 
 ## Embedded connections and Sites
 
+For a child chat's capability selection, `prepareSessionCapabilityAccess` reads
+an ancestor-to-child access plan without writing. Show the parent chats whose
+`request` is non-null and obtain an explicit confirmation before calling
+`applySessionCapabilityAccess`. The plan preserves existing choices, applies
+version-fenced updates root first, and grants no authority: each ordinary API
+request still authorizes its caller. Invalidate the review on actor/workspace
+changes. A partial failure may leave approved parent changes saved; prepare a
+new plan for retry instead of rolling them back. Existing
+`attachSessionCapability` remains a single-chat operation and never changes
+parents implicitly.
+
 Optional `@opengeni/react/connect` exports `useConnect`, `ConnectChooser`,
 `ConnectSetup`, `ConnectAccounts`, and the composed `ConnectPanel`. Inject one
 `@opengeni/connect` controller per authenticated actor/workspace and dispose it
@@ -98,6 +109,14 @@ import "@opengeni/react/compiled.css";
 // or one conversation: <SessionConversation baseUrl="/api/opengeni" sessionId={sessionId} />
 ```
 
+Bearer-token apps pass `headers` (a function runs per request) or a custom
+`fetch`; a `client` passed with `baseUrl` replaces the one the component
+creates:
+
+```tsx
+<OpenGeniChat baseUrl="/api/opengeni" headers={() => ({ Authorization: `Bearer ${getToken()}` })} />
+```
+
 The provider form keeps working, for example for several components sharing one
 client or the headless hooks:
 
@@ -120,6 +139,14 @@ separately. Pass `conversationProps` for message rendering and tool renderers,
 `createSession` to create chats through your own endpoint, or `sessionId` /
 `onSessionChange` to control the selection (for example from the URL).
 
+The composer shows a live voice button when the workspace offers an available
+voice model (for example hosted GPT Live with credits): the user talks, the
+voice model answers and hands work to the agent in the same chat, and the
+transcript lands in the timeline. It is hidden when no model is available, when
+the proxy sets `realtimeVoice: false`, or when you pass `realtimeVoice={false}`
+(also via `OpenGeniChat`'s `conversationProps`). The voice code loads lazily on
+first display.
+
 `SessionConversation` and `OpenGeniChat` are built to look native inside
 someone else's product with zero styling:
 
@@ -141,7 +168,13 @@ someone else's product with zero styling:
   also fixes the policy server-side.
 
 Attachments appear when the deployment enables uploads (`attachments={false}`
-opts out), pending tool approvals render Approve/Reject, a yes/no question
+opts out), the microphone appears when it reports voice input available
+(`voiceInput={false}` opts out), generated images, video, published files and
+screenshots display through the conversation's session scope, actions a
+session proxy reports unavailable (`sessionCreation`, `archive`, `artifacts`)
+are hidden, the session goal shows with Pause/Resume/Clear, sub-agent cards
+open the child through `onOpenSession` (`OpenGeniChat` opens it in place),
+pending tool approvals render Approve/Reject, a yes/no question
 renders as two buttons, a failed load offers Try again, and `toolRegistry`
 customizes tool rendering.
 
@@ -951,6 +984,9 @@ intentional changes should regenerate those snapshots and review the diff.
   `loadRetainedArtifact` to render permanent generated-image receipts; a loader
   may return verified bytes or a short-lived signed URL. The stock web app uses
   the URL path to avoid copying multi-megabyte images into JavaScript memory.
+  `createWorkspaceRetainedArtifactLoader`, `createSessionRetainedScreenshotLoader`,
+  and `createWorkspaceRetainedVideoLoader` bind the SDK reads to a workspace
+  (and session); `SessionConversation` uses them by default.
 - `UserMessageBody` — the shared lossless rendered-height disclosure for
   already-sent user text. Use it inside a custom `renderMessageText` user branch
   so attachments and voice identity remain outside the clipped Markdown region.

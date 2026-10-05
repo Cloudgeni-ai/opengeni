@@ -1,9 +1,8 @@
 import { useEffect, useMemo, useState } from "react";
 import type { RetainedArtifactReference } from "@opengeni/sdk";
 import { isRetainedImageContentType, useRetainedImageObjectUrl } from "@opengeni/react/artifacts";
-import { useLightboxOptional } from "@opengeni/react";
+import { createWorkspaceRetainedArtifactLoader, useLightboxOptional } from "@opengeni/react";
 import { useAppContext } from "@/context";
-import { createWorkspaceRetainedArtifactLoader } from "@/lib/retained-artifact-loader";
 import { Button } from "@/components/ui/button";
 import { Link } from "@tanstack/react-router";
 import { DeferredChatMedia } from "@opengeni/react/artifacts";

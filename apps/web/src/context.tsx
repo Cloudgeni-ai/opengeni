@@ -1,3 +1,4 @@
+import { startWorkspaceVoiceCapabilityRefresh } from "./lib/workspace-voice-capability";
 import {
   beginSocialLoginAnalytics,
   noteSuccessfulLogin,
@@ -618,6 +619,8 @@ export function RootRouteComponent() {
   const [sessionCreationHandoff, setSessionCreationHandoff] =
     useState<SessionCreationHandoff | null>(null);
   const [clientConfig, setClientConfig] = useState<ClientConfig | null>(null);
+  const [workspaceVoiceInput, setWorkspaceVoiceInput] =
+    useState<ClientConfig["voiceInput"]>(undefined);
   const [configError, setConfigError] = useState<BootstrapErrorPresentation | null>(null);
   const [configRequestVersion, setConfigRequestVersion] = useState(0);
   const [authSession, setAuthSession] = useState<AuthSession | null | undefined>(undefined);
@@ -896,6 +899,7 @@ export function RootRouteComponent() {
       setGithubAppBusy(false);
       setPersonalGitHubBusy(false);
       resetWorkspaceIntegrations();
+      setWorkspaceVoiceInput(undefined);
       setWorkspaceStateOwnerId(workspaceId);
     },
     [resetSessionView, resetWorkspaceIntegrations, sessionChannelProjectionAuthority],
@@ -919,6 +923,31 @@ export function RootRouteComponent() {
       ownsWorkspaceTransition(workspaceTransitionIdentity.current, accepted, workspaceId),
     [],
   );
+
+  const clientConfigurationReady = clientConfig !== null;
+  useEffect(() => {
+    if (!clientConfigurationReady || !authReady || !workspaceStateOwnerId) return;
+    const workspaceId = workspaceStateOwnerId;
+    const accepted = captureWorkspaceInvocation(workspaceId);
+    if (!accepted) return;
+    return startWorkspaceVoiceCapabilityRefresh({
+      read: (signal) => fetchClientConfig(signal, workspaceId),
+      ownsWorkspace: () => ownsWorkspaceInvocation(workspaceId, accepted),
+      apply: (voiceInput) => setWorkspaceVoiceInput(voiceInput),
+      subscribeFocus: (refresh) => {
+        window.addEventListener("focus", refresh);
+        return () => window.removeEventListener("focus", refresh);
+      },
+    });
+  }, [
+    clientConfigurationReady,
+    authReady,
+    workspaceStateOwnerId,
+    accessContext?.subjectId,
+    accessKeyVersion,
+    captureWorkspaceInvocation,
+    ownsWorkspaceInvocation,
+  ]);
 
   const invalidatePrincipalWorkspaceState = useCallback(
     (options?: { preservePendingSlackLink?: boolean }) => {
@@ -2526,14 +2555,24 @@ export function RootRouteComponent() {
     () => setAccessKeyVersion((version) => version + 1),
     [],
   );
-  // Onboarding may finish in a chat it opened (developer setup); go there
-  // while access revalidates, so the app opens on that chat.
+  // Onboarding may finish somewhere other than home (developer setup opens
+  // its workspace's new chat); go there while access revalidates, so the app
+  // opens on it. Resolves once the destination is the current location.
   const completeOrganizationOnboarding = useCallback(
-    (destination?: { workspaceId: string; sessionId: string }) => {
-      if (destination) {
-        void navigate({ to: "/workspaces/$workspaceId/sessions/$sessionId", params: destination });
-      }
+    async (destination?: { workspaceId: string; sessionId?: string }) => {
+      const arrived = destination?.sessionId
+        ? navigate({
+            to: "/workspaces/$workspaceId/sessions/$sessionId",
+            params: { workspaceId: destination.workspaceId, sessionId: destination.sessionId },
+          })
+        : destination
+          ? navigate({
+              to: "/workspaces/$workspaceId/sessions",
+              params: { workspaceId: destination.workspaceId },
+            })
+          : null;
       revalidatePrincipalAccess();
+      await arrived;
     },
     [navigate, revalidatePrincipalAccess],
   );
@@ -2630,7 +2669,14 @@ export function RootRouteComponent() {
     return clientConfig && accessContext
       ? ({
           client,
-          clientConfig,
+          clientConfig: {
+            ...clientConfig,
+            voiceInput:
+              workspaceVoiceInput ??
+              (clientConfig.voiceInput
+                ? { ...clientConfig.voiceInput, available: false, providers: [] }
+                : undefined),
+          },
           authSession: authSession ?? null,
           accessContext,
           workspaces,
@@ -2740,6 +2786,7 @@ export function RootRouteComponent() {
     clearSlackLinkContinuation,
     client,
     clientConfig,
+    workspaceVoiceInput,
     connectionState,
     contextAddManualRepository,
     contextCreateWorkspace,
@@ -2989,8 +3036,11 @@ export function RootRouteComponent() {
         onSignOut={handleManagedSignOut}
         onComplete={(destination) => {
           clearPendingDeveloperSetup();
-          setDeveloperSetupRevision((revision) => revision + 1);
-          completeOrganizationOnboarding(destination);
+          // Reach the destination before the app's routes return: the home
+          // route would otherwise redirect to the landing workspace first.
+          void completeOrganizationOnboarding(destination).finally(() =>
+            setDeveloperSetupRevision((revision) => revision + 1),
+          );
         }}
       />
     </Suspense>

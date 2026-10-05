@@ -23,7 +23,6 @@ import type {
 import {
   buildConnectionTokenResolver,
   getConnectionMetadata,
-  listConnectionsMetadata,
   listEnabledMcpCapabilityServers,
   listConnectorToolPermissionPolicies,
   listChangedConnectorToolPermissions,
@@ -37,11 +36,16 @@ import {
 import { HTTPException } from "hono/http-exception";
 import {
   GMAIL_REST_MCP_TOOLS,
+  gmailToolAvailableOnDeployment,
   gmailToolSupportsScopes,
   isOfficialGmailMcpConfig,
   isOfficialSlackMcpConfig,
 } from "@opengeni/runtime";
 import { hasPermission } from "../access";
+import {
+  personalConnectionDelegationSourceForGrant,
+  visibleMcpAccountConnections,
+} from "./personal-connection-delegations";
 import {
   buildCapabilityCatalog,
   settingsWithMcpCapabilityServers,
@@ -195,12 +199,14 @@ async function resolveTarget(input: Input) {
     throw new HTTPException(403, {
       message: "Only the authenticated connection owner may manage personal tool permissions",
     });
+  const source = personalConnectionDelegationSourceForGrant(input.grant);
   const visible = ref
-    ? await listConnectionsMetadata(
-        input.db,
-        input.workspaceId,
-        input.personalOwnerVerified ? input.grant.subjectId : null,
-      )
+    ? await visibleMcpAccountConnections(input.db, {
+        accountId: input.grant.accountId,
+        workspaceId: input.workspaceId,
+        source:
+          input.personalOwnerVerified && source.kind === "subject" ? source : { kind: "none" },
+      })
     : [];
   const bindings = mcpAccountBindingsFromVisibleConnections({
     accountId: input.grant.accountId,
@@ -256,9 +262,16 @@ async function resolveTarget(input: Input) {
 export function reviewedConnectorToolCatalog(
   server: Pick<Settings["mcpServers"][number], "url" | "connectionRef" | "allowedTools">,
   grantedScopes: readonly string[],
+  deployment: Pick<Settings, "gmailWatchTopicName">,
 ): ListedTool[] | null {
   const tools = isOfficialGmailMcpConfig(server.url, server.connectionRef)
-    ? GMAIL_REST_MCP_TOOLS.filter((tool) => gmailToolSupportsScopes(tool.name, grantedScopes))
+    ? GMAIL_REST_MCP_TOOLS.filter(
+        (tool) =>
+          gmailToolSupportsScopes(tool.name, grantedScopes) &&
+          gmailToolAvailableOnDeployment(tool.name, {
+            watchTopicName: deployment.gmailWatchTopicName,
+          }),
+      )
     : isOfficialSlackMcpConfig(server.url, server.connectionRef)
       ? slackRestMcpToolsForScopes(grantedScopes)
       : null;
@@ -275,6 +288,7 @@ async function listTools(
   const reviewed = reviewedConnectorToolCatalog(
     target.server,
     target.connection?.grantedScopes ?? [],
+    input.settings,
   );
   if (reviewed !== null) return reviewed;
   let headers = { ...target.server.headers };
@@ -283,7 +297,9 @@ async function listTools(
       input.db,
       input.settings,
     )({
-      workspaceId: input.workspaceId,
+      // The selected account's credentials remain in its origin workspace;
+      // approval preferences remain scoped to the workspace being configured.
+      workspaceId: target.connection?.workspaceId ?? input.workspaceId,
       ...(target.connection?.subjectId ? { subjectId: input.grant.subjectId } : {}),
       serverId: target.server.id,
       toolName: "tools/list",

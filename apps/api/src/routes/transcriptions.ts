@@ -3,9 +3,16 @@ import {
   WorkspaceVoiceInputSettings,
   type TranscribeAudioResponse,
 } from "@opengeni/contracts";
-import { type ApiRouteDeps, requireAccessGrant, TranscriptionServiceError } from "@opengeni/core";
+import {
+  type ApiRouteDeps,
+  requireAccessGrant,
+  TranscriptionBillingRefusedError,
+  TranscriptionServiceError,
+} from "@opengeni/core";
 import { getWorkspace } from "@opengeni/db";
 import type { Hono } from "hono";
+import { creditDebitAttributionForGrant } from "../access-grant-rls";
+import { transcriptionBillingRefusal } from "../transcription/billing-refusal";
 import { registerResumableTranscriptionRoutes } from "./transcription-recordings";
 
 export function registerTranscriptionRoutes(app: Hono, deps: ApiRouteDeps): void {
@@ -20,12 +27,26 @@ export function registerTranscriptionRoutes(app: Hono, deps: ApiRouteDeps): void
     }
     const preferences = WorkspaceVoiceInputSettings.safeParse(workspace.settings.voiceInput).data;
     const service = deps.transcription;
-    if (!service || !(await service.available({ workspaceId, subjectId: grant.subjectId }))) {
+    if (
+      !service ||
+      !(await service.available({
+        workspaceId,
+        subjectId: grant.subjectId,
+        preferredProvider: preferences?.preferredProvider,
+        fallbackEnabled: preferences?.fallbackEnabled,
+      }))
+    ) {
       return c.json({ code: "unavailable" }, 503);
     }
     try {
       const body = await audioRequest(c.req.raw, service.limits().maxSizeBytes);
+      // Server-generated: the correlation id is client-chosen and a reused
+      // settlement key would make every later call with it free.
       const result = await service.transcribe({
+        billing: {
+          sourceId: crypto.randomUUID(),
+          attribution: creditDebitAttributionForGrant(grant),
+        },
         preferredProvider: preferences?.preferredProvider,
         fallbackEnabled: preferences?.fallbackEnabled,
         workspaceId,
@@ -45,6 +66,9 @@ export function registerTranscriptionRoutes(app: Hono, deps: ApiRouteDeps): void
     } catch (error) {
       if (error instanceof TranscriptionServiceError) {
         return c.json({ code: error.code }, error.status as never);
+      }
+      if (error instanceof TranscriptionBillingRefusedError) {
+        return transcriptionBillingRefusal(c, error);
       }
       if (isAbort(error)) return c.json({ code: "cancelled" }, 499 as never);
       return c.json({ code: "unknown" }, 500);

@@ -69,9 +69,9 @@ export function SignedOutPage({
                 id="signed-out-heading"
                 className="font-display text-[40px] leading-[1.08] font-medium tracking-[-1.5px] text-balance min-[721px]:text-[48px] min-[721px]:tracking-[-2px]"
               >
-                Infrastructure <span className="whitespace-nowrap">for agents</span>{" "}
+                Agents in your product.{" "}
                 <em className="font-serif text-[1.18em] leading-none font-normal">
-                  that actually finish the job.
+                  Infrastructure out of the box.
                 </em>
               </h1>
               <p className="mt-5 max-w-[330px] text-[15px] leading-[1.6] text-fg-muted">

@@ -42,6 +42,7 @@ import {
   ORGANIZATION_GATEWAY_MODEL_ID_PREFIX,
   ORGANIZATION_OPENROUTER_MODEL_ID_PREFIX,
   allowedFirstPartyMcpToolsForSession,
+  deploymentUnavailableFirstPartyMcpTools,
   resolveFirstPartyMcpToolPolicy,
   policyProviderIdForModel,
   resolveTurnExecutionPolicyV1,
@@ -2051,6 +2052,11 @@ export async function postUserMessageTurn(
                 : {}),
               controlLockTimeoutMs: workspaceControlRequestLockTimeoutMs(),
             }),
+          undefined,
+          "shared",
+          // Linked-actor capture reauthorizes under the organization-membership
+          // lock; take it before the tenancy fence and the canonical prefix.
+          Boolean(input.captureTurnAuthority),
         ),
     );
   } catch (error) {
@@ -2410,6 +2416,14 @@ async function createSessionForRequestInFileScope(
   requestOptions: SessionCreateRequestOptions = {},
 ): Promise<CreateSessionRequestOutcome> {
   const payload = CreateSessionRequest.parse(rawPayload);
+  // A tool whose backing workload this deployment does not run is dropped, not
+  // rejected: a client echoing a full catalog must not fail on a deployment fact.
+  if (payload.firstPartyMcpTools) {
+    const unavailable = deploymentUnavailableFirstPartyMcpTools(unresolvedDeps.settings);
+    payload.firstPartyMcpTools = payload.firstPartyMcpTools.filter(
+      (tool) => !unavailable.has(tool),
+    );
+  }
   // Read before any await: the Site scope is request-local provenance.
   const surface = resolveTurnSurface({
     grant,
@@ -4249,6 +4263,10 @@ async function acceptSessionUserMessageInFileScope(
         (await requireWorkspace(db, workspaceId)).settings,
       ),
     });
+    const existingEffectiveFirstPartyTools = allowedFirstPartyMcpToolsForSession(
+      settings,
+      existingSession.firstPartyMcpTools,
+    );
     const { personalConnectionDelegations, mcpAccountBindings } = await freezeConnectionAccounts({
       db,
       accountId: grant.accountId,
@@ -4259,8 +4277,8 @@ async function acceptSessionUserMessageInFileScope(
       source: connectionDelegationSource,
       targetSessionId: sessionId,
       googleDrivePublicationEnabled:
-        existingSession.firstPartyMcpTools.includes("editable_artifact_export") &&
-        existingSession.firstPartyMcpTools.includes("editable_artifact_export_status") &&
+        existingEffectiveFirstPartyTools.includes("editable_artifact_export") &&
+        existingEffectiveFirstPartyTools.includes("editable_artifact_export_status") &&
         (!existingSession.firstPartyMcpPermissions?.length ||
           (existingSession.firstPartyMcpPermissions.includes("artifacts:read") &&
             existingSession.firstPartyMcpPermissions.includes("artifacts:publish"))),

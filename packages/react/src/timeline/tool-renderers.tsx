@@ -1,4 +1,6 @@
-import { useHasToolReview, ToolReviewHistoryReceipt } from "../components/tool-review-history";
+import { useHasToolReview, useRecordedToolReview } from "../components/tool-review-history";
+import { ToolActionReviewCard } from "../components/tool-action-review";
+import type { ToolReviewStatus } from "@opengeni/sdk";
 import { KnowledgeReceiptRow } from "./knowledge-receipt";
 import { defaultUrlTransform } from "react-markdown";
 import { isRetainedImageContentType, useRetainedImageObjectUrl } from "./retained-image";
@@ -588,7 +590,10 @@ function ComputerCallRenderer({ item, loadRetainedScreenshot }: ToolRendererProp
   // every transport.
   const functionAction: ComputerAction | undefined =
     !raw.action && item.name.startsWith("computer_") && item.name !== "computer_call"
-      ? { type: item.name.slice("computer_".length), ...asComputerArgs(item.arguments) }
+      ? {
+          type: item.name.slice("computer_".length),
+          ...asComputerArgs(item.arguments),
+        }
       : undefined;
   const action = raw.action ?? functionAction;
   const actions = raw.actions ?? (action ? [action] : []);
@@ -2335,9 +2340,73 @@ function RunOnRenderer({ item }: ToolRendererProps) {
  */
 function GenericRenderer({ item }: ToolRendererProps) {
   const reviewed = useHasToolReview(item.callId);
-  if (reviewed && item.callId) return <ToolReviewHistoryReceipt approvalId={item.callId} />;
+  if (reviewed && item.callId) return <ReviewedGenericRenderer item={item} />;
   return <UnreviewedGenericRenderer item={item} />;
 }
+
+/** Settled review states earn one quiet gutter word; success and waiting stay chip-free. */
+const REVIEW_CHIP: Partial<Record<ToolReviewStatus, DisclosureChip>> = {
+  rejected: { tone: "interrupted", text: "declined" },
+  cancelled: { tone: "interrupted", text: "not run" },
+  expired: { tone: "interrupted", text: "expired" },
+  stale: { tone: "interrupted", text: "not run" },
+  revoked: { tone: "interrupted", text: "not run" },
+  blocked: { tone: "interrupted", text: "blocked" },
+  unknown: { tone: "bad", text: "outcome unknown" },
+  partial: { tone: "bad", text: "partly done" },
+  failed: { tone: "bad", text: "failed" },
+};
+
+/**
+ * A call that went through approval keeps the ordinary row shape, titled with
+ * what was approved. The expanded body is the saved review plus the result.
+ */
+function ReviewedGenericRenderer({ item }: ToolRendererProps) {
+  const { review, onViewDetails } = useRecordedToolReview(item.callId);
+  if (!review) return <UnreviewedGenericRenderer item={item} />;
+  const icon = <GenericToolIcon name={item.name} />;
+  const waiting = review.status === "pending";
+  const running =
+    !waiting &&
+    (review.status === "executing" || review.status === "approved") &&
+    item.status === "running";
+  const { text: outText, isError } = unwrapMcpOutput(item.output);
+  const chip =
+    REVIEW_CHIP[review.status] ??
+    (isError && !running && !waiting ? ({ tone: "bad", text: "error" } as const) : undefined);
+  return (
+    <ActivityDisclosure
+      icon={icon}
+      iconTone={chip?.tone === "bad" ? "failed" : waiting ? "accent" : "muted"}
+      title={review.title}
+      running={running}
+      chip={chip}
+      preview={
+        waiting ? (
+          "Waiting for your approval"
+        ) : running ? (
+          <RunningPreview>Running…</RunningPreview>
+        ) : (
+          (review.accountLabel ?? undefined)
+        )
+      }
+    >
+      <div className="py-1" data-approval-id={item.callId} data-review-origin="history">
+        <ToolActionReviewCard
+          bare
+          review={{ ...review, availableActions: [] }}
+          onViewDetails={onViewDetails}
+        />
+      </div>
+      {outText ? <PayloadBlock label="Result" value={outText} failed={isError} /> : null}
+    </ActivityDisclosure>
+  );
+}
+
+/** The runtime's exact refusal for a tool whose effective permission is Block. */
+const BLOCKED_OUTPUT = /Connector action was not executed: blocked\b/;
+/** The runtime's refusal to guess whether an approved action ran. */
+const UNCERTAIN_OUTPUT = /Connector action outcome is uncertain\b/;
 
 function UnreviewedGenericRenderer({ item }: ToolRendererProps) {
   const running = item.status === "running";
@@ -2363,6 +2432,42 @@ function UnreviewedGenericRenderer({ item }: ToolRendererProps) {
   }
 
   const { text: outText, isError } = unwrapMcpOutput(item.output);
+  // A permission Block is a decision, not a tool failure: say so plainly instead
+  // of the generic "error occurred, please try again" wrapper.
+  if (isError && BLOCKED_OUTPUT.test(outText)) {
+    return (
+      <ActivityDisclosure
+        icon={icon}
+        iconTone="muted"
+        title={display}
+        chip={{ tone: "interrupted", text: "blocked" }}
+        preview="Blocked by your permission settings"
+      >
+        <p className="m-0 py-1 text-og-sm text-og-fg-muted">
+          Your permission settings block this action, so it did not run. You can change this in the
+          integration's tool permissions.
+        </p>
+        <PayloadBlock label="Arguments" value={args} />
+      </ActivityDisclosure>
+    );
+  }
+  // An interrupted approved action may have run. Never invite a blind retry.
+  if (isError && UNCERTAIN_OUTPUT.test(outText)) {
+    return (
+      <ActivityDisclosure
+        icon={icon}
+        iconTone="failed"
+        title={display}
+        chip={{ tone: "bad", text: "outcome unknown" }}
+        preview="It may have run"
+      >
+        <p className="m-0 py-1 text-og-sm text-og-fg-muted">
+          This action may have run. Check the result in the connected app before trying again.
+        </p>
+        <PayloadBlock label="Arguments" value={args} />
+      </ActivityDisclosure>
+    );
+  }
   // Cancelled is NOT an error — a user-cancelled tool should not surface the red
   // error chip even if the output payload carries an isError flag (the error may be
   // a consequence of the cancellation, not the tool's own failure).
@@ -2543,25 +2648,41 @@ const BASE_ENTRIES: ToolRegistryEntry[] = [
   { match: "name", name: "apply_patch_call", render: ApplyPatchRenderer },
   { match: "name", name: "apply_patch", render: ApplyPatchRenderer },
   { match: "name", name: "computer_call", render: ComputerCallRenderer },
-  { match: "name", name: "browser_screenshot", render: BrowserScreenshotRenderer },
+  {
+    match: "name",
+    name: "browser_screenshot",
+    render: BrowserScreenshotRenderer,
+  },
   { match: "name", name: "browser_observe", render: BrowserScreenshotRenderer },
   { match: "name", name: "browser_act", render: BrowserScreenshotRenderer },
   // Function-mode computer tools (codex / chat-wire transports).
   { match: "name", name: "computer_screenshot", render: ComputerCallRenderer },
   { match: "name", name: "computer_click", render: ComputerCallRenderer },
-  { match: "name", name: "computer_double_click", render: ComputerCallRenderer },
+  {
+    match: "name",
+    name: "computer_double_click",
+    render: ComputerCallRenderer,
+  },
   { match: "name", name: "computer_move", render: ComputerCallRenderer },
   { match: "name", name: "computer_scroll", render: ComputerCallRenderer },
   { match: "name", name: "computer_type", render: ComputerCallRenderer },
   { match: "name", name: "computer_keypress", render: ComputerCallRenderer },
   { match: "name", name: "computer_drag", render: ComputerCallRenderer },
   { match: "name", name: "web_search_call", render: WebSearchRenderer },
-  { match: "name", name: "image_generation_call", render: GeneratedImageRenderer },
+  {
+    match: "name",
+    name: "image_generation_call",
+    render: GeneratedImageRenderer,
+  },
   { match: "name", name: "generate_image", render: GeneratedImageRenderer },
   { match: "name", name: "generate_video", render: GeneratedVideoRenderer },
   { match: "name", name: "tool_search", render: ToolSearchRenderer },
   { match: "name", name: "view_image", render: ViewImageRenderer },
-  { match: "name", name: "sandbox_file_publish", render: SandboxFilePublishRenderer },
+  {
+    match: "name",
+    name: "sandbox_file_publish",
+    render: SandboxFilePublishRenderer,
+  },
   {
     match: "name",
     name: "artifacts_create",
@@ -2586,13 +2707,25 @@ const BASE_ENTRIES: ToolRegistryEntry[] = [
     render: SiteArtifactRenderer,
     matchPrefixedLeaf: false,
   },
-  { match: "name", name: "environment_set_variable", render: SecretSetRenderer },
-  { match: "name", name: "variable_set_set_variable", render: SecretSetRenderer },
+  {
+    match: "name",
+    name: "environment_set_variable",
+    render: SecretSetRenderer,
+  },
+  {
+    match: "name",
+    name: "variable_set_set_variable",
+    render: SecretSetRenderer,
+  },
   { match: "name", name: "search_documents", render: DocsSearchRenderer },
   { match: "name", name: "knowledge_search", render: DocsSearchRenderer },
   { match: "name", name: "memory_propose", render: MemoryProposeRenderer },
   { match: "name", name: "set_session_title", render: SetSessionTitleRenderer },
-  { match: "name", name: "set_other_session_title", render: SetSessionTitleRenderer },
+  {
+    match: "name",
+    name: "set_other_session_title",
+    render: SetSessionTitleRenderer,
+  },
 ];
 
 /** The built-in tool renderer registry: every first-party tool plus a fallback. */

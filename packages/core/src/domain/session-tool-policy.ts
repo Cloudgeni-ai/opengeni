@@ -3,6 +3,7 @@ import {
   codeSearchDeploymentPolicy,
   resolveModelProviderForTurn,
   resolveFirstPartyDelegationSecret,
+  webSearchToolPlan,
   type Settings,
 } from "@opengeni/config";
 import {
@@ -443,9 +444,18 @@ export function sessionEffectiveToolProjectionInput(
   const supportsImages =
     model?.model.api === "responses" && model.model.capabilities.inputModalities.includes("image");
   const hostedToolNames: AgentFunctionToolName[] = [];
+  // Same plan the worker applies: provider web_search/web_fetch where the
+  // model has no hosted search (or the operator chose `replace`).
+  const webSearchPlan = context
+    ? webSearchToolPlan(context.settings, {
+        hostedWebSearch: model?.model.hostedWebSearch ?? context.settings.webSearchEnabled,
+        transportHostedSearch: model?.provider.kind === "xai-subscription",
+      })
+    : { hostedWebSearch: false, providerTools: [] };
   if (model?.provider.kind === "xai-subscription") {
     if (context?.settings.webSearchEnabled) hostedToolNames.push("web_search", "x_search");
-  } else if (model?.model.hostedWebSearch) hostedToolNames.push("web_search");
+  } else if (model?.model.hostedWebSearch && webSearchPlan.hostedWebSearch)
+    hostedToolNames.push("web_search");
   const mediaAttachment =
     context?.mediaAttachments?.get(session.id) ??
     (context?.objectStorageAvailable === false
@@ -460,6 +470,7 @@ export function sessionEffectiveToolProjectionInput(
         "skill_read",
         ...AGENT_SKILL_MANAGE_TOOL_NAMES,
         ...media.runtime,
+        ...webSearchPlan.providerTools,
       ]
     : [];
   const sandboxToolNames: AgentFunctionToolName[] = sandboxAvailable
@@ -549,6 +560,7 @@ export function sessionEffectiveToolProjectionInput(
     "skill_read",
     "request_human_input",
     "list_models",
+    ...webSearchPlan.providerTools,
     ...(toolRefs.some((ref) => ref.id === "opengeni" && ref.eager === true) ||
     !progressiveDisclosure
       ? firstPartyMcpTools.filter((name) => !interactionNames.has(name) || !progressiveDisclosure)
@@ -563,7 +575,7 @@ export function sessionEffectiveToolProjectionInput(
         : []),
     ]),
     hasSkills: context ? sessionHasSkills(session, context) : false,
-    webSearch: hostedToolNames.includes("web_search"),
+    webSearch: hostedToolNames.includes("web_search") || webSearchPlan.providerTools.length > 0,
     humanInput: context?.humanInputEnabled ?? false,
     media: media.toolsKnown ? media.hosted.length + media.runtime.length > 0 : undefined,
     routerInHistory:

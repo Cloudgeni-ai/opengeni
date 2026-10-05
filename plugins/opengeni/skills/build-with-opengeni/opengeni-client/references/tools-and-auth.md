@@ -83,6 +83,42 @@ Your own tokens instead of `toolServer`: add the server in `createSession`
 `{ mcpCredentialUpdates: [{ id, headers }] }` from `beforeForwardMessage` to
 rotate it.
 
+### Local development
+
+Opengeni must reach the tool endpoint over public HTTPS. Never tunnel the whole
+dev app (`cloudflared tunnel --url http://localhost:3000` publishes every page,
+including sign-in and admin). If the tool endpoint is its own server, tunnel
+only that port. Otherwise forward only the tool path, and tunnel that port:
+
+```ts
+// tool-tunnel.ts: `bun tool-tunnel.ts`, then `cloudflared tunnel --url http://localhost:3999`
+const TOOL_PATH = "/api/opengeni/tools"; // the path of OPENGENI_TOOL_SERVER_URL
+const APP = "http://localhost:3000"; // the local app
+
+Bun.serve({
+  port: 3999,
+  fetch(request) {
+    const { pathname, search } = new URL(request.url);
+    if (pathname !== TOOL_PATH && !pathname.startsWith(`${TOOL_PATH}/`)) {
+      return new Response("Not found", { status: 404 });
+    }
+    const headers = new Headers(request.headers);
+    headers.delete("host");
+    headers.delete("accept-encoding");
+    return fetch(`${APP}${pathname}${search}`, {
+      method: request.method,
+      headers,
+      body: request.body,
+      redirect: "manual",
+    });
+  },
+});
+```
+
+Set `OPENGENI_TOOL_SERVER_URL=https://<name>.trycloudflare.com/api/opengeni/tools`
+(the tunnel URL plus `TOOL_PATH`). Any reverse proxy that forwards only that
+path works.
+
 ## OpenAPI Integrations
 
 For an existing HTTP API, publish an OpenAPI 3.x document with only the

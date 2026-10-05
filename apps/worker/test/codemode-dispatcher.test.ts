@@ -1,4 +1,6 @@
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
+import { Agent, RunContext, RunState } from "@openai/agents";
+import { OPEN_SUFFIX_RUN_STATE_BLOB } from "@opengeni/contracts";
 import { environmentsEncryptionKeyBytes } from "@opengeni/config";
 import {
   AttemptToolApprovalRequiredError,
@@ -39,7 +41,11 @@ import {
   type SharedTestDatabase,
   testSettings,
 } from "@opengeni/testing";
-import { InputWaitYield } from "@opengeni/runtime";
+import {
+  InputWaitYield,
+  extractOpenSuffixFromRunState,
+  assertOpenSuffixResumable,
+} from "@opengeni/runtime";
 import { connectionTokenResolverForTurn } from "../src/activities/mcp-credentials";
 import {
   CodemodeAttemptDispatcher,
@@ -205,6 +211,48 @@ describe("CodemodeAttemptDispatcher", () => {
     } finally {
       await dispatcher.close();
     }
+  });
+
+  test("first-request recovery joins lazy tool preparation only when stored work must resume", async () => {
+    const { scope, environment } = await fixture(async () => "unused");
+    const caller = `sandbox:${scope.attemptId}`;
+    let preparedReads = 0;
+    // A lazy MCP server that never finishes connecting must not delay a turn
+    // with nothing unfinished in its journal.
+    const ordinary = await Promise.race([
+      CodemodeAttemptDispatcher.resumeApproved(client.db, scope, caller, undefined, () => {
+        preparedReads++;
+        return new Promise<never>(() => undefined);
+      }),
+      Bun.sleep(5_000).then(() => "timed_out" as const),
+    ]);
+    expect(ordinary).toEqual([]);
+    expect(preparedReads).toBe(0);
+
+    await submitCodemodeOperation(client.db, {
+      ...scope,
+      durableApproval: true,
+      call: {
+        operationId: crypto.randomUUID(),
+        catalogDigest: environment.catalog.digest,
+        identity: { serverId: "docs", toolName: "search" },
+        arguments: {},
+        caller: { kind: "codemode", subjectId: caller },
+      },
+    });
+    let ready!: (dispatcher: CodemodeAttemptDispatcher | null) => void;
+    const pending = CodemodeAttemptDispatcher.resumeApproved(
+      client.db,
+      scope,
+      caller,
+      undefined,
+      () => new Promise((resolve) => (ready = resolve)),
+    );
+    expect(await Promise.race([pending, Bun.sleep(200).then(() => "waiting" as const)])).toBe(
+      "waiting",
+    );
+    ready(null);
+    expect(await pending).toEqual([]);
   });
 
   test("native OAuth credentials use the live canonical attempt during Codemode dispatch", async () => {
@@ -1161,11 +1209,34 @@ test("waiting releases the claim and approved continuation executes stored argum
   expect(effects).toBe(0);
   expect(gate.requested).toBe(true);
   await dispatcher.close();
+  // The SDK exec call has returned the durable waiting handle. There is no
+  // interrupted SDK call, and canonical history omits output-only statuses.
+  const pausedState = new RunState(
+    new RunContext(),
+    [
+      { type: "message", role: "assistant", content: [{ type: "output_text", text: "Ready" }] },
+      { type: "function_call", callId: "call_exec", name: "exec_command", arguments: "{}" },
+      {
+        type: "function_call_result",
+        callId: "call_exec",
+        name: "exec_command",
+        output: {
+          type: "text",
+          text: JSON.stringify({ operationId, state: "waiting_for_approval" }),
+        },
+      },
+    ] as never,
+    new Agent({ name: "Test agent" }),
+    null,
+  );
+  const suffix = extractOpenSuffixFromRunState(pausedState);
+  expect(suffix).toEqual([]);
+  assertOpenSuffixResumable(suffix, []);
   await saveRunState(client.db, {
     ...scope,
     expectedExecutionGeneration: scope.executionGeneration,
     expectedAttemptId: scope.attemptId,
-    serializedRunState: "{}",
+    serializedRunState: OPEN_SUFFIX_RUN_STATE_BLOB,
     pendingApprovals: [{ id: operationId, source: "codemode" }],
   });
   await applySessionTurnSettlement(client.db, scope.workspaceId, {
@@ -1245,3 +1316,77 @@ test("waiting releases the claim and approved continuation executes stored argum
     await resumed.close();
   }
 });
+
+test("a durable-capable call arriving mid model request still executes an allowed tool", async () => {
+  if (!available) throw new Error("PostgreSQL required");
+  let effects = 0;
+  const seenMeta: unknown[] = [];
+  const { scope, environment } = await fixture(
+    async () => {
+      effects++;
+      return "Synthetic allowed effect";
+    },
+    { type: "object" },
+    {
+      prepare: async ({ context }) => {
+        seenMeta.push(context.transportMeta?.durableApproval ?? null);
+        return {};
+      },
+    },
+  );
+  const bus = new MemoryEventBus(),
+    gate = new InputWaitYield();
+  // A model request is in flight: the wait gate is sealed for this stream.
+  const stream = gate.beginStream();
+  await stream.modelDispatchFilter({ modelData: {} } as never);
+  expect(() => gate.beginWait()).toThrow("sealed");
+  const dispatcher = new CodemodeAttemptDispatcher(
+    client.db,
+    bus,
+    environment,
+    scope,
+    undefined,
+    1,
+    {},
+    undefined,
+    undefined,
+    gate,
+  );
+  dispatcher.start();
+  const operationId = crypto.randomUUID();
+  try {
+    await submitCodemodeOperation(client.db, {
+      ...scope,
+      durableApproval: true,
+      call: {
+        operationId,
+        catalogDigest: environment.catalog.digest,
+        identity: { serverId: "docs", toolName: "search" },
+        arguments: {},
+        caller: { kind: "codemode", subjectId: `sandbox:${scope.attemptId}` },
+      },
+    });
+    await bus.request(
+      codemodeDispatchSubject(scope.workspaceId, scope.attemptId),
+      encodeCodemodeDispatchRequest({
+        version: 1,
+        operationId,
+        catalogDigest: environment.catalog.digest,
+      }),
+      { timeoutMs: 5000 },
+    );
+    const deadline = Date.now() + 5000;
+    let operation = await getCodemodeOperation(client.db, { ...scope, operationId });
+    while (operation?.state !== "completed" && Date.now() < deadline) {
+      await Bun.sleep(10);
+      operation = await getCodemodeOperation(client.db, { ...scope, operationId });
+    }
+    expect(operation).toMatchObject({ state: "completed" });
+    expect(effects).toBe(1);
+    // Prepared like a non-waiting client: no durable wait could be accepted.
+    expect(seenMeta).toEqual([null]);
+    expect(gate.requested).toBe(false);
+  } finally {
+    await dispatcher.close();
+  }
+}, 60_000);

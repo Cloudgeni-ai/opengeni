@@ -30,6 +30,8 @@ for (const scenario of ["committed", "missing", "fenced", "event_failed"] as con
       } as Awaited<ReturnType<typeof openSuffix.settleOpenSuffixResumeIfNeeded>>),
       spyOn(admission, "ensureRunAllowedBetweenModelCalls").mockResolvedValue(),
       spyOn(db, "nextSessionHistoryPosition").mockResolvedValue(2),
+      // This fixture has no stored programmatic operations to recover.
+      spyOn(db, "listTurnCodemodeApprovals").mockResolvedValue([]),
       spyOn(db, "sessionTurnHasFinalReplyNudge").mockResolvedValue(false),
       spyOn(db, "registerPendingSessionToolCall").mockResolvedValue({
         accepted: true,

@@ -15,6 +15,8 @@ import {
 } from "@opengeni/contracts";
 import {
   getConnectionMetadata,
+  availableSlackBotConnectionMetadata,
+  requireWorkspace,
   type ConnectionMetadataWithVerification,
   type Database,
 } from "@opengeni/db";
@@ -74,7 +76,14 @@ export async function requireOpenGeniSlackBotConnection(
   workspaceId: string,
   connectionId: string,
 ): Promise<ConnectionMetadata> {
-  const connection = await getConnectionMetadata(db, workspaceId, connectionId, null);
+  const local = await getConnectionMetadata(db, workspaceId, connectionId, null);
+  const workspace = await requireWorkspace(db, workspaceId);
+  const connection =
+    local ??
+    (
+      await availableSlackBotConnectionMetadata(db, { accountId: workspace.accountId, workspaceId })
+    ).find((candidate) => candidate.id === connectionId) ??
+    null;
   if (!connection || !isOpenGeniSlackBotConnection(connection)) {
     throw new HTTPException(422, {
       message: "slackBotConnectionId must reference an Opengeni Slack bot connection",
@@ -243,9 +252,12 @@ export function withScheduledSlackBotPostingTools(
   agentConfig: Pick<ScheduledTaskAgentConfig, "slackBotConnectionId" | "slackBotChannelId">,
   allowedTools: readonly FirstPartyMcpToolName[],
 ): FirstPartyMcpToolName[] {
-  if (!agentConfig.slackBotConnectionId || !agentConfig.slackBotChannelId) return [...tools];
+  const posting = new Set<FirstPartyMcpToolName>(SCHEDULED_SLACK_BOT_POSTING_TOOLS);
+  // Ordinary-chat defaults include these tools, but an unattended occurrence
+  // must have its own person-chosen destination before receiving them.
+  const next = tools.filter((tool) => !posting.has(tool));
+  if (!agentConfig.slackBotConnectionId || !agentConfig.slackBotChannelId) return next;
   const allowed = new Set(allowedTools);
-  const next = [...tools];
   for (const tool of SCHEDULED_SLACK_BOT_POSTING_TOOLS) {
     if (allowed.has(tool) && !next.includes(tool)) next.push(tool);
   }

@@ -23,6 +23,14 @@ const mutableContext: { current: Record<string, unknown> } = { current: {} };
 mock.module("@/context", () => ({
   useAppContext: () => {
     const client = mutableContext.current.client as Record<string, unknown>;
+    client.listAvailableOpenGeniSlackBots ??= async () => ({
+      connections: [],
+      organizationSharedConnectionIds: [],
+    });
+    client.getOpenGeniSlackBotOrganizationAccess ??= async () => ({
+      enabled: false,
+      generation: 0,
+    });
     client.connectTransport ??= () =>
       new OpenGeniClient({
         baseUrl: "http://localhost:3000",
@@ -153,11 +161,13 @@ async function renderAdapter({
   connections,
   bindings,
   contextOverride,
+  sheetOpen = false,
 }: {
   permissions: string[];
   connections: ConnectionMetadata[];
   bindings: SlackInstallationBinding[];
   contextOverride?: Record<string, unknown>;
+  sheetOpen?: boolean;
 }): Promise<{
   model: IntegrationViewModel;
   dialogs: () => React.ReactNode;
@@ -173,7 +183,7 @@ async function renderAdapter({
       connections,
       connectionsLoaded: true,
       slackInstallationBindings: bindings,
-      sheetOpen: false,
+      sheetOpen,
       refresh: async () => {},
       onRuntimeChanged: () => {},
     });
@@ -187,7 +197,9 @@ async function renderAdapter({
   await act(async () => root.render(<Probe />));
   if (!captured) throw new Error("Slack adapter model was not captured");
   return {
-    model: captured,
+    get model() {
+      return captured!;
+    },
     dialogs: () => dialogs,
     unmount: async () => {
       await act(async () => root.unmount());
@@ -199,6 +211,114 @@ async function renderAdapter({
 function optionById(model: IntegrationViewModel, id: string) {
   return model.options.find((option) => option.id === id) ?? null;
 }
+
+test("an organization administrator can explicitly share the installed bot", async () => {
+  const { bot, binding } = installedBot();
+  const permissions = ["connections:read", "connections:write"];
+  const context = appContext(permissions);
+  const access = accessContext(permissions);
+  access.accountGrants = [
+    { accountId: ACCOUNT_ID, subjectId: "subject-a", permissions: ["account:admin"] },
+  ] as AccessContext["accountGrants"];
+  const save = mock(
+    async (_workspace: string, _connection: string, request: { enabled: boolean }) => ({
+      ...request,
+      generation: 1,
+    }),
+  );
+  context.accessContext = access;
+  context.client = {
+    getOpenGeniSlackBotOrganizationAccess: async () => ({ enabled: false, generation: 0 }),
+    setOpenGeniSlackBotOrganizationAccess: save,
+  };
+  const rendered = await renderAdapter({
+    permissions,
+    connections: [bot],
+    bindings: [binding],
+    contextOverride: context,
+    sheetOpen: true,
+  });
+  try {
+    const option = optionById(rendered.model, "slack-organization-bot") as IntegrationToggleOption;
+    expect(option.checked).toBe(false);
+    expect(option.disabled).toBe(false);
+    await act(async () => option.onChange(true));
+    expect(save).toHaveBeenCalledWith(WORKSPACE_ID, bot.id, { enabled: true });
+    expect(
+      (optionById(rendered.model, "slack-organization-bot") as IntegrationToggleOption).checked,
+    ).toBe(true);
+  } finally {
+    await rendered.unmount();
+  }
+});
+
+test("workspace administrators can see organization sharing but cannot change it", async () => {
+  const { bot, binding } = installedBot();
+  const permissions = ["workspace:admin", "connections:read", "connections:write"];
+  const context = appContext(permissions);
+  const save = mock(async () => ({ enabled: false, generation: 2 }));
+  context.client = {
+    getOpenGeniSlackBotOrganizationAccess: async () => ({ enabled: true, generation: 1 }),
+    setOpenGeniSlackBotOrganizationAccess: save,
+  };
+  const rendered = await renderAdapter({
+    permissions,
+    connections: [bot],
+    bindings: [binding],
+    contextOverride: context,
+    sheetOpen: true,
+  });
+  try {
+    const option = optionById(rendered.model, "slack-organization-bot") as IntegrationToggleOption;
+    expect(option.checked).toBe(true);
+    expect(option.disabled).toBe(true);
+    await act(async () => option.onChange(false));
+    expect(save).not.toHaveBeenCalled();
+  } finally {
+    await rendered.unmount();
+  }
+});
+
+test("an organization administrator can disable sharing while the bot needs reconnecting", async () => {
+  const { bot, binding } = installedBot();
+  bot.status = "needs_reauth";
+  const permissions = ["connections:read", "connections:write"];
+  const context = appContext(permissions);
+  const access = accessContext(permissions);
+  access.accountGrants = [
+    { accountId: ACCOUNT_ID, subjectId: "subject-a", permissions: ["account:admin"] },
+  ] as AccessContext["accountGrants"];
+  context.accessContext = access;
+  const save = mock(
+    async (_workspace: string, _connection: string, request: { enabled: boolean }) => ({
+      ...request,
+      generation: 2,
+    }),
+  );
+  context.client = {
+    getOpenGeniSlackBotOrganizationAccess: async () => ({ enabled: true, generation: 1 }),
+    setOpenGeniSlackBotOrganizationAccess: save,
+  };
+  const rendered = await renderAdapter({
+    permissions,
+    connections: [bot],
+    bindings: [binding],
+    contextOverride: context,
+    sheetOpen: true,
+  });
+  try {
+    const option = optionById(rendered.model, "slack-organization-bot") as IntegrationToggleOption;
+    expect(option.checked).toBe(true);
+    expect(option.disabled).toBe(false);
+    await act(async () => option.onChange(false));
+    expect(save).toHaveBeenCalledWith(WORKSPACE_ID, bot.id, { enabled: false });
+    expect(
+      (optionById(rendered.model, "slack-organization-bot") as IntegrationToggleOption).disabled,
+    ).toBe(true);
+  } finally {
+    await rendered.unmount();
+  }
+});
 
 test("setup conflict survives remount and can be dismissed without clearing other search state", async () => {
   window.history.replaceState(

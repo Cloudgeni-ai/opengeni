@@ -337,9 +337,9 @@ import {
 import { ensureSessionGroupReady as ensureViewerSessionGroupReady } from "../sandbox/viewer";
 import {
   createOpenGeniSlackBotClient,
-  prepareScheduledSlackBotPost,
+  prepareSlackBotPost,
   resolveSlackBotConnectionForTool,
-  sendScheduledSlackBotPost,
+  sendSlackBotPost,
   type OpenGeniSlackBotClient,
 } from "../integrations/slack-bot";
 import { uploadSlackTaskFile } from "../integrations/slack-task-file-upload";
@@ -2076,7 +2076,22 @@ function registerSlackBotTools(
       sessionId,
       ...(connectionId ? { requestedConnectionId: connectionId } : {}),
     });
-    return createOpenGeniSlackBotClient(deps, resolved);
+    return createOpenGeniSlackBotClient(
+      {
+        ...deps,
+        authorizeProviderRequest: async () => {
+          if (sessionId !== null)
+            await authorizeFirstPartySession(
+              deps,
+              grant,
+              sessionId,
+              "session.first_party_mcp.call",
+            );
+          return true;
+        },
+      },
+      resolved,
+    );
   };
 
   server.registerTool(
@@ -2285,12 +2300,12 @@ function registerSlackBotTools(
     },
   );
 
-  // Scheduled runs post only to the channel a person chose on the task. The
-  // tools take no channel: the destination is read from the task each time,
-  // and the prepared message id is the durable Slack delivery identity.
-  const authorizeScheduledPost = async () => {
+  // Scheduled runs retain their person-chosen channel; ordinary chats supply
+  // an explicit destination. A server-owned prepared message id is the durable
+  // Slack delivery identity in both cases.
+  const authorizeBotPost = async () => {
     if (sessionId === null) {
-      throw new Error("Posting to the task's Slack channel requires a scheduled task run");
+      throw new Error("Bot posting requires a chat");
     }
     await authorizeFirstPartySession(deps, grant, sessionId, "session.first_party_mcp.call");
   };
@@ -2298,8 +2313,13 @@ function registerSlackBotTools(
     "slack_bot_prepare_message",
     {
       description:
-        "Prepare a message for this scheduled task's Slack channel, posted as the Opengeni workspace bot. The channel was chosen by a person on the task; you cannot pick another one. This saves the exact text without sending it. Then call slack_bot_send_prepared_message with the returned messageId. Pass threadTimestamp (a timestamp returned by an earlier send) to reply in that thread of the same channel.",
+        "Prepare a message as the Opengeni bot, never as a personal Slack account. In an ordinary chat supply channelId and, if multiple bots are available, connectionId. Scheduled runs omit both and use only the channel chosen by a person in Post to Slack. Nothing is sent until slack_bot_send_prepared_message is called with the returned messageId. Reuse that messageId for retries. Bot membership and organization sharing are checked when sending.",
       inputSchema: {
+        connectionId: z4.string().uuid().optional(),
+        channelId: z4
+          .string()
+          .regex(/^[CG][A-Z0-9]{2,63}$/)
+          .optional(),
         text: z4.string().min(1).max(40_000),
         threadTimestamp: z4
           .string()
@@ -2307,14 +2327,16 @@ function registerSlackBotTools(
           .optional(),
       },
     },
-    async ({ text, threadTimestamp }) => {
-      await authorizeScheduledPost();
+    async ({ text, threadTimestamp, channelId, connectionId }) => {
+      await authorizeBotPost();
       return json(
-        await prepareScheduledSlackBotPost({
+        await prepareSlackBotPost({
           db: deps.db,
           grant,
           sessionId,
           text,
+          ...(channelId ? { channelId } : {}),
+          ...(connectionId ? { connectionId } : {}),
           ...(threadTimestamp ? { threadTimestamp } : {}),
         }),
       );
@@ -2324,20 +2346,20 @@ function registerSlackBotTools(
     "slack_bot_send_prepared_message",
     {
       description:
-        "Send a message prepared by slack_bot_prepare_message in this chat, exactly as saved, to the task's Slack channel as the Opengeni workspace bot. If a send is interrupted or its outcome is unclear, retry with the same messageId: Opengeni checks Slack and never posts the same message twice. Do not prepare a new message just to retry.",
+        "Send a message prepared by slack_bot_prepare_message in this chat, exactly as saved, as the Opengeni bot. If a send is interrupted or its outcome is unclear, retry with the same messageId: Opengeni checks Slack and never posts the same message twice. Do not prepare a new message just to retry.",
       inputSchema: { messageId: z4.string().uuid() },
     },
     async ({ messageId }) => {
-      await authorizeScheduledPost();
+      await authorizeBotPost();
       return json(
-        await sendScheduledSlackBotPost({
+        await sendSlackBotPost({
           db: deps.db,
           settings: deps.settings,
           grant,
           sessionId,
           messageId,
           ...(deps.slackFetch ? { slackFetch: deps.slackFetch } : {}),
-          authorizeProviderRequest: authorizeScheduledPost,
+          authorizeProviderRequest: authorizeBotPost,
         }),
       );
     },

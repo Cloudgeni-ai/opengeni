@@ -331,7 +331,8 @@ export async function readInsightsUsage(
           ||jsonb_strip_nulls(jsonb_build_object(
           'provider',case when ${query.groupBy} in ('model','provider') then provider end,
           'model',case when ${query.groupBy}='model' then model end,
-          'workspaceId',case when ${query.groupBy}='workspace' then workspace_id end,
+          'workspaceId',case when ${query.groupBy}='workspace'
+            or (${query.groupBy}='rootSession' and kind='item') then workspace_id end,
           'you',case when ${query.groupBy}='person' or kind='personal' then you end))
           order by (measures->>'chargedMicros')::bigint+(measures->>'listMicros')::bigint desc,key) from selected_groups),'[]'::jsonb),
         'series',coalesce((select jsonb_agg(jsonb_build_object('start',points.start,'measures',coalesce(buckets.measures,zero.measures))

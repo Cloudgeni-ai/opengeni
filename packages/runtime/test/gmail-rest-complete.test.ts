@@ -743,36 +743,49 @@ describe("Gmail complete mailbox operations", () => {
         },
       );
       try {
-        await expect(
-          prepared.attemptToolEnvironment!.call({
-            operationId,
-            catalogDigest: prepared.attemptToolCatalog!.digest,
-            identity: {
-              serverId: "gmail",
-              toolName: ["read_failed", "file_failed", "result_failed"].includes(scenario)
-                ? "create_draft"
-                : uncertain
-                  ? "create_label"
-                  : "delete_label",
-            },
-            arguments:
-              scenario === "file_failed"
-                ? {
-                    to: ["owner@example.test"],
-                    attachments: [{ file: { path: "test.bin", sha256: "0".repeat(64) } }],
-                  }
-                : scenario === "read_failed"
-                  ? { to: ["owner@example.test"], replyToMessageId: "test-message" }
-                  : scenario === "result_failed"
-                    ? { to: ["owner@example.test"] }
-                    : uncertain
-                      ? { name: "Test" }
-                      : { labelId: "INBOX" },
-            caller: { kind: "codemode", subjectId: "test-owner" },
-          }),
-        ).rejects.toMatchObject({
-          connectorActionOutcome: uncertain ? "uncertain" : "not_executed",
+        const call = prepared.attemptToolEnvironment!.call({
+          operationId,
+          catalogDigest: prepared.attemptToolCatalog!.digest,
+          identity: {
+            serverId: "gmail",
+            toolName: ["read_failed", "file_failed", "result_failed"].includes(scenario)
+              ? "create_draft"
+              : uncertain
+                ? "create_label"
+                : "delete_label",
+          },
+          arguments:
+            scenario === "file_failed"
+              ? {
+                  to: ["owner@example.test"],
+                  attachments: [{ file: { path: "test.bin", sha256: "0".repeat(64) } }],
+                }
+              : scenario === "read_failed"
+                ? { to: ["owner@example.test"], replyToMessageId: "test-message" }
+                : scenario === "result_failed"
+                  ? { to: ["owner@example.test"] }
+                  : uncertain
+                    ? { name: "Test" }
+                    : { labelId: "INBOX" },
+          caller: { kind: "codemode", subjectId: "test-owner" },
         });
+        // The caller receives the bridge's own error result, never a generic
+        // replacement; only the connector ledger records the outcome.
+        const result = (await call) as {
+          isError?: boolean;
+          content?: Array<{ text?: string }>;
+          structuredContent?: {
+            error?: { connectorActionOutcome?: string; outcomeUnknown?: boolean };
+          };
+        };
+        expect(result.isError).toBe(true);
+        expect(result.content?.[0]?.text).not.toContain("Connector action");
+        if (uncertain) {
+          expect(result.structuredContent?.error?.outcomeUnknown).toBe(true);
+          expect(result.content?.[0]?.text).toContain("uncertain");
+        } else {
+          expect(result.structuredContent?.error?.connectorActionOutcome).toBe("not_executed");
+        }
         expect(outcomes).toEqual([uncertain ? "uncertain" : "not_executed"]);
         expect(providerMethods).toEqual(
           uncertain ? ["POST"] : scenario === "read_failed" ? ["GET"] : [],

@@ -277,7 +277,13 @@ export async function adoptCodemodeApproval(
   );
 }
 
-/** Read a handle with the current exact attempt and same original caller; old bearer authority is insufficient. */
+/**
+ * Read a handle with the current exact attempt and same original caller; old
+ * bearer authority is insufficient. This is a status read polled while a
+ * caller waits, so it is one plain snapshot select: it proves the exact live
+ * attempt in the same statement but takes no session/turn/attempt row locks
+ * and is not refused by a pending Pause/Steer, which owns the write fence only.
+ */
 export async function readTurnCodemodeOperation(
   db: Database,
   input: CodemodeContinuationScope & {
@@ -285,27 +291,51 @@ export async function readTurnCodemodeOperation(
     callerSubjectId: string;
   },
 ): Promise<CodemodeOperation | null> {
-  return await withRlsContext(
-    db,
-    input,
-    async (scoped) =>
-      await scoped.transaction(async (tx) => {
-        await lockActiveTurn(tx as unknown as Database, input);
-        const [row] = await tx
-          .select()
-          .from(schema.sessionAttemptCodemodeCalls)
-          .where(
-            and(
-              eq(schema.sessionAttemptCodemodeCalls.workspaceId, input.workspaceId),
-              eq(schema.sessionAttemptCodemodeCalls.sessionId, input.sessionId),
-              eq(schema.sessionAttemptCodemodeCalls.turnId, input.turnId),
-              eq(schema.sessionAttemptCodemodeCalls.operationId, input.operationId),
-            ),
-          )
-          .limit(1);
-        return row && codemodeCallerCanContinue(row, input) ? mapCodemodeOperation(row) : null;
-      }),
-  );
+  return await withRlsContext(db, input, async (scoped) => {
+    const [live] = await scoped
+      .select({ attemptId: schema.sessionTurnAttempts.id })
+      .from(schema.sessionTurns)
+      .innerJoin(
+        schema.sessionTurnAttempts,
+        and(
+          eq(schema.sessionTurnAttempts.id, schema.sessionTurns.activeAttemptId),
+          eq(schema.sessionTurnAttempts.turnId, schema.sessionTurns.id),
+          eq(schema.sessionTurnAttempts.sessionId, schema.sessionTurns.sessionId),
+          eq(schema.sessionTurnAttempts.accountId, schema.sessionTurns.accountId),
+          eq(
+            schema.sessionTurnAttempts.executionGeneration,
+            schema.sessionTurns.executionGeneration,
+          ),
+        ),
+      )
+      .where(
+        and(
+          eq(schema.sessionTurns.id, input.turnId),
+          eq(schema.sessionTurns.accountId, input.accountId),
+          eq(schema.sessionTurns.workspaceId, input.workspaceId),
+          eq(schema.sessionTurns.sessionId, input.sessionId),
+          eq(schema.sessionTurns.status, "running"),
+          eq(schema.sessionTurns.activeAttemptId, input.attemptId),
+          eq(schema.sessionTurns.executionGeneration, input.executionGeneration),
+          inArray(schema.sessionTurnAttempts.state, ["claimed", "running"]),
+        ),
+      )
+      .limit(1);
+    if (!live) throw new CodemodeOperationNotExecutableError();
+    const [row] = await scoped
+      .select()
+      .from(schema.sessionAttemptCodemodeCalls)
+      .where(
+        and(
+          eq(schema.sessionAttemptCodemodeCalls.workspaceId, input.workspaceId),
+          eq(schema.sessionAttemptCodemodeCalls.sessionId, input.sessionId),
+          eq(schema.sessionAttemptCodemodeCalls.turnId, input.turnId),
+          eq(schema.sessionAttemptCodemodeCalls.operationId, input.operationId),
+        ),
+      )
+      .limit(1);
+    return row && codemodeCallerCanContinue(row, input) ? mapCodemodeOperation(row) : null;
+  });
 }
 
 /** Signed sandbox subjects are attempt-bound; only the same owning turn can use this mapping. */

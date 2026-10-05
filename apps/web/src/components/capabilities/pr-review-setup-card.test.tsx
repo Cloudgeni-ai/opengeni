@@ -128,7 +128,7 @@ const managedSetup: PrReviewManagedGitHubSetup = {
   missing: [],
 };
 
-async function render(client: OpenGeniBrowserClient) {
+async function render(client: OpenGeniBrowserClient, canManage = true) {
   client.connectTransport ??= () =>
     new OpenGeniBrowserClient({
       baseUrl: "http://localhost:3000",
@@ -140,7 +140,9 @@ async function render(client: OpenGeniBrowserClient) {
   document.body.appendChild(container);
   const root = createRoot(container);
   await act(async () => {
-    root.render(<PrReviewSetupCard client={client} workspaceId={workspaceId} canManage={true} />);
+    root.render(
+      <PrReviewSetupCard client={client} workspaceId={workspaceId} canManage={canManage} />,
+    );
   });
   await act(async () => {
     await new Promise((resolve) => setTimeout(resolve, 0));
@@ -216,6 +218,87 @@ describe("OpenGeni Review Bot execution model", () => {
         body: { model: null },
       });
       expect(select!.value).toBe("");
+    } finally {
+      await rendered.unmount();
+    }
+  });
+});
+
+describe("Opengeni Lens availability", () => {
+  const unavailable = (missing: string[]): PrReviewManagedGitHubSetup => ({
+    ...managedSetup,
+    configured: false,
+    status: "unavailable",
+    connectUrl: null,
+    installations: [],
+    missing,
+  });
+  function clientFor(
+    setup: PrReviewManagedGitHubSetup,
+    configuration: {
+      registrations: PrReviewAppRegistration[];
+      repositories: PrReviewRepositoryBinding[];
+    },
+  ) {
+    return {
+      requestJson: mock(async (method: string, path: string) => {
+        if (method === "GET" && path.endsWith("/pr-review/registrations")) return configuration;
+        if (method === "GET" && path.endsWith("/pr-review/github")) return setup;
+        throw new Error(`Unexpected request: ${method} ${path}`);
+      }),
+      requestVoid: mock(async () => undefined),
+    } as unknown as OpenGeniBrowserClient;
+  }
+  const empty = { registrations: [], repositories: [] };
+
+  test("an unconfigured managed deployment shows no dead-end card", async () => {
+    const rendered = await render(clientFor(unavailable([]), empty));
+    try {
+      expect(rendered.container.innerHTML).toBe("");
+    } finally {
+      await rendered.unmount();
+    }
+  });
+
+  test("a non-admin on an unconfigured self-hosted deployment sees nothing", async () => {
+    const rendered = await render(
+      clientFor(unavailable(["OPENGENI_PR_REVIEW_GITHUB_APP_ID"]), empty),
+      false,
+    );
+    try {
+      expect(rendered.container.innerHTML).toBe("");
+    } finally {
+      await rendered.unmount();
+    }
+  });
+
+  test("an admin on an unconfigured self-hosted deployment sees the operator hint", async () => {
+    const rendered = await render(
+      clientFor(unavailable(["OPENGENI_PR_REVIEW_GITHUB_APP_ID"]), empty),
+    );
+    try {
+      expect(rendered.container.textContent).toContain(
+        "Missing: OPENGENI_PR_REVIEW_GITHUB_APP_ID.",
+      );
+      expect(rendered.container.textContent).not.toContain("Install on GitHub");
+    } finally {
+      await rendered.unmount();
+    }
+  });
+
+  test("existing bring-your-own review setup stays manageable without Lens", async () => {
+    const own: PrReviewAppRegistration = {
+      ...registration,
+      credentialKind: "github_app",
+      name: "Own review app",
+    };
+    const rendered = await render(
+      clientFor(unavailable([]), { registrations: [own], repositories: [repository] }),
+    );
+    try {
+      expect(rendered.container.textContent).toContain("Cloudgeni-ai/opengeni");
+      expect(rendered.container.textContent).not.toContain("Opengeni Lens is not configured");
+      expect(rendered.container.textContent).not.toContain("Install on GitHub");
     } finally {
       await rendered.unmount();
     }

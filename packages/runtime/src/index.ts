@@ -141,6 +141,7 @@ import {
 export { renderSessionGoalContext } from "@opengeni/contracts";
 import {
   MCP_MAX_CONCURRENT_SERVER_OPERATIONS,
+  MCP_MAX_RESPONSE_BYTES,
   MCP_MAX_TOOL_RESULT_BYTES,
   McpAggregateToolListBudget,
   assertMcpPayloadWithinBytes,
@@ -211,6 +212,7 @@ export {
   GmailRestMcpServer,
   OFFICIAL_GMAIL_MCP_URL,
   gmailRestToolIsMutation,
+  gmailToolAvailableOnDeployment,
   gmailToolSupportsScopes,
   isOfficialGmailMcpConfig,
   type GmailRestMcpServerOptions,
@@ -340,6 +342,8 @@ import {
   isModalCommandStartOutcomeUnknownError,
   isProviderCommandObservationUnavailableError,
   isRoutingMutationOutcomeUnknownError,
+  isRoutingMutationOutputRejectedError,
+  withRoutingMutationOutputRejectionFence,
   renderRoutingMutationOutcomeUnknownToolResult,
   repairSerializedRunStateExposedPorts,
   restoredSandboxSessionStateFromEntry,
@@ -2716,6 +2720,7 @@ export function mcpToolErrorOutput(error: unknown): {
   isError: true;
   content: [{ type: "text"; text: string }];
 } {
+  if (isRoutingMutationOutputRejectedError(error)) throw error;
   const text =
     invalidToolArgumentsText(error) ??
     (isIntegrationInvocationOutcomeUnknownError(error)
@@ -4058,6 +4063,7 @@ function buildAgentCapabilitiesFromComposition(
           return "Managed sandbox command observation unavailable. Outcome unknown. Do not replay the command or resend stdin; observe the existing invocation.";
         }
         if (isModalTaskExecStartPreDispatchUnavailableError(error)) throw error;
+        if (isRoutingMutationOutputRejectedError(error)) throw error;
         if (isRoutingMutationOutcomeUnknownError(error)) {
           // The outer physical fence must retain the exact process before
           // rendering uncertainty. Platform/setup calls still throw normally.
@@ -4108,6 +4114,24 @@ function buildAgentCapabilitiesFromComposition(
         });
       };
     }
+  }
+  // The SDK write_stdin and apply_patch fallbacks catch provider errors
+  // internally. Preserve exact typed settlement rejection outside that catch,
+  // with an invocation-local routing fence against later batch dispatch.
+  for (const capability of caps) {
+    const target = capability as unknown as { tools(): Tool<unknown>[] };
+    const original = target.tools;
+    target.tools = function () {
+      return original.call(this).map((tool) => {
+        if (tool.type !== "function") return tool;
+        const invoke = tool.invoke;
+        return {
+          ...tool,
+          invoke: (context, input, details) =>
+            withRoutingMutationOutputRejectionFence(() => invoke(context, input, details)),
+        };
+      });
+    };
   }
   return caps;
 }
@@ -5592,7 +5616,9 @@ function connectorActionGatewayLifecycle(input: {
             return;
           }
           // A provider-declared error is not evidence that no side effect occurred.
-          // Only a trusted in-process adapter can prove nonexecution.
+          // Only a trusted in-process adapter can prove nonexecution. The ledger
+          // records that judgement; the caller always receives the provider's
+          // own result, so its error text is never replaced or discarded.
           const returnedOutcome =
             input.resultOutcome?.(settlement.result) ??
             (settlement.result !== null &&
@@ -5605,14 +5631,6 @@ function connectorActionGatewayLifecycle(input: {
             requestId,
             outcome: returnedOutcome ?? "completed",
           });
-          if (returnedOutcome) {
-            throw new ConnectorActionExecutionError(
-              returnedOutcome === "not_executed"
-                ? "Connector action was not executed"
-                : "Connector action outcome is uncertain; inspect provider state before retrying",
-              returnedOutcome,
-            );
-          }
         },
       };
     },
@@ -5777,6 +5795,7 @@ async function prepareToolGatewayDefinitionsFromServers(
                 attemptToolCallMeta(server.registryId, context, serverIdentity),
                 {
                   ...(context.signal ? { signal: context.signal } : {}),
+                  maxResultBytes: MCP_MAX_RESPONSE_BYTES,
                 },
               );
             const recovery = configuredMcpOperationRecovery(server, toolName);
@@ -8045,7 +8064,17 @@ export class PrefixedMcpServer implements MCPServer {
     unprefixed: string,
     args: Record<string, unknown>,
     meta?: Record<string, unknown> | null,
-    options?: { signal?: AbortSignal },
+    options?: {
+      signal?: AbortSignal;
+      /**
+       * Exact-result bound for a successful provider result. A direct SDK call
+       * hands the result straight to the model, so it keeps the 1 MiB model cap.
+       * The attempt gateway passes the transport cap instead: its per-caller seam
+       * spills an oversized model result to a file, and Codemode receives the
+       * exact result, so a large read must never fail before that seam.
+       */
+      maxResultBytes?: number;
+    },
   ): Promise<AttemptToolResultValue> {
     if (!this.isAllowed(unprefixed)) {
       throw new Error(`MCP tool ${unprefixed} is not allowed for server ${this.registryId}`);
@@ -8116,7 +8145,11 @@ export class PrefixedMcpServer implements MCPServer {
         },
       });
       const result = AttemptToolResult.parse(output);
-      boundedMcpToolResult(result);
+      assertMcpPayloadWithinBytes(
+        result,
+        options?.maxResultBytes ?? MCP_MAX_TOOL_RESULT_BYTES,
+        "MCP tool result",
+      );
       recordOutcome(result.isError === true ? "provider_declared_error" : "success");
       if (unprefixed === "wait_for_input" && result.isError !== true) {
         completeWait?.(true);
@@ -8178,6 +8211,10 @@ export class PrefixedMcpServer implements MCPServer {
       // durably settles the operation as outcome_unknown.
       if (isRoutingMutationOutcomeUnknownError(error)) {
         recordOutcome("outcome_uncertain");
+        throw error;
+      }
+      if (isRoutingMutationOutputRejectedError(error)) {
+        recordOutcome("thrown_protocol_error");
         throw error;
       }
       // Generated OpenAPI/GraphQL adapters explicitly distinguish a provider

@@ -248,6 +248,21 @@ export const JEV_CODE_SEARCH_PASSTHROUGH_ENV: readonly string[] = [
   "OPENGENI_CODE_SEARCH_MODE",
 ];
 
+/** Provider-agnostic web search (`web_search` / `web_fetch` agent tools).
+ * Keys are server runtime secrets: the worker calls the provider and the keys
+ * never reach a sandbox. Unset keeps the tools off. */
+export const WEB_SEARCH_PROVIDER_PASSTHROUGH_ENV: readonly string[] = [
+  "OPENGENI_WEB_SEARCH_PROVIDER",
+  "OPENGENI_WEB_SEARCH_API_KEY",
+  "OPENGENI_WEB_SEARCH_BASE_URL",
+  "OPENGENI_WEB_FETCH_PROVIDER",
+  "OPENGENI_WEB_FETCH_API_KEY",
+  "OPENGENI_WEB_FETCH_BASE_URL",
+  "OPENGENI_WEB_SEARCH_PROVIDER_MODE",
+  "OPENGENI_WEB_SEARCH_PRICING_JSON",
+  "OPENGENI_WEB_SEARCH_REQUEST_TIMEOUT_MS",
+];
+
 /** Public workspace MCP OAuth rollout settings. The enable switch is
  * deployment-sensitive because OAuth needs a canonical managed/local human
  * session and one stable public issuer origin. */
@@ -2991,6 +3006,9 @@ function runtimeEnvValues(
     entries.push(valueEnv(key, env[key]));
   }
   for (const key of JEV_CODE_SEARCH_PASSTHROUGH_ENV) {
+    entries.push(valueEnv(key, env[key]));
+  }
+  for (const key of WEB_SEARCH_PROVIDER_PASSTHROUGH_ENV) {
     entries.push(valueEnv(key, env[key]));
   }
 

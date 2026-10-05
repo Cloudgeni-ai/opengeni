@@ -12,6 +12,16 @@ import {
 import OpenAI, { APIError } from "openai";
 import { AnthropicMessagesModel } from "./anthropic-messages";
 import { projectChatToolImages } from "./chat-tool-images";
+import { projectHistoryForProvider } from "./provider-history-adapter";
+import {
+  appendChatReasoningDetails,
+  chatReasoning,
+  chatReasoningDetails,
+  primaryChatChoice,
+  projectChatReasoning,
+  withChatReasoning,
+  type ChatReasoning,
+} from "./chat-reasoning";
 import { instrumentedModelFetch } from "./model-provider-client";
 import { CODEX_MODEL_ID_PREFIX } from "@opengeni/codex";
 import { XAI_SUBSCRIPTION_MODEL_ID_PREFIX } from "@opengeni/xai-subscription";
@@ -45,35 +55,64 @@ function chatCompletionFinishReason(value: unknown): unknown {
     : undefined;
 }
 
-/**
- * Chat-compatible providers can report `finish_reason: "unknown"` after an
- * interrupted generation. The upstream SDK otherwise converts that terminal
- * into an ordinary `response_done`, which can commit a truncated answer. Fail
- * before that boundary so the worker's fenced same-turn recovery owns the
- * continuation and no OpenGeni tool call from the ambiguous response executes.
- */
+function chatRequest(request: ModelRequest): ModelRequest {
+  const input =
+    typeof request.input === "string"
+      ? request.input
+      : (projectHistoryForProvider(request.input, "chat") as ModelRequest["input"]);
+  return projectChatReasoning(
+    projectChatToolImages(input === request.input ? request : { ...request, input }),
+  );
+}
+
+/** Reject ambiguous completion before the SDK can commit output or execute tools. */
 export class OpenGeniChatCompletionsModel extends OpenAIChatCompletionsModel {
   override async getResponse(request: ModelRequest): Promise<ModelResponse> {
-    const response = await super.getResponse(projectChatToolImages(request));
+    const response = await super.getResponse(chatRequest(request));
     if (isUnknownFinishReason(chatCompletionFinishReason(response.providerData))) {
       throw new UnknownModelFinishReasonError();
     }
-    return response;
+    return {
+      ...response,
+      output: withChatReasoning(
+        response.output,
+        chatReasoning(primaryChatChoice(response.providerData)?.message),
+        chatReasoningDetails(primaryChatChoice(response.providerData)?.message),
+      ),
+    };
   }
 
   override async *getStreamedResponse(request: ModelRequest): AsyncIterable<ResponseStreamEvent> {
     let finishReason: unknown;
-    for await (const event of super.getStreamedResponse(projectChatToolImages(request))) {
+    let reasoning: ChatReasoning | undefined;
+    let reasoningDetails: Record<string, unknown>[] | undefined;
+    for await (const event of super.getStreamedResponse(chatRequest(request))) {
       if (event.type === "model") {
         const observed = chatCompletionFinishReason(event.event);
         if (observed !== undefined && observed !== null) {
           finishReason = observed;
         }
+        const delta = chatReasoning(primaryChatChoice(event.event)?.delta);
+        const details = chatReasoningDetails(primaryChatChoice(event.event)?.delta);
+        if (details) appendChatReasoningDetails((reasoningDetails ??= []), details);
+        if (delta)
+          reasoning = {
+            field: delta.field,
+            text: (reasoning?.text ?? "") + delta.text,
+          };
       }
       if (event.type === "response_done" && isUnknownFinishReason(finishReason)) {
         throw new UnknownModelFinishReasonError();
       }
-      yield event;
+      yield event.type === "response_done"
+        ? {
+            ...event,
+            response: {
+              ...event.response,
+              output: withChatReasoning(event.response.output, reasoning, reasoningDetails),
+            },
+          }
+        : event;
     }
   }
 }
@@ -181,7 +220,14 @@ export class OpenGeniResponsesModel extends AppendOnlyOpenAIResponsesModel {
     const startedAt = performance.now();
     let outcome: "completed" | "failed" = "completed";
     try {
-      return super._buildResponsesCreateRequest(request, stream);
+      const input =
+        typeof request.input === "string"
+          ? request.input
+          : (projectHistoryForProvider(request.input, "responses") as ModelRequest["input"]);
+      return super._buildResponsesCreateRequest(
+        input === request.input ? request : { ...request, input },
+        stream,
+      );
     } catch (error) {
       outcome = "failed";
       throw error;

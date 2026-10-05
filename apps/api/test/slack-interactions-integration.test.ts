@@ -76,6 +76,7 @@ import {
   createSlackUserLinkToken,
   drainSlackInteractionsOnce,
   registerSlackInteractionRoutes,
+  slackTaskFirstPartyMcpTools,
   SLACK_SESSION_INSTRUCTIONS,
   verifySlackUserLinkToken,
 } from "../src/integrations/slack-interactions";
@@ -96,6 +97,30 @@ const SLACK_READ_ONLY_CONTEXT_TOOLS = [
   "slack_bot_file_content",
   "slack_bot_upload_file",
 ] as const;
+
+test("Slack context selection deduplicates defaults and respects the deployment ceiling", () => {
+  const workspaceSettings = {
+    sessionToolDefaults: {
+      firstPartyMcpTools: ["sessions_list", "slack_bot_list_channels", "slack_bot_channel_history"],
+    },
+  };
+  const selected = slackTaskFirstPartyMcpTools(testSettings(), workspaceSettings);
+  expect(selected).toEqual(["sessions_list", ...SLACK_READ_ONLY_CONTEXT_TOOLS]);
+  expect(new Set(selected).size).toBe(selected.length);
+  expect(selected.filter((tool) => tool === "slack_bot_list_channels")).toHaveLength(1);
+  expect(selected).not.toContain("slack_bot_post_message");
+  expect(selected).not.toContain("slack_bot_delete_message");
+
+  const restricted = slackTaskFirstPartyMcpTools(
+    testSettings({
+      allowedFirstPartyMcpTools: ["sessions_list", "slack_bot_thread_replies"],
+    }),
+    workspaceSettings,
+  );
+  expect(restricted).toEqual(["sessions_list", "slack_bot_thread_replies"]);
+  expect(restricted).not.toContain("slack_bot_list_channels");
+  expect(restricted).not.toContain("slack_bot_channel_history");
+});
 
 let available = true;
 let shared: SharedTestDatabase | null = null;
@@ -1765,7 +1790,10 @@ describe("Slack-to-OpenGeni real PostgreSQL acceptance", () => {
       expect(session!.first_party_mcp_tools).toEqual(
         trigger === "reaction"
           ? [...DEFAULT_FIRST_PARTY_MCP_TOOLS]
-          : [...DEFAULT_FIRST_PARTY_MCP_TOOLS, ...SLACK_READ_ONLY_CONTEXT_TOOLS],
+          : [...new Set([...DEFAULT_FIRST_PARTY_MCP_TOOLS, ...SLACK_READ_ONLY_CONTEXT_TOOLS])],
+      );
+      expect(new Set(session!.first_party_mcp_tools).size).toBe(
+        session!.first_party_mcp_tools.length,
       );
       // An explicitly chosen model narrows nothing and still carries over.
       expect(session!.reasoning_effort).toBe("high");
@@ -4676,9 +4704,11 @@ describe("Slack-to-OpenGeni real PostgreSQL acceptance", () => {
       where workspace_id = ${value.owner.workspaceId}
         and id = ${routes[0]!.session_id}`;
     expect(sessionPolicy!.first_party_mcp_tools).toEqual([
-      ...DEFAULT_FIRST_PARTY_MCP_TOOLS,
-      ...SLACK_READ_ONLY_CONTEXT_TOOLS,
+      ...new Set([...DEFAULT_FIRST_PARTY_MCP_TOOLS, ...SLACK_READ_ONLY_CONTEXT_TOOLS]),
     ]);
+    expect(new Set(sessionPolicy!.first_party_mcp_tools).size).toBe(
+      sessionPolicy!.first_party_mcp_tools.length,
+    );
     expect(sessionPolicy!.first_party_mcp_tools).not.toContain("slack_bot_post_message");
     expect(sessionPolicy!.first_party_mcp_tools).not.toContain("slack_bot_delete_message");
 

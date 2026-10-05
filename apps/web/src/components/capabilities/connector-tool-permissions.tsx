@@ -2,6 +2,7 @@ import { useEffect, useLayoutEffect, useRef, useState } from "react";
 import { ChevronRightIcon } from "lucide-react";
 import type {
   ConnectorToolPermission,
+  ConnectorToolPermissionEntry,
   ConnectorToolPermissionsResponse,
   UpdateConnectorToolPermissionsRequest,
 } from "@opengeni/contracts";
@@ -39,6 +40,18 @@ export function hasConnectorToolPermissionTarget(
     );
   }
   return true;
+}
+
+const sentenceCase = (text: string) => text.charAt(0).toUpperCase() + text.slice(1);
+
+/** Why this tool has its current choice: the setting that actually decides it. */
+export function permissionSourceText(tool: ConnectorToolPermissionEntry): string {
+  if (tool.resetReason) return "Action changed · reset to Ask first";
+  if (tool.source === "conflict") return "Two settings conflict, so it's blocked";
+  if (tool.conditional) return "Different choices for individual actions";
+  if (tool.source === "recommended") return "Recommended";
+  if (tool.source === "connector_default" || tool.inherited) return "Uses default choice";
+  return "Your choice";
 }
 
 export function PermissionSelect({
@@ -319,19 +332,9 @@ export function ConnectorToolPermissions({
                       <div className="flex items-start justify-between gap-3">
                         <div className="min-w-0">
                           <div className="break-words text-sm" title={tool.description}>
-                            {tool.title ?? tool.name.replaceAll("_", " ")}
+                            {tool.title ?? sentenceCase(tool.name.replaceAll("_", " "))}
                           </div>
-                          <p className="mt-1 text-xs text-fg-muted">
-                            {tool.resetReason
-                              ? "Action changed · reset to Ask first"
-                              : tool.conditional
-                                ? "Different choices for individual actions"
-                                : tool.source === "recommended"
-                                  ? "Recommended"
-                                  : tool.inherited
-                                    ? "Uses default choice"
-                                    : "Your choice"}
-                          </p>
+                          <p className="mt-1 text-xs text-fg-muted">{permissionSourceText(tool)}</p>
                         </div>
                         <PermissionSelect
                           label={`Permission for ${tool.title ?? tool.name}`}
@@ -348,7 +351,7 @@ export function ConnectorToolPermissions({
                           className="flex items-center justify-between gap-3 pl-4"
                         >
                           <span className="min-w-0 break-words text-sm text-fg">
-                            {action.actionName.replaceAll("_", " ")}
+                            {sentenceCase(action.actionName.replaceAll("_", " "))}
                           </span>
                           <PermissionSelect
                             label={`Permission for ${tool.title ?? tool.name}: ${action.actionName}`}
