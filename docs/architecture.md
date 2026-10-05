@@ -1498,6 +1498,11 @@ mutations are never replayed. Partially dispatched input remains outcome unknown
 queued input, DOM changes, navigation and emulation cannot cross into a replacement
 attachment. See [Connected Machines](connected-machines.md).
 
+Browser tab open/close keeps each physical outcome available to its caller.
+An older response or follow-up observation cannot replace a later selection.
+Once all pending selections settle, superseded tab mutations reconcile fresh
+inventory without replacing the selected page's admitted observation.
+
 ComputerSession attachments use canonical frame streams, including relay kind 4,
 for screens and windows. The viewer paints those exact authenticated pixels and
 uses the painted frame ID, target generation and geometry for human `/actions`;
@@ -1547,6 +1552,55 @@ desktop discovery is independent of semantic inspection.
 
 `ComputerBackend` supplies desktop operations behind the shared `ComputerDriver`.
 Opt-in [CUA](../packages/browserd/CUA-PILOT.md) includes Windows semantic actions; native remains default.
+
+Native framed Desktop input negotiates `pointerClickContinuation`. A supported
+viewer sends its first click immediately; the real second human click may be
+submitted while the first HTTP receipt is pending. `clickCount: 2` delivers only
+one second pair and references `continuationOfOperationId`. The controller's
+target queue requires that exact first click's terminal completed receipt, with
+the same actor, source generation and target generation. Native state also
+requires its confirmed operation, button, point and capture geometry, and
+consumes that proof once. Older helpers and CUA reject continuation before input.
+Each action still uses its exact painted frame and live target geometry. Canvas
+resize or relocation ends continuation recognition. A completed click can retain
+its original bounded metadata and already-captured newer matching frames; those
+extra frames authorize only `clickCount: 2`, never ordinary input or observation.
+Original deadlines remain. Fresh frames cannot replace a failed or unknown first
+delivery. Other mutations and intervening invalidation discard the proof. Later
+viewer input waits for both click receipts. Linux serializes physical pointer,
+keyboard, focus, activating launch and clipboard copy/paste on its exact seat;
+ordinary background AT-SPI actions stay independent. Their exact native
+invocations revoke click proof throughout admission, completion and cancellation;
+an overlapping first click cannot restore it, even with a newly captured frame.
+
+Linux Window Focus activates the exact X11 client retained in its observation,
+rechecking the original accessibility object, process and geometry before input.
+An advertised, verified window manager receives one activation request with an
+X-server timestamp; direct input focus is allowed only on a positively unmanaged
+display. Success requires the same client to own active and input focus and remain
+settled after observation. A refusal or uncertain settlement never forces a
+second route. Window activation does not require a non-focusable AT-SPI frame to
+accept element focus; child semantic Focus still uses its exact accessible node.
+The physical-seat lock and mutation admission guard cover both paths.
+
+Linux Window keyboard and clipboard copy/paste retain at most 64 immutable
+observed window identities for 60 seconds across read-only refreshes. Semantic
+refs and root activation keep their latest-observation rules. Retained identities
+never replace live checks of the original accessible object, process, geometry
+and active/input focus; no action implicitly activates or substitutes Screen.
+All text/chord components in a physical batch are resolved before its first
+input request, so known unsupported mappings remain definite zero-input failures.
+Once any request may have escaped, failures retain an unknown outcome.
+
+Window pointer preflight follows the mapped point through the X11 tree and
+requires the original client window and the same XRes resource owner, including
+embedded children. Covered or unprovable points are refused before XTEST input.
+A verified event-delivery boundary, identity button mappings and a provable
+input route without foreign grabs are also required. Ordinary managed windows
+without that boundary are unsupported and never fall back automatically to Screen.
+A scoped server guard spans native preflight, delivery and postchecks, excluding
+ordinary client focus/topology changes. This does not exclude hardware input or
+impervious XTEST clients; failed postchecks remain uncertain and are never replayed.
 
 Capability negotiation advertises only `manual` and `on-verify` recording.
 Historical `ComputerUse`, `on-turn`, and `computer_screenshot` contract shapes
