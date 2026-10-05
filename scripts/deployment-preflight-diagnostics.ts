@@ -28,3 +28,21 @@ export function publicProbeErrorDiagnostic(error: unknown): string {
   }
   return metadata.join(" ");
 }
+
+/** Parse a dial target without returning credentials, paths, or query strings
+ * in public diagnostics. Bare IPv6 addresses must use bracket notation. */
+export function probeHostPort(
+  value: string,
+  defaultPort: number,
+): { host: string; port: number } | null {
+  try {
+    const url = new URL(value.includes("://") ? value : `tcp://${value}`);
+    const port = Number(url.port || defaultPort);
+    let host = url.hostname;
+    if (host.startsWith("[") && host.endsWith("]")) host = host.slice(1, -1);
+    if (!host || !Number.isInteger(port) || port < 1 || port > 65_535) return null;
+    return { host, port };
+  } catch {
+    return null;
+  }
+}
