@@ -3085,6 +3085,13 @@ from the committed pointer and binds one exact root for its lifetime. There is
 no new user message, per-turn machine cwd query, silent fallback, path
 reinterpretation, or blind replay of an ambiguous operation.
 
+The same boundary recognizes the home resolver's typed
+`RoutingBackendRecoveryRequiredError` only for `resolve_home_backend` with
+`pending` or `superseded` recovery, before the requested provider operation
+is dispatched. Completed peer-tool receipts remain durable. A post-dispatch
+error, unresolved mutation, or incomplete/unreadable cause graph does not gain
+this recovery authority.
+
 A sandboxless attempt uses a plain Agent whose native capabilities cannot be
 added in place. If an authorized attachment commits an active machine pointer,
 the next provider-dispatch barrier first persists the complete preceding tool
