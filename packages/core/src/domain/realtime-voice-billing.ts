@@ -136,6 +136,32 @@ export function realtimeVoiceOfferProblem(
 export const REALTIME_VOICE_INSUFFICIENT_CREDITS_MESSAGE =
   "Live voice needs Opengeni credits. Add credits to continue.";
 
+/** Spendable general credits, only model-scoped free credits, or neither. */
+export type VoiceCreditStanding = "spendable" | "promotional_only" | "none";
+
+export function voiceCreditStanding(balance: {
+  balanceMicros: number;
+  promotionalCredits?: readonly { remainingMicros: number }[] | undefined;
+}): VoiceCreditStanding {
+  if (balance.balanceMicros > 0) return "spendable";
+  return (balance.promotionalCredits ?? []).some((grant) => grant.remainingMicros > 0)
+    ? "promotional_only"
+    : "none";
+}
+
+/**
+ * Insufficient-credit copy for voice. Free credits are scoped to chat models,
+ * so an account holding only those must not be told it has nothing.
+ */
+export function voiceInsufficientCreditsMessage(
+  feature: "Live voice" | "Voice input",
+  standing: VoiceCreditStanding,
+): string {
+  return standing === "promotional_only"
+    ? `Free credits don't cover ${feature.toLowerCase()}. Add credits to use it.`
+    : `${feature} needs Opengeni credits. Add credits to continue.`;
+}
+
 function startOfUtcMonth(now: Date): Date {
   return new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), 1));
 }
@@ -177,7 +203,7 @@ export function createRealtimeVoiceBilling(deps: { db: Database; settings: Setti
     if (balance.balanceMicros <= 0) {
       return new TranscriptionBillingRefusedError({
         code: "insufficient_credits",
-        message: REALTIME_VOICE_INSUFFICIENT_CREDITS_MESSAGE,
+        message: voiceInsufficientCreditsMessage("Live voice", voiceCreditStanding(balance)),
       });
     }
     const allowance = await checkWorkspaceAllowance(deps.db, {
@@ -239,9 +265,13 @@ export function createRealtimeVoiceBilling(deps: { db: Database; settings: Setti
 
     /** Spendable credits are positive (always true when credits are not enforced). */
     async hasSpendableCredits(accountId: string): Promise<boolean> {
-      if (!billingActive()) return true;
-      const balance = await getSpendableCreditBalance(deps.db, accountId);
-      return balance.balanceMicros > 0;
+      return (await this.creditStanding(accountId)) === "spendable";
+    },
+
+    /** Credit standing for live voice ("spendable" when credits are not enforced). */
+    async creditStanding(accountId: string): Promise<VoiceCreditStanding> {
+      if (!billingActive()) return "spendable";
+      return voiceCreditStanding(await getSpendableCreditBalance(deps.db, accountId));
     },
 
     /**

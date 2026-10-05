@@ -27,6 +27,7 @@ import {
   type TranscriptionBilling,
   type TranscriptionBillingContext,
 } from "../transcription";
+import { voiceCreditStanding, voiceInsufficientCreditsMessage } from "./realtime-voice-billing";
 
 /** Credit debit type and usage source for deployment-funded voice input. */
 export const VOICE_INPUT_DEBIT_TYPE = VOICE_TRANSCRIPTION_DEBIT_TYPE;
@@ -136,7 +137,7 @@ export function createVoiceInputBilling(deps: {
       if (balance.balanceMicros <= 0) {
         throw new TranscriptionBillingRefusedError({
           code: "insufficient_credits",
-          message: "Voice input needs Opengeni credits. Add credits to continue.",
+          message: voiceInsufficientCreditsMessage("Voice input", voiceCreditStanding(balance)),
         });
       }
       const refusal = await checkWorkspaceAllowance(deps.db, {

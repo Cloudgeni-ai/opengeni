@@ -77,7 +77,7 @@ export type RealtimeModelOption = {
 function realtimeRefusalLabel(code: string | null | undefined): string | null {
   switch (code) {
     case "insufficient_credits":
-      return "Out of credits";
+      return "Credits needed";
     case "allowance_exhausted":
     case "monthly_model_cost_limit":
       return "Usage limit reached";

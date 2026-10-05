@@ -91,7 +91,8 @@ const defaultMessages: ComposerTranscriptionMessages = {
   errorPermissionDenied: "Microphone access is blocked. Allow it in site settings, then try again.",
   errorNotSupported: "Voice input is not supported on this device.",
   errorUnavailable: "Voice input is not configured.",
-  errorInsufficientCredits: "Out of credits. Recording saved; retry after adding credits.",
+  errorInsufficientCredits:
+    "Voice input needs credits. Recording saved; retry after adding credits.",
   errorAllowanceExhausted: "Usage limit reached. Recording saved for later.",
   errorPolicyBlocked: "Voice input isn't allowed for this account or workspace.",
   errorTooLarge: "Recording is too large. Try a shorter message.",
