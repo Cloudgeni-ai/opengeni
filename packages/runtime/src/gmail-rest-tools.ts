@@ -271,6 +271,17 @@ const composeTools = new Set([
   "delete_draft",
 ]);
 const draftReads = new Set(["get_draft", "list_drafts"]);
+/** A watch needs the deployment's Pub/Sub topic; without one it cannot start. */
+export function gmailToolAvailableOnDeployment(
+  name: string,
+  deployment: { watchTopicName?: string | undefined },
+): boolean {
+  return (
+    name !== "watch_mailbox" ||
+    /^projects\/[^/]+\/topics\/[^/]+$/u.test(deployment.watchTopicName ?? "")
+  );
+}
+
 export function gmailToolSupportsScopes(name: string, scopes: readonly string[]): boolean {
   const has = (suffix: string) =>
     scopes.includes(`https://www.googleapis.com/auth/gmail.${suffix}`);

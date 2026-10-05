@@ -356,9 +356,11 @@ export type {
   CodexRealtimeControllerStatus,
   CodexRealtimeMicrophoneState,
   CodexRealtimeOwnerStorage,
+  CodexRealtimeRefusal,
   CreateCodexRealtimeControllerOptions,
   RealtimeControllerTransportStarter,
 } from "./codex-realtime-controller";
+export { codexRealtimeRefusal } from "./codex-realtime-controller";
 export {
   createGatewayRealtimeTransportStarter,
   createXaiSubscriptionRealtimeTransportStarter,
@@ -749,6 +751,7 @@ export type {
   SessionRealtimeMode,
   SessionRealtimeModel,
   SessionRealtimeMutationResponse,
+  SessionRealtimeStopInstruction,
   SessionRealtimeState,
   WorkspaceModelCatalogModel,
   WorkspaceModelCatalogResponse,

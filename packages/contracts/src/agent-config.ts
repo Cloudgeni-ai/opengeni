@@ -423,8 +423,11 @@ export type AgentFunctionToolClass = AgentCapabilityId | "runtime" | "sandbox";
 
 /** Tools served outside the first-party MCP catalog, by the name the model sees. */
 export const AGENT_FUNCTION_TOOL_CAPABILITIES = {
-  // Hosted provider tools.
+  // Web search: the provider-hosted `web_search`/`x_search` tools, or
+  // Opengeni's provider-agnostic `web_search` and `web_fetch` function tools
+  // (one transport per turn; the capability is the same).
   web_search: "webSearch",
+  web_fetch: "webSearch",
   x_search: "webSearch",
   image_generation: "media",
   // Runtime function tools.

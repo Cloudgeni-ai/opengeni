@@ -1,6 +1,10 @@
 import { and, desc, eq } from "drizzle-orm";
+import { parseVerifiedAttemptToolCatalog } from "@opengeni/codemode";
 import {
+  McpConnectionAccountBindings,
   ToolActionReview,
+  toolReviewContextFromSchema,
+  type ToolReviewContext,
   toolReviewAction,
   toolReviewDetails,
   toolReviewFields,
@@ -11,6 +15,7 @@ import { type Database, withRlsContext } from "./database";
 import * as schema from "./schema";
 import { connectorActionFingerprint } from "./connector-action-fingerprint";
 import { fromPostgresLosslessJson } from "./lossless-json";
+import { legacyToolActionReview } from "./legacy-tool-action-reviews";
 
 type ReviewScope = {
   accountId: string;
@@ -65,10 +70,17 @@ async function reviewSnapshot(db: Database, input: ReviewScope) {
         .orderBy(desc(schema.agentRunStates.stateVersion))
         .limit(32);
       for (const state of states) {
-        const pending = fromPostgresLosslessJson(
-          state.pendingApprovals,
-          state.pendingApprovalsCodecVersion,
-        );
+        // Recovery is best effort: one unreadable state must not hide the
+        // decision. Unrecovered arguments leave decline as the only response.
+        let pending: unknown;
+        try {
+          pending = fromPostgresLosslessJson(
+            state.pendingApprovals,
+            state.pendingApprovalsCodecVersion,
+          );
+        } catch {
+          continue;
+        }
         if (!Array.isArray(pending)) continue;
         for (const value of pending) {
           if (!value || typeof value !== "object") continue;
@@ -86,19 +98,94 @@ async function reviewSnapshot(db: Database, input: ReviewScope) {
               continue;
             }
           }
-          if (
-            connectorActionFingerprint({ ...record.request, arguments: args }) !==
-            record.request.actionFingerprint
-          )
+          let fingerprint: string;
+          try {
+            fingerprint = connectorActionFingerprint({ ...record.request, arguments: args });
+          } catch {
             continue;
+          }
+          if (fingerprint !== record.request.actionFingerprint) continue;
           record.request.reviewArguments = JSON.stringify(args);
           break;
         }
         if (record.request.reviewArguments !== null) break;
       }
+      // Recovered bytes predate the saved review context, so the context that
+      // hides schema-protected fields must be proven from the immutable catalog of
+      // the attempt that created the request. Without that proof the arguments
+      // stay hidden and decline remains the only response.
+      if (record.request.reviewArguments !== null && record.request.reviewContext === null) {
+        const context = await catalogReviewContext(scoped, input, record);
+        if (context) record.request.reviewContext = context;
+        else record.request.reviewArguments = null;
+      }
     }
     return record;
   });
+}
+
+async function catalogReviewContext(
+  scoped: Database,
+  input: ReviewScope,
+  record: {
+    request: typeof schema.connectorActionRequests.$inferSelect;
+    turn: typeof schema.sessionTurns.$inferSelect;
+  },
+): Promise<ToolReviewContext | null> {
+  try {
+    const { request, turn } = record;
+    const [stored] = await scoped
+      .select({ catalog: schema.sessionAttemptToolCatalogs.catalog })
+      .from(schema.sessionAttemptToolCatalogs)
+      .where(
+        and(
+          eq(schema.sessionAttemptToolCatalogs.accountId, input.accountId),
+          eq(schema.sessionAttemptToolCatalogs.workspaceId, input.workspaceId),
+          eq(schema.sessionAttemptToolCatalogs.sessionId, input.sessionId),
+          eq(schema.sessionAttemptToolCatalogs.turnId, request.turnId),
+          eq(schema.sessionAttemptToolCatalogs.attemptId, request.creationAttemptId),
+          eq(
+            schema.sessionAttemptToolCatalogs.executionGeneration,
+            request.creationExecutionGeneration,
+          ),
+        ),
+      )
+      .limit(1);
+    if (!stored) return null;
+    const entries = parseVerifiedAttemptToolCatalog(stored.catalog).entries.filter(
+      (item) =>
+        item.identity.serverId === request.serverId && item.identity.toolName === request.toolName,
+    );
+    if (entries.length !== 1) return null;
+    const entry = entries[0]!;
+    const bindings = McpConnectionAccountBindings.safeParse(turn.mcpAccountBindings);
+    const binding = bindings.success
+      ? bindings.data.find((item) => item.serverId === request.serverId)
+      : undefined;
+    return toolReviewContextFromSchema(entry.inputSchema, {
+      kind:
+        entry.source === "mcp" && binding?.providerDomain === "gmailmcp.googleapis.com"
+          ? "gmail"
+          : "generic",
+      ...(entry.title ? { title: entry.title } : {}),
+      ...(binding?.accountLabel ? { accountLabel: binding.accountLabel } : {}),
+    });
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Older approvals have no saved review. Their presentation is best effort: any
+ * failure to rebuild it answers "no saved review", and clients then fall back to
+ * the approval's own arguments instead of hiding the decision.
+ */
+async function presentableLegacyReview(db: Database, input: ReviewScope) {
+  try {
+    return await legacyToolActionReview(db, input);
+  } catch {
+    return null;
+  }
 }
 
 /** The HTTP/core caller must independently authorize this session. RLS remains active here. */
@@ -107,13 +194,13 @@ export async function getToolActionReview(
   input: ReviewScope,
 ): Promise<ToolActionReview | null> {
   const record = await reviewSnapshot(db, input);
-  if (!record) return null;
+  if (!record) return (await presentableLegacyReview(db, input))?.review ?? null;
   const { request, operation, turn } = record;
   let status: ToolReviewStatus =
     request.status === "uncertain"
       ? "unknown"
       : request.status === "blocked"
-        ? "revoked"
+        ? "blocked"
         : request.status;
   if (operation?.state === "outcome_unknown") status = "unknown";
   else if (operation?.state === "cancelled")
@@ -131,8 +218,10 @@ export async function getToolActionReview(
     ["pending", "approved"].includes(status)
   )
     status = "cancelled";
-  const available =
-    status === "pending" && turn.status === "requires_action" && request.reviewArguments !== null;
+  // A person can always decline a waiting action. Approving needs the exact saved
+  // arguments; when an older request's arguments cannot be recovered, decline is
+  // the only safe decision and keeps the session from staying stuck.
+  const waiting = status === "pending" && turn.status === "requires_action";
   const args = request.reviewArguments;
   const context = request.reviewContext ?? undefined;
   const parsed = decodeReviewArguments(args);
@@ -157,14 +246,22 @@ export async function getToolActionReview(
       : {}),
     ...toolReviewFields(args, context),
     reason:
-      request.policySource === "explicit"
-        ? "Your permission setting for this action is Ask."
-        : request.policySource === "ambiguous"
-          ? "Overlapping permission settings require a review."
-          : "This action asks for approval by default.",
+      status === "blocked"
+        ? request.policySource === "explicit"
+          ? "Your permission settings block this action."
+          : request.policySource === "ambiguous"
+            ? "Two permission settings conflict, so this action is blocked."
+            : "This action is blocked by default."
+        : request.policySource === "explicit"
+          ? "This action is set to Ask first."
+          : "This action asks first by default.",
     createdAt: request.createdAt.toISOString(),
     updatedAt: (operation?.updatedAt ?? request.updatedAt).toISOString(),
-    availableActions: available ? ["approve", "reject"] : [],
+    availableActions: waiting
+      ? request.reviewArguments !== null
+        ? ["approve", "reject"]
+        : ["reject"]
+      : [],
     detailsAvailable: args !== null,
   });
 }
@@ -174,6 +271,20 @@ export async function getToolReviewDetailsPage(
   input: ReviewScope & { actionDigest: string; path: string; offset: number },
 ) {
   const record = await reviewSnapshot(db, input);
+  if (!record) {
+    const legacy = await presentableLegacyReview(db, input);
+    if (!legacy?.proven || legacy.review.actionDigest !== input.actionDigest) return null;
+    try {
+      return {
+        version: 1 as const,
+        id: input.approvalId,
+        actionDigest: input.actionDigest,
+        ...toolReviewDetails(legacy.args, legacy.context, input.path, input.offset),
+      };
+    } catch {
+      return null;
+    }
+  }
   if (
     !record ||
     record.request.actionFingerprint !== input.actionDigest ||

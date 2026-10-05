@@ -69,6 +69,7 @@ import {
   SandboxResumeIdentityMismatchError,
   SandboxResumeIdentityUnavailableError,
   RoutingActiveRouteChangedError,
+  RoutingMutationOutputRejectedError,
   RoutingWorkspaceRootChangedError,
   SelfhostedWorkspaceRootChangedError,
   ChannelAConflictError,
@@ -1214,6 +1215,20 @@ export function mapChannelAError(error: unknown, waitSignal?: AbortSignal): unkn
     error instanceof SandboxResumeIdentityUnavailableError
   )
     return new HTTPException(409, { message: error.message });
+  if (error instanceof RoutingMutationOutputRejectedError) {
+    const revoked = error.reasonCode === "authority_revoked";
+    return new ApiHttpError(revoked ? 403 : 409, {
+      code: revoked ? "forbidden" : "conflict",
+      message: error.message,
+      retryable: false,
+      outcomeUnknown: false,
+      details: {
+        code: error.code,
+        reasonCode: error.reasonCode,
+        physicalOutcome: "resolved",
+      },
+    });
+  }
   if (
     error instanceof RoutingActiveRouteChangedError ||
     error instanceof RoutingWorkspaceRootChangedError ||
@@ -1307,6 +1322,13 @@ export function channelAOperationFailureDiagnostic(
       reason: "request_cancelled",
       status: 499,
       errorCode: "sandbox_channel_a_cancelled",
+    };
+  }
+  if (error instanceof RoutingMutationOutputRejectedError) {
+    return {
+      reason: "request_rejected",
+      status: error.reasonCode === "authority_revoked" ? 403 : 409,
+      errorCode: "sandbox_channel_a_operation_failed",
     };
   }
   if (error instanceof SandboxProviderReadLockUnavailableError) {

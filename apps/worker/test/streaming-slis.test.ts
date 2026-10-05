@@ -172,6 +172,114 @@ describe("StreamTimingMetrics — TTFT + inter-delta gaps", () => {
       /opengeni_stream_inter_delta_gap_seconds_count\{[^}]*class="reasoning"[^}]*\} 1\b/,
     );
   });
+
+  test("TTFT buckets resolve a slow first token instead of saturating at 10s", async () => {
+    const observability = worker();
+    let now = 0;
+    const timing = new StreamTimingMetrics(observability, {
+      provider: "codex-subscription",
+      now: () => now,
+    });
+
+    now = 25_000;
+    timing.onEvent("agent.reasoning.delta");
+
+    const metrics = await observability.prometheusMetrics();
+    for (const le of ["10", "20"]) {
+      expect(metrics).toMatch(
+        new RegExp(`opengeni_stream_ttft_seconds_bucket\\{[^}]*le="${le}"[^}]*\\} 0\\b`),
+      );
+    }
+    for (const le of ["30", "120", "300"]) {
+      expect(metrics).toMatch(
+        new RegExp(`opengeni_stream_ttft_seconds_bucket\\{[^}]*le="${le}"[^}]*\\} 1\\b`),
+      );
+    }
+  });
+
+  test("splits OpenGeni pre-dispatch work from provider first-content latency", async () => {
+    const observability = worker();
+    let now = 0;
+    const timing = new StreamTimingMetrics(observability, {
+      provider: "codex-subscription",
+      now: () => now,
+    });
+
+    now = 1_000;
+    timing.onModelRequestEntry();
+    now = 1_500;
+    timing.onModelRequestEntry(); // re-entered admission keeps the earliest entry
+    now = 3_000;
+    timing.onProviderDispatch(); // ours: 2.0s
+    now = 10_000;
+    timing.onEvent("agent.reasoning.delta"); // provider any: 7.0s; user TTFT 10.0s
+    now = 11_000;
+    timing.onEvent("agent.reasoning.delta"); // not a first delta
+    now = 15_000;
+    timing.onEvent("agent.message.delta"); // provider text: 12.0s
+
+    const metrics = await observability.prometheusMetrics();
+    expect(metrics).toMatch(
+      /opengeni_model_request_pre_dispatch_seconds_sum\{[^}]*provider="codex-subscription"[^}]*\} 2\b/,
+    );
+    expect(metrics).toMatch(
+      /opengeni_model_provider_ttft_seconds_sum\{[^}]*content="any"[^}]*provider="codex-subscription"[^}]*\} 7\b/,
+    );
+    expect(metrics).toMatch(
+      /opengeni_model_provider_ttft_seconds_count\{[^}]*content="any"[^}]*\} 1\b/,
+    );
+    expect(metrics).toMatch(
+      /opengeni_model_provider_ttft_seconds_sum\{[^}]*content="text"[^}]*provider="codex-subscription"[^}]*\} 12\b/,
+    );
+    expect(metrics).toMatch(/opengeni_stream_ttft_seconds_sum\{[^}]*\} 10\b/);
+  });
+
+  test("provider TTFT survives a lagging structural event and follows the latest dispatch", async () => {
+    const observability = worker();
+    let now = 0;
+    const timing = new StreamTimingMetrics(observability, {
+      provider: "azure",
+      now: () => now,
+    });
+
+    timing.onModelRequestEntry();
+    now = 100;
+    timing.onProviderDispatch(); // first request: tool-call only, no content
+    now = 5_000;
+    timing.onModelRequestEntry();
+    now = 5_200;
+    timing.onProviderDispatch(); // transport retry / next request
+    now = 5_300;
+    timing.onEvent("agent.toolCall.output"); // consumer catches up after dispatch
+    now = 6_200;
+    timing.onEvent("agent.message.delta");
+
+    const metrics = await observability.prometheusMetrics();
+    expect(metrics).toMatch(/opengeni_model_request_pre_dispatch_seconds_count\{[^}]*\} 2\b/);
+    // 0.1 + 0.2 seconds of our own work.
+    expect(metrics).toMatch(/opengeni_model_request_pre_dispatch_seconds_sum\{[^}]*\} 0\.30*\d*\b/);
+    expect(metrics).toMatch(
+      /opengeni_model_provider_ttft_seconds_sum\{[^}]*content="any"[^}]*\} 1\b/,
+    );
+    expect(metrics).toMatch(
+      /opengeni_model_provider_ttft_seconds_count\{[^}]*content="any"[^}]*\} 1\b/,
+    );
+  });
+
+  test("records no provider TTFT without an observed dispatch", async () => {
+    const observability = worker();
+    let now = 0;
+    const timing = new StreamTimingMetrics(observability, {
+      provider: "openai",
+      now: () => now,
+    });
+    now = 1_000;
+    timing.onEvent("agent.message.delta");
+
+    const metrics = await observability.prometheusMetrics();
+    expect(metrics).not.toContain("opengeni_model_provider_ttft_seconds_count{");
+    expect(metrics).not.toContain("opengeni_model_request_pre_dispatch_seconds_count{");
+  });
 });
 
 describe("provider request lifecycle diagnostics", () => {

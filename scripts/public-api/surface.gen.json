@@ -1607,7 +1607,8 @@
       "method": "POST",
       "path": "/v1/workspaces/:workspaceId/artifacts/:artifactId/playback-source",
       "sdk": [
-        "OpenGeniClient.createVideoArtifactPlaybackSource"
+        "OpenGeniClient.createVideoArtifactPlaybackSource",
+        "createSessionProxyHandler"
       ],
       "request": [],
       "response": [
@@ -5725,7 +5726,8 @@
       "method": "GET",
       "path": "/v1/workspaces/:workspaceId/realtime-model-catalog",
       "sdk": [
-        "OpenGeniClient.getWorkspaceRealtimeModelCatalog"
+        "OpenGeniClient.getWorkspaceRealtimeModelCatalog",
+        "createSessionProxyHandler"
       ],
       "request": [],
       "response": [
@@ -10483,6 +10485,8 @@
         "$.runtime.catalogTrust.state": "enum!=[\"\\\"legacy_active\\\"\",\"\\\"trusted\\\"\",\"\\\"unverified\\\"\"]",
         "$.runtime.mcpServerId": "string?",
         "$.runtime.notes": "string! null",
+        "$.runtime.operatorOAuthClient": "object?",
+        "$.runtime.operatorOAuthClient.configured": "boolean!",
         "$.runtime.transport": "string?",
         "$.source": "ref(CapabilitySource)!",
         "$.stale": "boolean!",
@@ -10987,7 +10991,7 @@
         "$.connectionEpoch": "integer!",
         "$.connectionId": "string!",
         "$.modeVersion": "integer!",
-        "$.model": "const!=[\"\\\"gpt-live-1-boulder-alpha\\\"\"]",
+        "$.model": "enum!=[\"\\\"gpt-live-1-boulder-alpha\\\"\",\"\\\"opengeni-azure/gpt-live-1\\\"\"]",
         "$.replay": "boolean!",
         "$.sdp": "string!",
         "$.startupFenceSequence": "integer!",
@@ -21779,7 +21783,7 @@
         "output"
       ],
       "shape": {
-        "$": "enum=[\"\\\"gpt-live-1-boulder-alpha\\\"\",\"\\\"opengeni-gateway/openai/gpt-realtime-2.1\\\"\",\"\\\"opengeni-gateway/openai/gpt-realtime-mini\\\"\",\"\\\"opengeni-gateway/xai/grok-voice-think-fast-2.0\\\"\",\"\\\"supergrok/grok-voice-think-fast-2.0\\\"\",\"\\\"workspace-gateway/openai/gpt-realtime-2.1\\\"\",\"\\\"workspace-gateway/openai/gpt-realtime-mini\\\"\",\"\\\"workspace-gateway/xai/grok-voice-think-fast-2.0\\\"\"]"
+        "$": "enum=[\"\\\"gpt-live-1-boulder-alpha\\\"\",\"\\\"opengeni-azure/gpt-live-1\\\"\",\"\\\"opengeni-gateway/openai/gpt-realtime-2.1\\\"\",\"\\\"opengeni-gateway/openai/gpt-realtime-mini\\\"\",\"\\\"opengeni-gateway/xai/grok-voice-think-fast-2.0\\\"\",\"\\\"supergrok/grok-voice-think-fast-2.0\\\"\",\"\\\"workspace-gateway/openai/gpt-realtime-2.1\\\"\",\"\\\"workspace-gateway/openai/gpt-realtime-mini\\\"\",\"\\\"workspace-gateway/xai/grok-voice-think-fast-2.0\\\"\"]"
       }
     },
     "SessionRealtimeMutationResponse": {
@@ -21789,7 +21793,8 @@
       "shape": {
         "$": "object",
         "$.mode": "ref(SessionRealtimeMode)!",
-        "$.replay": "boolean!"
+        "$.replay": "boolean!",
+        "$.stop": "ref(SessionRealtimeStopInstruction)?"
       }
     },
     "SessionRealtimeState": {
@@ -21798,6 +21803,16 @@
       ],
       "shape": {
         "$": "enum=[\"\\\"active\\\"\",\"\\\"ended\\\"\"]"
+      }
+    },
+    "SessionRealtimeStopInstruction": {
+      "io": [
+        "output"
+      ],
+      "shape": {
+        "$": "object",
+        "$.code": "string!",
+        "$.message": "string!"
       }
     },
     "SessionRetryRequest": {
@@ -23184,7 +23199,7 @@
         "output"
       ],
       "shape": {
-        "$": "enum=[\"\\\"approved\\\"\",\"\\\"cancelled\\\"\",\"\\\"completed\\\"\",\"\\\"executing\\\"\",\"\\\"expired\\\"\",\"\\\"failed\\\"\",\"\\\"partial\\\"\",\"\\\"pending\\\"\",\"\\\"rejected\\\"\",\"\\\"revoked\\\"\",\"\\\"stale\\\"\",\"\\\"unavailable\\\"\",\"\\\"unknown\\\"\"]"
+        "$": "enum=[\"\\\"approved\\\"\",\"\\\"blocked\\\"\",\"\\\"cancelled\\\"\",\"\\\"completed\\\"\",\"\\\"executing\\\"\",\"\\\"expired\\\"\",\"\\\"failed\\\"\",\"\\\"partial\\\"\",\"\\\"pending\\\"\",\"\\\"rejected\\\"\",\"\\\"revoked\\\"\",\"\\\"stale\\\"\",\"\\\"unavailable\\\"\",\"\\\"unknown\\\"\"]"
       }
     },
     "TranscribeAudioResponse": {
@@ -24517,7 +24532,7 @@
         "output"
       ],
       "shape": {
-        "$": "enum=[\"\\\"cancelled\\\"\",\"\\\"invalid_audio\\\"\",\"\\\"network\\\"\",\"\\\"not_supported\\\"\",\"\\\"permission_denied\\\"\",\"\\\"policy_blocked\\\"\",\"\\\"provider\\\"\",\"\\\"timeout\\\"\",\"\\\"too_large\\\"\",\"\\\"unavailable\\\"\",\"\\\"unknown\\\"\"]"
+        "$": "enum=[\"\\\"allowance_exhausted\\\"\",\"\\\"cancelled\\\"\",\"\\\"insufficient_credits\\\"\",\"\\\"invalid_audio\\\"\",\"\\\"monthly_model_cost_limit\\\"\",\"\\\"network\\\"\",\"\\\"not_supported\\\"\",\"\\\"permission_denied\\\"\",\"\\\"policy_blocked\\\"\",\"\\\"provider\\\"\",\"\\\"timeout\\\"\",\"\\\"too_large\\\"\",\"\\\"unavailable\\\"\",\"\\\"unknown\\\"\"]"
       }
     },
     "VoiceInputProviderId": {
@@ -24526,7 +24541,7 @@
         "output"
       ],
       "shape": {
-        "$": "enum=[\"\\\"azure-openai\\\"\",\"\\\"codex-subscription\\\"\",\"\\\"openai\\\"\",\"\\\"supergrok-subscription\\\"\"]"
+        "$": "enum=[\"\\\"azure-mai\\\"\",\"\\\"azure-openai\\\"\",\"\\\"codex-subscription\\\"\",\"\\\"openai\\\"\",\"\\\"supergrok-subscription\\\"\"]"
       }
     },
     "WorkClaimDiscoverySummary": {
@@ -25647,6 +25662,7 @@
         "$.label": "string!",
         "$.provider": "enum!=[\"\\\"Connected Codex\\\"\",\"\\\"Connected SuperGrok\\\"\",\"\\\"OpenGeni\\\"\",\"\\\"Your Gateway\\\"\"]",
         "$.recommended": "boolean!",
+        "$.unavailableCode": "string? null",
         "$.unavailableReason": "string! null"
       }
     },
@@ -26304,6 +26320,8 @@
       "CodexRealtimeMicrophoneState": "type",
       "CodexRealtimeNegotiator": "type",
       "CodexRealtimeOwnerStorage": "type",
+      "codexRealtimeRefusal": "value",
+      "CodexRealtimeRefusal": "type",
       "CodexRealtimeV3Bridge": "type",
       "CodexRealtimeV3BridgeOptions": "type",
       "CodexRealtimeV3BridgeSnapshot": "type",
@@ -27264,6 +27282,7 @@
       "SessionRealtimeModel": "type",
       "SessionRealtimeMutationResponse": "type",
       "SessionRealtimeState": "type",
+      "SessionRealtimeStopInstruction": "type",
       "SessionRetryRequest": "type",
       "SessionRetryResponse": "type",
       "SessionStatus": "type",
@@ -27826,6 +27845,8 @@
       "CodexRealtimeDiagnosticKind": "type",
       "CodexRealtimeMicrophoneState": "type",
       "CodexRealtimeOwnerStorage": "type",
+      "codexRealtimeRefusal": "value",
+      "CodexRealtimeRefusal": "type",
       "createCodexRealtimeController": "value",
       "CreateCodexRealtimeControllerOptions": "type",
       "hasStoredSessionRealtimeOwnerProof": "value",
@@ -28695,6 +28716,7 @@
       "ApplyPatchOperation": "type",
       "applyPatchOps": "value",
       "applyPatchOpsFromToolItem": "value",
+      "applySessionCapabilityAccess": "value",
       "approvalsFromRequiresAction": "value",
       "ApprovalSurface": "value",
       "ApprovalSurfaceMessages": "type",
@@ -28767,9 +28789,12 @@
       "createEmbeddedSessionClient": "value",
       "CreateEmbeddedSessionClientOptions": "type",
       "createOlderHistoryLoadReceipt": "value",
+      "createSessionRetainedScreenshotLoader": "value",
       "createToolRegistry": "value",
       "CreateToolRegistryOptions": "type",
       "createVoiceRecordingManifest": "value",
+      "createWorkspaceRetainedArtifactLoader": "value",
+      "createWorkspaceRetainedVideoLoader": "value",
       "CREDIT_EXHAUSTION_MESSAGE": "value",
       "creditExhaustedFromEvents": "value",
       "DEFAULT_ARTIFACT_LABELS": "value",
@@ -28995,6 +29020,7 @@
       "PierreFileProps": "type",
       "planVoiceRecordingChunkCommit": "value",
       "pointsFor": "value",
+      "prepareSessionCapabilityAccess": "value",
       "prepareVoiceRecordingChunk": "value",
       "presentFailure": "value",
       "projectClientModelRows": "value",
@@ -29013,8 +29039,11 @@
       "RenderAllowanceExhausted": "type",
       "ResponsiveBasis": "type",
       "RetainedArtifactLoader": "type",
+      "RetainedArtifactLoaderClient": "type",
       "retainedImageId": "value",
       "RetainedScreenshotLoader": "type",
+      "RetainedScreenshotLoaderClient": "type",
+      "RetainedVideoLoaderClient": "type",
       "runnableLatencyModesForModel": "value",
       "sandboxCommandExitCode": "value",
       "SandboxFileLocation": "type",
@@ -29042,6 +29071,7 @@
       "SESSION_STATUS_META": "value",
       "sessionAuthRecommendation": "value",
       "SessionCapabilitiesState": "type",
+      "SessionCapabilityAccessPlan": "type",
       "SessionCapabilityFrame": "value",
       "SessionCapabilityFrameProps": "type",
       "SessionChrome": "value",
@@ -30209,6 +30239,13 @@
       "protectedFill",
       "report",
       "verify"
+    ],
+    "AzureLiveDataChannel": [
+      "asRtcDataChannel",
+      "close",
+      "drain",
+      "readyState",
+      "send"
     ],
     "BrowserAccountsApiError": [
       "name"

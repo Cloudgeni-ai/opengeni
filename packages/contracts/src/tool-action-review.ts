@@ -174,6 +174,7 @@ export const ToolReviewStatus = z.enum([
   "cancelled",
   "expired",
   "revoked",
+  "blocked",
   "stale",
   "failed",
   "unavailable",

@@ -88,13 +88,22 @@ export type RenewSessionRealtimeInput = {
   expectedVersion: number;
   now?: Date;
   leaseMs?: number;
+  /**
+   * False keeps the current lease unchanged (owner still proven). Used when a
+   * deployment-funded call ran out of credits: the client drains and ends
+   * inside the remaining lease, and an ignoring client lapses on its own.
+   */
+  extendLease?: boolean;
 };
 
-export type EndSessionRealtimeInput = Omit<RenewSessionRealtimeInput, "leaseMs"> & {
+export type EndSessionRealtimeInput = Omit<RenewSessionRealtimeInput, "leaseMs" | "extendLease"> & {
   reason: Extract<SessionRealtimeEndReason, "user_stop" | "browser_unload">;
 };
 
-export type AssertSessionRealtimeOwnerInput = Omit<RenewSessionRealtimeInput, "leaseMs">;
+export type AssertSessionRealtimeOwnerInput = Omit<
+  RenewSessionRealtimeInput,
+  "leaseMs" | "extendLease"
+>;
 
 export type SessionRealtimeMutationResult = {
   mode: SessionRealtimeMode;
@@ -592,6 +601,15 @@ export async function renewSessionRealtimeInTransaction(
       eventIds: [expired.eventId],
       workflowWakeRevision: expired.workflowWakeRevision,
       expired: true,
+    };
+  }
+  if (input.extendLease === false) {
+    return {
+      mode: mapRealtimeMode(row),
+      replay: false,
+      eventIds: [],
+      workflowWakeRevision: null,
+      expired: false,
     };
   }
   const [renewed] = await db

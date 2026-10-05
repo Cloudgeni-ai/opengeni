@@ -166,6 +166,9 @@ export type EventingState = {
   firstModelRequestPreparationRecorded: boolean;
   firstModelRequestCheckpointAt: number | null;
   initialModelWireDispatch: InitialModelWireDispatchClock;
+  /** Diagnostic only: the current stream's timing hook for a native transport's
+   *  literal provider dispatch. Never joins, fences or fails the request. */
+  providerDispatchObserver: (() => void) | null;
   companyBrainContextContributions: readonly ModelContextContributionSummary[] | null;
   /** Skill ids in this turn's frozen, model-visible Skill index; telemetry only. */
   modelVisibleSkillIds: ReadonlySet<string> | null;
@@ -315,6 +318,7 @@ export function createTurnContext(input: {
       firstModelRequestPreparationRecorded: false,
       firstModelRequestCheckpointAt: null,
       initialModelWireDispatch: new InitialModelWireDispatchClock(),
+      providerDispatchObserver: null,
       companyBrainContextContributions: null,
       modelVisibleSkillIds: null,
     },

@@ -31,7 +31,10 @@ and receives a compact waiting handle. Arguments remain in protected storage.
 Waiting releases the execution claim and dispatcher capacity. The ordinary human
 decision transaction and wake outbox resume the same turn; a current authorized
 attempt adopts the exact operation after checking its executable identity.
-Original attempt and catalog references never change.
+Original attempt and catalog references never change. Recovery joins tool
+preparation on use: the dispatcher reads the turn's journal first and waits for
+full tool preparation only when an unfinished durable operation must resume, so
+every other turn keeps the eager-only first-request barrier.
 
 Approval resumes a stored operation, not a JavaScript stack. Persist a complete
 selection and chunk plan before submitting changes. Each chunk has its own
@@ -55,6 +58,11 @@ reason from the saved policy. `getToolActionReview` and `getToolReviewDetails`
 require ordinary session access. Details are bound to the saved action digest,
 not a new provider query. The shared React components supply pending review,
 receipts and paginated details. Web owns navigation, not a separate renderer.
+
+A waiting action can always be declined. An older request whose saved
+arguments cannot be recovered offers Decline only: it cannot be approved, but
+declining resumes the turn so the session is never stuck. A Block reports its
+own reason, including a conflict between two equally specific settings.
 
 Primary fields are bounded summaries; the full selection remains accessible in
 pages of 25 (at most 50). Long text is split into 4,000-character parts. Unusually

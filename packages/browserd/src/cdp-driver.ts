@@ -1165,7 +1165,15 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
       } catch (error) {
         // Input has already been dispatched. A closing popup or failed
         // follow-up read cannot prove that the mutation itself failed.
-        if (!(error instanceof InteractionDefiniteDriverError)) throw error;
+        const retiredSession =
+          (error instanceof CdpProtocolError &&
+            error.code === -32_001 &&
+            this.states.get(state.targetId) !== state) ||
+          (error instanceof InteractionControllerError &&
+            error.cause instanceof CdpSessionDetachedError);
+        // A native invalid-session reply after this exact attachment retired
+        // is target loss, not loss of the browser transport or healthy peers.
+        if (!(error instanceof InteractionDefiniteDriverError) && !retiredSession) throw error;
         throw new InteractionOutcomeUnknownDriverError(
           "outcome_unknown",
           "Browser input was sent, but the resulting page could not be observed. Check the current tabs before continuing; do not repeat the action automatically.",

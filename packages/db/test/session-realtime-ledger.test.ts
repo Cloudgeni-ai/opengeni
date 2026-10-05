@@ -1430,6 +1430,21 @@ describe("session realtime ledger", () => {
     expect(persisted.session).toEqual(before.session);
   });
 
+  test("a delegation without an echoed input transcript is admitted, not a failed sync", async () => {
+    // Azure Live delegates without echoing the user's words. Throwing here
+    // failed the whole sync batch, which the browser retried forever.
+    const value = await privateFixture(true);
+    const connection = await claimInitial(value);
+    await complete(value, connection.claimed.connection);
+    await proveProviderStarted(value, connection.claimed.connection);
+    const input = delegationSyncInput(value, connection.claimed.connection);
+    input.entries[0]!.payload.inputTranscript = "";
+    const admitted = await transaction(value.owner.workspaceId, (tx) =>
+      syncSessionRealtimeLedgerInTransaction(tx, input),
+    );
+    expect(admitted.accepted[0]!.entry.turnId).toEqual(expect.any(String));
+  });
+
   test("voice delegation preserves its frozen connector snapshot through replay", async () => {
     const value = await privateFixture(true);
     const connection = await claimInitial(value);

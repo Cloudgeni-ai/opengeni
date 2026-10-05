@@ -115,6 +115,7 @@ export * from "./editable-artifact-serialized-commit";
 export * from "./signup-attribution";
 export * from "./product-lifecycle-facts";
 export * from "./tool-catalog";
+export * from "./mcp-structured-content";
 export * from "./mcp-oauth";
 export * from "./tool-result-spill";
 export * from "./interaction";
@@ -1864,6 +1865,9 @@ export const TranscriptionErrorCode = z.enum([
   "too_large",
   "invalid_audio",
   "unknown",
+  "insufficient_credits",
+  "allowance_exhausted",
+  "monthly_model_cost_limit",
 ]);
 export type TranscriptionErrorCode = z.infer<typeof TranscriptionErrorCode>;
 
@@ -2120,6 +2124,7 @@ export const VoiceInputProviderId = z.enum([
   "codex-subscription",
   "openai",
   "azure-openai",
+  "azure-mai",
 ]);
 export type VoiceInputProviderId = z.infer<typeof VoiceInputProviderId>;
 
@@ -7078,7 +7083,7 @@ export const CodexRealtimeWebrtcResponse = z
       .min(1)
       .max(1024 * 1024),
     version: CodexRealtimeWebrtcVersion,
-    model: z.literal("gpt-live-1-boulder-alpha"),
+    model: z.enum(["gpt-live-1-boulder-alpha", "opengeni-azure/gpt-live-1"]),
     connectionId: z.string().uuid(),
     connectionEpoch: z.number().int().positive(),
     startupFenceSequence: z.number().int().nonnegative(),
@@ -7235,6 +7240,7 @@ export const SyncSessionRealtimeLedgerResponse = z
 export type SyncSessionRealtimeLedgerResponse = z.infer<typeof SyncSessionRealtimeLedgerResponse>;
 
 export const SessionRealtimeModel = z.enum([
+  "opengeni-azure/gpt-live-1",
   "gpt-live-1-boulder-alpha",
   "supergrok/grok-voice-think-fast-2.0",
   "opengeni-gateway/openai/gpt-realtime-2.1",
@@ -7253,6 +7259,12 @@ export const WorkspaceRealtimeModelCatalogItem = z.object({
   description: z.string().min(1),
   available: z.boolean(),
   unavailableReason: z.string().nullable(),
+  /**
+   * Machine-readable reason when unavailable. Credit refusals use the same
+   * codes as voice input (`insufficient_credits`, `allowance_exhausted`,
+   * `monthly_model_cost_limit`).
+   */
+  unavailableCode: z.string().min(1).max(64).nullable().optional(),
   recommended: z.boolean(),
 });
 export type WorkspaceRealtimeModelCatalogItem = z.infer<typeof WorkspaceRealtimeModelCatalogItem>;
@@ -7308,9 +7320,21 @@ export const EndSessionRealtimeRequest = RenewSessionRealtimeRequest.extend({
 });
 export type EndSessionRealtimeRequest = z.infer<typeof EndSessionRealtimeRequest>;
 
+/**
+ * Server instruction to end a live call now. Deployment-funded voice returns
+ * it from a heartbeat when credits run out; the lease is then no longer
+ * extended, so the client should drain and end the call gracefully.
+ */
+export const SessionRealtimeStopInstruction = z.object({
+  code: z.string().min(1).max(64),
+  message: z.string().min(1).max(512),
+});
+export type SessionRealtimeStopInstruction = z.infer<typeof SessionRealtimeStopInstruction>;
+
 export const SessionRealtimeMutationResponse = z.object({
   mode: SessionRealtimeMode,
   replay: z.boolean(),
+  stop: SessionRealtimeStopInstruction.optional(),
 });
 export type SessionRealtimeMutationResponse = z.infer<typeof SessionRealtimeMutationResponse>;
 
@@ -12088,6 +12112,11 @@ export const CapabilityRuntime = z.object({
       ]),
     })
     .optional(),
+  // Server-derived connectability: present when the connector's OAuth
+  // authorization server refuses self-registration, so connecting needs an
+  // operator-registered client. `configured` is whether this deployment has
+  // one; connector surfaces offer the row only when it is true.
+  operatorOAuthClient: z.object({ configured: z.boolean() }).optional(),
 });
 export type CapabilityRuntime = z.infer<typeof CapabilityRuntime>;
 

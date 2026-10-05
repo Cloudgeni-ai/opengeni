@@ -136,6 +136,29 @@ strict, own-data JSON; malformed values return fixed errors. These checks do
 not replace authenticated provider acquisition or lost-COMMIT-ACK reconciliation.
 The earlier audit and all remaining continuity requirements above are unchanged.
 
+The private `modal-native-original-configuration.ts` groundwork samples only own
+explicit deployment token and environment fields and the existing canonical
+32-byte environments-encryption root. Missing or unsupported data is OFF. Its
+HOST-pinned endpoint is the Modal 0.9.0 default `https://api.modal.com:443`, never
+an ambient SDK/profile lookup. The complete original declaration bytes, refs,
+scope, recipe and direct-read profile are bound by a framed, separately derived
+HMAC-SHA256 equality commitment. The pinned read policy includes exact source,
+auth headers, no retries, bounded chain and explicit bundled TLS root digest.
+The environment is retained exactly, including an explicitly supplied empty
+selection; those CP reads do not transmit it. There is no invented default.
+
+The extracted draft is sensitive private storage input, not evidence that any
+configuration, grant or admission committed. Neither equality nor the in-memory
+sample authenticates a host/human or licenses I/O. The real host authorizer must
+join the full original rows and commit declaration/config/grant/reservation and
+outstanding acquisition before prefix I/O. Unknown ACK requires identical-key
+read reconciliation, not another lookup. Original-pair/key/config changes do not
+select former credentials, another key or a successor. Restart reconstruction,
+protected storage and actual caller integration remain separate missing seams.
+Owned mutable transient key/pair buffers are wiped; immutable JS strings are not
+claimed cryptographically erased. Disposal releases only sample memory, never a
+native I/O slot, provider writer, custody grant or operation.
+
 ## Evidence and ownership
 
 Before changes, 137 installed-SDK/native fault tests passed across eight files,

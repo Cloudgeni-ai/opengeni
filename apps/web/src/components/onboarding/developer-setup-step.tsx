@@ -268,9 +268,9 @@ export function DeveloperSetupStep({
             {opening ? "Opening your setup chat…" : "Let Opengeni implement it"}
           </Button>
           <p className="text-xs leading-[18px] text-fg-muted">
-            Opens a chat in a new {DEVELOPER_SETUP_WORKSPACE_NAME} workspace that already has your
-            key. The agent asks about your product, suggests connecting GitHub, and builds it with
-            you.
+            Opens a new {DEVELOPER_SETUP_WORKSPACE_NAME} workspace that already has your key, with
+            your setup message ready to send. Send it and the agent asks about your product,
+            suggests connecting GitHub, and builds it with you.
           </p>
         </div>
 

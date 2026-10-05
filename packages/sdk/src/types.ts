@@ -83,7 +83,7 @@ export type CodexRealtimeWebrtcRequest = {
 export type CodexRealtimeWebrtcResponse = {
   sdp: string;
   version: CodexRealtimeWebrtcVersion;
-  model: "gpt-live-1-boulder-alpha";
+  model: "gpt-live-1-boulder-alpha" | "opengeni-azure/gpt-live-1";
   connectionId: string;
   connectionEpoch: number;
   startupFenceSequence: number;
@@ -271,6 +271,7 @@ export type SyncSessionRealtimeLedgerResponse = {
 };
 
 export type SessionRealtimeModel =
+  | "opengeni-azure/gpt-live-1"
   | "gpt-live-1-boulder-alpha"
   | "supergrok/grok-voice-think-fast-2.0"
   | "opengeni-gateway/openai/gpt-realtime-2.1"
@@ -287,6 +288,8 @@ export type WorkspaceRealtimeModelCatalogItem = {
   description: string;
   available: boolean;
   unavailableReason: string | null;
+  /** Machine-readable reason when unavailable, e.g. `insufficient_credits`. */
+  unavailableCode?: string | null | undefined;
   recommended: boolean;
 };
 
@@ -333,9 +336,17 @@ export type EndSessionRealtimeRequest = RenewSessionRealtimeRequest & {
   reason: Extract<SessionRealtimeEndReason, "user_stop" | "browser_unload">;
 };
 
+/** Server instruction to end a live call now (for example, out of credits). */
+export type SessionRealtimeStopInstruction = {
+  code: string;
+  message: string;
+};
+
 export type SessionRealtimeMutationResponse = {
   mode: SessionRealtimeMode;
   replay: boolean;
+  /** Present on a heartbeat when the server stopped extending the lease. */
+  stop?: SessionRealtimeStopInstruction | undefined;
 };
 
 export type SessionStatus =
@@ -4291,22 +4302,43 @@ export type ClientConfig = {
   /** Session proxy sandbox-path download opt-in; absent on native deployments. */
   sandboxFiles?: boolean | undefined;
   /**
+   * `false` when a host's session proxy turns live voice off
+   * (`createSessionProxyHandler({ realtimeVoice: false })`), so UIs hide the
+   * voice button. Otherwise absent: availability comes from the workspace's
+   * realtime model catalog.
+   */
+  realtimeVoice?: boolean | undefined;
+  /**
    * Session proxy only: the workspace the proxy resolved for this user, so a
    * browser pointed at the proxy (`<OpenGeniChat baseUrl=... />`) needs no
    * workspace id. Absent on native deployments and older proxies.
    */
   workspaceId?: string | undefined;
   /**
-   * Session proxy capability for the embedded artifact viewer; absent on
-   * native deployments. The live socket is ticket-authenticated and reached
-   * directly; the cache partition identifies the proxied user.
+   * Session proxy capability for the embedded artifact viewer and inline Site
+   * previews; absent on native deployments. The live socket is
+   * ticket-authenticated and reached directly; the cache partition identifies
+   * the proxied user. `false` when the proxy does not serve artifacts, so
+   * stock UIs show Site previews as unavailable instead of failing on click.
    */
   artifacts?:
     | {
         editableLiveUrl: string;
         cachePartition: { accountId: string; principalId: string; authorizationEpoch: string };
       }
+    | false
     | undefined;
+  /**
+   * Session proxy only: whether the browser may start a chat (the proxy has a
+   * `createSession` hook). Stock UIs hide "New chat" when `false`; absent on
+   * native deployments and older proxies.
+   */
+  sessionCreation?: boolean | undefined;
+  /**
+   * Session proxy only: whether users may archive or restore their chats.
+   * Stock UIs hide "Archive" when `false`; absent on native deployments.
+   */
+  archive?: boolean | undefined;
   /** Native browser microphone capture + server-side transcription capability. */
   voiceInput?: ClientVoiceInputConfig | undefined;
   /**
@@ -4382,7 +4414,10 @@ export type TranscriptionRecordingErrorCode =
   | "unavailable"
   | "too_large"
   | "invalid_audio"
-  | "unknown";
+  | "unknown"
+  | "insufficient_credits"
+  | "allowance_exhausted"
+  | "monthly_model_cost_limit";
 
 export type TranscriptionRecordingState =
   | "uploading"
@@ -5075,6 +5110,7 @@ export type UpdateSlackChannelRoutesRequest = {
 };
 
 export type VoiceInputProviderId =
+  | "azure-mai"
   | "supergrok-subscription"
   | "codex-subscription"
   | "openai"
@@ -7406,6 +7442,12 @@ export type CapabilityRuntime = {
           | "missing_verification";
       }
     | undefined;
+  /**
+   * Present when connecting needs an operator-registered OAuth client because
+   * the provider refuses self-registration; `configured` is whether this
+   * deployment has one. Connector surfaces offer the row only when true.
+   */
+  operatorOAuthClient?: { configured: boolean } | undefined;
 };
 
 export type CapabilityCatalogItem = {

@@ -5,6 +5,7 @@ import { describe, expect, test } from "bun:test";
 
 import * as database from "../src/database";
 import * as membershipAccess from "../src/workspace-membership-access";
+import * as connectionMetadata from "../src/connection-metadata";
 import * as root from "../src/index";
 import type {
   CreateDbOptions as RootCreateDbOptions,
@@ -43,6 +44,12 @@ describe("database foundation boundary", () => {
     expect(root.createDb).toBe(database.createDb);
     expect(root.grantWorkspaceAccess).toBe(membershipAccess.grantWorkspaceAccess);
     expect(root.listWorkspaceMembers).toBe(membershipAccess.listWorkspaceMembers);
+    expect(root.getConnectionMetadata).toBe(connectionMetadata.getConnectionMetadata);
+    expect(root.listConnectionsMetadata).toBe(connectionMetadata.listConnectionsMetadata);
+    expect(root).not.toHaveProperty("connectionMetadataColumns");
+    expect(root).not.toHaveProperty("mapConnectionMetadata");
+    expect(root).not.toHaveProperty("connectionSubjectVisibility");
+    expect(root).not.toHaveProperty("withConnectionSubjectRls");
     expect(root.registerDbBinding).toBe(database.registerDbBinding);
     expect(root.rlsContextForWorkspace).toBe(database.rlsContextForWorkspace);
     expect(root.rlsStrategyFor).toBe(database.rlsStrategyFor);

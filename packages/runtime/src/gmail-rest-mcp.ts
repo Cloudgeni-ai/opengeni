@@ -17,8 +17,9 @@ import {
   GMAIL_EXTRA_MUTATIONS,
   GMAIL_COMPOSE_PROPERTIES,
   GMAIL_ATTACHMENT_SOURCE_PROPERTIES,
+  gmailToolAvailableOnDeployment,
 } from "./gmail-rest-tools";
-export { gmailToolSupportsScopes } from "./gmail-rest-tools";
+export { gmailToolAvailableOnDeployment, gmailToolSupportsScopes } from "./gmail-rest-tools";
 
 export const OFFICIAL_GMAIL_MCP_URL = "https://gmailmcp.googleapis.com/mcp/v1";
 export const GMAIL_REST_API_BASE = "https://gmail.googleapis.com/gmail/v1/users/me";
@@ -483,7 +484,11 @@ export class GmailRestMcpServer implements LocalMcpBridgeServer {
   async invalidateToolsCache(): Promise<void> {}
 
   async listTools(): Promise<GmailTool[]> {
-    return structuredClone(GMAIL_REST_MCP_TOOLS);
+    return structuredClone(
+      GMAIL_REST_MCP_TOOLS.filter((tool) =>
+        gmailToolAvailableOnDeployment(tool.name, this.options),
+      ),
+    );
   }
 
   async reviewContext(
@@ -1243,7 +1248,7 @@ export class GmailRestMcpServer implements LocalMcpBridgeServer {
     }
     if (tool === "watch_mailbox") {
       const topic = this.options.watchTopicName;
-      if (!topic || !/^projects\/[^/]+\/topics\/[^/]+$/u.test(topic))
+      if (!topic || !gmailToolAvailableOnDeployment(tool, this.options))
         throw new GmailRestInputError("Gmail watch requires a deployment-configured Pub/Sub topic");
       const labelIds = optionalStrings(args.labelIds, "labelIds");
       const behavior = enumArg(args.labelFilterBehavior, "labelFilterBehavior", [

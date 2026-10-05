@@ -1,6 +1,6 @@
 import { sql } from "drizzle-orm";
 import { rawRows, setSubjectRlsContext, withRlsContext, type Database } from "./database";
-import { getConnectionMetadata, listConnectionsMetadata } from "./index";
+import { getConnectionMetadata, listConnectionsMetadata } from "./connection-metadata";
 
 export type SlackBotAccess = {
   connectionId: string;

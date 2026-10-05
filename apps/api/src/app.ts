@@ -24,9 +24,10 @@ import {
   canonicalPublicOrigin,
   configuredAllowedReasoningEfforts,
   resolveFirstPartyMcpToolPolicy,
-  resolveVoiceInputProviderRegistry,
   UnsupportedLatencyModeError,
+  voiceInputPricingIssues,
   type Settings,
+  type FirstPartyMcpToolPolicySettings,
 } from "@opengeni/config";
 import {
   AGENT_CAPABILITY_IDS,
@@ -40,6 +41,7 @@ import {
   resolveWorkspaceMemoryEnabled,
   resolveWorkspaceMemoryPromptMode,
   VOICE_INPUT_ACCEPTED_MIME_TYPES,
+  WorkspaceVoiceInputSettings,
   TRANSCRIPTION_RECORDING_PROVIDER_SEGMENT_SECONDS,
   ToolGatewayApprovalRequest,
   ToolGatewayCallRequest,
@@ -491,12 +493,27 @@ export function createAppComposition(deps: AppDependencies): {
     }, MANAGED_AUTH_REAPER_INTERVAL_MS);
     (timer as ReturnType<typeof setInterval> & { unref?: () => void }).unref?.();
   }
+  if (deps.transcription === undefined) {
+    // Voice pricing problems never fail boot (workers share this config); the
+    // affected provider is withheld and the operator sees exactly why, once.
+    for (const issue of voiceInputPricingIssues(deps.settings)) {
+      observability.error(
+        `Voice input provider ${issue.providerId} is unavailable: ${issue.message}`,
+        {
+          providerId: issue.providerId,
+          env: issue.env,
+          reason: issue.reason,
+        },
+      );
+    }
+  }
   const transcription =
     deps.transcription === undefined
       ? createTranscriptionService({
           settings: deps.settings,
           db: deps.db,
           ...(deps.codexFetch ? { codexFetch: deps.codexFetch } : {}),
+          log: (message, attributes) => observability.error(message, attributes),
         })
       : deps.transcription;
   const transcriptionSegmenter =
@@ -646,6 +663,8 @@ export function createAppComposition(deps: AppDependencies): {
       "X-OpenGeni-Actor-Epoch",
       "X-OpenGeni-Correlation-Id",
       "X-OpenGeni-Session-Csrf",
+      // Session scope for a session proxy; the API itself ignores it.
+      "X-OpenGeni-Session-Id",
       "X-OpenGeni-Site-Id",
       "X-OpenGeni-Site-Version",
       "X-OpenGeni-Subject",
@@ -1191,6 +1210,8 @@ export function createAppComposition(deps: AppDependencies): {
       creditsAvailable: false,
     });
     let modelSelectionForbidden = false;
+    let voiceInputAvailable = false;
+    let voiceInputProviders: string[] = [];
     const requestedWorkspaceId = c.req.query("workspaceId");
     if (requestedWorkspaceId !== undefined && requestedWorkspaceId.trim() === "") {
       throw new HTTPException(422, { message: "workspaceId must not be empty" });
@@ -1241,6 +1262,25 @@ export function createAppComposition(deps: AppDependencies): {
             selections = [];
           }
           const workspace = await getWorkspace(deps.db, workspaceId);
+          const voicePreferences = WorkspaceVoiceInputSettings.safeParse(
+            workspace?.settings.voiceInput,
+          ).data;
+          const voiceContext = {
+            workspaceId,
+            subjectId: grant.subjectId,
+            preferredProvider: voicePreferences?.preferredProvider,
+            fallbackEnabled: voicePreferences?.fallbackEnabled,
+          };
+          if (hasPermission(grant.permissions, "sessions:create") && transcription) {
+            // `providers` lists every ready provider (the workspace picker);
+            // `available` honours the workspace preference and fallback, so
+            // the composer never offers a mic every request would refuse.
+            voiceInputProviders = (await transcription.availableProviderIds?.(voiceContext)) ?? [];
+            voiceInputAvailable =
+              voiceInputProviders.length > 0 &&
+              (await Promise.resolve(transcription.available(voiceContext)).catch(() => false));
+          }
+
           defaultSelection = await resolveDefaultSessionModelForSelections(deps.db, {
             settings: catalogSettings,
             accountId: grant.accountId,
@@ -1303,10 +1343,8 @@ export function createAppComposition(deps: AppDependencies): {
           maxSizeBytes: objectStorage?.maxSinglePutSizeBytes ?? 5_000_000_000,
         },
         voiceInput: {
-          providers: resolveVoiceInputProviderRegistry(deps.settings).map(
-            (provider) => provider.id,
-          ),
-          available: (await transcription?.available()) ?? false,
+          providers: voiceInputProviders,
+          available: voiceInputAvailable,
           maxDurationSeconds: deps.settings.voiceInputMaxDurationSeconds,
           maxSizeBytes: deps.settings.voiceInputMaxSizeBytes,
           acceptedMimeTypes: [...VOICE_INPUT_ACCEPTED_MIME_TYPES],
@@ -1314,7 +1352,7 @@ export function createAppComposition(deps: AppDependencies): {
           objectStorage &&
           transcription &&
           transcriptionSegmenter &&
-          (await transcription.available()) &&
+          voiceInputAvailable &&
           (await transcriptionSegmenter.available())
             ? {
                 resumable: {
@@ -2107,7 +2145,7 @@ function clientAuthConfig(settings: AppDependencies["settings"], newSignupsEnabl
 
 /** Configured SDK credentials cannot regain tools from widened legacy columns. */
 export function configuredCodemodeSessionProxyTools(
-  settings: Pick<Settings, "defaultFirstPartyMcpTools" | "allowedFirstPartyMcpTools">,
+  settings: FirstPartyMcpToolPolicySettings,
   session: Pick<Session, "agent">,
 ): FirstPartyMcpToolName[] | null {
   if (!session.agent) return null;

@@ -1,14 +1,21 @@
 import { afterAll, beforeAll, describe, expect, setDefaultTimeout, test } from "bun:test";
 import { signDelegatedAccessToken } from "@opengeni/contracts";
 import type { ApiRouteDeps, SessionWorkflowClient } from "@opengeni/core";
-import { bootstrapWorkspace, createDb, type DbClient } from "@opengeni/db";
+import {
+  bootstrapWorkspace,
+  createDb,
+  isDatabaseConnectionLoss,
+  type DbClient,
+} from "@opengeni/db";
 import {
   acquireSharedTestDatabase,
   MemoryEventBus,
   testSettings,
+  waitFor,
   type SharedTestDatabase,
 } from "@opengeni/testing";
 import postgres from "postgres";
+import { sql } from "drizzle-orm";
 import { createAppComposition } from "../src/app";
 import { startSlackInteractionPump } from "../src/integrations/slack-interactions";
 import { startMemorySlackPublicationPump } from "../src/memory-slack-delivery";
@@ -122,6 +129,105 @@ type ErrorBody = {
 };
 
 describe("database connection loss", () => {
+  test("terminated startup catalog discovery rejects without escaping and then recovers", async () => {
+    if (!available) return;
+    const single = createDb(shared!.appUrl, { max: 1 });
+    const locker = postgres(shared!.adminUrl, { max: 1, prepare: false, fetch_types: false });
+    // The catalog lock belongs only to this disposable test database. Control
+    // must use the fixture's maintenance database so its own parse is not locked.
+    const maintenance = new URL(shared!.adminUrl);
+    const databaseName = maintenance.pathname.slice(1);
+    maintenance.pathname = "/postgres";
+    const control = postgres(maintenance.toString(), {
+      max: 1,
+      prepare: false,
+      fetch_types: false,
+    });
+    const escaped: unknown[] = [];
+    const onEscape = (error: unknown) => escaped.push(error);
+    process.on("unhandledRejection", onEscape);
+    let locked = false;
+    try {
+      await locker`begin`;
+      locked = true;
+      await locker`lock table pg_catalog.pg_type in access exclusive mode`;
+      const interrupted = single.db.execute(sql`select 1 as ready`).then(
+        () => null,
+        (error: unknown) => error,
+      );
+      let startupPid: number | undefined;
+      // Observe the startup phase before injecting the outage, not readiness
+      // after recovery. No subsequent application query is retried.
+      await waitFor(
+        async () => {
+          const rows = await control`
+            select pid, query, wait_event_type from pg_stat_activity
+            where datname = ${databaseName} and usename = 'opengeni_app'`;
+          const startup = rows.find(
+            (row) => row.wait_event_type === "Lock" && row.query.includes("pg_catalog.pg_type"),
+          );
+          startupPid = startup?.pid;
+          return startupPid !== undefined;
+        },
+        { timeoutMs: 2_000, intervalMs: 10 },
+      );
+      const [terminated] = await control`
+        select pg_terminate_backend(${startupPid!}) as terminated`;
+      expect(terminated?.terminated).toBe(true);
+      await locker`rollback`;
+      locked = false;
+      expect(isDatabaseConnectionLoss(await interrupted)).toBe(true);
+      const [recovered] = await single.db.execute<{ pid: number; ready: number }>(
+        sql`select pg_backend_pid() as pid, 1 as ready`,
+      );
+      expect(recovered?.ready).toBe(1);
+      expect(recovered?.pid).not.toBe(startupPid);
+      await new Promise<void>((resolve) => setImmediate(resolve));
+      expect(escaped).toEqual([]);
+    } finally {
+      if (locked) await locker`rollback`;
+      await single.close();
+      await locker.end();
+      await control.end();
+      process.off("unhandledRejection", onEscape);
+    }
+  });
+
+  test("the first fresh-backend query cannot inherit a terminated backend's error", async () => {
+    if (!available) return;
+    const single = createDb(shared!.appUrl, { max: 1 });
+    try {
+      const [original] = await single.db.execute<{ pid: number }>(
+        sql`select pg_backend_pid() as pid`,
+      );
+      const interrupted = single.db.execute(sql`select pg_sleep(10)`).then(
+        () => null,
+        (error: unknown) => error,
+      );
+      // Observe dispatch before injecting the outage. This is not a recovery
+      // retry: the first query after termination must succeed without polling.
+      await waitFor(
+        async () => {
+          const [row] = await admin`
+            select state, query from pg_stat_activity where pid = ${original!.pid}`;
+          return row?.state === "active" && row.query.includes("pg_sleep(10)");
+        },
+        { timeoutMs: 2_000, intervalMs: 10 },
+      );
+      const [terminated] = await admin`
+        select pg_terminate_backend(${original!.pid}) as terminated`;
+      expect(terminated?.terminated).toBe(true);
+      expect(await interrupted).not.toBeNull();
+      const [recovered] = await single.db.execute<{ pid: number; ready: number }>(
+        sql`select pg_backend_pid() as pid, 1 as ready`,
+      );
+      expect(recovered?.ready).toBe(1);
+      expect(recovered?.pid).not.toBe(original!.pid);
+    } finally {
+      await single.close();
+    }
+  });
+
   test("terminated backends become retryable 503s and never crash the process", async () => {
     if (!available) return;
     const value = await fixture();

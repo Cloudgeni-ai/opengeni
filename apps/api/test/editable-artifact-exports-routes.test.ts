@@ -161,6 +161,41 @@ describe("editable artifact durable export routes", () => {
     ]);
   });
 
+  test("refuses to enqueue an export the deployment has no materializer to run", async () => {
+    let enqueued = 0;
+    const app = new Hono();
+    registerEditableArtifactRoutes(app, {
+      settings: testSettings({
+        productAccessMode: "managed",
+        delegationSecret: SECRET,
+        artifactMaterializerDeployed: false,
+      }),
+      db: {} as never,
+      managedAuth: null,
+      editableArtifactExports: {
+        async enqueueMaterialization() {
+          enqueued += 1;
+          throw new Error("must not enqueue");
+        },
+      } as unknown as EditableArtifactDurableExportService,
+    });
+    const response = await app.request(
+      `http://api.test/v1/workspaces/${WORKSPACE_ID}/editable-artifacts/${ARTIFACT_ID}/materializations`,
+      {
+        method: "POST",
+        headers: { authorization: await bearer(), "content-type": "application/json" },
+        body: JSON.stringify({
+          replicaId: REPLICA_ID,
+          idempotencyKey: "xlsx-forecast-1",
+          versionId: VERSION_ID,
+          format: "xlsx",
+        }),
+      },
+    );
+    expect(response.status).toBe(503);
+    expect(enqueued).toBe(0);
+  });
+
   test("authenticates before parsing export request bodies", async () => {
     const app = new Hono();
     registerEditableArtifactRoutes(app, {

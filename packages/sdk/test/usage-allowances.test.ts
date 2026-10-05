@@ -316,7 +316,8 @@ describe("own-usage read-only proxy", () => {
       ["GET", `${base}/usage/me?cursor=other`, 400],
       ["GET", `${base}/usage/me?limit=1`, 400],
       ["POST", `${base}/usage/me`, 404],
-      ["DELETE", `${base}/usage/me`, 405],
+      ["DELETE", `${base}/usage/me`, 404],
+      ["TRACE", `${base}/usage/me`, 405],
       ["GET", "https://host.test/v1/workspaces/other/usage/me", 403],
     ] as const) {
       expect((await handler(new Request(path, { method }))).status).toBe(status);

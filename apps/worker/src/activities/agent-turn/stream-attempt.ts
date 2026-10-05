@@ -79,6 +79,7 @@ import {
   isCompletedGeneratedImageSdkEvent,
 } from "../generated-images";
 import { programmaticApproval, programmaticContinuationNote } from "../programmatic-approvals";
+import { CodemodeAttemptDispatcher } from "../codemode-dispatcher";
 import { ToolResultSpill } from "./tool-result-spill";
 import { ownedTurnSandboxForAgent } from "./turn-sandbox-access";
 import { createTurnCredentialLeases } from "./credential-leases";
@@ -690,6 +691,16 @@ export async function runTurnStreamAttempt(
     const providerPublishesNativeRequestEvents =
       resolvedModel?.provider.kind === "codex-subscription" ||
       resolvedModel?.provider.kind === "xai-subscription";
+    // Bounded provider label for the streaming SLIs — the resolved registry
+    // provider id (or the built-in OpenAI/Azure provider), never a raw
+    // user-supplied model string. Created before the stream starts so the
+    // first request's model entry and provider dispatch are observed.
+    const streamTiming = new StreamTimingMetrics(observability, {
+      provider: streamProvider,
+    });
+    // Native Codex/SuperGrok transports report their literal dispatch through
+    // the shared turn context; generic transports use the wire-dispatch clock.
+    eventing.providerDispatchObserver = () => streamTiming.onProviderDispatch();
     let fallbackProviderRequestStartedAt: number | null = null;
     let fallbackProviderRequestLifecycleStartedAt: number | null = null;
     const recordFallbackProviderDispatchAtWire = async (): Promise<void> => {
@@ -882,7 +893,10 @@ export async function runTurnStreamAttempt(
         }
         attempt.modelRequestStarted = true;
         return await runtime.runStream(agent, runInput!, eventing.modelRunSettings, {
-          beforeModelRequest: modelCallAdmission.beforeModelRequest,
+          beforeModelRequest: () => {
+            streamTiming.onModelRequestEntry();
+            return modelCallAdmission.beforeModelRequest();
+          },
           onModelResponse: (event) => {
             responseCreditPolicyRevisions.add(creditPolicyRevision);
             return modelCallAdmission.onModelResponse(event);
@@ -1045,6 +1059,7 @@ export async function runTurnStreamAttempt(
             ? {
                 onModelTransportStarted: recordFallbackProviderDispatchAtWire,
                 onModelTransportDispatched: (clock) => {
+                  streamTiming.onProviderDispatch();
                   eventing.initialModelWireDispatch.record(
                     { provider: streamProvider, dispatchId },
                     clock,
@@ -1086,12 +1101,6 @@ export async function runTurnStreamAttempt(
       modelCallAdmission.close();
       throw error;
     }
-    // Bounded provider label for the streaming SLIs — the resolved registry
-    // provider id (or the built-in OpenAI/Azure provider), never a raw
-    // user-supplied model string.
-    const streamTiming = new StreamTimingMetrics(observability, {
-      provider: streamProvider,
-    });
     eventing.batcher = createRuntimeBatcher(
       async (events) => {
         await eventing.publish!(events);
@@ -2104,14 +2113,26 @@ export async function runTurnStreamAttempt(
 
   // Recover committed waits/results before any model dispatch, including crash replacement.
   // A new attempt uses its own signed caller; origin provenance never changes.
-  await eventing.toolPreparationReady;
-  const codemodeOperations =
-    (await eventing.codemodeDispatcher?.resumeApproved(
-      `sandbox:${input.attemptId}`,
-      trigger.type === "user.approvalDecision"
-        ? (trigger.payload as { approvalId: string }).approvalId
-        : undefined,
-    )) ?? [];
+  // Join-on-use: lazy MCP preparation is awaited only when stored work must resume.
+  const codemodeOperations = await CodemodeAttemptDispatcher.resumeApproved(
+    db,
+    {
+      accountId: input.accountId,
+      workspaceId: input.workspaceId,
+      sessionId: input.sessionId,
+      turnId: activeTurnId,
+      attemptId: input.attemptId,
+      executionGeneration: attempt.executionGeneration,
+    },
+    `sandbox:${input.attemptId}`,
+    trigger.type === "user.approvalDecision"
+      ? (trigger.payload as { approvalId: string }).approvalId
+      : undefined,
+    async () => {
+      await eventing.toolPreparationReady;
+      return eventing.codemodeDispatcher;
+    },
+  );
   codemodeContinuationNote = programmaticContinuationNote(codemodeOperations);
   programmaticApprovalAcknowledged =
     trigger.type === "user.approvalDecision" &&

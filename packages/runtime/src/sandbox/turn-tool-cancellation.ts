@@ -7,6 +7,7 @@ import {
 } from "./exec-banner";
 import {
   RoutingMutationOutcomeUnknownError,
+  isRoutingMutationOutputRejectedError,
   renderRoutingMutationOutcomeUnknownToolResult,
   type RoutingCommandDispatchOptions,
 } from "./routing/routing-session";
@@ -635,6 +636,7 @@ function retainedProcessSession(
  * tool's string result, keeping the run alive instead of failing the turn.
  */
 export function renderDirectToolFault(error: unknown, retainedProcessSessionId?: number): string {
+  if (isRoutingMutationOutputRejectedError(error)) throw error;
   if (error instanceof ProviderCommandInputOutcomeUnknownError) {
     return `Command input acknowledgement unavailable${retainedProcessSessionId === undefined ? "" : ` for session ID ${retainedProcessSessionId}`}. The input may have been accepted; its outcome is unknown and it was not resent. Do not resend stdin. Inspect the existing command with write_stdin using empty chars.`;
   }

@@ -898,17 +898,26 @@ export async function withSessionActivityRlsContext<T>(
   );
 }
 
+/**
+ * `organizationMembershipFence` is required when the callback takes the
+ * organization-membership lifecycle lock (for example external-actor
+ * reauthorization): that lock precedes the session-tenancy fence and the
+ * canonical control/workspace/session prefix, never follows it.
+ */
 export async function withWorkspaceSessionActivityRls<T>(
   db: Database,
   workspaceId: string,
   fn: (db: SessionActivityDatabase) => Promise<T>,
   transactionConfig?: PgTransactionConfig,
+  organizationMembershipFence = false,
 ): Promise<T> {
   return await withSessionActivityRlsContext(
     db,
     { ...(await rlsContextForWorkspace(db, workspaceId)), workspaceId },
     fn,
     transactionConfig,
+    "shared",
+    organizationMembershipFence,
   );
 }
 

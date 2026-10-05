@@ -188,7 +188,23 @@ and, unless `modelSelection: false`, the user's explicit model choices, so it
 needs the `createSession` hook. The hook sees them as input; the proxy adds the
 files and applies those choices to the request the hook returns. Voice input
 (`POST .../transcriptions`) is forwarded as the resolved user unless
-`voiceInput: false`.
+`voiceInput: false`. The client config the proxy serves reports what it can do:
+`sessionCreation` (a `createSession` hook exists), `archive`, and `artifacts`
+(`false` unless `artifacts: true`). The stock UI hides "New chat" and
+"Archive" when they are off, shows Site previews as unavailable without a
+request, and shows the composer microphone only when `voiceInput.available`.
+
+Live voice (speech-to-speech) is forwarded the same way unless
+`realtimeVoice: false`: the workspace's voice model catalog and the call routes
+under `.../sessions/{id}/realtime` (start, provider connect, heartbeat,
+activate, transcript sync, end). Opengeni still checks the user's
+`sessions:control` permission, binds the call to that user and browser, runs
+spoken requests as steers of the same chat, and meters deployment-funded voice
+against your credits. `authorizeSession` runs on every call route, and
+`beforeForwardMessage` sees `delivery: "realtime"` when a call starts (refuse
+it, or return `mcpCredentialUpdates`; the proxy also refreshes the `toolServer`
+token) and before transcripts and spoken requests are saved (refuse them, or add
+`modelContext`, which must be the same when a request is retried).
 
 `listSessionPage` includes personal pinned details by default. A caller with a
 separate `pinsOnly: true` read can pass `includePinned: false` on ordinary pages
@@ -209,8 +225,14 @@ workspace. Only the native routes `OpenGeniProvider` and the conversation use
 are served: client config; workspace read, model catalog, live control stream,
 and workspace Resume; session read/rename, events (list and SSE with
 `Last-Event-ID` resume), send/steer/approval/human-input, queue, composer
-draft, pause/resume; and, unless `files: false`, attachment upload and download
-URLs. Every other route or method is a 404 (cancel and workspace Pause are
+draft, pause/resume, and the session goal (read; pause/resume, forwarding only
+`{ status: "paused" | "active" }`; and clear, the proxy's only `DELETE`); and, unless `files: false`, attachment upload and download
+URLs plus the media the session produced (generated images and video,
+published files, and browser or computer screenshots). Workspace-level
+artifact reads (`artifacts/:id/content` with `Range`, `artifacts/:id/playback-source`)
+must name their session in `x-opengeni-session-id`; the proxy runs
+`authorizeSession` and forwards only an artifact OpenGeni proves that session
+produced. Every other route or method is a 404 (cancel and workspace Pause are
 refused); unknown query parameters on served reads pass through. Browser session creation is disabled
 unless you supply `createSession`; the browser may then send only
 `initialMessage` and `idempotencyKey`, and your hook returns the full request

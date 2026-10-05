@@ -2420,6 +2420,10 @@ describe("release schema contract", () => {
       "0614_quiescence_command_containment.sql",
       "0615_credit_promotion_policy_validation.sql",
       "0622_organization_slack_bot_delivery.sql",
+      "0623_voice_transcription_attribution.sql",
+      "0624_azure_live_realtime_model.sql",
+      "0625_transcription_billing_refusal_codes.sql",
+      "0632_modal_native_live_origin.sql",
     ].filter((path) =>
       unfilteredSourceContract.migrations.some((migration) => migration.path === path),
     );

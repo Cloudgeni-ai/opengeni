@@ -993,6 +993,36 @@ control characters from string fields, collapses duplicate `(domain, name)`
 clusters to the best deterministic row, skips known-dead demo domains, and
 quarantines flagged suspicious URLs in the batch details for manual review.
 
+### OAuth client requirements
+
+Some providers' authorization servers cannot be reached by OAuth
+self-registration from a hosted deployment: their metadata advertises neither
+dynamic client registration nor Client ID Metadata Documents, their
+registration endpoint refuses unknown clients, or they reject a deployment
+callback the provider has not allowlisted. `data/catalog/oauth-client-requirements.json`
+records those rows by canonical MCP URL with the authorization-server issuer,
+a reason, and the evidence. Listing a row there neither curates nor features
+it. The importer stamps `metadata.oauthClientRequirement = { issuer, reason }`,
+and the requirement facts are part of the `--if-changed` fingerprint.
+
+The capability catalog projects deployment connectability as
+`runtime.operatorOAuthClient.configured`, using the same issuer matcher the
+OAuth start uses to find an operator client in
+`OPENGENI_INTEGRATIONS_OAUTH_CLIENTS_JSON` (`findIntegrationsOauthClient` in
+`@opengeni/config`). When it is `false`, the web Connectors page (Featured,
+Popular, Browse) and the embedded `ConnectionDiscovery` do not offer the row.
+A row stays reachable when it is already enabled, the workspace has a
+connection for it, or the connection list could not be read. To offer such a
+connector, register an OAuth client with the provider using the redirect URI
+`<OPENGENI_PUBLIC_BASE_URL>/v1/integrations/oauth/callback`, then add it to
+`OPENGENI_INTEGRATIONS_OAUTH_CLIENTS_JSON` under the listed issuer. No catalog
+change is needed. Gmail and the hosted Slack MCP are not listed because their
+native Connect readiness already gates them.
+`bun scripts/catalog-oauth-client-requirements-probe.ts` reads public metadata
+and reports unlisted rows that advertise no self-registration. Registration
+refusals and redirect allowlists only appear when registration is attempted,
+so record those from a reviewed attempt.
+
 ### Vendored logos
 
 A default deployment must not depend on integrations.sh or any other logo host

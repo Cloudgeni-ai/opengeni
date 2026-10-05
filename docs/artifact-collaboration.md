@@ -75,6 +75,10 @@ Office files are import/export representations only:
   name, MIME, size, hash, artifact id, and source head.
 - Export does not write into a sandbox. If code genuinely needs local bytes, it
   uses the existing Files tool to download that returned file.
+- Export exists only where the materializer runs. Without
+  `OPENGENI_ARTIFACT_MATERIALIZER_DEPLOYED=true` the export tools are outside
+  the first-party ceiling and the REST enqueue route refuses; editing and
+  import are unaffected (see `docs/deployment.md`).
 - Re-import always creates a new artifact. It never overwrites another
   artifact or changes the meaning of an existing Office source.
 

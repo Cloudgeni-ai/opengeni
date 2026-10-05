@@ -27,8 +27,12 @@ import {
   isModalTaskExecStartPreDispatchUnavailableError,
   isModalCommandStartOutcomeUnknownError,
   isProviderCommandObservationUnavailableError,
+  ProviderCommandInputOutcomeUnknownError,
+  ProviderCommandStartOutcomeUnknownError,
   isRoutingMutationOutcomeUnknownError,
+  isRoutingMutationOutputRejectedError,
   RoutingWorkspaceRootChangedError,
+  RoutingBackendRecoveryRequiredError,
   ResponsesStreamingTerminalError,
   SandboxMaterializationVerificationError,
   materializationVerificationDiagnostic,
@@ -380,7 +384,7 @@ export function preClaimAdmissionFailure(error: unknown): ApplicationFailure {
  * objects (including array containers), not queue positions/duplicate refs.
  * The separate link ceiling bounds huge duplicate arrays without truncating
  * them into permission. Cycles are harmless; overflow/unreadable edges hold. */
-function databaseRecoveryCauseGraph(error: unknown): Map<object, Set<object>> | null {
+function structuredRecoveryCauseGraph(error: unknown): Map<object, Set<object>> | null {
   const graph = new Map<object, Set<object>>();
   const queue: object[] = [];
   let links = 0;
@@ -414,7 +418,7 @@ function retryableDatabaseFailureCode(
   requireDatabaseProvenance = false,
 ): PostClaimDatabaseRecoveryDetail["code"] | null {
   try {
-    const graph = databaseRecoveryCauseGraph(error);
+    const graph = structuredRecoveryCauseGraph(error);
     if (!graph) return null;
     const transports = new Set<object>();
     const boundaries = new Set<object>();
@@ -429,7 +433,8 @@ function retryableDatabaseFailureCode(
     // Ask the canonical transport predicate about ONLY this node's facts. Its
     // recursive search must not pair a DB sibling with an unrelated provider.
     for (const node of graph.keys()) {
-      if (isRoutingMutationOutcomeUnknownError(node)) return null;
+      if (isRoutingMutationOutcomeUnknownError(node) || isRoutingMutationOutputRejectedError(node))
+        return null;
       const record = node as Record<string, unknown>;
       if (
         requireDatabaseProvenance
@@ -495,15 +500,20 @@ function retryableDatabaseFailureCode(
       const connectionOutage = requireDatabaseProvenance
         ? isRunningTurnDatabaseConnectionSqlState(sqlState)
         : isDatabaseConnectionSqlState(sqlState);
+      // PostgreSQL aborts a deadlock or serialization victim's whole
+      // transaction: unlike a lost connection, that write certainly did not
+      // commit, so it is at least as safe for exact-attempt recovery.
+      const rolledBack = isRetryablePersistenceSqlState(sqlState);
       const code = typed
         ? retryablePersistenceFailureCode(sqlState)
-        : connectionOutage || isRetryablePersistenceSqlState(sqlState)
+        : connectionOutage || rolledBack
           ? databaseFailureCode(sqlState)
           : null;
       if (
         !code ||
         (requireDatabaseProvenance &&
           !connectionOutage &&
+          !rolledBack &&
           !(sqlState === null && hasOwnTransport(node)))
       )
         return null;
@@ -598,12 +608,7 @@ export function postClaimDatabaseRecoveryFailure(input: {
   };
 }): ApplicationFailure | null {
   const code = retryableDatabaseFailureCode(input.error, input.requireDatabaseProvenance);
-  if (
-    !code ||
-    input.executionGeneration < 1 ||
-    (input.requireDatabaseProvenance && code !== "db_failure")
-  )
-    return null;
+  if (!code || input.executionGeneration < 1) return null;
   if (
     (input.sandboxSetupOutcomeUnknown && input.sandboxSetupRecoveryExhausted) ||
     ((input.sandboxSetupOutcomeUnknown || input.sandboxSetupRecoveryExhausted) &&
@@ -742,13 +747,56 @@ export function modelPreparationFailureEventPayload(error: unknown, durationMs: 
  * only those structural error links with a strict bound; never classify from
  * message text, which could originate in model or tool content.
  */
+/**
+ * Only the home resolver's positive pre-dispatch signal permits a fresh attempt.
+ * The same error class can also escape AFTER a provider mutation, so neither its
+ * retryable property nor message alone establishes replay safety. Inspect the
+ * complete bounded SDK cause graph and let uncertain peer outcomes veto this
+ * narrow recovery; unreadable or overflowing graphs fail closed.
+ */
+function isPreDispatchHomeBackendRecoveryRequired(error: unknown): boolean {
+  const graph = structuredRecoveryCauseGraph(error);
+  if (!graph) return false;
+  let found = false;
+  try {
+    for (const node of graph.keys()) {
+      if (
+        isRoutingMutationOutcomeUnknownError(node) ||
+        isRoutingMutationOutputRejectedError(node) ||
+        isRawProviderCommandOutcomeUnknown(node) ||
+        isModalCommandStartOutcomeUnknownError(node) ||
+        isProviderCommandObservationUnavailableError(node)
+      )
+        return false;
+      if (node instanceof RoutingBackendRecoveryRequiredError) {
+        if (
+          node.op !== "resolve_home_backend" ||
+          !Number.isSafeInteger(node.leaseEpoch) ||
+          node.leaseEpoch < 0 ||
+          !node.retryable ||
+          (node.recovery !== "pending" && node.recovery !== "superseded")
+        )
+          return false;
+        found = true;
+      }
+    }
+  } catch {
+    return false;
+  }
+  return found;
+}
+
 export function sandboxRouteTransitionCode(
   error: unknown,
 ):
   | "home_unavailable_this_turn"
   | "workspace_root_changed_this_turn"
   | "native_capabilities_changed_this_attempt"
+  | "home_backend_recovery_pending"
   | null {
+  if (isPreDispatchHomeBackendRecoveryRequired(error)) {
+    return "home_backend_recovery_pending";
+  }
   const pending: unknown[] = [error];
   const seen = new WeakSet<object>();
   let inspected = 0;
@@ -1273,10 +1321,41 @@ function anthropicRequestDiagnostic(error: unknown): AnthropicRequestError | und
     : undefined;
 }
 
+function isRawProviderCommandOutcomeUnknown(error: unknown): boolean {
+  try {
+    return (
+      error instanceof ProviderCommandInputOutcomeUnknownError ||
+      error instanceof ProviderCommandStartOutcomeUnknownError
+    );
+  } catch {
+    return false;
+  }
+}
+
 export function agentRunFailurePayload(
   error: unknown,
   options: { isCodexTurn?: boolean } = {},
 ): ReturnType<typeof baseAgentRunFailurePayload> {
+  const graph = structuredRecoveryCauseGraph(error);
+  const nodes = graph ? [...graph.keys()] : [];
+  const outputRejected = nodes.find(isRoutingMutationOutputRejectedError);
+  if (outputRejected) {
+    // A known receipt applies only to its own mutation. Uncertain peers retain
+    // their established terminal classification, regardless of SDK graph order.
+    const unknown = nodes.find(
+      (node) =>
+        isRoutingMutationOutcomeUnknownError(node) ||
+        isModalCommandStartOutcomeUnknownError(node) ||
+        isProviderCommandObservationUnavailableError(node) ||
+        isRawProviderCommandOutcomeUnknown(node),
+    );
+    if (unknown) return { ...baseAgentRunFailurePayload(unknown, options), retryable: false };
+    return {
+      error: outputRejected.message,
+      code: outputRejected.code,
+      retryable: false,
+    };
+  }
   const failure = baseAgentRunFailurePayload(error, options);
   const diagnostic = materializationVerificationDiagnostic(error);
   const anthropic = anthropicRequestDiagnostic(error);

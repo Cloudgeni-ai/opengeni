@@ -1144,8 +1144,14 @@ export async function resetPassword(input: {
   });
 }
 
-export async function fetchClientConfig(signal?: AbortSignal): Promise<ClientConfig> {
-  const config = await request<ClientConfig>("/v1/config/client", { signal });
+export async function fetchClientConfig(
+  signal?: AbortSignal,
+  workspaceId?: string,
+): Promise<ClientConfig> {
+  const path = workspaceId
+    ? `/v1/config/client?workspaceId=${encodeURIComponent(workspaceId)}`
+    : "/v1/config/client";
+  const config = await request<ClientConfig>(path, { signal });
   signal?.throwIfAborted();
   reloadIfStaleApiContract(config);
   reloadIfStaleDeployment(config);

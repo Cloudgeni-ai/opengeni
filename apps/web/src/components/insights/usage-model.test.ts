@@ -1,9 +1,15 @@
 import { describe, expect, test } from "bun:test";
 import type { WorkspaceInsightsSnapshot } from "@opengeni/sdk";
+import { OrganizationInsightsUsageQuery } from "@opengeni/contracts/insights-usage";
 
 import { catalogLabels, modelDisplayName, providerDisplayName } from "./model-display";
 import { workspaceUsageFromSnapshot } from "./usage-adapter";
-import { emptyMeasures, parseModelFilterKey, type UsageGroup } from "./usage-contract";
+import {
+  emptyMeasures,
+  parseModelFilterKey,
+  type UsageGroup,
+  type UsageGroupBy,
+} from "./usage-contract";
 import { niceScale } from "./usage-chart";
 import { breakdownRows } from "./usage-groups";
 import { cacheHitRate, costMicros, formatMoney, relativeChange } from "./usage-format";
@@ -126,6 +132,42 @@ describe("breakdown rows", () => {
     label: "x",
     measures: { ...emptyMeasures(), calls: 1 },
     ...overrides,
+  });
+
+  const identifier = "11111111-1111-4111-8111-111111111111";
+  for (const [groupBy, value] of [
+    ["workspace", identifier],
+    ["project", identifier],
+    ["rootSession", identifier],
+    ["schedule", identifier],
+    ["person", "user:example-member"],
+    ["provider", "example-provider"],
+    ["payer", "opengeni_credits"],
+  ] satisfies Array<[UsageGroupBy, string]>) {
+    test(`${groupBy} drilldown submits the selector, not the native display key`, () => {
+      for (const key of [value, `item:${value}`]) {
+        const [row] = breakdownRows({ groupBy, groups: [group({ key })] });
+        expect(row?.filter?.values).toEqual([value]);
+        const search = nextUsageSearch({}, { filter: row!.filter! });
+        const filters = usageQuery(search).filters;
+        expect(OrganizationInsightsUsageQuery.safeParse(filters).success).toBe(true);
+        if (groupBy === "rootSession") expect(row?.sessionId).toBe(value);
+        if (groupBy !== "provider") expect(row?.id).toBe(`item:${key}`);
+      }
+    });
+  }
+
+  test("unfiled project drilldown uses the supported sentinel", () => {
+    for (const key of ["unfiled", "unfiled:unfiled"]) {
+      const [row] = breakdownRows({
+        groupBy: "project",
+        groups: [group({ key, kind: "unfiled" })],
+      });
+      expect(row?.filter).toEqual({ field: "projectId", values: ["unfiled"] });
+      expect(
+        OrganizationInsightsUsageQuery.safeParse({ projectId: row?.filter?.values }).success,
+      ).toBe(true);
+    }
   });
 
   test("a model served by both Claude plans is one row that filters to both", () => {

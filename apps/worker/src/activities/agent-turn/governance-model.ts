@@ -59,6 +59,7 @@ import {
   lazyToolTransportForTurn,
   openAiHostedImageProviderBindingForTurn,
   modelAttachmentInputPolicyForTurn,
+  resolveAcceptedTurnModel,
 } from "./tool-policy";
 
 import type { ClaimTurnOk } from "./claim";
@@ -361,10 +362,11 @@ export async function prepareGovernanceAndModel(
   // a chat-only Fireworks model. Resolving against the default-model settings
   // keeps gating consistent with the router. Cost accounting covers registry
   // models via configuredModelPricing.
-  const resolvedModel = runtime.resolveTurnModel(
-    capabilitySettings,
-    turnExecutionPolicy.productModelId,
-  );
+  //
+  // The accepted policy is then projected back onto the resolved shape: a
+  // turn frozen before hosted web search was enabled keeps its frozen tool set
+  // on every attempt, so recovery never adds a tool mid-turn.
+  const resolvedModel = resolveAcceptedTurnModel(runtime, capabilitySettings, turnExecutionPolicy);
   const providerApi = resolvedModel?.provider.api ?? "responses";
   const nativeImageProviderBinding =
     providerApi === "responses"
@@ -372,10 +374,8 @@ export async function prepareGovernanceAndModel(
       : null;
   const lazyToolTransport = lazyToolTransportForTurn(resolvedModel);
   const modelInputPolicy = modelAttachmentInputPolicyForTurn(resolvedModel);
-  // Use the proven wire capability, not the catalogue modality alone. Chat
-  // providers may advertise vision, but OpenGeni intentionally has no typed
-  // image transport for that wire yet; exposing view_image there would turn
-  // pixels into a multi-megabyte text/base64 function result.
+  // The shared input policy combines model modality with the supported wire
+  // transport, including typed image projection for vision-capable Chat models.
   const supportsImageInput = modelInputPolicy.supportsImageInput;
   media.modelCanReceiveRetainedSessionImages = supportsImageInput;
   const attachmentProjector = createModelHistoryAttachmentProjector(

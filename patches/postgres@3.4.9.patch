@@ -54,17 +54,33 @@ diff --git a/src/connection.js b/src/connection.js
      socket.removeListener('data', data)
      socket.removeListener('connect', connected)
      idleTimer.cancel()
-@@ -451,6 +470,10 @@
+@@ -450,7 +469,14 @@
+-    if (initial)
++    // Only reconnect transparently before any startup query was dispatched.
++    if (initial && !query)
        return reconnect()
  
      !hadError && (query || sent.length) && error(Errors.connection('CONNECTION_CLOSED', options, socket))
 +    // The rejected query cannot receive ReadyForQuery from a dead backend.
 +    // Release its drain obligation without replaying any bytes.
-+    query = null
++    // Discard protocol state the dead backend cannot complete with ReadyForQuery.
++    query = results = errorResponse = null
++    result = new Result()
 +    ended && (ended(), ending = ended = null)
      closedTime = performance.now()
      hadError && options.shared.retries++
      delay = (typeof backoff === 'function' ? backoff(options.shared.retries) : backoff) * 1000
+@@ -562,4 +588,9 @@
+       if (needsTypes) {
+         initial.reserve && (initial = null)
+-        return fetchArrayTypes()
++        // Startup discovery has no application promise to observe rejection.
++        // Never apply its late failure to a replacement physical connection.
++        const startupSocket = socket
++        return fetchArrayTypes().catch(err => {
++          if (socket === startupSocket) error(err)
++        })
+       }
 diff --git a/cjs/src/connection.js b/cjs/src/connection.js
 --- a/cjs/src/connection.js
 +++ b/cjs/src/connection.js
@@ -121,17 +137,33 @@ diff --git a/cjs/src/connection.js b/cjs/src/connection.js
      socket.removeListener('data', data)
      socket.removeListener('connect', connected)
      idleTimer.cancel()
-@@ -451,6 +470,10 @@
+@@ -450,7 +469,14 @@
+-    if (initial)
++    // Only reconnect transparently before any startup query was dispatched.
++    if (initial && !query)
        return reconnect()
  
      !hadError && (query || sent.length) && error(Errors.connection('CONNECTION_CLOSED', options, socket))
 +    // The rejected query cannot receive ReadyForQuery from a dead backend.
 +    // Release its drain obligation without replaying any bytes.
-+    query = null
++    // Discard protocol state the dead backend cannot complete with ReadyForQuery.
++    query = results = errorResponse = null
++    result = new Result()
 +    ended && (ended(), ending = ended = null)
      closedTime = performance.now()
      hadError && options.shared.retries++
      delay = (typeof backoff === 'function' ? backoff(options.shared.retries) : backoff) * 1000
+@@ -562,4 +588,9 @@
+       if (needsTypes) {
+         initial.reserve && (initial = null)
+-        return fetchArrayTypes()
++        // Startup discovery has no application promise to observe rejection.
++        // Never apply its late failure to a replacement physical connection.
++        const startupSocket = socket
++        return fetchArrayTypes().catch(err => {
++          if (socket === startupSocket) error(err)
++        })
+       }
 diff --git a/src/index.js b/src/index.js
 --- a/src/index.js
 +++ b/src/index.js

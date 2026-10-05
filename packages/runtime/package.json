@@ -1,6 +1,6 @@
 {
   "name": "@opengeni/runtime",
-  "version": "1.3.0",
+  "version": "1.4.0",
   "license": "Apache-2.0",
   "repository": {
     "type": "git",
@@ -44,6 +44,10 @@
     "./github-rest-mcp": {
       "types": "./src/github-rest-mcp.ts",
       "default": "./src/github-rest-mcp.ts"
+    },
+    "./web-search": {
+      "types": "./src/web-search/index.ts",
+      "default": "./src/web-search/index.ts"
     },
     "./workspace-tool-gateway": {
       "types": "./src/workspace-tool-gateway.ts",

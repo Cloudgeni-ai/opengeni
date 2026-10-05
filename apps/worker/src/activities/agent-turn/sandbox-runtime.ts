@@ -5,6 +5,7 @@ import {
   readLease,
   accrueWarmSeconds,
   SandboxWorkspaceMutationFencedError,
+  SandboxWorkspaceMutationOutputRejectedError,
   retainWorkspaceMutationProcess,
   retainedProviderCommandPersistence,
   SandboxRetainedProcessPromotionFencedError,
@@ -12,6 +13,7 @@ import {
 import { createProviderCommandRetainer } from "@opengeni/db/retained-provider-commands";
 import {
   RoutingMutationOutcomeUnknownError,
+  RoutingMutationOutputRejectedError,
   ProviderCommandStartOutcomeUnknownError,
   ProviderCommandObservationUnavailableError,
   isModalCommandStartOutcomeUnknownError,
@@ -622,6 +624,20 @@ export function createSandboxTurnRuntime(deps: SandboxTurnRuntimeDeps) {
     try {
       await settleMutation("resolved");
     } catch (settlementError) {
+      if (
+        settlementError instanceof SandboxWorkspaceMutationOutputRejectedError &&
+        settlementError.matchesPhysicalSettlement({
+          accountId: identity.accountId,
+          workspaceId: identity.workspaceId,
+          admission,
+          operation,
+          outcome: "resolved",
+        })
+      ) {
+        throw new RoutingMutationOutputRejectedError(operation, settlementError.code, {
+          cause: settlementError,
+        });
+      }
       throw new RoutingMutationOutcomeUnknownError(
         operation,
         `Platform workspace mutation "${operation}" returned from the provider but lost its durable settlement fence; its outcome is unknown and it was not replayed`,
