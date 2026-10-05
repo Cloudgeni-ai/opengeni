@@ -2591,7 +2591,15 @@ completion, Pause, Steer, and cancellation stop it and settle its process holder
 before workspace capture. It is not registered as a session background command,
 does not create terminal background notifications, and cannot be reused by a
 successor attempt. Never wait for an indefinitely running server to exit before
-returning control to its owning agent. A yielded
+returning control to its owning agent. On every managed backend, a yielded
+`exec_command` whose final step is a bare stdin-driven shell (`bash`,
+`sh -i`, `bash --noprofile --norc`; no `-c`, script, or other argument, as
+decided by `isBareInteractiveShellCommand` in
+`packages/runtime/src/sandbox/turn-tool-cancellation.ts`) takes the same
+turn-scoped path instead of adoption, also on later `write_stdin` reads: the
+agent drives it during the turn, and finalization stops it through the exact
+marker kill. Such a shell never exits on its own, so adopting it would keep the
+sandbox busy and block idle drain after the turn. A yielded
 Connected Machine exec likewise creates its session-owned background-command
 row before returning; that row freezes the physical control workspace,
 enrollment, connection instance, and op ID. The exact parent admission,
