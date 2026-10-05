@@ -60,6 +60,12 @@ export interface AccessMember<R extends string = string> {
   initials: string;
   kind?: "person" | "service";
   isYou?: boolean;
+  /**
+   * The viewer administers this list from above (an organization owner or
+   * admin on the organization's workspace page), so their own row stays
+   * editable: they set and remove their own access like anyone else's.
+   */
+  managesOwnAccess?: boolean;
   /** Owners are always listed and can't be removed here. */
   isOwner?: boolean;
   /** A small tag after the name, for example "Only owner". */
@@ -154,7 +160,7 @@ export function groupAccessMembers<R extends string>(
 /** Why a member can't be removed, or null when they can. */
 export function removeBlockedReason(member: AccessMember): string | null {
   if (member.removeLockedReason) return member.removeLockedReason;
-  if (member.isYou) return "You can't remove yourself here.";
+  if (member.isYou && !member.managesOwnAccess) return "You can't remove yourself here.";
   if (member.isOwner) return "Owners always have access.";
   return null;
 }
@@ -286,7 +292,8 @@ function RowMenu({
   const blocked = removeBlockedReason(member);
   const canReset = member.role === "custom" && member.resetRole && onResetToRole;
   // Custom permissions follow the same rule as the role: never your own.
-  const canCustomize = Boolean(onCustomize) && !member.isYou && !member.isOwner;
+  const canCustomize =
+    Boolean(onCustomize) && (!member.isYou || member.managesOwnAccess) && !member.isOwner;
   const hasItems = invite
     ? Boolean(onResendInvite || onRevokeInvite)
     : Boolean((onRemove && !blocked) || canReset || canCustomize);
@@ -353,7 +360,9 @@ function roleLockReason(
 ): string | undefined {
   if (readOnlyReason) return undefined; // read-only lists show text, not locked controls
   if (member.roleLockedReason) return member.roleLockedReason;
-  if (member.isYou) return "You can't change your own role. Ask another admin.";
+  if (member.isYou && !member.managesOwnAccess) {
+    return "You can't change your own role. Ask another admin.";
+  }
   return undefined;
 }
 

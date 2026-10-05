@@ -1,6 +1,7 @@
 import { describe, expect, test } from "bun:test";
 
 import {
+  canManageWorkspaceMembers,
   canManageWorkspaceSettings,
   hasWorkspacePermission,
   buildApiKeyPermissionGroups,
@@ -219,5 +220,56 @@ describe("workspace member access roles", () => {
         workspaceAccessLevels,
       ),
     ).toBe("custom");
+  });
+});
+
+describe("workspace Members surface", () => {
+  const organizationId = "11111111-1111-4111-8111-111111111111";
+  const shared = {
+    id: "22222222-2222-4222-8222-222222222222",
+    accountId: organizationId,
+    kind: "shared" as const,
+  };
+  const personal = {
+    ...shared,
+    id: "33333333-3333-4333-8333-333333333333",
+    kind: "personal" as const,
+  };
+  const context = (
+    role: "owner" | "admin" | "member",
+    permissions: string[] = ["workspace:read"],
+  ) =>
+    ({
+      mode: "managed",
+      subjectId: "user:me",
+      accountGrants: [{ accountId: organizationId, subjectId: "user:me", role, permissions: [] }],
+      workspaceGrants: [
+        {
+          workspaceId: shared.id,
+          accountId: organizationId,
+          subjectId: "user:me",
+          permissions,
+        },
+      ],
+    }) as unknown as Parameters<typeof canManageWorkspaceMembers>[0];
+
+  test("organization owners and admins manage any shared workspace's members", () => {
+    expect(canManageWorkspaceMembers(context("owner"), shared, true)).toBe(true);
+    expect(canManageWorkspaceMembers(context("admin"), shared, true)).toBe(true);
+    expect(canManageWorkspaceMembers(context("owner"), { ...shared, id: "other" }, true)).toBe(
+      true,
+    );
+  });
+
+  test("members need their own grant; Personal workspaces and non-managed sessions never qualify", () => {
+    expect(canManageWorkspaceMembers(context("member"), shared, true)).toBe(false);
+    expect(canManageWorkspaceMembers(context("member", ["members:manage"]), shared, true)).toBe(
+      true,
+    );
+    expect(canManageWorkspaceMembers(context("owner"), personal, true)).toBe(false);
+    expect(canManageWorkspaceMembers(context("owner"), shared, false)).toBe(false);
+    expect(
+      canManageWorkspaceMembers(context("owner"), { ...shared, accountId: "other-org" }, true),
+    ).toBe(false);
   });
 });

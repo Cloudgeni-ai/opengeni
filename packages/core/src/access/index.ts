@@ -891,6 +891,55 @@ export async function requireWorkspaceSettingsGrant(
 }
 
 /**
+ * Authority for a shared workspace's own Members surface (list, candidates,
+ * add, change, remove). A holder of the requested workspace permission keeps
+ * the ordinary grant. Otherwise an active organization owner or administrator,
+ * authenticated by the canonical managed cookie, manages any shared workspace
+ * in their organization exactly as through the organization control plane,
+ * with or without an operational membership row there. Every other principal
+ * (API keys, delegated bearers, agents, services, local/configured access)
+ * and every Personal workspace keeps the original refusal. The database
+ * functions re-derive the organization role under the organization fence.
+ */
+export async function requireWorkspaceMemberManagementAuthority(
+  c: Context,
+  deps: AccessDeps,
+  workspaceId: string,
+  permission: "members:manage" | "workspace:read",
+): Promise<{ grant: AccessGrant; organizationAdministrator: boolean }> {
+  try {
+    return {
+      grant: await requireAccessGrant(c, deps, workspaceId, permission),
+      organizationAdministrator: false,
+    };
+  } catch (error) {
+    if (!(error instanceof HTTPException) || error.status !== 403) throw error;
+    const context = await requireAccessContext(c, deps);
+    if (!canonicalManagedCookieContexts.has(context) || !context.subjectId.startsWith("user:")) {
+      throw error;
+    }
+    const workspace = await requireWorkspace(deps.db, workspaceId).catch(() => null);
+    if (!workspace || workspace.kind !== "shared") throw error;
+    const organizationRole = context.accountGrants.find(
+      (candidate) =>
+        candidate.accountId === workspace.accountId && candidate.subjectId === context.subjectId,
+    )?.role;
+    if (organizationRole !== "owner" && organizationRole !== "admin") throw error;
+    return {
+      grant: {
+        workspaceId,
+        accountId: workspace.accountId,
+        subjectId: context.subjectId,
+        ...(context.subjectLabel ? { subjectLabel: context.subjectLabel } : {}),
+        principalKind: "human_session",
+        permissions: ["workspace:read", "members:manage"],
+      },
+      organizationAdministrator: true,
+    };
+  }
+}
+
+/**
  * Automatic membership for an organization key acting as an external user
  * (`asUser`): the first request to a shared workspace in the key's own
  * organization creates the user's missing membership with
