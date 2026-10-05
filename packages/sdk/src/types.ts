@@ -3393,6 +3393,7 @@ export type FirstPartyMcpToolName =
   | "instruction_policy_save"
   | "instruction_policy_get"
   | "set_session_title"
+  | "notify_user"
   | "goal_set"
   | "goal_update"
   | "goal_progress"
