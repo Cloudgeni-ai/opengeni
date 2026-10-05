@@ -38,7 +38,11 @@ import {
 } from "@/lib/api-error";
 import { includedDefaultModel } from "@/lib/model-access-onboarding";
 import { onboardingJourney, useOnboardingStep } from "@/lib/onboarding-analytics";
-import type { OnboardingUseCase } from "@/lib/onboarding-use-case";
+import {
+  storeOnboardingUseCase,
+  storedOnboardingUseCase,
+  type OnboardingUseCase,
+} from "@/lib/onboarding-use-case";
 import {
   loadModelAccessOnboarding,
   type StartingCreditsOnboarding,
@@ -115,7 +119,13 @@ export function OrganizationOnboardingPanel({
     organizationId: string;
     personalWorkspaceId: string;
   } | null>(null);
-  const [useCase, setUseCase] = useState<OnboardingUseCase | null>(initialUseCase ?? null);
+  const [useCase, setUseCaseState] = useState<OnboardingUseCase | null>(
+    () => initialUseCase ?? (previewState ? null : storedOnboardingUseCase()),
+  );
+  const setUseCase = (choice: OnboardingUseCase | null) => {
+    if (!previewState) storeOnboardingUseCase(choice);
+    setUseCaseState(choice);
+  };
   // "Add AI agents to my product" continues past the model step to developer setup.
   const [modelStepDone, setModelStepDone] = useState(false);
   const operationId = useRef(crypto.randomUUID());
@@ -289,6 +299,8 @@ export function OrganizationOnboardingPanel({
           ...(useCase ? { useCase } : {}),
         });
         onboardingJourney().completed("organization_name", "created");
+        // Durable from here on (signup use case + pending developer setup).
+        storeOnboardingUseCase(null);
         // The new-chat page leads with suggestions for the answer.
         if (useCase && activeEmail) {
           rememberSignupUseCase({
@@ -606,7 +618,8 @@ export function OrganizationOnboardingPanel({
 /**
  * The developer setup step again after a reload, a closed tab or another
  * device: the person chose "Add AI agents to my product" and has not picked
- * an option or skipped yet. It mints a fresh key, like the first time.
+ * an option or skipped yet. It reuses a live setup key (its token was shown
+ * once) and offers to replace it rather than minting another.
  */
 export function ResumedDeveloperSetup({
   client,

@@ -5,6 +5,27 @@
 /** The first onboarding question: embed Opengeni in a product, or use it directly. */
 export type OnboardingUseCase = "embed" | "cloud";
 
+const USE_CASE_STORAGE_KEY = "opengeni.onboardingUseCase.v1";
+
+/** The choice survives a reload of this tab until the organization exists. */
+export function storedOnboardingUseCase(): OnboardingUseCase | null {
+  try {
+    const value = window.sessionStorage.getItem(USE_CASE_STORAGE_KEY);
+    return value === "embed" || value === "cloud" ? value : null;
+  } catch {
+    return null;
+  }
+}
+
+export function storeOnboardingUseCase(choice: OnboardingUseCase | null): void {
+  try {
+    if (choice) window.sessionStorage.setItem(USE_CASE_STORAGE_KEY, choice);
+    else window.sessionStorage.removeItem(USE_CASE_STORAGE_KEY);
+  } catch {
+    /* Private mode: the question is asked again after a reload. */
+  }
+}
+
 /** Name of the shared workspace "Let Opengeni implement it" creates. */
 export const DEVELOPER_SETUP_WORKSPACE_NAME = "Opengeni setup";
 /** Variable set that carries the setup key into that chat's sandbox. */
