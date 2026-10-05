@@ -53,7 +53,8 @@ import {
 const GATEWAY_KEYS: Record<GatewayId, { prefix: string; where: string }> = {
   vercel: { prefix: "vck_", where: "Create one in Vercel under AI Gateway, then API keys." },
   openrouter: { prefix: "sk-or-", where: "Create one on openrouter.ai under Keys." },
-  opper: { prefix: "op-", where: "Create one at platform.opper.ai under API keys." },
+  // Opper key format is unverified; accept any key in this dev preview.
+  opper: { prefix: "", where: "Create one at platform.opper.ai under API keys." },
 };
 
 const NEW_ACCOUNT_NAMES = ["design@acme.dev", "support@acme.dev", "data@acme.dev"];

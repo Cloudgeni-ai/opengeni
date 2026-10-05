@@ -29071,6 +29071,7 @@
       "OpenGeniProviderProps": "type",
       "OpenGeniViewerTarget": "type",
       "OpenRouterMark": "value",
+      "OpperMark": "value",
       "parseCommandLine": "value",
       "ParsedCommandLine": "type",
       "parseExecBannerSessionId": "value",
