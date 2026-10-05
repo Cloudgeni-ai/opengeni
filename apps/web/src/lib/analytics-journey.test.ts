@@ -196,13 +196,73 @@ describe("content-free customer journey", () => {
   });
 
   test("funnel milestones are exact accepted-route facts", () => {
-    expect(journeyMilestone("/v1/billing/checkout", "POST")).toBe("checkout_started");
-    expect(journeyMilestone("/v1/billing/checkout", "post")).toBe("checkout_started");
-    expect(journeyMilestone("/v1/auth/organization-onboarding", "POST")).toBe(
-      "organization_setup_completed",
-    );
+    expect(journeyMilestone("/v1/billing/checkout", "POST")?.name).toBe("checkout_started");
+    expect(journeyMilestone("/v1/billing/checkout", "post")?.name).toBe("checkout_started");
+    expect(journeyMilestone("/v1/auth/organization-onboarding", "POST")).toEqual({
+      name: "organization_setup_completed",
+      properties: {},
+    });
     expect(journeyMilestone("/v1/auth/organization-onboarding", "GET")).toBeNull();
     expect(journeyMilestone("/v1/billing/checkout/extra", "POST")).toBeNull();
     expect(journeyMilestone("/v1/billing/usage-summary", "POST")).toBeNull();
+  });
+
+  test("API key creation is an embedding milestone with its scope and owner id only", () => {
+    const organization = "33333333-3333-4333-8333-333333333333";
+    expect(journeyMilestone(`/v1/organizations/${organization}/api-keys`, "POST")).toEqual({
+      name: "api_key_created",
+      properties: { scope: "organization", account_id: organization },
+    });
+    expect(journeyMilestone(`/v1/workspaces/${workspace}/api-keys`, "POST")).toEqual({
+      name: "api_key_created",
+      properties: { scope: "workspace", workspace_id: workspace },
+    });
+    expect(journeyMilestone(`/v1/organizations/${organization}/api-keys`, "GET")).toBeNull();
+    expect(
+      journeyMilestone(`/v1/organizations/${organization}/api-keys/${session}`, "DELETE"),
+    ).toBeNull();
+    expect(
+      journeyMilestone(`/v1/organizations/${organization}/api-keys/${session}`, "POST"),
+    ).toBeNull();
+    expect(journeyMilestone("/v1/organizations/private/api-keys", "POST")).toBeNull();
+  });
+
+  test("voice calls and dictations are counted once per start", () => {
+    expect(
+      journeyOperation(`/v1/workspaces/${workspace}/sessions/${session}/realtime`, "POST"),
+    ).toEqual({
+      operation: "voice_call",
+      properties: { workspace_id: workspace, session_id: session, method: "POST" },
+    });
+    for (const leaf of ["webrtc", "gateway", "supergrok"]) {
+      expect(
+        journeyOperation(
+          `/v1/workspaces/${workspace}/sessions/${session}/realtime/${leaf}`,
+          "POST",
+        ),
+      ).toBeNull();
+    }
+    expect(
+      journeyOperation(`/v1/workspaces/${workspace}/sessions/${session}/realtime`, "DELETE"),
+    ).toBeNull();
+    expect(journeyOperation(`/v1/workspaces/${workspace}/transcriptions`, "POST")).toEqual({
+      operation: "dictation",
+      properties: { workspace_id: workspace, method: "POST", mode: "direct" },
+    });
+    expect(
+      journeyOperation(`/v1/workspaces/${workspace}/transcription-recordings`, "POST"),
+    ).toEqual({
+      operation: "dictation",
+      properties: { workspace_id: workspace, method: "POST", mode: "recording" },
+    });
+    expect(
+      journeyOperation(
+        `/v1/workspaces/${workspace}/transcription-recordings/${session}/finalize`,
+        "POST",
+      ),
+    ).toBeNull();
+    expect(
+      journeyOperation(`/v1/workspaces/${workspace}/transcription-recordings`, "GET"),
+    ).toBeNull();
   });
 });

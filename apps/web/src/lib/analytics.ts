@@ -17,6 +17,7 @@ import {
   journeyOperation,
   journeyOutcome,
   journeyPage,
+  type JourneyMilestone,
 } from "./analytics-journey";
 import {
   isSignupAttributionValue,
@@ -58,7 +59,12 @@ export type AnalyticsEventName =
   | "onboarding_step_viewed"
   | "onboarding_step_completed"
   | "onboarding_abandoned"
-  | "playground_step_completed";
+  | "playground_step_completed"
+  | "api_key_created"
+  | "voice_call_attempted"
+  | "voice_call_finished"
+  | "dictation_attempted"
+  | "dictation_finished";
 
 type AnalyticsConfig = ClientConfig["analytics"];
 export type AnalyticsProperty = boolean | number | string;
@@ -493,9 +499,10 @@ export function beginAnalyticsRequest(
 }
 
 /** A funnel milestone is reported only when its request was accepted. */
-function milestoneFinisher(
-  name: "checkout_started" | "organization_setup_completed",
-): (status: number | null) => void {
+function milestoneFinisher({
+  name,
+  properties,
+}: JourneyMilestone): (status: number | null) => void {
   if (!analyticsCollectionAllowed()) return () => {};
   const generation = identityGeneration;
   const consentGeneration = initializationGeneration;
@@ -504,7 +511,7 @@ function milestoneFinisher(
     if (finished) return;
     finished = true;
     if (generation !== identityGeneration || consentGeneration !== initializationGeneration) return;
-    if (status !== null && status >= 200 && status < 300) captureAnalyticsEvent(name);
+    if (status !== null && status >= 200 && status < 300) captureAnalyticsEvent(name, properties);
   };
 }
 
