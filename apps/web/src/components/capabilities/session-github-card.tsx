@@ -247,7 +247,11 @@ export function SessionGitHubCapabilityCard({
       subtitle={catalogItem ? (catalogItem.providerDomain ?? "") : item.providerDomain}
       logo={logo}
       typeLabel="API"
-      description={catalogItem?.description || recommendation.rationale}
+      description={
+        ownerApprovalPending && !unavailable
+          ? "Waiting for your GitHub organization owner to approve. After they do, an owner of the organization connects it here, and this card updates on its own."
+          : catalogItem?.description || recommendation.rationale
+      }
       skill={false}
       expanded={expanded}
       complete={bound}
@@ -261,7 +265,7 @@ export function SessionGitHubCapabilityCard({
       note={
         unavailableNote ??
         (ownerApprovalPending
-          ? "Waiting for your GitHub organization owner. After they approve, an owner of the organization connects it here, and this card updates on its own."
+          ? "Nothing is connected yet. Meanwhile, you can attach a zip of your project to a message instead."
           : "Choose which account and repositories this workspace can access on GitHub. For an organization you don't own, GitHub lets you ask its owners to approve.")
       }
       onOpen={() => void connect()}

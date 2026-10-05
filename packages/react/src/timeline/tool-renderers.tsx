@@ -81,6 +81,7 @@ import {
   type DisclosureChip,
 } from "./shared";
 import { RawPatch, ToolDiff } from "./tool-diff";
+import { isPatchFilename, PatchApplyCommand } from "./patch-apply-command";
 import { mcpToolLeaf, toolDisplayName } from "./tool-display-name";
 import { useOpenGeniLinkResolver } from "../components/open-geni-links";
 
@@ -1151,6 +1152,13 @@ function SandboxFilePublishRenderer({ item, loadRetainedArtifact }: ToolRenderer
     >
       {downloadButton}
       {openLink}
+      {isPatchFilename(receipt.filename) ? (
+        <PatchApplyCommand
+          artifact={receipt.artifact}
+          filename={receipt.filename}
+          load={loadRetainedArtifact}
+        />
+      ) : null}
     </ActivityDisclosure>
   );
 }

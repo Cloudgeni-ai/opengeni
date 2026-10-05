@@ -401,6 +401,7 @@ export {
 export type {
   CreateToolRegistryOptions,
   RetainedArtifactLoader,
+  RetainedArtifactLoadOptions,
   RetainedArtifactLoaderClient,
   RetainedScreenshotLoader,
   RetainedScreenshotLoaderClient,

@@ -170,8 +170,7 @@ function ScopedSetup({
       {awaitingOwner && (
         <div className="og-connect-setup-pending">
           <p>
-            Your request was sent. GitHub asked the owners of your organization to approve
-            Opengeni.
+            Your request was sent. GitHub asked the owners of your organization to approve Opengeni.
           </p>
           <ol>
             <li>An organization owner approves the request on GitHub.</li>
@@ -198,15 +197,17 @@ function ScopedSetup({
             ) ? (
               <legend>Connection details</legend>
             ) : null}
-            {attempt.state === "connected_but_incomplete" && action.type === "none" && !awaitingOwner && (
-              <button
-                type="button"
-                className="og-connect-setup-primary"
-                onClick={() => invoke(() => view.advance({ type: "retry" }, crypto.randomUUID()))}
-              >
-                Choose tools
-              </button>
-            )}
+            {attempt.state === "connected_but_incomplete" &&
+              action.type === "none" &&
+              !awaitingOwner && (
+                <button
+                  type="button"
+                  className="og-connect-setup-primary"
+                  onClick={() => invoke(() => view.advance({ type: "retry" }, crypto.randomUUID()))}
+                >
+                  Choose tools
+                </button>
+              )}
             {action.type === "credentials" &&
               action.fields.map((field, i) => (
                 <label key={field.name}>
@@ -254,8 +255,8 @@ function ScopedSetup({
             {offersGitHubRequest && (
               <p className="og-connect-setup-hint">
                 Don't see your organization? Only its owners can connect it. Choose "Install on
-                another GitHub account" and pick the organization: GitHub lets you send its owners
-                a request to approve.
+                another GitHub account" and pick the organization: GitHub lets you send its owners a
+                request to approve.
               </p>
             )}
             {action.type === "select_resources" &&
