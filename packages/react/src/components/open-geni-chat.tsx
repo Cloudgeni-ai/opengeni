@@ -278,6 +278,8 @@ function Chat({
           {selected ? (
             <SessionConversation
               {...conversationProps}
+              // Sub-agent chats open in place, like a chat from the list.
+              onOpenSession={conversationProps?.onOpenSession ?? select}
               {...scope}
               sessionId={selected}
               height="100%"

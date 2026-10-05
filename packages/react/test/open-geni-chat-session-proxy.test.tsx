@@ -16,6 +16,7 @@ registerDom();
 const WS = "dddddddd-dddd-4ddd-8ddd-dddddddddddd";
 const S = "aaaaaaaa-0000-4000-8000-000000000001";
 const OTHER = "aaaaaaaa-0000-4000-8000-000000000009";
+const CHILD = "aaaaaaaa-0000-4000-8000-000000000002";
 const TURN = "bbbbbbbb-0000-4000-8000-000000000001";
 const IMG = "cccccccc-0000-4000-8000-000000000002";
 const PUB = "cccccccc-0000-4000-8000-000000000003";
@@ -159,6 +160,19 @@ function conversation(): Event[] {
     },
     null,
   );
+  // A sub-agent reporting back: its card links to the child chat.
+  push(
+    "user.message",
+    {
+      text: "Child finished.",
+      childCompletion: {
+        childSessionId: CHILD,
+        status: "idle",
+        goal: { status: "completed", text: "Check the report numbers" },
+      },
+    },
+    null,
+  );
   push("session.status.changed", { status: "idle" }, null);
   return list;
 }
@@ -250,6 +264,7 @@ async function mountStockChat(
   proxy: Partial<SessionProxyHandlerOptions> = {},
   props: Partial<OpenGeniChatProps> = {},
   rewriteConfig: (config: Record<string, unknown>) => Record<string, unknown> = (config) => config,
+  withGoal = false,
 ): Promise<Mounted> {
   const events = conversation().map((event, index) => ({
     id: `eeeeeeee-0000-4000-8000-${String(index + 1).padStart(12, "0")}`,
@@ -261,6 +276,32 @@ async function mountStockChat(
   }));
   const browser: string[] = [];
   const upstream: string[] = [];
+  let goal: { status: "active" | "paused"; version: number } | null = withGoal
+    ? ({
+        id: "ffffffff-0000-4000-8000-0000000000a1",
+        accountId: "acc",
+        workspaceId: WS,
+        sessionId: S,
+        status: "active",
+        text: "Ship the report",
+        successCriteria: null,
+        evidence: null,
+        rationale: null,
+        pausedReason: null,
+        createdBy: "agent",
+        version: 1,
+        objectiveRevision: 1,
+        mutationPolicy: "preserve_intent",
+        autoContinuations: 0,
+        noProgressStreak: 0,
+        maxAutoContinuations: null,
+        metadata: {},
+        continuation: null,
+        rootConstraints: [],
+        createdAt: now,
+        updatedAt: now,
+      } as never)
+    : null;
   const ws = `/v1/workspaces/${WS}`;
   const ss = `${ws}/sessions/${S}`;
   const fake = async (input: string | URL | Request, init?: RequestInit): Promise<Response> => {
@@ -333,6 +374,68 @@ async function mountStockChat(
       });
     }
     if (path === `${ss}/human-input-requests`) return json({ requests: [] });
+    if (path === `${ss}/goal` && method === "GET") {
+      return goal
+        ? json(goal)
+        : json({ error: { code: "goal_not_found", message: "No goal." } }, { status: 404 });
+    }
+    if (path === `${ss}/goal` && method === "PATCH") {
+      const { status } = (await request.json()) as { status: "active" | "paused" };
+      goal = { ...goal!, status, version: goal!.version + 1 };
+      return json(goal);
+    }
+    if (path === `${ss}/goal` && method === "DELETE") {
+      goal = null;
+      return new Response(null, { status: 204 });
+    }
+    // The sub-agent's own chat.
+    const child = `${ws}/sessions/${CHILD}`;
+    if (path === child) return json({ ...sessionRecord(CHILD), title: "Report check" });
+    if (path === `${child}/events`) {
+      return json(
+        [
+          {
+            id: "eeeeeeee-0000-4000-8000-0000000000c1",
+            workspaceId: WS,
+            sessionId: CHILD,
+            sequence: 1,
+            occurredAt: now,
+            turnId: null,
+            type: "session.created",
+            payload: {},
+          },
+          {
+            id: "eeeeeeee-0000-4000-8000-0000000000c2",
+            workspaceId: WS,
+            sessionId: CHILD,
+            sequence: 2,
+            occurredAt: now,
+            turnId: null,
+            type: "user.message",
+            payload: { text: "Check the report numbers" },
+          },
+        ],
+        { headers: { "X-OpenGeni-Covered-First": "1", "X-OpenGeni-Covered-Last": "2" } },
+      );
+    }
+    if (path === `${child}/queue`) {
+      return json({ version: 1, effectiveControl: control, items: [], pendingInputs: [] });
+    }
+    if (path === `${child}/composer-draft`) {
+      return json({
+        text: "",
+        resources: [],
+        revision: 0,
+        model: "m",
+        reasoningEffort: "medium",
+        latencyMode: "standard",
+        annotations: [],
+      });
+    }
+    if (path === `${child}/human-input-requests`) return json({ requests: [] });
+    if (path === `${child}/goal`) {
+      return json({ error: { code: "goal_not_found", message: "No goal." } }, { status: 404 });
+    }
     if (path === `${ss}/archive`) return json(sessionRecord());
     if (path === `${ws}/model-catalog`) return json({ models: [], defaultModel: "m" });
     if (path.startsWith(`${ws}/files/`) && path.endsWith("/download-url")) {
@@ -453,8 +556,9 @@ async function mountStockChat(
   return { container: view.container, browser, upstream, click, buttons };
 }
 
+/** Failed browser requests, except the API's ordinary "this session has no goal". */
 function failures(log: readonly string[]): string[] {
-  return log.filter((line) => /^[45]\d\d /.test(line));
+  return log.filter((line) => /^[45]\d\d /.test(line) && !/\/goal goal_not_found$/.test(line));
 }
 
 describe("stock OpenGeniChat behind the default session proxy", () => {
@@ -501,6 +605,31 @@ describe("stock OpenGeniChat behind the default session proxy", () => {
     // 4. A proxy with a createSession hook and archive on offers both.
     expect(chat.buttons()).toContain("New chat");
     expect(chat.buttons().some((label) => /^Archive:/.test(label))).toBe(true);
+    expect(failures(chat.browser)).toEqual([]);
+  });
+
+  test("goal controls pause, resume and clear through the proxy", async () => {
+    const chat = await mountStockChat({}, {}, undefined, true);
+    expect(chat.container.textContent).toContain("Goal");
+    expect(await chat.click(/^Pause goal$/)).toBe(true);
+    expect(await chat.click(/^Resume goal$/)).toBe(true);
+    expect(await chat.click(/^Clear goal$/)).toBe(true);
+    const goal = `/v1/workspaces/${WS}/sessions/${S}/goal`;
+    expect(chat.browser.filter((line) => line.endsWith(goal) || line.includes(`${goal} `))).toEqual(
+      expect.arrayContaining([`200 GET ${goal}`, `200 PATCH ${goal}`, `204 DELETE ${goal}`]),
+    );
+    // Only the status crosses the proxy; the chrome's rationale stays behind.
+    expect(chat.upstream.filter((line) => line.startsWith(`PATCH ${goal}`))).toHaveLength(2);
+    expect(failures(chat.browser)).toEqual([]);
+  });
+
+  test("a sub-agent's chat opens in place from its card", async () => {
+    const chat = await mountStockChat();
+    expect(await chat.click(/^View session$/)).toBe(true);
+    await flush(300);
+    expect(chat.browser).toContain(`200 GET /v1/workspaces/${WS}/sessions/${CHILD}`);
+    expect(chat.browser).toContain(`200 GET /v1/workspaces/${WS}/sessions/${CHILD}/events`);
+    expect(chat.container.textContent).toContain("Check the report numbers");
     expect(failures(chat.browser)).toEqual([]);
   });
 

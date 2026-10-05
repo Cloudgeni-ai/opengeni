@@ -213,7 +213,8 @@ workspace. Only the native routes `OpenGeniProvider` and the conversation use
 are served: client config; workspace read, model catalog, live control stream,
 and workspace Resume; session read/rename, events (list and SSE with
 `Last-Event-ID` resume), send/steer/approval/human-input, queue, composer
-draft, pause/resume; and, unless `files: false`, attachment upload and download
+draft, pause/resume, and the session goal (read; pause/resume, forwarding only
+`{ status: "paused" | "active" }`; and clear, the proxy's only `DELETE`); and, unless `files: false`, attachment upload and download
 URLs plus the media the session produced (generated images and video,
 published files, and browser or computer screenshots). Workspace-level
 artifact reads (`artifacts/:id/content` with `Range`, `artifacts/:id/playback-source`)

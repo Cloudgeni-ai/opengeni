@@ -359,8 +359,60 @@ describe("createSessionProxyHandler", () => {
         method: "DELETE",
       }),
     );
-    expect(deleted.status).toBe(405);
+    // DELETE reaches routing only to clear a goal; nothing else is deletable.
+    expect(deleted.status).toBe(404);
+    const options = await handler(
+      new Request(`${PRODUCT}/api/opengeni/v1/workspaces/${WORKSPACE_ID}`, { method: "OPTIONS" }),
+    );
+    expect(options.status).toBe(405);
+    expect(options.headers.get("allow")).toBe("GET, POST, PUT, PATCH, DELETE");
     expect(upstream.requests).toHaveLength(0);
+  });
+
+  test("goal controls: read, pause/resume only, and clear", async () => {
+    const { upstream, browser, handler } = setup();
+    const goal = `/v1/workspaces/${WORKSPACE_ID}/sessions/${SESSION_ID}/goal`;
+    await browser.getGoal(WORKSPACE_ID, SESSION_ID);
+    await browser.pauseGoal(WORKSPACE_ID, SESSION_ID, { rationale: "end-user text" });
+    await browser.resumeGoal(WORKSPACE_ID, SESSION_ID);
+    await browser.deleteGoal(WORKSPACE_ID, SESSION_ID);
+    expect(
+      upstream.requests.map((request) => [request.method, request.url.pathname, request.body]),
+    ).toEqual([
+      ["GET", goal, undefined],
+      ["PATCH", goal, { status: "paused" }],
+      ["PATCH", goal, { status: "active" }],
+      ["DELETE", goal, undefined],
+    ]);
+    upstream.requests.length = 0;
+    // The objective, limits, completion and rationale stay server-side.
+    for (const body of [
+      { status: "completed" },
+      { objective: "Something else" },
+      { status: "active", maxAutoContinuations: 99 },
+    ]) {
+      const refused = await rejection(browser.updateGoal(WORKSPACE_ID, SESSION_ID, body as never));
+      expect(refused.status).toBe(403);
+      expect(refused.code).toBe("goal_update_not_allowed");
+    }
+    // Goal revisions stay out of the browser boundary, and DELETE only clears.
+    expect((await rejection(browser.listGoalRevisions(WORKSPACE_ID, SESSION_ID))).status).toBe(404);
+    for (const path of [
+      `${goal}/revisions`,
+      `/v1/workspaces/${WORKSPACE_ID}/sessions/${SESSION_ID}/queue`,
+    ]) {
+      const response = await handler(
+        new Request(`${PRODUCT}/api/opengeni${path}`, { method: "DELETE" }),
+      );
+      expect(response.status).toBe(404);
+    }
+    expect(upstream.requests).toHaveLength(0);
+    // A product-level session check guards the goal too.
+    const guarded = setup({ authorizeSession: () => false });
+    expect((await rejection(guarded.browser.deleteGoal(WORKSPACE_ID, SESSION_ID))).status).toBe(
+      404,
+    );
+    expect(guarded.upstream.requests).toHaveLength(0);
   });
 
   test("acts as the resolved external user through asUser", async () => {
