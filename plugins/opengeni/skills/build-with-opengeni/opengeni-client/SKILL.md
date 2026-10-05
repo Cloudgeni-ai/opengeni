@@ -199,7 +199,10 @@ Before production, and for the handoff, read the
 - Never replace the proxy with a raw passthrough to the Opengeni API.
 - Keep every `@opengeni/*` package at one version. The SDK is ESM-only; from
   CommonJS, use `await import("@opengeni/sdk")`.
-- With cookie auth, pass the product's CSRF check as `authorizeMutation`.
+- With cookie auth, pass the product's existing CSRF check as
+  `authorizeMutation`. If it has none, keep the default (it refuses cross-site
+  mutations by `Sec-Fetch-Site`); a hand-written Origin/Host check breaks
+  behind proxies, tunnels, and preview URLs.
 - This skill guides the coding agent. Do not add it to the product agent's
   skills.
 
