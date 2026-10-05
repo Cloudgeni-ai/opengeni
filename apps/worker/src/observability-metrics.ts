@@ -37,7 +37,7 @@ import {
 
 export type TurnOutcome = "completed" | "failed" | "cancelled" | "recovering";
 export type WorkerDeathRecoveryOutcome = "recovering" | "exhausted";
-export type CreditMicrosKind = "usage" | "grant" | "topup" | "refund";
+export type CreditMicrosKind = "usage" | "grant" | "topup" | "refund" | "code_search";
 export type SandboxLeaseLiveness = "cold" | "warming" | "warm" | "draining";
 export type CreditBalanceGauge = { accountId: string; balanceMicros: number };
 export type TurnTaskQueueStats = {
@@ -2651,6 +2651,7 @@ export type CodeSearchCallOutcome =
   | "invalid_arguments"
   | "breaker_open"
   | "judge_key_unavailable"
+  | "billing_refused"
   | "cancelled"
   | "failed";
 
@@ -2703,6 +2704,18 @@ export function recordCodeSearchCall(
       amount: Math.round(input.jevCostUsd * 1_000_000),
     });
   }
+}
+
+/** One credit settlement of a completed code_search call on a charged route. */
+export function recordCodeSearchSettlement(
+  observability: Observability,
+  outcome: "settled" | "failed",
+): void {
+  observability.incrementCounter({
+    name: "opengeni_code_search_credit_settlements_total",
+    help: "Credit settlements of code_search calls on turns paid with OpenGeni credits, by outcome.",
+    labels: { outcome },
+  });
 }
 
 /**

@@ -542,6 +542,8 @@ This applies to non-model debits too:
 
 - Paid Knowledge queries use the exact turn's frozen human or a verified
   direct human request; key/service requests remain workspace-only.
+- Paid `code_search` calls (`code_search_debit`) carry their turn, so they
+  charge the turn's frozen initiating human.
 - Paid indexing retains the revision/job's enqueue attribution, including a
   scheduled source's accepted causal human. A new direct upload records its
   verified request attribution before asynchronous work begins.

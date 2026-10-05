@@ -72,11 +72,14 @@ import {
   hasPermission,
   requireExplicitPermissionDelegation,
   createWebSearchBilling,
+  CodeSearchBillingRefusedError,
+  createCodeSearchBilling,
 } from "@opengeni/core";
 import { loadWorkspaceEnvironmentForRunWithCredentials } from "../environment";
 import { withFirstPartyTools } from "../goals";
 import type { TurnActivityServices as ActivityServices, RunAgentTurnInput } from "../types";
 import {
+  recordCreditMicros,
   recordSkillCheckout,
   recordSkillRead,
   recordToolPreparationPhase,
@@ -841,12 +844,50 @@ export async function prepareTurnToolRuntime(deps: PrepareTurnToolRuntimeDeps) {
   // (`code_search.customer_jev_*`, customer_usd_micros), which never sums into
   // OpenGeni's own cost.
   let codeSearchAttribution: ReturnType<typeof creditDebitAttributionForTurn> | null = null;
+  // A turn paid with credits is charged for its searches (when the operator
+  // turned code search billing on); other routes are never charged.
+  const codeSearchBilling = createCodeSearchBilling({ db, settings: runSettings });
+  const codeSearchBillingScope = {
+    accountId: input.accountId,
+    workspaceId: input.workspaceId,
+    sessionId: input.sessionId,
+    turnId: turn.id,
+    attemptId: input.attemptId,
+    productModelId: turnExecutionPolicy.productModelId,
+  };
+  const chargedCodeSearchRoute =
+    codeSearchBilling.active && codeSearchRoute?.funding === "credits" ? codeSearchRoute : null;
   const codeSearchTools = codeSearchToolDefinitions({
     route: codeSearchRoute,
     settings: runSettings,
     backend: activeSandboxBackend ?? groupBoxBackend,
     machineWorkspaceRoot: sandboxState.machinePrimarySession?.workspaceRoot ?? null,
     observability,
+    ...(chargedCodeSearchRoute
+      ? {
+          billing: {
+            admit: async () => {
+              try {
+                await codeSearchBilling.admit(codeSearchBillingScope, chargedCodeSearchRoute);
+                return null;
+              } catch (error) {
+                if (error instanceof CodeSearchBillingRefusedError) return error.message;
+                throw error;
+              }
+            },
+            settle: async (usage) => {
+              const charged = await codeSearchBilling.settle(codeSearchBillingScope, {
+                operationId: usage.operationId,
+                route: usage.route,
+                model: usage.model,
+                providerMicros: Math.round(usage.jevCostUsd * 1_000_000),
+                basis: usage.costSource,
+              });
+              recordCreditMicros(observability, "code_search", charged);
+            },
+          },
+        }
+      : {}),
     loadCustomerKey: async (route) => {
       if (route.funding !== "external") return null;
       if (route.keySource === "organization_connection") {

@@ -245,6 +245,8 @@ export function testSettings(overrides: Partial<Settings> = {}): Settings {
     codeSearchMode: "off",
     codeSearchFunding: "all",
     codeSearchJudgeProvider: "typesafe",
+    codeSearchBillingMode: "usage_only",
+    codeSearchCreditMarginBps: 500,
     agentInstructionsTemplate: DEFAULT_AGENT_INSTRUCTIONS,
     azureOpenaiBaseUrl: undefined,
     azureOpenaiEndpoint: undefined,

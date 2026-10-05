@@ -28,7 +28,11 @@ import {
   isWindowsConnectedMachinePath,
   type SandboxChannelAService,
 } from "@opengeni/runtime/sandbox";
-import { recordCodeSearchCall, type CodeSearchCallOutcome } from "../../observability-metrics";
+import {
+  recordCodeSearchCall,
+  recordCodeSearchSettlement,
+  type CodeSearchCallOutcome,
+} from "../../observability-metrics";
 
 /**
  * One breaker per deployment judge provider per worker process. Repeated
@@ -107,6 +111,19 @@ export type CodeSearchUsage = {
   /** Provider-reported cost when every request reported one, else Jev's list price. */
   jevCostUsd: number;
   costSource: "provider_reported" | "list_price";
+  /** The judge model that answered, when the provider named it. */
+  model: string | null;
+};
+
+/**
+ * Credits for a call on a turn paid with OpenGeni credits. `admit` runs before
+ * any judge work and returns a refusal to show the model, or null; `settle`
+ * charges a completed call. Settlement failures are logged and counted, never
+ * surfaced: the search already ran.
+ */
+export type CodeSearchCallBilling = {
+  admit: () => Promise<string | null>;
+  settle: (usage: CodeSearchUsage) => Promise<void>;
 };
 
 /**
@@ -180,6 +197,8 @@ export function createCodeSearchAttemptToolDefinition(input: {
   observability: Observability;
   /** Records judge usage against the workspace. Failures are logged, never surfaced. */
   recordUsage?: (usage: CodeSearchUsage) => Promise<void>;
+  /** Credit admission and settlement; only for charged routes. */
+  billing?: CodeSearchCallBilling;
   /** Defaults to the deployment provider's breaker, or a breaker of this tool's own for a customer key. */
   breaker?: JevCircuitBreaker;
 }): AttemptToolDefinition {
@@ -216,6 +235,18 @@ export function createCodeSearchAttemptToolDefinition(input: {
       let lease: JevCircuitLease | null = null;
       try {
         const request = parseCodeSearchArguments(args);
+        if (input.billing) {
+          const refusal = await input.billing.admit().catch((error: unknown) => {
+            input.observability.warn("code_search credit admission failed", {
+              error: error instanceof Error ? error.message : String(error),
+            });
+            return "Fast code search could not check this account's Opengeni credits.";
+          });
+          if (refusal) {
+            outcome = "billing_refused";
+            return textResult(`${refusal} Search with exec_command instead.`, true);
+          }
+        }
         lease = breaker.tryAcquire(Date.now());
         if (!lease) {
           outcome = "breaker_open";
@@ -269,21 +300,32 @@ export function createCodeSearchAttemptToolDefinition(input: {
         outcome = "completed";
         jevRequests = result.stats.jev.requests;
         jevCostUsd = result.stats.jev.costUsd;
-        if (input.recordUsage && jevRequests > 0) {
-          await input
-            .recordUsage({
-              operationId: context.operationId,
-              route,
-              jevRequests,
-              jevInputTokens: result.stats.jev.inputTokens,
-              jevCostUsd,
-              costSource: result.stats.jev.costSource,
-            })
-            .catch((error: unknown) => {
-              input.observability.warn("code_search usage record failed", {
-                error: error instanceof Error ? error.message : String(error),
-              });
+        if (jevRequests > 0) {
+          const usage: CodeSearchUsage = {
+            operationId: context.operationId,
+            route,
+            jevRequests,
+            jevInputTokens: result.stats.jev.inputTokens,
+            jevCostUsd,
+            costSource: result.stats.jev.costSource,
+            model: result.stats.jev.model,
+          };
+          await input.recordUsage?.(usage).catch((error: unknown) => {
+            input.observability.warn("code_search usage record failed", {
+              error: error instanceof Error ? error.message : String(error),
             });
+          });
+          if (input.billing) {
+            await input.billing.settle(usage).then(
+              () => recordCodeSearchSettlement(input.observability, "settled"),
+              (error: unknown) => {
+                recordCodeSearchSettlement(input.observability, "failed");
+                input.observability.warn("code_search credit settlement failed", {
+                  error: error instanceof Error ? error.message : String(error),
+                });
+              },
+            );
+          }
         }
         return textResult(result.text, false);
       } catch (error) {
@@ -357,6 +399,8 @@ export function codeSearchToolDefinitions(input: {
   recordUsage?: (usage: CodeSearchUsage) => Promise<void>;
   /** Reads the customer's key for an `external` route; null when unavailable. */
   loadCustomerKey?: (route: CodeSearchJudgeRoute) => Promise<string | null>;
+  /** Credit admission and settlement for a route that is charged. */
+  billing?: CodeSearchCallBilling;
   breaker?: JevCircuitBreaker;
   fetch?: typeof fetch;
 }): AttemptToolDefinition[] {
@@ -377,6 +421,7 @@ export function codeSearchToolDefinitions(input: {
       workspace: input.workspace,
       observability: input.observability,
       ...(input.recordUsage ? { recordUsage: input.recordUsage } : {}),
+      ...(input.billing ? { billing: input.billing } : {}),
       ...(input.breaker ? { breaker: input.breaker } : {}),
     }),
   ];

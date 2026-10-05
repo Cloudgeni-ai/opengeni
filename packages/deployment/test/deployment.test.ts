@@ -1835,6 +1835,8 @@ describe("deployment contract", () => {
       "OPENGENI_CODE_SEARCH_FUNDING",
       "OPENGENI_CODE_SEARCH_JUDGE_PROVIDER",
       "OPENGENI_CODE_SEARCH_JUDGE_MODEL",
+      "OPENGENI_CODE_SEARCH_BILLING_MODE",
+      "OPENGENI_CODE_SEARCH_CREDIT_MARGIN_BPS",
     ]);
     const configured = generateRuntimeArtifacts(
       withSandboxBackend("docker"),
