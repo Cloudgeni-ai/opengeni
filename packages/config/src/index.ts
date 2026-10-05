@@ -3708,6 +3708,10 @@ const REVIEWED_OPPER_MODEL_PRICING: Readonly<
   },
 };
 
+/** Keepalive-only progress bound for Opper streams: room for a full 128,000-
+ * token hidden-reasoning response at roughly 35 tokens per second. */
+export const OPPER_STREAM_PROGRESS_TIMEOUT_MS = 60 * 60_000;
+
 /** Opper's smallest advertised `max_output_tokens` across every Claude route
  * in its 2026-10-05 catalogue (all 70 routes are 64,000 or more). */
 const OPPER_CLAUDE_FAMILY_MAX_OUTPUT_TOKENS = 64_000;
@@ -5714,6 +5718,13 @@ function opperRegistryProvider(
     api: "chat",
     wireProfile: "openai",
     baseUrl: OPPER_BASE_URL,
+    // Opper streams only SSE keepalives while a route thinks with hidden
+    // reasoning (Claude via Bedrock returns no reasoning deltas). A live
+    // `max`-effort Opus 5.5 request sent keepalives and no model progress for
+    // more than 10 minutes, so the deployment 10-minute progress bound would
+    // abort and replay legitimate thinking. The byte-silence bound still
+    // catches a dead connection.
+    streamProgressTimeoutMs: OPPER_STREAM_PROGRESS_TIMEOUT_MS,
     ...(input.apiKey ? { apiKey: input.apiKey } : {}),
     models,
   };

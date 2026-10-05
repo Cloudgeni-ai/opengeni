@@ -950,6 +950,14 @@ models and workspaces exactly as for OpenRouter.
 - **Output cap.** Requests without `max_tokens` get the route's configured
   `maxOutputTokens` (see above). Title (512) and compaction (20,000) requests
   keep their own explicit caps.
+- **Stream progress bound.** While a route thinks with hidden reasoning, Opper
+  sends only an SSE comment keepalive every 20 seconds (live: `high` took 2
+  minutes, 10,809 tokens, with no delta before the answer). A `max`-effort
+  request exceeded the deployment's 10-minute keepalive-only progress bound
+  and was aborted. Opper providers therefore set `streamProgressTimeoutMs` to 60
+  minutes (`OPPER_STREAM_PROGRESS_TIMEOUT_MS`), enough for a full 128,000-token
+  hidden response. The 5-minute byte-silence bound still detects a dead
+  connection.
 
 ### Live probe notes
 
@@ -971,6 +979,8 @@ client and request policy, streamed Agents SDK run).
 | Per-call reported cost | `usage.opper.cost.total` on every streamed final chunk; equals list price; debit = cost +5% |
 | Session title (`low`, max 512) and compaction (max 20,000) | title produced; compaction checkpoint produced (`finish_reason: stop`) |
 | Unsupported effort values (`none`, `minimal`) | accepted (200) |
+| Raw stream at `high`, hard prompt | first byte 1.2 s, then only `:` keepalive comments every 20 s until the answer at 120 s |
+| Runtime run at `max`, hard prompt, before the Opper progress bound | aborted by the 600 s keepalive-only progress timeout (fixed by the 60-minute Opper bound) |
 
 The Gemini `$ref` tool-output projection still applies to Opper Gemini ids
 (`vertexai/gemini-3.8-flash-eu` returned 400 on a raw `$ref` and 200 after

@@ -82,6 +82,8 @@ describe("deployment Opper rail", () => {
       api: "chat",
       baseUrl: OPPER_BASE_URL,
       apiKey: "op-deployment",
+      // Hidden reasoning streams only keepalives; see OPPER_STREAM_PROGRESS_TIMEOUT_MS.
+      streamProgressTimeoutMs: 60 * 60_000,
       credentialSource: { kind: "deployment", mechanism: "api_key" },
       billing: { upstreamPayer: "deployment", metering: "opengeni_credits" },
     });
