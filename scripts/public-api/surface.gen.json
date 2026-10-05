@@ -5726,7 +5726,8 @@
       "method": "GET",
       "path": "/v1/workspaces/:workspaceId/realtime-model-catalog",
       "sdk": [
-        "OpenGeniClient.getWorkspaceRealtimeModelCatalog"
+        "OpenGeniClient.getWorkspaceRealtimeModelCatalog",
+        "createSessionProxyHandler"
       ],
       "request": [],
       "response": [
