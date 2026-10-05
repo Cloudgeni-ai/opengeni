@@ -792,7 +792,9 @@ describe("first-party MCP tool visibility policy", () => {
       const tool = (await client.listTools()).tools.find(
         (candidate) => candidate.name === "session_create",
       );
-      expect(tool?.description).toContain("Normally omit tools, mcpServers, and firstPartyMcpTools");
+      expect(tool?.description).toContain(
+        "Normally omit tools, mcpServers, and firstPartyMcpTools",
+      );
       expect(tool?.description).toContain("capabilities: { from: 'all', subagents: false }");
       expect(tool?.description).toContain("cannot start, message, or follow other sessions");
       expect(tool?.description).toContain("Explicit tool arrays replace the inherited selection");
