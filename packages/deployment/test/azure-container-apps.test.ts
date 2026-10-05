@@ -138,13 +138,72 @@ describe("Azure Container Apps deployment profile", () => {
       "OPENGENI_MODAL_TOKEN_ID",
       "OPENGENI_MODAL_TOKEN_SECRET",
       "OPENGENI_ENVIRONMENTS_ENCRYPTION_KEY",
-      "OPENGENI_DELEGATION_SECRET",
     ]) {
       expect(required).toContain(name);
       expect(missing).toContain(name);
     }
+    expect(required).not.toContain("OPENGENI_DELEGATION_SECRET");
+    expect(missing).not.toContain("OPENGENI_DELEGATION_SECRET");
     expect(required).not.toContain("TEMPORAL_POSTGRES_PASSWORD");
     expect(required).not.toContain("OPENGENI_OPENSANDBOX_API_KEY");
+  });
+
+  test("accepts configured shared-key credentials without an explicit delegation secret", () => {
+    const env = {
+      OPENGENI_ACCESS_KEY: "fixture-shared-access-key",
+      OPENGENI_DATABASE_URL: "postgres://fixture:fixture@postgres.invalid/opengeni",
+      OPENGENI_TEMPORAL_HOST: "temporal.invalid:7233",
+      OPENGENI_NATS_URL: "nats://nats.invalid:4222",
+      OPENGENI_OBJECT_STORAGE_AZURE_CONNECTION_STRING:
+        "DefaultEndpointsProtocol=https;AccountName=fixture;AccountKey=fixture",
+      OPENGENI_OPENAI_API_KEY: "fixture-model-key",
+      OPENGENI_MODAL_APP_NAME: "fixture-modal-app",
+      OPENGENI_MODAL_TOKEN_ID: "fixture-modal-id",
+      OPENGENI_MODAL_TOKEN_SECRET: "fixture-modal-secret",
+      OPENGENI_MODAL_TIMEOUT_SECONDS: "900",
+      OPENGENI_ENVIRONMENTS_ENCRYPTION_KEY: Buffer.alloc(32, 2).toString("base64"),
+    };
+    expect(profile.access.mode).toBe("sharedKey");
+    expect(requiredRuntimeEnvVars(profile, env)).not.toContain("OPENGENI_DELEGATION_SECRET");
+    expect(missingRuntimeEnvVars(profile, env)).toEqual([]);
+    expect(stackPlanFor(profile, "none", env).requiredSecretKeys).not.toContain(
+      "OPENGENI_DELEGATION_SECRET",
+    );
+    expect(stackPlanFor(profile, "none", env).notes.join("\n")).toContain(
+      "reuses OPENGENI_ACCESS_KEY when OPENGENI_DELEGATION_SECRET is unset",
+    );
+    expect(missingRuntimeEnvVars(profile, { ...env, OPENGENI_ACCESS_KEY: undefined })).toContain(
+      "OPENGENI_ACCESS_KEY",
+    );
+    expect(
+      missingRuntimeEnvVars(profile, { ...env, OPENGENI_ENVIRONMENTS_ENCRYPTION_KEY: undefined }),
+    ).toContain("OPENGENI_ENVIRONMENTS_ENCRYPTION_KEY");
+  });
+
+  test("preserves an explicitly supplied delegation secret in the ACA secret manifest", () => {
+    const env = Object.freeze({ OPENGENI_DELEGATION_SECRET: "fixture-host-delegation-secret" });
+    const plan = stackPlanFor(profile, "none", env);
+    expect(requiredRuntimeEnvVars(profile, env)).toContain("OPENGENI_DELEGATION_SECRET");
+    expect(plan.requiredSecretKeys).toContain("OPENGENI_DELEGATION_SECRET");
+    expect(missingRuntimeEnvVars(profile, env)).not.toContain("OPENGENI_DELEGATION_SECRET");
+    expect(env.OPENGENI_DELEGATION_SECRET).toBe("fixture-host-delegation-secret");
+    expect(plan.notes.join("\n")).toContain("Preserve an explicitly supplied delegation secret");
+    expect(JSON.stringify(plan)).not.toContain(env.OPENGENI_DELEGATION_SECRET);
+  });
+
+  test("still requires a delegation secret for configured access without a shared key", () => {
+    const contract = parseDeploymentContract({
+      ...profile,
+      access: { ...profile.access, mode: "externalGateway" },
+    });
+    expect(requiredRuntimeEnvVars(contract, {})).toContain("OPENGENI_DELEGATION_SECRET");
+    expect(missingRuntimeEnvVars(contract, {})).toContain("OPENGENI_DELEGATION_SECRET");
+    expect(stackPlanFor(contract, "none", {}).requiredSecretKeys).toContain(
+      "OPENGENI_DELEGATION_SECRET",
+    );
+    expect(
+      missingRuntimeEnvVars(contract, { OPENGENI_DELEGATION_SECRET: "fixture-host-secret" }),
+    ).not.toContain("OPENGENI_DELEGATION_SECRET");
   });
 
   test("keeps artifact export activation fail-closed, including truthy aliases", () => {
