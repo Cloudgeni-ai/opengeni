@@ -1115,6 +1115,30 @@ describe("createSessionProxyHandler", () => {
     );
   });
 
+  test("keeps a quiet session stream alive under Bun.serve's 10-second idle timeout", async () => {
+    const { handler } = setup();
+    const response = await handler(
+      new Request(
+        `${PRODUCT}/api/opengeni/v1/workspaces/${WORKSPACE_ID}/sessions/${SESSION_ID}/events/stream`,
+        { headers: { "Last-Event-ID": "5" } },
+      ),
+    );
+    const reader = response.body!.getReader();
+    const decoder = new TextDecoder();
+    const started = Date.now();
+    let text = "";
+    // Upstream sends two events, then goes quiet; only the default heartbeat may follow.
+    while (!text.includes(": ping")) {
+      const { value, done } = await reader.read();
+      if (done) break;
+      text += decoder.decode(value);
+    }
+    await reader.cancel();
+    expect(text).toContain(": ping");
+    // Bun.serve closes a connection that sends nothing for 10 seconds by default.
+    expect(Date.now() - started).toBeLessThan(9_000);
+  }, 15_000);
+
   test("re-streams session SSE and honors the browser resume cursor", async () => {
     const { upstream, handler } = setup();
     const response = await handler(

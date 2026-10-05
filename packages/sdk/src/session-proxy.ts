@@ -311,9 +311,19 @@ export type SessionProxyHandlerOptions = {
    * settings decide which models end users see.
    */
   modelSelection?: boolean | undefined;
-  /** SSE heartbeat interval. Defaults to 15 seconds. */
+  /**
+   * SSE heartbeat interval. Defaults to 5 seconds, under Bun.serve's default
+   * 10-second `idleTimeout`, which otherwise closes a quiet event stream.
+   */
   heartbeatMs?: number | undefined;
 };
+
+/**
+ * Default SSE heartbeat. Bun.serve closes a connection that sends nothing for
+ * 10 seconds by default, so a quiet stream (a long tool call, an idle chat)
+ * would drop and reconnect every 10 seconds through a Bun or Hono-on-Bun host.
+ */
+const SESSION_PROXY_DEFAULT_HEARTBEAT_MS = 5_000;
 
 const DEFAULT_MAX_BODY_BYTES = 1024 * 1024;
 const SEGMENT = /^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$/;
@@ -384,7 +394,7 @@ export function createSessionProxyHandler(
       )
     : null;
   const modelSelection = options.modelSelection ?? true;
-  const heartbeatMs = options.heartbeatMs ?? 15_000;
+  const heartbeatMs = options.heartbeatMs ?? SESSION_PROXY_DEFAULT_HEARTBEAT_MS;
   const sessionList = options.sessionList ?? "mine";
   const archiveEnabled = options.archive ?? true;
   const chats = options.chats ?? "private";
