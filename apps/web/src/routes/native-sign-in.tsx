@@ -72,7 +72,10 @@ export function NativeSignInRoute({ search }: { search: NativeSignInSearch }) {
             type="button"
             variant="ghost"
             onClick={() => {
-              void handleManagedSignOut();
+              // Sign-out returns home; come back to this request to sign in
+              // as someone else, so the app's sign-in continues.
+              const request = window.location.href;
+              void handleManagedSignOut().then(() => window.location.replace(request));
             }}
           >
             Use another account

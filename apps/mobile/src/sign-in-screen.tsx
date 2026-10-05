@@ -1,5 +1,5 @@
 import { Button, fontStyle, useNativeTimelineTheme } from "@opengeni/react-native/timeline";
-import { useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { KeyboardAvoidingView, Platform, ScrollView, Text, TextInput, View } from "react-native";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
 import { DEFAULT_SERVER_URL, useAccount } from "@/account";
@@ -21,6 +21,14 @@ export function SignInScreen({ onDone, onCancel }: { onDone?: () => void; onCanc
   const [editingServer, setEditingServer] = useState(false);
   const [busy, setBusy] = useState(false);
   const [problem, setProblem] = useState<string | null>(null);
+  // A successful sign-in replaces this screen before the flow settles.
+  const mounted = useRef(true);
+  useEffect(
+    () => () => {
+      mounted.current = false;
+    },
+    [],
+  );
 
   const start = async () => {
     const baseUrl = normalizeServerUrl(server);
@@ -33,9 +41,9 @@ export function SignInScreen({ onDone, onCancel }: { onDone?: () => void; onCanc
     try {
       const result = await addAccount(baseUrl);
       if (result.kind === "signedIn") onDone?.();
-      else if (result.kind === "failed") setProblem(result.message);
+      else if (result.kind === "failed" && mounted.current) setProblem(result.message);
     } finally {
-      setBusy(false);
+      if (mounted.current) setBusy(false);
     }
   };
 

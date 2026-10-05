@@ -156,6 +156,7 @@ function Home() {
     <>
       <Stack.Screen
         options={{
+          headerShown: true,
           headerStyle: { backgroundColor: c.bg },
           headerShadowVisible: true,
           headerTitle: HeaderWordmark,

@@ -52,13 +52,18 @@ export function useNotificationSettingsSection(): SettingsSection | null {
   const { account, client, status } = useAccount();
   const [device, setDevice] = useState<NativePushDevice | null | undefined>(undefined);
   const [permission, setPermission] = useState<Notifications.PermissionStatus | null>(null);
+  // Android 13+ reports "denied" before the first prompt; only a refusal the
+  // system won't ask again for sends the person to system settings.
+  const [canAskAgain, setCanAskAgain] = useState(true);
   const [problem, setProblem] = useState<string | null>(null);
 
   useEffect(() => {
     if (status !== "ready") return;
     let live = true;
     void Notifications.getPermissionsAsync().then((result) => {
-      if (live) setPermission(result.status);
+      if (!live) return;
+      setPermission(result.status);
+      setCanAskAgain(result.canAskAgain);
     });
     client
       .getNativePushDevice()
@@ -86,6 +91,7 @@ export function useNotificationSettingsSection(): SettingsSection | null {
         if (!granted) {
           const asked = await Notifications.requestPermissionsAsync();
           setPermission(asked.status);
+          setCanAskAgain(asked.canAskAgain);
           granted = asked.status === "granted";
         }
         if (!granted) return;
@@ -100,7 +106,12 @@ export function useNotificationSettingsSection(): SettingsSection | null {
           }),
         );
       } catch (caught) {
-        setProblem(caught instanceof Error ? caught.message : "Notifications couldn't be saved.");
+        const message = caught instanceof Error ? caught.message : "";
+        setProblem(
+          /firebase|googleServicesFile|aps-environment|entitlement/iu.test(message)
+            ? "This build of the app isn't set up for push notifications."
+            : "Notifications couldn't be turned on. Try again.",
+        );
       }
     },
     [client, permission],
@@ -108,16 +119,16 @@ export function useNotificationSettingsSection(): SettingsSection | null {
 
   if (status !== "ready" || device === undefined) return null;
   const rules = device?.rules ?? [];
-  if (permission === "denied") {
+  if (permission === "denied" && !canAskAgain) {
     return {
       id: "notifications",
       title: "Notifications",
       footer: "Notifications are off for Opengeni in system settings.",
       rows: [
         {
-          kind: "external",
+          kind: "action",
           id: "open-settings",
-          title: "Turn on in Settings",
+          title: "Turn on in system settings",
           symbol: "bell.badge",
           onPress: () => void Linking.openSettings(),
         },
@@ -178,7 +189,7 @@ Notifications.setNotificationHandler({
 export function NotificationRouting() {
   const { accounts, account, status, switchAccount, setWorkspaceId, client } = useAccount();
   const pathname = usePathname();
-  const pending = useRef<PushData | null>(null);
+  const pending = useRef<{ accountId: string; data: PushData } | null>(null);
   visibleSessionId = pathname.startsWith("/session/") ? pathname.slice("/session/".length) : null;
 
   const open = useCallback(
@@ -188,7 +199,7 @@ export function NotificationRouting() {
         ? accounts.find((each) => each.subjectId === data.subjectId && !each.signedOut)
         : account;
       if (owner && owner.id !== account?.id) {
-        pending.current = data;
+        pending.current = { accountId: owner.id, data };
         switchAccount(owner.id);
         return;
       }
@@ -200,28 +211,39 @@ export function NotificationRouting() {
 
   // After an account switch for a tapped notification, finish opening it.
   useEffect(() => {
-    const data = pending.current;
-    if (!data || status !== "ready") return;
+    const target = pending.current;
+    if (!target || status !== "ready" || account?.id !== target.accountId) return;
     pending.current = null;
+    const data = target.data;
     if (data.workspaceId) setWorkspaceId(data.workspaceId);
     router.push(`/session/${data.sessionId}`);
   }, [account?.id, setWorkspaceId, status]);
 
+  // Each tapped notification opens once: one subscription for the app's life
+  // (a new subscription can replay the last response), reading the latest
+  // account state through a ref.
+  const openRef = useRef(open);
+  openRef.current = open;
+  const handled = useRef(new Set<string>());
+  const respond = useCallback((response: Notifications.NotificationResponse) => {
+    const id = response.notification.request.identifier;
+    if (handled.current.has(id)) return;
+    handled.current.add(id);
+    openRef.current(response.notification.request.content.data as PushData);
+  }, []);
   useEffect(() => {
-    const subscription = Notifications.addNotificationResponseReceivedListener((response) => {
-      open(response.notification.request.content.data as PushData);
-    });
+    const subscription = Notifications.addNotificationResponseReceivedListener(respond);
     return () => subscription.remove();
-  }, [open]);
+  }, [respond]);
 
   const handledLaunch = useRef(false);
   useEffect(() => {
     if (handledLaunch.current || status !== "ready") return;
     handledLaunch.current = true;
     void Notifications.getLastNotificationResponseAsync().then((response) => {
-      if (response) open(response.notification.request.content.data as PushData);
+      if (response) respond(response);
     });
-  }, [open, status]);
+  }, [respond, status]);
 
   // Tokens rotate: re-register the current token for the active account.
   useEffect(() => {

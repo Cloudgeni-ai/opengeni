@@ -7,6 +7,7 @@ import { serverLabel } from "@/account-store";
 import { useNotificationSettingsSection } from "@/notifications";
 import { SettingsList } from "@/settings-list";
 import type { SettingsSection } from "@/settings-model";
+import { dismissToHome } from "@/navigation";
 import { AppThemeProvider } from "@/theme";
 import { openOnWeb, webPaths } from "@/web-links";
 
@@ -38,7 +39,7 @@ function Settings() {
           text: "Sign out",
           style: "destructive",
           onPress: () => {
-            void signOut(account.id).then(() => router.dismissAll());
+            void signOut(account.id).then(() => dismissToHome());
           },
         },
       ],
@@ -62,7 +63,7 @@ function Settings() {
           selected: each.id === account?.id,
           onPress: () => {
             switchAccount(each.id);
-            router.dismissAll();
+            dismissToHome();
           },
         })),
         {

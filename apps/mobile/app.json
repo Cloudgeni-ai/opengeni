@@ -12,7 +12,11 @@
     },
     "android": {
       "package": "dev.opengeni.app",
-      "edgeToEdgeEnabled": true
+      "edgeToEdgeEnabled": true,
+      "adaptiveIcon": {
+        "foregroundImage": "./assets/adaptive-icon.png",
+        "backgroundColor": "#FFFFFF"
+      }
     },
     "plugins": [
       "expo-router",
@@ -27,6 +31,7 @@
     ],
     "experiments": {
       "tsconfigPaths": false
-    }
+    },
+    "icon": "./assets/icon.png"
   }
 }
