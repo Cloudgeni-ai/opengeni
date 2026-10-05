@@ -839,10 +839,10 @@ describe("workspace Gateway custom model API", () => {
 
   test("Opper workspace rail: connect, curate custom ids, admit sessions and retire", async () => {
     if (!app || !publicApp || !grant || !client) throw new Error("Real database fixture required");
-    const curatedProductId = "workspace-opper/vertexai/gemini-3.8-flash-eu";
+    const curatedProductId = "workspace-opper/aws/claude-opus-5-5";
     const curatedCollision = await request("/opper-custom-models", {
       method: "POST",
-      body: { operationId: crypto.randomUUID(), upstreamModelId: "vertexai/gemini-3.8-flash-eu" },
+      body: { operationId: crypto.randomUUID(), upstreamModelId: "aws/claude-opus-5-5" },
     });
     expect(curatedCollision.status).toBe(422);
     expect(

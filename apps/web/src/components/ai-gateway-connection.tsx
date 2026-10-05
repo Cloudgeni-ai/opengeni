@@ -235,9 +235,9 @@ const OPPER_CONFIG: ProviderConnectionConfig = {
   keyPlaceholder: (connected) => (connected ? "Replace Opper API key" : "Opper API key"),
   customModelsHeading: "Custom models",
   customModelsDescription:
-    "Add an exact Opper model id for this workspace account: a pool such as gemini-3.8-flash or a pinned EU route such as aws/claude-sonnet-4-6-eu. Deployment-provided Opper models remain separate.",
+    "Add an exact Opper model id for this workspace account: a pool such as gemini-3.8-flash or a pinned EU route such as aws/claude-opus-5-5. Deployment-provided Opper models remain separate.",
   customModelInputAriaLabel: "Opper model id",
-  customModelPlaceholder: "aws/claude-sonnet-4-6-eu",
+  customModelPlaceholder: "aws/claude-opus-5-5",
   customModelConnectedHelp: "The model becomes selectable when workspace policy allows it.",
   customModelDisconnectedHelp:
     "You can configure models now; they become selectable after you connect Opper.",

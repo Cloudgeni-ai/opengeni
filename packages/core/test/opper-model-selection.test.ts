@@ -7,7 +7,7 @@ import {
   workspaceCustomModelReference,
 } from "../src/model-catalog";
 
-const GEMINI = "vertexai/gemini-3.8-flash-eu";
+const GEMINI = "aws/claude-opus-5-5";
 
 function selection(
   input: Partial<Parameters<typeof resolveWorkspaceModelSelection>[0]> = {},
