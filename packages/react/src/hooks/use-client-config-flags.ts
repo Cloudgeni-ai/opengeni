@@ -39,6 +39,12 @@ export type ClientConfigFlags = {
    * it off; availability otherwise comes from the realtime model catalog.
    */
   realtimeVoice: boolean;
+  /**
+   * The host explicitly offers live voice to end users (a session proxy with
+   * `realtimeVoice: true`). Embedded conversations show the voice button only
+   * then or when their `realtimeVoice` prop is `true`.
+   */
+  realtimeVoiceOffered: boolean;
 };
 
 const INITIAL_FLAGS: ClientConfigFlags = {
@@ -52,6 +58,7 @@ const INITIAL_FLAGS: ClientConfigFlags = {
   archive: true,
   voiceInput: null,
   realtimeVoice: false,
+  realtimeVoiceOffered: false,
 };
 
 type ClientConfigFlagsInput = Awaited<ReturnType<ClientConfigFlagsSource["getClientConfig"]>>;
@@ -97,6 +104,7 @@ export function useClientConfigFlags(
             archive: config.archive !== false,
             voiceInput: config.voiceInput?.available === true ? config.voiceInput : null,
             realtimeVoice: config.realtimeVoice !== false,
+            realtimeVoiceOffered: config.realtimeVoice === true,
           });
         }
       },

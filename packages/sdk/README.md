@@ -194,8 +194,16 @@ files and applies those choices to the request the hook returns. Voice input
 "Archive" when they are off, shows Site previews as unavailable without a
 request, and shows the composer microphone only when `voiceInput.available`.
 
+Composer uploads are refused for anonymous visitors: return `visitor: true`
+from `resolve` for a user your product has not signed in (for example a
+website visitor keyed by a cookie), and the proxy reports file uploads off and
+refuses the upload routes unless `visitorUploads: true`. Agent-produced media
+still loads under `files`.
+
 Live voice (speech-to-speech) is forwarded the same way unless
-`realtimeVoice: false`: the workspace's voice model catalog and the call routes
+`realtimeVoice: false`. The stock conversation shows its voice button only when
+you opt in, with `realtimeVoice: true` here (reported in the client config) or
+the component's `realtimeVoice` prop. The proxy forwards the workspace's voice model catalog and the call routes
 under `.../sessions/{id}/realtime` (start, provider connect, heartbeat,
 activate, transcript sync, end). Opengeni still checks the user's
 `sessions:control` permission, binds the call to that user and browser, runs
