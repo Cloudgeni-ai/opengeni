@@ -21,6 +21,10 @@ interface FixtureOptions {
   defaultWorkspace?: boolean;
   workspaceListStatus?: number;
   storageCors?: "restricted" | "wildcard" | "echo-foreign" | "deny-allowed" | "foreign-5xx";
+  storageRequiredHeaders?: Record<string, string>;
+  storageAllowHeaders?: string | null;
+  scheduledTaskStatus?: "paused";
+  scheduledTaskFailure?: "trigger-failed" | "no-dispatch" | "run-failed" | "cleanup-failed";
   configRevision?: string | null;
   responseRevision?: string;
   mutationResponseRevision?: string;
@@ -37,10 +41,12 @@ interface Fixture {
     deploymentKey: string | null;
     bearer: string | null;
     origin: string | null;
+    requestedHeaders: string | null;
     contractRevision: string | null;
   }[];
   sessions: Record<string, unknown>[];
   tasks: Record<string, unknown>[];
+  deletedTaskIds: string[];
   run: (
     flags?: string[],
     env?: Record<string, string>,
@@ -64,6 +70,12 @@ async function withApi(
   const requests: Fixture["requests"] = [];
   const sessions: Fixture["sessions"] = [];
   const tasks: Fixture["tasks"] = [];
+  const deletedTaskIds: string[] = [];
+  const storedTasks = new Map<string, Record<string, unknown>>();
+  const objectHeaders = options.storageRequiredHeaders ?? {
+    "content-type": "text/plain",
+    "x-ms-blob-type": "BlockBlob",
+  };
   const authMode = options.authMode ?? "configuredToken";
   const credential = options.credential ?? "deploymentKey";
   let objectContent = "";
@@ -82,6 +94,7 @@ async function withApi(
         deploymentKey: key,
         bearer,
         origin,
+        requestedHeaders: request.headers.get("access-control-request-headers"),
         contractRevision,
       });
       if (url.pathname === "/fixture-object") {
@@ -103,6 +116,12 @@ async function withApi(
               ? {
                   "access-control-allow-origin": allowedOrigin,
                   "access-control-allow-methods": "PUT",
+                  ...(options.storageAllowHeaders === null
+                    ? {}
+                    : {
+                        "access-control-allow-headers":
+                          options.storageAllowHeaders ?? Object.keys(objectHeaders).join(", "),
+                      }),
                 }
               : {},
           });
@@ -186,7 +205,7 @@ async function withApi(
           putUrl: new URL("/fixture-object", server.url).href,
           uploadId: "fixture-upload",
           fileId: "fixture-file",
-          requiredHeaders: { "content-type": "text/plain" },
+          requiredHeaders: objectHeaders,
         });
       }
       if (url.pathname === `${prefix}/files/uploads/fixture-upload/complete`) {
@@ -224,19 +243,51 @@ async function withApi(
         );
       }
       if (url.pathname === `${prefix}/scheduled-tasks` && request.method === "POST") {
-        tasks.push((await request.json()) as Record<string, unknown>);
-        return apiJson({ id: "33333333-3333-4333-8333-333333333333" });
+        const payload = (await request.json()) as Record<string, unknown>;
+        tasks.push(payload);
+        const id = crypto.randomUUID();
+        const status = options.scheduledTaskStatus ?? payload.status;
+        storedTasks.set(id, { ...payload, status });
+        return apiJson({ id, status });
       }
-      if (url.pathname.endsWith("/trigger") || request.method === "DELETE") {
-        return apiJson({ ok: true });
-      }
-      if (url.pathname.endsWith("/runs")) {
-        return apiJson([
-          { status: "dispatched", sessionId: "44444444-4444-4444-8444-444444444444" },
-        ]);
+      const taskPath = url.pathname.slice(`${prefix}/scheduled-tasks/`.length);
+      if (url.pathname.startsWith(`${prefix}/scheduled-tasks/`)) {
+        const [id, action] = taskPath.split("/");
+        const task = storedTasks.get(id!);
+        if (!task) return apiJson({ error: "missing fixture task" }, { status: 404 });
+        if (request.method === "DELETE" && !action) {
+          if (options.scheduledTaskFailure === "cleanup-failed") {
+            return apiJson({ error: "fixture cleanup failure" }, { status: 502 });
+          }
+          storedTasks.delete(id!);
+          deletedTaskIds.push(id!);
+          return apiJson({ ok: true });
+        }
+        if (action === "trigger") {
+          if (options.scheduledTaskFailure === "trigger-failed") {
+            return apiJson({ error: "fixture trigger failure" }, { status: 502 });
+          }
+          // Match the live worker: acknowledging a paused manual fire cannot
+          // make it dispatch a run or count as successful conformance.
+          return apiJson({ id, status: task.status }, { status: 202 });
+        }
+        if (action === "runs") {
+          return apiJson(
+            task.status === "active" && options.scheduledTaskFailure !== "no-dispatch"
+              ? [{ status: "dispatched", sessionId: "44444444-4444-4444-8444-444444444444" }]
+              : [],
+          );
+        }
       }
       if (url.pathname.startsWith(`${prefix}/sessions/`)) {
-        return apiJson({ id: url.pathname.split("/").at(-1), status: "idle" });
+        return apiJson({
+          id: url.pathname.split("/").at(-1),
+          status:
+            options.scheduledTaskFailure === "run-failed" &&
+            url.pathname.endsWith("44444444-4444-4444-8444-444444444444")
+              ? "failed"
+              : "idle",
+        });
       }
       return apiJson({ error: "unexpected fixture route" }, { status: 404 });
     },
@@ -248,6 +299,7 @@ async function withApi(
       requests,
       sessions,
       tasks,
+      deletedTaskIds,
       async run(flags = [], env = {}, runAgent = false, runStorage = false) {
         const child = Bun.spawn(
           [
@@ -433,6 +485,7 @@ describe("deployment conformance restricted browser CORS", () => {
         expect(preflights).toHaveLength(2);
         expect(preflights[0]?.origin).toBe(new URL(fixture.baseUrl).origin);
         expect(preflights[1]?.origin).toMatch(/^https:\/\/.+\.foreign-conformance\.invalid$/);
+        expect(preflights[0]?.requestedHeaders).toBe("content-type, x-ms-blob-type");
         expect(fixture.requests.filter((request) => request.method === "PUT")).toHaveLength(1);
         expect(preflights.every((request) => !request.deploymentKey && !request.bearer)).toBe(true);
       });
@@ -472,6 +525,60 @@ describe("deployment conformance restricted browser CORS", () => {
     });
   });
 
+  for (const [name, allowHeaders, requiredHeaders, succeeds] of [
+    ["missing allowed headers", null, undefined, false],
+    ["empty allowed headers", "", undefined, false],
+    ["missing Azure blob type", "content-type", undefined, false],
+    ["missing content type", "x-ms-blob-type", undefined, false],
+    ["all case-insensitive headers", " X-MS-BLOB-TYPE , Content-Type ", undefined, true],
+    ["noncredentialed wildcard", "*", undefined, true],
+    [
+      "wildcard cannot cover Authorization",
+      "*",
+      { "content-type": "text/plain", Authorization: "fixture-private-object-authorization" },
+      false,
+    ],
+    [
+      "wildcard with explicit Authorization",
+      "*, AuThOrIzAtIoN",
+      { "content-type": "text/plain", Authorization: "fixture-private-object-authorization" },
+      true,
+    ],
+  ] as const) {
+    test(`validates every required upload header (${name})`, async () => {
+      await withApi(
+        {
+          storageCors: "restricted",
+          storageAllowHeaders: allowHeaders,
+          ...(requiredHeaders ? { storageRequiredHeaders: requiredHeaders } : {}),
+        },
+        async (fixture) => {
+          const result = await fixture.run(
+            ["--deployment-access-key", deploymentKey, "--browser-origin", fixture.baseUrl],
+            {},
+            false,
+            true,
+          );
+          expect(result.exitCode).toBe(succeeds ? 0 : 1);
+          expect(check(result.stdout, "object-storage").status).toBe(
+            succeeds ? "passed" : "failed",
+          );
+          if (!succeeds) {
+            expect(check(result.stdout, "object-storage").detail).toContain(
+              "did not allow every required upload header",
+            );
+          }
+          expect(fixture.requests.filter((request) => request.method === "PUT")).toHaveLength(
+            succeeds ? 1 : 0,
+          );
+          expect(result.stdout + result.stderr).not.toContain(
+            "fixture-private-object-authorization",
+          );
+        },
+      );
+    });
+  }
+
   test("requires a real explicit origin before opting into foreign-origin denial", async () => {
     await withApi({}, async (fixture) => {
       for (const flags of [
@@ -488,6 +595,113 @@ describe("deployment conformance restricted browser CORS", () => {
       expect(fixture.requests).toHaveLength(0);
     });
   });
+});
+
+describe("deployment conformance scheduled-task dispatch and cleanup", () => {
+  test("creates an active once schedule a day ahead, manually dispatches, and deletes its exact id", async () => {
+    await withApi({}, async (fixture) => {
+      const startedAt = Date.now();
+      const result = await fixture.run(["--deployment-access-key", deploymentKey], {}, true);
+      expect(result.exitCode).toBe(0);
+      expect(check(result.stdout, "scheduled-task").status).toBe("passed");
+      expect(fixture.tasks).toHaveLength(1);
+      expect(fixture.tasks[0]!.status).toBe("active");
+      const schedule = fixture.tasks[0]!.schedule as {
+        type: string;
+        runAt: string;
+        timeZone: string;
+      };
+      expect(schedule.type).toBe("once");
+      expect(schedule.timeZone).toBe("UTC");
+      expect(Date.parse(schedule.runAt)).toBeGreaterThanOrEqual(startedAt + 86_400_000);
+      expect(Date.parse(schedule.runAt)).toBeLessThanOrEqual(Date.now() + 86_400_000);
+      expect(fixture.deletedTaskIds).toHaveLength(1);
+      const id = fixture.deletedTaskIds[0]!;
+      const trigger = fixture.requests.findIndex((request) =>
+        request.path.endsWith(`/${id}/trigger`),
+      );
+      const removal = fixture.requests.findIndex(
+        (request) => request.method === "DELETE" && request.path.endsWith(`/${id}`),
+      );
+      expect(trigger).toBeGreaterThan(0);
+      expect(removal).toBeGreaterThan(trigger);
+    });
+  });
+
+  test("never counts a paused returned task as dispatch proof and still cleans it up", async () => {
+    await withApi({ scheduledTaskStatus: "paused" }, async (fixture) => {
+      const result = await fixture.run(["--deployment-access-key", deploymentKey], {}, true);
+      expect(result.exitCode).toBe(1);
+      expect(fixture.tasks[0]!.status).toBe("active");
+      expect(check(result.stdout, "scheduled-task").status).toBe("failed");
+      expect(check(result.stdout, "scheduled-task").detail).toContain("was not active");
+      expect(fixture.requests.some((request) => request.path.endsWith("/trigger"))).toBe(false);
+      expect(fixture.deletedTaskIds).toHaveLength(1);
+    });
+  });
+
+  test("its HTTP fixture refuses dispatch from paused tasks despite an acknowledged manual trigger", async () => {
+    await withApi({}, async (fixture) => {
+      const headers = {
+        "x-opengeni-access-key": deploymentKey,
+        [OPENGENI_API_CONTRACT_HEADER]: OPENGENI_API_CONTRACT_REVISION,
+        "content-type": "application/json",
+      };
+      const created = await fetch(
+        new URL(`/v1/workspaces/${workspaceId}/scheduled-tasks`, fixture.baseUrl),
+        { method: "POST", headers, body: JSON.stringify({ status: "paused" }) },
+      );
+      const task = (await created.json()) as { id: string };
+      const base = `/v1/workspaces/${workspaceId}/scheduled-tasks/${task.id}`;
+      const trigger = await fetch(new URL(`${base}/trigger`, fixture.baseUrl), {
+        method: "POST",
+        headers,
+        body: "{}",
+      });
+      expect(trigger.status).toBe(202);
+      const runs = await fetch(new URL(`${base}/runs`, fixture.baseUrl), { headers });
+      expect(await runs.json()).toEqual([]);
+      const removed = await fetch(new URL(base, fixture.baseUrl), { method: "DELETE", headers });
+      expect(removed.status).toBe(200);
+      expect(fixture.deletedTaskIds).toEqual([task.id]);
+    });
+  });
+
+  for (const scheduledTaskFailure of [
+    "trigger-failed",
+    "no-dispatch",
+    "run-failed",
+    "cleanup-failed",
+  ] as const) {
+    test(`fails honestly and attempts exact cleanup (${scheduledTaskFailure})`, async () => {
+      await withApi({ scheduledTaskFailure }, async (fixture) => {
+        const result = await fixture.run(
+          ["--deployment-access-key", deploymentKey, "--timeout-seconds", "0.1"],
+          {},
+          true,
+        );
+        expect(result.exitCode).toBe(1);
+        expect(check(result.stdout, "scheduled-task").status).toBe("failed");
+        expect(fixture.tasks[0]!.status).toBe("active");
+        const removals = fixture.requests.filter((request) => request.method === "DELETE");
+        expect(removals).toHaveLength(1);
+        expect(removals[0]!.path).toMatch(new RegExp(`/scheduled-tasks/[a-f0-9-]{36}$`));
+        expect(fixture.deletedTaskIds).toHaveLength(
+          scheduledTaskFailure === "cleanup-failed" ? 0 : 1,
+        );
+        if (scheduledTaskFailure === "no-dispatch") {
+          expect(check(result.stdout, "scheduled-task").detail).toContain(
+            "did not dispatch a session",
+          );
+        }
+        if (scheduledTaskFailure === "cleanup-failed") {
+          expect(check(result.stdout, "scheduled-task").detail).toContain(
+            "fixture cleanup failure",
+          );
+        }
+      });
+    });
+  }
 });
 
 describe("deployment conformance configured authentication", () => {

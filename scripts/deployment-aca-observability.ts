@@ -27,6 +27,7 @@ const Evidence = z.strictObject({
   kind: z.literal(kind),
   nonce: z.uuid(),
   role: z.enum(roles),
+  authRequired: z.boolean().nullable(),
   metricsStatus: z.number().int(),
   anonymousMetricsStatus: z.number().int().nullable(),
   healthStatus: z.number().int().nullable(),
@@ -65,16 +66,17 @@ export function privateProbeCommand(
   const code = [
     `(async()=>{let[s]=[${settings}];`,
     'let[base]=["http://127.0.0.1:"];let[headers]=[{}];',
-    "let[anonymousMetricsStatus,healthStatus,readyStatus]=[null,null,null];",
-    'if(s.role==="api"){let[key]=[process.env.OPENGENI_ACCESS_KEY];if(!key)throw(Error("missing-key"));',
-    'headers["x-opengeni-access-key"]=key;anonymousMetricsStatus=(await(fetch(base+s.metrics+"/metrics",{signal:AbortSignal.timeout(10000)}))).status;}',
+    "let[authRequired,anonymousMetricsStatus,healthStatus,readyStatus]=[null,null,null,null];",
+    'if(s.role==="api"){let[auth]=[process.env.OPENGENI_AUTH_REQUIRED];if(auth!=="true"&&auth!=="false")throw(Error("unknown-auth"));authRequired=auth==="true";',
+    'if(authRequired){let[key]=[process.env.OPENGENI_ACCESS_KEY];if(!key)throw(Error("missing-key"));headers["x-opengeni-access-key"]=key;}',
+    'anonymousMetricsStatus=(await(fetch(base+s.metrics+"/metrics",{signal:AbortSignal.timeout(10000)}))).status;}',
     'else{if(process.env.OPENGENI_WORKER_ROLE!==s.role)throw(Error("role-mismatch"));healthStatus=(await(fetch(base+s.health+"/healthz",{signal:AbortSignal.timeout(10000)}))).status;',
     'readyStatus=(await(fetch(base+s.health+"/readyz",{signal:AbortSignal.timeout(10000)}))).status;}',
     'let[m]=[await(fetch(base+s.metrics+"/metrics",{headers,signal:AbortSignal.timeout(10000)}))];',
     "let[text]=[await(m.text())];let[types]=[[...text.matchAll(/#\\x20TYPE\\x20([A-Za-z_:][A-Za-z0-9_:]*)\\x20(\\w+)/g)]];",
     'let[families]=[s.required.map((f)=>({name:f.name,type:types.find((t)=>t[1]===f.name)?.[2]??"missing",',
     'samples:[...text.matchAll(new(RegExp)("^"+f.sample+"(?:\\\\{[^\\\\r\\\\n]*\\\\})?\\\\x20(?:[0-9.+eE-]+|NaN|[+-]?Inf)(?:\\\\x20[0-9]+)?$","gm"))].length}))];',
-    "console.log(JSON.stringify({kind:s.kind,nonce:s.nonce,role:s.role,metricsStatus:m.status,anonymousMetricsStatus,healthStatus,readyStatus,familyCount:types.length,requiredFamilies:families}));",
+    "console.log(JSON.stringify({kind:s.kind,nonce:s.nonce,role:s.role,authRequired,metricsStatus:m.status,anonymousMetricsStatus,healthStatus,readyStatus,familyCount:types.length,requiredFamilies:families}));",
     "})().catch(()=>{process.exitCode=1;});",
   ].join("");
   if (/\s/u.test(code)) throw new Error("Private probe code must be one whitespace-free argument");
@@ -113,10 +115,12 @@ export function privateProbeEvidence(output: string, role: Role, nonce: string) 
       ),
     ) ||
     (role === "api"
-      ? proof.anonymousMetricsStatus !== 401 ||
+      ? proof.authRequired === null ||
+        proof.anonymousMetricsStatus !== (proof.authRequired ? 401 : 200) ||
         proof.healthStatus !== null ||
         proof.readyStatus !== null
-      : proof.anonymousMetricsStatus !== null ||
+      : proof.authRequired !== null ||
+        proof.anonymousMetricsStatus !== null ||
         proof.healthStatus !== 200 ||
         proof.readyStatus !== 200)
   ) {
@@ -256,6 +260,7 @@ export function inspectPrivateObservability(terraformRoot: string) {
       role,
       status: "passed" as const,
       familyCount: proof.familyCount,
+      authRequired: proof.authRequired,
       metricsStatus: proof.metricsStatus,
       anonymousMetricsStatus: proof.anonymousMetricsStatus,
       healthStatus: proof.healthStatus,

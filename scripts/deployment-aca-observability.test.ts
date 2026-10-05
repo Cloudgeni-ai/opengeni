@@ -49,6 +49,7 @@ function evidence(role: "api" | "control" | "turn") {
     kind,
     nonce,
     role,
+    authRequired: role === "api" ? true : null,
     metricsStatus: 200,
     anonymousMetricsStatus: role === "api" ? 401 : null,
     healthStatus: role === "api" ? null : 200,
@@ -84,8 +85,13 @@ describe("ACA private observability evidence", () => {
         },
         { ...proof, privateSecret: privateMarker },
         ...(role === "api"
-          ? [{ ...proof, anonymousMetricsStatus: 200 }]
+          ? [
+              { ...proof, authRequired: null },
+              { ...proof, authRequired: "true" },
+              { ...proof, anonymousMetricsStatus: 200 },
+            ]
           : [
+              { ...proof, authRequired: true },
               { ...proof, healthStatus: 503 },
               { ...proof, readyStatus: 503 },
             ]),
@@ -100,65 +106,105 @@ describe("ACA private observability evidence", () => {
       ).toThrow();
     });
 
-    test(`runs the compressed quote-free argument after shell lexing against loopback HTTP (${role})`, async () => {
-      const headers: (string | null)[] = [];
-      const server = Bun.serve({
-        hostname: "127.0.0.1",
-        port: 0,
-        fetch(request) {
-          const path = new URL(request.url).pathname;
-          if (path === "/healthz" || path === "/readyz") return Response.json({ ok: true });
-          const key = request.headers.get("x-opengeni-access-key");
-          headers.push(key);
-          if (role === "api" && key !== fixtureKey)
-            return new Response(privateMarker, { status: 401 });
-          return new Response(
-            [
-              "# TYPE opengeni_build_info gauge",
-              `opengeni_build_info{private="${privateMarker}"} 1`,
-              "# TYPE opengeni_http_requests_total counter",
-              'opengeni_http_requests_total{method="GET"} 2',
-              "# TYPE opengeni_http_request_duration_seconds histogram",
-              'opengeni_http_request_duration_seconds_bucket{le="+Inf"} 2',
-              "",
-            ].join("\n"),
-          );
-        },
-      });
-      try {
-        const command = privateProbeCommand(role, nonce, {
-          metrics: server.port!,
-          health: server.port!,
+    for (const authRequired of role === "api" ? [true, false] : [false]) {
+      test(`runs the compressed argument against loopback HTTP (${role}, authRequired=${authRequired})`, async () => {
+        const headers: (string | null)[] = [];
+        const server = Bun.serve({
+          hostname: "127.0.0.1",
+          port: 0,
+          fetch(request) {
+            const path = new URL(request.url).pathname;
+            if (path === "/healthz" || path === "/readyz") return Response.json({ ok: true });
+            const key = request.headers.get("x-opengeni-access-key");
+            headers.push(key);
+            if (role === "api" && authRequired && key !== fixtureKey)
+              return new Response(privateMarker, { status: 401 });
+            return new Response(
+              [
+                "# TYPE opengeni_build_info gauge",
+                `opengeni_build_info{private="${privateMarker}"} 1`,
+                "# TYPE opengeni_http_requests_total counter",
+                'opengeni_http_requests_total{method="GET"} 2',
+                "# TYPE opengeni_http_request_duration_seconds histogram",
+                'opengeni_http_request_duration_seconds_bucket{le="+Inf"} 2',
+                "",
+              ].join("\n"),
+            );
+          },
         });
-        const pieces = remoteArgv(command);
-        expect(command).not.toContain(fixtureKey);
-        const child = Bun.spawn([process.execPath, "--no-env-file", "-e", pieces[2]!], {
-          env: { OPENGENI_ACCESS_KEY: fixtureKey, OPENGENI_WORKER_ROLE: role },
-          stdout: "pipe",
-          stderr: "pipe",
-        });
-        const timeout = setTimeout(() => child.kill(), 10_000);
         try {
-          const [exitCode, stdout, stderr] = await Promise.all([
-            child.exited,
-            new Response(child.stdout).text(),
-            new Response(child.stderr).text(),
-          ]);
-          expect(exitCode).toBe(0);
-          expect(stdout + stderr).not.toContain(fixtureKey);
-          expect(stdout + stderr).not.toContain(privateMarker);
-          const proof = privateProbeEvidence(stdout, role, nonce);
-          expect(proof.familyCount).toBe(3);
-          expect(proof.requiredFamilies.every((family) => family.samples === 1)).toBe(true);
-          expect(headers).toEqual(role === "api" ? [null, fixtureKey] : [null]);
+          const command = privateProbeCommand(role, nonce, {
+            metrics: server.port!,
+            health: server.port!,
+          });
+          const pieces = remoteArgv(command);
+          expect(command).not.toContain(fixtureKey);
+          const child = Bun.spawn([process.execPath, "--no-env-file", "-e", pieces[2]!], {
+            env: {
+              ...(authRequired ? { OPENGENI_ACCESS_KEY: fixtureKey } : {}),
+              OPENGENI_AUTH_REQUIRED: String(authRequired),
+              OPENGENI_WORKER_ROLE: role,
+            },
+            stdout: "pipe",
+            stderr: "pipe",
+          });
+          const timeout = setTimeout(() => child.kill(), 10_000);
+          try {
+            const [exitCode, stdout, stderr] = await Promise.all([
+              child.exited,
+              new Response(child.stdout).text(),
+              new Response(child.stderr).text(),
+            ]);
+            expect(exitCode).toBe(0);
+            expect(stdout + stderr).not.toContain(fixtureKey);
+            expect(stdout + stderr).not.toContain(privateMarker);
+            const proof = privateProbeEvidence(stdout, role, nonce);
+            expect(proof.authRequired).toBe(role === "api" ? authRequired : null);
+            expect(proof.familyCount).toBe(3);
+            expect(proof.requiredFamilies.every((family) => family.samples === 1)).toBe(true);
+            expect(headers).toEqual(
+              role === "api" ? [null, authRequired ? fixtureKey : null] : [null],
+            );
+          } finally {
+            clearTimeout(timeout);
+          }
         } finally {
-          clearTimeout(timeout);
+          server.stop(true);
         }
-      } finally {
-        server.stop(true);
-      }
-    });
+      });
+    }
   }
+
+  test("accepts managed private API evidence only when anonymous metrics match strict false", () => {
+    const proof = { ...evidence("api"), authRequired: false, anonymousMetricsStatus: 200 };
+    expect(privateProbeEvidence(JSON.stringify(proof), "api", nonce).authRequired).toBe(false);
+    for (const invalid of [
+      { ...proof, authRequired: "false" },
+      { ...proof, authRequired: null },
+      { ...proof, anonymousMetricsStatus: 401 },
+      { ...proof, metricsStatus: 401 },
+    ]) {
+      expect(() => privateProbeEvidence(JSON.stringify(invalid), "api", nonce)).toThrow();
+    }
+  });
+
+  test("refuses missing or noncanonical workload auth protection and protected metrics without a key", async () => {
+    const pieces = remoteArgv(privateProbeCommand("api", nonce));
+    for (const value of [undefined, "", "TRUE", "1", " false ", "true"]) {
+      const child = Bun.spawn([process.execPath, "--no-env-file", "-e", pieces[2]!], {
+        env: value === undefined ? {} : { OPENGENI_AUTH_REQUIRED: value },
+        stdout: "pipe",
+        stderr: "pipe",
+      });
+      const [exitCode, stdout, stderr] = await Promise.all([
+        child.exited,
+        new Response(child.stdout).text(),
+        new Response(child.stderr).text(),
+      ]);
+      expect(exitCode).toBe(1);
+      expect(stdout + stderr).toBe("");
+    }
+  });
 });
 
 describe("ACA private observability PTY transport", () => {
@@ -222,6 +268,8 @@ describe("ACA private observability PTY transport", () => {
 describe("ACA private observability CLI", () => {
   for (const scenario of [
     "ready",
+    "managed-ready",
+    "managed-wrong-protection",
     "cluster-exec-failure",
     "wrong-nonce",
     "worker-not-ready",
@@ -268,14 +316,16 @@ const payload=pieces[2].match(/Buffer\\.from\\(\\/([A-Za-z0-9_-]+)\\/\\.source,\
 if(!payload)process.exit(19);
 const source=require("node:zlib").inflateSync(Buffer.from(payload[1],"base64url")).toString();
 const config=JSON.parse(source.slice(source.indexOf("let[s]=[")+8,source.indexOf("];let[base]")));
-let proof={kind:config.kind,nonce:config.nonce,role:config.role,metricsStatus:200,anonymousMetricsStatus:config.role==="api"?401:null,healthStatus:config.role==="api"?null:200,readyStatus:config.role==="api"?null:200,familyCount:3,requiredFamilies:config.required.map(f=>({name:f.name,type:f.type,samples:1}))};
 const scenario=process.env.ACA_TEST_SCENARIO;
+const managed=scenario.startsWith("managed-");
+let proof={kind:config.kind,nonce:config.nonce,role:config.role,authRequired:config.role==="api"?!managed:null,metricsStatus:200,anonymousMetricsStatus:config.role==="api"?(managed?200:401):null,healthStatus:config.role==="api"?null:200,readyStatus:config.role==="api"?null:200,familyCount:3,requiredFamilies:config.required.map(f=>({name:f.name,type:f.type,samples:1}))};
 console.error("${privateMarker}");
 if(scenario==="exec-nonzero")process.exit(19);
 if(scenario==="cluster-exec-failure"){console.log("ClusterExecFailure: ${privateMarker}");process.exit(0);}
 if(scenario==="wrong-nonce")proof.nonce="33333333-3333-4333-8333-333333333333";
 if(scenario==="worker-not-ready"&&config.role==="turn")proof.readyStatus=503;
 if(scenario==="missing-family")proof.requiredFamilies=[];
+if(scenario==="managed-wrong-protection"&&config.role==="api")proof.anonymousMetricsStatus=401;
 console.log("\\u001b[32m"+JSON.stringify(proof)+"\\u001b[0m");
 `,
           { mode: 0o755 },
@@ -321,8 +371,9 @@ console.log("\\u001b[32m"+JSON.stringify(proof)+"\\u001b[0m");
         expect(result.stdout + result.stderr).not.toContain(privateMarker);
         expect(result.stdout + result.stderr).not.toContain(fixtureKey);
         const output = JSON.parse(result.stdout);
-        expect(result.status).toBe(scenario === "ready" ? 0 : 1);
-        expect(output.ok).toBe(scenario === "ready");
+        const ready = scenario === "ready" || scenario === "managed-ready";
+        expect(result.status).toBe(ready ? 0 : 1);
+        expect(output.ok).toBe(ready);
         if (
           scenario === "missing-script" ||
           scenario === "unsupported-script" ||
@@ -330,7 +381,9 @@ console.log("\\u001b[32m"+JSON.stringify(proof)+"\\u001b[0m");
         ) {
           expect(output.detail).toContain("Linux/WSL2 and util-linux script with -q -e -c support");
         }
-        if (scenario === "ready") {
+        if (ready) {
+          expect(output.results[0].authRequired).toBe(scenario === "ready");
+          expect(output.results[0].anonymousMetricsStatus).toBe(scenario === "ready" ? 401 : 200);
           expect(output.results.map((entry: { role: string }) => entry.role)).toEqual([
             "api",
             "control",

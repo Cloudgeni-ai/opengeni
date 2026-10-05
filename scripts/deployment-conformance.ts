@@ -240,7 +240,9 @@ if (args.skipAgent) {
     await runCheck("scheduled-task", async () => {
       const task = await postJson(workspaceUrl("/scheduled-tasks"), {
         name: `conformance-${crypto.randomUUID()}`,
-        status: "paused",
+        // The dispatch activity rejects paused tasks even for manual triggers.
+        // Keep the active once schedule far in the future and delete it below.
+        status: "active",
         schedule: {
           type: "once",
           runAt: new Date(Date.now() + 86_400_000).toISOString(),
@@ -260,6 +262,9 @@ if (args.skipAgent) {
       });
       const taskId = stringField(task, "id");
       try {
+        if (stringField(task, "status") !== "active") {
+          throw new Error(`scheduled task ${taskId} was not active`);
+        }
         await postJson(workspaceUrl(`/scheduled-tasks/${taskId}/trigger`), {});
         const deadline = Date.now() + args.timeoutSeconds * 1000;
         let runSessionId: string | null = null;
@@ -294,7 +299,9 @@ if (args.skipAgent) {
         }
         return `task ${taskId} dispatched session ${runSessionId}`;
       } finally {
-        await deleteJson(workspaceUrl(`/scheduled-tasks/${taskId}`)).catch(() => undefined);
+        // An unconfirmed cleanup must fail conformance, not leave an active
+        // future schedule behind while claiming successful verification.
+        await deleteJson(workspaceUrl(`/scheduled-tasks/${taskId}`));
       }
     });
   }
@@ -515,6 +522,22 @@ async function preflightObjectPut(
     .split(/\s*,\s*/);
   if (!allowedMethods.includes("put")) {
     throw new Error("browser upload CORS preflight did not allow PUT");
+  }
+  const allowedHeaders = new Set(
+    (response.headers.get("access-control-allow-headers") ?? "")
+      .split(",")
+      .map((header) => header.trim().toLowerCase())
+      .filter(Boolean),
+  );
+  // Signed object uploads do not use browser credentials. The noncredentialed
+  // wildcard covers other request headers, but never Authorization itself.
+  if (
+    requiredHeaderNames.some((header) => {
+      const name = header.trim().toLowerCase();
+      return !allowedHeaders.has(name) && !(name !== "authorization" && allowedHeaders.has("*"));
+    })
+  ) {
+    throw new Error("browser upload CORS preflight did not allow every required upload header");
   }
 }
 
