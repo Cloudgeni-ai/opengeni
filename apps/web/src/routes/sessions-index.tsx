@@ -1293,7 +1293,8 @@ function SessionsIndexRouteContent({
                 };
               }
               await preserveNewerLocalDraft();
-              toast.error("Couldn't start voice", { description: "Try again." });
+              newSessionDraft.clearError();
+              toast.error("Couldn't start voice", { description: DRAFT_CHANGED_DURING_SEND_TEXT });
               return null;
             }
 
@@ -1392,8 +1393,11 @@ function SessionsIndexRouteContent({
               };
             }
             await preserveNewerLocalDraft();
+            // Each attempt saved the draft before the create refused it, so the
+            // draft is not unsaved: clear that notice and resume autosave.
+            newSessionDraft.clearError();
             toast.error("Couldn't send", {
-              description: "Your message is still here. Try again.",
+              description: DRAFT_CHANGED_DURING_SEND_TEXT,
             });
             return null;
           },
@@ -1976,6 +1980,10 @@ function SessionsIndexRouteContent({
     </div>,
   );
 }
+
+/** Send kept losing to a newer draft saved elsewhere (another tab or window). */
+const DRAFT_CHANGED_DURING_SEND_TEXT =
+  "Your message is saved, but this draft kept changing in another tab or window. Check it and send again.";
 
 /** A draft that didn't save: the message is kept, then what to do. */
 function draftSaveFailureText(draft: { conflict: Error | null; error: Error | null }): string {
