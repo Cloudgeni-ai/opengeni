@@ -230,7 +230,7 @@ const baseComponents: Components = {
   ),
   td: ({ children, ...props }) => (
     <td
-      className="border-b border-og-border/70 px-0 py-1.5 pr-4 align-top text-og-fg-muted [tr:last-child>&]:border-b-0"
+      className="border-b border-og-border/70 px-0 py-1.5 pr-4 align-top text-og-fg-muted"
       {...props}
     >
       {children}
@@ -615,7 +615,12 @@ function MarkdownTable({ children, className, ...props }: ComponentPropsWithoutR
       <div className="overflow-x-auto" tabIndex={0}>
         <table
           ref={tableRef}
-          className={cn("w-full min-w-0 border-collapse text-og-base", className)}
+          className={cn(
+            // Leading `&` only: a trailing one (`tr:last-child>&`) under the scoped
+            // selector list needs `:is()`, which bundlers warn about for older targets.
+            "w-full min-w-0 border-collapse text-og-base [&_tr:last-child>td]:border-b-0",
+            className,
+          )}
           {...props}
         >
           {children}
