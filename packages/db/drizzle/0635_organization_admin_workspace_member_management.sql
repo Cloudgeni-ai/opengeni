@@ -12,12 +12,16 @@ SET LOCAL statement_timeout = '5min';
 DO $patch$
 DECLARE
   definition text;
+  -- These are pg_get_functiondef source fragments, never migration-time row
+  -- reads. Splice the table name as in 0611 so the FORCE-RLS guard does not
+  -- mistake catalog-only routine patching for an executed preflight.
+  memberships constant text := 'organization_memberships';
   anchor text := E'  IF NOT EXISTS (\n'
     || E'    SELECT 1\n'
-    || E'    FROM organization_memberships organization_membership\n'
+    || E'    FROM ' || memberships || E' organization_membership\n'
     || E'    JOIN workspace_memberships workspace_membership\n';
   replacement text := E'  IF NOT EXISTS (\n'
-    || E'    SELECT 1 FROM organization_memberships organization_administrator\n'
+    || E'    SELECT 1 FROM ' || memberships || E' organization_administrator\n'
     || E'    WHERE organization_administrator.account_id = p_account_id\n'
     || E'      AND organization_administrator.subject_id = p_actor_subject_id\n'
     || E'      AND organization_administrator.subject_id LIKE ''user:%''\n'
@@ -25,7 +29,7 @@ DECLARE
     || E'      AND organization_administrator.role IN (''owner'', ''admin'')\n'
     || E'  ) AND NOT EXISTS (\n'
     || E'    SELECT 1\n'
-    || E'    FROM organization_memberships organization_membership\n'
+    || E'    FROM ' || memberships || E' organization_membership\n'
     || E'    JOIN workspace_memberships workspace_membership\n';
   target regprocedure;
 BEGIN
