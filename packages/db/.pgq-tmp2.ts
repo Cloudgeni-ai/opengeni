@@ -6,8 +6,11 @@ await root.end();
 for (const { datname } of dbs) {
   const s = postgres(base + datname, { max: 1, onnotice: () => {} });
   try {
-    const [r] = await s`select (select count(*)::int from pg_tables where schemaname=$$public$$) c, (to_regclass($$session_turn_attempts$$) is not null)::text m`;
+    const [r] =
+      await s`select (select count(*)::int from pg_tables where schemaname=$$public$$) c, (to_regclass($$session_turn_attempts$$) is not null)::text m`;
     console.log(datname, r.c, r.m);
-  } catch (e) { console.log(datname, "err"); }
+  } catch {
+    console.log(datname, "err");
+  }
   await s.end();
 }
