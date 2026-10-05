@@ -62,6 +62,7 @@ describe("onboarding use case text", () => {
     // No GitHub App access must never dead-end the setup.
     expect(withKey).toContain("If I can't connect GitHub");
     expect(withKey).toContain("upload a zip of my project");
+    expect(withKey).toContain("publish it with sandbox_file_publish");
     expect(withKey).toContain("my own Git credentials for the repository");
     expect(withKey).toContain("use my own coding agent instead");
     // An attached project zip is the code: never send the person back to GitHub.
