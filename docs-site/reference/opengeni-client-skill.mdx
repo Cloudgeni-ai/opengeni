@@ -184,6 +184,11 @@ to each chat with a short-lived per-user token. The endpoint calls
 query to the returned `user` and `tenant`. The user approves each call to a tool
 in `approvals.ask`. See [Tools and auth](references/tools-and-auth.md).
 
+`toolServer` throws at startup when `OPENGENI_TOOL_SERVER_URL` is not an
+`https://` URL. Until the tunnel or deployment exists, pass it only when that
+variable is set, so chat still works without the product's tools:
+`...(process.env.OPENGENI_TOOL_SERVER_URL ? { toolServer } : {})`.
+
 ## Verify
 
 1. The product's typecheck, build, and tests pass.
