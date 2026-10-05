@@ -41,11 +41,17 @@ import { hostedWebSearchForTurn } from "./tool-policy";
  * call this with the same accepted model and settings, so they agree.
  */
 export function turnWebSearchPlan(
-  resolvedModel: { configured: { hostedWebSearch: boolean }; provider: { kind?: string } } | null,
+  resolvedModel: {
+    configured: { hostedWebSearch: boolean };
+    provider: { kind?: string };
+  } | null,
   settings: WebSearchSettings,
 ) {
   return webSearchToolPlan(settings, {
-    hostedWebSearch: hostedWebSearchForTurn(resolvedModel, settings.webSearchEnabled),
+    hostedWebSearch: hostedWebSearchForTurn(
+      resolvedModel,
+      settings.webSearchEnabled,
+    ),
     // SuperGrok's native search is added by its transport, not as an agent
     // tool, so provider tools would only duplicate it.
     transportHostedSearch: resolvedModel?.provider.kind === "xai-subscription",
@@ -76,7 +82,9 @@ function settledCost(
       ? "provider_reported"
       : "list_price";
   const providerMicros =
-    basis === "provider_reported" ? reportedCostMicros! : pricing.providerMicros;
+    basis === "provider_reported"
+      ? reportedCostMicros!
+      : pricing.providerMicros;
   return {
     operationId,
     operation,
@@ -92,6 +100,49 @@ function providerFailure(error: WebSearchProviderError): string {
   return `${error.message}${error.retryable ? ". You may retry shortly." : "."}`;
 }
 
+/** Closed outcome set for `opengeni_web_search_calls_total`. */
+export type WebSearchCallOutcome =
+  "ok" | "provider_error" | "provider_retryable" | "billing_refused" | "error";
+
+type WebSearchObservability = Pick<
+  Observability,
+  "warn" | "incrementCounter" | "observeHistogram"
+>;
+
+const WEB_SEARCH_DURATION_BUCKETS = [0.25, 0.5, 1, 2, 4, 8, 15, 30];
+
+/**
+ * One provider call: a counter by fixed outcome plus its latency. Labels are
+ * the operation, the configured provider id, and the outcome only, never the
+ * query, URL, or session.
+ */
+function recordWebSearchCall(
+  observability: WebSearchObservability,
+  operation: "search" | "fetch",
+  provider: string,
+  outcome: WebSearchCallOutcome,
+  startedAt: number,
+): void {
+  observability.incrementCounter({
+    name: "opengeni_web_search_calls_total",
+    help: "Provider web search/fetch calls made by the worker, by operation, provider and outcome.",
+    labels: { operation, provider, outcome },
+  });
+  observability.observeHistogram({
+    name: "opengeni_web_search_call_duration_seconds",
+    help: "Provider web search/fetch call duration in seconds.",
+    buckets: WEB_SEARCH_DURATION_BUCKETS,
+    value: (performance.now() - startedAt) / 1000,
+    labels: { operation, provider },
+  });
+}
+
+function providerFailureOutcome(
+  error: WebSearchProviderError,
+): WebSearchCallOutcome {
+  return error.retryable ? "provider_retryable" : "provider_error";
+}
+
 /**
  * The `web_search` and `web_fetch` attempt tools for one turn. The caller
  * decides which names the turn gets ({@link webSearchToolPlan}); this only
@@ -102,10 +153,12 @@ export function webSearchToolDefinitions(input: {
   tools: readonly WebSearchProviderToolName[];
   scope: WebSearchCallScope;
   billing: WebSearchBilling;
-  observability: Pick<Observability, "warn">;
+  observability: WebSearchObservability;
   fetch?: typeof fetch;
 }): AttemptToolDefinition[] {
-  const config: WebSearchProviderConfig | null = webSearchProviderConfig(input.settings);
+  const config: WebSearchProviderConfig | null = webSearchProviderConfig(
+    input.settings,
+  );
   if (!config || input.tools.length === 0) return [];
   const adapterInput = {
     timeoutMs: config.timeoutMs,
@@ -127,7 +180,10 @@ export function webSearchToolDefinitions(input: {
   const definitions: AttemptToolDefinition[] = [];
 
   if (input.tools.includes(WEB_SEARCH_TOOL_NAME)) {
-    const provider = createWebSearchProvider({ ...adapterInput, endpoint: config.search });
+    const provider = createWebSearchProvider({
+      ...adapterInput,
+      endpoint: config.search,
+    });
     const pricing = webSearchCallPricing(config, "search");
     definitions.push({
       identity: { serverId: "opengeni", toolName: WEB_SEARCH_TOOL_NAME },
@@ -135,7 +191,8 @@ export function webSearchToolDefinitions(input: {
       codemodePath: ["opengeni", WEB_SEARCH_TOOL_NAME],
       title: "Search the web",
       description: WEB_SEARCH_TOOL_DESCRIPTION,
-      inputSchema: webSearchInputSchema as unknown as AttemptToolDefinition["inputSchema"],
+      inputSchema:
+        webSearchInputSchema as unknown as AttemptToolDefinition["inputSchema"],
       annotations: {
         title: "Search the web",
         readOnlyHint: true,
@@ -151,6 +208,15 @@ export function webSearchToolDefinitions(input: {
           request = parseWebSearchArguments(args);
           await input.billing.admit(input.scope, pricing.providerMicros);
         } catch (error) {
+          if (error instanceof WebSearchBillingRefusedError) {
+            recordWebSearchCall(
+              input.observability,
+              "search",
+              config.search.provider,
+              "billing_refused",
+              performance.now(),
+            );
+          }
           if (
             error instanceof WebToolArgumentError ||
             error instanceof WebSearchBillingRefusedError
@@ -158,8 +224,18 @@ export function webSearchToolDefinitions(input: {
             return textResult(error.message, true);
           throw error;
         }
+        const startedAt = performance.now();
         try {
-          const response = await provider.search(request, { signal: context.signal });
+          const response = await provider.search(request, {
+            signal: context.signal,
+          });
+          recordWebSearchCall(
+            input.observability,
+            "search",
+            config.search.provider,
+            "ok",
+            startedAt,
+          );
           await settle(
             settledCost(
               context.operationId,
@@ -169,12 +245,39 @@ export function webSearchToolDefinitions(input: {
               response.reportedCostMicros,
             ),
           );
-          return textResult(renderWebSearchResults(request.query, response.results), false);
+          return textResult(
+            renderWebSearchResults(request.query, response.results),
+            false,
+          );
         } catch (error) {
           if (context.signal?.aborted) throw error;
           if (error instanceof WebSearchProviderError) {
-            return textResult(`Web search failed: ${providerFailure(error)}`, true);
+            recordWebSearchCall(
+              input.observability,
+              "search",
+              config.search.provider,
+              providerFailureOutcome(error),
+              startedAt,
+            );
+            input.observability.warn("web search provider call failed", {
+              operation: "search",
+              provider: config.search.provider,
+              status: error.status ?? undefined,
+              retryable: error.retryable,
+              error: error.message,
+            });
+            return textResult(
+              `Web search failed: ${providerFailure(error)}`,
+              true,
+            );
           }
+          recordWebSearchCall(
+            input.observability,
+            "search",
+            config.search.provider,
+            "error",
+            startedAt,
+          );
           throw error;
         }
       },
@@ -183,7 +286,10 @@ export function webSearchToolDefinitions(input: {
 
   if (input.tools.includes(WEB_FETCH_TOOL_NAME) && config.fetch) {
     const fetchEndpoint = config.fetch;
-    const provider = createWebFetchProvider({ ...adapterInput, endpoint: fetchEndpoint });
+    const provider = createWebFetchProvider({
+      ...adapterInput,
+      endpoint: fetchEndpoint,
+    });
     const pricing = webSearchCallPricing(config, "fetch");
     const pages = new Map<string, WebPage>();
     definitions.push({
@@ -192,7 +298,8 @@ export function webSearchToolDefinitions(input: {
       codemodePath: ["opengeni", WEB_FETCH_TOOL_NAME],
       title: "Read a web page",
       description: WEB_FETCH_TOOL_DESCRIPTION,
-      inputSchema: webFetchInputSchema as unknown as AttemptToolDefinition["inputSchema"],
+      inputSchema:
+        webFetchInputSchema as unknown as AttemptToolDefinition["inputSchema"],
       annotations: {
         title: "Read a web page",
         readOnlyHint: true,
@@ -207,19 +314,41 @@ export function webSearchToolDefinitions(input: {
         try {
           request = parseWebFetchArguments(args);
         } catch (error) {
-          if (error instanceof WebToolArgumentError) return textResult(error.message, true);
+          if (error instanceof WebToolArgumentError)
+            return textResult(error.message, true);
           throw error;
         }
         const cached = pages.get(request.url);
-        if (cached) return textResult(renderWebPageWindow(cached, request), false);
+        if (cached)
+          return textResult(renderWebPageWindow(cached, request), false);
         try {
           await input.billing.admit(input.scope, pricing.providerMicros);
         } catch (error) {
-          if (error instanceof WebSearchBillingRefusedError) return textResult(error.message, true);
+          if (error instanceof WebSearchBillingRefusedError) {
+            recordWebSearchCall(
+              input.observability,
+              "fetch",
+              fetchEndpoint.provider,
+              "billing_refused",
+              performance.now(),
+            );
+            return textResult(error.message, true);
+          }
           throw error;
         }
+        const startedAt = performance.now();
         try {
-          const page = await provider.fetch({ url: request.url }, { signal: context.signal });
+          const page = await provider.fetch(
+            { url: request.url },
+            { signal: context.signal },
+          );
+          recordWebSearchCall(
+            input.observability,
+            "fetch",
+            fetchEndpoint.provider,
+            "ok",
+            startedAt,
+          );
           await settle(
             settledCost(
               context.operationId,
@@ -241,8 +370,32 @@ export function webSearchToolDefinitions(input: {
         } catch (error) {
           if (context.signal?.aborted) throw error;
           if (error instanceof WebSearchProviderError) {
-            return textResult(`Web fetch failed: ${providerFailure(error)}`, true);
+            recordWebSearchCall(
+              input.observability,
+              "fetch",
+              fetchEndpoint.provider,
+              providerFailureOutcome(error),
+              startedAt,
+            );
+            input.observability.warn("web search provider call failed", {
+              operation: "fetch",
+              provider: fetchEndpoint.provider,
+              status: error.status ?? undefined,
+              retryable: error.retryable,
+              error: error.message,
+            });
+            return textResult(
+              `Web fetch failed: ${providerFailure(error)}`,
+              true,
+            );
           }
+          recordWebSearchCall(
+            input.observability,
+            "fetch",
+            fetchEndpoint.provider,
+            "error",
+            startedAt,
+          );
           throw error;
         }
       },
