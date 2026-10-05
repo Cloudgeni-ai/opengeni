@@ -1783,6 +1783,7 @@ describe("organization onboarding UI", () => {
       expect(createOrganizationApiKey).not.toHaveBeenCalled();
       expect(container.textContent).toContain("You already created a setup key (ogk_old1234…)");
       expect(container.querySelector("[data-slot=developer-setup-key]")).toBeNull();
+      expect(container.textContent).toContain("replace the key above first");
 
       await clickButton(container, "Replace it with a new key");
       await flush();
