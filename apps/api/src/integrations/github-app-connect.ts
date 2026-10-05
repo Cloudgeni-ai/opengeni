@@ -256,7 +256,7 @@ export async function completeGitHubAppConnect(
               error: {
                 code: "owner_approval_pending",
                 message:
-                  "A GitHub organization owner must approve installation. Retry discovery after approval.",
+                  "Request sent. GitHub asked your organization owners to approve Opengeni. After an owner approves, an owner of the organization connects it here.",
                 retryable: true,
               },
             }),
