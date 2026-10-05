@@ -281,7 +281,41 @@ turn's initiating human:
   `code_search.customer_jev_cost` (`customer_usd_micros`, what the customer
   paid), so it never sums into OpenGeni's own cost.
 
-Nothing is debited from credits.
+### Charging credits
+
+`OPENGENI_CODE_SEARCH_BILLING_MODE=credits` charges searches on turns paid
+with OpenGeni credits (the `credits` route), when the deployment bills credits
+(`OPENGENI_BILLING_MODE=stripe` or `OPENGENI_USAGE_LIMITS_MODE=managed`). The
+default `usage_only` records usage and never debits. Routes paid by the
+deployment (`all` funding) or by the customer's own connection are never
+charged. `packages/core/src/domain/code-search-billing.ts` follows paid web
+search:
+
+- **Admission**, before any judge or sandbox work: the credits that can pay
+  for the turn's model must be positive (promotional grants covering that
+  model count, then general credits), and the workspace and initiating
+  member allowances must have room. It is a read, not a reservation. A
+  refusal, or an admission that cannot be checked, returns an error telling
+  the agent to search with `exec_command`.
+- **Settlement**, after a completed search, in one transaction: a
+  `code_search.cost` receipt (`usd_micros`) and an idempotent
+  `code_search_debit` (source `code_search`, `<attemptId>:<operationId>`).
+  The debit spends promotional grants covering the turn's model first, then
+  general credit, and carries `turnId`, so the allowance trigger charges the
+  turn's frozen initiating human. Its metadata keeps the judge provider and
+  model, the provider cost, the margin and the cost basis.
+- **Price:** `ceil(providerCost × (10000 + marginBps) / 10000)`, with
+  `OPENGENI_CODE_SEARCH_CREDIT_MARGIN_BPS` (default 500, +5%). The provider
+  cost is the provider-reported cost when every judge request reported one,
+  else Jev's list price.
+
+If settlement fails after the search ran, the agent still gets the result;
+the worker logs `code_search credit settlement failed` and counts
+`opengeni_code_search_credit_settlements_total{outcome="failed"}`. Charged
+micros also count in `opengeni_credit_micros_total{kind="code_search"}`.
+
+`code_search.cost` is what the customer is charged and `code_search.jev_cost`
+is what OpenGeni pays, so cost dashboards must not add the two.
 
 ## Observability
 

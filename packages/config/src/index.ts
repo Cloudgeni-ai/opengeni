@@ -960,6 +960,12 @@ const SettingsSchema = z.object({
   // id (jevModel on TypeSafe, ~typesafe/jev-latest, typesafe-ai/jev).
   codeSearchJudgeProvider: z.enum(["typesafe", "openrouter", "vercel_gateway"]).default("typesafe"),
   codeSearchJudgeModel: z.string().trim().min(1).max(128).optional(),
+  // Charging OpenGeni credits for `code_search` on turns paid with credits:
+  // `usage_only` (default) records usage and never debits; `credits` debits
+  // the judge's provider cost plus codeSearchCreditMarginBps, when the
+  // deployment bills credits (Stripe billing or managed usage limits).
+  codeSearchBillingMode: z.enum(["usage_only", "credits"]).default("usage_only"),
+  codeSearchCreditMarginBps: z.coerce.number().int().min(0).max(100_000).default(500),
   // Deployment-default agent persona template (the white-label surface). The
   // runtime resolves the effective template per turn as
   // per-session-override > per-workspace override > this default, substitutes
@@ -4207,6 +4213,8 @@ export function getSettings(source: NodeJS.ProcessEnv = process.env): Settings {
     codeSearchFunding: optional("OPENGENI_CODE_SEARCH_FUNDING"),
     codeSearchJudgeProvider: optional("OPENGENI_CODE_SEARCH_JUDGE_PROVIDER"),
     codeSearchJudgeModel: optional("OPENGENI_CODE_SEARCH_JUDGE_MODEL"),
+    codeSearchBillingMode: optional("OPENGENI_CODE_SEARCH_BILLING_MODE"),
+    codeSearchCreditMarginBps: optional("OPENGENI_CODE_SEARCH_CREDIT_MARGIN_BPS"),
     agentInstructionsTemplate: optional("OPENGENI_AGENT_INSTRUCTIONS_TEMPLATE"),
     azureOpenaiBaseUrl: optional("OPENGENI_AZURE_OPENAI_BASE_URL"),
     azureOpenaiEndpoint: optional("OPENGENI_AZURE_OPENAI_ENDPOINT"),

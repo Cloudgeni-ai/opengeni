@@ -10,6 +10,7 @@ export * from "./domain/knowledge-search";
 export * from "./domain/voice-input-billing";
 export * from "./domain/web-search-billing";
 export * from "./domain/code-search-judge";
+export * from "./domain/code-search-billing";
 export * from "./domain/realtime-voice-billing";
 // @opengeni/core — the framework-agnostic OpenGeni core.
 //

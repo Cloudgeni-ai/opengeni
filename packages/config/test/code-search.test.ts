@@ -11,6 +11,8 @@ describe("Jev and code_search settings", () => {
     const settings = withEnv({}, getSettings);
     expect(settings.codeSearchMode).toBe("off");
     expect(settings.codeSearchFunding).toBe("all");
+    expect(settings.codeSearchBillingMode).toBe("usage_only");
+    expect(settings.codeSearchCreditMarginBps).toBe(500);
     expect(settings.jevApiKey).toBeUndefined();
     expect(settings.jevBaseUrl).toBe("https://api.typesafe.ai");
     expect(settings.jevModel).toBe("jev-latest");
@@ -62,6 +64,18 @@ describe("Jev and code_search settings", () => {
     const creditsOnly = withEnv({ OPENGENI_CODE_SEARCH_FUNDING: "credits_only" }, getSettings);
     expect(creditsOnly.codeSearchFunding).toBe("credits_only");
     expect(() => withEnv({ OPENGENI_CODE_SEARCH_FUNDING: "credits" }, getSettings)).toThrow();
+  });
+
+  test("billing mode and margin are validated", () => {
+    const credits = withEnv(
+      { OPENGENI_CODE_SEARCH_BILLING_MODE: "credits", OPENGENI_CODE_SEARCH_CREDIT_MARGIN_BPS: "0" },
+      getSettings,
+    );
+    expect(credits.codeSearchBillingMode).toBe("credits");
+    expect(credits.codeSearchCreditMarginBps).toBe(0);
+    expect(() => withEnv({ OPENGENI_CODE_SEARCH_BILLING_MODE: "shadow" }, getSettings)).toThrow();
+    expect(() => withEnv({ OPENGENI_CODE_SEARCH_CREDIT_MARGIN_BPS: "-1" }, getSettings)).toThrow();
+    expect(() => withEnv({ OPENGENI_CODE_SEARCH_CREDIT_MARGIN_BPS: "2.5" }, getSettings)).toThrow();
   });
 
   test("the judge defaults to TypeSafe on the Jev key", () => {

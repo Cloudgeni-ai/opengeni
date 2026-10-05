@@ -697,3 +697,91 @@ describe("code_search on a customer's own connection", () => {
     ).toEqual([]);
   });
 });
+
+describe("code_search credit billing hooks", () => {
+  test("a refused admission never reaches the judge or the sandbox", async () => {
+    const calls = { count: 0 };
+    let workspaceCalls = 0;
+    let settled = 0;
+    const definition = createCodeSearchAttemptToolDefinition({
+      judge: deploymentJudge(fakeJevFetch(calls)),
+      workspace: async () => {
+        workspaceCalls++;
+        return fixtureWorkspace();
+      },
+      observability,
+      breaker: new JevCircuitBreaker(),
+      billing: {
+        admit: async () => "Fast code search needs Opengeni credits.",
+        settle: async () => {
+          settled++;
+        },
+      },
+    });
+    const result = await definition.execute(trialArgs, context);
+    expect(result.isError).toBe(true);
+    expect((result.content[0] as { text: string }).text).toContain("needs Opengeni credits");
+    expect((result.content[0] as { text: string }).text).toContain("exec_command");
+    expect([calls.count, workspaceCalls, settled]).toEqual([0, 0, 0]);
+  });
+
+  test("an admission that cannot be checked fails closed", async () => {
+    const calls = { count: 0 };
+    const definition = createCodeSearchAttemptToolDefinition({
+      judge: deploymentJudge(fakeJevFetch(calls)),
+      workspace: async () => fixtureWorkspace(),
+      observability,
+      breaker: new JevCircuitBreaker(),
+      billing: {
+        admit: async () => {
+          throw new Error("database unavailable");
+        },
+        settle: async () => {},
+      },
+    });
+    const result = await definition.execute(trialArgs, context);
+    expect(result.isError).toBe(true);
+    expect((result.content[0] as { text: string }).text).toContain("could not check");
+    expect(calls.count).toBe(0);
+  });
+
+  test.skipIf(!hasRipgrep)(
+    "settles a completed call, and still returns it when settlement fails",
+    async () => {
+      const settledUsage: CodeSearchUsage[] = [];
+      const ok = createCodeSearchAttemptToolDefinition({
+        judge: deploymentJudge(fakeJevFetch({ count: 0 })),
+        workspace: async () => fixtureWorkspace(),
+        observability,
+        breaker: new JevCircuitBreaker(),
+        billing: {
+          admit: async () => null,
+          settle: async (usage) => {
+            settledUsage.push(usage);
+          },
+        },
+      });
+      expect((await ok.execute(trialArgs, context)).isError).toBe(false);
+      expect(settledUsage).toHaveLength(1);
+      expect(settledUsage[0]!.operationId).toBe("op-1");
+      expect(settledUsage[0]!.model).toBe("jev-test");
+      expect(settledUsage[0]!.jevCostUsd).toBeGreaterThan(0);
+
+      const failing = createCodeSearchAttemptToolDefinition({
+        judge: deploymentJudge(fakeJevFetch({ count: 0 })),
+        workspace: async () => fixtureWorkspace(),
+        observability,
+        breaker: new JevCircuitBreaker(),
+        billing: {
+          admit: async () => null,
+          settle: async () => {
+            throw new Error("ledger unavailable");
+          },
+        },
+      });
+      const result = await failing.execute(trialArgs, context);
+      expect(result.isError).toBe(false);
+      expect((result.content[0] as { text: string }).text).toContain("resolveGithubApprovalPolicy");
+    },
+  );
+});
