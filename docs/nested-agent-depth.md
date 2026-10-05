@@ -51,9 +51,28 @@ The absolute override remains part of the public REST/SDK create contract for
 advanced callers. It is intentionally absent from the model-facing
 `session_create` schema: `maxNestedAgentDepth: 0` means “the root-relative limit
 is zero,” not “create one child that cannot delegate,” so a non-root manager
-would deny the child it is trying to create. A manager creates a non-delegating
-leaf by narrowing the child's `firstPartyMcpTools` so it omits
-`session_create` (and narrowing permissions when appropriate).
+would deny the child it is trying to create. For a worker that must not start,
+message, or follow other sessions, keep tool lists omitted and use the existing
+agent capability selection:
+
+```json
+{ "agent": { "capabilities": { "from": "all", "subagents": false } } }
+```
+
+This narrows only the session-coordination capability. Other capabilities and
+selected tools remain bounded by the parent's exact effective selection, and
+the child's final answer still reaches its parent automatically. It does not
+mean that only child creation is disabled: peer messaging and session reads are
+also disabled.
+
+Normally omit `tools`, `mcpServers`, and `firstPartyMcpTools`; a specialist role
+or a bounded task does not require a separate tool selection. Explicit arrays
+replace inheritance in full, including an explicit empty array. Advanced callers
+may still supply a deliberate per-tool subset, such as the parent's complete
+first-party selection minus `session_create` when peer coordination is needed.
+A short list of remembered tool names can unintentionally remove browser,
+computer, and scheduling tools. Never repair an explicit restriction by
+silently adding tools; a child's selection cannot exceed its parent's.
 
 ## Authoritative boundary and denials
 

@@ -322,7 +322,15 @@ agent access uses its hosted MCP connector. Explicit `[]` means
 no tools from the broad server. Unknown names fail validation. This field does
 not grant authority: every catalog entry also has an explicit registration-time
 permission predicate, and target-scoped authorization still runs on calls.
-Child omission inherits the parent's exact effective selection.
+Child omission inherits the parent's exact effective selection. An explicit
+array replaces that entire selection rather than adding to it, so omitted
+browser, computer, or scheduling names become unavailable even when
+needed by the task. Keep the selection omitted for an ordinary specialist.
+For a worker that must not start, message, or follow other sessions, use the
+existing `agent: { capabilities: { from: "all", subagents: false } }` and omit
+tool lists. Other parent-selected tools remain inherited, and the final answer
+still reaches the parent automatically. This guidance changes no inheritance,
+permission, or explicit-empty semantics and adds no tool-enablement UI.
 
 GitHub App installation credentials are deliberately absent from this catalog.
 Repository discovery and browser connect status remain model-visible, but token
