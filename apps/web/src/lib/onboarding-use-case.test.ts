@@ -6,6 +6,8 @@ import {
   developerSetupKeyRequest,
   developerSetupModelContext,
   formatCreditAmount,
+  storeOnboardingUseCase,
+  storedOnboardingUseCase,
 } from "./onboarding-use-case";
 
 const facts = {
@@ -88,6 +90,26 @@ describe("onboarding use case text", () => {
     expect(developerSetupModelContext({ ...facts, keyInSandbox: true })).toContain(
       "It expires in 30 days",
     );
+  });
+
+  test("the use-case answer survives a reload until it is cleared", () => {
+    const store = new Map<string, string>();
+    const sessionStorage = {
+      getItem: (key: string) => store.get(key) ?? null,
+      setItem: (key: string, value: string) => void store.set(key, value),
+      removeItem: (key: string) => void store.delete(key),
+    };
+    const hadWindow = "window" in globalThis;
+    if (!hadWindow) Object.assign(globalThis, { window: { sessionStorage } });
+    storeOnboardingUseCase(null);
+    expect(storedOnboardingUseCase()).toBeNull();
+    storeOnboardingUseCase("embed");
+    expect(storedOnboardingUseCase()).toBe("embed");
+    window.sessionStorage.setItem("opengeni.onboardingUseCase.v1", "bogus");
+    expect(storedOnboardingUseCase()).toBeNull();
+    storeOnboardingUseCase(null);
+    expect(storedOnboardingUseCase()).toBeNull();
+    if (!hadWindow) delete (globalThis as { window?: unknown }).window;
   });
 
   test("credit amounts drop cents only when there are none", () => {
