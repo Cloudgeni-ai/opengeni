@@ -45,7 +45,7 @@ import {
 } from "@/components/ui/dropdown-menu";
 import { Skeleton } from "@/components/ui/skeleton";
 import { requestConversationFind } from "@/lib/conversation-find-event";
-import { sessionInputWait } from "@/lib/session-rail";
+import { sessionControlPaused, sessionInputWait } from "@/lib/session-rail";
 import { useSessionStartup } from "@/lib/session-startup";
 import { isCodexProductModel } from "@/lib/session-model";
 import {
@@ -216,7 +216,7 @@ export function SessionHeader({
           {/* Below lg the lifecycle is a dot beside the title; the full badge
               and connection pill take over from lg. */}
           <CompactSessionStatus
-            paused={session.effectiveControl.state !== "active"}
+            paused={sessionControlPaused(session)}
             waiting={Boolean(waiting)}
             status={status}
             label={startupLabel}
@@ -286,7 +286,7 @@ export function SessionHeader({
               control is Active (Running + Active) is redundant noise. When
               paused, admission is the headline — hide lifecycle so we don't
               imply the session is still "Running"/"Idle" under a pause gate. */}
-          {session.effectiveControl.state === "active" ? (
+          {!sessionControlPaused(session) ? (
             waiting ? (
               <span
                 className="inline-flex shrink-0 items-center gap-1.5 rounded-full border border-border bg-surface px-2 py-0.5 text-control font-medium text-fg-muted"
@@ -455,7 +455,7 @@ function CompactSessionStatus({
 /** Pause-only header chip (Active is not shown — lifecycle status covers “go”). */
 function WorkstreamControlIndicator({ session }: { session: Session }) {
   const control = session.effectiveControl;
-  if (control.state !== "paused") {
+  if (control.state !== "paused" || session.status === "cancelled") {
     return null;
   }
   const blocker = control.primaryBlocker;
