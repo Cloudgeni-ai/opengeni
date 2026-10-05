@@ -27,10 +27,7 @@ function fakeBilling(refuse = false) {
     admit: async (_scope: unknown, micros: number) => {
       admitted.push(micros);
       if (refuse && micros > 0)
-        throw new WebSearchBillingRefusedError(
-          "insufficient_credits",
-          "no credits",
-        );
+        throw new WebSearchBillingRefusedError("insufficient_credits", "no credits");
     },
     settle: async (_scope: unknown, cost: WebSearchCallCost) => {
       settled.push(cost);
@@ -52,18 +49,14 @@ function providerFetch(responses: Record<string, unknown>) {
   return { impl, calls };
 }
 
-const context = (
-  operationId = crypto.randomUUID(),
-): AttemptToolExecutionContext =>
+const context = (operationId = crypto.randomUUID()): AttemptToolExecutionContext =>
   ({
     operationId,
     caller: { kind: "model" },
   }) as unknown as AttemptToolExecutionContext;
 
 const text = (result: unknown) =>
-  (result as { content: Array<{ text: string }> }).content
-    .map((block) => block.text)
-    .join("");
+  (result as { content: Array<{ text: string }> }).content.map((block) => block.text).join("");
 
 describe("turn web search plan", () => {
   const settings = testSettings({
@@ -96,12 +89,10 @@ describe("turn web search plan", () => {
       "web_search",
       "web_fetch",
     ]);
-    expect(turnWebSearchPlan(model(true, "xai-subscription"), replace)).toEqual(
-      {
-        hostedWebSearch: true,
-        providerTools: [],
-      },
-    );
+    expect(turnWebSearchPlan(model(true, "xai-subscription"), replace)).toEqual({
+      hostedWebSearch: true,
+      providerTools: [],
+    });
   });
 });
 
@@ -114,18 +105,15 @@ function quietObservability() {
 }
 
 function recordingObservability() {
-  const counters: Array<{ name: string; labels?: Record<string, unknown> }> =
-    [];
+  const counters: Array<{ name: string; labels?: Record<string, unknown> }> = [];
   const warnings: string[] = [];
   return {
     counters,
     warnings,
     observability: {
       warn: (message: string) => void warnings.push(message),
-      incrementCounter: (input: {
-        name: string;
-        labels?: Record<string, unknown>;
-      }) => void counters.push({ name: input.name, labels: input.labels }),
+      incrementCounter: (input: { name: string; labels?: Record<string, unknown> }) =>
+        void counters.push({ name: input.name, labels: input.labels }),
       observeHistogram: () => undefined,
     },
   };
@@ -185,10 +173,7 @@ describe("web_search and web_fetch attempt tools", () => {
     expect(search!.modelName).toBe("web_search");
     expect(search!.approval).toBe("none");
     const operationId = crypto.randomUUID();
-    const result = await search!.execute(
-      { query: "bun 2 release" },
-      context(operationId),
-    );
+    const result = await search!.execute({ query: "bun 2 release" }, context(operationId));
     expect(text(result)).toBe(
       "Web results for: bun 2 release\n\n1. Bun 2\n   https://bun.sh\n   Released today",
     );
@@ -228,16 +213,11 @@ describe("web_search and web_fetch attempt tools", () => {
       fetch: fake.impl,
     });
     expect(fetchTool!.modelName).toBe("web_fetch");
-    const first = text(
-      await fetchTool!.execute({ url: "https://a.example/doc" }, context()),
-    );
+    const first = text(await fetchTool!.execute({ url: "https://a.example/doc" }, context()));
     expect(first).toContain("Characters 0-20000 of 30000");
     expect(first).toContain("nextOffset: 20000");
     const second = text(
-      await fetchTool!.execute(
-        { url: "https://a.example/doc", offset: 20_000 },
-        context(),
-      ),
+      await fetchTool!.execute({ url: "https://a.example/doc", offset: 20_000 }, context()),
     );
     expect(second).toContain("Characters 20000-30000 of 30000");
     expect(fake.calls).toHaveLength(1);
@@ -263,10 +243,7 @@ describe("web_search and web_fetch attempt tools", () => {
     const refused = await search!.execute({ query: "q" }, context());
     expect(refused).toMatchObject({ isError: true });
     expect(text(refused)).toBe("no credits");
-    const privateUrl = await fetchTool!.execute(
-      { url: "http://169.254.169.254/" },
-      context(),
-    );
+    const privateUrl = await fetchTool!.execute({ url: "http://169.254.169.254/" }, context());
     expect(text(privateUrl)).toBe("url must be a public web address");
     expect(fake.calls).toEqual([]);
   });
@@ -280,8 +257,7 @@ describe("web_search and web_fetch attempt tools", () => {
       scope,
       billing,
       observability: recorded.observability,
-      fetch: (async () =>
-        new Response("busy", { status: 503 })) as unknown as typeof fetch,
+      fetch: (async () => new Response("busy", { status: 503 })) as unknown as typeof fetch,
     });
     const result = await search!.execute({ query: "q" }, context());
     expect(result).toMatchObject({ isError: true });
@@ -311,8 +287,7 @@ describe("web_search and web_fetch attempt tools", () => {
       scope,
       billing,
       observability: recorded.observability,
-      fetch: providerFetch({ "https://api.exa.ai/search": { results: [] } })
-        .impl,
+      fetch: providerFetch({ "https://api.exa.ai/search": { results: [] } }).impl,
     });
     await search!.execute({ query: "q" }, context());
     expect(recorded.counters).toEqual([
@@ -341,8 +316,7 @@ describe("web_search and web_fetch attempt tools", () => {
         ...quietObservability(),
         warn: (message: string) => void warnings.push(message),
       },
-      fetch: providerFetch({ "https://api.exa.ai/search": { results: [] } })
-        .impl,
+      fetch: providerFetch({ "https://api.exa.ai/search": { results: [] } }).impl,
     });
     const result = await search!.execute({ query: "q" }, context());
     expect(text(result)).toBe("No web results for: q");
