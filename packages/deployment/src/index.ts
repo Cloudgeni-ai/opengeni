@@ -7,6 +7,7 @@ export const DeploymentProfileId = z.enum([
   "kubernetes-external",
   "azure-managed",
   "azure-existing-services",
+  "azure-container-apps",
   "aws-managed",
   "aws-existing-services",
   "gcp-managed",
@@ -23,7 +24,7 @@ export type ProductOverlayId = z.infer<typeof ProductOverlayId>;
 export const CloudProvider = z.enum(["local", "generic", "azure", "aws", "gcp"]);
 export type CloudProvider = z.infer<typeof CloudProvider>;
 
-export const RuntimePlatform = z.enum(["docker-compose", "kubernetes"]);
+export const RuntimePlatform = z.enum(["docker-compose", "kubernetes", "azure-container-apps"]);
 export type RuntimePlatform = z.infer<typeof RuntimePlatform>;
 
 export const DependencyMode = z.enum(["managed", "external", "inCluster", "disabled"]);
@@ -495,6 +496,75 @@ export const DeploymentContract = z
         message: "docker-compose deployments must use the local cloud target",
       });
     }
+    if (
+      (contract.profile === "azure-container-apps") !==
+      (contract.runtime.platform === "azure-container-apps")
+    ) {
+      ctx.addIssue({
+        code: "custom",
+        path: ["runtime", "platform"],
+        message: "The azure-container-apps profile requires its explicit runtime platform",
+      });
+    }
+    if (contract.runtime.platform === "azure-container-apps") {
+      if (contract.runtime.namespace !== undefined) {
+        ctx.addIssue({
+          code: "custom",
+          path: ["runtime", "namespace"],
+          message: "Azure Container Apps does not use runtime.namespace",
+        });
+      }
+      if (contract.database.mode !== "managed" || contract.database.managed?.provider !== "azure") {
+        ctx.addIssue({
+          code: "custom",
+          path: ["database"],
+          message: "Azure Container Apps requires managed Azure PostgreSQL",
+        });
+      }
+      if (
+        contract.objectStorage.mode !== "managed" ||
+        contract.objectStorage.api !== "azure-blob" ||
+        contract.objectStorage.managed?.provider !== "azure"
+      ) {
+        ctx.addIssue({
+          code: "custom",
+          path: ["objectStorage"],
+          message: "Azure Container Apps requires managed Azure Blob storage",
+        });
+      }
+      for (const dependency of ["temporal", "nats"] as const) {
+        if (contract[dependency].mode !== "external") {
+          ctx.addIssue({
+            code: "custom",
+            path: [dependency, "mode"],
+            message: `Azure Container Apps requires an explicit external ${dependency} endpoint`,
+          });
+        }
+        const reference = contract[dependency].external;
+        if (reference && !reference.endpoint && !reference.secretRef) {
+          ctx.addIssue({
+            code: "custom",
+            path: [dependency, "external"],
+            message: `Azure Container Apps requires an external ${dependency} endpoint or secret reference`,
+          });
+        }
+      }
+      if (contract.secrets.mode !== "azureKeyVault") {
+        ctx.addIssue({
+          code: "custom",
+          path: ["secrets", "mode"],
+          message:
+            "Azure Container Apps requires managed-identity Azure Key Vault secret references",
+        });
+      }
+      if (["none", "local", "docker", "selfhosted"].includes(contract.sandbox.backend)) {
+        ctx.addIssue({
+          code: "custom",
+          path: ["sandbox", "backend"],
+          message: "Azure Container Apps requires a real remote sandbox backend",
+        });
+      }
+    }
     if (contract.profile.startsWith("azure") && contract.runtime.cloud !== "azure") {
       ctx.addIssue({
         code: "custom",
@@ -611,7 +681,9 @@ export function contractForProfile(
   overlay: ProductOverlayId = "none",
   env: Record<string, string | undefined> = process.env,
 ): DeploymentContract {
-  return applyProductOverlay(deploymentProfiles[profile], overlay, env);
+  const contract = applyProductOverlay(deploymentProfiles[profile], overlay, env);
+  assertContainerAppsCompatibility(contract, env);
+  return contract;
 }
 
 export function applyProductOverlay(
@@ -621,6 +693,11 @@ export function applyProductOverlay(
 ): DeploymentContract {
   if (overlay === "none") {
     return parseDeploymentContract(contract);
+  }
+  if (contract.runtime.platform === "azure-container-apps") {
+    throw new Error(
+      "azure-container-apps does not support managed SaaS product overlays; its native Terraform bootstrap supports configured product access only",
+    );
   }
   const publicBaseUrl =
     overlay === "managed-saas-staging"
@@ -651,6 +728,7 @@ export function applyProductOverlay(
 
 export type PreflightCheckId =
   | "kubernetes-context"
+  | "azure-container-apps-context"
   | "container-registry"
   | "postgres-connectivity"
   | "postgres-pgvector"
@@ -689,6 +767,8 @@ export interface DeploymentStackPlan {
   verifyCommands: string[];
   destroyCommands: string[];
   notes: string[];
+  /** Operator tools and inputs, not runtime dependency or chart settings. */
+  prerequisites?: string[];
 }
 
 export interface PlatformDependencyPlan {
@@ -941,6 +1021,70 @@ export const deploymentProfiles: Record<DeploymentProfileId, DeploymentContract>
       requireStructuredLogs: true,
     },
     sandbox: { backend: "none", preparationProfiles: ["none"], envAllowlist: [] },
+  }),
+  "azure-container-apps": parseDeploymentContract({
+    profile: "azure-container-apps",
+    runtime: {
+      platform: "azure-container-apps",
+      cloud: "azure",
+      releaseName: "opengeni",
+    },
+    database: {
+      mode: "managed",
+      engine: "postgres",
+      pgvectorRequired: true,
+      managed: {
+        provider: "azure",
+        notes: "Azure Database for PostgreSQL Flexible Server with pgvector enabled.",
+      },
+    },
+    temporal: {
+      mode: "external",
+      namespace: "default",
+      taskQueue: "opengeni-runs-ts",
+      external: {
+        secretRef: { name: "opengeni-temporal", key: "OPENGENI_TEMPORAL_HOST" },
+        notes:
+          "Operator-provided Temporal endpoint and credentials reachable from the applications.",
+      },
+    },
+    nats: {
+      mode: "external",
+      external: {
+        secretRef: { name: "opengeni-nats", key: "OPENGENI_NATS_URL" },
+        notes: "Operator-provided NATS endpoint and credentials reachable from the applications.",
+      },
+    },
+    objectStorage: {
+      mode: "managed",
+      api: "azure-blob",
+      bucket: "opengeni-files",
+      managed: {
+        provider: "azure",
+        notes:
+          "Private Azure Blob container; browser-upload CORS requires the deployed web origin.",
+      },
+    },
+    secrets: { mode: "azureKeyVault" },
+    ingress: { enabled: true, tls: true, sseTimeoutSeconds: 240 },
+    access: {
+      mode: "sharedKey",
+      allowUnauthenticatedHealth: true,
+      allowUnauthenticatedMetrics: false,
+    },
+    product: {
+      accessMode: "configured",
+      billingMode: "disabled",
+      entitlementsMode: "none",
+      usageLimitsMode: "none",
+    },
+    observability: {
+      backend: "azureMonitor",
+      requireTraces: true,
+      requireMetrics: true,
+      requireStructuredLogs: true,
+    },
+    sandbox: { backend: "modal", preparationProfiles: ["none"], envAllowlist: [] },
   }),
   "azure-existing-services": parseDeploymentContract({
     profile: "azure-existing-services",
@@ -1331,6 +1475,20 @@ export function parseDeploymentContract(input: unknown): DeploymentContract {
 
 export function preflightChecksFor(contract: DeploymentContract): PreflightCheck[] {
   const checks: PreflightCheck[] = [];
+  if (contract.runtime.platform === "azure-container-apps") {
+    checks.push(
+      check(
+        "azure-container-apps-context",
+        true,
+        "Verify Azure CLI account/subscription, Container Apps job commands, resource-provider registration, and permission to create and destroy the Terraform resources.",
+      ),
+      check(
+        "container-registry",
+        true,
+        "Verify API, web, worker, and migration images are existing immutable release digests and can be pulled by the managed identity.",
+      ),
+    );
+  }
   if (contract.runtime.platform === "kubernetes") {
     checks.push(
       check(
@@ -1360,7 +1518,13 @@ export function preflightChecksFor(contract: DeploymentContract): PreflightCheck
     );
   }
   checks.push(
-    check("postgres-migrations", true, "Verify migrations can run safely and idempotently."),
+    check(
+      "postgres-migrations",
+      true,
+      contract.runtime.platform === "azure-container-apps"
+        ? "Verify the manual migration/provision job succeeds before enabling API and both always-on worker roles. Maintenance upgrades require a drained runtime."
+        : "Verify migrations can run safely and idempotently.",
+    ),
   );
   checks.push(
     check(
@@ -1390,7 +1554,9 @@ export function preflightChecksFor(contract: DeploymentContract): PreflightCheck
     check(
       "secret-delivery",
       true,
-      "Verify required runtime secrets are delivered without leaking unintended values.",
+      contract.runtime.platform === "azure-container-apps"
+        ? "Verify managed identity can read the configured Key Vault secret references, without printing secret values."
+        : "Verify required runtime secrets are delivered without leaking unintended values.",
     ),
   );
   checks.push(
@@ -1439,7 +1605,9 @@ export function preflightChecksFor(contract: DeploymentContract): PreflightCheck
       check(
         "ingress-sse",
         true,
-        "Verify ingress supports long-lived SSE streams and reconnect replay.",
+        contract.runtime.platform === "azure-container-apps"
+          ? "Verify long-lived SSE and reconnect/replay through the native HTTP-route edge against actual Azure timeout behavior; configured timeout values alone are not stream-lifetime proof."
+          : "Verify ingress supports long-lived SSE streams and reconnect replay.",
       ),
     );
   }
@@ -1480,6 +1648,7 @@ export function requiredRuntimeEnvVars(
   contract: DeploymentContract,
   env: Record<string, string | undefined> = process.env,
 ): string[] {
+  assertContainerAppsCompatibility(contract, env);
   assertMcpOauthDeploymentContract(contract, env);
   const vars = [
     "OPENGENI_PRODUCT_ACCESS_MODE",
@@ -1553,6 +1722,9 @@ export function requiredRuntimeEnvVars(
   }
   if (contract.runtime.platform === "kubernetes") {
     vars.push("OPENGENI_API_HOST", "OPENGENI_API_PORT");
+  }
+  if (contract.runtime.platform === "azure-container-apps") {
+    vars.push("OPENGENI_ENVIRONMENTS_ENCRYPTION_KEY", "OPENGENI_DELEGATION_SECRET");
   }
   if (contract.access.mode === "sharedKey") {
     vars.push("OPENGENI_AUTH_REQUIRED", "OPENGENI_ACCESS_KEY");
@@ -1656,6 +1828,10 @@ export function stackPlanFor(
   productOverlay: ProductOverlayId = "none",
   env: Record<string, string | undefined> = process.env,
 ): DeploymentStackPlan {
+  assertContainerAppsCompatibility(contract, env);
+  if (contract.runtime.platform === "azure-container-apps" && productOverlay !== "none") {
+    throw new Error("azure-container-apps does not support managed SaaS product overlays");
+  }
   const terraformRoot = terraformRootFor(contract);
   const helmValuesFile = helmValuesFileFor(contract);
   // Only Terraform-backed stacks generate runtime.env and Helm config from
@@ -1699,7 +1875,20 @@ export function stackPlanFor(
     verifyCommands: verifyCommands(contract, platformDependencies, productOverlay),
     destroyCommands: destroyCommands(contract, terraformRoot, platformDependencies),
     notes: planNotes(contract, env),
+    ...(contract.runtime.platform === "azure-container-apps"
+      ? { prerequisites: containerAppsPrerequisites() }
+      : {}),
   };
+}
+
+/** The existing generator has a Helm/Kubernetes output contract, not a generic
+ * Terraform-to-runtime adapter. Refuse before reading or writing artifacts. */
+export function assertRuntimeArtifactsSupported(contract: DeploymentContract): void {
+  if (contract.runtime.platform === "azure-container-apps") {
+    throw new Error(
+      "deployment:runtime-artifacts emits Helm values and Kubernetes runtime secrets and does not support azure-container-apps; use deploy/terraform/azure-container-apps with its native runtime settings and Key Vault secret references (deployment:stack --profile azure-container-apps)",
+    );
+  }
 }
 
 export function generateRuntimeArtifacts(
@@ -1707,6 +1896,7 @@ export function generateRuntimeArtifacts(
   terraformOutputs: TerraformOutputs,
   env: Record<string, string | undefined> = process.env,
 ): DeploymentRuntimeArtifacts {
+  assertRuntimeArtifactsSupported(contract);
   assertNoRetiredTrustedProxyHops(env);
   const helmSetValues = terraformOutputObject(terraformOutputs, "helm_set_values");
   addGeneratedImageValues(helmSetValues, env.OPENGENI_IMAGE_TAG ?? "latest", env);
@@ -1766,6 +1956,9 @@ export function generateRuntimeArtifacts(
 }
 
 function terraformRootFor(contract: DeploymentContract): string | null {
+  if (contract.profile === "azure-container-apps") {
+    return CONTAINER_APPS_TERRAFORM_ROOT;
+  }
   if (
     contract.profile.endsWith("existing-services") ||
     !["azure", "aws", "gcp"].includes(contract.runtime.cloud)
@@ -1794,6 +1987,22 @@ function helmValuesFileFor(contract: DeploymentContract): string | null {
 }
 
 function createdResourceClasses(contract: DeploymentContract): string[] {
+  if (contract.runtime.platform === "azure-container-apps") {
+    return [
+      "Azure resource group",
+      "virtual network and delegated subnets for the environment and private PostgreSQL",
+      "Azure Container Apps managed environment",
+      "native environment HTTP-route edge for a shared HTTPS API/web origin",
+      "Azure Container Apps API and web applications",
+      "separate always-on control and turn worker applications",
+      "manual Azure Container Apps migration/provision job",
+      "Azure Database for PostgreSQL Flexible Server with pgvector",
+      "private Azure Blob container and browser-upload CORS",
+      "Azure Key Vault and managed-identity secret references",
+      "user-assigned managed identity and role assignments",
+      "Azure Log Analytics workspace",
+    ];
+  }
   const out = [
     "OpenGeni Kubernetes namespace",
     "OpenGeni Helm release",
@@ -1846,6 +2055,18 @@ function createdResourceClasses(contract: DeploymentContract): string[] {
 }
 
 function externalDependencies(contract: DeploymentContract): string[] {
+  if (contract.runtime.platform === "azure-container-apps") {
+    return [
+      "External Temporal endpoint, namespace, and TLS/auth credentials reachable from API and workers",
+      "External NATS endpoint and authentication reachable from API and workers",
+      "Existing release registry API, worker, and web images pinned by sha256 digest; migration uses the API image",
+      "Real model-provider credentials and selected remote sandbox credentials (Modal by default)",
+      ...(contract.access.mode === "externalGateway"
+        ? ["Gateway-managed authentication and authorization"]
+        : []),
+      "Configured OTEL export endpoint when traces and metrics are required; Log Analytics alone is not OTEL proof",
+    ];
+  }
   const out: string[] = [];
   if (contract.database.mode === "external")
     out.push("Postgres with pgvector reachable through OPENGENI_DATABASE_URL");
@@ -2004,6 +2225,76 @@ function helmApplicationDrainCommands(input: {
   ];
 }
 
+const CONTAINER_APPS_TERRAFORM_ROOT = "deploy/terraform/azure-container-apps";
+const CONTAINER_APPS_VARIABLE_ARGS =
+  '-var-file="${OPENGENI_ACA_TFVARS_FILE:?set the absolute path to private ACA tfvars}"';
+const CONTAINER_APPS_STATE_ARGS =
+  '-state="${OPENGENI_ACA_STATE_FILE:?set the absolute path to private local Terraform state}"';
+
+function containerAppsPrerequisites(): string[] {
+  return [
+    "Terraform version and provider versions satisfying this module's versions.tf; these commands use external local state. A remote backend requires a separately configured thin wrapper without the local -state flags.",
+    "Azure CLI with containerapp job start/execution show commands; sign in and select the intended subscription with az login and az account set before running any resource commands.",
+    "Register Microsoft.App, Microsoft.Network, Microsoft.OperationalInsights, Microsoft.DBforPostgreSQL, Microsoft.Storage, Microsoft.KeyVault, and Microsoft.ManagedIdentity resource providers; hold resource-create, role-assignment, Key Vault, and destroy permissions for the intended scope. Register Microsoft.ContainerRegistry if create_acr=true.",
+    "Bun at the repository-pinned version, Bash, jq, seq, and curl for operator verification; no local image build is needed.",
+    "Set absolute private paths OPENGENI_ACA_TFVARS_FILE, OPENGENI_ACA_STATE_FILE, and OPENGENI_ACA_TF_DATA_DIR outside the repository. TF_DATA_DIR and state must be the same across every phase and output/destroy command.",
+    "Private tfvars supply images.api/worker/web immutable release references, external_services Temporal/NATS settings, secret_env model/sandbox credentials, and config_env non-secret runtime settings. The module generates database credentials and Key Vault references; no operator PostgreSQL password is required.",
+    "Run the ordered deployment commands in the same shell so the exact migration execution identity is retained; never blindly retry job start after an unknown outcome.",
+    "A successful schema/env check or TCP probe is not live deployment proof. Complete real model, remote sandbox, file/storage, auth, replay, schedule, and telemetry conformance; exports remain unsupported.",
+  ];
+}
+
+function containerAppsMigrationStatusCommand(): string {
+  return (
+    'az containerapp job execution show --resource-group "${OPENGENI_ACA_RESOURCE_GROUP:?run bootstrap first}" ' +
+    '--name "${OPENGENI_ACA_MIGRATION_JOB:?run bootstrap first}" ' +
+    '--job-execution-name "${OPENGENI_ACA_MIGRATION_EXECUTION:?start and retain one exact migration execution}" ' +
+    "--query properties.status --output tsv --only-show-errors"
+  );
+}
+
+function containerAppsDeployCommands(terraformRoot: string): string[] {
+  const bootstrapArgs = `${CONTAINER_APPS_STATE_ARGS} ${CONTAINER_APPS_VARIABLE_ARGS} -var=deployment_phase=bootstrap`;
+  const applicationArgs = `${CONTAINER_APPS_STATE_ARGS} ${CONTAINER_APPS_VARIABLE_ARGS} -var=deployment_phase=apps -var="migration_completed_revision=\${OPENGENI_ACA_MIGRATION_IMAGE:?retain the exact migrated API image}"`;
+  const output = `terraform -chdir=${terraformRoot} output ${CONTAINER_APPS_STATE_ARGS}`;
+  const statusCommand = containerAppsMigrationStatusCommand();
+  return [
+    'set -euo pipefail && umask 077 && export TF_DATA_DIR="${OPENGENI_ACA_TF_DATA_DIR:?set the absolute path to private Terraform data}"',
+    'for OPENGENI_ACA_PRIVATE_PATH in "$TF_DATA_DIR" "${OPENGENI_ACA_STATE_FILE:?set private state path}" "${OPENGENI_ACA_TFVARS_FILE:?set private tfvars path}"; do case "$OPENGENI_ACA_PRIVATE_PATH" in /*) ;; *) printf "ACA operator paths must be absolute\\n" >&2; exit 1 ;; esac; done',
+    'mkdir -p "$TF_DATA_DIR"',
+    `terraform -chdir=${terraformRoot} init`,
+    `terraform -chdir=${terraformRoot} validate`,
+    `terraform -chdir=${terraformRoot} plan ${bootstrapArgs}`,
+    `terraform -chdir=${terraformRoot} apply ${bootstrapArgs}`,
+    `OPENGENI_ACA_RESOURCE_GROUP="$(${output} -raw resource_group_name)" && OPENGENI_ACA_MIGRATION_JOB="$(${output} -raw migration_job_name)" && OPENGENI_ACA_MIGRATION_IMAGE="$(${output} -json migration_job | jq -er .image)"`,
+    'OPENGENI_ACA_MIGRATION_EXECUTION="$(az containerapp job start --resource-group "${OPENGENI_ACA_RESOURCE_GROUP:?run bootstrap first}" --name "${OPENGENI_ACA_MIGRATION_JOB:?run bootstrap first}" --query name --output tsv --only-show-errors)" && test -n "$OPENGENI_ACA_MIGRATION_EXECUTION"',
+    `OPENGENI_ACA_MIGRATION_STATUS=Running && for OPENGENI_ACA_POLL in $(seq 1 390); do OPENGENI_ACA_MIGRATION_STATUS="$(${statusCommand})" || exit 1; case "$OPENGENI_ACA_MIGRATION_STATUS" in Succeeded) break ;; Failed|Stopped|Cancelled|Canceled) exit 1 ;; esac; sleep 10; done && test "$OPENGENI_ACA_MIGRATION_STATUS" = Succeeded`,
+    `OPENGENI_ACA_MIGRATION_STATUS="$(${statusCommand})" && test "$OPENGENI_ACA_MIGRATION_STATUS" = Succeeded && terraform -chdir=${terraformRoot} plan ${applicationArgs}`,
+    `OPENGENI_ACA_MIGRATION_STATUS="$(${statusCommand})" && test "$OPENGENI_ACA_MIGRATION_STATUS" = Succeeded && terraform -chdir=${terraformRoot} apply ${applicationArgs}`,
+  ];
+}
+
+function containerAppsVerifyCommands(
+  contract: DeploymentContract,
+  productOverlay: ProductOverlayId,
+): string[] {
+  const overlayArg = productOverlay === "none" ? "" : ` --product-overlay ${productOverlay}`;
+  const conformance =
+    'bun run deployment:conformance -- --base-url "$OPENGENI_API_BASE_URL"' +
+    ` --sandbox-backend ${contract.sandbox.backend}`;
+  return [
+    `OPENGENI_API_BASE_URL="$(terraform -chdir=${CONTAINER_APPS_TERRAFORM_ROOT} output ${CONTAINER_APPS_STATE_ARGS} -raw api_url)" && export OPENGENI_API_BASE_URL`,
+    'az containerapp list --resource-group "${OPENGENI_ACA_RESOURCE_GROUP:?run bootstrap first}" --output json --only-show-errors | jq -e \'def role: [.properties.template.containers[].env[]? | select(.name == "OPENGENI_WORKER_ROLE") | .value][0]; [.[] | select(role == "control" or role == "turn")] as $workers | ([$workers[] | role] | sort) == ["control", "turn"] and all($workers[]; .properties.template.scale.minReplicas >= 1 and .properties.template.terminationGracePeriodSeconds >= 120)\'',
+    'curl --fail --silent --show-error "${OPENGENI_API_BASE_URL:?apply applications first}/healthz"',
+    `bun run deployment:preflight -- --profile ${contract.profile}${overlayArg} --check-env`,
+    contract.access.mode === "sharedKey"
+      ? `OPENGENI_CONFORMANCE_DEPLOYMENT_ACCESS_KEY="$OPENGENI_ACCESS_KEY" ${conformance}`
+      : contract.product.accessMode === "managed"
+        ? `OPENGENI_CONFORMANCE_PRODUCT_TOKEN="$OPENGENI_TEST_WORKSPACE_API_KEY" ${conformance}`
+        : conformance,
+  ];
+}
+
 function deployCommands(
   contract: DeploymentContract,
   terraformRoot: string | null,
@@ -2012,6 +2303,9 @@ function deployCommands(
   productOverlay: ProductOverlayId,
   env: Record<string, string | undefined>,
 ): string[] {
+  if (contract.runtime.platform === "azure-container-apps") {
+    return containerAppsDeployCommands(CONTAINER_APPS_TERRAFORM_ROOT);
+  }
   const maintenanceImageValuesArg = maintenanceImageDigestHelmArgs(contract, terraformRoot, env);
   const maintenanceFinalUpgradeArgs = maintenanceFinalUpgradeSafetyArgs(env);
   if (contract.profile === "local-compose") {
@@ -2155,6 +2449,9 @@ function verifyCommands(
   platformDependencies: PlatformDependencyPlan[],
   productOverlay: ProductOverlayId,
 ): string[] {
+  if (contract.runtime.platform === "azure-container-apps") {
+    return containerAppsVerifyCommands(contract, productOverlay);
+  }
   const baseUrl = contract.ingress.enabled
     ? (contract.product.publicBaseUrl ?? "https://opengeni.example.com")
     : "http://127.0.0.1:18080";
@@ -2244,6 +2541,12 @@ function destroyCommands(
   terraformRoot: string | null,
   platformDependencies: PlatformDependencyPlan[],
 ): string[] {
+  if (contract.runtime.platform === "azure-container-apps") {
+    return [
+      `terraform -chdir=${terraformRoot} plan -destroy ${CONTAINER_APPS_STATE_ARGS} ${CONTAINER_APPS_VARIABLE_ARGS}`,
+      `terraform -chdir=${terraformRoot} destroy ${CONTAINER_APPS_STATE_ARGS} ${CONTAINER_APPS_VARIABLE_ARGS}`,
+    ];
+  }
   if (contract.profile === "local-compose") {
     return ["docker compose down --remove-orphans"];
   }
@@ -2452,6 +2755,28 @@ function planNotes(
   contract: DeploymentContract,
   env: Record<string, string | undefined>,
 ): string[] {
+  if (contract.runtime.platform === "azure-container-apps") {
+    return [
+      "Keep generated credentials, Terraform state/plans, and filled tfvars in private operator-controlled storage outside the repository. Terraform state is sensitive even when credentials are delivered through Key Vault.",
+      "Ordered bootstrap: create substrate and manual migration job with applications disabled; start one exact job execution; require Succeeded before enabling applications; verify real conformance; use the destroy plan for teardown.",
+      "API and web use native Container Apps ingress. Control and turn workers are separate always-on applications with at least one replica each, not event-triggered jobs.",
+      "Require Azure template readback for both worker roles: minimum replicas at least 1 and termination grace at least 120 seconds. A rollout must checkpoint/drain real turns rather than silently terminating them.",
+      "Temporal and NATS are external prerequisites; this profile does not install them. Temporary live-test dependency fixtures are not production defaults and have a separate lifecycle.",
+      "Use existing release images pinned by full sha256 digest. Migrations use the same API image; this workflow does not build or publish replacement images.",
+      "Do not change tfvars, image digests, runtime database roles, or secrets between bootstrap, migration execution, and application enablement. Retain the exact execution ID when an observation fails; do not start another migration blindly.",
+      "Use managed identity for Key Vault secret delivery and registry access; the current Blob adapter uses a connection string delivered as a secret, not an implied identity-native storage adapter.",
+      "create_acr=false uses existing release images by default. Optional create_acr=true creates an empty registry: import the exact immutable images separately before bootstrap can run its migration job.",
+      "The native environment HTTP-route edge serves API and web on one HTTPS origin. Verify real SSE duration, reconnect/replay, rolling restart and NATS-loss recovery against that edge.",
+      "The stock conformance stream is short and a selected sandbox backend is not proof of a sandbox invocation. Add actual remote commands and file materialization tests; test private production metrics/OTEL independently rather than counting a skipped public /metrics check as coverage.",
+      "preflight --check-env inspects only the operator's current environment, not deployed Key Vault references. Check effective runtime values privately; do not use reference URLs as credential values or mistake a local env check for workload readiness.",
+      "Standard ACA HTTP ingress documents a 240-second timeout; do not treat that as a measured stream lifetime or infer a 3600-second guarantee. Read back the native environment HTTP-route edge and verify long-lived SSE and reconnect/replay empirically.",
+      "Artifact exports are compatibility-unverified and remain disabled (OPENGENI_ARTIFACT_MATERIALIZER_DEPLOYED=false). Do not enable materializer, outbox, or sandbox artifact runtimes or claim export parity before dedicated probes and supported infrastructure exist.",
+      "deployment:runtime-artifacts does not support this profile; Terraform owns native runtime settings and secret references.",
+      "This is a fresh-deployment bootstrap plan, not a maintenance-upgrade procedure. Existing installations require a separately reviewed drain and migration sequence; disabling applications can destroy their resources.",
+      "Terraform destroy removes only this module's resources. External Temporal/NATS services and remote sandbox resources are operator-owned; reconcile any test-created remote sandboxes separately.",
+      "After destroy, reconcile the module's resource_group_name and infrastructure_resource_group_name outputs against Azure; provider-created environment infrastructure must also be gone before teardown is declared complete.",
+    ];
+  }
   const notes = [
     "Keep provider resource names, generated credentials, kubeconfigs, Terraform state, and filled tfvars in private operator-controlled storage outside the repository.",
     "Use the generated destroy commands as the baseline cleanup path for environments created from this plan.",
@@ -2504,6 +2829,37 @@ function secretLikeRuntimeEnv(name: string): boolean {
   );
 }
 
+function assertContainerAppsCompatibility(
+  contract: DeploymentContract,
+  env: Record<string, string | undefined>,
+): void {
+  if (contract.runtime.platform !== "azure-container-apps") return;
+  for (const name of [
+    "OPENGENI_ARTIFACT_MATERIALIZER_DEPLOYED",
+    "OPENGENI_ARTIFACT_MATERIALIZER_ENABLED",
+    "OPENGENI_ARTIFACT_OUTBOX_ENABLED",
+    "OPENGENI_SANDBOX_ARTIFACT_RUNTIME_ENABLED",
+  ]) {
+    const value = nonEmpty(env[name])?.toLowerCase();
+    if (value && !["false", "0", "no", "n", "off"].includes(value)) {
+      throw new Error(
+        `${name} must remain false for azure-container-apps: artifact exports are compatibility-unverified and this profile has no supported materializer/outbox deployment`,
+      );
+    }
+  }
+  if (nonEmpty(env.OPENGENI_DEPLOYMENT_MAINTENANCE_CUTOVER)) {
+    throw new Error(
+      "azure-container-apps stack plans support fresh bootstrap only, not OPENGENI_DEPLOYMENT_MAINTENANCE_CUTOVER; use a separately reviewed native application drain and migration procedure",
+    );
+  }
+  const selectedSandbox = nonEmpty(env.OPENGENI_SANDBOX_BACKEND);
+  if (selectedSandbox && selectedSandbox !== contract.sandbox.backend) {
+    throw new Error(
+      "OPENGENI_SANDBOX_BACKEND must match the azure-container-apps deployment contract; select and validate a real remote sandbox explicitly",
+    );
+  }
+}
+
 function runtimeDatabaseUrlRequired(contract: DeploymentContract): boolean {
   return (
     contract.database.mode !== "inCluster" ||
@@ -2513,6 +2869,13 @@ function runtimeDatabaseUrlRequired(contract: DeploymentContract): boolean {
 }
 
 function profileRequiredSecretKeys(contract: DeploymentContract): string[] {
+  if (contract.runtime.platform === "azure-container-apps") {
+    return [
+      "OPENGENI_NATS_URL",
+      "OPENGENI_MIGRATIONS_DATABASE_URL",
+      "OPENGENI_APP_DATABASE_PASSWORD",
+    ];
+  }
   if (contract.profile !== "single-node-kubernetes") {
     return [];
   }
@@ -2577,6 +2940,7 @@ function runtimeEnvValues(
   terraformOutputs: TerraformOutputs,
   env: Record<string, string | undefined>,
 ): RuntimeEnvEntry[] {
+  assertContainerAppsCompatibility(contract, env);
   assertMcpOauthDeploymentContract(contract, env);
   const publicBaseUrl = env.OPENGENI_PUBLIC_BASE_URL ?? contract.product.publicBaseUrl;
   const mcpOauthEnabled = mcpOauthDeploymentEnabled(env);
@@ -2586,6 +2950,15 @@ function runtimeEnvValues(
       env.OPENGENI_DATABASE_URL,
       runtimeDatabaseUrlRequired(contract),
     ),
+    ...(contract.runtime.platform === "azure-container-apps"
+      ? [
+          requiredEnv(
+            "OPENGENI_ENVIRONMENTS_ENCRYPTION_KEY",
+            env.OPENGENI_ENVIRONMENTS_ENCRYPTION_KEY,
+          ),
+          requiredEnv("OPENGENI_DELEGATION_SECRET", env.OPENGENI_DELEGATION_SECRET),
+        ]
+      : []),
     valueEnv("OPENGENI_AUTH_REQUIRED", String(contract.access.mode === "sharedKey")),
     ...(contract.access.mode === "sharedKey"
       ? [requiredEnv("OPENGENI_ACCESS_KEY", env.OPENGENI_ACCESS_KEY)]

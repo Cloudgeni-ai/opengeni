@@ -32,6 +32,7 @@ if (args.json) {
 
 console.log(`OpenGeni deployment stack plan: ${plan.profile}`);
 console.log("");
+if (plan.prerequisites) printList("Prerequisites", plan.prerequisites);
 printList("Creates", plan.creates);
 printPlatformDependencies();
 printList("External dependencies", plan.externalDependencies);
@@ -99,7 +100,7 @@ function parseArgs(values: string[]): Args {
     list: false,
   };
   for (let index = 0; index < values.length; index += 1) {
-    const value = values[index];
+    const value = values[index]!;
     if (value === "--json") {
       out.json = true;
       continue;
