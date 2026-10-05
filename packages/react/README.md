@@ -160,7 +160,11 @@ someone else's product with zero styling:
   also fixes the policy server-side.
 
 Attachments appear when the deployment enables uploads (`attachments={false}`
-opts out), pending tool approvals render Approve/Reject, a yes/no question
+opts out), the microphone appears when it reports voice input available
+(`voiceInput={false}` opts out), generated images, video, published files and
+screenshots display through the conversation's session scope, actions a
+session proxy reports unavailable (`sessionCreation`, `archive`, `artifacts`)
+are hidden, pending tool approvals render Approve/Reject, a yes/no question
 renders as two buttons, a failed load offers Try again, and `toolRegistry`
 customizes tool rendering.
 
@@ -970,6 +974,9 @@ intentional changes should regenerate those snapshots and review the diff.
   `loadRetainedArtifact` to render permanent generated-image receipts; a loader
   may return verified bytes or a short-lived signed URL. The stock web app uses
   the URL path to avoid copying multi-megabyte images into JavaScript memory.
+  `createWorkspaceRetainedArtifactLoader`, `createSessionRetainedScreenshotLoader`,
+  and `createWorkspaceRetainedVideoLoader` bind the SDK reads to a workspace
+  (and session); `SessionConversation` uses them by default.
 - `UserMessageBody` — the shared lossless rendered-height disclosure for
   already-sent user text. Use it inside a custom `renderMessageText` user branch
   so attachments and voice identity remain outside the clipped Markdown region.
