@@ -809,7 +809,7 @@ jobs:
           OPENGENI_SESSION_SEARCH_ARTIFACT_DIR: /tmp/session-search-header-evidence
         run: >-
           bun test --max-concurrency=1 --timeout 300000
-          --test-name-pattern 'desktop expanded header keeps icon-only search inline'
+          --test-name-pattern 'desktop expanded header keeps icon-only search inline|restores.*focus|mobile result navigation'
           ./test/e2e/session-search.browser.e2e.ts
 
       - name: Queue surface browser acceptance

@@ -340,7 +340,8 @@ export function SessionList() {
   // refresh; the previous index relied on a one-shot load.
   const [searchDraft, setSearchDraft] = useState("");
   const openSearchDialog = useCallback(
-    () => requestSessionSearch(rail.workspaceId),
+    (event: MouseEvent<HTMLButtonElement>) =>
+      requestSessionSearch(rail.workspaceId, event.currentTarget),
     [rail.workspaceId],
   );
   const [search, setSearch] = useState("");
@@ -4606,7 +4607,7 @@ export function CollapsedSessionsButton() {
             variant="ghost"
             size="icon-sm"
             aria-label="Search sessions"
-            onClick={() => requestSessionSearch(rail.workspaceId)}
+            onClick={(event) => requestSessionSearch(rail.workspaceId, event.currentTarget)}
             className="text-fg-label hover:text-fg"
           >
             <SearchIcon className="size-4" />
