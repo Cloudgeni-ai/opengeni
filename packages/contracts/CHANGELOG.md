@@ -1,5 +1,12 @@
 # @opengeni/contracts
 
+## 1.4.1
+
+### Patch Changes
+
+- 9145bad: Connector catalogs no longer offer connectors that cannot connect on the current deployment. Some providers refuse OAuth self-registration (Asana, HubSpot, Front, Box, Dropbox, Canva, Vercel, and others). When the deployment has no operator-registered OAuth client for such a provider, the catalog reports `runtime.operatorOAuthClient.configured: false` and connector discovery hides the row. Rows that are already connected stay visible.
+- f290348: Signup credits now pay for dictation and live voice like general credits. Admission counts their remainder, each voice charge is allocated to them first, and balances report `coversVoice` on those grants. Other model-scoped promotional credits still do not cover voice.
+
 ## 1.4.0
 
 ### Minor Changes

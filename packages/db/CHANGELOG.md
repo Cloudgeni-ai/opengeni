@@ -1,5 +1,24 @@
 # @opengeni/db
 
+## 1.4.1
+
+### Patch Changes
+
+- fe1f64d: Codemode terminal settlement takes the session lock prefix before updating its journal row, so it no longer deadlocks against the client's re-notify of the same operation (`POST /codemode/calls` 500s with SQLSTATE 40P01). Submit and claim retry deadlock/serialization victims, an exhausted victim returns a typed retryable 503, and the Codemode client resubmits and re-reads the same operation id after a known-outcome transient 5xx.
+- e6d35b9: Sandboxes kept warm only by Browser or Computer sessions are now visible: the reaper publishes `opengeni_sandbox_leases_interaction_only{idle_bucket}` by time since the sessions were last used, and an alert fires when more than five such boxes have been idle for over two hours.
+- 55bddfe: A `write_stdin` poll that races the reaper's settlement of an exited background command now returns the durable exit result instead of failing the turn with `sandbox_mutation_output_rejected`. The provider call is still made once and never replayed, and its output stays rejected.
+- f290348: Signup credits now pay for dictation and live voice like general credits. Admission counts their remainder, each voice charge is allocated to them first, and balances report `coversVoice` on those grants. Other model-scoped promotional credits still do not cover voice.
+- aedc3b9: A worker shutdown during sandbox provisioning no longer makes the session's sandbox unrecoverable or fails the turn. The dying attempt now finishes its own provisioning cleanup before exiting and never terminates a box it already published, so the replacement attempt resumes that same box. If an unpublished box disappears anyway, the session is no longer marked as having lost its workspace.
+- Updated dependencies [fe1f64d]
+- Updated dependencies [9145bad]
+- Updated dependencies [f290348]
+  - @opengeni/codemode@1.4.1
+  - @opengeni/contracts@1.4.1
+  - @opengeni/config@1.4.1
+  - @opengeni/codex@1.4.1
+  - @opengeni/observability@1.4.1
+  - @opengeni/network@1.4.1
+
 ## 1.4.0
 
 ### Patch Changes
