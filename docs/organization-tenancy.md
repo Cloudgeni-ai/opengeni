@@ -1093,6 +1093,28 @@ members, cross-organization membership ids, and every Personal workspace fail
 closed. Organization membership role changes keep the 0263 sole-owner
 invariant; workspace roles do not alter organization roles.
 
+That authority covers every shared workspace in the organization and every
+active member, the acting owner or administrator included. A workspace an
+organization key provisions (an embedding product's per-tenant
+`ensureWorkspace`/`og.workspaceId({ tenant })`) is an ordinary shared workspace
+in this inventory even though no human is a member of it, so an owner who
+cannot open a tenant's sessions grants themself (or anyone else) a role on it
+from Organization → Workspaces (**Join**) or Organization → People → the person →
+**Workspace access**, both of which call the same
+`PUT /v1/organizations/:organizationId/workspaces/:workspaceId/members/:membershipId`
+lifecycle. Lists longer than eight shared workspaces offer a name search.
+Migration `0634_organization_admin_self_workspace_removal.sql` (rolling)
+completes the self case: the removal-actor guard's "a member cannot remove
+their own workspace membership" rule is waived only for the transaction-local
+organization-administration capability that the organization revoke route
+opens, exactly like the last-administering-member guard; a workspace admin
+still cannot remove themself through the workspace's own Members route.
+Grants and revocations of one's own access write the same receipts and
+`organization_workspace_lifecycle_events` rows as any other. Organization keys
+still never manage human workspace membership: these routes require a managed
+human session (or an agent acting as that person), and the key keeps only its
+existing external-member administration. Personal workspaces stay owner-only.
+
 Create, rename, grant, and revoke are operation-id idempotent. Renames and
 access replacement/removal are exact-timestamp CAS fenced. Immutable FORCE-RLS
 receipt and event tables record the actor membership, shared workspace, target
