@@ -811,6 +811,141 @@ test.each([false, true])(
   60_000,
 );
 
+async function settleSessionRetainedProcessExited(
+  fixture: Awaited<ReturnType<typeof admittedInternalMutation>>,
+  exitCode: number,
+) {
+  const [row] = await shared.admin<{ id: string }[]>`
+    select id from sandbox_retained_processes
+    where workspace_id = ${fixture.workspaceId} and session_id = ${fixture.session.id}`;
+  const scope = {
+    accountId: fixture.accountId,
+    workspaceId: fixture.workspaceId,
+    sessionId: fixture.session.id,
+    processId: row!.id,
+  };
+  const process = await getRetainedProcess(client.db, scope);
+  // The control-worker reaper's exact-proof reconciliation of an adopted
+  // background command, racing the owning turn's in-flight stdin poll.
+  const settled = await settleRetainedProcess(client.db, {
+    ...scope,
+    expected: retainedProcessSettlementIdentity(process!),
+    outcome: "exited",
+    exitCode,
+    reason: "provider_exit_banner",
+    idleGraceMs: 0,
+  });
+  expect(settled.settled).toBe(true);
+  return scope;
+}
+
+test("a stdin settlement fenced by a concurrent terminal reconciliation carries durable terminal truth", async () => {
+  const fixture = await admittedInternalMutation();
+  Object.assign(fixture.sandbox.established.session, {
+    supportsPty: () => true,
+    execCommand: async () => "Process running with session ID 72\n\nOutput:\nstarted",
+  });
+  const routed = routedInternalFixture(fixture);
+  await (
+    routed.session as never as {
+      execCommand(args: { cmd: string }): Promise<string>;
+    }
+  ).execCommand({ cmd: "./script.sh" });
+  const [row] = await shared.admin<{ id: string }[]>`
+    select id from sandbox_retained_processes
+    where workspace_id = ${fixture.workspaceId} and session_id = ${fixture.session.id}`;
+  const processScope = {
+    accountId: fixture.accountId,
+    workspaceId: fixture.workspaceId,
+    sessionId: fixture.session.id,
+    processId: row!.id,
+  };
+  const admission = await advanceWorkspaceGenerationForRetainedProcess(client.db, {
+    ...processScope,
+    operation: "writeStdin",
+  });
+  await settleSessionRetainedProcessExited(fixture, 1);
+
+  const rejected = await verifyRetainedProcessMutationSettlement(client.db, {
+    ...processScope,
+    admission,
+    operation: "writeStdin",
+    outcome: "resolved",
+  }).catch((error) => error);
+  expect(rejected).toBeInstanceOf(SandboxWorkspaceMutationOutputRejectedError);
+  expect(rejected).toMatchObject({
+    code: "process_fenced",
+    retainedProcessTerminal: { state: "exited", exitCode: 1 },
+  });
+  expect(
+    (rejected as SandboxWorkspaceMutationOutputRejectedError).matchesPhysicalSettlement({
+      accountId: fixture.accountId,
+      workspaceId: fixture.workspaceId,
+      admission,
+      operation: "writeStdin",
+      outcome: "resolved",
+    }),
+  ).toBe(true);
+  const [physical] = await shared.admin`
+    select provider_outcome, settled_at from sandbox_workspace_mutation_admissions
+    where id = ${admission.id}`;
+  expect(physical!.provider_outcome).toBe("resolved");
+  expect(physical!.settled_at).toBeInstanceOf(Date);
+  expect(await getRetainedProcess(client.db, processScope)).toMatchObject({
+    state: "exited",
+    exitCode: 1,
+  });
+}, 60_000);
+
+test.each([false, true])(
+  "SDK stdin racing a terminal reconciliation returns durable exit truth without replay (cancellation: %s)",
+  async (cancellation) => {
+    const fixture = await admittedInternalMutation();
+    let writes = 0;
+    let processScope: Awaited<ReturnType<typeof settleSessionRetainedProcessExited>> | null = null;
+    Object.assign(fixture.sandbox.established.session, {
+      supportsPty: () => true,
+      execCommand: async () => "Process running with session ID 73\n\nOutput:\nstarted",
+      writeStdin: async () => {
+        writes++;
+        // Admission passed while the row was active; the reaper settles the
+        // exit before this provider call's output is verified.
+        processScope = await settleSessionRetainedProcessExited(fixture, 1);
+        return "Process exited with code 1\n\nOutput:\nrejected provider bytes";
+      },
+    });
+    const routed = routedInternalFixture(fixture);
+    await (
+      routed.session as never as {
+        execCommand(args: { cmd: string }): Promise<string>;
+      }
+    ).execCommand({ cmd: "./script.sh" });
+    const stdin = sdkCapabilityFunction(routed.session, "write_stdin", cancellation);
+    const output = await stdin.invoke(
+      {} as never,
+      JSON.stringify({ session_id: 73, chars: "", yield_time_ms: 0 }),
+    );
+    expect(String(output)).toContain("Process exited with code 1");
+    expect(String(output)).not.toContain("rejected provider bytes");
+    expect(writes).toBe(1);
+    const [physical] = await shared.admin`
+      select provider_outcome, settled_at from sandbox_workspace_mutation_admissions
+      where session_id = ${fixture.session.id} and actor_kind = 'process'`;
+    expect(physical!.provider_outcome).toBe("resolved");
+    expect(physical!.settled_at).toBeInstanceOf(Date);
+    expect(
+      (routed.session as never as { hasRetainedProcess(id: number): boolean }).hasRetainedProcess(
+        73,
+      ),
+    ).toBe(false);
+    expect(await getRetainedProcess(client.db, processScope!)).toMatchObject({
+      state: "exited",
+      exitCode: 1,
+    });
+  },
+  60_000,
+);
+
 test("actual SDK MCP fallback preserves exact real-database output rejection", async () => {
   const fixture = await admittedInternalMutation();
   let mutations = 0;

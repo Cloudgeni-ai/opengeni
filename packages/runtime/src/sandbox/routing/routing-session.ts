@@ -1293,6 +1293,17 @@ export class RoutingSandboxSession implements RoutableBackendSession {
       await this.deps.afterProcessMutation?.(pending);
       record.pendingMutationSettlement = null;
     } catch (error) {
+      const durableTerminal =
+        pending.outcome === "resolved" ? durableRetainedProcessTerminal(error) : null;
+      if (durableTerminal) {
+        // The retried settlement committed, but the process was durably
+        // settled terminal first and the pending output was rejected. Report
+        // the stored terminal truth; nothing is replayed.
+        record.pendingMutationSettlement = null;
+        record.pendingTerminal = null;
+        this.retainedProcesses.delete(record.process.providerSessionId);
+        return terminalResult(durableTerminal, record.process.providerSessionId);
+      }
       throw new RoutingMutationOutcomeUnknownError(
         pending.op,
         `Retained-process mutation ${pending.op} still lacks durable physical settlement; no later process mutation was admitted`,
@@ -1422,6 +1433,18 @@ export class RoutingSandboxSession implements RoutableBackendSession {
         await this.deps.afterProcessMutation(pending);
       } catch (error) {
         if (isRoutingMutationOutputRejectedError(error)) throw error;
+        const durableTerminal = durableRetainedProcessTerminal(error);
+        if (durableTerminal) {
+          // The provider call returned and its admission is physically
+          // settled, but durable settlement (the reaper's exact-proof
+          // reconciliation) won the race and recorded the process terminal
+          // first, so this output was rejected. Mirror the admission race:
+          // forget the local route, report the stored terminal truth instead
+          // of the rejected provider bytes, and never replay the provider call.
+          this.retainedProcesses.delete(providerSessionId);
+          await this.deps.observeProcessTerminal?.(record);
+          return terminalResult(durableTerminal, providerSessionId);
+        }
         record.pendingMutationSettlement = pending;
         throw new RoutingMutationOutcomeUnknownError(
           op,
