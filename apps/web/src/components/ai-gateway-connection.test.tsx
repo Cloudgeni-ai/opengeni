@@ -69,6 +69,24 @@ const deleteWorkspaceOpenRouterCustomModel = mock(
     _request: DeleteWorkspaceGatewayCustomModelRequest,
   ): Promise<void> => {},
 );
+const listWorkspaceOpperCustomModels = mock(
+  async (_workspaceId: string): Promise<{ models: WorkspaceGatewayCustomModel[] }> => ({
+    models: [],
+  }),
+);
+const createWorkspaceOpperCustomModel = mock(
+  async (
+    _workspaceId: string,
+    request: CreateWorkspaceGatewayCustomModelRequest,
+  ): Promise<WorkspaceGatewayCustomModel> => customModel(request.upstreamModelId),
+);
+const deleteWorkspaceOpperCustomModel = mock(
+  async (
+    _workspaceId: string,
+    _customModelId: string,
+    _request: DeleteWorkspaceGatewayCustomModelRequest,
+  ): Promise<void> => {},
+);
 const toastSuccess = mock((_message: string) => {});
 const toastError = mock((_message: string) => {});
 
@@ -85,6 +103,9 @@ const context = {
     listWorkspaceOpenRouterCustomModels,
     createWorkspaceOpenRouterCustomModel,
     deleteWorkspaceOpenRouterCustomModel,
+    listWorkspaceOpperCustomModels,
+    createWorkspaceOpperCustomModel,
+    deleteWorkspaceOpperCustomModel,
   },
 };
 
@@ -183,7 +204,7 @@ mock.module("@/components/ui/destructive-confirm", () => ({
     ) : null,
 }));
 
-const { AiGatewayConnectionCard, OpenRouterConnectionCard } =
+const { AiGatewayConnectionCard, OpenRouterConnectionCard, OpperConnectionCard } =
   await import("./ai-gateway-connection");
 
 /** The status in the provider page header; "…" while it's still loading. */
@@ -200,7 +221,7 @@ async function connectWithKey(container: HTMLElement, title: string, key: string
     await flush();
   });
   const input = container.querySelector<HTMLInputElement>(
-    `input[aria-label="${title === "OpenRouter" ? "OpenRouter API key" : "Vercel AI Gateway key"}"]`,
+    `input[aria-label="${title === "Vercel AI Gateway" ? "Vercel AI Gateway key" : `${title} API key`}"]`,
   )!;
   await setInputValue(input, key);
   await act(async () => {
@@ -307,6 +328,25 @@ function openRouterConnection(
   };
 }
 
+function opperConnection(
+  status: ConnectionMetadata["status"] = "active",
+  overrides: Partial<ConnectionMetadata> = {},
+): ConnectionMetadata {
+  const connection = gatewayConnection(status, {
+    id: "99999999-9999-4999-8999-999999999999",
+    providerDomain: "api.opper.ai",
+    metadata: {
+      credentialRole: "opper",
+      credentialLabel: "Opper",
+    },
+  });
+  return {
+    ...connection,
+    ...overrides,
+    metadata: { ...connection.metadata, ...overrides.metadata },
+  };
+}
+
 function gatewayCatalogModel(): WorkspaceModelCatalogModel {
   return {
     id: "workspace-gateway/deepseek/deepseek-v3.2",
@@ -337,6 +377,17 @@ function openRouterCatalogModel(): WorkspaceModelCatalogModel {
     provider: "workspace-openrouter",
     providerLabel: "Workspace OpenRouter",
     source: "openrouter",
+  };
+}
+
+function opperCatalogModel(): WorkspaceModelCatalogModel {
+  return {
+    ...gatewayCatalogModel(),
+    id: "workspace-opper/aws/claude-sonnet-4-6-eu",
+    label: "Claude Sonnet 4.6 (EU)",
+    provider: "workspace-opper",
+    providerLabel: "Your Opper",
+    source: undefined,
   };
 }
 
@@ -387,6 +438,28 @@ async function renderOpenRouterCard(
   await act(async () => {
     root.render(
       <OpenRouterConnectionCard
+        workspaceId="workspace-a"
+        canManageConnection={canManageConnection}
+        canManageCustomModels={canManageCustomModels}
+        onConnectionChange={onConnectionChange}
+      />,
+    );
+    await flush();
+  });
+  return { container, onConnectionChange, root };
+}
+
+async function renderOpperCard(
+  canManageConnection = true,
+  onConnectionChange = mock(() => {}),
+  canManageCustomModels = canManageConnection,
+) {
+  const container = document.createElement("div");
+  document.body.append(container);
+  const root = createRoot(container);
+  await act(async () => {
+    root.render(
+      <OpperConnectionCard
         workspaceId="workspace-a"
         canManageConnection={canManageConnection}
         canManageCustomModels={canManageCustomModels}
@@ -452,6 +525,9 @@ beforeEach(() => {
   listWorkspaceOpenRouterCustomModels.mockClear();
   createWorkspaceOpenRouterCustomModel.mockClear();
   deleteWorkspaceOpenRouterCustomModel.mockClear();
+  listWorkspaceOpperCustomModels.mockClear();
+  createWorkspaceOpperCustomModel.mockClear();
+  deleteWorkspaceOpperCustomModel.mockClear();
   toastSuccess.mockClear();
   toastError.mockClear();
   listConnections.mockImplementation(async () => []);
@@ -473,6 +549,13 @@ beforeEach(() => {
     customModel(request.upstreamModelId),
   );
   deleteWorkspaceOpenRouterCustomModel.mockImplementation(async () => {});
+  listWorkspaceOpperCustomModels.mockImplementation(async () => ({
+    models: [],
+  }));
+  createWorkspaceOpperCustomModel.mockImplementation(async (_workspaceId, request) =>
+    customModel(request.upstreamModelId),
+  );
+  deleteWorkspaceOpperCustomModel.mockImplementation(async () => {});
 });
 
 describe("AiGatewayConnectionCard custom models", () => {
@@ -1814,6 +1897,90 @@ describe("AiGatewayConnectionCard custom models", () => {
       expect(container.querySelector("input")).toBeNull();
       expect(listConnections).not.toHaveBeenCalled();
       expect(listWorkspaceGatewayCustomModels).not.toHaveBeenCalled();
+    } finally {
+      await act(async () => root.unmount());
+      container.remove();
+    }
+  });
+  test("supports workspace Opper as a peer connection and custom-model provider", async () => {
+    const created = customModel("aws/claude-sonnet-4-6-eu");
+    createConnection.mockImplementation(async (_workspaceId, request) =>
+      opperConnection("active", { metadata: request.metadata }),
+    );
+    createWorkspaceOpperCustomModel.mockImplementation(async () => created);
+    const onConnectionChange = mock(() => {});
+    const { container, root } = await renderOpperCard(true, onConnectionChange);
+
+    try {
+      expect(container.textContent).toContain("Opper");
+      expect(container.textContent).toContain("Your Opper account");
+      expect(container.textContent).toContain("Deployment-provided Opper models remain separate");
+
+      await connectWithKey(container, "Opper", "workspace-opper-key");
+
+      expect(createConnection).toHaveBeenCalledWith("workspace-a", {
+        providerDomain: "api.opper.ai",
+        kind: "api_key",
+        subjectId: null,
+        credential: { apiKey: "workspace-opper-key" },
+        grantedScopes: [],
+        metadata: {
+          credentialRole: "opper",
+          credentialLabel: "Opper",
+        },
+        operationId: expect.any(String),
+      });
+      expect(container.textContent).toContain("Connected");
+      expect(toastSuccess).toHaveBeenCalledWith("Opper connected");
+
+      const modelInput = container.querySelector<HTMLInputElement>(
+        'input[aria-label="Opper model id"]',
+      )!;
+      await setInputValue(modelInput, created.upstreamModelId);
+      await act(async () => {
+        [...container.querySelectorAll<HTMLButtonElement>("button")]
+          .find((button) => button.textContent?.includes("Add model"))
+          ?.click();
+        await flush();
+      });
+
+      expect(createWorkspaceOpperCustomModel).toHaveBeenCalledWith("workspace-a", {
+        operationId: expect.any(String),
+        upstreamModelId: created.upstreamModelId,
+      });
+      expect(createWorkspaceOpenRouterCustomModel).not.toHaveBeenCalled();
+      expect(createWorkspaceGatewayCustomModel).not.toHaveBeenCalled();
+      expect(container.textContent).toContain("Ready through workspace Opper");
+      expect(toastSuccess).toHaveBeenCalledWith("Opper model added", expect.any(Object));
+      expect(onConnectionChange).toHaveBeenCalledTimes(2);
+    } finally {
+      await act(async () => root.unmount());
+      container.remove();
+    }
+  });
+
+  test("reads workspace Opper readiness without conflating deployment Opper", async () => {
+    getWorkspaceModelCatalog.mockImplementation(async () => ({
+      models: [
+        {
+          ...opperCatalogModel(),
+          provider: "opper",
+          id: "opper/vertexai/gemini-3.8-flash-eu",
+        },
+        opperCatalogModel(),
+      ],
+    }));
+    listWorkspaceOpperCustomModels.mockImplementation(async () => ({
+      models: [customModel("aws/claude-sonnet-4-6-eu")],
+    }));
+    const { container, root } = await renderOpperCard(false);
+
+    try {
+      expect(container.textContent).toContain("Connected");
+      expect(container.textContent).toContain("Ready through workspace Opper");
+      expect(container.querySelector("input")).toBeNull();
+      expect(listConnections).not.toHaveBeenCalled();
+      expect(listWorkspaceOpenRouterCustomModels).not.toHaveBeenCalled();
     } finally {
       await act(async () => root.unmount());
       container.remove();

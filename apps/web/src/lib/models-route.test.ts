@@ -14,6 +14,14 @@ describe("Models URLs", () => {
   test("organization accounts and connect steps have their own keys", () => {
     expect(parseModelsAccount("org:codex:acct-1")).toBe("org:codex:acct-1");
     expect(parseModelsAccount("org:gateway:openrouter")).toBe("org:gateway:openrouter");
+    expect(parseModelsAccount("gateway:opper")).toBe("gateway:opper");
+    expect(accountKeyOf("org:gateway:opper")).toEqual({
+      provider: "gateway",
+      id: "opper",
+      organization: true,
+    });
+    expect(parseModelsView("connect:opper")).toBe("connect:opper");
+    expect(parseModelsView("connect-org:opper")).toBe("connect-org:opper");
     expect(parseModelsAccount("org:org:codex:acct-1")).toBeUndefined();
     expect(accountKeyOf("org:supergrok:x")).toEqual({
       provider: "supergrok",
@@ -34,6 +42,7 @@ describe("Models URLs", () => {
       organization: true,
     });
     expect(connectStepOf("connect:codex")).toEqual({ provider: "codex", organization: false });
+    expect(connectStepOf("connect-org:opper")).toEqual({ provider: "opper", organization: true });
     expect(connectStepOf("connect")).toBeNull();
   });
 

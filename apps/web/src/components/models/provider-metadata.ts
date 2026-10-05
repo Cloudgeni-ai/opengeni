@@ -92,4 +92,25 @@ export const ORGANIZATION_PROVIDER_META: Record<
     modelToastName: "OpenRouter model",
     connectionManagerDescription: "",
   },
+  opper: {
+    title: "Opper",
+    shortName: "Opper",
+    provider: "opper",
+    billedTo: "The organization's Opper account",
+    summary:
+      "Use models through the organization's Opper account in shared workspaces, billed to Opper.",
+    keyHelp: "Create one at platform.opper.ai under API keys.",
+    keyAriaLabel: "Organization Opper API key",
+    customModelsHeading: "Custom models",
+    customModelsDescription:
+      "Exact Opper model ids shared workspaces can pick: a pool such as gemini-3.8-flash or a pinned EU route such as aws/claude-sonnet-4-6-eu. Separate from deployment-provided Opper models.",
+    customModelInputAriaLabel: "Opper organization model id",
+    customModelPlaceholder: "aws/claude-sonnet-4-6-eu",
+    emptyCustomModelsDescription: "No custom models yet. Add one to offer it in shared workspaces.",
+    readyModelDescription: "Ready in shared workspaces",
+    waitingModelDescription: "Waiting for an Opper key",
+    unavailableModelDescription: "Connection status unavailable",
+    modelToastName: "Opper model",
+    connectionManagerDescription: "",
+  },
 };

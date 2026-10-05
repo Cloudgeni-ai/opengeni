@@ -36,6 +36,7 @@ export type ConnectedModelFamily =
   | "supergrok"
   | "vercel_gateway"
   | "openrouter"
+  | "opper"
   | "credits"
   | "openai"
   | "azure_openai";
@@ -61,6 +62,11 @@ function rowMatchesFamily(row: PickerModelRow, family: ConnectedModelFamily): bo
       return (
         (row.billingClass === "byok" || row.billingClass === "organization_byok") &&
         (row.provider === "workspace-openrouter" || row.provider === "organization-openrouter")
+      );
+    case "opper":
+      return (
+        (row.billingClass === "byok" || row.billingClass === "organization_byok") &&
+        (row.provider === "workspace-opper" || row.provider === "organization-opper")
       );
     case "credits":
       return row.catalog.cost === "credits" && row.catalog.creditFunding !== "unavailable";

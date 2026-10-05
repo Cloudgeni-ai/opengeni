@@ -1247,6 +1247,41 @@ describe("ModelPolicyPicker", () => {
     expect(container.querySelector('[data-testid="billing-class-icon-external"]')).toBeNull();
   });
 
+  test("preserves the workspace-provider rail for a removed Opper selection", async () => {
+    const container = await mount(
+      <ModelPolicyPicker
+        rows={[]}
+        model="workspace-opper/aws/retired-model-eu"
+        effort="low"
+        latencyMode="standard"
+        onModelChange={() => {}}
+        onEffortChange={() => {}}
+        onLatencyModeChange={() => {}}
+      />,
+    );
+
+    expect(container.querySelector('[data-testid="billing-class-icon-byok"]')).toBeTruthy();
+    expect(container.querySelector('[data-testid="billing-class-icon-external"]')).toBeNull();
+  });
+
+  test("uses the credits-safe rail when a removed deployment Opper selection has no cost row", async () => {
+    const container = await mount(
+      <ModelPolicyPicker
+        rows={[]}
+        model="opper/aws/retired-model-eu"
+        effort="low"
+        latencyMode="standard"
+        onModelChange={() => {}}
+        onEffortChange={() => {}}
+        onLatencyModeChange={() => {}}
+      />,
+    );
+
+    expect(
+      container.querySelector('[data-testid="billing-class-icon-opengeni_credits"]'),
+    ).toBeTruthy();
+  });
+
   test("labels the shared BYOK rail without connection scope", async () => {
     const container = await mount(<BillingClassMark billingClass="byok" />);
 

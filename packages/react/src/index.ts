@@ -728,6 +728,7 @@ export { setStartupDetails, useStartupDetails } from "./timeline/startup-prefere
 export { ClaudeMark } from "./components/claude-mark";
 export { AnthropicMark } from "./components/anthropic-mark";
 export { OpenRouterMark } from "./components/openrouter-mark";
+export { OpperMark } from "./components/opper-mark";
 export { GrokMark } from "./components/grok-mark";
 
 export { ToolReviewHistoryProvider } from "./components/tool-review-history";

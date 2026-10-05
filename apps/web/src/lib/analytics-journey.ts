@@ -184,7 +184,7 @@ export function journeyOperation(pathname: string, method: string): JourneyOpera
       properties: { ...properties, mode: parts[3] === "transcriptions" ? "direct" : "recording" },
     };
   }
-  if (["codex", "supergrok", "ai-gateway", "openrouter"].includes(parts[3] ?? "")) {
+  if (["codex", "supergrok", "ai-gateway", "openrouter", "opper"].includes(parts[3] ?? "")) {
     // Endpoint leaf names are closed vocabulary, not account IDs or provider responses.
     const action = parts.at(-1)!;
     if (

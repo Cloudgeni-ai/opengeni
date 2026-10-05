@@ -144,6 +144,7 @@ import { useWorkspaceModelCatalog } from "@/lib/use-workspace-model-catalog";
 const ORGANIZATION_KIND: Record<GatewayId, OrganizationModelProviderKind> = {
   vercel: "vercel_gateway",
   openrouter: "openrouter",
+  opper: "opper",
   anthropic: "anthropic",
   claude_subscription: "claude_subscription",
 };
@@ -190,6 +191,7 @@ export function useOrganizationModelAccounts({
   const orgGateways: Record<GatewayId, ProviderConnection> = {
     vercel: useOrganizationProviderConnection(organizationGateway("vercel")),
     openrouter: useOrganizationProviderConnection(organizationGateway("openrouter")),
+    opper: useOrganizationProviderConnection(organizationGateway("opper")),
     anthropic: useOrganizationProviderConnection(organizationGateway("anthropic")),
     claude_subscription: useOrganizationProviderConnection({
       ...organizationGateway("claude_subscription", claudeEnabled),
@@ -305,6 +307,7 @@ export function WorkspaceModelsPageBody({
   const gateways: Record<GatewayId, ProviderConnection> = {
     vercel: useProviderConnection(workspaceGateway("vercel")),
     openrouter: useProviderConnection(workspaceGateway("openrouter")),
+    opper: useProviderConnection(workspaceGateway("opper")),
     anthropic: useProviderConnection(workspaceGateway("anthropic")),
     claude_subscription: useProviderConnection({
       ...workspaceGateway("claude_subscription", claudeEnabled),
@@ -1406,7 +1409,8 @@ type ConnectChoice =
   | "codex"
   | "supergrok"
   | "vercel"
-  | "openrouter";
+  | "openrouter"
+  | "opper";
 
 /**
  * Connect account: every provider as a row (logo, name, how you pay). A row
@@ -1523,6 +1527,7 @@ export function ConnectPickerPage({
               choice.connected &&
               (choice.id === "vercel" ||
                 choice.id === "openrouter" ||
+                choice.id === "opper" ||
                 choice.id === "anthropic" ||
                 choice.id === "claude_subscription")
                 ? onOpenConnected?.(choice.id)
