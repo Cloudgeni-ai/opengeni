@@ -295,6 +295,49 @@ describe("Azure Container Apps deployment profile", () => {
     expect(required).not.toContain("OPENGENI_OPENSANDBOX_API_KEY");
   });
 
+  test("selects the native OpenAI credential name consistently for requirements and secret manifests", () => {
+    const modelNames = ["OPENGENI_OPENAI_API_KEY", "OPENAI_API_KEY"];
+    for (const [canonical, alias, selectedKey] of [
+      ["fixture-canonical-model-key", undefined, "OPENGENI_OPENAI_API_KEY"],
+      [undefined, "fixture-alias-model-key", "OPENAI_API_KEY"],
+      ["fixture-canonical-model-key", "fixture-alias-model-key", "OPENGENI_OPENAI_API_KEY"],
+      ["", "fixture-alias-model-key", "OPENAI_API_KEY"],
+      [" \t\n ", "fixture-alias-model-key", "OPENAI_API_KEY"],
+      [undefined, undefined, null],
+      [" \t\n ", "", null],
+    ] as const) {
+      const env = Object.freeze({ OPENGENI_OPENAI_API_KEY: canonical, OPENAI_API_KEY: alias });
+      const expectedName = selectedKey ?? "OPENGENI_OPENAI_API_KEY";
+      expect(
+        requiredRuntimeEnvVars(profile, env).filter((name) => modelNames.includes(name)),
+      ).toEqual([expectedName]);
+      expect(
+        missingRuntimeEnvVars(profile, env).filter((name) => modelNames.includes(name)),
+      ).toEqual(selectedKey === null ? [expectedName] : []);
+      const plan = stackPlanFor(profile, "none", env);
+      expect(plan.requiredSecretKeys.filter((name) => modelNames.includes(name))).toEqual([
+        expectedName,
+      ]);
+      expect(JSON.stringify(plan)).not.toContain("fixture-canonical-model-key");
+      expect(JSON.stringify(plan)).not.toContain("fixture-alias-model-key");
+      expect(env.OPENGENI_OPENAI_API_KEY).toBe(canonical);
+      expect(env.OPENAI_API_KEY).toBe(alias);
+    }
+  });
+
+  test("does not substitute the OpenAI alias for Azure credentials or change unrelated profiles", () => {
+    const env = { OPENAI_API_KEY: "fixture-alias-model-key" };
+    const azureEnv = { ...env, OPENGENI_OPENAI_PROVIDER: "azure" };
+    expect(requiredRuntimeEnvVars(profile, azureEnv)).toContain("OPENGENI_AZURE_OPENAI_API_KEY");
+    expect(requiredRuntimeEnvVars(profile, azureEnv)).not.toContain("OPENAI_API_KEY");
+    expect(missingRuntimeEnvVars(profile, azureEnv)).toContain("OPENGENI_AZURE_OPENAI_API_KEY");
+    const generic = deploymentProfiles["azure-managed"];
+    expect(requiredRuntimeEnvVars(generic, env)).toContain("OPENGENI_OPENAI_API_KEY");
+    expect(requiredRuntimeEnvVars(generic, env)).not.toContain("OPENAI_API_KEY");
+    expect(missingRuntimeEnvVars(generic, env)).toContain("OPENGENI_OPENAI_API_KEY");
+    expect(generateRuntimeArtifacts(generic, {}, env).runtimeEnv).not.toMatch(/^OPENAI_API_KEY=/m);
+  });
+
   test("accepts configured shared-key credentials without an explicit delegation secret", () => {
     const env = {
       OPENGENI_ACCESS_KEY: "fixture-shared-access-key",
