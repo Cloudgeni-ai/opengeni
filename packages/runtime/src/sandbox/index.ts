@@ -4,6 +4,7 @@ export type {
 } from "./provider-command-session";
 export {
   ProviderCommandStartOutcomeUnknownError,
+  ProviderCommandInputOutcomeUnknownError,
   ProviderCommandObservationUnavailableError,
   isProviderCommandObservationUnavailableError,
 } from "./provider-command-session";
@@ -615,6 +616,9 @@ export {
 // active at a time, fence-retrying on a swap race.
 export {
   isRoutingMutationOutcomeUnknownError,
+  isRoutingMutationOutputRejectedError,
+  RoutingMutationOutputRejectedError,
+  withRoutingMutationOutputRejectionFence,
   RoutingBackendRecoveryRequiredError,
   RoutingMutationOutcomeUnknownError,
   renderRoutingMutationOutcomeUnknownToolResult,

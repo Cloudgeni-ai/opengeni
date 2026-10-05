@@ -341,6 +341,8 @@ import {
   isModalCommandStartOutcomeUnknownError,
   isProviderCommandObservationUnavailableError,
   isRoutingMutationOutcomeUnknownError,
+  isRoutingMutationOutputRejectedError,
+  withRoutingMutationOutputRejectionFence,
   renderRoutingMutationOutcomeUnknownToolResult,
   repairSerializedRunStateExposedPorts,
   restoredSandboxSessionStateFromEntry,
@@ -2717,6 +2719,7 @@ export function mcpToolErrorOutput(error: unknown): {
   isError: true;
   content: [{ type: "text"; text: string }];
 } {
+  if (isRoutingMutationOutputRejectedError(error)) throw error;
   const text =
     invalidToolArgumentsText(error) ??
     (isIntegrationInvocationOutcomeUnknownError(error)
@@ -4059,6 +4062,7 @@ function buildAgentCapabilitiesFromComposition(
           return "Managed sandbox command observation unavailable. Outcome unknown. Do not replay the command or resend stdin; observe the existing invocation.";
         }
         if (isModalTaskExecStartPreDispatchUnavailableError(error)) throw error;
+        if (isRoutingMutationOutputRejectedError(error)) throw error;
         if (isRoutingMutationOutcomeUnknownError(error)) {
           // The outer physical fence must retain the exact process before
           // rendering uncertainty. Platform/setup calls still throw normally.
@@ -4109,6 +4113,24 @@ function buildAgentCapabilitiesFromComposition(
         });
       };
     }
+  }
+  // The SDK write_stdin and apply_patch fallbacks catch provider errors
+  // internally. Preserve exact typed settlement rejection outside that catch,
+  // with an invocation-local routing fence against later batch dispatch.
+  for (const capability of caps) {
+    const target = capability as unknown as { tools(): Tool<unknown>[] };
+    const original = target.tools;
+    target.tools = function () {
+      return original.call(this).map((tool) => {
+        if (tool.type !== "function") return tool;
+        const invoke = tool.invoke;
+        return {
+          ...tool,
+          invoke: (context, input, details) =>
+            withRoutingMutationOutputRejectionFence(() => invoke(context, input, details)),
+        };
+      });
+    };
   }
   return caps;
 }
@@ -8179,6 +8201,10 @@ export class PrefixedMcpServer implements MCPServer {
       // durably settles the operation as outcome_unknown.
       if (isRoutingMutationOutcomeUnknownError(error)) {
         recordOutcome("outcome_uncertain");
+        throw error;
+      }
+      if (isRoutingMutationOutputRejectedError(error)) {
+        recordOutcome("thrown_protocol_error");
         throw error;
       }
       // Generated OpenAPI/GraphQL adapters explicitly distinguish a provider

@@ -143,6 +143,10 @@ Pause/Resume, prompt admission or synthetic input.
 Active-run writes require exact attempt/generation; stale workers cannot write
 or settle replacements. Temporal cancellation is intent, not quiescence;
 unresolved writers fence capture, rotation and physical settlement.
+Exact committed workspace-mutation settlement carries a physical receipt when
+mutable authority rejects output. This remains non-replayable; missing or
+contradictory admissions, failed commits, caller-owned savepoints, and partial
+batches retain the uncertainty fence. See [run-lifecycle.md](run-lifecycle.md).
 Legacy Modal exec observations on lease-lost attempts allow same-machine
 inference only under exact actor/turn/generation checks; agents inspect before
 replay. Finalization stages carry heartbeat/metric evidence

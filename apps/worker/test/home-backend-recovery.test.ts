@@ -4,6 +4,7 @@ import { Agent, Runner, tool } from "@openai/agents";
 import {
   RoutingBackendRecoveryRequiredError,
   RoutingMutationOutcomeUnknownError,
+  RoutingMutationOutputRejectedError,
   RoutingSandboxSession,
 } from "@opengeni/runtime";
 import { testSettings } from "@opengeni/testing";
@@ -197,11 +198,14 @@ describe("home resolver recovery through real SDK function tools", () => {
   test("unknown peer outcomes, unreadable edges and oversized cause graphs veto recovery", () => {
     const proven = new RoutingBackendRecoveryRequiredError("resolve_home_backend", 1, "pending");
     const unknown = new RoutingMutationOutcomeUnknownError("writeFile", "unknown");
-    for (const errors of [
-      [proven, unknown],
-      [unknown, proven],
-    ]) {
-      expect(sandboxRouteTransitionCode(new AggregateError(errors))).toBeNull();
+    const rejected = new RoutingMutationOutputRejectedError("writeFile", "holder_fenced");
+    for (const terminal of [unknown, rejected]) {
+      for (const errors of [
+        [proven, terminal],
+        [terminal, proven],
+      ]) {
+        expect(sandboxRouteTransitionCode(new AggregateError(errors))).toBeNull();
+      }
     }
     expect(
       sandboxRouteTransitionCode(

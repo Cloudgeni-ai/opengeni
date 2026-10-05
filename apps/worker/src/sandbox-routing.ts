@@ -40,6 +40,7 @@ import {
   readActiveSandbox,
   resolvePersonalMachineConnectionForAttempt,
   SandboxRetainedProcessPromotionFencedError,
+  SandboxWorkspaceMutationOutputRejectedError,
   type Database,
   type EnrollmentRecord,
   type SandboxWorkspaceMutationAdmission,
@@ -63,6 +64,7 @@ import {
   NatsOpStreamTransport,
   RoutingBackendRecoveryRequiredError,
   RoutingSandboxSession,
+  RoutingMutationOutputRejectedError,
   resolveModalCheckpointProviderBindingForSession,
   resolveConnectedMachineWorkspaceRoot,
   sandboxProviderInstanceIdFromEnvelope,
@@ -594,21 +596,37 @@ function afterPersistableHomeMutation(
     }
     if (outcome === "outcome_unknown")
       throw new Error("Outcome-unknown command settlement requires its exact retained invocation");
-    await verifyWorkspaceMutationSettlement(services.db, {
-      accountId: fence.accountId,
-      workspaceId: ids.workspaceId,
-      sessionId: ids.sessionId,
-      turnId: fence.turnId,
-      executionGeneration: fence.executionGeneration,
-      attemptId: fence.attemptId,
-      holderId: sandboxLeaseHolderIdForAttempt(fence.attemptId),
-      sandboxGroupId: home.sandboxGroupId,
-      expectedEpoch: backend.leaseEpoch,
-      expectedInstanceId: backend.providerInstanceId,
-      admission: exactAdmission,
-      operation: op,
-      outcome,
-    });
+    try {
+      await verifyWorkspaceMutationSettlement(services.db, {
+        accountId: fence.accountId,
+        workspaceId: ids.workspaceId,
+        sessionId: ids.sessionId,
+        turnId: fence.turnId,
+        executionGeneration: fence.executionGeneration,
+        attemptId: fence.attemptId,
+        holderId: sandboxLeaseHolderIdForAttempt(fence.attemptId),
+        sandboxGroupId: home.sandboxGroupId,
+        expectedEpoch: backend.leaseEpoch,
+        expectedInstanceId: backend.providerInstanceId,
+        admission: exactAdmission,
+        operation: op,
+        outcome,
+      });
+    } catch (error) {
+      if (
+        error instanceof SandboxWorkspaceMutationOutputRejectedError &&
+        error.matchesPhysicalSettlement({
+          accountId: fence.accountId,
+          workspaceId: ids.workspaceId,
+          admission: exactAdmission,
+          operation: op,
+          outcome,
+        })
+      ) {
+        throw new RoutingMutationOutputRejectedError(op, error.code, { cause: error });
+      }
+      throw error;
+    }
   };
 }
 
@@ -661,15 +679,31 @@ function afterRetainedProcessMutation(
     ) {
       throw new Error("Retained-process mutation settlement lacked its exact admission");
     }
-    await verifyRetainedProcessMutationSettlement(services.db, {
-      accountId: fence.accountId,
-      workspaceId: ids.workspaceId,
-      sessionId: ids.sessionId,
-      processId: process.id,
-      admission: admission as SandboxWorkspaceMutationAdmission,
-      operation: op,
-      outcome,
-    });
+    try {
+      await verifyRetainedProcessMutationSettlement(services.db, {
+        accountId: fence.accountId,
+        workspaceId: ids.workspaceId,
+        sessionId: ids.sessionId,
+        processId: process.id,
+        admission: admission as SandboxWorkspaceMutationAdmission,
+        operation: op,
+        outcome,
+      });
+    } catch (error) {
+      if (
+        error instanceof SandboxWorkspaceMutationOutputRejectedError &&
+        error.matchesPhysicalSettlement({
+          accountId: fence.accountId,
+          workspaceId: ids.workspaceId,
+          admission: admission as SandboxWorkspaceMutationAdmission,
+          operation: op,
+          outcome,
+        })
+      ) {
+        throw new RoutingMutationOutputRejectedError(op, error.code, { cause: error });
+      }
+      throw error;
+    }
   };
 }
 

@@ -19,7 +19,10 @@ import {
   type ResolveConnectionCredentialResult,
   type RuntimeMetricsHooks,
 } from "../src";
-import { RoutingMutationOutcomeUnknownError } from "../src/sandbox";
+import {
+  RoutingMutationOutcomeUnknownError,
+  RoutingMutationOutputRejectedError,
+} from "../src/sandbox";
 
 const operationId = "11111111-1111-4111-8111-111111111111";
 const connectionId = "22222222-2222-4222-8222-222222222222";
@@ -351,11 +354,10 @@ describe("connector attachment MCP projection", () => {
     expect(materializerCalled).toBe(true);
   });
 
-  test("preserves routed mutation outcome-unknown through the private projection", async () => {
-    const uncertain = new RoutingMutationOutcomeUnknownError(
-      "importWorkspaceFiles",
-      "synthetic uncertain connector attachment batch",
-    );
+  test.each([
+    new RoutingMutationOutcomeUnknownError("importWorkspaceFiles", "synthetic uncertainty"),
+    new RoutingMutationOutputRejectedError("importWorkspaceFiles", "holder_fenced"),
+  ])("preserves routed mutation rejection through the private projection", async (uncertain) => {
     await expect(
       projectConnectorAttachmentTransfers(transferResult(), {
         serverId: "connector",
