@@ -1,3 +1,4 @@
+import { OPENGENI_API_CONTRACT_HEADER, OPENGENI_API_CONTRACT_REVISION } from "@opengeni/contracts";
 import { spawnSync } from "node:child_process";
 
 interface Args {
@@ -27,6 +28,8 @@ interface CheckResult {
 const args = parseArgs(process.argv.slice(2));
 const results: CheckResult[] = [];
 let workspaceId: string | null = null;
+let clientConfig: any = null;
+let apiContractReady = false;
 
 await runCheck("api-health", async () => {
   const health = await getJson(new URL("/healthz", args.baseUrl));
@@ -36,16 +39,29 @@ await runCheck("api-health", async () => {
   return `service=${String(health.service ?? "unknown")} environment=${String(health.environment ?? "unknown")}`;
 });
 
+await runCheck("api-contract", async () => {
+  clientConfig = await getJson(new URL("/v1/config/client", args.baseUrl), { auth: false });
+  if (clientConfig?.apiContractRevision !== OPENGENI_API_CONTRACT_REVISION) {
+    throw new Error(
+      "API client-config contract does not match this conformance release; no mutations are permitted",
+    );
+  }
+  apiContractReady = true;
+  return `client config matches ${OPENGENI_API_CONTRACT_REVISION}`;
+});
+
 await runCheck("access-boundary", async () => {
-  const config = await getJson(new URL("/v1/config/client", args.baseUrl), { auth: false });
-  const authMode = config?.auth?.mode ?? "unknown";
+  if (!apiContractReady) throw new Error("API contract handshake failed; access is not verified");
+  const authMode = clientConfig?.auth?.mode ?? "unknown";
   if (authMode === "deploymentKey") {
     if (!args.deploymentAccessKey) {
       throw new Error(
         "client config requires x-opengeni-access-key; set OPENGENI_CONFORMANCE_DEPLOYMENT_ACCESS_KEY or --deployment-access-key",
       );
     }
-    const response = await fetch(new URL("/v1/access/me", args.baseUrl));
+    const response = await fetchApi(new URL("/v1/access/me", args.baseUrl), {
+      headers: requestHeaders(false),
+    });
     if (response.status !== 401) {
       throw new Error(
         `/v1/access/me without deployment access key returned HTTP ${response.status}, expected 401`,
@@ -59,7 +75,9 @@ await runCheck("access-boundary", async () => {
         "configured-token auth requires --deployment-access-key or --product-token (OPENGENI_CONFORMANCE_DEPLOYMENT_ACCESS_KEY or OPENGENI_CONFORMANCE_PRODUCT_TOKEN)",
       );
     }
-    const response = await fetch(new URL("/v1/access/me", args.baseUrl));
+    const response = await fetchApi(new URL("/v1/access/me", args.baseUrl), {
+      headers: requestHeaders(false),
+    });
     if (response.status !== 401) {
       throw new Error(
         `/v1/access/me without conformance credentials returned HTTP ${response.status}, expected 401`,
@@ -150,39 +168,47 @@ if (args.skipAgent) {
     return `session ${sessionId} reached idle`;
   });
 
-  await runCheck("event-replay", async () => {
-    const events = await getJson(workspaceUrl(`/sessions/${sessionId}/events?limit=200`));
-    if (!Array.isArray(events)) {
-      throw new Error("events response was not an array");
-    }
-    const types = events.map((event) => event?.type);
-    for (const required of [
-      "session.created",
-      "turn.started",
-      "agent.message.completed",
-      "turn.completed",
-    ]) {
-      if (!types.includes(required)) {
-        throw new Error(`missing event type ${required}`);
+  if (!sessionId) {
+    results.push(skipped("event-replay", "session creation did not return an id"));
+    results.push(skipped("sse-replay", "session creation did not return an id"));
+  } else {
+    await runCheck("event-replay", async () => {
+      const events = await getJson(workspaceUrl(`/sessions/${sessionId}/events?limit=200`));
+      if (!Array.isArray(events)) {
+        throw new Error("events response was not an array");
       }
-    }
-    return `${events.length} persisted events replayed`;
-  });
-
-  await runCheck("sse-replay", async () => {
-    const controller = new AbortController();
-    const timeout = setTimeout(() => controller.abort(), 5_000);
-    const response = await fetch(workspaceUrl(`/sessions/${sessionId}/events/stream?after=0`), {
-      headers: requestHeaders(true),
-      signal: controller.signal,
+      const types = events.map((event) => event?.type);
+      for (const required of [
+        "session.created",
+        "turn.started",
+        "agent.message.completed",
+        "turn.completed",
+      ]) {
+        if (!types.includes(required)) {
+          throw new Error(`missing event type ${required}`);
+        }
+      }
+      return `${events.length} persisted events replayed`;
     });
-    const text = await readStreamUntilAbort(response, controller.signal);
-    clearTimeout(timeout);
-    if (!text.includes("event: session.created") || !text.includes("event: turn.completed")) {
-      throw new Error("SSE replay did not include expected session and turn events");
-    }
-    return `${text.split(/\r?\n/).filter(Boolean).length} non-empty SSE lines`;
-  });
+
+    await runCheck("sse-replay", async () => {
+      const controller = new AbortController();
+      const timeout = setTimeout(() => controller.abort(), 5_000);
+      const response = await fetchApi(
+        workspaceUrl(`/sessions/${sessionId}/events/stream?after=0`),
+        {
+          headers: requestHeaders(true),
+          signal: controller.signal,
+        },
+      );
+      const text = await readStreamUntilAbort(response, controller.signal);
+      clearTimeout(timeout);
+      if (!text.includes("event: session.created") || !text.includes("event: turn.completed")) {
+        throw new Error("SSE replay did not include expected session and turn events");
+      }
+      return `${text.split(/\r?\n/).filter(Boolean).length} non-empty SSE lines`;
+    });
+  }
 
   await runCheck("mcp-tool-session", async () => {
     const payload: Record<string, unknown> = {
@@ -305,7 +331,7 @@ if (args.skipStorage) {
       throw new Error("downloaded object did not match uploaded content");
     }
     const foreignWorkspace = crypto.randomUUID();
-    const foreignRead = await fetch(
+    const foreignRead = await fetchApi(
       new URL(`/v1/workspaces/${foreignWorkspace}/files/${fileId}`, args.baseUrl),
       { headers: requestHeaders(true) },
     );
@@ -342,7 +368,7 @@ async function runCheck(id: string, fn: () => Promise<string>): Promise<void> {
 }
 
 async function getJson(url: URL, options: { auth?: boolean } = {}): Promise<any> {
-  const response = await fetch(url, { headers: requestHeaders(options.auth !== false) });
+  const response = await fetchApi(url, { headers: requestHeaders(options.auth !== false) });
   if (!response.ok) {
     throw new Error(`${url.pathname} returned HTTP ${response.status}`);
   }
@@ -350,7 +376,7 @@ async function getJson(url: URL, options: { auth?: boolean } = {}): Promise<any>
 }
 
 async function getText(url: URL): Promise<string> {
-  const response = await fetch(url, { headers: requestHeaders(true) });
+  const response = await fetchApi(url, { headers: requestHeaders(true) });
   if (!response.ok) {
     throw new Error(`${url.pathname} returned HTTP ${response.status}`);
   }
@@ -358,23 +384,63 @@ async function getText(url: URL): Promise<string> {
 }
 
 async function postJson(url: URL, payload: unknown): Promise<any> {
-  const response = await fetch(url, {
+  requireApiContractForMutation();
+  const response = await fetchApi(url, {
     method: "POST",
     headers: requestHeaders(true, { "content-type": "application/json" }),
     body: JSON.stringify(payload),
   });
   if (!response.ok) {
-    throw new Error(`${url.pathname} returned HTTP ${response.status}: ${await response.text()}`);
+    throw await mutationResponseError(url, response);
   }
   return await response.json();
 }
 
 async function deleteJson(url: URL): Promise<any> {
-  const response = await fetch(url, { method: "DELETE", headers: requestHeaders(true) });
+  requireApiContractForMutation();
+  const response = await fetchApi(url, { method: "DELETE", headers: requestHeaders(true) });
   if (!response.ok) {
-    throw new Error(`${url.pathname} returned HTTP ${response.status}: ${await response.text()}`);
+    throw await mutationResponseError(url, response);
   }
   return await response.json();
+}
+
+async function fetchApi(url: URL, init: RequestInit): Promise<Response> {
+  const response = await fetch(url, init);
+  const revision = response.headers.get(OPENGENI_API_CONTRACT_HEADER);
+  if (revision !== null && revision !== OPENGENI_API_CONTRACT_REVISION) {
+    apiContractReady = false;
+    await response.body?.cancel().catch(() => undefined);
+    throw new Error(
+      "API response contract does not match this conformance release; further mutations are blocked",
+    );
+  }
+  return response;
+}
+
+function requireApiContractForMutation(): void {
+  if (!apiContractReady) {
+    throw new Error("API contract handshake is not current; mutation was not attempted");
+  }
+}
+
+async function mutationResponseError(url: URL, response: Response): Promise<Error> {
+  const body = await response.text();
+  if (response.status === 409) {
+    let code: unknown;
+    try {
+      code = JSON.parse(body)?.code;
+    } catch {
+      /* Not a contract refusal. */
+    }
+    if (code === "API_CONTRACT_CHANGED") {
+      apiContractReady = false;
+      return new Error(
+        "Mutation refused by API contract fence; further mutations are blocked, never retried with an advertised revision",
+      );
+    }
+  }
+  return new Error(`${url.pathname} returned HTTP ${response.status}: ${body}`);
 }
 
 async function waitForTerminalSessionStatus(
@@ -771,6 +837,7 @@ function requestHeaders(auth: boolean, extra: Record<string, string> = {}): Reco
       : {}),
     ...(auth && args.productToken ? { authorization: `Bearer ${args.productToken}` } : {}),
     ...extra,
+    [OPENGENI_API_CONTRACT_HEADER]: OPENGENI_API_CONTRACT_REVISION,
   };
 }
 
