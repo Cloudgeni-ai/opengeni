@@ -1,3 +1,7 @@
+import {
+  COMPOSER_VOICE_INPUT_START_EVENT,
+  composerVoiceEventScope,
+} from "../composer-voice-events";
 import type {
   ClientVoiceInputConfig,
   OpenGeniClient,
@@ -35,6 +39,10 @@ export type ComposerTranscriptionMessages = {
   stop: string;
   cancel: string;
   retry: string;
+  /** Transcribe a recording that was stopped without transcribing or recovered. */
+  transcribeSaved: string;
+  /** Shown near the automatic stop; `{seconds}` is replaced. */
+  timeRemaining: string;
   pauseRetrying: string;
   requestingPermission: string;
   recording: string;
@@ -64,32 +72,34 @@ export type ComposerTranscriptionMessages = {
 const defaultMessages: ComposerTranscriptionMessages = {
   start: "Start voice input",
   stop: "Stop and transcribe",
-  cancel: "Cancel recording",
+  cancel: "Stop without transcribing",
   retry: "Retry voice input",
+  transcribeSaved: "Transcribe saved recording",
+  timeRemaining: "Stops and transcribes in {seconds}s",
   pauseRetrying: "Pause automatic retry",
   requestingPermission: "Requesting microphone…",
-  recording: "Recording. Press Escape to cancel.",
+  recording: "Recording. Press Escape to stop without transcribing.",
   saving: "Saving audio locally…",
   transcribing: "Transcribing…",
-  retrying: "Recording saved. Retrying automatically…",
-  recovered: "Recording recovered and saved locally.",
-  recoveredTranscript: "Transcript saved locally. Check your draft before inserting.",
+  retrying: "Saved. Retrying transcription…",
+  recovered: "Recording saved on this device.",
+  recoveredTranscript: "Transcript saved. Insert it into your draft?",
   insertRecoveredTranscript: "Insert saved transcript",
   discardRecovered: "Discard saved recording",
   unavailableDisabled: "Voice input is unavailable while the composer is disabled.",
   unavailable: "Voice input is unavailable for this workspace.",
-  errorPermissionDenied: "Microphone permission was denied. Your draft was not changed.",
+  errorPermissionDenied: "Microphone access is blocked. Allow it in site settings, then try again.",
   errorNotSupported: "Voice input is not supported on this device.",
   errorUnavailable: "Voice input is not configured.",
   errorInsufficientCredits:
-    "Voice input needs Opengeni credits. Add credits, then retry your saved recording.",
-  errorAllowanceExhausted: "Your usage limit was reached. Your recording is saved for later.",
+    "Voice input needs credits. Recording saved; retry after adding credits.",
+  errorAllowanceExhausted: "Usage limit reached. Recording saved for later.",
   errorPolicyBlocked: "Voice input isn't allowed for this account or workspace.",
   errorTooLarge: "Recording is too large. Try a shorter message.",
   errorInvalidAudio: "The recording could not be read. Try again.",
   errorStorageUnavailable: "Voice input stopped because audio could not be saved safely.",
-  errorRetryable: "Recording is saved locally. Retry transcription when ready.",
-  errorHandoffUncertain: "Transcript is saved. Check your draft before inserting it again.",
+  errorRetryable: "Saved. Transcription failed, retry when ready.",
+  errorHandoffUncertain: "Transcript saved. Check your draft before inserting again.",
   errorUnknown: "Voice input could not start. Try again.",
 };
 
@@ -153,12 +163,18 @@ export function ComposerTranscriptionControl({
   const capturing = status === "requesting-permission" || status === "recording";
 
   const cancelTranscription = transcription.cancel;
+  const discardTranscription = transcription.discard;
+  const hasRecoverableRecording = transcription.hasRecoverableRecording;
   useEffect(() => {
     if (!suppressed) return;
     if (status === "recording" || status === "requesting-permission") {
       cancelTranscription();
+    } else if (status === "error" && !hasRecoverableRecording) {
+      // Live voice took over: a stale start error (nothing saved) would only
+      // duplicate whatever live voice reports next to it.
+      void discardTranscription();
     }
-  }, [cancelTranscription, status, suppressed]);
+  }, [cancelTranscription, discardTranscription, hasRecoverableRecording, status, suppressed]);
   const active = capturing || status === "saving" || status === "transcribing";
   const recoverable =
     transcription.hasRecoverableRecording &&
@@ -194,11 +210,22 @@ export function ComposerTranscriptionControl({
                     ? (errorMessage ?? messages.errorUnknown)
                     : unavailableMessage;
 
+  const recoveredLabel = savedTranscript
+    ? (errorMessage ?? messages.recoveredTranscript)
+    : retrying
+      ? messages.retrying
+      : status === "error"
+        ? (errorMessage ?? messages.errorRetryable)
+        : messages.recovered;
+
   function start(event: MouseEvent<HTMLButtonElement>) {
     if (unavailableMessage) {
       event.preventDefault();
       return;
     }
+    composerVoiceEventScope(event.currentTarget)?.dispatchEvent(
+      new Event(COMPOSER_VOICE_INPUT_START_EVENT),
+    );
     void transcription.start();
   }
 
@@ -220,6 +247,9 @@ export function ComposerTranscriptionControl({
           )}
           data-transcription-status={status}
           data-transcription-capturing={capturing ? "" : undefined}
+          data-transcription-attention={
+            !capturing && (recoverable || (status === "error" && errorMessage)) ? "" : undefined
+          }
         >
           <span className="inline-flex min-w-0 items-center gap-1.5">
             <AnimatePresence mode="popLayout" initial={false}>
@@ -235,14 +265,11 @@ export function ComposerTranscriptionControl({
                     "bg-og-surface-2/70 pl-2 pr-1 pointer-coarse:h-11",
                   )}
                 >
-                  <span className="og-transcription-recovered-label max-w-44 truncate text-og-xs text-og-fg-muted max-sm:max-w-28">
-                    {savedTranscript
-                      ? (errorMessage ?? messages.recoveredTranscript)
-                      : retrying
-                        ? messages.retrying
-                        : status === "error"
-                          ? (errorMessage ?? messages.errorRetryable)
-                          : messages.recovered}
+                  <span
+                    title={recoveredLabel}
+                    className="og-transcription-recovered-label max-w-56 line-clamp-2 text-og-xs leading-tight text-og-fg-muted max-sm:max-w-32"
+                  >
+                    {recoveredLabel}
                   </span>
                   <Tip
                     tip={
@@ -250,7 +277,9 @@ export function ComposerTranscriptionControl({
                         ? messages.insertRecoveredTranscript
                         : retrying
                           ? messages.pauseRetrying
-                          : messages.retry
+                          : status === "recovered"
+                            ? messages.transcribeSaved
+                            : messages.retry
                     }
                   >
                     <button
@@ -268,7 +297,9 @@ export function ComposerTranscriptionControl({
                           ? messages.insertRecoveredTranscript
                           : retrying
                             ? messages.pauseRetrying
-                            : messages.retry
+                            : status === "recovered"
+                              ? messages.transcribeSaved
+                              : messages.retry
                       }
                       className={cn(
                         "inline-flex size-7 shrink-0 items-center justify-center rounded-og-sm",
@@ -330,6 +361,13 @@ export function ComposerTranscriptionControl({
                         stream={status === "recording" ? transcription.stream : null}
                         mode={status === "recording" ? "recording" : "transcribing"}
                       />
+                      {status === "recording" && transcription.recordingStartedAt !== null ? (
+                        <RecordingClock
+                          startedAt={transcription.recordingStartedAt}
+                          maxSeconds={transcription.maxRecordingSeconds}
+                          remainingLabel={messages.timeRemaining}
+                        />
+                      ) : null}
                     </span>
                   )}
                   {status === "recording" ? (
@@ -401,14 +439,22 @@ export function ComposerTranscriptionControl({
               )}
             </AnimatePresence>
             {status === "error" && errorMessage && !recoverable ? (
-              <Tip tip={errorMessage}>
-                <span
-                  aria-hidden="true"
-                  className="og-transcription-error-label max-w-40 truncate text-og-xs text-og-status-failed max-sm:max-w-24"
-                >
+              // Nothing is saved in this state, so dismissing loses no speech.
+              <button
+                type="button"
+                title={errorMessage}
+                aria-label={`Dismiss: ${errorMessage}`}
+                onClick={() => void transcription.discard()}
+                className={cn(
+                  "inline-flex min-w-0 items-center gap-1 rounded-og-sm text-left outline-hidden",
+                  "text-og-status-failed focus-visible:ring-2 focus-visible:ring-og-accent/45",
+                )}
+              >
+                <span className="og-transcription-error-label max-w-56 line-clamp-2 text-og-xs leading-tight max-sm:max-w-32">
                   {errorMessage}
                 </span>
-              </Tip>
+                <XIcon className="size-3 shrink-0 opacity-70" aria-hidden />
+              </button>
             ) : null}
             <span
               className="sr-only"
@@ -421,6 +467,42 @@ export function ComposerTranscriptionControl({
         </motion.span>
       )}
     </AnimatePresence>
+  );
+}
+
+/** Elapsed dictation time; warns before the automatic stop-and-transcribe. */
+function RecordingClock({
+  startedAt,
+  maxSeconds,
+  remainingLabel,
+}: {
+  startedAt: number;
+  maxSeconds: number | null;
+  remainingLabel: string;
+}) {
+  const [now, setNow] = useState(() => Date.now());
+  useEffect(() => {
+    const timer = setInterval(() => setNow(Date.now()), 500);
+    return () => clearInterval(timer);
+  }, []);
+  const elapsed = Math.max(0, Math.floor((now - startedAt) / 1_000));
+  const remaining = maxSeconds === null ? null : Math.max(0, maxSeconds - elapsed);
+  const warn = remaining !== null && remaining <= 15;
+  const label = `${Math.floor(elapsed / 60)}:${String(elapsed % 60).padStart(2, "0")}`;
+  return (
+    <span
+      data-recording-clock
+      title={warn ? remainingLabel.replace("{seconds}", String(remaining)) : undefined}
+      className={cn(
+        "min-w-[2.25rem] text-right text-og-xs tabular-nums",
+        warn ? "font-medium text-og-status-failed" : "text-og-fg-muted",
+      )}
+    >
+      {label}
+      {warn ? (
+        <span className="sr-only">{remainingLabel.replace("{seconds}", String(remaining))}</span>
+      ) : null}
+    </span>
   );
 }
 

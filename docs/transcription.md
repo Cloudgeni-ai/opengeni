@@ -342,3 +342,14 @@ is credit-gated and billed per started minute of server-observed connection time
 with the same refusal codes; see the realtime section of
 [`run-lifecycle.md`](run-lifecycle.md). Backend delegated model work retains
 normal model billing.
+
+Voice is credit-gated on general credits only. Model-scoped free (promotional)
+credits do not cover dictation or live voice; an account holding only those is
+told so ("Free credits don't cover live voice") instead of "out of credits".
+
+Live voice runs long-lived browser protocol code, so the stock web app checks
+the deployment before every voice begin (`apps/web/src/lib/voice-deployment-guard.ts`).
+A tab whose bundle predates the current deployment or API contract reloads once
+onto the current build and resumes voice from the `?realtime=` launch
+parameter; an unsent draft, upload, or mutation keeps the tab and shows the
+update notice instead. A failed check never blocks voice.

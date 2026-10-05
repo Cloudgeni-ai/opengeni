@@ -11,6 +11,7 @@ import {
 } from "../voice-recording-store";
 import {
   acquireDefaultVoiceRecordingOwnerLease,
+  liveVoiceRecordingOwnerIds,
   type VoiceRecordingOwnerLease,
 } from "../voice-recording-owner";
 import { appendFinalTranscript } from "./use-transcription";
@@ -65,6 +66,10 @@ export type UseVoiceInputResult = {
   stream: MediaStream | null;
   recordingId: string | null;
   durationSeconds: number;
+  /** Wall-clock start of the current capture (epoch ms), or null when not recording. */
+  recordingStartedAt: number | null;
+  /** Capture stops and transcribes automatically after this many seconds. */
+  maxRecordingSeconds: number | null;
   locallySaved: boolean;
   hasRecoverableRecording: boolean;
   savedTranscript: string | null;
@@ -75,7 +80,10 @@ export type UseVoiceInputResult = {
   retry: () => void;
   /** Explicitly insert a durably saved transcript whose prior handoff may be uncertain. */
   insertSavedTranscript: () => Promise<void>;
-  /** Cancel active work. A stopped/transcribing recording remains recoverable. */
+  /**
+   * Cancel active work without losing speech: a recording longer than a few
+   * seconds and any stopped/transcribing recording stay locally recoverable.
+   */
   cancel: () => void;
   /** Intentionally delete the current durable recording. */
   discard: () => Promise<void>;
@@ -85,6 +93,8 @@ export const VOICE_RECORDING_TIMESLICE_MILLISECONDS = 5_000;
 export const VOICE_RECORDING_OWNER_HEARTBEAT_MILLISECONDS = 5_000;
 export const VOICE_RECORDING_OWNER_STALE_MILLISECONDS = 30_000;
 export const VOICE_RECORDING_CLIENT_MAX_DURATION_SECONDS = 600;
+// Cancel deletes only an accidental start; anything longer is kept for the user.
+const VOICE_RECORDING_DISCARD_ON_CANCEL_MAX_MILLISECONDS = 3_000;
 export const VOICE_RECORDING_RESUMABLE_CLIENT_MAX_DURATION_SECONDS = 8 * 60 * 60;
 export const VOICE_RECORDING_RECOVERY_STATUS_POLL_MILLISECONDS = 2_000;
 export const VOICE_RECORDING_RECOVERY_MAX_MUTATION_DELAY_MILLISECONDS = 30_000;
@@ -159,6 +169,9 @@ export function useVoiceInput({
   const recorderRef = useRef<MediaRecorder | null>(null);
   const streamRef = useRef<MediaStream | null>(null);
   const timerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  // Cancel/Escape/voice takeover keep a real dictation instead of deleting it.
+  const holdOnStopRef = useRef(false);
+  const recordingStartedAtRef = useRef(0);
   const automaticRetryTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const automaticRetryAttemptRef = useRef(0);
   const ownerHeartbeatTimerRef = useRef<ReturnType<typeof setInterval> | null>(null);
@@ -321,15 +334,31 @@ export function useVoiceInput({
         generation === generationRef.current && workspaceIdRef.current === workspaceId;
       const [store, ownerId] = await Promise.all([ensureStore(), ensureOwnerId()]);
       if (!active()) return;
-      const staleBefore = new Date(
+      const heartbeatStaleBefore = new Date(
         readNow().getTime() - VOICE_RECORDING_OWNER_STALE_MILLISECONDS,
       ).toISOString();
-      await store.cleanupHandedOffManifests({ ownerId, staleBefore }).catch(() => undefined);
+      await store
+        .cleanupHandedOffManifests({ ownerId, staleBefore: heartbeatStaleBefore })
+        .catch(() => undefined);
       if (!active()) return;
-      const manifests = await store.listRecoverableManifests(workspaceId, {
-        ownerId,
-        staleBefore,
-      });
+      // A closed or crashed tab releases its owner lock at once: recover its
+      // recording now rather than after the heartbeat window (the user who
+      // reopens the app right away must still see their dictation).
+      const liveOwners =
+        createOwnerIdRef.current === undefined ? await liveVoiceRecordingOwnerIds() : null;
+      if (!active()) return;
+      const staleBefore = liveOwners ? readNow().toISOString() : heartbeatStaleBefore;
+      const manifests = (
+        await store.listRecoverableManifests(workspaceId, { ownerId, staleBefore })
+      ).filter(
+        (manifest) =>
+          !liveOwners ||
+          !manifest.ownerId ||
+          manifest.ownerId === ownerId ||
+          !liveOwners.has(manifest.ownerId) ||
+          !manifest.ownerHeartbeatAt ||
+          manifest.ownerHeartbeatAt <= heartbeatStaleBefore,
+      );
       if (!active()) return;
       for (const candidate of manifests) {
         try {
@@ -353,14 +382,20 @@ export function useVoiceInput({
           }
           rememberManifest(claimed);
           beginOwnerHeartbeat(claimed);
+          const transcriptReady =
+            claimed.finalizationState === "transcript-ready" && claimed.transcriptText !== null;
           setStatus(
-            claimed.finalizationState === "transcript-ready" && claimed.transcriptText !== null
+            transcriptReady
               ? "transcript-ready"
               : claimed.recoveryMode === "automatic"
                 ? "retrying"
                 : "recovered",
           );
-          setError(null);
+          // An append-mode transcript may already be in the draft (the page
+          // closed between appending and recording the handoff).
+          setError(
+            transcriptReady && candidate.handoffMode === "append" ? "handoff_uncertain" : null,
+          );
           return;
         } catch (reason) {
           if (reason instanceof VoiceRecordingOwnedError) continue;
@@ -464,8 +499,9 @@ export function useVoiceInput({
 
         automaticRetryAttemptRef.current = 0;
         if (ready.handoffMode === "explicit") {
+          // Never appended: offer an explicit insert, not an "already inserted?" warning.
           setStatus("transcript-ready");
-          setError("handoff_uncertain");
+          setError(null);
           focusInput();
           return;
         }
@@ -824,6 +860,15 @@ export function useVoiceInput({
               await preserveForRetry(retained, attemptCaptureLimitError, generation);
               return;
             }
+            if (holdOnStopRef.current) {
+              holdOnStopRef.current = false;
+              const retained = await updateManifestBestEffort(stopped, {
+                recoveryMode: "manual",
+                handoffMode: "explicit",
+              });
+              await preserveForRetry(retained, null, generation);
+              return;
+            }
             await finalizePersistedRecording(generation);
           });
       };
@@ -832,6 +877,8 @@ export function useVoiceInput({
         resolveCaptureSettledRef.current = resolve;
       });
       attemptRecordingStartedAt = readNow().getTime();
+      recordingStartedAtRef.current = attemptRecordingStartedAt;
+      holdOnStopRef.current = false;
       recorder.start(VOICE_RECORDING_TIMESLICE_MILLISECONDS);
       recorderStarted = true;
       setStatus("recording");
@@ -1069,7 +1116,27 @@ export function useVoiceInput({
   ]);
 
   const cancel = useCallback(() => {
-    if (status === "recording" || status === "requesting-permission") {
+    if (status === "recording") {
+      const recorder = recorderRef.current;
+      const elapsed = readNow().getTime() - recordingStartedAtRef.current;
+      if (
+        recorder &&
+        recorder.state !== "inactive" &&
+        elapsed >= VOICE_RECORDING_DISCARD_ON_CANCEL_MAX_MILLISECONDS
+      ) {
+        // Never delete real speech on Cancel/Escape: stop, keep it locally, and
+        // let the user transcribe or explicitly discard it.
+        if (timerRef.current) clearTimeout(timerRef.current);
+        timerRef.current = null;
+        holdOnStopRef.current = true;
+        setStatus("saving");
+        recorder.stop();
+        return;
+      }
+      void discard();
+      return;
+    }
+    if (status === "requesting-permission") {
       void discard();
       return;
     }
@@ -1093,7 +1160,7 @@ export function useVoiceInput({
         await preserveForRetry(retained, null, generation);
       });
     }
-  }, [discard, preserveForRetry, status, updateManifestBestEffort]);
+  }, [discard, preserveForRetry, readNow, status, updateManifestBestEffort]);
 
   useEffect(() => {
     const current = manifestRef.current;
@@ -1156,6 +1223,8 @@ export function useVoiceInput({
     const onKeyDown = (event: KeyboardEvent) => {
       if (
         event.key === "Escape" &&
+        // A dialog, menu, or popover that handled Escape owns it.
+        !event.defaultPrevented &&
         (status === "requesting-permission" ||
           status === "recording" ||
           status === "saving" ||
@@ -1179,6 +1248,19 @@ export function useVoiceInput({
       automaticRetryTimerRef.current = null;
       const manifest = manifestRef.current;
       const ownerReady = ownerIdPromiseRef.current;
+      const knownOwnerId = ownerIdRef.current;
+      const ownerLease = ownerLeaseRef.current;
+      const closingStore = storeRef.current;
+      const ownsClosingStore = ownsStoreRef.current;
+      // Detach synchronously: a remount of this instance (React StrictMode,
+      // keyed re-render) must open a fresh store and owner instead of reusing
+      // the connection this cleanup is about to close.
+      storeRef.current = null;
+      storePromiseRef.current = null;
+      ownerIdRef.current = null;
+      ownerIdPromiseRef.current = null;
+      ownerLeaseRef.current = null;
+      manifestRef.current = null;
       stopOwnerHeartbeat();
       const recorder = recorderRef.current;
       let captureSettled = persistenceQueueRef.current;
@@ -1190,9 +1272,8 @@ export function useVoiceInput({
       void captureSettled
         .catch(() => undefined)
         .then(async () => {
-          const ownerId =
-            ownerIdRef.current ?? (ownerReady ? await ownerReady.catch(() => null) : null);
-          const store = storeRef.current;
+          const ownerId = knownOwnerId ?? (ownerReady ? await ownerReady.catch(() => null) : null);
+          const store = closingStore;
           if (store && manifest && ownerId) {
             const wasProcessing =
               statusRef.current === "saving" ||
@@ -1221,12 +1302,11 @@ export function useVoiceInput({
               )
               .catch(() => undefined);
           }
-          if (ownsStoreRef.current) await store?.close();
+          if (ownsClosingStore) await store?.close();
         })
         .catch(() => undefined)
         .finally(() => {
-          ownerLeaseRef.current?.release();
-          ownerLeaseRef.current = null;
+          ownerLease?.release();
         });
     },
     [clearCaptureRuntime, readNow, stopOwnerHeartbeat],
@@ -1239,6 +1319,17 @@ export function useVoiceInput({
     stream,
     recordingId,
     durationSeconds,
+    recordingStartedAt: status === "recording" ? recordingStartedAtRef.current || null : null,
+    maxRecordingSeconds: capability
+      ? Math.min(
+          capability.resumable && isResumableVoiceInputClient(client)
+            ? capability.resumable.maxDurationSeconds
+            : capability.maxDurationSeconds,
+          capability.resumable && isResumableVoiceInputClient(client)
+            ? VOICE_RECORDING_RESUMABLE_CLIENT_MAX_DURATION_SECONDS
+            : VOICE_RECORDING_CLIENT_MAX_DURATION_SECONDS,
+        )
+      : null,
     locallySaved,
     hasRecoverableRecording: manifestRef.current !== null && status !== "recording",
     savedTranscript:

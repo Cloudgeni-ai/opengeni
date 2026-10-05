@@ -212,6 +212,34 @@ describe("deployment-funded realtime voice credits (real PostgreSQL)", () => {
     });
   });
 
+  test("free chat-only credits are named instead of reported as no credits", async () => {
+    const app = appFor(pricedSettings);
+    const value = await fixture(0);
+    await applyCreditLedgerEntry(client.db, {
+      accountId: value.accountId,
+      amountMicros: 10_000_000,
+      type: "grant",
+      eligibleModelIds: ["gpt-chat-only"],
+      idempotencyKey: `promo:${value.accountId}`,
+    });
+    const refused = await begin(app, value, AZURE_MODEL);
+    expect(refused.response.status).toBe(402);
+    expect(await refused.response.json()).toMatchObject({
+      code: "insufficient_credits",
+      message: "Free credits don't cover live voice. Add credits to use it.",
+    });
+    const catalog = await app.request(
+      `http://x/v1/workspaces/${value.workspaceId}/realtime-model-catalog`,
+      { headers: value.headers },
+    );
+    const models = ((await catalog.json()) as { models: Array<Record<string, unknown>> }).models;
+    expect(models.find((model) => model.provider === "OpenGeni")).toMatchObject({
+      available: false,
+      unavailableCode: "insufficient_credits",
+      unavailableReason: "Free credits don't cover live voice. Add credits to use it.",
+    });
+  });
+
   test("an enabled provider without pricing is neither offered nor startable", async () => {
     const app = appFor({ ...pricedSettings, azureLivePricingJson: undefined });
     const value = await fixture(1_000_000);

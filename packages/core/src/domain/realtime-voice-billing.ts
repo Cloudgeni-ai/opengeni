@@ -43,6 +43,25 @@ export type DeploymentRealtimeVoice = {
  * return null. (The catalog lists hosted GPT Live instead of the managed
  * Gateway choices when both are configured; both remain priced and gated.)
  */
+const reportedPricingErrors = new Set<string>();
+
+/**
+ * Malformed pricing withholds the model (like voice input) instead of failing
+ * API/worker boot; each distinct error is logged once.
+ */
+function tolerantPricing<T>(parse: () => T, fallback: T): T {
+  try {
+    return parse();
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    if (!reportedPricingErrors.has(message)) {
+      reportedPricingErrors.add(message);
+      console.error(`Live voice pricing ignored: ${message}`);
+    }
+    return fallback;
+  }
+}
+
 export function deploymentRealtimeVoice(
   settings: Settings,
   model: SessionRealtimeModel | string,
@@ -52,7 +71,14 @@ export function deploymentRealtimeVoice(
     return {
       provider: "azure-live",
       configured: azureConfigured,
-      pricing: parseRealtimeVoicePricingJson(settings.azureLivePricingJson),
+      pricing: tolerantPricing(
+        () =>
+          parseRealtimeVoicePricingJson(
+            settings.azureLivePricingJson,
+            "OPENGENI_AZURE_LIVE_PRICING_JSON",
+          ),
+        null,
+      ),
     };
   }
   for (const gateway of Object.values(AI_GATEWAY_REALTIME_MODELS)) {
@@ -61,9 +87,14 @@ export function deploymentRealtimeVoice(
       provider: "ai-gateway",
       configured: Boolean(settings.vercelAiGatewayApiKey),
       pricing:
-        parseRealtimeVoicePricingTableJson(settings.aiGatewayRealtimePricingJson)[
-          gateway.upstreamModelId
-        ] ?? null,
+        tolerantPricing(
+          () =>
+            parseRealtimeVoicePricingTableJson(
+              settings.aiGatewayRealtimePricingJson,
+              "OPENGENI_AI_GATEWAY_REALTIME_PRICING_JSON",
+            ),
+          {} as Record<string, RealtimeVoicePricing>,
+        )[gateway.upstreamModelId] ?? null,
     };
   }
   return null;
@@ -104,6 +135,32 @@ export function realtimeVoiceOfferProblem(
 
 export const REALTIME_VOICE_INSUFFICIENT_CREDITS_MESSAGE =
   "Live voice needs Opengeni credits. Add credits to continue.";
+
+/** Spendable general credits, only model-scoped free credits, or neither. */
+export type VoiceCreditStanding = "spendable" | "promotional_only" | "none";
+
+export function voiceCreditStanding(balance: {
+  balanceMicros: number;
+  promotionalCredits?: readonly { remainingMicros: number }[] | undefined;
+}): VoiceCreditStanding {
+  if (balance.balanceMicros > 0) return "spendable";
+  return (balance.promotionalCredits ?? []).some((grant) => grant.remainingMicros > 0)
+    ? "promotional_only"
+    : "none";
+}
+
+/**
+ * Insufficient-credit copy for voice. Free credits are scoped to chat models,
+ * so an account holding only those must not be told it has nothing.
+ */
+export function voiceInsufficientCreditsMessage(
+  feature: "Live voice" | "Voice input",
+  standing: VoiceCreditStanding,
+): string {
+  return standing === "promotional_only"
+    ? `Free credits don't cover ${feature.toLowerCase()}. Add credits to use it.`
+    : `${feature} needs Opengeni credits. Add credits to continue.`;
+}
 
 function startOfUtcMonth(now: Date): Date {
   return new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), 1));
@@ -146,7 +203,7 @@ export function createRealtimeVoiceBilling(deps: { db: Database; settings: Setti
     if (balance.balanceMicros <= 0) {
       return new TranscriptionBillingRefusedError({
         code: "insufficient_credits",
-        message: REALTIME_VOICE_INSUFFICIENT_CREDITS_MESSAGE,
+        message: voiceInsufficientCreditsMessage("Live voice", voiceCreditStanding(balance)),
       });
     }
     const allowance = await checkWorkspaceAllowance(deps.db, {
@@ -208,9 +265,13 @@ export function createRealtimeVoiceBilling(deps: { db: Database; settings: Setti
 
     /** Spendable credits are positive (always true when credits are not enforced). */
     async hasSpendableCredits(accountId: string): Promise<boolean> {
-      if (!billingActive()) return true;
-      const balance = await getSpendableCreditBalance(deps.db, accountId);
-      return balance.balanceMicros > 0;
+      return (await this.creditStanding(accountId)) === "spendable";
+    },
+
+    /** Credit standing for live voice ("spendable" when credits are not enforced). */
+    async creditStanding(accountId: string): Promise<VoiceCreditStanding> {
+      if (!billingActive()) return "spendable";
+      return voiceCreditStanding(await getSpendableCreditBalance(deps.db, accountId));
     },
 
     /**

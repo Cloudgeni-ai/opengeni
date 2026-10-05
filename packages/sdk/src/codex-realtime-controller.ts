@@ -142,15 +142,7 @@ const REALTIME_REFUSAL_CODES = new Set([
 export function codexRealtimeRefusal(error: unknown): CodexRealtimeRefusal | null {
   if (!(error instanceof OpenGeniApiError) || !error.code) return null;
   if (!REALTIME_REFUSAL_CODES.has(error.code)) return null;
-  let message: string | null = null;
-  try {
-    const body = JSON.parse(error.body) as Record<string, unknown>;
-    const nested =
-      body.error && typeof body.error === "object" ? (body.error as Record<string, unknown>) : body;
-    message = typeof nested.message === "string" && nested.message ? nested.message : null;
-  } catch {
-    message = null;
-  }
+  const message = apiErrorMessage(error);
   return {
     code: error.code,
     message:
@@ -412,6 +404,9 @@ export function createCodexRealtimeController(
   let generation = 0;
   let reconnectAttempt = 0;
   let recoveryTerminal = false;
+  // Whether this mode ever reached a live provider connection. A definitive
+  // failure before that ends the mode instead of leaving an empty call open.
+  let connectedInMode = false;
   let mutationTail = Promise.resolve();
   let connectionTask: Promise<void> | null = null;
   const acceptedDelegationItemIds = new Set(
@@ -740,6 +735,12 @@ export function createCodexRealtimeController(
     if (closed || stopping || isAbortError(error)) return;
     const message = safeError(error);
     if (error instanceof CodexRealtimeMicrophoneError) {
+      if (error.code !== "track_ended" && !connectedInMode) {
+        // No conversation exists yet: end the call and say how to fix the
+        // microphone instead of holding an empty "reconnecting" call open.
+        await endAfterFailure(microphoneFailureMessage(error), null);
+        return;
+      }
       if (error.code === "track_ended" && state.mode?.state === "active") {
         reconnectAttempt += 1;
         publish({
@@ -783,6 +784,9 @@ export function createCodexRealtimeController(
           return;
         }
       }
+    } else if (error instanceof OpenGeniApiError && !error.retryable && !connectedInMode) {
+      await endAfterFailure(message, null);
+      return;
     } else if (error instanceof OpenGeniApiError && !error.retryable) {
       stopTimers();
       if (!active) releaseMicrophone();
@@ -1071,6 +1075,7 @@ export function createCodexRealtimeController(
         onFatal: (fatal) => onBridgeFatal(targetGeneration, bridge, fatal),
       });
       active = { generation: targetGeneration, transport: connected, bridge };
+      connectedInMode = true;
       connected.setOutputMuted(state.outputMuted);
       recoveryTerminal = false;
       pendingAbort = null;
@@ -1190,7 +1195,13 @@ export function createCodexRealtimeController(
    * End the call because Opengeni refused it, keep final speech, and leave a
    * terminal, non-retrying state that explains why.
    */
-  const endForRefusal = async (refusal: CodexRealtimeRefusal): Promise<void> => {
+  const endForRefusal = async (refusal: CodexRealtimeRefusal): Promise<void> =>
+    await endAfterFailure(refusal.message, refusal);
+
+  const endAfterFailure = async (
+    message: string,
+    refusal: CodexRealtimeRefusal | null,
+  ): Promise<void> => {
     try {
       await controller.stop();
     } catch {
@@ -1205,8 +1216,8 @@ export function createCodexRealtimeController(
       realtimeId: null,
       mode: null,
       bridge: null,
-      diagnostic: diagnostic("terminal_stop", refusal.message, false),
-      error: refusal.message,
+      diagnostic: diagnostic("terminal_stop", message, false),
+      error: message,
       refusal,
     });
   };
@@ -1263,6 +1274,7 @@ export function createCodexRealtimeController(
       closed = false;
       stopping = false;
       recoveryTerminal = false;
+      connectedInMode = false;
       const record: OwnerRecord = {
         version: OWNER_RECORD_VERSION,
         workspaceId: options.workspaceId,
@@ -1303,6 +1315,8 @@ export function createCodexRealtimeController(
         if (recoveryTerminal && state.mode?.state === "active") return;
         const record = readOwnerRecord(storage, storageKey, options);
         if (!record) {
+          // Keep a terminal failure readable after the server records the end.
+          if (state.status === "error" && !state.mode) return;
           transitionEnded();
           return;
         }
@@ -1326,7 +1340,10 @@ export function createCodexRealtimeController(
       if (lifecycle.state === "ended") {
         const record = readOwnerRecord(storage, storageKey, options);
         if (record && record.operationId !== lifecycle.operationId) {
-          if (connectionTask || state.status === "active") return;
+          // An earlier call's end is not news while this browser is starting
+          // its own call (for example, waiting on the microphone prompt):
+          // re-beginning would advance the lease and fail the pending start.
+          if (connectionTask || state.status === "active" || state.status === "starting") return;
           closed = false;
           stopping = false;
           owner = record;
@@ -1342,6 +1359,9 @@ export function createCodexRealtimeController(
           await connectionTask;
           return;
         }
+        // The server's end of a call that failed to start must not wipe the
+        // failure the user still needs to read.
+        if (state.status === "error" && !state.mode) return;
         if (state.realtimeId === null || lifecycle.realtimeId === state.realtimeId) {
           transitionEnded(`Realtime ended: ${lifecycle.reason}`);
         }
@@ -1801,6 +1821,37 @@ function isAbortError(error: unknown): boolean {
   return error instanceof Error && error.name === "AbortError";
 }
 
+function microphoneFailureMessage(error: CodexRealtimeMicrophoneError): string {
+  switch (error.code) {
+    case "permission_denied":
+      return "Microphone access is blocked. Allow it in site settings, then try again.";
+    case "device_not_found":
+      return "No microphone was found. Connect one, then try again.";
+    case "device_unavailable":
+      return "Your microphone is busy or unavailable. Close other apps using it, then try again.";
+    default:
+      return /timed out/i.test(error.message)
+        ? "Microphone access wasn't granted in time. Allow it when your browser asks, then try again."
+        : "The microphone could not start. Try again.";
+  }
+}
+
+/** The server's own message, without the transport prefix or reference id. */
+function apiErrorMessage(error: OpenGeniApiError): string | null {
+  try {
+    const body = JSON.parse(error.body) as Record<string, unknown>;
+    const nested =
+      body.error && typeof body.error === "object" ? (body.error as Record<string, unknown>) : body;
+    return typeof nested.message === "string" && nested.message ? nested.message : null;
+  } catch {
+    return null;
+  }
+}
+
 function safeError(error: unknown): string {
-  return error instanceof Error ? error.message : "Codex realtime browser controller failed";
+  if (error instanceof OpenGeniApiError) {
+    const message = apiErrorMessage(error);
+    if (message) return /[.!?]$/.test(message) ? message : `${message}.`;
+  }
+  return error instanceof Error ? error.message : "Live voice failed in this browser.";
 }

@@ -72,6 +72,7 @@ export async function createGatewayRealtimeConnectionSecret(input: {
     getSessionRealtimeContinuityEntries(input.db, input.workspaceId, input.sessionId),
     mintGatewayClientSecret({
       apiKey,
+      source: resolved.source,
       upstreamModelId: resolved.upstreamModelId,
       fetchImpl: input.fetchImpl ?? fetch,
     }),
@@ -86,6 +87,7 @@ export async function createGatewayRealtimeConnectionSecret(input: {
 
 async function mintGatewayClientSecret(input: {
   apiKey: string;
+  source: "managed" | "workspace";
   upstreamModelId: string;
   fetchImpl: typeof fetch;
 }): Promise<{ token: string; url: string; expiresAt: number | null }> {
@@ -105,17 +107,19 @@ async function mintGatewayClientSecret(input: {
   } catch {
     throw new GatewayRealtimeBrokerError(
       "provider_error",
-      "AI Gateway realtime token request failed",
+      "The voice provider could not be reached. Try again.",
     );
   }
   if (!response.ok) {
+    const rejected = response.status === 401 || response.status === 403;
+    // User-facing: say what to do, never which deployment credential failed.
     throw new GatewayRealtimeBrokerError(
-      response.status === 401 || response.status === 403
-        ? "credential_unavailable"
-        : "provider_error",
-      response.status === 401 || response.status === 403
-        ? "AI Gateway credentials were rejected"
-        : "AI Gateway realtime token request failed",
+      rejected ? "credential_unavailable" : "provider_error",
+      rejected
+        ? input.source === "managed"
+          ? "Opengeni voice is temporarily unavailable. Try another voice model."
+          : "Your AI Gateway key was rejected. Update it in workspace settings."
+        : "The voice provider could not start a call. Try again.",
       response.status,
     );
   }

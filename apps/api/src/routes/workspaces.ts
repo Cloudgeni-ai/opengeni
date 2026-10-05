@@ -980,12 +980,14 @@ export function registerWorkspaceRoutes(app: Hono, deps: ApiRouteDeps): void {
           ? model.id === AZURE_LIVE_MODEL_ID
           : true,
       );
-    const hasCredits =
-      managedCandidates.length > 0 &&
-      (await createRealtimeVoiceBilling({
-        db: deps.db,
-        settings: deps.settings,
-      }).hasSpendableCredits(grant.accountId));
+    const creditStanding =
+      managedCandidates.length > 0
+        ? await createRealtimeVoiceBilling({
+            db: deps.db,
+            settings: deps.settings,
+          }).creditStanding(grant.accountId)
+        : "none";
+    const hasCredits = creditStanding === "spendable";
     const models = [
       ...managedCandidates.map((model, index) => ({
         ...model,
@@ -994,7 +996,10 @@ export function registerWorkspaceRoutes(app: Hono, deps: ApiRouteDeps): void {
           ? { available: true, unavailableReason: null, unavailableCode: null }
           : {
               available: false,
-              unavailableReason: "Add Opengeni credits to use live voice",
+              unavailableReason:
+                creditStanding === "promotional_only"
+                  ? "Free credits don't cover live voice. Add credits to use it."
+                  : "Add Opengeni credits to use live voice",
               unavailableCode: "insufficient_credits",
             }),
         recommended: index === 0,

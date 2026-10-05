@@ -1,3 +1,7 @@
+import {
+  COMPOSER_VOICE_INPUT_START_EVENT,
+  composerVoiceEventScope,
+} from "../composer-voice-events";
 import { type EffectiveSessionControl, type SessionEvent, type SessionStatus } from "@opengeni/sdk";
 import {
   hasStoredSessionRealtimeOwnerProof,
@@ -22,6 +26,7 @@ import {
   SquareIcon,
   Volume2Icon,
   VolumeXIcon,
+  XIcon,
 } from "lucide-react";
 import { AnimatePresence, motion, useReducedMotion } from "motion/react";
 import {
@@ -72,7 +77,7 @@ export type RealtimeModelOption = {
 function realtimeRefusalLabel(code: string | null | undefined): string | null {
   switch (code) {
     case "insufficient_credits":
-      return "Out of credits";
+      return "Credits needed";
     case "allowance_exhausted":
     case "monthly_model_cost_limit":
       return "Usage limit reached";
@@ -103,18 +108,25 @@ type RealtimeModelProvider = (typeof REALTIME_MODEL_PROVIDERS)[number];
 
 const REALTIME_PROVIDER_META: Record<
   RealtimeModelProvider,
-  { billingClass: BillingClass; hint: string }
+  { billingClass: BillingClass; label: string; hint: string }
 > = {
-  OpenGeni: { billingClass: "opengeni_credits", hint: "Will use credits" },
+  // The wire value keeps its historical spelling; the product name is Opengeni.
+  OpenGeni: { billingClass: "opengeni_credits", label: "Opengeni", hint: "Uses Opengeni credits" },
   "Connected Codex": {
     billingClass: "codex_subscription",
+    label: "Connected Codex",
     hint: "ChatGPT / Codex plan",
   },
   "Connected SuperGrok": {
     billingClass: "supergrok_subscription",
+    label: "Connected SuperGrok",
     hint: "SuperGrok / xAI plan",
   },
-  "Your Gateway": { billingClass: "byok", hint: "Billed to your AI Gateway" },
+  "Your Gateway": {
+    billingClass: "byok",
+    label: "Your Gateway",
+    hint: "Billed to your AI Gateway",
+  },
 };
 /** Display name; the catalog's `provider` value stays the wire identifier. */
 function realtimeProviderLabel(provider: RealtimeModelProvider): string {
@@ -545,14 +557,13 @@ export function SessionRealtimeControl(props: {
     }
     if (!canStart) return;
     autostartStartedRef.current = true;
-    void start()
-      .then(() => {
-        autostartModelRef.current = null;
-        onRealtimeAutostartConsumed?.();
-      })
-      .catch(() => {
-        autostartStartedRef.current = false;
-      });
+    // One automatic attempt. A failed start stays visible with its reason and
+    // the user retries explicitly; re-arming would loop on a definitive refusal.
+    const consume = () => {
+      autostartModelRef.current = null;
+      onRealtimeAutostartConsumed?.();
+    };
+    void start().then(consume, consume);
   }, [
     canStart,
     lifecycleActive,
@@ -588,6 +599,18 @@ export function SessionRealtimeControl(props: {
   );
 }
 
+/**
+ * First available model; otherwise the model whose blocker the user can act on
+ * (for example adding credits) rather than an unrelated "connect" prompt.
+ */
+function fallbackRealtimeModelId(models: readonly RealtimeModelOption[]): SessionRealtimeModel {
+  return (
+    models.find((model) => model.available)?.id ??
+    models.find((model) => model.unavailableCode)?.id ??
+    CODEX_LIVE_MODEL.id
+  );
+}
+
 export function useRealtimeModelSelection(options: {
   client?: RealtimeControllerClient | undefined;
   workspaceId?: string | undefined;
@@ -614,7 +637,7 @@ export function useRealtimeModelSelection(options: {
     if (initialCachedCatalog.some((model) => model.id === preferred && model.available)) {
       return preferred;
     }
-    return initialCachedCatalog.find((model) => model.available)?.id ?? CODEX_LIVE_MODEL.id;
+    return fallbackRealtimeModelId(initialCachedCatalog);
   });
 
   useEffect(() => {
@@ -625,7 +648,7 @@ export function useRealtimeModelSelection(options: {
       setCatalog(models);
       setSelectedModelId((current) => {
         if (models.some((model) => model.id === current && model.available)) return current;
-        return models.find((model) => model.available)?.id ?? CODEX_LIVE_MODEL.id;
+        return fallbackRealtimeModelId(models);
       });
     };
     const cached = readCachedRealtimeModelCatalog(client, workspaceId);
@@ -852,6 +875,11 @@ export function RealtimeVoiceControl(props: {
     props.snapshot.status !== "active" &&
     props.snapshot.diagnostic?.recoverable === true;
   const audioBlocked = props.snapshot.audibleOutput === "blocked" && !props.snapshot.outputMuted;
+  // A call that ended in a failure keeps its reason on screen, not only in a
+  // tooltip or the model menu, until the user starts again or changes model.
+  const startFailed = props.snapshot.status === "error" && !modeOwned;
+  const failureText =
+    status.label === "Voice unavailable" ? status.detail : `${status.label}. ${status.detail}`;
   const mainDisabled =
     props.snapshot.status === "stopping" ||
     props.snapshot.status === "lost_owner" ||
@@ -863,7 +891,11 @@ export function RealtimeVoiceControl(props: {
       ? "Retry voice connection"
       : modeOwned
         ? "End voice conversation"
-        : `Start voice with ${selectedModel.label}`;
+        : !props.canStart && status.phase === "unavailable"
+          ? `${status.label}: ${status.detail}`
+          : startFailed
+            ? `Try voice again with ${selectedModel.label}`
+            : `Start voice with ${selectedModel.label}`;
   const runMainAction = audioBlocked
     ? props.onRetryAudibleOutput
     : retryConnection
@@ -880,6 +912,20 @@ export function RealtimeVoiceControl(props: {
     selectedModel.provider,
   );
   const [pickerDirection, setPickerDirection] = useState<1 | -1>(1);
+  const [failureDismissed, setFailureDismissed] = useState(false);
+  useEffect(() => {
+    if (!startFailed) setFailureDismissed(false);
+  }, [startFailed]);
+  const rootRef = useRef<HTMLDivElement>(null);
+  useEffect(() => {
+    if (!startFailed) return;
+    // Starting dictation in this composer supersedes a stale start failure.
+    const scope = composerVoiceEventScope(rootRef.current);
+    if (!scope) return;
+    const dismiss = () => setFailureDismissed(true);
+    scope.addEventListener(COMPOSER_VOICE_INPUT_START_EVENT, dismiss);
+    return () => scope.removeEventListener(COMPOSER_VOICE_INPUT_START_EVENT, dismiss);
+  }, [startFailed]);
 
   useEffect(() => {
     if (!pickerOpen) setPickerProvider(selectedModel.provider);
@@ -887,6 +933,7 @@ export function RealtimeVoiceControl(props: {
 
   return (
     <div
+      ref={rootRef}
       role="group"
       aria-label="Realtime voice"
       data-picker-side={props.menuSide ?? "top"}
@@ -968,6 +1015,20 @@ export function RealtimeVoiceControl(props: {
           </motion.div>
         ) : null}
       </AnimatePresence>
+      {startFailed && !failureDismissed ? (
+        <button
+          type="button"
+          data-realtime-attention=""
+          data-testid="realtime-failure-reason"
+          title="Dismiss"
+          aria-label={`Dismiss: ${failureText}`}
+          onClick={() => setFailureDismissed(true)}
+          className="og-realtime-failure mr-1.5 inline-flex min-w-0 items-center gap-1 rounded-og-sm text-right text-og-xs leading-tight text-og-status-failed outline-hidden focus-visible:ring-2 focus-visible:ring-og-accent/45"
+        >
+          <span className="og-realtime-failure-label line-clamp-2 max-w-56">{failureText}</span>
+          <XIcon className="size-3 shrink-0 opacity-70" aria-hidden />
+        </button>
+      ) : null}
       <div className="inline-flex shrink-0 items-center">
         <motion.button
           type="button"

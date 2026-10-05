@@ -16,6 +16,7 @@ import { securityReauthenticationPath } from "./lib/sign-in-feedback";
 import { noteClientRequestFailure } from "./lib/client-signals";
 import { signupAttribution, signupReturnPath } from "./lib/signup-attribution";
 import { browserAccountBridgeBlockersSnapshot } from "./lib/browser-account-bridge";
+import { decideVoiceDeployment, type VoiceDeploymentDecision } from "./lib/voice-deployment-guard";
 
 export function resolveApiBaseUrl(value: string | undefined): string {
   return (value ?? "").replace(/\/+$/, "");
@@ -1287,6 +1288,41 @@ function automaticReloadBlocked(): boolean {
     [...managedActorRequests].some((pendingRequest) => pendingRequest.mutation) ||
     browserAccountBridgeBlockersSnapshot().some(({ inspect }) => inspect() !== null)
   );
+}
+
+/** Whether live voice may start on this bundle, must reload first, or should prompt. */
+export async function checkVoiceDeployment(): Promise<VoiceDeploymentDecision> {
+  const config = await request<ClientConfig>("/v1/config/client");
+  return decideVoiceDeployment(
+    {
+      bundleRevision: bundleDeploymentRevision,
+      serverRevision: config.deploymentRevision ?? "",
+      bundleContract: OPENGENI_API_CONTRACT_REVISION,
+      serverContract: config.apiContractRevision ?? "",
+    },
+    {
+      reloadBlocked: voiceReloadBlocked(),
+      storage: typeof sessionStorage === "undefined" ? null : sessionStorage,
+    },
+  );
+}
+
+/**
+ * The user just asked for voice, so ordinary reads in flight may be dropped;
+ * unsent drafts, uploads, and mutations still keep the tab as it is.
+ */
+function voiceReloadBlocked(): boolean {
+  return (
+    typeof window === "undefined" ||
+    navigator.onLine === false ||
+    [...managedActorRequests].some((pendingRequest) => pendingRequest.mutation) ||
+    browserAccountBridgeBlockersSnapshot().some(({ inspect }) => inspect() !== null)
+  );
+}
+
+/** A stale tab that cannot reload right now says so plainly. */
+export function showVoiceUpdatePrompt(): void {
+  showApiUpdateNotice(false);
 }
 
 function reloadIfStaleDeployment(config: ClientConfig): void {

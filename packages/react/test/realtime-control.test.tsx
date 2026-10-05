@@ -649,6 +649,57 @@ describe("ordinary session Codex realtime control", () => {
     ).toBe("supergrok/grok-voice-think-fast-2.0");
   });
 
+  test("defaults to the first available voice model, else the one the user can act on, never an unrelated Connect Codex", async () => {
+    const codex = {
+      id: "gpt-live-1-boulder-alpha" as const,
+      label: "Codex Live",
+      provider: "Connected Codex" as const,
+      description: "Deep session integration",
+      available: false,
+      unavailableReason: "Connect Codex to use this voice model",
+      recommended: false,
+    };
+    const gptLive = (available: boolean) => ({
+      id: "opengeni-azure/gpt-live-1" as const,
+      label: "GPT Live 1",
+      provider: "OpenGeni" as const,
+      description: "Realtime voice with session delegation",
+      available,
+      unavailableReason: available
+        ? null
+        : "Free credits don't cover live voice. Add credits to use it.",
+      unavailableCode: available ? null : "insufficient_credits",
+      recommended: true,
+    });
+    const cases = [
+      { workspaceId: "88888888-8888-4888-8888-888888888881", models: [codex, gptLive(true)] },
+      { workspaceId: "88888888-8888-4888-8888-888888888882", models: [codex, gptLive(false)] },
+    ];
+    for (const { workspaceId, models } of cases) {
+      const client = {
+        getWorkspaceRealtimeModelCatalog: async () => ({ models }),
+      } as unknown as OpenGeniClient;
+      function Selection() {
+        const selection = useRealtimeModelSelection({ client, workspaceId, codexConnected: false });
+        return (
+          <output>
+            {selection.selectedModel.id}|{String(selection.selectedModel.available)}|
+            {selection.models.length}
+          </output>
+        );
+      }
+      await act(async () => root.render(<Selection key={workspaceId} />));
+      await act(async () => await new Promise((resolve) => setTimeout(resolve, 0)));
+      const [id, available, count] = (container.querySelector("output")?.textContent ?? "").split(
+        "|",
+      );
+      expect(id).toBe("opengeni-azure/gpt-live-1");
+      expect(available).toBe(String(models[1]!.available));
+      // Unavailable models stay listed with their reason.
+      expect(count).toBe("2");
+    }
+  });
+
   test("deduplicates catalog loads and reuses the settled catalog across remounts", async () => {
     const workspaceId = "66666666-6666-4666-8666-666666666666";
     let requests = 0;
@@ -918,6 +969,87 @@ describe("ordinary session Codex realtime control", () => {
     expect(container.querySelector('button[aria-label="Resume voice audio"]')).not.toBeNull();
   });
 
+  test("shows why a voice start failed until the user dismisses or retries it", async () => {
+    const calls: string[] = [];
+    const failed: SessionRealtimeControllerSnapshot = {
+      ...idle,
+      status: "error",
+      error: "Opengeni voice is temporarily unavailable. Try another voice model.",
+    };
+    const render = async (snapshot: SessionRealtimeControllerSnapshot) =>
+      await act(async () => {
+        root.render(
+          <RealtimeVoiceControl
+            snapshot={snapshot}
+            canStart={true}
+            modelAvailable={true}
+            audioRef={createRef<HTMLAudioElement>()}
+            onStart={async () => {
+              calls.push("start");
+            }}
+            onStop={async () => undefined}
+            onRetry={async () => undefined}
+            onRetryAudibleOutput={async () => undefined}
+            onSetInputMuted={() => undefined}
+            onSetOutputMuted={() => undefined}
+          />,
+        );
+      });
+    await render(failed);
+
+    const reason = () =>
+      container.querySelector<HTMLButtonElement>('[data-testid="realtime-failure-reason"]');
+    // Visible text, not only a tooltip or the model menu.
+    expect(reason()?.textContent).toBe(
+      "Opengeni voice is temporarily unavailable. Try another voice model.",
+    );
+    const start = container.querySelector<HTMLButtonElement>(
+      '[data-testid="realtime-primary-action"]',
+    );
+    expect(start?.getAttribute("aria-label")).toBe("Try voice again with Codex Live");
+    await act(async () => start?.click());
+    expect(calls).toEqual(["start"]);
+
+    await act(async () => reason()?.click());
+    expect(reason()).toBeNull();
+
+    // A new failure after another attempt is shown again.
+    await render({ ...idle, status: "starting" });
+    await render(failed);
+    expect(reason()).not.toBeNull();
+    await render(idle);
+    expect(reason()).toBeNull();
+  });
+
+  test("starting dictation in the same composer retires a stale start failure", async () => {
+    await act(async () => {
+      root.render(
+        <div className="og-composer">
+          <RealtimeVoiceControl
+            snapshot={{ ...idle, status: "error", error: "Microphone access is blocked." }}
+            canStart={true}
+            modelAvailable={true}
+            audioRef={createRef<HTMLAudioElement>()}
+            onStart={async () => undefined}
+            onStop={async () => undefined}
+            onRetry={async () => undefined}
+            onRetryAudibleOutput={async () => undefined}
+            onSetInputMuted={() => undefined}
+            onSetOutputMuted={() => undefined}
+          />
+        </div>,
+      );
+    });
+    const reason = () => container.querySelector('[data-testid="realtime-failure-reason"]');
+    expect(reason()).not.toBeNull();
+    await act(async () => {
+      container
+        .querySelector(".og-composer")
+        ?.dispatchEvent(new Event("opengeni:composer-voice-input-start"));
+    });
+    expect(reason()).toBeNull();
+  });
+
   test("keeps an unavailable provider quiet and explains why start is disabled", async () => {
     await act(async () => {
       root.render(
@@ -938,10 +1070,14 @@ describe("ordinary session Codex realtime control", () => {
     });
 
     const start = container.querySelector<HTMLButtonElement>(
-      'button[aria-label="Start voice with Codex Live"]',
+      '[data-testid="realtime-primary-action"]',
     );
     expect(start?.dataset.phase).toBe("unavailable");
     expect(start?.disabled).toBe(true);
+    // The disabled control names its blocker instead of offering to start.
+    expect(start?.getAttribute("aria-label")).toBe(
+      "Voice model unavailable: Connect Codex to use this voice model.",
+    );
     expect(container.querySelector('[role="status"]')?.textContent).toContain(
       "Voice model unavailable",
     );

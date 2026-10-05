@@ -5189,11 +5189,19 @@ function codexRealtimeHttpFailure(error: CodexRealtimeBrokerError): {
   }
 }
 
-function sessionRealtimeHttpError(error: unknown): HTTPException {
+/** Conflicts a person can hit by starting voice; the browser shows these verbatim. */
+const SESSION_REALTIME_USER_MESSAGES: Partial<Record<string, string>> = {
+  REALTIME_ACTIVE:
+    "Voice is already on for this session in another tab or window. End it there, or try again in a minute.",
+  CONTROL_NOT_ACTIVE: "Resume this session to start voice.",
+  SESSION_CANCELLED: "This session was cancelled, so voice can't start.",
+};
+
+export function sessionRealtimeHttpError(error: unknown): HTTPException {
   if (error instanceof HTTPException) return error;
   if (error instanceof SessionRealtimeConflictError) {
     return new HTTPException(error.code === "REALTIME_NOT_FOUND" ? 404 : 409, {
-      message: error.message,
+      message: SESSION_REALTIME_USER_MESSAGES[error.code] ?? error.message,
       cause: error,
     });
   }

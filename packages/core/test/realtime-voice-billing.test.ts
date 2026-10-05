@@ -6,7 +6,12 @@ import {
   realtimeVoiceStartedMinutes,
 } from "@opengeni/config";
 import { testSettings } from "@opengeni/testing";
-import { deploymentRealtimeVoice, realtimeVoiceOfferProblem } from "../src";
+import {
+  deploymentRealtimeVoice,
+  realtimeVoiceOfferProblem,
+  voiceCreditStanding,
+  voiceInsufficientCreditsMessage,
+} from "../src";
 
 test("live voice pricing: strict JSON, margin rounds up, every started minute", () => {
   expect(parseRealtimeVoicePricingJson(undefined)).toBeNull();
@@ -63,4 +68,28 @@ test("only deployment-funded voice is gated; enabled without pricing is unavaila
     "opengeni-azure/gpt-live-1",
   )!;
   expect(realtimeVoiceOfferProblem(settings, unconfigured)?.code).toBe("not_configured");
+  // Malformed pricing withholds the model rather than throwing (no boot failure).
+  const malformed = deploymentRealtimeVoice(
+    { ...settings, azureLivePricingJson: "{not json" },
+    "opengeni-azure/gpt-live-1",
+  )!;
+  expect(malformed.pricing).toBeNull();
+  expect(realtimeVoiceOfferProblem(settings, malformed)?.code).toBe("pricing_unconfigured");
+});
+
+test("free chat-only credits are named, not reported as no credits", () => {
+  expect(voiceCreditStanding({ balanceMicros: 1 })).toBe("spendable");
+  expect(voiceCreditStanding({ balanceMicros: 0, promotionalCredits: [] })).toBe("none");
+  expect(
+    voiceCreditStanding({
+      balanceMicros: 0,
+      promotionalCredits: [{ remainingMicros: 10_000_000 }],
+    }),
+  ).toBe("promotional_only");
+  expect(voiceInsufficientCreditsMessage("Live voice", "promotional_only")).toBe(
+    "Free credits don't cover live voice. Add credits to use it.",
+  );
+  expect(voiceInsufficientCreditsMessage("Voice input", "none")).toBe(
+    "Voice input needs Opengeni credits. Add credits to continue.",
+  );
 });
