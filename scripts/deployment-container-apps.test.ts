@@ -48,6 +48,14 @@ const completeManagedEnv = {
   OPENGENI_GITHUB_APP_PRIVATE_KEY: "fixture-github-private-key",
   OPENGENI_GITHUB_APP_MANIFEST_STATE_SECRET: "fixture-github-manifest-secret",
 };
+const completeDaytonaEnv = {
+  ...Object.fromEntries(
+    Object.entries(completeManagedEnv).filter(([name]) => !name.startsWith("OPENGENI_MODAL_")),
+  ),
+  OPENGENI_SANDBOX_BACKEND: "daytona",
+  OPENGENI_DAYTONA_API_KEY: "fixture-daytona-key",
+  OPENGENI_DAYTONA_SNAPSHOT_NAME: "fixture-daytona-template",
+};
 
 function runScript(name: string, args: string[], env: Record<string, string | undefined> = {}) {
   return spawnSync(process.execPath, ["--no-env-file", `scripts/${name}.ts`, ...args], {
@@ -59,14 +67,17 @@ function runScript(name: string, args: string[], env: Record<string, string | un
 }
 
 describe("ACA deployment operator CLI", () => {
-  for (const [productAccessMode, accessMode] of [
-    ["managed", "externalGateway"],
-    ["configured", "sharedKey"],
+  for (const [productAccessMode, accessMode, sandboxBackend] of [
+    ["managed", "externalGateway", "modal"],
+    ["configured", "sharedKey", "modal"],
+    ["managed", "externalGateway", "daytona"],
+    ["configured", "sharedKey", "daytona"],
   ] as const) {
-    test(`executes generated ${productAccessMode}/${accessMode} preflight against the same accepted access contract`, () => {
+    test(`executes generated ${productAccessMode}/${accessMode}/${sandboxBackend} preflight against the same accepted contract`, () => {
       const profile = deploymentProfiles["azure-container-apps"];
       const contract = parseDeploymentContract({
         ...profile,
+        sandbox: { ...profile.sandbox, backend: sandboxBackend },
         access: { ...profile.access, mode: accessMode },
         product: {
           ...profile.product,
@@ -75,11 +86,15 @@ describe("ACA deployment operator CLI", () => {
         },
       });
       const env = {
-        ...completeManagedEnv,
+        ...(sandboxBackend === "daytona" ? completeDaytonaEnv : completeManagedEnv),
+        OPENGENI_SANDBOX_BACKEND: sandboxBackend,
         OPENGENI_PRODUCT_ACCESS_MODE: productAccessMode,
         OPENGENI_AUTH_REQUIRED: String(accessMode === "sharedKey"),
         ...(accessMode === "sharedKey" ? { OPENGENI_ACCESS_KEY: "fixture-shared-key" } : {}),
       };
+      if (sandboxBackend === "daytona") {
+        expect(Object.keys(env).some((name) => name.startsWith("OPENGENI_MODAL_"))).toBe(false);
+      }
       expect(missingRuntimeEnvVars(contract, env)).toEqual([]);
       const generated = stackPlanFor(contract, "none", env).verifyCommands.find((command) =>
         command.startsWith("bun run deployment:preflight "),
@@ -109,11 +124,21 @@ describe("ACA deployment operator CLI", () => {
         expect(output.missingEnvVars).toEqual([]);
         expect(output.modes.access).toBe(accessMode);
         expect(output.modes.productAccess).toBe(productAccessMode);
+        expect(output.modes.sandbox).toBe(sandboxBackend);
         expect(output.requiredEnvVars.includes("OPENGENI_ACCESS_KEY")).toBe(
           accessMode === "sharedKey",
         );
+        const requiredSandboxSecret =
+          sandboxBackend === "daytona" ? "OPENGENI_DAYTONA_API_KEY" : "OPENGENI_MODAL_TOKEN_SECRET";
+        expect(output.requiredEnvVars).toContain(requiredSandboxSecret);
+        if (sandboxBackend === "daytona") {
+          expect(
+            output.requiredEnvVars.some((name: string) => name.startsWith("OPENGENI_MODAL_")),
+          ).toBe(false);
+        }
         expect(result.stdout + result.stderr).not.toContain("fixture-shared-key");
         expect(result.stdout + result.stderr).not.toContain("fixture-host-secret");
+        expect(result.stdout + result.stderr).not.toContain("fixture-daytona-key");
         const withoutPublicEnv = { ...env, OPENGENI_PUBLIC_BASE_URL: undefined };
         expect(missingRuntimeEnvVars(contract, withoutPublicEnv)).toEqual([]);
         const carriedPublicBase = execute(withoutPublicEnv);
@@ -127,6 +152,9 @@ describe("ACA deployment operator CLI", () => {
         expect(missingOutput.missingEnvVars).toEqual([requiredSecret]);
         expect(missingOutput.modes.access).toBe(accessMode);
         expect(missingOutput.modes.productAccess).toBe(productAccessMode);
+        const missingSandbox = execute({ ...env, [requiredSandboxSecret]: undefined });
+        expect(missingSandbox.status).toBe(2);
+        expect(JSON.parse(missingSandbox.stdout).missingEnvVars).toEqual([requiredSandboxSecret]);
       } finally {
         rmSync(dir, { recursive: true, force: true });
       }
@@ -200,6 +228,64 @@ describe("ACA deployment operator CLI", () => {
     expect(unchangedDefault.status).toBe(2);
     expect(JSON.parse(unchangedDefault.stdout).modes.productAccess).toBe("configured");
     expect(JSON.parse(unchangedDefault.stdout).missingEnvVars).toEqual(["OPENGENI_ACCESS_KEY"]);
+  });
+
+  test("preflight sandbox selection is explicit, canonical, ACA-only and preserves compatibility checks", () => {
+    const env = Object.freeze({
+      ...completeDaytonaEnv,
+      OPENGENI_PRODUCT_ACCESS_MODE: "configured",
+      OPENGENI_AUTH_REQUIRED: "true",
+      OPENGENI_ACCESS_KEY: "fixture-shared-key",
+    });
+    const selectedArgs = [
+      "--profile=azure-container-apps",
+      "--sandbox-backend=daytona",
+      "--json",
+      "--check-env",
+    ];
+    const selected = runScript("deployment-preflight", selectedArgs, env);
+    expect(selected.status).toBe(0);
+    const output = JSON.parse(selected.stdout);
+    expect(output.envOk).toBe(true);
+    expect(output.modes.productAccess).toBe("configured");
+    expect(output.modes.access).toBe("sharedKey");
+    expect(output.modes.sandbox).toBe("daytona");
+    for (const backend of ["none", "local", "docker", "selfhosted", "fakebackend", ""]) {
+      const result = runScript(
+        "deployment-preflight",
+        ["--profile=azure-container-apps", `--sandbox-backend=${backend}`, "--json", "--check-env"],
+        env,
+      );
+      expect(result.status).not.toBe(0);
+      expect(result.stdout).not.toContain('"envOk": true');
+      expect(result.stdout + result.stderr).not.toContain("fixture-daytona-key");
+    }
+    const conflict = runScript("deployment-preflight", selectedArgs, {
+      ...env,
+      OPENGENI_SANDBOX_BACKEND: "modal",
+    });
+    expect(conflict.status).not.toBe(0);
+    expect(conflict.stderr).toContain("OPENGENI_SANDBOX_BACKEND must match");
+    const unchangedDefault = runScript(
+      "deployment-preflight",
+      ["--profile=azure-container-apps", "--json", "--check-env"],
+      env,
+    );
+    expect(unchangedDefault.status).not.toBe(0);
+    expect(unchangedDefault.stderr).toContain("OPENGENI_SANDBOX_BACKEND must match");
+    const otherProfile = runScript("deployment-preflight", [
+      "--profile=local-compose",
+      "--sandbox-backend=daytona",
+    ]);
+    expect(otherProfile.status).not.toBe(0);
+    expect(otherProfile.stderr).toContain("supported only for the azure-container-apps profile");
+    const missingValue = runScript("deployment-preflight", [
+      "--profile=azure-container-apps",
+      "--sandbox-backend",
+    ]);
+    expect(missingValue.status).not.toBe(0);
+    expect(missingValue.stderr).toContain("--sandbox-backend requires a value");
+    expect(env.OPENGENI_SANDBOX_BACKEND).toBe("daytona");
   });
 
   test("lists the profile and emits a native plan with prerequisites", () => {

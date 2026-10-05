@@ -186,6 +186,69 @@ describe("Azure Container Apps deployment profile", () => {
     expect(deploymentProfiles["local-compose"].sandbox.backend).toBe("docker");
   });
 
+  test("canonically selects supported ACA remote backends before checking the runtime environment", () => {
+    for (const backend of [
+      "modal",
+      "daytona",
+      "runloop",
+      "e2b",
+      "blaxel",
+      "cloudflare",
+      "vercel",
+      "opensandbox",
+    ] as const) {
+      const env = Object.freeze({ OPENGENI_SANDBOX_BACKEND: backend });
+      const selected = contractForProfile("azure-container-apps", "none", env, backend);
+      expect(selected.sandbox.backend).toBe(backend);
+      expect(env.OPENGENI_SANDBOX_BACKEND).toBe(backend);
+      const preflight = stackPlanFor(selected, "none", env).verifyCommands.find((command) =>
+        command.startsWith("bun run deployment:preflight "),
+      );
+      expect(preflight).toContain(` --sandbox-backend ${backend}`);
+      if (backend !== "modal") {
+        expect(requiredRuntimeEnvVars(selected, env)).not.toContain("OPENGENI_MODAL_TOKEN_ID");
+      }
+    }
+    const daytona = contractForProfile("azure-container-apps", "none", {}, "daytona");
+    expect(requiredRuntimeEnvVars(daytona, {})).toContain("OPENGENI_DAYTONA_API_KEY");
+    expect(contractForProfile("azure-container-apps", "none", {}).sandbox.backend).toBe("modal");
+    expect(profile.sandbox.backend).toBe("modal");
+  });
+
+  test("explicit ACA sandbox selection preserves fail-closed compatibility and other profiles", () => {
+    for (const backend of ["none", "local", "docker", "selfhosted"] as const) {
+      expect(() => contractForProfile("azure-container-apps", "none", {}, backend)).toThrow(
+        "real remote sandbox",
+      );
+    }
+    const daytonaEnv = Object.freeze({ OPENGENI_SANDBOX_BACKEND: "daytona" });
+    expect(() => contractForProfile("azure-container-apps", "none", daytonaEnv)).toThrow(
+      "OPENGENI_SANDBOX_BACKEND must match",
+    );
+    expect(() =>
+      contractForProfile(
+        "azure-container-apps",
+        "none",
+        Object.freeze({ OPENGENI_SANDBOX_BACKEND: "modal" }),
+        "daytona",
+      ),
+    ).toThrow("OPENGENI_SANDBOX_BACKEND must match");
+    expect(() =>
+      contractForProfile(
+        "azure-container-apps",
+        "none",
+        { ...daytonaEnv, OPENGENI_ARTIFACT_MATERIALIZER_DEPLOYED: "true" },
+        "daytona",
+      ),
+    ).toThrow("must remain false for azure-container-apps");
+    expect(() => contractForProfile("azure-managed", "none", {}, "daytona")).toThrow(
+      "supported only for the azure-container-apps profile",
+    );
+    expect(contractForProfile("azure-managed", "none", {}).sandbox.backend).toBe("none");
+    expect(contractForProfile("local-compose", "none", {}).sandbox.backend).toBe("docker");
+    expect(daytonaEnv.OPENGENI_SANDBOX_BACKEND).toBe("daytona");
+  });
+
   test("has Azure-specific preflight checks without a cluster context", () => {
     const checks = preflightChecksFor(profile);
     const ids = checks.map((check) => check.id);

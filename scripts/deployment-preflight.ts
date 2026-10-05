@@ -1,6 +1,7 @@
 import {
   DeploymentProfileId,
   ProductOverlayId,
+  SandboxBackend,
   type DeploymentContract,
   type PreflightCheckId,
   contractForProfile,
@@ -24,6 +25,7 @@ interface Args {
   productAccessMode: string | null;
   accessMode: string | null;
   publicBaseUrl: string | null;
+  sandboxBackend: string | null;
   json: boolean;
   list: boolean;
   checkEnv: boolean;
@@ -57,7 +59,9 @@ if (hasAccessSelection && profileId !== "azure-container-apps") {
 if (hasAccessSelection && (args.productAccessMode === null || args.accessMode === null)) {
   throw new Error("--product-access-mode and --access-mode must be supplied together");
 }
-const baseContract = contractForProfile(profileId, overlay);
+const sandboxBackend =
+  args.sandboxBackend === null ? undefined : SandboxBackend.parse(args.sandboxBackend);
+const baseContract = contractForProfile(profileId, overlay, process.env, sandboxBackend);
 const contract = hasAccessSelection
   ? parseDeploymentContract({
       ...baseContract,
@@ -200,6 +204,7 @@ function parseArgs(values: string[]): Args {
     productAccessMode: null,
     accessMode: null,
     publicBaseUrl: null,
+    sandboxBackend: null,
     json: false,
     list: false,
     checkEnv: false,
@@ -248,6 +253,16 @@ function parseArgs(values: string[]): Args {
     }
     if (value.startsWith("--product-overlay=")) {
       out.productOverlay = value.slice("--product-overlay=".length);
+      continue;
+    }
+    if (value === "--sandbox-backend") {
+      const next = values[++index];
+      if (!next) throw new Error("--sandbox-backend requires a value");
+      out.sandboxBackend = next;
+      continue;
+    }
+    if (value.startsWith("--sandbox-backend=")) {
+      out.sandboxBackend = value.slice("--sandbox-backend=".length);
       continue;
     }
     if (

@@ -712,8 +712,23 @@ export function contractForProfile(
   profile: DeploymentProfileId,
   overlay: ProductOverlayId = "none",
   env: Record<string, string | undefined> = process.env,
+  sandboxBackend?: SandboxBackend,
 ): DeploymentContract {
-  const contract = applyProductOverlay(deploymentProfiles[profile], overlay, env);
+  if (sandboxBackend !== undefined && profile !== "azure-container-apps") {
+    throw new Error(
+      "Explicit sandbox selection is supported only for the azure-container-apps profile",
+    );
+  }
+  const baseContract = deploymentProfiles[profile];
+  // Canonically validate the explicit backend before comparing the selected
+  // contract with the unchanged runtime environment.
+  const contract = applyProductOverlay(
+    sandboxBackend === undefined
+      ? baseContract
+      : { ...baseContract, sandbox: { ...baseContract.sandbox, backend: sandboxBackend } },
+    overlay,
+    env,
+  );
   assertContainerAppsCompatibility(contract, env);
   return contract;
 }
@@ -2369,7 +2384,7 @@ function containerAppsVerifyCommands(
     'az containerapp list --resource-group "${OPENGENI_ACA_RESOURCE_GROUP:?run bootstrap first}" --output json --only-show-errors | jq -e \'def role: [.properties.template.containers[].env[]? | select(.name == "OPENGENI_WORKER_ROLE") | .value][0]; [.[] | select(role == "control" or role == "turn")] as $workers | ([$workers[] | role] | sort) == ["control", "turn"] and all($workers[]; .properties.template.scale.minReplicas >= 1 and .properties.template.terminationGracePeriodSeconds >= 120)\'',
     'curl --fail --silent --show-error "${OPENGENI_API_BASE_URL:?apply applications first}/healthz"',
     `bun scripts/deployment-aca-observability.ts --terraform-root ${CONTAINER_APPS_TERRAFORM_ROOT}`,
-    `bun run deployment:preflight -- --profile ${contract.profile}${overlayArg}${publicBaseUrlArg} --product-access-mode ${contract.product.accessMode} --access-mode ${contract.access.mode} --check-env`,
+    `bun run deployment:preflight -- --profile ${contract.profile}${overlayArg} --sandbox-backend ${contract.sandbox.backend}${publicBaseUrlArg} --product-access-mode ${contract.product.accessMode} --access-mode ${contract.access.mode} --check-env`,
     contract.access.mode === "sharedKey"
       ? `OPENGENI_CONFORMANCE_DEPLOYMENT_ACCESS_KEY="$OPENGENI_ACCESS_KEY" ${conformance}`
       : contract.product.accessMode === "managed"
