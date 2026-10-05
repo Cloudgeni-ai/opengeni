@@ -599,6 +599,15 @@ change the model or provider route. Grouped, name-annotated, and Chat Completion
 continuations were probed on 2026-08-03; only the paired Responses shape kept
 full tool continuity plus Gateway route/cost metadata.
 
+Gemini upstreams (any route whose upstream model id contains `gemini`, for
+example Gateway to Vertex) receive a JSON tool-output string as a parsed
+`functionResponse.response` object, where Gemini reserves the key `$ref` for
+multimodal part references. A request-local projection
+(`packages/runtime/src/gemini-function-response.ts`) renames only object keys
+that decode to `$ref` to `_$ref` inside valid-JSON function/tool outputs, so a
+`tool_search` schema result cannot fail the turn with a 400. Canonical history
+is unchanged and the projection is deterministic for prompt caching.
+
 Every Gateway request replaces caller routing options with the reviewed provider
 list in both `only` and `order`, sends no model fallback list, and disables OpenAI
 SDK retries. Gateway may advance only through that ordered allowlist. Unknown

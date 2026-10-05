@@ -27,6 +27,7 @@ import {
   XaiSubscriptionUnavailableError,
 } from "./model-provider-errors";
 import type { ModelJsonRequestPolicy } from "./replayable-json-body";
+import { geminiFunctionResponseRefPolicy } from "./gemini-function-response";
 import {
   chatReasoning,
   chatReasoningDetails,
@@ -288,8 +289,15 @@ export function modelRequestPolicyForProvider(
   };
   return (request) => {
     const projected = chatModelRequestPolicy(request);
-    const result = providerPolicy({ ...request, body: projected?.body ?? request.body });
-    return result ?? projected;
+    const result =
+      providerPolicy({ ...request, body: projected?.body ?? request.body }) ?? projected;
+    // Upstream-model wire quirk, independent of route: Gemini reserves `$ref`
+    // keys inside a parsed function response. Request-local copy only.
+    const gemini = geminiFunctionResponseRefPolicy({
+      path: request.path,
+      body: result?.body ?? request.body,
+    });
+    return gemini?.body ? { ...result, body: gemini.body } : result;
   };
 }
 
