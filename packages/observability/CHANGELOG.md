@@ -1,5 +1,13 @@
 # @opengeni/observability
 
+## 1.4.4
+
+### Patch Changes
+
+- 2edfa4c: Spans are batched on a short timer (up to 256 per OTLP request) instead of per microtask, so busy workers no longer overflow the bounded export queue and drop spans.
+- Updated dependencies [6384dbd]
+  - @opengeni/contracts@1.4.4
+
 ## 1.4.3
 
 ### Patch Changes
