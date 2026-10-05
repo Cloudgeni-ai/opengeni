@@ -1576,6 +1576,25 @@ async function resumeBoxForTurnOnce(
   if (acquired.role === "spawner") {
     const expectedEpoch = acquired.lease.leaseEpoch;
     let createdEstablished: EstablishedSandboxSession | null = null;
+    let published = false;
+    const terminateOwnedUnpublishedSandbox = async (): Promise<boolean> => {
+      if (published) return false;
+      if (createdEstablished) {
+        // A commit reply can be lost after publication, or another owner can
+        // supersede this callback. Neither grants provider teardown authority.
+        // Failure to read the exact warming fence also fails closed.
+        const current = await readLease(db, ids.workspaceId, ids.sandboxGroupId).catch(() => null);
+        if (
+          !current ||
+          current.liveness !== "warming" ||
+          current.leaseEpoch !== expectedEpoch ||
+          current.instanceId !== createdEstablished.instanceId
+        ) {
+          return false;
+        }
+      }
+      return await terminateEstablishedSandbox(createdEstablished);
+    };
     let providerCreateOperationId: string | undefined;
     let providerCreateBindingKey: string | undefined;
     let rematerialization: {
@@ -1999,7 +2018,7 @@ async function resumeBoxForTurnOnce(
         // re-established and bumped the epoch. Drop the handle; release our
         // holder; surface supersession. This spawner created the box, so stop it
         // before retrying to avoid an untracked running sandbox.
-        const terminated = await terminateEstablishedSandbox(established);
+        const terminated = await terminateOwnedUnpublishedSandbox();
         if (terminated && rematerialization && !established.providerContinuity) {
           await failSandboxRematerialization(db, {
             accountId: ids.accountId,
@@ -2021,6 +2040,11 @@ async function resumeBoxForTurnOnce(
         await release();
         throw new SandboxLeaseSupersededError(ids.sandboxGroupId, expectedEpoch);
       }
+      // Publication transfers physical ownership to the shared lease. A
+      // shutdown can arrive while the commit is in flight; its post-commit
+      // cancellation check must release only this holder, never stop the box
+      // that a replacement attempt can now attach to at the published epoch.
+      published = true;
       holderLeaseHeartbeat = {
         expectedEpoch: committed.lease.leaseEpoch,
         leaseTtlMs,
@@ -2028,12 +2052,16 @@ async function resumeBoxForTurnOnce(
       throwIfReleasedOrCancelled();
       return { established, leaseEpoch: committed.lease.leaseEpoch, release };
     } catch (error) {
-      if (error instanceof SandboxLeaseSupersededError) {
-        await terminateEstablishedSandbox(createdEstablished);
+      if (published) {
         await release();
         throw error;
       }
-      const terminated = await terminateEstablishedSandbox(createdEstablished);
+      if (error instanceof SandboxLeaseSupersededError) {
+        await terminateOwnedUnpublishedSandbox();
+        await release();
+        throw error;
+      }
+      const terminated = await terminateOwnedUnpublishedSandbox();
       // Caught spawn failure: if the just-created sandbox was actually stopped,
       // roll the warming row back to cold so a queued turn can re-acquire and
       // re-spawn. If termination itself failed, keep the recorded instance_id on

@@ -185,6 +185,94 @@ afterAll(async () => {
 }, 180_000);
 
 describe("P1.2 resumeBoxForTurn — stateless resume-by-id (local backend, real lease + RLS)", () => {
+  test("shutdown during warm publication leaves the published box available for exact reattachment", async () => {
+    if (!available) return;
+    const settings = settingsFor(true);
+    const { accountId, workspaceId, groupId } = await freshWorkspace();
+    const cancellation = new AbortController();
+    const locked = Promise.withResolvers<void>();
+    const unlock = Promise.withResolvers<void>();
+    let publicationLock: Promise<unknown> | undefined;
+    let established: EstablishedSandboxSession | undefined;
+    let stopped = 0;
+    const pending = resumeBoxForTurn(
+      {
+        db,
+        settings,
+        cancellationSignal: cancellation.signal,
+        verifySpawnedSandboxReadiness: async (box) => {
+          established = box;
+          const session = box.session as { close: () => Promise<void> };
+          const close = session.close.bind(session);
+          session.close = async () => {
+            stopped += 1;
+            await close();
+          };
+          publicationLock = admin.begin(async (tx) => {
+            await tx`select id from sandbox_leases
+              where workspace_id = ${workspaceId} and sandbox_group_id = ${groupId}
+              for update`;
+            locked.resolve();
+            await unlock.promise;
+          });
+          await locked.promise;
+        },
+      },
+      { accountId, workspaceId, sandboxGroupId: groupId, sessionId: groupId, backend: "local" },
+      "turn",
+      sandboxLeaseHolderIdForAttempt("publication-shutdown"),
+    );
+    // Attach a rejection handler before cancellation so the test owns the
+    // asynchronous failure while the real publication transaction is blocked.
+    const failed = pending.catch((error: unknown) => error);
+    let attached: Awaited<ReturnType<typeof resumeBoxForTurn>> | undefined;
+    try {
+      await locked.promise;
+      let publishing = false;
+      for (let i = 0; i < 200; i++) {
+        const [blocked] = await admin<{ present: boolean }[]>`
+          select exists(select 1 from pg_stat_activity
+            where datname = current_database() and wait_event_type = 'Lock'
+              and query like '%select * from sandbox_leases%'
+              and query like '%for update%') as present`;
+        if (blocked?.present) {
+          publishing = true;
+          break;
+        }
+        await Bun.sleep(5);
+      }
+      expect(publishing).toBe(true);
+      const reason = new Error("WORKER_SHUTDOWN");
+      cancellation.abort(reason);
+      unlock.resolve();
+      await publicationLock;
+      expect(await failed).toBe(reason);
+      expect(stopped).toBe(0);
+      const lease = await readLease(db, workspaceId, groupId);
+      expect(lease).toMatchObject({
+        liveness: "draining",
+        leaseEpoch: 1,
+        instanceId: established!.instanceId,
+        recovery: { provider: { status: "exists" }, workspace: { status: "ready" } },
+      });
+      attached = await resumeBoxForTurn(
+        { db, settings },
+        { accountId, workspaceId, sandboxGroupId: groupId, sessionId: groupId, backend: "local" },
+        "turn",
+        sandboxLeaseHolderIdForAttempt("publication-replacement"),
+      );
+      expect(attached.established.instanceId).toBe(established!.instanceId);
+      expect(attached.established.origin).toBe("resumed");
+      expect(attached.leaseEpoch).toBe(1);
+    } finally {
+      unlock.resolve();
+      await publicationLock;
+      await failed;
+      await attached?.release({ workspaceWritersQuiesced: true });
+      if (established) await dropSession(established);
+    }
+  }, 30_000);
+
   test("(1) FLAG-ON slice: spawner wins cold->warming, establishes (box manifest carries the threaded env), commits warm, returns a LIVE session; release -> draining", async () => {
     if (!available) return;
     const settings = settingsFor(true);
