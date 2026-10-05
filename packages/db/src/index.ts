@@ -86105,20 +86105,12 @@ export async function mutateAndAppendSessionEventsForTurnAttempt(
             workspaceId,
             activityGateOpen,
             async (tx) => {
-              const mutationApplied = await runSessionEventAppendPhase(
-                observer,
-                { ...phaseInput, phase: "mutation" },
-                async () => await mutate(tx),
-                (applied) => (applied ? "ok" : "mutation_skipped"),
-              );
-              if (!mutationApplied) {
-                return {
-                  events: [],
-                  accepted: false,
-                  mutationApplied: false,
-                  canonicalStartupMilestones: [],
-                };
-              }
+              // Canonical prefix BEFORE the caller's mutation. The mutation
+              // locks a session-owned row (the Codemode journal row on
+              // terminal settlement); taking it first and the session prefix
+              // second inverted the order of every prefix holder that then
+              // locks the same row (a Codemode re-submit or claim), which
+              // deadlocked POST /codemode/calls in production (40P01).
               const fence = await runSessionEventAppendPhase(
                 observer,
                 { ...phaseInput, phase: "turn_attempt_fence" },
@@ -86138,6 +86130,20 @@ export async function mutateAndAppendSessionEventsForTurnAttempt(
               if (!session) throw new Error(`Session not found: ${sessionId}`);
               if (!activityGateOpen && !fence.allowed) {
                 throw new SessionActivityGateEscalation();
+              }
+              const mutationApplied = await runSessionEventAppendPhase(
+                observer,
+                { ...phaseInput, phase: "mutation" },
+                async () => await mutate(tx),
+                (applied) => (applied ? "ok" : "mutation_skipped"),
+              );
+              if (!mutationApplied) {
+                return {
+                  events: [],
+                  accepted: false,
+                  mutationApplied: false,
+                  canonicalStartupMilestones: [],
+                };
               }
               let sequence = session.lastSequence;
               const now = new Date();
