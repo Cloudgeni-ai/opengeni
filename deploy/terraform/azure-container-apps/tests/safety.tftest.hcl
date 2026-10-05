@@ -211,6 +211,38 @@ run "configured_serving_roles_are_isolated" {
   }
 }
 
+run "remote_modal_publication_has_owned_sandbox_baseline" {
+  command = apply
+
+  variables {
+    deployment_phase             = "apps"
+    migration_completed_revision = "example.invalid/opengeni-api@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+  }
+
+  assert {
+    condition = (
+      local.application_config_env.OPENGENI_SANDBOX_OWNERSHIP_ENABLED == "true" &&
+      local.application_config_env.OPENGENI_SANDBOX_BACKEND == "modal" &&
+      local.application_config_env.OPENGENI_SANDBOX_SELFHOSTED_ENABLED == "false" &&
+      local.application_config_env.OPENGENI_ARTIFACT_MATERIALIZER_DEPLOYED == "false" &&
+      !contains(keys(local.application_config_env), "OPENGENI_SANDBOX_ARTIFACT_RUNTIME_ENABLED") &&
+      alltrue([for role in ["api", "control", "turn"] :
+        one([for env in azurerm_container_app.service[role].template[0].container[0].env :
+          env.value if env.name == "OPENGENI_SANDBOX_OWNERSHIP_ENABLED"
+        ]) == "true"
+      ])
+    )
+    error_message = "API/control/turn must share owned remote Modal leases for file publication without enabling Connected Machines, artifact runtime, or native exports."
+  }
+  assert {
+    condition = (
+      !contains(keys(local.migration_config_env), "OPENGENI_SANDBOX_OWNERSHIP_ENABLED") &&
+      !contains(keys(local.outbox_config_env), "OPENGENI_SANDBOX_OWNERSHIP_ENABLED")
+    )
+    error_message = "Maintenance/outbox config must not acquire the serving sandbox ownership flag."
+  }
+}
+
 run "optional_outbox_has_only_dedicated_authority" {
   command = apply
 
@@ -283,6 +315,18 @@ run "module_owned_auth_and_materializer_flags_cannot_be_overridden" {
 run "owner_credentials_cannot_be_injected_into_serving_secrets" {
   command = plan
   variables { secret_env = { OPENGENI_MIGRATIONS_DATABASE_URL = { value = "forbidden-owner-url" } } }
+  expect_failures = [var.secret_env]
+}
+
+run "module_owned_sandbox_ownership_cannot_be_disabled" {
+  command = plan
+  variables { config_env = { OPENGENI_SANDBOX_OWNERSHIP_ENABLED = "false" } }
+  expect_failures = [var.config_env]
+}
+
+run "module_owned_sandbox_ownership_cannot_be_overridden_by_secrets" {
+  command = plan
+  variables { secret_env = { OPENGENI_SANDBOX_OWNERSHIP_ENABLED = { value = "false" } } }
   expect_failures = [var.secret_env]
 }
 

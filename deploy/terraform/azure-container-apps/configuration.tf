@@ -31,6 +31,7 @@ locals {
     "OPENGENI_MCP_URL", "OPENGENI_MCP_INTERNAL_URL", "OPENGENI_CORS_ALLOW_ORIGIN_REGEX",
     "OPENGENI_PRODUCT_ACCESS_MODE", "OPENGENI_AUTH_REQUIRED", "OPENGENI_AUTH_ALLOW_HEALTH",
     "OPENGENI_AUTH_ALLOW_METRICS", "OPENGENI_SANDBOX_BACKEND", "OPENGENI_SANDBOX_SELFHOSTED_ENABLED",
+    "OPENGENI_SANDBOX_OWNERSHIP_ENABLED",
     "OPENGENI_SANDBOX_PREPARATION_PROFILES", "OPENGENI_SANDBOX_ENV_ALLOWLIST",
     "OPENGENI_OBJECT_STORAGE_BACKEND", "OPENGENI_OBJECT_STORAGE_BUCKET", "OPENGENI_OBJECT_STORAGE_ENDPOINT",
     "OPENGENI_OBJECT_STORAGE_INTERNAL_ENDPOINT", "OPENGENI_OBJECT_STORAGE_SANDBOX_ENDPOINT",
@@ -84,6 +85,7 @@ locals {
     OPENGENI_TEMPORAL_TLS_ENABLED = tostring(var.external_services.temporal_tls_enabled)
     OPENGENI_NATS_URL             = var.external_services.nats_url
   }
+  # Shared API/control/turn settings; owned provider leases enable file publication.
   application_config_env = merge({
     MIMALLOC_PURGE_DELAY                               = "0"
     MIMALLOC_PURGE_DECOMMITS                           = "1"
@@ -122,6 +124,7 @@ locals {
     OPENGENI_AUTH_ALLOW_HEALTH                                         = "true"
     OPENGENI_AUTH_ALLOW_METRICS                                        = "false"
     OPENGENI_SANDBOX_BACKEND                                           = var.sandbox_backend
+    OPENGENI_SANDBOX_OWNERSHIP_ENABLED                                 = "true"
     OPENGENI_SANDBOX_PREPARATION_PROFILES                              = "none"
     OPENGENI_SANDBOX_ENV_ALLOWLIST                                     = ""
     OPENGENI_SANDBOX_SELFHOSTED_ENABLED                                = "false"
