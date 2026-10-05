@@ -93,15 +93,16 @@ class SseProgressScanner {
   private pending = "";
 
   push(chunk: Uint8Array): boolean {
-    this.pending += this.decoder.decode(chunk, { stream: true });
+    // Linear in the chunk: split once and keep only the incomplete tail. A
+    // "\r\n" split across chunks yields one extra empty (non-progress) line.
+    const lines = (this.pending + this.decoder.decode(chunk, { stream: true })).split(/\r\n|\r|\n/);
+    this.pending = lines.pop() ?? "";
     let progress = false;
-    let newline = this.pending.search(/\r\n|\r|\n/);
-    while (newline !== -1) {
-      const line = this.pending.slice(0, newline);
-      const width = this.pending.startsWith("\r\n", newline) ? 2 : 1;
-      this.pending = this.pending.slice(newline + width);
-      if (isProgressLine(line)) progress = true;
-      newline = this.pending.search(/\r\n|\r|\n/);
+    for (const line of lines) {
+      if (isProgressLine(line)) {
+        progress = true;
+        break;
+      }
     }
     if (this.pending.length > MAX_PENDING_LINE_CHARS) {
       // A very long single data line (large output item) is itself progress.
