@@ -13,10 +13,41 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 
-import { deploymentProfiles, stackPlanFor } from "@opengeni/deployment";
+import {
+  deploymentProfiles,
+  missingRuntimeEnvVars,
+  parseDeploymentContract,
+  stackPlanFor,
+} from "@opengeni/deployment";
 
 const repoRoot = fileURLToPath(new URL("../", import.meta.url));
 const cleanEnv = { PATH: process.env.PATH ?? "/usr/bin:/bin" };
+const completeManagedEnv = {
+  OPENGENI_PRODUCT_ACCESS_MODE: "managed",
+  OPENGENI_AUTH_REQUIRED: "false",
+  OPENGENI_DATABASE_URL: "postgres://fixture:fixture@postgres.invalid/opengeni",
+  OPENGENI_TEMPORAL_HOST: "temporal.invalid:7233",
+  OPENGENI_NATS_URL: "nats://nats.invalid:4222",
+  OPENGENI_OBJECT_STORAGE_AZURE_ACCOUNT_NAME: "fixtureaccount",
+  OPENGENI_OBJECT_STORAGE_AZURE_ACCOUNT_KEY: "fixture-blob-key",
+  OPENGENI_OPENAI_API_KEY: "fixture-model-key",
+  OPENGENI_MODAL_APP_NAME: "fixture-modal-app",
+  OPENGENI_MODAL_TOKEN_ID: "fixture-modal-id",
+  OPENGENI_MODAL_TOKEN_SECRET: "fixture-modal-secret",
+  OPENGENI_MODAL_TIMEOUT_SECONDS: "900",
+  OPENGENI_ENVIRONMENTS_ENCRYPTION_KEY: Buffer.alloc(32, 2).toString("base64"),
+  OPENGENI_PUBLIC_BASE_URL: "https://managed.example.test",
+  OPENGENI_DELEGATION_SECRET: "fixture-host-secret",
+  OPENGENI_BETTER_AUTH_SECRET: "fixture-browser-secret",
+  OPENGENI_RESEND_API_KEY: "fixture-email-key",
+  OPENGENI_EMAIL_FROM: "Fixture <fixture@example.test>",
+  OPENGENI_GITHUB_APP_ID: "123",
+  OPENGENI_GITHUB_CLIENT_ID: "fixture-github-client",
+  OPENGENI_GITHUB_CLIENT_SECRET: "fixture-github-secret",
+  OPENGENI_GITHUB_APP_SLUG: "fixture-app",
+  OPENGENI_GITHUB_APP_PRIVATE_KEY: "fixture-github-private-key",
+  OPENGENI_GITHUB_APP_MANIFEST_STATE_SECRET: "fixture-github-manifest-secret",
+};
 
 function runScript(name: string, args: string[], env: Record<string, string | undefined> = {}) {
   return spawnSync(process.execPath, ["--no-env-file", `scripts/${name}.ts`, ...args], {
@@ -28,6 +59,149 @@ function runScript(name: string, args: string[], env: Record<string, string | un
 }
 
 describe("ACA deployment operator CLI", () => {
+  for (const [productAccessMode, accessMode] of [
+    ["managed", "externalGateway"],
+    ["configured", "sharedKey"],
+  ] as const) {
+    test(`executes generated ${productAccessMode}/${accessMode} preflight against the same accepted access contract`, () => {
+      const profile = deploymentProfiles["azure-container-apps"];
+      const contract = parseDeploymentContract({
+        ...profile,
+        access: { ...profile.access, mode: accessMode },
+        product: {
+          ...profile.product,
+          accessMode: productAccessMode,
+          publicBaseUrl: completeManagedEnv.OPENGENI_PUBLIC_BASE_URL,
+        },
+      });
+      const env = {
+        ...completeManagedEnv,
+        OPENGENI_PRODUCT_ACCESS_MODE: productAccessMode,
+        OPENGENI_AUTH_REQUIRED: String(accessMode === "sharedKey"),
+        ...(accessMode === "sharedKey" ? { OPENGENI_ACCESS_KEY: "fixture-shared-key" } : {}),
+      };
+      expect(missingRuntimeEnvVars(contract, env)).toEqual([]);
+      const generated = stackPlanFor(contract, "none", env).verifyCommands.find((command) =>
+        command.startsWith("bun run deployment:preflight "),
+      );
+      expect(generated).toBeDefined();
+      const dir = mkdtempSync(join(tmpdir(), "opengeni-aca-preflight-command-"));
+      try {
+        // Execute the unmodified generated command with real Bun and the real
+        // CLI; this wrapper only disables implicit checkout dotenv loading.
+        writeFileSync(
+          join(dir, "bun"),
+          `#!/bin/sh\nexec '${process.execPath.replaceAll("'", "'\\''")}' --no-env-file "$@"\n`,
+          { mode: 0o755 },
+        );
+        const execute = (selectedEnv: Record<string, string | undefined>) =>
+          spawnSync("bash", ["-e", "-o", "pipefail", "-c", `${generated} --json`], {
+            cwd: repoRoot,
+            encoding: "utf8",
+            timeout: 15_000,
+            env: { ...cleanEnv, ...selectedEnv, PATH: `${dir}:${cleanEnv.PATH}` },
+          });
+        const result = execute(env);
+        expect(result.error).toBeUndefined();
+        expect(result.status).toBe(0);
+        const output = JSON.parse(result.stdout);
+        expect(output.envOk).toBe(true);
+        expect(output.missingEnvVars).toEqual([]);
+        expect(output.modes.access).toBe(accessMode);
+        expect(output.modes.productAccess).toBe(productAccessMode);
+        expect(output.requiredEnvVars.includes("OPENGENI_ACCESS_KEY")).toBe(
+          accessMode === "sharedKey",
+        );
+        expect(result.stdout + result.stderr).not.toContain("fixture-shared-key");
+        expect(result.stdout + result.stderr).not.toContain("fixture-host-secret");
+        const withoutPublicEnv = { ...env, OPENGENI_PUBLIC_BASE_URL: undefined };
+        expect(missingRuntimeEnvVars(contract, withoutPublicEnv)).toEqual([]);
+        const carriedPublicBase = execute(withoutPublicEnv);
+        expect(carriedPublicBase.status).toBe(0);
+        expect(JSON.parse(carriedPublicBase.stdout).missingEnvVars).toEqual([]);
+        const requiredSecret =
+          accessMode === "sharedKey" ? "OPENGENI_ACCESS_KEY" : "OPENGENI_DELEGATION_SECRET";
+        const missing = execute({ ...env, [requiredSecret]: undefined });
+        expect(missing.status).toBe(2);
+        const missingOutput = JSON.parse(missing.stdout);
+        expect(missingOutput.missingEnvVars).toEqual([requiredSecret]);
+        expect(missingOutput.modes.access).toBe(accessMode);
+        expect(missingOutput.modes.productAccess).toBe(productAccessMode);
+      } finally {
+        rmSync(dir, { recursive: true, force: true });
+      }
+    });
+  }
+
+  test("preflight access selectors are explicit, paired, ACA-only and fail closed", () => {
+    const selected = runScript(
+      "deployment-preflight",
+      [
+        "--profile=azure-container-apps",
+        "--product-access-mode=managed",
+        "--access-mode=externalGateway",
+        "--json",
+        "--check-env",
+      ],
+      completeManagedEnv,
+    );
+    expect(selected.status).toBe(0);
+    expect(JSON.parse(selected.stdout).modes.productAccess).toBe("managed");
+    for (const args of [
+      [
+        "--profile",
+        "azure-container-apps",
+        "--product-access-mode",
+        "managed",
+        "--access-mode",
+        "sharedKey",
+      ],
+      [
+        "--profile",
+        "azure-container-apps",
+        "--product-access-mode",
+        "configured",
+        "--access-mode",
+        "externalGateway",
+      ],
+      [
+        "--profile",
+        "azure-container-apps",
+        "--product-access-mode",
+        "local",
+        "--access-mode",
+        "disabled",
+      ],
+      ["--profile", "azure-container-apps", "--product-access-mode", "managed"],
+      ["--profile", "azure-container-apps", "--access-mode", "externalGateway"],
+      [
+        "--profile",
+        "azure-managed",
+        "--product-access-mode",
+        "managed",
+        "--access-mode",
+        "externalGateway",
+      ],
+    ]) {
+      const result = runScript(
+        "deployment-preflight",
+        [...args, "--json", "--check-env"],
+        completeManagedEnv,
+      );
+      expect(result.status).not.toBe(0);
+      expect(result.stdout).not.toContain('"envOk": true');
+      expect(result.stdout + result.stderr).not.toContain("fixture-host-secret");
+    }
+    const unchangedDefault = runScript(
+      "deployment-preflight",
+      ["--profile", "azure-container-apps", "--json", "--check-env"],
+      completeManagedEnv,
+    );
+    expect(unchangedDefault.status).toBe(2);
+    expect(JSON.parse(unchangedDefault.stdout).modes.productAccess).toBe("configured");
+    expect(JSON.parse(unchangedDefault.stdout).missingEnvVars).toEqual(["OPENGENI_ACCESS_KEY"]);
+  });
+
   test("lists the profile and emits a native plan with prerequisites", () => {
     expect(runScript("deployment-preflight", ["--list"]).stdout).toContain("azure-container-apps");
     const result = runScript("deployment-stack", ["--profile", "azure-container-apps", "--json"]);

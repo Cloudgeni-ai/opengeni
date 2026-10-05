@@ -116,6 +116,12 @@ describe("Azure Container Apps deployment profile", () => {
     expect(stackPlanFor(managed, "none", {}).verifyCommands.join("\n")).toContain(
       'OPENGENI_CONFORMANCE_PRODUCT_TOKEN="$OPENGENI_TEST_WORKSPACE_API_KEY"',
     );
+    expect(stackPlanFor(managed, "none", {}).verifyCommands.join("\n")).toContain(
+      "--product-access-mode managed --access-mode externalGateway --check-env",
+    );
+    expect(stackPlanFor(profile, "none", {}).verifyCommands.join("\n")).toContain(
+      "--product-access-mode configured --access-mode sharedKey --check-env",
+    );
     const generic = deploymentProfiles["azure-managed"];
     for (const [accessMode, mode] of [
       ["configured", "externalGateway"],
