@@ -2072,6 +2072,8 @@ describe("release schema contract", () => {
       expect(taskTreeNotes).toMatchObject({ deploymentMode: "rolling" });
     }
     const appendedMigrationPaths = [
+      // Exclusion membership is unordered; keep this addition away from the shared tail.
+      "0640_knowledge_entry_created_since.sql",
       "0463_host_mcp_resolver_registration.sql",
       "0461_unified_knowledge.sql",
       "0460_host_export_message_attribution.sql",
@@ -2410,13 +2412,6 @@ describe("release schema contract", () => {
     ].filter((path) =>
       unfilteredSourceContract.migrations.some((migration) => migration.path === path),
     );
-    const knowledgeCreatedSinceMigration = "0640_knowledge_entry_created_since.sql";
-    if (
-      unfilteredSourceContract.migrations.some(
-        (migration) => migration.path === knowledgeCreatedSinceMigration,
-      )
-    )
-      appendedMigrationPaths.push(knowledgeCreatedSinceMigration);
     // The shared complete-contract assertion intentionally excludes these
     // branch-local migrations, but the governed hash must exclude them too.
     appendedMigrationPaths.unshift(
